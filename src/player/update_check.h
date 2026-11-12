@@ -169,10 +169,24 @@ bool nk_update_download(PackageHttpOpen transport, void *transport_context,
 bool nk_update_install_folder(const char *exe_dir, const char *downloads_dir,
                               const char *zip_name, char *out, size_t out_size);
 
+/* The file nk_update_claim_staging writes into a staging folder: it says the folder is
+   Nakagawa's own unpack in progress, so a later try may remove it. */
+#define NK_UPDATE_STAGING_MARK ".nakagawa-update-partial"
+
+/* Creates staging (the "<target_dir>.partial" folder an install unpacks into) and
+   writes NK_UPDATE_STAGING_MARK in it. A folder left there by an earlier install that
+   was interrupted (power loss, a crash, the player closed mid-unpack) carries the
+   mark and is removed first, so the next try works without the person deleting
+   anything; a folder without the mark is never touched and is refused with
+   UPDATE_INSTALL_LEFTOVER. Any host. */
+bool nk_update_claim_staging(const char *staging, NkUpdateError *error);
+
 /* Unpacks the verified ZIP into target_dir, which must not exist yet: first into
-   "<target_dir>.partial", then checks that every file the release's SHA256SUMS.txt
-   lists arrived, then renames it into place. log_path takes the unpacker's
-   output. Windows only (Windows' own tar.exe unpacks). */
+   "<target_dir>.partial" (nk_update_claim_staging), then checks that every file the
+   release's SHA256SUMS.txt lists arrived, removes the staging mark, then renames it into
+   place. Until that rename the running version's folder is untouched, so an interrupted
+   install leaves it working. log_path takes the unpacker's output. Windows only
+   (Windows' own tar.exe unpacks). */
 bool nk_update_install(const char *zip_path, const char *target_dir, const char *log_path,
                        NkUpdateError *error);
 /* Whether the running player was put in place by the Windows installer (Setup.exe):

@@ -7716,7 +7716,8 @@ static void test_play_mode_settings(void) {
            app->settings.enhanced.part[PLAYER_PART_WIDE] == 0 &&
            app->settings.enhanced.part[PLAYER_PART_SMOOTH] == 0 &&
            app->settings.enhanced.part[PLAYER_PART_SAS] == 0 &&
-           app->settings.enhanced.part[PLAYER_PART_TESS] == 0);
+           app->settings.enhanced.part[PLAYER_PART_TESS] == 0 &&
+           app->settings.enhanced.part[PLAYER_PART_TWIN] == 0);
     assert(app->settings.title_play_count == 0);
     player_play_resolve(&app->settings, "TEST90001", &r);
     assert(!r.on && r.mode == PLAYER_PLAY_AUTHENTIC && r.chosen == PLAYER_PLAY_LIBRARY);
@@ -7776,7 +7777,7 @@ static void test_play_mode_settings(void) {
            r.part[PLAYER_PART_READOUT] == 0 && r.part[PLAYER_PART_NOTICE] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;"
-                        "smooth=off;sas=off;tess=off") == 0);
+                        "smooth=off;sas=off;tess=off;twin=off") == 0);
     /* Ace is offered only for a title with a usable package: library, Authentic, Enhanced,
        then back to library for title 1; Ace before library for title 2. */
     player_app_cycle_title_play_mode(app, 1);
@@ -7798,7 +7799,7 @@ static void test_play_mode_settings(void) {
            r.part[PLAYER_PART_NOTICE] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=off;"
-                        "smooth=off;sas=off;tess=off") == 0);
+                        "smooth=off;sas=off;tess=off;twin=off") == 0);
     assert(player_app_title_60hz_saved(app, "TEST90003") && player_app_title_60hz_on(app, 2));
     /* Ace's own part has its off switch: Ace stays, without the 60 FPS game logic. */
     player_app_set_title_60hz(app, 2, false);
@@ -7930,7 +7931,7 @@ static void test_play_mode_settings(void) {
     assert(r.on && r.mode == PLAYER_PLAY_ACE && r.logic_60 && r.part[PLAYER_PART_SMOOTH] == 0);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=ace;af=16;text=off;readout=on;notice=on;wide=off;"
-                        "smooth=off;sas=off;tess=off") == 0);
+                        "smooth=off;sas=off;tess=off;twin=off") == 0);
     assert(!player_app_title_60hz_on(app, 1) && app->games[1].enhancement_package_id[0] == '\0');
     player_app_set_experimental_60hz_session(app, false);
     assert(app->games[2].enhancement_package_id[0] == '\0');
@@ -7975,7 +7976,7 @@ static void test_play_mode_settings(void) {
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\"},") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -8032,7 +8033,7 @@ static void test_play_mode_settings(void) {
         assert(nk_platform_mkdir_p(dir));
         assert(player_ace_report_path(root, "TEST90001", report, sizeof(report)));
         write_text_file(report,
-            "{\n  \"schema\": 1,\n  \"spec\": \"v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off\",\n"
+            "{\n  \"schema\": 1,\n  \"spec\": \"v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off\",\n"
             "  \"effective\": {\"af\": 16, \"text\": true, \"readout\": false, \"notice\": true, "
             "\"wide\": \"off\", \"smooth\": \"off\"},\n  \"unavailable\": {},\n"
             "  \"rate\": {\"dominant\": \"30 Hz\", \"seconds\": {\"30 Hz\": 50.0}},\n"
@@ -8119,7 +8120,7 @@ static void test_play_mode_settings_mapping(void) {
         char line[192];
         assert(player_play_launch_line(&r, line, sizeof(line)) &&
                strcmp(line, "v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=off;"
-                            "smooth=off;sas=off;tess=off") == 0);
+                            "smooth=off;sas=off;tess=off;twin=off") == 0);
     }
     player_play_resolve(&back->settings, "TEST91001", &r);
     assert(r.chosen == PLAYER_PLAY_ACE && r.logic_60 && r.part[PLAYER_PART_FILTERING] == 16 &&
@@ -8173,7 +8174,7 @@ static void test_play_mode_sas_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8200,7 +8201,7 @@ static void test_play_mode_sas_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -8267,7 +8268,7 @@ static void test_play_mode_cull_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -8333,15 +8334,16 @@ static void test_play_mode_stick_settings(void) {
     assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
            strcmp(line + strlen(line) - 9, ";stick=64") == 0);
     /* The part enum puts stick last (the rows and the saved order), but the Ace line keeps its own
-       sequence: tess, then stick, then cull. */
+       sequence: tess, twin, then stick, then cull. */
     r.part[PLAYER_PART_CULL] = 1;
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
-           strcmp(line + strlen(line) - 17, ";stick=64;cull=on") == 0 && strstr(line, ";tess=off;stick=64") != NULL);
+           strcmp(line + strlen(line) - 17, ";stick=64;cull=on") == 0 &&
+           strstr(line, ";tess=off;twin=off;stick=64") != NULL);
     /* Short loads too: stick, then load, then cull (contract 11.3.10, 11.3.11). */
     r.part[PLAYER_PART_LOAD] = 1;
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line + strlen(line) - 27, ";stick=64;load=fast;cull=on") == 0 &&
-           strstr(line, ";tess=off;stick=64") != NULL);
+           strstr(line, ";tess=off;twin=off;stick=64") != NULL);
     expect_line_parses_in_runtime(&r);   /* the runtime writes the same order */
     r.part[PLAYER_PART_LOAD] = 0;
     r.part[PLAYER_PART_CULL] = 0;
@@ -8355,7 +8357,7 @@ static void test_play_mode_stick_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"on\", "
-                                      "\"load\": \"off\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         free(saved);
     }
 
@@ -8518,7 +8520,7 @@ static void test_play_mode_load_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"fast\"}") != NULL);
+                                      "\"load\": \"fast\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST95001\": {\"mode\": \"ace\", \"load\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8551,6 +8553,108 @@ static void test_play_mode_load_settings(void) {
     free(app);
     printf("PASS: short loads are off by default, read and saved at both levels, and only Ace "
            "launches them\n");
+}
+
+/* Supersampling (contract 10.21, #2073): off in a fresh file and in every graphics preset, its row
+ * names the GPU cost, a library "ssaa" and a title's own are read (2, 4 or off), the title's wins,
+ * Enhanced and Ace launches both carry ";ssaa=<factor>" (after load, before cull), Authentic
+ * carries no line, and an unknown word is off. */
+static void test_play_mode_ssaa_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_ssaa_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+
+    /* Fresh: off, named, its cost in the sentence, and no preset turns it on. */
+    player_app_settings_init_default(&app->settings);
+    const PlayerEnhancedPartInfo *info = player_enhanced_part(PLAYER_PART_SSAA);
+    assert(app->settings.enhanced.part[PLAYER_PART_SSAA] == 0);
+    assert(info->fresh == 0 && info->value_count == 3);
+    assert(strcmp(info->key, "ssaa") == 0);
+    assert(strcmp(info->name, "Supersampling") == 0);
+    assert(strstr(info->sentence, "GPU work") != NULL);
+    assert(strcmp(player_enhanced_part_label(PLAYER_PART_SSAA, 2), "2x") == 0);
+    assert(strcmp(player_enhanced_part_label(PLAYER_PART_SSAA, 4), "4x") == 0);
+    assert(strcmp(player_enhanced_part_label(PLAYER_PART_SSAA, 0), "Off") == 0);
+    app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+    for (int preset = PLAYER_PRESET_LOW; preset < PLAYER_PRESET_COUNT; preset++) {
+        player_app_apply_graphics_preset(app, preset);
+        player_play_resolve(&app->settings, "TEST96001", &r);
+        assert(r.on && r.part[PLAYER_PART_SSAA] == 0);
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "ssaa") == NULL);
+    }
+
+    /* The library at 2x; one title at 4x, one off, one following; one Ace title. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"ssaa\": \"2\"},"
+        " \"title_play\": {\"TEST96001\": {\"ssaa\": \"4\"},"
+        " \"TEST96002\": {\"ssaa\": \"off\"},"
+        " \"TEST96004\": {\"mode\": \"ace\"},"
+        " \"TEST96005\": {\"mode\": \"authentic\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_SSAA] == 2);
+    player_play_resolve(&app->settings, "TEST96001", &r);       /* the title's own wins */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_SSAA] == 4);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=enhanced;") != NULL &&
+           strcmp(line + strlen(line) - 7, ";ssaa=4") == 0);
+    player_play_resolve(&app->settings, "TEST96002", &r);
+    assert(r.on && r.part[PLAYER_PART_SSAA] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "ssaa") == NULL);
+    player_play_resolve(&app->settings, "TEST96003", &r);       /* follows the library */
+    assert(r.on && r.part[PLAYER_PART_SSAA] == 2);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line + strlen(line) - 7, ";ssaa=2") == 0);
+    player_play_resolve(&app->settings, "TEST96004", &r);       /* Ace carries it too */
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_SSAA] == 2);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
+           strcmp(line + strlen(line) - 7, ";ssaa=2") == 0);
+    player_play_resolve(&app->settings, "TEST96005", &r);       /* Authentic: no line */
+    assert(!r.on);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line, "off") == 0);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\"}") != NULL);
+        assert(strstr(saved, "\"ssaa\": \"4\"}") != NULL && strstr(saved, "\"ssaa\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_SSAA] == 2);
+    player_play_resolve(&back->settings, "TEST96001", &r);
+    assert(r.on && r.part[PLAYER_PART_SSAA] == 4);
+
+    /* With load and cull on in an Ace launch, ssaa sits between them (the Ace line's order). */
+    app->settings.enhanced.part[PLAYER_PART_LOAD] = 1;
+    app->settings.enhanced.part[PLAYER_PART_CULL] = 1;
+    player_play_resolve(&app->settings, "TEST96004", &r);
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 25, ";load=fast;ssaa=2;cull=on") == 0);
+
+    /* An unknown word reads as off. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\", \"ssaa\": \"8\"}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_SSAA] == 0);
+    player_play_resolve(&app->settings, "TEST96003", &r);
+    assert(r.on && r.part[PLAYER_PART_SSAA] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "ssaa") == NULL);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: supersampling is off by default and in every preset, read and saved at both levels, "
+           "and Enhanced and Ace launches carry it\n");
 }
 
 /* Finer patches (contract 10.14, 11.3.7) at both levels: off in a fresh file and in no graphics
@@ -8604,7 +8708,8 @@ static void test_play_mode_tess_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
-                                      "\"upscale\": \"off\", \"stick\": \"off\", \"load\": \"off\"}") != NULL);
+                                      "\"upscale\": \"off\", \"stick\": \"off\", \"load\": \"off\", "
+                                      "\"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);
@@ -8763,6 +8868,9 @@ static void test_graphics_presets(void) {
                     assert(r.part[part] == custom_r.part[part]);
                 }
             }
+            /* Finer patches and Full 32-bit colour are in no preset: the row leaves both to the
+               library (a designated initializer would make a part it leaves out 0, "off"). */
+            assert(row->part[PLAYER_PART_TESS] == -1 && row->part[PLAYER_PART_TWIN] == -1);
             assert(strstr(line, row->part[PLAYER_PART_TEXT] ? ";text=on" : ";text=off") != NULL);
             assert(config.present_upscale == (row->part[PLAYER_PART_UPSCALE] == 1
                                                   ? NK_PRESENT_UPSCALE_FSR1
@@ -9032,6 +9140,98 @@ static void test_graphics_presets(void) {
            "Custom on an edit, save and load\n");
 }
 
+/* Full 32-bit colour (contract 10.11, 11.2 item 2) at both levels: a library "twin" and a
+ * title's own "twin" are read, the title's wins either way, and both survive a save and a
+ * load; a file from before the play modes leaves it off. */
+static void test_play_mode_twin_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_twin_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+
+    /* Off until the player turns it on. */
+    player_app_settings_init_default(&app->settings);
+    assert(app->settings.enhanced.part[PLAYER_PART_TWIN] == 0);
+    assert(strcmp(player_enhanced_part(PLAYER_PART_TWIN)->key, "twin") == 0);
+
+    /* The library on, one title off over it. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"twin\": \"on\"},"
+        " \"title_play\": {\"TEST92001\": {\"mode\": \"library\", \"twin\": \"off\"}}}");
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_TWIN] == 1);
+    player_play_resolve(&app->settings, "TEST92001", &r);
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";twin=off") != NULL);
+    player_play_resolve(&app->settings, "TEST92002", &r);       /* a title of its own follows */
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";twin=on") != NULL);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
+                                      "\"load\": \"off\", \"twin\": \"on\", \"ssaa\": \"off\"}") != NULL);
+        assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_TWIN] == 1);
+    player_play_resolve(&back->settings, "TEST92001", &r);
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 0);
+
+    /* The library off, one title on over it. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"twin\": \"off\"},"
+        " \"title_play\": {\"TEST92001\": {\"mode\": \"library\", \"twin\": \"on\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_TWIN] == 0);
+    player_play_resolve(&app->settings, "TEST92001", &r);
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 1);
+    player_play_resolve(&app->settings, "TEST92002", &r);
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 0);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+        assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"on\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    player_play_resolve(&back->settings, "TEST92001", &r);
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";twin=on") != NULL);
+
+    /* The development builds' keys never carried twin: a word there is not read. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"ace\": {\"enabled\": true, \"twin\": \"on\"},"
+        " \"ace_titles\": {\"TEST92001\": {\"mode\": \"ace\", \"twin\": \"on\"}}}");
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_TWIN] == 0);
+    player_play_resolve(&back->settings, "TEST92001", &r);
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 0);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: full 32-bit colour is read, resolved and saved at both levels\n");
+}
+
 /* Smooth motion (#1272) as an Enhanced part: off by default, x2 on the launch line and never
  * match, and refused by the true 60 FPS game logic build whatever the settings say. */
 static void test_play_mode_smooth_motion(void) {
@@ -9046,7 +9246,7 @@ static void test_play_mode_smooth_motion(void) {
     player_play_resolve(&settings, "TEST90001", &r);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;"
-                        "smooth=x2;sas=off;tess=off") == 0);
+                        "smooth=x2;sas=off;tess=off;twin=off") == 0);
     assert(strstr(line, "match") == NULL);
     player_play_apply_logic_60(&r, false);
     assert(r.part[PLAYER_PART_SMOOTH] == 1);
@@ -9090,11 +9290,23 @@ static void test_play_mode_smooth_motion(void) {
     assert(r.on && r.part[PLAYER_PART_SAS] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;"
-                        "smooth=off;sas=sinc;tess=off") == 0);
+                        "smooth=off;sas=sinc;tess=off;twin=off") == 0);
     player_play_apply_logic_60(&r, true);
     assert(r.part[PLAYER_PART_SAS] == 1 && player_play_launch_line(&r, line, sizeof(line)) &&
            strstr(line, "tier=ace;") != NULL && strstr(line, "sas=sinc") != NULL);
     settings.enhanced.part[PLAYER_PART_SAS] = 0;
+    /* Full 32-bit colour (contract 10.11) is off by default, reaches the line as on when the
+       library turns it on, and the 60 FPS game logic leaves it alone. */
+    settings.enhanced.part[PLAYER_PART_TWIN] = 1;
+    player_play_resolve(&settings, "TEST90001", &r);
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;"
+                        "smooth=off;sas=off;tess=off;twin=on") == 0);
+    player_play_apply_logic_60(&r, true);
+    assert(r.part[PLAYER_PART_TWIN] == 1 && player_play_launch_line(&r, line, sizeof(line)) &&
+           strstr(line, "tier=ace;") != NULL && strstr(line, "twin=on") != NULL);
+    settings.enhanced.part[PLAYER_PART_TWIN] = 0;
     /* Widescreen Fill (#1881) is off by default, reaches the line as fill when the library
        turns it on, and the 60 FPS game logic leaves it alone. It stays on for the Authentic
        check below: Authentic is off whatever the parts say. */
@@ -9104,7 +9316,7 @@ static void test_play_mode_smooth_motion(void) {
     assert(r.on && r.part[PLAYER_PART_WIDE] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=fill;"
-                        "smooth=off;sas=off;tess=off") == 0);
+                        "smooth=off;sas=off;tess=off;twin=off") == 0);
     player_play_apply_logic_60(&r, true);
     assert(r.part[PLAYER_PART_WIDE] == 1 && player_play_launch_line(&r, line, sizeof(line)) &&
            strstr(line, "tier=ace;") != NULL && strstr(line, ";wide=fill;") != NULL);
@@ -9150,6 +9362,7 @@ static void expect_line_parses_in_runtime(const PlayerPlayResolved *r) {
     assert(c.wide == (r->part[PLAYER_PART_WIDE] ? ACE_WIDE_FILL : ACE_WIDE_OFF));
     assert(c.smooth == (r->part[PLAYER_PART_SMOOTH] ? ACE_SMOOTH_X2 : ACE_SMOOTH_OFF));
     assert(c.sas == (r->part[PLAYER_PART_SAS] ? ACE_SAS_SINC : ACE_SAS_OFF));
+    assert(c.twin == (r->part[PLAYER_PART_TWIN] ? 1 : 0));
     assert(ace_format(&c, canonical, sizeof(canonical)) && strcmp(canonical, line) == 0);
 }
 
@@ -9230,8 +9443,8 @@ static void test_play_mode_upscale_settings(void) {
     /* The library on with FSR 1; one title turns it off, one plays Authentic, one says fsr2. */
     write_text_file(path,
         "{\"schema_version\": 2,"
-        " \"enhanced\": {\"default\": \"enhanced\", \"upscale\": \"fsr1\"},"
-        " \"title_play\": {\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\"},"
+        " \"enhanced\": {\"default\": \"enhanced\", \"upscale\": \"fsr1\", \"twin\": \"off\"},"
+        " \"title_play\": {\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\", \"twin\": \"off\"},"
         " \"TEST94002\": {\"mode\": \"authentic\"},"
         " \"TEST94004\": {\"mode\": \"ace\", \"upscale\": \"fsr2\"}}}");
     assert(player_app_load_settings(app, path) == NK_OK);
@@ -9290,8 +9503,9 @@ static void test_play_mode_upscale_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
-                                      "\"upscale\": \"fsr1\", \"stick\": \"off\", \"load\": \"off\"}") != NULL);
-        assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\"}") != NULL);
+                                      "\"upscale\": \"fsr1\", \"stick\": \"off\", \"load\": \"off\", "
+                                      "\"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+        assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -10096,7 +10310,9 @@ int main(int argc, char **argv) {
     test_play_mode_cull_settings();
     test_play_mode_stick_settings();
     test_play_mode_load_settings();
+    test_play_mode_ssaa_settings();
     test_play_mode_tess_settings();
+    test_play_mode_twin_settings();
     test_player_nickname();
     test_graphics_presets();
     test_play_mode_line_parses_in_runtime();

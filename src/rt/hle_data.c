@@ -11,6 +11,7 @@
  * the /DATA/FONT list. Extracted from hle.c on 2026-10-31 (#307). */
 
 #include "hle_internal.h"
+#include "ge_scene.h"
 
 #define SREG_OVERLAY_MAX_BYTES (1024u * 1024u)
 
@@ -2508,6 +2509,7 @@ uint32_t h_io_open_path(const char *path, uint32_t flags, int forced_slot) {
         hle_enhancement_attach((int)rc, path, flags) < 0) {
         fprintf(stderr, "ENHANCEMENT_DATA_MISMATCH: the run stops here\n");
         sr_trace_close();
+        ge_scene_dump_finish();
         (void)sr_videorec_finish_status("ENHANCEMENT_DATA_MISMATCH", 1);
         sr_perf_shutdown();
         sr_profile_dump_final();

@@ -93,6 +93,11 @@ static void bits_align(Bits *b)
     b->acc = 0u;
 }
 
+#ifdef NK_INFLATE_COUNT_BUILDS
+/* Code tables built, for tests that bound the work a stream costs (texrepl_selftest). */
+unsigned long long nk_inflate_table_builds;
+#endif
+
 static int huff_build(Huffman *h, const uint8_t *lens, int n, char *err,
                       size_t err_len)
 {
@@ -102,6 +107,9 @@ static int huff_build(Huffman *h, const uint8_t *lens, int n, char *err,
     int len;
     int i;
 
+#ifdef NK_INFLATE_COUNT_BUILDS
+    nk_inflate_table_builds++;
+#endif
     for (len = 0; len <= NK_INFLATE_MAXBITS; len++) {
         h->count[len] = 0;
     }
@@ -232,12 +240,20 @@ static int nk_deflate(Bits *b, OutBuf *o, char *err, size_t err_len)
         16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
 
     int final = 0;
+    /* The fixed codes are built once a stream, on its first fixed block, not once a block: a stream
+     * of empty fixed blocks (10 bits each) would otherwise cost two table builds every 10 bits. */
+    Huffman fixed_lh;
+    Huffman fixed_dh;
+    int fixed_built = 0;
+    size_t dynamic_blocks = 0u;
+    Huffman lh;
+    Huffman dh;
 
     while (!final) {
         uint32_t v = 0u;
         int btype;
-        Huffman lh;
-        Huffman dh;
+        const Huffman *lp = &lh;
+        const Huffman *dp = &dh;
         uint8_t lens[NK_INFLATE_MAXLITS + NK_INFLATE_MAXDISTS];
 
         if (b->over) {
@@ -303,31 +319,36 @@ static int nk_deflate(Bits *b, OutBuf *o, char *err, size_t err_len)
 
             if (btype == 1) {
                 /* Fixed Huffman codes. */
-                uint8_t flens[NK_INFLATE_MAXLITS];
-                uint8_t dlens[NK_INFLATE_MAXDISTS];
-                for (i = 0; i < 144; i++) {
-                    flens[i] = 8;
+                if (!fixed_built) {
+                    uint8_t flens[NK_INFLATE_MAXLITS];
+                    uint8_t dlens[NK_INFLATE_MAXDISTS];
+                    for (i = 0; i < 144; i++) {
+                        flens[i] = 8;
+                    }
+                    for (; i < 256; i++) {
+                        flens[i] = 9;
+                    }
+                    for (; i < 280; i++) {
+                        flens[i] = 7;
+                    }
+                    for (; i < 288; i++) {
+                        flens[i] = 8;
+                    }
+                    for (i = 0; i < NK_INFLATE_MAXDISTS; i++) {
+                        dlens[i] = 5;
+                    }
+                    if (huff_build(&fixed_lh, flens, 288, err, err_len) !=
+                        NK_INFLATE_OK) {
+                        return NK_INFLATE_ERR_FORMAT;
+                    }
+                    if (huff_build(&fixed_dh, dlens, NK_INFLATE_MAXDISTS, err,
+                                   err_len) != NK_INFLATE_OK) {
+                        return NK_INFLATE_ERR_FORMAT;
+                    }
+                    fixed_built = 1;
                 }
-                for (; i < 256; i++) {
-                    flens[i] = 9;
-                }
-                for (; i < 280; i++) {
-                    flens[i] = 7;
-                }
-                for (; i < 288; i++) {
-                    flens[i] = 8;
-                }
-                for (i = 0; i < NK_INFLATE_MAXDISTS; i++) {
-                    dlens[i] = 5;
-                }
-                if (huff_build(&lh, flens, 288, err, err_len) !=
-                    NK_INFLATE_OK) {
-                    return NK_INFLATE_ERR_FORMAT;
-                }
-                if (huff_build(&dh, dlens, NK_INFLATE_MAXDISTS, err,
-                               err_len) != NK_INFLATE_OK) {
-                    return NK_INFLATE_ERR_FORMAT;
-                }
+                lp = &fixed_lh;
+                dp = &fixed_dh;
             } else {
                 /* Dynamic Huffman block header. */
                 uint8_t cl_lens[NK_INFLATE_MAXCODES];
@@ -335,6 +356,13 @@ static int nk_deflate(Bits *b, OutBuf *o, char *err, size_t err_len)
                 int total;
                 int pos = 0;
                 int prev = 0;
+
+                if (++dynamic_blocks > NK_INFLATE_DYNAMIC_FREE +
+                                           o->len / NK_INFLATE_DYNAMIC_BYTES) {
+                    set_err(err, err_len,
+                            "inflate: more dynamic blocks than its output needs");
+                    return NK_INFLATE_ERR_FORMAT;
+                }
 
                 if (bits_n(b, 5, &v) != 0) {
                     set_err(err, err_len,
@@ -453,7 +481,7 @@ static int nk_deflate(Bits *b, OutBuf *o, char *err, size_t err_len)
         /* Decode the block body. */
         for (;;) {
             int sym;
-            if (huff_dec(b, &lh, &sym) != 0) {
+            if (huff_dec(b, lp, &sym) != 0) {
                 if (b->over) {
                     set_err(err, err_len, "inflate: truncated deflate stream");
                     return NK_INFLATE_ERR_TRUNCATED;
@@ -495,7 +523,7 @@ static int nk_deflate(Bits *b, OutBuf *o, char *err, size_t err_len)
                 }
                 length = (size_t)len_base[li] + (size_t)extra;
 
-                if (huff_dec(b, &dh, &dsym) != 0) {
+                if (huff_dec(b, dp, &dsym) != 0) {
                     if (b->over) {
                         set_err(err, err_len,
                                 "inflate: truncated distance code");
@@ -868,4 +896,46 @@ int nk_psp_inflate_raw(const uint8_t *src, size_t srclen, uint8_t **out,
                        size_t err_len)
 {
     return nk_inflate_run(src, srclen, out, outlen, expect, cap, err, err_len, 1);
+}
+
+int nk_psp_inflate_raw_into(const uint8_t *src, size_t srclen, uint8_t *dst,
+                            size_t dst_cap, size_t *outlen, size_t *consumed,
+                            char *err, size_t err_len)
+{
+    Bits b;
+    OutBuf o;
+    int rc;
+
+    if (outlen != NULL) {
+        *outlen = 0u;
+    }
+    if (consumed != NULL) {
+        *consumed = 0u;
+    }
+    if (err != NULL && err_len > 0u) {
+        err[0] = '\0';
+    }
+    if (outlen == NULL || (src == NULL && srclen != 0u) ||
+        (dst == NULL && dst_cap != 0u)) {
+        set_err(err, err_len, "inflate: invalid arguments");
+        return NK_INFLATE_ERR_FORMAT;
+    }
+    if (srclen == 0u) {
+        set_err(err, err_len, "inflate: empty input");
+        return NK_INFLATE_ERR_FORMAT;
+    }
+    memset(&b, 0, sizeof(b));
+    b.src = src;
+    b.len = srclen;
+    /* cap == limit: out_put never grows the buffer, it reports the overflow. */
+    o.data = dst;
+    o.len = 0u;
+    o.cap = dst_cap;
+    o.limit = dst_cap;
+    rc = nk_deflate(&b, &o, err, err_len);
+    *outlen = o.len;
+    if (consumed != NULL) {
+        *consumed = b.pos;
+    }
+    return rc;
 }

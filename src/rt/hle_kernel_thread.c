@@ -11,6 +11,7 @@
  * Extracted from hle.c on 2026-10-31 (#307). */
 
 #include "hle_internal.h"
+#include "ge_scene.h"
 
 extern int sr_libc_death_wish;    /* defined with h_ExitGame below */
 static int sr_thread_dispatch_callbacks_once(uint32_t thread_uid);
@@ -133,6 +134,7 @@ static uint32_t h_ExitThread(CpuState *s) {
         fflush(stderr);
         sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, s->pc, uid, 1u);
         SR_VERIFY_REPORT_NOW();  /* _exit skips atexit, which would have written the report */
+        ge_scene_dump_finish();
         (void)sr_videorec_finish_status("the guest's own exit path failed", 1);
         sr_perf_shutdown();      /* the end-of-process reports, as on the _Exit paths */
         sr_profile_dump_final();

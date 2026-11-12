@@ -578,6 +578,18 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     }
 }
 
+/* Ace Mode's peak=limit (#2137): a push that carries the SAS grain's unsaturated sum. It is a push
+ * like any other for the counters above; the sum is kept for the provenance cells. */
+static unsigned long s_audio_push_wide_calls;
+static int32_t s_audio_push_wide_capture[8192u * 2u];
+void sr_audio_push_wide(int ch, const int16_t *lr, const int32_t *wide, int nframes, int volL, int volR) {
+    s_audio_push_wide_calls++;
+    if (wide && nframes > 0)
+        memcpy(s_audio_push_wide_capture, wide,
+               ((size_t)nframes < 8192u ? (size_t)nframes : 8192u) * 2u * sizeof(*wide));
+    sr_audio_push(ch, lr, nframes, volL, volR);
+}
+
 void sr_audio_push_silence(int ch, int nframes) {
     s_audio_silence_calls++;
     if (nframes <= 0 || ch < 0 || ch >= 9) return;
@@ -633,6 +645,7 @@ int sr_audio_queued(int ch) {
 static void audio_fixture_reset(void) {
     s_oor_calls = 0;
     s_audio_push_calls = 0;
+    s_audio_push_wide_calls = 0;
     s_audio_queue_calls = 0;
     s_audio_push_frames = 0;
     s_audio_push_first_l = 0;
@@ -10336,11 +10349,13 @@ static void test_io_devctl_memory_stick(void) {
 /* ---- savedata GETSIZE / SIZES free space (#308) ---------------------------------------------
  * GETSIZE reports a shortfall, never the size of the data. On a PSP (pspautotests
  * tests/utility/savedata/getsize.expected, revision 2ed7c9c5) a zero-filled sizeInfo with no
- * entries for a save that exists changes only sectorSize (0x8000), freeSectors, freeKB and
+ * entries for a save that exists changes only sectorSize (0x8000 there; the PSP-3000 run of
+ * PSP-HLE-SAVEDATA-GETSIZE-001 reported 0x10000, see do_getsize), freeSectors, freeKB and
  * freeString, and the result is 0. A save that does not exist fills in the same figures and
- * reports RW_NO_DATA (PPSSPP as the behaviour reference, UNMEASURED on a PSP). Free space is the
- * host-backed Memory Stick the capacity devctl measures, in 32 KiB sectors; the shortfall
- * arithmetic for listed entries follows PPSSPP SavedataParam::GetSize as a behaviour reference. */
+ * reports RW_NO_DATA, and leaves overwriteKB and overwriteString alone
+ * (PSP-HLE-SAVEDATA-GETSIZE-001). Free space is the host-backed Memory Stick the capacity devctl
+ * measures, in 32 KiB sectors; the shortfall arithmetic for listed entries follows PPSSPP
+ * SavedataParam::GetSize as a behaviour reference. */
 extern void sr_hle_test_set_memstick_free_bytes(int mode, uint64_t bytes);
 
 enum {
@@ -10412,6 +10427,9 @@ static int getsize_write_host_file(const char *path, size_t bytes) {
 static void test_savedata_getsize_free_space(void) {
     static const char ms_root[] = HLE_BUILD_ROOT "/hle_savedata_getsize";
     static const char zero8[8] = { 0 };
+    static const char preset8[8] = { (char)0xA5, (char)0xA5, (char)0xA5, (char)0xA5,
+                                     (char)0xA5, (char)0xA5, (char)0xA5, (char)0xA5 };
+    enum { SAVEDATA_GETSIZE_OUT_BYTES = 44 };   /* sizeInfo after its four input words */
     const char *old_root_value = getenv("SR_MEMSTICK");
     char *old_root = old_root_value ? (char *)malloc(strlen(old_root_value) + 1u) : NULL;
     char text[8], save_host[512], file_host[600];
@@ -10443,7 +10461,7 @@ static void test_savedata_getsize_free_space(void) {
                    MEM_R32(GETSIZE_INFO_ADDR + 8u) == 0u && MEM_R32(GETSIZE_INFO_ADDR + 12u) == 0u,
                "GETSIZE leaves the entry counts and pointers alone");
         expect(MEM_R32(GETSIZE_INFO_ADDR + 16u) == 0x8000u,
-               "GETSIZE reports the PSP's 32 KiB savedata sector size");
+               "GETSIZE reports pspautotests' 32 KiB savedata sector size (a PSP-3000 reported 0x10000)");
         expect(sectors >= lo / 0x8000u && sectors <= hi / 0x8000u,
                "GETSIZE freeSectors * 0x8000 is the host-backed free space the devctl reports");
         expect(MEM_R32(GETSIZE_INFO_ADDR + 24u) == sectors * 32u,
@@ -10459,18 +10477,23 @@ static void test_savedata_getsize_free_space(void) {
     }
 
     /* 2. One secure entry of a few KB on a missing save fits: nothing needed, still no data. A
-     * game reads this pair as "no save yet, and room to make one". */
+     * game reads this pair as "no save yet, and room to make one". As on a PSP
+     * (PSP-HLE-SAVEDATA-GETSIZE-001), a preset shows what is left alone: neededKB is written,
+     * the other three are not. */
     {
         getsize_param(22u, "_GameData0");
         getsize_entry(GETSIZE_SECURE_ADDR, 0x2000u, "DATA.BIN");
         MEM_W32(GETSIZE_INFO_ADDR + 0u, 1u);
         MEM_W32(GETSIZE_INFO_ADDR + 8u, GETSIZE_SECURE_ADDR);
+        memset(g_mem_base + GETSIZE_INFO_ADDR + 16u, 0xA5, SAVEDATA_GETSIZE_OUT_BYTES);
         expect(sr_savedata_execute(GETSIZE_PARAM_ADDR) == 0x80110327u &&
                    MEM_R32(GETSIZE_INFO_ADDR + 16u) == 0x8000u &&
-                   MEM_R32(GETSIZE_INFO_ADDR + 36u) == 0u && MEM_R32(GETSIZE_INFO_ADDR + 48u) == 0u &&
-                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 40u, zero8) &&
-                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, zero8),
-               "GETSIZE for one small secure file on a missing save reports RW_NO_DATA, neededKB 0, overwriteKB 0");
+                   MEM_R32(GETSIZE_INFO_ADDR + 36u) == 0u,
+               "GETSIZE for one small secure file on a missing save reports RW_NO_DATA, neededKB 0");
+        expect(MEM_R32(GETSIZE_INFO_ADDR + 48u) == 0xA5A5A5A5u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 40u, preset8) &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, preset8),
+               "GETSIZE on a missing save that fits leaves neededString and the overwrite fields alone");
     }
 
     /* 3. A shortfall: 64 KiB free (plus a partial sector), more data than that. */
@@ -10500,6 +10523,28 @@ static void test_savedata_getsize_free_space(void) {
         expect(MEM_R32(GETSIZE_INFO_ADDR + 48u) == 71u &&
                    getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, "71 KB\0\0"),
                "GETSIZE overwriteKB and overwriteString discount the files the save already holds");
+    }
+    /* A shortfall on a missing save writes the needed fields and leaves the overwrite fields
+     * alone, and a text field stops at its NUL (the write mask PSP-HLE-SAVEDATA-GETSIZE-001
+     * measured). The figures are not the PSP's: see do_getsize. */
+    {
+        getsize_param(22u, "_GameData0");
+        getsize_entry(GETSIZE_SECURE_ADDR, 0x20000u, "DATA.BIN");
+        MEM_W32(GETSIZE_INFO_ADDR + 0u, 1u);
+        MEM_W32(GETSIZE_INFO_ADDR + 8u, GETSIZE_SECURE_ADDR);
+        memset(g_mem_base + GETSIZE_INFO_ADDR + 16u, 0xA5, SAVEDATA_GETSIZE_OUT_BYTES);
+        expect(sr_savedata_execute(GETSIZE_PARAM_ADDR) == 0x80110327u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 28u, "64 KB\0\xA5\xA5"),
+               "GETSIZE on a missing save reports RW_NO_DATA and writes freeString through its NUL only");
+        /* write = 0x20010, free = 0x10000: 0x10010 bytes short, 65 KB rounded up. PPSSPP's
+         * arithmetic, not the measured one (a PSP charges three clusters more and wraps at 32
+         * bits; do_getsize). This cell pins which fields are written, not the PSP's figure. */
+        expect(MEM_R32(GETSIZE_INFO_ADDR + 36u) == 65u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 40u, "65 KB\0\xA5\xA5"),
+               "GETSIZE on a missing save writes the shortfall to neededKB and neededString");
+        expect(MEM_R32(GETSIZE_INFO_ADDR + 48u) == 0xA5A5A5A5u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, preset8),
+               "GETSIZE on a missing save leaves overwriteKB and overwriteString alone");
     }
     /* Existing data the write replaces can make it fit again. */
     snprintf(file_host, sizeof(file_host), "%s/DATA.BIN", save_host);
@@ -11857,6 +11902,11 @@ static void reset_fixture(void) {
     s_stack_top = SR_STACK_ARENA_CEIL;
     stack_ranges_reset();
     s_vtime_us = 0;
+    /* The turbo clock charges its 10 ms quantum every TIMESLICE dispatches, counted on from the
+     * case before; some cases dispatch a host-dependent number of times, so a case's quantum fell
+     * where its predecessors left it. Each case starts the count afresh, so the quantum falls a
+     * whole TIMESLICE of dispatches in (PSP-DMAC-002 b3 failed when it fell inside the scenario). */
+    s_dispatches_since_time = 0u;
     s_tick = 0;
     s_interrupts_enabled = 1;
     s_dispatch_enabled = 1;
@@ -14255,6 +14305,7 @@ static void test_rtc_time_t_add_years_resolution_autotest(void) {
 enum {
     RTCA_NID_ADD_MICROS = 0x26d25a5du, RTCA_NID_ADD_SECONDS = 0xf2a4afe5u, RTCA_NID_ADD_DAYS = 0xe51b4b7au,
     RTCA_NID_DAY_OF_WEEK = 0x57726bc1u, RTCA_NID_CHECK_VALID = 0x4b1b5e82u,
+    RTCA_NID_ADD_MINUTES = 0xe6605bcau, RTCA_NID_ADD_HOURS = 0x26d7a24au, RTCA_NID_ADD_WEEKS = 0xcf3a2ca8u,
 };
 
 static int rtca_dst_is(uint16_t y, uint16_t mo, uint16_t d, uint16_t h, uint16_t mi, uint16_t sec, uint32_t us) {
@@ -14272,7 +14323,8 @@ static uint32_t rtca_add(uint32_t nid, uint16_t y, uint16_t mo, uint16_t d, uint
     expect(td24b_dispatch4(RTCT_NID_GET_TICK, RTCT_DATE, RTCT_SRC, 0u, 0u) == 0u, "the source date converts");
     MEM_W32(RTCT_DST, 0x1337u); MEM_W32(RTCT_DST + 4u, 0u);
     uint32_t lo = (uint32_t)(uint64_t)count, hi = (uint32_t)((uint64_t)count >> 32);
-    if (nid == RTCA_NID_ADD_DAYS) hi = 0u;   /* a 32-bit int argument: the 64-bit row is truncated */
+    if (nid == RTCA_NID_ADD_DAYS || nid == RTCA_NID_ADD_HOURS || nid == RTCA_NID_ADD_WEEKS)
+        hi = 0u;   /* a 32-bit int argument: the 64-bit row is truncated */
     return td24b_dispatch4(nid, RTCT_DST, RTCT_SRC, lo, hi);
 }
 
@@ -14280,6 +14332,72 @@ static uint32_t rtca_check_valid(uint16_t y, uint16_t mo, uint16_t d, uint16_t h
                                  uint32_t us) {
     rtct_date(y, mo, d, h, mi, sec, us);
     return td24b_dispatch4(RTCA_NID_CHECK_VALID, RTCT_DATE, 0u, 0u, 0u);
+}
+
+/* sceRtcTickAddMinutes, sceRtcTickAddHours and sceRtcTickAddWeeks against PSPAutotests
+ * tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): the 8 fixed rows of each function,
+ * each the autotest's own (its loop rows are not checked here). Minutes
+ * take a 64-bit count; hours and weeks a 32-bit int, so the autotest's 64-bit constants are
+ * truncated (+ 62135596800000445 hours lands in year 383). Before these handlers the three NIDs
+ * were unregistered imports. */
+static void test_rtc_tick_add_minutes_hours_weeks_autotest(void) {
+    reset_fixture();
+    sr_hle_init();
+    expect(sr_hle_test_is_registered(RTCA_NID_ADD_MINUTES) && sr_hle_test_is_registered(RTCA_NID_ADD_HOURS) &&
+               sr_hle_test_is_registered(RTCA_NID_ADD_WEEKS),
+           "sceRtcTickAddMinutes, -Hours and -Weeks are registered");
+    static const struct {
+        uint32_t nid;
+        uint16_t y, mo, d, h, mi;
+        long long count;
+        uint16_t ry, rmo, rd, rh, rmi, rsec;
+        uint32_t rus;
+    } rows[] = {
+        /* checkRtcTickAddMinutes */
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, -2000, 1969, 12, 30, 14, 40, 0, 445 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, 2000, 1970, 1, 2, 9, 20, 0, 445 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, -62135596800000445LL, 11640, 10, 4, 14, 46, 50, 248893 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, 62135596800000445LL, 52565, 4, 16, 17, 14, 59, 303613 },
+        { RTCA_NID_ADD_MINUTES, 1, 1, 1, 0, 10, -10, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_MINUTES, 1, 1, 1, 0, 10, -11, 60267, 1, 19, 8, 0, 49, 551616 },
+        { RTCA_NID_ADD_MINUTES, 9999, 12, 31, 23, 50, 9, 9999, 12, 31, 23, 59, 0, 0 },
+        { RTCA_NID_ADD_MINUTES, 9999, 12, 31, 23, 50, 10, 10000, 1, 1, 0, 0, 0, 0 },
+        /* checkRtcTickAddHours */
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, -2000, 1969, 10, 9, 16, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, 2000, 1970, 3, 25, 8, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, -62135596800000445LL, 3556, 10, 18, 11, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, 62135596800000445LL, 383, 3, 16, 13, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1, 1, 1, 10, 0, -10, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_HOURS, 1, 1, 1, 10, 0, -11, 60267, 1, 19, 7, 1, 49, 551616 },
+        { RTCA_NID_ADD_HOURS, 9999, 12, 31, 20, 0, 3, 9999, 12, 31, 23, 0, 0, 0 },
+        { RTCA_NID_ADD_HOURS, 9999, 12, 31, 20, 0, 4, 10000, 1, 1, 0, 0, 0, 0 },
+        /* checkRtcTickAddWeeks */
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, -2000, 1931, 9, 3, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, 2000, 2008, 5, 1, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, -62135596800000445LL, 6407, 10, 14, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, 62135596800000445LL, 57798, 4, 8, 8, 1, 49, 552061 },
+        { RTCA_NID_ADD_WEEKS, 1, 1, 8, 0, 0, -1, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_WEEKS, 1, 1, 8, 0, 0, -2, 60267, 1, 12, 8, 1, 49, 551616 },
+        { RTCA_NID_ADD_WEEKS, 9999, 12, 20, 0, 0, 1, 9999, 12, 27, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_WEEKS, 9999, 12, 20, 0, 0, 2, 10000, 1, 3, 0, 0, 0, 0 },
+    };
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        const uint32_t us = rows[i].y == 1970 ? 445u : 0u;   /* the autotest's 1970 rows carry .000445 */
+        char what[96];
+        snprintf(what, sizeof what, "arithmetic.expected row %u (nid 0x%08x, count %lld)", (unsigned)i,
+                 (unsigned)rows[i].nid, rows[i].count);
+        expect(rtca_add(rows[i].nid, rows[i].y, rows[i].mo, rows[i].d, rows[i].h, rows[i].mi, 0, us,
+                        rows[i].count) == 0u &&
+                   rtca_dst_is(rows[i].ry, rows[i].rmo, rows[i].rd, rows[i].rh, rows[i].rmi, rows[i].rsec,
+                               rows[i].rus),
+               what);
+    }
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    (void)td24b_dispatch4(RTCA_NID_ADD_MINUTES, 0u, RTCT_SRC, 1u, 0u);
+    (void)td24b_dispatch4(RTCA_NID_ADD_HOURS, RTCT_DST, 0u, 1u, 0u);
+    (void)td24b_dispatch4(RTCA_NID_ADD_WEEKS, 0u, RTCT_SRC, 1u, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 3u,
+           "the minute, hour and week adds stop by name on a NULL source or destination");
 }
 
 static void test_rtc_tick_add_day_of_week_check_valid_autotest(void) {
@@ -26552,8 +26670,9 @@ static void test_ge_linear_filter_stays_inside_region(void) {
 
 /* ==== GE raster cells (PSP-GE-RASTER-001, #343) ====
  * This block is carried byte for byte by fixtures/psp_oracle/probe_ge_sample.c (the PSP
- * side, CASE=ge-raster) and tests/native/hle_thread_selftest.c (the software GE side);
- * tools/test_psp_oracle.py pins the copy. Each cell is one display list of project-written
+ * side, CASE=ge-raster), tests/native/hle_thread_selftest.c (the software GE side) and
+ * src/rt/gpu_sdl3vk/ge_gpu_selftest.inc (the Vulkan side); tools/test_psp_oracle.py pins
+ * the copies. Each cell is one display list of project-written
  * command words over generated patterns (no game data). It draws into the 16x4 window
  * x 16..31, y 8..11 of a 64x32 colour buffer at VRAM offset GR_FB_OFFSET whose other pixels
  * are 0 and whose window holds gr_dst() before the list runs. The base state turns every
@@ -30428,6 +30547,190 @@ static void test_ge_finish_callback_reports(void) {
     ge_tim_teardown();
 }
 
+/* #2375: a finish callback that enqueues the next list. An enqueued list runs at once here, so
+ * its finish callback used to run inside the one that enqueued it, a guest-call frame deeper per
+ * list, until the owner's frames ran out and the fifth callback in the chain was refused. On a
+ * PSP finish callbacks run from the GE interrupt handler, which does not re-enter itself: each
+ * runs after the previous returns, in completion order.
+ * MUTANT: running a completion's callback at once while one is running nests them (depth 4, the
+ * chain stops after 4 callbacks); running the waiting ones last-in first-out reverses the burst
+ * order; dropping the full-queue stop runs or loses the 65th completion silently. */
+/* GE_CHAIN_WAIT is the runtime's GE_LIST_MAX (hle_internal.h): the completions that may wait. */
+enum { GE_CHAIN_LEN = 6, GE_CHAIN_WAIT = 64, GE_CHAIN_BURST = GE_CHAIN_WAIT + 1 };
+static unsigned s_ge_chain_depth, s_ge_chain_max_depth, s_ge_chain_calls;
+static unsigned s_ge_chain_next, s_ge_chain_last, s_ge_chain_burst;
+static uint32_t s_ge_chain_ids[GE_CHAIN_BURST + 1];
+
+static uint32_t ge_chain_list(unsigned i) { return GE_TIM_DL2 + 0x100u * i; }
+
+static void ge_chain_finish_fn(CpuState *cpu) {
+    if (++s_ge_chain_depth > s_ge_chain_max_depth) s_ge_chain_max_depth = s_ge_chain_depth;
+    if (s_ge_chain_calls <= GE_CHAIN_BURST) s_ge_chain_ids[s_ge_chain_calls] = cpu->r[4];
+    s_ge_chain_calls++;
+    if (s_ge_chain_burst) {
+        unsigned n = s_ge_chain_burst;
+        s_ge_chain_burst = 0u;               /* only the first callback enqueues the burst */
+        for (unsigned i = 0; i < n; i++) (void)ge_tim_enqueue(cpu, ge_chain_list(i));
+    } else if (s_ge_chain_next < s_ge_chain_last) {
+        (void)ge_tim_enqueue(cpu, ge_chain_list(s_ge_chain_next++));
+    }
+    s_ge_chain_depth--;
+    cpu->r[2] = 0u;
+}
+
+static void ge_chain_reset(void) {
+    s_ge_chain_depth = s_ge_chain_max_depth = s_ge_chain_calls = 0u;
+    s_ge_chain_next = s_ge_chain_last = s_ge_chain_burst = 0u;
+    memset(s_ge_chain_ids, 0, sizeof(s_ge_chain_ids));
+}
+
+static void test_ge_finish_callbacks_do_not_nest(void) {
+    CpuState cpu;
+    ge_tim_setup();
+    sr_hle_test_ge_lists_reset();
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_chain_finish_fn);
+    ge_tim_write_list(GE_TIM_DL, 0u);
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) ge_tim_write_list(ge_chain_list(i), 0u);
+
+    /* A chain: each callback enqueues the next list. */
+    ge_chain_reset();
+    s_ge_chain_last = GE_CHAIN_LEN - 1u;
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect(s_ge_chain_calls == GE_CHAIN_LEN,
+           "GE finish: a callback chain of 6 lists runs all 6 finish callbacks");
+    expect(s_ge_chain_max_depth == 1u,
+           "GE finish: a list completed inside a finish callback runs its callback after it returns");
+    int in_order = s_ge_chain_ids[0] == ge_tim_finish_id(GE_TIM_DL);
+    for (unsigned i = 1; i < GE_CHAIN_LEN; i++)
+        in_order &= s_ge_chain_ids[i] == ge_tim_finish_id(ge_chain_list(i - 1u));
+    expect(in_order, "GE finish: chained finish callbacks run in completion order");
+
+    /* A burst: the first callback enqueues 65 lists; 64 wait their turn, in order, and the 65th
+     * completion, with no room left to wait, stops the run by name. */
+    ge_chain_reset();
+    s_ge_chain_burst = GE_CHAIN_BURST;
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect(s_ge_chain_max_depth == 1u && s_ge_chain_calls == 1u + GE_CHAIN_WAIT,
+           "GE finish: 64 completions raised in one callback each run after it, one at a time");
+    in_order = 1;
+    for (unsigned i = 0; i < GE_CHAIN_WAIT; i++)
+        in_order &= s_ge_chain_ids[1u + i] == ge_tim_finish_id(ge_chain_list(i));
+    expect(in_order, "GE finish: completions raised in one callback run first-in first-out");
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u,
+           "GE finish: a completion with no room left to wait stops the run by name");
+
+    /* Nothing is left waiting: the next list's callback runs at once, at depth 1. */
+    ge_chain_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect(s_ge_chain_calls == 1u && s_ge_chain_max_depth == 1u &&
+               s_ge_chain_ids[0] == ge_tim_finish_id(GE_TIM_DL),
+           "GE finish: after a chain the next list's callback runs at once, alone");
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
+    ge_tim_teardown();
+}
+
+/* The waiting completions belong to the thread whose callback raised them. A worker thread whose
+ * finish callback ends the thread (sceKernelExitThread inside the callback) must give its run
+ * back, so a list another thread completes afterwards has its callback run at once; a worker
+ * that ends with a completion still waiting stops the run by name instead of dropping it.
+ * Real scheduler threads, real sceGeListEnQueue and sceKernelExitThread.
+ * MUTANT: one process-wide "callback running" flag, never cleared by the exit, leaves the main
+ * thread's later callback waiting forever (it never runs; reasoned, not built); dropping
+ * ge_finish_release_owner() from thread teardown leaves the dead worker's run open and loses its
+ * waiting completion without a stop (2 checks fail, measured). */
+#define GX_MAIN_ENTRY   0x08a38080u
+#define GX_WORKER_ENTRY 0x08a380c0u
+
+extern unsigned sr_hle_test_ge_finish_runs(void);
+
+static struct {
+    uint32_t worker_uid, main_uid;
+    int exit_with_waiting;           /* the worker's callback raises one more completion first */
+    int worker_after_enqueue;        /* the worker body ran past its enqueue */
+    unsigned calls, worker_calls, main_calls;
+    unsigned runs_after_worker, stops_before, stops_after_worker;
+    unsigned main_calls_after;
+    int main_done;
+} s_gx;
+
+static void gx_finish_fn(CpuState *cpu) {
+    const uint32_t uid = sched_current_uid();
+    s_gx.calls++;
+    if (uid == s_gx.worker_uid) {
+        s_gx.worker_calls++;
+        if (s_gx.exit_with_waiting) (void)ge_tim_enqueue(cpu, GE_TIM_DL2);
+        (void)sfs_call(cpu, NID_SCE_KERNEL_EXIT_THREAD, 0u, 0u, 0u, 0u);
+        return;   /* not reached: the thread ended */
+    }
+    if (uid == s_gx.main_uid) s_gx.main_calls++;
+    cpu->r[2] = 0u;
+}
+
+static void gx_worker_fn(CpuState *cpu) {
+    (void)ge_tim_enqueue(cpu, GE_TIM_DL);
+    s_gx.worker_after_enqueue = 1;
+    cpu->r[2] = 0u;
+}
+
+static uint32_t gx_run_worker(CpuState *cpu) {
+    const uint32_t w = sfs_call(cpu, NID_SCE_KERNEL_CREATE_THREAD, sfs_thread_name(), GX_WORKER_ENTRY,
+                                0x18u, 0u);
+    s_gx.worker_uid = w;
+    (void)sfs_call(cpu, NID_SCE_KERNEL_START_THREAD, w, 0u, 0u, 0u);
+    (void)sfs_call(cpu, NID_SCE_KERNEL_WAIT_THREAD_END, w, 0u, 0u, 0u);
+    return w;
+}
+
+static void gx_main_fn(CpuState *cpu) {
+    s_gx.main_uid = sfs_call(cpu, NID_SCE_KERNEL_GET_THREAD_ID, 0u, 0u, 0u, 0u);
+
+    /* A worker ends inside its finish callback with nothing waiting. */
+    s_gx.exit_with_waiting = 0;
+    const uint32_t w1 = gx_run_worker(cpu);
+    s_gx.runs_after_worker = sr_hle_test_ge_finish_runs();
+    (void)ge_tim_enqueue(cpu, GE_TIM_DL);
+    s_gx.main_calls_after = s_gx.main_calls;
+    (void)sfs_call(cpu, NID_SCE_KERNEL_DELETE_THREAD, w1, 0u, 0u, 0u);
+
+    /* A worker ends inside its finish callback with one completion waiting. */
+    s_gx.exit_with_waiting = 1;
+    s_gx.stops_before = sr_hle_test_unmodelled_stops();
+    const uint32_t w2 = gx_run_worker(cpu);
+    s_gx.stops_after_worker = sr_hle_test_unmodelled_stops();
+    (void)sfs_call(cpu, NID_SCE_KERNEL_DELETE_THREAD, w2, 0u, 0u, 0u);
+    s_gx.main_done = 1;
+    cpu->r[2] = 0u;
+}
+
+static void test_ge_finish_callback_thread_exit(void) {
+    ge_tim_setup();
+    sr_hle_test_ge_lists_reset();
+    memset(&s_gx, 0, sizeof s_gx);
+    s_gx.worker_uid = s_gx.main_uid = 0xffffffffu;
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gx_finish_fn);
+    sr_test_register_guest_fn(GX_MAIN_ENTRY, gx_main_fn);
+    sr_test_register_guest_fn(GX_WORKER_ENTRY, gx_worker_fn);
+    ge_tim_write_list(GE_TIM_DL, 0u);
+    ge_tim_write_list(GE_TIM_DL2, 0u);
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(GX_MAIN_ENTRY, 0u, 0u);
+    expect(s_gx.main_done, "GE finish exit: the main body ran to its end");
+    expect(s_gx.worker_calls == 2u && !s_gx.worker_after_enqueue,
+           "GE finish exit: each worker's callback ran and ended the worker inside it");
+    expect(s_gx.runs_after_worker == 0u,
+           "GE finish exit: a thread that ends inside its finish callback gives its run back");
+    expect(s_gx.main_calls_after == 1u,
+           "GE finish exit: another thread's list then has its finish callback run at once");
+    expect(s_gx.stops_after_worker == s_gx.stops_before + 1u && sr_hle_test_ge_finish_runs() == 0u,
+           "GE finish exit: ending with a completion waiting stops the run by name, not silently");
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
+    ge_tim_teardown();
+}
+
 /* #1374: lists enqueued while another list is still on the GE wait their turn, in enqueue
  * order, as the GE driver's queue runs them (uofw src/kd/ge/ge.c _sceGeListEnQueue and
  * _sceGeFinishInterrupt). The queued-list peek (1) is uofw's SCE_GE_LIST_QUEUED and
@@ -32127,6 +32430,40 @@ static void dch_scenario_fifo(void) {
     s_dch_pending_after[0] = dch_pending(0) && dch_pending(1);
     dch_start(2, 0x18u);   /* queues second, the stronger */
     s_dch_pending_after[1] = dch_pending(0) && dch_pending(2);
+}
+
+/* Whatever dispatch count the cases before leave, the arrival-order scenario runs the same. Each
+ * round leaves a count that puts the clock's quantum on one of the scenario's first 64 dispatches
+ * (counted from 0); reset_fixture starts the count afresh, so every round is the same run. Before
+ * it did, a quantum on dispatches 2 to 6 failed the queueing check and one on dispatch 11 the
+ * order and timing checks. The scenario itself takes fewer than 64 dispatches, so these phases
+ * cover it. */
+#define DCH_FIFO_PHASES 64u
+
+static void test_dmac_fifo_whatever_the_inherited_clock_phase(void) {
+    const uint32_t dispatches = s_dispatches_since_time;
+    unsigned failed = 0u;
+    uint32_t longest = 0u;
+    for (uint32_t phase = 0u; phase < DCH_FIFO_PHASES; phase++) {
+        memset(s_dch_pending_after, 0, sizeof s_dch_pending_after);
+        s_dispatches_since_time = TIMESLICE - 1u - phase;
+        dch_setup(dch_scenario_fifo);
+        if (s_dispatches_since_time > longest) longest = s_dispatches_since_time;
+        const int ok = s_dch_pending_after[0] && s_dch_pending_after[1] && s_dch[0].order == 1 &&
+                       s_dch[1].order == 2 && s_dch[2].order == 3 &&
+                       s_dch[1].exit_us >= s_dch[0].deadline_us + 58u &&
+                       s_dch[2].exit_us >= s_dch[1].exit_us + 58u;
+        if (!ok && failed++ == 0u)
+            printf("dmac fifo: first failing inherited phase %u: orders %d/%d/%d, exits %llu/%llu/%llu us\n",
+                   phase, s_dch[0].order, s_dch[1].order, s_dch[2].order,
+                   (unsigned long long)s_dch[0].exit_us, (unsigned long long)s_dch[1].exit_us,
+                   (unsigned long long)s_dch[2].exit_us);
+    }
+    printf("dmac fifo: %u of %u inherited clock phases failed; the scenario took %u dispatches\n", failed,
+           (unsigned)DCH_FIFO_PHASES, (unsigned)longest);
+    expect(failed == 0u, "PSP-DMAC-002 b3: the arrival-order scenario holds at every inherited clock phase");
+    expect(longest < DCH_FIFO_PHASES, "the inherited phases cover every dispatch of the scenario");
+    s_dispatches_since_time = dispatches;
 }
 
 static void test_dmac_queued_callers_are_served_in_arrival_order(void) {
@@ -34069,6 +34406,112 @@ static void test_sas_mix_saturates_without_wrapping(void) {
            "__sceSasCoreWithMix at unity gain never inverts a sample when the voice sum overflows int32");
     expect(wrong == 0,
            "__sceSasCoreWithMix saturates twenty full-scale voices at +32767 once every envelope is up");
+}
+
+/* ---- #2137: Ace Mode's peak=limit, the SAS side -------------------------------------------------
+ *
+ * The overflow fixture: twenty full-scale PCM voices over caller PCM of -1000 through
+ * __sceSasCoreWithMix, so the sum passes 16 bits once the envelopes rise and stays under it on
+ * the first samples, then sceAudioOutputBlocking of that same buffer. With the wide mix on, the
+ * guest's bytes must be the PSP's, saturated, exactly as with it off; the host's push must carry
+ * the unsaturated sum where the store saturated and the guest's value everywhere else; and a
+ * buffer the game changed after the mix, or a copy of it elsewhere, must play as the guest has it.
+ *
+ * MUTANT: store the wide sum into guest memory (sas_output_write(out, i, 0, wl)) -- the guest
+ *   bytes differ from the run with the switch off and the first cell fails.
+ * MUTANT: drop the memcmp in sas_wide_for_output -- the changed buffer still plays the kept sum
+ *   and the provenance cell fails. */
+static void sas_peak_overflow_grain(CpuState *cpu, int wide, int16_t *guest) {
+    const uint32_t core = 0x08030000u, out = 0x08010000u, pcm = 0x08040000u;
+    const uint32_t grain = 256u, voices = 20u, pcm_samples = 512u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_sas_reset();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_hle_sas_set_wide_mix(wide);
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[29] = 0x09012000u;
+    cpu->r[4] = core; cpu->r[5] = grain; cpu->r[6] = 32; cpu->r[7] = 0; cpu->r[8] = 44100;
+    expect(sr_syscall(cpu, NID_SAS_INIT) == 0, "peak fixture: __sceSasInit accepts the 256-sample grain");
+    for (uint32_t i = 0; i < pcm_samples; i++) MEM_W16(pcm + i * 2u, 0x7fffu);
+    for (uint32_t v = 0; v < voices; v++) {
+        cpu->r[4] = core; cpu->r[5] = v; cpu->r[6] = pcm; cpu->r[7] = pcm_samples; cpu->r[8] = 0xffffffffu;
+        expect(sr_syscall(cpu, NID_SAS_SET_VOICE_PCM) == 0, "peak fixture: __sceSasSetVoicePCM");
+        cpu->r[4] = core; cpu->r[5] = v; cpu->r[6] = 0x1000; cpu->r[7] = 0x1000;
+        cpu->r[8] = 0x1000; cpu->r[9] = 0x1000;
+        expect(sr_syscall(cpu, NID_SAS_SET_VOLUME) == 0, "peak fixture: __sceSasSetVolume");
+        cpu->r[4] = core; cpu->r[5] = v;
+        expect(sr_syscall(cpu, NID_SAS_SET_KEY_ON) == 0, "peak fixture: __sceSasSetKeyOn");
+    }
+    int16_t bgm[256 * 2];
+    for (uint32_t i = 0; i < grain * 2u; i++) bgm[i] = -1000;
+    sas_write_pcm(out, bgm, grain);
+    cpu->r[4] = core; cpu->r[5] = out; cpu->r[6] = 0x1000; cpu->r[7] = 0x1000;
+    expect(sr_syscall(cpu, NID_SAS_CORE_WITH_MIX) == 0, "peak fixture: __sceSasCoreWithMix");
+    sas_read_pcm(out, guest, grain);
+    expect(audio_dispatch(cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, grain, 0u) == 0u,
+           "peak fixture: the regular channel takes 256-frame stereo blocks");
+}
+
+static void test_sas_peak_limit_keeps_guest_bytes_and_hands_the_host_the_sum(void) {
+    const uint32_t out = 0x08010000u, copy = 0x08050000u;
+    CpuState cpu;
+    int16_t off[256 * 2], on[256 * 2];
+
+    /* Off: the PSP's bytes, and a plain push of them. */
+    sas_peak_overflow_grain(&cpu, 0, off);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak off: the output plays the grain");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak off: the output is a plain push (no wide sum is kept)");
+    uint32_t saturated = 0, unsaturated = 0;
+    for (uint32_t i = 0; i < 256u * 2u; i++) {
+        if (off[i] == 32767) saturated++;
+        else if (off[i] > -32768) unsaturated++;
+    }
+    expect(saturated > 0 && unsaturated > 0,
+           "peak fixture: the grain saturates once the envelopes rise and not before");
+
+    /* On: the same bytes in guest memory, and the sum for the host. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    expect(memcmp(off, on, sizeof(off)) == 0,
+           "peak on: the guest's SAS bytes are byte-identical to the run with the switch off");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak on: the output plays the grain");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 1,
+           "peak on: the unchanged SAS buffer reaches the host as one wide push");
+    expect(memcmp(s_audio_push_capture, on, sizeof(on)) == 0,
+           "peak on: the wide push still carries the guest's own bytes beside the sum");
+    uint32_t past = 0, wrong = 0;
+    for (uint32_t i = 0; i < 256u * 2u; i++) {
+        const int32_t w = s_audio_push_wide_capture[i];
+        if (on[i] == 32767) { if (w > 32767) past++; else wrong++; }
+        else if (w != on[i]) wrong++;
+    }
+    expect(wrong == 0, "peak on: the sum differs from the guest only where the store saturated");
+    expect(past == saturated, "peak on: every saturated sample carries a sum past 16 bits");
+    /* Twenty unity voices at full scale over -1000: once the envelopes are up the sum is
+     * 20 * 32767 - 1000, far past what any int16 holds. */
+    expect(s_audio_push_wide_capture[255 * 2] > 20 * 30000,
+           "peak on: the sum keeps all twenty voices");
+
+    /* The game changed the buffer after the mix: it plays as the guest has it. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    MEM_W16(out + 255u * 4u, 0x1234u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak on, changed buffer: the output plays");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak on, changed buffer: a span the game wrote after the mix gets no kept sum");
+
+    /* A copy elsewhere is the game's own buffer: it plays as the guest has it. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    sas_write_pcm(copy, on, 256u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, copy) == 256u,
+           "peak on, copy: the output plays");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak on, copy: a buffer the SAS mixer never wrote gets no kept sum");
+    sr_hle_sas_set_wide_mix(0);
 }
 
 /* Production-dispatch SAS state regressions.  Each case uses only synthetic
@@ -38825,6 +39268,125 @@ static void test_partition_spans_the_whole_user_partition(void) {
     }
     expect(pieces >= 2 && overlapping == 0,
            "the skipped span returns to the free list around the runtime's stacks");
+}
+
+/* A PSP takes a thread stack, and a High memory block, from the highest free block of the user
+ * partition that holds it (sched.c stack_range_alloc), and a block the guest freed below the
+ * partition's bump pointer is such a block. A title that keeps the whole partition for its own
+ * heap frees exactly a stack's size and then creates the thread (Discussion #2445). Before, the
+ * runtime looked only above the bump pointer, so sceKernelCreateThread returned NO_MEMORY, the
+ * High block MEMBLOCK_ALLOC_FAILED, and the title unloaded itself before its first frame. */
+#define FPB_NID_ALLOC_PART 0x237dbd4fu
+#define FPB_NID_GET_HEAD   0x9d9a5ba1u
+#define FPB_NID_FREE_PART  0xb6d61d02u
+#define FPB_NID_MAX_FREE   0xa291f107u
+#define FPB_NAME           0x00280010u
+#define FPB_ADDR_OUT       0x00280004u
+#define FPB_ENTRY          0x08900000u
+
+static uint32_t fpb_call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2; cpu.r[7] = a3;
+    return sr_syscall(&cpu, nid);
+}
+static uint32_t fpb_max_free(void) { return fpb_call(FPB_NID_MAX_FREE, 0u, 0u, 0u, 0u); }
+static uint32_t fpb_low(uint32_t size) { return fpb_call(FPB_NID_ALLOC_PART, 2u, 0u, 0u, size); }
+static uint32_t fpb_head(uint32_t uid) { return fpb_call(FPB_NID_GET_HEAD, uid, 0u, 0u, 0u); }
+static uint32_t fpb_free(uint32_t uid) { return fpb_call(FPB_NID_FREE_PART, uid, 0u, 0u, 0u); }
+/* sceKernelCreateThread through its production handler (attr 0 in t0). */
+static uint32_t fpb_thread(uint32_t stack) {
+    return fpb_call(NID_SCE_KERNEL_CREATE_THREAD, FPB_NAME, FPB_ENTRY, 32u, stack);
+}
+static uint32_t fpb_stack_base(uint32_t uid) {
+    TCB *t = uid < 0x80000000u ? tcb_by_uid(uid) : NULL;
+    return t ? t->stack_base : 0u;
+}
+
+static void test_high_requests_take_a_freed_partition_block(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name);
+    const uint32_t NO_MEMORY = 0x80020190u;
+    const uint32_t main_top = 0x0a000000u - 0x8000u;   /* below the main thread's stack */
+
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    title_hle_write_cstr(FPB_NAME, "fpb");
+    expect(sched_create_thread(0x2004u, 32, 0x8000u) != 0u, "freed block: a main thread is created");
+
+    /* Low blocks A, H and C, then H is freed: a 0x3000-byte block below the bump pointer. */
+    uint32_t a = fpb_low(0x10000u), h = fpb_low(0x3000u), c = fpb_low(0x1000u);
+    uint32_t hole = fpb_head(h);
+    expect(a < 0x80000000u && h < 0x80000000u && c < 0x80000000u && fpb_free(h) == 0u,
+           "freed block: three Low blocks, the middle one freed");
+
+    /* While the arena above the bump pointer holds the stack, that is where it goes: it is higher. */
+    uint32_t above = fpb_thread(0x2000u);
+    expect(fpb_stack_base(above) == main_top - 0x2000u,
+           "freed block: with room above the bump pointer the stack is carved there, not in the block");
+    expect(fpb_call(NID_SCE_KERNEL_DELETE_THREAD, above, 0u, 0u, 0u) == 0u, "freed block: that thread is deleted");
+
+    /* B takes everything above the bump pointer; only the freed block is left. */
+    uint32_t b = fpb_low(fpb_max_free());
+    expect(b < 0x80000000u && fpb_max_free() == 0x3000u, "freed block: the partition is full but for the block");
+
+    uint32_t worker = fpb_thread(0x2000u);
+    expect(fpb_stack_base(worker) == hole + 0x1000u,
+           "freed block: sceKernelCreateThread carves the stack from the top of the freed block");
+    expect(fpb_max_free() == 0x1000u && sched_guest_stack_floor() == main_top,
+           "freed block: the rest stays free and the partition's top does not move");
+    uint32_t small = fpb_thread(0x1000u);
+    expect(fpb_stack_base(small) == hole, "freed block: a second stack takes the rest");
+    expect(fpb_thread(0x200u) == NO_MEMORY && fpb_max_free() == 0u,
+           "freed block: with no free block left a further create returns NO_MEMORY");
+    expect(fpb_call(NID_SCE_KERNEL_DELETE_THREAD, worker, 0u, 0u, 0u) == 0u &&
+               fpb_call(NID_SCE_KERNEL_DELETE_THREAD, small, 0u, 0u, 0u) == 0u &&
+               fpb_max_free() == 0x3000u,
+           "freed block: deleting the threads gives the block back, coalesced");
+    expect(fpb_thread(0x3100u) == NO_MEMORY && fpb_max_free() == 0x3000u,
+           "freed block: a larger stack is still refused and the block stays free");
+
+    uint32_t high = memblock_alloc(FPB_NAME, 1u, 0x3000u, 0u);
+    expect(high < 0x80000000u && memblock_addr(high, FPB_ADDR_OUT) == hole && fpb_max_free() == 0u,
+           "freed block: a High memory block of that size takes the freed block");
+    expect(memblock_free(high) == 0u && fpb_max_free() == 0x3000u,
+           "freed block: freeing the High block gives it back to the partition");
+
+    /* Freeing the blocks above a live stack in the freed block stops the bump pointer at it. */
+    uint32_t pinned = fpb_thread(0x3000u);
+    expect(fpb_stack_base(pinned) == hole && fpb_free(b) == 0u && fpb_free(c) == 0u &&
+               fpb_max_free() == main_top - (hole + 0x3000u),
+           "freed block: the blocks above a stack in it free down to the stack's end, not past it");
+    expect(fpb_call(NID_SCE_KERNEL_DELETE_THREAD, pinned, 0u, 0u, 0u) == 0u &&
+               fpb_max_free() == main_top - hole,
+           "freed block: deleting that thread joins its block to the free space above");
+    (void)fpb_free(a);
+
+    /* A fixed reservation above a live High block returns the skipped gap, High block inside, to
+     * the free list (sr_alloc_block_at). A stack is never carved over that High block: the
+     * runtime refuses the request (fail closed) where a PSP could place it lower in the gap. */
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    title_hle_write_cstr(FPB_NAME, "fpb");
+    expect(sched_create_thread(0x2004u, 32, 0x8000u) != 0u, "freed block: a main thread again");
+    uint32_t h1 = memblock_alloc(FPB_NAME, 1u, 0x100u, 0u);
+    uint32_t h2 = memblock_alloc(FPB_NAME, 1u, 0x100u, 0u);
+    uint32_t h2_addr = memblock_addr(h2, FPB_ADDR_OUT);
+    expect(memblock_addr(h1, FPB_ADDR_OUT) == main_top - 0x100u && h2_addr == main_top - 0x200u &&
+               memblock_free(h1) == 0u,
+           "freed block: two High blocks at the top, the upper one freed");
+    uint32_t fixed = sr_alloc_block_at(main_top - 0x100u, 0x100u, "fixed");
+    expect(fixed != 0xFFFFFFFFu, "freed block: a fixed reservation where the upper High block was");
+    expect(fpb_thread(0x200u) == NO_MEMORY && memblock_addr(h2, FPB_ADDR_OUT) == h2_addr,
+           "freed block: no stack is carved over the live High block in the skipped gap");
+    (void)memblock_free(h2);
+
+    s_fixture_loaded_end = 0x00400000u;
+    sr_hle_test_partition_reset();
 }
 
 static void test_alloc_block_at_fixed_address(void) {
@@ -44032,7 +44594,7 @@ static void test_ace_stick_remap_reaches_the_guest_only_from_the_live_stick(void
     extern int s_ctrl_test_stick;
     extern int ace_init_spec(const char *spec, const char *report_path);
     static const char stick_line[] =
-        "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;stick=64";
+        "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;stick=64";
     CpuState cpu;
     RouteStickRead r;
     const int test_stick = s_ctrl_test_stick;
@@ -46852,7 +47414,7 @@ static void test_wc_display_getmode_and_start_cb(void) {
 static void test_ace_load_skip_wait_only_where_the_stock_call_blocks(void) {
     enum { NID_WAIT_VBLANK_START = 0x984c27e7u };
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     CpuState cpu;
     reset_fixture();
     sr_hle_init();
@@ -46890,7 +47452,15 @@ static void test_ace_load_skip_wait_only_where_the_stock_call_blocks(void) {
 /* A skipped wait still blocks, for the shortest real delay, so a loading loop that spins until a
  * lower-priority loader thread finishes does finish: the loader runs during the skip, as it would
  * during the stock wait, and sees the waiter in a delay wait. A zero delay or a rotation would not
- * let it run (#340), and the loop would spin to its bound. */
+ * let it run (#340), and the loop would spin to its bound.
+ *
+ * The virtual clock this fixture runs on charges a whole quantum at every TIMESLICE-th dispatch
+ * (scheduler_keep_time_at_dispatch), and the count carries over from every case before this one.
+ * When that charge fell on the decision the skip's block caused, the 1 us wait was already over
+ * there and the waiter, ready again at its higher priority, won it before the loader had run: the
+ * loop took a second skip. Which dispatch it fell on varied with the cases run before, so one run
+ * in many failed. The case therefore runs once with the charge at each of its first
+ * ACE_SKIP_PHASES dispatches, the decision after the block among them. */
 static volatile uint32_t s_ace_skip_loaded;
 static volatile uint32_t s_ace_skip_loaded_in_loop;
 static volatile uint32_t s_ace_skip_iterations;
@@ -46903,6 +47473,7 @@ enum {
     ACE_SKIP_WAITER_ENTRY = 0x08990300u,
     ACE_SKIP_LOADER_ENTRY = 0x08990340u,
     ACE_SKIP_LOOP_BOUND = 64u,
+    ACE_SKIP_PHASES = 16u,
 };
 
 static void ace_skip_loader_guest_fn(CpuState *cpu) {
@@ -46933,9 +47504,11 @@ static void ace_skip_waiter_guest_fn(CpuState *cpu) {
     cpu->r[2] = 0u;
 }
 
-static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
+/* One run of the case with the clock's next quantum due at dispatch phase + 1; 1 when every
+ * property held. Only the first failing run reports its properties. */
+static int ace_skip_yield_round(uint32_t phase, int report) {
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     reset_fixture();
     sr_hle_init();
     sr_test_guest_fn_reset();
@@ -46951,19 +47524,70 @@ static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
     sr_test_register_guest_fn(ACE_SKIP_LOADER_ENTRY, ace_skip_loader_guest_fn);
     g_worker_uid = SR_ROLE_UID_NONE;
     memset(s_cpu, 0, sizeof(*s_cpu));
+    s_dispatches_since_time = TIMESLICE - 1u - phase;
 
     sched_run(ACE_SKIP_WAITER_ENTRY, 0u, 0u);
 
-    expect(s_ace_skip_loader_lower, "ace load skip yield: the loader was ready at a lower priority");
-    expect(s_ace_skip_loaded_in_loop == 1u,
-           "ace load skip yield: the lower-priority loader ran during a skipped wait, before the loop ended");
-    expect(s_ace_skip_iterations == 1u, "ace load skip yield: the loading loop finished at its first skipped wait");
-    expect(s_ace_skip_waiter_state == TH_WAIT_DELAY,
-           "ace load skip yield: the waiter was in a delay wait while the loader ran");
-    expect(s_ace_skip_v0 == 0u, "ace load skip yield: a skipped wait returns 0 in $v0");
-    expect(ace_load_waits_skipped() == 1u, "ace load skip yield: the one skip is counted");
+    const int lower = s_ace_skip_loader_lower;
+    const int loaded_in_loop = s_ace_skip_loaded_in_loop == 1u;
+    const int first_skip = s_ace_skip_iterations == 1u;
+    const int delay_wait = s_ace_skip_waiter_state == TH_WAIT_DELAY;
+    const int v0 = s_ace_skip_v0 == 0u;
+    const int counted = ace_load_waits_skipped() == 1u;
+    if (report) {
+        printf("ace load skip yield: the first failing run had the quantum at dispatch %u\n",
+               (unsigned)phase + 1u);
+        expect(lower, "ace load skip yield: the loader was ready at a lower priority");
+        expect(loaded_in_loop,
+               "ace load skip yield: the lower-priority loader ran during a skipped wait, before the loop ended");
+        expect(first_skip, "ace load skip yield: the loading loop finished at its first skipped wait");
+        expect(delay_wait, "ace load skip yield: the waiter was in a delay wait while the loader ran");
+        expect(v0, "ace load skip yield: a skipped wait returns 0 in $v0");
+        expect(counted, "ace load skip yield: the one skip is counted");
+    }
     (void)ace_init_spec("off", NULL);
     sr_test_guest_fn_reset();
+    return lower && loaded_in_loop && first_skip && delay_wait && v0 && counted;
+}
+
+/* A thread alone: its skip still blocks, and with nobody else ready it resumes and finishes. */
+static volatile uint32_t s_ace_skip_lone_resumed;
+
+static void ace_skip_lone_guest_fn(CpuState *cpu) {
+    cpu->r[2] = 0x5au;
+    expect(nk_ace_load_skip_wait(cpu, "T", 0x08800000u) == 1, "ace load skip alone: the wait is skipped");
+    s_ace_skip_lone_resumed = cpu->r[2] == 0u ? 1u : 2u;
+    cpu->r[2] = 0u;
+}
+
+static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
+    static const char k_load_fast[] =
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
+    /* The cases after this one keep the dispatch count they would have had. */
+    const uint32_t dispatches = s_dispatches_since_time;
+    unsigned failed = 0u;
+    for (uint32_t phase = 0u; phase < ACE_SKIP_PHASES; phase++) {
+        const int ok = ace_skip_yield_round(phase, 0);
+        if (!ok && failed++ == 0u) (void)ace_skip_yield_round(phase, 1);
+    }
+    printf("ace load skip yield: %u of %u clock phases failed\n", failed, (unsigned)ACE_SKIP_PHASES);
+    expect(failed == 0u, "ace load skip yield: at every clock phase the loop finished at its first skipped wait");
+
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    s_ace_skip_lone_resumed = 0u;
+    expect(ace_init_spec(k_load_fast, NULL) == 1, "ace load skip alone: load=fast is on");
+    sr_test_register_guest_fn(ACE_SKIP_WAITER_ENTRY, ace_skip_lone_guest_fn);
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(ACE_SKIP_WAITER_ENTRY, 0u, 0u);
+    expect(s_ace_skip_lone_resumed == 1u,
+           "ace load skip alone: with no other thread ready the skipped wait resumes, returning 0");
+    expect(ace_load_waits_skipped() == 1u, "ace load skip alone: the one skip is counted");
+    (void)ace_init_spec("off", NULL);
+    sr_test_guest_fn_reset();
+    s_dispatches_since_time = dispatches;
 }
 
 /* The pacing guard (ENHANCEMENT_CONTRACT.md 11.3.10), through the real skip on a running
@@ -47004,7 +47628,7 @@ static void ace_pacing_guest_fn(CpuState *cpu) {
 
 static void test_ace_load_skip_wait_stops_once_it_paces_updates(void) {
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     enum { UPDATES = (int)(sizeof(s_ace_pacing_skips) / sizeof(s_ace_pacing_skips[0])) };
     char captured[4096];
     FILE *capture = NULL;
@@ -52477,6 +53101,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_break_continue();
     test_ge_completion_timing();
     test_ge_finish_callback_reports();
+    test_ge_finish_callbacks_do_not_nest();
+    test_ge_finish_callback_thread_exit();
     test_ge_queued_lists_run_in_order();
     test_ge_timing_blocking_sync_cannot_wait();
     test_volatile_mem_output_preflight();
@@ -52606,6 +53232,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_dmac_small_body_bypasses_the_channel();
     test_dmac_refused_try_copies_head_and_tail();
     test_dmac_queued_callers_are_served_in_arrival_order();
+    test_dmac_fifo_whatever_the_inherited_clock_phase();
     test_display_framebuf_latch();
     test_time_domains_are_coherent();
     test_kernel_import_sweep_sysclock_conversion();
@@ -52621,6 +53248,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_power_set_clock_frequency_range_checks();
     test_rtc_time_t_add_years_resolution_autotest();
     test_rtc_tick_add_day_of_week_check_valid_autotest();
+    test_rtc_tick_add_minutes_hours_weeks_autotest();
     test_imports_20261102_measured_contracts();
     test_psp_measured_umd_state_20261024();
     test_unregistered_batch_ctrl_sampling_getter();
@@ -52728,6 +53356,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();
     test_sas_mix_saturates_without_wrapping();
+    test_sas_peak_limit_keeps_guest_bytes_and_hands_the_host_the_sum();
     test_sas_state_contracts();
     test_sas_set_volume_accepts_negative();
     test_sas_voice_volume_defaults();
@@ -52761,6 +53390,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_partition_ends_at_lowest_live_stack();
     test_max_free_unchanged_after_top_stack_deleted();
     test_partition_spans_the_whole_user_partition();
+    test_high_requests_take_a_freed_partition_block();
     test_partition_unknown_block_codes();
     test_module_id_queries_resolve_owning_module();
     test_query_module_info_answers_main_module_record();
