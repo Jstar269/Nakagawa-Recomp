@@ -345,12 +345,12 @@ class ComparabilityContractTests(unittest.TestCase):
         ace = copy.deepcopy(candidate)
         ace["runtime"]["enhancements"] = {"ace": self.ACE_LINE}
         flight_diff.validate_bundle(ace)
-        # A line past the 95 characters the field used to keep: every optional key on (#2073's ssaa=4
-        # alone takes an Enhanced line to 100). The recorder keeps ACE_SPEC_MAX - 1 characters (its
-        # field is declared with ACE_SPEC_MAX, which ace-selftest checks against the longest line the
-        # key table formats), and the schema allows as many.
+        # A line past the 95 characters the field used to keep: every optional key on (#2051's depth=32
+        # alone takes an Enhanced line to 97, #2073's ssaa=4 to 100). The recorder keeps ACE_SPEC_MAX - 1
+        # characters (its field is declared with ACE_SPEC_MAX, which ace-selftest checks against the
+        # longest line the key table formats), and the schema allows as many.
         long_line = ("v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=fill;smooth=x2;sas=sinc;tess=4;"
-                     "stick=126;load=fast;ssaa=4;cull=on")
+                     "stick=126;load=fast;depth=32;ssaa=4;cull=on")
         self.assertGreater(len(long_line), 95)
         ace["runtime"]["enhancements"] = {"ace": long_line}
         flight_diff.validate_bundle(ace)

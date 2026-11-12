@@ -143,6 +143,41 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;load=fast;load=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate load");
     }
+    /* depth (contract 10.20, 11.3.12): optional; depth=32 is an Enhanced part (no tier=ace needed),
+       depth=off and a missing key are the PSP's 16 bits, any other value is refused, and it is
+       written after load and before cull, only when on. */
+    {
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.depth == 0, "a missing depth is 16-bit");
+        snprintf(spec, sizeof(spec), "%s;depth=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.depth == 0, "depth=off is 16-bit");
+        snprintf(spec, sizeof(spec), "%s;depth=32", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.depth == 32 && c.tier == ACE_TIER_ENHANCED,
+              "depth=32 in an Enhanced line");
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 9, ";depth=32") == 0,
+              "a line with depth=32 formats with the key last (%s)", out);
+        c.tier = ACE_TIER_ACE;
+        c.load = 1;
+        c.cull = 1;
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 27, ";load=fast;depth=32;cull=on") == 0,
+              "load, then depth, then cull, which stays last (%s)", out);
+        CHECK(ace_parse(out, &c, why, sizeof(why)) == 1 && c.depth == 32 && c.load == 1 && c.cull == 1,
+              "the formatted line parses back (%s)", why);
+        c.depth = 0;
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "depth") == NULL, "off writes no depth key (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;tier=ace;depth=32", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.depth == 32 && c.tier == ACE_TIER_ACE,
+              "depth=32 in an Ace line");
+        static const char *const bad[] = { "16", "24", "on", "1", "32f", "D32", "" };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            snprintf(spec, sizeof(spec), "%s;depth=%s", base, bad[i]);
+            CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && c.on == 0 && c.depth == 0,
+                  "depth=%s is refused (%s)", bad[i], why);
+        }
+        snprintf(spec, sizeof(spec), "%s;depth=32;depth=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate depth");
+    }
     /* ssaa (contract 10.21): optional; ssaa=2 and ssaa=4 are an Enhanced part (no tier=ace needed),
        ssaa=off and a missing key are off, any other value is refused, and it is written after load
        and before cull, only when on. */
@@ -164,6 +199,13 @@ static void cell_parse(void) {
         c.cull = 1;
         CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 25, ";load=fast;ssaa=4;cull=on") == 0,
               "load, then ssaa, then cull, which stays last (%s)", out);
+        c.depth = 32;
+        CHECK(ace_format(&c, out, sizeof(out)) &&
+                  strcmp(out + strlen(out) - 34, ";load=fast;depth=32;ssaa=4;cull=on") == 0,
+              "load, depth, ssaa, then cull (%s)", out);
+        CHECK(ace_parse(out, &c, why, sizeof(why)) == 1 && c.depth == 32 && c.ssaa == 4,
+              "a line with depth and ssaa parses back (%s)", why);
+        c.depth = 0;
         CHECK(ace_parse(out, &c, why, sizeof(why)) == 1 && c.ssaa == 4 && c.load == 1 && c.cull == 1,
               "the formatted line parses back (%s)", why);
         c.ssaa = 0;
@@ -323,6 +365,7 @@ static void cell_parse(void) {
         ACE_WIDEST(tess, 0, 2, 3, 4);
         ACE_WIDEST(stick, 0, 1, ACE_STICK_COUNTS_MAX);
         ACE_WIDEST(load, 0, 1);
+        ACE_WIDEST(depth, 0, 32);
         ACE_WIDEST(ssaa, 0, 2, 4);
         ACE_WIDEST(cull, 0, 1);
 #undef ACE_WIDEST
@@ -424,6 +467,25 @@ static void cell_switch(void) {
     CHECK(ace_effective()->cull == 0 && ace_requested()->cull == 1 &&
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": false") != NULL &&
           strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
+
+    /* depth=32 (contract 10.20): the stamp's line and the report carry it; a device without the
+       format (ge_gpu.c) makes it unavailable, and the report says 16. */
+    CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->depth == 0 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"depth\"") == NULL,
+          "a run without depth reports none:\n%s", json);
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;depth=32",
+                        NULL) == 1 && ace_effective()->depth == 32, "depth=32 in an Enhanced line turns it on");
+    CHECK(strcmp(ace_spec_text(), "v1;tier=enhanced;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;"
+                                  "sas=off;tess=off;depth=32") == 0,
+          "the stamp's line carries depth=32: '%s'", ace_spec_text());
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"depth\": 32") != NULL,
+          "the report carries depth 32:\n%s", json);
+    CHECK(ace_feature_words(json, sizeof(json)) > 0 && strstr(json, "32-bit depth") != NULL,
+          "the badge words name 32-bit depth: '%s'", json);
+    ace_feature_unavailable(ACE_FEATURE_DEPTH, "no D32: test");
+    CHECK(ace_effective()->depth == 0 && ace_requested()->depth == 32 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"depth\": 16") != NULL &&
+          strstr(json, "no D32: test") != NULL, "a device without D32 reports depth 16:\n%s", json);
 
     /* ssaa (contract 10.21): the stamp's line, the report and the words carry it; the renderer's size
        check (ge_gpu.c) can lower it, which the report records with the request, or make it

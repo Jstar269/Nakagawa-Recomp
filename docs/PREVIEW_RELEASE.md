@@ -249,21 +249,26 @@ if ($LASTEXITCODE -ne 0) { throw 'Writing the prerequisite source archive failed
 # A signed release signs the two executables here, on the signing machine, before anything below
 # describes them (RELEASE_SIGNING.md, "Sign the Windows binaries"):
 #   pwsh tools/sign_release_binaries.ps1 -Stage $Stage -Thumbprint <thumbprint> -TimestampUrl <RFC 3161 URL>
-python tools/generate_sbom.py --package-dir $Bin `
-    --spdx-out (Join-Path $Stage 'SBOM.spdx.json') `
-    --spdx3-out (Join-Path $Stage 'SBOM.spdx3.jsonld') `
-    --cyclonedx-out (Join-Path $Stage 'SBOM.cyclonedx.json')
-python tools/verify_sbom.py --expected-release-version $Version `
-    --observed-toolchain $ToolchainIdentity `
-    --spdx (Join-Path $Stage 'SBOM.spdx.json') `
-    --spdx3 (Join-Path $Stage 'SBOM.spdx3.jsonld') `
-    --cyclonedx (Join-Path $Stage 'SBOM.cyclonedx.json')
-
 # A bundle attested before #324 has no runtime manifest: record it here, from the verified files.
 if (-not (Test-Path -LiteralPath (Join-Path $Bin 'runtime-manifest.json') -PathType Leaf)) {
     python tools/stage_runtime_dlls.py --target $Bin --write-runtime-manifest-only
     if ($LASTEXITCODE -ne 0) { throw 'Recording the runtime manifest failed.' }
 }
+# The SBOMs carry the SHA-256 the runtime manifest records for every executable and DLL in bin/;
+# both steps check the manifest against the files first, and stop on any difference.
+python tools/generate_sbom.py --package-dir $Bin `
+    --spdx-out (Join-Path $Stage 'SBOM.spdx.json') `
+    --spdx3-out (Join-Path $Stage 'SBOM.spdx3.jsonld') `
+    --cyclonedx-out (Join-Path $Stage 'SBOM.cyclonedx.json')
+if ($LASTEXITCODE -ne 0) { throw 'Generating the SBOMs failed.' }
+python tools/verify_sbom.py --expected-release-version $Version `
+    --observed-toolchain $ToolchainIdentity `
+    --spdx (Join-Path $Stage 'SBOM.spdx.json') `
+    --spdx3 (Join-Path $Stage 'SBOM.spdx3.jsonld') `
+    --cyclonedx (Join-Path $Stage 'SBOM.cyclonedx.json') `
+    --package-dir $Bin
+if ($LASTEXITCODE -ne 0) { throw 'The SBOMs do not match the package.' }
+
 # The source export is a one-commit Git repository whose commit time and index timestamps change on every
 # run, so source/.git would make two builds differ. The installed source/ has no .git either (see below).
 Remove-Item -LiteralPath (Join-Path $Source '.git') -Recurse -Force
@@ -282,7 +287,7 @@ foreach ($Asset in @($Zip, $SourceZip)) {
 Write-Output $Zip, "$Zip.sha256", $SourceZip, "$SourceZip.sha256"
 ```
 
-The package contains the native player and synthetic verification binary under `bin/`, the showcase demos under `bin/demos/`, the mechanically resolved SDL3/SDL3_ttf runtime DLL closures and their notices, the public-safe source export under `source/`, setup and smoke instructions, root README/license/notices, `SOURCE.txt`, LGPL relinking material, the third-party notice bundle, three SBOM formats, and `SHA256SUMS.txt`. It does not copy the whole `build/` tree, generated translation units, fixture PRXs, Vulkan SDK files, local databases, or title outputs. `SHA256SUMS.txt` covers every staged file except itself, in ordinal path order. Two runs of this script on the same commit with the same attested bundle, trusted ledger and prerequisite pins give a byte-identical ZIP when the same CPython writes it (Deflate output depends on the zlib build, which `--portable-zip` reports as `zlib`). Attach `nakagawa-recomp-<version>-windows-x64.zip.sha256` to the release next to the ZIP: the release binaries are not Authenticode-signed, so the published checksum and the per-file build attestations are how a user checks a download.
+The package contains the native player and synthetic verification binary under `bin/`, the showcase demos under `bin/demos/`, the mechanically resolved SDL3/SDL3_ttf runtime DLL closures and their notices, the public-safe source export under `source/`, setup and smoke instructions, root README/license/notices, `SOURCE.txt`, LGPL relinking material, the third-party notice bundle, three SBOM formats (each records the SHA-256 of every executable and DLL directly in `bin/`, from `bin/runtime-manifest.json`), and `SHA256SUMS.txt`. It does not copy the whole `build/` tree, generated translation units, fixture PRXs, Vulkan SDK files, local databases, or title outputs. `SHA256SUMS.txt` covers every staged file except itself, in ordinal path order. Two runs of this script on the same commit with the same attested bundle, trusted ledger and prerequisite pins give a byte-identical ZIP when the same CPython writes it (Deflate output depends on the zlib build, which `--portable-zip` reports as `zlib`). Attach `nakagawa-recomp-<version>-windows-x64.zip.sha256` to the release next to the ZIP: the release binaries are not Authenticode-signed, so the published checksum and the per-file build attestations are how a user checks a download.
 
 Then sign that checksum file on the offline signing machine, as [`RELEASE_SIGNING.md`](RELEASE_SIGNING.md#sign-a-release) describes, and attach `nakagawa-recomp-<version>-windows-x64.zip.sha256.minisig` next to it. The player's update download (v0.0.2 and later) trusts the checksum only under a valid signature from the update-signing key built into it; a release without the `.minisig` is not downloaded by the player, which offers its release page instead. Build the release only from a commit that has `assets/update_signing_key.pub`: the build then embeds the key, and `test_update_check` in `native-core-tests` checks that the embedded key reads back. A player built without the file can't download any later update itself. v0.0.2 is built without the file, because no update-signing key exists yet, so its player links to the release page for every later version.
 

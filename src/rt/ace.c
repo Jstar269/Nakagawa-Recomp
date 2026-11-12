@@ -29,7 +29,7 @@ static int value_on_off(const char *v, int *out) {
    nothing: tier is the one key a line may leave out (an Enhanced run). */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
-    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_SSAA,
+    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_DEPTH, ACE_KEY_SSAA,
     ACE_KEY_CULL
 } AceKey;
 
@@ -49,6 +49,7 @@ static const struct {
     {"tier", ACE_KEY_TIER, 0},
     {"stick", ACE_KEY_STICK, 0},
     {"load", ACE_KEY_LOAD, 0},
+    {"depth", ACE_KEY_DEPTH, 0},
     {"ssaa", ACE_KEY_SSAA, 0},
     {"cull", ACE_KEY_CULL, 0},
 };
@@ -135,6 +136,13 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                     why_set(why, why_cap, "load is not part of this build"); return 0;
                 }
                 break;
+            case ACE_KEY_DEPTH:
+                if (strcmp(v, "off") == 0) { c.depth = 0; ok = 1; }
+                else if (strcmp(v, "32") == 0) { c.depth = 32; ok = 1; }
+                if (ok && c.depth && !ACE_HAS_DEPTH) {
+                    why_set(why, why_cap, "depth is not part of this build"); return 0;
+                }
+                break;
             case ACE_KEY_SSAA:
                 if (strcmp(v, "off") == 0) { c.ssaa = 0; ok = 1; }
                 else if (strcmp(v, "2") == 0) { c.ssaa = 2; ok = 1; }
@@ -219,6 +227,11 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
         const int m = snprintf(out + n, cap - (size_t)n, ";load=fast");
         n = m < 0 ? -1 : n + m;
     }
+    /* Likewise depth, after load: a missing depth is the PSP's 16 bits. */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->depth) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";depth=%d", c->depth);
+        n = m < 0 ? -1 : n + m;
+    }
     /* Likewise ssaa, after load: a missing ssaa is off. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->ssaa) {
         const int m = snprintf(out + n, cap - (size_t)n, ";ssaa=%d", c->ssaa);
@@ -257,7 +270,7 @@ static int s_load_paced;             /* the guard fired: nothing is skipped for 
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
     "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull",
-    "ssaa"
+    "depth", "ssaa"
 };
 
 /* The run's observation state. */
@@ -355,6 +368,10 @@ int ace_init_spec(const char *spec, const char *report_path) {
     if (s_req.load)
         fprintf(stderr, "ACE_MODE: load fast (a title's declared loading waits return at once; "
                         "guest timing changes)\n");
+    if (s_req.depth)
+        fprintf(stderr, "ACE_MODE: depth %d (the host depth buffer keeps unrounded depth, so surfaces "
+                        "within one 16-bit step of each other can draw in a different order; guest "
+                        "depth reads stay 16-bit)\n", s_req.depth);
     if (s_req.ssaa)
         fprintf(stderr, "ACE_MODE: ssaa %d (the host twin renders at %d times the render scale per axis and "
                         "the presenter shows its box-filtered average; guest VRAM and every readback are "
@@ -388,6 +405,7 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_SAS: s_eff.sas = 0; break;
     case ACE_FEATURE_LOAD: s_eff.load = 0; break;
     case ACE_FEATURE_CULL: s_eff.cull = 0; break;
+    case ACE_FEATURE_DEPTH: s_eff.depth = 0; break;
     case ACE_FEATURE_SSAA: s_eff.ssaa = 0; break;
     default: s_eff.tess = 0; break;
     }
@@ -541,6 +559,7 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.stick) used = words_add(out, cap, used, "stick remap");
     if (s_eff.load) used = words_add(out, cap, used, "short loads");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
+    if (s_eff.depth) used = words_add(out, cap, used, "32-bit depth");
     if (s_eff.ssaa) used = words_add(out, cap, used, s_eff.ssaa == 4 ? "4x supersampling" : "2x supersampling");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
@@ -1163,6 +1182,7 @@ size_t ace_report_json(char *out, size_t cap) {
                             "  \"load_paced\": %s,\n",
                             s_eff.load ? "true" : "false", s_load_skipped, s_load_run_max,
                             s_load_paced ? "true" : "false");
+    if (s_req.depth) ACE_PUT("  \"depth\": %d,\n", s_eff.depth ? s_eff.depth : 16);
     if (s_req.ssaa) ACE_PUT("  \"ssaa\": %d,\n", s_eff.ssaa ? s_eff.ssaa : 1);
     if (s_ssaa_limited) ACE_PUT("  \"ssaa_requested\": %d,\n", s_req.ssaa);
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
@@ -1258,11 +1278,11 @@ void ace_finish(void) {
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
                                                 ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL,
-                                                ACE_HAS_SSAA };
+                                                ACE_HAS_DEPTH, ACE_HAS_SSAA };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
                                         s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
                                         s_eff.load,
-                                        s_eff.cull, s_eff.ssaa };
+                                        s_eff.cull, s_eff.depth, s_eff.ssaa };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL

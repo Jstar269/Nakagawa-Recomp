@@ -457,12 +457,13 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `stick` (the title's
-stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section 11.3.10) and `cull` (`on` or `off`,
-section 11.3.6) and `ssaa` (`2`, `4` or `off`, section 10.21) are the other keys a line may leave out: a missing
-`stick`, `load`, `ssaa` or `cull` is off, `stick=<counts>`, `load=fast` and `cull=on` need `tier=ace`, and the
-launcher writes `;load=fast` and `;cull=on` only for an Ace launch with that part on, and `;ssaa=2` or `;ssaa=4`
-for an Enhanced or Ace launch with supersampling on. When present they come last, in the order `stick`, `load`,
-`ssaa`, `cull`. Every
+stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section 11.3.10), `depth` (`32` or `off`,
+section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21) and `cull` (`on` or `off`, section 11.3.6) are the other
+keys a line may leave out: a missing `stick`, `load`, `depth`, `ssaa` or `cull` is off, `stick=<counts>`,
+`load=fast` and `cull=on` need `tier=ace` (`depth=32` and `ssaa=2|4` do not), the launcher writes `;load=fast` and
+`;cull=on` only for an Ace launch with that part on and `;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with
+supersampling on, and no launcher writes `depth` yet (section 11.3.12). A line writes them in that order, `cull`
+last. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -484,7 +485,8 @@ scaling or the smart 2D filter, which names the request and does not obey it (se
 `TWIN: refused` line when `SR_GPU_TWIN_COLOR` is set, which changes nothing else (section 10.11), one line that
 names an unknown or refused `SR_GPU_DST_READ` value, which changes nothing else, and the
 `sdl3vk: destination reads: interlock|snapshot` line that every run prints (below). Finer patches (section 10.14)
-have no environment variable, so an authentic run prints nothing for them.
+have no environment variable, so an authentic run prints nothing for them. Nor has the host depth buffer (section
+10.20): an authentic run makes the 16-bit depth buffer it always made and prints nothing for it.
 `gpu-coherence-selftest` checks the samplers and the pool; `display-smoke` keeps its image hash.
 
 One device feature setting outside Ace applies to every run, Authentic included, because it is a correctness fix and not an
@@ -519,6 +521,9 @@ the device is created with no feature outside Ace.
   never when they are latched. It is a guest-visible item. Its entry is section 11.3.11.
 - **Loads:** `load=fast` (Ace only) shortens the display waits a title's own loading screen paces itself with, so
   it changes guest timing. It is a guest-visible item, not yet admitted. Its entry is section 11.3.10.
+- **Depth:** `depth=32` gives the Vulkan renderer a 32-bit float depth buffer, which changes which surface wins
+  where two lie within one 16-bit depth step, in the frames a present commits to guest VRAM. The depth the guest
+  reads stays 16-bit and unchanged. It is a guest-visible item, not yet admitted. Its entry is section 11.3.12.
 
 ### 10.4. Stamps and Evidence
 
@@ -1236,6 +1241,92 @@ window's keys turn it on, and it never runs in an Authentic run.
   output path, the guest queue seeded from the host's depth once per run and draining in guest time, and the host
   queue and pushes back after it stops. `ace-selftest` pins the readout and the report.
 
+### 10.20. Higher-Precision Host Depth (`depth=32`)
+
+The PSP's depth buffer holds 16 bits, and the Vulkan renderer keeps that format (`D16_UNORM`). Games set their near
+and far planes for the PSP's screen, so surfaces that lie less than one 16-bit step apart, often far away, flicker
+against each other (z-fighting), and the flicker is easier to see above 1x. This feature gives the Vulkan renderer a
+32-bit float depth buffer for every game, with no per-title data (#2051). It is guest-visible (section 11.1):
+section 11.3.12 is its entry and says what the guest can observe; this section says how it tests. The code is in
+`src/rt/gpu_sdl3vk/ge_gpu.c` (`s_depth_fmt`, `depth_unorm`, `depth_texel`, `PipeKey.zbias`).
+
+- **Setting.** The `depth` key of the `SR_ACE` launch line (section 10.1): `depth=32`, or `depth=off`, the same as no
+  key. It is an Enhanced part and needs no `tier=ace`. The renderer reads it once when it starts; there is no
+  environment variable for it. The player has no setting for it yet, so no launcher writes the key (section
+  11.3.12).
+- **The buffer.** The depth attachment is `D32_SFLOAT` on the scale the 16-bit buffer uses: a draw at 16-bit depth z
+  stores z / 65535 (`psp.vert`, `psp_tnl.vert`), now without rounding it to a step. A device that cannot render to and
+  copy that format keeps `D16_UNORM`, and one `ACE_MODE: depth unavailable (...)` line says so. The host twin (section
+  10.11) keeps a depth twin of the same format, and Smooth motion's depth copy (section 10.6) is `R32_SFLOAT` instead
+  of `R16_UNORM`, which its passes sample as the same 0 to 1 values.
+- **How a test decides.** The fixed-function test compares the unrounded values. Rounding is monotonic, so where the
+  two values round to different 16-bit steps the answer is the PSP's. Only where they round to the same step can it
+  differ:
+  - LESS and GREATER, and LEQUAL and GEQUAL with depth writes on: the nearer surface by its unrounded depth wins,
+    where the PSP's test sees two equal values (its strict tests fail them, its or-equal tests pass them). This is
+    what removes z-fighting.
+  - LEQUAL and GEQUAL with depth writes off (decals, shadows and many effect passes): the fragment's depth leans
+    toward passing by a depth bias of 64 units of the primitive's float exponent (`DEPTH32_TIE_BIAS`), at most a
+    quarter of a 16-bit step. A surface drawn on the plane it lies on, from other vertices, then passes as it does at
+    16 bits instead of failing on float rounding, and as the draw writes no depth, no stored value moves. The same
+    lean also passes such a draw where its surface lies less than the bias behind the stored one, across a step
+    boundary too, where the PSP fails it.
+  - EQUAL and NOTEQUAL compare unrounded values. A pass drawn again from the same vertices (a second texture or a
+    lighting pass) has the same depth and gets the PSP's answer. A different surface that rounds to the same step
+    without lying exactly on the stored one fails EQUAL, where the PSP passes it.
+  - A surface with depth writes on, drawn with LEQUAL or GEQUAL on the plane of another from other vertices, is
+    decided by float rounding pixel by pixel where the PSP passes every pixel, so it can speckle. That, and the EQUAL
+    case above, are why the feature is off by default.
+  - Through-mode draws (2D overlays) and every line, 3D lines included, carry whole-step depths (a line's depth is
+    cut to its step), while a 3D surface stores its depth with its fraction. Such a draw at the step a surface
+    rounds to, with LEQUAL or GEQUAL, meets the cases above at each pixel: it fails where it lies on the losing side
+    of the stored value by more than the lean, or by any amount when it writes depth, where the PSP passes it. A
+    cut line can lie almost a whole step from the surface it was drawn on, so lines show this most.
+
+  ALWAYS, NEVER and clear mode are unchanged, and so is the minz/maxz range test, which rounds the fragment's depth
+  to a step in `psp.frag`, except that on a draw with the lean a device may give the shader the leaned depth, which
+  can move a pixel within a quarter step of the range's edge to the other side.
+- **What the guest reads.** Depth crosses to and from guest memory at 16 bits. An upload of guest depth stores step /
+  65535, the value a draw at that step stores (`depth_unorm`), so a draw at that step passes EQUAL against it. A
+  readback rounds each value to the nearest step (`depth_texel`), as the 16-bit attachment's conversion does. The
+  step stored at a pixel is the same with the key on and off: a test whose answer the key changes compares two
+  values of one step, and the value it keeps lies in that step either way, while a draw the lean passes writes no
+  depth. So a depth readback, depth read as a texture through guest memory, and the software renderer when a draw
+  falls back to it see the same 16-bit depth, except for a value near half way between two steps: Vulkan leaves the
+  precision of a 16-bit attachment's conversion to the driver, so such a value may land in the other step with the
+  key off (lavapipe stores 17/32 of a step as the lower step), while `depth_texel` rounds it to the nearest. The
+  colour is what changes.
+- **The software renderer** (`src/rt/ge.c`) keeps its 16-bit depth. It is the PSP's model and the renderer of the
+  fallback paths, so a frame it draws z-fights as on the PSP; this feature is a property of the Vulkan renderer's host
+  buffer.
+- **Cost.** Each depth buffer takes 4 bytes a device pixel instead of 2: at 4x (2048 x 1088 device pixels) about 8.9
+  MB instead of 4.5 MB, and as much again for its host twin. A depth readback or upload moves twice the bytes. A
+  draw that writes no depth with LEQUAL or GEQUAL uses a pipeline with depth bias, so such a state can take one more
+  pipeline.
+- **Stamps.** `ACE_MODE: on (...)` is followed by `ACE_MODE: depth 32 (...)`; the renderer prints
+  `HOST_DEPTH: on (D32_SFLOAT; ...)` when it makes the buffer; the report has `"depth": 32`, or 16 when the device
+  refused it; the badge's words name "32-bit depth"; the flight recorder's `runtime.enhancements` keeps the whole
+  line (its field holds `ACE_SPEC_MAX` characters; at 95 it cut an Enhanced line with `depth=32` to `depth=3`).
+  Section 10.4 applies: the run is an Enhanced or Ace run.
+- **Tests.** `ace-selftest` pins the key, its values, its place in the line, the stamp's line and the report.
+  `gpu-coherence-selftest` runs `host-depth` with the key off and on (`--depth 32`) at scales 1 and 4:
+  - z-fight: a surface drawn after a nearer one with GEQUAL and depth writes, behind it by one step closing to a
+    small fraction of one (1/256 at the last device pixel at scale 1, 1/1024 at scale 4): with the key off the far surface shows where the two round to one step, which is the defect; with the
+    key on the near surface shows at every pixel;
+  - decal: a quad drawn on its base's plane from other vertices with GEQUAL, and with LEQUAL, and depth writes off,
+    covers every pixel it spans, with the key on and off;
+  - depth-equal: the base's own vertices drawn again with EQUAL cover every pixel; one step nearer, none;
+  - upload: every 16-bit value written by the CPU reads back from the device unchanged, and a quad at a written
+    step passes EQUAL against it while one a step away fails, from 0 to 65535;
+  - readback: a scene's depth committed to guest VRAM hashes to the same value with the key on as the key-off run
+    at the same scale (`--depth-ref`). The scene is a z-fight the key changes (the far surface shows at some
+    pixels with the key off and at none with it on, which the test checks), drawn so that every pixel stores the
+    near surface's step either way and that step is whole at each device pixel centre, away from the half steps
+    where a 16-bit conversion's rounding is the driver's.
+
+  The whole suite also runs once with `--depth 32`, and its cells that read the device's depth image read it at
+  either format.
+
 ### 10.21. Supersampling (`ssaa`)
 
 An Enhanced part (#2073), in the Vulkan GE renderer: each frame is drawn at 2 or 4 times the render scale on each
@@ -1275,8 +1366,8 @@ what the guest draws into, reads or waits for. The code is the comment at `s_ssa
   largest image, framebuffer and viewport (`maxImageDimension2D`, `maxFramebufferWidth` and `Height`,
   `maxViewportDimensions`), and an estimate of the memory the factor holds within half of the largest
   device-local memory heap. The estimate counts four render targets (two display buffers and two others), each
-  with its twin and depth twin at the twin's scale and its average at the render scale, the twin snapshot, and at
-  4x the halving step. If 4x does not fit and 2x does, the run uses 2x and says so in one
+  with its twin and depth twin at the twin's scale (2 bytes a depth sample, 4 with `depth=32`, section 10.20) and
+  its average at the render scale, the twin snapshot, and at 4x the halving step. If 4x does not fit and 2x does, the run uses 2x and says so in one
   `ACE_MODE: ssaa 2 (asked for 4: <reason>)` line; if nothing fits, supersampling is unavailable for the run
   (`SSAA: unavailable (<reason>)`, the reason naming each factor tried; the Ace report and stamps say so, the
   report's reason cut to its 95 characters). It never falls back to 1x without a
@@ -1288,8 +1379,8 @@ what the guest draws into, reads or waits for. The code is the comment at `s_ssa
   unavailable the same way. `ssaa-limit` forces small limits and checks the factor chosen, the reason given and
   the Ace report.
 - **Cost.** Every render op is drawn a second time, into the twin, at factor x factor times the render scale's
-  pixels: 4 times at 2x and 16 times at 4x, plus one or two blits per present. The estimate above is 17 MB at
-  render scale 1 and 2x, 64 MB at 1x and 4x, 68 MB and 255 MB at 2x render scale, and 272 MB and 1020 MB at 4x
+  pixels: 4 times at 2x and 16 times at 4x, plus one or two blits per present. The estimate above, with 16-bit depth, is
+  17 MB at render scale 1 and 2x, 64 MB at 1x and 4x, 68 MB and 255 MB at 2x render scale, and 272 MB and 1020 MB at 4x
   render scale (render scale 4 with 4x makes 8192 x 4352 images).
 - **Stamps.** `ACE_MODE: ssaa <n>` at start; `SSAA: on (<n>x: the twin renders <w>x<h>, ...)` when the twin starts;
   the Ace report's `"ssaa"` (the factor in effect, 1 when unavailable) and `"ssaa_requested"` when the size check
@@ -2182,3 +2273,31 @@ zone smaller than the game's, the first live host count reaches the edge of the 
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic (`ace-selftest`'s stick cells,
   `hle-thread-selftest`'s latch cell, `gui-present-selftest`'s dead-zone cell, the player's
   `test_play_mode_stick_settings`, and the manifest tests).
+
+#### 11.3.12. Higher-Precision Host Depth (`depth=32`, Not Yet Admitted)
+
+The feature of section 10.20 (#2051). How it tests is described there; this entry is what the guest can observe.
+
+- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
+  so a frame whose z-fighting the key removed is the frame the guest keeps. Its key and this entry are in place
+  (section 11.2, items 3 and 6). The library and per-title settings of item 2 are not: the player does not write the
+  key yet. The runs of item 4 do not exist.
+- **Key and off switch.** `depth=32` or `depth=off` on the launch line (section 10.1), an optional key; a line with
+  any other value is refused, and the run is Authentic. `depth=off` and a line without the key are off. An authentic
+  run has no line, so it never has the 32-bit buffer.
+- **Never silent.** A run with it on prints `ACE_MODE: depth 32 (...)`, and `HOST_DEPTH: on (...)` when the renderer
+  makes the buffer, or `ACE_MODE: depth unavailable (...)` when the device cannot.
+- **What it changes:** the colour of pixels where two surfaces lie within one 16-bit depth step of each other, in the
+  ways section 10.20 lists for each depth test: z-fighting surfaces show the nearer one, a draw that writes no depth
+  with LEQUAL or GEQUAL can pass up to a quarter step behind, an EQUAL pass on a different surface can fail, and a
+  coplanar surface that writes depth can speckle.
+- **VRAM bytes:** the colour bytes of those pixels differ, in the frames a present commits. The depth bytes do not:
+  the step stored at every pixel is the one the 16-bit buffer stores (section 10.20).
+- **Readbacks:** a colour readback, save picture or screenshot that covers those pixels differs the same way. A depth
+  readback, and depth read through guest memory, is unchanged.
+- **Timing:** unchanged. The GE timing model (`SR_GE_TIMING=1`) charges depth-tested spans whatever the host
+  buffer's format. The larger buffer and its readbacks are host GPU time and memory (section 10.20).
+- **I/O speed:** unchanged.
+- **Tier:** Enhanced. **Default:** off, and in no graphics preset.
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic (`ace-selftest`, and
+  `gpu-coherence-selftest`'s `host-depth`); no title has been run with it.

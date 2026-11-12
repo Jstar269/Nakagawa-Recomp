@@ -246,6 +246,8 @@ typedef struct {
     uint8_t cmask;                         /* VkColorComponentFlags */
     uint8_t tnl;                           /* 1: psp_tnl.vert over GeTnlVtx (#318) */
     uint8_t azero;                         /* 1: alpha blend factors ZERO, ZERO (stores 0) */
+    uint8_t zbias;                         /* depth=32 only: a test that writes no depth leans toward
+                                              passing, 1 up (GEQUAL), 2 down (LEQUAL); 0 otherwise */
 } PipeKey;
 
 typedef struct {
@@ -416,8 +418,22 @@ typedef struct Target {
  * twin on, the twin's pass of such an op is recorded the same way into the twin, which it loads
  * and stores in place of the twin snapshot. None of these objects exists on the snapshot path. */
 static int s_dst_interlock = 0;
+/* The host depth buffer (#2051, ENHANCEMENT_CONTRACT.md 10.20). D16_UNORM holds the PSP's 16 bits.
+ * The Ace line's depth=32 makes it D32_SFLOAT on the same 0..65535 -> 0..1 scale: the attachment then
+ * keeps the unrounded depth a draw produces, so a depth test whose two values round to the same 16-bit
+ * step is decided by their unrounded values, and where the steps differ it has the PSP's answer.
+ * Everything the guest sees of depth crosses at 16 bits: an upload from guest memory stores step / 65535
+ * exactly as a draw at that step does (depth_unorm), and a readback rounds to the nearest step, as the
+ * D16 attachment's conversion does (depth_texel). A test that writes no depth with LEQUAL or GEQUAL leans
+ * toward passing by DEPTH32_TIE_BIAS units of the primitive's float exponent (PipeKey.zbias), a quarter
+ * of a step at most, so a decal or shadow drawn on the surface it lies on passes as it does at 16 bits
+ * instead of failing on rounding noise; it writes nothing, so no stored value moves. */
+static VkFormat s_depth_fmt = VK_FORMAT_D16_UNORM;
+static int s_depth32 = 0;
+#define DEPTH_BPP (s_depth32 ? 4u : 2u)
+#define DEPTH32_TIE_BIAS 64.0f
 static VkShaderModule s_fs_rmw = VK_NULL_HANDLE;
-static VkRenderPass s_rp_rmw = VK_NULL_HANDLE;            /* depth-only: the D16 attachment */
+static VkRenderPass s_rp_rmw = VK_NULL_HANDLE;            /* depth-only: the depth attachment */
 static VkDescriptorSetLayout s_rmw_dlayout = VK_NULL_HANDLE;
 static VkPipelineLayout s_playout_rmw = VK_NULL_HANDLE;
 static VkDescriptorPool s_dpool_rmw = VK_NULL_HANDLE;
@@ -869,6 +885,22 @@ static uint32_t s_pxscratch[FB_W * FB_H];
  * in the mapped buffer was about half of a 2x frame's CPU time in a measured title (#1296). */
 static uint32_t s_pxwide[FB_W * MAX_SCALE];
 static uint16_t s_zwide[FB_W * MAX_SCALE];
+static float s_zwidef[FB_W * MAX_SCALE];     /* the same for a D32 depth upload (s_depth32) */
+
+/* A 16-bit depth step as the D32 attachment holds it: the value a draw at that step stores
+   (psp.vert, psp_tnl.vert: z * (1.0 / 65535.0), correctly rounded in float). */
+static float depth_unorm(uint16_t z) { return (float)z * (float)(1.0 / 65535.0); }
+
+/* Texel i of a depth readback (cmd_copy_readback at DEPTH_BPP) as the PSP's 16 bits: the D16
+   texel itself, or the D32 value rounded to the nearest step, as the D16 attachment rounds. */
+static uint16_t depth_texel(const void *map, size_t i) {
+    if (!s_depth32) return ((const uint16_t *)map)[i];
+    float v;
+    memcpy(&v, (const uint8_t *)map + i * 4u, sizeof v);
+    if (!(v > 0.0f)) return 0u;              /* NaN included */
+    if (v >= 1.0f) return 65535u;
+    return (uint16_t)(v * 65535.0f + 0.5f);
+}
 
 #define VKC(expr) do { VkResult vr_ = (expr); if (vr_ != VK_SUCCESS) { \
     fprintf(stderr, "gegpu: %s failed: %d\n", #expr, (int)vr_); return 0; } } while (0)
@@ -1998,6 +2030,10 @@ static VkPipeline pipe_create(const PipeKey *k, int rmw) {
      * area has the opposite sign convention, so those triangles are Vulkan-"clockwise". */
     rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rs.lineWidth = 1.0f;
+    if (k->zbias) {   /* depth=32 (s_depth32): the coplanar tolerance, never with depth writes */
+        rs.depthBiasEnable = VK_TRUE;
+        rs.depthBiasConstantFactor = k->zbias == 1 ? DEPTH32_TIE_BIAS : -DEPTH32_TIE_BIAS;
+    }
 
     VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -3469,10 +3505,10 @@ static int twin_target_make(Target *t) {
 static int twin_depth_make(DepthEnt *d) {
     d->wgen = 1; d->tgen = 0;
     if (TWIN_INJECTED_FAIL()) return 0;
-    if (!make_image(TSCL_W, TSCL_H, VK_FORMAT_D16_UNORM,
+    if (!make_image(TSCL_W, TSCL_H, s_depth_fmt,
                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                     &d->timg, &d->tmem)) return 0;
-    if (!make_view(d->timg, VK_FORMAT_D16_UNORM, VK_IMAGE_ASPECT_DEPTH_BIT, &d->tview)) return 0;
+    if (!make_view(d->timg, s_depth_fmt, VK_IMAGE_ASPECT_DEPTH_BIT, &d->tview)) return 0;
     d->tlayout = VK_IMAGE_LAYOUT_UNDEFINED;
     return 1;
 }
@@ -3709,13 +3745,21 @@ static Target *target_color_acquire(uint32_t fba, uint32_t stride, uint32_t fmt,
 }
 
 static int depth_from_cpu(DepthEnt *d) {
-    VkDeviceSize upload_bytes = (VkDeviceSize)SCL_W * SCL_H * 2u;
+    VkDeviceSize upload_bytes = (VkDeviceSize)SCL_W * SCL_H * DEPTH_BPP;
     UploadReservation upload;
     if (!upload_reserve(upload_bytes, &upload)) return 0;
     uint32_t source_stride = d->zstride;
     uint16_t *dst = (uint16_t *)upload.map;
     uint32_t drow = SCL_W;
-    for (uint32_t y = 0; y < FB_H; y++) {
+    /* depth=32: each step as a draw at it stores it, the row built in cached memory (s_zwidef) */
+    for (uint32_t y = 0; s_depth32 && y < FB_H; y++) {
+        const uint16_t *src = s_zbuf + y * source_stride;
+        for (uint32_t x = 0; x < FB_W; x++)
+            for (int i = 0; i < s_scale; i++) s_zwidef[(size_t)x * (size_t)s_scale + (size_t)i] = depth_unorm(src[x]);
+        float *dl = (float *)upload.map + (size_t)y * (size_t)s_scale * drow;
+        for (int j = 0; j < s_scale; j++) memcpy(dl + (size_t)j * drow, s_zwidef, (size_t)drow * sizeof(float));
+    }
+    for (uint32_t y = 0; !s_depth32 && y < FB_H; y++) {
         const uint16_t *src = s_zbuf + y * source_stride;
         const uint16_t *wide = src;
         if (s_scale > 1) {   /* replicate from cached memory, never the mapped upload (s_zwide) */
@@ -3752,16 +3796,15 @@ static int depth_to_cpu(DepthEnt *d) {
     if (!cmd_begin()) return 0;
     to_layout(s_cmd, d->img, VK_IMAGE_ASPECT_DEPTH_BIT, &d->layout,
               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    cmd_copy_readback(s_cmd, d->img, VK_IMAGE_ASPECT_DEPTH_BIT, s_xfer, 2u);
+    cmd_copy_readback(s_cmd, d->img, VK_IMAGE_ASPECT_DEPTH_BIT, s_xfer, DEPTH_BPP);
     to_layout(s_cmd, d->img, VK_IMAGE_ASPECT_DEPTH_BIT, &d->layout,
               VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     if (!cmd_submit_wait(SR_PERF_GE_DEPTH_READBACK)) return 0;
-    const uint16_t *src = (const uint16_t *)s_xfer_map;
     for (uint32_t y = 0; y < FB_H; y++)
         for (uint32_t x = 0; x < FB_W; x++)
             s_zbuf[y * d->zstride + x] =
-                src[y * readback_row_step() * SCL_W + x * s_scale];
-    if (sr_perf_enabled) sr_perf_vulkan_readback((uint32_t)readback_bytes(2u));
+                depth_texel(s_xfer_map, (size_t)y * readback_row_step() * SCL_W + (size_t)x * (size_t)s_scale);
+    if (sr_perf_enabled) sr_perf_vulkan_readback((uint32_t)readback_bytes(DEPTH_BPP));
     d->cpu_dirty = 1;
     d->guest_dirty = 0;
     ge_zbuf_note_external_write();
@@ -3795,25 +3838,25 @@ static int depth_readback_to_guest(DepthEnt *d) {
     if (!cmd_begin()) return 0;
     to_layout(s_cmd, d->img, VK_IMAGE_ASPECT_DEPTH_BIT, &d->layout,
               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    cmd_copy_readback(s_cmd, d->img, VK_IMAGE_ASPECT_DEPTH_BIT, s_xfer, 2u);
+    cmd_copy_readback(s_cmd, d->img, VK_IMAGE_ASPECT_DEPTH_BIT, s_xfer, DEPTH_BPP);
     to_layout(s_cmd, d->img, VK_IMAGE_ASPECT_DEPTH_BIT, &d->layout,
               VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     if (!cmd_submit_wait(SR_PERF_GE_DEPTH_READBACK)) return 0;
 
-    const uint16_t *src = (const uint16_t *)s_xfer_map;
     uint32_t width = d->zstride < FB_W ? d->zstride : FB_W;
     for (uint32_t y = 0; y < FB_H; y++) {
         for (uint32_t x = 0; x < width; x++) {
             uint32_t linear = (y * d->zstride + x) * 2u;
             uint32_t addr = 0x04000000u + ((d->zba + linear) ^ 0x2040u);
-            uint16_t value = src[y * readback_row_step() * SCL_W + x * (uint32_t)s_scale];
+            uint16_t value = depth_texel(s_xfer_map, (size_t)y * readback_row_step() * SCL_W +
+                                                     (size_t)x * (size_t)s_scale);
             if (!sr_inrange_n(addr, 2u)) return 0;
             memcpy(SR_HOST_LINEAR(addr), &value, sizeof value);
         }
     }
     d->guest_dirty = 0;
     ge_zbuf_invalidate_guest_span(depth_first, depth_end - depth_first);
-    if (sr_perf_enabled) sr_perf_vulkan_readback((uint32_t)readback_bytes(2u));
+    if (sr_perf_enabled) sr_perf_vulkan_readback((uint32_t)readback_bytes(DEPTH_BPP));
     return 1;
 }
 
@@ -3854,11 +3897,11 @@ static DepthEnt *depth_acquire(uint32_t zba, uint32_t zstride) {
             }
         memset(d, 0, sizeof(*d));
     }
-    if (!make_image(SCL_W, SCL_H, VK_FORMAT_D16_UNORM,
+    if (!make_image(SCL_W, SCL_H, s_depth_fmt,
                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                     &d->img, &d->mem)) return NULL;
-    if (!make_view(d->img, VK_FORMAT_D16_UNORM, VK_IMAGE_ASPECT_DEPTH_BIT, &d->view)) return NULL;
+    if (!make_view(d->img, s_depth_fmt, VK_IMAGE_ASPECT_DEPTH_BIT, &d->view)) return NULL;
     d->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (s_twin && !twin_depth_make(d)) { twin_depth_free(d); twin_off_for_run("a depth buffer's twin"); }
     d->zba = zba; d->zstride = zstride; d->used = 1;
@@ -5495,6 +5538,9 @@ static void build_state(int persp, int sprite, Batch *b) {
         k->ztest = g->ztest_enable ? 1 : 0;
         k->zwrite = (k->ztest && !g->zwrite_disable) ? 1 : 0;
         k->zfunc = k->ztest ? zmap[g->ztest & 7] : VK_COMPARE_OP_ALWAYS;
+        if (s_depth32 && k->ztest && !k->zwrite)
+            k->zbias = k->zfunc == VK_COMPARE_OP_GREATER_OR_EQUAL ? 1u
+                     : k->zfunc == VK_COMPARE_OP_LESS_OR_EQUAL ? 2u : 0u;
     }
 
     /* culling: draw_prim already reordered vertices; rasterizer keeps positive winding */
@@ -6109,11 +6155,11 @@ static int wing_create(WingEnt *w, uint32_t fb) {
                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                     &w->t.img, &w->t.mem) ||
         !make_view(w->t.img, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, &w->t.view) ||
-        !make_image(SCL_W, SCL_H, VK_FORMAT_D16_UNORM,
+        !make_image(SCL_W, SCL_H, s_depth_fmt,
                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                     &w->dep.img, &w->dep.mem) ||
-        !make_view(w->dep.img, VK_FORMAT_D16_UNORM, VK_IMAGE_ASPECT_DEPTH_BIT, &w->dep.view))
+        !make_view(w->dep.img, s_depth_fmt, VK_IMAGE_ASPECT_DEPTH_BIT, &w->dep.view))
         return 0;
     VkImageView views[2] = { w->t.view, w->dep.view };
     VkFramebufferCreateInfo fbc = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
@@ -7415,6 +7461,26 @@ int gegpu_init(void) {
 
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(s_pdev, &props);
+    /* The host depth buffer (s_depth_fmt): D32_SFLOAT for an Enhanced or Ace run whose line carries
+     * depth=32 on a device that can render to it and copy it, else the PSP's D16. */
+    s_depth_fmt = VK_FORMAT_D16_UNORM;
+    s_depth32 = 0;
+    if (g_ace_on && ace_effective()->depth == 32) {
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                                          VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+                                          VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+        VkFormatProperties zf;
+        vkGetPhysicalDeviceFormatProperties(s_pdev, VK_FORMAT_D32_SFLOAT, &zf);
+        if ((zf.optimalTilingFeatures & need) == need) {
+            s_depth_fmt = VK_FORMAT_D32_SFLOAT;
+            s_depth32 = 1;
+            fprintf(stderr, "HOST_DEPTH: on (D32_SFLOAT; depth tests compare unrounded depth, guest depth "
+                            "reads and uploads stay 16-bit)\n");
+        } else {
+            ace_feature_unavailable(ACE_FEATURE_DEPTH, "this GPU cannot render to and copy a 32-bit float depth buffer");
+        }
+    }
+    ace_hud_set_depth_float(s_depth32);
     /* The host twin (#2050), from the internal switch until the Ace line carries its key (after
      * #2074): SR_GPU_TWIN_COLOR=1 full colour, =native the twin with native colour (the identity
      * selftests). It is an Ace Mode feature: in an authentic run it stays off whatever the
@@ -7466,7 +7532,7 @@ int gegpu_init(void) {
         if ((cf.optimalTilingFeatures & lin) != lin)
             snprintf(why, sizeof(why), "this GPU cannot average RGBA8 images with a linear blit");
         else
-            f = ssaa_choose(want, s_scale, max_dim, budget, 2u, why, sizeof(why));   /* D16 depth */
+            f = ssaa_choose(want, s_scale, max_dim, budget, DEPTH_BPP, why, sizeof(why));   /* D16, D32: depth=32 */
         ace_set_ssaa_effective(f, why);
         if (f > 1) {
             s_ssaa = f;
@@ -7481,10 +7547,10 @@ int gegpu_init(void) {
         const VkFormatFeatureFlags blit = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
         VkFormatProperties cf, df;
         vkGetPhysicalDeviceFormatProperties(s_pdev, VK_FORMAT_R8G8B8A8_UNORM, &cf);
-        vkGetPhysicalDeviceFormatProperties(s_pdev, VK_FORMAT_D16_UNORM, &df);
+        vkGetPhysicalDeviceFormatProperties(s_pdev, s_depth_fmt, &df);
         if ((cf.optimalTilingFeatures & blit) != blit || (df.optimalTilingFeatures & blit) != blit) {
-            fprintf(stderr, "TWIN: unavailable (no nearest blit of RGBA8 and D16 on this GPU): native "
-                    "colour at render scale %dx\n", s_scale);
+            fprintf(stderr, "TWIN: unavailable (no nearest blit of RGBA8 and %s on this GPU): native "
+                    "colour at render scale %dx\n", s_depth32 ? "D32" : "D16", s_scale);
             twin_req = 0;
             s_twin_unavailable = 1;
             if (s_ssaa > 1) ace_set_ssaa_effective(1, "the host twin, which renders its samples, is unavailable");
@@ -7524,7 +7590,7 @@ int gegpu_init(void) {
     at[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     at[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     at[1] = at[0];
-    at[1].format = VK_FORMAT_D16_UNORM;
+    at[1].format = s_depth_fmt;
     at[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     at[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     VkAttachmentReference cref = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
@@ -7537,7 +7603,7 @@ int gegpu_init(void) {
     rpc.attachmentCount = 2; rpc.pAttachments = at;
     rpc.subpassCount = 1; rpc.pSubpasses = &sub;
     VKC(vkCreateRenderPass(s_dev, &rpc, NULL, &s_rp));
-    /* The interlock path (#2109, sdl3vk.h): the depth-only pass of the RMW runs, the same D16
+    /* The interlock path (#2109, sdl3vk.h): the depth-only pass of the RMW runs, the same depth
      * attachment and no colour. The snapshot path creates nothing here. */
     s_dst_interlock = vi.dst_read == SDL3VK_DST_READ_INTERLOCK;
     if (s_dst_interlock) {
@@ -7606,6 +7672,7 @@ int gegpu_init(void) {
     const uint32_t tex_sets = MAX_TEX * per_entry;
     s_tex_pool_sets = tex_sets;
     if (s_ace_af) ace_confirm(ACE_FEATURE_AF);   /* the renderer that filters is up */
+    if (s_depth32) ace_confirm(ACE_FEATURE_DEPTH);   /* ... and the one that tests at 32 bits */
     VkDescriptorPoolSize dps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, tex_sets };
     VkDescriptorPoolCreateInfo dpc = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpc.maxSets = tex_sets; dpc.poolSizeCount = 1; dpc.pPoolSizes = &dps;
