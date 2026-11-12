@@ -29,10 +29,13 @@ upstream job does, and never contacts the private authority. What comes from whe
   is still judged by its own list of paths;
 * the default branch is the trusted checkout's ``HEAD`` (``--tip``), not the event's base, which can
   lag it; the base must be an ancestor of it;
-* the release manifest (``assets/release_manifest.json``), whose dispositions waive the audit's
-  binary findings, may not change (``MANIFEST_CHANGED``) and must equal the tip's
-  (``MANIFEST_BEHIND``), and the bytes of a path it waives may not change
-  (``WAIVED_BINARY_CHANGED``), nor may any path it names become binary (``COMPONENT_BINARY_CHANGED``);
+* the pull request and the default branch have one merge base (``MULTIPLE_MERGE_BASES``), so the
+  tree the check compares with is the one a merge applies the pull request to;
+* the release manifest (``assets/release_manifest.json``) is held like the profile's rules: it may not
+  change (``MANIFEST_CHANGED``) and must equal the tip's (``MANIFEST_BEHIND``). The bytes of the paths
+  it marks approved (``HELD_PATH_DISPOSITIONS``) and of the tables under ``assets/vfpu/`` may not
+  change (``HELD_BYTES_CHANGED``), and no file the pull request adds or changes may be binary as
+  the trusted audit decides it (``BINARY_CHANGED``). These change by the fork maintainer's own push;
 * every path the candidate adds to ``include_paths`` is named as ``SELF_ADMITTED``, in the summary's
   title and list and as a warning annotation: the check cannot tell the fork maintainer's admission
   from a contributor's, and passes both. An added path must name a file of the candidate
@@ -71,6 +74,8 @@ Usage::
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -95,8 +100,10 @@ WORKFLOW = ".github/workflows/provenance-attestation.yml"
 WORKFLOW_PREFIX = ".github/workflows/"
 POLICY = "assets/public_source_profile.json"
 MANIFEST = "assets/release_manifest.json"
-#: Release-manifest dispositions under which tools/publish_audit.py drops a binary finding.
-WAIVING_DISPOSITIONS = frozenset(("approved_binary", "optional_excluded_if_unverified", "approved_submodule"))
+#: Release-manifest dispositions whose paths a fork pull request may not change, byte for byte.
+HELD_PATH_DISPOSITIONS = frozenset(("approved_binary", "optional_excluded_if_unverified", "approved_submodule"))
+#: Paths under this prefix are held byte for byte too.
+HELD_PREFIX = "assets/vfpu/"
 SELF_ADMITTED = "SELF_ADMITTED"
 #: At most this many paths, and this many characters of their names, may a pull request admit itself: each
 #: is named in the check's title, its warnings and its summary, which GitHub caps (ten warnings per step,
@@ -227,15 +234,46 @@ def profile_changes(repo: Path, base: str, candidate: str) -> tuple[list[str], l
     return sorted(after - before), sorted(before - after), changed
 
 
-def _merge_base(repo: Path, base: str, candidate: str) -> str:
-    """The commit the candidate branched from, so a head that lags the base shows only its own changes."""
+def _merge_bases(repo: Path, base: str, candidate: str) -> list[str]:
+    """Every best common ancestor of the two commits, in Git's order (the first is ``merge-base``'s)."""
     try:
-        sha = _git(repo, "merge-base", base, candidate).decode("ascii").strip()
+        shas = _git(repo, "merge-base", "--all", base, candidate).decode("ascii").split()
     except CheckError as error:
         raise CheckError(f"{candidate} and {base} have no common ancestor") from error
-    if len(sha) != 40:
+    if not shas or any(len(sha) != 40 for sha in shas):
         raise CheckError(f"{candidate} and {base} have no common ancestor")
-    return sha
+    return shas
+
+
+def _merge_base(repo: Path, base: str, candidate: str) -> str:
+    """The commit the candidate branched from, so a head that lags the base shows only its own changes."""
+    return _merge_bases(repo, base, candidate)[0]
+
+
+def _changed_blobs(repo: Path, older: str, newer: str) -> list[tuple[str, str]]:
+    """``(path, blob)`` for each file ``newer`` adds or changes against ``older``, renames not followed."""
+    raw = _git(repo, "diff-tree", "-r", "-z", "--no-renames", "--diff-filter=AMT", older, newer)
+    fields = raw.decode("utf-8", "surrogateescape").split("\0")
+    changed = []
+    for index in range(0, len(fields) - 1, 2):
+        meta, path = fields[index], fields[index + 1]
+        if not meta.startswith(":"):
+            raise CheckError(f"unexpected diff-tree record {meta!r}")
+        mode, blob = meta.split(" ")[1], meta.split(" ")[3]
+        if mode != "160000":
+            changed.append((path, blob))
+    return changed
+
+
+def _audit_binary_test(tool: Path) -> Callable[[bytes], bool]:
+    """The trusted audit's own test of whether bytes are binary, so the check and the audit cannot differ."""
+    spec = importlib.util.spec_from_file_location("nakagawa_trusted_publish_audit", tool)
+    if spec is None or spec.loader is None:
+        raise CheckError(f"cannot load {tool}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    test: Callable[[bytes], bool] = module._is_binary_bytes
+    return test
 
 
 def _blob(repo: Path, rev: str, path: str) -> bytes | None:
@@ -254,7 +292,7 @@ def _blob_id(repo: Path, rev: str, path: str) -> str | None:
 
 
 def waived_paths(manifest: bytes | None) -> list[str]:
-    """The paths whose release-manifest disposition waives one of the audit's binary findings."""
+    """The paths the release manifest gives one of ``HELD_PATH_DISPOSITIONS``."""
     if manifest is None:
         return []
     try:
@@ -266,40 +304,11 @@ def waived_paths(manifest: bytes | None) -> list[str]:
         raise CheckError(f"{MANIFEST} has no components list")
     paths = set()
     for component in components:
-        if isinstance(component, dict) and component.get("disposition") in WAIVING_DISPOSITIONS:
+        if isinstance(component, dict) and component.get("disposition") in HELD_PATH_DISPOSITIONS:
             path = component.get("source_path") or component.get("provenance_path")
             if isinstance(path, str):
                 paths.add(path)
     return sorted(paths)
-
-
-def component_paths(manifest: bytes | None) -> list[str]:
-    """Every path a release-manifest component names, whatever its disposition."""
-    if manifest is None:
-        return []
-    try:
-        document = json.loads(manifest)
-    except json.JSONDecodeError as error:
-        raise CheckError(f"{MANIFEST} is unreadable: {error}") from error
-    components = document.get("components") if isinstance(document, dict) else None
-    if not isinstance(components, list):
-        raise CheckError(f"{MANIFEST} has no components list")
-    paths = set()
-    for component in components:
-        if isinstance(component, dict):
-            for key in ("source_path", "provenance_path"):
-                if isinstance(component.get(key), str):
-                    paths.add(component[key])
-    return sorted(paths)
-
-
-def _plain_text(data: bytes) -> bool:
-    """True for UTF-8 text whose only control characters are tab, line feed and carriage return."""
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        return False
-    return not any(ord(ch) < 32 and ch not in "\t\n\r" or ch == "\x7f" for ch in text)
 
 
 def _tree_files(repo: Path, rev: str) -> set[str]:
@@ -333,10 +342,18 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
     if not _is_ancestor(repo, base_sha, tip_sha):
         raise CheckError(f"base {base_sha} is not an ancestor of the default branch tip {tip_sha}")
     candidate_sha = _commit(repo, candidate)
-    branch_point = _merge_base(repo, tip_sha, candidate_sha)
+    merge_bases = _merge_bases(repo, tip_sha, candidate_sha)
+    branch_point = merge_bases[0]
     lines = [f"base {base_sha}", f"default branch tip {tip_sha}", f"candidate {candidate_sha}",
              f"merge base {branch_point}"]
     failed = False
+    if len(merge_bases) > 1:
+        # Every comparison below is with one tree; a merge applies the pull request to a tree built from
+        # all of them. With the default branch merged in, the tip is the only merge base.
+        lines.append(
+            f"MULTIPLE_MERGE_BASES: the pull request and the default branch have {len(merge_bases)} merge bases "
+            f"({', '.join(merge_bases)}); merge the default branch into the pull request")
+        failed = True
 
     collisions = context_findings(_workflow_blobs(repo, candidate_sha),
                                   _workflow_blobs(repo, branch_point).get(WORKFLOW))
@@ -366,40 +383,37 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
                 "current rules")
             failed = True
 
-    # The release manifest decides which binaries (a file with binary magic, a prohibited extension, a
-    # gitlink) the audit accepts, and the audit reads it from the candidate. So it is held like the
-    # profile's rules: the pull request may not change it, it must equal the default branch's, and the
-    # bytes of a path it approves may not change either: they reach the default branch by review.
+    # The release manifest is held like the profile's rules, and so are the bytes of the paths it marks
+    # approved, the tables under HELD_PREFIX, and every binary: each changes by the fork maintainer's
+    # own push, after review.
     manifest = _blob(repo, candidate_sha, MANIFEST)
     if manifest != _blob(repo, branch_point, MANIFEST):
         lines.append(
-            f"MANIFEST_CHANGED: {MANIFEST}: the pull request changes the release manifest, whose dispositions "
-            "waive the audit's binary findings; it reaches the default branch by the fork maintainer's own push")
+            f"MANIFEST_CHANGED: {MANIFEST}: the pull request changes the release manifest, which is held like "
+            "the profile's rules; it reaches the default branch by the fork maintainer's own push")
         failed = True
     elif manifest != _blob(repo, tip_sha, MANIFEST):
         lines.append(
             f"MANIFEST_BEHIND: {MANIFEST}: the default branch changed the release manifest after this pull "
             "request branched; merge the default branch into it")
         failed = True
-    base_manifest = _blob(repo, branch_point, MANIFEST)
-    waived = waived_paths(base_manifest)
-    for path in waived:
+    tool = audit_tool or (ROOT / "tools" / "publish_audit.py")
+    held = set(waived_paths(_blob(repo, branch_point, MANIFEST)))
+    changed = _changed_blobs(repo, branch_point, candidate_sha)
+    held |= {path for path in _tree_files(repo, branch_point) if path.startswith(HELD_PREFIX)}
+    held |= {path for path, _ in changed if path.startswith(HELD_PREFIX)}
+    for path in sorted(held):
         if _blob_id(repo, candidate_sha, path) != _blob_id(repo, branch_point, path):
             lines.append(
-                f"WAIVED_BINARY_CHANGED: {shown_path(path)}: the release manifest approves this path as a "
-                "binary, and the pull request changes its bytes; that change reaches the default branch by "
-                "the fork maintainer's own push")
+                f"HELD_BYTES_CHANGED: {shown_path(path)}: the pull request changes this path, whose bytes are "
+                "held on the default branch; that change reaches it by the fork maintainer's own push")
             failed = True
-    # A path the manifest names, whatever its disposition, may not become binary in a pull request
-    # either: the manifest describes those bytes, and a change of kind reaches the default branch by review.
-    for path in sorted(set(component_paths(base_manifest)) - set(waived)):
-        before = _blob_id(repo, branch_point, path)
-        after = _blob_id(repo, candidate_sha, path)
-        if after is not None and after != before and not _plain_text(_git(repo, "cat-file", "blob", after)):
+    is_binary = _audit_binary_test(ROOT / "tools" / "publish_audit.py")
+    for path, blob in changed:
+        if path not in held and is_binary(_git(repo, "cat-file", "blob", blob)):
             lines.append(
-                f"COMPONENT_BINARY_CHANGED: {shown_path(path)}: the release manifest names this path, and the "
-                "pull request gives it bytes that are not plain text; that change reaches the default branch "
-                "by the fork maintainer's own push")
+                f"BINARY_CHANGED: {shown_path(path)}: the pull request adds or changes this file, and its new "
+                "bytes are binary; a binary reaches the default branch by the fork maintainer's own push")
             failed = True
 
     # Paths the pull request admits itself. The check cannot tell the fork maintainer's admission from
@@ -422,7 +436,6 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
     # The audit takes its policy from the candidate's commit, not from the checkout it runs in. The
     # checkout is the default branch, whose profile lacks what this pull request admits and may list
     # what a lagging head does not have yet. Its rules equal the tip's, checked above.
-    tool = audit_tool or (ROOT / "tools" / "publish_audit.py")
     with tempfile.TemporaryDirectory(prefix="nakagawa-fork-policy-") as scratch:
         policy = Path(scratch) / "public_source_profile.json"
         policy.write_bytes(_git(repo, "cat-file", "blob", f"{candidate_sha}:{POLICY}"))
@@ -433,7 +446,7 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
         )
     output = (audit.stdout + audit.stderr).strip().splitlines()
     lines.append(f"publication audit (trusted tools, candidate tree and profile): exit {audit.returncode}")
-    lines.extend("  " + line for line in output[-60:])
+    lines.extend("  | " + line for line in output[-60:])
     failed |= audit.returncode != 0
 
     lines.append(f"{FORK_CONTEXT}: {'FAIL' if failed else 'PASS'}")

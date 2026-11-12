@@ -260,7 +260,7 @@ PRODUCERS: tuple[Producer, ...] = (
 #: passes paths a pull request admits itself (it names them in its warnings), so a fork's green must not read
 #: like the upstream's, where only the maintainer's admission adds a path.
 FORK_SUCCESS_DESCRIPTION = ("Fork: intended jobs passed; provenance is the Fork provenance check, which passes "
-                            "paths a PR admits itself (see its warnings)")
+                            "paths a PR admits itself (see its summary)")
 
 
 def status_description(verdict: Verdict, producers: tuple[Producer, ...]) -> str:

@@ -412,8 +412,8 @@ class ForkCheckTest(unittest.TestCase):
 
     @staticmethod
     def _policy_seen(lines: list[str]) -> dict[str, object]:
-        (line,) = [line for line in lines if line.startswith("  POLICY ")]
-        seen = json.loads(line[len("  POLICY "):])
+        (line,) = [line for line in lines if line.startswith("  | POLICY ")]
+        seen = json.loads(line[len("  | POLICY "):])
         assert isinstance(seen, dict)
         return seen
 
@@ -581,6 +581,22 @@ class ForkCheckTest(unittest.TestCase):
         stop = re.fullmatch(r"::stop-commands::([0-9a-f]{32})", printed[0])
         assert stop is not None
         self.assertEqual(printed[-1], f"::{stop.group(1)}::")
+        # Review 2309-66fce005c252 answer 6 (M2, M3): the token differs on every run, and an unexpected error
+        # is printed before the resume line.
+        out = io.StringIO()
+        with mock.patch.object(pm, "fork_check", side_effect=RuntimeError("x\n::error::forged")), \
+                mock.patch("sys.stdout", out):
+            code = pm.main(["fork-check", "--repository", "example-user/Nakagawa-Recomp", "--repository-id", "42",
+                            "--repo", str(self.repo), "--base", self.base, "--candidate", self.base])
+        self.assertEqual(code, 2)
+        again = out.getvalue().splitlines()
+        second = re.fullmatch(r"::stop-commands::([0-9a-f]{32})", again[0])
+        assert second is not None
+        self.assertNotEqual(second.group(1), stop.group(1))
+        resume = again.index(f"::{second.group(1)}::")
+        self.assertEqual(resume, len(again) - 1)
+        self.assertIn("::error::forged", "\n".join(again[1:resume]))
+        self.assertIn(f"{pm.FORK_CONTEXT}: internal error", again[1:resume])
 
     def test_a_profile_entry_names_a_file_of_the_pull_request(self) -> None:
         # Review 2309-913c7747 S3: an entry with no file passed, and a later pull request could then add the
@@ -661,9 +677,9 @@ class ForkCheckTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"components": components}), encoding="utf-8")
 
-    def test_the_release_manifest_and_the_binaries_it_waives_are_not_the_pull_requests(self) -> None:
-        # Review 2309-36f775933693 S2: the release manifest decides which binaries the audit accepts, and
-        # it was the candidate's to change.
+    def test_the_release_manifest_and_the_paths_it_approves_are_held(self) -> None:
+        # Review 2309-36f775933693 S2: the release manifest and the bytes of the paths it marks approved are
+        # held in a fork pull request.
         approved: dict[str, object] = {"id": "image", "source_path": "image.gif", "disposition": "approved_binary"}
         self._write_manifest([approved])
         (self.repo / "image.gif").write_bytes(b"GIF89a" + bytes(8))
@@ -673,7 +689,8 @@ class ForkCheckTest(unittest.TestCase):
         cases: dict[str, tuple[list[dict[str, object]], dict[str, bytes], str]] = {
             "self-approval": ([approved, {"id": "x", "source_path": "x.bin", "disposition": "approved_binary"}],
                               {"x.bin": pbp}, "MANIFEST_CHANGED"),
-            "approved bytes replaced": ([approved], {"image.gif": pbp}, "WAIVED_BINARY_CHANGED: image.gif"),
+            "approved bytes replaced": ([approved], {"image.gif": b"GIF89a" + bytes(9)},
+                                        "HELD_BYTES_CHANGED: image.gif"),
         }
         for case, (components, files, code_text) in cases.items():
             with self.subTest(case=case):
@@ -700,23 +717,123 @@ class ForkCheckTest(unittest.TestCase):
         code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 0, lines)
 
-    def test_a_path_the_manifest_names_may_not_become_binary(self) -> None:
-        # Review 2309-913c7747 S1 and its delta read: a path the manifest names may not become binary in a
-        # pull request, whatever control character makes it so.
+    def test_no_file_the_pull_request_adds_or_changes_may_be_binary(self) -> None:
+        # Reviews 2309-913c7747 S1 and 2309-66fce005c252 S2: no file a fork pull request adds or changes may
+        # be binary, as the trusted audit's own test decides it; text with the odd control character passes.
         self._write_manifest([{"id": "stb", "source_path": "LICENSE.txt", "disposition": "included"}])
         (self.repo / "LICENSE.txt").write_text("licence\n", encoding="utf-8")
         self._write_profile(["README.md", "LICENSE.txt"])
         base = self._commit()
-        for data, expected in ((b"licence\nmore text\n", 0), (b"licence\x00hidden tail\n", 1), (b"\xff\xfe", 1),
-                               (b"licence\x1b[0m\n", 1), (b"licence\x0c\n", 1), (b"tab\tand\r\n", 0)):
-            with self.subTest(data=data):
+        long_text = b"a licence with a page break\n" * 20
+        for name, data, expected in (
+                ("LICENSE.txt", b"licence\nmore text\n", 0), ("LICENSE.txt", long_text + b"\x0c\n" + long_text, 0),
+                ("LICENSE.txt", b"tab\tand\r\n", 0), ("LICENSE.txt", b"licence\x00tail\n", 1),
+                ("LICENSE.txt", b"\xff\xfe", 1), ("LICENSE.txt", b"licence" + b"\x0c" * 167 + b"\n", 1),
+                ("README.md", b"readme\x00\n", 1), ("NEW.bin", b"\x00\x01\x02", 1)):
+            with self.subTest(name=name, data=data[:24]):
                 _git(self.repo, "reset", "--quiet", "--hard", base)
-                (self.repo / "LICENSE.txt").write_bytes(data)
+                (self.repo / name).write_bytes(data)
                 head = self._commit()
                 code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
                 self.assertEqual(code, expected, lines)
-                self.assertEqual(any(line.startswith("COMPONENT_BINARY_CHANGED: LICENSE.txt") for line in lines),
+                self.assertEqual(any(line.startswith(f"BINARY_CHANGED: {name}") for line in lines),
                                  bool(expected), lines)
+
+    def test_the_vfpu_tables_are_held(self) -> None:
+        # Review 2309-66fce005c252 S2: a table under assets/vfpu/ may not change, as text or as bytes, and none
+        # may be added.
+        table = self.repo / "assets" / "vfpu" / "sin.dat"
+        table.parent.mkdir(parents=True, exist_ok=True)
+        table.write_bytes(bytes(range(1, 64)))
+        base = self._commit()
+        for name, data in (("sin.dat", bytes(range(2, 65))), ("sin.dat", b"plain text now\n"),
+                           ("cos.dat", b"new table text\n")):
+            with self.subTest(name=name, data=data[:16]):
+                _git(self.repo, "reset", "--quiet", "--hard", base)
+                (table.parent / name).write_bytes(data)
+                head = self._commit()
+                code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
+                self.assertEqual(code, 1, lines)
+                self.assertIn(f"HELD_BYTES_CHANGED: assets/vfpu/{name}: the pull request changes this path, whose "
+                              "bytes are held on the default branch; that change reaches it by the fork "
+                              "maintainer's own push", lines)
+
+    def test_every_held_disposition_and_a_first_file_at_a_held_path(self) -> None:
+        # Review 2309-66fce005c252 answer 6 (M4, M13): each held disposition, and a file added at a path the
+        # manifest holds that the merge base does not carry yet.
+        for disposition in sorted(pm.HELD_PATH_DISPOSITIONS):
+            with self.subTest(disposition=disposition):
+                _git(self.repo, "reset", "--quiet", "--hard", self.base)
+                self._write_manifest([{"id": "font", "source_path": "font.pgf", "disposition": disposition},
+                                      {"id": "later", "provenance_path": "later.txt", "disposition": disposition}])
+                (self.repo / "font.pgf").write_text("font\n", encoding="utf-8")
+                base = self._commit()
+                (self.repo / "font.pgf").write_text("font, edited\n", encoding="utf-8")
+                (self.repo / "later.txt").write_text("first bytes\n", encoding="utf-8")
+                head = self._commit()
+                code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
+                self.assertEqual(code, 1, lines)
+                for path in ("font.pgf", "later.txt"):
+                    self.assertTrue(any(line.startswith(f"HELD_BYTES_CHANGED: {path}: ") for line in lines), lines)
+
+    def test_a_pull_request_with_two_merge_bases_is_refused(self) -> None:
+        # Review 2309-66fce005c252 S1: the check compared with one merge base, while a merge applies the pull
+        # request to a tree built from all of them. A criss-cross history has two.
+        def branch(name: str, file: str) -> str:
+            _git(self.repo, "checkout", "--quiet", "-b", name, self.base)
+            (self.repo / file).write_text(f"{name}\n", encoding="utf-8")
+            return self._commit()
+
+        first, second = branch("p", "P.md"), branch("q", "Q.md")
+        _git(self.repo, "checkout", "--quiet", "main")
+        _git(self.repo, "merge", "--quiet", "--no-ff", "--no-edit", "p", "q")
+        tip = _git(self.repo, "rev-parse", "HEAD")
+        _git(self.repo, "checkout", "--quiet", "-b", "criss", first)
+        _git(self.repo, "merge", "--quiet", "--no-ff", "--no-edit", "q")
+        head = _git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(sorted(_git(self.repo, "merge-base", "--all", tip, head).split()), sorted([first, second]))
+        code, lines = pm.fork_check(self.repo, self.base, head, tip=tip, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 1, lines)
+        (finding,) = [line for line in lines if line.startswith("MULTIPLE_MERGE_BASES: ")]
+        self.assertIn("have 2 merge bases", finding)
+        # Merging the default branch in leaves the tip as the only merge base, and the check passes.
+        _git(self.repo, "merge", "--quiet", "--no-edit", tip)
+        code, lines = pm.fork_check(self.repo, self.base, _git(self.repo, "rev-parse", "HEAD"), tip=tip,
+                                    audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 0, lines)
+
+    def test_rule_keys_and_the_report_fence_are_shown_safely(self) -> None:
+        # Review 2309-66fce005c252 answer 6 (M5, M6): a hostile profile key is escaped, and the summary's fence
+        # outruns the report's backticks.
+        _git(self.repo, "checkout", "--quiet", "-b", "keys", self.base)
+        self._write_profile(["README.md"], **{"x\n::error::k`": 1})
+        head = self._commit()
+        code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 1, lines)
+        (finding,) = [line for line in lines if line.startswith("PROFILE_RULES_CHANGED: ")]
+        self.assertIn('"x\\n::error::k\\u0060"', finding)
+        summary = pm._summary([*lines, "  | ````"], code)
+        self.assertIn("\n`````text\n", summary)
+        self.assertTrue(summary.rstrip("\n").endswith("`````"))
+
+    def test_the_name_limit_counts_characters_too(self) -> None:
+        # Review 2309-66fce005c252 answer 6 (M1): few paths, long names.
+        _git(self.repo, "checkout", "--quiet", "-b", "long", self.base)
+        # Names this long cannot sit in every file system, so they go into the index only.
+        names = [f"{index}/" + "/".join(["n" * 200] * 5) + ".md"
+                 for index in range(pm.SELF_ADMITTED_MAX_CHARS // 1000 + 1)]
+        self.assertLess(len(names), pm.SELF_ADMITTED_MAX_PATHS)
+        blob = subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"], input=b"long\n",
+                              capture_output=True, check=True).stdout.decode("ascii").strip()
+        for name in names:
+            _git(self.repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},{name}")
+        self._write_profile(["README.md", *names])
+        _git(self.repo, "add", pm.POLICY)
+        _git(self.repo, "commit", "--quiet", "-m", "long names")
+        head = _git(self.repo, "rev-parse", "HEAD")
+        code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 1, lines)
+        self.assertTrue(any(line.startswith("SELF_ADMITTED_LIMIT: ") for line in lines), lines)
 
     def test_a_head_that_lags_only_the_bases_paths_passes(self) -> None:
         _git(self.repo, "checkout", "--quiet", "-b", "topic", self.base)
@@ -901,10 +1018,9 @@ class ForkCheckRealAuditTest(unittest.TestCase):
         # Review 2309-36f775933693 S3: the pass names what the pull request admitted itself.
         self.assertIn(f"{pm.SELF_ADMITTED}: {self.ADMITTED}", "\n".join(lines))
 
-    def test_a_binary_approved_by_the_pull_request_itself_fails(self) -> None:
-        # Review 2309-36f775933693 S2, with the real audit: the scratch fork's EBOOT.PBP case plus the pull
-        # request's own approved_binary component and include_paths line; and the bytes of a path the
-        # manifest already approves replaced with a PBP image under its own name.
+    def test_the_manifest_and_the_paths_it_approves_are_held_with_the_real_audit(self) -> None:
+        # Review 2309-36f775933693 S2, with the real audit: a new file with its own manifest entry, and new
+        # bytes at a path the manifest approves, each fail in a fork pull request.
         manifest = json.loads(_git(self.repo, "cat-file", "blob", f"{self.head_tree}:{pm.MANIFEST}"))
         approved = pm.waived_paths(json.dumps(manifest).encode("utf-8"))
         image = next(path for path in approved if path.endswith(".gif"))
@@ -919,7 +1035,7 @@ class ForkCheckRealAuditTest(unittest.TestCase):
                                          pm.MANIFEST: (json.dumps(manifest, indent=2) + "\n").encode("utf-8"),
                                          pm.POLICY: (json.dumps(profile, indent=2) + "\n").encode("utf-8")},
                                         "MANIFEST_CHANGED"),
-            "approved image replaced": ({image: pbp}, f"WAIVED_BINARY_CHANGED: {image}"),
+            "approved image edited": ({image: b"GIF89a" + bytes(16)}, f"HELD_BYTES_CHANGED: {image}"),
         }
         for case, (files, expected) in cases.items():
             with self.subTest(case=case):
