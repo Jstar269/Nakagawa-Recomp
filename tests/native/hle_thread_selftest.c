@@ -382,6 +382,7 @@ static uint32_t vblank_delivered(uint32_t no, uint32_t *arg) {
 #define NID_SCE_AUDIO_SET_DATA_LEN 0xcb2e439eu
 #define NID_SCE_AUDIO_CHANGE_CHANNEL_CONFIG 0x95fd0c2du
 #define NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH 0xb011922fu
+#define NID_SCE_AUDIO_GET_CHANNEL_REST_LEN 0xe9d97901u
 #define NID_SCE_IO_RENAME 0x779103a0u
 #define NID_SCE_AUDIO_CHANGE_VOLUME 0xb7e1d8e7u
 #define NID_SCE_AUDIO_OUTPUT2_RESERVE 0x01562ba3u
@@ -4059,6 +4060,201 @@ static void test_io_async_and_path_imports(void) {
            "sceIoSync names unsupported device semantics with a real error");
 }
 
+/* #1380 cells through the production syscall path (sr_syscall, by NID), one probe-owned
+ * Memory Stick file at a time. */
+enum {
+    MS_CELL_OPEN = 0x109f50bcu, MS_CELL_CLOSE = 0x810c4bc3u, MS_CELL_READ = 0x6a638d83u,
+    MS_CELL_WRITE = 0x42ec03acu, MS_CELL_LSEEK = 0x27eb27b8u, MS_CELL_LSEEK32 = 0x68963324u,
+    MS_CELL_GETSTAT = 0xace946e8u, MS_CELL_REMOVE = 0xf27a9c51u,
+    MS_CELL_PATH = 0x09017000u, MS_CELL_DATA = 0x09017100u, MS_CELL_STAT = 0x09017200u,
+    MS_CELL_BACK = 0x09017300u,
+};
+
+static uint32_t ms_cell_path_call(uint32_t nid, const char *guest, uint32_t flags) {
+    CpuState cpu;
+    fd_guest_copy(MS_CELL_PATH, guest, strlen(guest) + 1u);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = MS_CELL_PATH;
+    if (nid == MS_CELL_OPEN) { cpu.r[5] = flags; cpu.r[6] = 0777u; }
+    if (nid == MS_CELL_GETSTAT) cpu.r[5] = MS_CELL_STAT;
+    return sr_syscall(&cpu, nid);
+}
+
+static uint32_t ms_cell_fd_call(uint32_t nid, uint32_t fd, uint32_t a1, uint32_t a2) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = fd; cpu.r[5] = a1; cpu.r[6] = a2;
+    return sr_syscall(&cpu, nid);
+}
+
+/* sceIoLseek: the 64-bit offset in a2:a3, whence in t0; the high word comes back in v1. */
+static uint32_t ms_cell_seek64(uint32_t fd, int64_t offset, uint32_t whence, uint32_t *high) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[3] = 0xdeadbeefu;
+    cpu.r[4] = fd;
+    cpu.r[6] = (uint32_t)((uint64_t)offset & 0xffffffffu);
+    cpu.r[7] = (uint32_t)((uint64_t)offset >> 32);
+    cpu.r[8] = whence;
+    uint32_t low = sr_syscall(&cpu, MS_CELL_LSEEK);
+    *high = cpu.r[3];
+    return low;
+}
+
+/* An open that should be refused; a descriptor it returns anyway is closed again. */
+static uint32_t ms_cell_refused_open(const char *guest, uint32_t flags) {
+    uint32_t rc = ms_cell_path_call(MS_CELL_OPEN, guest, flags);
+    if (rc < 64u) (void)ms_cell_fd_call(MS_CELL_CLOSE, rc, 0u, 0u);
+    return rc;
+}
+
+static int ms_cell_host_exists(const char *guest) {
+    char host[512];
+    fd_host_path(host, sizeof(host), guest);
+    FILE *f = fopen(host, "rb");
+    if (f) fclose(f);
+    return f != NULL;
+}
+
+/* The Memory Stick open, write and seek cells #1380 measured, each through sr_syscall: an
+ * open without PSP_O_CREAT (PSP-IO-EOF-001 io-eof-missing), PSP_O_RDONLY | PSP_O_CREAT on a
+ * missing file and a write through a PSP_O_RDONLY descriptor (PSP-HLE-IO-SEEK-001
+ * io-seek-ms-write-rdonly-creat and io-seek-ms-write-rdonly), an exclusive create of an
+ * existing file (PSP-KERNEL-SEM-001 io-excl-existing), seeks before the start, a write after a
+ * seek past the end and a read past it (PSP-IO-EOF-001 io-eof-seek-negative,
+ * io-eof-seek-negative-rdonly, io-eof-write-past, io-eof-read-past), and the 32-bit position
+ * (PSP-KERNEL-SEM-001 io-seek64). All measured on a PSP-3000 6.61. */
+static void test_io_memory_stick_cells_through_syscall(void) {
+    static const char file_guest[] = "ms0:/NAKAGAWA_IO_1380.BIN";
+    static const char missing_guest[] = "ms0:/NAKAGAWA_IO_1380_MISSING.BIN";
+    enum { MS_EINVAL = 0x80010016u, MS_ENOENT = 0x80010002u, MS_EEXIST = 0x80010011u,
+           MS_BADF = 0x80020323u, MS_SIZE = 16u };
+    uint8_t pattern[MS_SIZE];
+    for (uint32_t i = 0; i < MS_SIZE; i++) pattern[i] = (uint8_t)(0x40u + i);
+    char host[512];
+    fd_host_path(host, sizeof(host), file_guest);
+    nk_remove_utf8(host);
+    fd_host_path(host, sizeof(host), missing_guest);
+    nk_remove_utf8(host);
+    uint32_t high = 0;
+
+    /* io-eof-missing: write-only, read-write, read-only and write-only with PSP_O_TRUNC. */
+    static const uint32_t no_create[] = {0x0002u, 0x0003u, 0x0001u, 0x0402u};
+    for (size_t i = 0; i < sizeof(no_create) / sizeof(no_create[0]); i++)
+        expect(ms_cell_refused_open(missing_guest, no_create[i]) == MS_ENOENT,
+               "a missing Memory Stick file opened without PSP_O_CREAT is 0x80010002");
+    expect(ms_cell_path_call(MS_CELL_GETSTAT, missing_guest, 0u) == MS_ENOENT &&
+               !ms_cell_host_exists(missing_guest),
+           "an open without PSP_O_CREAT creates nothing");
+
+    /* io-seek-ms-write-rdonly-creat: PSP_O_RDONLY | PSP_O_CREAT on a missing file. */
+    expect(ms_cell_refused_open(missing_guest, 0x0201u) == MS_EINVAL,
+           "PSP_O_RDONLY | PSP_O_CREAT on a missing Memory Stick file is 0x80010016");
+    expect(ms_cell_path_call(MS_CELL_GETSTAT, missing_guest, 0u) == MS_ENOENT &&
+               !ms_cell_host_exists(missing_guest),
+           "the refused read-only create creates nothing");
+    fd_host_path(host, sizeof(host), missing_guest);
+    nk_remove_utf8(host);
+
+    /* The probe-owned 16-byte file, made by an exclusive create. */
+    fd_guest_copy(MS_CELL_DATA, pattern, MS_SIZE);
+    uint32_t fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0A03u);  /* RDWR|CREAT|EXCL */
+    expect(fd >= 3u && fd < 64u, "an exclusive create of a new Memory Stick file opens");
+    if (fd < 3u || fd >= 64u) return;
+    expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_DATA, MS_SIZE) == MS_SIZE &&
+               ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u,
+           "the probe file takes its 16 bytes");
+
+    /* io-excl-existing: with and without PSP_O_TRUNC, the file is left as it was. */
+    fd_host_path(host, sizeof(host), file_guest);
+    expect(ms_cell_refused_open(file_guest, 0x0A03u) == MS_EEXIST &&
+               ms_cell_refused_open(file_guest, 0x0E03u) == MS_EEXIST &&
+               fd_host_bytes_equal(host, pattern, MS_SIZE),
+           "an exclusive create of an existing file is 0x80010011 and leaves it unchanged");
+
+    /* Read-only creates no cell measured stop at the named boundary with nothing opened,
+     * created or cut: on an existing file, with PSP_O_TRUNC, and with PSP_O_EXCL. */
+    expect(ms_cell_refused_open(file_guest, 0x0201u) == 0x80010086u &&
+               ms_cell_refused_open(file_guest, 0x0601u) == 0x80010086u &&
+               fd_host_bytes_equal(host, pattern, MS_SIZE),
+           "PSP_O_RDONLY | PSP_O_CREAT on an existing file stops at the boundary, file unchanged");
+    expect(ms_cell_refused_open(missing_guest, 0x0A01u) == 0x80010086u &&
+               ms_cell_refused_open(missing_guest, 0x0301u) == 0x80010086u &&
+               !ms_cell_host_exists(missing_guest),
+           "PSP_O_RDONLY | PSP_O_CREAT with PSP_O_EXCL or PSP_O_APPEND stops at the boundary "
+           "and creates nothing");
+
+    /* io-seek-ms-write-rdonly: a write through a PSP_O_RDONLY descriptor. */
+    fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0001u);
+    expect(fd >= 3u && fd < 64u, "the probe file opens read-only");
+    if (fd < 3u || fd >= 64u) return;
+    static const uint8_t other[4] = {0xd0u, 0xd1u, 0xd2u, 0xd3u};
+    fd_guest_copy(MS_CELL_BACK, other, sizeof(other));
+    expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_BACK, 4u) == MS_BADF,
+           "a write through a PSP_O_RDONLY Memory Stick descriptor is 0x80020323");
+    /* io-eof-seek-negative-rdonly: SEEK_SET -1 on the read-only descriptor. */
+    expect(ms_cell_seek64(fd, -1, 0u, &high) == MS_EINVAL && high == 0xffffffffu &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0u,
+           "a read-only Memory Stick seek to -1 is 0x80010016 and keeps the position");
+    expect(ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u &&
+               fd_host_bytes_equal(host, pattern, MS_SIZE),
+           "the refused write left the file unchanged");
+
+    fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0003u);   /* RDWR */
+    expect(fd >= 3u && fd < 64u, "the probe file opens read-write");
+    if (fd < 3u || fd >= 64u) return;
+
+    /* io-eof-seek-negative: from position 8, SEEK_SET -1, SEEK_CUR -16 and SEEK_END -32. */
+    static const struct { int64_t offset; uint32_t whence; } before_start[] = {
+        {-1, 0u}, {-16, 1u}, {-32, 2u},
+    };
+    for (size_t i = 0; i < sizeof(before_start) / sizeof(before_start[0]); i++) {
+        expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 8u, 0u) == 8u &&
+                   ms_cell_seek64(fd, before_start[i].offset, before_start[i].whence, &high) ==
+                       MS_EINVAL &&
+                   high == 0xffffffffu && ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
+               "a Memory Stick seek before the start is 0x80010016 and keeps the position");
+    }
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0xffffffffu, 0u) == MS_EINVAL &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
+           "sceIoLseek32 to -1 on the Memory Stick is 0x80010016 and keeps the position");
+
+    /* io-eof-write-past: a seek to 0x20 leaves the size at 16; a 4-byte write there makes the
+     * position and the size 0x24 and reads back at 0x20 (the gap's bytes are not asserted). */
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0x20u, 0u) == 0x20u &&
+               ms_cell_seek64(fd, 0, 2u, &high) == MS_SIZE && high == 0u &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0x20u, 0u) == 0x20u,
+           "a Memory Stick seek past the end succeeds and leaves the size");
+    expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_BACK, 4u) == 4u &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0x24u &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 2u) == 0x24u,
+           "a write past the end extends the file to the end of the write");
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 0u) == 0u &&
+               ms_cell_fd_call(MS_CELL_READ, fd, MS_CELL_STAT, 0x30u) == 0x24u &&
+               MEM_R32(MS_CELL_STAT + 0x20u) == MEM_R32(MS_CELL_BACK),
+           "a read from the start answers 0x24 with the tail at 0x20");
+
+    /* io-eof-read-past: a seek to 0x40 succeeds, a read there is 0, the position stays. */
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0x40u, 0u) == 0x40u &&
+               ms_cell_fd_call(MS_CELL_READ, fd, MS_CELL_STAT, 4u) == 0u &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0x40u,
+           "a read past the end of a Memory Stick file is 0 and keeps the position");
+
+    /* io-seek64: 0xFFFFFFFF is a position; 0x100000010 is 0x80010016, position unchanged. */
+    expect(ms_cell_seek64(fd, 0xffffffffll, 0u, &high) == 0xffffffffu && high == 0u,
+           "a Memory Stick seek to 0xFFFFFFFF is accepted");
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 8u, 0u) == 8u &&
+               ms_cell_seek64(fd, 0x100000010ll, 0u, &high) == MS_EINVAL &&
+               high == 0xffffffffu && ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
+           "a Memory Stick seek to 0x100000010 is 0x80010016 and keeps the position");
+
+    expect(ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u &&
+               ms_cell_path_call(MS_CELL_REMOVE, file_guest, 0u) == 0u,
+           "the probe file closes and is removed");
+    fd_host_path(host, sizeof(host), missing_guest);
+    nk_remove_utf8(host);   /* only a runtime that wrongly created it leaves one */
+}
+
 /* sceIoAssign / sceIoUnassign through the production syscall path. WipEout Pure's Memory
  * Stick insert handler assigns "fatms0:" to "msstor0p1:" through "fatms0:" read/write, and
  * its eject handler unassigns it; before these handlers both NIDs were unregistered and the
@@ -4960,6 +5156,7 @@ static void test_fd_namespace(void) {
 
     test_io_async_and_path_imports();
     test_io_assign_through_syscall();
+    test_io_memory_stick_cells_through_syscall();
     test_io_open_async_notifies_later_callback();
     test_io_enhancement_data_file();
     test_state_sampler_rows();
@@ -5204,6 +5401,24 @@ static void test_umd_block_device_sectors(uint32_t fd, uint32_t data_addr) {
            "the position after the last UMD sector is refused");
     expect(umd_test_seek64(fd, INT64_MAX, 1u, &high) == 0x8001b003u,
            "an overflowing UMD SEEK_CUR is refused");
+    /* The refusal edge (PSP-IO-EOF-002 umd-eof-raw-seek-past, measured on a PSP-3000 6.61):
+     * from sector 16, SEEK_SET one and two past the last sector, SEEK_END +1 and SEEK_SET
+     * 0x100000000 answer 0x8001b003 with the high word 0xFFFFFFFF, sceIoLseek32 one past the
+     * last sector answers 0x8001b003, and the position stays 16. */
+    {
+        static const struct { int64_t offset; uint32_t whence; } past[] = {
+            {UMD_SYNTHETIC_SECTORS, 0u}, {UMD_SYNTHETIC_SECTORS + 1, 0u}, {1, 2u},
+            {0x100000000ll, 0u},
+        };
+        expect(umd_test_seek64(fd, 16, 0u, &high) == 16u, "UMD seek edge setup");
+        for (size_t i = 0; i < sizeof(past) / sizeof(past[0]); i++)
+            expect(umd_test_seek64(fd, past[i].offset, past[i].whence, &high) == 0x8001b003u &&
+                       high == 0xffffffffu && umd_test_seek64(fd, 0, 1u, &high) == 16u,
+                   "a UMD seek past the last sector is 0x8001b003 and keeps the position");
+        expect(umd_test_seek32(fd, (int32_t)UMD_SYNTHETIC_SECTORS, 0u) == 0x8001b003u &&
+                   umd_test_seek64(fd, 0, 1u, &high) == 16u,
+               "UMD sceIoLseek32 one past the last sector is 0x8001b003 and keeps the position");
+    }
     expect(umd_test_seek64(fd, 0, 3u, &high) == 0x80020324u && high == 0xffffffffu,
            "an unknown UMD whence is refused");
     expect(umd_test_seek32(fd, 0, 0u) == 0u, "UMD sceIoLseek32 SEEK_SET 0 is sector 0");
@@ -11862,9 +12077,13 @@ static void test_audio_calls_read_the_guest_queue_under_the_deterministic_clock(
     s_audio_queue_result = 100000;
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 64u,
            "GetChannelRestLength reports the model's 64 frames, not the host's 100000");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 64u,
+           "GetChannelRestLen agrees with RestLength on the model's 64 frames (#2361)");
     s_vtime_us += 2000u;   /* the 64 frames have played in guest time */
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 0u,
            "and 2 ms of guest time later the model is empty whatever the host holds");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 0u,
+           "and GetChannelRestLen reads the same empty model (#2361)");
 
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 64u, 0u, 0u) == 0u,
            "Output2 reserves a 64-sample channel");
@@ -12182,6 +12401,29 @@ static void test_audio_regular_contract_safety(void) {
     s_audio_queue_result = -1;
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 0u,
            "AudioGetChannelRestLength clamps negative queue backend report to 0");
+    s_audio_queue_result = 0;
+
+    /* sceAudioGetChannelRestLen (#2361) answers as sceAudioGetChannelRestLength does: on a
+     * PSP-3000 the two, channel in $a0, read the same rest length after each blocking output
+     * (PSP-HLE-AUDIO-REST-001). The invalid-channel code is UNMEASURED for both calls; RestLen
+     * keeps RestLength's.
+     * MUTANT: drop the 0xe9d97901 registration -- the first call below is an unimplemented
+     *   NID and the run stops (exit 7). */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0xffffffffu, 0u, 0u) ==
+               SCE_AUDIO_ERROR_INVALID_CH,
+           "AudioGetChannelRestLen rejects a negative channel with RestLength's code (unmeasured for both)");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 8u, 0u, 0u) ==
+               SCE_AUDIO_ERROR_INVALID_CH,
+           "AudioGetChannelRestLen rejects out-of-range channel 8 with RestLength's code (unmeasured for both)");
+    s_audio_queue_result = 512;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 512u,
+           "AudioGetChannelRestLen returns the queued frame count RestLength returns");
+    s_audio_queue_result = 0;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 0u,
+           "AudioGetChannelRestLen returns 0 when queue has 0 frames");
+    s_audio_queue_result = -1;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 0u,
+           "AudioGetChannelRestLen clamps negative queue backend report to 0");
     s_audio_queue_result = 0;
 
     for (uint32_t i = 0; i < 64u; i++)
@@ -15981,6 +16223,43 @@ static void test_route_observer_waits_for_guest_scanout_state(void) {
            "with the guest's own pixel format (1), not the initializer's 3");
     expect(g_sync_last.width == 480u && g_sync_last.height == 272u,
            "and the full visible extent");
+}
+
+/* The route observer and the FBSNAP snapshot decode the scanout through fb_decode_px. A
+ * 32-bit load of 0x04084000 is answered with the GE status word (sr_get_ge_status, 0x18
+ * when idle), so a decoder that read 8888 pixels through MEM_R32 replaced the pixel stored
+ * there: (0,264) of the usual stride-512 framebuffer at 0x04000000, in every FBSNAP
+ * snapshot of tools/test_player_package_route.py's sealed-disc launch (#308). Here the
+ * framebuffer sits at 0x0400D000, so the default 12x8 grid's sample (0,238) of cell (0,7)
+ * is the word at 0x04084000, and every cell must average to the one colour stored. */
+static void test_route_sample_reads_vram_not_the_ge_status_port(void) {
+    static const uint32_t NID_DISPLAY_SET_FRAME_BUF = 0x289d82feu;
+    static const uint32_t FB = 0x0400D000u;
+    static const uint32_t COLOUR = 0xFF604020u;   /* ABGR: R=0x20 G=0x40 B=0x60 */
+    uint8_t sig[4096];
+    CpuState cpu;
+
+    reset_fixture();
+    sr_hle_init();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(FB + (238u * 512u) * 4u == 0x04084000u,
+           "fixture: cell (0,7)'s first sample is the word at the GE status port");
+    for (uint32_t i = 0; i < 512u * 272u; i++) sr_w32(FB + i * 4u, COLOUR);
+    expect(sr_r8(0x04084000u) == 0x20u && sr_r8(0x04084001u) == 0x40u,
+           "fixture: guest VRAM at 0x04084000 holds the stored pixel");
+    cpu.r[4] = FB; cpu.r[5] = 512; cpu.r[6] = 3; cpu.r[7] = 0;
+    expect(sr_syscall(&cpu, NID_DISPLAY_SET_FRAME_BUF) == 0u,
+           "an immediate SetFrameBuf at 0x0400D000 is accepted");
+    expect(sr_route_test_sample(sig) == 1, "the observer samples the guest's scanout");
+    int cells = sr_route_sig_bytes() / 3;
+    int wrong = -1;
+    for (int k = 0; k < cells && wrong < 0; k++)
+        if (sig[k * 3] != 0x20u || sig[k * 3 + 1] != 0x40u || sig[k * 3 + 2] != 0x60u) wrong = k;
+    if (wrong >= 0)
+        fprintf(stderr, "  cell %d sampled %02x %02x %02x, stored 20 40 60\n", wrong,
+                sig[wrong * 3], sig[wrong * 3 + 1], sig[wrong * 3 + 2]);
+    expect(wrong < 0,
+           "every sampled cell is the stored colour; the GE status word replaced no pixel");
 }
 
 /* ---- extracted-data census preparation seam ---------------------------------
@@ -27939,14 +28218,20 @@ static const struct {
     {"fog-k1-c", 0x75e634dc776d8575ull},
 };
 
-/* Every PSP-GE-RASTER-001 cell through production dispatch and the software GE, with the
- * probe's own list, vertices, textures and destination pattern; the window must match the
- * PSP's digest. A diverging cell prints its software window for comparison with the raw
- * hardware rows. */
-static void test_ge_raster_cells_match_psp(void) {
+void ge_test_set_raster_mutant(int mutant);
+
+/* Every PSP-GE-RASTER-001 cell through production dispatch and the software GE under raster
+ * rule set `mutant` (0 the measured rules, ge.c ge_test_set_raster_mutant), with the probe's own
+ * list, vertices, textures and destination pattern. diverged[k] says whether cell k's window
+ * differs from the PSP's digest; returns how many do. Under the measured rules a diverging cell
+ * prints its software window for comparison with the raw hardware rows. */
+static unsigned gr_run_cells(int mutant, unsigned char diverged[GR_CELL_COUNT], unsigned *names_ok,
+                             unsigned *synced)
+{
     CpuState cpu;
     reset_fixture();
     sr_hle_init();
+    ge_test_set_raster_mutant(mutant);
     const uint32_t list = 0x08900000u, vtx = 0x08904000u, clut = 0x08918000u;
     const uint32_t fb = 0x04000000u + GR_FB_OFFSET;
     uint32_t tex[GR_T_COUNT];
@@ -27955,7 +28240,9 @@ static void test_ge_raster_cells_match_psp(void) {
         (void)gr_texture(t, (uint8_t *)SR_HOST(tex[t]));
     }
     gr_clut((uint8_t *)SR_HOST(clut));
-    unsigned diverged = 0, names_ok = 1, synced = 1;
+    unsigned count = 0;
+    *names_ok = 1;
+    *synced = 1;
     for (uint32_t k = 0; k < GR_CELL_COUNT; k++) {
         const struct gr_cell *c = &gr_cells[k];
         uint32_t px[GR_N];
@@ -27973,25 +28260,75 @@ static void test_ge_raster_cells_match_psp(void) {
         memset(&cpu, 0, sizeof(cpu));
         cpu.r[4] = qid;
         if ((qid & 0xFF000000u) != 0x35000000u || sr_syscall(&cpu, NID_SCE_GE_LIST_SYNC) != 0u)
-            synced = 0;
+            *synced = 0;
         for (uint32_t i = 0; i < GR_N; i++) {
             const uint32_t at = (GR_WY + i / GR_WW) * GR_STRIDE + GR_WX + i % GR_WW;
             px[i] = c->psm == 3u ? MEM_R32(fb + at * 4u) : (uint32_t)MEM_R16(fb + at * 2u);
         }
-        if (strcmp(s_gr_psp[k].name, c->name) != 0) names_ok = 0;
+        if (strcmp(s_gr_psp[k].name, c->name) != 0) *names_ok = 0;
         const uint64_t digest = gr_digest(px);
-        if (digest != s_gr_psp[k].psp) {
-            diverged++;
-            fprintf(stderr, "GE-RASTER %s software=0x%016llx psp=0x%016llx", c->name,
-                    (unsigned long long)digest, (unsigned long long)s_gr_psp[k].psp);
-            for (uint32_t i = 0; i < GR_N; i++)
-                fprintf(stderr, "%s%08x", i % GR_WW ? " " : "\n  ", (unsigned)px[i]);
-            fprintf(stderr, "\n");
-        }
+        diverged[k] = digest != s_gr_psp[k].psp;
+        if (!diverged[k]) continue;
+        count++;
+        if (mutant != 0) continue;
+        fprintf(stderr, "GE-RASTER %s software=0x%016llx psp=0x%016llx", c->name,
+                (unsigned long long)digest, (unsigned long long)s_gr_psp[k].psp);
+        for (uint32_t i = 0; i < GR_N; i++)
+            fprintf(stderr, "%s%08x", i % GR_WW ? " " : "\n  ", (unsigned)px[i]);
+        fprintf(stderr, "\n");
     }
+    ge_test_set_raster_mutant(0);
+    return count;
+}
+
+/* Each deliberately wrong raster rule of ge.c and exactly the PSP-GE-RASTER-001 cells it fails.
+ * Depth rounding has no mutant here: every depth a cell draws or clears is an integer, so
+ * rounding to nearest instead of truncating passes all 189 cells (docs/HARDWARE_ORACLE.md). */
+#define GR_MUTANT_CELLS 8
+static const struct {
+    int mutant;
+    const char *rule;
+    const char *cells[GR_MUTANT_CELLS];
+} s_gr_mutants[] = {
+    {1, "top-left fill rule replaced by bottom-right", {"e-tri1", "e-tri3", "e-tri5", NULL}},
+    {2, "vertex snap bias +0.5 instead of +0.375", {"e-tri3", NULL}},
+    {3, "dither matrix read at (x + 1, y + 1)",
+     {"dth-565", "dth-5551", "dth-4444", "dth-8888", "dth-565-b", "clr-ca-dth565",
+      "clr-ca-dth8888", NULL}},
+};
+
+/* Every PSP-GE-RASTER-001 cell matches the PSP's window digest under the measured rules, and
+ * each wrong rule above fails its named cells, so the PSP data, not agreement with the software
+ * GE's own past output, pins those rules (#343). */
+static void test_ge_raster_cells_match_psp(void) {
+    unsigned char diverged[GR_CELL_COUNT];
+    unsigned names_ok = 0, synced = 0;
+    const unsigned count = gr_run_cells(0, diverged, &names_ok, &synced);
     expect(names_ok, "PSP-GE-RASTER-001 digest table rows name the cells in table order");
     expect(synced, "every PSP-GE-RASTER-001 list is accepted and completes");
-    expect(diverged == 0, "every PSP-GE-RASTER-001 cell matches the PSP window digest");
+    expect(count == 0, "every PSP-GE-RASTER-001 cell matches the PSP window digest");
+    for (size_t m = 0; m < sizeof(s_gr_mutants) / sizeof(s_gr_mutants[0]); m++) {
+        unsigned mnames = 0, msynced = 0;
+        const unsigned wrong = gr_run_cells(s_gr_mutants[m].mutant, diverged, &mnames, &msynced);
+        fprintf(stderr, "GE-RASTER mutant %d (%s): %u of %u cells differ from the PSP:",
+                s_gr_mutants[m].mutant, s_gr_mutants[m].rule, wrong, (unsigned)GR_CELL_COUNT);
+        for (uint32_t k = 0; k < GR_CELL_COUNT; k++)
+            if (diverged[k]) fprintf(stderr, " %s", gr_cells[k].name);
+        fprintf(stderr, "\n");
+        unsigned named = 0, caught = 0;
+        for (size_t n = 0; n < GR_MUTANT_CELLS && s_gr_mutants[m].cells[n] != NULL; n++) {
+            named++;
+            unsigned hit = 0;
+            for (uint32_t k = 0; k < GR_CELL_COUNT; k++)
+                if (strcmp(gr_cells[k].name, s_gr_mutants[m].cells[n]) == 0 && diverged[k]) hit = 1;
+            if (!hit)
+                fprintf(stderr, "GE-RASTER mutant %d: named cell %s matches the PSP\n",
+                        s_gr_mutants[m].mutant, s_gr_mutants[m].cells[n]);
+            caught += hit;
+        }
+        expect(msynced && named > 0 && caught == named && wrong == named,
+               "each wrong PSP-GE-RASTER-001 raster rule fails exactly its named PSP cells");
+    }
 }
 
 static void test_ge_guest_sentinel(void) {
@@ -38490,13 +38827,15 @@ static void test_vpl_nonblocking_roundtrip(void) {
     cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
     uint32_t trailer = sr_syscall(&cpu, 0x237dbd4fu);
 
+    /* A 0x100-byte pool hands out 0xE0 bytes and a 0x64-byte block costs 0x70 (PSP-B1-01), so
+     * two blocks fill it. */
     memset(&cpu, 0, sizeof cpu);
-    cpu.r[4] = vpl; cpu.r[5] = 0x80u; cpu.r[6] = VPL_OUTPTR;
+    cpu.r[4] = vpl; cpu.r[5] = 0x64u; cpu.r[6] = VPL_OUTPTR;
     expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == 0u, "vpl first allocation succeeds");
     uint32_t first = MEM_R32(VPL_OUTPTR);
     expect(first != 0u, "vpl allocation writes address");
     memset(&cpu, 0, sizeof cpu);
-    cpu.r[4] = vpl; cpu.r[5] = 0x80u; cpu.r[6] = VPL_OUTPTR;
+    cpu.r[4] = vpl; cpu.r[5] = 0x64u; cpu.r[6] = VPL_OUTPTR;
     expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == 0u, "vpl pool reaches exhaustion boundary");
     MEM_W32(VPL_OUTPTR, 0xfeedfaceu);
     memset(&cpu, 0, sizeof cpu);
@@ -38510,7 +38849,7 @@ static void test_vpl_nonblocking_roundtrip(void) {
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
     MEM_W32(VPL_INFO, 0x34u); /* a zero size word leaves the record untouched */
     expect(sr_syscall(&cpu, NID_VPL_REFER) == 0u, "vpl refer status succeeds");
-    expect(MEM_R32(VPL_INFO + 40) == 0x100u && MEM_R32(VPL_INFO + 44) == 0x80u,
+    expect(MEM_R32(VPL_INFO + 40) == 0xe0u && MEM_R32(VPL_INFO + 44) == 0x70u,
            "vpl status reports pool and free sizes");
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = first;
     expect(sr_syscall(&cpu, NID_VPL_FREE) == VPL_UNKNOWN_ID_ERR, "vpl double free is rejected");
@@ -38529,7 +38868,7 @@ static void test_vpl_nonblocking_roundtrip(void) {
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = FPL_NAMEBUF; cpu.r[5] = 2u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
     uint32_t vpl2 = sr_syscall(&cpu, NID_VPL_CREATE);
-    memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl2; cpu.r[5] = 0x80u; cpu.r[6] = VPL_OUTPTR;
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl2; cpu.r[5] = 0x64u; cpu.r[6] = VPL_OUTPTR;
     expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == 0u && MEM_R32(VPL_OUTPTR) == first,
            "same-size vpl recreate reuses the released partition address");
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl2; cpu.r[5] = MEM_R32(VPL_OUTPTR);
@@ -38552,7 +38891,8 @@ static void test_vpl_block_count_bounded_by_pool_size(void) {
     sr_hle_test_partition_reset();
     sr_hle_init();
 
-    enum { BLOCKS = 512u, BLOCK = 16u, POOL = BLOCKS * BLOCK };
+    /* Each 16-byte block costs 24 bytes, and the pool keeps 0x20 for itself (PSP-B1-01). */
+    enum { BLOCKS = 512u, BLOCK = 16u, COST = BLOCK + 8u, POOL = BLOCKS * COST + 0x20u };
     static uint32_t addrs[BLOCKS];
     CpuState cpu;
     memset(&cpu, 0, sizeof cpu);
@@ -38585,15 +38925,16 @@ static void test_vpl_block_count_bounded_by_pool_size(void) {
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
     MEM_W32(VPL_INFO, 0x34u); /* a zero size word leaves the record untouched */
     expect(freed && sr_syscall(&cpu, NID_VPL_REFER) == 0u &&
-           MEM_R32(VPL_INFO + 44) == POOL / 2u,
+           MEM_R32(VPL_INFO + 44) == BLOCKS / 2u * COST,
            "vpl keeps every one of 256 separate free spans");
     for (uint32_t i = 1; i < BLOCKS; i += 2u) {
         memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = addrs[i];
         if (sr_syscall(&cpu, NID_VPL_FREE) != 0u) freed = 0;
     }
     memset(&cpu, 0, sizeof cpu);
-    cpu.r[4] = vpl; cpu.r[5] = POOL; cpu.r[6] = VPL_OUTPTR;
-    expect(freed && sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == 0u && MEM_R32(VPL_OUTPTR) == addrs[0],
+    cpu.r[4] = vpl; cpu.r[5] = BLOCKS * COST - 8u; cpu.r[6] = VPL_OUTPTR;
+    expect(freed && sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == 0u &&
+               MEM_R32(VPL_OUTPTR) == addrs[BLOCKS - 1u],
            "vpl frees coalesce back into the whole pool");
 
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl;
@@ -39454,7 +39795,8 @@ static void test_vpl_blocking_waits(void) {
     uint32_t out3 = 0x00271048u;
 
     /* ---- 1. FreeVpl reuse and validation ---- */
-    uint32_t vpool = selftest_vpl_create(256);
+    /* PSP-B1-01: 0x130 bytes hand out 0x110, two 128-byte blocks of 136. */
+    uint32_t vpool = selftest_vpl_create(0x130u);
     expect(vpool >= 0x600u, "VPL: CreateVpl returns valid UID");
     expect(selftest_vpl_allocate(vpool, 128, out1, 0) == 0, "VPL: first 128B allocation succeeds");
     expect(selftest_vpl_allocate(vpool, 128, out2, 0) == 0, "VPL: second 128B allocation succeeds");
@@ -39477,10 +39819,32 @@ static void test_vpl_blocking_waits(void) {
     expect(selftest_vpl_free(vpool, addr1) == 0, "VPL: free reused block succeeds");
     expect(selftest_vpl_delete(vpool) == 0, "VPL: DeleteVpl succeeds");
 
+    /* ---- 1b. A request no block of the pool can ever hold is refused, not waited on ----
+     * A 256-byte pool hands out 224 bytes (PSP-B1-01): 216 bytes fit, 217 or 256 never can.
+     * Their code is UNMEASURED (the pspautotests "more than the pool" code); a blocking allocate
+     * must not wait for space that cannot exist. */
+    vpool = selftest_vpl_create(256);
+    expect(vpool >= 0x600u, "VPL: CreateVpl for the never-fits cells succeeds");
+    MEM_W32(out1, 0xfeedfaceu);
+    expect(selftest_vpl_try_allocate(vpool, 217, out1) == 0x800201b7u &&
+               selftest_vpl_try_allocate(vpool, 256, out1) == 0x800201b7u &&
+               MEM_R32(out1) == 0xfeedfaceu,
+           "VPL: TryAllocate of a request whose cost exceeds the pool is 0x800201B7");
+    expect(selftest_vpl_allocate(vpool, 256, out1, 0) == 0x800201b7u && MEM_R32(out1) == 0xfeedfaceu,
+           "VPL: a blocking Allocate that can never fit returns 0x800201B7 instead of waiting");
+    expect(selftest_vpl_try_allocate(vpool, 216, out1) == 0u, "VPL: 216 bytes still fit the empty pool");
+    expect(selftest_vpl_free(vpool, MEM_R32(out1)) == 0 && selftest_vpl_delete(vpool) == 0,
+           "VPL: never-fits pool frees and deletes");
+    vpool = selftest_vpl_create(0x20u);
+    expect(vpool >= 0x600u && selftest_vpl_try_allocate(vpool, 1, out1) == 0x800201b7u,
+           "VPL: a pool of 0x20 bytes holds no block, so any request is 0x800201B7");
+    expect(selftest_vpl_delete(vpool) == 0, "VPL: the 0x20-byte pool deletes");
+
     /* ---- 2. AllocateVpl blocks then wakes on FreeVpl (FIFO order & CB check) ---- */
     vpool = selftest_vpl_create(256);
     expect(vpool >= 0x600u, "VPL: CreateVpl succeeds");
-    expect(selftest_vpl_allocate(vpool, 256, out1, 0) == 0, "VPL: allocate 256B exhausts pool");
+    /* PSP-B1-01: a 256-byte pool hands out 224 bytes, all of them to one 216-byte block. */
+    expect(selftest_vpl_allocate(vpool, 216, out1, 0) == 0, "VPL: allocate 216B exhausts pool");
     addr1 = MEM_R32(out1);
 
     SelftestPoolWaiterCtx w1; memset(&w1, 0, sizeof w1);
@@ -39537,7 +39901,7 @@ static void test_vpl_blocking_waits(void) {
 
     /* ---- 2b. AllocateVplCB callback wait flag ---- */
     vpool = selftest_vpl_create(256);
-    expect(selftest_vpl_allocate(vpool, 256, out1, 0) == 0, "VPL: allocate exhausts pool for CB test");
+    expect(selftest_vpl_allocate(vpool, 216, out1, 0) == 0, "VPL: allocate exhausts pool for CB test");
     addr1 = MEM_R32(out1);
 
     SelftestPoolWaiterCtx w_cb; memset(&w_cb, 0, sizeof w_cb);
@@ -39568,7 +39932,7 @@ static void test_vpl_blocking_waits(void) {
 
     /* ---- 3. AllocateVpl timeout returns WAIT_TIMEOUT ---- */
     vpool = selftest_vpl_create(256);
-    expect(selftest_vpl_allocate(vpool, 256, out1, 0) == 0, "VPL: allocate exhausts pool for timeout test");
+    expect(selftest_vpl_allocate(vpool, 216, out1, 0) == 0, "VPL: allocate exhausts pool for timeout test");
     addr1 = MEM_R32(out1);
 
     /* Timeout = 0 returns immediately without blocking */
@@ -39612,7 +39976,7 @@ static void test_vpl_blocking_waits(void) {
 
     /* ---- 4. DeleteVpl wakes waiter with WAIT_DELETE (0x800201b5) ---- */
     vpool = selftest_vpl_create(256);
-    expect(selftest_vpl_allocate(vpool, 256, out1, 0) == 0, "VPL: allocate exhausts pool for delete test");
+    expect(selftest_vpl_allocate(vpool, 216, out1, 0) == 0, "VPL: allocate exhausts pool for delete test");
 
     SelftestPoolWaiterCtx w_del; memset(&w_del, 0, sizeof w_del);
     w_del.uid = 0x13bu;
@@ -39636,6 +40000,77 @@ static void test_vpl_blocking_waits(void) {
     expect(MEM_R32(out2) == 0xfeedfaceu, "VPL: deleted pool writes no output pointer");
     sr_coro_destroy(w_del.tcb->coro); w_del.tcb->coro = NULL;
     s_cur = (int)(cur - s_tcb);
+}
+
+/* Pool bounds measured on the PSP-3000 (docs/HARDWARE_ORACLE.md, #2397):
+ * - PSP-HLE-KERNEL-STATUS-002 (case hle-kernel-pool-bounds, 2026-11-10, boot 173): partition 2,
+ *   attribute 0, NULL options. sceKernelCreateFpl with block size 0 and one block is 0x800201B7,
+ *   with block size 0x7FFFFFFF and one block 0x80020190, and neither makes a pool. A 0x1000-byte
+ *   VPL takes 15 TryAllocateVpl calls of 0x100 bytes; the 16th returns 0x80020190.
+ * - PSP-B1-01 (kernel-object semantics, FPL and VPL): a 1024-byte VPL reports 992 bytes, each
+ *   allocation costs roundup(size, 8) + 8, and allocations run from high addresses downward. */
+static void test_kernel_pool_bounds_measured(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern int sr_hle_test_partition_free_block_count(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+
+    const int blocks_before = sr_hle_test_partition_free_block_count();
+    expect(selftest_fpl_create(0u, 1u) == 0x800201b7u,
+           "pool bounds: CreateFpl with block size 0 is 0x800201B7 (PSP-HLE-KERNEL-STATUS-002)");
+    expect(selftest_fpl_create(0x7fffffffu, 1u) == 0x80020190u,
+           "pool bounds: CreateFpl of a 0x7FFFFFFF-byte block is 0x80020190 (PSP-HLE-KERNEL-STATUS-002)");
+    expect(sr_hle_test_partition_free_block_count() == blocks_before,
+           "pool bounds: a refused CreateFpl leaves the partition as it was");
+
+    uint32_t vpl = selftest_vpl_create(0x1000u);
+    expect(vpl >= 0x600u && vpl < 0x80000000u, "pool bounds: CreateVpl of 0x1000 bytes returns a UID");
+    uint32_t blocks[16] = {0};
+    uint32_t taken = 0;
+    for (; taken < 16u; ++taken) {
+        MEM_W32(VPL_OUTPTR, 0xfeedfaceu);
+        if (selftest_vpl_try_allocate(vpl, 0x100u, VPL_OUTPTR) != 0u) break;
+        blocks[taken] = MEM_R32(VPL_OUTPTR);
+    }
+    expect(taken == 15u, "pool bounds: a 0x1000-byte VPL gives 15 allocations of 0x100 (PSP-HLE-KERNEL-STATUS-002)");
+    MEM_W32(VPL_OUTPTR, 0xfeedfaceu);
+    expect(selftest_vpl_try_allocate(vpl, 0x100u, VPL_OUTPTR) == 0x80020190u &&
+               MEM_R32(VPL_OUTPTR) == 0xfeedfaceu,
+           "pool bounds: the 16th TryAllocateVpl of 0x100 is 0x80020190 and writes no address");
+    int freed = 1;
+    for (uint32_t i = 0; i < taken; ++i)
+        if (selftest_vpl_free(vpl, blocks[i]) != 0u) freed = 0;
+    expect(freed, "pool bounds: every VPL block frees with 0");
+    expect(selftest_vpl_delete(vpl) == 0u, "pool bounds: DeleteVpl returns 0");
+
+    /* PSP-B1-01: the 1024-byte pool reports 992 bytes of pool and of free space. */
+    vpl = selftest_vpl_create(1024u);
+    expect(vpl >= 0x600u && vpl < 0x80000000u, "pool bounds: CreateVpl of 1024 bytes returns a UID");
+    CpuState cpu;
+    MEM_W32(VPL_INFO, 0x34u);
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
+    expect(sr_syscall(&cpu, NID_VPL_REFER) == 0u && MEM_R32(VPL_INFO + 40) == 992u &&
+               MEM_R32(VPL_INFO + 44) == 992u,
+           "pool bounds: a 1024-byte VPL reports 992 bytes (PSP-B1-01), as poolSize and freeSize");
+    expect(selftest_vpl_try_allocate(vpl, 100u, VPL_OUTPTR) == 0u, "pool bounds: TryAllocateVpl of 100 succeeds");
+    const uint32_t a100 = MEM_R32(VPL_OUTPTR);
+    MEM_W32(VPL_INFO, 0x34u);
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
+    expect(sr_syscall(&cpu, NID_VPL_REFER) == 0u && MEM_R32(VPL_INFO + 40) == 992u &&
+               MEM_R32(VPL_INFO + 44) == 992u - (104u + 8u),
+           "pool bounds: a 100-byte block costs roundup(100, 8) + 8 = 112 bytes (PSP-B1-01)");
+    expect(selftest_vpl_try_allocate(vpl, 64u, VPL_OUTPTR) == 0u, "pool bounds: TryAllocateVpl of 64 succeeds");
+    const uint32_t a64 = MEM_R32(VPL_OUTPTR);
+    expect(a64 < a100 && a100 - a64 == 64u + 8u,
+           "pool bounds: the next block sits directly below the previous one (from PSP-B1-01's cost and direction)");
+    expect(selftest_vpl_free(vpl, a64) == 0u && selftest_vpl_free(vpl, a100) == 0u,
+           "pool bounds: both blocks free with 0");
+    MEM_W32(VPL_INFO, 0x34u);
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
+    expect(sr_syscall(&cpu, NID_VPL_REFER) == 0u && MEM_R32(VPL_INFO + 44) == 992u,
+           "pool bounds: freeing every block restores 992 free bytes");
+    expect(selftest_vpl_delete(vpl) == 0u, "pool bounds: DeleteVpl of the 1024-byte pool returns 0");
 }
 
 /* =========================================================================
@@ -51875,6 +52310,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_vcount_freezes_while_cpu_interrupts_are_masked();
     test_vcount_credits_one_deferred_period_on_resume();
     test_route_observer_waits_for_guest_scanout_state();
+    test_route_sample_reads_vram_not_the_ge_status_port();
     test_extracted_data_prepares_before_guest_and_lookup_never_builds();
     test_disc_route_serves_archive_and_loose_content_in_one_namespace();
     test_archive_discovery_skips_unpack_folders_only();
@@ -51997,6 +52433,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_wb_tlspl_vpl_cells();
     test_vpl_blocking_waits();
     test_std_handles_measured();
+    test_kernel_pool_bounds_measured();
     test_mbx_lifecycle_and_ordering();
     test_intr_context_conformance();
     test_mpeg_create_refused_in_interrupt();

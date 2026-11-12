@@ -47,7 +47,8 @@ void ace_smooth_destroy(AceBetween *s);
 typedef struct {
     /* ACE_SMOOTH_HUD_WORDS words, or NULL: no mask (the frame is matched as before). */
     const uint32_t *hud_bits;
-    /* The frame's D16 depth image, in depth_layout, with the presented frame at its top-left at
+    /* The frame's depth image (D16, or D32 under depth=32: ace_hud_depth_float), in depth_layout,
+     * with the presented frame at its top-left at
      * the same scale; VK_NULL_HANDLE when the frame wrote no depth. It is only read, and is left
      * in depth_layout. It needs VK_IMAGE_USAGE_TRANSFER_SRC_BIT. */
     VkImage depth;
@@ -73,6 +74,11 @@ VkImage ace_smooth_held(AceBetween *s, VkCommandBuffer cmd);
  * the latest ace_smooth_record call, for a present that shows an owed frame (ace.h, ACE_SHOW_OWED).
  * VK_NULL_HANDLE when the pass does not have it (nothing recorded before, or the size changed). */
 VkImage ace_smooth_previous(AceBetween *s, VkCommandBuffer cmd);
+/* The present that showed the owed frame failed, so the frame the show pass recorded with it
+ * never reached the screen: the frame recorded before it is the newest again, as if that record
+ * had not been made, and there is no previous frame until the next record. Only for a record
+ * made without an in-between (ACE_SHOW_OWED records none). */
+void ace_smooth_unrecord(AceBetween *s);
 /* The pair counts (pairs, pairs_mask, pairs_depth, depth_refused) of AceSmoothAuxStats; the
  * other fields are left as they are. */
 void ace_smooth_aux_stats(const AceBetween *s, AceSmoothAuxStats *out);
