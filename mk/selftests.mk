@@ -464,6 +464,24 @@ ge-patch-tess-selftest: $(RT_GE_O)
 
 native-core-tests: ge-patch-tess-selftest
 
+# ge-scene-selftest -- the GE scene record (src/rt/ge_scene.h, #1330 phase 1) on the production
+# ge.o: source-owned display lists (static, indexed, skinned, morphed, lit, a second target, a
+# through-mode sprite) through ge_run_list() with a GPU backend stand-in. The record's vertices,
+# projected by ge.c's own T&L, must equal every triangle the backend received, bit for bit; the
+# same lists with no consumer must submit the same bytes; and the SR_GESCENE dump written to
+# $(GE_SCENE_SELFTEST_DIR) must hold every record of the frame. No game input.
+GE_SCENE_SELFTEST := $(BUILD_DIR)/ge_scene_selftest$(EXE_EXT)
+GE_SCENE_SELFTEST_DIR := $(BUILD_DIR)/ge-scene-selftest
+
+ge-scene-selftest: $(RT_GE_O)
+	"$(PYTHON)" -c "import pathlib, sys; d = pathlib.Path(sys.argv[1]); d.mkdir(parents=True, exist_ok=True); [p.unlink() for p in d.glob('gescene_f*.bin')]" "$(GE_SCENE_SELFTEST_DIR)"
+	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_SCENE_SELFTEST) \
+		tests/native/ge_scene_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
+		src/rt/flight_recorder.c src/rt/perf.c -lm
+	$(GE_SCENE_SELFTEST) "$(GE_SCENE_SELFTEST_DIR)"
+
+native-core-tests: ge-scene-selftest
+
 # ge-flight-overhead -- cost of the disarmed flight recorder on the GE paths (#320): the
 # ge-cpu-profile-validate-selftest harness's --bench mode on the production ge.c, built once
 # with the recorder linked (SR_FLIGHT unset) and once with -USR_FLIGHT_RECORDER_LINKED, run

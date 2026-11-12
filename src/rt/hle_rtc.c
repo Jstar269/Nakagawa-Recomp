@@ -10,6 +10,7 @@
 /* The real-time clock: sceRtc. Extracted from hle.c on 2026-10-31 (#307). */
 
 #include "hle_internal.h"
+#include "ge_scene.h"
 
 static int rtc_read_u64(uint32_t addr, uint64_t *out) {
     if (!addr || !out || !sr_guest_span_readable(addr, 8u)) return 0;
@@ -224,6 +225,7 @@ static void hle_guest_fault(CpuState *s, const char *name, uint32_t addr, int st
 #else
     if (sr_sched_on) {
         sr_trace_close();
+        ge_scene_dump_finish();
         sr_compat_report();
         (void)sr_videorec_finish_status("a guest fault stopped the run", HLE_GUEST_FAULT_EXIT);
         sr_perf_shutdown();

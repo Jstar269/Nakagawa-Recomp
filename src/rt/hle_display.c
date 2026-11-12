@@ -11,6 +11,7 @@
  * 2026-10-31 (#307). */
 
 #include "hle_internal.h"
+#include "ge_scene.h"
 #include "replay_checkpoint.h" /* SR_REPLAY_CHECKPOINTS (#2147) */
 #include <time.h>
 
@@ -810,6 +811,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
             if (!snap_ok) {
                 fprintf(stderr, "SR_FBDUMP: no trustworthy framebuffer snapshot was written\n");
                 sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, 0u, 1u);
+                ge_scene_dump_finish();
                 sr_compat_report();
                 (void)sr_videorec_finish_status("SR_FBDUMP found no trustworthy framebuffer", 1);
                 sr_perf_shutdown();
@@ -821,6 +823,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
                 int capture_exit_status = sr_fbcap_exit_status(SR_FBCAP_FBDUMP, cres);
                 sr_flight_exit((uint32_t)capture_exit_status);
                 psmf_av_final("capture_exit");
+                ge_scene_dump_finish();
                 sr_compat_report();
                 (void)sr_videorec_finish_status("SR_FBDUMP capture exit", capture_exit_status);
                 sr_perf_shutdown();
@@ -1145,6 +1148,7 @@ void sr_vblank_tick(void) {
           if (wde > 0 && diff >= (uint32_t)wde) {
               fprintf(stderr, "WATCHDOG: aborting after %u vblanks with no new frame (SR_WATCHDOG_EXIT=%d)\n", diff, wde);
               sr_flight_hang(diff, (uint32_t)wde);
+              ge_scene_dump_finish();
               sr_compat_report();
               (void)sr_videorec_finish_status("SR_WATCHDOG_EXIT", 1);
               sr_perf_shutdown();
@@ -1226,6 +1230,7 @@ void sr_vblank_tick(void) {
              * above; it is idempotent and a no-op without SR_PERF. The PSMF A/V summary is an
              * atexit report too, so it is printed here as well (a no-op unless enabled). */
             psmf_av_final("exit_at_vblank");
+            ge_scene_dump_finish();
             sr_compat_report();
             sr_perf_shutdown();
             sr_profile_dump_final();
