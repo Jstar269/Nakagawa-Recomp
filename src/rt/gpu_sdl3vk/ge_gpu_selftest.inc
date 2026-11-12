@@ -9201,11 +9201,13 @@ static int coherence_run_twin_sync(void) {
  * dst-read-alpha: 5551 and 4444 targets, whose alpha (the stencil) a non-stencil draw keeps.
  * dst-read-mixed: an opaque sprite, the overlapping blended pair, then an opaque sprite over part of
  * the pair, in one op: fixed-function, RMW and fixed-function runs with a break between each.
- * dst-read-depth: an alpha-tested, depth-writing blend whose second sprite the alpha test rejects,
- * then an opaque sprite behind it. The rmwzfb rule keeps that op on the snapshot path; colour and
- * depth equal ge.c on every path.
- * dst-read-ctest: the same op with the color test rejecting the second sprite, the shader's other
- * kill that the interlock variant's early depth test cannot undo.
+ * dst-read-depth, -ctest, -zrange, -sfail (the failing-before cells of the rmwzfb rule's four
+ * kills: the alpha test, the color test, a narrow depth range and a stencil-fail KEEP): a
+ * depth-writing, depth-tested blend whose overlapping pair must blend in order, with a primitive
+ * behind the first in the same batch and one the kill rejects, then an opaque sprite behind them
+ * all. On the interlock path the op takes the interlock, the run owns depth in the shader, and
+ * colour and depth equal ge.c; on the snapshot path depth equals ge.c and the hazard is pinned to
+ * the overlap.
  * dst-read-feedback: a stencil state that reads its own writes, texturing from its own target. Its
  * second sprite copies what the first drew, so its batch must start from a destination copy that
  * holds the first sprite, and that copy is the texture: the op keeps the snapshot path.
@@ -9311,44 +9313,105 @@ static uint32_t dro_mixed_list(const DroState *st) {
     return DRO_LIST;
 }
 
-/* dst-read-depth: clear depth to 0 in clear mode; then, with depth writes on and the depth test
- * ALWAYS, a blended pair (not overlapping) under the alpha test GREATER 0x40, whose second sprite
- * (alpha 0x20) the test rejects; then an opaque sprite at z 20000 under GEQUAL over both. Where
- * a rejected fragment wrote depth anyway, the opaque sprite would be hidden.
- * dst-read-ctest (`colour_kill`): the same with the color test NOTEQUAL the second sprite's colour
- * in place of the alpha test, so the color test rejects that sprite. */
-static uint32_t dro_depth_list(const DroState *st, int colour_kill) {
+/* dst-read-depth, -ctest, -zrange and -sfail, `kind` 0 to 3. Depth is cleared to 0 in clear mode
+ * (for -sfail the stencil too, then the stencil of K's box to 1). Then one primitive command under
+ * the depth test GEQUAL with depth writes on: the blended pair P1 and P2 at z 32768, which overlap
+ * (k_drk_overlap, the ordered-blend hazard); P3 at z 25268, which lies behind P1 where they meet
+ * (a depth test against depth the batch wrote itself); and K at z 47768, which the kind's test
+ * rejects: 0 the alpha test GREATER 0x40 (K's alpha is 0x20), 1 the color test NOTEQUAL K's colour,
+ * 2 the transform-mode depth range 0-40000, 3 the stencil test EQUAL 0 with a stencil-fail KEEP.
+ * Then Q at z 25268 under the depth test LESS with depth writes off, in the same shader-depth run:
+ * it passes over P1 and P2 and fails over P3 and the cleared depth, and writes none.
+ * Last an opaque sprite at z 20000 under GEQUAL with depth writes off over all of them: where K
+ * wrote depth anyway it would be hidden.
+ * -zrange draws the command in transform mode, with identity matrices and a viewport that maps clip
+ * x, y and z to 240 + 240 x, 136 - 136 y and 32768 + 30000 z: the boxes lie on 30 by 17 pixel
+ * steps and the depths on 7500 steps, which those maps reach exactly. */
+static const float k_drk_box[5][5] = {
+    { 60.0f, 34.0f, 150.0f, 102.0f, 32768.0f },    /* P1 */
+    { 120.0f, 68.0f, 210.0f, 136.0f, 32768.0f },   /* P2 */
+    { 30.0f, 17.0f, 90.0f, 68.0f, 25268.0f },      /* P3 */
+    { 240.0f, 34.0f, 300.0f, 102.0f, 47768.0f },   /* K */
+    { 30.0f, 51.0f, 150.0f, 119.0f, 25268.0f },    /* Q */
+};
+static const uint32_t k_drk_rgba[5] = { 0x803050F0u, 0x80E0C020u, 0x8040C0E0u, 0x80608020u, 0x80A040C0u };
+static const DroBox k_drk_overlap = { 120u, 68u, 150u, 102u };
+
+static uint32_t dro_kill_list(const DroState *st, int kind) {
     static const float clear[1][5] = { { 0.0f, 0.0f, 480.0f, 272.0f, 0.0f } };
-    static const float pair[2][5] = {
-        { 40.0f, 40.0f, 100.0f, 100.0f, 30000.0f },
-        { 110.0f, 40.0f, 170.0f, 100.0f, 30000.0f },
-    };
-    static const float behind[1][5] = { { 60.0f, 60.0f, 150.0f, 120.0f, 20000.0f } };
-    static const uint32_t clear_rgba[1] = { 0 }, pair_rgba[2] = { 0x803050F0u, 0x20E0C020u };
+    static const float behind[1][5] = { { 30.0f, 17.0f, 330.0f, 153.0f, 20000.0f } };
+    static const uint32_t clear_rgba[1] = { 0 }, stencil_rgba[1] = { 0xFF000000u };
     static const uint32_t behind_rgba[1] = { 0xFF20A060u };
+    float box[5][5];
+    uint32_t rgba[5];
+    memcpy(box, k_drk_box, sizeof box);
+    memcpy(rgba, k_drk_rgba, sizeof rgba);
+    if (kind == 0) rgba[3] = (rgba[3] & 0x00FFFFFFu) | 0x20000000u;
+    if (kind == 2) {
+        for (int i = 0; i < 5; i++) {
+            box[i][0] = (box[i][0] - 240.0f) / 240.0f; box[i][2] = (box[i][2] - 240.0f) / 240.0f;
+            box[i][1] = (136.0f - box[i][1]) / 136.0f; box[i][3] = (136.0f - box[i][3]) / 136.0f;
+            box[i][4] = (box[i][4] - 32768.0f) / 30000.0f;
+        }
+    }
     StpList l;
     uint32_t vaddr = DRO_VERTS;
     dro_begin(&l, st);
-    stp_emit(&l, 0xD3, 1u | 0x400u);                     /* clear mode: depth only */
+    stp_emit(&l, 0x17, 0);                                /* no lighting */
+    stp_emit(&l, 0xD3, 1u | 0x400u | (kind == 3 ? 0x200u : 0u));   /* clear mode: depth (stencil) */
     dro_sprites(&l, &vaddr, clear, clear_rgba, 1u);
+    if (kind == 3) {
+        stp_emit(&l, 0xD3, 1u | 0x200u);                  /* K's box: stencil 1 */
+        dro_sprites(&l, &vaddr, &k_drk_box[3], stencil_rgba, 1u);
+    }
     stp_emit(&l, 0xD3, 0);
     stp_emit(&l, 0x23, 1);
     stp_emit(&l, 0xE7, 0);                                /* depth writes on */
-    stp_emit(&l, 0xDE, 1);                                /* ALWAYS */
-    if (colour_kill) {
-        stp_emit(&l, 0x27, 1);
-        stp_emit(&l, 0xD8, 3u);                           /* color NOTEQUAL the second sprite's */
-        stp_emit(&l, 0xD9, pair_rgba[1] & 0x00FFFFFFu);
-        stp_emit(&l, 0xDA, 0xFFFFFFu);
-    } else {
+    stp_emit(&l, 0xDE, 7);                                /* GEQUAL */
+    if (kind == 0) {
         stp_emit(&l, 0x22, 1);
         stp_emit(&l, 0xDB, 6u | (0x40u << 8) | (0xFFu << 16));   /* alpha GREATER 0x40 */
+    } else if (kind == 1) {
+        stp_emit(&l, 0x27, 1);
+        stp_emit(&l, 0xD8, 3u);                           /* color NOTEQUAL K's */
+        stp_emit(&l, 0xD9, rgba[3] & 0x00FFFFFFu);
+        stp_emit(&l, 0xDA, 0xFFFFFFu);
+    } else if (kind == 2) {
+        static const float ident43[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
+        static const float ident44[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        stp_emit(&l, 0x3A, 0);                            /* world, view, projection: identity */
+        for (int k = 0; k < 12; k++) stp_emit(&l, 0x3B, tfz_f24(ident43[k]));
+        stp_emit(&l, 0x3C, 0);
+        for (int k = 0; k < 12; k++) stp_emit(&l, 0x3D, tfz_f24(ident43[k]));
+        stp_emit(&l, 0x3E, 0);
+        for (int k = 0; k < 16; k++) stp_emit(&l, 0x3F, tfz_f24(ident44[k]));
+        stp_emit(&l, 0x42, tfz_f24(240.0f));
+        stp_emit(&l, 0x43, tfz_f24(-136.0f));
+        stp_emit(&l, 0x44, tfz_f24(30000.0f));
+        stp_emit(&l, 0x45, tfz_f24(2048.0f));
+        stp_emit(&l, 0x46, tfz_f24(2048.0f));
+        stp_emit(&l, 0x47, tfz_f24(32768.0f));
+        stp_emit(&l, 0x4C, (2048u - 240u) << 4);
+        stp_emit(&l, 0x4D, (2048u - 136u) << 4);
+        stp_emit(&l, 0xD6, 0);
+        stp_emit(&l, 0xD7, 40000u);                       /* depth range 0-40000 */
+        stp_emit(&l, 0x12, (7u << 2) | (3u << 7));        /* transform mode */
+    } else {
+        stp_emit(&l, 0x24, 1);
+        stp_emit(&l, 0xDC, 2u | (0u << 8) | (0xFFu << 16));      /* stencil EQUAL 0 */
+        stp_emit(&l, 0xDD, 0);                            /* KEEP, KEEP, KEEP */
     }
-    dro_sprites(&l, &vaddr, pair, pair_rgba, 2u);
+    dro_sprites(&l, &vaddr, (const float (*)[5])box, rgba, 4u);
+    stp_emit(&l, 0xE7, 1);                                /* Q: depth writes off, LESS */
+    stp_emit(&l, 0xDE, 4);
+    dro_sprites(&l, &vaddr, (const float (*)[5])&box[4], &rgba[4], 1u);
+    stp_emit(&l, 0xDE, 7);                                /* GEQUAL again for the sprite behind */
+    stp_emit(&l, 0x12, (7u << 2) | (3u << 7) | (1u << 23));   /* through mode */
     stp_emit(&l, 0x22, 0);
+    stp_emit(&l, 0x24, 0);
     stp_emit(&l, 0x27, 0);
     stp_emit(&l, 0x21, 0);
-    stp_emit(&l, 0xDE, 7);                                /* GEQUAL */
+    stp_emit(&l, 0xE7, 1);                                /* depth writes off */
     dro_sprites(&l, &vaddr, behind, behind_rgba, 1u);
     stp_end(&l);
     return DRO_LIST;
@@ -9378,7 +9441,7 @@ static unsigned dro_compare(const char *cell, const DroState *st, const uint8_t 
 }
 
 typedef struct DroRun {
-    unsigned long long batches, copies, rmw_ops, rmw_batches, rmw_breaks, fallbacks, twin_rmw_ops;
+    unsigned long long batches, copies, rmw_ops, rmw_batches, rmw_breaks, fallbacks, twin_rmw_ops, zruns;
 } DroRun;
 
 /* Set by a pair cell around dro_run_both in a twin run: the image and its twin, whole and at
@@ -9421,6 +9484,7 @@ static int dro_run_both(const DroState *st, uint32_t list, uint8_t *gpu_out, uin
     const unsigned long long b0 = s_replay_stats.batches, c0 = s_replay_stats.snapshot_copies;
     const unsigned long long o0 = s_cnt_rmw_ops, r0 = s_cnt_rmw_batches, k0 = s_cnt_rmw_breaks;
     const unsigned long long f0 = s_replay_stats.fallback_prims, t0 = s_cnt_twin_rmw_ops;
+    const unsigned long long z0 = s_cnt_rmw_zruns;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(list, 0);
     GeGpuFbDescriptor desc = { .addr = DRO_BASE, .format = st->fmt, .stride = 512u,
@@ -9442,6 +9506,7 @@ static int dro_run_both(const DroState *st, uint32_t list, uint8_t *gpu_out, uin
     run->rmw_batches = s_cnt_rmw_batches - r0;
     run->rmw_breaks = s_cnt_rmw_breaks - k0;
     run->fallbacks = s_replay_stats.fallback_prims - f0;
+    run->zruns = s_cnt_rmw_zruns - z0;
     coherence_reset_targets();
     stp_fill_background(DRO_BASE, st->fmt);
     ge_set_gpu_hooks(NULL);
@@ -9682,35 +9747,61 @@ static int coherence_run_dst_read_mixed(void) {
     return dro_overlap_cell("dst-read-mixed", k_dro_mixed, 1u, dro_mixed_list, 1u, 3u);
 }
 
-/* dst-read-depth and dst-read-ctest: `what` names the shader kill in the messages. */
-static int dro_kill_cell(const char *cell, const DroState *stp, int colour_kill, const char *what) {
+/* dst-read-depth, -ctest, -zrange, -sfail (dro_kill_list): `what` names the kill in the messages. */
+static int dro_kill_cell(const char *cell, const DroState *stp, int kind, const char *what) {
     const DroState st = *stp;
     uint8_t *gpu_out = (uint8_t *)malloc(FB_W * FB_H * 4u);
     uint16_t *gz = (uint16_t *)malloc(480u * FB_H * 2u), *wz = (uint16_t *)malloc(480u * FB_H * 2u);
     int ok = gpu_out && gz && wz;
+    const int ordered = dro_ordered();
     GeState saved = *s_ge;
     DroRun run = {0};
-    if (ok && !dro_run_both(&st, dro_depth_list(&st, colour_kill), gpu_out, gz, wz, &run)) ok = 0;
+    unsigned diff = 0;
+    if (ok && !dro_run_both(&st, dro_kill_list(&st, kind), gpu_out, gz, wz, &run)) ok = 0;
     if (ok) {
-        static const DroBox none = { 0u, 0u, 0u, 0u };
         unsigned outside = 0, kept = 0, zdiff = 0;
-        unsigned diff = dro_compare(cell, &st, gpu_out, (const uint8_t *)SR_HOST(DRO_BASE),
-                                    &none, &outside, &kept);
+        diff = dro_compare(cell, &st, gpu_out, (const uint8_t *)SR_HOST(DRO_BASE), &k_drk_overlap,
+                           &outside, &kept);
         for (uint32_t i = 0; i < 480u * FB_H; i++) {
             if (gz[i] == wz[i]) continue;
             if (!zdiff++)
                 fprintf(stderr, "gpu coherence selftest [%s]: depth x=%u y=%u gpu=%u ge_c=%u\n", cell,
                         i % 480u, i / 480u, gz[i], wz[i]);
         }
-        if (diff || zdiff) {
-            fprintf(stderr, "gpu coherence selftest [%s]: colour differs from ge.c in %u pixels, "
-                            "depth differs from ge.c in %u pixels\n", cell, diff, zdiff);
+        /* The interlock path equals ge.c; the snapshot path keeps the known hazard, in the
+         * overlap only, and its depth equals ge.c. A stencil batch that blends never merges
+         * overlapping primitives (stencil_reads_own_writes), so for -sfail the snapshot path
+         * equals ge.c too, at the price of a copy per split batch. With depth=32 (s_depth32) the
+         * interlock path keeps the depth-writing op on the snapshot path (rmw_refuses), as there. */
+        const int split = kind == 3, zshd = ordered && !s_depth32;
+        if (zdiff || (zshd || split ? diff != 0u : (!diff || outside))) {
+            fprintf(stderr, "gpu coherence selftest [%s]: colour differs from ge.c in %u pixels, depth "
+                            "differs from ge.c in %u pixels (%u colour pixels outside the overlap) on the %s "
+                            "path%s\n", cell, diff, zdiff, outside,
+                    ordered ? (s_depth32 ? "interlock (depth=32)" : "interlock") : "snapshot", dro_twin_note());
             ok = 0;
         }
-        if (run.rmw_ops) {
-            fprintf(stderr, "gpu coherence selftest [%s]: the %s depth-writing op took "
-                            "the interlock (%llu ops); the rmwzfb rule keeps it on the snapshot path\n",
-                    cell, what, run.rmw_ops);
+        if (ordered && s_depth32 && (run.copies < (split ? 2u : 1u) || run.zruns)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: with depth=32 the %s depth-writing op took %llu "
+                            "snapshot copies (want %s) and %llu shader-depth runs (want 0)\n", cell, what,
+                    run.copies, split ? "2 or more" : "1 or more", run.zruns);
+            ok = 0;
+        }
+        if (zshd && (run.rmw_ops < 1u || run.copies || run.zruns < 1u)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: the %s depth-writing op took %llu interlock ops "
+                            "(want 1 or more), %llu snapshot copies (want 0), %llu shader-depth runs (want 1 "
+                            "or more)\n", cell, what, run.rmw_ops, run.copies, run.zruns);
+            ok = 0;
+        }
+        if (!ordered && (run.rmw_ops || run.copies < (split ? 2u : 1u))) {
+            fprintf(stderr, "gpu coherence selftest [%s]: on the snapshot path the %s op took %llu interlock "
+                            "ops and %llu snapshot copies (want 0 and %s)\n", cell, what, run.rmw_ops,
+                    run.copies, split ? "2 or more" : "1 or more");
+            ok = 0;
+        }
+        if (s_twin && run.twin_rmw_ops != run.rmw_ops) {
+            fprintf(stderr, "gpu coherence selftest [%s]: %llu interlock ops, %llu of them recorded into the "
+                            "host twin (want all)\n", cell, run.rmw_ops, run.twin_rmw_ops);
             ok = 0;
         }
         if (run.fallbacks) {
@@ -9722,9 +9813,19 @@ static int dro_kill_cell(const char *cell, const DroState *stp, int colour_kill,
     *s_ge = saved;
     coherence_reset_targets();
     free(gpu_out); free(gz); free(wz);
-    if (ok)
-        printf("gpu coherence selftest: PASS %-22s colour and depth equal ge.c; the op kept the snapshot\n",
-               cell);
+    if (ok && ordered && s_depth32)
+        printf("gpu coherence selftest: PASS %-22s interlock with depth=32: the depth-writing op kept the "
+               "snapshot path (%llu copies, %u pixels of the known hazard, all in the overlap)\n", cell,
+               run.copies, diff);
+    else if (ok && ordered)
+        printf("gpu coherence selftest: PASS %-22s interlock, depth in the shader (%llu runs): colour and "
+               "depth equal ge.c\n", cell, run.zruns);
+    else if (ok && kind == 3)
+        printf("gpu coherence selftest: PASS %-22s snapshot path: colour and depth equal ge.c; the stencil "
+               "batch split at the overlaps (%llu snapshot copies)\n", cell, run.copies);
+    else if (ok)
+        printf("gpu coherence selftest: PASS %-22s snapshot path: depth equals ge.c; the known #2109 hazard, "
+               "%u pixels, all in the overlap\n", cell, diff);
     return ok;
 }
 
@@ -9736,6 +9837,16 @@ static int coherence_run_dst_read_depth(void) {
 static int coherence_run_dst_read_ctest(void) {
     static const DroState st = { "5650 colour-tested", 0u, 0u, 2u | (3u << 4), 0u, 0u, 0u };
     return dro_kill_cell("dst-read-ctest", &st, 1, "colour-tested");
+}
+
+static int coherence_run_dst_read_zrange(void) {
+    static const DroState st = { "5650 depth range", 0u, 0u, 2u | (3u << 4), 0u, 0u, 0u };
+    return dro_kill_cell("dst-read-zrange", &st, 2, "depth-ranged");
+}
+
+static int coherence_run_dst_read_sfail(void) {
+    static const DroState st = { "5551 stencil-fail KEEP", 1u, 0u, 2u | (3u << 4), 0u, 0u, 0u };
+    return dro_kill_cell("dst-read-sfail", &st, 3, "stencil-tested");
 }
 
 typedef struct DroTexVtx { float u, v; uint32_t rgba; float x, y, z; } DroTexVtx;
@@ -9929,10 +10040,11 @@ static int coherence_run_dst_read_ztest(void) {
                         st->name, leg->name, diff, outside);
                 ok = 0;
             }
-            if (run.rmw_ops != 1u || run.rmw_batches != 1u || run.copies != 0u) {
+            if (run.rmw_ops != 1u || run.rmw_batches != 1u || run.copies != 0u || run.zruns != 0u) {
                 fprintf(stderr, "gpu coherence selftest [dst-read-ztest]: %s, %s: interlock ops %llu (want 1), "
-                                "RMW batches %llu (want 1), snapshot copies %llu (want 0)\n",
-                        st->name, leg->name, run.rmw_ops, run.rmw_batches, run.copies);
+                                "RMW batches %llu (want 1), snapshot copies %llu (want 0), shader depth runs %llu "
+                                "(want 0: no kill, so the early depth test owns depth)\n",
+                        st->name, leg->name, run.rmw_ops, run.rmw_batches, run.copies, run.zruns);
                 ok = 0;
             }
         } else {
@@ -9974,7 +10086,8 @@ static int coherence_run_dst_read_pins(void) {
     const int storage = (s_target_usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
     const int objects = s_rp_rmw != VK_NULL_HANDLE || s_fs_rmw != VK_NULL_HANDLE ||
                         s_playout_rmw != VK_NULL_HANDLE || s_dpool_rmw != VK_NULL_HANDLE ||
-                        s_rmw_dlayout != VK_NULL_HANDLE;
+                        s_rmw_dlayout != VK_NULL_HANDLE || s_rmw_zbuf != VK_NULL_HANDLE;
+    const int rmw_pipes = s_rmw_pipe_n[0] + s_rmw_pipe_n[1];
     int ok = 1;
     if (vi.dst_read != (s_dst_interlock ? SDL3VK_DST_READ_INTERLOCK : SDL3VK_DST_READ_SNAPSHOT)) {
         fprintf(stderr, "gpu coherence selftest [dst-read-pins]: the device was made for path %d, the GE "
@@ -9982,15 +10095,16 @@ static int coherence_run_dst_read_pins(void) {
         ok = 0;
     }
     if (!s_dst_interlock) {
-        if (vi.device_extensions != base_ext || vi.device_features2 || storage || objects || s_rmw_pipe_n) {
+        if (vi.device_extensions != base_ext || vi.device_features2 || storage || objects || rmw_pipes) {
             fprintf(stderr, "gpu coherence selftest [dst-read-pins]: the snapshot path made interlock state: "
                             "extensions %u (want %u), features chain %d, STORAGE_BIT %d, objects %d, RMW "
                             "pipelines %d\n", vi.device_extensions, base_ext, vi.device_features2, storage,
-                    objects, s_rmw_pipe_n);
+                    objects, rmw_pipes);
             ok = 0;
         }
     } else if (vi.device_extensions != base_ext + 1u || !vi.device_features2 || vi.device_features ||
-               !storage || !s_rp_rmw || !s_fs_rmw || !s_playout_rmw || !s_dpool_rmw || !s_rmw_dlayout) {
+               !storage || !s_rp_rmw || !s_fs_rmw || !s_playout_rmw || !s_dpool_rmw || !s_rmw_dlayout ||
+               !s_rmw_zbuf) {
         fprintf(stderr, "gpu coherence selftest [dst-read-pins]: the interlock path lacks state: extensions "
                         "%u (want %u), features chain %d, pEnabledFeatures %d, STORAGE_BIT %d\n",
                 vi.device_extensions, base_ext + 1u, vi.device_features2, vi.device_features, storage);
@@ -10026,6 +10140,8 @@ static int coherence_run_dst_read(void) {
     if (!coherence_run_dst_read_mixed()) ok = 0;
     if (!coherence_run_dst_read_depth()) ok = 0;
     if (!coherence_run_dst_read_ctest()) ok = 0;
+    if (!coherence_run_dst_read_zrange()) ok = 0;
+    if (!coherence_run_dst_read_sfail()) ok = 0;
     if (!coherence_run_dst_read_feedback()) ok = 0;
     if (!coherence_run_dst_read_ztest()) ok = 0;
     if (!coherence_run_dst_read_pins()) ok = 0;
@@ -10046,6 +10162,8 @@ static int coherence_run_dst_read_one(const char *name) {
     if (strcmp(name, "dst-read-mixed") == 0) return coherence_run_dst_read_mixed();
     if (strcmp(name, "dst-read-depth") == 0) return coherence_run_dst_read_depth();
     if (strcmp(name, "dst-read-ctest") == 0) return coherence_run_dst_read_ctest();
+    if (strcmp(name, "dst-read-zrange") == 0) return coherence_run_dst_read_zrange();
+    if (strcmp(name, "dst-read-sfail") == 0) return coherence_run_dst_read_sfail();
     if (strcmp(name, "dst-read-feedback") == 0) return coherence_run_dst_read_feedback();
     if (strcmp(name, "dst-read-ztest") == 0) return coherence_run_dst_read_ztest();
     if (strcmp(name, "dst-read-pins") == 0)
