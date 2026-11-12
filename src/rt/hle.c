@@ -290,6 +290,8 @@ static uint32_t s_heap_last_bump = 0;     /* mirror of last s_heap value, for th
 uint32_t user_partition_last_heap(void) { return s_heap_last_bump ? s_heap_last_bump : s_heap; }
 
 uint32_t sr_last_alloc_addr = 0;     /* last heap allocation rounded address */
+static int partition_hole_alloc_high(uint32_t size, uint32_t *base_out);
+static void partition_hole_release(uint32_t base, uint32_t size);
 /* Start the user partition after the complete flat image, including zero-filled BSS.
  * tools/prxload.py preserves the original ~PSP header's segment-memory sizes when a
  * stripped ELF has lost them. An explicit override may move the base higher, but may
@@ -318,6 +320,7 @@ void user_partition_init(void) {
     s_heap = base;
     s_heap_base = base;
     sched_set_stack_range_refusal(sr_user_partition_overlaps);
+    sched_set_partition_hole_allocator(partition_hole_alloc_high, partition_hole_release);
     s_part_top = et ? (uint32_t)strtoul(et, NULL, 16) : 0x0A000000u;
     if (s_part_top <= s_heap) {
         fprintf(stderr,
@@ -582,6 +585,27 @@ int partition_high_modelled(void) {
     return s_heap_base >= SR_NESTED_FRAME_END;
 }
 
+/* A High request (a thread stack, a High block) that no range above the bump pointer holds: the
+ * highest free block below it that does, carved from that block's top, which is the PSP_SMEM_High
+ * rule applied to the rest of the partition. The carved range leaves the free list, so no Low
+ * request reuses it, and partition_hole_release gives it back. */
+static int partition_hole_alloc_high(uint32_t size, uint32_t *base_out) {
+    if (!base_out || size == 0u) return 0;
+    for (int i = s_nfree_blocks - 1; i >= 0; i--) {
+        if (s_free_blocks[i].size < size) continue;
+        s_free_blocks[i].size -= size;
+        *base_out = s_free_blocks[i].addr + s_free_blocks[i].size;
+        if (s_free_blocks[i].size == 0u) {
+            for (int j = i; j < s_nfree_blocks - 1; j++) s_free_blocks[j] = s_free_blocks[j + 1];
+            s_nfree_blocks--;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static void partition_hole_release(uint32_t base, uint32_t size) { partition_free_block(base, size); }
+
 uint32_t alloc_block_high(uint32_t size) {
     user_partition_init();
     if (!partition_high_modelled()) return 0xFFFFFFFFu;
@@ -595,7 +619,8 @@ uint32_t alloc_block_high(uint32_t size) {
         slot = s_nblocks;
     }
     uint32_t addr = 0u;
-    if (!sched_partition_alloc_high(slot_size, user_partition_ceiling(), &addr)) return 0xFFFFFFFFu;
+    int in_arena = sched_partition_alloc_high(slot_size, user_partition_ceiling(), &addr);
+    if (!in_arena && !partition_hole_alloc_high(slot_size, &addr)) return 0xFFFFFFFFu;
     if (slot == s_nblocks) s_nblocks++;
     sr_last_alloc_addr = addr;
     uint32_t uid = sr_alloc_uid();
@@ -605,7 +630,8 @@ uint32_t alloc_block_high(uint32_t size) {
     s_blocks[slot].slot_size = slot_size;
     s_blocks[slot].prev      = 0xFFFFFFFFu;
     s_blocks[slot].next      = 0u;
-    s_blocks[slot].high      = 1;
+    /* A block taken from a free block below the bump pointer goes back to the free list. */
+    s_blocks[slot].high      = in_arena;
     s_blocks[slot].part5     = 0;
     return uid;
 }

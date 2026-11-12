@@ -38489,6 +38489,81 @@ static void test_partition_spans_the_whole_user_partition(void) {
            "the skipped span returns to the free list around the runtime's stacks");
 }
 
+/* A PSP takes a thread stack, and a High memory block, from the highest free block of the user
+ * partition that holds it (sched.c stack_range_alloc), and a block the guest freed below the
+ * partition's bump pointer is such a block. A title that keeps the whole partition for its own
+ * heap frees exactly a stack's size and then creates the thread (Discussion #2445). Before, the
+ * runtime looked only above the bump pointer, so the create returned NO_MEMORY, the High block
+ * MEMBLOCK_ALLOC_FAILED, and the title unloaded itself before its first frame. */
+static void test_high_requests_take_a_freed_partition_block(void) {
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t NID_ALLOC_PART = 0x237dbd4fu;
+    const uint32_t NID_GET_HEAD   = 0x9d9a5ba1u;
+    const uint32_t NID_FREE_PART  = 0xb6d61d02u;
+    const uint32_t NID_MAX_FREE   = 0xa291f107u;
+    const uint32_t hole_size = 0x2000u;
+    const uint32_t name = 0x00280010u;
+    const uint32_t addr_out = 0x00280004u;
+    CpuState cpu;
+
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    title_hle_write_cstr(name, "high");
+    uint32_t main_thread = sched_create_thread(0x2004u, 32, 0x8000u);
+    expect(main_thread != 0u, "freed block: a main thread is created");
+
+    /* Low blocks A, H and B fill the partition up to the main thread's stack; then H is freed. */
+    uint32_t uids[3] = {0u, 0u, 0u};
+    for (int i = 0; i < 3; i++) {
+        memset(&cpu, 0, sizeof(cpu));
+        uint32_t size = i == 0 ? 0x10000u : i == 1 ? hole_size : sr_syscall(&cpu, NID_MAX_FREE);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = size;
+        uids[i] = sr_syscall(&cpu, NID_ALLOC_PART);
+    }
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = uids[1];
+    uint32_t hole = sr_syscall(&cpu, NID_GET_HEAD);
+    memset(&cpu, 0, sizeof(cpu));
+    expect(uids[0] < 0x80000000u && uids[1] < 0x80000000u && uids[2] < 0x80000000u &&
+               sr_syscall(&cpu, NID_MAX_FREE) == 0u,
+           "freed block: three Low blocks fill the partition");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = uids[1];
+    expect(sr_syscall(&cpu, NID_FREE_PART) == 0u, "freed block: the middle block is freed");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MAX_FREE) == hole_size, "freed block: its size is the largest free block");
+
+    uint32_t worker = sched_create_thread(0x2008u, 32, hole_size);
+    TCB *t = worker ? tcb_by_uid(worker) : NULL;
+    expect(t != NULL && t->stack_base == hole && t->stack_size == hole_size,
+           "freed block: a thread of that stack size gets the freed block as its stack");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_MAX_FREE) == 0u && sched_guest_stack_floor() == 0x0a000000u - 0x8000u,
+           "freed block: the stack uses it up and leaves the partition's top where it was");
+    expect(sched_create_thread(0x200cu, 32, 0x100u) == 0u,
+           "freed block: with no free block left a further create fails");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(worker != 0u && sched_delete_thread(worker) == 0u && sr_syscall(&cpu, NID_MAX_FREE) == hole_size,
+           "freed block: deleting the thread gives the block back to the partition");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sched_create_thread(0x200cu, 32, hole_size + 0x100u) == 0u &&
+               sr_syscall(&cpu, NID_MAX_FREE) == hole_size,
+           "freed block: a larger stack is still refused and the block stays free");
+
+    uint32_t high = memblock_alloc(name, 1u, hole_size, 0u);
+    memset(&cpu, 0, sizeof(cpu));
+    expect(high < 0x80000000u && memblock_addr(high, addr_out) == hole &&
+               sr_syscall(&cpu, NID_MAX_FREE) == 0u,
+           "freed block: a High memory block of that size takes the freed block");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(memblock_free(high) == 0u && sr_syscall(&cpu, NID_MAX_FREE) == hole_size,
+           "freed block: freeing the High block gives it back to the partition");
+
+    s_fixture_loaded_end = 0x00400000u;
+    sr_hle_test_partition_reset();
+}
+
 static void test_alloc_block_at_fixed_address(void) {
     extern void sr_hle_test_partition_reset(void);
     extern uint32_t sr_hle_test_partition_heap_ptr(void);
@@ -52347,6 +52422,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_partition_ends_at_lowest_live_stack();
     test_max_free_unchanged_after_top_stack_deleted();
     test_partition_spans_the_whole_user_partition();
+    test_high_requests_take_a_freed_partition_block();
     test_partition_unknown_block_codes();
     test_module_id_queries_resolve_owning_module();
     test_query_module_info_answers_main_module_record();
