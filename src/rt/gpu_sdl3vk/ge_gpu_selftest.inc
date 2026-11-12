@@ -13449,6 +13449,203 @@ static int coherence_run_host_depth(void) {
     return ok;
 }
 
+/* rtt-vram-view: a render target read through each view of VRAM. The PSP maps VRAM four times
+ * (docs/HARDWARE_ORACLE.md, PSP-VRAM-MIRROR-001, measured for CPU accesses): 0x04000000 and
+ * 0x04400000 read each offset where it is, 0x04200000 reads offset o at o ^ 0x2040, and 0x04600000
+ * rotates bits 5..9 of o left one and then XORs 0x2040. ge.c decodes a texture through the view
+ * (sr_vram_cpu_address, #1049); the GPU path must give the same picture. T (8888, stride 512, at
+ * 0x100000) and U (5650, stride 512, at 0x010000) are drawn as 16 x 4 cells of distinct colours over
+ * their rows 0..63 and columns 0..255, so each view's reordering (16 or 32 pixels, 4 or 8 rows, 8- or
+ * 16-pixel pieces) moves cells. Five 64 x 64 sprites on M then read, nearest and 1:1, in the target's
+ * own format and at its stride: T through 0x04000000 and 0x04400000 (each binds T's image directly),
+ * T through 0x04200000 and 0x04600000, and U through 0x04200000 (none may bind a target's image).
+ * Guest VRAM of M equals the software renderer's exactly at any scale: the cells are on whole guest
+ * pixels, so a target's top-left device samples are its software pixels. The software pictures of
+ * the reordering views differ from the plain read's, so the comparison shows the view. */
+#define RVV_T     0x00100000u
+#define RVV_U     0x00010000u
+#define RVV_M     0x00060000u
+#define RVV_Z     0x001A0000u
+#define RVV_VERTS 0x041F2000u
+enum { RVV_CELLS = 256, RVV_READS = 5 };
+static int coherence_run_rtt_vram_view(void) {
+    const char *name = "rtt-vram-view";
+    const uint32_t ta = 0x04000000u | RVV_T, ua = 0x04000000u | RVV_U, ma = 0x04000000u | RVV_M;
+    const uint32_t stride = 512u, bytes = stride * FB_H * 4u, half_bytes = stride * FB_H * 2u;
+    static const char *const read_name[RVV_READS] = {
+        "read of T through 0x04000000 (control)", "read of T through 0x04400000",
+        "read of T through 0x04200000", "read of T through 0x04600000", "read of U through 0x04200000" };
+    /* per read: texture address (low 24 bits; the view is address bits 21 and 22), format */
+    static const uint32_t rd[RVV_READS][2] = {
+        { RVV_T, 3u }, { 0x400000u | RVV_T, 3u }, { 0x200000u | RVV_T, 3u }, { 0x600000u | RVV_T, 3u },
+        { 0x200000u | RVV_U, 0u } };
+
+    RttCVtx *cv = (RttCVtx *)SR_HOST(RVV_VERTS);
+    RawSpriteVtx *sv = (RawSpriteVtx *)(cv + 2u * RVV_CELLS);
+    const uint32_t cv_addr = RVV_VERTS & 0x00FFFFFFu;
+    const uint32_t sv_addr = cv_addr + 2u * RVV_CELLS * (uint32_t)sizeof(RttCVtx);
+    const uint32_t vbytes = sv_addr + 2u * RVV_READS * (uint32_t)sizeof(RawSpriteVtx) - cv_addr;
+    for (uint32_t k = 0; k < RVV_CELLS; k++) {
+        const uint32_t x = (k % 16u) * 16u, y = (k / 16u) * 4u;
+        const uint32_t c = ((k * 37u + 11u) & 0xFFu) | (((k * 91u + 50u) & 0xFFu) << 8) |
+                           (((k * 53u + 200u) & 0xFFu) << 16) | 0xFF000000u;
+        cv[2u * k] = (RttCVtx){ c, (float)x, (float)y, 0.0f };
+        cv[2u * k + 1u] = (RttCVtx){ c, (float)(x + 16u), (float)(y + 4u), 0.0f };
+    }
+    for (uint32_t k = 0; k < RVV_READS; k++) {
+        const float x = (float)(k * 80u), y = 0.0f;
+        sv[2u * k] = (RawSpriteVtx){ 0.0f, 0.0f, x, y, 0.0f };
+        sv[2u * k + 1u] = (RawSpriteVtx){ 64.0f, 64.0f, x + 64.0f, y + 64.0f, 0.0f };
+    }
+
+    uint32_t *dl = (uint32_t *)SR_HOST(COH_SAMPLE_LIST);
+    int p = 0;
+    #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    DL_EMIT(0x10, (RVV_VERTS & 0xFF000000u) >> 8);         /* BASE: vertex addresses in VRAM */
+    DL_EMIT(0x9C, RVV_T);                                  /* T: 8888, stride 512 */
+    DL_EMIT(0x9D, stride | (0x04u << 16));
+    DL_EMIT(0xD2, 3);
+    DL_EMIT(0x9E, RVV_Z);
+    DL_EMIT(0x9F, 512u | (0x04u << 16));
+    DL_EMIT(0xD3, 0);
+    DL_EMIT(0x1D, 0); DL_EMIT(0x1E, 0); DL_EMIT(0x1F, 0);
+    DL_EMIT(0x22, 0); DL_EMIT(0x23, 0); DL_EMIT(0x24, 0);  /* no alpha, depth, stencil test */
+    DL_EMIT(0x25, 0); DL_EMIT(0x27, 0); DL_EMIT(0x28, 0);  /* no AA, colour test, logic op */
+    DL_EMIT(0xE7, 1); DL_EMIT(0xE8, 0); DL_EMIT(0xE9, 0);  /* no depth write, no masks */
+    DL_EMIT(0x4C, 0); DL_EMIT(0x4D, 0); DL_EMIT(0xD6, 0); DL_EMIT(0xD7, 0xFFFFu);
+    DL_EMIT(0x15, 0); DL_EMIT(0x16, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0xD4, 0); DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0x50, 0);                                      /* flat */
+    DL_EMIT(0x20, 0);                                      /* dither off */
+    DL_EMIT(0x21, 0);                                      /* blend off */
+    DL_EMIT(0x12, (7u << 2) | (3u << 7) | (1u << 23));     /* 8888 colour, float pos, through */
+    DL_EMIT(0x01, cv_addr);
+    DL_EMIT(0x04, (6u << 16) | (2u * RVV_CELLS));          /* T's cells */
+    DL_EMIT(0x9C, RVV_U);                                  /* U: 5650, the same cells */
+    DL_EMIT(0xD2, 0);
+    DL_EMIT(0x01, cv_addr);
+    DL_EMIT(0x04, (6u << 16) | (2u * RVV_CELLS));
+    DL_EMIT(0xD2, 3);
+    DL_EMIT(0x9C, RVV_M);                                  /* M */
+    DL_EMIT(0x1E, 1);
+    DL_EMIT(0xB8, 6u | (6u << 8));                         /* 64 x 64 */
+    DL_EMIT(0xC0, 0); DL_EMIT(0xC2, 0); DL_EMIT(0xC8, 0);  /* UV mapping, linear storage, level 0 */
+    DL_EMIT(0xC6, 0);                                      /* nearest */
+    DL_EMIT(0xC7, 0x101u);                                 /* clamp */
+    DL_EMIT(0xC9, 3u | 0x100u);                            /* replace, RGBA */
+    DL_EMIT(0xCB, 0);
+    DL_EMIT(0x12, 3u | (3u << 7) | (1u << 23));            /* float UV and position, through */
+    for (uint32_t k = 0; k < RVV_READS; k++) {
+        DL_EMIT(0xA0, rd[k][0]);
+        DL_EMIT(0xA8, stride | (0x04u << 16));
+        DL_EMIT(0xC3, rd[k][1]);
+        DL_EMIT(0x01, sv_addr + 2u * k * (uint32_t)sizeof(RawSpriteVtx));
+        DL_EMIT(0x04, (6u << 16) | 2u);
+    }
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    #undef DL_EMIT
+
+    uint32_t *gpu_m = (uint32_t *)malloc(bytes), *sw_m = (uint32_t *)malloc(bytes);
+    if (!gpu_m || !sw_m) { free(gpu_m); free(sw_m); return 0; }
+    sr_gpu_vram_dirty(RVV_VERTS, vbytes);
+    coherence_reset_targets();
+    coherence_reset_depths();
+    memset(SR_HOST(ta), 0, bytes);
+    memset(SR_HOST(ua), 0, half_bytes);
+    memset(SR_HOST(ma), 0, bytes);
+    sr_gpu_vram_dirty(ta, bytes);
+    sr_gpu_vram_dirty(ua, half_bytes);
+    sr_gpu_vram_dirty(ma, bytes);
+    ge_set_gpu_hooks(&k_hooks);
+    const uint64_t rtt0 = s_cnt_rtt, direct0 = s_cnt_rtt_direct;
+    int ok = ge_run_list(COH_SAMPLE_LIST, 0) == 0;
+    ok = ok && (!s_nbatch || submit_pending());
+    GeGpuFbDescriptor desc = { .addr = ma, .format = 3, .stride = stride, .width = 480, .height = FB_H };
+    ok = ok && gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK;
+    if (!ok) fprintf(stderr, "gpu coherence selftest [%s]: the GPU run failed\n", name);
+    /* A wrong bind count fails the case, but the pictures are still compared, to show what it drew. */
+    int counts_ok = 1;
+    const Target *tt = ok ? target_find_by_fba(RVV_T) : NULL, *tu = ok ? target_find_by_fba(RVV_U) : NULL;
+    if (ok && (!tt || !tt->gpu_valid || !tu || !tu->gpu_valid || s_cnt_rtt - rtt0 != RVV_READS ||
+               s_cnt_rtt_direct - direct0 != 2u)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL T and U are %sGPU targets, %llu reads were render-target "
+                "reads (want %u) and %llu bound a target's image (want 2, the reads through 0x04000000 and "
+                "0x04400000)\n", name, tt && tt->gpu_valid && tu && tu->gpu_valid ? "" : "not both ",
+                (unsigned long long)(s_cnt_rtt - rtt0), (unsigned)RVV_READS,
+                (unsigned long long)(s_cnt_rtt_direct - direct0));
+        counts_ok = 0;
+    }
+    if (ok) memcpy(gpu_m, SR_HOST(ma), bytes);
+
+    /* The software renderer, same list, from cleared VRAM. */
+    if (ok) {
+        coherence_reset_depths();
+        memset(SR_HOST(ta), 0, bytes);
+        memset(SR_HOST(ua), 0, half_bytes);
+        memset(SR_HOST(ma), 0, bytes);
+        sr_gpu_vram_dirty(ta, bytes);
+        sr_gpu_vram_dirty(ua, half_bytes);
+        sr_gpu_vram_dirty(ma, bytes);
+        ge_set_gpu_hooks(NULL);
+        ok = ge_run_list(COH_SAMPLE_LIST, 0) == 0;
+        ge_set_gpu_hooks(&k_hooks);
+        if (ok) memcpy(sw_m, SR_HOST(ma), bytes);
+        else fprintf(stderr, "gpu coherence selftest [%s]: the software run failed\n", name);
+    }
+    uint32_t wrong[RVV_READS] = {0}, varied[RVV_READS] = {0}, moved[RVV_READS] = {0}, outside = 0;
+    for (uint32_t gy = 0; ok && gy < FB_H; gy++) {
+        for (uint32_t gx = 0; gx < 480u; gx++) {
+            const uint32_t got = gpu_m[(size_t)gy * stride + gx], sw = sw_m[(size_t)gy * stride + gx];
+            const uint32_t k = gx / 80u;
+            const int in = gy < 64u && gx % 80u < 64u && k < RVV_READS;
+            if (!in) {
+                if (got != sw && outside++ < 3u)
+                    fprintf(stderr, "gpu coherence selftest [%s]: guest pixel (%u,%u) outside the sprites = %08x, "
+                            "software %08x\n", name, gx, gy, got, sw);
+                continue;
+            }
+            if (sw != sw_m[k * 80u]) varied[k] = 1;
+            if (k >= 1u && k <= 3u && sw != sw_m[(size_t)gy * stride + gx % 80u]) moved[k] = 1;
+            if (got != sw && wrong[k]++ < 3u)
+                fprintf(stderr, "gpu coherence selftest [%s]: %s: guest pixel (%u,%u) = %08x, software %08x "
+                        "(scale %d)\n", name, read_name[k], gx, gy, got, sw, s_scale);
+        }
+    }
+    for (uint32_t k = 0; ok && k < RVV_READS; k++) {
+        if (wrong[k]) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the %s: %u of 4096 guest pixels differ from the "
+                    "software renderer's (scale %d)\n", name, read_name[k], wrong[k], s_scale);
+            ok = 0;
+        }
+        if (!varied[k]) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the %s: the software picture is one colour, so the "
+                    "comparison shows nothing\n", name, read_name[k]);
+            ok = 0;
+        }
+    }
+    /* The identity view reads what the plain address does; the two reordering views do not. */
+    if (ok && (moved[1] || !moved[2] || !moved[3])) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL in the software picture, the 0x04400000 read %s the plain "
+                "read and the 0x04200000 and 0x04600000 reads %s and %s it\n", name, moved[1] ? "differs from" : "equals",
+                moved[2] ? "differ from" : "equal", moved[3] ? "differ from" : "equal");
+        ok = 0;
+    }
+    if (ok && outside) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %u guest pixels outside the sprites differ\n", name, outside);
+        ok = 0;
+    }
+    ok = ok && counts_ok;
+    free(gpu_m); free(sw_m);
+    coherence_reset_targets();
+    coherence_reset_depths();
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s scale=%d a target read through each view of VRAM: 0x04000000 and "
+               "0x04400000 bind T's image, 0x04200000 and 0x04600000 (T and U) bind none, and guest VRAM equals the "
+               "software renderer's exactly\n", name, s_scale);
+    return ok;
+}
+
 static int coherence_selftest_cases(void) {
     /* SR_GPU_COHERENCE_CASE=scaled-upload (the harness's --case) runs that case alone, as the
      * recipe does at render scales 2 and 4: the other fixtures expect 1x pixels (a filtered sample
@@ -13495,6 +13692,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "rtt-scale-offset") == 0) return coherence_run_rtt_scale_at(1);
         if (strcmp(only, "rtt-edge") == 0) return coherence_run_rtt_edge();
         if (strcmp(only, "rtt-depth-alias") == 0) return coherence_run_rtt_depth_alias();
+        if (strcmp(only, "rtt-vram-view") == 0) return coherence_run_rtt_vram_view();
         if (strcmp(only, "color-test") == 0) return coherence_run_color_test();
         if (strcmp(only, "lines") == 0) return coherence_run_lines();
         if (strcmp(only, "host-depth") == 0) return coherence_run_host_depth();
@@ -13589,6 +13787,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_rtt_scale_at(1)) ok = 0;
     if (!coherence_run_rtt_edge()) ok = 0;
     if (!coherence_run_rtt_depth_alias()) ok = 0;
+    if (!coherence_run_rtt_vram_view()) ok = 0;
     if (!coherence_run_host_depth()) ok = 0;
     if (!coherence_run_ssaa_edge()) ok = 0;
     if (!coherence_run_ssaa_sprite()) ok = 0;

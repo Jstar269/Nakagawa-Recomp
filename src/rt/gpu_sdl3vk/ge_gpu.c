@@ -5827,7 +5827,14 @@ static void build_state(int persp, int sprite, Batch *b) {
                 fprintf(stderr, "gegpu: a texture read inside depth buffer 0x%06x: the queued batches did not "
                         "submit, so the newer of colour and depth is judged without them\n", zsrc->zba);
             const int depth_read = zsrc && zsrc->zseq > src->cseq;
-            if (src->gpu_valid && !depth_read && !nortt && !ge_tex_mip_active(g) && g->tex_fmt == src->fmt &&
+            /* A texture address in the 0x04200000 or 0x04600000 view of VRAM (address bit 21; the
+             * uncached 0x44xxxxxx aliases too) reads each byte at another physical offset
+             * (sr_vram_cpu_address, PSP-VRAM-MIRROR-001), so its texels are not the target's pixels
+             * in the image's order: never a direct bind. It decodes guest VRAM through the view, as
+             * ge.c does, once every target's pixels the view can reach are there. */
+            const int view_read = (g->tex_addr & 0x00200000u) != 0u;
+            if (src->gpu_valid && !depth_read && !view_read && !nortt && !ge_tex_mip_active(g) &&
+                g->tex_fmt == src->fmt &&
                 !g->tex_swizzle && (g->tex_bufw == src->stride || g->tex_bufw == 0) && (toff % bpp_s) == 0) {
                 uint32_t pix = toff / bpp_s;
                 /* The texture's own size and clamp bits (#2052): psp.frag clamps or wraps each texel
@@ -5857,8 +5864,9 @@ static void build_state(int persp, int sprite, Batch *b) {
                     }
                     /* The twin's pass samples the source's twin (twin_dset). These conditions
                      * are the twin sampling rule too (same psm, so no CLUT; no swizzle; no
-                     * mips; bufw == stride; pixel-aligned): any other read goes through VRAM in
-                     * both passes. The source's twin may still be the presenter's blit source,
+                     * mips; bufw == stride; pixel-aligned; no reordering view): any other read
+                     * goes through VRAM in both passes. The source's twin may still be the
+                     * presenter's blit source,
                      * and one that is behind its image is re-seeded first. */
                     if (s_twin && src->timg && (src->tlayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
                                                 src->tgen != src->wgen)) {
@@ -5879,16 +5887,26 @@ static void build_state(int persp, int sprite, Batch *b) {
                 b->pc.texsize[2] = (float)(pix % src->stride);
                 b->pc.texsize[3] = (float)(pix / src->stride);
             } else {
-                /* incompatible stride/format reinterpretation, or mip levels: VRAM + decoder.
-                 * A render target is drawn as the GE drew it: never from a scaled copy. A depth
+                /* incompatible stride/format reinterpretation, mip levels or a reordering view:
+                 * VRAM + decoder. A render target is drawn as the GE drew it: never from a scaled copy. A depth
                  * read commits what a CPU read would (the targets' pixels, then the depth). */
-                const uint32_t span = tex_span_size(g->tex_bufw, g->tex_w, g->tex_h);
+                uint32_t off = vram_off(g->tex_addr), span = tex_span_size(g->tex_bufw, g->tex_w, g->tex_h);
+                if (view_read) {
+                    /* Both views change only offset bits 5..9 and 13, so the bytes a span reads
+                     * through them lie in the 16 KiB-aligned blocks around it. */
+                    const uint64_t end = ((uint64_t)off + span + 0x3FFFu) & ~UINT64_C(0x3FFF);
+                    off &= ~0x3FFFu;
+                    span = (uint32_t)((end < 0x200000u ? end : 0x200000u) - off);
+                }
                 if (depth_read) {
-                    if (!hook_vram_read(0x04000000u + vram_off(g->tex_addr), span))
+                    if (!hook_vram_read(0x04000000u + off, span))
                         fprintf(stderr, "gegpu: a depth read at 0x%06x could not commit the depth to guest "
                                 "VRAM: it decodes what guest VRAM holds\n", vram_off(g->tex_addr));
+                } else if (view_read) {
+                    for (int i = 0; i < MAX_TGT; i++)
+                        if (s_tgts[i].used && s_tgts[i].gpu_valid) (void)target_readback_span(&s_tgts[i], off, span);
                 } else {
-                    (void)target_readback_span(src, vram_off(g->tex_addr), span);
+                    (void)target_readback_span(src, off, span);
                 }
                 s_tex_noscale = 1;
                 b->dset = tex_get();

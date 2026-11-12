@@ -1795,8 +1795,9 @@ does, so it shows one device texel per guest texel. The texture's own width and 
 is clamped or wrapped at them, as the GE does, not at the target image's edge, so a texture inside a larger target never
 shows the target's pixels beyond it (`rtt-edge`), and a texture at an offset inside a target scales the same way
 (`rtt-scale-offset`).
-Every other read of a render target, including a read in another format, a swizzled or mipmapped read and another
-buffer width, decodes the target from guest memory at 1x. That is the GE's own picture of it, so such an effect shows
+Every other read of a render target, including a read in another format, a swizzled or mipmapped read, another
+buffer width and a read through the 0x04200000 or 0x04600000 view of VRAM (`rtt-vram-view`), decodes the target from
+guest memory at 1x. That is the GE's own picture of it, so such an effect shows
 1x detail at any render scale; it never shows a picture the PSP would not draw. A CPU read of a target a draw sampled
 returns its top-left device samples in its own format (the readback rule above, `rtt-scale`). A render-target read is
 found by address: depth read as a texture decodes from guest memory at 1x when its address lies outside every colour

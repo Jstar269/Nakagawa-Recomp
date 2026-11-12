@@ -326,7 +326,8 @@ rows (`target_containing` in `ge_gpu.c`). The direct
 bind then needs all of these: the texture format equals the target's pixel format, the texture is
 not swizzled and mipmapping is not active (a mipmap filter with a maximum level above 0), its
 buffer width equals the target's stride (or is 0), the texture address is pixel-aligned inside the
-target, and the target's image holds the guest's latest CPU writes. Any other read of a render
+target and in the 0x04000000 or 0x04400000 view of VRAM, and the target's image holds the guest's
+latest CPU writes. Any other read of a render
 target reads the target back to guest VRAM and decodes it there at 1x, the way the GE drew it, so
 the effect shows 1x detail at any render scale. Those reads include:
 
@@ -336,7 +337,21 @@ the effect shows 1x detail at any render scale. Those reads include:
 - a swizzled read;
 - a read with mipmapping active;
 - a read with another buffer width;
+- a read through the 0x04200000 or 0x04600000 view of VRAM (below);
 - a read of a target whose CPU writes could not be copied into its image.
+
+The PSP maps its 2 MiB of VRAM four times. Measured with CPU loads and stores
+(`docs/HARDWARE_ORACLE.md`, `PSP-VRAM-MIRROR-001`): the 0x04000000 and 0x04400000 views read each
+offset where it is, the 0x04200000 view reads offset `o` at `o ^ 0x2040`, and the 0x04600000 view
+rotates bits 5..9 of `o` left one and then XORs `0x2040` (the uncached 0x44xxxxxx aliases alike).
+`ge.c` decodes a texture given through a view with the same transforms
+(`sr_vram_cpu_address`, #1049). That the GE's own texel fetch applies them is inferred, not measured: a title draws its
+movie as a texture through a view after writing the frames there with the CPU (#1049), which shows
+only if the fetch undoes the write's transform. A read through 0x04200000 or 0x04600000 therefore
+never binds the target's image, whose pixels are in plain order: it reads back every target's
+pixels in the 16 KiB-aligned blocks the view can reach and decodes guest VRAM through the view at
+1x (`rtt-vram-view` in `gpu-coherence-selftest`, at 1x, 2x and 4x: an 8888 and a 5650 target read
+through each view, against the software renderer).
 
 Depth is matched by address like any texture. A depth buffer read as a texture decodes guest VRAM
 at 1x when its address lies outside every colour target's span. When the texture's address lies
