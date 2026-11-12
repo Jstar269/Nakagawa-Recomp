@@ -327,7 +327,10 @@ class WorkflowConditionTest(unittest.TestCase):
         self.assertIn("--require-immutable-revisions", block)
         self.assertNotIn("continue-on-error", block)
         self.assertNotIn("provenance_mode", block)
-        self.assertNotIn("publish_audit", block)
+        # Its one audit run is of the candidate's committed tree, from the trusted checkout (#2387); the fork
+        # path adds no audit of its own here.
+        self.assertEqual(block.count("tools/publish_audit.py"), 1)
+        self.assertIn('--committed-tree "${HEAD_SHA}"', block)
 
     def test_fork_job_reads_no_secret_and_never_contacts_the_authority(self) -> None:
         block = _code(self.fork)
@@ -405,9 +408,11 @@ class ForkCheckTest(unittest.TestCase):
         return stub
 
     @staticmethod
-    def _policy_seen(lines: list[str]) -> dict:
+    def _policy_seen(lines: list[str]) -> dict[str, object]:
         (line,) = [line for line in lines if line.startswith("  POLICY ")]
-        return json.loads(line[len("  POLICY "):])
+        seen = json.loads(line[len("  POLICY "):])
+        assert isinstance(seen, dict)
+        return seen
 
     def test_lists_profile_changes_and_passes_on_a_clean_audit(self) -> None:
         (self.repo / "NEW.md").write_text("new\n", encoding="utf-8")
