@@ -533,6 +533,29 @@ class ZipAndEntityTests(unittest.TestCase):
         dat = disc_verify.parse_dat_text(good.replace("Synthetic &amp; Test", "A &#38; B &#x26;"))
         self.assertEqual(dat.name, "A &#38; B &#x26;")
 
+    def test_the_reference_window_is_the_longest_reference_the_reader_accepts(self) -> None:
+        # _REFERENCE_WINDOW is how far past an '&' the reader matches a reference (and what it
+        # counts as looked at). It is written as a number, since the issue-number guard in
+        # tools/test_nk_core.py reads a hash and digits in nk_core's literals as an issue
+        # number; this holds the number to the pattern so the two cannot drift apart.
+        good = datafile()
+        # A decimal reference of seven digits, U+10FFFF, fills the window exactly and is read.
+        seven = "A &#1114111; B"
+        self.assertEqual(disc_verify.parse_dat_text(good.replace("Synthetic &amp; Test", seven)).name,
+                         seven)
+        # Eight digits are refused as any reference the format does not allow.
+        with self.assertRaises(disc_verify.DiscVerifyError) as raised:
+            disc_verify.parse_dat_text(good.replace("Synthetic &amp; Test", "A &#11141110; B"))
+        self.assertEqual(raised.exception.boundary_code, "DISC_DAT_ENTITY_REFUSED")
+        self.assertEqual(str(raised.exception), disc_verify._REFERENCE_REFUSED)
+        # The longest texts _REFERENCE matches, and the one-digit-longer forms it does not.
+        longest = ["&#" + "9" * 7 + ";", "&#x" + "F" * 6 + ";", "&quot;", "&apos;"]
+        for text in longest:
+            self.assertIsNotNone(disc_verify._REFERENCE.fullmatch(text.encode("ascii")), text)
+        for text in ("&#" + "9" * 8 + ";", "&#x" + "F" * 7 + ";"):
+            self.assertIsNone(disc_verify._REFERENCE.match(text.encode("ascii")), text)
+        self.assertEqual(disc_verify._REFERENCE_WINDOW, max(len(text) for text in longest))
+
 
 #: The most bytes the reader may look at for each byte of its input. The reader counts each
 #: one every time it looks at it (the UTF-8 and control-byte passes, the scan, and each

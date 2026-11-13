@@ -186,7 +186,9 @@ _ATTRIBUTE = re.compile(rb'[ \t\r\n]+([A-Za-z_:][A-Za-z0-9_.:-]*)[ \t\r\n]*=[ \t
 _START_TAIL = re.compile(rb"[ \t\r\n]*(/?)")
 _END_TAIL = re.compile(rb"[ \t\r\n]*")
 _REFERENCE = re.compile(rb"&(?:amp|lt|gt|quot|apos|#[0-9]{1,7}|#x[0-9A-Fa-f]{1,6});")
-_REFERENCE_WINDOW = len("&#1234567;")
+# The length of the longest character reference the reader accepts: an ampersand, a hash,
+# seven decimal digits and a semicolon (the hex form, with an "x" and six digits, is as long).
+_REFERENCE_WINDOW = 10
 _NAMED_REFERENCE = re.compile(rb"&(amp|lt|gt|quot|apos);")
 _NAMED = {b"amp": b"&", b"lt": b"<", b"gt": b">", b"quot": b'"', b"apos": b"'"}
 _PRINTABLE = re.compile(rb"[\x20-\x7e]*")
