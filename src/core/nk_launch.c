@@ -12,6 +12,7 @@
  */
 
 #include "nk_launch.h"
+#include "nk_pbp_homebrew.h"
 #include "nk_shared_helpers.h"
 #include "nk_font_slots.h"
 #include "../rt/prx_loader.h"
@@ -1079,6 +1080,7 @@ NkResult nk_launch_prepare_session(
     }
     snprintf(session->enhancement_package_id, sizeof(session->enhancement_package_id), "%s",
              game->enhancement_package_id);
+    session->enhancement_hook_only = game->enhancement_package_id[0] && game->enhancement_hook_only;
     int boot_written = snprintf(session->boot_executable,
                                 sizeof(session->boot_executable), "%s",
                                 boot_executable);
@@ -1531,7 +1533,48 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     snprintf(env_boot_path, sizeof(env_boot_path), "SR_BOOT_PATH=");
     const char *boot_executable = session->boot_executable[0]
         ? session->boot_executable : session->selected_executable;
-    if (session->iso_path[0] && boot_executable[0]) {
+    /* An imported homebrew program (#2143) runs from its Memory Stick folder, as on a PSP:
+     * the folder the import copied beside its disc image is put on the title's Memory Stick
+     * (only what the stick lacks, so the program's own writes stay), and the program is
+     * booted as ms0:/PSP/GAME/<folder>/EBOOT.PBP, the path its start-up code takes its
+     * working folder from (nk_pbp_homebrew.h). */
+    char homebrew_folder[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
+    homebrew_folder[0] = '\0';
+    if (session->iso_path[0]) {
+        NkPbpHomebrewView view = nk_pbp_homebrew_find_view(session->iso_path, homebrew_folder,
+                                                           sizeof(homebrew_folder));
+        char problem[512] = "";
+        if (view == NK_PBP_HB_VIEW_MISSING) {
+            snprintf(session->last_error, sizeof(session->last_error),
+                     "The homebrew program in %.300s has no copy of its Memory Stick folder "
+                     "beside it (it was added before Nakagawa kept one, or the copy was "
+                     "removed). Add the program's EBOOT.PBP again.", session->iso_path);
+            return NK_ERROR_FILE_NOT_FOUND;
+        }
+        if (view == NK_PBP_HB_VIEW_BROKEN) {
+            snprintf(session->last_error, sizeof(session->last_error),
+                     "The homebrew program's Memory Stick folder beside %.300s is damaged. "
+                     "Add the program's EBOOT.PBP again.", session->iso_path);
+            return NK_ERROR_FILE_NOT_FOUND;
+        }
+        if (view == NK_PBP_HB_VIEW_FOUND &&
+            !nk_pbp_homebrew_seed_memstick(session->iso_path, homebrew_folder,
+                                           session->memstick_root, problem, sizeof(problem))) {
+            snprintf(session->last_error, sizeof(session->last_error),
+                     "The homebrew program's folder could not be put on its Memory Stick: "
+                     "%.400s", problem);
+            return NK_ERROR_IO;
+        }
+    }
+    if (homebrew_folder[0]) {
+        int written = snprintf(env_boot_path, sizeof(env_boot_path),
+                               "SR_BOOT_PATH=ms0:/PSP/GAME/%s/EBOOT.PBP", homebrew_folder);
+        if (written <= 0 || (size_t)written >= sizeof(env_boot_path)) {
+            snprintf(session->last_error, sizeof(session->last_error),
+                     "Selected executable has no safe PSP boot path.");
+            return NK_ERROR_INVALID_EXECUTABLE;
+        }
+    } else if (session->iso_path[0] && boot_executable[0]) {
         if (!launch_boot_path_env(boot_executable, env_boot_path,
                                   sizeof(env_boot_path))) {
             snprintf(session->last_error, sizeof(session->last_error),
@@ -1575,12 +1618,13 @@ NkResult nk_launch_start(NkLaunchSession *session) {
         envp[env_count++] = env_launcher_display;
     }
     envp[env_count++] = env_volume;
-    /* Always set, so an inherited value cannot opt a launch in. On only for the
-       enhanced build, the one variant whose rewritten sites read it
-       (docs/ENHANCEMENT_CONTRACT.md section 9.1); the authentic package always
-       runs with it off. */
-    envp[env_count++] = session->enhancement_package_id[0] ? "SR_EXPERIMENTAL_60HZ=1"
-                                                           : "SR_EXPERIMENTAL_60HZ=0";
+    /* Always set, so an inherited value cannot opt a launch in. On only for an
+       enhanced build with a timing package, the one variant whose rewritten sites
+       read it (docs/ENHANCEMENT_CONTRACT.md section 9.1); the authentic package and
+       a build of a code-hook package alone, whose site runs on its own SR_ACE key
+       (section 11.3.6), always run with it off. */
+    envp[env_count++] = session->enhancement_package_id[0] && !session->enhancement_hook_only
+        ? "SR_EXPERIMENTAL_60HZ=1" : "SR_EXPERIMENTAL_60HZ=0";
     /* Likewise developer mode (#314): the game's developer HUD and pause pages follow the
        launcher's setting, never an inherited value. */
     envp[env_count++] = session->config.developer_mode ? "SR_DEVELOPER_MODE=1" : "SR_DEVELOPER_MODE=0";

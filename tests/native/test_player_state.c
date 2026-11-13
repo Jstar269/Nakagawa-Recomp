@@ -30,6 +30,7 @@
 #include "iso_reader.h"
 #include "nk_font.h"
 #include "nk_title_manifest.h"
+#include "nk_pbp_homebrew.h"
 #include "nk_platform.h"
 #include "nk_zip.h"
 #include "native_test_isolation.h"
@@ -1335,7 +1336,8 @@ static int g_fixture_generated_code_abi_epoch = NK_AOT_GENERATED_CODE_ABI_EPOCH;
    packages/<disc_id>, else packages/<disc_id>-enhanced-<id>), and
    `recorded_enhancement_id` the enhancement package the build's codegen options
    record (NULL: none, as an authentic build records), the way
-   tools/nk_core/package_cache.py writes them. */
+   tools/nk_core/package_cache.py writes them; <timing id>+<hook id> records the timing
+   package and the code-hook package beside it (contract section 9.9). */
 static void write_runtime_package_fixture_variant(
     const char *user_root, const char *disc_id, const char *title_id,
     uint32_t abi_version, const char *executable_relative_path,
@@ -1367,11 +1369,24 @@ static void write_runtime_package_fixture_variant(
         char options_hash_input[sizeof(codegen_options_json) + 2];
         int used = snprintf(codegen_options_json, sizeof(codegen_options_json), "{");
         if (recorded_enhancement_id) {
+            char timing_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+            const char *plus = strchr(recorded_enhancement_id, '+');
+            size_t timing_length = plus ? (size_t)(plus - recorded_enhancement_id)
+                                        : strlen(recorded_enhancement_id);
+            assert(timing_length < sizeof(timing_id));
+            memcpy(timing_id, recorded_enhancement_id, timing_length);
+            timing_id[timing_length] = '\0';
+            if (plus) {
+                used += snprintf(codegen_options_json + used,
+                                 sizeof(codegen_options_json) - (size_t)used,
+                                 "\"code_hook_package_id\":\"%s\","
+                                 "\"code_hook_package_sha256\":\"%064d\",", plus + 1, 0);
+            }
             used += snprintf(codegen_options_json + used, sizeof(codegen_options_json) - (size_t)used,
                              "\"enhancement_package_epoch\":\"aot-enhancement-package-v1\","
                              "\"enhancement_package_id\":\"%s\","
                              "\"enhancement_package_sha256\":\"%064d\"",
-                             recorded_enhancement_id, 0);
+                             timing_id, 0);
         }
         if (builder) {
             used += snprintf(codegen_options_json + used, sizeof(codegen_options_json) - (size_t)used,
@@ -2959,14 +2974,21 @@ static int player_state_package_builder_child(int argc, char **argv) {
         }
         char executable[128];
         snprintf(executable, sizeof(executable), "%s.exe", title_id);
-        bool enhanced = false;
+        bool logic_60 = false, cull = false;
         for (int i = 4; i < argc; i++) {
-            if (strcmp(argv[i], "--experimental-60hz") == 0) enhanced = true;
+            if (strcmp(argv[i], "--experimental-60hz") == 0) logic_60 = true;
+            if (strcmp(argv[i], "--ace-cull") == 0) cull = true;
         }
+        bool enhanced = logic_60 || cull;
         const char *enhancement_id = getenv("NAKAGAWA_TEST_PACKAGE_REBUILD_ENHANCEMENT_ID");
         if (enhanced) {
-            /* nk_cli.py reads the package and writes its own folder. */
+            /* nk_cli.py reads the package and writes its own folder: --experimental-60hz the
+               timing package, --ace-cull the culling package, <timing>+<hook> both. */
             if (!enhancement_id || !enhancement_id[0]) return 95;
+            const char *hook_only = getenv("NAKAGAWA_TEST_PACKAGE_REBUILD_HOOK_ONLY");
+            bool want_hook_only = hook_only && strcmp(hook_only, "1") == 0;
+            bool want_cull = want_hook_only || strchr(enhancement_id, '+') != NULL;
+            if (logic_60 == want_hook_only || cull != want_cull) return 97;
             write_runtime_package_fixture_variant(
                 user_root, disc_id, title_id, SR_CPUSTATE_ABI_VERSION, executable,
                 FIXTURE_SHA256, NULL,
@@ -4739,6 +4761,46 @@ static void test_package_build_lifecycle(const char *self_executable) {
         assert(player_app_validate_runtime_package(
                    rebuild_app, &stock_game, NULL, enhanced_reason,
                    sizeof(enhanced_reason)) == NK_RUNTIME_PACKAGE_OK);
+        /* Wider culling (contract 9.9, 11.3.6): <timing>+<hook> passes both flags, the culling
+           package alone passes --ace-cull alone; each writes and validates its own folder. */
+        {
+            static const struct { const char *variant; bool hook_only; } culls[] = {
+                {"fixture-60hz+fixture-cull", false}, {"fixture-cull", true}
+            };
+            for (size_t c = 0; c < sizeof(culls) / sizeof(culls[0]); c++) {
+                snprintf(rebuild_app->games[0].enhancement_package_id,
+                         sizeof(rebuild_app->games[0].enhancement_package_id), "%s",
+                         culls[c].variant);
+                rebuild_app->games[0].enhancement_hook_only = culls[c].hook_only;
+                nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_ENHANCEMENT_ID", culls[c].variant);
+                nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_HOOK_ONLY",
+                              culls[c].hook_only ? "1" : NULL);
+                assert(player_app_start_package_build(rebuild_app, 0));
+                assert(strcmp(rebuild_app->build_session.enhancement_package_id,
+                              culls[c].variant) == 0);
+                assert(rebuild_app->build_session.enhancement_hook_only == culls[c].hook_only);
+                poll_player_package_build_to_terminal(rebuild_app);
+                if (!rebuild_app->build_session.is_complete) {
+                    fprintf(stderr, "culling build %s did not complete: exit=%d message=%s\n",
+                            culls[c].variant, rebuild_app->build_session.exit_code,
+                            rebuild_app->build_session.current_message);
+                }
+                assert(rebuild_app->build_session.is_complete);
+                player_app_runtime_package_cache_invalidate(rebuild_app);
+                NkRuntimePackageInfo cull_info;
+                assert(player_app_validate_runtime_package(
+                           rebuild_app, &rebuild_app->games[0], &cull_info,
+                           enhanced_reason, sizeof(enhanced_reason)) == NK_RUNTIME_PACKAGE_OK);
+                char expected_folder[128];
+                snprintf(expected_folder, sizeof(expected_folder), "%c%s-enhanced-%s", sep,
+                         rebuild_app->games[0].disc_id, culls[c].variant);
+                assert(strstr(cull_info.package_root, expected_folder) != NULL);
+            }
+            nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_HOOK_ONLY", NULL);
+            rebuild_app->games[0].enhancement_hook_only = false;
+            fixture_sha_file(stock_package, stock_hash_after);
+            assert(strcmp(stock_hash_before, stock_hash_after) == 0);
+        }
         rebuild_app->games[0].enhancement_package_id[0] = '\0';
         nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_ENHANCEMENT_ID",
                       had_enhancement_env ? saved_enhancement_env : NULL);
@@ -6287,6 +6349,11 @@ static bool psn_test_cancel_now(void *userdata) {
     return true;
 }
 
+/* Cancels once the conversion has reported progress: after the folder copy, in the image. */
+static bool psn_test_cancel_after_progress(void *userdata) {
+    return ((const PsnTestProgress *)userdata)->calls > 0;
+}
+
 static uint8_t *psn_test_read_file(const char *path, size_t *size) {
     FILE *file = fopen(path, "rb");
     long length;
@@ -6313,7 +6380,12 @@ static void psn_test_refused(const char *path, const char *want_code, const char
                                        message, sizeof(message)));
     assert(strcmp(code, want_code) == 0);
     assert(strstr(message, want_text) != NULL);
-    assert(package.iso_path[0] == '\0');
+    if (strcmp(want_code, "HOMEBREW_ALREADY_ADDED") == 0) {
+        /* The package names the program, so the player can say what clears the stop. */
+        assert(package.homebrew && package.disc_id[0] != '\0' && package.iso_path[0] != '\0');
+    } else {
+        assert(package.iso_path[0] == '\0');
+    }
 }
 
 /* ---- Versioned per-user data ---------------------------------------------------------
@@ -6903,15 +6975,23 @@ static void test_homebrew_stop_cards_name_their_limit(void) {
 
 /* #2143: an unencrypted homebrew EBOOT.PBP imports as a small private disc image holding its
    program (and icon) under the library key of that image: the same program and title is the
-   same game, a different title is another. Encrypted and kernel-mode packages keep a named
+   same game, a different title is another. The folder the package was picked from comes with
+   it, copied beside the image as the program's ms0:/PSP/GAME/<folder>/ (nk_pbp_homebrew.h).
+   Encrypted and kernel-mode packages, and a folder that cannot be the program's, keep a named
    refusal, and nothing is written for them. */
 static void test_homebrew_package_becomes_a_private_disc(void) {
     const char sep = nk_platform_path_separator();
     char cache_root[NK_MAX_PATH];
     char base[NATIVE_TEST_PATH_MAX + 64];
     char data_root[NATIVE_TEST_PATH_MAX + 96];
-    char pbp_path[NATIVE_TEST_PATH_MAX + 96];
-    char other_path[NATIVE_TEST_PATH_MAX + 96];
+    char folder_path[NATIVE_TEST_PATH_MAX + 96];
+    char pbp_path[NATIVE_TEST_PATH_MAX + 128];
+    char data_path[NATIVE_TEST_PATH_MAX + 128];
+    char level_path[NATIVE_TEST_PATH_MAX + 160];
+    char other_path[NATIVE_TEST_PATH_MAX + 128];
+    char view_path[NATIVE_TEST_PATH_MAX + 320];
+    char view_root[NATIVE_TEST_PATH_MAX + 256];
+    char view_folder[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
     char expected_iso[NATIVE_TEST_PATH_MAX + 192];
     char partial[NATIVE_TEST_PATH_MAX + 192];
     char code[64];
@@ -6938,8 +7018,19 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     assert(test_remove_tree(base));
     snprintf(data_root, sizeof(data_root), "%s%cdata", base, sep);
     assert(nk_platform_mkdir_p(data_root));
-    snprintf(pbp_path, sizeof(pbp_path), "%s%cEBOOT.PBP", base, sep);
-    snprintf(other_path, sizeof(other_path), "%s%cOTHER.PBP", base, sep);
+    /* The package sits in its own folder, as on a PSP's Memory Stick, beside the files the
+       program reads; another package is in a folder of its own. */
+    snprintf(folder_path, sizeof(folder_path), "%s%cMYHB", base, sep);
+    snprintf(pbp_path, sizeof(pbp_path), "%s%cEBOOT.PBP", folder_path, sep);
+    snprintf(data_path, sizeof(data_path), "%s%cDATA.TXT", folder_path, sep);
+    snprintf(level_path, sizeof(level_path), "%s%clevels%cONE.BIN", folder_path, sep, sep);
+    snprintf(other_path, sizeof(other_path), "%s%cOTHER%cEBOOT.PBP", base, sep, sep);
+    snprintf(view_path, sizeof(view_path), "%s%clevels", folder_path, sep);
+    assert(nk_platform_mkdir_p(view_path));
+    snprintf(view_path, sizeof(view_path), "%s%cOTHER", base, sep);
+    assert(nk_platform_mkdir_p(view_path));
+    write_binary_file(data_path, (const uint8_t *)"read by the program", 19u);
+    write_binary_file(level_path, (const uint8_t *)"level one", 9u);
     assert(nk_platform_set_app_data_dir_override(data_root));
 
     memset(program, 0, sizeof(program));
@@ -6971,6 +7062,27 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
                                        sizeof(message)));
     assert(strcmp(code, "CANCELLED") == 0);
     assert(nk_platform_path_missing(package.iso_path) && nk_platform_path_missing(partial));
+    assert(nk_pbp_homebrew_view_root(package.iso_path, view_root, sizeof(view_root)));
+    assert(nk_platform_path_missing(view_root));
+    snprintf(view_path, sizeof(view_path), "%s.importing", view_root);
+    assert(nk_platform_path_missing(view_path));
+    /* A cancel once the folder copy is in place keeps nothing either: the copy and its source
+       record go with the partial image (cold read of #2426, finding 2). Failing before: the
+       record stayed, and the next pick from another folder was stopped as a kept copy. */
+    {
+        PlayerPsnConvertCallbacks late_cancel = { psn_test_progress,
+                                                  psn_test_cancel_after_progress, NULL };
+        memset(&progress, 0, sizeof(progress));
+        late_cancel.userdata = &progress;
+        assert(!player_psn_package_convert(&package, &late_cancel, code, sizeof(code), message,
+                                           sizeof(message)));
+        assert(progress.calls > 0 && strstr(message, "cancelled") != NULL);
+        assert(nk_platform_path_missing(package.iso_path) && nk_platform_path_missing(partial));
+        assert(nk_platform_path_missing(view_root));
+        snprintf(view_path, sizeof(view_path), "%s", view_root);
+        snprintf(view_path + strlen(view_path) - 4u, 16u, ".source");
+        assert(nk_platform_path_missing(view_path));
+    }
 
     memset(&progress, 0, sizeof(progress));
     hooks.userdata = &progress;
@@ -6989,12 +7101,42 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     assert(memcmp(image + 23u * 2048u, icon, sizeof(icon)) == 0);
     free(image);
 
-    /* The user's own package is only read, never changed: the import writes under the data
-       folder alone. (The package's folder is not mounted as ms0:/PSP/GAME/<folder>/ for the
-       program; the disc image holds only the program, its title and its icon, #2143.) */
+    /* The package's folder is beside the image as the program's ms0:/PSP/GAME/MYHB/: the
+       package and every file and folder beside it, byte for byte, and nothing else. Failing
+       before: the import kept only the disc image, so the program's own files were nowhere. */
+    assert(nk_pbp_homebrew_find_view(package.iso_path, view_folder, sizeof(view_folder)) ==
+           NK_PBP_HB_VIEW_FOUND);
+    assert(strcmp(view_folder, "MYHB") == 0);
+    assert(nk_pbp_homebrew_view_root(package.iso_path, view_root, sizeof(view_root)));
+    snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cMYHB%cEBOOT.PBP", view_root, sep, sep,
+             sep, sep);
+    after = psn_test_read_file(view_path, &after_len);
+    assert(after != NULL && after_len == before_len && memcmp(after, before, before_len) == 0);
+    free(after);
+    snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cMYHB%cDATA.TXT", view_root, sep, sep,
+             sep, sep);
+    after = psn_test_read_file(view_path, &after_len);
+    assert(after != NULL && after_len == 19u && memcmp(after, "read by the program", 19u) == 0);
+    free(after);
+    snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cMYHB%clevels%cONE.BIN", view_root, sep,
+             sep, sep, sep, sep);
+    after = psn_test_read_file(view_path, &after_len);
+    assert(after != NULL && after_len == 9u && memcmp(after, "level one", 9u) == 0);
+    free(after);
+    snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cMYHB%cMISSING.BIN", view_root, sep,
+             sep, sep, sep);
+    assert(nk_platform_path_missing(view_path));
+    snprintf(view_path, sizeof(view_path), "%s.importing", view_root);
+    assert(nk_platform_path_missing(view_path));
+
+    /* The user's own package and folder are only read, never changed: the import writes under
+       the data folder alone. */
     after = psn_test_read_file(pbp_path, &after_len);
     assert(after != NULL && after_len == before_len && memcmp(after, before, before_len) == 0);
     free(before);
+    free(after);
+    after = psn_test_read_file(data_path, &after_len);
+    assert(after != NULL && after_len == 19u && memcmp(after, "read by the program", 19u) == 0);
     free(after);
 
     /* Picking it again reuses the checked image; the same program under another title is
@@ -7003,12 +7145,549 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
                                       sizeof(message)));
     assert(again.homebrew && again.iso_ready);
     assert(strcmp(again.disc_id, package.disc_id) == 0);
+    /* An image without its folder, as an import before the folder came along made it, is not
+       ready: picking the package again makes both. */
+    assert(test_remove_tree(view_root));
+    assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                      sizeof(message)));
+    assert(again.homebrew && !again.iso_ready);
+    assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
+                                      sizeof(message)));
+    assert(nk_pbp_homebrew_find_view(again.iso_path, view_folder, sizeof(view_folder)) ==
+           NK_PBP_HB_VIEW_FOUND);
+    /* A newer release copied over the folder is not ready either: picking it again copies the
+       folder as it is now (review of #2426, M2). Failing before: the image counted as ready
+       and the program kept reading the first import's files. */
+    write_binary_file(data_path, (const uint8_t *)"the newer release", 17u);
+    assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                      sizeof(message)));
+    assert(again.homebrew && !again.iso_ready);
+    assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
+                                      sizeof(message)));
+    snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cMYHB%cDATA.TXT", view_root, sep, sep,
+             sep, sep);
+    after = psn_test_read_file(view_path, &after_len);
+    assert(after != NULL && after_len == 17u && memcmp(after, "the newer release", 17u) == 0);
+    free(after);
+    assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                      sizeof(message)));
+    assert(again.homebrew && again.iso_ready);
+    /* An imported program's image with no folder beside it is named as such, never taken for
+       another disc. */
+    assert(test_remove_tree(view_root));
+    assert(nk_pbp_homebrew_find_view(again.iso_path, view_folder, sizeof(view_folder)) ==
+           NK_PBP_HB_VIEW_MISSING);
+    assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
+                                      sizeof(message)));
     pbp = homebrew_pbp("Another Title", program, 88u, icon, sizeof(icon), &pbp_len);
     write_binary_file(other_path, pbp, pbp_len);
     free(pbp);
     assert(player_psn_package_inspect(other_path, &renamed, code, sizeof(code), message,
                                       sizeof(message)));
     assert(strcmp(renamed.disc_id, package.disc_id) != 0 && !renamed.iso_ready);
+
+    /* Two programs with one key (review of #2426, S3): the key keeps about 31 bits of a
+       program's digest, so another program can have it. Here the place of "Another Title"'s
+       key holds "My Homebrew"'s image, as a program padded to collide would find it: the
+       import stops by name at inspection and at conversion, and replaces nothing. Failing
+       before: the conversion wrote its folder copy and its image over the other title's. */
+    {
+        char planted_dir[NATIVE_TEST_PATH_MAX + 192];
+        char planted_view[NATIVE_TEST_PATH_MAX + 192];
+        uint8_t *mine;
+        uint8_t *kept_bytes;
+        size_t mine_len = 0, kept_len = 0;
+        char *slash;
+        snprintf(planted_dir, sizeof(planted_dir), "%s", renamed.iso_path);
+        slash = strrchr(planted_dir, sep);
+        assert(slash != NULL);
+        *slash = '\0';
+        assert(nk_platform_mkdir_p(planted_dir));
+        mine = psn_test_read_file(package.iso_path, &mine_len);
+        assert(mine != NULL);
+        write_binary_file(renamed.iso_path, mine, mine_len);
+        assert(!player_psn_package_convert(&renamed, &hooks, code, sizeof(code), message,
+                                           sizeof(message)));
+        assert(strcmp(code, "HOMEBREW_KEY_TAKEN") == 0);
+        assert(strstr(message, renamed.disc_id) != NULL);
+        kept_bytes = psn_test_read_file(renamed.iso_path, &kept_len);
+        assert(kept_bytes != NULL && kept_len == mine_len &&
+               memcmp(kept_bytes, mine, mine_len) == 0);
+        assert(nk_pbp_homebrew_view_root(renamed.iso_path, planted_view, sizeof(planted_view)));
+        assert(nk_platform_path_missing(planted_view));
+        psn_test_refused(other_path, "HOMEBREW_KEY_TAKEN", "Another program already has");
+        free(kept_bytes);
+        free(mine);
+        assert(test_remove_tree(planted_dir));
+    }
+
+    /* One program in two folders (review of #2426, M1): the key comes from the EBOOT.PBP
+       alone, so the same file copied into a second folder is the same title. Its import stops
+       by name, at inspection and at conversion, naming the title and the folder it was added
+       from, and replaces nothing; from its own folder it imports as before. A view without
+       its record (<key>.source, beside the image) is compared by its folder's name. Failing
+       before: the second folder was imported over the first, its copy replacing the first
+       folder's. */
+    {
+        char second_dir[NATIVE_TEST_PATH_MAX + 128];
+        char second_path[NATIVE_TEST_PATH_MAX + 160];
+        char second_data[NATIVE_TEST_PATH_MAX + 160];
+        char record_path[NATIVE_TEST_PATH_MAX + 320];
+        PlayerPsnPackage second;
+        uint8_t *first;
+        size_t first_len = 0;
+        snprintf(second_dir, sizeof(second_dir), "%s%cSECOND", base, sep);
+        assert(nk_platform_mkdir_p(second_dir));
+        snprintf(second_path, sizeof(second_path), "%s%cEBOOT.PBP", second_dir, sep);
+        snprintf(second_data, sizeof(second_data), "%s%cDATA.TXT", second_dir, sep);
+        first = psn_test_read_file(pbp_path, &first_len);
+        assert(first != NULL);
+        write_binary_file(second_path, first, first_len);
+        free(first);
+        write_binary_file(second_data, (const uint8_t *)"the second folder", 17u);
+        assert(!player_psn_package_inspect(second_path, &second, code, sizeof(code), message,
+                                           sizeof(message)));
+        assert(strcmp(code, "HOMEBREW_ALREADY_ADDED") == 0);
+        assert(strstr(message, "My Homebrew") != NULL && strstr(message, package.disc_id) != NULL);
+        assert(strstr(message, "MYHB") != NULL && strstr(message, "one folder") != NULL);
+        assert(strcmp(second.disc_id, package.disc_id) == 0 && second.iso_path[0] != '\0');
+        /* At conversion too: the second folder picked after the first was inspected. */
+        second = again;
+        int second_written = snprintf(second.pbp_path, sizeof(second.pbp_path), "%s", second_path);
+        assert(second_written > 0 && (size_t)second_written < sizeof(second.pbp_path));
+        assert(!player_psn_package_convert(&second, &hooks, code, sizeof(code), message,
+                                           sizeof(message)));
+        assert(strcmp(code, "HOMEBREW_ALREADY_ADDED") == 0);
+        snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cMYHB%cDATA.TXT", view_root, sep,
+                 sep, sep, sep);
+        after = psn_test_read_file(view_path, &after_len);
+        assert(after != NULL && after_len == 17u && memcmp(after, "the newer release", 17u) == 0);
+        free(after);
+        snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cSECOND", view_root, sep, sep, sep);
+        assert(nk_platform_path_missing(view_path));
+        /* From its own folder it is the same title as before. */
+        assert(player_psn_package_inspect(pbp_path, &second, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(second.homebrew && second.iso_ready);
+        /* A view without the record: the folder's name tells the two apart. */
+        snprintf(record_path, sizeof(record_path), "%s", view_root);
+        assert(strlen(record_path) > 4u &&
+               strcmp(record_path + strlen(record_path) - 4u, ".ms0") == 0);
+        snprintf(record_path + strlen(record_path) - 4u, 16u, ".source");
+        assert(!nk_platform_path_missing(record_path));
+        assert(remove(record_path) == 0);
+        psn_test_refused(second_path, "HOMEBREW_ALREADY_ADDED", "\"MYHB\"");
+        assert(player_psn_package_inspect(pbp_path, &second, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(second.homebrew && second.iso_ready);
+
+        /* The stop holds whatever state the copy is in (review of #2426, S2). Failing before:
+           the second folder was imported over a damaged view, and over a view removed part
+           way whose complete copy a crash left in staging. */
+        {
+            char staging[NATIVE_TEST_PATH_MAX + 288];
+            snprintf(staging, sizeof(staging), "%s.importing", view_root);
+            /* The record back, from the first folder. */
+            assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
+                                              sizeof(message)));
+            assert(!nk_platform_path_missing(record_path));
+            /* Damaged: a launch that finds a file of the view missing deletes its manifest. */
+            snprintf(view_path, sizeof(view_path), "%s%cview.manifest", view_root, sep);
+            assert(remove(view_path) == 0);
+            assert(nk_pbp_homebrew_find_view(again.iso_path, view_folder, sizeof(view_folder)) ==
+                   NK_PBP_HB_VIEW_BROKEN);
+            psn_test_refused(second_path, "HOMEBREW_ALREADY_ADDED", "MYHB");
+            assert(remove(record_path) == 0);
+            psn_test_refused(second_path, "HOMEBREW_ALREADY_ADDED", "\"MYHB\"");
+            /* Removed part way: no view, and the first folder's complete copy in staging. */
+            assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
+                                              sizeof(message)));
+            assert(rename(view_root, staging) == 0);
+            assert(nk_pbp_homebrew_find_view(again.iso_path, view_folder, sizeof(view_folder)) ==
+                   NK_PBP_HB_VIEW_MISSING);
+            psn_test_refused(second_path, "HOMEBREW_ALREADY_ADDED", "MYHB");
+            /* The record shows the staging copy is the first folder's own. */
+            assert(player_psn_package_inspect(pbp_path, &second, code, sizeof(code), message,
+                                              sizeof(message)));
+            /* Without it a staging copy is no folder's own: both stop. */
+            assert(remove(record_path) == 0);
+            psn_test_refused(second_path, "HOMEBREW_ALREADY_ADDED", "\"MYHB\"");
+            psn_test_refused(pbp_path, "HOMEBREW_ALREADY_ADDED", "another folder");
+            assert(test_remove_tree(staging));
+            /* A record that cannot be read as its two lines stops it too (N3). */
+            write_binary_file(record_path, (const uint8_t *)"one line\n", 9u);
+            psn_test_refused(second_path, "HOMEBREW_ALREADY_ADDED", "another folder");
+            assert(remove(record_path) == 0);
+            assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
+                                              sizeof(message)));
+        }
+        /* A failed attempt removes only what it made (review of #2426's fixes, S1 and N1).
+           Failing before: a re-import from the first folder, its image gone by hand and the
+           attempt cancelled, deleted the earlier folder copy and record, and the second folder
+           then imported with no stop; and a copy from a folder of the same name elsewhere,
+           beside a view without its record, kept the record it wrote, so the first folder
+           was then stopped as "added from" the other. */
+        {
+            PlayerPsnConvertCallbacks late_cancel = { psn_test_progress,
+                                                      psn_test_cancel_after_progress, NULL };
+            PlayerPsnConvertCallbacks cancel_now = { psn_test_progress, psn_test_cancel_now,
+                                                     NULL };
+            char other_dir[NATIVE_TEST_PATH_MAX + 160];
+            char other_path[NATIVE_TEST_PATH_MAX + 192];
+            PlayerPsnPackage other;
+            uint8_t *bytes;
+            size_t bytes_len = 0;
+            /* S1: the image goes by hand; the first folder again, cancelled late. */
+            assert(remove(again.iso_path) == 0);
+            memset(&progress, 0, sizeof(progress));
+            late_cancel.userdata = &progress;
+            assert(!player_psn_package_convert(&again, &late_cancel, code, sizeof(code), message,
+                                               sizeof(message)));
+            assert(progress.calls > 0 && strstr(message, "cancelled") != NULL);
+            assert(nk_platform_path_missing(again.iso_path));
+            assert(!nk_platform_path_missing(record_path) && !nk_platform_path_missing(view_root));
+            assert(strstr(message, "record of where it was added from stay") != NULL);
+            psn_test_refused(second_path, "HOMEBREW_ALREADY_ADDED", "MYHB");
+            assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
+                                              sizeof(message)));
+            /* N1: a view without its record; a folder named MYHB elsewhere, its copy cancelled. */
+            assert(remove(record_path) == 0);
+            snprintf(other_dir, sizeof(other_dir), "%s%cOTHER%cMYHB", base, sep, sep);
+            assert(nk_platform_mkdir_p(other_dir));
+            snprintf(other_path, sizeof(other_path), "%s%cEBOOT.PBP", other_dir, sep);
+            bytes = psn_test_read_file(pbp_path, &bytes_len);
+            assert(bytes != NULL);
+            write_binary_file(other_path, bytes, bytes_len);
+            free(bytes);
+            other = again;
+            assert(strlen(other_path) < sizeof(other.pbp_path));
+            memcpy(other.pbp_path, other_path, strlen(other_path) + 1u);
+            memset(&progress, 0, sizeof(progress));
+            cancel_now.userdata = &progress;
+            assert(!player_psn_package_convert(&other, &cancel_now, code, sizeof(code), message,
+                                               sizeof(message)));
+            assert(nk_platform_path_missing(record_path));
+            assert(player_psn_package_inspect(pbp_path, &other, code, sizeof(code), message,
+                                              sizeof(message)));
+            assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
+                                              sizeof(message)));
+            assert(!nk_platform_path_missing(record_path));
+        }
+        /* The same folder by another name (N2): a link named ALIAS to MYHB has MYHB's real
+           path. On Windows the picked path keeps the link's name, so the program's folder on
+           the Memory Stick would be ALIAS: the import stops, naming MYHB. On POSIX the
+           picked path is resolved (realpath), so ALIAS is MYHB by name too and imports as
+           the same folder. */
+        {
+            char alias_dir[NATIVE_TEST_PATH_MAX + 128];
+            char alias_path[NATIVE_TEST_PATH_MAX + 160];
+            snprintf(alias_dir, sizeof(alias_dir), "%s%cALIAS", base, sep);
+            snprintf(alias_path, sizeof(alias_path), "%s%cEBOOT.PBP", alias_dir, sep);
+#ifndef _WIN32
+            assert(symlink(folder_path, alias_dir) == 0);
+            assert(player_psn_package_inspect(alias_path, &second, code, sizeof(code), message,
+                                              sizeof(message)));
+            assert(second.homebrew && second.iso_ready);
+            assert(unlink(alias_dir) == 0);
+#else
+            {
+                char command[3 * NATIVE_TEST_PATH_MAX + 512];
+                snprintf(command, sizeof(command), "cmd /c mklink /J \"%s\" \"%s\" >NUL",
+                         alias_dir, folder_path);
+                if (system(command) == 0) {
+                    psn_test_refused(alias_path, "HOMEBREW_ALREADY_ADDED", "MYHB");
+                    assert(RemoveDirectoryA(alias_dir));
+                } else {
+                    printf("[PLAYER_STATE_TEST] NOT_RUN: mklink /J is unavailable here\n");
+                }
+            }
+#endif
+        }
+#ifndef _WIN32
+        /* A folder whose path holds a control character is refused by name (N3): its record
+           would not be one line. */
+        {
+            char odd_dir[NATIVE_TEST_PATH_MAX + 160];
+            char odd_path[NATIVE_TEST_PATH_MAX + 192];
+            uint8_t *bytes;
+            size_t bytes_len = 0;
+            snprintf(odd_dir, sizeof(odd_dir), "%s%codd\nparent%cMYHB", base, sep, sep);
+            assert(nk_platform_mkdir_p(odd_dir));
+            snprintf(odd_path, sizeof(odd_path), "%s%cEBOOT.PBP", odd_dir, sep);
+            bytes = psn_test_read_file(pbp_path, &bytes_len);
+            assert(bytes != NULL);
+            write_binary_file(odd_path, bytes, bytes_len);
+            free(bytes);
+            psn_test_refused(odd_path, "HOMEBREW_FOLDER_UNSUPPORTED", "control character");
+            snprintf(odd_dir, sizeof(odd_dir), "%s%codd\nparent", base, sep);
+            assert(test_remove_tree(odd_dir));
+        }
+#endif
+
+        /* The stop names what clears it, and that works (review of #2426, S1). In the
+           library: its removal with the disc copy ticked. Removed with the default options,
+           the copy stays: the card says so, and its Delete kept copy deletes it, never the
+           files the program wrote on its Memory Stick. Failing before: the message told the
+           user to remove a title that was not in the library, and nothing in the player
+           deleted the kept copy. */
+        {
+            PlayerApp *lib = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+            NkGameEntry entry;
+            PlayerPsnPackage refused;
+            char saves_root[NK_MAX_PATH];
+            char stick_dir[NK_MAX_PATH * 2];
+            char stick_file[NK_MAX_PATH * 2 + 16];
+            char error[NK_MAX_PATH + 256];
+            const char *label;
+            bool stick_was_there;
+            int index;
+            assert(lib != NULL);
+            nk_library_init(&lib->library);
+            {
+                char library_file[NATIVE_TEST_PATH_MAX + 96];
+                size_t length;
+                snprintf(library_file, sizeof(library_file), "%s%clibrary2426.json", base, sep);
+                length = strlen(library_file);
+                assert(length < sizeof(lib->library.library_path));
+                memcpy(lib->library.library_path, library_file, length + 1u);
+            }
+            seed_entry(&entry, package.disc_id, "My Homebrew");
+            snprintf(entry.iso_path, sizeof(entry.iso_path), "%s", again.iso_path);
+            assert(nk_library_add_or_update(&lib->library, &entry) == NK_OK);
+            player_app_sync_library(lib);
+            assert(player_app_find_game_by_disc_id(lib, package.disc_id) == 0);
+            lib->active_view = VIEW_LIBRARY;
+            /* The files the program wrote, on its Memory Stick. */
+            assert(nk_platform_get_path(NK_PATH_SAVES, saves_root, sizeof(saves_root)));
+            snprintf(stick_dir, sizeof(stick_dir), "%s%c%s", saves_root, sep, package.disc_id);
+            stick_was_there = !nk_platform_path_missing(stick_dir);
+            snprintf(stick_dir, sizeof(stick_dir), "%s%c%s%cPSP%cGAME%cMYHB", saves_root, sep,
+                     package.disc_id, sep, sep, sep);
+            assert(nk_platform_mkdir_p(stick_dir));
+            snprintf(stick_file, sizeof(stick_file), "%s%cSAVE.DAT", stick_dir, sep);
+            write_binary_file(stick_file, (const uint8_t *)"written by the program", 22u);
+
+            /* In the library. */
+            assert(!player_psn_package_inspect(second_path, &refused, code, sizeof(code), message,
+                                               sizeof(message)));
+            player_app_refuse_homebrew_elsewhere(lib, &refused, NULL, 0u);
+            assert(lib->active_view == VIEW_ERROR &&
+                   strcmp(lib->last_error.error_code, "HOMEBREW_ALREADY_ADDED") == 0);
+            assert(strstr(lib->last_error.message, "is in the library") != NULL);
+            assert(strstr(lib->last_error.message,
+                          "\"Also delete the decrypted files and disc copy\" ticked") != NULL);
+            assert(strstr(lib->last_error.message, "MYHB") != NULL);
+            assert(player_error_retry_label(&lib->last_error) == NULL);
+            assert(!player_app_delete_kept_homebrew(lib, package.disc_id, error, sizeof(error)));
+            assert(strstr(error, "is in the library") != NULL);
+            assert(!nk_platform_path_missing(again.iso_path));
+
+            /* Removed with the default options: the copy is kept, and so is the stop. */
+            assert(player_app_remove_game_and_data(lib, 0, 0u, error, sizeof(error)));
+            assert(lib->game_count == 0 && !nk_platform_path_missing(again.iso_path));
+            assert(!player_psn_package_inspect(second_path, &refused, code, sizeof(code), message,
+                                               sizeof(message)));
+            assert(strcmp(code, "HOMEBREW_ALREADY_ADDED") == 0);
+            /* However long the first folder's path, the card keeps what clears the stop (cold
+               read of #2426, finding 1): the path comes last. */
+            {
+                uint8_t *kept_record;
+                size_t kept_record_len = 0;
+                char long_record[700];
+                kept_record = psn_test_read_file(record_path, &kept_record_len);
+                assert(kept_record != NULL);
+                memset(long_record, 'a', sizeof(long_record));
+                long_record[0] = '/';
+                memcpy(long_record + 600, "\nMYHB\n", 7u);
+                write_binary_file(record_path, (const uint8_t *)long_record, 607u);
+                player_app_refuse_homebrew_elsewhere(lib, &refused, NULL, 0u);
+                assert(strstr(lib->last_error.message, "Delete kept copy") != NULL);
+                assert(strstr(lib->last_error.message, "Nothing was changed.") != NULL);
+                write_binary_file(record_path, kept_record, kept_record_len);
+                free(kept_record);
+            }
+            player_app_refuse_homebrew_elsewhere(lib, &refused, NULL, 0u);
+            assert(strstr(lib->last_error.message, "has left the library") != NULL);
+            assert(strstr(lib->last_error.message, "Delete kept copy") != NULL);
+            label = player_error_retry_label(&lib->last_error);
+            assert(label != NULL && strcmp(label, "Delete kept copy") == 0);
+            assert(strcmp(lib->last_error.subject_disc_id, package.disc_id) == 0);
+            assert(!nk_platform_path_missing(record_path));
+            /* Another player has added the title again: the library file is read again under
+               its lock, and nothing is deleted (cold read of #2426, finding 3). */
+            {
+                NkLibrary *disk = (NkLibrary *)calloc(1, sizeof(NkLibrary));
+                assert(disk != NULL);
+                nk_library_init(disk);
+                snprintf(entry.iso_path, sizeof(entry.iso_path), "%s", again.iso_path);
+                assert(nk_library_add_or_update(disk, &entry) == NK_OK);
+                assert(nk_library_save(disk, lib->library.library_path) == NK_OK);
+                assert(!player_app_delete_kept_homebrew(lib, package.disc_id, error,
+                                                        sizeof(error)));
+                assert(strstr(error, "in the library again") != NULL);
+                assert(!nk_platform_path_missing(again.iso_path));
+                nk_library_init(disk);
+                assert(nk_library_save(disk, lib->library.library_path) == NK_OK);
+                free(disk);
+            }
+            /* Where the first folder's path is shown (review of #2426, N7 and question 4): on
+               the card, with the profile folder as "~"; Copy details and the report link
+               carry no message, so not there at all; and the --iso route's stderr line, which
+               can be player-output.txt and so reach a problem report, carries the title and
+               what clears the stop but not the folder (review of #2426's fixes, S2; the route
+               and the bundle are in tools/test_player_package_route.py). */
+            {
+                char report[PLAYER_ERROR_DETAILS_MAX + 4096];
+                char log_line[sizeof(lib->last_error.message)];
+                player_app_refuse_homebrew_elsewhere(lib, &refused, log_line, sizeof(log_line));
+                assert(strstr(log_line, "My Homebrew") != NULL &&
+                       strstr(log_line, "Delete kept copy") != NULL);
+                assert(strstr(log_line, "MYHB") == NULL && strstr(log_line, base) == NULL &&
+                       strstr(log_line, "added from the folder") == NULL);
+                assert(strstr(lib->last_error.message, "added from the folder") != NULL);
+                const char *home = getenv(sep == '\\' ? "USERPROFILE" : "HOME");
+                if (home != NULL && home[0] != '\0' && native_test_path_within(folder_path, home)) {
+                    assert(strstr(lib->last_error.message, home) == NULL);
+                    assert(strstr(lib->last_error.message, "\"~") != NULL);
+                }
+                assert(player_app_format_error_report_for(lib, "0.0.0", home, NULL, report,
+                                                          sizeof(report)) > 0u);
+                assert(strstr(report, "HOMEBREW_ALREADY_ADDED") != NULL);
+                assert(strstr(report, "MYHB") == NULL && strstr(report, base) == NULL);
+            }
+
+            /* Delete kept copy: the image, the folder copy and the records go; the stick stays. */
+            assert(player_app_retry_from_error(lib));
+            assert(lib->active_view == VIEW_LIBRARY && strstr(lib->library_notice, "deleted"));
+            assert(nk_platform_path_missing(again.iso_path) && nk_platform_path_missing(view_root));
+            assert(nk_platform_path_missing(record_path));
+            after = psn_test_read_file(stick_file, &after_len);
+            assert(after != NULL && after_len == 22u &&
+                   memcmp(after, "written by the program", 22u) == 0);
+            free(after);
+
+            /* The second folder now imports. */
+            assert(player_psn_package_inspect(second_path, &second, code, sizeof(code), message,
+                                              sizeof(message)));
+            assert(second.homebrew && !second.iso_ready);
+            assert(player_psn_package_convert(&second, &hooks, code, sizeof(code), message,
+                                              sizeof(message)));
+            snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cSECOND%cDATA.TXT", view_root,
+                     sep, sep, sep, sep);
+            assert(nk_platform_file_exists(view_path));
+
+            /* In the library from the second folder: the first stops, naming the removal, and
+               that removal with the disc copy ticked lets the first in again. */
+            snprintf(entry.iso_path, sizeof(entry.iso_path), "%s", second.iso_path);
+            assert(nk_library_add_or_update(&lib->library, &entry) == NK_OK);
+            player_app_sync_library(lib);
+            index = player_app_find_game_by_disc_id(lib, package.disc_id);
+            assert(index >= 0);
+            assert(!player_psn_package_inspect(pbp_path, &refused, code, sizeof(code), message,
+                                               sizeof(message)));
+            player_app_refuse_homebrew_elsewhere(lib, &refused, NULL, 0u);
+            assert(strstr(lib->last_error.message, "is in the library") != NULL &&
+                   strstr(lib->last_error.message, "SECOND") != NULL);
+            assert(player_app_remove_game_and_data(lib, index, PLAYER_REMOVE_ALSO_DISC_COPY,
+                                                   error, sizeof(error)));
+            assert(nk_platform_path_missing(second.iso_path));
+            assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                              sizeof(message)));
+            assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
+                                              sizeof(message)));
+            after = psn_test_read_file(stick_file, &after_len);
+            assert(after != NULL && after_len == 22u);
+            free(after);
+            /* Delete kept copy deletes only a program's import in discs/ (cold read of #2426,
+               finding 3): a disc image that is not a program's, and a program's image outside
+               discs/, are refused, and nothing beside them goes. */
+            {
+                char plain_dir[NATIVE_TEST_PATH_MAX + 160];
+                char plain_iso[NATIVE_TEST_PATH_MAX + 192];
+                char plain_view[NATIVE_TEST_PATH_MAX + 192];
+                char problem[512];
+                uint8_t *image_bytes;
+                size_t image_len = 0;
+                snprintf(plain_dir, sizeof(plain_dir), "%s%cdiscs%cXZZZ99999", data_root, sep,
+                         sep);
+                assert(nk_platform_mkdir_p(plain_dir));
+                snprintf(plain_iso, sizeof(plain_iso), "%s%cXZZZ99999.iso", plain_dir, sep);
+                snprintf(plain_view, sizeof(plain_view), "%s%cXZZZ99999.ms0", plain_dir, sep);
+                write_binary_file(plain_iso, (const uint8_t *)"not a program", 13u);
+                assert(nk_platform_mkdir_p(plain_view));
+                assert(!nk_pbp_homebrew_delete_import(plain_iso, problem, sizeof(problem)));
+                assert(strstr(problem, "not a program's import") != NULL);
+                assert(nk_platform_file_exists(plain_iso) && nk_platform_dir_exists(plain_view));
+                assert(test_remove_tree(plain_dir));
+                snprintf(plain_dir, sizeof(plain_dir), "%s%celsewhere", base, sep);
+                assert(nk_platform_mkdir_p(plain_dir));
+                snprintf(plain_iso, sizeof(plain_iso), "%s%cXZZZ99999.iso", plain_dir, sep);
+                snprintf(plain_view, sizeof(plain_view), "%s%cXZZZ99999.ms0", plain_dir, sep);
+                image_bytes = psn_test_read_file(again.iso_path, &image_len);
+                assert(image_bytes != NULL);
+                write_binary_file(plain_iso, image_bytes, image_len);
+                free(image_bytes);
+                assert(nk_platform_mkdir_p(plain_view));
+                assert(!nk_pbp_homebrew_delete_import(plain_iso, problem, sizeof(problem)));
+                assert(nk_platform_file_exists(plain_iso) && nk_platform_dir_exists(plain_view));
+                assert(test_remove_tree(plain_dir));
+            }
+            if (!stick_was_there) {
+                snprintf(stick_dir, sizeof(stick_dir), "%s%c%s", saves_root, sep,
+                         package.disc_id);
+                assert(test_remove_tree(stick_dir));
+            }
+            remove(lib->library.library_path);
+            free(lib);
+        }
+        assert(test_remove_tree(second_dir));
+    }
+
+    /* A package not named EBOOT.PBP, in capitals, as the file has it on the disk, is refused
+       by name at import (review of #2426, S1): the view and the launch use that one name, so
+       such a package imported and then never started. */
+    {
+        static const char *const names[] = { "eboot.pbp", "MyGame.PBP" };
+        for (size_t n = 0; n < sizeof(names) / sizeof(names[0]); ++n) {
+            char named_dir[NATIVE_TEST_PATH_MAX + 128];
+            char named_path[NATIVE_TEST_PATH_MAX + 192];
+            char want[64];
+            snprintf(named_dir, sizeof(named_dir), "%s%cNAMED%u", base, sep, (unsigned)n);
+            assert(nk_platform_mkdir_p(named_dir));
+            snprintf(named_path, sizeof(named_path), "%s%c%s", named_dir, sep, names[n]);
+            pbp = homebrew_pbp("Named", program, 88u, NULL, 0, &pbp_len);
+            write_binary_file(named_path, pbp, pbp_len);
+            free(pbp);
+            snprintf(want, sizeof(want), "is named \"%s\"", names[n]);
+            psn_test_refused(named_path, "HOMEBREW_FOLDER_UNSUPPORTED", want);
+        }
+    }
+
+    /* A folder whose path is not ASCII imports (review of #2426, S2): on Windows the path
+       went through the system code page and was refused as a folder that could not be
+       found. The program's own folder keeps an ASCII name. */
+    {
+        char wide_dir[NATIVE_TEST_PATH_MAX + 160];
+        char wide_path[NATIVE_TEST_PATH_MAX + 192];
+        FILE *file;
+        PlayerPsnPackage wide;
+        snprintf(wide_dir, sizeof(wide_dir), "%s%c\xE6\x97\xA5\xE6\x9C\xAC%cWIDE", base, sep,
+                 sep);
+        assert(nk_platform_mkdir_p(wide_dir));
+        snprintf(wide_path, sizeof(wide_path), "%s%cEBOOT.PBP", wide_dir, sep);
+        pbp = homebrew_pbp("Wide", program, 88u, NULL, 0, &pbp_len);
+        file = nk_fopen_utf8(wide_path, "wb");
+        assert(file != NULL);
+        assert(fwrite(pbp, 1, pbp_len, file) == pbp_len);
+        assert(fclose(file) == 0);
+        free(pbp);
+        assert(player_psn_package_inspect(wide_path, &wide, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(wide.homebrew);
+        /* The test's own tree removal is ANSI on Windows; the platform's is not. */
+        *strrchr(wide_dir, sep) = '\0';
+        assert(nk_platform_remove_tree(wide_dir, NULL));
+    }
 
     /* The wizard says what is happening. */
     app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
@@ -7018,6 +7697,168 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     assert(strstr(app->wizard.status_message, "My Homebrew") != NULL);
     assert(strstr(app->wizard.status_message, "PSN") == NULL);
     free(app);
+
+    /* A package whose folder cannot be the program's is refused by name before anything is
+       written: a folder that also holds Nakagawa's data folder (its copy would hold itself),
+       and a folder name a PSP's Memory Stick cannot hold. */
+    {
+        char loose_path[NATIVE_TEST_PATH_MAX + 288];
+        char odd_folder[NATIVE_TEST_PATH_MAX + 192];
+        snprintf(loose_path, sizeof(loose_path), "%s%cLOOSE.PBP", base, sep);
+        pbp = homebrew_pbp("Loose", program, 88u, NULL, 0, &pbp_len);
+        write_binary_file(loose_path, pbp, pbp_len);
+        psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED",
+                         "also holds Nakagawa's data folder");
+        /* Longer than the 64 characters a program's folder name may have. */
+        snprintf(odd_folder, sizeof(odd_folder), "%s%c%s", base, sep,
+                 "Folder-name-far-longer-than-a-Memory-Stick-program-folder-may-have");
+        assert(nk_platform_mkdir_p(odd_folder));
+        snprintf(loose_path, sizeof(loose_path), "%s%cEBOOT.PBP", odd_folder, sep);
+        write_binary_file(loose_path, pbp, pbp_len);
+        free(pbp);
+        psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED",
+                         "has no name a PSP's Memory Stick can hold");
+    }
+    /* A folder past the bounds is refused by name: more than 4096 entries, or more than 16
+       levels of folders. */
+    {
+        char crowded[NATIVE_TEST_PATH_MAX + 128];
+        char entry[NATIVE_TEST_PATH_MAX + 320];
+        char deep[NATIVE_TEST_PATH_MAX + 256];
+        snprintf(crowded, sizeof(crowded), "%s%cCROWDED", base, sep);
+        assert(nk_platform_mkdir_p(crowded));
+        snprintf(entry, sizeof(entry), "%s%cEBOOT.PBP", crowded, sep);
+        pbp = homebrew_pbp("Crowded", program, 88u, NULL, 0, &pbp_len);
+        write_binary_file(entry, pbp, pbp_len);
+        for (unsigned i = 0; i < NK_PBP_HOMEBREW_FOLDER_MAX_ENTRIES; ++i) {
+            snprintf(entry, sizeof(entry), "%s%cF%04u.BIN", crowded, sep, i);
+            write_binary_file(entry, (const uint8_t *)"x", 1u);
+        }
+        snprintf(entry, sizeof(entry), "%s%cEBOOT.PBP", crowded, sep);
+        psn_test_refused(entry, "HOMEBREW_FOLDER_UNSUPPORTED", "more than 4096 files");
+        assert(test_remove_tree(crowded));
+        snprintf(deep, sizeof(deep), "%s%cDEEP", base, sep);
+        assert(nk_platform_mkdir_p(deep));
+        snprintf(entry, sizeof(entry), "%s%cEBOOT.PBP", deep, sep);
+        write_binary_file(entry, pbp, pbp_len);
+        free(pbp);
+        for (unsigned level = 0; level <= NK_PBP_HOMEBREW_FOLDER_MAX_DEPTH; ++level) {
+            size_t used = strlen(deep);
+            snprintf(deep + used, sizeof(deep) - used, "%cd", sep);
+        }
+        assert(nk_platform_mkdir_p(deep));
+        psn_test_refused(entry, "HOMEBREW_FOLDER_UNSUPPORTED", "more than 16 levels");
+    }
+#if !defined(_WIN32) && !defined(_WIN64)
+    /* A link, which a copy would leave out or follow out of the folder, and a name a Memory
+       Stick cannot hold, are refused by name (Windows cannot make either without rights or
+       at all). */
+    {
+        char odd[NATIVE_TEST_PATH_MAX + 128];
+        char entry[NATIVE_TEST_PATH_MAX + 192];
+        char program_path[NATIVE_TEST_PATH_MAX + 192];
+        snprintf(odd, sizeof(odd), "%s%cLINKED", base, sep);
+        assert(nk_platform_mkdir_p(odd));
+        snprintf(program_path, sizeof(program_path), "%s%cEBOOT.PBP", odd, sep);
+        pbp = homebrew_pbp("Linked", program, 88u, NULL, 0, &pbp_len);
+        write_binary_file(program_path, pbp, pbp_len);
+        free(pbp);
+        snprintf(entry, sizeof(entry), "%s%cSECRET.TXT", odd, sep);
+        assert(symlink(data_path, entry) == 0);
+        psn_test_refused(program_path, "HOMEBREW_FOLDER_UNSUPPORTED", "a link");
+        assert(unlink(entry) == 0);
+        snprintf(entry, sizeof(entry), "%s%cWHAT?.TXT", odd, sep);
+        write_binary_file(entry, (const uint8_t *)"x", 1u);
+        psn_test_refused(program_path, "HOMEBREW_FOLDER_UNSUPPORTED",
+                         "has a name a PSP's Memory Stick cannot hold");
+        assert(unlink(entry) == 0);
+        /* A linked sub-folder is a link too (review of #2426). */
+        snprintf(entry, sizeof(entry), "%s%cSUB", odd, sep);
+        assert(symlink(folder_path, entry) == 0);
+        psn_test_refused(program_path, "HOMEBREW_FOLDER_UNSUPPORTED", "a link");
+        assert(unlink(entry) == 0);
+        /* A hard link is a file like any other: its bytes are the folder's (review of #2426,
+           N3, accepted as documented in nk_pbp_homebrew.h). */
+        snprintf(entry, sizeof(entry), "%s%cHARD.TXT", odd, sep);
+        assert(link(data_path, entry) == 0);
+        {
+            PlayerPsnPackage linked;
+            assert(player_psn_package_inspect(program_path, &linked, code, sizeof(code),
+                                              message, sizeof(message)));
+        }
+        assert(unlink(entry) == 0);
+        /* The 1 GiB bound, on a sparse file (review of #2426). */
+        snprintf(entry, sizeof(entry), "%s%cBIG.BIN", odd, sep);
+        write_binary_file(entry, (const uint8_t *)"x", 1u);
+        assert(truncate(entry, (off_t)NK_PBP_HOMEBREW_FOLDER_MAX_BYTES + 1) == 0);
+        psn_test_refused(program_path, "HOMEBREW_FOLDER_UNSUPPORTED", "more than 1 GiB");
+        assert(unlink(entry) == 0);
+    }
+#else
+    /* A junction, which needs no rights to make, is refused like a link (review of #2426). */
+    {
+        char odd[NATIVE_TEST_PATH_MAX + 128];
+        char entry[NATIVE_TEST_PATH_MAX + 192];
+        char program_path[NATIVE_TEST_PATH_MAX + 192];
+        char command[3 * NATIVE_TEST_PATH_MAX + 512];
+        snprintf(odd, sizeof(odd), "%s%cJUNCTION", base, sep);
+        assert(nk_platform_mkdir_p(odd));
+        snprintf(program_path, sizeof(program_path), "%s%cEBOOT.PBP", odd, sep);
+        pbp = homebrew_pbp("Junction", program, 88u, NULL, 0, &pbp_len);
+        write_binary_file(program_path, pbp, pbp_len);
+        free(pbp);
+        snprintf(entry, sizeof(entry), "%s%cSUB", odd, sep);
+        snprintf(command, sizeof(command), "cmd /c mklink /J \"%s\" \"%s\" >NUL", entry,
+                 folder_path);
+        if (system(command) == 0) {
+            psn_test_refused(program_path, "HOMEBREW_FOLDER_UNSUPPORTED", "a junction");
+            assert(RemoveDirectoryA(entry));
+        } else {
+            printf("[PLAYER_STATE_TEST] NOT_RUN: mklink /J is unavailable here\n");
+        }
+    }
+#endif
+    /* A package picked from the user's home folder (or Downloads, Documents and the other
+       personal folders, wherever the system keeps them) does not take the user's own files
+       along as the program's folder: refused by name, nothing copied. */
+    {
+        char home[NATIVE_TEST_PATH_MAX + 96];
+        char loose_path[NATIVE_TEST_PATH_MAX + 160];
+        const char *home_name =
+#if defined(_WIN32) || defined(_WIN64)
+            "USERPROFILE";
+#else
+            "HOME";
+#endif
+        const char *previous = getenv(home_name);
+        char saved[NATIVE_TEST_PATH_MAX + 96];
+        bool had_home = previous != NULL;
+        snprintf(saved, sizeof(saved), "%s", previous ? previous : "");
+        snprintf(home, sizeof(home), "%s%chome", base, sep);
+        assert(nk_platform_mkdir_p(home));
+        snprintf(loose_path, sizeof(loose_path), "%s%cEBOOT.PBP", home, sep);
+        pbp = homebrew_pbp("Downloaded", program, 88u, NULL, 0, &pbp_len);
+        write_binary_file(loose_path, pbp, pbp_len);
+        free(pbp);
+        nk_ps_set_env(home_name, home);
+        psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED", "which holds your own files");
+        /* A folder that holds the home folder takes it along as well (review of #2426, m4). */
+        {
+            char holder[NATIVE_TEST_PATH_MAX + 96];
+            char inner[NATIVE_TEST_PATH_MAX + 128];
+            snprintf(holder, sizeof(holder), "%s%cHOLDER", base, sep);
+            snprintf(inner, sizeof(inner), "%s%cme", holder, sep);
+            assert(nk_platform_mkdir_p(inner));
+            snprintf(loose_path, sizeof(loose_path), "%s%cEBOOT.PBP", holder, sep);
+            pbp = homebrew_pbp("Holder", program, 88u, NULL, 0, &pbp_len);
+            write_binary_file(loose_path, pbp, pbp_len);
+            free(pbp);
+            nk_ps_set_env(home_name, inner);
+            psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED",
+                             "which holds your own files");
+        }
+        nk_ps_set_env(home_name, had_home ? saved : NULL);
+    }
 
     /* An encrypted program and a file that is not a program are refused by name, and nothing
        is written. */
@@ -7693,6 +8534,33 @@ static void test_input_classification_and_check_again(void) {
  * including Enhanced, each part's off switch at both levels, the launch line with its tier,
  * settings that round-trip and survive bad values, the per-run report's "Last session" line,
  * and Authentic taking 60 FPS game logic off. */
+/* The build a title selects carries its culling package exactly when the launch line the
+   launch work builds from that selection (player_play_config_session, as
+   player_launch_work_run calls it) carries cull=on (contract 11.3.6): a line with cull=on and a
+   build without a usable package would run unwidened, and a build with it and a line without
+   would carry a hook that never acts. */
+static void assert_cull_build_matches_line(const PlayerApp *app, int index) {
+    const GameRecord *game = &app->games[index];
+    bool with_hook = game->enhancement_package_id[0] &&
+                     (game->enhancement_hook_only || strchr(game->enhancement_package_id, '+'));
+    NkRuntimeConfig config;
+    memset(&config, 0, sizeof(config));
+    PlayerPlayResolved play;
+    player_play_config_session(&app->settings, game->disc_id,
+                               player_game_has_timing_package(game), false, &config, &play);
+    bool line_cull = strstr(config.ace_spec, ";cull=on") != NULL;
+    bool usable = app->title_enhancements[index].cull_available;
+    if (with_hook != (line_cull && usable)) {
+        fprintf(stderr, "cull build and launch line mismatch: variant=%s hook_only=%d usable=%d line=%s\n",
+                game->enhancement_package_id, (int)game->enhancement_hook_only, (int)usable,
+                config.ace_spec);
+    }
+    /* Without a usable culling package the line may still ask (the run then says cull
+       unavailable, and the title page names the package's problem); with one, they agree. */
+    assert(with_hook == (line_cull && usable));
+    assert(line_cull == player_app_title_cull_on(app, index));
+}
+
 static void test_play_mode_settings(void) {
     char sep = nk_platform_path_separator();
     char cache_root[512], root[700], path[800], line[192];
@@ -7854,11 +8722,47 @@ static void test_play_mode_settings(void) {
         assert(app->title_enhancements[1].available && app->title_enhancements[1].shipped);
         assert(strcmp(app->title_enhancements[1].package_id, "shipped-60hz") == 0);
         assert(app->title_enhancements[2].available && !app->title_enhancements[2].shipped);
+        /* A package is experimental unless it is the shipped one and declares
+           "experimental": false (section 9.10). */
+        assert(app->title_enhancements[1].experimental && app->title_enhancements[2].experimental);
+        assert(!player_app_title_60hz_released(app, 1) && !player_app_title_60hz_released(app, 2));
+        static const char *const k_flag_values[] = {"false", "true", "\"false\"", "0", "null"};
+        for (size_t v = 0; v < sizeof(k_flag_values) / sizeof(k_flag_values[0]); ++v) {
+            char text[160];
+            snprintf(text, sizeof(text),
+                     "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\","
+                     " \"experimental\": %s}", k_flag_values[v]);
+            write_text_file(file, text);
+            player_app_refresh_title_enhancements(app);
+            bool released = v == 0u;
+            assert(app->title_enhancements[1].available && app->title_enhancements[1].shipped);
+            assert(app->title_enhancements[1].experimental == !released);
+            assert(player_app_title_60hz_released(app, 1) == released);
+        }
+        /* The user's own copy of the released package comes first and still loads and plays,
+           but only the maintainer releases a package: it stays experimental. */
         snprintf(own, sizeof(own), "%s%cenhancements%ctest90002-60hz.json", root, sep, sep);
+        write_text_file(own,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\","
+            " \"experimental\": false}");
+        player_app_refresh_title_enhancements(app);
+        assert(app->title_enhancements[1].available && !app->title_enhancements[1].shipped &&
+               strcmp(app->title_enhancements[1].package_id, "shipped-60hz") == 0);
+        assert(app->title_enhancements[1].experimental && !player_app_title_60hz_released(app, 1));
+        remove(own);
+        /* The shipped package for another title is not usable, and not released. */
+        write_text_file(file,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-3\","
+            " \"experimental\": false}");
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[1].available && app->title_enhancements[1].experimental);
+        assert(!player_app_title_60hz_released(app, 1));
+        write_text_file(file,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\"}");
         write_text_file(own, "{}");
         player_app_refresh_title_enhancements(app);
         assert(!app->title_enhancements[1].available && !app->title_enhancements[1].shipped &&
-               app->title_enhancements[1].problem[0]);
+               app->title_enhancements[1].problem[0] && app->title_enhancements[1].experimental);
         remove(own);
         remove(file);
         player_app_refresh_title_enhancements(app);
@@ -7866,6 +8770,160 @@ static void test_play_mode_settings(void) {
         restore_environment_value("NK_INSTALL_ROOT", saved_install, had_install);
         free(saved_install);
         app->games[1].title_id[0] = '\0';
+    }
+
+    /* Wider culling (contract 11.3.6, 9.9): an Ace launch with the part on builds and launches
+       with the title's culling package, beside its timing package (<timing>+<hook>) or alone
+       with its 60 FPS game logic off; Authentic and Enhanced never do, nor does a title
+       without a usable culling package. Title 3 is on Ace with its 60 FPS game logic. */
+    {
+        char cull_file[820];
+        snprintf(cull_file, sizeof(cull_file), "%s%cenhancements%ctest90003-cull.json", root,
+                 sep, sep);
+        assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_LIBRARY);
+        for (int i = 0; i < 3; i++) player_app_cycle_title_play_mode(app, 2);   /* -> Ace */
+        assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_ACE);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        write_text_file(cull_file,
+            "{\"id\": \"fixture-cull\", \"target_title_id\": \"fixture-title\", "
+            "\"category\": \"guest_memory_code_hook\"}");
+        player_app_refresh_title_enhancements(app);
+        assert(app->title_enhancements[2].cull_available &&
+               strcmp(app->title_enhancements[2].cull_package_id, "fixture-cull") == 0 &&
+               !app->title_enhancements[2].cull_problem[0]);
+        /* The part is off: the timing build, as before. */
+        assert(!player_app_title_cull_on(app, 2));
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0 &&
+               !app->games[2].enhancement_hook_only);
+        assert_cull_build_matches_line(app, 2);
+        player_app_cycle_title_part(app, 2, PLAYER_PART_CULL);        /* library -> on */
+        assert(player_app_title_part(app, 2, PLAYER_PART_CULL) == 1);
+        assert(player_app_title_cull_on(app, 2));
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0 &&
+               !app->games[2].enhancement_hook_only);
+        player_play_resolve(&app->settings, "TEST90003", &r);
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";cull=on"));
+        assert_cull_build_matches_line(app, 2);
+        /* Its 60 FPS game logic off: the culling package is the build's one package. */
+        player_app_set_title_60hz(app, 2, false);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-cull") == 0 &&
+               app->games[2].enhancement_hook_only);
+        assert_cull_build_matches_line(app, 2);
+        player_app_set_title_60hz(app, 2, true);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0 &&
+               !app->games[2].enhancement_hook_only);
+        /* Authentic and Enhanced never build or launch it, the title's part still on. */
+        player_app_cycle_title_play_mode(app, 2);                     /* Ace -> library */
+        assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_LIBRARY &&
+               app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
+        assert(!player_app_title_cull_on(app, 2));
+        assert(!app->games[2].enhancement_package_id[0] && !app->games[2].enhancement_hook_only);
+        assert_cull_build_matches_line(app, 2);
+        player_app_cycle_title_play_mode(app, 2);                     /* -> Authentic */
+        assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_AUTHENTIC);
+        assert(!player_app_title_cull_on(app, 2) && !app->games[2].enhancement_package_id[0]);
+        assert_cull_build_matches_line(app, 2);
+        player_app_cycle_title_play_mode(app, 2);                     /* -> Enhanced */
+        assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_ENHANCED);
+        assert(!player_app_title_cull_on(app, 2) && !app->games[2].enhancement_package_id[0]);
+        assert_cull_build_matches_line(app, 2);
+        /* The session's 60 FPS switch runs a title on Enhanced as Ace (player_play_apply_logic_60),
+           so its line carries the title's cull=on and the build carries the culling package
+           beside the timing package. Failing before: it selected the timing package alone while
+           the line asked for cull. */
+        player_app_set_experimental_60hz_session(app, true);
+        assert(player_app_title_cull_on(app, 2));
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0 &&
+               !app->games[2].enhancement_hook_only);
+        assert_cull_build_matches_line(app, 2);
+        player_app_set_experimental_60hz_session(app, false);
+        assert(!app->games[2].enhancement_package_id[0]);
+        player_app_cycle_title_play_mode(app, 2);                     /* -> Ace */
+        assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_ACE);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0);
+        /* Following the library's part: its switch selects the build for every title. */
+        player_app_cycle_title_part(app, 2, PLAYER_PART_CULL);        /* on -> off */
+        assert(player_app_title_part(app, 2, PLAYER_PART_CULL) == 0);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        assert_cull_build_matches_line(app, 2);
+        player_app_cycle_title_part(app, 2, PLAYER_PART_CULL);        /* off -> library (off) */
+        assert(player_app_title_part(app, 2, PLAYER_PART_CULL) == -1);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        assert_cull_build_matches_line(app, 2);
+        player_app_cycle_enhanced_part(app, PLAYER_PART_CULL);        /* library off -> on */
+        assert(app->settings.enhanced.part[PLAYER_PART_CULL] == 1);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0);
+        assert_cull_build_matches_line(app, 2);
+        assert(!player_app_title_cull_problem(app, 2)[0]);
+        assert(!app->games[0].enhancement_package_id[0]);             /* no package: authentic */
+        /* A culling package that cannot ride: not a code-hook package, another game's, the
+           timing package's own id, or one whose joined name is too long. The timing build
+           stays, and the reason is kept. */
+        static const char *const unusable[] = {
+            "{\"id\": \"fixture-cull\", \"target_title_id\": \"fixture-title\", "
+            "\"category\": \"timing_frame_presentation\"}",
+            "{\"id\": \"fixture-cull\", \"target_title_id\": \"fixture-title\"}",
+            "{\"id\": \"fixture-cull\", \"target_title_id\": \"other-title\", "
+            "\"category\": \"guest_memory_code_hook\"}",
+            "{\"id\": \"fixture-60hz\", \"target_title_id\": \"fixture-title\", "
+            "\"category\": \"guest_memory_code_hook\"}",
+            "{\"id\": \"fixture-cull-0123456789012345678901234567890123456789012345678\", "
+            "\"target_title_id\": \"fixture-title\", \"category\": \"guest_memory_code_hook\"}",
+            "{"
+        };
+        for (size_t i = 0; i < sizeof(unusable) / sizeof(unusable[0]); i++) {
+            write_text_file(cull_file, unusable[i]);
+            player_app_refresh_title_enhancements(app);
+            assert(!app->title_enhancements[2].cull_available &&
+                   app->title_enhancements[2].cull_problem[0] &&
+                   !app->title_enhancements[2].cull_package_id[0]);
+            assert(app->title_enhancements[2].available);
+            assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0 &&
+                   !app->games[2].enhancement_hook_only);
+            assert_cull_build_matches_line(app, 2);
+            /* Named on the title page while the part asks for it, never silently dropped. */
+            assert(strcmp(player_app_title_cull_problem(app, 2),
+                          app->title_enhancements[2].cull_problem) == 0);
+        }
+        player_app_cycle_enhanced_part(app, PLAYER_PART_CULL);        /* library on -> off */
+        assert(!player_app_title_cull_problem(app, 2)[0]);
+        player_app_cycle_enhanced_part(app, PLAYER_PART_CULL);        /* library off -> on */
+        assert(player_app_title_cull_problem(app, 2)[0]);
+        remove(cull_file);
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[2].cull_available &&
+               !app->title_enhancements[2].cull_problem[0]);
+        assert(!player_app_title_cull_problem(app, 2)[0]);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        player_app_cycle_enhanced_part(app, PLAYER_PART_CULL);        /* library on -> off */
+        assert(app->settings.enhanced.part[PLAYER_PART_CULL] == 0);
+        player_app_cycle_title_play_mode(app, 2);                     /* Ace -> library */
+        assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_LIBRARY);
+        assert(!app->games[2].enhancement_package_id[0]);
+        /* The library's play mode reselects every title's build: with the session's 60 FPS
+           switch, a title following the library on Enhanced runs its timing package, and the
+           library turned to Authentic runs none. Failing before: the toggle kept the timing
+           build, which then launched with the line "off" and SR_EXPERIMENTAL_60HZ=1. */
+        player_app_set_experimental_60hz_session(app, true);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        assert(player_game_has_timing_package(&app->games[2]));
+        player_app_toggle_library_play_mode(app);                     /* Enhanced -> Authentic */
+        assert(app->settings.enhanced.library == PLAYER_PLAY_AUTHENTIC);
+        assert(!app->games[2].enhancement_package_id[0] &&
+               !player_game_has_timing_package(&app->games[2]));
+        player_app_toggle_library_play_mode(app);                     /* Authentic -> Enhanced */
+        assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        player_app_set_experimental_60hz_session(app, false);
+        assert(!app->games[2].enhancement_package_id[0]);
+        /* The culling package alone carries no timing package. */
+        GameRecord hook_only = app->games[2];
+        snprintf(hook_only.enhancement_package_id, sizeof(hook_only.enhancement_package_id),
+                 "fixture-cull");
+        hook_only.enhancement_hook_only = true;
+        assert(!player_game_has_timing_package(&hook_only));
+        hook_only.enhancement_hook_only = false;
+        assert(player_game_has_timing_package(&hook_only));
     }
 
     /* Per-part off switches at the library's level: a following title gets them. */
@@ -7976,7 +9034,8 @@ static void test_play_mode_settings(void) {
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"},") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -8174,7 +9233,8 @@ static void test_play_mode_sas_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8201,7 +9261,8 @@ static void test_play_mode_sas_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -8268,7 +9329,8 @@ static void test_play_mode_cull_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -8357,7 +9419,8 @@ static void test_play_mode_stick_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"on\", "
-                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         free(saved);
     }
 
@@ -8520,7 +9583,8 @@ static void test_play_mode_load_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"fast\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"load\": \"fast\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST95001\": {\"mode\": \"ace\", \"load\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8622,7 +9686,7 @@ static void test_play_mode_ssaa_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\"}") != NULL);
+        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\", \"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"ssaa\": \"4\"}") != NULL && strstr(saved, "\"ssaa\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8655,6 +9719,81 @@ static void test_play_mode_ssaa_settings(void) {
     free(app);
     printf("PASS: supersampling is off by default and in every preset, read and saved at both levels, "
            "and Enhanced and Ace launches carry it\n");
+}
+
+/* Smooth far textures (contract 10.16, 11.3.8): off in a fresh file and in every preset; a
+ * library "mips" and a title's own are read, the title's wins, both survive a save and a load, an
+ * Enhanced or Ace launch with the part on carries ";mips=on" right after twin, and a launch with it off carries
+ * no key, so its line is the line of a build without the part. */
+static void test_play_mode_mips_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_mips_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+    assert(player_enhanced_part(PLAYER_PART_MIPS)->fresh == 0);
+    assert(strcmp(player_enhanced_part(PLAYER_PART_MIPS)->key, "mips") == 0);
+
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"mips\": \"on\"},"
+        " \"title_play\": {\"TEST95001\": {\"mode\": \"enhanced\", \"mips\": \"off\"},"
+        " \"TEST95002\": {\"mode\": \"ace\"}, \"TEST95003\": {\"mode\": \"authentic\"}}}");
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_MIPS] == 1);
+    player_play_resolve(&app->settings, "TEST95001", &r);
+    assert(r.on && r.part[PLAYER_PART_MIPS] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "mips") == NULL);
+    player_play_resolve(&app->settings, "TEST95002", &r);       /* follows the library */
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_MIPS] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line + strlen(line) - 8, ";mips=on") == 0);
+    /* With Wider culling on too, cull stays last though its part comes before mips in the enum:
+       the line follows ace_format's key order (mips right after twin, cull last). */
+    r.part[PLAYER_PART_CULL] = 1;
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 25, ";twin=off;mips=on;cull=on") == 0);
+    r.part[PLAYER_PART_CULL] = 0;
+    player_play_resolve(&app->settings, "TEST95004", &r);       /* Enhanced by the library */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_MIPS] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line + strlen(line) - 8, ";mips=on") == 0);
+    player_play_resolve(&app->settings, "TEST95003", &r);       /* Authentic has no line */
+    assert(!r.on);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", \"mips\": \"on\"}") != NULL);
+        assert(strstr(saved, "\"TEST95001\": {\"mode\": \"enhanced\", \"mips\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_MIPS] == 1);
+    player_play_resolve(&back->settings, "TEST95001", &r);
+    assert(r.on && r.part[PLAYER_PART_MIPS] == 0);
+
+    /* A file that never had the key, or has a word this build does not know, leaves it off. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\"},"
+        " \"title_play\": {\"TEST95001\": {\"mode\": \"ace\", \"mips\": \"max\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_MIPS] == 0);
+    player_play_resolve(&app->settings, "TEST95001", &r);
+    assert(r.on && r.part[PLAYER_PART_MIPS] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "mips") == NULL);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: smooth far textures is off by default, read and saved at both levels, and launched only when on\n");
 }
 
 /* Finer patches (contract 10.14, 11.3.7) at both levels: off in a fresh file and in no graphics
@@ -8709,7 +9848,8 @@ static void test_play_mode_tess_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
                                       "\"upscale\": \"off\", \"stick\": \"off\", \"load\": \"off\", "
-                                      "\"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);
@@ -9178,7 +10318,8 @@ static void test_play_mode_twin_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"off\", \"twin\": \"on\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"on\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9204,7 +10345,8 @@ static void test_play_mode_twin_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"on\"}") != NULL);
         free(saved);
     }
@@ -9504,7 +10646,8 @@ static void test_play_mode_upscale_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
                                       "\"upscale\": \"fsr1\", \"stick\": \"off\", \"load\": \"off\", "
-                                      "\"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9678,6 +10821,34 @@ static void test_enhanced_package_variants(void) {
         char identity[65];
         assert(!nk_launch_runtime_package_cache_identity(root, &bad, identity));
     }
+    /* A build of a timing package with a code-hook package (contract 9.9): two different
+       valid ids joined by one '+', 64 characters at most in all. */
+    assert(nk_title_manifest_enhancement_variant_valid("fixture-60hz"));
+    assert(nk_title_manifest_enhancement_variant_valid("fixture-60hz+fixture-cull"));
+    assert(nk_title_manifest_enhancement_variant_valid(
+        "a123456789012345678901234567890+b1234567890123456789012345678901"));      /* 64 */
+    static const char *const refused_variants[] = {
+        "", "+fixture-cull", "fixture-60hz+", "fixture-60hz+fixture-60hz", "a+b+c",
+        "fixture-60hz+../escape", "../escape+fixture-cull", "Fixture+cull", "a++b",
+        "a123456789012345678901234567890+b12345678901234567890123456789013"         /* 65 */
+    };
+    for (size_t i = 0; i < sizeof(refused_variants) / sizeof(refused_variants[0]); i++) {
+        assert(!nk_title_manifest_enhancement_variant_valid(refused_variants[i]));
+        assert(!nk_title_manifest_enhancement_id_valid(refused_variants[i]));
+        if (!refused_variants[i][0]) continue;
+        assert(!nk_title_manifest_package_dir_name(disc_id, refused_variants[i], name,
+                                                   sizeof(name)));
+    }
+    assert(!nk_title_manifest_enhancement_id_valid("fixture-60hz+fixture-cull"));
+    {
+        NkGameEntry joined = stock;
+        char expected[128];
+        snprintf(joined.enhancement_package_id, sizeof(joined.enhancement_package_id),
+                 "fixture-60hz+fixture-cull");
+        assert(nk_launch_package_dir_name(&joined, name, sizeof(name)));
+        snprintf(expected, sizeof(expected), "%s-enhanced-fixture-60hz+fixture-cull", disc_id);
+        assert(strcmp(name, expected) == 0);
+    }
     assert(!nk_title_manifest_package_dir_name("ULUS1234", NULL, name, sizeof(name)));
     assert(!nk_title_manifest_package_dir_name("../S12345", NULL, name, sizeof(name)));
     assert(!nk_title_manifest_package_dir_name(disc_id, "fixture-60hz", name, 12));
@@ -9752,6 +10923,62 @@ static void test_enhanced_package_variants(void) {
         "fixture-60hz", NULL);
     assert(nk_launch_validate_runtime_package(root, &enhanced, &info, reason,
                                               sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+    /* A culling build beside the timing package (contract 9.9) records both, and its folder
+       holds only that build: the timing build without the culling package, or one with
+       another culling package, is refused there, and a build with a culling package is
+       refused in the timing-only folder and the authentic one. */
+    {
+        NkGameEntry joined = stock;
+        char joined_dir[1000];
+        snprintf(joined.enhancement_package_id, sizeof(joined.enhancement_package_id),
+                 "fixture-60hz+fixture-cull");
+        snprintf(joined_dir, sizeof(joined_dir), "%s-enhanced-fixture-60hz+fixture-cull",
+                 stock_dir);
+        write_runtime_package_fixture_variant(
+            root, disc_id, "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+            "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL, NULL, 0, false,
+            "fixture-60hz+fixture-cull", "fixture-60hz+fixture-cull");
+        assert(nk_launch_validate_runtime_package(root, &joined, &info, reason,
+                                                  sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+        assert(strstr(info.package_root, "-enhanced-fixture-60hz+fixture-cull") != NULL);
+        static const char *const wrong[] = {"fixture-60hz", "fixture-60hz+other-cull",
+                                            "other-60hz+fixture-cull"};
+        for (size_t i = 0; i < sizeof(wrong) / sizeof(wrong[0]); i++) {
+            write_runtime_package_fixture_variant(
+                root, disc_id, "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+                "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL, NULL, 0, false,
+                "fixture-60hz+fixture-cull", wrong[i]);
+            assert(nk_launch_validate_runtime_package(root, &joined, &info, reason,
+                                                      sizeof(reason)) ==
+                   NK_RUNTIME_PACKAGE_STALE);
+            assert(strstr(reason, "not built from enhancement package "
+                                  "fixture-60hz+fixture-cull") != NULL);
+        }
+        write_runtime_package_fixture_variant(
+            root, disc_id, "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+            "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL, NULL, 0, false,
+            "fixture-60hz", "fixture-60hz+fixture-cull");
+        assert(nk_launch_validate_runtime_package(root, &enhanced, &info, reason,
+                                                  sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+        assert(strstr(reason, "not built from enhancement package fixture-60hz") != NULL);
+        write_runtime_package_fixture_variant(
+            root, disc_id, "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+            "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL, NULL, 0, false,
+            NULL, "fixture-60hz+fixture-cull");
+        assert(nk_launch_validate_runtime_package(root, &stock, &info, reason,
+                                                  sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+        assert(strstr(reason, "authentic package folder is an enhanced build") != NULL);
+        static const char *const files[] = {
+            "package.json", "build-report.json", "completion-manifest.json",
+            "synthetic-allegrex-v1.exe", "synthetic-allegrex-v1_image.bin"
+        };
+        char path[1100];
+        for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+            snprintf(path, sizeof(path), "%s%c%s", joined_dir, sep, files[i]);
+            remove(path);
+        }
+        (void)test_rmdir(joined_dir);
+    }
 
     /* Clean up both folders. */
     remove_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1");
@@ -10182,6 +11409,103 @@ static void test_add_to_steam_outcomes(void) {
     free(app);
 }
 
+/* Room on the launch line and in the report (src/rt/ace.h ACE_SPEC_MAX, ACE_REPORT_MAX): an Ace
+ * line with every part at its longest value, built by the player into the launcher's field, reaches
+ * the runtime's parser whole and parses back to itself; eight more keys of its average length still
+ * pass the runtime's length check; a field one byte short is refused whole, never cut; and the
+ * player reads a report as long as the runtime may write. No key is named, so a new part changes no
+ * line here. */
+static void test_play_mode_line_room(void) {
+    char line[sizeof(((NkRuntimeConfig *)0)->ace_spec)], more[2u * ACE_SPEC_MAX], back[ACE_SPEC_MAX], why[64];
+    PlayerSettings settings;
+    PlayerPlayResolved r;
+    AceConfig c;
+    assert(sizeof(line) == ACE_SPEC_MAX);
+    player_app_settings_init_default(&settings);
+    PlayerTitlePlay *own = &settings.title_play[0];                 /* Ace is a title's own choice */
+    memset(own, 0, sizeof(*own));
+    memcpy(own->key, "TEST93002", sizeof("TEST93002"));
+    own->mode = PLAYER_PLAY_ACE;
+    for (int p = 0; p < PLAYER_PART_COUNT; p++) own->part[p] = -1;
+    own->logic_60 = -1;
+    settings.title_play_count = 1;
+    player_play_resolve(&settings, "TEST93002", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE);
+    r.stick_counts = ACE_STICK_COUNTS_MAX;
+    for (int p = 0; p < PLAYER_PART_COUNT; p++) {   /* each part at the value with the longest line */
+        const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+        int best = r.part[p];
+        size_t best_len = 0;
+        for (int i = 0; i < info->value_count; i++) {
+            r.part[p] = info->values[i];
+            if (player_play_launch_line(&r, line, sizeof(line)) && strlen(line) > best_len) {
+                best_len = strlen(line);
+                best = info->values[i];
+            }
+        }
+        r.part[p] = best;
+    }
+    assert(player_play_launch_line(&r, line, sizeof(line)));
+    if (ace_parse(line, &c, why, sizeof(why)) != 1 || !ace_format(&c, back, sizeof(back)) ||
+        strcmp(back, line) != 0) {
+        fprintf(stderr, "the runtime does not read the player's longest line '%s' back (%s)\n", line, why);
+        assert(!"the longest line round trips");
+    }
+    const size_t n = strlen(line);
+    size_t keys = 0;
+    for (const char *s = line; (s = strchr(s, ';')) != NULL; s++) keys++;
+    const size_t avg = (n - strlen("v1") + keys - 1u) / keys;
+    size_t used = (size_t)snprintf(more, sizeof(more), "%s", line);
+    for (int k = 0; k < 8 && avg > strlen(";k0="); k++)
+        used += (size_t)snprintf(more + used, sizeof(more) - used, ";k%d=%.*s", k,
+                                 (int)(avg - strlen(";k0=")), "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
+    why[0] = '\0';
+    if (used >= sizeof(line) || ace_parse(more, &c, why, sizeof(why)) != 0 || strcmp(why, "unknown key") != 0) {
+        fprintf(stderr, "the player's longest line (%zu characters) and eight more keys of %zu (%zu) do not fit "
+                        "the launcher's field of %zu bytes (%s)\n", n, avg, used, sizeof(line), why);
+        assert(!"eight more keys fit the launch line");
+    }
+    memset(back, 'x', sizeof(back));
+    assert(!player_play_launch_line(&r, back, n) && back[0] == '\0');   /* one byte short: refused whole */
+    assert(player_play_launch_line(&r, back, n + 1u) && strcmp(back, line) == 0);
+
+    /* The report: a valid report padded at the front to the longest the runtime writes
+       (ACE_REPORT_MAX - 1 bytes), so its content sits at the end as a long report's does, is read;
+       one byte more is refused. */
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], dir[760], report[800], out[256];
+    static const char k_report[] =
+        "{\n  \"schema\": 1,\n  \"spec\": \"v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;"
+        "smooth=off;sas=off;tess=off;twin=off\",\n  \"effective\": {\"af\": 16, \"text\": true},\n"
+        "  \"rate\": {\"dominant\": \"30 Hz\"}\n}";
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_line_room_probe", cache_root, sep);
+    snprintf(dir, sizeof(dir), "%s%cace", root, sep);
+    assert(nk_platform_mkdir_p(dir));
+    assert(player_ace_report_path(root, "TEST93002", report, sizeof(report)));
+    char *big = (char *)malloc(ACE_REPORT_MAX + 1u);
+    assert(big != NULL);
+    memset(big, ' ', ACE_REPORT_MAX + 1u);
+    memcpy(big + ACE_REPORT_MAX - 1u - strlen(k_report), k_report, strlen(k_report) + 1u);
+    assert(strlen(big) == ACE_REPORT_MAX - 1u);
+    write_text_file(report, big);
+    if (!player_ace_last_session_line(root, "TEST93002", out, sizeof(out))) {
+        fprintf(stderr, "the player does not read a report of %u bytes\n", ACE_REPORT_MAX - 1u);
+        assert(!"a report as long as the runtime writes is read");
+    }
+    memset(big, ' ', ACE_REPORT_MAX + 1u);
+    memcpy(big + ACE_REPORT_MAX - strlen(k_report), k_report, strlen(k_report) + 1u);
+    assert(strlen(big) == ACE_REPORT_MAX);
+    write_text_file(report, big);
+    assert(!player_ace_last_session_line(root, "TEST93002", out, sizeof(out)) && out[0] == '\0');
+    free(big);
+    remove(report);
+    (void)test_rmdir(dir);
+    (void)test_rmdir(root);
+    printf("[PLAYER_STATE_TEST] launch line room (%zu of %zu characters, %zu more keys of %zu) PASSED\n", n,
+           sizeof(line) - 1u, (sizeof(line) - 1u - n) / avg, avg);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
@@ -10311,11 +11635,13 @@ int main(int argc, char **argv) {
     test_play_mode_stick_settings();
     test_play_mode_load_settings();
     test_play_mode_ssaa_settings();
+    test_play_mode_mips_settings();
     test_play_mode_tess_settings();
     test_play_mode_twin_settings();
     test_player_nickname();
     test_graphics_presets();
     test_play_mode_line_parses_in_runtime();
+    test_play_mode_line_room();
     test_play_mode_upscale_settings();
     test_play_mode_title_page();
     /* Saves a library file under the cache root, so it runs only once that
@@ -15133,6 +16459,138 @@ int main(int argc, char **argv) {
                    !rep->render_notice_hidden[NK_RENDER_FALLBACK_SOFTWARE_GE]);
             assert(dev_log_contains(rep, "render path: presenter=gdi ge=software "
                                          "fallback=gdi_presenter"));
+        }
+
+        /* #2151: while the GPU renderer draws, the runtime reports each effect it hands to the
+           software renderer for long enough (BOOT_EVENT phase=render_fallback, written by
+           gui.c through nk_render_fallback_event_format). The game's page names them in one
+           sentence, each once, in the GE's order; another game's page does not. Hide hides it
+           for that game and the effects it named: the same effects on the next launch stay
+           hidden, a new effect shows it again, and so does another game. A launch on the
+           software GE shows the start-up notice instead. */
+        {
+            static const char all_effects[] =
+                "Some of this game's drawing is done in software because the GPU renderer "
+                "cannot draw it: stencil effects, colour-test effects, logic operations, "
+                "partial colour writes, pictures drawn in main memory, wide frame buffers, "
+                "mipmapped textures, lines and points. The game may run slower.";
+            static const char two_effects[] =
+                "Some of this game's drawing is done in software because the GPU renderer "
+                "cannot draw it: stencil effects and lines. The game may run slower.";
+            static const char three_effects[] =
+                "Some of this game's drawing is done in software because the GPU renderer "
+                "cannot draw it: stencil effects, mipmapped textures and lines. The game may "
+                "run slower.";
+            char words[384];
+            bool effects_ok = true;
+            int failed_pass = -1;
+            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true);
+            NkRenderPath soft_path = nk_render_path_from_init(true, true, true, false);
+            assert(rep->game_count > 1);
+            assert(player_render_effects_text(0x1FFu, words, sizeof(words)) &&
+                   strcmp(words, all_effects) == 0);
+            assert(!player_render_effects_text(0u, words, sizeof(words)) && words[0] == '\0');
+            assert(!player_render_effects_text(0x1FFu, words, 64u) && words[0] == '\0');
+            for (int pass = 0; pass < 4 && effects_ok; ++pass) {
+                const char *heading = "unset";
+                const char *text = "unset";
+                char line[256];
+                char timed[600];
+                NkRenderFallbackEvent stencil = {NK_RENDER_EFFECT_STENCIL, 360u, 5000u, 20000u,
+                                                 0u, 200u};
+                NkRenderFallbackEvent lines = {NK_RENDER_EFFECT_LINE, 360u, 900u, 20000u, 40u,
+                                               43u};
+                NkRenderFallbackEvent mips = {NK_RENDER_EFFECT_MIPS, 360u, 4800u, 1500000u, 0u,
+                                              3u};
+                /* Passes 0, 1 and 3 launch the first game, pass 2 the second; pass 3 starts
+                   the software GE: no GPU renderer, so no effects notice. */
+                const int game = pass == 2 ? 1 : 0;
+                const char *disc = rep->games[game].disc_id;
+                const NkRenderPath *path = pass == 3 ? &soft_path : &gpu_path;
+                set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "1");
+                bool launched = player_app_launch_game(rep, game) && rep->is_game_running &&
+                                rep->boot_event_file_path[0] != '\0';
+                effects_ok = effects_ok && launched && rep->render_effects == 0u &&
+                             rep->render_effects_text[0] == '\0';
+                if (launched) {
+                    (void)player_app_monitor_game_session(rep, 95000 + (uint64_t)pass * 1000);
+                    effects_ok = effects_ok &&
+                        nk_render_path_event_format(path, line, sizeof(line)) > 0;
+                    snprintf(timed, sizeof(timed), "%s t_ns=80\n", line);
+                    effects_ok = effects_ok &&
+                        append_runtime_event(rep->boot_event_file_path, timed);
+                    /* The line first, then the stencil (twice, as a second run of the rule
+                       would): the sentence keeps the GE's order. */
+                    effects_ok = effects_ok &&
+                        nk_render_fallback_event_format(&lines, line, sizeof(line)) > 0;
+                    snprintf(timed, sizeof(timed), "%s t_ns=81\n", line);
+                    effects_ok = effects_ok &&
+                        append_runtime_event(rep->boot_event_file_path, timed);
+                    effects_ok = effects_ok &&
+                        nk_render_fallback_event_format(&stencil, line, sizeof(line)) > 0;
+                    snprintf(timed, sizeof(timed), "%s t_ns=82\n%s t_ns=83\n", line, line);
+                    effects_ok = effects_ok &&
+                        append_runtime_event(rep->boot_event_file_path, timed);
+                    (void)player_app_monitor_game_session(rep, 95500 + (uint64_t)pass * 1000);
+                    bool shown = player_app_render_notice(rep, disc, &heading, &text);
+                    effects_ok = effects_ok && rep->render_path_known &&
+                        rep->render_effects ==
+                            ((1u << NK_RENDER_EFFECT_STENCIL) | (1u << NK_RENDER_EFFECT_LINE)) &&
+                        strcmp(rep->render_effects_text, two_effects) == 0;
+                    if (pass == 0) {
+                        effects_ok = effects_ok && shown && heading != NULL && text != NULL &&
+                            strcmp(heading, "Partly drawn in software") == 0 &&
+                            strcmp(text, two_effects) == 0;
+                        effects_ok = effects_ok &&
+                            !player_app_render_notice(rep, rep->games[1].disc_id, &heading,
+                                                      &text);
+                        player_app_hide_render_notice(rep);
+                        effects_ok = effects_ok &&
+                            !player_app_render_notice(rep, disc, &heading, &text);
+                    } else if (pass == 1) {
+                        /* The same game and effects: still hidden. A new effect shows the
+                           notice again, naming all three; Hide then hides those. */
+                        effects_ok = effects_ok && !shown && heading == NULL && text == NULL;
+                        effects_ok = effects_ok &&
+                            nk_render_fallback_event_format(&mips, line, sizeof(line)) > 0;
+                        snprintf(timed, sizeof(timed), "%s t_ns=84\n", line);
+                        effects_ok = effects_ok &&
+                            append_runtime_event(rep->boot_event_file_path, timed);
+                        (void)player_app_monitor_game_session(rep, 95800 + (uint64_t)pass * 1000);
+                        effects_ok = effects_ok &&
+                            player_app_render_notice(rep, disc, &heading, &text) &&
+                            heading != NULL && text != NULL &&
+                            strcmp(heading, "Partly drawn in software") == 0 &&
+                            strcmp(text, three_effects) == 0;
+                        player_app_hide_render_notice(rep);
+                        effects_ok = effects_ok &&
+                            !player_app_render_notice(rep, disc, &heading, &text);
+                    } else if (pass == 2) {
+                        /* Another game reporting the effects hidden on the first: shown. */
+                        effects_ok = effects_ok && shown && heading != NULL && text != NULL &&
+                            strcmp(heading, "Partly drawn in software") == 0 &&
+                            strcmp(text, two_effects) == 0;
+                    } else {
+                        /* No GPU renderer: the page names the start-up fallback, never the
+                           effects. */
+                        effects_ok = effects_ok && shown && heading != NULL && text != NULL &&
+                            strcmp(heading, "Drawn in software") == 0 &&
+                            strstr(text, "The GPU renderer did not start") != NULL;
+                    }
+                }
+                if (!effects_ok && failed_pass < 0) failed_pass = pass;
+                if (rep->is_game_running) player_app_stop_game(rep);
+                set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "");
+            }
+            if (!effects_ok) fprintf(stderr, "render effects: pass %d failed\n", failed_pass);
+            assert(effects_ok);
+            assert(dev_log_contains(rep, "render fallback: reason=stencil frames=360 "
+                                         "sw_prims=5000 gpu_prims=20000 readbacks=0 "
+                                         "share_pm=200"));
+            assert(dev_log_contains(rep, "render notice hidden for this session: effects drawn "
+                                         "in software"));
+            /* Hiding the effects hides no start-up fallback's notice. */
+            assert(!rep->render_notice_hidden[NK_RENDER_FALLBACK_SOFTWARE_GE]);
         }
 
         /* #308: a live synthetic runtime keeps flipping frames that show nothing.

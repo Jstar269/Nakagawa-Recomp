@@ -204,9 +204,22 @@ typedef struct {
     /* The file read is the shipped published package, not one in the user's
        data folder. */
     bool shipped;
+    /* The package is experimental: true unless it is the usable shipped package and
+       declares "experimental": false (docs/ENHANCEMENT_CONTRACT.md section 9.10). A
+       file in the user's data folder stays experimental whatever it declares. */
+    bool experimental;
     /* Why a file that exists cannot be used; empty when there is no file or it
        is usable. */
     char problem[160];
+    /* The title's culling package (section 11.3.6), read the same way from
+       <disc ID, lowercase>-cull.json: it parses, its category is
+       guest_memory_code_hook, its id is a valid package name other than the
+       timing package's, and its target_title_id is the title's own. An Ace
+       launch with Wider culling on builds and launches with it (section 9.9). */
+    bool cull_available;
+    char cull_package_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    bool cull_shipped;
+    char cull_problem[160];
 } PlayerTitleEnhancement;
 
 /* The three play modes (docs/ENHANCEMENT_CONTRACT.md section 10, #2055). Authentic is the
@@ -252,6 +265,9 @@ typedef enum {
     PLAYER_PART_SSAA,          /* supersampling (#2073, section 10.21): 0 off, or the factor 2 or 4 per
                                   axis on top of the render scale. Host presentation only; off in a
                                   fresh file and in every preset */
+    PLAYER_PART_MIPS,          /* host-built mip chains (section 11.3.8): 0 off, 1 on. Appended; the
+                                  SR_ACE line carries mips=on, right after twin, only when on; off in
+                                  a fresh file */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -463,7 +479,10 @@ typedef struct {
 typedef enum {
     PLAYER_ERROR_RETRY_NONE = 0,
     PLAYER_ERROR_RETRY_RESTART_GAME,  /* "Restart game": launch subject_disc_id again */
-    PLAYER_ERROR_RETRY_BUILD          /* "Try again": build subject_disc_id again */
+    PLAYER_ERROR_RETRY_BUILD,         /* "Try again": build subject_disc_id again */
+    PLAYER_ERROR_RETRY_DELETE_KEPT    /* "Delete kept copy": delete what the import of the
+                                         program subject_disc_id kept after it left the
+                                         library (player_app_delete_kept_homebrew) */
 } PlayerErrorRetry;
 
 typedef struct {
@@ -691,6 +710,8 @@ typedef struct {
     /* An EBOOT.PBP holding unencrypted homebrew (#2143): iso_path is a small private disc
        image written from the package, and disc_id is the library key that image will have. */
     bool homebrew;
+    /* For homebrew, the full digest the key is cut from (NkPbpHomebrew.identity_sha256). */
+    char identity_sha256[65];
     /* NK_DISC_FORMAT_NONE for a PSN package; otherwise the compressed image's
        format, and iso_path and disc_id are known once it is expanded. */
     NkDiscFormat disc_format;
@@ -1010,6 +1031,16 @@ struct PlayerApp {
     NkRenderPath render_path;
     char render_path_disc[MAX_DISC_ID_LEN];
     bool render_notice_hidden[NK_RENDER_FALLBACK_COUNT];
+    /* What the GPU renderer of the latest launch hands to the software renderer for long
+       enough to slow the game, from its render_fallback boot events (#2151): one bit per
+       NkRenderEffect, and the sentence that names them. Cleared by each launch. Hide on the
+       game's page hides it for that game and the effects it named, for the rest of this
+       player session: another game, or an effect it did not name, shows it again. The last
+       game hidden is the one remembered. */
+    uint16_t render_effects;
+    char render_effects_text[384];
+    uint16_t render_effects_hidden;
+    char render_effects_hidden_disc[MAX_DISC_ID_LEN];
     bool close_confirmation_pending;
     char boot_event_file_path[MAX_PATH_LEN];
     bool should_quit;
@@ -1685,12 +1716,28 @@ bool player_app_title_60hz_on(const PlayerApp *app, int game_index);
 /* Saved on, but the title has no usable enhancement package: nothing launches
  * or builds until the package is back, or Ace or its 60 FPS game logic is turned off. */
 bool player_app_title_60hz_blocked(const PlayerApp *app, int game_index);
+/* The title's usable package is the shipped one and the maintainer released it
+ * ("experimental": false, docs/ENHANCEMENT_CONTRACT.md section 9.10): the title page tags
+ * the 60 FPS switch OPTIONAL, else EXPERIMENTAL. */
+bool player_app_title_60hz_released(const PlayerApp *app, int game_index);
 /* The title page's 60 FPS switch, Ace's own part: on chooses Ace for the title with its 60 FPS
  * game logic, off keeps Ace and turns that part off. Re-selects the title's package variant
  * and asks for its package to be checked. */
 void player_app_set_title_60hz(PlayerApp *app, int game_index, bool on);
 /* The --experimental-60hz flag: on for this session only, never saved. */
 void player_app_set_experimental_60hz_session(PlayerApp *app, bool on);
+/* An Ace launch of the title with its Wider culling part on (section 11.3.6): the launch line
+   carries cull=on, and the title builds and launches with its culling package when it has a
+   usable one (PlayerTitleEnhancement.cull_available). Authentic and Enhanced never. */
+bool player_app_title_cull_on(const PlayerApp *app, int game_index);
+/* Why the title's culling package cannot be used while player_app_title_cull_on asks for it
+   (PlayerTitleEnhancement.cull_problem), so the title page names it; "" when the part is off,
+   the package is usable, or the title has no culling package file. */
+const char *player_app_title_cull_problem(const PlayerApp *app, int game_index);
+/* The title's selected build carries its timing package, so its launch runs with the 60 FPS
+   game logic (player_play_config_session's logic_60_package): an enhanced build that is not
+   the culling package alone (GameRecord.enhancement_hook_only). */
+bool player_game_has_timing_package(const GameRecord *game);
 
 /* ---- The play modes (#2055; src/rt/ace.h) ---- */
 
@@ -1723,6 +1770,7 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
  * notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off" (tier=ace for Ace; smooth=match is never written).
+ * ";mips=on" follows twin only with the Smooth far textures part on; a missing mips is off.
  * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
  * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
@@ -1838,13 +1886,18 @@ void player_app_keep_waiting_for_stalled_game(PlayerApp *app);
    takes, and what may fix it. False, with both NULL, for no fallback. */
 bool player_render_notice_text(NkRenderFallback fallback, const char **heading,
                                const char **text);
-/* The notice for disc_id's page: the latest launch's fallback when that launch started this
-   disc, its render_path event has been read, and its notice is not hidden. */
+/* The sentence naming what the GPU renderer hands to the software renderer: effects is one
+   bit per NkRenderEffect. Writes "" and returns false for none or a sentence too long for out. */
+bool player_render_effects_text(uint16_t effects, char *out, size_t out_capacity);
+/* The notice for disc_id's page when the latest launch started this disc and its render_path
+   event has been read: its start-up fallback, or else, while the GPU renderer draws, the
+   effects it hands to the software renderer (render_fallback events), unless hidden. */
 bool player_app_render_notice(const PlayerApp *app, const char *disc_id, const char **heading,
                               const char **text);
-/* Hide: that fallback's notice stays hidden for the rest of this player session. */
+/* Hide: the notice shown stays hidden for the rest of this player session. */
 void player_app_hide_render_notice(PlayerApp *app);
-/* Reads one line of the session's boot events for the render_path event. */
+/* Reads one line of the session's boot events for the render_path and render_fallback
+   events. */
 void player_app_consume_render_path_line(PlayerApp *app, const char *line);
 
 /* One PLAY, split so its slow part can leave the UI thread (#1298). Checking a
@@ -1999,6 +2052,23 @@ bool player_app_psn_conversion_take_request(PlayerApp *app);
 void player_app_psn_conversion_progress(PlayerApp *app, uint64_t done_bytes,
                                         uint64_t total_bytes);
 void player_app_psn_conversion_finish(PlayerApp *app);
+
+/* HOMEBREW_ALREADY_ADDED (review of #2426, S1): the program in package (its pbp_path,
+ * iso_path, disc_id and title, which the inspection or the conversion filled in) was added
+ * before from another folder. Shows the stop on the error card, naming what clears it:
+ * while the title is in the library, its removal with "Also delete the decrypted files and
+ * disc copy" ticked; once it has left the library, the card's "Delete kept copy". The
+ * other folder's path is shown with the profile folder as "~". Nothing is changed. */
+void player_app_refuse_homebrew_elsewhere(PlayerApp *app, const PlayerPsnPackage *package,
+                                          char *log_line, size_t log_line_size);
+/* Delete what the import of the program whose library key is key kept after the title left
+ * the library (nk_pbp_homebrew_delete_import): its disc image, the copy of its folder and
+ * their records. Its Memory Stick, with the files the program wrote, stays. False, with a
+ * sentence in error and nothing deleted, while the title is in this library or the library
+ * file, or when the library file cannot be read; false too when a part could not be
+ * deleted. */
+bool player_app_delete_kept_homebrew(PlayerApp *app, const char *key, char *error,
+                                     size_t error_size);
 
 /* Compressed disc images (.cso, .zso, .chd), expanded once at import. */
 /* Check a picked compressed image and fingerprint it. iso_ready is true when

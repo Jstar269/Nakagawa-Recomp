@@ -216,6 +216,8 @@ typedef struct {
     int      import_active;
     uint32_t import_nid;
     int      pc_stale;            /* switched out inside a call: saved.pc is its last yield */
+    int      yield_switched;      /* switched out by sr_yield's own switch and not resumed since:
+                                   * the one state in which the thread is parked (#2172) */
     int      has_block_nid;       /* the last block happened inside an import */
     uint32_t block_nid;           /* NID of that import */
     int      block_start_valid;   /* block_start_us is the start of the current wait */
@@ -690,7 +692,17 @@ static int stack_range_alloc(uint32_t size, uint32_t *base_out) {
     return 0;
 }
 
-static void stack_range_release(uint32_t base, uint32_t size) {
+/* hle.c: told after a thread stack or High block's owner gives it back to the arena, so the user
+ * partition can take back the part of it that lies below its bump pointer
+ * (partition_arena_released). NULL: not told. */
+static SrSchedArenaRelease s_arena_release_hook;
+
+void sched_set_arena_release_hook(SrSchedArenaRelease release) { s_arena_release_hook = release; }
+
+/* Put [base, base+size) back among the arena's free ranges. stack_range_release() below is the
+ * owner's release; a create that took a range and then refused it calls this one directly: the
+ * range never had an owner, and the partition is not told. */
+static void stack_range_return(uint32_t base, uint32_t size) {
     if (!s_stack_allocator_ready || base == 0u || size == 0u) return;
     if (base < SR_STACK_ARENA_FLOOR || base > SR_STACK_ARENA_CEIL ||
         size > SR_STACK_ARENA_CEIL - base) {
@@ -732,6 +744,34 @@ static void stack_range_release(uint32_t base, uint32_t size) {
         }
     }
     stack_ranges_update_top();
+}
+
+static void stack_range_release(uint32_t base, uint32_t size) {
+    if (!s_stack_allocator_ready || base == 0u || size == 0u) return;
+    stack_range_return(base, size);
+    if (s_arena_release_hook) s_arena_release_hook(base, size);
+}
+
+/* For the HLE user partition (hle.c): whether the arena holds `addr`. Outside the arena it holds
+ * nothing: 1, with *end_out the arena's floor (an address below it) or UINT32_MAX (above it).
+ * Inside it: 1 when a free range holds it, with *end_out the end of that range; 0 when a live
+ * thread stack or High block holds it, with *end_out the start of the next free range above it
+ * (the arena ceiling when none). */
+int sched_stack_arena_free_at(uint32_t addr, uint32_t *end_out) {
+    if (!s_stack_allocator_ready) stack_ranges_reset();
+    if (addr < SR_STACK_ARENA_FLOOR) { *end_out = SR_STACK_ARENA_FLOOR; return 1; }
+    if (addr >= SR_STACK_ARENA_CEIL) { *end_out = UINT32_MAX; return 1; }
+    uint32_t next = SR_STACK_ARENA_CEIL;
+    for (int i = 0; i < s_stack_free_count; i++) {
+        const uint32_t base = s_stack_free[i].base, end = base + s_stack_free[i].size;
+        if (addr >= base && addr < end) {
+            *end_out = end;
+            return 1;
+        }
+        if (base > addr && base < next) next = base;
+    }
+    *end_out = next;
+    return 0;
 }
 
 /* A High block of the user partition (sceKernelAllocMemoryBlock placement 1). A PSP takes High
@@ -1034,6 +1074,12 @@ void sched_resume_interrupts(uint32_t state) {
 
 int sched_interrupts_enabled(void) {
     return s_interrupts_enabled;
+}
+
+/* An interrupt episode is running (scheduler_service_pending): on a PSP its handler runs with the
+ * CPU's interrupts off, so no other interrupt is taken until it returns. */
+int sched_servicing_interrupts(void) {
+    return s_servicing_interrupts;
 }
 
 int sched_is_intr_context(void) {
@@ -2335,6 +2381,16 @@ void sched_set_ge_timing_hooks(SrSchedGeNextDeadline next_deadline, SrSchedGeSer
     s_ge_timing_service = service_due;
 }
 
+/* Every waiting GE finish callback (hle_route.c ge_finish_callback: one a VBLANK episode's
+ * handlers raised waits while the handler runs, and one a thread raised under the mask waits for
+ * the resume) runs when each owed VBLANK episode returns, before the next one, so a backlog of
+ * episodes cannot pile completions up behind one another. */
+static SrSchedGeServiceDue s_ge_waiting_deliver;
+
+void sched_set_ge_waiting_hook(SrSchedGeServiceDue deliver_waiting) {
+    s_ge_waiting_deliver = deliver_waiting;
+}
+
 static uint64_t sched_ge_next_deadline(void) {
     return s_ge_timing_next ? s_ge_timing_next() : SCHED_WAIT_FOREVER;
 }
@@ -2489,6 +2545,18 @@ static void scheduler_service_pending(void) {
                 break;
             }
             deliver_vblank();
+            /* The waiting GE finish callbacks run at this episode's return, before the next
+             * owed episode, in interrupt context: the ones its handlers raised, and any a thread
+             * raised under the mask before this batch.  Whether a PSP takes a GE finish
+             * interrupt raised in a VBLANK handler before the next VBLANK edge it still owes
+             * is UNMEASURED; this keeps each callback next to the handler that raised it, as
+             * when it ran inside that handler. */
+            if (s_ge_waiting_deliver && s_interrupts_enabled) {
+                int save_cur = s_cur; s_cur = -1;
+                s_ge_waiting_deliver();
+                s_cur = save_cur;
+                sr_cpu_link_clear(s_cpu);
+            }
         }
         sr_perf_vblank_service(episodes);
     }
@@ -2812,10 +2880,12 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
     if (stack_ok && s_stack_range_refusal &&
         s_stack_range_refusal(user_base, user_base + reservation)) {
         /* The descending arena reached memory the user partition has handed out: no range
-         * above the partition's bump pointer holds the stack. */
+         * above the partition's bump pointer holds the stack. The range never had an owner, so it
+         * goes back to the arena without telling the partition (stack_range_return): the hook
+         * would hand the partition pieces a live stack in a freed block holds. */
         overlapped = 1;
         overlap_base = user_base;
-        stack_range_release(user_base, reservation);
+        stack_range_return(user_base, reservation);
         stack_ok = 0;
     }
     if (!stack_ok && s_partition_hole_alloc && s_partition_hole_alloc(reservation, &user_base)) {
@@ -2835,7 +2905,10 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
         fprintf(stderr, "sched_create_thread: stack [0x%08x,0x%08x) is not writable guest "
                 "memory -- failing create (maps to SCE_KERNEL_ERROR_NO_MEMORY)\n",
                 user_base, user_base + reservation);
-        stack_reservation_release(user_base, reservation, in_partition);
+        /* Nobody owned it yet: a freed partition block goes back to the partition, an arena
+         * range to the arena without the release hook. */
+        if (in_partition) stack_reservation_release(user_base, reservation, 1);
+        else stack_range_return(user_base, reservation);
         stack_ok = 0;
     }
     if (!stack_ok) {
@@ -2940,6 +3013,7 @@ uint32_t sched_start_thread(uint32_t uid, uint32_t arglen, uint32_t argp) {
         /* The re-seeded pc is the entry, where the thread really resumes: the "switched out
          * inside a call" mark from its last run must not hide it from unload safety (#286). */
         t->pc_stale = 0;
+        t->yield_switched = 0;
         memset(&t->saved, 0, sizeof(t->saved));
         t->saved.r[26] = t->k0_init;
         t->saved.r[29] = t->sp_init;
@@ -3946,9 +4020,40 @@ void sr_yield(CpuState *s) {
     memcpy(&t->saved, s, sizeof(CpuState));
     if (t->state == TH_RUNNING) t->state = TH_READY;
     s_pause_switch_from_yield = 1;
+    t->yield_switched = 1;
     switch_to_scheduler();
+    t->yield_switched = 0;
     s_pause_switch_from_yield = 0;
     /* resumed later: the scheduler restored our registers into *s before switching back to this coroutine */
+}
+
+/* Whether thread `uid` is parked, and its switched-out call records (#2172; "Resume at a PC"
+ * in docs/ARCHITECTURE.md). sr_yield names the point it continues at before it does its own
+ * work: it advances time, latches and services interrupts and callbacks, and only then, if
+ * another thread should run, switches. Until that switch the thread is running, so a frame
+ * list taken inside the yield would skip the rest of it. The switch above marks the thread
+ * (yield_switched) for as long as it is out; no other switch does. pc_stale is not that mark:
+ * it is derived from a flag only the yielding thread clears, so a thread resumed in between
+ * and switched out inside a call can read clear. A thread at the yield's switch is in no
+ * import; that is checked too. */
+SrResumeStatus sched_resume_switched_out(uint32_t uid, const SrAotReturnBoundaryStack **stack_out,
+                                         const char **why_out) {
+    TCB *t = tcb_by_uid(uid);
+    *stack_out = NULL;
+    *why_out = "";
+    if (t == NULL || !t->started || t->coro == NULL || t->state == TH_DORMANT) {
+        *why_out = "has not started or has ended";
+        return SR_RESUME_NO_FRAMES;
+    }
+    if ((int)(t - s_tcb) == s_cur || t->state == TH_RUNNING)
+        *why_out = "is running";
+    else if (!t->yield_switched)
+        *why_out = "was switched out inside a call, not by sr_yield's own switch";
+    else if (t->hle_depth != 0 || t->import_active)
+        *why_out = "is inside an import";
+    if ((*why_out)[0] != '\0') return SR_RESUME_NOT_PARKED;
+    *stack_out = &t->aot_return_boundary_stack;
+    return SR_RESUME_OK;
 }
 
 /* PSP scheduling is strict-priority preemptive: the moment a higher-priority thread becomes

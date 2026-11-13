@@ -1037,6 +1037,8 @@ class NativePlayerUiTests(unittest.TestCase):
         package_built_by: str | None = None,
         disc_list: str | None = None,
         enhancement_packages: dict[str, str] | None = None,
+        enhancement_package_fields: dict[str, object] | None = None,
+        culling_packages: dict[str, dict[str, object]] | None = None,
         expect_failure: bool = False,
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
@@ -1064,12 +1066,19 @@ class NativePlayerUiTests(unittest.TestCase):
             runtime_root.mkdir()
             for disc, title_id in (enhancement_packages or {}).items():
                 # A title's own enhancement package (docs/ENHANCEMENT_CONTRACT.md section 9.4):
-                # the player reads only its id and target title, so Ace is offered for it.
+                # the player reads its id, target title and experimental flag, so Ace is offered for it.
                 enhancements = runtime_root / "enhancements"
                 enhancements.mkdir(exist_ok=True)
                 (enhancements / f"{disc.lower()}-60hz.json").write_text(
-                    json.dumps({"id": "fixture-60hz", "target_title_id": title_id}),
+                    json.dumps({"id": "fixture-60hz", "target_title_id": title_id,
+                                **(enhancement_package_fields or {})}),
                     encoding="utf-8")
+            for disc, package in (culling_packages or {}).items():
+                # A title's culling package (contract 11.3.6), read beside its -60hz.json.
+                enhancements = runtime_root / "enhancements"
+                enhancements.mkdir(exist_ok=True)
+                (enhancements / f"{disc.lower()}-cull.json").write_text(
+                    json.dumps(package), encoding="utf-8")
             tool_marker: Path | None = None
             if downloaded_tool_payload:
                 tool_marker = runtime_root / "prerequisites" / "synthetic-tool" / "marker.txt"
@@ -1273,6 +1282,7 @@ class NativePlayerUiTests(unittest.TestCase):
                 event_script.insert(0, f"DROP_FILE={package_iso}")
             elif drop_bytes is not None:
                 dropped = scratch / drop_bytes[0]
+                dropped.parent.mkdir(parents=True, exist_ok=True)
                 dropped.write_bytes(drop_bytes[1])
                 event_script.insert(0, f"DROP_FILE={dropped}")
             args.append("--ui-test-events=" + ";".join(event_script))
@@ -4415,7 +4425,10 @@ class NativePlayerUiTests(unittest.TestCase):
             package = eboot.read_bytes()
         events = ("WAIT_VIEW=experimental|unsupported|supported|error,20000", "WAIT_MS=100",
                   "KEY_RETURN", "WAIT_MS=2000")
-        run = self.next_ui_run("library", events, drop_bytes=("EBOOT.PBP", package),
+        # The program's folder comes with it, so the package sits in a folder of its own, as
+        # on a Memory Stick: the run's scratch folder holds the home and data folders, which
+        # an import refuses to copy (HOMEBREW_FOLDER_UNSUPPORTED).
+        run = self.next_ui_run("library", events, drop_bytes=("MYHB/EBOOT.PBP", package),
                                wait_background=True)
         frames = run["frames"]
         stdout = run["stdout"]
@@ -5314,6 +5327,44 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(pages[-1]["title"], "TEST00006", run["stdout"])
         return lines, pages[-1]
 
+    @staticmethod
+    def enhancement_tags(run: dict[str, object], disc: str) -> list[str]:
+        """Each tag the ENHANCEMENTS card took for `disc`, in order, from the title model."""
+        return re.findall(r"next_ui_enhancement_tag disc=" + re.escape(disc) + r" tag=(\S+)",
+                          str(run["stdout"]))
+
+    def test_next_ui_enhancement_tag_reads_optional_only_for_the_released_shipped_package(
+            self) -> None:
+        """Contract section 9.10 (#1732): the ENHANCEMENTS card's tag comes from where the
+        title's package was found. A package in the source tree's assets/enhancements that
+        declares "experimental": false reads Optional; the same package without the flag, or
+        a copy in the user's data folder that declares it, reads Experimental."""
+        # The "ready" fixture reads the title's package when its play mode changes, so the run
+        # opens the title and steps Play mode once (to Authentic; the card stays for the package).
+        events = ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", *self.DOWN_TO_PLAY_MODE,
+                  "KEY_RETURN", "WAIT_MS=200")
+        package = {"id": "fixture-60hz", "target_title_id": "display-smoke-v1"}
+        released = {"experimental": False}
+        own = self.next_ui_run("ready", events, post_build_ready=True, wait_background=True,
+                               enhancement_packages={"TEST00006": "display-smoke-v1"},
+                               enhancement_package_fields=released)
+        self.assertEqual(self.enhancement_tags(own, "TEST00006")[-1:], ["Experimental"],
+                         own["stdout"])
+        with tempfile.TemporaryDirectory(prefix=".shipped-package-", dir=ROOT) as tmp:
+            source = Path(tmp)
+            (source / "tools").mkdir()
+            (source / "tools" / "nk_cli.py").write_text("# fixture\n", encoding="utf-8")
+            shipped = source / "assets" / "enhancements"
+            shipped.mkdir(parents=True)
+            leaf = shipped / "test00006-60hz.json"
+            for fields, tag in ((released, "Optional"), ({}, "Experimental")):
+                leaf.write_text(json.dumps({**package, **fields}), encoding="utf-8")
+                run = self.next_ui_run("ready", events, post_build_ready=True,
+                                       wait_background=True,
+                                       env_extra={"NK_INSTALL_ROOT": str(source)})
+                self.assertEqual(self.enhancement_tags(run, "TEST00006")[-1:], [tag],
+                                 run["stdout"])
+
     def test_next_ui_smooth_motion_says_why_it_is_off_at_60_fps(self) -> None:
         """Contract 10.5 (#2085; #2074 delta review B1): a game launched with its 60 FPS game
         logic runs with smooth motion off, and its launch line says smooth=off. Its title page
@@ -5370,6 +5421,43 @@ class NativePlayerUiTests(unittest.TestCase):
                                      "smooths only 30 FPS games."), ace)
         for words in self.EVERY_PART_WORDS:
             self.assertIn(words, ace)
+
+    def culling_play_line(self, steps: int, culling: dict[str, object]) -> str:
+        """The packaged TEST00006's play line with every part on in the library (Wider culling
+        among them) and `culling` as its culling package, its own play mode stepped `steps`
+        times from Authentic: once to Enhanced, which reads its packages (the "ready" fixture
+        reads none at start, so Ace is offered only after that), twice to Ace."""
+        settings = {"enhanced": dict(self.EVERY_PART_ON),
+                    "title_play": {"TEST00006": {"mode": "authentic"}}}
+        run = self.next_ui_run(
+            "ready", ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", *self.DOWN_TO_PLAY_MODE,
+                      *(("KEY_RETURN", "WAIT_MS=200") * steps)),
+            post_build_ready=True, wait_background=True, settings=settings,
+            enhancement_packages={"TEST00006": "display-smoke-v1"},
+            culling_packages={"TEST00006": culling})
+        lines = re.findall(r"next_ui_title_play_line disc=TEST00006 line=(.+?)\r?$",
+                           str(run["stdout"]), re.M)
+        self.assertTrue(lines, run["stdout"])
+        return lines[-1]
+
+    def test_next_ui_play_line_names_an_unusable_culling_package(self) -> None:
+        """Contract 11.3.6 (#2302): with Wider culling on in an Ace launch, a culling package the
+        player cannot use leaves the title's other build in place, and the title page's play
+        line says why by name instead of dropping it silently. A usable package, or a title on
+        Enhanced, adds nothing to the line."""
+        other_game = {"id": "fixture-cull", "target_title_id": "other-title",
+                      "category": "guest_memory_code_hook"}
+        ace = self.culling_play_line(2, other_game)   # Authentic -> Enhanced -> Ace
+        self.assertTrue(ace.startswith("Ace for this game: "), ace)
+        self.assertTrue(ace.endswith(" Wider culling does nothing in this game. Its culling "
+                                     "package is for another game."), ace)
+        usable = self.culling_play_line(2, {**other_game,
+                                            "target_title_id": "display-smoke-v1"})
+        self.assertTrue(usable.startswith("Ace for this game: "), usable)
+        self.assertNotIn("Wider culling does nothing", usable)
+        enhanced = self.culling_play_line(1, other_game)   # Authentic -> Enhanced
+        self.assertTrue(enhanced.startswith("Enhanced for this game: "), enhanced)
+        self.assertNotIn("Wider culling does nothing", enhanced)
 
     def test_compatibility_records_carry_a_player_tier(self) -> None:
         """#1297: every title record maps to a player tier; Hot Shots Tennis is Playable.

@@ -19,8 +19,9 @@
  *              rebuilt, the rest draw as before and are rebuilt by the next present;
  *   pool       the texture descriptor pool has a set for every image an entry can hold;
  *   guest-bytes the page, the CLUT and VRAM outside the frame are unchanged by any of it.
- * `--authentic` (Ace Mode off, SR_GLYPHS whatever it is) draws the same scene and prints a hash of
- * the device image; mk/selftests.mk compares the hash with the feature unset and set.
+ * `--scene-hash` (and `--authentic`, Ace Mode off) draws one scene and prints a hash of the device
+ * image and the frame: mk/selftests.mk compares an authentic run, an Ace run whose line has no glyphs
+ * key and one with glyphs=off (the same hash), and one with glyphs=on (another hash).
  */
 
 #define GST_PAGE   0x08500000u
@@ -537,17 +538,30 @@ static uint64_t gst_scene_hash(int *ok) {
     return h;
 }
 
-/* Under --authentic: the run drew the scene, nothing was rebuilt, and the hash is printed. */
-int gegpu_glyph_authentic_selftest(void) {
+/* Under --scene-hash or --authentic: the run drew the scene and the hash is printed. With the feature off
+ * (an authentic run, or an Ace line without glyphs=on) nothing was rebuilt or decoded for a glyph; with it
+ * on a glyph was drawn from a rebuilt tile, so the hash can tell the two apart. */
+int gegpu_glyph_scene_selftest(void) {
+    /* What the line asked for, not what the renderer did: a renderer that ignores the key fails key-off. */
+    const int key_on = g_ace_on && ace_requested()->glyphs;
+    const char *cell = !g_ace_on ? "authentic" : key_on ? "key-on" : "key-off";
     int ok = 0;
     const uint64_t h = gst_scene_hash(&ok);
-    if (!ok) return gst_fail("authentic", "draw or readback failed");
-    if (s_glyphs || s_glyphs_asked || s_cnt_gl_bound || s_cnt_gl_built || s_cnt_gl_decodes)
-        return gst_fail("authentic", "an authentic run rebuilt glyphs (bound %llu, built %llu, page decodes %llu)",
-                        (unsigned long long)s_cnt_gl_bound, (unsigned long long)s_cnt_gl_built,
-                        (unsigned long long)s_cnt_gl_decodes);
-    printf("gpu glyph selftest: PASS %-12s no glyph was rebuilt in an authentic run\n", "authentic");
-    printf("GLYPH-AUTH-HASH %016llx\n", (unsigned long long)h);
+    if (!ok) return gst_fail(cell, "draw or readback failed");
+    if (!key_on) {
+        if (s_glyphs || s_glyphs_asked || s_cnt_gl_bound || s_cnt_gl_built || s_cnt_gl_decodes)
+            return gst_fail(cell, "a run without the feature rebuilt glyphs (bound %llu, built %llu, page decodes %llu)",
+                            (unsigned long long)s_cnt_gl_bound, (unsigned long long)s_cnt_gl_built,
+                            (unsigned long long)s_cnt_gl_decodes);
+        printf("gpu glyph selftest: PASS %-12s no glyph was rebuilt or decoded\n", cell);
+    } else {
+        if (!s_glyphs || !s_cnt_gl_bound)
+            return gst_fail(cell, "glyphs=on drew no rebuilt glyph at render scale %d (bound %llu)", s_scale,
+                            (unsigned long long)s_cnt_gl_bound);
+        printf("gpu glyph selftest: PASS %-12s %llu draws used a rebuilt glyph\n", cell,
+               (unsigned long long)s_cnt_gl_bound);
+    }
+    printf("GLYPH-SCENE-HASH %016llx\n", (unsigned long long)h);
     return 1;
 }
 
@@ -581,7 +595,7 @@ int gegpu_glyph_selftest(void) {
         }
         /* The setting is off in an Ace run (--glyphs off): the game's own picture. The sharp cell is the one this
          * feature changes, and it fails here, which shows it is not vacuous. */
-        if (s_glyphs_asked) return gst_fail("setup", "SR_GLYPHS is on but the feature is off at render scale %d", s_scale);
+        if (s_glyphs_asked) return gst_fail("setup", "glyphs=on but the feature is off at render scale %d", s_scale);
         return gst_cell_sharp();
     }
     int ok = gst_cell_pool() && gst_cell_sharp() && gst_cell_refuse() && gst_cell_color_test() && gst_cell_rewrite() && gst_cell_rewrite_gap() && gst_cell_gradient() &&

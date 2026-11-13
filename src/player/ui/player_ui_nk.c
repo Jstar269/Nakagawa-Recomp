@@ -160,8 +160,10 @@ struct PlayerUiNk {
     char settings_saves[NK_MAX_PATH];
     /* The play mode on the open title's page: what it turns on, and its last session, read
        at most every two seconds (the runtime writes the report when a game ends). */
-    /* Every part named, with the 60 FPS and smooth-motion words: the line is never cut. */
-    char ace_line[PLAYER_PART_COUNT * 64 + 192];
+    /* Every part named, with the 60 FPS and smooth-motion words (192) and a culling
+       package's problem (PlayerTitleEnhancement.cull_problem, 160, after a 41-character
+       sentence): the line is never cut. */
+    char ace_line[PLAYER_PART_COUNT * 64 + 192 + 256];
     char enhanced_smooth_sentence[160];  /* the Smooth motion row's words under 60 FPS logic */
     char ace_last_session[200];
     char ace_last_disc[NK_MAX_DISC_ID_LEN];
@@ -285,7 +287,8 @@ struct PlayerUiNk {
     char play_reported[PLAYER_UI_TITLE_CAP][16];   /* the play mode badge last printed */
     char enhanced_reported[512];                    /* Settings > Enhanced as last printed */
     char ace_line_reported[PLAYER_PART_COUNT * 64 + 192]; /* the play line last printed */
-    char preset_note_reported[200];                 /* the main Settings page's preset note */
+    char enhancement_tag_reported[PLAYER_UI_TITLE_CAP][16]; /* the ENHANCEMENTS tag printed */
+    char preset_note_reported[200];                /* the main Settings page's preset note */
     int disc_reported_view;  /* the game-found card whose rows were printed, or -1 */
 #endif
     bool ready;
@@ -2681,12 +2684,17 @@ static void player_ui_title_ace(PlayerUiNk *player, const PlayerApp *app, int in
         /* Smooth motion turned on, but off for this launch: the line says why (contract
            10.5), as the launch line carries smooth=off. */
         bool smooth_held = smooth_wanted && play.logic_60;
-        snprintf(player->ace_line, sizeof(player->ace_line), "%s for this game: %s%s%s.%s",
+        /* Wider culling on with a culling package the player cannot use (contract 11.3.6):
+           the launch keeps the title's other build, and the line says why by name. */
+        const char *cull_problem = player_app_title_cull_problem(app, index);
+        snprintf(player->ace_line, sizeof(player->ace_line), "%s for this game: %s%s%s.%s%s%s",
                  ace ? "Ace" : "Enhanced", ace && out->enhancement_on ? "60 FPS game logic" : "",
                  ace && out->enhancement_on && count ? ", " : "",
                  count ? words : (ace && out->enhancement_on ? "" : "every part is off"),
                  smooth_held ? " Smooth motion is off while it runs at 60 FPS: this build "
-                               "smooths only 30 FPS games." : "");
+                               "smooths only 30 FPS games." : "",
+                 cull_problem[0] ? " Wider culling does nothing in this game. " : "",
+                 cull_problem);
         out->ace_line = player->ace_line;
     }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
@@ -2896,6 +2904,18 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         out->enhancement_on = player_app_title_60hz_on(app, index);
         out->enhancement_session = app->experimental_60hz_session &&
                                    enhancement->available && !saved;
+        out->enhancement_released = player_app_title_60hz_released(app, index);
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+        /* The word scr_title.c tags the card with, from the value the screen reads. */
+        const char *tag = !out->enhancement_shown ? "none"
+                          : out->enhancement_released ? "Optional" : "Experimental";
+        if (strcmp(player->enhancement_tag_reported[index], tag) != 0) {
+            snprintf(player->enhancement_tag_reported[index],
+                     sizeof(player->enhancement_tag_reported[index]), "%s", tag);
+            printf("[PLAYER_UI_TEST] next_ui_enhancement_tag disc=%s tag=%s\n", game->disc_id,
+                   tag);
+        }
+#endif
         out->enhancement_enabled = !app->launch_pending && !app->is_game_running &&
             !out->enhancement_session &&
             !(app->build_session.is_building &&

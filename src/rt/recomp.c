@@ -27,6 +27,7 @@
  */
 
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdatomic.h>
@@ -2153,6 +2154,20 @@ static void code_capture_note(uint32_t target, uint32_t pc, uint32_t ra) {
                 s_code_capture_last);
 }
 
+/* The same call, dispatched again under the frames it already has: exception or ERET flow
+ * its code raised. The boundary says so, because the frames below still hold the call's
+ * entry $sp and a body entered here is not a host entry's own (#2172). */
+static int dispatch_again_for_flow(
+    CpuState *s,
+    uint32_t target,
+    const SrGuestInterpCallBoundary *call_boundary,
+    int drain) {
+    if (call_boundary == NULL) return dispatch_try_with_boundary(s, target, NULL, drain);
+    SrGuestInterpCallBoundary again = *call_boundary;
+    again.redispatch = 1u;
+    return dispatch_try_with_boundary(s, target, &again, drain);
+}
+
 static int dispatch_run_interp(
     CpuState *s,
     uint32_t target,
@@ -2181,7 +2196,7 @@ static int dispatch_run_interp(
         interp_result == SR_GUEST_INTERP_ERET) {
         uint32_t flow_target = s->flow_target;
         sr_cpu_clear_flow(s);
-        return dispatch_try_with_boundary(s, flow_target, call_boundary, drain);
+        return dispatch_again_for_flow(s, flow_target, call_boundary, drain);
     }
     if (interp_result == SR_GUEST_INTERP_NULL_CODE_POINTER) {
         dispatch_report_null_code_pointer(s, fault.pc);
@@ -2238,6 +2253,9 @@ static SrAotReturnBoundary *sr_aot_return_boundaries;
 static size_t sr_aot_return_boundary_depth;
 static size_t sr_aot_return_boundary_capacity;
 static size_t sr_aot_return_boundary_floor;
+/* Scopes open on the running fiber (sr_aot_return_boundary_scope_begin). The floor alone does
+ * not show one opened before the fiber's first call record. */
+static size_t sr_aot_return_boundary_scopes_live;
 
 void sr_aot_return_boundaries_reset(void) {
 #ifdef SR_VERIFY
@@ -2246,6 +2264,8 @@ void sr_aot_return_boundaries_reset(void) {
     sr_aot_return_boundary_depth = 0u;
     sr_aot_return_boundary_top = NULL;
     sr_aot_return_boundary_floor = 0u;
+    sr_aot_return_boundary_scopes_live = 0u;
+    sr_tail_drains_live = 0u;
 }
 
 void sr_aot_return_boundary_stack_swap(SrAotReturnBoundaryStack *other) {
@@ -2259,7 +2279,11 @@ void sr_aot_return_boundary_stack_swap(SrAotReturnBoundaryStack *other) {
         sr_aot_return_boundary_capacity,
         sr_aot_return_boundary_floor,
         sr_aot_return_boundary_top,
+        sr_tail_drains_live,
+        sr_aot_return_boundary_scopes_live,
     };
+    sr_tail_drains_live = other->drains_live;
+    sr_aot_return_boundary_scopes_live = other->scopes_live;
     sr_aot_return_boundaries = other->boundaries;
     sr_aot_return_boundary_depth = other->depth;
     sr_aot_return_boundary_capacity = other->capacity;
@@ -2287,12 +2311,14 @@ void sr_aot_return_boundary_scope_begin(SrAotReturnBoundaryScope *scope) {
     scope->depth = sr_aot_return_boundary_depth;
     scope->previous_floor = sr_aot_return_boundary_floor;
     sr_aot_return_boundary_floor = sr_aot_return_boundary_depth;
+    sr_aot_return_boundary_scopes_live++;
 }
 
 int sr_aot_return_boundary_scope_end(CpuState *s,
                                      const SrAotReturnBoundaryScope *scope,
                                      const char *owner) {
     if (!scope) return 0;
+    if (sr_aot_return_boundary_scopes_live != 0u) sr_aot_return_boundary_scopes_live--;
     const int corrupt = sr_aot_return_boundary_depth != scope->depth ||
                         sr_aot_return_boundary_floor != scope->depth;
     if (corrupt) {
@@ -2386,6 +2412,7 @@ int sr_aot_return_boundary_begin(CpuState *s, uint32_t resume_pc,
     boundary->dispatch_owned = 0u;
     boundary->unwinding = 0u;
     boundary->resume_sp = 0u;
+    boundary->flags = 0u;
     sr_aot_return_boundary_top = boundary;
 #ifdef SR_VERIFY
     if (has_resume_pc && !sr_verify_suppress_direct) sr_verify_begin(s, 0u, call_pc, resume_pc);
@@ -2635,7 +2662,10 @@ static void dispatch_call_aot(RecompFn fn, CpuState *s, uint32_t target,
         ? !call_boundary->site_boundary
         : !(drain == SR_DRAIN_SEGMENT && sr_aot_return_boundary_top != NULL &&
             sr_aot_return_boundary_top->state == s);
-    if (owns_return_boundary) {
+    /* dispatch_resume_from_host passes no body: the call's record is already rebuilt, and the
+     * body is entered at its resume point (#2172). Everything after the body is this call's. */
+    const int resuming = fn == NULL;
+    if (owns_return_boundary && !resuming) {
         const uint32_t call_pc = call_boundary != NULL
             ? call_boundary->resume_pc - 8u : s->pc;
 #ifdef SR_VERIFY
@@ -2652,10 +2682,18 @@ static void dispatch_call_aot(RecompFn fn, CpuState *s, uint32_t target,
             return;
         }
         sr_aot_return_boundary_top->dispatch_owned = 1u;
+        sr_aot_return_boundary_top->callee = target;
+        sr_aot_return_boundary_top->flags |= SR_BOUNDARY_CALLEE;
+        /* A host entry whose first code is this body. When the interpreter ran first and
+         * handed the frame on, or the call is dispatched again for flow its code raised,
+         * the frames below still hold the entry $sp the call owes. */
+        if (call_boundary != NULL && !call_boundary->continuation &&
+            !call_boundary->redispatch && call_boundary->resume_pc == SR_HOST_RETURN_PC)
+            sr_aot_return_boundary_top->flags |= SR_BOUNDARY_HOST_ENTRY;
     }
 #ifdef SR_VERIFY
     /* A continuation is the rest of a call already under way, not a call to sample. */
-    if (call_boundary != NULL && !call_boundary->continuation)
+    if (!resuming && call_boundary != NULL && !call_boundary->continuation)
         sr_verify_begin(s, target, call_boundary->resume_pc - 8u, call_boundary->resume_pc);
 #endif
     if (sr_perf_enabled) sr_perf_aot_begin(target);
@@ -2663,7 +2701,8 @@ static void dispatch_call_aot(RecompFn fn, CpuState *s, uint32_t target,
     sr_verify_note_entry(target);
 #endif
     int exec_previous = sr_exec_enter(SR_EXEC_TIER_AOT);
-    fn(s);
+    if (resuming) sr_resume_inner(s);
+    else fn(s);
     /* Complete the body's TAIL chain (#855) where the nested calls used to complete it:
      * inside this span, and before dispatch_after_aot looks for
      * exception flow a chained body may raise. A computed step (dispatch_tail_step) runs
@@ -2691,7 +2730,7 @@ static int dispatch_after_aot(
     if (s->flow_kind == SR_FLOW_EXCEPTION || s->flow_kind == SR_FLOW_ERET) {
         uint32_t flow_target = s->flow_target;
         sr_cpu_clear_flow(s);
-        return dispatch_try_with_boundary(s, flow_target, call_boundary, drain);
+        return dispatch_again_for_flow(s, flow_target, call_boundary, drain);
     }
     /* Fatal and currently unhandled flow kinds must not become a successful AOT
      * handoff. Leave the metadata intact for the fail-closed caller boundary. */
@@ -3098,7 +3137,7 @@ int dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc) {
 int dispatch_call_continue(CpuState *s, uint32_t target, const SrGuestInterpCallBoundary *call) {
     const SrGuestInterpCallBoundary rest = {
         .resume_pc = call->resume_pc, .site_boundary = call->site_boundary,
-        .continuation = 1u };
+        .continuation = 1u, .redispatch = call->redispatch };
     if (dispatch_try_with_boundary(s, target, &rest, SR_DRAIN_CHAIN) < 0) {
         /* The COSIM guest lane refused an import: the interpreter returns with the
          * fatal flow pending, and its dispatch reports it to the lane's entry. */
@@ -3124,6 +3163,347 @@ int dispatch_call_continue(CpuState *s, uint32_t target, const SrGuestInterpCall
  * body that returns anywhere else stops as the named #1034 mismatch. */
 void dispatch_from_host(CpuState *s, uint32_t entry) {
     dispatch_call(s, entry, SR_HOST_RETURN_PC);
+}
+
+/* ---- Resume at a PC (#2172; "Resume at a PC" in docs/ARCHITECTURE.md) ------------------- */
+
+const SrResumeFrame *sr_resume_request;
+
+/* The state-resumable bodies, by entry address, each with the function registered for it: a
+ * frame list may name only a body whose registration still holds. Open addressing; a body
+ * registers again whenever sr_register_all runs. */
+typedef struct {
+    uint32_t body;
+    uint32_t used;
+    RecompFn fn;
+} SrResumeBody;
+static SrResumeBody *s_resume_bodies;
+static size_t s_resume_body_capacity;
+static size_t s_resume_body_count;
+
+static SrResumeBody *resume_body_slot(SrResumeBody *table, size_t capacity, uint32_t body) {
+    size_t index = (size_t)(body * 2654435761u) & (capacity - 1u);
+    while (table[index].used && table[index].body != body) index = (index + 1u) & (capacity - 1u);
+    return &table[index];
+}
+
+void sr_resume_register_body(uint32_t body, RecompFn fn) {
+    if ((s_resume_body_count + 1u) * 2u > s_resume_body_capacity) {
+        const size_t capacity = s_resume_body_capacity ? s_resume_body_capacity * 2u : 256u;
+        SrResumeBody *grown = calloc(capacity, sizeof *grown);
+        if (grown == NULL) {
+            fprintf(stderr, "sr_resume_register_body: out of memory at 0x%08" PRIx32 "\n", body);
+            fflush(stderr);
+            exit(1);
+        }
+        for (size_t i = 0; i < s_resume_body_capacity; i++) {
+            if (s_resume_bodies[i].used)
+                *resume_body_slot(grown, capacity, s_resume_bodies[i].body) = s_resume_bodies[i];
+        }
+        free(s_resume_bodies);
+        s_resume_bodies = grown;
+        s_resume_body_capacity = capacity;
+    }
+    SrResumeBody *slot = resume_body_slot(s_resume_bodies, s_resume_body_capacity, body);
+    if (!slot->used) s_resume_body_count++;
+    slot->body = body;
+    slot->used = 1u;
+    slot->fn = fn;
+}
+
+static RecompFn resume_body_fn(uint32_t body) {
+    if (s_resume_body_capacity == 0u) return NULL;
+    const SrResumeBody *slot = resume_body_slot(s_resume_bodies, s_resume_body_capacity, body);
+    return slot->used ? slot->fn : NULL;
+}
+
+const char *sr_resume_status_name(SrResumeStatus status) {
+    switch (status) {
+    case SR_RESUME_OK: return "ok";
+    case SR_RESUME_NO_FRAMES: return "no-frames";
+    case SR_RESUME_SCOPE_LIVE: return "callback-or-interrupt-live";
+    case SR_RESUME_TAIL_CHAIN_LIVE: return "tail-chain-live";
+    case SR_RESUME_FOREIGN_STATE: return "foreign-cpu-state";
+    case SR_RESUME_ROOT_NOT_HOST_ENTRY: return "root-not-host-entry";
+    case SR_RESUME_RETURN_IN_FLIGHT: return "return-in-flight";
+    case SR_RESUME_FRAME_NOT_DESCRIBED: return "frame-not-described";
+    case SR_RESUME_FRAME_CHAIN: return "frame-chain";
+    case SR_RESUME_FRAME_SP: return "frame-sp";
+    case SR_RESUME_NOT_PARKED: return "not-parked";
+    case SR_RESUME_TOO_MANY_FRAMES: return "too-many-frames";
+    case SR_RESUME_BAD_FRAMES: return "bad-frames";
+    case SR_RESUME_BODY_NOT_REGISTERED: return "body-not-registered";
+    case SR_RESUME_BODY_STALE: return "body-stale";
+    case SR_RESUME_BODY_NOT_RESUMABLE: return "body-not-resumable";
+    case SR_RESUME_NO_RESUME_POINT: return "no-resume-point";
+    case SR_RESUME_POINT_KIND: return "resume-point-kind";
+    case SR_RESUME_BUSY: return "resume-busy";
+    }
+    return "unknown";
+}
+
+static SrResumeStatus resume_refuse(SrResumeStatus status, char *detail, size_t detail_cap,
+                                    const char *format, ...) {
+    if (detail != NULL && detail_cap != 0u) {
+        va_list args;
+        va_start(args, format);
+        vsnprintf(detail, detail_cap, format, args);
+        va_end(args);
+    }
+    return status;
+}
+
+SrResumeStatus sr_resume_describe(const SrAotReturnBoundaryStack *stack, const CpuState *s,
+                                  SrResumeFrame *frames, uint32_t capacity, uint32_t *count,
+                                  char *detail, size_t detail_cap) {
+    const SrAotReturnBoundary *records = stack ? stack->boundaries : sr_aot_return_boundaries;
+    const size_t depth = stack ? stack->depth : sr_aot_return_boundary_depth;
+    const size_t floor = stack ? stack->floor : sr_aot_return_boundary_floor;
+    const size_t drains = stack ? stack->drains_live : sr_tail_drains_live;
+    const size_t scopes = stack ? stack->scopes_live : sr_aot_return_boundary_scopes_live;
+    if (count != NULL) *count = 0u;
+    if (detail != NULL && detail_cap != 0u) detail[0] = '\0';
+    if (depth == 0u || records == NULL)
+        return resume_refuse(SR_RESUME_NO_FRAMES, detail, detail_cap, "no live call");
+    /* The running fiber is not parked, whatever its records say: inside sr_yield the rest
+     * of that yield has still to run. */
+    if (stack == NULL)
+        return resume_refuse(SR_RESUME_NOT_PARKED, detail, detail_cap,
+                             "the running fiber; a thread is parked once sr_yield has switched "
+                             "it out");
+    /* A scope opened before the thread's first call record leaves the floor at 0. */
+    if (floor != 0u || scopes != 0u)
+        return resume_refuse(SR_RESUME_SCOPE_LIVE, detail, detail_cap,
+                             "%zu callback or interrupt scope(s) open, floor %zu", scopes, floor);
+    if (drains != 0u)
+        return resume_refuse(SR_RESUME_TAIL_CHAIN_LIVE, detail, detail_cap,
+                             "%zu tail drain(s) running a body", drains);
+    if (depth > SR_RESUME_MAX_FRAMES || depth > capacity)
+        return resume_refuse(SR_RESUME_TOO_MANY_FRAMES, detail, detail_cap,
+                             "%zu frames, room for %" PRIu32, depth, capacity);
+    for (size_t k = 0; k < depth; k++) {
+        const SrAotReturnBoundary *record = &records[k];
+        if (record->state != s)
+            return resume_refuse(SR_RESUME_FOREIGN_STATE, detail, detail_cap, "frame %zu", k);
+        if (record->unwinding != 0u || record->observed_target != 0u)
+            return resume_refuse(SR_RESUME_RETURN_IN_FLIGHT, detail, detail_cap, "frame %zu", k);
+        if (k == 0u) {
+            if (!record->has_resume_pc || record->resume_pc != SR_HOST_RETURN_PC ||
+                !record->dispatch_owned ||
+                (record->flags & (SR_BOUNDARY_CALLEE | SR_BOUNDARY_HOST_ENTRY)) !=
+                    (SR_BOUNDARY_CALLEE | SR_BOUNDARY_HOST_ENTRY))
+                return resume_refuse(SR_RESUME_ROOT_NOT_HOST_ENTRY, detail, detail_cap,
+                                     "resume 0x%08" PRIx32 ", flags 0x%" PRIx32,
+                                     record->resume_pc, record->flags);
+        } else {
+            const SrAotReturnBoundary *below = &records[k - 1u];
+            if (!record->has_resume_pc || record->dispatch_owned ||
+                (record->flags & (SR_BOUNDARY_CALLEE | SR_BOUNDARY_SITE)) !=
+                    (SR_BOUNDARY_CALLEE | SR_BOUNDARY_SITE))
+                return resume_refuse(SR_RESUME_FRAME_NOT_DESCRIBED, detail, detail_cap,
+                                     "frame %zu, the call resuming at 0x%08" PRIx32,
+                                     k, record->resume_pc);
+            if (record->caller_body != below->callee)
+                return resume_refuse(SR_RESUME_FRAME_CHAIN, detail, detail_cap,
+                                     "frame %zu: called from body 0x%08" PRIx32
+                                     ", the call below entered 0x%08" PRIx32,
+                                     k, record->caller_body, below->callee);
+            if (record->caller_sp != below->call_sp)
+                return resume_refuse(SR_RESUME_FRAME_SP, detail, detail_cap,
+                                     "frame %zu: body 0x%08" PRIx32 " entered at $sp 0x%08" PRIx32
+                                     ", its call at 0x%08" PRIx32,
+                                     k - 1u, below->callee, record->caller_sp, below->call_sp);
+            frames[k - 1u].body = below->callee;
+            frames[k - 1u].pc = record->resume_pc;
+            frames[k - 1u].kind = SR_RESUME_POINT_CALL;
+            frames[k - 1u].sp = below->call_sp;
+        }
+    }
+    const SrAotReturnBoundary *top = &records[depth - 1u];
+    if (!(top->flags & SR_BOUNDARY_PARKED) || top->park_body != top->callee)
+        return resume_refuse(SR_RESUME_NOT_PARKED, detail, detail_cap,
+                             "body 0x%08" PRIx32 " of frame %zu", top->callee, depth - 1u);
+    if (top->park_sp != top->call_sp)
+        return resume_refuse(SR_RESUME_FRAME_SP, detail, detail_cap,
+                             "frame %zu: body 0x%08" PRIx32 " entered at $sp 0x%08" PRIx32
+                             ", its call at 0x%08" PRIx32,
+                             depth - 1u, top->callee, top->park_sp, top->call_sp);
+    frames[depth - 1u].body = top->callee;
+    frames[depth - 1u].pc = top->park_pc;
+    frames[depth - 1u].kind = top->park_kind;
+    frames[depth - 1u].sp = top->call_sp;
+    if (count != NULL) *count = (uint32_t)depth;
+    return SR_RESUME_OK;
+}
+
+/* The descent in progress: dispatch_resume_from_host enters the outermost body, whose call
+ * point enters the next (sr_resume_inner), down to the parked one. Nothing yields on the way,
+ * so this is not per-fiber state. */
+static struct {
+    const SrResumeFrame *frames;
+    uint32_t count;
+    uint32_t next;
+    uint32_t probe;
+    uint32_t probe_kind;
+    uint32_t probe_callee;
+} s_resume;
+
+static void resume_fatal(CpuState *s, const char *what, uint32_t body, uint32_t pc) {
+    fprintf(stderr, "SEMANTIC_BOUNDARY: RESUME_FAULT: %s body=0x%08" PRIx32 " pc=0x%08" PRIx32 "\n",
+            what, body, pc);
+    if (s != NULL) {
+        s->flow_kind = SR_FLOW_FATAL;
+        s->flow_target = pc;
+    }
+    sr_flight_fatal(SR_FLIGHT_KIND_FATAL_DISPATCH, body, pc, 0u);
+    fflush(stderr);
+    exit(1);
+}
+
+SrResumeEntry sr_resume_take(CpuState *s, uint32_t body) {
+    const SrResumeFrame *frame = sr_resume_request;
+    sr_resume_request = NULL;
+    if (frame == NULL || frame->body != body)
+        resume_fatal(s, "resume-body-mismatch", body, frame != NULL ? frame->pc : 0u);
+    const SrResumeEntry entry = { frame->pc, frame->kind, frame->sp, s_resume.probe };
+    return entry;
+}
+
+void sr_resume_inner(CpuState *s) {
+    if (s_resume.frames == NULL || s_resume.next >= s_resume.count)
+        resume_fatal(s, "resume-frames-exhausted", 0u, 0u);
+    const SrResumeFrame *frame = &s_resume.frames[s_resume.next++];
+    RecompFn fn = resume_body_fn(frame->body);
+    if (fn == NULL) resume_fatal(s, "resume-body-unregistered", frame->body, frame->pc);
+    if (s_resume.next == s_resume.count) s_resume.frames = NULL;
+    sr_resume_request = frame;
+    fn(s);
+}
+
+void sr_resume_probe_hit(uint32_t kind, uint32_t callee) {
+    s_resume.probe_kind = kind;
+    s_resume.probe_callee = callee;
+}
+
+void sr_resume_no_point(CpuState *s, uint32_t body, const SrResumeEntry *entry) {
+    if (entry->probe) {
+        s_resume.probe_kind = 0u;
+        return;
+    }
+    resume_fatal(s, "resume-point-missing", body, entry->pc);
+}
+
+SrResumeStatus sr_resume_validate(CpuState *s, const SrResumeFrame *frames, uint32_t count,
+                                  char *detail, size_t detail_cap) {
+    if (detail != NULL && detail_cap != 0u) detail[0] = '\0';
+    if (frames == NULL || count == 0u)
+        return resume_refuse(SR_RESUME_BAD_FRAMES, detail, detail_cap, "no frames");
+    if (count > SR_RESUME_MAX_FRAMES)
+        return resume_refuse(SR_RESUME_TOO_MANY_FRAMES, detail, detail_cap, "%" PRIu32 " frames", count);
+    if (sr_resume_request != NULL || s_resume.frames != NULL || s_resume.probe)
+        return resume_refuse(SR_RESUME_BUSY, detail, detail_cap, "a resume is in progress");
+    for (uint32_t k = 0; k < count; k++) {
+        const SrResumeFrame *frame = &frames[k];
+        const int innermost = k + 1u == count;
+        if (frame->kind != SR_RESUME_POINT_ENTRY && frame->kind != SR_RESUME_POINT_YIELD &&
+            frame->kind != SR_RESUME_POINT_CALL)
+            return resume_refuse(SR_RESUME_BAD_FRAMES, detail, detail_cap,
+                                 "frame %" PRIu32 ": kind %" PRIu32, k, frame->kind);
+        if ((frame->kind == SR_RESUME_POINT_CALL) == innermost)
+            return resume_refuse(SR_RESUME_POINT_KIND, detail, detail_cap,
+                                 "frame %" PRIu32 " of %" PRIu32 ": kind %" PRIu32,
+                                 k, count, frame->kind);
+        RecompFn registered = sr_lookup(frame->body);
+        if (registered == NULL)
+            return resume_refuse(SR_RESUME_BODY_NOT_REGISTERED, detail, detail_cap,
+                                 "frame %" PRIu32 ": body 0x%08" PRIx32, k, frame->body);
+        if (sr_stale_block_is_stale(frame->body))
+            return resume_refuse(SR_RESUME_BODY_STALE, detail, detail_cap,
+                                 "frame %" PRIu32 ": body 0x%08" PRIx32, k, frame->body);
+        if (resume_body_fn(frame->body) != registered)
+            return resume_refuse(SR_RESUME_BODY_NOT_RESUMABLE, detail, detail_cap,
+                                 "frame %" PRIu32 ": body 0x%08" PRIx32, k, frame->body);
+        /* Ask the body itself: its switch is the one list of the points it has. */
+        s_resume.probe = 1u;
+        s_resume.probe_kind = 0u;
+        sr_resume_request = frame;
+        registered(s);
+        s_resume.probe = 0u;
+        sr_resume_request = NULL;
+        if (s_resume.probe_kind != frame->kind)
+            return resume_refuse(SR_RESUME_NO_RESUME_POINT, detail, detail_cap,
+                                 "frame %" PRIu32 ": body 0x%08" PRIx32 " has no point of kind %"
+                                 PRIu32 " at 0x%08" PRIx32, k, frame->body, frame->kind, frame->pc);
+        if (!innermost && s_resume.probe_callee != frames[k + 1u].body)
+            return resume_refuse(SR_RESUME_FRAME_CHAIN, detail, detail_cap,
+                                 "frame %" PRIu32 ": the call returning to 0x%08" PRIx32
+                                 " entered 0x%08" PRIx32 ", the frame above runs 0x%08" PRIx32,
+                                 k, frame->pc, s_resume.probe_callee, frames[k + 1u].body);
+    }
+    return SR_RESUME_OK;
+}
+
+SrResumeStatus dispatch_resume_from_host(CpuState *s, const SrResumeFrame *frames, uint32_t count,
+                                         char *detail, size_t detail_cap) {
+    if (detail != NULL && detail_cap != 0u) detail[0] = '\0';
+    if (sr_aot_return_boundary_depth != 0u || sr_aot_return_boundary_floor != 0u ||
+        sr_aot_return_boundary_scopes_live != 0u || sr_tail_drains_live != 0u ||
+        sr_tail_transfer.pending)
+        return resume_refuse(SR_RESUME_BUSY, detail, detail_cap,
+                             "the fiber holds %zu call record(s)", sr_aot_return_boundary_depth);
+    const SrResumeStatus status = sr_resume_validate(s, frames, count, detail, detail_cap);
+    if (status != SR_RESUME_OK) return status;
+
+    const int stack_result = dispatch_host_stack_preflight();
+    if (stack_result < 0) {
+        dispatch_report_host_stack_boundary(stack_result);
+        sr_flight_fatal(SR_FLIGHT_KIND_FATAL_DISPATCH, frames[0].body, SR_HOST_RETURN_PC, 0u);
+        fflush(stderr);
+        exit(1);
+    }
+    /* The call records, as the host entry and each direct call site left them: frame k was
+     * entered by the call that resumes in frame k - 1. */
+    for (uint32_t k = 0; k < count; k++) {
+        const uint32_t resume_pc = k == 0u ? SR_HOST_RETURN_PC : frames[k - 1u].pc;
+#ifdef SR_VERIFY
+        sr_verify_suppress_direct = 1;   /* a rebuilt record is not a call to sample */
+#endif
+        const int refused = sr_aot_return_boundary_begin(s, resume_pc, resume_pc - 8u, 1u);
+#ifdef SR_VERIFY
+        sr_verify_suppress_direct = 0;
+#endif
+        if (refused) {
+            fflush(stderr);
+            exit(1);
+        }
+        SrAotReturnBoundary *record = sr_aot_return_boundary_top;
+        record->call_sp = frames[k].sp;
+        record->callee = frames[k].body;
+        record->flags = SR_BOUNDARY_CALLEE;
+        if (k == 0u) {
+            record->dispatch_owned = 1u;
+            record->flags |= SR_BOUNDARY_HOST_ENTRY;
+        } else {
+            record->caller_body = frames[k - 1u].body;
+            record->caller_sp = frames[k - 1u].sp;
+            record->flags |= SR_BOUNDARY_SITE;
+        }
+    }
+    s_resume.frames = frames;
+    s_resume.count = count;
+    s_resume.next = 0u;
+    /* The rest of the host entry's dispatch_call: the outermost body's chain, its record's
+     * end check and any flow it left, exactly as after an uninterrupted body. */
+    const SrGuestInterpCallBoundary boundary = {
+        .resume_pc = SR_HOST_RETURN_PC, .entry_sp = frames[0].sp, .owes_entry_sp = 1u };
+    const uint32_t entry = frames[0].body;
+    dispatch_call_aot(NULL, s, entry, &boundary, SR_DRAIN_CHAIN);
+    if (dispatch_after_aot(s, &boundary, SR_DRAIN_CHAIN) < 0) {
+        sr_flight_fatal(SR_FLIGHT_KIND_FATAL_DISPATCH, entry, SR_HOST_RETURN_PC, 0u);
+        fflush(stderr);
+        exit(1);
+    }
+    return SR_RESUME_OK;
 }
 
 jmp_buf g_hle_jmp;

@@ -1259,6 +1259,12 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"ssaa", "Supersampling",
      "Smooths jagged edges. 2x takes 4 times the GPU work, 4x 16 times.",
      3, k_part_ssaa_values, k_part_ssaa_labels, k_part_ssaa_words, 0},
+    /* A guest-visible item (contract 11.3.8): every present commits the smoothed frame to guest VRAM,
+       as texture filtering does. Off by default until its "nothing worse" runs exist (11.2 item 4),
+       with its own off switch in the library and each title (item 2). */
+    {"mips", "Smooth far textures",
+     "Slightly less shimmer on far textures. Uses CPU; may stutter on new textures.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -2320,7 +2326,7 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
 #define PRESET_PART_LIST(X, text, upscale)                                                \
     X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
     X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1)    \
-    X(TWIN, -1) X(SSAA, -1)
+    X(TWIN, -1) X(SSAA, -1) X(MIPS, -1)
 #define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
 #define PRESET_PART_ONE(part, value) + 1
 #define PRESET_PARTS(text, upscale) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale)}
@@ -2855,21 +2861,21 @@ bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_
            player_join_path(out, out_size, assets, "enhancements");
 }
 
-bool player_read_title_enhancement(const char *user_root, const char *shipped_root,
-                                   const GameRecord *game, PlayerTitleEnhancement *out) {
-    if (!out) return false;
-    memset(out, 0, sizeof(*out));
-    char key[PLAYER_DISC_ID_KEY_LEN];
+/* One of a title's package files, <key>-<suffix>.json, from the user's enhancements folder,
+   else the shipped one: its id into `id`, or why it cannot be used into `problem`. `noun`
+   names the file in that sentence; a non-NULL `category` must be the package's own. A
+   non-NULL `experimental_out` is cleared only for a usable shipped package that declares
+   "experimental": false (section 9.10). */
+static bool player_read_title_package_file(const char *user_root, const char *shipped_root,
+                                           const GameRecord *game, const char *key,
+                                           const char *suffix, const char *noun,
+                                           const char *category, char *id_out, size_t id_cap,
+                                           bool *shipped_out, bool *experimental_out,
+                                           char *problem, size_t problem_cap) {
     bool have_user = user_root && user_root[0];
     bool have_shipped = shipped_root && shipped_root[0];
-    if ((!have_user && !have_shipped) || !game || game->is_sample ||
-        game->is_showcase_package || !game->title_id[0] ||
-        !player_disc_id_key(game->disc_id, key)) {
-        return false;
-    }
     char leaf[PLAYER_DISC_ID_KEY_LEN + 16];
-    for (size_t i = 0; key[i]; i++) key[i] = (char)tolower((unsigned char)key[i]);
-    snprintf(leaf, sizeof(leaf), "%s-60hz.json", key);
+    snprintf(leaf, sizeof(leaf), "%s-%s.json", key, suffix);
     char folder[MAX_PATH_LEN];
     char path[MAX_PATH_LEN];
     bool found = have_user &&
@@ -2879,12 +2885,12 @@ bool player_read_title_enhancement(const char *user_root, const char *shipped_ro
     if (!found && have_shipped && player_join_path(path, sizeof(path), shipped_root, leaf) &&
         nk_platform_file_exists(path)) {
         found = true;
-        out->shipped = true;
+        *shipped_out = true;
     }
     if (!found) return false;
     FILE *f = nk_fopen_utf8(path, "rb");
     if (!f) {
-        snprintf(out->problem, sizeof(out->problem), "Its enhancement package can't be read.");
+        snprintf(problem, problem_cap, "Its %s can't be read.", noun);
         return false;
     }
     char *text = NULL;
@@ -2899,8 +2905,7 @@ bool player_read_title_enhancement(const char *user_root, const char *shipped_ro
     fclose(f);
     if (!text || got != (size_t)size) {
         free(text);
-        snprintf(out->problem, sizeof(out->problem),
-                 "Its enhancement package can't be read or is too large.");
+        snprintf(problem, problem_cap, "Its %s can't be read or is too large.", noun);
         return false;
     }
     text[got] = '\0';
@@ -2911,27 +2916,80 @@ bool player_read_title_enhancement(const char *user_root, const char *shipped_ro
         ? nk_json_get_string(nk_json_obj_get(package, "id")) : NULL;
     const char *target = package && nk_json_is_object(package)
         ? nk_json_get_string(nk_json_obj_get(package, "target_title_id")) : NULL;
+    const char *own_category = package && nk_json_is_object(package)
+        ? nk_json_get_string(nk_json_obj_get(package, "category")) : NULL;
+    bool usable = false;
     if (!package || !nk_json_is_object(package)) {
-        snprintf(out->problem, sizeof(out->problem),
-                 "Its enhancement package is not valid JSON.");
+        snprintf(problem, problem_cap, "Its %s is not valid JSON.", noun);
     } else if (!id || !nk_title_manifest_enhancement_id_valid(id)) {
-        snprintf(out->problem, sizeof(out->problem),
-                 "Its enhancement package has no valid id.");
+        snprintf(problem, problem_cap, "Its %s has no valid id.", noun);
     } else if (!target || strcmp(target, game->title_id) != 0) {
-        snprintf(out->problem, sizeof(out->problem),
-                 "Its enhancement package is for another game.");
+        snprintf(problem, problem_cap, "Its %s is for another game.", noun);
+    } else if (category && (!own_category || strcmp(own_category, category) != 0)) {
+        snprintf(problem, problem_cap, "Its %s is not a %s package.", noun, category);
     } else {
-        snprintf(out->package_id, sizeof(out->package_id), "%s", id);
-        out->available = true;
+        snprintf(id_out, id_cap, "%s", id);
+        usable = true;
+        /* Only the shipped package's explicit false releases it (section 9.10): the maintainer
+           releases a shipped package, so a file in the user's data folder stays experimental
+           whatever it declares, and a missing or non-boolean value stays experimental. */
+        bool experimental = true;
+        if (experimental_out && *shipped_out &&
+            nk_json_get_bool(nk_json_obj_get(package, "experimental"), &experimental) &&
+            !experimental) {
+            *experimental_out = false;
+        }
     }
     if (package) nk_json_free(package);
+    return usable;
+}
+
+bool player_read_title_enhancement(const char *user_root, const char *shipped_root,
+                                   const GameRecord *game, PlayerTitleEnhancement *out) {
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    out->experimental = true;
+    char key[PLAYER_DISC_ID_KEY_LEN];
+    bool have_user = user_root && user_root[0];
+    bool have_shipped = shipped_root && shipped_root[0];
+    if ((!have_user && !have_shipped) || !game || game->is_sample ||
+        game->is_showcase_package || !game->title_id[0] ||
+        !player_disc_id_key(game->disc_id, key)) {
+        return false;
+    }
+    for (size_t i = 0; key[i]; i++) key[i] = (char)tolower((unsigned char)key[i]);
+    out->available = player_read_title_package_file(
+        user_root, shipped_root, game, key, "60hz", "enhancement package", NULL,
+        out->package_id, sizeof(out->package_id), &out->shipped, &out->experimental,
+        out->problem, sizeof(out->problem));
+    /* The culling package (section 11.3.6) is read on its own: a title may have either. Its
+       build beside the timing package is named <timing id>+<hook id>, so the two ids differ
+       and the joined name fits a variant (nk_title_manifest_enhancement_variant_valid). */
+    out->cull_available = player_read_title_package_file(
+        user_root, shipped_root, game, key, "cull", "culling package", "guest_memory_code_hook",
+        out->cull_package_id, sizeof(out->cull_package_id), &out->cull_shipped, NULL,
+        out->cull_problem, sizeof(out->cull_problem));
+    if (out->cull_available && out->available) {
+        char variant[NK_MAX_ENHANCEMENT_PACKAGE_ID + 1];
+        int n = snprintf(variant, sizeof(variant), "%s+%s", out->package_id, out->cull_package_id);
+        if (strcmp(out->package_id, out->cull_package_id) == 0) {
+            snprintf(out->cull_problem, sizeof(out->cull_problem),
+                     "Its culling package has the enhancement package's own id.");
+            out->cull_available = false;
+        } else if (n < 0 || !nk_title_manifest_enhancement_variant_valid(variant)) {
+            snprintf(out->cull_problem, sizeof(out->cull_problem),
+                     "Its culling and enhancement package ids are too long together.");
+            out->cull_available = false;
+        }
+        if (!out->cull_available) out->cull_package_id[0] = '\0';
+    }
     return out->available;
 }
 
 /* Section 11.2 item 5 of docs/ENHANCEMENT_CONTRACT.md, a per-title off switch carried in a
-   game's package, is not read here: the player reads only a package's id and target title
-   (player_read_title_enhancement), and no section 11 item is admitted yet. The first section
-   11.3 item lands that switch with it. */
+   game's package, is not read here: the player reads only a package's id, target title and
+   experimental flag (player_read_title_enhancement), and no section 11 item is admitted yet.
+   The first section 11.3 item lands that switch with it. */
 bool player_app_title_60hz_saved(const PlayerApp *app, const char *disc_id) {
     const PlayerTitlePlay *title = app ? player_settings_title_play(&app->settings, disc_id) : NULL;
     return title && title->mode == PLAYER_PLAY_ACE && title->logic_60 != 0;
@@ -2955,16 +3013,71 @@ bool player_app_title_60hz_blocked(const PlayerApp *app, int game_index) {
            !app->title_enhancements[game_index].available;
 }
 
+bool player_app_title_60hz_released(const PlayerApp *app, int game_index) {
+    if (!app || game_index < 0 || game_index >= app->game_count) return false;
+    const PlayerTitleEnhancement *enhancement = &app->title_enhancements[game_index];
+    return enhancement->available && enhancement->shipped && !enhancement->experimental;
+}
+
+bool player_app_title_cull_on(const PlayerApp *app, int game_index) {
+    if (!app || game_index < 0 || game_index >= app->game_count) return false;
+    /* Exactly when the launch line carries cull=on (player_play_config_session): Ace with the
+       part on, including a title on Enhanced that the session's 60 FPS switch runs as Ace
+       (player_play_apply_logic_60). Authentic and Enhanced never build or launch the culling
+       package. */
+    PlayerPlayResolved play;
+    player_play_resolve(&app->settings, app->games[game_index].disc_id, &play);
+    player_play_apply_logic_60(&play, app->title_enhancements[game_index].available &&
+                                          player_app_title_60hz_on(app, game_index));
+    return play.on && play.mode == PLAYER_PLAY_ACE && play.part[PLAYER_PART_CULL] == 1;
+}
+
+bool player_game_has_timing_package(const GameRecord *game) {
+    return game && game->enhancement_package_id[0] && !game->enhancement_hook_only;
+}
+
+const char *player_app_title_cull_problem(const PlayerApp *app, int game_index) {
+    if (!player_app_title_cull_on(app, game_index)) return "";
+    const PlayerTitleEnhancement *enhancement = &app->title_enhancements[game_index];
+    return enhancement->cull_available ? "" : enhancement->cull_problem;
+}
+
 /* The variant the title launches: its enhanced build when its 60 FPS game logic is on and its
-   package is usable, else the authentic package. */
+   package is usable, with its culling package beside it (<timing id>+<hook id>) when an Ace
+   launch has Wider culling on and that package is usable too; the culling package alone when
+   only Wider culling asks for a build; else the authentic package. */
 static void player_app_select_package_variant(PlayerApp *app, int game_index) {
     GameRecord *game = &app->games[game_index];
     const PlayerTitleEnhancement *enhancement = &app->title_enhancements[game_index];
-    if (enhancement->available && player_app_title_60hz_on(app, game_index)) {
+    bool logic_60 = enhancement->available && player_app_title_60hz_on(app, game_index);
+    bool cull = enhancement->cull_available && player_app_title_cull_on(app, game_index);
+    game->enhancement_hook_only = false;
+    if (logic_60 && cull) {
+        /* cull_available holds beside a usable timing package only when the joined name is a
+           valid variant (player_read_title_enhancement), so it fits; were it ever cut, the
+           timing build stays, as for a culling package that cannot be used. */
+        int n = snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id),
+                         "%s+%s", enhancement->package_id, enhancement->cull_package_id);
+        if (n < 0 || (size_t)n >= sizeof(game->enhancement_package_id)) {
+            snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
+                     enhancement->package_id);
+        }
+    } else if (logic_60) {
         snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
                  enhancement->package_id);
+    } else if (cull) {
+        snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
+                 enhancement->cull_package_id);
+        game->enhancement_hook_only = true;
     } else {
         game->enhancement_package_id[0] = '\0';
+    }
+}
+
+/* A change to a part or a mode at the library's level can change what every title builds. */
+static void player_app_select_package_variants(PlayerApp *app) {
+    for (int i = 0; i < app->game_count && i < MAX_LIBRARY_GAMES; i++) {
+        player_app_select_package_variant(app, i);
     }
 }
 
@@ -3019,9 +3132,7 @@ void player_app_set_experimental_60hz_session(PlayerApp *app, bool on) {
     player_dev_log_add(app, "settings",
                        "60 FPS game logic %s for this session, for every game with an "
                        "enhancement package", on ? "on" : "off");
-    for (int i = 0; i < app->game_count && i < MAX_LIBRARY_GAMES; i++) {
-        player_app_select_package_variant(app, i);
-    }
+    player_app_select_package_variants(app);
 }
 
 /* ---- The play modes (#2055; src/rt/ace.h) ---- */
@@ -3097,6 +3208,9 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
            enum's. */
         if (p == PLAYER_PART_UPSCALE || p == PLAYER_PART_STICK || p == PLAYER_PART_LOAD ||
             p == PLAYER_PART_SSAA || p == PLAYER_PART_CULL) continue;
+        /* A missing mips is off (contract 11.3.8): the key is written only when the part is on,
+           right after twin. */
+        if (p == PLAYER_PART_MIPS && play->part[p] != 1) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
@@ -3138,6 +3252,11 @@ int player_play_present_upscale(const PlayerPlayResolved *play) {
                                                                      : NK_PRESENT_UPSCALE_OFF;
 }
 
+/* The launcher's copy of the line holds every line the runtime accepts and no more: one size,
+   ACE_SPEC_MAX, checked here in the C99 form because the core cannot include src/rt/ace.h. */
+typedef char player_ace_spec_is_ace_spec_max_check
+    [(sizeof(((NkRuntimeConfig *)0)->ace_spec) == ACE_SPEC_MAX) ? 1 : -1];
+
 void player_play_config_session(const PlayerSettings *settings, const char *disc_id,
                                 bool logic_60_package, bool acceptance, NkRuntimeConfig *config,
                                 PlayerPlayResolved *out) {
@@ -3170,7 +3289,7 @@ bool player_ace_report_path(const char *user_root, const char *disc_id, char *ou
 bool player_ace_last_session_line(const char *user_root, const char *disc_id, char *out,
                                   size_t cap) {
     char path[NK_MAX_PATH];
-    char text[4097];
+    char text[ACE_REPORT_MAX + 1u];
     if (!out || cap == 0) return false;
     out[0] = '\0';
     if (!player_ace_report_path(user_root, disc_id, path, sizeof(path))) return false;
@@ -3178,6 +3297,8 @@ bool player_ace_last_session_line(const char *user_root, const char *disc_id, ch
     if (!f) return false;
     size_t len = fread(text, 1, sizeof(text) - 1u, f);
     fclose(f);
+    /* The runtime writes fewer than ACE_REPORT_MAX bytes: a longer file is not its report. */
+    if (len >= ACE_REPORT_MAX) return false;
     text[len] = '\0';
     NkJsonNode *root = nk_json_parse(text, len, NULL, 0);
     if (!root) return false;
@@ -3218,6 +3339,7 @@ void player_app_toggle_library_play_mode(PlayerApp *app) {
     player_dev_log_add(app, "settings", "library default: %s",
                        player_play_mode_name(app->settings.enhanced.library));
     maybe_persist_settings(app);
+    player_app_select_package_variants(app);
 }
 
 void player_app_cycle_enhanced_part(PlayerApp *app, int part) {
@@ -3235,6 +3357,8 @@ void player_app_cycle_enhanced_part(PlayerApp *app, int part) {
     player_dev_log_add(app, "settings", "Enhanced %s for the library: %s", info->key,
                        info->words[next]);
     maybe_persist_settings(app);
+    /* Wider culling selects the culling build for every title on Ace that follows it. */
+    if (part == PLAYER_PART_CULL) player_app_select_package_variants(app);
 }
 
 bool player_app_ace_last_session(const PlayerApp *app, int game_index, char *out, size_t cap) {
@@ -3297,6 +3421,7 @@ void player_app_cycle_title_part(PlayerApp *app, int game_index, int part) {
                                             : enhanced_part_word(part, entry.part[part]));
     /* A game's own value wins over the preset (player_play_resolve), so the preset stays. */
     maybe_persist_settings(app);
+    if (part == PLAYER_PART_CULL) player_app_title_play_changed(app, game_index);
 }
 
 void player_app_open_title_enhanced(PlayerApp *app, int game_index) {
@@ -4347,6 +4472,8 @@ static const struct { const char *code; const char *badge; } k_error_badges[] = 
     {"GAME_FILES_NOT_READY", "Game files needed"},
     {"EXPERIMENTAL_LAUNCH_UNAVAILABLE", "Not playable yet"},
     {"EXPERIMENTAL_PROFILE_FAILED", "Not saved"},
+    {"HOMEBREW_ALREADY_ADDED", "Already added"},
+    {"HOMEBREW_KEPT_COPY_NOT_DELETED", "Not deleted"},
     {"FACTORY_RESET_BUSY", "Reset waiting"},
     {"FACTORY_RESET_FAILED", "Reset stopped"},
     /* The build tools download's own codes (tools/nk_core/prereq_fetcher.py). */
@@ -4397,13 +4524,19 @@ const char *player_error_retry_label(const ErrorState *error) {
     switch (error->retry) {
         case PLAYER_ERROR_RETRY_RESTART_GAME: return "Restart game";
         case PLAYER_ERROR_RETRY_BUILD: return "Try again";
+        case PLAYER_ERROR_RETRY_DELETE_KEPT: return "Delete kept copy";
         case PLAYER_ERROR_RETRY_NONE:
         default: return NULL;
     }
 }
 
+static bool player_app_delete_kept_from_error(PlayerApp *app);
+
 bool player_app_retry_from_error(PlayerApp *app) {
     if (!app || !player_error_retry_label(&app->last_error)) return false;
+    if (app->last_error.retry == PLAYER_ERROR_RETRY_DELETE_KEPT) {
+        return player_app_delete_kept_from_error(app);
+    }
     int index = player_app_find_game_by_disc_id(app, app->last_error.subject_disc_id);
     if (index < 0) return false;
     PlayerErrorRetry retry = app->last_error.retry;
@@ -5108,6 +5241,8 @@ static bool player_prepare_boot_event_file(PlayerApp *app) {
     app->stalled_game_restore_game_front_requested = false;
     app->render_path_known = false;
     app->render_path_disc[0] = '\0';
+    app->render_effects = 0u;
+    app->render_effects_text[0] = '\0';
 
     ++player_boot_event_sequence;
     if (!player_format_boot_event_path(app->boot_event_file_path,
@@ -5285,7 +5420,7 @@ void player_launch_work_run(PlayerLaunchWork *work) {
     {
         PlayerPlayResolved ace;
         player_play_config_session(&work->settings, game->disc_id,
-                                   game->enhancement_package_id[0] != '\0',
+                                   player_game_has_timing_package(game),
                                    work->headless_accept_presented_frames > 0u, &session->config,
                                    &ace);
         work->play_mode = ace.on ? ace.mode : PLAYER_PLAY_AUTHENTIC;
@@ -5796,22 +5931,89 @@ bool player_render_notice_text(NkRenderFallback fallback, const char **heading,
     return h != NULL;
 }
 
+/* The effects in words, in NkRenderEffect order. */
+static const char *const player_render_effect_words[NK_RENDER_EFFECT_COUNT] = {
+    "stencil effects", "colour-test effects", "logic operations", "partial colour writes",
+    "pictures drawn in main memory", "wide frame buffers", "mipmapped textures", "lines",
+    "points"
+};
+
+bool player_render_effects_text(uint16_t effects, char *out, size_t out_capacity) {
+    int total = 0;
+    int done = 0;
+    size_t used = 0u;
+    if (!out || out_capacity == 0u) return false;
+    out[0] = '\0';
+    for (int i = 0; i < NK_RENDER_EFFECT_COUNT; ++i) total += (effects >> i) & 1u;
+    if (total == 0) return false;
+    int n = snprintf(out, out_capacity,
+                     "Some of this game's drawing is done in software because the GPU renderer "
+                     "cannot draw it: ");
+    if (n < 0 || (size_t)n >= out_capacity) {
+        out[0] = '\0';
+        return false;
+    }
+    used = (size_t)n;
+    for (int i = 0; i < NK_RENDER_EFFECT_COUNT; ++i) {
+        if (!((effects >> i) & 1u)) continue;
+        const char *sep = done == 0 ? "" : done == total - 1 ? " and " : ", ";
+        n = snprintf(out + used, out_capacity - used, "%s%s", sep, player_render_effect_words[i]);
+        if (n < 0 || used + (size_t)n >= out_capacity) {
+            out[0] = '\0';
+            return false;
+        }
+        used += (size_t)n;
+        done++;
+    }
+    n = snprintf(out + used, out_capacity - used, ". The game may run slower.");
+    if (n < 0 || used + (size_t)n >= out_capacity) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
 bool player_app_render_notice(const PlayerApp *app, const char *disc_id, const char **heading,
                               const char **text) {
     if (heading) *heading = NULL;
     if (text) *text = NULL;
     if (!app || !disc_id || !disc_id[0] || !app->render_path_known ||
         strcmp(app->render_path_disc, disc_id) != 0 ||
-        (unsigned)app->render_path.fallback >= NK_RENDER_FALLBACK_COUNT ||
-        app->render_notice_hidden[app->render_path.fallback]) {
+        (unsigned)app->render_path.fallback >= NK_RENDER_FALLBACK_COUNT) {
         return false;
     }
-    return player_render_notice_text(app->render_path.fallback, heading, text);
+    if (app->render_path.fallback != NK_RENDER_FALLBACK_NONE) {
+        if (app->render_notice_hidden[app->render_path.fallback]) return false;
+        return player_render_notice_text(app->render_path.fallback, heading, text);
+    }
+    /* Hidden only when this game hid every effect it reports now. */
+    const uint16_t hidden =
+        strcmp(app->render_effects_hidden_disc, disc_id) == 0 ? app->render_effects_hidden : 0u;
+    if (!app->render_path.gpu_ge || (app->render_effects & (uint16_t)~hidden) == 0u ||
+        !app->render_effects_text[0]) {
+        return false;
+    }
+    if (heading) *heading = "Partly drawn in software";
+    if (text) *text = app->render_effects_text;
+    return true;
 }
 
 void player_app_hide_render_notice(PlayerApp *app) {
     if (!app || !app->render_path_known ||
         (unsigned)app->render_path.fallback >= NK_RENDER_FALLBACK_COUNT) {
+        return;
+    }
+    if (app->render_path.fallback == NK_RENDER_FALLBACK_NONE) {
+        if (app->render_effects == 0u || !app->render_path_disc[0]) return;
+        if (strcmp(app->render_effects_hidden_disc, app->render_path_disc) != 0) {
+            snprintf(app->render_effects_hidden_disc, sizeof(app->render_effects_hidden_disc),
+                     "%s", app->render_path_disc);
+            app->render_effects_hidden = 0u;
+        }
+        app->render_effects_hidden |= app->render_effects;
+        player_dev_log_add(app, "runtime",
+                           "render notice hidden for this session: effects drawn in software "
+                           "on %s", app->render_path_disc);
         return;
     }
     app->render_notice_hidden[app->render_path.fallback] = true;
@@ -5821,7 +6023,26 @@ void player_app_hide_render_notice(PlayerApp *app) {
 
 void player_app_consume_render_path_line(PlayerApp *app, const char *line) {
     NkRenderPath path;
-    if (!app || app->render_path_known || !nk_render_path_event_parse(line, &path)) return;
+    NkRenderFallbackEvent fallback;
+    if (!app) return;
+    if (nk_render_fallback_event_parse(line, &fallback)) {
+        const uint16_t bit = (uint16_t)(1u << fallback.reason);
+        if (app->render_effects & bit) return;
+        app->render_effects |= bit;
+        (void)player_render_effects_text(app->render_effects, app->render_effects_text,
+                                         sizeof(app->render_effects_text));
+        player_dev_log_add(app, "runtime",
+                           "render fallback: reason=%s frames=%lu sw_prims=%llu gpu_prims=%llu "
+                           "readbacks=%llu share_pm=%lu",
+                           nk_render_effect_name(fallback.reason),
+                           (unsigned long)fallback.frames,
+                           (unsigned long long)fallback.sw_prims,
+                           (unsigned long long)fallback.gpu_prims,
+                           (unsigned long long)fallback.readbacks,
+                           (unsigned long)fallback.share_pm);
+        return;
+    }
+    if (app->render_path_known || !nk_render_path_event_parse(line, &path)) return;
     app->render_path = path;
     app->render_path_known = true;
     player_dev_log_add(app, "runtime", "render path: presenter=%s ge=%s fallback=%s",
@@ -6064,6 +6285,7 @@ static bool player_app_start_package_build_view(PlayerApp *app, int game_index,
     snprintf(app->build_session.enhancement_package_id,
              sizeof(app->build_session.enhancement_package_id), "%s",
              game->enhancement_package_id);
+    app->build_session.enhancement_hook_only = game->enhancement_hook_only;
     /* This card's own image: another one can have the same disc ID. */
     snprintf(app->build_session.iso_path, sizeof(app->build_session.iso_path), "%s",
              game->iso_path);
@@ -8399,17 +8621,67 @@ static void player_psn_result(char *code, size_t code_size, const char *name,
 }
 
 /* A package of unencrypted homebrew (#2143): the package is not refused but turned into a
-   private disc image holding its program, under the library key that image will have. */
-static bool player_homebrew_iso_ready(const char *iso_path, const char *key) {
+   private disc image holding its program, under the library key that image will have, and a
+   copy of the folder it was picked from, the program's ms0:/PSP/GAME/<folder>/
+   (nk_pbp_homebrew.h). An image without that folder, as an older import made it, or whose
+   folder no longer matches the one picked (a newer release copied over it), is made
+   again. */
+static bool player_homebrew_iso_ready(const char *iso_path, const char *key,
+                                      const char *identity, const char *folder,
+                                      const char *pbp_path, const char *view_root) {
     NkIsoMetadata *meta;
     bool ready;
+    char found[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
     if (nk_platform_path_missing(iso_path)) return false;
+    if (nk_pbp_homebrew_find_view(iso_path, found, sizeof(found)) != NK_PBP_HB_VIEW_FOUND ||
+        strcmp(found, folder) != 0 || !nk_pbp_homebrew_view_current(pbp_path, view_root))
+        return false;
     meta = (NkIsoMetadata *)calloc(1, sizeof(*meta));
     if (meta == NULL) return false;
     ready = nk_iso_inspect(iso_path, meta) == NK_OK && meta->non_retail &&
-            strcmp(meta->disc_id, key) == 0;
+            strcmp(meta->disc_id, key) == 0 && strcmp(meta->identity_sha256, identity) == 0;
     free(meta);
     return ready;
+}
+
+/* Whether the key's place is free for this program (review of #2426, S3). The key keeps
+   about 31 bits of the program's digest, so another program can have it: an image already
+   under it must be this program's by its full digest, or the import stops by name and
+   replaces nothing (not the image, its folder copy, nor the Memory Stick its title runs
+   on). An image that cannot be read as a disc is not taken for this program's either. */
+static bool player_homebrew_key_free(const char *iso_path, const char *identity) {
+    NkIsoMetadata *meta;
+    bool same;
+    if (nk_platform_path_missing(iso_path)) return true;
+    meta = (NkIsoMetadata *)calloc(1, sizeof(*meta));
+    if (meta == NULL) return false;
+    same = nk_iso_inspect(iso_path, meta) == NK_OK && meta->non_retail &&
+           strcmp(meta->identity_sha256, identity) == 0;
+    free(meta);
+    return same;
+}
+
+static void player_homebrew_key_taken(const char *key, const char *iso_path, char *code,
+                                      size_t code_size, char *message, size_t message_size) {
+    player_psn_result(code, code_size, "HOMEBREW_KEY_TAKEN", message, message_size,
+                      "Another program already has the library key %s that this one would "
+                      "get, so this one can't be added beside it (its disc image is %.300s). "
+                      "Nothing was changed.", key, iso_path);
+}
+
+/* One program in two folders (review of #2426, M1): the key comes from the EBOOT.PBP alone,
+   so a second folder holding the same file would replace the first folder's copy, and both
+   would run on one Memory Stick. The import stops by name; from its own folder it goes on. */
+static void player_homebrew_already_added(const char *title, const char *key, const char *other,
+                                          char *code, size_t code_size, char *message,
+                                          size_t message_size) {
+    char shown[MAX_PATH_LEN];
+    (void)player_display_text(other, shown, sizeof(shown));
+    /* The player shows the stop with what clears it (player_app_refuse_homebrew_elsewhere). */
+    player_psn_result(code, code_size, "HOMEBREW_ALREADY_ADDED", message, message_size,
+                      "%.120s (%s) was added before from %s%.300s%s. A program is added from "
+                      "one folder. Nothing was changed.", title, key,
+                      shown[0] ? "the folder \"" : "another folder", shown, shown[0] ? "\"" : "");
 }
 
 static bool player_psn_disc_iso_path(char *out, size_t out_size, const char *data_root,
@@ -8426,6 +8698,175 @@ static bool player_psn_disc_iso_path(char *out, size_t out_size, const char *dat
                                NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
 }
 
+/* A key the import gives a program: X, three capital letters, five digits (nk_non_retail_disc_key). */
+static bool player_homebrew_key_valid(const char *key) {
+    if (!key || strlen(key) != 9u || key[0] != NK_NON_RETAIL_KEY_PREFIX) return false;
+    for (size_t i = 1; i < 4u; ++i) {
+        if (key[i] < 'A' || key[i] > 'Z') return false;
+    }
+    for (size_t i = 4; i < 9u; ++i) {
+        if (key[i] < '0' || key[i] > '9') return false;
+    }
+    return true;
+}
+
+/* What clears the stop comes before the path, which comes last, so a long path can never cut
+   the instruction off (cold read of #2426, finding 1). */
+static void player_homebrew_elsewhere_text(char *out, size_t out_size, bool in_library,
+                                           const char *title, const char *key,
+                                           const char *shown) {
+    int used;
+    if (in_library) {
+        used = snprintf(out, out_size,
+                        "%.60s (%s) is in the library, added from another folder. A program is "
+                        "added from one folder: to add it from this one, remove %.60s from the "
+                        "library with \"Also delete the decrypted files and disc copy\" ticked. "
+                        "Nothing was changed.", title, key, title);
+    } else {
+        used = snprintf(out, out_size,
+                        "%.60s (%s) has left the library, but Nakagawa still keeps its copy of "
+                        "the folder it was added from. A program is added from one folder: to "
+                        "add it from this one, choose Delete kept copy, then add it again. The "
+                        "files it wrote on its Memory Stick stay. Nothing was changed.",
+                        title, key);
+    }
+    if (shown[0] && used > 0 && (size_t)used < out_size) {
+        snprintf(out + used, out_size - (size_t)used, " It was added from the folder \"%.160s\".",
+                 shown);
+    }
+}
+
+void player_app_refuse_homebrew_elsewhere(PlayerApp *app, const PlayerPsnPackage *package,
+                                          char *log_line, size_t log_line_size) {
+    char other[MAX_PATH_LEN];
+    char shown[MAX_PATH_LEN];
+    char message[sizeof(app->last_error.message)];
+    const char *title;
+    PlayerView back = VIEW_LIBRARY;
+    bool in_library;
+    if (!app || !package) return;
+    title = package->title[0] ? package->title : "Homebrew";
+    other[0] = '\0';
+    shown[0] = '\0';
+    /* Asked again: what is beside the image now is what the card's action deletes. */
+    (void)nk_pbp_homebrew_other_source(package->pbp_path, package->iso_path, other,
+                                       sizeof(other));
+    if (other[0]) (void)player_display_text(other, shown, sizeof(shown));
+    in_library = player_app_find_game_by_disc_id(app, package->disc_id) >= 0;
+    player_homebrew_elsewhere_text(message, sizeof(message), in_library, title,
+                                   package->disc_id, shown);
+    /* The log line names the title and what clears the stop, not the folder: stderr can be
+       player-output.txt, which a problem report collects (review of #2426's fixes, S2). */
+    if (log_line && log_line_size) {
+        player_homebrew_elsewhere_text(log_line, log_line_size, in_library, title,
+                                       package->disc_id, "");
+    }
+    if (app->active_view == VIEW_SETUP_WIZARD) {
+        player_app_wizard_reset_extraction(app);
+        app->wizard.iso_selected = false;
+        snprintf(app->wizard.status_message, sizeof(app->wizard.status_message),
+                 "HOMEBREW_ALREADY_ADDED: %.120s was added before from another folder.", title);
+        back = VIEW_SETUP_WIZARD;
+    }
+    player_app_set_error(app, "HOMEBREW_ALREADY_ADDED", "Program added from another folder",
+                         message, "Choose another disc", back);
+    if (!in_library && player_homebrew_key_valid(package->disc_id)) {
+        snprintf(app->last_error.subject_disc_id, sizeof(app->last_error.subject_disc_id), "%s",
+                 package->disc_id);
+        app->last_error.retry = PLAYER_ERROR_RETRY_DELETE_KEPT;
+    }
+}
+
+bool player_app_delete_kept_homebrew(PlayerApp *app, const char *key, char *error,
+                                     size_t error_size) {
+    char data_root[NK_MAX_PATH];
+    char iso_path[MAX_PATH_LEN];
+    char library_path[NK_MAX_PATH];
+    char problem[512];
+    NkFileLock lock;
+    bool locked = false;
+    bool ok;
+    if (error && error_size) error[0] = '\0';
+    if (!app || !player_homebrew_key_valid(key)) {
+        if (error && error_size) snprintf(error, error_size, "That is not a program's key.");
+        return false;
+    }
+    if (player_app_find_game_by_disc_id(app, key) >= 0) {
+        if (error && error_size) {
+            snprintf(error, error_size, "%s is in the library. Remove it there with \"Also "
+                     "delete the decrypted files and disc copy\" ticked.", key);
+        }
+        return false;
+    }
+    if (!nk_platform_get_app_data_dir(data_root, sizeof(data_root)) ||
+        !player_psn_disc_iso_path(iso_path, sizeof(iso_path), data_root, key)) {
+        if (error && error_size) {
+            snprintf(error, error_size, "Nakagawa's data folder could not be found.");
+        }
+        return false;
+    }
+    /* Another player may have added the title since this library was read: the file is read
+       again under the library lock, held while the files are deleted. */
+    if (player_library_file_path(app, library_path, sizeof(library_path)) &&
+        !nk_platform_path_missing(library_path)) {
+        GameRecord *probe = (GameRecord *)calloc(1, sizeof(*probe));
+        PlayerLibraryFileImages images = PLAYER_LIBRARY_FILE_UNREADABLE;
+        if (nk_library_lock_acquire(&lock, library_path, NK_LIBRARY_LOCK_TIMEOUT_MS) != NK_OK) {
+            free(probe);
+            if (error && error_size) {
+                snprintf(error, error_size, "The library is in use by another program. "
+                         "Try again in a moment.");
+            }
+            return false;
+        }
+        locked = true;
+        if (probe) {
+            snprintf(probe->disc_id, sizeof(probe->disc_id), "%s", key);
+            images = player_library_file_other_image(probe, library_path);
+            free(probe);
+        }
+        if (images != PLAYER_LIBRARY_FILE_NO_OTHER_IMAGE) {
+            nk_platform_file_lock_release(&lock);
+            if (error && error_size) {
+                snprintf(error, error_size, images == PLAYER_LIBRARY_FILE_OTHER_IMAGE
+                         ? "%s is in the library again. Remove it there with \"Also delete the "
+                           "decrypted files and disc copy\" ticked."
+                         : "The library file could not be read, so nothing was deleted (%s).",
+                         key);
+            }
+            return false;
+        }
+    }
+    ok = nk_pbp_homebrew_delete_import(iso_path, problem, sizeof(problem));
+    if (locked) nk_platform_file_lock_release(&lock);
+    if (!ok && error && error_size) snprintf(error, error_size, "%s", problem);
+    return ok;
+}
+
+/* The card's "Delete kept copy": on success, back where the program was picked, saying so. */
+static bool player_app_delete_kept_from_error(PlayerApp *app) {
+    char key[sizeof(app->last_error.subject_disc_id)];
+    char error[PLAYER_ERROR_DETAILS_MAX];
+    PlayerView back = app->last_error.return_view;
+    snprintf(key, sizeof(key), "%s", app->last_error.subject_disc_id);
+    player_dev_log_add(app, "error", "%s: delete the kept copy of %s",
+                       app->last_error.error_code, key);
+    if (!player_app_delete_kept_homebrew(app, key, error, sizeof(error))) {
+        player_app_set_error(app, "HOMEBREW_KEPT_COPY_NOT_DELETED", "Kept copy not deleted",
+                             error, "Back", back);
+        return true;
+    }
+    player_app_set_view(app, back);
+    if (back == VIEW_SETUP_WIZARD) {
+        snprintf(app->wizard.status_message, sizeof(app->wizard.status_message),
+                 "The kept copy of %s was deleted. Add the program's EBOOT.PBP again.", key);
+    } else {
+        snprintf(app->library_notice, sizeof(app->library_notice),
+                 "The kept copy of %s was deleted. Add the program's EBOOT.PBP again.", key);
+    }
+    return true;
+}
+
 static bool player_homebrew_package_inspect(const char *pbp_path, const NkPbpInfo *info,
                                             PlayerPsnPackage *package,
                                             char *code, size_t code_size,
@@ -8434,6 +8875,10 @@ static bool player_homebrew_package_inspect(const char *pbp_path, const NkPbpInf
     NkPbpHomebrew program;
     char label[160];
     char data_root[NK_MAX_PATH];
+    char view_root[MAX_PATH_LEN];
+    char folder[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
+    char problem[512];
+    char other[MAX_PATH_LEN];
     int rc;
     snprintf(label, sizeof(label), "%.120s", info->title[0] ? info->title : "This package");
     nk_psp_ctx_init(&ctx, NULL);
@@ -8477,12 +8922,49 @@ static bool player_homebrew_package_inspect(const char *pbp_path, const NkPbpInf
                           "The path to Nakagawa's data folder is too long.");
         return false;
     }
+    /* The folder the package is in comes with it, as the program's Memory Stick folder. */
+    if (!nk_pbp_homebrew_view_root(package->iso_path, view_root, sizeof(view_root))) {
+        package->iso_path[0] = '\0';
+        player_psn_result(code, code_size, "IO_FAILURE", message, message_size,
+                          "The path to Nakagawa's data folder is too long.");
+        return false;
+    }
+    if (!nk_pbp_homebrew_check_folder(pbp_path, view_root, problem, sizeof(problem)) ||
+        !nk_pbp_homebrew_folder_name(pbp_path, folder, sizeof(folder), problem,
+                                     sizeof(problem)) ||
+        !nk_pbp_homebrew_program_named(pbp_path, problem, sizeof(problem))) {
+        package->iso_path[0] = '\0';
+        player_psn_result(code, code_size, "HOMEBREW_FOLDER_UNSUPPORTED", message, message_size,
+                          "%s", problem);
+        return false;
+    }
+    if (!player_homebrew_key_free(package->iso_path, program.identity_sha256)) {
+        player_homebrew_key_taken(program.key, package->iso_path, code, code_size, message,
+                                  message_size);
+        package->iso_path[0] = '\0';
+        return false;
+    }
+    if (nk_pbp_homebrew_other_source(pbp_path, package->iso_path, other, sizeof(other))) {
+        player_homebrew_already_added(info->title[0] ? info->title : "Homebrew", program.key,
+                                      other, code, code_size, message, message_size);
+        /* The package names the program, so the player can say what clears the stop. */
+        snprintf(package->pbp_path, sizeof(package->pbp_path), "%s", pbp_path);
+        snprintf(package->disc_id, sizeof(package->disc_id), "%s", program.key);
+        snprintf(package->title, sizeof(package->title), "%s",
+                 info->title[0] ? info->title : "Homebrew");
+        package->homebrew = true;
+        return false;
+    }
     snprintf(package->pbp_path, sizeof(package->pbp_path), "%s", pbp_path);
     snprintf(package->disc_id, sizeof(package->disc_id), "%s", program.key);
+    snprintf(package->identity_sha256, sizeof(package->identity_sha256), "%s",
+             program.identity_sha256);
     snprintf(package->title, sizeof(package->title), "%s",
              info->title[0] ? info->title : "Homebrew");
     package->homebrew = true;
-    package->iso_ready = player_homebrew_iso_ready(package->iso_path, program.key);
+    package->iso_ready = player_homebrew_iso_ready(package->iso_path, program.key,
+                                                   program.identity_sha256, folder, pbp_path,
+                                                   view_root);
     return true;
 }
 
@@ -8601,6 +9083,8 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
     NkPbpHomebrew program;
     PlayerPsnBridge bridge;
     NkNpumdimgCallbacks hooks;
+    bool had_image = false;
+    bool fresh = false;
     int rc;
     bridge.callbacks = callbacks;
     hooks.on_progress = player_psn_bridge_progress;
@@ -8613,26 +9097,89 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
                           "The package changed after it was checked. Add it again.");
         return false;
     }
-    rc = nk_pbp_homebrew_convert_file(&ctx, package->pbp_path, &info, package->iso_path, &hooks,
-                                      &program);
-    if (rc == NK_PSP_OK && strcmp(program.key, package->disc_id) != 0) {
-        (void)nk_remove_utf8(package->iso_path);
-        player_psn_result(code, code_size, "PBP_PACKAGE_UNSUPPORTED", message, message_size,
-                          "The package changed after it was checked. Add it again.");
-        return false;
+    /* The folder first, then the image: an image is never left without its folder, and a
+       launch refuses one that is (NK_PBP_HB_VIEW_MISSING). */
+    {
+        char view_root[MAX_PATH_LEN];
+        char problem[512];
+        char other[MAX_PATH_LEN];
+        had_image = !nk_platform_path_missing(package->iso_path);
+        /* Only an attempt that found nothing of an earlier import may take everything away
+           when it fails: one that found its record, view, staging copy or seed records
+           leaves them, so the first folder's stop holds (review of #2426's fixes, S1). */
+        fresh = !had_image && !nk_pbp_homebrew_import_present(package->iso_path);
+        problem[0] = '\0';
+        /* Checked again here, before anything is written: another program's image may
+           have arrived under the key since the inspection, or this one from another
+           folder. */
+        if (!player_homebrew_key_free(package->iso_path, package->identity_sha256)) {
+            player_homebrew_key_taken(package->disc_id, package->iso_path, code, code_size,
+                                      message, message_size);
+            return false;
+        }
+        if (nk_pbp_homebrew_other_source(package->pbp_path, package->iso_path, other,
+                                         sizeof(other))) {
+            player_homebrew_already_added(package->title, package->disc_id, other, code,
+                                          code_size, message, message_size);
+            return false;
+        }
+        if (!nk_pbp_homebrew_view_root(package->iso_path, view_root, sizeof(view_root)) ||
+            !nk_pbp_homebrew_write_view(package->pbp_path, view_root, &hooks, problem,
+                                        sizeof(problem))) {
+            bool cancelled = callbacks != NULL && callbacks->is_cancelled != NULL &&
+                             callbacks->is_cancelled(callbacks->userdata);
+            if (cancelled) {
+                player_psn_result(code, code_size, "CANCELLED", message, message_size,
+                                  "The import was cancelled, and nothing was kept.");
+            } else {
+                fprintf(stderr, "[PLAYER] homebrew folder copy stopped: %s\n", problem);
+                player_psn_result(code, code_size, "HOMEBREW_FOLDER_UNSUPPORTED", message,
+                                  message_size, "The package's folder could not be copied: "
+                                  "%.300s Nothing was kept.", problem);
+            }
+            return false;
+        }
+        rc = nk_pbp_homebrew_convert_file(&ctx, package->pbp_path, &info, package->iso_path,
+                                          &hooks, &program);
+        if (rc == NK_PSP_OK && (strcmp(program.key, package->disc_id) != 0 ||
+                                strcmp(program.identity_sha256, package->identity_sha256) != 0)) {
+            if (had_image) {
+                (void)nk_remove_utf8(package->iso_path);
+                (void)nk_platform_remove_tree(view_root, NULL);
+            } else if (fresh) {
+                (void)nk_pbp_homebrew_delete_import(package->iso_path, NULL, 0u);
+            } else {
+                (void)nk_remove_utf8(package->iso_path);
+            }
+            player_psn_result(code, code_size, "PBP_PACKAGE_UNSUPPORTED", message, message_size,
+                              "The package changed after it was checked. Add it again.");
+            return false;
+        }
+        if (rc == NK_PSP_OK) return true;
+        /* A first import keeps nothing, its source record included (cold read of #2426,
+           finding 2); an earlier image of the same program (the same key) keeps the new
+           folder, which belongs to it; and an earlier import whose image has gone keeps its
+           record and folder copy. */
+        if (fresh) (void)nk_pbp_homebrew_delete_import(package->iso_path, NULL, 0u);
     }
-    if (rc == NK_PSP_OK) return true;
+    /* With an earlier image, the new folder copy stays with it (review of #2426, N5). */
     if (rc == NK_PSP_ERR_CANCELLED) {
         player_psn_result(code, code_size, nk_psp_status_name(rc), message, message_size,
                           "The conversion was cancelled, and the partial disc image was "
-                          "removed.");
+                          "removed.%s", had_image ? " The earlier disc image stays, with the "
+                          "new copy of the program's folder."
+                          : fresh ? "" : " The copy of the program's folder and the record of "
+                          "where it was added from stay.");
         return false;
     }
     fprintf(stderr, "[PLAYER] homebrew package conversion stopped: %s: %s\n",
             nk_psp_status_name(rc), ctx.message);
     player_psn_result(code, code_size, nk_psp_status_name(rc), message, message_size,
-                      "The package could not be turned into a disc image: %.200s. Nothing was "
-                      "kept.", ctx.message);
+                      "The package could not be turned into a disc image: %.200s. %s",
+                      ctx.message, had_image ? "The earlier disc image stays, with the new "
+                      "copy of the program's folder."
+                      : fresh ? "Nothing was kept." : "The copy of the program's folder and "
+                      "the record of where it was added from stay.");
     return false;
 }
 

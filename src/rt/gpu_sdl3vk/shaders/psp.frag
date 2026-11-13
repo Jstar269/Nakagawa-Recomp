@@ -88,13 +88,17 @@ layout(set = 2, binding = 0) uniform sampler2D u_dst;
  * Bits 17-19 = factor - 1 of a scaled texture copy (ge_gpu.c, tex_scale.h); 0 otherwise.
  * 1048576 (bit 20) color test, bits 21-22 its function (GE_COLORTEST: 0 never, 2 equal,
  * 3 not equal; ge_gpu.c leaves the test off for 1, always): fixa.a = GE_COLORREF &
- * GE_COLORTESTMASK, fixb.a = GE_COLORTESTMASK, each a whole number. */
+ * GE_COLORTESTMASK, fixb.a = GE_COLORTESTMASK, each a whole number.
+ * 8388608 (bit 23) host mip chain (ge_gpu.c tex_hm_applies, tex_mips.h; an Enhanced run with
+ * mips=on only): the bound texture has levels the host built from the game's one, and is
+ * sampled with the level-0 texel coordinate's own gradients per device pixel. */
 layout(push_constant) uniform PC {
     ivec4 cfg;      /* x = texfunc | flags<<8, y = alpha test (func|ref<<8|mask<<16),
                        z = minz, w = maxz */
     vec4  texenv;   /* rgb = GE_TEXENVCOLOR / 255 */
     vec4  fogcol;   /* rgb = GE_FOGCOLOR / 255 */
-    vec4  texsize;  /* xy = tex dimensions, zw = texel offset (render-target sub-rect) */
+    vec4  texsize;  /* xy = tex dimensions, zw = texel offset (render-target sub-rect); a render
+                       target's texture size rides in texenv.a and fogcol.a (main) */
     ivec4 dith;     /* 4x4 GE dither matrix, one row per component, 4 x s8 packed per int */
     ivec4 bl;       /* x = blend srcf | dstf<<8 | eq<<16, y = render scale (>= 1),
                        z = stencil test (32768: the constant stencil), w = stencil ops |
@@ -224,9 +228,67 @@ void main() {
             if ((flags & 64) != 0) uv = floor(uv) + vec2(0.5);
             else uv = floor((uv - vec2(0.5)) * 16.0) / 16.0 + vec2(0.5);
             if (tscale > 1) uv /= float(tscale);
+            /* A render target bound directly (ge_gpu.c build_state, #2052) is a texture inside the
+             * target's 512 x 272 image at texel offset texsize.zw. texenv.a and fogcol.a carry the
+             * texture's width and height (0 for every other texture), cfg.y bits 24-25 its U and V
+             * clamp bits and bits 26-27 its minification and magnification filters (1: linear): the
+             * bind never has mip levels, so those per-fragment LOD lanes are free. Each texel index
+             * is clamped or wrapped at the texture's size, as ge.c sample_tex does, not at the
+             * image's edge. A fragment filters as ge.c shade picks: minified when the larger
+             * squared length of its texel coordinate's derivatives per guest pixel exceeds 1.
+             * Nearest keeps a position inside the texture and moves one outside it to the clamped
+             * or wrapped texel. Linear clamps the position to the centres of the texture's first
+             * and last device texels, where both taps lie inside it; a repeated axis wraps the
+             * position, and where its two taps straddle the seam all four taps are fetched and
+             * blended here, wrapped in device texels. With the same filter both ways the sampler
+             * filters (given the unwrapped coordinate's gradients) and inside the texture nothing
+             * changes. With different filters the shader's choice must hold, and a sampler may
+             * judge the footprint another way (Vulkan allows approximations of it), so the shader
+             * fetches every sample itself: for nearest the device texel the sampler's nearest
+             * path takes (the guest texel's centre, so one device texel per guest texel), the four
+             * taps for linear. */
+            bool rtt_box = (flags & 16384) == 0 && pc.texenv.a > 0.0;
+            bool rtt_seam = false, rtt_near = false;
+            ivec2 rtt_c0 = ivec2(0), rtt_c1 = ivec2(0);
+            vec2 rtt_f = vec2(0.0), rtt_gdx = vec2(0.0), rtt_gdy = vec2(0.0);
+            if (rtt_box) {
+                vec2 tsz = vec2(pc.texenv.a, pc.fogcol.a);
+                bvec2 clampm = bvec2(((pc.cfg.y >> 24) & 1) != 0, ((pc.cfg.y >> 25) & 1) != 0);
+                vec2 u0 = v_uv / rw;
+                vec2 fdx = (duv_dx - u0 * drw_dx) / rw, fdy = (duv_dy - u0 * drw_dy) / rw;
+                rtt_gdx = fdx / (lod_scale * pc.texsize.xy);
+                rtt_gdy = fdy / (lod_scale * pc.texsize.xy);
+                bool minify = max(dot(fdx, fdx), dot(fdy, fdy)) > 1.0;
+                bool linear = (flags & 64) == 0 && ((pc.cfg.y >> (minify ? 26 : 27)) & 1) != 0;
+                bool mixed = (flags & 64) == 0 && (((pc.cfg.y >> 26) ^ (pc.cfg.y >> 27)) & 1) != 0;
+                float sc = lod_scale;
+                ivec2 lim = textureSize(u_tex, 0) - ivec2(1);
+                if (!linear) {
+                    vec2 idx = floor(uv);
+                    vec2 moved = mix(idx - tsz * floor(idx / tsz), clamp(idx, vec2(0.0), tsz - vec2(1.0)), clampm);
+                    uv += moved - idx;
+                    rtt_near = mixed;
+                    if (rtt_near) rtt_c0 = clamp(ivec2(floor(uv)) * int(sc) + ivec2(int(sc) / 2) +
+                                                 ivec2(pc.texsize.zw * sc), ivec2(0), lim);
+                } else {
+                    vec2 lo = vec2(0.5 / sc), hi = tsz - vec2(0.5 / sc);
+                    uv = mix(uv - tsz * floor(uv / tsz), clamp(uv, lo, hi), clampm);
+                    rtt_seam = mixed || any(lessThan(uv, lo)) || any(greaterThan(uv, hi));
+                    if (rtt_seam) {
+                        vec2 n = tsz * sc, p = uv * sc - vec2(0.5), i0 = floor(p);
+                        rtt_f = p - i0;
+                        vec2 a = i0 - n * floor(i0 / n), b = (i0 + vec2(1.0)) - n * floor((i0 + vec2(1.0)) / n);
+                        rtt_c0 = clamp(ivec2(a + pc.texsize.zw * sc), ivec2(0), lim);
+                        rtt_c1 = clamp(ivec2(b + pc.texsize.zw * sc), ivec2(0), lim);
+                    }
+                }
+            }
             uv += pc.texsize.zw;
             vec4 t;
-            if ((flags & 16384) != 0) {
+            if (rtt_box) {
+                t = (rtt_near || rtt_seam) ? vec4(0.0)    /* fetched below */
+                                           : textureGrad(u_tex, uv / pc.texsize.xy, rtt_gdx, rtt_gdy) * 255.0;
+            } else if ((flags & 16384) != 0) {
                 /* ge.c tex_detail16: automatic mode is log16 of the footprint (the larger
                  * squared length of the level-0 texel coordinate's screen derivatives, each
                  * the quotient rule's (d(u rw) - u d(rw)) / rw, as raster_tri takes them);
@@ -254,6 +316,16 @@ void main() {
                     if (lod == 0.0) lod = 0.25;
                 }
                 t = textureLod(u_tex, uv / pc.texsize.xy, lod) * 255.0;
+            } else if ((flags & 8388608) != 0) {
+                /* A host-built chain: the footprint of this device pixel, by the quotient rule
+                 * from the derivatives taken above before any discard (explicit gradients need
+                 * no helper invocation), so the level follows the render scale and the sampler's
+                 * trilinear (and anisotropic) filtering does the rest. The sample point is the
+                 * PSP's, as above. */
+                vec2 u0 = v_uv / rw;
+                vec2 gs = 1.0 / (rw * lod_scale * pc.texsize.xy);
+                vec2 gdx = (duv_dx - u0 * drw_dx) * gs, gdy = (duv_dy - u0 * drw_dy) * gs;
+                t = textureGrad(u_tex, uv / pc.texsize.xy, gdx, gdy) * 255.0;
             } else if (v_uvbox.x <= v_uvbox.z || v_uvbox.y <= v_uvbox.w) {
                 /* A clamped primitive (through mode, so rw is 1) takes its footprint from the
                  * unclamped coordinate: a clamped band has the same minification or
@@ -262,6 +334,14 @@ void main() {
                 t = textureGrad(u_tex, uv / pc.texsize.xy, gdx, gdy) * 255.0;
             } else {
                 t = texture(u_tex, uv / pc.texsize.xy) * 255.0;
+            }
+            if (rtt_near) t = texelFetch(u_tex, rtt_c0, 0) * 255.0;
+            if (rtt_seam) {
+                vec4 t00 = texelFetch(u_tex, ivec2(rtt_c0.x, rtt_c0.y), 0);
+                vec4 t10 = texelFetch(u_tex, ivec2(rtt_c1.x, rtt_c0.y), 0);
+                vec4 t01 = texelFetch(u_tex, ivec2(rtt_c0.x, rtt_c1.y), 0);
+                vec4 t11 = texelFetch(u_tex, ivec2(rtt_c1.x, rtt_c1.y), 0);
+                t = mix(mix(t00, t10, rtt_f.x), mix(t01, t11, rtt_f.x), rtt_f.y) * 255.0;
             }
             int  tf    = pc.cfg.x & 7;
             bool rgba  = (flags & 2) != 0;

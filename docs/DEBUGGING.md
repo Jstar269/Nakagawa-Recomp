@@ -626,7 +626,7 @@ coverage classes, such as `unverified` and `synthetic`, are defined in [`HLE_COV
 | `SR_GEWATCH_AFTER=N` | Start GE watch after frame N |
 | `SR_GEMATW=1` | Log GE matrix writes |
 | `SR_NO2DZ=1` | Disable 2D Z-buffer |
-| `SR_GPU_STATS=1` | Emit bounded Vulkan submission/batch/texture/snapshot counters without per-submit logging |
+| `SR_GPU_STATS=1` | Emit bounded Vulkan submission/batch/texture/snapshot counters without per-submit logging, and a `GEGPU_FALLBACK present` line for each accepted present that handed primitives to the software rasterizer: the primitives the GPU drew and, by reason, those it handed over and their readbacks (#2151) |
 | `SR_GPU_TIMESTAMPS=1` | Measure GPU time with Vulkan timestamp queries: each GE command buffer split by op kind (render batch, snapshot copy, upload, readback, other), printed as a `GEGPU_TS` line every 60 presents and a `GEGPU_TS_TOTAL` line at exit, and the presentation blit; with `SR_PERF_FRAMES` the times also fill the `gpu_*` columns. An op on the interlock destination-read path (#2109) takes no snapshot copy, and its time counts as render batch. Ops overlap on the GPU, so the split is an attribution and the sum is the whole execution span. It changes no rendering, guest memory or wait |
 | `SR_GPU_TWIN_COLOR=1\|native\|0\|off` | Developer override of the launch line's `twin` key (the player's "Full 32-bit colour", #2050), for the Vulkan and the software renderer. It wins whenever it is set, so it overrides the player's setting: `1` turns on full 32-bit colour without dither (also when the player left it off), `native` keeps the authentic colour (for identity checks), `0` and `off` turn off a twin the line asked for (the Ace report names `twin` unavailable: SR_GPU_TWIN_COLOR overrides it); unset or empty leaves the choice to the line. Ace Mode only. Any other value is refused. Guest VRAM is unchanged ([ENHANCEMENT_CONTRACT.md 10.11](ENHANCEMENT_CONTRACT.md#1011-full-32-bit-colour-the-host-twin)). Prints `TWIN:` lines at start and exit |
 | `SR_GPU_TWIN_CAPTURE=authentic` | With the twin on, present and capture the authentic image instead of the twin |
@@ -1363,6 +1363,21 @@ Supported formats are `5650`, `5551`, `4444`, `8888`, `CLUT4`, `CLUT8`, `CLUT16`
 
 `mingw32-make --no-print-directory display-smoke-run` checks raw-to-PNG pixels against the display smoke fixture's host-sink PPM and checks that enabling the capture leaves that PPM byte-identical. This headless check uses the existing `SR_FIRST_FRAME_DUMP` host-sink PPM; `SR_FBSNAP` and `SR_FBDUMP` captures are published from the same `SR_VIDEO=offscreen` sink as well. The interactive in-player VRAM panel remains UNBUILT; the headless viewer is the partial capability tracked by [#314](https://github.com/Jstar269/nakagawa-recomp/issues/314).
 
+#### GE scene dump
+
+Set `SR_GESCENE=<frame>` and `SR_GESCENE_DIR=<existing-directory>` to write every PRIM of one GE
+frame to `gescene_f<frame>.bin`: each draw's identity, the GE state it draws with (matrices, lights,
+material, texture, targets) and its vertices in model space, before skinning. The format is
+versioned and documented in `src/rt/ge_scene.h`. The runtime prints
+`GESCENE: frame <n>: <k> records -> <path>` once a later frame begins. It prints
+`GESCENE NOT_CAPTURED (...)` if the run ends first, by any exit, `SR_EXIT_AT_VBLANK` and the other
+debug stops included; a file already started then holds only part of the frame. It prints
+`GESCENE CONFIG_FAIL (...)` for a frame number that is not plain digits or is above 4294967295, an
+`SR_GESCENE_DIR` too long for a path, or an unset or empty `SR_GESCENE_DIR`, and
+`GESCENE WRITE_FAIL (...)` if the file cannot be created (a folder that does not exist), written or
+closed. Off by default and host-side; with no dump, nothing the GE draws changes. The file holds
+decoded game geometry: like a VRAM dump, it is private evidence and never published.
+
 #### Where `SR_EXIT_AT_VBLANK` actually stops
 
 It is the **last statement of `sr_vblank_tick()`**. At that point vblank *V* is complete in
@@ -1664,6 +1679,8 @@ scan: they are excluded from `presenting` and never counted as a stall.
 | `SR_FBDUMP=N` | At vcount=N publish the presented frame as `present_source.ppm` and exit; status 0 only if a capture was truly published, else 1 |
 | `SR_VRAMDUMP=V[,V...]` | Capture the raw 2 MiB guest VRAM image and GE metadata at up to eight unique presented vblanks; pair with `SR_VRAMDUMP_DIR` |
 | `SR_VRAMDUMP_DIR=PATH` | Existing directory for `vram_<vblank>.bin` and `.json` capture files |
+| `SR_GESCENE=F` | Dump GE frame `F`'s scene records (one per PRIM: identity, state, model-space vertices); pair with `SR_GESCENE_DIR` |
+| `SR_GESCENE_DIR=PATH` | Existing directory for the `gescene_f<frame>.bin` scene dump |
 | `SR_VIDEOREC_DIR=PATH` | Record the run: one video frame per VBLANK at the presenter's output size plus the game's mixed audio, on one guest timeline. Needs `SR_DETERMINISTIC_CLOCK=1`; without it the recording is refused ([Recording a video of a run](#recording-a-video-of-a-run)) |
 | `SR_VIDEOREC_CODEC=ffv1\|x264rgb\|nvenc\|raw` | Encoder for a recording (default `ffv1`, lossless); `raw` writes unencoded frames and needs no FFmpeg. An encoder that cannot run refuses the recording; it never falls back to `raw` |
 | `SR_VIDEOREC_SIZE=WxH` | Output size of a recording, independent of the window (even numbers); default: the window's size at the first recorded present |
@@ -2572,3 +2589,16 @@ retail title is private: keep it out of the repository and every upload.
    that was not asked for (`SR_VIDEO=gdi`, `SR_GPU_GE` unset) is `fallback=none`. The native player names a fallback
    on the game's page, with Hide for the rest of its session. Primitives the GPU renderer hands to the software
    rasterizer during a frame (`GEGPU_FALLBACK_*`) are not part of this line.
+5. Check what the GPU renderer hands to the software rasterizer: while the GPU GE runs, `gegpu_fallback_counts`
+   counts each primitive drawn by `ge.c` instead, and each synchronous readback that took, by reason, always.
+   After each accepted present `gui_present` steps the rule in `src/core/nk_shared_helpers.h`
+   ([thresholds and their basis](../src/rt/gpu_sdl3vk/README.md#software-fallback-report-2151)): a reason whose
+   estimated cost (readbacks and software primitives at their per-unit costs) reaches the budget in each of three
+   windows of 120 presents in a row is reported once per run as
+   `BOOT_EVENT phase=render_fallback reason=<name> frames=<n> sw_prims=<n> gpu_prims=<n> readbacks=<n> share_pm=<n>`
+   (`nk_render_fallback_event_format` in `src/core/nk_shared_helpers.c`; the names are `stencil`, `color_test`,
+   `logic_op`, `write_mask`, `ram_fb`, `wide_stride`, `mips`, `line`, `point`). The native player names those
+   effects on the game's page ("Partly drawn in software"); Hide hides them for that game and those effects for
+   the rest of its session. With `SR_GPU_STATS=1` each accepted present that handed anything to the software
+   rasterizer also prints `GEGPU_FALLBACK present gpu=<n> <name>=<software primitives>/<readbacks>...` for the
+   reasons it had, the figures the rule is checked against; a present that handed nothing prints nothing.

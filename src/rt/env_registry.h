@@ -91,6 +91,8 @@
     X("SR_GELOG", "flag-presence", "off", "debug.h,ge.c,hle.c,hle_ge.c", "Enables GE command-list logging, including a message when a GE stall address is reached.") \
     X("SR_GEMAT", "flag-presence", "off", "ge.c", "When set, prints the world and view matrices of the first 16 primitives to stderr.") \
     X("SR_GEMATW", "flag-presence", "off", "ge.c", "Traces the first 120 GE matrix register writes to stderr.") \
+    X("SR_GESCENE", "number", "unset (no dump)", "ge.c", "GE frame number whose scene records (one per PRIM: identity, state, model-space vertices) are dumped to SR_GESCENE_DIR.") \
+    X("SR_GESCENE_DIR", "path", "unset (scene dump refused)", "ge.c", "Output directory for the SR_GESCENE dump, gescene_f<frame>.bin.") \
     X("SR_GESIGNALLOG", "flag-presence", "off", "ge.c", "Logs the first few GE signal command occurrences per behavior to stderr.") \
     X("SR_GESTAT", "flag-presence", "off", "ge.c", "Prints per-frame GE statistics once per 60-vblank window to diagnose culled or rejected geometry.") \
     X("SR_GEUNK", "flag-nonzero", "on", "ge.c", "Unhandled GE commands are reported once each unless this is set to 0.") \
@@ -112,7 +114,7 @@
     X("SR_GE_STRIP_CACHE_DISABLE", "flag-nonzero", "off (strip cache enabled)", "ge.c", "When nonzero, disables the GE strip cache.") \
     X("SR_GE_TIMING", "string", "off (enabled only when exactly \"1\")", "hle.c", "Set to 1 to turn on the measured GE time model and print a GE_TIMING banner.") \
     X("SR_GE_TRANSITION_TRACE", "path", "off", "ge.c", "Writes a GE transition trace to this file; 1 uses a default log path and 0 or empty disables it.") \
-    X("SR_GLYPHS", "string", "off", "gpu_sdl3vk/glyph_recon.c", "on redraws text as sharp glyphs rebuilt at the render scale (scale 2 to 4) from the game's own anti-aliased texels; Ace Mode only.") \
+    X("SR_GLYPHS", "string", "unset", "ace.c", "Retired (sharp game text is the SR_ACE line's glyphs=on key): any non-empty value refuses the run at start with a line that names the key.") \
     X("SR_GPU_CAPTURE_TERMINAL_CASE", "string", "unset: lifecycle self-test runs", "gpu_sdl3vk/sdl3vk.c", "Names a terminal-fault case for the GPU capture self-test; when set, the lifecycle self-test is skipped.") \
     X("SR_GPU_COHERENCE_CASE", "string", "unset (run all cases)", "gpu_sdl3vk/ge_gpu.c", "Restricts the GPU coherence self-test to one case; scaled-upload, mip-lod or readback-rows.") \
     X("SR_GPU_CPU_PROFILE", "flag-nonzero", "off", "ge.c,ge_replay.c,gpu_sdl3vk/ge_gpu.c", "Enables CPU-side profiling of GPU and GE replay paths, with wall-phase stats in replay.") \
@@ -126,7 +128,7 @@
     X("SR_GPU_READBACK_FULL", "flag-nonzero", "off (only the rows guest memory keeps are copied)", "gpu_sdl3vk/ge_gpu.c", "When enabled, a readback to guest memory copies the whole scaled target, the reference path for the narrowed copy.") \
     X("SR_GPU_SCALE", "number", "1 (falls back to SR_RESOLUTION_SCALE)", "gpu_sdl3vk/ge_gpu.c", "Internal render scale multiplier for the GPU GE renderer.") \
     X("SR_GPU_SSAA_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test ssaa-edge case: a run without supersampling writes it, a supersampled run at that scale checks it.") \
-    X("SR_GPU_STATS", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c", "Enables statistics output in the Vulkan GE backend.") \
+    X("SR_GPU_STATS", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c,gui.c", "Enables statistics output in the Vulkan GE backend, with a line for each accepted present that handed primitives to the software rasterizer.") \
     X("SR_GPU_SUBMIT_BATCH", "number", "SUBMIT_BATCH_MAX", "gpu_sdl3vk/ge_gpu.c", "Number of GPU ops per submit batch; values outside 1 to the maximum are ignored.") \
     X("SR_GPU_SYNC_SUBMIT", "flag-nonzero", "off (asynchronous submit)", "gpu_sdl3vk/ge_gpu.c", "When enabled, GPU command submission is synchronous instead of asynchronous.") \
     X("SR_GPU_TEX_SHADOW_DISABLE", "flag-nonzero", "off (texture shadow enabled)", "gpu_sdl3vk/ge_gpu.c", "Disables the GPU texture shadow when set to a non-empty value other than 0.") \
