@@ -1451,7 +1451,12 @@ void ace_finish(void) {
                 (unsigned long long)a->boxes_full, (unsigned long long)a->frames_overflow,
                 (unsigned long long)(a->frames_depth_unwritten + a->frames_depth_none + a->depth_refused));
     }
-    if (!len || !s_report_path[0]) return;
+    if (!s_report_path[0]) return;
+    if (!len) {
+        fprintf(stderr, "ACE_MODE: report not written (longer than ACE_REPORT_MAX, %u bytes)\n",
+                (unsigned)ACE_REPORT_MAX);
+        return;
+    }
     char tmp[sizeof(s_report_path) + 8];
     snprintf(tmp, sizeof(tmp), "%s.tmp", s_report_path);
     FILE *f = fopen(tmp, "wb");
