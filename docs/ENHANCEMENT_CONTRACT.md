@@ -79,8 +79,8 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   movie this part reads guest bytes, which the `presentation_only` observation boundary in the table
   above (host swapchain state, frame timings, compositor layout) does not name. The owner admitted
   it on 2026-11-13, for this part only and on the terms below: exactly these spans are read, only
-  read and never written, and guest timing is unaffected. The decision does not widen the boundary
-  for any other part.
+  read and never written, and guest timing does not depend on them. The decision does not widen the
+  boundary for any other part.
 
   *What it reads.* Only while `SR_MOVIE_UPSCALE` is on and the Vulkan GE draws (none of it runs
   under the software GE or with the upscaler off):
@@ -89,7 +89,7 @@ Presentation enhancements operate strictly after or alongside the host graphics 
     size and decoder handle, kept as a host-side note (`src/rt/ge_shared.h`), at most eight at a
     time;
   - the bytes of each noted picture's rows (width x height pixels at its stride, the bytes between
-    rows excluded), hashed when it is noted and again before a frame is taken for a movie frame;
+    rows excluded), hashed when it is noted and again each time a match below relies on it;
   - the bytes of a texture the renderer uploads (single-level, direct-colour, unswizzled, the note's
     stride and format), compared with a note's rows byte for byte until the first difference;
   - the GE state the renderer already holds: the texture address, stride and format, the descriptor
@@ -98,10 +98,13 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   Every read is read-only, through checked guest spans and never through the read path that prepares
   VRAM, so it pulls no GPU-held write back into guest memory. Nothing is written to guest memory,
   guest VRAM, a guest register, a GE command or a readback, and no guest call waits on it. It adds
-  host work on the emulation thread (one hash of each noted picture, and a comparison and a hash for
-  each upload that matches): under `SR_DETERMINISTIC_CLOCK=1` no guest-visible timing depends on it,
-  and under the wall clock it takes host time as any host work does. It chooses only which upscaler
-  enlarges the shown picture.
+  host work on the emulation thread: one hash of each picture when it is noted; for each qualifying
+  upload, a comparison with each held note of its stride and format, up to the first differing byte;
+  and a re-hash of a note when such a comparison matches, when an upload's first texel lies in the
+  picture, when a cached texture is checked again after a newer note, and when a GE present looks for
+  a picture written into its target. All of it is host work, so by design no guest-visible timing
+  depends on it under `SR_DETERMINISTIC_CLOCK=1`; that has not been measured. Under the wall clock it
+  takes host time as any host work does. It chooses only which upscaler enlarges the shown picture.
 
   *When a frame is a movie frame.* Its movie box (the box around its movie pixels) covers at least
   half of the shown 480 x 272, in either way a movie reaches the GE:
@@ -127,7 +130,10 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   when the upscaler is off. A picture behind a swizzled VRAM view, a copy that is converted, scaled,
   partial or copied into a GE target, a 16-bit `sceMpegAvcCsc`, a picture sampled from a render
   target, and a picture written in more than eight strips (whose first strip is dropped) are not
-  matched: those frames stay GE frames.
+  matched: those frames stay GE frames. Known limit: a picture of one solid colour (a fade to black)
+  is matched by any texture of its stride and format that starts with the same bytes, so while that
+  note is held, a frame that draws such a texture (a plain black background) over half the screen
+  goes to the movie upscaler, UI drawn over it included. Only the presented picture changes.
 
   Evidence: `gpu-coherence-selftest`'s `movie-texture` and `movie-target` cases present each way
   through the production path, check every way a note stops matching, and compare one frame's guest
@@ -138,7 +144,8 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   writer makes. A run's `GEGPU stats` line (`SR_GPU_STATS`) and its shutdown line (`gegpu: movie
   frames (#2111)`) count movie frames, presents that stayed GE frames while a picture was held, and
   dropped notes. Not measured: the guest flight events with it on and off (no flight recording has
-  been compared), and the upscaled picture itself.
+  been compared), guest timing with it on and off under `SR_DETERMINISTIC_CLOCK=1`, and the upscaled
+  picture itself.
 - **Forbidden:** Mutating GE display list commands, intercepting guest draw calls to alter gameplay geometry, or feeding host input back into the guest controller state.
 
 ### 2.3. Guest Memory and Code Hooks (`guest_memory_code_hook`)
