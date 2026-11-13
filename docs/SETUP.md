@@ -146,11 +146,88 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   `$XDG_DATA_HOME/nakagawa-recomp`), its `saves` folder, and `~/.config/nakagawa-recomp` (or
   `$XDG_CONFIG_HOME/nakagawa-recomp`); on macOS the `config`, `data` and `saves` folders in
   `~/Library/Application Support/NakagawaRecomp`. Nothing is moved, copied, merged or deleted, and
-  Nakagawa offers no move. If the new `Nakagawa` folder exists too, the library screen names both.
-- **Switching to the new folder.** Close Nakagawa, then move or rename those earlier folders out of
-  the way (on Linux both `nakagawa-recomp` folders; on macOS the whole `NakagawaRecomp` folder). The
-  next start uses the new `Nakagawa` folder. Copy anything you want to keep, such as saves, into it
-  yourself.
+  Nakagawa offers no move. If the new `Nakagawa` folder exists too, the library screen and the log
+  name both and point to [Switching to the new data folder](#switching-to-the-new-data-folder),
+  which has the steps and two known limits. Windows and Android have one data folder and nothing
+  to switch.
+
+### Switching to the new data folder
+
+This is for a Linux or macOS install that still uses its earlier folders (the previous section).
+Nakagawa never moves them itself. A switch by hand works when every piece goes to its place in the
+new folder and the library's saved paths are corrected:
+
+| Earlier folder | Goes to |
+| --- | --- |
+| Linux: `~/.local/share/nakagawa-recomp/saves` (or `$XDG_DATA_HOME/nakagawa-recomp/saves`) | `~/.local/share/Nakagawa/saves` (or `$XDG_DATA_HOME/Nakagawa/saves`) |
+| Linux: the rest of `~/.local/share/nakagawa-recomp` (or `$XDG_DATA_HOME/nakagawa-recomp`) | `~/.local/share/Nakagawa/data` (or `$XDG_DATA_HOME/Nakagawa/data`) |
+| Linux: `~/.config/nakagawa-recomp` (or `$XDG_CONFIG_HOME/nakagawa-recomp`) | `~/.local/share/Nakagawa/config` (or `$XDG_DATA_HOME/Nakagawa/config`) |
+| macOS: `~/Library/Application Support/NakagawaRecomp/config`, `data` and `saves` | `~/Library/Application Support/Nakagawa/config`, `data` and `saves` |
+
+On Linux the saves sit inside the earlier data folder, so they move out of it first: copied along
+with the rest into `Nakagawa/data`, they would be where nothing reads them. The new settings folder
+is in the data home, not in `$XDG_CONFIG_HOME`. Use the `$XDG_DATA_HOME` forms only when
+`XDG_DATA_HOME` is set to an absolute path; otherwise the new folder is under `~/.local/share`. The
+cache and the logs are not part of the switch: on Linux they stay in `~/.cache/nakagawa-recomp` and
+`~/.local/state/nakagawa-recomp/logs`; on macOS the earlier `~/Library/Caches/NakagawaRecomp` and
+`~/Library/Logs/NakagawaRecomp` can stay or go, and the new ones are made in the `Nakagawa` folder.
+
+`library.json` in the data folder keeps the full path of each game's disc image and staged copy
+(`iso_path`, `prepared_root`). A disc image you added from your own folder stays where it is and
+keeps working; built games are found by disc ID in the data folder, so they move with it. A disc
+image Nakagawa made inside the data folder (from a PSN or homebrew `EBOOT.PBP`, or a CSO or CHD
+image, in `data/discs`) and a staged copy (`data/games`) are still named at the earlier path after
+the move. The library lists those games as before, but **Play** stops with an error (for a disc
+image, "Game source ISO not found" and the earlier path), and building one says "The original disc
+image is missing. Put it back or add the disc again." Nothing is removed from the library and
+nothing is rebuilt by itself; step 5 corrects the paths, or you can add each such game again from
+its original file.
+
+1. Close Nakagawa and any Nakagawa tool.
+2. If a `Nakagawa` folder exists already (the library screen's notice names it), it holds what a
+   start that used it wrote. Rename it, for example to `Nakagawa.unused`, so the moves below do not
+   land on it; copy anything you want from it into the new folder afterwards.
+3. Linux:
+
+   ```sh
+   mkdir -p ~/.local/share/Nakagawa
+   mv ~/.local/share/nakagawa-recomp/saves ~/.local/share/Nakagawa/saves   # if it exists
+   mv ~/.local/share/nakagawa-recomp ~/.local/share/Nakagawa/data
+   mv ~/.config/nakagawa-recomp ~/.local/share/Nakagawa/config
+   ```
+
+   With the XDG variables set, use the paths in the table instead.
+4. macOS: rename `~/Library/Application Support/NakagawaRecomp` to `Nakagawa`; its `config`, `data`
+   and `saves` folders are already where the new layout expects them.
+5. In the new `data/library.json`, replace every occurrence of the earlier data folder's full path
+   with the new one, with a text editor or with `sed`:
+
+   ```sh
+   # Linux (with the XDG variables set, the paths in the table)
+   sed -i "s|$HOME/.local/share/nakagawa-recomp/|$HOME/.local/share/Nakagawa/data/|g" \
+       "$HOME/.local/share/Nakagawa/data/library.json"
+   # macOS
+   sed -i '' "s|$HOME/Library/Application Support/NakagawaRecomp/data/|$HOME/Library/Application Support/Nakagawa/data/|g" \
+       "$HOME/Library/Application Support/Nakagawa/data/library.json"
+   ```
+
+6. Start Nakagawa. With none of the earlier folders left it uses the `Nakagawa` folder, and the
+   library screen shows no notice. Do not leave a link at an earlier path: an earlier folder that
+   exists in any form, a link included, keeps the earlier layout in use.
+
+Two known limits:
+
+- **A start that cannot see the earlier folders uses the new folder for that run.** When the
+  earlier folders are there but that start cannot see them (they are on a drive that is not mounted
+  yet, or a folder above them may not be searched), it uses `Nakagawa`, and everything written in that run stays
+  there: settings, saves, games added to the library, imported fonts and built games, not only
+  settings. The next start that sees the earlier folders uses them again and reads none of it; the
+  library screen then names both folders. Move what you want to keep by hand.
+- **An older Nakagawa brings the earlier layout back.** Running a Nakagawa from before this change
+  once after a fresh install (an earlier release, or a player or tool from an older source checkout)
+  creates an earlier folder such as `~/.local/share/nakagawa-recomp`. From then on every start uses
+  the earlier layout and the `Nakagawa` folder goes unused, until you move the earlier folders away
+  with the steps above. The library screen names both folders while this lasts.
 
 ## Install, update and uninstall (Windows)
 

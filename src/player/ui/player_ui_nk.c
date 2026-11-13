@@ -258,7 +258,7 @@ struct PlayerUiNk {
     char rebuild_text[256];
     char rebuild_notice[96];
     /* the data folder notice, the library file's notice and the drop summary together */
-    char library_notice[4u * NK_MAX_PATH + 96u + 192u + 256u + 4u];
+    char library_notice[4u * NK_MAX_PATH + 192u + 192u + 256u + 4u];
     char verify_notice[96];     /* the library's disc check line */
     /* A rebuilding card's status word with its progress ("Rebuilding 40%"),
        or a queued card's with its place ("Queued 2 of 4"). */

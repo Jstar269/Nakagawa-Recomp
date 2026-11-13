@@ -95,22 +95,16 @@ def _old_layout_in_use(platform: str) -> bool:
 
 
 def _data_root_before_324() -> Path:
-    """The old layout's data folder, resolved exactly as it was before #324."""
-    if sys.platform == "darwin":
-        try:
-            return Path.home() / "Library" / "Application Support" / "NakagawaRecomp" / "data"
-        except RuntimeError as exc:
-            raise PrerequisiteFetchError(
-                "DATA_DIR_UNAVAILABLE: set HOME to locate per-user data."
-            ) from exc
-    if os.name == "posix" and os.environ.get("XDG_DATA_HOME"):
-        return Path(os.environ["XDG_DATA_HOME"]) / "nakagawa-recomp"
-    try:
-        return Path.home() / ".local" / "share" / "nakagawa-recomp"
-    except RuntimeError as exc:
+    """The old layout's data folder, as the player names it. Like the player, which never read the
+    password database, the tools name none without HOME or XDG_DATA_HOME: the old layout can be in
+    use through XDG_CONFIG_HOME alone, and then there is no data folder (DATA_DIR_UNAVAILABLE)."""
+    data = _layout_folders(True, sys.platform)[1]
+    if not data:
         raise PrerequisiteFetchError(
-            "DATA_DIR_UNAVAILABLE: set XDG_DATA_HOME or HOME to locate per-user data."
-        ) from exc
+            "DATA_DIR_UNAVAILABLE: set HOME to locate per-user data." if sys.platform == "darwin"
+            else "DATA_DIR_UNAVAILABLE: set XDG_DATA_HOME or HOME to locate per-user data."
+        )
+    return Path(data)
 
 
 def default_data_root() -> Path:

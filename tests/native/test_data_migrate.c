@@ -4,8 +4,9 @@
 /* Which per-user folders a Linux or macOS start uses (#324, src/core/nk_data_migrate.h): every case
  * of the rule's table (tools/test_prereq_fetcher.py reads the same table) through the production
  * resolver, the edges of the XDG variables and HOME, a decision kept for the whole run, a next start
- * that follows the old folders being moved away, and a start that creates nothing outside the layout
- * it uses. Every folder is made in a temporary root on the
+ * that follows the old folders being moved away, a start that creates nothing outside the layout
+ * it uses, and a real-profile guard that watches both layouts' settings folders. Every folder is made
+ * in a temporary root on the
  * real file system; the real profile is never touched. Windows has one layout and decides nothing. */
 
 #if !defined(_WIN32) && !defined(_WIN64)
@@ -65,8 +66,10 @@ static void test_notice(void) {
           "a notice when the old layout is in use and the new folder exists");
     CHECK(strcmp(notice, "Nakagawa uses /h/.local/share/nakagawa-recomp (settings in "
                          "/h/.config/nakagawa-recomp). Nakagawa data is also in "
-                         "/h/.local/share/Nakagawa, which is not used.") == 0,
-          "it names the old data and settings folders in use, then the new folder");
+                         "/h/.local/share/Nakagawa, which is not used. To use it, see \"Switching "
+                         "to the new data folder\" in docs/SETUP.md.") == 0,
+          "it names the old data and settings folders in use, then the new folder, and points at "
+          "the switching steps");
     CHECK(!nk_data_layout_notice(&layout, notice, 16u) && notice[0] == '\0',
           "a notice that does not fit is not cut short");
 }
@@ -399,6 +402,35 @@ static void test_override(void) {
     CHECK(nk_platform_set_app_data_dir_override(NULL), "clear the override");
 }
 
+/* The real-profile guard (native_test_isolation.c) watches the settings folders of both layouts: a
+   test that creates the settings folder of the layout not in use trips it too, since by the rule an
+   old folder a test created would switch a developer's install. Checked on a stand-in profile in the
+   temporary root, never the real one. */
+static void test_guard_watches_both_layouts(void) {
+    char root[NATIVE_TEST_PATH_MAX], problem[2 * NATIVE_TEST_PATH_MAX + 64];
+    for (int old = 0; old < 2; ++old) {
+        new_case(root, sizeof(root));
+        CHECK(nk_platform_user_data_layout(&g_layout), "the layouts can be named");
+        if (old) make_state(&g_layout.old_layout, "settings");
+        decide_as_a_new_start(root);
+        CHECK(g_layout.old_in_use == (old != 0), "the stand-in profile uses the layout meant");
+        const NkDataLayoutFolders *in_use = old ? &g_layout.old_layout : &g_layout.new_layout;
+        const NkDataLayoutFolders *other = old ? &g_layout.new_layout : &g_layout.old_layout;
+        native_test_recapture_real_config_probe();
+        CHECK(strcmp(native_test_get_real_config_probe(), in_use->path[NK_PATH_CONFIG]) == 0,
+              "the guard watches the settings folder in use");
+        CHECK(strcmp(native_test_get_real_config_probe_at(1), other->path[NK_PATH_CONFIG]) == 0,
+              "and the other layout's settings folder");
+        CHECK(native_test_real_config_unchanged(problem, sizeof(problem)), "nothing touched yet");
+        CHECK(nk_platform_mkdir_p(other->path[NK_PATH_CONFIG]),
+              "a test creates the other layout's settings folder");
+        CHECK(!native_test_real_config_unchanged(problem, sizeof(problem)) &&
+                  strstr(problem, other->path[NK_PATH_CONFIG]) != NULL,
+              old ? "the guard trips on a new settings folder beside the old layout"
+                  : "the guard trips on an old settings folder beside the new layout");
+    }
+}
+
 #endif
 
 int main(void) {
@@ -411,6 +443,7 @@ int main(void) {
     test_old_removed_between_starts();
     test_variables();
     test_override();
+    test_guard_watches_both_layouts();
 #else
     {
         static NkUserDataLayout layout;

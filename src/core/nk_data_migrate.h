@@ -18,9 +18,15 @@
  * folder, a dangling link, or a folder holding only fonts, a disc list, packages or prerequisites
  * counts. Nothing inside a folder is read. The cache and logs folders do not count.
  * When the old layout is in use and the new one exists too, the player shows one notice that names
- * both (nk_data_layout_notice). Nothing blocks a start. A start that cannot see the old layout at all
- * (a link to a drive not mounted yet) uses the new folder for that run; the next start that sees the
- * old layout uses it again, and the notice names the new folder.
+ * both and points at the switching steps in docs/SETUP.md (nk_data_layout_notice). Nothing blocks a
+ * start. Two known limits (docs/SETUP.md, "Switching to the new data folder"):
+ *   - A start that cannot see the old layout at all (its folders on a drive not mounted yet) uses the new
+ *     folder for that run, and everything written in that run (settings, saves, library additions,
+ *     fonts, packages) stays there; the next start that sees the old layout uses it again, and the
+ *     notice names the new folder.
+ *   - A Nakagawa from before #324 (an earlier release, or a player or tool from an older checkout)
+ *     run once after a fresh install creates an old folder, and from then on every start uses the
+ *     old layout, the new folder unused, until the user moves the old folders away.
  *
  * The cases, which tests/native/test_data_migrate.c and tools/test_prereq_fetcher.py both read from
  * here. The `new` and `old` columns say what each layout has before the start: none (nothing); empty
@@ -77,9 +83,10 @@ typedef struct NkUserDataLayout {
 } NkUserDataLayout;
 
 /* The player's notice when the old layout is in use and the new one exists too: "Nakagawa uses
-   <old>. Nakagawa data is also in <new>, which is not used." Writes "" and returns false otherwise,
+   <old>. Nakagawa data is also in <new>, which is not used. To use it, see "Switching to the new
+   data folder" in docs/SETUP.md." Writes "" and returns false otherwise,
    or when it does not fit (NK_DATA_LAYOUT_NOTICE_MAX always does). */
-#define NK_DATA_LAYOUT_NOTICE_MAX (4u * NK_MAX_PATH + 96u)
+#define NK_DATA_LAYOUT_NOTICE_MAX (4u * NK_MAX_PATH + 192u)
 bool nk_data_layout_notice(const NkUserDataLayout *layout, char *out, size_t cap);
 
 #ifdef __cplusplus

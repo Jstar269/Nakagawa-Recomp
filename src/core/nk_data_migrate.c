@@ -45,7 +45,9 @@ bool nk_data_layout_notice(const NkUserDataLayout *layout, char *out, size_t cap
         !name_layout(&layout->new_layout, unused, sizeof(unused))) {
         return false;
     }
-    int written = snprintf(out, cap, "Nakagawa uses %s. Nakagawa data is also in %s, which is not used.",
+    int written = snprintf(out, cap,
+                           "Nakagawa uses %s. Nakagawa data is also in %s, which is not used. "
+                           "To use it, see \"Switching to the new data folder\" in docs/SETUP.md.",
                            used, unused);
     if (written <= 0 || (size_t)written >= cap) {
         out[0] = '\0';

@@ -335,6 +335,18 @@ class TestPrerequisiteFetcher(unittest.TestCase):
             with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_DIR_UNAVAILABLE"):
                 default_data_root()
 
+    @unittest.skipUnless(os.name == "posix", "the rule is for Linux and macOS paths")
+    def test_old_settings_without_home_name_no_data_folder(self) -> None:
+        """#324: the old layout found through XDG_CONFIG_HOME alone, with HOME and XDG_DATA_HOME
+        unset: the player names no data folder (nk_platform_posix.c), so the tools stop with
+        DATA_DIR_UNAVAILABLE too instead of finding a home folder in the password database."""
+        config = self.root / "config"
+        (config / "nakagawa-recomp").mkdir(parents=True)
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(config)}, clear=True), \
+             patch.object(sys, "platform", "linux"):
+            with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_DIR_UNAVAILABLE"):
+                default_data_root()
+
     def test_happy_path_extracts_only_verified_payload_and_records_license(self) -> None:
         item = self.item()
         result = install_items({"artifacts": [item]}, self.root, allow_http=True)
