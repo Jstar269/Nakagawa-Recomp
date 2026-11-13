@@ -3163,6 +3163,11 @@ int player_play_present_upscale(const PlayerPlayResolved *play) {
                                                                      : NK_PRESENT_UPSCALE_OFF;
 }
 
+/* The launcher's copy of the line holds every line the runtime accepts and no more: one size,
+   ACE_SPEC_MAX, checked here in the C99 form because the core cannot include src/rt/ace.h. */
+typedef char player_ace_spec_is_ace_spec_max_check
+    [(sizeof(((NkRuntimeConfig *)0)->ace_spec) == ACE_SPEC_MAX) ? 1 : -1];
+
 void player_play_config_session(const PlayerSettings *settings, const char *disc_id,
                                 bool logic_60_package, bool acceptance, NkRuntimeConfig *config,
                                 PlayerPlayResolved *out) {
@@ -3195,7 +3200,7 @@ bool player_ace_report_path(const char *user_root, const char *disc_id, char *ou
 bool player_ace_last_session_line(const char *user_root, const char *disc_id, char *out,
                                   size_t cap) {
     char path[NK_MAX_PATH];
-    char text[4097];
+    char text[ACE_REPORT_MAX + 1u];
     if (!out || cap == 0) return false;
     out[0] = '\0';
     if (!player_ace_report_path(user_root, disc_id, path, sizeof(path))) return false;
@@ -3203,6 +3208,8 @@ bool player_ace_last_session_line(const char *user_root, const char *disc_id, ch
     if (!f) return false;
     size_t len = fread(text, 1, sizeof(text) - 1u, f);
     fclose(f);
+    /* The runtime writes fewer than ACE_REPORT_MAX bytes: a longer file is not its report. */
+    if (len >= ACE_REPORT_MAX) return false;
     text[len] = '\0';
     NkJsonNode *root = nk_json_parse(text, len, NULL, 0);
     if (!root) return false;
