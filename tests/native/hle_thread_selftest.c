@@ -39533,6 +39533,103 @@ static void test_partition_unknown_block_codes(void) {
 /* A live thread stack is not free partition memory: the reported free sizes and every
  * allocation end at the lowest live stack, so a game that takes the reported free
  * memory never receives a block over its own stack. */
+/* A thread stack that sat in a gap a fixed reservation skipped goes back to the free list once
+ * the thread is deleted: a create, reserve-over, delete, free loop gets its space back every round
+ * (the bump pointer returns to where it started), where each round used to lose one stack's span
+ * for the rest of the run. */
+static void test_partition_skipped_gap_space_comes_back(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_hle_test_partition_heap_ptr(void);
+    extern int sr_hle_test_partition_free_block_count(void);
+    extern uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name);
+    const uint32_t NID_FREE_PART = 0xb6d61d02u;
+    const uint32_t NID_DELETE_THREAD = 0x9fa03cd3u;
+    enum { ROUNDS = 100 };
+    CpuState cpu;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;   /* a main image in user RAM, as a game's is */
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t heap0 = sr_hle_test_partition_heap_ptr();
+    const int free0 = sr_hle_test_partition_free_block_count();
+    int rounds = 0;
+    for (; rounds < ROUNDS; rounds++) {
+        uint32_t upper = sched_create_thread(0x2000u, 32, 0x8000u);
+        uint32_t upper_floor = sched_guest_stack_floor();
+        uint32_t lower = sched_create_thread(0x2004u, 32, 0x8000u);
+        if (!upper || !lower || sched_guest_stack_floor() >= upper_floor) break;
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = upper;
+        if (sr_syscall(&cpu, NID_DELETE_THREAD) != 0u) break;
+        /* The bump pointer jumps over the lower thread's live stack. */
+        uint32_t fixed = sr_alloc_block_at(upper_floor, 0x1000u, "over-upper");
+        if (fixed == 0xFFFFFFFFu || fixed == 0u || sr_hle_test_partition_heap_ptr() <= upper_floor) break;
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = lower;
+        if (sr_syscall(&cpu, NID_DELETE_THREAD) != 0u) break;
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fixed;
+        if (sr_syscall(&cpu, NID_FREE_PART) != 0u) break;
+        if (sr_hle_test_partition_heap_ptr() != heap0 || sr_hle_test_partition_free_block_count() != free0)
+            break;
+    }
+    expect(rounds == ROUNDS,
+           "a stack freed inside a skipped gap comes back: 100 create/reserve/delete/free rounds each "
+           "end with the bump pointer and the free list where they started");
+
+    /* A create whose arena range would reach a fixed reservation the bump pointer has passed gives
+     * that range back to the arena only, and takes the top of the gap the reservation skipped, the
+     * highest free block (#2469): the bump pointer and the reservation stay as they were, and a
+     * later Low block lands outside the reservation. A refused range over a live stack in such a
+     * gap: test_refused_arena_range_spares_a_freed_block_stack. */
+    extern uint32_t alloc_block(uint32_t size);
+    extern uint32_t sr_last_alloc_addr;
+    uint32_t keep = sched_create_thread(0x2000u, 32, 0x8000u);
+    uint32_t keep_floor = sched_guest_stack_floor();
+    uint32_t below = sr_alloc_block_at(keep_floor - 0x10000u, 0x10000u, "below-stacks");
+    const uint32_t heap1 = sr_hle_test_partition_heap_ptr();
+    const int free1 = sr_hle_test_partition_free_block_count();
+    uint32_t in_gap = sched_create_thread(0x2004u, 32, 0x8000u);
+    TCB *in_gap_tcb = in_gap ? tcb_by_uid(in_gap) : NULL;
+    expect(keep != 0u && below != 0xFFFFFFFFu && below != 0u && heap1 == keep_floor && in_gap_tcb &&
+               in_gap_tcb->stack_base == keep_floor - 0x18000u,
+           "a thread create whose arena range would reach a passed fixed reservation takes the top "
+           "of the skipped gap");
+    expect(sr_hle_test_partition_heap_ptr() == heap1 && sr_hle_test_partition_free_block_count() == free1,
+           "the stack in the skipped gap leaves the bump pointer and the free-list count as they were");
+    uint32_t low = alloc_block(0x8000u);
+    uint32_t low_addr = sr_last_alloc_addr;
+    expect(low != 0xFFFFFFFFu &&
+               (low_addr + 0x8000u <= keep_floor - 0x10000u || low_addr >= keep_floor),
+           "a Low block after the create in the skipped gap lands outside the fixed reservation");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = low;
+    (void)sr_syscall(&cpu, NID_FREE_PART);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = in_gap;
+    (void)sr_syscall(&cpu, NID_DELETE_THREAD);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = below;
+    (void)sr_syscall(&cpu, NID_FREE_PART);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = keep;
+    (void)sr_syscall(&cpu, NID_DELETE_THREAD);
+
+    /* A fixed reservation that sits on a live thread stack (sr_alloc_block_at does not check
+     * thread stacks) stays the reservation's when that thread is deleted: the release frees none
+     * of it, so the bump pointer cannot roll back under the live reservation. */
+    uint32_t t = sched_create_thread(0x2000u, 32, 0x8000u);
+    uint32_t t_floor = sched_guest_stack_floor();
+    uint32_t on_stack = sr_alloc_block_at(t_floor, 0x1000u, "on-live-stack");
+    const uint32_t heap2 = sr_hle_test_partition_heap_ptr();
+    const int free2 = sr_hle_test_partition_free_block_count();
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = t;
+    uint32_t del = sr_syscall(&cpu, NID_DELETE_THREAD);
+    expect(t != 0u && on_stack != 0xFFFFFFFFu && on_stack != 0u && heap2 == t_floor + 0x1000u &&
+               del == 0u,
+           "a fixed reservation is placed on a live thread stack and the thread is deleted");
+    expect(sr_hle_test_partition_heap_ptr() == heap2 && sr_hle_test_partition_free_block_count() == free2,
+           "deleting a thread whose stack a live fixed reservation covers frees none of the reservation");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = on_stack;
+    (void)sr_syscall(&cpu, NID_FREE_PART);
+    expect(sr_hle_test_partition_heap_ptr() == heap0 && sr_hle_test_partition_free_block_count() == free0,
+           "after the skipped-gap checks the bump pointer and the free list are back where they started");
+    s_fixture_loaded_end = 0x00400000u;
+}
+
 static void test_partition_ends_at_lowest_live_stack(void) {
     extern void sr_hle_test_partition_reset(void);
     extern uint32_t sr_hle_test_partition_heap_ptr(void);
@@ -39572,8 +39669,8 @@ static void test_partition_ends_at_lowest_live_stack(void) {
     uint32_t head = sr_syscall(&cpu, NID_GET_HEAD);
     expect(head + (max_free & ~0xFFu) <= floor, "the block taken ends at or below the stack");
 
-    /* A fixed reservation keeps its previous bounds: a title profile's late module base
-     * may lie above the lowest live stack, as one reviewed profile's does. */
+    /* A fixed reservation keeps its previous bounds even above the lowest live stack: a module
+     * loaded at a fixed base or a sceKernelAllocPartitionMemory type 2 block can sit there. */
     extern uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name);
     reset_fixture();
     sr_hle_test_partition_reset();
@@ -39585,9 +39682,66 @@ static void test_partition_ends_at_lowest_live_stack(void) {
            "two stacked threads are created");
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = upper;
     expect(sr_syscall(&cpu, 0x9fa03cd3u) == 0u, "the dormant upper thread is deleted");
+    const uint32_t lower_floor = sched_guest_stack_floor();
+    const uint32_t gap_start = (sr_hle_test_partition_heap_ptr() + 0xFFu) & ~0xFFu;
+    expect(gap_start < lower_floor, "the bump pointer lies below the lower live stack");
     uint32_t between = sr_alloc_block_at(upper_floor, 0x1000u, "between-stacks");
     expect(between != FAIL && between != 0u,
            "a fixed reservation above the lowest live stack succeeds");
+    /* The reservation jumped the bump pointer over the lower thread's live stack. The skipped
+     * range goes back to the free list, but not the live stack inside it: no free entry
+     * covers [lower_floor, upper_floor), and a Low block one 256-byte step larger than the
+     * free space below the stack is refused instead of being placed over it. */
+    extern int sr_hle_test_partition_free_block_count(void);
+    extern int sr_hle_test_partition_get_free_block(int idx, uint32_t *addr_out, uint32_t *size_out);
+    int free_over_stack = 0;
+    for (int i = 0; i < sr_hle_test_partition_free_block_count(); i++) {
+        uint32_t f_addr = 0u, f_size = 0u;
+        if (sr_hle_test_partition_get_free_block(i, &f_addr, &f_size) &&
+            f_addr < upper_floor && f_addr + f_size > lower_floor)
+            free_over_stack = 1;
+    }
+    expect(!free_over_stack, "no free-list entry covers the lower thread's live stack");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = (lower_floor - gap_start) + 0x100u;
+    uint32_t over = sr_syscall(&cpu, NID_ALLOC_PART);
+    expect(over == 0x800200d9u /* MEMBLOCK_ALLOC_FAILED */,
+           "a Low block reaching into the lower live stack is refused");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = lower_floor - gap_start;
+    uint32_t below = sr_syscall(&cpu, NID_ALLOC_PART);
+    expect(below != 0x800200d9u && below != FAIL && below != 0u,
+           "the free space below the lower live stack is still handed out");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = below;
+    expect(sr_syscall(&cpu, NID_GET_HEAD) == gap_start,
+           "the block below the lower live stack starts at the old bump pointer");
+
+    /* The same with a High block in the skipped range instead of a live stack. */
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    upper = sched_create_thread(0x2000u, 32, 0x8000u);
+    upper_floor = sched_guest_stack_floor();
+    /* sceKernelAllocMemoryBlock type 1 is the High path (sceKernelAllocPartitionMemory's type 1
+     * is placed Low here). */
+    title_hle_write_cstr(0x00280010u, "high");
+    const uint32_t high = memblock_alloc(0x00280010u, 1u, 0x8000u, 0u);
+    expect(high != 0x800200d9u && high < 0x80000000u && high != 0u, "a High block is allocated");
+    const uint32_t high_head = memblock_addr(high, 0x00280004u);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = upper;
+    expect(sr_syscall(&cpu, 0x9fa03cd3u) == 0u, "the dormant thread above the High block is deleted");
+    expect((sr_hle_test_partition_heap_ptr() + 0xFFu) < high_head && high_head + 0x8000u <= upper_floor,
+           "the High block lies between the bump pointer and the deleted stack");
+    between = sr_alloc_block_at(upper_floor, 0x1000u, "above-high");
+    expect(between != FAIL && between != 0u, "a fixed reservation above the High block succeeds");
+    int free_over_high = 0;
+    for (int i = 0; i < sr_hle_test_partition_free_block_count(); i++) {
+        uint32_t f_addr = 0u, f_size = 0u;
+        if (sr_hle_test_partition_get_free_block(i, &f_addr, &f_size) &&
+            f_addr < high_head + 0x8000u && f_addr + f_size > high_head)
+            free_over_high = 1;
+    }
+    expect(!free_over_high, "no free-list entry covers the live High block");
     s_fixture_loaded_end = 0x00400000u;
 }
 
@@ -40122,9 +40276,9 @@ static void test_high_requests_take_a_freed_partition_block(void) {
            "freed block: deleting that thread joins its block to the free space above");
     (void)fpb_free(a);
 
-    /* A fixed reservation above a live High block returns the skipped gap, High block inside, to
-     * the free list (sr_alloc_block_at). A stack is never carved over that High block: the
-     * runtime refuses the request (fail closed) where a PSP could place it lower in the gap. */
+    /* A fixed reservation above a live High block returns the skipped gap to the free list, all of
+     * it but the High block (sr_alloc_block_at, skipped_gap_pieces). A stack is never carved over
+     * that High block: it takes the highest free block, the gap below the High block. */
     reset_fixture();
     s_fixture_loaded_end = 0x08a00000u;
     sr_hle_test_partition_reset();
@@ -40139,9 +40293,61 @@ static void test_high_requests_take_a_freed_partition_block(void) {
            "freed block: two High blocks at the top, the upper one freed");
     uint32_t fixed = sr_alloc_block_at(main_top - 0x100u, 0x100u, "fixed");
     expect(fixed != 0xFFFFFFFFu, "freed block: a fixed reservation where the upper High block was");
-    expect(fpb_thread(0x200u) == NO_MEMORY && memblock_addr(h2, FPB_ADDR_OUT) == h2_addr,
-           "freed block: no stack is carved over the live High block in the skipped gap");
+    uint32_t under = fpb_thread(0x200u);
+    expect(fpb_stack_base(under) == h2_addr - 0x200u && memblock_addr(h2, FPB_ADDR_OUT) == h2_addr,
+           "freed block: no stack is carved over the live High block in the skipped gap; it goes "
+           "below it");
+    (void)fpb_call(NID_SCE_KERNEL_DELETE_THREAD, under, 0u, 0u, 0u);
     (void)memblock_free(h2);
+
+    s_fixture_loaded_end = 0x00400000u;
+    sr_hle_test_partition_reset();
+}
+
+/* A stack in a freed partition block (#2469) and the arena release hook (partition_arena_released)
+ * meet when a create's arena range is refused over that stack. The refused range never had an
+ * owner, so it goes back to the arena without the hook; the hook would see the live stack as
+ * neither a partition block nor a free entry and give its memory to the free list. Layout: a fixed
+ * reservation F at the partition's top skips a 0x2000-byte gap G, which goes to the free list.
+ * Each 0x2000-byte create first takes the arena range R = [main_top - 0x2000, main_top), which
+ * overlaps F and is refused; the first then takes G, so its stack S covers R's lower half. */
+static void test_refused_arena_range_spares_a_freed_block_stack(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name);
+    const uint32_t NO_MEMORY = 0x80020190u;
+    const uint32_t main_top = 0x0a000000u - 0x8000u;   /* below the main thread's stack */
+
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    title_hle_write_cstr(FPB_NAME, "fpb");
+    expect(sched_create_thread(0x2004u, 32, 0x8000u) != 0u, "refused range: a main thread is created");
+
+    uint32_t low = fpb_low(fpb_max_free() - 0x3000u);
+    expect(low < 0x80000000u && fpb_max_free() == 0x3000u,
+           "refused range: a Low block leaves 0x3000 bytes under the main thread");
+    uint32_t fixed = sr_alloc_block_at(main_top - 0x1000u, 0x1000u, "fixed");
+    expect(fixed != 0xFFFFFFFFu && fpb_max_free() == 0x2000u,
+           "refused range: a fixed reservation at the top skips a 0x2000-byte gap to the free list");
+
+    uint32_t s1 = fpb_thread(0x2000u);
+    expect(fpb_stack_base(s1) == main_top - 0x3000u && fpb_max_free() == 0u,
+           "refused range: with the arena range refused, the stack takes the skipped gap");
+    expect(fpb_thread(0x2000u) == NO_MEMORY,
+           "refused range: a second create, its arena range refused over the first stack, has no "
+           "room");
+    expect(fpb_max_free() == 0u,
+           "refused range: the refused arena range gave none of the live stack to the free list");
+    expect(fpb_low(0x100u) >= 0x80000000u,
+           "refused range: no Low block is placed over the live stack");
+    expect(fpb_call(NID_SCE_KERNEL_DELETE_THREAD, s1, 0u, 0u, 0u) == 0u && fpb_max_free() == 0x2000u,
+           "refused range: deleting the thread gives the gap back to the partition once");
+    uint32_t s2 = fpb_thread(0x2000u);
+    expect(fpb_stack_base(s2) == main_top - 0x3000u && fpb_max_free() == 0u,
+           "refused range: the next stack takes the gap again");
+    (void)fpb_call(NID_SCE_KERNEL_DELETE_THREAD, s2, 0u, 0u, 0u);
+    (void)fpb_free(low);
 
     s_fixture_loaded_end = 0x00400000u;
     sr_hle_test_partition_reset();
@@ -54440,9 +54646,11 @@ static int hle_selftest_main(int argc, char **argv) {
     test_td28_partition_free_reuse();
     test_alloc_block_at_fixed_address();
     test_partition_ends_at_lowest_live_stack();
+    test_partition_skipped_gap_space_comes_back();
     test_max_free_unchanged_after_top_stack_deleted();
     test_partition_spans_the_whole_user_partition();
     test_high_requests_take_a_freed_partition_block();
+    test_refused_arena_range_spares_a_freed_block_stack();
     test_partition_unknown_block_codes();
     test_module_id_queries_resolve_owning_module();
     test_query_module_info_answers_main_module_record();
