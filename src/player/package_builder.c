@@ -2558,9 +2558,18 @@ NkResult package_builder_start(
     }
     if (session->no_shared_libraries) argv[argc++] = "--no-shared-libraries";
     /* The enhanced build: nk_cli.py reads the package at
-       <user data>/enhancements/<disc id>-60hz.json and writes
-       packages/<disc_id>-enhanced-<id>, never the authentic package. */
-    if (session->enhancement_package_id[0]) argv[argc++] = "--experimental-60hz";
+       <user data>/enhancements/<disc id>-60hz.json, else the published one the source tree
+       ships at assets/enhancements/<disc id>-60hz.json, and writes
+       packages/<disc_id>-enhanced-<id>, never the authentic package. --ace-cull adds the
+       title's <disc id>-cull.json the same way: beside the timing package, the build is
+       packages/<disc_id>-enhanced-<timing id>+<hook id>, and alone it is the build's one
+       package (docs/ENHANCEMENT_CONTRACT.md section 9.9). */
+    if (session->enhancement_package_id[0]) {
+        if (!session->enhancement_hook_only) argv[argc++] = "--experimental-60hz";
+        if (session->enhancement_hook_only || strchr(session->enhancement_package_id, '+')) {
+            argv[argc++] = "--ace-cull";
+        }
+    }
     if (session->iso_path[0]) {
         argv[argc++] = "--iso-path";
         argv[argc++] = session->iso_path;

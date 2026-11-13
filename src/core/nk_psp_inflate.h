@@ -55,6 +55,61 @@ int nk_psp_inflate_raw(const uint8_t *src, size_t srclen,
                        size_t expect, size_t cap,
                        char *err, size_t err_len);
 
+/*
+ * A raw DEFLATE stream unpacked into the caller's buffer of ``dst_cap``
+ * bytes, which is the hard ceiling: nothing is allocated for the output, and
+ * a stream that would write past it fails with NK_INFLATE_ERR_OVERFLOW.
+ * ``*outlen`` is the bytes written (on failure too, and the buffer then holds
+ * them, not a result). ``*consumed``, when given, is the input bytes the
+ * stream used, up to and including the byte that holds its last bit.
+ */
+int nk_psp_inflate_raw_into(const uint8_t *src, size_t srclen,
+                            uint8_t *dst, size_t dst_cap, size_t *outlen,
+                            size_t *consumed, char *err, size_t err_len);
+
+/*
+ * nk_psp_inflate_raw_into under zlib's rules (inflate with windowBits -15, zlib
+ * 1.2 and 1.3), for a reader that must accept exactly the streams Python's
+ * zlib module accepts (src/core/nk_disc_verify.c, whose list the command-line
+ * tools also read): an incomplete Huffman code only when it is one code of one
+ * bit, never for the code-length code; at most 30 distance codes; a cut stored
+ * block copied as far as it goes before it is refused; a copy with no room
+ * left for its first byte refused as an overflow before its distance is
+ * checked (in stream order, the first byte past dst_cap is the overflow, and a
+ * bad code or block header met before it is NK_INFLATE_ERR_FORMAT); and no allowance on
+ * dynamic blocks (below), so the caller bounds its input instead. ``*consumed``
+ * is required to tell whether bytes follow the final block.
+ */
+int nk_psp_inflate_raw_zlib(const uint8_t *src, size_t srclen,
+                            uint8_t *dst, size_t dst_cap, size_t *outlen,
+                            size_t *consumed, char *err, size_t err_len);
+
+/*
+ * A dynamic Huffman block costs three code tables before it writes a byte, so a
+ * stream of tiny ones costs table builds by the million and almost no output.
+ * Every function here but nk_psp_inflate_raw_zlib refuses a stream (NK_INFLATE_ERR_FORMAT) whose next
+ * dynamic block would be more than NK_INFLATE_DYNAMIC_FREE plus one for every
+ * NK_INFLATE_DYNAMIC_BYTES it has written. zlib at its default memLevel writes
+ * blocks of up to 16,383 symbols; its smallest, at memLevel 1, hold 127, each
+ * at least one byte, and a writer that flushes often ends a block at each
+ * flush. 64 is half that smallest block, so a stream zlib writes without
+ * flushing earns about two blocks for each it uses and is never refused; a
+ * writer would have to flush more often than every 64 bytes. At 128 a valid
+ * stream of nearly all literals, with a dynamic block each time, could have
+ * been refused after about 1 MiB. Measured with zlib-ng 1.3.1 over 400 KiB of
+ * text and image rows, memLevel 1 to 3 and a flush every 513 or 769 bytes
+ * wrote dynamic blocks of 367 bytes or more on average and used at most 0.25
+ * of this allowance (4 MiB of text at memLevel 1: 0.23). One more block for
+ * every 1,024 bytes refused several of those valid streams.
+ */
+#define NK_INFLATE_DYNAMIC_FREE 64u
+#define NK_INFLATE_DYNAMIC_BYTES 64u
+
+#ifdef NK_INFLATE_COUNT_BUILDS
+/* Huffman code tables built so far, in a build that counts them (tests). */
+extern unsigned long long nk_inflate_table_builds;
+#endif
+
 #ifdef __cplusplus
 }
 #endif

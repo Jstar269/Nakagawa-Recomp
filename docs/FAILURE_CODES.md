@@ -52,10 +52,12 @@ The **Where** column of each table names the places a code can appear:
 | Code | Where | Meaning |
 | --- | --- | --- |
 | `DISC_DAT_EMPTY` | disc | The Redump datafile lists no disc with a SHA-1 hash. |
-| `DISC_DAT_NOT_DATAFILE` | disc | The file chosen as a Redump datafile has no `<datafile>` element, or is not UTF-8 text. |
+| `DISC_DAT_ENTITY_REFUSED` | disc | The Redump datafile declares entities or a DTD of its own, carries other `<!` markup a Redump list does not use (a second `<!DOCTYPE>`, a comment, CDATA), or refers to an entity XML does not predefine; it is refused unread. |
+| `DISC_DAT_NOT_DATAFILE` | disc | The file chosen as a Redump datafile is not one in the format both readers accept ([COMPATIBILITY.md](COMPATIBILITY.md#what-a-list-must-look-like)): it has no complete `<datafile>` element, is not UTF-8 text, holds a control character, a malformed tag or an element out of place, or a header field or `<serial>` past its bound. The message names the rule and the byte offset. |
 | `DISC_DAT_READ_FAILED` | disc | The Redump datafile could not be read. |
-| `DISC_DAT_TOO_LARGE` | disc | The Redump datafile is larger, or lists more discs, than a datafile can. |
+| `DISC_DAT_TOO_LARGE` | disc | The Redump datafile is larger than 16 MiB (for a zip, the `.dat` in it, by its own size field before it is inflated), or has more than 40,000 discs, 480,000 tags or 80,000 disc IDs. |
 | `DISC_DAT_WRITE_FAILED` | disc | The imported Redump datafile could not be saved in the data folder. |
+| `DISC_DAT_ZIP_INVALID` | disc | A zip given as a Redump datafile is not laid out as Redump's zip is (one `.dat` entry, stored or deflated, with no comment, ZIP64, data descriptor or encryption, its headers agreeing), or fails its own checks (offsets, inflating within its declared size, CRC-32). |
 | `DISC_IDENTIFY_FAILED` | library | The disc's title information could not be read, so the library could not identify the disc. The record's `identify_detail` says why. |
 | `DISC_IMAGE_BLOCK_CORRUPT` | disc, player | A compressed disc image has a block that does not decompress. |
 | `DISC_IMAGE_CHD_CD_UNSUPPORTED` | disc, player | The CHD file holds a CD image, not a PSP UMD. |
@@ -77,7 +79,10 @@ The **Where** column of each table names the places a code can appear:
 | `DISC_NOT_PSP` | disc, player | The disc image is not a PSP game: it has no `PSP_GAME` folder. |
 | `EXECUTABLE_UNSUPPORTED` | report | The disc's executable is missing, encrypted with no decrypted copy, or breaks a PSP layout rule. |
 | `INVALID_ISO` | report | The input is not a readable PSP disc image, or its title information is invalid. |
+| `HOMEBREW_ALREADY_ADDED` | player | The same homebrew `EBOOT.PBP` was added before from another folder; a program is added from one folder. |
+| `HOMEBREW_FOLDER_UNSUPPORTED` | player | The homebrew program's folder cannot come with it: too large, a link or cloud file inside, a name a Memory Stick cannot hold, a personal folder, or a package not named `EBOOT.PBP`. |
 | `HOMEBREW_KERNEL_MODE_UNSUPPORTED` | player | The package's homebrew is kernel-mode or a custom-firmware plugin, which needs the PSP's own kernel and firmware. |
+| `HOMEBREW_KEY_TAKEN` | player | Another program already has the library key this homebrew program would get. |
 | `ISO_CORRUPT` | player | The picked file is not a PSP disc image. |
 | `MODIFIED_DUMP_CFW_LOADER` | report | The disc image was modified by a custom-firmware patch; its real executable needs a decrypted copy. |
 | `PBP_ENCRYPTED_EXECUTABLE_UNSUPPORTED` | player | The PBP holds an encrypted program; only unencrypted homebrew is imported from a package. |
@@ -174,6 +179,7 @@ The **Where** column of each table names the places a code can appear:
 | --- | --- | --- |
 | `BUILD_PACKAGE_FAILED` | report | The package could not be assembled. |
 | `ENHANCEMENT_UNAVAILABLE` | player | 60 FPS game logic is on for the game, but its enhancement package is missing or not valid. |
+| `TEXTURE_PACK_REFUSED` | player | The texture pack chosen for the game was not kept or not used: its folder or `textures.ini` cannot be read, its `[games]` section lists other games only or more than 64, its path is not a full UTF-8 path under 512 bytes, or 256 games already have one. A game whose stored pack no longer reads is never started with it: **Play without the pack** starts that run without it and keeps the choice. |
 | `PACKAGE_AMBIENT_ENHANCEMENT` | route | An enhancement setting from the environment would change the package; it must be explicit. |
 | `PACKAGE_BUILD_FAILED` | route, player | The package build failed; the problem report's reason gives the tool's message. |
 | `PACKAGE_BUILD_INCOMPLETE` | route | The build finished without every file the package needs. |
@@ -265,6 +271,7 @@ The **Where** column of each table names the places a code can appear:
 | `FOLDER_OPEN_FAILED` | player | A folder could not be opened. |
 | `HASH_MISMATCH` | player | A download did not match its pinned SHA-256. |
 | `HASH_UNAVAILABLE` | player | A download's hash could not be computed. |
+| `HOMEBREW_KEPT_COPY_NOT_DELETED` | player | **Delete kept copy** could not remove a homebrew program's kept copy; the message says why. |
 | `INSTALL_CANCELLED` | player | The prerequisite install was cancelled. |
 | `INTERNAL_ERROR` | decrypt, disc, player | A C engine returned a result it has no name for. This is a defect in Nakagawa. |
 | `LIBRARY_WRITE_FAILED` | player | The library could not be saved. |
@@ -293,6 +300,7 @@ The **Where** column of each table names the places a code can appear:
 | `SWEEP_REPORT_INVALID` | library | A sweep run's report has no failure class. |
 | `SWEEP_ROUTE_FAILED` | library | A sweep run wrote no report. |
 | `SWEEP_TIME_BUDGET` | library | A sweep run ended at its time budget. |
+| `TEXTURE_PACK_PICKER_FAILED` | player | The folder picker for choosing a game's texture pack could not open, or returned a folder too deep to read. |
 | `TITLE_TIME_BUDGET` | library | A library build ended at the title's time budget; `failed_stage` names the stage that was running. |
 | `TOOLS_IN_USE` | player | The build tools are in use and cannot be removed now. |
 | `TOOLS_REMOVE_FAILED` | player | The downloaded build tools could not be removed. |
@@ -311,7 +319,8 @@ The **Where** column of each table names the places a code can appear:
 | `UPDATE_INSTALLED_BY_SETUP` | player | This copy was installed with Setup, so it updates by running the new release's Setup. |
 | `UPDATE_INSTALL_EXISTS` | player | The new version is already unpacked. |
 | `UPDATE_INSTALL_INCOMPLETE` | player | Unpacking the new version did not finish. |
-| `UPDATE_INSTALL_LEFTOVER` | player | A previous install attempt left files in the way. |
+| `UPDATE_INSTALL_LEFTOVER` | player | A folder Nakagawa did not make is where the new version unpacks. (Nakagawa's own unpack left by an interrupted install is removed on the next try.) |
+| `UPDATE_INSTALL_LEFTOVER_IN_USE` | player | An interrupted install's unpack folder could not be removed; something has it open. |
 | `UPDATE_INSTALL_MOVE_FAILED` | player | The new version could not be moved into place. |
 | `UPDATE_INSTALL_NOT_WRITABLE` | player | The install folder is not writable. |
 | `UPDATE_INSTALL_PATH` | player | The folder for the new version has too long a path. |

@@ -144,7 +144,8 @@ PLAYER_NOT_CODES = {
     # gamepad and pointer names, UI actions and the UI test harness's tokens
     "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT", "DPAD_UP", "LEFT_SHOULDER", "RIGHT_SHOULDER",
     "MOUSE_DOWN", "MOUSE_UP", "MOUSE_X1", "MOUSE_X1_DOWN", "MOUSE_X1_UP", "OPEN_FOLDER",
-    "ASSERT_GAME_RUNNING", "DROP_BEGIN", "DROP_COMPLETE", "INVALIDATE_PACKAGE_CACHE",
+    "ASSERT_GAME_RUNNING", "DROP_BEGIN", "DROP_COMPLETE", "FOCUS_GAINED", "FOCUS_LOST",
+    "INVALIDATE_PACKAGE_CACHE",
     # an environment variable the package builder reads to find the MSYS2 UCRT64 bin
     "MSYS_PATH",
 }

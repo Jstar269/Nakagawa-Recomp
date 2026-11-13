@@ -3,30 +3,31 @@
 This snapshot records issue #317 on Windows 11 with MSYS2 UCRT64. The experiment used only
 public synthetic fixtures. No game, private input, hardware or title route was used.
 
-BASE_SHA: `0d2b9e72ad859e57ebbb5da2ef4aef7286b66b78`
-EXPERIMENT_SHA: `90c9bd2943695f22f039e59252d4fd2b804b1144`
-MERGED_MAIN_SHA: `a56a31e88ed6e3ce96c36de506524836239379af`
+BASE_SHA: `a39f7a14ce223eaa899967b3458c926e0350227a`
+EXPERIMENT_SHA: `a39f7a14ce223eaa899967b3458c926e0350227a`
 
-After the experiment, the branch merged the newer `origin/main`. Its only change on the
-compiler-gate paths materialized the display-smoke vblank selection as a list. The focused
-display-smoke and link-map regressions passed after that merge; the measurements below remain
-qualified to `EXPERIMENT_SHA`.
+The matrix was re-run on 2026-11-11 from a clean `origin/main` checkout, after #2381 fixed the
+lld link of the executable HLE harness. The veto and measurement tables are what
+`tools/compiler_compare.py` printed for that run (`build/c317-r3/compiler_compare.json`); nothing
+was changed to make a row pass. The wall time, load figures and the notes under each failing row
+are the operator's observations, marked as such.
 
 ## Command
 
-The matrix ran through the machine RAM lock. Make built serially at `-j1`. UCRT64's `bin`
-directory was first on `PATH`.
+The matrix ran through the machine RAM lock (`ramlock.py run`, one slot). Make built serially at
+`-j1`. `PATH` began with UCRT64's `bin` directory, then Git for Windows' `usr\bin` for the POSIX
+`sh` the Makefile recipes need ([PATH order](SETUP.md#path-order)). A first attempt without
+that `sh` stopped in `native-core-objects-core` (`'true' is not recognized`) for the GCC rows; it was
+an environment error and its result is discarded.
 
 ```powershell
-python tools/compiler_compare.py --make C:/msys64/ucrt64/bin/mingw32-make.exe --compilers gcc,clang --linkers default,lld --repeats 3 --output build/c317-final
+python tools/compiler_compare.py --make C:/msys64/ucrt64/bin/mingw32-make.exe --compilers gcc,clang --linkers default,lld --repeats 3 --output build/c317-r3
 ```
 
-On 2026-11-07, GCC/default was re-run alone through the RAM lock after fixing the runtime
-workload build roots. It used three repeats and a short fresh output path:
-
-```powershell
-python tools/compiler_compare.py --make C:/msys64/ucrt64/bin/mingw32-make.exe --compilers gcc --linkers default --repeats 3 --output build/c317-s1
-```
+Operator observations, not tool output: the run took 3 h 6 min of wall time while other agent
+sessions built and tested on the same machine. Host CPU load sampled once at the start was 80% and
+at the end 56%, and other sessions held other RAM-lock slots at the start, so the compile and link
+times below may carry that contention and are not clean timings.
 
 ## Toolchains and flags
 
@@ -46,73 +47,93 @@ remains GCC.
 
 ## Veto results
 
-| Compiler/linker | Result | First failure |
-| --- | --- | --- |
-| GCC/default | MEASURED | All veto gates and runtime workloads passed |
-| GCC/lld | FAILED_VETO | `cosim-mutants`: `ld.lld: error: undefined symbol: mpeg_malloc_avc_es_buf` |
-| Clang/default | FAILED_VETO | `src/rt/videorec.c:708:14: error: variable 's_clock_deterministic' set but not used [-Werror,-Wunused-but-set-global]` |
-| Clang/lld | FAILED_VETO | `src/rt/videorec.c:708:14: error: variable 's_clock_deterministic' set but not used [-Werror,-Wunused-but-set-global]` |
+| Compiler/linker | Result | Gates passed before the failure | First failure |
+| --- | --- | --- | --- |
+| GCC/default | MEASURED | All ten veto gates | None; the semantic hash is `UNSTABLE` (see Measurements) |
+| GCC/lld | FAILED_VETO | production-smoke, production-smoke-gap, display-smoke, cosim-selftest, cosim-mutants | `native-core-tests`: `ld.lld: error: undefined symbol: sr_ge_vram_read_prepare` |
+| Clang/default | FAILED_VETO | production-smoke, production-smoke-gap | `display-smoke`: `src/rt/videorec.c:83:17: error: variable 's_cur' set but not used [-Werror,-Wunused-but-set-global]` |
+| Clang/lld | FAILED_VETO | production-smoke, production-smoke-gap | `display-smoke`: `src/rt/videorec.c:83:17: error: variable 's_cur' set but not used [-Werror,-Wunused-but-set-global]` |
 
-GCC/lld passed production-smoke after the verifier learned lld's `file.o:(section)` map entries.
-A locked rerun of only the unmutated `25-scheduler` baseline, with
-`-Wl,--error-limit=0` and a fresh build root, exposed the first linker error:
-`ld.lld: error: undefined symbol: mpeg_malloc_avc_es_buf`; the remaining diagnostics name
-other undefined `mpeg_*` functions. `hle-thread-selftest-build` links `$(HLE_SRCS)`, which
-includes `src/rt/hle_mpeg.c`, but its explicit source list omits `src/rt/mpeg.c`, where those
-functions are defined. The baseline therefore remains a `no-run` veto. This follow-up records
-the cause without changing the build to make lld pass.
+**GCC/lld.** The tool's own `first_error` field for this gate reads `Clay error 1`: its pattern
+matched an unrelated line of the gate output (a follow-up for the extractor). The first failing
+reason below is taken from the gate output itself. The failing recipe is `profiler-selftest`
+(`mk/selftests.mk:72`), reached by `native-core-tests`. The HLE harness link that #2381 fixed now
+passes. Besides the test driver, the profiler selftest links an explicit source list (`recomp.c`,
+`sr_coro.c`, `flight_recorder.c`, `guest_interp.c`, `cpu_lle.c`, `domain_mode.c`, `stale_code.c`,
+`title_config.c`, `perf.c`) with `-Wl,--gc-sections`. GCC/default passed the same
+`native-core-tests` gate, which includes this recipe, so GNU ld linked it. lld's first 20 errors name `sr_ge_vram_read_prepare`,
+`sr_ge_vram_write_prepare`, `sr_ge_vram_write_commit`, `sr_get_ge_status`, `sr_note_mem_write`,
+`sched_current_uid`, `sr_vfpu_load`, `sr_vfpu_interp`, `sr_yield`, `sr_hle_resolve_late_import`,
+`sr_syscall`, `sr_timeslice`, `sr_sched_on` and the `sr_*_lut*` tables, then stops at lld's default
+error limit. `sr_ge_vram_read_prepare` is defined in `src/rt/ge.c`, which this recipe does not
+link. The cause is recorded here without changing the build to make lld pass.
 
-Both Clang rows passed the display-smoke VRAM capture check, then failed compiling
-`videorec.c` because Clang treats the unused-but-set global as an error. This is a project and
-toolchain incompatibility; no compiler-specific guest-semantics workaround was added.
-
-An earlier GCC/default attempt used a longer output root and the nested mutation linker could
-not resolve a split `build/comp` path. The final short-root invocation passed all veto gates.
-The earlier Clang display-capture failure was also superseded: the merged `origin/main` fix
-made the capture check pass before Clang reached the warning-as-error above.
+**Clang.** In both Clang rows the display-smoke fixture itself printed `PASS` lines (60 frames,
+`DISPLAY_SMOKE_VRAMDUMP` `present_bytes=IDENTICAL png_pixels=IDENTICAL`, the flight-recorder
+smoke), then the `-Werror` compile of `src/rt/videorec.c` inside the `display-smoke-run` recipe
+(`mk/smoke_gates.mk:93`) failed on Clang's `-Wunused-but-set-global`: `s_cur` (line 83) and
+`s_clock_deterministic` (line 718). This is a project and toolchain
+incompatibility; no compiler-specific guest-semantics workaround was added. The gates after
+display-smoke did not run for either Clang row.
 
 ## Measurements
 
-Only GCC/default passed the correctness veto. The other rows have no performance measurements.
-The GCC/default values below are from the 2026-11-07 isolated rerun; the original three veto
-failures remain unchanged.
+Only GCC/default passed the correctness veto, so only it has measurements. The other rows have
+none.
 
 | GCC/default measurement | Minimum | Median | Maximum |
 | --- | ---: | ---: | ---: |
-| Generated-C compile wall time (s) | 12.413 | 13.894 | 14.371 |
-| Peak working set (bytes) | 45,961,216 | 55,775,232 | 58,728,448 |
-| Link wall time (s) | 6.045 | 6.977 | 7.397 |
-| Object bytes | 16,228,566 | 16,228,566 | 16,228,566 |
-| Executable bytes | 14,728,236 | 14,728,236 | 14,728,236 |
+| Generated-C compile wall time (s) | 20.263 | 21.427 | 23.187 |
+| Peak working set (bytes) | 53,178,368 | 56,434,688 | 63,303,680 |
+| Link wall time (s) | 11.723 | 11.885 | 12.621 |
+| Object bytes | 17,472,005 | 17,472,005 | 17,472,005 |
+| Executable bytes | 15,785,996 | 15,785,996 | 15,785,996 |
 
-The three GCC/default run-output hashes matched at
-`a227c65f31a424817b8ac6ab545773bbcaff57fd219afd62934fc159e6834925`. The semantic-hash
-comparison across all four rows is `INCOMPLETE`, because three rows were vetoed.
+**The semantic hash is `UNSTABLE`.** The three repeats of GCC/default produced three different
+hashes: `48115df0…0f7c`, `401da44f…dea0` and `071b6204…8b7b`. The tool therefore reports no
+`semantic_sha256` for the row and the comparison across all four rows is `INCOMPLETE`. The earlier
+snapshot (2026-11-07) matched across its three repeats. The tool does not
+keep the raw per-repeat output, so which normalised field differs is not yet known.
 
-All nine GCC/default runtime workloads passed. Their elapsed wall times and local `SR_PERF`
-summary paths are in `build/c317-s1/compiler_compare.json`; the generated `perf.json` files
-are local build artifacts and are not committed. No cross-compiler runtime comparison is
-available because neither Clang row passed the veto.
+All nine GCC/default runtime workloads passed. Elapsed times are above the earlier snapshot's; the
+machine load noted above may account for it, and they are not comparable with it (different
+commit, larger executable). The `SR_PERF` summary paths for the six workloads that write one are in
+`build/c317-r3/compiler_compare.json`; the three platform-ladder rows are timed only. The
+generated `perf.json` files are local build artifacts and are not committed. No cross-compiler runtime comparison is available because neither
+Clang row passed the veto.
 
 | Runtime workload | Status | Elapsed wall time (s) |
 | --- | --- | ---: |
-| production-smoke-gap | PASS | 180.381 |
-| cosim | PASS | 32.410 |
-| psmf-media | PASS | 67.338 |
-| audio | PASS | 9.737 |
-| audio-resampler | PASS | 8.733 |
-| atrac3p | PASS | 10.579 |
-| platform-ladder-gap | PASS | 89.964 |
-| platform-ladder-sched | PASS | 85.553 |
-| platform-ladder-fs | PASS | 85.919 |
+| production-smoke-gap | PASS | 360.028 |
+| cosim | PASS | 67.656 |
+| psmf-media | PASS | 126.055 |
+| audio | PASS | 16.792 |
+| audio-resampler | PASS | 14.479 |
+| atrac3p | PASS | 16.805 |
+| platform-ladder-gap | PASS | 178.338 |
+| platform-ladder-sched | PASS | 183.477 |
+| platform-ladder-fs | PASS | 157.353 |
 
 The three platform-ladder workloads use fixed trees under `build/platform-ladder` and do not
 honor the row's `BUILD_ROOT`. `run_perf_benchmarks.py` runs all workload rows sequentially, so
 these fixed trees are shared across toolchain rows but are not built concurrently. Make does not
 track `LDFLAGS`, so a later row's platform-ladder timings may come from an earlier row's binaries;
-they are not per-toolchain evidence until those trees are isolated.
+they are not per-toolchain evidence until those trees are isolated. (This paragraph is unchanged
+from the earlier snapshot and was not re-verified in this run.)
 
-This one-row measurement does not establish a compiler winner or behavior equivalence. A
-default-toolchain change still needs repeatable results for both compilers and linkers, plus
-the runtime and residency evidence requested by #317. AOT/interpreter residency, sanitizer
-comparison, hosted CI, private-title acceptance and hardware acceptance are `NOT_RUN`.
+## What remains for #317
+
+1. GCC/default: find the field that differs between repeats (keep the raw per-repeat output, diff
+   the first divergent line, then normalise it or fix its source). Until the hash is stable no
+   cross-toolchain semantic comparison is possible.
+2. GCC/lld: make `profiler-selftest` link under lld (it references symbols defined in sources its
+   list omits, such as `src/rt/ge.c`), then re-run to reach the gates after `native-core-tests`.
+   Also fix the extractor's `first_error` (`Clay error 1` above).
+3. Clang: `src/rt/videorec.c` `s_cur` (line 83) and `s_clock_deterministic` (line 718) are set but
+   never read; then re-run to reach the later gates.
+4. Repeat on a quiet machine for clean compile and link times.
+
+This table does not establish a compiler winner or behavior equivalence. A default-toolchain change
+still needs repeatable results for both compilers and linkers, plus the runtime and residency
+evidence requested by #317. AOT/interpreter residency, sanitizer comparison, hosted CI,
+private-title acceptance and hardware acceptance are `NOT_RUN`.

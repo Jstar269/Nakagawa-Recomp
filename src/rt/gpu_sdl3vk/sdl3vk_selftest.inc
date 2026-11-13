@@ -996,6 +996,245 @@ static int sdl3vk_mouse_aim_selftest(void) {
 }
 #undef AIM_CHECK
 
+/* ---- mouse buttons selftest (#1791); no Vulkan needed ----------------------------------
+ * Drives the real event path (poll_input) with pushed mouse button events. Unbound (every
+ * default mapping), a click changes nothing the game reads. Bound, a click presses its PSP
+ * control while held and still reaches the game when it is shorter than one poll; a side
+ * button pushes the stick; a focus loss lets go of every button; a click the overlay had is
+ * never held for the game; and SR_PADSCRIPT keeps the default mapping. */
+#define MBTN_CHECK(cond, ...) do { if (!(cond)) { \
+    fprintf(stderr, "mouse_buttons_selftest: " __VA_ARGS__); fputc('\n', stderr); ok = 0; } } while (0)
+
+static void mbtn_test_button(Uint8 button, bool down) {
+    SDL_Event ev;
+    SDL_zero(ev);
+    ev.type = down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+    ev.button.button = button;
+    ev.button.down = down;
+    ev.button.clicks = 1;
+    SDL_PushEvent(&ev);
+}
+
+/* One host poll and one game sample: the buttons and stick the game reads. */
+static uint32_t mbtn_test_sample(uint8_t *lx, uint8_t *ly) {
+    int quit = 0;
+    poll_input(&quit);
+    uint32_t seen = sdl3vk_buttons();
+    sdl3vk_consume_button_pulses();
+    sdl3vk_analog(lx, ly);
+    return seen;
+}
+
+static int sdl3vk_mouse_buttons_selftest(void) {
+    int ok = 1;
+    if (!SDL_InitSubSystem(SDL_INIT_EVENTS)) {
+        fprintf(stderr, "mouse_buttons_selftest: SDL events unavailable: %s\n", SDL_GetError());
+        return 0;
+    }
+    const char *tmp_profile = "selftest_mouse_buttons_profile.json";
+    char diag[NK_INPUT_DIAGNOSTIC_MAX_LEN] = {0};
+    uint8_t lx, ly;
+    uint32_t seen;
+    NkInputProfile custom;
+    s_aim_relative_mode = aim_test_grab;   /* aiming stays off; nothing may grab the pointer */
+    aim_test_grab_calls = 0;
+    s_mouse_held = 0;
+
+    /* Unbound (the default mapping): with every button held, and with a click inside one poll,
+     * the game reads exactly what it reads with no mouse at all. */
+    nk_input_profile_init_default(&custom);
+    MBTN_CHECK(nk_input_profile_save(&custom, tmp_profile, diag, sizeof(diag)) == NK_OK,
+               "profile save failed: %s", diag);
+    profile_test_setenv("NK_INPUT_PROFILE", tmp_profile);
+    sdl3vk_reset_input_profile();
+    sdl3vk_init_input_profile();
+    {
+        uint8_t base_lx, base_ly;
+        const uint32_t base = mbtn_test_sample(&base_lx, &base_ly);
+        for (Uint8 b = SDL_BUTTON_LEFT; b <= SDL_BUTTON_X2; b++) mbtn_test_button(b, true);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == base && lx == base_lx && ly == base_ly,
+                   "unbound: held buttons changed the pad (0x%x %u,%u; without 0x%x %u,%u)",
+                   seen, lx, ly, base, base_lx, base_ly);
+        for (Uint8 b = SDL_BUTTON_LEFT; b <= SDL_BUTTON_X2; b++) {
+            mbtn_test_button(b, false);
+            mbtn_test_button(b, true);
+            mbtn_test_button(b, false);
+        }
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == base && lx == base_lx && ly == base_ly,
+                   "unbound: clicks changed the pad (0x%x %u,%u)", seen, lx, ly);
+        MBTN_CHECK(aim_test_grab_calls == 0, "a click grabbed the pointer");
+    }
+
+    /* Bound: the left button is Cross, the right one R beside its W key, the back side button
+     * pushes the stick up. */
+    custom.psp_keys[NK_PSP_BTN_CROSS].primary = NK_HOST_KEY_MOUSE_LEFT;
+    custom.psp_keys[NK_PSP_BTN_RTRIGGER].secondary = NK_HOST_KEY_MOUSE_RIGHT;
+    custom.stick_keys[NK_PSP_STICK_UP].secondary = NK_HOST_KEY_MOUSE_X1;
+    MBTN_CHECK(nk_input_profile_save(&custom, tmp_profile, diag, sizeof(diag)) == NK_OK,
+               "profile save failed: %s", diag);
+    sdl3vk_reset_input_profile();
+    sdl3vk_init_input_profile();
+    (void)mbtn_test_sample(&lx, &ly);
+
+    mbtn_test_button(SDL_BUTTON_LEFT, true);
+    seen = mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK(seen == NK_PSP_BTN_CROSS_BIT, "left held: the game read 0x%x", seen);
+    seen = mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK(seen == NK_PSP_BTN_CROSS_BIT, "left still held: the game read 0x%x", seen);
+    mbtn_test_button(SDL_BUTTON_LEFT, false);
+    seen = mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK(seen == 0, "left released: the game read 0x%x", seen);
+
+    /* A click inside one poll is seen once, then gone. */
+    mbtn_test_button(SDL_BUTTON_RIGHT, true);
+    mbtn_test_button(SDL_BUTTON_RIGHT, false);
+    seen = mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK(seen == NK_PSP_BTN_RTRIGGER_BIT, "a quick right click: the game read 0x%x", seen);
+    seen = mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK(seen == 0, "the quick click stayed pressed (0x%x)", seen);
+
+    /* A side button is a stick key: the stick goes to its edge and comes back. */
+    mbtn_test_button(SDL_BUTTON_X1, true);
+    seen = mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK(seen == 0 && lx == 128 && ly == 0, "back button held: 0x%x %u,%u", seen, lx, ly);
+    mbtn_test_button(SDL_BUTTON_X1, false);
+    (void)mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK(lx == 128 && ly == 128, "back button released: the stick stayed at %u,%u", lx, ly);
+
+    /* A focus loss lets go of a held button: its release goes to another window. */
+    {
+        SDL_Event lost;
+        SDL_zero(lost);
+        lost.type = SDL_EVENT_WINDOW_FOCUS_LOST;
+        mbtn_test_button(SDL_BUTTON_LEFT, true);
+        (void)mbtn_test_sample(&lx, &ly);
+        SDL_PushEvent(&lost);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == 0 && s_mouse_held == 0, "a focus loss left the click held (0x%x)", seen);
+    }
+
+    /* Not mouse buttons: a button past the second side button, a tap or a pen that SDL
+     * reports as the mouse, and a click while the on-screen keyboard has the input. */
+    {
+        SDL_Event tap;
+        SDL_zero(tap);
+        tap.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+        tap.button.button = SDL_BUTTON_LEFT;
+        tap.button.down = true;
+        tap.button.which = SDL_TOUCH_MOUSEID;
+        SDL_PushEvent(&tap);
+        tap.button.which = SDL_PEN_MOUSEID;
+        SDL_PushEvent(&tap);
+        mbtn_test_button(SDL_BUTTON_X2 + 1, true);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == 0 && s_mouse_held == 0, "a tap, a pen or button 6 pressed 0x%x", seen);
+        mbtn_test_button(SDL_BUTTON_X2 + 1, false);
+        /* A tap or a pen lifting does not let go of a mouse button held down. */
+        mbtn_test_button(SDL_BUTTON_LEFT, true);
+        (void)mbtn_test_sample(&lx, &ly);
+        tap.type = SDL_EVENT_MOUSE_BUTTON_UP;
+        tap.button.down = false;
+        tap.button.which = SDL_TOUCH_MOUSEID;
+        SDL_PushEvent(&tap);
+        tap.button.which = SDL_PEN_MOUSEID;
+        SDL_PushEvent(&tap);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == NK_PSP_BTN_CROSS_BIT, "a tap or a pen lifting let go of left (0x%x)", seen);
+        mbtn_test_button(SDL_BUTTON_LEFT, false);
+        (void)mbtn_test_sample(&lx, &ly);
+        sdl3vk_set_text_claim(1);
+        mbtn_test_button(SDL_BUTTON_LEFT, true);
+        seen = mbtn_test_sample(&lx, &ly);
+        sdl3vk_set_text_claim(0);
+        MBTN_CHECK(seen == 0 && s_mouse_held == 0, "the on-screen keyboard's click pressed 0x%x", seen);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == 0, "the on-screen keyboard's click was held for the game (0x%x)", seen);
+        mbtn_test_button(SDL_BUTTON_LEFT, false);
+        (void)mbtn_test_sample(&lx, &ly);
+    }
+
+    /* The keyboard reads what it read before mouse buttons joined its array: every key alone,
+     * with a click bound and not held, maps as SDL's own 512-entry array maps. */
+    {
+        const NkInputProfile *prof = sdl3vk_get_input_profile();
+        static bool sdl_keys[SDL_SCANCODE_COUNT];
+        bool merged[NK_HOST_KEY_LIMIT];
+        int differ = 0;
+        for (int s = 0; s < SDL_SCANCODE_COUNT; s++) {
+            memset(sdl_keys, 0, sizeof(sdl_keys));
+            sdl_keys[s] = true;
+            host_key_state(sdl_keys, SDL_SCANCODE_COUNT, 0u, merged);
+            uint8_t a_lx = 128, a_ly = 128, b_lx = 128, b_ly = 128;
+            (void)nk_input_profile_eval_key_analog(prof, sdl_keys, SDL_SCANCODE_COUNT, &a_lx, &a_ly);
+            (void)nk_input_profile_eval_key_analog(prof, merged, NK_HOST_KEY_LIMIT, &b_lx, &b_ly);
+            if (sdl3vk_map_keyboard(prof, sdl_keys, SDL_SCANCODE_COUNT) !=
+                    sdl3vk_map_keyboard(prof, merged, NK_HOST_KEY_LIMIT) ||
+                a_lx != b_lx || a_ly != b_ly) {
+                differ++;
+            }
+        }
+        MBTN_CHECK(prof != NULL && prof->psp_keys[NK_PSP_BTN_CROSS].primary == NK_HOST_KEY_MOUSE_LEFT,
+                   "the bound profile is not the one in force");
+        MBTN_CHECK(differ == 0, "%d keys map differently through the merged array", differ);
+        host_key_state(NULL, 0, 1u << (NK_HOST_KEY_MOUSE_X1 - NK_HOST_KEY_MOUSE_FIRST), merged);
+        MBTN_CHECK(merged[NK_HOST_KEY_MOUSE_X1] && !merged[NK_HOST_KEY_MOUSE_LEFT] && !merged[0],
+                   "the held mask did not land on its own key");
+    }
+
+    /* A click the overlay had is the overlay's: pressed under the claim and still held after
+     * it ends, it is not a press for the game. One held before the claim and let go under it
+     * is released for the game too. */
+    {
+        PauseTestSink sink = {0};
+        sdl3vk_set_input_claim(pause_test_sink, &sink);
+        mbtn_test_button(SDL_BUTTON_LEFT, true);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == 0 && s_mouse_held == 0, "a claimed click reached the game (0x%x)", seen);
+        sdl3vk_set_input_claim(NULL, NULL);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == 0, "the overlay's click was held for the game (0x%x)", seen);
+        mbtn_test_button(SDL_BUTTON_LEFT, false);
+        (void)mbtn_test_sample(&lx, &ly);
+
+        mbtn_test_button(SDL_BUTTON_LEFT, true);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == NK_PSP_BTN_CROSS_BIT, "left before the claim: 0x%x", seen);
+        sdl3vk_set_input_claim(pause_test_sink, &sink);
+        mbtn_test_button(SDL_BUTTON_LEFT, false);
+        (void)mbtn_test_sample(&lx, &ly);
+        sdl3vk_set_input_claim(NULL, NULL);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == 0 && s_mouse_held == 0,
+                   "a click let go under the claim stayed held (0x%x)", seen);
+    }
+
+    /* SR_PADSCRIPT drives the pad with the default mapping: a bound click does nothing. */
+    profile_test_setenv("SR_PADSCRIPT", "synthetic_script_active");
+    mbtn_test_button(SDL_BUTTON_LEFT, true);
+    seen = mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK((seen & NK_PSP_BTN_CROSS_BIT) == 0, "SR_PADSCRIPT: a click pressed Cross (0x%x)", seen);
+    mbtn_test_button(SDL_BUTTON_LEFT, false);
+    (void)mbtn_test_sample(&lx, &ly);
+    profile_test_setenv("SR_PADSCRIPT", NULL);
+
+    profile_test_setenv("NK_INPUT_PROFILE", NULL);
+    remove(tmp_profile);
+    sdl3vk_reset_input_profile();
+    s_aim_relative_mode = aim_relative_mode_default;
+    s_mouse_captured = false;
+    s_mouse_held = 0;
+    nk_input_gate_init(&s_gate);
+    s_button_pulse = s_pad_pulse = 0;
+    s_buttons = 0;
+    s_lx = s_ly = 128;
+    SDL_QuitSubSystem(SDL_INIT_EVENTS);
+    if (ok) printf("mouse_buttons_selftest: OK\n");
+    return ok;
+}
+#undef MBTN_CHECK
+
 /* Set while the lifecycle selftest holds its own SDL video reference: SDL_WasInit cannot tell
  * that reference from one sdl3vk leaked, so the per-step count then checks the gamepad
  * subsystem only, and the selftest checks video once after releasing its reference. */
@@ -1153,9 +1392,9 @@ static Fsr1Pass *s_test_fsr;
 static VkImage s_test_fsr_out;
 static int s_test_fsr_calls, s_test_fsr_args[4];
 
-static void *test_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int out_h, int cpu_frame,
+static void *test_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int out_h, int kind,
                            int *anime4k) {
-    (void)cpu_frame; (void)anime4k;
+    (void)kind; (void)anime4k;
     s_test_fsr_calls++;
     s_test_fsr_args[0] = w;
     s_test_fsr_args[1] = h;
@@ -1173,8 +1412,8 @@ static Fsr1Pass *s_test_rec_fsr;
 static int s_test_rec_calls, s_test_rec_args[4];
 
 static void *test_rec_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int out_h,
-                               int cpu_frame, int *anime4k) {
-    (void)cpu_frame; (void)anime4k;
+                               int kind, int *anime4k) {
+    (void)kind; (void)anime4k;
     s_test_rec_calls++;
     s_test_rec_args[0] = w;
     s_test_rec_args[1] = h;
@@ -1198,8 +1437,8 @@ static int test_rec_read(uint8_t *out, size_t bytes, int *filter) {
 
 /* The recording's upscaler when gui.c could not make its pass: asked, it returns nothing. */
 static void *test_rec_null_pass(void *cmd, void *src, int w, int h, int out_w, int out_h,
-                                int cpu_frame, int *anime4k) {
-    (void)cmd; (void)src; (void)w; (void)h; (void)out_w; (void)out_h; (void)cpu_frame; (void)anime4k;
+                                int kind, int *anime4k) {
+    (void)cmd; (void)src; (void)w; (void)h; (void)out_w; (void)out_h; (void)kind; (void)anime4k;
     s_test_rec_calls++;
     return NULL;
 }
@@ -1284,6 +1523,14 @@ static VkResult pace_test_acquire(VkDevice dev, VkSwapchainKHR swap, uint64_t ti
     return vkAcquireNextImageKHR(dev, swap, timeout, sem, fence, idx);
 }
 
+/* A show pass that only counts its calls. */
+static int s_pace_test_pass_calls;
+static void *pace_test_show_pass(void *cmd, void *src, int *w, int *h) {
+    (void)cmd; (void)src; (void)w; (void)h;
+    s_pace_test_pass_calls++;
+    return NULL;
+}
+
 static int sdl3vk_present_pacing_selftest(void) {
     static uint32_t px[PSP_W * PSP_H];
     const uint64_t period = 16683333u;   /* one guest VBLANK, 1001/60000 s */
@@ -1324,6 +1571,23 @@ static int sdl3vk_present_pacing_selftest(void) {
                         "%d)\n", s_pace_test_waits, PACE_TEST_FRAMES, late, (double)worst / 1e6,
                 busy, (unsigned long long)counted, PACE_TEST_FRAMES, PACE_TEST_FRAMES);
         ok = 0;
+    }
+
+    /* Smooth motion's held present is a game-frame present too: with the display holding every
+     * image it returns DISPLAY_BUSY before its show pass runs. Nothing of the held frame was
+     * shown, so its caller still owes that frame (gui_ace_vblank). */
+    {
+        Sdl3VkShowPass saved = s_show_pass;
+        s_pace_test_pass_calls = 0;
+        sdl3vk_set_show_pass(pace_test_show_pass);
+        const int held = sdl3vk_present_held();
+        sdl3vk_set_show_pass(saved);
+        if (held != SDL3VK_PRESENT_DISPLAY_BUSY || s_pace_test_pass_calls != 0) {
+            fprintf(stderr, "pacing: with the display holding every image, the held present returned %d "
+                            "and ran its show pass %d time(s) (want DISPLAY_BUSY and 0)\n", held,
+                    s_pace_test_pass_calls);
+            ok = 0;
+        }
     }
 
     /* The display frees: presents are shown again (the real display may still need a VBLANK). */
@@ -1387,6 +1651,96 @@ static int sdl3vk_present_pacing_selftest(void) {
     if (ok) printf("gpu capture selftest: present pacing OK (%d presents, none waited for a busy "
                    "display; worst %.1f ms after its VBLANK)\n", PACE_TEST_FRAMES,
                    (double)worst / 1e6);
+    return ok;
+}
+
+/* ---- what a show pass learns of its present, and the finished-submission count ---------------
+ * Each show pass is told once how its present ended and which submission carries its commands.
+ * The count of finished submissions moves only when the presenter has seen a fence signalled: it
+ * never passes a pending submission. A present that fails after its submission (an out-of-date
+ * swapchain) keeps its slot and is told it failed; the swapchain rebuild waits for every frame,
+ * so the count then reaches that submission. */
+static int s_done_test_calls, s_done_test_result;
+static uint64_t s_done_test_submission;
+static void done_test_show_done(int result, uint64_t submission) {
+    s_done_test_calls++;
+    s_done_test_result = result;
+    s_done_test_submission = submission;
+}
+
+static int sdl3vk_present_completed_selftest(void) {
+    static uint32_t px[PSP_W * PSP_H];
+    int ok = 1;
+    const Sdl3VkShowPass saved_pass = s_show_pass;
+    const Sdl3VkShowDone saved_done = s_show_done;
+    sdl3vk_set_present_nowait(0);
+    sdl3vk_set_show_pass(pace_test_show_pass);
+    sdl3vk_set_show_done(done_test_show_done);
+    s_done_test_calls = 0;
+
+    const uint64_t first = s_present_submitted + 1u;
+    const int shown = sdl3vk_present_rgba(px);
+    const int shown_calls = s_done_test_calls, shown_result = s_done_test_result;
+    const uint64_t shown_submission = s_done_test_submission;
+    const uint64_t completed_after_shown = sdl3vk_present_completed();   /* its fence not yet seen */
+    const int cursor = s_frame_cursor;
+    sdl3vk_present_fault_inject(VK_ERROR_OUT_OF_DATE_KHR);
+    const int failed = sdl3vk_present_rgba(px);
+    const int failed_calls = s_done_test_calls, failed_result = s_done_test_result;
+    const uint64_t failed_submission = s_done_test_submission;
+    const int failed_cursor = s_frame_cursor;
+    const uint64_t completed_after_fail = sdl3vk_present_completed();
+    const int again = sdl3vk_present_rgba(px);
+    const uint64_t completed_again = sdl3vk_present_completed();
+    if (shown != 1 || shown_calls != 1 || shown_result != 1 || shown_submission != first ||
+        completed_after_shown >= first || failed != -1 || failed_calls != 2 || failed_result != -1 || failed_submission != first + 1u ||
+        failed_cursor != cursor || completed_after_fail != first + 1u || again != 1 ||
+        s_done_test_calls != 3 || s_done_test_submission != first + 2u || completed_again < first + 1u ||
+        completed_again > s_present_submitted) {
+        fprintf(stderr, "show done: shown %d (%d call(s), %d, submission %llu of %llu, %llu finished); out "
+                        "of date %d (%d, submission %llu, cursor %d -> %d, %llu finished); next %d (%d "
+                        "call(s), submission %llu, %llu finished) (want 1, 1 call, 1, the first, an older "
+                        "one finished; -1, -1, the next, "
+                        "the cursor kept, finished by the rebuild; 1, 3 calls, the one after, the "
+                        "failed one finished)\n",
+                shown, shown_calls, shown_result, (unsigned long long)shown_submission,
+                (unsigned long long)first, (unsigned long long)completed_after_shown, failed, failed_result, (unsigned long long)failed_submission,
+                cursor, failed_cursor, (unsigned long long)completed_after_fail, again,
+                s_done_test_calls, (unsigned long long)s_done_test_submission,
+                (unsigned long long)completed_again);
+        ok = 0;
+    }
+
+    /* A slot still pending under no-wait: the present returns DISPLAY_BUSY before its show pass, so
+     * no pass is told anything, and the count does not move. Every slot is submitted first, so the
+     * poll reaches the fence. */
+    for (int k = 0; k < PRESENT_FRAMES; k++) (void)sdl3vk_present_rgba(px);
+    sdl3vk_set_present_nowait(1);
+    s_pace_test_slot_pending = 1;
+    s_fence_status_fn = pace_test_fence_status;
+    const int calls_before = s_done_test_calls;
+    const uint64_t completed_before = sdl3vk_present_completed();
+    const int pending = sdl3vk_present_rgba(px);
+    const uint64_t completed_pending = sdl3vk_present_completed();
+    s_pace_test_slot_pending = 0;
+    s_fence_status_fn = NULL;
+    sdl3vk_set_present_nowait(0);
+    /* Every fence waited: the count is the newest submission. */
+    const int all = wait_all_present_frames();
+    if (pending != SDL3VK_PRESENT_DISPLAY_BUSY || s_done_test_calls != calls_before ||
+        completed_pending != completed_before || !all ||
+        sdl3vk_present_completed() != s_present_submitted) {
+        fprintf(stderr, "show done: with the slot pending the present returned %d, told %d pass(es) and "
+                        "moved the count %llu -> %llu; after every wait the count is %llu of %llu (want "
+                        "DISPLAY_BUSY, none, unmoved, every submission)\n",
+                pending, s_done_test_calls - calls_before, (unsigned long long)completed_before,
+                (unsigned long long)completed_pending, (unsigned long long)sdl3vk_present_completed(),
+                (unsigned long long)s_present_submitted);
+        ok = 0;
+    }
+    sdl3vk_set_show_pass(saved_pass);
+    sdl3vk_set_show_done(saved_done);
+    if (ok) printf("gpu capture selftest: show pass outcomes and the finished-submission count OK\n");
     return ok;
 }
 
@@ -1477,6 +1831,12 @@ static int sdl3vk_capture_selftest_body(void) {
     /* ---- mouse aiming (#1791); no Vulkan needed ------------------------------------ */
     if (!sdl3vk_mouse_aim_selftest()) {
         fprintf(stderr, "gpu capture selftest: mouse aim selftest failed\n");
+        return 1;
+    }
+
+    /* ---- mouse buttons (#1791); no Vulkan needed ----------------------------------- */
+    if (!sdl3vk_mouse_buttons_selftest()) {
+        fprintf(stderr, "gpu capture selftest: mouse buttons selftest failed\n");
         return 1;
     }
 
@@ -1628,6 +1988,74 @@ static int sdl3vk_capture_selftest_body(void) {
         ok = 0;
     }
     remove("selftest_cpu.ppm");
+
+    /* ---- the F3 HUD composes over the picture (#314, LIVE_FRAME_OVERLAY) ---------------
+     * The performance HUD, and in developer mode the profile HUD, are copied into a rectangle
+     * of the window's image after the frame blit: a rectangle inside the window that leaves
+     * the rest of the picture showing, at the 16-pixel inset, and the HUD surface the software
+     * renderer drew for it holds the HUD. The frame the game drew, the source the window is
+     * blitted from, is untouched: a capture of the same present is the same bytes as
+     * with the HUD off. Off again, nothing is copied. */
+    {
+        static const int modes[] = { SDL3VK_HUD_PERF, SDL3VK_HUD_PROFILE };
+        static const int want_w[] = { HUD_W, PROFILE_HUD_W };
+        static const int want_h[] = { HUD_H, PROFILE_HUD_H };
+        const int saved_developer = s_developer;
+        const int saved_mode = s_hud_enabled;
+        s_developer = 1;
+        for (int m = 0; m < 2; m++) {
+            const unsigned before = s_hud_last.copies;
+            const char *what = m ? "profile HUD" : "performance HUD";
+            hud_set_mode(modes[m]);
+            if (!sr_capture_arm("selftest_hud.ppm") || sdl3vk_present_rgba(px) != 1 ||
+                sr_capture_result() != 1) {
+                fprintf(stderr, "hud: %s present or capture failed\n", what); ok = 0;
+                continue;
+            }
+            if (!cap_test_verify_ppm("selftest_hud.ppm", PSP_W, PSP_H)) {
+                fprintf(stderr, "hud: with the %s on, the captured frame is not the frame the "
+                                "game drew\n", what);
+                ok = 0;
+            }
+            remove("selftest_hud.ppm");
+            if (s_hud_last.copies != before + 1u || s_hud_last.w != want_w[m] ||
+                s_hud_last.h != want_h[m]) {
+                fprintf(stderr, "hud: %s copies %u (want %u), %dx%d (want %dx%d)\n", what,
+                        s_hud_last.copies - before, 1u, s_hud_last.w, s_hud_last.h, want_w[m],
+                        want_h[m]);
+                ok = 0;
+                continue;
+            }
+            if (s_hud_last.x != 16 || s_hud_last.y != 16 ||
+                s_hud_last.x + s_hud_last.w > s_hud_last.swap_w ||
+                s_hud_last.y + s_hud_last.h > s_hud_last.swap_h ||
+                (s_hud_last.w >= s_hud_last.swap_w && s_hud_last.h >= s_hud_last.swap_h)) {
+                fprintf(stderr, "hud: %s rectangle (%d,%d %dx%d) in a %dx%d image does not sit "
+                                "over part of the picture\n", what, s_hud_last.x, s_hud_last.y,
+                        s_hud_last.w, s_hud_last.h, s_hud_last.swap_w, s_hud_last.swap_h);
+                ok = 0;
+            }
+            /* What was copied is the HUD: its background and border, as drawn. */
+            Uint8 r = 0, g = 0, b = 0, a = 0, br = 0, bg = 0, bb = 0, ba = 0;
+            if (!s_hud_surf || !SDL_ReadSurfacePixel(s_hud_surf, 2, s_hud_last.h - 2, &r, &g, &b, &a) ||
+                !SDL_ReadSurfacePixel(s_hud_surf, 0, 0, &br, &bg, &bb, &ba) ||
+                r != 20 || g != 24 || b != 32 || br != 70 || bg != 90 || bb != 130) {
+                fprintf(stderr, "hud: %s surface shows %u,%u,%u inside and %u,%u,%u on the "
+                                "border\n", what, r, g, b, br, bg, bb);
+                ok = 0;
+            }
+        }
+        hud_set_mode(SDL3VK_HUD_OFF);
+        {
+            const unsigned before = s_hud_last.copies;
+            if (sdl3vk_present_rgba(px) != 1 || s_hud_last.copies != before) {
+                fprintf(stderr, "hud: with the HUD off a present still copied a HUD\n");
+                ok = 0;
+            }
+        }
+        s_developer = saved_developer;
+        hud_set_mode(saved_mode);
+    }
 
     /* ---- presentation upscaler (#1273, SR_PRESENT_UPSCALE=fsr1) ------------------------
      * The real FSR 1 pass on the present path, under the validation layer. A 480x272 frame in the
@@ -2447,6 +2875,7 @@ static int sdl3vk_capture_selftest_body(void) {
     }
 
     if (!sdl3vk_present_pacing_selftest()) ok = 0;
+    if (!sdl3vk_present_completed_selftest()) ok = 0;
 
     int errors = sdl3vk_validation_error_count();
     if (errors != 0) {

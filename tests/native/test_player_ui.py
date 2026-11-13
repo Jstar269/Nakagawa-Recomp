@@ -630,6 +630,8 @@ def compute_effective_timeout(
         "update=" name (available, downloaded, installed, failed, idle, ...); the run fails,
         naming the phase it last saw, when timeout_ms passes first.
       - WAIT_REPORT=<phase>,<timeout_ms>: waits for the Problem report phase number.
+      - WAIT_MUSIC=<state>,<timeout_ms>: waits until the launcher music is in <state>, by
+        its "music=" name (loading, playing, fading_out, paused, stopped, missing, ...).
 
     When explicit_timeout is None, sums all wait event bounds and adds
     TIMEOUT_BUFFER_SECONDS over DEFAULT_BASE_TIMEOUT_SECONDS to ensure slow
@@ -644,7 +646,7 @@ def compute_effective_timeout(
                 effective += int(ev.split("=", 1)[1]) / 1000.0
             except ValueError:
                 pass
-        elif ev.startswith(("WAIT_VIEW=", "WAIT_REPORT=")) and "," in ev:
+        elif ev.startswith(("WAIT_VIEW=", "WAIT_REPORT=", "WAIT_MUSIC=")) and "," in ev:
             try:
                 effective += int(ev.split(",", 1)[1]) / 1000.0
             except ValueError:
@@ -1037,6 +1039,8 @@ class NativePlayerUiTests(unittest.TestCase):
         package_built_by: str | None = None,
         disc_list: str | None = None,
         enhancement_packages: dict[str, str] | None = None,
+        enhancement_package_fields: dict[str, object] | None = None,
+        culling_packages: dict[str, dict[str, object]] | None = None,
         expect_failure: bool = False,
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
@@ -1052,7 +1056,7 @@ class NativePlayerUiTests(unittest.TestCase):
             # The player's data folder (LOCALAPPDATA on Windows, XDG_DATA_HOME elsewhere), with
             # a disc list the user imported (nk_disc_verify.h).
             data_folder = (localappdata / "Nakagawa" / "data" if os.name == "nt"
-                           else userprofile / "data" / "nakagawa-recomp")
+                           else userprofile / "data" / "Nakagawa" / "data")
             if disc_list is not None:
                 (data_folder / "verification").mkdir(parents=True)
                 (data_folder / "verification" / "redump.dat").write_text(disc_list,
@@ -1064,12 +1068,19 @@ class NativePlayerUiTests(unittest.TestCase):
             runtime_root.mkdir()
             for disc, title_id in (enhancement_packages or {}).items():
                 # A title's own enhancement package (docs/ENHANCEMENT_CONTRACT.md section 9.4):
-                # the player reads only its id and target title, so Ace is offered for it.
+                # the player reads its id, target title and experimental flag, so Ace is offered for it.
                 enhancements = runtime_root / "enhancements"
                 enhancements.mkdir(exist_ok=True)
                 (enhancements / f"{disc.lower()}-60hz.json").write_text(
-                    json.dumps({"id": "fixture-60hz", "target_title_id": title_id}),
+                    json.dumps({"id": "fixture-60hz", "target_title_id": title_id,
+                                **(enhancement_package_fields or {})}),
                     encoding="utf-8")
+            for disc, package in (culling_packages or {}).items():
+                # A title's culling package (contract 11.3.6), read beside its -60hz.json.
+                enhancements = runtime_root / "enhancements"
+                enhancements.mkdir(exist_ok=True)
+                (enhancements / f"{disc.lower()}-cull.json").write_text(
+                    json.dumps(package), encoding="utf-8")
             tool_marker: Path | None = None
             if downloaded_tool_payload:
                 tool_marker = runtime_root / "prerequisites" / "synthetic-tool" / "marker.txt"
@@ -1223,13 +1234,13 @@ class NativePlayerUiTests(unittest.TestCase):
                 write_large_library(
                     scratch,
                     localappdata / "Nakagawa" / "data" if os.name == "nt"
-                    else userprofile / "data" / "nakagawa-recomp",
+                    else userprofile / "data" / "Nakagawa" / "data",
                     library_titles,
                 )
             if settings is not None:
                 # A settings.json saved before this run, where the player reads it.
                 config = (localappdata / "Nakagawa" / "config" if os.name == "nt"
-                          else userprofile / "config" / "nakagawa-recomp")
+                          else userprofile / "data" / "Nakagawa" / "config")
                 config.mkdir(parents=True, exist_ok=True)
                 (config / "settings.json").write_text(
                     json.dumps({"schema_version": 2, **settings}), encoding="utf-8")
@@ -1273,6 +1284,7 @@ class NativePlayerUiTests(unittest.TestCase):
                 event_script.insert(0, f"DROP_FILE={package_iso}")
             elif drop_bytes is not None:
                 dropped = scratch / drop_bytes[0]
+                dropped.parent.mkdir(parents=True, exist_ok=True)
                 dropped.write_bytes(drop_bytes[1])
                 event_script.insert(0, f"DROP_FILE={dropped}")
             args.append("--ui-test-events=" + ";".join(event_script))
@@ -1697,6 +1709,130 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertNotIn("QUIT_DIALOG", keyboard["stdout"], "Esc closes the box, not the player")
         self.assertEqual(self.focus_trail(keyboard)[-1], self.FIND)
 
+    @staticmethod
+    def find_states(run: dict[str, object]) -> list[str]:
+        """What the find box held while it was open, frame by frame, with repeats collapsed."""
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        states: list[str] = []
+        for text_hex in re.findall(
+                r"^\[PLAYER_UI_TEST\] find_box frame=\d+ text_hex=([0-9a-f]*)\r?$", stdout, re.M):
+            state = bytes.fromhex(text_hex).decode("utf-8")
+            if not states or states[-1] != state:
+                states.append(state)
+        return states
+
+    def test_next_ui_find_stops_at_its_cap(self) -> None:
+        """#2206: what a hardware keyboard types into the find box goes through the shared
+        keyboard's cap: 40 characters typed twice (the second time into a box that holds
+        text), 63 bytes kept."""
+        run = self.run_player(
+            "library", ("WAIT_MS=1000", "KEY_SLASH", "TEXT=" + "x" * 40, "WAIT_MS=200",
+                        "TEXT=" + "x" * 40, "WAIT_MS=200"),
+            library_titles=4, timeout=120.0,
+        )
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
+            self.skipTest("the next UI could not start here (no UI fonts)")
+        states = self.find_states(run)
+        self.assertTrue(states, run["stdout"])
+        self.assertEqual(states[-1], "x" * 63)
+
+    def test_next_ui_find_types_with_a_controller_alone(self) -> None:
+        """#2206: the find box's keys are the shared on-screen keyboard, so a controller
+        alone searches: the d-pad moves, A types the focused key, X deletes, Start is Done
+        (focus goes to the first match) and A opens it. Failing-before: the box had its own
+        grid, X did nothing while it was open, and Start left the library for Settings."""
+        run = self.run_player(
+            "library",
+            ("WAIT_MS=1000", "PAD_WEST", "WAIT_MS=100", "PAD_DPAD_UP", "PAD_SOUTH",
+             "PAD_DPAD_RIGHT", "PAD_SOUTH", "WAIT_MS=100", "PAD_WEST", "WAIT_MS=100",
+             "PAD_DPAD_LEFT", "PAD_SOUTH", "WAIT_MS=100", "PAD_START", "WAIT_MS=100",
+             "PAD_SOUTH", "WAIT_MS=200"),
+            library_titles=12, timeout=120.0,
+        )
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
+            self.skipTest("the next UI could not start here (no UI fonts)")
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertIn(self.FIND_KEY_Q, self.focus_trail(run), "the pad opens the box on q")
+        # 1, 2, X deletes the 2, 1: "11" is in Synthetic title 11 and its disc ID alone.
+        self.assertEqual((frames[-1]["next_route"], frames[-1]["selected"]), ("2", "11"),
+                         "Start is Done, and A opens the one match")
+        self.assertEqual(self.find_states(run), ["", "1", "12", "1", "11"],
+                         "the keys typed 1 and 2, X deleted the 2, and 1 was typed again")
+
+    @staticmethod
+    def find_grid_trail(run: dict[str, object]) -> list[tuple[str | None, int, int, tuple[str, ...]]]:
+        """The library grid for each thing the find box held, in order: (the box's text,
+        or None while it is closed; the grid's games; the library's games; the disc IDs
+        the page drew). Each is the grid on the last frame of that text, so a keystroke's
+        own frame, which may still draw the grid of the text before, does not count."""
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        finds = {int(frame): bytes.fromhex(text_hex).decode("utf-8") for frame, text_hex in
+                 re.findall(r"^\[PLAYER_UI_TEST\] find_box frame=(\d+) text_hex=([0-9a-f]*)\r?$",
+                            stdout, re.M)}
+        grids = {int(frame): (int(matches), int(total), tuple(filter(None, shown.split(","))))
+                 for frame, matches, total, shown in re.findall(
+                     r"^\[PLAYER_UI_TEST\] library_grid frame=(\d+) matches=(\d+) total=(\d+)"
+                     r" shown=(\S*)\r?$", stdout, re.M)}
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        trail: list[tuple[str | None, int, int, tuple[str, ...]]] = []
+        grid: tuple[int, int, tuple[str, ...]] | None = None
+        for frame in frames:
+            number = int(frame["frame"])
+            grid = grids.get(number, grid)
+            if grid is None:
+                continue
+            text = finds.get(number)
+            if trail and trail[-1][0] == text:
+                trail[-1] = (text, *grid)
+            else:
+                trail.append((text, *grid))
+        return trail
+
+    def test_next_ui_find_filters_the_grid_with_a_controller_alone(self) -> None:
+        """#2206: a controller alone searches the library by name, and the grid follows
+        the box. The pad opens the box on q, the d-pad moves to e and A types it, Y types
+        a space, the d-pad moves to 1 and A types it twice ("e 11"), X deletes back to an
+        empty box, A types 1, and B clears and closes the box. Each step's grid is the
+        games whose name or disc ID holds the text: "e 1" is in the names "Synthetic
+        title 1", "10" and "11" and in no disc ID (SCAL000nn), so it shows the name
+        search; the empty box and the cleared one give back the whole library."""
+        run = self.run_player(
+            "library",
+            ("WAIT_MS=1000", "PAD_WEST", "WAIT_MS=100", "PAD_DPAD_RIGHT", "PAD_DPAD_RIGHT",
+             "PAD_SOUTH", "WAIT_MS=100", "PAD_NORTH", "WAIT_MS=100", "PAD_DPAD_UP",
+             "PAD_DPAD_LEFT", "PAD_DPAD_LEFT", "PAD_SOUTH", "WAIT_MS=100", "PAD_SOUTH",
+             "WAIT_MS=100", "PAD_WEST", "WAIT_MS=100", "PAD_WEST", "WAIT_MS=100", "PAD_WEST",
+             "WAIT_MS=100", "PAD_WEST", "WAIT_MS=100", "PAD_SOUTH", "WAIT_MS=100", "PAD_EAST",
+             "WAIT_MS=200"),
+            library_titles=12, timeout=120.0,
+        )
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
+            self.skipTest("the next UI could not start here (no UI fonts)")
+        trail = self.find_grid_trail(run)
+        self.assertEqual([text for text, *_ in trail],
+                         [None, "", "e", "e ", "e 1", "e 11", "e 1", "e ", "e", "", "1", None],
+                         run["stdout"][-4000:])
+        full = {f"SCAL{index:05d}" for index in range(12)}
+        ones = {"SCAL00001", "SCAL00010", "SCAL00011"}  # Synthetic title 1, 10 and 11
+        for text, matches, total, shown in trail:
+            self.assertEqual(total, 12, f"the library holds 12 games ({text!r})")
+            self.assertTrue(set(shown) <= full, f"the page draws library games ({text!r})")
+            if text in ("e 1", "1"):
+                self.assertEqual((matches, set(shown)), (3, ones),
+                                 f"{text!r} keeps titles 1, 10 and 11")
+            elif text == "e 11":
+                self.assertEqual((matches, shown), (1, ("SCAL00011",)), "'e 11' keeps title 11")
+            else:
+                self.assertEqual(matches, 12, f"{text!r} keeps every game")
+                self.assertGreater(len(shown), len(ones), f"{text!r} draws a full page")
+        self.assertEqual(trail[-1][3], trail[0][3],
+                         "B clears the box, and the first page draws what it drew at the start")
+        self.assertEqual(self.focus_trail(run)[-1], self.FIND, "B returns focus to FIND")
+
     def test_next_ui_is_the_only_launcher(self) -> None:
         """The owner's rule for v0.0.1: the new launcher or nothing.
 
@@ -1734,7 +1870,12 @@ class NativePlayerUiTests(unittest.TestCase):
             self.assertNotIn("ZIP", completed.stderr)
             self.assertIn("tools/stage_install.py", completed.stderr)
         self.assertNotIn("compiled without", completed.stderr)
-        self.assertIn("assets\\fonts\\ui", completed.stderr)
+        # The folder is named the way this platform writes paths (#306).
+        if sys.platform == "win32":
+            self.assertIn("assets\\fonts\\ui", completed.stderr)
+        else:
+            self.assertIn("assets/fonts/ui", completed.stderr)
+            self.assertNotIn("assets\\fonts", completed.stderr)
         self.assertNotIn(marker, completed.stdout)
         self.assertNotIn("frame=", completed.stdout, "nothing is drawn after the message")
 
@@ -2014,9 +2155,12 @@ class NativePlayerUiTests(unittest.TestCase):
     def test_next_ui_checks_an_added_disc_once_on_a_worker(self) -> None:
         """#1731: a disc added from the game-found card is hashed once after the add, on the
         disc check worker (never the UI thread), and compared with the disc list the user
-        imported; its library record keeps the hashes and the tier. With no list it is
-        hashed and left unchecked. The worker is held for a moment: the library draws frames
-        meanwhile, with the check running."""
+        imported, which takes precedence over the list bundled beside the player; its library
+        record keeps the hashes and the tier. With no import it is compared with the bundled
+        list (assets/redump), where a synthetic disc is not listed: UNKNOWN, never a pass. A
+        test build without the bundled list staged beside it leaves the disc unchecked. The
+        worker is held for a moment: the library draws frames meanwhile, with the check
+        running."""
         with tempfile.TemporaryDirectory(prefix=".disc-check-", dir=ROOT) as tmp:
             iso_path = Path(tmp) / "synthetic.iso"
             create_test_iso_with_executables(
@@ -2032,7 +2176,9 @@ class NativePlayerUiTests(unittest.TestCase):
                      f"sha1=\"{sha1}\"/></game>\n</datafile>\n")
         events = ("WAIT_VIEW=experimental|unsupported|supported|error,15000", "WAIT_MS=100",
                   "KEY_RETURN", "WAIT_MS=2000")
-        for listed, tier in ((True, "VERIFIED_RETAIL"), (False, "NOT_CHECKED")):
+        bundled = (PLAYER_EXE.parent / "assets" / "redump" / "redump-psp.zip").is_file()
+        unlisted = ("UNKNOWN", "bundled") if bundled else ("NOT_CHECKED", "none")
+        for listed, (tier, source) in ((True, ("VERIFIED_RETAIL", "imported")), (False, unlisted)):
             with self.subTest(listed=listed):
                 run = self.next_ui_run("library", events, drop_bytes=("source-owned.iso", iso),
                                        disc_list=disc_list if listed else None,
@@ -2046,8 +2192,9 @@ class NativePlayerUiTests(unittest.TestCase):
                 self.assertGreaterEqual(len(checking), 2, stdout)
                 self.assertEqual(frames[-1]["disc_check"], "0", stdout)
                 checks = re.findall(
-                    r"^\[PLAYER\] DISC_CHECK disc=(\S+) result=(\S+) tier=(\S+)$", stdout, re.M)
-                self.assertEqual(checks, [("TEST00043", "HASHED", tier)], stdout)
+                    r"^\[PLAYER\] DISC_CHECK disc=(\S+) result=(\S+) tier=(\S+) list=(\S+)$",
+                    stdout, re.M)
+                self.assertEqual(checks, [("TEST00043", "HASHED", tier, source)], stdout)
                 library = run["library"]
                 assert isinstance(library, dict)
                 records = [game for game in library["games"] if game["disc_id"] == "TEST00043"]
@@ -2069,6 +2216,8 @@ class NativePlayerUiTests(unittest.TestCase):
         "ace": str(0x4540), "ace_open": str(0x4541), "ace_mode": str(0x4542),
         "ui_sounds": str(0x4508),
         "preset": str(0x4510),
+        "launcher_music": str(0x4557), "music_volume_down": str(0x4558),
+        "music_volume_up": str(0x4559),
     }
     # From Resolution, Down runs through the Game card's seven rows (Play mode, which opens
     # Settings > Enhanced, then Graphics preset, #2150) to the button row, which it enters at
@@ -2312,7 +2461,7 @@ class NativePlayerUiTests(unittest.TestCase):
             localappdata.mkdir()
             runtime_root.mkdir()
             config = (localappdata / "Nakagawa" / "config" if os.name == "nt"
-                      else scratch / "config" / "nakagawa-recomp")
+                      else scratch / "data" / "Nakagawa" / "config")
             if settings is not None:
                 config.mkdir(parents=True)
                 (config / "settings.json").write_text(
@@ -2437,7 +2586,7 @@ class NativePlayerUiTests(unittest.TestCase):
                          run["stdout"])
         ultra = lines[4]
         self.assertIn("Ultra is used in Enhanced and Ace", ultra["note"])
-        self.assertIn("with crisp text and FSR 1 on", ultra["note"])
+        self.assertIn("with crisp text, FSR 1 and full 32-bit colour on", ultra["note"])
         self.assertIn("Authentic uses your settings", ultra["note"])
         self.assertIn("with crisp text on and FSR 1 off", lines[3]["note"])
         self.assertEqual((lines[-1]["note"],), ("",),
@@ -2512,6 +2661,268 @@ class NativePlayerUiTests(unittest.TestCase):
         assert isinstance(settings, dict)
         self.assertIs(settings.get("ui_sounds"), True)
 
+    # The launcher music runs on SDL's dummy audio device in these tests: never a speaker.
+    MUSIC_AUDIO = {"SDL_AUDIO_DRIVER": "dummy"}
+
+    def test_next_ui_launcher_music_is_off_by_default_and_saved(self) -> None:
+        """#2207: Launcher music is off by default and saved, with its own Music volume, at
+        the end of the Launcher and sound card. Turning it on starts the shipped track
+        through the production path: the frames show it load and play."""
+        focus = self.SETTINGS_FOCUS
+        plain = self.next_ui_run("settings", ("WAIT_MS=100", "KEY_ESCAPE"),
+                                 env_extra=self.MUSIC_AUDIO)
+        # Nothing changed, so nothing is saved; a saved file keeps the default.
+        settings = plain["settings"]
+        if settings is not None:
+            assert isinstance(settings, dict)
+            self.assertIs(settings.get("launcher_music"), False,
+                          "launcher music is off by default")
+            self.assertEqual(settings.get("launcher_music_volume"), 80)
+        frames = plain["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual({frame["music"] for frame in frames}, {"off"},
+                         "while it is off the music never loads or plays")
+
+        # Right from Resolution is the card's first row; Down runs through Launcher
+        # fullscreen, Accessibility, Menu sounds, Controls and Updates to Launcher music,
+        # then to Music volume.
+        run = self.next_ui_run(
+            "settings",
+            ("FOCUS_GAINED", "WAIT_MS=100", "KEY_RIGHT") + ("KEY_DOWN",) * 6 +
+            ("KEY_RETURN", "WAIT_MUSIC=playing,30000", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100",
+             "KEY_ESCAPE"),
+            env_extra=self.MUSIC_AUDIO,
+        )
+        trail = self.focus_trail(run)
+        self.assertIn(focus["launcher_music"], trail)
+        self.assertIn("wait_music actual=playing result=PASS", str(run["stdout"]))
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertIs(settings.get("launcher_music"), True)
+        stepped = trail[trail.index(focus["launcher_music"]) + 1]
+        self.assertIn(stepped, (focus["music_volume_down"], focus["music_volume_up"]),
+                      "Down from Launcher music is Music volume")
+        self.assertEqual(settings.get("launcher_music_volume"),
+                         75 if stepped == focus["music_volume_down"] else 85)
+        self.assertEqual(settings.get("master_volume"), 80, "Game volume is a separate level")
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        states = [frame["music"] for frame in frames]
+        self.assertIn("loading", states, "the track is decoded on its worker")
+        self.assertEqual(states[-1], "playing")
+
+    def test_launcher_music_stops_before_the_game_starts(self) -> None:
+        """#2207: PLAY fades the launcher music out and the launch worker, which starts
+        the game's process, starts only once the launcher holds no audio stream; the
+        music comes back when the launcher does (here the launch's own card, since the
+        synthetic package has no real program).
+
+        Failing-before: there was no launcher music, so no frame names its state and no
+        launch waits for it."""
+        run = self.run_player(
+            "ready",
+            ("FOCUS_GAINED", *self.PLAY_READY_TITLE, "WAIT_MUSIC=playing,30000", "KEY_RETURN",
+             "WAIT_VIEW=error,30000", "WAIT_MUSIC=playing,30000"),
+            post_build_ready=True, wait_background=True,
+            settings={"launcher_music": True},
+            env_extra={**self.MUSIC_AUDIO, "NK_UI_TEST_SLOW_START_MS": "300"},
+        )
+        stdout = str(run["stdout"])
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        workers = [line for line in stdout.splitlines()
+                   if line.startswith("[PLAYER_UI_TEST] launch_worker_start ")]
+        self.assertEqual(workers, ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
+                                   "music=stopped decoder=idle"], stdout)
+        # The frames between PLAY and the worker's start: after the press frame the music
+        # fades and stops, and it never plays again before the game's process starts.
+        lines = stdout.splitlines()
+        worker_at = lines.index(workers[0])
+        before = parse_frames("\n".join(lines[:worker_at]))
+        after = parse_frames("\n".join(lines[worker_at:]))
+        pending = [i for i, frame in enumerate(before) if frame["launch_pending"] == "1"]
+        self.assertTrue(pending, stdout)
+        self.assertEqual(before[pending[0] - 1]["music"], "playing",
+                         "the music played on the title page")
+        fading = [frame for frame in before[pending[0] + 1:]]
+        self.assertTrue(fading, stdout)
+        self.assertEqual(fading[0]["music"], "fading_out", "PLAY fades the music out")
+        self.assertNotIn("playing", [frame["music"] for frame in fading])
+        self.assertEqual(fading[-1]["music"], "fading_out",
+                         "the worker starts on the frame the music lets go")
+        fade_ms = int(fading[-1]["ticks_ms"]) - int(fading[0]["ticks_ms"])
+        self.assertGreaterEqual(fade_ms, 300, "the fade-out takes its half second")
+        # While the launch runs, the music stays stopped; on the launch's card it plays.
+        starting = [frame for frame in after if frame["launch_pending"] == "1"]
+        self.assertTrue(starting, stdout)
+        self.assertEqual({frame["music"] for frame in starting}, {"stopped"})
+        self.assertEqual(after[-1]["view"], "error", stdout)
+        self.assertEqual(after[-1]["music"], "playing", "back in the launcher it plays again")
+
+    def test_launcher_music_resumes_after_a_game_and_pauses_without_focus(self) -> None:
+        """#2207: while a game runs the launcher music is stopped; it plays when the game
+        ends, pauses when the window loses focus and plays again when it is back."""
+        run = self.run_player(
+            "ready",
+            ("FOCUS_GAINED", "WAIT_MS=300", "KEY_RETURN", "WAIT_MS=700", "GAME_EXIT=0",
+             "WAIT_MUSIC=playing,30000", "FOCUS_LOST", "WAIT_MUSIC=paused,30000",
+             "FOCUS_GAINED", "WAIT_MUSIC=playing,30000"),
+            post_build_ready=True, wait_background=True,
+            settings={"launcher_music": True},
+            env_extra={**self.MUSIC_AUDIO, "NK_UI_TEST_GAME_RUNNING": "TEST00006"},
+        )
+        stdout = str(run["stdout"])
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assertIn("game_exit code=0 result=PASS", stdout)
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        running = [frame["music"] for frame in frames if frame["game_running"] == "1"]
+        self.assertTrue(running, stdout)
+        self.assertEqual(set(running), {"stopped"}, "no launcher audio while a game runs")
+        ended = [frame["music"] for frame in frames if frame["game_running"] == "0"]
+        self.assertIn("playing", ended)
+        self.assertIn("paused", ended)
+        self.assertEqual(ended[-1], "playing")
+
+    def music_workers(self, stdout: str) -> list[str]:
+        return [line for line in stdout.splitlines()
+                if line.startswith("[PLAYER_UI_TEST] launch_worker_start ")]
+
+    def test_default_launch_starts_its_worker_on_the_play_frame(self) -> None:
+        """#2207: with the launcher music off (the default) nothing waits for it: the launch
+        worker starts on the PLAY frame, before any frame shows the launch pending."""
+        run = self.run_player(
+            "ready", (*self.PLAY_READY_TITLE, "KEY_RETURN", "WAIT_VIEW=error,30000"),
+            post_build_ready=True, wait_background=True, env_extra=self.MUSIC_AUDIO,
+        )
+        stdout = str(run["stdout"])
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        workers = self.music_workers(stdout)
+        self.assertEqual(workers, ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
+                                   "music=off decoder=idle"], stdout)
+        lines = stdout.splitlines()
+        before = parse_frames("\n".join(lines[:lines.index(workers[0])]))
+        self.assertTrue(before, stdout)
+        self.assertNotIn("1", {frame["launch_pending"] for frame in before},
+                         "no frame waited for the music")
+
+    def test_launcher_music_waits_for_focus_at_start(self) -> None:
+        """#2207: a launcher window that never had input focus (here the hidden test window,
+        as one that opens behind another would be) does not play until it gets focus."""
+        run = self.next_ui_run(
+            "settings", ("WAIT_MUSIC=paused,30000", "WAIT_MS=200", "FOCUS_GAINED",
+                         "WAIT_MUSIC=playing,30000"),
+            settings={"launcher_music": True}, env_extra=self.MUSIC_AUDIO,
+        )
+        stdout = str(run["stdout"])
+        self.assertIn("wait_music actual=paused result=PASS", stdout)
+        self.assertIn("wait_music actual=playing result=PASS", stdout)
+        states = [frame["music"] for frame in run["frames"]]  # type: ignore[union-attr]
+        self.assertLess(states.index("paused"), states.index("playing"), states)
+
+    def test_launcher_music_play_during_the_decode_joins_it_first(self) -> None:
+        """#2207: PLAY while the track is still decoding cancels the decode and joins its
+        worker before the launch worker starts the game's process. The decode here waits
+        for its cancel, so it is still running at PLAY; the player then quits while the
+        launcher's own decode is held again, and quitting cancels and joins that one."""
+        run = self.run_player(
+            "ready",
+            ("FOCUS_GAINED", *self.PLAY_READY_TITLE, "WAIT_MUSIC=loading,30000", "KEY_RETURN",
+             "WAIT_VIEW=error,30000", "WAIT_MUSIC=loading,30000"),
+            post_build_ready=True, wait_background=True,
+            settings={"launcher_music": True},
+            env_extra={**self.MUSIC_AUDIO, "NK_UI_TEST_MUSIC_HOLD_DECODE": "1"},
+        )
+        stdout = str(run["stdout"])
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        workers = self.music_workers(stdout)
+        self.assertEqual(workers, ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
+                                   "music=stopped decoder=idle"], stdout)
+        lines = stdout.splitlines()
+        worker_at = lines.index(workers[0])
+        before = parse_frames("\n".join(lines[:worker_at]))
+        after = parse_frames("\n".join(lines[worker_at:]))
+        pending = [i for i, frame in enumerate(before) if frame["launch_pending"] == "1"]
+        self.assertTrue(pending, stdout)
+        self.assertEqual(before[pending[0] - 1]["music"], "loading", "PLAY came during the decode")
+        starting = [frame for frame in after if frame["launch_pending"] == "1"]
+        self.assertEqual({frame["music"] for frame in starting}, {"stopped"})
+        self.assertIn("wait_view actual=error result=PASS", stdout)
+        self.assertEqual(after[-1]["music"], "loading", "back in the launcher it loads again")
+
+    def test_launcher_music_release_timeout_is_named(self) -> None:
+        """#2207: when the audio device stops taking data during the fade before a game,
+        the music closes it at the time limit (0.5 s fade and 0.25 s grace) and says so in
+        one named line; the launch then goes on."""
+        run = self.run_player(
+            "ready",
+            ("FOCUS_GAINED", *self.PLAY_READY_TITLE, "WAIT_MUSIC=playing,30000", "WAIT_MS=300",
+             "KEY_RETURN", "WAIT_VIEW=error,30000"),
+            post_build_ready=True, wait_background=True,
+            settings={"launcher_music": True},
+            env_extra={**self.MUSIC_AUDIO, "NK_UI_TEST_MUSIC_STALL": "1"},
+        )
+        stdout = str(run["stdout"])
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        stderr = str(run["stderr"])
+        lines = [line for line in stderr.splitlines()
+                 if line.startswith("[PLAYER] LAUNCHER_MUSIC_RELEASE_TIMEOUT: ")]
+        self.assertEqual(len(lines), 1, stderr)
+        match = re.search(r"released after (\d+) ms$", lines[0])
+        self.assertIsNotNone(match, lines[0])
+        assert match is not None
+        self.assertGreaterEqual(int(match.group(1)), 750)
+        self.assertEqual(self.music_workers(stdout),
+                         ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
+                          "music=stopped decoder=idle"], stdout)
+
+    def test_launcher_music_names_no_sound_device(self) -> None:
+        """#2207: with no audio device the music is a named state and one named line."""
+        run = self.next_ui_run(
+            "settings", ("FOCUS_GAINED", "WAIT_MUSIC=no_device,30000", "WAIT_MS=100"),
+            settings={"launcher_music": True},
+            env_extra={"SDL_AUDIO_DRIVER": "nk-no-such-audio-driver"},
+        )
+        self.assertIn("wait_music actual=no_device result=PASS", str(run["stdout"]))
+        stderr = str(run["stderr"])
+        lines = [line for line in stderr.splitlines()
+                 if line.startswith("[PLAYER] LAUNCHER_MUSIC_NO_DEVICE: ")]
+        self.assertEqual(len(lines), 1, stderr)
+        self.assertIn("assets/music/launcher/ChillLofi.ogg", lines[0])
+        self.assertNotIn("playing", {frame["music"] for frame in run["frames"]})  # type: ignore[union-attr]
+
+    def test_launcher_music_names_a_missing_or_damaged_track(self) -> None:
+        """#2207: a missing or damaged track is a named state and a named log line, never
+        a pretend play."""
+        with tempfile.TemporaryDirectory(prefix=".player-ui-music-", dir=ROOT) as tmp:
+            damaged = Path(tmp) / "damaged.ogg"
+            damaged.write_bytes(b"OggS" + bytes(range(256)) * 8)
+            for name, path, state, code in (
+                ("missing", Path(tmp) / "absent.ogg", "missing", "LAUNCHER_MUSIC_MISSING"),
+                ("damaged", damaged, "damaged", "LAUNCHER_MUSIC_DAMAGED"),
+            ):
+                with self.subTest(name):
+                    run = self.next_ui_run(
+                        "settings", ("FOCUS_GAINED", f"WAIT_MUSIC={state},30000",
+                                     "WAIT_MS=100"),
+                        settings={"launcher_music": True},
+                        env_extra={**self.MUSIC_AUDIO, "NK_UI_TEST_MUSIC_FILE": str(path)},
+                    )
+                    self.assertIn(f"wait_music actual={state} result=PASS", str(run["stdout"]))
+                    stderr = str(run["stderr"])
+                    lines = [line for line in stderr.splitlines()
+                             if line.startswith(f"[PLAYER] {code}: ")]
+                    self.assertEqual(len(lines), 1, stderr)
+                    self.assertIn("assets/music/launcher/ChillLofi.ogg", lines[0])
+                    self.assertNotIn(tmp, lines[0], "the log names the track, not a folder")
+                    frames = run["frames"]
+                    assert isinstance(frames, list)
+                    self.assertNotIn("playing", {frame["music"] for frame in frames})
+
     def test_next_ui_play_mode_is_saved_and_its_page_opens(self) -> None:
         """The play modes (#2055): Authentic by default. Settings has one Play mode row
         (#2007); it opens Settings > Enhanced, whose play mode row makes Enhanced the library's
@@ -2557,8 +2968,8 @@ class NativePlayerUiTests(unittest.TestCase):
                          "the page opens on its play mode and Back focuses the row that opened it")
 
     def test_next_ui_enhanced_page_shows_the_graphics_presets_parts(self) -> None:
-        """#2150: with Ultra chosen, Settings > Enhanced shows the parts the preset sets with
-        its values and name, over the library's own (both off here); the other parts keep
+        """#2150, #2280: with Ultra chosen, Settings > Enhanced shows the parts the preset sets
+        with its values and name, over the library's own (all off here); the other parts keep
         the library's value."""
         run = self.next_ui_run(
             "settings",
@@ -2567,13 +2978,14 @@ class NativePlayerUiTests(unittest.TestCase):
             settings={"graphics_preset": "ultra",
                       "enhanced": {"default": "enhanced", "af": "4", "text": "off",
                                    "readout": "off", "notice": "on", "smooth": "off",
-                                   "upscale": "off"}},
+                                   "upscale": "off", "twin": "off"}},
         )
         pages = [page for page in self.enhanced_pages(run) if page.get("title") == "library"]
         self.assertTrue(pages, run["stdout"])
         page = pages[-1]
         self.assertEqual(page["text"], "On (Ultra)", page)
         self.assertEqual(page["upscale"], "FSR 1 (Ultra)", page)
+        self.assertEqual(page["twin"], "On (Ultra)", page)
         self.assertNotIn("(Ultra)", page["af"], "texture filtering is the library's own")
         self.assertNotIn("(Ultra)", page["smooth"])
 
@@ -3104,8 +3516,11 @@ class NativePlayerUiTests(unittest.TestCase):
              UPDATE_DOWNLOAD_PREFIX + f"v{UPDATE_NEWER_VERSION}/nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip"],
             "the checksum file and its signature first, then the ZIP, each once")
         installed = steps[-1]
-        self.assertTrue(installed["zip"].endswith(
-            os.sep.join(("Nakagawa", "data", "downloads", f"nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip"))),
+        # The player writes its own separator, not the one of the Python running this test
+        # (MSYS2's python has os.sep "/" on Windows), so compare the path's last components.
+        self.assertEqual(
+            re.split(r"[\\/]", installed["zip"])[-4:],
+            ["Nakagawa", "data", "downloads", f"nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip"],
             installed)
         self.assertTrue(installed["install"].endswith(f"nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64"), installed)
         frames = run["frames"]
@@ -4283,7 +4698,10 @@ class NativePlayerUiTests(unittest.TestCase):
             package = eboot.read_bytes()
         events = ("WAIT_VIEW=experimental|unsupported|supported|error,20000", "WAIT_MS=100",
                   "KEY_RETURN", "WAIT_MS=2000")
-        run = self.next_ui_run("library", events, drop_bytes=("EBOOT.PBP", package),
+        # The program's folder comes with it, so the package sits in a folder of its own, as
+        # on a Memory Stick: the run's scratch folder holds the home and data folders, which
+        # an import refuses to copy (HOMEBREW_FOLDER_UNSUPPORTED).
+        run = self.next_ui_run("library", events, drop_bytes=("MYHB/EBOOT.PBP", package),
                                wait_background=True)
         frames = run["frames"]
         stdout = run["stdout"]
@@ -5182,6 +5600,44 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(pages[-1]["title"], "TEST00006", run["stdout"])
         return lines, pages[-1]
 
+    @staticmethod
+    def enhancement_tags(run: dict[str, object], disc: str) -> list[str]:
+        """Each tag the ENHANCEMENTS card took for `disc`, in order, from the title model."""
+        return re.findall(r"next_ui_enhancement_tag disc=" + re.escape(disc) + r" tag=(\S+)",
+                          str(run["stdout"]))
+
+    def test_next_ui_enhancement_tag_reads_optional_only_for_the_released_shipped_package(
+            self) -> None:
+        """Contract section 9.10 (#1732): the ENHANCEMENTS card's tag comes from where the
+        title's package was found. A package in the source tree's assets/enhancements that
+        declares "experimental": false reads Optional; the same package without the flag, or
+        a copy in the user's data folder that declares it, reads Experimental."""
+        # The "ready" fixture reads the title's package when its play mode changes, so the run
+        # opens the title and steps Play mode once (to Authentic; the card stays for the package).
+        events = ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", *self.DOWN_TO_PLAY_MODE,
+                  "KEY_RETURN", "WAIT_MS=200")
+        package = {"id": "fixture-60hz", "target_title_id": "display-smoke-v1"}
+        released = {"experimental": False}
+        own = self.next_ui_run("ready", events, post_build_ready=True, wait_background=True,
+                               enhancement_packages={"TEST00006": "display-smoke-v1"},
+                               enhancement_package_fields=released)
+        self.assertEqual(self.enhancement_tags(own, "TEST00006")[-1:], ["Experimental"],
+                         own["stdout"])
+        with tempfile.TemporaryDirectory(prefix=".shipped-package-", dir=ROOT) as tmp:
+            source = Path(tmp)
+            (source / "tools").mkdir()
+            (source / "tools" / "nk_cli.py").write_text("# fixture\n", encoding="utf-8")
+            shipped = source / "assets" / "enhancements"
+            shipped.mkdir(parents=True)
+            leaf = shipped / "test00006-60hz.json"
+            for fields, tag in ((released, "Optional"), ({}, "Experimental")):
+                leaf.write_text(json.dumps({**package, **fields}), encoding="utf-8")
+                run = self.next_ui_run("ready", events, post_build_ready=True,
+                                       wait_background=True,
+                                       env_extra={"NK_INSTALL_ROOT": str(source)})
+                self.assertEqual(self.enhancement_tags(run, "TEST00006")[-1:], [tag],
+                                 run["stdout"])
+
     def test_next_ui_smooth_motion_says_why_it_is_off_at_60_fps(self) -> None:
         """Contract 10.5 (#2085; #2074 delta review B1): a game launched with its 60 FPS game
         logic runs with smooth motion off, and its launch line says smooth=off. Its title page
@@ -5201,6 +5657,80 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIn("smooth motion", lines[-1], "smooth motion is among the parts on")
         self.assertNotIn("Smooth motion is off", lines[-1])
         self.assertEqual(page["smooth"], "Library (On)")
+
+    EVERY_PART_ON = {"default": "enhanced", "af": "16", "text": "on", "readout": "on",
+                     "notice": "on", "wide": "fill", "smooth": "x2", "sas": "sinc", "tess": "2",
+                     "cull": "on", "upscale": "fsr1"}
+    EVERY_PART_WORDS = ("16x texture filtering", "crisp system text", "speed readout",
+                        "game badge", "widescreen", "clean pitched sound", "2x finer patches",
+                        "wider culling", "sharper enlarging")
+
+    def every_part_play_line(self, title: dict[str, str]) -> str:
+        """The title page's play line for the packaged TEST00006 with every Enhanced part on in
+        the library and `title` as its own play choice: the line player_ui_nk.c builds."""
+        settings = {"enhanced": dict(self.EVERY_PART_ON), "title_play": {"TEST00006": title}}
+        run = self.next_ui_run(
+            "ready", ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300"),
+            post_build_ready=True, wait_background=True, settings=settings,
+            enhancement_packages={"TEST00006": "display-smoke-v1"})
+        lines = re.findall(r"next_ui_title_play_line disc=TEST00006 line=(.+?)\r?$",
+                           str(run["stdout"]), re.M)
+        self.assertTrue(lines, run["stdout"])
+        return lines[-1]
+
+    def test_next_ui_play_line_names_every_part(self) -> None:
+        """The game page's play line with every part on names each one and ends whole: on main
+        the parts list (160 bytes) cut "sharper enlarging" to "sharper e", and the Ace line (256 bytes) was
+        cut mid-word, with no ellipsis for the page test to see."""
+        enhanced = self.every_part_play_line({"mode": "enhanced"})
+        self.assertTrue(enhanced.startswith("Enhanced for this game: "), enhanced)
+        self.assertTrue(enhanced.endswith("smooth motion, clean pitched sound, 2x finer patches, "
+                                          "wider culling, sharper enlarging."), enhanced)
+        for words in self.EVERY_PART_WORDS:
+            self.assertIn(words, enhanced)
+        ace = self.every_part_play_line({"mode": "ace"})
+        self.assertTrue(ace.startswith("Ace for this game: 60 FPS game logic, "), ace)
+        self.assertTrue(ace.endswith("Smooth motion is off while it runs at 60 FPS: this build "
+                                     "smooths only 30 FPS games."), ace)
+        for words in self.EVERY_PART_WORDS:
+            self.assertIn(words, ace)
+
+    def culling_play_line(self, steps: int, culling: dict[str, object]) -> str:
+        """The packaged TEST00006's play line with every part on in the library (Wider culling
+        among them) and `culling` as its culling package, its own play mode stepped `steps`
+        times from Authentic: once to Enhanced, which reads its packages (the "ready" fixture
+        reads none at start, so Ace is offered only after that), twice to Ace."""
+        settings = {"enhanced": dict(self.EVERY_PART_ON),
+                    "title_play": {"TEST00006": {"mode": "authentic"}}}
+        run = self.next_ui_run(
+            "ready", ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", *self.DOWN_TO_PLAY_MODE,
+                      *(("KEY_RETURN", "WAIT_MS=200") * steps)),
+            post_build_ready=True, wait_background=True, settings=settings,
+            enhancement_packages={"TEST00006": "display-smoke-v1"},
+            culling_packages={"TEST00006": culling})
+        lines = re.findall(r"next_ui_title_play_line disc=TEST00006 line=(.+?)\r?$",
+                           str(run["stdout"]), re.M)
+        self.assertTrue(lines, run["stdout"])
+        return lines[-1]
+
+    def test_next_ui_play_line_names_an_unusable_culling_package(self) -> None:
+        """Contract 11.3.6 (#2302): with Wider culling on in an Ace launch, a culling package the
+        player cannot use leaves the title's other build in place, and the title page's play
+        line says why by name instead of dropping it silently. A usable package, or a title on
+        Enhanced, adds nothing to the line."""
+        other_game = {"id": "fixture-cull", "target_title_id": "other-title",
+                      "category": "guest_memory_code_hook"}
+        ace = self.culling_play_line(2, other_game)   # Authentic -> Enhanced -> Ace
+        self.assertTrue(ace.startswith("Ace for this game: "), ace)
+        self.assertTrue(ace.endswith(" Wider culling does nothing in this game. Its culling "
+                                     "package is for another game."), ace)
+        usable = self.culling_play_line(2, {**other_game,
+                                            "target_title_id": "display-smoke-v1"})
+        self.assertTrue(usable.startswith("Ace for this game: "), usable)
+        self.assertNotIn("Wider culling does nothing", usable)
+        enhanced = self.culling_play_line(1, other_game)   # Authentic -> Enhanced
+        self.assertTrue(enhanced.startswith("Enhanced for this game: "), enhanced)
+        self.assertNotIn("Wider culling does nothing", enhanced)
 
     def test_compatibility_records_carry_a_player_tier(self) -> None:
         """#1297: every title record maps to a player tier; Hot Shots Tennis is Playable.

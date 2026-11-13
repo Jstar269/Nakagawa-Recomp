@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
+/* realpath() is XSI rather than base POSIX: -std=c99 on glibc declares it only with this. */
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
 /* setenv/unsetenv are POSIX: without this, -std=c99 on glibc leaves them undeclared. */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -132,6 +136,21 @@ static void test_binding_words_fit(void) {
             input_settings_format_binding(&state, INPUT_CONTROL_BTN_SELECT, words, sizeof(words));
             check_binding_words("a host axis", words);
         }
+    }
+    /* A mouse button (#1791) alone, and beside Space, either way round. Like two long key
+     * names, a click beside a long key ("Middle Click / Page Down") may end in "...". */
+    for (int key = NK_HOST_KEY_MOUSE_FIRST; key < NK_HOST_KEY_LIMIT; key++) {
+        state.profile.psp_keys[NK_PSP_BTN_CROSS].primary = key;
+        state.profile.psp_keys[NK_PSP_BTN_CROSS].secondary = NK_HOST_KEY_NONE;
+        input_settings_format_key_binding(&state, INPUT_CONTROL_BTN_CROSS, words, sizeof(words));
+        check_binding_words("a mouse button", words);
+        state.profile.psp_keys[NK_PSP_BTN_CROSS].secondary = nk_host_key_from_name("space");
+        input_settings_format_key_binding(&state, INPUT_CONTROL_BTN_CROSS, words, sizeof(words));
+        check_binding_words("a mouse button and a key", words);
+        state.profile.psp_keys[NK_PSP_BTN_CROSS].primary = nk_host_key_from_name("space");
+        state.profile.psp_keys[NK_PSP_BTN_CROSS].secondary = key;
+        input_settings_format_key_binding(&state, INPUT_CONTROL_BTN_CROSS, words, sizeof(words));
+        check_binding_words("a key and a mouse button", words);
     }
     printf("[INPUT_SETTINGS_TEST] Subtest 1b PASSED!\n");
 }
@@ -817,6 +836,11 @@ static void test_per_title_scope_and_atomic_save(void) {
      * not a silently global launch. Point the per-user config location at a
      * regular file so creating the profile directory cannot succeed. */
     {
+#if defined(__APPLE__)
+#define NK_TEST_USER_ROOT_ENV "HOME"
+#else
+#define NK_TEST_USER_ROOT_ENV "XDG_DATA_HOME"
+#endif
         const char *blocker_file = SR_SELFTEST_BUILD_ROOT "/test_config_blocker";
         FILE *bf = fopen(blocker_file, "wb");
         assert(bf != NULL);
@@ -829,12 +853,21 @@ static void test_per_title_scope_and_atomic_save(void) {
 #elif defined(__ANDROID__)
         const char *config_root_env = "NK_ANDROID_DATA_DIR";
 #else
-        const char *config_root_env = "XDG_CONFIG_HOME";
+        /* Every other POSIX host keeps config under the unified root (#324): the data
+           base (XDG_DATA_HOME on Linux, HOME on macOS) is what a regular file blocks. */
+        const char *config_root_env = NK_TEST_USER_ROOT_ENV;
 #endif
         const char *saved = getenv(config_root_env);
         char saved_copy[1024];
         if (saved) snprintf(saved_copy, sizeof(saved_copy), "%s", saved);
+#if defined(_WIN32) || defined(_WIN64) || defined(__ANDROID__)
         test_setenv(config_root_env, blocker_file);
+#else
+        /* An absolute path: a relative XDG value is ignored, as the XDG spec says (#324). */
+        static char blocker_absolute[4096];
+        assert(realpath(blocker_file, blocker_absolute) != NULL);
+        test_setenv(config_root_env, blocker_absolute);
+#endif
         char blocked_path[NK_MAX_PATH];
         blocked_path[0] = 'x';
         assert(input_settings_write_disc_profile(&after_failed, "UCUS98701", blocked_path,
@@ -1313,7 +1346,10 @@ static void test_binding_glyphs(void) {
     static const struct { const char *name; const char *legend; } legends[] = {
         {"rshift", "SHIFT"}, {"lctrl", "CTRL"}, {"ralt", "ALT"}, {"backspace", "BKSP"},
         {"pagedown", "PG DN"}, {"delete", "DEL"}, {"kp_enter", "ENTER"}, {"kp_5", "5"},
-        {"kp_divide", "/"}, {"space", "SPACE"}, {"semicolon", ";"}, {"7", "7"}
+        {"kp_divide", "/"}, {"space", "SPACE"}, {"semicolon", ";"}, {"7", "7"},
+        /* The mouse buttons (#1791). */
+        {"mouse:left", "L CLICK"}, {"mouse:middle", "M CLICK"}, {"mouse:right", "R CLICK"},
+        {"mouse:x1", "MOUSE 4"}, {"mouse:x2", "MOUSE 5"}
     };
     for (size_t i = 0; i < sizeof(legends) / sizeof(legends[0]); i++) {
         state.profile.psp_keys[NK_PSP_BTN_HOME].primary = nk_host_key_from_name(legends[i].name);
@@ -1330,6 +1366,20 @@ static void test_binding_glyphs(void) {
     assert(input_settings_assign_key(&state, INPUT_CONTROL_BTN_START, nk_host_key_from_name("c")));
     input_settings_key_glyph(&state, INPUT_CONTROL_BTN_START, &glyph);
     expect_glyph(&glyph, INPUT_GLYPH_KEY, "C", "Start after rebinding to C");
+    /* A mouse button is a key of the mapping (#1791): it binds, reads and moves like one. */
+    {
+        char words[64];
+        assert(input_settings_assign_key(&state, INPUT_CONTROL_BTN_CROSS, NK_HOST_KEY_MOUSE_LEFT));
+        input_settings_format_key_binding(&state, INPUT_CONTROL_BTN_CROSS, words, sizeof(words));
+        assert(strcmp(words, "Left Click") == 0);
+        input_settings_key_glyph(&state, INPUT_CONTROL_BTN_CROSS, &glyph);
+        expect_glyph(&glyph, INPUT_GLYPH_KEY, "L CLICK", "Cross after binding the left button");
+        assert(input_settings_assign_key(&state, INPUT_CONTROL_BTN_CIRCLE, NK_HOST_KEY_MOUSE_LEFT));
+        assert(state.profile.psp_keys[NK_PSP_BTN_CIRCLE].primary == NK_HOST_KEY_MOUSE_LEFT);
+        assert(state.profile.psp_keys[NK_PSP_BTN_CROSS].primary != NK_HOST_KEY_MOUSE_LEFT &&
+               state.profile.psp_keys[NK_PSP_BTN_CROSS].secondary != NK_HOST_KEY_MOUSE_LEFT);
+        assert(nk_input_profile_validate(&state.profile, NULL, 0) == NK_OK);
+    }
 
     /* A pad input with no glyph of its own is named the way the pad's family names it. */
     static const struct { NkBindingSource source; const char *legends[INPUT_PAD_NAMES_COUNT]; } pills[] = {

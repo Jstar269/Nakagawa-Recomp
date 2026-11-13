@@ -23,12 +23,12 @@ Classes are listed strongest first. A path takes the first class whose source na
 
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
-| `hardware-measured` | 64 | 24 |
-| `ppsspp-derived` | 125 | 89 |
+| `hardware-measured` | 64 | 73 |
+| `ppsspp-derived` | 126 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 356 | 229 |
-| `unverified` | 162 | 22 |
-| total | 707 | 364 |
+| `synthetic` | 375 | 183 |
+| `unverified` | 146 | 22 |
+| total | 711 | 366 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
 issue #326 boundary (`unsupported-encoding` and `supported-opcode-form-unmodeled`). No path executes
@@ -45,7 +45,7 @@ them, so they carry no class; `python tools/vfpu_coverage_report.py` lists them.
   counted, because it would give every path the same class.
 - Hardware runs described only in `tools/hle_registry_meta.py` notes count only when
   `tools/psp_oracle/manifest.json` links them; the rows marked `note` below carry such a note.
-- Measured VFPU oracle rows that no census form cites yet: `PSP-VFPU-BASICARITH-001`, `PSP-VFPU-CCCMOV-001`, `PSP-VFPU-CONVERT-001`, `PSP-VFPU-QUADWB-001`, `PSP-VFPU-UNMODELED-001`, `PSP-VFPU-VUS2I-001`. Their forms keep the class
+- Measured VFPU oracle rows that no census form cites yet: `PSP-VFPU-CONSTANTS-001`, `PSP-VFPU-MFVMTV-001`, `PSP-VFPU-PREFIX-001`, `PSP-VFPU-RESERVED-001`, `PSP-VFPU-ROUNDSEP-001`, `PSP-VFPU-UNMODELED-001`, `PSP-VFPU-WIDEROPS-001`. Their forms keep the class
   their census row gives until the census links them.
 
 At run time `sr_syscall` logs one line the first time each `unverified` NID with a handler is
@@ -94,11 +94,11 @@ a title that translates none has generated code unchanged.
 | `0x07f58c24` | `__sceSasGetAllEnvelopeHeights` | audio | `synthetic` | HLE selftest dispatch |
 | `0x0840e808` | `sceMp3ResetPlayPositionByFrame` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; sceMp3 block: derived-translated from PPSSPP at a pinned revision |
 | `0x08d98894` | `sceNpDrmEdataSetupKey` | npdrm | `unverified` | no recorded evidence |
-| `0x08fff7a0` | `sceNetAdhocctlScan` | network | `unverified` | no recorded evidence |
+| `0x08fff7a0` | `sceNetAdhocctlScan` | network | `synthetic` | HLE selftest dispatch |
 | `0x090ccb3f` | `sceKernelPowerTick` | power | `synthetic` | HLE selftest dispatch |
 | `0x092968f4` | `sceKernelCpuSuspendIntr` | kernel_interrupt | `hardware-measured` | PSP oracle PSP-DISPLAY-001 |
 | `0x099ef33c` | `sceFontFindOptimumFont` | font | `synthetic` | HLE selftest dispatch |
-| `0x0ad043ed` | `sceNetAdhocctlConnect` | network | `unverified` | no recorded evidence |
+| `0x0ad043ed` | `sceNetAdhocctlConnect` | network | `synthetic` | HLE selftest dispatch |
 | `0x0afd0d8b` | `scePowerIsBatteryExist` | power | `synthetic` | HLE selftest dispatch; note |
 | `0x0b2228e9` | `sceNetAdhocGameModeDeleteReplica` | network | `unverified` | no recorded evidence |
 | `0x0b588501` | `sceCtrlReadLatch` | input | `hardware-measured` | PSP oracle PSP-HLE-CTRL-LATCH-001 |
@@ -161,14 +161,14 @@ a title that translates none has generated code unchanged.
 | `0x20628e6f` | `sceUmdGetErrorStat` | umd | `synthetic` | HLE selftest dispatch |
 | `0x2085d15d` | `scePowerGetBatteryLifePercent` | power | `synthetic` | HLE selftest dispatch; note |
 | `0x208db1bd` | `sceHprmIsRemoteExist` | input | `hardware-measured` | PSP oracle PSP-HLE-HPRM-001 |
-| `0x20b317a0` | `sceNetAdhocctlAddHandler` | network | `unverified` | no recorded evidence |
+| `0x20b317a0` | `sceNetAdhocctlAddHandler` | network | `synthetic` | HLE selftest dispatch |
 | `0x20fff560` | `sceKernelCreateVTimer` | kernel_time | `hardware-measured` | PSP oracle PSP-HLE-VTIMER-001, PSP-HLE-VTIMER-002, PSP-HLE-VTIMER-003, PSP-HLE-TIMER-ORDER-001 |
 | `0x210eab3a` | `sceDisplayGetAccumulatedHcount` | display | `hardware-measured` | PSP oracle PSP-DISPLAY-001 |
 | `0x211a057c` | `sceMpegAvcQueryYCbCrSize` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x219c58f1` | `sceHprmIsMicrophoneExist` | input | `hardware-measured` | PSP oracle PSP-HLE-HPRM-001 |
 | `0x21ff80e4` | `sceMpegQueryStreamOffset` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x2255551e` | `sceHttpGetNetworkPspError` | network | `unverified` | no recorded evidence |
-| `0x231fc6b7` | `_sceAtracGetContextAddress` | audio_codec | `unverified` | no recorded evidence |
+| `0x231fc6b7` | `_sceAtracGetContextAddress` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0x235d8787` | `scePsmfPlayerCreate` | mpeg | `synthetic` | HLE selftest dispatch |
 | `0x237dbd4f` | `sceKernelAllocPartitionMemory` | kernel_memory | `synthetic` | HLE selftest dispatch; note |
 | `0x23c31ffe` | `scePowerVolatileMemLock` | power | `synthetic` | HLE selftest dispatch |
@@ -177,6 +177,7 @@ a title that translates none has generated code unchanged.
 | `0x267a6dd2` | `__sceSasRevParam` | audio | `unverified` | no recorded evidence |
 | `0x26927d19` | `sceVideocodecGetVersion` | videocodec | `unverified` | no recorded evidence |
 | `0x26d25a5d` | `sceRtcTickAddMicroseconds` | rtc | `synthetic` | HLE selftest dispatch |
+| `0x26d7a24a` | `sceRtcTickAddHours` | rtc | `synthetic` | HLE selftest dispatch |
 | `0x278c0df5` | `sceKernelWaitThreadEnd` | kernel_thread | `synthetic` | conformance cells and HLE selftest dispatch; note |
 | `0x27c4594c` | `sceRtcGetTime_t` | rtc | `synthetic` | HLE selftest dispatch |
 | `0x27cc57f0` | `sceKernelLibcTime` | kernel_time | `synthetic` | HLE selftest dispatch |
@@ -223,7 +224,7 @@ a title that translates none has generated code unchanged.
 | `0x33d4ab37` | `__sceSasRevType` | audio | `synthetic` | HLE selftest dispatch |
 | `0x340b7686` | `sceUmdGetDiscInfo` | umd | `ppsspp-derived` | handler comment names PPSSPP; note |
 | `0x342061e5` | `sceKernelSetCompiledSdkVersion370` | kernel_memory | `synthetic` | HLE selftest dispatch |
-| `0x34401d65` | `sceNetAdhocctlDisconnect` | network | `unverified` | no recorded evidence |
+| `0x34401d65` | `sceNetAdhocctlDisconnect` | network | `synthetic` | HLE selftest dispatch |
 | `0x34885e0d` | `sceRtcConvertUtcToLocalTime` | rtc | `synthetic` | HLE selftest dispatch |
 | `0x349b864d` | `sceKernelCancelMsgPipe` | kernel_sync | `ppsspp-derived` | handler comment names PPSSPP |
 | `0x349d6d6c` | `sceKernelCheckCallback` | kernel_thread | `synthetic` | HLE selftest dispatch |
@@ -237,7 +238,7 @@ a title that translates none has generated code unchanged.
 | `0x358ca1bb` | `sceKernelSetCompiledSdkVersion606` | kernel_memory | `synthetic` | registry evidence `tools/test_sdkver_c.py` |
 | `0x35dbd746` | `sceIoWaitAsyncCB` | io | `synthetic` | conformance cells |
 | `0x362a956b` | `LoadExecForUser_362A956B` | kernel_module | `unverified` | no recorded evidence |
-| `0x362cbe8f` | `sceNetAdhocctlGetAdhocId` | network | `unverified` | no recorded evidence |
+| `0x362cbe8f` | `sceNetAdhocctlGetAdhocId` | network | `synthetic` | HLE selftest dispatch |
 | `0x369ed59d` | `sceKernelGetSystemTimeLow` | kernel_time | `synthetic` | HLE selftest dispatch |
 | `0x36aa6e91` | `sceImposeSetLanguageMode` | utility | `synthetic` | HLE selftest dispatch |
 | `0x36cdfade` | `sceDisplayWaitVblank` | display | `synthetic` | conformance cells and HLE selftest dispatch |
@@ -248,7 +249,7 @@ a title that translates none has generated code unchanged.
 | `0x383f7bcc` | `sceKernelTerminateDeleteThread` | kernel_thread | `synthetic` | HLE selftest dispatch |
 | `0x38553111` | `sceAudioSRCChReserve` | audio | `hardware-measured` | PSP oracle PSP-HLE-AUDIO-SRC-001 |
 | `0x39461b4d` | `sceRegFlushRegistry` | system | `synthetic` | HLE selftest dispatch |
-| `0x39810265` | `sceKernelReferVplStatus` | kernel_memory | `synthetic` | HLE selftest dispatch |
+| `0x39810265` | `sceKernelReferVplStatus` | kernel_memory | `synthetic` | HLE selftest dispatch; note |
 | `0x39af39a6` | `sceNetInit` | network | `ppsspp-derived` | registry notes name PPSSPP |
 | `0x3a20a200` | `sceAudiocodecGetEDRAM` | videocodec | `unverified` | no recorded evidence |
 | `0x3a622550` | `sceCtrlPeekBufferPositive` | input | `synthetic` | HLE selftest dispatch; note |
@@ -362,7 +363,7 @@ a title that translates none has generated code unchanged.
 | `0x6332aa39` | `sceUtilityNetconfGetStatus` | utility | `synthetic` | HLE selftest dispatch |
 | `0x63632449` | `sceIoIoctl` | io | `synthetic` | HLE selftest dispatch |
 | `0x63f2889c` | `sceAudioOutput2ChangeLength` | audio | `unverified` | no recorded evidence |
-| `0x6402490b` | `sceNetAdhocctlDelHandler` | network | `unverified` | no recorded evidence |
+| `0x6402490b` | `sceNetAdhocctlDelHandler` | network | `synthetic` | HLE selftest dispatch |
 | `0x644395e2` | `sceKernelGetModuleIdList` | kernel_module | `unverified` | no recorded evidence |
 | `0x644e5607` | `sceAtracResetPlayPosition` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0x647cef33` | `sceAudioOutput2GetRestSample` | audio | `synthetic` | HLE selftest dispatch; note |
@@ -410,7 +411,7 @@ a title that translates none has generated code unchanged.
 | `0x74b21701` | `sceFontPixelToPointH` | font | `unverified` | no recorded evidence |
 | `0x75156e8f` | `sceKernelResumeThread` | kernel_thread | `synthetic` | HLE selftest dispatch |
 | `0x7591c7db` | `sceKernelSetCompiledSdkVersion` | kernel_memory | `synthetic` | registry evidence `tools/test_sdkver_c.py` |
-| `0x75ecd386` | `sceNetAdhocctlGetState` | network | `unverified` | no recorded evidence |
+| `0x75ecd386` | `sceNetAdhocctlGetState` | network | `synthetic` | HLE selftest dispatch |
 | `0x769bebb6` | `sceMpegRingbufferQueryPackNum` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x76f01aca` | `__sceSasSetKeyOn` | audio | `synthetic` | HLE selftest dispatch |
 | `0x773dd3a3` | `sceDisplayGetCurrentHcount` | display | `ppsspp-derived` | handler comment names PPSSPP |
@@ -441,11 +442,11 @@ a title that translates none has generated code unchanged.
 | `0x810c4bc3` | `sceIoClose` | io | `hardware-measured` | PSP oracle PSP-IO-001 |
 | `0x812346e4` | `sceKernelClearEventFlag` | kernel_sync | `ppsspp-derived` | handler comment names PPSSPP; note |
 | `0x8125221d` | `sceKernelCreateMbx` | kernel_sync | `hardware-measured` | PSP oracle PSP-KERNEL-001 |
-| `0x81aee1be` | `sceNetAdhocctlGetScanInfo` | network | `unverified` | no recorded evidence |
+| `0x81aee1be` | `sceNetAdhocctlGetScanInfo` | network | `synthetic` | HLE selftest dispatch |
 | `0x8218b4dd` | `sceKernelReferGlobalProfiler` | kernel_thread | `unverified` | generic success handler; performs none of the API contract |
 | `0x82826f70` | `sceKernelSleepThreadCB` | kernel_thread | `synthetic` | conformance cells and HLE selftest dispatch |
 | `0x82bc5777` | `sceKernelGetSystemTimeWide` | kernel_time | `hardware-measured` | PSP oracle PSP-HLE-VTIMER-002 |
-| `0x83bf7afd` | `sceAtracSetSecondBuffer` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
+| `0x83bf7afd` | `sceAtracSetSecondBuffer` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0x83e85ea0` | `sceAtracGetSecondBufferInfo` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0x840e8133` | `sceKernelWaitThreadEndCB` | kernel_thread | `synthetic` | conformance cells and HLE selftest dispatch |
 | `0x843fbf43` | `scePowerSetCpuClockFrequency` | power | `synthetic` | HLE selftest dispatch; note |
@@ -473,7 +474,7 @@ a title that translates none has generated code unchanged.
 | `0x8c1e027d` | `sceMpegGetPcmAu` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x8c943191` | `sceImposeGetBatteryIconStatus` | utility | `unverified` | no recorded evidence |
 | `0x8daff657` | `sceKernelCreateTlspl` | kernel_memory | `synthetic` | HLE selftest dispatch |
-| `0x8db83fdc` | `sceNetAdhocctlGetPeerInfo` | network | `unverified` | no recorded evidence |
+| `0x8db83fdc` | `sceNetAdhocctlGetPeerInfo` | network | `synthetic` | HLE selftest dispatch |
 | `0x8eb9ec49` | `sceDisplayWaitVblankCB` | display | `synthetic` | HLE selftest dispatch |
 | `0x8ef08fce` | `sceUmdWaitDriveStat` | umd | `synthetic` | conformance cells and HLE selftest dispatch |
 | `0x8efb3fa2` | `scePowerGetBatteryLifeTime` | power | `synthetic` | HLE selftest dispatch; note |
@@ -515,7 +516,7 @@ a title that translates none has generated code unchanged.
 | `0x9c6eaad7` | `sceDisplayGetVcount` | display | `synthetic` | HLE selftest dispatch |
 | `0x9cd7de03` | `sceAtracSetMOutHalfwayBufferAndGetID` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0x9d3f790c` | `sceAudiocodecCheckNeedMem` | videocodec | `unverified` | no recorded evidence |
-| `0x9d689e13` | `sceNetAdhocctlTerm` | network | `unverified` | no recorded evidence |
+| `0x9d689e13` | `sceNetAdhocctlTerm` | network | `synthetic` | HLE selftest dispatch |
 | `0x9d9a5ba1` | `sceKernelGetBlockHeadAddr` | kernel_memory | `synthetic` | HLE selftest dispatch |
 | `0x9dcfb7ea` | `sceMpegChangeGetAuMode` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x9df81198` | `sceNetAdhocPtpAccept` | network | `unverified` | no recorded evidence |
@@ -544,7 +545,7 @@ a title that translates none has generated code unchanged.
 | `0xa5da2406` | `sceUtilityGetSystemParamInt` | utility | `hardware-measured` | PSP oracle PSP-HLE-SYSPARAM-001 |
 | `0xa62c6f57` | `sceNetAdhocTerm` | network | `unverified` | no recorded evidence |
 | `0xa66b0120` | `sceKernelReferEventFlagStatus` | kernel_sync | `synthetic` | HLE selftest dispatch; note |
-| `0xa6bab2e9` | `sceKernelStdout` | kernel_utils | `unverified` | no recorded evidence |
+| `0xa6bab2e9` | `sceKernelStdout` | kernel_utils | `synthetic` | HLE selftest dispatch |
 | `0xa703fe0f` | `sceMp3GetInfoToAddStreamData` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; sceMp3 block: derived-translated from PPSSPP at a pinned revision |
 | `0xa7144800` | `sceCtrlSetIdleCancelThreshold` | input | `synthetic` | HLE selftest dispatch |
 | `0xa780cf7e` | `sceMpegMallocAvcEsBuf` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
@@ -642,6 +643,7 @@ a title that translates none has generated code unchanged.
 | `0xcd203292` | `sceKernelCancelEventFlag` | kernel_sync | `synthetic` | HLE selftest dispatch; note |
 | `0xceadeb47` | `sceKernelDelayThread` | kernel_thread | `synthetic` | conformance cells and HLE selftest dispatch; note |
 | `0xceb870b1` | `sceMpegFreeAvcEsBuf` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
+| `0xcf3a2ca8` | `sceRtcTickAddWeeks` | rtc | `synthetic` | HLE selftest dispatch |
 | `0xcf561893` | `sceRtcGetWin32FileTime` | rtc | `synthetic` | HLE selftest dispatch |
 | `0xcf8e084d` | `sceNetAdhocctlExitGameMode` | network | `unverified` | no recorded evidence |
 | `0xd021c0fb` | `sceMp3Decode` | audio_codec | `ppsspp-derived` | sceMp3 block: derived-translated from PPSSPP at a pinned revision |
@@ -684,7 +686,7 @@ a title that translates none has generated code unchanged.
 | `0xdc93cfef` | `sceGeGetCmd` | ge | `synthetic` | HLE selftest dispatch |
 | `0xdcc80c2f` | `sceFontGetCharInfo` | font | `synthetic` | HLE selftest dispatch |
 | `0xdea197d4` | `sceDisplayGetMode` | display | `synthetic` | HLE selftest dispatch |
-| `0xded9d28e` | `sceNetAdhocctlGetParameter` | network | `ppsspp-derived` | registry notes name PPSSPP |
+| `0xded9d28e` | `sceNetAdhocctlGetParameter` | network | `ppsspp-derived` | handler comment names PPSSPP; registry notes name PPSSPP |
 | `0xdf089680` | `scePsmfPlayerGetPsmfInfo` | mpeg | `ppsspp-derived` | handler comment names PPSSPP; registry notes name PPSSPP |
 | `0xdf52098f` | `sceKernelTryReceiveMsgPipe` | kernel_sync | `synthetic` | HLE selftest dispatch; note |
 | `0xdfa8baf8` | `scePowerUnregisterCallback` | power | `synthetic` | HLE selftest dispatch; note |
@@ -693,7 +695,7 @@ a title that translates none has generated code unchanged.
 | `0xe08bdac1` | `sceNetAdhocPtpListen` | network | `unverified` | no recorded evidence |
 | `0xe0d68148` | `sceGeListUpdateStallAddr` | ge | `synthetic` | HLE selftest dispatch |
 | `0xe1619d7c` | `sceKernelSysClock2USecWide` | kernel_time | `synthetic` | HLE selftest dispatch |
-| `0xe162cb14` | `sceNetAdhocctlGetPeerList` | network | `unverified` | no recorded evidence |
+| `0xe162cb14` | `sceNetAdhocctlGetPeerList` | network | `synthetic` | HLE selftest dispatch |
 | `0xe175ef66` | `__sceSasGetOutputmode` | audio | `synthetic` | HLE selftest dispatch |
 | `0xe1c93e47` | `sceRtcGetTime64_t` | rtc | `synthetic` | HLE selftest dispatch; note |
 | `0xe1cd9561` | `__sceSasSetVoicePCM` | audio | `synthetic` | HLE selftest dispatch |
@@ -701,13 +703,14 @@ a title that translates none has generated code unchanged.
 | `0xe1d621d7` | `sceNetAdhocInit` | network | `synthetic` | HLE selftest dispatch |
 | `0xe23e3a35` | `sceAtracGetNextDecodePosition` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0xe23eec33` | `sceIoWaitAsync` | io | `synthetic` | conformance cells and HLE selftest dispatch |
-| `0xe26f226e` | `sceNetAdhocctlInit` | network | `unverified` | no recorded evidence |
+| `0xe26f226e` | `sceNetAdhocctlInit` | network | `synthetic` | HLE selftest dispatch |
 | `0xe2d56b2d` | `sceAudioOutputPanned` | audio | `unverified` | no recorded evidence |
 | `0xe3eb004c` | `sceIoDread` | io | `synthetic` | HLE selftest dispatch |
 | `0xe3ee2c81` | `sceMp3LowLevelDecode` | audio_codec | `synthetic` | HLE selftest dispatch |
 | `0xe47e40e4` | `sceGeEdramGetAddr` | ge | `hardware-measured` | PSP oracle PSP-HLE-GE-EDRAM-001, PSP-VRAM-MIRROR-001 |
 | `0xe49bfe92` | `sceUtilityUnloadModule` | utility | `ppsspp-derived` | registry notes name PPSSPP |
 | `0xe51b4b7a` | `sceRtcTickAddDays` | rtc | `synthetic` | HLE selftest dispatch |
+| `0xe6605bca` | `sceRtcTickAddMinutes` | rtc | `synthetic` | HLE selftest dispatch |
 | `0xe7282cb6` | `sceKernelAllocateFplCB` | kernel_memory | `synthetic` | conformance cells and HLE selftest dispatch |
 | `0xe792cd94` | `scePsmfPlayerReleasePsmf` | mpeg | `synthetic` | HLE selftest dispatch |
 | `0xe7c27d1b` | `sceRtcGetCurrentClockLocalTime` | rtc | `synthetic` | HLE selftest dispatch |
@@ -717,6 +720,7 @@ a title that translates none has generated code unchanged.
 | `0xe88f759b` | `sceAtracGetInternalErrorInfo` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0xe95a012b` | `sceIoIoctlAsync` | io | `synthetic` | HLE selftest dispatch |
 | `0xe9b3061e` | `sceKernelSendMbx` | kernel_sync | `synthetic` | HLE selftest dispatch |
+| `0xe9d97901` | `sceAudioGetChannelRestLen` | audio | `synthetic` | HLE selftest dispatch; note |
 | `0xea382a27` | `scePowerGetPllClockFrequencyFloat` | power | `hardware-measured` | PSP oracle PSP-HLE-POWER-001, PSP-HLE-POWER-002 |
 | `0xea3c6108` | `sceNetAdhocMatchingCancelTarget` | network | `unverified` | no recorded evidence |
 | `0xea748e31` | `sceKernelChangeCurrentThreadAttr` | kernel_thread | `synthetic` | HLE selftest dispatch |
@@ -724,7 +728,7 @@ a title that translates none has generated code unchanged.
 | `0xeb092469` | `sceIoDclose` | io | `synthetic` | HLE selftest dispatch; note |
 | `0xebd177d6` | `scePowerSetClockFrequency350` | power | `ppsspp-derived` | handler comment names PPSSPP; registry notes name PPSSPP |
 | `0xebd5c3e6` | `sceKernelSetCompiledSdkVersion395` | kernel_memory | `synthetic` | registry evidence `tools/test_sdkver_c.py` |
-| `0xec0635c1` | `sceNetAdhocctlCreate` | network | `unverified` | no recorded evidence |
+| `0xec0635c1` | `sceNetAdhocctlCreate` | network | `synthetic` | HLE selftest dispatch |
 | `0xec0a693f` | `sceKernelAllocateVplCB` | kernel_memory | `synthetic` | HLE selftest dispatch |
 | `0xec19337d` | `sceNetAdhocMatchingAbortSendData` | network | `unverified` | no recorded evidence |
 | `0xeca32a99` | `sceAtracIsSecondBufferNeeded` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
@@ -751,7 +755,7 @@ a title that translates none has generated code unchanged.
 | `0xf64910f0` | `sceUtilityUnloadUsbModule` | utility | `unverified` | no recorded evidence |
 | `0xf6837a1a` | `sceAtracSetMOutData` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0xf77d77cb` | `sceKernelSetCompilerVersion` | kernel_memory | `synthetic` | registry evidence `tools/test_sdkver_c.py` |
-| `0xf78ba90a` | `sceKernelStderr` | kernel_utils | `unverified` | no recorded evidence |
+| `0xf78ba90a` | `sceKernelStderr` | kernel_utils | `synthetic` | HLE selftest dispatch |
 | `0xf79472d7` | `sceNetAdhocMatchingSendData` | network | `unverified` | no recorded evidence |
 | `0xf7d13214` | `sceNetAdhocDiscoverStop` | network | `unverified` | no recorded evidence |
 | `0xf7d8d092` | `sceUtilityUnloadAvModule` | utility | `synthetic` | HLE selftest dispatch |
@@ -800,7 +804,7 @@ a title that translates none has generated code unchanged.
 | `vfpu-12-48610000-d5555d8d9cc7` | `0x12` | `0x4861008e` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-12-48610000-df156e6ab245` | `0x12` | `0x48610000` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-12-48610000-e13759eba1f9` | `0x12` | `0x4861008c` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-12-48610000-e50d110557e0` | `0x12` | `0x48610083` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-12-48610000-e50d110557e0` | `0x12` | `0x48610083` | - | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-CCCMOV-001 |
 | `vfpu-12-48610000-eba194a6eeea` | `0x12` | `0x48610089` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-12-48610000-f757075bc6c6` | `0x12` | `0x4861008b` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-12-48e00000-aba4a5a65af3` | `0x12` | `0x48e0008f` | - | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep` |
@@ -817,63 +821,63 @@ a title that translates none has generated code unchanged.
 | `vfpu-12-48e10000-5966b7b139c2` | `0x12` | `0x48e1008a` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-12-48e10000-5f14a99ceaf2` | `0x12` | `0x48e10089` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-12-48e10000-66f9672e174c` | `0x12` | `0x48e10082` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-12-48e10000-770439b7f24b` | `0x12` | `0x48e10083` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-12-48e10000-770439b7f24b` | `0x12` | `0x48e10083` | - | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-CCCMOV-001 |
 | `vfpu-12-48e10000-90dfa8701ff6` | `0x12` | `0x48e10081` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-12-48e10000-9f81684a9020` | `0x12` | `0x48e10000` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-12-48e10000-ca103ace1a90` | `0x12` | `0x48e10080` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-12-48e10000-d585297d9fe8` | `0x12` | `0x48e10087` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-18-60000000-0cfa9a75d8be` | `0x18` | `0x60000088` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-18-60000000-f0e692b53dcb` | `0x18` | `0x60000000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-18-60000000-f0e692b53dcb` | `0x18` | `0x60000000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
 | `vfpu-18-60008000-34d6ca7e595c` | `0x18` | `0x60008008` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-18-60008000-b5c9b371eb65` | `0x18` | `0x60008088` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-18-60800000-d34f72a61eb2` | `0x18` | `0x60800000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-18-60008000-b5c9b371eb65` | `0x18` | `0x60008088` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
+| `vfpu-18-60800000-d34f72a61eb2` | `0x18` | `0x60800000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
 | `vfpu-18-60800000-f58796aae9ea` | `0x18` | `0x60800080` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-18-60808000-544f2bc0907b` | `0x18` | `0x60808088` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-18-60808000-544f2bc0907b` | `0x18` | `0x60808088` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
 | `vfpu-18-60808000-d8b16bd16650` | `0x18` | `0x60808008` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-18-63800000-4bf35e2af6e6` | `0x18` | `0x63800088` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-18-63800000-f37c025679d4` | `0x18` | `0x63800000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-18-63800000-f37c025679d4` | `0x18` | `0x63800000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
 | `vfpu-18-63808000-499be6aa48a0` | `0x18` | `0x63808008` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-18-63808000-5dbbd521d19e` | `0x18` | `0x63808081` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-19-64000000-08b6957f3e98` | `0x19` | `0x64000088` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-19-64000000-3f34375f3ca5` | `0x19` | `0x64000000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-19-64008000-3e257e869ced` | `0x19` | `0x64008088` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-19-64000000-3f34375f3ca5` | `0x19` | `0x64000000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
+| `vfpu-19-64008000-3e257e869ced` | `0x19` | `0x64008088` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
 | `vfpu-19-64008000-67cfc07f3b90` | `0x19` | `0x64008008` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-19-64800000-0da2a221599c` | `0x19` | `0x64800080` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
+| `vfpu-19-64800000-0da2a221599c` | `0x19` | `0x64800080` | 2 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-WIDEDOT-001 |
 | `vfpu-19-64800000-e312edbc6fb8` | `0x19` | `0x64800000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-19-64808000-6bda61775b9a` | `0x19` | `0x64808008` | 3 | `aot-direct` | `hardware-measured` | census tier H: issue-40-group-a, issue-40-group-b |
-| `vfpu-19-64808000-b67a1ab661ca` | `0x19` | `0x64808088` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
+| `vfpu-19-64808000-b67a1ab661ca` | `0x19` | `0x64808088` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-WIDEDOT-001 |
 | `vfpu-19-65000000-7777348e5b92` | `0x19` | `0x65000088` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-19-65000000-cfacbeef7841` | `0x19` | `0x65000000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-19-65008000-45ad8b99a713` | `0x19` | `0x65008088` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-19-65008000-45ad8b99a713` | `0x19` | `0x65008088` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
 | `vfpu-19-65008000-6ec5653d8a7f` | `0x19` | `0x65008008` | 3 | `aot-direct` | `hardware-measured` | census tier H: issue-40-group-b |
 | `vfpu-19-66000000-16fd60090ea0` | `0x19` | `0x66000088` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-19-66000000-1e6d66f9fff4` | `0x19` | `0x66000000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-19-66008000-0d636b33954a` | `0x19` | `0x66008008` | 3 | `aot-direct` | `hardware-measured` | census tier H: issue-40-group-a, issue-40-group-b |
-| `vfpu-19-66008000-438352e68b6e` | `0x19` | `0x66008088` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
+| `vfpu-19-66008000-438352e68b6e` | `0x19` | `0x66008088` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-WIDEDOT-001 |
 | `vfpu-19-66808000-0c9d9ba97632` | `0x19` | `0x66808001` | 3 | `aot-direct` | `hardware-measured` | census tier H: issue-40-group-b |
 | `vfpu-1b-6c000000-74fc41be7f4a` | `0x1b` | `0x6c000000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-1b-6c018100-0566dd17110c` | `0x1b` | `0x6c01810f` | 3 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
-| `vfpu-1b-6c018100-d625eb3b8732` | `0x1b` | `0x6c01818f` | 4 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
+| `vfpu-1b-6c018100-d625eb3b8732` | `0x1b` | `0x6c01818f` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-CCCMOV-001 |
 | `vfpu-1b-6c020000-c1c31f03cddc` | `0x1b` | `0x6c020084` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-1b-6c028000-9fe8fdfc311c` | `0x1b` | `0x6c028004` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-1b-6c028000-baa982ad0853` | `0x1b` | `0x6c028084` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-1b-6c028000-baa982ad0853` | `0x1b` | `0x6c028084` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-CCCMOV-001 |
 | `vfpu-1b-6c030100-3e0ec260cd57` | `0x1b` | `0x6c030105` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-1b-6c030100-555feec3c123` | `0x1b` | `0x6c030185` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-1b-6c038100-508f36c7d28f` | `0x1b` | `0x6c038105` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-1b-6c038100-9adb419e739a` | `0x1b` | `0x6c038185` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-1b-6c038100-9adb419e739a` | `0x1b` | `0x6c038185` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-CCCMOV-001 |
 | `vfpu-1b-6c050100-30a73af1a998` | `0x1b` | `0x6c050101` | 1 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
 | `vfpu-1b-6c050100-e081eed350e5` | `0x1b` | `0x6c05010f` | 1 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
-| `vfpu-1b-6c058100-9421d0a0d133` | `0x1b` | `0x6c058181` | 4 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
+| `vfpu-1b-6c058100-9421d0a0d133` | `0x1b` | `0x6c058181` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-CCCMOV-001 |
 | `vfpu-1b-6c080000-9c4625988fd2` | `0x1b` | `0x6c0800ff` | 2 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
 | `vfpu-1b-6c0a0800-2900d600151e` | `0x1b` | `0x6c0a080c` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-1b-6c0a0800-a2c672edeed6` | `0x1b` | `0x6c0a088c` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-1b-6c0a8800-11462c644619` | `0x1b` | `0x6c0a888c` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-1b-6c0a8800-11462c644619` | `0x1b` | `0x6c0a888c` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-CCCMOV-001 |
 | `vfpu-1b-6c0a8800-2a5d12377634` | `0x1b` | `0x6c0a880c` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-1b-6c170100-5510fc3f2854` | `0x1b` | `0x6c170181` | 2 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
 | `vfpu-1b-6c3f8100-67cf43c5b272` | `0x1b` | `0x6c3f8101` | 3 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
-| `vfpu-1b-6d000000-ed7fc8ff41af` | `0x1b` | `0x6d000000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-1b-6d000000-ed7fc8ff41af` | `0x1b` | `0x6d000000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
 | `vfpu-1b-6d018000-2bd4bdf3daa1` | `0x1b` | `0x6d01807f` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-1b-6d018100-0d1e038ce247` | `0x1b` | `0x6d018180` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-1b-6d018100-0d1e038ce247` | `0x1b` | `0x6d018180` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
 | `vfpu-1b-6d020000-4a3ed2402858` | `0x1b` | `0x6d020084` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-1b-6e800000-5892d48f0b5a` | `0x1b` | `0x6e800000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-CMP-001 |
 | `vfpu-1b-6e808000-60c44851743e` | `0x1b` | `0x6e808001` | 3 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
@@ -899,21 +903,21 @@ a title that translates none has generated code unchanged.
 | `vfpu-32-c8250000-237b2992f72e` | `0x32` | `0xc825000f` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
 | `vfpu-32-c8258000-1c3c462e8d50` | `0x32` | `0xc8258081` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
 | `vfpu-32-c8260000-266eef066eaf` | `0x32` | `0xc8260001` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
-| `vfpu-34-d0000000-0d11775c2fde` | `0x34` | `0xd0000000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0000000-94b906e3c033` | `0x34` | `0xd0000084` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0008000-4d607a362c28` | `0x34` | `0xd0008084` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-34-d0000000-0d11775c2fde` | `0x34` | `0xd0000000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
+| `vfpu-34-d0000000-94b906e3c033` | `0x34` | `0xd0000084` | 2 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
+| `vfpu-34-d0008000-4d607a362c28` | `0x34` | `0xd0008084` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
 | `vfpu-34-d0008000-62bb79c43fa8` | `0x34` | `0xd0008004` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0010000-b971a5528982` | `0x34` | `0xd0010084` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0010000-d86d0cd5b2fc` | `0x34` | `0xd0010000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-34-d0010000-b971a5528982` | `0x34` | `0xd0010084` | 2 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
+| `vfpu-34-d0010000-d86d0cd5b2fc` | `0x34` | `0xd0010000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
 | `vfpu-34-d0018000-3f3edf2482ce` | `0x34` | `0xd0018004` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0018000-c4ecd4ba8f0b` | `0x34` | `0xd0018084` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0020000-4821ecf1e2d6` | `0x34` | `0xd0020084` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0020000-ab0ff5b761bb` | `0x34` | `0xd0020000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0028000-256d0e3657e8` | `0x34` | `0xd0028084` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-34-d0018000-c4ecd4ba8f0b` | `0x34` | `0xd0018084` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
+| `vfpu-34-d0020000-4821ecf1e2d6` | `0x34` | `0xd0020084` | 2 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
+| `vfpu-34-d0020000-ab0ff5b761bb` | `0x34` | `0xd0020000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
+| `vfpu-34-d0028000-256d0e3657e8` | `0x34` | `0xd0028084` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
 | `vfpu-34-d0028000-d21363515da0` | `0x34` | `0xd0028004` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0030000-a7ca06293e38` | `0x34` | `0xd0030000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0030000-fbe568a7e3d7` | `0x34` | `0xd0030084` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0038000-7fe09cd8240e` | `0x34` | `0xd0038084` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-34-d0030000-a7ca06293e38` | `0x34` | `0xd0030000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
+| `vfpu-34-d0030000-fbe568a7e3d7` | `0x34` | `0xd0030084` | 2 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
+| `vfpu-34-d0038000-7fe09cd8240e` | `0x34` | `0xd0038084` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
 | `vfpu-34-d0038000-8f018b9a6422` | `0x34` | `0xd0038004` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-34-d0040000-0be3552d4b88` | `0x34` | `0xd0040000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-34-d0040000-0ea342f0dc67` | `0x34` | `0xd0040084` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
@@ -923,10 +927,10 @@ a title that translates none has generated code unchanged.
 | `vfpu-34-d0050000-af00e1d2232f` | `0x34` | `0xd0050084` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-34-d0058000-6f7a7995a5b8` | `0x34` | `0xd0058004` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-34-d0058000-8a0e31df1185` | `0x34` | `0xd0058084` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0060000-632ff28fb776` | `0x34` | `0xd0060084` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0060000-db745a74ba51` | `0x34` | `0xd0060000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-34-d0060000-632ff28fb776` | `0x34` | `0xd0060084` | 2 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
+| `vfpu-34-d0060000-db745a74ba51` | `0x34` | `0xd0060000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
 | `vfpu-34-d0068000-5791705e7685` | `0x34` | `0xd0068004` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d0068000-c82dcb4f7a31` | `0x34` | `0xd0068084` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-34-d0068000-c82dcb4f7a31` | `0x34` | `0xd0068084` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-BASICARITH-001 |
 | `vfpu-34-d0100000-57f920b3947f` | `0x34` | `0xd0100084` | 2 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_rcp` |
 | `vfpu-34-d0100000-6868bfad7d0b` | `0x34` | `0xd0100000` | 1 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_rcp` |
 | `vfpu-34-d0108000-7156d63bfade` | `0x34` | `0xd0108080` | 4 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_rcp` |
@@ -1000,9 +1004,9 @@ a title that translates none has generated code unchanged.
 | `vfpu-34-d0330000-812afb3b7a6b` | `0x34` | `0xd0330000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-FORMS-001 |
 | `vfpu-34-d0380000-a8e1644c3022` | `0x34` | `0xd0380000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-FORMS-001 |
 | `vfpu-34-d0390000-01881cbef1ef` | `0x34` | `0xd0390000` | 1 | `aot-routes-to-sr-vfpu-interp` | `hardware-measured` | selftest pinned to PSP-VFPU-FORMS2-001 |
-| `vfpu-34-d03a0000-d9c2f025e1c0` | `0x34` | `0xd03a0000` | 1 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d03b0000-5bf1c1e7f497` | `0x34` | `0xd03b0000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d03b0000-695999f072c8` | `0x34` | `0xd03b0084` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-34-d03a0000-d9c2f025e1c0` | `0x34` | `0xd03a0000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-VUS2I-001 |
+| `vfpu-34-d03b0000-5bf1c1e7f497` | `0x34` | `0xd03b0000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-VUS2I-001 |
+| `vfpu-34-d03b0000-695999f072c8` | `0x34` | `0xd03b0084` | 2 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-VUS2I-001 |
 | `vfpu-34-d03b8000-65b917bad035` | `0x34` | `0xd03b8084` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-34-d03b8000-fe32fd38ba6b` | `0x34` | `0xd03b8004` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-34-d03c0000-aa28f693e213` | `0x34` | `0xd03c0000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
@@ -1037,7 +1041,7 @@ a title that translates none has generated code unchanged.
 | `vfpu-34-d0600000-db745a74ba51` | `0x34` | `0xd0600000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-34-d0608000-5791705e7685` | `0x34` | `0xd0608004` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-34-d0608000-c82dcb4f7a31` | `0x34` | `0xd0608084` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-34-d2000000-623625fb155b` | `0x34` | `0xd2000000` | 1 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-34-d2000000-623625fb155b` | `0x34` | `0xd2000000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-CONVERT-001 |
 | `vfpu-34-d2000000-c1d51c7467c8` | `0x34` | `0xd2000084` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-34-d2008000-0fbcf6fe903b` | `0x34` | `0xd2008084` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-34-d2008000-b6d78642ce9b` | `0x34` | `0xd2008004` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
@@ -1063,6 +1067,7 @@ a title that translates none has generated code unchanged.
 | `vfpu-36-d8200000-21b49665cf78` | `0x36` | `0xd8200000` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
 | `vfpu-36-d8218000-44bff127c0fe` | `0x36` | `0xd821800f` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
 | `vfpu-36-d8258000-b04c26043d59` | `0x36` | `0xd8258081` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
+| `vfpu-36-d9400000-83daafc8f505` | `0x36` | `0xd9400002` | - | `aot-routes-to-sr-vfpu-interp` | `hardware-measured` | selftest pinned to PSP-VFPU-QUADWB-001 |
 | `vfpu-37-dc000000-04aa804c6140` | `0x37` | `0xdc000000` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-37-dd000000-fc234082344e` | `0x37` | `0xdd000000` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-37-de000000-7caa71cf79ea` | `0x37` | `0xde000000` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
@@ -1080,7 +1085,7 @@ a title that translates none has generated code unchanged.
 | `vfpu-3a-e8258000-aa889c2278dc` | `0x3a` | `0xe8258081` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
 | `vfpu-3a-e8260000-420666dfdabb` | `0x3a` | `0xe8260001` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
 | `vfpu-3c-f0000000-4b10eb4e893b` | `0x3c` | `0xf0000000` | 1 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
-| `vfpu-3c-f0018100-2c959207adde` | `0x3c` | `0xf001818f` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-3c-f0018100-2c959207adde` | `0x3c` | `0xf001818f` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-WIDEDOT-001 |
 | `vfpu-3c-f0018100-b9d44eee71c0` | `0x3c` | `0xf001810f` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-3c-f0040000-994a363e741d` | `0x3c` | `0xf0040088` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-3c-f0800000-9f68c7ffe735` | `0x3c` | `0xf0800080` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
@@ -1092,19 +1097,19 @@ a title that translates none has generated code unchanged.
 | `vfpu-3c-f1018100-d337c174f6fe` | `0x3c` | `0xf1018180` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-3c-f1040000-af1c71a4986e` | `0x3c` | `0xf1040088` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-3c-f1800000-5d02d6a62119` | `0x3c` | `0xf1800000` | 1 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
-| `vfpu-3c-f1808000-aa6561e8ccbb` | `0x3c` | `0xf1808010` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-3c-f1818000-140d9a6b2ea4` | `0x3c` | `0xf1818090` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-3c-f1808000-aa6561e8ccbb` | `0x3c` | `0xf1808010` | 3 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-WIDEDOT-001 |
+| `vfpu-3c-f1818000-140d9a6b2ea4` | `0x3c` | `0xf1818090` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-WIDEDOT-001 |
 | `vfpu-3c-f1830000-bdcf1cbef03b` | `0x3c` | `0xf18300ff` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-3c-f2000000-041d394607e1` | `0x3c` | `0xf2000000` | 1 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
 | `vfpu-3c-f2008000-09ed18e5bfd0` | `0x3c` | `0xf200807f` | 3 | `aot-direct` | `hardware-measured` | census tier H: issue-40-group-b |
 | `vfpu-3c-f2018000-07cde07daa28` | `0x3c` | `0xf20180ff` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-3c-f2030100-8deefcb20043` | `0x3c` | `0xf20301ff` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-3c-f2808000-52b8120a1908` | `0x3c` | `0xf2808001` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-3c-f2808000-80dbf9496d08` | `0x3c` | `0xf2808090` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-3c-f2808000-52b8120a1908` | `0x3c` | `0xf2808001` | 3 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-WIDEDOT-001 |
+| `vfpu-3c-f2808000-80dbf9496d08` | `0x3c` | `0xf2808090` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-WIDEDOT-001 |
 | `vfpu-3c-f3800000-33c04b695fcc` | `0x3c` | `0xf3800088` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-3c-f3800000-8a57926c1d7d` | `0x3c` | `0xf3800000` | 1 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
 | `vfpu-3c-f3808000-7b56bb3b366e` | `0x3c` | `0xf3808008` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-3c-f3808000-c9722109ff7d` | `0x3c` | `0xf3808081` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
+| `vfpu-3c-f3808000-c9722109ff7d` | `0x3c` | `0xf3808081` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-WIDEDOT-001 |
 | `vfpu-3c-f3810000-041d394607e1` | `0x3c` | `0xf3810000` | 1 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
 | `vfpu-3c-f3810000-8deefcb20043` | `0x3c` | `0xf3810088` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-3c-f3818000-07cde07daa28` | `0x3c` | `0xf3818088` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
@@ -1112,7 +1117,7 @@ a title that translates none has generated code unchanged.
 | `vfpu-3c-f3830000-4d3e36431900` | `0x3c` | `0xf3830000` | 1 | `aot-direct` | `synthetic` | `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
 | `vfpu-3c-f3830000-b0763af87a26` | `0x3c` | `0xf3830080` | 2 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-3c-f3838000-2559d0e2853f` | `0x3c` | `0xf3838008` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
-| `vfpu-3c-f3838000-4172a423a232` | `0x3c` | `0xf3838088` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep`, `vfpu-interp-selftest:check_overlap_diff` |
+| `vfpu-3c-f3838000-4172a423a232` | `0x3c` | `0xf3838088` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-WIDEDOT-001 |
 | `vfpu-3c-f3a00000-15f095708365` | `0x3c` | `0xf3a0000f` | 1 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_cos`, `sr_vfpu_sin` |
 | `vfpu-3c-f3a00000-37b15d195917` | `0x3c` | `0xf3a00088` | 2 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_cos`, `sr_vfpu_sin` |
 | `vfpu-3c-f3a00000-f37f7c6d720b` | `0x3c` | `0xf3a00000` | 1 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_cos`, `sr_vfpu_sin` |
@@ -1120,7 +1125,7 @@ a title that translates none has generated code unchanged.
 | `vfpu-3c-f3a08000-e8955f46d066` | `0x3c` | `0xf3a08088` | 4 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_cos`, `sr_vfpu_sin` |
 | `vfpu-3c-f3a10000-7162b88501d5` | `0x3c` | `0xf3a1008f` | 2 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_cos`, `sr_vfpu_sin` |
 | `vfpu-3c-f3a18000-626883cc090d` | `0x3c` | `0xf3a1800f` | 3 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_cos`, `sr_vfpu_sin` |
-| `vfpu-3c-f3a18100-8807ce4d9f43` | `0x3c` | `0xf3a181ff` | 4 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_cos`, `sr_vfpu_sin` |
+| `vfpu-3c-f3a18100-8807ce4d9f43` | `0x3c` | `0xf3a181ff` | 4 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-WIDEDOT-001 |
 | `vfpu-3c-f3a30000-76a1225e7e87` | `0x3c` | `0xf3a30080` | 2 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_cos`, `sr_vfpu_sin` |
 | `vfpu-3c-f3a48000-105f3406c43a` | `0x3c` | `0xf3a48000` | 3 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_cos`, `sr_vfpu_sin` |
 | `vfpu-3c-f3aa0000-66df0f1d7e2d` | `0x3c` | `0xf3aa0080` | 2 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_cos`, `sr_vfpu_sin` |
@@ -1148,4 +1153,5 @@ a title that translates none has generated code unchanged.
 | `vfpu-3e-f8200000-c7eee1612aba` | `0x3e` | `0xf8200000` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
 | `vfpu-3e-f8218000-9dd390013655` | `0x3e` | `0xf821800f` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
 | `vfpu-3e-f8258000-51b5a0cb59ca` | `0x3e` | `0xf8258081` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
+| `vfpu-3e-f9400000-eacdf8c4ae88` | `0x3e` | `0xf9400002` | - | `aot-routes-to-sr-vfpu-interp` | `hardware-measured` | selftest pinned to PSP-VFPU-QUADWB-001 |
 | `vfpu-3f-fc000000-2f62df9cdfc2` | `0x3f` | `0xfc000000` | - | `aot-direct` | `unverified` | no recorded evidence |

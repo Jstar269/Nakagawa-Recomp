@@ -16,18 +16,16 @@ import hashlib
 import json
 import os
 import fnmatch
-import io
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import unicodedata
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from nk_core.git_isolation import isolated_git_env  # noqa: E402
+from nk_core.git_isolation import isolated_git_env as _isolated_git_env  # noqa: E402
 from publication_policy import (  # noqa: E402
     INCLUDED,
     Policy,
@@ -306,6 +304,24 @@ def parse_secret_scan_report(report_path: Path) -> list[Finding]:
 def parse_gitleaks_report(report_path: Path) -> list[Finding]:
     """Backward-compatible alias for integrations using the old function name."""
     return parse_secret_scan_report(report_path)
+
+
+def isolated_git_env(root: Path | None = None) -> dict[str, str]:
+    """The shared isolated Git environment, plus ``safe.bareRepository=explicit``.
+
+    A directory this tool audits can be shaped like a bare repository (``HEAD``, ``objects/``,
+    ``refs/``, ``config`` at its root): a committed tree is written out file by file, and a
+    candidate root is whatever the caller built. Git would discover such a directory as a
+    repository and read its ``config``, whose ``core.worktree`` and ``core.excludesFile`` change
+    what Git reports and whose ``core.fsmonitor`` names a command Git runs. With the setting, Git
+    uses a bare repository only when one is named explicitly, which this tool never does.
+    """
+    env: dict[str, str] = _isolated_git_env(root=root)
+    count = int(env.get("GIT_CONFIG_COUNT", "0"))
+    env[f"GIT_CONFIG_KEY_{count}"] = "safe.bareRepository"
+    env[f"GIT_CONFIG_VALUE_{count}"] = "explicit"
+    env["GIT_CONFIG_COUNT"] = str(count + 1)
+    return env
 
 
 def _git_output(cmd: list[str], repo_root: Path = ROOT) -> str:
@@ -666,6 +682,33 @@ def _get_filesystem_entries(repo_root: Path) -> list[GitEntry]:
     return sorted(entries, key=lambda entry: entry.path.lower())
 
 
+def _committed_entries(audit_root: Path, tree_entries: list[tuple[str, str, str]]) -> list[GitEntry]:
+    """Describe a committed tree written out by `_materialize_committed_tree`, from the tree's own list.
+
+    The list is ``git ls-tree``'s, never a walk of ``audit_root``: a walk skips VCS metadata
+    directory names (``.hg``, ``.svn``) and honours ignore rules, and every entry of a commit is
+    content to audit. The directory must hold exactly those files and nothing else.
+    """
+    expected = {path for path, _mode, _object_id in tree_entries}
+    written: set[str] = set()
+    for directory, _dirnames, filenames in os.walk(audit_root, followlinks=False):
+        for name in filenames:
+            written.add((Path(directory) / name).relative_to(audit_root).as_posix())
+    if written != expected:
+        extra = sorted(written - expected)[:5]
+        missing = sorted(expected - written)[:5]
+        raise RuntimeError(f"written committed tree differs from git ls-tree: extra {extra}, missing {missing}")
+    entries: list[GitEntry] = []
+    for path, mode, _object_id in tree_entries:
+        kind = "executable" if mode == "100755" else "file"
+        raw_bytes, _ = read_candidate_file(GitEntry(mode, "", "0", path, kind, working_mode=mode), audit_root)
+        text_value = _decode_text_safe(raw_bytes)
+        if text_value and is_git_lfs_pointer(text_value):
+            kind = "lfs_pointer"
+        entries.append(GitEntry(mode, "", "0", path, kind, working_mode=mode))
+    return sorted(entries, key=lambda entry: entry.path.lower())
+
+
 def _prune_gitignored_untracked(entries: list[GitEntry], repo_root: Path) -> list[GitEntry]:
     """Drop untracked files the candidate's own .gitignore excludes.
 
@@ -987,19 +1030,152 @@ def _forbidden_path(path: str) -> str | None:
     return None
 
 
-def _approved_binary_matches(reason: str, disp: str, manifest_comp: dict | None,
-                             sha256: str) -> bool:
-    """A prohibited-extension path passes only as a reviewed release-manifest binary.
+# Release-manifest dispositions that waive a binary finding (MAGIC, MAGIC_UNKNOWN, and for
+# ``approved_binary`` the prohibited-extension PATH rule) for one path.
+BINARY_WAIVER_DISPOSITIONS = ("approved_binary", "optional_excluded_if_unverified")
+# The VFPU lookup tables: raw data with no magic, exempt from MAGIC_UNKNOWN by where they live.
+VFPU_TABLE_PREFIX = "assets/vfpu/"
 
-    Project-authored build output (for example the profile-zero PSPDEV fixture)
-    may carry a guest-executable suffix. It is accepted only when the release
-    manifest records it as ``approved_binary`` and its bytes match the pinned
-    SHA-256, so a different file under an approved name is still reported.
+
+@dataclass(frozen=True)
+class TrustedWaiverBase:
+    """What a trusted base commit records about the audit's binary waivers.
+
+    ``paths`` is every path of the base tree. ``declared`` is every path the base's publication
+    profile includes, whether or not its tree carries the file. For a path the base's manifest
+    waives, ``waivers`` holds ``(disposition, pinned SHA-256)``. ``blob_sha256`` is the SHA-256 of
+    the base's own bytes at every path a waiver can cover: the ones its manifest waives and the
+    ones under ``VFPU_TABLE_PREFIX``. The audited tree supplies none of it.
     """
-    if not reason.startswith("prohibited extension") or disp != "approved_binary":
-        return False
-    pinned = ((manifest_comp or {}).get("hashes") or {}).get("sha256", "")
-    return bool(pinned) and bool(sha256) and pinned.lower() == sha256.lower()
+
+    paths: frozenset[str]
+    waivers: dict[str, tuple[str, str]]
+    blob_sha256: dict[str, str]
+    declared: frozenset[str]
+
+    def holds(self, rel: str) -> bool:
+        """Whether the base already has ``rel``: it carries the file, waives it or declares it."""
+        return rel in self.paths or rel in self.waivers or rel in self.declared
+
+
+def _manifest_pin(component: dict | None) -> str:
+    hashes = (component or {}).get("hashes")
+    pin = hashes.get("sha256") if isinstance(hashes, dict) else None
+    return pin.lower() if isinstance(pin, str) else ""
+
+
+def _binary_waiver_refusal(
+    rel: str,
+    disp: str,
+    manifest_comp: dict | None,
+    sha256: str,
+    trusted_base: TrustedWaiverBase | None = None,
+) -> tuple[str, str] | None:
+    """Why the release manifest's binary waiver for ``rel`` does not cover the audited bytes.
+
+    ``None`` when it does; otherwise the finding ``(code, detail)``. A waiver approves bytes, not
+    a path: it holds only for the SHA-256 it pins, so different content under an approved name
+    is reported like any other binary.
+
+    Without a trusted base the pin is the audited manifest's own, which catches a file that
+    changed without its pin. That manifest is part of the tree under audit, so it cannot vouch
+    for a change to both. With a trusted base, a path the base already carries, that its
+    manifest already waives or that its publication profile already declares is therefore held
+    to the base: its manifest must record the same waiver, and the waiver holds when
+
+    * the bytes are the ones the base vouches for and the pin is as the base has it (the change
+      under audit did not touch the approval, whatever state the base is in); or
+    * the bytes are the ones the base vouches for and the audited manifest pins exactly them.
+
+    The base vouches for the file it carries. Its manifest's pin stands in only for a path it
+    waives without carrying the file, so no pin the base holds approves other bytes at a path
+    whose file the base has. A path the base's profile declares without carrying or waiving it
+    has no bytes the base vouches for, so no waiver holds there. Any other path is new: its
+    publication is the admission's decision, and the audited manifest's pin applies.
+
+    ``disp`` comes from ``manifest_comp`` when there is one, else from the path's default
+    disposition, and the findings say which.
+    """
+    pin = _manifest_pin(manifest_comp)
+    actual = sha256.lower()
+    waived_as = (
+        f"the audited release manifest waives this path as {disp}"
+        if manifest_comp
+        else f"this path has no release-manifest component, and its default disposition {disp} is a waiver"
+    )
+    unpinned = (
+        "APPROVED_BINARY_UNPINNED",
+        f"{waived_as} without a hashes.sha256 pin; a waiver approves exact bytes",
+    )
+    if trusted_base is not None and trusted_base.holds(rel):
+        base_waiver = trusted_base.waivers.get(rel)
+        if base_waiver is None or base_waiver[0] != disp:
+            return (
+                "APPROVED_BINARY_UNPINNED",
+                f"{waived_as}, but the trusted base does not record that waiver for it; the tree "
+                "under audit cannot approve a binary at a path the base already carries, waives "
+                "or declares",
+            )
+        base_pin = base_waiver[1]
+        if rel in trusted_base.paths:
+            vouched, source = trusted_base.blob_sha256.get(rel, ""), "the file the trusted base carries"
+        else:
+            vouched, source = base_pin, "the bytes the trusted base's release manifest pins"
+        if actual and actual == vouched and pin == base_pin:
+            return None
+        if not pin:
+            return unpinned
+        if not actual or actual != vouched:
+            return (
+                "APPROVED_BINARY_CHANGED",
+                f"bytes (sha256 {actual or 'unreadable'}) are not {source} (sha256 "
+                f"{vouched or 'none'}); no pin approves other bytes at a path the base holds, "
+                "and a replacement needs the maintainer's approval of the new bytes",
+            )
+        if pin != actual:
+            return (
+                "APPROVED_BINARY_CHANGED",
+                f"the audited release manifest pins sha256 {pin} for this path, which is "
+                f"not its bytes (sha256 {actual})",
+            )
+        return None
+    if not pin:
+        return unpinned
+    if pin != actual:
+        return (
+            "APPROVED_BINARY_CHANGED",
+            f"bytes (sha256 {actual or 'unreadable'}) are not the ones the release manifest pins "
+            f"(sha256 {pin}); the waiver covers the pinned bytes only",
+        )
+    return None
+
+
+def _waives_extension_rule(reason: str, disp: str) -> bool:
+    """Whether an ``approved_binary`` waiver, when it holds, covers this PATH finding.
+
+    Project-authored build output (for example the profile-zero PSPDEV fixture) may carry a
+    guest-executable suffix. Only that extension rule can be waived, and only by
+    ``approved_binary``; ``_binary_waiver_refusal`` decides whether the waiver holds for the
+    audited bytes, so a different file under an approved name is still reported. The
+    private-path rules are never waived.
+    """
+    return reason.startswith("prohibited extension") and disp == "approved_binary"
+
+
+def requires_byte_binding(rel: str, data: bytes | None, manifest_map: dict[str, dict]) -> bool:
+    """Whether an admission of the new path ``rel`` must bind its bytes, not only its origin claim.
+
+    For a path new to the trusted base the audit holds a waived file only to the pin the tree under
+    audit records, and exempts a VFPU table by its path, so the admission is the only trusted
+    decision about such bytes. That holds for a path the release manifest waives, any path under
+    ``VFPU_TABLE_PREFIX`` (text included: the exemption is by path, so every new file there is
+    byte-bound), and bytes the audit classes as binary.
+    """
+    return (
+        (manifest_map.get(rel) or {}).get("disposition") in BINARY_WAIVER_DISPOSITIONS
+        or rel.startswith(VFPU_TABLE_PREFIX)
+        or (data is not None and (_is_binary_bytes(data) or _magic_kind(data, rel) is not None))
+    )
 
 
 def is_keystore_content(rel: str, text: str | None) -> bool:
@@ -1289,6 +1465,9 @@ SPDX_BYTE_EXACT_IMPORT_PATHS = frozenset({
     "third_party/anime4k/Anime4K_Upscale_CNN_x2_M.glsl",
     "third_party/portable-snippets/safe-math/safe-math.h",
     "third_party/stb/stb_image.h",
+    # stb_vorbis 1.24 (#2207): public domain or MIT in its own trailing licence text, without an
+    # SPDX line upstream; imported byte-identical (third_party/stb/PROVENANCE.md).
+    "third_party/stb/stb_vorbis.c",
     # Monocypher declares its SPDX line below the 8-line header window.
     "third_party/monocypher/monocypher-ed25519.c",
     "third_party/monocypher/monocypher-ed25519.h",
@@ -1386,6 +1565,7 @@ SPDX_GENERATED_EMBEDDING_SOURCES = {
     "src/rt/gpu_sdl3vk/psp_tnl_vert.inc": "src/rt/gpu_sdl3vk/shaders/psp_tnl.vert",
     "src/rt/gpu_sdl3vk/ace_match_comp.inc": "src/rt/gpu_sdl3vk/shaders/ace_match.comp",
     "src/rt/gpu_sdl3vk/ace_compose_comp.inc": "src/rt/gpu_sdl3vk/shaders/ace_compose.comp",
+    "src/rt/gpu_sdl3vk/ace_measure_comp.inc": "src/rt/gpu_sdl3vk/shaders/ace_measure.comp",
     "src/rt/gpu_sdl3vk/fsr1_easu_comp.inc": "src/rt/gpu_sdl3vk/shaders/fsr1_easu.comp",
     "src/rt/gpu_sdl3vk/fsr1_rcas_comp.inc": "src/rt/gpu_sdl3vk/shaders/fsr1_rcas.comp",
     "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_0_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_0.comp",
@@ -1748,7 +1928,7 @@ STALE_CONTROL_FIX = (
 TEXT_HYGIENE_EXEMPT_SUFFIXES = frozenset({".dat", ".bin", ".png", ".jpg", ".jpeg",
                                           ".gif", ".ico", ".mp4", ".pdf", ".zip", ".ttf",
                                           ".otf", ".woff", ".woff2", ".spv", ".wav",
-                                          ".prx", ".pbp", ".elf"})
+                                          ".ogg", ".prx", ".pbp", ".elf"})
 
 # Upstream byte-identical text can have source formatting that the repository
 # does not control. This exact hash exception preserves Clay's untouched
@@ -2506,7 +2686,7 @@ def _tree_binding_findings(
             return [Finding("POLICY_TREE_UNBINDABLE", str(repo_root), "committed-tree audit has no tree reference")]
         try:
             actual = _git_output(
-                ["rev-parse", f"{committed_tree_ref}^{{tree}}"], tree_repo_root or repo_root
+                ["rev-parse", "--verify", "--end-of-options", f"{committed_tree_ref}^{{tree}}"], tree_repo_root or repo_root
             ).strip()
         except RuntimeError as error:
             return [Finding("POLICY_TREE_UNBINDABLE", str(repo_root), str(error))]
@@ -2612,6 +2792,7 @@ def audit_entries_with_semantics(
     tree_repo_root: Path | None = None,
     provenance_self_consistency: bool = False,
     extra_private_roots: list[str] | None = None,
+    trusted_waiver_base: TrustedWaiverBase | None = None,
 ) -> tuple[list[Finding], list[FileSemantics]]:
 
     content_source = _resolve_content_source(content_source, is_candidate_root)
@@ -2833,9 +3014,23 @@ def audit_entries_with_semantics(
             f = Finding("UNRESOLVED_PUBLIC", rel, "unresolved asset must be excluded from candidate public tree scope")
             entry_findings.append(f)
 
+        # A binary waiver approves the bytes it pins, not the path. When it does not cover
+        # the audited bytes, each finding it would have waived stands, and one more finding
+        # says why the waiver was refused.
+        waiver_claimed = disp in BINARY_WAIVER_DISPOSITIONS
+        waiver_refusal = (
+            _binary_waiver_refusal(rel, disp, manifest_comp, sha256, trusted_waiver_base)
+            if waiver_claimed else None
+        )
+        waiver_holds = waiver_claimed and waiver_refusal is None
+        waiver_refused_a_finding = False
+
         reason = _forbidden_path(rel)
-        if reason and _approved_binary_matches(reason, disp, manifest_comp, sha256):
-            reason = None
+        if reason and _waives_extension_rule(reason, disp):
+            if waiver_holds:
+                reason = None
+            else:
+                waiver_refused_a_finding = True
         if reason:
             f = Finding("PATH", rel, reason)
             entry_findings.append(f)
@@ -2910,9 +3105,10 @@ def audit_entries_with_semantics(
             policy_excluded = resolution is not None and resolution.is_excluded
             if policy_excluded:
                 pass
-            elif disp in ("optional_excluded_if_unverified", "approved_binary"):
+            elif waiver_holds:
                 pass
             else:
+                waiver_refused_a_finding = waiver_refused_a_finding or waiver_claimed
                 entry_findings.append(Finding("MAGIC", rel, magic))
 
         text_str = _decode_text_safe(raw_bytes)
@@ -2920,11 +3116,41 @@ def audit_entries_with_semantics(
         text_binary_kind = "binary" if is_binary else "text"
 
         if is_binary and magic == "none" and entry.kind not in ("symlink", "gitlink"):
-            if rel.startswith("assets/vfpu/"):
+            if rel.startswith(VFPU_TABLE_PREFIX):
+                # With a trusted base, a table the base carries is exempt only as the bytes the
+                # base carries, and a table the base's profile declares without carrying it is not
+                # exempt; a table new to the base is the admission's decision.
+                if (
+                    trusted_waiver_base is not None
+                    and (rel in trusted_waiver_base.paths or rel in trusted_waiver_base.declared)
+                    and sha256 != trusted_waiver_base.blob_sha256.get(rel)
+                ):
+                    entry_findings.append(Finding(
+                        "MAGIC_UNKNOWN", rel,
+                        f"unknown binary magic: the {VFPU_TABLE_PREFIX} exemption covers only the "
+                        "file the trusted base carries at this path"))
+            elif waiver_holds:
                 pass
-            elif disp in ("unclassified", "excluded_pending_qualified_review") or exhaustive:
-                if not manifest_comp:
-                    entry_findings.append(Finding("MAGIC_UNKNOWN", rel, "unknown binary magic requires explicit manifest review/disposition"))
+            elif waiver_claimed:
+                # The manifest component dispositions these bytes only as the binary it pins.
+                waiver_refused_a_finding = True
+                entry_findings.append(Finding("MAGIC_UNKNOWN", rel, "unknown binary magic is not the binary the release manifest approves"))
+            elif (
+                disp in ("unclassified", "excluded_pending_qualified_review")
+                or exhaustive
+                or trusted_waiver_base is not None
+            ):
+                # A manifest component of any other disposition approves no bytes: it is part of
+                # the tree under audit, and it pins nothing the audit could hold the file to.
+                entry_findings.append(Finding(
+                    "MAGIC_UNKNOWN", rel,
+                    "unknown binary magic requires a release-manifest binary waiver that pins these bytes"))
+
+        # With a trusted base every refusal is reported, whether or not the bytes raised a binary
+        # finding in this audit: the base must never come to hold a waiver or a pin that this
+        # check refuses. Without one, a refusal is reported with the finding it restores.
+        if waiver_refusal is not None and (waiver_refused_a_finding or trusted_waiver_base is not None):
+            entry_findings.append(Finding(waiver_refusal[0], rel, waiver_refusal[1]))
 
         if (exhaustive or public_scope) and not manifest_comp and prov == "unclassified":
             entry_findings.append(Finding("UNCLASSIFIED_PATH", rel, "tracked path has no explicit manifest provenance classification"))
@@ -3036,6 +3262,7 @@ def audit_entries(
     committed_tree_ref: str | None = None,
     tree_repo_root: Path | None = None,
     extra_private_roots: list[str] | None = None,
+    trusted_waiver_base: TrustedWaiverBase | None = None,
 ) -> list[Finding]:
     findings, _ = audit_entries_with_semantics(
         entries=entries,
@@ -3054,6 +3281,7 @@ def audit_entries(
         committed_tree_ref=committed_tree_ref,
         tree_repo_root=tree_repo_root,
         extra_private_roots=extra_private_roots,
+        trusted_waiver_base=trusted_waiver_base,
     )
     return findings
 
@@ -3072,6 +3300,7 @@ def generate_manifest_report(
     secret_scan_report: Path | None = None,
     is_candidate_root: bool = False,
     content_source: str = CONTENT_INDEX,
+    git_commit: str | None = None,
 ) -> dict:
 
     content_source = _resolve_content_source(content_source, is_candidate_root)
@@ -3085,11 +3314,11 @@ def generate_manifest_report(
             content_source=content_source,
         )
 
-    git_commit = ""
-    try:
-        git_commit = _git_output(["rev-parse", "HEAD"], repo_root=repo_root).strip()
-    except Exception:
-        git_commit = "unknown"
+    if git_commit is None:
+        try:
+            git_commit = _git_output(["rev-parse", "HEAD"], repo_root=repo_root).strip()
+        except Exception:
+            git_commit = "unknown"
 
     canonical_entries = [asdict(s) for s in semantics]
     entry_json_canonical = json.dumps(canonical_entries, sort_keys=True)
@@ -3184,26 +3413,168 @@ def export_csv_manifest_report(
             writer.writerow(row)
 
 
-def _materialize_committed_tree(ref: str, source_repo: Path) -> tuple[Path, str]:
-    """Materialize a commit/tree into a disposable directory for exact-byte audit."""
-    tree_sha = _git_output(["rev-parse", f"{ref}^{{tree}}"], source_repo).strip()
-    destination = Path(tempfile.mkdtemp(prefix="nakagawa-committed-audit-"))
-    archive = subprocess.run(
-        ["git", "archive", "--format=tar", ref], cwd=source_repo,
-        env=isolated_git_env(root=source_repo),
+def _committed_tree_entries(tree_sha: str, source_repo: Path) -> list[tuple[str, str, str]]:
+    """``(path, mode, blob id)`` for every entry of a tree, refusing what cannot be audited as a file.
+
+    Read with ``git ls-tree``, so the list is the tree's own and no attribute of the tree can shorten it.
+    Refused: an entry that is not a regular file (a symlink or a submodule has no file bytes to audit), a
+    path that would leave the destination or name Git's own directory, and two paths that differ only in
+    letter case, which a case-insensitive file system would write as one file and so hide the other.
+    """
+    listing = subprocess.run(
+        ["git", "ls-tree", "-r", "-z", "--full-tree", tree_sha], cwd=source_repo,
+        env=isolated_git_env(root=source_repo), capture_output=True, check=True,
+    ).stdout
+    entries: list[tuple[str, str, str]] = []
+    folded: dict[str, str] = {}
+    for record in listing.split(b"\0"):
+        if not record:
+            continue
+        meta, separator, raw_path = record.partition(b"\t")
+        fields = meta.decode("ascii", errors="replace").split()
+        if not separator or len(fields) != 3:
+            raise RuntimeError(f"unreadable git ls-tree record: {record[:80]!r}")
+        mode, kind, object_id = fields
+        try:
+            path = raw_path.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise RuntimeError(f"committed tree path is not UTF-8: {raw_path[:80]!r}") from error
+        if kind != "blob" or mode not in ("100644", "100755"):
+            raise RuntimeError(f"committed tree entry is not a regular file: {path} (mode {mode}, {kind})")
+        parts = path.split("/")
+        if (path.startswith("/") or "\\" in path or ":" in path
+                or any(part in ("", ".", "..") or part.lower() == ".git" for part in parts)):
+            raise RuntimeError(f"unsafe path in committed tree: {path}")
+        key = path.casefold()
+        if key in folded:
+            raise RuntimeError(f"committed tree paths differ only in letter case: {folded[key]} and {path}")
+        folded[key] = path
+        entries.append((path, mode, object_id))
+    return entries
+
+
+def _commit_of(ref: str, source_repo: Path) -> str:
+    """The commit ``ref`` names, for the report; ``unknown`` for a bare tree id (also accepted)."""
+    try:
+        return _git_output(["rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}"],
+                           source_repo).strip()
+    except RuntimeError:
+        return "unknown"
+
+
+def _materialize_committed_tree(
+    ref: str, source_repo: Path, entries_out: list[tuple[str, str, str]] | None = None,
+) -> tuple[Path, str]:
+    """Materialize a commit/tree into a disposable directory for exact-byte audit.
+
+    Every file is written from the tree's own objects (``git ls-tree``, ``git cat-file``). ``git archive``
+    is not used: it leaves out a path marked ``export-ignore`` and rewrites one marked ``export-subst``,
+    and both attributes come from the ``.gitattributes`` of the tree under audit, so one line there would
+    hide a file from the audit. ``entries_out``, when given, receives the tree's ``git ls-tree`` list.
+    """
+    tree_sha = _git_output(["rev-parse", "--verify", "--end-of-options", f"{ref}^{{tree}}"], source_repo).strip()
+    entries = _committed_tree_entries(tree_sha, source_repo)
+    if entries_out is not None:
+        entries_out[:] = entries
+    batch = subprocess.run(
+        ["git", "cat-file", "--batch"], cwd=source_repo, env=isolated_git_env(root=source_repo),
+        input="".join(f"{object_id}\n" for _path, _mode, object_id in entries).encode("ascii"),
         capture_output=True, check=True,
     ).stdout
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
-        for member in tar.getmembers():
-            rel = PurePosixPath(member.name)
-            if rel.is_absolute() or ".." in rel.parts:
-                shutil.rmtree(destination, ignore_errors=True)
-                raise RuntimeError(f"unsafe path in committed tree archive: {member.name}")
-        tar.extractall(destination, filter="data")
+    destination = Path(tempfile.mkdtemp(prefix="nakagawa-committed-audit-"))
+    try:
+        position = 0
+        for path, mode, object_id in entries:
+            newline = batch.find(b"\n", position)
+            header = batch[position:newline].decode("ascii", errors="replace").split() if newline != -1 else []
+            if len(header) != 3 or header[0] != object_id or header[1] != "blob" or not header[2].isdigit():
+                raise RuntimeError(f"git cat-file did not return blob {object_id} for {path}")
+            size = int(header[2])
+            data = batch[newline + 1:newline + 1 + size]
+            if len(data) != size or batch[newline + 1 + size:newline + 2 + size] != b"\n":
+                raise RuntimeError(f"truncated git cat-file payload for {path}")
+            position = newline + 1 + size + 1
+            target = destination.joinpath(*path.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            if mode == "100755":
+                target.chmod(target.stat().st_mode | 0o111)
+        if position != len(batch):
+            raise RuntimeError("git cat-file returned more output than the tree's blobs")
+    except BaseException:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
     return destination, tree_sha
 
 
+def _load_trusted_waiver_base(ref: str, source_repo: Path) -> TrustedWaiverBase:
+    """Read a trusted base commit's binary waivers from its own objects.
+
+    The base's path list is ``git ls-tree``'s; its release manifest, its publication profile,
+    the files that manifest waives and its VFPU tables are read with ``git cat-file``. Nothing
+    comes from the tree under audit. A base whose manifest or profile cannot be read is an error:
+    the audit must not run as if no waiver were pinned or no path were declared.
+    """
+    tree_sha = _git_output(["rev-parse", "--verify", "--end-of-options", f"{ref}^{{tree}}"], source_repo).strip()
+    blob_ids = {path: (mode, object_id) for path, mode, object_id in _committed_tree_entries(tree_sha, source_repo)}
+
+    def read(paths: list[str]) -> dict[str, bytes]:
+        blobs = read_indexed_blobs_batch(
+            [GitEntry(blob_ids[path][0], blob_ids[path][1], "0", path, "file", working_mode=blob_ids[path][0])
+             for path in paths],
+            source_repo,
+        )
+        data: dict[str, bytes] = {}
+        for path in paths:
+            raw, error = blobs.get(path, (None, "not returned by git cat-file"))
+            if raw is None or error:
+                raise RuntimeError(f"trusted base file {path} is unreadable: {error}")
+            data[path] = raw
+        return data
+
+    manifest_rel = "assets/release_manifest.json"
+    if manifest_rel not in blob_ids:
+        raise RuntimeError(f"the trusted base has no {manifest_rel}")
+    manifest_map, manifest_findings = load_release_manifest_bytes(read([manifest_rel])[manifest_rel], manifest_rel)
+    if manifest_findings:
+        raise RuntimeError(
+            f"the trusted base's {manifest_rel} is unusable: "
+            f"{manifest_findings[0].code}: {manifest_findings[0].detail}")
+    waivers = {
+        path: (component["disposition"], _manifest_pin(component))
+        for path, component in manifest_map.items()
+        if component.get("disposition") in BINARY_WAIVER_DISPOSITIONS
+    }
+    profile_rel = "assets/public_source_profile.json"
+    if profile_rel not in blob_ids:
+        raise RuntimeError(f"the trusted base has no {profile_rel}")
+    try:
+        profile = json.loads(read([profile_rel])[profile_rel].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"the trusted base's {profile_rel} is unusable: {error}") from error
+    declared = profile.get("include_paths") if isinstance(profile, dict) else None
+    if not isinstance(declared, list) or not all(isinstance(path, str) for path in declared):
+        raise RuntimeError(f"the trusted base's {profile_rel} is unusable: include_paths must be a list of strings")
+    carried = sorted(path for path in blob_ids if path in waivers or path.startswith(VFPU_TABLE_PREFIX))
+    return TrustedWaiverBase(
+        paths=frozenset(blob_ids),
+        waivers=waivers,
+        blob_sha256={path: hashlib.sha256(data).hexdigest() for path, data in read(carried).items()},
+        declared=frozenset(declared),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
+    # A materialized committed tree is disposable: remove it however the audit ends.
+    disposable: list[Path] = []
+    try:
+        return _main(argv, disposable)
+    finally:
+        for path in disposable:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def _main(argv: list[str] | None, disposable: list[Path]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--tracked-only",
@@ -3271,6 +3642,20 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="Externally trusted release manifest used to prevent candidate control substitution",
+    )
+    parser.add_argument(
+        "--trusted-base",
+        type=str,
+        default=None,
+        help=(
+            "Trusted base commit, read from --repo-root's objects (in the attestation, the merge "
+            "base with the default branch). A path that commit already carries, or that its "
+            "manifest already waives, keeps a binary waiver (the release manifest's "
+            "approved_binary and optional_excluded_if_unverified, and the assets/vfpu/ "
+            "exemption) only for bytes the base vouches for: the file it carries, or, where it "
+            "carries none, the SHA-256 its own manifest pins. Without it the audited manifest's "
+            "own pin is used, which the tree under audit can rewrite."
+        ),
     )
     parser.add_argument(
         "--private-root",
@@ -3361,15 +3746,34 @@ def main(argv: list[str] | None = None) -> int:
     audit_repo_root = args.repo_root.absolute() if args.repo_root else ROOT
     committed_audit_root: Path | None = None
     committed_tree_sha: str | None = None
+    committed_tree_list: list[tuple[str, str, str]] = []
+    committed_commit: str | None = None
     if args.committed_tree:
         try:
-            committed_audit_root, committed_tree_sha = _materialize_committed_tree(args.committed_tree, audit_repo_root)
+            # Resolve the name once, so the report's commit and the audited tree are the same object.
+            committed_commit = _commit_of(args.committed_tree, audit_repo_root)
+            ref = args.committed_tree if committed_commit == "unknown" else committed_commit
+            committed_audit_root, committed_tree_sha = _materialize_committed_tree(
+                ref, audit_repo_root, entries_out=committed_tree_list,
+            )
+            disposable.append(committed_audit_root)
         except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
             print(f"publication audit failed: cannot materialize committed tree: {error}", file=sys.stderr)
             return 2
         audit_root = committed_audit_root
     else:
         audit_root = args.candidate_root.absolute() if args.candidate_root else audit_repo_root
+    trusted_waiver_base: TrustedWaiverBase | None = None
+    if args.trusted_base is not None:
+        if not args.trusted_base.strip():
+            # An empty value must not run the audit as if no base had been named.
+            print("publication audit failed: --trusted-base names no commit", file=sys.stderr)
+            return 2
+        try:
+            trusted_waiver_base = _load_trusted_waiver_base(args.trusted_base, audit_repo_root)
+        except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+            print(f"publication audit failed: cannot read the trusted base: {error}", file=sys.stderr)
+            return 2
     manifest_path = args.manifest or (audit_root / "assets" / "release_manifest.json")
     is_exhaustive = args.candidate_tree or bool(args.manifest_out) or bool(args.csv_out) or args.public_scope
     is_cand_root = bool(args.candidate_root)
@@ -3388,11 +3792,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        entries = (
-            _get_filesystem_entries(audit_root)
-            if args.candidate_root or args.committed_tree
-            else _get_git_entries(args.tracked_only, repo_root=audit_root, content_source=content_source)
-        )
+        if args.committed_tree:
+            entries = _committed_entries(audit_root, committed_tree_list)
+        elif args.candidate_root:
+            entries = _get_filesystem_entries(audit_root)
+        else:
+            entries = _get_git_entries(args.tracked_only, repo_root=audit_root, content_source=content_source)
     except (RuntimeError, UnicodeDecodeError) as error:
         print(f"publication audit failed: {error}", file=sys.stderr)
         return 2
@@ -3421,6 +3826,7 @@ def main(argv: list[str] | None = None) -> int:
         committed_tree_ref=args.committed_tree,
         tree_repo_root=audit_repo_root,
         extra_private_roots=args.private_root,
+        trusted_waiver_base=trusted_waiver_base,
     )
     report = generate_manifest_report(
         entries,
@@ -3431,6 +3837,7 @@ def main(argv: list[str] | None = None) -> int:
         secret_scan_report=args.secret_scan_report,
         is_candidate_root=is_cand_root,
         content_source=content_source,
+        git_commit=committed_commit,
     )
 
     if args.manifest_out:

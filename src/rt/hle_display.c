@@ -11,6 +11,7 @@
  * 2026-10-31 (#307). */
 
 #include "hle_internal.h"
+#include "ge_scene.h"
 #include "replay_checkpoint.h" /* SR_REPLAY_CHECKPOINTS (#2147) */
 #include <time.h>
 
@@ -246,6 +247,8 @@ static void display_present_active(void) {
     }
     /* A recording counts the guest's own flips beside the picture (videorec.h). */
     sr_videorec_guest_flip();
+    /* So do the host mip chain's windows, before the presenter's slot rule drops any. */
+    gegpu_note_guest_flip();
     display_present_frame();
     sr_capture_cancel();
     uint32_t brightest;
@@ -267,8 +270,12 @@ static void display_present_active(void) {
 static void fb_decode_px(uint32_t fbaddr, int fmt, uint32_t stride, int x, int y,
                          unsigned char rgb[3]) {
     if (fmt == 3) {
-        uint32_t p = MEM_R32(fbaddr + (uint32_t)(y * (int)stride + x) * 4);
-        rgb[0] = p & 0xFF; rgb[1] = (p >> 8) & 0xFF; rgb[2] = (p >> 16) & 0xFF;
+        /* The pixel's own bytes: a 32-bit load of 0x04084000 is answered with the GE status
+         * word (sr_r32), which replaced pixel (0,264) of the usual stride-512 framebuffer at
+         * 0x04000000 in every snapshot and route sample. The presenter reads VRAM literally
+         * for the same reason (gui.c convert_fb_pixels). */
+        uint32_t a = fbaddr + (uint32_t)(y * (int)stride + x) * 4;
+        rgb[0] = MEM_R8(a); rgb[1] = MEM_R8(a + 1u); rgb[2] = MEM_R8(a + 2u);
         return;
     }
     uint16_t p = MEM_R16(fbaddr + (uint32_t)(y * (int)stride + x) * 2);
@@ -392,6 +399,8 @@ static char s_fbcap_armed[128];  /* path armed for the CURRENT frame's present (
 static char s_fbcap_legacy[64];  /* legacy snap_*.ppm path for the same frame ("" = none) */
 uint32_t s_vramdump_vblanks[SR_VRAMDUMP_MAX_VBLANKS];
 unsigned s_vramdump_count;
+_Static_assert(SR_VRAMDUMP_MAX_VBLANKS <= GE_VRAM_CAPTURE_MAX,
+               "the VRAM viewer's Capture row can offer every SR_VRAMDUMP capture");
 unsigned s_vramdump_done;
 static char s_vramdump_dir[768];
 
@@ -806,6 +815,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
             if (!snap_ok) {
                 fprintf(stderr, "SR_FBDUMP: no trustworthy framebuffer snapshot was written\n");
                 sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, 0u, 1u);
+                ge_scene_dump_finish();
                 sr_compat_report();
                 (void)sr_videorec_finish_status("SR_FBDUMP found no trustworthy framebuffer", 1);
                 sr_perf_shutdown();
@@ -817,6 +827,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
                 int capture_exit_status = sr_fbcap_exit_status(SR_FBCAP_FBDUMP, cres);
                 sr_flight_exit((uint32_t)capture_exit_status);
                 psmf_av_final("capture_exit");
+                ge_scene_dump_finish();
                 sr_compat_report();
                 (void)sr_videorec_finish_status("SR_FBDUMP capture exit", capture_exit_status);
                 sr_perf_shutdown();
@@ -898,6 +909,32 @@ static uint32_t h_DisplayWaitVblankStart(CpuState *s) {
     if (!sched_wait_permitted()) return SCE_KERNEL_ERROR_CAN_NOT_WAIT;
     sched_wait_vblank_start();
     return 0;
+}
+
+/* A vblank_wait_skip site of a package's Ace load part (ENHANCEMENT_CONTRACT.md sections 9.8 and
+ * 11.3.10), from generated code at the site's jal to sceDisplayWaitVblankStart, after its delay
+ * slot. Nonzero means the call is skipped and $v0 is 0. It skips only a call the stock handler
+ * above would block in: where waits are not permitted that handler returns CAN_NOT_WAIT without
+ * blocking, so it returns 0 and the stock call runs, unskipped and uncounted. Otherwise it skips
+ * while the run's load=fast is in effect (nk_ace_load_fast(), which counts the skip) and its pacing
+ * guard has not fired (src/rt/ace.h: once a skip has happened in ACE_LOAD_PACING_UPDATES logic
+ * updates in a row, every declared wait runs its stock call for the rest of the run). site and pc
+ * are the declared site's id and its jal's address, which the guard's line names.
+ *
+ * A skipped wait still blocks, for the shortest delay that does: 1 us, sceKernelDelayThread(1)'s
+ * wait, through sched_delay_current_dispatching: even when that deadline is already over at the
+ * decision the block causes, that decision runs another ready thread first. Ready threads of any
+ * priority, lower ones included, run then, as during the stock wait, and the caller resumes at
+ * its next scheduling point instead of the next VBLANK. Neither a zero delay nor a ready-queue rotation would do: on the PSP (#340, h_DelayThread
+ * in hle_kernel_thread.c) sceKernelDelayThread(0) does not yield, and a rotation yields only to
+ * threads of equal or higher priority, so a loading loop that waits for a lower-priority loader
+ * would spin. $v0 is then the 0 the stock call returns after its wait. */
+int nk_ace_load_skip_wait(CpuState *s, const char *site, uint32_t pc) {
+    if (!sched_wait_permitted()) return 0;
+    if (!nk_ace_load_fast(site, pc)) return 0;
+    sched_delay_current_dispatching(1u);
+    s->r[2] = 0u;
+    return 1;
 }
 
 /* The public multi-wait contract blocks through the requested number of
@@ -1116,6 +1153,7 @@ void sr_vblank_tick(void) {
           if (wde > 0 && diff >= (uint32_t)wde) {
               fprintf(stderr, "WATCHDOG: aborting after %u vblanks with no new frame (SR_WATCHDOG_EXIT=%d)\n", diff, wde);
               sr_flight_hang(diff, (uint32_t)wde);
+              ge_scene_dump_finish();
               sr_compat_report();
               (void)sr_videorec_finish_status("SR_WATCHDOG_EXIT", 1);
               sr_perf_shutdown();
@@ -1197,6 +1235,7 @@ void sr_vblank_tick(void) {
              * above; it is idempotent and a no-op without SR_PERF. The PSMF A/V summary is an
              * atexit report too, so it is printed here as well (a no-op unless enabled). */
             psmf_av_final("exit_at_vblank");
+            ge_scene_dump_finish();
             sr_compat_report();
             sr_perf_shutdown();
             sr_profile_dump_final();

@@ -1,6 +1,6 @@
 {
   "compiler": {
-    "name": "glslc.exe",
+    "name": "glslc",
     "options": [
       "--target-env=vulkan1.1"
     ],
@@ -20,11 +20,11 @@
     },
     {
       "embedded": "psp_frag.inc",
-      "embedded_sha256": "a11b97b54b66a13c561ea5ba82bd7b9e51eaa45533775ef5935c5d228a43de01",
+      "embedded_sha256": "b1255d1add308738819b21f3048c41c124e44eeb7ff5c4f95e840268f284c629",
       "source": "shaders/psp.frag",
-      "source_sha256": "64387cb85e9061efe1db0ddf8235f093c420c5036fe054f364803e1688108bb1",
-      "spirv_bytes": 36756,
-      "spirv_sha256": "ab1795bb84423d027451cb102ad9a72042f1579b79e79cb8752421e7cf92ce20",
+      "source_sha256": "d2d304192649f914a0cf9c217cdaa82d10db5a060daf3848be1b26752826027e",
+      "spirv_bytes": 45904,
+      "spirv_sha256": "ff1d4401edc5477b0def6118eebf08022d65eca410d68affd475480075ab1c1c",
       "stage": "frag"
     },
     {
@@ -32,11 +32,11 @@
         "SR_DST_INTERLOCK"
       ],
       "embedded": "psp_frag_rmw.inc",
-      "embedded_sha256": "d0ee7f32457ce0364b4d3920a4632c7bb15a2eebb355305ef5875417703b7218",
+      "embedded_sha256": "da920c486dd74d1341675d825f3f0a55989f7bfd7bb0fbbb43d33a07eae4c624",
       "source": "shaders/psp.frag",
-      "source_sha256": "64387cb85e9061efe1db0ddf8235f093c420c5036fe054f364803e1688108bb1",
-      "spirv_bytes": 37804,
-      "spirv_sha256": "98a50e61c964068ea39f80afc5b418d2c06da04d0daa5a72141dac332c847949",
+      "source_sha256": "d2d304192649f914a0cf9c217cdaa82d10db5a060daf3848be1b26752826027e",
+      "spirv_bytes": 49596,
+      "spirv_sha256": "9c60a5bfbbeeafccdc9e250b0239c180c10685bc846a04bbe1a78c38e5ae9a40",
       "stage": "frag"
     },
     {
@@ -64,6 +64,15 @@
       "source_sha256": "f17b7a976f50a0c190b59513fde1f945eadd28d2895fad7e2b09faea1178dc9b",
       "spirv_bytes": 14660,
       "spirv_sha256": "caf0c02b61f2a6f4510bc7f5265f9f87ba74d76b076eb7700d2b12f12db7b28a",
+      "stage": "comp"
+    },
+    {
+      "embedded": "ace_measure_comp.inc",
+      "embedded_sha256": "1335a95264de65f0b216f4cb51e3769c1851908464e9bc055dae3482a4b343a4",
+      "source": "shaders/ace_measure.comp",
+      "source_sha256": "552379e86a54d5ed1ed9c2f67e1aebcb9c7c0f46bf0c251447f72f47cf10320a",
+      "spirv_bytes": 5248,
+      "spirv_sha256": "162be822b72bc1a6e30a2fc0568f6a98465e355b2154a4862ee9390e0b1618c4",
       "stage": "comp"
     },
     {

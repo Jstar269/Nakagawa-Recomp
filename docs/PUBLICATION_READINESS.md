@@ -695,7 +695,9 @@ contributor's pull request only says where each new file came from
 | Hosted check: HTTP 404 fetching the policy delta | The private records are not on the private `main` | Step 3 |
 | `ADMIT_HOOKS_WOULD_REWRITE` | A pre-commit hook would change a byte of a path being admitted | Fix it on the pull request branch, then admit |
 | `POLICY_DELTA_CLAIM_MISMATCH` | A new path's class, record, upstream, revision or licence differs from its admission | Restore the claim, or admit the new claim (a new decision) |
-| `POLICY_DELTA_ADDED_BYTES_MISMATCH` | A byte-bound import changed after its admission | Restore the upstream bytes, or admit it again as a LOCAL DELTA with `--binding claim` |
+| `POLICY_DELTA_ADDED_BYTES_MISMATCH` | A byte-bound import changed after its admission | Restore the upstream bytes, or admit it again: as a LOCAL DELTA with `--binding claim`, or, for a binary file, a path under `assets/vfpu/` or a path the release manifest waives, bound to its new bytes |
+| `ADMISSION_BINDING_BYTES_REQUIRED` | A binary file, a path under `assets/vfpu/` or a path the release manifest waives was to be admitted bound to its claim only | Admit it bound to its bytes; under `--rekey`, admit it again without `--rekey` |
+| `ADMIT_MANIFEST_UNREADABLE` | The pull request's `assets/release_manifest.json` cannot be read, so the admission cannot tell which paths it waives | Fix the manifest on the pull request branch, then admit |
 | `VENDORED_BYTES_DRIFT` | A `PROVENANCE.md` row says byte-identical but the file differs | Restore the upstream bytes, or move the row to LOCAL DELTA |
 | `POLICY_DELTA_UNAUTHORIZED` | The profile changes something the admission did not approve | Remove the extra change, or admit it |
 | `TRUSTED_BASELINE_INVALID` | The local private authority checkout is behind its `main` | Fast-forward it and rerun |
@@ -729,6 +731,10 @@ profile order and the claims-form ledger.
 Each path is bound to its claim unless its origin is `third_party`, which is bound to its bytes. Override that per
 path with `"binding"` in `--origin-json`, or for every path with `--binding claim|bytes`. Bind an authored or
 adapted file to its claim. Bind a file imported unchanged to its bytes, because there the bytes are the claim.
+A binary file, any new file under `assets/vfpu/` (text included) and a path the candidate's release manifest waives
+are always bound to their bytes, and a claim binding for one is refused (`ADMISSION_BINDING_BYTES_REQUIRED`): for a
+new path the publication audit holds such bytes only to the pull request's own pin, or exempts them by their path
+([Approved binaries in the release manifest](#approved-binaries-in-the-release-manifest)).
 
 For path-adding pull requests approved together, use `--batch <file.json>` with entries shaped like:
 
@@ -873,6 +879,8 @@ the fetched bytes to equal the derived document exactly. Beyond the V3 refusals 
 | `POLICY_DELTA_CLAIM_MISMATCH` | an added path's class, record id, record class, upstream, revision or licence differs from the claim its admission approved |
 | `POLICY_DELTA_CLAIM_UNRESOLVED` | an added path no longer resolves to any class (for example, its record no longer covers it) |
 | `POLICY_DELTA_ADDED_BYTES_MISMATCH` | a byte-bound path's bytes differ from the digest its admission approved |
+| `POLICY_DELTA_BINARY_CLAIM_BOUND` | a binary file, a path under `assets/vfpu/` or a path the release manifest waives is admitted bound to its claim only |
+| `POLICY_DELTA_MANIFEST_UNREADABLE` | a V4 delta binds a path to its claim and the candidate's `assets/release_manifest.json` cannot be read, so the verifier cannot tell whether it waives that path |
 
 What it still protects:
 
@@ -884,9 +892,10 @@ What it still protects:
 * A byte-identical import cannot drift. Its delta binds its bytes. After it lands, the `PROVENANCE.md` manifest
   check holds it (see below).
 
-Limit: a claim-bound delta accepts any content for its paths, as long as the claim holds. It does so in every pull
-request whose profile change is exactly the one it records, and the verdict is for the exact head it ran on. That
-is the authority a landed path already has. Hosted CI, review and the publication audit still check the content.
+Limit: a claim-bound delta accepts any content for its paths, as long as the claim holds, except that a binary
+file, a path under `assets/vfpu/` or a path the release manifest waives is never claim-bound
+(`POLICY_DELTA_BINARY_CLAIM_BOUND`). It does so in every pull request whose profile change is exactly the one it
+records, and the verdict is for the exact head it ran on. That is the authority a landed path already has. Hosted CI, review and the publication audit still check the content.
 To withdraw an approval before the pull request lands, delete the V4 file from the private `main`.
 
 ### Byte-identical manifest rows
@@ -913,8 +922,70 @@ claim) are therefore both `maintainer_action` findings. They stay fatal until th
 candidate's exact bytes in the trusted ledger. The approval is a `reviewed_blobs` entry for the path, at the
 SHA-256 of the new bytes, citing the path's own exact record. The verifier reads those entries only when such a
 change needs one. The trusted record's `upstream_revision` should be updated in the same private commit. A
-byte-identical file outside any manifest (for example a font) has no row to check, so after it lands it is held
-only by review.
+byte-identical file outside any manifest (for example a font) has no row to check. After it lands it is held by
+review, and by the next section when the release manifest approves it as a binary. For a vendored binary the
+release manifest waives (a font, an image, a sound), a `reviewed_blobs` approval does not let an in-place change
+through: the publication audit refuses other bytes at that path regardless, and the update lands as a new path
+([Approved binaries in the release manifest](#approved-binaries-in-the-release-manifest)).
+
+### Approved binaries in the release manifest
+
+The publication audit reports binary content: `MAGIC` for a known binary format, `MAGIC_UNKNOWN` for other
+binary bytes, and `PATH` for a prohibited extension. Two things waive those findings, and each approves bytes,
+not a path:
+
+* a component of `assets/release_manifest.json` whose disposition is `approved_binary` (a screenshot, a font, a
+  clip, a prebuilt fixture) or `optional_excluded_if_unverified`. It pins the approved bytes in `hashes.sha256`,
+  and only `approved_binary` waives the extension rule;
+* the `assets/vfpu/` exemption from `MAGIC_UNKNOWN`, for the VFPU lookup tables.
+
+A component of any other disposition waives nothing. When a waived file's bytes are not the approved ones, the
+findings the waiver would have dropped are reported, with one more that says why:
+
+| Finding | What happened |
+| --- | --- |
+| `APPROVED_BINARY_CHANGED` | the file's bytes are not the approved ones, or the manifest's pin is not the file's SHA-256 |
+| `APPROVED_BINARY_UNPINNED` | the component has no `hashes.sha256`, or the trusted base does not record that waiver |
+
+The manifest is part of the tree under audit, so its own pin is not an approval: it shows only that a file and
+its pin still agree. The trusted attestation therefore runs the audit with `--trusted-base <verdict base>`, the
+merge base of the head with the default branch, and the base decides for every path it already carries, its
+manifest already waives or its profile (`assets/public_source_profile.json`) already declares:
+
+* The base's manifest must record the same waiver for the path. A component the base does not have, or whose
+  disposition differs from the base's, waives nothing there.
+* The bytes must be the ones the base vouches for: the file it carries, or, for a path it waives without
+  carrying the file, the SHA-256 its manifest pins. No pin, the base's included, approves other bytes at a path
+  whose file the base has. A path the base only declares has no bytes the base vouches for, so no waiver holds
+  there.
+* The pin must be as the base has it, so the pull request did not touch the approval, or be exactly the file's
+  SHA-256; the second is how a pull request corrects a pin that does not match the file the base carries.
+* Every refused waiver for a file the audited tree carries is reported, whether or not its bytes raise a binary
+  finding, so the base never comes to hold such a waiver or pin that this check refuses. A component for a path
+  the tree does not carry is not compared with the base: the path can only appear later with an admission, and
+  that pull request is held to the base like any other.
+* A VFPU table the base carries is exempt only as the bytes the base carries, and one the base only declares is
+  not exempt.
+
+A path the base neither carries, waives nor declares is new. The candidate's own pin applies to it, a new VFPU
+table is exempt by its path, and whether the path may be published is the admission's decision. A new waived
+file, any new file under `assets/vfpu/` (text included) and any other new binary is therefore admitted bound to
+its bytes (`"binding": "bytes"`), which approves exactly one file; the verifier refuses a claim-bound admission
+for it ([V4 policy deltas](#v4-policy-deltas)).
+
+The audit has no input that approves new binary bytes at a path the base already holds. Replacing an approved
+binary or a VFPU table in place with other binary bytes, or changing the kind of a waiver in place for such
+bytes, therefore fails the trusted attestation. A replacement lands as a new path: the new file under a new name
+with its own manifest component, the old file and its component removed, and the profile change admitted by the
+maintainer.
+
+Text in place of a VFPU table is audited as text. A waiver stays held to the bytes the base vouches for even when
+the file is text, so text at a path the manifest waives is audited as text only once its component no longer
+waives it. To edit a text file the manifest lists as `approved_binary` (such as the brand SVGs), change its
+component to a disposition that is not a waiver, such as `included`, in the same pull request.
+
+A local run without `--trusted-base` (pre-commit, `contrib-check`, the hygiene job) compares the tree's own pins
+and applies the path exemption as it stands; it is a tripwire, not this check.
 
 ### V3 policy deltas
 

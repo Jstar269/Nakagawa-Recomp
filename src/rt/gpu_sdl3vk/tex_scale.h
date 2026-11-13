@@ -140,7 +140,7 @@ void nk_tex_scale_report(void);
 int nk_tex_scale_image(const uint32_t *rgba, int w, int h, int factor, int clamp_u, int clamp_v,
                        uint32_t *out);
 
-/* ---- soft shadows (Ace part shadow=soft, docs/ENHANCEMENT_CONTRACT.md section 10.20) ------- */
+/* ---- soft shadows (Ace part shadow=soft, docs/ENHANCEMENT_CONTRACT.md section 10.23) ------- */
 /* A title's blob shadow is a small textured quad whose alpha is a hard-edged disc. Ace's soft
  * shadows draw such a texture, when its package declares it, from a host-made copy with a softer
  * alpha edge, through the same scaled-copy path as a texture replacement. The copy is made here,

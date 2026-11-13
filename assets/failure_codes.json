@@ -37,6 +37,12 @@
         "disc"
       ]
     },
+    "DISC_DAT_ENTITY_REFUSED": {
+      "stage": "inspect",
+      "in": [
+        "disc"
+      ]
+    },
     "DISC_DAT_NOT_DATAFILE": {
       "stage": "inspect",
       "in": [
@@ -56,6 +62,12 @@
       ]
     },
     "DISC_DAT_WRITE_FAILED": {
+      "stage": "inspect",
+      "in": [
+        "disc"
+      ]
+    },
+    "DISC_DAT_ZIP_INVALID": {
       "stage": "inspect",
       "in": [
         "disc"
@@ -234,7 +246,25 @@
         "player"
       ]
     },
+    "HOMEBREW_ALREADY_ADDED": {
+      "stage": "inspect",
+      "in": [
+        "player"
+      ]
+    },
+    "HOMEBREW_FOLDER_UNSUPPORTED": {
+      "stage": "inspect",
+      "in": [
+        "player"
+      ]
+    },
     "HOMEBREW_KERNEL_MODE_UNSUPPORTED": {
+      "stage": "inspect",
+      "in": [
+        "player"
+      ]
+    },
+    "HOMEBREW_KEY_TAKEN": {
       "stage": "inspect",
       "in": [
         "player"
@@ -638,6 +668,12 @@
       ]
     },
     "ENHANCEMENT_UNAVAILABLE": {
+      "stage": "package",
+      "in": [
+        "player"
+      ]
+    },
+    "TEXTURE_PACK_REFUSED": {
       "stage": "package",
       "in": [
         "player"
@@ -1133,6 +1169,12 @@
         "player"
       ]
     },
+    "HOMEBREW_KEPT_COPY_NOT_DELETED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
     "INSTALL_CANCELLED": {
       "stage": "host",
       "in": [
@@ -1268,6 +1310,12 @@
       ]
     },
     "SAVES_RESTORE_FAILED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "TEXTURE_PACK_PICKER_FAILED": {
       "stage": "host",
       "in": [
         "player"
@@ -1412,6 +1460,12 @@
       ]
     },
     "UPDATE_INSTALL_LEFTOVER": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "UPDATE_INSTALL_LEFTOVER_IN_USE": {
       "stage": "host",
       "in": [
         "player"

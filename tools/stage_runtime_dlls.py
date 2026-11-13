@@ -238,6 +238,62 @@ def stage_ui_font_assets(target_dir: Path, *, repo_root: Path = ROOT) -> list[st
     return staged
 
 
+# The launcher music's track (#2207): the player reads it from beside itself at this
+# relative path (PLAYER_UI_MUSIC_TRACK in src/player/ui/player_ui_music.h).
+LAUNCHER_MUSIC_TRACK = Path("assets") / "music" / "launcher" / "ChillLofi.ogg"
+
+
+def stage_launcher_music(target_dir: Path, *, repo_root: Path = ROOT) -> list[str]:
+    """Copy the launcher music's track beside an opt-in player build, with its fonts."""
+    source = repo_root / LAUNCHER_MUSIC_TRACK
+    destination = target_dir / LAUNCHER_MUSIC_TRACK
+    if not source.is_file():
+        raise StageError(f"LAUNCHER_MUSIC_MISSING: expected {source}")
+    if destination.exists() and not destination.is_file():
+        raise StagingCollisionError(
+            f"launcher music staging collision: {destination} is not a file"
+        )
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+    except OSError as exc:
+        raise StageError(f"LAUNCHER_MUSIC_STAGE_FAILED: {exc}") from exc
+    return [LAUNCHER_MUSIC_TRACK.as_posix()]
+
+
+def stage_redump_list(target_dir: Path, *, repo_root: Path = ROOT) -> list[str]:
+    """Copy the bundled Redump PSP list (``assets/redump``) beside the player.
+
+    The player's disc check reads ``assets/redump/redump-psp.zip`` from its own folder when
+    the user has imported no list (``src/core/nk_disc_verify.h``). The folder's
+    ``PROVENANCE.md`` goes with it, so the copy keeps its source and pin.
+    """
+    source_root = repo_root / "assets" / "redump"
+    destination_root = target_dir / "assets" / "redump"
+    if not (source_root / "redump-psp.zip").is_file():
+        raise StageError(f"REDUMP_LIST_MISSING: expected {source_root / 'redump-psp.zip'}")
+    if destination_root.exists() and not destination_root.is_dir():
+        raise StagingCollisionError(
+            f"Redump list staging collision: {destination_root} is not a directory"
+        )
+    staged: list[str] = []
+    for source in sorted(path for path in source_root.iterdir() if path.is_file()):
+        destination = destination_root / source.name
+        if destination.exists() and not destination.is_file():
+            raise StagingCollisionError(
+                f"Redump list staging collision: {destination} is not a file"
+            )
+        try:
+            destination_root.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+        except OSError as exc:
+            raise StageError(
+                f"REDUMP_LIST_STAGE_FAILED: could not copy {source.name}: {exc}"
+            ) from exc
+        staged.append((Path("assets") / "redump" / source.name).as_posix())
+    return staged
+
+
 def _files_equal(first: Path, second: Path) -> bool:
     """Whether two files have identical bytes; a file that cannot be stat'ed counts as different."""
     try:
@@ -276,8 +332,8 @@ def stage_runtime_dlls(
     ``roots`` defaults to :data:`RUNTIME_ROOTS`; ``env`` defaults to the process
     environment and supplies each root's override. A root already present in
     ``target_dir`` is kept (a package may pre-bundle it) but still contributes
-    its closure. ``include_ui_fonts`` copies the project font bundle for the
-    standalone player target. Returns the sorted names of every file staged.
+    its closure. ``include_ui_fonts`` copies the project font bundle and the
+    bundled Redump PSP list for the standalone player target. Returns the sorted names of every file staged.
 
     With ``refresh=True``, a root or closure DLL already in ``target_dir`` is
     replaced by the resolved toolchain/override file when their bytes differ
@@ -337,6 +393,9 @@ def stage_runtime_dlls(
 
     if include_ui_fonts:
         staged.update(stage_ui_font_assets(target_dir, repo_root=repo_root))
+        staged.update(stage_launcher_music(target_dir, repo_root=repo_root))
+        # The player's other bundled data goes with its fonts: the Redump list.
+        staged.update(stage_redump_list(target_dir, repo_root=repo_root))
 
     if notices:
         package_notices.generate_package_notices(
@@ -592,7 +651,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--include-ui-fonts",
         action="store_true",
-        help="also stage the pinned UI font bundle beside the standalone player",
+        help="also stage the player's bundled data beside the standalone player: the pinned "
+             "UI font bundle and the Redump PSP list (assets/redump)",
     )
     parser.add_argument(
         "--refresh",
@@ -635,14 +695,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if os.name != "nt":
         # POSIX hosts resolve shared libraries through the system loader. The
-        # opt-in player still needs its font assets beside the executable.
+        # opt-in player still needs its font assets and the Redump list beside
+        # the executable.
         if args.include_ui_fonts:
             try:
                 fonts = stage_ui_font_assets(args.target, repo_root=ROOT)
+                stage_launcher_music(args.target, repo_root=ROOT)
+                redump = stage_redump_list(args.target, repo_root=ROOT)
             except StageError as exc:
                 print(f"stage_runtime_dlls: FAIL: {exc}", file=sys.stderr)
                 return 1
             print(f"stage_runtime_dlls: staged {len(fonts)} UI font asset(s) into {args.target}")
+            print(f"stage_runtime_dlls: staged the launcher music track into {args.target}")
+            print(f"stage_runtime_dlls: staged the Redump list ({len(redump)} file(s)) into {args.target}")
             return 0
         print(
             "stage_runtime_dlls: non-Windows host; shared libraries resolve "
@@ -662,13 +727,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"stage_runtime_dlls: FAIL: {exc}", file=sys.stderr)
         return 1
     font_assets = [name for name in staged if name.startswith("assets/fonts/ui/")]
-    dlls = [name for name in staged if name not in font_assets]
+    redump = [name for name in staged if name.startswith("assets/redump/")]
+    dlls = [name for name in staged
+            if name not in font_assets and name != LAUNCHER_MUSIC_TRACK.as_posix()
+            and name not in redump]
     print(
         f"stage_runtime_dlls: staged {len(dlls)} runtime DLL(s) into "
         f"{args.target}: {', '.join(dlls)}"
     )
     if font_assets:
         print(f"stage_runtime_dlls: staged {len(font_assets)} UI font asset(s) into {args.target}")
+        print(f"stage_runtime_dlls: staged the launcher music track into {args.target}")
+    if redump:
+        print(f"stage_runtime_dlls: staged the Redump list ({len(redump)} file(s)) into {args.target}")
     if args.runtime_manifest:
         print(f"stage_runtime_dlls: wrote {RUNTIME_MANIFEST_NAME} into {args.target}")
     return 0

@@ -112,13 +112,15 @@ bool ui_keyboard_type(UiKeyboard *keyboard, const char *utf8) {
             ++i; /* not a character: left out */
             continue;
         }
-        if (length + n > keyboard->cap) break;
-        if (keyboard->accept == NULL || keyboard->accept(cp, keyboard->user)) {
-            memcpy(keyboard->text + length, s + i, n);
-            length += n;
-            keyboard->text[length] = '\0';
-            typed = true;
+        if (keyboard->accept != NULL && !keyboard->accept(cp, keyboard->user)) {
+            i += n; /* refused by the filter: left out */
+            continue;
         }
+        if (length + n > keyboard->cap) break;
+        memcpy(keyboard->text + length, s + i, n);
+        length += n;
+        keyboard->text[length] = '\0';
+        typed = true;
         i += n;
     }
     return typed;
@@ -218,6 +220,15 @@ static NkUiLayout keyboard_row(float gap) {
     return layout;
 }
 
+void ui_keyboard_take_pad(NkUi *ui, UiKeyboardPad *pad) {
+    if (pad == NULL) return;
+    pad->remove = nk_ui_take_event(ui, NK_UI_EV_OPTIONS, NULL);
+    pad->space = nk_ui_take_event(ui, NK_UI_EV_DETAILS, NULL);
+    pad->shift = nk_ui_take_event(ui, NK_UI_EV_TAB, NULL);
+    pad->done = nk_ui_take_event(ui, NK_UI_EV_MENU, NULL);
+    pad->back = nk_ui_take_event(ui, NK_UI_EV_BACK, NULL);
+}
+
 UiKeyboardResult ui_keyboard_draw(NkUi *ui, UiKeyboard *keyboard, const UiKeyboardView *view) {
     UiKeyboardResult result = UI_KEYBOARD_NONE;
     NkUiLayout block;
@@ -277,19 +288,21 @@ UiKeyboardResult ui_keyboard_draw(NkUi *ui, UiKeyboard *keyboard, const UiKeyboa
     }
     nk_ui_end_container(ui);
     /* The pad's shortcuts, taken every frame the keyboard is up so none reaches the
-       screen under it. A key's own press above wins over them. */
+       screen under it (or before it, by the screen: view->pad). A key's own press
+       above wins over them. */
     {
-        bool remove = nk_ui_take_event(ui, NK_UI_EV_OPTIONS, NULL);
-        bool space = nk_ui_take_event(ui, NK_UI_EV_DETAILS, NULL);
-        bool shift = nk_ui_take_event(ui, NK_UI_EV_TAB, NULL);
-        bool done = nk_ui_take_event(ui, NK_UI_EV_MENU, NULL);
-        bool back = nk_ui_take_event(ui, NK_UI_EV_BACK, NULL);
+        UiKeyboardPad taken;
+        const UiKeyboardPad *pad = view->pad;
+        if (pad == NULL) {
+            ui_keyboard_take_pad(ui, &taken);
+            pad = &taken;
+        }
         if (result != UI_KEYBOARD_NONE) return result;
-        if (back) return UI_KEYBOARD_CANCEL;
-        if (done) return UI_KEYBOARD_DONE;
-        if (remove && ui_keyboard_delete(keyboard)) return UI_KEYBOARD_EDITED;
-        if (space && type_codepoint(keyboard, ' ')) return UI_KEYBOARD_EDITED;
-        if (shift) {
+        if (pad->back) return UI_KEYBOARD_CANCEL;
+        if (pad->done) return UI_KEYBOARD_DONE;
+        if (pad->remove && ui_keyboard_delete(keyboard)) return UI_KEYBOARD_EDITED;
+        if (pad->space && type_codepoint(keyboard, ' ')) return UI_KEYBOARD_EDITED;
+        if (pad->shift) {
             keyboard->shifted = !keyboard->shifted;
             return UI_KEYBOARD_EDITED;
         }

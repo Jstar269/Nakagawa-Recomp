@@ -146,8 +146,13 @@ typedef struct {
     bool no_shared_libraries;
     /* Set by the caller before package_builder_start: the enhancement package of
        the enhanced build to write, packages/<disc_id>-enhanced-<id>; the build
-       runs with --experimental-60hz. Empty builds the authentic package. */
+       runs with --experimental-60hz. <timing id>+<hook id> adds --ace-cull, the
+       title's culling package beside its timing package (docs/ENHANCEMENT_CONTRACT.md
+       section 9.9). Empty builds the authentic package. */
     char enhancement_package_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    /* Set with enhancement_package_id when the build is the culling package alone
+       (NkGameEntry.enhancement_hook_only): --ace-cull without --experimental-60hz. */
+    bool enhancement_hook_only;
     /* Set by the caller before package_builder_start: the disc image to build,
        passed as --iso-path. Two images can share a disc ID (a retail disc and a
        fan translation of it), and nk_cli.py then builds only the one named.

@@ -8,16 +8,99 @@
   "required": ["schema_version", "semantic_boundary", "tracking_issue", "cases"],
   "properties": {
     "$schema": {"type": "string"},
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "semantic_boundary": {"const": "GE_RASTER_PIXEL_CONFORMANCE"},
     "tracking_issue": {"const": 343},
     "cases": {
       "type": "array",
       "minItems": 1,
       "items": {"$ref": "#/$defs/case"}
+    },
+    "probe_runs": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {"$ref": "#/$defs/probe_run"},
+      "description": "Measured results of the ge-raster, ge-weight and ge-rtt probes, one run each, written by run_psplink.py --ge-corpus-write."
     }
   },
   "$defs": {
+    "probe_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["test_id", "probe_case", "fixture", "source_tier", "evidence_envelope", "cells"],
+      "properties": {
+        "test_id": {"enum": ["PSP-GE-RASTER-001", "PSP-GE-WEIGHT-001", "PSP-GE-RTT-001"]},
+        "probe_case": {"enum": ["ge-raster", "ge-weight", "ge-rtt"]},
+        "fixture": {"const": "fixtures/psp_oracle/probe_ge_sample.c"},
+        "source_tier": {"const": "PSP_HARDWARE"},
+        "evidence_envelope": {"$ref": "#/$defs/evidence_envelope"},
+        "cells": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/probe_cell"}
+        }
+      }
+    },
+    "probe_cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cell", "window_fnv1a64", "records"],
+      "properties": {
+        "cell": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,47}$"},
+        "window_fnv1a64": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{16}$",
+          "description": "FNV-1a 64 over the cell's rN rows, each word low byte first (gr_digest in probe_ge_sample.c)."
+        },
+        "records": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/probe_record"}
+        }
+      }
+    },
+    "probe_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case_id", "words"],
+      "properties": {
+        "case_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+        "words": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}( [0-9a-f]{8}){15}$",
+          "description": "The record's sixteen out words as the PSP reported them, in order."
+        }
+      }
+    },
+    "evidence_envelope": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "EVIDENCE_CLASS", "ACCEPTANCE_ELIGIBLE", "CASE_ID", "CONSOLE_MODEL", "FW",
+        "SOURCE_COMMIT", "BINARY_SHA256", "RESULT_RECORD"
+      ],
+      "properties": {
+        "EVIDENCE_CLASS": {"enum": ["PSP_HARDWARE", "UNQUALIFIED_CAPTURE"]},
+        "ACCEPTANCE_ELIGIBLE": {"type": "boolean"},
+        "CASE_ID": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+        "CONSOLE_MODEL": {"type": "string", "minLength": 1, "maxLength": 48},
+        "FW": {"type": "string", "minLength": 1, "maxLength": 48},
+        "SOURCE_COMMIT": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+        "BINARY_SHA256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "RESULT_RECORD": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){0,7}$"
+            },
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        }
+      }
+    },
     "case": {
       "type": "object",
       "additionalProperties": false,
@@ -94,35 +177,7 @@
           "type": ["string", "null"],
           "enum": [null, "PSP_HARDWARE", "LOCAL_COSIM", "PPSSPP_CORROBORATIVE"]
         },
-        "evidence_envelope": {
-          "type": ["object", "null"],
-          "additionalProperties": false,
-          "required": [
-            "EVIDENCE_CLASS", "ACCEPTANCE_ELIGIBLE", "CASE_ID", "CONSOLE_MODEL", "FW",
-            "SOURCE_COMMIT", "BINARY_SHA256", "RESULT_RECORD"
-          ],
-          "properties": {
-            "EVIDENCE_CLASS": {"enum": ["PSP_HARDWARE", "UNQUALIFIED_CAPTURE"]},
-            "ACCEPTANCE_ELIGIBLE": {"type": "boolean"},
-            "CASE_ID": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
-            "CONSOLE_MODEL": {"type": "string", "minLength": 1, "maxLength": 48},
-            "FW": {"type": "string", "minLength": 1, "maxLength": 48},
-            "SOURCE_COMMIT": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
-            "BINARY_SHA256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "RESULT_RECORD": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["path", "sha256"],
-              "properties": {
-                "path": {
-                  "type": "string",
-                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){0,7}$"
-                },
-                "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-              }
-            }
-          }
-        }
+        "evidence_envelope": {"$ref": "#/$defs/evidence_envelope"}
       }
     }
   }

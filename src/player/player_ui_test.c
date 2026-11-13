@@ -199,6 +199,16 @@ int player_ui_test_fail_title_index(const char *disc_id) {
 static float s_ui_test_mouse_x;
 static float s_ui_test_mouse_y;
 
+/* WAIT_MUSIC's state names, in PlayerUiMusicState order. */
+static int player_ui_test_music_state(const char *name) {
+    static const char *const names[] = {"off", "loading", "playing", "fading_out", "paused",
+                                        "stopped", "missing", "damaged", "no_device"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (strcmp(name, names[i]) == 0) return (int)i;
+    }
+    return -1;
+}
+
 int player_ui_test_next_event(const char *script, size_t *cursor,
                                     SDL_Event *event) {
     if (!script || !cursor || !event) return -1;
@@ -242,6 +252,29 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
         event->type = SDL_EVENT_USER;
         event->user.code = PLAYER_UI_TEST_ACTION_WAIT_LAID_OUT;
         event->user.timestamp = timeout;
+        return 1;
+    }
+    /* WAIT_MUSIC=<state>,<timeout ms>: until the launcher music is in that state
+       (player_ui_music_state_name). */
+    if (strncmp(token, "WAIT_MUSIC=", 11) == 0) {
+        char *comma = strchr(token + 11, ',');
+        uint64_t timeout = 0;
+        int state;
+        if (!comma) return -1;
+        *comma = '\0';
+        state = player_ui_test_music_state(token + 11);
+        if (state < 0 || !player_ui_test_parse_positive_u64(comma + 1, &timeout) ||
+            timeout > UINT32_MAX) return -1;
+        event->type = SDL_EVENT_USER;
+        event->user.code = PLAYER_UI_TEST_ACTION_WAIT_MUSIC;
+        event->user.windowID = (Uint32)state;
+        event->user.timestamp = timeout;
+        return 1;
+    }
+    /* The launcher window losing or getting back input focus, as SDL reports it. */
+    if (strcmp(token, "FOCUS_LOST") == 0 || strcmp(token, "FOCUS_GAINED") == 0) {
+        event->type = strcmp(token, "FOCUS_LOST") == 0 ? SDL_EVENT_WINDOW_FOCUS_LOST
+                                                       : SDL_EVENT_WINDOW_FOCUS_GAINED;
         return 1;
     }
     if (strncmp(token, "WAIT_VIEW=", 10) == 0) {
@@ -709,7 +742,8 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            "rebuild_reminder=%d rebuild_queue=%d rebuild_queue_active=%d "
            "rebuild_queue_paused=%d prompt_version=%s "
            "input_class=%s input_files=%zu next_input_class=%s next_input_files=%zu "
-           "backdrop=%d backdrop_shown=%d disc_check=%d drop_pending=%zu drop_notice=%s\n",
+           "backdrop=%d backdrop_shown=%d disc_check=%d drop_pending=%zu drop_notice=%s "
+           "music=%s\n",
            frame_number, (unsigned long long)SDL_GetTicks(),
            player_ui_test_view_name(app->active_view),
            app->selected_game_index,
@@ -784,7 +818,8 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            backdrop_index, backdrop_shown ? 1 : 0, app->disc_check.running ? 1 : 0,
            app->drop_count > app->drop_next ? app->drop_count - app->drop_next : (size_t)0,
            !app->drop_notice[0] ? "none"
-               : strstr(app->drop_notice, "being set up") ? "busy" : "summary");
+               : strstr(app->drop_notice, "being set up") ? "busy" : "summary",
+           player_ui_nk_music_state_name(g_ui_test_next_ui));
 
     if (g_ui_test_next_ui != NULL) {
         /* The nickname editor (#2197) while it is open: what it holds, in hex so a
@@ -798,6 +833,39 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
                 printf("%02x", (unsigned)(unsigned char)nickname[i]);
             }
             printf(" count=%s\n", count);
+        }
+        /* The library's find box (#2206) while it is open, in hex the same way. */
+        const char *find = player_ui_nk_test_find(g_ui_test_next_ui);
+        if (find != NULL) {
+            printf("[PLAYER_UI_TEST] find_box frame=%d text_hex=", frame_number);
+            for (size_t i = 0; find[i] != '\0'; i++) {
+                printf("%02x", (unsigned)(unsigned char)find[i]);
+            }
+            printf("\n");
+        }
+        /* The library grid at its root, each time it changes: how many games it holds
+           (the find box's matches while it is open), of how many, and the disc IDs of
+           the titles the frame drew, in order (player_ui_nk_shown_titles). */
+        if (player_ui_nk_at_library_root(g_ui_test_next_ui)) {
+            static char last_grid[PLAYER_UI_SHOWN_TITLES_MAX * MAX_DISC_ID_LEN + 64];
+            char grid[sizeof(last_grid)];
+            int shown[PLAYER_UI_SHOWN_TITLES_MAX];
+            size_t total = 0u;
+            size_t matches = player_ui_nk_test_library_grid(g_ui_test_next_ui, &total);
+            size_t shown_count = player_ui_nk_shown_titles(g_ui_test_next_ui, shown,
+                                                           PLAYER_UI_SHOWN_TITLES_MAX);
+            size_t used = (size_t)snprintf(grid, sizeof(grid), "matches=%zu total=%zu shown=",
+                                           matches, total);
+            for (size_t i = 0u; i < shown_count && used < sizeof(grid); i++) {
+                const char *disc = shown[i] >= 0 && shown[i] < app->game_count
+                    ? app->games[shown[i]].disc_id : "?";
+                used += (size_t)snprintf(grid + used, sizeof(grid) - used, "%s%s",
+                                         i > 0u ? "," : "", disc[0] ? disc : "?");
+            }
+            if (strcmp(grid, last_grid) != 0) {
+                memcpy(last_grid, grid, strlen(grid) + 1u);
+                printf("[PLAYER_UI_TEST] library_grid frame=%d %s\n", frame_number, grid);
+            }
         }
     }
 
@@ -1140,6 +1208,22 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, bool *running,
     if (!t->mode) return;
     uint64_t ui_test_now = SDL_GetTicks();
     bool ui_test_block_script = false;
+    if (t->waiting_for_music) {
+        int state = player_ui_nk_music_state(g_ui_test_next_ui);
+        if (state == t->wait_music_state) {
+            printf("[PLAYER_UI_TEST] wait_music actual=%s result=PASS\n",
+                   player_ui_nk_music_state_name(g_ui_test_next_ui));
+            t->waiting_for_music = false;
+        } else if (ui_test_now >= t->wait_deadline) {
+            fprintf(stderr, "[PLAYER_UI_TEST] wait_music result=FAIL actual=%s\n",
+                    player_ui_nk_music_state_name(g_ui_test_next_ui));
+            t->failed = true;
+            t->quit_queued = true;
+            *running = false;
+        } else {
+            ui_test_block_script = true;
+        }
+    }
     if (t->waiting_for_view) {
         uint32_t current_view_mask = (unsigned)app->active_view < 32
             ? UINT32_C(1) << (unsigned)app->active_view : 0;
@@ -1308,6 +1392,11 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, bool *running,
             t->wait_layout_frame = t->frame;
             t->wait_deadline = ui_test_now + scripted_event.user.timestamp;
             t->waiting_for_layout = true;
+        } else if (scripted_event.type == SDL_EVENT_USER &&
+                   scripted_event.user.code == PLAYER_UI_TEST_ACTION_WAIT_MUSIC) {
+            t->wait_music_state = (int)scripted_event.user.windowID;
+            t->wait_deadline = ui_test_now + scripted_event.user.timestamp;
+            t->waiting_for_music = true;
         } else if (scripted_event.type == SDL_EVENT_USER &&
                    scripted_event.user.code == PLAYER_UI_TEST_ACTION_WAIT_VIEW) {
             t->wait_view_mask = scripted_event.user.windowID;
@@ -1688,6 +1777,13 @@ const char *player_ui_test_slow_start_text(void) {
 
 void player_ui_test_slow_start(const PlayerUiTestLaunch *launch) {
     if (launch->slow_start_ms > 0u) SDL_Delay(launch->slow_start_ms);
+}
+
+void player_ui_test_report_launch_worker(bool launcher_audio_closed) {
+    printf("[PLAYER_UI_TEST] launch_worker_start launcher_audio=%s music=%s decoder=%s\n",
+           launcher_audio_closed ? "closed" : "open",
+           player_ui_nk_music_state_name(g_ui_test_next_ui),
+           player_ui_nk_music_decoding(g_ui_test_next_ui) ? "running" : "idle");
 }
 
 /* The headless regression cannot open a modal box, so it reads the dialog

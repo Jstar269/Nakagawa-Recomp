@@ -3,10 +3,15 @@
 
 /*
  * Disc verification (src/core/nk_disc_verify.c) and the library keyed by disc
- * ID plus content hash (src/core/nk_library.c), on synthetic data only: the
+ * ID plus content hash (src/core/nk_library.c). First the conformance table
+ * both datafile readers are held to (tests/native/disc_dat_conformance.txt,
+ * written and checked by tools/test_disc_verify.py: its cases, and seeded
+ * mutations of the bundled list); then, on synthetic data only: the
  * SHA-1 and CRC-32 known answers, the whole-image hash with progress and
  * cancel, the Redump datafile reader, the three tiers, the import into the
- * data folder, and library files: one written before hashing still loads, a
+ * data folder, Redump's zip, the refusal of entity-bearing lists, the list
+ * bundled with Nakagawa (the one real list read: assets/redump, from the
+ * checkout) and an import overriding it, and library files: one written before hashing still loads, a
  * fan translation and its retail disc are two records, the modified one
  * labelled. The CSO/ZSO/CHD round trips in test_disc_expand.c check that an
  * expansion hashes the same as its .iso.
@@ -18,6 +23,8 @@
 #include "nk_disc_verify.h"
 #include "nk_library.h"
 #include "nk_platform.h"
+#include "nk_psp_inflate.h"
+#include "nk_zip.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -74,6 +81,646 @@ static void sha1_hex(const uint8_t *data, size_t len, char out[41]) {
         out[2 * i + 1] = hex[digest[i] & 15];
     }
     out[40] = '\0';
+}
+
+static bool is_xml_space(uint8_t c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+/* ---- one table of cases for both readers ------------------------------ */
+
+/* tests/native/disc_dat_conformance.txt: inputs and the result each must
+   give, written by tools/test_disc_verify.py from the Python reader, whose
+   suite checks it too. This reader must give the same result for every case
+   and every mutation, so neither reader can change alone. The file's header
+   says how a case is written; the pieces and the mutations below follow
+   tools/test_disc_verify.py's build_pieces and mutation step for step. */
+
+#define CORPUS_PATH "tests/native/disc_dat_conformance.txt"
+
+typedef struct {
+    uint8_t *data;
+    size_t size;
+    size_t cap;
+} Buf;
+
+static void buf_reserve(Buf *b, size_t more) {
+    if (more <= b->cap - b->size) return;
+    CHECK(more <= SIZE_MAX - b->size);
+    size_t cap = b->cap ? b->cap : 256u;
+    while (cap < b->size + more) cap *= 2u;
+    uint8_t *grown = (uint8_t *)realloc(b->data, cap);
+    CHECK(grown != NULL);
+    b->data = grown;
+    b->cap = cap;
+}
+
+static void buf_add(Buf *b, const void *p, size_t n) {
+    if (n == 0) return;
+    buf_reserve(b, n);
+    memcpy(b->data + b->size, p, n);
+    b->size += n;
+}
+
+static void buf_add_byte(Buf *b, uint8_t c) {
+    buf_add(b, &c, 1u);
+}
+
+static void buf_free(Buf *b) {
+    free(b->data);
+    memset(b, 0, sizeof(*b));
+}
+
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* A piece's text: \\ \n \t \r and \xHH escaped, every other byte itself. */
+static void unescape_into(Buf *out, const char *text) {
+    for (const char *p = text; *p; p++) {
+        if (*p != '\\') {
+            buf_add_byte(out, (uint8_t)*p);
+            continue;
+        }
+        p++;
+        if (*p == '\\') buf_add_byte(out, '\\');
+        else if (*p == 'n') buf_add_byte(out, '\n');
+        else if (*p == 't') buf_add_byte(out, '\t');
+        else if (*p == 'r') buf_add_byte(out, '\r');
+        else {
+            CHECK(*p == 'x' && hex_nibble(p[1]) >= 0 && hex_nibble(p[2]) >= 0);
+            buf_add_byte(out, (uint8_t)(hex_nibble(p[1]) * 16 + hex_nibble(p[2])));
+            p += 2;
+        }
+    }
+}
+
+/* One final fixed-Huffman deflate block (RFC 1951 3.2.6), as
+   tools/test_disc_verify.py's fixed_deflate writes it: each byte a literal; a
+   run of 259 or more of one byte, a literal and as many length-258
+   distance-1 copies as fit; then the end of the block. */
+typedef struct {
+    Buf *out;
+    uint32_t acc;
+    unsigned bits;
+} BitWriter;
+
+static void bits_put(BitWriter *w, uint32_t value, unsigned count) {
+    for (unsigned i = 0; i < count; i++) {
+        w->acc |= ((value >> i) & 1u) << w->bits;
+        if (++w->bits == 8u) {
+            buf_add_byte(w->out, (uint8_t)w->acc);
+            w->acc = 0;
+            w->bits = 0;
+        }
+    }
+}
+
+/* A Huffman code, most significant bit first. */
+static void bits_code(BitWriter *w, unsigned symbol) {
+    uint32_t code;
+    unsigned length;
+    if (symbol < 144u) {
+        code = 0x30u + symbol;
+        length = 8u;
+    } else if (symbol < 256u) {
+        code = 0x190u + symbol - 144u;
+        length = 9u;
+    } else if (symbol < 280u) {
+        code = symbol - 256u;
+        length = 7u;
+    } else {
+        code = 0xC0u + symbol - 280u;
+        length = 8u;
+    }
+    for (unsigned i = length; i-- > 0;) bits_put(w, (code >> i) & 1u, 1u);
+}
+
+static void fixed_deflate(const uint8_t *data, size_t size, Buf *out) {
+    BitWriter w = {out, 0u, 0u};
+    bits_put(&w, 1u, 1u); /* BFINAL */
+    bits_put(&w, 1u, 2u); /* BTYPE 01 */
+    size_t at = 0;
+    while (at < size) {
+        size_t run = 1;
+        while (at + run < size && data[at + run] == data[at]) run++;
+        if (run < 259u) {
+            for (size_t i = 0; i < run; i++) bits_code(&w, data[at]);
+            at += run;
+            continue;
+        }
+        bits_code(&w, data[at]);
+        size_t copies = (run - 1u) / 258u;
+        for (size_t i = 0; i < copies; i++) {
+            bits_code(&w, 285u); /* length 258 */
+            bits_put(&w, 0u, 5u); /* distance code 0: distance 1 */
+        }
+        at += 1u + copies * 258u;
+    }
+    bits_code(&w, 256u);
+    if (w.bits) buf_add_byte(out, (uint8_t)w.acc);
+}
+
+static void put_le16(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+static void put_le32(uint8_t *p, uint32_t v) {
+    put_le16(p, v & 0xFFFFu);
+    put_le16(p + 2, v >> 16);
+}
+
+static uint32_t get_le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* The zip the mutations start from (tools/test_disc_verify.py's zip_bytes):
+   one entry, list.dat, version 20, no flags, time 0, date 0x21. */
+static void zip_bytes(const uint8_t *payload, size_t size, unsigned method, Buf *out) {
+    Buf packed = {NULL, 0, 0};
+    if (method == 8u) fixed_deflate(payload, size, &packed);
+    else buf_add(&packed, payload, size);
+    uint32_t crc = nk_crc32_update(0u, payload, size);
+    uint8_t local[38], central[54], end[22];
+    memset(local, 0, sizeof(local));
+    memset(central, 0, sizeof(central));
+    memset(end, 0, sizeof(end));
+    put_le32(local, 0x04034B50u);
+    put_le16(local + 4, 20u);
+    put_le16(local + 8, method);
+    put_le16(local + 12, 0x21u);
+    put_le32(local + 14, crc);
+    put_le32(local + 18, (uint32_t)packed.size);
+    put_le32(local + 22, (uint32_t)size);
+    put_le16(local + 26, 8u);
+    memcpy(local + 30, "list.dat", 8u);
+    put_le32(central, 0x02014B50u);
+    put_le16(central + 4, 20u);
+    put_le16(central + 6, 20u);
+    put_le16(central + 10, method);
+    put_le16(central + 14, 0x21u);
+    put_le32(central + 16, crc);
+    put_le32(central + 20, (uint32_t)packed.size);
+    put_le32(central + 24, (uint32_t)size);
+    put_le16(central + 28, 8u);
+    memcpy(central + 46, "list.dat", 8u);
+    put_le32(end, 0x06054B50u);
+    put_le16(end + 8, 1u);
+    put_le16(end + 10, 1u);
+    put_le32(end + 12, (uint32_t)sizeof(central));
+    put_le32(end + 16, (uint32_t)(sizeof(local) + packed.size));
+    buf_add(out, local, sizeof(local));
+    buf_add(out, packed.data, packed.size);
+    buf_add(out, central, sizeof(central));
+    buf_add(out, end, sizeof(end));
+    buf_free(&packed);
+}
+
+/* What the reader made of one input, as tools/test_disc_verify.py's outcome
+   writes it: the counts and the SHA-1 of the list read, or the refusal. */
+static void outcome_line(const uint8_t *data, size_t size, char *line, size_t line_size) {
+    NkDiscDat dat;
+    NkDiscExpandStatus status;
+    if (!nk_disc_dat_read(data, size, &dat, &status)) {
+        snprintf(line, line_size, "%s %s", status.code, status.message);
+        return;
+    }
+    Buf canonical = {NULL, 0, 0};
+    char row[160];
+    snprintf(row, sizeof(row), "%lu\n%lu\n%lu\n", (unsigned long)dat.games,
+             (unsigned long)dat.rom_count, (unsigned long)dat.rejected_roms);
+    buf_add(&canonical, row, strlen(row));
+    const char *const header[3] = {dat.name, dat.version, dat.date};
+    for (size_t i = 0; i < 3u; i++) {
+        buf_add(&canonical, header[i], strlen(header[i]));
+        buf_add_byte(&canonical, '\n');
+    }
+    for (size_t i = 0; i < dat.serial_count; i++) {
+        snprintf(row, sizeof(row), "serial %s\n", dat.serials[i]);
+        buf_add(&canonical, row, strlen(row));
+    }
+    for (size_t i = 0; i < dat.rom_count; i++) {
+        char sha1[41];
+        static const char hex[] = "0123456789abcdef";
+        for (size_t k = 0; k < 20u; k++) {
+            sha1[2u * k] = hex[dat.roms[i].sha1[k] >> 4];
+            sha1[2u * k + 1u] = hex[dat.roms[i].sha1[k] & 15u];
+        }
+        sha1[40] = '\0';
+        snprintf(row, sizeof(row), "rom %s %08lx %llu %lu\n", sha1,
+                 (unsigned long)dat.roms[i].crc32, (unsigned long long)dat.roms[i].size_bytes,
+                 (unsigned long)dat.roms[i].listed);
+        buf_add(&canonical, row, strlen(row));
+    }
+    char digest[41];
+    sha1_hex(canonical.data, canonical.size, digest);
+    snprintf(line, line_size, "OK %lu %lu %lu %lu %s", (unsigned long)dat.games,
+             (unsigned long)dat.rom_count, (unsigned long)dat.rejected_roms,
+             (unsigned long)dat.serial_count, digest);
+    buf_free(&canonical);
+    nk_disc_dat_free(&dat);
+}
+
+/* Registers a case's pieces may fill (reg NAME ... out). */
+typedef struct {
+    char name[32];
+    Buf buf;
+} Register;
+
+#define MAX_REGISTERS 8u
+
+static Buf *register_named(Register *regs, size_t *count, const char *name, bool fresh) {
+    for (size_t i = 0; i < *count; i++) {
+        if (strcmp(regs[i].name, name) == 0) {
+            if (fresh) regs[i].buf.size = 0;
+            return &regs[i].buf;
+        }
+    }
+    CHECK(fresh && *count < MAX_REGISTERS && strlen(name) < sizeof(regs[0].name));
+    snprintf(regs[*count].name, sizeof(regs[0].name), "%s", name);
+    memset(&regs[*count].buf, 0, sizeof(Buf));
+    return &regs[(*count)++].buf;
+}
+
+/* One piece line of a case, into *target (or a register change). */
+static void build_piece(const char *line, Buf *output, Buf **target, Register *regs,
+                        size_t *reg_count) {
+    if (strcmp(line, "t") == 0) return;
+    if (strncmp(line, "t ", 2) == 0) {
+        unescape_into(*target, line + 2);
+    } else if (strncmp(line, "h ", 2) == 0) {
+        for (const char *p = line + 2; *p; p += 2) {
+            CHECK(hex_nibble(p[0]) >= 0 && hex_nibble(p[1]) >= 0);
+            buf_add_byte(*target, (uint8_t)(hex_nibble(p[0]) * 16 + hex_nibble(p[1])));
+        }
+    } else if (strncmp(line, "r ", 2) == 0 || strncmp(line, "seq ", 4) == 0) {
+        bool seq = line[0] == 's';
+        char *rest = NULL;
+        unsigned long count = strtoul(line + (seq ? 4 : 2), &rest, 10);
+        CHECK(rest && *rest == ' ');
+        Buf unit = {NULL, 0, 0};
+        unescape_into(&unit, rest + 1);
+        if (!seq) {
+            buf_reserve(*target, unit.size * count);
+            for (unsigned long i = 0; i < count; i++) buf_add(*target, unit.data, unit.size);
+        }
+        for (unsigned long i = 0; seq && i < count; i++) {
+            for (size_t k = 0; k < unit.size; k++) {
+                char field[48];
+                if (unit.data[k] != '%' || k + 1u >= unit.size) {
+                    buf_add_byte(*target, unit.data[k]);
+                    continue;
+                }
+                char kind = (char)unit.data[++k];
+                if (kind == 'H') snprintf(field, sizeof(field), "%040lx", i);
+                else if (kind == 'X') snprintf(field, sizeof(field), "%lx", i);
+                else if (kind == 'D') snprintf(field, sizeof(field), "%05lu", i % 100000ul);
+                else {
+                    CHECK(kind == '%');
+                    snprintf(field, sizeof(field), "%%");
+                }
+                buf_add(*target, field, strlen(field));
+            }
+        }
+        buf_free(&unit);
+    } else if (strncmp(line, "file ", 5) == 0) {
+        FILE *f = nk_fopen_utf8(line + 5, "rb");
+        CHECK(f != NULL);
+        uint8_t chunk[65536];
+        size_t got;
+        while ((got = fread(chunk, 1, sizeof(chunk), f)) > 0) buf_add(*target, chunk, got);
+        fclose(f);
+    } else if (strncmp(line, "reg ", 4) == 0) {
+        *target = register_named(regs, reg_count, line + 4, true);
+    } else if (strcmp(line, "out") == 0) {
+        *target = output;
+    } else if (strncmp(line, "put ", 4) == 0) {
+        Buf *source = register_named(regs, reg_count, line + 4, false);
+        buf_add(*target, source->data, source->size);
+    } else if (strncmp(line, "deflate ", 8) == 0) {
+        Buf *source = register_named(regs, reg_count, line + 8, false);
+        fixed_deflate(source->data, source->size, *target);
+    } else {
+        fprintf(stderr, "unknown corpus piece: %.40s\n", line);
+        CHECK(false);
+    }
+}
+
+/* ---- the seeded mutations ---- */
+
+typedef struct {
+    uint64_t state;
+} SplitMix64;
+
+static uint64_t rng_next(SplitMix64 *rng) {
+    uint64_t z = (rng->state += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+static size_t rng_below(SplitMix64 *rng, size_t bound) {
+    return (size_t)(rng_next(rng) % (uint64_t)bound);
+}
+
+typedef struct {
+    const uint8_t *bytes;
+    size_t size;
+} Lit;
+
+#define LIT(s) {(const uint8_t *)(s), sizeof(s) - 1u}
+
+static const uint8_t k_interesting[] = {
+    0x00, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0x21, 0x22, 0x26, 0x27, 0x2c, 0x2d, 0x2f,
+    0x3c, 0x3d, 0x3e, 0x3f, 0x5b, 0x5d, 0x7f, 0x80, 0xa0, 0xc2, 0xe3, 0xef, 0xff,
+};
+
+static const Lit k_insertions[] = {
+    LIT("\xc2\xa0"), LIT("\xe3\x80\x80"), LIT("\xc5\xbf"), LIT("\xc4\xb1"), LIT("\xef\xbb\xbf"),
+    LIT("&amp;"), LIT("&#65;"), LIT("&#x41;"), LIT("&bogus;"), LIT("<!--"), LIT("-->"),
+    LIT("<?x?>"), LIT("<!DOCTYPE x>"), LIT("<![CDATA["), LIT("</datafile>"), LIT("<datafile>"),
+    LIT("<header>"), LIT("</header>"), LIT("<game>"), LIT("</game>"), LIT("<serial>"),
+    LIT("</serial>"), LIT("<rom/>"),
+    LIT("<rom sha1=\"0123456789abcdef0123456789abcdef01234567\" crc=\"0badf00d\" size=\"1\"/>"),
+    LIT("<a>"), LIT("</a>"), LIT(","), LIT("ULUS-10041"), LIT("\xf0\x9f\x98\x80"),
+    LIT("\xed\xa0\x80"), LIT("\xc0\xaf"), LIT("\xf4\x90\x80\x80"),
+};
+
+static const Lit k_whitespace_swaps[] = {
+    LIT("\x0b"), LIT("\x0c"), LIT("\xc2\xa0"), LIT("\xe3\x80\x80"), LIT("\xc2\x85"),
+    LIT("\xe2\x80\x8b"), LIT("\x00"), LIT("\x1f"), LIT(""), LIT("  "),
+};
+
+/* Replace data[at, at + removed) with insert[0, inserted). */
+static void buf_splice(Buf *b, size_t at, size_t removed, const uint8_t *insert, size_t inserted) {
+    CHECK(at <= b->size && removed <= b->size - at);
+    uint8_t *copy = NULL;
+    if (inserted) {
+        copy = (uint8_t *)malloc(inserted);
+        CHECK(copy != NULL);
+        memcpy(copy, insert, inserted); /* insert may point into b */
+    }
+    if (inserted > removed) buf_reserve(b, inserted - removed);
+    memmove(b->data + at + inserted, b->data + at + removed, b->size - at - removed);
+    if (inserted) memcpy(b->data + at, copy, inserted);
+    b->size = b->size - removed + inserted;
+    free(copy);
+}
+
+static void mutate_text(SplitMix64 *rng, Buf *data) {
+    size_t ops = 1u + rng_below(rng, 4u);
+    for (size_t n = 0; n < ops; n++) {
+        size_t op = rng_below(rng, 8u);
+        size_t size = data->size;
+        if (op == 2u) {
+            size_t at = rng_below(rng, size + 1u);
+            const Lit *seq = &k_insertions[rng_below(rng, sizeof(k_insertions) / sizeof(k_insertions[0]))];
+            buf_splice(data, at, 0, seq->bytes, seq->size);
+        } else if (size == 0) {
+            continue;
+        } else if (op == 0u) {
+            size_t at = rng_below(rng, size);
+            data->data[at] ^= (uint8_t)(1u << rng_below(rng, 8u));
+        } else if (op == 1u) {
+            size_t at = rng_below(rng, size);
+            data->data[at] = k_interesting[rng_below(rng, sizeof(k_interesting))];
+        } else if (op == 3u) {
+            size_t at = rng_below(rng, size);
+            size_t count = 1u + rng_below(rng, 16u);
+            buf_splice(data, at, count < size - at ? count : size - at, NULL, 0);
+        } else if (op == 4u) {
+            size_t at = rng_below(rng, size);
+            size_t count = 1u + rng_below(rng, 64u);
+            buf_splice(data, at, 0, data->data + at, count < size - at ? count : size - at);
+        } else if (op == 5u) {
+            data->size = rng_below(rng, size + 1u);
+        } else if (op == 6u) {
+            size_t at = rng_below(rng, size);
+            unsigned upper = data->data[at] & 0xDFu;
+            if (upper >= 0x41u && upper <= 0x5Au) data->data[at] ^= 0x20u;
+        } else {
+            size_t at = rng_below(rng, size);
+            while (at < size && !is_xml_space(data->data[at])) at++;
+            if (at < size) {
+                const Lit *swap = &k_whitespace_swaps[rng_below(
+                    rng, sizeof(k_whitespace_swaps) / sizeof(k_whitespace_swaps[0]))];
+                buf_splice(data, at, 1u, swap->bytes, swap->size);
+            }
+        }
+    }
+}
+
+typedef struct {
+    Buf bundled;
+    Buf windows[8];
+} MutationBases;
+
+static size_t find_bytes(const uint8_t *hay, size_t size, const char *needle, size_t from) {
+    size_t length = strlen(needle);
+    for (size_t at = from; at + length <= size; at++) {
+        if (hay[at] == (uint8_t)needle[0] && memcmp(hay + at, needle, length) == 0) return at;
+    }
+    return SIZE_MAX;
+}
+
+/* tools/test_disc_verify.py's bundled_windows: the bundled zip, and eight
+   short lists cut from its .dat (its header, eight games, </datafile>). */
+static void mutation_bases(MutationBases *bases) {
+    memset(bases, 0, sizeof(*bases));
+    char path[NATIVE_TEST_PATH_MAX];
+    CHECK(nk_disc_bundled_dat_path(".", path, sizeof(path)));
+    FILE *f = nk_fopen_utf8(path, "rb");
+    CHECK(f != NULL);
+    uint8_t chunk[65536];
+    size_t got;
+    while ((got = fread(chunk, 1, sizeof(chunk), f)) > 0) buf_add(&bases->bundled, chunk, got);
+    fclose(f);
+    const uint8_t *zip = bases->bundled.data;
+    size_t start = 30u + (size_t)(zip[26] | (zip[27] << 8)) + (size_t)(zip[28] | (zip[29] << 8));
+    uint32_t packed = get_le32(zip + 18), plain = get_le32(zip + 22);
+    uint8_t *text = (uint8_t *)malloc(plain);
+    CHECK(text != NULL);
+    size_t written = 0, consumed = 0;
+    char err[128];
+    CHECK(nk_psp_inflate_raw_zlib(zip + start, packed, text, plain, &written, &consumed, err,
+                                  sizeof(err)) == NK_INFLATE_OK && written == plain);
+    size_t header_end = find_bytes(text, plain, "</header>\n", 0);
+    CHECK(header_end != SIZE_MAX);
+    header_end += strlen("</header>\n");
+    size_t *starts = NULL;
+    size_t games = 0, cap = 0;
+    for (size_t at = find_bytes(text, plain, "\t<game ", 0); at != SIZE_MAX;
+         at = find_bytes(text, plain, "\t<game ", at + 1u)) {
+        if (games == cap) {
+            cap = cap ? cap * 2u : 4096u;
+            starts = (size_t *)realloc(starts, cap * sizeof(*starts));
+            CHECK(starts != NULL);
+        }
+        starts[games++] = at;
+    }
+    size_t closing = find_bytes(text, plain, "</datafile>", 0);
+    CHECK(games > 8u && closing != SIZE_MAX);
+    for (size_t w = 0; w < 8u; w++) {
+        size_t first = w * (games - 8u) / 7u, last = first + 7u;
+        size_t end = last + 1u < games ? starts[last + 1u] : closing;
+        buf_add(&bases->windows[w], text, header_end);
+        buf_add(&bases->windows[w], text + starts[first], end - starts[first]);
+        buf_add(&bases->windows[w], "</datafile>\n", 12u);
+    }
+    free(starts);
+    free(text);
+}
+
+/* tools/test_disc_verify.py's mutation(index): the same draws in the same order. */
+static void mutation(uint64_t seed, size_t index, const MutationBases *bases, Buf *out) {
+    SplitMix64 rng = {(seed << 32) | (uint64_t)index};
+    size_t kind = index % 16u;
+    out->size = 0;
+    if (kind < 10u) {
+        const Buf *base = &bases->windows[rng_below(&rng, 8u)];
+        buf_add(out, base->data, base->size);
+        mutate_text(&rng, out);
+    } else if (kind < 12u) {
+        const Buf *base = &bases->windows[rng_below(&rng, 8u)];
+        zip_bytes(base->data, base->size, 0u, out);
+        size_t changes = 1u + rng_below(&rng, 3u);
+        for (size_t n = 0; n < changes && out->size > 0; n++) {
+            size_t region = rng_below(&rng, 3u), at;
+            if (region == 0u) at = rng_below(&rng, out->size < 38u ? out->size : 38u);
+            else if (region == 1u) at = out->size - 1u - rng_below(&rng, out->size < 76u ? out->size : 76u);
+            else at = rng_below(&rng, out->size);
+            size_t change = rng_below(&rng, 3u);
+            if (change == 0u) out->data[at] ^= (uint8_t)(1u << rng_below(&rng, 8u));
+            else if (change == 1u) out->data[at] = (uint8_t)rng_below(&rng, 256u);
+            else out->size = at;
+        }
+    } else if (kind < 15u) {
+        const Buf *base = &bases->windows[rng_below(&rng, 8u)];
+        zip_bytes(base->data, base->size, 8u, out);
+        uint32_t packed = get_le32(out->data + 18);
+        size_t central = 38u + packed;
+        size_t changes = 1u + rng_below(&rng, 4u);
+        for (size_t n = 0; n < changes; n++) {
+            if (rng_below(&rng, 4u) < 3u) {
+                size_t at = 38u + rng_below(&rng, packed);
+                out->data[at] ^= (uint8_t)(1u << rng_below(&rng, 8u));
+            } else {
+                uint32_t size = get_le32(out->data + 22) + (uint32_t)rng_below(&rng, 17u) - 8u;
+                put_le32(out->data + 22, size);
+                put_le32(out->data + central + 24, size);
+            }
+        }
+    } else {
+        buf_add(out, bases->bundled.data, bases->bundled.size);
+        const uint8_t *zip = out->data;
+        size_t start = 30u + (size_t)(zip[26] | (zip[27] << 8)) + (size_t)(zip[28] | (zip[29] << 8));
+        uint32_t packed = get_le32(zip + 18);
+        size_t flips = 1u + rng_below(&rng, 2u);
+        for (size_t n = 0; n < flips; n++) {
+            size_t at = start + rng_below(&rng, packed);
+            out->data[at] ^= (uint8_t)(1u << rng_below(&rng, 8u));
+        }
+    }
+}
+
+static void test_conformance_corpus(void) {
+    FILE *f = nk_fopen_utf8(CORPUS_PATH, "rb");
+    CHECK(f != NULL);
+    Buf file = {NULL, 0, 0};
+    uint8_t chunk[65536];
+    size_t got;
+    while ((got = fread(chunk, 1, sizeof(chunk), f)) > 0) buf_add(&file, chunk, got);
+    fclose(f);
+    buf_add_byte(&file, '\0');
+
+    Buf input = {NULL, 0, 0};
+    Buf *target = &input;
+    Register regs[MAX_REGISTERS];
+    size_t reg_count = 0;
+    char name[256] = "";
+    char line_out[512];
+    size_t cases = 0, failures = 0, mutations = 0;
+    bool in_case = false;
+    char *next = (char *)file.data;
+    while (next && *next) {
+        char *line = next;
+        char *newline = strchr(line, '\n');
+        next = newline ? newline + 1 : NULL;
+        if (newline) *newline = '\0';
+        if (!in_case && (line[0] == '#' || line[0] == '\0')) continue;
+        if (!in_case && strncmp(line, "case ", 5) == 0) {
+            snprintf(name, sizeof(name), "%s", line + 5);
+            input.size = 0;
+            target = &input;
+            for (size_t i = 0; i < reg_count; i++) buf_free(&regs[i].buf);
+            reg_count = 0;
+            in_case = true;
+            continue;
+        }
+        if (in_case && strncmp(line, "expect ", 7) == 0) {
+            outcome_line(input.data, input.size, line_out, sizeof(line_out));
+            if (strcmp(line_out, line + 7) != 0) {
+                fprintf(stderr, "conformance case \"%s\":\n  expected %s\n  got      %s\n", name,
+                        line + 7, line_out);
+                failures++;
+            }
+            cases++;
+            continue;
+        }
+        if (in_case && strcmp(line, "end") == 0) {
+            in_case = false;
+            continue;
+        }
+        if (in_case) {
+            build_piece(line, &input, &target, regs, &reg_count);
+            continue;
+        }
+        /* mutations SEED COUNT, then the result prefixes, eight to a line. */
+        CHECK(strncmp(line, "mutations ", 10) == 0);
+        char *rest = NULL;
+        uint64_t seed = (uint64_t)strtoull(line + 10, &rest, 16);
+        size_t count = (size_t)strtoul(rest, NULL, 10);
+        MutationBases bases;
+        mutation_bases(&bases);
+        Buf mutated = {NULL, 0, 0};
+        while (next && strncmp(next, "end", 3) != 0) {
+            line = next;
+            newline = strchr(line, '\n');
+            next = newline ? newline + 1 : NULL;
+            if (newline) *newline = '\0';
+            for (char *prefix = strtok(line, " "); prefix; prefix = strtok(NULL, " ")) {
+                CHECK(mutations < count && strlen(prefix) == 8u);
+                mutation(seed, mutations, &bases, &mutated);
+                outcome_line(mutated.data, mutated.size, line_out, sizeof(line_out));
+                char digest[41];
+                sha1_hex((const uint8_t *)line_out, strlen(line_out), digest);
+                if (memcmp(digest, prefix, 8u) != 0) {
+                    fprintf(stderr, "conformance mutation %lu (kind %lu): expected %s, got %.8s: %s\n",
+                            (unsigned long)mutations, (unsigned long)(mutations % 16u), prefix,
+                            digest, line_out);
+                    failures++;
+                }
+                mutations++;
+            }
+        }
+        CHECK(mutations == count);
+        buf_free(&mutated);
+        buf_free(&bases.bundled);
+        for (size_t w = 0; w < 8u; w++) buf_free(&bases.windows[w]);
+        next = next ? strchr(next, '\n') : NULL;
+        if (next) next++;
+    }
+    for (size_t i = 0; i < reg_count; i++) buf_free(&regs[i].buf);
+    buf_free(&input);
+    buf_free(&file);
+    CHECK(!in_case && cases >= 230u && mutations == 4096u);
+    CHECK(failures == 0);
+    printf("PASS conformance table: %lu cases and %lu seeded mutations, as the Python reader reads "
+           "them\n", (unsigned long)cases, (unsigned long)mutations);
 }
 
 /* ---- hashes ------------------------------------------------------------ */
@@ -260,6 +907,9 @@ static void test_dat_reader_and_tiers(void) {
     CHECK(dat.rom_count == 2); /* the repeated SHA-1 is kept once */
     CHECK(dat.serial_count == 1 && nk_disc_dat_has_serial(&dat, "TEST70001"));
     CHECK(!nk_disc_dat_has_serial(&dat, "TEST70002"));
+    /* A disc ID matches after ASCII upper-casing, and only that (rule 9). */
+    CHECK(nk_disc_dat_has_serial(&dat, "test70001"));
+    CHECK(nk_disc_classify(&dat, "test70001", &g_modified_digest, false) == NK_DISC_TIER_MODIFIED);
 
     /* Verified retail: the SHA-1 matches and the CRC-32 and size agree. */
     CHECK(nk_disc_classify(&dat, "TEST70001", &g_retail_digest, false) ==
@@ -418,33 +1068,33 @@ static void test_verify_image_for_an_add_worker(void) {
     write_bytes(other, g_other, IMAGE_BYTES);
 
     /* No list imported yet: hashed, not checked, and it says so. */
-    CHECK(nk_disc_verify_image(retail, root, "TEST70001", false, NULL, &check));
+    CHECK(nk_disc_verify_image(retail, root, NULL, "TEST70001", false, NULL, &check));
     CHECK(check.result == NK_DISC_VERIFY_HASHED && check.tier == NK_DISC_TIER_NOT_CHECKED);
     CHECK(strcmp(check.digest.sha1, g_retail_digest.sha1) == 0 && check.code[0] == '\0');
     CHECK(strstr(check.reason, "no Redump list") != NULL);
 
     path_in(source, sizeof(source), "worker.dat");
-    char *text = build_dat(false); /* serial-less, as Redump's PSP list is */
+    char *text = build_dat(false); /* serial-less, as Redump's older PSP exports were */
     write_bytes(source, text, strlen(text));
     free(text);
     CHECK(nk_disc_dat_import(source, root, NULL, &status));
 
     Progress progress = {0, 0, 0, -1};
     NkDiscExpandCallbacks callbacks = {on_progress, on_cancel, &progress};
-    CHECK(nk_disc_verify_image(retail, root, "TEST70001", false, &callbacks, &check));
+    CHECK(nk_disc_verify_image(retail, root, NULL, "TEST70001", false, &callbacks, &check));
     CHECK(check.tier == NK_DISC_TIER_VERIFIED_RETAIL && progress.last_done == IMAGE_BYTES);
     CHECK(strncmp(check.reason, "Verified retail", 15) == 0);
     /* A lone modified image is unknown; beside its verified retail disc, modified. */
-    CHECK(nk_disc_verify_image(modified, root, "TEST70001", false, NULL, &check));
+    CHECK(nk_disc_verify_image(modified, root, NULL, "TEST70001", false, NULL, &check));
     CHECK(check.tier == NK_DISC_TIER_UNKNOWN && strncmp(check.reason, "Unknown", 7) == 0);
-    CHECK(nk_disc_verify_image(modified, root, "TEST70001", true, NULL, &check));
+    CHECK(nk_disc_verify_image(modified, root, NULL, "TEST70001", true, NULL, &check));
     CHECK(check.tier == NK_DISC_TIER_MODIFIED && strncmp(check.reason, "Modified", 8) == 0);
-    CHECK(nk_disc_verify_image(other, root, "TEST70009", false, NULL, &check));
+    CHECK(nk_disc_verify_image(other, root, NULL, "TEST70009", false, NULL, &check));
     CHECK(check.tier == NK_DISC_TIER_UNKNOWN);
 
     NkGameEntry entry;
     memset(&entry, 0, sizeof(entry));
-    CHECK(nk_disc_verify_image(retail, root, "TEST70001", false, NULL, &check));
+    CHECK(nk_disc_verify_image(retail, root, NULL, "TEST70001", false, NULL, &check));
     nk_disc_verification_to_entry(&check, &entry);
     CHECK(strcmp(entry.content_sha1, g_retail_digest.sha1) == 0 &&
           strcmp(entry.content_crc32, g_retail_digest.crc32) == 0 &&
@@ -453,7 +1103,7 @@ static void test_verify_image_for_an_add_worker(void) {
     /* A cancel or an unreadable image keeps nothing, and the entry stays unhashed. */
     Progress stop = {0, 0, 0, 0};
     NkDiscExpandCallbacks cancel = {on_progress, on_cancel, &stop};
-    CHECK(!nk_disc_verify_image(retail, root, "TEST70001", false, &cancel, &check));
+    CHECK(!nk_disc_verify_image(retail, root, NULL, "TEST70001", false, &cancel, &check));
     CHECK(check.result == NK_DISC_VERIFY_CANCELLED && check.digest.sha1[0] == '\0');
     CHECK(strcmp(check.code, NK_DISC_CANCELLED) == 0);
     memset(&entry, 0, sizeof(entry));
@@ -461,16 +1111,564 @@ static void test_verify_image_for_an_add_worker(void) {
     CHECK(entry.content_sha1[0] == '\0' && entry.disc_verification == NK_DISC_TIER_NOT_CHECKED);
     char missing[NATIVE_TEST_PATH_MAX];
     path_in(missing, sizeof(missing), "worker-missing.iso");
-    CHECK(!nk_disc_verify_image(missing, root, "TEST70001", false, NULL, &check));
+    CHECK(!nk_disc_verify_image(missing, root, NULL, "TEST70001", false, NULL, &check));
     CHECK(check.result == NK_DISC_VERIFY_READ_FAILED && strcmp(check.code, NK_DISC_READ_FAILED) == 0);
 
     /* A damaged imported list: still hashed, not checked, with the list's code. */
     CHECK(nk_disc_dat_path(root, imported, sizeof(imported)));
     write_bytes(imported, "damaged", 7);
-    CHECK(nk_disc_verify_image(retail, root, "TEST70001", false, NULL, &check));
+    CHECK(nk_disc_verify_image(retail, root, NULL, "TEST70001", false, NULL, &check));
     CHECK(check.result == NK_DISC_VERIFY_LIST_UNUSABLE && check.tier == NK_DISC_TIER_NOT_CHECKED);
     CHECK(strcmp(check.code, NK_DISC_DAT_NOT_DATAFILE) == 0 && check.digest.sha1[0] != '\0');
     printf("PASS one call for an add worker: tier, reason, cancel, damaged list\n");
+}
+
+/* ---- Redump's zip, entity refusal, and the bundled list ---------------- */
+
+static size_t read_all(const char *path, uint8_t *out, size_t cap) {
+    FILE *f = nk_fopen_utf8(path, "rb");
+    CHECK(f != NULL);
+    size_t got = fread(out, 1, cap, f);
+    fclose(f);
+    CHECK(got < cap);
+    return got;
+}
+
+/* A stored zip of the given entries (name, text) at path. */
+static void write_zip(const char *path, const char *const *names, const char *const *texts,
+                      size_t count) {
+    NkZipWriter *writer = NULL;
+    NkZipError err;
+    CHECK(nk_zip_writer_open(&writer, path, 0x0021u, 0u, &err) == NK_ZIP_OK);
+    for (size_t i = 0; i < count; i++) {
+        CHECK(nk_zip_writer_add_bytes(writer, names[i], texts[i], strlen(texts[i]), &err) ==
+              NK_ZIP_OK);
+    }
+    CHECK(nk_zip_writer_finish(writer, &err) == NK_ZIP_OK);
+}
+
+static void expect_load_refused(const char *path, const char *code) {
+    NkDiscDat dat;
+    NkDiscExpandStatus status;
+    CHECK(!nk_disc_dat_load(path, &dat, &status));
+    if (strcmp(status.code, code) != 0) {
+        fprintf(stderr, "expected %s, got %s: %s\n", code, status.code, status.message);
+    }
+    CHECK(strcmp(status.code, code) == 0);
+    CHECK(dat.roms == NULL && dat.rom_count == 0);
+}
+
+static void test_dat_zip_and_entity_refusals(void) {
+    NkDiscExpandStatus status;
+    NkDiscDat dat;
+    char zip[NATIVE_TEST_PATH_MAX], data_root[NATIVE_TEST_PATH_MAX];
+    char imported[NATIVE_TEST_PATH_MAX];
+    char *text = build_dat(true);
+    path_in(zip, sizeof(zip), "list.zip");
+    path_in(data_root, sizeof(data_root), "zip-data");
+
+    /* Redump's zip (here stored; the bundled list below is deflated) is read
+       and imported as the .dat inside it. */
+    const char *one_name[] = {"Synthetic - Datfile (2) (2026-10-31).dat"};
+    const char *one_text[] = {text};
+    write_zip(zip, one_name, one_text, 1);
+    CHECK(nk_disc_dat_load(zip, &dat, &status) && dat.rom_count == 2);
+    nk_disc_dat_free(&dat);
+    CHECK(nk_disc_dat_import(zip, data_root, NULL, &status));
+    CHECK(nk_disc_dat_path(data_root, imported, sizeof(imported)));
+    char *copy = read_text(imported);
+    CHECK(strcmp(copy, text) == 0);
+    free(copy);
+
+    /* Not one .dat: two files, or a file of another name. */
+    const char *two_names[] = {"a.dat", "b.dat"};
+    const char *two_texts[] = {text, text};
+    write_zip(zip, two_names, two_texts, 2);
+    expect_load_refused(zip, NK_DISC_DAT_ZIP_INVALID);
+    const char *txt_name[] = {"list.txt"};
+    write_zip(zip, txt_name, one_text, 1);
+    expect_load_refused(zip, NK_DISC_DAT_ZIP_INVALID);
+    /* A failed import keeps the earlier one. */
+    CHECK(!nk_disc_dat_import(zip, data_root, NULL, &status));
+    copy = read_text(imported);
+    CHECK(strcmp(copy, text) == 0);
+    free(copy);
+
+    /* A changed byte fails the CRC; a cut zip has no end record; a size past
+       the cap is refused before anything is inflated. */
+    static uint8_t bytes[16384];
+    write_zip(zip, one_name, one_text, 1);
+    size_t size = read_all(zip, bytes, sizeof(bytes));
+    /* The local header's name and extra lengths place the stored data. */
+    size_t data_at = 30u + (size_t)(bytes[26] | (bytes[27] << 8)) +
+                     (size_t)(bytes[28] | (bytes[29] << 8));
+    bytes[data_at + 100u] ^= 0x20u;
+    write_bytes(zip, bytes, size);
+    expect_load_refused(zip, NK_DISC_DAT_ZIP_INVALID);
+    bytes[data_at + 100u] ^= 0x20u;
+    write_bytes(zip, bytes, size - 10u);
+    expect_load_refused(zip, NK_DISC_DAT_ZIP_INVALID);
+    size_t central = SIZE_MAX;
+    for (size_t at = 0; at + 4u <= size; at++) {
+        if (memcmp(bytes + at, "PK\x01\x02", 4u) == 0) central = at;
+    }
+    CHECK(central != SIZE_MAX);
+    const uint8_t huge[4] = {0x00, 0x00, 0x00, 0x05}; /* 80 MiB, past NK_DISC_DAT_MAX_BYTES */
+    memcpy(bytes + central + 24u, huge, 4u);
+    write_bytes(zip, bytes, size);
+    expect_load_refused(zip, NK_DISC_DAT_TOO_LARGE);
+
+    /* Entities: declared, an internal DTD subset, or one XML does not
+       predefine are refused by name; the external DOCTYPE Redump's lists
+       carry, and character references, are read. */
+    char sha[48];
+    snprintf(sha, sizeof(sha), "%s", g_retail_digest.sha1);
+    /* Each case is the text before and after one good <rom>. */
+    static const char *const refused[][2] = {
+        {"<!DOCTYPE datafile [<!ENTITY big \"x\">]>\n<datafile><game name=\"&big;\">",
+         "</game></datafile>"},
+        {"<!DOCTYPE datafile [ ]>\n<datafile><game name=\"x\">", "</game></datafile>"},
+        {"<datafile><game name=\"&xxe;\">", "</game></datafile>"},
+        {"<datafile><!ENTITY x SYSTEM \"file:///etc/passwd\"><game name=\"x\">",
+         "</game></datafile>"},
+        {"<datafile><game name=\"A & B\">", "</game></datafile>"},
+    };
+    char rom[256], doc[1024];
+    snprintf(rom, sizeof(rom), "<rom name=\"r.iso\" size=\"%u\" crc=\"%s\" sha1=\"%s\"/>",
+             IMAGE_BYTES, g_retail_digest.crc32, sha);
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        snprintf(doc, sizeof(doc), "%s%s%s", refused[i][0], rom, refused[i][1]);
+        CHECK(!nk_disc_dat_parse(doc, strlen(doc), &dat, &status));
+        CHECK(strcmp(status.code, NK_DISC_DAT_ENTITY_REFUSED) == 0 && dat.roms == NULL);
+    }
+    snprintf(doc, sizeof(doc),
+             "<!DOCTYPE datafile PUBLIC \"-//Logiqx//DTD ROM Management Datafile//EN\" "
+             "\"http://www.logiqx.com/Dats/datafile.dtd\">\n"
+             "<datafile><game name=\"A &amp; B &#38; C &#x26;\">%s</game></datafile>", rom);
+    CHECK(nk_disc_dat_parse(doc, strlen(doc), &dat, &status) && dat.rom_count == 1);
+    nk_disc_dat_free(&dat);
+    /* The same refusal from a file and through an import. */
+    path_in(zip, sizeof(zip), "entity.dat");
+    snprintf(doc, sizeof(doc), "%s%s%s", refused[0][0], rom, refused[0][1]);
+    write_bytes(zip, doc, strlen(doc));
+    expect_load_refused(zip, NK_DISC_DAT_ENTITY_REFUSED);
+    CHECK(!nk_disc_dat_import(zip, data_root, NULL, &status));
+    CHECK(strcmp(status.code, NK_DISC_DAT_ENTITY_REFUSED) == 0);
+    free(text);
+    printf("PASS Redump's zip, and malformed, oversized and entity-bearing lists refused by name\n");
+}
+
+/* The list bundled with Nakagawa, read from the checkout (the tests run from
+   its root): Redump's PSP datfile of 2026-11-12 16-02-53, pinned in
+   assets/redump/PROVENANCE.md. A refreshed list changes these numbers with
+   its pin; tools/test_disc_verify.py checks the SHA-256. */
+#define BUNDLED_DATE "2026-11-12 16-02-53"
+#define BUNDLED_DISCS 3546u
+#define BUNDLED_SERIALS 3907u
+
+static void test_bundled_list(void) {
+    NkDiscExpandStatus status;
+    NkDiscDat dat;
+    char bundled[NATIVE_TEST_PATH_MAX], joined[NATIVE_TEST_PATH_MAX];
+    char sep = nk_platform_path_separator();
+    char expect[NATIVE_TEST_PATH_MAX];
+
+    /* The path, with or without a separator after the folder. */
+    snprintf(expect, sizeof(expect), "base%cassets%credump%credump-psp.zip", sep, sep, sep);
+    CHECK(nk_disc_bundled_dat_path("base", joined, sizeof(joined)) && strcmp(joined, expect) == 0);
+    char base[16];
+    snprintf(base, sizeof(base), "base%c", sep);
+    CHECK(nk_disc_bundled_dat_path(base, joined, sizeof(joined)) && strcmp(joined, expect) == 0);
+    CHECK(!nk_disc_bundled_dat_path("base", joined, 8u));
+    CHECK(!nk_disc_bundled_dat_path("", joined, sizeof(joined)));
+
+    CHECK(nk_disc_bundled_dat_path(".", bundled, sizeof(bundled)));
+    CHECK(nk_platform_file_exists(bundled));
+    CHECK(nk_disc_dat_load(bundled, &dat, &status));
+    CHECK(strcmp(dat.name, "Sony - PlayStation Portable") == 0);
+    CHECK(strcmp(dat.date, BUNDLED_DATE) == 0 && strcmp(dat.version, BUNDLED_DATE) == 0);
+    CHECK(dat.games == BUNDLED_DISCS && dat.rom_count == BUNDLED_DISCS && dat.rejected_roms == 0);
+    CHECK(dat.serial_count == BUNDLED_SERIALS);
+    /* A known entry: its SHA-1, CRC-32 and size verify; anything else does not. */
+    NkDiscDigest known = {"3ba8af1354c8ae1e5119dbff19730793c21ad56e", "b71764f4", 1207468032u};
+    CHECK(nk_disc_classify(&dat, "ULJM06340", &known, false) == NK_DISC_TIER_VERIFIED_RETAIL);
+    NkDiscDigest changed = known;
+    snprintf(changed.crc32, sizeof(changed.crc32), "%s", "b71764f5");
+    /* The list names its disc IDs, so a changed copy of a listed disc is
+       Modified with no verified image beside it; an unlisted ID is Unknown. */
+    CHECK(nk_disc_classify(&dat, "ULJM06340", &changed, false) == NK_DISC_TIER_MODIFIED);
+    /* "ULUS-10020" and "ULJM 06341" spellings both read as disc IDs. */
+    CHECK(nk_disc_dat_has_serial(&dat, "ULUS10020") && nk_disc_dat_has_serial(&dat, "ULJM06341"));
+    CHECK(nk_disc_classify(&dat, "TEST70009", &changed, false) == NK_DISC_TIER_UNKNOWN);
+    nk_disc_dat_free(&dat);
+
+    /* With no import, a check uses the bundled list and names it and its date.
+       A synthetic image is not in it: Unknown, said not to mean bad. */
+    char root[NATIVE_TEST_PATH_MAX], retail[NATIVE_TEST_PATH_MAX], source[NATIVE_TEST_PATH_MAX];
+    NkDiscVerification check;
+    path_in(root, sizeof(root), "bundled-data");
+    path_in(retail, sizeof(retail), "bundled-retail.iso");
+    write_bytes(retail, g_retail, IMAGE_BYTES);
+    CHECK(nk_disc_verify_image(retail, root, bundled, "TEST70001", false, NULL, &check));
+    CHECK(check.result == NK_DISC_VERIFY_HASHED && check.tier == NK_DISC_TIER_UNKNOWN);
+    CHECK(check.list == NK_DISC_LIST_BUNDLED && strcmp(check.list_date, BUNDLED_DATE) == 0);
+    CHECK(strstr(check.reason, "bundled with Nakagawa (dated " BUNDLED_DATE ", 3546 discs)") != NULL);
+    CHECK(strstr(check.reason, "does not mean bad") != NULL);
+
+    /* An import takes precedence over the bundled list. */
+    path_in(source, sizeof(source), "bundled-override.dat");
+    char *text = build_dat(false);
+    write_bytes(source, text, strlen(text));
+    free(text);
+    CHECK(nk_disc_dat_import(source, root, NULL, &status));
+    CHECK(nk_disc_verify_image(retail, root, bundled, "TEST70001", false, NULL, &check));
+    CHECK(check.tier == NK_DISC_TIER_VERIFIED_RETAIL && check.list == NK_DISC_LIST_IMPORTED);
+    CHECK(strstr(check.reason, "your imported Redump list (dated 2026-10-31, 2 discs)") != NULL);
+    /* The import is older than the bundled list: still used (the user chose
+       it), and the reason names both dates and how to use the bundled list
+       again (#1731 review S3). */
+    CHECK(strstr(check.reason, "older than the list bundled with Nakagawa (dated " BUNDLED_DATE
+                               "): import a newer list, or delete verification/redump.dat") != NULL);
+    {
+        NkDiscDat active;
+        NkDiscListSource which;
+        CHECK(nk_disc_dat_load_active(root, bundled, &active, &which, &status));
+        CHECK(which == NK_DISC_LIST_IMPORTED && strcmp(active.newer_bundled_date, BUNDLED_DATE) == 0);
+        nk_disc_dat_free(&active);
+    }
+    /* A newer import gets no such clause. */
+    text = build_dat(false);
+    char *version = strstr(text, "2026-10-31");
+    CHECK(version != NULL);
+    memcpy(version, "2027-01-02", 10u);
+    write_bytes(source, text, strlen(text));
+    free(text);
+    CHECK(nk_disc_dat_import(source, root, NULL, &status));
+    CHECK(nk_disc_verify_image(retail, root, bundled, "TEST70001", false, NULL, &check));
+    CHECK(check.list == NK_DISC_LIST_IMPORTED && strstr(check.reason, "older than") == NULL);
+    CHECK(nk_disc_list_date_is_older("2026-10-31", BUNDLED_DATE) &&
+          nk_disc_list_date_is_older("2026-11-12 16-02-52", BUNDLED_DATE) &&
+          !nk_disc_list_date_is_older(BUNDLED_DATE, BUNDLED_DATE) &&
+          !nk_disc_list_date_is_older("2026-11-12", BUNDLED_DATE) &&
+          !nk_disc_list_date_is_older("2027-01-01", BUNDLED_DATE) &&
+          !nk_disc_list_date_is_older("version 3", BUNDLED_DATE));
+    /* A damaged import is reported, never replaced by the bundled list. */
+    char imported[NATIVE_TEST_PATH_MAX];
+    CHECK(nk_disc_dat_path(root, imported, sizeof(imported)));
+    write_bytes(imported, "damaged", 7);
+    CHECK(nk_disc_verify_image(retail, root, bundled, "TEST70001", false, NULL, &check));
+    CHECK(check.result == NK_DISC_VERIFY_LIST_UNUSABLE && check.list == NK_DISC_LIST_IMPORTED);
+    CHECK(check.tier == NK_DISC_TIER_NOT_CHECKED && strstr(check.reason, "imported") != NULL);
+
+    /* A damaged bundled list: not checked, with its code; none at all: says so. */
+    char other_root[NATIVE_TEST_PATH_MAX], damaged[NATIVE_TEST_PATH_MAX];
+    path_in(other_root, sizeof(other_root), "bundled-none");
+    /* A listed disc ID whose hashes match no dump of it: Modified, worded for
+       what is known, a damaged dump or a changed copy, and what to do
+       (#1731 review S2). */
+    CHECK(nk_disc_verify_image(retail, other_root, bundled, "ULJM06340", false, NULL, &check));
+    CHECK(check.tier == NK_DISC_TIER_MODIFIED && check.list == NK_DISC_LIST_BUNDLED);
+    CHECK(strstr(check.reason, "its hashes differ from every dump of it in the Redump list bundled") != NULL);
+    CHECK(strstr(check.reason, "A damaged dump does that as well as a changed copy") != NULL &&
+          strstr(check.reason, "dump the disc again") != NULL);
+    path_in(damaged, sizeof(damaged), "damaged-bundled.zip");
+    write_bytes(damaged, "PK\x03\x04 not a zip", 15);
+    CHECK(nk_disc_verify_image(retail, other_root, damaged, "TEST70001", false, NULL, &check));
+    CHECK(check.result == NK_DISC_VERIFY_LIST_UNUSABLE && check.list == NK_DISC_LIST_BUNDLED);
+    CHECK(strcmp(check.code, NK_DISC_DAT_ZIP_INVALID) == 0 &&
+          strstr(check.reason, "bundled") != NULL);
+    path_in(damaged, sizeof(damaged), "no-such-list.zip");
+    CHECK(nk_disc_verify_image(retail, other_root, damaged, "TEST70001", false, NULL, &check));
+    CHECK(check.result == NK_DISC_VERIFY_HASHED && check.list == NK_DISC_LIST_NONE);
+    CHECK(check.tier == NK_DISC_TIER_NOT_CHECKED && strstr(check.reason, "no Redump list") != NULL);
+    printf("PASS the bundled Redump list: pinned counts, a known entry, the import overrides it\n");
+}
+
+/* ---- the reader's cost is linear in its input (#1731 review B1, S1) ----- */
+
+/* The most bytes the reader may look at for each byte of its input. It
+   counts each byte every time it looks at it, so this bounds the work of the
+   input, counted rather than timed (a time limit would be flaky).
+   tools/test_disc_verify.py holds the Python reader to the same bound. */
+#define COST_PER_BYTE 8u
+
+/* A growing text buffer for the hostile lists. */
+typedef struct {
+    char *text;
+    size_t length;
+    size_t capacity;
+} Text;
+
+static void text_add(Text *t, const char *piece) {
+    size_t n = strlen(piece);
+    if (t->length + n + 1u > t->capacity) {
+        size_t grown = t->capacity ? t->capacity : 4096u;
+        while (grown < t->length + n + 1u) grown *= 2u;
+        char *text = (char *)realloc(t->text, grown);
+        CHECK(text != NULL);
+        t->text = text;
+        t->capacity = grown;
+    }
+    memcpy(t->text + t->length, piece, n + 1u);
+    t->length += n;
+}
+
+static void text_repeat(Text *t, const char *piece, size_t repeats) {
+    for (size_t i = 0; i < repeats; i++) text_add(t, piece);
+}
+
+enum {
+    HOSTILE_DOCTYPE_AFTER_ROOT,
+    HOSTILE_DOCTYPE_BEFORE_ROOT,
+    HOSTILE_HEADER_TAGS,
+    HOSTILE_HEADER_ELEMENTS,
+    HOSTILE_UNCLOSED_GAMES,
+    HOSTILE_GAME_OPENERS,
+    HOSTILE_LONG_ATTRIBUTE_NAME,
+    HOSTILE_MANY_ROMS,
+    HOSTILE_REFERENCES,
+    HOSTILE_LONG_REFERENCE,
+    HOSTILE_LONG_SERIAL,
+    HOSTILE_MANY_SERIALS,
+    HOSTILE_OPEN_DECLARATION,
+    HOSTILE_TAGS,
+    HOSTILE_LESS_THAN,
+    HOSTILE_AMPERSANDS,
+    HOSTILE_SERIAL_COMMA_FLOODS,
+    HOSTILE_NO_CLOSING,
+    HOSTILE_COUNT
+};
+
+/* The shapes tools/test_disc_verify.py's hostile_lists builds: about
+   `repeats` repetitions of a shape that once cost quadratic time, or could. */
+static void build_hostile(int shape, size_t repeats, Text *t) {
+    char rom[256];
+    snprintf(rom, sizeof(rom), "<rom name=\"x\" size=\"%u\" crc=\"%s\" sha1=\"%s\"/>", IMAGE_BYTES,
+             g_retail_digest.crc32, g_retail_digest.sha1);
+    const char *head = "<?xml version=\"1.0\"?>\n<datafile>\n\t<header>\n\t\t<name>";
+    const char *after_name = "</name>\n\t</header>\n";
+    char game[512];
+    snprintf(game, sizeof(game),
+             "\t<game name=\"Retail\">\n\t\t<serial>%s</serial>\n\t\t%s\n\t</game>\n", "TEST-70001",
+             rom);
+    t->length = 0;
+    text_add(t, "");
+    switch (shape) {
+    case HOSTILE_DOCTYPE_AFTER_ROOT:
+        text_add(t, head); text_add(t, "N"); text_add(t, after_name);
+        text_repeat(t, "<!DOCTYPE", repeats); text_add(t, game); break;
+    case HOSTILE_DOCTYPE_BEFORE_ROOT:
+        text_repeat(t, "<!DOCTYPE", repeats); text_add(t, "<datafile>"); text_add(t, game); break;
+    case HOSTILE_HEADER_TAGS:
+        text_add(t, "<datafile>"); text_repeat(t, "<header", repeats); text_add(t, game); break;
+    case HOSTILE_HEADER_ELEMENTS:
+        text_add(t, "<datafile>"); text_repeat(t, "<header>", repeats); text_add(t, game); break;
+    case HOSTILE_UNCLOSED_GAMES:
+        text_add(t, "<datafile>"); text_repeat(t, "<game name=\"a\">", repeats); text_add(t, game);
+        break;
+    case HOSTILE_GAME_OPENERS:
+        text_add(t, "<datafile>"); text_repeat(t, "<game", repeats); text_add(t, game); break;
+    case HOSTILE_LONG_ATTRIBUTE_NAME:
+        text_add(t, "<datafile><game><rom "); text_repeat(t, "a", repeats);
+        text_add(t, "/></game>"); text_add(t, game); break;
+    case HOSTILE_MANY_ROMS:
+        text_add(t, "<datafile><game>"); text_repeat(t, rom, repeats / 20u);
+        text_add(t, "</game>"); text_add(t, game); break;
+    case HOSTILE_REFERENCES:
+        text_add(t, head); text_repeat(t, "&amp;", repeats); text_add(t, after_name);
+        text_add(t, game); break;
+    case HOSTILE_LONG_REFERENCE:
+        text_add(t, head); text_add(t, "&#"); text_repeat(t, "1", repeats); text_add(t, ";");
+        text_add(t, after_name); text_add(t, game); break;
+    case HOSTILE_LONG_SERIAL:
+        text_add(t, "<datafile><game><serial>"); text_repeat(t, "TEST-70001,", repeats);
+        text_add(t, "</serial>"); text_add(t, rom); text_add(t, "</game>"); break;
+    case HOSTILE_MANY_SERIALS:
+        text_add(t, "<datafile><game>"); text_repeat(t, "<serial>TEST-70002</serial>", repeats / 10u);
+        text_add(t, rom); text_add(t, "</game>"); break;
+    case HOSTILE_OPEN_DECLARATION:
+        text_add(t, "<datafile><?"); text_repeat(t, "x", repeats); break;
+    case HOSTILE_TAGS:
+        text_add(t, "<datafile>"); text_repeat(t, "<a>", repeats); text_add(t, game); break;
+    case HOSTILE_LESS_THAN:
+        text_add(t, "<datafile>"); text_repeat(t, "<", repeats); text_add(t, game); break;
+    case HOSTILE_AMPERSANDS:
+        text_add(t, head); text_repeat(t, "&", repeats); text_add(t, after_name);
+        text_add(t, game); break;
+    case HOSTILE_SERIAL_COMMA_FLOODS: {
+        /* S2: serials at the length bound, all commas, in game after game. */
+        char flood[NK_DISC_DAT_MAX_SERIAL_BYTES + 40u];
+        memset(flood, ',', sizeof(flood));
+        memcpy(flood, "<game><serial>", 14u);
+        memcpy(flood + 14u + NK_DISC_DAT_MAX_SERIAL_BYTES, "</serial></game>", 17u);
+        text_add(t, "<datafile>"); text_add(t, game); text_repeat(t, flood, repeats / 64u);
+        break;
+    }
+    case HOSTILE_NO_CLOSING:
+    default:
+        text_add(t, "<datafile>"); text_add(t, game); text_repeat(t, "<x>", repeats); break;
+    }
+    if (shape != HOSTILE_OPEN_DECLARATION && shape != HOSTILE_NO_CLOSING) text_add(t, "</datafile>\n");
+}
+
+static uint64_t parse_cost(const Text *t, NkDiscExpandStatus *status, bool *ok) {
+    NkDiscDat dat;
+    uint64_t examined = 0;
+    *ok = nk_disc_dat_parse_counted(t->text, t->length, &dat, status, &examined);
+    if (*ok) {
+        nk_disc_dat_free(&dat);
+    } else {
+        CHECK(strncmp(status->code, "DISC_DAT_", 9u) == 0 && dat.roms == NULL);
+    }
+    return examined;
+}
+
+static void test_reader_cost_is_linear(void) {
+    Text t = {NULL, 0, 0};
+    NkDiscExpandStatus status;
+    bool ok;
+    for (size_t repeats = 20000u; repeats <= 40000u; repeats *= 2u) {
+        for (int shape = 0; shape < HOSTILE_COUNT; shape++) {
+            build_hostile(shape, repeats, &t);
+            uint64_t cost = parse_cost(&t, &status, &ok);
+            if (cost > (uint64_t)COST_PER_BYTE * t.length) {
+                fprintf(stderr, "shape %d: %llu bytes examined for %llu\n", shape,
+                        (unsigned long long)cost, (unsigned long long)t.length);
+            }
+            CHECK(cost <= (uint64_t)COST_PER_BYTE * t.length);
+        }
+    }
+    /* S2: a serial's splitting is counted (three passes over it, beside the
+       two text passes, the search for '<' and the references check), and one
+       past the bound is refused before it is split. */
+    {
+        char doc[1024];
+        uint64_t with_commas, empty;
+        char commas[NK_DISC_DAT_MAX_SERIAL_BYTES + 2u];
+        memset(commas, ',', sizeof(commas));
+        commas[NK_DISC_DAT_MAX_SERIAL_BYTES] = '\0';
+        Text one = {doc, 0, sizeof(doc)};
+        snprintf(doc, sizeof(doc), "<datafile><game><serial>%s</serial>%s</game></datafile>", commas,
+                 "<rom size=\"1\" crc=\"00000000\" sha1=\"0000000000000000000000000000000000000000\"/>");
+        one.length = strlen(doc);
+        with_commas = parse_cost(&one, &status, &ok);
+        CHECK(ok);
+        snprintf(doc, sizeof(doc), "<datafile><game><serial>%s</serial>%s</game></datafile>", "",
+                 "<rom size=\"1\" crc=\"00000000\" sha1=\"0000000000000000000000000000000000000000\"/>");
+        one.length = strlen(doc);
+        empty = parse_cost(&one, &status, &ok);
+        CHECK(ok && with_commas - empty == 7u * NK_DISC_DAT_MAX_SERIAL_BYTES);
+        commas[NK_DISC_DAT_MAX_SERIAL_BYTES] = ',';
+        commas[NK_DISC_DAT_MAX_SERIAL_BYTES + 1u] = '\0';
+        snprintf(doc, sizeof(doc), "<datafile><game><serial>%s</serial></game></datafile>", commas);
+        one.length = strlen(doc);
+        (void)parse_cost(&one, &status, &ok);
+        CHECK(!ok && strstr(status.message, "longer than 256 bytes") != NULL);
+    }
+    /* The review's inputs, at 200,000 repeats: refused by name. */
+    build_hostile(HOSTILE_DOCTYPE_AFTER_ROOT, 200000u, &t);
+    (void)parse_cost(&t, &status, &ok);
+    CHECK(!ok && strcmp(status.code, NK_DISC_DAT_ENTITY_REFUSED) == 0);
+    build_hostile(HOSTILE_DOCTYPE_BEFORE_ROOT, 200000u, &t);
+    (void)parse_cost(&t, &status, &ok);
+    CHECK(!ok && strcmp(status.code, NK_DISC_DAT_ENTITY_REFUSED) == 0);
+    build_hostile(HOSTILE_HEADER_TAGS, 200000u, &t);
+    (void)parse_cost(&t, &status, &ok);
+    CHECK(!ok && strcmp(status.code, NK_DISC_DAT_NOT_DATAFILE) == 0);
+    /* The bundled list costs the same bound: its .dat, kept by an import. */
+    char bundled[NATIVE_TEST_PATH_MAX], root[NATIVE_TEST_PATH_MAX], kept[NATIVE_TEST_PATH_MAX];
+    CHECK(nk_disc_bundled_dat_path(".", bundled, sizeof(bundled)));
+    path_in(root, sizeof(root), "cost-data");
+    CHECK(nk_disc_dat_import(bundled, root, NULL, &status));
+    CHECK(nk_disc_dat_path(root, kept, sizeof(kept)));
+    free(t.text);
+    t.text = read_text(kept);
+    t.length = strlen(t.text);
+    t.capacity = t.length + 1u;
+    CHECK(parse_cost(&t, &status, &ok) <= (uint64_t)COST_PER_BYTE * t.length && ok);
+    free(t.text);
+    printf("PASS the datafile reader's work is linear in its input, hostile lists included\n");
+}
+
+/* A stored zip of one entry whose central-directory extra field is `extra`. */
+static size_t stored_zip_with_extra(uint8_t *out, size_t cap, const char *name, const char *text,
+                                    const uint8_t *extra, size_t extra_length) {
+    size_t name_length = strlen(name), size = strlen(text);
+    uint32_t crc = nk_crc32_update(0u, (const uint8_t *)text, size);
+    size_t at = 0;
+    CHECK(30u + name_length + size + 46u + name_length + extra_length + 22u <= cap);
+#define PUT16(v) do { out[at++] = (uint8_t)((v) & 0xFFu); out[at++] = (uint8_t)(((v) >> 8) & 0xFFu); } while (0)
+#define PUT32(v) do { PUT16((uint32_t)(v) & 0xFFFFu); PUT16(((uint32_t)(v) >> 16) & 0xFFFFu); } while (0)
+    PUT32(0x04034b50u); PUT16(20u); PUT16(0u); PUT16(0u); PUT16(0u); PUT16(0u);
+    PUT32(crc); PUT32(size); PUT32(size); PUT16(name_length); PUT16(0u);
+    memcpy(out + at, name, name_length); at += name_length;
+    memcpy(out + at, text, size); at += size;
+    size_t central = at;
+    PUT32(0x02014b50u); PUT16(20u); PUT16(20u); PUT16(0u); PUT16(0u); PUT16(0u); PUT16(0u);
+    PUT32(crc); PUT32(size); PUT32(size); PUT16(name_length); PUT16(extra_length); PUT16(0u);
+    PUT16(0u); PUT16(0u); PUT32(0u); PUT32(0u);
+    memcpy(out + at, name, name_length); at += name_length;
+    memcpy(out + at, extra, extra_length); at += extra_length;
+    size_t central_size = at - central;
+    PUT32(0x06054b50u); PUT16(0u); PUT16(0u); PUT16(1u); PUT16(1u);
+    PUT32(central_size); PUT32(central); PUT16(0u);
+#undef PUT32
+#undef PUT16
+    return at;
+}
+
+static void test_zip64_and_newer_markup_refusals(void) {
+    char path[NATIVE_TEST_PATH_MAX];
+    static uint8_t bytes[16384];
+    char *text = build_dat(true);
+    path_in(path, sizeof(path), "zip64.zip");
+    /* The same zip loads with an ordinary extra block, and is refused with a
+       ZIP64 one (header ID 0x0001), as disc_verify.py refuses it. */
+    const uint8_t plain_extra[4] = {0x55, 0x54, 0x00, 0x00};
+    size_t size = stored_zip_with_extra(bytes, sizeof(bytes), "list.dat", text, plain_extra, 4u);
+    write_bytes(path, bytes, size);
+    NkDiscDat dat;
+    NkDiscExpandStatus status;
+    CHECK(nk_disc_dat_load(path, &dat, &status) && dat.rom_count == 2);
+    nk_disc_dat_free(&dat);
+    const uint8_t zip64_extra[4] = {0x01, 0x00, 0x00, 0x00};
+    size = stored_zip_with_extra(bytes, sizeof(bytes), "list.dat", text, zip64_extra, 4u);
+    write_bytes(path, bytes, size);
+    expect_load_refused(path, NK_DISC_DAT_ZIP_INVALID);
+    /* A folder entry is an entry: one folder alone is not a .dat. */
+    size = stored_zip_with_extra(bytes, sizeof(bytes), "list.dat/", "", plain_extra, 4u);
+    write_bytes(path, bytes, size);
+    expect_load_refused(path, NK_DISC_DAT_ZIP_INVALID);
+
+    /* Markup a Redump list does not use is refused, not skipped: a lowercase
+       entity, a second DOCTYPE, one after the root, markup inside one, a
+       comment and CDATA. */
+    const char *external = "<!DOCTYPE datafile PUBLIC \"-//Logiqx//DTD ROM Management Datafile//EN\" "
+                           "\"http://www.logiqx.com/Dats/datafile.dtd\">";
+    char rom[256], doc[2048];
+    snprintf(rom, sizeof(rom), "<rom name=\"r.iso\" size=\"%u\" crc=\"%s\" sha1=\"%s\"/>",
+             IMAGE_BYTES, g_retail_digest.crc32, g_retail_digest.sha1);
+    const char *const cases[][3] = {
+        {"", "<datafile><!entity a \"b\"><game>", "</game></datafile>"},
+        {"", "<datafile><game>", "</game></datafile>"},  /* the DOCTYPE twice, below */
+        {"", "<datafile>", "<game>"},                      /* the DOCTYPE after the root */
+        {"<!DOCTYPE datafile <!ENTITY a \"b\">>", "<datafile><game>", "</game></datafile>"},
+        {"", "<datafile><!-- a --><game>", "</game></datafile>"},
+        {"", "<datafile><game><![CDATA[x]]>", "</game></datafile>"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (i == 1) {
+            snprintf(doc, sizeof(doc), "%s%s%s%s%s", external, external, cases[i][1], rom, cases[i][2]);
+        } else if (i == 2) {
+            snprintf(doc, sizeof(doc), "<datafile>%s<game>%s</game></datafile>", external, rom);
+        } else {
+            snprintf(doc, sizeof(doc), "%s%s%s%s", cases[i][0], cases[i][1], rom, cases[i][2]);
+        }
+        CHECK(!nk_disc_dat_parse(doc, strlen(doc), &dat, &status));
+        CHECK(strcmp(status.code, NK_DISC_DAT_ENTITY_REFUSED) == 0);
+    }
+    free(text);
+    printf("PASS ZIP64, a folder entry and markup a Redump list does not use are refused by name\n");
 }
 
 /* ---- library keyed by disc ID plus content hash ------------------------ */
@@ -884,6 +2082,7 @@ static void test_library_hash_members_are_checked(void) {
 }
 
 int main(void) {
+    test_conformance_corpus();
     native_test_create_root("disc-verify");
     native_test_isolate_user_data_roots();
     build_images();
@@ -892,6 +2091,10 @@ int main(void) {
     test_dat_reader_and_tiers();
     test_dat_import();
     test_verify_image_for_an_add_worker();
+    test_dat_zip_and_entity_refusals();
+    test_bundled_list();
+    test_reader_cost_is_linear();
+    test_zip64_and_newer_markup_refusals();
     test_old_library_still_loads();
     test_library_keys_by_disc_id_and_hash();
     test_library_remove_never_takes_the_other_image();

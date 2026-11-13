@@ -4,12 +4,14 @@
 #if defined(_WIN32) || defined(_WIN64)
 
 #include "nk_platform.h"
+#include "nk_data_migrate.h"
 #include "nk_types.h"
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <objbase.h>
 #include <ctype.h>
+#include <fcntl.h>
 #include <io.h>
 #include <process.h>
 #include <stdio.h>
@@ -690,6 +692,23 @@ bool nk_platform_get_desktop_dir(char *out_path, size_t max_len) {
     return resolved;
 }
 
+bool nk_platform_get_personal_dir(NkPersonalDir which, char *out_path, size_t max_len) {
+    static const KNOWNFOLDERID *const folders[NK_PERSONAL_COUNT] = {
+        &FOLDERID_Documents, &FOLDERID_Downloads, &FOLDERID_Music, &FOLDERID_Pictures,
+        &FOLDERID_Videos, &FOLDERID_Desktop
+    };
+    if (!out_path || max_len == 0) return false;
+    out_path[0] = '\0';
+    if ((unsigned)which >= (unsigned)NK_PERSONAL_COUNT) return false;
+    PWSTR wide_path = NULL;
+    HRESULT result = SHGetKnownFolderPath(folders[which], KF_FLAG_DEFAULT, NULL, &wide_path);
+    bool resolved = SUCCEEDED(result) && wide_path &&
+        wide_to_utf8(wide_path, out_path, max_len) && nk_platform_dir_exists(out_path);
+    if (wide_path) CoTaskMemFree(wide_path);
+    if (!resolved) out_path[0] = '\0';
+    return resolved;
+}
+
 static bool get_windows_data_base(char *out_base, size_t max_len) {
     char known_local_app_data[32768] = "";
     char local_app_data[32768] = "";
@@ -783,6 +802,12 @@ bool nk_platform_resolve_app_data_dir(char *out_path, size_t max_len) {
 
 bool nk_platform_resolve_path(NkPathType type, char *out_path, size_t max_len) {
     return resolve_windows_path(type, out_path, max_len);
+}
+
+/* Windows has one layout, %LOCALAPPDATA%\Nakagawa, so there is nothing to decide (#324). */
+bool nk_platform_user_data_layout(struct NkUserDataLayout *out) {
+    if (out) memset(out, 0, sizeof(*out));
+    return false;
 }
 
 bool nk_platform_get_executable_path(char *out_path, size_t max_len) {
@@ -1380,14 +1405,88 @@ int nk_platform_wait_process(NkProcessHandle *process, int timeout_ms) {
     return -1;
 }
 
+#define NK_FINAL_PATH_CHARS 32768u
+
+/* Wide, as every other path call here: the system code page cannot hold every UTF-8 path
+   (a Japanese folder name on a code page 1252 system, or any non-ASCII one past 932). */
 bool nk_platform_absolute_path(const char *path, char *out_path, size_t max_len) {
     if (!path || !*path || !out_path || max_len == 0) return false;
-    char buffer[MAX_PATH * 2];
-    DWORD written = GetFullPathNameA(path, (DWORD)sizeof(buffer), buffer, NULL);
-    if (written == 0 || written >= sizeof(buffer) || written >= max_len) return false;
+    WCHAR *wpath = (WCHAR *)malloc(2u * NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        return false;
+    }
+    WCHAR *full = wpath + NK_FINAL_PATH_CHARS;
+    DWORD written = GetFullPathNameW(wpath, NK_FINAL_PATH_CHARS, full, NULL);
+    bool ok = written > 0 && written < NK_FINAL_PATH_CHARS && wide_to_utf8(full, out_path, max_len);
+    free(wpath);
+    return ok;
+}
 
-    memcpy(out_path, buffer, (size_t)written + 1);
-    return true;
+bool nk_platform_real_path(const char *path, char *out_path, size_t max_len) {
+    if (!path || !*path || !out_path || max_len == 0) return false;
+    WCHAR *wpath = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        return false;
+    }
+    HANDLE handle = CreateFileW(wpath, FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(wpath);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    WCHAR *final_path = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    DWORD length = final_path == NULL ? 0 :
+        GetFinalPathNameByHandleW(handle, final_path, NK_FINAL_PATH_CHARS,
+                                  FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    CloseHandle(handle);
+    bool ok = length > 0 && length < NK_FINAL_PATH_CHARS;
+    if (ok) {
+        WCHAR *start = final_path;
+        if (wcsncmp(start, L"\\\\?\\UNC\\", 8) == 0) {
+            start += 6; /* a share: the prefix becomes the two leading separators */
+            start[0] = L'\\';
+        } else if (wcsncmp(start, L"\\\\?\\", 4) == 0) {
+            start += 4;
+        }
+        ok = wide_to_utf8(start, out_path, max_len);
+    }
+    free(final_path);
+    return ok;
+}
+
+#ifndef FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+#define FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS 0x00400000
+#endif
+
+FILE *nk_platform_open_regular_file(const char *path) {
+    if (!path || !*path) return NULL;
+    WCHAR *wpath = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        return NULL;
+    }
+    HANDLE handle = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    free(wpath);
+    if (handle == INVALID_HANDLE_VALUE) return NULL;
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(handle, &info) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
+                                  FILE_ATTRIBUTE_DEVICE | FILE_ATTRIBUTE_OFFLINE |
+                                  FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)) != 0 ||
+        GetFileType(handle) != FILE_TYPE_DISK) {
+        CloseHandle(handle);
+        return NULL;
+    }
+    int fd = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+    if (fd < 0) {
+        CloseHandle(handle);
+        return NULL;
+    }
+    FILE *file = _fdopen(fd, "rb");
+    if (!file) _close(fd);
+    return file;
 }
 
 void nk_platform_terminate_process(NkProcessHandle *process) {
@@ -1464,6 +1563,13 @@ bool nk_platform_is_path_separator(char c) {
     return c == '\\' || c == '/';
 }
 
+bool nk_platform_path_is_absolute(const char *path) {
+    if (path == NULL || path[0] == '\0') return false;
+    return (((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+            path[1] == ':' && nk_platform_is_path_separator(path[2])) ||
+           (nk_platform_is_path_separator(path[0]) && nk_platform_is_path_separator(path[1]));
+}
+
 bool nk_platform_path_chars_equal(char a, char b) {
     if (a == '/') a = '\\';
     if (b == '/') b = '\\';
@@ -1478,8 +1584,99 @@ const char *nk_platform_env_user_name(void) {
     return getenv("USERNAME");
 }
 
+int nk_platform_env_utf8(const char *name, char *out, size_t cap) {
+    WCHAR wname[128];
+    WCHAR probe[1];
+    if (!out || cap == 0) return -1;
+    out[0] = '\0';
+    if (!name || !utf8_to_wide(name, wname, sizeof(wname) / sizeof(wname[0]))) return -1;
+    SetLastError(ERROR_SUCCESS);
+    if (GetEnvironmentVariableW(wname, probe, 1) == 0)
+        return GetLastError() == ERROR_ENVVAR_NOT_FOUND ? 0 : 1;   /* unset, or set and empty */
+    return env_get_utf8(wname, out, cap) ? 1 : -1;
+}
+
 unsigned long nk_platform_process_id(void) {
     return (unsigned long)_getpid();
+}
+
+bool nk_platform_local_pipe_supported(void) {
+    return true;
+}
+
+bool nk_platform_local_pipe_open(NkLocalPipe *pipe, const char *name) {
+    if (!pipe) return false;
+    memset(pipe, 0, sizeof(*pipe));
+    if (!name || !*name || strchr(name, '\\') || strchr(name, '/')) return false;
+    char narrow[128];
+    WCHAR wide[128];
+    int n = snprintf(narrow, sizeof(narrow), "\\\\.\\pipe\\%s", name);
+    if (n <= 0 || (size_t)n >= sizeof(narrow) ||
+        !utf8_to_wide(narrow, wide, sizeof(wide) / sizeof(wide[0]))) {
+        return false;
+    }
+    /* Identification level only: whatever program serves the pipe (any local process could
+       create it first) may learn who connected but can never impersonate this user. */
+    HANDLE handle = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT |
+                                    SECURITY_IDENTIFICATION,
+                                NULL);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    pipe->handle = handle;
+    pipe->open = true;
+    return true;
+}
+
+/* One overlapped transfer that gives up after timeout_ms, cancelling what is left. */
+static bool local_pipe_transfer(HANDLE handle, bool writing, void *data, DWORD len,
+                                unsigned timeout_ms, DWORD *done) {
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof(ov));
+    ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!ov.hEvent) return false;
+    *done = 0;
+    BOOL ok = writing ? WriteFile(handle, data, len, NULL, &ov)
+                      : ReadFile(handle, data, len, NULL, &ov);
+    bool result = false;
+    if (ok || GetLastError() == ERROR_IO_PENDING) {
+        if (WaitForSingleObject(ov.hEvent, timeout_ms) == WAIT_OBJECT_0) {
+            result = GetOverlappedResult(handle, &ov, done, FALSE) != 0;
+        } else {
+            (void)CancelIoEx(handle, &ov);
+            (void)GetOverlappedResult(handle, &ov, done, TRUE);
+        }
+    }
+    CloseHandle(ov.hEvent);
+    return result;
+}
+
+bool nk_platform_local_pipe_write(NkLocalPipe *pipe, const void *data, size_t len,
+                                  unsigned timeout_ms) {
+    if (!pipe || !pipe->open || !data || len == 0 || len > 0x7fffffffu) return false;
+    DWORD done = 0;
+    return local_pipe_transfer((HANDLE)pipe->handle, true, (void *)data, (DWORD)len,
+                               timeout_ms, &done) &&
+           done == (DWORD)len;
+}
+
+long nk_platform_local_pipe_read(NkLocalPipe *pipe, void *buf, size_t cap) {
+    if (!pipe || !pipe->open || !buf || cap == 0) return -1;
+    DWORD avail = 0;
+    if (!PeekNamedPipe((HANDLE)pipe->handle, NULL, 0, NULL, &avail, NULL)) return -1;
+    if (avail == 0) return 0;
+    DWORD want = avail < cap ? avail : (DWORD)(cap > 0x7fffffffu ? 0x7fffffffu : cap);
+    DWORD done = 0;
+    /* The bytes are already in the pipe, so this completes at once; the bound only keeps a
+       misbehaving server from holding the caller. */
+    if (!local_pipe_transfer((HANDLE)pipe->handle, false, buf, want, 1000u, &done)) return -1;
+    return (long)done;
+}
+
+void nk_platform_local_pipe_close(NkLocalPipe *pipe) {
+    if (!pipe) return;
+    if (pipe->open && pipe->handle) CloseHandle((HANDLE)pipe->handle);
+    pipe->handle = NULL;
+    pipe->open = false;
 }
 
 int nk_platform_last_os_error(void) {
@@ -1631,5 +1828,7 @@ bool nk_platform_host_startup(const char *log_tag) {
     (void)log_tag;
     return true;
 }
+
+void nk_platform_host_shutdown(void) {}
 
 #endif /* _WIN32 */

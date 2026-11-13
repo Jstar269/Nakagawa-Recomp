@@ -78,7 +78,8 @@ typedef struct {
        share a disc ID and stay two records (nk_library.h). */
     char content_sha1[41];
     char content_crc32[9];
-    /* How the image compares with the user's Redump list: an NkDiscTier
+    /* How the image compares with the Redump list it was checked against (the
+       user's import, else the list bundled with Nakagawa): an NkDiscTier
        (nk_disc_verify.h), 0 when it was not checked. */
     uint32_t disc_verification;
     char prepared_root[NK_MAX_PATH];
@@ -115,8 +116,14 @@ typedef struct {
        package, packages/<disc_id>; an enhancement package id for the enhanced
        build, packages/<disc_id>-enhanced-<id> (docs/ENHANCEMENT_CONTRACT.md
        section 9). The player sets it from its per-title setting; the library
-       file never stores it. */
+       file never stores it. A build of a timing package with a code-hook
+       package is named <timing id>+<hook id> (section 9.9). */
     char enhancement_package_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    /* The enhanced build carries only a code-hook package, no timing package
+       (Wider culling with the 60 FPS game logic off, section 11.3.6): its launch
+       exports SR_EXPERIMENTAL_60HZ=0 and its build passes --ace-cull alone.
+       The library file never stores it. */
+    bool enhancement_hook_only;
 } NkGameEntry;
 
 #ifdef __cplusplus

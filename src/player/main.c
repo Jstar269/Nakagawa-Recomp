@@ -44,6 +44,7 @@
 #include "player_ui_test.h"
 #include "nk_platform.h"
 #include "nk_shared_helpers.h"
+#include "nk_data_migrate.h"
 #include "nk_portable.h"
 #include "nk_json.h"
 #include "player_host.h"
@@ -233,7 +234,11 @@ static void player_take_picked_package(PlayerApp *app, const char *path) {
     char message[512];
     if (!player_psn_package_inspect(path, &package, code, sizeof(code), message,
                                     sizeof(message))) {
-        player_show_picked_refusal(app, code, "Package not supported", message);
+        if (strcmp(code, "HOMEBREW_ALREADY_ADDED") == 0) {
+            player_app_refuse_homebrew_elsewhere(app, &package, NULL, 0u);
+        } else {
+            player_show_picked_refusal(app, code, "Package not supported", message);
+        }
         return;
     }
     if (package.iso_ready) {
@@ -357,6 +362,60 @@ static void trigger_save_folder_picker(SDL_Window *window, PlayerApp *app) {
     SDL_SetAtomicInt(&s_save_pick_state, 0);
     player_host_show_picker(PLAYER_HOST_PICK_SAVE, window, player_picker_start(app),
                             on_save_folder_dialog_callback, app);
+}
+
+/* A title's Enhanced page > Texture pack folder. As with a save, SDL may call back on another
+   thread, so the folder waits here for the main thread: 1 picked, 2 cancelled, 3 the picker
+   failed, 4 the path is too long to hold. */
+static char s_texpack_pick[NK_MAX_PATH];
+static char s_texpack_pick_error[256];
+static SDL_AtomicInt s_texpack_pick_state;
+
+static void on_texpack_folder_dialog_callback(void *userdata, const char *const *filelist,
+                                              int filter) {
+    (void)userdata;
+    (void)filter;
+    if (!filelist) {
+        (void)snprintf(s_texpack_pick_error, sizeof(s_texpack_pick_error), "%s", SDL_GetError());
+        SDL_SetAtomicInt(&s_texpack_pick_state, 3);
+    } else if (!filelist[0]) {
+        SDL_SetAtomicInt(&s_texpack_pick_state, 2);
+    } else if (strlen(filelist[0]) >= sizeof(s_texpack_pick)) {
+        SDL_SetAtomicInt(&s_texpack_pick_state, 4);
+    } else {
+        (void)snprintf(s_texpack_pick, sizeof(s_texpack_pick), "%s", filelist[0]);
+        SDL_SetAtomicInt(&s_texpack_pick_state, 1);
+    }
+}
+
+static void trigger_texpack_folder_picker(SDL_Window *window, PlayerApp *app) {
+    SDL_SetAtomicInt(&s_texpack_pick_state, 0);
+    player_host_show_picker(PLAYER_HOST_PICK_TEXPACK, window, player_picker_start(app),
+                            on_texpack_folder_dialog_callback, app);
+}
+
+static void player_take_texpack_folder_pick(PlayerApp *app) {
+    int state = SDL_GetAtomicInt(&s_texpack_pick_state);
+    if (state == 0) return;
+    SDL_SetAtomicInt(&s_texpack_pick_state, 0);
+    if (state != 1) player_app_cancel_texpack_pick(app);
+    if (state == 1) {
+        /* Read and refused with its reason, or stored for the game the dialog was opened for. */
+        (void)player_app_take_texpack_pick(app, s_texpack_pick);
+    } else if (state == 3) {
+        fprintf(stderr, "[PLAYER] The folder picker could not open: %s\n", s_texpack_pick_error);
+        player_app_set_error_with_details(
+            app, "TEXTURE_PACK_PICKER_FAILED", "The folder picker didn't open",
+            "Nakagawa couldn't show a folder picker, so no texture pack was chosen.",
+            s_texpack_pick_error, "Back", app->active_view == VIEW_ERROR ? VIEW_LIBRARY
+                                                                        : app->active_view);
+    } else if (state == 4) {
+        player_app_set_error(
+            app, "TEXTURE_PACK_PICKER_FAILED", "Texture pack not used",
+            "The folder you picked is too deep in other folders for Nakagawa to read, so no "
+            "texture pack was chosen. Move it somewhere shorter and choose it from there.",
+            "Back", app->active_view == VIEW_ERROR ? VIEW_LIBRARY : app->active_view);
+    }
 }
 
 static void player_take_save_folder_pick(PlayerApp *app) {
@@ -667,6 +726,11 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
     case SDL_EVENT_WINDOW_MAXIMIZED:
         app->settings.launcher_window_maximized = true;
         return true;
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+        /* The launcher music pauses while the window is away (#2207). */
+        player_ui_nk_note_window_focus(next_ui, event->type == SDL_EVENT_WINDOW_FOCUS_GAINED);
+        return true;
     case SDL_EVENT_WINDOW_RESTORED:
         app->settings.launcher_window_maximized =
             (SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED) != 0;
@@ -810,8 +874,10 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
                the routes below would give to the page under it. */
             return player_ui_nk_handle_event(next_ui, event);
         }
+        /* Start opens Settings from the library, except while the find box is
+           open: its keyboard takes Start as Done (#2206). */
         if (use_next_ui && event->gbutton.button == SDL_GAMEPAD_BUTTON_START &&
-            player_view_is_library(app->active_view)) {
+            player_view_is_library(app->active_view) && !player_ui_nk_find_open(next_ui)) {
             player_app_set_view(app, VIEW_SETTINGS);
             return true;
         }
@@ -1646,6 +1712,9 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_TOGGLE_UPDATE_AT_START:
             player_app_toggle_update_check_at_start(app);
             break;
+        case PLAYER_UI_SETTINGS_TOGGLE_DISCORD:
+            player_app_toggle_discord_presence(app);
+            break;
         case PLAYER_UI_SETTINGS_DOWNLOAD_UPDATE:
             if (app->update.phase == PLAYER_UPDATE_AVAILABLE) {
                 player_update_start(app, PLAYER_UPDATE_JOB_DOWNLOAD);
@@ -1694,6 +1763,13 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_VOLUME_DOWN: player_app_adjust_volume(app, -5); break;
         case PLAYER_UI_SETTINGS_VOLUME_UP: player_app_adjust_volume(app, 5); break;
         case PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS: player_app_toggle_ui_sounds(app); break;
+        case PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC: player_app_toggle_launcher_music(app); break;
+        case PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN:
+            player_app_adjust_launcher_music_volume(app, -5);
+            break;
+        case PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP:
+            player_app_adjust_launcher_music_volume(app, 5);
+            break;
         case PLAYER_UI_SETTINGS_OPEN_ACCESSIBILITY:
             player_app_set_view(app, VIEW_ACCESSIBILITY_SETTINGS);
             break;
@@ -1748,6 +1824,8 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
             player_app_toggle_share_system_libraries(app);
             break;
         case PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED: player_app_cycle_build_speed(app); break;
+        case PLAYER_UI_SETTINGS_CHOOSE_TEXPACK: player_app_begin_texpack_pick(app); break;
+        case PLAYER_UI_SETTINGS_REMOVE_TEXPACK: player_app_clear_enhanced_page_pack(app); break;
         case PLAYER_UI_SETTINGS_CLEAR_SHARED_LIBRARIES:
             player_app_clear_shared_library_cache(app);
             break;
@@ -2948,6 +3026,8 @@ static void finish_psn_job(PlayerApp *app, PlayerPsnJob *job) {
             snprintf(app->wizard.status_message, sizeof(app->wizard.status_message), "%.200s",
                      job->message);
         }
+    } else if (strcmp(job->code, "HOMEBREW_ALREADY_ADDED") == 0) {
+        player_app_refuse_homebrew_elsewhere(app, &job->package, NULL, 0u);
     } else if (job->package.disc_format != NK_DISC_FORMAT_NONE) {
         player_show_picked_refusal(app, job->code, player_disc_refusal_title(job->code),
                                    job->message);
@@ -2979,6 +3059,9 @@ typedef struct {
     PlayerDiscCheckItem item;
     bool verified_elsewhere;
     char data_root[NK_MAX_PATH];
+    /* The Redump list bundled beside the player (assets/redump); the user's
+       import in data_root takes precedence over it. */
+    char bundled_dat[NK_MAX_PATH];
     bool cancel_requested;
     bool finished;
     int percent;
@@ -3021,8 +3104,9 @@ static int SDLCALL disc_check_thread_main(void *userdata) {
     NkDiscExpandCallbacks callbacks = { disc_check_progress, disc_check_cancelled, job };
     NkDiscVerification check;
     player_ui_test_hold_disc_check();
-    bool hashed = nk_disc_verify_image(job->item.iso_path, job->data_root, job->item.disc_id,
-                                       job->verified_elsewhere, &callbacks, &check);
+    bool hashed = nk_disc_verify_image(job->item.iso_path, job->data_root, job->bundled_dat,
+                                       job->item.disc_id, job->verified_elsewhere, &callbacks,
+                                       &check);
     SDL_LockMutex(job->mutex);
     job->check = check;
     job->finished = true;
@@ -3050,8 +3134,14 @@ static void start_disc_check_job(PlayerApp *app, PlayerDiscCheckJob **job_slot) 
         return;
     }
     if (job) {
+        const char *base = SDL_GetBasePath();
         job->item = item;
         job->verified_elsewhere = verified_elsewhere;
+        /* No folder (or a path too long) leaves it empty: the import alone is
+           used, and with none the reason says no list was found. */
+        if (!base || !nk_disc_bundled_dat_path(base, job->bundled_dat, sizeof(job->bundled_dat))) {
+            job->bundled_dat[0] = '\0';
+        }
         job->mutex = SDL_CreateMutex();
     }
     if (job && job->mutex) {
@@ -3301,6 +3391,9 @@ static bool player_parse_positive_u32(const char *text, uint32_t maximum,
 typedef struct {
     SDL_Thread *thread;
     SDL_AtomicInt done;
+    /* The launcher music is still fading out (#2207): the worker, which starts the
+       game's process, waits until the launcher holds no audio stream. */
+    bool awaiting_audio;
     PlayerUiTestLaunch test;
     PlayerLaunchWork work;
 } PlayerLaunchJob;
@@ -3316,7 +3409,24 @@ static int SDLCALL player_launch_thread_main(void *data) {
     return 0;
 }
 
-static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index) {
+/* Starts the launch worker, or runs the launch here when no thread can start. */
+static void player_launch_job_spawn(PlayerLaunchJob *job, bool launcher_audio_closed) {
+    job->awaiting_audio = false;
+    player_ui_test_report_launch_worker(launcher_audio_closed);
+    job->thread = SDL_CreateThread(player_launch_thread_main, "nakagawa-launch", job);
+    if (!job->thread) {
+        /* No worker: run the launch here, as the launcher always did. */
+        fprintf(stderr, "[PLAYER] Launch worker could not start (%s); launching inline.\n",
+                SDL_GetError());
+        player_launch_job_run(job);
+    }
+}
+
+/* `launcher_audio_closed`: the launcher holds no music stream. Otherwise the job
+   waits, launch_pending, while the music fades out, and player_launch_job_poll
+   starts the worker once the music has let go of the device. */
+static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index,
+                                                bool launcher_audio_closed) {
     if (!app || app->launch_pending || app->is_game_running ||
         game_index < 0 || game_index >= app->game_count) {
         return NULL;
@@ -3340,21 +3450,33 @@ static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index) 
     app->launch_pending = true;
     snprintf(app->launch_pending_disc_id, sizeof(app->launch_pending_disc_id), "%s",
              job->work.game.disc_id);
-    job->thread = SDL_CreateThread(player_launch_thread_main, "nakagawa-launch", job);
-    if (!job->thread) {
-        /* No worker: run the launch here, as the launcher always did. */
-        fprintf(stderr, "[PLAYER] Launch worker could not start (%s); launching inline.\n",
-                SDL_GetError());
-        player_launch_job_run(job);
+    if (launcher_audio_closed) {
+        player_launch_job_spawn(job, true);
+    } else {
+        job->awaiting_audio = true;
     }
     return job;
 }
 
 /* Hands a finished launch to the app. Returns the job while it still runs and
- * NULL once it is handed back; `wait` blocks until then (shutdown only). */
+ * NULL once it is handed back; `wait` blocks until then (shutdown only). A job
+ * waiting for the launcher music starts its worker once `launcher_audio_closed`;
+ * at shutdown it is dropped, since no game's process has started for it. */
 static PlayerLaunchJob *player_launch_job_poll(PlayerApp *app, PlayerLaunchJob *job,
-                                               bool wait) {
+                                               bool wait, bool launcher_audio_closed) {
     if (!job) return NULL;
+    if (job->awaiting_audio) {
+        if (wait) {
+            fprintf(stderr, "[PLAYER] Launch of %s dropped: the player closed before the "
+                            "game started.\n", job->work.game.disc_id);
+            app->launch_pending = false;
+            app->launch_pending_disc_id[0] = '\0';
+            free(job);
+            return NULL;
+        }
+        if (!launcher_audio_closed) return job;
+        player_launch_job_spawn(job, true);
+    }
     if (!wait && SDL_GetAtomicInt(&job->done) == 0) return job;
     if (job->thread) SDL_WaitThread(job->thread, NULL);
     app->launch_pending = false;
@@ -3798,9 +3920,20 @@ typedef struct PlayerRun {
    the process's exit code. */
 #define PLAYER_RUN_CONTINUE INT_MIN
 
+/* A Linux or macOS install uses its earlier folders while the new one exists too (#324,
+   nk_data_migrate.h): the library and the log name both. Nothing is moved, and the start goes on. */
+static void player_note_data_layout(PlayerApp *app) {
+    static NkUserDataLayout layout;
+    if (nk_platform_user_data_layout(&layout) &&
+        nk_data_layout_notice(&layout, app->data_folder_notice, sizeof(app->data_folder_notice))) {
+        fprintf(stderr, "[PLAYER] %s\n", app->data_folder_notice);
+    }
+}
+
 static void player_run_init(PlayerRun *run) {
     memset(run, 0, sizeof(*run));
     player_app_init(&run->app);
+    player_note_data_layout(&run->app);
     const char *executable_directory = SDL_GetBasePath();
     if (executable_directory) {
         player_app_discover_showcase(&run->app, executable_directory);
@@ -4067,7 +4200,16 @@ static int player_load_library(PlayerRun *run) {
             ok = player_psn_package_convert(&package, &hooks, code, sizeof(code), message,
                                             sizeof(message));
         }
-        if (!ok) {
+        if (!ok && strcmp(code, "HOMEBREW_ALREADY_ADDED") == 0) {
+            /* What clears the stop, as the card says it, without the folder the card shows:
+               stderr may be player-output.txt, which a problem report collects. */
+            char log_line[sizeof(app->last_error.message)];
+            player_app_refuse_homebrew_elsewhere(app, &package, log_line, sizeof(log_line));
+            fprintf(stderr, "[PLAYER] %s: %s\n", code, log_line);
+            if (run->stage_only || app->launch_headless) return 1;
+            run->populate_sample = false;
+            run->initial_iso_path = NULL;
+        } else if (!ok) {
             fprintf(stderr, "[PLAYER] %s: %s\n", code, message);
             if (run->stage_only || app->launch_headless) return 1;
             run->populate_sample = false;
@@ -4928,6 +5070,10 @@ static void player_loop_start(PlayerRun *run) {
        process-exit monitoring alive while the user is idle; staging progress
        and normal input still wake the loop immediately. */
     player_ui_test_begin_first_frame(&run->ui_test);
+    /* The launcher music (#2207) starts with the first frame, so that frame
+       already shows its state; a game the player was started with keeps it
+       stopped. */
+    player_ui_nk_update_music(run->next_ui, app);
     player_render_active_ui(run->next_ui, app, run->renderer, run->window);
     if (run->interactive_window && run->have_usable_bounds && !run->window_frame_measured) {
         run->window_frame_measured = player_refit_to_actual_frame(
@@ -5088,6 +5234,13 @@ static void player_frame_requests(PlayerRun *run) {
         }
     }
     player_take_save_folder_pick(app);
+    if (app->request_texpack_folder_picker) {
+        if (!player_ui_test_active(&run->ui_test)) {
+            app->request_texpack_folder_picker = false;
+            trigger_texpack_folder_picker(run->window, app);
+        }
+    }
+    player_take_texpack_folder_pick(app);
     if (app->request_open_folder) {
         app->request_open_folder = false;
         if (app->requested_open_path[0] &&
@@ -5261,8 +5414,12 @@ static void player_frame_requests(PlayerRun *run) {
 /* The running game and the window handoff to it, and the controller's live input. */
 static void player_frame_game_session(PlayerRun *run) {
     PlayerApp *app = &run->app;
+    /* The launcher music follows the launch: a starting game fades it out, and
+       the worker below waits until it has let go of the audio device (#2207). */
+    player_ui_nk_update_music(run->next_ui, app);
     /* A launch the worker finished becomes the running game, or its card. */
-    run->launch_job = player_launch_job_poll(app, run->launch_job, false);
+    run->launch_job = player_launch_job_poll(app, run->launch_job, false,
+                                             player_ui_nk_launcher_audio_closed(run->next_ui));
 
     /* Monitor running game process */
     bool child_exited = false;
@@ -5270,6 +5427,9 @@ static void player_frame_game_session(PlayerRun *run) {
             child_exited = player_app_monitor_game_session(app, SDL_GetTicks());
     }
     (void)child_exited;
+    /* Discord status (#2259), when the user turned it on: shows the running game and
+       clears it once the game has exited. Never waits; quiet when Discord is not running. */
+    player_app_discord_tick(app, SDL_GetTicks());
     /* The launcher stays open behind the game (#1298): minimizing it
        unasked surprised users. When the game ends, it comes back to the
        front, and a later launch gets its own handoff. */
@@ -5363,8 +5523,14 @@ static void player_frame_render(PlayerRun *run) {
         app->request_launch = false;
         if (!run->launch_job) {
             player_note_launcher_display(app, run->window);
-            run->launch_job = player_launch_job_start(app, app->request_launch_index);
+            run->launch_job = player_launch_job_start(
+                app, app->request_launch_index,
+                player_ui_nk_launcher_audio_closed(run->next_ui));
         }
+        /* A request dropped here (a launch already running, or one refused before
+           player_app_launch_begin) must not leave its "Play without the pack" for a later launch;
+           a launch that began has already taken it. */
+        app->launch_without_pack[0] = '\0';
     }
     if (app->request_factory_reset) {
         app->request_factory_reset = false;
@@ -5418,7 +5584,8 @@ static int player_shutdown(PlayerRun *run) {
     run->outdated_scan_job = player_outdated_scan_poll(app, run->outdated_scan_job, true);
 
     /* A launch still on its worker finishes first, so its game is stopped. */
-    run->launch_job = player_launch_job_poll(app, run->launch_job, true);
+    run->launch_job = player_launch_job_poll(app, run->launch_job, true,
+                                             player_ui_nk_launcher_audio_closed(run->next_ui));
     if (app->is_game_running) {
         player_app_stop_game(app);
     }
@@ -5457,6 +5624,7 @@ static int player_shutdown(PlayerRun *run) {
 
     player_update_shutdown();
     player_report_shutdown();
+    player_app_discord_shutdown(app);
     destroy_staging_job(&run->staging_job);
     destroy_psn_job(&run->psn_job);
     destroy_disc_check_job(&run->disc_check_job);

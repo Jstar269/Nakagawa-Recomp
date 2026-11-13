@@ -23,6 +23,7 @@ set(CORE_SOURCES
     src/core/nk_font.c
     src/core/nk_pgf_host.c
     src/rt/pgf_public.c
+    src/rt/texrepl.c
     src/core/nk_iso.c
     src/core/nk_library.c
     src/core/nk_launch.c
@@ -49,6 +50,7 @@ set(CORE_SOURCES
     src/core/nk_disc_verify.c
     src/core/nk_zip.c
     src/core/nk_steam_shortcuts.c
+    src/core/nk_data_migrate.c
     src/core/generated/nk_title_catalog.c
 )
 
@@ -227,6 +229,8 @@ add_executable(test_disc_verify
 )
 target_link_libraries(test_disc_verify PRIVATE nakagawa_core)
 add_test(NAME disc_verify_test COMMAND test_disc_verify)
+# It reads the bundled Redump list at assets/redump/redump-psp.zip, relative to the checkout.
+set_tests_properties(disc_verify_test PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(test_nk_zip
     tests/native/test_nk_zip.c
@@ -262,6 +266,7 @@ add_executable(test_player_state
     tests/native/test_player_state.c
     tests/native/native_test_isolation.c
     src/player/player_state.c
+    src/player/discord_presence.c
     src/player/input_settings.c
     src/player/iso_reader.c
     src/player/package_builder.c
@@ -360,10 +365,13 @@ set(NK_UI_PLAYER_C5_SOURCES
     src/player/ui/scr_library.c
     ${NK_UI_PLAYER_TITLE_SOURCES}
 )
-# The next UI's SDL host pieces: disc art on a worker thread, launcher sounds.
+# The next UI's SDL host pieces: disc art on a worker thread, launcher sounds, and the
+# optional launcher music with its Ogg Vorbis decoder (#2207).
 set(NK_UI_PLAYER_HOST_SOURCES
     src/player/ui/player_ui_art.c
     src/player/ui/player_ui_sound.c
+    src/player/ui/player_ui_music.c
+    src/player/ui/player_ui_vorbis.c
 )
 set(NK_UI_OVERLAY_SOURCES
     src/rt/overlay/nk_overlay.c
@@ -622,6 +630,20 @@ endif()
 add_test(NAME update_check_test COMMAND test_update_check)
 set_tests_properties(update_check_test PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# Discord status (#2259) on a fake transport and, on Windows, a fake pipe server with a
+# test-only name; it never opens Discord's own pipes.
+add_executable(test_discord_presence
+    tests/native/test_discord_presence.c
+    tests/native/native_test_isolation.c
+    src/player/discord_presence.c
+)
+target_include_directories(test_discord_presence PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/player
+)
+target_link_libraries(test_discord_presence PRIVATE nakagawa_core)
+add_test(NAME discord_presence_test COMMAND test_discord_presence)
+
 add_executable(test_input_settings
     tests/native/test_input_settings.c
     tests/native/native_test_isolation.c
@@ -641,6 +663,14 @@ add_executable(test_portable_mode
 target_include_directories(test_portable_mode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
 target_link_libraries(test_portable_mode PRIVATE nakagawa_core)
 add_test(NAME portable_mode_test COMMAND test_portable_mode)
+
+add_executable(test_data_migrate
+    tests/native/test_data_migrate.c
+    tests/native/native_test_isolation.c
+)
+target_include_directories(test_data_migrate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
+target_link_libraries(test_data_migrate PRIVATE nakagawa_core)
+add_test(NAME data_migrate_test COMMAND test_data_migrate)
 
 if(WIN32)
     add_executable(argv_echo_helper tests/native/argv_echo_helper.c)
@@ -745,6 +775,7 @@ if(BUILD_PLAYER)
         src/player/package_builder.c
         src/core/nk_disc_chd.c
         src/player/update_check.c
+        src/player/discord_presence.c
         ${NK_UI_CORE_SOURCES}
         ${NK_UI_EDGE_SOURCES}
         src/ui/backend/nk_ui_sdlr.c
@@ -793,6 +824,20 @@ if(BUILD_PLAYER)
             "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/ui"
             "$<TARGET_FILE_DIR:nakagawa_player>/assets/fonts/ui"
         COMMENT "Staging the bundled UI font assets beside nakagawa_player"
+        VERBATIM
+    )
+    add_custom_command(TARGET nakagawa_player POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/music/launcher/ChillLofi.ogg"
+            "$<TARGET_FILE_DIR:nakagawa_player>/assets/music/launcher/ChillLofi.ogg"
+        COMMENT "Staging the launcher music's track beside nakagawa_player"
+        VERBATIM
+    )
+    add_custom_command(TARGET nakagawa_player POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/redump"
+            "$<TARGET_FILE_DIR:nakagawa_player>/assets/redump"
+        COMMENT "Staging the bundled Redump PSP list beside nakagawa_player"
         VERBATIM
     )
     if(WIN32)
@@ -980,6 +1025,8 @@ set(NK_RUNTIME_SOURCES
     src/rt/gpu_sdl3vk/tex_scale.c
     src/rt/gpu_sdl3vk/glyph_recon.c
     src/rt/texrepl.c
+    src/core/nk_zip.c
+    src/core/nk_psp_inflate.c
     third_party/xbrz/xbrz.c
     src/rt/gpu_sdl3vk/ace_ui.c
     src/rt/gpu_sdl3vk/ace_smooth.c

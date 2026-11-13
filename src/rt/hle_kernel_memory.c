@@ -281,8 +281,15 @@ static uint32_t h_MaxFreeMemSize(CpuState *s) {
 /* PSP-measured 2026-10-15 (PSP-3000, firmware 6.61, probe on e45e667b; docs/HARDWARE_ORACLE.md
  * 2026-10-15 entry, PR #1003): an unknown or deleted FPL id returns SCE_KERNEL_ERROR_UNKNOWN_FPLID,
  * and a refer after delete returns it and writes nothing. */
-/* UNMEASURED: create-time block failure and a blocking allocate outside a thread keep the code
- * they returned before the 2026-10-15 measurement; neither path was probed. */
+/* PSP-measured 2026-11-10 (PSP-3000, PSP-HLE-KERNEL-STATUS-002, case hle-kernel-pool-bounds;
+ * docs/HARDWARE_ORACLE.md): partition 2, attribute 0, one block, NULL options. A block size of 0
+ * is refused with SCE_KERNEL_ERROR_ILLEGAL_MEMSIZE, and a 0x7FFFFFFF-byte block the partition
+ * cannot hold with SCE_KERNEL_ERROR_NO_MEMORY; neither makes a pool. */
+#define FPL_ILLEGAL_MEMSIZE 0x800201b7u
+#define FPL_NO_MEMORY 0x80020190u
+/* UNMEASURED: a create with no free FPL slot and a blocking allocate outside a thread keep the
+ * code they returned before the 2026-10-15 measurement; neither path was probed. Block size 0
+ * was measured with one block: with a block count of 0 as well, the code order decides. */
 #define FPL_UNMEASURED_NO_SPACE 0x800200d9u
 
 /* A woken waiter that loses the freed block (or wakes for another reason, e.g. a
@@ -316,11 +323,11 @@ static uint32_t h_CreateFpl(CpuState *s) {
     if (A0) (void)guest_cstr(A0, name, sizeof(name));
     uint32_t bsize = A3;
     uint32_t nblocks = stack_arg(s, 0);
-    if (bsize == 0) bsize = 16;
+    if (bsize == 0) return FPL_ILLEGAL_MEMSIZE;
     if (nblocks == 0) nblocks = 1;
     uint32_t total = bsize * nblocks;
     uint32_t block_uid = alloc_block(total ? total : 16);
-    if (block_uid == 0xFFFFFFFFu) return FPL_UNMEASURED_NO_SPACE;
+    if (block_uid == 0xFFFFFFFFu) return FPL_NO_MEMORY;
     uint32_t pool = block_addr(block_uid);
     uint32_t uid = 0;
     for (int i = 0; i < FPL_MAX; i++) {
@@ -604,16 +611,26 @@ static uint32_t h_ReferFplStatus(CpuState *s) {
         MEM_W8(info_addr + i, ((const uint8_t *)&info)[i]);
     return 0;
 }
-#define VPL_ALIGN 16u
+/* PSP-measured (docs/HARDWARE_ORACLE.md kernel-object semantics, PSP-B1-01, "FPL and VPL"): a
+ * 1024-byte VPL reports 992 bytes, each allocation costs roundup(size, 8) + 8, and allocations
+ * run from high addresses downward. PSP-HLE-KERNEL-STATUS-002 (2026-11-10, PSP-3000) agrees: a
+ * 0x1000-byte VPL takes 15 allocations of 0x100 and refuses the 16th with NO_MEMORY, and
+ * pspautotests tests/threads/vpl/refer.expected reports poolSize 0xFFE0 for a 0x10000 pool.
+ * UNMEASURED: where the 0x20 bytes and each block's 8 bytes sit (here: the pool's first 0x20
+ * bytes, and the 8 bytes below the address handed out), and a pool size that is not a multiple
+ * of 8 (here rounded down), and which span a fragmented pool carves from (here the highest
+ * span that holds the block). */
+#define VPL_POOL_HEADER 0x20u
+#define VPL_BLOCK_HEADER 8u
+#define VPL_GRANULE 8u
 /* PSP-measured (docs/HARDWARE_ORACLE.md kernel-object error table, PSP-B1-01): an unknown VPL id
  * returns SCE_KERNEL_ERROR_UNKNOWN_VPLID. */
 /* UNMEASURED: no VPL exhausted code is recorded; this is the pre-measurement value, not the FPL
  * code. */
 #define VPL_EXHAUSTED 0x800200d9u
 /* pspautotests tests/threads/vpl/try.expected ("More than remaining", "All remaining", "1 byte
- * (none left)"): a request that no free block can hold answers SCE_KERNEL_ERROR_NO_MEMORY. The
- * point where a pool runs out still differs, because the PSP's per-block header accounting
- * (poolSize 0xFFE0 for a 0x10000 pool) is not modelled. */
+ * (none left)"): a request that no free block can hold answers SCE_KERNEL_ERROR_NO_MEMORY, as the
+ * 16th allocation of PSP-HLE-KERNEL-STATUS-002 did on the PSP-3000. */
 #define VPL_NO_SPACE 0x80020190u
 /* pspautotests tests/threads/vpl/allocate.expected and try.expected: a request of 0 bytes, of
  * -1 bytes, or larger than the pool answers 0x800201B7 from Allocate, AllocateCB (with and
@@ -684,6 +701,21 @@ void vpl_remove_waiter(VplPool *p, uint32_t thread_uid) {
     }
 }
 
+/* The bytes a pool hands out, which ReferVplStatus reports as poolSize. */
+static uint32_t vpl_pool_size(const VplPool *p) {
+    return p->size > VPL_POOL_HEADER ? (p->size - VPL_POOL_HEADER) & ~(VPL_GRANULE - 1u) : 0u;
+}
+
+/* A request no block of this pool can ever hold: 0 bytes, -1 bytes and more than the pool
+ * answer VPL_ILLEGAL_SIZE (pspautotests, above). UNMEASURED: a request within the create size
+ * whose cost exceeds the bytes the pool hands out gets the same code here, so a blocking
+ * allocate fails instead of waiting for space that can never exist. The request bound also
+ * keeps the cost from wrapping. */
+static int vpl_request_illegal(const VplPool *p, uint32_t request) {
+    if (request == 0 || request > p->size) return 1;
+    return ((request + (VPL_GRANULE - 1u)) & ~(VPL_GRANULE - 1u)) + VPL_BLOCK_HEADER > vpl_pool_size(p);
+}
+
 static uint32_t h_CreateVpl(CpuState *s) {
     uint32_t size = A3;
     if (size == 0) return VPL_EXHAUSTED; /* exact zero-size result is UNMEASURED */
@@ -698,7 +730,7 @@ static uint32_t h_CreateVpl(CpuState *s) {
             p->attr = A2;
             memset(s_vpl_names[i], 0, sizeof s_vpl_names[i]);
             if (A0) (void)guest_cstr(A0, s_vpl_names[i], (int)sizeof s_vpl_names[i]);
-            vpl_insert_free(p, base, size);
+            if (vpl_pool_size(p)) vpl_insert_free(p, base + VPL_POOL_HEADER, vpl_pool_size(p));
             return (uint32_t)(0x600 + i);
         }
     }
@@ -707,18 +739,21 @@ static uint32_t h_CreateVpl(CpuState *s) {
 }
 
 static uint32_t vpl_try_allocate_internal(VplPool *p, uint32_t request, uint32_t *addr_out) {
-    if (request == 0 || request > p->size) return VPL_ILLEGAL_SIZE; /* also keeps the rounding below from wrapping */
-    uint32_t need = (request + (VPL_ALIGN - 1u)) & ~(VPL_ALIGN - 1u);
-    for (int i = 0; i < p->nfree; ++i) {
+    if (vpl_request_illegal(p, request)) return VPL_ILLEGAL_SIZE;
+    /* PSP-B1-01: roundup(request, 8) + 8 bytes, carved from the top (the span choice is
+     * UNMEASURED, above) of the highest span that
+     * holds them. */
+    uint32_t need = ((request + (VPL_GRANULE - 1u)) & ~(VPL_GRANULE - 1u)) + VPL_BLOCK_HEADER;
+    for (int i = p->nfree - 1; i >= 0; --i) {
         if (p->free[i].size >= need) {
-            uint32_t addr = p->free[i].addr;
-            p->allocs = vpl_reserve(p->allocs, &p->allocs_cap, p->nallocs + 1, sizeof *p->allocs);
-            p->allocs[p->nallocs++] = (VplAlloc){addr, need};
-            p->free[i].addr += need; p->free[i].size -= need;
+            p->free[i].size -= need;
+            uint32_t addr = p->free[i].addr + p->free[i].size + VPL_BLOCK_HEADER;
             if (!p->free[i].size) {
                 for (int j = i; j + 1 < p->nfree; ++j) p->free[j] = p->free[j + 1];
                 --p->nfree;
             }
+            p->allocs = vpl_reserve(p->allocs, &p->allocs_cap, p->nallocs + 1, sizeof *p->allocs);
+            p->allocs[p->nallocs++] = (VplAlloc){addr, need};
             *addr_out = addr;
             return 0;
         }
@@ -730,7 +765,7 @@ static uint32_t h_TryAllocateVpl(CpuState *s) {
     VplPool *p = vpl_lookup(A0);
     uint32_t request = A1, out = A2;
     if (!p) return SCE_KERNEL_ERROR_UNKNOWN_VPLID;
-    if (request == 0 || request > p->size) return VPL_ILLEGAL_SIZE;
+    if (vpl_request_illegal(p, request)) return VPL_ILLEGAL_SIZE;
     if (out && !sr_guest_span_writable(out, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     uint32_t addr = 0;
     uint32_t err = vpl_try_allocate_internal(p, request, &addr);
@@ -745,7 +780,7 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
     uint32_t uid = A0, request = A1, out = A2, toptr = A3;
     VplPool *p = vpl_lookup(uid);
     if (!p) return SCE_KERNEL_ERROR_UNKNOWN_VPLID;
-    if (request == 0 || request > p->size) return VPL_ILLEGAL_SIZE;
+    if (vpl_request_illegal(p, request)) return VPL_ILLEGAL_SIZE;
     if (out && !sr_guest_span_writable(out, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
 
     uint64_t end_time = 0;
@@ -862,7 +897,7 @@ static uint32_t h_FreeVpl(CpuState *s) {
     uint32_t addr = A1;
     if (!p) return SCE_KERNEL_ERROR_UNKNOWN_VPLID;
     for (int i = 0; i < p->nallocs; ++i) if (p->allocs[i].addr == addr) {
-        vpl_insert_free(p, addr, p->allocs[i].size);
+        vpl_insert_free(p, addr - VPL_BLOCK_HEADER, p->allocs[i].size);
         p->allocs[i] = p->allocs[--p->nallocs];
         /* Waiter order: semaphores in hle.c do not handle attr for priority/FIFO queuing;
          * per task instruction, default to FIFO order and document.
@@ -902,14 +937,13 @@ static uint32_t h_ReferVplStatus(CpuState *s) {
     if (!info || !sr_guest_span_writable(info, 52u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     /* SceKernelVplInfo: size, name[32], attr, poolSize, freeSize, numWaitThreads.
      * pspautotests tests/threads/vpl/refer.expected: an input size of 0 leaves the record
-     * untouched (result 0); any other input size writes the 0x34-byte record. The pool size the
-     * PSP reports (0xFFE0 for a 0x10000 pool, 8 bytes of header per allocation) is NOT modelled
-     * here: this runtime reports the full pool size. */
+     * untouched (result 0); any other input size writes the 0x34-byte record. poolSize and
+     * freeSize follow the PSP-B1-01 accounting above (992 for a 1024-byte pool). */
     if (MEM_R32(info) == 0u) return 0;
     MEM_W32(info + 0, 52u);
     for (uint32_t i = 0; i < 32u; ++i) MEM_W8(info + 4u + i, (uint8_t)s_vpl_names[p - s_vpls][i]);
     MEM_W32(info + 36, p->attr);
-    MEM_W32(info + 40, p->size);
+    MEM_W32(info + 40, vpl_pool_size(p));
     uint32_t free_size = 0;
     for (int i = 0; i < p->nfree; ++i) free_size += p->free[i].size;
     MEM_W32(info + 44, free_size);

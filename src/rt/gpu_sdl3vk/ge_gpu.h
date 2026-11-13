@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "../../core/nk_shared_helpers.h"
+
 /* Pure parser for the render-scale environment (Settings > Internal Render
  * Resolution). The explicit diagnostic SR_GPU_SCALE wins when present; otherwise
  * the player-facing SR_RESOLUTION_SCALE is used. Values clamp to
@@ -103,6 +105,11 @@ typedef enum GeGpuSyncResult {
 /* Materialize a live GPU target into guest memory, or prove that no target owns the
  * validated span. This is target-scoped and does not make ordinary presentation wait. */
 int gegpu_sync_guest_fb(const GeGpuFbDescriptor *desc);
+
+/* One guest flip (the display's frame swap), counted before the presenter's slot rule or the
+ * on-screen keyboard can drop it: the clock of the host mip chain's build budget and streaming
+ * windows (ENHANCEMENT_CONTRACT.md 10.16), which must not depend on how fast the host presents. */
+void gegpu_note_guest_flip(void);
 
 typedef enum GeGpuReplayBoundaryKind {
     GEGPU_BOUNDARY_RENDER_SNAPSHOT = 0,
@@ -197,6 +204,30 @@ enum {
     GEGPU_FALLBACK_MIPS, GEGPU_FALLBACK_LINE, GEGPU_FALLBACK_POINT, GEGPU_FALLBACK_REASONS
 };
 
+/* Each reason's token in the render_fallback boot event and the player (#2151); NULL out of range. */
+static inline const char *gegpu_fallback_token(int reason) {
+    static const char *const tokens[GEGPU_FALLBACK_REASONS] = {
+        "stencil", "color_test", "logic_op", "write_mask", "ram_fb", "wide_stride", "mips",
+        "line", "point",
+    };
+    return reason >= 0 && reason < GEGPU_FALLBACK_REASONS ? tokens[reason] : NULL;
+}
+
+/* The render_fallback boot event and the player name these reasons as nk_shared_helpers.h's
+ * NkRenderEffect, in this order (#2151); the rule that decides when one is reported is there
+ * too (NK_RENDER_FALLBACK_*). */
+_Static_assert(GEGPU_FALLBACK_REASONS == (int)NK_RENDER_EFFECT_COUNT &&
+               GEGPU_FALLBACK_STENCIL == (int)NK_RENDER_EFFECT_STENCIL &&
+               GEGPU_FALLBACK_COLOR_TEST == (int)NK_RENDER_EFFECT_COLOR_TEST &&
+               GEGPU_FALLBACK_LOGIC_OP == (int)NK_RENDER_EFFECT_LOGIC_OP &&
+               GEGPU_FALLBACK_WRITE_MASK == (int)NK_RENDER_EFFECT_WRITE_MASK &&
+               GEGPU_FALLBACK_RAM_FB == (int)NK_RENDER_EFFECT_RAM_FB &&
+               GEGPU_FALLBACK_WIDE_STRIDE == (int)NK_RENDER_EFFECT_WIDE_STRIDE &&
+               GEGPU_FALLBACK_MIPS == (int)NK_RENDER_EFFECT_MIPS &&
+               GEGPU_FALLBACK_LINE == (int)NK_RENDER_EFFECT_LINE &&
+               GEGPU_FALLBACK_POINT == (int)NK_RENDER_EFFECT_POINT,
+               "the render_fallback event names the GE's fallback reasons in their order");
+
 typedef struct GeGpuReplayStats {
     unsigned long long queue_submits;
     unsigned long long render_submits;
@@ -210,7 +241,7 @@ typedef struct GeGpuReplayStats {
      * fallbacks that took a GPU-valid colour target back to guest VRAM (a synchronous
      * colour and depth readback each), by reason: GEGPU_FALLBACK_*. */
     unsigned long long fallback_prims;
-    unsigned long long fallback_readbacks[9];
+    unsigned long long fallback_readbacks[GEGPU_FALLBACK_REASONS];
     /* Stencil primitives that started a new batch because their box met the batch's
      * earlier primitives and the state reads what it writes (a snapshot copy between). */
     unsigned long long stencil_splits;
@@ -240,18 +271,36 @@ typedef struct GeGpuReplayStats {
 void gegpu_replay_stats_reset(void);
 void gegpu_replay_stats_get(GeGpuReplayStats *out);
 void gegpu_cpu_profile_stats_get(GeGpuCpuProfileStats *out);
+/* Movie frames (#2111, ge_shared.h's movie provenance): texture uploads that matched a noted movie
+ * picture, and presents decided to be movie frames, drawn as a texture or decoded into the target. */
+void gegpu_movie_counts(unsigned long *tex_matches, unsigned long *tex_frames, unsigned long *target_frames);
+
+/* The always-on counts the render fallback status reads once per accepted present (gui.c,
+ * #2151), indexed by GEGPU_FALLBACK_*: cumulative for the run, never reset, so a reader takes
+ * deltas. All zero, with ready 0, while the GPU GE is not running. gpu_prims counts the
+ * triangles, sprites and lines drawn on the GPU (a T&L primitive by its triangles), mod 2^32;
+ * sw_prims each primitive drawn by ge.c instead; readbacks is fallback_readbacks above. */
+typedef NkRenderFallbackCounts GeGpuFallbackCounts;
+void gegpu_fallback_counts(GeGpuFallbackCounts *out);
 
 /* Selftest entry points: defined only in selftest builds (see ge_gpu.c), but
  * declared unconditionally so no translation unit ever sees an implicit
  * declaration under any flag combination. */
 int gegpu_coherence_selftest(void);
+/* Supersampling's size check in the coherence selftest (--ssaa-budget-mb, --ssaa-max-dim,
+ * --ssaa-expect): the GPU memory budget and largest image side gegpu_init uses in place of the
+ * device's (0 keeps the device's), and the factor ssaa-limit expects init to choose (0: none).
+ * Call before gegpu_init. */
+void gegpu_selftest_ssaa_limits(unsigned long long budget_bytes, unsigned max_dim, int expect);
 /* Ace Mode's texture filtering (src/rt/ace.h): the anisotropy level the renderer uses (0 in an
  * authentic run), the anisotropic samplers it has made, and its texture descriptor pool's
- * size. Invariant A2: an authentic run makes none and keeps MAX_TEX sets. */
+ * size. Invariant A2: an authentic run makes none and keeps MAX_TEX sets. mips_entries: the
+ * cache entries given a host mip chain (tex_mips.h, mips=on); none in an authentic run. */
 typedef struct {
     int af;
     unsigned long long af_samplers;
     unsigned tex_pool_sets;
+    unsigned long long mips_entries;
 } GeGpuAceStats;
 void gegpu_ace_stats(GeGpuAceStats *out);
 
@@ -268,7 +317,8 @@ int gegpu_texscale_selftest(void); /* texture scaling and the smart 2D filter (t
 int gegpu_texrepl_only_prepare(const char *build_root); /* --repl-only: write the pack, set SR_TEX_REPLACE, before gegpu_init */
 int gegpu_texrepl_only_selftest(void); /* --repl-only: SR_TEX_REPLACE with no texture scaling */
 int gegpu_glyph_selftest(void);         /* sharp game text (glyph_recon.h) */
-int gegpu_glyph_authentic_selftest(void); /* --authentic: the scene, no glyph rebuilt, a hash of the picture */
+int gegpu_glyph_scene_selftest(void);   /* --scene-hash, --authentic: the scene and a hash of the picture */
+int gegpu_mips_selftest(void);          /* host-built mip chains (tex_mips.h) */
 /* --soft-shadow on|off|undeclared: the soft-shadow case's declaration, before gegpu_init. */
 int gegpu_soft_shadow_prepare(const char *mode);
 

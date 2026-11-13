@@ -654,6 +654,185 @@ Some paths still nest:
 - Per-function profile time for a computed target still includes its direct successors, but no
   longer the work after the next computed transfer.
 
+### Resume at a PC (direct save states)
+
+A direct save state (#2172) has to continue a guest thread from data. The thread's registers are
+data (`CpuState`), but a parked thread also sits inside host frames: one generated C function per
+guest call it is in, and under them the dispatcher. Those frames cannot be saved. This section is
+the contract for rebuilding them. It is separate from the interpreter floor above and does not
+extend it.
+
+**Native re-entry, not interpretation.** A restored thread goes back into the same generated
+bodies, at the statement where each one stopped, and from there runs the code an uninterrupted
+run runs. Running the restored frames on the interpreter floor instead was rejected, because the
+two tiers differ in state a save state and a replay checkpoint both hold:
+
+- `CpuState.pc`: generated code writes it at a yield and a few other sites, the interpreter per
+  instruction, and a checkpoint hashes the whole `CpuState` (`nk_ckpt_add_cpu`).
+- yield points: every `SR_YIELD` counts down the slice and, under `SR_DETERMINISTIC_CLOCK=1`, each
+  `sr_yield` charges guest time. Where they sit (a body's entry, a taken backward branch, the
+  dispatcher) is decided by `tools/codegen.py`; the interpreter has none.
+- `$sp` at a return: a callable body ends with `s->r[29] = _sp_entry`, where an interpreted
+  `jr $ra` leaves `$sp` as the instructions set it (the `spleak` cell).
+- coverage: the interpreter decodes only the forms a cosimulation cell executes. This one decides
+  alone: a restored frame with any other instruction stops.
+- the way back: the interpreter hands over to generated code only at a body's entry, so a restored
+  frame stays interpreted until it returns, and a thread's main loop never does.
+
+Copying host stacks was rejected too, for a state file and for in-process rewind alike. A file
+cannot hold them: they are absolute host addresses, so a copy can be neither checked nor loaded
+into another process. In one process the addresses stay valid, but the copy still cannot be
+checked, and it holds pointers into runtime state that a rewind would have to put back in place.
+
+**When a thread is parked.** A state-resumable body names the point it continues at before it
+enters `sr_yield`. That does not park it. `sr_yield` then advances guest time, latches and
+services interrupts and callbacks, and only afterwards decides whether to switch; most often it
+returns without switching. A thread is parked once `sr_yield`'s own switch has switched it out.
+The scheduler marks the thread at exactly that switch, until it runs again, so a capture
+describes threads from the scheduler's side, `sched_resume_describe`, and the running fiber is
+never described, not even inside its yield: a frame list taken there would skip the rest of the
+yield. After that switch `sr_yield` does nothing more, so the point's label is the whole
+continuation.
+
+**What a thread is, as data.** A frame list, outermost frame first (`SrResumeFrame` in
+`src/rt/recomp.h`). Each frame names:
+
+| Field | Meaning |
+| --- | --- |
+| `body` | The entry address of the generated body the frame runs in. One guest PC can sit in several bodies, so the PC alone does not name it. |
+| `pc`, `kind` | The resume point. `SR_RESUME_POINT_CALL`: the frame is inside a direct call and continues at the call's return PC once the frame above returns. `SR_RESUME_POINT_YIELD`: the body is parked at a loop edge's yield and continues at the edge's target. `SR_RESUME_POINT_ENTRY`: it is parked at its entry yield and runs from its first instruction. One PC can be two points with two continuations (a loop head that is also a call's return PC), so the kind is part of the key. |
+| `sp` | The body's entry `$sp`, its `_sp_entry`: the one C local a callable body keeps across statements. |
+
+Every frame but the innermost is a call point; the innermost is a parked point. The live `$ra` is
+not part of it, as at a `dispatch_call`.
+
+A frame list means something only to the generated code that wrote it: it names bodies and
+points in them, and another build has other bodies. `sr_resume_validate` checks structure, not
+origin, so the binding is the state file's. An `nkstate` file has a field for the SHA-256 of the
+generated code and refuses another build as `executable-identity` before any loader runs. No
+capture fills that field for a state yet; the one that does has to hash the generated code that
+is running. The frame lists
+travel only in that file, in its `FRMS` segment (`nkstate_frames_save`, `nkstate_frames_load`),
+whose version (`NKSTATE_FRAMES_VERSION`) changes with what a frame holds. `nkstate-selftest` loads
+a state with that segment under its own identity and requires `executable-identity` under another,
+with the frames loader not reached.
+
+What a describable thread implies about the per-thread state the scheduler keeps outside its
+registers: it is in no import (`hle_depth` 0, no import active), which `sched_resume_describe`
+checks; it runs generated code; and interrupts and thread dispatch are enabled, or `sr_yield`
+would not have switched, unless a stop was requested, when `sr_yield` switches with dispatch
+suspended. Its outermost frame is a thread's own entry (`coro_body`): a callback or
+interrupt entry opens a scope and is refused. Whoever resumes the thread therefore owes what
+`coro_body` does after `dispatch_from_host` returns.
+
+**Resume points exist only where codegen writes them.** `codegen.py --state-resume` is opt-in and
+the default output is byte-identical. It is not a default build: its cost (a test of
+`sr_resume_request` per body entry, four more stores per direct call, a `switch` per body, and a
+second entry into every loop that contains a direct call) has not been measured on a title, and
+builds with promoted registers, the LLVM backend or the LLE CPU have no direct states at all.
+With it, `state_resume_pass` rewrites three statement shapes of a callable body and nothing else:
+
+- the body's first statement becomes `SR_STATE_RESUME_TEST`, which sends a resume to the body's
+  `switch` before the host-stack check and the entry yield, so entering a body to resume it counts
+  no yield point; the entry yield becomes `SR_STATE_ENTRY`, which names the entry point;
+- a loop edge's `SR_YIELD(...); goto L_<target>;` becomes `SR_YIELD_PARK`, which counts and sets
+  `s->pc` exactly as `SR_YIELD` does and, around `sr_yield`, records the body, the target and the
+  body's entry `$sp` on the call record the body runs under;
+- a direct call's boundary is begun with `sr_aot_return_boundary_begin_at`, which also records the
+  callee, the calling body and its entry `$sp`, and the call gets a label between the callee and
+  the call's own tail drain and end check.
+
+A point's label is entered with only the entry `$sp` restored, so no other C local may be
+live there and what follows has to be straight-line code. The pass reads the body's block
+structure before it writes anything (`_StateResumeScan`). A call gets a point only when its line
+closes every block it sits in and none of them belongs to a loop or a `switch`, so an
+enhancement site that reads a local of its own after the call keeps its text; a loop edge gets
+one only when its target label is at function scope. A body in which the scan finds any other
+function-scope local, or which it cannot read with certainty (a line comment, a preprocessor
+line, a statement that may be a declaration it cannot name), is left as it is.
+
+The body ends with one `switch` over `SR_RESUME_KEY(kind, pc)`: a call point runs
+`sr_resume_inner` (the frame above) and jumps to the call's label, so the drain and the end check
+run after a resumed callee exactly as after a called one; a parked point jumps to its label. That
+switch is the only list of a body's points. A body with guest-owned `$sp` exits, a live-frame
+resume entry (`r_<addr>`), a runtime-placed module's body, and any statement of another shape have
+no point. `--state-resume` refuses `--stack-census`, `--promote-registers` and `--backend=llvm`,
+each of which keeps state a point does not restore, and `--lle-cpu` and `--lle-import-seam`,
+under which every direct call is followed by a flow check and would get no point.
+
+**Where the points are written.** Today a pass over the emitted lines writes them. That is the
+form this contract was proved in, not the form it keeps. The pass has to read back C it did not
+write, and there are things it cannot do at all: flush a promoted register at a point, reach an
+LLVM body, or give a call a point when the emitter put a flow check after it. The emitters know
+each of these by construction. The points therefore move into the emitters, for the entry, the
+loop edge and the direct call and in both backends, before any new park shape is added (#2172).
+The frame list, the refusals and the test below do not change with that move.
+
+**Describing a thread** (`sched_resume_describe`, then `sr_resume_describe`) reads the
+switched-out thread's return-boundary records, which follow its fiber, and refuses unless the
+frame list is exact. No refusal is a guess in either direction:
+
+| Refusal | The thread is not described because |
+| --- | --- |
+| `no-frames` | it is not inside a host entry |
+| `callback-or-interrupt-live` | a callback or interrupt scope is open on its fiber: a nested host-to-guest entry is on its stack, above its call records or, when its own code has begun none yet, in their place |
+| `tail-chain-live` | a tail drain is running a body: the chain's owed restore and release are on the host stack |
+| `foreign-cpu-state` | a call record belongs to another `CpuState`. Under the scheduler every thread's records name the one shared `CpuState`, so this separates threads only where each has its own, as in the cosimulation harness |
+| `root-not-host-entry` | its outermost call is not a host entry's first dispatch of a body: it does not return to `SR_HOST_RETURN_PC`, or the interpreter ran first and handed the frame on, or the call was dispatched again for exception or ERET flow its code raised. In the last two the host frames below still hold what the call owes |
+| `return-in-flight` | a call record holds a captured return target or an unwind |
+| `frame-not-described` | a live call above the outermost was not begun by a direct call site of a state-resumable body: a dispatched call (`jalr`), a call from the interpreter, a runtime call, or a body with no points |
+| `frame-chain` | a call's calling body is not the body the call below entered: a tail transfer changed the body |
+| `frame-sp` | a body's entry `$sp` is not the `$sp` of the call that entered it |
+| `not-parked` | the thread is running (the fiber that asks, or one inside its own `sr_yield`), or was switched out inside a call and not by `sr_yield`'s own switch, or is inside an import, or its innermost body named no resume point |
+| `too-many-frames` | the list does not fit |
+
+**Resuming** (`dispatch_resume_from_host`) is `dispatch_from_host` for a restored thread. It first
+validates (`sr_resume_validate`), and a refusal comes before any guest or runtime state changes:
+`bad-frames`, `resume-point-kind` (a call point innermost, or a parked point below a frame),
+`body-not-registered`, `body-stale`, `body-not-resumable` (the function registered for the address
+has no points; it is not called), `no-resume-point` (the body is asked; its switch has no such
+key), `frame-chain` (a call point's callee is not the body of the frame above) and `resume-busy`
+(the fiber already holds a call record or a transfer). Asking a body runs its first statement and
+its `switch` only, so validation may be called from any host context. `body-stale` is a refusal
+at load only: describing a thread does not look at staleness, so a state can be written that the
+same build then refuses, where the uninterrupted run would have gone on in its native frame. Then it rebuilds the call records with the
+values the host entry and each call site left, enters the outermost body at its point, and runs
+the rest of the host entry's `dispatch_call` when that body returns. It does not pass through the
+dispatcher's own yield point.
+
+**What is claimed.** After a resume the thread is in the generated bodies, with the host frames, the
+call records, the registers and the slice count an uninterrupted run has at that point, so what
+follows is the same code on the same state. `mingw32-make cosim-selftest-resume` checks it: the
+cosimulation corpus translated with `--state-resume`, where every yield point of the resume
+cases parks in turn, the thread is described, and a run that starts from the parked registers, the
+parked memory and the frame list, with a rebuilt dispatch table and an empty call-record stack, is
+compared with the uninterrupted run on the whole `CpuState` (`pc` included), the memory window,
+the guest writes and the instruction trace after the park, and the number of yield points counted.
+`mingw32-make aot-return-boundary-thread-selftest` checks the definition of parked with the real
+scheduler: a thread whose yield services an alarm and then switches to a peer is refused when it
+is described from the alarm handler and is its one frame when it is described from the peer.
+The same lane refuses each frame list and each set of call records above by name and checks that
+nothing changed, except `body-stale`: stale-code detection is an environment switch the fixture
+runs without. Every other cosimulation lane runs the same cases on ordinary output and requires
+every thread to be refused. The cells, the mutants and the limits of the evidence are in
+[`fixtures/cosim/README.md`](../fixtures/cosim/README.md).
+
+**What is not claimed, and is refused today.** This is the generated-code half of a direct state.
+Not built yet, each a separate change under #2172:
+
+- a thread parked anywhere else: in a blocking import (its continuation is "return this value
+  from the import", data the wait must latch), at the dispatcher's own yield point, under a
+  dispatched call, under a tail drain (the chain's state has to become data on the call record),
+  or in a body with a checked `$sp` load;
+- the scheduler's side of a restore: making a thread from its saved registers and frame list,
+  starting its fiber in `dispatch_resume_from_host`, and the state the scheduler holds for it
+  outside both (the slice counter, the wait and wake fields);
+- every subsystem's own segment, and the quiet point at which a capture is allowed. Nothing
+  writes a state with a `FRMS` segment yet; the segment and its binding exist.
+
+A capture that meets any of them refuses and names it. A resumed thread that parks again is
+described from its rebuilt records like any other.
+
 ### HLE boundary
 
 At a PSP import/HLE boundary:
@@ -868,7 +1047,10 @@ turbo virtual clock charged at the rate of the guest's work: a scheduler boundar
 `SR_DETERMINISTIC_SLICE_US` (default 100 µs, 1000 yield points at 10 million yield points per
 second; an estimate of about 33 cycles per yield point, not a measurement, and it decides guest
 results), a sleeper's deadline is reached by that work, an idle scheduler (no thread can run)
-advances one display period at a time as turbo's does, so it wakes a short sleeper up to 16.7 ms
+charges its slice, runs a sleeper that charge reaches (or serves an alarm, GE completion, VTimer or
+transfer window it reaches, while some thread waits), and otherwise goes to the earliest deadline
+still ahead when it comes before the next VBLANK or advances one display period when it does not,
+as turbo's does, so a sleeper whose deadline is at or past the next VBLANK can wake up to 16.7 ms
 late but identically on every run, and no vblank watchdog reads the host clock. The
 RTC starts at 2012-01-01 00:00:00 UTC instead of the host's date, and the audio queue the guest
 paces against (`sceAudioOutput*Blocking`, `sceAudioGetChannelRestLength`, the PSMF player's audio
@@ -898,14 +1080,16 @@ cannot observe it ([#1159](https://github.com/Jstar269/nakagawa-recomp/issues/11
 | Android output pump (`src/core/nk_platform_posix.c`, [#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)) | A native thread, Android only, started by `nk_platform_host_startup` | An app process's stdout and stderr go nowhere on Android, so it copies their text, line by line, to the system log and to the run log. It reads no guest memory and writes nothing the guest reads, so a paused guest observes nothing. |
 | Texture-scaling workers (`src/rt/gpu_sdl3vk/tex_scale.c`, [#1273](https://github.com/Jstar269/nakagawa-recomp/issues/1273)) | Two native threads, started at the first scaling job of an Ace Mode run with `SR_TEX_SCALE` on | They scale a host copy of texels the renderer already decoded and write only a host buffer. The runtime thread takes a finished copy at a later texture lookup, so nothing reaches guest memory except through the GE rendering row below, and a paused guest observes nothing. |
 | Preemption timer (`src/rt/sched.c`, [#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)) | A native thread, paced runs started by the driver | It sleeps until the earliest timed wait of a thread stronger than the running one runs out, then ends the running slice so the next yield point enters the scheduler. It reads no guest memory and writes only the slice counter, which the runtime thread resets at every switch, so a paused guest observes nothing. The timer's thread and the runtime thread that starts it ask the host for high priority. On Windows that needs no privilege; on Linux it means nice -10, which an ordinary session refuses (and which threads the runtime thread creates later inherit when it is granted). A refusal leaves normal priority and is logged once, with its cause. |
-| SDL audio output (`src/rt/audio_sdl3.c`) | SDL's audio device thread consumes the bound channel streams | The guest reads only the queue depth, on its own calls. A pause stashes each queue and puts back exactly that depth on resume. If the stash fails, the device is paused, so nothing is consumed (`audio-selftest`). |
+| Host worker (`src/rt/sched.c` `sched_host_work_*`, [#2361](https://github.com/Jstar269/nakagawa-recomp/issues/2361)) | A native thread, started at the first item of a paced run | It makes a host call that would block the runtime thread: today a `sceIoRead`'s read of the disc image (`io_disc_fetch_run` in `src/rt/hle_io.c`), into a host buffer. It reads and writes no guest memory. The guest thread that asked waits in the scheduler and copies the bytes itself when its wait ends, so a paused guest, whose threads do not run, takes nothing; the read's results, refusals and position are the same call's as without the worker. Under the turbo and deterministic clocks nothing is handed over. |
+| SDL audio output (`src/rt/audio_sdl3.c`) | SDL's audio device thread consumes the bound channel streams | The guest reads only the queue depth, on its own calls. A pause stashes each queue and puts back exactly that depth on resume. If the stash fails, the device is paused, so nothing is consumed (`audio-selftest`). The device, and with it SDL's device thread, is opened on the runtime thread by the driver once, before the scheduler runs the guest's first instruction ([#2361](https://github.com/Jstar269/nakagawa-recomp/issues/2361)): the open takes 45 to 92 ms, and no guest call waits on it. In a paced run it follows the scheduler thread's priority raise, so the device thread inherits it where the host passes priority on (Linux); the turbo and deterministic clocks raise nothing. The paced clock starts no later than that raise, so the open's time passes on it before the guest's first instruction: guest time, the VBLANK count and the VBLANK episodes owed start 45 to 92 ms in (3 to 5 VBLANKs), where they started near zero and the same time passed at the first audio call. Under the turbo and deterministic clocks no host time reaches the guest. `SR_AUDIO_DISABLED=1`, `SR_AUDIO_BACKEND=null` (or `none`, `0`, `off`), or `SR_HEADLESS=1` without `SR_AUDIO_BACKEND` opens no device. A run without the scheduler opens the device at its first audio call. |
 | Audio dump (`SR_AUDIODUMP`, postmix callback) | SDL's audio device thread | It writes the mixed output to a host WAV file and reads no guest memory. |
+| Audio pull reports (each channel stream's get-callback) | SDL's audio device thread | It reads its stream's queue depth and records the size of the device's pulls and whether the channel has been played dry. It reads no guest memory; its results are host atomics, which the guest's audio calls read as they read the queue depth, and a paused guest makes none. |
 | Asynchronous file I/O (`sceIoReadAsync` and related calls) | The runtime thread | A request completes in `io_async_dispatch_tick`, which runs at guest syscall entry and counts syscalls, not host time. A paused guest makes no syscalls. |
 | Media decode (ATRAC3+, H.264, MP3) | The runtime thread, inside the guest's decode call | Nothing runs between calls. |
 | GE rendering and readback (`src/rt/gpu_sdl3vk/ge_gpu.c`) | The host GPU | Results reach guest memory only through the read barrier the runtime thread takes before a guest read or a present. Its timing changes when bytes are copied, never what the guest reads. |
 
 Two source guards in `tools/test_sched_invariants.py` keep this table complete. One fails when a
-native thread creator appears outside the keyboard, diagnostic-stream, Android output-pump, texture-scaling and scheduler files. The other fails when a host callback
+native thread creator appears outside the keyboard, diagnostic-stream, Android output-pump, texture-scaling and scheduler files, or a third one in the scheduler's (it has the preemption timer and the host worker). The other fails when a host callback
 entry appears that is not listed above: SDL audio, timer, event-watch and dialog callbacks, OS
 thread pools, waits, timers, completion routines, and Media Foundation work queues. Before new
 host work is added, its row must say how a paused guest is kept from observing it.
@@ -927,8 +1111,8 @@ the maintained references for exact behavior.
 | `SR_GPU_LOG` | present/unset | GPU diagnostics where implemented |
 | `SR_VIDEO` | e.g. `gdi` | Select host fallback video path |
 | `SR_PRESENT_SCALING` | `sharp` (default) / `integer` / `bilinear` | How the Vulkan presenter scales game frames into the window: sharp bilinear (nearest to the next integer multiple, then linear), the largest integer multiple letterboxed, or plain linear; an exact integer fit is a nearest blit in every mode ([#1129](https://github.com/Jstar269/nakagawa-recomp/issues/1129)). The player's Settings set it |
-| `SR_PRESENT_UPSCALE` | `off` (default) / `fsr1` | The presentation upscaler: with `fsr1` the Vulkan presenter scales the shown picture to its place in the window with AMD FidelityFX Super Resolution 1 (EASU, then RCAS sharpening; `src/rt/gpu_sdl3vk/fsr1_pass.c`, the FidelityFX SDK v2.4.0 MIT headers in `third_party/fidelityfx_sdk/`) in place of `SR_PRESENT_SCALING`'s filter, on every frame the presenter shows except CPU-presented frames while `SR_MOVIE_UPSCALE` is on. Presentation only: the guest's frame, guest VRAM and captures are untouched. Used only when the picture is enlarged |
-| `SR_MOVIE_UPSCALE` | `off` (default) / `fsr1` / `anime4k` | The movie upscaler, for frames the CPU presents (decoded movies; every frame when the software GE draws): `fsr1` scales them with FSR 1 as `SR_PRESENT_UPSCALE` does, and `anime4k` first doubles them once or twice with Anime4K's CNN x2 (M) upscaler (`src/rt/gpu_sdl3vk/anime4k_pass.c`, the MIT shader in `third_party/anime4k/`), then takes them to the window's size with FSR 1 unless the doubled picture already is that size. It overrides `SR_PRESENT_UPSCALE` for those frames. Presentation only: the decoded movie, the guest's frame, guest VRAM and captures are untouched. Used only when the picture is enlarged |
+| `SR_PRESENT_UPSCALE` | `off` (default) / `fsr1` | The presentation upscaler: with `fsr1` the Vulkan presenter scales the shown picture to its place in the window with AMD FidelityFX Super Resolution 1 (EASU, then RCAS sharpening; `src/rt/gpu_sdl3vk/fsr1_pass.c`, the FidelityFX SDK v2.4.0 MIT headers in `third_party/fidelityfx_sdk/`) in place of `SR_PRESENT_SCALING`'s filter, on every frame the presenter shows except movie frames while `SR_MOVIE_UPSCALE` is on. Presentation only: the guest's frame, guest VRAM and captures are untouched. Used only when the picture is enlarged |
+| `SR_MOVIE_UPSCALE` | `off` (default) / `fsr1` / `anime4k` | The movie upscaler, for frames the CPU presents (decoded movies; every frame when the software GE draws) and GE frames that show a decoded movie (movie provenance, `src/rt/ge_shared.h`, #2111): `fsr1` scales them with FSR 1 as `SR_PRESENT_UPSCALE` does, and `anime4k` first doubles them once or twice with Anime4K's CNN x2 (M) upscaler (`src/rt/gpu_sdl3vk/anime4k_pass.c`, the MIT shader in `third_party/anime4k/`), then takes them to the window's size with FSR 1 unless the doubled picture already is that size. It overrides `SR_PRESENT_UPSCALE` for those frames. Presentation only: the decoded movie, the guest's frame, guest VRAM and captures are untouched. Used only when the picture is enlarged |
 | `SR_LAUNCHER_DISPLAY_BOUNDS` | `<x>,<y>,<w>,<h>` or empty | Desktop bounds of the display that holds the launcher window, set by the launcher. The game window, windowed or fullscreen, opens on the display that contains the centre of that rectangle; empty, malformed or off-screen values use the primary display, and the last two are reported on stderr |
 | `SR_FBSNAP` | positive integer | Rotating PPM snapshot interval |
 | `SR_HLELOG` | present/unset | HLE dispatch diagnostics |
