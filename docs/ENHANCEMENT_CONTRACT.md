@@ -2605,7 +2605,7 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the title page's play line names the reason while the part is on. The player checks only these fields:
   `build-package` checks the rest (section 9.9) and names any refusal in the build's own error. The row's text says the part acts only in games that have a culling build, and a run without
   one says so in the `ACE_MODE: cull unavailable (...)` line and the report. The runtime remembers at most 4096
-  distinct matrices (see Limits below); the report's
+  widened matrices still in guest memory (see Limits below); the report's
   `cull_untracked` counts the matrix uses it left alone once that table was full, and cull is confirmed only
   while that count is 0: a run with a nonzero count reports cull unavailable as `partial` (the matrices
   tracked before the table filled were widened, the rest were not), never as a complete run. The count is read
@@ -2627,15 +2627,24 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
 - **Package obligations.** The mechanism cannot check these, so the package author shows them for the title: (1) the
   call at the site leaves every listed matrix describing the camera it was built for, either rewritten at each call or
   unchanged since the last one (the runtime does not scale a matrix whose x row still holds the words it wrote, so a
-  matrix the call does not rebuild is not scaled twice); (2) the listed offsets are matrices only the title's visibility
+  matrix the call does not rebuild is not scaled twice), and never a saved copy of a matrix the hook already widened,
+  whether at another address or put back where it was after something else was written there (the runtime knows
+  its words only where they still are, so it would scale the copy again); (2) the
+  listed offsets are matrices only the title's visibility
   test reads, so the matrices the GE receives, and with them the centre picture, are untouched; (3) the title's logic
   that depends on what is visible is not a behaviour change to guard against, or is guarded.
 - **Limits.** It cannot create what the title never modelled, what it places only inside the original view, or what
   it hides by a rule that is not a horizontal clip test (a distance, a side-of-wall or a course-direction rule). The
-  wing cap of section 10.8 is unchanged. The table that keeps a matrix from being scaled twice holds 4096
-  distinct matrix addresses for the whole run and is never cleared; a title whose matrices move to new
-  addresses can fill it, after which new matrices are left unscaled (said once on stderr, counted in the
-  report's `cull_untracked`) instead of being scaled without a record.
+  wing cap of section 10.8 is unchanged. The table that keeps a matrix from being scaled twice is keyed by the
+  matrix's address and holds 4096 entries. An entry matters only while guest memory at its address still holds
+  the x row the hook wrote: once the title writes anything else there, the next call at that address scales what
+  it finds with or without the entry. So when a new address would take the table past three-quarters full, the
+  entries whose words are gone are dropped first (at most once per call), which changes no call's outcome while
+  package obligation (1) holds (no widened copy is put back where it was); a title that builds its
+  matrices in per-frame scratch memory, at addresses that move from frame to frame, reuses that room instead of
+  filling the table. Only when more than 4096 widened matrices are all still in guest memory at once is a new
+  matrix left unscaled (said once on stderr, counted in the report's `cull_untracked`) instead of being scaled
+  without a record.
 - **Tier:** Ace (one title). **Default:** off.
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.
 
