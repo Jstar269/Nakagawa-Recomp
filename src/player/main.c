@@ -4641,9 +4641,9 @@ static void player_apply_test_view(PlayerApp *app, const char *test_view) {
             app->data_move_offered = true;
             if (app->data_folder_in_use[0] == '\0') {
                 snprintf(app->data_folder_in_use, sizeof(app->data_folder_in_use), "%s",
-                         "/home/user/.local/share/nakagawa-recomp");
+                         "~/.local/share/nakagawa-recomp");
                 snprintf(app->data_folder_new, sizeof(app->data_folder_new), "%s",
-                         "/home/user/.local/share/Nakagawa");
+                         "~/.local/share/Nakagawa");
             }
             player_app_set_view(app, VIEW_CONFIRM_DATA_MOVE);
         } else if (strcmp(test_view, "psp-fonts") == 0) {

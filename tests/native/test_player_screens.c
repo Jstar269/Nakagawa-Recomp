@@ -421,8 +421,8 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     /* #324: a Linux start on the earlier folders offers the move (main page) and its check. */
     settings.data_move_offered = which == FLOW_SETTINGS_DATA_OFFERED ||
                                  which == FLOW_SETTINGS_DATA_MOVE;
-    settings.data_folder_in_use = "/home/synthetic/.local/share/nakagawa-recomp";
-    settings.data_folder_new = "/home/synthetic/.local/share/Nakagawa";
+    settings.data_folder_in_use = "~/.local/share/nakagawa-recomp";
+    settings.data_folder_new = "~/.local/share/Nakagawa";
     settings.resolution = "2x (960x544)";
     /* Settings > Enhanced (#2055): the library's default Enhanced (Authentic for its off
        case) with the fresh parts; the title case is one game's page, following it. */
