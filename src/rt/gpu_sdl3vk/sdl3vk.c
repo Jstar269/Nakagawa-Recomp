@@ -1517,8 +1517,10 @@ static void poll_input_on_this_stack(void *arg) {
             s_mouse_held = 0;
             break;
         case SDL_EVENT_MOUSE_BUTTON_UP: {
-            /* A release counts wherever the press went, so no click stays held. */
+            /* A release counts wherever the press went, so no click stays held. A tap or a pen
+             * lifting is not a mouse button letting go. */
             const int key = mouse_button_key(ev.button.button);
+            if (ev.button.which == SDL_TOUCH_MOUSEID || ev.button.which == SDL_PEN_MOUSEID) break;
             if (key != NK_HOST_KEY_NONE) s_mouse_held &= ~(1u << (key - NK_HOST_KEY_MOUSE_FIRST));
             break;
         }

@@ -1131,6 +1131,19 @@ static int sdl3vk_mouse_buttons_selftest(void) {
         seen = mbtn_test_sample(&lx, &ly);
         MBTN_CHECK(seen == 0 && s_mouse_held == 0, "a tap, a pen or button 6 pressed 0x%x", seen);
         mbtn_test_button(SDL_BUTTON_X2 + 1, false);
+        /* A tap or a pen lifting does not let go of a mouse button held down. */
+        mbtn_test_button(SDL_BUTTON_LEFT, true);
+        (void)mbtn_test_sample(&lx, &ly);
+        tap.type = SDL_EVENT_MOUSE_BUTTON_UP;
+        tap.button.down = false;
+        tap.button.which = SDL_TOUCH_MOUSEID;
+        SDL_PushEvent(&tap);
+        tap.button.which = SDL_PEN_MOUSEID;
+        SDL_PushEvent(&tap);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == NK_PSP_BTN_CROSS_BIT, "a tap or a pen lifting let go of left (0x%x)", seen);
+        mbtn_test_button(SDL_BUTTON_LEFT, false);
+        (void)mbtn_test_sample(&lx, &ly);
         sdl3vk_set_text_claim(1);
         mbtn_test_button(SDL_BUTTON_LEFT, true);
         seen = mbtn_test_sample(&lx, &ly);
@@ -1178,7 +1191,7 @@ static int sdl3vk_mouse_buttons_selftest(void) {
         sdl3vk_set_input_claim(pause_test_sink, &sink);
         mbtn_test_button(SDL_BUTTON_LEFT, true);
         seen = mbtn_test_sample(&lx, &ly);
-        MBTN_CHECK(seen == 0, "a claimed click reached the game (0x%x)", seen);
+        MBTN_CHECK(seen == 0 && s_mouse_held == 0, "a claimed click reached the game (0x%x)", seen);
         sdl3vk_set_input_claim(NULL, NULL);
         seen = mbtn_test_sample(&lx, &ly);
         MBTN_CHECK(seen == 0, "the overlay's click was held for the game (0x%x)", seen);
