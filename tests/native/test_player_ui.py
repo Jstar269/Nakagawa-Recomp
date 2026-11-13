@@ -628,11 +628,14 @@ LAUNCHER_MUSIC_FADE_OUT_MS = source_number(
 # How much sooner than the fade's length the launch may start. The fade ends when the audio
 # callback has rendered the ramp's last sample (player_ui_music_mix_render), and the device
 # asks for about one buffer ahead of the clock (SDL's dummy driver in these runs), with a
-# little clock slack on top. Nothing in the test output reports the device's
-# buffer, so this is an upper bound checked by measurement: the smallest PLAY-to-worker
-# span in ten Windows runs on 2026-11-13 was 635 ms (the worker starts on the first frame
-# after the release, so the spans run above the fade). It does not follow the UI's frame
-# rate: the floor stays the fade less this, however often the launcher draws.
+# little clock slack on top. Nothing in the test output reports the device's buffer, so
+# the 50 ms is an upper bound from the dummy driver's buffer of about 1024 sample frames
+# (some 21 to 23 ms) plus timer drift, not a measured one. What was measured is the whole
+# PLAY-to-worker span: its smallest value in ten Windows runs on 2026-11-13 was 635 ms
+# (the worker starts on the first frame after the release, so the spans run above the
+# fade), which shows the floor is not tight but does not measure the buffer. The slack does
+# not follow the UI's frame rate: the floor stays the fade less this, however often the
+# launcher draws.
 LAUNCHER_MUSIC_FADE_SLACK_MS = 50
 LAUNCH_WORKER_START = "[PLAYER_UI_TEST] launch_worker_start "
 
