@@ -307,15 +307,21 @@ class TestDmacGpuAliasBoundary(unittest.TestCase):
         start = text.index("static void hook_vram_dirty")
         region = text[start : text.index("/* ---- GE block transfer", start)]
         # The store and every cached range go through one canonical mapping: the store in
-        # hook_vram_dirty, each entry's levels once when tex_get creates it (#282).
+        # hook_vram_dirty, each entry's levels once when tex_get creates it (#282). Each level's
+        # range comes from tex_source_range, which canonicalizes the address it is given (and,
+        # through a reordering VRAM view, takes the envelope in the canonical 0x04000000 aperture).
         canon = text[text.index("static uint32_t tex_canonical"):]
         canon = canon[: canon.index("\n}\n")]
         self.assertIn("sr_vram_cpu_address(addr)", canon)
         self.assertIn("tex_canonical(addr)", region)
         ranges = text[text.index("static void tex_ent_set_ranges"):]
         ranges = ranges[: ranges.index("\n}\n")]
-        self.assertIn("tex_canonical(e->addr)", ranges)
-        self.assertIn("tex_canonical(e->mip.addr[l])", ranges)
+        self.assertIn("tex_source_range(e->addr,", ranges)
+        self.assertIn("tex_source_range(e->mip.addr[l],", ranges)
+        source = text[text.index("static void tex_source_range"):]
+        source = source[: source.index("\n}\n")]
+        self.assertIn("*lo = tex_canonical(addr);", source)
+        self.assertIn("*lo = SR_VRAM_CPU_BASE + off;", source)
         self.assertIn("tex_ent_overlaps(e, dirty0, dirty1)", region)
         self.assertIn("vram_off(canonical_addr)", region)
         # The alias cases live in the GE self-tests, which ge_gpu.c includes from their own file.

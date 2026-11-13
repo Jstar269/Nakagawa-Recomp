@@ -2734,12 +2734,12 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 163)
+        self.assertEqual(len(routes), 164)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(len(ids), len(set(ids)))
-        self.assertEqual(set(range(1, 79)) | set(range(90, 105)) | {180} | {106, 107, 108, 109}
+        self.assertEqual(set(range(1, 79)) | set(range(90, 106)) | {180} | {106, 107, 108, 109}
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
@@ -3021,6 +3021,17 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         self.assertIn("out[13] = reported_w;", csc)
         self.assertIn("out[14] = reported_h;", csc)
         self.assertLess(csc.index("geometry_ok"), csc.index("VCW_OP_CSCAVC"))
+        # Boot 149: type 1's Open is refused while its Init and SetMemory succeed. Its cells run after
+        # both decode contexts, and every teardown deletes a context once Open, Init or SetMemory
+        # succeeded, so no initialised context outlives its cell.
+        cases = list(spec.semantic_cases)
+        self.assertLess(cases.index("vc-t0-delete"), cases.index("vc-d480-input"))
+        self.assertLess(cases.index("vc-d464-delete"), cases.index("vc-t1-open-c0"))
+        self.assertLess(cases.index("vc-t1-delete"), cases.index("vc-ac-1000"))
+        teardown = section[section.index("static void vcw_teardown("):section.index("/* ---- item 1:")]
+        self.assertIn("const int wanted[3] = {stop_ok, edram_ok, delete_ok};", teardown)
+        self.assertEqual(section.count("ok[0] || ok[2] || ok[3]);"), 2)
+        self.assertNotIn("ok[1], ok[0]);", section)
 
     def test_vcodec_csc_geometry_fail_record_keeps_raw_dimensions_without_a_return_value(self) -> None:
         meta = META.format(source="psp", model="synthetic", firmware="test",
@@ -3685,6 +3696,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 "PSP-VRAM-MIRROR-001",
                 # The 2026-11-02 game-context run of eded11ac.
                 "PSP-HLE-SAVEDATA-GETSIZE-001",
+                # The 2026-11-02 acceptance-eligible game-context hle-io-trunc run of 08934592f
+                # (#1892, boot 107).
+                "PSP-HLE-IO-TRUNC-001",
                 # The 2026-10-27 acceptance-eligible ge-timing runs of 8f707fc0 (#1296).
                 "PSP-GE-TIMING-001",
                 # The 2026-10-27 acceptance-eligible cpu-timing run of 3a14a88e (#1296).
@@ -5707,6 +5721,9 @@ class HleMeasureProbeTests(unittest.TestCase):
         # #341 part 2: loads the helper PRX of case 172 (probe_hle_self_stop_helper.c).
         ("hle-self-stop-unload", 167, "hle_self_stop_unload", None,
          "HLE_CASE_SELF_STOP", "PSP-HLE-SELFSTOP-001"),
+        # #1892: PSP_O_TRUNC on one probe-owned ms0: file; links the CRT's sceUtility pair only.
+        ("hle-io-trunc", 105, "hle_io_trunc", "hle_utility_imports.S",
+         "HLE_CASE_IO_TRUNC", "PSP-HLE-IO-TRUNC-001"),
     )
     ALL_FAMILIES = FAMILIES + SINGLE_LAUNCH_FAMILIES + TABLE_FAMILIES + LATER_FAMILIES
     # Every family block: file -> (library, version word, {function: NID}). The
@@ -6072,7 +6089,7 @@ class HleMeasureProbeTests(unittest.TestCase):
                                  ("hle-utility-none", 140), ("hle-savedata-nodata", 180),
                                  ("hle-utility-dialogs", 161),
                                  ("hle-utility-netconf-sharing", 166),
-                                 ("hle-nickname-limit", 164)])
+                                 ("hle-nickname-limit", 164), ("hle-io-trunc", 105)])
         for case, case_id in users:
             with self.subTest(case=case):
                 gate = self.makefile.split(f"\nifeq ($(CASE),{case})\n", 1)[1].split("endif", 1)[0]
@@ -6176,6 +6193,11 @@ class HleMeasureProbeTests(unittest.TestCase):
             self.assertNotIn(writer, arest[reserve:release])
         arest_lines = (self.probe.count("\n", 0, arest_start + reserve),
                        self.probe.count("\n", 0, arest_start + release))
+        # hle-io-trunc's it_st() is a sceIoGetstat helper; every call to it runs inside a cell
+        # that has already written its step.
+        it_st_start = self.probe.index("static uint32_t it_st(void)")
+        it_st_lines = (self.probe.count("\n", 0, it_st_start),
+                       self.probe.count("\n", 0, self.probe.index("\n}\n", it_st_start)))
         checked = 0
         for index, line in enumerate(lines):
             if not self.MEASURED_CALL_RE.search(line):
@@ -6186,6 +6208,8 @@ class HleMeasureProbeTests(unittest.TestCase):
                 continue  # the callback samples time; host logging is unsafe there
             if arest_lines[0] <= index <= arest_lines[1]:
                 continue  # covered by the run's one step (above)
+            if it_st_lines[0] <= index <= it_st_lines[1]:
+                continue  # called only inside a stepped hle-io-trunc cell (above)
             checked += 1
             window = lines[max(0, index - 3):index]
             self.assertTrue(any("hle_step(" in previous for previous in window),
@@ -6290,7 +6314,9 @@ class HleMeasureProbeTests(unittest.TestCase):
                           "HLE_IS_FILE", "HLE_IS_FILE", "HLE_IS_MISSING",
                           # hle-io-seek-edges: its ms0: file on a setup failure, the file the
                           # RDONLY|CREAT|EXCL cell created (only when it exists), then cleanup.
-                          "HLE_ISE_FILE", "HLE_ISE_MISSING", "HLE_ISE_FILE", "HLE_ISE_MISSING"])
+                          "HLE_ISE_FILE", "HLE_ISE_MISSING", "HLE_ISE_FILE", "HLE_ISE_MISSING",
+                          # hle-io-trunc: its ms0: file, then the same file again (the cell).
+                          "HLE_IT_PATH", "HLE_IT_PATH"])
         issues = (self.fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         self.assertNotRegex(issues, r"\bsceIoRemove\s*\(")
 
@@ -17086,6 +17112,7 @@ class Record20261015Tests(unittest.TestCase):
             ("ge-raster-bounds", "PSP-GE-RASTER-002", "NOT_RUN"),
             ("ge-depth-round", "PSP-GE-RASTER-003", "NOT_RUN"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
+            ("hle-io-trunc", "PSP-HLE-IO-TRUNC-001", "MEASURED"),
         )
         docs = {row[0]: row for row in self._table_rows(self.doc) if len(row) == 4}
         readme = {row[0]: row for row in self._table_rows(self.readme) if len(row) == 3}
@@ -17107,6 +17134,25 @@ class Record20261015Tests(unittest.TestCase):
                      "0x80020323", "0x80010016", "queues nothing"):
             self.assertIn(term, note)
         self.assertIn("- **PSP-3000 single-case run of `hle-io-seek-edges` (2026-11-11 UTC)**", self.doc)
+
+    def test_the_io_trunc_run_is_measured_in_game_context(self) -> None:
+        """#1892: the 2026-11-02 hle-io-trunc run was built from 08934592f, which is not an
+        ancestor of this tree, so the record must say its case-105 source is identical here."""
+        row = self.rows["PSP-HLE-IO-TRUNC-001"]
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertNotIn("evidence_note", row)
+        self.assertEqual(row["evidence_ref"],
+                         "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        note = row["measurement_note"]
+        for term in ("2026-11-02", "PSP-3000", "boot 107", "game context", "08934592f",
+                     "not an ancestor of this tree", "identical to this tree's",
+                     "not in public history", "528e41f21ffd9f174aa8b1e4dd098db21402f9b1188f4a57a35e76723ef735fd",
+                     "not byte-identical to the one measured",
+                     "acceptance-eligible with 0 blockers", "0x8001000d", "ABCDEFGHWX",
+                     "src/rt/hle_data.c and src/rt/hle_io.c"):
+            self.assertIn(term, note)
+        self.assertIn("- **PSP-3000 single-case run of `hle-io-trunc` (2026-11-02 UTC)**", self.doc)
 
     def test_the_sas_adsr_capture_is_captured_with_its_blocker(self) -> None:
         row = self.rows["PSP-SAS-002"]

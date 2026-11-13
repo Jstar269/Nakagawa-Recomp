@@ -210,6 +210,8 @@ else ifeq ($(CASE),hle-timer-order)
 CASE_ID = 103
 else ifeq ($(CASE),hle-savedata-getsize)
 CASE_ID = 104
+else ifeq ($(CASE),hle-io-trunc)
+CASE_ID = 105
 # 180: savedata modes on a missing save, a directory without PARAM.SFO and a probe-made save.
 else ifeq ($(CASE),hle-savedata-nodata)
 CASE_ID = 180
@@ -638,6 +640,9 @@ OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),hle-savedata-getsize)
 TARGET = $(BUILD_DIR)/hle_savedata_getsize
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-io-trunc)
+TARGET = $(BUILD_DIR)/hle_io_trunc
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
 else ifeq ($(CASE),hle-savedata-nodata)
 TARGET = $(BUILD_DIR)/hle_savedata_nodata
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
@@ -984,6 +989,10 @@ USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343
 endif
 ifeq ($(CASE),hle-savedata-getsize)
 USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C
+endif
+# hle-io-trunc (case 105) takes the CRT's pair and nothing else from sceUtility: no dialog.
+ifeq ($(CASE),hle-io-trunc)
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343
 endif
 ifeq ($(CASE),hle-savedata-nodata)
 USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C

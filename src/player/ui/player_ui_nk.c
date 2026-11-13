@@ -160,8 +160,10 @@ struct PlayerUiNk {
     char settings_saves[NK_MAX_PATH];
     /* The play mode on the open title's page: what it turns on, and its last session, read
        at most every two seconds (the runtime writes the report when a game ends). */
-    /* Every part named, with the 60 FPS and smooth-motion words: the line is never cut. */
-    char ace_line[PLAYER_PART_COUNT * 64 + 192];
+    /* Every part named, with the 60 FPS and smooth-motion words (192) and a culling
+       package's problem (PlayerTitleEnhancement.cull_problem, 160, after a 41-character
+       sentence): the line is never cut. */
+    char ace_line[PLAYER_PART_COUNT * 64 + 192 + 256];
     char enhanced_smooth_sentence[160];  /* the Smooth motion row's words under 60 FPS logic */
     char ace_last_session[200];
     char ace_last_disc[NK_MAX_DISC_ID_LEN];
@@ -171,6 +173,8 @@ struct PlayerUiNk {
     char enhanced_mode[48];
     const char *enhanced_modes[4];
     char enhanced_values[PLAYER_UI_ENHANCED_ROWS][48];
+    char texpack_value[200];
+    char texpack_sentence[400];
     char enhanced_library_values[PLAYER_UI_ENHANCED_ROWS][48];
     char settings_tools[PLAYER_UI_SETTINGS_TOOLS][192];
     /* The factory reset check's folders, looked up when the check opens. */
@@ -928,6 +932,31 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         model->enhanced_mode_sentence = app->title_enhancements[title].available
             ? "Ace is Enhanced plus this game's own 60 FPS game logic."
             : "Enhanced adds the parts below. " PLAYER_UI_ACE_NEEDS_PACKAGE;
+        /* The title's texture pack (contract 10.12): its folder's name and what it lists, as
+           read when the page opened or the pack changed. */
+        const char *pack = player_settings_title_pack(settings, game->disc_id);
+        const PlayerTexturePackInfo *info = player_app_title_pack_info(app, title);
+        model->texpack_row = true;
+        model->texpack_chosen = pack != NULL;
+        if (!pack) {
+            snprintf(player->texpack_value, sizeof(player->texpack_value), "None");
+            snprintf(player->texpack_sentence, sizeof(player->texpack_sentence),
+                     "Choose the folder of a texture pack you made or downloaded for this game. "
+                     "Nakagawa ships none.");
+        } else if (info && info->ok) {
+            snprintf(player->texpack_value, sizeof(player->texpack_value), "%s \xC2\xB7 %zu %s",
+                     info->name, info->textures, info->textures == 1u ? "texture" : "textures");
+            snprintf(player->texpack_sentence, sizeof(player->texpack_sentence),
+                     "Used while Texture pack is on and the game runs Enhanced or Ace.");
+        } else {
+            snprintf(player->texpack_value, sizeof(player->texpack_value), "Refused");
+            snprintf(player->texpack_sentence, sizeof(player->texpack_sentence),
+                     "This pack can't be used: %s. Fix it where it is; it is read again when this page "
+                     "opens and when the game starts.",
+                     info && info->error[0] ? info->error : "it was not read");
+        }
+        model->texpack_value = player->texpack_value;
+        model->texpack_sentence = player->texpack_sentence;
     }
     model->enhanced_row_count = 0;
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
@@ -2682,12 +2711,17 @@ static void player_ui_title_ace(PlayerUiNk *player, const PlayerApp *app, int in
         /* Smooth motion turned on, but off for this launch: the line says why (contract
            10.5), as the launch line carries smooth=off. */
         bool smooth_held = smooth_wanted && play.logic_60;
-        snprintf(player->ace_line, sizeof(player->ace_line), "%s for this game: %s%s%s.%s",
+        /* Wider culling on with a culling package the player cannot use (contract 11.3.6):
+           the launch keeps the title's other build, and the line says why by name. */
+        const char *cull_problem = player_app_title_cull_problem(app, index);
+        snprintf(player->ace_line, sizeof(player->ace_line), "%s for this game: %s%s%s.%s%s%s",
                  ace ? "Ace" : "Enhanced", ace && out->enhancement_on ? "60 FPS game logic" : "",
                  ace && out->enhancement_on && count ? ", " : "",
                  count ? words : (ace && out->enhancement_on ? "" : "every part is off"),
                  smooth_held ? " Smooth motion is off while it runs at 60 FPS: this build "
-                               "smooths only 30 FPS games." : "");
+                               "smooths only 30 FPS games." : "",
+                 cull_problem[0] ? " Wider culling does nothing in this game. " : "",
+                 cull_problem);
         out->ace_line = player->ace_line;
     }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST

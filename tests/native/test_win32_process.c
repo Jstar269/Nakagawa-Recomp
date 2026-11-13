@@ -394,6 +394,33 @@ int main(int argc, char *argv[]) {
                runner_low ? " (the runner itself is below normal)" : "");
     }
 
+    /* nk_platform_env_utf8 reads the wide environment, where the launcher puts SR_TEX_REPLACE: unset
+     * is 0, set and empty is 1 (the launcher exports SR_TEX_REPLACE= for every run without a pack;
+     * _putenv cannot make an empty variable, SetEnvironmentVariableW can), a folder name outside the
+     * ANSI code page arrives in UTF-8, and a value that does not fit or is not valid UTF-16 is -1. */
+    {
+        const WCHAR *name = L"NK_ENV_UTF8_TEST";
+        const char *expected = "pack_\xC3\xA9\xE6\xBC\xA2";    /* 10 bytes */
+        char out[64];
+        assert(SetEnvironmentVariableW(name, NULL) || GetLastError() == ERROR_ENVVAR_NOT_FOUND);
+        out[0] = 'x';
+        assert(nk_platform_env_utf8("NK_ENV_UTF8_TEST", out, sizeof(out)) == 0 && out[0] == '\0');
+        assert(SetEnvironmentVariableW(name, L""));
+        out[0] = 'x';
+        assert(nk_platform_env_utf8("NK_ENV_UTF8_TEST", out, sizeof(out)) == 1 && out[0] == '\0');
+        assert(SetEnvironmentVariableW(name, L"pack_\u00e9\u6f22"));
+        assert(nk_platform_env_utf8("NK_ENV_UTF8_TEST", out, sizeof(out)) == 1 && strcmp(out, expected) == 0);
+        assert(nk_platform_env_utf8("NK_ENV_UTF8_TEST", out, 11) == 1 && strcmp(out, expected) == 0);
+        out[0] = 'x';
+        assert(nk_platform_env_utf8("NK_ENV_UTF8_TEST", out, 10) == -1 && out[0] == '\0');
+        const WCHAR lone_surrogate[] = { L'p', 0xD800, 0 };
+        assert(SetEnvironmentVariableW(name, lone_surrogate));
+        out[0] = 'x';
+        assert(nk_platform_env_utf8("NK_ENV_UTF8_TEST", out, sizeof(out)) == -1 && out[0] == '\0');
+        assert(SetEnvironmentVariableW(name, NULL));
+        printf("[PROCESS_TEST] nk_platform_env_utf8 reads unset, empty, non-ASCII, too long and invalid values\n");
+    }
+
     printf("[PROCESS_TEST] Process & quoting test PASSED successfully!\n");
 #else
     printf("[PROCESS_TEST] Skipping Windows-specific tests on non-Windows host.\n");

@@ -1778,6 +1778,19 @@ _register_campaign_probe(
         "volatile-lock-before": 2,
     },
 )
+# hle-io-trunc (#1892): what PSP_O_TRUNC shows through the same and a second descriptor on the
+# Memory Stick. Every word is an observation (see probe_hle_measure.c for each cell's layout).
+_register_campaign_probe(
+    "hle-io-trunc", "PSP-HLE-IO-TRUNC-001",
+    ("trunc-open-view", "trunc-seek-read", "trunc-seek-write", "trunc-close-nowrite",
+     "trunc-recover-after-close", "two-fd-view", "two-fd-writer-survives",
+     "two-fd-trunc-writes-last", "remove-absent"),
+    {
+        "trunc-open-view": 7, "trunc-seek-read": 3, "trunc-seek-write": 11,
+        "trunc-close-nowrite": 11, "trunc-recover-after-close": 10, "two-fd-view": 17,
+        "two-fd-writer-survives": 16, "two-fd-trunc-writes-last": 13, "remove-absent": 2,
+    },
+)
 # hle-savedata-nodata (180, probe_hle_measure.c): savedata modes on a save that does not exist
 # (nodir), a save directory without PARAM.SFO (nosfo) and a probe-made save (data), then LOAD
 # and DELETE of the missing save last. Each dialog cell carries InitStart's return and 11
@@ -3054,13 +3067,14 @@ _register_campaign_probe(
 
 # vcodec-words (160, probe.c): the #286 (W-LLE-1) Media Engine boundary words. The fixed sequence
 # run_vcodec_words emits on every path (a call that was not made keeps its record's shape, status
-# SKIP): the load record; per codec type 0 and 1 the zero-filled context through Open, GetEDRAM,
-# Init and SetMemory (three 32-word chunks of the 96-word context each) and its teardown; per
-# picture width 480 (d480) and 464 (d464) the sceMpegCreate context, three decoded access units
-# with their output structs and band summaries, AU a0's eight band buffers in 120-word chunks,
-# for d480 the CscInit and CscAvc cells (four pixel modes, the first 8192 bytes of each in 128-word
-# chunks) and the teardown; the five CheckNeedMem cells; the unload record. Every step record is
-# 34 words (return, microseconds, 32 context words).
+# SKIP): the load record; for codec type 0 the zero-filled context through Open, GetEDRAM, Init
+# and SetMemory (three 32-word chunks of the 96-word context each) and its teardown; per picture
+# width 480 (d480) and 464 (d464) the sceMpegCreate context, three decoded access units with their
+# output structs and band summaries, AU a0's eight band buffers in 120-word chunks, for d480 the
+# CscInit and CscAvc cells (four pixel modes, the first 8192 bytes of each in 128-word chunks) and
+# the teardown; the type 1 cells, after the decode contexts because type 1's Open is refused on a
+# PSP-3000 (boot 149); the five CheckNeedMem cells; the unload record. Every step record is 34
+# words (return, microseconds, 32 context words).
 VCODEC_STEP_WORDS = 34
 VCODEC_CHUNK_WORDS = 120
 # Chunk records per band: 4 luma bands of 32640 bytes and 4 chroma bands of 16320 bytes.
@@ -3104,9 +3118,9 @@ def _vcodec_decode_rows(tag: str, with_csc: bool) -> tuple[tuple[str, int], ...]
 VCODEC_WORDS_ROWS = (
     ("vc-load", 5),
     *_vcodec_type_rows(0),
-    *_vcodec_type_rows(1),
     *_vcodec_decode_rows("d480", True),
     *_vcodec_decode_rows("d464", False),
+    *_vcodec_type_rows(1),
     *((f"vc-ac-{cell}", 67) for cell in VCODEC_AC_CELLS),
     ("vc-unload", 5),
 )
@@ -3460,6 +3474,7 @@ HLE_MACHINERY_STATUS_CASES = frozenset({
     "hle-vtimer-unit", "hle-vtimer-errors", "hle-kernel-pool-bounds", "hle-power-float-v0",
     "hle-null-out-pointers", "hle-audio-src", "hle-timer-order", "hle-savedata-getsize",
     "hle-savedata-nodata",
+    "hle-io-trunc",
 })
 VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: Cases whose every cell is an unconditional observation: each record is PASS. hle-io-seek,

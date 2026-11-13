@@ -88,7 +88,8 @@ it agree with every other artifact.
 | T49 | Relabel a byte-bound import as claim-bound in the candidate | the binding lives only in the private V4 document; the verifier re-derives the document with the fetched bindings and compares bytes, so the candidate cannot choose one |
 | T50 | Drift a landed byte-identical import, or drop or re-word its `PROVENANCE.md` row first so nothing checks it | `VENDORED_BYTES_DRIFT`, `VENDORED_ROW_REMOVED`, `VENDORED_ROW_RECLASSIFIED` — every row the base declares byte-identical stays checked unless the file leaves the tree or the row becomes a LOCAL DELTA |
 | T50b | Rewrite a landed byte-identical import and its row's blob ID, SHA-256 or header revision together, or relabel it LOCAL DELTA, so the candidate manifest vouches for itself | `VENDORED_ROW_REPINNED`, `VENDORED_ROW_LOCAL_DELTA` (maintainer action, fatal) — a row byte-identical in the base keeps the base's cells; only a trusted `reviewed_blobs` approval of the candidate's exact bytes, citing the path's own exact record, clears it |
-| T51 | Reuse a claim-bound V4 delta in another pull request with different content for the same paths and the same profile change | accepted while the claim holds, as for a landed path; the delta is withdrawn by deleting it from the private `main`, and the content is still subject to review, hosted CI and the publication audit |
+| T51 | Reuse a claim-bound V4 delta in another pull request with different content for the same paths and the same profile change | accepted while the claim holds, as for a landed path, for a path that is not binary, not under `assets/vfpu/` and not waived by the release manifest (T51b); the delta is withdrawn by deleting it from the private `main`, and the content is still subject to review, hosted CI and the publication audit |
+| T51b | Admit a binary file, a path under `assets/vfpu/` or a path the release manifest waives bound to its claim only, so other bytes need no new admission | `POLICY_DELTA_BINARY_CLAIM_BOUND` (or `POLICY_DELTA_MANIFEST_UNREADABLE` when the candidate's manifest cannot be read) — such a path must be byte-bound, because the publication audit holds a new path's waived bytes only to the candidate's own pin; `admit_paths.py` binds it to its bytes by default and refuses a claim binding with `ADMISSION_BINDING_BYTES_REQUIRED` |
 | T52 | Get a file admitted that the next pre-commit run reshapes | `admit_paths.py` checks the paths against the byte-rewriting hook rules first and refuses with `ADMIT_HOOKS_WOULD_REWRITE` |
 | T52b | Make the maintainer's admission run code: ship a `pre_commit.py` or `pre_commit/__main__.py`, or redefine `trailing-whitespace` as a local system hook in the candidate's `.pre-commit-config.yaml` | nothing runs — the hook rules are pure Python over the blobs at the head, nothing is checked out, and the exclusions come only from the trusted base's configuration |
 
@@ -532,7 +533,10 @@ that does not execute a single byte of candidate code.
 
 The gate ships in **observation mode**. It runs on every pull request, fails
 closed, and publishes its findings, but it is deliberately **not** a required
-status check and must not be described as enforcement.
+status check and must not be described as enforcement. It runs in the upstream
+repository only (matched by its ID or name, `tools/provenance_mode.py`); a fork,
+which has no access to the private authority, runs the `Fork provenance check`
+job of the same workflow instead ([FORKING.md](FORKING.md)).
 
 The reason is unchanged and unweakened: GitHub matches required checks by
 context *name*, both the trusted workflow and any candidate workflow run as
