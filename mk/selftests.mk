@@ -425,17 +425,61 @@ native-core-tests: ge-float24-selftest
 # each profile switch; then faults injected into copies of those blocks, each of which
 # must fail exactly the checks it breaks.  Also the VRAM viewer's sources and decode, and its
 # SR_VRAMDUMP captures (#314): two captures are written next to the binary and removed.  Run
-# twice because ge.c latches the strip-cache switch per process.  No game input.
+# twice because ge.c latches the strip-cache switch per process, and a third time with the
+# per-draw vertex cache off for the scenes (its own case compares the cache on and off in
+# every run).  No game input.
 GE_CPU_PROFILE_VALIDATE_SELFTEST := $(BUILD_DIR)/ge_cpu_profile_validate_selftest$(EXE_EXT)
 
 ge-cpu-profile-validate-selftest: $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_CPU_PROFILE_VALIDATE_SELFTEST) \
 		tests/native/ge_cpu_profile_validate_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
 		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST)
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled
+	SR_GE_VERTEX_CACHE_DISABLE=1 $(GE_CPU_PROFILE_VALIDATE_SELFTEST)
 
-native-core-tests: ge-cpu-profile-validate-selftest
+native-core-tests: ge-cpu-profile-validate-selftest ge-vertex-cache-mutants
+
+# ge-vertex-cache-mutants — the selftest's vertex cache case must kill each
+# SR_GE_VERTEX_CACHE_MUTANT in ge.c: 1 never starts a new epoch, so a draw reuses vertices an
+# earlier draw transformed at the same address under another world matrix; 2 does not check
+# the address, so a vertex whose index shares a table slot gets another vertex's result; 3
+# caches vertices outside plain RAM, so a draw whose VRAM target covers its own VRAM vertices
+# reuses vertices its pixels rewrote; 4 caches while the colour target is in RAM, the same
+# hazard for RAM vertices; 5 drops the check that a VRAM target's rows end below main RAM, so a
+# 65535-pixel-wide VRAM target whose last row covers plain-RAM vertices reuses vertices its
+# pixels rewrote. Each builds its own ge.c object and binary in its own subdirectory (the
+# selftest writes its VRAM captures next to its binary) and must fail with its own message (2
+# also by pixels, 3, 4 and 5 by target bytes that differ from the cache-off draw); mutant 1
+# must also fail every state-change pair (vertex data, matrices, lights, material, vertex type,
+# morph weights and the rest) with pixels that differ from the cache-off draw.
+ge-vertex-cache-mutants: $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)/ge-vertex-cache-mutants').mkdir(parents=True, exist_ok=True)"
+	@for m in 1 2 3 4 5; do \
+		case $$m in \
+			1) kill="FAIL vertex_cache\[epoch-second\]: a distinct vertex was not transformed in its draw";; \
+			2) kill="FAIL vertex_cache\[u16-list-texgen1\]: a distinct vertex was not transformed in its draw";; \
+			3) kill="FAIL vertex_cache_overwrite\[vram-target\]: cache on and off differ";; \
+			4) kill="FAIL vertex_cache_overwrite\[ram-target\]: cache on and off differ";; \
+			*) kill="FAIL vertex_cache_overwrite\[wide-vram-target\]: cache on and off differ";; \
+		esac; \
+		changes=0; if test $$m -eq 1; then changes=16; fi; \
+		pixels=""; if test $$m -eq 2; then pixels="^FAIL vertex_cache: cache on and off differ: [1-9][0-9]* framebuffer pixels"; fi; \
+		obj=$(BUILD_DIR)/ge-vertex-cache-mutants/ge_vertex_cache_mutant$$m.o; \
+		bin=$(BUILD_DIR)/ge-vertex-cache-mutants/ge_vertex_cache_mutant$$m$(EXE_EXT); \
+		$(CC) $(GE_CFLAGS) -DSR_GE_VERTEX_CACHE_MUTANT=$$m -c src/rt/ge.c -o $$obj || exit 1; \
+		$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $$bin tests/native/ge_cpu_profile_validate_selftest.c \
+			$$obj src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm || exit 1; \
+		$$bin > $$bin.log 2>&1; result=$$?; \
+		if test $$result -eq 0; then cat $$bin.log; echo "vertex cache mutant $$m unexpectedly passed" >&2; exit 1; fi; \
+		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "vertex cache mutant $$m failed for another reason" >&2; exit 1; fi; \
+		if test -n "$$pixels" && ! grep -Eq "$$pixels" $$bin.log; then cat $$bin.log; echo "vertex cache mutant $$m: no pixel differs from the cache-off draw" >&2; exit 1; fi; \
+		differ=$$(grep -Ec "^FAIL vertex_cache_change\[[a-z-]+\]: cache on and off differ" $$bin.log); \
+		if test $$changes -ne 0 && test "$$differ" -ne $$changes; then cat $$bin.log; echo "vertex cache mutant $$m: $$differ of $$changes state-change pairs differ" >&2; exit 1; fi; \
+		echo "ge-vertex-cache-mutants: mutant $$m killed ($$kill)"; \
+	done
 
 # ge-tnl-census-selftest -- why ge.c keeps its own T&L for a PRIM it could offer to the GPU T&L
 # route (#318): the production ge.o with SR_GPU_TNL's switch on and a backend stand-in, one
