@@ -612,6 +612,63 @@ def parse_frames(output: str) -> list[dict[str, str]]:
     return frames
 
 
+def source_number(relative: str, pattern: str, what: str) -> int:
+    """One number read from a product source, so a test does not write it a second time.
+    `pattern` has one group, the digits; fails loudly when the source no longer has it."""
+    found = re.search(pattern, (ROOT / relative).read_text(encoding="utf-8"))
+    if found is None:
+        raise AssertionError(f"{relative} no longer {what}")
+    return int(found.group(1))
+
+
+# The launcher music's fade-out when a game starts (#2207).
+LAUNCHER_MUSIC_FADE_OUT_MS = source_number(
+    "src/player/ui/player_ui_music.h", r"#define\s+PLAYER_UI_MUSIC_FADE_OUT_MS\s+(\d+)u?\b",
+    "defines PLAYER_UI_MUSIC_FADE_OUT_MS")
+# One launcher frame in these runs: scripted runs cut motion (player_ui_test_apply_motion),
+# so with nothing moving the loop draws a frame each time its idle wake passes.
+LAUNCHER_IDLE_FRAME_MS = source_number(
+    "src/player/main.c", r"player_ui_nk_wait_ms\(run->next_ui,\s*(\d+)u\)",
+    "passes the launcher loop's idle wake to player_ui_nk_wait_ms")
+LAUNCH_WORKER_START = "[PLAYER_UI_TEST] launch_worker_start "
+
+
+def assert_launch_waits_for_the_music(case: unittest.TestCase, stdout: str) -> None:
+    """#2207: the launch worker, which starts the game's process, starts only once the
+    launcher music has faded out and let go of the audio device.
+
+    Timed from the PLAY press frame (the first with launch_pending=1; PLAY is taken in its
+    draw, so the fade begins on the next frame) to the first frame printed after the
+    worker's start line, the frame on which it started: at least the fade, less one idle
+    frame for the device rendering the fade's end a little ahead of the clock. The frames
+    drawn during the fade are not what is timed: a slow runner draws few of them, so the
+    first and last can be much closer together than the fade although the launch waited
+    it out. From the worker's frame to the launch's card no music is heard while the
+    launch is pending."""
+    lines = stdout.splitlines()
+    workers = [i for i, line in enumerate(lines) if line.startswith(LAUNCH_WORKER_START)]
+    case.assertEqual(len(workers), 1, stdout)
+    before = parse_frames("\n".join(lines[:workers[0]]))
+    frames = before + parse_frames("\n".join(lines[workers[0]:]))
+    pending = [i for i, frame in enumerate(frames) if frame["launch_pending"] == "1"]
+    case.assertTrue(pending, stdout)
+    press, started = pending[0], len(before)
+    case.assertLess(started, len(frames), "a frame is drawn after the worker starts")
+    span_ms = int(frames[started]["ticks_ms"]) - int(frames[press]["ticks_ms"])
+    case.assertGreaterEqual(
+        span_ms, LAUNCHER_MUSIC_FADE_OUT_MS - LAUNCHER_IDLE_FRAME_MS,
+        f"the launch worker started {span_ms} ms after PLAY (frame {frames[press]['frame']} "
+        f"to frame {frames[started]['frame']}): it waits out the music's "
+        f"{LAUNCHER_MUSIC_FADE_OUT_MS} ms fade, less one {LAUNCHER_IDLE_FRAME_MS} ms frame")
+    case.assertEqual(frames[started]["launch_pending"], "1",
+                     "the worker's frame shows the launch pending")
+    card = next((i for i in range(started, len(frames)) if frames[i]["view"] == "error"),
+                len(frames))
+    heard = [f"frame {frame['frame']} music={frame['music']}" for frame in frames[started:card]
+             if frame["launch_pending"] == "1" and frame["music"] in ("playing", "fading_out")]
+    case.assertEqual(heard, [], "no music is heard once the launch worker has started")
+
+
 DEFAULT_BASE_TIMEOUT_SECONDS: float = 30.0
 TIMEOUT_BUFFER_SECONDS: float = 15.0
 
@@ -811,6 +868,46 @@ class LegacyRendererSourceTests(unittest.TestCase):
             text = source.read_text(encoding="utf-8")
             self.assertNotIn('#include "ui_renderer.h"', text, source.name)
             self.assertNotIn("ui_render_frame(", text, source.name)
+
+
+class LaunchMusicTimingTests(unittest.TestCase):
+    """assert_launch_waits_for_the_music on synthetic frame records, with no player: what
+    it accepts and what it refuses, whatever the runner's frame pace (#2207)."""
+
+    @staticmethod
+    def frame(number: int, ticks: int, music: str, view: str = "ready_library") -> str:
+        return (f"[PLAYER_UI_TEST] frame={number} ticks_ms={ticks} view={view} "
+                f"launch_pending=1 music={music}")
+
+    WORKER = LAUNCH_WORKER_START + "launcher_audio=closed music=stopped decoder=idle"
+
+    def test_few_frames_during_the_fade(self) -> None:
+        """A slow runner draws one frame while the music fades: the PLAY frame, that frame
+        and the worker's frame. The fading frames alone span 0 ms (the hosted Windows run
+        measured 219 ms); from PLAY to the worker the launch waited the whole fade."""
+        fade = LAUNCHER_MUSIC_FADE_OUT_MS
+        stdout = "\n".join((self.frame(1, 1000, "playing"),
+                            self.frame(2, 1000 + fade // 2, "fading_out"),
+                            self.WORKER,
+                            self.frame(3, 1000 + fade + 20, "stopped")))
+        assert_launch_waits_for_the_music(self, stdout)
+
+    def test_a_worker_that_does_not_wait_for_the_fade_fails(self) -> None:
+        """The worker starts on the frame after PLAY, as the fade begins."""
+        stdout = "\n".join((self.frame(1, 1000, "playing"),
+                            self.WORKER,
+                            self.frame(2, 1070, "fading_out")))
+        with self.assertRaisesRegex(AssertionError, "waits out the music's"):
+            assert_launch_waits_for_the_music(self, stdout)
+
+    def test_music_still_heard_after_the_worker_starts_fails(self) -> None:
+        fade = LAUNCHER_MUSIC_FADE_OUT_MS
+        stdout = "\n".join((self.frame(1, 1000, "playing"),
+                            self.WORKER,
+                            self.frame(2, 1000 + fade + 20, "stopped"),
+                            self.frame(3, 1000 + fade + 90, "fading_out")))
+        with self.assertRaisesRegex(AssertionError, "no music is heard"):
+            assert_launch_waits_for_the_music(self, stdout)
 
 
 UPDATE_RELEASES_URL = "https://api.github.com/repos/Jstar269/nakagawa-recomp/releases?per_page=10"
@@ -2709,7 +2806,9 @@ class NativePlayerUiTests(unittest.TestCase):
         """#2207: PLAY fades the launcher music out and the launch worker, which starts
         the game's process, starts only once the launcher holds no audio stream; the
         music comes back when the launcher does (here the launch's own card, since the
-        synthetic package has no real program).
+        synthetic package has no real program). The wait is timed from the PLAY frame to
+        the worker's frame (assert_launch_waits_for_the_music), not across the frames
+        drawn during the fade, which a slow runner draws few of.
 
         Failing-before: there was no launcher music, so no frame names its state and no
         launch waits for it."""
@@ -2724,8 +2823,9 @@ class NativePlayerUiTests(unittest.TestCase):
         stdout = str(run["stdout"])
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        assert_launch_waits_for_the_music(self, stdout)
         workers = [line for line in stdout.splitlines()
-                   if line.startswith("[PLAYER_UI_TEST] launch_worker_start ")]
+                   if line.startswith(LAUNCH_WORKER_START)]
         self.assertEqual(workers, ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
                                    "music=stopped decoder=idle"], stdout)
         # The frames between PLAY and the worker's start: after the press frame the music
@@ -2744,8 +2844,6 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertNotIn("playing", [frame["music"] for frame in fading])
         self.assertEqual(fading[-1]["music"], "fading_out",
                          "the worker starts on the frame the music lets go")
-        fade_ms = int(fading[-1]["ticks_ms"]) - int(fading[0]["ticks_ms"])
-        self.assertGreaterEqual(fade_ms, 300, "the fade-out takes its half second")
         # While the launch runs, the music stays stopped; on the launch's card it plays.
         starting = [frame for frame in after if frame["launch_pending"] == "1"]
         self.assertTrue(starting, stdout)
