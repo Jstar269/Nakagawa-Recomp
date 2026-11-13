@@ -649,8 +649,12 @@ enum {
     GE_VRAM_VIEW_SHOWN = 0,
     GE_VRAM_VIEW_UNREADABLE,          /* the window cannot be read now */
     GE_VRAM_VIEW_TEXTURE_REFUSED,     /* outside guest memory, over 512 pixels, or a GE capture runs */
-    GE_VRAM_VIEW_NO_ROOM              /* `out`, or a surface's window, is NULL; or `out` is
+    GE_VRAM_VIEW_NO_ROOM,             /* `out`, or a surface's window, is NULL; or `out` is
                                          smaller than the window */
+    GE_VRAM_VIEW_CAPTURE_LOST,        /* no such capture, or its image file is missing or
+                                         changed since it was written */
+    GE_VRAM_VIEW_CAPTURE_TEXTURE      /* a captured texture that is not a linear colour
+                                         surface (swizzled, palette or compressed) */
 };
 int       ge_vram_view_decode(int texture, const GeVramWindow *window, uint32_t *out,
                               size_t capacity, uint32_t *width, uint32_t *height);
@@ -679,5 +683,21 @@ const char *ge_profile_check_name(GeProfileCheck check);
 int       ge_vramdump_write(const char *directory, uint32_t vblank,
                             uint32_t display_addr, uint32_t display_stride,
                             uint32_t display_format);
+/* The VRAM viewer's Capture row (#314): the captures ge_vramdump_write wrote in this run,
+ * oldest first (the first GE_VRAM_CAPTURE_MAX; SR_VRAMDUMP takes at most that many).
+ * ge_vram_capture_info gives capture `index`'s VBLANK and the viewer's sources as they stood
+ * at that present (ge_vram_view_sources, the display from the capture's own arguments);
+ * 0 for no such capture. */
+#define GE_VRAM_CAPTURE_MAX 8u
+unsigned  ge_vram_capture_count(void);
+int       ge_vram_capture_info(unsigned index, uint32_t *vblank, GeVramSources *sources);
+/* ge_vram_view_decode for capture `index`: decodes `window` from the raw image the capture
+ * wrote, read back from its file and checked against a digest of the bytes written, instead
+ * of from guest memory now. A colour (PSM 0-3) or DEPTH16 window wholly inside the captured
+ * 2 MiB, VRAM mirrors folded; a texture (`texture` set, `window` its level 0) only when it is
+ * linear PSM 0-3 (else GE_VRAM_VIEW_CAPTURE_TEXTURE). Reads no guest memory or GE state. */
+int       ge_vram_capture_decode(unsigned index, int texture, const GeVramWindow *window,
+                                 uint32_t *out, size_t capacity, uint32_t *width,
+                                 uint32_t *height);
 
 #endif /* GE_SHARED_H */

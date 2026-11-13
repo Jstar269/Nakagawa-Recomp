@@ -8328,12 +8328,36 @@ static void ge_vramdump_surface(FILE *file, int *first, const char *name,
     fputc('}', file);
 }
 
+/* The SR_VRAMDUMP captures this run wrote, oldest first, for the VRAM viewer's Capture row
+ * (#314): each capture's VBLANK, the viewer's sources as the GE state and the display named
+ * them at that present, and where its raw image went, with a digest of the bytes written so a
+ * file changed or replaced since is refused rather than shown as that capture. */
+typedef struct {
+    uint32_t vblank;
+    uint64_t digest;
+    GeVramSources sources;
+    char image_path[1024];
+} GeVramCaptureRecord;
+static GeVramCaptureRecord s_vram_captures[GE_VRAM_CAPTURE_MAX];
+static unsigned s_vram_capture_count;
+
+/* FNV-1a, 64-bit: a check that the image read back is the image written, not a secret. */
+static uint64_t ge_vram_capture_digest(const uint8_t *bytes, size_t size) {
+    uint64_t hash = 0xCBF29CE484222325ull;
+    for (size_t i = 0; i < size; i++) {
+        hash ^= bytes[i];
+        hash *= 0x00000100000001B3ull;
+    }
+    return hash;
+}
+
 int ge_vramdump_write(const char *directory, uint32_t vblank,
                       uint32_t display_addr, uint32_t display_stride,
                       uint32_t display_format) {
     char image_name[64], image_path[1024], sidecar_path[1024];
     FILE *image = NULL, *sidecar = NULL;
     uint32_t clut_command, clut_bytes, clut_format, clut_stride;
+    uint64_t digest;
     int first_surface = 1, ok = 0;
 
     if (!directory || !directory[0]) return 0;
@@ -8357,6 +8381,8 @@ int ge_vramdump_write(const char *directory, uint32_t vblank,
         fprintf(stderr, "VRAMDUMP vblank=%" PRIu32 " FAIL (cannot open raw image)\n", vblank);
         return 0;
     }
+    digest = ge_vram_capture_digest((const uint8_t *)SR_HOST(GE_CAPTURE_VRAM_BASE),
+                                    GE_CAPTURE_VRAM_SIZE);
     {
         size_t written = fwrite(SR_HOST(GE_CAPTURE_VRAM_BASE), 1,
                                 GE_CAPTURE_VRAM_SIZE, image);
@@ -8484,7 +8510,95 @@ int ge_vramdump_write(const char *directory, uint32_t vblank,
         fprintf(stderr, "VRAMDUMP vblank=%" PRIu32 " FAIL (JSON sidecar write incomplete)\n", vblank);
         return 0;
     }
+    if (s_vram_capture_count < GE_VRAM_CAPTURE_MAX) {
+        GeVramCaptureRecord *record = &s_vram_captures[s_vram_capture_count];
+        record->vblank = vblank;
+        record->digest = digest;
+        ge_vram_view_sources(display_addr, display_stride, display_format, 1, &record->sources);
+        snprintf(record->image_path, sizeof record->image_path, "%s", image_path);
+        s_vram_capture_count++;
+    }
     return 1;
+}
+
+unsigned ge_vram_capture_count(void) {
+    return s_vram_capture_count;
+}
+
+int ge_vram_capture_info(unsigned index, uint32_t *vblank, GeVramSources *sources) {
+    if (index >= s_vram_capture_count) return 0;
+    if (vblank) *vblank = s_vram_captures[index].vblank;
+    if (sources) *sources = s_vram_captures[index].sources;
+    return 1;
+}
+
+/* Reads capture `index`'s raw image back into a new 2 MiB buffer, or NULL when the file is
+ * missing, is not exactly GE_CAPTURE_VRAM_SIZE bytes, or no longer holds the bytes written. */
+static uint8_t *ge_vram_capture_load(unsigned index) {
+    const GeVramCaptureRecord *record = &s_vram_captures[index];
+    uint8_t *image = (uint8_t *)malloc(GE_CAPTURE_VRAM_SIZE);
+    FILE *file;
+    int whole;
+    if (!image) return NULL;
+    file = fopen(record->image_path, "rb");
+    if (!file) {
+        free(image);
+        return NULL;
+    }
+    whole = fread(image, 1, GE_CAPTURE_VRAM_SIZE, file) == GE_CAPTURE_VRAM_SIZE &&
+            fgetc(file) == EOF && !ferror(file);
+    fclose(file);
+    if (!whole || ge_vram_capture_digest(image, GE_CAPTURE_VRAM_SIZE) != record->digest) {
+        free(image);
+        return NULL;
+    }
+    return image;
+}
+
+int ge_vram_capture_decode(unsigned index, int texture, const GeVramWindow *window,
+                           uint32_t *out, size_t capacity, uint32_t *width, uint32_t *height) {
+    uint32_t folded, offset, bpp;
+    uint64_t end;
+    uint8_t *image;
+    if (width) *width = 0u;
+    if (height) *height = 0u;
+    if (!out || !window) return GE_VRAM_VIEW_NO_ROOM;
+    if (index >= s_vram_capture_count) return GE_VRAM_VIEW_CAPTURE_LOST;
+    /* Only what the image holds as a linear surface: a swizzled, palette or compressed texture
+     * needs the capture's CLUT and the texture decoder, which nk_cli vram runs. */
+    if (texture && (window->format > 3u || s_vram_captures[index].sources.texture_swizzled))
+        return GE_VRAM_VIEW_CAPTURE_TEXTURE;
+    if (!window->width || !window->height || window->width > GE_VRAM_VIEW_MAX_WIDTH ||
+        window->height > GE_VRAM_VIEW_MAX_HEIGHT || window->stride < window->width ||
+        (window->format > 3u && window->format != GE_VRAM_VIEW_DEPTH16))
+        return GE_VRAM_VIEW_UNREADABLE;
+    if ((uint64_t)window->width * window->height > capacity) return GE_VRAM_VIEW_NO_ROOM;
+    /* The whole window inside the captured 2 MiB, or nothing is read. */
+    folded = ge_vram_view_fold(window->addr);
+    if ((folded & ~0x001FFFFFu) != GE_CAPTURE_VRAM_BASE) return GE_VRAM_VIEW_UNREADABLE;
+    offset = folded & 0x001FFFFFu;
+    bpp = window->format == 3u ? 4u : 2u;
+    end = offset + ((uint64_t)(window->height - 1u) * window->stride + window->width) * bpp;
+    if (end > GE_CAPTURE_VRAM_SIZE) return GE_VRAM_VIEW_UNREADABLE;
+    image = ge_vram_capture_load(index);
+    if (!image) return GE_VRAM_VIEW_CAPTURE_LOST;
+    for (uint32_t y = 0; y < window->height; y++) {
+        const uint8_t *row = image + offset + (size_t)y * window->stride * bpp;
+        uint32_t *dst = out + (size_t)y * window->width;
+        for (uint32_t x = 0; x < window->width; x++) {
+            if (window->format == GE_VRAM_VIEW_DEPTH16) {
+                uint16_t z;
+                memcpy(&z, row + (size_t)x * 2u, 2u);
+                dst[x] = ge_depth16_gray(z);
+            } else {
+                dst[x] = ge_direct_texel(row, x, window->format) | 0xFF000000u;
+            }
+        }
+    }
+    free(image);
+    if (width) *width = window->width;
+    if (height) *height = window->height;
+    return GE_VRAM_VIEW_SHOWN;
 }
 
 #ifdef SR_GE_VRAM_DECODER_CLI
