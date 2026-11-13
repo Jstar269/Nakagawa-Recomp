@@ -446,23 +446,27 @@ native-core-tests: ge-cpu-profile-validate-selftest ge-vertex-cache-mutants
 # the address, so a vertex whose index shares a table slot gets another vertex's result; 3
 # caches vertices outside plain RAM, so a draw whose VRAM target covers its own VRAM vertices
 # reuses vertices its pixels rewrote; 4 caches while the colour target is in RAM, the same
-# hazard for RAM vertices. Each builds its own ge.c object and binary and must fail with its
-# own message (2 also by pixels, 3 and 4 by target bytes that differ from the cache-off draw);
-# mutant 1 must
-# also fail every state-change pair (vertex data, matrices, lights, material, vertex type,
+# hazard for RAM vertices; 5 drops the check that a VRAM target's rows end below main RAM, so a
+# 65535-pixel-wide VRAM target whose last row covers plain-RAM vertices reuses vertices its
+# pixels rewrote. Each builds its own ge.c object and binary in its own subdirectory (the
+# selftest writes its VRAM captures next to its binary) and must fail with its own message (2
+# also by pixels, 3, 4 and 5 by target bytes that differ from the cache-off draw); mutant 1
+# must also fail every state-change pair (vertex data, matrices, lights, material, vertex type,
 # morph weights and the rest) with pixels that differ from the cache-off draw.
 ge-vertex-cache-mutants: $(RT_GE_O)
-	@for m in 1 2 3 4; do \
+	@mkdir -p $(BUILD_DIR)/ge-vertex-cache-mutants
+	@for m in 1 2 3 4 5; do \
 		case $$m in \
 			1) kill="FAIL vertex_cache\[epoch-second\]: a distinct vertex was not transformed in its draw";; \
 			2) kill="FAIL vertex_cache\[u16-list-texgen1\]: a distinct vertex was not transformed in its draw";; \
 			3) kill="FAIL vertex_cache_overwrite\[vram-target\]: cache on and off differ";; \
-			*) kill="FAIL vertex_cache_overwrite\[ram-target\]: cache on and off differ";; \
+			4) kill="FAIL vertex_cache_overwrite\[ram-target\]: cache on and off differ";; \
+			*) kill="FAIL vertex_cache_overwrite\[wide-vram-target\]: cache on and off differ";; \
 		esac; \
 		changes=0; if test $$m -eq 1; then changes=16; fi; \
 		pixels=""; if test $$m -eq 2; then pixels="^FAIL vertex_cache: cache on and off differ: [1-9][0-9]* framebuffer pixels"; fi; \
-		obj=$(BUILD_DIR)/ge_vertex_cache_mutant$$m.o; \
-		bin=$(BUILD_DIR)/ge_vertex_cache_mutant$$m$(EXE_EXT); \
+		obj=$(BUILD_DIR)/ge-vertex-cache-mutants/ge_vertex_cache_mutant$$m.o; \
+		bin=$(BUILD_DIR)/ge-vertex-cache-mutants/ge_vertex_cache_mutant$$m$(EXE_EXT); \
 		$(CC) $(GE_CFLAGS) -DSR_GE_VERTEX_CACHE_MUTANT=$$m -c src/rt/ge.c -o $$obj || exit 1; \
 		$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $$bin tests/native/ge_cpu_profile_validate_selftest.c \
 			$$obj src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm || exit 1; \

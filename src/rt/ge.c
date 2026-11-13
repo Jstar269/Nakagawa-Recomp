@@ -4991,7 +4991,8 @@ static void transform_vtx_clip(uint32_t addr, const VFmt *vf, CVtx *o) {
  *
  * SR_GE_VERTEX_CACHE_MUTANT (ge-vertex-cache-mutants only; never in a product build) breaks
  * the cache: 1 never starts a new epoch, 2 does not check the address, 3 caches vertices
- * outside plain RAM, 4 caches vertices while the colour target is in RAM. */
+ * outside plain RAM, 4 caches vertices while the colour target is in RAM, 5 caches vertices
+ * while a VRAM colour target's last rows reach main RAM. */
 #ifndef SR_GE_VERTEX_CACHE_MUTANT
 #define SR_GE_VERTEX_CACHE_MUTANT 0
 #endif
@@ -5043,6 +5044,9 @@ static void vertex_cache_begin_draw(int repeats) {
     uint32_t fb = ge_fb_addr();
     uint64_t stride = ge.fbw ? ge.fbw : 512u;
     uint64_t fb_end = (uint64_t)fb + (271u * stride + (uint64_t)raster_columns()) * ((ge.fbfmt & 3) == 3 ? 4u : 2u);
+#if SR_GE_VERTEX_CACHE_MUTANT == 5
+    fb_end = SR_RAM_BASE;
+#endif
     if ((fb & 0x0F000000u) != 0x04000000u || fb_end > SR_RAM_BASE) {
         s_vertex_cache_draw = 1;
         return;

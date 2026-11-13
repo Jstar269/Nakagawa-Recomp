@@ -379,8 +379,14 @@ class TestGeCaptureWiring(unittest.TestCase):
         self.assertIn("$(RT_GE_O)", rule)
         self.assertNotIn("src/rt/ge.c", rule)
         self.assertIn("$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled", rule)
+        # The third run: every scene with the per-draw vertex cache off.
+        self.assertIn("\n\tSR_GE_VERTEX_CACHE_DISABLE=1 $(GE_CPU_PROFILE_VALIDATE_SELFTEST)\n", rule + "\n")
         self.assertIn("native-core-tests: ge-cpu-profile-validate-selftest ge-vertex-cache-mutants",
                       makefile)
+        mutants = makefile.split("\nge-vertex-cache-mutants:", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("for m in 1 2 3 4 5; do", mutants)
+        self.assertIn("-DSR_GE_VERTEX_CACHE_MUTANT=$$m", mutants)
+        self.assertIn("vertex_cache_overwrite\\[wide-vram-target\\]: cache on and off differ", mutants)
         replay = (RT / "ge_replay.c").read_text(encoding="utf-8")
         self.assertIn("ge_cpu_profile_validate(&ge_cpu_stats", replay)
         self.assertIn("return ge_cpu_failed ? 4 : 0;", replay)

@@ -117,7 +117,9 @@ The per-stage `estimated_ns` is `sample_ns * eligible / samples`. `samples` coun
 events; `eligible` counts the corresponding list, draw, vertex, or triangle operations and can be
 divided by new frames for an operations-per-frame rate. For `vertex_fetch_decode`, `transform`
 and `lighting` it leaves out the uses the per-draw vertex cache served (`vertex_cache_hits`),
-which do none of that work, so it is below the vertex uses whenever the cache hits. `clipping_acceptance` includes cull-order
+which do none of that work, so it is below the vertex uses whenever the cache hits. In a draw
+whose uses hit, miss or bypass the cache, the index read comes before the cache decision,
+outside the fetch/decode sample. `clipping_acceptance` includes cull-order
 reordering and triangle acceptance; `assembly` is the accepted screen-space projection work.
 `triangle_total` overlaps those two stages, and `empty_control` measures sampling overhead; neither
 is an additional front-end stage. These timers add measurement overhead and are for attribution

@@ -24,7 +24,7 @@
 // The Makefile runs this twice, once with --strip-cache-disabled, because ge.c latches
 // the strip-cache switch once per process.  The per-draw vertex cache case
 // (test_ge_vertex_cache) compares the cache on and off within one process, through
-// ge_vertex_cache_reload_env(); ge-vertex-cache-mutants requires it to kill three broken caches.
+// ge_vertex_cache_reload_env(); ge-vertex-cache-mutants requires it to kill five broken caches.
 //
 // `--bench ROUNDS` is not a test.  It times the same production GE object on two source-owned
 // workloads with the flight recorder compiled in but disarmed, or compiled out when the
@@ -3524,6 +3524,79 @@ static void test_ge_vertex_cache_overwrite(void) {
     free(saved); free(after);
 }
 
+/* ---- A VRAM target wide enough to reach main RAM ----
+ *
+ * GE_FRAMEBUFWIDTH keeps 16 bits, so a VRAM colour target 65535 pixels wide puts its last rows
+ * past 0x08000000, where plain-RAM vertices are cacheable. The target's row 271 is placed on
+ * the vertices of a 60-triangle indexed draw (grid rows 0 to 2, 48 vertices, 1728 bytes inside
+ * the row's 2048 bytes), the scissor keeps the draw to that row, and depth is off. Triangles of
+ * the first grid row write over vertices the second row reads again. The draw must bypass the
+ * cache (the target is in VRAM, but its rows reach main RAM) and leave the same bytes with the
+ * cache on and off. ge-vertex-cache-mutants requires mutant 5 (that bound dropped) to fail here
+ * by differing bytes. */
+
+#define VC_WIDE_VERTS 0x08400000u
+#define VC_WIDE_WIDTH 65535u
+#define VC_WIDE_ROW   271u
+#define VC_WIDE_FB    (VC_WIDE_VERTS - VC_WIDE_ROW * VC_WIDE_WIDTH * 4u)   /* 0x0404063C */
+#define VC_WIDE_BYTES 2048u                                               /* 512 columns of 8888 */
+
+static uint16_t s_vc_wide_indices[180];
+
+static void vc_change_wide_target(void) {
+    W(0x9C, VC_WIDE_FB & 0xFFFFFFu);
+    W(0x9D, ((VC_WIDE_FB >> 8) & 0xFF0000u) | VC_WIDE_WIDTH);
+    W(0xD4, VC_WIDE_ROW << 10);
+    W(0xD5, (VC_WIDE_ROW << 10) | 511u);
+    W(0x42, f24(400.0f)); W(0x43, f24(-60.0f));          /* the grid's rows 0 to 2 cross row 271 */
+    W(0x45, f24(256.0f)); W(0x46, f24(247.0f));
+    W(0x23, 0); W(0xE7, 1);                              /* no depth test, no depth writes */
+}
+
+static void test_ge_vertex_cache_overwrite_wide(void) {
+    const char *name = "vertex_cache_overwrite[wide-vram-target]";
+    uint8_t saved[VC_WIDE_BYTES], after[2][VC_WIDE_BYTES];
+    vc_fill();
+    vc_quads(0, 2, 0, 15, s_vc_wide_indices);            /* 30 quads over vertices 0 to 47 */
+    memset(SR_HOST(VC_WIDE_VERTS), 0, VC_WIDE_BYTES);
+    memcpy(SR_HOST(VC_WIDE_VERTS), SR_HOST(VC_PLAIN), 48u * VC_PLAIN_STRIDE);
+    memcpy(saved, SR_HOST(VC_WIDE_VERTS), VC_WIDE_BYTES);
+    for (int run = 0; run < 2; run++) {
+        int cache_on = run == 0;
+        env_set("SR_GE_VERTEX_CACHE_DISABLE", cache_on ? NULL : "1");
+        ge_vertex_cache_reload_env();
+        VcCase draw = { name, VT_VC_PLAIN | VT_INDEX16, VC_WIDE_VERTS, 3, 180, s_vc_wide_indices, 0, 0.0f,
+                        0, 0, 0, 0 };
+        memcpy(SR_HOST(VC_WIDE_VERTS), saved, VC_WIDE_BYTES);
+        s_vc_change = vc_change_wide_target;
+        vc_run_case(&draw);
+        s_vc_change = NULL;
+        memcpy(after[run], SR_HOST(VC_WIDE_VERTS), VC_WIDE_BYTES);
+        if (cache_on) {
+            char what[160];
+            snprintf(what, sizeof what, "a vertex of a draw whose VRAM target reaches main RAM went "
+                     "through the cache (hits=%lu misses=%lu bypasses=%lu uses=180)",
+                     draw.hits, draw.misses, draw.bypasses);
+            expect(draw.hits == 0 && draw.misses == 0 && draw.bypasses == 180u, name, what);
+        }
+    }
+    memcpy(SR_HOST(VC_WIDE_VERTS), saved, VC_WIDE_BYTES);
+    env_set("SR_GE_VERTEX_CACHE_DISABLE", NULL);
+    ge_vertex_cache_reload_env();   /* anything after this sees the cache on */
+
+    unsigned long diff = 0, rewritten = 0;
+    for (uint32_t i = 0; i < VC_WIDE_BYTES; i++) {
+        if (after[0][i] != after[1][i]) diff++;
+        if (i < 48u * VC_PLAIN_STRIDE && after[1][i] != saved[i]) rewritten++;
+    }
+    char what[200];
+    snprintf(what, sizeof what, "cache on and off differ: %lu target bytes", diff);
+    expect(diff == 0, name, what);
+    snprintf(what, sizeof what, "the draw rewrote none of its own vertex bytes (%lu)", rewritten);
+    expect(rewritten > 100u, name, what);
+    printf("VERTEX_CACHE_OVERWRITE %s rewritten_vertex_bytes=%lu differing=%lu\n", name, rewritten, diff);
+}
+
 int main(int argc, char **argv) {
     int strip_cache = 1;
     if (argc == 3 && strcmp(argv[1], "--bench") == 0) {
@@ -3686,6 +3759,7 @@ int main(int argc, char **argv) {
     test_ge_vertex_cache(strip_cache);
     test_ge_vertex_cache_changes();
     test_ge_vertex_cache_overwrite();
+    test_ge_vertex_cache_overwrite_wide();
     {
         /* The capture files go next to this binary, in the build tree. */
         char dir[1024];
