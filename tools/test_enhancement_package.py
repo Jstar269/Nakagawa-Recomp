@@ -916,6 +916,35 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
         out_dir.mkdir()
         return self._run_codegen(elf_path, out_dir / "out.c", [f"--enhancement-package={pkg_path}"])
 
+    def test_a_run_leaves_no_package_active_after_it_returns(self) -> None:
+        """The package a run loads ends with the run: code translated afterwards in the same process
+        (tools/test_cpu_lle.py's fixtures, translated at the site addresses this ELF uses) is
+        authentic. A package left active once rewrote those fixtures with nk_enhancement_on()."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            elf_path = tmp / "synth.elf"
+            elf_bytes = _write_synthetic_mips_elf(elf_path, self.words, self.entry)
+            pkg, symbols = self._make_package_and_symbols(elf_bytes)
+            pkg_path = tmp / "synth-60hz.json"
+            pkg_path.write_text(json.dumps(pkg), encoding="utf-8")
+            (tmp / "synth-60hz.symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
+            out_dir = tmp / "out"
+            out_dir.mkdir()
+            rc, output, files = self._run_codegen(
+                elf_path, out_dir / "out.c", [f"--enhancement-package={pkg_path}"])
+            self.assertEqual(rc, 0, output)
+            self.assertIn(b"nk_enhancement_on", b"\n".join(files.values()))
+        self.assertEqual(codegen.ENHANCEMENT_SITES, {})
+        self.assertEqual(codegen.ENHANCEMENT_ACE_SITES, {})
+        self.assertIsNone(codegen.ENHANCEMENT_PKG_META)
+        self.assertIsNone(codegen.ENHANCEMENT_HOOK_META)
+        self.assertIsNone(codegen.ENHANCEMENT_UPDATE_BOUNDARY)
+        self.assertIsNone(codegen.ENHANCEMENT_STORE_KEY)
+        for table in (codegen.ENHANCEMENT_APPLIED, codegen.ENHANCEMENT_DATA_PATCHES,
+                      codegen.ENHANCEMENT_DATA_FILES, codegen.ENHANCEMENT_STORE_SITES,
+                      codegen.ENHANCEMENT_PHASE_STEPS, codegen.ENHANCEMENT_LAUNCH_SITES):
+            self.assertFalse(table)
+
     def test_gated_sites_count_logic_updates_at_the_update_boundary(self) -> None:
         """The boundary statement counts each update once; gates read that count, not the display."""
         with tempfile.TemporaryDirectory() as tmp_dir:
