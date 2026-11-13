@@ -1441,7 +1441,7 @@
           1892
         ],
         "risk": "low; writes and removes one probe-owned file on the Memory Stick",
-        "reset": "one PRX launch; PSPLink soft reset before the next launch"
+        "reset": "one PRX launch, in game context as on boot 107; PSPLink soft reset before the next launch"
       },
       {
         "id": "PSP-HLE-SAVEDATA-NODATA-001",

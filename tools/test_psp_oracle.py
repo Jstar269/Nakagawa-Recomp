@@ -16520,7 +16520,7 @@ class Record20261015Tests(unittest.TestCase):
                      "acceptance-eligible with 0 blockers", "0x8001000d", "ABCDEFGHWX",
                      "src/rt/hle_data.c"):
             self.assertIn(term, note)
-        self.assertIn("- **PSP-3000 single-case run of `hle-io-trunc` (2026-11-02)**", self.doc)
+        self.assertIn("- **PSP-3000 single-case run of `hle-io-trunc` (2026-11-02 UTC)**", self.doc)
 
     def test_the_sas_adsr_capture_is_captured_with_its_blocker(self) -> None:
         row = self.rows["PSP-SAS-002"]

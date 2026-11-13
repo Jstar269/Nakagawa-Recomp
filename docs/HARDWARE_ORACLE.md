@@ -782,7 +782,7 @@ One console is one data point; see §11. Nothing here closes issue #70
     - A text field is written through its NUL and no further: the bytes after it keep their presets.
   - *Context.* Launched under the XMB (22 threads, 70 modules), InitStart for savedata returned 0 and the status stayed at INIT past 360 vblanks, an `SceUtilityInit` thread stayed behind, and later InitStarts returned 0x80110001 (two launches, 2026-10-31, withdrawn probe). In game context the same utility ran to completion, so a savedata probe needs game context.
 
-- **PSP-3000 single-case run of `hle-io-trunc` (2026-11-02)**: at 21:40 UTC on boot 107, game context
+- **PSP-3000 single-case run of `hle-io-trunc` (2026-11-02 UTC)**: at 21:40 UTC on boot 107, game context
   (standalone PSPLink: 19 threads, 52 modules), after the `transport-write` preflight (PSP-TRANSPORT-001 is not
   re-cited). Firmware recorded as 6.6.1 (system software 6.61; custom firmware ARK-5 5.1.0 at that time,
   operator-declared). Case 105, `fixtures/psp_oracle/probe_hle_measure.c`, built from `08934592f`,
@@ -801,7 +801,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   on this tree (#1907: `PSP_O_TRUNC` cuts the host file at open, and a write through that descriptor brings the
   old bytes below it back) read from its source:
 
-  | Cell | Measured | Runtime |
+  | Cell | Measured (2026-11-02, boot 107, `08934592f`) | Runtime (`src/rt/hle_data.c`, this tree) |
   | --- | --- | --- |
   | `trunc-open-view` | An `RDWR\|CREAT\|TRUNC` (0x0603) open returns a descriptor; while it is open `sceIoGetstat` gives size 0, lseek END 0, lseek to 0 returns 0, and a 4-byte read 0 | Agrees |
   | `trunc-seek-read` | lseek to 4 returns 4; a 4-byte read there returns 0 | Agrees |
