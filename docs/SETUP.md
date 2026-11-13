@@ -134,50 +134,19 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release
-  folder deletes no games or saves. Every host uses the same folder name: `Nakagawa`, with `config`,
-  `data` and `saves` side by side. It sits in the host's own per-user location:
-  `%LOCALAPPDATA%\Nakagawa` on Windows, `$XDG_DATA_HOME/Nakagawa` (else `~/.local/share/Nakagawa`) on
-  Linux, and `~/Library/Application Support/Nakagawa` on macOS. Windows and macOS keep `cache` and `logs`
-  in that folder too. Linux keeps the cache in `~/.cache/nakagawa-recomp` and the logs in
-  `~/.local/state/nakagawa-recomp/logs` (or under `$XDG_CACHE_HOME` and `$XDG_STATE_HOME`), as before. On
-  Android the app's own private folder is the data folder itself, with `config`, `cache`, `logs` and
-  `saves` inside it.
-- **If you used an earlier Linux or macOS build.** Nothing moves by itself. While your earlier folders
-  hold your data (Linux's `nakagawa-recomp` data folder and its `~/.config/nakagawa-recomp` settings, or
-  macOS's `NakagawaRecomp`), this version keeps using them, whole, and Settings shows **Move my data to
-  the new folder**. A fresh install uses the new folder and writes a small marker file,
-  `.nakagawa-layout`, in it; from then on the new folder is used even if an earlier folder appears
-  again. Windows already used this layout, so a Windows profile has nothing to move, and Settings does
-  not show the button. An XDG variable that is not an absolute path is ignored, as the XDG
-  specification says, and the log names it.
-- **Moving your data.** Settings > **Move my data to the new folder** names both folders and asks you
-  to close every game and every other Nakagawa window and tool first. Nakagawa can tell when a window
-  of this version is open, but not one of an earlier version: close those yourself. **Keep my folders**
-  has the focus; **Move** starts it. Each folder is renamed, never copied, and nothing is deleted but
-  empty folders. The paths your library stored for converted games are rewritten to the new place (the
-  old file is kept as `library.json.pre-migration`). Nakagawa then restarts on the new folder. It
-  refuses by name, before touching anything, when a game is running (`DATA_MIGRATION_GAME_RUNNING`),
-  another Nakagawa window is open (`DATA_MIGRATION_IN_USE`), a library, package or staging lock of
-  this or the earlier version is held (`DATA_MIGRATION_LOCK`, naming the lock), the new folder already
-  holds files (`DATA_MIGRATION_BOTH_PRESENT`), a folder is a symbolic link or holds a relative link that
-  would point elsewhere afterwards (`DATA_MIGRATION_LINKED`), your XDG folders point at each other
-  (`DATA_MIGRATION_OVERLAP`), a folder belongs to another user (`DATA_MIGRATION_OTHER_OWNER`), the
-  folders are on different disks (`DATA_MIGRATION_OTHER_DISK`; Nakagawa does not copy saves between
-  disks), or your library was written by a newer version (`DATA_MIGRATION_NEWER_LIBRARY`). You can
-  press it again once the cause is gone.
-- **If the move is interrupted.** Before the first rename the move writes its steps to
-  `.nakagawa-move-in-progress` beside the `Nakagawa` folder; the last step turns that record into the
-  marker. If the computer stops in between, the next start finishes the move, or, when a step cannot
-  be done, puts everything back where it was. Only when neither works does the start stop, with a
-  message naming both folders and what each holds, and **Open both folders** and **Quit**; fix what it
-  names and start again. The Python tools do not finish a move themselves: they stop with
-  `DATA_MIGRATION_INTERRUPTED` until the player has started once.
-- **If both folders hold files.** When your earlier folders are in use and the new folder holds files
-  too, the library screen says so (`DATA_FOLDERS_BOTH_HOLD_FILES`) and names both: Nakagawa uses the
-  earlier ones and never merges, moves or deletes either. When the new folder is in use and an earlier
-  folder holds files again, most likely written by an earlier version still running at the move, the
-  library screen names that folder and says its files are not used
-  (`DATA_FOLDERS_OLD_FOLDER_RETURNED`). Neither notice stops a start.
+  folder deletes no games or saves. A fresh install keeps its settings, data and saves in one `Nakagawa`
+  folder: `%LOCALAPPDATA%\Nakagawa` on Windows, `$XDG_DATA_HOME/Nakagawa` (else
+  `~/.local/share/Nakagawa`) on Linux, and `~/Library/Application Support/Nakagawa` on macOS. Linux keeps
+  the cache in `~/.cache/nakagawa-recomp` and the logs in `~/.local/state/nakagawa-recomp/logs` (or under
+  `$XDG_CACHE_HOME` and `$XDG_STATE_HOME`); an XDG variable that is not an absolute path is ignored, as
+  the XDG specification says.
+- **If you used an earlier Linux or macOS build.** Your install stays where it is, for good: Linux's
+  `~/.local/share/nakagawa-recomp` (or `$XDG_DATA_HOME/nakagawa-recomp`) with its settings in
+  `~/.config/nakagawa-recomp`, or macOS's `~/Library/Application Support/NakagawaRecomp`. Nakagawa
+  uses the new folder only once it holds data (a `settings.json`, a `library.json` or a save), and
+  the earlier folders while only they do. Nothing is moved, copied, merged or deleted, and moving an
+  existing install is not offered. If both hold data, the new folder is used and the library screen
+  names both.
 
 ## Install, update and uninstall (Windows)
 
@@ -771,7 +740,7 @@ python tools/nk_cli.py fonts remove --all
 Available options:
 
 - `--choose <slot>=<file>`: Pick a file for a generic slot that several files name (`japanese`, `latin`, or `korean`). Named `ltn0.pgf` through `ltn15.pgf` files select their own Latin indices and need no choice.
-- `--user-data-root <path>`: Override the target per-user data directory (default: `%LOCALAPPDATA%`, then `%APPDATA%`, under `Nakagawa\data` on Windows; `~/Library/Application Support/Nakagawa/data` on macOS; `$XDG_DATA_HOME/Nakagawa/data` or `~/.local/share/Nakagawa/data` on other POSIX systems).
+- `--user-data-root <path>`: Override the target per-user data directory (default: `%LOCALAPPDATA%`, then `%APPDATA%`, under `Nakagawa\data` on Windows; `~/Library/Application Support/Nakagawa/data` on macOS; `$XDG_DATA_HOME/Nakagawa/data` or `~/.local/share/Nakagawa/data` on other POSIX systems, or an earlier install's own folder, as **Where your data lives** says).
 - `--json`: Emit a machine-readable report of the outcome for each file, and of each slot's status.
 
 The import copies each accepted file into the per-user cache and writes `manifest.json` with `schema_version: 2` and an ISO 8601 UTC `import_time`. Generic files remain in `files`; indexed Latin files are listed in `latin_indices` with their index, size, SHA-256, user source, and reader version. The originals are not touched. Re-importing is idempotent, and entries not changed by the new run are retained:

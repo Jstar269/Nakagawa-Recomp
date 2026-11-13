@@ -567,8 +567,7 @@ typedef struct {
    tools (VIEW_PREREQ_ABOUT), the build tool removal check
    (VIEW_CONFIRM_REMOVE_TOOLS), build tools and cache (VIEW_BUILD_CACHE, #1306),
    the page that opens the removal check, Updates (VIEW_UPDATES), and
-   Accessibility (VIEW_ACCESSIBILITY_SETTINGS), and the check before moving the
-   data folder (VIEW_CONFIRM_DATA_MOVE). */
+   Accessibility (VIEW_ACCESSIBILITY_SETTINGS). */
 typedef enum {
     PLAYER_UI_SETTINGS_PAGE_MAIN = 0,
     PLAYER_UI_SETTINGS_PAGE_ONLINE,
@@ -580,8 +579,7 @@ typedef enum {
     PLAYER_UI_SETTINGS_PAGE_FACTORY_RESET, /* VIEW_CONFIRM_FACTORY_RESET */
     PLAYER_UI_SETTINGS_PAGE_ACCESSIBILITY, /* VIEW_ACCESSIBILITY_SETTINGS */
     PLAYER_UI_SETTINGS_PAGE_ACE,           /* VIEW_ACE_SETTINGS */
-    PLAYER_UI_SETTINGS_PAGE_PROBLEM_REPORT, /* VIEW_PROBLEM_REPORT */
-    PLAYER_UI_SETTINGS_PAGE_DATA_MOVE       /* VIEW_CONFIRM_DATA_MOVE (#324, Linux and macOS) */
+    PLAYER_UI_SETTINGS_PAGE_PROBLEM_REPORT /* VIEW_PROBLEM_REPORT */
 } PlayerUiSettingsPage;
 
 /* What a Settings control asks for (PLAYER_UI_ACTION_SETTINGS). main.c runs the
@@ -645,9 +643,7 @@ typedef enum {
     PLAYER_UI_SETTINGS_OPEN_LOGS,            /* the folder holding the logs */
     PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED,    /* Background, Balanced, Fastest */
     PLAYER_UI_SETTINGS_EDIT_NICKNAME,        /* the nickname editor (#2197) */
-    PLAYER_UI_SETTINGS_TOGGLE_DISCORD,       /* Settings > Online and developer (#2259) */
-    PLAYER_UI_SETTINGS_OPEN_DATA_MOVE,       /* the check before moving the data folder (#324) */
-    PLAYER_UI_SETTINGS_MOVE_DATA             /* move the data to the new folder, then restart */
+    PLAYER_UI_SETTINGS_TOGGLE_DISCORD        /* Settings > Online and developer (#2259) */
 } PlayerUiSettingsOp;
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
@@ -796,11 +792,6 @@ typedef struct {
     /* Factory reset (VIEW_CONFIRM_FACTORY_RESET): the folders that move aside */
     const char *reset_folders[PLAYER_UI_RESET_FOLDERS];
     size_t reset_folder_count;
-    /* Moving the data folder (#324, Linux and macOS): offered while the earlier layout is in use;
-       the folder in use now and the one the move puts it in */
-    bool data_move_offered;
-    const char *data_folder_in_use;
-    const char *data_folder_new;
     const char *font_summary;       /* how many of the PSP fonts are the user's own */
     bool fonts_all_own;
     /* The display the launcher is on, in Hz; 0 when unknown (no advisory then) */
@@ -1161,8 +1152,6 @@ enum {
     PLAYER_UI_ID_SETTINGS_OPEN_LOGS = 0x4554u,        /* Settings: shows the logs folder */
     PLAYER_UI_ID_SETTINGS_BUILD_SPEED = 0x4555u,      /* Build tools and cache: Build speed */
     PLAYER_UI_ID_SETTINGS_DISCORD = 0x4556u,          /* Settings > Online: Discord status */
-    PLAYER_UI_ID_SETTINGS_DATA_MOVE = 0x4557u,        /* Settings: opens the data folder move check */
-    PLAYER_UI_ID_SETTINGS_CONFIRM_DATA_MOVE = 0x4558u, /* the check's Move button */
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
     PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */

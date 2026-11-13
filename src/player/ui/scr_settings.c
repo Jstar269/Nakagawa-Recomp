@@ -339,18 +339,12 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
             {PLAYER_UI_ID_SETTINGS_OPEN_DATA_FOLDER, "Open data folder", 0u,
              PLAYER_UI_SETTINGS_OPEN_DATA_FOLDER},
             {PLAYER_UI_ID_SETTINGS_OPEN_LOGS, "Open logs", 0u, PLAYER_UI_SETTINGS_OPEN_LOGS},
-            /* Only while this start uses the earlier Linux or macOS folders (#324). */
-            {PLAYER_UI_ID_SETTINGS_DATA_MOVE, "Move my data to the new folder", 0u,
-             PLAYER_UI_SETTINGS_OPEN_DATA_MOVE},
             {PLAYER_UI_ID_SETTINGS_FACTORY_RESET, "Factory reset", NK_UI_BUTTON_DANGER,
              PLAYER_UI_SETTINGS_OPEN_FACTORY_RESET}
         };
         NkUiFlowRow flow;
         if (nk_ui_flow_begin(ui, &flow, SET_ID_ACTIONS, &layout, column)) {
             for (size_t i = 0u; i < sizeof(actions) / sizeof(actions[0]); ++i) {
-                if (actions[i].id == PLAYER_UI_ID_SETTINGS_DATA_MOVE && !model->data_move_offered) {
-                    continue;
-                }
                 nk_ui_flow_item(ui, &flow,
                                 nk_ui_button_width(ui, actions[i].label, actions[i].flags));
                 /* Left and Right stay on this row: the cards' last rows end just above it. */
@@ -1253,55 +1247,6 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                     nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_CONFIRM_RESET, "Reset",
                                  NK_UI_BUTTON_DANGER)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_FACTORY_RESET);
-                }
-                nk_ui_end_container(ui);
-            }
-        }
-        break;
-    case PLAYER_UI_SETTINGS_PAGE_DATA_MOVE:
-        /* Moving the data folder (#324): only the user starts it, from here. Keep my folders
-           has the focus; Move runs nk_data_migrate_move, which refuses by name what it cannot
-           do safely, and Nakagawa restarts after it. */
-        scr_flow_eyebrow(ui, FLOW_MARK_TRIANGLE, "Data folder", theme->warning);
-        nk_ui_text_role(ui, FLOW_ID_TITLE, "Move your data to the new folder?", NK_UI_TYPE_TITLE,
-                        theme->paper);
-        nk_ui_text_role(ui, FLOW_ID_LEAD,
-                        "Nakagawa now keeps your library, saves, settings and built games in one "
-                        "folder. This moves them there from the folders an earlier version used. "
-                        "Nothing is copied or deleted, and if a step fails everything is put back. "
-                        "Nakagawa restarts when the move is done.",
-                        NK_UI_TYPE_BODY, theme->muted);
-        if (scr_wizard_box_begin(ui, 0u)) {
-            NkUiTextStyle data = nk_ui_type(NK_UI_TYPE_DATA, theme->paper);
-            const char *labels[2] = {"From (in use now):", "To:"};
-            const char *folders[2] = {model->data_folder_in_use, model->data_folder_new};
-            for (size_t i = 0u; i < 2u; ++i) {
-                char folder[600];
-                nk_ui_text_role(ui, (NkUiId)(SET_ID_TEXT + 0x220u + 2u * (NkUiId)i), labels[i],
-                                NK_UI_TYPE_BODY_S, theme->muted);
-                settings_shorten_words(safe_text(folders[i], ""), folder, sizeof(folder), 72u);
-                nk_ui_text(ui, (NkUiId)(SET_ID_TEXT + 0x221u + 2u * (NkUiId)i),
-                           nk_ui_text_clamp(ui, folder, &data, inner - 32.0f, 1), &data);
-            }
-            nk_ui_text_role(ui, SET_ID_TEXT + 0x224u,
-                            "First close every game and every other Nakagawa window and tool. "
-                            "Nakagawa can tell when a window of this version is open, but not one "
-                            "of an earlier version: close those yourself.",
-                            NK_UI_TYPE_BODY_S, theme->warning);
-            nk_ui_end_container(ui);
-        }
-        {
-            NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
-                                         NK_UI_SPACE_3);
-            row.padding_top = NK_UI_SPACE_1;
-            if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Keep my folders",
-                                 NK_UI_BUTTON_PRIMARY)) {
-                    *result = settings_op(PLAYER_UI_SETTINGS_BACK);
-                }
-                if (model->data_move_offered &&
-                    nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_CONFIRM_DATA_MOVE, "Move", 0u)) {
-                    *result = settings_op(PLAYER_UI_SETTINGS_MOVE_DATA);
                 }
                 nk_ui_end_container(ui);
             }

@@ -4,6 +4,7 @@
 #if defined(_WIN32) || defined(_WIN64)
 
 #include "nk_platform.h"
+#include "nk_data_migrate.h"
 #include "nk_types.h"
 #include <windows.h>
 #include <shellapi.h>
@@ -803,6 +804,12 @@ bool nk_platform_resolve_path(NkPathType type, char *out_path, size_t max_len) {
     return resolve_windows_path(type, out_path, max_len);
 }
 
+/* Windows has one layout, %LOCALAPPDATA%\Nakagawa, so there is nothing to decide (#324). */
+bool nk_platform_user_data_layout(struct NkUserDataLayout *out) {
+    if (out) memset(out, 0, sizeof(*out));
+    return false;
+}
+
 bool nk_platform_get_executable_path(char *out_path, size_t max_len) {
     if (!out_path || max_len == 0) return false;
     out_path[0] = '\0';
@@ -827,18 +834,6 @@ bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len) {
     if (!env_get_utf8(L"USERPROFILE", profile, sizeof(profile))) return false;
     int written = snprintf(out_path, max_len, "%s\\Nakagawa\\data", profile);
     return written > 0 && (size_t)written < max_len;
-}
-
-/* Windows has always used %LOCALAPPDATA%\Nakagawa with config, data, cache, logs and saves beside each
-   other, which is the unified layout, so there is nothing to move. (The pre-canonical USERPROFILE
-   location is reported by the player, not moved: nk_platform_get_legacy_app_data_dir.) */
-bool nk_platform_user_data_plan(struct NkDataMigrationPlan *plan) {
-    (void)plan;
-    return false;
-}
-
-bool nk_platform_set_old_user_data_layout(bool on) {
-    return !on;
 }
 
 /* Helper to escape arguments for Windows command line according to Microsoft CRT rules */

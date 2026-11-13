@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -494,32 +495,97 @@ static bool resolve_rooted_path(const char *root, NkPathType type, char sep, cha
     return written > 0 && (size_t)written < max_len;
 }
 
-/* The default per-user folders (#324). The folders that matter, settings (config), the library and
-   data (data) and saves, are in `Nakagawa` in the host's own data base, beside each other as on
-   Windows (%LOCALAPPDATA%\Nakagawa). On macOS the cache and logs are in that folder too. Linux keeps
-   its cache in the XDG cache home and its logs in the XDG state home, where they always were
-   ($XDG_CACHE_HOME/nakagawa-recomp and $XDG_STATE_HOME/nakagawa-recomp/logs); XDG_DATA_HOME (else
-   ~/.local/share) is the base of `Nakagawa`.
-   The old layout, the one before #324, is used while the folders of an existing install are still
-   there (nk_data_migrate.h, nk_platform_set_old_user_data_layout): Linux's `nakagawa-recomp` data folder
-   with the saves inside it and the settings in the XDG config home, macOS's `NakagawaRecomp` with
-   Caches and Logs beside it.
-   An explicit root (--user-data-root, portable mode) is the data folder itself, with config,
-   cache, logs and saves inside it (resolve_rooted_path above); so is Android's folder. */
-static bool s_old_layout = false;
-
 #if !defined(__ANDROID__)
+/* The default per-user folders from before #324, resolved exactly as they were until then: the
+   layout an existing Linux or macOS install keeps (nk_data_migrate.h). */
+static bool resolve_old_layout_path(NkPathType type, char *out_path, size_t max_len) {
+#if defined(__APPLE__)
+    const char *home = getenv("HOME");
+    if (!home) return false;
+    int written = 0;
+    switch (type) {
+        case NK_PATH_CONFIG:
+            written = snprintf(out_path, max_len, "%s/Library/Application Support/NakagawaRecomp/config", home);
+            break;
+        case NK_PATH_DATA:
+            written = snprintf(out_path, max_len, "%s/Library/Application Support/NakagawaRecomp/data", home);
+            break;
+        case NK_PATH_CACHE:
+            written = snprintf(out_path, max_len, "%s/Library/Caches/NakagawaRecomp", home);
+            break;
+        case NK_PATH_LOGS:
+            written = snprintf(out_path, max_len, "%s/Library/Logs/NakagawaRecomp", home);
+            break;
+        case NK_PATH_SAVES:
+            written = snprintf(out_path, max_len, "%s/Library/Application Support/NakagawaRecomp/saves", home);
+            break;
+        default:
+            written = snprintf(out_path, max_len, "%s/Library/Application Support/NakagawaRecomp", home);
+            break;
+    }
+#else
+    const char *home = getenv("HOME");
+    const char *env_val = NULL;
+    int written = 0;
+
+    switch (type) {
+        case NK_PATH_CONFIG:
+            env_val = getenv("XDG_CONFIG_HOME");
+            if (env_val && *env_val) {
+                written = snprintf(out_path, max_len, "%s/nakagawa-recomp", env_val);
+            } else if (home && *home) {
+                written = snprintf(out_path, max_len, "%s/.config/nakagawa-recomp", home);
+            }
+            break;
+        case NK_PATH_DATA:
+            env_val = getenv("XDG_DATA_HOME");
+            if (env_val && *env_val) {
+                written = snprintf(out_path, max_len, "%s/nakagawa-recomp", env_val);
+            } else if (home && *home) {
+                written = snprintf(out_path, max_len, "%s/.local/share/nakagawa-recomp", home);
+            }
+            break;
+        case NK_PATH_CACHE:
+            env_val = getenv("XDG_CACHE_HOME");
+            if (env_val && *env_val) {
+                written = snprintf(out_path, max_len, "%s/nakagawa-recomp", env_val);
+            } else if (home && *home) {
+                written = snprintf(out_path, max_len, "%s/.cache/nakagawa-recomp", home);
+            }
+            break;
+        case NK_PATH_LOGS:
+            env_val = getenv("XDG_STATE_HOME");
+            if (env_val && *env_val) {
+                written = snprintf(out_path, max_len, "%s/nakagawa-recomp/logs", env_val);
+            } else if (home && *home) {
+                written = snprintf(out_path, max_len, "%s/.local/state/nakagawa-recomp/logs", home);
+            }
+            break;
+        case NK_PATH_SAVES:
+            env_val = getenv("XDG_DATA_HOME");
+            if (env_val && *env_val) {
+                written = snprintf(out_path, max_len, "%s/nakagawa-recomp/saves", env_val);
+            } else if (home && *home) {
+                written = snprintf(out_path, max_len, "%s/.local/share/nakagawa-recomp/saves", home);
+            }
+            break;
+        default:
+            return false;
+    }
+#endif
+
+    return written > 0 && (size_t)written < max_len;
+}
+
 static bool join_path(char *out, size_t cap, const char *base, const char *rest) {
     int written = snprintf(out, cap, "%s%s", base, rest);
     return written > 0 && (size_t)written < cap;
 }
-#endif
 
-#if !defined(__ANDROID__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
 /* An XDG base folder: the variable when it is set to an absolute path (trailing '/' dropped), else
    HOME and the default below it. A relative value is ignored, as the XDG Base Directory
-   specification says (S2 of the second #324 review; the migration plan names it in its notes).
-   False when neither is usable or the path does not fit. */
+   specification says. False when neither is usable or the path does not fit. */
 static bool xdg_base(const char *variable, const char *below_home, char *out, size_t cap) {
     const char *value = getenv(variable);
     if (value && value[0] == '/') {
@@ -536,60 +602,21 @@ static bool xdg_base(const char *variable, const char *below_home, char *out, si
 }
 #endif
 
-static bool posix_default_root(char *root, size_t max_len) {
-#if defined(__ANDROID__)
-    /* No HOME or XDG folders on Android: the activity names the app's private folder in
-       NK_ANDROID_DATA_DIR, and that folder is the root, laid out as an explicit root is. */
-    const char *android_root = getenv("NK_ANDROID_DATA_DIR");
-    if (!android_root || !android_root[0]) return false;
-    int written = snprintf(root, max_len, "%s", android_root);
-    return written > 0 && (size_t)written < max_len;
-#elif defined(__APPLE__)
-    const char *home = getenv("HOME");
-    if (!home || !home[0]) return false;
-    return join_path(root, max_len, home, "/Library/Application Support/Nakagawa");
-#else
-    char base[NK_MAX_PATH];
-    return xdg_base("XDG_DATA_HOME", "/.local/share", base, sizeof(base)) &&
-           join_path(root, max_len, base, "/Nakagawa");
-#endif
-}
-
-/* One folder of the default layout (old false) or of the layout before #324 (old true). */
-static bool resolve_layout_path(bool old, NkPathType type, char *out_path, size_t max_len) {
-#if defined(__ANDROID__)
-    /* Android's folder is the data folder itself, with config, cache, logs and saves inside it
-       (tests/native/test_launch_resolution.c, the Android data directory rule). It has no older
-       layout. */
-    (void)old;
-    char root[NK_MAX_PATH];
-    if (!posix_default_root(root, sizeof(root))) return false;
-    return resolve_rooted_path(root, type, '/', out_path, max_len);
-#elif defined(__APPLE__)
+/* The default per-user folders of a fresh install (#324): settings, data and saves in `Nakagawa`
+   in the host's data base, beside each other as on Windows. macOS keeps its cache and logs there
+   too; Linux keeps them in the XDG cache and state homes, where they always were. */
+static bool resolve_new_layout_path(NkPathType type, char *out_path, size_t max_len) {
+#if defined(__APPLE__)
     const char *home = getenv("HOME");
     if (!home || !home[0]) return false;
     const char *rest = NULL;
     switch (type) {
-        case NK_PATH_CONFIG:
-            rest = old ? "/Library/Application Support/NakagawaRecomp/config"
-                       : "/Library/Application Support/Nakagawa/config";
-            break;
-        case NK_PATH_DATA:
-            rest = old ? "/Library/Application Support/NakagawaRecomp/data"
-                       : "/Library/Application Support/Nakagawa/data";
-            break;
-        case NK_PATH_SAVES:
-            rest = old ? "/Library/Application Support/NakagawaRecomp/saves"
-                       : "/Library/Application Support/Nakagawa/saves";
-            break;
-        case NK_PATH_CACHE:
-            rest = old ? "/Library/Caches/NakagawaRecomp" : "/Library/Application Support/Nakagawa/cache";
-            break;
-        case NK_PATH_LOGS:
-            rest = old ? "/Library/Logs/NakagawaRecomp" : "/Library/Application Support/Nakagawa/logs";
-            break;
-        default:
-            return false;
+        case NK_PATH_CONFIG: rest = "/Library/Application Support/Nakagawa/config"; break;
+        case NK_PATH_DATA:   rest = "/Library/Application Support/Nakagawa/data"; break;
+        case NK_PATH_SAVES:  rest = "/Library/Application Support/Nakagawa/saves"; break;
+        case NK_PATH_CACHE:  rest = "/Library/Application Support/Nakagawa/cache"; break;
+        case NK_PATH_LOGS:   rest = "/Library/Application Support/Nakagawa/logs"; break;
+        default: return false;
     }
     return join_path(out_path, max_len, home, rest);
 #else
@@ -602,42 +629,121 @@ static bool resolve_layout_path(bool old, NkPathType type, char *out_path, size_
             return xdg_base("XDG_STATE_HOME", "/.local/state", base, sizeof(base)) &&
                    join_path(out_path, max_len, base, "/nakagawa-recomp/logs");
         case NK_PATH_CONFIG:
-            if (old) {
-                return xdg_base("XDG_CONFIG_HOME", "/.config", base, sizeof(base)) &&
-                       join_path(out_path, max_len, base, "/nakagawa-recomp");
-            }
             return xdg_base("XDG_DATA_HOME", "/.local/share", base, sizeof(base)) &&
                    join_path(out_path, max_len, base, "/Nakagawa/config");
         case NK_PATH_DATA:
             return xdg_base("XDG_DATA_HOME", "/.local/share", base, sizeof(base)) &&
-                   join_path(out_path, max_len, base, old ? "/nakagawa-recomp" : "/Nakagawa/data");
+                   join_path(out_path, max_len, base, "/Nakagawa/data");
         case NK_PATH_SAVES:
             return xdg_base("XDG_DATA_HOME", "/.local/share", base, sizeof(base)) &&
-                   join_path(out_path, max_len, base,
-                             old ? "/nakagawa-recomp/saves" : "/Nakagawa/saves");
+                   join_path(out_path, max_len, base, "/Nakagawa/saves");
         default:
             return false;
     }
 #endif
 }
 
-static bool resolve_default_path(NkPathType type, char *out_path, size_t max_len) {
-    return resolve_layout_path(s_old_layout, type, out_path, max_len);
+/* "Holds data", as nk_data_migrate.h defines it: a settings file, a library file, or a saves
+   folder with an entry. */
+static bool layout_holds_data(const NkDataLayoutFolders *folders) {
+    char path[NK_MAX_PATH + 32];
+    if (folders->path[NK_PATH_CONFIG][0] &&
+        join_path(path, sizeof(path), folders->path[NK_PATH_CONFIG],
+                  "/" NK_DATA_LAYOUT_SETTINGS_FILE) &&
+        nk_platform_file_exists(path)) {
+        return true;
+    }
+    if (folders->path[NK_PATH_DATA][0] &&
+        join_path(path, sizeof(path), folders->path[NK_PATH_DATA], "/" NK_DATA_LAYOUT_LIBRARY_FILE) &&
+        nk_platform_file_exists(path)) {
+        return true;
+    }
+    DIR *saves = folders->path[NK_PATH_SAVES][0] ? opendir(folders->path[NK_PATH_SAVES]) : NULL;
+    if (!saves) return false;
+    bool any = false;
+    for (struct dirent *item = readdir(saves); item && !any; item = readdir(saves)) {
+        any = strcmp(item->d_name, ".") != 0 && strcmp(item->d_name, "..") != 0;
+    }
+    closedir(saves);
+    return any;
 }
 
-bool nk_platform_set_old_user_data_layout(bool on) {
-#if defined(__ANDROID__)
-    if (on) return false;
-#endif
-    s_old_layout = on;
-    return true;
+static void layout_folders(bool old, NkDataLayoutFolders *folders) {
+    memset(folders, 0, sizeof(*folders));
+    for (int type = NK_PATH_CONFIG; type <= NK_PATH_SAVES; ++type) {
+        char *path = folders->path[type];
+        bool named = old ? resolve_old_layout_path((NkPathType)type, path, NK_MAX_PATH)
+                         : resolve_new_layout_path((NkPathType)type, path, NK_MAX_PATH);
+        if (!named) path[0] = '\0';
+    }
+    folders->holds_data = layout_holds_data(folders);
 }
+
+/* The layout in use, decided by the rule (nk_data_migrate.h) the first time a folder is looked up
+   and kept for the run. Only a change of HOME or an XDG variable the rule reads makes it decide
+   again, which a test does between its cases and a start never does. */
+static pthread_mutex_t s_layout_lock = PTHREAD_MUTEX_INITIALIZER;
+static NkUserDataLayout s_layout;
+static char s_layout_key[3u * NK_MAX_PATH + 8u];
+static bool s_layout_decided = false;
+
+static void layout_key_part(char *key, size_t cap, const char *variable) {
+    const char *value = getenv(variable);
+    size_t used = strlen(key);
+    (void)snprintf(key + used, cap - used, "%c%s\n", value ? '=' : '-', value ? value : "");
+}
+
+/* Decides when needed; returns the decision under the lock into *out when it is not NULL. */
+static bool layout_old_in_use(NkUserDataLayout *out) {
+    char key[sizeof(s_layout_key)] = "";
+    layout_key_part(key, sizeof(key), "HOME");
+    layout_key_part(key, sizeof(key), "XDG_DATA_HOME");
+    layout_key_part(key, sizeof(key), "XDG_CONFIG_HOME");
+    /* A key that does not fit is never kept, so such an environment decides on every lookup. */
+    bool keyed = strlen(key) + 1u < sizeof(key);
+    pthread_mutex_lock(&s_layout_lock);
+    if (!s_layout_decided || !keyed || strcmp(key, s_layout_key) != 0) {
+        layout_folders(false, &s_layout.new_layout);
+        layout_folders(true, &s_layout.old_layout);
+        s_layout.old_in_use = !s_layout.new_layout.holds_data && s_layout.old_layout.holds_data;
+        memcpy(s_layout_key, key, sizeof(key));
+        s_layout_decided = keyed;
+    }
+    bool old = s_layout.old_in_use;
+    if (out) *out = s_layout;
+    pthread_mutex_unlock(&s_layout_lock);
+    return old;
+}
+#endif
+
 static bool resolve_posix_path(NkPathType type, char *out_path, size_t max_len) {
     if (!out_path || max_len == 0) return false;
     if (s_app_data_dir_override[0]) {
         return resolve_rooted_path(s_app_data_dir_override, type, '/', out_path, max_len);
     }
-    return resolve_default_path(type, out_path, max_len);
+
+#if defined(__ANDROID__)
+    /* No HOME or XDG folders on Android: the per-user folders are in the app's private files
+       folder, which the activity names in NK_ANDROID_DATA_DIR, laid out as an override is. */
+    const char *android_root = getenv("NK_ANDROID_DATA_DIR");
+    if (!android_root || !android_root[0]) return false;
+    return resolve_rooted_path(android_root, type, '/', out_path, max_len);
+#else
+    return layout_old_in_use(NULL) ? resolve_old_layout_path(type, out_path, max_len)
+                                   : resolve_new_layout_path(type, out_path, max_len);
+#endif
+}
+
+bool nk_platform_user_data_layout(struct NkUserDataLayout *out) {
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+#if defined(__ANDROID__)
+    return false;
+#else
+    if (s_app_data_dir_override[0]) return false;
+    (void)layout_old_in_use(out);
+    return true;
+#endif
 }
 
 bool nk_platform_get_path(NkPathType type, char *out_path, size_t max_len) {
@@ -701,165 +807,6 @@ bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len) {
     return false;
 }
 
-#if !defined(__ANDROID__)
-static bool plan_add_move(NkDataMigrationPlan *plan, const char *from, const char *to,
-                          const char *label, bool after_previous, bool disposable) {
-    if (plan->move_count >= NK_MIGRATE_MAX_MOVES) return false;
-    NkMigrateMove *move = &plan->moves[plan->move_count];
-    int a = snprintf(move->from, sizeof(move->from), "%s", from);
-    int b = snprintf(move->to, sizeof(move->to), "%s", to);
-    int c = snprintf(move->label, sizeof(move->label), "%s", label);
-    if (a <= 0 || b <= 0 || c <= 0 || (size_t)a >= sizeof(move->from) ||
-        (size_t)b >= sizeof(move->to) || (size_t)c >= sizeof(move->label)) {
-        memset(move, 0, sizeof(*move));
-        return false;
-    }
-    move->after_previous = after_previous;
-    move->disposable = disposable;
-    plan->move_count++;
-    return true;
-}
-
-/* A named line for a folder of the old layout whose path could not be formed (S4 of the #324
-   review): only that folder is left out, and the log says so. */
-static void plan_note(NkDataMigrationPlan *plan, const char *what, const char *why) {
-    size_t used = strlen(plan->notes);
-    if (used >= sizeof(plan->notes) - 1u) return;
-    (void)snprintf(plan->notes + used, sizeof(plan->notes) - used,
-                   "%s: the earlier %s folder could not be located (%s), so it is not looked at.\n",
-                   NK_MIGRATE_CODE_PATH_UNAVAILABLE, what, why);
-}
-
-#if !defined(__APPLE__)
-/* A named line for each XDG variable set to a relative path, which xdg_base ignores. */
-static void plan_note_relative_xdg(NkDataMigrationPlan *plan) {
-    static const char *const variables[][2] = {
-        {"XDG_DATA_HOME", "~/.local/share"},
-        {"XDG_CONFIG_HOME", "~/.config"},
-        {"XDG_CACHE_HOME", "~/.cache"},
-        {"XDG_STATE_HOME", "~/.local/state"},
-    };
-    for (size_t i = 0; i < sizeof(variables) / sizeof(variables[0]); i++) {
-        const char *value = getenv(variables[i][0]);
-        if (!value || !value[0] || value[0] == '/') continue;
-        size_t used = strlen(plan->notes);
-        if (used >= sizeof(plan->notes) - 1u) return;
-        (void)snprintf(plan->notes + used, sizeof(plan->notes) - used,
-                       "%s: %s is set to '%.64s', which is not an absolute path; as the XDG Base "
-                       "Directory specification says, it is ignored and %s is used.\n",
-                       NK_MIGRATE_CODE_XDG_IGNORED, variables[i][0], value, variables[i][1]);
-    }
-}
-
-static bool plan_keep(NkDataMigrationPlan *plan, NkPathType type, const char *label) {
-    if (plan->kept_count >= NK_MIGRATE_MAX_KEPT) return false;
-    size_t k = plan->kept_count;
-    if (!resolve_layout_path(false, type, plan->kept[k], sizeof(plan->kept[k]))) return true;
-    int written = snprintf(plan->kept_label[k], sizeof(plan->kept_label[k]), "%s", label);
-    if (written <= 0 || (size_t)written >= sizeof(plan->kept_label[k])) return false;
-    plan->kept_count++;
-    return true;
-}
-#endif
-#endif
-
-/* The older folders and where they go (nk_data_migrate.h). Only the paths are worked out here;
-   nothing is read from the disk. Android has no earlier layout to move (it was never released).
-   False, with the plan left empty, when the new folders themselves cannot be named. */
-bool nk_platform_user_data_plan(struct NkDataMigrationPlan *plan) {
-    if (!plan) return false;
-    memset(plan, 0, sizeof(*plan));
-#if defined(__ANDROID__)
-    return false;
-#else
-    char root[NK_MAX_PATH], new_data[NK_MAX_PATH], new_saves[NK_MAX_PATH];
-    char old_data[NK_MAX_PATH], data_saves[NK_MAX_PATH];
-    bool ok = posix_default_root(root, sizeof(root)) &&
-              join_path(plan->new_root, sizeof(plan->new_root), root, "") &&
-              resolve_layout_path(false, NK_PATH_DATA, new_data, sizeof(new_data)) &&
-              resolve_layout_path(false, NK_PATH_SAVES, new_saves, sizeof(new_saves)) &&
-              join_path(plan->library_file, sizeof(plan->library_file), new_data, "/library.json");
-    /* The locks and the move's journal are beside the new folder, in the data base: it exists
-       before a move, lies on the new folder's file system, and no rename carries it. The marker is
-       in the new folder. */
-    const char *slash = strrchr(root, '/');
-    if (ok) {
-        size_t parent = slash ? (size_t)(slash - root) : 0u;
-        int written = snprintf(plan->base, sizeof(plan->base), "%.*s", (int)parent, root);
-        ok = slash && parent > 0u && written > 0 && (size_t)written < sizeof(plan->base) &&
-             join_path(plan->lock_file, sizeof(plan->lock_file), plan->base, "/.nakagawa-migration.lock") &&
-             join_path(plan->player_lock_file, sizeof(plan->player_lock_file), plan->base,
-                       "/.nakagawa-player.lock") &&
-             join_path(plan->journal_file, sizeof(plan->journal_file), plan->base,
-                       "/.nakagawa-move-in-progress") &&
-             join_path(plan->marker_file, sizeof(plan->marker_file), root, "/.nakagawa-layout");
-    }
-    if (!ok) {
-        memset(plan, 0, sizeof(*plan));
-        return false;
-    }
-    bool have_old_data = resolve_layout_path(true, NK_PATH_DATA, old_data, sizeof(old_data));
-#if defined(__APPLE__)
-    /* The old root already had config, data and saves beside each other: the whole folder is
-       renamed. Caches and Logs move into it, and never stop the start. */
-    char old_root[NK_MAX_PATH], from[NK_MAX_PATH], to[NK_MAX_PATH];
-    const char *home = getenv("HOME");
-    if (have_old_data && join_path(old_root, sizeof(old_root), home,
-                                   "/Library/Application Support/NakagawaRecomp")) {
-        ok = plan_add_move(plan, old_root, root, "data, saves and settings", false, false);
-    } else {
-        have_old_data = false;
-        plan_note(plan, "data, saves and settings", "its path is too long");
-    }
-    if (ok && resolve_layout_path(true, NK_PATH_CACHE, from, sizeof(from)) &&
-        resolve_layout_path(false, NK_PATH_CACHE, to, sizeof(to))) {
-        ok = plan_add_move(plan, from, to, "cache", false, true);
-    } else if (ok) {
-        plan_note(plan, "cache", "its path is too long");
-    }
-    if (ok && resolve_layout_path(true, NK_PATH_LOGS, from, sizeof(from)) &&
-        resolve_layout_path(false, NK_PATH_LOGS, to, sizeof(to))) {
-        ok = plan_add_move(plan, from, to, "logs", false, true);
-    } else if (ok) {
-        plan_note(plan, "logs", "its path is too long");
-    }
-    (void)data_saves;
-#else
-    /* The old data folder becomes root/data, and the saves it held (data/saves) move up to
-       root/saves. The settings come from the XDG config home. The cache and logs stay where they
-       are; the run checks that no folder it moves is one of them. */
-    if (have_old_data) {
-        ok = join_path(data_saves, sizeof(data_saves), new_data, "/saves") &&
-             plan_add_move(plan, old_data, new_data, "data", false, false) &&
-             plan_add_move(plan, data_saves, new_saves, "saves", true, false);
-    } else {
-        plan_note(plan, "data", "its path is too long");
-    }
-    char old_config[NK_MAX_PATH], new_config[NK_MAX_PATH];
-    if (ok && resolve_layout_path(true, NK_PATH_CONFIG, old_config, sizeof(old_config)) &&
-        resolve_layout_path(false, NK_PATH_CONFIG, new_config, sizeof(new_config))) {
-        ok = plan_add_move(plan, old_config, new_config, "settings", false, false);
-    } else if (ok) {
-        const char *xdg_config = getenv("XDG_CONFIG_HOME");
-        const char *home = getenv("HOME");
-        plan_note(plan, "settings",
-                  (xdg_config && xdg_config[0] == '/') || (home && home[0])
-                      ? "its path is too long"
-                      : "XDG_CONFIG_HOME is not set to an absolute path, and HOME is not set");
-    }
-    ok = ok && plan_keep(plan, NK_PATH_CACHE, "cache") && plan_keep(plan, NK_PATH_LOGS, "logs");
-    plan_note_relative_xdg(plan);
-#endif
-    if (ok && have_old_data) {
-        ok = join_path(plan->remap_from, sizeof(plan->remap_from), old_data, "") &&
-             join_path(plan->remap_to, sizeof(plan->remap_to), new_data, "") &&
-             join_path(plan->old_library_file, sizeof(plan->old_library_file), old_data,
-                       "/library.json");
-    }
-    if (!ok) memset(plan, 0, sizeof(*plan));
-    return ok;
-#endif
-}
 bool nk_platform_get_desktop_dir(char *out_path, size_t max_len) {
     if (!out_path || max_len == 0) return false;
     out_path[0] = '\0';

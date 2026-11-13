@@ -422,17 +422,17 @@ void native_test_capture_real_config_probe(void) {
     const char *env_home = getenv("HOME");
     if (env_home && env_home[0]) {
         snprintf(g_real_config_probe, sizeof(g_real_config_probe),
-                 "%s/Library/Application Support/Nakagawa/config", env_home);
+                 "%s/Library/Application Support/NakagawaRecomp/config", env_home);
     }
 #else
-    const char *env_xdg = getenv("XDG_DATA_HOME");
+    const char *env_xdg = getenv("XDG_CONFIG_HOME");
     const char *env_home = getenv("HOME");
     if (env_xdg && env_xdg[0]) {
         snprintf(g_real_config_probe, sizeof(g_real_config_probe),
-                 "%s/Nakagawa/config", env_xdg);
+                 "%s/nakagawa-recomp", env_xdg);
     } else if (env_home && env_home[0]) {
         snprintf(g_real_config_probe, sizeof(g_real_config_probe),
-                 "%s/.local/share/Nakagawa/config", env_home);
+                 "%s/.config/nakagawa-recomp", env_home);
     }
 #endif
     if (g_real_config_probe[0]) {

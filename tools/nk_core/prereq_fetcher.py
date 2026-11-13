@@ -31,133 +31,99 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CHUNK_SIZE = 64 * 1024
 
 
-# How deep a folder is read before it counts as holding files (src/core/nk_data_migrate.c,
-# MIGRATE_WALK_DEPTH).
-_WALK_DEPTH = 24
+# The data folder layout of a Linux or macOS install (#324). src/core/nk_data_migrate.h has the rule,
+# what "holds data" means, and the table of cases that tools/test_prereq_fetcher.py shares with the
+# player's test; src/core/nk_platform_posix.c is the player's side of it.
+_SETTINGS_FILE = "settings.json"
+_LIBRARY_FILE = "library.json"
+_PATH_LIMIT = 512  # NK_MAX_PATH: the player cannot name a folder whose path is this long
+_LAYOUT_DECISIONS: dict[tuple[str, ...], bool] = {}
 
 
-def _tree_state(path: Path, depth: int = 0) -> str:
-    """"absent", "empty" (only empty folders) or "content", as src/core/nk_data_migrate.c reads it.
+def _named(path: str) -> str:
+    return path if len(os.fsencode(path)) < _PATH_LIMIT else ""
 
-    A folder holds files when it has a file, a link, or a folder that does. A folder that cannot be
-    read, or a tree deeper than the player reads, counts as holding files: the safe answer.
+
+def _layout_folders(old: bool, platform: str) -> tuple[str, str, str]:
+    """The (config, data, saves) folders of one layout as the player names them; "" for none.
+
+    The old layout reads HOME and the XDG variables exactly as the player did before #324. The new
+    one ignores a relative XDG value, as the XDG Base Directory specification says.
     """
-    name = os.fspath(path)
-    if not os.path.lexists(name):
-        return "absent"
-    if depth > _WALK_DEPTH or not os.path.isdir(name):
-        return "content"
+    home = os.environ.get("HOME")
+    if platform == "darwin":
+        if home is None or (not old and not home):
+            return ("", "", "")
+        root = home + ("/Library/Application Support/NakagawaRecomp" if old
+                       else "/Library/Application Support/Nakagawa")
+        return (_named(root + "/config"), _named(root + "/data"), _named(root + "/saves"))
+    if old:
+        config_home = os.environ.get("XDG_CONFIG_HOME")
+        data_home = os.environ.get("XDG_DATA_HOME")
+        config = (config_home + "/nakagawa-recomp" if config_home
+                  else home + "/.config/nakagawa-recomp" if home else "")
+        data = (data_home + "/nakagawa-recomp" if data_home
+                else home + "/.local/share/nakagawa-recomp" if home else "")
+        return (_named(config), _named(data), _named(data + "/saves") if data else "")
+    data_home = os.environ.get("XDG_DATA_HOME", "")
+    if data_home and os.path.isabs(data_home):  # a leading "/" on POSIX, where the rule runs
+        base = data_home.rstrip("/") or "/"
+    elif home:
+        base = home + "/.local/share"
+    else:
+        return ("", "", "")
+    if len(os.fsencode(base)) >= _PATH_LIMIT:
+        return ("", "", "")
+    root = base + "/Nakagawa"
+    return (_named(root + "/config"), _named(root + "/data"), _named(root + "/saves"))
+
+
+def _holds_data(folders: tuple[str, str, str]) -> bool:
+    """A settings file, a library file, or a saves folder with an entry (nk_data_migrate.h)."""
+    config, data, saves = folders
+    if config and os.path.isfile(config + "/" + _SETTINGS_FILE):
+        return True
+    if data and os.path.isfile(data + "/" + _LIBRARY_FILE):
+        return True
+    if not saves:
+        return False
     try:
-        with os.scandir(name) as entries:
-            for entry in entries:
-                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
-                    return "content"
-                if _tree_state(Path(entry.path), depth + 1) != "empty":
-                    return "content"
+        with os.scandir(saves) as entries:
+            return any(True for _ in entries)
     except OSError:
-        return "content"
-    return "empty"
+        return False
 
 
-def _xdg_base(variable: str, *below_home: str) -> Path:
-    """An XDG base folder as the player finds it (src/core/nk_platform_posix.c, xdg_base).
-
-    A relative value is ignored, as the XDG Base Directory specification says, and HOME (not the
-    password database) is the fallback; RuntimeError when neither gives a folder.
-    """
-    value = os.environ.get(variable, "")
-    if value and os.path.isabs(value):  # "/..." on POSIX, where the rule applies
-        return Path(value)
-    home = os.environ.get("HOME", "")
-    if not home:
-        raise RuntimeError(f"neither {variable} (as an absolute path) nor HOME is set")
-    return Path(home).joinpath(*below_home)
+def _old_layout_in_use(platform: str) -> bool:
+    """The player's rule: the new layout when it holds data, else the old one when it does, else
+    the new one. Decided once per process for the same HOME and XDG variables, as in the player."""
+    key = (platform,) + tuple(
+        "-" if value is None else "=" + value
+        for value in (os.environ.get(name) for name in ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"))
+    )
+    if key not in _LAYOUT_DECISIONS:
+        _LAYOUT_DECISIONS[key] = (not _holds_data(_layout_folders(False, platform))
+                                  and _holds_data(_layout_folders(True, platform)))
+    return _LAYOUT_DECISIONS[key]
 
 
-_MARKER_TEXT = (
-    "Nakagawa uses the folders in this one (#324). Keep this file: it tells Nakagawa and its tools\n"
-    "to use this folder even if an earlier folder appears again.\n"
-)
-
-
-def _write_marker(new_root: Path) -> None:
-    """A fresh install's marker, as the player writes it; best effort, as in the player."""
+def _data_root_before_324() -> Path:
+    """The old layout's data folder, resolved exactly as it was before #324."""
+    if sys.platform == "darwin":
+        try:
+            return Path.home() / "Library" / "Application Support" / "NakagawaRecomp" / "data"
+        except RuntimeError as exc:
+            raise PrerequisiteFetchError(
+                "DATA_DIR_UNAVAILABLE: set HOME to locate per-user data."
+            ) from exc
+    if os.name == "posix" and os.environ.get("XDG_DATA_HOME"):
+        return Path(os.environ["XDG_DATA_HOME"]) / "nakagawa-recomp"
     try:
-        new_root.mkdir(parents=True, exist_ok=True)
-        temporary = new_root / ".nakagawa-layout.tmp"
-        temporary.write_text(_MARKER_TEXT, encoding="utf-8")
-        os.replace(temporary, new_root / ".nakagawa-layout")
-    except OSError:
-        pass  # the rule decides the same way again next time
-
-
-def _choose_data_root(base: Path, new_root: Path, new_data: Path, old_data: Path,
-                      old_folders: tuple[Path, ...]) -> Path:
-    """The player's rule for its data folder (#324, the table in src/core/nk_data_migrate.h).
-
-    In order: a move the user started that was interrupted is finished or undone by the player's
-    next start, so a tool refuses by name rather than read half-moved folders (it cannot tell
-    whether a game or another window still uses them, which the player checks); the marker means
-    the new layout; an earlier folder that holds files means the old layout, whole; otherwise the
-    new layout, and a fresh install writes the marker. Nothing is moved.
-    """
-    journal = base / ".nakagawa-move-in-progress"
-    if os.path.lexists(os.fspath(journal)):
-        raise PrerequisiteFetchError(
-            f"DATA_MIGRATION_INTERRUPTED: a move of your data folders to {new_root} was interrupted "
-            f"(its record is {journal}). Start the Nakagawa player, which finishes or undoes it, then "
-            "run this again."
-        )
-    if os.path.lexists(os.fspath(new_root / ".nakagawa-layout")):
-        return new_data
-    if any(_tree_state(folder) == "content" for folder in old_folders):
-        return old_data
-    _write_marker(new_root)
-    return new_data
-
-
-def _decide_data_root(base: Path, new_root: Path, new_data: Path, old_data: Path,
-                      old_folders: tuple[Path, ...]) -> Path:
-    """The rule, under the player's run lock (held shared) when the data base exists.
-
-    The player decides and moves only under ``.nakagawa-migration.lock`` in the data base, so a tool
-    that waits for it never reads the folders while a start or a move changes them. Without a data
-    base there is no earlier folder, nothing to move and no marker to write.
-    """
-    if not base.is_dir():
-        return new_data
-    if sys.platform == "win32" or os.name == "nt":
-        return _choose_data_root(base, new_root, new_data, old_data, old_folders)
-    import fcntl
-
-    try:
-        lock_fd = os.open(base / ".nakagawa-migration.lock",
-                          os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
-    except OSError:
-        return _choose_data_root(base, new_root, new_data, old_data, old_folders)
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_SH)
-        return _choose_data_root(base, new_root, new_data, old_data, old_folders)
-    finally:
-        os.close(lock_fd)
-
-
-def _xdg_data_root() -> Path:
-    """Linux and the other XDG hosts: `Nakagawa/data` in the XDG data home, or the earlier folder."""
-    try:
-        data_base = _xdg_base("XDG_DATA_HOME", ".local", "share")
+        return Path.home() / ".local" / "share" / "nakagawa-recomp"
     except RuntimeError as exc:
         raise PrerequisiteFetchError(
             "DATA_DIR_UNAVAILABLE: set XDG_DATA_HOME or HOME to locate per-user data."
         ) from exc
-    old_data = data_base / "nakagawa-recomp"
-    old_folders = [old_data]
-    try:
-        old_folders.append(_xdg_base("XDG_CONFIG_HOME", ".config") / "nakagawa-recomp")
-    except RuntimeError:
-        pass  # neither the variable nor HOME: the player has no earlier settings folder either
-    new_root = data_base / "Nakagawa"
-    return _decide_data_root(data_base, new_root, new_root / "data", old_data, tuple(old_folders))
 
 
 def default_data_root() -> Path:
@@ -170,15 +136,16 @@ def default_data_root() -> Path:
                 "does not identify an application-data directory."
             )
         return Path(base) / "Nakagawa" / "data"
-    if sys.platform == "darwin":
-        home = os.environ.get("HOME", "")
-        if not home:
-            raise PrerequisiteFetchError("DATA_DIR_UNAVAILABLE: set HOME to locate per-user data.")
-        support = Path(home) / "Library" / "Application Support"
-        old_root = support / "NakagawaRecomp"
-        return _decide_data_root(support, support / "Nakagawa", support / "Nakagawa" / "data",
-                                 old_root / "data", (old_root,))
-    return _xdg_data_root()
+    if _old_layout_in_use(sys.platform):
+        return _data_root_before_324()
+    data = _layout_folders(False, sys.platform)[1]
+    if not data:
+        raise PrerequisiteFetchError(
+            "DATA_DIR_UNAVAILABLE: set HOME to locate per-user data." if sys.platform == "darwin"
+            else "DATA_DIR_UNAVAILABLE: set XDG_DATA_HOME (an absolute path) or HOME to locate "
+            "per-user data."
+        )
+    return Path(data)
 
 
 def _safe_relative_path(value: object) -> PurePosixPath:

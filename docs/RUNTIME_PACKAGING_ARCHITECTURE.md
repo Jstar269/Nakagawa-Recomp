@@ -108,50 +108,12 @@ Roadmap items decided with the table:
 * **Python on Linux:** the builder and `pyproject.toml` accept CPython 3.14 and 3.15
   (`src/player/package_builder.c`, `requires-python`). 3.15 stays the default. Widen further only to
   what the tool suite actually passes on, and only after the full suite runs green on that version.
-* **One app ID on every host:** `nakagawa-recomp` names the repository and the release files. The
-  per-user data folder is `Nakagawa` on Windows, Linux and macOS, with `config`, `data` and `saves`
-  inside it (section 8). Windows and macOS keep `cache` and `logs` there too; Linux keeps them in the
-  XDG cache and state homes, where they always were. Android's private folder is the data folder
-  itself. An older Linux profile (`nakagawa-recomp` in the XDG data home, saves inside it, and the
-  XDG config folder) or macOS profile (`NakagawaRecomp`, `Caches/NakagawaRecomp`,
-  `Logs/NakagawaRecomp`) is used where it is until the user moves it from Settings
-  ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324), `src/core/nk_data_migrate.c`). Its
-  rules, each tested in `tests/native/test_data_migrate.c`:
-  * One rule, decided once per process by the player (`nk_data_layout_decide`) and the Python tools
-    (`tools/nk_core/prereq_fetcher.py`), in order: a move journal → recover first; the marker
-    (`Nakagawa/.nakagawa-layout`) → the new layout; an older folder that holds files → the old layout,
-    whole; otherwise the new layout, and the first start writes the marker. Its cases are one table in
-    `src/core/nk_data_migrate.h` that both test suites read. A start never moves anything except to
-    finish or undo an interrupted move. Data in both places is a non-blocking notice on the library
-    screen, as is an older folder that holds files again after the marker.
-  * The move runs only from Settings > Move my data to the new folder, while the old layout is in use.
-    It refuses, by name and before touching anything: a game running, another window of this version
-    (the player lock, `.nakagawa-player.lock` beside `Nakagawa`, held shared by every player for its
-    life), a library, package or staging lock of this or the earlier version, a folder that is a link
-    or holds a relative link that would break, a folder of another user or one that overlaps the kept
-    Linux cache and logs, folders on different file systems (checked before the first rename), data in
-    the new folder already, and a library written by a newer version. An earlier-version window holds
-    none of these locks and cannot be detected; the confirmation says to close it.
-  * The whole move holds `.nakagawa-migration.lock` (beside `Nakagawa`), and the library's own lock
-    from before the first rename to after the rewrite. Before the first rename it writes the journal,
-    `.nakagawa-move-in-progress` beside `Nakagawa`, listing every rename and the library rewrite; the
-    journal and its folder are synced. Each step's state is read from the disk: source gone and
-    destination present is done, source present and destination absent or only empty folders is to
-    do, anything else is an error. Only empty folders are removed, one `rmdir` at a time.
-  * library.json's stored paths are matched in every spelling (lexically cleaned, and with links
-    resolved) and rewritten, the rewritten file is read back, and the original is kept whole as
-    `library.json.pre-migration`.
-  * The commit syncs every folder the move touched, then renames the journal to the marker in one
-    step. A failure before it undoes the renames made, newest first; an undo that fails leaves the
-    journal for the next start, which rolls forward, or rolls back to the whole old layout, under the
-    same locks, and stops with a message naming both folders and their state only when neither
-    finishes. The player then restarts; it never switches folders mid-run.
-  * The Python tools decide under the same run lock, held shared, and keep no lock afterwards. On a
-    journal they refuse by name (`DATA_MIGRATION_INTERRUPTED`) rather than recover: a tool cannot
-    check for a running game or hold the player lock, so recovery stays with the player.
-    A relative XDG variable is ignored, as the XDG specification says.
-
-  Windows never used another name.
+* **One app ID on every host:** `nakagawa-recomp` names the repository and the release files. A
+  fresh install's per-user data folder is `Nakagawa` on Windows, Linux and macOS, with `config`,
+  `data` and `saves` inside it (section 8); Linux keeps its cache and logs in the XDG cache and
+  state homes. A Linux or macOS install from before
+  [#324](https://github.com/Jstar269/nakagawa-recomp/issues/324) keeps its `nakagawa-recomp` or
+  `NakagawaRecomp` folders for good; no move is offered.
 * **Code signing:** v0.0.1 and v0.0.2 ship unsigned. Until a build is signed, each
   release publishes the ZIP's SHA-256 and GitHub build attestations for every binary, and the release notes
   explain the SmartScreen prompt. The signing procedure is prepared
@@ -719,17 +681,22 @@ moves all of it into one folder (`nk_platform_set_app_data_dir_override`).
 | `Nakagawa\cache\` | the platform cache folder (`NK_PATH_CACHE`) | player |
 | `Nakagawa\fonts\` | optional UI font overrides | user |
 
-Linux and macOS use the same `Nakagawa` folder. Linux puts it in `$XDG_DATA_HOME` (else
-`~/.local/share`) with `config`, `data` and `saves` inside it, and keeps the cache in
+A fresh Linux or macOS install uses the same `Nakagawa` folder. Linux puts it in `$XDG_DATA_HOME`
+(else `~/.local/share`) with `config`, `data` and `saves` inside it, and keeps the cache in
 `$XDG_CACHE_HOME/nakagawa-recomp` (else `~/.cache/nakagawa-recomp`) and the logs in
-`$XDG_STATE_HOME/nakagawa-recomp/logs` (else `~/.local/state/nakagawa-recomp/logs`), as before; it no
-longer reads the XDG config home. macOS puts it in `~/Library/Application Support`, with all five
-folders inside it. Android's private folder is the data folder itself, with `config`, `cache`, `logs`
-and `saves` inside it, as with `--user-data-root`. An older Linux or macOS profile moves in only
-when the user asks from Settings (section 4); until then the older folders stay
-in use, whole. The Python tools resolve the data folder by the same rule
-(`tools/nk_core/prereq_fetcher.py`), and stop with `DATA_MIGRATION_INTERRUPTED` while a move the user
-started waits for the player to finish or undo it. Each launch
+`$XDG_STATE_HOME/nakagawa-recomp/logs` (else `~/.local/state/nakagawa-recomp/logs`); an XDG variable
+that is not an absolute path is ignored, as the XDG specification says. macOS puts it in
+`~/Library/Application Support`, with all five folders inside it. An install from before
+[#324](https://github.com/Jstar269/nakagawa-recomp/issues/324) keeps its folders where they are:
+Linux's `$XDG_DATA_HOME/nakagawa-recomp` with its settings in `$XDG_CONFIG_HOME/nakagawa-recomp`,
+macOS's `~/Library/Application Support/NakagawaRecomp`. Each process chooses once, by one rule that
+the player (`src/core/nk_platform_posix.c`) and the Python tools (`tools/nk_core/prereq_fetcher.py`)
+share: the new folder when it holds data, else the earlier folders when they do, else the new
+folder. "Holds data" means a `settings.json` in the config folder, a `library.json` in the data
+folder, or anything in the saves folder. The rule, its cases and that definition are in
+`src/core/nk_data_migrate.h`, and both test suites read the cases from there. When both hold data
+the new folder is used and the library screen names both. Nothing is ever moved, copied, merged or
+deleted between them, and moving an existing install is not offered. Each launch
 still starts one child process per title (Section 2, Option C), with the #297 run-package and
 save-root semantics unchanged.
 

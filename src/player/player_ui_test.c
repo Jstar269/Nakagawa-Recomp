@@ -45,8 +45,7 @@ static bool player_ui_test_parse_views(char *names, uint32_t *mask) {
         { "psp_fonts", VIEW_PSP_FONTS }, { "updates", VIEW_UPDATES },
         { "confirm_factory_reset", VIEW_CONFIRM_FACTORY_RESET },
         { "accessibility_settings", VIEW_ACCESSIBILITY_SETTINGS },
-        { "ace_settings", VIEW_ACE_SETTINGS }, { "problem_report", VIEW_PROBLEM_REPORT },
-        { "confirm_data_move", VIEW_CONFIRM_DATA_MOVE }
+        { "ace_settings", VIEW_ACE_SETTINGS }, { "problem_report", VIEW_PROBLEM_REPORT }
     };
     if (!names || !names[0] || !mask) return false;
     uint32_t parsed_mask = 0;
@@ -533,7 +532,6 @@ const char *player_ui_test_view_name(PlayerView view) {
     case VIEW_ACCESSIBILITY_SETTINGS: return "accessibility_settings";
     case VIEW_ACE_SETTINGS: return "ace_settings";
     case VIEW_PROBLEM_REPORT: return "problem_report";
-    case VIEW_CONFIRM_DATA_MOVE: return "confirm_data_move";
     case VIEW_DEVELOPER_LOG: return "developer_log";
     default: return "unknown";
     }

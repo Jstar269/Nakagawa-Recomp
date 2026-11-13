@@ -257,8 +257,8 @@ struct PlayerUiNk {
     bool rebuild_focus_pending;
     char rebuild_text[256];
     char rebuild_notice[96];
-    char library_notice[2560];  /* the data folder notice, the library file's notice and the drop
-                                   summary together */
+    /* the data folder notice, the library file's notice and the drop summary together */
+    char library_notice[4u * NK_MAX_PATH + 96u + 192u + 256u + 4u];
     char verify_notice[96];     /* the library's disc check line */
     /* A rebuilding card's status word with its progress ("Rebuilding 40%"),
        or a queued card's with its place ("Queued 2 of 4"). */
@@ -529,8 +529,7 @@ static bool player_ui_settings_view(PlayerView view) {
            view == VIEW_PREREQ_ABOUT || view == VIEW_CONFIRM_REMOVE_TOOLS ||
            view == VIEW_BUILD_CACHE || view == VIEW_PSP_FONTS || view == VIEW_UPDATES ||
            view == VIEW_CONFIRM_FACTORY_RESET || view == VIEW_ACCESSIBILITY_SETTINGS ||
-           view == VIEW_ACE_SETTINGS || view == VIEW_PROBLEM_REPORT ||
-           view == VIEW_CONFIRM_DATA_MOVE;
+           view == VIEW_ACE_SETTINGS || view == VIEW_PROBLEM_REPORT;
 }
 
 /* The views the next UI draws: the library (router screens), the setup wizard,
@@ -1023,7 +1022,6 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         case VIEW_BUILD_CACHE: model.page = PLAYER_UI_SETTINGS_PAGE_BUILD_CACHE; break;
         case VIEW_UPDATES: model.page = PLAYER_UI_SETTINGS_PAGE_UPDATES; break;
         case VIEW_PROBLEM_REPORT: model.page = PLAYER_UI_SETTINGS_PAGE_PROBLEM_REPORT; break;
-        case VIEW_CONFIRM_DATA_MOVE: model.page = PLAYER_UI_SETTINGS_PAGE_DATA_MOVE; break;
         case VIEW_CONFIRM_FACTORY_RESET:
             model.page = PLAYER_UI_SETTINGS_PAGE_FACTORY_RESET;
             if (!player->reset_folders_ready) {
@@ -1113,9 +1111,6 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         player->settings_saves[0] = '\0';
     }
     model.saves_folder = player->settings_saves;
-    model.data_move_offered = app->data_move_offered;
-    model.data_folder_in_use = app->data_folder_in_use;
-    model.data_folder_new = app->data_folder_new;
     model.online_mode = app->settings.online_mode;
     model.online_news = app->settings.online_news;
     model.online_reports = app->settings.online_reports;
@@ -1814,8 +1809,6 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
                         ? PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT
                     : player->last_view == VIEW_CONFIRM_FACTORY_RESET
                         ? PLAYER_UI_ID_SETTINGS_FACTORY_RESET
-                    : player->last_view == VIEW_CONFIRM_DATA_MOVE && app->data_move_offered
-                        ? PLAYER_UI_ID_SETTINGS_DATA_MOVE
                     : player->last_view == VIEW_CONTROLLER_SETTINGS
                         ? PLAYER_UI_ID_SETTINGS_CONTROLLER
                         : PLAYER_UI_ID_SETTINGS_RESOLUTION;
@@ -1869,8 +1862,7 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
             case VIEW_PREREQ_ABOUT:
             case VIEW_CONFIRM_REMOVE_TOOLS:
             /* The safe answer, Keep everything, has the focus. */
-            case VIEW_CONFIRM_FACTORY_RESET:
-            case VIEW_CONFIRM_DATA_MOVE: focus = PLAYER_UI_ID_SETTINGS_BACK; break;
+            case VIEW_CONFIRM_FACTORY_RESET: focus = PLAYER_UI_ID_SETTINGS_BACK; break;
             case VIEW_BUILD_CACHE:
                 /* Back from the removal check, focus the button that opened it. */
                 focus = player->last_view == VIEW_CONFIRM_REMOVE_TOOLS
@@ -3550,12 +3542,11 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                      "Version %.40s is out", app->update.check.newest.version);
             model.update_notice = player->update_notice;
         }
-        /* The data folder notice (#324: both folders hold files, or an old one is back; it stays
-           for the whole run), the library file's notice and the one summary of files dropped
-           together (#2007), in that order. */
+        /* The data folder notice (#324), the library file's notice and the one summary of files
+           dropped together (#2007), in that order. */
         const char *notices[3] = {app->data_folder_notice, app->library_notice, app->drop_notice};
         player->library_notice[0] = '\0';
-        for (size_t i = 0; i < 3u; ++i) {
+        for (size_t i = 0u; i < 3u; ++i) {
             if (notices[i][0] == '\0') continue;
             size_t used = strlen(player->library_notice);
             snprintf(player->library_notice + used, sizeof(player->library_notice) - used, "%s%s",

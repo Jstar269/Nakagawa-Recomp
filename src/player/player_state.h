@@ -64,8 +64,7 @@ typedef enum {
     VIEW_CONFIRM_FACTORY_RESET, /* Settings > Factory reset: what moves aside */
     VIEW_ACCESSIBILITY_SETTINGS, /* Settings > Accessibility: size, contrast, motion */
     VIEW_ACE_SETTINGS,          /* Settings > Enhanced, the library's or one title's (#2055) */
-    VIEW_PROBLEM_REPORT,        /* Settings > Problem report (#1849) */
-    VIEW_CONFIRM_DATA_MOVE      /* Settings > Move my data (#324, Linux and macOS); the last value */
+    VIEW_PROBLEM_REPORT         /* Settings > Problem report (#1849); the last value */
 } PlayerView;
 
 typedef enum {
@@ -943,19 +942,6 @@ struct PlayerApp {
     /* The reset moved the user data aside: the player quits without saving
        anything and starts a fresh copy of itself, which opens on a first run. */
     bool factory_reset_done;
-    /* The data folders (#324, nk_data_migrate.h). `data_move_offered`: this start uses a Linux or
-       macOS install's earlier folders, and Settings offers to move them (VIEW_CONFIRM_DATA_MOVE)
-       from `data_folder_in_use` to `data_folder_new`. `data_folder_notice` is the start's
-       non-blocking notice, shown on the library for as long as the condition holds (empty for
-       none). Settings' Move asks the event loop (`request_data_move`); once the folders are no
-       longer the ones this process started on (`data_move_done`), it quits without saving and
-       starts a fresh copy, as after a factory reset. */
-    bool data_move_offered;
-    char data_folder_in_use[NK_MAX_PATH];
-    char data_folder_new[NK_MAX_PATH];
-    char data_folder_notice[2048]; /* NkLayoutDecision.notice */
-    bool request_data_move;
-    bool data_move_done;
     /* A launch is checking the package or starting the process on that
        worker; `launch_pending_disc_id` names the game. The UI keeps drawing
        and shows the game as starting until the worker hands back. */
@@ -1001,6 +987,9 @@ struct PlayerApp {
     /* Why the library shows no saved games although library.json exists (a newer
      * player wrote it), or an empty string. Shown on the Library screen. */
     char library_notice[192];
+    /* Both data folders of a Linux or macOS install hold data (#324, nk_data_layout_notice):
+     * which is in use, for the whole run, or an empty string. Shown on the Library screen. */
+    char data_folder_notice[4u * NK_MAX_PATH + 96u];
 
     /* Files dropped on the window together (#2007): SDL sends them one event at a
      * time between a begin and a complete. Several are gathered in a batch, the
