@@ -259,15 +259,14 @@ preset that sets it), sets the preset back to **Custom**, which uses your settin
 | Ultra | 4x | Sharp | On | your setting | On | On | On |
 | Handheld | 2x | Sharp | On | On | On | On | your setting |
 
-In Enhanced and Ace, a preset's **Crisp system text**, **Sharper enlarging** (the FSR 1 upscaler) and, under
-**Ultra**, **Full 32-bit colour** take the place of the library's; Settings > Enhanced shows them as, for example,
-**On (Ultra)**. A game's own value for any of them, on its Enhanced options page, still wins. Changing one of them on
-Settings > Enhanced sets the preset back to **Custom**. Whenever a preset becomes **Custom**, the options the preset
-set keep the values it gave them; presets other than **Ultra** leave **Full 32-bit colour** as you set it. FSR 1
-works only where the
-window is larger than the game's picture, and where the graphics card can't run it, the normal scaling filter stays.
-The other Enhanced options, such as **Smooth motion**, **Widescreen** and **Texture filtering**, stay as you set them
-under every preset.
+In Enhanced and Ace, a preset's **Crisp system text**, **Sharper enlarging** (the FSR 1 upscaler) and, under **Ultra**,
+**Full 32-bit colour** take the place of the library's; Settings > Enhanced shows them as, for example, **On (Ultra)**.
+A game's own value for any of them, on its Enhanced options page, still wins. Changing one of them on Settings >
+Enhanced sets the preset back to **Custom**. Whenever a preset becomes **Custom**, the options the preset set keep the
+values it gave them; presets other than **Ultra** leave **Full 32-bit colour** as you set it. FSR 1 works only where the
+window is larger than the game's picture, and where the graphics card can't run it, the normal scaling filter stays. The
+other Enhanced options, such as **Smooth motion**, **Widescreen** and **Texture filtering**, stay as you set them under
+every preset.
 
 ## Texture packs
 

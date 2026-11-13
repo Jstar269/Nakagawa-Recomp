@@ -989,8 +989,8 @@ at `s_twin`) for the Vulkan renderer, and in `src/rt/ge.c` (the comment at `s_tw
     not follow host GPU work (section 10.3). The second draw of each render op, and the drain when a twin allocation
     fails, are host waits.
   - I/O speed: unchanged. The twin performs no guest I/O.
-- **Default.** Off for a new library and under every graphics preset except Ultra, which turns it on (section 10.1,
-  #2280). The player's part "Full 32-bit colour" (the launch line's `twin=on`), choosing Ultra or `SR_GPU_TWIN_COLOR`
+- **Default.** Off for a new library. The Ultra graphics preset turns it on (section 10.1, #2280); the other presets
+  do not change it, so it keeps the library's value. The player's part "Full 32-bit colour" (the launch line's `twin=on`), choosing Ultra or `SR_GPU_TWIN_COLOR`
   turns it on (see Setting). Turning it on by default needs section 11.2 item 4's "nothing worse" runs: picture-gate
   or route runs on *Hot Shots Tennis* and *LittleBigPlanet*, and a library sweep, each with the twin on against the
   same run with it off (#2050). The launch line carries its key (`twin`, below), which follows section 11.2 item 2:

@@ -589,18 +589,17 @@ A preset is used only by Enhanced and Ace sessions, where its values take the pl
 VSYNC and GAME FULLSCREEN rows and of up to three Enhanced parts' library values: CRISP SYSTEM TEXT, SHARPER
 ENLARGING (the FSR 1 upscaler) and, under ULTRA, FULL 32-BIT COLOUR. Choosing one changes none of those rows or
 parts, and an Authentic session always runs with the rows as the user set them, whatever the preset. The reason is
-that a render scale above 1x is not host-only: every
-present commits the frame to guest VRAM, so a game that copies its screen (a save picture) keeps the larger picture
-(`docs/ENHANCEMENT_CONTRACT.md` section 10.3, Pixels), and Authentic launch output must not change with a
-preset. Editing one of the rows a preset sets makes it CUSTOM, which means the rows apply in every session and
-the parts the preset set keep its values as the library's (below); GAME FULLSCREEN does so only under HANDHELD, the
-one preset that sets it. While a preset is chosen, the page's notice
-line says that it is used in Enhanced and Ace, names the parts it turns on and off, and says that Authentic uses
-the rows, in short words (`Ultra is used in Enhanced and Ace, with crisp text, FSR 1 and full 32-bit colour on.
-Authentic uses your settings.`, the longest, on one line at 960 x 540 and 853 x 480). The settings file keeps the
-preset's name beside the rows, and a file without it, or with a name this build doesn't know, loads as CUSTOM. The
-values are the project's choice, and FSR 1's cost is measured only on an RTX 3080 (`docs/SETUP.md`). They live in one
-table, `k_graphics_presets` in `src/player/player_state.c`:
+that a render scale above 1x is not host-only: every present commits the frame to guest VRAM, so a game that copies its
+screen (a save picture) keeps the larger picture (`docs/ENHANCEMENT_CONTRACT.md` section 10.3, Pixels), and Authentic
+launch output must not change with a preset. Editing one of the rows a preset sets makes it CUSTOM, which means the rows
+apply in every session and the parts the preset set keep its values as the library's (below); GAME FULLSCREEN does so
+only under HANDHELD, the one preset that sets it. While a preset is chosen, the page's notice line says that it is used
+in Enhanced and Ace, names the parts it turns on and off, and says that Authentic uses the rows, in short words (`Ultra
+is used in Enhanced and Ace, with crisp text, FSR 1 and full 32-bit colour on. Authentic uses your settings.`, the
+longest, on one line at 960 x 540 and 853 x 480). The settings file keeps the preset's name beside the rows, and a file
+without it, or with a name this build doesn't know, loads as CUSTOM. The values are the project's choice, and FSR 1's
+cost is measured only on an RTX 3080 (`docs/SETUP.md`); FULL 32-BIT COLOUR's is not measured on any GPU. They live in
+one table, `k_graphics_presets` in `src/player/player_state.c`:
 
 | Preset | Resolution | Scaling | VSync | Game fullscreen | Crisp system text | Sharper enlarging | Full 32-bit colour |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -625,7 +624,10 @@ second draw of each render op and its GPU memory stay off unless asked for. Wher
 (`docs/SETUP.md`). No preset sets frame pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN
 PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, the SPEED READOUT or
 the GAME BADGE: they change timing, framing, input, guest-visible output or the HUD, or have no measured cost on
-low-end GPUs, so they stay the library's and each game's.
+low-end GPUs, so they stay the library's and each game's. FULL 32-BIT COLOUR stays out of every preset but ULTRA for
+the same reason: its cost (a second draw of each render op and the twin's GPU memory) is not measured on any GPU, so
+only ULTRA, the preset for GPUs with headroom, turns it on, and under the others it stays the library's and each
+game's.
 
 The parts a preset sets are resolved with the rest (`player_play_resolve`): a game's own value, else the preset's,
 else the library's, so the launch line, `SR_PRESENT_UPSCALE` and both Enhanced pages agree. Settings > Enhanced shows

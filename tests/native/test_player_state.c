@@ -9646,9 +9646,12 @@ static void test_graphics_presets(void) {
 
             /* Authentic: the session's config and launch line equal Custom's with the same
                rows, under every preset. The library's parts are the opposite of the preset's,
-               so the Enhanced session below shows which one it took. */
+               so the Enhanced session below shows which one it took. Full 32-bit colour is on in
+               the library, so a preset that wrote 0 for it instead of leaving it to the library
+               would show as off. */
             app->settings.enhanced.part[PLAYER_PART_TEXT] = !row->part[PLAYER_PART_TEXT];
             app->settings.enhanced.part[PLAYER_PART_UPSCALE] = !row->part[PLAYER_PART_UPSCALE];
+            app->settings.enhanced.part[PLAYER_PART_TWIN] = 1;
             custom.enhanced = app->settings.enhanced;
             graphics_preset_session(&app->settings, &config, &r, line, sizeof(line));
             graphics_preset_session(&custom, &custom_config, &custom_r, custom_line,
@@ -9693,9 +9696,10 @@ static void test_graphics_presets(void) {
             assert(row->part[PLAYER_PART_TESS] == -1);
             assert(row->part[PLAYER_PART_TWIN] == (p == PLAYER_PRESET_ULTRA ? 1 : -1));
             assert(strstr(line, row->part[PLAYER_PART_TEXT] ? ";text=on" : ";text=off") != NULL);
-            assert(strstr(line, r.part[PLAYER_PART_TWIN] ? ";twin=on" : ";twin=off") != NULL);
-            assert(player_settings_library_part(&app->settings, PLAYER_PART_TWIN) ==
-                   (p == PLAYER_PRESET_ULTRA ? 1 : custom.enhanced.part[PLAYER_PART_TWIN]));
+            /* On under every preset: Ultra's own value, the library's under the others. */
+            assert(r.part[PLAYER_PART_TWIN] == 1);
+            assert(strstr(line, ";twin=on") != NULL);
+            assert(player_settings_library_part(&app->settings, PLAYER_PART_TWIN) == 1);
             assert(config.present_upscale == (row->part[PLAYER_PART_UPSCALE] == 1
                                                   ? NK_PRESENT_UPSCALE_FSR1
                                                   : NK_PRESENT_UPSCALE_OFF));
@@ -9719,10 +9723,15 @@ static void test_graphics_presets(void) {
                 t->mode = PLAYER_PLAY_LIBRARY;
                 for (int part = 0; part < PLAYER_PART_COUNT; part++) t->part[part] = -1;
                 t->part[PLAYER_PART_UPSCALE] = !row->part[PLAYER_PART_UPSCALE];
+                /* The game's own Full 32-bit colour, off, wins over Ultra's on and over the
+                   library's on under the other presets (#2280). */
+                t->part[PLAYER_PART_TWIN] = 0;
                 t->logic_60 = -1;
                 own.title_play_count = 1;
                 graphics_preset_session(&own, &config, &r, line, sizeof(line));
                 assert(r.on && r.part[PLAYER_PART_UPSCALE] == !row->part[PLAYER_PART_UPSCALE]);
+                assert(r.part[PLAYER_PART_TWIN] == 0);
+                assert(strstr(line, ";twin=off") != NULL && strstr(line, ";twin=on") == NULL);
                 assert(r.part[PLAYER_PART_TEXT] == row->part[PLAYER_PART_TEXT]);
                 assert(config.resolution_scale == row->resolution_scale);
             }

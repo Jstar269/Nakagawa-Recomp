@@ -3307,7 +3307,7 @@ static void test_settings_pages(void) {
     CHECK(flow_case_fits(FLOW_SETTINGS_PRESET, 960, 540, dump, sizeof(dump)),
           "Settings with a graphics preset's note fits 960 x 540");
     CHECK(strstr(dump, "Ultra is used in Enhanced and Ace, with crisp text, FSR 1 and full 32-bit "
-                       "colour") != NULL &&
+                       "colour on. Authentic uses your settings.") != NULL &&
               strstr(dump, "Changes are saved as you make them") == NULL,
           "a graphics preset's note takes the Settings notice line");
     CHECK(strstr(dump, "\"ULTRA\"") != NULL,
