@@ -610,7 +610,7 @@ coverage classes, such as `unverified` and `synthetic`, are defined in [`HLE_COV
 | `SR_GEWATCH_AFTER=N` | Start GE watch after frame N |
 | `SR_GEMATW=1` | Log GE matrix writes |
 | `SR_NO2DZ=1` | Disable 2D Z-buffer |
-| `SR_GPU_STATS=1` | Emit bounded Vulkan submission/batch/texture/snapshot counters without per-submit logging |
+| `SR_GPU_STATS=1` | Emit bounded Vulkan submission/batch/texture/snapshot counters without per-submit logging, and a `GEGPU_FALLBACK present` line for each accepted present that handed primitives to the software rasterizer: the primitives the GPU drew and, by reason, those it handed over and their readbacks (#2151) |
 | `SR_GPU_TIMESTAMPS=1` | Measure GPU time with Vulkan timestamp queries: each GE command buffer split by op kind (render batch, snapshot copy, upload, readback, other), printed as a `GEGPU_TS` line every 60 presents and a `GEGPU_TS_TOTAL` line at exit, and the presentation blit; with `SR_PERF_FRAMES` the times also fill the `gpu_*` columns. An op on the interlock destination-read path (#2109) takes no snapshot copy, and its time counts as render batch. Ops overlap on the GPU, so the split is an attribution and the sum is the whole execution span. It changes no rendering, guest memory or wait |
 | `SR_GPU_TWIN_COLOR=1\|native\|0\|off` | Developer override of the launch line's `twin` key (the player's "Full 32-bit colour", #2050), for the Vulkan and the software renderer. It wins whenever it is set, so it overrides the player's setting: `1` turns on full 32-bit colour without dither (also when the player left it off), `native` keeps the authentic colour (for identity checks), `0` and `off` turn off a twin the line asked for (the Ace report names `twin` unavailable: SR_GPU_TWIN_COLOR overrides it); unset or empty leaves the choice to the line. Ace Mode only. Any other value is refused. Guest VRAM is unchanged ([ENHANCEMENT_CONTRACT.md 10.11](ENHANCEMENT_CONTRACT.md#1011-full-32-bit-colour-the-host-twin)). Prints `TWIN:` lines at start and exit |
 | `SR_GPU_TWIN_CAPTURE=authentic` | With the twin on, present and capture the authentic image instead of the twin |
@@ -2578,3 +2578,16 @@ retail title is private: keep it out of the repository and every upload.
    that was not asked for (`SR_VIDEO=gdi`, `SR_GPU_GE` unset) is `fallback=none`. The native player names a fallback
    on the game's page, with Hide for the rest of its session. Primitives the GPU renderer hands to the software
    rasterizer during a frame (`GEGPU_FALLBACK_*`) are not part of this line.
+5. Check what the GPU renderer hands to the software rasterizer: while the GPU GE runs, `gegpu_fallback_counts`
+   counts each primitive drawn by `ge.c` instead, and each synchronous readback that took, by reason, always.
+   After each accepted present `gui_present` steps the rule in `src/core/nk_shared_helpers.h`
+   ([thresholds and their basis](../src/rt/gpu_sdl3vk/README.md#software-fallback-report-2151)): a reason whose
+   estimated cost (readbacks and software primitives at their per-unit costs) reaches the budget in each of three
+   windows of 120 presents in a row is reported once per run as
+   `BOOT_EVENT phase=render_fallback reason=<name> frames=<n> sw_prims=<n> gpu_prims=<n> readbacks=<n> share_pm=<n>`
+   (`nk_render_fallback_event_format` in `src/core/nk_shared_helpers.c`; the names are `stencil`, `color_test`,
+   `logic_op`, `write_mask`, `ram_fb`, `wide_stride`, `mips`, `line`, `point`). The native player names those
+   effects on the game's page ("Partly drawn in software"); Hide hides them for that game and those effects for
+   the rest of its session. With `SR_GPU_STATS=1` each accepted present that handed anything to the software
+   rasterizer also prints `GEGPU_FALLBACK present gpu=<n> <name>=<software primitives>/<readbacks>...` for the
+   reasons it had, the figures the rule is checked against; a present that handed nothing prints nothing.

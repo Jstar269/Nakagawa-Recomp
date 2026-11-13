@@ -247,6 +247,8 @@ static void display_present_active(void) {
     }
     /* A recording counts the guest's own flips beside the picture (videorec.h). */
     sr_videorec_guest_flip();
+    /* So do the host mip chain's windows, before the presenter's slot rule drops any. */
+    gegpu_note_guest_flip();
     display_present_frame();
     sr_capture_cancel();
     uint32_t brightest;

@@ -1356,6 +1356,14 @@ static void test_describe_controls(void) {
     CHECK(row_is(&controls, "Cross", "X", ""),
           "describe: no profile is the window's default keyboard and no pad binding");
     CHECK(row_is(&controls, "Select", "Shift", ""), "describe: both shift keys read Shift");
+
+    /* A mouse button (#1791) is named like a key, in its slot's order. */
+    key(&profile, NK_PSP_BTN_CROSS, "mouse:left", "x");
+    key(&profile, NK_PSP_BTN_RTRIGGER, NULL, "mouse:x1");
+    nk_overlay_describe_controls(&controls, &profile, NK_UI_PAD_LETTERS_A_SOUTH);
+    CHECK(row_is(&controls, "Cross", "Left Click / X", "B"),
+          "describe: a click is named in words beside the key");
+    CHECK(row_is(&controls, "R", "Mouse 4", ""), "describe: a side button alone is named");
 }
 
 static bool append_text(char *out, size_t cap, size_t *used, const char *text, size_t length) {
@@ -1450,6 +1458,22 @@ static bool build_golden(char *out, size_t cap, size_t *used) {
     nk_overlay_go(&state, NK_OVERLAY_SCREEN_SETTINGS, NK_OVERLAY_ID_FULLSCREEN);
     ok = ok && append_case(out, cap, used, "settings-display-rows-960x600", small, &state, &narrow);
     {
+        /* A keyboard-and-mouse mapping (#1791), described from the profile the window maps
+           through, appended so the cases above keep their bytes: the clicks are named the
+           way the keyboard column names keys. */
+        static NkOverlayControls mouse_controls;
+        NkInputProfile mouse_profile;
+        nk_input_profile_init_default(&mouse_profile);
+        mouse_profile.psp_keys[NK_PSP_BTN_CROSS].primary = NK_HOST_KEY_MOUSE_LEFT;
+        mouse_profile.psp_keys[NK_PSP_BTN_CROSS].secondary = nk_host_key_from_name("x");
+        mouse_profile.psp_keys[NK_PSP_BTN_RTRIGGER].primary = NK_HOST_KEY_MOUSE_RIGHT;
+        mouse_profile.psp_keys[NK_PSP_BTN_TRIANGLE].secondary = NK_HOST_KEY_MOUSE_X2;
+        nk_overlay_describe_controls(&mouse_controls, &mouse_profile, NK_UI_PAD_LETTERS_A_SOUTH);
+        NkOverlayModel mouse_model = base_model(1280.0f, 800.0f);
+        mouse_model.controls = mouse_controls.rows;
+        mouse_model.control_count = mouse_controls.count;
+        nk_overlay_go(&state, NK_OVERLAY_SCREEN_CONTROLS, 0u);
+        ok = ok && append_case(out, cap, used, "controls-mouse-buttons", ui, &state, &mouse_model);
         /* The VRAM viewer on a SR_VRAMDUMP capture (#314), appended so the cases above keep
            their bytes. */
         NkOverlayVram vram = synthetic_vram();
