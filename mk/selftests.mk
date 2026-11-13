@@ -713,6 +713,7 @@ hle-thread-selftest: hle-thread-selftest-build
 aot-return-boundary-thread-selftest:
 	$(MAKE) --no-print-directory hle-thread-selftest-build HLE_AOT_BOUNDARY_SELFTEST=1
 	$(BUILD_DIR)/hle_thread_selftest.exe --aot-return-boundary
+	$(BUILD_DIR)/hle_thread_selftest.exe --resume-describe
 
 # hle-title-selftest — run the same production-HLE executable against the generic
 # profile and both public fixture profiles. The optional configured profile is
