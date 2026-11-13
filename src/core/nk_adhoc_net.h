@@ -55,11 +55,15 @@
  *     The HLE layer does not link this seam yet (src/rt/hle_network.c); when it does, it logs
  *     that line on reading a count above zero and carries on, as PPSSPP does.
  * The medium's own rules: a MAC already logged in is refused (PPSSPP's server accepts it), a
- * login resets events_dropped, and the peer id is the console's index plus one. The server's product-code overrides, which let some
+ * login resets events_dropped and pdp_dropped (both count losses since the console's last login,
+ * and its sockets close at each logout), and the peer id is the console's index plus one. The server's product-code overrides, which let some
  * product codes share groups, are not modelled: a game meets only consoles running its own
  * product code.
  * Datagrams follow UDP: one to a MAC or port nobody holds in the sender's group is dropped and
- * the send still succeeds; a full receive queue drops the datagram and counts it. Broadcast is
+ * the send still succeeds; a full receive queue drops the datagram and counts it. One sender can
+ * fill a socket's queue, so the other senders' datagrams to it are dropped; the count is the
+ * receiver's and does not name the sender (a known limit for the wiring step: no per-peer
+ * fairness). Broadcast is
  * the caller's to fan out over the peer list, as PPSSPP does, so a group-address destination is
  * refused. */
 
@@ -137,6 +141,10 @@ typedef struct NkLoopTrace {
  * and returns how many were queued; a return above NK_LOOPNET_TRACE means some were not kept.
  * Dropped events (events_dropped) are not in it. */
 size_t nk_loopnet_trace(NkAdhocLoopNet *net, NkLoopTrace *out, size_t max);
+/* Test aid: sets the medium's group creation counter, so a test can reach the 2^32 creations
+ * after which a new group's number shares its low 32 bits (its BSSID) with an older one. Groups
+ * are numbered with 64 bits and never wrap; a number whose BSSID a live group holds is skipped. */
+void nk_loopnet_set_groups_made(NkAdhocLoopNet *net, uint64_t made);
 
 /* For a log: when t's events_dropped is above zero, writes one line naming the transport, the
  * console (the caller's number for it: the medium's index, or the HLE layer's own) and the count,

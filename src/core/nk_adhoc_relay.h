@@ -26,7 +26,8 @@
  *     client/postoffice.c (marked GPL-3.0-only), which does the same;
  *   - the login checks (nk_relay_product_ok, nk_relay_mac_ok, nk_relay_nickname_ok and the
  *     checks in nk_lobby_login): PPSSPP's Core/HLE/proAdhocServer.cpp login_user_data at
- *     3bc60270eae3069f13dfbfdb7292a7e1375de6f6 (GPL-2.0-or-later), written from it on 2026-11-12;
+ *     3bc60270eae3069f13dfbfdb7292a7e1375de6f6 (GPL-2.0-or-later), all of them written from it on
+ *     2026-11-12 (nothing in them is from aemu_postoffice);
  *   - the port offset (nk_relay_port_out, nk_relay_port_in): PPSSPP's Core/HLE/sceNetAdhoc.cpp
  *     offset_port_simple and reverse_port_simple at the same revision (GPL-2.0-or-later,
  *     Copyright (c) 2013- PPSSPP Project), and its PortOffset default in Core/Config.cpp.
@@ -89,8 +90,13 @@ bool nk_relay_product_ok(const char *product);
 /* True for any MAC but the all-ones and the all-zero one. */
 bool nk_relay_mac_ok(const uint8_t mac[NK_RELAY_MAC_LEN]);
 /* True for a nickname of 1 to 128 bytes: the server refuses only a first byte of zero, and 128
- * is the field's size, so the longest fills it with no terminator. */
+ * is the field's size, so the longest fills it with no terminator. The argument is a C string,
+ * read up to its terminator or byte 128, whichever comes first: a 128-byte field with no
+ * terminator goes to nk_relay_nickname_field_ok instead. */
 bool nk_relay_nickname_ok(const char *nickname);
+/* The same rule for a raw 128-byte field (a packet's, or the guest's parameter), terminated or
+ * not: true when its first byte is not zero. Reads field[0] only. */
+bool nk_relay_nickname_field_ok(const uint8_t field[NK_RELAY_NICKNAME_LEN]);
 
 /* The LOGIN packet. Returns NK_LOBBY_LOGIN_SIZE, or 0 (out untouched) when any of the three
  * checks above fails. The nickname is zero-padded to the field's 128 bytes; a 128-byte nickname
@@ -105,7 +111,7 @@ size_t nk_lobby_bare(uint8_t out[NK_LOBBY_BARE_SIZE], NkLobbyOpcode opcode);
 
 typedef struct NkLobbyEvent {
     NkLobbyOpcode kind;
-    uint8_t group[NK_RELAY_GROUP_LEN];           /* SCAN */
+    uint8_t group[NK_RELAY_GROUP_LEN];           /* SCAN: 8 bytes as sent, not terminated */
     uint8_t bssid[NK_RELAY_MAC_LEN];             /* SCAN, CONNECT_BSSID: the group's BSSID */
     uint8_t mac[NK_RELAY_MAC_LEN];               /* CONNECT: the member's MAC */
     char nickname[NK_RELAY_NICKNAME_LEN + 1u];   /* CONNECT, CHAT: the whole field, then a NUL */
@@ -117,7 +123,9 @@ typedef struct NkLobbyEvent {
 /* Decodes the first server packet in buf[0..len). Returns the bytes it used (> 0) and fills ev;
  * NK_LOBBY_NEED_MORE when buf holds only part of a packet; NK_LOBBY_BAD for an opcode a server
  * never sends (LOGIN, PING), which ends the session. A CHAT packet is decoded and used up, but the
- * player shows no chat. */
+ * player shows no chat. Only the opcode and the length are checked: the fields are decoded as the
+ * server sent them, and the consumer validates MACs, nicknames, peer ids and group names
+ * (nk_adhoc_relay.c, "Known limits for the wiring step"). */
 int nk_lobby_parse(const uint8_t *buf, size_t len, NkLobbyEvent *ev);
 
 /* ---- data relay (postoffice) --------------------------------------------------------------- */
@@ -164,7 +172,10 @@ bool nk_relay_parse_ptp_data_header(const uint8_t in[NK_RELAY_PTP_DATA_HEADER_SI
                                     uint32_t *size);
 
 /* A PSP port as the relay carries it, and back. Port 0 stays 0, and a port the offset wraps to 0
- * becomes 65535, as PPSSPP's offset_port_simple does; the way back subtracts the offset. */
+ * becomes 65535, as PPSSPP's offset_port_simple does; the way back subtracts the offset, as
+ * reverse_port_simple does, except that 0 comes back as 0 (this project's rule). 65535 comes
+ * back as 65535 minus the offset: the one port that wrapped to 0 on the way out does not round
+ * trip, as in PPSSPP. */
 uint16_t nk_relay_port_out(uint16_t port, uint16_t offset);
 uint16_t nk_relay_port_in(uint16_t port, uint16_t offset);
 

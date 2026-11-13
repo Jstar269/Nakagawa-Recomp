@@ -12,6 +12,7 @@
 
 #include "nk_adhoc_net.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -591,6 +592,96 @@ static void test_trace_bound(void) {
     nk_loopnet_destroy(net);
 }
 
+/* Misused socket handles and a full socket table (review of #2549 at eaebd9c1b5e9, tests 1, 2). */
+static void test_socket_bounds(void) {
+    NkAdhocLoopNet *net = nk_loopnet_create();
+    NkAdhocTransport *a = nk_loopnet_console(net, A), *b = nk_loopnet_console(net, B);
+    NkLobbyEvent ev[8];
+    login(a, k_a, "Alpha", k_game);
+    login(b, k_b, "Bravo", k_game);
+    a->ops->connect(a, k_g1);
+    b->ops->connect(b, k_g1);
+    take(a, ev, 8);
+    take(b, ev, 8);
+    CHECK(a->ops->pdp_open(a, 1) == 0, "one socket open");
+    static const int k_bad[] = {-1, (int)NK_NET_PDP_SOCKETS, INT_MAX, INT_MIN};
+    uint8_t mac[6], buf[8];
+    uint16_t port = 0;
+    uint32_t len = 0;
+    for (size_t k = 0; k < sizeof k_bad / sizeof k_bad[0]; k++) {
+        const int h = k_bad[k];
+        CHECK(a->ops->pdp_send(a, h, k_b, 1, "x", 1) == NK_NET_NO_SOCKET, "pdp_send with handle %d", h);
+        CHECK(a->ops->pdp_recv(a, h, mac, &port, buf, sizeof buf, &len) == NK_NET_NO_SOCKET,
+              "pdp_recv with handle %d", h);
+        CHECK(a->ops->pdp_close(a, h) == NK_NET_NO_SOCKET, "pdp_close with handle %d", h);
+    }
+    for (int p = 2; p <= (int)NK_NET_PDP_SOCKETS; p++)
+        CHECK(a->ops->pdp_open(a, (uint16_t)p) == p - 1, "port %d opens slot %d", p, p - 1);
+    CHECK(a->ops->pdp_open(a, 17) == NK_NET_NO_SLOT, "a 17th socket is refused: every slot is in use");
+    CHECK(a->ops->pdp_close(a, 5) == NK_NET_OK && a->ops->pdp_open(a, 17) == 5,
+          "after a close, the next open takes the freed slot");
+    static const uint8_t multicast[6] = {0x01, 0x00, 0x5e, 0x00, 0x00, 0x01};
+    CHECK(a->ops->pdp_send(a, 0, multicast, 1, "m", 1) == NK_NET_BAD_ARG,
+          "a multicast destination is refused, as broadcast is");
+    nk_loopnet_destroy(net);
+}
+
+/* Both drop counts start at zero at each login and stay readable after a logout. */
+static void test_drop_counts_reset_at_login(void) {
+    NkAdhocLoopNet *net = nk_loopnet_create();
+    NkAdhocTransport *a = nk_loopnet_console(net, A), *b = nk_loopnet_console(net, B);
+    NkLobbyEvent ev[8];
+    login(a, k_a, "Alpha", k_game);
+    login(b, k_b, "Bravo", k_game);
+    a->ops->connect(a, k_g1);
+    b->ops->connect(b, k_g1);
+    take(a, ev, 8);
+    take(b, ev, 8);
+    const int sa = a->ops->pdp_open(a, 0x1000), sb = b->ops->pdp_open(b, 0x2000);
+    for (uint32_t i = 0; i < NK_NET_PDP_QUEUE + 2u; i++) b->ops->pdp_send(b, sb, k_a, 0x1000, "x", 1);
+    CHECK(sa >= 0 && a->ops->pdp_dropped(a) == 2u, "two datagrams dropped at A");
+    CHECK(a->ops->logout(a) == NK_NET_OK && a->ops->pdp_dropped(a) == 2u, "the count survives the logout");
+    CHECK(login(a, k_a, "Alpha", k_game) == NK_NET_OK && a->ops->pdp_dropped(a) == 0u &&
+              a->ops->events_dropped(a) == 0u,
+          "and both counts are zero after the next login");
+    nk_loopnet_destroy(net);
+}
+
+/* Group numbers never wrap, and a new group never takes a live group's BSSID, even after 2^32
+ * creations (the BSSID holds the number's low 32 bits). */
+static void test_group_numbers_past_32_bits(void) {
+    NkAdhocLoopNet *net = nk_loopnet_create();
+    NkAdhocTransport *a = nk_loopnet_console(net, A), *b = nk_loopnet_console(net, B);
+    NkAdhocTransport *c = nk_loopnet_console(net, C), *d = nk_loopnet_console(net, D);
+    NkLobbyEvent ev[8];
+    login(a, k_a, "Alpha", k_game);
+    login(b, k_b, "Bravo", k_game);
+    login(c, k_c, "Charlie", k_game);
+    login(d, k_d, "Delta", k_game);
+    uint8_t bssid_a[6], bssid_b[6], bssid_c[6];
+    a->ops->connect(a, k_g1); /* number 1 */
+    CHECK(take(a, ev, 8) == 1u, "A's group");
+    memcpy(bssid_a, ev[0].bssid, 6);
+    nk_loopnet_set_groups_made(net, 0xfffffffeu);
+    b->ops->connect(b, k_g2); /* number 0xffffffff */
+    CHECK(take(b, ev, 8) == 1u, "B's group");
+    memcpy(bssid_b, ev[0].bssid, 6);
+    nk_loopnet_set_groups_made(net, UINT64_C(0x100000000));
+    c->ops->connect(c, k_g3); /* 0x100000001 would share A's BSSID, so 0x100000002 */
+    CHECK(take(c, ev, 8) == 1u, "C's group");
+    memcpy(bssid_c, ev[0].bssid, 6);
+    static const uint8_t want_b[6] = {0x02, 0x00, 0xff, 0xff, 0xff, 0xff};
+    static const uint8_t want_c[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x02};
+    CHECK(memcmp(bssid_b, want_b, 6) == 0 && memcmp(bssid_c, want_c, 6) == 0 &&
+              memcmp(bssid_c, bssid_a, 6) != 0,
+          "C's group skips the number whose BSSID A's live group holds");
+    CHECK(d->ops->scan(d) == NK_NET_OK && take(d, ev, 8) == 4u, "D's scan lists all three groups");
+    CHECK(memcmp(ev[0].group, k_g3, 8) == 0 && memcmp(ev[1].group, k_g2, 8) == 0 &&
+              memcmp(ev[2].group, k_g1, 8) == 0 && ev[3].kind == NK_LOBBY_SCAN_COMPLETE,
+          "newest first, the group numbered 0xffffffff included");
+    nk_loopnet_destroy(net);
+}
+
 int main(void) {
     test_alone();
     test_login_rules();
@@ -604,6 +695,9 @@ int main(void) {
     test_pdp();
     test_event_overflow();
     test_trace_bound();
+    test_socket_bounds();
+    test_drop_counts_reset_at_login();
+    test_group_numbers_past_32_bits();
     if (g_failures) {
         fprintf(stderr, "test_nk_adhoc_net: %d failure(s)\n", g_failures);
         return 1;

@@ -13,6 +13,7 @@
 #include "nk_adhoc_relay.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int g_failures;
@@ -246,7 +247,100 @@ static void test_ports(void) {
     CHECK(nk_relay_port_out(60000, NK_RELAY_PORT_OFFSET) == 4464u, "a port that wraps past 0");
     CHECK(nk_relay_port_in(11000, NK_RELAY_PORT_OFFSET) == 1000u, "11000 -> 1000");
     CHECK(nk_relay_port_in(4464, NK_RELAY_PORT_OFFSET) == 60000u, "and back across the wrap");
+    CHECK(nk_relay_port_in(0, NK_RELAY_PORT_OFFSET) == 0u, "port 0 comes back as 0, as it went out");
+    CHECK(nk_relay_port_in(65535, NK_RELAY_PORT_OFFSET) == 55535u,
+          "65535 comes back as 55535: 55536, which went out as 65535, does not round trip, as in PPSSPP");
     CHECK(NK_RELAY_LOBBY_PORT == 27312u && NK_RELAY_DATA_PORT == 27313u, "the two ports");
+}
+
+/* Hostile and short input (review of #2549 at eaebd9c1b5e9, tests 3 to 5). */
+static void test_short_reads(void) {
+    static const struct { uint8_t op; int need; } k_s2c[] = {
+        {0x02, 139}, {0x03, 5}, {0x04, 15}, {0x05, 1}, {0x06, 7}, {0x07, 193}};
+    uint8_t buf[200];
+    NkLobbyEvent ev;
+    for (size_t k = 0; k < sizeof k_s2c / sizeof k_s2c[0]; k++) {
+        memset(buf, 0x5a, sizeof buf);
+        buf[0] = k_s2c[k].op;
+        for (int n = 1; n < k_s2c[k].need; n++)
+            CHECK(nk_lobby_parse(buf, (size_t)n, &ev) == NK_LOBBY_NEED_MORE,
+                  "opcode %u at %d of %d bytes is a short read", (unsigned)k_s2c[k].op, n, k_s2c[k].need);
+        CHECK(nk_lobby_parse(buf, (size_t)k_s2c[k].need, &ev) == k_s2c[k].need,
+              "opcode %u whole at %d bytes", (unsigned)k_s2c[k].op, k_s2c[k].need);
+    }
+    const uint8_t disconnect4[4] = {0x03, 0x01, 0x00, 0x00};
+    CHECK(nk_lobby_parse(disconnect4, 4, &ev) == NK_LOBBY_NEED_MORE, "DISCONNECT one byte short");
+    const uint8_t bssid6[6] = {0x06, 0x02, 0xa1, 0xb2, 0xc3, 0xd4};
+    CHECK(nk_lobby_parse(bssid6, 6, &ev) == NK_LOBBY_NEED_MORE, "CONNECT_BSSID one byte short");
+    for (unsigned op = 0; op < 256u; op++) {
+        if (op >= 0x02u && op <= 0x07u) continue;
+        const uint8_t one[1] = {(uint8_t)op};
+        CHECK(nk_lobby_parse(one, 1, &ev) == NK_LOBBY_BAD, "opcode %u from a server is refused", op);
+    }
+}
+
+static void test_size_fields_are_32_bits(void) {
+    static const uint8_t k_sizes[3][4] = {{0x00, 0x00, 0x01, 0x00}, {0x00, 0x00, 0x00, 0x80},
+                                          {0xff, 0xff, 0xff, 0xff}};
+    for (size_t k = 0; k < 3; k++) {
+        uint8_t h[NK_RELAY_PDP_HEADER_SIZE] = {0x02, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0, 0, 0x34, 0x12};
+        memcpy(h + 10, k_sizes[k], 4);
+        uint8_t mac[6] = {0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
+        uint16_t port = 0x7777u;
+        uint32_t size = 0x77777777u;
+        CHECK(!nk_relay_parse_pdp_header(h, mac, &port, &size) && mac[0] == 0x77 && port == 0x7777u &&
+                  size == 0x77777777u,
+              "PDP size %02x %02x %02x %02x is refused with the outputs untouched", k_sizes[k][0],
+              k_sizes[k][1], k_sizes[k][2], k_sizes[k][3]);
+    }
+    uint32_t size = 0x77777777u;
+    CHECK(!nk_relay_parse_ptp_data_header(k_sizes[0], &size) && size == 0x77777777u,
+          "PTP size 00 00 01 00 (65536) is refused with the output untouched");
+}
+
+/* A CONNECT carrying values no real console holds. The codec checks only opcode and length, so
+ * each is decoded as sent; the consumer validates (nk_adhoc_relay.c, known limits). */
+static void test_hostile_connect(void) {
+    static const uint8_t k_macs[4][6] = {{0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+                                         {0x01, 0x00, 0x5e, 0x00, 0x00, 0x01},
+                                         {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+                                         {0x02, 0x11, 0x22, 0x33, 0x44, 0x55}}; /* k_mac, the console's own */
+    uint8_t c[139];
+    NkLobbyEvent ev;
+    for (size_t k = 0; k < 4; k++) {
+        memset(c, 0, sizeof c);
+        c[0] = 0x02;
+        memcpy(c + 1, "Peer", 4);
+        memcpy(c + 129, k_macs[k], 6);
+        c[135] = 0x02;
+        CHECK(nk_lobby_parse(c, 139, &ev) == 139 && memcmp(ev.mac, k_macs[k], 6) == 0 && ev.peer_id == 2u,
+              "a CONNECT with MAC %02x:%02x:.. decodes as sent", k_macs[k][0], k_macs[k][1]);
+    }
+    memset(c, 0, sizeof c);
+    c[0] = 0x02;
+    memcpy(c + 129, k_peer, 6);
+    CHECK(nk_lobby_parse(c, 139, &ev) == 139 && ev.nickname[0] == '\0',
+          "a CONNECT with an empty nickname decodes as sent");
+}
+
+static void test_check_boundaries(void) {
+    CHECK(nk_relay_product_ok("AZ0912345") && nk_relay_product_ok("ULUS10000"), "A-Z and 0-9");
+    CHECK(!nk_relay_product_ok("@LUS10000") && !nk_relay_product_ok("[LUS10000") &&
+              !nk_relay_product_ok("ULUS1000/") && !nk_relay_product_ok("ULUS1000:"),
+          "the bytes either side of A-Z and 0-9 are refused");
+    CHECK(!nk_relay_product_ok("ULUS1000") && !nk_relay_product_ok("ULUS100000") &&
+              !nk_relay_product_ok(""),
+          "eight, ten and no characters are refused");
+    uint8_t *field = (uint8_t *)malloc(NK_RELAY_NICKNAME_LEN); /* exactly the field: no terminator */
+    CHECK(field != NULL, "allocate a field");
+    if (field) {
+        memset(field, 'n', NK_RELAY_NICKNAME_LEN);
+        CHECK(nk_relay_nickname_field_ok(field), "a full 128-byte field with no terminator");
+        field[0] = 0u;
+        CHECK(!nk_relay_nickname_field_ok(field), "a field whose first byte is zero");
+        free(field);
+    }
+    CHECK(!nk_relay_nickname_field_ok(NULL), "no field");
 }
 
 int main(void) {
@@ -257,6 +351,10 @@ int main(void) {
     test_relay_init();
     test_relay_data();
     test_ports();
+    test_short_reads();
+    test_size_fields_are_32_bits();
+    test_hostile_connect();
+    test_check_boundaries();
     if (g_failures) {
         fprintf(stderr, "test_nk_adhoc_relay: %d failure(s)\n", g_failures);
         return 1;

@@ -60,8 +60,9 @@ We aim to respond promptly and will remove material where appropriate.
   (Copyright (c) 2014- PPSSPP Project, GPL-2.0-or-later, PPSSPP's port of
   Coldbird's aemu server), conveyed as GPL-3.0-or-later. The relay codec
   (`src/core/nk_adhoc_relay.c`) encodes the aemu_postoffice wire format, and no
-  aemu_postoffice code is imported; its login checks are translated from
-  `login_user_data` in PPSSPP's `proAdhocServer.cpp` and its port offset from
+  aemu_postoffice code is imported; all its login checks, the product-code
+  check included, are translated from `login_user_data` in PPSSPP's
+  `proAdhocServer.cpp`, and its port offset from
   PPSSPP's `Core/HLE/sceNetAdhoc.cpp` (Copyright (c) 2013- PPSSPP Project) at the
   same revision, and it is conveyed as GPL-3.0-or-later. Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
 - **PSPSDK / PSPDEV** — permissive per-component declarations and BSD-family

@@ -32,7 +32,8 @@
  *     (nk_adhoc_relay.c), PPSSPP's three checks in its order. They take C strings, so a product
  *     code must end after nine bytes and a nickname within 128; a refused login answers
  *     NK_NET_BAD_ARG and leaves the console logged out. A login empties the event queue and sets
- *     events_dropped to zero, as a new connection starts with nothing sent and nothing lost.
+ *     events_dropped and pdp_dropped to zero, as a new connection starts with nothing sent and
+ *     nothing lost (the sockets the datagram count belongs to closed at the logout before).
  *   - Where PPSSPP logs a client out for a request (a login while logged in, a join while in a
  *     group, a group name with a character outside A-Z, a-z and 0-9, a leave outside a group, a
  *     scan inside one), the medium
@@ -72,7 +73,7 @@ typedef struct Socket {
 
 typedef struct Group {
     int used;
-    uint32_t number; /* creation order: a larger number is a newer group */
+    uint64_t number; /* creation order: a larger number is a newer group; never wraps */
     char product[NK_RELAY_PRODUCT_LEN + 1u];
     uint8_t name[NK_RELAY_GROUP_LEN];
     uint8_t bssid[NK_RELAY_MAC_LEN];
@@ -99,7 +100,7 @@ typedef struct Console {
 struct NkAdhocLoopNet {
     Console consoles[NK_LOOPNET_CONSOLES];
     Group groups[NK_LOOPNET_CONSOLES]; /* each console is in one group at most */
-    uint32_t groups_made;
+    uint64_t groups_made;
     NkLoopTrace trace[NK_LOOPNET_TRACE];
     size_t trace_count; /* events queued since the last nk_loopnet_trace, kept or not */
 };
@@ -215,13 +216,26 @@ static int find_group(const NkAdhocLoopNet *net, const char *product,
     return -1;
 }
 
+static int bssid_in_use(const NkAdhocLoopNet *net, uint32_t low) {
+    for (unsigned i = 0; i < NK_LOOPNET_CONSOLES; i++) {
+        const Group *g = &net->groups[i];
+        if (g->used && (uint32_t)g->number == low) return 1;
+    }
+    return 0;
+}
+
 static int make_group(NkAdhocLoopNet *net, const char *product, const uint8_t name[NK_RELAY_GROUP_LEN]) {
     for (unsigned i = 0; i < NK_LOOPNET_CONSOLES; i++) {
         Group *g = &net->groups[i];
         if (g->used) continue;
+        /* The BSSID carries the number's low 32 bits; a number whose BSSID a live group holds
+         * (only after 2^32 creations) is skipped, so two live groups never share one. */
+        uint64_t number;
+        do number = ++net->groups_made;
+        while (bssid_in_use(net, (uint32_t)number));
         memset(g, 0, sizeof *g);
         g->used = 1;
-        g->number = ++net->groups_made;
+        g->number = number;
         memcpy(g->product, product, NK_RELAY_PRODUCT_LEN);
         memcpy(g->name, name, NK_RELAY_GROUP_LEN);
         g->bssid[0] = 0x02u; /* locally administered, unicast */
@@ -242,7 +256,7 @@ static int make_group(NkAdhocLoopNet *net, const char *product, const uint8_t na
  * NK_NET_BAD_ARG. A login that passes saves the MAC, the nickname and the product code, which
  * stands for PPSSPP's game node: groups are found per product code (find_group).
  * The medium's own rules: a MAC another console holds is refused (PPSSPP logs it and accepts it),
- * and a login starts with an empty event queue and a drop count of zero, as a new connection
+ * and a login starts with an empty event queue and both drop counts at zero, as a new connection
  * does. A LOGIN from a console already logged in is an opcode PPSSPP's server_loop does not take
  * in that state, so the server logs the console out. */
 static int lo_login(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], const char *nickname,
@@ -264,6 +278,7 @@ static int lo_login(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], co
     c->group = -1;
     c->ev_head = c->ev_count = 0u;
     c->ev_dropped = 0u;
+    c->pdp_dropped = 0u;
     c->logged_in = 1;
     return NK_NET_OK;
 }
@@ -325,7 +340,7 @@ static int lo_scan(NkAdhocTransport *t) {
     if (!c->logged_in) return NK_NET_NOT_LOGGED_IN;
     if (c->group >= 0) return drop_client(c);
     NkAdhocLoopNet *net = c->net;
-    uint32_t below = UINT32_MAX;
+    uint64_t below = UINT64_MAX;
     for (;;) {
         int next = -1;
         for (unsigned i = 0; i < NK_LOOPNET_CONSOLES; i++) {
@@ -476,6 +491,10 @@ void nk_loopnet_destroy(NkAdhocLoopNet *net) {
 NkAdhocTransport *nk_loopnet_console(NkAdhocLoopNet *net, unsigned index) {
     if (!net || index >= NK_LOOPNET_CONSOLES) return NULL;
     return &net->consoles[index].base;
+}
+
+void nk_loopnet_set_groups_made(NkAdhocLoopNet *net, uint64_t made) {
+    if (net) net->groups_made = made;
 }
 
 size_t nk_loopnet_trace(NkAdhocLoopNet *net, NkLoopTrace *out, size_t max) {

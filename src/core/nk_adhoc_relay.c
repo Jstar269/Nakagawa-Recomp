@@ -15,13 +15,27 @@
  *     must end after its nine bytes and a nickname within its 128 bytes; a longer one does not fit
  *     the field and is refused. Inside the field the rules are PPSSPP's: nine characters A-Z or
  *     0-9, and a nickname whose first byte is not zero, terminated or not.
- *   - The port offset is passed in rather than read from settings.
- * The login checks were first carried over, with small edits, from an earlier version of this
- * file; a review of pull request #2549 found that one of them (a nickname of 128 bytes refused)
- * was not PPSSPP's rule, and on 2026-11-12 nk_relay_mac_ok and the checks in nk_lobby_login were
- * deleted and written again from login_user_data. nk_relay_product_ok was kept: its body is
- * unchanged apart from comments, and its behaviour is PPSSPP's product-code rule, the check in
- * login_user_data that each of the nine bytes of the product code is A-Z or 0-9. */
+ *   - The port offset is passed in rather than read from settings, and a relay port of 0 comes
+ *     back as 0, as port 0 goes out as 0 (PPSSPP's reverse_port_simple subtracts the offset).
+ *   - nk_relay_nickname_field_ok checks a raw 128-byte field without reading past it.
+ * All the login checks (nk_relay_product_ok, nk_relay_mac_ok, nk_relay_nickname_ok and the checks
+ * in nk_lobby_login) are written from PPSSPP's login_user_data; none is from aemu_postoffice. An
+ * earlier version of this file carried them over, with small edits, from its 2026-11-06 version,
+ * which followed aemu_postoffice; reviews of pull request #2549 found this, and on 2026-11-12 each
+ * was deleted and written again from login_user_data, nk_relay_product_ok last.
+ *
+ * Known limits for the wiring step (nothing calls this codec yet; the slice that opens the relay
+ * connection decides them):
+ *   - nk_lobby_parse checks only a packet's opcode and length. A CONNECT from a hostile server may
+ *     carry the all-ones, all-zero or a group MAC, the console's own MAC, an empty nickname or a
+ *     repeated peer id, a DISCONNECT an unknown id, and a SCAN a group name with any bytes and no
+ *     terminator; each is decoded as it is. The consumer validates these fields before it puts a
+ *     peer in a list or fans a broadcast out to it.
+ *   - The product code and nickname differ from the HLE layer's: sceNetAdhocctlInit accepts any
+ *     product (a lower-case one too, as a PSP does), while the server's rule here refuses lower
+ *     case; sceNetAdhocctlGetParameter writes at most 127 bytes of the nickname and a NUL, while
+ *     the server accepts 128. The player caps a nickname at 32 bytes (#2197), so the second never
+ *     shows today; the wiring step maps the first (refuse at login, or report it). */
 
 #include "nk_adhoc_relay.h"
 
@@ -45,8 +59,8 @@ static uint32_t get32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-/* The login checks, rewritten on 2026-11-12 from login_user_data in PPSSPP's
- * Core/HLE/proAdhocServer.cpp at 3bc60270. The server accepts a LOGIN packet when all three hold,
+/* The login checks, written from login_user_data in PPSSPP's Core/HLE/proAdhocServer.cpp at
+ * 3bc60270. The server accepts a LOGIN packet when all three hold,
  * checked in this order: each of the nine product-code bytes is A-Z or 0-9; the MAC is neither
  * FF:FF:FF:FF:FF:FF nor 00:00:00:00:00:00; the nickname's first byte is not zero. It refuses
  * anything else. It checks nothing more of the nickname: all 128 bytes of the field may be text,
@@ -54,12 +68,16 @@ static uint32_t get32(const uint8_t *p) {
  * within its field (nine and 128 bytes): a longer one cannot be sent. */
 
 bool nk_relay_product_ok(const char *product) {
-    if (!product) return false;
-    for (size_t i = 0; i < NK_RELAY_PRODUCT_LEN; i++) {
-        const char ch = product[i]; /* a terminator before the ninth byte fails here */
-        if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))) return false;
+    if (product == NULL) return false;
+    /* login_user_data: "Product Code Check", proAdhocServer.cpp:561-569 at 3bc60270. */
+    int valid_product_code = 1;
+    for (int i = 0; i < (int)NK_RELAY_PRODUCT_LEN && valid_product_code == 1; i++) {
+        /* Valid characters; a terminator inside the nine fails here, before the next byte. */
+        if (!((product[i] >= 'A' && product[i] <= 'Z') || (product[i] >= '0' && product[i] <= '9')))
+            valid_product_code = 0;
     }
-    return product[NK_RELAY_PRODUCT_LEN] == '\0';
+    /* The C-string rule (this project's): the code ends right after its nine characters. */
+    return valid_product_code == 1 && product[NK_RELAY_PRODUCT_LEN] == '\0';
 }
 
 bool nk_relay_mac_ok(const uint8_t mac[NK_RELAY_MAC_LEN]) {
@@ -74,6 +92,10 @@ bool nk_relay_nickname_ok(const char *nickname) {
     for (size_t i = 1; i <= NK_RELAY_NICKNAME_LEN; i++)
         if (nickname[i] == '\0') return true;
     return false;
+}
+
+bool nk_relay_nickname_field_ok(const uint8_t field[NK_RELAY_NICKNAME_LEN]) {
+    return field != NULL && field[0] != 0u;
 }
 
 size_t nk_lobby_login(uint8_t out[NK_LOBBY_LOGIN_SIZE], const uint8_t mac[NK_RELAY_MAC_LEN],
@@ -225,7 +247,7 @@ bool nk_relay_parse_ptp_data_header(const uint8_t in[NK_RELAY_PTP_DATA_HEADER_SI
 /* Translated from PPSSPP's offset_port_simple and reverse_port_simple (Core/HLE/sceNetAdhoc.cpp
  * at 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, GPL-2.0-or-later, Copyright (c) 2013- PPSSPP
  * Project); modified for this project: C99, the offset passed in rather than read from the
- * settings. */
+ * settings, and port 0 coming back as 0. */
 uint16_t nk_relay_port_out(uint16_t port, uint16_t offset) {
     if (port == 0u) return 0u;
     const uint16_t shifted = (uint16_t)(port + offset);
@@ -233,5 +255,6 @@ uint16_t nk_relay_port_out(uint16_t port, uint16_t offset) {
 }
 
 uint16_t nk_relay_port_in(uint16_t port, uint16_t offset) {
+    if (port == 0u) return 0u; /* port 0 went out as 0; this project's addition */
     return (uint16_t)(port - offset);
 }
