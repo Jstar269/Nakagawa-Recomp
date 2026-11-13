@@ -3434,7 +3434,8 @@ static void test_settings_pages(void) {
               strstr(dump, "\"TEXTURE PACK: OFF\"") < strstr(dump, "\"LATE PAD SAMPLING: OFF\"") &&
               strstr(dump, "Ace only, with 60 FPS logic. Reads the pad") != NULL,
           "Settings > Enhanced shows the Late pad sampling row after Texture pack");
-    /* The 18th (Soft shadows, contract 11.3.13) follows Late pad sampling, at 0x4684. */
+    /* The 18th (Soft shadows, contract 11.3.13) follows Late pad sampling, at 0x4684; 1800 tall shows
+       its row, and its description wraps after "names their". */
     CHECK(PLAYER_UI_ID_ENHANCED_PART(17) == 0x4684u &&
               PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SHADOW) == 0x4684u && PLAYER_PART_COUNT >= 18,
           "the part rows' ids: the 18th in the second range, after the 17th");
@@ -3442,7 +3443,8 @@ static void test_settings_pages(void) {
               strstr(dump, "\"LATE PAD SAMPLING: OFF\"") != NULL &&
               strstr(dump, "\"SOFT SHADOWS: OFF\"") != NULL &&
               strstr(dump, "\"LATE PAD SAMPLING: OFF\"") < strstr(dump, "\"SOFT SHADOWS: OFF\"") &&
-              strstr(dump, "Ace only, in games whose package names their shadows") != NULL,
+              strstr(dump, "\"Ace only, in games whose package names their") != NULL &&
+              strstr(dump, "shadows. Changes what the frame shows.\"") != NULL,
           "Settings > Enhanced shows the Soft shadows row after Late pad sampling");
     for (unsigned i = 0u; i < PLAYER_PART_COUNT; ++i) {
         PlayerUiAction part =
