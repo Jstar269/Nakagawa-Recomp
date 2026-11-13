@@ -445,10 +445,38 @@ enhancement package id a build records, not its declaration.
 
 Only the maintainer releases a package the project ships in `assets/enhancements/` (section 5.1), by a decision
 recorded in an entry for that package under this section, with what was measured and the limits known when it was
-released. No package the project ships is released yet. The player honours `"experimental": false` only in a
+released (the entries below). The player honours `"experimental": false` only in a
 package it finds in the source tree's `assets/enhancements/` (section 5.1), never in one from the user's data
 folder: a package there, which comes first, still loads and plays but is always shown as experimental, whatever it
 declares.
+
+#### 9.10.1. *Hot Shots Tennis* (UCUS98701): `hst.timing.native_60hz`
+
+- **Status.** Released from package 14.0.0-pre1 by the owner's decision of 2026-11-12 (#1732), with the known
+  limits below. It is short of the goal #1732 sets, true 60 logic updates a second in menus, the title screen
+  and matches.
+- **Measured** (the side-by-side check of section 9.7, recorded in #2362). Package 14.0.0-pre1 against the authentic
+  game on a private full-match route (title screen, menus and one full match): 57.2 logic updates per game second in
+  the menus (with the boot), 59.9 on the title screen and 57.1 in a match. In that run 77 % of the match's seconds
+  after its entry load held 57 or more, with short dips (the lowest second 33), so the `SLOWED` line of section 9.5,
+  item 4 (three seconds in a row under 57) can appear in a match. No compared event differed from the authentic
+  game: the point winner, the ball's side and the ball's owner match, and both players' random-number seeds advance
+  1.98 and 2.03 times as often, as `rescale_probability` (section 9.3) expects. Shot-type changes were too few to
+  judge, and the tool's overall verdict reads `FAIL` only for reseeds it cannot resolve as generator steps, which
+  the authentic run has about as many of (35 against 38). The host was never fully idle: the measured run had 43 %
+  mean processor load from other work, and an earlier run at 53 % fell to 52.7 in the match (`SLOWED`).
+- **Known limits.**
+  1. Further sites belong in the next package update: the eight `gate_30hz_store` sites of #2360 (a cursor ease, a
+     step toward a target and a float ease, which run twice as fast at 60 Hz until then), and five triage rows
+     still open (#2362).
+  2. At 60 Hz the step from the main menu into single player takes 3.94 s longer than in the authentic game (288
+     vertical blanks against 52). A 60 Hz run with an earlier package shows the same, so it is older than
+     14.0.0-pre1. Its cause is not traced yet (#1732).
+
+  Also recorded in #2362: when two bounces come 33 ms apart or less, the bounce-effect sites free their emitters
+  up to two 60 Hz updates early.
+- **Not run.** A run on a fully idle host, and a measurement of whether 14.0.0-pre1 costs more per update than
+  13.0.0-pre1.
 
 ## 10. Play Modes: Authentic, Enhanced and Ace
 
@@ -457,11 +485,11 @@ The player offers three play modes per game (#2055):
 - **Authentic** is the standard: the game as released, recreating the PSP as closely as the project can. It is the
   default for a new library.
 - **Enhanced** turns on the project-authored improvements that work for any game: texture filtering, crisp system
-  text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound, finer patches, sharper
-  enlarging and full 32-bit colour (section 10.11). A new library starts with texture filtering, crisp system text
-  and the game badge on and the rest off, and a graphics preset sets crisp system text and sharper enlarging
-  (section 10.1); finer patches and full 32-bit colour are in no preset. Each one is a *part* that can be turned
-  off for the library or for a single game.
+  text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound, finer patches, smooth
+  far textures, sharper enlarging and full 32-bit colour (section 10.11). A new library starts with texture
+  filtering, crisp system text and the game badge on and the rest off, and a graphics preset sets crisp system text
+  and sharper enlarging (section 10.1); finer patches, smooth far textures and full 32-bit colour are in no preset.
+  Each one is a *part* that can be turned off for the library or for a single game.
 - **Ace** is Enhanced plus the improvements made for that game alone. Today that is the title's 60 FPS game logic
   package (section 9). The player offers Ace only for a title with a usable package; its own parts can be turned off
   for that game too.
@@ -475,16 +503,17 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off`. `tier` (`enhanced` or `ace`) only names the
-run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `stick` (the title's
-stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section 11.3.10), `depth` (`32` or `off`,
-section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `peak` (`limit` or `off`, section 10.22), `glyphs` (`on`
-or `off`, sections 10.13 and 11.3.5) and `cull` (`on` or `off`, section 11.3.6) are the other keys a line may leave
-out: a missing `stick`, `load`, `depth`, `ssaa`, `peak`, `glyphs` or `cull` is off, `stick=<counts>`, `load=fast`
-and `cull=on` need `tier=ace` (`depth=32`, `ssaa=2|4`, `peak=limit` and `glyphs=on` do not), the launcher writes
-`;load=fast` and `;cull=on` only for an Ace launch with that part on and `;ssaa=2` or `;ssaa=4` for an Enhanced or
-Ace launch with supersampling on, and no launcher writes `depth` (section 11.3.12), `peak` (section 10.22) or
-`glyphs` (section 11.3.5) yet: a line that carries one is written by hand. A line writes them only when on, in that
-order, `cull` last, so a line with them off is the line without them, byte for byte. Every
+run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `mips` (`on` or `off`,
+section 10.16), `stick` (the title's stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section
+11.3.10), `depth` (`32` or `off`, section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `peak` (`limit` or `off`,
+section 10.22), `glyphs` (`on` or `off`, sections 10.13 and 11.3.5) and `cull` (`on` or `off`, section 11.3.6) are the
+other keys a line may leave out: a missing `mips`, `stick`, `load`, `depth`, `ssaa`, `peak`, `glyphs` or `cull` is off,
+`stick=<counts>`, `load=fast` and `cull=on` need `tier=ace` (`mips=on`, `depth=32`, `ssaa=2|4`, `peak=limit` and
+`glyphs=on` do not), the launcher writes `;mips=on` for an Enhanced or Ace launch with that part on, `;load=fast` and
+`;cull=on` only for an Ace launch with that part on and `;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with
+supersampling on, and no launcher writes `depth` (section 11.3.12), `peak` (section 10.22) or `glyphs` (section
+11.3.5) yet: a line that carries one is written by hand. A line writes them only when on, in that order, `mips` right
+after `twin` and `cull` last, so a line with them off is the line without them, byte for byte. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -810,7 +839,7 @@ that builds one clip-space matrix per camera and tests object bounds against it.
 ```json
 "enhanced": {"default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on", "wide": "off",
             "smooth": "off", "sas": "off", "tess": "off", "cull": "off", "upscale": "off", "stick": "off",
-            "load": "off", "twin": "off"},
+            "load": "off", "twin": "off", "mips": "off"},
 "title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}}
 ```
 
@@ -836,7 +865,8 @@ when `"enhanced"` is absent, maps them as below, and writes the new keys from th
 `tests/native/test_player_state.c` (`test_play_mode_settings`, `test_play_mode_settings_mapping`) checks the names,
 the precedence, the off switches at both levels and this mapping; `test_play_mode_upscale_settings` checks sharper
 enlarging (`"upscale"`: `fsr1` or `off`) and the upscaler it sets for the launch; `test_play_mode_ssaa_settings`
-checks supersampling (`"ssaa"`: `2`, `4` or `off`) and its place on the launch line.
+checks supersampling (`"ssaa"`: `2`, `4` or `off`) and its place on the launch line; `test_play_mode_mips_settings`
+checks smooth far textures (`"mips"`: `on` or `off`) and the `mips=on` it adds to the launch line.
 
 ### 10.10. Texture Scaling and the Smart 2D Filter
 
@@ -1541,6 +1571,146 @@ window's keys turn it on, and it never runs in an Authentic run.
   output path, the guest queue seeded from the host's depth once per run and draining in guest time, and the host
   queue and pushes back after it stops. `ace-selftest` pins the readout and the report.
 
+### 10.16. Smooth Far Textures (Host Mip Chains)
+
+Most PSP games give a texture one level and let the GE sample it with a bilinear filter however small it is drawn
+(#1273). At 1x a far surface is a few pixels across and the aliasing is part of the PSP's picture; at 4x the same
+surface covers sixteen times the pixels, each of which samples one point of a texture many texels across, so the
+surface shimmers as the camera moves. This feature builds a mip chain on the host for such a texture and samples it
+trilinearly, the way the GE samples a chain the game supplies. It is guest-visible (section 11.1), as texture
+filtering is: section 11.3.8 is its entry and says what the guest can observe; this section says how it draws. The
+code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions in `src/rt/gpu_sdl3vk/ge_gpu.c`
+(the cache, the bind and the stamps); the software renderer has no chain.
+
+- **Setting.** The optional `mips` key of the `SR_ACE` launch line (section 10.1): `mips=on`, or no key, which is
+  off. In the player it is the part "Smooth far textures" (`"mips"`: `on` or `off`) on the library's
+  Settings > Enhanced page and on each game's own page (section 10.9). It is off in a fresh settings file, is in no
+  graphics preset and is not turned on by choosing Enhanced or Ace. An authentic run has no launch line, so the
+  chain code never runs there: no buffer, no chain, no extra descriptor set, and the shader branch is never taken.
+- **Which textures.** A cache entry gets a chain when the game gives it one level (no `TEXMODE` maximum level), its
+  minifying filter is linear, both sides are powers of two up to 512 texels with the longer at least 2, and no byte
+  of it lies in a live render target. A texture the game mips keeps the game's own chain (#1373) and gets none of these. A render
+  target, read back as a texture, never gets one: its contents are guest drawing, not texture data. A texture that
+  changes every frame, from a CPU write or a DMA, is decoded again as before, and its chain follows it: built again
+  for contents the renderer has not seen, or taken from the chain cache (below) for contents it has.
+  A CLUT texture's palette is part of its cache key, so each palette has its own entry and its own chain, and a
+  palette animation that comes back to a palette finds the chain it built the first time.
+- **When a chain is built.** At the first bind after a decode that the chain applies to (the next item), not at the
+  decode: a decode uploads level 0 alone and marks the chain stale. The bind builds it from the texels that decode
+  left, or, when the texture was decoded for an earlier draw, decodes level 0 again first. The chain's view,
+  sampler and descriptor set are made at the first such bind too. Contents that only through-mode draws,
+  alpha-unused or alpha-tested draws, 1:1 draws or render targets ever meet, such as a loading screen's or a menu's
+  textures, cost no build. Two limits keep builds off the frames that cannot afford them, and a draw either limit
+  stops binds level 0, as with the part off:
+  - **The build budget.** The builds started in one guest frame, from one of the guest's display flips to the
+    next, stop once they have read 131,072 level-0 texels (two 256x256 textures); one build may run past it by its
+    own size, and a chain taken from the cache, or contents refused below, charge a sixteenth of their texels. A
+    later bind builds the chain. The budget counts texels and guest flips, not host time or host presents (which
+    a frame cap drops on a wall-clock grid), because a chain changes the frame the guest keeps: which draws bind
+    one is the same on every host and in every deterministic run started from boot, record and replay included
+    (a saved state does not carry the budget, the streaming table or the chain cache).
+  - **Streaming textures.** A texture address whose contents are decoded anew in three guest frames in a row,
+    each within two frames of the last (a movie on a surface, a palette fade, which makes a new entry at each step, a
+    texture rewritten every frame), would build chains that are replaced before they are seen again. While it
+    streams, contents the chain cache holds bind their kept chain, and contents a streaming address has shown once
+    before (a slot several textures share in turn) are built when they come back; contents new to both keep level
+    0, and their hash is noted in a ring of 1,024. Once the address holds still for longer than two frames, its
+    next draw builds as usual.
+- **Which draws.** A draw binds the chain only when it is transformed (through-mode HUDs, menus and text keep
+  level 0, as texture filtering's rule has it), its minifying filter is linear, and, for a texture with any alpha
+  under 255, the draw blends by the texture's alpha and does not alpha-test it: the texture function is RGBA, the
+  source or the destination blend factor reads the source alpha, and the alpha test is off. A draw that shows a
+  keyed texel's colour as it is would show the fill colour described below instead, so it keeps level 0. An
+  alpha-tested draw keeps level 0 because the chain's alpha is a plain mean: a far cut-out (foliage, a fence, hair)
+  would thin out under a high reference or fill in under a low one, and the depth and stencil it writes would
+  follow; with level 0 its coverage stays the game's own. A draw that maps texels 1:1 onto guest pixels (the smart
+  2D test of section 10.10), or a sprite that magnifies its texture, is never minified at any render scale, so it
+  binds level 0 too, and sharp game text (10.13) and the smart 2D filter take it as they do with the part off. A colour-tested draw with a linear filter is drawn by the software
+  renderer, as with the part off, so it never samples a chain (the colour test keys on the game's own texels). Each
+  rule is rechecked at every bind, and the exit stamp counts the binds each rule kept at level 0.
+- **How a level is built.** After the palette lookup, from the RGBA8 texels the renderer uploads as level 0, which
+  it never changes. Each texel of the next level is the mean of a 2x2 block of the level above in linear light (the
+  sRGB curve decoded, averaged, encoded), with colour weighted by alpha so a transparent texel adds no colour, and
+  alpha averaged plainly; a block with no alpha at all takes the plain mean of its colours, with alpha 0. Then each
+  texel with alpha 0 takes the colour of its nearest texel with alpha above 0 (a two-pass chamfer distance over the
+  whole level, with no wrap), so no bilinear or anisotropic tap, which can span three texels, blends a colour key's
+  colour into a visible edge. A level of one texel ends the chain: 1 + log2 of the longer side levels.
+- **How it samples.** The sampler filters each level linearly and between levels linearly (trilinear), with 16x,
+  8x, 4x or 2x anisotropy when texture filtering is on, from level 0 to the last level. The shader branch
+  (`psp.frag`, flag bit 23) samples with gradients it computes from the device-pixel derivatives of the texture
+  coordinate before the PSP's 1/16-texel snap, so the level is chosen per device pixel: there is no level-of-detail
+  bias, and the render scale is in the gradient. A texture drawn at two texels per guest pixel is minified at 1x
+  and samples level 1; at 2x and above it is not minified and samples level 0, as the game draws it. The same entry
+  keeps a one-level view and sampler for every draw that does not bind the chain, so those draws sample exactly as
+  they do with the part off.
+- **The texture scaler and texture replacement** (sections 10.10 and 10.12). A scaled copy or a replacement
+  texture, when one exists for the entry, is what the draw samples, and it has no chain yet; a chain for those
+  images is later work. The smart 2D filter never takes a draw that binds the chain.
+- **Memory and cost.** A chain adds a third of level 0's bytes or less (a 64x64 texture: 1365 texels on top of
+  4096), in the same image as level 0, plus one descriptor set an entry. The chain is freed with its entry at
+  eviction and at shutdown. The builder's two buffers, made once when the part is on, hold a 512x512 chain's levels below level 0
+  (0.33 MiB)
+  and its float work area (2.25 MiB). A build is CPU work on the GE thread, bounded per guest frame by the build
+  budget above. A game that streams several textures
+  through one VRAM slot in turn decodes each of them again and again, so the renderer keeps built chains in a host
+  cache keyed by a 64-bit hash of every decoded level-0 texel and the size: contents it has seen upload their kept
+  chain instead of building it (the hash costs about a fifteenth of a build). The cache holds at most 32 MiB, about
+  two and a half times the chains Hot Shots Tennis keeps resident at 4x, and drops the least recently used chain
+  first. The exit stamp gives the builds, the reuses, the level-0 decodes a late build repeated, the time of all
+  three and the cache's peak. On LittleBigPlanet's first story level at 4x the cache saved 59 of about 9,000
+  builds, as nearly all of that title's contents are new; on Hot Shots Tennis it saved more builds than were made.
+  A 3D texture atlas also bleeds between its cells at far levels, as any mip chain does: the key fill covers only
+  texels with alpha 0.
+- **Stamps.** `ACE_MODE: mips on (textures with one level get host-built mip chains)` after the `ACE_MODE: on` line;
+  `HOST_MIPS: on (filter=box in linear light, alpha-weighted, key fill; bias=0 at <S>x; anisotropy=<A>)` and the
+  guest-visible line section 11.3.8 describes when the renderer starts; `HOST_MIPS: exit (entries=, sets=, builds=,
+  reused=, redecodes=, texels=, build_ms=, bound=, plain_alpha_unused=, plain_alpha_test=, plain_onetoone=,
+  plain_budget=, plain_stream=, plain_target=, set_failures=, chain_peak_kib=, cache_peak_kib=, frame_peak_ms=)`
+  (`entries` are the images with a chain, `sets` the ones a draw has bound; `build_ms` is the time of the repeated
+  decodes, the hash, the cache lookup, the builds and the copies into the upload buffer, and `frame_peak_ms` the
+  most of it one guest frame took; `texels` counts built ones; `plain_onetoone` counts draws, the other `plain_`
+  fields binds) when it
+  stops, or, on the `SR_EXIT_AT_VBLANK` path that skips the renderer's shutdown, from `ace_finish` (once either
+  way). The report's `effective` block has `"mips"`, the game badge lists "smooth far textures", and the flight
+  recorder's `runtime.enhancements` carries the launch line. Section 10.4 applies: the run is an Enhanced run. If the
+  builder's buffers cannot be made, the part is unavailable for the run and the report says so.
+- **Tests.**
+  - `tex-mips-selftest` runs `tex_mips.h` alone: the level count and chain size, the sRGB round trip, the
+    table-driven encode against the search at every midpoint and a sweep of 0..1, a checker whose every level is the
+    linear-light grey (188, not the gamma mean 128), alpha weighting (one opaque blue texel among three transparent
+    red ones gives blue at alpha 64), a colour-keyed edge whose fill leaves no key colour in any level, and a texture
+    with no alpha at all. `tex-mips-mutant` builds it without the fill and requires the key-edge cell to fail for
+    that reason.
+  - `gpu-mips-selftest` runs `ge_gpu.c`'s own hooks on a Vulkan device and reads the target at device resolution: a
+    64x64 single-level CLUT checker drawn 5 pixels wide samples the chain's grey, not level 0's aliasing; a draw at
+    two texels per guest pixel matches the same draw on level 0 alone pixel for pixel from 2x, and is the chain's
+    grey at 1x; a second palette builds a second chain and the first palette, back again, finds its own; a rewrite
+    of the texels rebuilds the chain, and the checker written back takes its cached chain with no build; new
+    contents drawn in through mode build nothing, and the first minified draw of them decodes level 0 again and
+    builds once, after a submit that closes the command buffer; an alpha-tested draw of a texture with alpha, and a
+    transformed draw at 1:1, bind level 0; past the build budget a draw binds level 0 and builds nothing, and with
+    budget it builds; with room for two 64x64 textures, two new contents build in one guest frame and the third
+    binds level 0 until the next, which guest flips that no host present follows still open; new contents at the
+    address in three frames in a row keep level 0 at the third,
+    while it streams contents the cache holds bind their chain, contents refused once build when they come back
+    and contents new again keep level 0, and the address held still builds again; a colour-keyed edge blended over black takes no key colour; through-mode and
+    alpha-unused draws keep level 0, and a colour-tested draw stays with the software renderer; the chain bytes
+    are 1365 texels an entry. It runs at render
+    scales 4, 2 and 1, with 16x texture filtering, and with the part off, where the minified draw must show level
+    0's aliasing and no entry may have a chain, and the key-off cell requires the draw the renderer made before
+    the part: an image of the game's one level, no chain view, sampler, set or builder buffers, the entry's own
+    set bound and no chain flag in the batch. `gpu-mips-mutant` builds it four times: recording the late build's
+    barrier before a command buffer begins and building at every decode, which the deferred cell must kill, and
+    giving an entry chain levels with the key off, which the key-off cell must kill, and keying the budget on
+    host presents, which the budget cell must kill.
+  - `ace-selftest` pins the key: optional, `on` or `off`, in an Enhanced or Ace line, written only when on, after
+    `twin` and before `stick`, `load`, `depth` and `cull`; the longest line the key table allows (`ace_longest_line`)
+    fits `ACE_SPEC_MAX`, and so
+    the flight recorder's field, and every part on, found from that table, has badge words that fit `ACE_WORDS_MAX`;
+    `ace_finish` runs a part's exit stamp once. `test_play_mode_mips_settings` in `tests/native/test_player_state.c`
+    checks the part at both levels, its save and load, and the launch line, with `mips` after `twin` and `cull` after `mips`.
+    `gpu-coherence-selftest`'s authentic run requires no entry to have a chain.
+
 ### 10.20. Higher-Precision Host Depth (`depth=32`)
 
 The PSP's depth buffer holds 16 bits, and the Vulkan renderer keeps that format (`D16_UNORM`). Games set their near
@@ -1840,6 +2010,20 @@ committed there (`rtt-depth-alias`); otherwise the colour target's rules apply. 
 switch are in `src/rt/gpu_sdl3vk/README.md` (#2052).
 
 At 1x the readback is the PSP's value.
+
+The render-target reads that decode at 1x (#2279; the README lists each with its reason) fall into two groups:
+
+- no scaled form exists, because the texture's texels are not the target's pixels: 8888 read as 16-bit or CLUT16,
+  16-bit as 8888 or CLUT32, CLUT4, CLUT8, DXT, an address off the target's pixel boundaries, and depth read in a
+  format whose texel is not one depth value. The 1x decode is the read, swizzled, mipmapped or at another width too;
+- a scaled form could exist but is not implemented, so these read at 1x and #2279 stays open for them, each in a
+  format whose texel is one of the buffer's values: a 16-bit target read as another 16-bit format, CLUT16 and CLUT32
+  at the target's pixel size, a swizzled read, a read with another non-zero buffer width, a mipmapped read, and a
+  depth read in a 16-bit format (outside every colour target, or inside one whose depth was written last).
+
+`rtt-1x-reads` in `gpu-coherence-selftest` runs thirteen such reads at 1x, 2x and 4x (the README lists them): none
+binds a target's image, each depth read commits the GPU's depth first, and the reading target's guest VRAM equals
+the software renderer's.
 
 ### 11.2. What an Item Must Have
 
@@ -2455,6 +2639,50 @@ The feature of section 10.14 (#2053). How it draws is described there; this entr
 - **I/O speed:** unchanged.
 - **Tier:** Enhanced. **Default:** off, and Ace-only: an authentic run has no launch line, so it is never on there.
   It is in no graphics preset, because it changes GE timing.
+- **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
+  exist.
+
+#### 11.3.8. Smooth Far Textures (`mips`)
+
+The feature of section 10.16 (#1273). How it draws is described there; this entry is what the guest can observe.
+
+- **Status: guest-visible.** Each present commits the frame it shows to guest VRAM, so a frame with a smoothed
+  texture is the frame the guest keeps, as with texture filtering. Its key, its library and per-title settings and
+  this entry are in place (section 11.2, items 2, 3 and 6). The runs of item 4 do not exist, so it stays off by
+  default and in no preset.
+- **Key and off switch.** `mips=on` on the launch line (section 10.1), an optional key like `cull`: a line without it,
+  or with `mips=off`, has it off, and any other value refuses the line. Its off switch is `"mips": "off"` for the
+  library or for one game (section 10.9); an unknown value in a settings file reads as off, an unset value in the
+  library block is off, an unset value for one game follows the library setting, and an authentic run, which has no
+  line, never has a chain.
+- **Never silent.** A run with it on prints, after its `HOST_MIPS: on` line, `HOST_MIPS: guest-visible: every present
+  commits the smoothed frame to guest VRAM (ENHANCEMENT_CONTRACT.md 11.3.8)`, and at its end the `HOST_MIPS: exit`
+  line with the entries, builds and binds, and the binds each rule kept at level 0 (section 10.16).
+- **What it changes:** the pixels of transformed draws that minify a single-level texture with a linear filter, in
+  the frames a present commits: they show the chain's filtered colour instead of a bilinear sample of level 0.
+  Through-mode draws, colour-tested and alpha-tested draws, alpha-unused draws of a keyed texture, 1:1 draws,
+  render targets and textures the game mips are unchanged.
+- **VRAM bytes:** differ in those frames, at the colour of those draws' pixels. Depth and stencil do not change: a
+  draw that binds the chain is not alpha-tested (section 10.16) and not colour-tested, so the chain decides no
+  fragment's coverage. CLUT loads and CPU reads of VRAM see the changed colour like any other reader.
+- **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them, and
+  for a render-to-texture pass that draws such a texture minified.
+- **Timing:** unchanged in guest time: the GE timing model (on or off) charges the draw by its texture and
+  footprint, not by the level the host samples, and the VBLANK schedule and the media clocks are unchanged. A chain
+  is built on the GE thread, the thread the guest runs on, at the first draw after each upload that samples it, so
+  a frame that brings many new textures into such draws can take longer in host time. The build budget
+  (section 10.16) bounds the builds: on the measured host (Windows 11, 2026-11-10) the builder read about 82
+  million level-0 texels a second, so a guest frame's budget of builds costs about 1.6 ms, and the worst frame of
+  builds, the budget plus one 512x512 build that starts just under it, about 4.8 ms. Chains taken from the cache
+  and contents refused while streaming are charged a sixteenth of their texels but may each decode level 0 again,
+  hash it and upload a kept chain; the exit stamp's `frame_peak_ms` is the measured worst frame of all of it. On LittleBigPlanet's first story level at 4x, before the
+  budget, builds took 7.1 s of an 8,740-VBLANK run, all in its intro and loading screens; on Hot Shots Tennis, 25 to
+  31 ms. With the budget (2026-11-12, the same host, an RTX 3080, render scale 4, nothing else running): on the same
+  LittleBigPlanet run (8,730 VBLANKs) builds took 484 and 490 ms in all over two runs, 187 binds were drawn plain
+  for the budget, and the worst frame (`frame_peak_ms`) took 1.9 and 2.3 ms; on a Hot Shots Tennis match (8,760
+  VBLANKs) builds took 14.9 ms, 17 binds were drawn plain for the budget, and the worst frame took 3.9 ms.
+- **I/O speed:** unchanged.
+- **Tier:** Enhanced. **Default:** off. It is in no graphics preset.
 - **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
   exist.
 

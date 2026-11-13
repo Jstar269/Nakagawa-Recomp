@@ -599,7 +599,8 @@ class MutantAnchorTests(unittest.TestCase):
         paths = {
             "interpreter": m.INTERPRETER, "fp-convert": m.FP_CONVERT,
             "fpu-reference": m.FPU_REFERENCE, "generator": m.GENERATOR,
-            "split-generator": m.GENERATOR, "scheduler": m.SCHEDULER,
+            "split-generator": m.GENERATOR, "resume-generator": m.GENERATOR,
+            "scheduler": m.SCHEDULER,
             "llvm-backend": m.LLVM_BACKEND,
         }
         for mutant in (*m.MUTANTS, *m.LLVM_MUTANTS):

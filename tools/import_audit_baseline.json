@@ -584,11 +584,10 @@
     "status": "controlled_unsupported"
   },
   "0x231fc6b7": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_AtracGetContextAddress",
     "name": "_sceAtracGetContextAddress",
-    "refusal_error": "0x80630003",
-    "status": "controlled_unsupported"
+    "status": "unreviewed"
   },
   "0x235d8787": {
     "classification": "dedicated",

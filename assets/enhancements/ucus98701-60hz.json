@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
   "id": "hst.timing.native_60hz",
-  "display_name": "Hot Shots Tennis Native 60 Hz Logic (Experimental)",
+  "display_name": "Hot Shots Tennis Native 60 Hz Logic",
+  "experimental": false,
   "version": "14.0.0-pre1",
   "category": "timing_frame_presentation",
   "target_title_id": "hst-ucus98701-v1",

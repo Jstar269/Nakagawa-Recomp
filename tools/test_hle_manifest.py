@@ -1433,7 +1433,6 @@ static uint32_t h_SynthReal(CpuState *s) {
                 "0x1575d64b": ("sceAtracLowLevelInitDecoder", "0x80630004"),
                 "0x1f0fc3e3": ("sceHttpSetRecvTimeOut", "0x80010086"),
                 "0x2255551e": ("sceHttpGetNetworkPspError", "0x80010086"),
-                "0x231fc6b7": ("_sceAtracGetContextAddress", "0x80630003"),
                 # The net stack's thread and pool bookkeeping and adhoc discovery stop (offline).
                 "0x50647530": ("sceNetFreeThreadinfo", "0x80010086"),
                 "0xcc393e48": ("sceNetGetMallocStat", "0x80010086"),

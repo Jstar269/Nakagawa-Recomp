@@ -319,6 +319,176 @@ bool nk_render_path_event_parse(const char *line, NkRenderPath *out) {
     return true;
 }
 
+static const char *const k_render_effect_names[NK_RENDER_EFFECT_COUNT] = {
+    "stencil", "color_test", "logic_op", "write_mask", "ram_fb", "wide_stride", "mips", "line",
+    "point"
+};
+
+const char *nk_render_effect_name(NkRenderEffect effect) {
+    return (unsigned)effect < NK_RENDER_EFFECT_COUNT ? k_render_effect_names[effect] : NULL;
+}
+
+int nk_render_fallback_event_format(const NkRenderFallbackEvent *event, char *out,
+                                    size_t out_capacity) {
+    const char *reason = event ? nk_render_effect_name(event->reason) : NULL;
+    if (!out || out_capacity == 0u) return 0;
+    out[0] = '\0';
+    if (!reason) return 0;
+    int written = snprintf(out, out_capacity,
+                           "BOOT_EVENT phase=render_fallback reason=%s frames=%lu sw_prims=%llu "
+                           "gpu_prims=%llu readbacks=%llu share_pm=%lu",
+                           reason, (unsigned long)event->frames,
+                           (unsigned long long)event->sw_prims,
+                           (unsigned long long)event->gpu_prims,
+                           (unsigned long long)event->readbacks,
+                           (unsigned long)event->share_pm);
+    if (written <= 0 || (size_t)written >= out_capacity) {
+        out[0] = '\0';
+        return 0;
+    }
+    return written;
+}
+
+/* A value of only decimal digits that fits max; false for an empty or longer one. */
+static bool event_number(const char *line, const char *key, uint64_t max, uint64_t *out) {
+    const char *value;
+    size_t length;
+    uint64_t n = 0u;
+    if (!event_value(line, key, &value, &length) || length == 0u) return false;
+    for (size_t i = 0u; i < length; ++i) {
+        if (value[i] < '0' || value[i] > '9') return false;
+        unsigned digit = (unsigned)(value[i] - '0');
+        if (n > (max - digit) / 10u) return false;
+        n = n * 10u + digit;
+    }
+    *out = n;
+    return true;
+}
+
+bool nk_render_fallback_event_parse(const char *line, NkRenderFallbackEvent *out) {
+    static const char prefix[] = "BOOT_EVENT phase=render_fallback ";
+    const char *value;
+    size_t length;
+    uint64_t frames, share_pm;
+    NkRenderFallbackEvent event;
+    if (!line || !out || strncmp(line, prefix, sizeof(prefix) - 1u) != 0) return false;
+    if (!event_value(line, "reason", &value, &length)) return false;
+    event.reason = NK_RENDER_EFFECT_COUNT;
+    for (int i = 0; i < NK_RENDER_EFFECT_COUNT; ++i) {
+        if (event_value_is(value, length, k_render_effect_names[i])) {
+            event.reason = (NkRenderEffect)i;
+        }
+    }
+    if (event.reason == NK_RENDER_EFFECT_COUNT) return false;
+    if (!event_number(line, "frames", UINT32_MAX, &frames) ||
+        !event_number(line, "sw_prims", UINT64_MAX, &event.sw_prims) ||
+        !event_number(line, "gpu_prims", UINT64_MAX, &event.gpu_prims) ||
+        !event_number(line, "readbacks", UINT64_MAX, &event.readbacks) ||
+        !event_number(line, "share_pm", 1000u, &share_pm)) {
+        return false;
+    }
+    event.frames = (uint32_t)frames;
+    event.share_pm = (uint32_t)share_pm;
+    *out = event;
+    return true;
+}
+
+/* Compile-time checks in the C99 form (this file is also built with -std=c99 -Wpedantic, where
+ * _Static_assert is not available): the reported effects fit a uint16_t, and each kind alone
+ * reaches the budget at a whole count. */
+typedef char nk_render_effects_fit_u16_check[(NK_RENDER_EFFECT_COUNT <= 16) ? 1 : -1];
+typedef char nk_render_fallback_whole_counts_check
+    [(NK_RENDER_FALLBACK_BUDGET_US % NK_RENDER_FALLBACK_READBACK_US == 0u &&
+      NK_RENDER_FALLBACK_BUDGET_US % NK_RENDER_FALLBACK_PRIM_US == 0u &&
+      NK_RENDER_FALLBACK_READBACKS == 30u && NK_RENDER_FALLBACK_MIN_PRIMS == 4000u) ? 1 : -1];
+
+uint64_t nk_render_fallback_cost_us(uint64_t sw_prims, uint64_t readbacks) {
+    if (readbacks > UINT64_MAX / NK_RENDER_FALLBACK_READBACK_US) return UINT64_MAX;
+    const uint64_t rb_us = readbacks * NK_RENDER_FALLBACK_READBACK_US;
+    if (sw_prims > (UINT64_MAX - rb_us) / NK_RENDER_FALLBACK_PRIM_US) return UINT64_MAX;
+    return rb_us + sw_prims * NK_RENDER_FALLBACK_PRIM_US;
+}
+
+uint16_t nk_render_fallback_window_step(NkRenderFallbackWindow *w,
+                                        const NkRenderFallbackCounts *now,
+                                        NkRenderFallbackDelta *delta) {
+    NkRenderFallbackDelta d;
+    memset(&d, 0, sizeof(d));
+    if (delta) *delta = d;
+    if (!w || !now) return 0u;
+    if (!now->ready) {
+        w->primed = 0;
+        return 0u;
+    }
+    bool restart = !w->primed;
+    for (int r = 0; r < NK_RENDER_EFFECT_COUNT && !restart; ++r) {
+        if (now->sw_prims[r] < w->last.sw_prims[r] || now->readbacks[r] < w->last.readbacks[r]) {
+            restart = true;                   /* the counts started over: so does the window */
+        }
+    }
+    if (restart) {
+        const uint16_t reported = w->reported;
+        memset(w, 0, sizeof(*w));
+        w->reported = reported;
+        w->last = *now;
+        w->primed = 1;
+        return 0u;
+    }
+    d.gpu_prims = now->gpu_prims - w->last.gpu_prims;
+    w->gpu += d.gpu_prims;
+    for (int r = 0; r < NK_RENDER_EFFECT_COUNT; ++r) {
+        d.sw_prims[r] = now->sw_prims[r] - w->last.sw_prims[r];
+        d.readbacks[r] = now->readbacks[r] - w->last.readbacks[r];
+        w->sw[r] += d.sw_prims[r];
+        w->rb[r] += d.readbacks[r];
+    }
+    w->last = *now;
+    if (delta) *delta = d;
+    if (++w->frames < NK_RENDER_FALLBACK_WINDOW_FRAMES) return 0u;
+    uint64_t all_sw = 0u;
+    for (int r = 0; r < NK_RENDER_EFFECT_COUNT; ++r) all_sw += w->sw[r];
+    uint16_t crossed = 0u;
+    for (int r = 0; r < NK_RENDER_EFFECT_COUNT; ++r) {
+        /* Per effect: another effect's cost never adds to this one's. */
+        const bool over = nk_render_fallback_cost_us(w->sw[r], w->rb[r]) >=
+                          NK_RENDER_FALLBACK_BUDGET_US;
+        if (!over) {
+            w->streak[r] = 0u;
+            w->span_gpu[r] = w->span_all_sw[r] = w->span_sw[r] = w->span_rb[r] = 0u;
+            continue;
+        }
+        w->streak[r]++;
+        w->span_gpu[r] += w->gpu;
+        w->span_all_sw[r] += all_sw;
+        w->span_sw[r] += w->sw[r];
+        w->span_rb[r] += w->rb[r];
+        if (w->streak[r] >= NK_RENDER_FALLBACK_WINDOWS && !(w->reported & (1u << r))) {
+            w->reported |= (uint16_t)(1u << r);
+            crossed |= (uint16_t)(1u << r);
+        }
+    }
+    w->frames = 0u;
+    w->gpu = 0u;
+    memset(w->sw, 0, sizeof(w->sw));
+    memset(w->rb, 0, sizeof(w->rb));
+    return crossed;
+}
+
+NkRenderFallbackEvent nk_render_fallback_window_event(const NkRenderFallbackWindow *w,
+                                                      NkRenderEffect effect) {
+    NkRenderFallbackEvent e;
+    memset(&e, 0, sizeof(e));
+    e.reason = effect;
+    if (!w || (unsigned)effect >= NK_RENDER_EFFECT_COUNT) return e;
+    const uint64_t all = w->span_gpu[effect] + w->span_all_sw[effect];
+    e.frames = w->streak[effect] * NK_RENDER_FALLBACK_WINDOW_FRAMES;
+    e.sw_prims = w->span_sw[effect];
+    e.gpu_prims = w->span_gpu[effect];
+    e.readbacks = w->span_rb[effect];
+    e.share_pm = all ? (uint32_t)(1000u * w->span_sw[effect] / all) : 0u;
+    return e;
+}
+
 int nk_shared_boot_event_format_path(char *out, size_t out_capacity,
                                     const char *cache_dir, char separator,
                                     unsigned long process_id, unsigned int sequence) {

@@ -46,8 +46,8 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **711** (dedicated **626**, fake_success **4**, controlled_unsupported **81**).
-Semantic handler census: **600** handlers across **30** API families, covering **633** handler-associated NID registrations.
+Registered NIDs: **711** (dedicated **614**, fake_success **4**, controlled_unsupported **93**).
+Semantic handler census: **588** handlers across **30** API families, covering **621** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
@@ -55,13 +55,13 @@ Semantic handler census: **600** handlers across **30** API families, covering *
 | `partial` | 348 | 360 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 234 | 242 |
+| `unreviewed` | 222 | 230 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | `newlib` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `other` | 1 | 1 | 0 | 0 | 0 | 2 | 2 |
-| `sceAtrac` | 0 | 0 | 0 | 0 | 32 | 32 | 33 |
+| `sceAtrac` | 0 | 0 | 0 | 0 | 33 | 33 | 34 |
 | `sceAudio` | 0 | 11 | 0 | 0 | 5 | 16 | 18 |
 | `sceAudiocodec` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceCtrl` | 0 | 12 | 0 | 0 | 0 | 12 | 12 |
@@ -76,7 +76,7 @@ Semantic handler census: **600** handlers across **30** API families, covering *
 | `sceMp3` | 0 | 0 | 0 | 0 | 20 | 20 | 20 |
 | `sceMpeg` | 0 | 12 | 0 | 2 | 26 | 40 | 40 |
 | `sceMpegbase` | 0 | 6 | 0 | 0 | 0 | 6 | 6 |
-| `sceNet` | 0 | 5 | 0 | 0 | 13 | 18 | 18 |
+| `sceNet` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceNp` | 0 | 2 | 0 | 0 | 0 | 2 | 2 |
 | `sceOpen` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `scePower` | 0 | 19 | 0 | 0 | 0 | 19 | 24 |
@@ -89,7 +89,7 @@ Semantic handler census: **600** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **348** | **1** | **3** | **234** | **600** | **633** |
+| **Total** | **14** | **348** | **1** | **3** | **222** | **588** | **621** |
 
 #### Complete Handlers (Evidence-Backed)
 
