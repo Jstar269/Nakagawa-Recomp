@@ -555,6 +555,7 @@ typedef struct {
     uint8_t *host_frame;          /* one frame copied out of the guest ring */
     int host_frame_cap;           /* allocated size of host_frame */
     int16_t *host_pcm;            /* decode output staging, channels*2048 */
+    uint32_t ctxAddr;             /* guest context from _sceAtracGetContextAddress (#322), 0 = none */
 } Atrac;
 enum {
     UTILITY_SLOT_NONE = 0, UTILITY_SLOT_SAVEDATA, UTILITY_SLOT_MSG, UTILITY_SLOT_NETCONF,
@@ -1296,6 +1297,7 @@ extern int g_atrac_out_nbufs;
 void atrac_release_decoder(Atrac *a);
 extern int s_atrac_caps_configured;
 extern uint32_t s_atrac_slot_codec[8];
+void hle_atrac_context_reset(void);
 void dialog_lock(void);
 void dialog_unlock(void);
 extern int s_utility_slot;
