@@ -1217,7 +1217,7 @@ def called_pointer_array_entries(elf, covered, relocated=None):
 
 
 def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unrelocated=None,
-                   end_at_outside_jump=False, stops=None):
+                   stops=None):
     # Recursive descent over one function's intra-procedural control flow from `start`.
     # Adds every instruction address reached to `covered`, and every direct-call target (jal,
     # or a linking branch to a callable, #968) to `calls`. Returns newly found targets so
@@ -1240,13 +1240,10 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
     # loader does not relocate names an address outside the module (a module linked against
     # its executable calls into it this way), so its target is no edge into this module's
     # code; the word is added to `unrelocated` when the caller passes a set.
-    # `end_at_outside_jump` ends the path at a `j` whose target is outside `ranges`, as a `j`
-    # inside them does. Without it the path runs on past the delay slot, the discovery's
-    # long-standing behaviour; only the checking trace (_check_trace) sets it.
-    # `stops` are the seeds withdrawn as non-code. Each ends a path where it ended one while it
-    # was an entry (a prologue or a known call target, below), so a body that stopped at one
-    # before the withdrawal still stops there, as its generated body does at the dispatch
-    # boundary codegen keeps there. A path that ran through one before still does.
+    # `stops` are the addresses withdrawn as non-code (_non_code_entries). Each ends every
+    # path, as the dispatch boundary code generation keeps there ends every body. No kept
+    # body ran through one when it was withdrawn (a withdrawal spares an address a kept body
+    # reaches), so this ends no path of code that stays.
     relocated = _relocated_jumps(elf)
     ranges = span_index(ranges)
     stack = [start]
@@ -1278,7 +1275,9 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
         while in_ranges(pc, ranges) and pc not in local:
             if walked is not None and pc in walked:
                 break
-            if pc != start and (pc in hc or (stops and pc in stops)):
+            if pc != start and stops and pc in stops:
+                break
+            if pc != start and pc in hc:
                 insn_bytes = elf.read_at_vaddr(pc, 4)
                 stop = True
                 if insn_bytes and len(insn_bytes) == 4:
@@ -1355,8 +1354,6 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
                     else:
                         stack.append(target)
                         break
-                elif end_at_outside_jump:
-                    break
             if op == 0 and funct == 0x08:  # jr (return / computed): end this path
                 covered.add(pc + 4)
                 # If the instruction after the delay slot is also jr $ra, the
@@ -1502,12 +1499,15 @@ _RT_ZERO_BRANCHES = frozenset({0x06, 0x07, 0x16, 0x17})
 
 
 def reserved_encoding(word):
-    """Why ``word`` is no Allegrex instruction, or None when it may be one.
+    """Why ``word`` is no instruction the tables above define, or None when it may be one.
 
     Only the opcode, SPECIAL function and REGIMM fields are judged, and the rt field of the
     four branches that require it to be zero; a word this passes can still be an encoding no
-    instruction has (a reserved VFPU or FPU form). So a reason is proof that the word is not
-    code, and None proves nothing. tools/test_analyze_non_code.py pins every class."""
+    instruction has (a reserved VFPU or FPU form). Code generation's emitter and the
+    interpreter refuse every word with a reason, so a body that holds one cannot be translated
+    or run there; None proves nothing. No PSP measurement stands behind the tables: what they
+    claim is that agreement. tools/test_analyze_non_code.py pins every class, and the emitter's
+    refusal of every judged word."""
     op = word >> 26
     if op in _RESERVED_OPCODES:
         return f"reserved opcode 0x{op:02x}"
@@ -1592,6 +1592,25 @@ def branch_target(source, word):
     offset = word & 0xFFFF
     offset -= 0x10000 if offset & 0x8000 else 0
     return (source + 4 + (offset << 2)) & 0xFFFFFFFF
+
+
+def is_cond_branch(w):
+    """The conditional branches code generation translates as branches: codegen's body walk
+    and emitter, and _BodyWalk, read this one definition."""
+    op = w >> 26
+    if op in (4, 5, 20, 21):
+        return True
+    if op in (6, 7, 22, 23):
+        return (w >> 16) & 0x1F == 0
+    if op == 1:
+        # REGIMM trap-immediates (tgei..tnei) are not branches. BLTZALL/BGEZALL
+        # (rt 0x12/0x13) are left out too: no codegen semantics test pins their link
+        # and nullify behaviour, so they reach effect() and are refused there, as on
+        # origin/main.
+        return (w >> 16) & 0x1F in (0, 1, 2, 3, 0x10, 0x11)
+    if op in (0x11, 0x12) and (w >> 21) & 0x1F == 8:
+        return True
+    return False
 
 
 def branch_kind(word):
@@ -2958,24 +2977,25 @@ def _analyze(elf, extra_spans, cfg_gate, trace_memo, report, entry_hints,
     # `floor` is the owned spans of the same analysis without seeds; `unproven`, a dict, receives
     # why a seed added off that floor is not proven an entry.
     # `report` also receives non_code ({withdrawn address: (first reserved word, why)}) and
-    # non_code_words, the words only withdrawn code reached: both empty unless the image has
+    # non_code_words, the words only withdrawn code reaches: both empty unless the image has
     # no relocation evidence (_non_code_entries).
-    non_code, reach, void, evidence_cache = {}, {}, frozenset(), {}
+    non_code, void, kept, evidence_cache = {}, frozenset(), frozenset(), {}
     while True:
         d, structural, code_candidates, materialized_code_work = _discover(
             elf, extra_spans, cfg_gate, trace_memo, entry_hints, mixed_code_data, seeds,
-            unusable, floor, unproven, entries, non_code, void)
+            unusable, floor, unproven, entries, non_code, void, kept)
         if d.relocated is not None:
             break
         # Termination: every pass that continues adds at least one address to `non_code`,
         # which only grows and holds addresses of this image's code ranges, a finite set.
         # No pass limit is needed or applied.
-        found, reached = _non_code_entries(d, structural, evidence_cache)
-        for entry, (hit, words) in found.items():
-            non_code[entry], reach[entry] = hit, words
-        void = frozenset().union(*reach.values()) - reached
+        found, void = _non_code_entries(d, structural, evidence_cache)
         if not found:
             break
+        non_code.update(found)
+        # Every entry that is not withdrawn stays one in the next pass, so a pass only adds
+        # boundaries: no body that stays runs on into words it did not own before.
+        kept = frozenset(d.functions) - frozenset(non_code)
 
     merged_ranges = _owned_spans(d)
     if report is not None:
@@ -2987,13 +3007,14 @@ def _analyze(elf, extra_spans, cfg_gate, trace_memo, report, entry_hints,
 
 
 def _discover(elf, extra_spans, cfg_gate, trace_memo, entry_hints, mixed_code_data, seeds,
-              unusable, floor, unproven, entries, non_code, void):
+              unusable, floor, unproven, entries, non_code, void, kept=frozenset()):
     """One discovery of the image with the given withdrawals: (state, structural seeds,
     code_candidates, materialized_code_work). The structural seeds are the ones the image's
     format names (entry point, exports and the init array, import stubs) and the ones a run
     reached (entries, miss seeds): no withdrawal touches them. A data-section pointer or an
     executable's pointer into the image is not one: without relocation evidence a data word that
-    equals a text address may be a coincidence."""
+    equals a text address may be a coincidence. `kept` are the previous pass's entries that were
+    not withdrawn: they stay entries, but not structural ones."""
     d = _Discovery(elf, extra_spans, cfg_gate, trace_memo)
     d.non_code = frozenset(non_code)
     d.void = frozenset(void)
@@ -3013,7 +3034,9 @@ def _discover(elf, extra_spans, cfg_gate, trace_memo, entry_hints, mixed_code_da
     if seeds:
         hc = set(d.hc)
         unusable.update(_seed_miss_targets(d, seeds, floor, unproven))
-        structural |= d.hc - hc
+        # A seed a run reached is structural whether this added it or a sweep already had.
+        structural |= (d.hc - hc) | (set(seeds) & d.hc)
+    d.hc |= kept - d.non_code
     if d.non_code:
         d.hc -= d.non_code
         d.noisy -= d.non_code
@@ -3040,19 +3063,14 @@ def _discover(elf, extra_spans, cfg_gate, trace_memo, entry_hints, mixed_code_da
 # Every relocation gate of the seed sweeps reads "no relocation map" as "every word is an
 # address" (_relocated_as). In an image whose code section also holds data, a data word that
 # looks like a `j`, an `la` pair, a table of pointers or a frame prologue then seeds a function,
-# and its trace and body run through the data. The analysis therefore withdraws, in such an
-# image, every seed the image's structure does not name whose trace reaches a word that is no
-# Allegrex instruction (reserved_encoding), with what only it reached, and discovers again.
-
-
-class _ReservedWord(Exception):
-    def __init__(self, address, why):
-        super().__init__(address, why)
-        self.address, self.why = address, why
+# and its body runs through the data. The analysis therefore judges, in such an image, every
+# seed the image's structure does not name by the body code generation would emit for it, and
+# withdraws the ones whose body holds a word reserved_encoding judges no instruction: code
+# generation could not translate that body either.
 
 
 def _non_code_evidence(elf, ranges, cache):
-    """{word address: why} for the words of ``ranges`` no Allegrex CPU decodes (reserved_encoding).
+    """{word address: why} for the words of ``ranges`` reserved_encoding judges no instruction.
 
     Each range is read once (``cache``, keyed by range, keeps the answer across passes), so
     the scan costs one read per range, not one per word."""
@@ -3067,129 +3085,173 @@ def _non_code_evidence(elf, ranges, cache):
     return found
 
 
-class _CheckedCover(set):
-    """The `covered` set of a checking trace: adding a word no Allegrex CPU decodes (an
-    address of ``evidence``) stops the trace there (the word is kept)."""
-
-    def __init__(self, evidence):
-        super().__init__()
-        self.evidence = evidence
-
-    def add(self, address):
-        super().add(address)
-        why = self.evidence.get(address)
-        if why is not None:
-            raise _ReservedWord(address, why)
+# The edges of a generated body walk: a fall-through, a call's return or a `j` (no body runs
+# on into another entry along one); a conditional branch's taken or not-taken edge (the unsplit
+# walk follows one into another entry); the word after the `b` idiom's delay slot (only a guest
+# patch makes a body run on there).
+_BODY_SEQ, _BODY_BRANCH, _BODY_AFTER_B = 0, 1, 2
 
 
-class _ReadOnlyCalls:
-    """`calls` for a checking trace: the discovery's set, read only. A call target the trace
-    finds is not added, so every checking trace of a pass stops by the same rules, whatever
-    ran before it (the `clean` memo relies on that)."""
+class _BodyWalk:
+    """The body code generation's walk (codegen.function_flow) gives an entry, over one range
+    list, every address of ``boundaries`` being an entry of its own.
 
-    __slots__ = ("base",)
+    The generated walk ends a body at another entry on a fall-through, a call's return and a
+    `j`. On a conditional edge its unsplit form runs on into another entry, its split form
+    (a body over the region-split threshold) does not. A word's step depends only on the word,
+    its address and the ranges, never on the entry walked from, so each answer below is one
+    walk over all its starts: a word is stepped once whatever number of bodies own it."""
 
-    def __init__(self, base):
-        self.base = base
+    def __init__(self, elf, ranges, boundaries, jumps):
+        self.elf, self.ranges = elf, span_index(list(ranges))
+        self.boundaries, self.jumps = boundaries, jumps
+        self.steps = {}
 
-    def __contains__(self, item):
-        return item in self.base
+    def step(self, pc):
+        """(delay slot or None, ((successor, edge), ...)) of the word at ``pc``, by
+        codegen._walk_body's rules for that word."""
+        known = self.steps.get(pc)
+        if known is None:
+            raw = self.elf.read_at_vaddr(pc, 4)
+            if raw is None or len(raw) < 4:
+                known = (None, ())
+            else:
+                known = self._step(pc, int.from_bytes(raw[:4], "little"))
+            self.steps[pc] = known
+        return known
 
-    def __iter__(self):
-        return iter(self.base)
+    def _step(self, pc, word):
+        op, funct = word >> 26, word & 0x3F
+        if op == 3 or (op == 0 and funct == 0x09 and (word >> 11) & 0x1F):  # jal, linked jalr
+            return pc + 4, ((pc + 8, _BODY_SEQ),)
+        if op == 0 and funct in (0x08, 0x09):                               # jr, jalr $zero
+            return pc + 4, ()
+        if op == 2:                                                         # j
+            target = (pc & 0xF0000000) | ((word & 0x3FFFFFF) << 2)
+            if (target != pc and _relocated_as(self.jumps, pc, "jump26")
+                    and in_ranges(target, self.ranges)):
+                return pc + 4, ((target, _BODY_SEQ),)
+            return pc + 4, ()
+        if (op == 0 and funct == 0x0C) or word == 0x42000018:              # syscall, eret
+            return None, ()
+        if op == 1 and _linked_branch_is_call(self.elf, pc, word, self.ranges):
+            return pc + 4, ((pc + 8, _BODY_SEQ),)
+        if is_cond_branch(word):
+            target = branch_target(pc, word)
+            edges = [(target, _BODY_BRANCH)] if in_ranges(target, self.ranges) else []
+            after = _BODY_AFTER_B if branch_kind(word) == BRANCH_UNCOND else _BODY_BRANCH
+            edges.append((pc + 8, after))
+            return pc + 4, tuple(edges)
+        return None, ((pc + 4, _BODY_SEQ),)
 
-    def add(self, item):
-        pass
+    def _follows(self, successor, edge, unsplit):
+        if edge == _BODY_SEQ:
+            return successor not in self.boundaries
+        if unsplit:
+            return True
+        return edge == _BODY_BRANCH and successor not in self.boundaries
 
+    def reach(self, starts):
+        """Every word a body of one of ``starts`` may own: the unsplit walk's, and past the
+        `b` idiom too. No form of the generated walk owns a word outside it."""
+        seen, words, stack = set(), set(), list(starts)
+        while stack:
+            pc = stack.pop()
+            if pc in seen or not in_ranges(pc, self.ranges):
+                continue
+            seen.add(pc)
+            words.add(pc)
+            slot, edges = self.step(pc)
+            if slot is not None:
+                words.add(slot)
+            stack.extend(s for s, edge in edges if s not in seen and self._follows(s, edge, True))
+        return words
 
-class _CleanView:
-    """`walked` for a checking trace. A word in ``clean`` was expanded by an earlier trace that
-    reached no reserved word, so every path from it is known to reach none, and it ends a path.
-    The words this trace expands are kept apart in ``expanded``: they are clean only once the
-    whole trace is. Only expanded words count, never a word `covered` holds without expanding it
-    (a delay slot): a path that runs on through such a word goes where no trace has been."""
+    def reserved(self, starts, evidence):
+        """{start: (address, why)} for each of ``starts`` whose body holds a word of
+        ``evidence``, naming the lowest such word. The body is the split walk's (no edge
+        enters another entry, nothing runs past the `b` idiom), which every form of the
+        generated walk owns: a body judged here to hold such a word holds it in every form.
 
-    __slots__ = ("clean", "expanded")
-
-    def __init__(self, clean):
-        self.clean, self.expanded = clean, set()
-
-    def __contains__(self, item):
-        return item in self.clean
-
-    def add(self, item):
-        self.expanded.add(item)
-
-
-def _check_trace(d, entry, evidence, clean):
-    """(the words the trace from ``entry`` reaches, (first reserved word, why) or None).
-
-    The trace follows the discovery's rules against its seeds, call targets and withdrawn
-    addresses (read only), ends a path at a `j` out of the trace's ranges (as at one inside
-    them), and stops at the first word of ``evidence``. A transfer out of the image is no
-    evidence: an overlay at a fixed address may call one loaded later. A path also ends at a
-    word of ``clean`` (one set per range list, as the discovery's `walked`): an earlier trace
-    of the pass expanded it by the same rules and reached no evidence, so every path from it
-    reaches none, and a tail many entries share is walked once. A trace that reaches no
-    evidence adds the words it expanded to ``clean``; the words it reached are complete
-    (those past a clean word are in an earlier clean trace's). A trace that reaches evidence
-    stops there, so its words are not all the entry reaches: _full_reach gives those. It
-    changes no state of the discovery."""
-    ranges = d.trace_ranges_for_entry(entry)
-    known = clean.setdefault(tuple(ranges), set())
-    covered = _CheckedCover(evidence)
-    view = _CleanView(known)
-    try:
-        trace_function(d.elf, entry, ranges, covered, _ReadOnlyCalls(d.calls), d.hc,
-                       walked=view, end_at_outside_jump=True, stops=d.non_code)
-    except _ReservedWord as hit:
-        return frozenset(covered), (hit.address, hit.why)
-    known |= view.expanded
-    return frozenset(covered), None
-
-
-def _full_reach(d, entry):
-    """Every word the checking trace from ``entry`` reaches when it does not stop at evidence:
-    the reach of an entry that stays although its trace meets a reserved word."""
-    covered = set()
-    trace_function(d.elf, entry, d.trace_ranges_for_entry(entry), covered,
-                   _ReadOnlyCalls(d.calls), d.hc, end_at_outside_jump=True, stops=d.non_code)
-    return covered
+        One walk records each word's predecessors; a walk back from each word of evidence,
+        the lowest first, then marks every word whose body reaches it."""
+        seen, back, stack, marked = set(), {}, list(starts), []
+        while stack:
+            pc = stack.pop()
+            if pc in seen or not in_ranges(pc, self.ranges):
+                continue
+            seen.add(pc)
+            slot, edges = self.step(pc)
+            hits = [a for a in (pc, slot) if a is not None and a in evidence]
+            if hits:
+                marked.append((min(hits), pc))
+            for successor, edge in edges:
+                if self._follows(successor, edge, False):
+                    back.setdefault(successor, []).append(pc)
+                    if successor not in seen:
+                        stack.append(successor)
+        lowest = {}
+        for hit, pc in sorted(marked):
+            if pc in lowest:
+                continue
+            lowest[pc] = hit
+            wave = [pc]
+            while wave:
+                for previous in back.get(wave.pop(), ()):
+                    if previous not in lowest:
+                        lowest[previous] = hit
+                        wave.append(previous)
+        return {a: (lowest[a], evidence[lowest[a]]) for a in starts if a in lowest}
 
 
 def _non_code_entries(d, structural, evidence_cache=None):
-    """({candidate to withdraw: ((first reserved word, why), words its trace reached)}, the
-    words that code which stays reaches).
+    """({candidate to withdraw: (lowest reserved word its body holds, why)}, the words only
+    withdrawn code reaches).
 
     The candidates are every seed and call target of this discovery that its structure does
-    not name, whether or not it became an entry: a weak seed that a withdrawn trace covered
-    would otherwise become an entry only in the next pass, one layer of data at a time. A
-    candidate is withdrawn when its checking trace reaches a reserved word. Each answer
-    depends on the candidate's own reach alone, so the result does not depend on the order
-    the candidates are visited in (_entry_order). An image whose code holds no reserved word
-    has nothing to withdraw and is not traced again."""
+    not name, whether or not it became an entry: a weak seed that a withdrawn body covered
+    would otherwise become an entry only in the next pass, one layer of data at a time. Each
+    candidate and each entry is judged by its body (_BodyWalk), every entry and every address
+    already withdrawn ending it, as code generation's walk ends it:
+
+    - a candidate whose body holds a reserved word is withdrawn, unless a body that stays may
+      own it (it lies in that body's reach): code generation could not have translated its
+      body, so the withdrawal takes no translation away;
+    - an entry the structure names, and every entry whose body holds no reserved word, stays.
+
+    No verdict depends on another, nor on the order of the walks (_entry_order). The void is
+    what the bodies of withdrawn addresses reach and no body that stays may own. An image whose
+    code holds no reserved word has nothing to withdraw and is not walked."""
     spans = sorted({*d.ranges, *d.file_exec_ranges, *d.proven_spans})
     evidence = _non_code_evidence(d.elf, spans, {} if evidence_cache is None else evidence_cache)
     if not evidence:
-        return {}, set()
+        return {}, frozenset()
     candidates = {a for a in d.functions | d.hc | d.noisy | d.jtails | d.calls
                   if (a & 3) == 0 and a not in structural and d.callable_target(a)}
-    found, reached, clean = {}, set(), {}
-    for entry in _entry_order(candidates | d.functions):
-        words, hit = _check_trace(d, entry, evidence, clean)
-        if hit is None:
-            reached |= words
-        elif entry in candidates:
-            found[entry] = (hit, words)
-        else:
-            # An entry the structure names stays, and so does all it reaches, past the
-            # reserved word its trace stopped at too.
-            reached |= _full_reach(d, entry)
-    return found, reached
+    boundaries = frozenset(d.functions) | d.non_code
+    groups = {}
+    for a in _entry_order(candidates | d.functions | d.non_code):
+        groups.setdefault(tuple(d.trace_ranges_for_entry(a)), []).append(a)
+    walks = {ranges: _BodyWalk(d.elf, ranges, boundaries, d.jumps) for ranges in groups}
+    hits, reached = {}, set()
+    for ranges, starts in groups.items():
+        found_here = walks[ranges].reserved(starts, evidence)
+        hits.update(found_here)
+        reached |= walks[ranges].reach(
+            [a for a in starts if a in d.functions and (a in structural or a not in found_here)])
+    found = {a: hits[a] for a in sorted(candidates) if a in hits and a not in reached}
+    # The void excludes the reach of every entry that stays, not only the clean ones: an entry
+    # kept because another body holds its word (as a delay slot, say) still has a generated
+    # body, a stub's walk included, and that body may run on into a withdrawn word.
+    void, owned = set(), set()
+    for ranges, starts in groups.items():
+        void |= walks[ranges].reach([a for a in starts if a in found or a in d.non_code])
+        owned |= walks[ranges].reach([a for a in starts if a in d.functions and a not in found])
+    return found, frozenset(void - owned)
 
 
 def _entry_order(entries):
-    """The order _non_code_entries visits entries in; tests replace it to show the result does
+    """The order _non_code_entries walks entries in; tests replace it to show the result does
     not depend on it."""
     return sorted(entries)
 

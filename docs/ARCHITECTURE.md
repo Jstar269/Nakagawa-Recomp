@@ -220,35 +220,44 @@ These tools run on the development host before the native compiler.
 `codegen.py` is the translation core.
 
 - **Function discovery:** consumes `analyze.py` results.
-- **Non-code in an image without relocation evidence:** an image with no relocations to read (an
-  overlay or an `ET_EXEC` executable loaded at a fixed address, or a PRX analyzed without a base,
-  which the pipeline never does) gives the analyzer no way to tell a word that holds a code address
-  from any other. Its seed sweeps (address pairs, `j`-shaped words, table stores, prologue words,
-  the word after a terminator) and its data-section pointers can then start functions inside the
-  data its code section holds. For such an image only (`relocated_words` is `None`), `analyze.py`
-  traces every seed and call target the format does not name and withdraws it when the trace
-  reaches a word no Allegrex CPU decodes (`reserved_encoding`: a reserved opcode, SPECIAL function
-  or REGIMM `rt`, a `blez`/`bgtz` form with `rt` set). The seeds that are never withdrawn are the
-  entry point (and a prologue at the start of the executable segment), the exports and init array,
-  the import stubs, and the addresses a run reached (capture entries and miss seeds); one of those
-  that reaches a reserved word stays, with everything it reaches. A valid instruction the
-  translator does not support is no evidence, and neither is a transfer out of the image: a
-  fixed-address overlay may call one loaded later. The checking trace ends a path at a `j` out of
-  its ranges. Words that withdrawn traces reached and no trace of a seed that stays reached become
-  void: the sweeps skip them, so a seed whose evidence lies there is no evidence. Discovery runs
-  again until a pass withdraws nothing; each pass that continues withdraws at least one more
-  address, so the loop ends without a limit. A withdrawn address ends a later path where it ended
-  one as an entry (a prologue word or a direct-call target), and it stays a dispatch boundary in
-  the generated code, so a body that ended there before the withdrawal still does. An image whose code holds no reserved word is not traced again.
-  Otherwise every checking trace of a pass stops by the same rules (it reads the discovery's call
-  targets and adds none), so the words a clean trace expanded end the paths of later ones, and a
-  tail many entries share is walked once. In a runtime module the module's spans exclude the void,
+- **Non-code in an image without relocation evidence:** when the analyzer has no relocation
+  evidence for an image (`relocated_words` is `None`), it cannot tell a word that holds a code
+  address from any other. That is an overlay or an `ET_EXEC` executable loaded at a fixed address,
+  a code capture, a PRX whose relocation map is empty or that is analyzed without a base (the
+  pipeline never does the latter), and an `ET_REL` or relocation-bearing `ET_EXEC` loaded at a
+  nonzero base, which the loader relocates without recording the words. Its seed sweeps (address
+  pairs, `j`-shaped words, table stores, prologue words, the word after a terminator) and its
+  data-section pointers can then start functions inside the data its code section holds. For such
+  an image `analyze.py` judges every seed and call target the format does not name by the body
+  codegen would emit for it (`_BodyWalk`: the rules of `codegen.function_flow`, every entry and
+  every withdrawn address a boundary), and withdraws it when that body holds a word
+  `reserved_encoding` judges no instruction (a reserved opcode, SPECIAL function or REGIMM `rt`,
+  or a `blez`/`bgtz` form with `rt` set). The emitter and the interpreter refuse every such word,
+  so codegen could not have translated that body: a withdrawal takes no translation away. The body
+  judged is the split walk's (no edge enters another entry), which every form of the generated
+  walk owns. A seed that a body which stays may own (the unsplit walk's reach of a kept entry,
+  which follows a conditional edge into another entry) is never withdrawn, and neither are the
+  entry point (and a prologue at the start of the executable segment), the exports and init
+  array, the import stubs, and the addresses a run reached (capture entries and miss seeds,
+  however they were first seeded); one of those whose body holds a reserved word stays. A valid
+  instruction the translator does not support is no evidence, and neither is a transfer out of the
+  image: a fixed-address overlay may call one loaded later. The words that the bodies of withdrawn
+  addresses reach and no body that stays may own become void: the sweeps skip them, so a seed
+  whose evidence lies there is no evidence. Discovery runs again until a pass withdraws nothing.
+  Every entry that is not withdrawn stays an entry in the next pass, so a pass only adds
+  boundaries and no body that stays runs on into words it did not own; each pass that continues
+  withdraws at least one more address, so the loop ends without a limit. One walk answers for every
+  seed of a pass, so a word is stepped once however many bodies own it. A withdrawn address ends
+  every discovery path and stays a dispatch boundary in the generated code. An image whose code
+  holds no reserved word is not walked. In a runtime module the module's spans exclude the void,
   and the descriptor registers an `SrModuleNonCode` record (count of withdrawn seeds and void words)
   only for a module that has one, so other descriptors are unchanged; a dispatch that reaches a
-  withdrawn span stops with `NON_CODE_WITHDRAWN` (see [`DEBUGGING.md`](DEBUGGING.md)). In the
-  executable the void leaves the registered executable spans, so a dispatch there stops as
-  not executable, without that name. Codegen refuses the build (`NON_CODE_TRANSLATED`) if a body
-  it emits owns a void word: the analyzer and the generator would disagree about what is code.
+  withdrawn span stops with `NON_CODE_WITHDRAWN` (see [`DEBUGGING.md`](DEBUGGING.md)). The runtime
+  finds a module's span by a binary search, and registration refuses spans out of address order.
+  In the executable and an `--extra-elf` image the void leaves the registered executable spans, so
+  a dispatch there stops as not executable, without that name. Codegen refuses the build
+  (`NON_CODE_TRANSLATED`) if an entry, or a word it walked for any function it emits (translated
+  or not), lies in the void: the analyzer and the generator would disagree about what is code.
   Images with relocation evidence are untouched.
 - **Instruction translation:** emits C operating on the shared `CpuState` ABI.
 - **Narrow compatibility translations:** address-specific/custom behavior is allowed only when

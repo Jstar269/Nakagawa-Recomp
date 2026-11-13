@@ -6,17 +6,21 @@
 A code overlay whose text section also holds data has no relocations, so every relocation gate
 of the seed sweeps lets a data word through as evidence: a word that reads as a `j`, an `la`
 pair, a table of text pointers stored as a vtable or loaded for a `jr`, a frame prologue. The
-analysis withdraws every seed the image's structure does not name whose trace reaches a word
-that cannot be code. These tests build such an overlay from a seed: 40 real functions, one more
-reached only by a call (it holds a valid VFPU instruction the emitter does not support, on a
-path that never runs), and 34,000 words of data that plant every one of those seed kinds.
+analysis withdraws every seed the image's structure does not name whose generated body would
+hold a word that cannot be code, unless a body that stays reaches it. These tests build such an
+overlay from a seed: 40 real functions, one more reached only by a call (it holds a valid VFPU
+instruction the emitter does not support, on a path that never runs), and 34,000 words of data
+that plant every one of those seed kinds; small images for each rule; and the public fixtures'
+code, with and without data after it.
 """
 
 import contextlib
+import importlib.util
 import io
 import os
 import pathlib
 import random
+import re
 import struct
 import sys
 import tempfile
@@ -32,7 +36,7 @@ LINK = 0x08C00000
 TEXT = LINK + 0x40
 BLOB_WORDS = 34000
 PROLOGUE = 0x27BDFFE0          # addiu sp, sp, -32
-RESERVED = 0x68000000          # opcode 0x1a: no Allegrex instruction
+RESERVED = 0x68000000          # opcode 0x1a: a reserved opcode
 JR_RA = 0x03E00008
 VSBN_S = 0x61394C10            # vsbn.s: valid; the emitter has no native form for it
 VTABLE = 0x08C10000            # 64 KiB aligned: the sweep's vtable rule reads `lui` alone
@@ -158,7 +162,8 @@ def translate(overlay, flow_sizes=None):
 
 def stock_analysis():
     """The analysis as it was before the withdrawal: no candidate is ever withdrawn."""
-    return mock.patch.object(analyze, "_non_code_entries", lambda d, structural, cache=None: ({}, set()))
+    return mock.patch.object(analyze, "_non_code_entries",
+                             lambda d, structural, cache=None: ({}, frozenset()))
 
 
 class ReservedEncodingTest(unittest.TestCase):
@@ -197,9 +202,9 @@ class NonCodeOverlayTest(unittest.TestCase):
         stock = analyze._non_code_entries
 
         def recording(d, structural, cache=None):
-            found, reached = stock(d, structural, cache)
+            found, void = stock(d, structural, cache)
             cls.passes.append((frozenset(d.non_code), frozenset(found)))
-            return found, reached
+            return found, void
 
         with mock.patch.object(analyze, "_non_code_entries", recording):
             cls.module, cls.log = translate(cls.overlay, cls.sizes)
@@ -224,11 +229,10 @@ class NonCodeOverlayTest(unittest.TestCase):
         self.assertTrue(set(self.overlay.planted) <= withdrawn)
         # What stays in the data is code-shaped to the last word: a few valid words that end in
         # a `j` out of the image (a tail call into another image, for all the analysis can
-        # tell) or a `jr` through a register, as a leaf function does. Nothing tells such a run
-        # apart from code, so it keeps a (translated) body of its own. Over this seed and seeds
-        # 1 to 8, 2 to 6 such runs stayed, of 2 to 15 words; one of them (seed 8) ends instead in
-        # a tail jump to a withdrawn word shaped like a prologue, which is no evidence either.
-        # This seed leaves 2.
+        # tell), a `jr` through a register, as a leaf function does, or a transfer to another
+        # entry, where a generated body ends. Nothing tells such a run apart from code, so it
+        # keeps a body of its own. Over seeds 1 to 8, 1 to 7 such runs stayed, of 1 to 15
+        # words. This seed leaves 2, each ending in a `j` out of the image or a `jr`.
         elf = analyze.Elf(analyze.code_overlay_elf(self.overlay.image))
         image = analyze.exec_ranges(elf)
         left = [a for a in entries if self.overlay.in_blob(a)]
@@ -250,6 +254,14 @@ class NonCodeOverlayTest(unittest.TestCase):
         for start in self.overlay.starts:
             self.assertIn(start, entries)
             self.assertNotIn(start, stubbed)
+
+    def test_no_withdrawal_takes_a_translation_away(self):
+        # Every withdrawn address that was an entry before had a body the emitter could not
+        # translate (a stub): a withdrawal is judged on the body code generation emits.
+        withdrawn = {a for a, *_ in self.module.non_code}
+        before = self.entries(self.stock)
+        self.assertTrue(withdrawn & before)
+        self.assertLessEqual(withdrawn & before, {a for a, _ in self.stock.stubbed})
 
     def test_a_valid_unsupported_instruction_is_no_evidence(self):
         callee = self.overlay.unsupported
@@ -305,33 +317,21 @@ class NonCodeOverlayTest(unittest.TestCase):
             self.assertEqual(after, before | found)     # ... and the set only grows
         self.assertFalse(passes[-1][1])                 # the last pass withdraws nothing
 
-    def test_an_image_with_relocation_evidence_is_untouched(self):
-        def refuse(d, structural, cache=None):
-            raise AssertionError("an image with relocation evidence was checked")
-
-        with mock.patch.object(analyze, "_relocated_words", lambda elf: {}), \
-                mock.patch.object(analyze, "_non_code_entries", refuse):
-            module, _ = translate(self.overlay)
-        self.assertEqual(module.non_code, ())
-
 
 class TraceFunctionTest(unittest.TestCase):
-    def test_a_jump_out_of_the_image_is_unchanged_for_the_discovery(self):
-        # The checking trace ends a path at a `j` out of the image; the discovery's own trace
-        # keeps running past it, as before.
+    def test_a_jump_out_of_the_image_ends_a_body_not_the_discovery(self):
+        # A generated body ends at a `j` out of the image, so the body walk does; the
+        # discovery's own trace keeps running past it, as before.
         words = [PROLOGUE, (0x02 << 26) | ((0x08900000 >> 2) & 0x3FFFFFF), 0, 0x25080001, JR_RA, 0]
-        text = b"".join(struct.pack("<I", w) for w in words)
-        header = struct.pack("<4s7I", b"MWo3", 1, LINK, len(text), 0, 0, TEXT + len(text),
-                             TEXT + len(text)) + b"j.ovl".ljust(0x20, b"\0")
-        elf = analyze.Elf(analyze.code_overlay_elf(header + text))
+        elf = small_overlay(words)
         ranges = analyze.exec_ranges(elf)
         covered = set()
         analyze.trace_function(elf, TEXT, ranges, covered, set(), set())
         self.assertIn(TEXT + 16, covered)
-        covered = set()
-        analyze.trace_function(elf, TEXT, ranges, covered, set(), set(), end_at_outside_jump=True)
-        self.assertIn(TEXT + 8, covered)                 # the delay slot
-        self.assertNotIn(TEXT + 12, covered)
+        walk = analyze._BodyWalk(elf, ranges, frozenset({TEXT}), None)
+        self.assertEqual(walk.reach([TEXT]), {TEXT, TEXT + 4, TEXT + 8})
+        flow = codegen.function_flow(elf, TEXT, ranges, {TEXT})[0]
+        self.assertEqual(flow, {TEXT, TEXT + 4, TEXT + 8})
 
     def test_a_tail_many_entries_share_is_checked_once(self):
         # 32 functions jump into one 256-word tail, and one word past the code cannot be
@@ -406,11 +406,7 @@ class TraceFunctionTest(unittest.TestCase):
 
 def small_overlay(words, data_words=(), name=b"small.ovl"):
     """An overlay of ``words`` at TEXT, its data section holding ``data_words``."""
-    text = b"".join(struct.pack("<I", w) for w in words)
-    data = b"".join(struct.pack("<I", w) for w in data_words)
-    header = struct.pack("<4s7I", b"MWo3", 1, LINK, len(text), len(data), 0x10 if data else 0,
-                         TEXT + len(text), TEXT + len(text)) + name.ljust(0x20, b"\0")
-    return analyze.Elf(analyze.code_overlay_elf(header + text + data))
+    return analyze.Elf(analyze.code_overlay_elf(overlay_image(words, data_words, name)))
 
 
 def jal(target):
@@ -422,6 +418,70 @@ def branch(op, rs, rt, at, target):
 
 
 ADDU = 0x01004021                 # addu t0, t0, zero
+
+
+def jump(target):
+    return (0x02 << 26) | ((target >> 2) & 0x3FFFFFF)
+
+
+def overlay_image(words, data_words=(), name=b"small.ovl"):
+    """The bytes of an overlay of ``words`` at TEXT, its data section holding ``data_words``."""
+    text = b"".join(struct.pack("<I", w) for w in words)
+    data = b"".join(struct.pack("<I", w) for w in data_words)
+    header = struct.pack("<4s7I", b"MWo3", 1, LINK, len(text), len(data), 0x10 if data else 0,
+                         TEXT + len(text), TEXT + len(text)) + name.ljust(0x20, b"\0")
+    return header + text + data
+
+
+def translate_image(image):
+    """translate_runtime_module of an overlay's bytes, and what it wrote to stderr."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "small.ovl")
+        pathlib.Path(path).write_bytes(image)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            module = codegen.translate_runtime_module(0, path)
+    return module, err.getvalue()
+
+
+def fixed_executable(words, base, text=None):
+    """A fixed-address ELF executable (no relocations) holding ``words`` (or ``text``) at ``base``."""
+    text = b"".join(struct.pack("<I", w) for w in words) if text is None else text
+    payload_off = 52 + 32
+    blob = bytearray(payload_off + len(text))
+    blob[:8] = b"\x7fELF\x01\x01\x01\x00"
+    struct.pack_into("<HHIIIIIHHHHHH", blob, 16, 2, 8, 1, base, 52, 0, 0, 52, 32, 1, 0, 0, 0)
+    struct.pack_into("<8I", blob, 52, 1, payload_off, base, base, len(text), len(text), 5, 4)
+    blob[payload_off:] = text
+    return bytes(blob)
+
+
+def run_codegen(blob, extra=()):
+    """codegen.main on the executable ``blob``: (rc, stderr, every generated .c and .h).
+    ``extra`` is ((bytes, link address), ...) passed as --extra-elf images."""
+    with tempfile.TemporaryDirectory() as tmp:
+        elf_path = os.path.join(tmp, "exec.elf")
+        out_c = os.path.join(tmp, "exec.c")
+        pathlib.Path(elf_path).write_bytes(blob)
+        args = []
+        for index, (image, address) in enumerate(extra):
+            path = os.path.join(tmp, f"extra{index}.elf")
+            pathlib.Path(path).write_bytes(image)
+            args.append(f"--extra-elf={path}@{address:x}")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("TITLE_EXTRA_SPANS", "HST_EXTRA_SPANS", "GAME_BASE")}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                contextlib.redirect_stderr(io.StringIO()) as err, \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = codegen.main(["codegen.py", elf_path, out_c, "--base=0", "--profile=none", *args])
+        generated = "".join(pathlib.Path(tmp, f).read_text(encoding="utf-8")
+                            for f in sorted(os.listdir(tmp)) if f.endswith((".c", ".h")))
+    return rc, err.getvalue(), generated
+
+
+def function_text(generated, address):
+    """The C body of the function at ``address`` in generated code."""
+    start = generated.index(f"void f_{address:08x}(CpuState *s) {{")
+    return generated[start:generated.index("\n}", start) + 2]
 
 
 class WithdrawalRulesTest(unittest.TestCase):
@@ -441,23 +501,192 @@ class WithdrawalRulesTest(unittest.TestCase):
         self.assertIn(s, starts)
         self.assertFalse({c, c + 4, c + 8} & report["non_code_words"])
 
-    def test_the_check_does_not_depend_on_the_order(self):
-        # A calls T and falls into it; B branches into the run before T. Neither call target
-        # nor seed changes how another trace stops, so each verdict is the one a trace without
-        # the memo gives, whatever ran first.
+    def test_each_verdict_is_the_one_its_body_gives_alone(self):
+        # A calls T and runs on into it; B branches into the run before T. One walk over all
+        # three gives each the verdict a walk of it alone gives, in any order, and names the
+        # lowest reserved word its body holds.
         a, w, t, b = TEXT, TEXT + 8, TEXT + 12, TEXT + 20
-        words = [jal(t), 0, ADDU, ADDU, RESERVED, branch(4, 0, 0, b, w), 0, JR_RA, 0]
+        words = [jal(t), 0, ADDU, ADDU, RESERVED, branch(4, 0, 0, b, w), 0, JR_RA, 0, RESERVED]
         elf = small_overlay(words)
         ranges = analyze.exec_ranges(elf)
-        d = mock.Mock(elf=elf, hc={a, t, b}, calls=set(), non_code=frozenset(),
-                      trace_ranges_for_entry=lambda entry: ranges)
         evidence = analyze._non_code_evidence(elf, ranges, {})
-        alone = {e: analyze._check_trace(d, e, evidence, {})[1] for e in (a, t, b)}
+        boundaries = frozenset({a, t, b})
+
+        def verdicts(starts):
+            return analyze._BodyWalk(elf, ranges, boundaries, None).reserved(starts, evidence)
+
+        alone = {}
+        for start in (a, t, b):
+            alone.update(verdicts([start]))
+        self.assertEqual(alone, {t: (TEXT + 16, "reserved opcode 0x1a")})  # A ends at T, B at T
         for order in ((a, t, b), (b, t, a), (t, a, b)):
-            clean = {}
-            self.assertEqual({e: analyze._check_trace(d, e, evidence, clean)[1] for e in order},
-                             alone, [hex(e) for e in order])
-        self.assertEqual(d.calls, set())                 # the check adds no call target
+            self.assertEqual(verdicts(list(order)), alone, [hex(e) for e in order])
+
+    def test_shared_runs_are_walked_once(self):
+        # 500 seeds shaped like prologues, 8 words apart, share one run of valid words that
+        # ends in a reserved word: each is withdrawn, and a pass reads each word a bounded
+        # number of times, not once per seed that reaches it.
+        words = []
+        for _ in range(500):
+            words += [PROLOGUE] + [ADDU] * 7
+        words += [RESERVED]
+        elf = small_overlay(words)
+        read, reads, per_pass = elf.read_at_vaddr, [0], []
+
+        def counting(vaddr, n):
+            reads[0] += 1
+            return read(vaddr, n)
+
+        stock = analyze._non_code_entries
+
+        def counted(d, structural, cache=None):
+            before = reads[0]
+            result = stock(d, structural, cache)
+            per_pass.append(reads[0] - before)
+            return result
+
+        elf.read_at_vaddr = counting
+        report = {}
+        with contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.object(analyze, "_non_code_entries", counted):
+            analyze.analyze(elf, report=report)
+        self.assertEqual(len(report["non_code"]), 500)
+        for count in per_pass:
+            self.assertLessEqual(count, 3 * len(words))
+
+    def test_a_clean_body_stays_when_the_entry_it_jumps_to_is_withdrawn(self):
+        # G (named by a data word) calls F and K. F returns on its hot path; its cold path
+        # tail-jumps to K (S1b), or calls a no-return function and runs on into K (S1c). K's
+        # cold path calls the no-return function and runs into a data word. K's generated body
+        # holds that word, so it was a stub and is withdrawn; F's body ends at K, holds no
+        # such word, and keeps its translation, as G does.
+        g, f, k = TEXT, TEXT + 32, TEXT + 64
+        abort = k + 32
+        s1b = [PROLOGUE, jal(f), 0, jal(k), 0, 0x8FBF001C, JR_RA, 0x27BD0020,
+               PROLOGUE, branch(5, 4, 0, f + 4, f + 20), 0, 0x8FBF001C, JR_RA, 0x27BD0020,
+               jump(k), 0,
+               ADDU, branch(5, 5, 0, k + 4, k + 16), 0, JR_RA, 0,
+               jal(abort), 0, RESERVED,
+               PROLOGUE, branch(4, 0, 0, abort + 4, abort + 4), 0]
+        abort = k + 36
+        s1c = [PROLOGUE, jal(f), 0, jal(k), 0, 0x8FBF001C, JR_RA, 0x27BD0020,
+               ADDU, branch(5, 4, 0, f + 4, f + 24), 0, ADDU, JR_RA, 0,
+               jal(abort), 0,
+               ADDU, branch(5, 5, 0, k + 4, k + 20), 0, ADDU, JR_RA, 0,
+               jal(abort), 0, RESERVED,
+               PROLOGUE, branch(4, 0, 0, abort + 4, abort + 4), 0]
+        for name, words in (("S1b", s1b), ("S1c", s1c)):
+            with self.subTest(name):
+                image = overlay_image(words, [g])
+                module, _ = translate_image(image)
+                with stock_analysis():
+                    before, _ = translate_image(image)
+                stubbed_before = {a for a, _ in before.stubbed}
+                withdrawn = {a for a, *_ in module.non_code}
+                self.assertIn(k, withdrawn)
+                self.assertLessEqual(withdrawn, set(range(k, abort, 4)))   # K and its labels
+                self.assertIn(k, stubbed_before)
+                for kept in (g, f):
+                    self.assertIn(kept, {a for a, _ in module.functions})
+                    self.assertNotIn(kept, {a for a, _ in module.stubbed})
+                    self.assertNotIn(kept, stubbed_before)
+
+    def test_a_kept_entry_keeps_a_prologue_it_runs_through(self):
+        # The entry point of a fixed-address executable runs into a prologue at 0x1004 that
+        # starts its frame; a cold path tail-jumps to K, whose cold path runs into a data
+        # word. K is withdrawn; the entry's body translates the same words as before (its `j K`
+        # now goes through checked dispatch), and its spans do not split at the prologue.
+        base, cold, k, kcold, abort = 0x1000, 0x1020, 0x1028, 0x103C, 0x1048
+        words = [ADDU,
+                 PROLOGUE, branch(5, 4, 0, 0x1008, cold), 0, 0x8FBF001C, JR_RA, 0x27BD0020, 0,
+                 jump(k), 0,
+                 ADDU, branch(5, 5, 0, 0x102C, kcold), 0, JR_RA, 0,
+                 jal(abort), 0, RESERVED,
+                 PROLOGUE, branch(4, 0, 0, abort + 4, abort + 4), 0,
+                 PROLOGUE, jal(k), 0, 0x8FBF001C, JR_RA, 0x27BD0020]
+        rc, log, generated = run_codegen(fixed_executable(words, base))
+        with stock_analysis():
+            rc0, _, before = run_codegen(fixed_executable(words, base))
+        self.assertEqual((rc, rc0), (0, 0), log)
+        def translated(text):
+            return re.findall(r"sr_begin\(s, (0x[0-9a-f]+)u", function_text(text, base))
+
+        self.assertEqual(translated(generated), translated(before))
+        self.assertEqual(len(translated(generated)), 9)   # 0x1000 to 0x1024 but the padding at 0x101c
+        self.assertNotIn("sr_unimplemented", function_text(generated, base))
+        self.assertIn("sr_exec_span_register(0x00001000u, 0x00001028u)", generated)
+        self.assertNotIn(f"void f_{k:08x}(CpuState *s) {{", generated)
+        self.assertIn("executable: withdrew", log)
+
+    def test_a_kept_entry_keeps_an_entry_it_branches_to(self):
+        # The entry point branches to T, an entry whose own body holds a reserved word. The
+        # generated entry body may run into T's words on that branch, so T stays code and the
+        # build passes, as it did before.
+        base, t = 0x1000, 0x1010
+        words = [branch(4, 4, 0, base, t), 0, JR_RA, 0,
+                 PROLOGUE, branch(4, 8, 9, t + 4, t + 16), 0, RESERVED,
+                 ADDU, JR_RA, 0x27BD0020]
+        rc, log, generated = run_codegen(fixed_executable(words, base))
+        self.assertEqual(rc, 0, log)
+        self.assertNotIn("NON_CODE_TRANSLATED", log)
+        self.assertNotIn("withdrew", log)
+
+    def test_an_entry_in_a_kept_delay_slot_keeps_its_own_body(self):
+        # K, E and W are named by data words. E is the delay slot of K's `j`; E is a `j` too,
+        # whose delay slot W is a data word, so E's body holds it and was a stub. W is
+        # withdrawn. E stays, as K's body holds its word, and code generation still walks
+        # E's body: W's word stays out of the void, and the module translates.
+        k, e, w, t = TEXT, TEXT + 4, TEXT + 8, TEXT + 12
+        image = overlay_image([jump(t), jump(t), RESERVED, JR_RA, 0], [k, e, w])
+        module, log = translate_image(image)
+        self.assertNotIn("NON_CODE_TRANSLATED", log)
+        self.assertEqual({a for a, *_ in module.non_code}, {w})
+        self.assertIn(e, {a for a, _ in module.functions})
+        self.assertIn(e, {a for a, _ in module.stubbed})
+        void = {a for lo, hi in module.non_code_spans for a in range(lo, hi, 4)}
+        self.assertNotIn(w, void)
+
+    def test_a_seed_a_run_reached_stays_whoever_seeded_it_first(self):
+        # The entry point materializes X (an `la` pair), so a sweep seeds it; a run's dispatch
+        # miss names it too. X's cold path runs into a data word after a no-return call. A seed
+        # a run reached is structural however it was seeded: it stays, and is applied.
+        base = 0x1000
+        x = base + 16
+        ok, abort = x + 24, x + 32
+        words = [0x3C080000 | (x >> 16), 0x25080000 | (x & 0xFFFF), JR_RA, 0,
+                 PROLOGUE, branch(4, 4, 0, x + 4, ok), 0, jal(abort), 0, RESERVED,
+                 JR_RA, 0x27BD0020,
+                 PROLOGUE, branch(4, 0, 0, abort + 4, abort + 4), 0]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "e.elf")
+            pathlib.Path(path).write_bytes(fixed_executable(words, base))
+            for seeds in (set(), {x}):
+                report = {}
+                with contextlib.redirect_stderr(io.StringIO()):
+                    starts, _ = analyze.analyze(analyze.Elf(path, base=0), report=report,
+                                                seeds=seeds)
+                if seeds:
+                    self.assertIn(x, starts)
+                    self.assertNotIn(x, report["non_code"])
+                    self.assertEqual(report["miss_seeds"], {x: "applied"})
+                else:
+                    self.assertIn(x, report["non_code"])        # without the run, it is data
+
+    def test_reserved_words_are_refused_by_the_emitter(self):
+        # A word judged reserved is no control transfer and makes the emitter refuse: judging
+        # one as evidence of data never takes a translatable word away. Every opcode, SPECIAL
+        # function and REGIMM rt, with random other fields.
+        rng = random.Random(7)
+        words = [(op << 26) | rng.getrandbits(26) for op in range(64) for _ in range(32)]
+        words += [(rng.getrandbits(20) << 6) | funct for funct in range(64) for _ in range(8)]
+        words += [(1 << 26) | (rng.getrandbits(5) << 21) | (rt << 16) | rng.getrandbits(16)
+                  for rt in range(32) for _ in range(8)]
+        judged = [w for w in words if analyze.reserved_encoding(w)]
+        self.assertGreater(len(judged), 500)
+        for word in judged:
+            self.assertFalse(codegen.is_control(word), hex(word))
+            with self.assertRaises(codegen.Unsupported, msg=hex(word)):
+                codegen.effect(0x1000, word)
 
     def test_a_withdrawn_seed_still_ends_the_body_before_it(self):
         # G calls N and runs on into X, a data seed (a data-section pointer) shaped like an
@@ -482,35 +711,34 @@ class ExecutableNonCodeTest(unittest.TestCase):
     def test_withdrawn_words_of_the_executable_leave_its_spans(self):
         # A fixed-address executable whose entry calls a data seed: the seed is withdrawn,
         # gets no body, and its words leave the spans the interpreter may run.
+        # Its body runs on past the reserved word into a return: all of it leaves.
         base = 0x1000
         words = [jal(base + 16), 0, JR_RA, 0,
                  PROLOGUE, RESERVED, JR_RA, 0]
-        payload_off = 52 + 32
-        blob = bytearray(payload_off + 4 * len(words))
-        blob[:8] = b"\x7fELF\x01\x01\x01\x00"
-        struct.pack_into("<HHIIIIIHHHHHH", blob, 16, 2, 8, 1, base, 52, 0, 0, 52, 32, 1, 0, 0, 0)
-        struct.pack_into("<8I", blob, 52, 1, payload_off, base, base, 4 * len(words),
-                         4 * len(words), 5, 4)
-        struct.pack_into(f"<{len(words)}I", blob, payload_off, *words)
-        with tempfile.TemporaryDirectory() as tmp:
-            elf_path = os.path.join(tmp, "exec.elf")
-            out_c = os.path.join(tmp, "exec.c")
-            with open(elf_path, "wb") as handle:
-                handle.write(blob)
-            env = {k: v for k, v in os.environ.items()
-                   if k not in ("TITLE_EXTRA_SPANS", "HST_EXTRA_SPANS", "GAME_BASE")}
-            with mock.patch.dict(os.environ, env, clear=True), \
-                    contextlib.redirect_stderr(io.StringIO()) as err, \
-                    contextlib.redirect_stdout(io.StringIO()):
-                rc = codegen.main(["codegen.py", elf_path, out_c, "--base=0", "--profile=none"])
-            self.assertEqual(rc, 0, err.getvalue())
-            generated = "".join(pathlib.Path(tmp, f).read_text(encoding="utf-8")
-                                for f in sorted(os.listdir(tmp)) if f.endswith((".c", ".h")))
-        self.assertIn("withdrew 1 seeds of the executable as non-code", err.getvalue())
+        rc, log, generated = run_codegen(fixed_executable(words, base))
+        self.assertEqual(rc, 0, log)
+        self.assertIn("codegen: executable: withdrew 1 seeds as non-code, 4 words only they "
+                      "reach, 1 executable spans left (no relocation evidence; first reserved "
+                      "word: reserved opcode (1))", log)
         self.assertNotIn("void f_00001010(CpuState *s) {", generated)
         self.assertIn("sr_exec_span_register(0x00001000u, 0x00001010u)", generated)
-        self.assertIn("sr_exec_span_register(0x00001018u, 0x00001020u)", generated)
         self.assertNotIn("sr_exec_span_register(0x00001000u, 0x00001020u)", generated)
+
+    def test_an_extra_image_is_handled_as_the_executable_is(self):
+        # An --extra-elf image without relocation evidence: its withdrawn seed gets no body,
+        # the words only it reaches leave the spans, and the summary line names the image.
+        base, extra = 0x1000, 0x2000
+        words = [JR_RA, 0]
+        extra_words = [jal(extra + 16), 0, JR_RA, 0, PROLOGUE, RESERVED, JR_RA, 0]
+        rc, log, generated = run_codegen(fixed_executable(words, base),
+                                         [(fixed_executable(extra_words, extra), extra)])
+        self.assertEqual(rc, 0, log)
+        self.assertIn("codegen: extra0.elf: withdrew 1 seeds as non-code, 4 words only they reach",
+                      log)
+        self.assertIn("void f_00002000(CpuState *s) {", generated)
+        self.assertNotIn("void f_00002010(CpuState *s) {", generated)
+        self.assertIn("sr_exec_span_register(0x00002000u, 0x00002010u)", generated)
+        self.assertNotIn("sr_exec_span_register(0x00002000u, 0x00002020u)", generated)
 
     def test_a_body_in_withdrawn_words_stops_the_build(self):
         log = io.StringIO()
@@ -518,6 +746,98 @@ class ExecutableNonCodeTest(unittest.TestCase):
             self.assertFalse(codegen._non_code_disjoint("image", {0x1000, 0x1010}, {0x1010}))
             self.assertTrue(codegen._non_code_disjoint("image", {0x1000}, {0x1010}))
         self.assertIn("NON_CODE_TRANSLATED: 1 words", log.getvalue())
+
+
+def fixture_generator(name):
+    """fixtures/<name>/generate.py, the recipe of a public, source-owned guest."""
+    path = pathlib.Path(__file__).resolve().parent.parent / "fixtures" / name / "generate.py"
+    spec = importlib.util.spec_from_file_location(f"non_code_fixture_{name}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def analysis(image, **elf_args):
+    """(entries, spans, report) of the analysis with the withdrawal, then without it."""
+    results = []
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "guest.elf")
+        pathlib.Path(path).write_bytes(image)
+        for patch in (contextlib.nullcontext(), stock_analysis()):
+            report = {}
+            with patch, contextlib.redirect_stderr(io.StringIO()), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                entries, spans = analyze.analyze(analyze.Elf(path, **elf_args), report=report)
+            results.append((entries, spans, report))
+    return results
+
+
+class PublicFixtureTest(unittest.TestCase):
+    """The withdrawal on the code of the public, source-owned guests (fixtures/*/generate.py)."""
+
+    GUESTS = ("cosim", "display_smoke", "production_smoke", "snapshot")
+    LOAD = 0x08804000
+
+    def text(self, generator):
+        if "frames" in generator.build_text_segment.__code__.co_varnames:
+            return generator.build_text_segment(generator.DEFAULT_FRAMES)
+        return generator.build_text_segment()
+
+    def test_a_module_with_relocations_is_untouched(self):
+        # Each guest as its loader sees it, a PRX with its relocation map: analysed exactly
+        # as without the withdrawal, and nothing withdrawn.
+        for name in self.GUESTS:
+            with self.subTest(name):
+                (entries, spans, report), (before, before_spans, _) = analysis(
+                    fixture_generator(name).build_prx(), base=self.LOAD)
+                self.assertEqual((entries, spans), (before, before_spans))
+                self.assertEqual(report["non_code"], {})
+
+    def test_code_without_relocation_evidence_loses_nothing(self):
+        # Each guest's code alone as a fixed-address executable (no relocation evidence): the
+        # same analysis as without the withdrawal. With data after it (a reserved word, then
+        # random words), the code keeps every entry but those whose generated body ran on into
+        # the data before (padding after the last function), which code generation stubbed.
+        rng = random.Random(1)
+        data = struct.pack("<I", RESERVED) + b"".join(
+            struct.pack("<I", rng.getrandbits(32)) for _ in range(2000))
+        for name in self.GUESTS:
+            with self.subTest(name):
+                text = self.text(fixture_generator(name))
+                (entries, spans, _), (before, before_spans, _) = analysis(
+                    fixed_executable((), self.LOAD, text), base=0)
+                self.assertEqual((entries, spans), (before, before_spans))
+                image = fixed_executable((), self.LOAD, text + data)
+                (entries, _, report), (before, _, _) = analysis(image, base=0)
+                code = range(self.LOAD, self.LOAD + len(text))
+                self.assertTrue(report["non_code"])
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = os.path.join(tmp, "guest.elf")
+                    pathlib.Path(path).write_bytes(image)
+                    elf = analyze.Elf(path, base=0)
+                for lost in sorted(a for a in before if a in code and a not in entries):
+                    body = codegen.function_flow(elf, lost, analyze.exec_ranges(elf), set(before))[0]
+                    self.assertTrue(any(analyze.reserved_encoding(codegen.read32(elf, a))
+                                        for a in body), hex(lost))
+
+    def test_a_module_with_an_empty_relocation_map_is_judged_as_an_executable(self):
+        # A PRX whose loader finds no relocation has no address evidence either: placed at
+        # the load address, it gets the same entries, spans and withdrawals as the same
+        # bytes as a fixed-address executable there.
+        rng = random.Random(1)
+        data = struct.pack("<I", RESERVED) + b"".join(
+            struct.pack("<I", rng.getrandbits(32)) for _ in range(2000))
+        for name in self.GUESTS:
+            with self.subTest(name):
+                text = self.text(fixture_generator(name))
+                prx = bytearray(fixed_executable((), 0, text + data))
+                struct.pack_into("<H", prx, 16, 0xFFA0)  # ET_SCE_PRX, no relocation section
+                (entries, spans, report), _ = analysis(bytes(prx), base=self.LOAD)
+                (fixed, fixed_spans, fixed_report), _ = analysis(
+                    fixed_executable((), self.LOAD, text + data), base=0)
+                self.assertTrue(report["non_code"])
+                self.assertEqual((entries, spans, report["non_code"]),
+                                 (fixed, fixed_spans, fixed_report["non_code"]))
 
 
 if __name__ == "__main__":

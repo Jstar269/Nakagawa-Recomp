@@ -41,7 +41,7 @@ from analyze import (
     canonical_cfg_gate, canonical_cfg_json, canonical_cfg_report,
     check_code_overlay, code_overlay_elf, code_overlay_layout, data_section_words,
     is_code_overlay, is_fixed_overlay, static_coverage, branch_kind, BRANCH_UNCOND,
-    seeds_in_analysis, spans_without, _gpr_writes,
+    is_cond_branch, seeds_in_analysis, spans_without, _gpr_writes,
 )
 from codegen_hst_stubs import HST_CUSTOM_STUBS
 from host_stubs import HST_SIMPLE_STUBS
@@ -3684,22 +3684,6 @@ def fpu_effect(addr, w, options=None):
     if fmt == 0x14 and funct(w) == 0x20: return f"{F(fdv)} = sr_fpu_cvt_s_w(sr_u32_as_s32(s->fi[{fs}]), s->fcr31);", None, 0  # cvt.s.w
     raise Unsupported(f"COP1 fmt 0x{fmt:02x} funct 0x{funct(w):02x} at 0x{addr:08x}")
 
-def is_cond_branch(w):
-    op = w >> 26
-    if op in (4, 5, 20, 21):
-        return True
-    if op in (6, 7, 22, 23):
-        return rt(w) == 0
-    if op == 1:
-        # REGIMM trap-immediates (tgei..tnei) are not branches. BLTZALL/BGEZALL
-        # (rt 0x12/0x13) are left out too: no codegen semantics test pins their link
-        # and nullify behaviour, so they reach effect() and are refused there, as on
-        # origin/main.
-        return rt(w) in (0, 1, 2, 3, 0x10, 0x11)
-    if op in (0x11, 0x12) and rs(w) == 8:
-        return True
-    return False
-
 def cond_expr(w):
     op = w >> 26
     if op == 4: return f"({R(rs(w))} == {R(rt(w))})"          # beq
@@ -5386,10 +5370,11 @@ def word_runs(addresses):
 
 
 def _non_code_disjoint(image, owned, non_code_words):
-    """True when no word code generation translated or entered (``owned``) lies in the words
-    the analysis withdrew as non-code. Otherwise the two disagree about what is code, a
-    translator bug: say so and refuse, since the withdrawn words leave the interpreter's spans
-    and that code could not run there."""
+    """True when no word code generation walked or entered (``owned``: every entry, and the
+    body walk of every function it emitted, translated or not) lies in the words the analysis
+    withdrew as non-code. Otherwise the two disagree about what is code, a translator bug:
+    say so and refuse, since the withdrawn words leave the interpreter's spans and that code
+    could not run there."""
     clash = set(owned) & set(non_code_words)
     if clash:
         sys.stderr.write(
@@ -5397,6 +5382,24 @@ def _non_code_disjoint(image, owned, non_code_words):
             f"lie in what the analysis withdrew as non-code (first 0x{min(clash):08x}); "
             "the analysis and the generator disagree about what is code\n")
     return not clash
+
+
+def _reserved_class(why):
+    """The class of analyze.reserved_encoding's reason, its field values left out."""
+    return why.split(" 0x")[0] if why.startswith("reserved ") else "branch with a nonzero rt"
+
+
+def _non_code_summary(image, non_code, non_code_words, spans):
+    """The one line an image whose analysis withdrew seeds as non-code gets: how many, the
+    words only they reach, the executable spans left, and the withdrawals by the class of the
+    lowest reserved word each body holds."""
+    classes = Counter(_reserved_class(why) for _, why in non_code.values())
+    evidence = ", ".join(f"{name} ({count})" for name, count in
+                         sorted(classes.items(), key=lambda item: (-item[1], item[0])))
+    sys.stderr.write(
+        f"codegen: {image}: withdrew {len(non_code)} seeds as non-code, "
+        f"{len(non_code_words)} words only they reach, {len(spans)} executable spans left "
+        f"(no relocation evidence; first reserved word: {evidence})\n")
 
 
 def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, shared=False,
@@ -5474,18 +5477,12 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
     known = {a for a in analyzed if in_ranges(a, ranges)}
     non_code = discovery.get("non_code", {})
     non_code_words = discovery.get("non_code_words", frozenset())
-    # A withdrawn address was an entry before, and every body stopped at it; it stays a
-    # boundary (a transfer there dispatches) so no remaining body changes its extent.
+    # A withdrawn address stays a boundary (a transfer there dispatches), as the analysis
+    # judged every body with it one.
     boundaries = set(non_code) or None
     if non_code:
         module.non_code = tuple((a, *non_code[a]) for a in sorted(non_code))
         module.non_code_spans = tuple(word_runs(non_code_words))
-        reasons = Counter(re.sub(r" (0x[0-9a-f]+|\d+)$", "", why)
-                          for _, why in non_code.values())
-        sys.stderr.write(
-            f"codegen: {name}: withdrew {len(non_code)} seeds as non-code, "
-            f"{len(non_code_words)} words only they reached (no relocation evidence; "
-            f"evidence: {', '.join(f'{r} {n}' for r, n in reasons.most_common())})\n")
     if cfg_gate:
         report = canonical_cfg_report(elf, ranges=ranges, entries=sorted(known))
         findings = canonical_cfg_gate(report)
@@ -5518,6 +5515,7 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
                          relocations=relocations, patched=var_sites)
     spans = span_index(ranges)
     translated_words = set()
+    walked_words = set()  # the body walk of every function, translated or not
     previous_space = ADDRESS_SPACE
     ADDRESS_SPACE = space
     try:
@@ -5536,6 +5534,7 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
                     # One walk serves the body and its translated-word count.
                     flow = function_flow(elf, a, spans, known, dispatch_boundaries=boundaries,
                                          options=options)
+                    walked_words.update(flow[0])
                     text = "\n".join(emit_function(elf, a, spans, known, profile=profile,
                                                    dispatch_boundaries=boundaries,
                                                    flow=flow, options=options))
@@ -5552,7 +5551,7 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
             module.functions.append((a, nwords))
     finally:
         ADDRESS_SPACE = previous_space
-    if non_code_words and not _non_code_disjoint(name, translated_words | known, non_code_words):
+    if non_code_words and not _non_code_disjoint(name, walked_words | known, non_code_words):
         return 1
     module.spans = sorted(set((lo, hi) for lo, hi in ranges if hi > lo))
     if non_code_words:
@@ -5580,6 +5579,8 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
                              "evidence it is code; outside the spans\n")
         if not words:
             module.unsupported_reason = "code overlay has no translated code to identify it"
+    if non_code:
+        _non_code_summary(name, non_code, non_code_words, module.spans)
     module_stubbed = {a for a, _ in module.stubbed}
     module.coverage = static_coverage(
         elf, ranges, known,
@@ -7111,13 +7112,6 @@ def _translate(argv):
     # A withdrawn seed is no entry, and stays a boundary no body runs through.
     main_non_code = {a: hit for a, hit in seed_args["report"].get("non_code", {}).items()
                      if a not in analyzed}
-    if main_non_code:
-        reasons = Counter(re.sub(r" (0x[0-9a-f]+|\d+)$", "", why) for _, why in main_non_code.values())
-        sys.stderr.write(
-            f"codegen: withdrew {len(main_non_code)} seeds of the executable as non-code, "
-            f"{len(seed_args['report'].get('non_code_words', ()))} words only they reached "
-            f"(no relocation evidence; evidence: "
-            f"{', '.join(f'{r} {n}' for r, n in reasons.most_common())})\n")
     if miss_seed_outcome is not None:
         miss_seeds.report_outcome(miss_seed_outcome, prefix="CODEGEN_MISS_SEEDS")
     cfg_report = _cfg_report_and_gate(elf, analyzed, ranges, extra_spans, cfg_report_path, cfg_gate,
@@ -7127,6 +7121,8 @@ def _translate(argv):
                            if main_non_code else frozenset())
     owned_exec_ranges = (spans_without(list(ranges), main_non_code_words) if main_non_code_words
                          else list(ranges))
+    if main_non_code:
+        _non_code_summary("executable", main_non_code, main_non_code_words, owned_exec_ranges)
     catalog = build_entry_catalog(analyzed, ranges, profile=profile, elf=elf)
     omitted = omit_aot.apply(catalog, elf.entry)
     dispatch_boundaries = set(omit_aot.addrs) | set(main_non_code)
@@ -7293,14 +7289,29 @@ def _translate(argv):
                             f"0x{old_lo:08x},0x{old_hi:08x}\n"
                         )
                         return 2
-        owned_exec_ranges.extend(extra_ranges)
+        extra_report = {}
         try:
-            extra_analyzed, _ = analyze(extra_elf, cfg_gate=cfg_gate)
+            extra_analyzed, _ = analyze(extra_elf, cfg_gate=cfg_gate, report=extra_report)
         except ImportTableError as exc:
             sys.stderr.write(f"codegen: {format_boundary(exc, extra_elf_path)}\n")
             return 1
         extra_known = set(extra_analyzed)
         extra_known = set(a for a in extra_known if in_ranges(a, extra_ranges))
+        # Withdrawn seeds of an image without relocation evidence, as for the executable: no
+        # entry, a dispatch boundary, and the words only they reach out of the spans.
+        extra_non_code = {a: hit for a, hit in extra_report.get("non_code", {}).items()
+                          if a not in extra_analyzed}
+        extra_non_code_words = (frozenset(extra_report.get("non_code_words", ()))
+                                if extra_non_code else frozenset())
+        extra_owned = (spans_without(list(extra_ranges), extra_non_code_words)
+                       if extra_non_code_words else list(extra_ranges))
+        owned_exec_ranges.extend(extra_owned)
+        if extra_non_code:
+            _non_code_summary(os.path.basename(extra_elf_path), extra_non_code,
+                              extra_non_code_words, extra_owned)
+        extra_boundaries = set(extra_non_code) or None
+        # Passed only when there is a withdrawal, so every other image's call is unchanged.
+        extra_boundary_args = {"dispatch_boundaries": extra_boundaries} if extra_boundaries else {}
         if cfg_gate:
             extra_report = canonical_cfg_report(
                 extra_elf, ranges=extra_ranges, entries=sorted(extra_known)
@@ -7348,6 +7359,7 @@ def _translate(argv):
         # A module at a fixed base reads its own variable-import sites from memory.
         main_space = ADDRESS_SPACE
         ADDRESS_SPACE = AddressSpace(patched=extra_var_sites)
+        extra_walked = set(extra_known)
         for a in sorted(extra_known):
             if is_extra_stub(a):
                 lib_nid = extra_impmap.get(a)
@@ -7361,11 +7373,18 @@ def _translate(argv):
                 func_texts.append(text)
                 emitted.append(a)
                 continue
+            if extra_non_code_words:
+                try:
+                    extra_walked.update(function_flow(
+                        extra_elf, a, extra_ranges, extra_known,
+                        dispatch_boundaries=extra_boundaries, options=options)[0])
+                except Unsupported:
+                    pass  # left to the interpreter: its entry is in `extra_walked` already
             try:
                 func_texts.append(llvm_body("\n".join(emit_function(
                     extra_elf, a, extra_ranges, extra_known, profile=profile,
-                    stack_census=stack_census, options=options)), extra_elf, a,
-                    extra_ranges, extra_known))
+                    stack_census=stack_census, options=options, **extra_boundary_args)),
+                    extra_elf, a, extra_ranges, extra_known, **extra_boundary_args))
                 emitted.append(a)
             except Unsupported as e:
                 reason = str(e).replace('"', "'")
@@ -7377,6 +7396,9 @@ def _translate(argv):
                 stubbed.append((a, reason))
                 sys.stderr.write(f"skip 0x{a:08x}: {e}\n")
         ADDRESS_SPACE = main_space
+        if extra_non_code_words and not _non_code_disjoint(
+                os.path.basename(extra_elf_path), extra_walked, extra_non_code_words):
+            return 1
         extra_stubbed = {a for a, _ in stubbed} & extra_known
         coverage_images.append({
             "image": os.path.basename(extra_elf_path),

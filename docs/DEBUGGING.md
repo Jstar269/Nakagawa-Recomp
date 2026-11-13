@@ -463,11 +463,13 @@ non-zero:
 
 **Data withdrawn from a fixed-address image.** An image without relocation evidence (an overlay
 or an executable loaded at a fixed address) can keep data in its code section, and codegen withdraws
-the seeds whose traces reach a word no Allegrex CPU decodes, with the words only they reached
-([`ARCHITECTURE.md`](ARCHITECTURE.md#codegen-internals)). Codegen prints one line per such image,
-`codegen: <module>: withdrew N seeds as non-code, W words only they reached (no relocation evidence;
-evidence: ...)` (for the executable, `codegen: withdrew N seeds of the executable as non-code, ...`),
-with the reserved-word kinds counted. A dispatch into a module's withdrawn span stops with
+the seeds whose generated bodies would hold a word that no instruction has, with the words only
+they reach ([`ARCHITECTURE.md`](ARCHITECTURE.md#codegen-internals)). Codegen prints one line per
+such image, `codegen: <image>: withdrew N seeds as non-code, W words only they reach, S executable
+spans left (no relocation evidence; first reserved word: <class> (count), ...)`, where the image is
+the module's name, `executable`, or an `--extra-elf` file's name, and each class (a reserved
+opcode, SPECIAL function or REGIMM `rt`, or a branch with a nonzero `rt`) counts the withdrawals
+whose lowest reserved word is of it. A dispatch into a module's withdrawn span stops with
 `NON_CODE_WITHDRAWN: 0x... is <module>@0x..., in a span the build withdrew as non-code`. In the
 executable the withdrawn words leave its executable spans, so a dispatch there stops as not
 executable at that address, without the module line. Either way the game called into those words, so

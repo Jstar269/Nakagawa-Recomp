@@ -588,6 +588,49 @@ static const char *stderr_capture_end(char *out, size_t size) {
     return out;
 }
 
+/* A module whose analysis withdrew non-code has a span per run of code between the
+ * withdrawn words. The lookup and the fetch-authority query find the span by a binary
+ * search: every span answers for its own words, and no gap, word before the first span or
+ * word past the last one is owned. */
+static uint32_t g_module_c_base;
+static const SrModuleFunc k_module_c_funcs[] = {
+    { 0x08u, 2u, module_a_entry }, { 0x20u, 2u, module_a_entry }, { 0x40u, 1u, module_a_entry },
+    { 0x60u, 2u, module_a_entry }, { 0x80u, 2u, module_a_entry },
+};
+static const SrModuleSpan k_module_c_spans[] = {
+    { 0x08u, 0x10u }, { 0x20u, 0x30u }, { 0x40u, 0x44u }, { 0x60u, 0x70u }, { 0x80u, 0x90u },
+};
+static const SrModuleCode k_module_c = {
+    "overlay_c.prx", 0x200u, NULL, 0x00u, 0x100u, 0x10u, 1u, NULL, &g_module_c_base,
+    k_module_c_funcs, 5u, k_module_c_spans, 5u, 0u, 0u, NULL, 0u, NULL, 0u,
+};
+
+static void test_runtime_module_spans_are_searched(void) {
+    SrModuleBindDetail detail;
+    static const uint32_t owned[] = { 0x08u, 0x0cu, 0x20u, 0x2cu, 0x40u, 0x60u, 0x6cu, 0x80u, 0x8cu };
+    static const uint32_t gaps[] = { 0x00u, 0x04u, 0x10u, 0x1cu, 0x30u, 0x44u, 0x5cu, 0x70u, 0x90u, 0xfcu };
+    sr_module_code_reset();
+    sr_exec_span_reset();
+    sr_module_code_register(&k_module_c);
+    CHECK(sr_module_code_bind(&k_module_c, MODULE_BASE_LOW, &detail) == SR_MODULE_BIND_OK,
+          "module C binds (address 0x%08x)", detail.address);
+    for (size_t i = 0; i < sizeof owned / sizeof owned[0]; i++)
+        CHECK(sr_module_code_fetch_authority(MODULE_BASE_LOW + owned[i]) == 1,
+              "a word of a span is executable (link 0x%02x)", owned[i]);
+    for (size_t i = 0; i < sizeof gaps / sizeof gaps[0]; i++) {
+        int in_bound = 0;
+        CHECK(sr_module_code_fetch_authority(MODULE_BASE_LOW + gaps[i]) == 0 &&
+                  sr_module_code_lookup(MODULE_BASE_LOW + gaps[i], &in_bound) == NULL && in_bound,
+              "a word outside every span is neither executable nor a body (link 0x%02x)", gaps[i]);
+    }
+    for (size_t i = 0; i < sizeof k_module_c_funcs / sizeof k_module_c_funcs[0]; i++)
+        CHECK(sr_module_code_lookup(MODULE_BASE_LOW + k_module_c_funcs[i].offset, NULL) ==
+                  k_module_c_funcs[i].fn,
+              "each span's entry is found (link 0x%02x)", k_module_c_funcs[i].offset);
+    sr_module_code_unbind(&k_module_c);
+    sr_module_code_reset();
+}
+
 static void test_runtime_module_non_code_is_named(void) {
     SrModuleBindDetail detail;
     const char *name = NULL;
@@ -2641,6 +2684,7 @@ int main(int argc, char **argv) {
     test_historical_call_target_fails_at_named_boundary();
     test_runtime_module_binding_is_the_authority_for_its_range();
     test_runtime_module_non_code_is_named();
+    test_runtime_module_spans_are_searched();
     test_code_overlays_follow_guest_memory();
     test_mixed_overlay_is_identified_by_its_code_ranges();
     test_late_import_retirement_is_visible_after_warm_dispatch();

@@ -324,6 +324,13 @@ void sr_module_code_register(const SrModuleCode *code) {
         fprintf(stderr, "sr_module_code_register: malformed generated module descriptor\n");
         abort();
     }
+    for (uint32_t i = 1; i < code->nspans; i++) {
+        if (code->spans[i].start < code->spans[i - 1u].end) {
+            fprintf(stderr, "sr_module_code_register: %s: spans out of address order or "
+                    "overlapping at 0x%08" PRIx32 "\n", code->name, code->spans[i].start);
+            abort();
+        }
+    }
     for (size_t i = 0; i < s_module_code_count; i++) {
         if (s_module_codes[i] == code) return;
         if (module_name_equal(s_module_codes[i]->name, code->name)) {
@@ -488,13 +495,20 @@ static const SrModuleBinding *module_binding_for(uint32_t pc) {
     return NULL;
 }
 
+/* The spans are in address order and disjoint (sr_module_code_register refuses others), so
+ * only the last span starting at or below link_pc can hold it: a binary search finds it. A
+ * module whose analysis withdrew non-code has a span per run of code between the withdrawn
+ * words, often hundreds, and this runs on every lookup and fetch-authority query. */
 static int module_span_owns(const SrModuleCode *code, uint32_t link_pc) {
-    for (uint32_t i = 0; i < code->nspans; i++) {
-        const SrModuleSpan *span = &code->spans[i];
-        if (link_pc >= span->start && link_pc < span->end && span->end - link_pc >= 4u)
-            return 1;
+    uint32_t lo = 0, hi = code->nspans;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2u;
+        if (code->spans[mid].start <= link_pc) lo = mid + 1u;
+        else hi = mid;
     }
-    return 0;
+    if (lo == 0u) return 0;
+    const SrModuleSpan *span = &code->spans[lo - 1u];
+    return link_pc < span->end && span->end - link_pc >= 4u;
 }
 
 RecompFn sr_module_code_lookup(uint32_t pc, int *in_bound_image) {
