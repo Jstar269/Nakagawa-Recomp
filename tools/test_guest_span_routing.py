@@ -163,6 +163,7 @@ class TestGuestSpanRouting(unittest.TestCase):
                 "ge_vramdump_write": ("sr_guest_span_readable",),
                 "ge_tr_hash_span": ("sr_guest_span_readable",),
                 "sr_enhancement_widen_clip_x": ("sr_guest_span_writable_at",),
+                "cull_sweep": ("sr_guest_span_readable",),
             },
             ROOT / "src" / "rt" / "ge_capture.c": {
                 "ge_capture_begin": ("sr_guest_span_readable",),

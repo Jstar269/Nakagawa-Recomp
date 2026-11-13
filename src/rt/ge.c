@@ -5365,7 +5365,11 @@ static void cull_sweep(void) {   /* drop the entries whose words the title has s
     for (uint32_t i = 0; i < GE_CULL_SEEN; i++) {
         const GeCullSeen *e = &s_cull_seen[i];
         if (e->addr == 0u) continue;
-        uint32_t now[4];   /* the address passed the 64-byte span check when its entry was made */
+        /* The words are read through a direct host pointer, so the 64-byte span the entry passed
+         * when it was made is checked again here. An entry whose span is not readable guest
+         * memory decides no later call and is dropped with the overwritten ones. */
+        if (!sr_guest_span_readable(e->addr, 64u)) continue;
+        uint32_t now[4];
         for (uint32_t k = 0; k < 4u; k++) memcpy(&now[k], SR_HOST(e->addr + 16u * k), sizeof now[k]);
         if (memcmp(now, e->row, sizeof now) == 0) keep[n++] = *e;
     }
