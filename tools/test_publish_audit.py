@@ -909,6 +909,17 @@ class TestPublishAudit(unittest.TestCase):
         )
         self.assertFalse(any(f.code == "SPDX_UPSTREAM_LINEAGE" for f in stb_findings), stb_findings)
 
+        # #2207: stb_vorbis.c is byte-identical upstream too; another stb source still needs SPDX.
+        vorbis_header = b"// Ogg Vorbis audio decoder - v1.24 - public domain\n"
+        vorbis_findings = self._spdx_provenance_findings(
+            "third_party/stb/stb_vorbis.c", vorbis_header, "upstream_derived", "MIT OR Unlicense"
+        )
+        self.assertFalse(any(f.code == "SPDX_UPSTREAM_LINEAGE" for f in vorbis_findings), vorbis_findings)
+        stb_sibling = self._spdx_provenance_findings(
+            "third_party/stb/stb_other.c", vorbis_header, "upstream_derived", "MIT OR Unlicense"
+        )
+        self.assertTrue(any(f.code == "SPDX_UPSTREAM_LINEAGE" for f in stb_sibling), stb_sibling)
+
         sibling_findings = self._spdx_provenance_findings(
             "third_party/clay/other.h", upstream_header, "upstream_derived", "Zlib"
         )
@@ -1983,6 +1994,13 @@ class TextHygieneTests(unittest.TestCase):
         self.assertEqual(self._codes(clip, path="docs/media/clip.mp4"), [])
         self.assertEqual(self._codes(clip, path="docs/media/clip.mp4.txt"), ["TEXT_ENCODING_UNDECODABLE"])
         self.assertEqual(self._codes(b"a" + CRLF + b"b" + CRLF, path="docs/media/clip.md"), ["TEXT_LINE_ENDING_CRLF"])
+
+    def test_launcher_music_track_is_binary_but_its_text_neighbours_are_not(self):
+        # #2207: an Ogg Vorbis track is binary audio like a .wav sound; its manifest stays governed text.
+        track = b"OggS\x00\x02" + bytes(range(0x80, 0x100))
+        self.assertEqual(self._codes(track, path="assets/music/launcher/track.ogg"), [])
+        self.assertEqual(self._codes(track, path="assets/music/launcher/track.ogg.txt"),
+                         ["TEXT_ENCODING_UNDECODABLE"])
 
     def test_empty_file_is_silent(self):
         self.assertEqual(self._codes(b""), [])

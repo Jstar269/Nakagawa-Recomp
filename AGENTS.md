@@ -238,6 +238,7 @@ Re-check live source before changing these; PR numbers are navigation, not evide
 - **PR #126:** a `jr`/`jalr` target is latched at transfer, before link writes and the delay slot.
 - **PR #127:** `dispatch_call` carries `target` and `resume_pc`; CALL and TAIL differ; live `$ra` is not a resume descriptor.
 - **PR #128:** cosimulation compares AOT/interpreter state, CALL/TAIL cells included; its negative corpus fails closed; a build-only mutant is not a valid semantic kill.
+- **PR #2451:** resume at a PC is native re-entry and opt-in (`codegen.py --state-resume`; default output stays byte-identical): a parked thread is a frame list (body entry, resume point and kind, entry `$sp`) read from its return-boundary records, never from live `$ra` or host frames; anything not exactly describable or resumable is refused by name, and it does not extend the interpreter floor.
 - Nested interpreted calls outside that floor are unproven; broader claims need a new contract and test.
 - `src/rt/recomp.h` is a load-bearing ABI: `$ra` is `r[31]`; `CpuState` is versioned by `SR_CPUSTATE_ABI_VERSION`.
 - Chunk count is dynamic; `FUNCS_PER_CHUNK` is not a fixed ABI.

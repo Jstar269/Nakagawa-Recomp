@@ -8634,11 +8634,47 @@ static void test_play_mode_settings(void) {
         assert(app->title_enhancements[1].available && app->title_enhancements[1].shipped);
         assert(strcmp(app->title_enhancements[1].package_id, "shipped-60hz") == 0);
         assert(app->title_enhancements[2].available && !app->title_enhancements[2].shipped);
+        /* A package is experimental unless it is the shipped one and declares
+           "experimental": false (section 9.10). */
+        assert(app->title_enhancements[1].experimental && app->title_enhancements[2].experimental);
+        assert(!player_app_title_60hz_released(app, 1) && !player_app_title_60hz_released(app, 2));
+        static const char *const k_flag_values[] = {"false", "true", "\"false\"", "0", "null"};
+        for (size_t v = 0; v < sizeof(k_flag_values) / sizeof(k_flag_values[0]); ++v) {
+            char text[160];
+            snprintf(text, sizeof(text),
+                     "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\","
+                     " \"experimental\": %s}", k_flag_values[v]);
+            write_text_file(file, text);
+            player_app_refresh_title_enhancements(app);
+            bool released = v == 0u;
+            assert(app->title_enhancements[1].available && app->title_enhancements[1].shipped);
+            assert(app->title_enhancements[1].experimental == !released);
+            assert(player_app_title_60hz_released(app, 1) == released);
+        }
+        /* The user's own copy of the released package comes first and still loads and plays,
+           but only the maintainer releases a package: it stays experimental. */
         snprintf(own, sizeof(own), "%s%cenhancements%ctest90002-60hz.json", root, sep, sep);
+        write_text_file(own,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\","
+            " \"experimental\": false}");
+        player_app_refresh_title_enhancements(app);
+        assert(app->title_enhancements[1].available && !app->title_enhancements[1].shipped &&
+               strcmp(app->title_enhancements[1].package_id, "shipped-60hz") == 0);
+        assert(app->title_enhancements[1].experimental && !player_app_title_60hz_released(app, 1));
+        remove(own);
+        /* The shipped package for another title is not usable, and not released. */
+        write_text_file(file,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-3\","
+            " \"experimental\": false}");
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[1].available && app->title_enhancements[1].experimental);
+        assert(!player_app_title_60hz_released(app, 1));
+        write_text_file(file,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\"}");
         write_text_file(own, "{}");
         player_app_refresh_title_enhancements(app);
         assert(!app->title_enhancements[1].available && !app->title_enhancements[1].shipped &&
-               app->title_enhancements[1].problem[0]);
+               app->title_enhancements[1].problem[0] && app->title_enhancements[1].experimental);
         remove(own);
         remove(file);
         player_app_refresh_title_enhancements(app);
@@ -8756,7 +8792,8 @@ static void test_play_mode_settings(void) {
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"},") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -8954,7 +8991,8 @@ static void test_play_mode_sas_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8981,7 +9019,8 @@ static void test_play_mode_sas_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -9048,7 +9087,8 @@ static void test_play_mode_cull_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -9137,7 +9177,8 @@ static void test_play_mode_stick_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"on\", "
-                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         free(saved);
     }
 
@@ -9300,7 +9341,8 @@ static void test_play_mode_load_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"fast\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"load\": \"fast\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST95001\": {\"mode\": \"ace\", \"load\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9402,7 +9444,7 @@ static void test_play_mode_ssaa_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\"}") != NULL);
+        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\", \"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"ssaa\": \"4\"}") != NULL && strstr(saved, "\"ssaa\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9435,6 +9477,81 @@ static void test_play_mode_ssaa_settings(void) {
     free(app);
     printf("PASS: supersampling is off by default and in every preset, read and saved at both levels, "
            "and Enhanced and Ace launches carry it\n");
+}
+
+/* Smooth far textures (contract 10.16, 11.3.8): off in a fresh file and in every preset; a
+ * library "mips" and a title's own are read, the title's wins, both survive a save and a load, an
+ * Enhanced or Ace launch with the part on carries ";mips=on" right after twin, and a launch with it off carries
+ * no key, so its line is the line of a build without the part. */
+static void test_play_mode_mips_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_mips_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+    assert(player_enhanced_part(PLAYER_PART_MIPS)->fresh == 0);
+    assert(strcmp(player_enhanced_part(PLAYER_PART_MIPS)->key, "mips") == 0);
+
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"mips\": \"on\"},"
+        " \"title_play\": {\"TEST95001\": {\"mode\": \"enhanced\", \"mips\": \"off\"},"
+        " \"TEST95002\": {\"mode\": \"ace\"}, \"TEST95003\": {\"mode\": \"authentic\"}}}");
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_MIPS] == 1);
+    player_play_resolve(&app->settings, "TEST95001", &r);
+    assert(r.on && r.part[PLAYER_PART_MIPS] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "mips") == NULL);
+    player_play_resolve(&app->settings, "TEST95002", &r);       /* follows the library */
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_MIPS] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line + strlen(line) - 8, ";mips=on") == 0);
+    /* With Wider culling on too, cull stays last though its part comes before mips in the enum:
+       the line follows ace_format's key order (mips right after twin, cull last). */
+    r.part[PLAYER_PART_CULL] = 1;
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 25, ";twin=off;mips=on;cull=on") == 0);
+    r.part[PLAYER_PART_CULL] = 0;
+    player_play_resolve(&app->settings, "TEST95004", &r);       /* Enhanced by the library */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_MIPS] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line + strlen(line) - 8, ";mips=on") == 0);
+    player_play_resolve(&app->settings, "TEST95003", &r);       /* Authentic has no line */
+    assert(!r.on);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", \"mips\": \"on\"}") != NULL);
+        assert(strstr(saved, "\"TEST95001\": {\"mode\": \"enhanced\", \"mips\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_MIPS] == 1);
+    player_play_resolve(&back->settings, "TEST95001", &r);
+    assert(r.on && r.part[PLAYER_PART_MIPS] == 0);
+
+    /* A file that never had the key, or has a word this build does not know, leaves it off. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\"},"
+        " \"title_play\": {\"TEST95001\": {\"mode\": \"ace\", \"mips\": \"max\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_MIPS] == 0);
+    player_play_resolve(&app->settings, "TEST95001", &r);
+    assert(r.on && r.part[PLAYER_PART_MIPS] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "mips") == NULL);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: smooth far textures is off by default, read and saved at both levels, and launched only when on\n");
 }
 
 /* Finer patches (contract 10.14, 11.3.7) at both levels: off in a fresh file and in no graphics
@@ -9489,7 +9606,8 @@ static void test_play_mode_tess_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
                                       "\"upscale\": \"off\", \"stick\": \"off\", \"load\": \"off\", "
-                                      "\"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);
@@ -9958,7 +10076,8 @@ static void test_play_mode_twin_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"off\", \"twin\": \"on\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"on\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9984,7 +10103,8 @@ static void test_play_mode_twin_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"on\"}") != NULL);
         free(saved);
     }
@@ -10284,7 +10404,8 @@ static void test_play_mode_upscale_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
                                       "\"upscale\": \"fsr1\", \"stick\": \"off\", \"load\": \"off\", "
-                                      "\"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -11091,6 +11212,7 @@ int main(int argc, char **argv) {
     test_play_mode_stick_settings();
     test_play_mode_load_settings();
     test_play_mode_ssaa_settings();
+    test_play_mode_mips_settings();
     test_play_mode_tess_settings();
     test_play_mode_twin_settings();
     test_player_nickname();
@@ -15913,6 +16035,138 @@ int main(int argc, char **argv) {
                    !rep->render_notice_hidden[NK_RENDER_FALLBACK_SOFTWARE_GE]);
             assert(dev_log_contains(rep, "render path: presenter=gdi ge=software "
                                          "fallback=gdi_presenter"));
+        }
+
+        /* #2151: while the GPU renderer draws, the runtime reports each effect it hands to the
+           software renderer for long enough (BOOT_EVENT phase=render_fallback, written by
+           gui.c through nk_render_fallback_event_format). The game's page names them in one
+           sentence, each once, in the GE's order; another game's page does not. Hide hides it
+           for that game and the effects it named: the same effects on the next launch stay
+           hidden, a new effect shows it again, and so does another game. A launch on the
+           software GE shows the start-up notice instead. */
+        {
+            static const char all_effects[] =
+                "Some of this game's drawing is done in software because the GPU renderer "
+                "cannot draw it: stencil effects, colour-test effects, logic operations, "
+                "partial colour writes, pictures drawn in main memory, wide frame buffers, "
+                "mipmapped textures, lines and points. The game may run slower.";
+            static const char two_effects[] =
+                "Some of this game's drawing is done in software because the GPU renderer "
+                "cannot draw it: stencil effects and lines. The game may run slower.";
+            static const char three_effects[] =
+                "Some of this game's drawing is done in software because the GPU renderer "
+                "cannot draw it: stencil effects, mipmapped textures and lines. The game may "
+                "run slower.";
+            char words[384];
+            bool effects_ok = true;
+            int failed_pass = -1;
+            NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true);
+            NkRenderPath soft_path = nk_render_path_from_init(true, true, true, false);
+            assert(rep->game_count > 1);
+            assert(player_render_effects_text(0x1FFu, words, sizeof(words)) &&
+                   strcmp(words, all_effects) == 0);
+            assert(!player_render_effects_text(0u, words, sizeof(words)) && words[0] == '\0');
+            assert(!player_render_effects_text(0x1FFu, words, 64u) && words[0] == '\0');
+            for (int pass = 0; pass < 4 && effects_ok; ++pass) {
+                const char *heading = "unset";
+                const char *text = "unset";
+                char line[256];
+                char timed[600];
+                NkRenderFallbackEvent stencil = {NK_RENDER_EFFECT_STENCIL, 360u, 5000u, 20000u,
+                                                 0u, 200u};
+                NkRenderFallbackEvent lines = {NK_RENDER_EFFECT_LINE, 360u, 900u, 20000u, 40u,
+                                               43u};
+                NkRenderFallbackEvent mips = {NK_RENDER_EFFECT_MIPS, 360u, 4800u, 1500000u, 0u,
+                                              3u};
+                /* Passes 0, 1 and 3 launch the first game, pass 2 the second; pass 3 starts
+                   the software GE: no GPU renderer, so no effects notice. */
+                const int game = pass == 2 ? 1 : 0;
+                const char *disc = rep->games[game].disc_id;
+                const NkRenderPath *path = pass == 3 ? &soft_path : &gpu_path;
+                set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "1");
+                bool launched = player_app_launch_game(rep, game) && rep->is_game_running &&
+                                rep->boot_event_file_path[0] != '\0';
+                effects_ok = effects_ok && launched && rep->render_effects == 0u &&
+                             rep->render_effects_text[0] == '\0';
+                if (launched) {
+                    (void)player_app_monitor_game_session(rep, 95000 + (uint64_t)pass * 1000);
+                    effects_ok = effects_ok &&
+                        nk_render_path_event_format(path, line, sizeof(line)) > 0;
+                    snprintf(timed, sizeof(timed), "%s t_ns=80\n", line);
+                    effects_ok = effects_ok &&
+                        append_runtime_event(rep->boot_event_file_path, timed);
+                    /* The line first, then the stencil (twice, as a second run of the rule
+                       would): the sentence keeps the GE's order. */
+                    effects_ok = effects_ok &&
+                        nk_render_fallback_event_format(&lines, line, sizeof(line)) > 0;
+                    snprintf(timed, sizeof(timed), "%s t_ns=81\n", line);
+                    effects_ok = effects_ok &&
+                        append_runtime_event(rep->boot_event_file_path, timed);
+                    effects_ok = effects_ok &&
+                        nk_render_fallback_event_format(&stencil, line, sizeof(line)) > 0;
+                    snprintf(timed, sizeof(timed), "%s t_ns=82\n%s t_ns=83\n", line, line);
+                    effects_ok = effects_ok &&
+                        append_runtime_event(rep->boot_event_file_path, timed);
+                    (void)player_app_monitor_game_session(rep, 95500 + (uint64_t)pass * 1000);
+                    bool shown = player_app_render_notice(rep, disc, &heading, &text);
+                    effects_ok = effects_ok && rep->render_path_known &&
+                        rep->render_effects ==
+                            ((1u << NK_RENDER_EFFECT_STENCIL) | (1u << NK_RENDER_EFFECT_LINE)) &&
+                        strcmp(rep->render_effects_text, two_effects) == 0;
+                    if (pass == 0) {
+                        effects_ok = effects_ok && shown && heading != NULL && text != NULL &&
+                            strcmp(heading, "Partly drawn in software") == 0 &&
+                            strcmp(text, two_effects) == 0;
+                        effects_ok = effects_ok &&
+                            !player_app_render_notice(rep, rep->games[1].disc_id, &heading,
+                                                      &text);
+                        player_app_hide_render_notice(rep);
+                        effects_ok = effects_ok &&
+                            !player_app_render_notice(rep, disc, &heading, &text);
+                    } else if (pass == 1) {
+                        /* The same game and effects: still hidden. A new effect shows the
+                           notice again, naming all three; Hide then hides those. */
+                        effects_ok = effects_ok && !shown && heading == NULL && text == NULL;
+                        effects_ok = effects_ok &&
+                            nk_render_fallback_event_format(&mips, line, sizeof(line)) > 0;
+                        snprintf(timed, sizeof(timed), "%s t_ns=84\n", line);
+                        effects_ok = effects_ok &&
+                            append_runtime_event(rep->boot_event_file_path, timed);
+                        (void)player_app_monitor_game_session(rep, 95800 + (uint64_t)pass * 1000);
+                        effects_ok = effects_ok &&
+                            player_app_render_notice(rep, disc, &heading, &text) &&
+                            heading != NULL && text != NULL &&
+                            strcmp(heading, "Partly drawn in software") == 0 &&
+                            strcmp(text, three_effects) == 0;
+                        player_app_hide_render_notice(rep);
+                        effects_ok = effects_ok &&
+                            !player_app_render_notice(rep, disc, &heading, &text);
+                    } else if (pass == 2) {
+                        /* Another game reporting the effects hidden on the first: shown. */
+                        effects_ok = effects_ok && shown && heading != NULL && text != NULL &&
+                            strcmp(heading, "Partly drawn in software") == 0 &&
+                            strcmp(text, two_effects) == 0;
+                    } else {
+                        /* No GPU renderer: the page names the start-up fallback, never the
+                           effects. */
+                        effects_ok = effects_ok && shown && heading != NULL && text != NULL &&
+                            strcmp(heading, "Drawn in software") == 0 &&
+                            strstr(text, "The GPU renderer did not start") != NULL;
+                    }
+                }
+                if (!effects_ok && failed_pass < 0) failed_pass = pass;
+                if (rep->is_game_running) player_app_stop_game(rep);
+                set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "");
+            }
+            if (!effects_ok) fprintf(stderr, "render effects: pass %d failed\n", failed_pass);
+            assert(effects_ok);
+            assert(dev_log_contains(rep, "render fallback: reason=stencil frames=360 "
+                                         "sw_prims=5000 gpu_prims=20000 readbacks=0 "
+                                         "share_pm=200"));
+            assert(dev_log_contains(rep, "render notice hidden for this session: effects drawn "
+                                         "in software"));
+            /* Hiding the effects hides no start-up fallback's notice. */
+            assert(!rep->render_notice_hidden[NK_RENDER_FALLBACK_SOFTWARE_GE]);
         }
 
         /* #308: a live synthetic runtime keeps flipping frames that show nothing.

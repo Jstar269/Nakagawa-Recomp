@@ -204,6 +204,10 @@ typedef struct {
     /* The file read is the shipped published package, not one in the user's
        data folder. */
     bool shipped;
+    /* The package is experimental: true unless it is the usable shipped package and
+       declares "experimental": false (docs/ENHANCEMENT_CONTRACT.md section 9.10). A
+       file in the user's data folder stays experimental whatever it declares. */
+    bool experimental;
     /* Why a file that exists cannot be used; empty when there is no file or it
        is usable. */
     char problem[160];
@@ -252,6 +256,9 @@ typedef enum {
     PLAYER_PART_SSAA,          /* supersampling (#2073, section 10.21): 0 off, or the factor 2 or 4 per
                                   axis on top of the render scale. Host presentation only; off in a
                                   fresh file and in every preset */
+    PLAYER_PART_MIPS,          /* host-built mip chains (section 11.3.8): 0 off, 1 on. Appended; the
+                                  SR_ACE line carries mips=on, right after twin, only when on; off in
+                                  a fresh file */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -1015,6 +1022,16 @@ struct PlayerApp {
     NkRenderPath render_path;
     char render_path_disc[MAX_DISC_ID_LEN];
     bool render_notice_hidden[NK_RENDER_FALLBACK_COUNT];
+    /* What the GPU renderer of the latest launch hands to the software renderer for long
+       enough to slow the game, from its render_fallback boot events (#2151): one bit per
+       NkRenderEffect, and the sentence that names them. Cleared by each launch. Hide on the
+       game's page hides it for that game and the effects it named, for the rest of this
+       player session: another game, or an effect it did not name, shows it again. The last
+       game hidden is the one remembered. */
+    uint16_t render_effects;
+    char render_effects_text[384];
+    uint16_t render_effects_hidden;
+    char render_effects_hidden_disc[MAX_DISC_ID_LEN];
     bool close_confirmation_pending;
     char boot_event_file_path[MAX_PATH_LEN];
     bool should_quit;
@@ -1690,6 +1707,10 @@ bool player_app_title_60hz_on(const PlayerApp *app, int game_index);
 /* Saved on, but the title has no usable enhancement package: nothing launches
  * or builds until the package is back, or Ace or its 60 FPS game logic is turned off. */
 bool player_app_title_60hz_blocked(const PlayerApp *app, int game_index);
+/* The title's usable package is the shipped one and the maintainer released it
+ * ("experimental": false, docs/ENHANCEMENT_CONTRACT.md section 9.10): the title page tags
+ * the 60 FPS switch OPTIONAL, else EXPERIMENTAL. */
+bool player_app_title_60hz_released(const PlayerApp *app, int game_index);
 /* The title page's 60 FPS switch, Ace's own part: on chooses Ace for the title with its 60 FPS
  * game logic, off keeps Ace and turns that part off. Re-selects the title's package variant
  * and asks for its package to be checked. */
@@ -1728,6 +1749,7 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
  * notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off" (tier=ace for Ace; smooth=match is never written).
+ * ";mips=on" follows twin only with the Smooth far textures part on; a missing mips is off.
  * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
  * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
@@ -1843,13 +1865,18 @@ void player_app_keep_waiting_for_stalled_game(PlayerApp *app);
    takes, and what may fix it. False, with both NULL, for no fallback. */
 bool player_render_notice_text(NkRenderFallback fallback, const char **heading,
                                const char **text);
-/* The notice for disc_id's page: the latest launch's fallback when that launch started this
-   disc, its render_path event has been read, and its notice is not hidden. */
+/* The sentence naming what the GPU renderer hands to the software renderer: effects is one
+   bit per NkRenderEffect. Writes "" and returns false for none or a sentence too long for out. */
+bool player_render_effects_text(uint16_t effects, char *out, size_t out_capacity);
+/* The notice for disc_id's page when the latest launch started this disc and its render_path
+   event has been read: its start-up fallback, or else, while the GPU renderer draws, the
+   effects it hands to the software renderer (render_fallback events), unless hidden. */
 bool player_app_render_notice(const PlayerApp *app, const char *disc_id, const char **heading,
                               const char **text);
-/* Hide: that fallback's notice stays hidden for the rest of this player session. */
+/* Hide: the notice shown stays hidden for the rest of this player session. */
 void player_app_hide_render_notice(PlayerApp *app);
-/* Reads one line of the session's boot events for the render_path event. */
+/* Reads one line of the session's boot events for the render_path and render_fallback
+   events. */
 void player_app_consume_render_path_line(PlayerApp *app, const char *line);
 
 /* One PLAY, split so its slow part can leave the UI thread (#1298). Checking a

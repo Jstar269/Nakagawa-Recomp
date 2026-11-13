@@ -408,6 +408,200 @@ static void test_render_path(void) {
     }
 }
 
+/* The render_fallback event (#2151): every reason's name, a round trip through the line the
+ * runtime writes, and the lines the player must not take for one. */
+static void test_render_fallback_event(void) {
+    static const char *const names[NK_RENDER_EFFECT_COUNT] = {
+        "stencil", "color_test", "logic_op", "write_mask", "ram_fb", "wide_stride", "mips",
+        "line", "point"
+    };
+    static const char *const refused[] = {
+        "BOOT_EVENT phase=render_path presenter=vulkan ge=gpu fallback=none",
+        "BOOT_EVENT phase=render_fallback reason=fog frames=360 sw_prims=1 gpu_prims=2 "
+        "readbacks=0 share_pm=5",
+        "BOOT_EVENT phase=render_fallback reason=stencil frames=360 sw_prims=1 gpu_prims=2 "
+        "readbacks=0",
+        "BOOT_EVENT phase=render_fallback reason=stencil frames=-1 sw_prims=1 gpu_prims=2 "
+        "readbacks=0 share_pm=5",
+        "BOOT_EVENT phase=render_fallback reason=stencil frames=4294967296 sw_prims=1 "
+        "gpu_prims=2 readbacks=0 share_pm=5",
+        "BOOT_EVENT phase=render_fallback reason=stencil frames=360 sw_prims=1 gpu_prims=2 "
+        "readbacks=0 share_pm=1001",
+        "BOOT_EVENT phase=render_fallback reason=stencil frames=360 sw_prims= gpu_prims=2 "
+        "readbacks=0 share_pm=5",
+        "BOOT_EVENT phase=render_fallback reason=stencil frames=360 sw_prims=18446744073709551616 "
+        "gpu_prims=2 readbacks=0 share_pm=5",
+        "stderr: BOOT_EVENT phase=render_fallback reason=stencil frames=360 sw_prims=1 "
+        "gpu_prims=2 readbacks=0 share_pm=5",
+    };
+    for (int i = 0; i < NK_RENDER_EFFECT_COUNT; ++i) {
+        NkRenderFallbackEvent event = {(NkRenderEffect)i, 360u, 18446744073709551615ull,
+                                       123456u, (uint64_t)i, 1000u};
+        NkRenderFallbackEvent read;
+        char line[256];
+        char want[256];
+        char timed[300];
+        CHECK(nk_render_effect_name((NkRenderEffect)i) != NULL &&
+                  strcmp(nk_render_effect_name((NkRenderEffect)i), names[i]) == 0,
+              "each fallback reason has its event name");
+        (void)snprintf(want, sizeof(want),
+                       "BOOT_EVENT phase=render_fallback reason=%s frames=360 "
+                       "sw_prims=18446744073709551615 gpu_prims=123456 readbacks=%d "
+                       "share_pm=1000",
+                       names[i], i);
+        CHECK(nk_render_fallback_event_format(&event, line, sizeof(line)) ==
+                      (int)strlen(want) &&
+                  strcmp(line, want) == 0,
+              "render fallback event names the reason and its counts");
+        (void)snprintf(timed, sizeof(timed), "%s t_ns=99\r\n", line);
+        memset(&read, 0, sizeof(read));
+        CHECK(nk_render_fallback_event_parse(timed, &read) && read.reason == event.reason &&
+                  read.frames == event.frames && read.sw_prims == event.sw_prims &&
+                  read.gpu_prims == event.gpu_prims && read.readbacks == event.readbacks &&
+                  read.share_pm == event.share_pm,
+              "render fallback event reads back, timestamp and line end included");
+    }
+    for (size_t i = 0u; i < sizeof(refused) / sizeof(refused[0]); ++i) {
+        NkRenderFallbackEvent read = {NK_RENDER_EFFECT_POINT, 7u, 7u, 7u, 7u, 7u};
+        CHECK(!nk_render_fallback_event_parse(refused[i], &read) &&
+                  read.reason == NK_RENDER_EFFECT_POINT && read.frames == 7u &&
+                  read.share_pm == 7u,
+              "another line, an unknown reason or a bad number is not a render fallback");
+    }
+    {
+        NkRenderFallbackEvent event = {NK_RENDER_EFFECT_STENCIL, 360u, 1u, 2u, 0u, 5u};
+        NkRenderFallbackEvent bad = {NK_RENDER_EFFECT_COUNT, 360u, 1u, 2u, 0u, 5u};
+        char small[24] = "old";
+        char line[256] = "old";
+        CHECK(nk_render_fallback_event_format(&event, small, sizeof(small)) == 0 &&
+                  small[0] == '\0',
+              "render fallback formatter clears an output too small for it");
+        CHECK(nk_render_fallback_event_format(&bad, line, sizeof(line)) == 0 && line[0] == '\0',
+              "render fallback formatter refuses an unknown reason");
+        CHECK(nk_render_effect_name(NK_RENDER_EFFECT_COUNT) == NULL,
+              "an out-of-range reason has no name");
+    }
+}
+
+/* #2151: the rule nk_render_fallback_window_step keeps, on its own counts. */
+static uint16_t window_frames(NkRenderFallbackWindow *w, NkRenderFallbackCounts *c, int r,
+                              uint32_t gpu, uint64_t sw, uint64_t rb, uint32_t presents) {
+    uint16_t crossed = 0u;
+    for (uint32_t f = 0u; f < presents; ++f) {
+        if (f == 0u) {
+            c->gpu_prims += gpu;
+            c->sw_prims[r] += sw;
+            c->readbacks[r] += rb;
+        }
+        crossed |= nk_render_fallback_window_step(w, c, NULL);
+    }
+    return crossed;
+}
+
+static void test_render_fallback_window(void) {
+    const uint32_t W = NK_RENDER_FALLBACK_WINDOW_FRAMES, K = NK_RENDER_FALLBACK_WINDOWS;
+    const uint16_t ram_fb = (uint16_t)(1u << NK_RENDER_EFFECT_RAM_FB);
+    NkRenderFallbackWindow w;
+    NkRenderFallbackCounts c;
+    NkRenderFallbackDelta d;
+    memset(&w, 0, sizeof(w));
+    memset(&c, 0, sizeof(c));
+    c.ready = 1;
+    c.gpu_prims = 0xFFFFFFF0u;
+    CHECK(nk_render_fallback_window_step(&w, &c, &d) == 0u && w.primed,
+          "the first sample only primes the window");
+    /* A present's share, the GPU count wrapping. */
+    c.gpu_prims += 0x20u;
+    c.sw_prims[NK_RENDER_EFFECT_LINE] += 3u;
+    c.readbacks[NK_RENDER_EFFECT_LINE] += 1u;
+    CHECK(nk_render_fallback_window_step(&w, &c, &d) == 0u && d.gpu_prims == 0x20u &&
+              d.sw_prims[NK_RENDER_EFFECT_LINE] == 3u && d.readbacks[NK_RENDER_EFFECT_LINE] == 1u,
+          "a present's delta carries its counts across the GPU count's wrap");
+    memset(&w, 0, sizeof(w));
+    (void)nk_render_fallback_window_step(&w, &c, NULL);
+    /* 90 software primitives a present in 10,000 GPU ones, no readback: under 1 % of the scene,
+       over the primitive limit, reported on the K-th window with its share. */
+    uint16_t crossed = 0u;
+    for (uint32_t i = 0u; i + 1u < K; ++i)
+        crossed |= window_frames(&w, &c, NK_RENDER_EFFECT_RAM_FB, 10000u * W, 90u * W, 0u, W);
+    CHECK(crossed == 0u, "nothing is reported before the K-th window");
+    crossed = window_frames(&w, &c, NK_RENDER_EFFECT_RAM_FB, 10000u * W, 90u * W, 0u, W);
+    NkRenderFallbackEvent e = nk_render_fallback_window_event(&w, NK_RENDER_EFFECT_RAM_FB);
+    CHECK(crossed == ram_fb && e.frames == K * W && e.sw_prims == 90ull * W * K &&
+              e.readbacks == 0u && e.share_pm == 8u,
+          "the primitive limit decides on its own, whatever the share");
+    CHECK(window_frames(&w, &c, NK_RENDER_EFFECT_RAM_FB, 10000u * W, 90u * W, 0u, K * W) == 0u,
+          "a reason is reported once per run");
+    /* Counts going back start the window over; the run's reports are kept. */
+    memset(&c, 0, sizeof(c));
+    c.ready = 1;
+    CHECK(nk_render_fallback_window_step(&w, &c, &d) == 0u && w.frames == 0u &&
+              w.reported == ram_fb && d.gpu_prims == 0u,
+          "counts that started over restart the window, not a negative one");
+    /* Readbacks alone, one short and then at the limit. */
+    crossed = 0u;
+    for (uint32_t i = 0u; i < 2u * K; ++i)
+        crossed |= window_frames(&w, &c, NK_RENDER_EFFECT_STENCIL, 1000000u, 0u,
+                                 NK_RENDER_FALLBACK_READBACKS - 1u, W);
+    CHECK(crossed == 0u, "one readback under the limit is never reported");
+    for (uint32_t i = 0u; i < K; ++i)
+        crossed |= window_frames(&w, &c, NK_RENDER_EFFECT_STENCIL, 1000000u, 0u,
+                                 NK_RENDER_FALLBACK_READBACKS, W);
+    CHECK(crossed == (uint16_t)(1u << NK_RENDER_EFFECT_STENCIL),
+          "readbacks at the limit are reported");
+    c.ready = 0;
+    CHECK(nk_render_fallback_window_step(&w, &c, &d) == 0u && !w.primed,
+          "a renderer that is not running unprimes the window");
+
+    /* One cost budget per effect: readbacks and primitives add up; each kind alone still trips
+       it at its old limit, and one short of it does not. */
+    const uint64_t P = NK_RENDER_FALLBACK_MIN_PRIMS, B = NK_RENDER_FALLBACK_READBACKS;
+    CHECK(nk_render_fallback_cost_us(P, 0u) == NK_RENDER_FALLBACK_BUDGET_US &&
+              nk_render_fallback_cost_us(0u, B) == NK_RENDER_FALLBACK_BUDGET_US &&
+              nk_render_fallback_cost_us(P - 1u, 0u) < NK_RENDER_FALLBACK_BUDGET_US &&
+              nk_render_fallback_cost_us(0u, B - 1u) < NK_RENDER_FALLBACK_BUDGET_US &&
+              nk_render_fallback_cost_us(P - 1u, B - 1u) == 95976u + 92800u,
+          "the cost adds readbacks and primitives at their per-unit costs");
+    CHECK(nk_render_fallback_cost_us(0u, UINT64_MAX) == UINT64_MAX &&
+              nk_render_fallback_cost_us(UINT64_MAX, 0u) == UINT64_MAX &&
+              nk_render_fallback_cost_us(UINT64_MAX / NK_RENDER_FALLBACK_PRIM_US, 1u) == UINT64_MAX,
+          "a cost too large for 64 bits is the largest one, never a wrapped small one");
+    const NkRenderEffect each[3] = {NK_RENDER_EFFECT_STENCIL, NK_RENDER_EFFECT_LINE,
+                                    NK_RENDER_EFFECT_COLOR_TEST};
+    const uint64_t sw_of[3] = {P - 1u, P, 0u}, rb_of[3] = {B - 1u, 0u, B};
+    for (int k = 0; k < 3; ++k) {
+        memset(&w, 0, sizeof(w));
+        c.ready = 1;
+        (void)nk_render_fallback_window_step(&w, &c, NULL);
+        crossed = 0u;
+        for (uint32_t i = 0u; i < K; ++i)
+            crossed |= window_frames(&w, &c, each[k], 50000u, sw_of[k], rb_of[k], W);
+        CHECK(crossed == (uint16_t)(1u << each[k]),
+              "one short of each limit together, or either limit alone, is reported");
+    }
+    /* Two effects each under the budget are not reported, whatever their sum: the budget is per
+       effect, so a report names an effect that costs it alone. */
+    memset(&w, 0, sizeof(w));
+    (void)nk_render_fallback_window_step(&w, &c, NULL);
+    crossed = 0u;
+    for (uint32_t i = 0u; i < 2u * K; ++i) {
+        c.sw_prims[NK_RENDER_EFFECT_STENCIL] += 3000u;
+        crossed |= window_frames(&w, &c, NK_RENDER_EFFECT_COLOR_TEST, 50000u, 3000u, 0u, W);
+    }
+    CHECK(crossed == 0u, "costs of different effects do not add up");
+    /* One cheap primitive a present for ever, with no readback (a frame buffer in main memory):
+       120 x 24 us a window, never reported. */
+    memset(&w, 0, sizeof(w));
+    (void)nk_render_fallback_window_step(&w, &c, NULL);
+    crossed = 0u;
+    for (uint32_t f = 0u; f < 20u * K * W; ++f) {
+        c.gpu_prims += 3000u;
+        c.sw_prims[NK_RENDER_EFFECT_RAM_FB] += 1u;
+        crossed |= nk_render_fallback_window_step(&w, &c, NULL);
+    }
+    CHECK(crossed == 0u, "one cheap software primitive a present is never reported");
+}
+
 int main(void) {
     test_path_joins();
     test_legacy_path_contracts();
@@ -416,6 +610,8 @@ int main(void) {
     test_size_format();
     test_boot_events();
     test_render_path();
+    test_render_fallback_event();
+    test_render_fallback_window();
     if (failures != 0) {
         fprintf(stderr, "shared helper selftest: %d failure(s)\n", failures);
         return 1;

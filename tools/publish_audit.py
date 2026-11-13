@@ -1465,6 +1465,9 @@ SPDX_BYTE_EXACT_IMPORT_PATHS = frozenset({
     "third_party/anime4k/Anime4K_Upscale_CNN_x2_M.glsl",
     "third_party/portable-snippets/safe-math/safe-math.h",
     "third_party/stb/stb_image.h",
+    # stb_vorbis 1.24 (#2207): public domain or MIT in its own trailing licence text, without an
+    # SPDX line upstream; imported byte-identical (third_party/stb/PROVENANCE.md).
+    "third_party/stb/stb_vorbis.c",
     # Monocypher declares its SPDX line below the 8-line header window.
     "third_party/monocypher/monocypher-ed25519.c",
     "third_party/monocypher/monocypher-ed25519.h",
@@ -1925,7 +1928,7 @@ STALE_CONTROL_FIX = (
 TEXT_HYGIENE_EXEMPT_SUFFIXES = frozenset({".dat", ".bin", ".png", ".jpg", ".jpeg",
                                           ".gif", ".ico", ".mp4", ".pdf", ".zip", ".ttf",
                                           ".otf", ".woff", ".woff2", ".spv", ".wav",
-                                          ".prx", ".pbp", ".elf"})
+                                          ".ogg", ".prx", ".pbp", ".elf"})
 
 # Upstream byte-identical text can have source formatting that the repository
 # does not control. This exact hash exception preserves Clay's untouched
