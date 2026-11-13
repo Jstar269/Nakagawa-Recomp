@@ -326,7 +326,8 @@ rows (`target_containing` in `ge_gpu.c`). The direct
 bind then needs all of these: the texture format equals the target's pixel format, the texture is
 not swizzled and mipmapping is not active (a mipmap filter with a maximum level above 0), its
 buffer width equals the target's stride (or is 0), the texture address is pixel-aligned inside the
-target, and the target's image holds the guest's latest CPU writes. Any other read of a render
+target and in the 0x04000000 or 0x04400000 view of VRAM, and the target's image holds the guest's
+latest CPU writes. Any other read of a render
 target reads the target back to guest VRAM and decodes it there at 1x, the way the GE drew it, so
 the effect shows 1x detail at any render scale. Those reads include:
 
@@ -336,7 +337,28 @@ the effect shows 1x detail at any render scale. Those reads include:
 - a swizzled read;
 - a read with mipmapping active;
 - a read with another buffer width;
+- a read through the 0x04200000 or 0x04600000 view of VRAM (below);
 - a read of a target whose CPU writes could not be copied into its image.
+
+The PSP maps its 2 MiB of VRAM four times. Measured with CPU loads and stores
+(`docs/HARDWARE_ORACLE.md`, `PSP-VRAM-MIRROR-001`): the 0x04000000 and 0x04400000 views read each
+offset where it is, the 0x04200000 view reads offset `o` at `o ^ 0x2040`, and the 0x04600000 view
+rotates bits 5..9 of `o` left one and then XORs `0x2040` (the uncached 0x44xxxxxx aliases alike).
+`ge.c` decodes a texture given through a view with the same transforms (`sr_vram_cpu_address`, issue
+1049). That the GE's own texel fetch applies them is inferred, not measured: a title draws its movie
+as a texture through a view after writing the frames there with the CPU (#1049), which shows only if
+the fetch undoes the write's transform. A read through 0x04200000 or 0x04600000 therefore never
+binds the target's image, whose pixels are in plain order. Both views change only offset bits 5..9
+and 13, so a texture read through one reads bytes of the 16 KiB-aligned blocks around it: the read,
+from a target or not, first reads back every target's pixels in those blocks, then decodes guest
+VRAM through the view at 1x. Such a source usually has no content hash, so the texture cache keeps
+its decode current another way: its source range is those blocks, so a notified CPU write to any
+byte the view reads makes it stale, and so does a readback, which marks every cached texture over
+the guest VRAM it writes stale (one with a content hash revalidates against its copy). The cell
+`rtt-vram-view` in `gpu-coherence-selftest` runs at 1x, 2x and 4x against the software renderer: an
+8888 and a 5650 target read through each view, then the 8888 target redrawn and read through
+0x04200000 again, and a texture in no target read through 0x04200000 before and after a CPU write to
+bytes that only the 16 KiB blocks cover.
 
 Depth is matched by address like any texture. A depth buffer read as a texture decodes guest VRAM
 at 1x when its address lies outside every colour target's span. When the texture's address lies
@@ -375,7 +397,8 @@ no device samples of its own, and the 1x decode is the read:
 - an address that is not on a pixel boundary of the target (each texel straddles two pixels);
 - a depth buffer read as 8888, CLUT32, CLUT4, CLUT8 or DXT (a texel is not one depth value).
 
-These stay in this group when the read is also swizzled, mipmapped or at another buffer width.
+These stay in this group when the read is also swizzled, mipmapped, at another buffer width or
+through the 0x04200000 or 0x04600000 view.
 
 **A scaled form could exist, but the renderer has none.** Here each texel is one pixel, or one
 depth value, of a buffer the GPU holds at render scale: the read is in a format whose texel is one
@@ -392,6 +415,10 @@ What each path would need:
   each tap's texel (a swizzled texture takes the buffer's 16-byte by 8-row blocks in another order;
   another width puts texture rows across the target's rows), and filter only between texels,
   whose neighbours are not the target's neighbouring pixels;
+- a read through the 0x04200000 or 0x04600000 view: each texel is still one target pixel, only
+  reordered in 32- or 64-byte pieces and 8 KiB halves of each 16 KiB block, so a scaled path would
+  map each tap's address through the view's mapping (`sr_vram_cpu_address`) to the target pixel
+  that holds it, and filter only between texels, as for a swizzled read;
 - a mipmapped read (a mipmap filter and a highest level above 0): the texture cache builds the
   whole chain from guest VRAM and a target image has no mip levels, so level 0 would come from the
   target's image and each other level from its own address, at its own scale;

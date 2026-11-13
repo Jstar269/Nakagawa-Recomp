@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **519** (declared in `recomp.h`: 442)
-- reach class: emitter-reached 94, production-runtime-only 384, selftest-only 0, address-only 8, none 33
-- provenance class of the home definition: declared-only 1, project_authored_attested 38, upstream_derived 480
+- helpers: **518** (declared in `recomp.h`: 441)
+- reach class: emitter-reached 94, production-runtime-only 383, selftest-only 0, address-only 8, none 33
+- provenance class of the home definition: declared-only 1, project_authored_attested 38, upstream_derived 479
 
 ## Helpers
 
@@ -129,7 +129,6 @@ does not make this file stale. `--details` prints them to stdout.
 | `sched_clear_current_join_target` | `rt/sched.c`, `rt/snapshot_runner.c`, `rt/verify_harness.c` | yes | none | `rt/sched.c`: upstream_derived; `rt/snapshot_runner.c`: project_authored_attested; `rt/verify_harness.c`: project_authored_attested |
 | `sched_clock_deterministic` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_count_waiters` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
-| `sched_create_service_thread` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_create_thread` | `rt/sched.c` | yes | none | `rt/sched.c`: upstream_derived |
 | `sched_create_thread_ex` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_current_has_pending_wakeup` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
@@ -190,9 +189,8 @@ does not make this file stale. `--details` prints them to stdout.
 | `sched_root_uid` | `rt/sched.c` | yes | none | `rt/sched.c`: upstream_derived |
 | `sched_rotate_thread_ready_queue` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_run` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
-| `sched_service_kick` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
-| `sched_service_wait` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_servicing_interrupts` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_set_arena_release_hook` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_set_current_cb_wait` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_set_current_join_target` | `rt/sched.c`, `rt/snapshot_runner.c`, `rt/verify_harness.c` | yes | none | `rt/sched.c`: upstream_derived; `rt/snapshot_runner.c`: project_authored_attested; `rt/verify_harness.c`: project_authored_attested |
 | `sched_set_current_wait_kind` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
@@ -206,6 +204,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sched_set_thread_exit_hook` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_set_vtimer_hooks` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_set_watchdog_describers` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_stack_arena_free_at` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_start_thread` | `rt/sched.c`, `rt/snapshot_runner.c`, `rt/verify_harness.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived; `rt/snapshot_runner.c`: project_authored_attested; `rt/verify_harness.c`: project_authored_attested |
 | `sched_suspend_dispatch` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_suspend_interrupts` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |

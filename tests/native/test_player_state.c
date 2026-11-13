@@ -1336,7 +1336,8 @@ static int g_fixture_generated_code_abi_epoch = NK_AOT_GENERATED_CODE_ABI_EPOCH;
    packages/<disc_id>, else packages/<disc_id>-enhanced-<id>), and
    `recorded_enhancement_id` the enhancement package the build's codegen options
    record (NULL: none, as an authentic build records), the way
-   tools/nk_core/package_cache.py writes them. */
+   tools/nk_core/package_cache.py writes them; <timing id>+<hook id> records the timing
+   package and the code-hook package beside it (contract section 9.9). */
 static void write_runtime_package_fixture_variant(
     const char *user_root, const char *disc_id, const char *title_id,
     uint32_t abi_version, const char *executable_relative_path,
@@ -1368,11 +1369,24 @@ static void write_runtime_package_fixture_variant(
         char options_hash_input[sizeof(codegen_options_json) + 2];
         int used = snprintf(codegen_options_json, sizeof(codegen_options_json), "{");
         if (recorded_enhancement_id) {
+            char timing_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+            const char *plus = strchr(recorded_enhancement_id, '+');
+            size_t timing_length = plus ? (size_t)(plus - recorded_enhancement_id)
+                                        : strlen(recorded_enhancement_id);
+            assert(timing_length < sizeof(timing_id));
+            memcpy(timing_id, recorded_enhancement_id, timing_length);
+            timing_id[timing_length] = '\0';
+            if (plus) {
+                used += snprintf(codegen_options_json + used,
+                                 sizeof(codegen_options_json) - (size_t)used,
+                                 "\"code_hook_package_id\":\"%s\","
+                                 "\"code_hook_package_sha256\":\"%064d\",", plus + 1, 0);
+            }
             used += snprintf(codegen_options_json + used, sizeof(codegen_options_json) - (size_t)used,
                              "\"enhancement_package_epoch\":\"aot-enhancement-package-v1\","
                              "\"enhancement_package_id\":\"%s\","
                              "\"enhancement_package_sha256\":\"%064d\"",
-                             recorded_enhancement_id, 0);
+                             timing_id, 0);
         }
         if (builder) {
             used += snprintf(codegen_options_json + used, sizeof(codegen_options_json) - (size_t)used,
@@ -2960,14 +2974,21 @@ static int player_state_package_builder_child(int argc, char **argv) {
         }
         char executable[128];
         snprintf(executable, sizeof(executable), "%s.exe", title_id);
-        bool enhanced = false;
+        bool logic_60 = false, cull = false;
         for (int i = 4; i < argc; i++) {
-            if (strcmp(argv[i], "--experimental-60hz") == 0) enhanced = true;
+            if (strcmp(argv[i], "--experimental-60hz") == 0) logic_60 = true;
+            if (strcmp(argv[i], "--ace-cull") == 0) cull = true;
         }
+        bool enhanced = logic_60 || cull;
         const char *enhancement_id = getenv("NAKAGAWA_TEST_PACKAGE_REBUILD_ENHANCEMENT_ID");
         if (enhanced) {
-            /* nk_cli.py reads the package and writes its own folder. */
+            /* nk_cli.py reads the package and writes its own folder: --experimental-60hz the
+               timing package, --ace-cull the culling package, <timing>+<hook> both. */
             if (!enhancement_id || !enhancement_id[0]) return 95;
+            const char *hook_only = getenv("NAKAGAWA_TEST_PACKAGE_REBUILD_HOOK_ONLY");
+            bool want_hook_only = hook_only && strcmp(hook_only, "1") == 0;
+            bool want_cull = want_hook_only || strchr(enhancement_id, '+') != NULL;
+            if (logic_60 == want_hook_only || cull != want_cull) return 97;
             write_runtime_package_fixture_variant(
                 user_root, disc_id, title_id, SR_CPUSTATE_ABI_VERSION, executable,
                 FIXTURE_SHA256, NULL,
@@ -4740,6 +4761,46 @@ static void test_package_build_lifecycle(const char *self_executable) {
         assert(player_app_validate_runtime_package(
                    rebuild_app, &stock_game, NULL, enhanced_reason,
                    sizeof(enhanced_reason)) == NK_RUNTIME_PACKAGE_OK);
+        /* Wider culling (contract 9.9, 11.3.6): <timing>+<hook> passes both flags, the culling
+           package alone passes --ace-cull alone; each writes and validates its own folder. */
+        {
+            static const struct { const char *variant; bool hook_only; } culls[] = {
+                {"fixture-60hz+fixture-cull", false}, {"fixture-cull", true}
+            };
+            for (size_t c = 0; c < sizeof(culls) / sizeof(culls[0]); c++) {
+                snprintf(rebuild_app->games[0].enhancement_package_id,
+                         sizeof(rebuild_app->games[0].enhancement_package_id), "%s",
+                         culls[c].variant);
+                rebuild_app->games[0].enhancement_hook_only = culls[c].hook_only;
+                nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_ENHANCEMENT_ID", culls[c].variant);
+                nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_HOOK_ONLY",
+                              culls[c].hook_only ? "1" : NULL);
+                assert(player_app_start_package_build(rebuild_app, 0));
+                assert(strcmp(rebuild_app->build_session.enhancement_package_id,
+                              culls[c].variant) == 0);
+                assert(rebuild_app->build_session.enhancement_hook_only == culls[c].hook_only);
+                poll_player_package_build_to_terminal(rebuild_app);
+                if (!rebuild_app->build_session.is_complete) {
+                    fprintf(stderr, "culling build %s did not complete: exit=%d message=%s\n",
+                            culls[c].variant, rebuild_app->build_session.exit_code,
+                            rebuild_app->build_session.current_message);
+                }
+                assert(rebuild_app->build_session.is_complete);
+                player_app_runtime_package_cache_invalidate(rebuild_app);
+                NkRuntimePackageInfo cull_info;
+                assert(player_app_validate_runtime_package(
+                           rebuild_app, &rebuild_app->games[0], &cull_info,
+                           enhanced_reason, sizeof(enhanced_reason)) == NK_RUNTIME_PACKAGE_OK);
+                char expected_folder[128];
+                snprintf(expected_folder, sizeof(expected_folder), "%c%s-enhanced-%s", sep,
+                         rebuild_app->games[0].disc_id, culls[c].variant);
+                assert(strstr(cull_info.package_root, expected_folder) != NULL);
+            }
+            nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_HOOK_ONLY", NULL);
+            rebuild_app->games[0].enhancement_hook_only = false;
+            fixture_sha_file(stock_package, stock_hash_after);
+            assert(strcmp(stock_hash_before, stock_hash_after) == 0);
+        }
         rebuild_app->games[0].enhancement_package_id[0] = '\0';
         nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_ENHANCEMENT_ID",
                       had_enhancement_env ? saved_enhancement_env : NULL);
@@ -8473,6 +8534,33 @@ static void test_input_classification_and_check_again(void) {
  * including Enhanced, each part's off switch at both levels, the launch line with its tier,
  * settings that round-trip and survive bad values, the per-run report's "Last session" line,
  * and Authentic taking 60 FPS game logic off. */
+/* The build a title selects carries its culling package exactly when the launch line the
+   launch work builds from that selection (player_play_config_session, as
+   player_launch_work_run calls it) carries cull=on (contract 11.3.6): a line with cull=on and a
+   build without a usable package would run unwidened, and a build with it and a line without
+   would carry a hook that never acts. */
+static void assert_cull_build_matches_line(const PlayerApp *app, int index) {
+    const GameRecord *game = &app->games[index];
+    bool with_hook = game->enhancement_package_id[0] &&
+                     (game->enhancement_hook_only || strchr(game->enhancement_package_id, '+'));
+    NkRuntimeConfig config;
+    memset(&config, 0, sizeof(config));
+    PlayerPlayResolved play;
+    player_play_config_session(&app->settings, game->disc_id,
+                               player_game_has_timing_package(game), false, &config, &play);
+    bool line_cull = strstr(config.ace_spec, ";cull=on") != NULL;
+    bool usable = app->title_enhancements[index].cull_available;
+    if (with_hook != (line_cull && usable)) {
+        fprintf(stderr, "cull build and launch line mismatch: variant=%s hook_only=%d usable=%d line=%s\n",
+                game->enhancement_package_id, (int)game->enhancement_hook_only, (int)usable,
+                config.ace_spec);
+    }
+    /* Without a usable culling package the line may still ask (the run then says cull
+       unavailable, and the title page names the package's problem); with one, they agree. */
+    assert(with_hook == (line_cull && usable));
+    assert(line_cull == player_app_title_cull_on(app, index));
+}
+
 static void test_play_mode_settings(void) {
     char sep = nk_platform_path_separator();
     char cache_root[512], root[700], path[800], line[192];
@@ -8682,6 +8770,160 @@ static void test_play_mode_settings(void) {
         restore_environment_value("NK_INSTALL_ROOT", saved_install, had_install);
         free(saved_install);
         app->games[1].title_id[0] = '\0';
+    }
+
+    /* Wider culling (contract 11.3.6, 9.9): an Ace launch with the part on builds and launches
+       with the title's culling package, beside its timing package (<timing>+<hook>) or alone
+       with its 60 FPS game logic off; Authentic and Enhanced never do, nor does a title
+       without a usable culling package. Title 3 is on Ace with its 60 FPS game logic. */
+    {
+        char cull_file[820];
+        snprintf(cull_file, sizeof(cull_file), "%s%cenhancements%ctest90003-cull.json", root,
+                 sep, sep);
+        assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_LIBRARY);
+        for (int i = 0; i < 3; i++) player_app_cycle_title_play_mode(app, 2);   /* -> Ace */
+        assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_ACE);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        write_text_file(cull_file,
+            "{\"id\": \"fixture-cull\", \"target_title_id\": \"fixture-title\", "
+            "\"category\": \"guest_memory_code_hook\"}");
+        player_app_refresh_title_enhancements(app);
+        assert(app->title_enhancements[2].cull_available &&
+               strcmp(app->title_enhancements[2].cull_package_id, "fixture-cull") == 0 &&
+               !app->title_enhancements[2].cull_problem[0]);
+        /* The part is off: the timing build, as before. */
+        assert(!player_app_title_cull_on(app, 2));
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0 &&
+               !app->games[2].enhancement_hook_only);
+        assert_cull_build_matches_line(app, 2);
+        player_app_cycle_title_part(app, 2, PLAYER_PART_CULL);        /* library -> on */
+        assert(player_app_title_part(app, 2, PLAYER_PART_CULL) == 1);
+        assert(player_app_title_cull_on(app, 2));
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0 &&
+               !app->games[2].enhancement_hook_only);
+        player_play_resolve(&app->settings, "TEST90003", &r);
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";cull=on"));
+        assert_cull_build_matches_line(app, 2);
+        /* Its 60 FPS game logic off: the culling package is the build's one package. */
+        player_app_set_title_60hz(app, 2, false);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-cull") == 0 &&
+               app->games[2].enhancement_hook_only);
+        assert_cull_build_matches_line(app, 2);
+        player_app_set_title_60hz(app, 2, true);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0 &&
+               !app->games[2].enhancement_hook_only);
+        /* Authentic and Enhanced never build or launch it, the title's part still on. */
+        player_app_cycle_title_play_mode(app, 2);                     /* Ace -> library */
+        assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_LIBRARY &&
+               app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
+        assert(!player_app_title_cull_on(app, 2));
+        assert(!app->games[2].enhancement_package_id[0] && !app->games[2].enhancement_hook_only);
+        assert_cull_build_matches_line(app, 2);
+        player_app_cycle_title_play_mode(app, 2);                     /* -> Authentic */
+        assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_AUTHENTIC);
+        assert(!player_app_title_cull_on(app, 2) && !app->games[2].enhancement_package_id[0]);
+        assert_cull_build_matches_line(app, 2);
+        player_app_cycle_title_play_mode(app, 2);                     /* -> Enhanced */
+        assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_ENHANCED);
+        assert(!player_app_title_cull_on(app, 2) && !app->games[2].enhancement_package_id[0]);
+        assert_cull_build_matches_line(app, 2);
+        /* The session's 60 FPS switch runs a title on Enhanced as Ace (player_play_apply_logic_60),
+           so its line carries the title's cull=on and the build carries the culling package
+           beside the timing package. Failing before: it selected the timing package alone while
+           the line asked for cull. */
+        player_app_set_experimental_60hz_session(app, true);
+        assert(player_app_title_cull_on(app, 2));
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0 &&
+               !app->games[2].enhancement_hook_only);
+        assert_cull_build_matches_line(app, 2);
+        player_app_set_experimental_60hz_session(app, false);
+        assert(!app->games[2].enhancement_package_id[0]);
+        player_app_cycle_title_play_mode(app, 2);                     /* -> Ace */
+        assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_ACE);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0);
+        /* Following the library's part: its switch selects the build for every title. */
+        player_app_cycle_title_part(app, 2, PLAYER_PART_CULL);        /* on -> off */
+        assert(player_app_title_part(app, 2, PLAYER_PART_CULL) == 0);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        assert_cull_build_matches_line(app, 2);
+        player_app_cycle_title_part(app, 2, PLAYER_PART_CULL);        /* off -> library (off) */
+        assert(player_app_title_part(app, 2, PLAYER_PART_CULL) == -1);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        assert_cull_build_matches_line(app, 2);
+        player_app_cycle_enhanced_part(app, PLAYER_PART_CULL);        /* library off -> on */
+        assert(app->settings.enhanced.part[PLAYER_PART_CULL] == 1);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0);
+        assert_cull_build_matches_line(app, 2);
+        assert(!player_app_title_cull_problem(app, 2)[0]);
+        assert(!app->games[0].enhancement_package_id[0]);             /* no package: authentic */
+        /* A culling package that cannot ride: not a code-hook package, another game's, the
+           timing package's own id, or one whose joined name is too long. The timing build
+           stays, and the reason is kept. */
+        static const char *const unusable[] = {
+            "{\"id\": \"fixture-cull\", \"target_title_id\": \"fixture-title\", "
+            "\"category\": \"timing_frame_presentation\"}",
+            "{\"id\": \"fixture-cull\", \"target_title_id\": \"fixture-title\"}",
+            "{\"id\": \"fixture-cull\", \"target_title_id\": \"other-title\", "
+            "\"category\": \"guest_memory_code_hook\"}",
+            "{\"id\": \"fixture-60hz\", \"target_title_id\": \"fixture-title\", "
+            "\"category\": \"guest_memory_code_hook\"}",
+            "{\"id\": \"fixture-cull-0123456789012345678901234567890123456789012345678\", "
+            "\"target_title_id\": \"fixture-title\", \"category\": \"guest_memory_code_hook\"}",
+            "{"
+        };
+        for (size_t i = 0; i < sizeof(unusable) / sizeof(unusable[0]); i++) {
+            write_text_file(cull_file, unusable[i]);
+            player_app_refresh_title_enhancements(app);
+            assert(!app->title_enhancements[2].cull_available &&
+                   app->title_enhancements[2].cull_problem[0] &&
+                   !app->title_enhancements[2].cull_package_id[0]);
+            assert(app->title_enhancements[2].available);
+            assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0 &&
+                   !app->games[2].enhancement_hook_only);
+            assert_cull_build_matches_line(app, 2);
+            /* Named on the title page while the part asks for it, never silently dropped. */
+            assert(strcmp(player_app_title_cull_problem(app, 2),
+                          app->title_enhancements[2].cull_problem) == 0);
+        }
+        player_app_cycle_enhanced_part(app, PLAYER_PART_CULL);        /* library on -> off */
+        assert(!player_app_title_cull_problem(app, 2)[0]);
+        player_app_cycle_enhanced_part(app, PLAYER_PART_CULL);        /* library off -> on */
+        assert(player_app_title_cull_problem(app, 2)[0]);
+        remove(cull_file);
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[2].cull_available &&
+               !app->title_enhancements[2].cull_problem[0]);
+        assert(!player_app_title_cull_problem(app, 2)[0]);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        player_app_cycle_enhanced_part(app, PLAYER_PART_CULL);        /* library on -> off */
+        assert(app->settings.enhanced.part[PLAYER_PART_CULL] == 0);
+        player_app_cycle_title_play_mode(app, 2);                     /* Ace -> library */
+        assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_LIBRARY);
+        assert(!app->games[2].enhancement_package_id[0]);
+        /* The library's play mode reselects every title's build: with the session's 60 FPS
+           switch, a title following the library on Enhanced runs its timing package, and the
+           library turned to Authentic runs none. Failing before: the toggle kept the timing
+           build, which then launched with the line "off" and SR_EXPERIMENTAL_60HZ=1. */
+        player_app_set_experimental_60hz_session(app, true);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        assert(player_game_has_timing_package(&app->games[2]));
+        player_app_toggle_library_play_mode(app);                     /* Enhanced -> Authentic */
+        assert(app->settings.enhanced.library == PLAYER_PLAY_AUTHENTIC);
+        assert(!app->games[2].enhancement_package_id[0] &&
+               !player_game_has_timing_package(&app->games[2]));
+        player_app_toggle_library_play_mode(app);                     /* Authentic -> Enhanced */
+        assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        player_app_set_experimental_60hz_session(app, false);
+        assert(!app->games[2].enhancement_package_id[0]);
+        /* The culling package alone carries no timing package. */
+        GameRecord hook_only = app->games[2];
+        snprintf(hook_only.enhancement_package_id, sizeof(hook_only.enhancement_package_id),
+                 "fixture-cull");
+        hook_only.enhancement_hook_only = true;
+        assert(!player_game_has_timing_package(&hook_only));
+        hook_only.enhancement_hook_only = false;
+        assert(player_game_has_timing_package(&hook_only));
     }
 
     /* Per-part off switches at the library's level: a following title gets them. */
@@ -10579,6 +10821,34 @@ static void test_enhanced_package_variants(void) {
         char identity[65];
         assert(!nk_launch_runtime_package_cache_identity(root, &bad, identity));
     }
+    /* A build of a timing package with a code-hook package (contract 9.9): two different
+       valid ids joined by one '+', 64 characters at most in all. */
+    assert(nk_title_manifest_enhancement_variant_valid("fixture-60hz"));
+    assert(nk_title_manifest_enhancement_variant_valid("fixture-60hz+fixture-cull"));
+    assert(nk_title_manifest_enhancement_variant_valid(
+        "a123456789012345678901234567890+b1234567890123456789012345678901"));      /* 64 */
+    static const char *const refused_variants[] = {
+        "", "+fixture-cull", "fixture-60hz+", "fixture-60hz+fixture-60hz", "a+b+c",
+        "fixture-60hz+../escape", "../escape+fixture-cull", "Fixture+cull", "a++b",
+        "a123456789012345678901234567890+b12345678901234567890123456789013"         /* 65 */
+    };
+    for (size_t i = 0; i < sizeof(refused_variants) / sizeof(refused_variants[0]); i++) {
+        assert(!nk_title_manifest_enhancement_variant_valid(refused_variants[i]));
+        assert(!nk_title_manifest_enhancement_id_valid(refused_variants[i]));
+        if (!refused_variants[i][0]) continue;
+        assert(!nk_title_manifest_package_dir_name(disc_id, refused_variants[i], name,
+                                                   sizeof(name)));
+    }
+    assert(!nk_title_manifest_enhancement_id_valid("fixture-60hz+fixture-cull"));
+    {
+        NkGameEntry joined = stock;
+        char expected[128];
+        snprintf(joined.enhancement_package_id, sizeof(joined.enhancement_package_id),
+                 "fixture-60hz+fixture-cull");
+        assert(nk_launch_package_dir_name(&joined, name, sizeof(name)));
+        snprintf(expected, sizeof(expected), "%s-enhanced-fixture-60hz+fixture-cull", disc_id);
+        assert(strcmp(name, expected) == 0);
+    }
     assert(!nk_title_manifest_package_dir_name("ULUS1234", NULL, name, sizeof(name)));
     assert(!nk_title_manifest_package_dir_name("../S12345", NULL, name, sizeof(name)));
     assert(!nk_title_manifest_package_dir_name(disc_id, "fixture-60hz", name, 12));
@@ -10653,6 +10923,62 @@ static void test_enhanced_package_variants(void) {
         "fixture-60hz", NULL);
     assert(nk_launch_validate_runtime_package(root, &enhanced, &info, reason,
                                               sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+    /* A culling build beside the timing package (contract 9.9) records both, and its folder
+       holds only that build: the timing build without the culling package, or one with
+       another culling package, is refused there, and a build with a culling package is
+       refused in the timing-only folder and the authentic one. */
+    {
+        NkGameEntry joined = stock;
+        char joined_dir[1000];
+        snprintf(joined.enhancement_package_id, sizeof(joined.enhancement_package_id),
+                 "fixture-60hz+fixture-cull");
+        snprintf(joined_dir, sizeof(joined_dir), "%s-enhanced-fixture-60hz+fixture-cull",
+                 stock_dir);
+        write_runtime_package_fixture_variant(
+            root, disc_id, "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+            "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL, NULL, 0, false,
+            "fixture-60hz+fixture-cull", "fixture-60hz+fixture-cull");
+        assert(nk_launch_validate_runtime_package(root, &joined, &info, reason,
+                                                  sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+        assert(strstr(info.package_root, "-enhanced-fixture-60hz+fixture-cull") != NULL);
+        static const char *const wrong[] = {"fixture-60hz", "fixture-60hz+other-cull",
+                                            "other-60hz+fixture-cull"};
+        for (size_t i = 0; i < sizeof(wrong) / sizeof(wrong[0]); i++) {
+            write_runtime_package_fixture_variant(
+                root, disc_id, "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+                "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL, NULL, 0, false,
+                "fixture-60hz+fixture-cull", wrong[i]);
+            assert(nk_launch_validate_runtime_package(root, &joined, &info, reason,
+                                                      sizeof(reason)) ==
+                   NK_RUNTIME_PACKAGE_STALE);
+            assert(strstr(reason, "not built from enhancement package "
+                                  "fixture-60hz+fixture-cull") != NULL);
+        }
+        write_runtime_package_fixture_variant(
+            root, disc_id, "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+            "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL, NULL, 0, false,
+            "fixture-60hz", "fixture-60hz+fixture-cull");
+        assert(nk_launch_validate_runtime_package(root, &enhanced, &info, reason,
+                                                  sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+        assert(strstr(reason, "not built from enhancement package fixture-60hz") != NULL);
+        write_runtime_package_fixture_variant(
+            root, disc_id, "synthetic-allegrex-v1", SR_CPUSTATE_ABI_VERSION,
+            "synthetic-allegrex-v1.exe", FIXTURE_SHA256, NULL, NULL, 0, false,
+            NULL, "fixture-60hz+fixture-cull");
+        assert(nk_launch_validate_runtime_package(root, &stock, &info, reason,
+                                                  sizeof(reason)) == NK_RUNTIME_PACKAGE_STALE);
+        assert(strstr(reason, "authentic package folder is an enhanced build") != NULL);
+        static const char *const files[] = {
+            "package.json", "build-report.json", "completion-manifest.json",
+            "synthetic-allegrex-v1.exe", "synthetic-allegrex-v1_image.bin"
+        };
+        char path[1100];
+        for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+            snprintf(path, sizeof(path), "%s%c%s", joined_dir, sep, files[i]);
+            remove(path);
+        }
+        (void)test_rmdir(joined_dir);
+    }
 
     /* Clean up both folders. */
     remove_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1");
@@ -11083,6 +11409,103 @@ static void test_add_to_steam_outcomes(void) {
     free(app);
 }
 
+/* Room on the launch line and in the report (src/rt/ace.h ACE_SPEC_MAX, ACE_REPORT_MAX): an Ace
+ * line with every part at its longest value, built by the player into the launcher's field, reaches
+ * the runtime's parser whole and parses back to itself; eight more keys of its average length still
+ * pass the runtime's length check; a field one byte short is refused whole, never cut; and the
+ * player reads a report as long as the runtime may write. No key is named, so a new part changes no
+ * line here. */
+static void test_play_mode_line_room(void) {
+    char line[sizeof(((NkRuntimeConfig *)0)->ace_spec)], more[2u * ACE_SPEC_MAX], back[ACE_SPEC_MAX], why[64];
+    PlayerSettings settings;
+    PlayerPlayResolved r;
+    AceConfig c;
+    assert(sizeof(line) == ACE_SPEC_MAX);
+    player_app_settings_init_default(&settings);
+    PlayerTitlePlay *own = &settings.title_play[0];                 /* Ace is a title's own choice */
+    memset(own, 0, sizeof(*own));
+    memcpy(own->key, "TEST93002", sizeof("TEST93002"));
+    own->mode = PLAYER_PLAY_ACE;
+    for (int p = 0; p < PLAYER_PART_COUNT; p++) own->part[p] = -1;
+    own->logic_60 = -1;
+    settings.title_play_count = 1;
+    player_play_resolve(&settings, "TEST93002", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE);
+    r.stick_counts = ACE_STICK_COUNTS_MAX;
+    for (int p = 0; p < PLAYER_PART_COUNT; p++) {   /* each part at the value with the longest line */
+        const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+        int best = r.part[p];
+        size_t best_len = 0;
+        for (int i = 0; i < info->value_count; i++) {
+            r.part[p] = info->values[i];
+            if (player_play_launch_line(&r, line, sizeof(line)) && strlen(line) > best_len) {
+                best_len = strlen(line);
+                best = info->values[i];
+            }
+        }
+        r.part[p] = best;
+    }
+    assert(player_play_launch_line(&r, line, sizeof(line)));
+    if (ace_parse(line, &c, why, sizeof(why)) != 1 || !ace_format(&c, back, sizeof(back)) ||
+        strcmp(back, line) != 0) {
+        fprintf(stderr, "the runtime does not read the player's longest line '%s' back (%s)\n", line, why);
+        assert(!"the longest line round trips");
+    }
+    const size_t n = strlen(line);
+    size_t keys = 0;
+    for (const char *s = line; (s = strchr(s, ';')) != NULL; s++) keys++;
+    const size_t avg = (n - strlen("v1") + keys - 1u) / keys;
+    size_t used = (size_t)snprintf(more, sizeof(more), "%s", line);
+    for (int k = 0; k < 8 && avg > strlen(";k0="); k++)
+        used += (size_t)snprintf(more + used, sizeof(more) - used, ";k%d=%.*s", k,
+                                 (int)(avg - strlen(";k0=")), "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
+    why[0] = '\0';
+    if (used >= sizeof(line) || ace_parse(more, &c, why, sizeof(why)) != 0 || strcmp(why, "unknown key") != 0) {
+        fprintf(stderr, "the player's longest line (%zu characters) and eight more keys of %zu (%zu) do not fit "
+                        "the launcher's field of %zu bytes (%s)\n", n, avg, used, sizeof(line), why);
+        assert(!"eight more keys fit the launch line");
+    }
+    memset(back, 'x', sizeof(back));
+    assert(!player_play_launch_line(&r, back, n) && back[0] == '\0');   /* one byte short: refused whole */
+    assert(player_play_launch_line(&r, back, n + 1u) && strcmp(back, line) == 0);
+
+    /* The report: a valid report padded at the front to the longest the runtime writes
+       (ACE_REPORT_MAX - 1 bytes), so its content sits at the end as a long report's does, is read;
+       one byte more is refused. */
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], dir[760], report[800], out[256];
+    static const char k_report[] =
+        "{\n  \"schema\": 1,\n  \"spec\": \"v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;"
+        "smooth=off;sas=off;tess=off;twin=off\",\n  \"effective\": {\"af\": 16, \"text\": true},\n"
+        "  \"rate\": {\"dominant\": \"30 Hz\"}\n}";
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_line_room_probe", cache_root, sep);
+    snprintf(dir, sizeof(dir), "%s%cace", root, sep);
+    assert(nk_platform_mkdir_p(dir));
+    assert(player_ace_report_path(root, "TEST93002", report, sizeof(report)));
+    char *big = (char *)malloc(ACE_REPORT_MAX + 1u);
+    assert(big != NULL);
+    memset(big, ' ', ACE_REPORT_MAX + 1u);
+    memcpy(big + ACE_REPORT_MAX - 1u - strlen(k_report), k_report, strlen(k_report) + 1u);
+    assert(strlen(big) == ACE_REPORT_MAX - 1u);
+    write_text_file(report, big);
+    if (!player_ace_last_session_line(root, "TEST93002", out, sizeof(out))) {
+        fprintf(stderr, "the player does not read a report of %u bytes\n", ACE_REPORT_MAX - 1u);
+        assert(!"a report as long as the runtime writes is read");
+    }
+    memset(big, ' ', ACE_REPORT_MAX + 1u);
+    memcpy(big + ACE_REPORT_MAX - strlen(k_report), k_report, strlen(k_report) + 1u);
+    assert(strlen(big) == ACE_REPORT_MAX);
+    write_text_file(report, big);
+    assert(!player_ace_last_session_line(root, "TEST93002", out, sizeof(out)) && out[0] == '\0');
+    free(big);
+    remove(report);
+    (void)test_rmdir(dir);
+    (void)test_rmdir(root);
+    printf("[PLAYER_STATE_TEST] launch line room (%zu of %zu characters, %zu more keys of %zu) PASSED\n", n,
+           sizeof(line) - 1u, (sizeof(line) - 1u - n) / avg, avg);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
@@ -11218,6 +11641,7 @@ int main(int argc, char **argv) {
     test_player_nickname();
     test_graphics_presets();
     test_play_mode_line_parses_in_runtime();
+    test_play_mode_line_room();
     test_play_mode_upscale_settings();
     test_play_mode_title_page();
     /* Saves a library file under the cache root, so it runs only once that

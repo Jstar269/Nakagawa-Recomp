@@ -2963,6 +2963,11 @@ int      sched_current_thread_stack_range(uint32_t *base_out, uint32_t *size_out
 /* High user-partition blocks, carved from the top of the thread-stack arena (sched.c). */
 int      sched_partition_alloc_high(uint32_t size, uint32_t ceiling, uint32_t *base_out);
 void     sched_partition_release_high(uint32_t base, uint32_t size);
+/* Whether an address inside the thread-stack arena is free there; *end_out bounds the answer. */
+int      sched_stack_arena_free_at(uint32_t addr, uint32_t *end_out);
+/* hle.c: told after a thread stack or High block's owner gives it back to the arena (base, size). */
+typedef void (*SrSchedArenaRelease)(uint32_t base, uint32_t size);
+void     sched_set_arena_release_hook(SrSchedArenaRelease release);
 void     sched_set_current_join_target(uint32_t uid);
 void     sched_clear_current_join_target(void);
 int      sched_take_current_join_result(uint32_t uid, uint32_t *result_out);

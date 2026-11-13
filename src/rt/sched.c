@@ -698,7 +698,17 @@ static int stack_range_alloc(uint32_t size, uint32_t *base_out) {
     return 0;
 }
 
-static void stack_range_release(uint32_t base, uint32_t size) {
+/* hle.c: told after a thread stack or High block's owner gives it back to the arena, so the user
+ * partition can take back the part of it that lies below its bump pointer
+ * (partition_arena_released). NULL: not told. */
+static SrSchedArenaRelease s_arena_release_hook;
+
+void sched_set_arena_release_hook(SrSchedArenaRelease release) { s_arena_release_hook = release; }
+
+/* Put [base, base+size) back among the arena's free ranges. stack_range_release() below is the
+ * owner's release; a create that took a range and then refused it calls this one directly: the
+ * range never had an owner, and the partition is not told. */
+static void stack_range_return(uint32_t base, uint32_t size) {
     if (!s_stack_allocator_ready || base == 0u || size == 0u) return;
     if (base < SR_STACK_ARENA_FLOOR || base > SR_STACK_ARENA_CEIL ||
         size > SR_STACK_ARENA_CEIL - base) {
@@ -740,6 +750,34 @@ static void stack_range_release(uint32_t base, uint32_t size) {
         }
     }
     stack_ranges_update_top();
+}
+
+static void stack_range_release(uint32_t base, uint32_t size) {
+    if (!s_stack_allocator_ready || base == 0u || size == 0u) return;
+    stack_range_return(base, size);
+    if (s_arena_release_hook) s_arena_release_hook(base, size);
+}
+
+/* For the HLE user partition (hle.c): whether the arena holds `addr`. Outside the arena it holds
+ * nothing: 1, with *end_out the arena's floor (an address below it) or UINT32_MAX (above it).
+ * Inside it: 1 when a free range holds it, with *end_out the end of that range; 0 when a live
+ * thread stack or High block holds it, with *end_out the start of the next free range above it
+ * (the arena ceiling when none). */
+int sched_stack_arena_free_at(uint32_t addr, uint32_t *end_out) {
+    if (!s_stack_allocator_ready) stack_ranges_reset();
+    if (addr < SR_STACK_ARENA_FLOOR) { *end_out = SR_STACK_ARENA_FLOOR; return 1; }
+    if (addr >= SR_STACK_ARENA_CEIL) { *end_out = UINT32_MAX; return 1; }
+    uint32_t next = SR_STACK_ARENA_CEIL;
+    for (int i = 0; i < s_stack_free_count; i++) {
+        const uint32_t base = s_stack_free[i].base, end = base + s_stack_free[i].size;
+        if (addr >= base && addr < end) {
+            *end_out = end;
+            return 1;
+        }
+        if (base > addr && base < next) next = base;
+    }
+    *end_out = next;
+    return 0;
 }
 
 /* A High block of the user partition (sceKernelAllocMemoryBlock placement 1). A PSP takes High
@@ -2910,10 +2948,12 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
     if (stack_ok && s_stack_range_refusal &&
         s_stack_range_refusal(user_base, user_base + reservation)) {
         /* The descending arena reached memory the user partition has handed out: no range
-         * above the partition's bump pointer holds the stack. */
+         * above the partition's bump pointer holds the stack. The range never had an owner, so it
+         * goes back to the arena without telling the partition (stack_range_return): the hook
+         * would hand the partition pieces a live stack in a freed block holds. */
         overlapped = 1;
         overlap_base = user_base;
-        stack_range_release(user_base, reservation);
+        stack_range_return(user_base, reservation);
         stack_ok = 0;
     }
     if (!stack_ok && s_partition_hole_alloc && s_partition_hole_alloc(reservation, &user_base)) {
@@ -2933,7 +2973,10 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
         fprintf(stderr, "sched_create_thread: stack [0x%08x,0x%08x) is not writable guest "
                 "memory -- failing create (maps to SCE_KERNEL_ERROR_NO_MEMORY)\n",
                 user_base, user_base + reservation);
-        stack_reservation_release(user_base, reservation, in_partition);
+        /* Nobody owned it yet: a freed partition block goes back to the partition, an arena
+         * range to the arena without the release hook. */
+        if (in_partition) stack_reservation_release(user_base, reservation, 1);
+        else stack_range_return(user_base, reservation);
         stack_ok = 0;
     }
     if (!stack_ok) {

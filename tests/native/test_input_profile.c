@@ -768,7 +768,7 @@ static void test_schema_one_migration(void) {
     size_t rb = fread(readback, 1, sizeof(readback) - 1, f);
     fclose(f);
     readback[rb] = '\0';
-    assert(strstr(readback, "\"schema_version\": 5") != NULL);
+    assert(strstr(readback, "\"schema_version\": 6") != NULL);
     assert(strstr(readback, "\"per_title\"") != NULL);
 
     NkInputProfileFile reloaded;
@@ -2405,7 +2405,7 @@ static void test_keyboard_bindings(void) {
     size_t rb = fread(readback, 1, sizeof(readback) - 1, f);
     fclose(f);
     readback[rb] = '\0';
-    assert(strstr(readback, "\"schema_version\": 5") != NULL);
+    assert(strstr(readback, "\"schema_version\": 6") != NULL);
     assert(strstr(readback, "\"keyboard_bindings\"") != NULL);
     assert(strstr(readback, "\"kp_2\"") != NULL);
 
@@ -2572,9 +2572,9 @@ static void test_stick_keys(void) {
     nk_input_profile_init_default(&def);
 
     /* The schema this adds, and the version it first appears in. */
-    assert(NK_INPUT_PROFILE_SCHEMA_VERSION == 5);
+    assert(NK_INPUT_PROFILE_SCHEMA_VERSION == 6);
     assert(NK_INPUT_PROFILE_STICK_KEYS_SCHEMA_VERSION == 4);
-    assert(def.schema_version == 5);
+    assert(def.schema_version == 6);
 
     /* Names: stable, case-insensitive, distinct from the button names. */
     static const char *const kDirNames[NK_PSP_STICK_DIR_COUNT] = {
@@ -2633,7 +2633,7 @@ static void test_stick_keys(void) {
     size_t rb = fread(readback, 1, sizeof(readback) - 1, f);
     fclose(f);
     readback[rb] = '\0';
-    assert(strstr(readback, "\"schema_version\": 5") != NULL);
+    assert(strstr(readback, "\"schema_version\": 6") != NULL);
     {
         /* psp_bindings also names "hold", so look from the keyboard list on. */
         const char *kb = strstr(readback, "\"keyboard_bindings\"");
@@ -3049,7 +3049,7 @@ static void versioned_profile_case(const char *fixture, int version, int title_c
         assert(none == NULL);
     }
     char *saved = versioned_read(path);
-    assert(strstr(saved, "\"schema_version\": 5,") != NULL);
+    assert(strstr(saved, "\"schema_version\": 6,") != NULL);
     free(saved);
     assert(nk_input_profile_file_load(&reloaded, path, diag, sizeof(diag)) == NK_OK);
     assert(memcmp(&reloaded.global, &doc.global, sizeof(doc.global)) == 0);
@@ -3187,10 +3187,10 @@ static void test_mouse_aim(void) {
     /* A schema 4 file cannot carry aim (an older build would ignore it), and one with no
      * aim loads with aiming off. */
     {
-        const char *at = strstr(saved, "\"schema_version\": 5");
+        const char *at = strstr(saved, "\"schema_version\": 6");
         assert(at != NULL);
         snprintf(text, sizeof(text), "%.*s\"schema_version\": 4%s", (int)(at - saved), saved,
-                 at + strlen("\"schema_version\": 5"));
+                 at + strlen("\"schema_version\": 6"));
         assert(nk_input_profile_parse_json(&parsed, text, strlen(text), diag, sizeof(diag)) !=
                NK_OK);
         assert(strstr(diag, "aim") != NULL);
@@ -3303,6 +3303,180 @@ static void test_mouse_aim(void) {
     printf("[INPUT_PROFILE_TEST] Subtest 18 PASSED!\n");
 }
 
+static void test_mouse_buttons(void) {
+    printf("[INPUT_PROFILE_TEST] Subtest 19: mouse buttons as keys (schema 6, #1791)...\n");
+    static const struct {
+        const char *name;
+        int key;
+        const char *words;
+    } kMouse[NK_HOST_KEY_MOUSE_COUNT] = {
+        { "mouse:left", NK_HOST_KEY_MOUSE_LEFT, "Left Click" },
+        { "mouse:middle", NK_HOST_KEY_MOUSE_MIDDLE, "Middle Click" },
+        { "mouse:right", NK_HOST_KEY_MOUSE_RIGHT, "Right Click" },
+        { "mouse:x1", NK_HOST_KEY_MOUSE_X1, "Mouse 4" },
+        { "mouse:x2", NK_HOST_KEY_MOUSE_X2, "Mouse 5" },
+    };
+    char diag[NK_INPUT_DIAGNOSTIC_MAX_LEN];
+    char words[32];
+    static char saved[65536];
+    static char text[65536];
+    NkInputProfile def;
+    NkInputProfile profile;
+    NkInputProfile parsed;
+    nk_input_profile_init_default(&def);
+
+    /* Names, words and codes: past every keyboard code, and the last bindable code. */
+    assert(NK_INPUT_PROFILE_MOUSE_BUTTONS_SCHEMA_VERSION == 6);
+    assert(NK_HOST_KEY_MOUSE_FIRST == 512);
+    assert(NK_HOST_KEY_LIMIT == NK_HOST_KEY_MOUSE_FIRST + NK_HOST_KEY_MOUSE_COUNT);
+    for (int i = 0; i < NK_HOST_KEY_MOUSE_COUNT; i++) {
+        assert(kMouse[i].key == NK_HOST_KEY_MOUSE_FIRST + i);
+        assert(nk_host_key_from_name(kMouse[i].name) == kMouse[i].key);
+        assert(strcmp(nk_host_key_name(kMouse[i].key), kMouse[i].name) == 0);
+        assert(nk_host_key_is_mouse(kMouse[i].key));
+        nk_host_key_words(kMouse[i].key, words, sizeof(words));
+        assert(strcmp(words, kMouse[i].words) == 0);
+    }
+    assert(nk_host_key_from_name("MOUSE:LEFT") == NK_HOST_KEY_MOUSE_LEFT);
+    assert(nk_host_key_from_name("mouse:x3") == NK_HOST_KEY_NONE);
+    assert(nk_host_key_from_name("mouse") == NK_HOST_KEY_NONE);
+    for (int key = 0; key < NK_HOST_KEY_MOUSE_FIRST; key++) assert(!nk_host_key_is_mouse(key));
+    assert(!nk_host_key_is_mouse(NK_HOST_KEY_LIMIT));
+
+    /* Off unless bound: no default binds a mouse button, so the default mapping reads the
+     * same with every mouse button held as with none, keys held or not. */
+    {
+        bool down[NK_HOST_KEY_LIMIT] = {false};
+        uint8_t lx = 77, ly = 201;
+        for (int i = 0; i < NK_HOST_KEY_MOUSE_COUNT; i++) {
+            down[NK_HOST_KEY_MOUSE_FIRST + i] = true;
+            assert(nk_input_profile_key_buttons(&def, NK_HOST_KEY_MOUSE_FIRST + i) == 0);
+        }
+        assert(nk_input_profile_eval_keys(&def, down, NK_HOST_KEY_LIMIT) == 0);
+        assert(!nk_input_profile_eval_key_analog(&def, down, NK_HOST_KEY_LIMIT, &lx, &ly));
+        assert(lx == 77 && ly == 201);
+        bool keys_only[NK_HOST_KEY_LIMIT];
+        for (int k = 0; k < NK_HOST_KEY_LIMIT; k++) {
+            down[k] = true;
+            keys_only[k] = k < NK_HOST_KEY_MOUSE_FIRST;
+        }
+        assert(nk_input_profile_eval_keys(&def, down, NK_HOST_KEY_LIMIT) ==
+               nk_input_profile_eval_keys(&def, keys_only, NK_HOST_KEY_LIMIT));
+        /* A host that reports only the keyboard's codes reads every mouse button released. */
+        assert(nk_input_profile_eval_keys(&def, down, NK_HOST_KEY_MOUSE_FIRST) ==
+               nk_input_profile_eval_keys(&def, keys_only, NK_HOST_KEY_LIMIT));
+    }
+
+    /* Bound: a click presses its PSP button, a side button pushes the stick, and a mouse
+     * button drives one control only, like any key. */
+    profile = def;
+    profile.psp_keys[NK_PSP_BTN_CROSS].primary = NK_HOST_KEY_MOUSE_LEFT;
+    profile.psp_keys[NK_PSP_BTN_RTRIGGER].secondary = NK_HOST_KEY_MOUSE_RIGHT;
+    profile.stick_keys[NK_PSP_STICK_UP].secondary = NK_HOST_KEY_MOUSE_X1;
+    assert(nk_input_profile_validate(&profile, diag, sizeof(diag)) == NK_OK);
+    {
+        bool down[NK_HOST_KEY_LIMIT] = {false};
+        uint8_t lx = 128, ly = 128;
+        down[NK_HOST_KEY_MOUSE_LEFT] = true;
+        assert(nk_input_profile_eval_keys(&profile, down, NK_HOST_KEY_LIMIT) == NK_PSP_BTN_CROSS_BIT);
+        assert(nk_input_profile_key_buttons(&profile, NK_HOST_KEY_MOUSE_LEFT) == NK_PSP_BTN_CROSS_BIT);
+        assert(nk_input_profile_key_buttons(&profile, NK_HOST_KEY_MOUSE_RIGHT) ==
+               NK_PSP_BTN_RTRIGGER_BIT);
+        down[NK_HOST_KEY_MOUSE_LEFT] = false;
+        down[NK_HOST_KEY_MOUSE_X1] = true;
+        assert(nk_input_profile_eval_keys(&profile, down, NK_HOST_KEY_LIMIT) == 0);
+        assert(nk_input_profile_eval_key_analog(&profile, down, NK_HOST_KEY_LIMIT, &lx, &ly));
+        assert(lx == 128 && ly == 0);
+        /* The keyboard key the control already had still works beside the click. */
+        down[NK_HOST_KEY_MOUSE_X1] = false;
+        down[nk_host_key_from_name("w")] = true;
+        assert(nk_input_profile_eval_keys(&profile, down, NK_HOST_KEY_LIMIT) == NK_PSP_BTN_RTRIGGER_BIT);
+    }
+    /* With clicks bound but none held, every keyboard key reads as it does through a host
+     * array that stops at the keyboard's codes. */
+    {
+        bool merged[NK_HOST_KEY_LIMIT] = {false};
+        for (int key = 0; key < NK_HOST_KEY_MOUSE_FIRST; key++) {
+            uint8_t a_lx = 128, a_ly = 128, b_lx = 128, b_ly = 128;
+            merged[key] = true;
+            assert(nk_input_profile_eval_keys(&profile, merged, NK_HOST_KEY_LIMIT) ==
+                   nk_input_profile_eval_keys(&profile, merged, NK_HOST_KEY_MOUSE_FIRST));
+            (void)nk_input_profile_eval_key_analog(&profile, merged, NK_HOST_KEY_LIMIT, &a_lx, &a_ly);
+            (void)nk_input_profile_eval_key_analog(&profile, merged, NK_HOST_KEY_MOUSE_FIRST, &b_lx,
+                                                   &b_ly);
+            assert(a_lx == b_lx && a_ly == b_ly);
+            merged[key] = false;
+        }
+    }
+    {
+        NkInputProfile clash = profile;
+        clash.psp_keys[NK_PSP_BTN_CIRCLE].secondary = NK_HOST_KEY_MOUSE_LEFT;
+        assert(nk_input_profile_validate(&clash, diag, sizeof(diag)) != NK_OK);
+        assert(strstr(diag, "'mouse:left'") != NULL);
+    }
+
+    /* Round trip through the file, by name. */
+    const char *path = SR_SELFTEST_BUILD_ROOT "/test_mouse_buttons.json";
+    assert(nk_input_profile_save(&profile, path, diag, sizeof(diag)) == NK_OK);
+    FILE *file = fopen(path, "rb");
+    assert(file != NULL);
+    size_t size = fread(saved, 1, sizeof(saved) - 1, file);
+    fclose(file);
+    saved[size] = '\0';
+    remove(path);
+    assert(strstr(saved, "\"schema_version\": 6") != NULL);
+    assert(strstr(saved, "\"mouse:left\"") != NULL && strstr(saved, "\"mouse:x1\"") != NULL);
+    assert(nk_input_profile_parse_json(&parsed, saved, size, diag, sizeof(diag)) == NK_OK);
+    assert(memcmp(parsed.psp_keys, profile.psp_keys, sizeof(profile.psp_keys)) == 0);
+    assert(memcmp(parsed.stick_keys, profile.stick_keys, sizeof(profile.stick_keys)) == 0);
+
+    /* A schema 5 file cannot name a mouse button: a build that knows none would refuse the
+     * whole profile, so the button only exists from the schema that writes it. */
+    {
+        const char *at = strstr(saved, "\"schema_version\": 6");
+        snprintf(text, sizeof(text), "%.*s\"schema_version\": 5%s", (int)(at - saved), saved,
+                 at + strlen("\"schema_version\": 6"));
+        assert(nk_input_profile_parse_json(&parsed, text, strlen(text), diag, sizeof(diag)) !=
+               NK_OK);
+        assert(strstr(diag, "cannot carry mouse buttons (introduced in 6)") != NULL);
+    }
+    /* A schema 5 file that names no mouse button (aiming on) still loads, as the same
+     * mapping the schema 6 copy of it is. */
+    {
+        NkInputProfile five = def;
+        NkInputProfile from_six;
+        five.aim.mouse = true;
+        five.aim.sensitivity = 300;
+        assert(nk_input_profile_save(&five, path, diag, sizeof(diag)) == NK_OK);
+        file = fopen(path, "rb");
+        assert(file != NULL);
+        size = fread(saved, 1, sizeof(saved) - 1, file);
+        fclose(file);
+        saved[size] = '\0';
+        remove(path);
+        assert(nk_input_profile_parse_json(&from_six, saved, size, diag, sizeof(diag)) == NK_OK);
+        const char *at = strstr(saved, "\"schema_version\": 6");
+        assert(at != NULL);
+        snprintf(text, sizeof(text), "%.*s\"schema_version\": 5%s", (int)(at - saved), saved,
+                 at + strlen("\"schema_version\": 6"));
+        assert(nk_input_profile_parse_json(&parsed, text, strlen(text), diag, sizeof(diag)) == NK_OK);
+        assert(memcmp(parsed.psp_keys, from_six.psp_keys, sizeof(parsed.psp_keys)) == 0);
+        assert(memcmp(parsed.stick_keys, from_six.stick_keys, sizeof(parsed.stick_keys)) == 0);
+        assert(memcmp(&parsed.aim, &five.aim, sizeof(parsed.aim)) == 0);
+    }
+    /* Mouse movement as a pad source stays reserved and refused by name. */
+    {
+        const char *at = strstr(saved, "\"south\"");
+        assert(at != NULL);
+        snprintf(text, sizeof(text), "%.*s\"mouse:+x@4\"%s", (int)(at - saved), saved,
+                 at + strlen("\"south\""));
+        assert(nk_input_profile_parse_json(&parsed, text, strlen(text), diag, sizeof(diag)) !=
+               NK_OK);
+        assert(strstr(diag, "mouse source 'mouse:+x@4' is not supported") != NULL);
+    }
+    printf("[INPUT_PROFILE_TEST] Subtest 19 PASSED!\n");
+}
+
 static void test_versioned_profile_files(void) {
     printf("[INPUT_PROFILE_TEST] Versioned files: earlier players' profiles load, migrate "
            "and keep a backup; a newer one is kept...\n");
@@ -3310,6 +3484,49 @@ static void test_versioned_profile_files(void) {
     versioned_profile_case("fixtures/user_data/input_profile_v1.json", 1, 0);
     versioned_profile_case("fixtures/user_data/input_profile_v2.json", 2, 1);
     versioned_profile_case("fixtures/user_data/v0.0.1/input_profile.json", 3, 1);
+
+    /* Schema 5 -> 6 on disk: a schema 5 profile (this writer's output with no mouse button,
+     * labelled 5, the members a schema 5 player wrote) loads as the same mapping, and the
+     * first save keeps it byte for byte as .v5.bak and writes schema 6. */
+    {
+        static NkInputProfileFile doc;
+        static NkInputProfileFile reloaded;
+        char path[512], backup[560], diag[256];
+        NkInputProfile five;
+        nk_input_profile_init_default(&five);
+        five.aim.mouse = true;
+        five.aim.sensitivity = 300;
+        snprintf(path, sizeof(path), VERSIONED_PROFILE_ROOT "/profile_v5.json");
+        snprintf(backup, sizeof(backup), "%s.v5.bak", path);
+        remove(path);
+        remove(backup);
+        assert(nk_input_profile_save(&five, path, diag, sizeof(diag)) == NK_OK);
+        char *text = versioned_read(path);
+        assert(text != NULL);
+        char *version = strstr(text, "\"schema_version\": 6,");
+        assert(version != NULL);
+        version[strlen("\"schema_version\": ")] = '5';
+        versioned_write(path, text);
+
+        assert(nk_input_profile_file_load(&doc, path, diag, sizeof(diag)) == NK_OK);
+        assert(doc.schema_version == NK_INPUT_PROFILE_SCHEMA_VERSION);
+        assert(memcmp(doc.global.psp_keys, five.psp_keys, sizeof(five.psp_keys)) == 0);
+        assert(memcmp(doc.global.stick_keys, five.stick_keys, sizeof(five.stick_keys)) == 0);
+        assert(memcmp(&doc.global.aim, &five.aim, sizeof(five.aim)) == 0);
+
+        assert(nk_input_profile_file_save(&doc, path, diag, sizeof(diag)) == NK_OK);
+        char *kept = versioned_read(backup);
+        assert(kept != NULL && strcmp(kept, text) == 0);
+        char *saved = versioned_read(path);
+        assert(saved != NULL && strstr(saved, "\"schema_version\": 6,") != NULL);
+        assert(nk_input_profile_file_load(&reloaded, path, diag, sizeof(diag)) == NK_OK);
+        assert(memcmp(&reloaded.global, &doc.global, sizeof(doc.global)) == 0);
+        free(text);
+        free(kept);
+        free(saved);
+        remove(backup);
+        remove(path);
+    }
 
     /* A newer player's profile is refused by name, and a save leaves it as it is. */
     char newer[160];
@@ -3362,6 +3579,7 @@ int main(void) {
     test_stick_keys();
     test_source_thresholds();
     test_mouse_aim();
+    test_mouse_buttons();
     test_versioned_profile_files();
 
     printf("=================================================================\n");
