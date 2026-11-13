@@ -950,6 +950,25 @@ int sr_movie_find_pixel(uint32_t addr, uint32_t stride, uint32_t fmt, SrMoviePic
     return 1;
 }
 
+int sr_movie_find_copy(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t max_w, uint32_t max_h,
+                       SrMoviePicture *out) {
+    if (!s_movie_tracking) return 0;
+    SrMoviePicture *best = NULL;
+    for (int i = 0; i < SR_MOVIE_NOTES; i++) {
+        SrMoviePicture *n = &s_movie_notes[i];
+        if (!n->seq || n->stride != stride || n->fmt != fmt || n->width > max_w || n->height > max_h)
+            continue;
+        if (best && best->seq > n->seq) continue;
+        /* The shape is in the hash's seed, so equal hashes mean equal rows of an equal shape. */
+        if (sr_movie_rows_hash(addr, stride, fmt, n->width, n->height) != n->hash) continue;
+        if (!movie_note_unchanged(n)) continue;
+        best = n;
+    }
+    if (!best) return 0;
+    if (out) *out = *best;
+    return 1;
+}
+
 int sr_movie_find_in(uint32_t lo, uint32_t hi, uint32_t stride, uint32_t fmt, uint64_t after,
                      SrMoviePicture *out) {
     if (!s_movie_tracking) return 0;

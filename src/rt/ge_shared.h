@@ -571,7 +571,7 @@ void      sr_gpu_vram_dirty(uint32_t addr, uint32_t bytes);
  *     any pixel, or the buffer reused for anything else);
  *   - a later picture is noted over any of its bytes (it is replaced);
  *   - its decoder is deleted or released (sr_movie_forget_owner), or tracking is turned off;
- *   - more than SR_MOVIE_NOTES newer pictures were noted (the oldest is dropped).
+ *   - SR_MOVIE_NOTES newer pictures were noted (the oldest is dropped).
  * A picture through a swizzled VRAM view, or with a format or size outside the GE's, is never
  * noted. The renderer adds its own rules for draws (ge_gpu.c, "Movie frames"). Guest thread
  * only, like the HLE and the GE. */
@@ -598,6 +598,12 @@ int       sr_movie_alive(uint64_t seq);
  * format, re-hashed and unchanged: 1 and *out, or 0. (x, y) is that pixel in the picture. */
 int       sr_movie_find_pixel(uint32_t addr, uint32_t stride, uint32_t fmt, SrMoviePicture *out,
                               uint32_t *x, uint32_t *y);
+/* The newest note whose picture's rows, byte for byte, start at canonical address `addr` with this
+ * stride and format and fit in max_w x max_h pixels, the note itself unchanged: 1 and *out, or 0.
+ * A copy the game made with its own code (no HLE call sees it) is found this way; a converted,
+ * scaled, swizzled or partial copy is not. Each candidate costs one hash of the picture's rows. */
+int       sr_movie_find_copy(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t max_w,
+                             uint32_t max_h, SrMoviePicture *out);
 /* The newest note whose whole picture lies in canonical [lo, hi) with this stride and format,
  * noted after sequence `after`, re-hashed and unchanged: 1 and *out, or 0. */
 int       sr_movie_find_in(uint32_t lo, uint32_t hi, uint32_t stride, uint32_t fmt, uint64_t after,

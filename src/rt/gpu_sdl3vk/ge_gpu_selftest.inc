@@ -13706,10 +13706,10 @@ static int coherence_run_rtt_1x_reads(void) {
  *
  * Movie provenance (ge_shared.h) on the production path: the media HLE notes a decoded picture
  * (sr_movie_note_picture, as sceMpegAvcDecode, sceMpegAvcCsc and the PSMF player do), and the
- * renderer finds it at the texture upload (movie-texture: a picture in guest RAM drawn as a textured
- * sprite, LittleBigPlanet's case) or in the presented target (movie-target: a picture decoded into the
- * VRAM framebuffer a GE target holds, Hot Shots Tennis's case). gegpu_present then gives the presenter
- * SDL3VK_FRAME_MOVIE, which the movie upscaler (gui.c) takes as it takes a CPU-presented frame; a stub
+ * renderer finds it at the texture upload (movie-texture: a picture in guest RAM, or a byte-exact copy
+ * of it in VRAM as Hot Shots Tennis makes, drawn as a textured sprite) or in the presented target
+ * (movie-target: a picture decoded into the VRAM framebuffer a GE target holds). gegpu_present then
+ * gives the presenter SDL3VK_FRAME_MOVIE, which the movie upscaler (gui.c) takes as it takes a CPU-presented frame; a stub
  * pass in gui.c's place records what it was given. Each way the tag is dropped has its own step, and
  * the frame's guest VRAM is compared byte for byte with tracking off. NK_MOVIE_MUTANT_NO_MATCH drops
  * the match in the renderer: every "movie frame not found" step then fails
@@ -13718,6 +13718,7 @@ static int coherence_run_rtt_1x_reads(void) {
 #define MVC_PIC    0x09000000u   /* movie-texture: the picture in guest RAM, 512 texels a row */
 #define MVC_OWNER  0x09F00000u   /* the decoder handle the notes carry */
 #define MVC_BASE   0x04000000u   /* the displayed framebuffer, 8888, stride 512 */
+#define MVC_COPY   0x04110000u   /* movie-texture: a copy of the picture in VRAM, past the framebuffer */
 
 static struct { int calls, kind; } s_mvc;
 static int s_mvc_pass_runs;   /* presents the stub pass ran for, in the running cell */
@@ -13872,6 +13873,22 @@ static int mvc_notes_rules(void) {
                 cell);
         ok = 0;
     }
+    /* A byte-exact copy of a held picture elsewhere is found as that picture; one of another stride,
+     * one larger than the texture and one with a byte changed are not. */
+    for (uint32_t y = 0; y < 16u; y++)
+        memcpy(SR_HOST(MVC_PIC + 0xC0000u + y * 2048u), SR_HOST(MVC_PIC + 0x80000u + y * 2048u), 64u);
+    if (!sr_movie_find_copy(MVC_PIC + 0xC0000u, 512u, 3u, 16u, 16u, &pic) || pic.addr != MVC_PIC + 0x80000u ||
+        sr_movie_find_copy(MVC_PIC + 0xC0000u, 256u, 3u, 16u, 16u, NULL) ||
+        sr_movie_find_copy(MVC_PIC + 0xC0000u, 512u, 3u, 15u, 16u, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: a copy was not found, or found with another stride or "
+                        "in a smaller texture\n", cell);
+        ok = 0;
+    }
+    ((uint8_t *)SR_HOST(MVC_PIC + 0xC0000u + 15u * 2048u))[63] ^= 1u;
+    if (sr_movie_find_copy(MVC_PIC + 0xC0000u, 512u, 3u, 16u, 16u, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: a copy with its last byte changed was found\n", cell);
+        ok = 0;
+    }
     sr_movie_set_tracking(0);
     sr_movie_set_tracking(1);
     if (sr_movie_find_pixel(MVC_PIC + 0x80000u, 512u, 3u, NULL, NULL, NULL)) {
@@ -13879,7 +13896,7 @@ static int mvc_notes_rules(void) {
         ok = 0;
     }
     sr_movie_set_tracking(0);
-    if (ok) printf("gpu coherence selftest: PASS %-22s span, replacement, eviction, views, release\n", cell);
+    if (ok) printf("gpu coherence selftest: PASS %-22s span, replacement, eviction, views, release, copies\n", cell);
     return ok;
 }
 
@@ -13982,9 +13999,20 @@ static int coherence_run_movie_texture(void) {
         s_ge->tex_w = 512;
     }
     ok = ok && mvc_present(cell, "drawn in two strips", SDL3VK_FRAME_MOVIE);
+    /* The game copies the picture into VRAM with its own code and draws the copy (Hot Shots
+     * Tennis): a byte-exact copy is the picture; the same copy with one pixel changed is not. */
+    for (uint32_t y = 0; y < FB_H; y++)
+        memcpy(SR_HOST(MVC_COPY + y * 2048u), SR_HOST(MVC_PIC + y * 2048u), 480u * 4u);
+    sr_gpu_vram_dirty(MVC_COPY, 512u * FB_H * 4u);
+    s_ge->tex_addr = MVC_COPY;
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 0, 0) && mvc_present(cell, "a copy in VRAM", SDL3VK_FRAME_MOVIE);
+    ((uint32_t *)SR_HOST(MVC_COPY))[100u * 512u + 200u] ^= 0x00010101u;
+    sr_gpu_vram_dirty(MVC_COPY + (100u * 512u + 200u) * 4u, 4u);
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 0, 0) && mvc_present(cell, "a copy with a pixel changed", SDL3VK_FRAME_GE);
+    s_ge->tex_addr = MVC_PIC;
     gegpu_movie_counts(&m1, &tf1, &gf1);
-    if (ok && (tf1 - tf0 != 6u || gf1 != gf0 || m1 == m0)) {
-        fprintf(stderr, "gpu coherence selftest [%s]: counted %lu texture movie frames (want 6), %lu target "
+    if (ok && (tf1 - tf0 != 7u || gf1 != gf0 || m1 == m0)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: counted %lu texture movie frames (want 7), %lu target "
                         "ones (want 0), %lu matched uploads\n", cell, tf1 - tf0, gf1 - gf0, m1 - m0);
         ok = 0;
     }

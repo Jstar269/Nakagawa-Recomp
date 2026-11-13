@@ -1228,7 +1228,7 @@ gpu-coherence-selftest-movie-mutant: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@bin=$(BUILD_DIR)/gpu_coherence_movie_mutant.exe; kill="FAIL movie frame not found"; \
 	$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DNK_MOVIE_MUTANT_NO_MATCH -ffunction-sections -fdata-sections \
-		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -Wl,--gc-sections -o $$bin \
+		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) $(LD_GC_SECTIONS) -o $$bin \
 		tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
 		$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
 	for c in movie-texture movie-target; do \

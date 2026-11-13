@@ -898,6 +898,9 @@ static uint64_t s_write_seq = 0;
 static unsigned long s_cnt_readback = 0, s_cnt_upload = 0, s_cnt_dirty = 0;
 static unsigned long s_cnt_snap = 0, s_cnt_texup = 0, s_cnt_xferblit = 0;
 static unsigned long s_cnt_depth_commit = 0;   /* depth_readback_to_guest copies (rtt-1x-reads) */
+/* Movie pictures (#2111): texture uploads that were one, and presents handed to the movie
+ * upscaler because a drawn (tex) or decoded-into (target) picture covered the frame. */
+static unsigned long s_cnt_movie_tex, s_cnt_movie_present_tex, s_cnt_movie_present_target;
 static uint64_t s_cnt_tex_invalidations = 0;
 static uint64_t s_cnt_tex_clean_skips = 0;   /* CPU stores that skipped the texture scan (#282): */
 static uint64_t s_cnt_tex_quiet_skips = 0;   /* clean pages, and quiet pages */
@@ -3080,7 +3083,8 @@ static void stats_emit(int final) {
     fprintf(stderr, "GEGPU stats: submits=%lu batches=%llu verts=%llu avg_batches=%.2f "
             "tris=%lu spr=%lu lines=%lu nonfinite=%lu tnl[prims=%lu tris=%lu] rtt=%lu snap=%lu "
             "present[gpu=%lu cpu=%lu] upload=%lu readback=%lu texup=%lu dirty=%lu xferblit=%lu pipes=%d texs=%d "
-            "shadow[invalidations=%llu checks=%llu hits=%llu misses=%llu bytes=%llu avoided=%llu required=%llu] final=%d\n",
+            "shadow[invalidations=%llu checks=%llu hits=%llu misses=%llu bytes=%llu avoided=%llu required=%llu] "
+            "movie[tex=%lu present_tex=%lu present_target=%lu] final=%d\n",
             s_cnt_submit, (unsigned long long)s_cnt_batches, (unsigned long long)s_cnt_verts,
             s_cnt_submit ? (double)s_cnt_batches / (double)s_cnt_submit : 0.0,
             s_cnt_tri, s_cnt_spr, s_cnt_line, s_cnt_nonfinite, s_cnt_tnl_prims, s_cnt_tnl_tris,
@@ -3091,7 +3095,7 @@ static void stats_emit(int final) {
             (unsigned long long)s_cnt_shadow_checks, (unsigned long long)s_cnt_shadow_hits,
             (unsigned long long)s_cnt_shadow_misses, (unsigned long long)s_cnt_shadow_bytes,
             (unsigned long long)s_cnt_shadow_avoided, (unsigned long long)s_cnt_shadow_required,
-            final);
+            s_cnt_movie_tex, s_cnt_movie_present_tex, s_cnt_movie_present_target, final);
 }
 
 static void stats_tick(void) { stats_emit(0); }
@@ -5171,24 +5175,24 @@ static void tex_xs_retry(TexEnt *e, uint32_t levels) {
 /* ---- Movie frames (#2111) ---------------------------------------------------------------------
  * The renderer's half of movie provenance (ge_shared.h). With SR_MOVIE_UPSCALE on (gui.c turns
  * tracking on), presenting a GE target is a movie frame, which the movie upscaler enlarges as it
- * does a CPU-presented one, when movie pixels cover at least half of the shown 480 x 272:
+ * does a CPU-presented one, when its movie box covers at least half of the shown 480 x 272:
  *   texture  draws since the target was last presented sampled a cache entry whose upload matched
  *            a noted picture (tex_movie_match); the movie box is the union of their boxes, clipped
- *            to the scissor and the shown area. A later GE write whose box covers the whole movie
- *            box hides the movie and empties the box; one over part of it (subtitles, a prompt)
- *            does not.
+ *            to the scissor and the shown area. A later GE draw, line, point or block transfer
+ *            whose box covers the whole movie box hides the movie and empties the box; one over
+ *            part of it (subtitles, a prompt) does not, nor does a software-drawn primitive,
+ *            whose box is not known.
  *   target   the target holds a whole noted picture, written after the GE's last write to the image
  *            (any draw, block transfer or software-drawn primitive) and unchanged since; a GE write
  *            after it, even one pixel of UI, leaves the frame to the GE.
  * The decision only picks the upscaler that enlarges the shown picture, in the window and in a
  * recording: no pixel of the target, guest VRAM, a readback or a capture changes. */
 
-static unsigned long s_cnt_movie_tex, s_cnt_movie_present_tex, s_cnt_movie_present_target;
-
 /* The noted picture the texture being uploaded shows (its sequence number), or 0: a direct-colour,
  * unswizzled single level whose first texel is a pixel of a noted picture with the same stride and
- * format, the picture unchanged since it was noted. A render target read back through the cache is
- * not one. */
+ * format, or that starts with a byte-exact copy of one (a game that copies the decoded picture into
+ * VRAM itself, as Hot Shots Tennis does for its opening movie), the picture unchanged since it was
+ * noted. A render target read back through the cache is not one. */
 static uint64_t tex_movie_match(uint32_t levels) {
     if (!sr_movie_tracking() || s_tex_noscale || levels != 1u || s_ge->tex_fmt > 3u || s_ge->tex_swizzle)
         return 0;
@@ -5196,7 +5200,10 @@ static uint64_t tex_movie_match(uint32_t levels) {
     return 0;
 #else
     SrMoviePicture pic;
-    if (!sr_movie_find_pixel(tex_canonical(s_ge->tex_addr), s_ge->tex_bufw, s_ge->tex_fmt, &pic, NULL, NULL))
+    const uint32_t at = tex_canonical(s_ge->tex_addr);
+    if (!sr_movie_find_pixel(at, s_ge->tex_bufw, s_ge->tex_fmt, &pic, NULL, NULL) &&
+        !sr_movie_find_copy(at, s_ge->tex_bufw, s_ge->tex_fmt, (uint32_t)s_ge->tex_w, (uint32_t)s_ge->tex_h,
+                            &pic))
         return 0;
     s_cnt_movie_tex++;
     return pic.seq;
@@ -5225,19 +5232,21 @@ static int movie_draw_samples(const Batch *b) {
     return sr_movie_alive(e->movie_seq);
 }
 
-/* A GE write to target `t`: a draw (movie = movie_draw_samples), a block transfer or a
- * software-drawn primitive, over [x0, x1) x [y0, y1) in guest pixels (an empty box when it is not
- * known). Nothing happens with tracking off. */
-static void movie_note_write(Target *t, int movie, float x0, float y0, float x1, float y1) {
+/* A GE write to target `t`: a draw (movie = movie_draw_samples), a block transfer (scissored = 0:
+ * the scissor does not limit it) or a software-drawn primitive, over [x0, x1) x [y0, y1) in guest
+ * pixels (an empty box when it is not known). Nothing happens with tracking off. */
+static void movie_note_write(Target *t, int movie, int scissored, float x0, float y0, float x1,
+                             float y1) {
     if (!t || !sr_movie_tracking()) return;
     if (t->mv_closed) {
         t->mv_x0 = t->mv_y0 = t->mv_x1 = t->mv_y1 = 0;
         t->mv_closed = 0;
     }
     t->mv_clock = sr_movie_clock();
-    const float cx0 = fmaxf(0.0f, (float)s_ge->scis_x1), cy0 = fmaxf(0.0f, (float)s_ge->scis_y1);
-    const float cx1 = fminf((float)DRAW_W, (float)s_ge->scis_x2 + 1.0f);
-    const float cy1 = fminf((float)FB_H, (float)s_ge->scis_y2 + 1.0f);
+    const float cx0 = scissored ? fmaxf(0.0f, (float)s_ge->scis_x1) : 0.0f;
+    const float cy0 = scissored ? fmaxf(0.0f, (float)s_ge->scis_y1) : 0.0f;
+    const float cx1 = scissored ? fminf((float)DRAW_W, (float)s_ge->scis_x2 + 1.0f) : (float)DRAW_W;
+    const float cy1 = scissored ? fminf((float)FB_H, (float)s_ge->scis_y2 + 1.0f) : (float)FB_H;
     x0 = fmaxf(x0, cx0); y0 = fmaxf(y0, cy0); x1 = fminf(x1, cx1); y1 = fminf(y1, cy1);
     if (!(x0 < x1) || !(y0 < y1)) return;
     const int ix0 = (int)floorf(x0), iy0 = (int)floorf(y0), ix1 = (int)ceilf(x1), iy1 = (int)ceilf(y1);
@@ -6359,7 +6368,7 @@ static int software_fallback_begin(int forced) {
     if (s_nbatch&&!submit_pending()) return 1;
 
     Target *t=is_vram(s_ge->fbp)?target_find_by_fba(vram_off(s_ge->fbp)):NULL;
-    movie_note_write(t, 0, 0.0f, 0.0f, 0.0f, 0.0f);   /* a GE write the GPU does not draw (#2111) */
+    movie_note_write(t, 0, 1, 0.0f, 0.0f, 0.0f, 0.0f);   /* a GE write the GPU does not draw (#2111) */
     if (t&&t->gpu_valid) {
         s_replay_stats.fallback_readbacks[reason]++;
         (void)target_readback(t);
@@ -6654,7 +6663,7 @@ static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
     cpu_profile_vertex_done(vertex_started, 3);
     append(&b, first, 3);
     if (!s_wing_dst) {   /* a wing canvas draw is not the target's: no count, no HUD box */
-        movie_note_write(s_cur, movie, fminf(A->x, fminf(B->x, C->x)), fminf(A->y, fminf(B->y, C->y)),
+        movie_note_write(s_cur, movie, 1, fminf(A->x, fminf(B->x, C->x)), fminf(A->y, fminf(B->y, C->y)),
                          fmaxf(A->x, fmaxf(B->x, C->x)), fmaxf(A->y, fmaxf(B->y, C->y)));
         s_cnt_tri++;
         if (g_ace_hud_on)
@@ -6740,7 +6749,7 @@ static int hook_tnl_prim(const GeTnlPrim *p) {
     }
     s_tnl_box[pi] = (TnlBox){ first, s_ntnl, p->box[0], p->box[1], p->box[2], p->box[3] };
     append(&b, first, nv);
-    movie_note_write(s_cur, 0, 0.0f, 0.0f, 0.0f, 0.0f);   /* #2111: a GE write, box not kept */
+    movie_note_write(s_cur, 0, 1, p->box[0], p->box[1], p->box[2], p->box[3]);   /* #2111 */
     s_cnt_tnl_prims++;
     s_cnt_tnl_tris += p->ntri;
     return cpu_profile_hook_leave(1);
@@ -6860,7 +6869,7 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
     cpu_profile_vertex_done(vertex_started, 6);
     append(&b, first, 6);
     if (!s_wing_dst) {
-        movie_note_write(s_cur, movie, xa, ya, xb, yb);
+        movie_note_write(s_cur, movie, 1, xa, ya, xb, yb);
         s_cnt_spr++;
         if (g_ace_hud_on) ace_hud_draw(&b, xa, ya, xb, yb);
     }
@@ -6959,7 +6968,8 @@ static int hook_line(const GeVtx *A, const GeVtx *B, int persp) {
         if (have) { run = px; run_len = 1; run_minor = minor; }
     }
     cpu_profile_vertex_done(vertex_started, verts);
-    movie_note_write(s_cur, 0, 0.0f, 0.0f, 0.0f, 0.0f);   /* #2111: a GE write, box not kept */
+    movie_note_write(s_cur, 0, 1, floorf(fminf(A->x, B->x)), floorf(fminf(A->y, B->y)),   /* #2111 */
+                     floorf(fmaxf(A->x, B->x)) + 1.0f, floorf(fmaxf(A->y, B->y)) + 1.0f);
     s_cnt_line++;
     return cpu_profile_hook_leave(1);
 }
@@ -6985,7 +6995,7 @@ static int hook_point(const GeVtx *A, int persp) {
     put_vert(x0,        y0 + 1.0f, A->z, A->rw, A->u, A->v, A->fog, A->r, A->g, A->b, A->a);
     cpu_profile_vertex_done(vertex_started, 6);
     append(&b, first, 6);
-    movie_note_write(s_cur, 0, 0.0f, 0.0f, 0.0f, 0.0f);   /* #2111: a GE write, box not kept */
+    movie_note_write(s_cur, 0, 1, x0, y0, x0 + 1.0f, y0 + 1.0f);   /* #2111 */
     s_cnt_line++;
     return cpu_profile_hook_leave(1);
 }
@@ -7190,7 +7200,7 @@ static int hook_xfer(uint32_t startdata) {
     if (!cmd_submit_wait(SR_PERF_GE_TRANSFER_BLIT)) return 0;
     dst->render_gen++; dst->cseq = ++s_write_seq;                       /* content changed (snapshot/present tracking) */
     target_note_drawn(dst, (int)dx, (int)dy, (int)(dx + w), (int)(dy + h));
-    movie_note_write(dst, 0, (float)dx, (float)dy, (float)(dx + w), (float)(dy + h));
+    movie_note_write(dst, 0, 0, (float)dx, (float)dy, (float)(dx + w), (float)(dy + h));
     if (g_ace_on) ace_note_target_draw(dst->fba);
     sr_vram_mark_renderer_pending();
     dst->lru = s_lru++;

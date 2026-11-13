@@ -589,7 +589,8 @@ static int psmf_video_take(SrPsmfPlayer *p, uint32_t displaybuf, int bufw,
             psmf_av_delivered(PSMF_AV_VIDEO, displaybuf, 0u, value, 1);
     }
     /* Movie provenance (#2111, ge_shared.h): the picture now in the display buffer, for the
-     * movie upscaler. A no-op unless SR_MOVIE_UPSCALE is on. */
+     * movie upscaler. A no-op unless SR_MOVIE_UPSCALE is on. delivered_format is one of the
+     * four SR_H264_PIXEL_* formats from 5650 on (checked above), so the difference is 0..3. */
     if (bufw > 0)
         sr_movie_note_picture(p->guest, displaybuf, (uint32_t)bufw,
                               (uint32_t)(info.delivered_format - SR_H264_PIXEL_5650),

@@ -965,10 +965,11 @@ default, leaves them to `SR_PRESENT_UPSCALE`. It applies in the window and in a 
 (`SR_VIDEOREC_DIR`), each with its own passes at its own size. Use `anime4k` for line art and movies
 only: on other pictures, such as fine regular stripes, it adds a faint ripple along edges. A movie
 the GE presents is found by its provenance: the movie decoder notes where each picture lands, and a
-GE frame is a movie frame when pictures drawn as a texture (LittleBigPlanet) or decoded into the
-displayed target with no GE drawing after them (Hot Shots Tennis) cover at least half of it
-([ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md), section 2.2). A movie the game copies elsewhere
-first, or decodes behind a swizzled VRAM view, stays a GE frame and is not upscaled.
+GE frame is a movie frame when pictures drawn as a texture (Hot Shots Tennis draws a byte-exact copy
+of each picture), or decoded into the displayed target with no GE drawing after them, cover at least
+half of it ([ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md), section 2.2). A movie the game
+converts or scales on its way to the screen, or decodes behind a swizzled VRAM view, stays a GE
+frame and is not upscaled.
 Like `SR_PRESENT_UPSCALE` it is presentation only: the decoded movie, the guest's frame, guest VRAM
 and captures are unchanged (`display-smoke-anime4k`, which needs a Vulkan device and a display). A
 run with it on is stamped as enhanced (`ACE_MODE: present upscale movie-anime4k`, a
