@@ -1797,6 +1797,7 @@
     "tools/test_admit_paths.py",
     "tools/test_analysis_ir.py",
     "tools/test_analyze_import_stub_entries.py",
+    "tools/test_analyze_non_code.py",
     "tools/test_analyze_tailcall.py",
     "tools/test_analyze_toml_emit.py",
     "tools/test_analyzer_span_scope.py",
