@@ -105,9 +105,13 @@ player-ui-tests: osk-overlay-paint-selftest ui-font-selftest nk-ui-player-screen
 		-o $(BUILD_ROOT)/test_ui_clip$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_ui_clip$(EXE_EXT)
 	$(CC) -std=c99 -Wall -Wextra -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(PLAYER_INCLUDES) $(LDFLAGS) tests/native/test_player_ui_art.c \
-		$(NK_UI_PLAYER_HOST_SRCS) src/ui/nk_ui_image.c src/ui/nk_ui_assets.c -lSDL3 \
+		$(NK_UI_PLAYER_HOST_SRCS) src/ui/nk_ui_image.c src/ui/nk_ui_assets.c -lSDL3 -lm \
 		-o $(BUILD_ROOT)/test_player_ui_art$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_player_ui_art$(EXE_EXT)
+	$(CC) -std=c99 -O2 -Wall -Wextra -Werror -DPLAYER_UI_MUSIC_TEST_SEAMS -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(PLAYER_INCLUDES) $(LDFLAGS) \
+		tests/native/test_player_ui_music.c src/player/ui/player_ui_music.c src/player/ui/player_ui_vorbis.c -lSDL3 -lm \
+		-o $(BUILD_ROOT)/test_player_ui_music$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_player_ui_music$(EXE_EXT) assets/music/launcher/ChillLofi.ogg
 
 .PHONY: nk-ui-player-screens-capture
 ifeq ($(SDL3_TTF_AVAILABLE),yes)

@@ -481,6 +481,9 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     /* The refresh-rate advisory case runs on a 144 Hz display; the rest on 60 Hz. */
     settings.display_refresh_hz = which == FLOW_SETTINGS_REFRESH ? 144.0 : 60.0;
     settings.volume = 80;
+    /* Launcher music (#2207): off, the default, at its default level. */
+    settings.launcher_music_value = "Off";
+    settings.music_volume = 80;
     settings.controller_line = "keyboard and mouse";
     settings.saves_folder = "C:/synthetic/Nakagawa/saves";
     /* Off, the default; its own case has the stored setting On (#2007). */
@@ -3208,6 +3211,12 @@ static void test_settings_pages(void) {
          "plus raises the volume"},
         {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_UI_SOUNDS, PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS,
          "the menu sounds button toggles them"},
+        {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_LAUNCHER_MUSIC,
+         PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC, "the launcher music button toggles it"},
+        {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_DOWN,
+         PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN, "minus lowers the music volume"},
+        {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP, PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP,
+         "plus raises the music volume"},
         {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_ACCESSIBILITY,
          PLAYER_UI_SETTINGS_OPEN_ACCESSIBILITY, "Accessibility opens its page"},
         {FLOW_SETTINGS_ACCESSIBILITY, PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE,
