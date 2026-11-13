@@ -862,7 +862,7 @@ that builds one clip-space matrix per camera and tests object bounds against it.
             "smooth": "off", "sas": "off", "tess": "off", "cull": "off", "upscale": "off", "stick": "off",
             "load": "off", "twin": "off", "mips": "off"},
 "title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}},
-"texture_packs": {"ULUS10000": "D:\\Packs\\My HD pack"}
+"texture_packs": {"ULUS10000": "C:\\path\\Packs\\My HD pack"}
 ```
 
 `"texture_packs"` maps a disc ID to the folder of the texture pack the player chose for it (section 10.12), at most
