@@ -5680,14 +5680,15 @@ def _reserved_class(why):
 
 def _non_code_summary(image, non_code, non_code_words, spans):
     """The one line an image whose analysis withdrew seeds as non-code gets: how many, the
-    words only they reach, the executable spans left, and the withdrawals by the class of the
-    lowest reserved word each body holds."""
+    words proven non-code (every path from each runs into a reserved word; they leave the
+    executable spans), the spans left, and the withdrawals by the class of the lowest reserved
+    word each body holds."""
     classes = Counter(_reserved_class(why) for _, why in non_code.values())
     evidence = ", ".join(f"{name} ({count})" for name, count in
                          sorted(classes.items(), key=lambda item: (-item[1], item[0])))
     sys.stderr.write(
         f"codegen: {image}: withdrew {len(non_code)} seeds as non-code, "
-        f"{len(non_code_words)} words only they reach, {len(spans)} executable spans left "
+        f"{len(non_code_words)} words proven non-code, {len(spans)} executable spans left "
         f"(no relocation evidence; first reserved word: {evidence})\n")
 
 
@@ -7612,7 +7613,7 @@ def _translate(argv):
         extra_known = set(extra_analyzed)
         extra_known = set(a for a in extra_known if in_ranges(a, extra_ranges))
         # Withdrawn seeds of an image without relocation evidence, as for the executable: no
-        # entry, a dispatch boundary, and the words only they reach out of the spans.
+        # entry, a dispatch boundary, and the words proven non-code out of the spans.
         extra_non_code = {a: hit for a, hit in extra_report.get("non_code", {}).items()
                           if a not in extra_analyzed}
         extra_non_code_words = (frozenset(extra_report.get("non_code_words", ()))

@@ -235,25 +235,40 @@ These tools run on the development host before the native compiler.
   or a `blez`/`bgtz` form with `rt` set). The emitter and the interpreter refuse every such word,
   so codegen could not have translated that body: a withdrawal takes no translation away. The body
   judged is the split walk's (no edge enters another entry), which every form of the generated
-  walk owns. A seed that a body which stays may own (the unsplit walk's reach of a kept entry,
-  which follows a conditional edge into another entry) is never withdrawn, and neither are the
+  walk owns. A seed that a body which stays may own (the unsplit walk's reach of a kept entry or
+  of a clean candidate, which follows a conditional edge into another entry) is never withdrawn,
+  and neither are the
   entry point (and a prologue at the start of the executable segment), the exports and init
   array, the import stubs, and the addresses a run reached (capture entries and miss seeds,
   however they were first seeded); one of those whose body holds a reserved word stays. A valid
   instruction the translator does not support is no evidence, and neither is a transfer out of the
-  image: a fixed-address overlay may call one loaded later. The words that the bodies of withdrawn
-  addresses reach and no body that stays may own become void: the sweeps skip them, so a seed
-  whose evidence lies there is no evidence. Discovery runs again until a pass withdraws nothing.
+  image: a fixed-address overlay may call one loaded later. Every body that stays owns its unsplit
+  reach: each candidate whose body holds no reserved word, an entry or not (a clean seed a data
+  body's trace ran over first becomes an entry once that body is withdrawn), and each entry not
+  withdrawn. What withdrawn bodies reach beyond that is their shadow: the sweeps skip it, so a
+  seed whose evidence lies there is no evidence. The void is the part of the shadow from which
+  every path runs into a reserved word (none returns, leaves the image, stops at `jr`, a syscall
+  or `eret`, or enters an entry): proven never to run as working code. The rest of the shadow
+  stays executable, as before the withdrawal; a withdrawn address there has no translated body
+  and, if called, runs on the interpreter floor, which refuses at the reserved word if it gets
+  there. Discovery runs again until a pass withdraws nothing.
   Every entry that is not withdrawn stays an entry in the next pass, so a pass only adds
   boundaries and no body that stays runs on into words it did not own; each pass that continues
   withdraws at least one more address, so the loop ends without a limit. One walk answers for every
   seed of a pass, so a word is stepped once however many bodies own it. A withdrawn address ends
   every discovery path and stays a dispatch boundary in the generated code. An image whose code
-  holds no reserved word is not walked. In a runtime module the module's spans exclude the void,
+  holds no reserved word is not walked. The judging walk (`_BodyWalk` in `tools/analyze.py`) follows
+  `codegen._walk_body`'s rules for one shared walk over every seed; `tools/test_analyze_non_code.py`
+  runs both over a seeded corpus of random bodies and fails if a generated body leaves the judged
+  reach, or a judged body is not inside the generated split body. The one difference is a
+  transfer in a delay slot: the judging walk steps such a slot when a branch also lands on it,
+  the generated walk does not, and the emitter refuses every body with one, so it is a stub in
+  either case. In a runtime module the module's spans exclude the void,
   and the descriptor registers an `SrModuleNonCode` record (count of withdrawn seeds and void words)
   only for a module that has one, so other descriptors are unchanged; a dispatch that reaches a
   withdrawn span stops with `NON_CODE_WITHDRAWN` (see [`DEBUGGING.md`](DEBUGGING.md)). The runtime
-  finds a module's span by a binary search, and registration refuses spans out of address order.
+  finds a module's span, and the executable's, by a binary search, and registration refuses spans
+  out of address order.
   In the executable and an `--extra-elf` image the void leaves the registered executable spans, so
   a dispatch there stops as not executable, without that name. Codegen refuses the build
   (`NON_CODE_TRANSLATED`) if an entry, or a word it walked for any function it emits (translated

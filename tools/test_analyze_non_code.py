@@ -15,6 +15,7 @@ code, with and without data after it.
 """
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import os
@@ -163,7 +164,7 @@ def translate(overlay, flow_sizes=None):
 def stock_analysis():
     """The analysis as it was before the withdrawal: no candidate is ever withdrawn."""
     return mock.patch.object(analyze, "_non_code_entries",
-                             lambda d, structural, cache=None: ({}, frozenset()))
+                             lambda d, structural, cache=None: ({}, frozenset(), frozenset()))
 
 
 class ReservedEncodingTest(unittest.TestCase):
@@ -202,9 +203,9 @@ class NonCodeOverlayTest(unittest.TestCase):
         stock = analyze._non_code_entries
 
         def recording(d, structural, cache=None):
-            found, void = stock(d, structural, cache)
+            found, void, shadow = stock(d, structural, cache)
             cls.passes.append((frozenset(d.non_code), frozenset(found)))
-            return found, void
+            return found, void, shadow
 
         with mock.patch.object(analyze, "_non_code_entries", recording):
             cls.module, cls.log = translate(cls.overlay, cls.sizes)
@@ -614,7 +615,10 @@ class WithdrawalRulesTest(unittest.TestCase):
         self.assertEqual(translated(generated), translated(before))
         self.assertEqual(len(translated(generated)), 9)   # 0x1000 to 0x1024 but the padding at 0x101c
         self.assertNotIn("sr_unimplemented", function_text(generated, base))
-        self.assertIn("sr_exec_span_register(0x00001000u, 0x00001028u)", generated)
+        # K's cold path (its call, delay slot and the data word after it) can only run into
+        # the data word: those leave the spans. K's own words stay: its hot path returns.
+        self.assertIn("sr_exec_span_register(0x00001000u, 0x0000103cu)", generated)
+        self.assertIn("sr_exec_span_register(0x00001048u, 0x0000106cu)", generated)
         self.assertNotIn(f"void f_{k:08x}(CpuState *s) {{", generated)
         self.assertIn("executable: withdrew", log)
 
@@ -630,6 +634,25 @@ class WithdrawalRulesTest(unittest.TestCase):
         self.assertEqual(rc, 0, log)
         self.assertNotIn("NON_CODE_TRANSLATED", log)
         self.assertNotIn("withdrew", log)
+
+    def test_a_clean_seed_after_data_keeps_its_words_and_becomes_an_entry(self):
+        # G is named by a data word. D, data, reads as a prologue and then a reserved word;
+        # after it U, a real function with a frame that only a pointer the analysis cannot see
+        # calls. D's discovery trace runs over U first, so U is a clean seed, not an entry. D is
+        # withdrawn; U's words stay executable and U becomes a translated entry. Only D's two
+        # words, which can only run into the reserved word, leave the spans.
+        g = TEXT
+        d = g + 24
+        u = d + 16
+        words = [PROLOGUE, 0xAFBF001C, ADDU, 0x8FBF001C, JR_RA, 0x27BD0020,
+                 PROLOGUE, RESERVED, ADDU, ADDU,
+                 PROLOGUE, 0xAFBF001C, ADDU, ADDU, 0x8FBF001C, JR_RA, 0x27BD0020]
+        module, log = translate_image(overlay_image(words, [g]))
+        self.assertNotIn("NON_CODE_TRANSLATED", log)
+        self.assertEqual({a for a, *_ in module.non_code}, {d})
+        self.assertIn(u, {a for a, _ in module.functions})
+        self.assertNotIn(u, {a for a, _ in module.stubbed})
+        self.assertEqual(module.spans, [(g, d), (d + 8, u + 28)])
 
     def test_an_entry_in_a_kept_delay_slot_keeps_its_own_body(self):
         # K, E and W are named by data words. E is the delay slot of K's `j`; E is a `j` too,
@@ -709,35 +732,37 @@ class WithdrawalRulesTest(unittest.TestCase):
 
 class ExecutableNonCodeTest(unittest.TestCase):
     def test_withdrawn_words_of_the_executable_leave_its_spans(self):
-        # A fixed-address executable whose entry calls a data seed: the seed is withdrawn,
-        # gets no body, and its words leave the spans the interpreter may run.
-        # Its body runs on past the reserved word into a return: all of it leaves.
+        # A fixed-address executable whose entry calls a data seed: the seed is withdrawn and
+        # gets no body. The words that can only run into its reserved word leave the spans the
+        # interpreter may run; the return after that word stays, as nothing proves it is data.
         base = 0x1000
         words = [jal(base + 16), 0, JR_RA, 0,
                  PROLOGUE, RESERVED, JR_RA, 0]
         rc, log, generated = run_codegen(fixed_executable(words, base))
         self.assertEqual(rc, 0, log)
-        self.assertIn("codegen: executable: withdrew 1 seeds as non-code, 4 words only they "
-                      "reach, 1 executable spans left (no relocation evidence; first reserved "
+        self.assertIn("codegen: executable: withdrew 1 seeds as non-code, 2 words proven "
+                      "non-code, 2 executable spans left (no relocation evidence; first reserved "
                       "word: reserved opcode (1))", log)
         self.assertNotIn("void f_00001010(CpuState *s) {", generated)
         self.assertIn("sr_exec_span_register(0x00001000u, 0x00001010u)", generated)
+        self.assertIn("sr_exec_span_register(0x00001018u, 0x00001020u)", generated)
         self.assertNotIn("sr_exec_span_register(0x00001000u, 0x00001020u)", generated)
 
     def test_an_extra_image_is_handled_as_the_executable_is(self):
         # An --extra-elf image without relocation evidence: its withdrawn seed gets no body,
-        # the words only it reaches leave the spans, and the summary line names the image.
+        # its words proven non-code leave the spans, and the summary line names the image.
         base, extra = 0x1000, 0x2000
         words = [JR_RA, 0]
         extra_words = [jal(extra + 16), 0, JR_RA, 0, PROLOGUE, RESERVED, JR_RA, 0]
         rc, log, generated = run_codegen(fixed_executable(words, base),
                                          [(fixed_executable(extra_words, extra), extra)])
         self.assertEqual(rc, 0, log)
-        self.assertIn("codegen: extra0.elf: withdrew 1 seeds as non-code, 4 words only they reach",
+        self.assertIn("codegen: extra0.elf: withdrew 1 seeds as non-code, 2 words proven non-code",
                       log)
         self.assertIn("void f_00002000(CpuState *s) {", generated)
         self.assertNotIn("void f_00002010(CpuState *s) {", generated)
         self.assertIn("sr_exec_span_register(0x00002000u, 0x00002010u)", generated)
+        self.assertIn("sr_exec_span_register(0x00002018u, 0x00002020u)", generated)
         self.assertNotIn("sr_exec_span_register(0x00002000u, 0x00002020u)", generated)
 
     def test_a_body_in_withdrawn_words_stops_the_build(self):
@@ -772,6 +797,207 @@ def analysis(image, **elf_args):
     return results
 
 
+def random_body_word(rng, at, size):
+    """A random word of a synthetic text of ``size`` words: ordinary words, every transfer
+    kind (branches, `b`, linked branches, `j`, `jal`, `jr`, `jalr`, syscall, `eret`) aimed in
+    and just around the text, prologues, reserved words and random words."""
+    def offset():
+        return ((TEXT + 4 * rng.randrange(-4, size + 4) - (at + 4)) >> 2) & 0xFFFF
+
+    def target():
+        return ((TEXT + 4 * rng.randrange(-4, size + 4)) >> 2) & 0x3FFFFFF
+
+    r = rng.random()
+    if r < 0.36:
+        return rng.choice([0, ADDU, 0x25080001, 0x8FB00010, 0x0000000D])
+    if r < 0.48:
+        op = rng.choice([4, 5, 6, 7, 20, 21, 22, 23])
+        rt = 0 if op in (6, 7, 22, 23) and rng.random() < 0.8 else rng.randrange(32)
+        return (op << 26) | (rng.randrange(32) << 21) | (rt << 16) | offset()
+    if r < 0.54:
+        rt = rng.choice([0, 1, 2, 3, 0x10, 0x11, 0x12, 0x13, 8])
+        return (1 << 26) | (rng.randrange(32) << 21) | (rt << 16) | offset()
+    if r < 0.58:
+        return 0x10000000 | offset()                                   # b
+    if r < 0.61:
+        return 0x04110000 | offset()                                   # bal
+    if r < 0.64:
+        return (rng.choice([0x11, 0x12]) << 26) | (8 << 21) | (rng.randrange(4) << 16) | offset()
+    if r < 0.70:
+        return (2 << 26) | target()                                    # j
+    if r < 0.76:
+        return (3 << 26) | target()                                    # jal
+    if r < 0.81:
+        return (rng.randrange(32) << 21) | 0x08                        # jr
+    if r < 0.85:
+        return (rng.randrange(32) << 21) | (rng.choice([0, 31, 5]) << 11) | 0x09   # jalr
+    if r < 0.87:
+        return 0x0000000C                                              # syscall
+    if r < 0.88:
+        return 0x42000018                                              # eret
+    if r < 0.91:
+        return PROLOGUE
+    if r < 0.93:
+        return RESERVED
+    return rng.getrandbits(32)
+
+
+def is_transfer(elf, address):
+    """Whether the word at ``address`` transfers control (a jump, branch or linked branch)."""
+    word = codegen.read32(elf, address)
+    return word is not None and (codegen.is_control(word) or word >> 26 == 1)
+
+
+def judged_body(walk, start):
+    """The body _BodyWalk.reserved judges for ``start``: the split walk, no edge into another
+    entry and nothing past the `b` idiom."""
+    seen, words, stack = set(), set(), [start]
+    while stack:
+        pc = stack.pop()
+        if pc in seen or not analyze.in_ranges(pc, walk.ranges):
+            continue
+        seen.add(pc)
+        words.add(pc)
+        slot, edges = walk.step(pc)
+        if slot is not None:
+            words.add(slot)
+        stack.extend(s for s, edge in edges if walk._follows(s, edge, False))
+    return words
+
+
+class BodyWalkDifferentialTest(unittest.TestCase):
+    """_BodyWalk restates codegen._walk_body's rules for one shared walk; this compares the two
+    over a seeded corpus of random bodies, every entry walked both ways."""
+
+    SIZE = 96
+
+    def test_the_judging_walk_agrees_with_the_generated_walk(self):
+        rng = random.Random(2564)
+        bodies = slot_transfers = 0
+        for _ in range(300):
+            words = [random_body_word(rng, TEXT + 4 * i, self.SIZE) for i in range(self.SIZE)]
+            elf = analyze.Elf(analyze.code_overlay_elf(overlay_image(words)))
+            ranges = analyze.exec_ranges(elf)
+            index = analyze.span_index(ranges)
+            known = {TEXT + 4 * i for i in range(self.SIZE) if rng.random() < 0.12} | {TEXT}
+            withdrawn = {TEXT + 4 * i for i in range(self.SIZE) if rng.random() < 0.03} - known
+            walk = analyze._BodyWalk(elf, ranges, frozenset(known | withdrawn), None)
+            evidence = analyze._non_code_evidence(elf, ranges, {})
+            verdicts = walk.reserved(sorted(known), evidence)
+            for start in sorted(known):
+                try:
+                    unsplit = codegen._walk_body(elf, start, index, known, {}, set(withdrawn),
+                                                 False, None)[0]
+                    split = codegen._walk_body(elf, start, index, known, {}, set(withdrawn),
+                                               True, None)[0]
+                except AssertionError:
+                    continue   # conflicting continuations: the generator refuses the image
+                bodies += 1
+                where = f"start 0x{start:08x}, words {[f'{w:08x}' for w in words]}"
+                # Every form of the generated body lies in the reach that protects it.
+                self.assertLessEqual(unsplit | split, walk.reach([start]), where)
+                judged = judged_body(walk, start)
+                if not judged <= split:
+                    # The one known difference: a branch lands on a delay slot that holds a
+                    # transfer, which the judging walk steps and the generated walk does not.
+                    # The emitter refuses every such body, so it is a stub either way.
+                    slot_transfers += 1
+                    self.assertTrue(any(is_transfer(elf, a) and is_transfer(elf, a + 4)
+                                        for a in split), where)
+                    with self.assertRaises(codegen.Unsupported, msg=where), \
+                            contextlib.redirect_stderr(io.StringIO()):
+                        codegen.emit_function(elf, start, ranges, known,
+                                              dispatch_boundaries=set(withdrawn))
+                if start in verdicts:
+                    # A body judged to hold a reserved word is one the emitter refuses.
+                    with self.assertRaises(codegen.Unsupported, msg=where), \
+                            contextlib.redirect_stderr(io.StringIO()):
+                        codegen.emit_function(elf, start, ranges, known,
+                                              dispatch_boundaries=set(withdrawn))
+        self.assertGreater(bodies, 3000)
+        self.assertGreater(slot_transfers, 0)
+
+    def test_a_transfer_in_a_delay_slot_is_the_known_difference(self):
+        # A branch lands on its own delay slot, which holds a `b` to a reserved word. The
+        # judging walk steps the slot and reaches the word; the generated walk keeps the slot
+        # as a delay slot only. The emitter refuses the body for the transfer in the slot.
+        words = [branch(4, 4, 0, TEXT, TEXT + 4), branch(4, 0, 0, TEXT + 4, TEXT + 16),
+                 JR_RA, 0, RESERVED]
+        elf = analyze.Elf(analyze.code_overlay_elf(overlay_image(words)))
+        ranges = analyze.exec_ranges(elf)
+        walk = analyze._BodyWalk(elf, ranges, frozenset({TEXT}), None)
+        split = codegen._walk_body(elf, TEXT, analyze.span_index(ranges), {TEXT}, {}, set(),
+                                   True, None)[0]
+        self.assertIn(TEXT + 16, judged_body(walk, TEXT))
+        self.assertNotIn(TEXT + 16, split)
+        with self.assertRaises(codegen.Unsupported) as refused, \
+                contextlib.redirect_stderr(io.StringIO()):
+            codegen.emit_function(elf, TEXT, ranges, {TEXT})
+        self.assertIn("control in delay slot", str(refused.exception))
+
+
+def generated_digest(image, base):
+    """sha256 over the name and bytes of every file codegen.main writes for ``image`` (written
+    as guest.elf, generating guest_recomp.c at ``--base=<base>`` with no title profile)."""
+    digest = hashlib.sha256()
+    with tempfile.TemporaryDirectory() as tmp:
+        work = pathlib.Path(tmp)
+        (work / "guest.elf").write_bytes(image)
+        cwd = os.getcwd()
+        environment = {key: os.environ.pop(key) for key in
+                       ("TITLE_EXTRA_SPANS", "HST_EXTRA_SPANS", "GAME_BASE") if key in os.environ}
+        os.chdir(work)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                rc = codegen.main(["codegen.py", "guest.elf", "guest_recomp.c", f"--base={base}",
+                                   "--profile=none"])
+        finally:
+            os.chdir(cwd)
+            os.environ.update(environment)
+        assert rc == 0, rc
+        for path in sorted(p for p in work.iterdir() if p.name != "guest.elf"):
+            digest.update(path.name.encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def every_path_runs_into_a_reserved_word(elf, start):
+    """True when every path the CPU could take from ``start`` executes a reserved word: none
+    leaves the image, stops at a return, `jr`, syscall or `eret`, or loops for ever without one.
+    A call is taken to return. Unlike the analysis no entry ends a path, and nothing runs on past
+    the `b` idiom."""
+    walk = analyze._BodyWalk(elf, analyze.exec_ranges(elf), frozenset(), None)
+
+    def reserved(address):
+        raw = elf.read_at_vaddr(address, 4)
+        return bool(raw) and len(raw) == 4 and bool(
+            analyze.reserved_encoding(int.from_bytes(raw, "little")))
+
+    state, stack = {}, [(start, None)]   # 1: on the current path, 2: every path from it is doomed
+    while stack:
+        pc, successors = stack.pop()
+        if successors is None:
+            if state.get(pc) == 2 or reserved(pc):
+                state[pc] = 2
+                continue
+            if state.get(pc) == 1 or not analyze.in_ranges(pc, walk.ranges):
+                return False                 # a loop without a reserved word, or out of the image
+            slot, edges = walk.step(pc)
+            if slot is not None and reserved(slot):
+                state[pc] = 2
+                continue
+            successors = [s for s, edge in edges if edge != analyze._BODY_AFTER_B]
+            if not successors:
+                return False                 # a return, `jr`, syscall, `eret` or a jump out
+            state[pc] = 1
+        if successors:
+            stack.append((pc, successors[1:]))
+            stack.append((successors[0], None))
+        else:
+            state[pc] = 2
+    return True
+
+
 class PublicFixtureTest(unittest.TestCase):
     """The withdrawal on the code of the public, source-owned guests (fixtures/*/generate.py)."""
 
@@ -782,6 +1008,31 @@ class PublicFixtureTest(unittest.TestCase):
         if "frames" in generator.build_text_segment.__code__.co_varnames:
             return generator.build_text_segment(generator.DEFAULT_FRAMES)
         return generator.build_text_segment()
+
+    # sha256 over the name and bytes of every file codegen writes for each guest, as a PRX with
+    # its relocation map (base 0x08804000) and as its code alone in a fixed-address executable,
+    # computed on main 8b769e1c6 before this change. Neither image has data in its code, so the
+    # withdrawal must leave every byte as it was. A change to code generation on main that moves
+    # these on purpose recomputes them there (generated_digest on that commit).
+    MAIN_DIGESTS = {
+        ("cosim", "prx"): "bee3adc3e5eae434f8f847c5d01653496d026cbdfd471295640d72097415ac47",
+        ("cosim", "exec"): "f351d09338aace3c3b367509a717cd4246d4d735c1d8a78c90c49b0df37f4430",
+        ("display_smoke", "prx"): "1da0e0efdf775dff837b3198dea52a8aa7935f30b025a3e73b3c932710456b3d",
+        ("display_smoke", "exec"): "5147b3e75ae67fd626117c140fab2b0be5b0e284e918fd814847eda530f90607",
+        ("production_smoke", "prx"): "0b579f0cbb5a73ede2896d262891779005bbd3697700d1ae7af0f8007f9cea8d",
+        ("production_smoke", "exec"): "acbdb8137bd7571cb89a9e869887a5a0b23358bf2d2d66cc31debf08d2871cfe",
+        ("snapshot", "prx"): "de84e29d48cb0dc50af0e01b629164536e0891d9c92dbd9dfd41c7c8e9c91d17",
+        ("snapshot", "exec"): "690e7881258920bc57859594e9b8a1c119fbc830ac9466a849a55f40504e4fb2",
+    }
+
+    def test_generated_output_is_byte_identical_to_main(self):
+        for name in self.GUESTS:
+            generator = fixture_generator(name)
+            images = (("prx", generator.build_prx(), f"0x{self.LOAD:08x}"),
+                      ("exec", fixed_executable((), self.LOAD, self.text(generator)), "0"))
+            for kind, image, base in images:
+                with self.subTest(name=name, image=kind):
+                    self.assertEqual(generated_digest(image, base), self.MAIN_DIGESTS[(name, kind)])
 
     def test_a_module_with_relocations_is_untouched(self):
         # Each guest as its loader sees it, a PRX with its relocation map: analysed exactly
@@ -819,6 +1070,36 @@ class PublicFixtureTest(unittest.TestCase):
                     body = codegen.function_flow(elf, lost, analyze.exec_ranges(elf), set(before))[0]
                     self.assertTrue(any(analyze.reserved_encoding(codegen.read32(elf, a))
                                         for a in body), hex(lost))
+
+    def test_code_after_data_stays_executable(self):
+        # Each guest's code after a data block (a reserved word, then random words), with the
+        # image's entry point on the data's first word. Every word executable without the
+        # withdrawal stays executable unless every path from it runs into a reserved word, so
+        # no word of the guest's code leaves the spans, and no entry in the code is lost.
+        rng = random.Random(1)
+        data = struct.pack("<I", RESERVED) + b"".join(
+            struct.pack("<I", rng.getrandbits(32)) for _ in range(2000))
+        for name in self.GUESTS:
+            with self.subTest(name):
+                text = self.text(fixture_generator(name))
+                image = fixed_executable((), self.LOAD, data + text)
+                (entries, spans, report), (before, before_spans, _) = analysis(image, base=0)
+                code = set(range(self.LOAD + len(data), self.LOAD + len(data) + len(text), 4))
+
+                def words(ranges):
+                    return {a for lo, hi in ranges for a in range(lo, hi, 4)}
+
+                self.assertTrue(report["non_code"])
+                self.assertFalse(code & report["non_code_words"])
+                self.assertLessEqual(code, words(spans))
+                self.assertLessEqual(words(before_spans) - report["non_code_words"], words(spans))
+                self.assertLessEqual({a for a in before if a in code}, set(entries))
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = os.path.join(tmp, "guest.elf")
+                    pathlib.Path(path).write_bytes(image)
+                    elf = analyze.Elf(path, base=0)
+                for word in report["non_code_words"]:
+                    self.assertTrue(every_path_runs_into_a_reserved_word(elf, word), hex(word))
 
     def test_a_module_with_an_empty_relocation_map_is_judged_as_an_executable(self):
         # A PRX whose loader finds no relocation has no address evidence either: placed at

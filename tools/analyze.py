@@ -1945,7 +1945,7 @@ class _Discovery:
         # as non-code, never a seed or a call target, and the words a seed's evidence may not
         # come from. Both stay empty for every other image.
         self.non_code = frozenset()
-        self.void = frozenset()
+        self.shadow = frozenset()
 
     def trace_ranges_for_entry(self, entry):
         ranges = self.ranges
@@ -2058,7 +2058,7 @@ def _seed_entry_point(d):
 
 
 def _seed_prologues_and_terminators(d):
-    elf, ranges, noisy, void = d.elf, d.ranges, d.noisy, d.void
+    elf, ranges, noisy, shadow = d.elf, d.ranges, d.noisy, d.shadow
     # Build a file-offset -> vaddr lookup from PT_LOAD segments (needed because
     # the raw file's byte offset differs from the guest virtual address for PRX/rebased ELFs).
     # If no PT_LOAD segment covers a given file offset, the address is skipped.
@@ -2074,7 +2074,7 @@ def _seed_prologues_and_terminators(d):
     for i in range(0, len(data) - 4, 4):
         w = int.from_bytes(data[i:i+4], 'little')
         va = file_to_vaddr(i)
-        if va is None or va in void:  # a withdrawn word is no evidence (_non_code_entries)
+        if va is None or va in shadow:  # no evidence where only withdrawn code reaches (_non_code_entries)
             continue
         # addiu sp, sp, -X (0x27bdXXXX where XXXX is negative)
         if (w >> 16) == 0x27BD and (w & 0x8000) and (va & 3) == 0:
@@ -2216,13 +2216,13 @@ def _seed_computed_goto_pads(d):
     # A computed `jr` whose target set the code bounds (an `andi` mask applied to a
     # materialized base) lands only on those pads; each one needs a dispatch entry. The
     # evidence is code in the text, so a withdrawn word takes no part (_non_code_entries).
-    d.hc.update(bounded_computed_goto_targets(d.elf, spans_without(d.ranges, d.void)))
+    d.hc.update(bounded_computed_goto_targets(d.elf, spans_without(d.ranges, d.shadow)))
 
 
 def _seed_address_materializations(d):
     elf, ranges, file_exec_ranges = d.elf, d.ranges, d.file_exec_ranges
     relocated, jumps, hc, noisy, jtails = d.relocated, d.jumps, d.hc, d.noisy, d.jtails
-    cfg_gate, in_text, void = d.cfg_gate, d.in_text, d.void
+    cfg_gate, in_text, shadow = d.cfg_gate, d.in_text, d.shadow
     # Sweep executable sections for weaker "block boundary" signals and possible indirect
     # targets. Direct JAL targets are collected by trace_function only after their source
     # instruction is reached; a linear sweep can mistake data inside .text for a call.
@@ -2258,9 +2258,9 @@ def _seed_address_materializations(d):
         for off in range(0, len(blob) - 3, 4):
             word = int.from_bytes(blob[off:off + 4], 'little')
             addr = lo + off
-            if addr in void:
-                # A word withdrawn as non-code is no evidence and ends a straight-line run
-                # (_non_code_entries). The set is empty for every other image.
+            if addr in shadow:
+                # A word only withdrawn code reaches is no evidence and ends a straight-line run
+                # (_non_code_entries: the shadow). The set is empty for every other image.
                 hireg, clear_at, before_slot = {}, None, None
                 continue
             if clear_at is not None and addr == clear_at - 4:
@@ -2977,19 +2977,19 @@ def _analyze(elf, extra_spans, cfg_gate, trace_memo, report, entry_hints,
     # `floor` is the owned spans of the same analysis without seeds; `unproven`, a dict, receives
     # why a seed added off that floor is not proven an entry.
     # `report` also receives non_code ({withdrawn address: (first reserved word, why)}) and
-    # non_code_words, the words only withdrawn code reaches: both empty unless the image has
+    # non_code_words, the words proven non-code (the void): both empty unless the image has
     # no relocation evidence (_non_code_entries).
-    non_code, void, kept, evidence_cache = {}, frozenset(), frozenset(), {}
+    non_code, void, shadow, kept, evidence_cache = {}, frozenset(), frozenset(), frozenset(), {}
     while True:
         d, structural, code_candidates, materialized_code_work = _discover(
             elf, extra_spans, cfg_gate, trace_memo, entry_hints, mixed_code_data, seeds,
-            unusable, floor, unproven, entries, non_code, void, kept)
+            unusable, floor, unproven, entries, non_code, shadow, kept)
         if d.relocated is not None:
             break
         # Termination: every pass that continues adds at least one address to `non_code`,
         # which only grows and holds addresses of this image's code ranges, a finite set.
         # No pass limit is needed or applied.
-        found, void = _non_code_entries(d, structural, evidence_cache)
+        found, void, shadow = _non_code_entries(d, structural, evidence_cache)
         if not found:
             break
         non_code.update(found)
@@ -3007,7 +3007,7 @@ def _analyze(elf, extra_spans, cfg_gate, trace_memo, report, entry_hints,
 
 
 def _discover(elf, extra_spans, cfg_gate, trace_memo, entry_hints, mixed_code_data, seeds,
-              unusable, floor, unproven, entries, non_code, void, kept=frozenset()):
+              unusable, floor, unproven, entries, non_code, shadow, kept=frozenset()):
     """One discovery of the image with the given withdrawals: (state, structural seeds,
     code_candidates, materialized_code_work). The structural seeds are the ones the image's
     format names (entry point, exports and the init array, import stubs) and the ones a run
@@ -3017,7 +3017,7 @@ def _discover(elf, extra_spans, cfg_gate, trace_memo, entry_hints, mixed_code_da
     not withdrawn: they stay entries, but not structural ones."""
     d = _Discovery(elf, extra_spans, cfg_gate, trace_memo)
     d.non_code = frozenset(non_code)
-    d.void = frozenset(void)
+    d.shadow = frozenset(shadow)
     _seed_entry_point(d)
     _seed_prologues_and_terminators(d)
     _seed_module_exports(d)
@@ -3167,6 +3167,46 @@ class _BodyWalk:
             stack.extend(s for s, edge in edges if s not in seen and self._follows(s, edge, True))
         return words
 
+    def doomed(self, starts, evidence):
+        """The words of the reach of ``starts`` from which every path runs into a word of
+        ``evidence``: no path returns, leaves the ranges, stops at a `jr`, syscall or `eret`,
+        enters another entry along a fall-through, call return or `j`, or loops for ever
+        without one. Such a word can never run as part of working code. A delay slot is doomed
+        with its transfer when it is not also reached as a word of its own."""
+        seen, stack, nodes = set(), list(starts), {}
+        while stack:
+            pc = stack.pop()
+            if pc in seen or not in_ranges(pc, self.ranges):
+                continue
+            seen.add(pc)
+            slot, edges = self.step(pc)
+            followed = [s for s, edge in edges if self._follows(s, edge, True)]
+            leaves = len(followed) < len(edges) or any(not in_ranges(s, self.ranges) for s in followed)
+            nodes[pc] = (slot, followed, leaves)
+            stack.extend(s for s in followed if s not in seen)
+        doomed, pending, back = set(), {}, {}
+        wave = []
+        for pc, (slot, followed, leaves) in nodes.items():
+            if pc in evidence or (slot is not None and slot in evidence):
+                doomed.add(pc)
+                wave.append(pc)
+            elif followed and not leaves:
+                pending[pc] = len(set(followed))
+                for s in set(followed):
+                    back.setdefault(s, []).append(pc)
+        while wave:
+            for previous in back.get(wave.pop(), ()):
+                if previous in doomed:
+                    continue
+                pending[previous] -= 1
+                if pending[previous] == 0:
+                    doomed.add(previous)
+                    wave.append(previous)
+        words = set(doomed)
+        words.update(nodes[pc][0] for pc in doomed
+                     if nodes[pc][0] is not None and nodes[pc][0] not in nodes)
+        return words
+
     def reserved(self, starts, evidence):
         """{start: (address, why)} for each of ``starts`` whose body holds a word of
         ``evidence``, naming the lowest such word. The body is the split walk's (no edge
@@ -3205,8 +3245,8 @@ class _BodyWalk:
 
 
 def _non_code_entries(d, structural, evidence_cache=None):
-    """({candidate to withdraw: (lowest reserved word its body holds, why)}, the words only
-    withdrawn code reaches).
+    """({candidate to withdraw: (lowest reserved word its body holds, why)}, the void, the
+    shadow).
 
     The candidates are every seed and call target of this discovery that its structure does
     not name, whether or not it became an entry: a weak seed that a withdrawn body covered
@@ -3217,15 +3257,19 @@ def _non_code_entries(d, structural, evidence_cache=None):
     - a candidate whose body holds a reserved word is withdrawn, unless a body that stays may
       own it (it lies in that body's reach): code generation could not have translated its
       body, so the withdrawal takes no translation away;
-    - an entry the structure names, and every entry whose body holds no reserved word, stays.
+    - an entry the structure names, and every candidate or entry whose body holds no reserved
+      word, stays, and its reach is owned.
 
-    No verdict depends on another, nor on the order of the walks (_entry_order). The void is
-    what the bodies of withdrawn addresses reach and no body that stays may own. An image whose
-    code holds no reserved word has nothing to withdraw and is not walked."""
+    No verdict depends on another, nor on the order of the walks (_entry_order). The shadow is
+    what withdrawn bodies reach and no body that stays may own: the next discovery takes no
+    evidence and seeds no gap there. The void is the part of the shadow from which every path runs
+    into a reserved word (_BodyWalk.doomed): proven never to run as working code, it leaves the
+    executable spans. The rest of the shadow stays executable, as it was before the withdrawal.
+    An image whose code holds no reserved word has nothing to withdraw and is not walked."""
     spans = sorted({*d.ranges, *d.file_exec_ranges, *d.proven_spans})
     evidence = _non_code_evidence(d.elf, spans, {} if evidence_cache is None else evidence_cache)
     if not evidence:
-        return {}, frozenset()
+        return {}, frozenset(), frozenset()
     candidates = {a for a in d.functions | d.hc | d.noisy | d.jtails | d.calls
                   if (a & 3) == 0 and a not in structural and d.callable_target(a)}
     boundaries = frozenset(d.functions) | d.non_code
@@ -3237,17 +3281,23 @@ def _non_code_entries(d, structural, evidence_cache=None):
     for ranges, starts in groups.items():
         found_here = walks[ranges].reserved(starts, evidence)
         hits.update(found_here)
+        # Every clean body stays, an entry's or not: a clean seed that a data body's trace ran
+        # over first is not an entry yet, and becomes one once that body is withdrawn.
         reached |= walks[ranges].reach(
-            [a for a in starts if a in d.functions and (a in structural or a not in found_here)])
+            [a for a in starts
+             if a not in d.non_code and (a in structural or a not in found_here)])
     found = {a: hits[a] for a in sorted(candidates) if a in hits and a not in reached}
-    # The void excludes the reach of every entry that stays, not only the clean ones: an entry
-    # kept because another body holds its word (as a delay slot, say) still has a generated
-    # body, a stub's walk included, and that body may run on into a withdrawn word.
-    void, owned = set(), set()
+    # The void excludes the reach of every body that stays: every clean one (above), and every
+    # entry not withdrawn, hits included: an entry kept because another body holds its word (as
+    # a delay slot, say) still has a generated body, a stub's walk included, and that body may
+    # run on into a withdrawn word.
+    void, shadow, owned = set(), set(), set(reached)
     for ranges, starts in groups.items():
-        void |= walks[ranges].reach([a for a in starts if a in found or a in d.non_code])
+        withdrawn = [a for a in starts if a in found or a in d.non_code]
+        shadow |= walks[ranges].reach(withdrawn)
+        void |= walks[ranges].doomed(withdrawn, evidence)
         owned |= walks[ranges].reach([a for a in starts if a in d.functions and a not in found])
-    return found, frozenset(void - owned)
+    return found, frozenset(void - owned), frozenset(shadow - owned)
 
 
 def _entry_order(entries):

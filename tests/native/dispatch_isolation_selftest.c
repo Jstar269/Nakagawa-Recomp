@@ -1281,6 +1281,97 @@ static void test_nested_call_ra_zero_cannot_return_from_the_interpreter_floor(vo
     sr_exec_span_reset();
 }
 
+/* The executable's spans, registered out of order and overlapping (the primary image and
+ * extra images each register their own, and withdrawn words split them), are searched as a
+ * sorted set: every word is owned exactly when some span holds its whole fetch slot, and a
+ * word that is not owned is a fetch boundary exactly when some span has start <= pc <= end.
+ * A seeded random set checks the same against a linear oracle. */
+#define EXEC_SPAN_BASE 0x00700000u
+typedef struct { uint32_t start, end; } ExecSpanCase;
+
+static void exec_span_oracle(const ExecSpanCase *spans, size_t count, uint32_t pc,
+                             int *owned, int *touched) {
+    *owned = 0;
+    *touched = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (pc >= spans[i].start && pc <= spans[i].end) {
+            *touched = 1;
+            if (pc < spans[i].end && spans[i].end - pc >= 4u) *owned = 1;
+        }
+    }
+}
+
+static void check_exec_spans(const ExecSpanCase *spans, size_t count, uint32_t lo, uint32_t hi,
+                             const char *what) {
+    sr_exec_span_reset();
+    for (size_t i = 0; i < count; i++)
+        CHECK(sr_exec_span_register(spans[i].start, spans[i].end),
+              "%s: span %zu [0x%08x, 0x%08x) registers", what, i, spans[i].start, spans[i].end);
+    int wrong = 0;
+    for (uint32_t pc = lo; pc < hi && wrong < 4; pc += 4u) {
+        int owned, touched;
+        exec_span_oracle(spans, count, pc, &owned, &touched);
+        if (sr_exec_span_owns_fetch(pc) != owned) {
+            CHECK(0, "%s: 0x%08x owned %d, expected %d", what, pc, !owned, owned);
+            wrong++;
+            continue;
+        }
+        if (owned) continue;
+        SrGuestInterpFault fault;
+        CpuState state = reject_state();
+        SrGuestInterpResult result = sr_guest_interp_run(&state, pc, &fault);
+        SrGuestInterpResult expected =
+            touched ? SR_GUEST_INTERP_FETCH_BOUNDARY : SR_GUEST_INTERP_NOT_EXECUTABLE;
+        if (result != expected) {
+            CHECK(0, "%s: interpreter fetch at 0x%08x returned %s, expected %s", what, pc,
+                  sr_guest_interp_result_name(result), sr_guest_interp_result_name(expected));
+            wrong++;
+        }
+    }
+    sr_exec_span_reset();
+}
+
+static void test_executable_spans_are_searched(void) {
+    const uint32_t b = EXEC_SPAN_BASE;
+    /* Out of order; nested; overlapping; one sharing a start; an exact duplicate; one whose
+     * end cuts its last word (end - pc < 4); gaps between. */
+    const ExecSpanCase fixed[9] = {
+        { b + 0x200u, b + 0x240u }, { b + 0x000u, b + 0x100u }, { b + 0x020u, b + 0x040u },
+        { b + 0x0f0u, b + 0x180u }, { b + 0x200u, b + 0x210u }, { b + 0x300u, b + 0x306u },
+        { b + 0x000u, b + 0x100u }, { b + 0x400u, b + 0x404u }, { b + 0x180u, b + 0x1a0u },
+    };
+    check_exec_spans(fixed, 9u, b - 0x20u, b + 0x440u, "fixed set");
+
+    /* A long earlier span must still be found behind many later, shorter ones. */
+    static ExecSpanCase shadowed[66];
+    shadowed[0].start = b;
+    shadowed[0].end = b + 0x1000u;
+    for (size_t i = 1; i < 66; i++) {
+        shadowed[i].start = b + 0x1100u + 0x10u * (uint32_t)(65u - i);
+        shadowed[i].end = shadowed[i].start + 8u;
+    }
+    shadowed[65].start = b + 0x10u;   /* a short span inside the long one */
+    shadowed[65].end = b + 0x18u;
+    check_exec_spans(shadowed, 66u, b - 0x10u, b + 0x1520u, "a long span behind short ones");
+
+    static ExecSpanCase random_set[200];
+    uint32_t x = 0x2564u;
+    for (unsigned round = 0; round < 8u; round++) {
+        size_t count = 2u + (size_t)(round * 25u);
+        for (size_t i = 0; i < count; i++) {
+            x = x * 1103515245u + 12345u;
+            uint32_t start = b + ((x >> 8) % 0x400u) * 4u;
+            x = x * 1103515245u + 12345u;
+            uint32_t length = 1u + (x >> 8) % ((round & 1u) ? 0x40u : 0x200u);
+            random_set[i].start = start;
+            random_set[i].end = start + length;
+        }
+        char what[32];
+        snprintf(what, sizeof what, "random set %u", round);
+        check_exec_spans(random_set, count, b - 0x10u, b + 0x1a00u, what);
+    }
+}
+
 static void test_interpreter_rejects_unowned_and_invalid_fetches(void) {
     SrGuestInterpFault fault;
     CpuState s;
@@ -2685,6 +2776,7 @@ int main(int argc, char **argv) {
     test_runtime_module_binding_is_the_authority_for_its_range();
     test_runtime_module_non_code_is_named();
     test_runtime_module_spans_are_searched();
+    test_executable_spans_are_searched();
     test_code_overlays_follow_guest_memory();
     test_mixed_overlay_is_identified_by_its_code_ranges();
     test_late_import_retirement_is_visible_after_warm_dispatch();

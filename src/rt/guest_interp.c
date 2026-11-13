@@ -192,7 +192,13 @@ typedef struct SrExecSpan {
     uint32_t end;
 } SrExecSpan;
 
+/* Sorted by start, then end. s_exec_span_reach[i] is the largest end of spans 0..i, so a
+ * lookup walks back from the last span starting at or below a PC only while an earlier span
+ * can still reach it: spans may come in any order and overlap (the primary image and each
+ * extra module register their own), and a lookup stays a binary search however many spans
+ * an image's withdrawn words split it into. */
 static SrExecSpan *s_exec_spans;
+static uint32_t *s_exec_span_reach;
 static size_t s_exec_span_count;
 static size_t s_exec_span_capacity;
 
@@ -214,7 +220,9 @@ static size_t s_exec_span_capacity;
  * neither tier. */
 void sr_exec_span_reset(void) {
     free(s_exec_spans);
+    free(s_exec_span_reach);
     s_exec_spans = NULL;
+    s_exec_span_reach = NULL;
     s_exec_span_count = 0;
     s_exec_span_capacity = 0;
 }
@@ -241,13 +249,63 @@ int sr_exec_span_register(uint32_t start, uint32_t end) {
             return 0;
         }
         s_exec_spans = next;
+        uint32_t *next_reach = realloc(s_exec_span_reach, next_capacity * sizeof(*next_reach));
+        if (!next_reach) {
+            return 0;
+        }
+        s_exec_span_reach = next_reach;
         s_exec_span_capacity = next_capacity;
     }
 
-    s_exec_spans[s_exec_span_count].start = start;
-    s_exec_spans[s_exec_span_count].end = end;
+    size_t at = s_exec_span_count;
+    while (at > 0u && (s_exec_spans[at - 1u].start > start ||
+                       (s_exec_spans[at - 1u].start == start && s_exec_spans[at - 1u].end > end))) {
+        s_exec_spans[at] = s_exec_spans[at - 1u];
+        at--;
+    }
+    s_exec_spans[at].start = start;
+    s_exec_spans[at].end = end;
     s_exec_span_count++;
+    for (size_t i = at; i < s_exec_span_count; i++) {
+        uint32_t before = i == 0u ? 0u : s_exec_span_reach[i - 1u];
+        s_exec_span_reach[i] = s_exec_spans[i].end > before ? s_exec_spans[i].end : before;
+    }
     return 1;
+}
+
+/* 1 when a registered span holds the complete four-byte fetch slot at `pc`. `touches`, when
+ * not NULL, receives whether some span has start <= pc <= end (a fetch at a span's end is a
+ * boundary fault, not an unowned address). */
+static int exec_span_find(uint32_t pc, int *touches) {
+    size_t lo = 0u, hi = s_exec_span_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2u;
+        if (s_exec_spans[mid].start <= pc) {
+            lo = mid + 1u;
+        } else {
+            hi = mid;
+        }
+    }
+    int touched = 0;
+    for (size_t i = lo; i-- > 0u;) {
+        if (s_exec_span_reach[i] < pc) {
+            break;
+        }
+        const SrExecSpan *span = &s_exec_spans[i];
+        if (pc <= span->end) {
+            touched = 1;
+            if (pc < span->end && span->end - pc >= 4u) {
+                if (touches) {
+                    *touches = 1;
+                }
+                return 1;
+            }
+        }
+    }
+    if (touches) {
+        *touches = touched;
+    }
+    return 0;
 }
 
 static _Atomic(uint32_t) s_module_bound_count;
@@ -276,13 +334,7 @@ int sr_exec_span_owns_fetch(uint32_t pc) {
         const SrExecSpan *span = &s_exec_spans[0];
         return (pc >= span->start && pc < span->end && (span->end - pc) >= 4u) ? 1 : 0;
     }
-    for (size_t i = 0; i < s_exec_span_count; i++) {
-        const SrExecSpan *span = &s_exec_spans[i];
-        if (pc >= span->start && pc < span->end && span->end - pc >= 4u) {
-            return 1;
-        }
-    }
-    return 0;
+    return exec_span_find(pc, NULL);
 }
 
 /* ---- Runtime-placed guest modules (issue #704) ------------------------------
@@ -748,20 +800,13 @@ static SrGuestInterpResult fetch_instruction(
     }
 
     int touches_span_boundary = 0;
-    for (size_t i = 0; i < s_exec_span_count; i++) {
-        const SrExecSpan *span = &s_exec_spans[i];
-        if (pc < span->start || pc > span->end) {
-            continue;
+    if (exec_span_find(pc, &touches_span_boundary)) {
+        if (!sr_inrange_n(pc, 4u)) {
+            set_fault(fault, pc, 0u, pc, 0);
+            return SR_GUEST_INTERP_MEMORY_FAULT;
         }
-        touches_span_boundary = 1;
-        if (pc < span->end && span->end - pc >= 4u) {
-            if (!sr_inrange_n(pc, 4u)) {
-                set_fault(fault, pc, 0u, pc, 0);
-                return SR_GUEST_INTERP_MEMORY_FAULT;
-            }
-            *opcode = MEM_R32(pc);
-            return SR_GUEST_INTERP_AOT_HANDOFF;
-        }
+        *opcode = MEM_R32(pc);
+        return SR_GUEST_INTERP_AOT_HANDOFF;
     }
 
     set_fault(fault, pc, 0u, pc, 0);
