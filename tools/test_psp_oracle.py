@@ -3021,6 +3021,17 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         self.assertIn("out[13] = reported_w;", csc)
         self.assertIn("out[14] = reported_h;", csc)
         self.assertLess(csc.index("geometry_ok"), csc.index("VCW_OP_CSCAVC"))
+        # Boot 149: type 1's Open is refused while its Init and SetMemory succeed. Its cells run after
+        # both decode contexts, and every teardown deletes a context once Open, Init or SetMemory
+        # succeeded, so no initialised context outlives its cell.
+        cases = list(spec.semantic_cases)
+        self.assertLess(cases.index("vc-t0-delete"), cases.index("vc-d480-input"))
+        self.assertLess(cases.index("vc-d464-delete"), cases.index("vc-t1-open-c0"))
+        self.assertLess(cases.index("vc-t1-delete"), cases.index("vc-ac-1000"))
+        teardown = section[section.index("static void vcw_teardown("):section.index("/* ---- item 1:")]
+        self.assertIn("const int wanted[3] = {stop_ok, edram_ok, delete_ok};", teardown)
+        self.assertEqual(section.count("ok[0] || ok[2] || ok[3]);"), 2)
+        self.assertNotIn("ok[1], ok[0]);", section)
 
     def test_vcodec_csc_geometry_fail_record_keeps_raw_dimensions_without_a_return_value(self) -> None:
         meta = META.format(source="psp", model="synthetic", firmware="test",
