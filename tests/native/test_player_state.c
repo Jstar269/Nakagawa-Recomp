@@ -11083,6 +11083,103 @@ static void test_add_to_steam_outcomes(void) {
     free(app);
 }
 
+/* Room on the launch line and in the report (src/rt/ace.h ACE_SPEC_MAX, ACE_REPORT_MAX): an Ace
+ * line with every part at its longest value, built by the player into the launcher's field, reaches
+ * the runtime's parser whole and parses back to itself; eight more keys of its average length still
+ * pass the runtime's length check; a field one byte short is refused whole, never cut; and the
+ * player reads a report as long as the runtime may write. No key is named, so a new part changes no
+ * line here. */
+static void test_play_mode_line_room(void) {
+    char line[sizeof(((NkRuntimeConfig *)0)->ace_spec)], more[2u * ACE_SPEC_MAX], back[ACE_SPEC_MAX], why[64];
+    PlayerSettings settings;
+    PlayerPlayResolved r;
+    AceConfig c;
+    assert(sizeof(line) == ACE_SPEC_MAX);
+    player_app_settings_init_default(&settings);
+    PlayerTitlePlay *own = &settings.title_play[0];                 /* Ace is a title's own choice */
+    memset(own, 0, sizeof(*own));
+    memcpy(own->key, "TEST93002", sizeof("TEST93002"));
+    own->mode = PLAYER_PLAY_ACE;
+    for (int p = 0; p < PLAYER_PART_COUNT; p++) own->part[p] = -1;
+    own->logic_60 = -1;
+    settings.title_play_count = 1;
+    player_play_resolve(&settings, "TEST93002", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE);
+    r.stick_counts = ACE_STICK_COUNTS_MAX;
+    for (int p = 0; p < PLAYER_PART_COUNT; p++) {   /* each part at the value with the longest line */
+        const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+        int best = r.part[p];
+        size_t best_len = 0;
+        for (int i = 0; i < info->value_count; i++) {
+            r.part[p] = info->values[i];
+            if (player_play_launch_line(&r, line, sizeof(line)) && strlen(line) > best_len) {
+                best_len = strlen(line);
+                best = info->values[i];
+            }
+        }
+        r.part[p] = best;
+    }
+    assert(player_play_launch_line(&r, line, sizeof(line)));
+    if (ace_parse(line, &c, why, sizeof(why)) != 1 || !ace_format(&c, back, sizeof(back)) ||
+        strcmp(back, line) != 0) {
+        fprintf(stderr, "the runtime does not read the player's longest line '%s' back (%s)\n", line, why);
+        assert(!"the longest line round trips");
+    }
+    const size_t n = strlen(line);
+    size_t keys = 0;
+    for (const char *s = line; (s = strchr(s, ';')) != NULL; s++) keys++;
+    const size_t avg = (n - strlen("v1") + keys - 1u) / keys;
+    size_t used = (size_t)snprintf(more, sizeof(more), "%s", line);
+    for (int k = 0; k < 8 && avg > strlen(";k0="); k++)
+        used += (size_t)snprintf(more + used, sizeof(more) - used, ";k%d=%.*s", k,
+                                 (int)(avg - strlen(";k0=")), "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
+    why[0] = '\0';
+    if (used >= sizeof(line) || ace_parse(more, &c, why, sizeof(why)) != 0 || strcmp(why, "unknown key") != 0) {
+        fprintf(stderr, "the player's longest line (%zu characters) and eight more keys of %zu (%zu) do not fit "
+                        "the launcher's field of %zu bytes (%s)\n", n, avg, used, sizeof(line), why);
+        assert(!"eight more keys fit the launch line");
+    }
+    memset(back, 'x', sizeof(back));
+    assert(!player_play_launch_line(&r, back, n) && back[0] == '\0');   /* one byte short: refused whole */
+    assert(player_play_launch_line(&r, back, n + 1u) && strcmp(back, line) == 0);
+
+    /* The report: a valid report padded at the front to the longest the runtime writes
+       (ACE_REPORT_MAX - 1 bytes), so its content sits at the end as a long report's does, is read;
+       one byte more is refused. */
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], dir[760], report[800], out[256];
+    static const char k_report[] =
+        "{\n  \"schema\": 1,\n  \"spec\": \"v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;"
+        "smooth=off;sas=off;tess=off;twin=off\",\n  \"effective\": {\"af\": 16, \"text\": true},\n"
+        "  \"rate\": {\"dominant\": \"30 Hz\"}\n}";
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_line_room_probe", cache_root, sep);
+    snprintf(dir, sizeof(dir), "%s%cace", root, sep);
+    assert(nk_platform_mkdir_p(dir));
+    assert(player_ace_report_path(root, "TEST93002", report, sizeof(report)));
+    char *big = (char *)malloc(ACE_REPORT_MAX + 1u);
+    assert(big != NULL);
+    memset(big, ' ', ACE_REPORT_MAX + 1u);
+    memcpy(big + ACE_REPORT_MAX - 1u - strlen(k_report), k_report, strlen(k_report) + 1u);
+    assert(strlen(big) == ACE_REPORT_MAX - 1u);
+    write_text_file(report, big);
+    if (!player_ace_last_session_line(root, "TEST93002", out, sizeof(out))) {
+        fprintf(stderr, "the player does not read a report of %u bytes\n", ACE_REPORT_MAX - 1u);
+        assert(!"a report as long as the runtime writes is read");
+    }
+    memset(big, ' ', ACE_REPORT_MAX + 1u);
+    memcpy(big + ACE_REPORT_MAX - strlen(k_report), k_report, strlen(k_report) + 1u);
+    assert(strlen(big) == ACE_REPORT_MAX);
+    write_text_file(report, big);
+    assert(!player_ace_last_session_line(root, "TEST93002", out, sizeof(out)) && out[0] == '\0');
+    free(big);
+    remove(report);
+    (void)test_rmdir(dir);
+    (void)test_rmdir(root);
+    printf("[PLAYER_STATE_TEST] launch line room (%zu of %zu characters, %zu more keys of %zu) PASSED\n", n,
+           sizeof(line) - 1u, (sizeof(line) - 1u - n) / avg, avg);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
@@ -11218,6 +11315,7 @@ int main(int argc, char **argv) {
     test_player_nickname();
     test_graphics_presets();
     test_play_mode_line_parses_in_runtime();
+    test_play_mode_line_room();
     test_play_mode_upscale_settings();
     test_play_mode_title_page();
     /* Saves a library file under the cache root, so it runs only once that
