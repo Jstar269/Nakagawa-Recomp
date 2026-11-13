@@ -2426,10 +2426,20 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the end of the run: the title's build has no culling package, or Widescreen is off. The package build is chosen by
   the title's own data (section 5): `build-package --ace-cull` adds the title's culling package, beside the timing
   package when the build has one (`--experimental-60hz` or `--enhancement-package`) and as the build's one package
-  otherwise (section 9.9); the launcher picking that build for an Ace launch with the part on is a separate
-  change. The player cannot tell ahead of a launch which games have a culling build, so the row's text says it
-  acts only in games that do, and a run without one says so in the `ACE_MODE: cull unavailable (...)` line and
-  the report. The runtime remembers at most 4096 distinct matrices (see Limits below); the report's
+  otherwise (section 9.9). The player reads the title's `<disc id>-cull.json` beside its `-60hz.json`, from the
+  user's `enhancements` folder, else the shipped one, and reads only its `id`, `target_title_id` and `category`: it
+  is usable when its category is `guest_memory_code_hook`, its target is the title, and beside a usable timing
+  package its id differs from that package's and `<timing id>+<hook id>` has at most 64 characters. The player
+  selects the culling build exactly when the launch line carries `cull=on`: an Ace launch with the part on,
+  including a title on Enhanced that the session's `--experimental-60hz` runs as Ace. It then builds and launches
+  `<timing id>+<hook id>` when the 60 FPS game logic is on, else the culling package alone, which exports
+  `SR_EXPERIMENTAL_60HZ=0`. Authentic and Enhanced never do. The title page offers Ace only to a title with a usable
+  timing package, so the culling package alone is the build of such a title with its 60 FPS game logic turned off.
+  A title without a usable culling package keeps its other build; when its culling file exists but cannot be used,
+  the title page's play line names the reason while the part is on. The player checks only these fields:
+  `build-package` checks the rest (section 9.9) and names any refusal in the build's own error. The row's text says the part acts only in games that have a culling build, and a run without
+  one says so in the `ACE_MODE: cull unavailable (...)` line and the report. The runtime remembers at most 4096
+  distinct matrices (see Limits below); the report's
   `cull_untracked` counts the matrix uses it left alone once that table was full, and cull is confirmed only
   while that count is 0: a run with a nonzero count reports cull unavailable as `partial` (the matrices
   tracked before the table filled were widened, the rest were not), never as a complete run. The count is read

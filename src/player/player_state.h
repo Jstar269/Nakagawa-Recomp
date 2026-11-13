@@ -211,6 +211,15 @@ typedef struct {
     /* Why a file that exists cannot be used; empty when there is no file or it
        is usable. */
     char problem[160];
+    /* The title's culling package (section 11.3.6), read the same way from
+       <disc ID, lowercase>-cull.json: it parses, its category is
+       guest_memory_code_hook, its id is a valid package name other than the
+       timing package's, and its target_title_id is the title's own. An Ace
+       launch with Wider culling on builds and launches with it (section 9.9). */
+    bool cull_available;
+    char cull_package_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    bool cull_shipped;
+    char cull_problem[160];
 } PlayerTitleEnhancement;
 
 /* The three play modes (docs/ENHANCEMENT_CONTRACT.md section 10, #2055). Authentic is the
@@ -1704,6 +1713,18 @@ bool player_app_title_60hz_released(const PlayerApp *app, int game_index);
 void player_app_set_title_60hz(PlayerApp *app, int game_index, bool on);
 /* The --experimental-60hz flag: on for this session only, never saved. */
 void player_app_set_experimental_60hz_session(PlayerApp *app, bool on);
+/* An Ace launch of the title with its Wider culling part on (section 11.3.6): the launch line
+   carries cull=on, and the title builds and launches with its culling package when it has a
+   usable one (PlayerTitleEnhancement.cull_available). Authentic and Enhanced never. */
+bool player_app_title_cull_on(const PlayerApp *app, int game_index);
+/* Why the title's culling package cannot be used while player_app_title_cull_on asks for it
+   (PlayerTitleEnhancement.cull_problem), so the title page names it; "" when the part is off,
+   the package is usable, or the title has no culling package file. */
+const char *player_app_title_cull_problem(const PlayerApp *app, int game_index);
+/* The title's selected build carries its timing package, so its launch runs with the 60 FPS
+   game logic (player_play_config_session's logic_60_package): an enhanced build that is not
+   the culling package alone (GameRecord.enhancement_hook_only). */
+bool player_game_has_timing_package(const GameRecord *game);
 
 /* ---- The play modes (#2055; src/rt/ace.h) ---- */
 

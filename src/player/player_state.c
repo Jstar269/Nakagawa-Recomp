@@ -2855,22 +2855,21 @@ bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_
            player_join_path(out, out_size, assets, "enhancements");
 }
 
-bool player_read_title_enhancement(const char *user_root, const char *shipped_root,
-                                   const GameRecord *game, PlayerTitleEnhancement *out) {
-    if (!out) return false;
-    memset(out, 0, sizeof(*out));
-    out->experimental = true;
-    char key[PLAYER_DISC_ID_KEY_LEN];
+/* One of a title's package files, <key>-<suffix>.json, from the user's enhancements folder,
+   else the shipped one: its id into `id`, or why it cannot be used into `problem`. `noun`
+   names the file in that sentence; a non-NULL `category` must be the package's own. A
+   non-NULL `experimental_out` is cleared only for a usable shipped package that declares
+   "experimental": false (section 9.10). */
+static bool player_read_title_package_file(const char *user_root, const char *shipped_root,
+                                           const GameRecord *game, const char *key,
+                                           const char *suffix, const char *noun,
+                                           const char *category, char *id_out, size_t id_cap,
+                                           bool *shipped_out, bool *experimental_out,
+                                           char *problem, size_t problem_cap) {
     bool have_user = user_root && user_root[0];
     bool have_shipped = shipped_root && shipped_root[0];
-    if ((!have_user && !have_shipped) || !game || game->is_sample ||
-        game->is_showcase_package || !game->title_id[0] ||
-        !player_disc_id_key(game->disc_id, key)) {
-        return false;
-    }
     char leaf[PLAYER_DISC_ID_KEY_LEN + 16];
-    for (size_t i = 0; key[i]; i++) key[i] = (char)tolower((unsigned char)key[i]);
-    snprintf(leaf, sizeof(leaf), "%s-60hz.json", key);
+    snprintf(leaf, sizeof(leaf), "%s-%s.json", key, suffix);
     char folder[MAX_PATH_LEN];
     char path[MAX_PATH_LEN];
     bool found = have_user &&
@@ -2880,12 +2879,12 @@ bool player_read_title_enhancement(const char *user_root, const char *shipped_ro
     if (!found && have_shipped && player_join_path(path, sizeof(path), shipped_root, leaf) &&
         nk_platform_file_exists(path)) {
         found = true;
-        out->shipped = true;
+        *shipped_out = true;
     }
     if (!found) return false;
     FILE *f = nk_fopen_utf8(path, "rb");
     if (!f) {
-        snprintf(out->problem, sizeof(out->problem), "Its enhancement package can't be read.");
+        snprintf(problem, problem_cap, "Its %s can't be read.", noun);
         return false;
     }
     char *text = NULL;
@@ -2900,8 +2899,7 @@ bool player_read_title_enhancement(const char *user_root, const char *shipped_ro
     fclose(f);
     if (!text || got != (size_t)size) {
         free(text);
-        snprintf(out->problem, sizeof(out->problem),
-                 "Its enhancement package can't be read or is too large.");
+        snprintf(problem, problem_cap, "Its %s can't be read or is too large.", noun);
         return false;
     }
     text[got] = '\0';
@@ -2912,29 +2910,73 @@ bool player_read_title_enhancement(const char *user_root, const char *shipped_ro
         ? nk_json_get_string(nk_json_obj_get(package, "id")) : NULL;
     const char *target = package && nk_json_is_object(package)
         ? nk_json_get_string(nk_json_obj_get(package, "target_title_id")) : NULL;
+    const char *own_category = package && nk_json_is_object(package)
+        ? nk_json_get_string(nk_json_obj_get(package, "category")) : NULL;
+    bool usable = false;
     if (!package || !nk_json_is_object(package)) {
-        snprintf(out->problem, sizeof(out->problem),
-                 "Its enhancement package is not valid JSON.");
+        snprintf(problem, problem_cap, "Its %s is not valid JSON.", noun);
     } else if (!id || !nk_title_manifest_enhancement_id_valid(id)) {
-        snprintf(out->problem, sizeof(out->problem),
-                 "Its enhancement package has no valid id.");
+        snprintf(problem, problem_cap, "Its %s has no valid id.", noun);
     } else if (!target || strcmp(target, game->title_id) != 0) {
-        snprintf(out->problem, sizeof(out->problem),
-                 "Its enhancement package is for another game.");
+        snprintf(problem, problem_cap, "Its %s is for another game.", noun);
+    } else if (category && (!own_category || strcmp(own_category, category) != 0)) {
+        snprintf(problem, problem_cap, "Its %s is not a %s package.", noun, category);
     } else {
-        snprintf(out->package_id, sizeof(out->package_id), "%s", id);
-        out->available = true;
+        snprintf(id_out, id_cap, "%s", id);
+        usable = true;
         /* Only the shipped package's explicit false releases it (section 9.10): the maintainer
            releases a shipped package, so a file in the user's data folder stays experimental
            whatever it declares, and a missing or non-boolean value stays experimental. */
         bool experimental = true;
-        if (out->shipped &&
+        if (experimental_out && *shipped_out &&
             nk_json_get_bool(nk_json_obj_get(package, "experimental"), &experimental) &&
             !experimental) {
-            out->experimental = false;
+            *experimental_out = false;
         }
     }
     if (package) nk_json_free(package);
+    return usable;
+}
+
+bool player_read_title_enhancement(const char *user_root, const char *shipped_root,
+                                   const GameRecord *game, PlayerTitleEnhancement *out) {
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    out->experimental = true;
+    char key[PLAYER_DISC_ID_KEY_LEN];
+    bool have_user = user_root && user_root[0];
+    bool have_shipped = shipped_root && shipped_root[0];
+    if ((!have_user && !have_shipped) || !game || game->is_sample ||
+        game->is_showcase_package || !game->title_id[0] ||
+        !player_disc_id_key(game->disc_id, key)) {
+        return false;
+    }
+    for (size_t i = 0; key[i]; i++) key[i] = (char)tolower((unsigned char)key[i]);
+    out->available = player_read_title_package_file(
+        user_root, shipped_root, game, key, "60hz", "enhancement package", NULL,
+        out->package_id, sizeof(out->package_id), &out->shipped, &out->experimental,
+        out->problem, sizeof(out->problem));
+    /* The culling package (section 11.3.6) is read on its own: a title may have either. Its
+       build beside the timing package is named <timing id>+<hook id>, so the two ids differ
+       and the joined name fits a variant (nk_title_manifest_enhancement_variant_valid). */
+    out->cull_available = player_read_title_package_file(
+        user_root, shipped_root, game, key, "cull", "culling package", "guest_memory_code_hook",
+        out->cull_package_id, sizeof(out->cull_package_id), &out->cull_shipped, NULL,
+        out->cull_problem, sizeof(out->cull_problem));
+    if (out->cull_available && out->available) {
+        char variant[NK_MAX_ENHANCEMENT_PACKAGE_ID + 1];
+        int n = snprintf(variant, sizeof(variant), "%s+%s", out->package_id, out->cull_package_id);
+        if (strcmp(out->package_id, out->cull_package_id) == 0) {
+            snprintf(out->cull_problem, sizeof(out->cull_problem),
+                     "Its culling package has the enhancement package's own id.");
+            out->cull_available = false;
+        } else if (n < 0 || !nk_title_manifest_enhancement_variant_valid(variant)) {
+            snprintf(out->cull_problem, sizeof(out->cull_problem),
+                     "Its culling and enhancement package ids are too long together.");
+            out->cull_available = false;
+        }
+        if (!out->cull_available) out->cull_package_id[0] = '\0';
+    }
     return out->available;
 }
 
@@ -2971,16 +3013,65 @@ bool player_app_title_60hz_released(const PlayerApp *app, int game_index) {
     return enhancement->available && enhancement->shipped && !enhancement->experimental;
 }
 
+bool player_app_title_cull_on(const PlayerApp *app, int game_index) {
+    if (!app || game_index < 0 || game_index >= app->game_count) return false;
+    /* Exactly when the launch line carries cull=on (player_play_config_session): Ace with the
+       part on, including a title on Enhanced that the session's 60 FPS switch runs as Ace
+       (player_play_apply_logic_60). Authentic and Enhanced never build or launch the culling
+       package. */
+    PlayerPlayResolved play;
+    player_play_resolve(&app->settings, app->games[game_index].disc_id, &play);
+    player_play_apply_logic_60(&play, app->title_enhancements[game_index].available &&
+                                          player_app_title_60hz_on(app, game_index));
+    return play.on && play.mode == PLAYER_PLAY_ACE && play.part[PLAYER_PART_CULL] == 1;
+}
+
+bool player_game_has_timing_package(const GameRecord *game) {
+    return game && game->enhancement_package_id[0] && !game->enhancement_hook_only;
+}
+
+const char *player_app_title_cull_problem(const PlayerApp *app, int game_index) {
+    if (!player_app_title_cull_on(app, game_index)) return "";
+    const PlayerTitleEnhancement *enhancement = &app->title_enhancements[game_index];
+    return enhancement->cull_available ? "" : enhancement->cull_problem;
+}
+
 /* The variant the title launches: its enhanced build when its 60 FPS game logic is on and its
-   package is usable, else the authentic package. */
+   package is usable, with its culling package beside it (<timing id>+<hook id>) when an Ace
+   launch has Wider culling on and that package is usable too; the culling package alone when
+   only Wider culling asks for a build; else the authentic package. */
 static void player_app_select_package_variant(PlayerApp *app, int game_index) {
     GameRecord *game = &app->games[game_index];
     const PlayerTitleEnhancement *enhancement = &app->title_enhancements[game_index];
-    if (enhancement->available && player_app_title_60hz_on(app, game_index)) {
+    bool logic_60 = enhancement->available && player_app_title_60hz_on(app, game_index);
+    bool cull = enhancement->cull_available && player_app_title_cull_on(app, game_index);
+    game->enhancement_hook_only = false;
+    if (logic_60 && cull) {
+        /* cull_available holds beside a usable timing package only when the joined name is a
+           valid variant (player_read_title_enhancement), so it fits; were it ever cut, the
+           timing build stays, as for a culling package that cannot be used. */
+        int n = snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id),
+                         "%s+%s", enhancement->package_id, enhancement->cull_package_id);
+        if (n < 0 || (size_t)n >= sizeof(game->enhancement_package_id)) {
+            snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
+                     enhancement->package_id);
+        }
+    } else if (logic_60) {
         snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
                  enhancement->package_id);
+    } else if (cull) {
+        snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
+                 enhancement->cull_package_id);
+        game->enhancement_hook_only = true;
     } else {
         game->enhancement_package_id[0] = '\0';
+    }
+}
+
+/* A change to a part or a mode at the library's level can change what every title builds. */
+static void player_app_select_package_variants(PlayerApp *app) {
+    for (int i = 0; i < app->game_count && i < MAX_LIBRARY_GAMES; i++) {
+        player_app_select_package_variant(app, i);
     }
 }
 
@@ -3035,9 +3126,7 @@ void player_app_set_experimental_60hz_session(PlayerApp *app, bool on) {
     player_dev_log_add(app, "settings",
                        "60 FPS game logic %s for this session, for every game with an "
                        "enhancement package", on ? "on" : "off");
-    for (int i = 0; i < app->game_count && i < MAX_LIBRARY_GAMES; i++) {
-        player_app_select_package_variant(app, i);
-    }
+    player_app_select_package_variants(app);
 }
 
 /* ---- The play modes (#2055; src/rt/ace.h) ---- */
@@ -3234,6 +3323,7 @@ void player_app_toggle_library_play_mode(PlayerApp *app) {
     player_dev_log_add(app, "settings", "library default: %s",
                        player_play_mode_name(app->settings.enhanced.library));
     maybe_persist_settings(app);
+    player_app_select_package_variants(app);
 }
 
 void player_app_cycle_enhanced_part(PlayerApp *app, int part) {
@@ -3251,6 +3341,8 @@ void player_app_cycle_enhanced_part(PlayerApp *app, int part) {
     player_dev_log_add(app, "settings", "Enhanced %s for the library: %s", info->key,
                        info->words[next]);
     maybe_persist_settings(app);
+    /* Wider culling selects the culling build for every title on Ace that follows it. */
+    if (part == PLAYER_PART_CULL) player_app_select_package_variants(app);
 }
 
 bool player_app_ace_last_session(const PlayerApp *app, int game_index, char *out, size_t cap) {
@@ -3313,6 +3405,7 @@ void player_app_cycle_title_part(PlayerApp *app, int game_index, int part) {
                                             : enhanced_part_word(part, entry.part[part]));
     /* A game's own value wins over the preset (player_play_resolve), so the preset stays. */
     maybe_persist_settings(app);
+    if (part == PLAYER_PART_CULL) player_app_title_play_changed(app, game_index);
 }
 
 void player_app_open_title_enhanced(PlayerApp *app, int game_index) {
@@ -5309,7 +5402,7 @@ void player_launch_work_run(PlayerLaunchWork *work) {
     {
         PlayerPlayResolved ace;
         player_play_config_session(&work->settings, game->disc_id,
-                                   game->enhancement_package_id[0] != '\0',
+                                   player_game_has_timing_package(game),
                                    work->headless_accept_presented_frames > 0u, &session->config,
                                    &ace);
         work->play_mode = ace.on ? ace.mode : PLAYER_PLAY_AUTHENTIC;
@@ -6088,6 +6181,7 @@ static bool player_app_start_package_build_view(PlayerApp *app, int game_index,
     snprintf(app->build_session.enhancement_package_id,
              sizeof(app->build_session.enhancement_package_id), "%s",
              game->enhancement_package_id);
+    app->build_session.enhancement_hook_only = game->enhancement_hook_only;
     /* This card's own image: another one can have the same disc ID. */
     snprintf(app->build_session.iso_path, sizeof(app->build_session.iso_path), "%s",
              game->iso_path);
