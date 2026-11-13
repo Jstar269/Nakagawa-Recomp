@@ -91,13 +91,14 @@ static bool player_ui_sounds_open(PlayerUiSounds *sounds) {
     if (sounds->failed) {
         return false;
     }
-    if (!SDL_WasInit(SDL_INIT_AUDIO)) {
-        if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
-            sounds->failed = true;
-            return false;
-        }
-        sounds->audio_started = true;
+    /* Its own reference on SDL's audio subsystem, which SDL counts: the
+       launcher music (player_ui_music.c) holds another, and either one closing
+       leaves the other's stream playing. */
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        sounds->failed = true;
+        return false;
     }
+    sounds->audio_started = true;
     for (i = 0; i < PLAYER_UI_SOUND_COUNT; ++i) {
         const NkUiEmbeddedAsset *asset =
             nk_ui_embedded_asset(player_ui_sound_asset_name((PlayerUiSound)i));

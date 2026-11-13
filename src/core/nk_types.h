@@ -78,7 +78,8 @@ typedef struct {
        share a disc ID and stay two records (nk_library.h). */
     char content_sha1[41];
     char content_crc32[9];
-    /* How the image compares with the user's Redump list: an NkDiscTier
+    /* How the image compares with the Redump list it was checked against (the
+       user's import, else the list bundled with Nakagawa): an NkDiscTier
        (nk_disc_verify.h), 0 when it was not checked. */
     uint32_t disc_verification;
     char prepared_root[NK_MAX_PATH];

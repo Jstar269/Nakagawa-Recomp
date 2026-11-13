@@ -355,6 +355,10 @@ typedef struct {
     int interface_size_pct; /* 0 = automatic (the display's scale), or 100, 125, 150, 200 */
     int text_size_pct;      /* 100 Standard, 125 Large, 150 Larger: the type only */
     bool ui_sounds;       /* launcher move/confirm/back sounds; off by default */
+    /* Launcher background music (#2207): off by default, at its own level, apart
+       from the game's volume, as the menu sounds are. */
+    bool launcher_music;
+    int launcher_music_volume; /* 0..100 */
     PlayerLibrarySort library_sort;
     bool launcher_window_maximized;
     bool launcher_window_position_valid;
@@ -1046,6 +1050,10 @@ struct PlayerApp {
     /* Why the library shows no saved games although library.json exists (a newer
      * player wrote it), or an empty string. Shown on the Library screen. */
     char library_notice[192];
+    /* The earlier data folders of a Linux or macOS install are in use and the new one exists too
+     * (#324, nk_data_layout_notice): both named, for the whole run, or an empty string. Shown on
+     * the Library screen. */
+    char data_folder_notice[4u * NK_MAX_PATH + 192u]; /* NK_DATA_LAYOUT_NOTICE_MAX */
 
     /* Files dropped on the window together (#2007): SDL sends them one event at a
      * time between a begin and a complete. Several are gathered in a batch, the
@@ -1730,6 +1738,7 @@ void player_app_read_system_preferences(PlayerApp *app);
 bool player_app_reduce_motion(const PlayerApp *app);
 bool player_app_high_contrast_focus(const PlayerApp *app);
 void player_app_toggle_ui_sounds(PlayerApp *app);
+void player_app_toggle_launcher_music(PlayerApp *app);
 /* The library's sort: Recently played, Name A to Z, Recently added, and round
  * again. The change is saved. */
 void player_app_cycle_library_sort(PlayerApp *app);
@@ -1912,6 +1921,8 @@ void player_app_toggle_share_system_libraries(PlayerApp *app);
    next build uses it; a running one keeps the speed it started with. */
 void player_app_cycle_build_speed(PlayerApp *app);
 void player_app_adjust_volume(PlayerApp *app, int delta);
+/* Steps the launcher music's level, kept within 0 to 100, and saves it. */
+void player_app_adjust_launcher_music_volume(PlayerApp *app, int delta);
 
 /* Index of the library entry carrying this disc ID, or -1 if there is none.
    nk_library_add_or_update updates an existing record IN PLACE, so the entry
@@ -2031,7 +2042,7 @@ void player_app_request_launch(PlayerApp *app, int game_index);
  * configuration (resolution, frame cap, vsync, fullscreen, master volume).
  * These are the user's own rows, what an Authentic session runs with; an Enhanced or Ace
  * session then takes the graphics preset's values (player_session_apply_graphics_preset).
- * The accessibility settings and ui_sounds are launcher-UI state and deliberately not copied. Kept as a
+ * The accessibility settings, ui_sounds and the launcher music are launcher-UI state and deliberately not copied. Kept as a
  * named seam so tests can pin the settings -> session mapping without
  * spawning a child. */
 void player_app_apply_settings_to_session(const PlayerSettings *settings,

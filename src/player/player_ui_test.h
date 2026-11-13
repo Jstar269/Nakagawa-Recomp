@@ -58,7 +58,8 @@ enum {
     PLAYER_UI_TEST_ACTION_WAIT_REPORT = -20261010,
     PLAYER_UI_TEST_ACTION_GAME_EXIT = -20261011,
     PLAYER_UI_TEST_ACTION_WAIT_UPDATE = -20261012,
-    PLAYER_UI_TEST_ACTION_WAIT_LAID_OUT = -20261110
+    PLAYER_UI_TEST_ACTION_WAIT_LAID_OUT = -20261110,
+    PLAYER_UI_TEST_ACTION_WAIT_MUSIC = -20261112
 };
 
 #define UI_TEST_MAX_PACKAGE_STATUS_THREAD_CREATE_FAILURES 8
@@ -115,6 +116,8 @@ typedef struct PlayerUiTest {
     bool waiting_for_update;     /* WAIT_UPDATE: until app->update.phase is the target */
     PlayerUpdatePhase wait_update_target;
     bool waiting_for_layout;     /* WAIT_LAID_OUT: until a frame after it is laid out */
+    bool waiting_for_music;      /* WAIT_MUSIC: until the launcher music is in a state */
+    int wait_music_state;        /* the PlayerUiMusicState that ends the wait */
     int wait_layout_frame;       /* the frame count when WAIT_LAID_OUT began */
     uint64_t wait_deadline;
     uint32_t wait_view_mask;
@@ -199,6 +202,8 @@ void player_ui_test_delay_screenshot(void);
 /* The raw NK_UI_TEST_SLOW_START_MS setting, or NULL. */
 const char *player_ui_test_slow_start_text(void);
 void player_ui_test_slow_start(const PlayerUiTestLaunch *launch);
+/* The launch worker starts: whether the launcher held no music stream then. */
+void player_ui_test_report_launch_worker(bool launcher_audio_closed);
 
 /* Hooks where the UI-test build reports or answers instead of acting. */
 void player_ui_test_report_quit_dialog(const SDL_MessageBoxData *dialog);
@@ -310,6 +315,9 @@ static inline void player_ui_test_delay_screenshot(void) {}
 static inline const char *player_ui_test_slow_start_text(void) { return NULL; }
 static inline void player_ui_test_slow_start(const PlayerUiTestLaunch *launch) {
     (void)launch;
+}
+static inline void player_ui_test_report_launch_worker(bool launcher_audio_closed) {
+    (void)launcher_audio_closed;
 }
 static inline void player_ui_test_report_quit_dialog(const SDL_MessageBoxData *dialog) {
     (void)dialog;

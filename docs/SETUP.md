@@ -167,7 +167,100 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release
-  folder deletes no games or saves.
+  folder deletes no games or saves. A fresh install keeps its settings, data and saves in one `Nakagawa`
+  folder: `%LOCALAPPDATA%\Nakagawa` on Windows, `$XDG_DATA_HOME/Nakagawa` (else
+  `~/.local/share/Nakagawa`) on Linux, and `~/Library/Application Support/Nakagawa` on macOS. Linux keeps
+  the cache in `~/.cache/nakagawa-recomp` and the logs in `~/.local/state/nakagawa-recomp/logs` (or under
+  `$XDG_CACHE_HOME` and `$XDG_STATE_HOME`); an XDG variable that is not an absolute path is ignored, as
+  the XDG specification says. Without `HOME` (or an absolute `$XDG_DATA_HOME`) there is no data folder,
+  and the Python tools stop with `DATA_DIR_UNAVAILABLE`.
+- **If you used an earlier Linux or macOS build.** While any of its folders exists, Nakagawa keeps
+  using it, even an empty one: on Linux `~/.local/share/nakagawa-recomp` (or
+  `$XDG_DATA_HOME/nakagawa-recomp`), its `saves` folder, and `~/.config/nakagawa-recomp` (or
+  `$XDG_CONFIG_HOME/nakagawa-recomp`); on macOS the `config`, `data` and `saves` folders in
+  `~/Library/Application Support/NakagawaRecomp`. Nothing is moved, copied, merged or deleted, and
+  Nakagawa offers no move. If the new `Nakagawa` folder exists too, the library screen and the log
+  name both and point to [Switching to the new data folder](#switching-to-the-new-data-folder),
+  which has the steps and two known limits. Windows and Android have one data folder and nothing
+  to switch.
+
+### Switching to the new data folder
+
+This is for a Linux or macOS install that still uses its earlier folders (the previous section).
+Nakagawa never moves them itself. A switch by hand works when every piece goes to its place in the
+new folder and the library's saved paths are corrected:
+
+| Earlier folder | Goes to |
+| --- | --- |
+| Linux: `~/.local/share/nakagawa-recomp/saves` (or `$XDG_DATA_HOME/nakagawa-recomp/saves`) | `~/.local/share/Nakagawa/saves` (or `$XDG_DATA_HOME/Nakagawa/saves`) |
+| Linux: the rest of `~/.local/share/nakagawa-recomp` (or `$XDG_DATA_HOME/nakagawa-recomp`) | `~/.local/share/Nakagawa/data` (or `$XDG_DATA_HOME/Nakagawa/data`) |
+| Linux: `~/.config/nakagawa-recomp` (or `$XDG_CONFIG_HOME/nakagawa-recomp`) | `~/.local/share/Nakagawa/config` (or `$XDG_DATA_HOME/Nakagawa/config`) |
+| macOS: `~/Library/Application Support/NakagawaRecomp/config`, `data` and `saves` | `~/Library/Application Support/Nakagawa/config`, `data` and `saves` |
+
+On Linux the saves sit inside the earlier data folder, so they move out of it first: copied along
+with the rest into `Nakagawa/data`, they would be where nothing reads them. The new settings folder
+is in the data home, not in `$XDG_CONFIG_HOME`. Use the `$XDG_DATA_HOME` forms only when
+`XDG_DATA_HOME` is set to an absolute path; otherwise the new folder is under `~/.local/share`. The
+cache and the logs are not part of the switch: on Linux they stay in `~/.cache/nakagawa-recomp` and
+`~/.local/state/nakagawa-recomp/logs`; on macOS the earlier `~/Library/Caches/NakagawaRecomp` and
+`~/Library/Logs/NakagawaRecomp` can stay or go, and the new ones are made in the `Nakagawa` folder.
+
+`library.json` in the data folder keeps the full path of each game's disc image and staged copy
+(`iso_path`, `prepared_root`). A disc image you added from your own folder stays where it is and
+keeps working; built games are found by disc ID in the data folder, so they move with it. A disc
+image Nakagawa made inside the data folder (from a PSN or homebrew `EBOOT.PBP`, or a CSO or CHD
+image, in `data/discs`) and a staged copy (`data/games`) are still named at the earlier path after
+the move. The library lists those games as before, but **Play** stops with an error (for a disc
+image, "Game source ISO not found" and the earlier path), and building one says "The original disc
+image is missing. Put it back or add the disc again." Nothing is removed from the library and
+nothing is rebuilt by itself; step 5 corrects the paths, or you can add each such game again from
+its original file.
+
+1. Close Nakagawa and any Nakagawa tool.
+2. If a `Nakagawa` folder exists already (the library screen's notice names it), it holds what a
+   start that used it wrote. Rename it, for example to `Nakagawa.unused`, so the moves below do not
+   land on it; copy anything you want from it into the new folder afterwards.
+3. Linux:
+
+   ```sh
+   mkdir -p ~/.local/share/Nakagawa
+   mv ~/.local/share/nakagawa-recomp/saves ~/.local/share/Nakagawa/saves   # if it exists
+   mv ~/.local/share/nakagawa-recomp ~/.local/share/Nakagawa/data
+   mv ~/.config/nakagawa-recomp ~/.local/share/Nakagawa/config
+   ```
+
+   With the XDG variables set, use the paths in the table instead.
+4. macOS: rename `~/Library/Application Support/NakagawaRecomp` to `Nakagawa`; its `config`, `data`
+   and `saves` folders are already where the new layout expects them.
+5. In the new `data/library.json`, replace every occurrence of the earlier data folder's full path
+   with the new one, with a text editor or with `sed`:
+
+   ```sh
+   # Linux (with the XDG variables set, the paths in the table)
+   sed -i "s|$HOME/.local/share/nakagawa-recomp/|$HOME/.local/share/Nakagawa/data/|g" \
+       "$HOME/.local/share/Nakagawa/data/library.json"
+   # macOS
+   sed -i '' "s|$HOME/Library/Application Support/NakagawaRecomp/data/|$HOME/Library/Application Support/Nakagawa/data/|g" \
+       "$HOME/Library/Application Support/Nakagawa/data/library.json"
+   ```
+
+6. Start Nakagawa. With none of the earlier folders left it uses the `Nakagawa` folder, and the
+   library screen shows no notice. Do not leave a link at an earlier path: an earlier folder that
+   exists in any form, a link included, keeps the earlier layout in use.
+
+Two known limits:
+
+- **A start that cannot see the earlier folders uses the new folder for that run.** When the
+  earlier folders are there but that start cannot see them (they are on a drive that is not mounted
+  yet, or a folder above them may not be searched), it uses `Nakagawa`, and everything written in that run stays
+  there: settings, saves, games added to the library, imported fonts and built games, not only
+  settings. The next start that sees the earlier folders uses them again and reads none of it; the
+  library screen then names both folders. Move what you want to keep by hand.
+- **An older Nakagawa brings the earlier layout back.** Running a Nakagawa from before this change
+  once after a fresh install (an earlier release, or a player or tool from an older source checkout)
+  creates an earlier folder such as `~/.local/share/nakagawa-recomp`. From then on every start uses
+  the earlier layout and the `Nakagawa` folder goes unused, until you move the earlier folders away
+  with the steps above. The library screen names both folders while this lasts.
 
 ## Install, update and uninstall (Windows)
 
@@ -761,7 +854,7 @@ python tools/nk_cli.py fonts remove --all
 Available options:
 
 - `--choose <slot>=<file>`: Pick a file for a generic slot that several files name (`japanese`, `latin`, or `korean`). Named `ltn0.pgf` through `ltn15.pgf` files select their own Latin indices and need no choice.
-- `--user-data-root <path>`: Override the target per-user data directory (default: `%LOCALAPPDATA%`, then `%APPDATA%`, under `Nakagawa\data` on Windows; `~/Library/Application Support/NakagawaRecomp/data` on macOS; `$XDG_DATA_HOME/nakagawa-recomp` or `~/.local/share/nakagawa-recomp` on other POSIX systems).
+- `--user-data-root <path>`: Override the target per-user data directory (default: `%LOCALAPPDATA%`, then `%APPDATA%`, under `Nakagawa\data` on Windows; `~/Library/Application Support/Nakagawa/data` on macOS; `$XDG_DATA_HOME/Nakagawa/data` or `~/.local/share/Nakagawa/data` on other POSIX systems, or an earlier install's own folder, as **Where your data lives** says).
 - `--json`: Emit a machine-readable report of the outcome for each file, and of each slot's status.
 
 The import copies each accepted file into the per-user cache and writes `manifest.json` with `schema_version: 2` and an ISO 8601 UTC `import_time`. Generic files remain in `files`; indexed Latin files are listed in `latin_indices` with their index, size, SHA-256, user source, and reader version. The originals are not touched. Re-importing is idempotent, and entries not changed by the new run are retained:
@@ -969,8 +1062,8 @@ game's own value wins over the preset ([PLAYER_UI_DESIGN.md](PLAYER_UI_DESIGN.md
 `SR_PRESENT_UPSCALE=fsr1` makes the Vulkan presenter enlarge the picture to its place in the
 window with AMD FidelityFX Super Resolution 1: EASU, an edge-adaptive upscaler, then RCAS
 sharpening. `off`, the default, keeps the `SR_PRESENT_SCALING` filter. It runs only when the
-picture is enlarged on both axes, on every frame the presenter shows except a CPU-presented one
-while `SR_MOVIE_UPSCALE` is on. It is presentation only:
+picture is enlarged on both axes, on every frame the presenter shows except a movie frame (a
+CPU-presented one, or a GE frame that shows a decoded movie) while `SR_MOVIE_UPSCALE` is on. It is presentation only:
 the guest's frame, guest VRAM and captures are byte for byte what they are with it off
 (`gpu-capture-selftest` and, with a Vulkan device and a display, `display-smoke-fsr1`). A run
 recording (`SR_VIDEOREC_DIR`) is enlarged by FSR 1 too, at the recording's size, and its
@@ -988,16 +1081,21 @@ gate and the library sweep set it `off` for their own runs.
 
 ### Movie upscaler (`SR_MOVIE_UPSCALE`)
 
-`SR_MOVIE_UPSCALE` gives frames the CPU presents, which are decoded movies (and every frame when the
-software GE draws), their own upscaler: `fsr1` scales them with FSR 1, and `anime4k` first doubles
+`SR_MOVIE_UPSCALE` gives movie frames their own upscaler: frames the CPU presents, which are decoded
+movies (and every frame when the software GE draws), and on the Vulkan GE renderer the GE frames that
+show a decoded movie (#2111): `fsr1` scales them with FSR 1, and `anime4k` first doubles
 them once or twice with Anime4K's CNN x2 (M) network, which suits the flat colours and dark lines
 of animated and pre-rendered movies, then takes them to the window's size with FSR 1 (unless the
 doubled picture is already that size, as at the default 960x544 window). `off`, the
 default, leaves them to `SR_PRESENT_UPSCALE`. It applies in the window and in a recording
 (`SR_VIDEOREC_DIR`), each with its own passes at its own size. Use `anime4k` for line art and movies
-only: on other pictures, such as fine regular stripes, it adds a faint ripple along edges. It reaches
-only frames the CPU presents. A game whose movie the GE presents, drawn as a texture (LittleBigPlanet)
-or decoded into a GE target (Hot Shots Tennis), shows a GE frame, which this key does not upscale.
+only: on other pictures, such as fine regular stripes, it adds a faint ripple along edges. A movie
+the GE presents is found by its provenance: the movie decoder notes where each picture lands, and a
+GE frame is a movie frame when pictures drawn as a texture (Hot Shots Tennis draws a byte-exact copy
+of each picture), or decoded into the displayed target with no GE drawing after them, cover at least
+half of it ([ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md), section 2.2). A movie the game
+converts or scales on its way to the screen, or decodes behind a swizzled VRAM view, stays a GE
+frame and is not upscaled.
 Like `SR_PRESENT_UPSCALE` it is presentation only: the decoded movie, the guest's frame, guest VRAM
 and captures are unchanged (`display-smoke-anime4k`, which needs a Vulkan device and a display). A
 run with it on is stamped as enhanced (`ACE_MODE: present upscale movie-anime4k`, a
@@ -1155,6 +1253,10 @@ connections, listed below, and each is opt-in.
 
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).
+
+The disc check needs no connection either: Redump's PSP list ships beside the player
+(`assets/redump/`), and a newer list is one you download yourself and import
+([Disc check](COMPATIBILITY.md#updating-the-disc-list)).
 
 **Discord status** (Settings > Online and developer, off by default) makes no network
 connection either. While a game runs, the player passes three things to the Discord app on this

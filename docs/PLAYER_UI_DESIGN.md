@@ -315,6 +315,28 @@ Optional launcher sounds (Kenney's CC0 "Interface Sounds": a tick when focus mov
 back) are off by default; **UI sounds** in Settings (`ui_sounds` in `settings.json`) turns them on. While they are off
 no audio device is opened, and they never play while a game runs.
 
+Optional launcher music ([#2207](https://github.com/Jstar269/nakagawa-recomp/issues/2207)) is off by default too:
+**Launcher music** in Settings (`launcher_music` in `settings.json`) turns it on, and **Music volume** sets its own
+level (`launcher_music_volume`, 0 to 100%, 80% by default; the track is mastered at about -22 LUFS, so 100% is that
+level). Like the menu sounds it does not follow **Game volume**, which is the game's. The track is "Chill lofi
+inspired" by omfgdude (CC0, from OpenGameArt; [`assets/music/launcher/`](../assets/music/launcher/PROVENANCE.md)). It
+ships beside the player and is decoded with the vendored stb_vorbis; nothing is downloaded. It plays only while the
+launcher shows (the library, Settings, a game's page, the launcher's cards): it fades in over 1.5 s, and loops from the
+recording's first to its last sound, so the loop has no gap and no click. When a game starts it fades out over 0.5 s
+and the launcher lets go of the audio device before the game's process starts, so it never mixes into the game's
+sound. A game started while the track is still decoding stops the decode, and the launch waits for its worker to
+finish first. The decoded track (about 22 MB) is not kept while a game runs: once the launcher is back and the music
+would be heard (the window has focus and Music volume is above 0), the track is decoded again on its worker (about
+half a second) and fades in from where it stopped. It also fades out and lets go
+of the device while the launcher window does not have focus (a launcher that opens without focus waits for it), and
+at Music volume 0. Turning the setting off fades it out over 50 ms. If the audio device stops taking data during a
+fade, the launcher closes it at the fade's length plus 0.25 s and logs `LAUNCHER_MUSIC_RELEASE_TIMEOUT` with the time
+it waited. While the setting is off nothing is read and no audio device is opened. A track that is missing, cannot
+be decoded, is a file larger than 64 MB or would decode to more than 64 MB of samples, or an audio device that cannot
+be opened, is named on the setting's row (On: file
+missing, On: file damaged, On: no sound device) and in the log (`LAUNCHER_MUSIC_MISSING`, `LAUNCHER_MUSIC_DAMAGED`,
+`LAUNCHER_MUSIC_NO_DEVICE`); the launcher stays silent and carries on.
+
 Only actions the screen handles appear in its prompt bar.
 
 ## Screens
@@ -375,7 +397,7 @@ any other image of its disc ID not hashed yet. None starts while a game starts o
 one runs, the heading row carries a `CAPTION` `muted` line, "Checking disc image: 40%" ("Checking disc images: 40%,
 2 more" with more waiting), and a small CANCEL that stops it and the ones waiting (it stays while the check stops);
 the games stay, unchecked. A check that could not finish leaves a `warning` line ("A disc image could not be
-checked", "Your disc list could not be read", or "Some disc images were not checked" when too many wait) with HIDE,
+checked", "The disc list could not be read", or "Some disc images were not checked" when too many wait) with HIDE,
 and the reason goes to the developer log. The line stays until HIDE; a later check shows its progress meanwhile.
 Neither button is ever the default focus. The progress is a number, not an animation, and it is on that line
 only: the card's badge, YOUR DISC until then, changes once, to VERIFIED RETAIL, MODIFIED DISC or UNKNOWN DUMP (a
@@ -390,8 +412,8 @@ missing, starting, running), never the primary action: while its game runs, a re
 Stop the game to rebuild or change settings." The input note about decrypted files shows only while the package
 still needs them. Main column: eyebrow LIBRARY › TITLE, the name in `TITLE_XL`, the disc ID in `DATA`, the status
 pill and tag (YOUR DISC, BETA / UNOFFICIAL or the disc check's word, as on the card), then for a checked disc
-one `BODY_S` `muted` sentence on what the check found (for UNKNOWN DUMP: not shown to be retail, not modified,
-since Redump's PSP list names no disc IDs), then a PICTURE card when the last run of this game fell back to a
+one `BODY_S` `muted` sentence on what the check found (for UNKNOWN DUMP: not in the disc list, which doesn't
+mean bad, only not shown to be retail, and its disc ID isn't one the list names), then a PICTURE card when the last run of this game fell back to a
 slower drawing path (#2151): a DRAWN IN SOFTWARE pill in the brand blue, as a fact and not a warning, one `BODY_S`
 `paper` paragraph naming the renderer that did not start and what that costs (Internal resolution has no effect, the
 game may run slower, a graphics driver update may help), and a small Hide button, never the default focus, that hides
@@ -554,8 +576,8 @@ it under the action row while BUILD PACKAGE waits for the files, with CHECK AGAI
 
 Built now (#1302): one page under the top bar with SETTINGS active, two cards of named rows, each value on the 34 px
 button that changes it: GAME (resolution, frame pacing, VSync, fullscreen, scaling) and LAUNCHER AND SOUND (game
-volume with - and +, launcher fullscreen, accessibility, menu sounds, controller settings, CHECK FOR UPDATES, then
-the controller and the saves folder as captions; CHECK FOR UPDATES opens the Updates card and asks GitHub, see
+volume with - and +, launcher fullscreen, accessibility, menu sounds, controller settings, CHECK FOR UPDATES,
+launcher music and music volume with - and +, then the controller and the saves folder as captions; CHECK FOR UPDATES opens the Updates card and asks GitHub, see
 [`SETUP.md`](SETUP.md#network-use)). Under them DONE (primary: saves and returns to the Library), ONLINE AND DEVELOPER,
 THIRD-PARTY NOTICES and BUILD TOOLS AND CACHE (#1306: the share libraries switch, CLEAR SHARED LIBRARY CACHE and
 REMOVE BUILD TOOLS); the online options, the notices, build tools and cache and the removal check are dialog cards.

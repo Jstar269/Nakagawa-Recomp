@@ -1088,10 +1088,13 @@ void player_app_disc_check_finish(PlayerApp *app, const NkDiscVerification *resu
         player_dev_log_add(app, "disc check", "%s: %s", item.disc_id, result->reason);
     }
     static const char *const results[] = {"HASHED", "CANCELLED", "READ_FAILED", "LIST_UNUSABLE"};
-    printf("[PLAYER] DISC_CHECK disc=%s result=%s tier=%s\n", item.disc_id,
+    /* Which Redump list the image was compared with (NkDiscListSource). */
+    static const char *const lists[] = {"none", "imported", "bundled"};
+    printf("[PLAYER] DISC_CHECK disc=%s result=%s tier=%s list=%s\n", item.disc_id,
            (size_t)result->result < sizeof(results) / sizeof(results[0])
                ? results[result->result] : "UNKNOWN",
-           nk_disc_tier_name(result->tier));
+           nk_disc_tier_name(result->tier),
+           (size_t)result->list < sizeof(lists) / sizeof(lists[0]) ? lists[result->list] : "none");
     if (cancelled) {
         /* The library's Cancel: the checks waiting end too, even when the
            running one finished first. */
@@ -1101,7 +1104,7 @@ void player_app_disc_check_finish(PlayerApp *app, const NkDiscVerification *resu
     if (result->result == NK_DISC_VERIFY_HASHED || result->result == NK_DISC_VERIFY_LIST_UNUSABLE) {
         player_disc_check_record(app, &item, result);
         if (result->result == NK_DISC_VERIFY_LIST_UNUSABLE) {
-            snprintf(check->note, sizeof(check->note), "Your disc list could not be read");
+            snprintf(check->note, sizeof(check->note), "The disc list could not be read");
         }
     } else if (!cancelled) {
         snprintf(check->note, sizeof(check->note), "A disc image could not be checked");
@@ -1161,13 +1164,14 @@ const char *player_disc_tier_badge(uint32_t tier) {
 const char *player_disc_tier_note(uint32_t tier) {
     switch ((NkDiscTier)tier) {
         case NK_DISC_TIER_VERIFIED_RETAIL:
-            return "Disc check: this image matches a retail disc in your disc list.";
+            return "Disc check: this image matches a retail disc in Redump's disc list.";
         case NK_DISC_TIER_MODIFIED:
-            return "Disc check: a changed copy of a retail disc in your library, such as a "
-                   "fan translation or a patch.";
+            return "Disc check: its disc ID is a retail disc's, but its contents match no "
+                   "dump of it in the disc list. A damaged dump does that as well as a changed "
+                   "copy; dump the disc again and check it to tell which.";
         case NK_DISC_TIER_UNKNOWN:
-            return "Disc check: not in your disc list. This means not shown to be retail, "
-                   "not modified: Redump's PSP list names no disc IDs.";
+            return "Disc check: not in the disc list. That doesn't mean it's bad: it is "
+                   "only not shown to be retail, and its disc ID isn't one the list names.";
         case NK_DISC_TIER_NOT_CHECKED:
         default: return NULL;
     }
@@ -1348,6 +1352,8 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->interface_size_pct = 0;
     settings->text_size_pct = 100;
     settings->ui_sounds = false;
+    settings->launcher_music = false;
+    settings->launcher_music_volume = 80;
     settings->library_sort = PLAYER_LIBRARY_SORT_PLAYED;
     settings->launcher_window_maximized = false;
     settings->launcher_window_position_valid = false;
@@ -2116,6 +2122,19 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.ui_sounds = sounds_val;
     }
 
+    NkJsonNode *music_node = nk_json_obj_get(root, "launcher_music");
+    bool music_val = false;
+    if (music_node && nk_json_get_bool(music_node, &music_val)) {
+        app->settings.launcher_music = music_val;
+    }
+    NkJsonNode *music_vol_node = nk_json_obj_get(root, "launcher_music_volume");
+    int64_t music_vol_val = 0;
+    if (music_vol_node && nk_json_get_int64(music_vol_node, &music_vol_val)) {
+        if (music_vol_val < 0) music_vol_val = 0;
+        if (music_vol_val > 100) music_vol_val = 100;
+        app->settings.launcher_music_volume = (int)music_vol_val;
+    }
+
     NkJsonNode *vol_node = nk_json_obj_get(root, "master_volume");
     int64_t vol_val = 0;
     if (vol_node && nk_json_get_int64(vol_node, &vol_val)) {
@@ -2321,6 +2340,8 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
     fprintf(f, "  \"text_size\": %d,\n",
             text_size_valid(app->settings.text_size_pct) ? app->settings.text_size_pct : 100);
     fprintf(f, "  \"ui_sounds\": %s,\n", app->settings.ui_sounds ? "true" : "false");
+    fprintf(f, "  \"launcher_music\": %s,\n", app->settings.launcher_music ? "true" : "false");
+    fprintf(f, "  \"launcher_music_volume\": %d,\n", app->settings.launcher_music_volume);
     fprintf(f, "  \"library_sort\": \"%s\",\n",
             kLibrarySortKeys[(int)app->settings.library_sort >= 0 &&
                                      app->settings.library_sort < PLAYER_LIBRARY_SORT_COUNT
@@ -2995,6 +3016,12 @@ const char *player_library_sort_label(PlayerLibrarySort sort) {
 void player_app_toggle_ui_sounds(PlayerApp *app) {
     if (!app) return;
     app->settings.ui_sounds = !app->settings.ui_sounds;
+    maybe_persist_settings(app);
+}
+
+void player_app_toggle_launcher_music(PlayerApp *app) {
+    if (!app) return;
+    app->settings.launcher_music = !app->settings.launcher_music;
     maybe_persist_settings(app);
 }
 
@@ -4115,6 +4142,15 @@ void player_app_adjust_volume(PlayerApp *app, int delta) {
     if (volume < 0) volume = 0;
     if (volume > 100) volume = 100;
     app->settings.master_volume = volume;
+    maybe_persist_settings(app);
+}
+
+void player_app_adjust_launcher_music_volume(PlayerApp *app, int delta) {
+    if (!app) return;
+    int volume = app->settings.launcher_music_volume + delta;
+    if (volume < 0) volume = 0;
+    if (volume > 100) volume = 100;
+    app->settings.launcher_music_volume = volume;
     maybe_persist_settings(app);
 }
 

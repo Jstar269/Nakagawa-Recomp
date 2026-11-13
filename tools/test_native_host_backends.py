@@ -72,6 +72,7 @@ CORE_SOURCES = [
     "src/core/nk_disc_verify.c",
     "src/core/nk_zip.c",
     "src/core/nk_steam_shortcuts.c",
+    "src/core/nk_data_migrate.c",
     "src/core/generated/nk_title_catalog.c",
 ]
 

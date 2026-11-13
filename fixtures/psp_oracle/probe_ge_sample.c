@@ -28,6 +28,12 @@
 //   CASE=ge-clut-mip (PSP-GE-MIP-002, #2031): what TEXMODE bit 8 (multi-CLUT) does to the
 //     CLUT entry each mip level of a T4, T8 or T16 texture reads, with 8888 and 4444 CLUTs,
 //     a short CLUT load over a full one, and the CLUT start offset and index mask.
+//   CASE=ge-raster-bounds (PSP-GE-RASTER-002, #2193): whether colour writes past the frame-buffer
+//     stride and depth writes past zbw stay in their row or run on linearly into the next, and
+//     whether a depth-only clear honours the scissor. Its own section; see there.
+//   CASE=ge-depth-round (PSP-GE-RASTER-003, #343): whether the GE truncates or rounds a
+//     fractional window depth, read as colour through depth tests in the ge-raster window and
+//     list shape. Its own section; see there.
 //
 // ge-sample: each draw is one raw display list (no libpspgu) into a 64x32 8888 framebuffer
 // at VRAM offset 0x100000, cleared by the CPU through the uncached VRAM mirror before the list is
@@ -61,8 +67,12 @@
 // round trip and a final NAKAGAWA_PSP_COMPLETE line. Every GE wait is bounded
 // (sceGeDrawSync(1) peeks against a deadline); a list that does not finish is a TIMEOUT
 // record and every queue is reset (sceGeBreak(1)) before the next draw. The probe writes
-// only its own RAM, the 8 KiB framebuffer block at VRAM 0x100000, the 4 KiB depth block at
-// 0x110000 (ge-raster) and host0 logs.
+// only its own RAM, the 8 KiB framebuffer block at VRAM 0x100000, the depth buffer at
+// 0x110000 (ge-raster; under PSP-VRAM-MIRROR-001's 0x2040 XOR its depth words land at 0x112000
+// and above, within 0x110000..0x113fff) and host0 logs. ge-raster-bounds and ge-depth-round
+// decide a draw's end from their own list's state instead (see their sections), and
+// ge-raster-bounds alone uses the larger VRAM block its section names, after checking the
+// display buffer is not in it, saves it first and restores it at the end.
 
 #include <pspkernel.h>
 #include <pspthreadman.h>
@@ -90,6 +100,8 @@ PSP_HEAP_SIZE_KB(64);
 #define GE_CASE_CLUT_MIP 154
 #define GE_CASE_WEIGHT 157
 #define GE_CASE_RTT 158
+#define GE_CASE_RASTER_BOUNDS 187
+#define GE_CASE_DEPTH_ROUND 188
 
 #if PSP_ORACLE_CASE == GE_CASE_SAMPLE
 #define HLE_CAMPAIGN_ID "ge-sample"
@@ -127,6 +139,14 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "ge-rtt"
 #define HLE_TEST_ID "PSP-GE-RTT-001"
 #define HLE_LOG "host0:/ge_rtt_log.txt"
+#elif PSP_ORACLE_CASE == GE_CASE_RASTER_BOUNDS
+#define HLE_CAMPAIGN_ID "ge-raster-bounds"
+#define HLE_TEST_ID "PSP-GE-RASTER-002"
+#define HLE_LOG "host0:/ge_raster_bounds_log.txt"
+#elif PSP_ORACLE_CASE == GE_CASE_DEPTH_ROUND
+#define HLE_CAMPAIGN_ID "ge-depth-round"
+#define HLE_TEST_ID "PSP-GE-RASTER-003"
+#define HLE_LOG "host0:/ge_depth_round_log.txt"
 #else
 #error probe_ge_sample.c has no case for this PSP_ORACLE_CASE
 #endif
@@ -3583,6 +3603,1013 @@ static int hle_run(void)
 }
 
 #endif /* GE_CASE_RTT */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == GE_CASE_RASTER_BOUNDS
+
+#include <pspdisplay.h>
+
+/* ==== GE raster bounds cells (PSP-GE-RASTER-002, #2193) ====
+ * Whether the GE bounds a colour write by the frame-buffer stride (fbw) and a depth write by
+ * the depth-buffer width (zbw), or forms y * stride + x and so writes on into the next row, and
+ * whether a depth-only clear honours the scissor. Each cell is one display list of
+ * project-written command words (no game data): through mode, float positions, 8888 vertex
+ * colour, no texture, every per-fragment unit off unless the cell says otherwise, the drawing
+ * region x 0..511, y 0..271 and the scissor x 0..sx1, y 0..271.
+ *
+ *   raster-512-x511      8888, fbw 512: a sprite x 0..512, rows 0..15. Are columns 480..511
+ *                        drawn?
+ *   raster-500-x511      8888, fbw 500: the same sprite. Columns 500..511 of row y are,
+ *                        linearly, row y + 1's columns 0..11, so row 16's columns 0..11 are
+ *                        drawn only if the write runs on linearly.
+ *   raster-256-x479      8888, fbw 256, scissor x 0..479: a sprite x 0..512, rows 100..109.
+ *                        Row 110's columns 0..223 are drawn only if the write runs on linearly.
+ *   depth-zbw256-past    5650, fbw 512, zbw 256: a depth-only clear of 512x272 to 0x4000, then,
+ *                        with the depth test on (ALWAYS) and depth writes on, a sprite at depth
+ *                        0x0100 over x 256..511, rows 0..9. Depth rows 1..10, columns 0..255
+ *                        read 0x0100 only if the depth write runs on linearly.
+ *   depth-clear-scissor  5650, fbw 512, zbw 512, scissor x 0..99: a depth-only clear of 512x272
+ *                        to 0x4000. Depth at x 100..511 changes only if the clear ignores the
+ *                        scissor.
+ *
+ * Layout: a 0x44000-byte colour block at VRAM offset GRB_FB_OFFSET and a 0x44000-byte depth
+ * block directly after it at GRB_ZB_OFFSET (bits 6 and 13 clear, low 14 bits zero), each large
+ * enough for 512x272 at 16 bits and for every linear overrun the cells can make. The probe
+ * copies the whole 0x88000 bytes to RAM before the first cell and writes them back after the
+ * last. Before every cell the CPU fills both blocks with GRB_FILL through the uncached mirror.
+ * Colour is read through the plain uncached mirror; depth through the uncached 0x04200000
+ * mirror, which presents the GE's depth layout linearly (PSP-VRAM-MIRROR-001: the GE stores the
+ * depth of (x, y) at (zbp + 2 (y * zbw + x)) ^ 0x2040). Every list is queued with a GE context
+ * (PspGeListArgs), so the GE driver restores the GE state after a list that ends (after a
+ * sceGeBreak(1) reset that is not established).
+ *
+ * The block's ownership is an assumption, not a measured precondition: the check below sees only
+ * the buffer on screen at one moment, not other VRAM the XMB may use (a libGu-style layout after
+ * two 512x272 8888 buffers puts a depth buffer at 0x110000). A VSH write into the block would show
+ * in a read's "other" count and could be taken for a GE overrun, and the probe's fill may show on
+ * screen until the restore. No cell is known to be riskier than another, so their order is free.
+ *
+ * Before touching VRAM the probe reads the display buffer (sceDisplayGetFrameBuf) and records
+ * `display-check` (9 words: the call's result, the display address, buffer width and pixel
+ * format, the address's VRAM offset (bits 21 and above, the cached/uncached and mirror bits,
+ * masked off), the display span in bytes (width x 272 x 2, or x 4 for 8888), whether that span
+ * overlaps 0x110000..0x197fff or the display could not be read, whether the GE went idle, and the
+ * idle polls used). It then waits, bounded, for the whole GE to read idle (sceGeDrawSync(1)) with
+ * nothing of its own queued, and only then saves the block. If the display overlaps or could not
+ * be read, or the GE never idles, `display-check` is SKIP and every later record is SKIP with its
+ * usual word count (all 0) and the display address as its result: the probe touches no VRAM and
+ * queues nothing.
+ *
+ * Records per cell: `<cell>-draw` (9 words: qid, the probe's own list's last peek
+ * (sceGeListSync(qid, 1)), the whole GE's sceGeDrawSync(1) after the wait, elapsed us, how the
+ * wait ended (GRB_WAIT_*), the sceGeBreak(1) result (0 unless the deadline passed), the list
+ * length, fbw and zbw; after a sceGeBreak(1) reset, word 2 is the whole GE's state after the
+ * reset's bounded idle wait, and when the GE is still busy no later list is queued: every later
+ * cell's records are SKIP with result GRB_SKIP_WEDGED, and the block is still restored), then the
+ * cell's reads of grb_reads in order. A summary read
+ * `<cell>-<read>` covers `rows` rows from row0 of the columns col0 .. col0 + cols - 1 at the
+ * buffer's stride (fbw for colour, zbw for depth), or the whole block as one run when rows is 0, and holds 8 words: the pixel count; the counts
+ * equal to the drawn value (colour 0xff00ff00 in 8888 and 0x07e0 in 5650, depth 0x0100), to the
+ * cleared value (colour 0xff0000ff and 0x001f, which only a clear that wrote colour leaves;
+ * depth 0x4000), to the fill (0x5a5a5a5a, or 0x5a5a at 16 bits) and to anything else (8888
+ * colour compares the RGB bytes only: its alpha byte is the stencil byte, which a draw with
+ * the stencil test off leaves as it was, as a development run of ge-depth-round showed: PSP-3000,
+ * XMB context, 2026-11-12 boot 195, built from 24acc82e, not a recorded result); the
+ * first other value and its index in the read (0 and 0xffffffff when none); and the read's
+ * first pixel. A raw read holds the 16 pixels from (row0, col0), zero-extended. After the last
+ * cell, `vram-restore` (2 words: the words written back and how many do not read back as
+ * saved). */
+
+/* 0x110000, not the 0x100000 the other GE cases use: on a development run (PSP-3000, XMB context,
+ * 2026-11-12 boot 194, the block still at 0x100000) the XMB's display buffer was
+ * at VRAM 0x88000 (512 wide, 8888, 0x88000 bytes, to 0x10ffff), which overlapped a block at
+ * 0x100000, so display-check skipped every cell. This block clears both XMB buffers (0x0 and
+ * 0x88000) and ends at 0x197fff, inside the 2 MiB of VRAM. */
+#define GRB_FB_OFFSET 0x00110000u   /* VRAM-relative colour block */
+#define GRB_ZB_OFFSET 0x00154000u   /* VRAM-relative depth block, directly after the colour block */
+#define GRB_BLOCK_BYTES 0x00044000u /* 512 x 272 x 2 bytes */
+#define GRB_SAVE_WORDS ((2u * GRB_BLOCK_BYTES) / 4u)
+#define GRB_ROWS 272u
+#define GRB_FILL 0x5a5a5a5au
+#define GRB_GREEN 0xff00ff00u       /* the drawing sprites (ABGR): 5650 0x07e0 */
+#define GRB_RED 0xff0000ffu         /* the depth-only clears (ABGR): 5650 0x001f */
+#define GRB_ZCLEAR 0x4000u
+#define GRB_ZSPRITE 0x0100u
+#define GRB_LIST_WORDS 96u
+#define GRB_VTX_WORDS 16u
+#define GRB_WAIT_POLLS 5000u        /* 5000 x 100 us: a half-second bound per list */
+#define GRB_WAIT_POLL_US 100u
+#define GRB_WAIT_DONE 0u        /* the draw record's word 4: how the wait ended */
+#define GRB_WAIT_FREED 1u
+#define GRB_WAIT_DEADLINE 2u
+#define GRB_WAIT_REJECTED 3u
+#define GRB_SKIP_WEDGED 0xffffffffu /* the SKIP result once a reset left the GE busy */
+
+enum { GRB_K_COLOUR, GRB_K_ZBW, GRB_K_ZCLEAR };
+enum { GRB_BUF_C, GRB_BUF_Z };
+
+/* psm: 3 (8888) or 0 (5650); the scissor is x 0..sx1, y 0..271; the drawing sprite covers
+   rows y0 .. y1 - 1 (x 0..511 for GRB_K_COLOUR, x 256..511 for GRB_K_ZBW). */
+struct grb_cell {
+    const char *name;
+    uint8_t kind, psm;
+    uint16_t fbw, zbw, sx1, y0, y1;
+};
+
+#define GRB_CELL_COUNT 5u
+static const struct grb_cell grb_cells[GRB_CELL_COUNT] = {
+    {"raster-512-x511", GRB_K_COLOUR, 3u, 512u, 512u, 511u, 0u, 16u},
+    {"raster-500-x511", GRB_K_COLOUR, 3u, 500u, 512u, 511u, 0u, 16u},
+    {"raster-256-x479", GRB_K_COLOUR, 3u, 256u, 512u, 479u, 100u, 110u},
+    {"depth-zbw256-past", GRB_K_ZBW, 0u, 512u, 256u, 511u, 0u, 10u},
+    {"depth-clear-scissor", GRB_K_ZCLEAR, 0u, 512u, 512u, 99u, 0u, 0u},
+};
+_Static_assert(sizeof(grb_cells) / sizeof(grb_cells[0]) == GRB_CELL_COUNT, "GRB_CELL_COUNT");
+
+/* raw 0: a summary read; raw 1: the 16 pixels from (row0, col0). rows 0: the whole block. */
+struct grb_read {
+    uint8_t cell, raw, buf;
+    const char *suffix;
+    uint16_t row0, rows, col0, cols;
+};
+
+#define GRB_READ_COUNT 31u
+static const struct grb_read grb_reads[GRB_READ_COUNT] = {
+    {0u, 0u, GRB_BUF_C, "all", 0u, 0u, 0u, 0u},
+    {0u, 0u, GRB_BUF_C, "c480", 0u, 16u, 480u, 32u},
+    {0u, 0u, GRB_BUF_C, "row16", 16u, 1u, 0u, 512u},
+    {0u, 1u, GRB_BUF_C, "r0-x496", 0u, 1u, 496u, 16u},
+    {1u, 0u, GRB_BUF_C, "all", 0u, 0u, 0u, 0u},
+    {1u, 0u, GRB_BUF_C, "r15-x488", 15u, 1u, 488u, 12u},
+    {1u, 0u, GRB_BUF_C, "row16-x0", 16u, 1u, 0u, 12u},
+    {1u, 0u, GRB_BUF_C, "row16-x12", 16u, 1u, 12u, 488u},
+    {1u, 1u, GRB_BUF_C, "r16-x0", 16u, 1u, 0u, 16u},
+    {2u, 0u, GRB_BUF_C, "all", 0u, 0u, 0u, 0u},
+    {2u, 0u, GRB_BUF_C, "rows100to109", 100u, 10u, 0u, 256u},
+    {2u, 0u, GRB_BUF_C, "row110-x0", 110u, 1u, 0u, 224u},
+    {2u, 0u, GRB_BUF_C, "row110-x224", 110u, 1u, 224u, 32u},
+    {2u, 0u, GRB_BUF_C, "row99", 99u, 1u, 0u, 256u},
+    {2u, 0u, GRB_BUF_C, "row111", 111u, 1u, 0u, 256u},
+    {2u, 1u, GRB_BUF_C, "r110-x216", 110u, 1u, 216u, 16u},
+    {3u, 0u, GRB_BUF_Z, "z-all", 0u, 0u, 0u, 0u},
+    {3u, 0u, GRB_BUF_Z, "z-row0", 0u, 1u, 0u, 256u},
+    {3u, 0u, GRB_BUF_Z, "z-rows1to10", 1u, 10u, 0u, 256u},
+    {3u, 0u, GRB_BUF_Z, "z-rows11to271", 11u, 261u, 0u, 256u},
+    {3u, 0u, GRB_BUF_Z, "z-row272", 272u, 1u, 0u, 256u},
+    {3u, 0u, GRB_BUF_C, "c-all", 0u, 0u, 0u, 0u},
+    {3u, 0u, GRB_BUF_C, "c-sprite", 0u, 10u, 256u, 256u},
+    {3u, 1u, GRB_BUF_Z, "z-r1-x0", 1u, 1u, 0u, 16u},
+    {3u, 1u, GRB_BUF_Z, "z-r10-x240", 10u, 1u, 240u, 16u},
+    {4u, 0u, GRB_BUF_Z, "z-all", 0u, 0u, 0u, 0u},
+    {4u, 0u, GRB_BUF_Z, "z-in", 0u, 272u, 0u, 100u},
+    {4u, 0u, GRB_BUF_Z, "z-out", 0u, 272u, 100u, 412u},
+    {4u, 0u, GRB_BUF_C, "c-all", 0u, 0u, 0u, 0u},
+    {4u, 1u, GRB_BUF_Z, "z-r0-x92", 0u, 1u, 92u, 16u},
+    {4u, 1u, GRB_BUF_Z, "z-r271-x92", 271u, 1u, 92u, 16u},
+};
+_Static_assert(sizeof(grb_reads) / sizeof(grb_reads[0]) == GRB_READ_COUNT, "GRB_READ_COUNT");
+
+static uint32_t s_grb_vtx[GRB_VTX_WORDS] __attribute__((aligned(64)));
+static uint32_t s_grb_list[GRB_LIST_WORDS] __attribute__((aligned(64)));
+static PspGeContext s_grb_ctx __attribute__((aligned(64)));
+static uint32_t s_grb_save[GRB_SAVE_WORDS];
+static uint32_t s_grb_out[16];
+static volatile uint32_t *s_grb_vram;   /* plain uncached mirror: the colour block, then depth */
+static volatile uint16_t *s_grb_zview;  /* uncached 0x04200000 mirror of the depth block */
+
+static uint32_t grb_fbits(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+static uint32_t grb_phys(const void *p)
+{
+    return (uint32_t)(uintptr_t)p & 0x0fffffffu;
+}
+
+/* The pixels buffer `buf` holds in cell c's format. */
+static uint32_t grb_pixels(const struct grb_cell *c, uint32_t buf)
+{
+    return buf == GRB_BUF_C && c->psm == 3u ? GRB_BLOCK_BYTES / 4u : GRB_BLOCK_BYTES / 2u;
+}
+
+/* Pixel k (< grb_pixels) of buffer `buf`, zero-extended. */
+static uint32_t grb_pixel(const struct grb_cell *c, uint32_t buf, uint32_t k)
+{
+    if (buf == GRB_BUF_Z) {
+        return s_grb_zview[k];
+    }
+    if (c->psm == 3u) {
+        return s_grb_vram[k];
+    }
+    return ((volatile uint16_t *)s_grb_vram)[k];
+}
+
+/* The drawn, cleared and fill values of buffer `buf` in cell c's format. */
+static void grb_values(const struct grb_cell *c, uint32_t buf, uint32_t *v)
+{
+    if (buf == GRB_BUF_Z) {
+        v[0] = GRB_ZSPRITE;
+        v[1] = GRB_ZCLEAR;
+        v[2] = GRB_FILL & 0xffffu;
+    } else if (c->psm == 3u) {
+        v[0] = GRB_GREEN;
+        v[1] = GRB_RED;
+        v[2] = GRB_FILL;
+    } else {
+        v[0] = 0x07e0u;
+        v[1] = 0x001fu;
+        v[2] = GRB_FILL & 0xffffu;
+    }
+}
+
+/* One through-mode vertex: 8888 colour; float x, y, z (vertex type 0x80019c). */
+static uint32_t grb_vtx(uint32_t *out, uint32_t col, float x, float y, float z)
+{
+    out[0] = col;
+    out[1] = grb_fbits(x);
+    out[2] = grb_fbits(y);
+    out[3] = grb_fbits(z);
+    return 4u;
+}
+
+/* The cell's vertices: the drawing sprite, or the 512x272 clear and the depth sprite. */
+static void grb_vertices(const struct grb_cell *c)
+{
+    uint32_t n = 0;
+    if (c->kind == GRB_K_COLOUR) {
+        n += grb_vtx(s_grb_vtx + n, GRB_GREEN, 0.0f, (float)c->y0, 0.0f);
+        n += grb_vtx(s_grb_vtx + n, GRB_GREEN, 512.0f, (float)c->y1, 0.0f);
+    } else {
+        n += grb_vtx(s_grb_vtx + n, GRB_RED, 0.0f, 0.0f, (float)GRB_ZCLEAR);
+        n += grb_vtx(s_grb_vtx + n, GRB_RED, 512.0f, (float)GRB_ROWS, (float)GRB_ZCLEAR);
+        n += grb_vtx(s_grb_vtx + n, GRB_GREEN, 256.0f, (float)c->y0, (float)GRB_ZSPRITE);
+        n += grb_vtx(s_grb_vtx + n, GRB_GREEN, 512.0f, (float)c->y1, (float)GRB_ZSPRITE);
+    }
+}
+
+/* The cell's display list; returns the word count. Every state the draws read is set. */
+static uint32_t grb_list(const struct grb_cell *c, uint32_t vtx, uint32_t *out)
+{
+    static const uint8_t off_units[12] = {0x17u, 0x1cu, 0x1du, 0x1fu, 0x20u, 0x21u,
+                                          0x22u, 0x23u, 0x24u, 0x25u, 0x27u, 0x28u};
+    uint32_t n = 0;
+#define GRB_W(cmd, data) (out[n++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(data) & 0x00ffffffu))
+    GRB_W(0x10, (vtx >> 8) & 0x000f0000u);
+    GRB_W(0x9c, GRB_FB_OFFSET);
+    GRB_W(0x9d, c->fbw);
+    GRB_W(0xd2, c->psm);
+    GRB_W(0x9e, GRB_ZB_OFFSET);
+    GRB_W(0x9f, c->zbw);
+    GRB_W(0x15, 0);             /* drawing region x 0..511, y 0..271 */
+    GRB_W(0x16, 511u | ((GRB_ROWS - 1u) << 10));
+    GRB_W(0xd4, 0);             /* scissor x 0..sx1, y 0..271 */
+    GRB_W(0xd5, (uint32_t)c->sx1 | ((GRB_ROWS - 1u) << 10));
+    GRB_W(0x4c, 0);
+    GRB_W(0x4d, 0);
+    GRB_W(0xd6, 0);
+    GRB_W(0xd7, 0xffffu);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GRB_W(off_units[i], 0); /* lighting, clipping, culling, fog, dither, blend, tests, logic */
+    }
+    GRB_W(0x1e, 0);             /* texture off */
+    GRB_W(0x50, 0);             /* flat shading */
+    GRB_W(0xd3, 0);             /* clear mode off */
+    GRB_W(0xe7, 1);             /* depth writes off */
+    GRB_W(0xe8, 0);
+    GRB_W(0xe9, 0);
+    GRB_W(0xdb, 0x00ff0001u);   /* alpha test ALWAYS */
+    GRB_W(0xd8, 1);             /* colour test ALWAYS */
+    GRB_W(0xd9, 0);
+    GRB_W(0xda, 0);
+    GRB_W(0xdc, 0x00ff0001u);   /* stencil test ALWAYS */
+    GRB_W(0xdd, 0);             /* KEEP, KEEP, KEEP */
+    GRB_W(0xde, 1);             /* depth test ALWAYS */
+    GRB_W(0xdf, 0x32u);
+    GRB_W(0xe0, 0);
+    GRB_W(0xe1, 0);
+    GRB_W(0xe6, 3);             /* logic op COPY */
+    GRB_W(0xcf, 0);
+    GRB_W(0xcd, 0);
+    GRB_W(0xce, 0);
+    GRB_W(0x53, 0);             /* MATERIALUPDATE: vertex colour is the only colour source */
+    GRB_W(0x55, 0xffffffu);
+    GRB_W(0x58, 0xffu);
+    GRB_W(0x12, 0x0080019cu);   /* through, 8888 colour, float position */
+    GRB_W(0x01, vtx);
+    if (c->kind == GRB_K_COLOUR) {
+        GRB_W(0x04, (6u << 16) | 2u);   /* the drawing sprite */
+    } else {
+        GRB_W(0xe7, 0);         /* depth writes on */
+        GRB_W(0xd3, 0x401u);    /* clear mode, depth only */
+        GRB_W(0x04, (6u << 16) | 2u);   /* the 512x272 clear at depth 0x4000 */
+        GRB_W(0xd3, 0);
+        if (c->kind == GRB_K_ZBW) {
+            GRB_W(0x23, 1);     /* depth test on, ALWAYS, writes on */
+            GRB_W(0x01, vtx + 2u * 16u);
+            GRB_W(0x04, (6u << 16) | 2u);   /* the depth sprite at 0x0100 */
+            GRB_W(0x23, 0);
+        }
+        GRB_W(0xe7, 1);
+    }
+    GRB_W(0x0f, 0);
+    GRB_W(0x0c, 0);
+#undef GRB_W
+    return n;
+}
+
+/* One read of the cell's buffers, recorded as described at the top of the section. */
+static void grb_read(const struct grb_cell *c, const struct grb_read *r)
+{
+    static char row[64];
+    const uint32_t pixels = grb_pixels(c, r->buf);
+    const uint32_t stride = r->buf == GRB_BUF_Z ? c->zbw : c->fbw;
+    const uint32_t rows = r->rows == 0u ? 1u : r->rows;
+    const uint32_t cols = r->rows == 0u ? pixels : r->cols;
+    const uint32_t base = r->rows == 0u ? 0u : (uint32_t)r->row0 * stride + r->col0;
+    const int fits = (r->rows == 0u || (uint32_t)r->col0 + r->cols <= stride) &&
+                     (!r->raw || cols == 16u) && cols != 0u &&
+                     base + (rows - 1u) * stride + cols <= pixels;
+    snprintf(row, sizeof(row), "%s-%s", c->name, r->suffix);
+    memset(s_grb_out, 0, sizeof(s_grb_out));
+    if (!fits) {
+        hle_record(row, "FAIL", 1u, s_grb_out, r->raw ? 16u : 8u);
+        return;
+    }
+    if (r->raw) {
+        for (uint32_t x = 0; x < 16u; x++) {
+            s_grb_out[x] = grb_pixel(c, r->buf, base + x);
+        }
+        hle_record(row, "PASS", 0, s_grb_out, 16u);
+        return;
+    }
+    uint32_t v[3];
+    grb_values(c, r->buf, v);
+    /* 8888 colour: RGB only (the alpha byte is the stencil byte the draws leave as filled). */
+    const uint32_t m = r->buf == GRB_BUF_C && c->psm == 3u ? 0x00ffffffu : 0xffffffffu;
+    uint32_t count[4] = {0u, 0u, 0u, 0u};
+    uint32_t first_other = 0u;
+    uint32_t first_index = 0xffffffffu;
+    for (uint32_t y = 0; y < rows; y++) {
+        for (uint32_t x = 0; x < cols; x++) {
+            const uint32_t p = grb_pixel(c, r->buf, base + y * stride + x);
+            const uint32_t q = p & m;
+            const uint32_t k = q == (v[0] & m)   ? 0u
+                               : q == (v[1] & m) ? 1u
+                               : q == (v[2] & m) ? 2u
+                                                 : 3u;
+            if (k == 3u && count[3] == 0u) {
+                first_other = p;
+                first_index = y * cols + x;
+            }
+            count[k]++;
+        }
+    }
+    s_grb_out[0] = rows * cols;
+    s_grb_out[1] = count[0];
+    s_grb_out[2] = count[1];
+    s_grb_out[3] = count[2];
+    s_grb_out[4] = count[3];
+    s_grb_out[5] = first_other;
+    s_grb_out[6] = first_index;
+    s_grb_out[7] = grb_pixel(c, r->buf, base);
+    hle_record(row, "PASS", 0, s_grb_out, 8u);
+}
+
+/* Wait (bounded) for the probe's own list `qid`: GRB_WAIT_DONE when its peek reads
+   PSP_GE_LIST_DONE, GRB_WAIT_FREED when it reads 0x80000100 (the slot was freed after the list
+   ended: PSP-GE-SYNC-001 saw a completed list peek that within 1 ms when another GE client synced;
+   only the list's end or a break frees it, and the probe breaks only after the deadline),
+   GRB_WAIT_DEADLINE when neither by the deadline, GRB_WAIT_REJECTED when the enqueue failed. The
+   last peek is left in s_grb_list_state. Other clients' lists (the VSH's) do not decide it. */
+static int s_grb_list_state;
+
+static uint32_t grb_wait(int qid)
+{
+    s_grb_list_state = qid;
+    if (qid < 0) {
+        return GRB_WAIT_REJECTED;
+    }
+    for (unsigned i = 0; i < GRB_WAIT_POLLS; i++) {
+        s_grb_list_state = sceGeListSync(qid, 1);
+        if (s_grb_list_state == PSP_GE_LIST_DONE) {
+            return GRB_WAIT_DONE;
+        }
+        if ((uint32_t)s_grb_list_state == 0x80000100u) {
+            return GRB_WAIT_FREED;
+        }
+        sceKernelDelayThread(GRB_WAIT_POLL_US);
+    }
+    return GRB_WAIT_DEADLINE;
+}
+
+/* One cell: fill both blocks, build the list, queue it with the GE context, wait (bounded),
+   then the `-draw` record and the cell's reads. */
+static int grb_draw(uint32_t index)
+{
+    static char row[64];
+    const struct grb_cell *c = &grb_cells[index];
+    hle_step(c->name);
+    for (uint32_t i = 0; i < GRB_SAVE_WORDS; i++) {
+        s_grb_vram[i] = GRB_FILL;
+    }
+    __asm__ volatile("sync" ::: "memory");
+    grb_vertices(c);
+    const uint32_t words = grb_list(c, grb_phys(s_grb_vtx), s_grb_list);
+    PspGeListArgs args;
+    memset(&args, 0, sizeof(args));
+    args.size = sizeof(args);
+    args.context = &s_grb_ctx;
+    sceKernelDcacheWritebackAll();
+    const uint32_t t0 = sceKernelGetSystemTimeLow();
+    const int qid = sceGeListEnQueue(s_grb_list, NULL, -1, &args);
+    const uint32_t wait = grb_wait(qid);
+    const uint32_t elapsed = sceKernelGetSystemTimeLow() - t0;
+    const int list_state = s_grb_list_state;
+    int draw_state = sceGeDrawSync(1); /* the whole GE, for the record only */
+    int reset_rc = 0;
+    int wedged = 0;
+    if (wait == GRB_WAIT_DEADLINE) {
+        PspGeBreakParam param;
+        memset(&param, 0, sizeof(param));
+        reset_rc = sceGeBreak(1, &param);
+        /* Word 2 becomes the whole GE's state after the reset's bounded idle wait. */
+        for (unsigned i = 0; i < GRB_WAIT_POLLS; i++) {
+            draw_state = sceGeDrawSync(1);
+            if (draw_state == PSP_GE_LIST_DONE) {
+                break;
+            }
+            sceKernelDelayThread(GRB_WAIT_POLL_US);
+        }
+        wedged = draw_state != PSP_GE_LIST_DONE;
+    }
+    const uint32_t draw[9] = {(uint32_t)qid, (uint32_t)list_state, (uint32_t)draw_state,
+                              elapsed, wait, (uint32_t)reset_rc, words, c->fbw, c->zbw};
+    snprintf(row, sizeof(row), "%s-draw", c->name);
+    const char *status = wait == GRB_WAIT_REJECTED ? "FAIL"
+                         : wait == GRB_WAIT_DEADLINE ? "TIMEOUT" : "PASS";
+    hle_record(row, status, (uint32_t)qid, draw, 9);
+    for (uint32_t i = 0; i < GRB_READ_COUNT; i++) {
+        if (grb_reads[i].cell == index) {
+            grb_read(c, &grb_reads[i]);
+        }
+    }
+    return wedged;
+}
+
+/* Every record after `display-check` as SKIP, with its usual word count and `address` as its
+   result; nothing touches VRAM or the GE. */
+/* Cells first.. as SKIP records with their usual word counts (all 0) and `address` as the result. */
+static void grb_skip_from(uint32_t first, uint32_t address)
+{
+    static char row[64];
+    memset(s_grb_out, 0, sizeof(s_grb_out));
+    for (uint32_t c = 0; c < GRB_CELL_COUNT; c++) {
+        if (c < first) {
+            continue;
+        }
+        snprintf(row, sizeof(row), "%s-draw", grb_cells[c].name);
+        hle_record(row, "SKIP", address, s_grb_out, 9);
+        for (uint32_t i = 0; i < GRB_READ_COUNT; i++) {
+            if (grb_reads[i].cell == c) {
+                snprintf(row, sizeof(row), "%s-%s", grb_cells[c].name, grb_reads[i].suffix);
+                hle_record(row, "SKIP", address, s_grb_out, grb_reads[i].raw ? 16u : 8u);
+            }
+        }
+    }
+}
+
+static void grb_skip_all(uint32_t address)
+{
+    grb_skip_from(0u, address);
+    hle_record("vram-restore", "SKIP", address, s_grb_out, 2);
+}
+
+static int hle_run(void)
+{
+    hle_step("display-check");
+    void *top = NULL;
+    int width = 0;
+    int format = -1;
+    const int fb_rc = sceDisplayGetFrameBuf(&top, &width, &format, PSP_DISPLAY_SETBUF_IMMEDIATE);
+    const uint32_t address = (uint32_t)(uintptr_t)top;
+    const int known = fb_rc >= 0 && top != NULL && width > 0 && width <= 4096 && format >= 0 &&
+                      format <= 3;
+    const uint32_t span = known ? (uint32_t)width * GRB_ROWS * (format == 3 ? 4u : 2u) : 0u;
+    const int in_vram = (address & 0x0f800000u) == 0x04000000u;
+    const uint32_t offset = address & 0x001fffffu;
+    const int overlap = !known || (in_vram && offset < GRB_FB_OFFSET + 2u * GRB_BLOCK_BYTES &&
+                                   offset + span > GRB_FB_OFFSET);
+    int ge_idle = 0;
+    uint32_t idle_polls = 0u;
+    for (unsigned i = 0; !overlap && i < GRB_WAIT_POLLS; i++) {
+        if (sceGeDrawSync(1) == PSP_GE_LIST_DONE) {
+            ge_idle = 1;
+            break;
+        }
+        idle_polls++;
+        sceKernelDelayThread(GRB_WAIT_POLL_US);
+    }
+    const uint32_t check[9] = {(uint32_t)fb_rc, address, (uint32_t)width, (uint32_t)format,
+                               offset, span, (uint32_t)overlap, (uint32_t)ge_idle, idle_polls};
+    hle_record("display-check", overlap || !ge_idle ? "SKIP" : "PASS", address, check, 9);
+    if (overlap || !ge_idle) {
+        grb_skip_all(address);
+        return 1;
+    }
+    const uint32_t vram = (uint32_t)(uintptr_t)sceGeEdramGetAddr();
+    s_grb_vram = (volatile uint32_t *)(uintptr_t)((vram | 0x40000000u) + GRB_FB_OFFSET);
+    s_grb_zview = (volatile uint16_t *)(uintptr_t)((vram | 0x40200000u) + GRB_ZB_OFFSET);
+    hle_step("vram-save");
+    for (uint32_t i = 0; i < GRB_SAVE_WORDS; i++) {
+        s_grb_save[i] = s_grb_vram[i];
+    }
+    for (uint32_t i = 0; i < GRB_CELL_COUNT; i++) {
+        if (grb_draw(i)) {
+            /* The GE stayed busy after the reset: queue nothing more; the block is still restored. */
+            grb_skip_from(i + 1u, GRB_SKIP_WEDGED);
+            break;
+        }
+    }
+    hle_step("vram-restore");
+    for (uint32_t i = 0; i < GRB_SAVE_WORDS; i++) {
+        s_grb_vram[i] = s_grb_save[i];
+    }
+    __asm__ volatile("sync" ::: "memory");
+    uint32_t mismatches = 0u;
+    for (uint32_t i = 0; i < GRB_SAVE_WORDS; i++) {
+        mismatches += s_grb_vram[i] != s_grb_save[i];
+    }
+    const uint32_t restore[2] = {GRB_SAVE_WORDS, mismatches};
+    hle_record("vram-restore", mismatches == 0u ? "PASS" : "FAIL", 0, restore, 2);
+    return 1;
+}
+
+#endif /* GE_CASE_RASTER_BOUNDS */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == GE_CASE_DEPTH_ROUND
+
+/* ==== GE depth rounding cells (PSP-GE-RASTER-003, #343) ====
+ * Whether the GE truncates a fractional depth or rounds it to nearest, read as colour only.
+ * The window, buffers, patterns, base state and record shape are ge-raster's GR_K_ZSPRITE
+ * cells' (PSP-GE-RASTER-001's records are bound to the cell block it shares with
+ * tests/native/hle_thread_selftest.c, so this section repeats what it needs instead of adding to
+ * that block): a 64x32 8888 colour buffer at VRAM 0x100000 that the CPU clears, whose 16x4 window
+ * x 16..31, y 8..11 holds gdr_rgba(5, i) at pixel i, and a depth buffer at 0x110000 that only the
+ * GE writes (at its 0x2040-XOR addresses, within 0x110000..0x113fff). One 1x1 clear-mode,
+ * depth-only through-mode sprite per window pixel writes that pixel's depth; the cell's words
+ * then turn the depth test on with its function, and the test draw gives each pixel the source
+ * colour gdr_rgba(1, i), so a pixel that passes shows it and one that fails keeps gdr_rgba(5, i).
+ *
+ *   zr-thru-eq  pixel i's depth is the through-mode z 32768 + gdr_thru_frac[i % 8]; the test is
+ *               ge-raster's through-mode sprite (the 16x4 texture, REPLACE) at z 32768.0, EQUAL.
+ *   zr-thru-gt  the same depths; the test sprite at z 32768.5, GREATER.
+ *   zr-xf-eq    pixel i's depth is the integer 32768 + ((i >> 2) & 1); then, texture off, one
+ *               transform-mode 1x1 sprite per pixel of colour gdr_rgba(1, i) whose window depth
+ *               is that integer plus gdr_xf_frac[i % 4]: identity world and view matrices, a
+ *               projection that passes view z through with w = 1, the viewport z scale 16384 and
+ *               centre 32768, and vertex z (((i >> 2) & 1) + frac) / 16384, exact in float. EQUAL.
+ *
+ * The pass mask (bit i set when pixel i shows its source colour's RGB; the alpha byte is the
+ * stencil byte, which the test draw leaves as the destination's: a development run showed it,
+ * PSP-3000, XMB context, 2026-11-12 boot 195, built from 24acc82e, where comparing all 32 bits
+ * gave a zero mask; not a recorded result) repeats one byte, bit k for i % 8 = k. What each
+ * model would give (a reading key, not a prediction of the PSP's result):
+ *               truncate   round half up   round half to even
+ *   zr-thru-eq    0x1f         0x63              0x67
+ *   zr-thru-gt    0xe0         0xe3              0x80
+ *   zr-xf-eq      0xff         0x33              0x37
+ * A 0x1f, 0xe0 or 0xff mask reads "truncate or reduced precision": the fractional depths need 17
+ * to 24 significant bits (32768.25: 17, 32768.99609375: 24), and a GE that carried fewer into
+ * the depth conversion (a 16-bit significand, the 24-bit command floats, a reduced viewport path)
+ * loses the fraction of 32768 + f and, for f >= 0, matches truncation exactly. The table also
+ * assumes the clear-mode depth write and the tested draw convert alike; a mask outside it means
+ * they do not, and the raw `-rN` rows show how.
+ *
+ * Records per cell: `<cell>-draw` (9 words, ge-raster's shape: qid, the probe's own list's last
+ * peek (sceGeListSync(qid, 1)), the whole GE's sceGeDrawSync(1) after the wait, elapsed us, how
+ * the wait ended (GDR_WAIT_*: the probe's own list decides it, and sceGeBreak(1) runs only when
+ * that list has not ended by the deadline), the sceGeBreak(1) result, the list length and the
+ * window's FNV-1a 64 digest, low word first),
+ * `<cell>-r0` .. `<cell>-r3` (the window rows, 16 pixels each), then `<cell>-pass` (4 words: the
+ * pass mask of pixels 0..31 and of pixels 32..63, the number of pixels that kept their
+ * destination and the number that hold neither colour). Every list is queued with a GE context
+ * (PspGeListArgs), so the GE driver restores the GE state after a list that ends (after a
+ * sceGeBreak(1) reset that is not established).
+ *
+ * The colour buffer at 0x100000 is not checked against the display and not restored. It lies inside
+ * the XMB display buffer a development run saw (boot 194: 0x88000..0x10ffff), so a strip at the
+ * bottom of the screen may show the probe's pixels until the XMB redraws, and a VSH write into the
+ * window between the clear and the read shows as `-pass` word 3 (neither colour). Main's ge-raster
+ * (boot 71) and ge-through-z (boot 180, XMB context) used the same blocks with complete streams.
+ *
+ * After a sceGeBreak(1) reset, `-draw` word 2 is the whole GE's sceGeDrawSync(1) after the reset's
+ * bounded idle wait; when the GE is still busy no later list is queued and every later record is
+ * SKIP with its usual word count (all 0) and result GDR_SKIP_WEDGED. */
+
+#define GDR_FB_OFFSET 0x00100000u   /* VRAM-relative colour buffer, stride 64, 32 rows */
+#define GDR_ZB_OFFSET 0x00110000u   /* VRAM-relative depth buffer, stride 64 */
+#define GDR_STRIDE 64u
+#define GDR_ROWS 32u
+#define GDR_WX 16u                  /* window x 16..31, y 8..11 */
+#define GDR_WY 8u
+#define GDR_WW 16u
+#define GDR_WH 4u
+#define GDR_N 64u
+#define GDR_LIST_WORDS 256u
+#define GDR_VTX_WORDS 1536u
+#define GDR_WAIT_POLLS 5000u        /* 5000 x 100 us: a half-second bound per draw */
+#define GDR_WAIT_POLL_US 100u
+#define GDR_WAIT_DONE 0u        /* the draw record's word 4: how the wait ended */
+#define GDR_WAIT_FREED 1u
+#define GDR_WAIT_DEADLINE 2u
+#define GDR_WAIT_REJECTED 3u
+#define GDR_SKIP_WEDGED 0xffffffffu /* the SKIP result once a reset left the GE busy */
+
+/* xf 0: the through-mode test sprite at test_z; xf 1: the transform-mode sprites. w: the
+   command words after the depth pass, as a ge-raster cell's; 0 ends them. */
+struct gdr_cell {
+    const char *name;
+    uint8_t xf;
+    float test_z;
+    uint32_t w[3];
+};
+
+#define GDR_CELL_COUNT 3u
+static const struct gdr_cell gdr_cells[GDR_CELL_COUNT] = {
+    {"zr-thru-eq", 0u, 32768.0f, {0x23000001u, 0xde000002u, 0u}},
+    {"zr-thru-gt", 0u, 32768.5f, {0x23000001u, 0xde000006u, 0u}},
+    {"zr-xf-eq", 1u, 0.0f, {0x23000001u, 0xde000002u, 0x1e000000u}},
+};
+_Static_assert(sizeof(gdr_cells) / sizeof(gdr_cells[0]) == GDR_CELL_COUNT, "GDR_CELL_COUNT");
+
+/* 0.99609375 (255/256) stands for 0.999: 32768.999 is 32769.0 in float, and 32768.99609375 is
+   the largest float below 32769. Every depth 32768 + f is exact in float. */
+static const float gdr_thru_frac[8] = {0.0f, 0.25f, 0.5f, 0.75f, 0.99609375f,
+                                        -0.25f, -0.5f, -0.75f};
+static const float gdr_xf_frac[4] = {0.0f, 0.25f, 0.5f, 0.75f};
+
+static uint8_t s_gdr_tex[GDR_N * 4u] __attribute__((aligned(64)));
+static uint32_t s_gdr_list[GDR_LIST_WORDS] __attribute__((aligned(64)));
+static uint32_t s_gdr_vtx[GDR_VTX_WORDS] __attribute__((aligned(64)));
+static PspGeContext s_gdr_ctx __attribute__((aligned(64)));
+static uint32_t s_gdr_win[GDR_N];
+
+/* gr_byte and gr_rgba of the ge-raster cell block, unchanged. */
+static uint8_t gdr_byte(uint32_t seed, uint32_t i)
+{
+    static const uint8_t edge[8] = {0x00u, 0xffu, 0x01u, 0xfeu, 0x7fu, 0x80u, 0x40u, 0xc0u};
+    const uint32_t slot = (i * 5u + seed * 11u) & 63u;
+    if (slot < 8u) {
+        return edge[slot];
+    }
+    uint32_t x = seed * 0x9e3779b9u + i * 0x85ebca6bu + 0x165667b1u;
+    x ^= x >> 15;
+    x *= 0x2c1b3c6du;
+    x ^= x >> 12;
+    x *= 0x297a2d39u;
+    x ^= x >> 15;
+    return (uint8_t)(x >> 24);
+}
+
+static uint32_t gdr_rgba(uint32_t seed, uint32_t i)
+{
+    return (uint32_t)gdr_byte(seed, i) | ((uint32_t)gdr_byte(seed + 1u, i) << 8) |
+           ((uint32_t)gdr_byte(seed + 2u, i) << 16) | ((uint32_t)gdr_byte(seed + 3u, i) << 24);
+}
+
+static uint32_t gdr_fbits(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+static uint32_t gdr_phys(const void *p)
+{
+    return (uint32_t)(uintptr_t)p & 0x0fffffffu;
+}
+
+/* ge-raster's through-mode vertex: float u, v; 8888 colour; float x, y, z (type 0x80019f). */
+static uint32_t gdr_tvtx(uint32_t *out, float u, float v, uint32_t col, float x, float y, float z)
+{
+    out[0] = gdr_fbits(u);
+    out[1] = gdr_fbits(v);
+    out[2] = col;
+    out[3] = gdr_fbits(x);
+    out[4] = gdr_fbits(y);
+    out[5] = gdr_fbits(z);
+    return 6u;
+}
+
+/* ge-raster's transform-mode vertex: 8888 colour; float x, y, z (type 0x19c), x and y in
+   window pixels mapped to the view x, y the viewport maps back to them. */
+static uint32_t gdr_xvtx(uint32_t *out, uint32_t col, float x, float y, float z)
+{
+    out[0] = col;
+    out[1] = gdr_fbits((x - 32.0f) / 32.0f);
+    out[2] = gdr_fbits((y - 16.0f) / 16.0f);
+    out[3] = gdr_fbits(z);
+    return 4u;
+}
+
+/* The depth pass (two vertices per window pixel), then the test draw's vertices. */
+static uint32_t gdr_vertices(const struct gdr_cell *c, uint32_t *out)
+{
+    const float x0 = (float)GDR_WX, y0 = (float)GDR_WY;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < GDR_N; i++) {
+        const float x = x0 + (float)(i % GDR_WW), y = y0 + (float)(i / GDR_WW);
+        const float z = c->xf ? 32768.0f + (float)((i >> 2) & 1u)
+                              : 32768.0f + gdr_thru_frac[i & 7u];
+        n += gdr_tvtx(out + n, 0.0f, 0.0f, 0u, x, y, z);
+        n += gdr_tvtx(out + n, 0.0f, 0.0f, 0u, x + 1.0f, y + 1.0f, z);
+    }
+    if (c->xf) {
+        for (uint32_t i = 0; i < GDR_N; i++) {
+            const float x = x0 + (float)(i % GDR_WW), y = y0 + (float)(i / GDR_WW);
+            const float z = ((float)((i >> 2) & 1u) + gdr_xf_frac[i & 3u]) / 16384.0f;
+            n += gdr_xvtx(out + n, gdr_rgba(1u, i), x, y, z);
+            n += gdr_xvtx(out + n, gdr_rgba(1u, i), x + 1.0f, y + 1.0f, z);
+        }
+    } else {
+        n += gdr_tvtx(out + n, 0.0f, 0.0f, 0x9aff7f20u, x0, y0, c->test_z);
+        n += gdr_tvtx(out + n, (float)GDR_WW, (float)GDR_WH, 0x9aff7f20u, x0 + (float)GDR_WW,
+                      y0 + (float)GDR_WH, c->test_z);
+    }
+    return n;
+}
+
+/* The cell's display list: ge-raster's base state and GR_K_ZSPRITE depth pass, the cell's
+   words, then the test draw. Returns the word count. */
+static uint32_t gdr_list(const struct gdr_cell *c, uint32_t vtx, uint32_t tex, uint32_t *out)
+{
+    static const uint8_t off_units[12] = {0x17u, 0x1cu, 0x1du, 0x1fu, 0x20u, 0x21u,
+                                          0x22u, 0x23u, 0x24u, 0x25u, 0x27u, 0x28u};
+    static const float ident43[12] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                                      0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
+    /* Clip z = view z and w = 1, so the viewport's z scale and centre give the window depth. */
+    static const float proj[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                   0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    const uint32_t full = (GDR_STRIDE - 1u) | ((GDR_ROWS - 1u) << 10);
+    uint32_t n = 0;
+#define GDR_W(cmd, data) (out[n++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(data) & 0x00ffffffu))
+    GDR_W(0x10, (vtx >> 8) & 0x000f0000u);
+    GDR_W(0x9c, GDR_FB_OFFSET);
+    GDR_W(0x9d, GDR_STRIDE);
+    GDR_W(0xd2, 3u);
+    GDR_W(0x9e, GDR_ZB_OFFSET);
+    GDR_W(0x9f, GDR_STRIDE);
+    GDR_W(0x15, 0);
+    GDR_W(0x16, full);
+    GDR_W(0xd4, 0);
+    GDR_W(0xd5, full);
+    GDR_W(0x4c, 0);
+    GDR_W(0x4d, 0);
+    GDR_W(0xd6, 0);
+    GDR_W(0xd7, 0xffffu);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GDR_W(off_units[i], 0);
+    }
+    GDR_W(0x50, 0);             /* flat shading */
+    GDR_W(0xd3, 0);             /* clear mode off */
+    GDR_W(0xe7, 1);             /* depth writes off */
+    GDR_W(0xe8, 0);
+    GDR_W(0xe9, 0);
+    GDR_W(0xdb, 0x00ff0001u);   /* alpha test ALWAYS */
+    GDR_W(0xd8, 1);             /* colour test ALWAYS */
+    GDR_W(0xd9, 0);
+    GDR_W(0xda, 0);
+    GDR_W(0xdc, 0x00ff0001u);   /* stencil test ALWAYS */
+    GDR_W(0xdd, 0);             /* KEEP, KEEP, KEEP */
+    GDR_W(0xde, 1);             /* depth test ALWAYS */
+    GDR_W(0xdf, 0x32u);
+    GDR_W(0xe0, 0);
+    GDR_W(0xe1, 0);
+    GDR_W(0xe6, 3);             /* logic op COPY */
+    GDR_W(0xe2, 0x1d0cu);       /* the PSP SDK default dither matrix */
+    GDR_W(0xe3, 0xf3e2u);
+    GDR_W(0xe4, 0x0c1du);
+    GDR_W(0xe5, 0xe2f3u);
+    GDR_W(0xcf, 0);
+    GDR_W(0xcd, 0);
+    GDR_W(0xce, 0);
+    GDR_W(0x55, 0xffffffu);
+    GDR_W(0x58, 0xffu);
+    GDR_W(0x1e, 1);             /* texture on: UV, linear, one level, 8888 */
+    GDR_W(0xc0, 0);
+    GDR_W(0xc2, 0);
+    GDR_W(0xc3, 3);
+    GDR_W(0xa0, tex);
+    GDR_W(0xa8, ((tex >> 8) & 0x000f0000u) | GDR_WW);
+    GDR_W(0xb8, (2u << 8) | 4u); /* 16x4 */
+    GDR_W(0xc6, 0);             /* nearest */
+    GDR_W(0xc7, 0x101u);        /* clamp u and v */
+    GDR_W(0xc8, 0);
+    GDR_W(0xc9, 0x103u);        /* REPLACE, RGBA */
+    GDR_W(0xca, 0);
+    GDR_W(0x48, gdr_fbits(1.0f) >> 8);
+    GDR_W(0x49, gdr_fbits(1.0f) >> 8);
+    GDR_W(0x4a, 0);
+    GDR_W(0x4b, 0);
+    GDR_W(0xcb, 0);             /* texture flush */
+    GDR_W(0x12, 0x0080019fu);   /* through, float uv, 8888 colour, float position */
+    GDR_W(0x01, vtx);
+    GDR_W(0xe7, 0);
+    GDR_W(0xd3, 0x401u);        /* clear mode, depth only: one 1x1 sprite per pixel */
+    GDR_W(0x04, (6u << 16) | (2u * GDR_N));
+    GDR_W(0xd3, 0);
+    GDR_W(0xe7, 1);
+    GDR_W(0x01, vtx + 2u * GDR_N * 24u);
+    for (uint32_t i = 0; i < 3u && c->w[i] != 0u; i++) {
+        out[n++] = c->w[i];
+    }
+    if (c->xf) {
+        GDR_W(0x3a, 0);
+        for (uint32_t i = 0; i < 12u; i++) {
+            GDR_W(0x3b, gdr_fbits(ident43[i]) >> 8);
+        }
+        GDR_W(0x3c, 0);
+        for (uint32_t i = 0; i < 12u; i++) {
+            GDR_W(0x3d, gdr_fbits(ident43[i]) >> 8);
+        }
+        GDR_W(0x3e, 0);
+        for (uint32_t i = 0; i < 16u; i++) {
+            GDR_W(0x3f, gdr_fbits(proj[i]) >> 8);
+        }
+        GDR_W(0x42, gdr_fbits(32.0f) >> 8);    /* viewport: x = 32 + 32 X, y = 16 + 16 Y */
+        GDR_W(0x43, gdr_fbits(16.0f) >> 8);
+        GDR_W(0x44, gdr_fbits(16384.0f) >> 8); /* z = 32768 + 16384 Z */
+        GDR_W(0x45, gdr_fbits(2048.0f) >> 8);
+        GDR_W(0x46, gdr_fbits(2048.0f) >> 8);
+        GDR_W(0x47, gdr_fbits(32768.0f) >> 8);
+        GDR_W(0x4c, (2048u - 32u) << 4);
+        GDR_W(0x4d, (2048u - 16u) << 4);
+        GDR_W(0x12, 0x0000019cu);  /* transform, 8888 colour, float position */
+        GDR_W(0x04, (6u << 16) | (2u * GDR_N));
+    } else {
+        GDR_W(0x04, (6u << 16) | 2u);
+    }
+    GDR_W(0x0f, 0);
+    GDR_W(0x0c, 0);
+#undef GDR_W
+    return n;
+}
+
+/* FNV-1a 64 over the window's 64 result words, each little-endian (gr_digest). */
+static uint64_t gdr_digest(const uint32_t *px)
+{
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < GDR_N; i++) {
+        for (uint32_t b = 0; b < 4u; b++) {
+            h ^= (px[i] >> (8u * b)) & 0xffu;
+            h *= 0x100000001b3ull;
+        }
+    }
+    return h;
+}
+
+/* Wait (bounded) for the probe's own list `qid`: GDR_WAIT_DONE when its peek reads
+   PSP_GE_LIST_DONE, GDR_WAIT_FREED when it reads 0x80000100 (the slot was freed after the list
+   ended: PSP-GE-SYNC-001 saw a completed list peek that within 1 ms when another GE client synced;
+   only the list's end or a break frees it, and the probe breaks only after the deadline),
+   GDR_WAIT_DEADLINE when neither by the deadline, GDR_WAIT_REJECTED when the enqueue failed. The
+   last peek is left in s_gdr_list_state. Other clients' lists (the VSH's) do not decide it. */
+static int s_gdr_list_state;
+
+static uint32_t gdr_wait(int qid)
+{
+    s_gdr_list_state = qid;
+    if (qid < 0) {
+        return GDR_WAIT_REJECTED;
+    }
+    for (unsigned i = 0; i < GDR_WAIT_POLLS; i++) {
+        s_gdr_list_state = sceGeListSync(qid, 1);
+        if (s_gdr_list_state == PSP_GE_LIST_DONE) {
+            return GDR_WAIT_DONE;
+        }
+        if ((uint32_t)s_gdr_list_state == 0x80000100u) {
+            return GDR_WAIT_FREED;
+        }
+        sceKernelDelayThread(GDR_WAIT_POLL_US);
+    }
+    return GDR_WAIT_DEADLINE;
+}
+
+/* One cell: clear the block, write the window's destination pattern, queue the list with the GE
+   context, wait (bounded), read the window back, then the `-draw`, `-rN` and `-pass` records. */
+static int gdr_draw(const struct gdr_cell *c, uint32_t tex)
+{
+    static char row[64];
+    hle_step(c->name);
+    const uint32_t vram = (uint32_t)(uintptr_t)sceGeEdramGetAddr();
+    volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)((vram | 0x40000000u) + GDR_FB_OFFSET);
+    for (unsigned i = 0; i < GDR_STRIDE * GDR_ROWS; i++) {
+        fb[i] = 0u;
+    }
+    for (uint32_t i = 0; i < GDR_N; i++) {
+        fb[(GDR_WY + i / GDR_WW) * GDR_STRIDE + GDR_WX + i % GDR_WW] = gdr_rgba(5u, i);
+    }
+    __asm__ volatile("sync" ::: "memory");
+    (void)gdr_vertices(c, s_gdr_vtx);
+    const uint32_t words = gdr_list(c, gdr_phys(s_gdr_vtx), tex, s_gdr_list);
+    PspGeListArgs args;
+    memset(&args, 0, sizeof(args));
+    args.size = sizeof(args);
+    args.context = &s_gdr_ctx;
+    sceKernelDcacheWritebackAll();
+    const uint32_t t0 = sceKernelGetSystemTimeLow();
+    const int qid = sceGeListEnQueue(s_gdr_list, NULL, -1, &args);
+    const uint32_t wait = gdr_wait(qid);
+    const uint32_t elapsed = sceKernelGetSystemTimeLow() - t0;
+    const int list_state = s_gdr_list_state;
+    int draw_state = sceGeDrawSync(1); /* the whole GE, for the record only */
+    int reset_rc = 0;
+    int wedged = 0;
+    if (wait == GDR_WAIT_DEADLINE) {
+        PspGeBreakParam param;
+        memset(&param, 0, sizeof(param));
+        reset_rc = sceGeBreak(1, &param);
+        /* Word 2 becomes the whole GE's state after the reset's bounded idle wait. */
+        for (unsigned i = 0; i < GDR_WAIT_POLLS; i++) {
+            draw_state = sceGeDrawSync(1);
+            if (draw_state == PSP_GE_LIST_DONE) {
+                break;
+            }
+            sceKernelDelayThread(GDR_WAIT_POLL_US);
+        }
+        wedged = draw_state != PSP_GE_LIST_DONE;
+    }
+    uint32_t pass[4] = {0u, 0u, 0u, 0u};
+    for (uint32_t i = 0; i < GDR_N; i++) {
+        const uint32_t p = fb[(GDR_WY + i / GDR_WW) * GDR_STRIDE + GDR_WX + i % GDR_WW];
+        s_gdr_win[i] = p;
+        if (((p ^ gdr_rgba(1u, i)) & 0x00ffffffu) == 0u) {
+            pass[i / 32u] |= 1u << (i % 32u);
+        } else if (((p ^ gdr_rgba(5u, i)) & 0x00ffffffu) == 0u) {
+            pass[2]++;
+        } else {
+            pass[3]++;
+        }
+    }
+    const uint64_t digest = gdr_digest(s_gdr_win);
+    const uint32_t draw[9] = {(uint32_t)qid, (uint32_t)list_state, (uint32_t)draw_state,
+                              elapsed, wait, (uint32_t)reset_rc, words,
+                              (uint32_t)digest, (uint32_t)(digest >> 32)};
+    snprintf(row, sizeof(row), "%s-draw", c->name);
+    const char *status = wait == GDR_WAIT_REJECTED ? "FAIL"
+                         : wait == GDR_WAIT_DEADLINE ? "TIMEOUT" : "PASS";
+    hle_record(row, status, (uint32_t)qid, draw, 9);
+    for (uint32_t y = 0; y < GDR_WH; y++) {
+        snprintf(row, sizeof(row), "%s-r%u", c->name, (unsigned int)y);
+        hle_record(row, "PASS", y, &s_gdr_win[y * GDR_WW], GDR_WW);
+    }
+    snprintf(row, sizeof(row), "%s-pass", c->name);
+    hle_record(row, "PASS", 0, pass, 4);
+    return wedged;
+}
+
+/* Cells first.. as SKIP records with their usual word counts (all 0), after a reset left the GE busy. */
+static void gdr_skip_from(uint32_t first)
+{
+    static char row[64];
+    static const uint32_t zero[GDR_WW];
+    for (uint32_t c = 0; c < GDR_CELL_COUNT; c++) {
+        if (c < first) {
+            continue;
+        }
+        snprintf(row, sizeof(row), "%s-draw", gdr_cells[c].name);
+        hle_record(row, "SKIP", GDR_SKIP_WEDGED, zero, 9);
+        for (uint32_t y = 0; y < GDR_WH; y++) {
+            snprintf(row, sizeof(row), "%s-r%u", gdr_cells[c].name, (unsigned int)y);
+            hle_record(row, "SKIP", GDR_SKIP_WEDGED, zero, GDR_WW);
+        }
+        snprintf(row, sizeof(row), "%s-pass", gdr_cells[c].name);
+        hle_record(row, "SKIP", GDR_SKIP_WEDGED, zero, 4);
+    }
+}
+
+static int hle_run(void)
+{
+    for (uint32_t i = 0; i < GDR_N; i++) {
+        const uint32_t v = gdr_rgba(1u, i);
+        for (uint32_t b = 0; b < 4u; b++) {
+            s_gdr_tex[i * 4u + b] = (uint8_t)(v >> (8u * b));
+        }
+    }
+    for (uint32_t i = 0; i < GDR_CELL_COUNT; i++) {
+        if (gdr_draw(&gdr_cells[i], gdr_phys(s_gdr_tex))) {
+            gdr_skip_from(i + 1u); /* the GE stayed busy after the reset: queue nothing more */
+            break;
+        }
+    }
+    return 1;
+}
+
+#endif /* GE_CASE_DEPTH_ROUND */
 
 /* ------------------------------------------------------------------------- */
 

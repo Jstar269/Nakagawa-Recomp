@@ -191,6 +191,12 @@ bool nk_platform_get_app_data_dir(char *out_path, size_t max_len);
 /* Resolve the pre-canonical Windows profile location used by older builds.
  * Returns false on non-Windows hosts or when USERPROFILE is unavailable. */
 bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len);
+/* The default per-user folders of a Linux or macOS install (#324, nk_data_migrate.h): both
+ * layouts' folders, whether each exists, and the one this process uses, decided by the rule there
+ * the first time a folder is looked up. False, with *out cleared, where there is one layout (Windows,
+ * Android) or an override names the folders (--user-data-root, portable mode). */
+struct NkUserDataLayout;
+bool nk_platform_user_data_layout(struct NkUserDataLayout *out);
 
 /* The user's Desktop folder, where a first run's file pickers open. Windows:
  * FOLDERID_Desktop, which follows a Desktop the user or a sync tool moved.

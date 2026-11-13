@@ -481,6 +481,9 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     /* The refresh-rate advisory case runs on a 144 Hz display; the rest on 60 Hz. */
     settings.display_refresh_hz = which == FLOW_SETTINGS_REFRESH ? 144.0 : 60.0;
     settings.volume = 80;
+    /* Launcher music (#2207): off, the default, at its default level. */
+    settings.launcher_music_value = "Off";
+    settings.music_volume = 80;
     settings.controller_line = "keyboard and mouse";
     settings.saves_folder = "C:/synthetic/Nakagawa/saves";
     /* Off, the default; its own case has the stored setting On (#2007). */
@@ -923,8 +926,10 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         fixture.compatibility_expect = k_compatibility_cases[1].expect;
         fixture.compatibility_known_issues = k_compatibility_cases[1].known_issues;
         fixture.compatibility_category = "Playable";
-        fixture.disc_check_note = "Disc check: a changed copy of a retail disc in your "
-                                  "library, such as a fan translation or a patch.";
+        fixture.disc_check_note = "Disc check: its disc ID is a retail disc's, but its "
+                                  "contents match no dump of it in the disc list. A damaged "
+                                  "dump does that as well as a changed copy; dump the disc "
+                                  "again and check it to tell which.";
         fixture.ace_shown = true;
         fixture.ace_label = enhanced ? "Play mode: Enhanced" : "Play mode: Authentic";
         fixture.ace_in_effect = enhanced;
@@ -3208,6 +3213,12 @@ static void test_settings_pages(void) {
          "plus raises the volume"},
         {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_UI_SOUNDS, PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS,
          "the menu sounds button toggles them"},
+        {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_LAUNCHER_MUSIC,
+         PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC, "the launcher music button toggles it"},
+        {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_DOWN,
+         PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN, "minus lowers the music volume"},
+        {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP, PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP,
+         "plus raises the music volume"},
         {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_ACCESSIBILITY,
          PLAYER_UI_SETTINGS_OPEN_ACCESSIBILITY, "Accessibility opens its page"},
         {FLOW_SETTINGS_ACCESSIBILITY, PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE,
@@ -7045,8 +7056,9 @@ static void test_disc_verify_line_badge_and_note(void) {
         title.disc_id = "TEST70021";
         title.library_status = "Ready";
         title.badge = "Unknown dump";
-        title.disc_check_note = "Disc check: not in your disc list. This means not shown to be "
-                                "retail, not modified: Redump's PSP list names no disc IDs.";
+        title.disc_check_note = "Disc check: not in the disc list. That doesn't mean it's bad: it "
+                                "is only not shown to be retail, and its disc ID isn't one the "
+                                "list names.";
         title.primary_action_label = "PLAY";
         title.primary_action = PLAYER_UI_PRIMARY_PLAY;
         title.primary_action_enabled = true;
@@ -7066,7 +7078,7 @@ static void test_disc_verify_line_badge_and_note(void) {
         }
         (void)nk_ui_dump(ui, dump, sizeof(dump));
         CHECK(strstr(dump, "\"UNKNOWN DUMP\"") != NULL &&
-                  strstr(dump, "not shown to be retail, not modified") != NULL,
+                  strstr(dump, "That doesn't mean it's bad") != NULL,
               "the title page names the tier and what it means");
         CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_PRIMARY, "PLAY keeps the default focus");
         nk_ui_destroy(ui);

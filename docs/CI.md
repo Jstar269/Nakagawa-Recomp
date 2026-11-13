@@ -1412,7 +1412,10 @@ without uploading partial results and uploads all three in one SARIF. Each run's
 `automationDetails.id` is `/language:<lang>/`: code scanning stores a run under the
 part of the id before its last `/`, so the trailing slash keeps the three languages
 in separate categories instead of letting one replace the others. TRAP caching is off:
-a run that restored the cache was observed to extract no C/C++ file at all. An edit to this
+a run that restored the cache was observed to extract no C/C++ file at all. Each API call of the
+upload step (the stale-target check, the upload and the processing-status reads) is retried on a
+5xx answer or a dropped connection, up to five tries 5, 10, 20 and 40 s apart; any other answer,
+or a fifth 5xx, fails the step and names the call. An edit to this
 workflow reaches pull requests only after it lands on `main`, or through a manual
 dispatch run with `--ref` naming the branch.
 

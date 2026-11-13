@@ -18,10 +18,12 @@
 #define _FILE_OFFSET_BITS 64
 
 #include "nk_platform.h"
+#include "nk_data_migrate.h"
 #include "nk_types.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -493,19 +495,11 @@ static bool resolve_rooted_path(const char *root, NkPathType type, char sep, cha
     return written > 0 && (size_t)written < max_len;
 }
 
-static bool resolve_posix_path(NkPathType type, char *out_path, size_t max_len) {
-    if (!out_path || max_len == 0) return false;
-    if (s_app_data_dir_override[0]) {
-        return resolve_rooted_path(s_app_data_dir_override, type, '/', out_path, max_len);
-    }
-
-#if defined(__ANDROID__)
-    /* No HOME or XDG folders on Android: the per-user folders are in the app's private files
-       folder, which the activity names in NK_ANDROID_DATA_DIR, laid out as an override is. */
-    const char *android_root = getenv("NK_ANDROID_DATA_DIR");
-    if (!android_root || !android_root[0]) return false;
-    return resolve_rooted_path(android_root, type, '/', out_path, max_len);
-#elif defined(__APPLE__)
+#if !defined(__ANDROID__)
+/* The default per-user folders from before #324, resolved exactly as they were until then: the
+   layout an existing Linux or macOS install keeps (nk_data_migrate.h). */
+static bool resolve_old_layout_path(NkPathType type, char *out_path, size_t max_len) {
+#if defined(__APPLE__)
     const char *home = getenv("HOME");
     if (!home) return false;
     int written = 0;
@@ -580,8 +574,184 @@ static bool resolve_posix_path(NkPathType type, char *out_path, size_t max_len) 
     }
 #endif
 
-#if !defined(__ANDROID__)
     return written > 0 && (size_t)written < max_len;
+}
+
+static bool join_path(char *out, size_t cap, const char *base, const char *rest) {
+    int written = snprintf(out, cap, "%s%s", base, rest);
+    return written > 0 && (size_t)written < cap;
+}
+
+#if !defined(__APPLE__)
+/* An XDG base folder: the variable when it is set to an absolute path (trailing '/' dropped), else
+   HOME and the default below it. A relative value is ignored, as the XDG Base Directory
+   specification says. False when neither is usable or the path does not fit. */
+static bool xdg_base(const char *variable, const char *below_home, char *out, size_t cap) {
+    const char *value = getenv(variable);
+    if (value && value[0] == '/') {
+        size_t length = strlen(value);
+        while (length > 1u && value[length - 1u] == '/') length--;
+        if (length >= cap) return false;
+        memcpy(out, value, length);
+        out[length] = '\0';
+        return true;
+    }
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) return false;
+    return join_path(out, cap, home, below_home);
+}
+#endif
+
+/* The default per-user folders of a fresh install (#324): settings, data and saves in `Nakagawa`
+   in the host's data base, beside each other as on Windows. macOS keeps its cache and logs there
+   too; Linux keeps them in the XDG cache and state homes, where they always were. */
+static bool resolve_new_layout_path(NkPathType type, char *out_path, size_t max_len) {
+#if defined(__APPLE__)
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) return false;
+    const char *rest = NULL;
+    switch (type) {
+        case NK_PATH_CONFIG: rest = "/Library/Application Support/Nakagawa/config"; break;
+        case NK_PATH_DATA:   rest = "/Library/Application Support/Nakagawa/data"; break;
+        case NK_PATH_SAVES:  rest = "/Library/Application Support/Nakagawa/saves"; break;
+        case NK_PATH_CACHE:  rest = "/Library/Application Support/Nakagawa/cache"; break;
+        case NK_PATH_LOGS:   rest = "/Library/Application Support/Nakagawa/logs"; break;
+        default: return false;
+    }
+    return join_path(out_path, max_len, home, rest);
+#else
+    char base[NK_MAX_PATH];
+    switch (type) {
+        case NK_PATH_CACHE:
+            return xdg_base("XDG_CACHE_HOME", "/.cache", base, sizeof(base)) &&
+                   join_path(out_path, max_len, base, "/nakagawa-recomp");
+        case NK_PATH_LOGS:
+            return xdg_base("XDG_STATE_HOME", "/.local/state", base, sizeof(base)) &&
+                   join_path(out_path, max_len, base, "/nakagawa-recomp/logs");
+        case NK_PATH_CONFIG:
+            return xdg_base("XDG_DATA_HOME", "/.local/share", base, sizeof(base)) &&
+                   join_path(out_path, max_len, base, "/Nakagawa/config");
+        case NK_PATH_DATA:
+            return xdg_base("XDG_DATA_HOME", "/.local/share", base, sizeof(base)) &&
+                   join_path(out_path, max_len, base, "/Nakagawa/data");
+        case NK_PATH_SAVES:
+            return xdg_base("XDG_DATA_HOME", "/.local/share", base, sizeof(base)) &&
+                   join_path(out_path, max_len, base, "/Nakagawa/saves");
+        default:
+            return false;
+    }
+#endif
+}
+
+/* A layout exists, as nk_data_migrate.h defines it: its settings, data or saves folder is present
+   by lstat (an empty folder or a dangling link counts; nothing inside is read). */
+static bool layout_exists(const NkDataLayoutFolders *folders) {
+    static const NkPathType kinds[3] = {NK_PATH_CONFIG, NK_PATH_DATA, NK_PATH_SAVES};
+    for (size_t i = 0; i < 3u; ++i) {
+        struct stat st;
+        const char *path = folders->path[kinds[i]];
+        if (path[0] && lstat(path, &st) == 0) return true;
+    }
+    return false;
+}
+
+static void layout_folders(bool old, NkDataLayoutFolders *folders) {
+    memset(folders, 0, sizeof(*folders));
+    for (int type = NK_PATH_CONFIG; type <= NK_PATH_SAVES; ++type) {
+        char *path = folders->path[type];
+        bool named = old ? resolve_old_layout_path((NkPathType)type, path, NK_MAX_PATH)
+                         : resolve_new_layout_path((NkPathType)type, path, NK_MAX_PATH);
+        if (!named) path[0] = '\0';
+    }
+    folders->exists = layout_exists(folders);
+}
+
+/* The layout in use, decided by the rule (nk_data_migrate.h) the first time a folder is looked up
+   and kept for the run. Only a change of HOME or an XDG variable the rule reads makes it decide
+   again, which a test does between its cases and a start never does. */
+static pthread_mutex_t s_layout_lock = PTHREAD_MUTEX_INITIALIZER;
+static NkUserDataLayout s_layout;
+static char *s_layout_key = NULL; /* HOME, XDG_DATA_HOME and XDG_CONFIG_HOME as last decided */
+
+/* Whether the variables the rule reads are the ones it decided with: each as '-' (unset) or '='
+   and its value, one per line, compared in place without a copy. */
+static bool layout_key_matches(const char *key) {
+    static const char *const variables[3] = {"HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"};
+    if (!key) return false;
+    for (size_t i = 0; i < 3u; ++i) {
+        const char *value = getenv(variables[i]);
+        if (*key++ != (value ? '=' : '-')) return false;
+        size_t length = value ? strlen(value) : 0u;
+        if (value && strncmp(key, value, length) != 0) return false;
+        key += length;
+        if (*key++ != '\n') return false;
+    }
+    return *key == '\0';
+}
+
+static char *layout_key_make(void) {
+    static const char *const variables[3] = {"HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"};
+    size_t size = 1u;
+    for (size_t i = 0; i < 3u; ++i) {
+        const char *value = getenv(variables[i]);
+        size += 2u + (value ? strlen(value) : 0u);
+    }
+    char *key = (char *)malloc(size);
+    if (!key) return NULL;
+    key[0] = '\0';
+    for (size_t i = 0; i < 3u; ++i) {
+        const char *value = getenv(variables[i]);
+        size_t used = strlen(key);
+        (void)snprintf(key + used, size - used, "%c%s\n", value ? '=' : '-', value ? value : "");
+    }
+    return key;
+}
+
+/* Decides when needed; returns the decision under the lock into *out when it is not NULL. Out of
+   memory for the key, the decision is still made and used, and made again at the next lookup. */
+static bool layout_old_in_use(NkUserDataLayout *out) {
+    pthread_mutex_lock(&s_layout_lock);
+    if (!layout_key_matches(s_layout_key)) {
+        layout_folders(false, &s_layout.new_layout);
+        layout_folders(true, &s_layout.old_layout);
+        s_layout.old_in_use = s_layout.old_layout.exists;
+        free(s_layout_key);
+        s_layout_key = layout_key_make();
+    }
+    bool old = s_layout.old_in_use;
+    if (out) *out = s_layout;
+    pthread_mutex_unlock(&s_layout_lock);
+    return old;
+}
+#endif
+
+static bool resolve_posix_path(NkPathType type, char *out_path, size_t max_len) {
+    if (!out_path || max_len == 0) return false;
+    if (s_app_data_dir_override[0]) {
+        return resolve_rooted_path(s_app_data_dir_override, type, '/', out_path, max_len);
+    }
+
+#if defined(__ANDROID__)
+    /* No HOME or XDG folders on Android: the per-user folders are in the app's private files
+       folder, which the activity names in NK_ANDROID_DATA_DIR, laid out as an override is. */
+    const char *android_root = getenv("NK_ANDROID_DATA_DIR");
+    if (!android_root || !android_root[0]) return false;
+    return resolve_rooted_path(android_root, type, '/', out_path, max_len);
+#else
+    return layout_old_in_use(NULL) ? resolve_old_layout_path(type, out_path, max_len)
+                                   : resolve_new_layout_path(type, out_path, max_len);
+#endif
+}
+
+bool nk_platform_user_data_layout(struct NkUserDataLayout *out) {
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+#if defined(__ANDROID__)
+    return false;
+#else
+    if (s_app_data_dir_override[0]) return false;
+    (void)layout_old_in_use(out);
+    return true;
 #endif
 }
 

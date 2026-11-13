@@ -13,9 +13,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from types import ModuleType
 from typing import ClassVar, NamedTuple, TypedDict, cast
@@ -4555,6 +4557,76 @@ class MergeQueueCodeqlWiringTests(unittest.TestCase):
         # Both routes end in the one validating, stale-checking upload.
         self.assertEqual(self.text.count("codeScanning.uploadSarif("), 1)
         self.assertEqual(self.text.count('const expected = ["actions", "c-cpp", "python"];'), 1)
+
+    def _upload_script(self) -> str:
+        step = _ci_step(_workflow_job_blocks("codeql.yml")["upload"], "Upload exact-head CodeQL results")
+        assert step is not None
+        return "\n".join(step)
+
+    def test_every_api_call_of_the_upload_goes_through_the_bounded_retry(self) -> None:
+        # A 502 on the processing-status read failed main's upload (2026-11-13). Every API call
+        # of the step is made through withRetry, and none directly.
+        script = self._upload_script()
+        calls = re.findall(r"await (withRetry\(\"[^\"]+\", \(\) => )?github\.", script)
+        self.assertEqual(len(calls), 5)
+        self.assertTrue(all(calls), "an API call of the upload step is made without withRetry")
+        self.assertIn("const API_TRIES = 5;", script)
+
+    def test_the_retry_takes_only_5xx_and_fails_loudly_after_the_last_try(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        script = self._upload_script()
+        begin, end = script.index("// BEGIN API retry"), script.index("// END API retry")
+        helper = textwrap.dedent("\n".join(script[begin:end].splitlines()[1:]))
+        driver = helper + textwrap.dedent("""
+            const warnings = [];
+            const core = { warning: (message) => warnings.push(message) };
+            async function run(statuses) {
+              const sleeps = [];
+              let calls = 0;
+              const call = async () => {
+                const status = statuses[calls++];
+                if (status === undefined) return "answer";
+                const error = new Error(`status ${status}`);
+                if (status !== null) error.status = status;
+                throw error;
+              };
+              try {
+                const value = await withRetry("Reading it", call, async (ms) => { sleeps.push(ms); });
+                return { value, calls, sleeps };
+              } catch (error) {
+                return { error: error.message, cause: error.cause?.status ?? null, calls, sleeps };
+              }
+            }
+            (async () => {
+              const out = {};
+              for (const [name, statuses] of Object.entries({
+                recovers: [502, 500, 503], gone: [502, 502, 502, 502, 502, 502],
+                refused: [404], unknown: [null], first: [] })) {
+                out[name] = await run(statuses);
+              }
+              out.warnings = warnings.length;
+              console.log(JSON.stringify(out));
+            })();
+        """)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "retry.js"
+            path.write_text(driver, encoding="utf-8")
+            done = subprocess.run([node, str(path)], capture_output=True, text=True, timeout=60, check=False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["first"], {"value": "answer", "calls": 1, "sleeps": []})
+        self.assertEqual(out["recovers"], {"value": "answer", "calls": 4, "sleeps": [5000, 10000, 20000]})
+        self.assertEqual(out["gone"]["calls"], 5)
+        self.assertEqual(out["gone"]["sleeps"], [5000, 10000, 20000, 40000])
+        self.assertEqual(out["gone"]["error"], "Reading it failed after 5 tries (HTTP 502): status 502")
+        self.assertEqual(out["gone"]["cause"], 502)
+        self.assertEqual(out["refused"]["calls"], 1)
+        self.assertEqual(out["refused"]["error"], "Reading it failed after 1 try (HTTP 404): status 404")
+        self.assertEqual(out["unknown"]["calls"], 1)
+        self.assertEqual(out["unknown"]["error"], "Reading it failed after 1 try (no HTTP status): status null")
+        self.assertEqual(out["warnings"], 3 + 4)
 
     def test_pull_request_route_text_is_unchanged(self) -> None:
         for fragment in (
