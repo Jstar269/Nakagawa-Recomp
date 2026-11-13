@@ -505,8 +505,8 @@ The player offers three play modes per game (#2055):
   text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound, finer patches, smooth
   far textures, sharper enlarging and full 32-bit colour (section 10.11). A new library starts with texture
   filtering, crisp system text and the game badge on and the rest off, and a graphics preset sets crisp system text
-  and sharper enlarging (section 10.1); finer patches, smooth far textures and full 32-bit colour are in no preset.
-  Each one is a *part* that can be turned off for the library or for a single game.
+  and sharper enlarging, and Ultra also full 32-bit colour (section 10.1); finer patches and smooth far textures are
+  in no preset. Each one is a *part* that can be turned off for the library or for a single game.
 - **Ace** is Enhanced plus the improvements made for that game alone. Today that is the title's 60 FPS game logic
   package (section 9). The player offers Ace only for a title with a usable package; its own parts can be turned off
   for that game too.
@@ -542,7 +542,9 @@ Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`
 (section 9.4). Nor is sharper enlarging (`"upscale"`, #2122): the launcher exports it as `SR_PRESENT_UPSCALE`, `fsr1`
 for an Enhanced or Ace run with the part on, and `off` otherwise, and always `off` for Authentic (section 2.2). The
 part's value is the title's own, else the graphics preset's where it sets the part (Medium, Ultra and Handheld on,
-Low and High off), else the library's; crisp text (`text`) is resolved the same way, and every preset turns it on.
+Low and High off), else the library's. Crisp text (`text`) and full 32-bit colour (`twin`, section 10.11) are
+resolved the same way: every preset turns crisp text on, and Ultra turns full 32-bit colour on while the other
+presets leave it to the library.
 The launcher also exports `SR_MOVIE_UPSCALE=off` for an Authentic session; an Enhanced or Ace session
 keeps the inherited value, as the movie upscaler has no setting.
 
@@ -1016,14 +1018,17 @@ at `s_twin`) for the Vulkan renderer, and in `src/rt/ge.c` (the comment at `s_tw
     not follow host GPU work (section 10.3). The second draw of each render op, and the drain when a twin allocation
     fails, are host waits.
   - I/O speed: unchanged. The twin performs no guest I/O.
-- **Default.** Off. The player's part "Full 32-bit colour" (the launch line's `twin=on`) or `SR_GPU_TWIN_COLOR`
+- **Default.** Off for a new library. The Ultra graphics preset turns it on (section 10.1, #2280); the other presets
+  do not change it, so it keeps the library's value. The player's part "Full 32-bit colour" (the launch line's `twin=on`), choosing Ultra or `SR_GPU_TWIN_COLOR`
   turns it on (see Setting). Turning it on by default needs section 11.2 item 4's "nothing worse" runs: picture-gate
   or route runs on *Hot Shots Tennis* and *LittleBigPlanet*, and a library sweep, each with the twin on against the
   same run with it off (#2050). The launch line carries its key (`twin`, below), which follows section 11.2 item 2:
   a library switch and a per-title switch, each off by default.
 - **Setting.** The launch line's `twin=off|on` (section 10.1), a required key: `twin=on` asks for full colour. The
   player writes it from the part "Full 32-bit colour" (`"twin"`, `on` or `off`) on the library's Settings > Enhanced
-  page and on each title's own page (sections 10.5 and 10.9); it is off unless the player turns it on.
+  page and on each title's own page (sections 10.5 and 10.9); it is off for a new library unless the player turns it
+  on or chooses the Ultra graphics preset (the other presets leave it to the library, and a title's own value wins
+  over Ultra).
   `SR_GPU_TWIN_COLOR=1` (full colour) or `native` (the twin with the authentic colour, which the identity self-tests
   use), read when the renderer starts (the software renderer: at its first colour write), stays as the developer
   override and wins whenever it is set: unset or empty leaves the choice to the launch line, `0` and `off` are off,
