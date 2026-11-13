@@ -131,6 +131,13 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   and 272 or 1020 MB at 4. At start the renderer checks that the images fit the GPU; when 4x does not, the run
   uses 2x, and when neither does, it runs without supersampling, and the log says why in either case. The rules
   are in [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1021-supersampling-ssaa).
+- **Full 32-bit colour.** A part of Enhanced and Ace, off for a new library and turned on by the Ultra graphics
+  preset; Low, Medium, High and Handheld leave it as the library has it. Settings > Enhanced offers it as **Full
+  32-bit colour** (On or Off), for the library or for one game, and the launch line carries it as `twin=`. It shows
+  16-bit games in full colour without dither by drawing each render op a second time into a host-only copy of each
+  render target and depth buffer at the render scale, so it costs extra GPU work and memory; the frames the game can
+  read back do not change. The rules are in
+  [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1011-full-32-bit-colour-the-host-twin).
 - **Smooth far textures.** A part of Enhanced and Ace, off by default and in no graphics preset: Settings >
   Enhanced offers it as **Smooth far textures** (On or Off), for the library or for one game, and the launch
   line carries it as `mips=on`. It is not on by choosing Enhanced or Ace, because it changes the frames the game can
