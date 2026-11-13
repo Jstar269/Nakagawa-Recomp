@@ -1716,11 +1716,11 @@ static void test_posix_data_directory_rule(void) {
 
     char data_root[256];
     assert(nk_platform_resolve_app_data_dir(data_root, sizeof(data_root)));
-    assert(strcmp(data_root, "/synthetic/xdg/nakagawa-recomp") == 0);
+    assert(strcmp(data_root, "/synthetic/xdg/Nakagawa/data") == 0);
     set_environment_value("XDG_DATA_HOME", "");
     assert(nk_platform_resolve_app_data_dir(data_root, sizeof(data_root)));
     assert(strcmp(data_root,
-                  "/synthetic/profile/.local/share/nakagawa-recomp") == 0);
+                  "/synthetic/profile/.local/share/Nakagawa/data") == 0);
 
     restore_environment_value("HOME", saved_home, home_was_set);
     restore_environment_value("XDG_DATA_HOME", saved_xdg, xdg_was_set);

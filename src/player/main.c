@@ -44,6 +44,7 @@
 #include "player_ui_test.h"
 #include "nk_platform.h"
 #include "nk_shared_helpers.h"
+#include "nk_data_migrate.h"
 #include "nk_portable.h"
 #include "nk_json.h"
 #include "player_host.h"
@@ -3919,9 +3920,20 @@ typedef struct PlayerRun {
    the process's exit code. */
 #define PLAYER_RUN_CONTINUE INT_MIN
 
+/* A Linux or macOS install uses its earlier folders while the new one exists too (#324,
+   nk_data_migrate.h): the library and the log name both. Nothing is moved, and the start goes on. */
+static void player_note_data_layout(PlayerApp *app) {
+    static NkUserDataLayout layout;
+    if (nk_platform_user_data_layout(&layout) &&
+        nk_data_layout_notice(&layout, app->data_folder_notice, sizeof(app->data_folder_notice))) {
+        fprintf(stderr, "[PLAYER] %s\n", app->data_folder_notice);
+    }
+}
+
 static void player_run_init(PlayerRun *run) {
     memset(run, 0, sizeof(*run));
     player_app_init(&run->app);
+    player_note_data_layout(&run->app);
     const char *executable_directory = SDL_GetBasePath();
     if (executable_directory) {
         player_app_discover_showcase(&run->app, executable_directory);

@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
+/* realpath() is XSI rather than base POSIX: -std=c99 on glibc declares it only with this. */
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
 /* setenv/unsetenv are POSIX: without this, -std=c99 on glibc leaves them undeclared. */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -832,6 +836,11 @@ static void test_per_title_scope_and_atomic_save(void) {
      * not a silently global launch. Point the per-user config location at a
      * regular file so creating the profile directory cannot succeed. */
     {
+#if defined(__APPLE__)
+#define NK_TEST_USER_ROOT_ENV "HOME"
+#else
+#define NK_TEST_USER_ROOT_ENV "XDG_DATA_HOME"
+#endif
         const char *blocker_file = SR_SELFTEST_BUILD_ROOT "/test_config_blocker";
         FILE *bf = fopen(blocker_file, "wb");
         assert(bf != NULL);
@@ -844,12 +853,21 @@ static void test_per_title_scope_and_atomic_save(void) {
 #elif defined(__ANDROID__)
         const char *config_root_env = "NK_ANDROID_DATA_DIR";
 #else
-        const char *config_root_env = "XDG_CONFIG_HOME";
+        /* Every other POSIX host keeps config under the unified root (#324): the data
+           base (XDG_DATA_HOME on Linux, HOME on macOS) is what a regular file blocks. */
+        const char *config_root_env = NK_TEST_USER_ROOT_ENV;
 #endif
         const char *saved = getenv(config_root_env);
         char saved_copy[1024];
         if (saved) snprintf(saved_copy, sizeof(saved_copy), "%s", saved);
+#if defined(_WIN32) || defined(_WIN64) || defined(__ANDROID__)
         test_setenv(config_root_env, blocker_file);
+#else
+        /* An absolute path: a relative XDG value is ignored, as the XDG spec says (#324). */
+        static char blocker_absolute[4096];
+        assert(realpath(blocker_file, blocker_absolute) != NULL);
+        test_setenv(config_root_env, blocker_absolute);
+#endif
         char blocked_path[NK_MAX_PATH];
         blocked_path[0] = 'x';
         assert(input_settings_write_disc_profile(&after_failed, "UCUS98701", blocked_path,

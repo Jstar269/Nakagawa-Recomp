@@ -4,6 +4,7 @@
 #if defined(_WIN32) || defined(_WIN64)
 
 #include "nk_platform.h"
+#include "nk_data_migrate.h"
 #include "nk_types.h"
 #include <windows.h>
 #include <shellapi.h>
@@ -801,6 +802,12 @@ bool nk_platform_resolve_app_data_dir(char *out_path, size_t max_len) {
 
 bool nk_platform_resolve_path(NkPathType type, char *out_path, size_t max_len) {
     return resolve_windows_path(type, out_path, max_len);
+}
+
+/* Windows has one layout, %LOCALAPPDATA%\Nakagawa, so there is nothing to decide (#324). */
+bool nk_platform_user_data_layout(struct NkUserDataLayout *out) {
+    if (out) memset(out, 0, sizeof(*out));
+    return false;
 }
 
 bool nk_platform_get_executable_path(char *out_path, size_t max_len) {

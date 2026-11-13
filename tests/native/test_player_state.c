@@ -16490,6 +16490,7 @@ int main(int argc, char **argv) {
         char oversized_cache_root[NK_MAX_PATH * 2];
         memset(oversized_cache_root, 'x', sizeof(oversized_cache_root) - 1);
         oversized_cache_root[sizeof(oversized_cache_root) - 1] = '\0';
+        oversized_cache_root[0] = '/'; /* absolute: a relative XDG value is ignored (#324) */
         set_environment_value(cache_root_env, oversized_cache_root);
         rep->enable_focus_handoff = true;
         assert(!player_app_launch_game(rep, 0));

@@ -31,6 +31,82 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CHUNK_SIZE = 64 * 1024
 
 
+# The data folder layout of a Linux or macOS install (#324). src/core/nk_data_migrate.h has the rule,
+# what "exists" means, and the table of cases that tools/test_prereq_fetcher.py shares with the
+# player's test; src/core/nk_platform_posix.c is the player's side of it.
+_PATH_LIMIT = 512  # NK_MAX_PATH: the player cannot name a folder whose path is this long
+_LAYOUT_DECISIONS: dict[tuple[str, ...], bool] = {}
+
+
+def _named(path: str) -> str:
+    return path if len(os.fsencode(path)) < _PATH_LIMIT else ""
+
+
+def _layout_folders(old: bool, platform: str) -> tuple[str, str, str]:
+    """The (config, data, saves) folders of one layout as the player names them; "" for none.
+
+    The old layout reads HOME and the XDG variables exactly as the player did before #324. The new
+    one ignores a relative XDG value, as the XDG Base Directory specification says.
+    """
+    home = os.environ.get("HOME")
+    if platform == "darwin":
+        if home is None or (not old and not home):
+            return ("", "", "")
+        root = home + ("/Library/Application Support/NakagawaRecomp" if old
+                       else "/Library/Application Support/Nakagawa")
+        return (_named(root + "/config"), _named(root + "/data"), _named(root + "/saves"))
+    if old:
+        config_home = os.environ.get("XDG_CONFIG_HOME")
+        data_home = os.environ.get("XDG_DATA_HOME")
+        config = (config_home + "/nakagawa-recomp" if config_home
+                  else home + "/.config/nakagawa-recomp" if home else "")
+        data = (data_home + "/nakagawa-recomp" if data_home
+                else home + "/.local/share/nakagawa-recomp" if home else "")
+        return (_named(config), _named(data), _named(data + "/saves") if data else "")
+    data_home = os.environ.get("XDG_DATA_HOME", "")
+    if data_home and os.path.isabs(data_home):  # a leading "/" on POSIX, where the rule runs
+        base = data_home.rstrip("/") or "/"
+    elif home:
+        base = home + "/.local/share"
+    else:
+        return ("", "", "")
+    if len(os.fsencode(base)) >= _PATH_LIMIT:
+        return ("", "", "")
+    root = base + "/Nakagawa"
+    return (_named(root + "/config"), _named(root + "/data"), _named(root + "/saves"))
+
+
+def _exists(folders: tuple[str, str, str]) -> bool:
+    """A layout's settings, data or saves folder is present, by lstat (nk_data_migrate.h): an empty
+    folder or a dangling link counts, and nothing inside is read."""
+    return any(folder and os.path.lexists(folder) for folder in folders)
+
+
+def _old_layout_in_use(platform: str) -> bool:
+    """The player's rule: the old layout when it exists, else the new one. Decided once per process
+    for the same HOME and XDG variables, as in the player; nothing is recorded on disk."""
+    key = (platform,) + tuple(
+        "-" if value is None else "=" + value
+        for value in (os.environ.get(name) for name in ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"))
+    )
+    if key not in _LAYOUT_DECISIONS:
+        _LAYOUT_DECISIONS[key] = _exists(_layout_folders(True, platform))
+    return _LAYOUT_DECISIONS[key]
+
+
+def _data_root_before_324() -> Path:
+    """The old layout's data folder, as the player names it. Like the player, which never read the
+    password database, the tools name none without HOME or XDG_DATA_HOME: the old layout can be in
+    use through XDG_CONFIG_HOME alone, and then there is no data folder (DATA_DIR_UNAVAILABLE)."""
+    data = _layout_folders(True, sys.platform)[1]
+    if not data:
+        raise PrerequisiteFetchError(
+            "DATA_DIR_UNAVAILABLE: set HOME to locate per-user data." if sys.platform == "darwin"
+            else "DATA_DIR_UNAVAILABLE: set XDG_DATA_HOME or HOME to locate per-user data."
+        )
+    return Path(data)
+
+
 def default_data_root() -> Path:
     """Return the player's per-user data root; never place downloads by an ISO."""
     if os.name == "nt":
@@ -41,21 +117,16 @@ def default_data_root() -> Path:
                 "does not identify an application-data directory."
             )
         return Path(base) / "Nakagawa" / "data"
-    if sys.platform == "darwin":
-        try:
-            return Path.home() / "Library" / "Application Support" / "NakagawaRecomp" / "data"
-        except RuntimeError as exc:
-            raise PrerequisiteFetchError(
-                "DATA_DIR_UNAVAILABLE: set HOME to locate per-user data."
-            ) from exc
-    if os.name == "posix" and os.environ.get("XDG_DATA_HOME"):
-        return Path(os.environ["XDG_DATA_HOME"]) / "nakagawa-recomp"
-    try:
-        return Path.home() / ".local" / "share" / "nakagawa-recomp"
-    except RuntimeError as exc:
+    if _old_layout_in_use(sys.platform):
+        return _data_root_before_324()
+    data = _layout_folders(False, sys.platform)[1]
+    if not data:
         raise PrerequisiteFetchError(
-            "DATA_DIR_UNAVAILABLE: set XDG_DATA_HOME or HOME to locate per-user data."
-        ) from exc
+            "DATA_DIR_UNAVAILABLE: set HOME to locate per-user data." if sys.platform == "darwin"
+            else "DATA_DIR_UNAVAILABLE: set XDG_DATA_HOME (an absolute path) or HOME to locate "
+            "per-user data."
+        )
+    return Path(data)
 
 
 def _safe_relative_path(value: object) -> PurePosixPath:

@@ -1050,6 +1050,10 @@ struct PlayerApp {
     /* Why the library shows no saved games although library.json exists (a newer
      * player wrote it), or an empty string. Shown on the Library screen. */
     char library_notice[192];
+    /* The earlier data folders of a Linux or macOS install are in use and the new one exists too
+     * (#324, nk_data_layout_notice): both named, for the whole run, or an empty string. Shown on
+     * the Library screen. */
+    char data_folder_notice[4u * NK_MAX_PATH + 192u]; /* NK_DATA_LAYOUT_NOTICE_MAX */
 
     /* Files dropped on the window together (#2007): SDL sends them one event at a
      * time between a begin and a complete. Several are gathered in a batch, the

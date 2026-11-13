@@ -50,6 +50,7 @@ set(CORE_SOURCES
     src/core/nk_disc_verify.c
     src/core/nk_zip.c
     src/core/nk_steam_shortcuts.c
+    src/core/nk_data_migrate.c
     src/core/generated/nk_title_catalog.c
 )
 
@@ -662,6 +663,14 @@ add_executable(test_portable_mode
 target_include_directories(test_portable_mode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
 target_link_libraries(test_portable_mode PRIVATE nakagawa_core)
 add_test(NAME portable_mode_test COMMAND test_portable_mode)
+
+add_executable(test_data_migrate
+    tests/native/test_data_migrate.c
+    tests/native/native_test_isolation.c
+)
+target_include_directories(test_data_migrate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
+target_link_libraries(test_data_migrate PRIVATE nakagawa_core)
+add_test(NAME data_migrate_test COMMAND test_data_migrate)
 
 if(WIN32)
     add_executable(argv_echo_helper tests/native/argv_echo_helper.c)

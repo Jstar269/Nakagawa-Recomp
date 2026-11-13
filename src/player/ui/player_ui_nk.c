@@ -265,7 +265,8 @@ struct PlayerUiNk {
     bool rebuild_focus_pending;
     char rebuild_text[256];
     char rebuild_notice[96];
-    char library_notice[448];   /* the library file's notice and the drop summary together */
+    /* the data folder notice, the library file's notice and the drop summary together */
+    char library_notice[4u * NK_MAX_PATH + 192u + 192u + 256u + 4u];
     char verify_notice[96];     /* the library's disc check line */
     /* A rebuilding card's status word with its progress ("Rebuilding 40%"),
        or a queued card's with its place ("Queued 2 of 4"). */
@@ -3677,16 +3678,17 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                      "Version %.40s is out", app->update.check.newest.version);
             model.update_notice = player->update_notice;
         }
-        if (app->library_notice[0] != '\0' && app->drop_notice[0] != '\0') {
-            snprintf(player->library_notice, sizeof(player->library_notice), "%s %s",
-                     app->library_notice, app->drop_notice);
-            model.library_notice = player->library_notice;
-        } else if (app->library_notice[0] != '\0') {
-            model.library_notice = app->library_notice;
-        } else if (app->drop_notice[0] != '\0') {
-            /* The one summary of files dropped together (#2007). */
-            model.library_notice = app->drop_notice;
+        /* The data folder notice (#324), the library file's notice and the one summary of files
+           dropped together (#2007), in that order. */
+        const char *notices[3] = {app->data_folder_notice, app->library_notice, app->drop_notice};
+        player->library_notice[0] = '\0';
+        for (size_t i = 0u; i < 3u; ++i) {
+            if (notices[i][0] == '\0') continue;
+            size_t used = strlen(player->library_notice);
+            snprintf(player->library_notice + used, sizeof(player->library_notice) - used, "%s%s",
+                     used ? " " : "", notices[i]);
         }
+        if (player->library_notice[0] != '\0') model.library_notice = player->library_notice;
         if (player_app_rebuild_banner_visible(app)) {
             (void)player_app_rebuild_banner_text(app, player->rebuild_notice,
                                                  sizeof(player->rebuild_notice),
