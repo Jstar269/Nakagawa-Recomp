@@ -2898,7 +2898,7 @@ static void vc_fill(void) {
     for (unsigned i = 0; i < VC_SKIN_N; i++) {
         uint8_t *v = SR_HOST(VC_SKIN + i * 2u * VC_SKIN_ONE);
         for (unsigned t = 0; t < 2u; t++) {
-            uint8_t *p = v + t * VC_SKIN_ONE;
+            uint8_t *p = v + (size_t)t * VC_SKIN_ONE;
             float w[2] = { vc_rand(0.2f, 0.8f), vc_rand(0.2f, 0.8f) };
             float x, y, z;
             vc_grid(i, &x, &y, &z);
@@ -3070,7 +3070,11 @@ static void (*s_vc_change)(void);
 static void vc_run_case(VcCase *c) {
     uint32_t index_addr = VC_INDICES;
     if (c->indices) {
-        size_t bytes = c->count * ((c->vtype & VT_INDEX16) ? 2u : 1u);
+        size_t bytes = (size_t)c->count * ((c->vtype & VT_INDEX16) ? 2u : 1u);
+        if (bytes > VC_TEX - VC_INDICES) {   /* the index area ends where the texture starts */
+            expect(0, c->name, "the case's indices overrun the index area");
+            return;
+        }
         memcpy(SR_HOST(index_addr), c->indices, bytes);
     }
     s_pc = VC_LIST;
@@ -3134,8 +3138,8 @@ static void test_ge_vertex_cache(int strip_cache) {
     /* Colour from guest VRAM (the linear view maps one to one), depth from the GE's own depth
      * buffer for the target (ge_zbuf_ptr), 128x128 each. */
     enum { PIXELS = 128 * 128 };
-    uint32_t *fb[2] = { (uint32_t *)malloc(PIXELS * 4u), (uint32_t *)malloc(PIXELS * 4u) };
-    uint16_t *zb[2] = { (uint16_t *)malloc(PIXELS * 2u), (uint16_t *)malloc(PIXELS * 2u) };
+    uint32_t *fb[2] = { (uint32_t *)malloc((size_t)PIXELS * 4u), (uint32_t *)malloc((size_t)PIXELS * 4u) };
+    uint16_t *zb[2] = { (uint16_t *)malloc((size_t)PIXELS * 2u), (uint16_t *)malloc((size_t)PIXELS * 2u) };
     GeCpuProfileStats profile[2];
     unsigned long total_hits[2] = { 0, 0 }, total_misses[2] = { 0, 0 };
     unsigned total_uses = 0;
@@ -3146,7 +3150,7 @@ static void test_ge_vertex_cache(int strip_cache) {
     }
     vc_fill();
     vc_build_indices();
-    memcpy(SR_HOST(VC_VRAM_VERTS), SR_HOST(VC_PLAIN), 256u * VC_PLAIN_STRIDE);
+    memcpy(SR_HOST(VC_VRAM_VERTS), SR_HOST(VC_PLAIN), (size_t)256u * VC_PLAIN_STRIDE);
     for (unsigned i = 0; i < N; i++) total_uses += vc_uses(&cases[i], strip_cache);
 
     for (int run = 0; run < 2; run++) {
@@ -3188,13 +3192,13 @@ static void test_ge_vertex_cache(int strip_cache) {
                        "the disabled cache counted");
             }
         }
-        memcpy(fb[run], SR_HOST(VC_FB), PIXELS * 4u);
+        memcpy(fb[run], SR_HOST(VC_FB), (size_t)PIXELS * 4u);
         const uint16_t *depth_buffer = ge_zbuf_ptr();
         uint32_t depth_stride = ge_zbuf_stride();
         expect(depth_buffer && depth_stride == 128u, "vertex_cache", "no depth buffer for the target");
         for (uint32_t y = 0; y < 128u; y++)
             for (uint32_t x = 0; x < 128u; x++)
-                zb[run][y * 128u + x] = depth_buffer ? depth_buffer[y * depth_stride + x] : 0u;
+                zb[run][(size_t)y * 128u + x] = depth_buffer ? depth_buffer[(size_t)y * depth_stride + x] : 0u;
         profile[run] = snapshot();
         expect_consistent(cache_on ? "vertex_cache_on" : "vertex_cache_off", &profile[run]);
     }
@@ -3260,13 +3264,13 @@ static uint16_t s_vc_u16_grid[15 * 15 * 6];
 static uint8_t s_vc_saved[VC_PLAIN_N * VC_PLAIN_STRIDE + VC_SKIN_N * 2u * VC_SKIN_ONE];
 
 static void vc_save_vertices(void) {
-    memcpy(s_vc_saved, SR_HOST(VC_PLAIN), VC_PLAIN_N * VC_PLAIN_STRIDE);
-    memcpy(s_vc_saved + VC_PLAIN_N * VC_PLAIN_STRIDE, SR_HOST(VC_SKIN), VC_SKIN_N * 2u * VC_SKIN_ONE);
+    memcpy(s_vc_saved, SR_HOST(VC_PLAIN), (size_t)VC_PLAIN_N * VC_PLAIN_STRIDE);
+    memcpy(s_vc_saved + (size_t)VC_PLAIN_N * VC_PLAIN_STRIDE, SR_HOST(VC_SKIN), (size_t)VC_SKIN_N * 2u * VC_SKIN_ONE);
 }
 
 static void vc_restore_vertices(void) {
-    memcpy(SR_HOST(VC_PLAIN), s_vc_saved, VC_PLAIN_N * VC_PLAIN_STRIDE);
-    memcpy(SR_HOST(VC_SKIN), s_vc_saved + VC_PLAIN_N * VC_PLAIN_STRIDE, VC_SKIN_N * 2u * VC_SKIN_ONE);
+    memcpy(SR_HOST(VC_PLAIN), s_vc_saved, (size_t)VC_PLAIN_N * VC_PLAIN_STRIDE);
+    memcpy(SR_HOST(VC_SKIN), s_vc_saved + (size_t)VC_PLAIN_N * VC_PLAIN_STRIDE, (size_t)VC_SKIN_N * 2u * VC_SKIN_ONE);
 }
 
 /* The guest rewrites the grid's colours and depths in place between the draws. */
@@ -3325,12 +3329,12 @@ typedef struct {
 } VcChange;
 
 static void vc_snap(uint32_t *fb, uint16_t *zb) {
-    memcpy(fb, SR_HOST(VC_FB), 128u * 128u * 4u);
+    memcpy(fb, SR_HOST(VC_FB), (size_t)128u * 128u * 4u);
     const uint16_t *depth_buffer = ge_zbuf_ptr();
     uint32_t depth_stride = ge_zbuf_stride();
     for (uint32_t y = 0; y < 128u; y++)
         for (uint32_t x = 0; x < 128u; x++)
-            zb[y * 128u + x] = depth_buffer ? depth_buffer[y * depth_stride + x] : 0u;
+            zb[(size_t)y * 128u + x] = depth_buffer ? depth_buffer[(size_t)y * depth_stride + x] : 0u;
 }
 
 static void test_ge_vertex_cache_changes(void) {
@@ -3354,8 +3358,8 @@ static void test_ge_vertex_cache_changes(void) {
     };
     enum { N = sizeof changes / sizeof changes[0], PIXELS = 128 * 128 };
     /* [run][change]: the second draw's image; [change]: the first draw's with the cache off. */
-    uint32_t *fb2 = (uint32_t *)malloc(2u * N * PIXELS * 4u), *fb1 = (uint32_t *)malloc(N * PIXELS * 4u);
-    uint16_t *zb2 = (uint16_t *)malloc(2u * N * PIXELS * 2u), *zb1 = (uint16_t *)malloc(N * PIXELS * 2u);
+    uint32_t *fb2 = (uint32_t *)malloc((size_t)2u * N * PIXELS * 4u), *fb1 = (uint32_t *)malloc((size_t)N * PIXELS * 4u);
+    uint16_t *zb2 = (uint16_t *)malloc((size_t)2u * N * PIXELS * 2u), *zb1 = (uint16_t *)malloc((size_t)N * PIXELS * 2u);
     if (!fb2 || !fb1 || !zb2 || !zb1) {
         expect(0, "vertex_cache_change", "no memory for the snapshots");
         free(fb2); free(fb1); free(zb2); free(zb1);
@@ -3457,8 +3461,8 @@ static void test_ge_vertex_cache_overwrite(void) {
         { "vertex_cache_overwrite[ram-target]", VC_PLAIN },
         { "vertex_cache_overwrite[vram-target]", VC_VRAM_OVER_VERTS },
     };
-    uint8_t *saved = (uint8_t *)malloc(2u * R * REGION);
-    uint8_t *after = (uint8_t *)malloc(2u * 2u * R * REGION);   /* [run][kind][row] */
+    uint8_t *saved = (uint8_t *)malloc((size_t)2u * R * REGION);
+    uint8_t *after = (uint8_t *)malloc((size_t)2u * 2u * R * REGION);   /* [run][kind][row] */
     if (!saved || !after) {
         expect(0, "vertex_cache_overwrite", "no memory for the snapshots");
         free(saved); free(after);
@@ -3466,10 +3470,10 @@ static void test_ge_vertex_cache_overwrite(void) {
     }
     vc_fill();
     vc_quads(0, 15, 0, 15, s_vc_u16_grid);
-    memcpy(SR_HOST(VC_VRAM_OVER_VERTS), SR_HOST(VC_PLAIN), 256u * VC_PLAIN_STRIDE);
+    memcpy(SR_HOST(VC_VRAM_OVER_VERTS), SR_HOST(VC_PLAIN), (size_t)256u * VC_PLAIN_STRIDE);
     for (unsigned k = 0; k < 2u; k++)
         for (unsigned r = 0; r < R; r++)
-            memcpy(saved + (k * R + r) * (size_t)REGION, SR_HOST(kinds[k].vaddr - rows[r] * 512u), REGION);
+            memcpy(saved + ((size_t)k * R + r) * REGION, SR_HOST(kinds[k].vaddr - rows[r] * 512u), REGION);
 
     for (int run = 0; run < 2; run++) {
         int cache_on = run == 0;
@@ -3481,7 +3485,7 @@ static void test_ge_vertex_cache_overwrite(void) {
                                 s_vc_u16_grid, 0, 0.0f, k == 1u, 0, 0, 0 };
                 s_vc_target = kinds[k].vaddr - rows[r] * 512u;
                 vc_clear();   /* the depth buffer; the colour it clears is elsewhere */
-                memcpy(SR_HOST(s_vc_target), saved + (k * R + r) * (size_t)REGION, REGION);
+                memcpy(SR_HOST(s_vc_target), saved + ((size_t)k * R + r) * REGION, REGION);
                 s_vc_change = vc_change_target;
                 vc_run_case(&draw);
                 s_vc_change = NULL;
@@ -3498,7 +3502,7 @@ static void test_ge_vertex_cache_overwrite(void) {
     }
     for (unsigned k = 0; k < 2u; k++)
         for (unsigned r = 0; r < R; r++)
-            memcpy(SR_HOST(kinds[k].vaddr - rows[r] * 512u), saved + (k * R + r) * (size_t)REGION, REGION);
+            memcpy(SR_HOST(kinds[k].vaddr - rows[r] * 512u), saved + ((size_t)k * R + r) * REGION, REGION);
     env_set("SR_GE_VERTEX_CACHE_DISABLE", NULL);
     ge_vertex_cache_reload_env();   /* anything after this sees the cache on */
 
@@ -3510,7 +3514,7 @@ static void test_ge_vertex_cache_overwrite(void) {
             const uint8_t *orig = saved + ((size_t)k * R + r) * REGION;
             for (uint32_t i = 0; i < REGION; i++)
                 if (on[i] != off[i]) diff++;
-            for (uint32_t i = rows[r] * 512u; i < rows[r] * 512u + 256u * VC_PLAIN_STRIDE; i++)
+            for (size_t i = (size_t)rows[r] * 512u; i < (size_t)rows[r] * 512u + (size_t)256u * VC_PLAIN_STRIDE; i++)
                 if (off[i] != orig[i]) rewritten++;
         }
         char what[200];
@@ -3538,7 +3542,7 @@ static void test_ge_vertex_cache_overwrite(void) {
 #define VC_WIDE_VERTS 0x08400000u
 #define VC_WIDE_WIDTH 65535u
 #define VC_WIDE_ROW   271u
-#define VC_WIDE_FB    (VC_WIDE_VERTS - VC_WIDE_ROW * VC_WIDE_WIDTH * 4u)   /* 0x0404063C */
+#define VC_WIDE_FB    (VC_WIDE_VERTS - VC_WIDE_ROW * VC_WIDE_WIDTH * 4u)   /* 0x0404043C */
 #define VC_WIDE_BYTES 2048u                                               /* 512 columns of 8888 */
 
 static uint16_t s_vc_wide_indices[180];
@@ -3559,7 +3563,7 @@ static void test_ge_vertex_cache_overwrite_wide(void) {
     vc_fill();
     vc_quads(0, 2, 0, 15, s_vc_wide_indices);            /* 30 quads over vertices 0 to 47 */
     memset(SR_HOST(VC_WIDE_VERTS), 0, VC_WIDE_BYTES);
-    memcpy(SR_HOST(VC_WIDE_VERTS), SR_HOST(VC_PLAIN), 48u * VC_PLAIN_STRIDE);
+    memcpy(SR_HOST(VC_WIDE_VERTS), SR_HOST(VC_PLAIN), (size_t)48u * VC_PLAIN_STRIDE);
     memcpy(saved, SR_HOST(VC_WIDE_VERTS), VC_WIDE_BYTES);
     for (int run = 0; run < 2; run++) {
         int cache_on = run == 0;

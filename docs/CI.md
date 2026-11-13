@@ -473,7 +473,7 @@ times with `SR_GE_VERTEX_CACHE_MUTANT` (1: no new epoch per draw, 2: no address 
 vertices cached, 4: cached while rendering to RAM, 5: no check that a VRAM target's rows stay
 below main RAM) in its own build subdirectory and runs the selftest against each; each must
 fail with its own message, mutant 1 must also fail all sixteen state-change pairs with
-differing pixels, and 3, 4 and 5 must fail by differing target bytes. The four mutant builds
+differing pixels, and 3, 4 and 5 must fail by differing target bytes. The five mutant builds
 and runs took 40 to 70 seconds on a 12-core Windows desktop under load (2026-11-11), once per
 suite run.
 
