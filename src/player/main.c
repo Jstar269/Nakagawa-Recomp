@@ -748,6 +748,7 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
                        app->active_view == VIEW_PSP_FONTS ||
                        app->active_view == VIEW_UPDATES ||
                        app->active_view == VIEW_CONFIRM_FACTORY_RESET ||
+                       app->active_view == VIEW_CONFIRM_DATA_MOVE ||
                        app->active_view == VIEW_ONLINE_SETTINGS ||
                        app->active_view == VIEW_ACCESSIBILITY_SETTINGS ||
                        app->active_view == VIEW_PROBLEM_REPORT) {
@@ -856,6 +857,7 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
                        app->active_view == VIEW_PSP_FONTS ||
                        app->active_view == VIEW_UPDATES ||
                        app->active_view == VIEW_CONFIRM_FACTORY_RESET ||
+                       app->active_view == VIEW_CONFIRM_DATA_MOVE ||
                        app->active_view == VIEW_ONLINE_SETTINGS ||
                        app->active_view == VIEW_ACCESSIBILITY_SETTINGS ||
                        app->active_view == VIEW_PROBLEM_REPORT) {
@@ -1749,6 +1751,13 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
             break;
         /* The event loop runs the reset: it owns the background jobs. */
         case PLAYER_UI_SETTINGS_FACTORY_RESET: app->request_factory_reset = true; break;
+        case PLAYER_UI_SETTINGS_OPEN_DATA_MOVE:
+            if (app->data_move_offered) player_app_set_view(app, VIEW_CONFIRM_DATA_MOVE);
+            break;
+        /* The event loop runs the move too, for the same reason. */
+        case PLAYER_UI_SETTINGS_MOVE_DATA:
+            if (app->data_move_offered) app->request_data_move = true;
+            break;
         case PLAYER_UI_SETTINGS_OPEN_BUILD_CACHE: player_app_set_view(app, VIEW_BUILD_CACHE); break;
         case PLAYER_UI_SETTINGS_TOGGLE_SHARE_LIBRARIES:
             player_app_toggle_share_system_libraries(app);
@@ -3461,52 +3470,32 @@ static void player_open_migration_folder(const char *path) {
     }
 }
 
-/* One data folder name on every host (#324): a Linux or macOS profile from before the rename is
-   moved into place once, before anything reads it (nk_data_migrate.h). Only a folder that
-   matters (library, saves, settings) can stop the start: then the message names both folders and
-   offers to open them, so no terminal is needed. A start that keeps the old folders (another
-   Nakagawa still using them among the reasons) goes on and says so once. From here on this process
-   holds the shared in-use lock, so no later start moves the folders under it or the games it
-   starts. False to stop the start. */
-static bool player_migrate_user_data(void) {
-    static NkDataMigration migration;
-    nk_data_migrate_host(&migration);
-    if (migration.log[0]) fprintf(stderr, "[PLAYER] %s", migration.log);
-    switch (migration.status) {
-    case NK_MIGRATE_NOTHING:
-        return true;
-    case NK_MIGRATE_DONE:
-        printf("[PLAYER] %s (%zu folder(s) moved)\n", migration.message, migration.moved);
-        return true;
-    case NK_MIGRATE_KEPT_OLD:
-        fprintf(stderr, "[PLAYER] %s\n", migration.message);
-        if (nk_data_migrate_notice_is_new(&migration)) {
-            (void)SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION,
-                                           "Nakagawa Recomp kept your data folders",
-                                           migration.message, NULL);
-        }
-        return true;
-    case NK_MIGRATE_REFUSED:
-    case NK_MIGRATE_FAILED:
-        break;
-    }
-    fprintf(stderr, "[PLAYER] %s\n", migration.message);
+/* The data folders this start uses (#324, nk_data_migrate.h), decided once before anything reads
+   them. Settings offers the move from it, and the library screen shows its notice. */
+static NkLayoutDecision s_data_layout;
+
+/* One data folder name on every host (#324): a Linux or macOS start uses the earlier folders while
+   they hold the data, and nothing moves at a start except to finish or undo a move the user started
+   that was interrupted. Only when neither can be done does the start stop: the message names both
+   folders and each one's state, and offers to open them, so no terminal is needed. False to stop
+   the start. */
+static bool player_decide_data_layout(void) {
+    nk_data_layout_host(&s_data_layout);
+    if (s_data_layout.log[0]) fprintf(stderr, "[PLAYER] %s", s_data_layout.log);
+    if (s_data_layout.notice[0]) fprintf(stderr, "[PLAYER] %s\n", s_data_layout.notice);
+    if (s_data_layout.layout != NK_LAYOUT_BLOCKED) return true;
+    fprintf(stderr, "[PLAYER] %s\n", s_data_layout.message);
     /* Quit is the Return and Escape default: nothing happens without a choice. */
     const SDL_MessageBoxButtonData buttons[] = {
         { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT | SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0,
           "Quit" },
         { 0, 1, "Open both folders" }
     };
-    /* A late writer (an older copy still running when the folders moved) is not a failure to move:
-       the message says which folder is in use and what the other one holds. */
-    const bool late = strncmp(migration.message, NK_MIGRATE_CODE_LATE_WRITES,
-                              strlen(NK_MIGRATE_CODE_LATE_WRITES)) == 0;
     const SDL_MessageBoxData dialog = {
-        late ? SDL_MESSAGEBOX_WARNING : SDL_MESSAGEBOX_ERROR,
+        SDL_MESSAGEBOX_ERROR,
         NULL,
-        late ? "Nakagawa Recomp found newer files in an earlier folder"
-             : "Nakagawa Recomp can't move your data folder",
-        migration.message,
+        "Nakagawa Recomp can't finish moving your data folder",
+        s_data_layout.message,
         (int)(sizeof(buttons) / sizeof(buttons[0])),
         buttons,
         NULL
@@ -3517,10 +3506,76 @@ static bool player_migrate_user_data(void) {
         return false;
     }
     if (button_id == 1) {
-        player_open_migration_folder(migration.folder_a);
-        player_open_migration_folder(migration.folder_b);
+        player_open_migration_folder(s_data_layout.folder_a);
+        player_open_migration_folder(s_data_layout.folder_b);
     }
     return false;
+}
+
+/* What the start decided, for Settings and the library screen: the notice for the whole run, and
+   the move while the earlier folders are in use. A start with --user-data-root or in portable mode
+   decided nothing, so it offers nothing. */
+static void player_note_data_layout(PlayerApp *app) {
+    snprintf(app->data_folder_notice, sizeof(app->data_folder_notice), "%s", s_data_layout.notice);
+    app->data_move_offered = false;
+    if (!s_data_layout.can_move) return;
+    NkDataMigrationPlan plan;
+    if (!nk_platform_user_data_plan(&plan)) return;
+    snprintf(app->data_folder_in_use, sizeof(app->data_folder_in_use), "%s", s_data_layout.folder_a);
+    snprintf(app->data_folder_new, sizeof(app->data_folder_new), "%s", plan.new_root);
+    app->data_move_offered = true;
+}
+
+/* Settings > Move my data (#324): the user's move, run by the event loop once no job of this
+   player is using the folders. nk_data_migrate_move checks the rest (a game, another window, the
+   locks, links, disks, a newer library) and refuses by name before touching anything. After the
+   move, or a failed one it could not put back, this process quits without saving anything and
+   starts again on the folders the start decides. */
+static void player_move_data(PlayerApp *app) {
+    static NkDataMigrationPlan plan;
+    static NkDataMigration result;
+    if (!nk_platform_user_data_plan(&plan)) {
+        player_app_set_error(app, NK_MIGRATE_CODE_FAILED, "Your data was not moved",
+                             "Nakagawa Recomp could not work out the new data folder on this "
+                             "computer. Nothing was moved.", "Back to settings", VIEW_SETTINGS);
+        return;
+    }
+    nk_data_migrate_move(&plan, app->is_game_running || app->launch_pending, &result);
+    if (result.log[0]) fprintf(stderr, "[PLAYER] %s", result.log);
+    fprintf(stderr, "[PLAYER] %s\n", result.message);
+    if (result.must_restart) {
+        if (result.status != NK_MIGRATE_DONE) {
+            (void)SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "Your data was not fully moved",
+                                           result.message, NULL);
+        }
+        app->data_move_offered = false;
+        app->data_move_done = true;
+        app->should_quit = true;
+        return;
+    }
+    if (result.status == NK_MIGRATE_NOTHING) {
+        /* Another window moved it, or the earlier folders are empty now. */
+        app->data_move_offered = false;
+    }
+    /* The message starts with its code: "CODE: what happened". */
+    char code[64] = NK_MIGRATE_CODE_FAILED;
+    const char *colon = strchr(result.message, ':');
+    if (colon && (size_t)(colon - result.message) < sizeof(code) && colon != result.message) {
+        snprintf(code, sizeof(code), "%.*s", (int)(colon - result.message), result.message);
+    }
+    const char *body = colon ? colon + 1 : result.message;
+    while (*body == ' ') ++body;
+    const char *title = result.status == NK_MIGRATE_NOTHING ? "Nothing to move"
+                                                            : "Your data was not moved";
+    if (strlen(body) < sizeof(app->last_error.message)) {
+        player_app_set_error(app, code, title, body, "Back to settings", VIEW_SETTINGS);
+    } else {
+        /* A message naming long folders is shown whole as the card's details. */
+        player_app_set_error_with_details(app, code, title,
+                                          "Nakagawa Recomp did not move your data, and nothing was "
+                                          "moved or deleted. The details say why and what to do.",
+                                          body, "Back to settings", VIEW_SETTINGS);
+    }
 }
 
 /* --user-data-root=<folder> makes this process keep its library, title
@@ -3548,10 +3603,10 @@ static bool player_apply_user_data_root(int argc, char *argv[]) {
                                            portable.message, NULL);
             return false;
         }
-        /* One data folder name on every host (#324): a Linux or macOS profile from before
-           the rename is moved into place once, before anything reads it. Only the default
-           per-user root migrates; portable mode and --user-data-root name their own folder. */
-        if (portable.state == NK_PORTABLE_ABSENT && !player_migrate_user_data()) return false;
+        /* One data folder name on every host (#324): which folders a Linux or macOS start
+           uses is decided once, before anything reads them. Only the default per-user root has
+           an earlier layout; portable mode and --user-data-root name their own folder. */
+        if (portable.state == NK_PORTABLE_ABSENT && !player_decide_data_layout()) return false;
     }
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], prefix, sizeof(prefix) - 1u) != 0) continue;
@@ -3890,6 +3945,7 @@ typedef struct PlayerRun {
 static void player_run_init(PlayerRun *run) {
     memset(run, 0, sizeof(*run));
     player_app_init(&run->app);
+    player_note_data_layout(&run->app);
     const char *executable_directory = SDL_GetBasePath();
     if (executable_directory) {
         player_app_discover_showcase(&run->app, executable_directory);
@@ -4579,6 +4635,17 @@ static void player_apply_test_view(PlayerApp *app, const char *test_view) {
             player_app_set_view(app, VIEW_UPDATES);
         } else if (strcmp(test_view, "factory-reset") == 0) {
             player_app_set_view(app, VIEW_CONFIRM_FACTORY_RESET);
+        } else if (strcmp(test_view, "data-move") == 0) {
+            /* The check as a Linux or macOS start on the earlier folders shows it; nothing is
+               moved without its Move button. */
+            app->data_move_offered = true;
+            if (app->data_folder_in_use[0] == '\0') {
+                snprintf(app->data_folder_in_use, sizeof(app->data_folder_in_use), "%s",
+                         "/home/user/.local/share/nakagawa-recomp");
+                snprintf(app->data_folder_new, sizeof(app->data_folder_new), "%s",
+                         "/home/user/.local/share/Nakagawa");
+            }
+            player_app_set_view(app, VIEW_CONFIRM_DATA_MOVE);
         } else if (strcmp(test_view, "psp-fonts") == 0) {
             player_app_refresh_font_status(app);
             player_app_set_view(app, VIEW_PSP_FONTS);
@@ -5479,6 +5546,25 @@ static void player_frame_render(PlayerRun *run) {
             (void)player_app_factory_reset(app, stamp);
         }
     }
+    if (app->request_data_move) {
+        app->request_data_move = false;
+        /* As for the factory reset: a worker may still have a file in the folders open. */
+        if (run->launch_job || run->package_status_job || s_update_job || run->disc_check_job ||
+            (run->staging_job && !run->staging_job->completion_handled) ||
+            (run->psn_job && !run->psn_job->completion_handled) || app->is_game_running ||
+            app->launch_pending || app->build_session.is_building ||
+            app->prerequisite_job_started || app->prerequisite_fetcher_started ||
+            app->update.phase == PLAYER_UPDATE_CHECKING ||
+            app->update.phase == PLAYER_UPDATE_DOWNLOADING ||
+            app->update.phase == PLAYER_UPDATE_INSTALLING) {
+            player_app_set_error(app, "DATA_MIGRATION_BUSY", "Moving your data has to wait",
+                                 "Stop the game, and let any check, build, tool download or "
+                                 "update finish, then move your data again. Nothing was moved.",
+                                 "Back to settings", VIEW_SETTINGS);
+        } else {
+            player_move_data(app);
+        }
+    }
     if (app->request_package_status_retry) {
         app->request_package_status_retry = false;
         player_app_runtime_package_cache_mark_explicit_retry(
@@ -5498,8 +5584,10 @@ static void player_frame_render(PlayerRun *run) {
 static int player_shutdown(PlayerRun *run) {
     PlayerApp *app = &run->app;
     /* A binding made in the same moment as the quit is written before closing; a
-       write that fails now has nowhere left to be shown, so it goes to the log. */
-    if (input_settings_flush(&app->input_settings) != NK_OK) {
+       write that fails now has nowhere left to be shown, so it goes to the log. After a
+       data move nothing is written: the folders this process started on are not the ones in
+       use any more (#324). */
+    if (!app->data_move_done && input_settings_flush(&app->input_settings) != NK_OK) {
         fprintf(stderr, "[PLAYER] Controls not saved: %s\n",
                 app->input_settings.save_diagnostic);
     }
@@ -5515,9 +5603,9 @@ static int player_shutdown(PlayerRun *run) {
         player_app_stop_game(app);
     }
 
-    /* After a factory reset nothing is saved: the settings would bring the
-       config folder back. */
-    if (run->interactive_window && !app->factory_reset_done) {
+    /* After a factory reset or a data move nothing is saved: the settings would
+       bring the config folder back. */
+    if (run->interactive_window && !app->factory_reset_done && !app->data_move_done) {
         player_capture_window_settings(app, run->window);
         player_app_save_settings(app, NULL);
     }
@@ -5581,6 +5669,20 @@ static int player_shutdown(PlayerRun *run) {
                             "not be started (%s). Start it again to set it up.\n", SDL_GetError());
             (void)SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Factory reset is done",
                                            "Start Nakagawa Recomp again to set it up.", NULL);
+        }
+    } else if (app->data_move_done) {
+        /* The new copy decides the folders afresh (and finishes or undoes a move left half
+           done), so this one lets go of the player lock first. */
+        nk_data_migrate_release_player_lock();
+        bool start_copy = run->interactive_window;
+        if (player_ui_test_skip_factory_restart(&run->ui_test)) {
+            start_copy = false;
+        }
+        if (start_copy && !player_start_fresh_copy()) {
+            fprintf(stderr, "[PLAYER] Your data was moved, but a new copy of the player could not "
+                            "be started (%s). Start it again.\n", SDL_GetError());
+            (void)SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Your data was moved",
+                                           "Start Nakagawa Recomp again to use it.", NULL);
         }
     }
     SDL_Quit();

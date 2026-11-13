@@ -141,38 +141,42 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   `~/.local/state/nakagawa-recomp/logs` (or under `$XDG_CACHE_HOME` and `$XDG_STATE_HOME`), as before. On
   Android the app's own private folder is the data folder itself, with `config`, `cache`, `logs` and
   `saves` inside it.
-- **If you used an earlier Linux or macOS build.** The first start of this version moves your library,
-  saves and settings into the new folder, once: Linux's `nakagawa-recomp` data folder and its
-  `~/.config/nakagawa-recomp` settings, or macOS's `NakagawaRecomp` with `Caches/NakagawaRecomp` and
-  `Logs/NakagawaRecomp`. Nothing is copied, and nothing is deleted but empty folders; each folder is
-  renamed, and the paths your library stored for converted games are rewritten to the new place (the old
-  file is kept as `library.json.pre-migration`). Two starts at once take turns. If one of these folders
-  cannot be moved, the folders already moved are moved back and the player does not start: it names
-  both folders and offers **Open both folders** and **Quit**. If moving one back fails too, or the
-  computer stops part-way, the message says so, and the next start finishes the move or names what is in
-  the way. The code at the start of the message says why: `DATA_MIGRATION_BOTH_PRESENT` when the new
-  folder already holds data as well (keep the one you want in `Nakagawa` and move the other aside),
-  `DATA_MIGRATION_OTHER_DISK` when the two are on different disks (Nakagawa does not copy saves between
-  disks; move them yourself), `DATA_MIGRATION_LATE_WRITES` when the earlier folder was made again after
-  a completed move (below), and `DATA_MIGRATION_FAILED` otherwise. A macOS cache or logs folder that
-  cannot be moved is left where it is and named in the log; it never stops the start. In these cases
-  the player keeps using your earlier folders, moves nothing and tells you once: the folder is a symbolic
-  link, or holds a relative link that would point elsewhere after the move (`DATA_MIGRATION_LINKED`);
-  your XDG folders point at each other (`DATA_MIGRATION_OVERLAP`); the folder belongs to another user
-  (`DATA_MIGRATION_OTHER_OWNER`); your library was written by a newer version of Nakagawa
-  (`DATA_MIGRATION_NEWER_LIBRARY`; the move waits for a version that understands it); or another
-  Nakagawa program may still be using the earlier folders (`DATA_MIGRATION_IN_USE`). An XDG variable
-  that is not an absolute path is ignored, as the XDG specification says, and the log names it.
-  Windows already used this layout, so a Windows profile has nothing to move.
-- **If you upgrade with a game or a tool still open.** The move waits until nothing else may be using
-  the earlier folders: another window or tool of this version, an earlier version holding its library,
-  package or staging lock, and on Linux any process of yours that runs the player under its own name or
-  has a file or its working folder in them. Until then the new version keeps using the earlier folders,
-  and a later start moves them. What it cannot see is an earlier copy that holds none of these at that
-  moment: on macOS one that is idle, on Linux one of another user or renamed with nothing open there. If
-  such a copy writes after the move, it makes the earlier folder again; the next start then says
-  `DATA_MIGRATION_LATE_WRITES`, names the folder in use and the one holding the later files, and offers
-  **Open both folders** and **Quit**. Nakagawa never merges or deletes either folder.
+- **If you used an earlier Linux or macOS build.** Nothing moves by itself. While your earlier folders
+  hold your data (Linux's `nakagawa-recomp` data folder and its `~/.config/nakagawa-recomp` settings, or
+  macOS's `NakagawaRecomp`), this version keeps using them, whole, and Settings shows **Move my data to
+  the new folder**. A fresh install uses the new folder and writes a small marker file,
+  `.nakagawa-layout`, in it; from then on the new folder is used even if an earlier folder appears
+  again. Windows already used this layout, so a Windows profile has nothing to move, and Settings does
+  not show the button. An XDG variable that is not an absolute path is ignored, as the XDG
+  specification says, and the log names it.
+- **Moving your data.** Settings > **Move my data to the new folder** names both folders and asks you
+  to close every game and every other Nakagawa window and tool first. Nakagawa can tell when a window
+  of this version is open, but not one of an earlier version: close those yourself. **Keep my folders**
+  has the focus; **Move** starts it. Each folder is renamed, never copied, and nothing is deleted but
+  empty folders. The paths your library stored for converted games are rewritten to the new place (the
+  old file is kept as `library.json.pre-migration`). Nakagawa then restarts on the new folder. It
+  refuses by name, before touching anything, when a game is running (`DATA_MIGRATION_GAME_RUNNING`),
+  another Nakagawa window is open (`DATA_MIGRATION_IN_USE`), a library, package or staging lock of
+  this or the earlier version is held (`DATA_MIGRATION_LOCK`, naming the lock), the new folder already
+  holds files (`DATA_MIGRATION_BOTH_PRESENT`), a folder is a symbolic link or holds a relative link that
+  would point elsewhere afterwards (`DATA_MIGRATION_LINKED`), your XDG folders point at each other
+  (`DATA_MIGRATION_OVERLAP`), a folder belongs to another user (`DATA_MIGRATION_OTHER_OWNER`), the
+  folders are on different disks (`DATA_MIGRATION_OTHER_DISK`; Nakagawa does not copy saves between
+  disks), or your library was written by a newer version (`DATA_MIGRATION_NEWER_LIBRARY`). You can
+  press it again once the cause is gone.
+- **If the move is interrupted.** Before the first rename the move writes its steps to
+  `.nakagawa-move-in-progress` beside the `Nakagawa` folder; the last step turns that record into the
+  marker. If the computer stops in between, the next start finishes the move, or, when a step cannot
+  be done, puts everything back where it was. Only when neither works does the start stop, with a
+  message naming both folders and what each holds, and **Open both folders** and **Quit**; fix what it
+  names and start again. The Python tools do not finish a move themselves: they stop with
+  `DATA_MIGRATION_INTERRUPTED` until the player has started once.
+- **If both folders hold files.** When your earlier folders are in use and the new folder holds files
+  too, the library screen says so (`DATA_FOLDERS_BOTH_HOLD_FILES`) and names both: Nakagawa uses the
+  earlier ones and never merges, moves or deletes either. When the new folder is in use and an earlier
+  folder holds files again, most likely written by an earlier version still running at the move, the
+  library screen names that folder and says its files are not used
+  (`DATA_FOLDERS_OLD_FOLDER_RETURNED`). Neither notice stops a start.
 
 ## Install, update and uninstall (Windows)
 

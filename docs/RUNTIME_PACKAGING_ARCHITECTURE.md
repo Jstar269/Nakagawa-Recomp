@@ -114,39 +114,42 @@ Roadmap items decided with the table:
   XDG cache and state homes, where they always were. Android's private folder is the data folder
   itself. An older Linux profile (`nakagawa-recomp` in the XDG data home, saves inside it, and the
   XDG config folder) or macOS profile (`NakagawaRecomp`, `Caches/NakagawaRecomp`,
-  `Logs/NakagawaRecomp`) is moved there once at start by `src/core/nk_data_migrate.c`
-  ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)). Its rules, each tested in
-  `tests/native/test_data_migrate.c`:
-  * One start at a time: the whole run holds a lock (`.nakagawa-migration.lock` beside `Nakagawa`), so
-    a second start waits and then finds the work done.
-  * Whole-folder renames only. Nothing is copied, and nothing is deleted except empty folders in the
-    way, one `rmdir` at a time, which the system refuses for a folder that holds anything.
-  * Only the folders that matter (library, saves, settings) can stop the start. When one of them
-    cannot move (data in both places, another disk, a folder that cannot be written), the moves
-    already made are undone, and the player names both folders with **Open both folders** and
-    **Quit**. An undo that fails, or a run that is killed, is named, and the next start finishes it. A
-    macOS cache or logs folder that cannot move stays where it is, with a named line in the log.
-  * Nothing moves while another program may use the older folders. Every player and tool of this
-    version holds `.nakagawa-in-use.lock` (beside `Nakagawa`) shared for its life, and the run takes it
-    exclusively. The run also probes the locks the earlier version takes (`locks/*.lock`,
-    `games/.staging_*.lock`), holds the library's own lock from before the first move to after the
-    rewrite, and on Linux looks through `/proc` for a process of the user that runs the player's file
-    name or has its program, working folder or an open file in an older folder. Any of these keeps the
-    older folders in use for that start (`DATA_MIGRATION_IN_USE`).
-  * A completed run writes `.nakagawa-migration-done` in `Nakagawa`, naming the folders it moved. An
-    older folder made again after that holds only what a late writer added; it is named
-    (`DATA_MIGRATION_LATE_WRITES`), never merged or deleted. The record also retires the steps that
-    finish a stopped run: the saves-in-data rule and the library rewrite.
-  * A linked folder, a relative link inside a folder that would leave it after the move, XDG homes that
-    point at each other, a folder of another user, or a `library.json` written by a newer version keep
-    the older folders in use for that start: nothing is moved or rewritten, and the user is told once.
-    A relative XDG variable is ignored, as the XDG specification says.
+  `Logs/NakagawaRecomp`) is used where it is until the user moves it from Settings
+  ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324), `src/core/nk_data_migrate.c`). Its
+  rules, each tested in `tests/native/test_data_migrate.c`:
+  * One rule, decided once per process by the player (`nk_data_layout_decide`) and the Python tools
+    (`tools/nk_core/prereq_fetcher.py`), in order: a move journal → recover first; the marker
+    (`Nakagawa/.nakagawa-layout`) → the new layout; an older folder that holds files → the old layout,
+    whole; otherwise the new layout, and the first start writes the marker. Its cases are one table in
+    `src/core/nk_data_migrate.h` that both test suites read. A start never moves anything except to
+    finish or undo an interrupted move. Data in both places is a non-blocking notice on the library
+    screen, as is an older folder that holds files again after the marker.
+  * The move runs only from Settings > Move my data to the new folder, while the old layout is in use.
+    It refuses, by name and before touching anything: a game running, another window of this version
+    (the player lock, `.nakagawa-player.lock` beside `Nakagawa`, held shared by every player for its
+    life), a library, package or staging lock of this or the earlier version, a folder that is a link
+    or holds a relative link that would break, a folder of another user or one that overlaps the kept
+    Linux cache and logs, folders on different file systems (checked before the first rename), data in
+    the new folder already, and a library written by a newer version. An earlier-version window holds
+    none of these locks and cannot be detected; the confirmation says to close it.
+  * The whole move holds `.nakagawa-migration.lock` (beside `Nakagawa`), and the library's own lock
+    from before the first rename to after the rewrite. Before the first rename it writes the journal,
+    `.nakagawa-move-in-progress` beside `Nakagawa`, listing every rename and the library rewrite; the
+    journal and its folder are synced. Each step's state is read from the disk: source gone and
+    destination present is done, source present and destination absent or only empty folders is to
+    do, anything else is an error. Only empty folders are removed, one `rmdir` at a time.
   * library.json's stored paths are matched in every spelling (lexically cleaned, and with links
-    resolved) and rewritten, the rewritten file is read back, and one that still names the old folder
-    undoes the run. The original is kept whole as `library.json.pre-migration`. A folder flush that
-    fails after a rename is a named log line, not a failure.
-  * The Python tools take the same in-use lock and refuse by name (`DATA_MIGRATION_IN_PROGRESS`) while
-    a run holds the migration lock.
+    resolved) and rewritten, the rewritten file is read back, and the original is kept whole as
+    `library.json.pre-migration`.
+  * The commit syncs every folder the move touched, then renames the journal to the marker in one
+    step. A failure before it undoes the renames made, newest first; an undo that fails leaves the
+    journal for the next start, which rolls forward, or rolls back to the whole old layout, under the
+    same locks, and stops with a message naming both folders and their state only when neither
+    finishes. The player then restarts; it never switches folders mid-run.
+  * The Python tools decide under the same run lock, held shared, and keep no lock afterwards. On a
+    journal they refuse by name (`DATA_MIGRATION_INTERRUPTED`) rather than recover: a tool cannot
+    check for a running game or hold the player lock, so recovery stays with the player.
+    A relative XDG variable is ignored, as the XDG specification says.
 
   Windows never used another name.
 * **Code signing:** v0.0.1 and v0.0.2 ship unsigned. Until a build is signed, each
@@ -722,13 +725,11 @@ Linux and macOS use the same `Nakagawa` folder. Linux puts it in `$XDG_DATA_HOME
 `$XDG_STATE_HOME/nakagawa-recomp/logs` (else `~/.local/state/nakagawa-recomp/logs`), as before; it no
 longer reads the XDG config home. macOS puts it in `~/Library/Application Support`, with all five
 folders inside it. Android's private folder is the data folder itself, with `config`, `cache`, `logs`
-and `saves` inside it, as with `--user-data-root`. A start after an upgrade moves an older Linux or
-macOS profile in once (section 4); a start that cannot do so safely keeps using the older folders for
-that run and says so. The Python tools resolve the data folder by the same rule
-(`tools/nk_core/prereq_fetcher.py`): the older folder while it is the one in use, the new one after
-the move, and `DATA_MIGRATION_BOTH_PRESENT` when both hold data; while a start is moving the folders
-they stop with `DATA_MIGRATION_IN_PROGRESS`, and while they run they hold the in-use lock that keeps a
-start from moving them. Each launch
+and `saves` inside it, as with `--user-data-root`. An older Linux or macOS profile moves in only
+when the user asks from Settings (section 4); until then the older folders stay
+in use, whole. The Python tools resolve the data folder by the same rule
+(`tools/nk_core/prereq_fetcher.py`), and stop with `DATA_MIGRATION_INTERRUPTED` while a move the user
+started waits for the player to finish or undo it. Each launch
 still starts one child process per title (Section 2, Option C), with the #297 run-package and
 save-root semantics unchanged.
 

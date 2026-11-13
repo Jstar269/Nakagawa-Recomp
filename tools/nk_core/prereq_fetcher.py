@@ -13,7 +13,6 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
-import stat
 import sys
 import tarfile
 import tempfile
@@ -32,39 +31,32 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CHUNK_SIZE = 64 * 1024
 
 
-def _holds_data(path: Path) -> bool:
-    """True when ``path`` is a link, a file, or a folder with a file or a link anywhere below it.
+# How deep a folder is read before it counts as holding files (src/core/nk_data_migrate.c,
+# MIGRATE_WALK_DEPTH).
+_WALK_DEPTH = 24
 
-    A folder that cannot be read counts as holding data, as in src/core/nk_data_migrate.c.
+
+def _tree_state(path: Path, depth: int = 0) -> str:
+    """"absent", "empty" (only empty folders) or "content", as src/core/nk_data_migrate.c reads it.
+
+    A folder holds files when it has a file, a link, or a folder that does. A folder that cannot be
+    read, or a tree deeper than the player reads, counts as holding files: the safe answer.
     """
+    name = os.fspath(path)
+    if not os.path.lexists(name):
+        return "absent"
+    if depth > _WALK_DEPTH or not os.path.isdir(name):
+        return "content"
     try:
-        info = os.lstat(path)
-    except (FileNotFoundError, NotADirectoryError):
-        return False
+        with os.scandir(name) as entries:
+            for entry in entries:
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    return "content"
+                if _tree_state(Path(entry.path), depth + 1) != "empty":
+                    return "content"
     except OSError:
-        return True
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        return True
-    pending = [os.fspath(path)]
-    while pending:
-        try:
-            with os.scandir(pending.pop()) as entries:
-                for entry in entries:
-                    if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
-                        return True
-                    pending.append(entry.path)
-        except OSError:
-            return True
-    return False
-
-
-def _same_or_inside(a: Path, b: Path) -> bool:
-    first = os.path.realpath(os.fspath(a))
-    second = os.path.realpath(os.fspath(b))
-    try:
-        return os.path.commonpath([first, second]) in (first, second)
-    except ValueError:  # different drives: neither is inside the other
-        return False
+        return "content"
+    return "empty"
 
 
 def _xdg_base(variable: str, *below_home: str) -> Path:
@@ -82,100 +74,90 @@ def _xdg_base(variable: str, *below_home: str) -> Path:
     return Path(home).joinpath(*below_home)
 
 
-# The in-use lock each data base this process resolved, held shared for the process's life.
-_FOLDERS_IN_USE: dict[str, int] = {}
+_MARKER_TEXT = (
+    "Nakagawa uses the folders in this one (#324). Keep this file: it tells Nakagawa and its tools\n"
+    "to use this folder even if an earlier folder appears again.\n"
+)
 
 
-def _open_lock(path: Path) -> int | None:
+def _write_marker(new_root: Path) -> None:
+    """A fresh install's marker, as the player writes it; best effort, as in the player."""
     try:
-        return os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        new_root.mkdir(parents=True, exist_ok=True)
+        temporary = new_root / ".nakagawa-layout.tmp"
+        temporary.write_text(_MARKER_TEXT, encoding="utf-8")
+        os.replace(temporary, new_root / ".nakagawa-layout")
     except OSError:
-        return None
+        pass  # the rule decides the same way again next time
 
 
-def _use_data_folders(base: Path, resolve: Callable[[], Path]) -> Path:
-    """Resolve the data folder, never while the player moves the folders, and keep them in use.
+def _choose_data_root(base: Path, new_root: Path, new_data: Path, old_data: Path,
+                      old_folders: tuple[Path, ...]) -> Path:
+    """The player's rule for its data folder (#324, the table in src/core/nk_data_migrate.h).
 
-    The player moves an older layout only under ``.nakagawa-migration.lock`` and only while no process
-    holds ``.nakagawa-in-use.lock`` (src/core/nk_data_migrate.h). A tool takes the first, shared and
-    without waiting, while it resolves (refusing by name while a move is under way), and keeps a
-    shared lock on the second for the rest of its life, so no start moves the folders under it.
-    Without a data base there is no older folder to move; a lock file that cannot be opened cannot
-    be locked by the player either, which then moves nothing.
+    In order: a move the user started that was interrupted is finished or undone by the player's
+    next start, so a tool refuses by name rather than read half-moved folders (it cannot tell
+    whether a game or another window still uses them, which the player checks); the marker means
+    the new layout; an earlier folder that holds files means the old layout, whole; otherwise the
+    new layout, and a fresh install writes the marker. Nothing is moved.
     """
-    if sys.platform == "win32":
-        return resolve()
-    if os.name == "nt" or not base.is_dir():
-        return resolve()
-    import fcntl
-
-    run_fd = _open_lock(base / ".nakagawa-migration.lock")
-    if run_fd is None:
-        return resolve()
-    busy = PrerequisiteFetchError(
-        f"DATA_MIGRATION_IN_PROGRESS: the Nakagawa player is moving your data folders in {base}. "
-        "Run this again once it has started."
-    )
-    try:
-        try:
-            fcntl.flock(run_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise busy from None
-        key = os.fspath(base)
-        if key not in _FOLDERS_IN_USE:
-            use_fd = _open_lock(base / ".nakagawa-in-use.lock")
-            if use_fd is not None:
-                try:
-                    fcntl.flock(use_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    os.close(use_fd)
-                    raise busy from None
-                _FOLDERS_IN_USE[key] = use_fd
-        return resolve()
-    finally:
-        os.close(run_fd)
-
-
-def _choose_data_root(new_data: Path, old_data: Path, kept: tuple[Path, ...]) -> Path:
-    """The player's rule for its data folder (#324, src/core/nk_data_migrate.h).
-
-    The player moves an older data folder into the new layout at start-up. Until it has, and
-    whenever it keeps the old folders (a linked folder, XDG homes that point at each other, a library
-    a newer version wrote), the old folder is the one in use, so a tool uses it too. Both holding data
-    is the case the player refuses to start on; a tool refuses it as well rather than pick one.
-    """
-    old_has = _holds_data(old_data)
-    if old_has and _holds_data(new_data):
+    journal = base / ".nakagawa-move-in-progress"
+    if os.path.lexists(os.fspath(journal)):
         raise PrerequisiteFetchError(
-            f"DATA_MIGRATION_BOTH_PRESENT: both {old_data} and {new_data} hold Nakagawa data. Start "
-            "the Nakagawa player, which names both folders and what to do, then run this again."
+            f"DATA_MIGRATION_INTERRUPTED: a move of your data folders to {new_root} was interrupted "
+            f"(its record is {journal}). Start the Nakagawa player, which finishes or undoes it, then "
+            "run this again."
         )
-    if old_has or any(_same_or_inside(old_data, folder) for folder in kept):
+    if os.path.lexists(os.fspath(new_root / ".nakagawa-layout")):
+        return new_data
+    if any(_tree_state(folder) == "content" for folder in old_folders):
         return old_data
+    _write_marker(new_root)
     return new_data
 
 
+def _decide_data_root(base: Path, new_root: Path, new_data: Path, old_data: Path,
+                      old_folders: tuple[Path, ...]) -> Path:
+    """The rule, under the player's run lock (held shared) when the data base exists.
+
+    The player decides and moves only under ``.nakagawa-migration.lock`` in the data base, so a tool
+    that waits for it never reads the folders while a start or a move changes them. Without a data
+    base there is no earlier folder, nothing to move and no marker to write.
+    """
+    if not base.is_dir():
+        return new_data
+    if sys.platform == "win32" or os.name == "nt":
+        return _choose_data_root(base, new_root, new_data, old_data, old_folders)
+    import fcntl
+
+    try:
+        lock_fd = os.open(base / ".nakagawa-migration.lock",
+                          os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return _choose_data_root(base, new_root, new_data, old_data, old_folders)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_SH)
+        return _choose_data_root(base, new_root, new_data, old_data, old_folders)
+    finally:
+        os.close(lock_fd)
+
+
 def _xdg_data_root() -> Path:
-    """Linux and the other XDG hosts: `Nakagawa/data` in the XDG data home, or the older folder."""
+    """Linux and the other XDG hosts: `Nakagawa/data` in the XDG data home, or the earlier folder."""
     try:
         data_base = _xdg_base("XDG_DATA_HOME", ".local", "share")
     except RuntimeError as exc:
         raise PrerequisiteFetchError(
             "DATA_DIR_UNAVAILABLE: set XDG_DATA_HOME or HOME to locate per-user data."
         ) from exc
-    kept: list[Path] = []
-    for variable, below_home, leaf in (
-        ("XDG_CACHE_HOME", (".cache",), ("nakagawa-recomp",)),
-        ("XDG_STATE_HOME", (".local", "state"), ("nakagawa-recomp", "logs")),
-    ):
-        try:
-            kept.append(_xdg_base(variable, *below_home).joinpath(*leaf))
-        except RuntimeError:
-            continue  # neither the variable nor HOME: the player has no such folder either
-    return _use_data_folders(
-        data_base,
-        lambda: _choose_data_root(data_base / "Nakagawa" / "data", data_base / "nakagawa-recomp", tuple(kept)),
-    )
+    old_data = data_base / "nakagawa-recomp"
+    old_folders = [old_data]
+    try:
+        old_folders.append(_xdg_base("XDG_CONFIG_HOME", ".config") / "nakagawa-recomp")
+    except RuntimeError:
+        pass  # neither the variable nor HOME: the player has no earlier settings folder either
+    new_root = data_base / "Nakagawa"
+    return _decide_data_root(data_base, new_root, new_root / "data", old_data, tuple(old_folders))
 
 
 def default_data_root() -> Path:
@@ -193,10 +175,9 @@ def default_data_root() -> Path:
         if not home:
             raise PrerequisiteFetchError("DATA_DIR_UNAVAILABLE: set HOME to locate per-user data.")
         support = Path(home) / "Library" / "Application Support"
-        return _use_data_folders(
-            support,
-            lambda: _choose_data_root(support / "Nakagawa" / "data", support / "NakagawaRecomp" / "data", ()),
-        )
+        old_root = support / "NakagawaRecomp"
+        return _decide_data_root(support, support / "Nakagawa", support / "Nakagawa" / "data",
+                                 old_root / "data", (old_root,))
     return _xdg_data_root()
 
 

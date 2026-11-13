@@ -264,7 +264,7 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_SETTINGS_ACCESSIBILITY, FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_OFF,
                FLOW_SETTINGS_ACE_TITLE,
                FLOW_SETTINGS_REPORT, FLOW_SETTINGS_REPORT_NO_PYTHON, FLOW_SETTINGS_REFRESH,
-               FLOW_SETTINGS_PRESET,
+               FLOW_SETTINGS_PRESET, FLOW_SETTINGS_DATA_OFFERED, FLOW_SETTINGS_DATA_MOVE,
                FLOW_CONTROLLER,
                FLOW_CONTROLLER_GAME, FLOW_CONTROLLER_KEYS,
                FLOW_CALIBRATE_REST, FLOW_CALIBRATE_EXTREMES, FLOW_CALIBRATE_RESULT,
@@ -416,7 +416,13 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
         : which == FLOW_SETTINGS_UPDATES || which == FLOW_SETTINGS_UPDATE_FAILED ||
           which == FLOW_SETTINGS_UPDATE_NO_KEY || which == FLOW_SETTINGS_UPDATE_REFUSED
             ? PLAYER_UI_SETTINGS_PAGE_UPDATES
+        : which == FLOW_SETTINGS_DATA_MOVE ? PLAYER_UI_SETTINGS_PAGE_DATA_MOVE
         : PLAYER_UI_SETTINGS_PAGE_MAIN;
+    /* #324: a Linux start on the earlier folders offers the move (main page) and its check. */
+    settings.data_move_offered = which == FLOW_SETTINGS_DATA_OFFERED ||
+                                 which == FLOW_SETTINGS_DATA_MOVE;
+    settings.data_folder_in_use = "/home/synthetic/.local/share/nakagawa-recomp";
+    settings.data_folder_new = "/home/synthetic/.local/share/Nakagawa";
     settings.resolution = "2x (960x544)";
     /* Settings > Enhanced (#2055): the library's default Enhanced (Authentic for its off
        case) with the fresh parts; the title case is one game's page, following it. */
@@ -3279,7 +3285,13 @@ static void test_settings_pages(void) {
         {FLOW_SETTINGS_REMOVE, PLAYER_UI_ID_SETTINGS_CONFIRM_REMOVE,
          PLAYER_UI_SETTINGS_REMOVE_TOOLS, "Remove tools removes them"},
         {FLOW_SETTINGS_REMOVE, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_KEEP_TOOLS,
-         "Keep them leaves the tools alone and returns to build tools and cache"}
+         "Keep them leaves the tools alone and returns to build tools and cache"},
+        {FLOW_SETTINGS_DATA_OFFERED, PLAYER_UI_ID_SETTINGS_DATA_MOVE,
+         PLAYER_UI_SETTINGS_OPEN_DATA_MOVE, "Move my data opens its check (#324)"},
+        {FLOW_SETTINGS_DATA_MOVE, PLAYER_UI_ID_SETTINGS_CONFIRM_DATA_MOVE,
+         PLAYER_UI_SETTINGS_MOVE_DATA, "the check's Move asks for the move"},
+        {FLOW_SETTINGS_DATA_MOVE, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
+         "Keep my folders leaves the check and moves nothing"}
     };
     static const FlowCase pages[] = {FLOW_SETTINGS, FLOW_SETTINGS_ONLINE, FLOW_SETTINGS_NOTICES,
                                      FLOW_SETTINGS_REMOVE, FLOW_SETTINGS_BUILD_CACHE,
@@ -3287,10 +3299,33 @@ static void test_settings_pages(void) {
                                      FLOW_SETTINGS_UPDATE_NO_KEY, FLOW_SETTINGS_UPDATE_REFUSED,
                                      FLOW_SETTINGS_ACCESSIBILITY, FLOW_SETTINGS_ACE,
                                      FLOW_SETTINGS_ACE_OFF, FLOW_SETTINGS_ACE_TITLE,
-                                     FLOW_SETTINGS_REPORT, FLOW_SETTINGS_REPORT_NO_PYTHON};
+                                     FLOW_SETTINGS_REPORT, FLOW_SETTINGS_REPORT_NO_PYTHON,
+                                     FLOW_SETTINGS_DATA_OFFERED, FLOW_SETTINGS_DATA_MOVE};
     for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); ++i) {
         CHECK(settings_op_is(activate_flow_button(cases[i].id, cases[i].which), cases[i].op),
               cases[i].what);
+    }
+    /* #324: the button is there only while the earlier folders are in use, and the check names
+       both folders, says to close an earlier version's windows, and has Keep my folders focused,
+       so Return or the pad's confirm button never moves anything by accident. */
+    CHECK(dump_flow_case(FLOW_SETTINGS, dump, sizeof(dump)) &&
+              strstr(dump, "MOVE MY DATA") == NULL,
+          "Settings offers no data move on the new layout (Windows, a fresh install)");
+    CHECK(flow_case_fits(FLOW_SETTINGS_DATA_OFFERED, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "\"MOVE MY DATA TO THE NEW FOLDER\"") != NULL,
+          "Settings on the earlier folders offers the move, on screen at 960 x 540");
+    CHECK(flow_case_fits(FLOW_SETTINGS_DATA_MOVE, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "share/nakagawa-recomp") != NULL &&
+              strstr(dump, "share/Nakagawa") != NULL &&
+              strstr(dump, "earlier version") != NULL && strstr(dump, "\"KEEP MY FOLDERS\"") != NULL &&
+              strstr(dump, "\"MOVE\"") != NULL,
+          "the check names both folders and an earlier version's windows, with both buttons");
+    {
+        NkUi *ui = NULL;
+        (void)flow_case_layout(FLOW_SETTINGS_DATA_MOVE, 1280, 720, &ui);
+        CHECK(ui != NULL && nk_ui_focused(ui) == PLAYER_UI_ID_SETTINGS_BACK,
+              "the check opens on Keep my folders, the safe answer");
+        if (ui != NULL) nk_ui_destroy(ui);
     }
     CHECK(activate_flow_button(PLAYER_UI_ID_TAB_LIBRARY, FLOW_SETTINGS).kind ==
               PLAYER_UI_ACTION_OPEN_LIBRARY,

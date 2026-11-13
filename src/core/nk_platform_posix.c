@@ -500,8 +500,8 @@ static bool resolve_rooted_path(const char *root, NkPathType type, char sep, cha
    its cache in the XDG cache home and its logs in the XDG state home, where they always were
    ($XDG_CACHE_HOME/nakagawa-recomp and $XDG_STATE_HOME/nakagawa-recomp/logs); XDG_DATA_HOME (else
    ~/.local/share) is the base of `Nakagawa`.
-   The old layout, the one before #324, is used for a run whose migration keeps the old folders
-   (nk_data_migrate.h, nk_platform_set_old_user_data_layout): Linux's `nakagawa-recomp` data folder
+   The old layout, the one before #324, is used while the folders of an existing install are still
+   there (nk_data_migrate.h, nk_platform_set_old_user_data_layout): Linux's `nakagawa-recomp` data folder
    with the saves inside it and the settings in the XDG config home, macOS's `NakagawaRecomp` with
    Caches and Logs beside it.
    An explicit root (--user-data-root, portable mode) is the data folder itself, with config,
@@ -700,12 +700,12 @@ static bool plan_add_move(NkDataMigrationPlan *plan, const char *from, const cha
 }
 
 /* A named line for a folder of the old layout whose path could not be formed (S4 of the #324
-   review): only that folder is left out, and the run says so. */
+   review): only that folder is left out, and the log says so. */
 static void plan_note(NkDataMigrationPlan *plan, const char *what, const char *why) {
     size_t used = strlen(plan->notes);
     if (used >= sizeof(plan->notes) - 1u) return;
     (void)snprintf(plan->notes + used, sizeof(plan->notes) - used,
-                   "%s: the earlier %s folder could not be located (%s), so it is not moved.\n",
+                   "%s: the earlier %s folder could not be located (%s), so it is not looked at.\n",
                    NK_MIGRATE_CODE_PATH_UNAVAILABLE, what, why);
 }
 
@@ -758,18 +758,20 @@ bool nk_platform_user_data_plan(struct NkDataMigrationPlan *plan) {
               resolve_layout_path(false, NK_PATH_DATA, new_data, sizeof(new_data)) &&
               resolve_layout_path(false, NK_PATH_SAVES, new_saves, sizeof(new_saves)) &&
               join_path(plan->library_file, sizeof(plan->library_file), new_data, "/library.json");
-    /* The locks are beside the new folder, in the data base, so no move ever carries them; the
-       record of a completed run is in the new folder. */
+    /* The locks and the move's journal are beside the new folder, in the data base: it exists
+       before a move, lies on the new folder's file system, and no rename carries it. The marker is
+       in the new folder. */
     const char *slash = strrchr(root, '/');
     if (ok) {
         size_t parent = slash ? (size_t)(slash - root) : 0u;
-        int written = snprintf(plan->lock_file, sizeof(plan->lock_file), "%.*s/.nakagawa-migration.lock",
-                               (int)parent, root);
-        int in_use = snprintf(plan->in_use_file, sizeof(plan->in_use_file), "%.*s/.nakagawa-in-use.lock",
-                              (int)parent, root);
-        ok = slash && written > 0 && (size_t)written < sizeof(plan->lock_file) && in_use > 0 &&
-             (size_t)in_use < sizeof(plan->in_use_file) &&
-             join_path(plan->done_file, sizeof(plan->done_file), root, "/.nakagawa-migration-done");
+        int written = snprintf(plan->base, sizeof(plan->base), "%.*s", (int)parent, root);
+        ok = slash && parent > 0u && written > 0 && (size_t)written < sizeof(plan->base) &&
+             join_path(plan->lock_file, sizeof(plan->lock_file), plan->base, "/.nakagawa-migration.lock") &&
+             join_path(plan->player_lock_file, sizeof(plan->player_lock_file), plan->base,
+                       "/.nakagawa-player.lock") &&
+             join_path(plan->journal_file, sizeof(plan->journal_file), plan->base,
+                       "/.nakagawa-move-in-progress") &&
+             join_path(plan->marker_file, sizeof(plan->marker_file), root, "/.nakagawa-layout");
     }
     if (!ok) {
         memset(plan, 0, sizeof(*plan));

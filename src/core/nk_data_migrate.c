@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
-/* One-time move of an older per-user folder into the unified one (#324). Rules: nk_data_migrate.h. */
+/* Which per-user folders a Linux or macOS install uses, and the move the user can ask for (#324).
+   Rules: nk_data_migrate.h. */
 
 #if !defined(_WIN32) && !defined(_WIN64)
 /* As in nk_platform_posix.c: realpath and readlink are XSI, flock is BSD (glibc declares it with
@@ -31,97 +32,58 @@
 
 static NkMigrateRenameFn s_rename = NULL;
 static NkMigrateSyncDirFn s_sync_dir = NULL;
+static NkMigratePointFn s_point = NULL;
 static long s_euid_for_test = -1;
 
 void nk_data_migrate_set_rename_for_test(NkMigrateRenameFn rename_fn) { s_rename = rename_fn; }
 void nk_data_migrate_set_sync_dir_for_test(NkMigrateSyncDirFn sync_fn) { s_sync_dir = sync_fn; }
 void nk_data_migrate_set_euid_for_test(long euid) { s_euid_for_test = euid; }
+void nk_data_migrate_set_point_hook_for_test(NkMigratePointFn hook) { s_point = hook; }
 
-/* ---- Messages ---- */
+/* ---- The host ---- */
 
-static void append(char *buffer, size_t cap, const char *format, va_list args) {
-    size_t used = strlen(buffer);
-    if (used >= cap - 1u) return;
-    (void)vsnprintf(buffer + used, cap - used, format, args);
-}
-
-static void say(NkDataMigration *r, const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    append(r->message, sizeof(r->message), format, args);
-    va_end(args);
-}
-
-/* ---- The host's plan and the notice ---- */
-
-void nk_data_migrate_host(NkDataMigration *result) {
-    if (!result) return;
-    NkDataMigrationPlan plan;
+void nk_data_layout_host(NkLayoutDecision *out) {
+    if (!out) return;
+    static NkDataMigrationPlan plan;
     memset(&plan, 0, sizeof(plan));
     if (!nk_platform_user_data_plan(&plan)) {
-        memset(result, 0, sizeof(*result));
+        /* Windows and Android: no older layout, nothing to decide. */
+        memset(out, 0, sizeof(*out));
+        out->layout = NK_LAYOUT_NEW;
+        out->rule = "none";
         return;
     }
-    /* The player: it holds the in-use lock for its life, and looks for older copies of itself. */
-    plan.hold_in_use = true;
-    plan.scan_processes = true;
-    char exe[NK_MAX_PATH];
-    if (nk_platform_get_executable_path(exe, sizeof(exe))) {
-        const char *name = strrchr(exe, '/');
-        name = name ? name + 1 : exe;
-        if (strlen(name) < sizeof(plan.instance_name)) {
-            memcpy(plan.instance_name, name, strlen(name) + 1u);
-        }
-    }
-    nk_data_migrate_run(&plan, result);
-    if (result->status == NK_MIGRATE_KEPT_OLD && !nk_platform_set_old_user_data_layout(true)) {
+    nk_data_layout_decide(&plan, out);
+    if (out->layout == NK_LAYOUT_OLD && !nk_platform_set_old_user_data_layout(true)) {
         /* Not reached on a host that has a plan; said rather than started on the wrong folders. */
-        result->status = NK_MIGRATE_FAILED;
-        say(result, " (%s: this build cannot use the earlier folders on this host.)",
-            NK_MIGRATE_CODE_FAILED);
+        out->layout = NK_LAYOUT_BLOCKED;
+        snprintf(out->message, sizeof(out->message),
+                 "%s: this build cannot use the earlier folders on this host.", NK_MIGRATE_CODE_FAILED);
     }
-}
-
-bool nk_data_migrate_notice_is_new(const NkDataMigration *result) {
-    if (!result || !result->message[0]) return false;
-    char cache[NK_MAX_PATH];
-    char path[NK_MAX_PATH + 32];
-    if (!nk_platform_get_path(NK_PATH_CACHE, cache, sizeof(cache))) return true;
-    int written = snprintf(path, sizeof(path), "%s%cdata-migration-notice.txt", cache,
-                           nk_platform_path_separator());
-    if (written <= 0 || (size_t)written >= sizeof(path)) return true;
-    const size_t length = strlen(result->message);
-    FILE *f = nk_fopen_utf8(path, "rb");
-    if (f) {
-        char *seen = (char *)malloc(length + 2u);
-        size_t got = seen ? fread(seen, 1u, length + 1u, f) : 0u;
-        bool same = seen && got == length && memcmp(seen, result->message, length) == 0;
-        free(seen);
-        fclose(f);
-        if (same) return false;
-    }
-    FILE *w = nk_fopen_utf8(path, "wb");
-    if (w) {
-        (void)fwrite(result->message, 1u, length, w);
-        (void)fclose(w);
-    }
-    return true;
 }
 
 #if defined(_WIN32) || defined(_WIN64)
 
-/* Windows always used the unified layout (nk_platform_user_data_plan is empty there), so the
-   engine, which relies on POSIX rename, rmdir, lstat and flock, is not built. */
-void nk_data_migrate_run(const NkDataMigrationPlan *plan, NkDataMigration *result) {
+/* Windows always used the unified layout (nk_platform_user_data_plan is empty there), so the rule
+   and the move, which rely on POSIX rename, rmdir, lstat and flock, are not built. */
+void nk_data_layout_decide(const NkDataMigrationPlan *plan, NkLayoutDecision *out) {
     (void)plan;
-    if (!result) return;
-    memset(result, 0, sizeof(*result));
-    result->status = NK_MIGRATE_FAILED;
-    snprintf(result->message, sizeof(result->message),
-             "%s: Windows has no earlier folder layout to move.", NK_MIGRATE_CODE_FAILED);
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    out->layout = NK_LAYOUT_NEW;
+    out->rule = "none";
 }
 
-void nk_data_migrate_release_in_use(void) {}
+void nk_data_migrate_release_player_lock(void) {}
+
+void nk_data_migrate_move(const NkDataMigrationPlan *plan, bool game_running, NkDataMigration *result) {
+    (void)plan;
+    (void)game_running;
+    if (!result) return;
+    memset(result, 0, sizeof(*result));
+    result->status = NK_MIGRATE_NOTHING;
+    snprintf(result->message, sizeof(result->message), "Windows has no earlier folder layout to move.");
+}
 
 #else
 
@@ -131,37 +93,66 @@ void nk_data_migrate_release_in_use(void) {}
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <time.h>
 #include <unistd.h>
 
-/* One named line for the log; the line ends in '\n'. */
-static void log_line(NkDataMigration *r, const char *format, ...) {
+/* ---- Messages ---- */
+
+static void append_v(char *buffer, size_t cap, const char *format, va_list args) {
+    size_t used = strlen(buffer);
+    if (used >= cap - 1u) return;
+    (void)vsnprintf(buffer + used, cap - used, format, args);
+}
+
+static void add(char *buffer, size_t cap, const char *format, ...) {
     va_list args;
     va_start(args, format);
-    append(r->log, sizeof(r->log), format, args);
+    append_v(buffer, cap, format, args);
     va_end(args);
-    size_t used = strlen(r->log);
-    if (used > 0u && used < sizeof(r->log) - 1u && r->log[used - 1u] != '\n') {
-        r->log[used] = '\n';
-        r->log[used + 1u] = '\0';
+}
+
+#define MIGRATE_LOG_CAP 2048u
+/* Both results carry a log of this size; the engine writes either through log_line. */
+typedef char migrate_log_sizes_match[(sizeof(((NkDataMigration *)0)->log) == MIGRATE_LOG_CAP &&
+                                      sizeof(((NkLayoutDecision *)0)->log) == MIGRATE_LOG_CAP)
+                                         ? 1
+                                         : -1];
+
+/* One named line for the log; the line ends in '\n'. */
+static void log_line(char *log, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    append_v(log, MIGRATE_LOG_CAP, format, args);
+    va_end(args);
+    size_t used = strlen(log);
+    if (used > 0u && used < MIGRATE_LOG_CAP - 1u && log[used - 1u] != '\n') {
+        log[used] = '\n';
+        log[used + 1u] = '\0';
     }
 }
 
 #define MIGRATE_LIBRARY_MAX_BYTES (16u * 1024u * 1024u)
+#define MIGRATE_JOURNAL_MAX_BYTES (64u * 1024u)
 #define MIGRATE_WALK_DEPTH 24
 /* The relative-link check walks every folder that moves; deeper than this, it cannot rule a
-   link out, and the folders are kept. */
+   link out, and the move is refused. */
 #define MIGRATE_LINK_SCAN_DEPTH 64
-#define MIGRATE_RECORD_MAX_BYTES (64u * 1024u)
 
-/* The shared in-use lock a run kept for this process (plan.hold_in_use). */
-static int s_in_use_fd = -1;
+/* The player lock this process holds shared while it runs (nk_data_layout_decide). */
+static int s_player_fd = -1;
 
-void nk_data_migrate_release_in_use(void) {
-    if (s_in_use_fd >= 0) {
-        close(s_in_use_fd);
-        s_in_use_fd = -1;
+void nk_data_migrate_release_player_lock(void) {
+    if (s_player_fd >= 0) {
+        close(s_player_fd);
+        s_player_fd = -1;
     }
+}
+
+static void point(const char *what, size_t n) {
+    if (!s_point) return;
+    char name[48];
+    if (n == 0u) snprintf(name, sizeof(name), "%s", what);
+    else snprintf(name, sizeof(name), "%s:%zu", what, n);
+    s_point(name);
 }
 
 static int do_rename(const char *from, const char *to) {
@@ -190,9 +181,10 @@ typedef struct {
 
 static TreeState tree_state(const char *path, int depth);
 
-/* A folder holds data when it has any file, any entry the listing skips (a link or a file kept off
-   this PC), or a folder that does. A folder that cannot be read counts as holding data, and so does
-   a tree deeper than MIGRATE_WALK_DEPTH: the safe answer is the one that replaces nothing. */
+/* A folder holds files when it has any file, any entry the listing skips (a link or a file kept off
+   this PC), or a folder that does. A folder that cannot be read counts as holding files, and so does
+   a tree deeper than MIGRATE_WALK_DEPTH: the safe answer is the one that replaces nothing.
+   tools/nk_core/prereq_fetcher.py (_tree_state) reads folders the same way. */
 static bool walk_entry(const char *name, bool is_dir, void *context) {
     Walk *walk = (Walk *)context;
     if (!is_dir) {
@@ -222,6 +214,18 @@ static TreeState tree_state(const char *path, int depth) {
     return (listed && skipped == 0u) ? TREE_EMPTY : TREE_CONTENT;
 }
 
+static const char *state_words(const char *path) {
+    switch (tree_state(path, 0)) {
+    case TREE_ABSENT:
+        return "does not exist";
+    case TREE_EMPTY:
+        return "is empty";
+    case TREE_CONTENT:
+        break;
+    }
+    return "holds files";
+}
+
 typedef enum { ENTRY_ABSENT = 0, ENTRY_LINK, ENTRY_PRESENT } EntryKind;
 
 /* The entry itself, not what a link points at. One that cannot be looked at counts as present. */
@@ -231,7 +235,7 @@ static EntryKind entry_kind(const char *path) {
     return (errno == ENOENT || errno == ENOTDIR) ? ENTRY_ABSENT : ENTRY_PRESENT;
 }
 
-/* A destination that is a link was put there on purpose: it counts as holding data. */
+/* A destination that is a link was put there on purpose: it counts as holding files. */
 static TreeState dest_state(const char *path) {
     if (entry_kind(path) == ENTRY_LINK) return TREE_CONTENT;
     return tree_state(path, 0);
@@ -249,6 +253,32 @@ static bool parent_dir(const char *path, char *dir, size_t cap) {
 static bool copy_path(char *out, size_t cap, const char *path) {
     int written = snprintf(out, cap, "%s", path);
     return written >= 0 && (size_t)written < cap;
+}
+
+static bool is_real_dir(const char *path) {
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+/* The device of `path`, or of the nearest folder above it that exists (where it would be made). */
+static bool device_of(const char *path, dev_t *device) {
+    char at[NK_MAX_PATH];
+    if (!copy_path(at, sizeof(at), path)) return false;
+    for (;;) {
+        struct stat st;
+        if (lstat(at, &st) == 0) {
+            *device = st.st_dev;
+            return true;
+        }
+        if (errno != ENOENT && errno != ENOTDIR) return false;
+        char *cut = strrchr(at, '/');
+        if (!cut) return false;
+        if (cut == at) {
+            at[1] = '\0';
+        } else {
+            *cut = '\0';
+        }
+    }
 }
 
 /* ---- Comparing folders ---- */
@@ -369,7 +399,7 @@ static bool clear_empty_below(const char *dir) {
     }
 }
 
-/* ---- The lock ---- */
+/* ---- Locks ---- */
 
 static int open_lock_file(const char *path, int *error) {
     char dir[NK_MAX_PATH];
@@ -389,7 +419,9 @@ static bool lock_now(int fd, int operation) {
     }
 }
 
-static bool take_lock(const char *path, int *fd_out, int *error) {
+/* The run lock: one decision or move at a time. Waits for as long as another holds it (the system
+   drops a holder's lock when it ends); said first, so a wait is not a silent one. */
+static bool take_run_lock(const char *path, int *fd_out, int *error) {
     *fd_out = -1;
     int fd = open_lock_file(path, error);
     if (fd < 0) return false;
@@ -399,10 +431,8 @@ static bool take_lock(const char *path, int *fd_out, int *error) {
             close(fd);
             return false;
         }
-        /* Waits for as long as another start holds it; the system drops a holder's lock when it
-           ends. Said first, so a wait behind a slow disk is not a silent one. */
-        fprintf(stderr, "[nk] %s: another Nakagawa start is moving the data folders; waiting for it "
-                        "to finish (%s).\n", NK_MIGRATE_CODE_LOCK, path);
+        fprintf(stderr, "[nk] %s: another Nakagawa start is deciding or moving the data folders; "
+                        "waiting for it to finish (%s).\n", NK_MIGRATE_CODE_LOCK, path);
         while (flock(fd, LOCK_EX) != 0) {
             if (errno != EINTR) {
                 *error = errno;
@@ -415,18 +445,51 @@ static bool take_lock(const char *path, int *fd_out, int *error) {
     return true;
 }
 
-static void flush_parent(NkDataMigration *r, const char *path) {
+static void release_lock(int fd) {
+    if (fd < 0) return;
+    (void)flock(fd, LOCK_UN);
+    close(fd);
+}
+
+/* The player lock exclusively, on an open file of its own: a flock held through another open file,
+   this process's shared one included, conflicts with it, so the caller gives that one up first.
+   -1, with `error` (EWOULDBLOCK when another process holds it), on failure. */
+static int player_lock_exclusive(const char *path, int *error) {
+    int fd = open_lock_file(path, error);
+    if (fd < 0) return -1;
+    if (!lock_now(fd, LOCK_EX)) {
+        *error = errno;
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* This process holds the player lock shared from here on. Taken under the run lock, which every
+   exclusive holder also holds, so it does not wait. */
+static bool player_lock_shared(const char *path) {
+    nk_data_migrate_release_player_lock();
+    int error = 0;
+    int fd = open_lock_file(path, &error);
+    if (fd < 0) return false;
+    if (!lock_now(fd, LOCK_SH)) {
+        close(fd);
+        return false;
+    }
+    s_player_fd = fd;
+    return true;
+}
+
+static void flush_parent(char *log, const char *path) {
     char dir[NK_MAX_PATH];
-    if (parent_dir(path, dir, sizeof(dir)) && !do_sync_dir(dir)) {
-        log_line(r, "%s: the folder %s could not be flushed to the disk after a move (%s).",
+    if (parent_dir(path, dir, sizeof(dir)) && !nk_platform_path_missing(dir) && !do_sync_dir(dir)) {
+        log_line(log, "%s: the folder %s could not be flushed to the disk after a rename (%s).",
                  NK_MIGRATE_CODE_NOT_FLUSHED, dir, strerror(errno));
     }
 }
 
-/* ---- Is anything else using the old folders? (B1 of the second #324 review) ---- */
-
-/* Another open file holds an exclusive flock on `path` (the older version's library and build
-   locks). Probed with a shared lock, released at once. */
+/* Another open file holds an exclusive flock on `path`. Probed with a shared lock, released at
+   once. */
 static bool flock_held(const char *path) {
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return false;
@@ -435,7 +498,7 @@ static bool flock_held(const char *path) {
     return held;
 }
 
-/* Another process holds an fcntl lock on `path` (the older version's staging lock). */
+/* Another process holds an fcntl lock on `path` (the staging lock). */
 static bool fcntl_lock_held(const char *path) {
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return false;
@@ -453,10 +516,10 @@ static bool ends_with(const char *s, const char *suffix) {
     return a >= b && strcmp(s + a - b, suffix) == 0;
 }
 
-/* The locks the version before #324 takes in its data folder: locks/<name>.lock (flock: the library
-   and package builds) and games/.staging_<disc>.lock (fcntl). True, with what in `what`, when one is
-   held. */
-static bool old_locks_held(const char *data_dir, char *what, size_t cap) {
+/* The locks this version and the one before #324 take in the data folder while they write:
+   locks/<name>.lock (flock: the library and package builds) and games/.staging_<disc>.lock (fcntl).
+   True, with the lock named in `what`, when one is held. */
+static bool data_locks_held(const char *data_dir, char *what, size_t cap) {
     static const char *const folders[] = {"locks", "games"};
     for (size_t f = 0; f < 2u; f++) {
         char dir[NK_MAX_PATH];
@@ -483,85 +546,32 @@ static bool old_locks_held(const char *data_dir, char *what, size_t cap) {
     return false;
 }
 
-#if defined(__linux__)
-/* `link` (a /proc symbolic link) points into one of `folders` (canonical paths). */
-static bool proc_link_inside(const char *link, const char (*folders)[NK_MAX_PATH], size_t count,
-                             char *target, size_t cap) {
-    ssize_t n = readlink(link, target, cap - 1u);
-    if (n <= 0 || (size_t)n >= cap - 1u) return false;
-    target[n] = '\0';
-    if (target[0] != '/') return false; /* pipes, sockets, anonymous memory */
-    for (size_t i = 0; i < count; i++) {
-        if (same_or_inside(target, folders[i])) return true;
+/* The library's own lock (locks/library.lock beside it), taken through the library's resolved path:
+   nk_library_lock_acquire refuses a lock folder reached through a link, and a lock is the same
+   file however its path is spelled. On failure, `why` says whether another process holds it or it
+   could not be taken at all. */
+static bool lock_library(NkFileLock *lock, const char *library_file, char *why, size_t why_size) {
+    memset(lock, 0, sizeof(*lock));
+    char resolved[NK_MAX_PATH], dir[NK_MAX_PATH] = "", lock_path[NK_MAX_PATH + 32];
+    if (!canonical_path(library_file, resolved, sizeof(resolved))) {
+        snprintf(why, why_size, "the library lock beside %s could not be located", library_file);
+        return false;
+    }
+    errno = 0;
+    if (nk_library_lock_acquire(lock, resolved, 0u) == NK_OK) return true;
+    int saved = errno;
+    if (parent_dir(resolved, dir, sizeof(dir)) &&
+        (size_t)snprintf(lock_path, sizeof(lock_path), "%s/locks/library.lock", dir) < sizeof(lock_path) &&
+        flock_held(lock_path)) {
+        snprintf(why, why_size, "the library lock %s is held by another process", lock_path);
+    } else {
+        snprintf(why, why_size, "the library lock in %s/locks could not be taken (%s)", dir,
+                 saved ? strerror(saved) : "unknown error");
     }
     return false;
 }
 
-/* A process of this user, other than this one, whose program, working folder or open file is in
-   one of `folders`, or that runs a program called `instance` (an older copy of the player). */
-static bool processes_using(const char (*folders)[NK_MAX_PATH], size_t count, const char *instance,
-                            char *what, size_t cap) {
-    DIR *proc = opendir("/proc");
-    if (!proc) return false;
-    const pid_t self = getpid();
-    const uid_t uid = geteuid();
-    bool found = false;
-    char path[64];
-    static char target[PATH_MAX];
-    for (struct dirent *item = readdir(proc); item && !found; item = readdir(proc)) {
-        char *end = NULL;
-        long pid = strtol(item->d_name, &end, 10);
-        if (!end || *end != '\0' || pid <= 0 || (pid_t)pid == self) continue;
-        struct stat st;
-        snprintf(path, sizeof(path), "/proc/%ld", pid);
-        if (stat(path, &st) != 0 || st.st_uid != uid) continue;
-        snprintf(path, sizeof(path), "/proc/%ld/exe", pid);
-        ssize_t n = readlink(path, target, sizeof(target) - 1u);
-        if (n > 0 && (size_t)n < sizeof(target) - 1u) {
-            target[n] = '\0';
-            char *deleted = strstr(target, " (deleted)");
-            if (deleted && deleted[10] == '\0') *deleted = '\0'; /* replaced by an update */
-            const char *name = strrchr(target, '/');
-            name = name ? name + 1 : target;
-            if (instance && instance[0] && strcmp(name, instance) == 0) {
-                snprintf(what, cap, "process %ld runs %s, another copy of this program", pid, target);
-                found = true;
-                break;
-            }
-            for (size_t i = 0; i < count && !found; i++) {
-                if (same_or_inside(target, folders[i])) {
-                    snprintf(what, cap, "process %ld runs %s, from an earlier folder", pid, target);
-                    found = true;
-                }
-            }
-            if (found) break;
-        }
-        snprintf(path, sizeof(path), "/proc/%ld/cwd", pid);
-        if (proc_link_inside(path, folders, count, target, sizeof(target))) {
-            snprintf(what, cap, "process %ld works in %s", pid, target);
-            found = true;
-            break;
-        }
-        snprintf(path, sizeof(path), "/proc/%ld/fd", pid);
-        DIR *fds = opendir(path);
-        if (!fds) continue;
-        for (struct dirent *fd = readdir(fds); fd && !found; fd = readdir(fds)) {
-            if (fd->d_name[0] == '.') continue;
-            char link[320];
-            snprintf(link, sizeof(link), "/proc/%ld/fd/%s", pid, fd->d_name);
-            if (proc_link_inside(link, folders, count, target, sizeof(target))) {
-                snprintf(what, cap, "process %ld has %s open", pid, target);
-                found = true;
-            }
-        }
-        closedir(fds);
-    }
-    closedir(proc);
-    return found;
-}
-#endif
-
-/* ---- Relative links that would point elsewhere after a move (S3 of the second review) ---- */
+/* ---- Relative links that would point elsewhere after a move ---- */
 
 typedef struct {
     char path[PATH_MAX];      /* the folder being walked; grows and shrinks as the walk goes */
@@ -668,9 +678,9 @@ static bool links_stay(LinkScan *scan, int depth) {
     return ok;
 }
 
-/* ---- library.json ---- */
+/* ---- Files ---- */
 
-static bool read_whole(const char *path, char **data, size_t *size) {
+static bool read_whole(const char *path, size_t max_bytes, char **data, size_t *size) {
     *data = NULL;
     *size = 0;
     FILE *f = nk_fopen_utf8(path, "rb");
@@ -680,7 +690,7 @@ static bool read_whole(const char *path, char **data, size_t *size) {
     while (buffer) {
         if (length == cap) {
             cap *= 2u;
-            char *grown = cap <= MIGRATE_LIBRARY_MAX_BYTES + 1u ? (char *)realloc(buffer, cap) : NULL;
+            char *grown = cap <= max_bytes + 1u ? (char *)realloc(buffer, cap) : NULL;
             if (!grown) {
                 free(buffer);
                 buffer = NULL;
@@ -692,7 +702,7 @@ static bool read_whole(const char *path, char **data, size_t *size) {
         if (got == 0u) break;
         length += got;
     }
-    bool failed = !buffer || ferror(f) != 0 || length > MIGRATE_LIBRARY_MAX_BYTES;
+    bool failed = !buffer || ferror(f) != 0 || length > max_bytes;
     fclose(f);
     if (failed) {
         free(buffer);
@@ -713,11 +723,10 @@ static bool write_whole(const char *path, const char *data, size_t size) {
 
 /* Writes `path` whole or not at all: a temporary file beside it, synced, then renamed over it. Once
    the rename has happened the new file is the one in place: a folder flush that fails after it
-   (durability unknown) is a named log line, not a failure (S4 of the second review). */
-static bool write_atomic(NkDataMigration *r, const char *path, const char *suffix, const char *data,
-                         size_t size) {
-    char temp[NK_MAX_PATH];
-    int written = snprintf(temp, sizeof(temp), "%s%s", path, suffix);
+   (durability unknown) is a named log line, not a failure. */
+static bool write_atomic(char *log, const char *path, const char *data, size_t size) {
+    char temp[NK_MAX_PATH + 8];
+    int written = snprintf(temp, sizeof(temp), "%s.tmp", path);
     if (written <= 0 || (size_t)written >= sizeof(temp)) return false;
     bool ok = write_whole(temp, data, size) && nk_rename_utf8(temp, path) == 0;
     if (!ok) {
@@ -726,23 +735,10 @@ static bool write_atomic(NkDataMigration *r, const char *path, const char *suffi
     }
     char dir[NK_MAX_PATH];
     if (parent_dir(path, dir, sizeof(dir)) && !do_sync_dir(dir)) {
-        log_line(r, "%s: the folder %s could not be flushed to the disk after %s was written (%s); "
-                    "the file is in place.",
+        log_line(log, "%s: the folder %s could not be flushed to the disk after %s was written (%s); "
+                      "the file is in place.",
                  NK_MIGRATE_CODE_NOT_FLUSHED, dir, path, strerror(errno));
     }
-    return true;
-}
-
-/* A backup that reads and parses whole; a cut-off one does not. */
-static bool backup_is_whole(const char *path) {
-    char *data = NULL;
-    size_t size = 0;
-    if (!read_whole(path, &data, &size)) return false;
-    char err[64];
-    NkJsonNode *root = nk_json_parse(data, size, err, sizeof(err));
-    free(data);
-    if (!root) return false;
-    nk_json_free(root);
     return true;
 }
 
@@ -780,6 +776,8 @@ static void out_put(OutBuf *b, const char *bytes, size_t n) {
     memcpy(b->data + b->length, bytes, n);
     b->length += n;
 }
+
+static void out_text(OutBuf *b, const char *text) { out_put(b, text, strlen(text)); }
 
 /* `text` as JSON string content, escaped as nk_library.c writes its strings. */
 static void out_put_escaped(OutBuf *b, const char *text, size_t n) {
@@ -829,10 +827,13 @@ static bool json_unescape(const char *body, size_t n, char *out, size_t cap, siz
     return true;
 }
 
+/* ---- library.json ---- */
+
 typedef enum { LIB_UNCHANGED = 0, LIB_REWRITTEN, LIB_NEWER, LIB_FAILED } LibResult;
 
-/* The old data folder in the two spellings a stored path is compared in (S2 of the second review):
-   lexically cleaned, and with links resolved (taken before the first move, while it exists). */
+/* A folder in the two spellings a stored path is compared in, lexically cleaned and with links
+   resolved (taken before the first rename, while the folder exists), and the folder that replaces
+   it. */
 typedef struct {
     bool active;
     char lexical[NK_MAX_PATH];
@@ -840,21 +841,14 @@ typedef struct {
     char to[NK_MAX_PATH];
 } Remap;
 
-static bool remap_init(const NkDataMigrationPlan *plan, Remap *m) {
-    memset(m, 0, sizeof(*m));
-    if (!plan->remap_from[0] || !plan->remap_to[0] || !plan->library_file[0]) return true;
-    if (!lexical_clean(plan->remap_from, m->lexical, sizeof(m->lexical)) ||
-        !canonical_path(plan->remap_from, m->resolved, sizeof(m->resolved)) ||
-        !lexical_clean(plan->remap_to, m->to, sizeof(m->to))) {
-        return false;
-    }
+static void remap_activate(Remap *m) {
     /* A folder at the top of the tree would match every path: never one Nakagawa used. */
-    m->active = strlen(m->lexical) > 1u && strlen(m->resolved) > 1u;
-    return true;
+    m->active = strlen(m->lexical) > 1u && strlen(m->resolved) > 1u && strlen(m->to) > 1u &&
+                m->lexical[0] == '/' && m->resolved[0] == '/' && m->to[0] == '/';
 }
 
-/* The part of the absolute path `value` below the old data folder ("" for the folder itself, else
-   from its '/'), or NULL when `value` is not there. `scratch` holds the spelling that matched. */
+/* The part of the absolute path `value` below the folder ("" for the folder itself, else from its
+   '/'), or NULL when `value` is not there. `scratch` holds the spelling that matched. */
 static const char *remap_rest(const Remap *m, const char *value, char *scratch, size_t cap) {
     if (!m->active || value[0] != '/') return NULL;
     if (lexical_clean(value, scratch, cap) && same_or_inside(scratch, m->lexical)) {
@@ -867,11 +861,10 @@ static const char *remap_rest(const Remap *m, const char *value, char *scratch, 
 }
 
 /* Goes through every JSON string in `data` (keys and titles included, though only paths match in
-   practice). With `out`, writes `data` to it with each string that names the old data folder, or a
-   path below it, rewritten to the same path below the new one; every other byte is kept. Each
-   string is decoded before it is compared and the new value is escaped as the library writes it, so
-   a folder name with a quote or a backslash is found and stays valid JSON. Without `out`, only
-   counts. */
+   practice). With `out`, writes `data` to it with each string that names the folder, or a path
+   below it, rewritten to the same path below the new one; every other byte is kept. Each string is
+   decoded before it is compared and the new value is escaped as the library writes it, so a folder
+   name with a quote or a backslash is found and stays valid JSON. Without `out`, only counts. */
 static void remap_strings(const Remap *m, const char *data, size_t size, OutBuf *out, size_t *hits,
                           bool *too_long) {
     static char value[NK_MAX_PATH * 2u];
@@ -923,67 +916,30 @@ static void remap_strings(const Remap *m, const char *data, size_t size, OutBuf 
     }
 }
 
-/* Rewrites library.json's stored paths into the old data folder (remap_strings) under the library's
-   own lock, which every writer of the file takes: held by the caller from before the first move
-   (`held`), else taken here. The rewritten file is read back, and a path that still names the old
-   folder fails the rewrite. A library a newer Nakagawa wrote (schema_version above
-   NK_LIBRARY_SCHEMA_VERSION) is not touched: LIB_NEWER. */
-/* The library's own lock (locks/library.lock beside it), taken through the library's resolved path:
-   nk_library_lock_acquire refuses a lock folder reached through a link, and a lock is the same
-   file however its path is spelled. On failure, `why` says whether another process holds it or it
-   could not be taken at all. */
-static bool lock_library(NkFileLock *lock, const char *library_file, unsigned timeout_ms, char *why,
-                         size_t why_size) {
-    memset(lock, 0, sizeof(*lock));
-    char resolved[NK_MAX_PATH], dir[NK_MAX_PATH] = "", lock_path[NK_MAX_PATH + 32];
-    if (!canonical_path(library_file, resolved, sizeof(resolved))) {
-        snprintf(why, why_size, "the library lock beside %s could not be located", library_file);
-        return false;
-    }
-    errno = 0;
-    if (nk_library_lock_acquire(lock, resolved, timeout_ms) == NK_OK) return true;
-    int saved = errno;
-    if (parent_dir(resolved, dir, sizeof(dir)) &&
-        (size_t)snprintf(lock_path, sizeof(lock_path), "%s/locks/library.lock", dir) < sizeof(lock_path) &&
-        flock_held(lock_path)) {
-        snprintf(why, why_size, "the library lock %s is held by another process", lock_path);
-    } else {
-        snprintf(why, why_size, "the library lock in %s/locks could not be taken (%s)", dir,
-                 saved ? strerror(saved) : "unknown error");
-    }
-    return false;
-}
-
-static LibResult rewrite_library(const NkDataMigrationPlan *plan, const Remap *m, bool held,
-                                 NkDataMigration *r, char *why, size_t why_size) {
-    if (!m->active) return LIB_UNCHANGED;
-    if (nk_platform_path_missing(plan->library_file)) return LIB_UNCHANGED;
-    NkFileLock lock;
-    memset(&lock, 0, sizeof(lock));
-    if (!held) {
-        char lock_why[NK_MAX_PATH * 2];
-        if (!lock_library(&lock, plan->library_file, NK_LIBRARY_LOCK_TIMEOUT_MS, lock_why, sizeof(lock_why))) {
-            snprintf(why, why_size, "the library file %s could not be locked: %s (after waiting up to %u s)",
-                     plan->library_file, lock_why, NK_LIBRARY_LOCK_TIMEOUT_MS / 1000u);
-            return LIB_FAILED;
-        }
-    }
+/* Rewrites library.json's stored paths under m's folder, while the caller holds the library's
+   lock. With `backup`, the original is first written whole to library.json.pre-migration (an older
+   one is replaced). The result is read back: a path that still names the folder puts the original
+   back and fails. A library a newer Nakagawa wrote (schema_version above NK_LIBRARY_SCHEMA_VERSION)
+   is not touched: LIB_NEWER. A missing library is LIB_UNCHANGED. */
+static LibResult library_apply(const char *library_file, const Remap *m, bool backup, char *log,
+                               char *why, size_t why_size) {
+    if (!m->active || nk_platform_path_missing(library_file)) return LIB_UNCHANGED;
     LibResult result = LIB_FAILED;
     char *data = NULL, *check = NULL;
     size_t size = 0, check_size = 0, hits = 0;
     bool too_long = false;
     OutBuf out = {NULL, 0u, 0u, false};
-    long version = nk_user_data_file_version(plan->library_file, MIGRATE_LIBRARY_MAX_BYTES);
+    long version = nk_user_data_file_version(library_file, MIGRATE_LIBRARY_MAX_BYTES);
     if (version > (long)NK_LIBRARY_SCHEMA_VERSION) {
         snprintf(why, why_size,
                  "the library file %s was written by a newer version of Nakagawa (schema_version "
                  "%ld), which this version does not change",
-                 plan->library_file, version);
+                 library_file, version);
         result = LIB_NEWER;
         goto done;
     }
-    if (!read_whole(plan->library_file, &data, &size)) {
-        snprintf(why, why_size, "the library file %s could not be read", plan->library_file);
+    if (!read_whole(library_file, MIGRATE_LIBRARY_MAX_BYTES, &data, &size)) {
+        snprintf(why, why_size, "the library file %s could not be read", library_file);
         goto done;
     }
     remap_strings(m, data, size, &out, &hits, &too_long);
@@ -991,41 +947,34 @@ static LibResult rewrite_library(const NkDataMigrationPlan *plan, const Remap *m
         snprintf(why, why_size,
                  too_long ? "a path in the library file %s would be too long in the new folder"
                           : "out of memory while rewriting the library file %s",
-                 plan->library_file);
+                 library_file);
         goto done;
     }
     if (hits == 0u) {
         result = LIB_UNCHANGED;
         goto done;
     }
-    char backup[NK_MAX_PATH];
-    int written = snprintf(backup, sizeof(backup), "%s.pre-migration", plan->library_file);
-    bool ok = written > 0 && (size_t)written < sizeof(backup);
-    /* The original is kept once, written whole. A backup already there is the older original when
-       it parses (a run that stopped before its rewrite left it); one that does not is replaced. */
-    if (ok && (nk_platform_path_missing(backup) || !backup_is_whole(backup))) {
-        ok = write_atomic(r, backup, ".tmp", data, size);
-    }
-    if (!ok || !write_atomic(r, plan->library_file, ".migrating", out.data, out.length)) {
-        snprintf(why, why_size, "the library file %s could not be rewritten", plan->library_file);
+    char backup_file[NK_MAX_PATH + 16];
+    int written = snprintf(backup_file, sizeof(backup_file), "%s.pre-migration", library_file);
+    bool ok = written > 0 && (size_t)written < sizeof(backup_file);
+    if (ok && backup) ok = write_atomic(log, backup_file, data, size);
+    if (!ok || !write_atomic(log, library_file, out.data, out.length)) {
+        snprintf(why, why_size, "the library file %s could not be rewritten", library_file);
         goto done;
     }
-    /* Read back: no stored path may still name the old folder. */
-    if (!read_whole(plan->library_file, &check, &check_size)) {
-        snprintf(why, why_size, "the rewritten library file %s could not be read back",
-                 plan->library_file);
+    if (!read_whole(library_file, MIGRATE_LIBRARY_MAX_BYTES, &check, &check_size)) {
+        snprintf(why, why_size, "the rewritten library file %s could not be read back", library_file);
         goto done;
     }
     remap_strings(m, check, check_size, NULL, &hits, &too_long);
     if (hits != 0u) {
-        snprintf(why, why_size, "%zu stored path(s) in the library file %s still name %s after it was "
-                                "rewritten",
-                 hits, plan->library_file, plan->remap_from);
-        /* The moves are undone next: the file goes back to the paths they restore. */
-        if (!write_atomic(r, plan->library_file, ".migrating", data, size)) {
-            log_line(r, "%s: the library file %s could not be put back as it was; the original is "
-                        "%s.",
-                     NK_MIGRATE_CODE_LIBRARY_NOT_UPDATED, plan->library_file, backup);
+        snprintf(why, why_size,
+                 "%zu stored path(s) in the library file %s still name %s after it was rewritten",
+                 hits, library_file, m->lexical);
+        if (!write_atomic(log, library_file, data, size)) {
+            log_line(log, "%s: the library file %s could not be put back as it was%s%s.",
+                     NK_MIGRATE_CODE_FAILED, library_file, backup ? "; the original is " : "",
+                     backup ? backup_file : "");
         }
         goto done;
     }
@@ -1034,203 +983,332 @@ done:
     free(data);
     free(check);
     free(out.data);
-    if (!held) nk_platform_file_lock_release(&lock);
     return result;
 }
 
-/* ---- The record of a completed run ---- */
+/* ---- The journal ---- */
 
-/* When a run finished, and the old folders it retired (canonical paths). */
 typedef struct {
-    bool present;
-    long long when;
-    char from[NK_MIGRATE_MAX_MOVES][NK_MAX_PATH];
-    size_t count;
-} DoneRecord;
+    char label[32];
+    char from[NK_MAX_PATH];
+    char to[NK_MAX_PATH];
+    bool essential; /* a folder that matters; a cache or logs folder that cannot move stays put */
+} Step;
 
-static void read_record(const char *path, DoneRecord *record) {
-    memset(record, 0, sizeof(*record));
-    if (!path[0] || nk_platform_path_missing(path)) return;
-    char *data = NULL;
-    size_t size = 0;
-    if (!read_whole(path, &data, &size) || size > MIGRATE_RECORD_MAX_BYTES) {
-        free(data);
-        return;
+/* The move, step by step, as the journal holds it. Each rename's paths are where its folder is when
+   that step runs (Linux's saves are inside the moved data folder by then). The library rewrite, when
+   there is one, is the last step. */
+typedef struct {
+    char new_root[NK_MAX_PATH];
+    Step steps[NK_MIGRATE_MAX_MOVES];
+    size_t count;
+    bool library;
+    char library_file[NK_MAX_PATH];
+    Remap remap; /* the old data folder (both spellings) to the new one */
+} Journal;
+
+static const char k_journal_magic[] = "nakagawa-data-folder-move 1";
+
+static void journal_text(const Journal *j, OutBuf *out) {
+    out_text(out, k_journal_magic);
+    out_text(out, "\n# Nakagawa is moving your data folders (#324). The next start finishes or undoes "
+                  "this move;\n# do not edit or delete this file.\n");
+    out_text(out, "root\t");
+    out_text(out, j->new_root);
+    out_text(out, "\n");
+    for (size_t i = 0; i < j->count; i++) {
+        const Step *s = &j->steps[i];
+        out_text(out, "rename\t");
+        out_text(out, s->label);
+        out_text(out, s->essential ? "\t1\t" : "\t0\t");
+        out_text(out, s->from);
+        out_text(out, "\t");
+        out_text(out, s->to);
+        out_text(out, "\n");
     }
+    if (j->library) {
+        out_text(out, "library\t");
+        out_text(out, j->library_file);
+        out_text(out, "\t");
+        out_text(out, j->remap.lexical);
+        out_text(out, "\t");
+        out_text(out, j->remap.resolved);
+        out_text(out, "\t");
+        out_text(out, j->remap.to);
+        out_text(out, "\n");
+    }
+}
+
+/* Splits `line` at tabs into exactly `want` fields. */
+static bool split_fields(char *line, char **fields, size_t want) {
+    size_t n = 0;
+    char *p = line;
+    while (n < want) {
+        fields[n++] = p;
+        char *tab = strchr(p, '\t');
+        if (!tab) break;
+        *tab = '\0';
+        p = tab + 1;
+    }
+    return n == want && strchr(fields[want - 1u], '\t') == NULL;
+}
+
+static bool absolute_into(char *out, size_t cap, const char *path) {
+    return path[0] == '/' && copy_path(out, cap, path);
+}
+
+static bool journal_parse(const char *data, size_t size, Journal *j) {
+    memset(j, 0, sizeof(*j));
+    static char line[NK_MAX_PATH * 4 + 64];
+    bool first = true, root = false;
     for (size_t i = 0; i < size;) {
         size_t end = i;
         while (end < size && data[end] != '\n') end++;
         size_t n = end - i;
-        const char *line = data + i;
-        if (n > 5u && memcmp(line, "time ", 5u) == 0) {
-            char number[32];
-            size_t digits = n - 5u < sizeof(number) - 1u ? n - 5u : sizeof(number) - 1u;
-            memcpy(number, line + 5, digits);
-            number[digits] = '\0';
-            char *stop = NULL;
-            long long when = strtoll(number, &stop, 10);
-            if (stop && *stop == '\0' && when > 0) {
-                record->when = when;
-                record->present = true;
-            }
-        } else if (n > 5u && memcmp(line, "from ", 5u) == 0 && record->count < NK_MIGRATE_MAX_MOVES &&
-                   n - 5u < NK_MAX_PATH) {
-            memcpy(record->from[record->count], line + 5, n - 5u);
-            record->from[record->count][n - 5u] = '\0';
-            record->count++;
-        }
+        if (n >= sizeof(line) || memchr(data + i, '\0', n)) return false;
+        memcpy(line, data + i, n);
+        line[n] = '\0';
         i = end + 1u;
+        if (first) {
+            if (strcmp(line, k_journal_magic) != 0) return false;
+            first = false;
+            continue;
+        }
+        if (line[0] == '#' || line[0] == '\0') continue;
+        char *f[5];
+        if (strncmp(line, "root\t", 5) == 0) {
+            if (root || !split_fields(line, f, 2u) || !absolute_into(j->new_root, sizeof(j->new_root), f[1])) {
+                return false;
+            }
+            root = true;
+        } else if (strncmp(line, "rename\t", 7) == 0) {
+            if (j->library || j->count >= NK_MIGRATE_MAX_MOVES || !split_fields(line, f, 5u)) return false;
+            Step *s = &j->steps[j->count];
+            if (!copy_path(s->label, sizeof(s->label), f[1]) || (strcmp(f[2], "1") != 0 && strcmp(f[2], "0") != 0) ||
+                !absolute_into(s->from, sizeof(s->from), f[3]) || !absolute_into(s->to, sizeof(s->to), f[4])) {
+                return false;
+            }
+            s->essential = f[2][0] == '1';
+            j->count++;
+        } else if (strncmp(line, "library\t", 8) == 0) {
+            if (j->library || !split_fields(line, f, 5u) ||
+                !absolute_into(j->library_file, sizeof(j->library_file), f[1]) ||
+                !absolute_into(j->remap.lexical, sizeof(j->remap.lexical), f[2]) ||
+                !absolute_into(j->remap.resolved, sizeof(j->remap.resolved), f[3]) ||
+                !absolute_into(j->remap.to, sizeof(j->remap.to), f[4])) {
+                return false;
+            }
+            remap_activate(&j->remap);
+            j->library = j->remap.active;
+        } else {
+            return false;
+        }
     }
-    free(data);
+    return !first && root && j->count > 0u;
 }
 
-/* The record lists `folder` (compared with links resolved) as one a completed run retired. */
-static bool record_lists(const DoneRecord *record, const char *folder) {
-    char canonical[NK_MAX_PATH];
-    if (!record->present || !canonical_path(folder, canonical, sizeof(canonical))) return false;
-    for (size_t i = 0; i < record->count; i++) {
-        if (strcmp(record->from[i], canonical) == 0) return true;
-    }
-    return false;
-}
-
-static void format_when(long long when, char *out, size_t cap) {
-    time_t t = (time_t)when;
-    struct tm local;
-    if (!localtime_r(&t, &local) || strftime(out, cap, "%Y-%m-%d at %H:%M", &local) == 0u) {
-        snprintf(out, cap, "an earlier start");
-    }
-}
-
-/* Written once the folders that matter are in the new layout and the library is rewritten. */
-static void write_record(const NkDataMigrationPlan *plan, const char (*canonical_from)[NK_MAX_PATH],
-                         NkDataMigration *r) {
-    if (!plan->done_file[0]) return;
+/* The journal, synced, and its folder synced, before the first rename. */
+static bool journal_write(const char *path, const Journal *j, char *why, size_t why_size) {
     OutBuf out = {NULL, 0u, 0u, false};
-    char line[NK_MAX_PATH + 32];
-    static const char header[] =
-        "Nakagawa moved its earlier folders into this one (#324). This file records that move: when\n"
-        "it finished, and the earlier folders it retired. Anything in one of them now was written\n"
-        "there after the move.\n";
-    out_put(&out, header, sizeof(header) - 1u);
-    int written = snprintf(line, sizeof(line), "time %lld\n", (long long)time(NULL));
-    if (written > 0 && (size_t)written < sizeof(line)) out_put(&out, line, (size_t)written);
-    for (size_t i = 0; i < plan->move_count; i++) {
-        const NkMigrateMove *move = &plan->moves[i];
-        if (move->disposable || move->after_previous || !canonical_from[i][0]) continue;
-        if (strchr(canonical_from[i], '\n')) continue; /* not a line; such a folder is not listed */
-        written = snprintf(line, sizeof(line), "from %s\n", canonical_from[i]);
-        if (written > 0 && (size_t)written < sizeof(line)) out_put(&out, line, (size_t)written);
-    }
-    if (out.failed || !write_atomic(r, plan->done_file, ".tmp", out.data, out.length)) {
-        log_line(r, "%s: %s could not be written, so a later start cannot tell files an older copy of "
-                    "Nakagawa writes into an earlier folder from a second copy of your data.",
-                 NK_MIGRATE_CODE_RECORD_NOT_WRITTEN, plan->done_file);
-    }
+    journal_text(j, &out);
+    char temp[NK_MAX_PATH + 8];
+    int written = snprintf(temp, sizeof(temp), "%s.tmp", path);
+    bool ok = !out.failed && written > 0 && (size_t)written < sizeof(temp) &&
+              write_whole(temp, out.data, out.length);
+    if (ok && nk_rename_utf8(temp, path) != 0) ok = false;
     free(out.data);
+    if (!ok) {
+        snprintf(why, why_size, "the record of the move %s could not be written (%s)", path,
+                 errno ? strerror(errno) : "unknown error");
+        (void)nk_remove_utf8(temp);
+        return false;
+    }
+    char dir[NK_MAX_PATH];
+    if (!parent_dir(path, dir, sizeof(dir)) || !do_sync_dir(dir)) {
+        snprintf(why, why_size, "%s: the record of the move %s could not be flushed to the disk (%s)",
+                 NK_MIGRATE_CODE_NOT_FLUSHED, path, errno ? strerror(errno) : "unknown error");
+        (void)nk_remove_utf8(path);
+        return false;
+    }
+    return true;
 }
 
-/* ---- The run ---- */
-
-typedef struct {
-    bool active;
-    bool clear_to;  /* the destination is a tree of empty folders */
-    bool skipped;   /* left where it is (a cache or logs folder, or one that is also kept) */
-    char now[NK_MAX_PATH]; /* where its folder is before this run moves anything */
-} MoveState;
-
-typedef struct {
-    const char *code;
-    char text[2048];
-    char folder[NK_MAX_PATH];
-    char after[1024];  /* what the user can do; "Nothing needs doing." when empty */
-} KeepReason;
-
-static void keep_reason(KeepReason *reason, const char *code, const char *folder, const char *format,
-                        ...) {
-    if (reason->code) return; /* the first reason found is the one given */
-    reason->code = code;
-    (void)copy_path(reason->folder, sizeof(reason->folder), folder);
-    va_list args;
-    va_start(args, format);
-    (void)vsnprintf(reason->text, sizeof(reason->text), format, args);
-    va_end(args);
+/* After a complete undo: the move is over. A journal that cannot be removed is finished or undone
+   again by the next start. */
+static bool journal_remove(const char *path, char *log) {
+    if (nk_remove_utf8(path) != 0 && !nk_platform_path_missing(path)) {
+        log_line(log, "%s: the record of the move %s could not be removed (%s); the next start "
+                      "finishes or undoes the move again.",
+                 NK_MIGRATE_CODE_INTERRUPTED, path, strerror(errno));
+        return false;
+    }
+    flush_parent(log, path);
+    return true;
 }
 
-static void keep_after(KeepReason *reason, const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    (void)vsnprintf(reason->after, sizeof(reason->after), format, args);
-    va_end(args);
+/* ---- Steps, read from the disk ---- */
+
+/* One rename forward. Done when the source is gone and the destination is there; to do when the
+   source is there and the destination is absent or only empty folders; anything else is an error. */
+static bool step_forward(const Step *s, char *log, int *error, char *why, size_t why_size) {
+    const EntryKind from = entry_kind(s->from);
+    const TreeState to = dest_state(s->to);
+    if (from == ENTRY_ABSENT && to != TREE_ABSENT) return true;
+    if (from == ENTRY_ABSENT) {
+        *error = ENOENT;
+        snprintf(why, why_size, "neither %s nor %s exists", s->from, s->to);
+        return false;
+    }
+    if (to == TREE_CONTENT) {
+        *error = EEXIST;
+        snprintf(why, why_size, "both %s and %s hold files", s->from, s->to);
+        return false;
+    }
+    char parent[NK_MAX_PATH];
+    if ((to == TREE_EMPTY && !clear_empty_below(s->to)) ||
+        (parent_dir(s->to, parent, sizeof(parent)) && !nk_platform_mkdir_p(parent)) ||
+        do_rename(s->from, s->to) != 0) {
+        *error = errno;
+        if (*error == EXDEV) {
+            snprintf(why, why_size, "%s and %s are on different disks (or file systems)", s->from, s->to);
+        } else {
+            snprintf(why, why_size, "%s could not be moved to %s (%s)", s->from, s->to,
+                     *error ? strerror(*error) : "unknown error");
+        }
+        return false;
+    }
+    flush_parent(log, s->to);
+    flush_parent(log, s->from);
+    return true;
 }
 
-/* A destination of a folder that matters already holds data: the user uses the new folders. */
-static bool new_layout_holds_data(const NkDataMigrationPlan *plan, const char **which) {
-    for (size_t i = 0; i < plan->move_count; i++) {
-        const NkMigrateMove *move = &plan->moves[i];
-        if (move->disposable) continue;
-        if (dest_state(move->to) == TREE_CONTENT) {
-            *which = move->to;
-            return true;
+/* One rename back. Nothing to do when the destination is absent, or only empty folders while the
+   source is there (the step never ran); back when the source is gone; an error when both hold
+   files. */
+static bool step_undo(const Step *s, char *log, char *why, size_t why_size) {
+    const EntryKind from = entry_kind(s->from);
+    const TreeState to = dest_state(s->to);
+    if (to == TREE_ABSENT || (to == TREE_EMPTY && from != ENTRY_ABSENT)) return true;
+    if (from != ENTRY_ABSENT) {
+        snprintf(why, why_size, "both %s and %s hold files", s->from, s->to);
+        return false;
+    }
+    char parent[NK_MAX_PATH];
+    if ((parent_dir(s->from, parent, sizeof(parent)) && !nk_platform_mkdir_p(parent)) ||
+        do_rename(s->to, s->from) != 0) {
+        int error = errno;
+        snprintf(why, why_size, "%s could not be moved back to %s (%s)", s->to, s->from,
+                 error ? strerror(error) : "unknown error");
+        return false;
+    }
+    flush_parent(log, s->from);
+    flush_parent(log, s->to);
+    return true;
+}
+
+/* Every step forward, in order. False, with `why`, at the first that cannot complete. A cache or
+   logs folder that cannot move stays where it is (a log line). `reached` is the number of renames
+   before the one that failed (all of them when the library or the commit failed): that rename did not
+   happen, since step_forward found it not done, so neither did any later one. */
+static bool roll_forward(const Journal *j, char *log, size_t *moved, bool *rewritten, size_t *reached,
+                         int *error, char *why, size_t why_size) {
+    *moved = 0;
+    *rewritten = false;
+    *reached = j->count;
+    for (size_t i = 0; i < j->count; i++) {
+        const Step *s = &j->steps[i];
+        if (!step_forward(s, log, error, why, why_size)) {
+            if (s->essential) {
+                *reached = i;
+                return false;
+            }
+            log_line(log, "%s: your old %s folder stays where it is: %s.", NK_MIGRATE_CODE_LEFT_BEHIND,
+                     s->label, why);
+            why[0] = '\0';
+            *error = 0;
+        } else {
+            (*moved)++;
+        }
+        point("step", i + 1u);
+    }
+    if (j->library) {
+        LibResult lib = library_apply(j->library_file, &j->remap, true, log, why, why_size);
+        if (lib == LIB_NEWER || lib == LIB_FAILED) return false;
+        *rewritten = lib == LIB_REWRITTEN;
+        point("step", j->count + 1u);
+    }
+    return true;
+}
+
+/* The first `reached` steps back, newest first (the library first when every rename was reached).
+   Stops at the first that cannot be undone, so what is done is always a run of steps from the first:
+   the next start rolls it forward. */
+static bool roll_back(const Journal *j, size_t reached, char *log, char *why, size_t why_size) {
+    if (j->library && reached == j->count) {
+        Remap back;
+        memset(&back, 0, sizeof(back));
+        (void)copy_path(back.lexical, sizeof(back.lexical), j->remap.to);
+        (void)copy_path(back.resolved, sizeof(back.resolved), j->remap.to);
+        (void)copy_path(back.to, sizeof(back.to), j->remap.lexical);
+        remap_activate(&back);
+        LibResult lib = library_apply(j->library_file, &back, false, log, why, why_size);
+        /* A newer library was never rewritten forward either. */
+        if (lib == LIB_FAILED) return false;
+        point("undo", j->count + 1u);
+    }
+    for (size_t k = reached; k > 0u; k--) {
+        const Step *s = &j->steps[k - 1u];
+        if (!step_undo(s, log, why, why_size)) {
+            if (s->essential) return false;
+            log_line(log, "%s: your old %s folder could not be put back: %s.", NK_MIGRATE_CODE_LEFT_BEHIND,
+                     s->label, why);
+            why[0] = '\0';
+        }
+        point("undo", k);
+    }
+    return true;
+}
+
+/* Commit: everything the marker vouches for is flushed, then the journal becomes the marker in one
+   rename. */
+static bool commit_move(const Journal *j, const char *journal_file, const char *marker_file, char *log,
+                        char *why, size_t why_size) {
+    for (size_t i = 0; i <= j->count; i++) {
+        const char *paths[2] = {NULL, NULL};
+        if (i < j->count) {
+            paths[0] = j->steps[i].from;
+            paths[1] = j->steps[i].to;
+        } else if (j->library) {
+            paths[0] = j->library_file;
+        }
+        for (size_t p = 0; p < 2u; p++) {
+            char dir[NK_MAX_PATH];
+            if (!paths[p] || !parent_dir(paths[p], dir, sizeof(dir)) || nk_platform_path_missing(dir)) continue;
+            if (!do_sync_dir(dir)) {
+                snprintf(why, why_size, "%s: the folder %s could not be flushed to the disk (%s)",
+                         NK_MIGRATE_CODE_NOT_FLUSHED, dir, errno ? strerror(errno) : "unknown error");
+                return false;
+            }
         }
     }
-    return false;
+    if (!do_sync_dir(j->new_root)) {
+        snprintf(why, why_size, "%s: the folder %s could not be flushed to the disk (%s)",
+                 NK_MIGRATE_CODE_NOT_FLUSHED, j->new_root, errno ? strerror(errno) : "unknown error");
+        return false;
+    }
+    if (do_rename(journal_file, marker_file) != 0) {
+        int error = errno;
+        snprintf(why, why_size, "the record of the move %s could not become %s (%s)", journal_file,
+                 marker_file, error ? strerror(error) : "unknown error");
+        return false;
+    }
+    flush_parent(log, marker_file);
+    flush_parent(log, journal_file);
+    point("commit", 0u);
+    return true;
 }
 
-/* An earlier start moved some folders that matter and stopped: one of them is in the new layout
-   and gone from the old one, while another still waits in the old one. */
-static bool earlier_move_unfinished(const NkDataMigrationPlan *plan) {
-    bool moved = false, waiting = false;
-    for (size_t i = 0; i < plan->move_count; i++) {
-        const NkMigrateMove *move = &plan->moves[i];
-        if (move->disposable || move->after_previous) continue;
-        bool old_has = tree_state(move->from, 0) == TREE_CONTENT;
-        if (old_has) waiting = true;
-        else if (dest_state(move->to) == TREE_CONTENT) moved = true;
-    }
-    return moved && waiting;
-}
-
-static const char *first_old_folder(const NkDataMigrationPlan *plan) {
-    for (size_t i = 0; i < plan->move_count; i++) {
-        if (!plan->moves[i].disposable && !plan->moves[i].after_previous) return plan->moves[i].from;
-    }
-    return "";
-}
-
-/* Nothing moves. The old folders stay in use unless the new ones hold data too, which leaves no
-   complete layout to start on. */
-static void keep_old(const NkDataMigrationPlan *plan, NkDataMigration *result,
-                     const KeepReason *reason) {
-    const char *taken = NULL;
-    const char *after = reason->after[0] ? reason->after : "Nothing needs doing.";
-    if (new_layout_holds_data(plan, &taken)) {
-        result->status = NK_MIGRATE_REFUSED;
-        (void)copy_path(result->folder_a, sizeof(result->folder_a), reason->folder);
-        (void)copy_path(result->folder_b, sizeof(result->folder_b), taken);
-        if (earlier_move_unfinished(plan)) {
-            /* N2 of the second review: a stopped run cannot be finished now, and the old layout is
-               no longer whole. */
-            snprintf(result->message, sizeof(result->message),
-                     "%s: %s An earlier start moved part of your data into %s and stopped, so Nakagawa "
-                     "can neither finish that move now nor use the earlier folders. It did not move or "
-                     "delete anything. %s Then start Nakagawa again, and it finishes the move.",
-                     reason->code, reason->text, plan->new_root, reason->after);
-            return;
-        }
-        snprintf(result->message, sizeof(result->message),
-                 "%s: %s Nakagawa cannot keep using the earlier folders either, because %s holds "
-                 "data too. It did not move or delete anything. Keep the folder you want, move the "
-                 "other one somewhere outside Nakagawa's folders, then start Nakagawa again.",
-                 reason->code, reason->text, taken);
-        return;
-    }
-    result->status = NK_MIGRATE_KEPT_OLD;
-    snprintf(result->message, sizeof(result->message),
-             "%s: %s Nakagawa moved nothing and changed nothing, and keeps using your earlier "
-             "folders (your library and saves stay in %s). %s",
-             reason->code, reason->text, first_old_folder(plan), after);
-}
+/* ---- The plan ---- */
 
 static bool plan_is_valid(const NkDataMigrationPlan *plan) {
     if (!plan || plan->move_count > NK_MIGRATE_MAX_MOVES || plan->kept_count > NK_MIGRATE_MAX_KEPT) {
@@ -1249,592 +1327,608 @@ static bool plan_is_valid(const NkDataMigrationPlan *plan) {
     return true;
 }
 
-/* Each move's old folder with links resolved, for the record. */
-static void canonical_froms(const NkDataMigrationPlan *plan, char (*out)[NK_MAX_PATH]) {
+static bool is_primary(const NkMigrateMove *move) { return !move->disposable && !move->after_previous; }
+
+static const char *first_old_folder(const NkDataMigrationPlan *plan) {
     for (size_t i = 0; i < plan->move_count; i++) {
-        if (!canonical_path(plan->moves[i].from, out[i], NK_MAX_PATH)) out[i][0] = '\0';
+        if (is_primary(&plan->moves[i])) return plan->moves[i].from;
     }
+    return "";
 }
 
-/* No old folder holds data. A run stopped after its last move and before the library rewrite
-   leaves stored paths into an old data folder that no longer exists; finish the rewrite. Not after
-   a completed run (its record exists): then there is nothing to finish (N8). */
-static void finish_earlier_run(const NkDataMigrationPlan *plan, const DoneRecord *record,
-                               NkDataMigration *result) {
-    result->status = NK_MIGRATE_NOTHING;
-    if (record->present) return;
-    if (!plan->remap_from[0] || !nk_platform_path_missing(plan->remap_from)) return;
-    Remap remap;
-    if (!remap_init(plan, &remap)) return;
-    char why[NK_MAX_PATH + 192] = "";
-    switch (rewrite_library(plan, &remap, false, result, why, sizeof(why))) {
-    case LIB_REWRITTEN: {
-        result->status = NK_MIGRATE_DONE;
-        result->library_rewritten = true;
-        snprintf(result->message, sizeof(result->message),
-                 "Nakagawa finished an earlier move of your data to %s: your library's stored "
-                 "paths were updated (a copy of the old file is library.json.pre-migration).",
-                 plan->new_root[0] ? plan->new_root : "its new folder");
-        char froms[NK_MIGRATE_MAX_MOVES][NK_MAX_PATH];
-        canonical_froms(plan, froms);
-        write_record(plan, (const char (*)[NK_MAX_PATH])froms, result);
-        return;
+/* The first folder of the old layout that matters and holds files, or NULL. */
+static const char *old_folder_with_files(const NkDataMigrationPlan *plan) {
+    for (size_t i = 0; i < plan->move_count; i++) {
+        if (is_primary(&plan->moves[i]) && tree_state(plan->moves[i].from, 0) == TREE_CONTENT) {
+            return plan->moves[i].from;
+        }
     }
-    case LIB_UNCHANGED:
-        return;
-    case LIB_NEWER:
-    case LIB_FAILED:
-        log_line(result, "%s: %s; its stored paths into %s were left as they are.",
-                 NK_MIGRATE_CODE_LIBRARY_NOT_UPDATED, why, plan->remap_from);
-        return;
-    }
+    return NULL;
 }
 
-/* B1 of the second review: anything that may be using the old folders. True, with `what` set, when
-   something is; on false the old library lock is held in `library_lock` (when there is an old data
-   folder) until the rewrite is done. */
-static bool old_folders_in_use(const NkDataMigrationPlan *plan, const MoveState *state, int in_use_fd,
-                               NkFileLock *library_lock, char *what, size_t cap) {
-    memset(library_lock, 0, sizeof(*library_lock));
-    if (in_use_fd >= 0 && !lock_now(in_use_fd, LOCK_EX)) {
-        snprintf(what, cap, "another Nakagawa of this version holds %s", plan->in_use_file);
-        return true;
+/* A folder this host keeps using in the new layout (Linux's cache or logs, when XDG homes point at
+   each other) is, holds or lies in `path`. */
+static bool overlaps_kept(const NkDataMigrationPlan *plan, const char *path) {
+    for (size_t k = 0; k < plan->kept_count; k++) {
+        if (folders_overlap(path, plan->kept[k])) return true;
     }
-    char old_data[NK_MAX_PATH] = "";
-    struct stat st;
-    if (plan->old_library_file[0] && parent_dir(plan->old_library_file, old_data, sizeof(old_data)) &&
-        lstat(old_data, &st) == 0 && S_ISDIR(st.st_mode)) {
-        if (old_locks_held(old_data, what, cap)) return true;
-        /* The library's own lock: held from here until the rewrite, so no writer can slip in. */
-        if (!lock_library(library_lock, plan->old_library_file, 0u, what, cap)) return true;
-    }
-#if defined(__linux__)
-    if (plan->scan_processes) {
-        char folders[NK_MIGRATE_MAX_MOVES][NK_MAX_PATH];
-        size_t count = 0;
-        for (size_t i = 0; i < plan->move_count; i++) {
-            if (!state[i].active) continue;
-            if (canonical_path(state[i].now, folders[count], NK_MAX_PATH)) count++;
-        }
-        if (processes_using((const char (*)[NK_MAX_PATH])folders, count, plan->instance_name, what, cap)) {
-            nk_platform_file_lock_release(library_lock);
-            return true;
-        }
-    }
-#else
-    (void)state;
-#endif
     return false;
 }
 
-static void run_locked(const NkDataMigrationPlan *plan, NkDataMigration *result, int in_use_fd) {
-    MoveState state[NK_MIGRATE_MAX_MOVES];
-    memset(state, 0, sizeof(state));
-    KeepReason reason;
-    memset(&reason, 0, sizeof(reason));
-    DoneRecord record;
-    read_record(plan->done_file, &record);
-    const char *taken = NULL;
-    const bool new_has_data = new_layout_holds_data(plan, &taken);
-
-    /* A folder that matters which is, holds or lies in a folder this host keeps where it is (XDG
-       homes that point at each other). Its content cannot be told apart from that folder's. */
+/* Every old folder that matters and holds files, as "a and b"; with `skip_kept`, not one that the
+   new layout itself writes (overlaps_kept). Returns the first, or NULL. */
+static const char *old_folders_with_files(const NkDataMigrationPlan *plan, bool skip_kept, char *out,
+                                          size_t cap) {
+    const char *first = NULL;
+    out[0] = '\0';
     for (size_t i = 0; i < plan->move_count; i++) {
         const NkMigrateMove *move = &plan->moves[i];
-        if (move->disposable || move->after_previous) continue;
-        for (size_t k = 0; k < plan->kept_count; k++) {
-            if (!folders_overlap(move->from, plan->kept[k])) continue;
-            if (new_has_data) {
-                state[i].skipped = true;
-                log_line(result,
-                         "%s: %s is also Nakagawa's %s folder (%s), so it is not moved: %s already "
-                         "holds your data.",
-                         NK_MIGRATE_CODE_LEFT_BEHIND, move->from, plan->kept_label[k], plan->kept[k],
-                         taken);
-            } else {
-                keep_reason(&reason, NK_MIGRATE_CODE_OVERLAP, move->from,
-                            "Your earlier %s folder %s and Nakagawa's %s folder %s are the same "
-                            "folder, or one is inside the other (XDG_DATA_HOME, XDG_CONFIG_HOME, "
-                            "XDG_CACHE_HOME or XDG_STATE_HOME point at each other), so one cannot "
-                            "be moved without the other.",
-                            move->label, move->from, plan->kept_label[k], plan->kept[k]);
-            }
-            break;
+        if (!is_primary(move) || tree_state(move->from, 0) != TREE_CONTENT) continue;
+        if (skip_kept && overlaps_kept(plan, move->from)) continue;
+        add(out, cap, "%s%s", out[0] ? " and " : "", move->from);
+        if (!first) first = move->from;
+    }
+    return first;
+}
+
+/* ---- The rule ---- */
+
+/* The paths of the data folder, old and new, whose locks a recovery checks: the journal's, else
+   none. */
+static bool recovery_locks(const Journal *j, NkFileLock *library_lock, char *what, size_t cap) {
+    memset(library_lock, 0, sizeof(*library_lock));
+    if (!j->library) return true;
+    const char *dirs[2] = {j->remap.lexical, j->remap.to};
+    for (size_t d = 0; d < 2u; d++) {
+        if (!is_real_dir(dirs[d])) continue;
+        if (data_locks_held(dirs[d], what, cap)) return false;
+        char library[NK_MAX_PATH + 16];
+        int written = snprintf(library, sizeof(library), "%s/library.json", dirs[d]);
+        if (written <= 0 || (size_t)written >= sizeof(library)) continue;
+        return lock_library(library_lock, library, what, cap);
+    }
+    return true;
+}
+
+static void blocked_where(const Journal *j, NkLayoutDecision *out) {
+    add(out->message, sizeof(out->message), " Where your folders are now:");
+    for (size_t i = 0; i < j->count; i++) {
+        const Step *s = &j->steps[i];
+        if (!s->essential) continue;
+        add(out->message, sizeof(out->message), " your %s folder: %s %s, and %s %s;", s->label, s->from,
+            state_words(s->from), s->to, state_words(s->to));
+    }
+}
+
+/* Rule 1: an interrupted move is finished, or undone, before anything uses the folders. True when
+   the journal is gone; false with out->message set (the start stops). */
+static bool recover(const NkDataMigrationPlan *plan, NkLayoutDecision *out) {
+    static Journal j;
+    memset(&j, 0, sizeof(j));
+    (void)copy_path(out->folder_a, sizeof(out->folder_a), first_old_folder(plan));
+    (void)copy_path(out->folder_b, sizeof(out->folder_b), plan->new_root);
+    int player_fd = -1;
+    if (plan->player_lock_file[0]) {
+        int error = 0;
+        player_fd = player_lock_exclusive(plan->player_lock_file, &error);
+        if (player_fd < 0) {
+            snprintf(out->message, sizeof(out->message),
+                     "%s: A move of your data folders to %s was interrupted, and another Nakagawa "
+                     "window is open (%s: %s), so the move can be neither finished nor undone now. "
+                     "Nakagawa did not start, so that nothing uses the folders while they are half "
+                     "moved. Close every other Nakagawa window and game, then start Nakagawa again.",
+                     NK_MIGRATE_CODE_IN_USE, plan->new_root, plan->player_lock_file,
+                     error == EWOULDBLOCK ? "held by another process" : strerror(error));
+            return false;
         }
     }
-
-    /* Where each folder is now, whether it holds data, and whether it is a link. */
-    for (size_t i = 0; i < plan->move_count; i++) {
-        const NkMigrateMove *move = &plan->moves[i];
-        if (state[i].skipped) continue;
-        if (move->after_previous && record.present && !state[i - 1u].active) {
-            /* N6: after a completed run, a data/saves folder that appears later (a
-               --user-data-root naming the new data folder) is that root's own: it stays. */
-            continue;
-        }
-        bool copied;
-        if (move->after_previous && state[i - 1u].active) {
-            /* Still inside the previous move's folder, which has not moved yet. */
-            const char *rest = move->from + strlen(plan->moves[i - 1u].to);
-            int written = snprintf(state[i].now, sizeof(state[i].now), "%s%s", state[i - 1u].now, rest);
-            copied = written > 0 && (size_t)written < sizeof(state[i].now);
+    char *data = NULL;
+    size_t size = 0;
+    bool parsed = read_whole(plan->journal_file, MIGRATE_JOURNAL_MAX_BYTES, &data, &size) &&
+                  journal_parse(data, size, &j);
+    free(data);
+    if (!parsed) {
+        release_lock(player_fd);
+        snprintf(out->message, sizeof(out->message),
+                 "%s: A move of your data folders to %s was interrupted, and its record %s cannot be "
+                 "read, so Nakagawa cannot tell how far it got. Nakagawa did not start. Nothing was "
+                 "deleted. Your earlier folder %s %s; %s %s.",
+                 NK_MIGRATE_CODE_INTERRUPTED, plan->new_root, plan->journal_file, out->folder_a,
+                 state_words(out->folder_a), plan->new_root, state_words(plan->new_root));
+        return false;
+    }
+    NkFileLock library_lock;
+    char what[PATH_MAX + 128] = "";
+    if (!recovery_locks(&j, &library_lock, what, sizeof(what))) {
+        release_lock(player_fd);
+        add(out->message, sizeof(out->message),
+                 "%s: A move of your data folders to %s was interrupted, and %s, so the move can be "
+                 "neither finished nor undone now. Nakagawa did not start, so that nothing uses the "
+                 "folders while they are half moved. Close every other Nakagawa window, game and tool, "
+                 "then start Nakagawa again.",
+                 NK_MIGRATE_CODE_LOCK, j.new_root, what);
+        return false;
+    }
+    char why[NK_MAX_PATH * 2 + 256] = "";
+    size_t moved = 0;
+    size_t reached = 0;
+    bool rewritten = false;
+    int error = 0;
+    bool ok = roll_forward(&j, out->log, &moved, &rewritten, &reached, &error, why, sizeof(why)) &&
+              commit_move(&j, plan->journal_file, plan->marker_file, out->log, why, sizeof(why));
+    if (ok) {
+        log_line(out->log, "%s: an interrupted move of your data folders to %s was finished at this start.",
+                 NK_MIGRATE_CODE_INTERRUPTED, j.new_root);
+    } else {
+        char undo_why[NK_MAX_PATH * 2 + 256] = "";
+        ok = roll_back(&j, reached, out->log, undo_why, sizeof(undo_why)) &&
+             journal_remove(plan->journal_file, out->log);
+        if (ok) {
+            log_line(out->log, "%s: an interrupted move of your data folders could not be finished (%s), so "
+                               "it was undone; Nakagawa uses your earlier folders.",
+                     NK_MIGRATE_CODE_INTERRUPTED, why);
         } else {
-            copied = copy_path(state[i].now, sizeof(state[i].now), move->from);
+            if (j.count > 0u) (void)copy_path(out->folder_a, sizeof(out->folder_a), j.steps[0].from);
+            snprintf(out->message, sizeof(out->message),
+                     "%s: A move of your data folders to %s that you started was interrupted. Nakagawa "
+                     "could not finish it (%s) or undo it (%s), so it did not start: nothing may use the "
+                     "folders while they are half moved. Nothing was deleted.",
+                     NK_MIGRATE_CODE_INTERRUPTED, j.new_root, why[0] ? why : "unknown error",
+                     undo_why[0] ? undo_why : "the record of the move could not be removed");
+            blocked_where(&j, out);
+            add(out->message, sizeof(out->message),
+                " Fix what is named above (free space, permissions, a disk that is not mounted), then "
+                "start Nakagawa again: it carries on from where it stopped. The record of the move is "
+                "%s; do not edit or delete it.",
+                plan->journal_file);
         }
-        if (!copied) {
-            result->status = NK_MIGRATE_FAILED;
-            snprintf(result->message, sizeof(result->message),
-                     "%s: the path of your %s folder (%s) is too long where it is now, so Nakagawa "
-                     "did not move anything.",
-                     NK_MIGRATE_CODE_FAILED, move->label, move->from);
+    }
+    nk_platform_file_lock_release(&library_lock);
+    release_lock(player_fd);
+    return ok;
+}
+
+static void write_marker(const NkDataMigrationPlan *plan, NkLayoutDecision *out) {
+    static const char text[] =
+        "Nakagawa uses the folders in this one (#324). Keep this file: it tells Nakagawa and its tools\n"
+        "to use this folder even if an earlier folder appears again.\n";
+    if (!plan->marker_file[0]) return;
+    if (!nk_platform_mkdir_p(plan->new_root) || !write_atomic(out->log, plan->marker_file, text, sizeof(text) - 1u)) {
+        log_line(out->log, "%s: %s could not be written (%s); the rule decides again at the next start.",
+                 NK_MIGRATE_CODE_MARKER_NOT_WRITTEN, plan->marker_file, errno ? strerror(errno) : "unknown error");
+    }
+}
+
+static void decide_locked(const NkDataMigrationPlan *plan, NkLayoutDecision *out) {
+    if (plan->journal_file[0] && !nk_platform_path_missing(plan->journal_file)) {
+        out->rule = "journal";
+        if (!recover(plan, out)) {
+            out->layout = NK_LAYOUT_BLOCKED;
             return;
         }
-        state[i].active = tree_state(state[i].now, 0) == TREE_CONTENT;
-        if (!state[i].active || entry_kind(state[i].now) != ENTRY_LINK) continue;
-        if (move->disposable) {
-            state[i].active = false;
-            state[i].skipped = true;
-            log_line(result, "%s: your %s folder %s is a link, so it is not moved; it stays where it is.",
-                     NK_MIGRATE_CODE_LEFT_BEHIND, move->label, state[i].now);
-            continue;
-        }
-        char target[NK_MAX_PATH] = "";
-        ssize_t n = readlink(state[i].now, target, sizeof(target) - 1u);
-        if (n > 0 && (size_t)n < sizeof(target)) target[n] = '\0';
-        else snprintf(target, sizeof(target), "a place that cannot be read");
-        struct stat followed;
-        if (stat(state[i].now, &followed) != 0 && (errno == ENOENT || errno == ENOTDIR)) {
-            /* N9: a link to nothing (a disk that is not mounted); lstat sees the link itself. */
-            keep_reason(&reason, NK_MIGRATE_CODE_LINKED, state[i].now,
-                        "Your %s folder %s is a link to %s, which does not exist now (a disk that is "
-                        "not mounted?). Nakagawa does not move a linked folder.",
-                        move->label, state[i].now, target);
-            keep_after(&reason, "If %s is on a disk that is not mounted, mount it.", target);
-        } else {
-            keep_reason(&reason, NK_MIGRATE_CODE_LINKED, state[i].now,
-                        "Your %s folder %s is a link to %s. Nakagawa does not move a linked folder: "
-                        "moving the link can change where it points.",
-                        move->label, state[i].now, target);
-        }
+        out->recovered = true;
     }
-
-    /* The other side of B1 (second review): an old folder that appeared again after a completed
-       run, beside the new folders that hold the data. Everything in it was written after the move,
-       most likely by an older copy that was still running. Neither folder is merged or deleted. */
-    for (size_t i = 0; i < plan->move_count; i++) {
-        const NkMigrateMove *move = &plan->moves[i];
-        if (!state[i].active || move->disposable || move->after_previous) continue;
-        if (!record_lists(&record, state[i].now) || dest_state(move->to) != TREE_CONTENT) continue;
-        char when[64];
-        format_when(record.when, when, sizeof(when));
-        result->status = NK_MIGRATE_REFUSED;
-        (void)copy_path(result->folder_a, sizeof(result->folder_a), state[i].now);
-        (void)copy_path(result->folder_b, sizeof(result->folder_b), move->to);
-        snprintf(result->message, sizeof(result->message),
-                 "%s: Nakagawa uses your %s folder %s, where it moved it on %s. Your earlier folder "
-                 "%s was made again after that move, so everything in it was written there later, "
-                 "most likely by an older copy of Nakagawa (a window, a game or a tool) that was "
-                 "still running. Nakagawa did not merge, move or delete anything. Open both "
-                 "folders, copy anything you want to keep from %s into %s, then delete %s (or move "
-                 "it outside Nakagawa's folders) and start Nakagawa again.",
-                 NK_MIGRATE_CODE_LATE_WRITES, move->label, move->to, when, state[i].now,
-                 state[i].now, move->to, state[i].now);
+    const char *old = old_folder_with_files(plan);
+    if (plan->marker_file[0] && !nk_platform_path_missing(plan->marker_file)) {
+        if (!out->recovered) out->rule = "marker";
+        out->layout = NK_LAYOUT_NEW;
+        (void)copy_path(out->folder_a, sizeof(out->folder_a), plan->new_root);
+        out->folder_b[0] = '\0';
+        char list[NK_MAX_PATH * 3];
+        const char *returned = old_folders_with_files(plan, true, list, sizeof(list));
+        if (!returned) return;
+        out->notice_kind = NK_LAYOUT_NOTICE_RETURNED;
+        (void)copy_path(out->folder_b, sizeof(out->folder_b), returned);
+        add(out->notice, sizeof(out->notice),
+                 "%s: Nakagawa uses your data in %s. Your earlier folder %s holds files again. They "
+                 "were written there after your data was moved, most likely by an older version "
+                 "of Nakagawa that was still running. Nakagawa does not use them, and it did not move or "
+                 "delete anything.",
+                 NK_LAYOUT_CODE_RETURNED, plan->new_root, list);
         return;
     }
+    if (old) {
+        if (!out->recovered) out->rule = "old";
+        out->layout = NK_LAYOUT_OLD;
+        out->can_move = true;
+        (void)copy_path(out->folder_a, sizeof(out->folder_a), old);
+        out->folder_b[0] = '\0';
+        if (dest_state(plan->new_root) != TREE_CONTENT) return;
+        char list[NK_MAX_PATH * 3];
+        (void)old_folders_with_files(plan, false, list, sizeof(list));
+        out->notice_kind = NK_LAYOUT_NOTICE_BOTH;
+        (void)copy_path(out->folder_b, sizeof(out->folder_b), plan->new_root);
+        add(out->notice, sizeof(out->notice),
+                 "%s: Nakagawa uses your data in %s. The newer folder %s holds files too. Nakagawa does "
+                 "not use them, and it did not merge, move or delete anything.",
+                 NK_LAYOUT_CODE_BOTH, list, plan->new_root);
+        return;
+    }
+    if (!out->recovered) out->rule = "fresh";
+    out->layout = NK_LAYOUT_NEW;
+    (void)copy_path(out->folder_a, sizeof(out->folder_a), plan->new_root);
+    out->folder_b[0] = '\0';
+    write_marker(plan, out);
+}
 
-    /* Two folders being moved that are the same folder, or one inside the other. */
-    for (size_t i = 0; i < plan->move_count; i++) {
-        if (!state[i].active) continue;
-        for (size_t j = i + 1u; j < plan->move_count; j++) {
-            if (!state[j].active) continue;
-            if (plan->moves[j].after_previous && j == i + 1u) continue; /* inside it by design */
-            if (!folders_overlap(state[i].now, state[j].now)) continue;
-            const NkMigrateMove *a = &plan->moves[i];
-            const NkMigrateMove *b = &plan->moves[j];
-            if (a->disposable || b->disposable) {
-                size_t d = a->disposable ? i : j;
-                state[d].active = false;
-                state[d].skipped = true;
-                log_line(result,
-                         "%s: your %s folder %s is, holds or lies in another folder being moved, so "
-                         "it is not moved on its own; it stays where it is.",
-                         NK_MIGRATE_CODE_LEFT_BEHIND, plan->moves[d].label, state[d].now);
-                continue;
-            }
-            keep_reason(&reason, NK_MIGRATE_CODE_OVERLAP, state[i].now,
-                        "Your earlier %s folder %s and %s folder %s are the same folder, or one is "
-                        "inside the other (XDG_DATA_HOME and XDG_CONFIG_HOME point at each other), "
-                        "so Nakagawa cannot tell which files belong where.",
-                        a->label, state[i].now, b->label, state[j].now);
+void nk_data_layout_decide(const NkDataMigrationPlan *plan, NkLayoutDecision *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    out->layout = NK_LAYOUT_NEW;
+    out->rule = "none";
+    /* Decided once per process; a second call (a test) starts over. */
+    nk_data_migrate_release_player_lock();
+    if (!plan_is_valid(plan) || !plan->new_root[0]) {
+        log_line(out->log, "%s: the data folder plan is invalid; the new layout is used.", NK_MIGRATE_CODE_FAILED);
+        return;
+    }
+    if (plan->notes[0]) log_line(out->log, "%s", plan->notes);
+    int run_fd = -1;
+    if (plan->lock_file[0]) {
+        int error = 0;
+        if (!take_run_lock(plan->lock_file, &run_fd, &error)) {
+            /* The player lock still keeps a recovery to one process. */
+            log_line(out->log, "%s: %s could not be locked (%s); the layout is decided without it.",
+                     NK_MIGRATE_CODE_LOCK, plan->lock_file, strerror(error));
         }
     }
+    decide_locked(plan, out);
+    if (out->layout != NK_LAYOUT_BLOCKED && plan->player_lock_file[0] &&
+        !player_lock_shared(plan->player_lock_file)) {
+        log_line(out->log, "%s: %s could not be held while Nakagawa runs (%s); a move started from "
+                           "another window cannot see this one.",
+                 NK_MIGRATE_CODE_LOCK, plan->player_lock_file, strerror(errno));
+    }
+    release_lock(run_fd);
+}
 
-    bool essential_active = false;
+/* ---- The move ---- */
+
+static void refuse(NkDataMigration *r, const char *code, const char *format, ...) {
+    r->status = NK_MIGRATE_REFUSED;
+    snprintf(r->message, sizeof(r->message), "%s: ", code);
+    va_list args;
+    va_start(args, format);
+    append_v(r->message, sizeof(r->message), format, args);
+    va_end(args);
+    add(r->message, sizeof(r->message), " Nothing was moved or deleted.");
+}
+
+static bool has_control(const char *path) { return strchr(path, '\t') || strchr(path, '\n'); }
+
+static const char *unsafe_path(const NkDataMigrationPlan *plan) {
+    const char *paths[] = {plan->new_root,    plan->journal_file, plan->marker_file,
+                           plan->library_file, plan->remap_from,  plan->remap_to};
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        if (has_control(paths[i])) return paths[i];
+    }
+    for (size_t i = 0; i < plan->move_count; i++) {
+        if (has_control(plan->moves[i].from)) return plan->moves[i].from;
+        if (has_control(plan->moves[i].to)) return plan->moves[i].to;
+    }
+    return NULL;
+}
+
+/* Every check, before anything is touched, and the steps of the move. False with r refused. */
+static bool plan_steps(const NkDataMigrationPlan *plan, Journal *j, NkDataMigration *r) {
+    static char now[NK_MIGRATE_MAX_MOVES][NK_MAX_PATH];
+    bool included[NK_MIGRATE_MAX_MOVES];
+    memset(included, 0, sizeof(included));
+    const char *unsafe = unsafe_path(plan);
+    if (unsafe) {
+        refuse(r, NK_MIGRATE_CODE_UNSAFE_NAME,
+               "The folder path %s holds a tab or a line break, which the record of the move cannot "
+               "hold.", unsafe);
+        return false;
+    }
+    if (dest_state(plan->new_root) == TREE_CONTENT) {
+        refuse(r, NK_MIGRATE_CODE_BOTH_PRESENT,
+               "Your data is in %s, and %s holds files too, so moving would mix the two.",
+               first_old_folder(plan), plan->new_root);
+        return false;
+    }
+    char base[NK_MAX_PATH];
+    dev_t base_device = 0, root_device = 0;
+    if (!parent_dir(plan->journal_file, base, sizeof(base)) || !device_of(base, &base_device) ||
+        !device_of(plan->new_root, &root_device) || base_device != root_device) {
+        refuse(r, NK_MIGRATE_CODE_OTHER_DISK,
+               "%s and the folder that holds it are on different disks (or file systems), so the "
+               "record of the move cannot be committed there.", plan->new_root);
+        return false;
+    }
     for (size_t i = 0; i < plan->move_count; i++) {
         const NkMigrateMove *move = &plan->moves[i];
-        if (!state[i].active || move->disposable) continue;
-        essential_active = true;
-        if (reason.code) continue;
-        /* N1: a folder of another user (sudo with HOME kept) is not moved from here. */
-        struct stat st;
-        if (lstat(state[i].now, &st) == 0 && (unsigned long)st.st_uid != effective_uid()) {
-            keep_reason(&reason, NK_MIGRATE_CODE_OTHER_OWNER, state[i].now,
-                        "Your %s folder %s belongs to user %lu, and Nakagawa runs as user %lu (for "
-                        "example under sudo), so it does not move it from here.",
-                        move->label, state[i].now, (unsigned long)st.st_uid, effective_uid());
-            keep_after(&reason, "Start Nakagawa as yourself to move it.");
+        if (move->after_previous) {
+            if (!included[i - 1u]) continue;
+            const char *rest = move->from + strlen(plan->moves[i - 1u].to);
+            int written = snprintf(now[i], sizeof(now[i]), "%s%s", now[i - 1u], rest);
+            if (written <= 0 || (size_t)written >= sizeof(now[i])) {
+                refuse(r, NK_MIGRATE_CODE_PATH_UNAVAILABLE, "The path of your %s folder is too long.",
+                       move->label);
+                return false;
+            }
+        } else if (!copy_path(now[i], sizeof(now[i]), move->from)) {
             continue;
         }
-        /* S3: a relative link inside that would point elsewhere once the folder has moved. Links in
-           a folder that moves on its own (Linux's data/saves) are checked against that folder. */
+        const EntryKind kind = entry_kind(now[i]);
+        if (kind == ENTRY_ABSENT) continue;
+        dev_t from_device = 0, to_device = 0;
+        const bool same_disk = device_of(now[i], &from_device) && device_of(move->to, &to_device) &&
+                               from_device == to_device;
+        if (move->disposable) {
+            if (kind == ENTRY_LINK) {
+                log_line(r->log, "%s: your old %s folder %s is a link, so it is not moved; it stays where "
+                                 "it is.", NK_MIGRATE_CODE_LEFT_BEHIND, move->label, now[i]);
+            } else if (tree_state(now[i], 0) != TREE_CONTENT) {
+                /* nothing worth moving */
+            } else if (dest_state(move->to) == TREE_CONTENT || !same_disk) {
+                log_line(r->log, "%s: your old %s folder %s is not moved (%s); it stays where it is and "
+                                 "can be deleted.", NK_MIGRATE_CODE_LEFT_BEHIND, move->label, now[i],
+                         same_disk ? "the new one holds files" : "it is on another disk");
+            } else {
+                included[i] = true;
+            }
+            continue;
+        }
+        if (kind == ENTRY_LINK) {
+            char target[NK_MAX_PATH] = "";
+            ssize_t n = readlink(now[i], target, sizeof(target) - 1u);
+            if (n > 0 && (size_t)n < sizeof(target)) target[n] = '\0';
+            else snprintf(target, sizeof(target), "a place that cannot be read");
+            struct stat followed;
+            const bool dangling = stat(now[i], &followed) != 0 && (errno == ENOENT || errno == ENOTDIR);
+            refuse(r, NK_MIGRATE_CODE_LINKED,
+                   dangling ? "Your %s folder %s is a link to %s, which does not exist now (a disk that "
+                              "is not mounted?). Nakagawa does not move a linked folder."
+                            : "Your %s folder %s is a link to %s. Nakagawa does not move a linked "
+                              "folder: moving the link can change where it points.",
+                   move->label, now[i], target);
+            return false;
+        }
+        struct stat st;
+        if (lstat(now[i], &st) == 0 && (unsigned long)st.st_uid != effective_uid()) {
+            refuse(r, NK_MIGRATE_CODE_OTHER_OWNER,
+                   "Your %s folder %s belongs to user %lu, and Nakagawa runs as user %lu (for example "
+                   "under sudo). Start Nakagawa as yourself to move it.",
+                   move->label, now[i], (unsigned long)st.st_uid, effective_uid());
+            return false;
+        }
+        if (is_primary(move) && overlaps_kept(plan, now[i])) {
+            for (size_t k = 0; k < plan->kept_count; k++) {
+                if (!folders_overlap(now[i], plan->kept[k])) continue;
+                refuse(r, NK_MIGRATE_CODE_OVERLAP,
+                       "Your %s folder %s and Nakagawa's %s folder %s are the same folder, or one is "
+                       "inside the other (XDG_DATA_HOME, XDG_CONFIG_HOME, XDG_CACHE_HOME or "
+                       "XDG_STATE_HOME point at each other), so one cannot be moved without the other.",
+                       move->label, now[i], plan->kept_label[k], plan->kept[k]);
+                return false;
+            }
+        }
+        if (!same_disk) {
+            refuse(r, NK_MIGRATE_CODE_OTHER_DISK,
+                   "Your %s folder %s and its new place %s are on different disks (or file systems), "
+                   "and Nakagawa does not copy your library, saves or settings between disks.",
+                   move->label, now[i], move->to);
+            return false;
+        }
+        included[i] = true;
+    }
+    /* Two folders being moved that are the same folder, or one inside the other. */
+    for (size_t i = 0; i < plan->move_count; i++) {
+        if (!included[i]) continue;
+        for (size_t k = i + 1u; k < plan->move_count; k++) {
+            if (!included[k] || (plan->moves[k].after_previous && k == i + 1u)) continue;
+            if (!folders_overlap(now[i], now[k])) continue;
+            const NkMigrateMove *a = &plan->moves[i];
+            const NkMigrateMove *b = &plan->moves[k];
+            if (a->disposable || b->disposable) {
+                const size_t d = a->disposable ? i : k;
+                included[d] = false;
+                log_line(r->log, "%s: your old %s folder %s is, holds or lies in another folder being "
+                                 "moved, so it is not moved on its own; it stays where it is.",
+                         NK_MIGRATE_CODE_LEFT_BEHIND, plan->moves[d].label, now[d]);
+                continue;
+            }
+            refuse(r, NK_MIGRATE_CODE_OVERLAP,
+                   "Your %s folder %s and %s folder %s are the same folder, or one is inside the other "
+                   "(XDG_DATA_HOME and XDG_CONFIG_HOME point at each other), so Nakagawa cannot tell "
+                   "which files belong where.",
+                   a->label, now[i], b->label, now[k]);
+            return false;
+        }
+    }
+    /* A relative link inside that would point elsewhere once the folder has moved. Links in a folder
+       that moves on its own (Linux's data/saves) are checked against that folder. */
+    for (size_t i = 0; i < plan->move_count; i++) {
+        if (!included[i] || !is_primary(&plan->moves[i])) continue;
         static LinkScan scan;
         memset(&scan, 0, sizeof(scan));
-        if (!copy_path(scan.path, sizeof(scan.path), state[i].now)) continue;
-        for (size_t j = i + 1u; j < plan->move_count; j++) {
-            if (state[j].active && plan->moves[j].after_previous && j == i + 1u) {
-                scan.nested[scan.nested_count++] = state[j].now;
-            }
+        if (!copy_path(scan.path, sizeof(scan.path), now[i])) continue;
+        if (i + 1u < plan->move_count && included[i + 1u] && plan->moves[i + 1u].after_previous) {
+            scan.nested[scan.nested_count++] = now[i + 1u];
         }
         if (links_stay(&scan, 0)) continue;
         if (scan.unreadable) {
-            keep_reason(&reason, NK_MIGRATE_CODE_LINKED, state[i].now,
-                        "Nakagawa could not look through %s, inside your %s folder %s, for links that "
-                        "moving the folder would break.",
-                        scan.found, move->label, state[i].now);
-            keep_after(&reason, "Make %s readable (or remove it), and a later start moves your data.",
-                       scan.found);
+            refuse(r, NK_MIGRATE_CODE_LINKED,
+                   "Nakagawa could not look through %s, inside your %s folder %s, for links that moving "
+                   "the folder would break. Make it readable (or remove it), then try again.",
+                   scan.found, plan->moves[i].label, now[i]);
         } else {
-            keep_reason(&reason, NK_MIGRATE_CODE_LINKED, state[i].now,
-                        "Your %s folder %s holds a link, %s, to %s: a relative path that leads out of "
-                        "the folder, so moving the folder would make it point elsewhere.",
-                        move->label, state[i].now, scan.found, scan.target);
-            keep_after(&reason, "To have your data moved, make that link absolute (for example with "
-                                "ln -sfn and the full path), and a later start moves it.");
+            refuse(r, NK_MIGRATE_CODE_LINKED,
+                   "Your %s folder %s holds a link, %s, to %s: a relative path that leads out of the "
+                   "folder, so moving the folder would make it point elsewhere. Make that link absolute "
+                   "(for example with ln -sfn and the full path), then try again.",
+                   plan->moves[i].label, now[i], scan.found, scan.target);
         }
+        return false;
     }
-
-    /* A library a newer Nakagawa wrote: neither moved nor rewritten. */
-    if (essential_active && plan->old_library_file[0]) {
+    if (plan->old_library_file[0]) {
         long version = nk_user_data_file_version(plan->old_library_file, MIGRATE_LIBRARY_MAX_BYTES);
         if (version > (long)NK_LIBRARY_SCHEMA_VERSION) {
-            keep_reason(&reason, NK_MIGRATE_CODE_NEWER_LIBRARY, first_old_folder(plan),
-                        "Your library %s was written by a newer version of Nakagawa "
-                        "(schema_version %ld). This version leaves it as it is, so the move of your "
-                        "data into %s waits for a version that understands that library.",
-                        plan->old_library_file, version, plan->new_root);
+            refuse(r, NK_MIGRATE_CODE_NEWER_LIBRARY,
+                   "Your library %s was written by a newer version of Nakagawa (schema_version %ld), "
+                   "which this version does not change.",
+                   plan->old_library_file, version);
+            return false;
         }
     }
-    if (reason.code) {
-        keep_old(plan, result, &reason);
+    /* The steps, each with the paths it has when it runs. */
+    memset(j, 0, sizeof(*j));
+    (void)copy_path(j->new_root, sizeof(j->new_root), plan->new_root);
+    for (size_t i = 0; i < plan->move_count; i++) {
+        if (!included[i]) continue;
+        Step *s = &j->steps[j->count++];
+        (void)copy_path(s->label, sizeof(s->label), plan->moves[i].label);
+        (void)copy_path(s->from, sizeof(s->from), plan->moves[i].from);
+        (void)copy_path(s->to, sizeof(s->to), plan->moves[i].to);
+        s->essential = !plan->moves[i].disposable;
+    }
+    if (plan->remap_from[0] && plan->remap_to[0] && plan->library_file[0]) {
+        if (!copy_path(j->library_file, sizeof(j->library_file), plan->library_file) ||
+            !lexical_clean(plan->remap_from, j->remap.lexical, sizeof(j->remap.lexical)) ||
+            !canonical_path(plan->remap_from, j->remap.resolved, sizeof(j->remap.resolved)) ||
+            !lexical_clean(plan->remap_to, j->remap.to, sizeof(j->remap.to)) ||
+            has_control(j->remap.resolved)) {
+            refuse(r, NK_MIGRATE_CODE_PATH_UNAVAILABLE,
+                   "The path of your data folder (%s) is too long to compare, or holds a tab or a line "
+                   "break.", plan->remap_from);
+            return false;
+        }
+        remap_activate(&j->remap);
+        j->library = j->remap.active;
+    }
+    return true;
+}
+
+static void move_checked(const NkDataMigrationPlan *plan, NkDataMigration *r) {
+    static Journal j;
+    if (!plan_steps(plan, &j, r)) return;
+    if (j.count == 0u) {
+        r->status = NK_MIGRATE_NOTHING;
+        snprintf(r->message, sizeof(r->message), "No earlier folder holds files: there is nothing to move.");
         return;
     }
-
-    /* Every destination is checked before the first move. */
-    bool any = false;
-    for (size_t i = 0; i < plan->move_count; i++) {
-        const NkMigrateMove *move = &plan->moves[i];
-        if (!state[i].active) continue;
-        TreeState to = dest_state(move->to);
-        if (to == TREE_CONTENT) {
-            if (move->disposable) {
-                state[i].active = false;
-                state[i].skipped = true;
-                log_line(result,
-                         "%s: your old %s folder %s was not moved, because %s already holds files; "
-                         "it stays where it is and can be deleted.",
-                         NK_MIGRATE_CODE_LEFT_BEHIND, move->label, state[i].now, move->to);
-                continue;
-            }
-            result->status = NK_MIGRATE_REFUSED;
-            (void)copy_path(result->folder_a, sizeof(result->folder_a), state[i].now);
-            (void)copy_path(result->folder_b, sizeof(result->folder_b), move->to);
-            snprintf(result->message, sizeof(result->message),
-                     "%s: Nakagawa found your %s in both %s and %s. It did not move or delete "
-                     "anything. Keep the data you want in %s: move the other folder somewhere "
-                     "outside Nakagawa's folders (or merge the two by hand), then start Nakagawa "
-                     "again.",
-                     NK_MIGRATE_CODE_BOTH_PRESENT, move->label, state[i].now, move->to, move->to);
+    /* The old data folder's locks are free, and the library's own lock is held until the rewrite. */
+    NkFileLock library_lock;
+    memset(&library_lock, 0, sizeof(library_lock));
+    char old_data[NK_MAX_PATH] = "";
+    char what[PATH_MAX + 128] = "";
+    if (plan->old_library_file[0] && parent_dir(plan->old_library_file, old_data, sizeof(old_data)) &&
+        is_real_dir(old_data)) {
+        if (data_locks_held(old_data, what, sizeof(what)) ||
+            !lock_library(&library_lock, plan->old_library_file, what, sizeof(what))) {
+            refuse(r, NK_MIGRATE_CODE_LOCK,
+                   "Another Nakagawa program is writing your data: %s. Close every other Nakagawa "
+                   "window, game and tool, then try again.", what);
             return;
         }
-        state[i].clear_to = to == TREE_EMPTY;
-        any = true;
     }
-    if (!any) {
-        finish_earlier_run(plan, &record, result);
-        return;
-    }
-
-    /* B1: never while anything else may be using the old folders. */
-    NkFileLock library_lock;
-    char what[PATH_MAX + 128];
-    if (old_folders_in_use(plan, state, in_use_fd, &library_lock, what, sizeof(what))) {
-        log_line(result, "%s: %s.", NK_MIGRATE_CODE_IN_USE, what);
-        KeepReason busy;
-        memset(&busy, 0, sizeof(busy));
-        keep_reason(&busy, NK_MIGRATE_CODE_IN_USE, first_old_folder(plan),
-                    "Another Nakagawa program (a window, a game or a tool, perhaps of an earlier "
-                    "version) may be using your earlier folders, so they were not moved now.");
-        keep_after(&busy, "Close the other Nakagawa windows, games and tools when you can; a later "
-                          "start then moves your data into %s.",
-                   plan->new_root);
-        keep_old(plan, result, &busy);
-        return;
-    }
-
-    /* The old data folder's spellings, while it still exists (S2). */
-    Remap remap;
-    if (!remap_init(plan, &remap)) {
+    point("begin", 0u);
+    char why[NK_MAX_PATH * 2 + 256] = "";
+    if (!journal_write(plan->journal_file, &j, why, sizeof(why))) {
         nk_platform_file_lock_release(&library_lock);
-        result->status = NK_MIGRATE_FAILED;
-        snprintf(result->message, sizeof(result->message),
-                 "%s: the path of your data folder (%s) is too long to compare, so Nakagawa did not "
-                 "move anything.",
-                 NK_MIGRATE_CODE_FAILED, plan->remap_from);
+        r->status = NK_MIGRATE_FAILED;
+        snprintf(r->message, sizeof(r->message), "%s: %s, so Nakagawa moved nothing.", NK_MIGRATE_CODE_FAILED, why);
         return;
     }
-    char froms[NK_MIGRATE_MAX_MOVES][NK_MAX_PATH];
-    canonical_froms(plan, froms);
-
-    if (plan->new_root[0] && !nk_platform_mkdir_p(plan->new_root)) {
+    point("journal", 0u);
+    size_t moved = 0;
+    size_t reached = 0;
+    bool rewritten = false;
+    int error = 0;
+    bool ok = roll_forward(&j, r->log, &moved, &rewritten, &reached, &error, why, sizeof(why)) &&
+              commit_move(&j, plan->journal_file, plan->marker_file, r->log, why, sizeof(why));
+    if (ok) {
         nk_platform_file_lock_release(&library_lock);
-        result->status = NK_MIGRATE_FAILED;
-        (void)copy_path(result->folder_a, sizeof(result->folder_a), first_old_folder(plan));
-        (void)copy_path(result->folder_b, sizeof(result->folder_b), plan->new_root);
-        snprintf(result->message, sizeof(result->message),
-                 "%s: Nakagawa could not create %s, so it did not move anything. Check that the "
-                 "folder can be written, then start Nakagawa again.",
-                 NK_MIGRATE_CODE_FAILED, plan->new_root);
+        r->status = NK_MIGRATE_DONE;
+        r->moved = moved;
+        r->library_rewritten = rewritten;
+        r->must_restart = true;
+        snprintf(r->message, sizeof(r->message), "Nakagawa moved your data to %s. Nothing was deleted.%s "
+                                                 "Nakagawa restarts now to use it.",
+                 plan->new_root,
+                 rewritten ? " Your library's stored paths were updated (a copy of the old file is "
+                             "library.json.pre-migration)."
+                           : "");
         return;
     }
-
-    size_t done[NK_MIGRATE_MAX_MOVES];
-    size_t done_count = 0;
-    const NkMigrateMove *failed_move = NULL;
-    int failed_error = 0;
-    for (size_t i = 0; i < plan->move_count; i++) {
-        const NkMigrateMove *move = &plan->moves[i];
-        if (!state[i].active) continue;
-        /* A move that depends on the one before it has nothing to do when that move brought no
-           such folder (an old data folder without saves). */
-        if (move->after_previous && tree_state(move->from, 0) != TREE_CONTENT) {
-            state[i].active = false;
-            continue;
-        }
-        char parent[NK_MAX_PATH];
-        bool ok = true;
-        int error = 0;
-        if (state[i].clear_to && !clear_empty_below(move->to)) {
-            ok = false;
-            error = errno;
-        }
-        if (ok && parent_dir(move->to, parent, sizeof(parent)) && !nk_platform_mkdir_p(parent)) {
-            ok = false;
-            error = errno;
-        }
-        if (ok && do_rename(move->from, move->to) != 0) {
-            ok = false;
-            error = errno;
-        }
-        if (!ok) {
-            if (move->disposable) {
-                state[i].active = false;
-                state[i].skipped = true;
-                log_line(result,
-                         "%s: your old %s folder %s could not be moved to %s (%s); it stays where it "
-                         "is and can be deleted.",
-                         NK_MIGRATE_CODE_LEFT_BEHIND, move->label, move->from, move->to,
-                         error ? strerror(error) : "unknown error");
-                continue;
-            }
-            failed_move = move;
-            failed_error = error;
-            break;
-        }
-        flush_parent(result, move->to);
-        flush_parent(result, move->from);
-        done[done_count++] = i;
-    }
-
-    char why[NK_MAX_PATH * 2 + 192] = "";
-    LibResult library = LIB_UNCHANGED;
-    if (!failed_move) {
-        library = rewrite_library(plan, &remap, library_lock.held, result, why, sizeof(why));
-    }
+    char undo_why[NK_MAX_PATH * 2 + 256] = "";
+    bool back = roll_back(&j, reached, r->log, undo_why, sizeof(undo_why)) &&
+                journal_remove(plan->journal_file, r->log);
     nk_platform_file_lock_release(&library_lock);
-    if (!failed_move && (library == LIB_UNCHANGED || library == LIB_REWRITTEN)) {
-        result->status = NK_MIGRATE_DONE;
-        result->moved = done_count;
-        result->library_rewritten = library == LIB_REWRITTEN;
-        snprintf(result->message, sizeof(result->message),
-                 "Nakagawa moved your data to %s. Nothing was deleted.%s",
-                 plan->new_root[0] ? plan->new_root : "its new folder",
-                 result->library_rewritten
-                     ? " Your library's stored paths were updated (a copy of the old file is "
-                       "library.json.pre-migration)."
-                     : "");
-        write_record(plan, (const char (*)[NK_MAX_PATH])froms, result);
+    r->status = NK_MIGRATE_FAILED;
+    snprintf(r->message, sizeof(r->message), "%s: Nakagawa could not move your data: %s. ",
+             error == EXDEV ? NK_MIGRATE_CODE_OTHER_DISK : NK_MIGRATE_CODE_FAILED, why[0] ? why : "unknown error");
+    if (back) {
+        add(r->message, sizeof(r->message), "Everything is back where it was, and nothing was deleted. "
+                                            "Nakagawa keeps using %s.", first_old_folder(plan));
         return;
     }
-
-    /* Undo, newest first. A dependent move whose undo fails stays inside the folder it was moved
-       into, so that folder is not put back either. */
-    bool back[NK_MIGRATE_MAX_MOVES];
-    memset(back, 0, sizeof(back));
-    bool all_back = true;
-    bool hold = false;
-    size_t hold_index = 0;
-    for (size_t k = done_count; k > 0u; k--) {
-        size_t index = done[k - 1u];
-        const NkMigrateMove *move = &plan->moves[index];
-        if (hold && index == hold_index) {
-            hold = false;
-            all_back = false;
-            continue;
-        }
-        if (do_rename(move->to, move->from) == 0) {
-            back[k - 1u] = true;
-            flush_parent(result, move->from);
-            flush_parent(result, move->to);
-        } else {
-            all_back = false;
-            if (move->after_previous) {
-                hold = true;
-                hold_index = index - 1u;
-            }
-        }
-    }
-
-    if (!failed_move && library == LIB_NEWER && all_back) {
-        /* The library changed under the run: as for one found before it. */
-        KeepReason newer;
-        memset(&newer, 0, sizeof(newer));
-        keep_reason(&newer, NK_MIGRATE_CODE_NEWER_LIBRARY, first_old_folder(plan), "%s.", why);
-        keep_old(plan, result, &newer);
-        return;
-    }
-
-    result->status = NK_MIGRATE_FAILED;
-    if (failed_move) {
-        (void)copy_path(result->folder_a, sizeof(result->folder_a), failed_move->from);
-        (void)copy_path(result->folder_b, sizeof(result->folder_b), failed_move->to);
-        if (failed_error == EXDEV) {
-            snprintf(result->message, sizeof(result->message),
-                     "%s: Nakagawa could not move your %s folder %s to %s: the two are on different "
-                     "disks (or file systems), and Nakagawa does not copy your library, saves or "
-                     "settings between disks. ",
-                     NK_MIGRATE_CODE_OTHER_DISK, failed_move->label, failed_move->from,
-                     failed_move->to);
-        } else {
-            snprintf(result->message, sizeof(result->message),
-                     "%s: Nakagawa could not move your %s folder %s to %s (%s). ",
-                     NK_MIGRATE_CODE_FAILED, failed_move->label, failed_move->from, failed_move->to,
-                     failed_error ? strerror(failed_error) : "unknown error");
-        }
-    } else {
-        (void)copy_path(result->folder_a, sizeof(result->folder_a), plan->remap_from);
-        (void)copy_path(result->folder_b, sizeof(result->folder_b), plan->remap_to);
-        snprintf(result->message, sizeof(result->message), "%s: %s. ", NK_MIGRATE_CODE_FAILED, why);
-    }
-    if (all_back) {
-        say(result, "Everything it had moved is back where it was, and nothing was deleted. ");
-        if (failed_move) {
-            say(result,
-                "To use the new folder, move what is in %s into %s yourself (the folders can be "
-                "opened from this message), then start Nakagawa again.",
-                failed_move->from, failed_move->to);
-        } else {
-            say(result, "Start Nakagawa again once the library file can be written.");
-        }
-        return;
-    }
-    say(result, "Some folders could not be put back. Where each one is now:");
-    for (size_t k = 0; k < done_count; k++) {
-        const NkMigrateMove *move = &plan->moves[done[k]];
-        if (back[k]) {
-            say(result, " your %s folder is back in %s;", move->label, move->from);
-        } else {
-            say(result, " your %s folder is %s (it was %s);", move->label, move->to, move->from);
-        }
-    }
-    say(result, " Nothing was deleted. Do not move these folders by hand: start Nakagawa again, and "
-                "it carries on from where it stopped, or names what is in the way.");
+    r->must_restart = true;
+    add(r->message, sizeof(r->message),
+        "It could not put everything back either (%s). Nothing was deleted. Nakagawa restarts now, and "
+        "the start finishes the move or undoes it before anything uses the folders.",
+        undo_why[0] ? undo_why : "the record of the move could not be removed");
 }
 
-static void lock_failed(const NkDataMigrationPlan *plan, NkDataMigration *result, const char *file,
-                        int error) {
-    bool any_old = false;
-    for (size_t i = 0; i < plan->move_count; i++) {
-        const NkMigrateMove *move = &plan->moves[i];
-        if (!move->disposable && !move->after_previous && entry_kind(move->from) != ENTRY_ABSENT) {
-            any_old = true;
-        }
-    }
-    if (!any_old) {
-        result->status = NK_MIGRATE_NOTHING;
-        log_line(result,
-                 "%s: Nakagawa could not lock %s (%s); there is no earlier folder to move, and the "
-                 "library was not checked for stored paths to update.",
-                 NK_MIGRATE_CODE_LOCK, file, strerror(error));
+void nk_data_migrate_move(const NkDataMigrationPlan *plan, bool game_running, NkDataMigration *r) {
+    if (!r) return;
+    memset(r, 0, sizeof(*r));
+    if (!plan_is_valid(plan) || !plan->new_root[0] || !plan->journal_file[0] || !plan->marker_file[0]) {
+        r->status = NK_MIGRATE_FAILED;
+        snprintf(r->message, sizeof(r->message), "%s: the migration plan is invalid.", NK_MIGRATE_CODE_FAILED);
         return;
     }
-    KeepReason reason;
-    memset(&reason, 0, sizeof(reason));
-    keep_reason(&reason, NK_MIGRATE_CODE_LOCK, first_old_folder(plan),
-                "Nakagawa could not lock %s (%s), which keeps two starts from moving your data at "
-                "once, so it did not move your data.",
-                file, strerror(error));
-    keep_after(&reason, "If %s belongs to another user (made under sudo), delete it.", file);
-    keep_old(plan, result, &reason);
-}
-
-void nk_data_migrate_run(const NkDataMigrationPlan *plan, NkDataMigration *result) {
-    if (!result) return;
-    memset(result, 0, sizeof(*result));
-    /* This process is never another user of the folders for its own run. */
-    nk_data_migrate_release_in_use();
-    if (!plan_is_valid(plan)) {
-        result->status = NK_MIGRATE_FAILED;
-        snprintf(result->message, sizeof(result->message), "%s: the migration plan is invalid.",
-                 NK_MIGRATE_CODE_FAILED);
+    (void)copy_path(r->folder_a, sizeof(r->folder_a), first_old_folder(plan));
+    (void)copy_path(r->folder_b, sizeof(r->folder_b), plan->new_root);
+    if (game_running) {
+        refuse(r, NK_MIGRATE_CODE_GAME_RUNNING, "A game started from Nakagawa is running. Quit the game, "
+                                                "then try again.");
         return;
     }
-    if (plan->notes[0]) log_line(result, "%s", plan->notes);
-    int lock_fd = -1;
+    int run_fd = -1;
     if (plan->lock_file[0]) {
         int error = 0;
-        if (!take_lock(plan->lock_file, &lock_fd, &error)) {
-            lock_failed(plan, result, plan->lock_file, error);
+        if (!take_run_lock(plan->lock_file, &run_fd, &error)) {
+            refuse(r, NK_MIGRATE_CODE_LOCK, "Nakagawa could not lock %s (%s), which keeps two moves from "
+                                            "running at once. If it belongs to another user (made under "
+                                            "sudo), delete it.", plan->lock_file, strerror(error));
             return;
         }
     }
-    int in_use_fd = -1;
-    if (plan->in_use_file[0]) {
+    if (!nk_platform_path_missing(plan->journal_file)) {
+        refuse(r, NK_MIGRATE_CODE_INTERRUPTED, "An earlier move of your data folders was interrupted (%s "
+                                               "exists). Quit Nakagawa and start it again: the start "
+                                               "finishes or undoes that move first.", plan->journal_file);
+    } else if (plan->marker_file[0] && !nk_platform_path_missing(plan->marker_file)) {
+        r->status = NK_MIGRATE_NOTHING;
+        snprintf(r->message, sizeof(r->message), "Your data is already in %s.", plan->new_root);
+    } else if (!old_folder_with_files(plan)) {
+        r->status = NK_MIGRATE_NOTHING;
+        snprintf(r->message, sizeof(r->message), "No earlier folder holds files: there is nothing to move.");
+    } else if (plan->player_lock_file[0]) {
+        /* No other player of this version: this one gives up its shared hold and takes it alone. */
+        nk_data_migrate_release_player_lock();
         int error = 0;
-        in_use_fd = open_lock_file(plan->in_use_file, &error);
-        if (in_use_fd < 0) {
-            lock_failed(plan, result, plan->in_use_file, error);
-            if (lock_fd >= 0) close(lock_fd);
-            return;
-        }
-    }
-    run_locked(plan, result, in_use_fd);
-    if (in_use_fd >= 0) {
-        /* From exclusive (when the run took it) to shared, while the run lock still keeps every
-           other run out: this process now uses the folders it chose. */
-        if (plan->hold_in_use && lock_now(in_use_fd, LOCK_SH)) {
-            s_in_use_fd = in_use_fd;
-        } else {
-            if (plan->hold_in_use) {
-                log_line(result, "%s: %s could not be held while Nakagawa runs (%s).",
-                         NK_MIGRATE_CODE_LOCK, plan->in_use_file, strerror(errno));
+        int player_fd = player_lock_exclusive(plan->player_lock_file, &error);
+        if (player_fd < 0) {
+            if (error == EWOULDBLOCK) {
+                refuse(r, NK_MIGRATE_CODE_IN_USE, "Another Nakagawa window is open (it holds %s). Close "
+                                                  "every other Nakagawa window and game, then try again.",
+                       plan->player_lock_file);
+            } else {
+                refuse(r, NK_MIGRATE_CODE_LOCK, "Nakagawa could not lock %s (%s).", plan->player_lock_file,
+                       strerror(error));
             }
-            close(in_use_fd);
+        } else {
+            move_checked(plan, r);
+            release_lock(player_fd);
         }
+        (void)player_lock_shared(plan->player_lock_file);
+    } else {
+        move_checked(plan, r);
     }
-    if (lock_fd >= 0) {
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
-    }
+    release_lock(run_fd);
 }
 
 #endif

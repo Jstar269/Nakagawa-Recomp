@@ -184,50 +184,90 @@ class TestPrerequisiteFetcher(unittest.TestCase):
 
         self.assertEqual(roots, {name: expected for name in roots})
 
-    def _linux_data_root(self, **overrides: str) -> Path:
+    def _linux_data_root(self, root: Path | None = None, **overrides: str) -> Path:
+        base = root if root is not None else self.root
         environment = {
-            "HOME": str(self.root / "home"),
-            "XDG_DATA_HOME": str(self.root / "share"),
-            "XDG_CACHE_HOME": str(self.root / "cache"),
-            "XDG_STATE_HOME": str(self.root / "state"),
+            "HOME": str(base / "home"),
+            "XDG_DATA_HOME": str(base / "share"),
+            "XDG_CONFIG_HOME": str(base / "config"),
+            "XDG_CACHE_HOME": str(base / "cache"),
+            "XDG_STATE_HOME": str(base / "state"),
         }
         environment.update(overrides)
         # The XDG rule itself, which default_data_root uses on Linux; called directly so the case
         # also runs on a Windows host, where pathlib cannot make a POSIX path.
         with patch.dict(os.environ, environment, clear=True):
-            return _xdg_data_root()
+            resolved: Path = _xdg_data_root()
+        return resolved
 
-    def test_tools_follow_the_player_data_folder_rule_on_linux(self) -> None:
-        """#324 S3: a tool uses the folder the player uses, and never starts a second library."""
-        old = self.root / "share" / "nakagawa-recomp"
-        new = self.root / "share" / "Nakagawa" / "data"
+    @staticmethod
+    def _rule_cases() -> list[dict[str, str]]:
+        """The rule's cases, from the table the player's test reads too (src/core/nk_data_migrate.h)."""
+        header = (REPOSITORY_ROOT_FOR_TESTS / "src" / "core" / "nk_data_migrate.h").read_text(encoding="utf-8")
+        table = header.split("BEGIN DATA FOLDER RULE CASES", 1)[1].split("END DATA FOLDER RULE CASES", 1)[0]
+        rows = [line.strip().lstrip("*").split() for line in table.splitlines()]
+        rows = [row for row in rows if len(row) == 9]
+        columns = rows[0]
+        return [dict(zip(columns, row, strict=True)) for row in rows[1:]]
+
+    @staticmethod
+    def _make_state(folder: Path, state: str, file_name: str) -> None:
+        if state == "empty":
+            (folder / "empty-inside").mkdir(parents=True)
+        elif state == "files":
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / file_name).write_text("{}", encoding="utf-8")
+        else:
+            assert state == "none", state
+
+    def test_tools_follow_the_shared_rule_table(self) -> None:
+        """#324: every case of the player's rule, from the one table both suites read."""
+        cases = self._rule_cases()
+        self.assertGreaterEqual(len(cases), 12)
+        for number, case in enumerate(cases):
+            with self.subTest(case=case["case"]):
+                case_root = self.root / f"case-{number}"
+                share = case_root / "share"
+                old_data = share / "nakagawa-recomp"
+                old_config = case_root / "config" / "nakagawa-recomp"
+                new_root = share / "Nakagawa"
+                new_data = new_root / "data"
+                marker = new_root / ".nakagawa-layout"
+                share.mkdir(parents=True)
+                self._make_state(old_data, case["old_data"], "library.json")
+                self._make_state(old_config, case["old_config"], "settings.json")
+                self._make_state(new_data, case["new_data"], "library.json")
+                if case["marker"] == "yes":
+                    new_root.mkdir(parents=True, exist_ok=True)
+                    marker.write_text("marker", encoding="utf-8")
+                if case["journal"] == "yes":
+                    (share / ".nakagawa-move-in-progress").write_text("nakagawa-data-folder-move 1\n",
+                                                                      encoding="utf-8")
+                had_marker = marker.exists()
+                if case["tools"] == "refuse":
+                    with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_MIGRATION_INTERRUPTED"):
+                        self._linux_data_root(case_root)
+                else:
+                    want = old_data if case["tools"] == "old" else new_data
+                    self.assertEqual(self._linux_data_root(case_root), want)
+                    self.assertEqual(marker.exists(), had_marker or case["tools"] == "new",
+                                     "a fresh install writes the marker; the old layout never does")
+                # A tool never moves anything: what was put there is still there.
+                self.assertEqual((old_data / "library.json").exists(), case["old_data"] == "files")
+                self.assertEqual((old_config / "settings.json").exists(), case["old_config"] == "files")
+                self.assertEqual((new_data / "library.json").exists(), case["new_data"] == "files")
+
+    def test_the_marker_keeps_the_new_folder_when_an_old_one_returns(self) -> None:
+        """#324: once the marker is there, a returning earlier folder is never used again."""
+        share = self.root / "share"
+        share.mkdir(parents=True)
+        new = share / "Nakagawa" / "data"
         self.assertEqual(self._linux_data_root(), new, "a fresh install uses the new folder")
-        (new / "titles").mkdir(parents=True)
-        self.assertEqual(self._linux_data_root(), new, "empty new folders are not data")
-        old.mkdir(parents=True)
+        self.assertTrue((share / "Nakagawa" / ".nakagawa-layout").is_file(), "and writes the marker")
+        old = share / "nakagawa-recomp"
+        old.mkdir()
         (old / "library.json").write_text("{}", encoding="utf-8")
-        self.assertEqual(self._linux_data_root(), old,
-                         "before the player has moved it, the old folder is the one in use")
-        (new / "library.json").write_text("{}", encoding="utf-8")
-        with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_MIGRATION_BOTH_PRESENT"):
-            self._linux_data_root()
-        (old / "library.json").unlink()
-        old.rmdir()
-        self.assertEqual(self._linux_data_root(), new, "after the move, the new folder")
-
-    def test_tools_keep_the_old_folder_where_the_player_does(self) -> None:
-        old = self.root / "share" / "nakagawa-recomp"
-        # XDG_CACHE_HOME == XDG_DATA_HOME: the player keeps the old layout even on a fresh install.
-        self.assertEqual(self._linux_data_root(XDG_CACHE_HOME=str(self.root / "share")), old)
-        self.assertEqual(self._linux_data_root(XDG_STATE_HOME=str(self.root / "share")), old)
-        target = self.root / "games" / "nk"
-        target.mkdir(parents=True)
-        (self.root / "share").mkdir(parents=True, exist_ok=True)
-        try:
-            os.symlink(target, old, target_is_directory=True)
-        except (OSError, NotImplementedError) as exc:
-            self.skipTest(f"symbolic links unavailable here: {exc}")
-        self.assertEqual(self._linux_data_root(), old, "a linked old folder stays in use, as in the player")
+        self.assertEqual(self._linux_data_root(), new, "an older version's writes are not used")
 
     def test_relative_xdg_values_are_ignored_as_the_player_ignores_them(self) -> None:
         """#324 second review S2: a relative XDG_* value is ignored (XDG spec); HOME is used."""
@@ -240,34 +280,28 @@ class TestPrerequisiteFetcher(unittest.TestCase):
             with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_DIR_UNAVAILABLE"):
                 _xdg_data_root()
 
-    @unittest.skipUnless(sys.platform != "win32", "the player's migration locks are POSIX flock locks")
-    def test_tools_refuse_while_the_player_moves_the_folders(self) -> None:
-        """#324 second review B1/S1: a tool never resolves the folder while a move is under way."""
+    @unittest.skipUnless(sys.platform != "win32", "the player's run lock is a POSIX flock lock")
+    def test_tools_decide_under_the_run_lock_and_hold_nothing_after(self) -> None:
+        """#324: a tool decides under the player's run lock, shared, and keeps no lock afterwards."""
         import fcntl
-
-        share = self.root / "share"
-        share.mkdir(parents=True)
-        (share / "nakagawa-recomp").mkdir()
-        (share / "nakagawa-recomp" / "library.json").write_text("{}", encoding="utf-8")
-        with open(share / ".nakagawa-migration.lock", "a+b") as held:
-            fcntl.flock(held.fileno(), fcntl.LOCK_EX)
-            with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_MIGRATION_IN_PROGRESS"):
-                self._linux_data_root()
-        self.assertEqual(self._linux_data_root(), share / "nakagawa-recomp",
-                         "once the move is over, the folder in use")
-
-    @unittest.skipUnless(sys.platform != "win32", "the player's migration locks are POSIX flock locks")
-    def test_tools_keep_the_folders_in_use_while_they_run(self) -> None:
-        """#324 second review B1: no start may move the folders while a tool uses them."""
-        import fcntl
+        import nk_core.prereq_fetcher as prereq_fetcher
 
         share = self.root / "share"
         (share / "nakagawa-recomp").mkdir(parents=True)
         (share / "nakagawa-recomp" / "library.json").write_text("{}", encoding="utf-8")
-        self.assertEqual(self._linux_data_root(), share / "nakagawa-recomp")
-        with open(share / ".nakagawa-in-use.lock", "a+b") as probe:
-            with self.assertRaises(BlockingIOError):
-                fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        taken: list[int] = []
+        real_flock = fcntl.flock
+
+        def recording_flock(fd: int, operation: int) -> None:
+            taken.append(operation)
+            real_flock(fd, operation)
+
+        with patch.object(fcntl, "flock", recording_flock):
+            self.assertEqual(self._linux_data_root(), share / "nakagawa-recomp")
+        self.assertEqual(taken, [fcntl.LOCK_SH])
+        self.assertFalse(hasattr(prereq_fetcher, "_FOLDERS_IN_USE"))
+        with open(share / ".nakagawa-migration.lock", "a+b") as probe:
+            fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # nothing is held any more
 
     def test_happy_path_extracts_only_verified_payload_and_records_license(self) -> None:
         item = self.item()
