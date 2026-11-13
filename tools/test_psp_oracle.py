@@ -12596,7 +12596,7 @@ class GeRasterBoundsProbeTests(_GeNewCaseMixin, unittest.TestCase):
         self.assertIn("(vram | 0x40000000u) + GRB_FB_OFFSET", run)
         self.assertIn("(vram | 0x40200000u) + GRB_ZB_OFFSET", run)
         save = run.index("s_grb_save[i] = s_grb_vram[i];")
-        first = run.index("grb_draw(i);")
+        first = run.index("if (grb_draw(i)) {")
         restore = run.index("s_grb_vram[i] = s_grb_save[i];")
         self.assertLess(run.index('hle_step("vram-save");'), save)
         self.assertLess(save, first)
@@ -12762,13 +12762,33 @@ class GeRasterBoundsProbeTests(_GeNewCaseMixin, unittest.TestCase):
             "offset, span, (uint32_t)overlap, (uint32_t)ge_idle, idle_polls};"):
             self.assertIn(fragment, run)
         # The skip path writes every later record as SKIP with its usual word count.
+        skip_from = self.bodies["grb_skip_from"]
         skip_all = self.bodies["grb_skip_all"]
         for fragment in ('hle_record(row, "SKIP", address, s_grb_out, 9);',
-                         'hle_record(row, "SKIP", address, s_grb_out, grb_reads[i].raw ? 16u : 8u);',
-                         'hle_record("vram-restore", "SKIP", address, s_grb_out, 2);'):
-            self.assertIn(fragment, skip_all)
-        for banned in ("sceGe", "s_grb_vram", "s_grb_zview", "grb_draw("):
-            self.assertNotIn(banned, skip_all)
+                         'hle_record(row, "SKIP", address, s_grb_out, grb_reads[i].raw ? 16u : 8u);'):
+            self.assertIn(fragment, skip_from)
+        self.assertIn("if (c < first) {\n            continue;\n        }", skip_from)
+        self.assertIn("grb_skip_from(0u, address);", skip_all)
+        self.assertIn('hle_record("vram-restore", "SKIP", address, s_grb_out, 2);', skip_all)
+        for body in (skip_from, skip_all):
+            for banned in ("sceGe", "s_grb_vram", "s_grb_zview", "grb_draw("):
+                self.assertNotIn(banned, body)
+
+    def test_a_reset_that_leaves_the_ge_busy_skips_the_later_cells(self) -> None:
+        # After sceGeBreak(1), word 2 is the whole GE's state after the bounded idle wait; when the
+        # GE is still busy no later list is queued, every later cell is SKIP with its usual word
+        # count, and the block is still restored.
+        draw = self.bodies["grb_draw"]
+        self.assertIn("wedged = draw_state != PSP_GE_LIST_DONE;", draw)
+        self.assertIn("            draw_state = sceGeDrawSync(1);\n"
+                      "            if (draw_state == PSP_GE_LIST_DONE) {", draw)
+        self.assertTrue(draw.rstrip().endswith("return wedged;\n}"))
+        run = self.bodies["hle_run"]
+        branch = run.index("if (grb_draw(i)) {")
+        self.assertLess(branch, run.index("grb_skip_from(i + 1u, GRB_SKIP_WEDGED);"))
+        self.assertLess(run.index("grb_skip_from(i + 1u, GRB_SKIP_WEDGED);"), run.index("break;", branch))
+        self.assertLess(branch, run.index('hle_step("vram-restore");'))
+        self.assertIn("#define GRB_SKIP_WEDGED 0xffffffffu", self.section)
 
     def test_a_skipped_run_keeps_the_stream_shape(self) -> None:
         # Every record SKIP (the display overlapped or the GE never idled) still parses as the
@@ -12837,7 +12857,7 @@ class GeDepthRoundProbeTests(_GeNewCaseMixin, unittest.TestCase):
         # A truncate-column mask is read as "truncate or reduced precision" wherever it is cited.
         self.assertIn('A 0x1f, 0xe0 or 0xff mask reads "truncate or reduced precision"', self.probe)
         self.assertIn('pass mask reads "truncate or reduced precision"', self.row["evidence_note"])
-        self.assertIn("first hardware use of a GE-context enqueue", self.row["risk"])
+        self.assertIn("first recorded use of a GE-context enqueue", self.row["risk"])
         self.assertIn('mask reads "truncate or reduced precision"', self.doc)
         self.assertIn("static const float gdr_xf_frac[4] = {0.0f, 0.25f, 0.5f, 0.75f};", self.section)
 
@@ -12915,6 +12935,20 @@ class GeDepthRoundProbeTests(_GeNewCaseMixin, unittest.TestCase):
                 self.assertEqual(len(set(got)), 3)
                 self.assertRegex(self.probe, rf" \* +{cell} +0x{expected[0]:02x} +0x{expected[1]:02x}"
                                              rf" +0x{expected[2]:02x}\n")
+
+    def test_a_reset_that_leaves_the_ge_busy_skips_the_later_cells(self) -> None:
+        draw = self.bodies["gdr_draw"]
+        self.assertIn("wedged = draw_state != PSP_GE_LIST_DONE;", draw)
+        self.assertTrue(draw.rstrip().endswith("return wedged;\n}"))
+        run = self.bodies["hle_run"]
+        branch = run.index("if (gdr_draw(&gdr_cells[i], gdr_phys(s_gdr_tex))) {")
+        self.assertLess(branch, run.index("gdr_skip_from(i + 1u);"))
+        skip = self.bodies["gdr_skip_from"]
+        for fragment in ('hle_record(row, "SKIP", GDR_SKIP_WEDGED, zero, 9);',
+                         'hle_record(row, "SKIP", GDR_SKIP_WEDGED, zero, GDR_WW);',
+                         'hle_record(row, "SKIP", GDR_SKIP_WEDGED, zero, 4);'):
+            self.assertIn(fragment, skip)
+        self.assertNotIn("sceGe", skip)
 
     def test_pass_and_kept_compare_rgb_only(self) -> None:
         # Seen on a development run (PSP-3000, XMB context, 2026-11-12 boot 195, built from 24acc82e; not a recorded

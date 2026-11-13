@@ -3640,7 +3640,14 @@ static int hle_run(void)
  * Colour is read through the plain uncached mirror; depth through the uncached 0x04200000
  * mirror, which presents the GE's depth layout linearly (PSP-VRAM-MIRROR-001: the GE stores the
  * depth of (x, y) at (zbp + 2 (y * zbw + x)) ^ 0x2040). Every list is queued with a GE context
- * (PspGeListArgs), so the GE driver restores the GE state after it.
+ * (PspGeListArgs), so the GE driver restores the GE state after a list that ends (after a
+ * sceGeBreak(1) reset that is not established).
+ *
+ * The block's ownership is an assumption, not a measured precondition: the check below sees only
+ * the buffer on screen at one moment, not other VRAM the XMB may use (a libGu-style layout after
+ * two 512x272 8888 buffers puts a depth buffer at 0x110000). A VSH write into the block would show
+ * in a read's "other" count and could be taken for a GE overrun, and the probe's fill may show on
+ * screen until the restore. No cell is known to be riskier than another, so their order is free.
  *
  * Before touching VRAM the probe reads the display buffer (sceDisplayGetFrameBuf) and records
  * `display-check` (9 words: the call's result, the display address, buffer width and pixel
@@ -3656,7 +3663,10 @@ static int hle_run(void)
  * Records per cell: `<cell>-draw` (9 words: qid, the probe's own list's last peek
  * (sceGeListSync(qid, 1)), the whole GE's sceGeDrawSync(1) after the wait, elapsed us, how the
  * wait ended (GRB_WAIT_*), the sceGeBreak(1) result (0 unless the deadline passed), the list
- * length, fbw and zbw), then the cell's reads of grb_reads in order. A summary read
+ * length, fbw and zbw; after a sceGeBreak(1) reset, word 2 is the whole GE's state after the
+ * reset's bounded idle wait, and when the GE is still busy no later list is queued: every later
+ * cell's records are SKIP with result GRB_SKIP_WEDGED, and the block is still restored), then the
+ * cell's reads of grb_reads in order. A summary read
  * `<cell>-<read>` covers `rows` rows from row0 of the columns col0 .. col0 + cols - 1 at the
  * buffer's stride (fbw for colour, zbw for depth), or the whole block as one run when rows is 0, and holds 8 words: the pixel count; the counts
  * equal to the drawn value (colour 0xff00ff00 in 8888 and 0x07e0 in 5650, depth 0x0100), to the
@@ -3693,6 +3703,7 @@ static int hle_run(void)
 #define GRB_WAIT_FREED 1u
 #define GRB_WAIT_DEADLINE 2u
 #define GRB_WAIT_REJECTED 3u
+#define GRB_SKIP_WEDGED 0xffffffffu /* the SKIP result once a reset left the GE busy */
 
 enum { GRB_K_COLOUR, GRB_K_ZBW, GRB_K_ZCLEAR };
 enum { GRB_BUF_C, GRB_BUF_Z };
@@ -3996,7 +4007,7 @@ static uint32_t grb_wait(int qid)
 
 /* One cell: fill both blocks, build the list, queue it with the GE context, wait (bounded),
    then the `-draw` record and the cell's reads. */
-static void grb_draw(uint32_t index)
+static int grb_draw(uint32_t index)
 {
     static char row[64];
     const struct grb_cell *c = &grb_cells[index];
@@ -4017,18 +4028,22 @@ static void grb_draw(uint32_t index)
     const uint32_t wait = grb_wait(qid);
     const uint32_t elapsed = sceKernelGetSystemTimeLow() - t0;
     const int list_state = s_grb_list_state;
-    const int draw_state = sceGeDrawSync(1); /* the whole GE, for the record only */
+    int draw_state = sceGeDrawSync(1); /* the whole GE, for the record only */
     int reset_rc = 0;
+    int wedged = 0;
     if (wait == GRB_WAIT_DEADLINE) {
         PspGeBreakParam param;
         memset(&param, 0, sizeof(param));
         reset_rc = sceGeBreak(1, &param);
+        /* Word 2 becomes the whole GE's state after the reset's bounded idle wait. */
         for (unsigned i = 0; i < GRB_WAIT_POLLS; i++) {
-            if (sceGeDrawSync(1) == PSP_GE_LIST_DONE) {
+            draw_state = sceGeDrawSync(1);
+            if (draw_state == PSP_GE_LIST_DONE) {
                 break;
             }
             sceKernelDelayThread(GRB_WAIT_POLL_US);
         }
+        wedged = draw_state != PSP_GE_LIST_DONE;
     }
     const uint32_t draw[9] = {(uint32_t)qid, (uint32_t)list_state, (uint32_t)draw_state,
                               elapsed, wait, (uint32_t)reset_rc, words, c->fbw, c->zbw};
@@ -4041,15 +4056,20 @@ static void grb_draw(uint32_t index)
             grb_read(c, &grb_reads[i]);
         }
     }
+    return wedged;
 }
 
 /* Every record after `display-check` as SKIP, with its usual word count and `address` as its
    result; nothing touches VRAM or the GE. */
-static void grb_skip_all(uint32_t address)
+/* Cells first.. as SKIP records with their usual word counts (all 0) and `address` as the result. */
+static void grb_skip_from(uint32_t first, uint32_t address)
 {
     static char row[64];
     memset(s_grb_out, 0, sizeof(s_grb_out));
     for (uint32_t c = 0; c < GRB_CELL_COUNT; c++) {
+        if (c < first) {
+            continue;
+        }
         snprintf(row, sizeof(row), "%s-draw", grb_cells[c].name);
         hle_record(row, "SKIP", address, s_grb_out, 9);
         for (uint32_t i = 0; i < GRB_READ_COUNT; i++) {
@@ -4059,6 +4079,11 @@ static void grb_skip_all(uint32_t address)
             }
         }
     }
+}
+
+static void grb_skip_all(uint32_t address)
+{
+    grb_skip_from(0u, address);
     hle_record("vram-restore", "SKIP", address, s_grb_out, 2);
 }
 
@@ -4102,7 +4127,11 @@ static int hle_run(void)
         s_grb_save[i] = s_grb_vram[i];
     }
     for (uint32_t i = 0; i < GRB_CELL_COUNT; i++) {
-        grb_draw(i);
+        if (grb_draw(i)) {
+            /* The GE stayed busy after the reset: queue nothing more; the block is still restored. */
+            grb_skip_from(i + 1u, GRB_SKIP_WEDGED);
+            break;
+        }
     }
     hle_step("vram-restore");
     for (uint32_t i = 0; i < GRB_SAVE_WORDS; i++) {
@@ -4168,7 +4197,18 @@ static int hle_run(void)
  * `<cell>-r0` .. `<cell>-r3` (the window rows, 16 pixels each), then `<cell>-pass` (4 words: the
  * pass mask of pixels 0..31 and of pixels 32..63, the number of pixels that kept their
  * destination and the number that hold neither colour). Every list is queued with a GE context
- * (PspGeListArgs), so the GE driver restores the GE state after it. */
+ * (PspGeListArgs), so the GE driver restores the GE state after a list that ends (after a
+ * sceGeBreak(1) reset that is not established).
+ *
+ * The colour buffer at 0x100000 is not checked against the display and not restored. It lies inside
+ * the XMB display buffer a development run saw (boot 194: 0x88000..0x10ffff), so a strip at the
+ * bottom of the screen may show the probe's pixels until the XMB redraws, and a VSH write into the
+ * window between the clear and the read shows as `-pass` word 3 (neither colour). Main's ge-raster
+ * (boot 71) and ge-through-z (boot 180, XMB context) used the same blocks with complete streams.
+ *
+ * After a sceGeBreak(1) reset, `-draw` word 2 is the whole GE's sceGeDrawSync(1) after the reset's
+ * bounded idle wait; when the GE is still busy no later list is queued and every later record is
+ * SKIP with its usual word count (all 0) and result GDR_SKIP_WEDGED. */
 
 #define GDR_FB_OFFSET 0x00100000u   /* VRAM-relative colour buffer, stride 64, 32 rows */
 #define GDR_ZB_OFFSET 0x00110000u   /* VRAM-relative depth buffer, stride 64 */
@@ -4187,6 +4227,7 @@ static int hle_run(void)
 #define GDR_WAIT_FREED 1u
 #define GDR_WAIT_DEADLINE 2u
 #define GDR_WAIT_REJECTED 3u
+#define GDR_SKIP_WEDGED 0xffffffffu /* the SKIP result once a reset left the GE busy */
 
 /* xf 0: the through-mode test sprite at test_z; xf 1: the transform-mode sprites. w: the
    command words after the depth pass, as a ge-raster cell's; 0 ends them. */
@@ -4460,7 +4501,7 @@ static uint32_t gdr_wait(int qid)
 
 /* One cell: clear the block, write the window's destination pattern, queue the list with the GE
    context, wait (bounded), read the window back, then the `-draw`, `-rN` and `-pass` records. */
-static void gdr_draw(const struct gdr_cell *c, uint32_t tex)
+static int gdr_draw(const struct gdr_cell *c, uint32_t tex)
 {
     static char row[64];
     hle_step(c->name);
@@ -4485,18 +4526,22 @@ static void gdr_draw(const struct gdr_cell *c, uint32_t tex)
     const uint32_t wait = gdr_wait(qid);
     const uint32_t elapsed = sceKernelGetSystemTimeLow() - t0;
     const int list_state = s_gdr_list_state;
-    const int draw_state = sceGeDrawSync(1); /* the whole GE, for the record only */
+    int draw_state = sceGeDrawSync(1); /* the whole GE, for the record only */
     int reset_rc = 0;
+    int wedged = 0;
     if (wait == GDR_WAIT_DEADLINE) {
         PspGeBreakParam param;
         memset(&param, 0, sizeof(param));
         reset_rc = sceGeBreak(1, &param);
+        /* Word 2 becomes the whole GE's state after the reset's bounded idle wait. */
         for (unsigned i = 0; i < GDR_WAIT_POLLS; i++) {
-            if (sceGeDrawSync(1) == PSP_GE_LIST_DONE) {
+            draw_state = sceGeDrawSync(1);
+            if (draw_state == PSP_GE_LIST_DONE) {
                 break;
             }
             sceKernelDelayThread(GDR_WAIT_POLL_US);
         }
+        wedged = draw_state != PSP_GE_LIST_DONE;
     }
     uint32_t pass[4] = {0u, 0u, 0u, 0u};
     for (uint32_t i = 0; i < GDR_N; i++) {
@@ -4524,6 +4569,27 @@ static void gdr_draw(const struct gdr_cell *c, uint32_t tex)
     }
     snprintf(row, sizeof(row), "%s-pass", c->name);
     hle_record(row, "PASS", 0, pass, 4);
+    return wedged;
+}
+
+/* Cells first.. as SKIP records with their usual word counts (all 0), after a reset left the GE busy. */
+static void gdr_skip_from(uint32_t first)
+{
+    static char row[64];
+    static const uint32_t zero[GDR_WW];
+    for (uint32_t c = 0; c < GDR_CELL_COUNT; c++) {
+        if (c < first) {
+            continue;
+        }
+        snprintf(row, sizeof(row), "%s-draw", gdr_cells[c].name);
+        hle_record(row, "SKIP", GDR_SKIP_WEDGED, zero, 9);
+        for (uint32_t y = 0; y < GDR_WH; y++) {
+            snprintf(row, sizeof(row), "%s-r%u", gdr_cells[c].name, (unsigned int)y);
+            hle_record(row, "SKIP", GDR_SKIP_WEDGED, zero, GDR_WW);
+        }
+        snprintf(row, sizeof(row), "%s-pass", gdr_cells[c].name);
+        hle_record(row, "SKIP", GDR_SKIP_WEDGED, zero, 4);
+    }
 }
 
 static int hle_run(void)
@@ -4535,7 +4601,10 @@ static int hle_run(void)
         }
     }
     for (uint32_t i = 0; i < GDR_CELL_COUNT; i++) {
-        gdr_draw(&gdr_cells[i], gdr_phys(s_gdr_tex));
+        if (gdr_draw(&gdr_cells[i], gdr_phys(s_gdr_tex))) {
+            gdr_skip_from(i + 1u); /* the GE stayed busy after the reset: queue nothing more */
+            break;
+        }
     }
     return 1;
 }
