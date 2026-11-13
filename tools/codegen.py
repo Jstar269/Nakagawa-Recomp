@@ -4122,7 +4122,10 @@ def normal_line(addr, w, lle_cpu=None, delay_branch_pc=None, options=None):
         # update (contract 11.3.10); the call changes nothing unless the run's load=fast is on.
         if ENHANCEMENT_ACE_SITES:
             line = f"    nk_ace_load_update();\n{line}"
-        line = f"    if (nk_enhancement_on()) {{ nk_enhancement_updates++; }}\n{line}"
+        # Late pad sampling's hook (pad=late, docs/ENHANCEMENT_CONTRACT.md section 11.3.9) runs inside
+        # the same toggle; it returns at once unless the run's line asks for pad=late.
+        line = (f"    if (nk_enhancement_on()) {{ nk_enhancement_updates++; sr_enhancement_update_begin(); }}\n"
+                f"{line}")
     rw = _enhancement_rewrite(addr) if w is not None else None
     if rw is None:
         return line

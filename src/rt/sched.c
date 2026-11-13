@@ -1445,6 +1445,9 @@ static uint32_t sr_rt_current_uid(void) {
  * semantic and is not expressible on hardware; see the D2 record
  * (PSP-DISPLAY-003) quoted above sched_run's idle handling. */
 static void sched_vblank_block(void) {
+    /* A 60 FPS logic update ends its work here (late pad sampling, ace.h): only the thread that
+     * passed the update boundary is counted, and only with Ace on. Reads the host clock only. */
+    sr_enhancement_update_waits();
     /* Sample the clock, latch any edge that has fallen due, and deliver the edges owed
      * from before this call. All of it runs before the caller registers, so the owed
      * edges wake only threads already waiting and this caller is not released by an
@@ -1573,6 +1576,7 @@ static void pace_set_speed(uint32_t speed) {
 }
 
 int sched_fast_forward_on(void) { return s_ff_speed > 1u; }
+uint32_t sched_fast_forward_speed(void) { return s_ff_speed; }
 uint32_t sched_fast_forward_epoch(void) { return s_ff_epoch; }
 
 /* SR_DETERMINISTIC_CLOCK: unset, empty or '0' = off; '1' = on. There is no automatic choice: a
@@ -1655,6 +1659,33 @@ int sched_vbl_paced(void) { pace_setup(); return s_pace_on > 0; }
 /* True when guest time is deterministic (#2037): the RTC then starts at a fixed date instead of
  * the host's calendar, so two identical runs see the same time of day. */
 int sched_clock_deterministic(void) { pace_setup(); return s_det_clock; }
+
+/* Late pad sampling (ace.h, contract 11.3.9) plans on the host clock: this clock, one VBLANK
+ * period on it, and the host time at which the next VBLANK source event falls due, 0 when
+ * VBLANKs are not paced to it or no VBLANK has been latched yet.
+ *
+ * The source deadline, s_clock_epoch_ns plus s_vbl_next_us, is a time on the paced clock
+ * (pace_ns), which runs ahead of the host clock by every fast-forward span so far. It is moved
+ * to the host clock as the paced time left until it, converted at the current speed, from now:
+ * exact at any speed and after any fast forward. s_vbl_latch_ns is a reading of the host clock
+ * itself at the last VBLANK latch (shifted only by a pause, which stops guest time too), and
+ * one period after it caps the deadline, so no deadline is ever more than a period out. */
+uint64_t sched_host_now_ns(void) { return host_now_ns(); }
+uint64_t sched_vblank_period_ns(void) { return 16683333u; }   /* 1001/60 ms, 59.94 Hz */
+uint64_t sched_vblank_deadline_ns(void) {
+    pace_setup();
+    if (s_pace_on <= 0 || !s_vbl_latch_ns || s_vbl_next_us == UINT64_MAX ||
+        s_vbl_next_us > (UINT64_MAX - s_clock_epoch_ns) / 1000u)
+        return 0u;
+    const uint64_t paced = s_clock_epoch_ns + s_vbl_next_us * 1000u;
+    const uint64_t host = host_now_ns();
+    const uint64_t pace_now = pace_ns_at(host);
+    const uint64_t left = paced > pace_now ? pace_to_host_ns(paced - pace_now) : 0u;
+    const uint64_t source = left > UINT64_MAX - host ? UINT64_MAX : host + left;
+    const uint64_t period = sched_vblank_period_ns();
+    const uint64_t bound = s_vbl_latch_ns > UINT64_MAX - period ? UINT64_MAX : s_vbl_latch_ns + period;
+    return source < bound ? source : bound;
+}
 
 static uint64_t host_us(void) {
     return (pace_ns() - s_clock_epoch_ns) / 1000u;
@@ -5566,6 +5597,7 @@ int sched_pause_active(void) { return s_pause_active; }
 SrPauseSource sched_pause_source(void) { return s_pause_source; }
 int sched_pause_pending(void) { return s_pause_requested || s_pause_active; }
 uint64_t sched_pause_total_ns(void) { return s_pause_total_ns; }
+uint64_t sched_pause_count(void) { return s_pause_count; }
 
 static int sched_pause_parse_decimal(const char *begin, const char *end,
                                      uint64_t maximum, uint64_t *value_out) {

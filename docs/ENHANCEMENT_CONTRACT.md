@@ -604,7 +604,9 @@ an Enhanced or Ace launch with the Texture pack part on for a title that has a p
 hand. A line writes them only when on, in that order, `mips` right after `twin` and `cull` last, so a line with them
 off is the line without them, byte for byte. With `texpack=on` the launcher also exports `SR_TEX_REPLACE`, the
 title's pack folder; it always exports that variable, empty for any other line, so an inherited folder never reaches
-a run. Every
+a run. `pad` (`late` or `off`, section 11.3.9) may be left out too: a missing `pad` or `pad=off` is off, `pad=late`
+needs `tier=ace`, and the launcher writes `;pad=late` only for an Ace launch with that part on, after `texpack` and
+before `cull`. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -658,6 +660,9 @@ the device is created with no feature outside Ace.
 - **Sound:** `sas=sinc` writes band-limited sample values into the guest's SAS output buffer, so it is a
   guest-visible item. Its entry is section 11.3.1. `peak=limit` changes only what the host plays: the guest's SAS
   buffer keeps the PSP's saturated bytes (section 10.22).
+- **Input timing:** `pad=late` holds each 60 FPS logic update at its package's update boundary until shortly before
+  its VBLANK deadline, so the update reads a fresher pad sample. It changes when the update runs inside its period,
+  which the guest can measure, so it is a guest-visible item. Its entry is section 11.3.9.
 - **Patches:** `tess=2` to `tess=4` draws every triangle patch with finer triangles, which changes the frames a
   present commits to guest VRAM, and under `SR_GE_TIMING=1` it alters the GE timing model's clocks. It is a
   guest-visible item. Its entry is section 11.3.7.
@@ -2839,6 +2844,129 @@ The feature of section 10.16 (#1273). How it draws is described there; this entr
 - **Tier:** Enhanced. **Default:** off. It is in no graphics preset.
 - **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
   exist.
+
+#### 11.3.9. Late Pad Sampling (`pad=late`, Not Yet Admitted)
+
+An Ace part for a title with a 60 FPS timing package: each logic update starts closer to the VBLANK that shows it,
+so the pad sample it reads is younger when its frame reaches the screen.
+
+- **Status: guest-visible, not admitted under section 11.2.** It changes when, inside its VBLANK period, a logic
+  update runs. Its key, its library and per-title settings and this entry are in place (section 11.2, items 2, 3
+  and 6); the runs of item 4 exist for one title (below) and have not been reviewed, so it stays off by default and in
+  no preset.
+- **Mechanism.** The package's `update_boundary` (section 9.5) calls `sr_enhancement_update_begin()` on every update
+  while 60 FPS game logic is on. Only in a run whose line carries `pad=late` does the call do anything: the runtime
+  keeps the host cost of the last 64 updates, measured from the end of the update's hold (its boundary when it was not
+  held) to its next display wait (`sched_vblank_block`), and may hold an update. Once 30 updates in a row were
+  measured, an update reaching the boundary with more than its reserve left before the next VBLANK deadline waits there.
+  The reserve is the largest of those costs, a quarter of it again, and a 2 ms margin. The deadline is the next VBLANK
+  on the host clock: the paced time left until it, moved to the host clock at the current speed, so it stays exact after
+  a fast-forward span has put the paced clock ahead of the host's. It is never later than one VBLANK period after the
+  last VBLANK the scheduler latched, and a deadline more than one period ahead is not planned against (no hold, and the
+  30 updates are counted again). Every hold is shorter than one VBLANK period. The wait is an ordinary guest-thread
+  delay (`sched_delay_current`) and is never shorter than 1 ms. It is taken only where the thread could wait anyway
+  (never in an interrupt handler, a pending tail transfer, a pause request or the COSIM guest lane), not in fast forward
+  (whose guest time, the delay's clock, runs ahead of the host time the hold is planned on), and only where the gates a
+  refresh checks pass (the GDI window passes them, but its pump polls no input; see Limits): not under a route
+  (`SR_PADSCRIPT`), a recording or replay, the headless START pulse or a non-zero sampling cycle, not with no window a
+  person is at (the offscreen sink, a headless presenter) or while the on-screen keyboard is open, and not once the
+  newest sample was handed to a guest call. After the wait, the runtime polls the host input once more and rewrites the
+  newest controller sample in place, only if that poll read the host input (the GDI window reads its keys when it
+  presents, so there the sample stays as latched) and no guest call has been handed the sample yet: a buffer read or
+  peek, and a latch read or peek, all count. The rewritten sample is built as a VBLANK latch of the same host input is
+  (buttons, and in analog mode the stick with the `stick=<counts>` remap of section 11.3.11 when the line carries it).
+  It keeps every button its VBLANK latch took as a press,
+  one down in it and up in the sample before, whatever its source (a key, a gamepad button, a trigger or a stick bound
+  to a button), and one pressed and released since the sample before, and, while the sample before was handed to no
+  guest call, the presses that sample kept or a refresh added to it that are still down (a read of one buffer skips it),
+  so a press that sample carried is never lost to a release during the wait. A button pulse (a press and release) the
+  refresh takes into a sample no guest call is then handed goes into the next VBLANK's sample as well, where it would
+  have gone without the part, so a reader of one buffer still sees it. The sample whose press closed the on-screen
+  keyboard, a sample a sampling cycle latched, and a pause requested, opened or closed by then leave the sample as
+  latched. Its count of samples, its timestamp and its scripted-input id stay the same. An update whose work then ends
+  after the deadline it was held for is late. Holding stops for 300 updates and the margin grows by 1 ms; the added part
+  stops at 6 ms, so the margin reaches 8 ms at most. An update with a player pause or a change of speed (fast forward on
+  or off) between its boundary and its display wait is dropped instead: no cost, no verdict, counted as `interrupted`.
+- **Key.** `pad=late` or `pad=off` on the launch line (section 10.1), an optional key: a line without it reads as off,
+  any other value refuses the whole line (`ACE_MODE: refused (bad value)`, and the run is Authentic), and `pad=late` is
+  refused unless the line carries `tier=ace` (`ACE_MODE: refused (pad needs tier=ace)`). The player has a library
+  setting and a per-title setting, "Late pad sampling", each able to turn it off alone (section 11.2, item 2); the line
+  carries `;pad=late` only for an Ace launch with the part on. The run names it (`ACE_MODE: pad late (...)` at start, an
+  `ACE_MODE: pad` line at exit and the report's `pad` object with updates, holds, mean and largest hold, late updates,
+  refreshed samples, deadlines more than a period ahead and interrupted updates). It confirms the part when the
+  boundary first runs; a run that asked for it and in which no update boundary ran (no 60 FPS package, or
+  `SR_EXPERIMENTAL_60HZ` off) reports it unavailable at exit.
+- **Off is off.** With `pad` missing or `pad=off`, in Enhanced, Ace or Authentic, the boundary call returns at once:
+  no update is measured, held or refreshed, no latency is measured, and the start line, the exit lines and the report
+  are those of a build without the part. The guest reads the sample its VBLANK latched, with its timestamp, as without
+  the part (`hle-thread-selftest` and `ace-selftest` pin both). The one difference is in the generated code of a
+  package with an `update_boundary`: the boundary's line calls `sr_enhancement_update_begin()` inside the same
+  `nk_enhancement_on()` test that counts the update, so an Authentic run never reaches it.
+- **What it changes:** the time inside each VBLANK period at which an update begins, and the pad state of the newest
+  sample when no guest call has been handed it yet. A refreshed sample's content is up to one hold newer than its
+  `TimeStamp`: stamps stay monotonic, but a stamp no longer says when its content was polled. While no hold overruns,
+  the guest computes the same update from the input it reads, and the number of updates, the number of controller
+  samples and every sample's timestamp are those of a run without it. A hold whose update then overruns its deadline
+  changes both counts: the next VBLANK latches its sample during the update's work, after the hold, so the update's
+  next read of two or more buffers returns two samples where a run without it returns one (a read of one buffer
+  returns the newest), and the update waits for the VBLANK after, so one update (and its frame) is lost.
+- **VRAM bytes:** unchanged for the same input. A frame can show input from up to one period later than without it.
+- **Readbacks:** unchanged.
+- **Timing:** differs. A held update starts later in its period, by the hold, so the guest's system time read at its
+  start is later. During the hold the update's thread is in a delay wait (`TH_WAIT_DELAY`), which a run without it never
+  puts it in there: sceKernelReferThreadStatus and the thread lists show it waiting, and sceKernelReleaseWaitThread on
+  it is refused as on a thread that is not waiting (the runtime releases only object waits), where without the part it
+  would find the thread running or in its releasable VBLANK wait. Other guest threads that are ready while it waits run
+  during the hold, before the update's work rather than after it. The VBLANK schedule, the RTC, the media clocks and the
+  GE timing model are unchanged. The number of updates per second is unchanged unless a held update is late (an overrun,
+  above), which the back-off limits.
+- **I/O speed:** unchanged.
+- **Package obligations:** the package's `update_boundary` runs once per logic update (section 9.5), and the title
+  reads its pad after that point in the update. A title that reads the pad before its boundary gets no fresher sample
+  and no hold: once a guest call was handed the newest sample, the update is not held.
+- **Measured (Hot Shots Tennis, UCUS98701, 60 FPS package, Vulkan GE, hidden window, Windows 11, other builds running
+  on the machine).** At the title screen with live input, two pairs of 3,600-VBLANK runs:
+  - Sample-to-present latency (from the host poll behind the newest sample the guest read to the present of the frame
+    it set; the runtime's poll-to-present age, not press-to-photon latency): mean 24.76 and 24.73 ms off, 15.08 and
+    15.09 ms with `pad=late`; median 31.0 and 30.5 ms off, 19.0 and 19.5 ms on; 95th percentile 33.0 and 33.0 ms off,
+    33.0 and 32.5 ms on.
+  - About 84 % of updates were held (2,842 of 3,398 and 2,784 of 3,318), for a mean of 10 to 12 ms and at most 13.6 ms.
+  - Late updates, off: 10 and 7. With `pad=late`: 2 and 2 late after a hold, plus 9 and 4 late without one.
+  - In every run, every update was measured and none was left open (`unmeasured` 0), and each update set one new frame:
+    the new frames presented are the updates less one.
+  - One run on reported a largest latency of 1,275 ms that the repeat did not show (138 ms). It is a single frame
+    outside the 99th percentile (34 ms in both).
+  - These runs predate two corrections. The measure then also timed a frame the guest set with no pad read since the
+    previous present, from the last read however old, which is the likely source of that 1,275 ms frame. It now
+    times a present only when it shows a new frame set after a pad read, by any read path, that no earlier measured
+    frame was charged with, and counts every other present apart (`frames_without_read`): a repeated frame, or a new
+    frame with no such read. A read made after a frame was set is charged to the next new frame, which is the one it
+    can reach. The latch reads did not yet count as reads, and a tap latched at a VBLANK could be dropped.
+- **Measured again, quiet host.** The same title-screen run with live input, one 3,600-VBLANK pair at the corrected
+  measure, run alone on the machine:
+  - Sample-to-present latency over 3,521 and 3,528 measured frames: mean 16.81 ms off and 6.55 ms with `pad=late`,
+    median 17.0 and 4.5 ms, 95th percentile 17.5 and 17.0 ms. The largest frame was 132.9 ms off and 119.9 ms on;
+    which frame that is has not been traced.
+  - 3,523 updates off and 3,530 on, every one measured (`unmeasured` 0), with 3,522 and 3,529 new frames, the
+    updates less one. 2,872 updates were held (81 %), for a mean of 11.9 ms and at most 13.9 ms, under one period;
+    no deadline was more than a period ahead (`far_deadline` 0), and all 2,872 held samples were refreshed.
+  - Late updates: 2 off (without a hold), 2 on (both after a hold).
+  On a scripted menu, match load and rally route of 12,000 VBLANKs (a route's samples are not refreshed, so it shows
+  the hold's cost, not its gain), 8,744 updates off and 8,958 on, with 2,678 late updates off and 2,701 on, three and
+  four slowed-logic notices, and latency percentiles within 1 ms. These runs share the machine with other work, so
+  they show no regression at that load, not steady-state pacing. A route run is no longer held at all: the hold is
+  now skipped wherever no refresh can follow it.
+- **Limits.** The hold is planned from host costs, so a sudden expensive update after a run of cheap ones can be late
+  once before the back-off. A latency gain needs live host input polled by the window, and the gates are checked
+  when the update reaches its boundary: an input source that changes during the hold (the keyboard opens, a pause, a
+  read from another thread) leaves the sample as latched, and the hold has then been taken for nothing; so does the
+  GDI window, whose pump reads no input. The `SR_INLOG` log names a refresh in a `ctrl_refresh:` line, not a
+  `ctrl_latch:` line, so `tools/padscript_from_log.py`, which reads only `ctrl_latch:` lines, rebuilds what each
+  VBLANK latched from a log of a run with `pad=late`, not what the guest read. The latency measure and the plan's
+  counts now run only with `pad=late` (off is off, above): the "off" figures above were taken by builds that measured
+  every Ace run, and a run without the part no longer reports them.
+- **Tier:** Ace. **Default:** off. **Nothing worse (section 11.2, item 4):** the runs above, which have not been
+  reviewed.
 
 #### 11.3.10. Short Loads (`load=fast`, Not Yet Admitted)
 
