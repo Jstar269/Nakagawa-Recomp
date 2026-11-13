@@ -71,12 +71,15 @@ gives every `ge-raster` cell (`test_ge_raster_cells_match_psp`); no test yet run
 `ge-raster` entry below), 146 `ge-raster` cells drawn on the GPU equal the PSP, 20 stay within 2 per
 colour field of it (most differ by 1 or 2, depending on the driver), and 23 are drawn by the software fallback. Other pixel evidence measured on a
 PSP but not in `ge_corpus.json`: PSP-GE-SAMPLE-001, PSP-GE-THROUGHZ-001, PSP-GE-MIP-001, PSP-GE-MIP-002,
-PSP-GE-LIGHT-001 and PSP-GE-OVERLAP-001 (their entries below). Not measured at all:
+PSP-GE-LIGHT-001, PSP-GE-OVERLAP-001, and the colour cells of PSP-GE-RASTER-002 and the cells of PSP-GE-RASTER-003
+(their entries below). Not measured at all:
 
 - the command-word case above (`NOT_RUN`);
 - the depth the GE stores for a fractional z: every `ge-raster` depth is an integer and
   PSP-GE-THROUGHZ-001 does not show the stored word, so depth rounding and the transform-mode depth
-  range mapping are not pinned;
+  range mapping are not pinned (PSP-GE-RASTER-003's pass masks read "truncate or reduced precision", not
+  truncation alone);
+- the depth cells of PSP-GE-RASTER-002 (UNDECIDED: the depth view read 0 for every word);
 - clipping, the guard band and back-face culling;
 - scissor rectangles smaller than the surface: every cell scissors to the full surface;
 - index buffers, and vertex formats no cell uses;
@@ -1744,6 +1747,36 @@ One console is one data point; see §11. Nothing here closes issue #70
     an inference, as the probe did not read there.
   - *XMB context.* The VSH draws its own lists, so a cell's time may include its work. A VSH write to either block
     during a cell would show as extra colour pixels or changed depth words; none appeared.
+
+- **PSP-3000 single-case runs of `ge-raster-bounds` and `ge-depth-round` (2026-11-13 UTC)**: one PSP-3000, XMB
+  context, one launch per boot (boots 214 and 215), an unattended run with nobody at the console. Firmware identity:
+  console PSP-3000; system software 6.61 (operator-declared); custom firmware ARK-5 with cIPL, version 5.2.0
+  (operator-declared, not read by a tool); PSPLink built from `pspdev/psplinkusb` `7a0035d9`. Both cases (cases 187
+  and 188, `fixtures/psp_oracle/probe_ge_sample.c`) were built from `05aafe975`, the head of the pull request that
+  added them; it is not an ancestor of this tree, and its `probe_ge_sample.c` and its Makefile CASE lines for these
+  cases are identical to this tree's. Each envelope is acceptance-eligible with 0 blockers (evidence class
+  `PSP_HARDWARE`, source commit binding on a clean committed tree), every record is PASS, each stream ends COMPLETE
+  PASS, every wait ended DONE and no `sceGeBreak` reset ran. The raw envelopes and host0 logs stay in the private
+  campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-13) |
+  | --- | --- | --- | --- |
+  | `PSP-GE-RASTER-002` | `raster-*`, `ge-raster-bounds-done` (boot 214) | `depth-zbw256-past` and `depth-clear-scissor` (UNDECIDED, below); other formats, strides and scissors; the game context | MEASURED: 38 records and the done record, all PASS |
+  | `PSP-GE-RASTER-003` | `zr-*`, `ge-depth-round-done` (boot 215) | other depths, depth functions and vertex formats; the stored depth word itself; the game context | MEASURED: 18 records and the done record, all PASS |
+
+  What the cells establish, for these exact lists only:
+  - *Colour runs on linearly past the frame-buffer width (`ge-raster-bounds`).* A sprite to x 511 at fbw 500 drew
+    8012 pixels (500x16+12): row 16 x 0..11 is drawn and x 12 onwards keeps the fill. A sprite on rows 100..109
+    under scissor x 0..479 at fbw 256 drew 2784 pixels (256x10+224): row 110 x 0..223 is drawn and x 224 onwards
+    keeps the fill. Only the scissor clips.
+  - *Alpha byte.* Drawn 8888 pixels read `0x5a00ff00`: they keep the fill's alpha (stencil) byte.
+  - *Depth cells UNDECIDED.* The depth view the case reads through the `0x04200000` mirror read 0 for every word in
+    `depth-zbw256-past` and `depth-clear-scissor`, including the depth fill the case's own expectations say it
+    should show. These reads therefore do not show the depth the GE stored; they are recorded as read, and neither
+    cell is measured.
+  - *Depth rounding (`ge-depth-round`).* The pass masks read `0x1f1f1f1f` in both words for `zr-thru-eq`,
+    `0xe0e0e0e0` for `zr-thru-gt` and `0xffffffff` for `zr-xf-eq`, that is 0x1f, 0xe0 and 0xff per eight pixels:
+    "truncate or reduced precision" by the probe's reading key in all three cells. Truncation alone is not claimed.
 
 - **PSP-3000 single-case run of `vfpu-reserved-widths` (2026-11-10 UTC)**: one PSP-3000, XMB context, one launch on
   its own boot after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited), with the owner present
@@ -3922,8 +3955,8 @@ not expected PSP values.
 | `dma-timing` | `PSP-DMAC-002` | `MEASURED` (2026-10-29, `0e40e7d3`, `281a21a4` and `1310e632`; single launches, not in the campaign queue) | #303: `sceDmacMemcpy` / `sceDmacTryMemcpy` per-call duration by size (0x10 to 0x100000) and main-RAM/VRAM pair, relative-alignment cost, BUSY against the NULL and zero-size checks, what a refused Try copies, the order of queued callers, the busy window, and the sizes a pending transfer lets through. 202 result records in the last build. |
 | `ge-raster` | `PSP-GE-RASTER-001` | `MEASURED` (2026-10-29, `990748ec`; single launch, not in the campaign queue) | #343: the raw pixels of a 16x4 window after 189 project-written display lists: blend factors and equations, alpha, colour, stencil and depth tests, texture functions, formats, CLUT modes and row pitch, wrap and clamp, triangle, line and point coverage, 16-bit framebuffers, dithering, pixel masks, logic operations, clear mode, and transform-mode triangles, sprites and fog. 945 result records. |
 | `ge-through-z` | `PSP-GE-THROUGHZ-001` | `MEASURED` (2026-11-10, PSP-3000, boot 180, XMB context, `e4e6a3a2`; 23 records) | Through-mode vertex z outside 0..65535, fractional, infinite and NaN: the depth word the GE writes under a 16x16 sprite (depth test ALWAYS, writes on, cleared to 0x1234) and whether colour is written: clamp, wrap or a dropped draw (a Ridge Racer 2 fix). Every z, +inf and NaN included, drew all 256 colour pixels; no word of the depth block the probe read linearly changed, so the stored depth, and clamp or wrap, is not shown. |
-| `ge-raster-bounds` | `PSP-GE-RASTER-002` | `NOT_RUN` | Built #2193 cells: colour writes past the frame-buffer stride (fbw 512, 500, 256), depth writes past zbw 256, and a depth-only clear under a scissor; no hardware result is claimed. Development runs of earlier builds (PSP-3000, XMB context, 2026-11-12) are not results: on boot 194 `display-check` skipped every `ge-raster-bounds` cell because the display overlapped the block then at 0x100000, and boot 195 ran `ge-depth-round` from `24acc82e` with a 32-bit colour compare. |
-| `ge-depth-round` | `PSP-GE-RASTER-003` | `NOT_RUN` | Built #343 cells `zr-thru-eq`, `zr-thru-gt` and `zr-xf-eq`: whether the GE truncates or rounds a fractional depth, read as colour in the `ge-raster` window (a 0x1f, 0xe0 or 0xff mask reads "truncate or reduced precision"); no hardware result is claimed. Development runs of earlier builds (PSP-3000, XMB context, 2026-11-12) are not results: on boot 194 `display-check` skipped every `ge-raster-bounds` cell because the display overlapped the block then at 0x100000, and boot 195 ran `ge-depth-round` from `24acc82e` with a 32-bit colour compare. |
+| `ge-raster-bounds` | `PSP-GE-RASTER-002` | `MEASURED` (2026-11-13 UTC, PSP-3000, boot 214, XMB context, `05aafe975`; 38 records and the done record, all PASS, acceptance-eligible; unattended run; the depth cells UNDECIDED) | #2193: colour writes past the frame-buffer stride (fbw 512, 500, 256), depth writes past zbw 256, and a depth-only clear under a scissor. Colour written past the frame-buffer width continues linearly (8012 pixels at fbw 500, 2784 at fbw 256) and only the scissor clips; drawn 8888 pixels keep the fill's alpha byte (`0x5a00ff00`). The depth view read 0 for every word, so `depth-zbw256-past` and `depth-clear-scissor` are UNDECIDED, not measured. See the `ge-raster-bounds` run in the measured-to-date index. Development runs of earlier builds (PSP-3000, XMB context, 2026-11-12, boots 194 and 195) are not results. |
+| `ge-depth-round` | `PSP-GE-RASTER-003` | `MEASURED` (2026-11-13 UTC, PSP-3000, boot 215, XMB context, `05aafe975`; 18 records and the done record, all PASS, acceptance-eligible; unattended run) | #343 cells `zr-thru-eq`, `zr-thru-gt` and `zr-xf-eq`: whether the GE truncates or rounds a fractional depth, read as colour in the `ge-raster` window (a 0x1f, 0xe0 or 0xff mask reads "truncate or reduced precision"). The pass masks read 0x1f, 0xe0 and 0xff per eight pixels, so "truncate or reduced precision" in all three cells; truncation alone is not claimed. Development runs of earlier builds (PSP-3000, XMB context, 2026-11-12, boots 194 and 195) are not results. |
 | `insn-trace` | `PSP-TRACE-001` | `MEASURED` (2026-10-29, `84568280`; 2026-11-02, `1fbab0c6`, boot 98; single launches, not in the campaign queue) | #312: per instruction of four source-owned microprograms single-stepped on the Allegrex (ALU, shifts, compares, mult/divu, loads and stores of every width, a delay-slot loop; branches and likely branches, bal/bltzal calls returning by jr, a store in a delay slot; `add.s`/`mfc1`/`c.eq.s`/`cfc1` and `mfv`/`mtv`), the traced register state, including FCR31 and selected VFPU registers, and any store. 136 result records in 2026-10-29's two-fixture build, 149 in the four-fixture build; the v2 traces agree with Nakagawa's. See [#1375 and #312 runs 2026-11-02](#1375-and-312-runs-2026-11-02). |
 | `ge-sync-ids` | `PSP-GE-SYNC-001` | `MEASURED` (2026-10-31, `66940d76`, boot 86; single launch, not in the campaign queue; captured earlier from `96fe29f6` and `f6da6125`) | #1374: `sceGeListSync`, `sceGeDrawSync` and `sceGeListDeQueue` on an unknown queue id, on completed lists before and after later lists, on a list a `sceGeBreak(1)` reset removed, and with sync types other than 0 and 1, each blocking call bounded in a helper thread. See [PSP-GE-SYNC-001 runs 2026-10-31](#psp-ge-sync-001-runs-2026-10-31). |
 | `ge-signal` | `PSP-GE-SIGNAL-001` | `CAPTURED` (2026-11-10, PSP-3000, boot 179, XMB context, `80e7c9eb`; 37 records, 12 of 14 cells; incomplete, stalled at `rjump-un`, console power-cycled; not acceptance-eligible) | #2095: whether the signal handler runs for SIGNAL behaviours 0x01-0x03 (and the undefined 0x00 and 0x04), whether the list waits for it, whether 0x03 pauses until `sceGeContinue`, what a NULL-handler callback id does, and where RJUMP and RCALL go with an aligned and an unaligned offset; every cell bounded, a `sceGeBreak(1)` reset after a `TIMEOUT`. Continue and reset are decided from the probe's own list state and a bounded (100 ms) idle wait, never one `sceGeDrawSync(1)` sample, as the VSH draws its own lists in the XMB context. POWER RISK: `rjump-un` and `rcall-un` are not to be re-run unattended. See [PSP-GE-SIGNAL-001 capture 2026-11-10](#psp-ge-signal-001-capture-2026-11-10). |
