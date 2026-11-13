@@ -625,11 +625,15 @@ def source_number(relative: str, pattern: str, what: str) -> int:
 LAUNCHER_MUSIC_FADE_OUT_MS = source_number(
     "src/player/ui/player_ui_music.h", r"#define\s+PLAYER_UI_MUSIC_FADE_OUT_MS\s+(\d+)u?\b",
     "defines PLAYER_UI_MUSIC_FADE_OUT_MS")
-# One launcher frame in these runs: scripted runs cut motion (player_ui_test_apply_motion),
-# so with nothing moving the loop draws a frame each time its idle wake passes.
-LAUNCHER_IDLE_FRAME_MS = source_number(
-    "src/player/main.c", r"player_ui_nk_wait_ms\(run->next_ui,\s*(\d+)u\)",
-    "passes the launcher loop's idle wake to player_ui_nk_wait_ms")
+# How much sooner than the fade's length the launch may start. The fade ends when the audio
+# callback has rendered the ramp's last sample (player_ui_music_mix_render), and the device
+# asks for about one buffer ahead of the clock (SDL's dummy driver in these runs), with a
+# little clock slack on top. Nothing in the test output reports the device's
+# buffer, so this is an upper bound checked by measurement: the smallest PLAY-to-worker
+# span in ten Windows runs on 2026-11-13 was 635 ms (the worker starts on the first frame
+# after the release, so the spans run above the fade). It does not follow the UI's frame
+# rate: the floor stays the fade less this, however often the launcher draws.
+LAUNCHER_MUSIC_FADE_SLACK_MS = 50
 LAUNCH_WORKER_START = "[PLAYER_UI_TEST] launch_worker_start "
 
 
@@ -639,8 +643,9 @@ def assert_launch_waits_for_the_music(case: unittest.TestCase, stdout: str) -> N
 
     Timed from the PLAY press frame (the first with launch_pending=1; PLAY is taken in its
     draw, so the fade begins on the next frame) to the first frame printed after the
-    worker's start line, the frame on which it started: at least the fade, less one idle
-    frame for the device rendering the fade's end a little ahead of the clock. The frames
+    worker's start line, the frame on which it started: at least the fade, less
+    LAUNCHER_MUSIC_FADE_SLACK_MS for the device rendering the fade's end ahead of the
+    clock. The frame before PLAY shows the music playing. The frames
     drawn during the fade are not what is timed: a slow runner draws few of them, so the
     first and last can be much closer together than the fade although the launch waited
     it out. From the worker's frame to the launch's card no music is heard while the
@@ -653,13 +658,16 @@ def assert_launch_waits_for_the_music(case: unittest.TestCase, stdout: str) -> N
     pending = [i for i, frame in enumerate(frames) if frame["launch_pending"] == "1"]
     case.assertTrue(pending, stdout)
     press, started = pending[0], len(before)
+    case.assertGreater(press, 0, "a frame is drawn before PLAY")
+    case.assertEqual(frames[press - 1]["music"], "playing", "the music played before PLAY")
     case.assertLess(started, len(frames), "a frame is drawn after the worker starts")
     span_ms = int(frames[started]["ticks_ms"]) - int(frames[press]["ticks_ms"])
     case.assertGreaterEqual(
-        span_ms, LAUNCHER_MUSIC_FADE_OUT_MS - LAUNCHER_IDLE_FRAME_MS,
+        span_ms, LAUNCHER_MUSIC_FADE_OUT_MS - LAUNCHER_MUSIC_FADE_SLACK_MS,
         f"the launch worker started {span_ms} ms after PLAY (frame {frames[press]['frame']} "
         f"to frame {frames[started]['frame']}): it waits out the music's "
-        f"{LAUNCHER_MUSIC_FADE_OUT_MS} ms fade, less one {LAUNCHER_IDLE_FRAME_MS} ms frame")
+        f"{LAUNCHER_MUSIC_FADE_OUT_MS} ms fade, less {LAUNCHER_MUSIC_FADE_SLACK_MS} ms of "
+        "audio-buffer slack")
     case.assertEqual(frames[started]["launch_pending"], "1",
                      "the worker's frame shows the launch pending")
     card = next((i for i in range(started, len(frames)) if frames[i]["view"] == "error"),
@@ -875,10 +883,13 @@ class LaunchMusicTimingTests(unittest.TestCase):
     it accepts and what it refuses, whatever the runner's frame pace (#2207)."""
 
     @staticmethod
-    def frame(number: int, ticks: int, music: str, view: str = "ready_library") -> str:
+    def frame(number: int, ticks: int, music: str, pending: int = 1,
+              view: str = "ready_library") -> str:
         return (f"[PLAYER_UI_TEST] frame={number} ticks_ms={ticks} view={view} "
-                f"launch_pending=1 music={music}")
+                f"launch_pending={pending} music={music}")
 
+    # The title page before PLAY, with the music playing.
+    TITLE = frame(0, 930, "playing", pending=0)
     WORKER = LAUNCH_WORKER_START + "launcher_audio=closed music=stopped decoder=idle"
 
     def test_few_frames_during_the_fade(self) -> None:
@@ -886,7 +897,8 @@ class LaunchMusicTimingTests(unittest.TestCase):
         and the worker's frame. The fading frames alone span 0 ms (the hosted Windows run
         measured 219 ms); from PLAY to the worker the launch waited the whole fade."""
         fade = LAUNCHER_MUSIC_FADE_OUT_MS
-        stdout = "\n".join((self.frame(1, 1000, "playing"),
+        stdout = "\n".join((self.TITLE,
+                            self.frame(1, 1000, "playing"),
                             self.frame(2, 1000 + fade // 2, "fading_out"),
                             self.WORKER,
                             self.frame(3, 1000 + fade + 20, "stopped")))
@@ -894,7 +906,8 @@ class LaunchMusicTimingTests(unittest.TestCase):
 
     def test_a_worker_that_does_not_wait_for_the_fade_fails(self) -> None:
         """The worker starts on the frame after PLAY, as the fade begins."""
-        stdout = "\n".join((self.frame(1, 1000, "playing"),
+        stdout = "\n".join((self.TITLE,
+                            self.frame(1, 1000, "playing"),
                             self.WORKER,
                             self.frame(2, 1070, "fading_out")))
         with self.assertRaisesRegex(AssertionError, "waits out the music's"):
@@ -902,11 +915,22 @@ class LaunchMusicTimingTests(unittest.TestCase):
 
     def test_music_still_heard_after_the_worker_starts_fails(self) -> None:
         fade = LAUNCHER_MUSIC_FADE_OUT_MS
-        stdout = "\n".join((self.frame(1, 1000, "playing"),
+        stdout = "\n".join((self.TITLE,
+                            self.frame(1, 1000, "playing"),
                             self.WORKER,
                             self.frame(2, 1000 + fade + 20, "stopped"),
                             self.frame(3, 1000 + fade + 90, "fading_out")))
         with self.assertRaisesRegex(AssertionError, "no music is heard"):
+            assert_launch_waits_for_the_music(self, stdout)
+
+    def test_play_before_the_music_plays_fails(self) -> None:
+        """A PLAY with no music playing proves no wait for it."""
+        fade = LAUNCHER_MUSIC_FADE_OUT_MS
+        stdout = "\n".join((self.frame(0, 930, "loading", pending=0),
+                            self.frame(1, 1000, "loading"),
+                            self.WORKER,
+                            self.frame(2, 1000 + fade + 20, "stopped")))
+        with self.assertRaisesRegex(AssertionError, "the music played before PLAY"):
             assert_launch_waits_for_the_music(self, stdout)
 
 
@@ -2812,10 +2836,17 @@ class NativePlayerUiTests(unittest.TestCase):
 
         Failing-before: there was no launcher music, so no frame names its state and no
         launch waits for it."""
+        # "playing" means the device is open, not that it has asked for sound yet: until
+        # its first callback the music's gain is still 0, and a fade from 0 ends at once,
+        # so a PLAY then would start the worker a frame later from a correct player. The
+        # harness reports no callback or gain, so the script waits WAIT_MS=300 after
+        # "playing" (as test_launcher_music_release_timeout_is_named does), many device
+        # buffers, for the music to be heard. A wait in the test script for the device to
+        # start, not a sleep in the player: the launch's own wait is what is timed.
         run = self.run_player(
             "ready",
-            ("FOCUS_GAINED", *self.PLAY_READY_TITLE, "WAIT_MUSIC=playing,30000", "KEY_RETURN",
-             "WAIT_VIEW=error,30000", "WAIT_MUSIC=playing,30000"),
+            ("FOCUS_GAINED", *self.PLAY_READY_TITLE, "WAIT_MUSIC=playing,30000", "WAIT_MS=300",
+             "KEY_RETURN", "WAIT_VIEW=error,30000", "WAIT_MUSIC=playing,30000"),
             post_build_ready=True, wait_background=True,
             settings={"launcher_music": True},
             env_extra={**self.MUSIC_AUDIO, "NK_UI_TEST_SLOW_START_MS": "300"},
