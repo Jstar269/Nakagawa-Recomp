@@ -26,20 +26,25 @@ build ran, and the toolchain copies them into its own output:
     short spelling Make and ``gcc`` echo into dependency files and the link map.
 ``scratch-name``
     The ``tempfile.mkdtemp`` scratch workspace ``tools/title_codegen_plan.py``
-    creates when the output path is not Make-safe. Its random suffix is part of
-    those same path echoes, so it is normalized as a path component, never alone.
+    creates when the output path is not Make-safe (it has a space, or on Windows it
+    leaves less than 85 characters of the 260-character path limit). Its random
+    suffix is part of those same path echoes, so it is normalized as a path
+    component, never alone. It fires exactly when the planner takes that route,
+    which the test works out from the package's own cache entry.
 ``build-profile-hash``
     The content hash ``tools/build_profile.py`` derives from ``CFLAGS`` -- which
     contains that path -- and the ``.runtime-profile-<hash>`` stamp named from it.
 ``input-stamp-mtime``
     The guest input's modification time in the ``.game-inputs`` freshness stamp.
     That mtime *is* the freshness mechanism, so it is normalized, not removed.
-``pe-image-checksum``
-    The PE32+ optional-header image checksum, which is a checksum over the image
-    and therefore necessarily tracks every other difference above.
 ``transitive-digest``
     A ``sha256`` the package's own JSON records for a file that differs only by
     the rules above. A recorded digest is a consequence, not a new difference.
+
+No rule touches the title executable. The PE link is timestamp-free
+(``-Wl,--no-insert-timestamp``) and the executable records no build path, so two
+builds in two roots, and two builds bound to two manifests, link byte-identical
+executables, and the test requires exactly that.
 
 Three toolchain files, the link's response file, the runtime profile-entries file and
 the list of runtime objects the profile stamp invalidates, also record the cache entry
@@ -84,6 +89,7 @@ TOOLS = ROOT / "tools"
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
+from nk_core import package_cache  # noqa: E402
 import publication_policy  # noqa: E402
 import scratch_dir  # noqa: E402
 from test_build_truth import _class_scratch_build_root  # noqa: E402
@@ -113,7 +119,6 @@ RULE_NAMES = (
     "scratch-name",
     "build-profile-hash",
     "input-stamp-mtime",
-    "pe-image-checksum",
     "transitive-digest",
 )
 
@@ -127,9 +132,6 @@ _PROFILE_HASH_RE = re.compile(rb'"profile_hash": "[0-9a-f]{16,}"')
 # from matching an unrelated identifier.
 _SCRATCH_RE = re.compile(rb"\.build-[A-Za-z0-9._-]+-[A-Za-z0-9_]{8}(?=[/\\\x00])")
 _MTIME_RE = re.compile(rb"(?<= )[0-9]{16,20}(?= )")
-
-# PE signature + COFF header, then the CheckSum field of the PE32+ optional header.
-_PE_CHECKSUM_OFFSET = 24 + 64
 
 # Artifacts this project authors for a title. None is written by the compiler or
 # the Make recipes, so none may vary between two builds of the same inputs.
@@ -169,9 +171,10 @@ MANIFEST_IDENTIFIED = ("build-report.json", "package.json", "completion-manifest
 # argument list Make writes to a file because inline it overran the command line under
 # a long BUILD_DIR, so it is compared the same way rather than dropped on its own.
 PATH_ECHOES = ("link-objects.rsp", ".runtime-profile-entries", ".runtime-invalidate.lst")
-# A cache entry directory, <AOT digest>/<native digest>, in its long spelling or in the
-# Windows 8.3 spelling the planner's workspace path is echoed with (for example
-# "7B48E1~1" for "7b48e18b9f...").
+# A cache entry directory, the short key tools/nk_core/package_cache.py derives from the
+# AOT and native digests (cache_entry_key, CACHE_ENTRY_KEY_CHARS hex characters), in its
+# long spelling or in the Windows 8.3 spelling the planner's workspace path is echoed
+# with (for example "3E2EB8~1" for "3e2eb867778f4419").
 #
 # The 8.3 suffix is ``~N`` with N counting collisions, so it reaches ``~10`` and beyond.
 #
@@ -183,8 +186,8 @@ PATH_ECHOES = ("link-objects.rsp", ".runtime-profile-entries", ".runtime-invalid
 # ``build_workspace.as_posix()``. A backslash echo would therefore not be rewritten
 # here, and the two manifests' differing digests would fail the equality check in the
 # test, so the assumption fails closed.
-_CACHE_ENTRY_RE = re.compile(rb"/entries/(?:[0-9a-f]{64}|[0-9A-F]{6}~[0-9]+)/"
-                             rb"(?:[0-9a-f]{64}|[0-9A-F]{6}~[0-9]+)/")
+_CACHE_ENTRY_RE = re.compile(rb"/entries/(?:[0-9a-f]{%d}|[0-9A-F]{6}~[0-9]+)/"
+                             % package_cache.CACHE_ENTRY_KEY_CHARS)
 # The package files whose content names the title or the artifact stem. These are
 # left out of the byte comparison, because a route may legitimately name a
 # different title; the generated-manifest test then states which of them must still
@@ -283,16 +286,6 @@ def _root_spellings(root: Path) -> list[bytes]:
     return sorted(spellings, key=len, reverse=True)
 
 
-def _zero_pe_checksum(data: bytes) -> tuple[bytes, bool]:
-    signature = data.find(b"PE\x00\x00")
-    if signature < 0 or signature + _PE_CHECKSUM_OFFSET + 4 > len(data):
-        return data, False
-    field = signature + _PE_CHECKSUM_OFFSET
-    if data[field:field + 4] == b"\x00\x00\x00\x00":
-        return data, False
-    return data[:field] + b"\x00\x00\x00\x00" + data[field + 4:], True
-
-
 class PackageNormalizer:
     """Map one promoted package onto the bytes a build must actually produce.
 
@@ -330,9 +323,6 @@ class PackageNormalizer:
             if rewritten != data:
                 fired.add("input-stamp-mtime")
             data = rewritten
-        data, changed = _zero_pe_checksum(data)
-        if changed:
-            fired.add("pe-image-checksum")
         for digest in self.digests:
             if digest in data:
                 fired.add("transitive-digest")
@@ -381,7 +371,6 @@ class PackagePair:
         self.differing: set[str] = set()
         self.unattributed: list[str] = []
         self.rules: set[str] = set()
-        self.file_rules: dict[str, set[str]] = {}
         for raw_left in sorted(self.left):
             if raw_left not in self.right:
                 continue
@@ -400,13 +389,8 @@ class PackagePair:
             right_bytes, right_fired = self.right_rules.apply(name, data_right)
             self.rules.update(left_fired)
             self.rules.update(right_fired)
-            self.file_rules[name] = set(left_fired) | set(right_fired)
             if left_bytes != right_bytes:
                 self.unattributed.append(f"{name}\n{describe(left_bytes, right_bytes)}")
-
-    def rules_for(self, name: str) -> set[str]:
-        """The documented rules that had to fire for one file to match."""
-        return self.file_rules.get(name, set())
 
 
 class TestPlayerPackageDeterminism(unittest.TestCase):
@@ -505,6 +489,21 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
     def package_pair(self, left: str, right: str) -> PackagePair:
         return PackagePair(self.packages[left], self.packages[right],
                            (self.roots[left], self.roots[right]))
+
+    def builds_in_scratch(self, name: str) -> bool:
+        """Whether the planner built this root's package in a scratch workspace.
+
+        The package is built in its cache entry's ``package`` directory, and
+        ``build_package`` in tools/title_codegen_plan.py moves the build into a
+        ``.build-<name>-<random>`` workspace when that directory has a space or, on
+        Windows, leaves less than 85 characters of the 260-character path limit.
+        """
+        package = json.loads((self.packages[name] / "package.json").read_text(encoding="utf-8"))
+        cache = package_cache.cache_root(self.roots[name], DISC_ID)
+        output = (package_cache.cache_entry_root(cache, package["cache"]["key"])
+                  / "package").resolve().as_posix()
+        return (any(char.isspace() for char in output)
+                or (os.name == "nt" and len(output) + 85 >= 260))
 
     # -- the build half -------------------------------------------------------
 
@@ -613,7 +612,11 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
             raise AssertionError("the guest routed into the disc is not an ELF")
         manifest = dict(published)
         manifest["id"] = TITLE_ID
-        manifest["display_name"] = "Analyzer-generated player package route"
+        # The title executable's VERSIONINFO names the manifest's display name
+        # (tools/make_app_icon.py, #2001), which is the title's identity, not the guest's.
+        # Both routes therefore name the title the same way, as they do the artifact stem
+        # below, so the executables stay comparable byte for byte.
+        manifest["display_name"] = synthetic_manifest()["display_name"]
         manifest["kind"] = "retail"
         manifest["disc"] = {"id": DISC_ID, "region": "NA",
                             "revision_policy": "exact-disc-id"}
@@ -713,17 +716,32 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
                              right_package["cache"]["key"][side]["digest"],
                              f"the {side} cache key is not reproducible from the same inputs")
 
-        # (3) Everything else must be explained, rule by documented rule.
+        # (3) The linked title executable: byte-identical, with no rule applied. The
+        #     link is timestamp-free and the executable records no build path.
+        self.assertIn(EXECUTABLE, pair.identical,
+                      f"{EXECUTABLE} is not byte-identical between two builds of the same "
+                      "inputs in two output roots")
+
+        # (4) Everything else must be explained, rule by documented rule.
         self.assertEqual(
             pair.unattributed, [],
             "these differences are explained by no documented rule:\n"
             + "\n".join(pair.unattributed))
         # A rule that never fires no longer documents anything, and a rule set that
-        # explains everything only means something while it is this tight.
+        # explains everything only means something while it is this tight. The scratch
+        # rule describes a route the planner takes only for some output paths, so it
+        # must fire exactly when this build took that route.
+        scratch = {self.builds_in_scratch("a"), self.builds_in_scratch("b")}
+        self.assertEqual(len(scratch), 1, "one of two builds of the same inputs ran in a "
+                         "scratch workspace and the other did not")
+        expected = set(RULE_NAMES) - (set() if scratch.pop() else {"scratch-name"})
         self.assertEqual(
-            sorted(set(RULE_NAMES) - pair.rules), [],
+            sorted(expected - pair.rules), [],
             "these documented rules never fired, so they no longer describe a real "
             "difference between two builds of the same inputs")
+        self.assertEqual(
+            sorted(pair.rules - expected), [],
+            "these rules fired although the route they describe was not taken")
 
     def test_unchanged_inputs_reuse_the_package_the_route_already_built(self):
         """A second BUILD PACKAGE on unchanged inputs reproduces the same package.
@@ -848,20 +866,18 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
                              f"{name} differs between the hand-written and the "
                              "analyzer-generated manifest build")
 
-        # The compiled result differs only where the compiler's own echoes are: the
-        # runtime carries the build directory it was compiled with (the flight recorder
-        # no longer stamps the compile clock, #532). Those are the same documented rules
-        # two builds of *identical* inputs needed, and nothing else may explain them.
-        self.assertIn(EXECUTABLE, pair.differing,
-                      f"{EXECUTABLE} is byte-identical between the two manifest routes, "
-                      "so this comparison says nothing about what the compiler produced")
-        identical = self.package_pair("a", "b")
-        self.assertTrue(pair.rules_for(EXECUTABLE),
-                        f"{EXECUTABLE} differs and no documented rule explains it")
-        self.assertTrue(pair.rules_for(EXECUTABLE) <= identical.rules_for(EXECUTABLE),
-                        f"{EXECUTABLE} differed between the two manifest routes for a "
-                        "reason two builds of identical inputs did not share: "
-                        f"{sorted(pair.rules_for(EXECUTABLE))}")
+        # The linked executable is the compiled result, and it records neither a build
+        # path nor a link time (the flight recorder no longer stamps the compile clock,
+        # #532; the PE link is timestamp-free). So the two routes must link the same
+        # executable byte for byte, with no rule applied. Each route links its own: the
+        # link map names the objects in that route's own cache entry, so it differs.
+        self.assertIn(f"{GAME}.map", pair.differing,
+                      "the two manifest routes have the same link map, so the second "
+                      "route did not link its executable from its own cache entry")
+        self.assertIn(EXECUTABLE, pair.identical,
+                      f"{EXECUTABLE} differs between the hand-written and the "
+                      "analyzer-generated manifest build, so the route that bound the "
+                      "guest's addresses changed what the compiler produced")
 
         # The only artifacts allowed to differ, by name, are the ones that record a
         # manifest's own identity, the compiled artifacts, and the path echoes checked
@@ -870,13 +886,13 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
         self.assertEqual(
             sorted(name for name in pair.differing
                    if not name.endswith((".d", ".o", ".map"))
-                   and name not in (".game-inputs", "runtime_profile.json", EXECUTABLE)
+                   and name not in (".game-inputs", "runtime_profile.json")
                    and name not in PATH_ECHOES),
             sorted(MANIFEST_IDENTIFIED),
             "these artifacts differ between the two manifest routes, and the difference "
             "is neither the manifest's own recorded identity nor a compiled artifact")
         # A path echo may differ between the routes only where its cache entry does. With
-        # the workspace root, the scratch name and the cache-entry digests read as one,
+        # the workspace root, the scratch name and the cache-entry key read as one,
         # it must then be byte-identical: a difference in its content is not explained.
         for name in PATH_ECHOES:
             self.assertIn(name, pair.identity, f"the package no longer contains {name}")
@@ -896,10 +912,10 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
             self.assertNotIn(name, pair.left_names | pair.right_names,
                              f"{name} is in a package, so it needs a comparison rule")
 
-        # The compiled artifacts do differ, because the two manifests carry different
-        # content-addressed cache keys, and every one of them is a file two builds of
-        # *identical* inputs also had to differ in. A new one appearing here would
-        # mean the analyzer-derived addresses changed what the compiler produced.
+        # The other compiled artifacts do differ, because the two manifests carry
+        # different content-addressed cache keys, and every one of them is a file two
+        # builds of *identical* inputs also had to differ in. A new one appearing here
+        # would mean the analyzer-derived addresses changed what the compiler produced.
         identical = self.package_pair("a", "b")
 
         def compiled(names) -> set[str]:
@@ -910,15 +926,6 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
                          "the two manifest routes differ in a compiled artifact that two "
                          "builds of identical inputs did not, so the guest itself is not "
                          "what the two routes agree on")
-        self.assertIn(EXECUTABLE, pair.differing,
-                      f"{EXECUTABLE} is byte-identical between the two manifest routes, "
-                      "so this comparison says nothing about what the compiler produced")
-        self.assertTrue(pair.rules_for(EXECUTABLE),
-                        f"{EXECUTABLE} differs and no documented rule explains it")
-        self.assertTrue(pair.rules_for(EXECUTABLE) <= identical.rules_for(EXECUTABLE),
-                        f"{EXECUTABLE} differed between the two manifest routes for a "
-                        "reason two builds of identical inputs did not share: "
-                        f"{sorted(pair.rules_for(EXECUTABLE))}")
 
         # The staged notices, the codegen profile and the artifact names carry the
         # guest's own stem and title, so the two routes must agree on all of them.

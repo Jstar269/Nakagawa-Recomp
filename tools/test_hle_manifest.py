@@ -64,6 +64,25 @@ static void init(void) {
 """
 
 
+# #1139 phase 1a: the sceNetAdhocctl calls modelled for a console alone (src/rt/hle_network.c).
+ADHOCCTL_MODELLED = (
+    "AddHandler",
+    "Connect",
+    "Create",
+    "DelHandler",
+    "Disconnect",
+    "GetAdhocId",
+    "GetParameter",
+    "GetPeerInfo",
+    "GetPeerList",
+    "GetScanInfo",
+    "GetState",
+    "Init",
+    "Scan",
+    "Term",
+)
+
+
 def pspsdk_adhoc_refusals() -> dict[str, tuple[str, str]]:
     """The public ad hoc surface (#1139 phase 0): NID -> (name, refusal code).
 
@@ -934,7 +953,11 @@ class LiveManifestTests(unittest.TestCase):
                     "docs/HARDWARE_ORACLE.md (PSP-IO-001: io-lseek and io-append)",
                     "docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: io-seek64, io-seek64-rdwr)",
                     "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001: io-eof-seek-negative, io-eof-seek-negative-rdonly, io-eof-write-past, io-eof-read-past)",
+                    "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-flash-*)",
+                    "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-002: umd-eof-raw-seek-past)",
+                    "tests/native/hle_thread_selftest.c:test_flash0_font_device",
                     "tests/native/hle_thread_selftest.c:test_umd_block_device_sectors",
+                    "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
                 ],
             ),
             0x109F50BC: (
@@ -944,7 +967,9 @@ class LiveManifestTests(unittest.TestCase):
                     "docs/HARDWARE_ORACLE.md (PSP-UMDIO-001: io-open-0000..0012)",
                     "docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: io-missing-parent, io-excl-new, io-excl-existing)",
                     "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001: io-eof-missing)",
+                    "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*)",
                     "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
+                    "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
                 ],
             ),
         }
@@ -990,13 +1015,16 @@ class LiveManifestTests(unittest.TestCase):
                     "docs/HARDWARE_ORACLE.md (PSP-IO-001: io-read-verify and io-errors)",
                     "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
                     "tests/native/hle_thread_selftest.c:test_umd_block_device_sectors",
+                    "tests/native/hle_thread_selftest.c:test_umd_read_parks_its_thread_for_the_drives_time",
                 ],
             ),
             0x42EC03AC: (
                 "h_IoWrite",
                 [
                     "docs/HARDWARE_ORACLE.md (PSP-IO-001: io-write and io-append)",
+                    "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*)",
                     "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
+                    "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
                 ],
             ),
         }
@@ -1138,7 +1166,8 @@ class LiveManifestTests(unittest.TestCase):
         """Check batch 9's `(PSP-IO-001|PSP-UMDIO-001: io-... cells)` citations.
 
 Scoped to the four IoFileMgr handlers of batch 9 on purpose: the grammar is
-`(<oracle id>: <io- cell names or io-x-NNNN..NNNN ranges>)`, and the ids come
+`(<oracle id>: <io- cell names, io-x-NNNN..NNNN ranges or a cell glob such as
+io-x-* that the oracle row lists itself>)`, and the ids come
 from `tools/psp_oracle/manifest.json`. Any citation naming a PSP id that does
 not parse in that shape fails instead of being skipped. Other handlers' older
 citations (PSP-B1-01, no-colon forms) need their own check.
@@ -1159,7 +1188,7 @@ citations (PSP-B1-01, no-colon forms) need their own check.
             for prefix, first, last in re.findall(r"(io-[a-z]+-)(\d{4})\.\.(\d{4})", cells_text):
                 cited.update(f"{prefix}{n:04d}" for n in range(int(first), int(last) + 1))
             cells_text = re.sub(r"io-[a-z]+-\d{4}\.\.\d{4}", "", cells_text)
-            cited.update(re.findall(r"io-[a-z0-9]+(?:-[a-z0-9]+)*", cells_text))
+            cited.update(re.findall(r"io-[a-z0-9]+(?:-[a-z0-9]+)*(?:-\*)?", cells_text))
             self.assertTrue(cited, citation)
             self.assertLessEqual(cited, cells_by_id[oracle_id], citation)
 
@@ -1186,11 +1215,11 @@ citations (PSP-B1-01, no-colon forms) need their own check.
 
         The split is the three public headers' prototype counts (22, 21 and 16). Network HLE
         stays fail-closed (AGENTS.md section 5): each one refuses with the runtime's documented
-        SCE_KERNEL_ERROR_ERRNO_FUNCTION_NOT_SUPPORTED (0x80010086), not a measured result. The one
-        exception is sceNetAdhocctlGetParameter, which answers as a PSP whose ad hoc control library
-        was never initialized (0x80410b08, h_NetAdhocctlGetParameter, #341); it still opens nothing.
+        SCE_KERNEL_ERROR_ERRNO_FUNCTION_NOT_SUPPORTED (0x80010086), not a measured result. The
+        exceptions are the 14 sceNetAdhocctl calls phase 1a models for a console alone, from PSP
+        recordings (ADHOCCTL_MODELLED, src/rt/hle_network.c); they open nothing either.
         """
-        modelled = {"sceNetAdhocctlGetParameter": "h_NetAdhocctlGetParameter"}
+        modelled = {f"sceNetAdhocctl{n}": f"h_NetAdhocctl{n}" for n in ADHOCCTL_MODELLED}
         expected = pspsdk_adhoc_refusals()
         names = [name for name, _ in expected.values()]
         self.assertEqual(
@@ -1404,7 +1433,6 @@ static uint32_t h_SynthReal(CpuState *s) {
                 "0x1575d64b": ("sceAtracLowLevelInitDecoder", "0x80630004"),
                 "0x1f0fc3e3": ("sceHttpSetRecvTimeOut", "0x80010086"),
                 "0x2255551e": ("sceHttpGetNetworkPspError", "0x80010086"),
-                "0x231fc6b7": ("_sceAtracGetContextAddress", "0x80630003"),
                 # The net stack's thread and pool bookkeeping and adhoc discovery stop (offline).
                 "0x50647530": ("sceNetFreeThreadinfo", "0x80010086"),
                 "0xcc393e48": ("sceNetGetMallocStat", "0x80010086"),
@@ -1430,10 +1458,10 @@ static uint32_t h_SynthReal(CpuState *s) {
                 "0x8ab81558": ("sceMp3StartEntry", "0x80010086"),
                 "0x732b042a": ("sceMp3EndEntry", "0x80010086"),
                 # The 59 public PSPSDK ad hoc entry points refuse under the offline network policy (#1139).
-                # sceNetAdhocctlGetParameter has its own handler (h_NetAdhocctlGetParameter):
-                # before sceNetAdhocctlInit it answers NOT_INITIALIZED, as a PSP does.
+                # The sceNetAdhocctl calls a lone console models (ADHOCCTL_MODELLED) have their own
+                # handlers in src/rt/hle_network.c (#1139 phase 1a).
                 **{nid: entry for nid, entry in pspsdk_adhoc_refusals().items()
-                   if entry[0] != "sceNetAdhocctlGetParameter"},
+                   if entry[0] not in {f"sceNetAdhocctl{n}" for n in ADHOCCTL_MODELLED}},
             },
         )
         self.assertEqual(
@@ -1934,24 +1962,30 @@ class EvidenceTierTests(unittest.TestCase):
                 "PSP-DMAC-002",
                 "PSP-EXCEPTION-001", "PSP-FPU-001", "PSP-FPU-CC-001", "PSP-GE-001",
                 "PSP-GE-CONTROL-001", "PSP-GE-LIGHT-001", "PSP-GE-MIP-001", "PSP-GE-MIP-002",
-                "PSP-GE-OVERLAP-001", "PSP-GE-RASTER-001", "PSP-GE-RTT-001",
+                "PSP-GE-OVERLAP-001", "PSP-GE-RASTER-001", "PSP-GE-RASTER-002",
+                "PSP-GE-RASTER-003", "PSP-GE-RTT-001",
                 "PSP-GE-SAMPLE-001",
-                "PSP-GE-SYNC-001", "PSP-GE-TIMING-001", "PSP-GE-WEIGHT-001",
+                "PSP-GE-SYNC-001", "PSP-GE-THROUGHZ-001", "PSP-GE-TIMING-001", "PSP-GE-WEIGHT-001",
                 "PSP-HLE-AUDIO-REST-001", "PSP-HLE-AUDIO-SRC-001",
                 "PSP-HLE-CTRL-LATCH-001",
                 "PSP-HLE-GE-EDRAM-001", "PSP-HLE-HPRM-001", "PSP-HLE-INTR-001", "PSP-HLE-IO-SEEK-001",
-                "PSP-HLE-KERNEL-STATUS-001", "PSP-HLE-NICKNAME-001",
+                "PSP-HLE-IO-SEEK-002", "PSP-HLE-IO-TRUNC-001", "PSP-HLE-ISSUES-001",
+                "PSP-HLE-KERNEL-STATUS-001", "PSP-HLE-KERNEL-STATUS-002", "PSP-HLE-NICKNAME-001",
                 "PSP-HLE-POWER-001", "PSP-HLE-POWER-002", "PSP-HLE-SAVEDATA-GETSIZE-001",
                 "PSP-HLE-SELFSTOP-001", "PSP-HLE-STDIO-001", "PSP-HLE-SYSPARAM-001",
                 "PSP-HLE-TIMER-ORDER-001", "PSP-HLE-UTILITY-NONE-001", "PSP-HLE-VTIMER-001", "PSP-HLE-VTIMER-002",
                 "PSP-HLE-VTIMER-003", "PSP-INTR-CAUSE-001", "PSP-IO-001", "PSP-IO-EOF-001", "PSP-IO-EOF-002", "PSP-KERNEL-001",
                 "PSP-KERNEL-002", "PSP-KERNEL-MISC-001", "PSP-KERNEL-SEM-001", "PSP-KERNEL-STATUS-001",
                 "PSP-LLSC-001",
-                "PSP-MODULE-START-001", "PSP-MUTEX-001", "PSP-REGISTRY-001", "PSP-SMOKE-001", "PSP-SYSTEM-001",
+                "PSP-MODULE-START-001", "PSP-MUTEX-001", "PSP-REGISTRY-001", "PSP-SAS-002", "PSP-SAS-003",
+                "PSP-SMOKE-001", "PSP-SYSTEM-001",
                 "PSP-THREAD-003", "PSP-THREAD-EXIT-001", "PSP-TRACE-001", "PSP-TRANSPORT-001",
-                "PSP-UMDIO-001", "PSP-VFPU-BASICARITH-001", "PSP-VFPU-CCCMOV-001", "PSP-VFPU-CMP-001", "PSP-VFPU-CONVERT-001",
-                "PSP-VFPU-FORMS-001",
-                "PSP-VFPU-FORMS2-001", "PSP-VFPU-FUNNEL-001", "PSP-VFPU-QUADWB-001", "PSP-VFPU-SORT-001", "PSP-VFPU-TRANSCENDENTAL-001", "PSP-VFPU-UNMODELED-001", "PSP-VFPU-VUS2I-001", "PSP-VRAM-MIRROR-001", "PSP-WAIT-001",
+                "PSP-UMDIO-001", "PSP-VFPU-BASICARITH-001", "PSP-VFPU-CCCMOV-001", "PSP-VFPU-CMP-001",
+                "PSP-VFPU-CONSTANTS-001", "PSP-VFPU-CONVERT-001", "PSP-VFPU-FORMS-001",
+                "PSP-VFPU-FORMS2-001", "PSP-VFPU-FUNNEL-001", "PSP-VFPU-MFVMTV-001", "PSP-VFPU-PREFIX-001",
+                "PSP-VFPU-QUADWB-001", "PSP-VFPU-RESERVED-001", "PSP-VFPU-ROUNDSEP-001", "PSP-VFPU-SORT-001",
+                "PSP-VFPU-TRANSCENDENTAL-001", "PSP-VFPU-UNMODELED-001", "PSP-VFPU-VUS2I-001", "PSP-VFPU-WIDEDOT-001",
+                "PSP-VFPU-WIDEROPS-001", "PSP-VRAM-MIRROR-001", "PSP-WAIT-001",
             ],
         )
         self.assertIn("sceDmacTryMemcpy", promoted)

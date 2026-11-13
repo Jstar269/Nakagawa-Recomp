@@ -143,11 +143,23 @@ typedef struct {
 #define SCR_ONLINE_NOT_BUILT_LINE \
     "Online features aren't built yet, so Nakagawa makes no connection and has " \
     "nothing to switch on."
+/* The Nickname row in Settings (#2197): its button opens the nickname editor. */
+#define SCR_NICKNAME_SENTENCE \
+    "What games show as this PSP's nickname. It is never taken from this PC's user name."
 /* A user whose stored online_mode is On still gets the switch, with what it does now, so
    they can turn it off. Nobody else sees it (#2007). */
 #define SCR_ONLINE_STORED_ON_SENTENCE \
     "Online mode is on in your settings, but it does nothing yet because online " \
     "features aren't built. Switch it off to keep it off."
+/* Discord status (#2259) on Settings > Online and developer. */
+#define SCR_DISCORD_SENTENCE \
+    "Show the game you play and for how long in Discord, through the Discord app on this " \
+    "PC. Nakagawa itself connects to nothing."
+/* A build that cannot show Discord status (no application ID, or no local pipes) hides the
+   row, except for a stored On, which it shows with this sentence so it can be turned off. */
+#define SCR_DISCORD_STORED_ON_SENTENCE \
+    "Discord status is on in your settings, but this build can't show it. Switch it off " \
+    "to keep it off."
 /* The developer switch, in the wizard and in Settings. */
 #define WIZARD_DEVELOPER_SENTENCE \
     "Show a developer log on screen to help track down problems. Stays on this PC."

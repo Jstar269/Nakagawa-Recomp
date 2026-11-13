@@ -189,6 +189,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import provenance_mode  # noqa: E402
+
 VERDICT_CONTEXT = "Trusted CI verdict"
 VERDICT_WORKFLOW = ".github/workflows/ci-trust-verdict.yml"
 # The aggregate of a full CI run, and of a light one (.github/workflows/ci.yml). Only the first can make a
@@ -252,6 +255,56 @@ PRODUCERS: tuple[Producer, ...] = (
     ),
 )
 
+
+#: The status a fork's passing head gets. The fork's provenance producer is the Fork provenance check, which
+#: passes paths a pull request admits itself (it names them in its warnings), so a fork's green must not read
+#: like the upstream's, where only the maintainer's admission adds a path.
+FORK_SUCCESS_DESCRIPTION = ("Fork: intended jobs passed; provenance is the Fork provenance check, which passes "
+                            "paths a PR admits itself (see its summary)")
+
+
+def status_description(verdict: Verdict, producers: tuple[Producer, ...]) -> str:
+    """The status description to post: a fork's success says what its provenance check covers."""
+    if verdict.state == "success" and producers != PRODUCERS:
+        return FORK_SUCCESS_DESCRIPTION
+    return verdict.description()
+
+
+def fork_run_note(snapshot: dict, producers: tuple[Producer, ...], repository: str) -> str:
+    """In a fork, the link to the Fork provenance check run this verdict judged; empty for the upstream.
+
+    That run's summary names the head and the tip it judged and the paths the pull request admits itself. On the
+    routes that need no ``pull_request_target`` it is listed under the default branch, not on the pull request, so
+    the verdict's report links it. The URL is built from the repository name and the run's numeric ID only.
+    """
+    if producers is PRODUCERS:
+        return ""
+    producer = next(item for item in producers if item.context == provenance_mode.FORK_CONTEXT)
+    run = latest_live_run(snapshot["workflow_runs"], producer, snapshot["head_sha"], snapshot["default_branch"])
+    if run is None:
+        return f"; no {provenance_mode.FORK_CONTEXT} run was judged"
+    return (f"; judged {provenance_mode.FORK_CONTEXT} run: "
+            f"https://github.com/{repository}/actions/runs/{int(run['id'])}")
+
+
+def producers_for(repository: str | None, repository_id: str | None) -> tuple[Producer, ...]:
+    """The producers judged for ``repository``: ``PRODUCERS`` unchanged for the upstream.
+
+    A fork has no access to the upstream's private provenance authority, so its provenance job is the
+    Fork provenance check from the same workflow, by the same routes and under the same run title
+    (``tools/provenance_mode.py``, ``docs/FORKING.md``). The upstream, matched by ID or by name, always gets
+    ``PRODUCERS``.
+    """
+    if provenance_mode.is_upstream(repository, repository_id):
+        return PRODUCERS
+    return tuple(
+        Producer(provenance_mode.FORK_CONTEXT, producer.workflow, producer.events, producer.named_events,
+                 producer.run_title)
+        if producer.context == provenance_mode.UPSTREAM_CONTEXT else producer
+        for producer in PRODUCERS
+    )
+
+
 PROTECTED_PREFIXES = (".github/workflows/", ".github/actions/")
 
 # Gate code that decides what runs or what passes, protected even where no
@@ -264,7 +317,35 @@ PROTECTED_EXTRA = frozenset({
     "tools/ci_test_shards.py",
     "tools/ci_test_weights.json",
     "tools/ci_trust_verdict.py",
+    # Decides which provenance producer this verifier judges (producers_for).
+    "tools/provenance_mode.py",
     "tools/requirements-lock.txt",
+}) | frozenset({
+    # The publication gate's own code. Only the publication audit refuses a file that is outside the
+    # publication profile and is not implementation (game data, a key, a private path). It runs twice: in
+    # the attest job from the default branch's checkout, where a pull request cannot touch it, and in
+    # ``pull_request`` jobs from the pull request's own checkout, through pre-commit hooks and
+    # ``tools/build_public_export.py``. No workflow line names most of these files, so without this list a
+    # pull request could loosen the audit for its own run, and a loosened audit that reached the default
+    # branch unread would be the trusted one from then on. Listed here: every local hook pre-commit runs,
+    # every local module those hooks or the trusted-checkout tools load or run as a subprocess, and
+    # ``.gitattributes``, which the audit reads for its Git LFS rule. ``GateCodeTests`` in
+    # tools/test_ci_trust_verdict.py computes that closure and fails when a file in it is not protected.
+    # A new file in tools/ named like a standard-library module is protected too (``_shadows_stdlib``).
+    ".gitattributes",
+    "tools/enhancement_package.py",
+    "tools/history_audit.py",
+    "tools/lint_docs.py",
+    "tools/modified_file_notice_audit.py",
+    "tools/nk_core/__init__.py",
+    "tools/nk_core/git_isolation.py",
+    "tools/policy_sync.py",
+    "tools/provenance_ledger.py",
+    "tools/provenance_record_gap.py",
+    "tools/public_candidate.py",
+    "tools/public_export.py",
+    "tools/publication_policy.py",
+    "tools/publish_audit.py",
 })
 
 # A tools/ path standing on its own, not the tail of a longer path such as an
@@ -741,11 +822,11 @@ def _not_success(snapshot: dict, producer: Producer, run: dict, job: dict, pendi
     )]
 
 
-def evaluate(snapshot: dict) -> Verdict:
+def evaluate(snapshot: dict, producers: tuple[Producer, ...] = PRODUCERS) -> Verdict:
     """Apply every rule to a normalised snapshot. Pure: no I/O."""
     findings = _check_pull_request(snapshot) + _check_definitions(snapshot)
     pending: list[str] = []
-    for producer in PRODUCERS:
+    for producer in producers:
         findings += _check_producer(snapshot, producer, pending)
     if any(item.fatal for item in findings):
         state = "failure"
@@ -787,10 +868,36 @@ def referenced_tools(workflow_text: str) -> set[str]:
     return found
 
 
+#: What Python imports from a directory on ``sys.path``: a module file or a package's ``__init__``.
+_IMPORTABLE_SUFFIXES = (".py", ".pyc", ".pyw", ".pyd", ".so")
+
+
+def _shadows_stdlib(path: str) -> bool:
+    """Whether ``path`` would be imported in place of a standard-library module by a gate tool.
+
+    The gate tools run as ``python tools/X.py``, which puts ``tools/`` first on ``sys.path``, so a
+    ``tools/fnmatch.py`` replaces the ``fnmatch`` the publication audit imports. Adding such a file
+    changes the gate's code without touching a listed path.
+    """
+    parts = path.split("/")
+    if parts[0] != "tools" or len(parts) not in (2, 3):
+        return False
+    if len(parts) == 3:
+        name, leaf = parts[1], parts[2]
+        if not (leaf.startswith("__init__.") and leaf.lower().endswith(_IMPORTABLE_SUFFIXES)):
+            return False
+    else:
+        name, leaf = parts[1].split(".", 1)[0], parts[1]
+        if not leaf.lower().endswith(_IMPORTABLE_SUFFIXES):
+            return False
+    return name in sys.stdlib_module_names
+
+
 def protected_paths(trusted: dict[str, str], candidate: dict[str, str], workflow_texts: list[str]) -> set[str]:
     """Paths whose bytes define or decide the CI gates."""
     paths = {path for path in set(trusted) | set(candidate) if path.startswith(PROTECTED_PREFIXES)}
     paths |= PROTECTED_EXTRA
+    paths |= {path for path in set(trusted) | set(candidate) if _shadows_stdlib(path)}
     for text in workflow_texts:
         paths |= {path for path in referenced_tools(text) if path in trusted}
     return paths
@@ -1157,8 +1264,8 @@ def list_cut(runs: list, total: int | None) -> bool:
     return total is None or total > len(runs) or len(runs) >= RUN_LIST_LIMIT
 
 
-def named_runs(gh: "GitHub", repo: Path, default_branch: str, head_sha: str,
-               since: str) -> tuple[list[dict], dict[str, str]]:
+def named_runs(gh: "GitHub", repo: Path, default_branch: str, head_sha: str, since: str,
+               producers: tuple[Producer, ...] = PRODUCERS) -> tuple[list[dict], dict[str, str]]:
     """Default-branch runs named for ``head_sha``, for every producer with a named route, and for each context
     with a truncated list its horizon: the time before which runs are missing.
 
@@ -1178,7 +1285,7 @@ def named_runs(gh: "GitHub", repo: Path, default_branch: str, head_sha: str,
     """
     found: list[dict] = []
     horizons: dict[str, str] = {}
-    for producer in PRODUCERS:
+    for producer in producers:
         title = producer.run_title.format(head=head_sha) if producer.named_events else ""
         workflow = urllib.parse.quote(producer.workflow.rsplit("/", 1)[1])
         for event in producer.named_events:
@@ -1196,14 +1303,14 @@ def named_runs(gh: "GitHub", repo: Path, default_branch: str, head_sha: str,
 
 
 def behind_horizon(workflow_runs: list[dict], horizons: dict[str, str], head_sha: str,
-                   default_branch: str) -> list[str]:
+                   default_branch: str, producers: tuple[Producer, ...] = PRODUCERS) -> list[str]:
     """The contexts whose run to be judged is not newer than its truncated list's horizon, each with the remedy.
 
     The run must have started after the horizon. One that started in the horizon's own second is refused as
     well: a lost run of that second with a higher id would be the newer one.
     """
     lost = []
-    for producer in PRODUCERS:
+    for producer in producers:
         horizon = horizons.get(producer.context)
         latest = latest_live_run(workflow_runs, producer, head_sha, default_branch)
         if horizon is not None and (latest is None or run_order(latest)[0] <= horizon):
@@ -1212,7 +1319,8 @@ def behind_horizon(workflow_runs: list[dict], horizons: dict[str, str], head_sha
     return lost
 
 
-def unfinished_producers(workflow_runs: list[dict], head_sha: str, default_branch: str = "main") -> list[str]:
+def unfinished_producers(workflow_runs: list[dict], head_sha: str, default_branch: str = "main",
+                         producers: tuple[Producer, ...] = PRODUCERS) -> list[str]:
     """The intended contexts whose producer has no run at this head yet, or whose newest live run is unfinished.
 
     While any is listed the verdict cannot be success, so ``collect`` stops after reading the workflow runs and
@@ -1223,7 +1331,7 @@ def unfinished_producers(workflow_runs: list[dict], head_sha: str, default_branc
     and pending never satisfies the ruleset.
     """
     waiting = []
-    for producer in PRODUCERS:
+    for producer in producers:
         runs = producer_runs(workflow_runs, producer, head_sha, default_branch)
         live = [run for run in runs if run.get("conclusion") != "cancelled"]
         if not runs:
@@ -1233,7 +1341,10 @@ def unfinished_producers(workflow_runs: list[dict], head_sha: str, default_branc
     return waiting
 
 
-def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: int | None) -> dict | None:
+def collect(
+    gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: int | None,
+    producers: tuple[Producer, ...] = PRODUCERS,
+) -> dict | None:
     """Read everything the rules need. ``None`` when no pull request into the default branch has this head.
 
     While a producer is unfinished (``unfinished_producers``) only the workflow runs are read, and the result
@@ -1247,16 +1358,16 @@ def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: 
             return None
         number = min(int(pr["number"]) for pr in matches)
     workflow_runs = gh.paginate(f"actions/runs?head_sha={head_sha}", "workflow_runs")
-    waiting = unfinished_producers(workflow_runs, head_sha, default_branch)
+    waiting = unfinished_producers(workflow_runs, head_sha, default_branch, producers)
     # A named route is listed only when it can change the answer: while a producer without one is unfinished the
     # head is pending whatever the list says, and the list is one more API call (several for an old head).
-    named_contexts = {producer.context for producer in PRODUCERS if producer.named_events}
+    named_contexts = {producer.context for producer in producers if producer.named_events}
     if not set(waiting) <= named_contexts:
         return {"head_sha": head_sha, "waiting_producers": waiting}
     since = min((run["created_at"] for run in workflow_runs if run.get("created_at")), default=None)
     horizons: dict[str, str] = {}
     if since:
-        named, horizons = named_runs(gh, repo, default_branch, head_sha, since)
+        named, horizons = named_runs(gh, repo, default_branch, head_sha, since, producers)
         workflow_runs = workflow_runs + named
         # A truncated list has lost every run created before its horizon, and one of them may be this head's
         # newest attestation and a failure. The run that would be judged must therefore be newer than the
@@ -1265,10 +1376,10 @@ def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: 
         # is attested again, and that run is newer than any horizon. (A lost run that someone re-runs is the
         # one case this cannot see.) The check runs again below, once the jobs are read: a run found to be
         # jobless is dropped, and the run judged in its place has to pass the horizon too.
-        lost = behind_horizon(workflow_runs, horizons, head_sha, default_branch)
+        lost = behind_horizon(workflow_runs, horizons, head_sha, default_branch, producers)
         if lost:
             return {"head_sha": head_sha, "waiting_producers": lost}
-        waiting = unfinished_producers(workflow_runs, head_sha, default_branch)
+        waiting = unfinished_producers(workflow_runs, head_sha, default_branch, producers)
     if waiting:
         return {"head_sha": head_sha, "waiting_producers": waiting}
     pr = gh.get(f"pulls/{number}")
@@ -1302,7 +1413,7 @@ def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: 
     # The rules read jobs only from each producer's newest live run at this head (``_check_producer``), so only
     # those runs' jobs are fetched: one call per run, and superseded or cancelled runs used to cost one each.
     jobs: dict[str, list] = {}
-    for producer in PRODUCERS:
+    for producer in producers:
         while (run := latest_live_run(workflow_runs, producer, head_sha, default_branch)) is not None:
             key = str(run["id"])
             if key not in jobs:
@@ -1313,7 +1424,7 @@ def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: 
                     or not producer.named_events or run.get("jobless") is True):
                 break
             run["jobless"] = True
-    lost = behind_horizon(workflow_runs, horizons, head_sha, default_branch)
+    lost = behind_horizon(workflow_runs, horizons, head_sha, default_branch, producers)
     if lost:
         return {"head_sha": head_sha, "waiting_producers": lost}
     raw["jobs"] = jobs
@@ -1646,7 +1757,8 @@ def target_main(args: argparse.Namespace, gh: GitHub) -> int:
     except Exception as error:  # Fail closed: any error, an API failure included, resolves nothing.
         print(f"no attestation target: {type(error).__name__}: {error}", file=sys.stderr)
         return 1
-    print(f"attesting #{target['number']} at {target['head_sha']} against base {target['base_sha']}")
+    print(f"attesting #{target['number']} at {target['head_sha']} (event base {target['base_sha']}; "
+          "the verdict base is the head's merge base with the default branch)")
     output = args.github_output or os.environ.get("GITHUB_OUTPUT")
     if output:
         with open(output, "a", encoding="utf-8") as handle:
@@ -1715,8 +1827,13 @@ def main(argv: list[str] | None = None) -> int:
                 **({"target_url": args.target_url} if args.target_url else {}),
             })
 
+    identity = os.environ.get("GITHUB_REPOSITORY_ID")
+    judged = (f"Provenance producer set: {provenance_mode.mode(args.repository, identity)} "
+              f"(repository {args.repository}, ID {identity or 'unknown'})")
+    print(judged)
     try:
-        raw = collect(gh, args.repo_dir, args.default_branch, head, args.pull_request)
+        producers = producers_for(args.repository, identity)
+        raw = collect(gh, args.repo_dir, args.default_branch, head, args.pull_request, producers)
         if raw is None:
             print(f"no open pull request into {args.default_branch} has head {head}; no verdict")
             print(gh.budget_note())
@@ -1730,21 +1847,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.snapshot_out:
             args.snapshot_out.write_text(json.dumps(raw, indent=1, sort_keys=True), encoding="utf-8")
         snapshot = normalise(raw)
-        verdict = evaluate(snapshot)
+        verdict = evaluate(snapshot, producers)
     except Exception as error:
         # An earlier verdict for this head may still say success. Replace it:
         # a head that cannot be judged now is not a passing head.
         post("error", f"verifier could not judge this head: {type(error).__name__}")
         print(gh.budget_note())
         raise
-    _report(verdict, snapshot, args.summary)
-    post(verdict.state, verdict.description())
+    _report(verdict, snapshot, args.summary, judged + fork_run_note(snapshot, producers, args.repository))
+    post(verdict.state, status_description(verdict, producers))
     print(gh.budget_note())
     return 1 if verdict.state == "failure" else 0
 
 
-def _report(verdict: Verdict, snapshot: dict, summary: Path | None) -> None:
+def _report(verdict: Verdict, snapshot: dict, summary: Path | None, judged: str | None = None) -> None:
     report = summary_markdown(verdict, snapshot)
+    if judged:
+        report += f"\n{judged}\n"
     print(report)
     if summary:
         with summary.open("a", encoding="utf-8") as handle:

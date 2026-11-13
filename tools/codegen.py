@@ -130,6 +130,14 @@ class CodegenOptions:
     # generated C byte-identical. RegisterPromotion below owns the rules.
     promote_registers: bool = False
 
+    # Resume points for direct save states (#2172; "Resume at a PC" in docs/ARCHITECTURE.md).
+    # When True, a callable body that keeps the ordinary frame contract can be entered again at
+    # the yield it parked in or at the return of a direct call it made: its entry tests
+    # sr_resume_request, its direct call sites record the body and its entry $sp on the call's
+    # return boundary, and its yields record where it continues (state_resume_pass). Set by
+    # --state-resume; default False leaves the generated C byte-identical.
+    state_resume: bool = False
+
     # --static-verify: compile-time-predicted register assertions (see the SR_SV_CHECK block).
     static_verify: bool = False
 
@@ -173,6 +181,13 @@ PROMOTION_STATS = {"functions": 0, "promoted": 0, "spans": 0, "loads": 0, "write
 # Empty (the default) keeps authentic emission byte-identical.
 ENHANCEMENT_SITES: dict[int, dict] = {}
 ENHANCEMENT_PKG_META: dict | None = None
+# The --code-hook-package applied beside the enhancement package (contract section 9.9): its id,
+# version, digest and site count for the generated header, or None. Its sites are in
+# ENHANCEMENT_SITES with the enhancement package's.
+ENHANCEMENT_HOOK_META: dict | None = None
+# Verified ace_parts sites (contract section 9.8; addr -> resolved site dict with its "rewrite").
+# Each runs only on its own SR_ACE key at run time, never on SR_EXPERIMENTAL_60HZ.
+ENHANCEMENT_ACE_SITES: dict[int, dict] = {}
 # The sites whose rewrite has been emitted. A package is refused unless every
 # verified site is in it when the translation is written.
 ENHANCEMENT_APPLIED: set[int] = set()
@@ -186,6 +201,11 @@ ENHANCEMENT_DATA_FILES: list[tuple[str, str, bytes, str]] = []
 # Sites that keep run-time state (stock_values, requires), numbered by the index their
 # rewrites carry: {"id", "pc", "float", "pairs", "requires"}.
 ENHANCEMENT_STORE_SITES: list[dict] = []
+# The distinct 60 Hz steps of the package's gate_30hz_phase sites: each has one table of the times
+# a state can read (enhancement_package.phase_runs), and a site's rewrite carries its index.
+ENHANCEMENT_PHASE_STEPS: list[float] = []
+# The launch_from_rest_60hz sites, {"id", "pc"}, numbered by the index their rewrites carry.
+ENHANCEMENT_LAUNCH_SITES: list[dict] = []
 # The executable's stock-digest key (enhancement_package.published_digest_key) when a store
 # site declares stock_value_digests: the run-time check digests each stored value with it.
 # It is derived from the user's own executable and lives only in their generated build.
@@ -217,6 +237,21 @@ def _enhancement_rewrite(addr: int) -> dict | None:
     return rewrite
 
 
+def _enhancement_ace_rewrite(addr: int) -> dict | None:
+    """The planned rewrite of a verified ace_parts site of the main executable, or None.
+
+    Callers emit the rewrite they are given, so the site is recorded as applied.
+    """
+    if not ENHANCEMENT_ACE_SITES or ADDRESS_SPACE.runtime_module:
+        return None
+    site = ENHANCEMENT_ACE_SITES.get(addr)
+    if site is None:
+        return None
+    rewrite: dict = site["rewrite"]
+    ENHANCEMENT_APPLIED.add(addr)
+    return rewrite
+
+
 def _refuse_argument_site_on_a_loop(entry: int) -> None:
     """An argument_x2 site doubles once per call: a branch back to its entry would double again."""
     if not ENHANCEMENT_SITES or ADDRESS_SPACE.runtime_module:
@@ -239,6 +274,30 @@ def _enhancement_boundary(addr: int) -> bool:
     return True
 
 
+def _float_holds(factor: float) -> bool:
+    return bool(struct.unpack("<f", struct.pack("<f", factor))[0] == factor)
+
+
+def _scaled_float(cell: str, factor: float) -> str:
+    """``cell`` times a scale factor, as a float expression. A factor a float holds exactly (the
+    constant scales, 2 and 0.5) is a single-precision multiply. Any other (kappa) is multiplied
+    in double and rounded once, which is what a store site's stock-value table and its run-time
+    check compute (enhancement_package._store_value_pairs, nk_enh_scale); for a factor a float
+    holds, the two forms give the same bits."""
+    factor = float(factor)
+    if _float_holds(factor):
+        return f"{cell} * {factor!r}f"
+    return f"(float)((double){cell} * {factor!r})"
+
+
+def _scale_stmt(cell: str, factor: float) -> str:
+    """Scale ``cell`` in place by a scale factor (see _scaled_float)."""
+    factor = float(factor)
+    if _float_holds(factor):
+        return f"{cell} *= {factor!r}f;"
+    return f"{cell} = {_scaled_float(cell, factor)};"
+
+
 def _scaled_store_line(rw: dict, stock_line: str) -> str:
     """A swc1 or sw site that stores its register scaled: the store reads a scaled copy, and
     the register is never written, so an access fault that leaves the statement early
@@ -252,7 +311,8 @@ def _scaled_store_line(rw: dict, stock_line: str) -> str:
     if "stock_values" in rw or "stock_value_digests" in rw:
         return (f"{{ uint32_t _nk_bits = nk_enh_store({rw['site_index']}u, {stored}); "
                 f"{stock.replace(stored, '_nk_bits')} }}")
-    return (f"{{ float _nk_f = s->f[{r}] * {rw['factor']!r}f; uint32_t _nk_bits; "
+    scaled = _scaled_float(f"s->f[{r}]", rw["factor"])
+    return (f"{{ float _nk_f = {scaled}; uint32_t _nk_bits; "
             f"memcpy(&_nk_bits, &_nk_f, sizeof _nk_bits); "
             f"{stock.replace(stored, '_nk_bits')} }}")
 
@@ -269,7 +329,71 @@ def _mapped_factor_stmt(mapping: str, cell: str, site_id: str, addr: int) -> str
             f'nk_enhancement_factor_kept(&nk_kept, "{site_id}", 0x{addr:08x}u, {cell}); }}')
 
 
-def _enhanced_line(rw: dict, stock_line: str, word_line: str | None, site_id: str, addr: int) -> str:
+def _guest_word_read(var: str, address: str, addr: int, lle_cpu: bool) -> str:
+    """Declare ``uint32_t var``, the guest word at ``address``, read as a guest load at the site
+    reads it: through MEM_R32, after the LLE CPU's access check when that is on."""
+    if lle_cpu:
+        return (f"uint32_t {var}_ea = {address}; "
+                f"if (sr_cpu_guard_access(s, {var}_ea, 4u, 0, {G(addr)}, 0u, 0u)) return; "
+                f"uint32_t {var} = MEM_R32({var}_ea);")
+    return f"uint32_t {var} = MEM_R32({address});"
+
+
+def _phase_odd_stmt(rw: dict, site_id: str, addr: int, lle_cpu: bool) -> str:
+    """Declare ``int _nk_odd`` for a gate_30hz_phase site: 1 when the state's own time, the float
+    at the declared offset from the declared register, is its time after an odd number of
+    updates. A time the state does not reach reads as even and is reported once per site."""
+    read = _guest_word_read("_nk_time", f"s->r[{rw['reg']}] + {rw['offset']}u", addr, lle_cpu)
+    return (f"static int nk_kept; {read} "
+            f'int _nk_odd = nk_enhancement_phase_odd(&nk_kept, "{site_id}", 0x{addr:08x}u, _nk_time, '
+            f"{rw['phase_table']}u);")
+
+
+def _launch_from_rest_lines(rw: dict, addr: int, lle_cpu: bool, ready: str) -> tuple[list[str], list[str]]:
+    """The statements before and after a launch_from_rest_60hz call (contract section 9.2).
+
+    Before: $a0 as the site passes it, and the float of the other axis as the call finds it.
+    After: on the gravity axis the float becomes kappa*v + q*g, the image of a velocity set from
+    rest. On the other axis only what the call changed is scaled, kappa*(v - before) + before,
+    so a velocity the body already carried is never scaled, and a float the call left alone is
+    not written. Each is computed in double as one fused multiply-add and rounded to float once,
+    and read and written as a guest load and store at the site. The runtime counts the calls
+    made and the maps applied, and names the site at the end of the run when they differ."""
+    index = rw["launch_index"]
+    kappa = float(rw["kappa"])
+    other = 1 - rw["axis"]
+
+    def address(i: int) -> str:
+        return f"_nk_a0 + {rw['offset'] + 4 * i}u"
+
+    before = [
+        f"    {{ uint32_t _nk_a0 = s->r[4]; uint32_t _nk_before = 0u; int _nk_map = nk_enhancement_on(){ready};",
+        f"      if (_nk_map) {{ {_guest_word_read('_nk_b', address(other), addr, lle_cpu)} _nk_before = _nk_b; "
+        f"nk_enhancement_launch_begin({index}u); }}",
+    ]
+    after = ["      if (_nk_map) {"]
+    for i in (0, 1):
+        var = f"_nk_v{i}"
+        store = f"MEM_W32_PC({address(i)}, {var}, {G(addr)});"
+        if lle_cpu:
+            store = (f"if (sr_cpu_guard_access(s, {var}_ea, 4u, 1, {G(addr)}, 0u, 0u)) return; "
+                     f"MEM_W32_PC({var}_ea, {var}, {G(addr)});")
+        read = _guest_word_read(var, address(i), addr, lle_cpu)
+        if i == rw["axis"]:
+            after.append(f"        {{ {read} float _nk_f; memcpy(&_nk_f, &{var}, sizeof _nk_f); "
+                         f"_nk_f = (float)(fma((double)_nk_f, {kappa!r}, {float(rw['gravity_offset'])!r})); "
+                         f"memcpy(&{var}, &_nk_f, sizeof {var}); {store} }}")
+        else:
+            after.append(f"        {{ {read} if ({var} != _nk_before) {{ float _nk_f, _nk_g; "
+                         f"memcpy(&_nk_f, &{var}, sizeof _nk_f); memcpy(&_nk_g, &_nk_before, sizeof _nk_g); "
+                         f"_nk_f = (float)(fma((double)_nk_f - (double)_nk_g, {kappa!r}, (double)_nk_g)); "
+                         f"memcpy(&{var}, &_nk_f, sizeof {var}); {store} }} }}")
+    after += [f"        nk_enhancement_launch_done({index}u);", "      }", "    }"]
+    return before, after
+
+
+def _enhanced_line(rw: dict, stock_line: str, word_line: str | None, site_id: str, addr: int,
+                   lle_cpu: bool = False) -> str:
     """Both forms of one rewritten site: the stock statement runs unless the
     experimental toggle is on at run time (nk_enhancement_on())."""
     kind = rw["kind"]
@@ -295,16 +419,32 @@ def _enhanced_line(rw: dict, stock_line: str, word_line: str | None, site_id: st
     elif kind == "scale_int_args":
         enh = " ".join([stock_line.strip()] + [f"s->r[{r}] <<= 1;" for r in rw["regs"]])
     elif kind == "scale_f_reg":
-        enh = f"{stock_line.strip()} s->f[{rw['reg']}] *= {rw['factor']!r}f;"
+        cell = f"s->f[{rw['reg']}]"
+        enh = f"{stock_line.strip()} {_scale_stmt(cell, rw['factor'])}"
     elif kind == "map_f_reg":
         cell = f"s->f[{rw['reg']}]"
         enh = f"{stock_line.strip()} {_mapped_factor_stmt(rw['map'], cell, site_id, addr)}"
     elif kind == "scale_v_reg":
         v = vreg_indices(rw["vreg"], 1)[0]
-        enh = f"{stock_line.strip()} s->v[{v}] *= {rw['factor']!r}f;"
+        cell = f"s->v[{v}]"
+        enh = f"{stock_line.strip()} {_scale_stmt(cell, rw['factor'])}"
     elif kind == "map_v_reg":
         v = vreg_indices(rw["vreg"], 1)[0]
         enh = f"{stock_line.strip()} {_mapped_factor_stmt(rw['map'], f's->v[{v}]', site_id, addr)}"
+    elif kind == "scale_vq_reg":
+        scaled = " ".join(_scale_stmt(f"s->v[{v}]", rw["factor"]) for v in vreg_indices(rw["vreg"], 4))
+        enh = f"{stock_line.strip()} {scaled}"
+    elif kind in ("gate_phase_zero_f", "gate_phase_zero_v"):
+        # The load runs; half a stock step after a stock instant the loaded value reads as +0.0.
+        cell = (f"s->fi[{rw['value_reg']}]" if kind == "gate_phase_zero_f"
+                else f"s->vi[{vreg_indices(rw['value_vreg'], 1)[0]}]")
+        enh = (f"{stock_line.strip()} {{ {_phase_odd_stmt(rw, site_id, addr, lle_cpu)} "
+               f"if (_nk_odd) {{ {cell} = 0u; }} }}")
+    elif kind == "gate_phase_cond":
+        # The compare runs; half a stock step after a stock instant its flag reads as declared.
+        enh = (f"{stock_line.strip()} {{ {_phase_odd_stmt(rw, site_id, addr, lle_cpu)} "
+               f"if (_nk_odd) {{ s->fpcond = {int(rw['condition'])}u; "
+               f"s->fcr31 = (s->fcr31 & ~0x00800000u) | (s->fpcond << 23); }} }}")
     elif kind in ("scale_f_store", "scale_int_store"):
         enh = _scaled_store_line(rw, stock_line)
     elif kind == "scale_f_addend":
@@ -1184,6 +1324,118 @@ def _number_enhancement_store_sites() -> None:
             for note in enhancement_package.store_value_overlaps(site["id"], rw):
                 sys.stderr.write(f"warning: enhancement {note}\n")
         rw["site_index"] = index[site["id"]]
+    ENHANCEMENT_PHASE_STEPS.clear()
+    ENHANCEMENT_LAUNCH_SITES.clear()
+    for addr, site in sorted(ENHANCEMENT_SITES.items()):
+        rw = site["rewrite"]
+        if "half_step" in rw:
+            step = float(rw["half_step"])
+            if step not in ENHANCEMENT_PHASE_STEPS:
+                ENHANCEMENT_PHASE_STEPS.append(step)
+            rw["phase_table"] = ENHANCEMENT_PHASE_STEPS.index(step)
+        if rw["kind"] == "launch_from_rest":
+            rw["launch_index"] = len(ENHANCEMENT_LAUNCH_SITES)
+            ENHANCEMENT_LAUNCH_SITES.append({"id": site["id"], "pc": addr})
+
+
+def _enhancement_phase_lines() -> list[str]:
+    """The run-time half of gate_30hz_phase: one table per 60 Hz step of the times a state can
+    read, and the lookup. Emitted only for a package that has such a site."""
+    if not ENHANCEMENT_PHASE_STEPS:
+        return []
+    out = [
+        "/* Enhancement phase tables (docs/ENHANCEMENT_CONTRACT.md section 9.2): every time a state can",
+        " * read, as its own float32 sum of the 60 Hz step from zero. After n0 + k updates the time is",
+        " * exactly a0 + k*delta, for 0 <= k <= count, and a1 is the last of them. */",
+        "typedef struct { uint32_t n0, count; double a0, a1, delta; } NkEnhPhaseRun;",
+    ]
+    tables = []
+    for i, step in enumerate(ENHANCEMENT_PHASE_STEPS):
+        runs = enhancement_package.phase_runs(step)
+        rows = ", ".join(f"{{{n0}u, {count}u, {a0!r}, {a1!r}, {delta!r}}}" for n0, count, a0, a1, delta in runs)
+        out.append(f"static const NkEnhPhaseRun nk_enh_phase_runs_{i}[] = {{{rows}}};")
+        tables.append(f"    {{nk_enh_phase_runs_{i}, {len(runs)}u, {step!r}}},")
+    out += [
+        "static const struct { const NkEnhPhaseRun *runs; unsigned count; double step; } nk_enh_phase_tables[] = {",
+        *tables,
+        "};",
+        "/* 1 when the time is the state's time after an odd number of updates, 0 after an even number.",
+        " * The match is exact, so the rounding of the state's own sum cannot move a phase. A time the",
+        " * state does not reach by adding the step from zero reads as 0, so the site runs its stock",
+        " * instruction, and is reported once per site. */",
+        "int nk_enhancement_phase_odd(int *reported, const char *site, uint32_t pc, uint32_t time_bits,",
+        "                             unsigned table) {",
+        "    const NkEnhPhaseRun *runs = nk_enh_phase_tables[table].runs;",
+        "    unsigned i;",
+        "    float t;",
+        "    double x;",
+        "    memcpy(&t, &time_bits, sizeof t);",
+        "    x = (double)t;",
+        "    for (i = 0; i < nk_enh_phase_tables[table].count; i++) {",
+        "        if (x >= runs[i].a0 && x <= runs[i].a1) {",
+        "            double k = (x - runs[i].a0) / runs[i].delta;",
+        "            if (k == floor(k)) return (int)((runs[i].n0 + (uint32_t)k) & 1u);",
+        "            break;",
+        "        }",
+        "    }",
+        "    if (!*reported) {",
+        "        *reported = 1;",
+        '        fprintf(stderr, "ENHANCEMENT_PHASE_KEPT: site %s at 0x%08x read the time %.9g, which its state "',
+        '                "does not reach by adding %.9g from zero; it runs its stock instruction\\n", site,',
+        "                (unsigned)pc, (double)t, nk_enh_phase_tables[table].step);",
+        "    }",
+        "    return 0;",
+        "}",
+        "/* End of enhancement phase tables. */",
+        "",
+    ]
+    return out
+
+
+def _enhancement_launch_lines() -> list[str]:
+    """The run-time half of launch_from_rest_60hz: the calls made and the maps applied, per site,
+    and the report of a site whose call was not followed by its map."""
+    if not ENHANCEMENT_LAUNCH_SITES:
+        return []
+    rows = [f'    {{"{row["id"]}", 0x{row["pc"]:08x}u, 0u, 0u}},' for row in ENHANCEMENT_LAUNCH_SITES]
+    return [
+        "/* Enhancement launch sites (docs/ENHANCEMENT_CONTRACT.md section 9.2). */",
+        "static struct { const char *id; uint32_t pc; uint32_t made, mapped; } nk_enh_launch_sites[] = {",
+        *rows,
+        "};",
+        "/* A launch map follows its call in the same statement. When the call does not come back to it",
+        " * (the callee blocked or left by another route), or a guest access of the map faulted, the",
+        " * velocity keeps what the call left: say so at the end of the run, at an ordinary exit",
+        " * (atexit) and on the runtime's _Exit paths (sr_at_process_end). */",
+        "void sr_at_process_end(void (*report)(void));",
+        "static void nk_enh_launch_report(void) {",
+        "    static int reported;",
+        "    size_t i;",
+        "    if (reported) return;",
+        "    reported = 1;",
+        "    for (i = 0; i < sizeof nk_enh_launch_sites / sizeof nk_enh_launch_sites[0]; i++) {",
+        "        if (nk_enh_launch_sites[i].made != nk_enh_launch_sites[i].mapped) {",
+        '            fprintf(stderr, "ENHANCEMENT_LAUNCH_NOT_MAPPED: site %s at 0x%08x: %u of %u call(s) were not "',
+        '                    "followed by the launch map; the velocity they left kept its stock value\\n",',
+        "                    nk_enh_launch_sites[i].id, (unsigned)nk_enh_launch_sites[i].pc,",
+        "                    (unsigned)(nk_enh_launch_sites[i].made - nk_enh_launch_sites[i].mapped),",
+        "                    (unsigned)nk_enh_launch_sites[i].made);",
+        "        }",
+        "    }",
+        "}",
+        "void nk_enhancement_launch_begin(unsigned site) {",
+        "    static int registered;",
+        "    if (!registered) {",
+        "        registered = 1;",
+        "        (void)atexit(nk_enh_launch_report);",
+        "        sr_at_process_end(nk_enh_launch_report);",
+        "    }",
+        "    nk_enh_launch_sites[site].made++;",
+        "}",
+        "void nk_enhancement_launch_done(unsigned site) { nk_enh_launch_sites[site].mapped++; }",
+        "/* End of enhancement launch sites. */",
+        "",
+    ]
 
 
 def write_funcs_header(path, emitted, resume_owners=None, runtime_modules=(), renames=None,
@@ -1224,6 +1476,12 @@ def write_funcs_header(path, emitted, resume_owners=None, runtime_modules=(), re
                     "{ return (nk_enhancement_updates & 1u) == 0u; }\n")
             f.write("void nk_enhancement_factor_kept(int *reported, const char *site, uint32_t pc, "
                     "float value);\n")
+            if ENHANCEMENT_PHASE_STEPS:
+                f.write("int nk_enhancement_phase_odd(int *reported, const char *site, uint32_t pc, "
+                        "uint32_t time_bits, unsigned table);\n")
+            if ENHANCEMENT_LAUNCH_SITES:
+                f.write("void nk_enhancement_launch_begin(unsigned site);\n")
+                f.write("void nk_enhancement_launch_done(unsigned site);\n")
             if ENHANCEMENT_STORE_SITES:
                 f.write("uint32_t nk_enh_store(unsigned site, uint32_t bits);\n")
                 f.write("int nk_enh_ready(unsigned site);\n")
@@ -1265,7 +1523,12 @@ def _frame_step(w, regs, slots):
         if op == 0x2B and rt(w) in regs:
             slots[offset] = regs[rt(w)]
     written = _gpr_writes(w)
-    if written == "unknown":
+    if written is None:
+        # A transfer the walk does not model: bltzall/bgezall, which is_control() leaves out, or
+        # any transfer stepped as a delay slot. effect() refuses each by name later; here no
+        # register value survives it.
+        written = frozenset(range(32))
+    elif written == "unknown":
         written = (frozenset({rt(w)}) if op == 0x12 else
                    frozenset() if op in _VFPU_OPCODES else frozenset(range(32)))
     for reg in written:
@@ -1286,7 +1549,7 @@ def _loads_foreign_sp(w, regs, slots):
             and _OWN_SP not in _frame_step(w, {**regs, _OWN_SP: 0}, slots)[0])
 
 
-def _sp_exit_walk(elf, start, insns, labels):
+def _sp_exit_walk(elf, start, insns, labels, work=None):
     """(the exits of a body that leave $sp as the guest set it, all of its exits, the
     addresses of the $sp loads that made them the guest's).
 
@@ -1310,11 +1573,18 @@ def _sp_exit_walk(elf, start, insns, labels):
     to miss the frame. An exit is the address of a transfer that leaves the body, or the
     address outside the body it falls into. Whether such a load really left the frame is
     known only when it runs: emit_function checks each one there (_sp_load_check).
+
+    A computed jump may land on any label, so its state goes to every label. A fan-out that
+    cannot change a label is skipped (`hub`, below), which keeps the walk linear in the body
+    instead of (computed jumps) x (labels) and leaves every state, push and result as they
+    were. `work`, when given, receives the counts: "reach" calls, "fanouts" run in full and
+    "skipped".
     """
     if not any((read32(elf, addr) or 0) >> 26 == 0x23 and rt(read32(elf, addr)) == 29
                for addr in insns):
         return frozenset(), frozenset(), frozenset()
-    states, work, guest, exits, foreign = {}, [], set(), set(), set()
+    states, pending, guest, exits, foreign = {}, [], set(), set(), set()
+    counts = {"reach": 0, "fanouts": 0, "skipped": 0}
 
     def leave(addr, regs):
         exits.add(addr)
@@ -1322,6 +1592,7 @@ def _sp_exit_walk(elf, start, insns, labels):
             guest.add(addr)
 
     def reach(addr, regs, slots, exit_at=None):
+        counts["reach"] += 1
         if addr not in insns:
             leave(addr if exit_at is None else exit_at, regs)
             return
@@ -1332,11 +1603,18 @@ def _sp_exit_walk(elf, start, insns, labels):
             if (regs, slots) == old:
                 return
         states[addr] = (regs, slots)
-        work.append(addr)
+        pending.append(addr)
 
+    # The meet of every state sent to all labels so far. After a full fan-out of state A each
+    # label holds a state at or below A, and states only shrink, so every label is at or
+    # below hub. A state at or above hub would leave each of them as it is: reach() would
+    # return without a push, and for a label outside the body the exit is recorded already,
+    # guest-owned too when _OWN_SP (always 0 while present) is missing, since then it was
+    # missing from a state fanned out before.
+    hub = None
     reach(start, {29: 0, _OWN_SP: 0}, {})
-    while work:
-        addr = work.pop()
+    while pending:
+        addr = pending.pop()
         regs, slots = states[addr]
         w = read32(elf, addr)
         if w is None or is_eret(w):
@@ -1356,14 +1634,25 @@ def _sp_exit_walk(elf, start, insns, labels):
         elif (op == 0 and fn in (0x08, 0x09) and (fn == 0x08 or rd(w) == 0)):
             leave(addr, after[0])
             if rs(w) != 31:
-                for label in labels:
-                    reach(label, *after)
+                if (hub is not None
+                        and all(after[0].get(k) == v for k, v in hub[0].items())
+                        and all(after[1].get(k) == v for k, v in hub[1].items())):
+                    counts["skipped"] += 1
+                else:
+                    counts["fanouts"] += 1
+                    for label in labels:
+                        reach(label, *after)
+                    hub = after if hub is None else (
+                        {k: v for k, v in hub[0].items() if after[0].get(k) == v},
+                        {k: v for k, v in hub[1].items() if after[1].get(k) == v})
         elif op == 3 or (op == 0 and fn == 0x09) or is_link(w):
             kept = {k: v for k, v in after[0].items() if k in _CALL_SAVED_GPRS or k == _OWN_SP}
             reach(addr + 8, kept, after[1])
         else:
             reach(branch_target(addr, w), *after, exit_at=addr)
             reach(addr + 8, *((regs, slots) if is_likely(w) else after))
+    if work is not None:
+        work.update(counts)
     return frozenset(guest), frozenset(exits), frozenset(foreign)
 
 
@@ -2913,7 +3202,7 @@ def _vfpu_cop2_effect(addr, w, options, delay_branch_pc):
         raise Unsupported(f"cop2 sub {sub} or register {imm} at 0x{addr:08x}")
     if sub == 7 and imm == 131:
         # VFPU_CC keeps only bits 0..5: mtvc then mfvc read back written & 0x3f in every cell
-        # (unrecorded PSP read, PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov).
+        # (PSP-VFPU-CCCMOV-001, PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov).
         return f"{dst} = {R(rt(w))} & 0x3fu;", None, 0
     return handler(w, src, dst)
 
@@ -3828,9 +4117,13 @@ def normal_line(addr, w, lle_cpu=None, delay_branch_pc=None, options=None):
     line = _plain_line(addr, w, w, delay_branch_pc=delay_branch_pc,
                        options=options)
     if w is not None and _enhancement_boundary(addr):
-        # One logic update begins here: count it before the stock statement runs.
-        # With Ace on, the runtime measures each update here and, with late pad sampling
-        # (pad=late, docs/ENHANCEMENT_CONTRACT.md section 11.3.9), may hold it before it reads the pad.
+        # One logic update begins here: count it before the stock statement runs. A package with
+        # an Ace load part also tells the runtime, ungated, so the part's pacing guard sees every
+        # update (contract 11.3.10); the call changes nothing unless the run's load=fast is on.
+        if ENHANCEMENT_ACE_SITES:
+            line = f"    nk_ace_load_update();\n{line}"
+        # Late pad sampling's hook (pad=late, docs/ENHANCEMENT_CONTRACT.md section 11.3.9) runs inside
+        # the same toggle; it returns at once unless the run's line asks for pad=late.
         line = (f"    if (nk_enhancement_on()) {{ nk_enhancement_updates++; sr_enhancement_update_begin(); }}\n"
                 f"{line}")
     rw = _enhancement_rewrite(addr) if w is not None else None
@@ -3841,7 +4134,8 @@ def normal_line(addr, w, lle_cpu=None, delay_branch_pc=None, options=None):
         # The trace hook keeps the stock word: guest memory still holds it.
         word_line = _plain_line(addr, rw["word"], w, delay_branch_pc=delay_branch_pc,
                                 options=options)
-    return _enhanced_line(rw, line, word_line, ENHANCEMENT_SITES[addr]["id"], addr)
+    return _enhanced_line(rw, line, word_line, ENHANCEMENT_SITES[addr]["id"], addr,
+                          lle_cpu=bool(options.lle_cpu))
 
 class _PromotedLine:
     """GPRs one instruction reads and writes while it is translated with promotion."""
@@ -4178,13 +4472,27 @@ def _sv_step(w, regs, written):
             regs[i] = None
 
 def sv_plan(elf, insns, labels, hst_profile=False, options=None):
-    """Pre-compute {flush_addr: [(reg, expected_value), ...]} for one function."""
+    """Pre-compute {flush_addr: [(reg, expected_value), ...]} for one function.
+
+    Counts the points for the run's summary line; sv_points computes them without
+    counting, for the LLVM lowering plan, which reads the same function again."""
+    points = sv_points(elf, insns, labels, hst_profile=hst_profile, options=options)
+    if points:
+        SV_STATS["funcs"] += 1
+        SV_STATS["checks"] += sum(len(checks) for checks in points.values())
+    return points
+
+
+def sv_points(elf, insns, labels, hst_profile=False, options=None):
+    """sv_plan's {flush_addr: [(reg, expected_value), ...]}, with no side effect."""
     options = _options_for_call(options)
     if not (insns and options.static_verify):
         return {}
     if hst_profile and (insns & _SV_SPECIAL):
         return {}
     if ENHANCEMENT_SITES and (insns & set(ENHANCEMENT_SITES.keys())):
+        return {}
+    if ENHANCEMENT_ACE_SITES and (insns & set(ENHANCEMENT_ACE_SITES.keys())):
         return {}
     points, total = {}, 0
     regs: list[int | None] = [None] * 32
@@ -4230,9 +4538,6 @@ def sv_plan(elf, insns, labels, hst_profile=False, options=None):
         run_len += 1
         last_plain = addr
     flush()
-    if points:
-        SV_STATS["funcs"] += 1
-        SV_STATS["checks"] += total
     return points
 
 SR_SV_CHECK = """/* --static-verify support: compile-time-predicted register assertions. */
@@ -4387,6 +4692,7 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
     lle_cpu, resumable = ctx.lle_cpu, ctx.resumable
     target = jump_target(addr, w)
     _jal_rw = _enhancement_rewrite(addr)
+    _ace_rw = _enhancement_ace_rewrite(addr)
     out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u); s->r[31] = {G((addr + 8) & 0xFFFFFFFF)}; sr_end(s, 0u, 0);")
     out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,
                                 options=ctx.options))
@@ -4397,7 +4703,20 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
     else:
         _call_stmt = "    " + emit_checked_dispatch_call(
             G(target), G((addr + 8) & 0xFFFFFFFF))
-    if _jal_rw is not None and _jal_rw["kind"] == "clip_x_widen":
+    if _ace_rw is not None:
+        if _jal_rw is not None or _ace_rw["kind"] != "vblank_wait_skip":
+            raise enhancement_package.EnhancementPackageError(
+                f"ace_parts site at 0x{addr:08x} has no rewrite here (fail-closed refusal)")
+        # vblank_wait_skip (contract section 9.8): the delay slot above ran as stock. The call to
+        # sceDisplayWaitVblankStart runs unless the runtime skips it (nk_ace_load_skip_wait(), on
+        # the run's Ace load part only, never nk_enhancement_on()); a skip sets $v0 itself. The
+        # site's id (SITE_ID_RE: no quote or backslash) and address name it in the pacing guard's
+        # line.
+        _ace_id = ENHANCEMENT_ACE_SITES[addr]["id"]
+        out.append(f'    if (!nk_ace_load_skip_wait(s, "{_ace_id}", {G(addr)})) {{')
+        out.extend(_call_stmt.split("\n"))
+        out.append("    }")
+    elif _jal_rw is not None and _jal_rw["kind"] == "clip_x_widen":
         # clip_x_widen (contract section 10.8): the stock call runs unchanged; when it returns,
         # the runtime scales the x row of the clip matrices at the offsets from the pointer the
         # call returned, by the Widescreen factor. It does nothing while Widescreen is off.
@@ -4406,6 +4725,26 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
         out.append(f"    {{ static const uint32_t _nk_clip_off[] = {{{_offsets}}};")
         out.append(f"      sr_enhancement_widen_clip_x(s->r[{_jal_rw['reg']}], _nk_clip_off, "
                    f"{len(_jal_rw['offsets'])}u); }}")
+    elif _jal_rw is not None and _jal_rw["kind"] in ("gate_phase", "launch_from_rest"):
+        # A site with ``requires`` runs stock until each required site has applied (section 9.6).
+        _ready = f" && nk_enh_ready({_jal_rw['site_index']}u)" if "requires" in _jal_rw else ""
+        _site_id = ENHANCEMENT_SITES[addr]["id"]
+        if _jal_rw["kind"] == "gate_phase":
+            # gate_30hz_phase (contract section 9.2): the delay slot above always runs; the call
+            # is skipped when the state's own time is its time after an odd number of updates.
+            out.append("    { int _nk_run = 1;")
+            out.append(f"      if (nk_enhancement_on(){_ready}) {{ "
+                       f"{_phase_odd_stmt(_jal_rw, _site_id, addr, bool(lle_cpu))} _nk_run = !_nk_odd; }}")
+            out.append("      if (_nk_run) {")
+            out.extend(_call_stmt.split("\n"))
+            out.append("      } }")
+        else:
+            # launch_from_rest_60hz (contract section 9.2): the stock call runs unchanged; when
+            # it returns, the velocity it left is mapped, with $a0 as it was after the delay slot.
+            _before, _after = _launch_from_rest_lines(_jal_rw, addr, bool(lle_cpu), _ready)
+            out.extend(_before)
+            out.extend(_call_stmt.split("\n"))
+            out.extend(_after)
     elif _jal_rw is not None:
         # A gate on a call (gate_30hz, gate_30hz_hold or gate_30hz_alt; no other rewrite
         # plans a call site): the delay slot above always runs; the call is gated while the
@@ -4877,9 +5216,290 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
             # dispatch-only bodies stay unchecked. Keyed on the CALL's own drain, so every
             # call form that uses emit_body_call is covered. See SR_HOST_STACK_CHECK in recomp.h.
             out.insert(1, emit_host_stack_check(G(start)))
+        if options.state_resume:
+            # A resume point restores one frame local, the entry $sp of a callable body. A
+            # body with another (a checked $sp load's verdict, promoted registers), with none
+            # (a live-frame resume entry) or behind a census wrapper stays as it is, and so
+            # does a runtime-placed module's, whose addresses are not constants.
+            if (resumable or sp_kept or stack_census or promo is not None
+                    or ADDRESS_SPACE.runtime_module):
+                STATE_RESUME_STATS["plain_bodies"] += 1
+            else:
+                before = out
+                out = state_resume_pass(out, start)
+                if out is before:
+                    STATE_RESUME_STATS["plain_bodies"] += 1
     finally:
         _BODY_SP_CHECKS.clear()
     return out
+
+_STATE_RESUME_ENTRY = re.compile(r"^    SR_YIELD\(s, (0x[0-9a-f]{8}u)\);$")
+_STATE_RESUME_YIELD = re.compile(
+    r"SR_YIELD\(s, (0x[0-9a-f]{8}u)\); goto L_([0-9a-f]{8});")
+_STATE_RESUME_CALL = re.compile(
+    r"if \(sr_aot_return_boundary_begin\(s, 0x([0-9a-f]{8})u, (0x[0-9a-f]{8}u), 1u\)\) return; "
+    r"f_([0-9a-f]{8})\(s\); SR_TAIL_DRAIN\(s\); "
+    r"if \(sr_aot_return_boundary_end\(s\)\) return;")
+#: What may follow a direct call in its line for the call to get a resume point: the close of
+#: the blocks it sits in. A point's label is jumped to from the body's resume switch, past
+#: every local those blocks declare, so nothing after the label may read one.
+_STATE_RESUME_CALL_TAIL = re.compile(r"^[\s}]*$")
+_STATE_RESUME_LABEL = re.compile(r"^\s*L_([0-9a-f]{8}): ;$")
+#: Comments and literals, whose braces and words are not code.
+_STATE_RESUME_NOT_CODE = re.compile(
+    r"/\*.*?\*/|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'", re.S)
+_STATE_RESUME_TOKEN = re.compile(r"[A-Za-z_]\w*|[{};()]")
+#: Words that open a block which runs again or elsewhere.
+_STATE_RESUME_LOOPS = frozenset(("while", "for", "do", "switch"))
+#: A statement that starts with one of these is not a declaration, whatever follows.
+_STATE_RESUME_STATEMENTS = frozenset(
+    ("goto", "return", "else", "case", "default", "break", "continue", "if", "sizeof")
+) | _STATE_RESUME_LOOPS
+#: A statement that starts with one of these is a declaration.
+_STATE_RESUME_TYPES = frozenset(
+    ("void", "const", "volatile", "register", "static", "extern", "auto", "struct", "union",
+     "enum", "unsigned", "signed", "bool", "_Bool", "char", "short", "int", "long", "float",
+     "double", "typedef"))
+#: After a statement's first word: a second name, so the first was a type.
+_STATE_RESUME_DECLARED = re.compile(r"[\s*]+([A-Za-z_]\w*)")
+#: The names a function-scope statement may start with and be followed by its parentheses.
+#: Text alone cannot tell a call from a macro that declares a local (`DECLARE(x);`), so a
+#: statement shaped like a call is read as one only when its first word is a callable body
+#: (``f_XXXXXXXX``, a prototype in the generated ``_funcs.h``) or one of these runtime names,
+#: none of which declares anything at the statement's own scope (each is a function, an
+#: expression, or a ``do { } while (0)`` block; src/rt/recomp.h). Any other name leaves the
+#: body without resume points.
+_STATE_RESUME_CALLS = frozenset(
+    ("sr_begin", "sr_end", "sr_tail_record", "sr_swl_pc", "sr_swr_pc", "MEM_W8_PC", "MEM_W16_PC",
+     "MEM_W32_PC", "SR_YIELD", "SR_TAIL_DRAIN", "SR_HOST_STACK_CHECK"))
+_STATE_RESUME_BODY_NAME = re.compile(r"f_[0-9a-f]{8}")
+#: After a statement's first word: a label's colon, so a new statement starts.
+_STATE_RESUME_COLON = re.compile(r"\s*:(?!:)")
+#: After the parentheses that follow a statement's first word: a name or a bracket, so the
+#: statement is a declaration this reader cannot name (`uint32_t (*p)[2]`, `typeof(e) x`,
+#: an attribute, a macro that hides a type).
+_STATE_RESUME_AFTER_CALL = re.compile(r"\s*(?:[A-Za-z_\[*]|\()")
+STATE_RESUME_STATS = {"bodies": 0, "points": 0, "plain_bodies": 0}
+
+
+class _StateResumeScan:
+    """The block structure of a body's lines, as far as resume points need it.
+
+    A label the resume switch jumps to is entered with one local restored, the entry ``$sp``.
+    So the pass has to know, for every place it would put one, that no other C local is live
+    there and that the code after it is straight-line. This reads the lines once and records:
+
+    * ``depth[i]``: the open blocks after line ``i``, 1 being the function's own;
+    * ``looped(i, column)``: whether a block open at that column was opened by ``while``,
+      ``for``, ``do`` or ``switch`` (on this line or an earlier one);
+    * ``locals``: the names declared at function scope.
+
+    ``readable`` is False when a line cannot be read this way (a comment left open, a line
+    comment, a preprocessor line, a function-scope statement that may be a declaration whose
+    name it cannot give, a function-scope statement cut by the end of its line right after
+    its first word, a function-scope call of a name outside ``_STATE_RESUME_CALLS`` and the
+    callable bodies, which could be a macro that declares); the pass then leaves the whole
+    body alone.
+    """
+
+    def __init__(self, out):
+        self.readable = True
+        self.depth = []
+        self.locals = set()
+        self._starts = []
+        self._code = []
+        stack = []          # one flag per open block: opened by a loop word
+        # pending: a loop word whose block has not opened; start: the next word begins a
+        # function-scope statement; parens: open parentheses; called: the first word's own
+        # parenthesis depth, while its argument list is open.
+        state = {"pending": False, "start": False, "parens": 0, "called": None}
+        for line in out:
+            code = _STATE_RESUME_NOT_CODE.sub(lambda m: " " * len(m.group(0)), line)
+            if ("/*" in code or "*/" in code or "//" in code
+                    or any(part.lstrip().startswith("#") for part in code.split("\n"))):
+                self.readable = False
+                return
+            self._starts.append((list(stack), dict(state)))
+            self._code.append(code)
+            self._advance(code, len(code), stack, state, self.locals)
+            self.depth.append(len(stack))
+
+    def _advance(self, code, end, stack, state, declared):
+        after = 0           # where the statement being read began, in this line
+        for token in _STATE_RESUME_TOKEN.finditer(code, 0, end):
+            word = token.group(0)
+            if word == "(":
+                state["parens"] += 1
+                state["start"] = False
+            elif word == ")":
+                state["parens"] = max(0, state["parens"] - 1)
+                if state["called"] == state["parens"]:
+                    # The parentheses after a function-scope statement's first word have
+                    # closed. A call or a macro ends there or goes on with an operator.
+                    state["called"] = None
+                    if _STATE_RESUME_AFTER_CALL.match(code, token.end()):
+                        self.readable = False
+            elif word == "{":
+                # A brace inside parentheses is an expression's, not the loop's block.
+                loop = state["pending"] and state["parens"] == 0
+                stack.append(loop or (bool(stack) and stack[-1]))
+                if loop:
+                    state["pending"] = False
+                state["start"] = len(stack) == 1 and state["parens"] == 0
+                after = token.end()
+            elif word == "}":
+                if stack:
+                    stack.pop()
+                state["start"] = len(stack) == 1 and state["parens"] == 0
+                after = token.end()
+            elif word == ";":
+                if state["parens"] == 0:
+                    # A loop with no block of its own ends with its statement.
+                    state["pending"] = False
+                    state["start"] = len(stack) == 1
+                    after = token.end()
+            else:
+                if word in _STATE_RESUME_LOOPS:
+                    state["pending"] = True
+                # The statement's first word, with nothing before it: `(void)x;` opens with
+                # a parenthesis and declares nothing.
+                first = (state["start"] and len(stack) == 1 and state["parens"] == 0
+                         and not code[after:token.start()].strip())
+                state["start"] = False
+                if not first:
+                    continue
+                colon = _STATE_RESUME_COLON.match(code, token.end())
+                if colon is not None:
+                    # A label: the statement proper starts after it.
+                    state["start"] = True
+                    after = colon.end()
+                elif word in _STATE_RESUME_TYPES:
+                    self.readable = False
+                elif word not in _STATE_RESUME_STATEMENTS:
+                    second = _STATE_RESUME_DECLARED.match(code, token.end())
+                    if second is not None:
+                        declared.add(second.group(1))
+                    elif not code[token.end():].strip(" \t\n*"):
+                        self.readable = False   # the line ends before the statement says more
+                    elif code[token.end():].lstrip().startswith("("):
+                        if (word not in _STATE_RESUME_CALLS
+                                and not _STATE_RESUME_BODY_NAME.fullmatch(word)):
+                            self.readable = False   # a call or a macro that may declare
+                        state["called"] = state["parens"]
+
+    def looped(self, index, column):
+        """Whether a block open at ``column`` of line ``index`` belongs to a loop or switch."""
+        stack, state = list(self._starts[index][0]), dict(self._starts[index][1])
+        self._advance(self._code[index], column, stack, state, set())
+        return bool(stack) and stack[-1]
+
+
+def state_resume_pass(out, start):
+    """Give the body in ``out`` (emit_function's lines) its resume points (--state-resume, #2172).
+
+    Three statement shapes get one, and only as emit_function wrote them:
+
+    * the entry yield: ``SR_STATE_ENTRY`` tests ``sr_resume_request`` before it, so a resumed
+      entry counts no yield point, and the entry point continues right after it;
+    * a loop edge's ``SR_YIELD(s, pc); goto L_target;``: the body parks naming ``target``, and
+      the point is that label;
+    * a direct call of a callable body: the call's return boundary records this body and its
+      entry ``$sp``, and the point is a label between the callee and the call's own drain and
+      end check, which run after a resumed callee exactly as after a called one.
+
+    A point's label is entered from the resume switch with only the entry ``$sp`` restored
+    (_StateResumeScan). A body that declares any other function-scope local, or that the scan
+    cannot read, is returned as it is. A loop edge whose target label is inside a block is
+    left alone, and so is a call unless its line closes every block it sits in and none of
+    them belongs to a loop or switch: an enhancement site that reads a local of its own after
+    the call keeps its text.
+
+    A statement of any other shape keeps its text and has no point, so a thread parked or
+    suspended there is refused when it is described (sr_resume_describe); nothing is guessed.
+    Returns the new lines, or ``out`` itself when the body gets no point at all.
+
+    The body's first statement becomes ``SR_STATE_RESUME_TEST``, ahead of the host-stack check
+    of a body that makes direct calls: a resume makes that check in the switch, and
+    sr_resume_validate's question never reaches it.
+    """
+    body = f"0x{start:08x}u"
+    entry_at = next((i for i, line in enumerate(out) if _STATE_RESUME_ENTRY.match(line)), None)
+    if entry_at is None or _STATE_RESUME_ENTRY.match(out[entry_at]).group(1) != body:
+        return out
+    if not any(line.startswith("    uint32_t _sp_entry = s->r[29];") for line in out):
+        return out
+    scan = _StateResumeScan(out)
+    if not scan.readable or scan.locals != {"_sp_entry"} or scan.depth[entry_at] != 1:
+        return out
+    # Loop targets whose label is at function scope, before and after its own line.
+    scope_labels = {
+        match.group(1) for index, line in enumerate(out)
+        if (match := _STATE_RESUME_LABEL.match(line))
+        and scan.depth[index] == 1 and scan.depth[index - 1] == 1}
+    cases = [f"      case SR_RESUME_KEY(SR_RESUME_POINT_ENTRY, {body}): "
+             f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_ENTRY, 0u); goto _nk_enter;"]
+    yield_targets = set()
+    call_points = set()
+
+    def park(match):
+        site, target = match.group(1), match.group(2)
+        if target not in scope_labels:
+            return match.group(0)
+        if target not in yield_targets:
+            yield_targets.add(target)
+            cases.append(f"      case SR_RESUME_KEY(SR_RESUME_POINT_YIELD, 0x{target}u): "
+                         f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_YIELD, 0u); goto L_{target};")
+        return (f"SR_YIELD_PARK(s, {site}, {body}, 0x{target}u, SR_RESUME_POINT_YIELD, _sp_entry); "
+                f"goto L_{target};")
+
+    stack_check = emit_host_stack_check(body)
+    checks_stack = stack_check in out[:entry_at]
+    result = []
+    for index, line in enumerate(out):
+        if index == 1:
+            result.append("    SR_STATE_RESUME_TEST();")
+        if index == entry_at:
+            result.append(f"    SR_STATE_ENTRY(s, {body}); _nk_enter: ;")
+            continue
+        # The call is looked for in the line as emit_function wrote it: the scan's columns
+        # are that line's.
+        calls = list(_STATE_RESUME_CALL.finditer(line))
+        call = calls[0] if len(calls) == 1 else None
+        if (call is not None and call.group(1) not in call_points
+                and scan.depth[index] == 1
+                and not scan.looped(index, call.start())
+                and _STATE_RESUME_CALL_TAIL.match(line[call.end():])):
+            resume, call_pc, callee = call.group(1), call.group(2), call.group(3)
+            call_points.add(resume)
+            cases.append(f"      case SR_RESUME_KEY(SR_RESUME_POINT_CALL, 0x{resume}u): "
+                         f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_CALL, 0x{callee}u); sr_resume_inner(s); "
+                         f"goto R_{resume};")
+            line = (_STATE_RESUME_YIELD.sub(park, line[:call.start()])
+                    + f"if (sr_aot_return_boundary_begin_at(s, 0x{resume}u, {call_pc}, "
+                      f"0x{callee}u, {body}, _sp_entry)) return; "
+                      f"f_{callee}(s); R_{resume}: SR_TAIL_DRAIN(s); "
+                      f"if (sr_aot_return_boundary_end(s)) return;"
+                    + line[call.end():])
+        else:
+            line = _STATE_RESUME_YIELD.sub(park, line)
+        result.append(line)
+    close = max(i for i, line in enumerate(result) if line == "}")
+    result[close:close] = [
+        "    return;",
+        "  _nk_resume: {",
+        f"    const SrResumeEntry _nk_e = sr_resume_take(s, {body});",
+        *([f"    if (!_nk_e.probe) {{ {stack_check.strip()} }}"] if checks_stack else []),
+        "    _sp_entry = _nk_e.sp;",
+        "    switch (SR_RESUME_KEY(_nk_e.kind, _nk_e.pc)) {",
+        *cases,
+        f"      default: sr_resume_no_point(s, {body}, &_nk_e); return;",
+        "    }",
+        "  }",
+    ]
+    STATE_RESUME_STATS["bodies"] += 1
+    STATE_RESUME_STATS["points"] += len(cases)
+    return result
+
 
 #: ``--extra-elf=<module>@runtime``: the module is placed by the runtime's guest
 #: allocator when the game loads it, so it is translated position-independently.
@@ -5743,6 +6363,7 @@ def _command_line_parser():
     parser.add_argument("--omit-aot", action="append", default=[], metavar="ADDR[,ADDR...]",
                         help="leave these entries to the dispatcher instead of direct C calls")
     value("--enhancement-package", "enhancement package to apply")
+    value("--code-hook-package", "a guest_memory_code_hook package applied beside --enhancement-package")
     value("--enhancement-data-root", "the title's extracted files, for package data_files")
     value("--region-split-threshold", "split regions at this many conditional edges, or off")
     flag("--static-verify", "emit the static-verify prediction table")
@@ -5750,6 +6371,7 @@ def _command_line_parser():
     flag("--lle-import-seam", "route import stubs through sr_import_call")
     flag("--stale-detect", "TD-27 stale-code detection")
     flag("--promote-registers", "#284 register promotion")
+    flag("--state-resume", "#2172 resume points for direct save states")
     flag("--nan-trap", "SR_NAN_TRAP result checks")
     return parser
 
@@ -5782,11 +6404,15 @@ def _validated_options(cli):
     """
     for option, given in (("--enhancement-data-root", cli.enhancement_data_root),
                           ("--enhancement-package", cli.enhancement_package),
+                          ("--code-hook-package", cli.code_hook_package),
                           ("--symbol-map", cli.symbol_map),
                           ("--miss-seeds", cli.miss_seeds),
                           ("--cfg-report", cli.cfg_report)):
         if given == "":
             raise _Refusal(2, f"{option} requires a path\n")
+    if cli.code_hook_package is not None and cli.enhancement_package is None:
+        raise _Refusal(2, "--code-hook-package is applied beside --enhancement-package; a code-hook "
+                          "package on its own is the --enhancement-package\n")
     backend = "c"
     if cli.backend is not None:
         # #330: --backend=llvm lowers each function the LLVM backend supports to
@@ -5795,6 +6421,19 @@ def _validated_options(cli):
         backend = cli.backend
         if backend not in ("c", "llvm"):
             raise _Refusal(2, f"--backend must be c or llvm, not {backend!r}\n")
+    if cli.state_resume:
+        # #2172: a resume point restores a C body's one frame local. A census wrapper, a
+        # promoted register and an LLVM body each hold state a point does not restore.
+        # With the LLE CPU every direct call is followed on its line by a flow check, so no
+        # call would get a point: refused by name instead of translating a build in which
+        # only one-frame threads can be described.
+        for option, given in (("--stack-census", cli.stack_census),
+                              ("--promote-registers", cli.promote_registers),
+                              ("--backend=llvm", backend == "llvm"),
+                              ("--lle-cpu", cli.lle_cpu),
+                              ("--lle-import-seam", cli.lle_import_seam)):
+            if given:
+                raise _Refusal(2, f"--state-resume cannot be combined with {option}\n")
     threshold_arg = cli.region_split_threshold
     threshold = None
     if threshold_arg is not None:
@@ -5942,7 +6581,7 @@ def _refuse_unemitted_enhancement_sites():
     if ENHANCEMENT_PKG_META is None:
         return
     missing = sorted(
-        site["id"] for addr, site in ENHANCEMENT_SITES.items()
+        site["id"] for addr, site in (*ENHANCEMENT_SITES.items(), *ENHANCEMENT_ACE_SITES.items())
         if addr not in ENHANCEMENT_APPLIED
     )
     if (ENHANCEMENT_UPDATE_BOUNDARY is not None
@@ -5954,7 +6593,7 @@ def _refuse_unemitted_enhancement_sites():
         # it: refuse before anything is written.
         raise _Refusal(
             1, "codegen: enhancement package refused (fail-closed): "
-               f"{len(missing)} of {len(ENHANCEMENT_SITES)} sites were not emitted: "
+               f"{len(missing)} of {len(ENHANCEMENT_SITES) + len(ENHANCEMENT_ACE_SITES)} sites were not emitted: "
                + ", ".join(missing) + "\n")
 
 
@@ -6002,6 +6641,10 @@ def _apply_options(cli, checked, options):
         # instructions, written back at every boundary. Default (absent)
         # leaves the generated C byte-identical.
         options.promote_registers = True
+    if cli.state_resume:
+        # #2172: resume points for direct save states. Default (absent) leaves the
+        # generated C byte-identical.
+        options.state_resume = True
     if cli.nan_trap:
         # SR_NAN_TRAP: follow every FPU/VFPU result write with a check that
         # names the instruction whose result went non-finite from all-finite
@@ -6010,25 +6653,183 @@ def _apply_options(cli, checked, options):
         options.nan_trap = True
 
 
-def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhancement_data_root,
-                              symbol_map_path):
-    """Load, verify and resolve the ``--enhancement-package`` into the ``ENHANCEMENT_*`` tables.
+def _package_symbol_map(elf, pkg_validated, pkg_path, symbols, symbol_map_path, data_root,
+                        read_words, read_loaded_data):
+    """The validated package and the {symbol: address} map its sites resolve through.
 
-    The tables are reset first, so a run without a package starts empty. A package that fails
-    verification refuses the run (fail closed).
+    A published package (ENHANCEMENT_CONTRACT.md section 5.1) resolves only through its own
+    site map, after its keyed digests match this executable. A private one uses the ELF's own
+    function symbols, plus the guest symbol map when the run has one, else the
+    ``<package>.symbols.json`` sidecar beside the package.
+    """
+    from pathlib import Path
+    if enhancement_package.is_published_package(pkg_validated):
+        return enhancement_package.resolve_published_package(
+            pkg_validated, executable=elf.data, read_words_fn=read_words,
+            read_data_fn=read_loaded_data, data_root=data_root,
+        )
+    sym_map = enhancement_package.extract_elf_func_symbols(elf)
+    if symbol_map_path is not None:
+        # The guest symbol map names the package's sites too, in place of the
+        # <package>.symbols.json sidecar.
+        sym_map.update(site_names_from_symbol_map(symbols))
+    else:
+        sidecar = Path(pkg_path).with_suffix(".symbols.json")
+        if sidecar.is_file():
+            sym_map.update(enhancement_package.load_symbol_map(sidecar))
+    return pkg_validated, sym_map
+
+
+def _refuse_uncallable_control_sites(sites):
+    """Among control transfers, only a jal call site can be rewritten (fail closed)."""
+    for site in sites.values():
+        stock = site["stock_words"][0]
+        if is_control(stock) and not (
+            (stock >> 26) == 3 and site["rewrite"]["kind"] in (
+                "gate", "clip_x_widen", "gate_phase", "launch_from_rest")
+        ):
+            raise enhancement_package.EnhancementPackageError(
+                f"site {site['id']}: only a jal call site can be rewritten among "
+                "control transfers (fail-closed refusal)"
+            )
+
+
+def _rewritten_words():
+    """{word address: what rewrites it} for every word the enhancement package's statements
+    change: each rewritten site word and, for a control transfer, its delay slot (emitted with
+    the call), each ace_parts site and its delay slot, and the update_boundary."""
+    words: dict[int, str] = {}
+    for table in (ENHANCEMENT_SITES, ENHANCEMENT_ACE_SITES):
+        for addr, site in table.items():
+            words[addr] = f"site {site['id']}"
+            if is_control(site["stock_words"][0]):
+                words.setdefault(addr + 4, f"the delay slot of site {site['id']}")
+    if ENHANCEMENT_UPDATE_BOUNDARY is not None:
+        words.setdefault(ENHANCEMENT_UPDATE_BOUNDARY, "the update_boundary")
+    return words
+
+
+def _load_code_hook_package(elf, known, symbols, code_hook_pkg_path, symbol_map_path, read_words,
+                            read_loaded_data, enhancement_pkg):
+    """Load, verify and resolve the ``--code-hook-package`` and add its sites to ENHANCEMENT_SITES.
+
+    A build carries one enhancement package (``--enhancement-package``) and at most one
+    code-hook package beside it (ENHANCEMENT_CONTRACT.md section 9.9). The second package must
+    be a ``guest_memory_code_hook`` package for the same title and executable, the first must
+    not be one, and no site of the second may touch a word the first rewrites: each is refused
+    by name, never merged. Returns the package's header metadata.
+    """
+    import hashlib
+    pkg = enhancement_package.validate_package(enhancement_package.load_package(code_hook_pkg_path))
+    if pkg["category"] == "guest_memory_code_hook" and not pkg.get("sites"):
+        raise enhancement_package.EnhancementPackageError(
+            f"code-hook package {pkg['id']!r} has no sites (fail-closed refusal)")
+    if pkg["category"] != "guest_memory_code_hook":
+        raise enhancement_package.EnhancementPackageError(
+            f"code-hook package {pkg['id']!r}: category {pkg['category']!r} is not "
+            "'guest_memory_code_hook' (fail-closed refusal)")
+    if enhancement_pkg["category"] == "guest_memory_code_hook":
+        raise enhancement_package.EnhancementPackageError(
+            f"code-hook package {pkg['id']!r}: the enhancement package {enhancement_pkg['id']!r} "
+            "is a code-hook package too, and a build carries at most one (fail-closed refusal)")
+    if pkg["target_title_id"] != enhancement_pkg["target_title_id"]:
+        raise enhancement_package.EnhancementPackageError(
+            f"code-hook package {pkg['id']!r}: target_title_id {pkg['target_title_id']!r} is not "
+            f"the enhancement package's {enhancement_pkg['target_title_id']!r} (fail-closed refusal)")
+    pkg, sym_map = _package_symbol_map(elf, pkg, code_hook_pkg_path, symbols, symbol_map_path, None,
+                                       read_words, read_loaded_data)
+    sites = enhancement_package.verify_and_resolve_sites(
+        pkg,
+        executable_sha256=hashlib.sha256(elf.data).hexdigest(),
+        symbol_to_addr=sym_map,
+        read_words_fn=read_words,
+        known_functions=sorted(known),
+        read_const_fn=enhancement_package.elf_constant_reader(elf),
+    )
+    _refuse_uncallable_control_sites(sites)
+    for site in sites.values():
+        # Run-time state is numbered over the enhancement package's sites before these join the
+        # table (_number_enhancement_store_sites), so a code-hook site may not carry any.
+        rw = site["rewrite"]
+        if (rw["kind"] == "launch_from_rest"
+                or {"requires", "stock_values", "stock_value_digests", "half_step"} & set(rw)):
+            raise enhancement_package.EnhancementPackageError(
+                f"code-hook site {site['id']}: transform {site['transform']!r} keeps run-time state, "
+                "which a code-hook package beside an enhancement package cannot carry (fail-closed refusal)")
+    first_ids = {site["id"] for site in enhancement_pkg.get("sites", ())}
+    for part in enhancement_pkg.get("ace_parts", {}).values():
+        first_ids.update(site["id"] for site in part["sites"])
+    for site in pkg["sites"]:
+        if site["id"] in first_ids:
+            raise enhancement_package.EnhancementPackageError(
+                f"code-hook site {site['id']}: the enhancement package has a site with that id; "
+                "site ids are one namespace across both packages (fail-closed refusal)")
+    taken = _rewritten_words()
+    # A gate_30hz_alt site calls its alternates itself on alternate updates, bypassing the gated
+    # function's own call to them: a hook on such a call would act only on the other updates.
+    alternates = {alt: f"site {s['id']}" for s in ENHANCEMENT_SITES.values()
+                  for alt in s["rewrite"].get("alternates", ())}
+    for addr, site in sorted(sites.items()):
+        stock = site["stock_words"][0]
+        if (stock >> 26) == 3 and jump_target(addr, stock) in alternates:
+            raise enhancement_package.EnhancementPackageError(
+                f"code-hook site {site['id']} at 0x{addr:08x}: its call to 0x{jump_target(addr, stock):08x} "
+                f"is an alternate that {alternates[jump_target(addr, stock)]} of the enhancement package "
+                "calls itself on alternate updates, where the hook would not run (fail-closed refusal)")
+        if addr in taken:
+            raise enhancement_package.EnhancementPackageError(
+                f"code-hook site {site['id']}: address 0x{addr:08x} collides with {taken[addr]} of "
+                f"the enhancement package (fail-closed refusal)")
+        if is_control(site["stock_words"][0]) and addr + 4 in taken:
+            raise enhancement_package.EnhancementPackageError(
+                f"code-hook site {site['id']} at 0x{addr:08x}: its delay slot 0x{addr + 4:08x} is "
+                f"{taken[addr + 4]} of the enhancement package, inside a span it rewrites "
+                "(fail-closed refusal)")
+    ENHANCEMENT_SITES.update(sites)
+    return {
+        "id": pkg["id"],
+        "version": pkg["version"],
+        "digest": enhancement_package.compute_package_digest(pkg),
+        "sites_count": len(sites),
+    }
+
+
+def _reset_enhancement_tables() -> None:
+    """Empty every ``ENHANCEMENT_*`` table, so no package is active.
+
+    A run loads its package into these tables before it translates; ``main`` empties them again
+    when the run ends, so a package never stays active for code translated later in the same
+    process (an in-process caller of ``main``, then ``emit_function`` and the like).
     """
     global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY, ENHANCEMENT_STORE_KEY
+    global ENHANCEMENT_ACE_SITES, ENHANCEMENT_HOOK_META
     ENHANCEMENT_SITES = {}
+    ENHANCEMENT_ACE_SITES = {}
     ENHANCEMENT_STORE_KEY = None
     ENHANCEMENT_PKG_META = None
+    ENHANCEMENT_HOOK_META = None
     ENHANCEMENT_UPDATE_BOUNDARY = None
     ENHANCEMENT_APPLIED.clear()
     ENHANCEMENT_DATA_PATCHES.clear()
     ENHANCEMENT_DATA_FILES.clear()
     ENHANCEMENT_STORE_SITES.clear()
+    ENHANCEMENT_PHASE_STEPS.clear()
+    ENHANCEMENT_LAUNCH_SITES.clear()
+
+
+def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhancement_data_root,
+                              symbol_map_path, code_hook_pkg_path=None):
+    """Load, verify and resolve the ``--enhancement-package`` into the ``ENHANCEMENT_*`` tables,
+    then the ``--code-hook-package`` beside it, if any (``_load_code_hook_package``).
+
+    The tables are reset first, so a run without a package starts empty. A package that fails
+    verification refuses the run (fail closed).
+    """
+    global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY, ENHANCEMENT_STORE_KEY
+    global ENHANCEMENT_ACE_SITES, ENHANCEMENT_HOOK_META
+    _reset_enhancement_tables()
     if enhancement_pkg_path is not None:
         import hashlib
-        from pathlib import Path
         try:
             pkg_raw = enhancement_package.load_package(enhancement_pkg_path)
             pkg_validated = enhancement_package.validate_package(pkg_raw)
@@ -6036,24 +6837,9 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
             # Instruction words as codegen reads them, and initialised data as the loader
             # places it (enhancement_package.elf_readers).
             _read_words, _read_loaded_data = enhancement_package.elf_readers(elf)
-            if enhancement_package.is_published_package(pkg_validated):
-                # A published package (ENHANCEMENT_CONTRACT.md section 5.1) resolves only
-                # through its own site map, after its keyed digests match this executable.
-                pkg_validated, sym_map = enhancement_package.resolve_published_package(
-                    pkg_validated, executable=elf.data, read_words_fn=_read_words,
-                    read_data_fn=_read_loaded_data, data_root=enhancement_data_root,
-                )
-            else:
-                sym_map = enhancement_package.extract_elf_func_symbols(elf)
-                if symbol_map_path is not None:
-                    # The guest symbol map names the package's sites too, in place of the
-                    # <package>.symbols.json sidecar.
-                    sym_map.update(site_names_from_symbol_map(symbols))
-                else:
-                    pkg_p = Path(enhancement_pkg_path)
-                    sidecar = pkg_p.with_suffix(".symbols.json")
-                    if sidecar.is_file():
-                        sym_map.update(enhancement_package.load_symbol_map(sidecar))
+            pkg_validated, sym_map = _package_symbol_map(
+                elf, pkg_validated, enhancement_pkg_path, symbols, symbol_map_path,
+                enhancement_data_root, _read_words, _read_loaded_data)
 
             ENHANCEMENT_SITES = enhancement_package.verify_and_resolve_sites(
                 pkg_validated,
@@ -6061,16 +6847,13 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                 symbol_to_addr=sym_map,
                 read_words_fn=_read_words,
                 known_functions=sorted(known),
+                read_const_fn=enhancement_package.elf_constant_reader(elf),
             )
-            for site in ENHANCEMENT_SITES.values():
-                stock = site["stock_words"][0]
-                if is_control(stock) and not (
-                    (stock >> 26) == 3 and site["rewrite"]["kind"] in ("gate", "clip_x_widen")
-                ):
-                    raise enhancement_package.EnhancementPackageError(
-                        f"site {site['id']}: only a jal call site can be rewritten among "
-                        "control transfers (fail-closed refusal)"
-                    )
+            # A value_reference site pins a stock value for other sites and rewrites nothing:
+            # it is resolved and checked above, and no statement is emitted for it.
+            ENHANCEMENT_SITES = {a: site for a, site in ENHANCEMENT_SITES.items()
+                                 if site["rewrite"]["kind"] != "reference"}
+            _refuse_uncallable_control_sites(ENHANCEMENT_SITES)
             _number_enhancement_store_sites()
             if any(row["digests"] for row in ENHANCEMENT_STORE_SITES):
                 ENHANCEMENT_STORE_KEY = enhancement_package.published_digest_key(elf.data)
@@ -6091,6 +6874,8 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                         "update_boundary: the boundary is also a rewritten site (fail-closed refusal)"
                     )
                 ENHANCEMENT_UPDATE_BOUNDARY = boundary["site_addr"]
+            ENHANCEMENT_ACE_SITES = _verified_ace_part_sites(elf, pkg_validated, sym_map, _read_words, known,
+                                                             boundary)
 
             for patch in enhancement_package.verify_and_resolve_data_sites(
                 pkg_validated, symbol_to_addr=sym_map, read_data_fn=_read_loaded_data,
@@ -6117,8 +6902,54 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                 "data_sites_count": len(ENHANCEMENT_DATA_PATCHES),
                 "data_files_count": len(ENHANCEMENT_DATA_FILES),
             }
+            if code_hook_pkg_path is not None:
+                ENHANCEMENT_HOOK_META = _load_code_hook_package(
+                    elf, known, symbols, code_hook_pkg_path, symbol_map_path, _read_words,
+                    _read_loaded_data, pkg_validated)
         except enhancement_package.EnhancementPackageError as exc:
             raise _Refusal(1, f"codegen: enhancement package refused (fail-closed): {exc}\n") from None
+
+
+def _verified_ace_part_sites(elf, pkg_validated, sym_map, read_words, known, boundary):
+    """The package's ace_parts sites, verified (contract section 9.8). A vblank_wait_skip site is
+    a jal whose target is the primary image's import stub of sceDisplayWaitVblankStart, in a
+    function other than the resolved update boundary's; any other target, a word another site
+    or the update boundary rewrites, a package with no boundary, or a site in the boundary's
+    function by address (whatever name the package gives it) refuses the package. No other
+    function is checked (a caller or callee of the boundary's passes; contract 11.3.10).
+    ``boundary`` is verify_and_resolve_update_boundary's result."""
+    sites = enhancement_package.verify_and_resolve_ace_parts(
+        pkg_validated, symbol_to_addr=sym_map, read_words_fn=read_words, known_functions=sorted(known),
+    )
+    if not sites:
+        return {}
+    impmap = primary_import_map(elf)
+    for addr, site in sites.items():
+        where = f"site {site['id']}"
+        if addr in ENHANCEMENT_SITES or addr == ENHANCEMENT_UPDATE_BOUNDARY:
+            raise enhancement_package.EnhancementPackageError(
+                f"{where}: its word is also a 60 Hz site or the update_boundary (fail-closed refusal)")
+        if boundary is None:
+            raise enhancement_package.EnhancementPackageError(
+                f"{where}: an ace_parts.load site needs the package's update_boundary (fail-closed refusal)")
+        if site["fn_addr"] == boundary["fn_addr"]:
+            raise enhancement_package.EnhancementPackageError(
+                f"{where}: its function {site['function']!r} resolves to 0x{site['fn_addr']:08x}, the "
+                f"update_boundary's function: skipping that wait would run logic updates unpaced "
+                f"(fail-closed refusal)")
+        if site["rewrite"]["kind"] != "vblank_wait_skip":
+            raise enhancement_package.EnhancementPackageError(
+                f"{where}: transform {site['rewrite']['kind']!r} has no rewrite (fail-closed refusal)")
+        target = jump_target(addr, site["stock_words"][0])
+        import_ = impmap.get(target)
+        if import_ is None or import_[1] != enhancement_package.VBLANK_WAIT_SKIP_NID:
+            called = (f"import NID 0x{import_[1]:08x}" if import_ is not None
+                      else "no import stub")
+            raise enhancement_package.EnhancementPackageError(
+                f"{where}: vblank_wait_skip needs a jal to the "
+                f"{enhancement_package.VBLANK_WAIT_SKIP_IMPORT} import stub; its jal reaches "
+                f"0x{target:08x}, {called} (fail-closed refusal)")
+    return sites
 
 
 def _symbol_names(symbol_map_path, name_imports, symbols, import_nids, emitted, resume_owners, func_texts):
@@ -6189,6 +7020,12 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
             f"sites={ENHANCEMENT_PKG_META['sites_count']} "
             f"sha256={ENHANCEMENT_PKG_META['digest']} */"
         )
+        if ENHANCEMENT_HOOK_META is not None:
+            main_out.append(
+                f"/* AOT Code-Hook Package: id={ENHANCEMENT_HOOK_META['id']} "
+                f"v={ENHANCEMENT_HOOK_META['version']} sites={ENHANCEMENT_HOOK_META['sites_count']} "
+                f"sha256={ENHANCEMENT_HOOK_META['digest']} */"
+            )
         main_out += [
             "int nk_enhancement_on(void) {",
             "    static int on = -1;",
@@ -6207,6 +7044,8 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
             "}",
             "",
         ]
+        main_out += _enhancement_phase_lines()
+        main_out += _enhancement_launch_lines()
         main_out += _enhancement_store_lines()
         main_out += _enhancement_data_lines()
     census_entries = sorted({a for a in emitted if a not in resume_owners})
@@ -6344,6 +7183,9 @@ def _write_chunks(base_name, boundaries, renames, backend, llvm_lowered, llvm_fa
                 prefix = m.group(1)
                 a_val = int(m.group(2), 16)
                 parts.append(f"    sr_register(0x{a_val:08x}u, {prefix}_{a_val:08x});\n")
+                if "\n  _nk_resume: {\n" in ft:
+                    parts.append(f"    sr_resume_register_body(0x{a_val:08x}u, "
+                                 f"{prefix}_{a_val:08x});\n")
         parts.append("}\n")
         with open(f"{base_name}_{i}.c", "w", encoding="ascii", newline="\n") as f:
             f.write(rename_generated_entries("".join(parts), renames))
@@ -6416,6 +7258,10 @@ def _print_summary(out_c, base_name, num_files, funcs_per_chunk, chunk_target_by
               f"across {SV_STATS['funcs']} functions")
     if options.promote_registers:
         print(promotion_summary())
+    if options.state_resume:
+        print(f"state-resume: {STATE_RESUME_STATS['points']} resume points in "
+              f"{STATE_RESUME_STATS['bodies']} bodies; "
+              f"{STATE_RESUME_STATS['plain_bodies']} bodies have none")
 
 
 
@@ -6470,6 +7316,7 @@ def _translate(argv):
     stack_census = cli.stack_census
     enhancement_pkg_path = cli.enhancement_package
     enhancement_data_root = cli.enhancement_data_root
+    code_hook_pkg_path = cli.code_hook_package
     cli_extra_specs = cli.extra_elf  # raw "ELF@BASE" strings from --extra-elf=
     cfg_report_path = cli.cfg_report
     symbol_map_path = cli.symbol_map
@@ -6548,7 +7395,7 @@ def _translate(argv):
 
     GUEST_SP_ENTRIES.clear()
     _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhancement_data_root,
-                              symbol_map_path)
+                              symbol_map_path, code_hook_pkg_path)
 
     try:
         impmap = primary_import_map(elf)
@@ -6626,7 +7473,8 @@ def _translate(argv):
             func_texts.append(text)
             emitted.append(a)
             continue
-        applied_before = set(ENHANCEMENT_APPLIED) if ENHANCEMENT_SITES else None
+        applied_before = (set(ENHANCEMENT_APPLIED) if ENHANCEMENT_SITES or ENHANCEMENT_ACE_SITES
+                          else None)
         try:
             func_texts.append(llvm_body("\n".join(emit_function(
                 elf, a, ranges, known, resume_owners=resume_owners,
@@ -6902,6 +7750,8 @@ def main(argv):
         return refusal.status
     finally:
         stop_collecting_unverified_vfpu_uses()
+        # The package loaded for this run ends with it (_reset_enhancement_tables).
+        _reset_enhancement_tables()
 
 
 if __name__ == "__main__":

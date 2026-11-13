@@ -164,6 +164,23 @@ void sdl3vk_set_ui_pass(void (*pass)(const Sdl3VkUiPass *frame));
  * motion; NULL removes it. */
 typedef void *(*Sdl3VkShowPass)(void *cmd, void *src, int *w, int *h);
 void sdl3vk_set_show_pass(Sdl3VkShowPass pass);
+/* How the present a show pass recorded into ended, told once per show pass before that present
+ * returns: `result` is what the present returns (1 shown, -1 failed), and `submission` is the
+ * serial of the queue submission that carries the pass's commands (sdl3vk_present_completed), or
+ * 0 when they were never submitted. A present can fail after its submission (an out-of-date
+ * swapchain), so a failed one may still have run its commands. NULL removes it. */
+typedef void (*Sdl3VkShowDone)(int result, uint64_t submission);
+void sdl3vk_set_show_done(Sdl3VkShowDone done);
+/* The present frame slots: a present records only once its slot's previous submission has
+ * finished, so at most this many present submissions are in flight. A failed present can leave
+ * its slot to the next one, so the slots are not always used in turn. */
+#define SDL3VK_PRESENT_FRAMES 3
+/* The newest present submission the presenter has seen finished (its fence signalled), counted
+ * from 1 in submission order; 0 before any. That submission and every present submission before
+ * it have finished on the GPU: they share one queue, and a fence signals only after every command
+ * submitted to that queue before it. So what a show pass left in a buffer of its own may be read
+ * once this has reached its submission's serial. */
+uint64_t sdl3vk_present_completed(void);
 /* Presents what the show pass returns for no source: no capture, no input latch. Returns as the
  * other presents do, and 0 with nothing to show or no pass. */
 int sdl3vk_present_held(void);
@@ -172,15 +189,23 @@ int sdl3vk_present_held(void);
  * present whose shown image (w x h, in TRANSFER_SRC_OPTIMAL) is smaller than its place in the
  * window, after the show pass and before the frame blit. It may record into the command buffer,
  * and returns an image of exactly out_w x out_h, in TRANSFER_SRC_OPTIMAL, that is copied 1:1 into
- * that place, or NULL to scale as SR_PRESENT_SCALING says. `cpu_frame` is 1 when the picture is
- * a CPU-presented frame (a movie, or any frame of a software-GE run; a held present repeats the
- * last one's kind). `*anime4k` (NULL when the caller does not ask) is set to 1 when Anime4K's
+ * that place, or NULL to scale as SR_PRESENT_SCALING says. `kind` is SDL3VK_FRAME_CPU for a
+ * CPU-presented frame (a movie, or any frame of a software-GE run), SDL3VK_FRAME_MOVIE for a GE
+ * image the GE renderer found to be a movie frame (#2111, sdl3vk_set_present_movie), and
+ * SDL3VK_FRAME_GE otherwise; a held present repeats the last one's kind. `*anime4k` (NULL when
+ * the caller does not ask) is set to 1 when Anime4K's
  * stages made the returned image, so record.json can name them. A capture always reads the
  * guest's frame, so what it returns is never captured. Registered only when SR_PRESENT_UPSCALE or
  * SR_MOVIE_UPSCALE asks for it; NULL removes it. Handles are Vulkan's, passed as void pointers. */
+enum { SDL3VK_FRAME_GE = 0, SDL3VK_FRAME_CPU = 1, SDL3VK_FRAME_MOVIE = 2 };
 typedef void *(*Sdl3VkUpscalePass)(void *cmd, void *src, int w, int h, int out_w, int out_h,
-                                   int cpu_frame, int *anime4k);
+                                   int kind, int *anime4k);
 void sdl3vk_set_upscale_pass(Sdl3VkUpscalePass pass);
+/* The GE renderer says, right before it presents a GPU image (sdl3vk_present_image_ex), whether
+ * that image is a movie frame (#2111): the next present only, CPU presents ignore it. */
+void sdl3vk_set_present_movie(int movie);
+/* The kind (SDL3VK_FRAME_*) the upscale passes were or would be given for the last present. */
+int  sdl3vk_present_frame_kind(void);
 /* The same for the recording (SR_VIDEOREC_DIR, #2138): called with the recording's place for a
  * recorded present whose shown image is smaller than it, so a recording made with the upscaler
  * on is enlarged by it as the window is. A separate pass, so its images keep the recording's

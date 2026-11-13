@@ -21,13 +21,14 @@
  * Off is authentic: the feature takes effect only in an Ace Mode run (g_ace_on, ace.h), whose
  * launch line the launcher always sets, so an authentic run can never turn it on.
  *
- * Setting, read once when the renderer starts (nk_glyph_init_from_env):
- *   SR_GLYPHS   off | on     unset is off; any other value refuses the setting
+ * Setting: the launch line's glyphs key (ace.h; glyphs=on, a missing key or glyphs=off is off), which
+ * the renderer hands to nk_glyph_init once when it starts. ace.c parses the key; this unit reads no
+ * environment.
  *
  * The feature is guest-visible (docs/ENHANCEMENT_CONTRACT.md, the section 11.3 entry "Sharp Game
  * Text"): each present commits the frame, rebuilt glyphs included, to guest VRAM. It is not admitted
- * under section 11.2: it has no launch-line key and no library or per-title switch, so a run that
- * turns it on through the variable says so at start.
+ * under section 11.2: it has a launch-line key but no library or per-title switch yet, so a run that
+ * turns it on says so at start.
  */
 #ifndef NK_GLYPH_RECON_H
 #define NK_GLYPH_RECON_H
@@ -91,21 +92,18 @@ typedef struct NkGlyphConfig {
     int on;   /* 0 off, 1 on */
 } NkGlyphConfig;
 
-/* Parse SR_GLYPHS (NULL = unset). Returns 1 when it is valid (off included), 0 with `why` filled
- * when refused; `out` is then off. Pure: no state. */
-int nk_glyph_parse(const char *glyphs, NkGlyphConfig *out, char *why, size_t why_cap);
-/* Read the setting (only when `enhanced` is nonzero: an Ace run), print its start lines when it is
- * on, refused, or asked for in an authentic run, and make it the run's configuration. Returns the
- * configuration in force. */
-const NkGlyphConfig *nk_glyph_init_from_env(int enhanced);
-/* The line naming a guest-visible setting that is on through the environment, outside section 11.2
- * admission. Writes it to `out` (without a newline) and returns its length when on; returns 0 and
- * an empty string when off. */
+/* Take the launch line's glyphs key (`requested`, nonzero for glyphs=on) for an Ace run (`enhanced`
+ * nonzero), print its start lines when it is on or asked for in an authentic run, and make it the
+ * run's configuration. Returns the configuration in force: off whenever `enhanced` is 0. */
+const NkGlyphConfig *nk_glyph_init(int enhanced, int requested);
+/* The line naming a guest-visible setting that is on outside section 11.2 admission. Writes it to
+ * `out` (without a newline) and returns its length when on; returns 0 and an empty string when
+ * off. */
 size_t nk_glyph_admission_line(const NkGlyphConfig *cfg, char *out, size_t cap);
-/* The lines the last nk_glyph_init_from_env printed, each ending in a newline ("" for none), for
+/* The lines the last nk_glyph_init printed, each ending in a newline ("" for none), for
  * the self-test. */
 const char *nk_glyph_start_lines(void);
-/* Tests: set the configuration directly (no environment, no line). */
+/* Tests: set the configuration directly (no launch line, no start line). */
 void nk_glyph_configure(const NkGlyphConfig *cfg);
 const NkGlyphConfig *nk_glyph_config(void);
 

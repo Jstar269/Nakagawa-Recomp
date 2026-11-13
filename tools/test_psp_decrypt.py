@@ -953,6 +953,30 @@ def builtin_table() -> tuple[dict, dict, dict]:
     return arrays, recipes, {"values": values, "firmware": firmware}
 
 
+def seal_with_builtin_table(payload: bytes, header_tag: int = BUILTIN_GAME_TAG) -> bytes:
+    """Seal ``payload`` with the game recipe read at run time from the public built-in table.
+
+    ``header_tag`` is the tag the container claims; the sealing keys are always the
+    ``BUILTIN_GAME_TAG`` recipe's, so a different header tag models a container the
+    tables do not open.
+
+    The repository carries no sealed bytes and no key outside
+    ``src/core/nk_psp_builtin_keys.c``: the recipe, the KIRK CMD1 value and the
+    keyvault row all come from that table, so the production boundary opens the
+    container with no key file. tools/test_player_package_route.py seals a whole
+    source-owned guest this way to take it through the player's ISO-to-Play route.
+    """
+    arrays, recipes, extra = builtin_table()
+    recipe = recipes[BUILTIN_GAME_TAG]
+    values = extra["values"]
+    return seal_type2_psp(
+        payload, header_tag, arrays[recipe["key"]],
+        values["kirk.cmd1.key"],
+        values[f"kirk.keyvault.{recipe['code']}"],
+        compressed=False, elf_size=len(payload),
+    )
+
+
 @unittest.skipUnless(CC, "no C compiler on PATH")
 class TestBuiltinTables(unittest.TestCase):
     """nk_decrypt with no key file uses the built-in game tables; firmware is
@@ -979,13 +1003,7 @@ class TestBuiltinTables(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _seal_builtin(self, header_tag: int) -> bytes:
-        recipe = self.recipes[BUILTIN_GAME_TAG]
-        return seal_type2_psp(
-            self.elf, header_tag, self.arrays[recipe["key"]],
-            self.values["kirk.cmd1.key"],
-            self.values[f"kirk.keyvault.{recipe['code']}"],
-            compressed=False, elf_size=len(self.elf),
-        )
+        return seal_with_builtin_table(self.elf, header_tag)
 
     def _run(self, name: str, data: bytes, *extra: str):
         src = self.tmp / f"{name}.BIN"

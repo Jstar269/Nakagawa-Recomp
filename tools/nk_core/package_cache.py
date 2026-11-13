@@ -1153,8 +1153,11 @@ def nan_trap_enabled(environment: Mapping[str, str] | None = None) -> bool:
 AOT_ENHANCEMENT_PACKAGE_EPOCH = "aot-enhancement-package-v1"
 AOT_LLVM_BACKEND_EPOCH = "aot-llvm-backend-v1"
 
-#: The sources that decide what the LLVM IR backend (#330) emits and what its IR calls.
-LLVM_BACKEND_SOURCES = ("tools/codegen_llvm.py", "tools/llvm_ir.py",
+#: The sources that decide what the LLVM IR backend (#330) emits and what its IR calls:
+#: the renderer, every tools/ module it imports (test_codegen_llvm derives that closure),
+#: and the runtime ABI shim. `tools/codegen.py`, which hands itself to the renderer rather
+#: than being imported by it, is keyed for both backends by its own hash (`codegen_sha256`).
+LLVM_BACKEND_SOURCES = ("tools/codegen_llvm.py", "tools/llvm_ir.py", "tools/lowering_plan.py",
                         "src/rt/llvm_abi.c", "src/rt/llvm_abi.h")
 
 
@@ -1189,9 +1192,10 @@ def llvm_backend_options(environment: Mapping[str, str] | None = None,
     """AOT cache-key options for the LLVM IR backend, or an empty dict for the C backend.
 
     The C backend returns `{}`, so its keys are unchanged. An LLVM build's key names the
-    backend's own sources and the exact Clang and llvm-link that compile its IR, so an
-    LLVM package is never reused for a C build, for another lowering, or across
-    toolchains; a missing tool fails closed.
+    backend's own sources and the clang and llvm-link programs that compile its IR (each
+    program's SHA-256 and version report, not the libraries it loads), so an LLVM package
+    is never reused for a C build, for another lowering, or after either program changes;
+    a missing tool fails closed.
     """
     env = os.environ if environment is None else environment
     if not llvm_backend_enabled(env):
@@ -1215,14 +1219,17 @@ def ambient_enhancement_package(environment: Mapping[str, str] | None = None) ->
     for which this returns a value: an inherited variable never enhances a build.
     """
     env = os.environ if environment is None else environment
-    if env.get("ENHANCEMENT_PACKAGE", "").strip():
-        return "ENHANCEMENT_PACKAGE"
-    for token in env.get("MAKEFLAGS", "").split():
-        if token.startswith("ENHANCEMENT_PACKAGE=") and token.split("=", 1)[1].strip():
-            return "MAKEFLAGS ENHANCEMENT_PACKAGE"
-    for token in env.get("CODEGEN_USER_ARGS", "").split():
-        if token.startswith("--enhancement-package"):
-            return "CODEGEN_USER_ARGS --enhancement-package"
+    # ENHANCEMENT_CODE_HOOK_PACKAGE, the code-hook package beside it (contract section 9.9), the same.
+    for variable, option in (("ENHANCEMENT_PACKAGE", "--enhancement-package"),
+                             ("ENHANCEMENT_CODE_HOOK_PACKAGE", "--code-hook-package")):
+        if env.get(variable, "").strip():
+            return variable
+        for token in env.get("MAKEFLAGS", "").split():
+            if token.startswith(f"{variable}=") and token.split("=", 1)[1].strip():
+                return f"MAKEFLAGS {variable}"
+        for token in env.get("CODEGEN_USER_ARGS", "").split():
+            if token.startswith(option):
+                return f"CODEGEN_USER_ARGS {option}"
     return None
 
 
@@ -1262,6 +1269,25 @@ def enhancement_package_options(environment: Mapping[str, str] | None = None) ->
     sidecar = pkg_path.with_suffix(".symbols.json")
     if sidecar.is_file():
         result["enhancement_symbol_map_sha256"] = sha256_file(sidecar)
+    # The code-hook package applied beside it (contract section 9.9), named only when there is one,
+    # so the key of a build without one is unchanged.
+    hook_raw = env.get("ENHANCEMENT_CODE_HOOK_PACKAGE", "").strip()
+    if not hook_raw:
+        for token in env.get("CODEGEN_USER_ARGS", "").split():
+            if token.startswith("--code-hook-package="):
+                hook_raw = token.split("=", 1)[1].strip()
+                break
+    if hook_raw:
+        hook_path = Path(hook_raw)
+        try:
+            hook_data = enhancement_package.load_and_validate_package(hook_path)
+        except (OSError, ValueError) as exc:
+            raise PackageCacheError(f"code-hook package is invalid or unreadable: {exc}") from exc
+        result["code_hook_package_id"] = hook_data["id"]
+        result["code_hook_package_sha256"] = enhancement_package.compute_package_digest(hook_data)
+        hook_sidecar = hook_path.with_suffix(".symbols.json")
+        if hook_sidecar.is_file():
+            result["code_hook_symbol_map_sha256"] = sha256_file(hook_sidecar)
     return result
 
 

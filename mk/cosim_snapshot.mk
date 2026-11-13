@@ -37,6 +37,8 @@ COSIM_FP_CONVERT_PRELUDE_FLAG = $(if $(strip $(COSIM_FP_CONVERT_PRELUDE)),-inclu
 COSIM_FPU_REFERENCE_SRC ?= fixtures/cosim/fpu_reference.c
 COSIM_CODEGEN_ARGS ?= --stack-census
 COSIM_LDFLAGS ?= $(filter -fuse-ld=lld,$(LDFLAGS))
+# Extra defines for the harness alone; the resume lane sets COSIM_STATE_RESUME.
+COSIM_HARNESS_DEFS ?=
 
 # The loader and codegen rules are named directly rather than through `pipeline`.
 # This guest deliberately imports nothing, and tools/imports.py fails closed on an
@@ -99,6 +101,14 @@ cosim-selftest-promoted:
 	$(MAKE) cosim-selftest COSIM_DIR=$(BUILD_ROOT)/cosim-promoted \
 		COSIM_CODEGEN_ARGS="--stack-census --promote-registers"
 
+# The cosimulation corpus with resume points (#2172): the same cells, translated with
+# codegen.py --state-resume, and every yield point of the resume cells parked, described and
+# resumed against the uninterrupted run. The ordinary lanes run the same cases and require
+# every one of those threads to be refused.
+cosim-selftest-resume:
+	$(MAKE) cosim-selftest COSIM_DIR=$(BUILD_ROOT)/cosim-resume \
+		COSIM_CODEGEN_ARGS="--state-resume" COSIM_HARNESS_DEFS=-DCOSIM_STATE_RESUME
+
 # Second phase: CHUNK_OBJS is derived with $(wildcard) at parse time, so the
 # generated chunk sources must already exist before this target is parsed.
 # No $(LIBS): the harness stubs the runtime's few host-library symbols, so
@@ -110,7 +120,7 @@ cosim-selftest-promoted:
 # command-line limit, which truncated it mid-path ("cannot find build/cosim-l", #2227).
 cosim-selftest-run: $(GENERIC_TITLE_CONFIG_HEADER) $(CHUNK_OBJS) $(LIBRARY_OBJS) $(BUILD_DIR)/$(GAME_NAME)_recomp.o
 	$(file >$(BUILD_DIR)/cosim_link_objs.rsp,$(CHUNK_OBJS) $(LIBRARY_OBJS) $(BUILD_DIR)/$(GAME_NAME)_recomp.o)
-	$(CC) $(CFLAGS) $(COSIM_LDFLAGS) $(COSIM_FP_CONVERT_PRELUDE_FLAG) -DSR_INSTRUCTION_TRACE \
+	$(CC) $(CFLAGS) $(COSIM_LDFLAGS) $(COSIM_FP_CONVERT_PRELUDE_FLAG) -DSR_INSTRUCTION_TRACE $(COSIM_HARNESS_DEFS) \
 		-I$(GENERIC_TITLE_CONFIG_DIR) -I$(BUILD_DIR) -I$(COSIM_FIXTURE) \
 		-o $(BUILD_DIR)/cosim_selftest.exe \
 		$(COSIM_HARNESS) $(COSIM_FPU_REFERENCE_SRC) @$(BUILD_DIR)/cosim_link_objs.rsp \

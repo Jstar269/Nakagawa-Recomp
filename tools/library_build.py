@@ -209,7 +209,11 @@ def _preexec(priority: str) -> Callable[[], None] | None:
     if os.name == "nt" or priority == "normal":
         return None
     increment = 10 if priority == "below" else 19
-    return lambda: os.nice(increment)
+
+    def lower_priority() -> None:
+        os.nice(increment)
+
+    return lower_priority
 
 
 def _directory_bytes(path: Path) -> int | None:
@@ -227,7 +231,8 @@ def _read_json(path: Path) -> Any:
 
 def summarize_report(report: dict) -> dict[str, Any]:
     """The manifest's view of one bring-up report."""
-    stages = report.get("stages") if isinstance(report.get("stages"), dict) else {}
+    raw_stages = report.get("stages")
+    stages = raw_stages if isinstance(raw_stages, dict) else {}
     stage_rows = {
         name: {"status": detail.get("status"), "duration_ms": detail.get("duration_ms")}
         for name, detail in stages.items() if isinstance(detail, dict)
@@ -238,7 +243,8 @@ def summarize_report(report: dict) -> dict[str, Any]:
         None,
     )
     built = stage_rows.get("build_package", {}).get("status") == "PASS"
-    counts = report.get("counts") if isinstance(report.get("counts"), dict) else {}
+    raw_counts = report.get("counts")
+    counts = raw_counts if isinstance(raw_counts, dict) else {}
     imports = sorted({
         f"{row.get('library')}:{row.get('nid_name') or '?'}"
         for row in report.get("unsupported_imports", []) if isinstance(row, dict)
@@ -247,7 +253,8 @@ def summarize_report(report: dict) -> dict[str, Any]:
         json.dumps(row, sort_keys=True) if not isinstance(row, str) else row
         for row in report.get("runtime_imports", [])
     })
-    presentation = report.get("presentation") if isinstance(report.get("presentation"), dict) else {}
+    raw_presentation = report.get("presentation")
+    presentation = raw_presentation if isinstance(raw_presentation, dict) else {}
     return {
         "outcome": "BUILT" if built else "BUILD_FAILED",
         "reached_stage": report.get("reached_stage"),
@@ -394,7 +401,7 @@ class LibraryBuild:
             record = self.records.get(key)
             unchanged = (record is not None and record.get("size_bytes") == stat.st_size
                          and record.get("mtime_ns") == stat.st_mtime_ns)
-            if not unchanged:
+            if record is None or not unchanged:
                 record = {
                     "source_key": key,
                     "source": path.relative_to(self.disc_root).as_posix(),

@@ -2,7 +2,8 @@
 
 Status: step 1 of the implementation order is built (the switches, the wizard step and the developer log panel).
 The update check is built too, as its own opt-in feature outside online mode (see
-[Update check](#update-check)); news and reports are not. The player is offline unless the user asks
+[Update check](#update-check)), and so is [Discord status](#discord-status), which makes no
+network connection; news and reports are not. The player is offline unless the user asks
 ([`SETUP.md`](SETUP.md#network-use)). This page is the contract the implementation follows. The launcher gets an update check, a reporting system and a news feed, all behind an
 **online mode** that the setup wizard asks about, and a **developer mode** that shows a developer log for
 diagnosing new issues.
@@ -36,8 +37,9 @@ switches, each with one plain sentence (today the Online mode row is hidden, as 
 | Developer mode | Off | "Show a developer log on screen to help track down problems. Stays on this PC." |
 
 Until news and reports exist, the wizard step and Settings > Online and developer do not show the Online mode
-switch or its two parts (news, reports): they say in one line that online features are not built yet, and
-only the Developer mode switch is there. A user whose stored `online_mode` is On still gets the Online mode
+switch or its two parts (news, reports): they say in one line that online features are not built yet. The
+wizard step then has only the Developer mode switch; Settings > Online and developer has the Developer mode switch
+and, in a build that can show it, the [Discord status](#discord-status) switch. A user whose stored `online_mode` is On still gets the Online mode
 switch (with a sentence that it does nothing yet), so it can be turned off. The `online_mode`, `online_news` and `online_reports` settings are still
 stored and still default to off, so a build that adds the features keeps what the user chose; with online mode
 on, Settings will show its two parts again, each on by default and each switchable alone. The step is skippable;
@@ -68,6 +70,36 @@ already are.
   build-provenance attestation; the files in it do.
 
 Hosts, the exact request and the failure cards are in [`SETUP.md`](SETUP.md#network-use).
+
+## Discord status
+
+Built for v0.1.0 (#2259; maintainer decision 2026-11-08): Discord Rich Presence, as PPSSPP offers it,
+opt-in and off by default.
+
+- **Settings > Online and developer** has a **Discord status** switch, off by default
+  (`discord_presence` in `settings.json`; anything but `true` reads as off).
+- **No network connection.** The player writes to the Discord app on the same PC through its local
+  named pipe (`discord-ipc-0` to `discord-ipc-9`; `src/player/discord_presence.c`, over
+  `nk_platform_local_pipe_*`). The protocol is written from Discord's public RPC documentation: a
+  framed JSON handshake with the application ID, then `SET_ACTIVITY`. No Discord SDK is used or
+  vendored.
+- **What Discord receives:** the game's title from the disc's own metadata (the disc ID when it
+  names no title), the play mode (Authentic, Enhanced or Ace) and the start time, plus the player's
+  process ID, which the protocol requires. Never a path, save, user name or anything from the
+  game's memory. Discord shows these on the user's profile; that is the disclosure the switch
+  asks about.
+- **Quiet failure.** If Discord isn't running, the player tries each pipe once, at most once a
+  minute, and logs nothing. A write gives up after 250 ms and no read waits, so the launcher never
+  stalls. The status clears when the game exits and when the player closes.
+- **Application ID.** The project's Discord application ID is one constant,
+  `NK_DISCORD_APPLICATION_ID` in `src/player/discord_presence.h`. It is public, not a secret. An
+  empty or malformed value fails closed: the build cannot show Discord status, and the player never
+  opens the pipe.
+- **Which builds show it.** Windows builds with an application ID. Other builds (no application ID,
+  or Linux and macOS, which have no local pipes here) have no Discord status row; one whose stored
+  setting is On still shows the row, saying the build can't show it, so it can be turned off.
+- **Tests** (`tests/native/test_discord_presence.c`) drive the client against a fake transport and,
+  on Windows, a fake pipe server with a test-only name; they never reach Discord.
 
 ## News
 
@@ -115,32 +147,79 @@ The plan below is the later in-player report, once online mode ships.
   name with placeholders (`%USERPROFILE%`, `<user>`) before display.
 - Release builds keep the panel; it adds no performance cost while hidden.
 
-## Online play (later)
+## Online play
 
-A separate, later switch, **Online play**, lets games use the PSP's own network services. It is not part of online
-mode: online mode lets the launcher talk to one host, while online play lets game code reach the network, so it is
-its own explicit choice with its own sentence in Settings.
+Status: design approved by the owner on 2026-11-06
+([#1139](https://github.com/Jstar269/nakagawa-recomp/issues/1139)). The relay's wire format is built
+(`src/core/nk_adhoc_relay.c`, tested by `relay-codec-selftest`), and so are the transport seam and its in-process
+medium (`src/core/nk_adhoc_net.c`, tested by `adhoc-net-selftest`). Nothing connects yet: the PSP ad hoc services
+are still named refusals.
 
-- **Ad-hoc multiplayer first.** Most PSP multiplayer is local wireless ad-hoc play. Nakagawa implements the PSP ad-hoc
-  services for real and carries the traffic to a relay server the project hosts, or directly between devices on the
-  user's local network. One implementation covers many titles. Speaking the protocol of PPSSPP's ad-hoc server would
-  let Nakagawa players join PPSSPP players; its code may be adapted under the import rules in `AGENTS.md`, section 4.
+A separate switch, **Online play**, lets games use the PSP's ad hoc multiplayer over the internet. It is not part of
+online mode: online mode lets the launcher talk to one host, while online play lets game code reach other consoles,
+so it is its own explicit choice with its own sentence in Settings. It is off by default.
+
+- **Ad hoc multiplayer through a relay.** Most PSP multiplayer is local wireless ad hoc play. Nakagawa carries it
+  through an ad hoc relay server, the way PPSSPP does. Nakagawa speaks the protocol of
+  [aemu_postoffice](https://github.com/Kethen/aemu_postoffice) at commit `02abf18f`, the version PPSSPP pins, so
+  Nakagawa players can play with PPSSPP players, and with PSPs running the aemu plugin, on the same servers.
+- **Servers.** The player ships one server, `socom.cc`, which is PPSSPP's default. The user may enter their own
+  instead. A server the user enters is used only on their PC and never ships.
+- **Two connections, both unencrypted.** The protocol is plain TCP. It has no encryption and no sign-in.
+  - **Lobby** (port 27312): log in, find groups, join one, and learn who is in it.
+  - **Data relay** (port 27313): one connection per ad hoc socket, carrying the game's own packets.
+
+  Anyone on the network path can read this traffic. The consent card and `docs/SETUP.md` say so plainly.
+- **What is sent, and nothing else:**
+  - to the lobby: the disc ID (for example `ULUS10000`), a nickname (the console profile's own, which the user can
+    change), the console profile's MAC address and the group name. The profile's MAC is a random address Nakagawa
+    made for that profile, never the PC's.
+  - to the data relay: the game's own ad hoc packets, addressed by that MAC and the game's ports.
+
+  No game data, saves, packages, guest memory, telemetry or identifier of the PC is sent. The chat message the
+  protocol allows is never sent.
+- **Where it lives.**
+  - **PSP services:** `sceNetAdhoc`, `sceNetAdhocctl` and `sceNetAdhocMatching` are firmware modules, so they are
+    HLE (`AGENTS.md`, section 6). They become real state machines in `src/rt/hle_network.c`. Their PSP-visible
+    results come from the public PSP recordings in pspautotests (`tests/net/adhoc`) and from measurements on the
+    project's PSP. A call stays a named refusal until its sequence is measured.
+  - **Transport:** the services talk to their peers through one small transport interface
+    (`src/core/nk_adhoc_net.h`): the lobby and PDP sockets now, PTP streams later. Its first implementation is an
+    in-process medium whose lobby is translated from PPSSPP's ad hoc server, which speaks the same lobby protocol.
+    One console alone on it is a PSP with no peers in range, the default with Online play off. Two to four consoles
+    on it are a simulation for tests, labelled as such. The relay is the second implementation.
+  - **The relay client** is one module in the game process (`src/core/nk_adhoc_relay*`), because a game's
+    datagrams cannot wait for a trip through the launcher. The player starts a game with the server only when the
+    user turned Online play on. That module is the only runtime file the egress allowlist test lets use the network.
+- **Where the code comes from** (`src/core/PROVENANCE.md` has the details).
+  - The relay codec (`src/core/nk_adhoc_relay.c/.h`) encodes and decodes the protocol's packets; no
+    aemu_postoffice code is copied. The packet layouts and limits come from aemu_postoffice's headers. Its login
+    checks (PPSSPP's `login_user_data`) and port offset are translated from PPSSPP, so `nk_adhoc_relay.c` is
+    labelled derived-translated.
+  - The in-process medium's lobby (`src/core/nk_adhoc_net.c`) is translated from PPSSPP's ad hoc server
+    (`Core/HLE/proAdhocServer.cpp`, GPL-2.0-or-later) and labelled derived-translated. Its PDP half is this
+    project's own.
+  - Importing aemu_postoffice's client code later under `AGENTS.md` section 4 is approved by the owner. That code is
+    marked GPL-3.0-only, and its `PROVENANCE.md` entry would record that.
 - **Infrastructure revivals, per title, later.** A game whose official servers are gone can be revived only by
   rebuilding that game's own server protocol, one title at a time, from interoperability study of the game itself.
 - **Never:** anything that needs the console vendor's online-account sign-in or DNAS authentication. Those depend on
   the vendor's keys and certificates, which stay out of the project like firmware and decryption.
 - **Still fail-closed where unbuilt.** A network service a title calls that Nakagawa does not implement stays a named,
-  visible stop, whatever this switch says; no setting makes a refusal permissive.
-- **Scope of traffic:** the project's relay host and the user's local network only, each listed in `docs/SETUP.md`
-  "Network use" when it ships.
-- **Hardware evidence:** ad-hoc behaviour is measured on PSP hardware (two consoles where the test needs a peer)
+  visible stop whatever this switch says. No setting makes a refusal permissive.
+- **Before the first connection ships:**
+  - a `docs/SETUP.md` "Network use" row names the server, both ports and what is sent;
+  - the egress allowlist test in `tools/test_prereq_fetcher.py` gains the relay module and the shipped server;
+  - the relay's tests use a local fake server only.
+- **Hardware evidence:** ad hoc behaviour is measured on PSP hardware (two consoles where the test needs a peer)
   before it is claimed, as for every other runtime behaviour.
 
 ## Testing online features
 
 - **The default test suite and hosted CI stay offline.** Online code is tested against a stub server on the loopback
-  interface with fixed signed fixtures (a valid update notice, a tampered one, a malformed feed, a timeout), and ad-hoc
-  play against a local relay with two player instances on loopback.
+  interface with fixed signed fixtures (a valid update notice, a tampered one, a malformed feed, a timeout). Ad hoc
+  play is tested against an in-process fake relay and a two-console loopback inside one process, with no host
+  socket.
 - **One labelled online smoke check may use the internet,** opt-in only: it runs when the maintainer starts it or on a
   schedule the maintainer sets, talks only to the project's own host, checks the live update notice's signature,
   fetches the news feed and joins the relay. It is never part of the default suite; without network it reports

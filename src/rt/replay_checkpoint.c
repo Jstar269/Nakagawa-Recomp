@@ -419,6 +419,11 @@ static size_t s_rep_ckpt_next;
 static OskAnswer *s_rep_answ;       /* indexed by request number */
 static size_t s_rep_answ_count;
 static uint64_t s_rep_end;          /* the recording's last frame */
+/* The flight record's newest event at the last matching checkpoint, when there is one: the
+ * position a next run arms to keep the events from there on (#2147). */
+static SrFlightMark s_rep_flight;
+static int s_rep_flight_ok;
+static uint32_t s_rep_flight_frame;
 static int s_rep_have_end_line;
 static NkCheckpoint s_rep_expect;
 
@@ -783,6 +788,33 @@ static void record_answer(uint32_t request, uint32_t pending, AnswResult result,
     fflush(s_rec_fp);
 }
 
+/* The first divergent checkpoint arms the flight recorder, when SR_FLIGHT records (#2147): with
+ * no SR_FLIGHT_TRIGGER mode armed, the record freezes at its newest event, so the bundle keeps
+ * the events just before the divergence. One line says what happened. When it froze the record
+ * and the ring no longer holds the newest event before the last matching checkpoint, a second
+ * line names the trigger that makes the next run keep the first events after that checkpoint.
+ * A mode the user armed is theirs: no second line. Without SR_FLIGHT it says nothing. */
+static void flight_divergence(void) {
+    SrFlightMark at;
+    const int armed = sr_flight_replay_divergence(&at);
+    if (armed == SR_FLIGHT_DIVERGENCE_OFF) return;
+    if (armed == SR_FLIGHT_DIVERGENCE_FROZE)
+        fprintf(stderr,
+                "SR_FLIGHT: the replay mismatch froze the record at event %llu "
+                "(SR_FLIGHT_TRIGGER=checkpoint:%" PRIu32 ":%" PRIu32 ":0)\n",
+                (unsigned long long)at.sequence, at.kind, at.occurrence);
+    else if (armed == SR_FLIGHT_DIVERGENCE_MODE)
+        fputs("SR_FLIGHT: the replay mismatch left the armed SR_FLIGHT_TRIGGER mode in charge\n", stderr);
+    else
+        fputs("SR_FLIGHT: the record had stopped or held no event; the replay mismatch armed nothing\n", stderr);
+    /* The frozen ring holds the last after + 1 events, so it still has the mark when they span it. */
+    if (armed == SR_FLIGHT_DIVERGENCE_FROZE && s_rep_flight_ok && at.sequence - s_rep_flight.sequence > s_rep_flight.after)
+        fprintf(stderr,
+                "SR_FLIGHT: to keep the events after the last matching checkpoint (frame %" PRIu32 "), replay "
+                "again with the same SR_FLIGHT and SR_FLIGHT_TRIGGER=checkpoint:%" PRIu32 ":%" PRIu32 ":%" PRIu32 "\n",
+                s_rep_flight_frame, s_rep_flight.kind, s_rep_flight.occurrence, s_rep_flight.after);
+}
+
 static void rr_vblank(uint32_t vcount) {
     s_rr_vcount = vcount;
     s_rr_seen_vblank = 1;
@@ -810,11 +842,14 @@ static void rr_vblank(uint32_t vcount) {
         if (diff != NK_CKPT_SAME) {
             fprintf(stderr, "REPLAY_MISMATCH frame=%" PRIu32 " index=%zu kind=%s digest=%s\n", vcount, index,
                     nk_ckpt_diff_name(diff), diff == NK_CKPT_FRAME ? "-" : m.name);
+            flight_divergence();
             fflush(stderr);
             s_rr = RR_OFF;
             exit(1);
         }
         s_rep_ckpt_next++;
+        s_rep_flight_ok = sr_flight_mark(&s_rep_flight);
+        s_rep_flight_frame = vcount;
     }
     if (s_rep_ckpt_next == s_rep_ckpt_count && vcount >= s_rep_end) rr_complete(vcount);
 }

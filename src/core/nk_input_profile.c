@@ -215,7 +215,13 @@ static const struct {
     { 226, "lalt" },
     { 228, "rctrl" },
     { 229, "rshift" },
-    { 230, "ralt" }
+    { 230, "ralt" },
+    /* The mouse buttons (#1791, schema 6), past the keyboard's codes. */
+    { NK_HOST_KEY_MOUSE_LEFT,   "mouse:left" },
+    { NK_HOST_KEY_MOUSE_MIDDLE, "mouse:middle" },
+    { NK_HOST_KEY_MOUSE_RIGHT,  "mouse:right" },
+    { NK_HOST_KEY_MOUSE_X1,     "mouse:x1" },
+    { NK_HOST_KEY_MOUSE_X2,     "mouse:x2" }
 };
 
 uint32_t nk_psp_button_bitmask(NkPspButton btn) {
@@ -352,7 +358,8 @@ static const struct {
     { "kp_minus", "Keypad -" },     { "kp_plus", "Keypad +" },      { "kp_enter", "Keypad Enter" },
     { "kp_period", "Keypad ." },    { "lctrl", "Left Ctrl" },       { "lshift", "Left Shift" },
     { "lalt", "Left Alt" },         { "rctrl", "Right Ctrl" },      { "rshift", "Right Shift" },
-    { "ralt", "Right Alt" }
+    { "ralt", "Right Alt" },        { "mouse:left", "Left Click" }, { "mouse:middle", "Middle Click" },
+    { "mouse:right", "Right Click" }, { "mouse:x1", "Mouse 4" },    { "mouse:x2", "Mouse 5" }
 };
 
 void nk_host_key_words(int key, char *buf, size_t buf_sz) {
@@ -376,6 +383,10 @@ void nk_host_key_words(int key, char *buf, size_t buf_sz) {
     } else {
         snprintf(buf, buf_sz, "%s", name);
     }
+}
+
+bool nk_host_key_is_mouse(int key) {
+    return key >= NK_HOST_KEY_MOUSE_FIRST && key < NK_HOST_KEY_MOUSE_FIRST + NK_HOST_KEY_MOUSE_COUNT;
 }
 
 int nk_host_key_from_name(const char *name) {
@@ -1407,6 +1418,13 @@ static bool parse_keyboard_bindings(
                                    &target->secondary, diag_buf, diag_buf_sz)) {
             return false;
         }
+        if (doc_version < NK_INPUT_PROFILE_MOUSE_BUTTONS_SCHEMA_VERSION &&
+            (nk_host_key_is_mouse(target->primary) || nk_host_key_is_mouse(target->secondary))) {
+            diag_set(diag_buf, diag_buf_sz,
+                     "schema_version %d cannot carry mouse buttons (introduced in %d)",
+                     doc_version, NK_INPUT_PROFILE_MOUSE_BUTTONS_SCHEMA_VERSION);
+            return false;
+        }
     }
     return true;
 }
@@ -1906,7 +1924,9 @@ NkResult nk_input_profile_file_parse_json(
      *      that a default key the mapping already binds to a PSP button leaves that
      *      direction unbound. The button keys of the file are never changed, and the
      *      migrated mapping always validates (migrate_stick_keys). A mapping with no
-     *      keyboard_bindings list keeps every default key, stick included.
+     *      keyboard_bindings list keeps every default key, stick included;
+     *      v4 -> v5: no aim member, so mouse aiming stays off;
+     *      v5 -> v6: no mouse buttons in keyboard_bindings, so nothing changes.
      *    v0.0.1 wrote version 3. The file on disk is rewritten only by the next
      *    save, which keeps the original as <file>.v<n>.bak first. A future version
      *    is never downgraded: it is refused with NK_ERROR_NEWER_SCHEMA, and the

@@ -11,12 +11,14 @@ leaves the process and no real pull request is opened.
 
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -3117,6 +3119,388 @@ class CommandLineTests(unittest.TestCase):
     def test_snapshot_cannot_be_posted(self) -> None:
         with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
             self._main(Scenario().raw, "--post")
+
+
+class ForkProducerTests(unittest.TestCase):
+    """The upstream judges the trusted attestation; a fork judges its Fork provenance check (docs/FORKING.md)."""
+
+    def test_a_forks_success_says_what_its_provenance_check_covers(self) -> None:
+        # A fork's success says what its provenance check covers: that check passes paths a pull request
+        # admits itself.
+        upstream = ctv.producers_for("Jstar269/Nakagawa-Recomp", "1330183186")
+        fork = ctv.producers_for("example-user/Nakagawa-Recomp", "42")
+        success = ctv.Verdict("success")
+        self.assertEqual(ctv.status_description(success, upstream), success.description())
+        self.assertEqual(ctv.status_description(success, fork), ctv.FORK_SUCCESS_DESCRIPTION)
+        self.assertLessEqual(len(ctv.FORK_SUCCESS_DESCRIPTION), 140)
+        self.assertIn("admits itself", ctv.FORK_SUCCESS_DESCRIPTION)
+        for verdict in (ctv.Verdict("failure", [ctv.Finding("JOB_FAILED", "x", "y")]), ctv.Verdict("pending", pending=["x"])):
+            self.assertEqual(ctv.status_description(verdict, fork), verdict.description())
+
+    def _main_with_id(self, identity: str | None) -> tuple[mock.MagicMock, str]:
+        """Run main() as the workflow does; return the producer choice's spy and the job log."""
+        import io  # noqa: PLC0415
+
+        scenario = Scenario()
+        gh = FakeGitHub(scenario)
+        environment = {"GITHUB_TOKEN": "token"}
+        if identity is not None:
+            environment["GITHUB_REPOSITORY_ID"] = identity
+        log = io.StringIO()
+        with mock.patch.object(ctv, "git_facts", return_value=_facts()), \
+                mock.patch.object(ctv, "GitHub", return_value=gh), \
+                mock.patch.object(ctv, "producers_for", wraps=ctv.producers_for) as spy, \
+                mock.patch.dict(os.environ, environment), mock.patch("sys.stdout", log):
+            if identity is None:
+                os.environ.pop("GITHUB_REPOSITORY_ID", None)
+            ctv.main(["--repository", gh.repository, "--pull-request", str(PR)])
+        return spy, log.getvalue()
+
+    def test_main_hands_the_runs_repository_and_id_to_the_producer_choice(self) -> None:
+        # main() chooses the producers from the repository and its ID, and the log names the set judged.
+        for identity in ("42", None):
+            with self.subTest(identity=identity):
+                spy, log = self._main_with_id(identity)
+                repository = spy.call_args.args[0]
+                spy.assert_called_once_with(repository, identity)
+                expected = ctv.provenance_mode.mode(repository, identity)
+                self.assertIn(f"Provenance producer set: {expected} (repository {repository}, "
+                              f"ID {identity or 'unknown'})", log)
+
+    def test_upstream_producers_are_unchanged(self) -> None:
+        for repository, repository_id in (
+            ("Jstar269/Nakagawa-Recomp", None),
+            ("jstar269/nakagawa-recomp", None),
+            ("jstar269/nakagawa-recomp", "987654321"),
+            ("jstar269/nakagawa-recomp", "1330183186"),
+            ("Some-Org/Nakagawa-Recomp", "1330183186"),
+            # An unknown ID fails closed to the upstream's producers.
+            ("example-user/Nakagawa-Recomp", None),
+            ("example-user/Nakagawa-Recomp", ""),
+        ):
+            with self.subTest(repository=repository):
+                producers = ctv.producers_for(repository, repository_id)
+                self.assertIs(producers, ctv.PRODUCERS)
+                self.assertIn("Trusted provenance attestation", [item.context for item in producers])
+
+    def test_fork_judges_the_fork_check_from_the_same_workflow_and_event(self) -> None:
+        producers = ctv.producers_for("example-user/Nakagawa-Recomp", "42")
+        contexts = [item.context for item in producers]
+        self.assertNotIn("Trusted provenance attestation", contexts)
+        fork = next(item for item in producers if item.context == "Fork provenance check")
+        upstream = next(item for item in ctv.PRODUCERS if item.context == "Trusted provenance attestation")
+        self.assertEqual(fork.workflow, ".github/workflows/provenance-attestation.yml")
+        self.assertEqual(fork.events, ("pull_request_target",))
+        # The routes that need no pull_request_target, which GitHub blocks by default in public repositories
+        # from 2026-12-02, and the run title that binds such a run to a head.
+        self.assertEqual(fork.named_events, ("workflow_run", "workflow_dispatch"))
+        self.assertEqual((fork.named_events, fork.run_title), (upstream.named_events, upstream.run_title))
+        self.assertEqual(
+            [item for item in producers if item.context != "Fork provenance check"],
+            [item for item in ctv.PRODUCERS if item.context != "Trusted provenance attestation"],
+        )
+
+    def test_a_fork_finds_its_check_by_run_title_when_the_event_route_is_refused(self) -> None:
+        # In a fork GitHub refuses pull_request_target without an Actions policy: the head-attached run ends
+        # startup_failure with no job. The run its requested CI started on the default branch answers instead.
+        head = "a" * 40
+        fork = next(item for item in ctv.producers_for("example-user/Nakagawa-Recomp", "42")
+                    if item.context == "Fork provenance check")
+        refused = {"id": 1, "path": fork.workflow, "event": "pull_request_target", "head_sha": head,
+                   "status": "completed", "conclusion": "startup_failure"}
+        named = {"id": 2, "path": fork.workflow, "event": "workflow_run", "head_sha": "b" * 40,
+                 "head_branch": "main", "default_definition": True, "status": "completed",
+                 "conclusion": "success", "display_title": f"Provenance attestation of {head}"}
+        self.assertEqual(ctv.producer_runs([refused, named], fork, head, "main"), [named])
+        # A run titled for another head, or one that did not run the default branch's copy, is no answer.
+        for change in ({"display_title": f"Provenance attestation of {'c' * 40}"}, {"default_definition": False},
+                       {"head_branch": "topic"}):
+            with self.subTest(change=change):
+                self.assertEqual(ctv.producer_runs([refused, named | change], fork, head, "main"), [refused])
+        self.assertEqual(ctv.unfinished_producers([refused, named], head, "main", (fork,)), [])
+        self.assertEqual(ctv.unfinished_producers([], head, "main", (fork,)), ["Fork provenance check"])
+
+    def test_the_mode_switch_is_protected_gate_code(self) -> None:
+        # The verifier imports tools/provenance_mode.py to choose its producers, so a change to it
+        # needs the CI-change approval even when no workflow line names it.
+        self.assertIn("tools/provenance_mode.py", ctv.PROTECTED_EXTRA)
+        self.assertIn("tools/provenance_mode.py", ctv.protected_paths({}, {}, []))
+
+    @staticmethod
+    def _fork_scenario() -> Scenario:
+        """A healthy fork head: the provenance workflow's job is the Fork provenance check."""
+        scenario = Scenario()
+        for job in scenario.raw["jobs"]["4"]:
+            job["name"] = "Fork provenance check"
+        for check in scenario.raw["check_runs"]:
+            if check["name"] == "Trusted provenance attestation":
+                check["name"] = "Fork provenance check"
+        return scenario
+
+    def _run_main(self, scenario: Scenario, repository: str, identity: str,
+                  summary: Path) -> tuple[FakeGitHub, int, str]:
+        import io  # noqa: PLC0415
+
+        gh = FakeGitHub(scenario)
+        log = io.StringIO()
+        with mock.patch.object(ctv, "git_facts", return_value=_facts()), \
+                mock.patch.object(ctv, "GitHub", return_value=gh), \
+                mock.patch.dict(os.environ, {"GITHUB_TOKEN": "token", "GITHUB_REPOSITORY_ID": identity}), \
+                mock.patch("sys.stdout", log):
+            code = ctv.main(["--repository", repository, "--post", "--target-url", "https://run",
+                             "--pull-request", str(PR), "--summary", str(summary)])
+        return gh, code, log.getvalue()
+
+    def test_a_forks_verdict_reaches_success_through_main_and_links_the_judged_run(self) -> None:
+        # main hands the fork's producers to collect and evaluate, posts the fork text, and its report links
+        # the Fork provenance check run it judged.
+        with tempfile.TemporaryDirectory() as scratch:
+            summary = Path(scratch) / "summary.md"
+            gh, code, log = self._run_main(self._fork_scenario(), "example-user/nakagawa-recomp", "42", summary)
+            report = summary.read_text(encoding="utf-8")
+        self.assertEqual(code, 0, log)
+        self.assertEqual(gh.posts, [(f"statuses/{HEAD}", {
+            "state": "success", "context": ctv.VERDICT_CONTEXT, "description": ctv.FORK_SUCCESS_DESCRIPTION,
+            "target_url": "https://run",
+        })])
+        line = ("Provenance producer set: fork (repository example-user/nakagawa-recomp, ID 42); judged Fork provenance "
+                "check run: https://github.com/example-user/nakagawa-recomp/actions/runs/4")
+        self.assertTrue(report.endswith(f"\n{line}\n"), report)
+        self.assertIn(line, log)
+
+    def test_a_forks_pending_verdict_names_its_own_check(self) -> None:
+        # collect waits for the fork's producer, not the upstream's.
+        scenario = self._fork_scenario()
+        run = next(item for item in scenario.raw["workflow_runs"] if item["id"] == 4)
+        run["status"], run["conclusion"] = "in_progress", None
+        with tempfile.TemporaryDirectory() as scratch:
+            gh, code, _ = self._run_main(scenario, "example-user/nakagawa-recomp", "42", Path(scratch) / "s.md")
+        self.assertEqual(code, 0)
+        ((_, body),) = gh.posts
+        self.assertEqual(body["state"], "pending")
+        self.assertIn("Fork provenance check", body["description"])
+        self.assertNotIn("Trusted provenance attestation", body["description"])
+
+    def test_the_upstreams_report_and_status_are_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            summary = Path(scratch) / "summary.md"
+            gh, code, _ = self._run_main(Scenario(), "Jstar269/Nakagawa-Recomp", "1330183186", summary)
+            report = summary.read_text(encoding="utf-8")
+        self.assertEqual(code, 0)
+        self.assertEqual(gh.posts, [(f"statuses/{HEAD}", {
+            "state": "success", "context": ctv.VERDICT_CONTEXT, "description": ctv.Verdict("success").description(),
+            "target_url": "https://run",
+        })])
+        self.assertTrue(report.endswith(
+            "\n\nProvenance producer set: upstream (repository Jstar269/Nakagawa-Recomp, ID 1330183186)\n"), report)
+        self.assertNotIn("actions/runs/", report)
+        self.assertEqual(ctv.fork_run_note(ctv.normalise(Scenario().raw), ctv.PRODUCERS, "Jstar269/Nakagawa-Recomp"), "")
+
+    def test_a_skipped_upstream_job_fails_the_upstream_verdict(self) -> None:
+        # On the upstream the fork job is skipped and the attestation must still succeed: a skipped
+        # attestation is a failure, never a pass.
+        raw = Scenario().raw
+        for jobs in raw["jobs"].values():
+            for job in jobs:
+                if job["name"] == "Trusted provenance attestation":
+                    job["conclusion"] = "skipped"
+        verdict = ctv.evaluate(ctv.normalise(raw), ctv.producers_for("Jstar269/Nakagawa-Recomp", "1330183186"))
+        self.assertEqual(verdict.state, "failure")
+        self.assertIn("JOB_FAILED", {item.code for item in verdict.findings})
+
+
+class GateCodeTests(unittest.TestCase):
+    """The code that decides what the publication gate passes is a protected path.
+
+    Failing-before: ``tools/publish_audit.py``, ``tools/policy_sync.py`` and the modules they import were
+    not protected. They ran only from the pull request's own checkout, and the trusted attestation did not
+    judge a file that is outside the publication profile and is not implementation. A pull request could
+    therefore loosen the audit, add such a file, and reach a green verdict with no ``ci-change-approved``.
+    """
+
+    # The tools the trusted checkout runs, with secrets or to judge a head, and the public-export job's
+    # tool. Every local hook pre-commit runs is added to these in ``setUpClass``.
+    TRUSTED_ROOTS = (
+        "tools/ci_trust_verdict.py",
+        "tools/provenance_attest_verify.py",
+        "tools/publish_audit.py",
+        "tools/build_public_export.py",
+    )
+    tree: dict[str, str]
+    protected: set[str]
+    hooks: set[str]
+    roots: tuple[str, ...]
+    # Imports that a gate never executes, each with the reason. Everything else a root can load is followed.
+    NOT_LOADED_BY_A_GATE = {
+        # Inside the draft and publish commands only; the audit calls the package validator, which is
+        # pure Python over the package's JSON.
+        ("tools/enhancement_package.py", "tools/analyze.py"),
+        ("tools/enhancement_package.py", "tools/imports.py"),
+        # A subprocess of the public-export job that checks the export's SBOM against the generator's
+        # output. It does not decide whether a file may be published (publish_audit.py and
+        # history_audit.py do), and it loads the analyzer and code generator, about 30 modules that
+        # would all need the approval for every change.
+        ("tools/build_public_export.py", "tools/verify_sbom.py"),
+    }
+    @classmethod
+    def setUpClass(cls) -> None:
+        texts = [path.read_text(encoding="utf-8") for path in sorted(WORKFLOWS.glob("*.y*ml"))]
+        listed = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], check=True, capture_output=True).stdout
+        cls.tree = {path: "x" for path in listed.decode("utf-8").split("\0") if path}
+        cls.protected = ctv.protected_paths(cls.tree, cls.tree, texts)
+        config = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+        cls.hooks = set(re.findall(r"(?m)^\s+entry: python (tools/[A-Za-z0-9_/]+\.py)\b", config))
+        cls.roots = (*cls.TRUSTED_ROOTS, *sorted(cls.hooks))
+
+    @staticmethod
+    def _resolve(module: str, level: int, here: Path) -> list[str]:
+        """Every tools/ file that importing ``module`` from ``here`` loads: packages' __init__ files too."""
+        base = here.parent if level else ROOT / "tools"
+        for _ in range(max(level - 1, 0)):
+            base = base.parent
+        parts = [part for part in module.split(".") if part]
+        if not level and parts[:1] == ["tools"]:
+            parts = parts[1:]
+        found: list[Path] = []
+        for part in parts:
+            if (base / part / "__init__.py").is_file():
+                found.append(base / part / "__init__.py")
+                base = base / part
+            elif (base / f"{part}.py").is_file():
+                found.append(base / f"{part}.py")
+                break
+            else:
+                break
+        return [path.relative_to(ROOT).as_posix() for path in found]
+
+    @classmethod
+    def _imports(cls, path: str) -> set[str]:
+        """Local modules ``path`` imports anywhere in its text, except under ``if TYPE_CHECKING:``."""
+        file = ROOT / path
+        parsed = ast.parse(file.read_text(encoding="utf-8"))
+        typing_only = {id(node) for block in ast.walk(parsed)
+                       if isinstance(block, ast.If) and getattr(block.test, "id", "") == "TYPE_CHECKING"
+                       for statement in block.body for node in ast.walk(statement)}
+        found: set[str] = set()
+        for node in ast.walk(parsed):
+            if id(node) in typing_only:
+                continue
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    found.update(cls._resolve(alias.name, 0, file))
+            elif isinstance(node, ast.ImportFrom):
+                found.update(cls._resolve(node.module or "", node.level, file))
+                for alias in node.names:
+                    found.update(cls._resolve(f"{node.module or ''}.{alias.name}".strip("."), node.level, file))
+        return found | cls._subprocess_tools(parsed)
+
+    @staticmethod
+    def _subprocess_tools(parsed: ast.AST) -> set[str]:
+        """tools/ scripts named as ``<root> / "tools" / "<name>.py"``, the form the gate tools run them by."""
+        found: set[str] = set()
+        for node in ast.walk(parsed):
+            if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+                    and isinstance(node.right, ast.Constant) and isinstance(node.right.value, str)
+                    and node.right.value.endswith(".py")
+                    and isinstance(node.left, ast.BinOp) and isinstance(node.left.right, ast.Constant)
+                    and node.left.right.value == "tools" and (ROOT / "tools" / node.right.value).is_file()):
+                found.add(f"tools/{node.right.value}")
+        return found
+
+    def _closure(self) -> set[str]:
+        seen: set[str] = set()
+        todo = list(self.roots)
+        while todo:
+            path = todo.pop()
+            if path in seen:
+                continue
+            seen.add(path)
+            todo.extend(target for target in self._imports(path) if (path, target) not in self.NOT_LOADED_BY_A_GATE)
+        return seen
+
+    def test_every_module_a_gate_loads_is_protected(self) -> None:
+        closure = self._closure()
+        self.assertEqual(sorted(path for path in closure if path not in self.protected), [])
+        # The roots are real files, and the walk found the modules this change is about.
+        self.assertLessEqual(set(self.roots), set(self.tree))
+        for path in ("tools/publication_policy.py", "tools/provenance_ledger.py", "tools/public_export.py",
+                     "tools/nk_core/git_isolation.py", "tools/nk_core/__init__.py", "tools/enhancement_package.py",
+                     "tools/history_audit.py"):
+            self.assertIn(path, closure)
+
+    def test_the_walk_follows_the_scripts_a_gate_runs(self) -> None:
+        # Failing-before (review 2387-22495ab5fee4 S2): only imports were followed, so a script the
+        # public-export job runs as a subprocess, such as history_audit.py, was outside the closure.
+        self.assertEqual(self._imports("tools/build_public_export.py") & {
+            "tools/publish_audit.py", "tools/history_audit.py", "tools/verify_sbom.py"},
+            {"tools/publish_audit.py", "tools/history_audit.py", "tools/verify_sbom.py"})
+
+    def test_a_new_tools_module_named_like_the_standard_library_is_protected(self) -> None:
+        # Failing-before (review 2387-22495ab5fee4 S3): an added tools/fnmatch.py replaced the fnmatch the
+        # audit imports, and no listed path changed.
+        for path in ("tools/fnmatch.py", "tools/json/__init__.py", "tools/tempfile.pyc", "tools/glob.PY",
+                     "tools/hashlib.cpython-315-x86_64-linux-gnu.so"):
+            with self.subTest(path=path):
+                protected = ctv.protected_paths({}, {path: "1"}, [])
+                self.assertEqual(ctv.protected_changes({}, {path: "1"}, {}, protected),
+                                 [{"path": path, "kind": "added"}])
+        for path in ("tools/fnmatch_rules.py", "tools/json/data.json", "tools/nk_core/json.py", "docs/json.py"):
+            with self.subTest(path=path):
+                self.assertNotIn(path, ctv.protected_paths({}, {path: "1"}, []))
+        # Nothing in the tree today is named so; the rule costs no approval for an existing file.
+        self.assertEqual(sorted(path for path in self.tree if ctv._shadows_stdlib(path)), [])
+
+    def test_the_exemptions_are_real_edges_inside_functions(self) -> None:
+        for source, target in sorted(self.NOT_LOADED_BY_A_GATE):
+            with self.subTest(source=source, target=target):
+                self.assertIn(target, self._imports(source))
+                parsed = ast.parse((ROOT / source).read_text(encoding="utf-8"))
+                module = Path(target).stem
+                top_level = [node for node in parsed.body if isinstance(node, (ast.Import, ast.ImportFrom))
+                             and module in ([alias.name for alias in node.names] + [getattr(node, "module", "")])]
+                self.assertEqual(top_level, [], "an exempt edge must not run when the module is loaded")
+                self.assertNotIn(target, self.protected, "an exempt edge to a protected file needs no exemption")
+
+    def test_every_local_pre_commit_hook_is_protected(self) -> None:
+        # The hooks are read from the configuration, so a new one is a root the day it is added.
+        for hook in ("tools/publish_audit.py", "tools/policy_sync.py", "tools/modified_file_notice_audit.py",
+                     "tools/provenance_record_gap.py", "tools/lint_docs.py"):
+            self.assertIn(hook, self.hooks)
+        self.assertEqual(sorted(self.hooks - self.protected), [])
+        # Every hook that runs a local tool is written in the one form the pattern reads.
+        config = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+        local = re.findall(r"(?m)^\s+entry: (.*tools/.*)$", config)
+        self.assertEqual(len(local), len(re.findall(r"(?m)^\s+entry: python tools/[A-Za-z0-9_/]+\.py\b", config)), local)
+
+    def test_a_change_to_the_audit_needs_the_approval(self) -> None:
+        for path in ("tools/publish_audit.py", "tools/policy_sync.py", "tools/publication_policy.py",
+                     "tools/nk_core/git_isolation.py", ".gitattributes"):
+            with self.subTest(path=path):
+                trusted = {path: "1"}
+                candidate = {path: "2"}
+                protected = ctv.protected_paths(trusted, candidate, [])
+                self.assertEqual(ctv.protected_changes(trusted, candidate, trusted, protected),
+                                 [{"path": path, "kind": "modified"}])
+
+    def test_importing_the_git_environment_helper_loads_no_other_package_module(self) -> None:
+        # tools/nk_core/__init__.py resolves its exports on first use. Were it eager, every gate would run
+        # the preparation engine and the code generator at import, and they would be gate code too.
+        script = ("import sys; sys.path.insert(0, 'tools'); import nk_core.git_isolation; "
+                  "print(sorted(name for name in sys.modules if name.split('.')[0] == 'nk_core'))")
+        result = subprocess.run([sys.executable, "-c", script], cwd=ROOT, check=True, capture_output=True, text=True)
+        self.assertEqual(result.stdout.strip(), "['nk_core', 'nk_core.git_isolation']")
+
+    def test_the_package_still_exports_its_names(self) -> None:
+        script = ("import sys; sys.path.insert(0, 'tools'); import nk_core; "
+                  "from nk_core import TitleRegistry, inspect_iso, package_cache; "
+                  "assert sorted(nk_core.__all__) == sorted(nk_core._EXPORTS); "
+                  "assert all(getattr(nk_core, name) is not None for name in nk_core.__all__); "
+                  "print(TitleRegistry.__module__, inspect_iso.__module__, package_cache.__name__)")
+        result = subprocess.run([sys.executable, "-c", script], cwd=ROOT, check=True, capture_output=True, text=True)
+        self.assertEqual(result.stdout.strip(), "nk_core.title_registry nk_core.iso_inspect nk_core.package_cache")
+        missing = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, 'tools'); import nk_core; nk_core.nope"],
+                                 cwd=ROOT, check=False, capture_output=True, text=True)
+        self.assertIn("AttributeError", missing.stderr)
 
 
 if __name__ == "__main__":

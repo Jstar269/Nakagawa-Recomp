@@ -96,6 +96,37 @@ static bool settings_row(NkUi *ui, uint32_t k, NkUiId button, const char *name,
     return pressed;
 }
 
+/* A named level with a - and a + either side of it (Game volume, Music volume). */
+static void settings_level_row(NkUi *ui, uint32_t k, const char *name, int level, NkUiId down,
+                               NkUiId up, NkUiId text_id, PlayerUiSettingsOp down_op,
+                               PlayerUiSettingsOp up_op, float name_width,
+                               PlayerUiAction *result) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    char line[16];
+    NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_3);
+    NkUiId base = (NkUiId)(SET_ID_ROWS + k * 4u);
+    row.align_y = NK_UI_ALIGN_CENTER;
+    if (!nk_ui_begin_container(ui, base, &row, NULL)) return;
+    {
+        NkUiLayout cell = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(name_width), sizing_fit(),
+                                      0.0f);
+        if (nk_ui_begin_container(ui, base + 1u, &cell, NULL)) {
+            nk_ui_text_role(ui, base + 2u, name, NK_UI_TYPE_BODY, theme->paper);
+            nk_ui_end_container(ui);
+        }
+        if (nk_ui_button(ui, down, "-", NK_UI_BUTTON_SMALL)) *result = settings_op(down_op);
+        (void)snprintf(line, sizeof(line), "%d%%", level);
+        cell.width = sizing_fixed(52.0f);
+        cell.align_x = NK_UI_ALIGN_CENTER;
+        if (nk_ui_begin_container(ui, base + 3u, &cell, NULL)) {
+            nk_ui_text_role(ui, text_id, line, NK_UI_TYPE_DATA, theme->paper);
+            nk_ui_end_container(ui);
+        }
+        if (nk_ui_button(ui, up, "+", NK_UI_BUTTON_SMALL)) *result = settings_op(up_op);
+    }
+    nk_ui_end_container(ui);
+}
+
 /* The game's frames come at 60 Hz (the PSP's 59.94 Hz): a display shows them evenly only when
    its rate is a whole multiple of that. Half a hertz covers the 59.94 family and the rounding
    displays report, and is far from the nearest uneven rate (75, 90, 144, 165). */
@@ -242,39 +273,10 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
         if (nk_ui_card_begin(ui, SET_ID_LAUNCHER, sizing_fixed(card), sizing_grow(),
                              NK_UI_SPACE_2)) {
             nk_ui_eyebrow(ui, SET_ID_TEXT + 0x20u, "Launcher and sound");
-            {
-                /* Volume: the two steps either side of the level. */
-                NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
-                                             NK_UI_SPACE_3);
-                NkUiId base = (NkUiId)(SET_ID_ROWS + 5u * 4u);
-                row.align_y = NK_UI_ALIGN_CENTER;
-                if (nk_ui_begin_container(ui, base, &row, NULL)) {
-                    NkUiLayout cell = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(name_width),
-                                                  sizing_fit(), 0.0f);
-                    if (nk_ui_begin_container(ui, base + 1u, &cell, NULL)) {
-                        nk_ui_text_role(ui, base + 2u, "Game volume", NK_UI_TYPE_BODY,
-                                        theme->paper);
-                        nk_ui_end_container(ui);
-                    }
-                    if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_VOLUME_DOWN, "-",
-                                     NK_UI_BUTTON_SMALL)) {
-                        *result = settings_op(PLAYER_UI_SETTINGS_VOLUME_DOWN);
-                    }
-                    (void)snprintf(line, sizeof(line), "%d%%", model->volume);
-                    cell.width = sizing_fixed(52.0f);
-                    cell.align_x = NK_UI_ALIGN_CENTER;
-                    if (nk_ui_begin_container(ui, base + 3u, &cell, NULL)) {
-                        nk_ui_text_role(ui, SET_ID_TEXT + 0x11u, line, NK_UI_TYPE_DATA,
-                                        theme->paper);
-                        nk_ui_end_container(ui);
-                    }
-                    if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_VOLUME_UP, "+",
-                                     NK_UI_BUTTON_SMALL)) {
-                        *result = settings_op(PLAYER_UI_SETTINGS_VOLUME_UP);
-                    }
-                    nk_ui_end_container(ui);
-                }
-            }
+            settings_level_row(ui, 5u, "Game volume", model->volume,
+                               PLAYER_UI_ID_SETTINGS_VOLUME_DOWN, PLAYER_UI_ID_SETTINGS_VOLUME_UP,
+                               SET_ID_TEXT + 0x11u, PLAYER_UI_SETTINGS_VOLUME_DOWN,
+                               PLAYER_UI_SETTINGS_VOLUME_UP, name_width, result);
             if (settings_row(ui, 6u, PLAYER_UI_ID_SETTINGS_LAUNCHER_FULLSCREEN,
                              "Launcher fullscreen (F11)", settings_on_off(model->launcher_fullscreen),
                              model->launcher_fullscreen, name_width)) {
@@ -296,6 +298,21 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
                              "Check for updates", false, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_CHECK_UPDATES);
             }
+            /* Launcher music (#2207), at the card's end so the rows above keep their
+               places beside the GAME rows. Its level is its own, as the menu sounds'
+               is: Game volume is the game's. */
+            if (settings_row(ui, 14u, PLAYER_UI_ID_SETTINGS_LAUNCHER_MUSIC, "Launcher music",
+                             model->launcher_music_value != NULL
+                                 ? model->launcher_music_value
+                                 : settings_on_off(model->launcher_music),
+                             model->launcher_music, name_width)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC);
+            }
+            settings_level_row(ui, 15u, "Music volume", model->music_volume,
+                               PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_DOWN,
+                               PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP, SET_ID_TEXT + 0x12u,
+                               PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN,
+                               PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP, name_width, result);
             {
                 NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
                 (void)snprintf(line, sizeof(line), "Controller: %s",
@@ -819,6 +836,12 @@ static void settings_accessibility(NkUi *ui, const PlayerUiSettingsModel *model,
     }
 }
 
+/* Settings > Enhanced's text ids: the play mode at 0x400, part row i at 0x404 + 4i, room for every
+   part PLAYER_UI_ID_ENHANCED_PART can name, then the texture pack rows at 0x500 and 0x504. */
+#define SET_ID_ENHANCED_TEXT_END \
+    (0x404u + 4u * (PLAYER_UI_ENHANCED_FIRST_IDS + PLAYER_UI_ENHANCED_MORE_IDS))
+typedef char settings_texpack_text_after_parts[SET_ID_ENHANCED_TEXT_END <= 0x500u ? 1 : -1];
+
 /* Settings > Enhanced (#2055; src/rt/ace.h): the play mode, then one row per Enhanced part, with a
    sentence beside each that says what it does and what it costs. The library's page sets the
    default; a title's page (opened from its Enhanced options) sets that game's choice, where a
@@ -844,7 +867,8 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
     nk_ui_text_role(ui, FLOW_ID_LEAD, nk_ui_frame_text(ui, lead), NK_UI_TYPE_BODY_S,
                     theme->muted);
     if (scr_wizard_box_begin(ui, 0u)) {
-        WizardRow rows[1 + PLAYER_UI_ENHANCED_ROWS];
+        WizardRow rows[1 + PLAYER_UI_ENHANCED_ROWS + 2];
+        size_t measured;
         int count = model->enhanced_row_count < PLAYER_UI_ENHANCED_ROWS
             ? model->enhanced_row_count : PLAYER_UI_ENHANCED_ROWS;
         if (count < 0) count = 0;
@@ -856,11 +880,27 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
             rows[i + 1].value = safe_text(model->enhanced_rows[i].value, "Off");
             rows[i + 1].sentence = safe_text(model->enhanced_rows[i].sentence, "");
         }
+        measured = (size_t)count + 1u;
+        if (model->texpack_row) {
+            rows[measured].name = "Texture pack folder";
+            rows[measured].value = safe_text(model->texpack_value, "None");
+            rows[measured].sentence = safe_text(model->texpack_sentence, "");
+            measured++;
+            if (model->texpack_chosen) {
+                rows[measured].name = "Remove texture pack";
+                rows[measured].value = "Remove";
+                rows[measured].sentence =
+                    "Forgets the folder for this game. The folder is not deleted.";
+                measured++;
+            }
+        }
         /* The column is sized from the widest value each row can show on this page, not
            the one it shows now, so stepping a setting (Smooth motion turning Widescreen
-           off, say) never moves or restacks the rows. */
-        WizardRow widest[1 + PLAYER_UI_ENHANCED_ROWS];
-        memcpy(widest, rows, sizeof(rows[0]) * ((size_t)count + 1u));
+           off, say) never moves or restacks the rows. The texture pack rows change only when
+           a pack is chosen or removed, never when a setting steps, so they are measured as
+           they are. */
+        WizardRow widest[1 + PLAYER_UI_ENHANCED_ROWS + 2];
+        memcpy(widest, rows, sizeof(rows[0]) * measured);
         widest[0].value = settings_widest_value(ui, rows[0].name, rows[0].value,
                                                 model->enhanced_modes,
                                                 model->enhanced_mode_count, NULL, NULL);
@@ -871,20 +911,36 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                                                         row->library_value,
                                                         row->other_value);
         }
-        WizardColumn column = scr_wizard_column(ui, widest, (size_t)count + 1u, inner - 32.0f,
-                                                true);
+        WizardColumn column = scr_wizard_column(ui, widest, measured, inner - 32.0f, true);
         if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACE_MODE, SET_ID_TEXT + 0x400u, rows[0].name,
                              rows[0].value, rows[0].sentence, model->enhanced_on, inner - 32.0f,
                              &column)) {
             *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE);
         }
         for (int i = 0; i < count; i++) {
-            if (scr_wizard_value_state(ui, PLAYER_UI_ID_SETTINGS_ENHANCED_PART + (NkUiId)i,
+            if (scr_wizard_value_state(ui, PLAYER_UI_ID_ENHANCED_PART(i),
                                        SET_ID_TEXT + 0x404u + 4u * (NkUiId)i, rows[i + 1].name,
                                        rows[i + 1].value, rows[i + 1].sentence,
                                        model->enhanced_rows[i].on, off, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART);
                 result->title_index = (size_t)i;
+            }
+        }
+        /* A title's page: its texture pack's folder, which can be chosen in any play mode. Its
+           rows' text ids sit past every part row's (SET_ID_ENHANCED_TEXT_END), so a later part
+           takes the next part id and moves no other row's text. */
+        if (model->texpack_row) {
+            const size_t at = (size_t)count + 1u;
+            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE, SET_ID_TEXT + 0x500u,
+                                 rows[at].name, rows[at].value, rows[at].sentence,
+                                 model->texpack_chosen, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_CHOOSE_TEXPACK);
+            }
+            if (model->texpack_chosen &&
+                scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE, SET_ID_TEXT + 0x504u,
+                                 rows[at + 1u].name, rows[at + 1u].value, rows[at + 1u].sentence,
+                                 false, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_REMOVE_TEXPACK);
             }
         }
         nk_ui_end_container(ui);
@@ -921,9 +977,30 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_NOT_BUILT_LINE, NK_UI_TYPE_BODY_S,
                         theme->warning);
         if (scr_wizard_box_begin(ui, 0u)) {
-            WizardColumn column = scr_online_developer_column(ui, model->online_mode,
-                                                              model->developer_mode,
-                                                              inner - 32.0f);
+            /* Discord status shows when this build can show it, or while it is stored On
+               (so it can be turned off), as the Online mode row does (#2007). */
+            bool discord_row = model->discord_available || model->discord_presence;
+            const char *discord_sentence = model->discord_available
+                ? SCR_DISCORD_SENTENCE : SCR_DISCORD_STORED_ON_SENTENCE;
+            /* One button column for every row the page shows, so a sentence of any of them
+               that would be cut makes them all stack. The Nickname button's value is clamped
+               to half the column, so only its name counts for the column's width. */
+            WizardRow rows[4];
+            size_t row_count = 0u;
+            if (model->online_mode) {
+                rows[row_count++] = (WizardRow){"Online mode", "On",
+                                                SCR_ONLINE_STORED_ON_SENTENCE};
+            }
+            rows[row_count++] = (WizardRow){"Developer mode",
+                                            model->developer_mode ? "On" : "Off",
+                                            WIZARD_DEVELOPER_SENTENCE};
+            if (discord_row) {
+                rows[row_count++] = (WizardRow){"Discord status",
+                                                model->discord_presence ? "On" : "Off",
+                                                discord_sentence};
+            }
+            rows[row_count++] = (WizardRow){"Nickname", "", SCR_NICKNAME_SENTENCE};
+            WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, false);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
                                   "Online mode", SCR_ONLINE_STORED_ON_SENTENCE, true,
@@ -935,6 +1012,12 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                               model->developer_mode, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DEVELOPER);
             }
+            if (discord_row &&
+                scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_DISCORD, SET_ID_TEXT + 0xB0u,
+                                  "Discord status", discord_sentence, model->discord_presence,
+                                  inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DISCORD);
+            }
             {
                 /* The console nickname games read (#2197); its button opens the nickname
                    editor. A long one is shortened here. */
@@ -944,8 +1027,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                      nk_ui_text_clamp(ui, safe_text(model->nickname,
                                                                     NK_NICKNAME_DEFAULT),
                                                       &value, column.cell * 0.5f, 1),
-                                     "What games show as this PSP's nickname. It is never "
-                                     "taken from this PC's user name.",
+                                     SCR_NICKNAME_SENTENCE,
                                      false, inner - 32.0f, &column)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_EDIT_NICKNAME);
                 }
@@ -1092,13 +1174,17 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         nk_ui_text_role(ui, FLOW_ID_TITLE, "PSP fonts", NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD,
                         /* #2005: what the stand-in fonts change, as font/README.md
-                           describes them (shapes, widths) and the converter's Latin set
-                           (tools/ttf2pgf.py, no Cyrillic). */
+                           describes them: letter shapes, Latin line widths within 3 %, and the
+                           characters they lack. The Latin stand-ins have every character
+                           of the PSP's Latin fonts, Cyrillic included (--latin-cyrillic-text
+                           in mk/housekeeping.mk); the Japanese one lacks about 2,200 of the
+                           PSP font's characters, all outside code page 932, and the Korean
+                           one 512, none of them Hangul. */
                         "Optional. Without your PSP's own fonts, every game still runs and "
                         "shows its text in open stand-in fonts. They look different: the "
                         "letters are shaped differently, English lines come out a little wider "
-                        "or narrower, and a few characters such as Cyrillic letters are "
-                        "missing. For the PSP's own look, "
+                        "or narrower, and some rarely used characters of the PSP's Japanese "
+                        "and Korean fonts are missing. For the PSP's own look, "
                         "connect your PSP by USB and choose Get fonts from my PSP, or copy the "
                         ".pgf files from flash0:/font on your PSP to a folder on this PC "
                         "(docs/SETUP.md, \"Copying the fonts from your PSP\") and choose them "

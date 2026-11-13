@@ -34,6 +34,8 @@
 #include "osk_overlay.h"        /* the in-window keyboard: keys in, the frame drawn over */
 #include "osk_overlay_paint.h"
 #include "ace.h"             /* Ace Mode: crisp keyboard; refused by the acceptance checkpoint */
+#include "ge_shared.h"       /* the software renderer's twin rows (#2050) and the VRAM viewer's
+                                decoders (#314) */
 #ifdef SR_SDL3VK
 #include "gpu_sdl3vk/ge_gpu.h"
 #include "gpu_sdl3vk/ace_smooth.h" /* Ace Mode's in-between frames */
@@ -46,7 +48,6 @@
 #include "overlay/overlay_host.h" /* the pause overlay's pages (C9c) */
 #include "gpu_sdl3vk/ace_ui.h"   /* Ace Mode's in-game UI: notice, readout, crisp keyboard */
 #include "nk_platform.h"         /* the system's Reduce motion, for the Ace UI */
-#include "ge_shared.h"           /* the developer VRAM viewer's decoders (#314) */
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_render.h>
 #endif
@@ -83,7 +84,9 @@ enum {
  * (gui_ace_vblank): the events that present reads must reach the game's input state before
  * its controller sample, and a closed window must request quit. That hand-off and the input
  * state it fills (SR_GUI_INPUT_PATH) run against the sdl3vk and runtime stubs in the selftest
- * block at the end of this file; each stub the test does not expect to be called fails it.
+ * block at the end of this file; each stub the test does not expect to be called fails it. So do
+ * smooth motion's show pass and what gui_present does for Ace Mode after its presents, against a
+ * stubbed renderer.
  * The presenters themselves need guest memory, the scheduler, perf telemetry and the Vulkan
  * backend, so they stay out of that binary: a pacing regression must not depend on a stubbed
  * presenter. */
@@ -99,14 +102,16 @@ static Fsr1Pass *s_fsr1;               /* the presentation upscaler, when SR_PRE
 static Fsr1Pass *s_fsr1_rec;           /* its own instance for the recording (#2138), made at the
                                           first recorded present */
 static int s_fsr1_rec_failed;          /* that instance could not be made: said once, not retried */
-/* The movie upscaler (SR_MOVIE_UPSCALE) for CPU-presented frames: Anime4K's CNN stages, then FSR 1 to
- * the exact size. The window and the recording each own a set, as for the presentation upscaler. */
+/* The movie upscaler (SR_MOVIE_UPSCALE) for CPU-presented frames and the GE frames the renderer
+ * finds to be movie frames (#2111): Anime4K's CNN stages, then FSR 1 to the exact size. The window
+ * and the recording each own a set, as for the presentation upscaler. */
 typedef struct {
     Anime4kPass *anime4k;
     Fsr1Pass *fsr1;
     int failed;                        /* the set could not be made: said once, not retried */
     unsigned long long presents;       /* presents it made, said at shutdown */
     unsigned long long anime4k_presents;  /* of those, the ones Anime4K's stages made */
+    unsigned long long ge_presents;    /* of those, GE movie frames (SDL3VK_FRAME_MOVIE) */
 } MovieUpscale;
 static int s_movie_mode;               /* MOVIE_UPSCALE_* */
 static MovieUpscale s_movie, s_movie_rec;
@@ -117,6 +122,8 @@ static uint32_t s_buttons = 0;
  * input-latency measure's start (ace.h). Host-side only. */
 static uint64_t s_input_poll_ns;
 static uint8_t  s_lx = 128, s_ly = 128;   /* live left-stick (0..255, 128=centre), latched each present */
+static int      s_stick_dead_zone = 0;     /* the input profile's stick dead zone in centred counts,
+                                              latched with the stick; 0 without an SDL3 presenter */
 static int      s_pad_present = 0;         /* a controller is currently connected */
 #endif /* SR_GUI_INPUT_PATH */
 #ifndef SR_GUI_PRESENT_SELFTEST
@@ -338,6 +345,181 @@ static int gui_gpu_result_action(int res) {
     default:                         return GUI_GPU_TRY_CPU;   /* NOT_RESIDENT, TARGET_FAILED */
     }
 }
+
+/* The display could not take gui_present's frame: the GPU present found it busy (and the CPU
+ * path did not run), or the CPU present did. `cpu_result` is GUI_CPU_NOT_RUN when there was none. */
+enum { GUI_CPU_NOT_RUN = -2 };
+static int gui_present_busy(int gpu_action, int cpu_result) {
+    return gpu_action == GUI_GPU_NOT_SHOWN || cpu_result == SDL3VK_PRESENT_DISPLAY_BUSY;
+}
+
+/* ---- Ace Mode's smooth motion: the show pass and what became of its present (ace.h,
+ * gpu_sdl3vk/ace_smooth.h) ------------------------------------------------------------------------
+ * gui-present-selftest compiles these with the renderer's calls stubbed, so its runs drive this
+ * code rather than a copy of it. The show pass decides what a present shows; what that changes
+ * for the pace is settled only once the present has reached the screen (gui_ace_show_done). */
+static AcePresentKind s_ace_present_kind;
+static AceShow s_ace_show_pending;     /* what the show pass showed, until its present ends */
+static uint64_t s_ace_between_serial;  /* the in-between it showed, for its measurement */
+static AceMotionQueue s_ace_motion_queue;
+/* A measurement is read at the first show pass after its submission was seen finished. That pass
+ * waited for its own frame slot, so fewer than SDL3VK_PRESENT_FRAMES later submissions can still
+ * be in flight then, and fewer in-betweens than the ring keeps were measured over its record. */
+_Static_assert(SDL3VK_PRESENT_FRAMES < ACE_SMOOTH_MOTION_RING,
+               "the measurement ring must outlast the presents in flight");
+
+/* What the in-betweens moved: each one is measured in its own command buffer (ace_smooth.h), and
+ * its numbers are read here once the presenter has seen that submission finished (ace.h,
+ * AceMotionQueue). One that cannot be read then is counted, never guessed. */
+static void gui_ace_collect_motion(void) {
+    uint64_t serial;
+    while ((serial = ace_motion_queue_due(&s_ace_motion_queue, sdl3vk_present_completed())) != 0u) {
+        AceSmoothMotion m;
+        if (ace_smooth_motion(s_ace_smooth, serial, &m))
+            ace_smooth_note_motion(m.moving, m.eq_old, m.eq_new, m.sum_old, m.sum_new, m.novel);
+        else
+            ace_smooth_note_motion_unread();
+    }
+}
+
+static void *gui_ace_show_pass(void *cmd, void *src, int *w, int *h) {
+    VkCommandBuffer vk_cmd = (VkCommandBuffer)cmd;
+    s_ace_present_kind = ACE_PRESENT_REAL;
+    s_ace_show_pending = ACE_SHOW_REAL;
+    gui_ace_collect_motion();
+    if (!src) {
+        VkImage held = ace_smooth_held(s_ace_smooth, vk_cmd);
+        if (!held) return NULL;
+        ace_smooth_size(s_ace_smooth, w, h);
+        s_ace_present_kind = ACE_PRESENT_HELD;
+        return (void *)held;
+    }
+    /* What the GPU GE published for this image (its HUD boxes and depth), taken on every real
+     * present so it never outlives its frame; NULL for a CPU frame or another image. */
+    const AceSmoothAux *aux = ace_hud_take((VkImage)src);
+    AceShow show = ace_smooth_take();
+    VkImage between = VK_NULL_HANDLE;
+    if (show != ACE_SHOW_REAL)
+        between = ace_smooth_record_aux(s_ace_smooth, vk_cmd, (VkImage)src, *w, *h,
+                                        show == ACE_SHOW_BETWEEN, aux);
+    /* The report's counts of boxes, frames and pairs with and without mask or depth. */
+    AceSmoothAuxStats st;
+    memset(&st, 0, sizeof(st));
+    ace_hud_stats(&st);
+    ace_smooth_aux_stats(s_ace_smooth, &st);
+    ace_smooth_aux_report(&st);
+    if (show == ACE_SHOW_OWED) {
+        /* The frame before this one is owed: the display could not take its present. It is
+         * shown now, in place of an in-between, and the frame just kept is held for the next
+         * VBLANK (ace.h). A pass that no longer has it (the picture changed size) shows the new
+         * frame as it is, and the owed one is counted as never shown. */
+        VkImage owed = ace_smooth_previous(s_ace_smooth, vk_cmd);
+        if (!owed) {
+            ace_smooth_held_missed(0);
+            return NULL;
+        }
+        ace_smooth_size(s_ace_smooth, w, h);
+        s_ace_show_pending = ACE_SHOW_OWED;
+        s_ace_present_kind = ACE_PRESENT_HELD;
+        return (void *)owed;
+    }
+    if (!between) return NULL;
+    s_ace_show_pending = ACE_SHOW_BETWEEN;
+    s_ace_between_serial = ace_smooth_between_serial(s_ace_smooth);
+    s_ace_present_kind = ACE_PRESENT_BETWEEN;
+    return (void *)between;
+}
+
+/* The present the show pass recorded into ended (sdl3vk.h, Sdl3VkShowDone). Shown, the owed frame
+ * or the in-between leaves the new frame held for the VBLANK after, and the in-between's
+ * measurement waits for its submission. Failed (an out-of-date swapchain, or a GPU present the CPU
+ * path then takes over), neither reached the screen. When the present failed after its
+ * submission and the renderer can present again, the owed frame stays owed, as for a busy
+ * display, and the pass drops the new frame it recorded, so the CPU present that follows shows
+ * the owed frame and holds the new one again (ace.h, ace_pace_owed_failed). Failed before its
+ * submission, the pass's commands never ran, so the frame is given up and counted. The new frame of a
+ * failed in-between is not held, so the CPU present shows it as itself and no VBLANK shows it
+ * again, and an in-between nobody saw is not measured. */
+static void gui_ace_show_done(int result, uint64_t submission) {
+    const AceShow shown = s_ace_show_pending;
+    s_ace_show_pending = ACE_SHOW_REAL;
+    if (shown == ACE_SHOW_OWED) {
+        if (result == 1) {
+            ace_smooth_shown_owed(SDL_GetTicksNS());
+        } else if (submission && !sdl3vk_renderer_terminal()) {
+            ace_smooth_unrecord(s_ace_smooth);
+            ace_smooth_owed_failed();
+        } else {
+            ace_smooth_held_missed(0);
+        }
+    } else if (shown == ACE_SHOW_BETWEEN && result == 1) {
+        ace_smooth_shown_between(SDL_GetTicksNS());
+        if (!ace_motion_queue_made(&s_ace_motion_queue, s_ace_between_serial, submission))
+            ace_smooth_note_motion_unread();
+    }
+}
+
+/* The end of a gui_present, for Ace Mode. Every Ace run times its presents, so a run without
+ * smooth motion is the baseline. A flip that re-shows the held frame is that frame's present:
+ * when the display could not take it, the frame is owed (ace.h). */
+static void gui_ace_presented(int accepted, int display_busy) {
+    if (!g_ace_on) return;
+    if (accepted) {
+        ace_smooth_note_present(s_ace_smooth ? s_ace_present_kind : ACE_PRESENT_REAL, SDL_GetTicksNS());
+        /* An in-between stays on screen until the held frame's VBLANK, so a recording keeps it
+         * for its own VBLANK and writes the held frame at the next (videorec.h). */
+        if (s_ace_smooth && s_ace_present_kind == ACE_PRESENT_BETWEEN) sr_videorec_frame_keep();
+    }
+    if (display_busy) ace_smooth_flip_busy();
+}
+
+/* ---- what the GPU GE renderer hands to the software renderer (#2151) -------------------------
+ * While the GPU GE runs, a primitive in a state it cannot draw goes to ge.c's software rasterizer,
+ * and when its target was on the GPU, with a synchronous readback (ge_gpu.c,
+ * software_fallback_begin). gegpu_fallback_counts counts both by reason, always. After each
+ * accepted present this reads them and steps nk_render_fallback_window_step, the rule in
+ * nk_shared_helpers.h that decides when a reason costs enough for long enough to tell the
+ * person: then it is reported once per run as BOOT_EVENT phase=render_fallback, and the player
+ * names it on the game's page. Reading the counts changes nothing the GE draws.
+ * gui-present-selftest drives this code with the counts stubbed. */
+static NkRenderFallbackWindow s_render_window;
+static int s_render_stats = -1;   /* SR_GPU_STATS: a line for each present that fell back; -1 unread */
+
+/* After each gui_present: an accepted present steps the windows. With SR_GPU_STATS, a present
+ * that handed anything to the software renderer also prints its counts, the figures the rule is
+ * checked against (src/rt/gpu_sdl3vk/README.md); a present that did not prints nothing. */
+static void gui_render_fallback_presented(int accepted) {
+    if (!accepted) return;
+    GeGpuFallbackCounts now;
+    NkRenderFallbackDelta delta;
+    gegpu_fallback_counts(&now);
+    const uint16_t crossed = nk_render_fallback_window_step(&s_render_window, &now, &delta);
+    if (s_render_stats < 0) {
+        const char *st = getenv("SR_GPU_STATS");
+        s_render_stats = st && st[0] && strcmp(st, "0") != 0;
+    }
+    if (s_render_stats) {
+        char line[512];
+        int used = snprintf(line, sizeof(line), "GEGPU_FALLBACK present gpu=%lu",
+                            (unsigned long)delta.gpu_prims);
+        int fell = 0;
+        for (int r = 0; r < GEGPU_FALLBACK_REASONS && used > 0 && (size_t)used < sizeof(line); r++) {
+            if (!delta.sw_prims[r] && !delta.readbacks[r]) continue;
+            fell = 1;
+            used += snprintf(line + used, sizeof(line) - (size_t)used, " %s=%llu/%llu",
+                             gegpu_fallback_token(r), (unsigned long long)delta.sw_prims[r],
+                             (unsigned long long)delta.readbacks[r]);
+        }
+        if (fell) fprintf(stderr, "%s\n", line);
+    }
+    for (int r = 0; r < GEGPU_FALLBACK_REASONS; r++) {
+        if (!(crossed & (1u << r))) continue;
+        const NkRenderFallbackEvent e = nk_render_fallback_window_event(&s_render_window,
+                                                                        (NkRenderEffect)r);
+        char line[256];
+        if (nk_render_fallback_event_format(&e, line, sizeof(line)) > 0) sr_gui_boot_event("%s", line);
+    }
+}
 #endif
 
 #ifdef SR_SDL3VK
@@ -377,6 +559,12 @@ static void sync_sdl_input(void) {
     s_input_poll_ns = sched_host_now_ns();
     s_buttons = sdl3vk_buttons();
     sdl3vk_analog(&s_lx, &s_ly);
+    {
+        const NkInputProfile *prof = sdl3vk_get_input_profile();
+        s_stick_dead_zone = prof ? ace_stick_host_counts(prof->axes[NK_PSP_AXIS_ANALOG_X].deadzone_inner,
+                                                         prof->axes[NK_PSP_AXIS_ANALOG_Y].deadzone_inner)
+                                 : 0;
+    }
     s_pad_present = sdl3vk_pad_present();
     sr_gui_feed_keyboard();
     sr_gui_take_pause_request();
@@ -471,7 +659,7 @@ static AceUi *s_ace_ui;
 static int s_ace_ui_ready;
 static int s_ace_keyboard_now;                    /* this present's keyboard is the UI pass's */
 static uint64_t s_ace_first_frame_ns;             /* the first accepted present: the notice starts */
-static char s_ace_words[160];
+static char s_ace_words[ACE_WORDS_MAX];
 
 static void gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     const AceConfig *ace = ace_effective();
@@ -551,7 +739,7 @@ static void gui_ace_ui_init(void) {
         init.device = (VkDevice)vi.device;
         init.queue = (VkQueue)vi.queue;
         init.queue_family = vi.queue_family;
-        init.frames_in_flight = 3u;   /* sdl3vk.c PRESENT_FRAMES; the pass checks every slot */
+        init.frames_in_flight = SDL3VK_PRESENT_FRAMES;   /* the pass checks every slot */
         init.text = nk_overlay_fonts_text(s_ace_fonts);
         s_ace_ui = ace_ui_create(&init, error, sizeof(error));
     }
@@ -573,38 +761,6 @@ static void gui_ace_ui_init(void) {
  * Made once at start in an Ace run that asks for it, and only then is the show pass registered,
  * so any other present records what it did before. Without compute the feature is off for the
  * run, said once. */
-static AcePresentKind s_ace_present_kind;
-
-static void *gui_ace_show_pass(void *cmd, void *src, int *w, int *h) {
-    VkCommandBuffer vk_cmd = (VkCommandBuffer)cmd;
-    s_ace_present_kind = ACE_PRESENT_REAL;
-    if (!src) {
-        VkImage held = ace_smooth_held(s_ace_smooth, vk_cmd);
-        if (!held) return NULL;
-        ace_smooth_size(s_ace_smooth, w, h);
-        s_ace_present_kind = ACE_PRESENT_HELD;
-        return (void *)held;
-    }
-    /* What the GPU GE published for this image (its HUD boxes and depth), taken on every real
-     * present so it never outlives its frame; NULL for a CPU frame or another image. */
-    const AceSmoothAux *aux = ace_hud_take((VkImage)src);
-    AceShow show = ace_smooth_take();
-    VkImage between = VK_NULL_HANDLE;
-    if (show != ACE_SHOW_REAL)
-        between = ace_smooth_record_aux(s_ace_smooth, vk_cmd, (VkImage)src, *w, *h,
-                                        show == ACE_SHOW_BETWEEN, aux);
-    /* The report's counts of boxes, frames and pairs with and without mask or depth. */
-    AceSmoothAuxStats st;
-    memset(&st, 0, sizeof(st));
-    ace_hud_stats(&st);
-    ace_smooth_aux_stats(s_ace_smooth, &st);
-    ace_smooth_aux_report(&st);
-    if (!between) return NULL;
-    ace_smooth_shown_between(SDL_GetTicksNS());
-    s_ace_present_kind = ACE_PRESENT_BETWEEN;
-    return (void *)between;
-}
-
 static void gui_ace_smooth_init(void) {
     char error[160] = "";
     Sdl3VkInfo vi;
@@ -625,7 +781,9 @@ static void gui_ace_smooth_init(void) {
         ace_feature_unavailable(ACE_FEATURE_SMOOTH, error[0] ? error : "no Vulkan device");
         return;
     }
+    ace_motion_queue_reset(&s_ace_motion_queue);
     sdl3vk_set_show_pass(gui_ace_show_pass);
+    sdl3vk_set_show_done(gui_ace_show_done);
     /* The HUD mask and depth: on with smooth motion; SR_ACE_SMOOTH_HUD=0 and SR_ACE_SMOOTH_DEPTH=0
      * turn each off (ace_hud.h), and with both off the in-betweens are today's, byte for byte. */
     ace_hud_enable(1);
@@ -637,6 +795,8 @@ static void gui_ace_smooth_init(void) {
  * side of the frame. Smooth motion's HUD mask and depth are sized to the 480-wide frame, so in
  * this build the two are exclusive: with smooth motion on, Fill reports itself unavailable. */
 static int s_wide_on;
+
+static void gui_cull_sync(void);
 
 static void gui_wide_init(void) {
     const AceConfig *effective = ace_effective();
@@ -651,6 +811,7 @@ static void gui_wide_init(void) {
     s_wide_on = 1;
     ace_confirm(ACE_FEATURE_WIDE);
     ge_wide_set_cull(effective->cull);
+    ace_set_finish_hook(gui_cull_sync);   /* the exit path reads the final count (contract 11.3.6) */
 }
 
 static void gui_cull_sync(void) {
@@ -658,13 +819,15 @@ static void gui_cull_sync(void) {
     ace_set_cull_untracked(ge_wide_cull_untracked());
     if (ge_wide_cull_untracked())
         ace_feature_unavailable(ACE_FEATURE_CULL,
-                                "partial: the 4096-matrix table filled, later matrices were left alone");
+                                "partial: more than 4096 widened matrices were in guest memory at once, "
+                                "later matrices were left alone");
     else if (ge_wide_cull_calls())
         ace_confirm(ACE_FEATURE_CULL);   /* the title's hook has run */
 }
 
 static void gui_wide_release(void) {
     gui_cull_sync();
+    ace_set_finish_hook(NULL);
     if (s_wide_on) (void)ge_wide_set_wing(0);
     ge_wide_set_cull(0);
     s_wide_on = 0;
@@ -759,13 +922,14 @@ static VkImage gui_movie_record(MovieUpscale *m, VkCommandBuffer cmd, VkImage sr
     return out;
 }
 
-static void *gui_upscale_pass(void *cmd, void *src, int w, int h, int out_w, int out_h, int cpu_frame,
+static void *gui_upscale_pass(void *cmd, void *src, int w, int h, int out_w, int out_h, int kind,
                               int *anime4k) {
-    if (cpu_frame && s_movie_mode != MOVIE_UPSCALE_OFF) {
+    if (kind != SDL3VK_FRAME_GE && s_movie_mode != MOVIE_UPSCALE_OFF) {
         VkImage movie = gui_movie_record(&s_movie, (VkCommandBuffer)cmd, (VkImage)src, w, h, out_w, out_h,
                                          anime4k);
         if (movie) {
             s_movie.presents++;
+            if (kind == SDL3VK_FRAME_MOVIE) s_movie.ge_presents++;
             return (void *)movie;
         }
     }
@@ -782,12 +946,14 @@ static unsigned long long s_fsr1_rec_presents;  /* recorded presents the upscale
  * the recording's never make one rebuild its images for the other. Without it the recording is
  * scaled as SR_PRESENT_SCALING says, and record.json names the blits that made it. */
 static void *gui_record_upscale_pass(void *cmd, void *src, int w, int h, int out_w, int out_h,
-                                     int cpu_frame, int *anime4k) {
-    if (cpu_frame && s_movie_mode != MOVIE_UPSCALE_OFF && gui_movie_make(&s_movie_rec, "the recording")) {
+                                     int kind, int *anime4k) {
+    if (kind != SDL3VK_FRAME_GE && s_movie_mode != MOVIE_UPSCALE_OFF &&
+        gui_movie_make(&s_movie_rec, "the recording")) {
         VkImage movie = gui_movie_record(&s_movie_rec, (VkCommandBuffer)cmd, (VkImage)src, w, h, out_w,
                                          out_h, anime4k);
         if (movie) {
             s_movie_rec.presents++;
+            if (kind == SDL3VK_FRAME_MOVIE) s_movie_rec.ge_presents++;
             return (void *)movie;
         }
     }
@@ -810,7 +976,8 @@ static void *gui_record_upscale_pass(void *cmd, void *src, int w, int h, int out
 }
 
 /* SR_PRESENT_UPSCALE=fsr1: AMD FSR 1 (EASU + RCAS) scales the shown picture to the window.
- * SR_MOVIE_UPSCALE=fsr1|anime4k: CPU-presented frames (decoded movies) get their own upscaler,
+ * SR_MOVIE_UPSCALE=fsr1|anime4k: CPU-presented frames (decoded movies) and the GE frames that show a
+ * decoded movie (#2111: movie provenance, ge_shared.h, turned on here) get their own upscaler,
  * Anime4K's CNN stages then FSR 1, whatever SR_PRESENT_UPSCALE says. Both are presentation only:
  * the guest's frame, the decoded movie, guest VRAM and captures are untouched. Both are off by
  * default. */
@@ -837,6 +1004,8 @@ static void gui_upscale_init(void) {
     }
     if (s_movie_mode != MOVIE_UPSCALE_OFF && !gui_movie_make(&s_movie, "the window"))
         s_movie_mode = MOVIE_UPSCALE_OFF;
+    /* The media HLE notes the pictures it decodes only while a movie upscaler can use them. */
+    sr_movie_set_tracking(s_movie_mode != MOVIE_UPSCALE_OFF);
     if (!s_fsr1 && s_movie_mode == MOVIE_UPSCALE_OFF) return;
     sdl3vk_set_upscale_pass(gui_upscale_pass);
     /* A recording (SR_VIDEOREC_DIR) is enlarged the same way, at its own size (#2138). */
@@ -860,8 +1029,9 @@ static void gui_upscale_init(void) {
 
 static void gui_movie_release(MovieUpscale *m, const char *what) {
     if (m->presents)
-        fprintf(stderr, "sdl3vk: the movie upscaler made %llu %spresents, %llu through Anime4K\n",
-                m->presents, what, m->anime4k_presents);
+        fprintf(stderr, "sdl3vk: the movie upscaler made %llu %spresents, %llu through Anime4K, %llu of "
+                        "them GE movie frames\n",
+                m->presents, what, m->anime4k_presents, m->ge_presents);
     anime4k_destroy(m->anime4k);
     fsr1_destroy(m->fsr1);
     memset(m, 0, sizeof(*m));
@@ -880,6 +1050,7 @@ static void gui_upscale_release(void) {
     gui_movie_release(&s_movie, "");
     gui_movie_release(&s_movie_rec, "recorded ");
     s_movie_mode = MOVIE_UPSCALE_OFF;
+    sr_movie_set_tracking(0);
     fsr1_destroy(s_fsr1_rec);
     s_fsr1_rec = NULL;
     s_fsr1_rec_failed = 0;
@@ -888,7 +1059,10 @@ static void gui_upscale_release(void) {
 }
 
 static void gui_ace_smooth_release(void) {
-    if (s_ace_smooth) sdl3vk_set_show_pass(NULL);
+    if (s_ace_smooth) {
+        sdl3vk_set_show_pass(NULL);
+        sdl3vk_set_show_done(NULL);
+    }
     ace_hud_enable(0);
     ace_smooth_destroy(s_ace_smooth);
     s_ace_smooth = NULL;
@@ -1038,6 +1212,9 @@ void gui_init(const char *title) {
                         if (!gpu_ge_started)
                             fprintf(stderr, "gui_init: GPU GE init failed; software GE active\n");
                     }
+                    /* #2111: only the Vulkan GE reads movie notes; the software GE presents from the
+                     * CPU, which the movie upscaler takes without them. */
+                    if (!gpu_ge_started) sr_movie_set_tracking(0);
                     gui_report_render_path(true, true, gpu_ge_asked, gpu_ge_started);
                 }
                 sr_gui_request_launcher_foreground(true, NULL,
@@ -1146,6 +1323,7 @@ int gui_interactive(void) {
 uint32_t gui_buttons(void) { return s_buttons; }
 uint64_t gui_input_poll_ns(void) { return s_input_poll_ns; }
 void gui_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = s_lx; if (ly) *ly = s_ly; }
+int gui_stick_dead_zone(void) { return s_stick_dead_zone; }
 int gui_pad_present(void) { return s_pad_present; }
 uint32_t gui_consume_button_pulses(void) {
     uint32_t pulses = 0u;
@@ -1192,6 +1370,16 @@ static uint32_t bgra_from_fb_word(uint32_t p, int fmt) {
 
 static void convert_fb_pixels(uint32_t fbaddr, int fmt, uint32_t stride) {
     for (int y = 0; y < PSP_H; y++) {
+        /* Enhanced 32-bit colour (#2050): the software renderer's host twin gives the row when
+         * it is on (RGBA8); off, and always under the Vulkan renderer, it returns 0. */
+        uint32_t *row = s_px + y * PSP_W;
+        if (ge_twin_present_row(fbaddr, fmt, stride, y, row, PSP_W)) {
+            for (int x = 0; x < PSP_W; x++) {
+                const uint32_t c = row[x];
+                row[x] = ((c & 0xFFu) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFFu);
+            }
+            continue;
+        }
         for (int x = 0; x < PSP_W; x++) {
             uint32_t i = (uint32_t)(y * (int)stride + x);
             uint32_t p;
@@ -1382,7 +1570,11 @@ void gui_ace_vblank(uint32_t vcount) {
     int result = sdl3vk_present_held();
     sync_sdl_input();
     if (result == 0) gui_quit_request();
+    /* Shown, or not: a display too busy to take it leaves the frame owed, tried again at the
+     * next VBLANK or shown by the next flip (ace.h); a failed present or a closed window gives it
+     * up, and it is counted. */
     if (result == 1) ace_smooth_note_present(ACE_PRESENT_HELD, SDL_GetTicksNS());
+    else ace_smooth_held_missed(result == SDL3VK_PRESENT_DISPLAY_BUSY);
 #else
     (void)vcount;
 #endif
@@ -1433,6 +1625,8 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
 
     int accepted = 1;
 #ifdef SR_SDL3VK
+    int gpu_action = GUI_GPU_TRY_CPU;   /* what the GPU present did */
+    int cpu_result = GUI_CPU_NOT_RUN;   /* what the CPU present returned, when one ran */
     if (s_sdl3) {
         /* 1. GPU VRAM image fast path: any frame the GPU rasterizer produced is presented
          *    directly from its Vulkan image. GEGPU_PRESENT_SHOWN skips the CPU path;
@@ -1465,7 +1659,7 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
 #endif
         int res = osk_cpu ? GEGPU_PRESENT_NOT_RESIDENT : gegpu_present(fbaddr, fmt, stride);
         sync_sdl_input();
-        const int gpu_action = gui_gpu_result_action(res);
+        gpu_action = gui_gpu_result_action(res);
         if (gpu_action == GUI_GPU_CLOSED) gui_quit_request();
         /* Not shown, not failed: the CPU path must not show it either. */
         if (gpu_action == GUI_GPU_NOT_SHOWN && sr_perf_enabled) sr_perf_present_busy();
@@ -1532,20 +1726,19 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
          * frame capture receive, and guest VRAM is untouched. */
         if (osk_cpu && sr_osk_overlay_active())
             osk_overlay_paint(sr_osk_overlay_view(), s_px, PSP_W, PSP_H);
-        int present_result;
 #ifndef SR_GUI_PRESENT_SELFTEST
         const int wide_cols = gui_wide_compose(fbaddr);
         if (wide_cols) {
-            present_result = sdl3vk_present_rgba_ex(s_wide_px, wide_cols, PSP_H);
+            cpu_result = sdl3vk_present_rgba_ex(s_wide_px, wide_cols, PSP_H);
             /* Shown: the buffer's next draw begins a new frame and clears its canvas. */
-            if (present_result == 1) ge_wide_shown(fbaddr);
+            if (cpu_result == 1) ge_wide_shown(fbaddr);
         } else
 #endif
-        present_result = sdl3vk_present_rgba(s_px);
+        cpu_result = sdl3vk_present_rgba(s_px);
         sync_sdl_input();
-        if (present_result == 0) gui_quit_request();
-        if (present_result == SDL3VK_PRESENT_DISPLAY_BUSY && sr_perf_enabled) sr_perf_present_busy();
-        accepted = present_result == 1;
+        if (cpu_result == 0) gui_quit_request();
+        if (cpu_result == SDL3VK_PRESENT_DISPLAY_BUSY && sr_perf_enabled) sr_perf_present_busy();
+        accepted = cpu_result == 1;
         goto pace;
     }
 #endif
@@ -1582,13 +1775,10 @@ pace:
 #endif
 #if defined(SR_SDL3VK) && !defined(SR_GUI_PRESENT_SELFTEST)
     if (accepted && s_ace_ui_ready && !s_ace_first_frame_ns) s_ace_first_frame_ns = SDL_GetTicksNS();
-    /* Every Ace run times its presents, so a run without smooth motion is the baseline. */
-    if (accepted && g_ace_on) {
-        ace_smooth_note_present(s_ace_smooth ? s_ace_present_kind : ACE_PRESENT_REAL, SDL_GetTicksNS());
-        /* An in-between stays on screen until the held frame's VBLANK, so a recording keeps it
-         * for its own VBLANK and writes the held frame at the next (videorec.h). */
-        if (s_ace_smooth && s_ace_present_kind == ACE_PRESENT_BETWEEN) sr_videorec_frame_keep();
-    }
+#endif
+#ifdef SR_SDL3VK
+    gui_ace_presented(accepted, gui_present_busy(gpu_action, cpu_result));
+    gui_render_fallback_presented(accepted);
 #endif
     if (accepted) {
         s_shown_fb.addr = fbaddr;
@@ -1636,6 +1826,7 @@ static int          s_pause_host_tried;
 static NkOverlayControls s_pause_controls;
 /* The developer pages (#314), filled only in developer mode. */
 static NkOverlayVram s_pause_vram;
+static NkOverlayVramCapture s_pause_vram_captures[NK_OVERLAY_VRAM_CAPTURES];
 static NkUiImage     s_pause_vram_image;
 static uint32_t     *s_pause_vram_px;    /* the decoded window, GE_VRAM_VIEW_MAX_* words */
 static NkOverlayProfile s_pause_profile;
@@ -1728,57 +1919,60 @@ static void gui_pause_describe_controls(void) {
                                  nk_overlay_host_pad_family(s_pause_host));
 }
 
-/* A GE-local framebuffer offset, or any view of VRAM, as its 0x04000000 address, the fold
- * ge_framebuffer() applies to the draw target; any other address is left as it is. */
-static uint32_t gui_vram_fold(uint32_t addr) {
-    if (addr < 0x00200000u || (addr & 0x0F000000u) == 0x04000000u)
-        return 0x04000000u | (addr & 0x001FFFFFu);
-    return addr;
+_Static_assert((int)GE_VRAM_VIEW_DISPLAY == (int)NK_OVERLAY_VRAM_DISPLAY &&
+                   (int)GE_VRAM_VIEW_DRAW == (int)NK_OVERLAY_VRAM_DRAW &&
+                   (int)GE_VRAM_VIEW_DEPTH == (int)NK_OVERLAY_VRAM_DEPTH &&
+                   (int)GE_VRAM_VIEW_TEXTURE == (int)NK_OVERLAY_VRAM_TEXTURE &&
+                   (int)GE_VRAM_VIEW_SOURCES == (int)NK_OVERLAY_VRAM_SOURCE_COUNT &&
+                   GE_VRAM_VIEW_DEPTH16 == NK_OVERLAY_VRAM_DEPTH16,
+               "the GE's VRAM view sources are the overlay page's, index for index");
+_Static_assert(GE_VRAM_CAPTURE_MAX == NK_OVERLAY_VRAM_CAPTURES,
+               "the overlay's Capture row lists every capture ge.c records");
+static void gui_pause_copy_vram_sources(const GeVramSources *sources,
+                                        NkOverlayVramSurface *out, bool *present,
+                                        bool *swizzled) {
+    for (int i = 0; i < GE_VRAM_VIEW_SOURCES; i++) {
+        const GeVramWindow *w = &sources->window[i];
+        NkOverlayVramSurface s = { w->addr, w->stride, w->width, w->height, w->format };
+        out[i] = s;
+        present[i] = sources->present[i] != 0;
+    }
+    *swizzled = sources->texture_swizzled != 0;
 }
 
-/* The surfaces the GE state names while the game is paused, as the VRAMDUMP sidecar names
- * them: the displayed framebuffer, the draw target, the depth buffer and the bound texture. */
+/* The surfaces the display and the GE state name while the game is paused, from the same
+ * ge.c function vram-view-identity-selftest runs (ge_shared.h): the displayed framebuffer, the
+ * draw target, the depth buffer and the bound texture. The same for each SR_VRAMDUMP capture
+ * this run wrote, as ge.c recorded them at that present (ge_vram_capture_info): the page offers
+ * a Capture row only when there is one. */
 static void gui_pause_describe_vram(void) {
-    const GeState *ge = ge_state_ptr();
     NkOverlayVram *v = &s_pause_vram;
-    memset(v->sources, 0, sizeof(v->sources));
-    memset(v->present, 0, sizeof(v->present));
-    if (s_shown_fb.valid) {
-        NkOverlayVramSurface s = { s_shown_fb.addr, s_shown_fb.stride, PSP_W, PSP_H,
-                                   (uint32_t)s_shown_fb.fmt & 3u };
-        v->sources[NK_OVERLAY_VRAM_DISPLAY] = s;
-        v->present[NK_OVERLAY_VRAM_DISPLAY] = 1;
+    GeVramSources sources;
+    unsigned count = ge_vram_capture_count();
+    ge_vram_view_sources(s_shown_fb.addr, s_shown_fb.stride, (uint32_t)s_shown_fb.fmt,
+                         s_shown_fb.valid, &sources);
+    gui_pause_copy_vram_sources(&sources, v->sources, v->present, &v->texture_swizzled);
+    if (count > NK_OVERLAY_VRAM_CAPTURES) count = NK_OVERLAY_VRAM_CAPTURES;
+    v->capture_count = 0;
+    for (unsigned i = 0; i < count; i++) {
+        NkOverlayVramCapture *c = &s_pause_vram_captures[v->capture_count];
+        if (!ge_vram_capture_info(i, &c->vblank, &sources)) break;
+        gui_pause_copy_vram_sources(&sources, c->sources, c->present, &c->texture_swizzled);
+        v->capture_count++;
     }
-    if (!ge) return;
-    if (ge->fbw) {
-        NkOverlayVramSurface s = { ge_framebuffer(), ge->fbw, PSP_W, PSP_H, ge->fbfmt & 3u };
-        v->sources[NK_OVERLAY_VRAM_DRAW] = s;
-        v->present[NK_OVERLAY_VRAM_DRAW] = 1;
-    }
-    if (ge->zbp) {
-        NkOverlayVramSurface s = { gui_vram_fold(ge->zbp), ge->zbw ? ge->zbw : (ge->fbw ? ge->fbw : 512u),
-                                   PSP_W, PSP_H, NK_OVERLAY_VRAM_DEPTH16 };
-        v->sources[NK_OVERLAY_VRAM_DEPTH] = s;
-        v->present[NK_OVERLAY_VRAM_DEPTH] = 1;
-    }
-    if (ge->tex_addr && ge->tex_w > 0 && ge->tex_h > 0) {
-        NkOverlayVramSurface s = { ge->tex_addr, ge->tex_bufw ? ge->tex_bufw : (uint32_t)ge->tex_w,
-                                   (uint32_t)ge->tex_w, (uint32_t)ge->tex_h, ge->tex_fmt };
-        v->sources[NK_OVERLAY_VRAM_TEXTURE] = s;
-        v->present[NK_OVERLAY_VRAM_TEXTURE] = 1;
-        v->texture_swizzled = ge->tex_swizzle != 0;
-    }
+    v->captures = v->capture_count ? s_pause_vram_captures : NULL;
 }
 
-/* Decodes the viewer's window into the page's image. Reads only: the surface decoder copies
- * guest bytes as stored, and the bound texture goes through the texture decoder with the GE
- * state left as it is (ge_shared.h). Alpha is shown opaque, as the PSP display shows a
- * framebuffer. */
+/* Decodes the viewer's window into the page's image through ge_vram_view_decode, the decode
+ * vram-view-identity-selftest runs. Reads only: the surface decoder copies guest bytes as
+ * stored, and the bound texture goes through the texture decoder with the GE state left as it
+ * is (ge_shared.h). Alpha is shown opaque, as the PSP display shows a framebuffer. */
 static void gui_pause_decode_vram(void) {
     const NkOverlayVramView *view = nk_overlay_host_vram_view(s_pause_host);
     const size_t capacity = (size_t)GE_VRAM_VIEW_MAX_WIDTH * GE_VRAM_VIEW_MAX_HEIGHT;
+    GeVramWindow window;
     uint32_t width, height;
-    int ok;
+    int result;
     s_pause_vram.image = NULL;
     s_pause_vram.note = NULL;
     if (!view || !view->chosen) return;
@@ -1787,24 +1981,38 @@ static void gui_pause_decode_vram(void) {
         s_pause_vram.note = "Out of memory for the decoded window.";
         return;
     }
-    if (view->source == NK_OVERLAY_VRAM_TEXTURE) {
-        const GeState *ge = ge_state_ptr();
-        ok = ge && ge_vram_decode_bound_texture(s_pause_vram_px, capacity);
-        width = ok ? (uint32_t)ge->tex_w : 0u;
-        height = ok ? (uint32_t)ge->tex_h : 0u;
-        if (!ok)
-            s_pause_vram.note = "The bound texture cannot be read now: it is outside guest memory, "
-                                "larger than 512 pixels, or a GE capture is running.";
-    } else {
-        const NkOverlayVramSurface *w = &view->view;
-        ok = ge_vram_decode_surface(w->addr, w->width, w->height, w->stride, w->format,
-                                    s_pause_vram_px);
-        width = w->width;
-        height = w->height;
-        if (!ok) s_pause_vram.note = "This window cannot be read now.";
+    window.addr = view->view.addr;
+    window.stride = view->view.stride;
+    window.width = view->view.width;
+    window.height = view->view.height;
+    window.format = view->view.format;
+    /* A capture decodes from the image it wrote (ge_vram_capture_decode), not from memory now. */
+    if (view->capture > 0)
+        result = ge_vram_capture_decode((unsigned)(view->capture - 1),
+                                        view->source == NK_OVERLAY_VRAM_TEXTURE, &window,
+                                        s_pause_vram_px, capacity, &width, &height);
+    else
+        result = ge_vram_view_decode(view->source == NK_OVERLAY_VRAM_TEXTURE, &window,
+                                     s_pause_vram_px, capacity, &width, &height);
+    if (result == GE_VRAM_VIEW_TEXTURE_REFUSED) {
+        s_pause_vram.note = "The bound texture cannot be read now: it is outside guest memory, "
+                            "larger than 512 pixels, or a GE capture is running.";
+        return;
     }
-    if (!ok) return;
-    for (size_t i = 0; i < (size_t)width * height; i++) s_pause_vram_px[i] |= 0xFF000000u;
+    if (result == GE_VRAM_VIEW_CAPTURE_TEXTURE) {
+        s_pause_vram.note = "This texture is swizzled, uses a palette or is compressed: decode it "
+                            "from the capture's files with nk_cli vram.";
+        return;
+    }
+    if (result == GE_VRAM_VIEW_CAPTURE_LOST) {
+        s_pause_vram.note = "This capture's image file is missing, or changed since it was written.";
+        return;
+    }
+    if (result != GE_VRAM_VIEW_SHOWN) {
+        s_pause_vram.note = view->capture > 0 ? "This window cannot be shown from the capture."
+                                              : "This window cannot be read now.";
+        return;
+    }
     s_pause_vram_image.width = width;
     s_pause_vram_image.height = height;
     s_pause_vram_image.rgba_pm = (uint8_t *)s_pause_vram_px;
@@ -1935,10 +2143,10 @@ static int gui_pause_compose(int w, int h, int rgba) {
         model.hud_on = sdl3vk_hud_is_enabled() != 0;
         /* Enhanced or Ace (ace.h): the menu says what it does; the readout is a live switch while
          * the in-game UI can draw it. Nothing in an authentic run. */
-        static char ace_caption[200];
+        static char ace_caption[ACE_WORDS_MAX + 40];   /* "<tier>: " and the words */
         ace_caption[0] = '\0';
         if (g_ace_on) {
-            char words[160];
+            char words[ACE_WORDS_MAX];
             if (ace_feature_words(words, sizeof(words)) > 0)
                 snprintf(ace_caption, sizeof(ace_caption), "%s: %s", ace_tier_name(), words);
             else
@@ -2395,6 +2603,10 @@ uint32_t sdl3vk_consume_button_pulses(void) {
 }
 void sdl3vk_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = 128; if (ly) *ly = 128; }
 int sdl3vk_pad_present(void) { return 1; }
+/* Each input read takes the stick dead zone from the session's input profile; NULL (no profile)
+ * gives 0, which is what every test but the dead-zone one expects. */
+static const NkInputProfile *s_stub_profile;
+const NkInputProfile *sdl3vk_get_input_profile(void) { return s_stub_profile; }
 /* Each input poll stamps the host clock (late pad sampling's latency measure); the stub clock is
  * what the test sets. */
 static uint64_t s_stub_now_ns;
@@ -2414,7 +2626,10 @@ int sr_exit_request_stop_due(void) { s_stub_stop_due_calls++; return 0; }
 int sr_capture_is_armed(void) { return 0; }
 
 /* The held present reads the window's events, as every present does: the tap lands there. */
+static int (*s_stub_presenter)(VkImage src);   /* when set, it makes the held present */
+
 int sdl3vk_present_held(void) {
+    if (s_stub_presenter) return s_stub_presenter(VK_NULL_HANDLE);
     if (s_stub_held_result == -2) selftest_unexpected("sdl3vk_present_held");
     s_stub_held_calls++;
     s_stub_pulse |= s_stub_tap;
@@ -2501,12 +2716,540 @@ static void selftest_held_present_window_closed_requests_quit(void) {
     s_quit_requested = 0;
     g_ace_on = 0;
 }
+
+/* The game's sample reads the host's stick dead zone with the stick: the larger of the active
+ * input profile's X and Y deadzone_inner in centred counts (ace_stick_host_counts), 0 with no
+ * profile. */
+static void selftest_stick_dead_zone_from_profile(void) {
+    static NkInputProfile prof;
+    const int sdl3 = s_sdl3;
+    s_sdl3 = 1;
+    memset(&prof, 0, sizeof(prof));
+    s_stub_profile = NULL;
+    (void)selftest_game_sample();
+    assert(gui_stick_dead_zone() == 0);
+    prof.axes[NK_PSP_AXIS_ANALOG_X].deadzone_inner = 7849;   /* the default profile's */
+    prof.axes[NK_PSP_AXIS_ANALOG_Y].deadzone_inner = 7849;
+    s_stub_profile = &prof;
+    (void)selftest_game_sample();
+    assert(gui_stick_dead_zone() == 30);
+    prof.axes[NK_PSP_AXIS_ANALOG_X].deadzone_inner = 0;
+    prof.axes[NK_PSP_AXIS_ANALOG_Y].deadzone_inner = 25700;  /* the larger axis, for both */
+    (void)selftest_game_sample();
+    assert(gui_stick_dead_zone() == 100);
+    s_stub_profile = NULL;
+    (void)selftest_game_sample();
+    assert(gui_stick_dead_zone() == 0);
+    s_sdl3 = sdl3;
+}
+
+/* ---- a held frame the display could not take (SDL3VK_PRESENT_DISPLAY_BUSY) ---------------
+ * A 30 FPS title with smooth motion, run through the production show pass (gui_ace_show_pass),
+ * its present's outcome (gui_ace_show_done), gui_present's busy and Ace steps (gui_present_busy,
+ * gui_ace_presented) and the VBLANK's held present (gui_ace_vblank). Stubbed are the renderer and
+ * the presenter. The renderer is a fake AceBetween that keeps the two newest frames and measures
+ * each in-between it makes. Images are names: real frame n is BUSY_IMG_FRAME + n, the in-between
+ * that leads to it BUSY_IMG_BETWEEN + n, so the presenter can tell what reached the screen. The
+ * presenter stands in for present_common: a busy display returns before the show pass, a present
+ * may be made to fail after its submission (an out-of-date swapchain), and each present's slot
+ * wait has seen only the submission SDL3VK_PRESENT_FRAMES back finished, the least the real one
+ * guarantees. A failed GPU present is retried by the CPU path, as gegpu_present's TARGET_FAILED
+ * is in gui_present. `reflip`: the title flips each frame twice, so the second flip's own present
+ * is the held one. */
+enum { BUSY_FRAMES = 240, BUSY_FB = 0x44000, BUSY_IMG_FRAME = 0x10000, BUSY_IMG_BETWEEN = 0x20000 };
+#define BUSY_NO_FAIL 0xFFFFFFFFu
+typedef struct {
+    int real[BUSY_FRAMES];      /* times the frame's own picture reached the screen */
+    int between[BUSY_FRAMES];   /* times its in-between did */
+    int order_ok;               /* real pictures reached the screen in the game's order */
+    int last_real;
+    int (*busy_at)(uint32_t);   /* the display cannot take a present at that VBLANK */
+    uint32_t vcount;            /* the VBLANK the presents are made in */
+    uint32_t fail_vcount;       /* the first presents made in it fail after their submission */
+    int fails;                  /* how many */
+    uint64_t submitted;         /* present submissions made */
+    unsigned keeps;             /* pictures the recording was told to keep (sr_videorec_frame_keep) */
+} BusyRun;
+
+static BusyRun *s_busy;
+
+static struct {
+    int have_new, have_old;     /* the frames the pass keeps, by number */
+    int newest, older;
+    uint64_t serial;            /* in-betweens made */
+    uint64_t submission[ACE_SMOOTH_MOTION_RING];  /* the submission carrying each one's measurement */
+    uint64_t completed;         /* what sdl3vk_present_completed reports */
+    uint64_t lost;              /* the one measurement that cannot be read; 0 for none */
+} s_stub_smooth;
+
+static VkImage busy_image(int base, int n) { return (VkImage)(uintptr_t)(unsigned)(base + n); }
+
+VkImage ace_smooth_held(AceBetween *s, VkCommandBuffer cmd) {
+    (void)s; (void)cmd;
+    return s_stub_smooth.have_new ? busy_image(BUSY_IMG_FRAME, s_stub_smooth.newest) : VK_NULL_HANDLE;
+}
+
+VkImage ace_smooth_previous(AceBetween *s, VkCommandBuffer cmd) {
+    (void)s; (void)cmd;
+    return s_stub_smooth.have_old ? busy_image(BUSY_IMG_FRAME, s_stub_smooth.older) : VK_NULL_HANDLE;
+}
+
+void ace_smooth_unrecord(AceBetween *s) {
+    (void)s;
+    if (!s_stub_smooth.have_old) return;
+    s_stub_smooth.newest = s_stub_smooth.older;
+    s_stub_smooth.have_old = 0;
+}
+
+/* A failed present is an out-of-date swapchain, unless a run makes the renderer terminal. */
+static int s_stub_terminal;
+int sdl3vk_renderer_terminal(void) { return s_stub_terminal; }
+
+void ace_smooth_size(const AceBetween *s, int *w, int *h) {
+    (void)s;
+    if (w) *w = PSP_W;
+    if (h) *h = PSP_H;
+}
+
+VkImage ace_smooth_record_aux(AceBetween *s, VkCommandBuffer cmd, VkImage src, int w, int h, int between,
+                              const AceSmoothAux *aux) {
+    (void)s; (void)cmd; (void)w; (void)h; (void)aux;
+    const int had = s_stub_smooth.have_new;
+    s_stub_smooth.older = s_stub_smooth.newest;
+    s_stub_smooth.have_old = had;
+    s_stub_smooth.newest = (int)(uintptr_t)src - BUSY_IMG_FRAME;
+    s_stub_smooth.have_new = 1;
+    if (!between || !had) return VK_NULL_HANDLE;
+    s_stub_smooth.serial++;
+    s_stub_smooth.submission[s_stub_smooth.serial % ACE_SMOOTH_MOTION_RING] = 0;   /* not submitted yet */
+    return busy_image(BUSY_IMG_BETWEEN, s_stub_smooth.newest);
+}
+
+void ace_smooth_aux_stats(const AceBetween *s, AceSmoothAuxStats *out) { (void)s; (void)out; }
+uint64_t ace_smooth_between_serial(const AceBetween *s) { (void)s; return s_stub_smooth.serial; }
+const AceSmoothAux *ace_hud_take(VkImage src) { (void)src; return NULL; }
+void ace_hud_stats(AceSmoothAuxStats *out) { (void)out; }
+uint64_t sdl3vk_present_completed(void) { return s_stub_smooth.completed; }
+void sr_videorec_frame_keep(void) { if (s_busy) s_busy->keeps++; }
+
+/* A record read before the presenter saw its submission finish may be torn: that fails the test.
+ * One the ring no longer holds is refused, as ace_smooth.c refuses it. */
+int ace_smooth_motion(const AceBetween *s, uint64_t serial, AceSmoothMotion *out) {
+    (void)s;
+    const uint64_t submission = s_stub_smooth.submission[serial % ACE_SMOOTH_MOTION_RING];
+    if (serial + ACE_SMOOTH_MOTION_RING <= s_stub_smooth.serial) return 0;
+    if (!submission || submission > s_stub_smooth.completed)
+        selftest_unexpected("ace_smooth_motion before its submission finished");
+    if (serial == s_stub_smooth.lost) return 0;
+    memset(out, 0, sizeof(*out));
+    out->moving = 100u;
+    out->sum_old = 300u;
+    out->sum_new = 300u;
+    return 1;
+}
+
+static void busy_run_shown(BusyRun *r, VkImage image) {
+    const int name = (int)(uintptr_t)image;
+    if (name >= BUSY_IMG_BETWEEN) {
+        r->between[name - BUSY_IMG_BETWEEN]++;
+        return;
+    }
+    const int frame = name - BUSY_IMG_FRAME;
+    if (frame < r->last_real) r->order_ok = 0;
+    r->last_real = frame;
+    r->real[frame]++;
+}
+
+/* present_common, as far as the show pass sees it. */
+static int busy_present(VkImage src) {
+    BusyRun *r = s_busy;
+    if (r->busy_at(r->vcount)) return SDL3VK_PRESENT_DISPLAY_BUSY;
+    int result = 1;
+    if (r->vcount == r->fail_vcount && r->fails > 0) {
+        r->fails--;
+        result = -1;
+    }
+    const uint64_t next = r->submitted + 1u;
+    if (next > SDL3VK_PRESENT_FRAMES) s_stub_smooth.completed = next - SDL3VK_PRESENT_FRAMES;
+    const uint64_t made = s_stub_smooth.serial;
+    int w = PSP_W, h = PSP_H;
+    VkImage alt = (VkImage)gui_ace_show_pass((void *)&s_stub_held, (void *)src, &w, &h);
+    VkImage shown = alt ? alt : src;
+    uint64_t submission = 0;
+    if (!shown) {
+        result = -1;                    /* nothing to show: nothing is submitted */
+    } else {
+        submission = ++r->submitted;
+        if (s_stub_smooth.serial != made)
+            s_stub_smooth.submission[s_stub_smooth.serial % ACE_SMOOTH_MOTION_RING] = submission;
+        if (result == 1) busy_run_shown(r, shown);
+    }
+    gui_ace_show_done(result, submission);
+    return result;
+}
+
+/* A flip's gui_present: the GPU present (gegpu_present turns a failed one into TARGET_FAILED),
+ * the CPU present of the same frame when that one says to try it, then gui_present's own end. */
+static void busy_flip(int frame) {
+    const int gpu = busy_present(busy_image(BUSY_IMG_FRAME, frame));
+    const int res = gpu == 1 ? GEGPU_PRESENT_SHOWN
+                  : gpu == SDL3VK_PRESENT_DISPLAY_BUSY ? GEGPU_PRESENT_DISPLAY_BUSY : GEGPU_PRESENT_TARGET_FAILED;
+    const int gpu_action = gui_gpu_result_action(res);
+    int cpu_result = GUI_CPU_NOT_RUN;
+    if (gpu_action == GUI_GPU_TRY_CPU) cpu_result = busy_present(busy_image(BUSY_IMG_FRAME, frame));
+    gui_ace_presented(gpu_action == GUI_GPU_SHOWN || cpu_result == 1, gui_present_busy(gpu_action, cpu_result));
+}
+
+static void busy_run(BusyRun *r, int reflip, int (*busy_at)(uint32_t), uint32_t fail_vcount, int fails,
+                     uint64_t lost) {
+    memset(r, 0, sizeof(*r));
+    r->order_ok = 1;
+    r->last_real = -1;
+    r->busy_at = busy_at;
+    r->fail_vcount = fail_vcount;
+    r->fails = fails;
+    assert(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=x2;sas=off;tess=off;twin=off", NULL));
+    s_on = 1; s_sdl3 = 1; s_offscreen = 0; s_quit_requested = 0;
+    s_ace_smooth = (AceBetween *)&s_stub_held;
+    memset(&s_stub_smooth, 0, sizeof(s_stub_smooth));
+    s_stub_smooth.lost = lost;
+    ace_motion_queue_reset(&s_ace_motion_queue);
+    s_ace_show_pending = ACE_SHOW_REAL;
+    s_busy = r;
+    s_stub_presenter = busy_present;
+    uint64_t now = 1000000u;
+    for (int n = 0; n < BUSY_FRAMES; n++) {
+        const uint32_t v = 2u * (uint32_t)n;
+        r->vcount = v;
+        ace_note_target_draw(BUSY_FB);
+        (void)ace_flip(BUSY_FB, 512u * 272u * 4u, v, now);
+        busy_flip(n);
+        gui_ace_vblank(v);
+        now += PSP_SCANOUT_PERIOD_NS;
+        r->vcount = v + 1u;
+        if (reflip) {
+            (void)ace_flip(BUSY_FB, 512u * 272u * 4u, v + 1u, now);
+            busy_flip(n);
+        }
+        gui_ace_vblank(v + 1u);
+        now += PSP_SCANOUT_PERIOD_NS;
+    }
+    s_stub_presenter = NULL;
+    s_busy = NULL;
+}
+
+static int busy_never(uint32_t v) { (void)v; return 0; }
+static int busy_one_held(uint32_t v) { return v == 401u; }          /* frame 200's held present */
+static int busy_every_odd(uint32_t v) { return v >= 301u && (v & 1u); }
+static int busy_stretch(uint32_t v) { return v >= 401u && v <= 404u; }
+
+static int busy_count(const int *a, int from, int to) {
+    int n = 0;
+    for (int i = from; i < to; i++) n += a[i] != 0;
+    return n;
+}
+
+static int busy_most(const int *a) {
+    int most = 0;
+    for (int i = 0; i < BUSY_FRAMES; i++) if (a[i] > most) most = a[i];
+    return most;
+}
+
+static int busy_sum(const int *a) {
+    int n = 0;
+    for (int i = 0; i < BUSY_FRAMES; i++) n += a[i];
+    return n;
+}
+
+/* Every in-between that reached the screen is measured, or counted unread, or still waits for
+ * its submission; none is measured twice, and nothing else is. The recording kept each one. */
+static void busy_check_motion(const BusyRun *r, uint64_t unread) {
+    AceMotionStats m;
+    ace_motion_stats(&m);
+    const uint64_t shown = (uint64_t)busy_sum(r->between);
+    assert(m.unread == unread);
+    assert(m.measured + m.unread + s_ace_motion_queue.count == shown);
+    assert(s_ace_motion_queue.dropped == 0u);
+    assert(r->keeps == (unsigned)shown);
+}
+
+static void busy_check_report(const char *want) {
+    char json[ACE_REPORT_MAX];
+    assert(ace_report_json(json, sizeof(json)) > 0);
+    if (!strstr(json, want)) {
+        fprintf(stderr, "gui-present-selftest: the report lacks %s. The report:\n%s", want, json);
+        abort();
+    }
+}
+
+static void selftest_busy_display_keeps_real_frames(void) {
+    BusyRun r;
+    AcePaceStats st;
+    static const uint64_t busy_one[2] = { 1u, 2u };     /* reflip: its flip's present and its VBLANK */
+    static const uint64_t busy_odd[2] = { 90u, 180u };
+    static const uint64_t busy_four[2] = { 4u, 5u };
+    for (int reflip = 0; reflip <= 1; reflip++) {
+        /* The display takes every present: each frame has its in-between and its own picture. */
+        busy_run(&r, reflip, busy_never, BUSY_NO_FAIL, 0, 0u);
+        ace_pace_stats(&st);
+        assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES && r.order_ok);
+        assert(busy_count(r.between, 100, BUSY_FRAMES) == BUSY_FRAMES - 100);
+        assert(st.busy == 0u && st.superseded == 0u);
+        busy_check_motion(&r, 0u);
+        if (!reflip) assert(busy_most(r.real) == 1 && busy_most(r.between) == 1);
+
+        /* One held present finds the display busy: that frame is shown by the next flip's
+         * present in place of the in-between, the new frame at its own VBLANK, and the frames
+         * after carry on with in-betweens. */
+        busy_run(&r, reflip, busy_one_held, BUSY_NO_FAIL, 0, 0u);
+        ace_pace_stats(&st);
+        assert(r.between[200] && r.real[200]);              /* was: never shown as itself */
+        assert(!r.between[201] && r.real[201]);
+        assert(r.between[202] && r.real[202]);
+        assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES && r.order_ok);
+        assert(st.busy == busy_one[reflip] && st.superseded == 0u);
+        busy_check_motion(&r, 0u);
+        busy_check_report(reflip ? "\"superseded\": 0, \"unpaired\": 0, \"busy\": 2}"
+                                 : "\"superseded\": 0, \"unpaired\": 0, \"busy\": 1}");
+
+        /* A display that takes only every second present, the flips': every game frame is
+         * shown as itself, in order, and no made-up picture takes a real one's place. */
+        busy_run(&r, reflip, busy_every_odd, BUSY_NO_FAIL, 0, 0u);
+        ace_pace_stats(&st);
+        assert(busy_count(r.real, 0, BUSY_FRAMES - 1) == BUSY_FRAMES - 1 && r.order_ok);
+        assert(busy_count(r.between, 152, BUSY_FRAMES) == 0);
+        assert(st.busy == busy_odd[reflip] && st.superseded == 0u);
+        busy_check_motion(&r, 0u);
+
+        /* The display is busy for four VBLANKs: frame 200's held present, frame 201's flip and
+         * VBLANK, frame 202's flip. Frames 201 and 202 never reach a show pass, as without smooth
+         * motion. At frame 202's VBLANK the display takes a present again, and the owed frame
+         * 200 is shown there, never replaced by a newer one. A title that flips each frame twice
+         * re-flips 202 there, so 202's picture was taken too: that present shows 200 and holds
+         * 202, which the next flip shows in place of 203's in-between. Either way every frame
+         * whose present was taken is shown, in order, nothing is superseded, no in-between
+         * stands in for a real frame, and in-betweens resume with frame 204. */
+        busy_run(&r, reflip, busy_stretch, BUSY_NO_FAIL, 0, 0u);
+        ace_pace_stats(&st);
+        assert(r.order_ok && r.real[200] == 1 && !r.real[201] && !r.between[201] && !r.between[202]);
+        assert(reflip ? r.real[202] == 1 : !r.real[202]);
+        assert(r.real[203] && !r.between[203] && r.between[204] && r.real[204]);
+        assert(busy_most(r.real) == 1 + reflip);    /* a re-flip's present shows its frame again */
+        assert(st.busy == busy_four[reflip] && st.superseded == 0u);
+        busy_check_motion(&r, 0u);
+    }
+
+    /* The present that should show the owed frame 200 fails after its submission (frame 201's
+     * flip). Nothing reached the screen, so 200 stays owed, and gui_present's CPU present of the
+     * same flip shows it and holds 201, which its VBLANK shows. Every frame is shown once, in
+     * order; the failed present is counted with the busy ones. */
+    busy_run(&r, 0, busy_one_held, 402u, 1, 0u);
+    ace_pace_stats(&st);
+    assert(r.real[200] == 1 && r.between[200] && r.real[201] == 1 && !r.between[201]);
+    assert(r.real[202] == 1 && r.between[202] == 1 && r.order_ok && busy_most(r.real) == 1);
+    assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES);
+    assert(st.busy == 2u && st.superseded == 0u);
+    busy_check_motion(&r, 0u);
+    busy_check_report("\"superseded\": 0, \"unpaired\": 0, \"busy\": 2}");
+
+    /* Both presents of frame 201's flip fail, the GPU one and the CPU one: 200 stays owed and its
+     * VBLANK shows it. 201 never reached the screen, as a frame whose presents fail is lost
+     * without smooth motion, and 202 follows 200 as itself, since no in-between pairs it with a
+     * frame two steps back. */
+    busy_run(&r, 0, busy_one_held, 402u, 2, 0u);
+    ace_pace_stats(&st);
+    assert(r.real[200] == 1 && r.between[200] && !r.real[201] && !r.between[201]);
+    assert(r.real[202] == 1 && !r.between[202] && r.between[203] && r.order_ok && busy_most(r.real) == 1);
+    assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES - 1);
+    assert(st.busy == 3u && st.superseded == 0u);
+    busy_check_motion(&r, 0u);
+    busy_check_report("\"superseded\": 0, \"unpaired\": 1, \"busy\": 3}");
+
+    /* The same failed present with a renderer that can present nothing any more: nothing can
+     * show frame 200 later, so it is given up and counted, and 201 is not held, so no VBLANK
+     * shows it a second time. Only the give-up's accounting is checked here: a real terminal
+     * renderer fails the CPU present too, which this stand-in still lets through. */
+    s_stub_terminal = 1;
+    busy_run(&r, 0, busy_one_held, 402u, 1, 0u);
+    s_stub_terminal = 0;
+    ace_pace_stats(&st);
+    assert(!r.real[200] && r.between[200] && r.real[201] == 1 && !r.between[201]);
+    assert(r.real[202] == 1 && r.between[202] == 1 && r.order_ok && busy_most(r.real) == 1);
+    assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES - 1);
+    assert(st.busy == 1u && st.superseded == 1u);
+    busy_check_motion(&r, 0u);
+    busy_check_report("\"superseded\": 1, \"unpaired\": 0, \"busy\": 1}");
+
+    /* An in-between's present fails after its submission (frame 150's flip): nobody saw it, so it
+     * is not measured, and its frame, shown by the CPU path, is not held for a second showing. */
+    busy_run(&r, 0, busy_never, 300u, 1, 0u);
+    ace_pace_stats(&st);
+    assert(!r.between[150] && r.real[150] == 1 && r.between[151] == 1 && busy_most(r.real) == 1);
+    assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES && r.order_ok);
+    assert(st.busy == 0u && st.superseded == 0u);
+    busy_check_motion(&r, 0u);
+
+    /* A measurement that cannot be read when its submission has finished is counted, never
+     * guessed. */
+    busy_run(&r, 0, busy_never, BUSY_NO_FAIL, 0, 5u);
+    busy_check_motion(&r, 1u);
+    g_ace_on = 0;
+}
+
+/* ---- the render fallback rule and its event (#2151) -----------------------------------------
+ * gui_present's step after each present (gui_render_fallback_presented) with the GE's counts
+ * stubbed: the boot event it writes goes to SR_BOOT_EVENT_FILE, as in a player launch, and is
+ * read back with the player's parser. Each case uses the rule's own constants, so a change to
+ * them is tested as it stands. */
+static GeGpuFallbackCounts s_stub_fallback;
+void gegpu_fallback_counts(GeGpuFallbackCounts *out) { *out = s_stub_fallback; }
+
+static char s_fallback_events_path[1024];
+
+static void fallback_reset(void) {
+    FILE *f = fopen(s_fallback_events_path, "wb");
+    assert(f);
+    fclose(f);
+    memset(&s_render_window, 0, sizeof(s_render_window));
+    memset(&s_stub_fallback, 0, sizeof(s_stub_fallback));
+    s_stub_fallback.ready = 1;
+    s_stub_fallback.gpu_prims = 0xFFFFFF00u;   /* the GPU count wraps during each case */
+    gui_render_fallback_presented(1);          /* the first sample only primes the window */
+}
+
+/* One window of accepted presents; the first carries all of the window's counts, and a present
+ * the slot rule dropped (accepted 0) comes between each two. */
+static void fallback_window(int r, uint32_t gpu, unsigned long long sw, unsigned long long rb) {
+    for (uint32_t f = 0; f < NK_RENDER_FALLBACK_WINDOW_FRAMES; f++) {
+        if (f == 0) {
+            s_stub_fallback.gpu_prims += gpu;
+            s_stub_fallback.sw_prims[r] += sw;
+            s_stub_fallback.readbacks[r] += rb;
+        }
+        gui_render_fallback_presented(1);
+        gui_render_fallback_presented(0);
+    }
+}
+
+/* The events written since fallback_reset; every line must be one. */
+static int fallback_events(NkRenderFallbackEvent *out, int max) {
+    FILE *f = fopen(s_fallback_events_path, "rb");
+    char line[512];
+    int n = 0;
+    assert(f);
+    while (fgets(line, sizeof(line), f)) {
+        assert(n < max);
+        if (!nk_render_fallback_event_parse(line, &out[n])) {
+            fprintf(stderr, "gui-present-selftest: not a render_fallback event: %s", line);
+            abort();
+        }
+        n++;
+    }
+    fclose(f);
+    return n;
+}
+
+static void selftest_render_fallback_rule(int argc, char **argv) {
+    NkRenderFallbackEvent ev[8];
+    const uint32_t W = NK_RENDER_FALLBACK_WINDOW_FRAMES, K = NK_RENDER_FALLBACK_WINDOWS;
+    const unsigned long long P = NK_RENDER_FALLBACK_MIN_PRIMS, B = NK_RENDER_FALLBACK_READBACKS;
+    const uint32_t G = 400000u;                  /* GPU primitives a window: a busy scene */
+    assert(K >= 2u && P >= 2u && B >= 1u);
+    assert(argc >= 1 && argv[0]);
+    (void)snprintf(s_fallback_events_path, sizeof(s_fallback_events_path), "%s.events", argv[0]);
+#ifdef _WIN32
+    assert(_putenv_s("SR_BOOT_EVENT_FILE", s_fallback_events_path) == 0);
+#else
+    assert(setenv("SR_BOOT_EVENT_FILE", s_fallback_events_path, 1) == 0);
+#endif
+    s_render_stats = 0;
+
+    /* The event's names are the GE's reasons. */
+    for (int r = 0; r < GEGPU_FALLBACK_REASONS; r++)
+        assert(strcmp(gegpu_fallback_token(r), nk_render_effect_name((NkRenderEffect)r)) == 0);
+
+    /* At the primitive threshold: nothing until the K-th window in a row, then one event that
+     * carries those windows' counts; never a second one in the same run. */
+    fallback_reset();
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_STENCIL, G, P, 0u);
+    assert(fallback_events(ev, 8) == 0);
+    fallback_window(GEGPU_FALLBACK_STENCIL, G, P, 0u);
+    assert(fallback_events(ev, 8) == 1);
+    assert(ev[0].reason == NK_RENDER_EFFECT_STENCIL && ev[0].frames == K * W &&
+           ev[0].sw_prims == K * P && ev[0].gpu_prims == (unsigned long long)K * G &&
+           ev[0].readbacks == 0u && ev[0].share_pm == (uint32_t)(1000u * P / (G + P)));
+    for (uint32_t i = 0; i < K + 1u; i++) fallback_window(GEGPU_FALLBACK_STENCIL, G, P, 0u);
+    assert(fallback_events(ev, 8) == 1);
+
+    /* One primitive short at any share (all of them here), or one readback short: never. */
+    fallback_reset();
+    for (uint32_t i = 0; i < 2u * K; i++) fallback_window(GEGPU_FALLBACK_LINE, 0u, P - 1u, 0u);
+    for (uint32_t i = 0; i < 2u * K; i++)
+        fallback_window(GEGPU_FALLBACK_RAM_FB, 1000000u, 1u, B - 1u);
+    assert(fallback_events(ev, 8) == 0);
+
+    /* The cost decides, not the share: a busy scene of 10,000 GPU primitives a present with 90 a
+     * present drawn in software and no readback is under 1 % of the scene but about 2 ms a
+     * present at the derived cost, and is reported with its share. */
+    fallback_reset();
+    for (uint32_t i = 0; i < K; i++)
+        fallback_window(GEGPU_FALLBACK_RAM_FB, 10000u * W, 90u * W, 0u);
+    assert(fallback_events(ev, 8) == 1 && ev[0].reason == NK_RENDER_EFFECT_RAM_FB &&
+           ev[0].sw_prims == 90ull * W * K && ev[0].readbacks == 0u && ev[0].share_pm == 8u);
+
+    /* A window under the rule breaks the run of windows: K-1 over, one under, K-1 over is not
+     * enough; one more over is. */
+    fallback_reset();
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, P, 0u);
+    fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, P - 1u, 0u);
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, P, 0u);
+    assert(fallback_events(ev, 8) == 0);
+    fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, P, 0u);
+    assert(fallback_events(ev, 8) == 1 && ev[0].reason == NK_RENDER_EFFECT_COLOR_TEST);
+
+    /* Readbacks alone cross the rule, at a negligible share of primitives. */
+    fallback_reset();
+    for (uint32_t i = 0; i < K; i++)
+        fallback_window(GEGPU_FALLBACK_WRITE_MASK, 1000000u, 1u, B);
+    assert(fallback_events(ev, 8) == 1 && ev[0].reason == NK_RENDER_EFFECT_WRITE_MASK &&
+           ev[0].readbacks == (unsigned long long)K * B && ev[0].sw_prims == K &&
+           ev[0].share_pm == 0u);
+
+    /* Two reasons in the same windows, half of all primitives each: each is reported, in reason
+     * order. */
+    fallback_reset();
+    for (uint32_t i = 0; i < K; i++) {
+        s_stub_fallback.sw_prims[GEGPU_FALLBACK_POINT] += P;
+        fallback_window(GEGPU_FALLBACK_LOGIC_OP, 0u, P, 0u);
+    }
+    assert(fallback_events(ev, 8) == 2 && ev[0].reason == NK_RENDER_EFFECT_LOGIC_OP &&
+           ev[1].reason == NK_RENDER_EFFECT_POINT && ev[0].frames == K * W &&
+           ev[0].share_pm == 500u && ev[1].share_pm == 500u);
+
+    /* The GPU GE stopped (ready 0): nothing is counted, and its counts starting over make a new
+     * window rather than a negative one. */
+    fallback_reset();
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_MIPS, G, P, 0u);
+    s_stub_fallback.ready = 0;
+    gui_render_fallback_presented(1);
+    memset(&s_stub_fallback, 0, sizeof(s_stub_fallback));
+    s_stub_fallback.ready = 1;
+    gui_render_fallback_presented(1);           /* primes again */
+    fallback_window(GEGPU_FALLBACK_MIPS, G, P, 0u);
+    assert(fallback_events(ev, 8) == 0);
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_MIPS, G, P, 0u);
+    assert(fallback_events(ev, 8) == 1 && ev[0].reason == NK_RENDER_EFFECT_MIPS);
+
+    remove(s_fallback_events_path);
+}
 #endif /* SR_SDL3VK */
 
 /* The unset SR_FPS_CAP default is the PSP scanout period, not a slower title-specific
  * rate: a guest may submit a framebuffer several times per scanout and every submission
  * past the next output slot is dropped rather than delaying the guest. */
-int main(void) {
+int main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
     s_present_cap = present_cap_from_value(NULL);
     assert(PSP_SCANOUT_PERIOD_NS == 16683333ull);
     assert(present_period_ns() == PSP_SCANOUT_PERIOD_NS);
@@ -2536,6 +3279,9 @@ int main(void) {
     selftest_display_busy_frames();
     selftest_held_present_passes_a_tap_to_the_game();
     selftest_held_present_window_closed_requests_quit();
+    selftest_stick_dead_zone_from_profile();
+    selftest_busy_display_keeps_real_frames();
+    selftest_render_fallback_rule(argc, argv);
 #endif
     return 0;
 }

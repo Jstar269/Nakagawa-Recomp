@@ -163,6 +163,10 @@ CASE_ID = 64
 # bounded blocking forms (probe.c, PSP-GE-SYNC-001).
 else ifeq ($(CASE),ge-sync-ids)
 CASE_ID = 78
+# 181: GE SIGNAL handler behaviours 0x00-0x04 (callback, wait, pause, continue) and RJUMP/RCALL
+# offset alignment, bounded per cell (probe.c, PSP-GE-SIGNAL-001).
+else ifeq ($(CASE),ge-signal)
+CASE_ID = 181
 else ifeq ($(CASE),refer-status-size)
 CASE_ID = 65
 else ifeq ($(CASE),registry-readonly)
@@ -206,6 +210,11 @@ else ifeq ($(CASE),hle-timer-order)
 CASE_ID = 103
 else ifeq ($(CASE),hle-savedata-getsize)
 CASE_ID = 104
+else ifeq ($(CASE),hle-io-trunc)
+CASE_ID = 105
+# 180: savedata modes on a missing save, a directory without PARAM.SFO and a probe-made save.
+else ifeq ($(CASE),hle-savedata-nodata)
+CASE_ID = 180
 # 140: #1386's utility dialog calls at NONE (no InitStart is imported).
 else ifeq ($(CASE),hle-utility-none)
 CASE_ID = 140
@@ -223,9 +232,16 @@ CASE_ID = 159
 # 161: #1386's utility dialog status timing and wrong-state answers, in game context.
 else ifeq ($(CASE),hle-utility-dialogs)
 CASE_ID = 161
+# 166: #1386's netconf and game sharing dialog cells of 161 only (no savedata, no gamedata install).
+else ifeq ($(CASE),hle-utility-netconf-sharing)
+CASE_ID = 166
 # 162: #1380's flash0:/ms0:/disc0: seek cells and sceIoIoctl file commands (probe_hle_measure.c).
 else ifeq ($(CASE),hle-io-seek)
 CASE_ID = 162
+# 186: #1380's remaining seek cells: flash0: SEEK_CUR and past-0x100000000 seeks, and ms0:
+# open-flag and async-write cells on a probe-owned file (probe_hle_measure.c, PSP-HLE-IO-SEEK-002).
+else ifeq ($(CASE),hle-io-seek-edges)
+CASE_ID = 186
 # 164: W-NET-1's nickname limit: owner_name key info and the system-parameter string length
 # refusals, read-only (probe_hle_measure.c, PSP-HLE-NICKNAME-001).
 else ifeq ($(CASE),hle-nickname-limit)
@@ -247,6 +263,10 @@ CASE_ID = 109
 # functions and formats, wrap, coverage, framebuffer formats, dither, masks, logic, clear, fog.
 else ifeq ($(CASE),ge-raster)
 CASE_ID = 123
+# 185: GE through-mode vertex z outside 0..65535, fractions, infinity and NaN: the depth
+# word and whether colour is written (probe_ge_sample.c, PSP-GE-THROUGHZ-001).
+else ifeq ($(CASE),ge-through-z)
+CASE_ID = 185
 # 126: the GE level-of-detail and mip cells (probe_ge_sample.c, #1373): constant, automatic
 # and slope TEXLEVEL modes over a texture whose every level is one colour.
 else ifeq ($(CASE),ge-mip)
@@ -271,6 +291,14 @@ CASE_ID = 157
 # reads of a framebuffer the GE just drew into, with and without TEXFLUSH and TEXSYNC.
 else ifeq ($(CASE),ge-rtt)
 CASE_ID = 158
+# 187: #2193's raster bounds cells (probe_ge_sample.c, PSP-GE-RASTER-002): colour writes past
+# the frame-buffer stride, depth writes past zbw, and a depth-only clear under a scissor.
+else ifeq ($(CASE),ge-raster-bounds)
+CASE_ID = 187
+# 188: #343's depth rounding cells (probe_ge_sample.c, PSP-GE-RASTER-003): fractional
+# through-mode and transform-mode depths read as colour through EQUAL and GREATER tests.
+else ifeq ($(CASE),ge-depth-round)
+CASE_ID = 188
 else ifeq ($(CASE),llsc-link)
 CASE_ID = 69
 else ifeq ($(CASE),fpu-cc)
@@ -341,6 +369,33 @@ CASE_ID = 171
 # raise a reserved-instruction exception; it runs last.
 else ifeq ($(CASE),vfpu-basic-arith)
 CASE_ID = 168
+# 173: the #326 wide dot-product and matrix VFPU forms (vdot, vhdp, vcrsp, vqmul, vtfm, vhtfm, vmmul, vmscl,
+# vmzero/vmidt/vmone/vmmov, vrot; probe_hle_issues.c), register-only.
+else ifeq ($(CASE),vfpu-wide-dot-matrix)
+CASE_ID = 173
+# 174: #326 mtv.s/mfv.s word round trip through two VFPU registers (probe_hle_issues.c); register-only.
+else ifeq ($(CASE),vfpu-mfv-mtv)
+CASE_ID = 174
+# 175: #326 vcst.s/vcst.q for indices 0-31 (probe_hle_issues.c); register-only. POWER RISK: the
+# reserved indices 20-31 may raise an exception; they run last.
+else ifeq ($(CASE),vfpu-constants)
+CASE_ID = 175
+# 176: the #326 rounding separation of vdot.q, vmscl.q, vmul.s, vadd.s and vsub.s (probe_hle_issues.c),
+# register-only.
+else ifeq ($(CASE),vfpu-round-sep)
+CASE_ID = 176
+# 182: the #326 VFPU prefix state (non-identity vpfxs/vpfxt/vpfxd, prefix lifetime, vfim.s/viim.s;
+# probe_hle_issues.c), register-only.
+else ifeq ($(CASE),vfpu-prefix-state)
+CASE_ID = 182
+# 183: the #326 wider VFPU forms (vdiv, vsin/vcos/vrcp/vrsq/vsqrt/vocp, the .p/.t dot and matrix
+# forms, vidt into every column and row register; probe_hle_issues.c), register-only.
+else ifeq ($(CASE),vfpu-wider-ops)
+CASE_ID = 183
+# 184: the #326 vus2i/vs2i words at the reserved widths .t and .q (probe_hle_issues.c), hand-encoded,
+# register-only. POWER RISK: reserved encodings; owner present. Run it last, in its own launch.
+else ifeq ($(CASE),vfpu-reserved-widths)
+CASE_ID = 184
 else ifeq ($(CASE),thread-k0-block)
 CASE_ID = 116
 else ifeq ($(CASE),sas-init)
@@ -585,6 +640,12 @@ OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),hle-savedata-getsize)
 TARGET = $(BUILD_DIR)/hle_savedata_getsize
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-io-trunc)
+TARGET = $(BUILD_DIR)/hle_io_trunc
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-savedata-nodata)
+TARGET = $(BUILD_DIR)/hle_savedata_nodata
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
 else ifeq ($(CASE),hle-utility-none)
 TARGET = $(BUILD_DIR)/hle_utility_none
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
@@ -605,8 +666,14 @@ OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),hle-utility-dialogs)
 TARGET = $(BUILD_DIR)/hle_utility_dialogs
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-utility-netconf-sharing)
+TARGET = $(BUILD_DIR)/hle_utility_netconf_sharing
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
 else ifeq ($(CASE),hle-io-seek)
 TARGET = $(BUILD_DIR)/hle_io_seek
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-io-seek-edges)
+TARGET = $(BUILD_DIR)/hle_io_seek_edges
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),hle-nickname-limit)
 TARGET = $(BUILD_DIR)/hle_nickname_limit
@@ -653,6 +720,27 @@ OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),vfpu-basic-arith)
 TARGET = $(BUILD_DIR)/vfpu_basic_arith
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-wide-dot-matrix)
+TARGET = $(BUILD_DIR)/vfpu_wide_dot_matrix
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-mfv-mtv)
+TARGET = $(BUILD_DIR)/vfpu_mfv_mtv
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-constants)
+TARGET = $(BUILD_DIR)/vfpu_constants
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-round-sep)
+TARGET = $(BUILD_DIR)/vfpu_round_sep
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-prefix-state)
+TARGET = $(BUILD_DIR)/vfpu_prefix_state
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-wider-ops)
+TARGET = $(BUILD_DIR)/vfpu_wider_ops
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-reserved-widths)
+TARGET = $(BUILD_DIR)/vfpu_reserved_widths
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE sample-point cells: their own source (raw display lists, no libpspgu) with the
 # same writer, ThreadManForUser block and module lifecycle as the HLE issue cells.
 else ifeq ($(CASE),ge-sample)
@@ -693,6 +781,10 @@ OBJS = $(BUILD_DIR)/probe_memory_edge.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),ge-raster)
 TARGET = $(BUILD_DIR)/ge_raster
 OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE through-mode depth cells: the same source as the sample-point cells, case 185.
+else ifeq ($(CASE),ge-through-z)
+TARGET = $(BUILD_DIR)/ge_through_z
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE mip cells: the same source as the sample-point cells, case 126.
 else ifeq ($(CASE),ge-mip)
 TARGET = $(BUILD_DIR)/ge_mip
@@ -716,6 +808,14 @@ OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE render-to-texture cells: the same source as the sample-point cells, case 158.
 else ifeq ($(CASE),ge-rtt)
 TARGET = $(BUILD_DIR)/ge_rtt
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE raster bounds cells: the same source as the sample-point cells, case 187.
+else ifeq ($(CASE),ge-raster-bounds)
+TARGET = $(BUILD_DIR)/ge_raster_bounds
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE depth rounding cells: the same source as the sample-point cells, case 188.
+else ifeq ($(CASE),ge-depth-round)
+TARGET = $(BUILD_DIR)/ge_depth_round
 OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
 # The instruction trace: its own source, the single-step trampoline and the fixtures
 # header, with the same writer, ThreadManForUser block and module lifecycle as the HLE
@@ -881,13 +981,20 @@ USER_MODE_IMPORT_GATE_ARGS += --exact-library Kernel_Library=0x092968F4,0x5F10D4
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library InterruptManager --forbid-library SystemCtrlForUser
 endif
 # hle_utility_imports.S declares the two system-parameter Get calls (the CRT's timezone
-# setup calls the Int one in every PRX) and, for hle-savedata-getsize (case 104) only, the
-# four savedata dialog calls. Each build is pinned to exactly its own sceUtility set, so
+# setup calls the Int one in every PRX) and, for hle-savedata-getsize (case 104) and
+# hle-savedata-nodata (case 180) only, the four savedata dialog calls. Each build is pinned to exactly its own sceUtility set, so
 # hle-sysparam cannot import a savedata call and neither can import a Set call.
 ifeq ($(CASE),hle-sysparam)
 USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343
 endif
 ifeq ($(CASE),hle-savedata-getsize)
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C
+endif
+# hle-io-trunc (case 105) takes the CRT's pair and nothing else from sceUtility: no dialog.
+ifeq ($(CASE),hle-io-trunc)
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343
+endif
+ifeq ($(CASE),hle-savedata-nodata)
 USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C
 endif
 # hle-utility-none: GetStatus, Update and ShutdownStart of five dialogs and no InitStart, so no
@@ -918,6 +1025,20 @@ USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhoc=0xE1D621D7,0xA62C6F57
 USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhocctl=0xE26F226E,0x9D689E13
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhocMatching --forbid-library sceNetResolver
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceHttp --forbid-library sceSsl --forbid-library sceReg
+endif
+# hle-utility-netconf-sharing: case 161's netconf and game sharing calls and net module pair only.
+# No savedata call, no gamedata install call and no UMD call is linked.
+ifeq ($(CASE),hle-utility-netconf-sharing)
+LIBS += -lpspnet_adhocctl -lpspnet_adhoc
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x2AD8E239,0x4DB1E739,0x6332AA39,0x91E70E35,0xF88155F6,0xC492F751,0x946963F3,0x7853182D,0xEFC6F80F,0x1579A159,0x64D50C56
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNet=0x39AF39A6,0x281928A9
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetInet=0x17943399,0xA9ED66B9,0x8D7284EA,0xCDA85C99,0x7AA671BC,0xFBABE411
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetApctl=0xE2F91F9B,0xB3EDD0EC
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhoc=0xE1D621D7,0xA62C6F57
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhocctl=0xE26F226E,0x9D689E13
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhocMatching --forbid-library sceNetResolver
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceHttp --forbid-library sceSsl --forbid-library sceReg
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceUmdUser
 endif
 ifeq ($(CASE),cpu-timing)
 # The shared probe cleanup checks interrupt state; cpu-timing also calls the

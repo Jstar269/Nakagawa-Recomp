@@ -1357,6 +1357,33 @@ class CodegenProfileTransportTests(unittest.TestCase):
         self.assertRegex(self._profile_hash(modules), r"^[0-9a-f]{20}$")
         self.assertNotEqual(self._profile_hash(modules), self._profile_hash(modules[:-1]))
 
+    def _probe(self, *assignments: str) -> tuple[str, str]:
+        completed = subprocess.run(
+            [cast(str, self.make), "--no-print-directory", "GAME_NAME=probe",
+             f"BUILD_ROOT={Path(self.temp.name).as_posix()}",
+             f"BUILD_DIR={Path(self.temp.name).as_posix()}", *assignments,
+             "--eval", "nkprobe: ; @echo ARG=[$(strip $(ENHANCEMENT_PACKAGE_ARG))] HASH=$(CODEGEN_PROFILE_HASH)",
+             "nkprobe"],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        line = next(text for text in completed.stdout.splitlines() if text.startswith("ARG="))
+        arg, _, digest = line.partition(" HASH=")
+        return arg.removeprefix("ARG="), digest
+
+    def test_the_code_hook_package_reaches_codegen_and_the_profile(self) -> None:
+        # Contract section 9.9: without ENHANCEMENT_CODE_HOOK_PACKAGE the codegen arguments are as
+        # before; with it codegen gets --code-hook-package and the profile changes; alone it is still
+        # passed, so codegen refuses it instead of building without it.
+        alone_arg, alone_hash = self._probe("ENHANCEMENT_PACKAGE=a.json")
+        self.assertEqual(alone_arg, "[--enhancement-package=a.json]")
+        both_arg, both_hash = self._probe("ENHANCEMENT_PACKAGE=a.json", "ENHANCEMENT_CODE_HOOK_PACKAGE=h.json")
+        self.assertEqual(both_arg, "[--enhancement-package=a.json --code-hook-package=h.json]")
+        self.assertNotEqual(alone_hash, both_hash)
+        self.assertEqual(self._probe("ENHANCEMENT_PACKAGE=a.json", "ENHANCEMENT_CODE_HOOK_PACKAGE=")[1],
+                         alone_hash)
+        self.assertEqual(self._probe("ENHANCEMENT_CODE_HOOK_PACKAGE=h.json")[0], "[--code-hook-package=h.json]")
+
     def test_the_transport_keeps_the_argv_hash(self) -> None:
         # The environment form must hash exactly as the former --entry form did, so
         # existing builds keep their codegen profile. The former form is evaluated in
@@ -1949,6 +1976,329 @@ class ShellPortabilityAndRecipeTruthTests(unittest.TestCase):
                     f"{target} did not fail when a configuration was invalid:\n"
                     + proc.stdout + proc.stderr,
                 )
+
+
+#: The guard a recipe written for a POSIX sh names on its first line (Makefile, "RECIPE SHELL").
+POSIX_SHELL_GUARD = "$(NK_REQUIRE_POSIX_SHELL)"
+
+_SHELL_STRING = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'')
+_SHELL_ANYWHERE = {
+    "command substitution": re.compile(r"\$\$\(|`"),
+    "shell variable": re.compile(r"\$\$(?:\{|[A-Za-z_?#!*0-9])"),
+    "/dev/ device": re.compile(r"/dev/(?:null|stdin|stdout|stderr|tty)\b"),
+}
+#: Words that, in command position, mean sh syntax or a POSIX utility cmd.exe does not have.
+#: A bare `:` is absent on purpose: mingw32-make runs it as a no-op under cmd.exe too.
+_POSIX_COMMAND_WORDS = frozenset({
+    "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
+    "[", "test", "{", "}", "export", "set", "unset", "trap", "exec", "true", "false",
+    "rm", "cp", "mv", "cat", "grep", "sed", "awk", "touch", "ls", "find", "xargs", "head",
+    "tail", "wc", "tee", "printf", "sh", "bash", "env", "cmp", "diff", "mkdir", "chmod",
+    "sort", "uniq", "tr", "cut",
+})
+_SHELL_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_DATABASE_RECIPE = re.compile(r"^#  recipe to execute \(from '([^']+)', line (\d+)\):$")
+_DATABASE_MACRO = re.compile(r"^define (\S+)\n(.*?)\nendef$", re.S | re.M)
+_MACRO_REFERENCE = re.compile(r"\$\((?:call\s+)?([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _database_macros(database: str) -> dict[str, str]:
+    """Every multi-line ``define`` in ``make -p`` output: name -> its unexpanded body."""
+    return {match.group(1): match.group(2) for match in _DATABASE_MACRO.finditer(database)}
+
+
+def _macro_commands(text: str, macros: dict[str, str], seen: frozenset[str] = frozenset()
+                    ) -> list[tuple[str, str]]:
+    """(macro name, command) for each line of every macro ``text`` names, nested ones too.
+
+    A recipe such as ``$(call NC_COMPILE_OBJECTS,...)`` takes its commands from the macro's
+    body, which the recipe text hides behind one Make reference.
+    """
+    found: list[tuple[str, str]] = []
+    for name in _MACRO_REFERENCE.findall(text):
+        if name not in macros or name in seen:
+            continue
+        body = macros[name]
+        found.extend((name, command) for command in _recipe_commands(body.splitlines()))
+        found.extend(_macro_commands(body, macros, seen | {name}))
+    return found
+
+
+def _without_make_references(text: str, replacement: str = " MREF ") -> str:
+    """``text`` with every ``$(...)`` / ``${...}`` Make reference, nested or not, replaced.
+
+    ``$$`` is the recipe's literal dollar for the shell and stays. Parentheses inside a
+    reference's text (an $(error ...) message, say) are balanced by the scan, so a
+    reference is removed whole. A shell operator that ends a reference's text stays after
+    the replacement: `$(foreach s,$(SRCS),cc $(s) &&) true` expands to commands joined by
+    `&&`, so the `true` after it is a command, not an argument.
+    """
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        if text.startswith("$$", index):
+            out.append("$$")
+            index += 2
+            continue
+        if text[index] == "$" and index + 1 < len(text) and text[index + 1] in "({":
+            opener = text[index + 1]
+            closer = ")" if opener == "(" else "}"
+            depth = 0
+            end = index + 1
+            while end < len(text):
+                if text[end] == opener:
+                    depth += 1
+                elif text[end] == closer:
+                    depth -= 1
+                    if depth == 0:
+                        break
+                end += 1
+            out.append(replacement)
+            trailing = re.search(r"(&&|\|\||[;|])\s*$", text[index + 2:end])
+            if trailing:
+                out.append(trailing.group(1) + " ")
+            index = end + 1
+            continue
+        out.append(text[index])
+        index += 1
+    return "".join(out)
+
+
+def posix_shell_constructs(command: str) -> list[str]:
+    """The POSIX-sh-only constructs in one recipe command (continuation lines joined).
+
+    What cmd.exe cannot run the same way: sh keywords and `[`/`test`, a `VAR=value cmd`
+    environment prefix, `$$var` and `$$(...)` expansion, `/dev/null`, `;` between
+    commands (cmd.exe keeps it as text, so `echo x; exit 2` prints and exits 0), and the
+    POSIX utilities a plain Windows PATH lacks. Make references are removed first, so a
+    `$(if ...)` or a `VAR=value` argument to `$(MAKE)` is not mistaken for shell syntax;
+    quoted strings are removed before the command-position checks, so the `;` and `for`
+    inside a `python -c "..."` program do not count either.
+    """
+    found: set[str] = set()
+    for name, pattern in _SHELL_ANYWHERE.items():
+        if pattern.search(command.replace("$$$$", "")):
+            found.add(name)
+    body = _SHELL_STRING.sub(" STR ", _without_make_references(command))
+    if ";" in body:
+        found.add("';' between commands")
+    for part in re.split(r"&&|\|\||[;|&\n()]", body):
+        words = part.split()
+        if not words:
+            continue
+        word = words[0].lstrip("@-+!") or (words[1] if len(words) > 1 else "")
+        if _SHELL_ASSIGNMENT.match(word) and len(words) > 1:
+            found.add(f"environment prefix {word.split('=', 1)[0]}=")
+        elif word in _POSIX_COMMAND_WORDS:
+            found.add(f"'{word}'")
+    return sorted(found)
+
+
+def _database_recipes(database: str) -> dict[tuple[str, int], tuple[str, list[str]]]:
+    """Every recipe in ``make -p`` output: (file, first line) -> (target, recipe lines).
+
+    The database names each recipe's own file and line after conditionals, templates and
+    target-specific variables are resolved, which a reading of the Makefile text cannot.
+    """
+    recipes: dict[tuple[str, int], tuple[str, list[str]]] = {}
+    lines = database.splitlines()
+    target = ""
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line and not line.startswith(("#", "\t", " ")) and ":" in line:
+            # The first colon followed by a blank or the line end, so a Windows target
+            # such as C:/x/build/a.o keeps its drive.
+            named = re.match(r"^(.*?):(?=\s|$)", line)
+            target = named.group(1) if named else line.split(":", 1)[0]
+        match = _DATABASE_RECIPE.match(line)
+        if match is None:
+            index += 1
+            continue
+        body: list[str] = []
+        index += 1
+        while index < len(lines) and lines[index].startswith("\t"):
+            body.append(lines[index][1:])
+            index += 1
+        recipes.setdefault((match.group(1), int(match.group(2))), (target, body))
+    return recipes
+
+
+def _recipe_commands(body: list[str]) -> list[str]:
+    commands: list[str] = []
+    pending: list[str] = []
+    for line in body:
+        if line.endswith("\\"):
+            pending.append(line[:-1])
+            continue
+        pending.append(line)
+        commands.append(" ".join(pending))
+        pending = []
+    if pending:
+        commands.append(" ".join(pending))
+    return commands
+
+
+class RecipeShellGuardTests(unittest.TestCase):
+    """A recipe written for a POSIX sh refuses to run under the cmd.exe fallback (#368).
+
+    mingw32-make runs recipes with cmd.exe when it finds no sh.exe on PATH. A recipe in
+    sh syntax then fails with an unrelated error after a long build, or exits 0 having
+    done nothing. Every such recipe names $(NK_REQUIRE_POSIX_SHELL) first, which stops
+    Make before any line of it runs. The list comes from Make's own rule database, so a
+    new POSIX recipe without the guard fails here, and so does a guard on a recipe that
+    cmd.exe runs correctly (it would refuse a build that works, such as the player's
+    package build, which has no sh).
+
+    Two limits. The database holds only the conditional branches active on the host that
+    runs the test, so a recipe in a Windows-only or Linux-only branch is checked on that
+    host (hosted CI covers Linux; Windows runs are local). Commands a recipe takes from a
+    multi-line `define` macro are classified with it; a single-line variable that expands
+    to shell syntax is not.
+    """
+
+    make: ClassVar[str | None]
+    recipes: ClassVar[dict[tuple[str, int], tuple[str, list[str]]]]
+    macros: ClassVar[dict[str, str]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.make = shutil.which("mingw32-make") or shutil.which("make")
+        cls.recipes = {}
+        cls.macros = {}
+        if not cls.make:
+            return
+        scratch = _make_safe_temp_dir("nakagawa-recipe-shell-")
+        cls.addClassCleanup(shutil.rmtree, scratch, True)
+        proc = _run_scratch_make(
+            cls.make, "-p", "-q", "help",
+            build_root=scratch / "build", log_dir=scratch / "logs",
+        )
+        if "# Finished Make data base" not in proc.stdout:
+            raise AssertionError("make -p printed no rule database:\n" + proc.stderr[-4000:])
+        cls.recipes = _database_recipes(proc.stdout)
+        cls.macros = _database_macros(proc.stdout)
+
+    def setUp(self) -> None:
+        if not self.make:
+            self.skipTest("GNU Make is required")
+
+    def _posix_recipes(self) -> dict[tuple[str, int], tuple[str, list[str]]]:
+        found = {}
+        for where, (target, body) in self.recipes.items():
+            direct = {c for command in _recipe_commands(body)
+                      for c in posix_shell_constructs(command)}
+            from_macros = {f"{c} (in {name})"
+                           for name, command in _macro_commands("\n".join(body), self.macros)
+                           for c in posix_shell_constructs(command)}
+            constructs = sorted(direct | from_macros)
+            if constructs:
+                found[where] = (target, constructs)
+        return found
+
+    def test_classifier_separates_sh_syntax_from_cmd_safe_recipes(self) -> None:
+        posix = (
+            '@echo "ERROR: set NK_UI_CAPTURE_DIR"; exit 2',
+            "if [ -f x ]; then echo y; fi",
+            "SR_GPU_CAPTURE_TERMINAL_CASE=surface-lost $(GPU_CAPTURE_BIN)",
+            '@test -n "$(REV)" || { echo no; exit 1; }',
+            "@rc=0; $(BIN) || rc=$$?",
+            "for f in a b; do echo $$f; done",
+            "cat $(LOG) >/dev/null",
+            "$(foreach s,$(NC_SOURCES),$(CC) -c $(s) &&) true",
+        )
+        cmd_safe = (
+            '"$(PYTHON)" -c "import sys; [print(a) for a in sys.argv]" x',
+            '"$(PYTHON)" tools/nk_clean.py $(if $(filter 1,$(CONFIRM)),--yes,)',
+            "$(MAKE) BUILD_DIR=$(COSIM_DIR) clean",
+            "$(if $(strip $(VULKAN_SDK)),,$(error No SDK; set VULKAN_SDK (e.g. C:/x)))",
+            "@:",
+            "$(CC) $(CFLAGS) -o $(BUILD_DIR)/a.exe a.c 2>&1",
+            "$(BUILD_DIR)/coro_selftest.exe",
+        )
+        for command in posix:
+            with self.subTest(command=command):
+                self.assertNotEqual(posix_shell_constructs(command), [])
+        for command in cmd_safe:
+            with self.subTest(command=command):
+                self.assertEqual(posix_shell_constructs(command), [])
+
+    def test_every_posix_recipe_starts_with_the_guard(self) -> None:
+        offenders = [
+            f"{file}:{line}: {target} uses {', '.join(constructs)}"
+            for (file, line), (target, constructs) in sorted(self._posix_recipes().items())
+            if self.recipes[(file, line)][1][:1] != [POSIX_SHELL_GUARD]
+        ]
+        self.assertEqual(
+            offenders, [],
+            "these recipes need a POSIX sh but do not start with "
+            f"{POSIX_SHELL_GUARD}, so the cmd.exe fallback runs them wrongly:\n"
+            + "\n".join(offenders),
+        )
+
+    def test_guard_only_on_recipes_that_need_sh(self) -> None:
+        posix = self._posix_recipes()
+        guarded = [
+            f"{file}:{line}: {target}"
+            for (file, line), (target, body) in sorted(self.recipes.items())
+            if POSIX_SHELL_GUARD in body and (file, line) not in posix
+        ]
+        self.assertEqual(
+            guarded, [],
+            f"{POSIX_SHELL_GUARD} refuses these recipes under cmd.exe, which runs them "
+            "correctly:\n" + "\n".join(guarded),
+        )
+        self.assertTrue(posix, "the rule database listed no POSIX recipe; the parse is broken")
+
+    def _scratch_run(self, *arguments: str, env: dict[str, str] | None = None
+                     ) -> subprocess.CompletedProcess:
+        assert self.make is not None
+        scratch = _make_safe_temp_dir("nakagawa-recipe-shell-run-")
+        self.addCleanup(shutil.rmtree, scratch, True)
+        build_root, log_dir = scratch / "build", scratch / "logs"
+        for variable, root in (("BUILD_ROOT", build_root), ("LOG_DIR", log_dir)):
+            self.assertFalse(_reaches_checkout(root), f"{variable} reaches the checkout")
+        return subprocess.run(
+            [self.make, "--no-print-directory", *arguments, f"PYTHON={Path(sys.executable).as_posix()}",
+             f"BUILD_ROOT={build_root.as_posix()}", f"LOG_DIR={log_dir.as_posix()}"],
+            cwd=ROOT, capture_output=True, text=True, check=False, env=env,
+        )
+
+    def test_guard_stops_make_before_the_recipe_runs(self) -> None:
+        # NK_RECIPE_SHELL=cmd.exe is what the Makefile derives on Windows when Make found
+        # no sh; setting it here runs the guard on any host.
+        proc = self._scratch_run("selftest-repeat", "NK_RECIPE_SHELL=cmd.exe",
+                                 "SELFTEST_REPEAT=nk-recipe-shell-marker")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("selftest-repeat needs a POSIX sh", proc.stderr)
+        self.assertIn("docs/SETUP.md", proc.stderr)
+        self.assertNotIn("nk-recipe-shell-marker", proc.stdout + proc.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "the cmd.exe fallback exists only on Windows")
+    def test_without_sh_on_path_make_refuses_instead_of_misrunning(self) -> None:
+        """The production failure: mingw32-make started from a PATH that has no sh.exe.
+
+        Before the guard, `nk-ui-player-screens-capture` with no capture folder ran
+        `echo "ERROR ..."; exit 2` under cmd.exe, which printed the line and exited 0,
+        and a POSIX selftest ran its sh syntax under cmd.exe.
+        """
+        assert self.make is not None
+        system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        path = [Path(self.make).parent, Path(sys.executable).parent,
+                system_root / "System32", system_root]
+        for folder in path:
+            if (folder / "sh.exe").exists():
+                self.skipTest(f"{folder} holds sh.exe; no PATH without sh is available")
+        env = {key: value for key, value in os.environ.items() if key.upper() != "PATH"}
+        env["PATH"] = os.pathsep.join(str(folder) for folder in path)
+        capture = self._scratch_run("nk-ui-player-screens-capture", "SDL3_TTF_AVAILABLE=yes",
+                                    "NK_UI_CAPTURE_DIR=", env=env)
+        self.assertNotEqual(capture.returncode, 0, capture.stdout + capture.stderr)
+        self.assertIn("set NK_UI_CAPTURE_DIR", capture.stderr)
+        guarded = self._scratch_run("selftest-repeat", "SELFTEST_REPEAT=nk-recipe-shell-marker", env=env)
+        self.assertNotEqual(guarded.returncode, 0, guarded.stdout + guarded.stderr)
+        self.assertIn("selftest-repeat needs a POSIX sh", guarded.stderr)
+        self.assertNotIn("nk-recipe-shell-marker", guarded.stdout + guarded.stderr)
 
 
 class BuildArtifactLifecycleTests(unittest.TestCase):
@@ -3860,6 +4210,74 @@ class DoctorRefusesTrackedCodeCaptureTests(unittest.TestCase):
         tracked = [r for r in report.results if r.code == "GIT_TRACKED_PRIVATE"]
         self.assertEqual([r.status for r in tracked], ["FAIL"])
         self.assertIn(".nkcap", tracked[0].detail or "")
+
+
+class LinkerSpellingTests(unittest.TestCase):
+    """Unused-section removal is spelled by the linker, not the compiler: GNU ld and the MinGW
+    linker take --gc-sections, Apple's ld64 rejects it and takes -dead_strip (#329). Every link
+    line names LD_GC_SECTIONS, which the Makefile chooses from HOST_KIND."""
+
+    RAW = "-Wl,--gc-sections"
+
+    def _make_texts(self) -> dict[str, str]:
+        paths = [ROOT / "Makefile", *sorted((ROOT / "mk").glob("*.mk"))]
+        return {path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
+                for path in paths}
+
+    def test_no_link_line_names_the_gnu_spelling(self) -> None:
+        offenders = []
+        for name, text in self._make_texts().items():
+            for number, line in enumerate(text.splitlines(), 1):
+                if self.RAW in line and not line.startswith("LD_GC_SECTIONS :="):
+                    offenders.append(f"{name}:{number}: {line.strip()}")
+        self.assertEqual(offenders, [], "use $(LD_GC_SECTIONS) on link lines")
+        users = sum(text.count("$(LD_GC_SECTIONS)") for text in self._make_texts().values())
+        self.assertGreaterEqual(users, 25)
+
+    def test_each_host_kind_gets_its_linker_spelling(self) -> None:
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make:
+            self.skipTest("GNU Make is required")
+        with tempfile.TemporaryDirectory(prefix="nakagawa-linker-spelling-") as temp:
+            # Windows_NT takes the same branch as Linux; each probe parses the whole Makefile,
+            # so the cases that choose differently are the ones probed. OS= clears Windows' own
+            # OS variable, so the Makefile derives a build for the host itself on a POSIX host as
+            # it does there; a Mac building for Android links with the NDK's lld, which takes the
+            # GNU spelling.
+            for host, target, expected in (("Darwin", "OS=", "-Wl,-dead_strip"),
+                                           ("Linux", "OS=", "-Wl,--gc-sections"),
+                                           ("Darwin", "NK_TARGET=android", "-Wl,--gc-sections")):
+                with self.subTest(host=host, target=target):
+                    completed = subprocess.run(
+                        [make, "--no-print-directory", "GAME_NAME=probe",
+                         f"BUILD_ROOT={Path(temp).as_posix()}",
+                         f"BUILD_DIR={Path(temp).as_posix()}", f"HOST_KIND={host}", target,
+                         "--eval", "nkprobe: ; @echo LD_GC_SECTIONS=$(LD_GC_SECTIONS)",
+                         "nkprobe"],
+                        cwd=ROOT, capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(completed.returncode, 0,
+                                     completed.stdout + completed.stderr)
+                    self.assertIn(f"LD_GC_SECTIONS={expected}", completed.stdout.splitlines())
+
+    def test_the_build_host_is_detected_when_not_given(self) -> None:
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make:
+            self.skipTest("GNU Make is required")
+        with tempfile.TemporaryDirectory(prefix="nakagawa-linker-host-") as temp:
+            environment = {key: value for key, value in os.environ.items()
+                           if key != "HOST_KIND"}
+            completed = subprocess.run(
+                [make, "--no-print-directory", "GAME_NAME=probe",
+                 f"BUILD_ROOT={Path(temp).as_posix()}", f"BUILD_DIR={Path(temp).as_posix()}",
+                 "--eval", "nkprobe: ; @echo HOST_KIND=$(HOST_KIND)", "nkprobe"],
+                cwd=ROOT, capture_output=True, text=True, check=False, env=environment,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        expected = {"win32": "Windows_NT", "linux": "Linux", "darwin": "Darwin"}.get(sys.platform)
+        if expected is None:
+            self.skipTest(f"no expectation for {sys.platform}")
+        self.assertIn(f"HOST_KIND={expected}", completed.stdout.splitlines())
 
 
 if __name__ == "__main__":

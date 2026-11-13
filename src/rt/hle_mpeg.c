@@ -59,6 +59,15 @@ SrPsmfPlayer s_psmf_players[4];
  * player path being involved in a no-new-frame stretch. File-local: no other translation
  * unit consumes them (the watchdog that prints them lives in this file). */
 unsigned long s_psmf_calls = 0, s_psmf_getvideo = 0, s_psmf_getaudio = 0;
+#ifdef SR_HLE_THREAD_SELFTEST
+/* hle_thread_selftest (#286): how many host player slots are in use, whatever key holds them. */
+unsigned sr_hle_test_psmf_players_used(void) {
+    unsigned n = 0;
+    for (size_t i = 0; i < sizeof(s_psmf_players) / sizeof(s_psmf_players[0]); i++)
+        n += s_psmf_players[i].used != 0;
+    return n;
+}
+#endif
 static SrPsmfPlayer *psmf_slot(uint32_t guest, int create) {
     SrPsmfPlayer *freeSlot = NULL;
     for (size_t i = 0; i < sizeof(s_psmf_players) / sizeof(s_psmf_players[0]); i++) {
@@ -412,6 +421,7 @@ static void psmf_media_reset(SrPsmfPlayer *p) {
  * got none. */
 void psmf_player_release(SrPsmfPlayer *p) {
     if (!p) return;
+    sr_movie_forget_owner(p->guest);   /* its pictures are no longer movie frames (#2111) */
     psmf_flush(p);
     if (p->producer) { sr_psmf_producer_close(p->producer); p->producer = NULL; }
     if (p->h264 >= 0) { sr_h264_destroy(p->h264); p->h264 = -1; }
@@ -587,6 +597,13 @@ static int psmf_video_take(SrPsmfPlayer *p, uint32_t displaybuf, int bufw,
         else
             psmf_av_delivered(PSMF_AV_VIDEO, displaybuf, 0u, value, 1);
     }
+    /* Movie provenance (#2111, ge_shared.h): the picture now in the display buffer, for the
+     * movie upscaler. A no-op unless SR_MOVIE_UPSCALE is on. delivered_format is one of the
+     * four SR_H264_PIXEL_* formats from 5650 on (checked above), so the difference is 0..3. */
+    if (bufw > 0)
+        sr_movie_note_picture(p->guest, displaybuf, (uint32_t)bufw,
+                              (uint32_t)(info.delivered_format - SR_H264_PIXEL_5650),
+                              (uint32_t)info.width, (uint32_t)info.height);
     p->videoFramesOut++;
     return 1;
 }
@@ -1072,9 +1089,18 @@ static uint32_t h_PsmfAudioOutSize(CpuState *s) {
  * h264_null.c picks the build's decoder, Media Foundation (h264_mf.c) on Windows or the vendored
  * FFmpeg H.264 subset (h264_ffmpeg.c, the H264_FFMPEG=1 default elsewhere). A build with
  * neither fails closed. Nothing here depends on which backend decodes. sceMpegAtracDecode
- * still decodes no audio samples; it only advances the audio clock. */
+ * still decodes no audio samples; it only advances the audio clock.
+ *
+ * The executable HLE harness (SR_HLE_THREAD_SELFTEST) does not link mpeg.c: its own
+ * tests/native/hle_thread_selftest.c defines mpeg_init, mpeg_finish, mpeg_create and
+ * mpeg_delete for its interrupt-context check of sceMpegCreate. That build compiles only
+ * the wrappers over those four, so it never refers to a function it does not link; the
+ * rest of the family, and the registrations that use it, are left out of it. */
 uint32_t mpeg_init(void);
 uint32_t mpeg_finish(void);
+uint32_t mpeg_create(uint32_t mpegAddr, uint32_t dataPtr, uint32_t size, uint32_t ringAddr, uint32_t frameWidth, uint32_t mode, uint32_t ddrTop);
+uint32_t mpeg_delete(uint32_t mpegAddr);
+#ifndef SR_HLE_THREAD_SELFTEST
 uint32_t mpeg_ringbuffer_query_mem_size(uint32_t packets);
 uint32_t mpeg_ringbuffer_query_pack_num(uint32_t mem_size);
 uint32_t mpeg_avc_query_ycbcr_size(uint32_t mpegAddr, uint32_t mode, uint32_t width, uint32_t height, uint32_t resultAddr);
@@ -1088,8 +1114,6 @@ uint32_t mpeg_query_pcm_es_size(uint32_t mpegAddr, uint32_t esSizeAddr, uint32_t
 uint32_t mpeg_get_pcm_au(uint32_t mpegAddr, uint32_t sid, uint32_t auAddr, uint32_t attrAddr);
 uint32_t mpeg_change_get_au_mode(uint32_t mpegAddr, uint32_t sid, uint32_t mode);
 uint32_t mpeg_ringbuffer_construct(uint32_t ring, uint32_t numPackets, uint32_t data, uint32_t size, uint32_t cbAddr, uint32_t cbArg);
-uint32_t mpeg_create(uint32_t mpegAddr, uint32_t dataPtr, uint32_t size, uint32_t ringAddr, uint32_t frameWidth, uint32_t mode, uint32_t ddrTop);
-uint32_t mpeg_delete(uint32_t mpegAddr);
 uint32_t mpeg_query_stream_offset(uint32_t mpegAddr, uint32_t bufferAddr, uint32_t offsetAddr);
 uint32_t mpeg_query_stream_size(uint32_t bufferAddr, uint32_t sizeAddr);
 uint32_t mpeg_regist_stream(uint32_t mpegAddr, uint32_t streamType, uint32_t streamNum);
@@ -1108,7 +1132,6 @@ uint32_t mpeg_init_au(uint32_t mpegAddr, uint32_t esBuffer, uint32_t auAddr);
 uint32_t mpeg_query_atrac_es_size(uint32_t mpegAddr, uint32_t esSizeAddr, uint32_t outSizeAddr);
 uint32_t mpeg_query_userdata_es_size(uint32_t mpegAddr, uint32_t esSizeAddr, uint32_t outSizeAddr);
 uint32_t mpeg_get_userdata_au(uint32_t mpegAddr, uint32_t sid, uint32_t auAddr, uint32_t resultAddr);
-#ifndef SR_HLE_THREAD_SELFTEST
 uint32_t mpeg_flush_all_stream(uint32_t mpegAddr);
 uint32_t mpeg_flush_stream(uint32_t mpegAddr, uint32_t sid);
 uint32_t mpeg_avc_decode_flush(uint32_t mpegAddr);
@@ -1116,15 +1139,13 @@ uint32_t mpeg_avc_decode_flush(uint32_t mpegAddr);
 
 
 static uint32_t h_MpegInit(CpuState *s) { (void)s; return mpeg_init(); }
-static uint32_t h_MpegMallocAvcEsBuf(CpuState *s) { return mpeg_malloc_avc_es_buf(A0); }
-static uint32_t h_MpegFreeAvcEsBuf(CpuState *s) { return mpeg_free_avc_es_buf(A0, A1); }
-static uint32_t h_MpegInitAu(CpuState *s) { return mpeg_init_au(A0, A1, A2); }
-static uint32_t h_MpegQueryAtracEsSize(CpuState *s) { return mpeg_query_atrac_es_size(A0, A1, A2); }
 static uint32_t h_MpegFinish(CpuState *s) { (void)s; return mpeg_finish(); }
+#ifndef SR_HLE_THREAD_SELFTEST
 /* sceMpegQueryMemSize() takes no args and RETURNS the context size in v0 (PPSSPP MpegRequiredMem:
  * 0x10000 for lib version >= 0x0105, which ACX uses). The earlier wrapper wrote it to a pointer and
  * returned 0, so the game allocated a 0-byte mpeg buffer and sceMpegCreate failed with NO_MEMORY. */
 static uint32_t h_MpegQueryMemSize(CpuState *s) { (void)s; return 0x10000u; }
+#endif
 /* sceMpegCreate refuses an interrupt handler with 0x80618008 and creates nothing: measured by
  * pspautotests tests/intr/delays (delays.expected:24, with valid arguments). PPSSPP 177244863 added
  * the same check, first, and names the value SCE_MPEG_ERROR_IN_INTERRUPT; that name is not from
@@ -1138,6 +1159,11 @@ static uint32_t h_MpegCreate(CpuState *s) {
     return r;
 }
 static uint32_t h_MpegDelete(CpuState *s) { return mpeg_delete(A0); }
+#ifndef SR_HLE_THREAD_SELFTEST
+static uint32_t h_MpegMallocAvcEsBuf(CpuState *s) { return mpeg_malloc_avc_es_buf(A0); }
+static uint32_t h_MpegFreeAvcEsBuf(CpuState *s) { return mpeg_free_avc_es_buf(A0, A1); }
+static uint32_t h_MpegInitAu(CpuState *s) { return mpeg_init_au(A0, A1, A2); }
+static uint32_t h_MpegQueryAtracEsSize(CpuState *s) { return mpeg_query_atrac_es_size(A0, A1, A2); }
 static uint32_t h_MpegRingbufferQueryMemSize(CpuState *s) { return mpeg_ringbuffer_query_mem_size(A0); }
 static uint32_t h_MpegRingbufferQueryPackNum(CpuState *s) { return mpeg_ringbuffer_query_pack_num(A0); }
 static uint32_t h_MpegAvcQueryYCbCrSize(CpuState *s) { return mpeg_avc_query_ycbcr_size(A0, A1, A2, A3, stack_arg(s, 0)); }
@@ -1191,6 +1217,7 @@ static uint32_t h_MpegAtracDecode(CpuState *s) {
 }
 static uint32_t h_MpegAvcDecodeStop(CpuState *s) { return mpeg_avc_decode_stop(A0, A1, A2, A3); }
 static uint32_t h_MpegAvcDecodeDetail(CpuState *s) { return mpeg_avc_decode_detail(A0, A1); }
+#endif
 /* sceMpegRingbufferDestruct(ring): drain a constructed ring buffer. The ring
  * layout is owned by src/rt/mpeg.c (RB_* field offsets); mpeg.c is not linked
  * into the executable HLE harness, so the harness-visible handler carries the
@@ -1273,6 +1300,7 @@ void hle_register_mpeg_shared_handlers(void) {
     sr_hle_register(0x4571cc64, "sceMpegAvcDecodeFlush", h_MpegAvcDecodeFlush);
 }
 
+#ifndef SR_HLE_THREAD_SELFTEST
 /* These YCbCr handlers are registered by the focused media fixture and by the full registry,
  * so the fixture reaches the same production argument marshalling through sr_syscall(). */
 /* One definition for both registry branches, so the media fixture reaches mpeg_avc_decode (the
@@ -1295,6 +1323,7 @@ void hle_register_mpeg_ycbcr_handlers(void) {
     sr_hle_register(0x0558b075, "sceMpegAvcCopyYCbCr", h_MpegAvcCopyYCbCr);
     sr_hle_register(0x31bd0272, "sceMpegAvcCsc", h_MpegAvcCsc);
 }
+#endif
 
 void hle_register_psmf_player_handlers(void) {
     sr_hle_register(0x1078c008, "scePsmfPlayerStop", h_PsmfStop);
@@ -1825,7 +1854,7 @@ int psmf_av_queue_frames(int ch) {
 #ifdef SR_MPEG_MEDIA_SELFTEST
     if (s_psmf_av_test_queue_set) return s_psmf_av_test_queue;
 #endif
-    return hle_audio_queued(ch);
+    return hle_audio_play_lead(ch);
 }
 
 /* FNV-1a of [addr, +bytes), 0 when the bytes are all zero or cannot be read: a silent block is

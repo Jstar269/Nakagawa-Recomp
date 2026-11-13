@@ -52,7 +52,7 @@
 
 #define PSP_W 480
 #define PSP_H 272
-#define PRESENT_FRAMES 3
+#define PRESENT_FRAMES SDL3VK_PRESENT_FRAMES
 #define HUD_W 240
 #define HUD_H 108
 #define LOGIC_NOTICE_H 22
@@ -75,6 +75,7 @@ typedef struct PresentFrame {
     VkDeviceMemory fbimg_mem;
     VkImage source;
     int submitted;
+    uint64_t serial;  /* its latest submission's (sdl3vk_present_completed) */
     int ts_written;   /* SR_GPU_TIMESTAMPS: this recording holds its start/end pair */
 } PresentFrame;
 
@@ -216,6 +217,9 @@ static int (*s_logic_slowed_cb)(unsigned *rate) = NULL;
 static SDL_Surface  *s_hud_surf = NULL;
 static SDL_Renderer *s_hud_ren = NULL;
 static VkFormat      s_hud_fmt = VK_FORMAT_UNDEFINED;
+/* The last HUD composition (#314): how many times a present copied the HUD into the window's
+ * image, the rectangle it covered, and the image's size then. The capture selftest checks it. */
+static struct { unsigned copies; int x, y, w, h, swap_w, swap_h; } s_hud_last;
 
 int sdl3vk_hud_is_enabled(void) {
     return s_hud_enabled != SDL3VK_HUD_OFF;
@@ -259,9 +263,13 @@ void sdl3vk_set_logic_slowed_cb(int (*cb)(unsigned *rate)) {
 
 static void (*s_ui_pass)(const Sdl3VkUiPass *frame);
 static Sdl3VkShowPass s_show_pass;
+static Sdl3VkShowDone s_show_done;
+static uint64_t s_present_submitted;  /* present submissions made, the newest one's serial */
+static uint64_t s_present_completed;  /* sdl3vk_present_completed */
 static Sdl3VkUpscalePass s_upscale_pass;
 static Sdl3VkUpscalePass s_rec_upscale_pass;  /* the recording's own upscaler (#2138) */
-static int s_upscale_cpu_frame;  /* the last source present's kind, for the held presents */
+static int s_upscale_cpu_frame;  /* the last source present's SDL3VK_FRAME_*, for the held presents */
+static int s_present_movie;      /* sdl3vk_set_present_movie: the next GPU image is a movie frame */
 /* What the last present's frame blit read: its source image and size, its place in the window and
  * its filter. The capture selftest checks the presentation upscaler's image is what reaches the
  * window. */
@@ -275,9 +283,33 @@ void sdl3vk_set_show_pass(Sdl3VkShowPass pass) {
     s_show_pass = pass;
 }
 
+void sdl3vk_set_show_done(Sdl3VkShowDone done) {
+    s_show_done = done;
+}
+
+uint64_t sdl3vk_present_completed(void) {
+    return s_present_completed;
+}
+
+/* A frame's submission has been seen finished: its slot is free, and the completed count moves
+ * up to it (it never moves back, as slots can be waited out of order). */
+static void present_frame_finished(PresentFrame *f) {
+    f->submitted = 0;
+    f->source = VK_NULL_HANDLE;
+    if (f->serial > s_present_completed) s_present_completed = f->serial;
+}
+
+static void present_frame_submitted(PresentFrame *f) {
+    f->submitted = 1;
+    f->serial = ++s_present_submitted;
+}
+
 void sdl3vk_set_upscale_pass(Sdl3VkUpscalePass pass) {
     s_upscale_pass = pass;
 }
+
+void sdl3vk_set_present_movie(int movie) { s_present_movie = movie ? 1 : 0; }
+int sdl3vk_present_frame_kind(void) { return s_upscale_cpu_frame; }
 
 void sdl3vk_set_record_upscale_pass(Sdl3VkUpscalePass pass) {
     s_rec_upscale_pass = pass;
@@ -341,8 +373,7 @@ static int wait_present_frame(PresentFrame *f) {
         s_renderer_terminal = 1;
         return 0;
     }
-    f->submitted=0;
-    f->source=VK_NULL_HANDLE;
+    present_frame_finished(f);
     if (f->ts_written) {
         uint64_t v[2];
         uint32_t q = (uint32_t)(f - s_frame) * 2u;
@@ -1181,6 +1212,13 @@ _Static_assert((int)SDL_SCANCODE_RETURN == 40, "SDL scancode drift from HID usag
 _Static_assert((int)SDL_SCANCODE_UP == 82, "SDL scancode drift from HID usage: UP");
 _Static_assert((int)SDL_SCANCODE_KP_0 == 98, "SDL scancode drift from HID usage: KP_0");
 _Static_assert((int)SDL_SCANCODE_RALT == 230, "SDL scancode drift from HID usage: RALT");
+/* The mouse buttons are profile keys past the keyboard's codes, in SDL's button order (#1791). */
+_Static_assert((int)SDL_SCANCODE_COUNT <= NK_HOST_KEY_MOUSE_FIRST, "SDL scancodes reach the mouse keys");
+_Static_assert(NK_HOST_KEY_MOUSE_LEFT - NK_HOST_KEY_MOUSE_FIRST == SDL_BUTTON_LEFT - 1, "mouse key drift: LEFT");
+_Static_assert(NK_HOST_KEY_MOUSE_MIDDLE - NK_HOST_KEY_MOUSE_FIRST == SDL_BUTTON_MIDDLE - 1, "mouse key drift: MIDDLE");
+_Static_assert(NK_HOST_KEY_MOUSE_RIGHT - NK_HOST_KEY_MOUSE_FIRST == SDL_BUTTON_RIGHT - 1, "mouse key drift: RIGHT");
+_Static_assert(NK_HOST_KEY_MOUSE_X1 - NK_HOST_KEY_MOUSE_FIRST == SDL_BUTTON_X1 - 1, "mouse key drift: X1");
+_Static_assert(NK_HOST_KEY_MOUSE_X2 - NK_HOST_KEY_MOUSE_FIRST == SDL_BUTTON_X2 - 1, "mouse key drift: X2");
 
 /* Versioned host input profile state (#357). */
 static NkInputProfile s_input_profile;
@@ -1278,6 +1316,11 @@ static uint32_t       s_claim_saved_pulse, s_claim_saved_pad_pulse;
 static float          s_mouse_fx, s_mouse_fy;
 static NkAimState     s_aim_state;
 static bool           s_mouse_captured;
+/* The mouse buttons the game has seen pressed (#1791), one bit per NK_HOST_KEY_MOUSE_* key:
+ * set by a press the game had the input for, cleared by its release (wherever it went) and by
+ * a focus loss, so a click made for a menu or the overlay is never held for the game, and no
+ * button stays down while the window is away. */
+static uint32_t       s_mouse_held;
 #define KEY_QUEUE_CAP 64
 static Sdl3VkKeyEvent s_key_queue[KEY_QUEUE_CAP];
 static int            s_key_head, s_key_count;
@@ -1436,6 +1479,27 @@ static void pause_request_latch(int request) {
     if (s_pause_request != SDL3VK_PAUSE_REQUEST_USER) s_pause_request = request;
 }
 
+/* The profile key of an SDL mouse button, or NK_HOST_KEY_NONE for a button with none. */
+static int mouse_button_key(Uint8 button) {
+    if (button < SDL_BUTTON_LEFT || button > SDL_BUTTON_X2) return NK_HOST_KEY_NONE;
+    return NK_HOST_KEY_MOUSE_FIRST + (int)(button - SDL_BUTTON_LEFT);
+}
+
+/* The keys SDL reports held and, past them, the mouse buttons in `mouse_held` (#1791): the one
+ * array the profile's key bindings read. Keyboard codes are copied as they are. */
+static void host_key_state(const bool *k, int key_count, uint32_t mouse_held,
+                           bool out[NK_HOST_KEY_LIMIT]) {
+    memset(out, 0, NK_HOST_KEY_LIMIT * sizeof(bool));
+    if (k && key_count > 0) {
+        memcpy(out, k, (size_t)(key_count < NK_HOST_KEY_MOUSE_FIRST ? key_count
+                                                                    : NK_HOST_KEY_MOUSE_FIRST) *
+                           sizeof(bool));
+    }
+    for (int i = 0; i < NK_HOST_KEY_MOUSE_COUNT; i++) {
+        out[NK_HOST_KEY_MOUSE_FIRST + i] = (mouse_held >> i) & 1u;
+    }
+}
+
 static void poll_input_on_this_stack(void *arg) {
     int *quit = (int *)arg;
     SDL_Event ev;
@@ -1454,7 +1518,16 @@ static void poll_input_on_this_stack(void *arg) {
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
             aim_reset();
+            s_mouse_held = 0;
             break;
+        case SDL_EVENT_MOUSE_BUTTON_UP: {
+            /* A release counts wherever the press went, so no click stays held. A tap or a pen
+             * lifting is not a mouse button letting go. */
+            const int key = mouse_button_key(ev.button.button);
+            if (ev.button.which == SDL_TOUCH_MOUSEID || ev.button.which == SDL_PEN_MOUSEID) break;
+            if (key != NK_HOST_KEY_NONE) s_mouse_held &= ~(1u << (key - NK_HOST_KEY_MOUSE_FIRST));
+            break;
+        }
         default: break;
         }
         /* While the overlay has the input every event is its own; nothing reaches the game. */
@@ -1496,6 +1569,18 @@ static void poll_input_on_this_stack(void *arg) {
             s_mouse_fx += ev.motion.xrel;
             s_mouse_fy += ev.motion.yrel;
             break;
+        case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+            /* A click is a key of the profile (#1791): held until its release, and a pulse
+             * so a click shorter than one poll still reaches the game. Unbound, it is nothing.
+             * A tap or a pen that SDL reports as a mouse is not a mouse button, and a click
+             * the on-screen keyboard has is its own. */
+            const int key = mouse_button_key(ev.button.button);
+            if (key == NK_HOST_KEY_NONE || s_text_claim) break;
+            if (ev.button.which == SDL_TOUCH_MOUSEID || ev.button.which == SDL_PEN_MOUSEID) break;
+            s_mouse_held |= 1u << (key - NK_HOST_KEY_MOUSE_FIRST);
+            s_button_pulse |= sdl3vk_map_key(padscript_active() ? NULL : sdl3vk_get_input_profile(), key);
+            break;
+        }
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN: {
             /* Guide asks for the pause and is consumed, whatever the profile binds to it. */
             if (ev.gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE) {
@@ -1516,7 +1601,9 @@ static void poll_input_on_this_stack(void *arg) {
     /* The profile's keyboard keys (#1299). Its defaults are the GDI front-end's map
      * (gui.c read_keys); SR_PADSCRIPT keeps the defaults, as it does for the gamepad. */
     const NkInputProfile *key_prof = padscript_active() ? NULL : sdl3vk_get_input_profile();
-    uint32_t b = sdl3vk_map_keyboard(key_prof, k, key_count);
+    bool keys[NK_HOST_KEY_LIMIT];
+    host_key_state(k, key_count, s_mouse_held, keys);
+    uint32_t b = sdl3vk_map_keyboard(key_prof, keys, NK_HOST_KEY_LIMIT);
     /* Tab held is fast forward (ace.h), unless the profile binds Tab to a PSP button or the
      * on-screen keyboard has the keys. */
     ace_ff_hold(!s_text_claim && SDL_SCANCODE_TAB < key_count && k[SDL_SCANCODE_TAB] &&
@@ -1548,7 +1635,7 @@ static void poll_input_on_this_stack(void *arg) {
             nk_input_profile_init_default(&def_profile);
             stick_prof = &def_profile;
         }
-        (void)nk_input_profile_eval_key_analog(stick_prof, k, key_count, &lx, &ly);
+        (void)nk_input_profile_eval_key_analog(stick_prof, keys, NK_HOST_KEY_LIMIT, &lx, &ly);
     }
     /* Mouse aiming (#1791): a moving mouse takes the nub; a still one leaves the controller's
      * and the keyboard's value. Off unless the profile turns it on, and never under SR_PADSCRIPT
@@ -1960,8 +2047,7 @@ static int recover_unenqueued_present(PresentFrame *f, uint32_t idx) {
             s_renderer_terminal = 1;
             return 0;
         }
-        f->submitted = 0;
-        f->source = VK_NULL_HANDLE;
+        present_frame_finished(f);
     }
     if (s_swap_sem_done[idx]) {
         vkDestroySemaphore(s_dev, s_swap_sem_done[idx], NULL);
@@ -2451,13 +2537,24 @@ static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_i
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     vkCmdCopyBufferToImage(cmd, f->hud_staging, dst_img,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    s_hud_last.copies++;
+    s_hud_last.x = ox;
+    s_hud_last.y = oy;
+    s_hud_last.w = hud_w;
+    s_hud_last.h = hud_h;
+    s_hud_last.swap_w = swap_w;
+    s_hud_last.swap_h = swap_h;
 }
 
 static int present_common(VkImage src, int srcw, int srch, const uint32_t *upload) {
+    const int movie = s_present_movie;   /* for this present only, whatever happens to it */
+    s_present_movie = 0;
     if (s_renderer_terminal) { sr_capture_fail("renderer is terminal"); return -1; }
     const char *why = NULL;
     int quit = 0;
     int presented = 0;
+    int pass_ran = 0;                /* the show pass recorded into this present (Sdl3VkShowDone) */
+    uint64_t pass_submission = 0;
     poll_input(&quit);
     if (quit) { why = "window closed during present"; goto fail_quit; }
     PresentFrame *f = &s_frame[s_frame_cursor];
@@ -2475,7 +2572,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
     if (s_rec_pending == f) sr_videorec_resolve_pending();
     int rec_in_submit = 0;
     if (upload) { memcpy(f->staging_map, upload, (size_t)srcw * (size_t)srch * 4u); src = f->fbimg; }
-    if (src) s_upscale_cpu_frame = upload != NULL;
+    if (src) s_upscale_cpu_frame = upload ? SDL3VK_FRAME_CPU : movie ? SDL3VK_FRAME_MOVIE : SDL3VK_FRAME_GE;
     VkCommandBuffer cmd = f->cmd;
 
     for (int attempt = 0; attempt < 2; attempt++) {
@@ -2550,6 +2647,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         VkImage show = src;
         int showw = srcw, showh = srch;
         if (s_show_pass) {
+            pass_ran = 1;
             VkImage alt = (VkImage)s_show_pass((void *)cmd, (void *)src, &showw, &showh);
             if (alt) show = alt;
             else { showw = srcw; showh = srch; }
@@ -2709,7 +2807,8 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         }
         if (perf_submit_started) sr_perf_vulkan_submit(perf_submit_started);
         if (sr_perf_enabled) sr_perf_present_submit();
-        f->submitted = 1;
+        present_frame_submitted(f);
+        if (pass_ran) pass_submission = f->serial;
         f->source = upload ? VK_NULL_HANDLE : src;
         if (cap_in_submit)
             sr_capture_mark_recorded(upload ? SR_CAP_SRC_CPU : SR_CAP_SRC_GPU,
@@ -2833,8 +2932,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
                 why = "capture fence wait failed"; goto fail;
             }
             if (perf_wait_started) sr_perf_vulkan_wait(perf_wait_started, 0);
-            f->submitted = 0;
-            f->source = VK_NULL_HANDLE;
+            present_frame_finished(f);
         }
         /* The frame reached the presentation engine (vkQueuePresentKHR succeeded above):
          * a readback/publication failure must not make the frame itself look unpresented,
@@ -2846,6 +2944,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         else
             sr_capture_publish_recorded(s_cap.map, s_cap_w * 4u, s_cap_order);
     }
+    if (pass_ran && s_show_done) s_show_done(1, pass_submission);
     return 1;
 
 display_busy:
@@ -2861,8 +2960,9 @@ fail_acquired:
     s_renderer_terminal = 1;
 fail:
     /* One exit for every failure above: the armed capture resolves as failed, never as
-     * an invented success. */
+     * an invented success, and a show pass learns its picture was not shown. */
     sr_capture_fail(why);
+    if (pass_ran && s_show_done) s_show_done(-1, pass_submission);
     return -1;
 fail_quit:
     sr_capture_fail(why);
@@ -3209,7 +3309,7 @@ int sdl3vk_present_overlay(const void *px, int pitch) {
         s_renderer_terminal = 1;
         return -1;
     }
-    f->submitted = 1;
+    present_frame_submitted(f);
     f->source = VK_NULL_HANDLE;
 
     VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
@@ -3346,6 +3446,7 @@ void sdl3vk_shutdown(void) {
     if (s_pad)         { SDL_CloseGamepad(s_pad); s_pad = NULL; }
     if (s_win)         { SDL_DestroyWindow(s_win); s_win = NULL; }
     s_mouse_captured = false;                      /* the window took its grab with it */
+    s_mouse_held = 0;                              /* and no click outlives it */
     if (s_sdl_subsystems) {
         SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
         s_sdl_subsystems = 0;

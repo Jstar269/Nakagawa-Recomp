@@ -153,6 +153,12 @@ enum { SD_AUTOLOAD=0, SD_AUTOSAVE=1, SD_LOAD=2, SD_SAVE=3, SD_LISTLOAD=4, SD_LIS
  * READDATA modes alike when the save data is larger than the guest buffer.
  * UNMEASURED: no PSP capture shows which code firmware returns for that case. */
 #define ERR_LOAD_DATA_BROKEN_UNMEASURED 0x80110306u
+/* A save directory without its PARAM.SFO, with or without other files: LOAD, AUTOLOAD and
+ * LISTLOAD report LOAD_DATA_BROKEN, and READDATA, READDATASECURE, FILES, ERASE and
+ * ERASESECURE report RW_DATA_BROKEN, before the data file is looked at (pspautotests
+ * tests/utility/savedata loadbroken and deletebroken, revision 26a3dd01, recorded on a PSP). */
+#define ERR_LOAD_DATA_BROKEN 0x80110306u
+#define ERR_RW_DATA_BROKEN   0x80110326u
 
 /* SceUtilitySavedataParam: bind result (offset 0x34, after mode). PPSSPP sets 1021 on every
  * successful load -- "PSP always responds this and this unlocks some games". */
@@ -1735,6 +1741,29 @@ static int savedata_crypt_mode(const char *dir, uint8_t *mode) {
     return 1;
 }
 
+/* Whether the existing save directory `dir` holds the member `name`: 1 it does, 0 it does not, -1
+ * not known (the directory cannot be opened, or something other than a regular file has that
+ * name, or a file whose name differs from `name` only in case, as one copied from a FAT
+ * Memory Stick to a case-sensitive host can). A directory without its PARAM.SFO is a damaged
+ * save on the PSP (ERR_LOAD_DATA_BROKEN). */
+static int savedata_member_state(const char *dir, const char *name) {
+    SavedataDir d;
+    SdContent c;
+    if (!sd_dir_open(&d, dir)) return -1;
+    const int known = sd_content(&d, name, &c);
+    sd_dir_close(&d);
+    if (!known) return -1;
+    if (c.present) return 1;
+    char **names = NULL;
+    size_t count = 0;
+    if (!savedata_sorted_names(dir, &names, &count)) return -1;
+    int state = 0;
+    for (size_t i = 0; i < count; i++)
+        if (sd_stricmp(names[i], name) == 0) state = -1;
+    free_names(names, count);
+    return state;
+}
+
 /* A save this runtime cannot decrypt is never handed back as data, and never replaced or
  * deleted either: it may be the only copy of a save the player brought from a PSP. A save whose
  * PARAM.SFO cannot be read is treated the same way, since it may be one. Logged on every
@@ -2078,6 +2107,33 @@ static int dir_exists(const char *dir) {
 #endif
 }
 
+/* The state of the save directory `dir`: 1 it exists, 0 it is absent, -1 not known. Absent
+ * means only that the host reports nothing at that name (file or path not found); a file, a
+ * link, a junction, an unreadable directory or any other error is not known, never absent, so
+ * that "cannot tell" is never answered as "no save". The name itself is looked at, not what a
+ * link there points to. */
+static int save_dir_state(const char *dir) {
+    if (dir_exists(dir)) return 1;
+#ifdef _WIN32
+    int need = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, dir, -1, NULL, 0);
+    if (need <= 0) return -1;
+    wchar_t *wpath = (wchar_t *)malloc((size_t)need * sizeof(wchar_t));
+    if (!wpath) return -1;
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, dir, -1, wpath, need);
+    for (wchar_t *p = wpath; *p; p++) if (*p == L'/') *p = L'\\';
+    const DWORD attrs = GetFileAttributesW(wpath);
+    const DWORD err = attrs == INVALID_FILE_ATTRIBUTES ? GetLastError() : 0;
+    free(wpath);
+    return attrs == INVALID_FILE_ATTRIBUTES &&
+                   (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
+               ? 0
+               : -1;
+#else
+    struct stat st;
+    return lstat(dir, &st) != 0 && errno == ENOENT ? 0 : -1;
+#endif
+}
+
 /* Read a host file into a guest PspUtilitySavedataFileData block {buf, bufSize, size, unk}.
  * PPSSPP loads ICON0/ICON1/PIC1/SND0 back on every Load; some games require it. */
 static void load_filedata(const char *dir, const char *name, uint32_t fd) {
@@ -2093,7 +2149,8 @@ static void load_filedata(const char *dir, const char *name, uint32_t fd) {
     }
 }
 
-static uint32_t do_load(uint32_t param, const char *game, const char *save) {
+/* rw: READDATA or READDATASECURE, whose damaged-save code is the RW family's. */
+static uint32_t do_load(uint32_t param, const char *game, const char *save, int rw) {
     char dir[PATH_MAX], fileName[16];
     rd_cstr(param + SDP_fileName, fileName, sizeof(fileName));
     uint32_t dataBuf = MEM_R32(param + SDP_dataBuf);
@@ -2120,6 +2177,14 @@ static uint32_t do_load(uint32_t param, const char *game, const char *save) {
     /* An unfinished SAVE is settled before anything is read: no read ever sees half of one. */
     if (!savedata_recover(dir)) return ERR_LOAD_ACCESS_ERROR_UNMEASURED;
     if (fileName[0] && savedata_encrypted(dir, "LOAD")) return ERR_LOAD_DATA_BROKEN_UNMEASURED;
+    /* No PARAM.SFO: a damaged save, whether or not the data file is there (PSP, loadbroken),
+     * and dataSize is left as the game wrote it (PSP-HLE-SAVEDATA-NODATA-001, CAPTURED on a
+     * PSP-3000: AUTOLOAD, READDATA and READDATASECURE left it at its preset; LOAD and LISTLOAD
+     * are UNMEASURED and follow AUTOLOAD). */
+    if (savedata_member_state(dir, "PARAM.SFO") == 0)
+        return rw ? ERR_RW_DATA_BROKEN : ERR_LOAD_DATA_BROKEN;
+    /* dataSize is zeroed before the read, as PPSSPP's LoadSaveData does; what a PSP leaves
+     * there when the read then fails is UNMEASURED. */
     MEM_W32(param + SDP_dataSize, 0);
     /* Blank fileName means success without reading data (PPSSPP LoadSaveData); the SFO and
      * icon blobs are still handed back. */
@@ -2184,6 +2249,14 @@ static uint32_t do_delete(const char *game, const char *save) {
     char rel[SR_CD_REL_MAX], dir[PATH_MAX];
     if (!save_rel(rel, sizeof(rel), game, save) || !save_dir(dir, sizeof(dir), game, save))
         return ERR_DELETE_NO_DATA;
+    /* No save: nothing to delete. AUTODELETE returns DELETE_NO_DATA and DELETEDATA RW_NO_DATA
+     * there (PSP-HLE-SAVEDATA-NODATA-001, CAPTURED on a PSP-3000); what DELETE (mode 10)
+     * returns is UNMEASURED and follows AUTODELETE. A directory without PARAM.SFO is deleted
+     * like any other (PSP, deletebroken: result 0). Anything at that name that is not known to
+     * be a directory is refused, and nothing is deleted. */
+    const int state = save_dir_state(dir);
+    if (state == 0) return ERR_DELETE_NO_DATA;
+    if (state < 0) return ERR_DELETE_ACCESS_ERROR_UNMEASURED;
     /* An unfinished SAVE is settled first, and a save this runtime cannot read is kept. */
     if (!savedata_recover(dir) || savedata_encrypted(dir, "DELETE"))
         return ERR_DELETE_ACCESS_ERROR_UNMEASURED;
@@ -2207,10 +2280,22 @@ static uint32_t do_erase(uint32_t param, const char *game, const char *save) {
         return ERR_RW_NO_DATA;
     if (!save_rel(rel, sizeof(rel), game, save) || !save_dir(dir, sizeof(dir), game, save))
         return ERR_RW_NO_DATA;
+    /* No save: RW_NO_DATA for ERASE and ERASESECURE (PSP-HLE-SAVEDATA-NODATA-001, CAPTURED on a
+     * PSP-3000). Anything at that name that is not known to be a directory is refused, and
+     * nothing is erased. */
+    const int state = save_dir_state(dir);
+    if (state == 0) return ERR_RW_NO_DATA;
+    if (state < 0) return ERR_RW_NO_MEMSTICK_UNMEASURED;
     /* ERASE removes one member, so the directory must be fully settled first: no record or
      * previous copy may still name the file it is about to delete. */
     if (!savedata_recover_settled(dir) || savedata_encrypted(dir, "ERASE"))
         return ERR_RW_NO_MEMSTICK_UNMEASURED;
+    /* No PARAM.SFO: a damaged save, and nothing in it is erased (PSP, deletebroken). */
+    if (savedata_member_state(dir, "PARAM.SFO") == 0) return ERR_RW_DATA_BROKEN;
+    /* A data file that is not there is RW_FILE_NOT_FOUND (PSP, deletebroken). It is looked up
+     * before the deletion, because on Windows the deletion primitive reports a missing file as
+     * one it refuses. */
+    if (savedata_member_state(dir, fileName) == 0) return ERR_RW_NOT_FOUND;
     sr_cd_root root;
     sr_cd_status st = sr_cd_root_open(ms_root(), &root);
     if (st == SR_CD_OK) {
@@ -2341,21 +2426,27 @@ static uint32_t do_files(uint32_t param, uint32_t size, const char *game, const 
     char dir[PATH_MAX];
     char **names = NULL;
     size_t name_count = 0;
-    int listed = save_dir(dir, sizeof(dir), game, save);
-#ifdef _WIN32
-    wchar_t canonical_root[MAX_PATH * 2];
-    if (listed && (!ms_canonical_root(canonical_root, sizeof(canonical_root)/sizeof(wchar_t)) ||
-                   !sr_vfs_dir_is_contained(dir, canonical_root)))
-        listed = 0;
-#endif
-    if (listed && dir_exists(dir) && !savedata_recover(dir)) {
+    /* The directory's state, once: dir_exists, inside it, refuses a directory that resolves
+     * outside the Memory Stick root (a junction), which then reads as not known. */
+    const int state = save_dir(dir, sizeof(dir), game, save) ? save_dir_state(dir) : 0;
+    /* No such save: RW_NO_DATA (PSP, deletedata), and the counts, entries and list pointers are
+     * left as the game wrote them (PSP-HLE-SAVEDATA-NODATA-001, CAPTURED on a PSP-3000). */
+    if (state == 0) return ERR_RW_NO_DATA;
+    /* Something at that name that is not known to be a directory, or a directory that cannot
+     * be settled or listed: an access error, not "no save". What a PSP returns for a directory
+     * it cannot read is UNMEASURED; the code is the LOAD-family access error main returned when
+     * the directory could not be settled. */
+    if (state < 0 || !savedata_recover(dir)) {
         MEM_W32(fl + 12, 0); MEM_W32(fl + 16, 0); MEM_W32(fl + 20, 0);
         return ERR_LOAD_ACCESS_ERROR_UNMEASURED;
     }
-    if (listed) listed = savedata_sorted_names(dir, &names, &name_count);
-    if (!listed) {
+    /* A directory without PARAM.SFO: RW_DATA_BROKEN, and the counts are left as the game wrote
+     * them. pspautotests loadbroken and deletebroken print one system entry after every such
+     * FILES call, the count an earlier call returned, so a PSP does not clear them. */
+    if (savedata_member_state(dir, "PARAM.SFO") == 0) return ERR_RW_DATA_BROKEN;
+    if (!savedata_sorted_names(dir, &names, &name_count)) {
         MEM_W32(fl + 12, 0); MEM_W32(fl + 16, 0); MEM_W32(fl + 20, 0);
-        return ERR_LOAD_NO_DATA;                  /* no such save: FILES_NO_DATA semantics */
+        return ERR_LOAD_ACCESS_ERROR_UNMEASURED;
     }
     /* Each regular file once: a system file in the system list, any other file in the normal
      * list and again in the secure list (data files are also "secure"). */
@@ -2578,6 +2669,16 @@ static int getsize_sum_entries(uint32_t count, uint32_t entries, uint64_t per_en
     return 1;
 }
 
+/* A sizeInfo text field: written through its NUL and no further. Measured for a save that does
+ * not exist (PSP-HLE-SAVEDATA-GETSIZE-001); a save that exists uses the same rule by analogy
+ * (UNMEASURED there). */
+static void wr_size_text(uint32_t addr, const char *s, int n) {
+    for (int i = 0; i < n; i++) {
+        MEM_W8(addr + (uint32_t)i, (uint8_t)s[i]);
+        if (!s[i]) break;
+    }
+}
+
 /* KB for the 32-bit sizeInfo fields, rounded up. A shortfall beyond 4 TiB is
  * not representable there and saturates at the field's maximum. */
 static uint32_t getsize_kb_round_up(uint64_t bytes) {
@@ -2595,11 +2696,25 @@ static uint32_t getsize_kb_round_up(uint64_t bytes) {
  * bytes, files already in the save count as overwritable, and the needed and
  * overwrite strings are written only when there is a shortfall.
  *
- * A save that does not exist fills in the same figures and then reports
- * ERR_RW_NO_DATA (PPSSPP PSPSaveDialog::ExecuteNotVisibleIOAction, revision
- * c9e2afb6; UNMEASURED on a PSP, whose recorded case has the save in place). A
- * game reads that pair as "no save yet, and this much room to make one", and
- * success as "there is a save to load". */
+ * A save that does not exist fills in the free figures and neededKB, with
+ * neededString on a shortfall, and reports ERR_RW_NO_DATA; overwriteKB and
+ * overwriteString stay as the game left them, and a NULL sizeInfo reports 0
+ * (PSP-3000, docs/HARDWARE_ORACLE.md, PSP-HLE-SAVEDATA-GETSIZE-001). A NULL
+ * sizeInfo for a save that exists reports 0 here too (UNMEASURED). A game
+ * reads RW_NO_DATA as "no save yet, and this much room to make one", and
+ * success as "there is a save to load".
+ *
+ * Measured but NOT reproduced: the shortfall figure. On the same run a PSP's
+ * neededKB charged three clusters beyond the entry's size and wrapped at 32
+ * bits of bytes, so its neededKB and neededString differ from the figures
+ * here, which stay PPSSPP's arithmetic (64-bit, no cluster charge,
+ * saturating). By that arithmetic its fit/shortfall boundary would differ
+ * too (UNMEASURED: the one shortfall cell wraps). One measured cell cannot divide
+ * those clusters between the entry's rounding and the save's own files, so
+ * the model waits for more cells (#308). The cluster size differs too: the
+ * runtime writes 0x8000, that PSP-3000's Memory Stick reported 0x10000.
+ *
+ * UNMEASURED: the overwrite fields and text of a save that exists. */
 static uint32_t do_getsize(uint32_t param, uint32_t size, const char *game, const char *save) {
     uint32_t si = savedata_optional_pointer(param, size, SDP_sizeInfo);
     if (!si) return 0;
@@ -2615,7 +2730,8 @@ static uint32_t do_getsize(uint32_t param, uint32_t size, const char *game, cons
     char dir[PATH_MAX];
     if (save_dir(dir, sizeof(dir), game, save) && !savedata_recover(dir))
         return ERR_RW_NO_MEMSTICK_UNMEASURED;
-    const uint32_t result = dir[0] && dir_exists(dir) ? 0u : ERR_RW_NO_DATA;
+    const int exists = dir[0] && dir_exists(dir);
+    const uint32_t result = exists ? 0u : ERR_RW_NO_DATA;
     uint64_t write_bytes = 0, overwrite_bytes = 0;
     if (!getsize_sum_entries(nSec, pSec, 0x10u, dir, &write_bytes, &overwrite_bytes) ||
         !getsize_sum_entries(nNorm, pNorm, 0u, dir, &write_bytes, &overwrite_bytes))
@@ -2625,21 +2741,22 @@ static uint32_t do_getsize(uint32_t param, uint32_t size, const char *game, cons
     MEM_W32(si + 16, CLUSTER);                              /* sectorSize */
     MEM_W32(si + 20, fr.sectors);                           /* freeSectors */
     MEM_W32(si + 24, fr.kb);                                /* freeKB */
-    wr_fixed(si + 28, fr.text, 8);                          /* freeString */
+    wr_size_text(si + 28, fr.text, 8);                      /* freeString */
     if (overwrite_bytes >= write_bytes || write_bytes - overwrite_bytes < fr.bytes) {
         MEM_W32(si + 36, 0);                                /* neededKB */
-        MEM_W32(si + 48, 0);                                /* overwriteKB */
+        if (exists) MEM_W32(si + 48, 0);                    /* overwriteKB */
         return result;
     }
     char text[24];
     uint64_t needed = write_bytes - fr.bytes;
     MEM_W32(si + 36, getsize_kb_round_up(needed));
     savedata_space_text(needed, 1, text, sizeof(text));
-    wr_fixed(si + 40, text, 8);                             /* neededString */
+    wr_size_text(si + 40, text, 8);                         /* neededString */
+    if (!exists) return result;
     uint64_t overwrite = needed > overwrite_bytes ? needed - overwrite_bytes : 0;
     MEM_W32(si + 48, getsize_kb_round_up(overwrite));
     savedata_space_text(overwrite, 1, text, sizeof(text));
-    wr_fixed(si + 52, text, 8);                             /* overwriteString */
+    wr_size_text(si + 52, text, 8);                         /* overwriteString */
     return result;
 }
 
@@ -2872,9 +2989,9 @@ static uint32_t savedata_dispatch(uint32_t param, uint32_t size, uint32_t mode, 
             return r;
         }
         case SD_AUTOLOAD: case SD_LOAD: case SD_LISTLOAD:
-            return do_load(param, game, save);
+            return do_load(param, game, save, 0);
         case SD_READDATA: case SD_READDATASECURE: {
-            uint32_t r = do_load(param, game, save);             /* PPSSPP error remap */
+            uint32_t r = do_load(param, game, save, 1);          /* PPSSPP error remap */
             if (r == ERR_LOAD_NO_DATA) r = ERR_RW_NO_DATA;
             if (r == ERR_LOAD_NOT_FOUND) r = ERR_RW_NOT_FOUND;
             if (r == ERR_LOAD_ACCESS_ERROR_UNMEASURED) r = ERR_RW_NO_MEMSTICK_UNMEASURED;

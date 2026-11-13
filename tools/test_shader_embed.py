@@ -407,6 +407,7 @@ int main(int argc, char **argv) {
 # SPV_EXT_fragment_shader_interlock).
 SPV_OP_CAPABILITY, SPV_OP_EXECUTION_MODE, SPV_OP_DECORATE, SPV_OP_VARIABLE = 17, 16, 71, 59
 SPV_OP_BEGIN_INTERLOCK, SPV_OP_END_INTERLOCK = 5364, 5365
+SPV_OP_ATOMIC_OR, SPV_OP_ATOMIC_XOR = 241, 242
 SPV_CAP_PIXEL_INTERLOCK = 5378
 SPV_MODE_EARLY_FRAGMENT_TESTS, SPV_MODE_PIXEL_ORDERED, SPV_MODE_PIXEL_UNORDERED = 9, 5366, 5367
 SPV_DECORATION_COHERENT = 23
@@ -432,9 +433,10 @@ class DstReadVariantTests(unittest.TestCase):
 
     # The default module, psp.frag built without SR_DST_INTERLOCK: a change meant for the variant
     # alone (an #ifdef) must not change it. A deliberate change to the default fragment stage
-    # updates this hash; the last one added the color test, and the module is the same with and
-    # without the variant's #ifdef blocks in the source.
-    DEFAULT_FRAG_SPIRV_SHA256 = "ab1795bb84423d027451cb102ad9a72042f1579b79e79cb8752421e7cf92ce20"
+    # updates this hash; the last one is the merge of a directly bound render target read at its
+    # texture's own size (#2052) with the host mip chain's textureGrad branch (#1273), and the
+    # module is the same with and without the variant's #ifdef blocks in the source.
+    DEFAULT_FRAG_SPIRV_SHA256 = "ff1d4401edc5477b0def6118eebf08022d65eca410d68affd475480075ab1c1c"
 
     def manifest_entry(self, embedded: str) -> dict:
         manifest = shader_embed.load_manifest(shader_embed.MANIFEST)
@@ -470,6 +472,13 @@ class DstReadVariantTests(unittest.TestCase):
                     if op == SPV_OP_DECORATE and operands[1] == SPV_DECORATION_COHERENT}
         variables = {operands[1] for op, operands in ins if op == SPV_OP_VARIABLE}
         self.assertEqual(len(coherent & variables), 1)
+        # Shader-owned depth (#2109): the packed D16 buffer is read and written only by atomics
+        # (two pixels share a word, outside each other's critical sections), and only in the
+        # critical section: one atomic read and one atomic XOR, both between begin and end.
+        begin, end = ops.index(SPV_OP_BEGIN_INTERLOCK), ops.index(SPV_OP_END_INTERLOCK)
+        atomics = [i for i, op in enumerate(ops) if op in (SPV_OP_ATOMIC_OR, SPV_OP_ATOMIC_XOR)]
+        self.assertEqual(sorted(ops[i] for i in atomics), [SPV_OP_ATOMIC_OR, SPV_OP_ATOMIC_XOR])
+        self.assertTrue(all(begin < i < end for i in atomics))
 
 
 class GePowfSharedTextTests(unittest.TestCase):

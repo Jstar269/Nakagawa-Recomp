@@ -655,6 +655,186 @@ def _check_ignored(paths: list[str]) -> set[str]:
     return {line for line in proc.stdout.decode("utf-8", "replace").splitlines() if line}
 
 
+class OutsideOutputRootInventoryTests(unittest.TestCase):
+    """Every fixed path outside BUILD_ROOT and LOG_DIR is declared, with its reason (#368).
+
+    docs/WORKSPACE_DOCTOR.md, "Paths outside the output roots", lists what the runtime
+    opens relative to its run folder, the names it joins to a folder it is given, and the
+    fixed paths tools write. The runtime lists are derived from the source here, both
+    ways. The source side is: a path default in src/rt/env_registry.h; an fopen of a
+    literal name for writing and a `logs/`, `build/` or `place_game_here/` literal
+    anywhere in src/; and a file name with an output extension in src/rt, bare or after
+    `%s/`. Self-test output names and comments are skipped, and a literal split around
+    an inttypes.h format macro is joined with the macro's name in place. A name the code assembles from separate pieces
+    at run time is not seen, nor a literal default in code that env_registry.h does not
+    record. Each runtime row's switches must be registered variables, and a literal
+    fopen'd for writing must be declared as written. The tools table is checked row by
+    row against its tool's source, not derived. A written path inside the checkout must
+    be gitignored, or a debug run under `make run` leaves a file that `git add -A` stages.
+    """
+
+    DOC = ROOT / "docs" / "WORKSPACE_DOCTOR.md"
+    SECTION = "### Paths outside the output roots"
+    RUNTIME_HEADER = "| Path | Switch | Direction | Why it stays |"
+    JOINED_HEADER = "| Name | Joined to |"
+    TOOLS_HEADER = "| Path | Tool | Why it stays |"
+    #: The title catalog's launch candidates and fixture memory-stick roots are joined to
+    #: the root src/core/nk_launch.c is given, never to the working directory (the doc
+    #: says so below the tables).
+    EXCLUDED_DIRS = ("src/core/generated/",)
+    REGISTRY_ROW = re.compile(r'X\("([A-Z0-9_]+)",\s*"([\w-]+)",\s*"([^"]*)"')
+    RELATIVE_DEFAULT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./%-]*$")
+    FOPEN_WRITE = re.compile(r'fopen\(\s*"([^"]+)"\s*,\s*"[wa]')
+    ROOTED_LITERAL = re.compile(r'"((?:logs|build|place_game_here)/[^"]*)"')
+    BARE_NAME = re.compile(
+        r'"(?:%s/)?([A-Za-z0-9][A-Za-z0-9_%.-]*\.'
+        r'(?:ppm|pgm|png|bin|csv|json|jsonl|txt|ngef|wav|flag|tmp|mkv|bgr0|srt|nkcap))"')
+    #: Comments, string literals and character literals, so a comment is dropped and a
+    #: quote inside a literal does not end it.
+    C_TOKEN = re.compile(
+        r'//[^\n]*|/\*.*?\*/|("(?:\\.|[^"\\\n])*")|(\'(?:\\.|[^\'\\\n])*\')', re.S)
+    FORMAT_MACRO_JOIN = re.compile(r'"\s*(PRI\w+)\s*"')
+    CODE_SPAN = re.compile(r"`([^`]+)`")
+
+    @classmethod
+    def _table(cls, header: str) -> list[list[str]]:
+        text = cls.DOC.read_text(encoding="utf-8")
+        if cls.SECTION not in text:
+            raise AssertionError(f"{cls.DOC.name} has no {cls.SECTION!r} section")
+        section = text.split(cls.SECTION, 1)[1].split("\n## ", 1)[0]
+        if header not in section:
+            raise AssertionError(f"the section has no table headed {header!r}")
+        rows = []
+        for line in section.split(header, 1)[1].splitlines()[2:]:
+            if not line.startswith("|"):
+                break
+            rows.append([cell.strip() for cell in line.strip().strip("|").split("|")])
+        return rows
+
+    @classmethod
+    def _spans(cls, cell: str) -> list[str]:
+        return cls.CODE_SPAN.findall(cell)
+
+    @classmethod
+    def _first_spans(cls, header: str) -> dict[str, list[str]]:
+        """First code span of each row's first cell -> the row."""
+        return {cls._spans(row[0])[0]: row for row in cls._table(header) if cls._spans(row[0])}
+
+    @classmethod
+    def _code(cls, text: str) -> str:
+        """C source without comments, with format-macro concatenations joined."""
+        text = cls.C_TOKEN.sub(lambda m: m.group(1) or m.group(2) or " ", text)
+        return cls.FORMAT_MACRO_JOIN.sub(r"\1", text)
+
+    @classmethod
+    def _runtime_sources(cls) -> list[Path]:
+        found = []
+        for path in sorted((ROOT / "src").rglob("*")):
+            relative = path.relative_to(ROOT).as_posix()
+            if path.suffix not in {".c", ".h", ".inc"} or not path.is_file():
+                continue
+            if "selftest" in path.name or path.name.endswith("_test.c") or "/tests/" in relative:
+                continue
+            if relative.startswith(cls.EXCLUDED_DIRS):
+                continue
+            found.append(path)
+        return found
+
+    @classmethod
+    def _registry(cls) -> dict[str, tuple[str, str]]:
+        """Registered variable -> (kind, default)."""
+        text = (ROOT / "src" / "rt" / "env_registry.h").read_text(encoding="utf-8")
+        return {name: (kind, default) for name, kind, default in cls.REGISTRY_ROW.findall(text)}
+
+    @classmethod
+    def _source_paths(cls) -> tuple[dict[str, set[str]], set[str], dict[str, str]]:
+        """(literal path -> the files naming it, the literals fopen'd for writing,
+        registry path default -> its variable)."""
+        literals: dict[str, set[str]] = {}
+        opened_for_writing: set[str] = set()
+        for path in cls._runtime_sources():
+            relative = path.relative_to(ROOT).as_posix()
+            text = cls._code(path.read_text(encoding="utf-8", errors="replace"))
+            patterns = [cls.FOPEN_WRITE, cls.ROOTED_LITERAL]
+            if relative.startswith("src/rt/"):
+                patterns.append(cls.BARE_NAME)
+            for pattern in patterns:
+                for literal in pattern.findall(text):
+                    if "selftest" in literal:  # a self-test's scratch output, in TEMP
+                        continue
+                    literals.setdefault(literal, set()).add(relative)
+            opened_for_writing.update(cls.FOPEN_WRITE.findall(text))
+        defaults = {
+            default: name
+            for name, (kind, default) in cls._registry().items()
+            if kind == "path" and default not in {"off", "unset"}
+            and cls.RELATIVE_DEFAULT.fullmatch(default)
+        }
+        return literals, opened_for_writing, defaults
+
+    def test_every_runtime_path_is_declared(self) -> None:
+        literals, _, defaults = self._source_paths()
+        declared = set(self._first_spans(self.RUNTIME_HEADER)) | set(
+            self._first_spans(self.JOINED_HEADER))
+        missing = sorted(f"{literal} ({', '.join(sorted(files))})"
+                         for literal, files in literals.items() if literal not in declared)
+        missing += sorted(f"{default} ({name})" for default, name in defaults.items()
+                          if default not in declared)
+        self.assertEqual(missing, [], "these runtime paths outside the output roots are not "
+                         f"declared in {self.DOC.name}:\n" + "\n".join(missing))
+
+    def test_no_runtime_row_is_stale(self) -> None:
+        literals, _, defaults = self._source_paths()
+        declared = list(self._first_spans(self.RUNTIME_HEADER)) + list(
+            self._first_spans(self.JOINED_HEADER))
+        stale = sorted(path for path in declared if path not in literals and path not in defaults)
+        self.assertEqual(stale, [], "these declared runtime paths no longer appear in src/")
+
+    def test_runtime_rows_name_registered_switches_and_true_directions(self) -> None:
+        _, opened_for_writing, defaults = self._source_paths()
+        registry = self._registry()
+        rows = self._first_spans(self.RUNTIME_HEADER)
+        problems = []
+        for path, row in rows.items():
+            switches = self._spans(row[1])
+            if not switches and row[1] != "none":
+                problems.append(f"{path}: the Switch cell is neither variables nor 'none'")
+            problems += [f"{path}: {name} is not in src/rt/env_registry.h"
+                         for name in switches if name not in registry]
+            if path in defaults and defaults[path] not in switches:
+                problems.append(f"{path}: the registry default of {defaults[path]}, "
+                                "which the Switch cell does not name")
+            if path in opened_for_writing and "written" not in row[2]:
+                problems.append(f"{path}: opened for writing, declared {row[2]!r}")
+        self.assertEqual(problems, [])
+
+    def test_every_tool_row_names_a_tool_that_writes_it(self) -> None:
+        rows = self._table(self.TOOLS_HEADER)
+        self.assertTrue(rows)
+        for row in rows:
+            path, tool = self._spans(row[0])[0], self._spans(row[1])[0]
+            with self.subTest(path=path):
+                source = ROOT / tool
+                self.assertTrue(source.is_file(), f"{tool} does not exist")
+                text = source.read_text(encoding="utf-8")
+                words = [word for word in re.split(r"[\\/%.]", path) if len(word) >= 3]
+                self.assertTrue(words)
+                self.assertEqual([word for word in words if word not in text], [],
+                                 f"{tool} never names these parts of {path}")
+
+    def test_written_paths_in_the_checkout_are_gitignored(self) -> None:
+        written = [path for path, row in self._first_spans(self.RUNTIME_HEADER).items()
+                   if "written" in row[2]]
+        written += [path for path in self._first_spans(self.TOOLS_HEADER) if "%" not in path]
+        self.assertGreater(len(written), 5)
+        # A folder is asked about with its trailing slash, so a rule for folders applies.
+        asked = [path if Path(path).suffix else path + "/" for path in written]
+        ignored = _check_ignored(asked)
+        self.assertEqual(sorted(set(asked) - ignored), [],
+                         "a run or tool writes these into the checkout, but `git add -A` "
+                         "would stage them")
+
+
 class KeyFileIgnoreTests(unittest.TestCase):
     """A KeyStore file dropped anywhere in the tree stays out of `git add -A`.
 

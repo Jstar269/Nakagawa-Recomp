@@ -40,6 +40,7 @@ static void audio_note_sas_buf(uint32_t buf) {
  * so a no-op return makes the audio thread monopolise the CPU. Here it yields the thread for
  * the buffer's duration AND forwards the samples to the host waveOut backend (audio.c). */
 extern void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR);
+extern void sr_audio_push_wide(int ch, const int16_t *lr, const int32_t *wide, int nframes, int volL, int volR);
 /* Slots 0..7 are the regular hardware channels. Slot 8 models the separate
  * sceAudioOutput2 channel, which has its own reservation and queue. */
 static int s_audio_ch[9], s_audio_fmt[9];   /* regular fmt: 0=stereo, 0x10=mono */
@@ -186,13 +187,90 @@ static void audio_vq_drain(uint32_t slot) {
     else s_vq_frames[slot] -= (uint32_t)drained;
 }
 
-/* The queue depth in frames the guest sees on `ch`. Under the deterministic clock it is the
- * guest-time model's, whatever the host has; otherwise the host mixer's, or -1 when the host has no
- * output for it. */
-int hle_audio_queued(int ch) {
+/* ---- what the host mixer holds that the guest does not see ----------------------------------
+ *
+ * The PSP plays a channel's buffer as it is handed over, so a guest that keeps two periods queued
+ * never runs its channel dry. A host output device does not drain like that: it takes a whole
+ * block from the mixer at a time (441 frames from WASAPI and 1024 from DirectSound on the
+ * reference PC), and the guest thread that refills the queue learns of a pull only when its wait
+ * ends, from a host scheduler that can be late. Held to two periods of a 256-frame channel (512
+ * frames), the queue is smaller than one 1024-frame pull: every pull came up short, and Warship
+ * Gunner 2 Portable's 256-frame channel delivered three periods per pull, 75% of its audio, with
+ * the queue empty at 2491 of its pushes in 59 seconds. With 441-frame pulls the two periods cover
+ * a pull and nothing more, so each late wake was a dropout.
+ *
+ * So the queue holds one device pull and one display period, P + W frames, where the guest's view
+ * of it is two periods: P is the block the device was seen to take at once
+ * (sr_audio_host_pull_frames) and W one VBLANK period, the longest the scheduler ordinarily runs
+ * without reaching a boundary, which is how late a wait can end (#67). That covers the blocking
+ * output as it waits now: for as long as the frames it sees above two periods take to play. Say
+ * y of them are left when the pull comes that takes its view to two periods or under. That pull
+ * leaves 2n + hold - P + y frames, and the guest finds out when its wait ends, at most y + W
+ * frames of play time later. floor((y + W) / P) more pulls can come before it refills, each
+ * taking P, and 2n + hold - P + y >= floor((y + W) / P) * P for every y when
+ * hold >= P + W - 2n. No period is added for the wait: a wait is only as long as the queue is
+ * deep.
+ *
+ * The guest's own two periods count towards the sum, and only the frames beyond them are hidden:
+ * the guest sees and paces against at most its two periods, as on the PSP, and a channel whose
+ * two periods already cover the sum (768 frames and up against 441-frame pulls, 1024 and up
+ * against 1024-frame pulls) is paced exactly as before. A channel left at two periods less a
+ * display period by a guest that is busy elsewhere still fills a pull.
+ *
+ * A channel the device has played dry (a pull came while its stream could give nothing: at its
+ * start, or after it stopped or stalled for longer than its queue) gets the hold as silence ahead
+ * of its next push (audio_host_hold_prime): the guest then sees its own frames from the first
+ * one, and as many outputs return at once as on the PSP. A queue that still has frames, after a
+ * late wake the hold absorbed or a pull that took the last of it, gets none, because silence
+ * there would cut into audio that is playing: the guest's next outputs return at once and refill
+ * it.
+ *
+ * Under the deterministic clock, and while fast forward runs, the guest sees the guest-time
+ * model instead and none of this applies: the host mixer only follows, or is given nothing. */
+extern int sr_audio_host_pull_frames(void);
+extern int sr_audio_played_dry(int ch);
+extern void sr_audio_push_silence(int ch, int nframes);
+
+/* One display period in mixer frames, rounded up (736). */
+#define AUDIO_LATE_WAKE_FRAMES ((SR_DISPLAY_PERIOD_US * 44100u + 999999u) / 1000000u)
+
+static uint32_t audio_host_hold_frames(uint32_t n) {
+    if (!n) return 0u;   /* no period reserved: nothing paces against this queue */
+    const int pull = sr_audio_host_pull_frames();
+    if (pull <= 0) return 0u;   /* no device takes blocks from this queue: there is nothing to cover */
+    const uint64_t need = (uint64_t)(uint32_t)pull + AUDIO_LATE_WAKE_FRAMES;
+    const uint64_t seen = 2u * (uint64_t)n;
+    return need > seen ? (uint32_t)(need - seen) : 0u;
+}
+
+/* Before a push: a channel the device has played dry gets its hold as silence, so the frames about
+ * to be pushed are the first the guest sees queued. */
+static void audio_host_hold_prime(int ch, uint32_t n) {
+    if (audio_vq_on(ch) || !sr_audio_played_dry(ch)) return;
+    const uint32_t hold = audio_host_hold_frames(n);
+    if (hold) sr_audio_push_silence(ch, (int)hold);
+}
+
+/* The frames of `ch` the host has not played yet: what a listener is still to hear. Under the
+ * deterministic clock and in fast forward it is the guest-time model's; otherwise the host
+ * mixer's whole queue, the hold included, or -1 when the host has no output for it. The model
+ * is seeded with the guest's view (the queue less the hold, audio_vq_on), so a lead read here
+ * drops by the hold when fast forward starts and rises by it when fast forward ends. Nothing
+ * plays from the host while fast forward runs, so no listener hears the difference. */
+int hle_audio_play_lead(int ch) {
     if (ch < 0 || ch > 8 || !audio_vq_on(ch)) return sr_audio_queued(ch);
     audio_vq_drain((uint32_t)ch);
     return s_vq_frames[ch] > (uint32_t)INT_MAX ? INT_MAX : (int)s_vq_frames[ch];
+}
+
+/* The queue depth in frames the guest sees on `ch`. Under the deterministic clock and in fast
+ * forward it is the guest-time model's, whatever the host has; otherwise the host mixer's beyond
+ * what it holds for its device (above), or -1 when the host has no output for it. */
+int hle_audio_queued(int ch) {
+    const int lead = hle_audio_play_lead(ch);
+    if (ch < 0 || ch > 8 || lead <= 0 || audio_vq_on(ch)) return lead;
+    const uint32_t hold = audio_host_hold_frames(s_audio_len[ch]);
+    return (uint32_t)lead > hold ? (int)((uint32_t)lead - hold) : 0;
 }
 
 /* The model answers on `ch` (0 to 8) under the deterministic clock and while fast forward runs. */
@@ -202,8 +280,12 @@ static int audio_vq_on(int ch) {
     const uint32_t epoch = sched_fast_forward_epoch();
     if (s_vq_ff_epoch[ch] != epoch) {
         s_vq_ff_epoch[ch] = epoch;
+        /* What the guest saw of the host queue: less the hold, so the first blocking output
+         * of the run waits as it would have. Not through hle_audio_queued(): the epoch is
+         * recorded, so that would read this model before it is seeded. */
         const int q = sr_audio_queued(ch);
-        s_vq_frames[ch] = q > 0 ? (uint32_t)q : 0u;
+        const uint32_t hold = audio_host_hold_frames(s_audio_len[ch]);
+        s_vq_frames[ch] = q > 0 && (uint32_t)q > hold ? (uint32_t)q - hold : 0u;
         s_vq_carry[ch] = 0u;
         s_vq_last_us[ch] = now_usec();
     }
@@ -231,8 +313,9 @@ static uint32_t audio_frames_to_us(uint32_t ch, uint32_t frames) {
 
 /* SR_AUDIOSTAT: the audio drift the guest actually felt, read where it is felt.
  *
- * sr_audio_queued() is the value the blocking output below paces against -- the audio the
- * host mixer still owes the guest -- so it is also the honest place to measure drift. Counting
+ * hle_audio_queued() is the value the blocking output below paces against -- the audio the
+ * guest sees queued, which is the host mixer's less what it holds for its device (above; a
+ * listener hears the hold too) -- so it is also the honest place to measure drift. Counting
  * pushed frames cannot: a guest that submits exactly what it consumes and one that submits
  * twice as much both push frames, and only the queue depth tells them apart. A queue that only
  * grows is drift a consumer hears as lag building over minutes while nothing is dropped; once
@@ -368,6 +451,8 @@ static void (*s_audio_wait_hook)(uint32_t us);
 void sr_hle_test_audio_wait_hook(void (*hook)(uint32_t us)) { s_audio_wait_hook = hook; }
 void sr_hle_test_audio_wait_reset(void) { s_audio_wait_total_us = 0u; }
 uint64_t sr_hle_test_audio_wait_total_us(void) { return s_audio_wait_total_us; }
+/* The late wake the host hold covers, for a fixture that ends every wait that late. */
+uint32_t sr_hle_test_audio_late_wake_us(void) { return SR_DISPLAY_PERIOD_US; }
 #endif
 static void audio_wait(uint32_t us) {
 #ifdef SR_HLE_THREAD_SELFTEST
@@ -376,6 +461,8 @@ static void audio_wait(uint32_t us) {
 #endif
     sched_delay_current(us);
 }
+
+static const int32_t *sas_wide_for_output(uint32_t buf, uint32_t n, const int16_t *lr);
 
 static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, int volr) {
     (void)s;
@@ -403,10 +490,16 @@ static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, i
          * not inside a host audio backend. A backend that does not instrument itself made
          * audio_output_calls/frames read zero for a run whose music was plainly audible,
          * which is exactly the case the counters exist to describe. */
+        audio_host_hold_prime((int)ch, n);
         psmf_av_audio_submit((int)ch, buf, bytes, mono ? 2u : 4u, 44100u);   /* queue lead read before the push */
         uint64_t out_started = sr_perf_now_ns();
         sr_videorec_audio((int)ch, lr, (int)n, voll, volr, sched_vtime_us());
-        if (!sched_fast_forward_on()) sr_audio_push((int)ch, lr, (int)n, voll, volr);
+        if (!sched_fast_forward_on()) {
+            /* Ace Mode's peak=limit: a SAS grain the output hands over unchanged plays unsaturated. */
+            const int32_t *wide = mono ? NULL : sas_wide_for_output(buf, n, lr);
+            if (wide) sr_audio_push_wide((int)ch, lr, wide, (int)n, voll, volr);
+            else sr_audio_push((int)ch, lr, (int)n, voll, volr);
+        }
         audio_vq_pushed((int)ch, (int)n);
         if (out_started) sr_perf_audio_output(out_started, n);
     }
@@ -415,7 +508,7 @@ static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, i
         audio_wait(n ? audio_frames_to_us(ch, n) : 1000u);
         return n;
     }
-    /* sr_audio_queued() is signed only so the backend can report -1. Once that
+    /* hle_audio_queued() is signed only so the backend can report -1. Once that
      * sentinel is excluded, keep the frame comparison/subtraction unsigned;
      * never narrow the guest-derived frame count into the signed queue domain.
      * This form is defense in depth, not a repaired defect: with the reserve and
@@ -470,6 +563,17 @@ void hle_register_regular_audio_handlers(void) {
     sr_hle_register(0xe2d56b2d, "sceAudioOutputPanned", h_AudioOutputPannedBlocking);
     sr_hle_register(0x95fd0c2d, "sceAudioChangeChannelConfig", h_AudioChangeChannelConfig);
     sr_hle_register(0xb011922f, "sceAudioGetChannelRestLength", h_AudioRestLen);
+    /* sceAudioGetChannelRestLen (#2361) shares the handler. Measured on a PSP-3000
+     * (PSP-HLE-AUDIO-REST-001): with the channel in $a0, read right after each of 32 blocking
+     * outputs on stereo channels of F = 1024, 2048 and 4096 frames, the two calls agree and
+     * return F or F - 64, and RestLen alone, polled after the last output, reaches 0. That
+     * run is evidence that the two calls are one answer; the value itself is not reproduced
+     * here: this runtime's blocking output returns with up to two blocks queued (#67), so in
+     * that state both calls can read up to 2F where the console read one block (#279, open).
+     * The PSP-AUDIO-001 query cells also read both calls on channel 0 (before and after
+     * output, just after release). UNMEASURED, for both calls, and taken from RestLength:
+     * the invalid-channel code (negative or >= 8) and any other queue state. */
+    sr_hle_register(0xe9d97901, "sceAudioGetChannelRestLen", h_AudioRestLen);
     sr_hle_register(0xb7e1d8e7, "sceAudioChangeChannelVolume", h_AudioChangeChannelVolume);
     sr_hle_register(0xcb2e439e, "sceAudioSetChannelDataLen", h_AudioSetChannelDataLen);
 }
@@ -790,10 +894,73 @@ static int s_sas_lookahead;
 
 int sr_hle_sas_set_band_limited(int on) { s_sas_band_limited = on ? 1 : 0; return 1; }
 
+/* Ace Mode's peak=limit (#2137, docs/ENHANCEMENT_CONTRACT.md 10.22). The guest's grain stays what
+ * the PSP writes, saturated, because a game may read it back. What changes is what the host hears:
+ * the last few grains whose stereo sum saturated are kept here with the sum before saturation,
+ * and an output (audio_output) that hands the host a span holding exactly the bytes such a grain
+ * stored hands the host that sum instead, for the host's true-peak limiter (audio_sdl3.c). A span
+ * the game changed after the mix (its own volume, its own mixing, a copy elsewhere) no longer holds
+ * those bytes and plays as the guest has it. Raw (four-plane) output mode is not kept: its planes
+ * are not what sceAudioOutput* plays. */
+#define SAS_WIDE_RING 8
+#define SAS_WIDE_LIMIT (1 << 24)   /* the widest sum kept; the host's own bound (audio_sdl3.c) */
+typedef struct {
+    uint32_t addr, frames;                 /* the grain: addr .. addr + frames * 4; 0 frames: free */
+    int16_t stored[SAS_GRAIN_MAX * 2];     /* the bytes the store left, saturated */
+    int32_t wide[SAS_GRAIN_MAX * 2];       /* the sum before saturation */
+} SasWideGrain;
+static int s_sas_wide_mix;
+static SasWideGrain s_sas_wide[SAS_WIDE_RING];
+static uint32_t s_sas_wide_next;
+
+int sr_hle_sas_set_wide_mix(int on) {
+    s_sas_wide_mix = on ? 1 : 0;
+    for (int i = 0; i < SAS_WIDE_RING; i++) s_sas_wide[i].frames = 0;
+    s_sas_wide_next = 0;
+    return 1;
+}
+
+/* A mix into [out, out + bytes) makes every kept grain it overlaps stale. */
+static void sas_wide_forget(uint32_t out, uint32_t bytes) {
+    for (int i = 0; i < SAS_WIDE_RING; i++) {
+        SasWideGrain *g = &s_sas_wide[i];
+        if (g->frames && g->addr < out + bytes && out < g->addr + g->frames * 4u) g->frames = 0;
+    }
+}
+
+/* The host's copy of an output of n stereo frames at buf (`lr`, as read from the guest): `lr`
+ * widened, with every kept grain whose bytes the span still holds unchanged replaced by its sum.
+ * NULL when no kept grain matches, so the output plays as the guest has it. */
+static const int32_t *sas_wide_for_output(uint32_t buf, uint32_t n, const int16_t *lr) {
+    static int32_t wide[65536 * 2];
+    int matched = 0;
+    if (!s_sas_wide_mix || !buf || !n) return NULL;
+    const uint64_t end = (uint64_t)buf + (uint64_t)n * 4u;
+    for (int i = 0; i < SAS_WIDE_RING; i++) {
+        const SasWideGrain *g = &s_sas_wide[i];
+        if (!g->frames) continue;
+        const uint64_t g_end = (uint64_t)g->addr + (uint64_t)g->frames * 4u;
+        const uint64_t lo = g->addr > buf ? g->addr : buf;
+        const uint64_t hi = g_end < end ? g_end : end;
+        if (lo >= hi || ((lo - buf) & 3u) || ((lo - g->addr) & 3u)) continue;
+        const uint32_t at = (uint32_t)((lo - buf) / 4u), from = (uint32_t)((lo - g->addr) / 4u);
+        const uint32_t count = (uint32_t)((hi - lo) / 4u);
+        if (memcmp(lr + at * 2u, g->stored + from * 2u, (size_t)count * 4u) != 0) continue;
+        if (!matched) {
+            for (uint32_t k = 0; k < n * 2u; k++) wide[k] = lr[k];
+            matched = 1;
+        }
+        memcpy(wide + at * 2u, g->wide + from * 2u, (size_t)count * 2u * sizeof(int32_t));
+    }
+    return matched ? wide : NULL;
+}
+
 void hle_sas_guest_reset(void) {
     memset(&s_sas_core, 0, sizeof(s_sas_core));
     memset(s_sasv, 0, sizeof(s_sasv));
     s_sas_max_voices = SAS_VOICES;
+    for (int i = 0; i < SAS_WIDE_RING; i++) s_sas_wide[i].frames = 0;
+    s_sas_wide_next = 0;
 }
 
 #ifdef SR_HLE_THREAD_SELFTEST
@@ -1162,12 +1329,32 @@ static void sas_mix_stateful(uint32_t out, int add, int32_t in_gain_l, int32_t i
         }
         if (rs) sas_mix_band_limited(v, &pre, &grain, mixl, mixr, mixsl, mixsr);
     }
+    /* peak=limit: the stereo sum before the store saturates it, for the host only. */
+    static int32_t wide_sum[SAS_GRAIN_MAX * 2];
+    int32_t *wide_grain = NULL;
+    int wide_differs = 0;
+    if (s_sas_wide_mix) {
+        sas_wide_forget(out, (uint32_t)n * (s_sas_core.output_mode ? 8u : 4u));
+        if (!s_sas_core.output_mode) wide_grain = wide_sum;
+    }
     for (int i = 0; i < n; i++) {
         /* in_gain_l/in_gain_r scale the caller's PCM already in out (add only), never the voice
          * mix (#2135). The product is 64-bit and saturated before the store, so a volume of any
          * size clips instead of wrapping. */
         int l = mixl[i], r = mixr[i];
         int sl = mixsl[i], sr = mixsr[i];
+        if (wide_grain) {
+            int64_t wl = l, wr = r;
+            if (add) {
+                wl += ((int64_t)sas_output_read(out, (uint32_t)i, 0) * in_gain_l) >> 12;
+                wr += ((int64_t)sas_output_read(out, (uint32_t)i, 1) * in_gain_r) >> 12;
+            }
+            wl = wl > SAS_WIDE_LIMIT ? SAS_WIDE_LIMIT : wl < -SAS_WIDE_LIMIT ? -SAS_WIDE_LIMIT : wl;
+            wr = wr > SAS_WIDE_LIMIT ? SAS_WIDE_LIMIT : wr < -SAS_WIDE_LIMIT ? -SAS_WIDE_LIMIT : wr;
+            wide_grain[i * 2] = (int32_t)wl;
+            wide_grain[i * 2 + 1] = (int32_t)wr;
+            if (wl > 32767 || wl < -32768 || wr > 32767 || wr < -32768) wide_differs = 1;
+        }
         if (add) {
             l = sas_add_scaled_input(l, sas_output_read(out, (uint32_t)i, 0), in_gain_l);
             r = sas_add_scaled_input(r, sas_output_read(out, (uint32_t)i, 1), in_gain_r);
@@ -1185,6 +1372,19 @@ static void sas_mix_stateful(uint32_t out, int add, int32_t in_gain_l, int32_t i
             sas_output_write(out, (uint32_t)i, 2, sl);
             sas_output_write(out, (uint32_t)i, 3, sr);
         }
+    }
+    /* Kept only when the store saturated, in the oldest slot: elsewhere the guest's bytes are the
+     * sum already, and a grain that did not saturate leaves the kept ones alone. */
+    if (wide_grain && wide_differs) {
+        SasWideGrain *g = &s_sas_wide[s_sas_wide_next];
+        memcpy(g->wide, wide_grain, (size_t)n * 2u * sizeof(int32_t));
+        for (int i = 0; i < n; i++) {
+            g->stored[i * 2] = sas_output_read(out, (uint32_t)i, 0);
+            g->stored[i * 2 + 1] = sas_output_read(out, (uint32_t)i, 1);
+        }
+        g->addr = out;
+        g->frames = (uint32_t)n;
+        s_sas_wide_next = (s_sas_wide_next + 1u) % SAS_WIDE_RING;
     }
     if (stat) {
         int post_peak = 0;

@@ -51,7 +51,9 @@ if TYPE_CHECKING:
     )
     from .parse_golden import (
         CAMPAIGN_PROBE_CASES,
+        GE_CORPUS_PROBES,
         DMAC_INVALID_CASES,
+        ge_corpus_cells,
         parse_cache_alias_output,
         parse_campaign_probe_output,
         parse_audio_query_output,
@@ -107,7 +109,9 @@ else:
     try:
         from .parse_golden import (
             CAMPAIGN_PROBE_CASES,
+            GE_CORPUS_PROBES,
             DMAC_INVALID_CASES,
+            ge_corpus_cells,
             parse_cache_alias_output,
             parse_campaign_probe_output,
             parse_audio_query_output,
@@ -131,7 +135,9 @@ else:
     except ImportError:  # direct ``python tools/psp_oracle/run_psplink.py`` invocation
         from psp_oracle.parse_golden import (
             CAMPAIGN_PROBE_CASES,
+            GE_CORPUS_PROBES,
             DMAC_INVALID_CASES,
+            ge_corpus_cells,
             parse_cache_alias_output,
             parse_campaign_probe_output,
             parse_audio_query_output,
@@ -1201,6 +1207,11 @@ def _parse_usbipd_psplink_devices(output: str) -> list[tuple[str, str]]:
 
 DEFAULT_TRANSPORT_START_TIMEOUT = 60.0
 _SERVER_OUTPUT_TAIL_LINES = 8
+# usbhostfs_pc reads shell commands on stdin; `exit` runs its exit_app, which releases the PSPLink
+# USB interface and resets the device before the process ends (psplinkusb usbhostfs_pc/main.c).
+USBHOSTFS_EXIT_COMMAND = "exit\n"
+USBHOSTFS_EXIT_TIMEOUT = 5.0
+_USBHOSTFS_NOT_RELEASED = "terminated, so the PSPLink USB interface was not released"
 
 
 class TransportStartError(RuntimeError):
@@ -1249,6 +1260,7 @@ class PsplinkProcessTransport:
         self.popen_factory = popen_factory
         self.start_timeout = start_timeout
         self.start_detail: str | None = None
+        self.stop_detail: str | None = None
         self.server: subprocess.Popen | None = None
         self._server_output_thread: threading.Thread | None = None
         self._server_state = threading.Condition()
@@ -1298,7 +1310,7 @@ class PsplinkProcessTransport:
         self.server = self.popen_factory(
             self._server_argv(),
             cwd=self.host0_root,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,  # stop() sends usbhostfs_pc its own `exit` command
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -1554,16 +1566,38 @@ class PsplinkProcessTransport:
         self.start()
 
     def stop(self) -> None:
+        """Stop the owned usbhostfs_pc, through its own `exit` command first.
+
+        `exit` makes usbhostfs_pc release the PSPLink USB interface and reset the
+        device before it ends. Terminating it skips that: on Windows the runner
+        owns the wsl.exe that started it, and terminating wsl.exe ends the Linux
+        process with SIGHUP, which usbhostfs_pc does not handle. The next
+        usbhostfs_pc then finds the device in its old state; its first connection
+        drops and reconnects about a second later, and the first PSPLink command
+        sent in that window gets no reply (PSP-3000, 2026-11-11, #352). Terminate
+        and kill stay as the fallback for a server that does not exit.
+        """
         server, self.server = self.server, None
+        self.stop_detail = None
         if server is None:
             return
-        if server.poll() is None:
-            server.terminate()
+        if server.poll() is not None:
+            self.stop_detail = "usbhostfs_pc had already exited"
+        else:
+            exited, self.stop_detail = self._request_server_exit(server)
+            if not exited:
+                server.terminate()
+                try:
+                    server.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait(timeout=2.0)
+        stdin = getattr(server, "stdin", None)
+        if stdin is not None and not stdin.closed:
             try:
-                server.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                server.kill()
-                server.wait(timeout=2.0)
+                stdin.close()
+            except OSError:
+                pass
         if self._server_output_thread is not None:
             self._server_output_thread.join(timeout=0.2)
             self._server_output_thread = None
@@ -1573,6 +1607,37 @@ class PsplinkProcessTransport:
             self._server_polling = False
             self._link_up = False
             self._server_state.notify_all()
+
+    @staticmethod
+    def _request_server_exit(server: subprocess.Popen) -> tuple[bool, str]:
+        """Send `exit` on the server's stdin; return (process ended, what happened).
+
+        The exit status is not checked: after exit_app has released and reset
+        the device, libusb can abort the process during exit (status 134).
+        """
+        stdin = getattr(server, "stdin", None)
+        if stdin is None or stdin.closed:
+            return False, f"usbhostfs_pc has no command input; {_USBHOSTFS_NOT_RELEASED}"
+        try:
+            stdin.write(USBHOSTFS_EXIT_COMMAND)
+            stdin.flush()
+            stdin.close()
+        except (OSError, ValueError) as exc:
+            if server.poll() is not None:
+                # It ended on its own: whether exit_app ran is not known.
+                return True, "usbhostfs_pc ended before its `exit` command could be sent"
+            return False, (
+                f"usbhostfs_pc's `exit` command could not be sent ({type(exc).__name__}); "
+                f"{_USBHOSTFS_NOT_RELEASED}"
+            )
+        try:
+            server.wait(timeout=USBHOSTFS_EXIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return False, (
+                f"usbhostfs_pc did not exit within {USBHOSTFS_EXIT_TIMEOUT:g}s of its `exit` "
+                f"command; {_USBHOSTFS_NOT_RELEASED}"
+            )
+        return True, "usbhostfs_pc exited after its `exit` command"
 
 
 class PsplinkCampaignRunner:
@@ -1727,6 +1792,14 @@ class PsplinkCampaignRunner:
             self._ok(usbstat) and "established" in usbstat[1].lower()
             and self._ok(pwd) and "host0:/" in pwd[1]
         )
+
+    def _record_restart_details(self) -> None:
+        """Record how L1 stopped the owned usbhostfs_pc and how the new one started."""
+
+        for label, attribute in (("stop", "stop_detail"), ("transport start", "start_detail")):
+            detail = getattr(self.transport, attribute, None)
+            if isinstance(detail, str) and detail:
+                self.recovery_events.append(f"L1: {label}: {detail}")
 
     def _qualify(self) -> bool:
         if not self._shell_qualified():
@@ -2102,11 +2175,13 @@ class PsplinkCampaignRunner:
                 try:
                     self.transport.restart()
                 except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                    self._record_restart_details()
                     self.recovery_events.append(
                         "L1: host stack restart raised "
                         f"{type(exc).__name__}; continue to L2"
                     )
                 else:
+                    self._record_restart_details()
                     restart_succeeded = True
                 if self.terminal_reason is not None:
                     return False
@@ -4094,6 +4169,129 @@ def _canonicalize_psp(text: str, args: argparse.Namespace) -> str:
     return metadata + "\n" + "\n".join(records) + "\n"
 
 
+def _dump_ge_corpus(value: Any, indent: str = "") -> str:
+    """The corpus JSON layout: an object of scalars on one line, everything else one item per line."""
+
+    inner = indent + "  "
+    if isinstance(value, dict):
+        if all(not isinstance(item, (dict, list)) for item in value.values()):
+            return json.dumps(value, ensure_ascii=False)
+        body = ",\n".join(f"{inner}{json.dumps(key)}: {_dump_ge_corpus(item, inner)}"
+                          for key, item in value.items())
+        return "{\n" + body + "\n" + indent + "}"
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        body = ",\n".join(inner + _dump_ge_corpus(item, inner) for item in value)
+        return "[\n" + body + "\n" + indent + "]"
+    return json.dumps(value, ensure_ascii=False)
+
+
+def write_ge_corpus_probe_runs(
+    corpus_path: Path, schema_path: Path, run_paths: list[Path], results_root: Path
+) -> dict[str, Any]:
+    """Write the measured cells of GE corpus probe runs into the corpus.
+
+    Each runner report must carry one acceptance-eligible, qualified PSP_HARDWARE envelope for
+    ge-raster, ge-weight or ge-rtt, whose raw result's identity (model, firmware, source commit,
+    PRX SHA-256) is the envelope's. Its raw result becomes the private result record
+    ``ge-corpus/<test id>-<commit12>.txt`` under ``results_root``; the corpus gets the cells and an
+    envelope that names that record by path and SHA-256. Every report is checked before anything
+    is written, an existing record is never replaced by different bytes, and the corpus is written
+    only when the gate then refuses nothing and reports every written run MEASURED; otherwise the
+    records this call created are removed again.
+    """
+
+    corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    runs = {run["test_id"]: run for run in corpus.get("probe_runs", [])}
+    staged: dict[str, tuple[Path, bytes]] = {}
+    for run_path in run_paths:
+        report = json.loads(run_path.read_text(encoding="utf-8"))
+        envelopes = [envelope for envelope in report.get("envelopes", [])
+                     if envelope.get("CASE_ID") in GE_CORPUS_PROBES]
+        if len(envelopes) != 1:
+            raise ProtocolError(f"{run_path.name}: expected one GE corpus probe envelope, "
+                                f"found {len(envelopes)}")
+        envelope = envelopes[0]
+        probe_case = envelope["CASE_ID"]
+        test_id = GE_CORPUS_PROBES[probe_case][0]
+        if test_id in staged:
+            raise ProtocolError(f"{run_path.name}: a second {probe_case} run in one write")
+        if (envelope.get("EVIDENCE_CLASS") != "PSP_HARDWARE"
+                or envelope.get("ACCEPTANCE_ELIGIBLE") is not True
+                or envelope.get("QUALIFICATION_STATUS") != "QUALIFIED"
+                or envelope.get("ACCEPTANCE_BLOCKERS")):
+            raise ProtocolError(f"{run_path.name}: {probe_case} is not an acceptance-eligible, "
+                                "qualified PSP_HARDWARE run")
+        raw_result = envelope.get("RAW_RESULT")
+        if not isinstance(raw_result, str):
+            raise ProtocolError(f"{run_path.name}: {probe_case} envelope has no RAW_RESULT text")
+        sequence = parse_campaign_probe_output(raw_result, probe_case)
+        cells = ge_corpus_cells(sequence, probe_case)
+        metadata = sequence.metadata
+        for field, key in (("model", "PHYSICAL_MODEL_LABEL"), ("firmware", "FW"),
+                           ("source_commit", "SOURCE_COMMIT"), ("binary_sha256", "BINARY_SHA256")):
+            if metadata.get(field) != envelope.get(key):
+                raise ProtocolError(f"{run_path.name}: raw result {field} is not the envelope's {key}")
+        commit = metadata["source_commit"]
+        record_path = f"ge-corpus/{test_id}-{commit[:12]}.txt"
+        data = raw_result.encode("utf-8")
+        target = results_root / record_path
+        if target.exists() and target.read_bytes() != data:
+            raise ProtocolError(f"{record_path} already holds a different result record")
+        staged[test_id] = (target, data)
+        runs[test_id] = {
+            "test_id": test_id,
+            "probe_case": probe_case,
+            "fixture": "fixtures/psp_oracle/probe_ge_sample.c",
+            "source_tier": "PSP_HARDWARE",
+            "evidence_envelope": {
+                "EVIDENCE_CLASS": "PSP_HARDWARE",
+                "ACCEPTANCE_ELIGIBLE": True,
+                "CASE_ID": probe_case,
+                "CONSOLE_MODEL": metadata["model"],
+                "FW": metadata["firmware"],
+                "SOURCE_COMMIT": commit,
+                "BINARY_SHA256": metadata["binary_sha256"],
+                "RESULT_RECORD": {"path": record_path, "sha256": hashlib.sha256(data).hexdigest()},
+            },
+            "cells": cells,
+        }
+    order = [test_id for test_id, _cells, _suffixes in GE_CORPUS_PROBES.values()]
+    corpus["probe_runs"] = [runs[test_id] for test_id in order if test_id in runs]
+    created: list[Path] = []
+    try:
+        for target, data in staged.values():
+            if target.exists():
+                continue  # the same bytes (checked above): an existing record is never removed
+            target.parent.mkdir(parents=True, exist_ok=True)
+            partial = target.with_name(target.name + ".partial")
+            created.append(partial)
+            partial.write_bytes(data)
+            created.append(target)
+            os.replace(partial, target)
+        report = ge_corpus_report(corpus, schema, results_root)
+        statuses = {item["test_id"]: item for item in report["probe_runs"]}
+        for test_id in staged:
+            if statuses[test_id]["status"] != "MEASURED":
+                raise ProtocolError(f"{test_id}: the gate refuses the written run: "
+                                    f"{statuses[test_id]['reason']}")
+        if report["status"] == "REFUSED":
+            raise ProtocolError("the gate refuses the corpus: " + "; ".join(
+                f"{item.get('test_id', item.get('case_id'))}: {item['reason']}"
+                for item in (*report["cases"], *report["probe_runs"]) if item["status"] == "REFUSED"))
+        partial_corpus = corpus_path.with_name(corpus_path.name + ".partial")
+        created.append(partial_corpus)
+        partial_corpus.write_text(_dump_ge_corpus(corpus) + "\n", encoding="utf-8", newline="\n")
+        os.replace(partial_corpus, corpus_path)
+    except BaseException:
+        for target in created:
+            target.unlink(missing_ok=True)
+        raise
+    return report
+
+
 def _argv_json(parser: argparse.ArgumentParser, value: str, option: str) -> list[str]:
     try:
         parsed = json.loads(value)
@@ -4141,6 +4339,14 @@ def main(argv: list[str] | None = None) -> int:
         "--ge-corpus-gate",
         action="store_true",
         help="validate the source-owned GE corpus and report per-case evidence status without hardware access",
+    )
+    parser.add_argument(
+        "--ge-corpus-write",
+        type=Path,
+        nargs="+",
+        metavar="RUN_REPORT",
+        help="write the measured cells of these ge-raster, ge-weight or ge-rtt runner reports into "
+             "the GE corpus, their raw results into --results-directory/ge-corpus",
     )
     parser.add_argument("--ge-corpus", type=Path, help="GE corpus JSON under fixtures/psp_oracle")
     parser.add_argument("--ge-corpus-schema", type=Path, help="GE corpus schema JSON under assets")
@@ -4206,7 +4412,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     report: dict[str, Any]
-    if args.ge_corpus_gate:
+    if args.ge_corpus_gate or args.ge_corpus_write:
+        if args.ge_corpus_gate and args.ge_corpus_write:
+            parser.error("--ge-corpus-gate and --ge-corpus-write are separate runs")
         if any((
             args.prx, args.remote_command, args.command, args.psp_output, args.nakagawa_output,
             args.host0_output, args.validate_dmac_size_matrix, args.binary, args.source_commit,
@@ -4215,7 +4423,8 @@ def main(argv: list[str] | None = None) -> int:
             args.host0_root, args.out, args.annotate_report, args.observed_terminal_outcome,
             args.dry_run,
         )):
-            parser.error("--ge-corpus-gate cannot be combined with PSPLink execution or capture options")
+            parser.error("--ge-corpus-gate and --ge-corpus-write cannot be combined with PSPLink "
+                         "execution or capture options")
         corpus_path = (args.ge_corpus or DEFAULT_GE_CORPUS).resolve()
         schema_path = (args.ge_corpus_schema or DEFAULT_GE_CORPUS_SCHEMA).resolve()
         allowed_corpus_root = (ROOT / "fixtures" / "psp_oracle").resolve()
@@ -4253,6 +4462,15 @@ def main(argv: list[str] | None = None) -> int:
             results_root.relative_to(ROOT.resolve())
         except ValueError:
             parser.error("--results-directory must be inside the repository root")
+        if args.ge_corpus_write:
+            try:
+                report = write_ge_corpus_probe_runs(
+                    corpus_path, schema_path, list(args.ge_corpus_write), results_root)
+            except (OSError, UnicodeError, json.JSONDecodeError, KeyError, ProtocolError) as exc:
+                sys.stderr.write(f"--ge-corpus-write refused: {type(exc).__name__}: {exc}\n")
+                return 2
+            sys.stdout.write(dump_json(report))
+            return 2 if report["status"] == "REFUSED" else 0
         report = ge_corpus_report(corpus, schema, results_root if results_root.is_dir() else None)
         sys.stdout.write(dump_json(report))
         return 2 if report["status"] == "REFUSED" else 0

@@ -77,7 +77,10 @@ The **Where** column of each table names the places a code can appear:
 | `DISC_NOT_PSP` | disc, player | The disc image is not a PSP game: it has no `PSP_GAME` folder. |
 | `EXECUTABLE_UNSUPPORTED` | report | The disc's executable is missing, encrypted with no decrypted copy, or breaks a PSP layout rule. |
 | `INVALID_ISO` | report | The input is not a readable PSP disc image, or its title information is invalid. |
+| `HOMEBREW_ALREADY_ADDED` | player | The same homebrew `EBOOT.PBP` was added before from another folder; a program is added from one folder. |
+| `HOMEBREW_FOLDER_UNSUPPORTED` | player | The homebrew program's folder cannot come with it: too large, a link or cloud file inside, a name a Memory Stick cannot hold, a personal folder, or a package not named `EBOOT.PBP`. |
 | `HOMEBREW_KERNEL_MODE_UNSUPPORTED` | player | The package's homebrew is kernel-mode or a custom-firmware plugin, which needs the PSP's own kernel and firmware. |
+| `HOMEBREW_KEY_TAKEN` | player | Another program already has the library key this homebrew program would get. |
 | `ISO_CORRUPT` | player | The picked file is not a PSP disc image. |
 | `MODIFIED_DUMP_CFW_LOADER` | report | The disc image was modified by a custom-firmware patch; its real executable needs a decrypted copy. |
 | `PBP_ENCRYPTED_EXECUTABLE_UNSUPPORTED` | player | The PBP holds an encrypted program; only unencrypted homebrew is imported from a package. |
@@ -174,6 +177,7 @@ The **Where** column of each table names the places a code can appear:
 | --- | --- | --- |
 | `BUILD_PACKAGE_FAILED` | report | The package could not be assembled. |
 | `ENHANCEMENT_UNAVAILABLE` | player | 60 FPS game logic is on for the game, but its enhancement package is missing or not valid. |
+| `TEXTURE_PACK_REFUSED` | player | The texture pack chosen for the game was not kept or not used: its folder or `textures.ini` cannot be read, its `[games]` section lists other games only or more than 64, its path is not a full UTF-8 path under 512 bytes, or 256 games already have one. A game whose stored pack no longer reads is never started with it: **Play without the pack** starts that run without it and keeps the choice. |
 | `PACKAGE_AMBIENT_ENHANCEMENT` | route | An enhancement setting from the environment would change the package; it must be explicit. |
 | `PACKAGE_BUILD_FAILED` | route, player | The package build failed; the problem report's reason gives the tool's message. |
 | `PACKAGE_BUILD_INCOMPLETE` | route | The build finished without every file the package needs. |
@@ -265,6 +269,7 @@ The **Where** column of each table names the places a code can appear:
 | `FOLDER_OPEN_FAILED` | player | A folder could not be opened. |
 | `HASH_MISMATCH` | player | A download did not match its pinned SHA-256. |
 | `HASH_UNAVAILABLE` | player | A download's hash could not be computed. |
+| `HOMEBREW_KEPT_COPY_NOT_DELETED` | player | **Delete kept copy** could not remove a homebrew program's kept copy; the message says why. |
 | `INSTALL_CANCELLED` | player | The prerequisite install was cancelled. |
 | `INTERNAL_ERROR` | decrypt, disc, player | A C engine returned a result it has no name for. This is a defect in Nakagawa. |
 | `LIBRARY_WRITE_FAILED` | player | The library could not be saved. |
@@ -293,6 +298,7 @@ The **Where** column of each table names the places a code can appear:
 | `SWEEP_REPORT_INVALID` | library | A sweep run's report has no failure class. |
 | `SWEEP_ROUTE_FAILED` | library | A sweep run wrote no report. |
 | `SWEEP_TIME_BUDGET` | library | A sweep run ended at its time budget. |
+| `TEXTURE_PACK_PICKER_FAILED` | player | The folder picker for choosing a game's texture pack could not open, or returned a folder too deep to read. |
 | `TITLE_TIME_BUDGET` | library | A library build ended at the title's time budget; `failed_stage` names the stage that was running. |
 | `TOOLS_IN_USE` | player | The build tools are in use and cannot be removed now. |
 | `TOOLS_REMOVE_FAILED` | player | The downloaded build tools could not be removed. |
@@ -311,7 +317,8 @@ The **Where** column of each table names the places a code can appear:
 | `UPDATE_INSTALLED_BY_SETUP` | player | This copy was installed with Setup, so it updates by running the new release's Setup. |
 | `UPDATE_INSTALL_EXISTS` | player | The new version is already unpacked. |
 | `UPDATE_INSTALL_INCOMPLETE` | player | Unpacking the new version did not finish. |
-| `UPDATE_INSTALL_LEFTOVER` | player | A previous install attempt left files in the way. |
+| `UPDATE_INSTALL_LEFTOVER` | player | A folder Nakagawa did not make is where the new version unpacks. (Nakagawa's own unpack left by an interrupted install is removed on the next try.) |
+| `UPDATE_INSTALL_LEFTOVER_IN_USE` | player | An interrupted install's unpack folder could not be removed; something has it open. |
 | `UPDATE_INSTALL_MOVE_FAILED` | player | The new version could not be moved into place. |
 | `UPDATE_INSTALL_NOT_WRITABLE` | player | The install folder is not writable. |
 | `UPDATE_INSTALL_PATH` | player | The folder for the new version has too long a path. |
