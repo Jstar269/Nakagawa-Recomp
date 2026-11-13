@@ -137,44 +137,44 @@ static const PlayerUiTitle k_titles[] = {
      "", "", "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Showcase Breakout", "TEST00008", "Needs setup", "",
      "Showcase profile-zero acceptance remains open.", "", NULL, "",
      "", "", "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PLAYABLE, false, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Experimental Fixture", "TEST00006", "Experimental", "",
      "Source-owned compatibility fixture.", "", NULL, "", "", "",
      "RETRY PACKAGE CHECK", "◆", 0xC29AF4FFu,
      PLAYER_UI_PRIMARY_RETRY_PACKAGE_CHECK, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_NONE, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Untested Fixture", "TEST00005", "Untested", "",
      "No compatibility record exists.", "", NULL, "", "", "",
      "BUILD PACKAGE", "?", 0xC29AF4FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_NONE, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Phase Five", "TEST00004", "Needs setup", "",
      "Player launch stops at the package boundary.", "", NULL, "",
      "", "", "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_WONT_BOOT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Title Two", "TEST00002", "Needs setup", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Profile", "TEST00001", "Ready", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false}
 };
 
 /* A library with the demos that come with Nakagawa among the user's games, in
@@ -185,25 +185,25 @@ static const PlayerUiTitle k_demo_titles[] = {
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Title Two", "TEST00002", "Needs setup", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Scene Demo", "TEST00007", "Ready", "",
      "Shows a synthetic cube with sound.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Profile", "TEST00001", "Ready", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false}
 };
 
 /* The demos alone: a first start with nothing added yet. */
@@ -213,13 +213,13 @@ static const PlayerUiTitle k_demo_only_titles[] = {
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Scene Demo", "TEST00007", "Ready", "",
      "Shows a synthetic cube with sound.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false}
 };
 
 /* What-to-expect cards: a player tier with plain words, with known issues, the
@@ -5671,9 +5671,22 @@ static void test_title_enhancement_card(void) {
               strstr(dump, "Off plays the original") != NULL,
           "the card says it is Ace's improvement for this game and that off is the original");
     CHECK(strstr(dump, "Experimental") != NULL || strstr(dump, "EXPERIMENTAL") != NULL,
-          "the card is tagged experimental until matches hold 60 updates a second");
+          "the card is tagged experimental unless its package is released");
+    CHECK(strstr(dump, "Optional") == NULL && strstr(dump, "OPTIONAL") == NULL,
+          "an experimental package's card is not tagged optional");
     CHECK(strstr(dump, "Turn it off to play the original game.") == NULL,
           "a usable package has no problem line");
+    /* A package that declares "experimental": false (ENHANCEMENT_CONTRACT.md section 9.10). */
+    title.enhancement_released = true;
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_title(ui, &model);
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "Optional") != NULL || strstr(dump, "OPTIONAL") != NULL,
+          "a released package's card is tagged optional");
+    CHECK(strstr(dump, "Experimental") == NULL && strstr(dump, "EXPERIMENTAL") == NULL,
+          "a released package's card is not tagged experimental");
+    title.enhancement_released = false;
     CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_PRIMARY,
           "PLAY, not the enhancement switch, is the title's default focus");
     for (int move = 0; move < 6 && !reached; ++move) {

@@ -617,7 +617,7 @@ static uint64_t s_xs_serial = 0;          /* content generations handed out */
 static int s_tex_bound_scale = 1;          /* factor of the set tex_get last returned */
 static TexEnt *s_tex_cur;                  /* the cache entry tex_bind_set last handled (glyph_apply checks its set) */
 static int s_glyphs = 0;                   /* sharp game text is on and the render scale is above 1 (#2110) */
-static int s_glyphs_asked = 0;             /* SR_GLYPHS was on for this Ace run: the exit lines print */
+static int s_glyphs_asked = 0;             /* glyphs=on was on this Ace run's line: the exit lines print */
 static VkDescriptorSet s_tex_plain_set;    /* with a copy returned: the entry's unscaled set */
 /* A draw that maps one texel to one pixel binds the unscaled texture even when a copy is ready:
  * xBRZ adds no detail at that size, and a copy of an atlas (a font page) carries neighbouring
@@ -8412,12 +8412,21 @@ int gegpu_init(void) {
     {
         /* Sharp game text (glyph_recon.h): Ace runs only. Its image lives in the scaled-copy budget
          * and takes one more descriptor set per entry that has one. */
-        const NkGlyphConfig *gl = nk_glyph_init_from_env(g_ace_on);
+#ifdef NK_GLYPH_GPU_MUTANT_IGNORE_KEY
+        const NkGlyphConfig *gl = nk_glyph_init(g_ace_on, 1);   /* gpu-glyph-mutant: the key ignored; key-off must fail */
+#else
+        const NkGlyphConfig *gl = nk_glyph_init(g_ace_on, ace_effective()->glyphs);
+#endif
         s_glyphs_asked = gl->on;
         s_glyphs = gl->on && s_scale >= NK_GLYPH_MIN_FACTOR && s_scale <= MAX_SCALE;
-        if (gl->on && !s_glyphs)
-            fprintf(stderr, "GLYPHS: idle (render scale %d leaves nothing to sharpen; it takes %d to %d)\n",
-                    s_scale, NK_GLYPH_MIN_FACTOR, MAX_SCALE);
+        if (gl->on && !s_glyphs) {
+            char why[96];
+            snprintf(why, sizeof why, "render scale %d leaves nothing to sharpen; it takes %d to %d", s_scale,
+                     NK_GLYPH_MIN_FACTOR, MAX_SCALE);
+            fprintf(stderr, "GLYPHS: idle (%s)\n", why);
+            ace_feature_unavailable(ACE_FEATURE_GLYPHS, why);
+        }
+        if (s_glyphs) ace_confirm(ACE_FEATURE_GLYPHS);   /* the renderer that rebuilds is up */
         if (s_glyphs && !nk_tex_scale_config()->budget_bytes) {
             NkTexScaleConfig c = *nk_tex_scale_config();
             c.budget_bytes = (uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20;

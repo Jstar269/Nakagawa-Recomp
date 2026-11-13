@@ -2865,6 +2865,7 @@ bool player_read_title_enhancement(const char *user_root, const char *shipped_ro
                                    const GameRecord *game, PlayerTitleEnhancement *out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
+    out->experimental = true;
     char key[PLAYER_DISC_ID_KEY_LEN];
     bool have_user = user_root && user_root[0];
     bool have_shipped = shipped_root && shipped_root[0];
@@ -2929,15 +2930,24 @@ bool player_read_title_enhancement(const char *user_root, const char *shipped_ro
     } else {
         snprintf(out->package_id, sizeof(out->package_id), "%s", id);
         out->available = true;
+        /* Only the shipped package's explicit false releases it (section 9.10): the maintainer
+           releases a shipped package, so a file in the user's data folder stays experimental
+           whatever it declares, and a missing or non-boolean value stays experimental. */
+        bool experimental = true;
+        if (out->shipped &&
+            nk_json_get_bool(nk_json_obj_get(package, "experimental"), &experimental) &&
+            !experimental) {
+            out->experimental = false;
+        }
     }
     if (package) nk_json_free(package);
     return out->available;
 }
 
 /* Section 11.2 item 5 of docs/ENHANCEMENT_CONTRACT.md, a per-title off switch carried in a
-   game's package, is not read here: the player reads only a package's id and target title
-   (player_read_title_enhancement), and no section 11 item is admitted yet. The first section
-   11.3 item lands that switch with it. */
+   game's package, is not read here: the player reads only a package's id, target title and
+   experimental flag (player_read_title_enhancement), and no section 11 item is admitted yet.
+   The first section 11.3 item lands that switch with it. */
 bool player_app_title_60hz_saved(const PlayerApp *app, const char *disc_id) {
     const PlayerTitlePlay *title = app ? player_settings_title_play(&app->settings, disc_id) : NULL;
     return title && title->mode == PLAYER_PLAY_ACE && title->logic_60 != 0;
@@ -2959,6 +2969,12 @@ bool player_app_title_60hz_blocked(const PlayerApp *app, int game_index) {
     if (!app || game_index < 0 || game_index >= app->game_count) return false;
     return player_app_title_60hz_saved(app, app->games[game_index].disc_id) &&
            !app->title_enhancements[game_index].available;
+}
+
+bool player_app_title_60hz_released(const PlayerApp *app, int game_index) {
+    if (!app || game_index < 0 || game_index >= app->game_count) return false;
+    const PlayerTitleEnhancement *enhancement = &app->title_enhancements[game_index];
+    return enhancement->available && enhancement->shipped && !enhancement->experimental;
 }
 
 /* The variant the title launches: its enhanced build when its 60 FPS game logic is on and its

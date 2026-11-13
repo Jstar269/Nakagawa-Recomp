@@ -8634,11 +8634,47 @@ static void test_play_mode_settings(void) {
         assert(app->title_enhancements[1].available && app->title_enhancements[1].shipped);
         assert(strcmp(app->title_enhancements[1].package_id, "shipped-60hz") == 0);
         assert(app->title_enhancements[2].available && !app->title_enhancements[2].shipped);
+        /* A package is experimental unless it is the shipped one and declares
+           "experimental": false (section 9.10). */
+        assert(app->title_enhancements[1].experimental && app->title_enhancements[2].experimental);
+        assert(!player_app_title_60hz_released(app, 1) && !player_app_title_60hz_released(app, 2));
+        static const char *const k_flag_values[] = {"false", "true", "\"false\"", "0", "null"};
+        for (size_t v = 0; v < sizeof(k_flag_values) / sizeof(k_flag_values[0]); ++v) {
+            char text[160];
+            snprintf(text, sizeof(text),
+                     "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\","
+                     " \"experimental\": %s}", k_flag_values[v]);
+            write_text_file(file, text);
+            player_app_refresh_title_enhancements(app);
+            bool released = v == 0u;
+            assert(app->title_enhancements[1].available && app->title_enhancements[1].shipped);
+            assert(app->title_enhancements[1].experimental == !released);
+            assert(player_app_title_60hz_released(app, 1) == released);
+        }
+        /* The user's own copy of the released package comes first and still loads and plays,
+           but only the maintainer releases a package: it stays experimental. */
         snprintf(own, sizeof(own), "%s%cenhancements%ctest90002-60hz.json", root, sep, sep);
+        write_text_file(own,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\","
+            " \"experimental\": false}");
+        player_app_refresh_title_enhancements(app);
+        assert(app->title_enhancements[1].available && !app->title_enhancements[1].shipped &&
+               strcmp(app->title_enhancements[1].package_id, "shipped-60hz") == 0);
+        assert(app->title_enhancements[1].experimental && !player_app_title_60hz_released(app, 1));
+        remove(own);
+        /* The shipped package for another title is not usable, and not released. */
+        write_text_file(file,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-3\","
+            " \"experimental\": false}");
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[1].available && app->title_enhancements[1].experimental);
+        assert(!player_app_title_60hz_released(app, 1));
+        write_text_file(file,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\"}");
         write_text_file(own, "{}");
         player_app_refresh_title_enhancements(app);
         assert(!app->title_enhancements[1].available && !app->title_enhancements[1].shipped &&
-               app->title_enhancements[1].problem[0]);
+               app->title_enhancements[1].problem[0] && app->title_enhancements[1].experimental);
         remove(own);
         remove(file);
         player_app_refresh_title_enhancements(app);
