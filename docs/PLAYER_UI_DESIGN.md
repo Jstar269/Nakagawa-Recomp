@@ -593,7 +593,7 @@ default (AUTHENTIC: OPTIONS or ENHANCED: OPTIONS; Authentic for a new library), 
 dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from the player's part table (TEXTURE
 FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; WIDESCREEN; SMOOTH MOTION; CLEAN
 PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; FULL 32-BIT COLOUR;
-SUPERSAMPLING; SMOOTH FAR TEXTURES; TEXTURE PACK; a
+SUPERSAMPLING; SMOOTH FAR TEXTURES; TEXTURE PACK; LATE PAD SAMPLING; a
 new library has 16x filtering, crisp text and the badge on and the rest off, and a graphics preset sets SHARPER
 ENLARGING, CRISP SYSTEM TEXT and, under ULTRA, FULL 32-BIT COLOUR in Enhanced and Ace, below), each beside a
 sentence that says what it does and what it costs. A new part is a new row with no change to the page. While the
@@ -646,7 +646,7 @@ on (#2280), which changes only the picture the window shows; the other presets l
 second draw of each render op and its GPU memory stay off unless asked for. Where the GPU renderer cannot run FSR
 1, the normal scaling filter stays, as for the part. `fsr1-selftest` reports the pass's cost at each of these sizes
 (`docs/SETUP.md`). No preset sets frame pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN
-PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, the SPEED READOUT or
+PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, LATE PAD SAMPLING, the SPEED READOUT or
 the GAME BADGE: they change timing, framing, input, guest-visible output or the HUD, or have no measured cost on
 low-end GPUs, so they stay the library's and each game's. FULL 32-BIT COLOUR stays out of every preset but ULTRA for
 the same reason: its cost (a second draw of each render op and the twin's GPU memory) is not measured on any GPU, so

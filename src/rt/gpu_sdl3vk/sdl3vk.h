@@ -299,7 +299,7 @@ int  sdl3vk_capture_selftest(void);
 
 /* Input state captured by the last present (PSP sceCtrl button mask / analog stick). */
 uint32_t sdl3vk_buttons(void);
-void     sdl3vk_consume_button_pulses(void);
+uint32_t sdl3vk_consume_button_pulses(void);   /* clears the pulses; returns them */
 void     sdl3vk_analog(uint8_t *lx, uint8_t *ly);
 int      sdl3vk_pad_present(void);
 

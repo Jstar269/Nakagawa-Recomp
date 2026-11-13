@@ -1351,6 +1351,13 @@ static int ctrl_pulse_suppressed(uint32_t keys) {
     if (gui_interactive() && !ctrl_pulse_requested()) return 1;
     return 0;
 }
+/* The same gate, read only: whether a sample built from these keys now would carry no pulse.
+ * Late pad sampling asks it before it holds or refreshes; only a sample it then builds
+ * (ctrl_host_sample) records the live-input evidence, as the next latch of those keys would. */
+static int ctrl_pulse_would_be_suppressed(uint32_t keys) {
+    if (keys || getenv("SR_NOINPUT") || gui_pad_present() || s_live_input_seen) return 1;
+    return gui_interactive() && !ctrl_pulse_requested();
+}
 #ifdef SR_HLE_THREAD_SELFTEST
 void sr_ctrl_test_reset_live_input(void) { s_live_input_seen = 0; }
 int sr_ctrl_test_live_input_seen(void) { return s_live_input_seen; }
@@ -1451,32 +1458,46 @@ static uint32_t h_CtrlButtons(void) {
                                   startf > 0 ? (uint32_t)startf : 0u, s_vcount_fwd);
 }
 
+/* The live host part of a pad sample: the buttons (the window's, OR'd with a route's keys or
+ * the headless START pulse, h_CtrlButtons) and, in analog mode, the window's stick as the guest
+ * gets it. Digital mode reads the stick centred whatever holds it (measured, see hle.c). The
+ * VBLANK latch and late pad sampling's refresh both build their sample from this, so a refreshed
+ * sample holds what a latch of the same host input would. */
+static void ctrl_host_sample(uint32_t *buttons, uint8_t *lx, uint8_t *ly) {
+    *lx = 128u;
+    *ly = 128u;
+    if (s_ctrl_sampling_mode == 1u) {
+        if (gui_on()) {
+            gui_analog(lx, ly);
+            /* Ace's stick dead-zone remap (stick=<counts>, contract 11.3.11) reshapes the live host
+             * stick only. It does nothing unless the run's line asked for it, so every other run
+             * latches the bytes the window gave. A route's stick and a replay's recorded sample
+             * are already the guest's bytes and pass through unchanged (sr_ctrl_sample). */
+            if (g_ace_on) ace_stick_sample(lx, ly, gui_stick_dead_zone());
+        }
+#ifdef SR_HLE_THREAD_SELFTEST
+        if (s_ctrl_test_stick) { *lx = s_ctrl_test_lx; *ly = s_ctrl_test_ly; }
+#endif
+    }
+    *buttons = h_CtrlButtons();
+}
+
 void sr_ctrl_sample(void) {
     /* The pause request is already a scheduler rendezvous. Do not commit a pad
      * sample at the request boundary; the first post-resume sample owns that
      * guest-time input transition. */
     if (sr_replay_pad_skip(sched_pause_pending())) return; /* SR_RECORD/SR_REPLAY: replay_checkpoint.h */
-    /* The left stick. Digital mode reads it centred whatever holds it (measured, see hle.c).
-     * In analog mode the live stick is the window's pad (a test build's stand-in replaces it),
-     * and a route step that holds the stick replaces both for the samples it holds it, then
-     * hands the stick back. A route takes the stick outright rather than mixing with it, as
-     * buttons are OR'd, because a pad at rest is not at 128,128 (a PSP's reads 0x75,0x7c) and
+    /* The left stick. In analog mode the live stick is the window's pad (a test build's stand-in
+     * replaces it), and a route step that holds the stick replaces both for the samples it holds
+     * it, then hands the stick back. A route takes the stick outright rather than mixing with it,
+     * as buttons are OR'd, because a pad at rest is not at 128,128 (a PSP's reads 0x75,0x7c) and
      * any mix would move the scripted position by however far that pad sits off centre. */
     uint8_t lx = 128u, ly = 128u;
+    uint32_t buttons = 0u;
     uint8_t route_lx = 128u, route_ly = 128u;
     int route_stick = s_route_state != ROUTE_OFF && sr_input_stick(&s_input, &route_lx, &route_ly);
+    ctrl_host_sample(&buttons, &lx, &ly);
     if (s_ctrl_sampling_mode == 1u) {
-        if (gui_on()) {
-            gui_analog(&lx, &ly);
-            /* Ace's stick dead-zone remap (stick=<counts>, contract 11.3.11) reshapes the live host
-             * stick only. It does nothing unless the run's line asked for it, so every other run
-             * latches the bytes the window gave. A route's stick and a replay's recorded sample
-             * below are already the guest's bytes and pass through unchanged. */
-            if (g_ace_on) ace_stick_sample(&lx, &ly, gui_stick_dead_zone());
-        }
-#ifdef SR_HLE_THREAD_SELFTEST
-        if (s_ctrl_test_stick) { lx = s_ctrl_test_lx; ly = s_ctrl_test_ly; }
-#endif
         if (route_stick) { lx = route_lx; ly = route_ly; }
     } else if (route_stick && !s_route_stick_digital_noted) {
         s_route_stick_digital_noted = 1;
@@ -1484,7 +1505,6 @@ void sr_ctrl_sample(void) {
                         "the pad in digital mode (sceCtrlSetSamplingMode 0), which reads the stick "
                         "centred\n", s_vcount_fwd, route_lx, route_ly);
     }
-    uint32_t buttons = h_CtrlButtons();
     /* The on-screen keyboard is a system dialog: while it is open the title's pad reads
      * nothing, and the keyboard takes the pad instead. The scripted route reaches it as the
      * held mask; a live gamepad as its press events (gui.c). The auto-START pulse never does,
@@ -1499,6 +1519,11 @@ void sr_ctrl_sample(void) {
      * project choice, not yet measured on hardware. */
     keyboard_took_sample = keyboard_took_sample || sr_osk_overlay_active();
     if (keyboard_took_sample) buttons = 0u;
+    /* Late pad sampling (ace.h): a button pulse a refresh consumed into the previous sample, which
+     * no guest call was handed, would without the part still be pending here, so this sample
+     * carries it, and keeps it as a tap if it is refreshed in turn. 0 unless a refresh ran. */
+    const uint32_t refresh_taps = keyboard_took_sample ? 0u : ctrl_unread_refresh_taps();
+    buttons |= refresh_taps;
     /* The sample is final here: SR_RECORD writes it down and SR_REPLAY hands back the recorded
      * one, before anything below reads it (replay_checkpoint.h). */
     sr_replay_pad_sample(&buttons, &lx, &ly, &keyboard_took_sample);
@@ -1525,7 +1550,12 @@ void sr_ctrl_sample(void) {
      * the VBLANK itself latches none. */
     if (s_ctrl_sampling_cycle) ctrl_cycle_catch_up();
     s_ctrl_live = (CtrlSample){ buttons, 0u, lx, ly, input_id };
-    if (gui_on()) gui_consume_button_pulses();
+    /* Host-side only (late pad sampling, ace.h): when the host input behind this sample was
+     * polled, whether the keyboard took it, and the buttons it carries from the pulses consumed
+     * here, which a refresh of this sample must keep. */
+    s_ctrl_live_poll_ns = gui_on() ? gui_input_poll_ns() : sched_host_now_ns();
+    s_ctrl_live_keyboard = keyboard_took_sample;
+    s_ctrl_live_taps = (gui_on() ? buttons & gui_consume_button_pulses() : 0u) | refresh_taps;
     if (s_ctrl_sampling_cycle) return;
     /* Stamped with the low 32 bits of the guest microsecond clock at latch. */
     ctrl_push(&s_ctrl_live, (uint32_t)sched_vtime_us());
@@ -1823,6 +1853,109 @@ static uint32_t s_enh_updates_last;
 static uint32_t s_enh_vblank_mark;
 static uint32_t s_enh_slow_seconds;
 static atomic_uint s_enh_slow_rate;   /* updates in the last second while slowed, else 0 */
+
+/* Late pad sampling (docs/ENHANCEMENT_CONTRACT.md section 11.3.9, ace.h). The generated update
+ * boundary calls sr_enhancement_update_begin() once per logic update while 60 FPS game logic is
+ * on. Without a line that asks for pad=late (Authentic, or Enhanced or Ace without the key or
+ * with pad=off) it returns at once and nothing is planned, held, refreshed or measured. With
+ * pad=late the plan measures every update: from the end of the boundary to its thread's first
+ * VBLANK wait (sr_enhancement_update_waits, from the scheduler), and it may hold
+ * the thread in an ordinary delay, so the title's other threads run as they would while it
+ * waits for the VBLANK, and when the delay ends the window is pumped and the newest pad sample,
+ * which no read has been handed yet, takes the host's input of that moment.
+ *
+ * The refresh is for a person's input only. Under a pad script or route, SR_RECORD or
+ * SR_REPLAY, the headless START pulse, a sampling cycle, the on-screen keyboard (also the sample
+ * whose press closed it), with no window or with a pause requested, the sample keeps what the
+ * VBLANK latched. Those are checked before the hold too: where no refresh can follow, the
+ * update is not held at all, so a scripted run keeps the timing it has with the part off. */
+static uint32_t s_pad_update_uid;   /* the thread that passed the boundary; 0: no update open */
+static uint64_t s_pad_update_pauses;   /* sched_pause_count() at that boundary */
+static uint32_t s_pad_update_speed;    /* sched_fast_forward_speed() at that boundary */
+
+/* Whether a refresh could take live input now: a window a person is at (gui_interactive: not
+ * the offscreen sink or a headless presenter). ctrl_pulse_would_be_suppressed is the evidence
+ * gate the VBLANK sample runs on these buttons, read without recording anything: false while the
+ * headless START pulse owns the pad. */
+static int pad_refresh_possible(void) {
+    route_load_once();
+    return s_route_state == ROUTE_OFF && gui_on() && gui_interactive() && sr_replay_pad_live() &&
+           !sr_osk_overlay_active() && !sched_pause_pending() && ctrl_refresh_allowed() &&
+           ctrl_pulse_would_be_suppressed(gui_buttons());
+}
+
+static int pad_refresh_live(void) {
+    if (!pad_refresh_possible()) return 0;
+    const uint64_t polled_before = gui_input_poll_ns();
+    gui_pump();
+    /* Only a pump that polled the host input has anything to refresh with: the GDI window reads
+     * its keys when it presents, not here. */
+    if (gui_input_poll_ns() == polled_before) return 0;
+    /* The pump can take a pause request (gui.c): the sample is then left as the VBLANK latched
+     * it, as sr_ctrl_sample commits none at a pause request. Then every gate again on the
+     * buttons the pump read. */
+    if (!pad_refresh_possible()) return 0;
+    /* The sample a VBLANK latch would build from this host input: buttons, and the stick with
+     * Ace's dead-zone remap (stick=<counts>) applied as the latch applies it. */
+    uint32_t buttons = 0u;
+    uint8_t lx = 128u, ly = 128u;
+    ctrl_host_sample(&buttons, &lx, &ly);
+    const uint64_t poll_ns = gui_input_poll_ns();
+    /* The pulses in these buttons go to this sample, as they would to the next one without the
+     * part, and it keeps them if it is refreshed again. */
+    const uint32_t taps = buttons & gui_consume_button_pulses();
+    if (!ctrl_refresh_newest(buttons, lx, ly, poll_ns, taps)) return 0;
+    if (hle_inlog_on())
+        fprintf(stderr, "ctrl_refresh: vcount=%u buttons 0x%04x lx=%u ly=%u\n", s_vcount_fwd,
+                s_ctrl_live.btn, lx, ly);
+    return 1;
+}
+
+void sr_enhancement_update_begin(void) {
+    if (!ace_pad_requested()) return;
+    AcePadPlan *plan = ace_pad_plan();
+    const int late = ace_effective()->pad != 0;
+    if (late) ace_confirm(ACE_FEATURE_PAD);   /* the title's boundary runs */
+    const uint32_t uid = sched_current_uid();
+    /* A delay is an ordinary thread wait: only where the thread could wait anyway, and only
+     * where a refresh could follow it. Not in fast forward, where guest time (the delay's
+     * clock) runs ahead of the host time the plan measures, so a hold would end at no
+     * predictable point of the period. Not inside the COSIM guest lane, where a fiber switch
+     * is a stop (sched.c). */
+    const int can_wait = late && uid != 0u && sched_wait_permitted() && !sched_is_intr_context() &&
+                         !sr_tail_transfer.pending && !sched_pause_pending() && !sched_fast_forward_on() &&
+                         !sr_guest_lane_hold.held && pad_refresh_possible();
+    uint64_t now = sched_host_now_ns();
+    const uint64_t hold = ace_pad_plan_begin(plan, now, sched_vblank_deadline_ns(), sched_vblank_period_ns(),
+                                             can_wait);
+    s_pad_update_uid = uid ? uid : UINT32_MAX;
+    s_pad_update_pauses = sched_pause_count();
+    s_pad_update_speed = sched_fast_forward_speed();
+    if (hold >= 1000u) {
+        sched_delay_current(hold / 1000u);
+        /* A pause that opened and closed during the hold leaves the sample as latched: its input
+         * would be from after the pause, in a sample stamped before it. */
+        if (sched_pause_count() == s_pad_update_pauses && pad_refresh_live()) plan->refreshed++;
+        now = sched_host_now_ns();
+    }
+    ace_pad_plan_release(plan, now);
+}
+
+void sr_enhancement_update_waits(void) {
+    if (!ace_pad_requested() || !s_pad_update_uid) return;
+    const uint32_t uid = sched_current_uid();
+    if ((uid ? uid : UINT32_MAX) != s_pad_update_uid) return;
+    s_pad_update_uid = 0u;
+    /* A pause, or a change of speed (fast forward on or off), between the boundary and this wait
+     * moved the VBLANK schedule under the update: its host time is neither its cost nor a miss of
+     * the deadline it had, so the plan drops it (ace_pad_plan_interrupt) and keeps its costs,
+     * back-off and margin as they were. */
+    if (sched_pause_count() != s_pad_update_pauses || sched_fast_forward_speed() != s_pad_update_speed) {
+        ace_pad_plan_interrupt(ace_pad_plan());
+        return;
+    }
+    (void)ace_pad_plan_wait(ace_pad_plan(), sched_host_now_ns());
+}
 
 void sr_enhancement_register_updates(const volatile uint32_t *counter) {
     s_enh_updates = counter;

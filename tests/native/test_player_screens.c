@@ -66,7 +66,8 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_TWIN] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_SSAA] = ENHANCED_WORDS(k_enhanced_ssaa_labels),
     [PLAYER_PART_MIPS] = ENHANCED_WORDS(k_enhanced_switch_labels),
-    [PLAYER_PART_TEXPACK] = ENHANCED_WORDS(k_enhanced_switch_labels)};
+    [PLAYER_PART_TEXPACK] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_PAD] = ENHANCED_WORDS(k_enhanced_switch_labels)};
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
 enum { ENHANCED_MAX_WORDS = 5 };
@@ -3421,6 +3422,17 @@ static void test_settings_pages(void) {
               strstr(dump, "\"TEXTURE PACK: OFF\"") != NULL &&
               strstr(dump, "Draws the texture pack") != NULL,
           "Settings > Enhanced shows the Texture pack row after Smooth far textures");
+    /* The 17th (Late pad sampling, contract 11.3.9) follows Texture pack, at 0x4683; 1600 tall shows
+       its row. */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(16) == 0x4683u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_PAD) == 0x4683u && PLAYER_PART_COUNT >= 17,
+          "the part rows' ids: the 17th in the second range, after the 16th");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1600, dump, sizeof(dump)) &&
+              strstr(dump, "\"TEXTURE PACK: OFF\"") != NULL &&
+              strstr(dump, "\"LATE PAD SAMPLING: OFF\"") != NULL &&
+              strstr(dump, "\"TEXTURE PACK: OFF\"") < strstr(dump, "\"LATE PAD SAMPLING: OFF\"") &&
+              strstr(dump, "Ace only, with 60 FPS logic. Reads the pad") != NULL,
+          "Settings > Enhanced shows the Late pad sampling row after Texture pack");
     for (unsigned i = 0u; i < PLAYER_PART_COUNT; ++i) {
         PlayerUiAction part =
             activate_flow_button(PLAYER_UI_ID_ENHANCED_PART(i), FLOW_SETTINGS_ACE);

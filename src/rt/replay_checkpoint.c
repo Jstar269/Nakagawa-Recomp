@@ -1014,6 +1014,11 @@ static void pad_missing(const char *what) {
     exit(1);
 }
 
+int sr_replay_pad_live(void) {
+    if (s_rr == RR_UNREAD) rr_setup();
+    return s_rr == RR_OFF;
+}
+
 int sr_replay_pad_skip(int live_skip) {
     if (s_rr == RR_UNREAD) rr_setup();
     if (s_rr == RR_RECORD) {

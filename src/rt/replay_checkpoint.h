@@ -158,6 +158,9 @@ void sr_replay_checkpoint_vblank(uint32_t vcount);
  * recorded one under SR_REPLAY. Once the sample is final, sr_replay_pad_sample records it, or
  * replaces it with the recorded one; keyboard_took is whether the on-screen keyboard took it. */
 int sr_replay_pad_skip(int live_skip);
+/* 1 when the pad is neither recorded nor replayed (SR_RECORD and SR_REPLAY are unset): only then
+ * may late pad sampling refresh a latched sample (ace.h). */
+int sr_replay_pad_live(void);
 void sr_replay_pad_sample(uint32_t *buttons, uint8_t *lx, uint8_t *ly, int *keyboard_took);
 
 #define SR_REPLAY_OSK_UNITS 256 /* the HLE keyboard's field bound, terminator included */

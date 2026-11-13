@@ -274,6 +274,10 @@ typedef enum {
                                   effect only for a title with a pack chosen (PlayerTitlePack); the
                                   line carries texpack=on and the folder reaches the runtime as
                                   SR_TEX_REPLACE (NkRuntimeConfig.texpack_dir) */
+    PLAYER_PART_PAD,           /* late pad sampling (section 11.3.9): 0 off, 1 late. Each 60 FPS logic
+                                  update starts nearer its VBLANK deadline; a title without a 60 FPS
+                                  logic package ignores it. Appended; the Ace line writes pad after
+                                  texpack, before cull */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -1834,6 +1838,8 @@ void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
  * ";ssaa=2" or ";ssaa=4" follows with the Supersampling part on, in either tier.
  * ";texpack=on" follows only with the Texture pack part on for a title that has a pack, in
  * either tier; a missing texpack is off.
+ * ";pad=late" follows texpack, before cull, only for Ace with the Late pad sampling part on; a
+ * missing pad is off.
  * ";cull=on" follows, last, only for Ace with the Wider culling part on; a missing cull is off.
  * Returns false when it does not fit. */
 bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap);

@@ -1203,6 +1203,7 @@ static const char *const k_part_load_words[] = {"fast", "off"};
 static const int k_part_ssaa_values[] = {2, 4, 0};
 static const char *const k_part_ssaa_labels[] = {"2x", "4x", "Off"};
 static const char *const k_part_ssaa_words[] = {"2", "4", "off"};
+static const char *const k_part_pad_words[] = {"late", "off"};
 static const char *const k_part_upscale_labels[] = {"FSR 1", "Off"};
 static const char *const k_part_upscale_words[] = {"fsr1", "off"};
 
@@ -1275,6 +1276,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"texpack", "Texture pack",
      "Draws the texture pack chosen on a game's page. The game receives changed pictures.",
      2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+    /* A guest-visible item (contract 11.3.9): it moves when each logic update starts, so it is off
+       by default, in no preset, and matters only for a title running its 60 FPS game logic package. */
+    {"pad", "Late pad sampling",
+     "Ace only, with 60 FPS logic. Reads the pad later in each frame; the game's timing changes.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_pad_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -2485,7 +2491,8 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
 #define PRESET_PART_LIST(X, text, upscale, twin)                                          \
     X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
     X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1)    \
-    X(TWIN, (twin)) X(SSAA, -1) X(MIPS, -1) X(TEXPACK, -1)
+    X(TWIN, (twin)) X(SSAA, -1) X(MIPS, -1) X(TEXPACK, -1)                                \
+    X(PAD, -1)
 #define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
 #define PRESET_PART_ONE(part, value) + 1
 #define PRESET_PARTS(text, upscale, twin) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale, twin)}
@@ -3388,6 +3395,8 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
         /* A missing mips is off (contract 11.3.8): the key is written only when the part is on,
            right after twin. */
         if (p == PLAYER_PART_MIPS && play->part[p] != 1) continue;
+        /* Late pad sampling comes after texpack, before cull, below. */
+        if (p == PLAYER_PART_PAD) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
@@ -3421,6 +3430,14 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     if (play->part[PLAYER_PART_TEXPACK] == 1) {
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_TEXPACK].key,
                      enhanced_part_word(PLAYER_PART_TEXPACK, 1));
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
+    }
+    /* Late pad sampling is an Ace item (contract 11.3.9): a missing pad is off, so the line
+       carries pad=late only for an Ace launch with the part on, after texpack and before cull. */
+    if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_PAD] == 1) {
+        n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_PAD].key,
+                     enhanced_part_word(PLAYER_PART_PAD, 1));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
     }
