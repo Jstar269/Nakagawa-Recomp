@@ -452,6 +452,7 @@ class ShowcaseImageTests(unittest.TestCase):
                 raw = zlib.decompress(data)
             offset += size + 12
         self.assertIsNotNone(raw)
+        assert raw is not None
         self.assertEqual(len(raw), 80 * (1 + 144 * 4))
 
     def test_generated_iso_has_psp_tree_and_stable_synthetic_identity(self) -> None:

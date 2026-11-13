@@ -1983,6 +1983,20 @@ class PublicExportJobTests(unittest.TestCase):
         self.assertIn("python tools/build_public_export.py --export-dir", export)
         self.assertIn("--public-safe-profile 2>&1", export)
         self.assertIn("PROVENANCE_UNVERIFIED", export)
+        # Review 2387-0087347807fa N-A: a failed gate whose text named PROVENANCE_UNVERIFIED passed.
+        # The gates' part must hold no [FAIL] line, and the token is searched only after the last pass line.
+        for line in ("marker='[ALL GATES PASSED] Public-export gates verified.'",
+                     'last="$(grep -nxF "$marker" <<<"$output" | tail -n 1 | cut -d: -f1 || true)"',
+                     'gates="$(head -n "$last" <<<"$output")"',
+                     'audit="$(tail -n "+$((last + 1))" <<<"$output")"',
+                     "if grep -q '^\\[FAIL\\] ' <<<\"$gates\"; then",
+                     'if ! grep -q "PROVENANCE_UNVERIFIED" <<<"$audit"; then'):
+            self.assertIn(line, export)
+        self.assertNotIn('grep -q "PROVENANCE_UNVERIFIED" <<<"$output"', export)
+        # Review 2387 (Fable) R2: a gate failing after a forged pass line landed in the audit half.
+        self.assertIn('if grep -qF "[FAILED CLOSED] Public-export gates failed" <<<"$output"; then', export)
+        self.assertLess(export.index("[FAILED CLOSED] Public-export gates failed"), export.index("marker='"))
+        self.assertEqual(export.count('echo "a publication gate failed before the candidate audit ran" >&2'), 3)
         job = "\n".join(self.blocks["public_export"])
         self.assertIn("fetch-depth: 0", job)
         self.assertIn('python-version: "3.15.2"', job)
@@ -3118,16 +3132,65 @@ class TrustedAttestationRouteTests(unittest.TestCase):
                 self.assertFalse(_actions_eval(self.guard, context))
                 self.assertEqual(_actions_value(self.title, context), self.PLAIN)
 
+    def test_the_attest_job_audits_the_whole_candidate_tree_with_the_trusted_audit(self) -> None:
+        # Failing-before: no trusted job ran the publication audit, so the only refusal of a file outside the
+        # profile came from the pull request's own copy of the audit.
+        step = _matched(re.search(
+            r"(?m)^      - name: Audit the candidate tree with the trusted publication audit\n((?:(?:        .*)?\n)+)",
+            self.attest)).group(1)
+        self.assertEqual(self.attest.count("python tools/publish_audit.py"), 1)
+        self.assertIn("          HEAD_SHA: ${{ steps.target.outputs.head_sha }}\n", step)
+        self.assertIn("          set -euo pipefail\n", step)
+        # The candidate is named by commit and read as objects; its own profile is the policy.
+        self.assertIn('          git cat-file blob "${HEAD_SHA}:assets/public_source_profile.json" \\\n'
+                      '            > "${RUNNER_TEMP}/tree-audit/public_source_profile.json"\n', step)
+        self.assertIn('          python tools/publish_audit.py \\\n'
+                      '            --repo-root "${GITHUB_WORKSPACE}" \\\n'
+                      '            --committed-tree "${HEAD_SHA}" \\\n'
+                      '            --trusted-base "${BASE_SHA}" \\\n'
+                      '            --policy "${RUNNER_TEMP}/tree-audit/public_source_profile.json" \\\n'
+                      '            --public-scope --provenance-self-consistency\n'
+                      '          touch "${RUNNER_TEMP}/tree-audit/passed"\n', step)
+        # Failing-before: the release manifest that waives binary findings was the candidate's alone, so a
+        # pull request could put other bytes under an approved binary's path. The audit is given the verdict
+        # base (the merge base with the default branch, resolved by the trusted checkout), re-checked here.
+        self.assertIn("          BASE_SHA: ${{ steps.base.outputs.base_sha }}\n", step)
+        self.assertIn('          if [[ ! "${BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then\n', step)
+        self.assertIn('          base_sha="$(git merge-base "${HEAD_SHA}" HEAD)"\n', self.attest)
+        # Nothing of the candidate's stands in for the base: no manifest is read from the head for it.
+        self.assertNotIn("--trusted-manifest", step)
+        self.assertNotIn("release_manifest.json", step)
+        # Review 2387-0087347807fa N-F: nothing read a copy of the report; the job log holds it.
+        self.assertNotIn("tree-audit/report.txt", self.attest)
+        # The head is re-checked here, so a reordered step cannot pass an unchecked value to Git.
+        self.assertIn('          if [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then\n', step)
+        # A failed tree audit is named in the summary, after the verdict, without its findings.
+        explain = _matched(re.search(
+            r"(?m)^      - name: Explain the verdict in plain words\n((?:(?:        .*)?\n)+)", self.attest)).group(1)
+        self.assertIn("&& [ ! -e \"${RUNNER_TEMP}/tree-audit/passed\" ]; then\n", explain)
+        self.assertIn("### Trusted publication audit: FAIL", explain)
+        self.assertNotIn("report.txt", explain)
+        # Its exit code decides the job, it runs only after the verifier passed, and it holds no secret.
+        for tolerant in ("|| true", "continue-on-error", "if:", "secrets.", "GH_TOKEN", "GITHUB_TOKEN"):
+            self.assertNotIn(tolerant, step)
+        verify = self.attest.index("            --trusted-baseline ")
+        audit = self.attest.index("- name: Audit the candidate tree with the trusted publication audit")
+        explain = self.attest.index("- name: Explain the verdict in plain words")
+        self.assertLess(verify, audit)
+        self.assertLess(audit, explain)
+
     def test_every_attestation_step_takes_its_target_from_the_resolver(self) -> None:
         text = _uncommented(self.text)
         # The event's values and the triggering run's head enter once, in the resolver step's env.
         self.assertEqual(len(re.findall(r"github\.event\.pull_request\.head\.sha", text)), 2)   # and the title
         self.assertEqual(len(re.findall(r"github\.event\.pull_request\.base\.sha", text)), 1)
         self.assertEqual(len(re.findall(r"github\.event\.pull_request\.number", text)), 2)      # and concurrency
-        self.assertEqual(self.attest.count("${{ steps.target.outputs.head_sha }}"), 4)   # and the merge base
+        # The merge base and the trusted tree audit read the head too.
+        self.assertEqual(self.attest.count("${{ steps.target.outputs.head_sha }}"), 5)
         # The event's base is only checked to be on the default branch; the verdict base is the merge base.
         self.assertEqual(self.attest.count("${{ steps.target.outputs.base_sha }}"), 1)
-        self.assertEqual(self.attest.count("${{ steps.base.outputs.base_sha }}"), 3)
+        # The trusted tree audit reads it too, to hold the release manifest's binary waivers to the base.
+        self.assertEqual(self.attest.count("${{ steps.base.outputs.base_sha }}"), 4)
         self.assertEqual(self.attest.count("${{ steps.target.outputs.number }}"), 1)
         self.assertIn("--attestation-target)", self.attest)
         # A run that resolves no pull request must fail: nothing in the job tolerates a failed step.

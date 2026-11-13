@@ -420,7 +420,31 @@ jobs:
             echo "export cleared without the trusted ledger; the candidate audit must fail closed" >&2
             exit 1
           fi
-          if ! grep -q "PROVENANCE_UNVERIFIED" <<<"$output"; then
+          # Every publication gate must pass first, and the expected failure must
+          # come from the candidate audit that follows. A gate's printed output
+          # (the unprotected SBOM check's, say) can hold any line, but it cannot
+          # remove the lines the tool prints itself: a [FAIL] status line for
+          # an earlier gate, the [FAILED CLOSED] line when any gate failed, or
+          # what comes after the tool's last pass line. These checks read output
+          # only; code run in this job could still change files on disk, and
+          # the control against a changed audit is the trusted attestation.
+          if grep -qF "[FAILED CLOSED] Public-export gates failed" <<<"$output"; then
+            echo "a publication gate failed before the candidate audit ran" >&2
+            exit 1
+          fi
+          marker='[ALL GATES PASSED] Public-export gates verified.'
+          last="$(grep -nxF "$marker" <<<"$output" | tail -n 1 | cut -d: -f1 || true)"
+          if [ -z "$last" ]; then
+            echo "a publication gate failed before the candidate audit ran" >&2
+            exit 1
+          fi
+          gates="$(head -n "$last" <<<"$output")"
+          audit="$(tail -n "+$((last + 1))" <<<"$output")"
+          if grep -q '^\[FAIL\] ' <<<"$gates"; then
+            echo "a publication gate failed before the candidate audit ran" >&2
+            exit 1
+          fi
+          if ! grep -q "PROVENANCE_UNVERIFIED" <<<"$audit"; then
             echo "export failed for a reason other than the named fail-closed candidate audit" >&2
             exit 1
           fi

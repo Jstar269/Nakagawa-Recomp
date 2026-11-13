@@ -349,7 +349,8 @@ class _Image:
         # inline advance (bit 47 clear) is unmeasured and refused (pgf_primary_glyph).
         flags = bits(44, 4)
         shadow_id = bits(55, 9)
-        if None in (shadow_offset, width, height, adjust_x, adjust_y, row_order, flags, shadow_id):
+        if (shadow_offset is None or width is None or height is None or adjust_x is None
+                or adjust_y is None or row_order is None or flags is None or shadow_id is None):
             return None
         if not flags & 8:
             return None
@@ -375,7 +376,7 @@ class _Image:
                 dimension = pair
             elif group == 2:
                 y_metrics = pair
-        if cursor >= self.size:
+        if dimension is None or y_metrics is None or cursor >= self.size:
             return None
         field = self.data[cursor]
         cursor += 1
@@ -427,9 +428,10 @@ class _Image:
             else:
                 if self.size - target < 6:
                     return None
-                shadow_row = _get_bits(self.data, target, self.size - target, 42, 2)
-                if shadow_row is None:
+                row = _get_bits(self.data, target, self.size - target, 42, 2)
+                if row is None:
                     return None
+                shadow_row = row
             glyph["shadow_row_order"] = shadow_row
         return self._finish(glyph, allow_composite)
 
@@ -644,7 +646,7 @@ def _load_manifest(cache_dir: Path) -> Tuple[str, str, Dict[str, Dict[str, Any]]
             and len(sha) == 64
             and entry.get("source") == MANIFEST_SOURCE_USER
         )
-        if not ok:
+        if not ok or slot is None:
             return "INVALID", (
                 "PSP font manifest has an entry this build does not accept; run fonts import <folder>."
             ), {}
