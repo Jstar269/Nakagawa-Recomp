@@ -182,6 +182,10 @@ PUBLIC_TARGETS := \
 	gpu-stencil-once-mutants \
 	gpu-snapsync-selftest \
 	gpu-ace-selftest \
+	gpu-mips-selftest \
+	gpu-mips-mutant \
+	tex-mips-selftest \
+	tex-mips-mutant \
 	tex-scale-selftest \
 	pipeline-cache-selftest \
 	tex-scale-gate-mutant \
@@ -396,6 +400,10 @@ HELP_DESCRIPTION_gpu-dst-read-mutants := prove the GPU coherence dst-read cells 
 HELP_DESCRIPTION_gpu-stencil-once-mutants := prove the GPU coherence stencil-once case kills three broken write-once stencil batch variants
 HELP_DESCRIPTION_gpu-snapsync-selftest := run the GPU snapshot-sync selftest
 HELP_DESCRIPTION_gpu-ace-selftest := run Ace Mode's texture filtering selftest on a real Vulkan device (SKIPs without one)
+HELP_DESCRIPTION_gpu-mips-selftest := run the host-built mip chain selftest (Enhanced mips=on) on a real Vulkan device (SKIPs without one)
+HELP_DESCRIPTION_gpu-mips-mutant := prove the host mip chain selftest kills a late build that records its barrier before a command buffer begins, and an eager build at every decode
+HELP_DESCRIPTION_tex-mips-selftest := run the host-built mip chain builder's CPU selftest (linear-light box filter, alpha weighting, colour-key fill; no GPU)
+HELP_DESCRIPTION_tex-mips-mutant := build tex-mips-selftest without the colour-key fill and require its key-edge cell to fail
 HELP_DESCRIPTION_tex-scale-selftest := run the xBRZ texture scaling selftest against the pinned upstream goldens (no GPU)
 HELP_DESCRIPTION_pipeline-cache-selftest := run the GPU pipeline cache file checks and their atomic write (no GPU)
 HELP_DESCRIPTION_tex-scale-gate-mutant := prove the texture scaling selftest kills a build without the Ace gate

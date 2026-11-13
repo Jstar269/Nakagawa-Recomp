@@ -256,6 +256,9 @@ typedef enum {
     PLAYER_PART_SSAA,          /* supersampling (#2073, section 10.21): 0 off, or the factor 2 or 4 per
                                   axis on top of the render scale. Host presentation only; off in a
                                   fresh file and in every preset */
+    PLAYER_PART_MIPS,          /* host-built mip chains (section 11.3.8): 0 off, 1 on. Appended; the
+                                  SR_ACE line carries mips=on, right after twin, only when on; off in
+                                  a fresh file */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -1736,6 +1739,7 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
  * notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off" (tier=ace for Ace; smooth=match is never written).
+ * ";mips=on" follows twin only with the Smooth far textures part on; a missing mips is off.
  * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
  * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.

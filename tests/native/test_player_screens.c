@@ -56,7 +56,8 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_STICK] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_TWIN] = ENHANCED_WORDS(k_enhanced_switch_labels),
-    [PLAYER_PART_SSAA] = ENHANCED_WORDS(k_enhanced_ssaa_labels)};
+    [PLAYER_PART_SSAA] = ENHANCED_WORDS(k_enhanced_ssaa_labels),
+    [PLAYER_PART_MIPS] = ENHANCED_WORDS(k_enhanced_switch_labels)};
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
 enum { ENHANCED_MAX_WORDS = 5 };
@@ -3348,7 +3349,8 @@ static void test_settings_pages(void) {
     CHECK(flow_case_fits(FLOW_SETTINGS_ACE, 960, 540, dump, sizeof(dump)) &&
               flow_case_has_scroll(FLOW_SETTINGS_ACE, 960, 540),
           "Settings > Enhanced scrolls inside the 960 x 540 window");
-    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1000, dump, sizeof(dump)) &&
+    /* 1100 tall: the fifteenth row (Smooth far textures) is past the bottom of a 1000-tall window. */
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1100, dump, sizeof(dump)) &&
               strstr(dump, "\"PLAY MODE: ENHANCED\"") != NULL &&
               strstr(dump, "\"TEXTURE FILTERING: 16X\"") != NULL &&
               strstr(dump, "\"CRISP SYSTEM TEXT: ON\"") != NULL &&
@@ -3359,6 +3361,7 @@ static void test_settings_pages(void) {
               strstr(dump, "\"CLEAN PITCHED SOUND: OFF\"") != NULL &&
               strstr(dump, "\"SHARPER ENLARGING: OFF\"") != NULL &&
               strstr(dump, "\"SUPERSAMPLING: OFF\"") != NULL &&
+              strstr(dump, "\"SMOOTH FAR TEXTURES: OFF\"") != NULL &&
               /* The sentences wrap; their lines are dumped one by one. */
               strstr(dump, "Smooths steady 30 FPS scenes") != NULL &&
               strstr(dump, "Adds about 17 ms of delay.\"") != NULL &&
@@ -3377,6 +3380,10 @@ static void test_settings_pages(void) {
               PLAYER_UI_ID_ENHANCED_PART(13) == 0x4680u &&
               PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SSAA) == 0x4680u && PLAYER_PART_COUNT >= 14,
           "the part rows' ids: 13 in the first range, the 14th in the second");
+    /* The 15th (Smooth far textures) follows Supersampling in the second range, at 0x4681. */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(14) == 0x4681u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_MIPS) == 0x4681u && PLAYER_PART_COUNT >= 15,
+          "the part rows' ids: the 15th in the second range, after the 14th");
     for (unsigned i = 0u; i < PLAYER_PART_COUNT; ++i) {
         PlayerUiAction part =
             activate_flow_button(PLAYER_UI_ID_ENHANCED_PART(i), FLOW_SETTINGS_ACE);

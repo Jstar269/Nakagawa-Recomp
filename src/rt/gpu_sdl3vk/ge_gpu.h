@@ -104,6 +104,11 @@ typedef enum GeGpuSyncResult {
  * validated span. This is target-scoped and does not make ordinary presentation wait. */
 int gegpu_sync_guest_fb(const GeGpuFbDescriptor *desc);
 
+/* One guest flip (the display's frame swap), counted before the presenter's slot rule or the
+ * on-screen keyboard can drop it: the clock of the host mip chain's build budget and streaming
+ * windows (ENHANCEMENT_CONTRACT.md 10.16), which must not depend on how fast the host presents. */
+void gegpu_note_guest_flip(void);
+
 typedef enum GeGpuReplayBoundaryKind {
     GEGPU_BOUNDARY_RENDER_SNAPSHOT = 0,
     GEGPU_BOUNDARY_TEXTURE_UPLOAD,
@@ -252,11 +257,13 @@ int gegpu_coherence_selftest(void);
 void gegpu_selftest_ssaa_limits(unsigned long long budget_bytes, unsigned max_dim, int expect);
 /* Ace Mode's texture filtering (src/rt/ace.h): the anisotropy level the renderer uses (0 in an
  * authentic run), the anisotropic samplers it has made, and its texture descriptor pool's
- * size. Invariant A2: an authentic run makes none and keeps MAX_TEX sets. */
+ * size. Invariant A2: an authentic run makes none and keeps MAX_TEX sets. mips_entries: the
+ * cache entries given a host mip chain (tex_mips.h, mips=on); none in an authentic run. */
 typedef struct {
     int af;
     unsigned long long af_samplers;
     unsigned tex_pool_sets;
+    unsigned long long mips_entries;
 } GeGpuAceStats;
 void gegpu_ace_stats(GeGpuAceStats *out);
 
@@ -274,6 +281,7 @@ int gegpu_texrepl_only_prepare(const char *build_root); /* --repl-only: write th
 int gegpu_texrepl_only_selftest(void); /* --repl-only: SR_TEX_REPLACE with no texture scaling */
 int gegpu_glyph_selftest(void);         /* sharp game text (glyph_recon.h) */
 int gegpu_glyph_scene_selftest(void);   /* --scene-hash, --authentic: the scene and a hash of the picture */
+int gegpu_mips_selftest(void);          /* host-built mip chains (tex_mips.h) */
 
 void gegpu_shutdown(void);
 
