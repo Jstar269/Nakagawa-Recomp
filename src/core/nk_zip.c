@@ -3,11 +3,13 @@
 
 /* Store-only ZIP reader and writer for save backups (#1883); nk_zip.h says what
    is written and what is refused. Written from PKWARE's APPNOTE.TXT (6.3.x):
-   section 4.3.7 (local header), 4.3.12 (central directory header), 4.3.16
-   (end of central directory record), 4.3.14-4.3.15 (the ZIP64 records),
-   4.4.4 (general purpose flags) and 4.5.3 (the ZIP64 extra field). */
+   section 4.3.7 (local header), 4.3.9 (data descriptor), 4.3.12 (central
+   directory header), 4.3.16 (end of central directory record), 4.3.14-4.3.15
+   (the ZIP64 records), 4.4.4 (general purpose flags), 4.4.5 (method 8,
+   DEFLATE) and 4.5.3 (the ZIP64 extra field). */
 
 #include "nk_zip.h"
+#include "nk_psp_inflate.h"
 
 #ifndef NK_ZIP_NO_HOST_IO
 #include "nk_platform.h"
@@ -28,6 +30,10 @@
 #define ZIP_MAX_COMMENT 65535u
 #define ZIP_FLAG_ENCRYPTED 0x0001u
 #define ZIP_FLAG_DESCRIPTOR 0x0008u
+#define ZIP_FLAG_DEFLATE_LEVEL 0x0006u  /* method 8: the compression level used */
+#define ZIP_METHOD_STORED 0u
+#define ZIP_METHOD_DEFLATE 8u
+#define ZIP_DESCRIPTOR_MAX 16u          /* signature, CRC and two sizes */
 #define ZIP_FLAG_STRONG_ENCRYPTION 0x0040u
 #define ZIP_FLAG_UTF8 0x0800u
 #define ZIP_FLAG_MASKED_HEADERS 0x2000u
@@ -36,12 +42,10 @@
 #define ZIP_VERSION_MADE_BY 20u  /* 2.0, MS-DOS attributes */
 #define ZIP_DOS_FOLDER 0x10u
 #define ZIP_CHUNK 65536u
-/* An archive's data, headers and central directory: bigger than this cannot
-   be one the caps allow. */
-#define ZIP_MAX_ARCHIVE_BYTES \
-    (NK_ZIP_MAX_TOTAL_BYTES + (uint64_t)NK_ZIP_MAX_CENTRAL_BYTES + \
-     (uint64_t)NK_ZIP_MAX_ENTRIES * (ZIP_LOCAL_SIZE + NK_ZIP_MAX_NAME_BYTES + 65535u) + \
-     ZIP_END_SIZE + ZIP_MAX_COMMENT)
+/* Without ZIP64 the central directory starts below 4 GiB and the end record
+   follows it: no archive this reader takes is longer. */
+#define ZIP_MAX_ARCHIVE_BYTES_32 \
+    (0xFFFFFFFFull + (uint64_t)NK_ZIP_MAX_CENTRAL_BYTES + ZIP_END_SIZE + ZIP_MAX_COMMENT)
 
 /* ---- Status words ---- */
 
@@ -94,6 +98,7 @@ static const struct {
     {"ZIP_EXISTS", "A file it would write is there already."},
     {"ZIP_LEFT_OUT", "A file or folder could not be put in the backup: a link, a junction, a "
                      "cloud file that is not on this computer, or one that cannot be read."},
+    {"ZIP_INFLATE", "A compressed file in it is damaged: it does not unpack."},
 };
 
 const char *nk_zip_status_code(NkZipStatus status) {
@@ -133,26 +138,63 @@ static NkZipStatus zip_ok(NkZipError *err) {
 
 /* ---- CRC-32 ---- */
 
-static void zip_crc_table(uint32_t table[256]) {
-    for (uint32_t i = 0; i < 256u; ++i) {
-        uint32_t c = i;
-        for (int k = 0; k < 8; ++k) c = (c & 1u) ? (c >> 1) ^ 0xEDB88320u : c >> 1;
-        table[i] = c;
-    }
-}
+/* CRC-32 (the reflected polynomial 0xEDB88320) of each byte value, as a constant: a caller that
+   checks many small pieces (a PNG's chunks) pays nothing to build it. */
+static const uint32_t kZipCrcTable[256] = {
+    0x00000000u, 0x77073096u, 0xEE0E612Cu, 0x990951BAu, 0x076DC419u, 0x706AF48Fu,
+    0xE963A535u, 0x9E6495A3u, 0x0EDB8832u, 0x79DCB8A4u, 0xE0D5E91Eu, 0x97D2D988u,
+    0x09B64C2Bu, 0x7EB17CBDu, 0xE7B82D07u, 0x90BF1D91u, 0x1DB71064u, 0x6AB020F2u,
+    0xF3B97148u, 0x84BE41DEu, 0x1ADAD47Du, 0x6DDDE4EBu, 0xF4D4B551u, 0x83D385C7u,
+    0x136C9856u, 0x646BA8C0u, 0xFD62F97Au, 0x8A65C9ECu, 0x14015C4Fu, 0x63066CD9u,
+    0xFA0F3D63u, 0x8D080DF5u, 0x3B6E20C8u, 0x4C69105Eu, 0xD56041E4u, 0xA2677172u,
+    0x3C03E4D1u, 0x4B04D447u, 0xD20D85FDu, 0xA50AB56Bu, 0x35B5A8FAu, 0x42B2986Cu,
+    0xDBBBC9D6u, 0xACBCF940u, 0x32D86CE3u, 0x45DF5C75u, 0xDCD60DCFu, 0xABD13D59u,
+    0x26D930ACu, 0x51DE003Au, 0xC8D75180u, 0xBFD06116u, 0x21B4F4B5u, 0x56B3C423u,
+    0xCFBA9599u, 0xB8BDA50Fu, 0x2802B89Eu, 0x5F058808u, 0xC60CD9B2u, 0xB10BE924u,
+    0x2F6F7C87u, 0x58684C11u, 0xC1611DABu, 0xB6662D3Du, 0x76DC4190u, 0x01DB7106u,
+    0x98D220BCu, 0xEFD5102Au, 0x71B18589u, 0x06B6B51Fu, 0x9FBFE4A5u, 0xE8B8D433u,
+    0x7807C9A2u, 0x0F00F934u, 0x9609A88Eu, 0xE10E9818u, 0x7F6A0DBBu, 0x086D3D2Du,
+    0x91646C97u, 0xE6635C01u, 0x6B6B51F4u, 0x1C6C6162u, 0x856530D8u, 0xF262004Eu,
+    0x6C0695EDu, 0x1B01A57Bu, 0x8208F4C1u, 0xF50FC457u, 0x65B0D9C6u, 0x12B7E950u,
+    0x8BBEB8EAu, 0xFCB9887Cu, 0x62DD1DDFu, 0x15DA2D49u, 0x8CD37CF3u, 0xFBD44C65u,
+    0x4DB26158u, 0x3AB551CEu, 0xA3BC0074u, 0xD4BB30E2u, 0x4ADFA541u, 0x3DD895D7u,
+    0xA4D1C46Du, 0xD3D6F4FBu, 0x4369E96Au, 0x346ED9FCu, 0xAD678846u, 0xDA60B8D0u,
+    0x44042D73u, 0x33031DE5u, 0xAA0A4C5Fu, 0xDD0D7CC9u, 0x5005713Cu, 0x270241AAu,
+    0xBE0B1010u, 0xC90C2086u, 0x5768B525u, 0x206F85B3u, 0xB966D409u, 0xCE61E49Fu,
+    0x5EDEF90Eu, 0x29D9C998u, 0xB0D09822u, 0xC7D7A8B4u, 0x59B33D17u, 0x2EB40D81u,
+    0xB7BD5C3Bu, 0xC0BA6CADu, 0xEDB88320u, 0x9ABFB3B6u, 0x03B6E20Cu, 0x74B1D29Au,
+    0xEAD54739u, 0x9DD277AFu, 0x04DB2615u, 0x73DC1683u, 0xE3630B12u, 0x94643B84u,
+    0x0D6D6A3Eu, 0x7A6A5AA8u, 0xE40ECF0Bu, 0x9309FF9Du, 0x0A00AE27u, 0x7D079EB1u,
+    0xF00F9344u, 0x8708A3D2u, 0x1E01F268u, 0x6906C2FEu, 0xF762575Du, 0x806567CBu,
+    0x196C3671u, 0x6E6B06E7u, 0xFED41B76u, 0x89D32BE0u, 0x10DA7A5Au, 0x67DD4ACCu,
+    0xF9B9DF6Fu, 0x8EBEEFF9u, 0x17B7BE43u, 0x60B08ED5u, 0xD6D6A3E8u, 0xA1D1937Eu,
+    0x38D8C2C4u, 0x4FDFF252u, 0xD1BB67F1u, 0xA6BC5767u, 0x3FB506DDu, 0x48B2364Bu,
+    0xD80D2BDAu, 0xAF0A1B4Cu, 0x36034AF6u, 0x41047A60u, 0xDF60EFC3u, 0xA867DF55u,
+    0x316E8EEFu, 0x4669BE79u, 0xCB61B38Cu, 0xBC66831Au, 0x256FD2A0u, 0x5268E236u,
+    0xCC0C7795u, 0xBB0B4703u, 0x220216B9u, 0x5505262Fu, 0xC5BA3BBEu, 0xB2BD0B28u,
+    0x2BB45A92u, 0x5CB36A04u, 0xC2D7FFA7u, 0xB5D0CF31u, 0x2CD99E8Bu, 0x5BDEAE1Du,
+    0x9B64C2B0u, 0xEC63F226u, 0x756AA39Cu, 0x026D930Au, 0x9C0906A9u, 0xEB0E363Fu,
+    0x72076785u, 0x05005713u, 0x95BF4A82u, 0xE2B87A14u, 0x7BB12BAEu, 0x0CB61B38u,
+    0x92D28E9Bu, 0xE5D5BE0Du, 0x7CDCEFB7u, 0x0BDBDF21u, 0x86D3D2D4u, 0xF1D4E242u,
+    0x68DDB3F8u, 0x1FDA836Eu, 0x81BE16CDu, 0xF6B9265Bu, 0x6FB077E1u, 0x18B74777u,
+    0x88085AE6u, 0xFF0F6A70u, 0x66063BCAu, 0x11010B5Cu, 0x8F659EFFu, 0xF862AE69u,
+    0x616BFFD3u, 0x166CCF45u, 0xA00AE278u, 0xD70DD2EEu, 0x4E048354u, 0x3903B3C2u,
+    0xA7672661u, 0xD06016F7u, 0x4969474Du, 0x3E6E77DBu, 0xAED16A4Au, 0xD9D65ADCu,
+    0x40DF0B66u, 0x37D83BF0u, 0xA9BCAE53u, 0xDEBB9EC5u, 0x47B2CF7Fu, 0x30B5FFE9u,
+    0xBDBDF21Cu, 0xCABAC28Au, 0x53B39330u, 0x24B4A3A6u, 0xBAD03605u, 0xCDD70693u,
+    0x54DE5729u, 0x23D967BFu, 0xB3667A2Eu, 0xC4614AB8u, 0x5D681B02u, 0x2A6F2B94u,
+    0xB40BBE37u, 0xC30C8EA1u, 0x5A05DF1Bu, 0x2D02EF8Du,
+};
 
-static uint32_t zip_crc_update(const uint32_t table[256], uint32_t crc, const uint8_t *data,
-                               size_t size) {
+static uint32_t zip_crc_update(uint32_t crc, const uint8_t *data, size_t size) {
     crc = ~crc;
-    for (size_t i = 0; i < size; ++i) crc = table[(crc ^ data[i]) & 0xFFu] ^ (crc >> 8);
+    for (size_t i = 0; i < size; ++i) crc = kZipCrcTable[(crc ^ data[i]) & 0xFFu] ^ (crc >> 8);
     return ~crc;
 }
 
 uint32_t nk_zip_crc32(uint32_t crc, const void *data, size_t size) {
-    uint32_t table[256];
     if (!data || size == 0) return crc;
-    zip_crc_table(table);
-    return zip_crc_update(table, crc, (const uint8_t *)data, size);
+    return zip_crc_update(crc, (const uint8_t *)data, size);
 }
 
 /* ---- Little-endian fields ---- */
@@ -217,12 +259,15 @@ static bool zip_utf8_valid(const unsigned char *s, size_t n) {
 
 static char zip_upper(char c) { return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; }
 
-/* A Windows device name, alone or before an extension ("NUL", "con.txt"). */
+/* A Windows device name, alone or before an extension ("NUL", "con.txt"), with the blanks
+   Windows drops before the extension ignored ("CON .png" is CON). The name rule is a first
+   line only: a reader that opens files checks the handle it gets, which is the real guard. */
 static bool zip_reserved_device(const char *seg, size_t n) {
     static const char *const names[] = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"};
     char stem[8];
     size_t len = 0;
     while (len < n && seg[len] != '.') ++len;
+    while (len > 0 && seg[len - 1] == ' ') --len;
     if (len < 3 || len > 7) return false;
     for (size_t i = 0; i < len; ++i) stem[i] = zip_upper(seg[i]);
     stem[len] = '\0';
@@ -297,6 +342,7 @@ static int zip_fold(unsigned char c) {
 }
 
 static int zip_name_compare(const void *a, const void *b) {
+    NK_SORT_COMPARE_COUNT();
     const ZipNameRef *x = (const ZipNameRef *)a;
     const ZipNameRef *y = (const ZipNameRef *)b;
     size_t n = x->size < y->size ? x->size : y->size;
@@ -316,9 +362,47 @@ static bool zip_folded_prefix(const ZipNameRef *a, const ZipNameRef *b, size_t n
     return true;
 }
 
+/* Heapsort: at most about 2 n log2 n comparisons whatever the order, so an archive or a pack
+   cannot choose an order that makes sorting it quadratic, as it can with a C library's qsort
+   (UCRT's is a median-of-three quicksort with no fallback). Not stable; the callers' keys break
+   their own ties. */
+static void zip_sort_swap(unsigned char *a, unsigned char *b, size_t size) {
+    while (size--) {
+        unsigned char t = *a;
+        *a++ = *b;
+        *b++ = t;
+    }
+}
+
+static void zip_sort_sift(unsigned char *base, size_t root, size_t n, size_t size,
+                          int (*compare)(const void *, const void *)) {
+    for (;;) {
+        size_t child = 2u * root + 1u;
+        if (child >= n) return;
+        if (child + 1u < n && compare(base + child * size, base + (child + 1u) * size) < 0) ++child;
+        if (compare(base + root * size, base + child * size) >= 0) return;
+        zip_sort_swap(base + root * size, base + child * size, size);
+        root = child;
+    }
+}
+
+#ifdef NK_SORT_COUNT_COMPARES
+unsigned long long nk_sort_compares;
+#endif
+
+void nk_zip_sort(void *items, size_t count, size_t size, int (*compare)(const void *, const void *)) {
+    unsigned char *base = (unsigned char *)items;
+    if (!items || count < 2u || size == 0u || !compare) return;
+    for (size_t i = count / 2u; i-- > 0u;) zip_sort_sift(base, i, count, size, compare);
+    for (size_t end = count - 1u; end > 0u; --end) {
+        zip_sort_swap(base, base + end * size, size);
+        zip_sort_sift(base, 0u, end, size, compare);
+    }
+}
+
 static NkZipStatus zip_names_distinct(ZipNameRef *refs, size_t count, NkZipError *err) {
     if (count < 2) return NK_ZIP_OK;
-    qsort(refs, count, sizeof(refs[0]), zip_name_compare);
+    nk_zip_sort(refs, count, sizeof(refs[0]), zip_name_compare);
     for (size_t k = 0; k + 1 < count; ++k) {
         const ZipNameRef *a = &refs[k];
         const ZipNameRef *b = &refs[k + 1];
@@ -339,8 +423,10 @@ typedef struct {
     char *name;            /* NUL-terminated copy */
     uint16_t name_size;
     uint16_t flags;
+    uint16_t method;
     uint32_t crc;
-    uint32_t size;
+    uint32_t size;         /* unpacked */
+    uint32_t packed;       /* in the archive; the same as size when stored */
     uint32_t local_offset;
     uint64_t data_offset;
     bool folder;
@@ -357,7 +443,11 @@ struct NkZipReader {
     size_t count;          /* entries checked */
     uint64_t total;
     uint8_t *chunk;
-    uint32_t crc_table[256];
+    /* What this reader takes (NkZipReadOptions; the save caps without). */
+    size_t max_entries;
+    uint64_t max_total;
+    bool deflate;
+    bool descriptor;
 };
 
 static NkZipStatus zip_read_at(NkZipReader *r, uint64_t offset, void *buf, size_t size) {
@@ -392,14 +482,38 @@ static bool zip_extra_scan(const uint8_t *extra, size_t size, bool *zip64) {
 }
 
 /* The flag and method rules, the same for the central and the local header. */
-static NkZipStatus zip_check_flags(uint16_t flags, uint16_t method) {
+static NkZipStatus zip_check_flags(const NkZipReader *r, uint16_t flags, uint16_t method) {
+    uint16_t allowed = ZIP_FLAG_UTF8;
     if (flags & (ZIP_FLAG_ENCRYPTED | ZIP_FLAG_STRONG_ENCRYPTION | ZIP_FLAG_MASKED_HEADERS)) {
         return NK_ZIP_ERR_ENCRYPTED;
     }
-    if (flags & ZIP_FLAG_DESCRIPTOR) return NK_ZIP_ERR_DATA_DESCRIPTOR;
-    if (method != 0u) return NK_ZIP_ERR_METHOD;
-    if (flags & (uint16_t)~ZIP_FLAG_UTF8) return NK_ZIP_ERR_FLAGS;
+    if ((flags & ZIP_FLAG_DESCRIPTOR) && !r->descriptor) return NK_ZIP_ERR_DATA_DESCRIPTOR;
+    if (method != ZIP_METHOD_STORED && !(method == ZIP_METHOD_DEFLATE && r->deflate)) {
+        return NK_ZIP_ERR_METHOD;
+    }
+    if (r->descriptor) allowed |= ZIP_FLAG_DESCRIPTOR;
+    if (method == ZIP_METHOD_DEFLATE) allowed |= ZIP_FLAG_DEFLATE_LEVEL;
+    if (flags & (uint16_t)~allowed) return NK_ZIP_ERR_FLAGS;
     return NK_ZIP_OK;
+}
+
+static uint64_t zip_add_capped(uint64_t a, uint64_t b) {
+    return a > UINT64_MAX - b ? UINT64_MAX : a + b;
+}
+
+/* An archive's data, headers and central directory: bigger than this cannot
+   be one the caps allow. DEFLATE data can be longer than what it unpacks to,
+   so with it only the 32-bit bound holds. */
+static uint64_t zip_max_archive_bytes(const NkZipReader *r) {
+    uint64_t per_entry = (uint64_t)ZIP_LOCAL_SIZE + NK_ZIP_MAX_NAME_BYTES + 65535u +
+                         (r->descriptor ? ZIP_DESCRIPTOR_MAX : 0u);
+    uint64_t bound = ZIP_MAX_ARCHIVE_BYTES_32;
+    if (!r->deflate) {
+        bound = zip_add_capped(r->max_total, (uint64_t)NK_ZIP_MAX_CENTRAL_BYTES);
+        bound = zip_add_capped(bound, (uint64_t)r->max_entries * per_entry);
+        bound = zip_add_capped(bound, (uint64_t)ZIP_END_SIZE + ZIP_MAX_COMMENT);
+    }
+    return bound < ZIP_MAX_ARCHIVE_BYTES_32 ? bound : ZIP_MAX_ARCHIVE_BYTES_32;
 }
 
 /* Finds the one end record: the signature whose comment length reaches the
@@ -446,6 +560,7 @@ static NkZipStatus zip_find_end(NkZipReader *r, uint64_t *end_offset, uint8_t re
 }
 
 static int zip_entry_offset_compare(const void *a, const void *b) {
+    NK_SORT_COMPARE_COUNT();
     const ZipEntry *const *x = (const ZipEntry *const *)a;
     const ZipEntry *const *y = (const ZipEntry *const *)b;
     return ((*x)->local_offset > (*y)->local_offset) - ((*x)->local_offset < (*y)->local_offset);
@@ -459,11 +574,12 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
     uint8_t *central = NULL;
     ZipNameRef *refs = NULL;
     ZipEntry **by_offset = NULL;
+    uint64_t previous_end = 0u;
     NkZipStatus status;
     size_t at = 0;
 
     if (r->size < ZIP_END_SIZE) return zip_fail(err, NK_ZIP_ERR_NOT_ZIP, NULL, 0);
-    if (r->size > ZIP_MAX_ARCHIVE_BYTES) return zip_fail(err, NK_ZIP_ERR_TOO_LARGE, NULL, 0);
+    if (r->size > zip_max_archive_bytes(r)) return zip_fail(err, NK_ZIP_ERR_TOO_LARGE, NULL, 0);
     status = zip_find_end(r, &end_offset, end);
     if (status != NK_ZIP_OK) return zip_fail(err, status, NULL, 0);
     disk = rd16(end + 4);
@@ -481,7 +597,7 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
     if (disk != 0u || central_disk != 0u || disk_entries != total_entries) {
         return zip_fail(err, NK_ZIP_ERR_MULTI_DISK, NULL, 0);
     }
-    if (total_entries > NK_ZIP_MAX_ENTRIES) {
+    if (total_entries > r->max_entries) {
         return zip_fail(err, NK_ZIP_ERR_TOO_MANY_ENTRIES, NULL, 0);
     }
     if ((uint64_t)central_offset + central_size != end_offset) {
@@ -575,12 +691,19 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
             status = zip_fail(err, NK_ZIP_ERR_MULTI_DISK, e->name, e->name_size);
             goto done;
         }
-        status = zip_check_flags(flags, method);
+        status = zip_check_flags(r, flags, method);
         if (status != NK_ZIP_OK) {
             status = zip_fail(err, status, e->name, e->name_size);
             goto done;
         }
-        if (packed != size || (folder && size != 0u)) {
+        if ((method == ZIP_METHOD_STORED && packed != size) || (folder && size != 0u)) {
+            status = zip_fail(err, NK_ZIP_ERR_SIZE_MISMATCH, e->name, e->name_size);
+            goto done;
+        }
+        /* DEFLATE never needs much more room than the data: stored blocks cost 5 bytes in 65,535.
+           A packed size far above the unpacked one is padding (empty blocks, bytes after the end)
+           that would be read whole for nothing, so it is refused. */
+        if (method == ZIP_METHOD_DEFLATE && (uint64_t)packed > (uint64_t)size + size / 8u + 64u) {
             status = zip_fail(err, NK_ZIP_ERR_SIZE_MISMATCH, e->name, e->name_size);
             goto done;
         }
@@ -589,13 +712,15 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
             goto done;
         }
         r->total += size;
-        if (r->total > NK_ZIP_MAX_TOTAL_BYTES) {
+        if (r->total > r->max_total) {
             status = zip_fail(err, NK_ZIP_ERR_TOO_LARGE, e->name, e->name_size);
             goto done;
         }
         e->flags = flags;
+        e->method = method;
         e->crc = crc;
         e->size = size;
+        e->packed = packed;
         e->local_offset = local;
         e->folder = folder;
         refs[i].name = e->name;
@@ -611,14 +736,25 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
     status = zip_names_distinct(refs, r->count, err);
     if (status != NK_ZIP_OK) goto done;
 
-    /* Each local header against its central entry. */
+    /* Each local header against its central entry, in file order. No two
+       entries share bytes: an entry whose header starts before the previous
+       one's data ends is refused before its header is read, so however far
+       the headers' fields claim to reach, no byte of the file is read twice. */
+    for (size_t i = 0; i < r->count; ++i) by_offset[i] = &r->entries[i];
+    if (r->count > 1) {
+        nk_zip_sort(by_offset, r->count, sizeof(by_offset[0]), zip_entry_offset_compare);
+    }
     for (size_t i = 0; i < r->count; ++i) {
-        ZipEntry *e = &r->entries[i];
+        ZipEntry *e = by_offset[i];
         uint8_t h[ZIP_LOCAL_SIZE];
         uint8_t *tail;
         uint16_t name_size, extra_size;
         uint64_t header_end;
         bool zip64 = false;
+        if (e->local_offset < previous_end) {
+            status = zip_fail(err, NK_ZIP_ERR_OVERLAP, e->name, e->name_size);
+            goto done;
+        }
         if ((uint64_t)e->local_offset + ZIP_LOCAL_SIZE > central_offset) {
             status = zip_fail(err, NK_ZIP_ERR_OFFSET, e->name, e->name_size);
             goto done;
@@ -640,14 +776,18 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
             goto done;
         }
         {
-            NkZipStatus local_flags = zip_check_flags(rd16(h + 6), rd16(h + 8));
+            NkZipStatus local_flags = zip_check_flags(r, rd16(h + 6), rd16(h + 8));
             if (local_flags != NK_ZIP_OK) {
                 status = zip_fail(err, local_flags, e->name, e->name_size);
                 goto done;
             }
         }
-        if (rd16(h + 6) != e->flags || rd32(h + 14) != e->crc || rd32(h + 18) != e->size ||
-            rd32(h + 22) != e->size || name_size != e->name_size) {
+        /* With a data descriptor the local header may leave the CRC and both
+           sizes zero (APPNOTE 4.4.4, bit 3); the central entry has them. */
+        if (rd16(h + 6) != e->flags || rd16(h + 8) != e->method || name_size != e->name_size ||
+            (!((e->flags & ZIP_FLAG_DESCRIPTOR) && rd32(h + 14) == 0u && rd32(h + 18) == 0u &&
+               rd32(h + 22) == 0u) &&
+             (rd32(h + 14) != e->crc || rd32(h + 18) != e->packed || rd32(h + 22) != e->size))) {
             status = zip_fail(err, NK_ZIP_ERR_LOCAL_MISMATCH, e->name, e->name_size);
             goto done;
         }
@@ -671,23 +811,11 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
             goto done;
         }
         e->data_offset = header_end;
-        if (header_end + e->size > central_offset) {
+        if (header_end + e->packed > central_offset) {
             status = zip_fail(err, NK_ZIP_ERR_OFFSET, e->name, e->name_size);
             goto done;
         }
-        by_offset[i] = e;
-    }
-    /* No two entries share bytes: each one's header and data end before the
-       next one's header starts. */
-    if (r->count > 1) {
-        qsort(by_offset, r->count, sizeof(by_offset[0]), zip_entry_offset_compare);
-        for (size_t i = 0; i + 1 < r->count; ++i) {
-            if (by_offset[i]->data_offset + by_offset[i]->size > by_offset[i + 1]->local_offset) {
-                status = zip_fail(err, NK_ZIP_ERR_OVERLAP, by_offset[i + 1]->name,
-                                  by_offset[i + 1]->name_size);
-                goto done;
-            }
-        }
+        previous_end = header_end + e->packed;
     }
     status = zip_ok(err);
 done:
@@ -697,9 +825,20 @@ done:
     return status;
 }
 
-static NkZipStatus zip_reader_start(NkZipReader *r, NkZipReader **out, NkZipError *err) {
+static NkZipStatus zip_reader_start(NkZipReader *r, NkZipReader **out,
+                                    const NkZipReadOptions *options, NkZipError *err) {
     NkZipStatus status;
-    zip_crc_table(r->crc_table);
+    r->max_entries = NK_ZIP_MAX_ENTRIES;
+    r->max_total = NK_ZIP_MAX_TOTAL_BYTES;
+    if (options) {
+        if (options->max_entries) {
+            r->max_entries = options->max_entries < NK_ZIP_READ_MAX_ENTRIES
+                                 ? options->max_entries : NK_ZIP_READ_MAX_ENTRIES;
+        }
+        if (options->max_total_bytes) r->max_total = options->max_total_bytes;
+        r->deflate = options->deflate;
+        r->descriptor = options->data_descriptor;
+    }
     r->chunk = (uint8_t *)malloc(ZIP_CHUNK);
     if (!r->chunk) {
         nk_zip_reader_close(r);
@@ -716,6 +855,11 @@ static NkZipStatus zip_reader_start(NkZipReader *r, NkZipReader **out, NkZipErro
 
 NkZipStatus nk_zip_reader_open_memory(NkZipReader **out, const void *data, size_t size,
                                       NkZipError *err) {
+    return nk_zip_reader_open_memory_with(out, data, size, NULL, err);
+}
+
+NkZipStatus nk_zip_reader_open_memory_with(NkZipReader **out, const void *data, size_t size,
+                                           const NkZipReadOptions *options, NkZipError *err) {
     NkZipReader *r;
     if (!out) return zip_fail(err, NK_ZIP_ERR_ARGUMENT, NULL, 0);
     *out = NULL;
@@ -725,7 +869,7 @@ NkZipStatus nk_zip_reader_open_memory(NkZipReader **out, const void *data, size_
     if (!r) return zip_fail(err, NK_ZIP_ERR_NO_MEMORY, NULL, 0);
     r->mem = (const uint8_t *)data;
     r->size = size;
-    return zip_reader_start(r, out, err);
+    return zip_reader_start(r, out, options, err);
 }
 
 size_t nk_zip_reader_count(const NkZipReader *reader) { return reader ? reader->count : 0; }
@@ -740,22 +884,69 @@ bool nk_zip_reader_entry(const NkZipReader *reader, size_t index, NkZipEntryInfo
     out->size = reader->entries[index].size;
     out->crc32 = reader->entries[index].crc;
     out->is_folder = reader->entries[index].folder;
+    out->deflated = reader->entries[index].method == ZIP_METHOD_DEFLATE;
+    out->packed_size = reader->entries[index].packed;
     return true;
 }
 
 /* Streams one entry's data through `sink` (when given) and checks its CRC-32. */
 typedef bool (*ZipSink)(void *ctx, const uint8_t *data, size_t size);
 
+/* A DEFLATE entry, unpacked whole; its CRC is checked before the sink sees a
+   byte. With `into` (at least the entry's size), it is unpacked there instead,
+   with no buffer of its own and no sink: the caller's buffer, the packed bytes
+   and nothing more are held at once. */
+static NkZipStatus zip_inflate_entry(NkZipReader *r, const ZipEntry *e, ZipSink sink, void *ctx,
+                                     uint8_t *into, NkZipError *err) {
+    uint8_t *packed;
+    uint8_t *plain = NULL;
+    size_t plain_size = 0;
+    NkZipStatus status;
+    int rc;
+    if (e->packed == 0u && e->size == 0u) {
+        /* No stream at all for an empty file: nothing to unpack. */
+        return e->crc == 0u ? NK_ZIP_OK : zip_fail(err, NK_ZIP_ERR_CRC, e->name, e->name_size);
+    }
+    packed = (uint8_t *)malloc(e->packed ? (size_t)e->packed : 1u);
+    if (!packed) return zip_fail(err, NK_ZIP_ERR_NO_MEMORY, e->name, e->name_size);
+    status = zip_read_at(r, e->data_offset, packed, e->packed);
+    if (status != NK_ZIP_OK) {
+        free(packed);
+        return zip_fail(err, status, e->name, e->name_size);
+    }
+    /* The declared size bounds the output: a stream that runs past it stops there. */
+    if (into) {
+        rc = nk_psp_inflate_raw_into(packed, e->packed, into, (size_t)e->size, &plain_size, NULL,
+                                     NULL, 0);
+    } else {
+        rc = nk_psp_inflate_raw(packed, e->packed, &plain, &plain_size, e->size,
+                                e->size ? (size_t)e->size : 1u, NULL, 0);
+    }
+    free(packed);
+    if (rc != NK_INFLATE_OK) {
+        status = rc == NK_INFLATE_ERR_MEMORY     ? NK_ZIP_ERR_NO_MEMORY
+                 : rc == NK_INFLATE_ERR_OVERFLOW ? NK_ZIP_ERR_SIZE_MISMATCH
+                                                 : NK_ZIP_ERR_INFLATE;
+        return zip_fail(err, status, e->name, e->name_size);
+    }
+    if (plain_size != e->size) status = NK_ZIP_ERR_SIZE_MISMATCH;
+    else if (zip_crc_update(0u, into ? into : plain, plain_size) != e->crc) status = NK_ZIP_ERR_CRC;
+    else if (sink && plain_size && !sink(ctx, plain, plain_size)) status = NK_ZIP_ERR_IO;
+    free(plain);
+    return status == NK_ZIP_OK ? NK_ZIP_OK : zip_fail(err, status, e->name, e->name_size);
+}
+
 static NkZipStatus zip_stream_entry(NkZipReader *r, const ZipEntry *e, ZipSink sink, void *ctx,
                                     NkZipError *err) {
     uint64_t left = e->size;
     uint64_t at = e->data_offset;
     uint32_t crc = 0;
+    if (e->method == ZIP_METHOD_DEFLATE) return zip_inflate_entry(r, e, sink, ctx, NULL, err);
     while (left > 0) {
         size_t n = left > ZIP_CHUNK ? ZIP_CHUNK : (size_t)left;
         NkZipStatus status = zip_read_at(r, at, r->chunk, n);
         if (status != NK_ZIP_OK) return zip_fail(err, status, e->name, e->name_size);
-        crc = zip_crc_update(r->crc_table, crc, r->chunk, n);
+        crc = zip_crc_update(crc, r->chunk, n);
         if (sink && !sink(ctx, r->chunk, n)) {
             return zip_fail(err, NK_ZIP_ERR_IO, e->name, e->name_size);
         }
@@ -797,7 +988,11 @@ NkZipStatus nk_zip_reader_read(NkZipReader *reader, size_t index, void *buf, siz
     if (cap < reader->entries[index].size) return zip_fail(err, NK_ZIP_ERR_ARGUMENT, NULL, 0);
     sink.out = (uint8_t *)buf;
     sink.at = 0;
-    status = zip_stream_entry(reader, &reader->entries[index], zip_buffer_sink, &sink, err);
+    if (reader->entries[index].method == ZIP_METHOD_DEFLATE) {
+        status = zip_inflate_entry(reader, &reader->entries[index], NULL, NULL, (uint8_t *)buf, err);
+    } else {
+        status = zip_stream_entry(reader, &reader->entries[index], zip_buffer_sink, &sink, err);
+    }
     return status == NK_ZIP_OK ? zip_ok(err) : status;
 }
 
@@ -896,6 +1091,11 @@ NkZipFolderState nk_zip_folder_state(const char *folder) {
 /* ---- Reader: files and extraction ---- */
 
 NkZipStatus nk_zip_reader_open_file(NkZipReader **out, const char *path, NkZipError *err) {
+    return nk_zip_reader_open_file_with(out, path, NULL, err);
+}
+
+NkZipStatus nk_zip_reader_open_file_with(NkZipReader **out, const char *path,
+                                         const NkZipReadOptions *options, NkZipError *err) {
     NkZipReader *r;
     int64_t size;
     if (!out) return zip_fail(err, NK_ZIP_ERR_ARGUMENT, NULL, 0);
@@ -913,7 +1113,7 @@ NkZipStatus nk_zip_reader_open_file(NkZipReader **out, const char *path, NkZipEr
         nk_zip_reader_close(r);
         return zip_fail(err, NK_ZIP_ERR_NOT_ZIP, NULL, 0);
     }
-    return zip_reader_start(r, out, err);
+    return zip_reader_start(r, out, options, err);
 }
 
 static bool zip_file_sink(void *ctx, const uint8_t *data, size_t size) {
@@ -1007,7 +1207,6 @@ struct NkZipWriter {
     NkZipStatus failed;      /* the first failure; every later call returns it */
     char failed_entry[160];
     uint8_t *chunk;
-    uint32_t crc_table[256];
 };
 
 static NkZipStatus zip_writer_fail(NkZipWriter *w, NkZipError *err, NkZipStatus status,
@@ -1048,7 +1247,6 @@ NkZipStatus nk_zip_writer_open(NkZipWriter **out, const char *path, uint16_t dos
     }
     w->dos_date = dos_date;
     w->dos_time = dos_time;
-    zip_crc_table(w->crc_table);
     *out = w;
     return zip_ok(err);
 }
@@ -1153,7 +1351,7 @@ NkZipStatus nk_zip_writer_add_bytes(NkZipWriter *writer, const char *name, const
         return zip_writer_fail(writer, err, NK_ZIP_ERR_TOO_LARGE, name, name_size);
     }
     status = zip_writer_begin_entry(writer, name, name_size, false,
-                                    size ? zip_crc_update(writer->crc_table, 0u,
+                                    size ? zip_crc_update(0u,
                                                           (const uint8_t *)data, size)
                                          : 0u,
                                     (uint32_t)size, &e, err);
@@ -1192,7 +1390,7 @@ NkZipStatus nk_zip_writer_add_file(NkZipWriter *writer, const char *name, const 
             fclose(in);
             return zip_writer_fail(writer, err, NK_ZIP_ERR_TOO_LARGE, name, name_size);
         }
-        crc = zip_crc_update(writer->crc_table, crc, writer->chunk, got);
+        crc = zip_crc_update(crc, writer->chunk, got);
         if (fwrite(writer->chunk, 1, got, writer->file) != got) {
             fclose(in);
             return zip_writer_fail(writer, err, NK_ZIP_ERR_IO, name, name_size);
@@ -1367,6 +1565,7 @@ static bool zip_list_add(const char *name, bool is_dir, void *ctx) {
 }
 
 static int zip_listed_compare(const void *a, const void *b) {
+    NK_SORT_COMPARE_COUNT();
     return strcmp(((const ZipListed *)a)->name, ((const ZipListed *)b)->name);
 }
 
@@ -1397,7 +1596,7 @@ static NkZipStatus zip_write_tree(NkZipWriter *w, const char *host, const char *
         zip_listing_free(&list);
         return zip_writer_fail(w, err, NK_ZIP_ERR_LEFT_OUT, relative, strlen(relative));
     }
-    qsort(list.items, list.count, sizeof(list.items[0]), zip_listed_compare);
+    nk_zip_sort(list.items, list.count, sizeof(list.items[0]), zip_listed_compare);
     for (size_t i = 0; i < list.count && status == NK_ZIP_OK; ++i) {
         char name[NK_ZIP_MAX_NAME_BYTES + 2];
         char path[NK_ZIP_MAX_NAME_BYTES + 4096];
