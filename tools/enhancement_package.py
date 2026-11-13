@@ -183,6 +183,7 @@ ROOT_KEYS = frozenset({
     "schema_version",
     "id",
     "display_name",
+    "experimental",
     "version",
     "category",
     "target_title_id",
@@ -494,6 +495,10 @@ def validate_package(data: Any) -> dict[str, Any]:
         fail("display_name", "display_name must not have leading or trailing whitespace")
     if not (1 <= len(name) <= 128):
         fail("display_name", f"display_name length must be between 1 and 128 characters, got {len(name)}")
+
+    # Validate optional experimental (section 9.10): a package without it is experimental.
+    if "experimental" in data and not isinstance(data["experimental"], bool):
+        fail("experimental", f"experimental must be true or false, got {type(data['experimental']).__name__}")
 
     # Validate version
     ver = data["version"]

@@ -204,6 +204,10 @@ typedef struct {
     /* The file read is the shipped published package, not one in the user's
        data folder. */
     bool shipped;
+    /* The package is experimental: true unless it is the usable shipped package and
+       declares "experimental": false (docs/ENHANCEMENT_CONTRACT.md section 9.10). A
+       file in the user's data folder stays experimental whatever it declares. */
+    bool experimental;
     /* Why a file that exists cannot be used; empty when there is no file or it
        is usable. */
     char problem[160];
@@ -1695,6 +1699,10 @@ bool player_app_title_60hz_on(const PlayerApp *app, int game_index);
 /* Saved on, but the title has no usable enhancement package: nothing launches
  * or builds until the package is back, or Ace or its 60 FPS game logic is turned off. */
 bool player_app_title_60hz_blocked(const PlayerApp *app, int game_index);
+/* The title's usable package is the shipped one and the maintainer released it
+ * ("experimental": false, docs/ENHANCEMENT_CONTRACT.md section 9.10): the title page tags
+ * the 60 FPS switch OPTIONAL, else EXPERIMENTAL. */
+bool player_app_title_60hz_released(const PlayerApp *app, int game_index);
 /* The title page's 60 FPS switch, Ace's own part: on chooses Ace for the title with its 60 FPS
  * game logic, off keeps Ace and turns that part off. Re-selects the title's package variant
  * and asks for its package to be checked. */

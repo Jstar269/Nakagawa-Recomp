@@ -90,6 +90,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_AUDIO_REST 159
 #define HLE_CASE_SELF_STOP 167
 #define HLE_CASE_UTILITY_DIALOGS 161
+#define HLE_CASE_UTILITY_NETCONF_SHARING 166
 #define HLE_CASE_IO_SEEK 162
 #define HLE_CASE_IO_SEEK_EDGES 186
 #define HLE_CASE_NICKNAME_LIMIT 164
@@ -178,6 +179,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "hle-utility-dialogs"
 #define HLE_TEST_ID "PSP-HLE-UTILITY-DIALOG-001"
 #define HLE_LOG "host0:/hle_utility_dialogs_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING
+#define HLE_CAMPAIGN_ID "hle-utility-netconf-sharing"
+#define HLE_TEST_ID "PSP-HLE-UTILITY-DIALOG-002"
+#define HLE_LOG "host0:/hle_utility_netconf_sharing_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_IO_SEEK
 #define HLE_CAMPAIGN_ID "hle-io-seek"
 #define HLE_TEST_ID "PSP-HLE-IO-SEEK-001"
@@ -3430,7 +3435,7 @@ static int hle_run(void)
 #endif /* HLE_CASE_AUDIO_REST */
 
 /* ------------------------------------------------------------------------- */
-#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING
 
 /* #1386 (W-HLE-1): utility dialog status timing after an InitStart, the wrong-state answers of
    netconf, the gamedata install dialog and game sharing, and the common result word a cancel
@@ -3441,16 +3446,18 @@ static int hle_run(void)
    after a soft reset): under the XMB a dialog stays at INIT (PSP-HLE-UTILITY-NONE-001 note).
 
    Safety rules, all kept in the code below:
-   - Order: savedata (mode 22 GETSIZE, which writes nothing), the gamedata install dialog, then
-     netconf, then game sharing last, so a hang in a radio dialog cannot lose an earlier record.
+   - Order (case 161; case 166's is below): savedata (mode 22 GETSIZE, which writes nothing), the
+     gamedata install dialog, then netconf, then game sharing last, so a hang in a radio dialog
+     cannot lose an earlier record.
      Every record is written as soon as its cell ends.
    - Nothing presses a button. A dialog only ever gets GetStatus, Update(1) and ShutdownStart,
      and the matrix calls below. A run still RUNNING after HLE_UD_CANCEL_POLLS polls is
      cancelled with ShutdownStart; one still at INIT after HLE_UD_INIT_CANCEL_POLLS polls gets one
      ShutdownStart too. Every wait is a vblank-counted bound.
-   - No network is joined, created or scanned for, and no setting or profile is written: netconf
-     runs action 0 (connect to an access point) with hotspot 0 and wifisp 0 and is never answered,
-     so it can only be cancelled. The only net calls are the module load/unload pair and each net
+   - The probe joins, creates and scans for no network and writes no setting or profile (a
+     RUNNING game sharing dialog may still use the radio on its own): netconf runs action 0
+     (connect to an access point) with hotspot 0 and wifisp 0 and is never answered, so it can
+     only be cancelled. The only net calls are the module load/unload pair and each net
      library's Init and Term (the Makefile pins every net library to exactly that pair). No apctl
      connect, ad hoc connect, create or join, scan or registry call is made or linked.
    - Game sharing shares HLE_UD_GS_DATA_BYTES of project-written pattern bytes in memory mode
@@ -3481,6 +3488,42 @@ static int hle_run(void)
    a block whose size word is 0, so no message dialog can open: the busy check comes before the
    size check (status.expected), so a busy slot still answers INVALID_STATUS, while a size check
    that came first would answer 0x80110004. An accepted one is recorded as stuck.
+
+   Case 166 (hle-utility-netconf-sharing, PSP-HLE-UTILITY-DIALOG-002) compiles this same section
+   with the savedata and gamedata install cells left out (#if HLE_CASE_UTILITY_DIALOGS blocks),
+   with the helpers, bounds and record shapes below unchanged, so its records are the sharing-*
+   and netconf-* rows of case 161. Main's record of case 161 (docs/HARDWARE_ORACLE.md,
+   PSP-HLE-UTILITY-DIALOG-001 captures 2026-11-12, neither capture acceptance-eligible): on boot
+   204 the netconf dialog this case runs, same block and calls, stayed RUNNING to the 600-poll cap,
+   a ShutdownStart while RUNNING returned 0x80110001, and PSPLink then went silent until the
+   owner power-cycled the console; on boot 206 the gamedata install dialog did the same. Nothing
+   in this probe presses a button, and ShutdownStart is its only way to end a RUNNING dialog, so
+   netconf-timing is expected to stick here as it did on boot 204. Game sharing has never run on
+   a console (on both boots it was SKIP 5) and has no expectation. A stuck dialog makes every
+   later dialog cell SKIP 5, so whichever dialog runs first is the one measured: case 166 runs
+   game sharing first and netconf last. (No record was lost on boot 204 or 206: each stream was
+   complete and PSPLink went silent only after the done record; every record is written to host0,
+   opened, written and closed, as soon as its cell ends.) The one launch is meant to measure the
+   sharing cells, and to show whether netconf sticks as on boot 204 when no savedata dialog has
+   run before it. Expected end when netconf sticks: netconf-timing records outcome 1, the netconf
+   state cells are SKIP 5, netconf-teardown runs and records each call's return, as it did under
+   the stuck dialog on boot 204 (all five setup calls undone, then the done record), COMPLETE
+   reports FAIL, and the console needs the owner's power cycle. The console is expected to need
+   that power cycle either way: on boot 204 it followed a teardown that completed, and on boot
+   206 it came with no net module loaded. One launch per boot.
+
+   Case 166 tears each group's net setup down exactly as case 161 does, on every path that ran a
+   setup, a stuck dialog's included. The two groups are coupled: netconf's setup loads COMMON and
+   calls sceNetInit again after sharing's teardown, so a sharing teardown that leaves either in
+   place makes netconf-setup fail and the netconf cells SKIP 6 (161 has the mirror case).
+
+   Operator conditions (README and manifest rows): game context, as for case 161; the WLAN switch
+   on. The probe does not read the switch, so a run with it off shows only what the net setup and
+   dialog cells return then. The game sharing dialog is expected to start the PSP's ad hoc radio
+   on its own and may offer its HLE_UD_GS_DATA_BYTES pattern bytes under HLE_UD_GS_NAME to a
+   nearby PSP in receive mode until it is shut down or the console is power-cycled; netconf may
+   scan for access points. The probe makes no connect call and answers no dialog, so nothing can
+   reach an access point or a server.
 
    Records, in order (a SKIP record keeps its word count, all words 0, and carries the reason in
    result: 1 a UMD is present, 2 the gamedata directory exists, 3 sceUmdCheckMedium failed, 4 the
@@ -3547,7 +3590,7 @@ static int hle_run(void)
      the Term calls and unloads in reverse order (ApctlTerm, InetTerm, NetTerm, unload INET,
      unload COMMON; AdhocctlTerm, AdhocTerm, NetTerm, unload ADHOC, unload COMMON), each made
      only when its setup call succeeded (HLE_SENTINEL otherwise). They run on every path that
-     ran a setup. */
+     ran a setup, a stuck dialog's included, in case 161 and in case 166. */
 
 #include <pspumd.h>
 #include <pspnet.h>
@@ -3615,19 +3658,23 @@ _Static_assert(HLE_UD_CLEAN_HEAD + 2u * HLE_UD_CLEAN_FILES == HLE_UD_CLEANUP_WOR
                "a cleanup record is its head, the removes and the sizes");
 _Static_assert(HLE_UD_TIMING_WORDS <= HLE_MAX_WORDS, "a timing record fits the writer");
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 int nkUtilSavedataInitStart(void *param);
 int nkUtilSavedataGetStatus(void);
 int nkUtilSavedataUpdate(int speed);
 int nkUtilSavedataShutdownStart(void);
+#endif
 int nkUtilMsgDialogInitStart(void *param);
 int nkUtilNetconfInitStart(void *param);
 int nkUtilNetconfGetStatus(void);
 int nkUtilNetconfUpdate(int speed);
 int nkUtilNetconfShutdownStart(void);
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 int nkUtilGamedataInstallInitStart(void *param);
 int nkUtilGamedataInstallGetStatus(void);
 int nkUtilGamedataInstallUpdate(int speed);
 int nkUtilGamedataInstallShutdownStart(void);
+#endif
 int nkUtilGameSharingInitStart(void *param);
 int nkUtilGameSharingGetStatus(void);
 int nkUtilGameSharingUpdate(int speed);
@@ -3666,20 +3713,26 @@ typedef struct HleUdRun {
     int init_cancel_called;
 } HleUdRun;
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 static uint8_t s_ud_sd[HLE_UD_SD_BYTES] __attribute__((aligned(64)));
 static uint32_t s_ud_sd_size_info[HLE_UD_SD_SIZE_INFO_WORDS] __attribute__((aligned(64)));
+#endif
 static uint8_t s_ud_nc[2][HLE_UD_NC_BYTES] __attribute__((aligned(64)));
 static uint8_t s_ud_nc_adhoc[16] __attribute__((aligned(64)));
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 static uint8_t s_ud_gd[2][HLE_UD_GD_BYTES] __attribute__((aligned(64)));
+#endif
 static uint8_t s_ud_gs[2][HLE_UD_GS_BYTES] __attribute__((aligned(64)));
 static uint8_t s_ud_gs_data[HLE_UD_GS_DATA_BYTES] __attribute__((aligned(64)));
 static uint8_t s_ud_msg[HLE_UD_MSG_BYTES] __attribute__((aligned(64)));
 static struct productStruct s_ud_product;
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 static SceIoDirent s_ud_dirent;
 static char s_ud_names[HLE_UD_CLEAN_FILES][HLE_UD_NAME_BYTES];
 static char s_ud_path[sizeof(HLE_UD_GD_DIR) + 1u + HLE_UD_NAME_BYTES];
 _Static_assert(sizeof(s_ud_path) >= sizeof(HLE_UD_GD_DIR) + HLE_UD_NAME_BYTES,
                "a file path is the directory, a slash, a name of at most 63 bytes and a NUL");
+#endif
 static uint32_t s_ud_stuck;
 static uint32_t s_ud_fail;
 
@@ -3715,6 +3768,7 @@ static void hle_ud_common(uint8_t *block, uint32_t bytes)
     hle_ud_put32(block, 0x1cu, HLE_SENTINEL); /* common result: an unwritten word shows */
 }
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 /* Savedata GETSIZE for a save no game owns, with an empty sizeInfo (no files listed). */
 static void hle_ud_fill_savedata(uint8_t *block)
 {
@@ -3729,6 +3783,7 @@ static void hle_ud_fill_savedata(uint8_t *block)
     hle_ud_put32(block, 0x5fcu, (uint32_t)(uintptr_t)s_ud_sd_size_info);
 }
 
+#endif
 /* Netconf action 0 (connect to an access point), no ad hoc group, hotspot 0, wifisp 0. */
 static void hle_ud_fill_netconf(uint8_t *block)
 {
@@ -3741,6 +3796,7 @@ static void hle_ud_fill_netconf(uint8_t *block)
     hle_ud_put32(block, 0x40u, 0u);           /* wifisp: off */
 }
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 /* The gamedata install block, mode 0 (no prompt), into the probe-owned directory. */
 static void hle_ud_fill_gamedata(uint8_t *block)
 {
@@ -3757,6 +3813,7 @@ static void hle_ud_fill_gamedata(uint8_t *block)
     hle_ud_put32(block, 0x564u, HLE_SENTINEL);
 }
 
+#endif
 /* Game sharing, single send, the probe's pattern bytes in memory. */
 static void hle_ud_fill_sharing(uint8_t *block)
 {
@@ -3772,6 +3829,7 @@ static void hle_ud_fill_sharing(uint8_t *block)
     hle_ud_put32(block, 0x60u, HLE_UD_GS_DATA_BYTES);
 }
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 static const HleUdType k_ud_savedata = {
     "savedata", nkUtilSavedataInitStart, nkUtilSavedataGetStatus, nkUtilSavedataUpdate,
     nkUtilSavedataShutdownStart, hle_ud_fill_savedata, s_ud_sd, s_ud_sd, 0x34u,
@@ -3781,6 +3839,7 @@ static const HleUdType k_ud_gamedata = {
     nkUtilGamedataInstallUpdate, nkUtilGamedataInstallShutdownStart, hle_ud_fill_gamedata,
     s_ud_gd[0], s_ud_gd[1], 0x55cu,
 };
+#endif
 static const HleUdType k_ud_netconf = {
     "netconf", nkUtilNetconfInitStart, nkUtilNetconfGetStatus, nkUtilNetconfUpdate,
     nkUtilNetconfShutdownStart, hle_ud_fill_netconf, s_ud_nc[0], s_ud_nc[1], 0x3cu,
@@ -4087,6 +4146,7 @@ static void hle_ud_states(const char *init_id, const char *running_id, const cha
     hle_ud_state(shutdown_id, t, HLE_UD_STATUS_SHUTDOWN, reason);
 }
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 /* The gamedata cells run only with no disc in the drive and no directory of that name. */
 static uint32_t hle_ud_gamedata_precheck(void)
 {
@@ -4217,6 +4277,8 @@ static void hle_ud_gamedata(void)
                   "gamedata-state-shutdown", &k_ud_gamedata, reason);
     hle_ud_gamedata_cleanup(reason);
 }
+
+#endif
 
 /* Netconf's net setup; *stage counts the calls that succeeded, in order. */
 static uint32_t hle_ud_netconf_setup(uint32_t *stage)
@@ -4388,6 +4450,7 @@ static void hle_ud_sharing(void)
     hle_ud_sharing_teardown(stage, reason == HLE_UD_SKIP_STUCK ? reason : 0u);
 }
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 static int hle_run(void)
 {
     hle_ud_timing("savedata-timing-r1", &k_ud_savedata, 0u);
@@ -4398,6 +4461,19 @@ static int hle_run(void)
     hle_ud_sharing();
     return s_ud_fail == 0u;
 }
+#endif
+
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING
+/* Game sharing first, netconf last: netconf stuck RUNNING on boot 204 (case 161), and a stuck
+   dialog makes every later dialog cell SKIP 5, so sharing runs before it. No savedata or gamedata
+   install dialog is built in, and no message dialog is meant to open (size-0 block only). */
+static int hle_run(void)
+{
+    hle_ud_sharing();
+    hle_ud_netconf();
+    return s_ud_fail == 0u;
+}
+#endif
 
 #endif /* HLE_CASE_UTILITY_DIALOGS */
 
