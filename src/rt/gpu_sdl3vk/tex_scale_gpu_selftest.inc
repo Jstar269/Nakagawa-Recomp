@@ -1222,9 +1222,13 @@ static int xst_dump_fail(const char *why) {
     return 0;
 }
 
-/* A clean folder `<build root>/<leaf>` with the non-ASCII suffix, into `dir`. */
+/* A clean folder `<build root>/<leaf>` with the non-ASCII suffix, into `dir`. The build root is
+ * made a full path first: the dump takes only a full path, as the launcher's user data folder is. */
 static void xst_dump_folder(char *dir, size_t cap, const char *leaf) {
-    snprintf(dir, cap, "%s/%s" XST_DUMP_NONASCII, SR_SELFTEST_BUILD_ROOT, leaf);
+    static char root[400];
+    if (!root[0] && !nk_platform_absolute_path(SR_SELFTEST_BUILD_ROOT, root, sizeof(root)))
+        snprintf(root, sizeof(root), "%s", SR_SELFTEST_BUILD_ROOT);   /* then the dump refuses it, and says so */
+    snprintf(dir, cap, "%s/%s" XST_DUMP_NONASCII, root, leaf);
     (void)nk_platform_remove_tree(dir, NULL);   /* an earlier run's files */
 }
 
@@ -1582,6 +1586,13 @@ static int xst_cell_dump(int f) {
         tex_dump_redact(text, sizeof(text), bad);
         if (strcmp(text, "texture pack folder 'texdump_gpu_badini" XST_DUMP_NONASCII "' cannot be read") != 0)
             return xst_dump_fail("a reason that names the folder keeps more than its last component");
+        /* The folder is checked as a pack folder is before anything is made in it: a relative path
+         * and ill-formed UTF-8 are refused with their reason. */
+        if (gegpu_texdump_start("texdump_gpu_relative", err, sizeof(err)) || !strstr(err, "full path"))
+            return xst_dump_fail("a relative dump folder was taken");
+        snprintf(text, sizeof(text), "%s/\xC0\xAF", SR_SELFTEST_BUILD_ROOT);
+        if (gegpu_texdump_start(text, err, sizeof(err)) || !strstr(err, "UTF-8"))
+            return xst_dump_fail("a dump folder that is not valid UTF-8 was taken");
     }
     memset(&s_dump, 0, sizeof(s_dump));
     printf("gpu texscale selftest: PASS %-12s refused when authentic, nothing while off, cached and new textures "
@@ -1739,6 +1750,96 @@ static int xst_cell_dump_mip(int f) {
         w0 != XST_W || h0 != XST_H || w1 != XST_W / 2 || h1 != XST_H / 2)
         return xst_dump_fail("a mip-mapped texture's levels are not each dumped at their own size");
     printf("gpu texscale selftest: PASS %-12s a mip-mapped texture's levels are dumped, level 1 as _1\n", "dump-mip");
+    return 1;
+}
+
+/* A work job that does nothing: it only takes a slot on the workers' queue. */
+static void xst_dump_filler(void *ctx) { (void)ctx; }
+
+/* The dump off the guest thread (#1880): with the scaler's workers held, a texture the dump writes
+ * is handed to them and the draw returns before any encode or write (a dump on the guest thread
+ * writes the file inside the draw and fails here); drawn again it is not handed over twice. With
+ * the queue full, the next texture is refused loudly (counted in queue_full, said once), not
+ * dropped: once the queue has room it is written on its next draw. Files are counted only when
+ * taken back on the guest thread. */
+static int xst_cell_dump_async(int f) {
+    (void)f;
+    uint32_t a[XST_W * XST_H], b[XST_W * XST_H];
+    char dir[400], name_a[64], name_b[64];
+    xst_pattern(a, 401u);
+    xst_pattern(b, 409u);
+    xst_dump_folder(dir, sizeof(dir), "texdump_gpu_async");
+    xst_repl_name(a, name_a, sizeof(name_a));
+    xst_repl_name(b, name_b, sizeof(name_b));
+    xst_reset();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(0);
+    nk_tex_scale_set_hold(1);
+    const char *why = NULL;
+    int fillers = 0, took = 0;
+    unsigned long long saved = 0;
+    if (!xst_dump_start(dir)) { why = "the dump did not start"; goto done; }
+
+    /* 1. Held: the level is handed over and the draw returns without it. */
+    xst_upload(a);
+    xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+    if (!xst_dump_draw()) { why = "a draw failed"; goto done; }
+    if (s_dump.inflight != 1u || nk_tex_scale_work_pending(tex_dump_job_run) != 1 || s_dump.written != 0u ||
+        xst_dump_has(dir, name_a)) {
+        why = "the draw wrote the file itself, or handed nothing to the workers";
+        goto done;
+    }
+    if (!xst_dump_draw() || s_dump.inflight != 1u || nk_tex_scale_work_pending(tex_dump_job_run) != 1) {
+        why = "a texture being written was handed over again";
+        goto done;
+    }
+
+    /* 2. The queue full (the rest of its slots taken by jobs that do nothing): the next texture is
+     * refused, counted and said, its level not handed over, and looked at again on later draws. */
+    while (nk_tex_scale_can_submit_work(64u) && nk_tex_scale_submit_work(xst_dump_filler, NULL, 64u)) fillers++;
+    if (fillers < 1 || nk_tex_scale_can_submit_work(64u)) { why = "the test could not fill the queue"; goto done; }
+    xst_upload(b);
+    if (!xst_dump_draw()) { why = "a draw failed"; goto done; }
+    if (s_dump.queue_full != 1u || !s_dump.queue_noted || s_dump.inflight != 1u || xst_dump_has(dir, name_b)) {
+        why = "a texture that found the queue full was not refused and counted";
+        goto done;
+    }
+    if (!xst_dump_draw() || s_dump.queue_full != 2u || s_dump.inflight != 1u) {
+        why = "a refused texture was not looked at again on its next draw";
+        goto done;
+    }
+
+    /* 3. Let go: the first file lands and is counted once taken back. */
+    nk_tex_scale_set_hold(0);
+    nk_tex_scale_wait_idle();
+    for (void *ctx = NULL; nk_tex_scale_take_work(xst_dump_filler, &ctx);) took++;
+    gegpu_texdump_status(&saved, NULL, NULL);
+    if (took != fillers || saved != 1u || s_dump.inflight != 0u || !xst_dump_has(dir, name_a)) {
+        why = "a file handed to the workers did not land, or was not counted when taken back";
+        goto done;
+    }
+
+    /* 4. The refused texture, drawn again with room on the queue, is written. */
+    if (!xst_dump_draw()) { why = "a draw failed"; goto done; }
+    nk_tex_scale_wait_idle();
+    gegpu_texdump_status(&saved, NULL, NULL);
+    if (saved != 2u || s_dump.queue_full != 2u || !xst_dump_has(dir, name_b)) {
+        why = "a texture refused for a full queue was dropped";
+        goto done;
+    }
+
+done:
+    nk_tex_scale_set_hold(0);
+    nk_tex_scale_wait_idle();
+    for (void *ctx = NULL; nk_tex_scale_take_work(xst_dump_filler, &ctx);) {}
+    gegpu_texdump_stop();
+    tex_dump_collect();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(1);   /* the cells after this one run with sync on, as before it */
+    if (why) return xst_dump_fail(why);
+    printf("gpu texscale selftest: PASS %-12s encode and write on the workers, the draw not waiting; a full "
+           "queue refused, counted and said, the texture written on a later draw (%d jobs filled it)\n",
+           "dump-async", fillers);
     return 1;
 }
 
@@ -1924,10 +2025,11 @@ int gegpu_texscale_selftest(void) {
     static int (*const cells[])(int) = { xst_cell_scaled_draw, xst_cell_large, xst_cell_upload_cap,
                                          xst_cell_not_ready, xst_cell_rewrite, xst_cell_clut, xst_cell_replace,
                                          xst_cell_replace_palette, xst_cell_dump, xst_cell_dump_xxh,
-                                         xst_cell_dump_palette, xst_cell_dump_mip, xst_cell_budget, xst_cell_rtt, xst_cell_color_test, xst_cell_onetoone };
+                                         xst_cell_dump_palette, xst_cell_dump_mip, xst_cell_dump_async, xst_cell_budget,
+                                         xst_cell_rtt, xst_cell_color_test, xst_cell_onetoone };
     static const char *const names[] = { "scaled-draw", "large", "upload-cap", "not-ready", "rewrite", "clut",
                                          "replace", "replace-pal", "dump", "dump-xxh",
-                                         "dump-pal", "dump-mip", "budget", "rtt", "color-test",
+                                         "dump-pal", "dump-mip", "dump-async", "budget", "rtt", "color-test",
                                          "onetoone" };
     /* The cells before onetoone check copies through 1:1 sprites, so they run with the 1:1 rule
      * off; onetoone turns it back on. */

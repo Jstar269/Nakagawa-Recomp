@@ -410,6 +410,13 @@ static int zd_deflate(ZdOut *z, const uint8_t *in, size_t n) {
     return z->ok;
 }
 
+uint64_t sr_png_encode_bound(uint32_t w, uint32_t h) {
+    if (w == 0u || h == 0u || (uint64_t)w * 4u * h > UINT32_MAX) return 0u;
+    const uint64_t raw = (uint64_t)h * (1u + 4u * (uint64_t)w);
+    if (raw > 0x7FFFFFFFu) return 0u;
+    return 63u + (9u * raw + 17u) / 8u;
+}
+
 int sr_png_encode_rgba(const uint32_t *rgba, uint32_t w, uint32_t h, uint8_t **out, size_t *out_len) {
     if (out) *out = NULL;
     if (out_len) *out_len = 0u;
@@ -487,7 +494,9 @@ int sr_png_encode_rgba(const uint32_t *rgba, uint32_t w, uint32_t h, uint8_t **o
     return 1;
 }
 
-int sr_file_publish_new(const char *path, const void *data, size_t len) {
+/* sr_file_publish_new and sr_file_publish_new_tagged: `tag` NULL takes the temp names from this
+   file's counter (one thread), else from the caller's tag. */
+static int publish_new(const char *path, const void *data, size_t len, const unsigned long *tag) {
     if (!path || !path[0] || (!data && len)) return SR_PUBLISH_FAILED;
     static unsigned long s_publish_seq;
     char tmp[1024 + 64];
@@ -498,8 +507,9 @@ int sr_file_publish_new(const char *path, const void *data, size_t len) {
        is taken costs one more try, up to PUBLISH_TEMP_TRIES; then the publish fails and says so. */
     enum { PUBLISH_TEMP_TRIES = 16 };
     for (int attempt = 0; attempt < PUBLISH_TEMP_TRIES && !f; attempt++) {
-        if (snprintf(tmp, sizeof tmp, "%s.tmp%lu.%lu", path, nk_platform_process_id(), ++s_publish_seq) >=
-            (int)sizeof tmp)
+        const int n = tag ? snprintf(tmp, sizeof tmp, "%s.tmp%lu.t%lu.%d", path, nk_platform_process_id(), *tag, attempt)
+                          : snprintf(tmp, sizeof tmp, "%s.tmp%lu.%lu", path, nk_platform_process_id(), ++s_publish_seq);
+        if (n < 0 || n >= (int)sizeof tmp)
             return SR_PUBLISH_FAILED;
         errno = 0;
         f = nk_fopen_utf8(tmp, "wbx");
@@ -517,6 +527,46 @@ int sr_file_publish_new(const char *path, const void *data, size_t len) {
     if (moved == 0) return SR_PUBLISH_WRITTEN;
     nk_remove_utf8(tmp);
     return moved == 1 ? SR_PUBLISH_EXISTS : SR_PUBLISH_FAILED;
+}
+
+int sr_file_publish_new(const char *path, const void *data, size_t len) {
+    return publish_new(path, data, len, NULL);
+}
+
+int sr_file_publish_new_tagged(const char *path, const void *data, size_t len, unsigned long tag) {
+    return publish_new(path, data, len, &tag);
+}
+
+/* The length of the strict UTF-8 sequence at s (RFC 3629: no overlong form, no surrogate, nothing
+   past U+10FFFF), or 0. */
+static size_t texdump_utf8_at(const unsigned char *s) {
+    const unsigned char a = s[0];
+    if (a < 0x80u) return 1u;
+    if (a >= 0xc2u && a <= 0xdfu) return (s[1] & 0xc0u) == 0x80u ? 2u : 0u;
+    if (a >= 0xe0u && a <= 0xefu) {
+        const unsigned char lo = a == 0xe0u ? 0xa0u : 0x80u, hi = a == 0xedu ? 0x9fu : 0xbfu;
+        return s[1] >= lo && s[1] <= hi && (s[2] & 0xc0u) == 0x80u ? 3u : 0u;
+    }
+    if (a >= 0xf0u && a <= 0xf4u) {
+        const unsigned char lo = a == 0xf0u ? 0x90u : 0x80u, hi = a == 0xf4u ? 0x8fu : 0xbfu;
+        return s[1] >= lo && s[1] <= hi && (s[2] & 0xc0u) == 0x80u && (s[3] & 0xc0u) == 0x80u ? 4u : 0u;
+    }
+    return 0u;
+}
+
+const char *sr_texdump_folder_problem(const char *dir) {
+    if (!dir || !dir[0]) return "no dump folder could be named";
+    for (const unsigned char *p = (const unsigned char *)dir; *p;) {
+        const size_t n = texdump_utf8_at(p);
+        if (!n) return "the dump folder's path is not valid UTF-8";
+        p += n;
+    }
+    if (!nk_platform_path_is_absolute(dir)) return "the dump folder's path is not a full path";
+    if (strlen(dir) >= SR_TEXDUMP_DIR_MAX) return "the dump folder's path is 512 characters or longer";
+    if ((dir[0] == '\\' || dir[0] == '/') && (dir[1] == '\\' || dir[1] == '/') && (dir[2] == '.' || dir[2] == '?') &&
+        (dir[3] == '\\' || dir[3] == '/'))
+        return "the dump folder is in a device namespace";
+    return NULL;
 }
 
 /* Publish w x h pixels as a P6 PPM whose name ends in .ppm, or as the PNG above for a name

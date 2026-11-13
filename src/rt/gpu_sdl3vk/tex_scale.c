@@ -6,7 +6,8 @@
  * Jobs live in a fixed table of NK_TEX_SCALE_QUEUE slots, each FREE, QUEUED, RUNNING or DONE,
  * with a sequence number that keeps them first in, first out. Two worker threads take QUEUED
  * slots; the renderer thread submits and takes. Nothing here waits for a worker except
- * nk_tex_scale_wait_idle and shutdown.
+ * nk_tex_scale_wait_idle and shutdown. A slot holds a scale or a work job (the texture dump's
+ * encode and write); each kind is taken only by its own take call.
  */
 #include "tex_scale.h"
 
@@ -207,6 +208,10 @@ typedef struct {
     uint32_t *src;   /* w x h, owned while QUEUED/RUNNING */
     uint32_t *dst;   /* the result, owned while DONE */
     int failed;
+    uint64_t host;   /* host bytes counted against NK_TEX_SCALE_HOST_MB while the slot is not FREE */
+    /* A work job (nk_tex_scale_submit_work): run(ctx) on a worker; ctx stays the caller's. */
+    NkTexScaleWorkFn run;
+    void *ctx;
 } Job;
 
 #define WORKERS 2
@@ -240,12 +245,18 @@ static void run_job(Job *j) {
     s_stats.scale_ns += SDL_GetTicksNS() - t0;   /* the sync path holds s_mx */
 }
 
-static Job *oldest(int state) {
+/* The oldest slot in `state`; `scale_only` skips work jobs. */
+static Job *oldest_of(int state, int scale_only) {
     Job *best = NULL;
-    for (int i = 0; i < NK_TEX_SCALE_QUEUE; i++)
-        if (s_jobs[i].state == state && (!best || s_jobs[i].seq < best->seq)) best = &s_jobs[i];
+    for (int i = 0; i < NK_TEX_SCALE_QUEUE; i++) {
+        const Job *j = &s_jobs[i];
+        if (j->state != state || (scale_only && j->run)) continue;
+        if (!best || j->seq < best->seq) best = &s_jobs[i];
+    }
     return best;
 }
+
+static Job *oldest(int state) { return oldest_of(state, 0); }
 
 static int worker(void *arg) {
     (void)arg;
@@ -256,6 +267,15 @@ static int worker(void *arg) {
         if (s_quit) break;
         j->state = JOB_RUNNING;
         SDL_UnlockMutex(s_mx);
+        if (j->run) {
+            /* A work job: the caller's function, outside the lock, then done. */
+            j->run(j->ctx);
+            SDL_LockMutex(s_mx);
+            j->state = JOB_DONE;
+            s_stats.work_done++;
+            SDL_BroadcastCondition(s_idle_cv);
+            continue;
+        }
         uint64_t t0 = SDL_GetTicksNS();
         size_t n = (size_t)j->w * (size_t)j->h * (size_t)j->factor * (size_t)j->factor;
         uint32_t *dst = (uint32_t *)malloc(n * sizeof(uint32_t));
@@ -334,6 +354,9 @@ int nk_tex_scale_submit(uint64_t serial, uint64_t hash, const uint32_t *rgba, in
         return 0;
     }
     s_host_bytes += host;
+    j->host = host;
+    j->run = NULL;
+    j->ctx = NULL;
     memcpy(j->src, rgba, (size_t)w * (size_t)h * sizeof(uint32_t));
     j->serial = serial;
     j->hash = hash;
@@ -386,9 +409,77 @@ int nk_tex_scale_submit_ready(uint64_t serial, uint64_t hash, const uint32_t *rg
     j->seq = ++s_seq;
     j->state = JOB_DONE;
     s_host_bytes += host;
+    j->host = host;
+    j->run = NULL;
+    j->ctx = NULL;
     s_stats.submitted++;
     SDL_UnlockMutex(s_mx);
     return 1;
+}
+
+int nk_tex_scale_can_submit_work(uint64_t host_bytes) {
+    if (!ensure_started()) return 0;
+    SDL_LockMutex(s_mx);
+    const int room = room_for(host_bytes) != NULL;
+    SDL_UnlockMutex(s_mx);
+    return room;
+}
+
+int nk_tex_scale_submit_work(NkTexScaleWorkFn run, void *ctx, uint64_t host_bytes) {
+    if (!run) return 0;
+    if (!ensure_started()) return 0;
+    SDL_LockMutex(s_mx);
+    Job *j = room_for(host_bytes);
+    if (!j) {
+        s_stats.work_refused++;
+        SDL_UnlockMutex(s_mx);
+        return 0;
+    }
+    memset(j, 0, sizeof(*j));
+    j->run = run;
+    j->ctx = ctx;
+    j->host = host_bytes;
+    j->seq = ++s_seq;
+    s_host_bytes += host_bytes;
+    s_stats.work_submitted++;
+    if (s_sync) {
+        /* No worker (or a test's sync mode): run it here, as a scale is run here. */
+        j->state = JOB_RUNNING;
+        run(ctx);
+        j->state = JOB_DONE;
+        s_stats.work_done++;
+    } else {
+        j->state = JOB_QUEUED;
+        SDL_SignalCondition(s_work_cv);
+    }
+    SDL_UnlockMutex(s_mx);
+    return 1;
+}
+
+int nk_tex_scale_take_work(NkTexScaleWorkFn run, void **ctx) {
+    *ctx = NULL;
+    if (!s_started || !run) return 0;
+    SDL_LockMutex(s_mx);
+    Job *j = NULL;
+    for (int i = 0; i < NK_TEX_SCALE_QUEUE; i++)
+        if (s_jobs[i].state == JOB_DONE && s_jobs[i].run == run && (!j || s_jobs[i].seq < j->seq)) j = &s_jobs[i];
+    if (j) {
+        *ctx = j->ctx;
+        s_host_bytes = j->host > s_host_bytes ? 0 : s_host_bytes - j->host;
+        memset(j, 0, sizeof(*j));   /* JOB_FREE */
+    }
+    SDL_UnlockMutex(s_mx);
+    return j != NULL;
+}
+
+int nk_tex_scale_work_pending(NkTexScaleWorkFn run) {
+    if (!s_started) return 0;
+    SDL_LockMutex(s_mx);
+    int n = 0;
+    for (int i = 0; i < NK_TEX_SCALE_QUEUE; i++)
+        if (s_jobs[i].run && s_jobs[i].run == run && (s_jobs[i].state == JOB_QUEUED || s_jobs[i].state == JOB_RUNNING)) n++;
+    SDL_UnlockMutex(s_mx);
+    return n;
 }
 
 int nk_tex_scale_take(NkTexScaleResult *out) {
@@ -396,10 +487,10 @@ int nk_tex_scale_take(NkTexScaleResult *out) {
     if (!s_started) return 0;
     SDL_LockMutex(s_mx);
     for (;;) {
-        Job *j = oldest(JOB_DONE);
+        Job *j = oldest_of(JOB_DONE, 1);
         if (!j) break;
         j->state = JOB_FREE;
-        const uint64_t host = job_host_bytes(j->w, j->h, j->factor);
+        const uint64_t host = j->host;
         s_host_bytes = host > s_host_bytes ? 0 : s_host_bytes - host;
         if (j->failed || !j->dst) {
             s_stats.discarded++;
@@ -451,6 +542,12 @@ void nk_tex_scale_shutdown(void) {
         if (s_threads[i]) SDL_WaitThread(s_threads[i], NULL);
         s_threads[i] = NULL;
     }
+    /* A work job's context is its owner's, which takes every one before this (the texture dump
+     * does); one left here is said, never dropped in silence. */
+    int untaken = 0;
+    for (int i = 0; i < NK_TEX_SCALE_QUEUE; i++)
+        if (s_jobs[i].run && s_jobs[i].state != JOB_FREE) untaken++;
+    if (untaken) fprintf(stderr, "TEX_SCALE: shutdown with %d work jobs not taken by their owner\n", untaken);
     for (int i = 0; i < NK_TEX_SCALE_QUEUE; i++) {
         free(s_jobs[i].src);
         free(s_jobs[i].dst);

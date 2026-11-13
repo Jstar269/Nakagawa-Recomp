@@ -1369,7 +1369,11 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   on the Vulkan renderer, the pause menu's **Settings > Dump textures** (`gegpu_texdump_start`, started from
   `gui.c`) writes every texture the game draws from then on, each level once, as an RGBA PNG named the way the
   folder's pack names it (`nk_texrepl_file_key`), `<16 hex cache key><8 hex hash>.png` and `..._<level>.png` for mip
-  levels, into `<user data>/texdump/<disc ID>` (`sr_texdump_folder`: one folder a disc ID, never shared). A texture
+  levels, into `<user data>/texdump/<disc ID>` (`sr_texdump_folder`: one folder a disc ID, never shared). Before
+  anything is made or written there, the folder is checked as a texture pack folder is (`sr_texdump_folder_problem`):
+  strict UTF-8, a full path on this host (`nk_platform_path_is_absolute`), shorter than 512 bytes (the length a pack
+  folder may have, so the folder can be chosen as the pack as it is), and no Windows device or extended namespace
+  (`\\.\`, `\\?\`); a refusal says which, without naming the path. A texture
   already in the cache is written the next time it is drawn. A folder without a `textures.ini` gets one first
   (`hash = quick`, and a `[games]` line for the run's `SR_DISC_ID`, so the player knows whose pack it is; the reader
   takes a line that names `textures.ini` itself as the game list, not as an override), and the folder is then read as
@@ -1377,9 +1381,9 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   tool the player likes, is a pack that lists what was dumped; a `textures.ini` the player edited (another hash,
   ranges, `ignoreAddress`, which drops the address from each name) names the files of later dumps too, and one that
   does not read refuses the dump with its reason. Skipped and counted: render targets sampled as textures and movie
-  pictures (the spans `sceMpegAvcDecode`, `sceMpegAvcCsc` and `sceMpegBaseCscAvc` wrote in the last 120 VBLANKs,
-  `sr_video_frame_note`), which are frames, not loaded textures; textures with no pack identity (no power-of-two
-  size, or a source the renderer cannot read directly); and a content hash of 0 (the name a pack gives every content
+  pictures (the spans `sceMpegAvcDecode`, `sceMpegAvcCsc`, `sceMpegBaseCscAvc` and the PSMF player's video output
+  wrote in the last 120 VBLANKs, `sr_video_frame_note`), which are frames, not loaded textures; textures with no
+  pack identity (no power-of-two size, or a source the renderer cannot read directly); and a content hash of 0 (the name a pack gives every content
   at an address). An address whose content is new in 30 presents in a row (at most 4 presents apart) is an animation
   or a movie drawn as a texture: it is no longer dumped, with one `TEX_DUMP: note:` line, and the row counts it,
   until its content has held still for 300 presents (a font cache that has finished typing, a streaming slot that
@@ -1387,15 +1391,25 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   again once that no longer holds, so a texture the game loads where a movie played is not lost. A file already in
   the folder is never written again or replaced:
   each PNG (compressed with fixed-Huffman deflate, `sr_png_encode_rgba`) is written to a temporary file and moved
-  into place only while no file has the name (`sr_file_publish_new`, `nk_rename_noreplace_utf8`), so an image the
-  player enlarges in place is kept even when it is saved during the dump. Every file call is the platform layer's
+  into place only while no file has the name (`sr_file_publish_new_tagged`, `nk_rename_noreplace_utf8`), so an image
+  the player enlarges in place is kept even when it is saved during the dump. Every file call is the platform layer's
   wide-path one, so a user data folder under a user name that is not ASCII works. Nothing the guest can observe
-  changes: each texture is decoded from guest memory into a buffer of its own and written to disk, never to guest
-  memory; files are written only inside the folder, on the renderer thread (a frame that meets many new textures
-  takes longer while the dump is on). Three things stop the whole dump, each with `TEX_DUMP: stopped (<reason>)`
-  and `Stopped: <reason>` on the row: `SR_TEX_DUMP_BUDGET_MB` (1 to 65536, default 4096), the bytes a run writes
-  (the file that would pass it is not written); `SR_TEX_DUMP_MAX_FILES` (1 to 1000000, default 20000), the files
-  a run writes; and the first file that cannot be written, a full disk included. The budget and the file limit are
+  changes: each texture is decoded from guest memory, on the guest thread, into a buffer of its own, and written to
+  disk, never to guest memory; files are written only inside the folder. The encode and the write run on the
+  texture scaler's two worker threads as work jobs (`tex_scale.h`, `nk_tex_scale_submit_work`), so the guest thread
+  never waits for either; a finished file is counted when the guest thread takes it back (at the next texture it
+  looks at, the next present, or when the row is read). A level is handed over only when the workers' queue (its
+  64 slots and 128 MiB of host memory, shared with scaling) has room; when it has none, the level is not dropped: it
+  is counted (`queue_full=`), said once a stretch in a `TEX_DUMP: note:` line, and the texture is looked at again
+  on its next draw. A file being written is not handed over twice. When no worker thread could start, the jobs run
+  on the guest thread, as scaling does then. Three things stop the whole dump, each with `TEX_DUMP: stopped
+  (<reason>)` and `Stopped: <reason>` on the row: `SR_TEX_DUMP_BUDGET_MB` (1 to 65536, default 4096), the bytes a
+  run writes; `SR_TEX_DUMP_MAX_FILES` (1 to 1000000, default 20000), the files a run writes; and the first file that
+  cannot be written, a full disk included. A file still being written holds its largest possible size
+  (`sr_png_encode_bound`, 63 + (9 R + 17) / 8 bytes for R raw bytes) of the budget and a place under the file
+  limit until it is taken back, so neither is ever passed: a level that does not fit waits for its next draw while
+  any file is being written, and stops the dump, unwritten, when none is. Files already handed over when a write
+  fails still land or fail on their own, and are counted. The budget and the file limit are
   the run's, so the dump stays stopped when it is turned on again; after a failed write, turning it on again tries
   again. Each variable takes a whole decimal number in its range and nothing else. While on, the row says how many
   files the run has saved. The switch is the run's alone, off at every start unless `SR_TEX_DUMP=1`, and never
@@ -1403,7 +1417,8 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   what the game shows before the first pause and a script can take one unattended. Stamps:
   `TEX_DUMP: on (hash=, budget_mb=, max_files=; ...)` when started, `TEX_DUMP: refused (<reason>)` (the row shows
   the reason too; a reason that names the folder names only its last component, never a full path), and
-  `TEX_DUMP: off` and, at exit, `TEX_DUMP: exit (written=, already_there=, skipped=, changing=, failed=, mb=)`.
+  `TEX_DUMP: off` and, at exit, `TEX_DUMP: exit (written=, already_there=, skipped=, changing=, failed=,
+  queue_full=, writing=, mb=)`; the run waits at exit for every file handed to the workers, so `writing=` is 0 there.
   The project ships no texture and no upscaler: the images are the game's copyrighted images, from the player's own
   copy of the game, and stay on their PC.
 - **Tests.** `texrepl-selftest` checks the hashes against values taken from PPSSPP's own code and published xxHash
@@ -1488,11 +1503,21 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   cache key and the quick hash), the folder read back as a pack giving the textures' own pixels with no `[games]`
   note, no file written twice and a player's file left as it is, a movie picture skipped, the budget, the file limit
   and a failed write each stopping the dump with the reason on the row, an animated texture cut off after its run
-  while another address goes on, both variables' parsing, and refusals that name no full path. Its `dump-xxh`,
-  `dump-pal` and `dump-mip` cells check names under xxh32 and xxh64 with `ignoreAddress`, a CLUT8 texture under
-  PPSSPP's name with its palette's colours, and each mip level at its size. `fbcap-selftest` checks the folder name,
-  the PNG encoder against the project's own inflater (`nk_psp_inflate.c`), and the no-replace publish and a
-  screenshot into a non-ASCII folder; `test_overlay_screens` checks the row.
+  while another address goes on, both variables' parsing, refusals that name no full path, and a relative folder and
+  one that is not UTF-8 refused. Its `dump-xxh`, `dump-pal` and `dump-mip` cells check names under xxh32 and xxh64
+  with `ignoreAddress`, a CLUT8 texture under PPSSPP's name with its palette's colours, and each mip level at its
+  size. Its `dump-async` cell holds the workers: a texture the dump writes is handed to them and the draw returns
+  with no file written (a dump that encoded or wrote on the guest thread fails there), drawn again it is not handed
+  over twice; with the queue's other slots taken, the next texture is refused, counted and said, and looked at again
+  on each draw; once the workers run, the first file lands and is counted when taken back, and the refused texture
+  is written on its next draw. `tex-scale-selftest` checks the work jobs themselves: each runs once, on a worker
+  thread, never the submitter's; held jobs stay queued with nobody waiting; the 64 slots and the host-memory cap
+  refuse the next job; scale and work results are taken apart; a sync submit runs before it returns.
+  `fbcap-selftest` checks the folder name, the folder check (ill-formed UTF-8 of each kind, a relative and, on
+  Windows, a drive-relative path, 511 bytes taken and 512 refused, device and extended paths), the PNG encoder
+  against the project's own inflater (`nk_psp_inflate.c`) and within `sr_png_encode_bound` (noise of 9-bit literals
+  included), and the no-replace publish, tagged and untagged, and a screenshot into a non-ASCII folder;
+  `test_overlay_screens` checks the row.
 
 ### 10.13. Sharp Game Text
 

@@ -207,6 +207,14 @@ int sr_picture_watch_collect(SrPictureWatch *w, int block, uint32_t *brightest);
  * with *out NULL when the arguments are invalid (w * 4 * h above UINT32_MAX, or an image past a
  * PNG chunk's 2^31 - 1 bytes, included) or memory runs out. */
 int sr_png_encode_rgba(const uint32_t *rgba, uint32_t w, uint32_t h, uint8_t **out, size_t *out_len);
+/* The most bytes sr_png_encode_rgba can produce for a w x h image: the PNG's fixed 63 bytes
+ * (signature, IHDR, the IDAT's length, type and CRC, the zlib header and Adler-32, IEND) and the
+ * deflate stream, which spends at most 9 bits on each of the R = h * (1 + 4 * w) raw bytes (a
+ * fixed-Huffman literal from 144 up takes 9; a match of L >= 3 bytes takes at most 25 bits for
+ * L = 3 and less per byte for longer ones) plus 3 header bits and the 7-bit end code, rounded up
+ * to whole bytes: 63 + (9 R + 17) / 8. 0 when the encoder would refuse the size. The texture dump
+ * reserves this much of its budget for a file that is still being encoded. */
+uint64_t sr_png_encode_bound(uint32_t w, uint32_t h);
 
 /* What sr_file_publish_new did. */
 enum {
@@ -219,8 +227,25 @@ enum {
  * the file and an existing file (a player's own edited image) is never replaced, even one that
  * appears while the temp file is written. The temp sibling ("<path>.tmp<process id>.<n>") is
  * created exclusively, so nothing already at that name (another run's temp file, a link) is
- * written through. Every file call is the platform layer's wide-path one. */
+ * written through. Every file call is the platform layer's wide-path one. Its temp names come from
+ * a counter of this file's, so it is called from one thread (the guest thread: screenshots, the
+ * dump's textures.ini). */
 int sr_file_publish_new(const char *path, const void *data, size_t len);
+/* sr_file_publish_new for callers on several threads at once (the texture dump's workers): the
+ * temp names are "<path>.tmp<process id>.t<tag>.<n>", from `tag`, which the caller keeps unique
+ * among the publishes that can overlap, and no state here is shared. */
+int sr_file_publish_new_tagged(const char *path, const void *data, size_t len, unsigned long tag);
+
+/* The texture dump folder's path must be shorter than this, the length a texture pack folder may
+ * have (PlayerTitlePack.path), so the folder can be chosen as the game's pack as it is. */
+#define SR_TEXDUMP_DIR_MAX 512u
+/* Why `dir` cannot be the texture dump's folder, or NULL when it can. Checked as the texture pack
+ * folder is (player_state.c): not empty, strict UTF-8 (no overlong form, surrogate or code point
+ * past U+10FFFF, since every file call converts it to the platform's wide form), a full path on
+ * this host (nk_platform_path_is_absolute), shorter than SR_TEXDUMP_DIR_MAX bytes, and not in a
+ * Windows device or extended namespace ("\\.\", "\\?\" or their '/' spellings, which
+ * sr_texdump_folder never makes). The text alone: nothing is looked up. */
+const char *sr_texdump_folder_problem(const char *dir);
 
 #ifdef __cplusplus
 }

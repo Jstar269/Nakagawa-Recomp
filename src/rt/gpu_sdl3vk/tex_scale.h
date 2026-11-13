@@ -13,7 +13,9 @@
  *
  * Off is authentic: both features take effect only in an Ace Mode run (g_ace_on, ace.h), whose
  * launch line the launcher always sets, so an authentic run can never turn them on. With them
- * off no thread starts and nothing is allocated.
+ * off no thread starts and nothing is allocated, unless the texture dump (an Enhanced or Ace run
+ * too) hands the workers its own work jobs (below), which read only the host copies they are
+ * given and write only the dump's files.
  *
  * Settings, read once when the renderer starts (nk_tex_scale_init_from_env):
  *   SR_TEX_SCALE      off | 2 | 3 | 4 | 5 | 6   xBRZ factor; unset is off
@@ -109,10 +111,32 @@ typedef struct NkTexScaleResult {
     uint32_t *rgba;        /* R in the low byte; owned by the result */
 } NkTexScaleResult;
 
-/* Take one finished job, oldest first. Returns 1 and fills `out` (release it with
- * nk_tex_scale_release), or 0 when none is finished. Never waits. */
+/* Take one finished scale job, oldest first. Returns 1 and fills `out` (release it with
+ * nk_tex_scale_release), or 0 when none is finished. Never waits, and never returns a work job. */
 int nk_tex_scale_take(NkTexScaleResult *out);
 void nk_tex_scale_release(NkTexScaleResult *res);
+
+/* ---- work jobs: other host work on the same workers ---------------------------------------
+ * The texture dump (ge_gpu.c) encodes and writes its files here, off the guest thread. A work job
+ * shares the scale jobs' NK_TEX_SCALE_QUEUE slots and NK_TEX_SCALE_HOST_MB cap: `host_bytes` is
+ * what it holds until taken. `run(ctx)` is called once, on a worker thread (with sync on, or when
+ * no worker could start, on the submitting thread before submit returns); the job is then done
+ * and waits for nk_tex_scale_take_work. `ctx` stays the caller's: nothing here reads or frees it,
+ * and the caller must not touch it between a submit that returned 1 and the take that returns it.
+ * Submit returns 1 when queued, 0 when the queue or the cap has no room (counted in
+ * work_refused; the caller keeps `ctx`). Nothing waits: with hold on, a work job stays queued like
+ * a scale. The owner takes every work job before nk_tex_scale_shutdown, which says so on stderr
+ * when one is left. */
+typedef void (*NkTexScaleWorkFn)(void *ctx);
+int nk_tex_scale_submit_work(NkTexScaleWorkFn run, void *ctx, uint64_t host_bytes);
+/* Whether a work job holding `host_bytes` would be accepted now; the same test submit makes, so a
+ * single submitting thread told there is room is never refused. */
+int nk_tex_scale_can_submit_work(uint64_t host_bytes);
+/* Take one finished work job of `run`'s, oldest first: 1 and *ctx, or 0 when none is finished.
+ * Never waits; a job of another function is left for its own owner. */
+int nk_tex_scale_take_work(NkTexScaleWorkFn run, void **ctx);
+/* `run`'s work jobs queued or running (not finished yet). */
+int nk_tex_scale_work_pending(NkTexScaleWorkFn run);
 
 /* Tests and capture runs: with sync on, nk_tex_scale_submit scales on the calling thread
  * and the result is ready before it returns; with hold on, workers start no new job (a
@@ -126,6 +150,7 @@ void nk_tex_scale_shutdown(void);
 
 typedef struct NkTexScaleStats {
     uint64_t submitted, scaled, refused_full, taken, discarded;
+    uint64_t work_submitted, work_done, work_refused;   /* work jobs */
     uint64_t scale_ns;          /* worker time spent scaling */
     uint64_t budget_used, budget_peak;
 } NkTexScaleStats;

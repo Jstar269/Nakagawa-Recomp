@@ -5353,12 +5353,25 @@ static void tex_repl_shutdown(void) {
  * disk. Skipped and counted: render targets sampled as textures and movie pictures
  * (sr_video_frame_recent), which are frames, not loaded textures, and textures with no pack
  * identity. Files are compressed PNGs (sr_png_encode_rgba) published without ever replacing a
- * file (sr_file_publish_new), so an image the player is enlarging in place is kept. Files are
- * written on the render thread, so a frame that meets many new textures takes longer while the
- * dump is on. Bounds, each saying so in the log and on the row when it stops the dump:
+ * file (sr_file_publish_new_tagged), so an image the player is enlarging in place is kept.
+ *
+ * Threads: the guest thread decides (skips, names, bounds) and decodes each level from guest
+ * memory into a host buffer of the job's own; the encode and the write run on the texture
+ * scaler's workers as work jobs (tex_scale.h, nk_tex_scale_submit_work), so the guest thread never
+ * waits for either. Their results are taken back on the guest thread (tex_dump_collect: at each
+ * look, at each present, and when the row is read) and only then counted. A job reads only its
+ * own buffer and path and writes only its own file. A level is offered to the workers only when
+ * nk_tex_scale_can_submit_work says the queue has room; when it has none the level is not
+ * dropped: it is counted (queue_full), said once a stretch, and the texture is looked at again
+ * on its next draw. A file that is being written is not offered twice.
+ *
+ * Bounds, each saying so in the log and on the row when it stops the dump:
  * SR_TEX_DUMP_BUDGET_MB (1 to 65536, default 4096) for the bytes a run writes and
  * SR_TEX_DUMP_MAX_FILES (1 to 1000000, default 20000) for its files; the first file that cannot
- * be written (a full disk included) stops it too. An address whose content is new in
+ * be written (a full disk included) stops it too. A file still being written holds its largest
+ * possible size (sr_png_encode_bound) of the budget, and a place under the file limit, until it is
+ * taken back; a level that does not fit beside those waits for its next draw while any file is
+ * being written, and stops the dump when none is. An address whose content is new in
  * TEX_DUMP_CHURN_RUN presents in a row (a gap of at most TEX_DUMP_CHURN_GAP presents between
  * them) is a movie or an animation drawn as a texture: it is no longer dumped, with one note,
  * while every other address goes on, until its content has held still for TEX_DUMP_CHURN_QUIET
@@ -5393,16 +5406,34 @@ typedef struct {
     int used, off;
 } TexDumpChurn;
 
+/* One level handed to the workers: the guest thread fills it, a worker encodes and writes it
+ * (tex_dump_job_run), and the guest thread takes the result back (tex_dump_collect). */
+typedef struct TexDumpJob {
+    uint32_t *rgba;                /* lw x lh, R in the low byte; freed by the worker */
+    uint32_t w, h;
+    uint64_t bound;                /* sr_png_encode_bound: the budget it holds until taken back */
+    unsigned long tag;             /* unique among the jobs: its temp file names */
+    int put;                       /* SR_PUBLISH_* (SR_PUBLISH_FAILED also when the encode failed) */
+    size_t len;                    /* the PNG's bytes */
+    char path[SR_TEXDUMP_DIR_MAX + 64u];
+} TexDumpJob;
+
 typedef struct {
     NkTexRepl *names;              /* the folder read as a pack: its hash kind and ranges name files */
-    char dir[768];
+    char dir[SR_TEXDUMP_DIR_MAX];
     uint64_t serial;               /* new on every start */
     uint64_t budget, written_bytes;
+    uint64_t reserved;             /* the bound of every file still being written */
     unsigned long long max_files;
     unsigned long long written, present, failed, skipped, changing, starts;
+    unsigned long long queue_full; /* levels the workers' queue had no room for (looked at again) */
     unsigned long long churn_addrs;   /* addresses no longer dumped in this stretch */
     int on;
+    int queue_noted;               /* the queue_full note was said in this stretch */
     TexDumpStop stop;
+    unsigned long tag;             /* the last job's tag */
+    unsigned inflight;             /* jobs in flight[] */
+    TexDumpJob *flight[NK_TEX_SCALE_QUEUE];
     TexDumpChurn churn[TEX_DUMP_CHURN_SLOTS];
 } TexDump;
 static TexDump s_dump;
@@ -5413,7 +5444,8 @@ static uint32_t *s_dumpscratch;
 
 static void tex_dump_line(const char *what) {
     fprintf(stderr, "TEX_DUMP: %s (written=%llu, already_there=%llu, skipped=%llu, changing=%llu, failed=%llu, "
-            "mb=%llu)\n", what, s_dump.written, s_dump.present, s_dump.skipped, s_dump.changing, s_dump.failed,
+            "queue_full=%llu, writing=%u, mb=%llu)\n", what, s_dump.written, s_dump.present, s_dump.skipped,
+            s_dump.changing, s_dump.failed, s_dump.queue_full, s_dump.inflight,
             (unsigned long long)(s_dump.written_bytes >> 20));
 }
 
@@ -5422,6 +5454,56 @@ static void tex_dump_halt(TexDumpStop why) {
     char line[160];
     snprintf(line, sizeof(line), "stopped (%s%s)", s_dump_stop_why[why], s_dump_stop_knob[why]);
     tex_dump_line(line);
+}
+
+/* A worker: encode one level and publish it, never over a file that is there. Touches only `ctx`. */
+static void tex_dump_job_run(void *ctx) {
+    TexDumpJob *j = (TexDumpJob *)ctx;
+    uint8_t *png = NULL;
+    size_t len = 0;
+    j->put = SR_PUBLISH_FAILED;
+    j->len = 0;
+    if (sr_png_encode_rgba(j->rgba, j->w, j->h, &png, &len) && len <= j->bound) {
+        j->len = len;
+        j->put = sr_file_publish_new_tagged(j->path, png, len, j->tag);
+    }
+    free(png);
+    free(j->rgba);
+    j->rgba = NULL;
+}
+
+/* Take back every job the workers have finished, on the guest thread, and count it: a file
+ * written, one that was there already (kept as it is), or a failure, which stops the dump. */
+static void tex_dump_collect(void) {
+    void *ctx;
+    while (s_dump.inflight && nk_tex_scale_take_work(tex_dump_job_run, &ctx)) {
+        TexDumpJob *j = (TexDumpJob *)ctx;
+        for (unsigned i = 0; i < s_dump.inflight; i++) {
+            if (s_dump.flight[i] != j) continue;
+            s_dump.flight[i] = s_dump.flight[--s_dump.inflight];
+            s_dump.flight[s_dump.inflight] = NULL;
+            break;
+        }
+        s_dump.reserved = j->bound > s_dump.reserved ? 0u : s_dump.reserved - j->bound;
+        if (j->put == SR_PUBLISH_WRITTEN) {
+            s_dump.written++;
+            s_dump.written_bytes += j->len;
+        } else if (j->put == SR_PUBLISH_EXISTS) {
+            s_dump.present++;   /* made by someone else since the check: kept as it is */
+        } else {
+            s_dump.failed++;
+            if (s_dump.stop == TEX_DUMP_GOING) tex_dump_halt(TEX_DUMP_STOP_WRITE);
+        }
+        free(j->rgba);
+        free(j);
+    }
+}
+
+/* Whether a file at `path` is being written now. */
+static int tex_dump_in_flight(const char *path) {
+    for (unsigned i = 0; i < s_dump.inflight; i++)
+        if (strcmp(s_dump.flight[i]->path, path) == 0) return 1;
+    return 0;
 }
 
 /* A whole decimal number lo..hi from environment variable `name` into *out; unset or empty gives
@@ -5475,8 +5557,11 @@ int gegpu_texdump_start(const char *dir, char *err, size_t err_cap) {
         snprintf(err, err_cap, "a texture dump needs Enhanced or Ace and the Vulkan renderer");
         return 0;
     }
-    if (!dir || !dir[0] || strlen(dir) >= sizeof(s_dump.dir)) {
-        snprintf(err, err_cap, "no dump folder could be named");
+    /* Checked as a texture pack folder is: strict UTF-8, a full path, shorter than a pack folder
+       may be, and no device path. The reason names no part of the path. */
+    const char *problem = sr_texdump_folder_problem(dir);
+    if (problem) {
+        snprintf(err, err_cap, "%s", problem);
         return 0;
     }
     unsigned long long mb = 0, files = 0;
@@ -5543,6 +5628,7 @@ int gegpu_texdump_start(const char *dir, char *err, size_t err_cap) {
     s_dump.serial++;
     s_dump.starts++;
     s_dump.churn_addrs = 0;
+    s_dump.queue_noted = 0;
     memset(s_dump.churn, 0, sizeof(s_dump.churn));
     if (s_dump.stop == TEX_DUMP_STOP_WRITE) s_dump.stop = TEX_DUMP_GOING;   /* the budget and file limit stay spent */
     s_dump.on = 1;
@@ -5554,6 +5640,7 @@ int gegpu_texdump_start(const char *dir, char *err, size_t err_cap) {
 }
 
 void gegpu_texdump_stop(void) {
+    tex_dump_collect();   /* what is finished is counted in the line; the rest still lands, counted later */
     if (!s_dump.on) return;
     s_dump.on = 0;
     nk_texrepl_close(s_dump.names);
@@ -5578,6 +5665,7 @@ static unsigned long long tex_dump_churn_live(void) {
 }
 
 void gegpu_texdump_status(unsigned long long *saved, unsigned long long *changing, const char **stopped) {
+    tex_dump_collect();
     if (saved) *saved = s_dump.written;
     if (changing) *changing = s_dump.on ? tex_dump_churn_live() : 0u;
     if (stopped) *stopped = s_dump.on && s_dump.stop ? s_dump_stop_why[s_dump.stop] : NULL;
@@ -5654,6 +5742,7 @@ static int tex_dump_churning(uint32_t addr) {
  * write each of its `levels` levels that the folder does not hold yet. */
 static void tex_dump_note(TexEnt *e, uint32_t levels) {
     if (!s_dump.on) return;
+    tex_dump_collect();
     const int relook = e->dump_serial == s_dump.serial && e->dump_hash == e->hash;   /* counted once already */
     if (relook) {
         /* Looked at in this stretch. A skip for a reason that ends lasts only while it holds, so a
@@ -5693,6 +5782,43 @@ static void tex_dump_note(TexEnt *e, uint32_t levels) {
             return;
         }
         if (nk_platform_file_exists(path)) { s_dump.present++; continue; }
+        if (tex_dump_in_flight(path)) continue;   /* being written: counted when taken back */
+        int lw = e->w >> level, lh = e->h >> level;
+        if (lw < 1) lw = 1;
+        if (lh < 1) lh = 1;
+        const uint64_t bound = sr_png_encode_bound((uint32_t)lw, (uint32_t)lh);
+        const uint64_t texels = (uint64_t)lw * (uint64_t)lh;
+        if (!bound || texels > TEX_DUMP_SCRATCH_TEXELS) {
+            s_dump.failed++;
+            tex_dump_halt(TEX_DUMP_STOP_WRITE);
+            return;
+        }
+        /* The file limit and the budget count the files still being written at their largest.
+         * While one is, a level that does not fit waits for its next draw (they may come in
+         * smaller); with none, the limit is reached and the dump stops. */
+        if (s_dump.written + s_dump.inflight >= s_dump.max_files) {
+            if (s_dump.inflight) { e->dump_retry = 1u; return; }
+            tex_dump_halt(TEX_DUMP_STOP_COUNT);
+            return;
+        }
+        if (s_dump.written_bytes + s_dump.reserved + bound > s_dump.budget) {
+            if (s_dump.inflight) { e->dump_retry = 1u; return; }
+            tex_dump_halt(TEX_DUMP_STOP_BUDGET);
+            return;
+        }
+        /* Room on the workers' queue, asked before anything is changed, so a level that finds
+         * none is not lost and does not count toward its address's run of new contents. */
+        const uint64_t host = texels * 4u + bound + sizeof(TexDumpJob);
+        if (s_dump.inflight >= NK_TEX_SCALE_QUEUE || !nk_tex_scale_can_submit_work(host)) {
+            s_dump.queue_full++;
+            e->dump_retry = 1u;   /* looked at again on its next draw */
+            if (!s_dump.queue_noted) {
+                s_dump.queue_noted = 1;
+                fprintf(stderr, "TEX_DUMP: note: the workers' queue is full; a texture that finds it full is "
+                                "written on a later draw (queue_full= counts each such level)\n");
+            }
+            return;
+        }
         if (!churn_checked) {
             churn_checked = 1;
             if (tex_dump_churning(id.addr)) {
@@ -5701,43 +5827,58 @@ static void tex_dump_note(TexEnt *e, uint32_t levels) {
                 return;
             }
         }
-        if (s_dump.written >= s_dump.max_files) {
-            tex_dump_halt(TEX_DUMP_STOP_COUNT);
+        TexDumpJob *job = (TexDumpJob *)calloc(1, sizeof(*job));
+        uint32_t *px = (uint32_t *)malloc((size_t)texels * sizeof(uint32_t));
+        if (!job || !px) {
+            free(job);
+            free(px);
+            s_dump.failed++;
+            tex_dump_halt(TEX_DUMP_STOP_WRITE);
             return;
         }
-        int lw = e->w >> level, lh = e->h >> level;
-        if (lw < 1) lw = 1;
-        if (lh < 1) lh = 1;
+        /* Decoded here, on the guest thread, from guest memory as it is now; the job holds its
+         * own copy, so nothing a worker reads is guest memory or shared. */
         if (level == 0u) ge_decode_tex_rgba(s_dumpscratch);
         else ge_decode_tex_level_rgba(level, s_dumpscratch);
-        uint8_t *png = NULL;
-        size_t len = 0;
-        if (!sr_png_encode_rgba(s_dumpscratch, (uint32_t)lw, (uint32_t)lh, &png, &len)) {
+        memcpy(px, s_dumpscratch, (size_t)texels * sizeof(uint32_t));
+        job->rgba = px;
+        job->w = (uint32_t)lw;
+        job->h = (uint32_t)lh;
+        job->bound = bound;
+        job->tag = ++s_dump.tag;
+        if ((size_t)n >= sizeof(job->path)) {   /* the folder is under SR_TEXDUMP_DIR_MAX: not expected */
+            free(job);
+            free(px);
             s_dump.failed++;
             tex_dump_halt(TEX_DUMP_STOP_WRITE);
             return;
         }
-        if (s_dump.written_bytes + len > s_dump.budget) {
-            free(png);
-            tex_dump_halt(TEX_DUMP_STOP_BUDGET);
+        memcpy(job->path, path, (size_t)n + 1u);
+        s_dump.flight[s_dump.inflight++] = job;
+        s_dump.reserved += bound;
+        if (!nk_tex_scale_submit_work(tex_dump_job_run, job, host)) {
+            /* can_submit said there was room and only this thread submits: not expected, but
+             * never silent. The level is looked at again on its next draw. */
+            s_dump.flight[--s_dump.inflight] = NULL;
+            s_dump.reserved -= bound;
+            free(px);
+            free(job);
+            s_dump.queue_full++;
+            e->dump_retry = 1u;
             return;
         }
-        const int put = sr_file_publish_new(path, png, len);
-        free(png);
-        if (put == SR_PUBLISH_WRITTEN) {
-            s_dump.written++;
-            s_dump.written_bytes += len;
-        } else if (put == SR_PUBLISH_EXISTS) {
-            s_dump.present++;   /* made by someone else since the check: kept as it is */
-        } else {
-            s_dump.failed++;
-            tex_dump_halt(TEX_DUMP_STOP_WRITE);
-            return;
-        }
+        tex_dump_collect();   /* with sync on (or no worker), the job has run already */
     }
 }
 
 static void tex_dump_shutdown(void) {
+    /* Every file handed to the workers lands (or fails) and is counted before the exit line: a
+     * test's hold is let go, and the guest thread waits here only because the run is ending. */
+    if (s_dump.inflight) {
+        nk_tex_scale_set_hold(0);
+        nk_tex_scale_wait_idle();
+        tex_dump_collect();
+    }
     gegpu_texdump_stop();
     if (s_dump.starts) tex_dump_line("exit");
     memset(&s_dump, 0, sizeof(s_dump));
@@ -8695,6 +8836,7 @@ int gegpu_present(uint32_t fbaddr, int fmt, uint32_t stride) {
     }
     if (!s_ready) return GEGPU_PRESENT_NOT_RESIDENT;
     readback_poll();
+    tex_dump_collect();   /* the texture dump's finished files, counted (no wait; nothing when none is out) */
     /* Fill keeps a canvas for each of the last two display buffers (no effect while it is off). */
     ge_wide_note_display(fbaddr);
     /* Display buffers in main RAM (movie frames, CPU-composed screens) are never
@@ -9572,6 +9714,7 @@ void gegpu_shutdown(void) {
         nk_tex_scale_report();
         s_xs_factor = s_xs_smart2d = 0;
     }
+    nk_tex_scale_shutdown();   /* the workers a texture dump alone started (a no-op once stopped above) */
     for (int i = 0; i < s_pipe_n; i++)
         if (s_pipes[i].pipe) vkDestroyPipeline(s_dev, s_pipes[i].pipe, NULL);
     s_pipe_n = 0;

@@ -314,9 +314,12 @@ void gegpu_wide_counts(unsigned long *drawn, unsigned long *dropped);
 /* The texture dump (#1880; ge_gpu.c, "Texture dump"): the pause menu's Settings > Dump textures.
  * gegpu_texdump_start writes every texture drawn from then on, each level once, as a PNG named the
  * way a pack names it into `dir` (made when missing; a textures.ini is written when it has none),
- * in an Enhanced or Ace run only. Returns 1 (also when already on), or 0 with `err` filled.
+ * in an Enhanced or Ace run only; `dir` must pass sr_texdump_folder_problem (fbcap.h). The encode
+ * and the write run on the texture scaler's workers; a file counts once taken back on the guest
+ * thread. Returns 1 (also when already on), or 0 with `err` filled.
  * gegpu_texdump_row is the menu's row: 0 none (an authentic run, or the renderer is not running),
- * 1 off, 2 on. gegpu_texdump_status fills what the row says: the files this run has written,
+ * 1 off, 2 on. gegpu_texdump_status (which first takes back finished files) fills what the row
+ * says: the files this run has written,
  * how many addresses that change every frame this stretch no longer dumps (0 while off), and,
  * while on but stopped (the run's budget or file limit, or a write that failed), why (else NULL).
  * A refusal names the dump folder by its last component only, never the full path. */

@@ -87,7 +87,7 @@ int sr_texdump_folder(const char *user_root, const char *disc_id, char *out, siz
     if (!out || outsz == 0u) return 0;
     out[0] = '\0';
     if (!user_root || !user_root[0]) return 0;
-    /* The runtime holds SR_USER_DATA_ROOT in Windows' extended form (\\?\C:\..., or
+    /* The runtime holds SR_USER_DATA_ROOT in Windows' extended form (\\?\ and a drive, or
        \\?\UNC\server\share\...), where '/' is not a separator. The dump writes through paths
        joined with '/', as the pack reader reads them, so the folder takes the root's plain form. */
     const char *unc = "";

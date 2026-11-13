@@ -16,7 +16,10 @@
 //   - the texture dump's PNG encoder (fixed-Huffman deflate) inflates, through the project's
 //     own inflater (nk_psp_inflate.c), to exactly the image, and shrinks a flat one;
 //   - sr_file_publish_new never replaces a file that is already there, leaves no temp file,
-//     and, like a capture, writes into a folder whose name is not ASCII.
+//     and, like a capture, writes into a folder whose name is not ASCII; its tagged form (the
+//     dump's workers) does the same with the caller's temp names;
+//   - sr_png_encode_bound is never passed, and the dump folder check refuses what a texture pack
+//     folder check refuses (ill-formed UTF-8, a relative path, 512 bytes or more, a device path).
 // No game data, no GPU, no window: exit 0 = every check passed.
 
 #ifndef _POSIX_C_SOURCE
@@ -925,6 +928,67 @@ static void test_texdump_folder(void) {
           "dump folder: an extended prefix with no folder is refused");
 }
 
+/* The dump folder is checked as a texture pack folder is before anything is made or written in
+ * it (sr_texdump_folder_problem): strict UTF-8, a full path on this host, shorter than a pack
+ * folder may be, no device namespace; each refusal says why without naming the path. */
+static void test_texdump_folder_problem(void) {
+#ifdef _WIN32
+#define DUMP_ABS "C:/data/texdump/"
+#else
+#define DUMP_ABS "/data/texdump/"
+#endif
+    char out[700];
+    CHECK(sr_texdump_folder_problem(DUMP_ABS "ULUS10000") == NULL, "dump folder check: a full path is taken");
+    CHECK(sr_texdump_folder_problem(DUMP_ABS "\xC3\xA9\xE6\x97\xA5 \xF0\x9F\x8E\xAE") == NULL,
+          "dump folder check: a full path with 2-, 3- and 4-byte UTF-8 is taken");
+    CHECK(sr_texdump_folder_problem(NULL) != NULL && sr_texdump_folder_problem("") != NULL,
+          "dump folder check: no folder is refused");
+    const char *why = sr_texdump_folder_problem("texdump/ULUS10000");
+    CHECK(why && strstr(why, "full path") && !strstr(why, "texdump/"),
+          "dump folder check: a relative path is refused, and the reason names no path");
+#ifdef _WIN32
+    CHECK(sr_texdump_folder_problem("C:texdump") != NULL, "dump folder check: a drive-relative path is refused");
+    CHECK(sr_texdump_folder_problem("\\texdump") != NULL, "dump folder check: a path from the drive's root alone is refused");
+    CHECK(sr_texdump_folder_problem("\\\\srv\\share\\texdump/X") == NULL, "dump folder check: a UNC path is taken");
+#endif
+    static const char *const bad_utf8[] = {
+        DUMP_ABS "\xC0\xAF",           /* overlong '/' */
+        DUMP_ABS "\xE0\x80\xAF",       /* overlong, three bytes */
+        DUMP_ABS "\xED\xA0\x80",       /* a surrogate */
+        DUMP_ABS "\xF4\x90\x80\x80",   /* past U+10FFFF */
+        DUMP_ABS "\xE6\x97",           /* cut */
+        DUMP_ABS "\x80",               /* a lone continuation byte */
+        DUMP_ABS "\xFF",
+    };
+    for (size_t i = 0; i < sizeof bad_utf8 / sizeof bad_utf8[0]; i++) {
+        why = sr_texdump_folder_problem(bad_utf8[i]);
+        CHECK(why && strstr(why, "UTF-8"), "dump folder check: ill-formed UTF-8 is refused as such");
+    }
+    static const char *const devices[] = { "\\\\.\\COM1", "\\\\?\\C:\\data", "//./COM1", "//?/C:/data", "\\\\.\\C:\\data" };
+    for (size_t i = 0; i < sizeof devices / sizeof devices[0]; i++) {
+        why = sr_texdump_folder_problem(devices[i]);
+#ifdef _WIN32
+        CHECK(why && strstr(why, "device"), "dump folder check: a device or extended path is refused");
+#else
+        CHECK(why != NULL, "dump folder check: a device or extended path is refused");
+#endif
+    }
+    /* Length: SR_TEXDUMP_DIR_MAX - 1 bytes is taken, SR_TEXDUMP_DIR_MAX refused. */
+    const size_t base = strlen(DUMP_ABS);
+    memcpy(out, DUMP_ABS, base);
+    memset(out + base, 'a', SR_TEXDUMP_DIR_MAX - 1u - base);
+    out[SR_TEXDUMP_DIR_MAX - 1u] = '\0';
+    CHECK(sr_texdump_folder_problem(out) == NULL, "dump folder check: a path one byte under the limit is taken");
+    out[SR_TEXDUMP_DIR_MAX - 1u] = 'a';
+    out[SR_TEXDUMP_DIR_MAX] = '\0';
+    why = sr_texdump_folder_problem(out);
+    CHECK(why && strstr(why, "512"), "dump folder check: a path at the limit is refused");
+    /* What sr_texdump_folder makes from a full root passes. */
+    CHECK(sr_texdump_folder(DUMP_ABS "u", "ULUS10000", out, sizeof out) == 1 && sr_texdump_folder_problem(out) == NULL,
+          "dump folder check: the folder made from a full root is taken");
+#undef DUMP_ABS
+}
+
 static void test_screenshot_request(void) {
     sr_screenshot_clear();
     CHECK(!sr_screenshot_pending(), "request: none pending at start");
@@ -1042,6 +1106,19 @@ static void test_png_encode(void) {
     /* Transparent texels (bytes equal to the one before: matches one byte back) between noise. */
     for (int i = 0; i < PW * PH; i++) runs[i] = (i / 37) % 2 ? 0u : enc_rand(&seed);
     CHECK(encode_round_trips(runs, PW, PH, &n), "png encode: runs of one byte value inflate exactly");
+    /* sr_png_encode_bound, the budget the texture dump holds for a file still being encoded: never
+     * passed, even near its worst case, noise whose every byte is a 9-bit literal (144 and up), and
+     * within a sixteenth of it there (only the filter bytes and the few chance matches cost less). */
+    for (int i = 0; i < BW * BH; i++) big[i] = enc_rand(&seed) | 0x90909090u;
+    CHECK(encode_round_trips(big, BW, BH, &n) && n <= sr_png_encode_bound(BW, BH) &&
+              sr_png_encode_bound(BW, BH) - n <= sr_png_encode_bound(BW, BH) / 16u,
+          "png encode: 9-bit-literal noise stays within the bound, and the bound is tight there");
+    CHECK(encode_round_trips(flat, FW, FH, &n) && n <= sr_png_encode_bound(FW, FH), "png encode: the bound holds for a flat texture");
+    CHECK(encode_round_trips(noise, NW, NH, &n) && n <= sr_png_encode_bound(NW, NH), "png encode: the bound holds for noise");
+    CHECK(encode_round_trips(&one, 1u, 1u, &n) && n <= sr_png_encode_bound(1u, 1u) && sr_png_encode_bound(1u, 1u) == 70u,
+          "png encode: a 1x1 image's bound is 63 + (9 * 5 + 17) / 8 = 70, and holds");
+    CHECK(sr_png_encode_bound(0u, 4u) == 0u && sr_png_encode_bound(65536u, 65536u) == 0u,
+          "png encode: no bound for a size the encoder refuses");
     uint8_t *out = (uint8_t *)1;
     size_t out_len = 1;
     CHECK(sr_png_encode_rgba(flat, 0u, 4u, &out, &out_len) == 0 && out == NULL && out_len == 0u,
@@ -1121,6 +1198,36 @@ static void test_publish_new_unicode(void) {
         CHECK(intact == 2 * DECOYS, "publish: a file already at a temp name is never written through");
         nk_remove_utf8(second);
     }
+    /* The tagged publish the dump's workers use: its temp names come from the caller's tag, so it
+     * shares no counter between threads; decoys at those names are never written through either,
+     * and a file already there is kept. */
+    {
+        char tagged[800], decoy[900];
+        snprintf(tagged, sizeof tagged, "%s/2222222222222222feedf00d.png", dir);
+        nk_remove_utf8(tagged);
+        enum { DECOYS = 12 };
+        const unsigned long tag = 4242ul;
+        for (int k = 0; k < DECOYS; k++) {
+            snprintf(decoy, sizeof decoy, "%s.tmp%lu.t%lu.%d", tagged, nk_platform_process_id(), tag, k);
+            FILE *d = nk_fopen_utf8(decoy, "wb");
+            if (d) { fputs("decoy", d); fclose(d); }
+        }
+        CHECK(sr_file_publish_new_tagged(tagged, "fourth", 6u, tag) == SR_PUBLISH_WRITTEN &&
+                  read_back(tagged, buf, sizeof buf) == 6 && strcmp(buf, "fourth") == 0,
+              "publish tagged: a file is published past files already at its temp names");
+        CHECK(sr_file_publish_new_tagged(tagged, "fifth!", 6u, tag + 1u) == SR_PUBLISH_EXISTS &&
+                  read_back(tagged, buf, sizeof buf) == 6 && strcmp(buf, "fourth") == 0,
+              "publish tagged: a file already there is kept");
+        int intact = 0;
+        for (int k = 0; k < DECOYS; k++) {
+            snprintf(decoy, sizeof decoy, "%s.tmp%lu.t%lu.%d", tagged, nk_platform_process_id(), tag, k);
+            if (read_back(decoy, buf, sizeof buf) == 5 && strcmp(buf, "decoy") == 0) intact++;
+            nk_remove_utf8(decoy);
+        }
+        CHECK(intact == DECOYS, "publish tagged: a file already at a temp name is never written through");
+        nk_remove_utf8(tagged);
+        CHECK(sr_file_publish_new_tagged("", "x", 1u, tag) == SR_PUBLISH_FAILED, "publish tagged: an empty path is refused");
+    }
     /* A screenshot (cap_write_file) into a non-ASCII folder it has to make. */
     CHECK(sr_capture_arm(shot) == 1, "publish: screenshot arm accepted");
     CHECK(sr_capture_serve_host(s_frame, PSP_W, PSP_H, PSP_W * 4u, SR_CAP_ORDER_BGRX) == 1 &&
@@ -1151,6 +1258,7 @@ int main(int argc, char **argv) {
     test_png_capture();
     test_screenshot_name();
     test_texdump_folder();
+    test_texdump_folder_problem();
     test_screenshot_request();
     test_png_encode();
     test_publish_new_unicode();

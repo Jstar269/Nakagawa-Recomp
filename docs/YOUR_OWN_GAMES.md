@@ -315,8 +315,9 @@ with the result as a texture pack. Nakagawa ships no textures and no upscaler, a
 1. Start the game in Enhanced or Ace. Open the pause menu (Esc, F1 or the controller's Guide button), choose
    **Settings**, and turn **Dump textures** on.
 2. Resume and play through the parts of the game you want. Each texture the game draws is saved once, as a PNG file,
-   in the `texdump` folder of your user data folder, in a folder named for the game's disc ID. The game may stutter
-   when it shows many new textures at once; turn **Dump textures** off when you have what you need. It is off again
+   in the `texdump` folder of your user data folder, in a folder named for the game's disc ID. The files are compressed
+   and saved beside the game, so the game does not wait for that; when it shows very many new textures at once, some are
+   saved the next time they are drawn. Turn **Dump textures** off when you have what you need. It is off again
    the next time the game starts. The row shows how many files are saved, and says why when the dump stops: the run
    wrote as much as it may, or a file could not be written (a full disk, for example). Movies, and pictures that
    change every frame, are not saved. A file already in the folder is never replaced.
