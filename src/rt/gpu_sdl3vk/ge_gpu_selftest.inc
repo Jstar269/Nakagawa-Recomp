@@ -12617,6 +12617,18 @@ static int coherence_run_soft_shadow(void) {
             ok = 0;
         }
     }
+    /* SR_ACE_SHADOW_CANDIDATES (the harness's --shadow-candidates): exactly "1", with the part on,
+     * lists each distinct content hashed once. The run hashes three (discs A, B and C: the copies at
+     * other addresses and the rewritten texture repeat them, and the pack's texture is not hashed),
+     * so the table holds three; any other value, or the part off, lists nothing. */
+    const char *cand = getenv("SR_ACE_SHADOW_CANDIDATES");
+    const int want_list = want_on && cand && strcmp(cand, "1") == 0;
+    if (ok && (s_soft_candidates != want_list || s_soft_seen.count != (want_list ? 3u : 0u))) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL SR_ACE_SHADOW_CANDIDATES=%s: listing %d (want %d), %u "
+                        "distinct contents listed (want %u)\n", name, cand ? cand : "(unset)", s_soft_candidates,
+                want_list, (unsigned)s_soft_seen.count, want_list ? 3u : 0u);
+        ok = 0;
+    }
     nk_tex_scale_set_sync(0);
     /* Across runs: the off run's stock and part-off frames are every run's at its scale and factor. */
     const char *ref = getenv("SR_GPU_SOFT_SHADOW_REF");

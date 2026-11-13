@@ -2146,8 +2146,10 @@ filter `nk_tex_soften_alpha_edge` and the digest `nk_tex_soft_shadow_digest` in 
     get a smooth ramp, keep their interior and are the same frame whatever the xBRZ factor, and the undeclared disc
     is drawn exactly as with the part off. A freed copy is made again without a second hash; a texture the guest
     rewrites to undeclared content gives up its copy for what the part-off run draws, and takes it back when the
-    declared content returns; a replacement pack's image for a declared texture is drawn instead, unhashed. Guest
-    VRAM outside the frame is unchanged, and the counts on the exit line match.
+    declared content returns; a replacement pack's image for a declared texture is drawn instead, unhashed. With
+    `SR_ACE_SHADOW_CANDIDATES=1` and the part on, each distinct content hashed is listed once; with another value,
+    or the part off, nothing is listed. Guest VRAM outside the frame is unchanged, and the counts on the exit line
+    match.
   - `test_player_state` and the player screens test pin the part, its settings, presets and launch line.
 
 **Next layer: real shadow maps.** Softening a blob keeps the title's own shadow shape. Shadows cast by the scene's

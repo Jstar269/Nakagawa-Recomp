@@ -976,7 +976,9 @@ asset-index-selftest:
 # but nothing declared (`undeclared`: the part unavailable); both later runs draw the off run's
 # frames. It runs again with xBRZ on (`--tex-scale`) at every factor the scaler takes, off and on
 # at scale 1 (undeclared too at 2) and at factor 4 at scale 4: a declared disc stays the soft frame
-# xBRZ-off draws. Each is selected by arguments: a
+# xBRZ-off draws. Three more runs set SR_ACE_SHADOW_CANDIDATES (`--shadow-candidates`): exactly 1
+# with the part on lists each distinct content hashed once; `yes`, or the part off, lists nothing.
+# Each is selected by arguments: a
 # VAR=value prefix needs a POSIX shell, and cmd.exe does not take one. The host twin (#2050) runs
 # after them: twin-off runs of twin-scene write reference files that the twin-on runs at the
 # same scale check (guest VRAM always, the shown images for the native twin), `--twin native`
@@ -1079,6 +1081,9 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 6 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x6.txt --case soft-shadow
 	$(GPU_COHERENCE_BIN) --scale 4 --tex-scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_x4.txt --case soft-shadow
 	$(GPU_COHERENCE_BIN) --scale 4 --tex-scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_x4.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow on --shadow-candidates 1 --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow on --shadow-candidates yes --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow off --shadow-candidates 1 --case soft-shadow
 	$(GPU_COHERENCE_BIN) --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
 	$(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
 	$(GPU_COHERENCE_BIN) --scale 4 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s4.txt

@@ -146,7 +146,8 @@ static int set_env(const char *name, const char *value) {
  * `--soft-shadow on|off|undeclared` turns Ace Mode on as an Ace run, with shadow=soft for on and
  * undeclared, and makes the soft-shadow case's declaration (none for undeclared) before the
  * renderer starts; `--soft-ref PATH` sets SR_GPU_SOFT_SHADOW_REF, the file the off run writes its
- * stock frames' hashes to and the others compare against.
+ * stock frames' hashes to and the others compare against; `--shadow-candidates V` sets
+ * SR_ACE_SHADOW_CANDIDATES.
  * Recipes pass arguments, not a `VAR=value` prefix, which cmd.exe does not accept. */
 int main(int argc, char **argv) {
     int twin_arg = 0, twin_key = 0, twin_key_on = 0, authentic = 0, repl_only = 0, pcache_arg = 0, depth_arg = 0;
@@ -226,6 +227,7 @@ int main(int argc, char **argv) {
                          : strcmp(argv[i], "--twin") == 0 ? "SR_GPU_TWIN_COLOR"
                          : strcmp(argv[i], "--twin-ref") == 0 ? "SR_GPU_TWIN_REF"
                          : strcmp(argv[i], "--soft-ref") == 0 ? "SR_GPU_SOFT_SHADOW_REF"
+                         : strcmp(argv[i], "--shadow-candidates") == 0 ? "SR_ACE_SHADOW_CANDIDATES"
                          : strcmp(argv[i], "--depth-ref") == 0 ? "SR_GPU_DEPTH_REF"
                          : strcmp(argv[i], "--ssaa-ref") == 0 ? "SR_GPU_SSAA_REF"
                          : strcmp(argv[i], "--dst-read") == 0 ? "SR_GPU_DST_READ"

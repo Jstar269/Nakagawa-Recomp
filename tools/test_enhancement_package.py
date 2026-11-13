@@ -7387,6 +7387,23 @@ class TestAcePartsSoftShadows(_AcePartsFixture):
                     validate_package(pkg)
                 self.assertIn(why, str(ctx.exception))
 
+    def test_schema_describes_soft_shadows(self) -> None:
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        part = schema["properties"]["ace_parts"]["properties"]["soft_shadows"]
+        self.assertFalse(part["additionalProperties"])
+        self.assertEqual(set(part["properties"]), enhancement_package.ACE_SOFT_SHADOW_PART_KEYS)
+        textures = part["properties"]["textures"]
+        self.assertEqual((textures["minItems"], textures["maxItems"]),
+                         (1, enhancement_package.ACE_SOFT_SHADOW_TEXTURES_MAX))
+        item = textures["items"]
+        self.assertFalse(item["additionalProperties"])
+        self.assertEqual(set(item["properties"]), enhancement_package.ACE_SOFT_SHADOW_TEXTURE_KEYS)
+        self.assertEqual(set(item["required"]), enhancement_package.ACE_SOFT_SHADOW_TEXTURE_KEYS)
+        self.assertEqual(item["properties"]["transform"]["enum"], ["alpha_edge_soften"])
+        self.assertEqual(item["properties"]["texture_digest"]["pattern"], "^[0-9a-f]{64}$")
+        self.assertEqual((item["properties"]["edge_texels"]["minimum"], item["properties"]["edge_texels"]["maximum"]),
+                         (enhancement_package.ACE_SOFT_SHADOW_EDGE_MIN, enhancement_package.ACE_SOFT_SHADOW_EDGE_MAX))
+
     def test_digest_and_cache_key_cover_soft_shadows(self) -> None:
         variants = (
             self.package(),
