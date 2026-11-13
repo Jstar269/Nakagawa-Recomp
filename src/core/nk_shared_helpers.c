@@ -393,11 +393,14 @@ bool nk_render_fallback_event_parse(const char *line, NkRenderFallbackEvent *out
     return true;
 }
 
-_Static_assert(NK_RENDER_EFFECT_COUNT <= 16, "the reported effects fit a uint16_t");
-_Static_assert(NK_RENDER_FALLBACK_BUDGET_US % NK_RENDER_FALLBACK_READBACK_US == 0u &&
-                   NK_RENDER_FALLBACK_BUDGET_US % NK_RENDER_FALLBACK_PRIM_US == 0u &&
-                   NK_RENDER_FALLBACK_READBACKS == 30u && NK_RENDER_FALLBACK_MIN_PRIMS == 4000u,
-               "each kind alone reaches the budget at a whole count");
+/* Compile-time checks in the C99 form (this file is also built with -std=c99 -Wpedantic, where
+ * _Static_assert is not available): the reported effects fit a uint16_t, and each kind alone
+ * reaches the budget at a whole count. */
+typedef char nk_render_effects_fit_u16_check[(NK_RENDER_EFFECT_COUNT <= 16) ? 1 : -1];
+typedef char nk_render_fallback_whole_counts_check
+    [(NK_RENDER_FALLBACK_BUDGET_US % NK_RENDER_FALLBACK_READBACK_US == 0u &&
+      NK_RENDER_FALLBACK_BUDGET_US % NK_RENDER_FALLBACK_PRIM_US == 0u &&
+      NK_RENDER_FALLBACK_READBACKS == 30u && NK_RENDER_FALLBACK_MIN_PRIMS == 4000u) ? 1 : -1];
 
 uint64_t nk_render_fallback_cost_us(uint64_t sw_prims, uint64_t readbacks) {
     if (readbacks > UINT64_MAX / NK_RENDER_FALLBACK_READBACK_US) return UINT64_MAX;
