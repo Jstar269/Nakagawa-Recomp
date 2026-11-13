@@ -3298,6 +3298,7 @@ static void test_prx_export_relocation_behavior(void) {
 
 int sr_hle_test_last_prx_host_served(void);
 void sr_hle_test_unregister_late_imports(uint32_t lo, uint32_t hi);
+unsigned sr_hle_test_psmf_players_used(void);   /* hle_mpeg.c (#286) */
 int sr_hle_test_module_host_served(uint32_t uid);
 
 /* Replaces the first little-endian copy of `from` in the file with `to`. */
@@ -47954,6 +47955,259 @@ static void test_late_prx_unload_keeps_module_owned_objects(void) {
     sr_hle_test_module_reset();
 }
 
+/* ---- #286: a guest player's threads and queue go with its own Delete; unload leaves nothing ----
+ *
+ * A title that ships libpsmfplayer runs it. This test models such a player: its
+ * scePsmfPlayerCreate starts three worker threads blocked on a message box, and its
+ * scePsmfPlayerDelete wakes them, joins them, deletes them and deletes the box (a model, not the
+ * real library's code). The PSP's own stop and unload leave module-owned objects alone (#1106,
+ * test_late_prx_unload_keeps_module_owned_objects above, measured for a semaphore, an event flag,
+ * a callback and a worker thread; a message box is inferred to behave the same), so the guest's
+ * Delete is what removes them, and the runtime has to carry that out completely and keep no
+ * player state of its own beside it.
+ *
+ * The synthetic module exports the two real scePsmfPlayer NIDs, which host HLE also registers.
+ * Production StartModule links them ahead of the host handlers; the guest bodies make their
+ * kernel calls through sr_syscall like translated code. Each of two load-start-play-delete-stop-
+ * unload cycles checks that: the host player never held the handle (scePsmfPlayerGetCurrentStatus,
+ * which the module does not export, answers the host's unknown-player status); after the guest
+ * Delete the three threads and the box no longer resolve; unload is not refused by a leftover
+ * continuation, retires both exports to host HLE and releases the image; and no live thread whose
+ * entry lies in the image remains. The second cycle shows that a reload starts a fresh player.
+ * Nothing here is a hardware value: the error codes are the kernel's unknown-UID answers the
+ * thread and message-box selftests above already pin. */
+#define GPLAYER_BASE           0x09380000u
+#define GPLAYER_CREATE_NID     0x235d8787u   /* scePsmfPlayerCreate */
+#define GPLAYER_DELETE_NID     0x9b71a274u   /* scePsmfPlayerDelete */
+#define GPLAYER_STATUS_NID     0xf8ef08a6u   /* scePsmfPlayerGetCurrentStatus, host-only here */
+#define GPLAYER_HOST_NO_PLAYER 0x80616001u   /* the host handler's unknown-player status */
+#define GPLAYER_CREATE_OFF     LIFECYCLE_PATCH_OFF_A_1
+#define GPLAYER_DELETE_OFF     LIFECYCLE_PATCH_OFF_A_2
+#define GPLAYER_WORKER_OFF     0x90u         /* three entries, 8 bytes apart, inside the image */
+#define GPLAYER_WORKERS        3u
+#define GPLAYER_RUNNER_ENTRY   0x08ffde80u
+#define GPLAYER_HANDLE         0x00251000u   /* the title's PsmfPlayer handle */
+#define GPLAYER_DATA           0x00251100u   /* player data: mbx uid, then the worker uids */
+#define GPLAYER_NAME           0x00251200u
+#define GPLAYER_MSG            0x00251300u   /* one 16-byte quit packet per worker */
+#define GPLAYER_RECV_OUT       0x00251400u   /* one received-packet word per worker */
+#define GPLAYER_INFO           0x00251480u
+#define GPLAYER_START_NID      LATE_OBJ_START_NID
+#define GPLAYER_STOP_NID       LATE_OBJ_STOP_NID
+#define GPLAYER_UNLOAD_NID     LATE_OBJ_UNLOAD_NID
+
+static const char *s_gplayer_path;
+static uint32_t s_gplayer_received[GPLAYER_WORKERS];
+static uint32_t s_gplayer_first_uids[1u + GPLAYER_WORKERS];
+static int      s_gplayer_cycles_done;
+
+static int gplayer_live_threads_in_image(void) {
+    int n = 0;
+    for (int i = 0; i < s_ntcb; i++) {
+        const TCB *t = &s_tcb[i];
+        if (!t->deleted && t->entry >= GPLAYER_BASE &&
+            t->entry < GPLAYER_BASE + LIFECYCLE_IMAGE_SIZE)
+            n++;
+    }
+    return n;
+}
+
+static void gplayer_worker(CpuState *s, unsigned idx) {
+    const uint32_t mbx = MEM_R32(GPLAYER_DATA);
+    s->r[4] = mbx;
+    s->r[5] = GPLAYER_RECV_OUT + 4u * idx;
+    s->r[6] = 0u;                                          /* no timeout: wait for the quit */
+    uint32_t rc = sr_syscall(s, NID_MBX_RECV);
+    s_gplayer_received[idx] = rc == 0u ? MEM_R32(GPLAYER_RECV_OUT + 4u * idx) : rc;
+    s->r[2] = 0u;                                          /* returning ends the worker */
+}
+static void gplayer_worker0(CpuState *s) { gplayer_worker(s, 0u); }
+static void gplayer_worker1(CpuState *s) { gplayer_worker(s, 1u); }
+static void gplayer_worker2(CpuState *s) { gplayer_worker(s, 2u); }
+
+/* The module's scePsmfPlayerCreate(handle, data): a message box and three workers waiting on it. */
+static void gplayer_create(CpuState *s) {
+    const uint32_t handle = s->r[4];
+    uint32_t mbx = late_obj_guest_call(s, NID_MBX_CREATE, GPLAYER_NAME, 0u, 0u, 0u, 0u, 0u);
+    if ((int32_t)mbx <= 0) { s->r[2] = mbx; return; }
+    MEM_W32(GPLAYER_DATA, mbx);
+    for (uint32_t i = 0; i < GPLAYER_WORKERS; i++) {
+        uint32_t uid = late_obj_guest_call(s, NID_SCE_KERNEL_CREATE_THREAD, GPLAYER_NAME,
+                                           GPLAYER_BASE + GPLAYER_WORKER_OFF + 8u * i,
+                                           16u, 0x1000u, 0u, 0u);
+        if ((int32_t)uid <= 0) { s->r[2] = uid; return; }
+        MEM_W32(GPLAYER_DATA + 4u + 4u * i, uid);
+        uint32_t rc = late_obj_guest_call(s, NID_SCE_KERNEL_START_THREAD, uid, 0u, 0u,
+                                          0u, 0u, 0u);
+        if (rc != 0u) { s->r[2] = rc; return; }
+    }
+    MEM_W32(handle, GPLAYER_DATA);
+    s->r[2] = 0u;
+}
+
+/* The module's scePsmfPlayerDelete(handle): a quit packet per worker, join, delete, delete box. */
+static void gplayer_delete(CpuState *s) {
+    const uint32_t handle = s->r[4];   /* the kernel calls below reuse a0 */
+    const uint32_t data = MEM_R32(handle);
+    const uint32_t mbx = MEM_R32(data);
+    for (uint32_t i = 0; i < GPLAYER_WORKERS; i++) {
+        const uint32_t msg = GPLAYER_MSG + 16u * i;
+        MEM_W32(msg, 0u);
+        MEM_W32(msg + 4u, 0u);
+        uint32_t rc = late_obj_guest_call(s, NID_MBX_SEND, mbx, msg, 0u, 0u, 0u, 0u);
+        if (rc != 0u) { s->r[2] = rc; return; }
+    }
+    for (uint32_t i = 0; i < GPLAYER_WORKERS; i++) {
+        const uint32_t uid = MEM_R32(data + 4u + 4u * i);
+        uint32_t rc = late_obj_guest_call(s, NID_SCE_KERNEL_WAIT_THREAD_END, uid, 0u, 0u,
+                                          0u, 0u, 0u);
+        if (rc != 0u) { s->r[2] = rc; return; }
+        rc = late_obj_guest_call(s, NID_SCE_KERNEL_DELETE_THREAD, uid, 0u, 0u, 0u, 0u, 0u);
+        if (rc != 0u) { s->r[2] = rc; return; }
+    }
+    s->r[2] = late_obj_guest_call(s, NID_MBX_DELETE, mbx, 0u, 0u, 0u, 0u, 0u);
+    MEM_W32(handle, 0u);
+}
+
+static void gplayer_runner(CpuState *s) {
+    SrThreadInfo info;
+    for (int cycle = 0; cycle < 2; cycle++) {
+        const int live_before = gplayer_live_threads_in_image();
+        uint32_t uid = sr_hle_test_load_prx_image(s_gplayer_path, GPLAYER_BASE,
+                                                  GPLAYER_CREATE_NID, GPLAYER_CREATE_OFF);
+        expect(uid != 0u, "guest player: the module image loads");
+        if (uid == 0u) break;
+        /* The loader publishes every export of the image; the fixture's table is empty, so
+         * the second export goes into the same late-import registry by hand. */
+        sr_hle_register_late_import(GPLAYER_DELETE_NID, GPLAYER_BASE + GPLAYER_DELETE_OFF);
+        expect(sr_hle_test_started_export(GPLAYER_CREATE_NID) == 0u &&
+                   sr_hle_test_started_export(GPLAYER_DELETE_NID) == 0u,
+               "guest player: before StartModule neither export is linked");
+        expect(late_obj_guest_call(s, GPLAYER_START_NID, uid, 0u, 0u, 0u, 0u, 0u) == 0u &&
+                   sr_hle_test_started_export(GPLAYER_CREATE_NID) ==
+                       GPLAYER_BASE + GPLAYER_CREATE_OFF &&
+                   sr_hle_test_started_export(GPLAYER_DELETE_NID) ==
+                       GPLAYER_BASE + GPLAYER_DELETE_OFF,
+               "guest player: the started module's Create and Delete are linked ahead of host HLE");
+
+        MEM_W32(GPLAYER_HANDLE, 0u);
+        memset(s_gplayer_received, 0xff, sizeof s_gplayer_received);
+        expect(late_obj_guest_call(s, GPLAYER_CREATE_NID, GPLAYER_HANDLE, 0u, 0u, 0u, 0u, 0u) ==
+                       0u && MEM_R32(GPLAYER_HANDLE) == GPLAYER_DATA,
+               "guest player: the module's own scePsmfPlayerCreate builds the player");
+        expect(late_obj_guest_call(s, GPLAYER_STATUS_NID, GPLAYER_HANDLE, 0u, 0u, 0u, 0u, 0u) ==
+                   GPLAYER_HOST_NO_PLAYER &&
+                   sr_hle_test_psmf_players_used() == 0u,
+               "guest player: the host player holds no instance for the guest's handle");
+        const uint32_t mbx = MEM_R32(GPLAYER_DATA);
+        uint32_t workers[GPLAYER_WORKERS];
+        int waiting = 1;
+        for (uint32_t i = 0; i < GPLAYER_WORKERS; i++) {
+            workers[i] = MEM_R32(GPLAYER_DATA + 4u + 4u * i);
+            waiting &= sched_thread_info(workers[i], &info) == 0 && info.waitId == mbx;
+        }
+        expect(waiting && gplayer_live_threads_in_image() == live_before + (int)GPLAYER_WORKERS,
+               "guest player: its three workers run module code and wait on its message box");
+        MEM_W32(GPLAYER_INFO, 52u);
+        expect(late_obj_guest_call(s, NID_MBX_REFER, mbx, GPLAYER_INFO, 0u, 0u, 0u, 0u) == 0u &&
+                   MEM_R32(GPLAYER_INFO + 40u) == GPLAYER_WORKERS,
+               "guest player: the message box counts the three waiting workers");
+        if (cycle == 0) {
+            s_gplayer_first_uids[0] = mbx;
+            memcpy(&s_gplayer_first_uids[1], workers, sizeof workers);
+        } else {
+            int stale_gone = 1;
+            for (uint32_t i = 0; i < GPLAYER_WORKERS; i++)
+                stale_gone &= sched_thread_info(s_gplayer_first_uids[1u + i], &info) != 0;
+            MEM_W32(GPLAYER_INFO, 52u);
+            stale_gone &= late_obj_guest_call(s, NID_MBX_REFER, s_gplayer_first_uids[0],
+                                              GPLAYER_INFO, 0u, 0u, 0u, 0u) ==
+                          SCE_KERNEL_ERROR_UNKNOWN_MBXID;
+            expect(stale_gone && mbx != s_gplayer_first_uids[0] &&
+                       workers[0] != s_gplayer_first_uids[1] &&
+                       workers[1] != s_gplayer_first_uids[2] &&
+                       workers[2] != s_gplayer_first_uids[3],
+                   "guest player: the reloaded module's player has fresh objects, and the first "
+                   "player's stay gone");
+        }
+
+        expect(late_obj_guest_call(s, GPLAYER_DELETE_NID, GPLAYER_HANDLE, 0u, 0u, 0u, 0u, 0u) ==
+                       0u && MEM_R32(GPLAYER_HANDLE) == 0u,
+               "guest player: the module's own scePsmfPlayerDelete returns 0");
+        int quit = 1, gone = 1;
+        for (uint32_t i = 0; i < GPLAYER_WORKERS; i++) {
+            quit &= s_gplayer_received[i] >= GPLAYER_MSG &&
+                    s_gplayer_received[i] < GPLAYER_MSG + 16u * GPLAYER_WORKERS;
+            gone &= late_obj_guest_call(s, LATE_OBJ_REFER_THREAD, workers[i], GPLAYER_INFO,
+                                        0u, 0u, 0u, 0u) == SCE_KERNEL_ERROR_UNKNOWN_THID &&
+                    sched_thread_info(workers[i], &info) != 0;
+        }
+        expect(quit, "guest player: each worker received its quit packet and returned");
+        expect(gone, "guest player: after Delete no worker thread resolves");
+        MEM_W32(GPLAYER_INFO, 52u);
+        expect(late_obj_guest_call(s, NID_MBX_REFER, mbx, GPLAYER_INFO, 0u, 0u, 0u, 0u) ==
+                   SCE_KERNEL_ERROR_UNKNOWN_MBXID,
+               "guest player: after Delete its message box does not resolve");
+
+        expect(late_obj_guest_call(s, GPLAYER_STOP_NID, uid, 0u, 0u, 0u, 0u, 0u) == 0u &&
+                   late_obj_guest_call(s, GPLAYER_UNLOAD_NID, uid, 0u, 0u, 0u, 0u, 0u) == 0u,
+               "guest player: the module stops and unloads (no ready or running thread in it refuses it)");
+        expect(sr_hle_resolve_late_import(GPLAYER_CREATE_NID) == SR_HLE_LATE_BUILTIN &&
+                   sr_hle_resolve_late_import(GPLAYER_DELETE_NID) == SR_HLE_LATE_BUILTIN &&
+                   sr_hle_test_started_export(GPLAYER_CREATE_NID) == 0u &&
+                   sr_hle_test_started_export(GPLAYER_DELETE_NID) == 0u,
+               "guest player: unload hands both NIDs back to host HLE");
+        expect(sr_hle_test_image_count() == 0u && sr_hle_test_started_image_count() == 0,
+               "guest player: unload releases the image");
+        expect(gplayer_live_threads_in_image() == live_before,
+               "guest player: no live thread runs the unloaded module's code");
+        expect(late_obj_guest_call(s, GPLAYER_STATUS_NID, GPLAYER_HANDLE, 0u, 0u, 0u, 0u, 0u) ==
+                   GPLAYER_HOST_NO_PLAYER &&
+                   sr_hle_test_psmf_players_used() == 0u,
+               "guest player: after unload the host player still holds nothing for the handle");
+        s_gplayer_cycles_done++;
+    }
+    s->r[2] = 0u;
+}
+
+static void test_guest_player_unload_leaves_no_threads_or_queues(void) {
+    const char *path = HLE_BUILD_ROOT "/hle_guest_player.prx";
+
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    sr_hle_test_module_reset();
+    hle_test_setenv("SR_REAL_MODULE_START", "1");
+
+    expect(sr_hle_test_is_registered(GPLAYER_CREATE_NID) &&
+               sr_hle_test_is_registered(GPLAYER_DELETE_NID) &&
+               sr_hle_test_is_registered(GPLAYER_STATUS_NID),
+           "guest player: host HLE registers the scePsmfPlayer NIDs the module shadows");
+    expect(write_lifecycle_prx(path, 0x286aaaaau), "guest player: synthetic module image written");
+    s_gplayer_path = path;
+    s_gplayer_cycles_done = 0;
+    sr_test_register_guest_fn(GPLAYER_BASE + LIFECYCLE_START_OFF, lifecycle_start_fn);
+    sr_test_register_guest_fn(GPLAYER_BASE + LIFECYCLE_STOP_OFF, lifecycle_stop_fn);
+    sr_test_register_guest_fn(GPLAYER_BASE + GPLAYER_CREATE_OFF, gplayer_create);
+    sr_test_register_guest_fn(GPLAYER_BASE + GPLAYER_DELETE_OFF, gplayer_delete);
+    sr_test_register_guest_fn(GPLAYER_BASE + GPLAYER_WORKER_OFF, gplayer_worker0);
+    sr_test_register_guest_fn(GPLAYER_BASE + GPLAYER_WORKER_OFF + 8u, gplayer_worker1);
+    sr_test_register_guest_fn(GPLAYER_BASE + GPLAYER_WORKER_OFF + 16u, gplayer_worker2);
+    sr_test_register_guest_fn(GPLAYER_RUNNER_ENTRY, gplayer_runner);
+    title_hle_write_cstr(GPLAYER_NAME, "guest-psmf-player");
+
+    sched_run(GPLAYER_RUNNER_ENTRY, 0u, 0u);
+    expect(s_gplayer_cycles_done == 2, "guest player: both load-to-unload cycles ran to the end");
+
+    s_cur = -1;
+    remove(path);
+    /* A failed cycle can stop before unload: keep its exports from reaching later tests. */
+    sr_hle_test_unregister_late_imports(GPLAYER_BASE, GPLAYER_BASE + LIFECYCLE_IMAGE_SIZE);
+    hle_test_setenv("SR_REAL_MODULE_START", "0");
+    sr_test_guest_fn_reset();
+    sr_hle_test_module_reset();
+}
+
 /* ---- scePowerUnregisterCallback: release a slot scePowerRegisterCallback filled ----
  *
  * Measured on PSP-3000, firmware 6.6.1, 2026-10-22 (merged PR #1153):
@@ -54681,6 +54935,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ctrl_sampling_contract();
     test_volatile_partition_allocator();
     test_late_prx_unload_keeps_module_owned_objects();
+    test_guest_player_unload_leaves_no_threads_or_queues();
     test_power_unregister_callback_slots();
     test_wc_power_register_callback_errors();
     test_wc_volatile_unlock_mode();
