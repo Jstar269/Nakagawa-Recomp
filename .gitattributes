@@ -94,6 +94,9 @@ third_party/libchdr/PROVENANCE.md     whitespace=blank-at-eol,blank-at-eof,space
 # checks; the project-authored manifest keeps the normal rules.
 third_party/fidelityfx_sdk/**             whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,-indent-with-non-tab
 third_party/fidelityfx_sdk/PROVENANCE.md  whitespace=blank-at-eol,blank-at-eof,space-before-tab
+# stb_vorbis (third_party/stb/PROVENANCE.md) is byte-identical upstream, which ends some lines in
+# spaces and the file in a blank line: exempt it the same way so its blob ID stays the pinned one.
+third_party/stb/stb_vorbis.c              whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,-indent-with-non-tab
 
 # Parallel additions to these hand-maintained lists merge without a conflict (docs/CI.md, "Merging
 # parallel additions"): tools/merge_append.py keeps both sides when each only inserted lines at the same

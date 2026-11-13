@@ -88,7 +88,10 @@ layout(set = 2, binding = 0) uniform sampler2D u_dst;
  * Bits 17-19 = factor - 1 of a scaled texture copy (ge_gpu.c, tex_scale.h); 0 otherwise.
  * 1048576 (bit 20) color test, bits 21-22 its function (GE_COLORTEST: 0 never, 2 equal,
  * 3 not equal; ge_gpu.c leaves the test off for 1, always): fixa.a = GE_COLORREF &
- * GE_COLORTESTMASK, fixb.a = GE_COLORTESTMASK, each a whole number. */
+ * GE_COLORTESTMASK, fixb.a = GE_COLORTESTMASK, each a whole number.
+ * 8388608 (bit 23) host mip chain (ge_gpu.c tex_hm_applies, tex_mips.h; an Enhanced run with
+ * mips=on only): the bound texture has levels the host built from the game's one, and is
+ * sampled with the level-0 texel coordinate's own gradients per device pixel. */
 layout(push_constant) uniform PC {
     ivec4 cfg;      /* x = texfunc | flags<<8, y = alpha test (func|ref<<8|mask<<16),
                        z = minz, w = maxz */
@@ -313,6 +316,16 @@ void main() {
                     if (lod == 0.0) lod = 0.25;
                 }
                 t = textureLod(u_tex, uv / pc.texsize.xy, lod) * 255.0;
+            } else if ((flags & 8388608) != 0) {
+                /* A host-built chain: the footprint of this device pixel, by the quotient rule
+                 * from the derivatives taken above before any discard (explicit gradients need
+                 * no helper invocation), so the level follows the render scale and the sampler's
+                 * trilinear (and anisotropic) filtering does the rest. The sample point is the
+                 * PSP's, as above. */
+                vec2 u0 = v_uv / rw;
+                vec2 gs = 1.0 / (rw * lod_scale * pc.texsize.xy);
+                vec2 gdx = (duv_dx - u0 * drw_dx) * gs, gdy = (duv_dy - u0 * drw_dy) * gs;
+                t = textureGrad(u_tex, uv / pc.texsize.xy, gdx, gdy) * 255.0;
             } else if (v_uvbox.x <= v_uvbox.z || v_uvbox.y <= v_uvbox.w) {
                 /* A clamped primitive (through mode, so rw is 1) takes its footprint from the
                  * unclamped coordinate: a clamped band has the same minification or

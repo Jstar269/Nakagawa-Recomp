@@ -170,9 +170,10 @@ try:
         ALLOWED_CLASSES as ALLOWED_CLASSES, RefreshError, _admission_requires_implementation,
         _canonical_json_bytes, _class_for, _classify_policy_delta, _read_policy_delta_authority,
         admission_claim, claims_ledger, claims_ledger_bytes, derive_policy_delta_v3, is_claims_ledger,
-        is_derived_policy_delta, policy_delta_v3_bytes, policy_delta_v3_name, policy_delta_v4_key,
-        validate_ledger, verify_derived_policy_delta,
+        is_derived_policy_delta, is_policy_delta_v4, policy_delta_v3_bytes, policy_delta_v3_name,
+        policy_delta_v4_key, validate_ledger, verify_derived_policy_delta,
     )
+    from .publish_audit import load_release_manifest_bytes, requires_byte_binding
     from .public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS
     from .public_export import build_control_document as _build_control_document
     from .public_export import build_document as _build_export_document
@@ -183,9 +184,10 @@ except ImportError:
         ALLOWED_CLASSES as ALLOWED_CLASSES, RefreshError, _admission_requires_implementation,
         _canonical_json_bytes, _class_for, _classify_policy_delta, _read_policy_delta_authority,
         admission_claim, claims_ledger, claims_ledger_bytes, derive_policy_delta_v3, is_claims_ledger,
-        is_derived_policy_delta, policy_delta_v3_bytes, policy_delta_v3_name, policy_delta_v4_key,
-        validate_ledger, verify_derived_policy_delta,
+        is_derived_policy_delta, is_policy_delta_v4, policy_delta_v3_bytes, policy_delta_v3_name,
+        policy_delta_v4_key, validate_ledger, verify_derived_policy_delta,
     )
+    from publish_audit import load_release_manifest_bytes, requires_byte_binding  # type: ignore[no-redef]
     from public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS  # type: ignore[no-redef]
     from public_export import build_control_document as _build_control_document  # type: ignore[no-redef]
     from public_export import build_document as _build_export_document  # type: ignore[no-redef]
@@ -1977,6 +1979,7 @@ def generate_ephemeral_controls(
             )
         except RefreshError as error:
             raise VerifyError(error.code, str(error)) from error
+        _refuse_claim_bound_binaries(policy_delta_raw, candidate_blobs)
         candidate_policy_matches_trusted = True
 
     baseline_bytes = baseline_file.read_bytes()
@@ -2060,6 +2063,33 @@ def _declares_hashed_ledger(raw: bytes | None) -> bool:
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
     return isinstance(document, dict) and document.get("schema_version") == 1
+
+
+def _refuse_claim_bound_binaries(raw: bytes, candidate_blobs: dict[str, bytes]) -> None:
+    """Refuse a V4 admission that binds only the origin claim of a path whose bytes need binding.
+
+    For a path new to the trusted base the publication audit holds a waived file only to the
+    candidate's own pin and exempts a VFPU table by its path, so the admission is the only trusted
+    decision about those bytes: such a path, and any binary file, must be admitted byte-bound.
+    """
+    if not is_policy_delta_v4(raw):
+        return
+    claim_bound = [item["path"] for item in json.loads(raw)["include_added"] if item["binding"] == "claim"]
+    if not claim_bound:
+        return
+    manifest_map: dict[str, dict] = {}
+    if MANIFEST_PATH in candidate_blobs:
+        manifest_map, findings = load_release_manifest_bytes(candidate_blobs[MANIFEST_PATH], MANIFEST_PATH)
+        if findings:
+            raise VerifyError("POLICY_DELTA_MANIFEST_UNREADABLE", f"{MANIFEST_PATH}: {findings[0].detail}")
+    refused = [path for path in claim_bound
+               if requires_byte_binding(path, candidate_blobs.get(path), manifest_map)]
+    if refused:
+        raise VerifyError(
+            "POLICY_DELTA_BINARY_CLAIM_BOUND",
+            f"{', '.join(refused)}: a binary file, a VFPU table or a path the release manifest waives is "
+            "admitted bound to its claim only; admit it bound to its bytes",
+        )
 
 
 def policy_delta_key_v4(*, repo: Path, base_rev: str, candidate_rev: str) -> str:
