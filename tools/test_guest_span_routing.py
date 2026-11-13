@@ -166,6 +166,7 @@ class TestGuestSpanRouting(unittest.TestCase):
                 "sr_movie_find_copy": ("sr_guest_span_readable",),
                 "movie_mutant_fold": ("sr_guest_span_readable",),
                 "sr_enhancement_widen_clip_x": ("sr_guest_span_writable_at",),
+                "cull_sweep": ("sr_guest_span_readable",),
             },
             ROOT / "src" / "rt" / "ge_capture.c": {
                 "ge_capture_begin": ("sr_guest_span_readable",),

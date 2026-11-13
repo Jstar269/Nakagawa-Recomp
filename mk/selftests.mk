@@ -423,8 +423,9 @@ native-core-tests: ge-float24-selftest
 # primitive type in both modes, indexed draws, clipped and rejected triangles, rejected
 # points and sprite corners, patches, block transfer and CLUT load, the GPU hook seam, and
 # each profile switch; then faults injected into copies of those blocks, each of which
-# must fail exactly the checks it breaks.  Run twice because ge.c latches the strip-cache
-# switch per process.  No game input.
+# must fail exactly the checks it breaks.  Also the VRAM viewer's sources and decode, and its
+# SR_VRAMDUMP captures (#314): two captures are written next to the binary and removed.  Run
+# twice because ge.c latches the strip-cache switch per process.  No game input.
 GE_CPU_PROFILE_VALIDATE_SELFTEST := $(BUILD_DIR)/ge_cpu_profile_validate_selftest$(EXE_EXT)
 
 ge-cpu-profile-validate-selftest: $(RT_GE_O)

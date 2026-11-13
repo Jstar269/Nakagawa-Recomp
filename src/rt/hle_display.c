@@ -399,6 +399,8 @@ static char s_fbcap_armed[128];  /* path armed for the CURRENT frame's present (
 static char s_fbcap_legacy[64];  /* legacy snap_*.ppm path for the same frame ("" = none) */
 uint32_t s_vramdump_vblanks[SR_VRAMDUMP_MAX_VBLANKS];
 unsigned s_vramdump_count;
+_Static_assert(SR_VRAMDUMP_MAX_VBLANKS <= GE_VRAM_CAPTURE_MAX,
+               "the VRAM viewer's Capture row can offer every SR_VRAMDUMP capture");
 unsigned s_vramdump_done;
 static char s_vramdump_dir[768];
 

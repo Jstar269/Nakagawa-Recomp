@@ -445,6 +445,13 @@ bool nk_platform_path_is_absolute(const char *path);
    nk_platform_get_path. */
 const char *nk_platform_env_home_dir(void);
 const char *nk_platform_env_user_name(void);
+/* Environment variable `name` in UTF-8, for a value that is a path. Win32 reads the wide
+   environment, so a folder whose name is outside the ANSI code page arrives whole (the narrow
+   getenv gives code-page bytes, which a UTF-8 path reader refuses or reads as '?'); POSIX gives
+   the bytes as they are. Returns 1 with the value in `out` (an empty value included), 0 when the
+   variable is unset (`out` empty), and -1 when it does not fit `cap` bytes or is not valid
+   UTF-16 (`out` empty). */
+int nk_platform_env_utf8(const char *name, char *out, size_t cap);
 
 /* This process's id (_getpid on Win32, getpid on POSIX). */
 unsigned long nk_platform_process_id(void);

@@ -34,8 +34,8 @@ void player_host_show_picker(PlayerHostPick what, SDL_Window *window,
     };
     /* The fonts import shows the .pgf files themselves, which a folder picker
        hides, so the user can see they are in the right folder. */
-    if (what == PLAYER_HOST_PICK_SAVE) {
-        /* A save is a folder (SAVEDATA/<ID>), so the folder picker. */
+    if (what == PLAYER_HOST_PICK_SAVE || what == PLAYER_HOST_PICK_TEXPACK) {
+        /* A save is a folder (SAVEDATA/<ID>), and so is a texture pack: the folder picker. */
         SDL_ShowOpenFolderDialog(callback, userdata, window, start_folder, false);
     } else if (what == PLAYER_HOST_PICK_FONTS) {
         SDL_ShowOpenFileDialog(callback, userdata, window, font_filters, 1,

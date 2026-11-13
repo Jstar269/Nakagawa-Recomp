@@ -1501,6 +1501,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     char env_disc_id[NK_MAX_DISC_ID_LEN + 16];
     char env_ace[sizeof(session->config.ace_spec) + 8];
     char env_ace_report[NK_MAX_PATH + 16];
+    char env_texpack[NK_MAX_PATH + 24];
     char env_ui_root[NK_MAX_PATH + 16];
     char env_launcher_display[96];
     char env_nickname[sizeof(session->config.nickname) + 16];
@@ -1649,6 +1650,11 @@ NkResult nk_launch_start(NkLaunchSession *session) {
         snprintf(env_ace_report, sizeof(env_ace_report), "SR_ACE_REPORT=%s",
                  ace_on ? session->config.ace_report_path : "");
         envp[env_count++] = env_ace_report;
+        /* The texture pack's folder, also always set: the title's own pack while the line turns
+           texpack on, else empty, so an inherited SR_TEX_REPLACE never reaches the runtime. */
+        snprintf(env_texpack, sizeof(env_texpack), "SR_TEX_REPLACE=%s",
+                 ace_on && strstr(ace, ";texpack=on") ? session->config.texpack_dir : "");
+        envp[env_count++] = env_texpack;
     }
     if (session->config.headless_accept_presented_frames > 0u) {
         snprintf(env_headless_accept_frames, sizeof(env_headless_accept_frames),

@@ -244,42 +244,55 @@ finds the same title the player does.
 
 ## Graphics presets
 
-**Settings > Graphics preset** picks a set of display settings and two Enhanced options in one choice. A preset is
-used only when a game plays in Enhanced or Ace. In Authentic, a game always runs with your own **Resolution**,
+**Settings > Graphics preset** picks a set of display settings and up to three Enhanced options in one choice. A
+preset is used only when a game plays in Enhanced or Ace. In Authentic, a game always runs with your own **Resolution**,
 **Scaling**, **VSync** and **Game fullscreen** settings, whatever the preset, because a larger render scale also
 changes what the game can copy from its own screen, such as a save picture. Choosing a preset doesn't change those
 settings. Changing **Resolution**, **Scaling** or **VSync** yourself, or **Game fullscreen** under Handheld (the one
 preset that sets it), sets the preset back to **Custom**, which uses your settings everywhere.
 
-| Preset | Resolution | Scaling | VSync | Game fullscreen | Crisp system text | Sharper enlarging |
-| --- | --- | --- | --- | --- | --- | --- |
-| Low | 1x (480x272) | Sharp | On | your setting | On | Off |
-| Medium | 2x | Sharp | On | your setting | On | On |
-| High | 4x | Sharp | On | your setting | On | Off |
-| Ultra | 4x | Sharp | On | your setting | On | On |
-| Handheld | 2x | Sharp | On | On | On | On |
+| Preset | Resolution | Scaling | VSync | Game fullscreen | Crisp system text | Sharper enlarging | Full 32-bit colour |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Low | 1x (480x272) | Sharp | On | your setting | On | Off | your setting |
+| Medium | 2x | Sharp | On | your setting | On | On | your setting |
+| High | 4x | Sharp | On | your setting | On | Off | your setting |
+| Ultra | 4x | Sharp | On | your setting | On | On | On |
+| Handheld | 2x | Sharp | On | On | On | On | your setting |
 
-In Enhanced and Ace, a preset's **Crisp system text** and **Sharper enlarging** (the FSR 1 upscaler) take the place of
-the library's; Settings > Enhanced shows them as, for example, **On (Ultra)**. A game's own value for either, on its
-Enhanced options page, still wins. Changing either one on Settings > Enhanced sets the preset back to **Custom**.
-Whenever a preset becomes **Custom**, these two options keep the values it gave them. FSR 1 works only where the
-window is larger than the game's picture, and where the graphics card can't run it, the normal scaling filter stays.
-The other Enhanced options, such as **Smooth motion**, **Widescreen** and **Texture filtering**, stay as you set them
-under every preset.
+In Enhanced and Ace, a preset's **Crisp system text**, **Sharper enlarging** (the FSR 1 upscaler) and, under **Ultra**,
+**Full 32-bit colour** take the place of the library's; Settings > Enhanced shows them as, for example, **On (Ultra)**.
+A game's own value for any of them, on its Enhanced options page, still wins. Changing one of them on Settings >
+Enhanced sets the preset back to **Custom**. Whenever a preset becomes **Custom**, the options the preset set keep the
+values it gave them; presets other than **Ultra** leave **Full 32-bit colour** as you set it. FSR 1 works only where the
+window is larger than the game's picture, and where the graphics card can't run it, the normal scaling filter stays. The
+other Enhanced options, such as **Smooth motion**, **Widescreen** and **Texture filtering**, stay as you set them under
+every preset.
 
 ## Texture packs
 
-A texture pack replaces a game's textures with sharper images while the game plays in Ace Mode. Nakagawa ships
-no pack and downloads none: a pack is a folder or a ZIP file you made yourself or got from a community for your
-game, in the layout PSP emulators use (a `textures.ini` and PNG files named for the textures they replace). A
-folder that holds a `textures.zip` is read from that ZIP.
+A texture pack replaces a game's textures with sharper images while the game plays in Enhanced or Ace. Nakagawa
+ships no pack and downloads none: a pack is a folder you made yourself or got from a community for your game, in
+the layout PSP emulators use (a `textures.ini` and PNG files named for the textures they replace). A folder that
+holds a `textures.zip` is read from that ZIP.
 
-When Nakagawa starts the game it reads the pack's list: the folder or ZIP and its `textures.ini`. If it cannot read
-that list (the folder or ZIP has gone, a file in its place is not an ordinary file, the ZIP is damaged, or the
-`textures.ini` has a line it does not understand), it does not use the pack at all, says why, and the game plays
-without it. An image the pack lists is read the first time the game draws its texture. An image that is missing,
-damaged, too large, linked to a place outside the pack's folder, or the wrong size is skipped on its own: that
-texture is drawn as the game made it, and the rest of the pack is used.
+1. Put the pack's folder anywhere on your PC.
+2. On the game's page, open **Enhanced options** and choose **Texture pack folder**. Pick the folder that holds the
+   `textures.ini`, the PNG files or the `textures.zip`. The row then shows the folder's name and how many textures
+   it lists, and **Texture pack** turns on for that game.
+3. Play the game in Enhanced or Ace. In Authentic, the pack is not used.
+
+Nakagawa reads the pack's list (the folder or ZIP and its `textures.ini`) when you choose it and again each time
+the game starts. If it cannot read that list (the folder or ZIP has gone, a file in its place is not an ordinary
+file, the ZIP is damaged, or the `textures.ini` has a line it does not understand), or the pack says it is made for
+another game (its `[games]` section lists other games only, or more than 64), it says why and does not use the
+pack. When that happens as you start the game, **Play without the pack** starts it without the pack this time and
+keeps your choice. To use the pack again, fix it where it is or choose another; **Remove texture pack** or turning
+**Texture pack** off stops Nakagawa asking. **Remove texture pack** forgets the folder for that game and does not
+delete it.
+
+An image the pack lists is read the first time the game draws its texture. An image that is missing, damaged, too
+large, linked to a place outside the pack's folder, or the wrong size is skipped on its own: that texture is drawn
+as the game made it, and the rest of the pack is used.
 
 The details, including what a pack made for an emulator cannot match here, are in
 [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1012-texture-replacement).

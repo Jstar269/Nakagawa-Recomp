@@ -815,7 +815,8 @@ static void gui_cull_sync(void) {
     ace_set_cull_untracked(ge_wide_cull_untracked());
     if (ge_wide_cull_untracked())
         ace_feature_unavailable(ACE_FEATURE_CULL,
-                                "partial: the 4096-matrix table filled, later matrices were left alone");
+                                "partial: more than 4096 widened matrices were in guest memory at once, "
+                                "later matrices were left alone");
     else if (ge_wide_cull_calls())
         ace_confirm(ACE_FEATURE_CULL);   /* the title's hook has run */
 }
@@ -1817,6 +1818,7 @@ static int          s_pause_host_tried;
 static NkOverlayControls s_pause_controls;
 /* The developer pages (#314), filled only in developer mode. */
 static NkOverlayVram s_pause_vram;
+static NkOverlayVramCapture s_pause_vram_captures[NK_OVERLAY_VRAM_CAPTURES];
 static NkUiImage     s_pause_vram_image;
 static uint32_t     *s_pause_vram_px;    /* the decoded window, GE_VRAM_VIEW_MAX_* words */
 static NkOverlayProfile s_pause_profile;
@@ -1916,21 +1918,41 @@ _Static_assert((int)GE_VRAM_VIEW_DISPLAY == (int)NK_OVERLAY_VRAM_DISPLAY &&
                    (int)GE_VRAM_VIEW_SOURCES == (int)NK_OVERLAY_VRAM_SOURCE_COUNT &&
                    GE_VRAM_VIEW_DEPTH16 == NK_OVERLAY_VRAM_DEPTH16,
                "the GE's VRAM view sources are the overlay page's, index for index");
+_Static_assert(GE_VRAM_CAPTURE_MAX == NK_OVERLAY_VRAM_CAPTURES,
+               "the overlay's Capture row lists every capture ge.c records");
+static void gui_pause_copy_vram_sources(const GeVramSources *sources,
+                                        NkOverlayVramSurface *out, bool *present,
+                                        bool *swizzled) {
+    for (int i = 0; i < GE_VRAM_VIEW_SOURCES; i++) {
+        const GeVramWindow *w = &sources->window[i];
+        NkOverlayVramSurface s = { w->addr, w->stride, w->width, w->height, w->format };
+        out[i] = s;
+        present[i] = sources->present[i] != 0;
+    }
+    *swizzled = sources->texture_swizzled != 0;
+}
+
 /* The surfaces the display and the GE state name while the game is paused, from the same
  * ge.c function vram-view-identity-selftest runs (ge_shared.h): the displayed framebuffer, the
- * draw target, the depth buffer and the bound texture. */
+ * draw target, the depth buffer and the bound texture. The same for each SR_VRAMDUMP capture
+ * this run wrote, as ge.c recorded them at that present (ge_vram_capture_info): the page offers
+ * a Capture row only when there is one. */
 static void gui_pause_describe_vram(void) {
     NkOverlayVram *v = &s_pause_vram;
     GeVramSources sources;
+    unsigned count = ge_vram_capture_count();
     ge_vram_view_sources(s_shown_fb.addr, s_shown_fb.stride, (uint32_t)s_shown_fb.fmt,
                          s_shown_fb.valid, &sources);
-    for (int i = 0; i < GE_VRAM_VIEW_SOURCES; i++) {
-        const GeVramWindow *w = &sources.window[i];
-        NkOverlayVramSurface s = { w->addr, w->stride, w->width, w->height, w->format };
-        v->sources[i] = s;
-        v->present[i] = sources.present[i] != 0;
+    gui_pause_copy_vram_sources(&sources, v->sources, v->present, &v->texture_swizzled);
+    if (count > NK_OVERLAY_VRAM_CAPTURES) count = NK_OVERLAY_VRAM_CAPTURES;
+    v->capture_count = 0;
+    for (unsigned i = 0; i < count; i++) {
+        NkOverlayVramCapture *c = &s_pause_vram_captures[v->capture_count];
+        if (!ge_vram_capture_info(i, &c->vblank, &sources)) break;
+        gui_pause_copy_vram_sources(&sources, c->sources, c->present, &c->texture_swizzled);
+        v->capture_count++;
     }
-    v->texture_swizzled = sources.texture_swizzled != 0;
+    v->captures = v->capture_count ? s_pause_vram_captures : NULL;
 }
 
 /* Decodes the viewer's window into the page's image through ge_vram_view_decode, the decode
@@ -1956,15 +1978,31 @@ static void gui_pause_decode_vram(void) {
     window.width = view->view.width;
     window.height = view->view.height;
     window.format = view->view.format;
-    result = ge_vram_view_decode(view->source == NK_OVERLAY_VRAM_TEXTURE, &window,
-                                 s_pause_vram_px, capacity, &width, &height);
+    /* A capture decodes from the image it wrote (ge_vram_capture_decode), not from memory now. */
+    if (view->capture > 0)
+        result = ge_vram_capture_decode((unsigned)(view->capture - 1),
+                                        view->source == NK_OVERLAY_VRAM_TEXTURE, &window,
+                                        s_pause_vram_px, capacity, &width, &height);
+    else
+        result = ge_vram_view_decode(view->source == NK_OVERLAY_VRAM_TEXTURE, &window,
+                                     s_pause_vram_px, capacity, &width, &height);
     if (result == GE_VRAM_VIEW_TEXTURE_REFUSED) {
         s_pause_vram.note = "The bound texture cannot be read now: it is outside guest memory, "
                             "larger than 512 pixels, or a GE capture is running.";
         return;
     }
+    if (result == GE_VRAM_VIEW_CAPTURE_TEXTURE) {
+        s_pause_vram.note = "This texture is swizzled, uses a palette or is compressed: decode it "
+                            "from the capture's files with nk_cli vram.";
+        return;
+    }
+    if (result == GE_VRAM_VIEW_CAPTURE_LOST) {
+        s_pause_vram.note = "This capture's image file is missing, or changed since it was written.";
+        return;
+    }
     if (result != GE_VRAM_VIEW_SHOWN) {
-        s_pause_vram.note = "This window cannot be read now.";
+        s_pause_vram.note = view->capture > 0 ? "This window cannot be shown from the capture."
+                                              : "This window cannot be read now.";
         return;
     }
     s_pause_vram_image.width = width;

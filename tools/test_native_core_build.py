@@ -112,6 +112,8 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/mygame/psmf_producer_selftest --fuzz-iters 100",
     "build/test_input_profile",
     "build/test_nk_sig",
+    "build/test_nk_adhoc_relay",
+    "build/test_nk_adhoc_net",
     "build/test_nk_achievements",
     "build/test_portable_mode",
 )
