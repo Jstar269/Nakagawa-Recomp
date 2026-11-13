@@ -16520,7 +16520,7 @@ class Record20261015Tests(unittest.TestCase):
                      "not in public history", "528e41f21ffd9f174aa8b1e4dd098db21402f9b1188f4a57a35e76723ef735fd",
                      "not byte-identical to the one measured",
                      "acceptance-eligible with 0 blockers", "0x8001000d", "ABCDEFGHWX",
-                     "src/rt/hle_data.c"):
+                     "src/rt/hle_data.c and src/rt/hle_io.c"):
             self.assertIn(term, note)
         self.assertIn("- **PSP-3000 single-case run of `hle-io-trunc` (2026-11-02 UTC)**", self.doc)
 
