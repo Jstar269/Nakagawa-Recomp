@@ -969,8 +969,8 @@ game's own value wins over the preset ([PLAYER_UI_DESIGN.md](PLAYER_UI_DESIGN.md
 `SR_PRESENT_UPSCALE=fsr1` makes the Vulkan presenter enlarge the picture to its place in the
 window with AMD FidelityFX Super Resolution 1: EASU, an edge-adaptive upscaler, then RCAS
 sharpening. `off`, the default, keeps the `SR_PRESENT_SCALING` filter. It runs only when the
-picture is enlarged on both axes, on every frame the presenter shows except a CPU-presented one
-while `SR_MOVIE_UPSCALE` is on. It is presentation only:
+picture is enlarged on both axes, on every frame the presenter shows except a movie frame (a
+CPU-presented one, or a GE frame that shows a decoded movie) while `SR_MOVIE_UPSCALE` is on. It is presentation only:
 the guest's frame, guest VRAM and captures are byte for byte what they are with it off
 (`gpu-capture-selftest` and, with a Vulkan device and a display, `display-smoke-fsr1`). A run
 recording (`SR_VIDEOREC_DIR`) is enlarged by FSR 1 too, at the recording's size, and its
@@ -988,16 +988,21 @@ gate and the library sweep set it `off` for their own runs.
 
 ### Movie upscaler (`SR_MOVIE_UPSCALE`)
 
-`SR_MOVIE_UPSCALE` gives frames the CPU presents, which are decoded movies (and every frame when the
-software GE draws), their own upscaler: `fsr1` scales them with FSR 1, and `anime4k` first doubles
+`SR_MOVIE_UPSCALE` gives movie frames their own upscaler: frames the CPU presents, which are decoded
+movies (and every frame when the software GE draws), and on the Vulkan GE renderer the GE frames that
+show a decoded movie (#2111): `fsr1` scales them with FSR 1, and `anime4k` first doubles
 them once or twice with Anime4K's CNN x2 (M) network, which suits the flat colours and dark lines
 of animated and pre-rendered movies, then takes them to the window's size with FSR 1 (unless the
 doubled picture is already that size, as at the default 960x544 window). `off`, the
 default, leaves them to `SR_PRESENT_UPSCALE`. It applies in the window and in a recording
 (`SR_VIDEOREC_DIR`), each with its own passes at its own size. Use `anime4k` for line art and movies
-only: on other pictures, such as fine regular stripes, it adds a faint ripple along edges. It reaches
-only frames the CPU presents. A game whose movie the GE presents, drawn as a texture (LittleBigPlanet)
-or decoded into a GE target (Hot Shots Tennis), shows a GE frame, which this key does not upscale.
+only: on other pictures, such as fine regular stripes, it adds a faint ripple along edges. A movie
+the GE presents is found by its provenance: the movie decoder notes where each picture lands, and a
+GE frame is a movie frame when pictures drawn as a texture (Hot Shots Tennis draws a byte-exact copy
+of each picture), or decoded into the displayed target with no GE drawing after them, cover at least
+half of it ([ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md), section 2.2). A movie the game
+converts or scales on its way to the screen, or decodes behind a swizzled VRAM view, stays a GE
+frame and is not upscaled.
 Like `SR_PRESENT_UPSCALE` it is presentation only: the decoded movie, the guest's frame, guest VRAM
 and captures are unchanged (`display-smoke-anime4k`, which needs a Vulkan device and a display). A
 run with it on is stamped as enhanced (`ACE_MODE: present upscale movie-anime4k`, a

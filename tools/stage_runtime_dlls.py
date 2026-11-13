@@ -238,6 +238,29 @@ def stage_ui_font_assets(target_dir: Path, *, repo_root: Path = ROOT) -> list[st
     return staged
 
 
+# The launcher music's track (#2207): the player reads it from beside itself at this
+# relative path (PLAYER_UI_MUSIC_TRACK in src/player/ui/player_ui_music.h).
+LAUNCHER_MUSIC_TRACK = Path("assets") / "music" / "launcher" / "ChillLofi.ogg"
+
+
+def stage_launcher_music(target_dir: Path, *, repo_root: Path = ROOT) -> list[str]:
+    """Copy the launcher music's track beside an opt-in player build, with its fonts."""
+    source = repo_root / LAUNCHER_MUSIC_TRACK
+    destination = target_dir / LAUNCHER_MUSIC_TRACK
+    if not source.is_file():
+        raise StageError(f"LAUNCHER_MUSIC_MISSING: expected {source}")
+    if destination.exists() and not destination.is_file():
+        raise StagingCollisionError(
+            f"launcher music staging collision: {destination} is not a file"
+        )
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+    except OSError as exc:
+        raise StageError(f"LAUNCHER_MUSIC_STAGE_FAILED: {exc}") from exc
+    return [LAUNCHER_MUSIC_TRACK.as_posix()]
+
+
 def stage_redump_list(target_dir: Path, *, repo_root: Path = ROOT) -> list[str]:
     """Copy the bundled Redump PSP list (``assets/redump``) beside the player.
 
@@ -370,6 +393,7 @@ def stage_runtime_dlls(
 
     if include_ui_fonts:
         staged.update(stage_ui_font_assets(target_dir, repo_root=repo_root))
+        staged.update(stage_launcher_music(target_dir, repo_root=repo_root))
         # The player's other bundled data goes with its fonts: the Redump list.
         staged.update(stage_redump_list(target_dir, repo_root=repo_root))
 
@@ -676,11 +700,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.include_ui_fonts:
             try:
                 fonts = stage_ui_font_assets(args.target, repo_root=ROOT)
+                stage_launcher_music(args.target, repo_root=ROOT)
                 redump = stage_redump_list(args.target, repo_root=ROOT)
             except StageError as exc:
                 print(f"stage_runtime_dlls: FAIL: {exc}", file=sys.stderr)
                 return 1
             print(f"stage_runtime_dlls: staged {len(fonts)} UI font asset(s) into {args.target}")
+            print(f"stage_runtime_dlls: staged the launcher music track into {args.target}")
             print(f"stage_runtime_dlls: staged the Redump list ({len(redump)} file(s)) into {args.target}")
             return 0
         print(
@@ -702,13 +728,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     font_assets = [name for name in staged if name.startswith("assets/fonts/ui/")]
     redump = [name for name in staged if name.startswith("assets/redump/")]
-    dlls = [name for name in staged if name not in font_assets and name not in redump]
+    dlls = [name for name in staged
+            if name not in font_assets and name != LAUNCHER_MUSIC_TRACK.as_posix()
+            and name not in redump]
     print(
         f"stage_runtime_dlls: staged {len(dlls)} runtime DLL(s) into "
         f"{args.target}: {', '.join(dlls)}"
     )
     if font_assets:
         print(f"stage_runtime_dlls: staged {len(font_assets)} UI font asset(s) into {args.target}")
+        print(f"stage_runtime_dlls: staged the launcher music track into {args.target}")
     if redump:
         print(f"stage_runtime_dlls: staged the Redump list ({len(redump)} file(s)) into {args.target}")
     if args.runtime_manifest:

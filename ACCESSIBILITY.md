@@ -89,6 +89,11 @@ so we use its contrast and target-size values as a guide for the launcher only.
 - **Windows' settings apply at once.** The launcher reads the contrast theme and *Animation effects* every frame,
   so a change in Windows takes effect without a restart.
 - **Volume** has its own setting (*Settings > Game volume*), separate from any volume setting inside a game.
+- **Launcher music is off by default.** *Settings > Launcher music* turns on a quiet looping track in the launcher
+  only, and *Settings > Music volume* sets its level apart from Game volume. Both rows are reached with the keyboard
+  or a controller like every other setting. The music fades out before a game starts and while the launcher window
+  is in the background, and never plays during a game. Menu sounds are off by default as well. Neither carries
+  information: everything they accompany is shown on screen.
 - **Status and errors are words first.** Every error screen has a plain-language title, a "what to do" sentence and
   a named recovery button. A disc the player cannot use is explained, not just refused.
 

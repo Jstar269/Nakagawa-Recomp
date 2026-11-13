@@ -12490,6 +12490,15 @@ int main(int argc, char **argv) {
     assert(settings->settings.master_volume == 100);
     player_app_adjust_volume(settings, -2000);
     assert(settings->settings.master_volume == 0);
+    /* The launcher music's level is its own and stays within 0 to 100 (#2207). */
+    settings->settings.launcher_music_volume = 80;
+    player_app_adjust_launcher_music_volume(settings, 5);
+    assert(settings->settings.launcher_music_volume == 85);
+    player_app_adjust_launcher_music_volume(settings, 1000);
+    assert(settings->settings.launcher_music_volume == 100);
+    player_app_adjust_launcher_music_volume(settings, -2000);
+    assert(settings->settings.launcher_music_volume == 0);
+    assert(settings->settings.master_volume == 0);
     free(settings);
 
     /* 9b. The launch-relevant settings map onto the session's runtime config;
@@ -14475,6 +14484,9 @@ int main(int argc, char **argv) {
         assert(s_app->settings.interface_size_pct == 0);
         assert(s_app->settings.text_size_pct == 100);
         assert(s_app->settings.master_volume == 80);
+        /* #2207: launcher music is off by default, at its own level. */
+        assert(s_app->settings.launcher_music == false);
+        assert(s_app->settings.launcher_music_volume == 80);
         assert(s_app->settings.launcher_window_width == 1280);
         assert(s_app->settings.launcher_window_height == 720);
         assert(s_app->settings.launcher_window_position_valid == false);
@@ -14498,6 +14510,10 @@ int main(int argc, char **argv) {
         player_app_cycle_build_speed(s_app);
         assert(s_app->settings.build_speed == PACKAGE_BUILD_SPEED_FASTEST);
         s_app->settings.master_volume = 55;
+        player_app_toggle_launcher_music(s_app);
+        assert(s_app->settings.launcher_music == true);
+        player_app_adjust_launcher_music_volume(s_app, -45);
+        assert(s_app->settings.launcher_music_volume == 35);
         s_app->settings.launcher_window_maximized = true;
         s_app->settings.launcher_window_position_valid = true;
         s_app->settings.launcher_window_x = -1600;
@@ -14523,6 +14539,8 @@ int main(int argc, char **argv) {
         assert(s_app2->settings.share_system_libraries == false);
         assert(s_app2->settings.build_speed == PACKAGE_BUILD_SPEED_FASTEST);
         assert(s_app2->settings.master_volume == 55);
+        assert(s_app2->settings.launcher_music == true);
+        assert(s_app2->settings.launcher_music_volume == 35);
         assert(s_app2->settings.library_sort == PLAYER_LIBRARY_SORT_PLAYED);
         /* The sort is saved by name; a name this build does not know keeps the default. */
         s_app2->settings.library_sort = PLAYER_LIBRARY_SORT_NAME;

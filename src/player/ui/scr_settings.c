@@ -96,6 +96,37 @@ static bool settings_row(NkUi *ui, uint32_t k, NkUiId button, const char *name,
     return pressed;
 }
 
+/* A named level with a - and a + either side of it (Game volume, Music volume). */
+static void settings_level_row(NkUi *ui, uint32_t k, const char *name, int level, NkUiId down,
+                               NkUiId up, NkUiId text_id, PlayerUiSettingsOp down_op,
+                               PlayerUiSettingsOp up_op, float name_width,
+                               PlayerUiAction *result) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    char line[16];
+    NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_3);
+    NkUiId base = (NkUiId)(SET_ID_ROWS + k * 4u);
+    row.align_y = NK_UI_ALIGN_CENTER;
+    if (!nk_ui_begin_container(ui, base, &row, NULL)) return;
+    {
+        NkUiLayout cell = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(name_width), sizing_fit(),
+                                      0.0f);
+        if (nk_ui_begin_container(ui, base + 1u, &cell, NULL)) {
+            nk_ui_text_role(ui, base + 2u, name, NK_UI_TYPE_BODY, theme->paper);
+            nk_ui_end_container(ui);
+        }
+        if (nk_ui_button(ui, down, "-", NK_UI_BUTTON_SMALL)) *result = settings_op(down_op);
+        (void)snprintf(line, sizeof(line), "%d%%", level);
+        cell.width = sizing_fixed(52.0f);
+        cell.align_x = NK_UI_ALIGN_CENTER;
+        if (nk_ui_begin_container(ui, base + 3u, &cell, NULL)) {
+            nk_ui_text_role(ui, text_id, line, NK_UI_TYPE_DATA, theme->paper);
+            nk_ui_end_container(ui);
+        }
+        if (nk_ui_button(ui, up, "+", NK_UI_BUTTON_SMALL)) *result = settings_op(up_op);
+    }
+    nk_ui_end_container(ui);
+}
+
 /* The game's frames come at 60 Hz (the PSP's 59.94 Hz): a display shows them evenly only when
    its rate is a whole multiple of that. Half a hertz covers the 59.94 family and the rounding
    displays report, and is far from the nearest uneven rate (75, 90, 144, 165). */
@@ -242,39 +273,10 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
         if (nk_ui_card_begin(ui, SET_ID_LAUNCHER, sizing_fixed(card), sizing_grow(),
                              NK_UI_SPACE_2)) {
             nk_ui_eyebrow(ui, SET_ID_TEXT + 0x20u, "Launcher and sound");
-            {
-                /* Volume: the two steps either side of the level. */
-                NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
-                                             NK_UI_SPACE_3);
-                NkUiId base = (NkUiId)(SET_ID_ROWS + 5u * 4u);
-                row.align_y = NK_UI_ALIGN_CENTER;
-                if (nk_ui_begin_container(ui, base, &row, NULL)) {
-                    NkUiLayout cell = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(name_width),
-                                                  sizing_fit(), 0.0f);
-                    if (nk_ui_begin_container(ui, base + 1u, &cell, NULL)) {
-                        nk_ui_text_role(ui, base + 2u, "Game volume", NK_UI_TYPE_BODY,
-                                        theme->paper);
-                        nk_ui_end_container(ui);
-                    }
-                    if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_VOLUME_DOWN, "-",
-                                     NK_UI_BUTTON_SMALL)) {
-                        *result = settings_op(PLAYER_UI_SETTINGS_VOLUME_DOWN);
-                    }
-                    (void)snprintf(line, sizeof(line), "%d%%", model->volume);
-                    cell.width = sizing_fixed(52.0f);
-                    cell.align_x = NK_UI_ALIGN_CENTER;
-                    if (nk_ui_begin_container(ui, base + 3u, &cell, NULL)) {
-                        nk_ui_text_role(ui, SET_ID_TEXT + 0x11u, line, NK_UI_TYPE_DATA,
-                                        theme->paper);
-                        nk_ui_end_container(ui);
-                    }
-                    if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_VOLUME_UP, "+",
-                                     NK_UI_BUTTON_SMALL)) {
-                        *result = settings_op(PLAYER_UI_SETTINGS_VOLUME_UP);
-                    }
-                    nk_ui_end_container(ui);
-                }
-            }
+            settings_level_row(ui, 5u, "Game volume", model->volume,
+                               PLAYER_UI_ID_SETTINGS_VOLUME_DOWN, PLAYER_UI_ID_SETTINGS_VOLUME_UP,
+                               SET_ID_TEXT + 0x11u, PLAYER_UI_SETTINGS_VOLUME_DOWN,
+                               PLAYER_UI_SETTINGS_VOLUME_UP, name_width, result);
             if (settings_row(ui, 6u, PLAYER_UI_ID_SETTINGS_LAUNCHER_FULLSCREEN,
                              "Launcher fullscreen (F11)", settings_on_off(model->launcher_fullscreen),
                              model->launcher_fullscreen, name_width)) {
@@ -296,6 +298,21 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
                              "Check for updates", false, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_CHECK_UPDATES);
             }
+            /* Launcher music (#2207), at the card's end so the rows above keep their
+               places beside the GAME rows. Its level is its own, as the menu sounds'
+               is: Game volume is the game's. */
+            if (settings_row(ui, 14u, PLAYER_UI_ID_SETTINGS_LAUNCHER_MUSIC, "Launcher music",
+                             model->launcher_music_value != NULL
+                                 ? model->launcher_music_value
+                                 : settings_on_off(model->launcher_music),
+                             model->launcher_music, name_width)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC);
+            }
+            settings_level_row(ui, 15u, "Music volume", model->music_volume,
+                               PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_DOWN,
+                               PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP, SET_ID_TEXT + 0x12u,
+                               PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN,
+                               PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP, name_width, result);
             {
                 NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
                 (void)snprintf(line, sizeof(line), "Controller: %s",
