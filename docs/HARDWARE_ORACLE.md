@@ -1482,7 +1482,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   The values are listed under [PSP-SAS-003 capture 2026-11-07](#psp-sas-003-capture-2026-11-07).
 
 - **PSP-3000 single-case run of `sas-adsr` (2026-11-13 UTC)**: one PSP-3000, game context (entered from the XMB by
-  one `nkctl --owner-present game-context` soft reset, the owner at home), one launch on its own boot (boot 208)
+  one `nkctl --owner-present game-context` soft reset, the owner at the console), one launch on its own boot (boot 208)
   after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). Firmware identity: console PSP-3000;
   system software 6.61 (operator-declared); PSPLink `pspver` printed `0x06060110` ("6.6.1") in the game context on
   this boot (`0x06060010` in the XMB context before and after), which the runner records as 6.6.1; custom firmware
@@ -3898,7 +3898,7 @@ not expected PSP values.
 | `vcodec-words` | `PSP-VCODEC-001` | `NOT_RUN` | Built Media Engine boundary-word cells over synthetic AVC access units; no hardware result is claimed. |
 | `hle-self-stop-unload` | `PSP-HLE-SELFSTOP-001` | `MEASURED` (2026-11-08, PSP-3000, boot 165, `935f225d`; 6 records) | #341: sceKernelSelfStopUnloadModule from a helper PRX's own thread: the call does not return, module_stop runs once and the module is unloaded. |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | `NOT_RUN` (captured twice, PSP-3000, game context, 2026-11-12 boots 204 and 206; not acceptance-eligible) | Built #1386 dialog timing and wrong-state cells; no hardware result is claimed. A netconf dialog (boot 204) and a gamedata install dialog (boot 206) stayed RUNNING to the poll cap and the console then needed a power cycle: [captures](#psp-hle-utility-dialog-001-captures-2026-11-12). |
-| `hle-utility-netconf-sharing` | `PSP-HLE-UTILITY-DIALOG-002` | `NOT_RUN` | Built #1386 game sharing and netconf dialog cells (case 166), game sharing first and netconf last, with no savedata and no gamedata install dialog; no hardware result is claimed. POWER RISK, owner present, one launch per boot: case 161's netconf dialog stuck RUNNING on boot 204 ([captures](#psp-hle-utility-dialog-001-captures-2026-11-12)), so netconf-timing is expected to stick here too and the console to need a power cycle either way (on boot 204 it followed a net teardown that completed; case 166 tears down as case 161 does). Game context, WLAN switch on; the game sharing dialog is expected to use the PSP's ad hoc radio, and nothing is sent to an access point or any server. |
+| `hle-utility-netconf-sharing` | `PSP-HLE-UTILITY-DIALOG-002` | `CAPTURED` (2026-11-13 UTC, PSP-3000, boot 211, game context, `e8b9b0cd5`; game sharing stayed RUNNING to the poll cap, the netconf cells did not run, and the console needed a power cycle; not acceptance-eligible) | See [PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13](#psp-hle-utility-dialog-002-capture-2026-11-13). Built #1386 game sharing and netconf dialog cells (case 166), game sharing first and netconf last, with no savedata and no gamedata install dialog; no hardware result is claimed. POWER RISK, owner present, one launch per boot: case 161's netconf dialog stuck RUNNING on boot 204 ([captures](#psp-hle-utility-dialog-001-captures-2026-11-12)), so netconf-timing is expected to stick here too and the console to need a power cycle either way (on boot 204 it followed a net teardown that completed; case 166 tears down as case 161 does). Game context, WLAN switch on; the game sharing dialog is expected to use the PSP's ad hoc radio, and nothing is sent to an access point or any server. |
 | `hle-io-seek` | `PSP-HLE-IO-SEEK-001` | `MEASURED` (2026-11-08, PSP-3000, boot 156, `59520eb0`; 30 records) | #1380: flash0 seeks (64- and 32-bit), sceIoIoctl file commands, and writes on read-only descriptors. |
 | `hle-io-seek-edges` | `PSP-HLE-IO-SEEK-002` | `MEASURED` (2026-11-11, PSP-3000, boot 192, `1a5157e37`; 24 records) | #1380: flash0 SEEK_CUR and past-0x100000000 seeks, and Memory Stick open-flag and async-write cells on a probe-owned file. |
 | `hle-nickname-limit` | `PSP-HLE-NICKNAME-001` | `MEASURED` (2026-11-08, PSP-3000, boot 155, `07e58170`; 16 records) | W-NET-1 (#2197): the owner_name key type and the nickname string call at eight buffer lengths; no value bytes. |
@@ -3955,8 +3955,33 @@ stay in the private campaign directory.
 Every ShutdownStart these captures recorded while RUNNING (four of the six issued) returned `0x80110001`. The
 runtime's utility slot now refuses ShutdownStart during INIT and RUNNING with `0x80110001` for every dialog type, as
 the message dialog's measured rule does (`utility_shutdown_refused` in `src/rt/hle_utility.c`); for savedata, netconf
-and gamedata while RUNNING that agrees with these captures, and the other cells stay UNMEASURED. An
-acceptance-eligible run is needed before any of it is a measured claim (#1386).
+and gamedata while RUNNING that agrees with these captures, and for game sharing while RUNNING it agrees with the
+[PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13](#psp-hle-utility-dialog-002-capture-2026-11-13); the other cells
+stay UNMEASURED. An acceptance-eligible run is needed before any of it is a measured claim (#1386).
+
+### PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13
+
+`hle-utility-netconf-sharing` (case 166, `fixtures/psp_oracle/probe_hle_measure.c`) ran once on 2026-11-13 (UTC) on
+the PSP-3000, boot 211, in the game context (entered from the XMB by one `nkctl --owner-present game-context` soft
+reset, the owner at the console), built from `e8b9b0cd5`, a descendant of this tree's base whose
+`fixtures/psp_oracle` sources and `tools/psp_oracle/parse_golden.py` are identical to this tree's. Firmware: system
+software 6.61 (operator-declared); PSPLink `pspver` 0x06060110, recorded as 6.6.1 in the game context; custom
+firmware ARK-5 with cIPL, version 5.2.0 (operator-declared, not read by a tool); PSPLink built from
+`pspdev/psplinkusb` `7a0035d9`. The envelope is not acceptance-eligible: the loaded module was not proven unloaded
+and the console needed a power cycle. The capture is therefore `CAPTURED`, establishes nothing about PSP behaviour,
+and no cell is MEASURED; the values below are what it shows. The raw envelope and host0 log stay in the private
+campaign directory.
+
+- The sharing net setup returned 0 for all five calls.
+- Game sharing InitStart returned 0. The status went NONE, then INIT at vblank 0, then RUNNING at vblank 44, and
+  stayed RUNNING to the 600-poll cap.
+- The first ShutdownStart, sent while RUNNING at vblank 111, returned `0x80110001`; 2 ShutdownStart calls were made
+  in all, and the dialog stayed RUNNING.
+- The common result word (+0x1c) and the sharing result word (+0x4c) both read `0x80110703`.
+- The sharing teardown returned 0 for all five calls.
+
+No netconf cell ran: the case runs netconf only if game sharing does not stick, so this capture shows nothing about
+the netconf dialog.
 
 ### PSP-HLE-SAVEDATA-NODATA-001 capture 2026-11-10
 

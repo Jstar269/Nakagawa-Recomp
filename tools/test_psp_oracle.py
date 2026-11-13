@@ -3788,6 +3788,10 @@ class PspDmacProbeTests(unittest.TestCase):
                 # 2026-11-10: hle-savedata-nodata (dbb47db4, boot 183, game context): 34 PASS and
                 # 1 SKIP; nodir-load stayed VISIBLE to its bound and the console needed a power cycle.
                 "PSP-HLE-SAVEDATA-NODATA-001",
+                # 2026-11-13 (UTC): hle-utility-netconf-sharing (e8b9b0cd5, boot 211, game
+                # context): the game sharing dialog stayed RUNNING to the poll cap, netconf did
+                # not run, and the console needed a power cycle.
+                "PSP-HLE-UTILITY-DIALOG-002",
             },
         )
 
@@ -12934,13 +12938,12 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json").read_text(
             encoding="utf-8"))
         row = next(t for t in manifest["tests"] if t["id"] == "PSP-HLE-UTILITY-DIALOG-002")
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
         self.assertEqual(row["case_ids"], ["sharing-*", "netconf-*"])
         self.assertTrue(row["risk"].startswith("POWER RISK; case 161's netconf dialog"))
         for field in ("risk", "evidence_note"):
             with self.subTest(field=field):
                 self.assertIn("boot 204", row[field])
-        self.assertIn("the sharing cells have no expectation", row["evidence_note"])
         # Operator steps in the other owner-present rows' form: the game context, the WLAN
         # switch, one launch per boot and a power cycle after a stuck run.
         self.assertTrue(row["reset"].startswith("game context: standalone PSPLink entered from the "
@@ -12989,6 +12992,52 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
                      "the console is expected to need a power cycle after this case either way"):
             with self.subTest(readme=term):
                 self.assertIn(term, texts["readme"])
+
+    def test_the_2026_11_13_run_is_a_sharing_capture_and_claims_nothing_about_netconf(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json").read_text(
+            encoding="utf-8"))
+        row = next(t for t in manifest["tests"] if t["id"] == "PSP-HLE-UTILITY-DIALOG-002")
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
+        for absent in ("measurement_note", "evidence_cases", "evidence_ref"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, row)
+        note = row["evidence_note"]
+        for term in ("2026-11-13 (UTC)", "PSP-3000", "boot 211", "game context", "e8b9b0cd5",
+                     "system software 6.61", "6.6.1", "ARK-5 with cIPL, version 5.2.0",
+                     "7a0035d9", "not acceptance-eligible", "establishes nothing about PSP behaviour",
+                     "InitStart returned 0", "INIT at vblank 0", "RUNNING at vblank 44",
+                     "600-poll cap", "vblank 111", "0x80110001", "2 ShutdownStart calls",
+                     "+0x1c", "+0x4c", "0x80110703", "all five", "netconf cells did not run",
+                     "power cycle"):
+            with self.subTest(term=term):
+                self.assertIn(term, note)
+        hardware = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        readme = (root / "fixtures" / "psp_oracle" / "README.md").read_text(encoding="utf-8")
+        docs_row = next(line for line in hardware.splitlines()
+                        if line.startswith("| `hle-utility-netconf-sharing` |"))
+        readme_row = next(line for line in readme.splitlines()
+                          if line.startswith("| `hle-utility-netconf-sharing` |"))
+        self.assertIn("| `CAPTURED` (2026-11-13 UTC, PSP-3000, boot 211, game context, "
+                      "`e8b9b0cd5`;", docs_row)
+        self.assertIn("(#psp-hle-utility-dialog-002-capture-2026-11-13)", docs_row)
+        self.assertIn("**CAPTURED** on 2026-11-13 UTC", readme_row)
+        start = hardware.index("### PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13")
+        section = " ".join(hardware[start:hardware.index("\n### ", start + 1)].split())
+        for term in ("boot 211", "`e8b9b0cd5`", "`0x80110001`", "`0x80110703`",
+                     "not acceptance-eligible", "establishes nothing about PSP behaviour",
+                     "the owner at the console", "No netconf cell ran"):
+            with self.subTest(section=term):
+                self.assertIn(term, section)
+        # Nothing is said about how netconf behaves: its cells did not run.
+        for text in (note, docs_row, readme_row, section):
+            for claim in ("netconf-timing returned", "netconf dialog went", "netconf stayed"):
+                self.assertNotIn(claim, text)
+        # The shared ShutdownStart paragraph cites this capture for the sharing dialog.
+        paragraph = " ".join(hardware[hardware.index(
+            "Every ShutdownStart these captures recorded while RUNNING"):start].split())
+        self.assertIn("game sharing while RUNNING", paragraph)
+        self.assertIn("[PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13]", paragraph)
 
 
 class HleUtilityDialogsProbeTests(unittest.TestCase):
@@ -16464,7 +16513,7 @@ class Record20261015Tests(unittest.TestCase):
             ("sas-mix", "PSP-SAS-003", "MEASURED"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
-            ("hle-utility-netconf-sharing", "PSP-HLE-UTILITY-DIALOG-002", "NOT_RUN"),
+            ("hle-utility-netconf-sharing", "PSP-HLE-UTILITY-DIALOG-002", "CAPTURED"),
             ("hle-io-seek-edges", "PSP-HLE-IO-SEEK-002", "MEASURED"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
         )
@@ -16501,6 +16550,9 @@ class Record20261015Tests(unittest.TestCase):
                      "boot 185, 74acbe42", "loaded module was not proven unloaded", "2026-11-05"):
             self.assertIn(term, note)
         self.assertIn("- **PSP-3000 single-case run of `sas-adsr` (2026-11-13 UTC)**", self.doc)
+        # Public text says the owner was at the console, never where the owner was.
+        for text in (note, self.doc):
+            self.assertNotIn("owner at home", text)
         # The 2026-11-10 section keeps the capture and points at the rerun.
         self.assertIn("### PSP-SAS-002 capture 2026-11-10", self.doc)
         self.assertIn("(#psp-sas-002-capture-2026-11-10)", self.doc)
