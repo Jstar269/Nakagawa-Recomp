@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "hst.timing.native_60hz",
   "display_name": "Hot Shots Tennis Native 60 Hz Logic (Experimental)",
-  "version": "14.0.0-pre1",
+  "version": "15.0.0-pre1",
   "category": "timing_frame_presentation",
   "target_title_id": "hst-ucus98701-v1",
   "game_version": "1.01",
@@ -6416,6 +6416,38 @@
       "word_count": 1,
       "stock_digest": "60ca640752c9a08268f0f2d4de6eec5f36a6f953c8761648a7891f7469a95e2b",
       "transform": "gate_30hz"
+    },
+    {
+      "id": "S0375_a",
+      "function": "hst_fn_0010bc70",
+      "insn_offset": 1160,
+      "word_count": 1,
+      "stock_digest": "93487fb1b6e34cc5cea9e1285012aac39d65bdb566d322b17b85a56201b55621",
+      "transform": "gate_30hz_store"
+    },
+    {
+      "id": "S0375_b",
+      "function": "hst_fn_0010bc70",
+      "insn_offset": 1244,
+      "word_count": 1,
+      "stock_digest": "1a44fc2e8e11d4a855902480f35687aca608c868f725f67bbbd733320daa8b9e",
+      "transform": "gate_30hz_store"
+    },
+    {
+      "id": "S0386_a",
+      "function": "hst_fn_00110bfc",
+      "insn_offset": 248,
+      "word_count": 1,
+      "stock_digest": "fa65e37c0230abedf855c737158c5df9ad2e6e45b521a9663478998cacb84bb5",
+      "transform": "gate_30hz_store"
+    },
+    {
+      "id": "S0386_b",
+      "function": "hst_fn_00110bfc",
+      "insn_offset": 264,
+      "word_count": 1,
+      "stock_digest": "e1c771c11f8a17864c4177828220e67c55af27087fb180061fe35b36dc591abd",
+      "transform": "gate_30hz_store"
     }
   ],
   "update_boundary": {

@@ -4689,6 +4689,22 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             with self.assertRaisesRegex(EnhancementPackageError, "does not match the executable"):
                 self._publish(elf_bytes, wrong)
 
+    def test_shipped_hot_shots_tennis_package_holds_its_eased_fields(self) -> None:
+        """From 15.0.0-pre1 the Hot Shots Tennis package holds two eased fields at their 30 Hz values with
+        gate_30hz_store (section 11.3.2.2): a menu cursor's x and y, and a ticker's two positions while it
+        eases in. Each store site names a function of the site map, and the package declares the update
+        boundary every gate counts."""
+        package = json.loads((ROOT / "assets" / "enhancements" / "ucus98701-60hz.json").read_text("utf-8"))
+        stores = [site for site in package["sites"] if site["transform"] == "gate_30hz_store"]
+        self.assertEqual(sorted(site["id"] for site in stores),
+                         ["S0375_a", "S0375_b", "S0386_a", "S0386_b"])
+        self.assertEqual(len({site["function"] for site in stores}), 2)
+        for site in stores:
+            with self.subTest(site=site["id"]):
+                self.assertIn(site["function"], package["site_map"])
+                self.assertEqual(site.get("word_count", 1), 1)
+        self.assertIn("update_boundary", package)
+
     def test_shipped_packages_validate_and_pass_the_publication_check(self) -> None:
         """Every package in assets/enhancements/ is a valid published package with no findings.
 
