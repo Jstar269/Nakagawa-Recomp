@@ -2144,8 +2144,9 @@ filter `nk_tex_soften_alpha_edge` and the digest `nk_tex_soft_shadow_digest` in 
 geometry need a light-space depth pass over the title's shadow casters. That pass needs a GE scene seam that knows
 which draws are casters, and that knowledge has to come from package-declared draw classification. The renderer
 also needs a shadow-compare sampler and a receiver pass, and must suppress the title's own blob quads once real
-shadows draw. That is GE scene-level work, comparable to the RTX Remix seam (#1330), not a texture change, and this
-feature does not start it.
+shadows draw. That is GE scene-level work, comparable to the RTX Remix seam
+([#1330](https://github.com/Jstar269/Nakagawa-Recomp/issues/1330)), not a texture change, and this feature does not
+start it.
 
 ## 11. Guest-Visible Items
 

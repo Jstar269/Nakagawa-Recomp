@@ -164,6 +164,13 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   can read back ([section 11.3.4](ENHANCEMENT_CONTRACT.md#1134-texture-replacement-texpackon)); the rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1012-texture-replacement), and how to use one is in
   [`YOUR_OWN_GAMES.md`](YOUR_OWN_GAMES.md#texture-packs).
+- **Soft shadows.** A part of Ace only, off by default and in no graphics preset: Settings > Enhanced offers it as
+  **Soft shadows** (On or Off), for the library or for one game. In a game whose package names its shadow
+  textures, it draws those small blob shadows with a smooth edge instead of a stepped one, at every render scale. No
+  game's package names any yet, so a run with it on says on one `ACE_MODE: shadow unavailable` line that nothing is
+  declared and draws as before. The launch line carries `shadow=soft`. It changes the frames the game can read back
+  ([section 11.3.13](ENHANCEMENT_CONTRACT.md#11313-soft-shadows-shadowsoft-not-yet-admitted)); the rules are in
+  [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1023-soft-shadows).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release
