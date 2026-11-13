@@ -2086,15 +2086,16 @@ does, so it shows one device texel per guest texel. The texture's own width and 
 is clamped or wrapped at them, as the GE does, not at the target image's edge, so a texture inside a larger target never
 shows the target's pixels beyond it (`rtt-edge`), and a texture at an offset inside a target scales the same way
 (`rtt-scale-offset`).
-Every other read of a render target, including a read in another format, a swizzled or mipmapped read and another
-buffer width, decodes the target from guest memory at 1x. That is the GE's own picture of it, so such an effect shows
-1x detail at any render scale; it never shows a picture the PSP would not draw. A CPU read of a target a draw sampled
-returns its top-left device samples in its own format (the readback rule above, `rtt-scale`). A render-target read is
-found by address: depth read as a texture decodes from guest memory at 1x when its address lies outside every colour
-target's span. When it lies inside a colour target's span too, the read takes whichever was written last: depth
-written after the target's image last changed makes it a depth read, decoded from guest memory at 1x after the depth is
-committed there (`rtt-depth-alias`); otherwise the colour target's rules apply. The cases, the depth rule and the debug
-switch are in `src/rt/gpu_sdl3vk/README.md` (#2052).
+Every other read of a render target, including a read in another format, a swizzled or mipmapped read, another buffer
+width and a read through the 0x04200000 or 0x04600000 view of VRAM (`rtt-vram-view`; that the GE's texel fetch reorders
+through a view as a CPU access does is inferred, not measured), decodes the target from guest memory at 1x. That is the
+GE's own picture of it, so such an effect shows 1x detail at any render scale; it never shows a picture the PSP would
+not draw. A CPU read of a target a draw sampled returns its top-left device samples in its own format (the readback rule
+above, `rtt-scale`). A render-target read is found by address: depth read as a texture decodes from guest memory at 1x
+when its address lies outside every colour target's span. When it lies inside a colour target's span too, the read takes
+whichever was written last: depth written after the target's image last changed makes it a depth read, decoded from
+guest memory at 1x after the depth is committed there (`rtt-depth-alias`); otherwise the colour target's rules apply.
+The cases, the depth rule and the debug switch are in `src/rt/gpu_sdl3vk/README.md` (#2052).
 
 At 1x the readback is the PSP's value.
 
@@ -2105,8 +2106,9 @@ The render-target reads that decode at 1x (#2279; the README lists each with its
   format whose texel is not one depth value. The 1x decode is the read, swizzled, mipmapped or at another width too;
 - a scaled form could exist but is not implemented, so these read at 1x and #2279 stays open for them, each in a
   format whose texel is one of the buffer's values: a 16-bit target read as another 16-bit format, CLUT16 and CLUT32
-  at the target's pixel size, a swizzled read, a read with another non-zero buffer width, a mipmapped read, and a
-  depth read in a 16-bit format (outside every colour target, or inside one whose depth was written last).
+  at the target's pixel size, a swizzled read, a read with another non-zero buffer width, a read through the
+  0x04200000 or 0x04600000 view, a mipmapped read, and a depth read in a 16-bit format (outside every colour target,
+  or inside one whose depth was written last).
 
 `rtt-1x-reads` in `gpu-coherence-selftest` runs thirteen such reads at 1x, 2x and 4x (the README lists them): none
 binds a target's image, each depth read commits the GPU's depth first, and the reading target's guest VRAM equals
@@ -2655,10 +2657,20 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the end of the run: the title's build has no culling package, or Widescreen is off. The package build is chosen by
   the title's own data (section 5): `build-package --ace-cull` adds the title's culling package, beside the timing
   package when the build has one (`--experimental-60hz` or `--enhancement-package`) and as the build's one package
-  otherwise (section 9.9); the launcher picking that build for an Ace launch with the part on is a separate
-  change. The player cannot tell ahead of a launch which games have a culling build, so the row's text says it
-  acts only in games that do, and a run without one says so in the `ACE_MODE: cull unavailable (...)` line and
-  the report. The runtime remembers at most 4096 distinct matrices (see Limits below); the report's
+  otherwise (section 9.9). The player reads the title's `<disc id>-cull.json` beside its `-60hz.json`, from the
+  user's `enhancements` folder, else the shipped one, and reads only its `id`, `target_title_id` and `category`: it
+  is usable when its category is `guest_memory_code_hook`, its target is the title, and beside a usable timing
+  package its id differs from that package's and `<timing id>+<hook id>` has at most 64 characters. The player
+  selects the culling build exactly when the launch line carries `cull=on`: an Ace launch with the part on,
+  including a title on Enhanced that the session's `--experimental-60hz` runs as Ace. It then builds and launches
+  `<timing id>+<hook id>` when the 60 FPS game logic is on, else the culling package alone, which exports
+  `SR_EXPERIMENTAL_60HZ=0`. Authentic and Enhanced never do. The title page offers Ace only to a title with a usable
+  timing package, so the culling package alone is the build of such a title with its 60 FPS game logic turned off.
+  A title without a usable culling package keeps its other build; when its culling file exists but cannot be used,
+  the title page's play line names the reason while the part is on. The player checks only these fields:
+  `build-package` checks the rest (section 9.9) and names any refusal in the build's own error. The row's text says the part acts only in games that have a culling build, and a run without
+  one says so in the `ACE_MODE: cull unavailable (...)` line and the report. The runtime remembers at most 4096
+  distinct matrices (see Limits below); the report's
   `cull_untracked` counts the matrix uses it left alone once that table was full, and cull is confirmed only
   while that count is 0: a run with a nonzero count reports cull unavailable as `partial` (the matrices
   tracked before the table filled were widened, the rest were not), never as a complete run. The count is read

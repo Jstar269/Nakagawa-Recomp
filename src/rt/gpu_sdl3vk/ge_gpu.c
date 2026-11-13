@@ -719,16 +719,37 @@ static uint32_t tex_canonical(uint32_t addr) {
     return sr_vram_cpu_aperture(addr) ? sr_vram_cpu_address(addr) : SR_PHYS(addr);
 }
 
+/* The 0x04200000 and 0x04600000 views of VRAM (address bit 21) read each offset elsewhere
+ * (sr_vram_cpu_address, PSP-VRAM-MIRROR-001), changing only offset bits 5..9 and 13: the bytes
+ * that `bytes` from VRAM offset `off` read through either view lie in the 16 KiB-aligned blocks
+ * around them, [*lo, *lo + *len), clamped at the end of VRAM. */
+static void vram_view_envelope(uint32_t off, uint32_t bytes, uint32_t *lo, uint32_t *len) {
+    const uint64_t end = ((uint64_t)off + bytes + 0x3FFFu) & ~UINT64_C(0x3FFF);
+    *lo = off & ~0x3FFFu;
+    *len = (uint32_t)((end < 0x200000u ? end : 0x200000u) - *lo);
+}
+
+/* The canonical range a texture source at `addr` reads: through a reordering view, the
+ * envelope of its plain offset, so a write to any byte the view reads overlaps it. */
+static void tex_source_range(uint32_t addr, uint32_t bytes, uint64_t *lo, uint64_t *hi) {
+    if (sr_vram_cpu_aperture(addr) && (SR_PHYS(addr) & 0x00200000u)) {
+        uint32_t off, len;
+        vram_view_envelope(SR_PHYS(addr) & 0x001FFFFFu, bytes, &off, &len);
+        *lo = SR_VRAM_CPU_BASE + off;
+        *hi = *lo + len;
+        return;
+    }
+    *lo = tex_canonical(addr);
+    *hi = *lo + bytes;
+}
+
 /* Cache the canonical source range of level 0, then of each level 1..mip.max_level (#1373). */
 static void tex_ent_set_ranges(TexEnt *e) {
     int n = 0;
-    e->range_lo[n] = tex_canonical(e->addr);
-    e->range_hi[n] = e->range_lo[n] + e->bytes;
+    tex_source_range(e->addr, e->bytes, &e->range_lo[n], &e->range_hi[n]);
     n++;
-    for (uint32_t l = 0; l < e->mip.max_level && l < 7u; l++, n++) {
-        e->range_lo[n] = tex_canonical(e->mip.addr[l]);
-        e->range_hi[n] = e->range_lo[n] + e->mip_bytes[l];
-    }
+    for (uint32_t l = 0; l < e->mip.max_level && l < 7u; l++, n++)
+        tex_source_range(e->mip.addr[l], e->mip_bytes[l], &e->range_lo[n], &e->range_hi[n]);
     e->range_n = n;
 }
 
@@ -949,6 +970,23 @@ static unsigned long s_cnt_depth_commit = 0;   /* depth_readback_to_guest copies
 static unsigned long s_cnt_movie_tex, s_cnt_movie_present_tex, s_cnt_movie_present_target;
 static unsigned long s_cnt_movie_present_ge;   /* presents while a note was held that stayed GE frames */
 static uint64_t s_cnt_tex_invalidations = 0;
+static int s_tmpl_ok;   /* the cached state template (state_get) is current; defined below */
+
+/* A readback wrote guest VRAM [a0, a1) (canonical addresses) without hook_vram_dirty: mark every
+ * cached texture that reads those bytes stale, as a notified write does. A source with a content
+ * hash then revalidates against its shadow; one without (read through a reordering VRAM view, or
+ * a mip level without a host pointer) decodes again. The state template may carry such a
+ * texture's descriptor, so it goes too. */
+static void tex_invalidate_span(uint64_t a0, uint64_t a1) {
+    for (int i = 0; i < s_tex_n; i++) {
+        TexEnt *e = &s_tex[i];
+        if (e->content_valid && tex_ent_overlaps(e, a0, a1)) {
+            s_cnt_tex_invalidations++;
+            e->content_valid = 0;
+            s_tmpl_ok = 0;
+        }
+    }
+}
 static uint64_t s_cnt_tex_clean_skips = 0;   /* CPU stores that skipped the texture scan (#282): */
 static uint64_t s_cnt_tex_quiet_skips = 0;   /* clean pages, and quiet pages */
 static uint64_t s_cnt_shadow_checks = 0, s_cnt_shadow_hits = 0, s_cnt_shadow_misses = 0;
@@ -1787,6 +1825,8 @@ static int write_guest_fb(const uint32_t *src, uint32_t fba, uint32_t stride, ui
                 dst[x] = (uint16_t)fb_pack(sl[x * s_scale], fmt);
         }
     }
+    const uint64_t row = (uint64_t)stride * ((fmt & 3) == 3 ? 4u : 2u), base = tex_canonical(rba);
+    tex_invalidate_span(base + (uint64_t)y0 * row, base + (uint64_t)y1 * row);
     return 1;
 }
 
@@ -4065,6 +4105,7 @@ static int depth_readback_to_guest(DepthEnt *d) {
     d->guest_dirty = 0;
     s_cnt_depth_commit++;
     ge_zbuf_invalidate_guest_span(depth_first, depth_end - depth_first);
+    tex_invalidate_span(tex_canonical(depth_first), tex_canonical(depth_first) + (depth_end - depth_first));
     if (sr_perf_enabled) sr_perf_vulkan_readback((uint32_t)readback_bytes(DEPTH_BPP));
     return 1;
 }
@@ -5080,10 +5121,11 @@ static int tex_mip_chain_supported(void) {
 static void tex_mip_targets_readback(const TexMipKey *mip, const uint32_t *level_bytes) {
     for (uint32_t i = 0; i < mip->max_level; i++) {
         if (!is_vram(mip->addr[i])) continue;
-        uint32_t off = vram_off(mip->addr[i]);
+        uint32_t off = vram_off(mip->addr[i]), bytes = level_bytes[i];
+        if (mip->addr[i] & 0x00200000u) vram_view_envelope(off, bytes, &off, &bytes);   /* a reordering view */
         for (int t = 0; t < MAX_TGT; t++) {
             Target *tg = &s_tgts[t];
-            if (tg->used && tg->gpu_valid) (void)target_readback_span(tg, off, level_bytes[i]);
+            if (tg->used && tg->gpu_valid) (void)target_readback_span(tg, off, bytes);
         }
     }
 }
@@ -6534,7 +6576,16 @@ static void build_state(int persp, int sprite, Batch *b) {
                 fprintf(stderr, "gegpu: a texture read inside depth buffer 0x%06x: the queued batches did not "
                         "submit, so the newer of colour and depth is judged without them\n", zsrc->zba);
             const int depth_read = zsrc && zsrc->zseq > src->cseq;
-            if (src->gpu_valid && !depth_read && !nortt && !ge_tex_mip_active(g) && g->tex_fmt == src->fmt &&
+            /* A texture address in the 0x04200000 or 0x04600000 view of VRAM (address bit 21; the
+             * uncached 0x44xxxxxx aliases too) reads each byte at another physical offset
+             * (sr_vram_cpu_address, PSP-VRAM-MIRROR-001). That record measured CPU accesses; that
+             * the GE's texel fetch goes through the same mapping is inferred, not measured. Its
+             * texels are then not the target's pixels in the image's order: never a direct bind.
+             * It decodes guest VRAM through the view, as ge.c does, once every target's pixels the
+             * view can reach are there. */
+            const int view_read = (g->tex_addr & 0x00200000u) != 0u;
+            if (src->gpu_valid && !depth_read && !view_read && !nortt && !ge_tex_mip_active(g) &&
+                g->tex_fmt == src->fmt &&
                 !g->tex_swizzle && (g->tex_bufw == src->stride || g->tex_bufw == 0) && (toff % bpp_s) == 0) {
                 uint32_t pix = toff / bpp_s;
                 /* The texture's own size and clamp bits (#2052): psp.frag clamps or wraps each texel
@@ -6564,9 +6615,10 @@ static void build_state(int persp, int sprite, Batch *b) {
                     }
                     /* The twin's pass samples the source's twin (twin_dset). These conditions
                      * are the twin sampling rule too (same psm, so no CLUT; no swizzle; no
-                     * mips; bufw == stride; pixel-aligned): any other read goes through VRAM in
-                     * both passes. The source's twin may still be the presenter's blit source,
-                     * and one that is behind its image is re-seeded first. */
+                     * mips; bufw == stride; pixel-aligned; no reordering view): any other read
+                     * goes through VRAM in both passes. The source's twin may still be the
+                     * presenter's blit source, and one that is behind its image is re-seeded
+                     * first. */
                     if (s_twin && src->timg && (src->tlayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
                                                 src->tgen != src->wgen)) {
                         if (s_nbatch) submit_pending();
@@ -6586,22 +6638,36 @@ static void build_state(int persp, int sprite, Batch *b) {
                 b->pc.texsize[2] = (float)(pix % src->stride);
                 b->pc.texsize[3] = (float)(pix / src->stride);
             } else {
-                /* incompatible stride/format reinterpretation, or mip levels: VRAM + decoder.
-                 * A render target is drawn as the GE drew it: never from a scaled copy. A depth
-                 * read commits what a CPU read would (the targets' pixels, then the depth). */
-                const uint32_t span = tex_span_size(g->tex_bufw, g->tex_w, g->tex_h);
+                /* incompatible stride/format reinterpretation, mip levels or a reordering view:
+                 * VRAM + decoder. A render target is drawn as the GE drew it: never from a scaled
+                 * copy. A depth read commits what a CPU read would (the targets' pixels, then the
+                 * depth). */
+                uint32_t off = vram_off(g->tex_addr), span = tex_span_size(g->tex_bufw, g->tex_w, g->tex_h);
+                if (view_read) vram_view_envelope(off, span, &off, &span);
                 if (depth_read) {
-                    if (!hook_vram_read(0x04000000u + vram_off(g->tex_addr), span))
+                    if (!hook_vram_read(0x04000000u + off, span))
                         fprintf(stderr, "gegpu: a depth read at 0x%06x could not commit the depth to guest "
                                 "VRAM: it decodes what guest VRAM holds\n", vram_off(g->tex_addr));
+                } else if (view_read) {
+                    for (int i = 0; i < MAX_TGT; i++)
+                        if (s_tgts[i].used && s_tgts[i].gpu_valid) (void)target_readback_span(&s_tgts[i], off, span);
                 } else {
-                    (void)target_readback_span(src, vram_off(g->tex_addr), span);
+                    (void)target_readback_span(src, off, span);
                 }
                 s_tex_noscale = 1;
                 b->dset = tex_get();
                 s_tex_noscale = 0;
             }
         } else {
+            if (is_vram(g->tex_addr) && (g->tex_addr & 0x00200000u)) {
+                /* Through a reordering view, a texture that starts in no target may still read
+                 * bytes of one (vram_view_envelope): those target pixels are read back first. */
+                uint32_t off, span;
+                vram_view_envelope(vram_off(g->tex_addr), tex_span_size(g->tex_bufw, g->tex_w, g->tex_h),
+                                   &off, &span);
+                for (int i = 0; i < MAX_TGT; i++)
+                    if (s_tgts[i].used && s_tgts[i].gpu_valid) (void)target_readback_span(&s_tgts[i], off, span);
+            }
             b->dset = tex_get();
             /* A host chain (tex_mips.h): psp.frag samples it with gradients per device pixel. */
             if (s_tex_bound_hm) flags |= F_HOSTMIP;

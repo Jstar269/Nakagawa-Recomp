@@ -654,7 +654,11 @@ void ace_set_ssaa_effective(int factor, const char *reason) {
 static size_t words_add(char *out, size_t cap, size_t used, const char *word) {
     int n = snprintf(out + used, used < cap ? cap - used : 0, "%s%s",
                      used ? " \xC2\xB7 " : "", word);
-    if (n < 0 || used + (size_t)n >= cap) return used;
+    if (n < 0 || used + (size_t)n >= cap) {
+        /* snprintf wrote the part that fit: end the text where it was, so a word drops whole. */
+        if (used < cap) out[used] = '\0';
+        return used;
+    }
     return used + (size_t)n;
 }
 
@@ -1451,7 +1455,12 @@ void ace_finish(void) {
                 (unsigned long long)a->boxes_full, (unsigned long long)a->frames_overflow,
                 (unsigned long long)(a->frames_depth_unwritten + a->frames_depth_none + a->depth_refused));
     }
-    if (!len || !s_report_path[0]) return;
+    if (!s_report_path[0]) return;
+    if (!len) {
+        fprintf(stderr, "ACE_MODE: report not written (longer than ACE_REPORT_MAX, %u bytes)\n",
+                (unsigned)ACE_REPORT_MAX);
+        return;
+    }
     char tmp[sizeof(s_report_path) + 8];
     snprintf(tmp, sizeof(tmp), "%s.tmp", s_report_path);
     FILE *f = fopen(tmp, "wb");
