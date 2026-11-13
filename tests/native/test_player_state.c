@@ -9945,7 +9945,8 @@ static void test_play_mode_pad_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"late\"}") != NULL);
+        assert(saved && strstr(saved, "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"late\", "
+                                      "\"shadow\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"ace\", \"pad\": \"off\"}") != NULL);
         free(saved);
     }
