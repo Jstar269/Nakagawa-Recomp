@@ -3378,8 +3378,18 @@
       {
         "id": "PSP-GE-RASTER-002",
         "status": "implemented",
-        "hardware_evidence": "NOT_RUN",
-        "evidence_note": "Built as the fixed-shape case 187 stream of #2193's raster bounds cells: colour writes past the frame-buffer stride (fbw 512, 500 and 256), depth writes past zbw 256, and a depth-only clear under a scissor, each read back as counts of drawn, cleared, fill and other pixels. Development runs of earlier builds on 2026-11-12 (PSP-3000, XMB context, boots 194 and 195) only set the block address and the RGB comparison. No hardware run is cited and no measurement is claimed.",
+        "hardware_evidence": "MEASURED",
+        "evidence_ref": "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize",
+        "evidence_cases": [
+          "raster-*",
+          "ge-raster-bounds-done"
+        ],
+        "uncited_cases": [
+          "display-check",
+          "depth-*",
+          "vram-restore"
+        ],
+        "measurement_note": "Measured by the 2026-11-13 (UTC) PSP-3000 launch (system software 6.61, operator-declared; custom firmware ARK-5 5.2.0 with cIPL, operator-declared; PSPLink built from pspdev/psplinkusb 7a0035d9; XMB context; boot 214; an unattended run, nobody at the console) of commit 05aafe975, the head of the pull request that added the case, case ge-raster-bounds. 05aafe975 is not an ancestor of this tree; its probe_ge_sample.c and its Makefile CASE lines for this case are identical to this tree's. 38 records and the done record, all PASS, COMPLETE PASS, acceptance-eligible with 0 blockers; every wait ended DONE and no sceGeBreak reset ran. raster-500-x511: colour written past the frame-buffer width continues linearly: 8012 pixels are drawn (500x16+12), row 16 x 0..11 drawn and x 12 onwards fill. raster-256-x479: 2784 pixels are drawn (256x10+224), row 110 x 0..223 drawn and x 224 onwards fill. Only the scissor clips. Drawn 8888 pixels read 0x5a00ff00: they keep the fill's alpha (stencil) byte. The depth cells depth-zbw256-past and depth-clear-scissor are UNDECIDED and not measured: the depth view, read through the 0x04200000 mirror, read 0 for every word, including the depth fill the case's own expectations say it should show, so these reads do not show the depth the GE stored; the depth-* records are recorded as read and not cited. display-check and vram-restore are not cited either. The raw stream stays in the private campaign directory.",
         "group": "ge",
         "source": "fixtures/psp_oracle/probe_ge_sample.c",
         "prx": "ge_raster_bounds.prx",
@@ -3414,8 +3424,13 @@
       {
         "id": "PSP-GE-RASTER-003",
         "status": "implemented",
-        "hardware_evidence": "NOT_RUN",
-        "evidence_note": "Built as the fixed-shape case 188 stream of #343's depth rounding cells (zr-thru-eq, zr-thru-gt, zr-xf-eq) in the ge-raster window and record shape: fractional through-mode and transform-mode depths read as colour through EQUAL and GREATER tests. A 0x1f, 0xe0 or 0xff pass mask reads \"truncate or reduced precision\", not truncation alone. Development runs of earlier builds on 2026-11-12 (PSP-3000, XMB context, boots 194 and 195) only set the RGB comparison. No hardware run is cited and no measurement is claimed.",
+        "hardware_evidence": "MEASURED",
+        "evidence_ref": "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize",
+        "evidence_cases": [
+          "zr-*",
+          "ge-depth-round-done"
+        ],
+        "measurement_note": "Measured by the 2026-11-13 (UTC) PSP-3000 launch (system software 6.61, operator-declared; custom firmware ARK-5 5.2.0 with cIPL, operator-declared; PSPLink built from pspdev/psplinkusb 7a0035d9; XMB context; boot 215; an unattended run, nobody at the console) of commit 05aafe975, the head of the pull request that added the case, case ge-depth-round. 05aafe975 is not an ancestor of this tree; its probe_ge_sample.c and its Makefile CASE lines for this case are identical to this tree's. 18 records and the done record, all PASS, COMPLETE PASS, acceptance-eligible with 0 blockers; every wait ended DONE and no sceGeBreak reset ran. Pass masks (both 32-bit words of each cell): zr-thru-eq 0x1f1f1f1f, zr-thru-gt 0xe0e0e0e0, zr-xf-eq 0xffffffff, that is 0x1f, 0xe0 and 0xff per eight pixels; by the probe's reading key a 0x1f, 0xe0 or 0xff pass mask reads \"truncate or reduced precision\", so it does in all three cells; truncation alone is not claimed. The raw stream stays in the private campaign directory.",
         "group": "ge",
         "source": "fixtures/psp_oracle/probe_ge_sample.c",
         "prx": "ge_depth_round.prx",
