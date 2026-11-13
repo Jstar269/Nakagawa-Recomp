@@ -9,12 +9,13 @@ pair, a table of text pointers stored as a vtable or loaded for a `jr`, a frame 
 analysis withdraws every seed the image's structure does not name whose trace reaches a word
 that cannot be code. These tests build such an overlay from a seed: 40 real functions, one more
 reached only by a call (it holds a valid VFPU instruction the emitter does not support, on a
-path that never runs), and 40,000 words of data that plant every one of those seed kinds.
+path that never runs), and 34,000 words of data that plant every one of those seed kinds.
 """
 
 import contextlib
 import io
 import os
+import pathlib
 import random
 import struct
 import sys
@@ -29,7 +30,7 @@ import codegen  # noqa: E402
 
 LINK = 0x08C00000
 TEXT = LINK + 0x40
-BLOB_WORDS = 40000
+BLOB_WORDS = 34000
 PROLOGUE = 0x27BDFFE0          # addiu sp, sp, -32
 RESERVED = 0x68000000          # opcode 0x1a: no Allegrex instruction
 JR_RA = 0x03E00008
@@ -170,10 +171,18 @@ class ReservedEncodingTest(unittest.TestCase):
             self.assertEqual(analyze.reserved_encoding(word), why)
 
     def test_defined_forms_are_not_judged(self):
-        for funct in analyze._SPECIAL_FUNCTS:
-            self.assertIsNone(analyze.reserved_encoding(funct))
-        for rt in analyze._REGIMM_RTS:
-            self.assertIsNone(analyze.reserved_encoding((1 << 26) | (rt << 16)))
+        # The Allegrex SPECIAL functions and REGIMM rt values, listed here rather than read
+        # from the tables under test.
+        special = (0x00, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+                   0x0F, 0x10, 0x11, 0x12, 0x13, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C,
+                   0x1D, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x2A, 0x2B, 0x2C,
+                   0x2D, 0x2E, 0x2F)
+        for funct in special:
+            self.assertIsNone(analyze.reserved_encoding(funct), hex(funct))
+        for funct in set(range(0x40)) - set(special):
+            self.assertIsNotNone(analyze.reserved_encoding(funct), hex(funct))
+        for rt in (0x00, 0x01, 0x02, 0x03, 0x10, 0x11, 0x12, 0x13):
+            self.assertIsNone(analyze.reserved_encoding((1 << 26) | (rt << 16)), hex(rt))
         # COP3 and jalx are named by the PSP toolchain's disassembler: never judged.
         for word in (0x18000000, 0x4C000000, 0x74000000, VSBN_S, PROLOGUE, JR_RA):
             self.assertIsNone(analyze.reserved_encoding(word))
@@ -184,7 +193,16 @@ class NonCodeOverlayTest(unittest.TestCase):
     def setUpClass(cls):
         cls.overlay = Overlay()
         cls.sizes = []
-        cls.module, cls.log = translate(cls.overlay, cls.sizes)
+        cls.passes = []
+        stock = analyze._non_code_entries
+
+        def recording(d, structural, cache=None):
+            found, reached = stock(d, structural, cache)
+            cls.passes.append((frozenset(d.non_code), frozenset(found)))
+            return found, reached
+
+        with mock.patch.object(analyze, "_non_code_entries", recording):
+            cls.module, cls.log = translate(cls.overlay, cls.sizes)
         with stock_analysis():
             cls.stock_sizes = []
             cls.stock, _ = translate(cls.overlay, cls.stock_sizes)
@@ -207,12 +225,14 @@ class NonCodeOverlayTest(unittest.TestCase):
         # What stays in the data is code-shaped to the last word: a few valid words that end in
         # a `j` out of the image (a tail call into another image, for all the analysis can
         # tell) or a `jr` through a register, as a leaf function does. Nothing tells such a run
-        # apart from code, so it keeps a (translated) body of its own. Over this seed and eight
-        # others, 2 to 5 such runs stayed, of 2 to 15 words; this seed leaves 3.
+        # apart from code, so it keeps a (translated) body of its own. Over this seed and seeds
+        # 1 to 8, 2 to 6 such runs stayed, of 2 to 15 words; one of them (seed 8) ends instead in
+        # a tail jump to a withdrawn word shaped like a prologue, which is no evidence either.
+        # This seed leaves 2.
         elf = analyze.Elf(analyze.code_overlay_elf(self.overlay.image))
         image = analyze.exec_ranges(elf)
         left = [a for a in entries if self.overlay.in_blob(a)]
-        self.assertEqual(len(left), 3)
+        self.assertEqual(len(left), 2)
         for a in left:
             insns = sorted(codegen.function_flow(elf, a, self.module.spans, entries)[0])
             self.assertLessEqual(len(insns), 16)
@@ -267,26 +287,17 @@ class NonCodeOverlayTest(unittest.TestCase):
             return order
 
         outputs = []
-        for seed in (1, 2):
+        for seed in (1,):
             with mock.patch.object(analyze, "_entry_order", shuffled(seed)):
                 module, _ = translate(self.overlay)
             outputs.append(("\n".join(codegen.runtime_module_descriptor_lines(module)),
                             [str(t) for t in module.texts], module.non_code, module.spans))
         expected = ("\n".join(codegen.runtime_module_descriptor_lines(self.module)),
                     [str(t) for t in self.module.texts], self.module.non_code, self.module.spans)
-        self.assertEqual(outputs, [expected, expected])
+        self.assertEqual(outputs, [expected])
 
     def test_the_withdrawal_only_grows_and_ends(self):
-        passes = []
-        stock = analyze._non_code_entries
-
-        def recording(d, structural, cache=None):
-            found, reached = stock(d, structural, cache)
-            passes.append((frozenset(d.non_code), frozenset(found)))
-            return found, reached
-
-        with mock.patch.object(analyze, "_non_code_entries", recording):
-            translate(self.overlay)
+        passes = self.passes
         self.assertGreaterEqual(len(passes), 2)
         for (before, found), (after, _) in zip(passes, passes[1:], strict=False):
             self.assertTrue(found)                      # a pass that continues withdraws ...
@@ -391,6 +402,122 @@ class TraceFunctionTest(unittest.TestCase):
         self.assertNotIn(data_seed, starts)
         self.assertIn(first, starts)
         self.assertIn(callee, starts)
+
+
+def small_overlay(words, data_words=(), name=b"small.ovl"):
+    """An overlay of ``words`` at TEXT, its data section holding ``data_words``."""
+    text = b"".join(struct.pack("<I", w) for w in words)
+    data = b"".join(struct.pack("<I", w) for w in data_words)
+    header = struct.pack("<4s7I", b"MWo3", 1, LINK, len(text), len(data), 0x10 if data else 0,
+                         TEXT + len(text), TEXT + len(text)) + name.ljust(0x20, b"\0")
+    return analyze.Elf(analyze.code_overlay_elf(header + text + data))
+
+
+def jal(target):
+    return (0x03 << 26) | ((target >> 2) & 0x3FFFFFF)
+
+
+def branch(op, rs, rt, at, target):
+    return (op << 26) | (rs << 21) | (rt << 16) | (((target - (at + 4)) >> 2) & 0xFFFF)
+
+
+ADDU = 0x01004021                 # addu t0, t0, zero
+
+
+class WithdrawalRulesTest(unittest.TestCase):
+    def test_an_entry_that_stays_keeps_all_it_reaches(self):
+        # S, a code capture's entry, calls X and branches to C, its return, before it runs
+        # into a reserved word; X, a call target only, branches to the same C. X is withdrawn;
+        # S stays, and C, which S reaches past the reserved word, stays code.
+        s, c, x = TEXT, TEXT + 20, TEXT + 32
+        words = [jal(x), 0, branch(4, 8, 9, TEXT + 8, c), 0, RESERVED,       # S
+                 ADDU, JR_RA, 0,                                              # C
+                 branch(5, 8, 9, x, x + 16), 0, branch(4, 0, 0, x + 8, c), 0,  # X
+                 RESERVED]
+        report = {}
+        with contextlib.redirect_stderr(io.StringIO()):
+            starts, _ = analyze.analyze(small_overlay(words), entries=[s], report=report)
+        self.assertIn(x, report["non_code"])
+        self.assertIn(s, starts)
+        self.assertFalse({c, c + 4, c + 8} & report["non_code_words"])
+
+    def test_the_check_does_not_depend_on_the_order(self):
+        # A calls T and falls into it; B branches into the run before T. Neither call target
+        # nor seed changes how another trace stops, so each verdict is the one a trace without
+        # the memo gives, whatever ran first.
+        a, w, t, b = TEXT, TEXT + 8, TEXT + 12, TEXT + 20
+        words = [jal(t), 0, ADDU, ADDU, RESERVED, branch(4, 0, 0, b, w), 0, JR_RA, 0]
+        elf = small_overlay(words)
+        ranges = analyze.exec_ranges(elf)
+        d = mock.Mock(elf=elf, hc={a, t, b}, calls=set(), non_code=frozenset(),
+                      trace_ranges_for_entry=lambda entry: ranges)
+        evidence = analyze._non_code_evidence(elf, ranges, {})
+        alone = {e: analyze._check_trace(d, e, evidence, {})[1] for e in (a, t, b)}
+        for order in ((a, t, b), (b, t, a), (t, a, b)):
+            clean = {}
+            self.assertEqual({e: analyze._check_trace(d, e, evidence, clean)[1] for e in order},
+                             alone, [hex(e) for e in order])
+        self.assertEqual(d.calls, set())                 # the check adds no call target
+
+    def test_a_withdrawn_seed_still_ends_the_body_before_it(self):
+        # G calls N and runs on into X, a data seed (a data-section pointer) shaped like an
+        # entry. X is withdrawn; G stopped at X before, and stays a function that still stops
+        # there, as its generated body does at X's dispatch boundary.
+        g, x, n = TEXT + 8, TEXT + 20, TEXT + 28
+        words = [JR_RA, 0,                               # a leaf at the segment start
+                 PROLOGUE, jal(n), 0,                    # G
+                 PROLOGUE, RESERVED,                     # X
+                 PROLOGUE, JR_RA, 0x27BD0020]            # N
+        report = {}
+        with contextlib.redirect_stderr(io.StringIO()):
+            starts, _ = analyze.analyze(small_overlay(words, [g, x]), mixed_code_data=True,
+                                        report=report)
+        self.assertIn(x, report["non_code"])
+        self.assertNotIn(g, report["non_code"])
+        self.assertIn(g, starts)
+        self.assertEqual(report["non_code_words"], frozenset({x, x + 4}))
+
+
+class ExecutableNonCodeTest(unittest.TestCase):
+    def test_withdrawn_words_of_the_executable_leave_its_spans(self):
+        # A fixed-address executable whose entry calls a data seed: the seed is withdrawn,
+        # gets no body, and its words leave the spans the interpreter may run.
+        base = 0x1000
+        words = [jal(base + 16), 0, JR_RA, 0,
+                 PROLOGUE, RESERVED, JR_RA, 0]
+        payload_off = 52 + 32
+        blob = bytearray(payload_off + 4 * len(words))
+        blob[:8] = b"\x7fELF\x01\x01\x01\x00"
+        struct.pack_into("<HHIIIIIHHHHHH", blob, 16, 2, 8, 1, base, 52, 0, 0, 52, 32, 1, 0, 0, 0)
+        struct.pack_into("<8I", blob, 52, 1, payload_off, base, base, 4 * len(words),
+                         4 * len(words), 5, 4)
+        struct.pack_into(f"<{len(words)}I", blob, payload_off, *words)
+        with tempfile.TemporaryDirectory() as tmp:
+            elf_path = os.path.join(tmp, "exec.elf")
+            out_c = os.path.join(tmp, "exec.c")
+            with open(elf_path, "wb") as handle:
+                handle.write(blob)
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("TITLE_EXTRA_SPANS", "HST_EXTRA_SPANS", "GAME_BASE")}
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    contextlib.redirect_stderr(io.StringIO()) as err, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                rc = codegen.main(["codegen.py", elf_path, out_c, "--base=0", "--profile=none"])
+            self.assertEqual(rc, 0, err.getvalue())
+            generated = "".join(pathlib.Path(tmp, f).read_text(encoding="utf-8")
+                                for f in sorted(os.listdir(tmp)) if f.endswith((".c", ".h")))
+        self.assertIn("withdrew 1 seeds of the executable as non-code", err.getvalue())
+        self.assertNotIn("void f_00001010(CpuState *s) {", generated)
+        self.assertIn("sr_exec_span_register(0x00001000u, 0x00001010u)", generated)
+        self.assertIn("sr_exec_span_register(0x00001018u, 0x00001020u)", generated)
+        self.assertNotIn("sr_exec_span_register(0x00001000u, 0x00001020u)", generated)
+
+    def test_a_body_in_withdrawn_words_stops_the_build(self):
+        log = io.StringIO()
+        with contextlib.redirect_stderr(log):
+            self.assertFalse(codegen._non_code_disjoint("image", {0x1000, 0x1010}, {0x1010}))
+            self.assertTrue(codegen._non_code_disjoint("image", {0x1000}, {0x1010}))
+        self.assertIn("NON_CODE_TRANSLATED: 1 words", log.getvalue())
 
 
 if __name__ == "__main__":

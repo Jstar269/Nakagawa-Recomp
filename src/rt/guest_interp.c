@@ -654,6 +654,10 @@ void sr_module_code_reset(void) {
     s_module_codes = NULL;
     s_module_code_count = 0;
     s_module_code_capacity = 0;
+    free((void *)s_module_non_code);
+    s_module_non_code = NULL;
+    s_module_non_code_count = 0;
+    s_module_non_code_capacity = 0;
 }
 
 static void set_fault(

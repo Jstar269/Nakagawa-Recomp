@@ -5385,6 +5385,20 @@ def word_runs(addresses):
     return [(lo, hi) for lo, hi in runs]
 
 
+def _non_code_disjoint(image, owned, non_code_words):
+    """True when no word code generation translated or entered (``owned``) lies in the words
+    the analysis withdrew as non-code. Otherwise the two disagree about what is code, a
+    translator bug: say so and refuse, since the withdrawn words leave the interpreter's spans
+    and that code could not run there."""
+    clash = set(owned) & set(non_code_words)
+    if clash:
+        sys.stderr.write(
+            f"codegen: {image}: NON_CODE_TRANSLATED: {len(clash)} words code generation owns "
+            f"lie in what the analysis withdrew as non-code (first 0x{min(clash):08x}); "
+            "the analysis and the generator disagree about what is code\n")
+    return not clash
+
+
 def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, shared=False,
                              entry_hints=None, data=None, name=None, entries=None,
                              options=None):
@@ -5538,6 +5552,8 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
             module.functions.append((a, nwords))
     finally:
         ADDRESS_SPACE = previous_space
+    if non_code_words and not _non_code_disjoint(name, translated_words | known, non_code_words):
+        return 1
     module.spans = sorted(set((lo, hi) for lo, hi in ranges if hi > lo))
     if non_code_words:
         module.spans = spans_without(module.spans, non_code_words)
@@ -7106,7 +7122,11 @@ def _translate(argv):
         miss_seeds.report_outcome(miss_seed_outcome, prefix="CODEGEN_MISS_SEEDS")
     cfg_report = _cfg_report_and_gate(elf, analyzed, ranges, extra_spans, cfg_report_path, cfg_gate,
                                       miss_seed_outcome)
-    owned_exec_ranges = list(ranges)
+    # The words only withdrawn seeds reached are no code: the interpreter may not run them.
+    main_non_code_words = (frozenset(seed_args["report"].get("non_code_words", ()))
+                           if main_non_code else frozenset())
+    owned_exec_ranges = (spans_without(list(ranges), main_non_code_words) if main_non_code_words
+                         else list(ranges))
     catalog = build_entry_catalog(analyzed, ranges, profile=profile, elf=elf)
     omitted = omit_aot.apply(catalog, elf.entry)
     dispatch_boundaries = set(omit_aot.addrs) | set(main_non_code)
@@ -7224,6 +7244,18 @@ def _translate(argv):
             stubbed.append((a, reason))
             sys.stderr.write(f"skip 0x{a:08x}: {e}\n")
 
+    if main_non_code_words:
+        owned = set(analyzed)
+        for a in emitted:
+            if not is_stub(a) and a not in SIMPLE_STUBS and not (hst_profile and a in HST_CUSTOM_STUBS):
+                try:
+                    owned.update(function_flow(elf, a, ranges, known, resume_owners=resume_owners,
+                                               dispatch_boundaries=dispatch_boundaries,
+                                               options=options)[0])
+                except Unsupported:
+                    pass  # left to the interpreter: its entry is in `owned` already
+        if not _non_code_disjoint("executable", owned, main_non_code_words):
+            return 1
     primary_emitted = tuple(sorted(set(emitted)))
     primary_stubbed = {a for a, _ in stubbed}
     coverage_images = [{

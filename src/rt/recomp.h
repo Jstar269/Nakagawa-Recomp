@@ -1640,7 +1640,8 @@ int  sr_module_code_fetch_authority(uint32_t pc);
  * reserved encodings reached. They lie outside the module's spans, so neither a body nor the
  * interpreter runs them. The generated sr_register_all() registers one record per module that
  * has such ranges, after the module itself; `entries` and `words` count the withdrawn seeds
- * and words. */
+ * and words, for a reader of the generated code (the runtime reads neither). The registry
+ * lasts until sr_module_code_reset(), like the module registry. */
 typedef struct SrModuleNonCode {
     const SrModuleCode *code;
     const SrModuleSpan *spans;

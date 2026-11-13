@@ -1217,7 +1217,7 @@ def called_pointer_array_entries(elf, covered, relocated=None):
 
 
 def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unrelocated=None,
-                   end_at_outside_jump=False):
+                   end_at_outside_jump=False, stops=None):
     # Recursive descent over one function's intra-procedural control flow from `start`.
     # Adds every instruction address reached to `covered`, and every direct-call target (jal,
     # or a linking branch to a callable, #968) to `calls`. Returns newly found targets so
@@ -1240,10 +1240,13 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
     # loader does not relocate names an address outside the module (a module linked against
     # its executable calls into it this way), so its target is no edge into this module's
     # code; the word is added to `unrelocated` when the caller passes a set.
-    # `end_at_outside_jump` ends the path at a `j` whose target is outside `ranges` and the
-    # file-backed executable bytes, as a `j` inside them does. Without it the path runs on past
-    # the delay slot, the discovery's long-standing behaviour; only the checking trace
-    # (_check_trace) sets it.
+    # `end_at_outside_jump` ends the path at a `j` whose target is outside `ranges`, as a `j`
+    # inside them does. Without it the path runs on past the delay slot, the discovery's
+    # long-standing behaviour; only the checking trace (_check_trace) sets it.
+    # `stops` are the seeds withdrawn as non-code. Each ends a path where it ended one while it
+    # was an entry (a prologue or a known call target, below), so a body that stopped at one
+    # before the withdrawal still stops there, as its generated body does at the dispatch
+    # boundary codegen keeps there. A path that ran through one before still does.
     relocated = _relocated_jumps(elf)
     ranges = span_index(ranges)
     stack = [start]
@@ -1275,7 +1278,7 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
         while in_ranges(pc, ranges) and pc not in local:
             if walked is not None and pc in walked:
                 break
-            if pc != start and pc in hc:
+            if pc != start and (pc in hc or (stops and pc in stops)):
                 insn_bytes = elf.read_at_vaddr(pc, 4)
                 stop = True
                 if insn_bytes and len(insn_bytes) == 4:
@@ -1352,7 +1355,7 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
                     else:
                         stack.append(target)
                         break
-                elif end_at_outside_jump and not in_ranges(target, _file_backed_exec_ranges(elf)):
+                elif end_at_outside_jump:
                     break
             if op == 0 and funct == 0x08:  # jr (return / computed): end this path
                 covered.add(pc + 4)
@@ -1953,6 +1956,7 @@ class _Discovery:
             walked = self.walked_by_ranges.setdefault(tuple(entry_ranges), set())
         return trace_function(
             self.elf, entry, entry_ranges, self.covered, self.calls, self.hc, walked=walked,
+            stops=self.non_code,
         )
 
     def callable_target(self, addr):
@@ -3078,22 +3082,24 @@ class _CheckedCover(set):
             raise _ReservedWord(address, why)
 
 
-class _ScratchSet:
-    """`calls` for a checking trace: reads the discovery's set and keeps its own additions."""
+class _ReadOnlyCalls:
+    """`calls` for a checking trace: the discovery's set, read only. A call target the trace
+    finds is not added, so every checking trace of a pass stops by the same rules, whatever
+    ran before it (the `clean` memo relies on that)."""
 
-    __slots__ = ("base", "added")
+    __slots__ = ("base",)
 
     def __init__(self, base):
-        self.base, self.added = base, set()
+        self.base = base
 
     def __contains__(self, item):
-        return item in self.added or item in self.base
+        return item in self.base
 
     def __iter__(self):
-        return iter(self.added | self.base)
+        return iter(self.base)
 
     def add(self, item):
-        self.added.add(item)
+        pass
 
 
 class _CleanView:
@@ -3118,24 +3124,37 @@ class _CleanView:
 def _check_trace(d, entry, evidence, clean):
     """(the words the trace from ``entry`` reaches, (first reserved word, why) or None).
 
-    The trace follows the discovery's rules against its seeds and call targets, ends a path
-    at a `j` out of the image (as at one inside it), and stops at the first word of
-    ``evidence``. A transfer out of the image is no evidence: an overlay at a fixed address
-    may call one loaded later. A path also ends at a word of ``clean`` (one set per range list, as the
-    discovery's `walked`): every path from there is known to reach no evidence, so the answer
-    is the one a full trace gives, and a tail many entries share is walked once. A trace that
-    reaches no evidence adds its words to ``clean``. It changes no state of the discovery."""
+    The trace follows the discovery's rules against its seeds, call targets and withdrawn
+    addresses (read only), ends a path at a `j` out of the trace's ranges (as at one inside
+    them), and stops at the first word of ``evidence``. A transfer out of the image is no
+    evidence: an overlay at a fixed address may call one loaded later. A path also ends at a
+    word of ``clean`` (one set per range list, as the discovery's `walked`): an earlier trace
+    of the pass expanded it by the same rules and reached no evidence, so every path from it
+    reaches none, and a tail many entries share is walked once. A trace that reaches no
+    evidence adds the words it expanded to ``clean``; the words it reached are complete
+    (those past a clean word are in an earlier clean trace's). A trace that reaches evidence
+    stops there, so its words are not all the entry reaches: _full_reach gives those. It
+    changes no state of the discovery."""
     ranges = d.trace_ranges_for_entry(entry)
     known = clean.setdefault(tuple(ranges), set())
     covered = _CheckedCover(evidence)
     view = _CleanView(known)
     try:
-        trace_function(d.elf, entry, ranges, covered, _ScratchSet(d.calls), d.hc,
-                       walked=view, end_at_outside_jump=True)
+        trace_function(d.elf, entry, ranges, covered, _ReadOnlyCalls(d.calls), d.hc,
+                       walked=view, end_at_outside_jump=True, stops=d.non_code)
     except _ReservedWord as hit:
         return frozenset(covered), (hit.address, hit.why)
     known |= view.expanded
     return frozenset(covered), None
+
+
+def _full_reach(d, entry):
+    """Every word the checking trace from ``entry`` reaches when it does not stop at evidence:
+    the reach of an entry that stays although its trace meets a reserved word."""
+    covered = set()
+    trace_function(d.elf, entry, d.trace_ranges_for_entry(entry), covered,
+                   _ReadOnlyCalls(d.calls), d.hc, end_at_outside_jump=True, stops=d.non_code)
+    return covered
 
 
 def _non_code_entries(d, structural, evidence_cache=None):
@@ -3158,10 +3177,14 @@ def _non_code_entries(d, structural, evidence_cache=None):
     found, reached, clean = {}, set(), {}
     for entry in _entry_order(candidates | d.functions):
         words, hit = _check_trace(d, entry, evidence, clean)
-        if hit is not None and entry in candidates:
+        if hit is None:
+            reached |= words
+        elif entry in candidates:
             found[entry] = (hit, words)
         else:
-            reached |= words
+            # An entry the structure names stays, and so does all it reaches, past the
+            # reserved word its trace stopped at too.
+            reached |= _full_reach(d, entry)
     return found, reached
 
 

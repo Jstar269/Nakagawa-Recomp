@@ -468,9 +468,12 @@ the seeds whose traces reach a word no Allegrex CPU decodes, with the words only
 `codegen: <module>: withdrew N seeds as non-code, W words only they reached (no relocation evidence;
 evidence: ...)` (for the executable, `codegen: withdrew N seeds of the executable as non-code, ...`),
 with the reserved-word kinds counted. A dispatch into a module's withdrawn span stops with
-`NON_CODE_WITHDRAWN: 0x... is <module>@0x..., in a span the build withdrew as non-code`. The game
-called into those words, so the withdrawal was wrong: report it as a translator bug with the address
-and the module, not as a missing function.
+`NON_CODE_WITHDRAWN: 0x... is <module>@0x..., in a span the build withdrew as non-code`. In the
+executable the withdrawn words leave its executable spans, so a dispatch there stops as not
+executable at that address, without the module line. Either way the game called into those words, so
+the withdrawal was wrong: report it as a translator bug with the address and the image, not as a
+missing function. A build that stops with `NON_CODE_TRANSLATED` is the same kind of bug, found
+before the run: a generated body owns a word the analysis withdrew.
 
 The share is a time share. It overstates the interpreter's share of instructions, because the
 interpreter is slower per instruction. The exact instruction share still needs a

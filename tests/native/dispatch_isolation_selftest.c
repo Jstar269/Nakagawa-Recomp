@@ -45,6 +45,7 @@ void sr_ge_vram_write_commit(uint32_t addr, uint32_t width) { (void)addr; (void)
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
+#include <io.h>
 #include <windows.h>
 #include <wchar.h>
 #else
@@ -551,10 +552,47 @@ static const SrModuleNonCode k_module_a_non_code = {
     &k_module_a, k_module_a_non_code_spans, 1u, 1u, 4u,
 };
 
+/* The stderr of one call, for a test that asserts the line a stop prints. */
+static FILE *s_capture;
+static int s_capture_fd = -1;
+
+static int stderr_capture_begin(void) {
+    s_capture = tmpfile();
+    if (!s_capture) return 0;
+    fflush(stderr);
+    s_capture_fd = dup(fileno(stderr));
+    if (s_capture_fd < 0 || dup2(fileno(s_capture), fileno(stderr)) < 0) {
+        if (s_capture_fd >= 0) close(s_capture_fd);
+        s_capture_fd = -1;
+        fclose(s_capture);
+        s_capture = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+/* Restores stderr, replays what was captured (so the run log keeps it) and returns it. */
+static const char *stderr_capture_end(char *out, size_t size) {
+    out[0] = '\0';
+    if (!s_capture) return out;
+    fflush(stderr);
+    rewind(s_capture);
+    size_t n = fread(out, 1u, size - 1u, s_capture);
+    out[n] = '\0';
+    dup2(s_capture_fd, fileno(stderr));
+    close(s_capture_fd);
+    s_capture_fd = -1;
+    fclose(s_capture);
+    s_capture = NULL;
+    fputs(out, stderr);
+    return out;
+}
+
 static void test_runtime_module_non_code_is_named(void) {
     SrModuleBindDetail detail;
     const char *name = NULL;
     uint32_t link = 0u;
+    char log[8192];
     sr_module_code_reset();
     sr_exec_span_reset();
     sr_module_code_register(&k_module_a);
@@ -569,14 +607,27 @@ static void test_runtime_module_non_code_is_named(void) {
           "a withdrawn word of a bound module is named with its module and link address");
     CHECK(sr_module_code_fetch_authority(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u) == 0,
           "a withdrawn word is not executable");
+    int capturing = stderr_capture_begin();
+    CHECK(capturing, "stderr capture for the withdrawn-word stop");
     Probe stop = probe(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u, PROBE_PC, PROBE_RA);
-    CHECK(!stop.body_ran, "a transfer into a withdrawn word runs nothing (NON_CODE_WITHDRAWN)");
+    stderr_capture_end(log, sizeof log);
+    CHECK(!stop.body_ran && stop.dispatch_result < 0,
+          "a transfer into a withdrawn word runs nothing and fails");
+    CHECK(strstr(log, "NON_CODE_WITHDRAWN") && strstr(log, "overlay_a.prx@0x"),
+          "the stop names the withdrawn word with its module (NON_CODE_WITHDRAWN)");
     CHECK(!sr_module_code_non_code(MODULE_BASE_LOW + 0x20u, NULL, NULL) &&
               !sr_module_code_non_code(MODULE_BASE_LOW + MODULE_GAP_OFF + 0x10u, NULL, NULL),
           "span words and words past the withdrawn range are not named");
     sr_module_code_unbind(&k_module_a);
     CHECK(!sr_module_code_non_code(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u, NULL, NULL),
           "an unbound module's withdrawn words are not named");
+    sr_module_code_reset();
+    sr_module_code_register(&k_module_a);
+    CHECK(sr_module_code_bind(&k_module_a, MODULE_BASE_LOW, &detail) == SR_MODULE_BIND_OK,
+          "module A binds again after a reset");
+    CHECK(!sr_module_code_non_code(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u, NULL, NULL),
+          "a reset drops the non-code records with the modules");
+    sr_module_code_reset();
 }
 
 static void test_runtime_module_binding_is_the_authority_for_its_range(void) {
