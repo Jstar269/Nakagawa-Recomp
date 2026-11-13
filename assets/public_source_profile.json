@@ -1271,6 +1271,7 @@
     "tests/native/code_capture_selftest.c",
     "tests/native/cpu_lle_selftest.c",
     "tests/native/debug_selftest.c",
+    "tests/native/disc_dat_conformance.txt",
     "tests/native/dispatch_isolation_selftest.c",
     "tests/native/dispatch_selftest.c",
     "tests/native/domain_mode_selftest.c",
