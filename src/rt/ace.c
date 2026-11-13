@@ -386,13 +386,8 @@ static AceLatency s_latency;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
     "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull",
-                                                ACE_HAS_MIPS, ACE_HAS_TEXPACK,
-                                                ACE_HAS_PAD, ACE_HAS_SHADOW };
-    const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
-                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
-                                        s_eff.load, s_eff.cull, s_eff.depth, s_eff.twin, s_eff.ssaa,
-                                        s_eff.peak, s_eff.glyphs, s_eff.mips, s_eff.texpack,
-                                        s_eff.pad, s_eff.shadow };
+    "depth", "twin", "ssaa", "peak", "glyphs", "mips", "texpack",
+    "pad", "shadow"
 };
 
 /* The run's observation state. */
@@ -1658,8 +1653,13 @@ void ace_finish(void) {
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
                                                 ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL,
                                                 ACE_HAS_DEPTH, 1, ACE_HAS_SSAA, ACE_HAS_PEAK, ACE_HAS_GLYPHS,
-    "depth", "twin", "ssaa", "peak", "glyphs", "mips", "texpack",
-    "pad", "shadow"
+                                                ACE_HAS_MIPS, ACE_HAS_TEXPACK,
+                                                ACE_HAS_PAD, ACE_HAS_SHADOW };
+    const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
+                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
+                                        s_eff.load, s_eff.cull, s_eff.depth, s_eff.twin, s_eff.ssaa,
+                                        s_eff.peak, s_eff.glyphs, s_eff.mips, s_eff.texpack,
+                                        s_eff.pad, s_eff.shadow };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
