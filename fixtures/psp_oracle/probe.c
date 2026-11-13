@@ -13189,7 +13189,7 @@ static void run_sas_mix(int emulated) {
    - vc-t0-<step>-c0..c2 and vc-t1-... for step open, edram, init, setmem (item 1): a zeroed 96-word
      context, then Open, GetEDRAM, Init and SetMemory in turn, the whole 96 words after each call in
      three 32-word chunks, for codec type 0 and type 1; then vc-tT-stop, -release and -delete (a step
-     record of words 0..31 each).
+     record of words 0..31 each). Type 0 runs first, type 1 after the two decode contexts.
    - vc-dW-input (9 words: macroblock width and height, the three AU sizes and FNV-1a hashes, the ES
      physical address), then the context of sceMpegCreate for W = d480 (480x272) and d464 (464x272,
      width bit 0x10 set): vc-dW-open, -edram, -init and -setmem (step records, words 0..31); words
@@ -13210,7 +13210,9 @@ static void run_sas_mix(int emulated) {
      which is first filled with 0x5a, and FNV-1a of each 2048-byte span of the first 8192 bytes), then
      vc-csc-mM-d00..d15, the first 8192 bytes (4 rows at 512 pixels of 8888) in 128-word records;
      then vc-csc-modes (the return of pixel mode 4 and of setting mode 3 again).
-   - vc-dW-stop, -release and -delete: the teardown, each a step record.
+   - vc-dW-stop, -release and -delete: the teardown, each a step record (vcw_teardown says which
+     acquiring call each one needs).
+   - vc-t1-...: the type 1 cells of item 1.
    - vc-ac-1000, -1001, -1002, -1000-p5c5c and -1000-p5c28 (item 5): sceAudiocodecCheckNeedMem on a
      zeroed 65-word context for codec 0x1000, 0x1001 and 0x1002, then for 0x1000 with the 16-bit
      value 0x5c5c or 0x5c28 at byte 40 as sceMpegCreate leaves it: 67 words, out0 the return, out1
@@ -13614,14 +13616,17 @@ static int vcw_run(int emulated, const char *step, int op, uint32_t *ctx, int ar
     return 1;
 }
 
-/* The teardown of one context: Stop, ReleaseEDRAM, Delete, each only when the call that acquired it
-   succeeded. */
-static void vcw_teardown(int emulated, const char *prefix, int type, int stop_ok, int edram_ok, int open_ok) {
+/* The teardown of one context: Stop when Init succeeded (and, for a decode context, a decode ran),
+   ReleaseEDRAM when GetEDRAM succeeded, and Delete when any of Open, Init or SetMemory succeeded.
+   Boot 149 showed why Delete does not wait for Open alone: type 1's Open returned 0x80628001 but its
+   Init and SetMemory returned 0, the Delete was skipped, and the next context's Init returned
+   0x80628002 and its SetMemory 0x80628001, so no access unit was decoded. */
+static void vcw_teardown(int emulated, const char *prefix, int type, int stop_ok, int edram_ok, int delete_ok) {
     static const struct {
         const char *name;
         int op;
     } steps[3] = {{"stop", VCW_OP_STOP}, {"release", VCW_OP_RELEASE}, {"delete", VCW_OP_DELETE}};
-    const int wanted[3] = {stop_ok, edram_ok, open_ok};
+    const int wanted[3] = {stop_ok, edram_ok, delete_ok};
     for (int i = 0; i < 3; i++) {
         char id[96], step[64];
         int rc = 0, ran = 0;
@@ -13664,7 +13669,7 @@ static void vcw_type_cells(int emulated, int type) {
     }
     char prefix[16];
     (void)snprintf(prefix, sizeof(prefix), "vc-t%d", type);
-    vcw_teardown(emulated, prefix, type, ok[2], ok[1], ok[0]);
+    vcw_teardown(emulated, prefix, type, ok[2], ok[1], ok[0] || ok[2] || ok[3]);
 }
 
 /* ---- items 2 to 4: decode three access units, then convert --------------------------------------- */
@@ -13918,7 +13923,7 @@ static void vcw_decode_cells(int emulated, uint32_t w_mbs, const char *tag, int 
     }
 
     (void)snprintf(prefix, sizeof(prefix), "vc-%s", tag);
-    vcw_teardown(emulated, prefix, 0, decoded && ok[2], ok[1], ok[0]);
+    vcw_teardown(emulated, prefix, 0, decoded && ok[2], ok[1], ok[0] || ok[2] || ok[3]);
 }
 
 /* ---- item 5: sceAudiocodecCheckNeedMem -------------------------------------------------------------- */
@@ -13970,10 +13975,12 @@ static void run_vcodec_words(int emulated) {
     vcw_record(emulated, "vc-load", 1, rc_av, load, 5u);
     s_vcw_enabled = load[3] && load[4];
 
+    /* Type 1 runs after both decode contexts: its Open is refused on a PSP-3000 (boot 149), so the
+       decode cells do not depend on how the firmware takes down a context whose Open failed. */
     vcw_type_cells(emulated, 0);
-    vcw_type_cells(emulated, 1);
     vcw_decode_cells(emulated, 30u, "d480", 1);
     vcw_decode_cells(emulated, 29u, "d464", 0);
+    vcw_type_cells(emulated, 1);
     vcw_audio_cells(emulated);
 
     /* A wedged call leaves its helper terminated mid-call: the modules stay loaded then. */
