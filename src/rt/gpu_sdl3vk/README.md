@@ -397,7 +397,8 @@ no device samples of its own, and the 1x decode is the read:
 - an address that is not on a pixel boundary of the target (each texel straddles two pixels);
 - a depth buffer read as 8888, CLUT32, CLUT4, CLUT8 or DXT (a texel is not one depth value).
 
-These stay in this group when the read is also swizzled, mipmapped or at another buffer width.
+These stay in this group when the read is also swizzled, mipmapped, at another buffer width or
+through the 0x04200000 or 0x04600000 view.
 
 **A scaled form could exist, but the renderer has none.** Here each texel is one pixel, or one
 depth value, of a buffer the GPU holds at render scale: the read is in a format whose texel is one
@@ -414,6 +415,10 @@ What each path would need:
   each tap's texel (a swizzled texture takes the buffer's 16-byte by 8-row blocks in another order;
   another width puts texture rows across the target's rows), and filter only between texels,
   whose neighbours are not the target's neighbouring pixels;
+- a read through the 0x04200000 or 0x04600000 view: each texel is still one target pixel, only
+  reordered in 32- or 64-byte pieces and 8 KiB halves of each 16 KiB block, so a scaled path would
+  map each tap's address through the view's mapping (`sr_vram_cpu_address`) to the target pixel
+  that holds it, and filter only between texels, as for a swizzled read;
 - a mipmapped read (a mipmap filter and a highest level above 0): the texture cache builds the
   whole chain from guest VRAM and a target image has no mip levels, so level 0 would come from the
   target's image and each other level from its own address, at its own scale;

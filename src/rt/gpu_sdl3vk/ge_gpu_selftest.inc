@@ -13722,7 +13722,9 @@ static int coherence_run_rtt_1x_reads(void) {
  * exactly at any scale: the cells are on whole guest pixels, so a target's top-left device samples
  * are its software pixels. The software pictures show what each read must show: the reordering
  * views differ from the plain read, the identity view does not, and the pass-2 reads of T and X
- * differ from pass 1's, so a stale decode shows. */
+ * differ from pass 1's, so a stale decode shows. The cell is a white-box check of the GPU path
+ * against the software renderer (ge.c), not a hardware oracle: that the GE's texel fetch reorders
+ * through a view as a CPU access does is inferred, not measured. */
 #define RVV_T     0x00100000u
 #define RVV_U     0x00010000u
 #define RVV_M     0x00060000u

@@ -5873,9 +5873,11 @@ static void build_state(int persp, int sprite, Batch *b) {
             const int depth_read = zsrc && zsrc->zseq > src->cseq;
             /* A texture address in the 0x04200000 or 0x04600000 view of VRAM (address bit 21; the
              * uncached 0x44xxxxxx aliases too) reads each byte at another physical offset
-             * (sr_vram_cpu_address, PSP-VRAM-MIRROR-001), so its texels are not the target's pixels
-             * in the image's order: never a direct bind. It decodes guest VRAM through the view, as
-             * ge.c does, once every target's pixels the view can reach are there. */
+             * (sr_vram_cpu_address, PSP-VRAM-MIRROR-001). That record measured CPU accesses; that
+             * the GE's texel fetch goes through the same mapping is inferred, not measured. Its
+             * texels are then not the target's pixels in the image's order: never a direct bind.
+             * It decodes guest VRAM through the view, as ge.c does, once every target's pixels the
+             * view can reach are there. */
             const int view_read = (g->tex_addr & 0x00200000u) != 0u;
             if (src->gpu_valid && !depth_read && !view_read && !nortt && !ge_tex_mip_active(g) &&
                 g->tex_fmt == src->fmt &&
