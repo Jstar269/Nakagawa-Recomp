@@ -1345,6 +1345,33 @@ class ClaimBindingAdmissionTest(unittest.TestCase):
             fixture.admit("docs/notice.md", slug="bad", origins={"docs/notice.md": {"binding": "trust-me"}})
         self.assertEqual(caught.exception.code, "ADMISSION_BINDING_INVALID")
 
+    def test_a_binary_or_waived_path_is_bound_to_its_bytes(self) -> None:
+        fixture = _Fixture(self)
+        shot, png = "docs/new-shot.png", b"\x89PNG\r\n\x1a\n" + bytes(range(32))
+        mark, svg = "docs/new-mark.svg", '<svg xmlns="http://www.w3.org/2000/svg"/>\n'
+        manifest = {"components": [{"id": mark, "source_path": mark, "disposition": "approved_binary",
+                                    "hashes": {"sha256": hashlib.sha256(svg.encode("utf-8")).hexdigest()}}]}
+        (fixture.pr / "docs").mkdir(parents=True, exist_ok=True)
+        (fixture.pr / shot).write_bytes(png)
+        write(fixture.pr, mark, svg)
+        write(fixture.pr, "assets/release_manifest.json", json.dumps(manifest) + "\n")
+        write(fixture.pr, "docs/new-page.md", "# New page\n")
+        git(fixture.pr, "add", "-A")
+        git(fixture.pr, "commit", "-qm", "add an image, a waived mark and a page")
+        result = fixture.admit(shot, mark, "docs/new-page.md")
+        statements = {s["path"]: s for s in fixture.record(result["records"][0])["reviewed_new_paths"]}
+        self.assertEqual((statements[shot].get("binding"), statements[mark].get("binding")), ("bytes", "bytes"))
+        self.assertNotIn("binding", statements["docs/new-page.md"])
+        self.assertEqual(self._entry(fixture, result, shot)["sha256"], hashlib.sha256(png).hexdigest())
+        self.assertEqual(self._entry(fixture, result, "docs/new-page.md")["binding"], "claim")
+        # A claim binding chosen for such a path is refused.
+        git(fixture.pr, "branch", "-q", "-D", result["admit_branch"])
+        for path in (shot, mark):
+            with self.subTest(path):
+                with self.assertRaises(AdmitError) as caught:
+                    fixture.admit(path, slug="claim", origins={path: {"binding": "claim"}})
+                self.assertEqual(caught.exception.code, "ADMISSION_BINDING_BYTES_REQUIRED")
+
     def test_cli_binding_flag(self) -> None:
         fixture = _Fixture(self)
         fixture.add("docs/new-page.md", "# New page\n")
