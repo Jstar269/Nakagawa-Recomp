@@ -192,8 +192,8 @@ bool nk_platform_get_app_data_dir(char *out_path, size_t max_len);
  * Returns false on non-Windows hosts or when USERPROFILE is unavailable. */
 bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len);
 /* The default per-user folders of a Linux or macOS install (#324, nk_data_migrate.h): both
- * layouts' folders, what each holds, and the one this process uses, decided by the rule there the
- * first time a folder is looked up. False, with *out cleared, where there is one layout (Windows,
+ * layouts' folders, whether each exists, and the one this process uses, decided by the rule there
+ * the first time a folder is looked up. False, with *out cleared, where there is one layout (Windows,
  * Android) or an override names the folders (--user-data-root, portable mode). */
 struct NkUserDataLayout;
 bool nk_platform_user_data_layout(struct NkUserDataLayout *out);

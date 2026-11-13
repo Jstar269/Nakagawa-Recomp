@@ -32,10 +32,8 @@ CHUNK_SIZE = 64 * 1024
 
 
 # The data folder layout of a Linux or macOS install (#324). src/core/nk_data_migrate.h has the rule,
-# what "holds data" means, and the table of cases that tools/test_prereq_fetcher.py shares with the
+# what "exists" means, and the table of cases that tools/test_prereq_fetcher.py shares with the
 # player's test; src/core/nk_platform_posix.c is the player's side of it.
-_SETTINGS_FILE = "settings.json"
-_LIBRARY_FILE = "library.json"
 _PATH_LIMIT = 512  # NK_MAX_PATH: the player cannot name a folder whose path is this long
 _LAYOUT_DECISIONS: dict[tuple[str, ...], bool] = {}
 
@@ -78,32 +76,21 @@ def _layout_folders(old: bool, platform: str) -> tuple[str, str, str]:
     return (_named(root + "/config"), _named(root + "/data"), _named(root + "/saves"))
 
 
-def _holds_data(folders: tuple[str, str, str]) -> bool:
-    """A settings file, a library file, or a saves folder with an entry (nk_data_migrate.h)."""
-    config, data, saves = folders
-    if config and os.path.isfile(config + "/" + _SETTINGS_FILE):
-        return True
-    if data and os.path.isfile(data + "/" + _LIBRARY_FILE):
-        return True
-    if not saves:
-        return False
-    try:
-        with os.scandir(saves) as entries:
-            return any(True for _ in entries)
-    except OSError:
-        return False
+def _exists(folders: tuple[str, str, str]) -> bool:
+    """A layout's settings, data or saves folder is present, by lstat (nk_data_migrate.h): an empty
+    folder or a dangling link counts, and nothing inside is read."""
+    return any(folder and os.path.lexists(folder) for folder in folders)
 
 
 def _old_layout_in_use(platform: str) -> bool:
-    """The player's rule: the new layout when it holds data, else the old one when it does, else
-    the new one. Decided once per process for the same HOME and XDG variables, as in the player."""
+    """The player's rule: the old layout when it exists, else the new one. Decided once per process
+    for the same HOME and XDG variables, as in the player; nothing is recorded on disk."""
     key = (platform,) + tuple(
         "-" if value is None else "=" + value
         for value in (os.environ.get(name) for name in ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"))
     )
     if key not in _LAYOUT_DECISIONS:
-        _LAYOUT_DECISIONS[key] = (not _holds_data(_layout_folders(False, platform))
-                                  and _holds_data(_layout_folders(True, platform)))
+        _LAYOUT_DECISIONS[key] = _exists(_layout_folders(True, platform))
     return _LAYOUT_DECISIONS[key]
 
 

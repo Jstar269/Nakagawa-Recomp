@@ -113,7 +113,7 @@ Roadmap items decided with the table:
   `data` and `saves` inside it (section 8); Linux keeps its cache and logs in the XDG cache and
   state homes. A Linux or macOS install from before
   [#324](https://github.com/Jstar269/nakagawa-recomp/issues/324) keeps its `nakagawa-recomp` or
-  `NakagawaRecomp` folders for good; no move is offered.
+  `NakagawaRecomp` folders while they exist; no move is offered.
 * **Code signing:** v0.0.1 and v0.0.2 ship unsigned. Until a build is signed, each
   release publishes the ZIP's SHA-256 and GitHub build attestations for every binary, and the release notes
   explain the SmartScreen prompt. The signing procedure is prepared
@@ -691,12 +691,13 @@ that is not an absolute path is ignored, as the XDG specification says. macOS pu
 Linux's `$XDG_DATA_HOME/nakagawa-recomp` with its settings in `$XDG_CONFIG_HOME/nakagawa-recomp`,
 macOS's `~/Library/Application Support/NakagawaRecomp`. Each process chooses once, by one rule that
 the player (`src/core/nk_platform_posix.c`) and the Python tools (`tools/nk_core/prereq_fetcher.py`)
-share: the new folder when it holds data, else the earlier folders when they do, else the new
-folder. "Holds data" means a `settings.json` in the config folder, a `library.json` in the data
-folder, or anything in the saves folder. The rule, its cases and that definition are in
-`src/core/nk_data_migrate.h`, and both test suites read the cases from there. When both hold data
-the new folder is used and the library screen names both. Nothing is ever moved, copied, merged or
-deleted between them, and moving an existing install is not offered. Each launch
+share: the earlier folders when any of their settings, data or saves folders is present (by `lstat`,
+so an empty folder or a dangling link counts; nothing inside is read), else the new folder. Nothing
+is recorded, so the next start that sees an earlier folder uses it again. The rule and its cases are
+in `src/core/nk_data_migrate.h`, and both test suites read the cases from there. When the earlier
+folders are in use and the new one exists too, the library screen names both. Nothing is ever
+moved, copied, merged or deleted between them, and moving an existing install is not offered; a user
+who wants the new folder moves the earlier ones away. Each launch
 still starts one child process per title (Section 2, Option C), with the #297 run-package and
 save-root semantics unchanged.
 

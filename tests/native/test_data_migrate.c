@@ -3,8 +3,9 @@
 
 /* Which per-user folders a Linux or macOS start uses (#324, src/core/nk_data_migrate.h): every case
  * of the rule's table (tools/test_prereq_fetcher.py reads the same table) through the production
- * resolver, the edges of the XDG variables and HOME, a decision kept for the whole run, and a start
- * that creates nothing outside the layout it uses. Every folder is made in a temporary root on the
+ * resolver, the edges of the XDG variables and HOME, a decision kept for the whole run, a next start
+ * that follows the old folders being moved away, and a start that creates nothing outside the layout
+ * it uses. Every folder is made in a temporary root on the
  * real file system; the real profile is never touched. Windows has one layout and decides nothing. */
 
 #if !defined(_WIN32) && !defined(_WIN64)
@@ -20,6 +21,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32) && !defined(_WIN64)
+#include <unistd.h>
+#endif
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -37,7 +41,7 @@ static int g_checks = 0;
         }                                                                        \
     } while (0)
 
-/* The notice names both layouts, the one in use first, on every host. */
+/* The notice names the old layout in use, then the new folder, on every host. */
 static void test_notice(void) {
     static NkUserDataLayout layout;
     char notice[NK_DATA_LAYOUT_NOTICE_MAX];
@@ -52,15 +56,17 @@ static void test_notice(void) {
         snprintf(layout.old_layout.path[i == 0 ? NK_PATH_CONFIG : i == 1 ? NK_PATH_DATA : NK_PATH_SAVES],
                  NK_MAX_PATH, "%s", old_paths[i]);
     }
-    layout.new_layout.holds_data = true;
+    layout.old_layout.exists = true;
+    layout.old_in_use = true;
     CHECK(!nk_data_layout_notice(&layout, notice, sizeof(notice)) && notice[0] == '\0',
-          "no notice when only one layout holds data");
-    layout.old_layout.holds_data = true;
-    CHECK(nk_data_layout_notice(&layout, notice, sizeof(notice)), "a notice when both hold data");
-    CHECK(strcmp(notice, "Nakagawa uses /h/.local/share/Nakagawa. Nakagawa data is also in "
-                         "/h/.local/share/nakagawa-recomp (settings in /h/.config/nakagawa-recomp), "
-                         "which is not used.") == 0,
-          "it names the folder in use, then the old data and settings folders");
+          "no notice when the new folder does not exist");
+    layout.new_layout.exists = true;
+    CHECK(nk_data_layout_notice(&layout, notice, sizeof(notice)),
+          "a notice when the old layout is in use and the new folder exists");
+    CHECK(strcmp(notice, "Nakagawa uses /h/.local/share/nakagawa-recomp (settings in "
+                         "/h/.config/nakagawa-recomp). Nakagawa data is also in "
+                         "/h/.local/share/Nakagawa, which is not used.") == 0,
+          "it names the old data and settings folders in use, then the new folder");
     CHECK(!nk_data_layout_notice(&layout, notice, 16u) && notice[0] == '\0',
           "a notice that does not fit is not cut short");
 }
@@ -128,22 +134,29 @@ static void make_state(const NkDataLayoutFolders *f, const char *state) {
         CHECK(nk_platform_mkdir_p(f->path[NK_PATH_CONFIG]) && nk_platform_mkdir_p(f->path[NK_PATH_DATA]) &&
                   nk_platform_mkdir_p(f->path[NK_PATH_SAVES]),
               "make the empty folders");
-    } else if (strcmp(state, "stray") == 0) {
-        put_file(f->path[NK_PATH_CONFIG], "notes.txt");
-        put_file(f->path[NK_PATH_DATA], "notes.txt");
+    } else if (strcmp(state, "emptydata") == 0) {
+        CHECK(nk_platform_mkdir_p(f->path[NK_PATH_DATA]), "make the empty data folder");
+    } else if (strcmp(state, "emptyconfig") == 0) {
+        CHECK(nk_platform_mkdir_p(f->path[NK_PATH_CONFIG]), "make the empty settings folder");
+    } else if (strcmp(state, "dangling") == 0) {
+        char parent[NATIVE_TEST_PATH_MAX];
+        parent_of(f->path[NK_PATH_DATA], parent, sizeof(parent));
+        join(path, sizeof(path), parent, "unmounted-drive/nakagawa-recomp");
+        CHECK(nk_platform_mkdir_p(parent) && symlink(path, f->path[NK_PATH_DATA]) == 0,
+              "make the data folder a link to a path that does not exist");
+    } else if (strcmp(state, "fonts") == 0) {
+        join(path, sizeof(path), f->path[NK_PATH_DATA], "fonts/v2");
+        put_file(path, "jpn0.pgf");
     } else if (strcmp(state, "cache") == 0) {
         put_file(f->path[NK_PATH_CACHE], "shader.bin");
         put_file(f->path[NK_PATH_LOGS], "player.log");
     } else if (strcmp(state, "settings") == 0) {
-        put_file(f->path[NK_PATH_CONFIG], NK_DATA_LAYOUT_SETTINGS_FILE);
+        put_file(f->path[NK_PATH_CONFIG], "settings.json");
     } else if (strcmp(state, "library") == 0) {
-        put_file(f->path[NK_PATH_DATA], NK_DATA_LAYOUT_LIBRARY_FILE);
+        put_file(f->path[NK_PATH_DATA], "library.json");
     } else if (strcmp(state, "saves") == 0) {
         join(path, sizeof(path), f->path[NK_PATH_SAVES], "ULUS10000");
         put_file(path, "DATA.BIN");
-    } else if (strcmp(state, "savesdir") == 0) {
-        join(path, sizeof(path), f->path[NK_PATH_SAVES], "ULUS10000");
-        CHECK(nk_platform_mkdir_p(path), "make an empty save folder");
     } else {
         CHECK(false, "a state the table names is known to the test");
     }
@@ -209,7 +222,7 @@ static size_t read_rule_cases(RuleCase *cases, size_t cap) {
 static void test_rule_table(void) {
     RuleCase cases[32];
     size_t count = read_rule_cases(cases, sizeof(cases) / sizeof(cases[0]));
-    CHECK(count >= 16u, "the table has its cases");
+    CHECK(count >= 14u, "the table has its cases");
     for (size_t i = 0; i < count; ++i) {
         const RuleCase *c = &cases[i];
         char root[NATIVE_TEST_PATH_MAX], what[160];
@@ -231,9 +244,10 @@ static void test_rule_table(void) {
         if (shown) {
             char new_root[NK_MAX_PATH];
             parent_of(g_layout.new_layout.path[NK_PATH_DATA], new_root, sizeof(new_root));
-            CHECK(strncmp(notice, "Nakagawa uses ", 14u) == 0 && strstr(notice, new_root) == notice + 14 &&
-                      strstr(notice, g_layout.old_layout.path[NK_PATH_DATA]) != NULL,
-                  "the notice names the folder in use first, then the other");
+            CHECK(strncmp(notice, "Nakagawa uses ", 14u) == 0 &&
+                      strstr(notice, g_layout.old_layout.path[NK_PATH_DATA]) == notice + 14 &&
+                      strstr(notice, new_root) != NULL,
+                  "the notice names the old folder in use first, then the new one");
         }
 
         /* A start: every folder it uses is made; nothing appears in the layout it does not use. */
@@ -258,18 +272,40 @@ static void test_rule_table(void) {
     }
 }
 
-/* Decided once for the run: data that appears in the other layout later changes nothing. */
+/* Decided once for the run: an old folder that appears during it changes nothing. */
 static void test_decision_is_kept_for_the_run(void) {
     char root[NATIVE_TEST_PATH_MAX];
     new_case(root, sizeof(root));
+    CHECK(nk_platform_user_data_layout(&g_layout) && !g_layout.old_in_use, "a fresh install");
+    make_state(&g_layout.old_layout, "library");
+    CHECK(nk_platform_user_data_layout(&g_layout) && !g_layout.old_in_use &&
+              resolves_to(&g_layout.new_layout),
+          "an old folder that appears during the run does not switch it");
+}
+
+/* Nothing is recorded: the next start decides from what is there. With both layouts present the
+   old one is used; once the user moves the old folders away, the next start uses the new folder. */
+static void test_old_removed_between_starts(void) {
+    char root[NATIVE_TEST_PATH_MAX], moved[NATIVE_TEST_PATH_MAX];
+    new_case(root, sizeof(root));
     CHECK(nk_platform_user_data_layout(&g_layout), "the layouts can be named");
     make_state(&g_layout.old_layout, "library");
-    decide_as_a_new_start(root);
-    CHECK(g_layout.old_in_use, "the old layout holds data and is in use");
+    make_state(&g_layout.old_layout, "settings");
     make_state(&g_layout.new_layout, "library");
-    CHECK(nk_platform_user_data_layout(&g_layout) && g_layout.old_in_use &&
-              resolves_to(&g_layout.old_layout),
-          "data that appears in the new folder during the run does not switch it");
+    decide_as_a_new_start(root);
+    CHECK(g_layout.old_in_use && resolves_to(&g_layout.old_layout),
+          "first start: the old layout exists and is used, though the new folder exists too");
+    const NkPathType kinds[2] = {NK_PATH_CONFIG, NK_PATH_DATA};
+    for (size_t i = 0; i < 2u; ++i) {
+        snprintf(moved, sizeof(moved), "%s/moved-away-%u", root, (unsigned)i);
+        CHECK(rename(g_layout.old_layout.path[kinds[i]], moved) == 0, "move an old folder away");
+    }
+    char value[NATIVE_TEST_PATH_MAX];
+    join(value, sizeof(value), root, "config");
+    native_test_set_env("XDG_CONFIG_HOME", value); /* the same folders, decided afresh as a new start */
+    CHECK(nk_platform_user_data_layout(&g_layout) && !g_layout.old_in_use &&
+              resolves_to(&g_layout.new_layout),
+          "second start: the old folders are gone and the new folder is used");
 }
 
 /* The XDG variables and HOME: a relative value is ignored by the new layout, as the XDG Base
@@ -372,6 +408,7 @@ int main(void) {
     snprintf(g_base, sizeof(g_base), "%s", native_test_get_root());
     test_rule_table();
     test_decision_is_kept_for_the_run();
+    test_old_removed_between_starts();
     test_variables();
     test_override();
 #else

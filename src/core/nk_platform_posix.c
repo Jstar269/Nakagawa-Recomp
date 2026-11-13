@@ -643,29 +643,16 @@ static bool resolve_new_layout_path(NkPathType type, char *out_path, size_t max_
 #endif
 }
 
-/* "Holds data", as nk_data_migrate.h defines it: a settings file, a library file, or a saves
-   folder with an entry. */
-static bool layout_holds_data(const NkDataLayoutFolders *folders) {
-    char path[NK_MAX_PATH + 32];
-    if (folders->path[NK_PATH_CONFIG][0] &&
-        join_path(path, sizeof(path), folders->path[NK_PATH_CONFIG],
-                  "/" NK_DATA_LAYOUT_SETTINGS_FILE) &&
-        nk_platform_file_exists(path)) {
-        return true;
+/* A layout exists, as nk_data_migrate.h defines it: its settings, data or saves folder is present
+   by lstat (an empty folder or a dangling link counts; nothing inside is read). */
+static bool layout_exists(const NkDataLayoutFolders *folders) {
+    static const NkPathType kinds[3] = {NK_PATH_CONFIG, NK_PATH_DATA, NK_PATH_SAVES};
+    for (size_t i = 0; i < 3u; ++i) {
+        struct stat st;
+        const char *path = folders->path[kinds[i]];
+        if (path[0] && lstat(path, &st) == 0) return true;
     }
-    if (folders->path[NK_PATH_DATA][0] &&
-        join_path(path, sizeof(path), folders->path[NK_PATH_DATA], "/" NK_DATA_LAYOUT_LIBRARY_FILE) &&
-        nk_platform_file_exists(path)) {
-        return true;
-    }
-    DIR *saves = folders->path[NK_PATH_SAVES][0] ? opendir(folders->path[NK_PATH_SAVES]) : NULL;
-    if (!saves) return false;
-    bool any = false;
-    for (struct dirent *item = readdir(saves); item && !any; item = readdir(saves)) {
-        any = strcmp(item->d_name, ".") != 0 && strcmp(item->d_name, "..") != 0;
-    }
-    closedir(saves);
-    return any;
+    return false;
 }
 
 static void layout_folders(bool old, NkDataLayoutFolders *folders) {
@@ -676,7 +663,7 @@ static void layout_folders(bool old, NkDataLayoutFolders *folders) {
                          : resolve_new_layout_path((NkPathType)type, path, NK_MAX_PATH);
         if (!named) path[0] = '\0';
     }
-    folders->holds_data = layout_holds_data(folders);
+    folders->exists = layout_exists(folders);
 }
 
 /* The layout in use, decided by the rule (nk_data_migrate.h) the first time a folder is looked up
@@ -727,7 +714,7 @@ static bool layout_old_in_use(NkUserDataLayout *out) {
     if (!layout_key_matches(s_layout_key)) {
         layout_folders(false, &s_layout.new_layout);
         layout_folders(true, &s_layout.old_layout);
-        s_layout.old_in_use = !s_layout.new_layout.holds_data && s_layout.old_layout.holds_data;
+        s_layout.old_in_use = s_layout.old_layout.exists;
         free(s_layout_key);
         s_layout_key = layout_key_make();
     }

@@ -217,9 +217,15 @@ class TestPrerequisiteFetcher(unittest.TestCase):
         if state == "empty":
             for folder in (config, data, saves):
                 folder.mkdir(parents=True, exist_ok=True)
-        elif state == "stray":
-            put(config, "notes.txt")
-            put(data, "notes.txt")
+        elif state == "emptydata":
+            data.mkdir(parents=True)
+        elif state == "emptyconfig":
+            config.mkdir(parents=True)
+        elif state == "dangling":
+            data.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(data.parent / "unmounted-drive" / "nakagawa-recomp", data)
+        elif state == "fonts":
+            put(data / "fonts" / "v2", "jpn0.pgf")
         elif state == "cache":
             put(cache[0], "shader.bin")
             put(cache[1], "player.log")
@@ -229,8 +235,6 @@ class TestPrerequisiteFetcher(unittest.TestCase):
             put(data, "library.json")
         elif state == "saves":
             put(saves / "ULUS10000", "DATA.BIN")
-        elif state == "savesdir":
-            (saves / "ULUS10000").mkdir(parents=True)
         else:
             assert state == "none", state
 
@@ -249,7 +253,7 @@ class TestPrerequisiteFetcher(unittest.TestCase):
     def test_tools_follow_the_shared_rule_table(self) -> None:
         """#324: every case of the player's rule, from the one table both suites read."""
         cases = self._rule_cases()
-        self.assertGreaterEqual(len(cases), 16)
+        self.assertGreaterEqual(len(cases), 14)
         for platform in ("linux", "darwin"):
             for number, case in enumerate(cases):
                 with self.subTest(platform=platform, case=case["case"]):
@@ -272,17 +276,31 @@ class TestPrerequisiteFetcher(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "the rule is for Linux and macOS paths")
     def test_the_decision_is_kept_for_the_process(self) -> None:
-        """#324: data that appears in the new folder later does not switch a running tool."""
+        """#324: an old folder that appears later does not switch a running tool."""
         with patch.dict(os.environ, self._environment(self.root), clear=True), \
              patch.object(sys, "platform", "linux"):
-            old = self.root / "share" / "nakagawa-recomp"
-            old.mkdir(parents=True)
-            (old / "library.json").write_text("{}", encoding="utf-8")
-            self.assertEqual(default_data_root(), old)
             new = self.root / "share" / "Nakagawa" / "data"
-            new.mkdir(parents=True)
-            (new / "library.json").write_text("{}", encoding="utf-8")
-            self.assertEqual(default_data_root(), old)
+            self.assertEqual(default_data_root(), new)
+            (self.root / "share" / "nakagawa-recomp").mkdir(parents=True)
+            self.assertEqual(default_data_root(), new)
+
+    @unittest.skipUnless(os.name == "posix", "the rule is for Linux and macOS paths")
+    def test_old_folders_moved_away_between_two_starts(self) -> None:
+        """#324: nothing is recorded; once the old folders are moved away the new one is used."""
+        environment = self._environment(self.root)
+        old = self.root / "share" / "nakagawa-recomp"
+        new = self.root / "share" / "Nakagawa" / "data"
+        old.mkdir(parents=True)
+        (old / "library.json").write_text("{}", encoding="utf-8")
+        new.mkdir(parents=True)
+        (new / "library.json").write_text("{}", encoding="utf-8")
+        with patch.dict(os.environ, environment, clear=True), patch.object(sys, "platform", "linux"):
+            self.assertEqual(default_data_root(), old, "both exist: the old layout is used")
+        old.rename(self.root / "moved-away")
+        # HOME spelled with a trailing "/" names the same folders and decides afresh, as a new start.
+        environment["HOME"] += "/"
+        with patch.dict(os.environ, environment, clear=True), patch.object(sys, "platform", "linux"):
+            self.assertEqual(default_data_root(), new, "the old folders are gone: the new one is used")
 
     @unittest.skipUnless(os.name == "posix", "the rule is for Linux and macOS paths")
     def test_xdg_variables_and_home(self) -> None:

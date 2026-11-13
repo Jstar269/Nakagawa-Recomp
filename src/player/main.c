@@ -3810,8 +3810,8 @@ typedef struct PlayerRun {
    the process's exit code. */
 #define PLAYER_RUN_CONTINUE INT_MIN
 
-/* Both data folders of a Linux or macOS install hold data (#324, nk_data_migrate.h): the library
-   and the log say which one is in use. Nothing is moved, and the start goes on. */
+/* A Linux or macOS install uses its earlier folders while the new one exists too (#324,
+   nk_data_migrate.h): the library and the log name both. Nothing is moved, and the start goes on. */
 static void player_note_data_layout(PlayerApp *app) {
     static NkUserDataLayout layout;
     if (nk_platform_user_data_layout(&layout) &&

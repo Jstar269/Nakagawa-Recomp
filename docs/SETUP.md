@@ -141,13 +141,16 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   `$XDG_CACHE_HOME` and `$XDG_STATE_HOME`); an XDG variable that is not an absolute path is ignored, as
   the XDG specification says. Without `HOME` (or an absolute `$XDG_DATA_HOME`) there is no data folder,
   and the Python tools stop with `DATA_DIR_UNAVAILABLE`.
-- **If you used an earlier Linux or macOS build.** Your install stays where it is, for good: Linux's
-  `~/.local/share/nakagawa-recomp` (or `$XDG_DATA_HOME/nakagawa-recomp`) with its settings in
-  `~/.config/nakagawa-recomp`, or macOS's `~/Library/Application Support/NakagawaRecomp`. Nakagawa
-  uses the new folder only once it holds data (a `settings.json`, a `library.json` or a save), and
-  the earlier folders while only they do. Nothing is moved, copied, merged or deleted, and moving an
-  existing install is not offered. If both hold data, the new folder is used and the library screen
-  names both.
+- **If you used an earlier Linux or macOS build.** While any of its folders exists, Nakagawa keeps
+  using it, even an empty one: on Linux `~/.local/share/nakagawa-recomp` (or
+  `$XDG_DATA_HOME/nakagawa-recomp`), its `saves` folder, and `~/.config/nakagawa-recomp` (or
+  `$XDG_CONFIG_HOME/nakagawa-recomp`); on macOS the `config`, `data` and `saves` folders in
+  `~/Library/Application Support/NakagawaRecomp`. Nothing is moved, copied, merged or deleted, and
+  Nakagawa offers no move. If the new `Nakagawa` folder exists too, the library screen names both.
+- **Switching to the new folder.** Close Nakagawa, then move or rename those earlier folders out of
+  the way (on Linux both `nakagawa-recomp` folders; on macOS the whole `NakagawaRecomp` folder). The
+  next start uses the new `Nakagawa` folder. Copy anything you want to keep, such as saves, into it
+  yourself.
 
 ## Install, update and uninstall (Windows)
 
