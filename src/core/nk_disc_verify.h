@@ -26,19 +26,17 @@
  *                    retail", never "bad";
  *   NOT_CHECKED      no list found, or the image was never hashed.
  *
- * The datafile (Logiqx XML, as Redump publishes it) is read in one forward
- * pass, so its cost is linear in its size, which NK_DISC_DAT_MAX_BYTES caps.
- * It expands no entity and never reads a DTD: one <!DOCTYPE> before the root
- * that only names an external DTD (Logiqx's, as Redump's lists do) is skipped
- * unread, and any other <! markup (an entity declaration, an internal DTD
- * subset, a second DOCTYPE, a comment) or a reference to an entity other than
- * XML's five predefined ones and character references is refused
- * (DISC_DAT_ENTITY_REFUSED). It reads each <game> element, the size, crc and
- * sha1 attributes of its <rom> elements, and any <serial> text. A rom with a
- * malformed hash or size is skipped and counted. A datafile may be the zip
- * Redump serves: exactly one entry, a .dat, stored or deflated, not ZIP64, its
- * size checked before it is inflated and its CRC-32 after
- * (DISC_DAT_ZIP_INVALID).
+ * The datafile format (Logiqx XML as Redump publishes it, or the zip Redump
+ * serves) is written down once, byte for byte, in the module documentation of
+ * tools/nk_core/disc_verify.py ("The datafile format", rules 1-10), which the
+ * command-line tools read with. This reader accepts exactly that format and
+ * refuses everything else with the same code and message, so the player and
+ * the tools never give two verdicts on one disc;
+ * tests/native/disc_dat_conformance.txt holds both readers to it. In short:
+ * a strict, ASCII-markup subset of XML in UTF-8, read in one forward pass (its
+ * cost linear in its size); no entity expanded and no DTD read; one zip entry,
+ * a .dat, exactly as Redump's zip lays it out, inflated under zlib's rules into
+ * at most its declared size and checked against its CRC-32.
  */
 
 #ifndef NK_DISC_VERIFY_H
@@ -68,11 +66,24 @@ extern "C" {
    the zip's own size field before inflating, and on the bytes inflated).
    Redump's PSP list of 2026-11-12 is 1,475,779 bytes for 3,546 discs, about
    416 bytes a disc, so 16 MiB holds about 40,000 discs: ten times the list,
-   more than the PSP library will ever add. MAX_DAT_BYTES in disc_verify.py is
-   the same. The reader holds at most the file (16 MiB), the inflated .dat
-   (16 MiB) and NK_DISC_DAT_MAX_ROMS roms. */
+   more than the PSP library will ever add. The reader holds at most the file
+   (16 MiB), the inflated .dat (16 MiB), NK_DISC_DAT_MAX_ROMS roms and
+   NK_DISC_DAT_MAX_SERIALS disc IDs. Each limit is the MAX_* of the same name in
+   disc_verify.py (the format's rules 1, 5-9). */
 #define NK_DISC_DAT_MAX_BYTES (16u * 1024u * 1024u)
-#define NK_DISC_DAT_MAX_ROMS 200000u
+/* Roms read (ten times the list's 3,546), tags (every '<'; the list has about
+   eleven a disc), disc IDs over all games (the list names 3,907). */
+#define NK_DISC_DAT_MAX_ROMS 40000u
+#define NK_DISC_DAT_MAX_TAGS 480000u
+#define NK_DISC_DAT_MAX_SERIALS 80000u
+/* Elements nested (the list nests three deep). */
+#define NK_DISC_DAT_MAX_DEPTH 8u
+/* A <serial>'s raw bytes, and the disc IDs one names (the list's longest is 74
+   bytes; the most IDs one names is five). */
+#define NK_DISC_DAT_MAX_SERIAL_BYTES 256u
+#define NK_DISC_DAT_MAX_GAME_SERIALS 16u
+/* A header <name>, <version> or <date>, in printable ASCII. */
+#define NK_DISC_DAT_MAX_HEADER_FIELD 63u
 
 #define NK_DISC_SHA1_HEX_CHARS 40u
 #define NK_DISC_CRC32_HEX_CHARS 8u
@@ -176,11 +187,13 @@ typedef struct {
 } NkDiscDat;
 
 void nk_disc_dat_free(NkDiscDat *dat);
-/* Read a datafile from memory. Refuses a text with no complete <datafile>
-   element, a list cut short included (DISC_DAT_NOT_DATAFILE), entity
-   declarations, an internal DTD subset or an entity reference XML does not
-   predefine (DISC_DAT_ENTITY_REFUSED), no rom with a SHA-1 (DISC_DAT_EMPTY) or
-   more than NK_DISC_DAT_MAX_ROMS roms (DISC_DAT_TOO_LARGE). */
+/* Read a datafile, or the zip Redump serves, from memory: the whole format
+   (rules 1-10), disc_verify.py's dat_from_bytes. Every refusal fills status
+   with a DISC_DAT_* code and the message disc_verify.py gives. */
+bool nk_disc_dat_read(const uint8_t *bytes, size_t length, NkDiscDat *out,
+                      NkDiscExpandStatus *status);
+/* Read a datafile's text from memory (rules 3-10, no zip and no size check:
+   disc_verify.py's parse_dat_bytes). One UTF-8 byte-order mark is skipped. */
 bool nk_disc_dat_parse(const char *text, size_t length, NkDiscDat *out,
                        NkDiscExpandStatus *status);
 /* nk_disc_dat_parse, also giving the bytes the reader looked at, each counted
@@ -226,7 +239,8 @@ typedef enum {
 bool nk_disc_dat_load_active(const char *data_root, const char *bundled_path, NkDiscDat *out,
                              NkDiscListSource *source, NkDiscExpandStatus *status);
 
-/* Whether the list names this disc ID in a <serial>. */
+/* Whether the list names this disc ID in a <serial>, compared after ASCII
+   upper-casing (rule 9). */
 bool nk_disc_dat_has_serial(const NkDiscDat *dat, const char *disc_id);
 
 /* The tier of one image. dat or digest NULL (or an empty digest) is

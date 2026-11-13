@@ -3,7 +3,10 @@
 
 /*
  * Disc verification (src/core/nk_disc_verify.c) and the library keyed by disc
- * ID plus content hash (src/core/nk_library.c), on synthetic data only: the
+ * ID plus content hash (src/core/nk_library.c). First the conformance table
+ * both datafile readers are held to (tests/native/disc_dat_conformance.txt,
+ * written and checked by tools/test_disc_verify.py: its cases, and seeded
+ * mutations of the bundled list); then, on synthetic data only: the
  * SHA-1 and CRC-32 known answers, the whole-image hash with progress and
  * cancel, the Redump datafile reader, the three tiers, the import into the
  * data folder, Redump's zip, the refusal of entity-bearing lists, the list
@@ -20,6 +23,7 @@
 #include "nk_disc_verify.h"
 #include "nk_library.h"
 #include "nk_platform.h"
+#include "nk_psp_inflate.h"
 #include "nk_zip.h"
 
 #include <stdint.h>
@@ -77,6 +81,646 @@ static void sha1_hex(const uint8_t *data, size_t len, char out[41]) {
         out[2 * i + 1] = hex[digest[i] & 15];
     }
     out[40] = '\0';
+}
+
+static bool is_xml_space(uint8_t c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+/* ---- one table of cases for both readers ------------------------------ */
+
+/* tests/native/disc_dat_conformance.txt: inputs and the result each must
+   give, written by tools/test_disc_verify.py from the Python reader, whose
+   suite checks it too. This reader must give the same result for every case
+   and every mutation, so neither reader can change alone. The file's header
+   says how a case is written; the pieces and the mutations below follow
+   tools/test_disc_verify.py's build_pieces and mutation step for step. */
+
+#define CORPUS_PATH "tests/native/disc_dat_conformance.txt"
+
+typedef struct {
+    uint8_t *data;
+    size_t size;
+    size_t cap;
+} Buf;
+
+static void buf_reserve(Buf *b, size_t more) {
+    if (more <= b->cap - b->size) return;
+    CHECK(more <= SIZE_MAX - b->size);
+    size_t cap = b->cap ? b->cap : 256u;
+    while (cap < b->size + more) cap *= 2u;
+    uint8_t *grown = (uint8_t *)realloc(b->data, cap);
+    CHECK(grown != NULL);
+    b->data = grown;
+    b->cap = cap;
+}
+
+static void buf_add(Buf *b, const void *p, size_t n) {
+    if (n == 0) return;
+    buf_reserve(b, n);
+    memcpy(b->data + b->size, p, n);
+    b->size += n;
+}
+
+static void buf_add_byte(Buf *b, uint8_t c) {
+    buf_add(b, &c, 1u);
+}
+
+static void buf_free(Buf *b) {
+    free(b->data);
+    memset(b, 0, sizeof(*b));
+}
+
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* A piece's text: \\ \n \t \r and \xHH escaped, every other byte itself. */
+static void unescape_into(Buf *out, const char *text) {
+    for (const char *p = text; *p; p++) {
+        if (*p != '\\') {
+            buf_add_byte(out, (uint8_t)*p);
+            continue;
+        }
+        p++;
+        if (*p == '\\') buf_add_byte(out, '\\');
+        else if (*p == 'n') buf_add_byte(out, '\n');
+        else if (*p == 't') buf_add_byte(out, '\t');
+        else if (*p == 'r') buf_add_byte(out, '\r');
+        else {
+            CHECK(*p == 'x' && hex_nibble(p[1]) >= 0 && hex_nibble(p[2]) >= 0);
+            buf_add_byte(out, (uint8_t)(hex_nibble(p[1]) * 16 + hex_nibble(p[2])));
+            p += 2;
+        }
+    }
+}
+
+/* One final fixed-Huffman deflate block (RFC 1951 3.2.6), as
+   tools/test_disc_verify.py's fixed_deflate writes it: each byte a literal; a
+   run of 259 or more of one byte, a literal and as many length-258
+   distance-1 copies as fit; then the end of the block. */
+typedef struct {
+    Buf *out;
+    uint32_t acc;
+    unsigned bits;
+} BitWriter;
+
+static void bits_put(BitWriter *w, uint32_t value, unsigned count) {
+    for (unsigned i = 0; i < count; i++) {
+        w->acc |= ((value >> i) & 1u) << w->bits;
+        if (++w->bits == 8u) {
+            buf_add_byte(w->out, (uint8_t)w->acc);
+            w->acc = 0;
+            w->bits = 0;
+        }
+    }
+}
+
+/* A Huffman code, most significant bit first. */
+static void bits_code(BitWriter *w, unsigned symbol) {
+    uint32_t code;
+    unsigned length;
+    if (symbol < 144u) {
+        code = 0x30u + symbol;
+        length = 8u;
+    } else if (symbol < 256u) {
+        code = 0x190u + symbol - 144u;
+        length = 9u;
+    } else if (symbol < 280u) {
+        code = symbol - 256u;
+        length = 7u;
+    } else {
+        code = 0xC0u + symbol - 280u;
+        length = 8u;
+    }
+    for (unsigned i = length; i-- > 0;) bits_put(w, (code >> i) & 1u, 1u);
+}
+
+static void fixed_deflate(const uint8_t *data, size_t size, Buf *out) {
+    BitWriter w = {out, 0u, 0u};
+    bits_put(&w, 1u, 1u); /* BFINAL */
+    bits_put(&w, 1u, 2u); /* BTYPE 01 */
+    size_t at = 0;
+    while (at < size) {
+        size_t run = 1;
+        while (at + run < size && data[at + run] == data[at]) run++;
+        if (run < 259u) {
+            for (size_t i = 0; i < run; i++) bits_code(&w, data[at]);
+            at += run;
+            continue;
+        }
+        bits_code(&w, data[at]);
+        size_t copies = (run - 1u) / 258u;
+        for (size_t i = 0; i < copies; i++) {
+            bits_code(&w, 285u); /* length 258 */
+            bits_put(&w, 0u, 5u); /* distance code 0: distance 1 */
+        }
+        at += 1u + copies * 258u;
+    }
+    bits_code(&w, 256u);
+    if (w.bits) buf_add_byte(out, (uint8_t)w.acc);
+}
+
+static void put_le16(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+static void put_le32(uint8_t *p, uint32_t v) {
+    put_le16(p, v & 0xFFFFu);
+    put_le16(p + 2, v >> 16);
+}
+
+static uint32_t get_le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* The zip the mutations start from (tools/test_disc_verify.py's zip_bytes):
+   one entry, list.dat, version 20, no flags, time 0, date 0x21. */
+static void zip_bytes(const uint8_t *payload, size_t size, unsigned method, Buf *out) {
+    Buf packed = {NULL, 0, 0};
+    if (method == 8u) fixed_deflate(payload, size, &packed);
+    else buf_add(&packed, payload, size);
+    uint32_t crc = nk_crc32_update(0u, payload, size);
+    uint8_t local[38], central[54], end[22];
+    memset(local, 0, sizeof(local));
+    memset(central, 0, sizeof(central));
+    memset(end, 0, sizeof(end));
+    put_le32(local, 0x04034B50u);
+    put_le16(local + 4, 20u);
+    put_le16(local + 8, method);
+    put_le16(local + 12, 0x21u);
+    put_le32(local + 14, crc);
+    put_le32(local + 18, (uint32_t)packed.size);
+    put_le32(local + 22, (uint32_t)size);
+    put_le16(local + 26, 8u);
+    memcpy(local + 30, "list.dat", 8u);
+    put_le32(central, 0x02014B50u);
+    put_le16(central + 4, 20u);
+    put_le16(central + 6, 20u);
+    put_le16(central + 10, method);
+    put_le16(central + 14, 0x21u);
+    put_le32(central + 16, crc);
+    put_le32(central + 20, (uint32_t)packed.size);
+    put_le32(central + 24, (uint32_t)size);
+    put_le16(central + 28, 8u);
+    memcpy(central + 46, "list.dat", 8u);
+    put_le32(end, 0x06054B50u);
+    put_le16(end + 8, 1u);
+    put_le16(end + 10, 1u);
+    put_le32(end + 12, (uint32_t)sizeof(central));
+    put_le32(end + 16, (uint32_t)(sizeof(local) + packed.size));
+    buf_add(out, local, sizeof(local));
+    buf_add(out, packed.data, packed.size);
+    buf_add(out, central, sizeof(central));
+    buf_add(out, end, sizeof(end));
+    buf_free(&packed);
+}
+
+/* What the reader made of one input, as tools/test_disc_verify.py's outcome
+   writes it: the counts and the SHA-1 of the list read, or the refusal. */
+static void outcome_line(const uint8_t *data, size_t size, char *line, size_t line_size) {
+    NkDiscDat dat;
+    NkDiscExpandStatus status;
+    if (!nk_disc_dat_read(data, size, &dat, &status)) {
+        snprintf(line, line_size, "%s %s", status.code, status.message);
+        return;
+    }
+    Buf canonical = {NULL, 0, 0};
+    char row[160];
+    snprintf(row, sizeof(row), "%lu\n%lu\n%lu\n", (unsigned long)dat.games,
+             (unsigned long)dat.rom_count, (unsigned long)dat.rejected_roms);
+    buf_add(&canonical, row, strlen(row));
+    const char *const header[3] = {dat.name, dat.version, dat.date};
+    for (size_t i = 0; i < 3u; i++) {
+        buf_add(&canonical, header[i], strlen(header[i]));
+        buf_add_byte(&canonical, '\n');
+    }
+    for (size_t i = 0; i < dat.serial_count; i++) {
+        snprintf(row, sizeof(row), "serial %s\n", dat.serials[i]);
+        buf_add(&canonical, row, strlen(row));
+    }
+    for (size_t i = 0; i < dat.rom_count; i++) {
+        char sha1[41];
+        static const char hex[] = "0123456789abcdef";
+        for (size_t k = 0; k < 20u; k++) {
+            sha1[2u * k] = hex[dat.roms[i].sha1[k] >> 4];
+            sha1[2u * k + 1u] = hex[dat.roms[i].sha1[k] & 15u];
+        }
+        sha1[40] = '\0';
+        snprintf(row, sizeof(row), "rom %s %08lx %llu %lu\n", sha1,
+                 (unsigned long)dat.roms[i].crc32, (unsigned long long)dat.roms[i].size_bytes,
+                 (unsigned long)dat.roms[i].listed);
+        buf_add(&canonical, row, strlen(row));
+    }
+    char digest[41];
+    sha1_hex(canonical.data, canonical.size, digest);
+    snprintf(line, line_size, "OK %lu %lu %lu %lu %s", (unsigned long)dat.games,
+             (unsigned long)dat.rom_count, (unsigned long)dat.rejected_roms,
+             (unsigned long)dat.serial_count, digest);
+    buf_free(&canonical);
+    nk_disc_dat_free(&dat);
+}
+
+/* Registers a case's pieces may fill (reg NAME ... out). */
+typedef struct {
+    char name[32];
+    Buf buf;
+} Register;
+
+#define MAX_REGISTERS 8u
+
+static Buf *register_named(Register *regs, size_t *count, const char *name, bool fresh) {
+    for (size_t i = 0; i < *count; i++) {
+        if (strcmp(regs[i].name, name) == 0) {
+            if (fresh) regs[i].buf.size = 0;
+            return &regs[i].buf;
+        }
+    }
+    CHECK(fresh && *count < MAX_REGISTERS && strlen(name) < sizeof(regs[0].name));
+    snprintf(regs[*count].name, sizeof(regs[0].name), "%s", name);
+    memset(&regs[*count].buf, 0, sizeof(Buf));
+    return &regs[(*count)++].buf;
+}
+
+/* One piece line of a case, into *target (or a register change). */
+static void build_piece(const char *line, Buf *output, Buf **target, Register *regs,
+                        size_t *reg_count) {
+    if (strcmp(line, "t") == 0) return;
+    if (strncmp(line, "t ", 2) == 0) {
+        unescape_into(*target, line + 2);
+    } else if (strncmp(line, "h ", 2) == 0) {
+        for (const char *p = line + 2; *p; p += 2) {
+            CHECK(hex_nibble(p[0]) >= 0 && hex_nibble(p[1]) >= 0);
+            buf_add_byte(*target, (uint8_t)(hex_nibble(p[0]) * 16 + hex_nibble(p[1])));
+        }
+    } else if (strncmp(line, "r ", 2) == 0 || strncmp(line, "seq ", 4) == 0) {
+        bool seq = line[0] == 's';
+        char *rest = NULL;
+        unsigned long count = strtoul(line + (seq ? 4 : 2), &rest, 10);
+        CHECK(rest && *rest == ' ');
+        Buf unit = {NULL, 0, 0};
+        unescape_into(&unit, rest + 1);
+        if (!seq) {
+            buf_reserve(*target, unit.size * count);
+            for (unsigned long i = 0; i < count; i++) buf_add(*target, unit.data, unit.size);
+        }
+        for (unsigned long i = 0; seq && i < count; i++) {
+            for (size_t k = 0; k < unit.size; k++) {
+                char field[48];
+                if (unit.data[k] != '%' || k + 1u >= unit.size) {
+                    buf_add_byte(*target, unit.data[k]);
+                    continue;
+                }
+                char kind = (char)unit.data[++k];
+                if (kind == 'H') snprintf(field, sizeof(field), "%040lx", i);
+                else if (kind == 'X') snprintf(field, sizeof(field), "%lx", i);
+                else if (kind == 'D') snprintf(field, sizeof(field), "%05lu", i % 100000ul);
+                else {
+                    CHECK(kind == '%');
+                    snprintf(field, sizeof(field), "%%");
+                }
+                buf_add(*target, field, strlen(field));
+            }
+        }
+        buf_free(&unit);
+    } else if (strncmp(line, "file ", 5) == 0) {
+        FILE *f = nk_fopen_utf8(line + 5, "rb");
+        CHECK(f != NULL);
+        uint8_t chunk[65536];
+        size_t got;
+        while ((got = fread(chunk, 1, sizeof(chunk), f)) > 0) buf_add(*target, chunk, got);
+        fclose(f);
+    } else if (strncmp(line, "reg ", 4) == 0) {
+        *target = register_named(regs, reg_count, line + 4, true);
+    } else if (strcmp(line, "out") == 0) {
+        *target = output;
+    } else if (strncmp(line, "put ", 4) == 0) {
+        Buf *source = register_named(regs, reg_count, line + 4, false);
+        buf_add(*target, source->data, source->size);
+    } else if (strncmp(line, "deflate ", 8) == 0) {
+        Buf *source = register_named(regs, reg_count, line + 8, false);
+        fixed_deflate(source->data, source->size, *target);
+    } else {
+        fprintf(stderr, "unknown corpus piece: %.40s\n", line);
+        CHECK(false);
+    }
+}
+
+/* ---- the seeded mutations ---- */
+
+typedef struct {
+    uint64_t state;
+} SplitMix64;
+
+static uint64_t rng_next(SplitMix64 *rng) {
+    uint64_t z = (rng->state += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+static size_t rng_below(SplitMix64 *rng, size_t bound) {
+    return (size_t)(rng_next(rng) % (uint64_t)bound);
+}
+
+typedef struct {
+    const uint8_t *bytes;
+    size_t size;
+} Lit;
+
+#define LIT(s) {(const uint8_t *)(s), sizeof(s) - 1u}
+
+static const uint8_t k_interesting[] = {
+    0x00, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0x21, 0x22, 0x26, 0x27, 0x2c, 0x2d, 0x2f,
+    0x3c, 0x3d, 0x3e, 0x3f, 0x5b, 0x5d, 0x7f, 0x80, 0xa0, 0xc2, 0xe3, 0xef, 0xff,
+};
+
+static const Lit k_insertions[] = {
+    LIT("\xc2\xa0"), LIT("\xe3\x80\x80"), LIT("\xc5\xbf"), LIT("\xc4\xb1"), LIT("\xef\xbb\xbf"),
+    LIT("&amp;"), LIT("&#65;"), LIT("&#x41;"), LIT("&bogus;"), LIT("<!--"), LIT("-->"),
+    LIT("<?x?>"), LIT("<!DOCTYPE x>"), LIT("<![CDATA["), LIT("</datafile>"), LIT("<datafile>"),
+    LIT("<header>"), LIT("</header>"), LIT("<game>"), LIT("</game>"), LIT("<serial>"),
+    LIT("</serial>"), LIT("<rom/>"),
+    LIT("<rom sha1=\"0123456789abcdef0123456789abcdef01234567\" crc=\"0badf00d\" size=\"1\"/>"),
+    LIT("<a>"), LIT("</a>"), LIT(","), LIT("ULUS-10041"), LIT("\xf0\x9f\x98\x80"),
+    LIT("\xed\xa0\x80"), LIT("\xc0\xaf"), LIT("\xf4\x90\x80\x80"),
+};
+
+static const Lit k_whitespace_swaps[] = {
+    LIT("\x0b"), LIT("\x0c"), LIT("\xc2\xa0"), LIT("\xe3\x80\x80"), LIT("\xc2\x85"),
+    LIT("\xe2\x80\x8b"), LIT("\x00"), LIT("\x1f"), LIT(""), LIT("  "),
+};
+
+/* Replace data[at, at + removed) with insert[0, inserted). */
+static void buf_splice(Buf *b, size_t at, size_t removed, const uint8_t *insert, size_t inserted) {
+    CHECK(at <= b->size && removed <= b->size - at);
+    uint8_t *copy = NULL;
+    if (inserted) {
+        copy = (uint8_t *)malloc(inserted);
+        CHECK(copy != NULL);
+        memcpy(copy, insert, inserted); /* insert may point into b */
+    }
+    if (inserted > removed) buf_reserve(b, inserted - removed);
+    memmove(b->data + at + inserted, b->data + at + removed, b->size - at - removed);
+    if (inserted) memcpy(b->data + at, copy, inserted);
+    b->size = b->size - removed + inserted;
+    free(copy);
+}
+
+static void mutate_text(SplitMix64 *rng, Buf *data) {
+    size_t ops = 1u + rng_below(rng, 4u);
+    for (size_t n = 0; n < ops; n++) {
+        size_t op = rng_below(rng, 8u);
+        size_t size = data->size;
+        if (op == 2u) {
+            size_t at = rng_below(rng, size + 1u);
+            const Lit *seq = &k_insertions[rng_below(rng, sizeof(k_insertions) / sizeof(k_insertions[0]))];
+            buf_splice(data, at, 0, seq->bytes, seq->size);
+        } else if (size == 0) {
+            continue;
+        } else if (op == 0u) {
+            size_t at = rng_below(rng, size);
+            data->data[at] ^= (uint8_t)(1u << rng_below(rng, 8u));
+        } else if (op == 1u) {
+            size_t at = rng_below(rng, size);
+            data->data[at] = k_interesting[rng_below(rng, sizeof(k_interesting))];
+        } else if (op == 3u) {
+            size_t at = rng_below(rng, size);
+            size_t count = 1u + rng_below(rng, 16u);
+            buf_splice(data, at, count < size - at ? count : size - at, NULL, 0);
+        } else if (op == 4u) {
+            size_t at = rng_below(rng, size);
+            size_t count = 1u + rng_below(rng, 64u);
+            buf_splice(data, at, 0, data->data + at, count < size - at ? count : size - at);
+        } else if (op == 5u) {
+            data->size = rng_below(rng, size + 1u);
+        } else if (op == 6u) {
+            size_t at = rng_below(rng, size);
+            unsigned upper = data->data[at] & 0xDFu;
+            if (upper >= 0x41u && upper <= 0x5Au) data->data[at] ^= 0x20u;
+        } else {
+            size_t at = rng_below(rng, size);
+            while (at < size && !is_xml_space(data->data[at])) at++;
+            if (at < size) {
+                const Lit *swap = &k_whitespace_swaps[rng_below(
+                    rng, sizeof(k_whitespace_swaps) / sizeof(k_whitespace_swaps[0]))];
+                buf_splice(data, at, 1u, swap->bytes, swap->size);
+            }
+        }
+    }
+}
+
+typedef struct {
+    Buf bundled;
+    Buf windows[8];
+} MutationBases;
+
+static size_t find_bytes(const uint8_t *hay, size_t size, const char *needle, size_t from) {
+    size_t length = strlen(needle);
+    for (size_t at = from; at + length <= size; at++) {
+        if (hay[at] == (uint8_t)needle[0] && memcmp(hay + at, needle, length) == 0) return at;
+    }
+    return SIZE_MAX;
+}
+
+/* tools/test_disc_verify.py's bundled_windows: the bundled zip, and eight
+   short lists cut from its .dat (its header, eight games, </datafile>). */
+static void mutation_bases(MutationBases *bases) {
+    memset(bases, 0, sizeof(*bases));
+    char path[NATIVE_TEST_PATH_MAX];
+    CHECK(nk_disc_bundled_dat_path(".", path, sizeof(path)));
+    FILE *f = nk_fopen_utf8(path, "rb");
+    CHECK(f != NULL);
+    uint8_t chunk[65536];
+    size_t got;
+    while ((got = fread(chunk, 1, sizeof(chunk), f)) > 0) buf_add(&bases->bundled, chunk, got);
+    fclose(f);
+    const uint8_t *zip = bases->bundled.data;
+    size_t start = 30u + (size_t)(zip[26] | (zip[27] << 8)) + (size_t)(zip[28] | (zip[29] << 8));
+    uint32_t packed = get_le32(zip + 18), plain = get_le32(zip + 22);
+    uint8_t *text = (uint8_t *)malloc(plain);
+    CHECK(text != NULL);
+    size_t written = 0, consumed = 0;
+    char err[128];
+    CHECK(nk_psp_inflate_raw_zlib(zip + start, packed, text, plain, &written, &consumed, err,
+                                  sizeof(err)) == NK_INFLATE_OK && written == plain);
+    size_t header_end = find_bytes(text, plain, "</header>\n", 0);
+    CHECK(header_end != SIZE_MAX);
+    header_end += strlen("</header>\n");
+    size_t *starts = NULL;
+    size_t games = 0, cap = 0;
+    for (size_t at = find_bytes(text, plain, "\t<game ", 0); at != SIZE_MAX;
+         at = find_bytes(text, plain, "\t<game ", at + 1u)) {
+        if (games == cap) {
+            cap = cap ? cap * 2u : 4096u;
+            starts = (size_t *)realloc(starts, cap * sizeof(*starts));
+            CHECK(starts != NULL);
+        }
+        starts[games++] = at;
+    }
+    size_t closing = find_bytes(text, plain, "</datafile>", 0);
+    CHECK(games > 8u && closing != SIZE_MAX);
+    for (size_t w = 0; w < 8u; w++) {
+        size_t first = w * (games - 8u) / 7u, last = first + 7u;
+        size_t end = last + 1u < games ? starts[last + 1u] : closing;
+        buf_add(&bases->windows[w], text, header_end);
+        buf_add(&bases->windows[w], text + starts[first], end - starts[first]);
+        buf_add(&bases->windows[w], "</datafile>\n", 12u);
+    }
+    free(starts);
+    free(text);
+}
+
+/* tools/test_disc_verify.py's mutation(index): the same draws in the same order. */
+static void mutation(uint64_t seed, size_t index, const MutationBases *bases, Buf *out) {
+    SplitMix64 rng = {(seed << 32) | (uint64_t)index};
+    size_t kind = index % 16u;
+    out->size = 0;
+    if (kind < 10u) {
+        const Buf *base = &bases->windows[rng_below(&rng, 8u)];
+        buf_add(out, base->data, base->size);
+        mutate_text(&rng, out);
+    } else if (kind < 12u) {
+        const Buf *base = &bases->windows[rng_below(&rng, 8u)];
+        zip_bytes(base->data, base->size, 0u, out);
+        size_t changes = 1u + rng_below(&rng, 3u);
+        for (size_t n = 0; n < changes && out->size > 0; n++) {
+            size_t region = rng_below(&rng, 3u), at;
+            if (region == 0u) at = rng_below(&rng, out->size < 38u ? out->size : 38u);
+            else if (region == 1u) at = out->size - 1u - rng_below(&rng, out->size < 76u ? out->size : 76u);
+            else at = rng_below(&rng, out->size);
+            size_t change = rng_below(&rng, 3u);
+            if (change == 0u) out->data[at] ^= (uint8_t)(1u << rng_below(&rng, 8u));
+            else if (change == 1u) out->data[at] = (uint8_t)rng_below(&rng, 256u);
+            else out->size = at;
+        }
+    } else if (kind < 15u) {
+        const Buf *base = &bases->windows[rng_below(&rng, 8u)];
+        zip_bytes(base->data, base->size, 8u, out);
+        uint32_t packed = get_le32(out->data + 18);
+        size_t central = 38u + packed;
+        size_t changes = 1u + rng_below(&rng, 4u);
+        for (size_t n = 0; n < changes; n++) {
+            if (rng_below(&rng, 4u) < 3u) {
+                size_t at = 38u + rng_below(&rng, packed);
+                out->data[at] ^= (uint8_t)(1u << rng_below(&rng, 8u));
+            } else {
+                uint32_t size = get_le32(out->data + 22) + (uint32_t)rng_below(&rng, 17u) - 8u;
+                put_le32(out->data + 22, size);
+                put_le32(out->data + central + 24, size);
+            }
+        }
+    } else {
+        buf_add(out, bases->bundled.data, bases->bundled.size);
+        const uint8_t *zip = out->data;
+        size_t start = 30u + (size_t)(zip[26] | (zip[27] << 8)) + (size_t)(zip[28] | (zip[29] << 8));
+        uint32_t packed = get_le32(zip + 18);
+        size_t flips = 1u + rng_below(&rng, 2u);
+        for (size_t n = 0; n < flips; n++) {
+            size_t at = start + rng_below(&rng, packed);
+            out->data[at] ^= (uint8_t)(1u << rng_below(&rng, 8u));
+        }
+    }
+}
+
+static void test_conformance_corpus(void) {
+    FILE *f = nk_fopen_utf8(CORPUS_PATH, "rb");
+    CHECK(f != NULL);
+    Buf file = {NULL, 0, 0};
+    uint8_t chunk[65536];
+    size_t got;
+    while ((got = fread(chunk, 1, sizeof(chunk), f)) > 0) buf_add(&file, chunk, got);
+    fclose(f);
+    buf_add_byte(&file, '\0');
+
+    Buf input = {NULL, 0, 0};
+    Buf *target = &input;
+    Register regs[MAX_REGISTERS];
+    size_t reg_count = 0;
+    char name[256] = "";
+    char line_out[512];
+    size_t cases = 0, failures = 0, mutations = 0;
+    bool in_case = false;
+    char *next = (char *)file.data;
+    while (next && *next) {
+        char *line = next;
+        char *newline = strchr(line, '\n');
+        next = newline ? newline + 1 : NULL;
+        if (newline) *newline = '\0';
+        if (!in_case && (line[0] == '#' || line[0] == '\0')) continue;
+        if (!in_case && strncmp(line, "case ", 5) == 0) {
+            snprintf(name, sizeof(name), "%s", line + 5);
+            input.size = 0;
+            target = &input;
+            for (size_t i = 0; i < reg_count; i++) buf_free(&regs[i].buf);
+            reg_count = 0;
+            in_case = true;
+            continue;
+        }
+        if (in_case && strncmp(line, "expect ", 7) == 0) {
+            outcome_line(input.data, input.size, line_out, sizeof(line_out));
+            if (strcmp(line_out, line + 7) != 0) {
+                fprintf(stderr, "conformance case \"%s\":\n  expected %s\n  got      %s\n", name,
+                        line + 7, line_out);
+                failures++;
+            }
+            cases++;
+            continue;
+        }
+        if (in_case && strcmp(line, "end") == 0) {
+            in_case = false;
+            continue;
+        }
+        if (in_case) {
+            build_piece(line, &input, &target, regs, &reg_count);
+            continue;
+        }
+        /* mutations SEED COUNT, then the result prefixes, eight to a line. */
+        CHECK(strncmp(line, "mutations ", 10) == 0);
+        char *rest = NULL;
+        uint64_t seed = (uint64_t)strtoull(line + 10, &rest, 16);
+        size_t count = (size_t)strtoul(rest, NULL, 10);
+        MutationBases bases;
+        mutation_bases(&bases);
+        Buf mutated = {NULL, 0, 0};
+        while (next && strncmp(next, "end", 3) != 0) {
+            line = next;
+            newline = strchr(line, '\n');
+            next = newline ? newline + 1 : NULL;
+            if (newline) *newline = '\0';
+            for (char *prefix = strtok(line, " "); prefix; prefix = strtok(NULL, " ")) {
+                CHECK(mutations < count && strlen(prefix) == 8u);
+                mutation(seed, mutations, &bases, &mutated);
+                outcome_line(mutated.data, mutated.size, line_out, sizeof(line_out));
+                char digest[41];
+                sha1_hex((const uint8_t *)line_out, strlen(line_out), digest);
+                if (memcmp(digest, prefix, 8u) != 0) {
+                    fprintf(stderr, "conformance mutation %lu (kind %lu): expected %s, got %.8s: %s\n",
+                            (unsigned long)mutations, (unsigned long)(mutations % 16u), prefix,
+                            digest, line_out);
+                    failures++;
+                }
+                mutations++;
+            }
+        }
+        CHECK(mutations == count);
+        buf_free(&mutated);
+        buf_free(&bases.bundled);
+        for (size_t w = 0; w < 8u; w++) buf_free(&bases.windows[w]);
+        next = next ? strchr(next, '\n') : NULL;
+        if (next) next++;
+    }
+    for (size_t i = 0; i < reg_count; i++) buf_free(&regs[i].buf);
+    buf_free(&input);
+    buf_free(&file);
+    CHECK(!in_case && cases >= 230u && mutations == 4096u);
+    CHECK(failures == 0);
+    printf("PASS conformance table: %lu cases and %lu seeded mutations, as the Python reader reads "
+           "them\n", (unsigned long)cases, (unsigned long)mutations);
 }
 
 /* ---- hashes ------------------------------------------------------------ */
@@ -263,6 +907,9 @@ static void test_dat_reader_and_tiers(void) {
     CHECK(dat.rom_count == 2); /* the repeated SHA-1 is kept once */
     CHECK(dat.serial_count == 1 && nk_disc_dat_has_serial(&dat, "TEST70001"));
     CHECK(!nk_disc_dat_has_serial(&dat, "TEST70002"));
+    /* A disc ID matches after ASCII upper-casing, and only that (rule 9). */
+    CHECK(nk_disc_dat_has_serial(&dat, "test70001"));
+    CHECK(nk_disc_classify(&dat, "test70001", &g_modified_digest, false) == NK_DISC_TIER_MODIFIED);
 
     /* Verified retail: the SHA-1 matches and the CRC-32 and size agree. */
     CHECK(nk_disc_classify(&dat, "TEST70001", &g_retail_digest, false) ==
@@ -787,6 +1434,7 @@ enum {
     HOSTILE_TAGS,
     HOSTILE_LESS_THAN,
     HOSTILE_AMPERSANDS,
+    HOSTILE_SERIAL_COMMA_FLOODS,
     HOSTILE_NO_CLOSING,
     HOSTILE_COUNT
 };
@@ -847,6 +1495,15 @@ static void build_hostile(int shape, size_t repeats, Text *t) {
     case HOSTILE_AMPERSANDS:
         text_add(t, head); text_repeat(t, "&", repeats); text_add(t, after_name);
         text_add(t, game); break;
+    case HOSTILE_SERIAL_COMMA_FLOODS: {
+        /* S2: serials at the length bound, all commas, in game after game. */
+        char flood[NK_DISC_DAT_MAX_SERIAL_BYTES + 40u];
+        memset(flood, ',', sizeof(flood));
+        memcpy(flood, "<game><serial>", 14u);
+        memcpy(flood + 14u + NK_DISC_DAT_MAX_SERIAL_BYTES, "</serial></game>", 17u);
+        text_add(t, "<datafile>"); text_add(t, game); text_repeat(t, flood, repeats / 64u);
+        break;
+    }
     case HOSTILE_NO_CLOSING:
     default:
         text_add(t, "<datafile>"); text_add(t, game); text_repeat(t, "<x>", repeats); break;
@@ -880,6 +1537,33 @@ static void test_reader_cost_is_linear(void) {
             }
             CHECK(cost <= (uint64_t)COST_PER_BYTE * t.length);
         }
+    }
+    /* S2: a serial's splitting is counted (three passes over it, beside the
+       two text passes, the search for '<' and the references check), and one
+       past the bound is refused before it is split. */
+    {
+        char doc[1024];
+        uint64_t with_commas, empty;
+        char commas[NK_DISC_DAT_MAX_SERIAL_BYTES + 2u];
+        memset(commas, ',', sizeof(commas));
+        commas[NK_DISC_DAT_MAX_SERIAL_BYTES] = '\0';
+        Text one = {doc, 0, sizeof(doc)};
+        snprintf(doc, sizeof(doc), "<datafile><game><serial>%s</serial>%s</game></datafile>", commas,
+                 "<rom size=\"1\" crc=\"00000000\" sha1=\"0000000000000000000000000000000000000000\"/>");
+        one.length = strlen(doc);
+        with_commas = parse_cost(&one, &status, &ok);
+        CHECK(ok);
+        snprintf(doc, sizeof(doc), "<datafile><game><serial>%s</serial>%s</game></datafile>", "",
+                 "<rom size=\"1\" crc=\"00000000\" sha1=\"0000000000000000000000000000000000000000\"/>");
+        one.length = strlen(doc);
+        empty = parse_cost(&one, &status, &ok);
+        CHECK(ok && with_commas - empty == 7u * NK_DISC_DAT_MAX_SERIAL_BYTES);
+        commas[NK_DISC_DAT_MAX_SERIAL_BYTES] = ',';
+        commas[NK_DISC_DAT_MAX_SERIAL_BYTES + 1u] = '\0';
+        snprintf(doc, sizeof(doc), "<datafile><game><serial>%s</serial></game></datafile>", commas);
+        one.length = strlen(doc);
+        (void)parse_cost(&one, &status, &ok);
+        CHECK(!ok && strstr(status.message, "longer than 256 bytes") != NULL);
     }
     /* The review's inputs, at 200,000 repeats: refused by name. */
     build_hostile(HOSTILE_DOCTYPE_AFTER_ROOT, 200000u, &t);
@@ -1398,6 +2082,7 @@ static void test_library_hash_members_are_checked(void) {
 }
 
 int main(void) {
+    test_conformance_corpus();
     native_test_create_root("disc-verify");
     native_test_isolate_user_data_roots();
     build_images();

@@ -1103,7 +1103,7 @@ void player_app_disc_check_finish(PlayerApp *app, const NkDiscVerification *resu
     if (result->result == NK_DISC_VERIFY_HASHED || result->result == NK_DISC_VERIFY_LIST_UNUSABLE) {
         player_disc_check_record(app, &item, result);
         if (result->result == NK_DISC_VERIFY_LIST_UNUSABLE) {
-            snprintf(check->note, sizeof(check->note), "Your disc list could not be read");
+            snprintf(check->note, sizeof(check->note), "The disc list could not be read");
         }
     } else if (!cancelled) {
         snprintf(check->note, sizeof(check->note), "A disc image could not be checked");
@@ -1165,9 +1165,9 @@ const char *player_disc_tier_note(uint32_t tier) {
         case NK_DISC_TIER_VERIFIED_RETAIL:
             return "Disc check: this image matches a retail disc in Redump's disc list.";
         case NK_DISC_TIER_MODIFIED:
-            return "Disc check: its disc ID is in the disc list, but its contents match no "
-                   "dump of it there. A damaged dump does that as well as a changed copy; dump "
-                   "the disc again and check it to tell which.";
+            return "Disc check: its disc ID is a retail disc's, but its contents match no "
+                   "dump of it in the disc list. A damaged dump does that as well as a changed "
+                   "copy; dump the disc again and check it to tell which.";
         case NK_DISC_TIER_UNKNOWN:
             return "Disc check: not in the disc list. That doesn't mean it's bad: it is "
                    "only not shown to be retail, and its disc ID isn't one the list names.";

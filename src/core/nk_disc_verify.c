@@ -18,7 +18,6 @@
 #include <string.h>
 
 #define NK_DISC_HASH_CHUNK (1024u * 1024u)
-#define NK_DISC_MAX_GAME_SERIALS 16u
 
 static bool verify_fail(NkDiscExpandStatus *status, const char *code, const char *fmt, ...) {
     if (status) {
@@ -250,7 +249,13 @@ bool nk_disc_hash_file(const char *path, const NkDiscExpandCallbacks *callbacks,
     return true;
 }
 
-/* ---- datafile scanner -------------------------------------------------- */
+/* ---- the datafile format ------------------------------------------------ */
+
+/* The format both readers accept is written down once, in the module
+   documentation of tools/nk_core/disc_verify.py ("The datafile format", rules
+   1-10). This reader applies those rules step for step, in the same order and
+   with the same message for each refusal, as disc_verify.py's _DatScanner and
+   _dat_from_zip do; tests/native/disc_dat_conformance.txt holds both to it. */
 
 typedef struct {
     const char *p;
@@ -292,23 +297,31 @@ static bool parse_decimal(const Span *value, uint64_t *out) {
     return true;
 }
 
+/* Rule 4: whitespace is space, tab, CR and LF, nothing else. */
+static bool is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+static char ascii_upper(char c) {
+    return c >= 'a' && c <= 'z' ? (char)(c - 'a' + 'A') : c;
+}
+
 size_t nk_disc_normalize_serials(const char *text, size_t length, char (*out_ids)[10],
                                  size_t max_ids) {
     size_t count = 0;
     size_t i = 0;
     while (i < length && count < max_ids) {
-        /* One comma-separated part with spaces and dashes taken out. */
-        char compact[32];
+        /* One comma-separated part with space, tab, CR, LF and '-' taken out
+           and a-z upper-cased (rule 9); its first nine bytes are the ID. */
+        char compact[10];
         size_t used = 0;
         while (i < length && text[i] != ',') {
             char c = text[i++];
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '-') continue;
-            if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
-            if (used + 1u < sizeof(compact)) compact[used++] = c;
+            if (is_space(c) || c == '-') continue;
+            if (used < 9u) compact[used++] = ascii_upper(c);
         }
         if (i < length) i++; /* the comma */
-        compact[used] = '\0';
-        bool retail = used >= 9u;
+        bool retail = used == 9u;
         for (size_t k = 0; retail && k < 9u; k++) {
             char c = compact[k];
             retail = k < 4u ? (c >= 'A' && c <= 'Z') : (c >= '0' && c <= '9');
@@ -324,64 +337,33 @@ size_t nk_disc_normalize_serials(const char *text, size_t length, char (*out_ids
     return count;
 }
 
-/* Copy element text, with the five predefined XML entities decoded. */
-static void copy_text(const Span *text, char *out, size_t out_size) {
-    static const struct { const char *entity; char c; } entities[] = {
+/* Rule 7: a header field's text, whitespace trimmed and the five named
+   references decoded, into out (64 bytes): false when the result is longer
+   than NK_DISC_DAT_MAX_HEADER_FIELD bytes or not printable ASCII. */
+static bool copy_header_field(const char *p, const char *end, char out[64]) {
+    static const struct { const char *name; char c; } named[] = {
         {"&amp;", '&'}, {"&lt;", '<'}, {"&gt;", '>'}, {"&quot;", '"'}, {"&apos;", '\''},
     };
     size_t used = 0;
-    for (const char *q = text->p; q < text->end && used + 1u < out_size;) {
-        bool decoded = false;
-        for (size_t e = 0; *q == '&' && e < sizeof(entities) / sizeof(entities[0]); e++) {
-            size_t n = strlen(entities[e].entity);
-            if ((size_t)(text->end - q) >= n && memcmp(q, entities[e].entity, n) == 0) {
-                out[used++] = entities[e].c;
-                q += n;
-                decoded = true;
+    while (p < end && is_space(*p)) p++;
+    while (end > p && is_space(end[-1])) end--;
+    while (p < end) {
+        char c = *p;
+        size_t step = 1;
+        for (size_t e = 0; c == '&' && e < sizeof(named) / sizeof(named[0]); e++) {
+            size_t n = strlen(named[e].name);
+            if ((size_t)(end - p) >= n && memcmp(p, named[e].name, n) == 0) {
+                c = named[e].c;
+                step = n;
                 break;
             }
         }
-        if (!decoded) out[used++] = *q++;
+        if (c < 0x20 || c > 0x7E || used == NK_DISC_DAT_MAX_HEADER_FIELD) return false;
+        out[used++] = c;
+        p += step;
     }
     out[used] = '\0';
-    while (used > 0 && (out[used - 1u] == ' ' || out[used - 1u] == '\n' || out[used - 1u] == '\r' ||
-                        out[used - 1u] == '\t')) {
-        out[--used] = '\0';
-    }
-}
-
-/* Whether [p, end) starts with needle, ASCII letters compared without case. */
-static bool starts_with_nocase(const char *p, const char *end, const char *needle) {
-    size_t n = strlen(needle);
-    if ((size_t)(end - p) < n) return false;
-    for (size_t i = 0; i < n; i++) {
-        char a = p[i], b = needle[i];
-        if (a >= 'a' && a <= 'z') a = (char)(a - 'a' + 'A');
-        if (b >= 'a' && b <= 'z') b = (char)(b - 'a' + 'A');
-        if (a != b) return false;
-    }
     return true;
-}
-
-/* An '&' at p that XML defines without a DTD: one of the five predefined
-   entities, or a decimal (1-7 digits) or hex (1-6 digits) character reference. */
-static bool is_predefined_reference(const char *p, const char *end) {
-    static const char *const names[] = {"&amp;", "&lt;", "&gt;", "&quot;", "&apos;"};
-    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        size_t n = strlen(names[i]);
-        if ((size_t)(end - p) >= n && memcmp(p, names[i], n) == 0) return true;
-    }
-    if (end - p < 3 || p[1] != '#') return false;
-    const char *q = p + 2;
-    bool hex = *q == 'x';
-    if (hex) q++;
-    size_t digits = 0;
-    /* At most one digit past the longest form is read: the lookahead is bounded. */
-    while (q < end && digits <= (hex ? 6u : 7u) && (hex ? is_hex_digit(*q) : (*q >= '0' && *q <= '9'))) {
-        q++;
-        digits++;
-    }
-    return digits >= 1u && digits <= (hex ? 6u : 7u) && q < end && *q == ';';
 }
 
 static int rom_compare(const void *a, const void *b) {
@@ -432,111 +414,97 @@ static bool dat_push_serial(NkDiscDat *dat, size_t *capacity, const char id[10])
     return true;
 }
 
-/* ---- the datafile scanner ------------------------------------------------- */
+/* ---- the datafile scanner (rules 4-10) ----------------------------------- */
 
-/* One forward pass over a datafile's text, the rules of disc_verify.py's
-   _DatScanner. The scan moves from the start to </datafile> and never goes
-   back: each search starts where the last one stopped, and lookahead is
-   bounded (a tag name, a reference), so the work is linear in the text's
-   length. `examined` counts the bytes looked at, each time one is looked at,
-   so a test can hold any input's cost to a fixed multiple of its length. */
+/* One forward pass, never back: each search starts where the last one
+   stopped, so the work is linear in the text's length. `examined` counts the
+   bytes looked at, each time one is looked at (the serial splitting's passes
+   too), so a test can hold any input's cost to a fixed multiple of its
+   length. Offsets in messages count from `text`, after a byte-order mark. */
 typedef struct {
+    const char *text;
     const char *end;
     uint64_t examined;
 } DatScan;
 
-/* A tag name is read from at most this many bytes after "<" or "</"; the
-   names the reader knows are shorter, so a longer one is simply unknown. */
-#define NK_DISC_TAG_NAME_WINDOW 16u
-/* The longest reference XML defines without a DTD: "&#1114111;". */
+/* The longest reference rule 5 allows: "&#1234567;". */
 #define NK_DISC_REFERENCE_WINDOW 10u
 
+static unsigned long scan_offset(const DatScan *s, const char *at) {
+    return (unsigned long)(at - s->text);
+}
+
 /* The first byte c in [from, stop), or NULL. */
-static const char *scan_byte(DatScan *s, const char *from, const char *stop, char c) {
-    if (from >= stop) return NULL;
-    const char *at = (const char *)memchr(from, c, (size_t)(stop - from));
-    s->examined += (uint64_t)((at ? at + 1 : stop) - from);
-    return at;
+static const char *find_byte(const char *from, const char *stop, char c) {
+    return from < stop ? (const char *)memchr(from, c, (size_t)(stop - from)) : NULL;
 }
 
-/* The first needle in [from, stop), or NULL: each candidate is compared only
-   up to its first differing byte, and the search moves on past it. */
-static const char *scan_find(DatScan *s, const char *from, const char *stop, const char *needle) {
-    size_t n = strlen(needle);
-    for (const char *p = from; p < stop;) {
-        const char *at = scan_byte(s, p, stop, needle[0]);
-        if (!at) return NULL;
-        size_t same = 1;
-        while (same < n && at + same < stop && at[same] == needle[same]) same++;
-        s->examined += same - 1u;
-        if (same == n) return at;
-        p = at + 1;
+/* An '&' at p that rule 5 allows: a named reference, or a decimal (1-7
+   digits) or hex (1-6 digits) character reference. */
+static bool is_allowed_reference(const char *p, const char *end) {
+    static const char *const names[] = {"&amp;", "&lt;", "&gt;", "&quot;", "&apos;"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        size_t n = strlen(names[i]);
+        if ((size_t)(end - p) >= n && memcmp(p, names[i], n) == 0) return true;
     }
-    return NULL;
+    if (end - p < 3 || p[1] != '#') return false;
+    const char *q = p + 2;
+    bool hex = *q == 'x';
+    if (hex) q++;
+    size_t digits = 0;
+    /* At most one digit past the longest form is read: the lookahead is bounded. */
+    while (q < end && digits <= (hex ? 6u : 7u) && (hex ? is_hex_digit(*q) : (*q >= '0' && *q <= '9'))) {
+        q++;
+        digits++;
+    }
+    return digits >= 1u && digits <= (hex ? 6u : 7u) && q < end && *q == ';';
 }
 
-/* The end of a tag from `from`: its '>', or a '<' that makes it malformed. */
-static const char *scan_tag_end(DatScan *s, const char *from) {
-    const char *p = from;
-    while (p < s->end && *p != '<' && *p != '>') p++;
-    s->examined += (uint64_t)((p < s->end ? p + 1 : p) - from);
-    return p < s->end ? p : NULL;
-}
-
-/* Whether every '&' in [from, stop) starts a reference XML defines without a DTD. */
+/* Whether every '&' in [from, stop) starts a reference rule 5 allows. */
 static bool scan_references_ok(DatScan *s, const char *from, const char *stop) {
-    for (const char *at = scan_byte(s, from, stop, '&'); at; at = scan_byte(s, at + 1, stop, '&')) {
+    const char *at = find_byte(from, stop, '&');
+    s->examined += (uint64_t)((at ? at + 1 : stop) - from);
+    while (at) {
         s->examined += NK_DISC_REFERENCE_WINDOW;
-        if (!is_predefined_reference(at, s->end)) return false;
+        if (!is_allowed_reference(at, s->end)) return false;
+        const char *following = at + 1;
+        at = find_byte(following, stop, '&');
+        s->examined += (uint64_t)((at ? at + 1 : stop) - following);
     }
     return true;
 }
 
-static bool is_space(char c) {
-    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+/* The first byte in [from, stop) that is not whitespace, or NULL. */
+static const char *scan_non_space(DatScan *s, const char *from, const char *stop) {
+    const char *q = from;
+    while (q < stop && is_space(*q)) q++;
+    s->examined += (uint64_t)(stop - from);
+    return q < stop ? q : NULL;
 }
 
-static bool is_attribute_start(char c) {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+static bool is_name_start(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c == ':';
 }
 
-static bool is_attribute_char(char c) {
-    return is_attribute_start(c) || (c >= '0' && c <= '9') || c == '.' || c == ':' || c == '-';
+static bool is_name_char(char c) {
+    return is_name_start(c) || (c >= '0' && c <= '9') || c == '.' || c == '-';
+}
+
+/* The end of the name (rule 5) at p, before stop: p itself when there is none. */
+static const char *scan_name(const char *p, const char *stop) {
+    if (p >= stop || !is_name_start(*p)) return p;
+    p++;
+    while (p < stop && is_name_char(*p)) p++;
+    return p;
 }
 
 static bool span_is(const char *p, size_t length, const char *want) {
     return strlen(want) == length && memcmp(p, want, length) == 0;
 }
 
-/* A <rom> tag's sha1, crc and size from its attributes in [p, stop), read in
-   order up to the first malformed one; the first of a repeated name is kept,
-   as disc_verify.py keeps it. Each byte is passed once. */
-static void scan_rom_attributes(DatScan *s, const char *p, const char *stop, Span *sha1, Span *crc,
-                                Span *size, bool found[3]) {
-    const char *start = p;
-    for (;;) {
-        while (p < stop && is_space(*p)) p++;
-        if (p >= stop || !is_attribute_start(*p)) break;
-        const char *name = p;
-        while (p < stop && is_attribute_char(*p)) p++;
-        size_t name_length = (size_t)(p - name);
-        while (p < stop && is_space(*p)) p++;
-        if (p >= stop || *p != '=') break;
-        p++;
-        while (p < stop && is_space(*p)) p++;
-        if (p >= stop || *p != '"') break;
-        const char *value = p + 1;
-        s->examined += (uint64_t)(value - start);
-        const char *close = scan_byte(s, value, stop, '"');
-        if (!close) return;
-        Span text = {value, close};
-        if (!found[0] && span_is(name, name_length, "sha1")) { *sha1 = text; found[0] = true; }
-        if (!found[1] && span_is(name, name_length, "crc")) { *crc = text; found[1] = true; }
-        if (!found[2] && span_is(name, name_length, "size")) { *size = text; found[2] = true; }
-        p = close + 1;
-        start = p;
-    }
-    s->examined += (uint64_t)(p - start);
+static bool scan_fail_at(NkDiscExpandStatus *status, const char *code, const char *format,
+                         const DatScan *s, const char *at) {
+    return verify_fail(status, code, format, scan_offset(s, at));
 }
 
 static bool markup_refused(NkDiscExpandStatus *status) {
@@ -545,202 +513,359 @@ static bool markup_refused(NkDiscExpandStatus *status) {
                        "does not use, so it was not read.");
 }
 
-typedef enum { FIELD_NONE = 0, FIELD_NAME, FIELD_VERSION, FIELD_DATE, FIELD_SERIAL } DatField;
+static bool reference_refused(NkDiscExpandStatus *status) {
+    return verify_fail(status, NK_DISC_DAT_ENTITY_REFUSED,
+                       "The datafile refers to an entity XML does not predefine; a Redump list "
+                       "has none, so it was not read.");
+}
 
-static bool dat_scan(DatScan *s, const char *text, NkDiscDat *out, NkDiscExpandStatus *status) {
-    static const char *const field_names[] = {"", "name", "version", "date", "serial"};
+static bool no_memory(NkDiscExpandStatus *status) {
+    return verify_fail(status, NK_DISC_INTERNAL, "No memory was free to read the datafile.");
+}
+
+/* Element kinds (rule 6): the stack holds one per open element. */
+typedef enum {
+    KIND_OTHER = 0,
+    KIND_DATAFILE,
+    KIND_HEADER,
+    KIND_GAME,
+    KIND_NAME,
+    KIND_VERSION,
+    KIND_DATE,
+    KIND_SERIAL,
+    KIND_ROM
+} DatKind;
+
+typedef struct {
+    const char *name;
+    size_t length;
+    DatKind kind;
+} OpenElement;
+
+static bool is_text_field(DatKind kind) {
+    return kind == KIND_NAME || kind == KIND_VERSION || kind == KIND_DATE || kind == KIND_SERIAL;
+}
+
+static const char k_malformed_tag[] = "The datafile has a malformed tag at offset %lu.";
+static const char k_unmatched[] =
+    "The datafile has an end tag that does not match its start tag at offset %lu.";
+static const char k_repeated_field[] =
+    "The datafile repeats a <name>, <version> or <date> in its header, or a <serial> in a game, "
+    "at offset %lu.";
+
+static bool dat_scan(DatScan *s, NkDiscDat *out, NkDiscExpandStatus *status) {
     const char *end = s->end;
-    if (!scan_find(s, text, end, "<datafile")) {
-        return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE,
-                           "This file isn't a Redump datafile: it has no <datafile> element.");
-    }
-    bool root = false, closed = false, doctype = false, in_game = false;
-    int header = 0; /* 0 before the first <header>, 1 inside it, 2 after it */
-    DatField field = FIELD_NONE;
-    const char *field_start = text;
-    char ids[NK_DISC_MAX_GAME_SERIALS][10];
+    OpenElement stack[NK_DISC_DAT_MAX_DEPTH];
+    size_t depth = 0;
+    uint64_t tags = 0;
+    bool root = false, closed = false, doctype = false, header_seen = false, game_seen = false;
+    bool header_fields[3] = {false, false, false};
+    bool game_serial = false;
+    char ids[NK_DISC_DAT_MAX_GAME_SERIALS + 1u][10];
     size_t id_count = 0;
     size_t rom_capacity = 0, serial_capacity = 0;
-    const char *pos = text;
-    while (pos < end) {
-        const char *lt = scan_byte(s, pos, end, '<');
-        if (!scan_references_ok(s, pos, lt ? lt : end)) {
-            return verify_fail(status, NK_DISC_DAT_ENTITY_REFUSED,
-                               "The datafile refers to an entity XML does not predefine; a Redump "
-                               "list has none, so it was not read.");
+    const char *field_start = s->text;
+    const char *pos = s->text;
+    for (;;) {
+        const char *lt = find_byte(pos, end, '<');
+        const char *stop = lt ? lt : end;
+        s->examined += (uint64_t)((lt ? lt + 1 : end) - pos);
+        if (depth == 0) {
+            const char *text = scan_non_space(s, pos, stop);
+            if (text) {
+                return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE,
+                                    "The datafile has text outside its <datafile> element at "
+                                    "offset %lu.", s, text);
+            }
+        } else if (!scan_references_ok(s, pos, stop)) {
+            return reference_refused(status);
         }
         if (!lt) break;
-        DatField pending = field;
-        field = FIELD_NONE;
-        if (end - lt >= 2 && lt[1] == '?') {
-            const char *q = scan_find(s, lt + 2, end, "?>");
-            if (!q) {
-                return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE,
-                                   "The datafile is cut short inside a <?...?> declaration.");
-            }
-            pos = q + 2;
-            continue;
+        if (++tags > NK_DISC_DAT_MAX_TAGS) {
+            return verify_fail(status, NK_DISC_DAT_TOO_LARGE, "The datafile has more than %u tags.",
+                               (unsigned)NK_DISC_DAT_MAX_TAGS);
         }
-        if (end - lt >= 2 && lt[1] == '!') {
-            s->examined += strlen("<!DOCTYPE");
-            if (doctype || root || !starts_with_nocase(lt, end, "<!DOCTYPE")) {
-                return markup_refused(status);
-            }
-            const char *q = scan_tag_end(s, lt + 2);
-            if (!q) {
-                return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE,
-                                   "The datafile is cut short inside its <!DOCTYPE>.");
-            }
-            /* Only "<!DOCTYPE name PUBLIC/SYSTEM ...>" naming an external DTD,
-               which is never read: an internal subset ('[') or markup inside
-               it is refused. */
-            if (*q == '<' || scan_byte(s, lt, q, '[')) return markup_refused(status);
-            doctype = true;
-            pos = q + 1;
-            continue;
-        }
-        const char *gt = scan_tag_end(s, lt + 1);
-        if (!gt) {
-            return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE, "The datafile is cut short inside a tag.");
-        }
-        if (*gt == '<') {
-            return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE,
-                               "The datafile has a malformed tag: a '<' inside a tag.");
-        }
-        if (!scan_references_ok(s, lt, gt)) {
-            return verify_fail(status, NK_DISC_DAT_ENTITY_REFUSED,
-                               "The datafile refers to an entity XML does not predefine; a Redump "
-                               "list has none, so it was not read.");
-        }
-        bool closing = lt + 1 < gt && lt[1] == '/';
-        const char *name = lt + (closing ? 2 : 1);
-        size_t window = (size_t)(gt - name) < NK_DISC_TAG_NAME_WINDOW ? (size_t)(gt - name)
-                                                                      : NK_DISC_TAG_NAME_WINDOW;
-        size_t name_length = 0;
-        while (name_length < window && !is_space(name[name_length]) && name[name_length] != '/') {
-            name_length++;
-        }
-        s->examined += window;
-        const char *name_end = name + name_length;
-        bool bare = name_end == gt; /* "<name>" with nothing after the name */
-        pos = gt + 1;
-        if (closing) {
-            if (pending != FIELD_NONE && span_is(name, name_length, field_names[pending])) {
-                Span value = {field_start, lt};
-                s->examined += (uint64_t)(lt - field_start);
-                if (pending == FIELD_SERIAL) {
-                    if (in_game && id_count < NK_DISC_MAX_GAME_SERIALS) {
-                        id_count += nk_disc_normalize_serials(value.p, (size_t)(value.end - value.p),
-                                                              ids + id_count,
-                                                              NK_DISC_MAX_GAME_SERIALS - id_count);
-                    }
-                } else {
-                    char *dest = pending == FIELD_NAME ? out->name
-                               : pending == FIELD_VERSION ? out->version : out->date;
-                    size_t dest_size = pending == FIELD_NAME ? sizeof(out->name)
-                                     : pending == FIELD_VERSION ? sizeof(out->version)
-                                                                : sizeof(out->date);
-                    if (!dest[0]) copy_text(&value, dest, dest_size);
-                }
-            } else if (span_is(name, name_length, "header") && header == 1) {
-                header = 2;
-            } else if (span_is(name, name_length, "game") && in_game) {
-                out->games++;
-                for (size_t k = 0; k < id_count; k++) {
-                    if (!dat_push_serial(out, &serial_capacity, ids[k])) {
-                        return verify_fail(status, NK_DISC_INTERNAL, "No memory was free to read the datafile.");
-                    }
-                }
-                in_game = false;
-                id_count = 0;
-            } else if (span_is(name, name_length, "datafile")) {
-                const char *q = name_end;
-                while (q < gt && is_space(*q)) q++;
-                s->examined += (uint64_t)(gt - name_end);
-                if (q == gt) {
-                    closed = true;
+        /* No NUL byte gets this far (rule 3), so '\0' means "none". */
+        char marker = lt + 1 < end ? lt[1] : '\0';
+        if (marker == '?') {
+            if (root) return markup_refused(status);
+            const char *q = lt + 2;
+            const char *close = NULL;
+            for (const char *at = find_byte(q, end, '?'); at; at = find_byte(at + 1, end, '?')) {
+                if (at + 1 < end && at[1] == '>') {
+                    close = at;
                     break;
                 }
             }
+            s->examined += (uint64_t)((close ? close + 2 : end) - q);
+            if (!close) {
+                return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE,
+                                   "The datafile is cut short inside a <?...?> declaration.");
+            }
+            pos = close + 2;
             continue;
         }
-        bool self_closing = gt[-1] == '/';
-        if (span_is(name, name_length, "datafile")) {
-            root = true;
-        } else if (span_is(name, name_length, "header") && header == 0 && !in_game) {
-            header = 1;
-        } else if (header == 1 && bare && (span_is(name, name_length, "name") ||
-                                           span_is(name, name_length, "version") ||
-                                           span_is(name, name_length, "date"))) {
-            field = name_length == 4u && name[0] == 'n' ? FIELD_NAME
-                  : name_length == 4u ? FIELD_DATE : FIELD_VERSION;
-            field_start = pos;
-        } else if (span_is(name, name_length, "game")) {
-            if (in_game) {
+        if (marker == '!') {
+            s->examined += 9u;
+            if (doctype || root || (size_t)(end - lt) < 9u || memcmp(lt, "<!DOCTYPE", 9u) != 0) {
+                return markup_refused(status);
+            }
+            const char *gt = find_byte(lt + 2, end, '>');
+            const char *inner = find_byte(lt + 2, gt ? gt : end, '<');
+            s->examined += (uint64_t)((gt ? gt + 1 : end) - (lt + 2));
+            if (!inner && !gt) {
                 return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE,
-                                   "The datafile is cut short inside a <game> element.");
+                                   "The datafile is cut short inside its <!DOCTYPE>.");
             }
-            if (self_closing) {
-                out->games++;
-            } else {
-                in_game = true;
+            if (inner || find_byte(lt, gt, '[')) return markup_refused(status);
+            s->examined += (uint64_t)(gt - lt);
+            doctype = true;
+            pos = gt + 1;
+            continue;
+        }
+        const char *gt = find_byte(lt + 1, end, '>');
+        const char *inner = find_byte(lt + 1, gt ? gt : end, '<');
+        s->examined += (uint64_t)((gt ? gt + 1 : end) - (lt + 1));
+        if (inner) {
+            return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE,
+                                "The datafile has a '<' inside a tag at offset %lu.", s, lt);
+        }
+        if (!gt) return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE, "The datafile is cut short inside a tag.");
+        if (!scan_references_ok(s, lt, gt)) return reference_refused(status);
+        pos = gt + 1;
+        /* Each tag's bytes are read once more by the grammar below. */
+        s->examined += (uint64_t)(gt - lt);
+        DatKind kind = KIND_OTHER;
+        bool is_end = marker == '/';
+        bool self_closing = false;
+        if (is_end) {
+            const char *name = lt + 2;
+            const char *name_end = scan_name(name, gt);
+            const char *q = name_end;
+            while (q < gt && is_space(*q)) q++;
+            if (name_end == name || q != gt) return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE, k_malformed_tag, s, lt);
+            if (depth == 0) return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE, k_unmatched, s, lt);
+            const OpenElement *top = &stack[depth - 1u];
+            if (top->length != (size_t)(name_end - name) || memcmp(top->name, name, top->length) != 0) {
+                return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE, k_unmatched, s, lt);
+            }
+            kind = top->kind;
+            depth--;
+        } else {
+            const char *name = lt + 1;
+            const char *name_end = scan_name(name, gt);
+            if (name_end == name) return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE, k_malformed_tag, s, lt);
+            size_t name_length = (size_t)(name_end - name);
+            bool is_rom = span_is(name, name_length, "rom");
+            /* A <rom>'s first sha1, crc, size and name (rule 8). */
+            static const char *const wanted_names[4] = {"sha1", "crc", "size", "name"};
+            Span wanted[4] = {{NULL, NULL}, {NULL, NULL}, {NULL, NULL}, {NULL, NULL}};
+            bool found[4] = {false, false, false, false};
+            const char *p = name_end;
+            for (;;) {
+                /* One attribute: whitespace, a name, '=', a value in double quotes. */
+                const char *q = p;
+                while (q < gt && is_space(*q)) q++;
+                if (q == p) break;
+                const char *attribute = q;
+                q = scan_name(q, gt);
+                if (q == attribute) break;
+                size_t attribute_length = (size_t)(q - attribute);
+                while (q < gt && is_space(*q)) q++;
+                if (q >= gt || *q != '=') break;
+                q++;
+                while (q < gt && is_space(*q)) q++;
+                if (q >= gt || *q != '"') break;
+                const char *value = q + 1;
+                const char *close = find_byte(value, gt, '"');
+                if (!close) break;
+                for (size_t k = 0; is_rom && k < 4u; k++) {
+                    if (!found[k] && span_is(attribute, attribute_length, wanted_names[k])) {
+                        wanted[k].p = value;
+                        wanted[k].end = close;
+                        found[k] = true;
+                    }
+                }
+                p = close + 1;
+            }
+            const char *q = p;
+            while (q < gt && is_space(*q)) q++;
+            if (q < gt && *q == '/') {
+                self_closing = true;
+                q++;
+            }
+            if (q != gt) return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE, k_malformed_tag, s, lt);
+            if (depth >= NK_DISC_DAT_MAX_DEPTH) {
+                return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE,
+                                   "The datafile nests elements more than %u deep at offset %lu.",
+                                   (unsigned)NK_DISC_DAT_MAX_DEPTH, scan_offset(s, lt));
+            }
+            bool has_parent = depth > 0;
+            DatKind parent = has_parent ? stack[depth - 1u].kind : KIND_OTHER;
+            if (has_parent && is_text_field(parent)) {
+                return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE,
+                                    "The datafile has an element inside a <name>, <version>, "
+                                    "<date> or <serial> at offset %lu.", s, lt);
+            }
+            if (!has_parent) {
+                if (!span_is(name, name_length, "datafile")) {
+                    return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE,
+                                        "The datafile's first element is not <datafile> (offset "
+                                        "%lu).", s, lt);
+                }
+                kind = KIND_DATAFILE;
+                root = true;
+            } else if (parent == KIND_DATAFILE && span_is(name, name_length, "header")) {
+                if (header_seen || game_seen) {
+                    return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE,
+                                        "The datafile has a second <header>, or one after a "
+                                        "<game>, at offset %lu.", s, lt);
+                }
+                kind = KIND_HEADER;
+                header_seen = true;
+            } else if (parent == KIND_DATAFILE && span_is(name, name_length, "game")) {
+                kind = KIND_GAME;
+                game_seen = true;
+                game_serial = false;
                 id_count = 0;
+            } else if (parent == KIND_HEADER && (span_is(name, name_length, "name") ||
+                                                 span_is(name, name_length, "version") ||
+                                                 span_is(name, name_length, "date"))) {
+                kind = name[0] == 'n' ? KIND_NAME : name[0] == 'v' ? KIND_VERSION : KIND_DATE;
+                size_t field = (size_t)(kind - KIND_NAME);
+                if (header_fields[field]) return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE, k_repeated_field, s, lt);
+                header_fields[field] = true;
+            } else if (parent == KIND_GAME && span_is(name, name_length, "serial")) {
+                if (game_serial) return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE, k_repeated_field, s, lt);
+                kind = KIND_SERIAL;
+                game_serial = true;
+            } else if (parent == KIND_GAME && is_rom) {
+                if (!self_closing) {
+                    return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE,
+                                        "The datafile has a <rom> that is not empty (<rom .../>) "
+                                        "at offset %lu.", s, lt);
+                }
+                kind = KIND_ROM;
+                NkDiscDatRom entry;
+                uint8_t crc_bytes[4];
+                memset(&entry, 0, sizeof(entry));
+                if (found[0] && found[1] && found[2] && parse_hex_bytes(&wanted[0], entry.sha1, 20u) &&
+                    parse_hex_bytes(&wanted[1], crc_bytes, 4u) &&
+                    parse_decimal(&wanted[2], &entry.size_bytes)) {
+                    if (out->rom_count >= NK_DISC_DAT_MAX_ROMS) {
+                        return verify_fail(status, NK_DISC_DAT_TOO_LARGE,
+                                           "The datafile lists more than %u discs.",
+                                           (unsigned)NK_DISC_DAT_MAX_ROMS);
+                    }
+                    entry.crc32 = ((uint32_t)crc_bytes[0] << 24) | ((uint32_t)crc_bytes[1] << 16) |
+                                  ((uint32_t)crc_bytes[2] << 8) | (uint32_t)crc_bytes[3];
+                    entry.listed = (uint32_t)out->rom_count;
+                    if (!dat_push_rom(out, &rom_capacity, &entry)) return no_memory(status);
+                } else {
+                    out->rejected_roms++;
+                }
+            } else if (span_is(name, name_length, "datafile") || span_is(name, name_length, "header") ||
+                       span_is(name, name_length, "game") || is_rom ||
+                       span_is(name, name_length, "serial")) {
+                return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE,
+                                    "The datafile has a <datafile>, <header>, <game>, <rom> or "
+                                    "<serial> element out of place at offset %lu.", s, lt);
+            } else {
+                kind = KIND_OTHER;
             }
-        } else if (span_is(name, name_length, "serial") && in_game && bare) {
-            field = FIELD_SERIAL;
             field_start = pos;
-        } else if (span_is(name, name_length, "rom") && in_game) {
-            Span sha1 = {NULL, NULL}, crc = {NULL, NULL}, size = {NULL, NULL};
-            bool found[3] = {false, false, false};
-            NkDiscDatRom entry;
-            uint8_t crc_bytes[4];
-            memset(&entry, 0, sizeof(entry));
-            scan_rom_attributes(s, name_end, self_closing ? gt - 1 : gt, &sha1, &crc, &size, found);
-            if (!(found[0] && found[1] && found[2] && parse_hex_bytes(&sha1, entry.sha1, 20u) &&
-                  parse_hex_bytes(&crc, crc_bytes, 4u) && parse_decimal(&size, &entry.size_bytes))) {
-                out->rejected_roms++;
+            if (!self_closing) {
+                stack[depth].name = name;
+                stack[depth].length = name_length;
+                stack[depth].kind = kind;
+                depth++;
                 continue;
             }
-            if (out->rom_count >= NK_DISC_DAT_MAX_ROMS) {
-                return verify_fail(status, NK_DISC_DAT_TOO_LARGE, "The datafile lists more than %u discs.",
-                                   (unsigned)NK_DISC_DAT_MAX_ROMS);
+        }
+        /* An element closes: its end tag, or a start tag that ends in "/>". */
+        const char *raw = is_end ? field_start : lt;
+        if (kind == KIND_SERIAL) {
+            size_t length = (size_t)(lt - raw);
+            if (length > NK_DISC_DAT_MAX_SERIAL_BYTES) {
+                return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE,
+                                   "The datafile has a <serial> longer than %u bytes at offset %lu.",
+                                   (unsigned)NK_DISC_DAT_MAX_SERIAL_BYTES, scan_offset(s, lt));
             }
-            entry.crc32 = ((uint32_t)crc_bytes[0] << 24) | ((uint32_t)crc_bytes[1] << 16) |
-                          ((uint32_t)crc_bytes[2] << 8) | (uint32_t)crc_bytes[3];
-            entry.listed = (uint32_t)out->rom_count;
-            if (!dat_push_rom(out, &rom_capacity, &entry)) {
-                return verify_fail(status, NK_DISC_INTERNAL, "No memory was free to read the datafile.");
+            /* Three passes over the value, as disc_verify.py counts them. */
+            s->examined += 3u * (uint64_t)length;
+            id_count = nk_disc_normalize_serials(raw, length, ids, NK_DISC_DAT_MAX_GAME_SERIALS + 1u);
+            if (id_count > NK_DISC_DAT_MAX_GAME_SERIALS) {
+                return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE,
+                                   "The datafile has a <serial> naming more than %u disc IDs at "
+                                   "offset %lu.", (unsigned)NK_DISC_DAT_MAX_GAME_SERIALS,
+                                   scan_offset(s, lt));
             }
+        } else if (kind == KIND_NAME || kind == KIND_VERSION || kind == KIND_DATE) {
+            char *dest = kind == KIND_NAME ? out->name : kind == KIND_VERSION ? out->version : out->date;
+            if (!copy_header_field(raw, lt, dest)) {
+                return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE,
+                                   "The datafile's header has a <name>, <version> or <date> that "
+                                   "is longer than %u bytes or not printable ASCII, at offset %lu.",
+                                   (unsigned)NK_DISC_DAT_MAX_HEADER_FIELD, scan_offset(s, lt));
+            }
+        } else if (kind == KIND_GAME) {
+            out->games++;
+            if (out->serial_count + id_count > NK_DISC_DAT_MAX_SERIALS) {
+                return verify_fail(status, NK_DISC_DAT_TOO_LARGE,
+                                   "The datafile names more than %u disc IDs.",
+                                   (unsigned)NK_DISC_DAT_MAX_SERIALS);
+            }
+            for (size_t k = 0; k < id_count; k++) {
+                if (!dat_push_serial(out, &serial_capacity, ids[k])) return no_memory(status);
+            }
+            id_count = 0;
+        } else if (kind == KIND_DATAFILE) {
+            closed = true;
+            const char *text = scan_non_space(s, pos, end);
+            if (text) {
+                return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE,
+                                    "The datafile goes on after its </datafile>, at offset %lu.", s, text);
+            }
+            break;
         }
     }
-    /* A list cut short (a download that stopped) is refused, never read as the
-       whole list: its discs past the cut would all read as unknown. */
     if (!closed) {
-        return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE,
-                           "The datafile is cut short: it has no closing </datafile>.");
-    }
-    if (in_game) {
-        return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE,
-                           "The datafile is cut short inside a <game> element.");
+        return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE, "%s",
+                           root ? "The datafile is cut short: it has no closing </datafile>."
+                                : "This file isn't a Redump datafile: it has no <datafile> element.");
     }
     return true;
 }
 
 bool nk_disc_dat_parse_counted(const char *text, size_t length, NkDiscDat *out,
                                NkDiscExpandStatus *status, uint64_t *bytes_examined) {
-    DatScan scan = {NULL, 0u};
+    DatScan scan = {NULL, NULL, 0u};
     bool ok = false;
     verify_status_clear(status);
     if (bytes_examined) *bytes_examined = 0;
     if (!out) return verify_fail(status, NK_DISC_INTERNAL, "No datafile result was given.");
     memset(out, 0, sizeof(*out));
     if (!text) return verify_fail(status, NK_DISC_INTERNAL, "No datafile text was given.");
+    /* Rule 3: one byte-order mark skipped; UTF-8; then no control byte. */
+    size_t skip = length >= 3u && memcmp(text, "\xEF\xBB\xBF", 3u) == 0 ? 3u : 0u;
+    scan.text = text + skip;
     scan.end = text + length;
-    scan.examined = length; /* the UTF-8 check reads each byte once */
-    if (!nk_json_validate_utf8((const uint8_t *)text, length)) {
+    scan.examined = 2u * (uint64_t)(length - skip); /* the two passes below */
+    const char *control = NULL;
+    if (!nk_json_validate_utf8((const uint8_t *)scan.text, length - skip)) {
         ok = verify_fail(status, NK_DISC_DAT_NOT_DATAFILE, "The datafile isn't UTF-8 text.");
     } else {
-        ok = dat_scan(&scan, text, out, status);
+        for (const char *p = scan.text; p < scan.end && !control; p++) {
+            unsigned char c = (unsigned char)*p;
+            if ((c < 0x20u && c != 0x09u && c != 0x0Au && c != 0x0Du) || c == 0x7Fu) control = p;
+        }
+        if (control) {
+            ok = verify_fail(status, NK_DISC_DAT_NOT_DATAFILE,
+                             "The datafile holds a control character (byte 0x%02X) at offset %lu.",
+                             (unsigned)(unsigned char)*control, scan_offset(&scan, control));
+        } else {
+            ok = dat_scan(&scan, out, status);
+        }
     }
     if (bytes_examined) *bytes_examined = scan.examined;
     if (!ok) {
@@ -797,34 +922,7 @@ bool nk_disc_list_date_is_older(const char *date, const char *other) {
     return a_time && b_time && memcmp(date + 11, other + 11, 8u) < 0;
 }
 
-static bool read_bounded_file(const char *path, char **out_text, size_t *out_length,
-                              NkDiscExpandStatus *status) {
-    *out_text = NULL;
-    *out_length = 0;
-    FILE *f = nk_fopen_utf8(path, "rb");
-    if (!f) return verify_fail(status, NK_DISC_DAT_READ_FAILED, "The datafile can't be opened.");
-    char *buffer = (char *)malloc((size_t)NK_DISC_DAT_MAX_BYTES + 1u);
-    if (!buffer) {
-        fclose(f);
-        return verify_fail(status, NK_DISC_INTERNAL, "No memory was free to read the datafile.");
-    }
-    size_t got = fread(buffer, 1, (size_t)NK_DISC_DAT_MAX_BYTES + 1u, f);
-    bool failed = ferror(f) != 0;
-    fclose(f);
-    if (failed) {
-        free(buffer);
-        return verify_fail(status, NK_DISC_DAT_READ_FAILED, "The datafile can't be read.");
-    }
-    if (got > NK_DISC_DAT_MAX_BYTES) {
-        free(buffer);
-        return verify_fail(status, NK_DISC_DAT_TOO_LARGE, "The datafile is larger than %u bytes.",
-                           (unsigned)NK_DISC_DAT_MAX_BYTES);
-    }
-    buffer[got] = '\0';
-    *out_text = buffer;
-    *out_length = got;
-    return true;
-}
+/* ---- the zip Redump serves (rule 2) -------------------------------------- */
 
 static uint16_t read_le16(const uint8_t *p) {
     return (uint16_t)(p[0] | (p[1] << 8));
@@ -839,43 +937,59 @@ static bool zip_fail(NkDiscExpandStatus *status, const char *reason) {
                        "The zip can't be read as a Redump datafile: %s", reason);
 }
 
-/* The one .dat inside a zip as Redump serves it (PKWARE APPNOTE: one entry,
-   stored or deflated, not encrypted, no ZIP64), inflated under
-   NK_DISC_DAT_MAX_BYTES and checked against its CRC-32. Every offset and size
-   is checked against the bytes held before it is used. *out_text is malloc'd. */
+/* Whether a zip extra field is made of whole blocks (*whole), and whether one
+   is ZIP64 (0x0001); the walk stops at the first block that is ZIP64 or does
+   not fit, as disc_verify.py's _extra_is_whole_without_zip64 does. */
+static void zip_extra_check(const uint8_t *extra, size_t length, bool *whole, bool *zip64) {
+    size_t at = 0;
+    *whole = true;
+    *zip64 = false;
+    while (at < length) {
+        if (length - at < 4u || length - at - 4u < read_le16(extra + at + 2u)) {
+            *whole = false;
+            return;
+        }
+        if (read_le16(extra + at) == 0x0001u) {
+            *zip64 = true;
+            return;
+        }
+        at += 4u + read_le16(extra + at + 2u);
+    }
+}
+
+/* The one .dat inside a zip, under the format's rule 2, step for step as
+   disc_verify.py's _dat_from_zip takes them. Every offset and size is checked
+   against the bytes held before it is used. *out_text is malloc'd. */
 static bool dat_text_from_zip(const uint8_t *zip, size_t size, char **out_text, size_t *out_length,
                               NkDiscExpandStatus *status) {
     enum { EOCD = 22u, CENTRAL = 46u, LOCAL = 30u };
+    static const char disagrees[] = "its file's header disagrees with its central directory.";
     *out_text = NULL;
     *out_length = 0;
     if (size < EOCD) return zip_fail(status, "it is cut short.");
-    /* The end record is in the last 22 + 65535 bytes; its comment runs to the end. */
-    size_t eocd = SIZE_MAX;
-    size_t lowest = size - EOCD > 0xFFFFu ? size - EOCD - 0xFFFFu : 0u;
-    for (size_t at = size - EOCD + 1u; at-- > lowest;) {
-        if (read_le32(zip + at) == 0x06054b50u && at + EOCD + read_le16(zip + at + 20u) == size) {
-            eocd = at;
-            break;
-        }
-    }
-    if (eocd == SIZE_MAX) return zip_fail(status, "it has no end record.");
-    /* A ZIP64 end record's locator sits just before the end record. */
-    if (eocd >= 20u && read_le32(zip + eocd - 20u) == 0x07064b50u) {
-        return zip_fail(status, "it uses ZIP64.");
-    }
+    size_t eocd = size - EOCD;
     const uint8_t *end_record = zip + eocd;
-    uint32_t central_size = read_le32(end_record + 12u);
-    uint32_t central_offset = read_le32(end_record + 16u);
+    if (read_le32(end_record) != 0x06054b50u || read_le16(end_record + 20u) != 0u) {
+        return zip_fail(status, "its last 22 bytes are not its end record (it has a comment, or "
+                                "data after it).");
+    }
     if (read_le16(end_record + 4u) != 0u || read_le16(end_record + 6u) != 0u) {
         return zip_fail(status, "it spans several disks.");
     }
     if (read_le16(end_record + 8u) != 1u || read_le16(end_record + 10u) != 1u) {
         return zip_fail(status, "it does not hold exactly one file.");
     }
-    if ((uint64_t)central_offset + central_size > eocd || central_size < CENTRAL) {
+    uint32_t central_size = read_le32(end_record + 12u);
+    uint32_t central_offset = read_le32(end_record + 16u);
+    if ((uint64_t)central_offset + central_size != eocd) {
         return zip_fail(status, "its central directory is not where its end record says.");
     }
     const uint8_t *central = zip + central_offset;
+    if (central_size < CENTRAL || read_le32(central) != 0x02014b50u ||
+        (uint64_t)CENTRAL + read_le16(central + 28u) + read_le16(central + 30u) +
+                read_le16(central + 32u) != central_size) {
+        return zip_fail(status, "its central directory is malformed.");
+    }
     uint16_t flags = read_le16(central + 8u);
     uint16_t method = read_le16(central + 10u);
     uint32_t crc = read_le32(central + 16u);
@@ -883,28 +997,26 @@ static bool dat_text_from_zip(const uint8_t *zip, size_t size, char **out_text, 
     uint32_t plain_size = read_le32(central + 24u);
     size_t name_length = read_le16(central + 28u);
     size_t extra_length = read_le16(central + 30u);
-    size_t comment_length = read_le16(central + 32u);
     uint32_t local_offset = read_le32(central + 42u);
-    if (read_le32(central) != 0x02014b50u ||
-        (uint64_t)CENTRAL + name_length + extra_length + comment_length != central_size) {
-        return zip_fail(status, "its central directory is malformed.");
-    }
     if (packed_size == 0xFFFFFFFFu || plain_size == 0xFFFFFFFFu || local_offset == 0xFFFFFFFFu) {
         return zip_fail(status, "it uses ZIP64.");
     }
-    /* A ZIP64 block (header ID 0x0001) in the entry's extra field, as
-       disc_verify.py's _has_zip64_extra finds it. The field lies inside the
-       central directory, whose size was checked above. */
-    const uint8_t *extra = central + CENTRAL + name_length;
-    for (size_t at = 0; at + 4u <= extra_length; at += 4u + read_le16(extra + at + 2u)) {
-        if (read_le16(extra + at) == 0x0001u) return zip_fail(status, "it uses ZIP64.");
-    }
+    bool whole, zip64;
+    zip_extra_check(central + CENTRAL + name_length, extra_length, &whole, &zip64);
+    if (!whole) return zip_fail(status, "its central directory is malformed.");
+    if (zip64) return zip_fail(status, "it uses ZIP64.");
     if (flags & 0x41u) return zip_fail(status, "the file in it is encrypted.");
+    if (flags & ~0x0806u) {
+        return verify_fail(status, NK_DISC_DAT_ZIP_INVALID,
+                           "The zip can't be read as a Redump datafile: the file in it uses a zip "
+                           "feature Redump's zip does not (flags 0x%04X).", (unsigned)flags);
+    }
     if (method != 0u && method != 8u) {
         return zip_fail(status, "the file in it is compressed with a method other than deflate.");
     }
-    const char *name = (const char *)central + CENTRAL;
-    if (name_length < 4u || !starts_with_nocase(name + name_length - 4u, name + name_length, ".dat")) {
+    const uint8_t *name = central + CENTRAL;
+    if (memchr(name, 0, name_length) || name_length < 4u ||
+        memcmp(name + name_length - 4u, ".dat", 4u) != 0) {
         return zip_fail(status, "the file in it is not a .dat file.");
     }
     if (plain_size > NK_DISC_DAT_MAX_BYTES) {
@@ -912,40 +1024,55 @@ static bool dat_text_from_zip(const uint8_t *zip, size_t size, char **out_text, 
                            "The datafile in the zip is larger than %u bytes.",
                            (unsigned)NK_DISC_DAT_MAX_BYTES);
     }
-    if ((uint64_t)local_offset + LOCAL > central_offset) {
-        return zip_fail(status, "its file's header is past its central directory.");
+    if (local_offset != 0u) return zip_fail(status, "its file does not start the zip.");
+    if (central_offset < LOCAL) return zip_fail(status, disagrees);
+    size_t local_name_length = read_le16(zip + 26u);
+    size_t local_extra_length = read_le16(zip + 28u);
+    if (read_le32(zip) != 0x04034b50u || read_le16(zip + 6u) != flags ||
+        read_le16(zip + 8u) != method || read_le32(zip + 14u) != crc ||
+        read_le32(zip + 18u) != packed_size || read_le32(zip + 22u) != plain_size ||
+        local_name_length != name_length ||
+        (uint64_t)LOCAL + local_name_length + local_extra_length > central_offset ||
+        memcmp(zip + LOCAL, name, name_length) != 0) {
+        return zip_fail(status, disagrees);
     }
-    const uint8_t *local = zip + local_offset;
-    uint64_t data_offset = (uint64_t)local_offset + LOCAL + read_le16(local + 26u) +
-                           read_le16(local + 28u);
-    if (read_le32(local) != 0x04034b50u || read_le16(local + 8u) != method) {
-        return zip_fail(status, "its file's header disagrees with its central directory.");
+    zip_extra_check(zip + LOCAL + local_name_length, local_extra_length, &whole, &zip64);
+    if (!whole || zip64) return zip_fail(status, disagrees);
+    size_t data_start = LOCAL + local_name_length + local_extra_length;
+    if ((uint64_t)data_start + packed_size != central_offset) {
+        return zip_fail(status, "its file's data does not end where its central directory starts.");
     }
-    if (data_offset + packed_size > central_offset) {
-        return zip_fail(status, "its file's data runs past its central directory.");
+    const uint8_t *packed = zip + data_start;
+    if (method == 0u && packed_size != plain_size) {
+        return zip_fail(status, "its stored file's sizes differ.");
     }
-    const uint8_t *packed = zip + data_offset;
-    uint8_t *plain = NULL;
-    size_t plain_length = 0;
+    uint8_t *plain = (uint8_t *)malloc((size_t)plain_size + 1u);
+    if (!plain) return no_memory(status);
+    size_t plain_length = plain_size;
     if (method == 0u) {
-        if (packed_size != plain_size) return zip_fail(status, "its stored file's sizes differ.");
-        plain = (uint8_t *)malloc((size_t)plain_size + 1u);
-        if (!plain) return verify_fail(status, NK_DISC_INTERNAL, "No memory was free to read the datafile.");
         memcpy(plain, packed, plain_size);
-        plain_length = plain_size;
     } else {
+        /* Inflated into exactly the declared size: a stream that would write
+           more is refused where it would, before what follows is read. */
+        size_t consumed = 0;
         char error[128];
-        int rc = nk_psp_inflate_raw(packed, packed_size, &plain, &plain_length, plain_size,
-                                    (size_t)NK_DISC_DAT_MAX_BYTES, error, sizeof(error));
-        if (rc != NK_INFLATE_OK) free(plain);  /* NULL by its contract; freed either way */
-        if (rc == NK_INFLATE_ERR_OVERFLOW) {
-            return verify_fail(status, NK_DISC_DAT_TOO_LARGE,
-                               "The datafile in the zip is larger than %u bytes.",
-                               (unsigned)NK_DISC_DAT_MAX_BYTES);
+        int rc = nk_psp_inflate_raw_zlib(packed, packed_size, plain, plain_size, &plain_length,
+                                         &consumed, error, sizeof(error));
+        const char *reason = NULL;
+        if (rc == NK_INFLATE_ERR_MEMORY) {
+            free(plain);
+            return no_memory(status);
         }
-        if (rc != NK_INFLATE_OK) {
-            return zip_fail(status, rc == NK_INFLATE_ERR_MEMORY ? "no memory was free to inflate it."
-                                                                : "its file does not inflate.");
+        if (rc == NK_INFLATE_ERR_OVERFLOW) {
+            reason = "its file inflates past its declared size.";
+        } else if (rc != NK_INFLATE_OK) {
+            reason = "its file does not inflate.";
+        } else if (consumed != packed_size) {
+            reason = "its file's compressed data goes on past its end.";
+        }
+        if (reason) {
+            free(plain);
+            return zip_fail(status, reason);
         }
     }
     if (plain_length != plain_size || nk_crc32_update(0u, plain, plain_length) != crc) {
@@ -957,31 +1084,78 @@ static bool dat_text_from_zip(const uint8_t *zip, size_t size, char **out_text, 
     return true;
 }
 
-/* A datafile's own text from a file: the file, or the .dat inside it when it
-   is a zip. *out_text is malloc'd. */
-static bool read_dat_source(const char *path, char **out_text, size_t *out_length,
-                            NkDiscExpandStatus *status) {
-    if (!read_bounded_file(path, out_text, out_length, status)) return false;
-    if (*out_length < 4u || memcmp(*out_text, "PK\x03\x04", 4u) != 0) return true;
-    char *zip = *out_text;
-    size_t zip_length = *out_length;
-    bool ok = dat_text_from_zip((const uint8_t *)zip, zip_length, out_text, out_length, status);
-    free(zip);
+/* A datafile's own text (rules 1-2): the bytes given, or the .dat inside them
+   when they are a zip (then *owned is that malloc'd text, else NULL). */
+static bool dat_text(const uint8_t *bytes, size_t length, const char **out_text, size_t *out_length,
+                     char **owned, NkDiscExpandStatus *status) {
+    *owned = NULL;
+    *out_text = (const char *)bytes;
+    *out_length = length;
+    if (length > NK_DISC_DAT_MAX_BYTES) {
+        return verify_fail(status, NK_DISC_DAT_TOO_LARGE, "The datafile is larger than %u bytes.",
+                           (unsigned)NK_DISC_DAT_MAX_BYTES);
+    }
+    if (length < 4u || memcmp(bytes, "PK\x03\x04", 4u) != 0) return true;
+    if (!dat_text_from_zip(bytes, length, owned, out_length, status)) return false;
+    *out_text = *owned;
+    return true;
+}
+
+bool nk_disc_dat_read(const uint8_t *bytes, size_t length, NkDiscDat *out,
+                      NkDiscExpandStatus *status) {
+    const char *text = NULL;
+    size_t text_length = 0;
+    char *owned = NULL;
+    verify_status_clear(status);
+    if (out) memset(out, 0, sizeof(*out));
+    if (!bytes || !out) return verify_fail(status, NK_DISC_INTERNAL, "No datafile was given.");
+    if (!dat_text(bytes, length, &text, &text_length, &owned, status)) return false;
+    bool ok = nk_disc_dat_parse(text, text_length, out, status);
+    free(owned);
     return ok;
 }
 
+/* A file's bytes, read once and refused over NK_DISC_DAT_MAX_BYTES (rule 1).
+   *out_bytes is malloc'd. */
+static bool read_bounded_file(const char *path, uint8_t **out_bytes, size_t *out_length,
+                              NkDiscExpandStatus *status) {
+    *out_bytes = NULL;
+    *out_length = 0;
+    FILE *f = nk_fopen_utf8(path, "rb");
+    if (!f) return verify_fail(status, NK_DISC_DAT_READ_FAILED, "The datafile can't be opened.");
+    uint8_t *buffer = (uint8_t *)malloc((size_t)NK_DISC_DAT_MAX_BYTES + 1u);
+    if (!buffer) {
+        fclose(f);
+        return no_memory(status);
+    }
+    size_t got = fread(buffer, 1, (size_t)NK_DISC_DAT_MAX_BYTES + 1u, f);
+    bool failed = ferror(f) != 0;
+    fclose(f);
+    if (failed) {
+        free(buffer);
+        return verify_fail(status, NK_DISC_DAT_READ_FAILED, "The datafile can't be read.");
+    }
+    if (got > NK_DISC_DAT_MAX_BYTES) {
+        free(buffer);
+        return verify_fail(status, NK_DISC_DAT_TOO_LARGE, "The datafile is larger than %u bytes.",
+                           (unsigned)NK_DISC_DAT_MAX_BYTES);
+    }
+    *out_bytes = buffer;
+    *out_length = got;
+    return true;
+}
+
 bool nk_disc_dat_load(const char *path, NkDiscDat *out, NkDiscExpandStatus *status) {
-    char *text = NULL;
+    uint8_t *bytes = NULL;
     size_t length = 0;
+    verify_status_clear(status);
     if (out) memset(out, 0, sizeof(*out));
     if (!path || !path[0] || !out) {
         return verify_fail(status, NK_DISC_INTERNAL, "No datafile was given.");
     }
-    if (!read_dat_source(path, &text, &length, status)) return false;
-    /* A UTF-8 byte-order mark is allowed, as the Python reader allows it. */
-    size_t skip = length >= 3u && memcmp(text, "\xEF\xBB\xBF", 3u) == 0 ? 3u : 0u;
-    bool ok = nk_disc_dat_parse(text + skip, length - skip, out, status);
-    free(text);
+    if (!read_bounded_file(path, &bytes, &length, status)) return false;
+    bool ok = nk_disc_dat_read(bytes, length, out, status);
+    free(bytes);
     return ok;
 }
 
@@ -1054,8 +1228,11 @@ bool nk_disc_dat_load_active(const char *data_root, const char *bundled_path, Nk
 
 bool nk_disc_dat_import(const char *source, const char *data_root, NkDiscDat *out,
                         NkDiscExpandStatus *status) {
-    char *text = NULL;
+    uint8_t *bytes = NULL;
     size_t length = 0;
+    const char *text = NULL;
+    size_t text_length = 0;
+    char *owned = NULL;
     char target[NK_MAX_PATH];
     char dir[NK_MAX_PATH];
     char tmp[NK_MAX_PATH + 8];
@@ -1065,11 +1242,12 @@ bool nk_disc_dat_import(const char *source, const char *data_root, NkDiscDat *ou
     if (!source || !source[0] || !nk_disc_dat_path(data_root, target, sizeof(target))) {
         return verify_fail(status, NK_DISC_INTERNAL, "No datafile or data folder was given.");
     }
+    if (!read_bounded_file(source, &bytes, &length, status)) return false;
     /* From a zip, the .dat inside is what is checked and kept. */
-    if (!read_dat_source(source, &text, &length, status)) return false;
-    size_t skip = length >= 3u && memcmp(text, "\xEF\xBB\xBF", 3u) == 0 ? 3u : 0u;
-    if (!nk_disc_dat_parse(text + skip, length - skip, &parsed, status)) {
-        free(text);
+    if (!dat_text(bytes, length, &text, &text_length, &owned, status) ||
+        !nk_disc_dat_parse(text, text_length, &parsed, status)) {
+        free(owned);
+        free(bytes);
         return false;
     }
     int n = snprintf(dir, sizeof(dir), "%s%c%s", data_root, nk_platform_path_separator(),
@@ -1081,13 +1259,14 @@ bool nk_disc_dat_import(const char *source, const char *data_root, NkDiscDat *ou
         FILE *f = nk_platform_fopen_private(tmp, "wb");
         ok = f != NULL;
         if (ok) {
-            ok = fwrite(text, 1, length, f) == length;
+            ok = fwrite(text, 1, text_length, f) == text_length;
             ok = (fclose(f) == 0) && ok;
         }
         if (ok) ok = nk_rename_utf8(tmp, target) == 0;
         if (!ok) (void)nk_remove_utf8(tmp);
     }
-    free(text);
+    free(owned);
+    free(bytes);
     if (!ok) {
         nk_disc_dat_free(&parsed);
         return verify_fail(status, NK_DISC_DAT_WRITE_FAILED,
@@ -1101,9 +1280,14 @@ bool nk_disc_dat_import(const char *source, const char *data_root, NkDiscDat *ou
     return true;
 }
 
+/* Rule 9: an image's disc ID matches when it is the same nine bytes after
+   ASCII upper-casing. */
 bool nk_disc_dat_has_serial(const NkDiscDat *dat, const char *disc_id) {
+    char key[10];
     if (!dat || !dat->serials || !disc_id || strlen(disc_id) != 9u) return false;
-    return bsearch(disc_id, dat->serials, dat->serial_count, sizeof(dat->serials[0]),
+    for (size_t i = 0; i < 9u; i++) key[i] = ascii_upper(disc_id[i]);
+    key[9] = '\0';
+    return bsearch(key, dat->serials, dat->serial_count, sizeof(dat->serials[0]),
                    serial_compare) != NULL;
 }
 
@@ -1189,8 +1373,9 @@ bool nk_disc_verify_image(const char *iso_path, const char *data_root,
         snprintf(out->code, sizeof(out->code), "%s", status.code);
         if (source == NK_DISC_LIST_IMPORTED) {
             snprintf(out->reason, sizeof(out->reason),
-                     "Not checked: your imported Redump list can't be used (%s). Import it again.",
-                     status.code);
+                     "Not checked: your imported Redump list can't be used (%s). Import a list "
+                     "again, or delete verification/redump.dat from your data folder to go "
+                     "back to the list bundled with Nakagawa.", status.code);
         } else {
             snprintf(out->reason, sizeof(out->reason),
                      "Not checked: the Redump list bundled with Nakagawa can't be used (%s). "
@@ -1199,8 +1384,8 @@ bool nk_disc_verify_image(const char *iso_path, const char *data_root,
         return true;
     }
     copy_printable(dat.date[0] ? dat.date : dat.version, out->list_date, sizeof(out->list_date));
-    char described[320];
-    snprintf(described, sizeof(described), "%s (%s%s%s%u discs)%s%s%s",
+    char described[384];
+    snprintf(described, sizeof(described), "%s (%s%.63s%s%u discs)%s%.63s%s",
              source == NK_DISC_LIST_IMPORTED ? "your imported Redump list"
                                              : "the Redump list bundled with Nakagawa",
              out->list_date[0] ? "dated " : "", out->list_date, out->list_date[0] ? ", " : "",

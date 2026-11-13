@@ -277,9 +277,29 @@ The list is checked, then kept in your player data folder (`verification/redump.
 on are checked against it instead of the bundled list. A file that is not a Redump datafile is refused with a
 `DISC_DAT_*` code ([FAILURE_CODES.md](FAILURE_CODES.md)) and the earlier list stays. To go back to the bundled
 list, delete `verification/redump.dat` from the data folder. An import stays in use after an update brings a
-newer bundled list, since you chose it; each check then says so, with both lists' dates. The reader takes a
-list of up to 16 MiB, in one pass, and refuses anything else in it a Redump list does not use, such as
-entity declarations.
+newer bundled list, since you chose it; each check then says so, with both lists' dates.
+
+#### What a list must look like
+
+The player and the command-line tools read a list with two readers (`src/core/nk_disc_verify.c` and
+`tools/nk_core/disc_verify.py`) that accept exactly the same files and refuse the rest with the same
+`DISC_DAT_*` code and message, so a disc never gets two verdicts. The format is written down byte for byte, as
+ten rules, in the module documentation of
+[`tools/nk_core/disc_verify.py`](../tools/nk_core/disc_verify.py) ("The datafile format"), and one table of cases
+and seeded mutations of the bundled list, [`tests/native/disc_dat_conformance.txt`](../tests/native/disc_dat_conformance.txt),
+holds both readers to it. In short, a list Redump publishes reads, and anything a Redump list does not use is
+refused:
+
+- at most 16 MiB; a zip must be one `.dat` laid out as Redump's own zip is (no comment, no ZIP64, no data
+  descriptor, no encryption, its headers agreeing), its size checked before it is inflated and its CRC-32 after;
+- UTF-8 text with no control characters but tab, CR and LF; markup in ASCII, whitespace only space, tab, CR and
+  LF, attribute values in double quotes, no entity but XML's five and character references, no comment, CDATA or
+  internal DTD;
+- one `<datafile>` that ends the file; at most one `<header>`, whose name, version and date are at most 63
+  printable ASCII characters; one `<serial>` a game, of at most 256 bytes naming at most 16 disc IDs;
+- at most 40,000 discs, 480,000 tags and 80,000 disc IDs; elements nested at most 8 deep.
+
+Redump's list of 2026-11-12 has 3,546 discs, about 11 tags a disc and at most five disc IDs in a `<serial>`.
 
 Two images with one disc ID still share some folders, so only one of them is ready to play at a time:
 

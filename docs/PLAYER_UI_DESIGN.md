@@ -375,7 +375,7 @@ any other image of its disc ID not hashed yet. None starts while a game starts o
 one runs, the heading row carries a `CAPTION` `muted` line, "Checking disc image: 40%" ("Checking disc images: 40%,
 2 more" with more waiting), and a small CANCEL that stops it and the ones waiting (it stays while the check stops);
 the games stay, unchecked. A check that could not finish leaves a `warning` line ("A disc image could not be
-checked", "Your disc list could not be read", or "Some disc images were not checked" when too many wait) with HIDE,
+checked", "The disc list could not be read", or "Some disc images were not checked" when too many wait) with HIDE,
 and the reason goes to the developer log. The line stays until HIDE; a later check shows its progress meanwhile.
 Neither button is ever the default focus. The progress is a number, not an animation, and it is on that line
 only: the card's badge, YOUR DISC until then, changes once, to VERIFIED RETAIL, MODIFIED DISC or UNKNOWN DUMP (a

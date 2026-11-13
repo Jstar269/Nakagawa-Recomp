@@ -3,10 +3,13 @@
 
 """nk_core.disc_verify and the bring-up's library records keyed by disc ID plus hash.
 
-Synthetic data, a datafile in Redump's layout naming made-up images, for every case but one:
-``BundledListTests`` reads the real list the project ships (assets/redump), checks it against
-its pin and uses it as the default. The C reader (src/core/nk_disc_verify.c) has the same cases
-in tests/native/test_disc_verify.c.
+Synthetic data, a datafile in Redump's layout naming made-up images, for every case but the
+bundled list's: ``BundledListTests`` reads the real list the project ships (assets/redump),
+checks it against its pin and uses it as the default, and ``ConformanceTests`` cuts the
+mutations' starting points from it. ``ConformanceTests`` holds this reader to
+tests/native/disc_dat_conformance.txt, which tests/native/test_disc_verify.c holds the C reader
+(src/core/nk_disc_verify.c) to: one table of inputs and results for both. Regenerate the table
+with ``python tools/test_disc_verify.py --write-corpus`` after a deliberate change to the format.
 """
 
 from __future__ import annotations
@@ -17,10 +20,13 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import struct
 import sys
 import tempfile
+import tracemalloc
 import unittest
-from typing import cast
+from typing import Callable, Iterable, Optional, cast
 from unittest import mock
 import zipfile
 import zlib
@@ -77,19 +83,31 @@ class DatafileTests(unittest.TestCase):
     def test_the_reader_follows_the_c_reader_on_edge_cases(self) -> None:
         retail = digest(RETAIL)
         rom = f'<rom name="A &amp; B &#38; C" size="{{size}}" crc="{retail.crc32}" sha1="{retail.sha1}"/>'
-        many = ", ".join(f"TEST-7{index:04d}" for index in range(20))
-        text = (f"<datafile><game name=\"x\"><serial>{many}</serial>"
-                f"<serial>TEST&#45;79999</serial>{rom.format(size=len(RETAIL))}</game>"
+        many = ", ".join(f"TEST-7{index:04d}" for index in range(16))
+        text = (f"<datafile><game name=\"x\"><serial>{many}, TEST&#45;79999</serial>"
+                f"{rom.format(size=len(RETAIL))}</game>"
                 f"<game name=\"y\">{rom.format(size=2**64).replace(retail.sha1, 'f' * 40)}"
                 "</game></datafile>")
         dat = disc_verify.parse_dat_text(text)
         # Only the five predefined entities are decoded, as in C.
         self.assertEqual(dat.roms_by_sha1[retail.sha1].name, "A & B &#38; C")
-        # At most 16 serials per game, and a numeric entity is not decoded into one.
+        # Sixteen disc IDs, and a numeric reference is not decoded into one.
         self.assertEqual(len(dat.serials), 16)
         self.assertNotIn("TEST79999", dat.serials)
         # A size past 64 bits is a malformed row.
         self.assertEqual((len(dat), dat.rejected_roms), (1, 1))
+        # Seventeen IDs in one <serial>, or a second <serial>, are refused (rule 9).
+        for refused in (many + ", TEST-79998", "TEST-70000</serial><serial>TEST-70001"):
+            with self.assertRaises(disc_verify.DiscVerifyError) as raised:
+                disc_verify.parse_dat_text(text.replace(many + ", TEST&#45;79999", refused))
+            self.assertEqual(raised.exception.boundary_code, "DISC_DAT_NOT_DATAFILE")
+
+    def test_disc_ids_match_after_ascii_upper_casing_only(self) -> None:
+        dat = disc_verify.parse_dat_text(datafile())
+        changed = digest(MODIFIED)
+        self.assertEqual(disc_verify.classify("test70001", changed, dat), disc_verify.MODIFIED)
+        # U+017F (long s) upper-cases to "S" in Unicode, not in ASCII: no match.
+        self.assertEqual(disc_verify.classify("TE\u017fT70001", changed, dat), disc_verify.UNKNOWN)
 
     def test_serials_normalize_to_the_disc_id_param_sfo_holds(self) -> None:
         self.assertEqual(
@@ -178,7 +196,7 @@ class HashAndImportTests(unittest.TestCase):
         # The CRC-32 check value, as the C reader's test checks it.
         self.assertEqual(f"{zlib.crc32(b'123456789'):08x}", "cbf43926")
 
-    def test_nk_cli_prints_the_list_version_without_control_characters(self) -> None:
+    def test_nk_cli_refuses_a_list_with_control_characters_and_prints_none(self) -> None:
         import argparse
         import contextlib
         import io
@@ -191,13 +209,17 @@ class HashAndImportTests(unittest.TestCase):
             source.write_text(datafile().replace("<version>2026-10-31</version>",
                                                  "<version>1\x1b[31m\x07red</version>"),
                               encoding="utf-8")
-            shown = io.StringIO()
-            with contextlib.redirect_stdout(shown):
+            shown, errors = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(shown), contextlib.redirect_stderr(errors):
                 self.assertEqual(nk_cli.cmd_redump_import(argparse.Namespace(
-                    datafile=source, user_data_root=root / "data")), 0)
-            self.assertIn("(version 1[31mred)", shown.getvalue())
-            self.assertNotIn("\x1b", shown.getvalue())
-            self.assertNotIn("\x07", shown.getvalue())
+                    datafile=source, user_data_root=root / "data")), 1)
+            # Rule 3: a control byte anywhere refuses the list, named by its value.
+            self.assertIn("[DISC_DAT_NOT_DATAFILE]", errors.getvalue())
+            self.assertIn("(byte 0x1B)", errors.getvalue())
+            for output in (shown.getvalue(), errors.getvalue()):
+                self.assertNotIn("\x1b", output)
+                self.assertNotIn("\x07", output)
+            self.assertFalse(disc_verify.imported_dat_path(root / "data").exists())
 
     def test_import_saves_the_bytes_it_checked(self) -> None:
         # The file is read once: a source that changes after the check can't put
@@ -207,14 +229,14 @@ class HashAndImportTests(unittest.TestCase):
             source = root / "chosen.dat"
             checked = datafile().encode("utf-8")
             source.write_bytes(checked)
-            real_parse = disc_verify._parse_dat_bytes
+            real_parse = disc_verify.parse_dat_bytes
 
             def parse_then_change(data: bytes) -> disc_verify.RedumpDat:
                 dat = real_parse(data)
                 source.write_bytes(b"not a datafile, written after the check")
                 return dat
 
-            with mock.patch.object(disc_verify, "_parse_dat_bytes", parse_then_change):
+            with mock.patch.object(disc_verify, "parse_dat_bytes", parse_then_change):
                 disc_verify.import_dat(source, root / "data")
             self.assertEqual((root / "data" / "verification" / "redump.dat").read_bytes(),
                              checked)
@@ -512,9 +534,11 @@ class ZipAndEntityTests(unittest.TestCase):
         self.assertEqual(dat.name, "A &#38; B &#x26;")
 
 
-#: The most characters the reader may look at for each character of its input. The scanner
-#: counts each one every time it looks at it, so this bounds the work of any input (#1731
-#: review B1, S1: lists that once cost time quadratic in their size).
+#: The most bytes the reader may look at for each byte of its input. The reader counts each
+#: one every time it looks at it (the UTF-8 and control-byte passes, the scan, and each
+#: <serial>'s splitting), so this bounds the work of any input (#1731 reviews B1, S1 and S2:
+#: lists that once cost time quadratic in their size, and a serial whose splitting went
+#: uncounted). nk_disc_dat_parse_counted counts the same way, to the same bound.
 COST_PER_CHARACTER = 8
 
 
@@ -540,6 +564,9 @@ def hostile_lists(repeats: int) -> dict[str, str]:
         "references": good.replace("Synthetic &amp; Test", "&amp;" * repeats),
         "long reference": good.replace("Synthetic &amp; Test", "&#" + "1" * repeats + ";"),
         "a long serial": good.replace("TEST-70001, TEST-70001GA", "TEST-70001," * repeats),
+        # S2: serials at the length bound, all commas, in game after game.
+        "serial comma floods": good[:game] + ("<game><serial>" + "," * disc_verify.MAX_SERIAL_BYTES
+                                              + "</serial></game>") * (repeats // 64) + good[game:],
         "many serials": good.replace("\t\t<serial>", "<serial>TEST-70002</serial>" * (repeats // 10)
                                      + "\t\t<serial>"),
         "an open declaration": "<datafile><?" + "x" * repeats,
@@ -555,12 +582,16 @@ class LinearCostTests(unittest.TestCase):
     flaky). tests/native/test_disc_verify.c holds the C reader to the same bound."""
 
     def cost(self, text: str) -> int:
-        scanner = disc_verify._DatScanner(text)
+        data = text.encode("utf-8")
+        scanner = disc_verify._DatScanner(data)
         try:
+            examined = disc_verify._check_text(data, 0)
             scanner.parse()
         except disc_verify.DiscVerifyError as exc:
             self.assertTrue(exc.boundary_code.startswith("DISC_DAT_"), exc.boundary_code)
-        return scanner.examined
+            examined = 2 * len(data)
+        # int(): mypy sees nk_core (imported through sys.path) as Any (S4).
+        return int(examined + scanner.examined)
 
     def test_hostile_lists_cost_a_fixed_multiple_of_their_size(self) -> None:
         for repeats in (20_000, 40_000):
@@ -581,6 +612,67 @@ class LinearCostTests(unittest.TestCase):
         with zipfile.ZipFile(disc_verify.bundled_dat_path()) as archive:
             text = archive.read(archive.infolist()[0]).decode("utf-8-sig")
         self.assertLessEqual(self.cost(text), COST_PER_CHARACTER * len(text))
+
+    def test_a_serial_is_split_once_and_counted(self) -> None:
+        # S2: the splitting's three passes are counted, and a serial past the bound is refused
+        # before it is split at all.
+        good = datafile()
+        at_bound = good.replace("TEST-70001, TEST-70001GA", "," * disc_verify.MAX_SERIAL_BYTES)
+        self.assertEqual(self.cost(at_bound) - self.cost(good.replace("TEST-70001, TEST-70001GA", "")),
+                         4 * disc_verify.MAX_SERIAL_BYTES + 3 * disc_verify.MAX_SERIAL_BYTES)
+        over = good.replace("TEST-70001, TEST-70001GA", "," * (disc_verify.MAX_SERIAL_BYTES + 1))
+        with self.assertRaises(disc_verify.DiscVerifyError) as raised:
+            disc_verify.parse_dat_text(over)
+        self.assertIn("longer than 256 bytes", str(raised.exception))
+
+
+#: What the reader may hold at once (S5: it once held every attribute of a <rom>, so a 14 MB
+#: list peaked near 180 MiB): a few times the bytes it reads (the file, and the .dat inflated
+#: from a zip), plus each rom it keeps (its DatRom, its SHA-1, CRC-32 and name strings, its
+#: place in the dict, its game's disc IDs). Counted by tracemalloc, which sees every
+#: allocation Python makes; the limits (MAX_DAT_BYTES, MAX_DAT_ROMS) bound both terms.
+MEMORY_PER_BYTE = 3
+MEMORY_PER_ROM = 512
+
+
+class MemoryTests(unittest.TestCase):
+    def peak(self, read: Callable[[], object]) -> int:
+        tracemalloc.start()
+        try:
+            read()
+            return tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    def bound(self, size: int, roms: int) -> int:
+        return MEMORY_PER_BYTE * size + MEMORY_PER_ROM * roms
+
+    def test_the_bundled_list_is_held_once(self) -> None:
+        path = disc_verify.bundled_dat_path()
+        packed = path.read_bytes()
+        text = disc_verify._dat_from_zip(packed)
+        peak = self.peak(lambda: disc_verify.load_dat(path))
+        self.assertLessEqual(peak, self.bound(len(packed) + len(text), BUNDLED_DISCS))
+        peak = self.peak(lambda: disc_verify.parse_dat_bytes(text))
+        self.assertLessEqual(peak, self.bound(len(text), BUNDLED_DISCS))
+
+    def test_many_games_fit_the_same_bound(self) -> None:
+        # Ten thousand games of one rom and one disc ID each (the bound is per byte and per rom).
+        games = "".join(f'<game name="Game {index} (USA)"><serial>ULUS-{index:05d}</serial>'
+                        f'<rom name="Game {index} (USA).iso" size="1" crc="0badf00d" '
+                        f'sha1="{index:040x}"/></game>' for index in range(10_000))
+        data = f"<datafile>{games}</datafile>".encode("ascii")
+        peak = self.peak(lambda: disc_verify.parse_dat_bytes(data))
+        self.assertLessEqual(peak, self.bound(len(data), 10_000))
+
+    def test_attributes_a_rom_does_not_use_are_not_held(self) -> None:
+        # The review's c03 shape (one <rom> with 1.4 million empty attributes) at a seventh of
+        # its size: nothing in proportion to them is held, the peak is a few KiB.
+        attributes = "".join(f' a{index:x}=""' for index in range(200_000))
+        data = (f'<datafile><game><rom{attributes} size="1" crc="0badf00d" sha1="{"a" * 40}"/>'
+                "</game></datafile>").encode("ascii")
+        peak = self.peak(lambda: disc_verify.parse_dat_bytes(data))
+        self.assertLessEqual(peak, 64 * 1024)
 
 
 #: The list bundled with Nakagawa (assets/redump/PROVENANCE.md). A refreshed list changes these
@@ -718,5 +810,847 @@ class BundledListTests(unittest.TestCase):
         self.assertFalse(older("version 3", BUNDLED_DATE))
 
 
+# ---- one table of cases for both readers ----------------------------------------------------
+#
+# tests/native/disc_dat_conformance.txt holds inputs and the result each must give, and both
+# test suites read it: this one generates it (``python tools/test_disc_verify.py
+# --write-corpus``) and checks that the file is what the generator and this reader give; the C
+# suite builds the same inputs and checks that the C reader gives the same results. A reader
+# that changes alone fails its suite. The file's own header says how it is written.
+
+CORPUS = disc_verify.PROJECT_ROOT / "tests" / "native" / "disc_dat_conformance.txt"
+MUTATION_SEED = 0x1731
+MUTATION_COUNT = 4096
+MUTATION_WINDOWS = 8
+MUTATION_WINDOW_GAMES = 8
+
+Piece = tuple  # ("t", bytes) | ("r", count, bytes) | ("h", bytes) | ("seq", count, bytes)
+#                | ("file", path) | ("reg", name) | ("out",) | ("put", name) | ("deflate", name)
+
+CORPUS_HEADER = """\
+# The Redump datafile format, as both readers must read it: tools/nk_core/disc_verify.py
+# (its module documentation writes the format down) and src/core/nk_disc_verify.c.
+# Generated by `python tools/test_disc_verify.py --write-corpus`; do not edit by hand.
+#
+# A case builds one input from pieces, in order, then names the result:
+#   t TEXT          the text (escapes: \\\\ \\n \\t \\r \\xHH; every other byte is itself)
+#   r COUNT TEXT    the text COUNT times
+#   h HEX           bytes in hex
+#   seq COUNT TEXT  the text COUNT times, i from 0: %H is i in 40 hex digits, %X in hex,
+#                   %D is i mod 100000 in five digits, %% is %
+#   file PATH       a file's bytes (PATH from the repository's root)
+#   reg NAME        the pieces that follow fill register NAME (emptied first) ...
+#   out             ... until this, when they fill the input again
+#   put NAME        a register's bytes
+#   deflate NAME    a register's bytes as one fixed-Huffman deflate block: each byte a
+#                   literal, a run of 259 or more of one byte a literal and as many
+#                   length-258 distance-1 copies as fit, then the end of the block
+#   expect RESULT   OK GAMES ROMS REJECTED DISC-IDS SHA1, the SHA-1 of the list read (its
+#                   counts, header and disc IDs, and each rom's SHA-1, CRC-32, size and
+#                   place, one per line, sorted); or the refusal's code and message
+#
+# The mutations section names a seed and a count: mutation i is made by a splitmix64
+# generator seeded with (seed << 32) | i from one of eight windows of the bundled list (its
+# header, eight games, </datafile>): XML changes (i % 16 < 10), a stored zip of the window
+# with changed bytes (10, 11), a fixed-Huffman zip of it with flipped bits or a changed
+# size (12-14), or the bundled zip with flipped bits in its deflate data (15). Each
+# result's line is listed as the first 8 hex digits of its SHA-1, eight to a line.
+"""
+
+
+def _escape(data: bytes) -> str:
+    out = []
+    for index, byte in enumerate(data):
+        if byte == 0x5C:
+            out.append("\\\\")
+        elif byte == 0x0A:
+            out.append("\\n")
+        elif byte == 0x09:
+            out.append("\\t")
+        elif byte == 0x0D:
+            out.append("\\r")
+        elif byte < 0x20 or byte >= 0x7F or (byte == 0x20 and index == len(data) - 1):
+            out.append(f"\\x{byte:02x}")
+        else:
+            out.append(chr(byte))
+    return "".join(out)
+
+
+_SEQ_FIELDS = {b"%H": "{0:040x}", b"%X": "{0:x}", b"%D": "{1:05d}", b"%%": "%"}
+
+
+def _seq(count: int, template: bytes) -> bytes:
+    """A ``seq`` piece: the template ``count`` times, its fields filled from i."""
+    parts = re.split(rb"(%[HXD%])", template)
+    pattern = "".join(_SEQ_FIELDS[part] if index % 2 else
+                      part.decode("ascii").replace("{", "{{").replace("}", "}}")
+                      for index, part in enumerate(parts))
+    return "".join(pattern.format(index, index % 100000) for index in range(count)).encode("ascii")
+
+
+_RUNS = [re.compile(re.escape(bytes([byte])) + b"+") for byte in range(256)]
+_FIXED_CODES = []
+for _symbol in range(288):
+    if _symbol < 144:
+        _code, _length = 0x30 + _symbol, 8
+    elif _symbol < 256:
+        _code, _length = 0x190 + _symbol - 144, 9
+    elif _symbol < 280:
+        _code, _length = _symbol - 256, 7
+    else:
+        _code, _length = 0xC0 + _symbol - 280, 8
+    # Huffman codes go into the stream most significant bit first.
+    _FIXED_CODES.append((int(f"{_code:0{_length}b}"[::-1], 2), _length))
+
+
+def fixed_deflate(data: bytes) -> bytes:
+    """One final fixed-Huffman block (RFC 1951 3.2.6) of ``data``, as the corpus's ``deflate``
+    piece and the C suite's fixed_deflate write it."""
+    out = bytearray()
+    acc = nbits = 0
+
+    def put(value: int, count: int) -> None:
+        nonlocal acc, nbits
+        acc |= value << nbits
+        nbits += count
+        while nbits >= 8:
+            out.append(acc & 0xFF)
+            acc >>= 8
+            nbits -= 8
+
+    put(1, 1)  # BFINAL
+    put(1, 2)  # BTYPE 01, fixed codes
+    at = 0
+    while at < len(data):
+        match = _RUNS[data[at]].match(data, at)
+        assert match is not None
+        run = match.end() - at
+        if run < 259:
+            for byte in data[at:at + run]:
+                put(*_FIXED_CODES[byte])
+            at += run
+            continue
+        put(*_FIXED_CODES[data[at]])
+        copies = (run - 1) // 258
+        for _ in range(copies):
+            put(*_FIXED_CODES[285])  # length 258
+            put(0, 5)  # distance code 0: distance 1
+        at += 1 + copies * 258
+    put(*_FIXED_CODES[256])
+    if nbits:
+        out.append(acc & 0xFF)
+    return bytes(out)
+
+
+def build_pieces(pieces: Iterable[Piece]) -> bytes:
+    """The input a case's pieces build (the C suite's build_case does the same)."""
+    output = bytearray()
+    registers: dict[str, bytearray] = {}
+    target = output
+    for piece in pieces:
+        kind = piece[0]
+        if kind == "t" or kind == "h":
+            target += piece[1]
+        elif kind == "r":
+            target += piece[2] * piece[1]
+        elif kind == "seq":
+            target += _seq(piece[1], piece[2])
+        elif kind == "file":
+            target += (disc_verify.PROJECT_ROOT / piece[1]).read_bytes()
+        elif kind == "reg":
+            target = registers[piece[1]] = bytearray()
+        elif kind == "out":
+            target = output
+        elif kind == "put":
+            target += registers[piece[1]]
+        elif kind == "deflate":
+            target += fixed_deflate(bytes(registers[piece[1]]))
+        else:
+            raise ValueError(kind)
+    return bytes(output)
+
+
+def piece_lines(pieces: Iterable[Piece]) -> list[str]:
+    lines = []
+    for piece in pieces:
+        kind = piece[0]
+        if kind == "t":
+            lines.append(f"t {_escape(piece[1])}" if piece[1] else "t")
+        elif kind == "h":
+            lines.append(f"h {piece[1].hex()}")
+        elif kind in ("r", "seq"):
+            lines.append(f"{kind} {piece[1]} {_escape(piece[2])}")
+        elif kind == "out":
+            lines.append("out")
+        else:
+            lines.append(f"{kind} {piece[1]}")
+    return lines
+
+
+def outcome(data: bytes) -> str:
+    """The result line of one input: what the reader made of it, or its refusal."""
+    try:
+        dat = disc_verify.dat_from_bytes(data)
+    except disc_verify.DiscVerifyError as exc:
+        return f"{exc.boundary_code} {exc}"
+    lines = [str(dat.games), str(len(dat)), str(dat.rejected_roms), dat.name, dat.version,
+             dat.date]
+    lines += sorted(f"serial {disc_id}" for disc_id in dat.serials)
+    lines += sorted(f"rom {rom.sha1} {rom.crc32} {rom.size_bytes} {rom.listed}"
+                    for rom in dat.roms_by_sha1.values())
+    canonical = hashlib.sha1("".join(line + "\n" for line in lines).encode("ascii"))
+    return (f"OK {dat.games} {len(dat)} {dat.rejected_roms} {len(dat.serials)} "
+            f"{canonical.hexdigest()}")
+
+
+# -- the cases -----------------------------------------------------------------------------
+
+SHA_A, SHA_B, SHA_C = "a" * 40, "b" * 40, "c" * 40
+DOCTYPE = ('<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" '
+           '"http://www.logiqx.com/Dats/datafile.dtd">')
+HEADER = ("\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n"
+          "\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n"
+          "\t</header>\n")
+
+
+def c_rom(sha: str, crc: str = "0badf00d", size: str = "1024", name: str = "x.iso") -> str:
+    return f'<rom name="{name}" size="{size}" crc="{crc}" sha1="{sha}"/>'
+
+
+def c_game(body: str, serial: Optional[str] = None, name: str = "G") -> str:
+    s = f"<serial>{serial}</serial>" if serial is not None else ""
+    return f'\t<game name="{name}">\n\t\t{s}\n\t\t{body}\n\t</game>\n'
+
+
+def c_dat(games: str, header: Optional[str] = None, pre: str = "", post: str = "") -> str:
+    header = HEADER if header is None else header
+    return f'<?xml version="1.0"?>\n{DOCTYPE}\n{pre}<datafile>\n{header}{games}</datafile>\n{post}'
+
+
+GOOD_GAMES = c_game(c_rom(SHA_A), "ULUS-10041") + c_game(c_rom(SHA_B), "ULES-00151, ULES-00152")
+GOOD = c_dat(GOOD_GAMES)
+
+
+def T(text: str | bytes) -> Piece:
+    return ("t", text.encode("utf-8") if isinstance(text, str) else text)
+
+
+def R(count: int, text: str | bytes) -> Piece:
+    return ("r", count, text.encode("utf-8") if isinstance(text, str) else text)
+
+
+def SEQ(count: int, text: str) -> Piece:
+    return ("seq", count, text.encode("utf-8"))
+
+
+def text_case(text: str | bytes) -> list[Piece]:
+    return [T(text)]
+
+
+def around(text: str, count: int, unit: str) -> list[Piece]:
+    """The text with its one "@@" replaced by ``unit`` ``count`` times."""
+    before, after = text.split("@@")
+    return [T(before), R(count, unit), T(after)]
+
+
+def _local_header(name: bytes, method: int, crc: int, csize: int, usize: int, flags: int = 0,
+                  extra: bytes = b"") -> bytes:
+    return struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, flags, method, 0, 0x21, crc, csize, usize,
+                       len(name), len(extra)) + name + extra
+
+
+def _central(name: bytes, method: int, crc: int, csize: int, usize: int, offset: int,
+             flags: int = 0, extra: bytes = b"") -> bytes:
+    return struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, flags, method, 0, 0x21, crc,
+                       csize, usize, len(name), len(extra), 0, 0, 0, 0, offset) + name + extra
+
+
+def _eocd(count: int, cd_size: int, cd_offset: int, comment: bytes = b"",
+          count2: Optional[int] = None, disk: int = 0) -> bytes:
+    return struct.pack("<IHHHHIIH", 0x06054B50, disk, 0, count, count if count2 is None else count2,
+                       cd_size, cd_offset, len(comment)) + comment
+
+
+def zip_bytes(payload: bytes, method: int) -> bytes:
+    """The zip the mutations start from (and the C suite's zip_bytes): one entry, list.dat."""
+    packed = fixed_deflate(payload) if method == 8 else payload
+    crc = zlib.crc32(payload)
+    local = _local_header(b"list.dat", method, crc, len(packed), len(payload))
+    central = _central(b"list.dat", method, crc, len(packed), len(payload), 0)
+    body = local + packed
+    return body + central + _eocd(1, len(central), len(body))
+
+
+_zip_registers = iter(range(1_000_000))
+
+
+def zip_case(payload: list[Piece], *, method: int = 8, packed: Optional[list[Piece]] = None,
+             crc: Optional[int] = None, usize: Optional[int] = None,
+             csize: Optional[int] = None, flags: int = 0, lflags: Optional[int] = None,
+             extra: bytes = b"", lextra: bytes = b"", name: bytes = b"list.dat",
+             lname: Optional[bytes] = None, lmethod: Optional[int] = None, count: int = 1,
+             count2: Optional[int] = None, comment: bytes = b"", disk: int = 0,
+             offset: int = 0, after_data: bytes = b"", after_eocd: bytes = b"") -> list[Piece]:
+    """A one-entry zip of a payload, each field overridable."""
+    serial = next(_zip_registers)
+    payload_register, packed_register = f"p{serial}", f"q{serial}"
+    payload_bytes = build_pieces(payload)
+    pieces: list[Piece] = [("reg", payload_register), *payload]
+    if packed is not None:
+        packed_bytes = build_pieces(packed)
+        pieces += [("reg", packed_register), *packed]
+        data: Piece = ("put", packed_register)
+    elif method == 8:
+        packed_bytes = fixed_deflate(payload_bytes)
+        data = ("deflate", payload_register)
+    else:
+        packed_bytes = payload_bytes
+        data = ("put", payload_register)
+    crc = zlib.crc32(payload_bytes) if crc is None else crc
+    usize = len(payload_bytes) if usize is None else usize
+    csize = len(packed_bytes) if csize is None else csize
+    local = _local_header(name if lname is None else lname, method if lmethod is None else lmethod,
+                          crc, csize, usize, flags if lflags is None else lflags, lextra)
+    central = _central(name, method, crc, csize, usize, offset, flags, extra)
+    body_length = len(local) + len(packed_bytes) + len(after_data)
+    tail = after_data + central + _eocd(count, len(central), body_length, comment, count2, disk)
+    return pieces + [("out",), ("h", local), data, ("h", tail + after_eocd)]
+
+
+def corpus_cases() -> list[tuple[str, list[Piece]]]:
+    """The cases: the shapes of the reviews of #2530 (hostile datafiles and zips), each
+    rule's edges, and the bundled list."""
+    cases: list[tuple[str, list[Piece]]] = []
+
+    def add(name: str, pieces: list[Piece] | str | bytes) -> None:
+        cases.append((name, pieces if isinstance(pieces, list) else text_case(pieces)))
+
+    good = GOOD
+    add("good", good)
+    add("bundled zip", [("file", "assets/redump/redump-psp.zip")])
+    # Whitespace is space, tab, CR and LF only (review B1).
+    one = c_dat(c_game(c_rom(SHA_A), "ULUS-10041"))
+    for label, space in (("VT", "\x0b"), ("NBSP", "\u00a0"), ("FF", "\x0c"), ("tab", "\t"),
+                         ("ideographic space", "\u3000"), ("NEL", "\u0085")):
+        add(f"closing tag with {label}", one.replace(
+            "</datafile>\n", f"</datafile {space}>\n" + c_game(c_rom(SHA_C), "ULUS-99999")
+            + "</datafile>\n"))
+    add("closing tag with a tab only", good.replace("</datafile>", "</datafile\t>"))
+    add("closing tag, CRLF", good.replace("</datafile>", "</datafile\r\n>"))
+    # Disc IDs (review B2).
+    for label, serial in (("VT", "ULUS\x0b10041"), ("NBSP", "ULUS\u00a010041"),
+                          ("long s", "\u017fLUS10041"), ("dotless i", "\u0131LUS10041"),
+                          ("fullwidth digits", "ULUS\uff11\uff10\uff10\uff14\uff11"),
+                          ("lower case", "ulus-10041"),
+                          ("suffixes and spaces", "ULUS-10041GA, ULUS10041-X, UL US 1 0 0 4 2"),
+                          ("references", "ULUS-10041&amp;, ULUS&amp;10042, ULUS&#45;10043"),
+                          ("CR LF tab inside", "UL\r\nUS-1\t0041"),
+                          ("empty parts", ",,,ULUS-10041,,"),
+                          ("one ID twenty times", ", ".join(["ULUS-10041"] * 20)),
+                          ("sixteen IDs", ", ".join(f"ULUS-1{i:04d}" for i in range(16))),
+                          ("seventeen IDs", ", ".join(f"ULUS-1{i:04d}" for i in range(17))),
+                          ("sixteen IDs, repeats between", ",".join(
+                              f"ULUS1{i % 16:04d}" for i in range(23))),
+                          ("256 bytes", "ULUS-10041," + "," * 245),
+                          ("257 bytes", "ULUS-10041," + "," * 246),
+                          ("non-ASCII", "ULUS-10041, \u00dcLUS-10042")):
+        add(f"serial: {label}", c_dat(c_game(c_rom(SHA_A), serial)))
+    add("serial: self-closing", c_dat(c_game(c_rom(SHA_A)).replace("\t\t\n", "\t\t<serial/>\n", 1)))
+    add("serial: sixteen repeats in separate elements", c_dat(
+        '\t<game name="G">' + "<serial>ULUS-10041</serial>" * 16 + "<serial>ULUS-10042</serial>"
+        + c_rom(SHA_A) + "</game>\n"))
+    add("serial: element inside", c_dat(c_game(c_rom(SHA_A), "ULUS<b>10041</b>")))
+    add("serial: CDATA", c_dat(c_game(c_rom(SHA_A), "<![CDATA[ULUS10041]]>")))
+    add("serial: in the header", good.replace("<date>", "<serial>ULUS-55555</serial><date>"))
+    add("serial: in the root", good.replace("\t<game", "<serial>ULUS-55555</serial>\t<game", 1))
+    add("serial: inside a rom's sibling element", c_dat(c_game(
+        "<x><serial>ULUS-55555</serial></x>" + c_rom(SHA_A))))
+    # Header fields (review S1).
+    add("date: leading space", good.replace("<date>2026", "<date> 2026"))
+    add("date: on its own lines", good.replace("<date>2026-11-12 16-02-53</date>",
+                                               "<date>\n\t\t\t2026-11-12 16-02-53\n\t\t</date>"))
+    add("date: NUL", good.replace("<date>2026", "<date>\x002026"))
+    add("date: NBSP after", good.replace("16-02-53</date>", "16-02-53\u00a0</date>"))
+    add("date: control characters", good.replace("<date>2026-11-12 16-02-53",
+                                                 "<date>" + "\x01" * 80 + "2026-11-12"))
+    add("date: 63 bytes", good.replace("<date>2026-11-12 16-02-53", "<date>" + "d" * 63))
+    add("date: 64 bytes", good.replace("<date>2026-11-12 16-02-53", "<date>" + "d" * 64))
+    add("date: 63 bytes after references", good.replace(
+        "<date>2026-11-12 16-02-53", "<date>\t " + "&amp;" * 3 + "d" * 60 + " \t"))
+    add("date: escape sequence", good.replace("<date>2026", "<date>\x1b[31m2026"))
+    add("date: empty", good.replace("<date>2026-11-12 16-02-53</date>", "<date/>"))
+    add("date: element inside", good.replace("<date>2026", "<date><b/>2026"))
+    add("date: twice", good.replace("\t</header>", "\t\t<date>2027-01-01</date>\n\t</header>"))
+    add("name: references", good.replace("Sony - PlayStation", "Sony &amp; &lt;PlayStation&gt;"))
+    add("name: character references", good.replace(
+        "Sony - PlayStation", "&#65;&#x41;&#0;&#xD800;&#1114111;&#x10FFFF;"))
+    add("name: non-ASCII", good.replace("Sony", "S\u00f6ny"))
+    add("name: astral text", around(good.replace("Sony", "@@"), 3_000_000, "\U0001F600"))
+    add("header: second", good.replace("\t<game", HEADER + "\t<game", 1))
+    add("header: after a game", c_dat(GOOD_GAMES + HEADER))
+    add("header: fifty thousand", around(c_dat(GOOD_GAMES, header="@@"), 50_000,
+                                         "<header><date>2026-01-01</date></header>"))
+    add("header: none", c_dat(GOOD_GAMES, header=""))
+    add("header: unknown fields kept out", good.replace(
+        "\t</header>", "\t\t<author>a &amp; b</author><comment/>\n\t</header>"))
+    # Markup.
+    add("attribute: '>' in a value", c_dat(c_game('<rom name="a>b" size="1024" crc="0badf00d" sha1="'
+                                                   + SHA_C + '"/>' + c_rom(SHA_A))))
+    add("attribute: single quotes", c_dat(c_game(
+        "<rom name='x' size='1024' crc='0badf00d' sha1='" + SHA_C + "'/>" + c_rom(SHA_A))))
+    add("attribute: apostrophe in a value", c_dat(c_game(
+        '<rom name="it\'s" size="1024" crc="0badf00d" sha1="' + SHA_C + '"/>' + c_rom(SHA_A))))
+    add("attribute: no space before", c_dat(c_game(
+        '<rom name="x"size="1024" crc="0badf00d" sha1="' + SHA_C + '"/>')))
+    add("attribute: no value", c_dat(c_game('<rom name size="1024"/>' + c_rom(SHA_A))))
+    add("attribute: unquoted", c_dat(c_game(c_rom(SHA_A)).replace('name="G"', "name=G")))
+    add("attribute: spaces around =", c_dat(c_game(
+        f'<rom name = "x"\tsize =\n"1024" crc= "0badf00d" sha1 ="{SHA_A}" />')))
+    add("attribute: repeated, first kept", c_dat(c_game(
+        f'<rom size="1024" crc="0badf00d" sha1="{SHA_A}" sha1="{SHA_C}" size="9"/>')))
+    add("attribute: a long value", around(c_dat(c_game(
+        f'<rom name="@@" size="1024" crc="0badf00d" sha1="{SHA_C}"/>' + c_rom(SHA_A))),
+        8_000_000, "n"))
+    add("attribute: a long name", around(c_dat(c_game(
+        f'<rom @@="x" size="1024" crc="0badf00d" sha1="{SHA_C}"/>' + c_rom(SHA_A))),
+        8_000_000, "n"))
+    add("attribute: two hundred thousand", [
+        T(c_dat("").split("</datafile>")[0] + '\t<game name="G"><rom'),
+        SEQ(200_000, ' a%X=""'),
+        T(f' size="1024" crc="0badf00d" sha1="{SHA_A}"/></game>\n</datafile>\n')])
+    add("name: non-ASCII element", c_dat(c_game(c_rom(SHA_A)) + "<\u00e9l\u00e9ment/>"))
+    add("name: element ROM", c_dat(c_game(
+        f'<ROM name="x" size="1024" crc="0badf00d" sha1="{SHA_C}"/>' + c_rom(SHA_A))))
+    add("name: element romx", c_dat(c_game(
+        f'<romx name="x" size="1024" crc="0badf00d" sha1="{SHA_C}"/>' + c_rom(SHA_A))))
+    add("name: root DATAFILE", good.replace("datafile>", "DATAFILE>"))
+    add("end tag: space before >", good.replace("</game>", "</game >"))
+    add("end tag: space after <", good.replace("</game>", "</ game>"))
+    add("end tag: attributes", good.replace("</game>", '</game a="b">'))
+    add("end tag: not matching", good.replace("</game>", "</gam>", 1))
+    add("end tag: after the root", good + "</datafile>")
+    add("end tag: before the root", good.replace("<datafile>", "</x><datafile>"))
+    add("tag: '<' inside", good.replace("<game ", "<game <", 1))
+    add("tag: '<' after the root", good.replace("</datafile>\n", "</datafile>\n<"))
+    add("tag: '<' at the end", good.replace("</datafile>\n", "<"))
+    add("tag: cut short", good.replace("</datafile>\n", '<rom sha1="' + SHA_C))
+    add("tag: empty", good.replace("\t<game", "<>\t<game", 1))
+    add("tag: '< game'", good.replace("<game", "< game", 1))
+    add("tag: '/' in the middle", good.replace('<game name="G">', '<game / name="G">', 1))
+    add("references: allowed forms", good.replace(
+        "Sony - PlayStation", "&#1234567;&#x10FFFF;&#x123456;&quot;&apos;"))
+    add("references: eight digits", good.replace("Sony - PlayStation", "&#12345678;"))
+    add("references: hex seven digits", good.replace("Sony - PlayStation", "&#x1100000;"))
+    add("references: empty", good.replace("Sony - PlayStation", "&#;"))
+    add("references: upper X", good.replace("Sony - PlayStation", "&#X41;"))
+    add("references: named", good.replace("Sony - PlayStation", "&nbsp;"))
+    add("references: in an attribute", c_dat(c_game(c_rom(SHA_A, name="a&bogus;b"))))
+    add("references: bare &", good.replace("Sony - PlayStation", "A & B"))
+    add("references: cut at the end", good.replace("</datafile>\n", "</datafile>&am"))
+    add("references: cut inside the root", good.replace("</datafile>\n", "&am"))
+    add("references: in text outside the root", good.replace("<datafile>", "&amp;<datafile>"))
+    # Declarations and DOCTYPE.
+    add("DOCTYPE: lower case", good.replace("<!DOCTYPE", "<!doctype"))
+    add("DOCTYPE: '>' in a quoted value", good.replace(DOCTYPE, '<!DOCTYPE datafile SYSTEM "a>b">'))
+    add("DOCTYPE: internal subset", good.replace(DOCTYPE, '<!DOCTYPE datafile [<!ENTITY b "x">]>'))
+    add("DOCTYPE: '[' alone", good.replace(DOCTYPE, "<!DOCTYPE datafile [ ]>"))
+    add("DOCTYPE: twice", good.replace(DOCTYPE, DOCTYPE + DOCTYPE))
+    add("DOCTYPE: inside the root", good.replace("<datafile>", "<datafile>" + DOCTYPE))
+    add("DOCTYPE: cut short", "<!DOCTYPE datafile")
+    add("DOCTYPE: '<' inside", good.replace(DOCTYPE, '<!DOCTYPE datafile <!ENTITY a "b">>'))
+    add("DOCTYPE: none", good.replace(DOCTYPE + "\n", ""))
+    add("comment: in the root", good.replace("<datafile>", "<datafile><!-- <game><rom/></game> -->"))
+    add("comment: before the root", good.replace("<datafile>", "<!-- x --><datafile>"))
+    add("comment: after the root", good + "<!-- x -->")
+    add("entity: after the root", good + "<!ENTITY x 'y'>&bogus;")
+    add("declaration: inside the root", c_dat(c_game(c_rom(SHA_A)) + "<?x " + c_game(c_rom(SHA_C))
+                                              + " ?>"))
+    add("declaration: cut short", "<?xml version")
+    add("declaration: many before the root", good.replace("<datafile>", "<?a?><?b c?>\n<datafile>"))
+    add("declaration: none", good.replace('<?xml version="1.0"?>\n', ""))
+    # Encoding and control bytes.
+    add("encoding: UTF-16", ("\ufeff" + good).encode("utf-16-le"))
+    add("encoding: byte-order mark", b"\xef\xbb\xbf" + good.encode())
+    add("encoding: two byte-order marks", b"\xef\xbb\xbf\xef\xbb\xbf" + good.encode())
+    add("encoding: byte-order mark only", b"\xef\xbb\xbf")
+    add("encoding: Latin-1", good.replace("Sony", "S\u00f6ny").encode("latin-1"))
+    for label, raw in (("overlong", b"\xc0\xaf"), ("surrogate", b"\xed\xa0\x80"),
+                       ("past U+10FFFF", b"\xf4\x90\x80\x80"), ("lone continuation", b"\x80"),
+                       ("cut short", b"\xe3\x80")):
+        add(f"encoding: {label}", good.encode().replace(b"Sony", b"S" + raw + b"ony"))
+    add("encoding: cut at the end", good.encode() + b"\xe3\x80")
+    add("control: NUL before a game", good.replace("<game", "\x00<game", 1))
+    add("control: DEL in a name", c_dat(c_game(c_rom(SHA_A, name="a\x7fb"))))
+    add("control: VT in text", good.replace("\t<game", "\x0b<game", 1))
+    add("control: CR only lines", good.replace("\n", "\r"))
+    add("control: CRLF lines", good.replace("\n", "\r\n"))
+    add("text: empty", b"")
+    add("text: whitespace only", " \t\r\n")
+    add("text: not a datafile", "<html>nothing</html>")
+    add("text: plain words", "hello")
+    add("text: before the root", good.replace("<datafile>", "x<datafile>"))
+    add("text: after the root", good + "x")
+    add("text: whitespace after the root", good + " \t\r\n\n")
+    add("text: a game outside the root", good.replace(
+        "<datafile>", c_game(c_rom(SHA_C), "ULUS-77777") + "<datafile>"))
+    add("text: no closing tag", good.replace("</datafile>\n", ""))
+    add("text: closing tag cut", good.replace("</datafile>\n", "</datafile"))
+    add("text: cut inside the last game", good[:good.rindex("<rom")])
+    # Structure.
+    add("structure: nested game", c_dat('<game name="a"><game name="b">' + c_rom(SHA_A)
+                                        + "</game></game>\n"))
+    add("structure: self-closing game", c_dat("<game/>" + c_game(c_rom(SHA_A))))
+    add("structure: game with no rom", c_dat(c_game("", "ULUS-12345") + c_game(c_rom(SHA_A))))
+    add("structure: rom outside a game", c_dat(c_rom(SHA_C) + c_game(c_rom(SHA_A))))
+    add("structure: rom in the header", good.replace("<date>", c_rom(SHA_C) + "<date>"))
+    add("structure: rom with content", c_dat(c_game(c_rom(SHA_A)[:-2] + "></rom>")))
+    add("structure: second datafile inside", c_dat(c_game(c_rom(SHA_A)) + "<datafile/>"))
+    add("structure: self-closing root", '<?xml version="1.0"?>\n<datafile/>\n')
+    add("structure: unknown elements kept out", c_dat(c_game(
+        "<x a=\"1\"><y>text &amp; more</y><z/></x>" + c_rom(SHA_A))))
+    add("structure: eight deep", c_dat(c_game("<a><b><c><d><e><f/></e></d></c></b></a>"
+                                              + c_rom(SHA_A))))
+    add("structure: nine deep", c_dat(c_game("<a><b><c><d><e><f><g/></f></e></d></c></b></a>"
+                                             + c_rom(SHA_A))))
+    deep = c_dat(GOOD_GAMES + "@@").split("@@")
+    add("structure: a million tags deep", [T(deep[0]), R(500_000, "<a>"), R(500_000, "</a>"),
+                                           T(deep[1])])
+    add("structure: references in tags", around(c_dat(GOOD_GAMES + "@@"), 300_000,
+                                                '<a b="&amp;&amp;&amp;">'))
+    # Roms.
+    add("rom: upper-case hashes", c_dat(c_game(c_rom(SHA_A.upper(), crc="0BADF00D"))))
+    add("rom: malformed hashes", c_dat(c_game(c_rom("a" * 39) + c_rom("a" * 41) + c_rom("g" * 40)
+                                               + c_rom(SHA_B))))
+    add("rom: malformed CRCs", c_dat(c_game(c_rom(SHA_A, crc="0BADF00D") + c_rom(SHA_B, crc="0badf00")
+                                            + c_rom(SHA_C, crc="0badf00dd"))))
+    add("rom: sizes at the edge", c_dat(c_game(
+        c_rom(SHA_A, size="18446744073709551615") + c_rom(SHA_B, size="18446744073709551616")
+        + c_rom(SHA_C, size="+1") + c_rom("d" * 40, size=" 1")
+        + c_rom("e" * 40, size="00000000000000000000001") + c_rom("f" * 40, size="0"))))
+    add("rom: missing attributes", c_dat(c_game(f'<rom sha1="{SHA_A}" crc="0badf00d"/>'
+                                                + c_rom(SHA_B))))
+    add("rom: references in a hash", c_dat(c_game(c_rom("&#97;" + "a" * 39) + c_rom(SHA_B))))
+    add("rom: one SHA-1 twice", c_dat(c_game(c_rom(SHA_A, size="1")) + c_game(c_rom(SHA_A, size="2"))
+                                      + c_game(c_rom(SHA_B))))
+    add("rom: none with a SHA-1", c_dat(c_game('<rom name="x" size="1"/>')))
+    add("rom: forty thousand", [T(c_dat("").split("</datafile>")[0] + "<game>"),
+                                SEQ(40_000, '<rom size="1" crc="0badf00d" sha1="%H"/>'),
+                                T("</game>\n</datafile>\n")])
+    add("rom: forty thousand and one", [T(c_dat("").split("</datafile>")[0] + "<game>"),
+                                        SEQ(40_001, '<rom size="1" crc="0badf00d" sha1="%H"/>'),
+                                        T("</game>\n</datafile>\n")])
+    add("rom: forty thousand and one games", [T(c_dat("").split("</datafile>")[0]),
+                                      SEQ(40_001, '\t<game name="G"><serial>ULUS%D</serial>'
+                                          '<rom size="1024" crc="0badf00d" sha1="%H"/></game>\n'),
+                                      T("</datafile>\n")])
+    # Limits and cost (review S2: a comma flood once went uncounted).
+    add("serial: comma flood", around(c_dat(c_game(c_rom(SHA_A), "@@")), 15_000_000, ","))
+    add("serial: short parts flood", around(c_dat(c_game(c_rom(SHA_A), "@@")), 7_500_000, "x,"))
+    add("serial: comma floods at the bound", [
+        T(c_dat("").split("</datafile>")[0] + c_game(c_rom(SHA_A))),
+        R(30_000, "<game><serial>" + "," * 256 + "</serial></game>"),
+        T("</datafile>\n")])
+    add("serial: eighty thousand and one IDs", [
+        T(c_dat("").split("</datafile>")[0] + c_game(c_rom(SHA_A))),
+        SEQ(5_001, "<game><serial>" + ", ".join(
+            f"AA{chr(65 + j // 26)}{chr(65 + j % 26)}%D" for j in range(16)) + "</serial></game>"),
+        T("</datafile>\n")])
+    before = c_dat("").split("</datafile>")[0] + "<game>" + c_rom(SHA_A)
+    after = "</game>\n</datafile>\n"
+    fill = disc_verify.MAX_DAT_TAGS - (before + after).count("<")
+    add("tags: at the bound", [T(before), R(fill, "<a/>"), T(after)])
+    add("tags: one more", [T(before), R(fill + 1, "<a/>"), T(after)])
+    before = '<?xml version="1.0"?>\n<?pad '
+    after = "?><datafile>" + HEADER + GOOD_GAMES + "</datafile>\n"
+    fill = disc_verify.MAX_DAT_BYTES - len(before) - len(after)
+    add("size: 16 MiB", [T(before), R(fill, "p"), T(after)])
+    add("size: one byte more", [T(before), R(fill + 1, "p"), T(after)])
+    # Zips (review B3: zips whose structure lies).
+    payload = [T(good)]
+    other = [T(c_dat(c_game(c_rom(SHA_C), "ULUS-99999")))]
+    good_bytes, other_bytes = good.encode(), build_pieces(other)
+    add("zip: deflated", zip_case(payload))
+    add("zip: stored", zip_case(payload, method=0))
+    deflater = zlib.compressobj(9, zlib.DEFLATED, -15)
+    add("zip: zlib's dynamic codes", zip_case(
+        payload, packed=[("h", deflater.compress(good_bytes) + deflater.flush())]))
+    add("zip: UTF-8 name flag", zip_case(payload, flags=0x0800))
+    add("zip: deflate option flags", zip_case(payload, flags=0x0006))
+    add("zip: flag 0x0010", zip_case(payload, flags=0x0010))
+    longer = good_bytes + b"<!-- trailing -->" + b"x" * 1000
+    add("zip: declared size too small, deflated", zip_case(payload, packed=[("h", fixed_deflate(longer))]))
+    add("zip: declared size too small, stored", zip_case(
+        payload, method=0, packed=[("h", longer)], usize=len(good_bytes)))
+    add("zip: declared size too large, deflated", zip_case(payload, usize=len(good_bytes) + 5000))
+    add("zip: declared size too large, stored", zip_case(
+        payload, method=0, usize=len(good_bytes) + 10, csize=len(good_bytes)))
+    add("zip: declared size 0", zip_case(payload, usize=0))
+    add("zip: compressed size short", zip_case(payload, csize=len(fixed_deflate(good_bytes)) - 1))
+    add("zip: stored data into the directory", zip_case(
+        payload, method=0, csize=len(good_bytes) + 30, usize=len(good_bytes)))
+    add("zip: count two", zip_case(payload, count=2))
+    add("zip: counts differ", zip_case(payload, count2=2))
+    add("zip: count zero", zip_case(payload, count=0))
+    local_a = _local_header(b"a.dat", 0, zlib.crc32(good_bytes), len(good_bytes), len(good_bytes))
+    local_b = _local_header(b"b.dat", 0, zlib.crc32(other_bytes), len(other_bytes), len(other_bytes))
+    offset_b = len(local_a) + len(good_bytes)
+    central_a = _central(b"a.dat", 0, zlib.crc32(good_bytes), len(good_bytes), len(good_bytes), 0)
+    central_b = _central(b"b.dat", 0, zlib.crc32(other_bytes), len(other_bytes), len(other_bytes),
+                         offset_b)
+    body = local_a + good_bytes + local_b + other_bytes
+    add("zip: two files", [("h", body + central_a + central_b
+                                 + _eocd(2, len(central_a) + len(central_b), len(body)))])
+    add("zip: two directories, the end record naming the first", [
+        ("h", body + central_a + central_b + _eocd(1, len(central_a), len(body)))])
+    add("zip: an end record in the comment", [
+        ("h", body + central_a + central_b + _eocd(
+            1, len(central_a), len(body),
+            _eocd(1, len(central_b), len(body) + len(central_a)) + b"tail-bytes"))])
+    add("zip: a comment", zip_case(payload, comment=b"Redump"))
+    add("zip: bytes after the end record", zip_case(payload, after_eocd=b"\0"))
+    add("zip: bytes between the data and the directory", zip_case(payload, after_data=b"\0\0"))
+    add("zip: path in the name", zip_case(payload, name=b"../../../../evil.dat"))
+    add("zip: drive in the name", zip_case(payload, name=b"C:/Windows/evil.dat"))
+    add("zip: NUL then .txt", zip_case(payload, name=b"x.dat\x00.txt"))
+    add("zip: NUL then .dat", zip_case(payload, name=b"x.txt\x00.dat"))
+    add("zip: upper-case .DAT", zip_case(payload, name=b"LIST.DAT"))
+    add("zip: only .dat", zip_case(payload, name=b".dat"))
+    add("zip: a .txt", zip_case(payload, name=b"list.txt"))
+    add("zip: a folder named .dat", zip_case([T(b"")], method=0, name=b"d.dat/"))
+    add("zip: local name differs", zip_case(payload, lname=b"other.dat"))
+    add("zip: local method differs", zip_case(payload, method=0, lmethod=8))
+    add("zip: local flags differ", zip_case(payload, lflags=0x0800))
+    add("zip: ZIP64 extra block", zip_case(payload, extra=b"\x01\x00\x00\x00"))
+    add("zip: ZIP64 extra block second", zip_case(
+        payload, extra=b"\x55\x54\x01\x00\x00\x01\x00\x00\x00"))
+    add("zip: extra field whole", zip_case(payload, extra=b"\x55\x54\x01\x00\x00",
+                                           lextra=b"\x55\x54\x01\x00\x00"))
+    add("zip: extra field cut", zip_case(payload, extra=b"\x55\x54\x05\x00\x00"))
+    add("zip: local extra cut", zip_case(payload, lextra=b"\x55\x54\x05\x00\x00"))
+    add("zip: local ZIP64 extra", zip_case(payload, lextra=b"\x01\x00\x00\x00"))
+    add("zip: ZIP64 sizes", zip_case(payload, csize=0xFFFFFFFF))
+    add("zip: ZIP64 offset", zip_case(payload, offset=0xFFFFFFFF))
+    add("zip: not at offset 0", zip_case(payload, offset=4))
+    add("zip: encrypted", zip_case(payload, flags=0x1))
+    add("zip: strong encryption", zip_case(payload, flags=0x40))
+    packed = fixed_deflate(good_bytes)
+    descriptor = struct.pack("<IIII", 0x08074B50, zlib.crc32(good_bytes), len(packed), len(good_bytes))
+    local = _local_header(b"list.dat", 8, 0, 0, 0, flags=0x8)
+    central = _central(b"list.dat", 8, zlib.crc32(good_bytes), len(packed), len(good_bytes), 0,
+                       flags=0x8)
+    add("zip: data descriptor", [("reg", "dd"), *payload, ("out",), ("h", local), ("deflate", "dd"),
+                                 ("h", descriptor + central + _eocd(
+                                     1, len(central), len(local) + len(packed) + len(descriptor)))])
+    add("zip: bzip2", zip_case(payload, method=12, packed=[T(b"BZh9garbage")]))
+    add("zip: garbage deflate data", zip_case(payload, packed=[("h", b"\xff" * 100)]))
+    add("zip: deflate data cut", zip_case(payload, packed=[("h", packed[:-5])]))
+    add("zip: bytes after the deflate data", zip_case(payload, packed=[("h", packed + b"\0")]))
+    add("zip: wrong CRC", zip_case(payload, crc=zlib.crc32(good_bytes) ^ 1))
+    add("zip: empty file", zip_case([T(b"")], method=0))
+    add("zip: empty file, deflated", zip_case([T(b"")]))
+    add("zip: stored, near 16 MiB", zip_case([
+        T('<?xml version="1.0"?>\n<?pad '), R(disc_verify.MAX_DAT_BYTES - 2000, "p"),
+        T("?><datafile>" + HEADER + GOOD_GAMES + "</datafile>\n")], method=0))
+    add("zip: declared over 16 MiB", zip_case(payload, usize=16 * 1024 * 1024 + 1))
+    bomb = [T(good.replace("</datafile>\n", "")), R(17 << 20, " "), T("</datafile>\n")]
+    add("zip: bomb declared at the cap", zip_case(bomb, crc=0, usize=16 * 1024 * 1024))
+    add("zip: bomb declared small", zip_case(bomb, crc=0, usize=1000))
+    add("zip: a zip in it", zip_case([("h", zip_bytes(good_bytes, 8))], name=b"inner.dat"))
+    whole = zip_bytes(good_bytes, 8)
+    for cut in (4, 30, 60, len(whole) - 22, len(whole) - 1):
+        add(f"zip: cut at {cut}", [("h", whole[:cut])])
+    add("zip: magic only", [("h", b"PK\x03\x04")])
+    add("zip: disk number", zip_case(payload, disk=1))
+    add("zip: empty, no file header", [("h", _eocd(0, 0, 0))])
+    return cases
+
+
+# -- mutations -------------------------------------------------------------------------------
+
+_MASK64 = (1 << 64) - 1
+INTERESTING_BYTES = (b"\x00\x09\x0a\x0b\x0c\x0d\x20\x21\x22\x26\x27\x2c\x2d\x2f\x3c\x3d\x3e\x3f"
+                     b"\x5b\x5d\x7f\x80\xa0\xc2\xe3\xef\xff")
+INSERTIONS = (b"\xc2\xa0", b"\xe3\x80\x80", b"\xc5\xbf", b"\xc4\xb1", b"\xef\xbb\xbf", b"&amp;",
+              b"&#65;", b"&#x41;", b"&bogus;", b"<!--", b"-->", b"<?x?>", b"<!DOCTYPE x>",
+              b"<![CDATA[", b"</datafile>", b"<datafile>", b"<header>", b"</header>", b"<game>",
+              b"</game>", b"<serial>", b"</serial>", b"<rom/>",
+              b'<rom sha1="0123456789abcdef0123456789abcdef01234567" crc="0badf00d" size="1"/>',
+              b"<a>", b"</a>", b",", b"ULUS-10041", b"\xf0\x9f\x98\x80", b"\xed\xa0\x80",
+              b"\xc0\xaf", b"\xf4\x90\x80\x80")
+WHITESPACE_SWAPS = (b"\x0b", b"\x0c", b"\xc2\xa0", b"\xe3\x80\x80", b"\xc2\x85", b"\xe2\x80\x8b",
+                    b"\x00", b"\x1f", b"", b"  ")
+
+
+class SplitMix64:
+    def __init__(self, seed: int) -> None:
+        self.state = seed & _MASK64
+
+    def next(self) -> int:
+        self.state = (self.state + 0x9E3779B97F4A7C15) & _MASK64
+        z = self.state
+        z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
+        z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _MASK64
+        return z ^ (z >> 31)
+
+    def below(self, bound: int) -> int:
+        return self.next() % bound
+
+
+def bundled_windows() -> tuple[bytes, list[bytes]]:
+    """The bundled zip, and eight short lists cut from its .dat: its header, eight games from
+    spread places, </datafile>."""
+    data = disc_verify.bundled_dat_path().read_bytes()
+    text = disc_verify._dat_from_zip(data)
+    header = text[:text.index(b"</header>\n") + len(b"</header>\n")]
+    starts = []
+    at = text.find(b"\t<game ")
+    while at >= 0:
+        starts.append(at)
+        at = text.find(b"\t<game ", at + 1)
+    ends = starts[1:] + [text.index(b"</datafile>")]
+    windows = []
+    for window in range(MUTATION_WINDOWS):
+        first = window * (len(starts) - MUTATION_WINDOW_GAMES) // (MUTATION_WINDOWS - 1)
+        last = first + MUTATION_WINDOW_GAMES - 1
+        windows.append(header + text[starts[first]:ends[last]] + b"</datafile>\n")
+    return data, windows
+
+
+def _mutate_text(rng: SplitMix64, base: bytes) -> bytes:
+    data = bytearray(base)
+    for _ in range(1 + rng.below(4)):
+        op = rng.below(8)
+        size = len(data)
+        if op == 2:
+            at = rng.below(size + 1)
+            data[at:at] = INSERTIONS[rng.below(len(INSERTIONS))]
+        elif size == 0:
+            continue
+        elif op == 0:
+            at = rng.below(size)
+            data[at] ^= 1 << rng.below(8)
+        elif op == 1:
+            at = rng.below(size)
+            data[at] = INTERESTING_BYTES[rng.below(len(INTERESTING_BYTES))]
+        elif op == 3:
+            at = rng.below(size)
+            del data[at:at + 1 + rng.below(16)]
+        elif op == 4:
+            at = rng.below(size)
+            span = data[at:at + 1 + rng.below(64)]
+            data[at:at] = span
+        elif op == 5:
+            del data[rng.below(size + 1):]
+        elif op == 6:
+            at = rng.below(size)
+            if 0x41 <= (data[at] & ~0x20) <= 0x5A:
+                data[at] ^= 0x20
+        else:
+            at = rng.below(size)
+            while at < size and data[at] not in b" \t\r\n":
+                at += 1
+            if at < size:
+                data[at:at + 1] = WHITESPACE_SWAPS[rng.below(len(WHITESPACE_SWAPS))]
+    return bytes(data)
+
+
+def mutation(index: int, bundled: bytes, windows: list[bytes]) -> bytes:
+    rng = SplitMix64((MUTATION_SEED << 32) | index)
+    kind = index % 16
+    if kind < 10:
+        return _mutate_text(rng, windows[rng.below(len(windows))])
+    if kind < 12:
+        data = bytearray(zip_bytes(windows[rng.below(len(windows))], 0))
+        for _ in range(1 + rng.below(3)):
+            if not data:
+                break
+            region = rng.below(3)
+            if region == 0:
+                at = rng.below(min(38, len(data)))
+            elif region == 1:
+                at = len(data) - 1 - rng.below(min(76, len(data)))
+            else:
+                at = rng.below(len(data))
+            change = rng.below(3)
+            if change == 0:
+                data[at] ^= 1 << rng.below(8)
+            elif change == 1:
+                data[at] = rng.below(256)
+            else:
+                del data[at:]
+        return bytes(data)
+    if kind < 15:
+        data = bytearray(zip_bytes(windows[rng.below(len(windows))], 8))
+        packed_size = int.from_bytes(data[18:22], "little")
+        central = 38 + packed_size
+        for _ in range(1 + rng.below(4)):
+            if rng.below(4) < 3:
+                at = 38 + rng.below(packed_size)
+                data[at] ^= 1 << rng.below(8)
+            else:
+                size = (int.from_bytes(data[22:26], "little") + rng.below(17) - 8) & 0xFFFFFFFF
+                data[22:26] = size.to_bytes(4, "little")
+                data[central + 24:central + 28] = size.to_bytes(4, "little")
+        return bytes(data)
+    data = bytearray(bundled)
+    start = 30 + int.from_bytes(data[26:28], "little") + int.from_bytes(data[28:30], "little")
+    packed_size = int.from_bytes(data[18:22], "little")
+    for _ in range(1 + rng.below(2)):
+        at = start + rng.below(packed_size)
+        data[at] ^= 1 << rng.below(8)
+    return bytes(data)
+
+
+def generate_corpus() -> str:
+    lines = [CORPUS_HEADER.rstrip("\n"), ""]
+    for name, pieces in corpus_cases():
+        lines.append(f"case {name}")
+        lines += piece_lines(pieces)
+        lines.append(f"expect {outcome(build_pieces(pieces))}")
+        lines.append("end")
+        lines.append("")
+    bundled, windows = bundled_windows()
+    lines.append(f"mutations {MUTATION_SEED:x} {MUTATION_COUNT}")
+    prefixes = [hashlib.sha1(outcome(mutation(index, bundled, windows)).encode("ascii"))
+                .hexdigest()[:8] for index in range(MUTATION_COUNT)]
+    for at in range(0, len(prefixes), 8):
+        lines.append(" ".join(prefixes[at:at + 8]))
+    lines.append("end")
+    return "\n".join(lines) + "\n"
+
+
+class ConformanceTests(unittest.TestCase):
+    """This reader against the table both readers are held to (rules 1-10; the module
+    documentation of nk_core/disc_verify.py)."""
+
+    def test_the_table_is_what_the_generator_and_this_reader_give(self) -> None:
+        expected = CORPUS.read_text(encoding="ascii").split("\n\n")
+        actual = generate_corpus().split("\n\n")
+        # Not strict: the first block that differs names the case (or the
+        # mutations) before the lengths are compared.
+        for want, got in zip(expected, actual, strict=False):
+            self.assertEqual(got, want)
+        self.assertEqual(len(actual), len(expected))
+
+    def test_the_table_covers_every_refusal(self) -> None:
+        text = CORPUS.read_text(encoding="ascii")
+        results = re.findall(r"^expect (\S+)", text, re.M)
+        self.assertGreaterEqual(len(results), 230)
+        self.assertEqual(set(results), {
+            "OK", "DISC_DAT_NOT_DATAFILE", "DISC_DAT_ENTITY_REFUSED", "DISC_DAT_EMPTY",
+            "DISC_DAT_TOO_LARGE", "DISC_DAT_ZIP_INVALID"})
+        mutations = re.search(r"^mutations (\S+) (\d+)\n(.*?)\nend$", text, re.M | re.S)
+        assert mutations is not None
+        self.assertEqual((int(mutations.group(1), 16), int(mutations.group(2))),
+                         (MUTATION_SEED, MUTATION_COUNT))
+        prefixes = mutations.group(3).split()
+        self.assertEqual(len(prefixes), MUTATION_COUNT)
+        # The mutations reach many results, not one refusal over and over.
+        self.assertGreaterEqual(len(set(prefixes)), MUTATION_COUNT // 8)
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if sys.argv[1:] == ["--write-corpus"]:
+        CORPUS.write_text(generate_corpus(), encoding="ascii", newline="\n")
+    else:
+        unittest.main()

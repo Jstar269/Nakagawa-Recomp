@@ -53,11 +53,11 @@ The **Where** column of each table names the places a code can appear:
 | --- | --- | --- |
 | `DISC_DAT_EMPTY` | disc | The Redump datafile lists no disc with a SHA-1 hash. |
 | `DISC_DAT_ENTITY_REFUSED` | disc | The Redump datafile declares entities or a DTD of its own, carries other `<!` markup a Redump list does not use (a second `<!DOCTYPE>`, a comment, CDATA), or refers to an entity XML does not predefine; it is refused unread. |
-| `DISC_DAT_NOT_DATAFILE` | disc | The file chosen as a Redump datafile has no `<datafile>` element, or is not UTF-8 text. |
+| `DISC_DAT_NOT_DATAFILE` | disc | The file chosen as a Redump datafile is not one in the format both readers accept ([COMPATIBILITY.md](COMPATIBILITY.md#what-a-list-must-look-like)): it has no complete `<datafile>` element, is not UTF-8 text, holds a control character, a malformed tag or an element out of place, or a header field or `<serial>` past its bound. The message names the rule and the byte offset. |
 | `DISC_DAT_READ_FAILED` | disc | The Redump datafile could not be read. |
-| `DISC_DAT_TOO_LARGE` | disc | The Redump datafile is larger than 16 MiB (for a zip, the `.dat` in it, by its own size field before it is inflated), or lists more than 200,000 discs. |
+| `DISC_DAT_TOO_LARGE` | disc | The Redump datafile is larger than 16 MiB (for a zip, the `.dat` in it, by its own size field before it is inflated), or has more than 40,000 discs, 480,000 tags or 80,000 disc IDs. |
 | `DISC_DAT_WRITE_FAILED` | disc | The imported Redump datafile could not be saved in the data folder. |
-| `DISC_DAT_ZIP_INVALID` | disc | A zip given as a Redump datafile does not hold exactly one entry, a `.dat` file, stored or deflated, not encrypted and not ZIP64, or fails its own checks (end record, offsets, CRC-32). |
+| `DISC_DAT_ZIP_INVALID` | disc | A zip given as a Redump datafile is not laid out as Redump's zip is (one `.dat` entry, stored or deflated, with no comment, ZIP64, data descriptor or encryption, its headers agreeing), or fails its own checks (offsets, inflating within its declared size, CRC-32). |
 | `DISC_IDENTIFY_FAILED` | library | The disc's title information could not be read, so the library could not identify the disc. The record's `identify_detail` says why. |
 | `DISC_IMAGE_BLOCK_CORRUPT` | disc, player | A compressed disc image has a block that does not decompress. |
 | `DISC_IMAGE_CHD_CD_UNSUPPORTED` | disc, player | The CHD file holds a CD image, not a PSP UMD. |
