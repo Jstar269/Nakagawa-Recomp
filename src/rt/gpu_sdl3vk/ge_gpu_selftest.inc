@@ -12199,7 +12199,7 @@ int gegpu_soft_shadow_prepare(const char *mode) {
     for (int k = 0; k < 2; k++) {
         const SshDisc *d = declared[k];
         for (int y = 0; y < d->n; y++)
-            for (int x = 0; x < d->n; x++) t[y * d->n + x] = ssh_rgba(d, ssh_index(d, x, y));
+            for (int x = 0; x < d->n; x++) t[(size_t)y * (size_t)d->n + (size_t)x] = ssh_rgba(d, ssh_index(d, x, y));
         if (!nk_tex_soft_shadow_digest(k_ssh_key, t, (uint32_t)d->n, (uint32_t)d->n, digest[k])) return 0;
         edge[k] = (uint8_t)d->edge;
     }
@@ -12218,11 +12218,11 @@ static void ssh_upload(uint32_t addr, const SshDisc *d) {
         for (int x = 0; x < d->n; x++) {
             const uint32_t level = ssh_index(d, x, y);
             if (d->fmt == 4u) {   /* CLUT4: the left texel in the low nibble */
-                uint8_t *b = &p[(y * d->bufw + x) / 2];
+                uint8_t *b = &p[((size_t)y * (size_t)d->bufw + (size_t)x) / 2u];
                 *b = (uint8_t)((x & 1) ? ((*b & 0x0Fu) | (level << 4)) : ((*b & 0xF0u) | level));
             } else {              /* 4444: alpha in the top nibble, black */
                 const uint16_t v = (uint16_t)(k_ssh_nibble[level] << 12);
-                memcpy(&p[(y * d->bufw + x) * 2], &v, 2);
+                memcpy(&p[((size_t)y * (size_t)d->bufw + (size_t)x) * 2u], &v, 2);
             }
         }
     sr_gpu_vram_dirty(addr, ssh_bytes(d));
@@ -12232,7 +12232,7 @@ static void ssh_upload(uint32_t addr, const SshDisc *d) {
 static int ssh_frame(uint32_t tex, const SshDisc *d, uint32_t *out) {
     uint32_t *fb = (uint32_t *)SR_HOST(SSH_BASE);
     coherence_reset_targets();
-    memset(fb, 0xFF, SSH_STRIDE * FB_H * 4u);
+    memset(fb, 0xFF, (size_t)SSH_STRIDE * FB_H * 4u);
     sr_gpu_vram_dirty(SSH_BASE, SSH_STRIDE * FB_H * 4u);
     wrap_state(SSH_BASE, SSH_STRIDE);
     s_ge->tex_enable = 1;
@@ -12249,7 +12249,7 @@ static int ssh_frame(uint32_t tex, const SshDisc *d, uint32_t *out) {
     s_ge->blend_mode = 2u | (3u << 4);       /* source alpha, one minus source alpha */
     for (uint32_t j = 0; j < 16u; j++) {
         const uint32_t entry = j < 4u ? k_ssh_alpha[j] << 24 : 0u;
-        memcpy(&s_ge->clutram[j * 4u], &entry, 4);
+        memcpy(&s_ge->clutram[(size_t)j * 4u], &entry, 4);
     }
     s_ge->clut_fmt = 3u | (0xFFu << 8);      /* 8888, shift 0, mask 0xFF */
     ge_state_note_external_write();
@@ -12259,7 +12259,7 @@ static int ssh_frame(uint32_t tex, const SshDisc *d, uint32_t *out) {
     wrap_vtx(&p1, (float)(SSH_X0 + d->n * SSH_ZOOM), (float)(SSH_Y0 + d->n * SSH_ZOOM), 0xFFFFFFFFu);
     p1.u = (float)d->n; p1.v = (float)d->n;
     const int ok = hook_sprite(&p0, &p1, 0) && s_cur && target_readback(s_cur);
-    if (ok) memcpy(out, fb, SSH_STRIDE * FB_H * 4u);
+    if (ok) memcpy(out, fb, (size_t)SSH_STRIDE * FB_H * 4u);
     return ok;
 }
 
@@ -12316,7 +12316,7 @@ static int ssh_row_ramp(const SshDisc *d, const uint32_t *fb, int *levels, int *
     *levels = 0;
     *jump = 0;
     for (int x = SSH_X0 + d->n * SSH_ZOOM / 2 - 1; x >= SSH_X0 - 2; x--) {
-        const int r = (int)(fb[y * (int)SSH_STRIDE + x] & 0xFFu);
+        const int r = (int)(fb[(size_t)y * SSH_STRIDE + (size_t)x] & 0xFFu);
         if (prev >= 0 && r < prev) mono = 0;
         if (prev >= 0 && r - prev > *jump) *jump = r - prev;
         if (!seen[r]++) (*levels)++;
@@ -12350,7 +12350,7 @@ static int ssh_soft_edge_check(const char *name, const char *what, const SshDisc
                     flat = j >= 0 && j < d->n && i >= 0 && i < d->n && ssh_index(d, i, j) == 3u;
             if (!flat) continue;
             interior++;
-            if ((soft[y * (int)SSH_STRIDE + x] & 0xFFFFFFu) != (stock[y * (int)SSH_STRIDE + x] & 0xFFFFFFu)) bad++;
+            if ((soft[(size_t)y * SSH_STRIDE + (size_t)x] & 0xFFFFFFu) != (stock[(size_t)y * SSH_STRIDE + (size_t)x] & 0xFFFFFFu)) bad++;
         }
     if (bad || interior == 0 || ssh_same(soft, stock)) {
         fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: %d of %d interior pixels differ from stock%s\n", name,
@@ -12433,7 +12433,7 @@ static int ssh_pack_first(const char *name, uint32_t *tmp) {
     int off = 0;
     for (int y = SSH_Y0; ok && y < SSH_Y0 + k_ssh_c.n * SSH_ZOOM; y++)
         for (int x = SSH_X0; x < SSH_X0 + k_ssh_c.n * SSH_ZOOM; x++)
-            if ((tmp[y * (int)SSH_STRIDE + x] & 0xFFFFFFu) != (SSH_PACK_COLOUR & 0xFFFFFFu)) off++;
+            if ((tmp[(size_t)y * SSH_STRIDE + (size_t)x] & 0xFFFFFFu) != (SSH_PACK_COLOUR & 0xFFFFFFu)) off++;
     const TexEnt *e = ssh_entry(SSH_TEX_P);
     if (!ok || off || !e || e->xs.soft || s_cnt_soft_hashed != hashed0 || s_cnt_repl_bound <= repl_bound0) {
         fprintf(stderr, "gpu coherence selftest [%s]: FAIL pack: a declared texture the pack lists is not drawn from "

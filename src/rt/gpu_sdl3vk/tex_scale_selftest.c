@@ -619,6 +619,9 @@ static void test_smart2d(void) {
 
 /* ---- soft shadows ------------------------------------------------------------------------ */
 
+/* Texel (x, y) of a row-major image `w` texels wide, as a size_t: widened before the product. */
+static size_t soft_at(int y, int w, int x) { return (size_t)y * (size_t)w + (size_t)x; }
+
 /* A synthetic hard-edged disc of side n (centre between the middle texels): alpha 255 inside
  * radius r0, a rim of 200 to r1, a last ring of 48 to r2 and 0 outside, radii in texels times two
  * (q = (2x - n + 1)^2 + (2y - n + 1)^2 is four times the squared distance). The levels are the
@@ -628,7 +631,7 @@ static void soft_disc(uint32_t *t, int n, int r0, int r1, int r2) {
         for (int x = 0; x < n; x++) {
             const int dx = 2 * x - n + 1, dy = 2 * y - n + 1, q = dx * dx + dy * dy;
             const uint32_t a = q < r0 * r0 ? 255u : q < r1 * r1 ? 200u : q < r2 * r2 ? 48u : 0u;
-            t[y * n + x] = (a << 24) | (0x40u << 16) | ((uint32_t)(9 * y) << 8) | (uint32_t)(19 * x);
+            t[soft_at(y, n, x)] = (a << 24) | (0x40u << 16) | ((uint32_t)(9 * y) << 8) | (uint32_t)(19 * x);
         }
 }
 
@@ -650,8 +653,8 @@ static uint32_t ref_bilinear(const uint32_t *t, int w, int h, int f, int x, int 
     int xb, wx, yb, wy;
     const int xa = ref_tap(x, f, w, &xb, &wx), ya = ref_tap(y, f, h, &yb, &wy), d = 2 * f;
     const int sh = 8 * ch;
-    const uint32_t c00 = (t[ya * w + xa] >> sh) & 0xFFu, c01 = (t[ya * w + xb] >> sh) & 0xFFu;
-    const uint32_t c10 = (t[yb * w + xa] >> sh) & 0xFFu, c11 = (t[yb * w + xb] >> sh) & 0xFFu;
+    const uint32_t c00 = (t[soft_at(ya, w, xa)] >> sh) & 0xFFu, c01 = (t[soft_at(ya, w, xb)] >> sh) & 0xFFu;
+    const uint32_t c10 = (t[soft_at(yb, w, xa)] >> sh) & 0xFFu, c11 = (t[soft_at(yb, w, xb)] >> sh) & 0xFFu;
     return (uint32_t)((d - wy) * (d - wx)) * c00 + (uint32_t)((d - wy) * wx) * c01 +
            (uint32_t)(wy * (d - wx)) * c10 + (uint32_t)(wy * wx) * c11;
 }
@@ -676,7 +679,7 @@ static int soft_row_ramp(const uint32_t *o, int ow, int row, int c0, int *levels
     *levels = 0;
     *jump = 0;
     for (int x = c0; x >= 0; x--) {
-        const int a = (int)(o[row * ow + x] >> 24);
+        const int a = (int)(o[soft_at(row, ow, x)] >> 24);
         if (a > prev) mono = 0;
         if (prev != 256 && prev - a > *jump) *jump = prev - a;
         if (!seen[a]++) (*levels)++;
@@ -726,19 +729,19 @@ static void test_soften(void) {
         CHECK(nk_tex_soften_alpha_edge(small, SN, SN, 4, 1, out) == 1, "soften: the 12x12 disc is refused");
         for (int y = 0; y < SN * 4; y++)
             for (int x = 0; x < SN * 4; x++)
-                if (out[y * SN * 4 + x] != ref_soft_texel(small, SN, SN, 4, 1, x, y) && !bad++) { bx = x; by = y; }
+                if (out[soft_at(y, SN * 4, x)] != ref_soft_texel(small, SN, SN, 4, 1, x, y) && !bad++) { bx = x; by = y; }
         CHECK(bad == 0, "soften: %d texels of the 12x12 disc differ from the reference; first (%d, %d) %08x, want %08x",
-              bad, bx, by, out[by * SN * 4 + bx], ref_soft_texel(small, SN, SN, 4, 1, bx, by));
+              bad, bx, by, out[soft_at(by, SN * 4, bx)], ref_soft_texel(small, SN, SN, 4, 1, bx, by));
         int row_ok = 1;
-        for (int x = 0; x < SN * 4; x++) row_ok &= (out[23 * SN * 4 + x] >> 24) == k_row23[x];
+        for (int x = 0; x < SN * 4; x++) row_ok &= (out[soft_at(23, SN * 4, x)] >> 24) == k_row23[x];
         if (!row_ok) {
             fprintf(stderr, "soften: row 23 alpha:");
-            for (int x = 0; x < SN * 4; x++) fprintf(stderr, "%s%u", x ? ", " : " ", out[23 * SN * 4 + x] >> 24);
+            for (int x = 0; x < SN * 4; x++) fprintf(stderr, "%s%u", x ? ", " : " ", out[soft_at(23, SN * 4, x)] >> 24);
             fputc('\n', stderr);
         }
         CHECK(row_ok, "soften: row 23 of the 12x12 disc is not the pinned row");
         printf("tex scale selftest: soft row 23 (12x12 disc, factor 4, edge 1), alpha:");
-        for (int x = 0; x < SN * 4; x++) printf("%s%u", x ? "," : " ", out[23 * SN * 4 + x] >> 24);
+        for (int x = 0; x < SN * 4; x++) printf("%s%u", x ? "," : " ", out[soft_at(23, SN * 4, x)] >> 24);
         printf("\n");
     }
 
@@ -758,16 +761,16 @@ static void test_soften(void) {
             for (int y = 0; y < oh; y++)
                 for (int x = 0; x < ow; x++) {
                     const int sx = x / (int)f, sy = y / (int)f;
-                    const uint32_t a = big[sy * BN + sx] >> 24;
+                    const uint32_t a = big[soft_at(sy, BN, sx)] >> 24;
                     int flat = 1;
                     for (int j = sy - reach; j <= sy + reach && flat; j++)
                         for (int i = sx - reach; i <= sx + reach && flat; i++) {
                             const int cj = j < 0 ? 0 : j >= BN ? BN - 1 : j, ci = i < 0 ? 0 : i >= BN ? BN - 1 : i;
-                            flat = (big[cj * BN + ci] >> 24) == a;
+                            flat = (big[soft_at(cj, BN, ci)] >> 24) == a;
                         }
                     if (!flat) continue;
                     if (a == 255u) checked_in++; else checked_out++;
-                    if ((out[y * ow + x] >> 24) != a) interior_bad++;
+                    if ((out[soft_at(y, ow, x)] >> 24) != a) interior_bad++;
                 }
             CHECK(interior_bad == 0, "soften: factor %u edge %u: %d flat texels lost their alpha", f, e, interior_bad);
             uint64_t src_mass = 0, out_mass = 0;

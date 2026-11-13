@@ -652,14 +652,15 @@ int nk_tex_soft_shadow_digest(const uint8_t key[32], const uint32_t *rgba, uint3
         return 0;
     head[0] = (uint8_t)w; head[1] = (uint8_t)(w >> 8);
     head[2] = (uint8_t)h; head[3] = (uint8_t)(h >> 8);
-    for (uint32_t i = 0; i < w * h; i++) {
+    const size_t n = (size_t)w * h;   /* at most 64 x 64: widened before any product */
+    for (size_t i = 0; i < n; i++) {
         texels[i * 4u] = (uint8_t)rgba[i];
         texels[i * 4u + 1u] = (uint8_t)(rgba[i] >> 8);
         texels[i * 4u + 2u] = (uint8_t)(rgba[i] >> 16);
         texels[i * 4u + 3u] = (uint8_t)(rgba[i] >> 24);
     }
     const uint8_t *parts[3] = { (const uint8_t *)k_domain, head, texels };
-    const size_t lens[3] = { sizeof(k_domain), sizeof(head), (size_t)w * h * 4u };
+    const size_t lens[3] = { sizeof(k_domain), sizeof(head), n * 4u };
     sr_vfpu_hmac_sha256(key, 32u, parts, lens, 3u, digest);
     return 1;
 }
@@ -668,9 +669,9 @@ size_t nk_tex_soft_candidate_line(char *out, size_t cap, uint32_t w, uint32_t h,
     static const char k_hex[] = "0123456789abcdef";
     char hex[65];
     if (!out || !digest) return 0;
-    for (int i = 0; i < 32; i++) {
-        hex[2 * i] = k_hex[digest[i] >> 4];
-        hex[2 * i + 1] = k_hex[digest[i] & 15u];
+    for (size_t i = 0; i < 32u; i++) {
+        hex[2u * i] = k_hex[digest[i] >> 4];
+        hex[2u * i + 1u] = k_hex[digest[i] & 15u];
     }
     hex[64] = '\0';
     const int n = snprintf(out, cap, "SOFT_SHADOW: candidate %ux%u digest=%s", (unsigned)w, (unsigned)h, hex);

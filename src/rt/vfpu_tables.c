@@ -125,10 +125,10 @@ static void sr_sha_final(SrSha256 *sha, uint8_t digest[32]) {
         used = 0;
     }
     memset(sha->block + used, 0, 56u - used);
-    for (unsigned i = 0; i < 8u; i++)
+    for (size_t i = 0; i < 8u; i++)
         sha->block[56u + i] = (uint8_t)(sha->bits >> (56u - 8u * i));
     sr_sha_transform(sha, sha->block);
-    for (unsigned i = 0; i < 8u; i++) {
+    for (size_t i = 0; i < 8u; i++) {
         digest[i * 4u] = (uint8_t)(sha->h[i] >> 24);
         digest[i * 4u + 1u] = (uint8_t)(sha->h[i] >> 16);
         digest[i * 4u + 2u] = (uint8_t)(sha->h[i] >> 8);
