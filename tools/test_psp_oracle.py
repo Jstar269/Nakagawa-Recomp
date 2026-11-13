@@ -12776,7 +12776,8 @@ class GeRasterBoundsProbeTests(_GeNewCaseMixin, unittest.TestCase):
         self._check_stream("SKIP")
 
     def test_8888_colour_counts_compare_rgb_only(self) -> None:
-        # Measured on the PSP-3000 (2026-11-12, ge-depth-round): a draw with the stencil test off
+        # Seen on a development run of ge-depth-round (PSP-3000, XMB context, 2026-11-12 boot 195, built from 24acc82e; not a
+        # recorded result): a draw with the stencil test off
         # leaves the 8888 alpha (stencil) byte as it was, so a drawn pixel reads 0x5a00ff00 over
         # the fill, never 0xff00ff00. The counts compare RGB for 8888 colour, all bits otherwise.
         self.assertIn("const uint32_t m = r->buf == GRB_BUF_C && c->psm == 3u ? 0x00ffffffu : 0xffffffffu;",
@@ -12916,7 +12917,8 @@ class GeDepthRoundProbeTests(_GeNewCaseMixin, unittest.TestCase):
                                              rf" +0x{expected[2]:02x}\n")
 
     def test_pass_and_kept_compare_rgb_only(self) -> None:
-        # Measured on the PSP-3000 (2026-11-12, boot 195): every pixel that passed showed the
+        # Seen on a development run (PSP-3000, XMB context, 2026-11-12 boot 195, built from 24acc82e; not a recorded
+        # result): every pixel that passed showed the
         # source RGB with the destination's alpha (stencil) byte, so a 32-bit compare gave a zero
         # mask in all three cells.
         self.assertIn("if (((p ^ gdr_rgba(1u, i)) & 0x00ffffffu) == 0u) {", self.section)

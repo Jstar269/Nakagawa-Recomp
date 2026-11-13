@@ -3663,13 +3663,15 @@ static int hle_run(void)
  * cleared value (colour 0xff0000ff and 0x001f, which only a clear that wrote colour leaves;
  * depth 0x4000), to the fill (0x5a5a5a5a, or 0x5a5a at 16 bits) and to anything else (8888
  * colour compares the RGB bytes only: its alpha byte is the stencil byte, which a draw with
- * the stencil test off leaves as it was, as ge-depth-round measured on 2026-11-12); the
+ * the stencil test off leaves as it was, as a development run of ge-depth-round showed: PSP-3000,
+ * XMB context, 2026-11-12 boot 195, built from 24acc82e, not a recorded result); the
  * first other value and its index in the read (0 and 0xffffffff when none); and the read's
  * first pixel. A raw read holds the 16 pixels from (row0, col0), zero-extended. After the last
  * cell, `vram-restore` (2 words: the words written back and how many do not read back as
  * saved). */
 
-/* 0x110000, not the 0x100000 the other GE cases use: on 2026-11-12 the XMB's display buffer was
+/* 0x110000, not the 0x100000 the other GE cases use: on a development run (PSP-3000, XMB context,
+ * 2026-11-12 boot 194, the block still at 0x100000) the XMB's display buffer was
  * at VRAM 0x88000 (512 wide, 8888, 0x88000 bytes, to 0x10ffff), which overlapped a block at
  * 0x100000, so display-check skipped every cell. This block clears both XMB buffers (0x0 and
  * 0x88000) and ends at 0x197fff, inside the 2 MiB of VRAM. */
@@ -4143,9 +4145,10 @@ static int hle_run(void)
  *               centre 32768, and vertex z (((i >> 2) & 1) + frac) / 16384, exact in float. EQUAL.
  *
  * The pass mask (bit i set when pixel i shows its source colour's RGB; the alpha byte is the
- * stencil byte, which the test draw leaves as the destination's: measured on the PSP-3000 on
- * 2026-11-12, where comparing all 32 bits gave a zero mask) repeats one byte, bit k for
- * i % 8 = k:
+ * stencil byte, which the test draw leaves as the destination's: a development run showed it,
+ * PSP-3000, XMB context, 2026-11-12 boot 195, built from 24acc82e, where comparing all 32 bits
+ * gave a zero mask; not a recorded result) repeats one byte, bit k for i % 8 = k. What each
+ * model would give (a reading key, not a prediction of the PSP's result):
  *               truncate   round half up   round half to even
  *   zr-thru-eq    0x1f         0x63              0x67
  *   zr-thru-gt    0xe0         0xe3              0x80
