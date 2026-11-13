@@ -138,6 +138,21 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   render target and depth buffer at the render scale, so it costs extra GPU work and memory; the frames the game can
   read back do not change. The rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1011-full-32-bit-colour-the-host-twin).
+- **Smooth far textures.** A part of Enhanced and Ace, off by default and in no graphics preset: Settings >
+  Enhanced offers it as **Smooth far textures** (On or Off), for the library or for one game, and the launch
+  line carries it as `mips=on`. It is not on by choosing Enhanced or Ace, because it changes the frames the game can
+  read back ([section 11.3.8](ENHANCEMENT_CONTRACT.md#1138-smooth-far-textures-mips)). A texture the game gives
+  only one level gets smaller copies of itself, which a far 3D surface samples at a high render scale. That
+  reduces shimmer on such surfaces, but by little when texture filtering is on: on LittleBigPlanet's first level
+  at 4x, distant shimmer fell by 0.1 % with 16x filtering and by 2.2 % without it. The copies are built on the
+  game's own thread at the first draw that shows the texture small, so a scene that brings in many new textures
+  can stutter; each frame builds about two 256x256 textures' worth, plus at most one more that started under that limit (the rest draw unsmoothed until a later frame), and textures that
+  change every frame, such as movies, keep their one level while they change. The copies add up to a third of
+  the texture's GPU memory. Through-mode menus and text, alpha-tested cut-outs, textures drawn at their own size
+  or larger, and
+  textures the game already shrinks itself are drawn as before. A run's log ends with a `HOST_MIPS: exit` line
+  that counts the textures and the build time. The rules are in
+  [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1016-smooth-far-textures-host-mip-chains).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release

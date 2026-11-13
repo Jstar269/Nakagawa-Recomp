@@ -1164,6 +1164,7 @@ void sr_hle_loadexec_reset_guest_state(void) {
     }
     s_atrac_caps_configured = 0;
     memset(s_atrac_slot_codec, 0, sizeof(s_atrac_slot_codec));
+    hle_atrac_context_reset();        /* the ATRAC context table's block went with the partition */
     hle_audio_guest_reset();
     hle_sas_guest_reset();
     hle_videocodec_guest_reset();     /* sceVideocodec, sceAudiocodec and the ME RAM model */

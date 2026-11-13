@@ -82,6 +82,8 @@ _RUNS_BEFORE_PROCESS_TEST = (
     # translation from tools/code_capture.py, the binding that takes the call (#1933).
     "build/mygame/code_capture_selftest_capture build/mygame/code-capture-selftest",
     "build/mygame/code_capture_selftest_bound build/mygame/code-capture-selftest",
+    # tex-mips-selftest: the host mip chain builder on synthetic textures, no GPU (#1273).
+    "build/mygame/tex_mips_selftest",
     # glyph-recon-selftest: sharp game text's CPU side on synthetic glyphs, no GPU (#2110).
     "build/mygame/glyph_recon_selftest",
     # pipeline-cache-selftest: the Vulkan pipeline cache file's checks, no GPU (#2149).
