@@ -43,6 +43,10 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
                            "the game's timing."},
     {"Full 32-bit colour", "Off", "Shows 16-bit games in full colour, without dither. Uses more memory."},
     {"Supersampling", "Off", "Smooths jagged edges. 2x takes 4 times the GPU work, 4x 16 times."},
+    {"Smooth far textures", "Off", "Slightly less shimmer on far textures. Uses CPU; may stutter "
+                                    "on new textures."},
+    {"Texture pack", "Off",
+     "Draws the texture pack chosen on a game's page. The game receives changed pictures."},
 };
 typedef char player_enhanced_fixture_matches_parts[
     sizeof(k_enhanced_parts) / sizeof(k_enhanced_parts[0]) == PLAYER_PART_COUNT ? 1 : -1];

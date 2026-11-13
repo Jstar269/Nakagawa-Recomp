@@ -247,6 +247,8 @@ static void display_present_active(void) {
     }
     /* A recording counts the guest's own flips beside the picture (videorec.h). */
     sr_videorec_guest_flip();
+    /* So do the host mip chain's windows, before the presenter's slot rule drops any. */
+    gegpu_note_guest_flip();
     display_present_frame();
     sr_capture_cancel();
     uint32_t brightest;
@@ -397,6 +399,8 @@ static char s_fbcap_armed[128];  /* path armed for the CURRENT frame's present (
 static char s_fbcap_legacy[64];  /* legacy snap_*.ppm path for the same frame ("" = none) */
 uint32_t s_vramdump_vblanks[SR_VRAMDUMP_MAX_VBLANKS];
 unsigned s_vramdump_count;
+_Static_assert(SR_VRAMDUMP_MAX_VBLANKS <= GE_VRAM_CAPTURE_MAX,
+               "the VRAM viewer's Capture row can offer every SR_VRAMDUMP capture");
 unsigned s_vramdump_done;
 static char s_vramdump_dir[768];
 

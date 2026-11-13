@@ -151,7 +151,8 @@ Testing is the most useful help right now: try a game you own and
 [report how far it gets](https://github.com/Jstar269/Nakagawa-Recomp/discussions/categories/compatibility-reports).
 Bugs go in [issues](https://github.com/Jstar269/Nakagawa-Recomp/issues), and
 [good first issues](https://github.com/Jstar269/Nakagawa-Recomp/labels/good%20first%20issue) are a place to start
-on code. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the rules and the checks to run.
+on code. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the rules and the checks to run. To carry the project on in a
+fork of your own, start with [`docs/FORKING.md`](docs/FORKING.md).
 
 [All documentation](docs/README.md) · [Accessibility](ACCESSIBILITY.md) · [Getting help](SUPPORT.md) ·
 [Security](SECURITY.md) · [Code of conduct](CODE_OF_CONDUCT.md) · [AI use](docs/AI_USAGE.md)

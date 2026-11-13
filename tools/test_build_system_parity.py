@@ -70,6 +70,22 @@ class BuildSystemParityTests(unittest.TestCase):
             self.assertIn(src, self.makefile_text, f"Missing {src} in Makefile")
             self.assertIn(src, self.cmake_text, f"Missing {src} in CMakeLists.txt")
 
+    def test_player_core_sources_are_one_set(self) -> None:
+        """The player's core library is one list in both systems: make's PLAYER_CORE_SOURCES and
+        CMake's CORE_SOURCES name the same files. A file the runtime also builds (such as the
+        texture pack reader, #1880) appears elsewhere in both texts, so only the lists themselves
+        say whether the player links it."""
+        make = re.search(r"^PLAYER_CORE_SOURCES\s*:=\s*(.+)$", self.makefile_text, re.MULTILINE)
+        cmake = re.search(r"^set\(CORE_SOURCES\s+(.*?)\)", self.cmake_text, re.MULTILINE | re.DOTALL)
+        if make is None:
+            self.fail("PLAYER_CORE_SOURCES not found in the Makefile text")
+        if cmake is None:
+            self.fail("set(CORE_SOURCES ...) not found in CMakeLists.txt")
+        make_set = set(make.group(1).split())
+        cmake_set = set(cmake.group(1).split())
+        self.assertEqual(make_set, cmake_set, "the player's core sources differ between make and CMake")
+        self.assertIn("src/rt/texrepl.c", make_set, "the player does not link the texture pack reader")
+
     def test_include_paths_parity(self) -> None:
         """Verify include search paths are declared in both build systems."""
         expected_includes = [
