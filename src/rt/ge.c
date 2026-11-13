@@ -5331,8 +5331,8 @@ unsigned long ge_wide_cull_untracked(void) { return s_cull_untracked; }
  *
  * An entry decides a call only while guest memory at its address still holds the words it records:
  * once the title has written anything else there, a call at that address scales what it finds,
- * with or without the entry. So when a new address would take the table to GE_CULL_SWEEP_AT
- * entries or more, the entries whose words are gone are dropped and the rest re-inserted in slot
+ * with or without the entry. So when a new address would take the table past GE_CULL_SWEEP_AT
+ * entries, the entries whose words are gone are dropped and the rest re-inserted in slot
  * order (deterministic). That changes the outcome of no call unless the title later puts those very
  * bits back at that address (package obligation (1) of contract 11.3.6 rules out restoring a
  * widened copy). A title that builds its matrices in per-frame scratch memory, at addresses that
@@ -5342,8 +5342,9 @@ unsigned long ge_wide_cull_untracked(void) { return s_cull_untracked; }
  * Only matrices whose widened words are all still in guest memory hold an entry. If more than
  * GE_CULL_SEEN of those exist at once, a new matrix is left alone (said once, and counted in
  * s_cull_untracked for the run report), never scaled untracked. A sweep runs at most once per
- * hook call, which bounds its cost while the table stays full: the guest runs between two calls,
- * and a second sweep within one call could find only entries the call's own writes overwrote. */
+ * hook call, which bounds its cost to one scan per call while the table stays full (per call, not
+ * per frame: a site the title reaches many times a frame pays for each). The guest runs between two
+ * calls; a second sweep within one call could find only entries the call's own writes overwrote. */
 typedef struct { uint32_t addr; uint32_t row[4]; } GeCullSeen;
 static GeCullSeen s_cull_seen[GE_CULL_SEEN];
 static uint32_t s_cull_live;   /* entries in use */

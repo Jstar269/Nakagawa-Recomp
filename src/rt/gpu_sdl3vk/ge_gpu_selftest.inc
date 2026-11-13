@@ -7326,7 +7326,10 @@ static int wide_clip_x_moving_check(int wing) {
         }
         for (uint32_t j = 0; ok && j < MOVE_RECORDS; j++) {
             cur -= 16u * ((f + 3u * j) % 8u) + MOVE_RECORD_BYTES;
-            if (!seen[(cur - (base + first)) / 16u]++) distinct++;
+            if (!seen[(cur - (base + first)) / 16u]) {
+                seen[(cur - (base + first)) / 16u] = 1;
+                distinct++;
+            }
             for (uint32_t b = 0; b < MOVE_RECORD_BYTES; b += 4u) {
                 const float v = 1.0f + (float)(b / 4u % 16u) + 0.25f * (float)(f % 97u) + (float)j;
                 memcpy(SR_HOST(cur + b), &v, sizeof v);
