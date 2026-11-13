@@ -18,7 +18,8 @@
 // savedata modes on a missing save, a directory without PARAM.SFO and a probe-made save), plus hle-utility-none (PSP-HLE-UTILITY-NONE-001), which
 // imports no InitStart call, and hle-utility-dialogs (PSP-HLE-UTILITY-DIALOG-001), which opens
 // the savedata, gamedata install, netconf and game sharing dialogs in game context and never
-// answers them, and hle-nickname-limit (PSP-HLE-NICKNAME-001, case 164), which reads the owner_name
+// answers them (cases 189-191 open one of them each and wait for a person to dismiss it), and
+// hle-nickname-limit (PSP-HLE-NICKNAME-001, case 164), which reads the owner_name
 // key's type and size and the system-parameter string's length refusals and records no value bytes.
 // Cases 97-101 have recorded PSP-3000 runs from
 // 2026-10-15: the VTimer and power cases were measured; pool-bounds was captured
@@ -91,6 +92,9 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_SELF_STOP 167
 #define HLE_CASE_UTILITY_DIALOGS 161
 #define HLE_CASE_UTILITY_NETCONF_SHARING 166
+#define HLE_CASE_UTILITY_ATTENDED_NETCONF 189
+#define HLE_CASE_UTILITY_ATTENDED_SHARING 190
+#define HLE_CASE_UTILITY_ATTENDED_GAMEDATA 191
 #define HLE_CASE_IO_SEEK 162
 #define HLE_CASE_IO_SEEK_EDGES 186
 #define HLE_CASE_NICKNAME_LIMIT 164
@@ -183,6 +187,18 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "hle-utility-netconf-sharing"
 #define HLE_TEST_ID "PSP-HLE-UTILITY-DIALOG-002"
 #define HLE_LOG "host0:/hle_utility_netconf_sharing_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_NETCONF
+#define HLE_CAMPAIGN_ID "hle-utility-attended-netconf"
+#define HLE_TEST_ID "PSP-HLE-UTILITY-DIALOG-003"
+#define HLE_LOG "host0:/hle_utility_attended_netconf_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_SHARING
+#define HLE_CAMPAIGN_ID "hle-utility-attended-sharing"
+#define HLE_TEST_ID "PSP-HLE-UTILITY-DIALOG-004"
+#define HLE_LOG "host0:/hle_utility_attended_sharing_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_GAMEDATA
+#define HLE_CAMPAIGN_ID "hle-utility-attended-gamedata"
+#define HLE_TEST_ID "PSP-HLE-UTILITY-DIALOG-005"
+#define HLE_LOG "host0:/hle_utility_attended_gamedata_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_IO_SEEK
 #define HLE_CAMPAIGN_ID "hle-io-seek"
 #define HLE_TEST_ID "PSP-HLE-IO-SEEK-001"
@@ -3435,7 +3451,7 @@ static int hle_run(void)
 #endif /* HLE_CASE_AUDIO_REST */
 
 /* ------------------------------------------------------------------------- */
-#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING || PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_NETCONF || PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_SHARING || PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_GAMEDATA
 
 /* #1386 (W-HLE-1): utility dialog status timing after an InitStart, the wrong-state answers of
    netconf, the gamedata install dialog and game sharing, and the common result word a cancel
@@ -3590,7 +3606,45 @@ static int hle_run(void)
      the Term calls and unloads in reverse order (ApctlTerm, InetTerm, NetTerm, unload INET,
      unload COMMON; AdhocctlTerm, AdhocTerm, NetTerm, unload ADHOC, unload COMMON), each made
      only when its setup call succeeded (HLE_SENTINEL otherwise). They run on every path that
-     ran a setup, a stuck dialog's included, in case 161 and in case 166. */
+     ran a setup, a stuck dialog's included, in case 161 and in case 166.
+
+   ATTENDED cases 189-191 (hle-utility-attended-netconf, -sharing, -gamedata;
+   PSP-HLE-UTILITY-DIALOG-003 to -005) compile this section for one dialog type each, with the
+   same blocks, net setup and teardown, gamedata precheck and cleanup, record helpers and poll
+   as above, and none of the wrong-state cells, the timing runs' cancel bounds or the message
+   dialog call. They exist because no unattended run can reach FINISHED: on boots 204, 206 and
+   211 a dialog on screen waited for a button nobody pressed, stayed RUNNING to the 600-poll cap
+   (a ShutdownStart while RUNNING returned 0x80110001), and the console then needed a power
+   cycle. In an attended run a person at the console dismisses the dialog by hand (its Back or
+   Cancel button, Circle or Cross as the dialog shows), so the sequence can run on to FINISHED,
+   ShutdownStart is made in that state, and the dialog goes back to NONE. The probe still
+   presses nothing. One launch per boot, one dialog type per launch, in the game context.
+   - <t>-attended (24 words, the timing record's layout and meanings above; result InitStart's
+     return): InitStart, then a poll every vblank for at most HLE_UD_ATTEND_POLLS polls (about
+     90 s, the attended window), Update(1) on every RUNNING poll except the probe poll below,
+     the one ShutdownStart at FINISHED, and nothing else, until the status is NONE again. A run
+     still not at NONE when the window ends is recorded as stuck (outcome 1), makes COMPLETE
+     report FAIL, and gets one more ShutdownStart in the status it is stuck in, as case 166's
+     stuck dialog got; that boot then needs a power cycle.
+   - <t>-attended-shutdown (20 words; result the run's ShutdownStart calls): the first
+     ShutdownStart made in each status, NONE, INIT, RUNNING, FINISHED, SHUTDOWN in that order,
+     four words each: its return, its vblank, GetStatus just before it and GetStatus just after
+     it (all four HLE_SENTINEL when none was made in that status). The probe makes one in
+     RUNNING on the HLE_UD_ATTEND_RUN_PROBE-th RUNNING poll (it answered 0x80110001 on boots 204,
+     206 and 211), the FINISHED one, one on the first SHUTDOWN poll, one on the poll that finds
+     NONE again, and one in INIT only when the window ends there. A step marker precedes each,
+     and a status that moves on while the marker is written shows in the before word.
+   Records, in order: netconf-setup, netconf-attended, netconf-attended-shutdown,
+   netconf-teardown (189); the same for sharing (190); gamedata-precheck, gamedata-attended,
+   gamedata-attended-shutdown, gamedata-cleanup (191). Setup, teardown, precheck and cleanup are
+   the records above, unchanged. */
+
+/* The parts each case compiles: the unattended cases 161 and 166 as before; each attended case
+   only its own dialog type and none of the wrong-state cells. */
+#define HLE_UD_ATTENDED (PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_NETCONF || PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_SHARING || PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_GAMEDATA)
+#define HLE_UD_WITH_NETCONF (!HLE_UD_ATTENDED || PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_NETCONF)
+#define HLE_UD_WITH_SHARING (!HLE_UD_ATTENDED || PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_SHARING)
+#define HLE_UD_WITH_GAMEDATA (PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_GAMEDATA)
 
 #include <pspumd.h>
 #include <pspnet.h>
@@ -3669,7 +3723,7 @@ int nkUtilNetconfInitStart(void *param);
 int nkUtilNetconfGetStatus(void);
 int nkUtilNetconfUpdate(int speed);
 int nkUtilNetconfShutdownStart(void);
-#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
+#if HLE_UD_WITH_GAMEDATA
 int nkUtilGamedataInstallInitStart(void *param);
 int nkUtilGamedataInstallGetStatus(void);
 int nkUtilGamedataInstallUpdate(int speed);
@@ -3717,16 +3771,22 @@ typedef struct HleUdRun {
 static uint8_t s_ud_sd[HLE_UD_SD_BYTES] __attribute__((aligned(64)));
 static uint32_t s_ud_sd_size_info[HLE_UD_SD_SIZE_INFO_WORDS] __attribute__((aligned(64)));
 #endif
+#if HLE_UD_WITH_NETCONF
 static uint8_t s_ud_nc[2][HLE_UD_NC_BYTES] __attribute__((aligned(64)));
 static uint8_t s_ud_nc_adhoc[16] __attribute__((aligned(64)));
-#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
+#endif
+#if HLE_UD_WITH_GAMEDATA
 static uint8_t s_ud_gd[2][HLE_UD_GD_BYTES] __attribute__((aligned(64)));
 #endif
+#if HLE_UD_WITH_SHARING
 static uint8_t s_ud_gs[2][HLE_UD_GS_BYTES] __attribute__((aligned(64)));
 static uint8_t s_ud_gs_data[HLE_UD_GS_DATA_BYTES] __attribute__((aligned(64)));
-static uint8_t s_ud_msg[HLE_UD_MSG_BYTES] __attribute__((aligned(64)));
 static struct productStruct s_ud_product;
-#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
+#endif
+#if !HLE_UD_ATTENDED
+static uint8_t s_ud_msg[HLE_UD_MSG_BYTES] __attribute__((aligned(64)));
+#endif
+#if HLE_UD_WITH_GAMEDATA
 static SceIoDirent s_ud_dirent;
 static char s_ud_names[HLE_UD_CLEAN_FILES][HLE_UD_NAME_BYTES];
 static char s_ud_path[sizeof(HLE_UD_GD_DIR) + 1u + HLE_UD_NAME_BYTES];
@@ -3748,11 +3808,13 @@ static uint32_t hle_ud_get32(const uint8_t *block, uint32_t offset)
     return value;
 }
 
+#if HLE_UD_WITH_SHARING || HLE_UD_WITH_GAMEDATA
 /* A NUL-terminated text into a zeroed field; every text here is shorter than its field. */
 static void hle_ud_put_text(uint8_t *block, uint32_t offset, const char *text)
 {
     memcpy(block + offset, text, strlen(text) + 1u);
 }
+#endif
 
 /* The common header (pspUtilityDialogCommon), filled as case 104 fills it. */
 static void hle_ud_common(uint8_t *block, uint32_t bytes)
@@ -3784,6 +3846,7 @@ static void hle_ud_fill_savedata(uint8_t *block)
 }
 
 #endif
+#if HLE_UD_WITH_NETCONF
 /* Netconf action 0 (connect to an access point), no ad hoc group, hotspot 0, wifisp 0. */
 static void hle_ud_fill_netconf(uint8_t *block)
 {
@@ -3795,8 +3858,9 @@ static void hle_ud_fill_netconf(uint8_t *block)
     hle_ud_put32(block, 0x3cu, 0u);           /* hotspot_connected: an output */
     hle_ud_put32(block, 0x40u, 0u);           /* wifisp: off */
 }
+#endif
 
-#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
+#if HLE_UD_WITH_GAMEDATA
 /* The gamedata install block, mode 0 (no prompt), into the probe-owned directory. */
 static void hle_ud_fill_gamedata(uint8_t *block)
 {
@@ -3814,6 +3878,7 @@ static void hle_ud_fill_gamedata(uint8_t *block)
 }
 
 #endif
+#if HLE_UD_WITH_SHARING
 /* Game sharing, single send, the probe's pattern bytes in memory. */
 static void hle_ud_fill_sharing(uint8_t *block)
 {
@@ -3828,26 +3893,33 @@ static void hle_ud_fill_sharing(uint8_t *block)
     hle_ud_put32(block, 0x5cu, (uint32_t)(uintptr_t)s_ud_gs_data);
     hle_ud_put32(block, 0x60u, HLE_UD_GS_DATA_BYTES);
 }
+#endif
 
 #if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 static const HleUdType k_ud_savedata = {
     "savedata", nkUtilSavedataInitStart, nkUtilSavedataGetStatus, nkUtilSavedataUpdate,
     nkUtilSavedataShutdownStart, hle_ud_fill_savedata, s_ud_sd, s_ud_sd, 0x34u,
 };
+#endif
+#if HLE_UD_WITH_GAMEDATA
 static const HleUdType k_ud_gamedata = {
     "gamedata", nkUtilGamedataInstallInitStart, nkUtilGamedataInstallGetStatus,
     nkUtilGamedataInstallUpdate, nkUtilGamedataInstallShutdownStart, hle_ud_fill_gamedata,
     s_ud_gd[0], s_ud_gd[1], 0x55cu,
 };
 #endif
+#if HLE_UD_WITH_NETCONF
 static const HleUdType k_ud_netconf = {
     "netconf", nkUtilNetconfInitStart, nkUtilNetconfGetStatus, nkUtilNetconfUpdate,
     nkUtilNetconfShutdownStart, hle_ud_fill_netconf, s_ud_nc[0], s_ud_nc[1], 0x3cu,
 };
+#endif
+#if HLE_UD_WITH_SHARING
 static const HleUdType k_ud_sharing = {
     "sharing", nkUtilGameSharingInitStart, nkUtilGameSharingGetStatus, nkUtilGameSharingUpdate,
     nkUtilGameSharingShutdownStart, hle_ud_fill_sharing, s_ud_gs[0], s_ud_gs[1], 0x4cu,
 };
+#endif
 
 static void hle_ud_skip(const char *case_id, uint32_t reason, uint32_t count)
 {
@@ -3903,6 +3975,7 @@ static int hle_ud_poll(HleUdRun *r)
     return status;
 }
 
+#if !HLE_UD_ATTENDED
 /* A ShutdownStart from a poll loop: its marker, then the vblank, then the call. */
 static void hle_ud_shutdown(HleUdRun *r, int status)
 {
@@ -3999,6 +4072,7 @@ static int hle_ud_reach(HleUdRun *r, int want)
     }
     return status;
 }
+#endif
 
 static uint32_t hle_ud_stuck_reason(uint32_t reason)
 {
@@ -4013,6 +4087,7 @@ static void hle_ud_settle(const HleUdRun *r)
     }
 }
 
+#if !HLE_UD_ATTENDED
 /* Item 1 and 3: one dialog from InitStart back to NONE, with each status change's vblank. */
 static void hle_ud_timing(const char *case_id, const HleUdType *t, uint32_t reason)
 {
@@ -4145,8 +4220,150 @@ static void hle_ud_states(const char *init_id, const char *running_id, const cha
     hle_ud_state(finished_id, t, HLE_UD_STATUS_FINISHED, reason);
     hle_ud_state(shutdown_id, t, HLE_UD_STATUS_SHUTDOWN, reason);
 }
+#endif
 
-#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
+#if HLE_UD_ATTENDED
+#define HLE_UD_ATTEND_POLLS 5400u    /* the attended window: about 90 s of vblanks */
+#define HLE_UD_ATTEND_RUN_PROBE 30u  /* the RUNNING poll that gets the RUNNING ShutdownStart */
+#define HLE_UD_ATTEND_SLOTS 5u       /* one per status, NONE to SHUTDOWN */
+#define HLE_UD_ATTEND_SLOT_WORDS 4u
+#define HLE_UD_ATTEND_SD_WORDS 20u
+_Static_assert(HLE_UD_ATTEND_SLOTS * HLE_UD_ATTEND_SLOT_WORDS == HLE_UD_ATTEND_SD_WORDS,
+               "an attended shutdown record is four words for each status");
+_Static_assert(HLE_UD_ATTEND_SD_WORDS <= HLE_MAX_WORDS, "an attended shutdown record fits");
+
+/* The first ShutdownStart made in each status (slot = status code): return, vblank, GetStatus
+   just before and just after, HLE_SENTINEL until one is made. */
+static uint32_t s_ud_probe[HLE_UD_ATTEND_SD_WORDS];
+static int s_ud_probe_made[HLE_UD_ATTEND_SLOTS];
+
+/* An attended ShutdownStart: its marker, then the vblank, GetStatus, the call and GetStatus. */
+static void hle_ud_attend_shutdown(HleUdRun *r, int status)
+{
+    hle_ud_step(r->t, "shutdown");
+    const uint32_t at = sceDisplayGetVcount() - r->v0;
+    const int before = r->t->get_status();
+    const int rc = r->t->shutdown();
+    const int after = r->t->get_status();
+    if (r->sd_calls == 0u) {
+        r->sd_rc = (uint32_t)rc;
+        r->sd_at = at;
+        r->sd_status = (uint32_t)status;
+    }
+    r->sd_calls++;
+    if (rc >= 0 && status != HLE_UD_STATUS_NONE) {
+        r->accepted = 1;
+    }
+    const uint32_t slot = hle_ud_code(status);
+    if (slot < HLE_UD_ATTEND_SLOTS && !s_ud_probe_made[slot]) {
+        s_ud_probe_made[slot] = 1;
+        s_ud_probe[slot * HLE_UD_ATTEND_SLOT_WORDS] = (uint32_t)rc;
+        s_ud_probe[slot * HLE_UD_ATTEND_SLOT_WORDS + 1u] = at;
+        s_ud_probe[slot * HLE_UD_ATTEND_SLOT_WORDS + 2u] = (uint32_t)before;
+        s_ud_probe[slot * HLE_UD_ATTEND_SLOT_WORDS + 3u] = (uint32_t)after;
+    }
+}
+
+/* The attended drive: a poll every vblank for at most HLE_UD_ATTEND_POLLS polls until the dialog
+   is back at NONE. Update(1) while RUNNING; ShutdownStart once in RUNNING (the probe poll), at
+   FINISHED, on the first SHUTDOWN poll and at NONE again. Nothing cancels a RUNNING dialog
+   early: only the person at the console ends it. */
+static void hle_ud_attend_drive(HleUdRun *r)
+{
+    uint32_t running = 0;
+    uint32_t idle = 0;
+    int shutdown_probed = 0;
+    r->outcome = HLE_UD_OUT_STUCK;
+    for (uint32_t i = 0; i < HLE_UD_ATTEND_POLLS; i++) {
+        const int status = hle_ud_poll(r);
+        if (status < 0) {
+            r->outcome = HLE_UD_OUT_STATUS_ERROR;
+            return;
+        }
+        if (status == HLE_UD_STATUS_NONE) {
+            idle++;
+            if (r->accepted || r->active || idle >= HLE_UD_CANCEL_POLLS) {
+                r->outcome = r->accepted ? HLE_UD_OUT_NONE : HLE_UD_OUT_SELF_NONE;
+                hle_ud_attend_shutdown(r, status);
+                return;
+            }
+        } else if (status == HLE_UD_STATUS_RUNNING) {
+            running++;
+            if (running == HLE_UD_ATTEND_RUN_PROBE && !r->accepted) {
+                hle_ud_attend_shutdown(r, status);
+            } else {
+                (void)r->t->update(1);
+                r->updates++;
+            }
+        } else if (status == HLE_UD_STATUS_FINISHED) {
+            if (!r->accepted && !r->finish_called) {
+                r->finish_called = 1;
+                hle_ud_attend_shutdown(r, status);
+            }
+        } else if (status == HLE_UD_STATUS_SHUTDOWN) {
+            if (!shutdown_probed) {
+                shutdown_probed = 1;
+                hle_ud_attend_shutdown(r, status);
+            }
+        }
+        (void)sceDisplayWaitVblankStart();
+    }
+    /* The window ended with the dialog still up: one more ShutdownStart in the status it is
+       stuck in, as case 166's stuck dialog got, and the run is recorded as stuck. */
+    hle_ud_attend_shutdown(r, r->last);
+}
+
+/* One attended run of a dialog type: InitStart, the attended drive, the timing-layout record,
+   then the per-status ShutdownStart record. */
+static void hle_ud_attended(const char *case_id, const char *shutdown_id, const HleUdType *t,
+                            uint32_t reason)
+{
+    reason = hle_ud_stuck_reason(reason);
+    if (reason) {
+        hle_ud_skip(case_id, reason, HLE_UD_TIMING_WORDS);
+        hle_ud_skip(shutdown_id, reason, HLE_UD_ATTEND_SD_WORDS);
+        return;
+    }
+    HleUdRun r;
+    uint32_t out[HLE_UD_TIMING_WORDS];
+    for (uint32_t i = 0; i < HLE_UD_ATTEND_SD_WORDS; i++) {
+        s_ud_probe[i] = HLE_SENTINEL;
+    }
+    memset(s_ud_probe_made, 0, sizeof(s_ud_probe_made));
+    hle_ud_begin(&r, t);
+    t->fill(t->first);
+    hle_step(case_id);
+    r.v0 = sceDisplayGetVcount();
+    r.init_rc = t->init(t->first);
+    if (r.init_rc < 0) {
+        (void)hle_ud_poll(&r);
+        r.outcome = HLE_UD_OUT_REFUSED;
+    } else {
+        hle_ud_attend_drive(&r);
+    }
+    hle_ud_settle(&r);
+    out[0] = (uint32_t)r.init_rc;
+    out[1] = r.outcome;
+    out[2] = r.polls;
+    out[3] = r.updates;
+    out[4] = r.sd_rc;
+    out[5] = r.sd_at;
+    out[6] = r.sd_status;
+    out[7] = r.sd_calls;
+    out[8] = hle_ud_get32(t->first, 0x1cu);
+    out[9] = hle_ud_get32(t->first, t->output_offset);
+    out[10] = (uint32_t)r.last;
+    out[11] = r.end_at;
+    out[12] = r.changes;
+    for (uint32_t i = 0; i < HLE_UD_CHANGE_SLOTS; i++) {
+        out[HLE_UD_TIMING_HEAD + i] = r.change[i];
+    }
+    hle_record(case_id, "PASS", (uint32_t)r.init_rc, out, HLE_UD_TIMING_WORDS);
+    hle_record(shutdown_id, "PASS", r.sd_calls, s_ud_probe, HLE_UD_ATTEND_SD_WORDS);
+}
+#endif
+
+#if HLE_UD_WITH_GAMEDATA
 /* The gamedata cells run only with no disc in the drive and no directory of that name. */
 static uint32_t hle_ud_gamedata_precheck(void)
 {
@@ -4269,6 +4486,7 @@ static void hle_ud_gamedata_cleanup(uint32_t reason)
                HLE_UD_CLEANUP_WORDS);
 }
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 static void hle_ud_gamedata(void)
 {
     const uint32_t reason = hle_ud_gamedata_precheck();
@@ -4277,9 +4495,11 @@ static void hle_ud_gamedata(void)
                   "gamedata-state-shutdown", &k_ud_gamedata, reason);
     hle_ud_gamedata_cleanup(reason);
 }
+#endif
 
 #endif
 
+#if HLE_UD_WITH_NETCONF
 /* Netconf's net setup; *stage counts the calls that succeeded, in order. */
 static uint32_t hle_ud_netconf_setup(uint32_t *stage)
 {
@@ -4354,6 +4574,7 @@ static void hle_ud_netconf_teardown(uint32_t stage, uint32_t skipped)
     hle_record("netconf-teardown", "PASS", stage, out, HLE_UD_NET_WORDS);
 }
 
+#if !HLE_UD_ATTENDED
 static void hle_ud_netconf(void)
 {
     uint32_t stage = 0;
@@ -4363,7 +4584,10 @@ static void hle_ud_netconf(void)
                   "netconf-state-shutdown", &k_ud_netconf, reason);
     hle_ud_netconf_teardown(stage, reason == HLE_UD_SKIP_STUCK ? reason : 0u);
 }
+#endif
+#endif
 
+#if HLE_UD_WITH_SHARING
 /* Game sharing's ad hoc setup: init calls only, no group is created or joined here. */
 static uint32_t hle_ud_sharing_setup(uint32_t *stage)
 {
@@ -4440,6 +4664,7 @@ static void hle_ud_sharing_teardown(uint32_t stage, uint32_t skipped)
     hle_record("sharing-teardown", "PASS", stage, out, HLE_UD_NET_WORDS);
 }
 
+#if !HLE_UD_ATTENDED
 static void hle_ud_sharing(void)
 {
     uint32_t stage = 0;
@@ -4449,6 +4674,8 @@ static void hle_ud_sharing(void)
                   "sharing-state-shutdown", &k_ud_sharing, reason);
     hle_ud_sharing_teardown(stage, reason == HLE_UD_SKIP_STUCK ? reason : 0u);
 }
+#endif
+#endif
 
 #if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 static int hle_run(void)
@@ -4471,6 +4698,42 @@ static int hle_run(void)
 {
     hle_ud_sharing();
     hle_ud_netconf();
+    return s_ud_fail == 0u;
+}
+#endif
+
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_NETCONF
+/* Attended: netconf alone (no game sharing before it), dismissed by the person at the console. */
+static int hle_run(void)
+{
+    uint32_t stage = 0;
+    const uint32_t reason = hle_ud_netconf_setup(&stage);
+    hle_ud_attended("netconf-attended", "netconf-attended-shutdown", &k_ud_netconf, reason);
+    hle_ud_netconf_teardown(stage, 0u);
+    return s_ud_fail == 0u;
+}
+#endif
+
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_SHARING
+/* Attended: game sharing alone, dismissed by the person at the console. */
+static int hle_run(void)
+{
+    uint32_t stage = 0;
+    const uint32_t reason = hle_ud_sharing_setup(&stage);
+    hle_ud_attended("sharing-attended", "sharing-attended-shutdown", &k_ud_sharing, reason);
+    hle_ud_sharing_teardown(stage, 0u);
+    return s_ud_fail == 0u;
+}
+#endif
+
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_GAMEDATA
+/* Attended: the gamedata install dialog alone, after its precheck (no disc, no directory),
+   dismissed by the person at the console; the probe-owned directory is cleaned up after. */
+static int hle_run(void)
+{
+    const uint32_t reason = hle_ud_gamedata_precheck();
+    hle_ud_attended("gamedata-attended", "gamedata-attended-shutdown", &k_ud_gamedata, reason);
+    hle_ud_gamedata_cleanup(reason);
     return s_ud_fail == 0u;
 }
 #endif

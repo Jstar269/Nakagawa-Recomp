@@ -2066,6 +2066,34 @@ _register_campaign_probe(
     tuple(row for row, _ in HLE_UTILITY_NETCONF_SHARING_ROWS),
     dict(HLE_UTILITY_NETCONF_SHARING_ROWS),
 )
+
+# hle-utility-attended-netconf, -sharing and -gamedata (189-191, probe_hle_measure.c): #1386's
+# ATTENDED runs, one dialog type per launch. A person at the console dismisses the dialog by hand,
+# so the run can reach FINISHED, which no unattended run did (boots 204, 206 and 211 each stuck
+# RUNNING to the poll cap). Each: its net setup or gamedata precheck (case 161's record), the
+# attended run in the timing record's 24-word layout, the first ShutdownStart made in each status
+# (NONE, INIT, RUNNING, FINISHED, SHUTDOWN; four words each), then its net teardown or gamedata
+# cleanup (case 161's record).
+HLE_UTILITY_ATTENDED_SHUTDOWN_WORDS = 20
+HLE_UTILITY_ATTENDED_ROWS = {
+    "netconf": (("netconf-setup", 5), ("netconf-attended", 24),
+                ("netconf-attended-shutdown", HLE_UTILITY_ATTENDED_SHUTDOWN_WORDS),
+                ("netconf-teardown", 5)),
+    "sharing": (("sharing-setup", 5), ("sharing-attended", 24),
+                ("sharing-attended-shutdown", HLE_UTILITY_ATTENDED_SHUTDOWN_WORDS),
+                ("sharing-teardown", 5)),
+    "gamedata": (("gamedata-precheck", 5), ("gamedata-attended", 24),
+                 ("gamedata-attended-shutdown", HLE_UTILITY_ATTENDED_SHUTDOWN_WORDS),
+                 ("gamedata-cleanup", 23)),
+}
+for _kind, _test_id in (("netconf", "PSP-HLE-UTILITY-DIALOG-003"),
+                        ("sharing", "PSP-HLE-UTILITY-DIALOG-004"),
+                        ("gamedata", "PSP-HLE-UTILITY-DIALOG-005")):
+    _register_campaign_probe(
+        f"hle-utility-attended-{_kind}", _test_id,
+        tuple(row for row, _ in HLE_UTILITY_ATTENDED_ROWS[_kind]),
+        dict(HLE_UTILITY_ATTENDED_ROWS[_kind]),
+    )
 # hle-io-seek (162, probe_hle_measure.c): #1380's seeks on a flash0: file (64- and 32-bit), the
 # sceIoIoctl file commands on a probe-owned ms0: file, two writes on descriptors opened without
 # PSP_O_WRONLY, then the same ioctl seek on disc0:/UMD_DATA.BIN (last: the only calls that could
