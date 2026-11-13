@@ -661,6 +661,12 @@
         "player"
       ]
     },
+    "TEXTURE_PACK_REFUSED": {
+      "stage": "package",
+      "in": [
+        "player"
+      ]
+    },
     "PACKAGE_AMBIENT_ENHANCEMENT": {
       "stage": "package",
       "in": [
@@ -1292,6 +1298,12 @@
       ]
     },
     "SAVES_RESTORE_FAILED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "TEXTURE_PACK_PICKER_FAILED": {
       "stage": "host",
       "in": [
         "player"

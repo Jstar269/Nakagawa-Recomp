@@ -819,6 +819,12 @@ static void settings_accessibility(NkUi *ui, const PlayerUiSettingsModel *model,
     }
 }
 
+/* Settings > Enhanced's text ids: the play mode at 0x400, part row i at 0x404 + 4i, room for every
+   part PLAYER_UI_ID_ENHANCED_PART can name, then the texture pack rows at 0x500 and 0x504. */
+#define SET_ID_ENHANCED_TEXT_END \
+    (0x404u + 4u * (PLAYER_UI_ENHANCED_FIRST_IDS + PLAYER_UI_ENHANCED_MORE_IDS))
+typedef char settings_texpack_text_after_parts[SET_ID_ENHANCED_TEXT_END <= 0x500u ? 1 : -1];
+
 /* Settings > Enhanced (#2055; src/rt/ace.h): the play mode, then one row per Enhanced part, with a
    sentence beside each that says what it does and what it costs. The library's page sets the
    default; a title's page (opened from its Enhanced options) sets that game's choice, where a
@@ -844,7 +850,8 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
     nk_ui_text_role(ui, FLOW_ID_LEAD, nk_ui_frame_text(ui, lead), NK_UI_TYPE_BODY_S,
                     theme->muted);
     if (scr_wizard_box_begin(ui, 0u)) {
-        WizardRow rows[1 + PLAYER_UI_ENHANCED_ROWS];
+        WizardRow rows[1 + PLAYER_UI_ENHANCED_ROWS + 2];
+        size_t measured;
         int count = model->enhanced_row_count < PLAYER_UI_ENHANCED_ROWS
             ? model->enhanced_row_count : PLAYER_UI_ENHANCED_ROWS;
         if (count < 0) count = 0;
@@ -856,11 +863,27 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
             rows[i + 1].value = safe_text(model->enhanced_rows[i].value, "Off");
             rows[i + 1].sentence = safe_text(model->enhanced_rows[i].sentence, "");
         }
+        measured = (size_t)count + 1u;
+        if (model->texpack_row) {
+            rows[measured].name = "Texture pack folder";
+            rows[measured].value = safe_text(model->texpack_value, "None");
+            rows[measured].sentence = safe_text(model->texpack_sentence, "");
+            measured++;
+            if (model->texpack_chosen) {
+                rows[measured].name = "Remove texture pack";
+                rows[measured].value = "Remove";
+                rows[measured].sentence =
+                    "Forgets the folder for this game. The folder is not deleted.";
+                measured++;
+            }
+        }
         /* The column is sized from the widest value each row can show on this page, not
            the one it shows now, so stepping a setting (Smooth motion turning Widescreen
-           off, say) never moves or restacks the rows. */
-        WizardRow widest[1 + PLAYER_UI_ENHANCED_ROWS];
-        memcpy(widest, rows, sizeof(rows[0]) * ((size_t)count + 1u));
+           off, say) never moves or restacks the rows. The texture pack rows change only when
+           a pack is chosen or removed, never when a setting steps, so they are measured as
+           they are. */
+        WizardRow widest[1 + PLAYER_UI_ENHANCED_ROWS + 2];
+        memcpy(widest, rows, sizeof(rows[0]) * measured);
         widest[0].value = settings_widest_value(ui, rows[0].name, rows[0].value,
                                                 model->enhanced_modes,
                                                 model->enhanced_mode_count, NULL, NULL);
@@ -871,8 +894,7 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                                                         row->library_value,
                                                         row->other_value);
         }
-        WizardColumn column = scr_wizard_column(ui, widest, (size_t)count + 1u, inner - 32.0f,
-                                                true);
+        WizardColumn column = scr_wizard_column(ui, widest, measured, inner - 32.0f, true);
         if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACE_MODE, SET_ID_TEXT + 0x400u, rows[0].name,
                              rows[0].value, rows[0].sentence, model->enhanced_on, inner - 32.0f,
                              &column)) {
@@ -885,6 +907,23 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                                        model->enhanced_rows[i].on, off, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART);
                 result->title_index = (size_t)i;
+            }
+        }
+        /* A title's page: its texture pack's folder, which can be chosen in any play mode. Its
+           rows' text ids sit past every part row's (SET_ID_ENHANCED_TEXT_END), so a later part
+           takes the next part id and moves no other row's text. */
+        if (model->texpack_row) {
+            const size_t at = (size_t)count + 1u;
+            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE, SET_ID_TEXT + 0x500u,
+                                 rows[at].name, rows[at].value, rows[at].sentence,
+                                 model->texpack_chosen, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_CHOOSE_TEXPACK);
+            }
+            if (model->texpack_chosen &&
+                scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE, SET_ID_TEXT + 0x504u,
+                                 rows[at + 1u].name, rows[at + 1u].value, rows[at + 1u].sentence,
+                                 false, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_REMOVE_TEXPACK);
             }
         }
         nk_ui_end_container(ui);

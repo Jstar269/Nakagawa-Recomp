@@ -65,7 +65,8 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_TWIN] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_SSAA] = ENHANCED_WORDS(k_enhanced_ssaa_labels),
-    [PLAYER_PART_MIPS] = ENHANCED_WORDS(k_enhanced_switch_labels)};
+    [PLAYER_PART_MIPS] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_TEXPACK] = ENHANCED_WORDS(k_enhanced_switch_labels)};
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
 enum { ENHANCED_MAX_WORDS = 5 };
@@ -3400,6 +3401,15 @@ static void test_settings_pages(void) {
     CHECK(PLAYER_UI_ID_ENHANCED_PART(14) == 0x4681u &&
               PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_MIPS) == 0x4681u && PLAYER_PART_COUNT >= 15,
           "the part rows' ids: the 15th in the second range, after the 14th");
+    /* The 16th (Texture pack, #1880) follows Smooth far textures, at 0x4682; 1200 tall shows its row. */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(15) == 0x4682u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_TEXPACK) == 0x4682u && PLAYER_PART_COUNT >= 16,
+          "the part rows' ids: the 16th in the second range, after the 15th");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1200, dump, sizeof(dump)) &&
+              strstr(dump, "\"SMOOTH FAR TEXTURES: OFF\"") != NULL &&
+              strstr(dump, "\"TEXTURE PACK: OFF\"") != NULL &&
+              strstr(dump, "Draws the texture pack") != NULL,
+          "Settings > Enhanced shows the Texture pack row after Smooth far textures");
     for (unsigned i = 0u; i < PLAYER_PART_COUNT; ++i) {
         PlayerUiAction part =
             activate_flow_button(PLAYER_UI_ID_ENHANCED_PART(i), FLOW_SETTINGS_ACE);
