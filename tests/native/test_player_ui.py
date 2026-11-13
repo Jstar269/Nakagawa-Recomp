@@ -2576,7 +2576,7 @@ class NativePlayerUiTests(unittest.TestCase):
                          run["stdout"])
         ultra = lines[4]
         self.assertIn("Ultra is used in Enhanced and Ace", ultra["note"])
-        self.assertIn("with crisp text and FSR 1 on", ultra["note"])
+        self.assertIn("with crisp text, FSR 1 and full 32-bit colour on", ultra["note"])
         self.assertIn("Authentic uses your settings", ultra["note"])
         self.assertIn("with crisp text on and FSR 1 off", lines[3]["note"])
         self.assertEqual((lines[-1]["note"],), ("",),
@@ -2696,8 +2696,8 @@ class NativePlayerUiTests(unittest.TestCase):
                          "the page opens on its play mode and Back focuses the row that opened it")
 
     def test_next_ui_enhanced_page_shows_the_graphics_presets_parts(self) -> None:
-        """#2150: with Ultra chosen, Settings > Enhanced shows the parts the preset sets with
-        its values and name, over the library's own (both off here); the other parts keep
+        """#2150, #2280: with Ultra chosen, Settings > Enhanced shows the parts the preset sets
+        with its values and name, over the library's own (all off here); the other parts keep
         the library's value."""
         run = self.next_ui_run(
             "settings",
@@ -2706,13 +2706,14 @@ class NativePlayerUiTests(unittest.TestCase):
             settings={"graphics_preset": "ultra",
                       "enhanced": {"default": "enhanced", "af": "4", "text": "off",
                                    "readout": "off", "notice": "on", "smooth": "off",
-                                   "upscale": "off"}},
+                                   "upscale": "off", "twin": "off"}},
         )
         pages = [page for page in self.enhanced_pages(run) if page.get("title") == "library"]
         self.assertTrue(pages, run["stdout"])
         page = pages[-1]
         self.assertEqual(page["text"], "On (Ultra)", page)
         self.assertEqual(page["upscale"], "FSR 1 (Ultra)", page)
+        self.assertEqual(page["twin"], "On (Ultra)", page)
         self.assertNotIn("(Ultra)", page["af"], "texture filtering is the library's own")
         self.assertNotIn("(Ultra)", page["smooth"])
 
