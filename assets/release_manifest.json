@@ -2315,6 +2315,27 @@
       "public_scope_included": true,
       "optional": false,
       "comment": "Project-authored C++ test helper, built by hand against the unmodified xBRZ 1.9 release to print the goldens tex-scale-selftest checks; not part of any build (third_party/xbrz/PROVENANCE.md)."
+    },
+    {
+      "id": "redump-psp-datfile",
+      "name": "Redump PSP datfile: Sony - PlayStation Portable (2026-11-12 16-02-53, 3546 discs)",
+      "type": "asset",
+      "relationship": "CONTAINS",
+      "presence": "tracked_file",
+      "source_path": "assets/redump/redump-psp.zip",
+      "upstream_origin": "https://redump.info/datfile/PSP",
+      "upstream_file": "Sony - PlayStation Portable - Datfile (3546) (2026-11-12 16-02-53).zip",
+      "fetched_utc": "2026-11-12T18:43:40Z",
+      "size_bytes": 346932,
+      "license": "NOASSERTION",
+      "notice_path": "assets/redump/PROVENANCE.md",
+      "disposition": "approved_binary",
+      "public_scope_included": true,
+      "optional": false,
+      "hashes": {
+        "sha256": "7e4afb96fe3a02b3e43e4138b1ebba911bdb1d96c73fa61f294166bb14fbebaf"
+      },
+      "comment": "Redump's PSP datfile (Logiqx XML in a zip), byte-identical to the file https://redump.info/datfile/PSP served on 2026-11-12; redump.info/about states the data \"is considered public domain to be used however people see fit\" and names no licence. Staged beside the player by tools/stage_runtime_dlls.py and read by the disc check when the user has imported no list; manifest in assets/redump/PROVENANCE.md."
     }
   ]
 }

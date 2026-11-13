@@ -1229,6 +1229,29 @@
       }
     },
     {
+      "path": "assets/redump/PROVENANCE.md",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "redump_list_manifest_1731_20261112",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "assets/redump/redump-psp.zip",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "redump_psp_datfile_1731_20261112",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "Public domain as stated on Redump's About page (no SPDX identifier)",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
       "path": "assets/release_manifest.json",
       "classification": "reviewed_configuration",
       "evidence": {
@@ -12753,6 +12776,17 @@
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/disc_dat_conformance.txt",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "redump_conformance_corpus_1731_20261112",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
       }
     },
     {

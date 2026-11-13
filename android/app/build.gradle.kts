@@ -50,11 +50,13 @@ val fetchNativeDeps = tasks.register<Exec>("fetchNativeDeps") {
 }
 
 // The files the app unpacks on first start (LauncherActivity): the UI fonts, the launcher music's
-// track (#2207), and for each bundled title its flat image and package description.
+// track (#2207), the bundled Redump PSP list the disc check reads, and for each bundled title its
+// flat image and package description.
 val stageBundledAssets = tasks.register<Sync>("stageBundledAssets") {
     into(bundledAssets)
     from(File(repoRoot, "assets/fonts/ui")) { into("app/assets/fonts/ui") }
     from(File(repoRoot, "assets/music/launcher/ChillLofi.ogg")) { into("app/assets/music/launcher") }
+    from(File(repoRoot, "assets/redump")) { into("app/assets/redump") }
     for ((id, dir) in titles) {
         from(File(dir, "${id}_image.bin")) { into("app/titles/$id") }
         from(File(dir, "package.json")) { into("app/titles/$id") }

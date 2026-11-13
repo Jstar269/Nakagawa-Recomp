@@ -1088,10 +1088,13 @@ void player_app_disc_check_finish(PlayerApp *app, const NkDiscVerification *resu
         player_dev_log_add(app, "disc check", "%s: %s", item.disc_id, result->reason);
     }
     static const char *const results[] = {"HASHED", "CANCELLED", "READ_FAILED", "LIST_UNUSABLE"};
-    printf("[PLAYER] DISC_CHECK disc=%s result=%s tier=%s\n", item.disc_id,
+    /* Which Redump list the image was compared with (NkDiscListSource). */
+    static const char *const lists[] = {"none", "imported", "bundled"};
+    printf("[PLAYER] DISC_CHECK disc=%s result=%s tier=%s list=%s\n", item.disc_id,
            (size_t)result->result < sizeof(results) / sizeof(results[0])
                ? results[result->result] : "UNKNOWN",
-           nk_disc_tier_name(result->tier));
+           nk_disc_tier_name(result->tier),
+           (size_t)result->list < sizeof(lists) / sizeof(lists[0]) ? lists[result->list] : "none");
     if (cancelled) {
         /* The library's Cancel: the checks waiting end too, even when the
            running one finished first. */
@@ -1101,7 +1104,7 @@ void player_app_disc_check_finish(PlayerApp *app, const NkDiscVerification *resu
     if (result->result == NK_DISC_VERIFY_HASHED || result->result == NK_DISC_VERIFY_LIST_UNUSABLE) {
         player_disc_check_record(app, &item, result);
         if (result->result == NK_DISC_VERIFY_LIST_UNUSABLE) {
-            snprintf(check->note, sizeof(check->note), "Your disc list could not be read");
+            snprintf(check->note, sizeof(check->note), "The disc list could not be read");
         }
     } else if (!cancelled) {
         snprintf(check->note, sizeof(check->note), "A disc image could not be checked");
@@ -1161,13 +1164,14 @@ const char *player_disc_tier_badge(uint32_t tier) {
 const char *player_disc_tier_note(uint32_t tier) {
     switch ((NkDiscTier)tier) {
         case NK_DISC_TIER_VERIFIED_RETAIL:
-            return "Disc check: this image matches a retail disc in your disc list.";
+            return "Disc check: this image matches a retail disc in Redump's disc list.";
         case NK_DISC_TIER_MODIFIED:
-            return "Disc check: a changed copy of a retail disc in your library, such as a "
-                   "fan translation or a patch.";
+            return "Disc check: its disc ID is a retail disc's, but its contents match no "
+                   "dump of it in the disc list. A damaged dump does that as well as a changed "
+                   "copy; dump the disc again and check it to tell which.";
         case NK_DISC_TIER_UNKNOWN:
-            return "Disc check: not in your disc list. This means not shown to be retail, "
-                   "not modified: Redump's PSP list names no disc IDs.";
+            return "Disc check: not in the disc list. That doesn't mean it's bad: it is "
+                   "only not shown to be retail, and its disc ID isn't one the list names.";
         case NK_DISC_TIER_NOT_CHECKED:
         default: return NULL;
     }

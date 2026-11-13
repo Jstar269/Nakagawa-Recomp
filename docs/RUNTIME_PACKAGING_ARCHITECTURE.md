@@ -6,7 +6,7 @@
 > `tools/nk_cli.py build-package <disc_id>` resolves the executable from a library disc
 > image, or from the decrypted `EBOOT.elf` in the title's folder for an encrypted disc (the
 > player decrypts it from the user's disc, #1494), and the
-> player consumes the resulting package. The player checks each disc against the user's Redump
+> player consumes the resulting package. The player checks each disc against Redump's PSP
 > list, and the release ZIP carries the pinned build tools in `prereqs/`. Installers and a
 > precompiled, compiler-free end-user route (#308) are not built.
 

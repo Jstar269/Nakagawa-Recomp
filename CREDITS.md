@@ -73,6 +73,12 @@ Nakagawa has since substantially extended and modified that codebase. This repos
   [`assets/music/launcher/`](assets/music/launcher/PROVENANCE.md).
 - **Kenney "Input Prompts" and "Interface Sounds" — Kenney Vleugels ([kenney.nl](https://kenney.nl))** — CC0-1.0. The
   launcher's button prompt glyphs and its optional launcher sounds, in [`third_party/kenney/`](third_party/kenney/).
+- **Redump PSP datfile — the Redump project ([redump.info](https://redump.info/))** — the list of PSP disc dumps
+  (names, disc IDs, sizes and CRC32, MD5 and SHA-1 hashes) the disc check compares images with, in
+  [`assets/redump/`](assets/redump/PROVENANCE.md): Redump's datfile of 2026-11-12 16-02-53, fetched 2026-11-12 and
+  kept byte for byte. Redump's About page (<https://redump.info/about>, read 2026-11-12) says of its data: "This
+  information is considered public domain to be used however people see fit - whether you are a researcher,
+  academic, organization, or simply an individual verifying the data for your own media."
 - **Inno Setup 6.7.3 — Jordan Russell and Martijn Laan** — the Inno Setup License (a permissive, no-copyleft licence; text pinned by hash in [`assets/upstream/innosetup.lock.json`](assets/upstream/innosetup.lock.json)). A build tool for the Windows installer, not vendored: `tools/build_installer.py` runs the user's own pinned copy. The installer's `Setup.exe` embeds Inno's unmodified loader, whose copyright notice and web addresses stay intact.
 - **LLVM 21.1.8 — the LLVM Project** — Apache-2.0 WITH LLVM-exception. clang, lld, compiler-rt builtins, libunwind,
   libc++abi and libc++, built by `tools/android_toolchain.py` from the pinned release tarball for the on-device C

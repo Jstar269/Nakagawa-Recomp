@@ -1254,6 +1254,10 @@ connections, listed below, and each is opt-in.
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).
 
+The disc check needs no connection either: Redump's PSP list ships beside the player
+(`assets/redump/`), and a newer list is one you download yourself and import
+([Disc check](COMPATIBILITY.md#updating-the-disc-list)).
+
 **Discord status** (Settings > Online and developer, off by default) makes no network
 connection either. While a game runs, the player passes three things to the Discord app on this
 PC through Discord's local named pipe (`discord-ipc-0` to `discord-ipc-9`): the game's title as

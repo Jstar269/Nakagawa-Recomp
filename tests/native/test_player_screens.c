@@ -926,8 +926,10 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         fixture.compatibility_expect = k_compatibility_cases[1].expect;
         fixture.compatibility_known_issues = k_compatibility_cases[1].known_issues;
         fixture.compatibility_category = "Playable";
-        fixture.disc_check_note = "Disc check: a changed copy of a retail disc in your "
-                                  "library, such as a fan translation or a patch.";
+        fixture.disc_check_note = "Disc check: its disc ID is a retail disc's, but its "
+                                  "contents match no dump of it in the disc list. A damaged "
+                                  "dump does that as well as a changed copy; dump the disc "
+                                  "again and check it to tell which.";
         fixture.ace_shown = true;
         fixture.ace_label = enhanced ? "Play mode: Enhanced" : "Play mode: Authentic";
         fixture.ace_in_effect = enhanced;
@@ -7054,8 +7056,9 @@ static void test_disc_verify_line_badge_and_note(void) {
         title.disc_id = "TEST70021";
         title.library_status = "Ready";
         title.badge = "Unknown dump";
-        title.disc_check_note = "Disc check: not in your disc list. This means not shown to be "
-                                "retail, not modified: Redump's PSP list names no disc IDs.";
+        title.disc_check_note = "Disc check: not in the disc list. That doesn't mean it's bad: it "
+                                "is only not shown to be retail, and its disc ID isn't one the "
+                                "list names.";
         title.primary_action_label = "PLAY";
         title.primary_action = PLAYER_UI_PRIMARY_PLAY;
         title.primary_action_enabled = true;
@@ -7075,7 +7078,7 @@ static void test_disc_verify_line_badge_and_note(void) {
         }
         (void)nk_ui_dump(ui, dump, sizeof(dump));
         CHECK(strstr(dump, "\"UNKNOWN DUMP\"") != NULL &&
-                  strstr(dump, "not shown to be retail, not modified") != NULL,
+                  strstr(dump, "That doesn't mean it's bad") != NULL,
               "the title page names the tier and what it means");
         CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_PRIMARY, "PLAY keeps the default focus");
         nk_ui_destroy(ui);

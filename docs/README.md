@@ -260,7 +260,7 @@ Every substantial document carries one status.
 | `RELEASE_NOTES_v0.0.2.md` | CURRENT | Notes of the v0.0.2 release |
 | `RELEASE_NOTES_v0.0.1.md` | HISTORICAL | Notes of the v0.0.1 release, kept as released |
 | `RELEASE_SIGNING.md` | CURRENT | Update-signing key procedure (minisign, offline) and what the player checks before an update download |
-| `NATIVE_PLAYER_ARCHITECTURE.md` | CURRENT | Maintained native-shell architecture; the wizard's bounded ISO/XB staging exists and the player decrypts the user's own disc locally and checks it against the user's Redump list, while one-click play without compiling on the user's PC is not built and is marked inline |
+| `NATIVE_PLAYER_ARCHITECTURE.md` | CURRENT | Maintained native-shell architecture; the wizard's bounded ISO/XB staging exists and the player decrypts the user's own disc locally and checks it against Redump's PSP list, while one-click play without compiling on the user's PC is not built and is marked inline |
 | `PLAYER_UI_DESIGN.md` | CURRENT | Player UI design system for the default launcher: tokens, components, and the screen specs C6-C8 build against |
 | `ONLINE_FEATURES.md` | DRAFT | Design for the launcher's opt-in online mode (update check, news, user-sent reports) and developer mode, asked in the setup wizard; the switches, the wizard step, the developer log panel, the update check and Discord status are built; news and in-player reports are not |
 | `AOT_PRODUCTIZATION_ARCHITECTURE.md` | CURRENT | Maintained evaluation of end-user recompilation routes A-G; the zero-toolchain recommended routes remain unimplemented |
