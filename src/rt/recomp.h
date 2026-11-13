@@ -2499,6 +2499,10 @@ void     sched_note_import_return(uint32_t nid, uint32_t ret);
 typedef uint64_t (*SrSchedGeNextDeadline)(void);
 typedef void (*SrSchedGeServiceDue)(void);
 void     sched_set_ge_timing_hooks(SrSchedGeNextDeadline next_deadline, SrSchedGeServiceDue service_due);
+/* GE finish callbacks waiting for an interrupt to be taken (hle_route.c): the step that runs
+ * every waiting one, called after each owed VBLANK episode before the next one.  NULL: not
+ * called. */
+void     sched_set_ge_waiting_hook(SrSchedGeServiceDue deliver_waiting);
 /* VTimer handlers (hle.c): the earliest guest-time deadline of a running VTimer with a
  * handler (UINT64_MAX when none), and the interrupt-service step that runs the most overdue
  * handler once.  With no hooks registered the scheduler behaves as before. */
@@ -2620,6 +2624,7 @@ int      sched_wait_finish(SrWaitHandle handle); /* returns notifications; calle
 void     sched_wait_cancel_object(uint32_t object, uint32_t result);
 void     sched_set_current_wait_kind(int kind); /* latch Refer waitType before blocking */
 int      sched_is_intr_context(void);               /* 1 if running in interrupt context, 0 otherwise */
+int      sched_servicing_interrupts(void);          /* 1 inside an interrupt episode (handlers run with the CPU's interrupts off on a PSP) */
 void     sr_hle_release_thread_resources(uint32_t thread_uid); /* release HLE resources on thread teardown */
 /* Wait-object ids shared between hle.c (wait side) and sched.c (thread-dump side). */
 #define CTRL_WAIT_OBJ 0xC471D000u                   /* sceCtrl blocking reads park on this object */
