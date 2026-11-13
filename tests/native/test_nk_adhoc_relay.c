@@ -2,7 +2,8 @@
 // Copyright (C) 2026 the Nakagawa Recomp authors
 
 /* The ad hoc relay's wire format (src/core/nk_adhoc_relay.c, #1139): every packet byte by byte,
- * the login checks of PPSSPP's ad hoc server (proAdhocServer.cpp login_user_data at 3bc60270),
+ * the login checks of PPSSPP's ad hoc server (proAdhocServer.cpp login_user_data at 3bc60270:
+ * product code, MAC, and a nickname refused only for a zero first byte),
  * the decoder's partial and refused input, and the port offset (PPSSPP's offset_port_simple).
  * The expected bytes are written out by hand from the packet layouts the relay protocol uses
  * (aemu_postoffice 02abf18f aemu_postoffice_packets.h and adhocctl/packets_v1.h; the lobby
@@ -57,21 +58,27 @@ static void test_login(void) {
     CHECK(memcmp(p + 7, "Player", 6) == 0 && all_zero(p + 13, 128u - 6u), "nickname at 7, padded");
     CHECK(memcmp(p + 135, "ULUS10000", 9) == 0, "product code at 135");
 
-    char longest[128];
-    memset(longest, 'n', 127);
-    longest[127] = '\0';
-    CHECK(nk_lobby_login(p, k_mac, longest, "NPJH50000") == 144u && p[7 + 126] == 'n' &&
-              p[7 + 127] == 0,
-          "a 127-byte nickname fits, and the field's last byte stays zero");
-    char too_long[129];
-    memset(too_long, 'n', 128);
-    too_long[128] = '\0';
+    /* PPSSPP's server refuses a nickname only when its first byte is zero, so the longest is
+     * the whole 128-byte field, sent with no terminator; 129 bytes do not fit the field. */
+    char longest[129];
+    memset(longest, 'n', 128);
+    longest[128] = '\0';
     memset(p, 0xee, sizeof p);
-    CHECK(nk_lobby_login(p, k_mac, too_long, "ULUS10000") == 0u && p[0] == 0xee,
-          "a 128-byte nickname is refused and nothing is written");
-    CHECK(nk_lobby_login(p, k_mac, NULL, "ULUS10000") == 0u, "NULL nickname");
+    CHECK(nk_relay_nickname_ok(longest) && nk_lobby_login(p, k_mac, longest, "NPJH50000") == 144u &&
+              p[7] == 'n' && p[7 + 127] == 'n' && memcmp(p + 135, "NPJH50000", 9) == 0,
+          "a 128-byte nickname is accepted and fills the field with no terminator");
+    char too_long[130];
+    memset(too_long, 'n', 129);
+    too_long[129] = '\0';
     memset(p, 0xee, sizeof p);
-    CHECK(nk_lobby_login(p, k_mac, "", "ULUS10000") == 0u && p[0] == 0xee,
+    CHECK(!nk_relay_nickname_ok(too_long) && nk_lobby_login(p, k_mac, too_long, "ULUS10000") == 0u &&
+              p[0] == 0xee,
+          "a 129-byte nickname, the first that does not fit, is refused and nothing is written");
+    CHECK(nk_relay_nickname_ok("n") && nk_relay_nickname_ok("\x01"), "one non-zero byte is enough");
+    CHECK(!nk_relay_nickname_ok(NULL) && nk_lobby_login(p, k_mac, NULL, "ULUS10000") == 0u,
+          "NULL nickname");
+    memset(p, 0xee, sizeof p);
+    CHECK(!nk_relay_nickname_ok("") && nk_lobby_login(p, k_mac, "", "ULUS10000") == 0u && p[0] == 0xee,
           "an empty nickname is refused, as PPSSPP's server refuses one");
 
     /* PPSSPP's server refuses exactly the all-zero and the all-ones MAC. */
@@ -116,8 +123,8 @@ static void test_lobby_parse(void) {
     CHECK(nk_lobby_parse(scan, 0, &ev) == NK_LOBBY_NEED_MORE, "empty");
     CHECK(nk_lobby_parse(scan, 14, &ev) == NK_LOBBY_NEED_MORE, "a SCAN one byte short");
     CHECK(nk_lobby_parse(scan, 15, &ev) == 15 && ev.kind == NK_LOBBY_SCAN &&
-              memcmp(ev.group, "GROUP001", 8) == 0 && memcmp(ev.mac, k_peer, 6) == 0,
-          "SCAN: group and leader MAC");
+              memcmp(ev.group, "GROUP001", 8) == 0 && memcmp(ev.bssid, k_peer, 6) == 0,
+          "SCAN: group and the group's BSSID");
 
     uint8_t connect[139];
     memset(connect, 0, sizeof connect);
@@ -134,8 +141,9 @@ static void test_lobby_parse(void) {
               ev.peer_id == 0x12345678u,
           "CONNECT: nickname, MAC and little-endian peer id (%08x)", ev.peer_id);
     memset(connect + 1, 'x', 128);
-    CHECK(nk_lobby_parse(connect, 139, &ev) == 139 && strlen(ev.nickname) == 127u,
-          "a 128-byte nickname from the server is cut to 127 and terminated");
+    CHECK(nk_lobby_parse(connect, 139, &ev) == 139 && strlen(ev.nickname) == 128u &&
+              ev.nickname[127] == 'x' && memcmp(ev.mac, k_peer, 6) == 0,
+          "an unterminated 128-byte nickname from the server is kept whole and terminated");
 
     const uint8_t disconnect[5] = {0x03, 0x01, 0x00, 0x00, 0x80};
     CHECK(nk_lobby_parse(disconnect, 5, &ev) == 5 && ev.kind == NK_LOBBY_DISCONNECT &&
@@ -144,8 +152,8 @@ static void test_lobby_parse(void) {
     uint8_t bssid[7] = {0x06};
     memcpy(bssid + 1, k_peer, 6);
     CHECK(nk_lobby_parse(bssid, 7, &ev) == 7 && ev.kind == NK_LOBBY_CONNECT_BSSID &&
-              memcmp(ev.mac, k_peer, 6) == 0,
-          "CONNECT_BSSID: the group leader");
+              memcmp(ev.bssid, k_peer, 6) == 0,
+          "CONNECT_BSSID: the group's BSSID");
     const uint8_t done[1] = {0x05};
     CHECK(nk_lobby_parse(done, 1, &ev) == 1 && ev.kind == NK_LOBBY_SCAN_COMPLETE, "SCAN_COMPLETE");
     uint8_t chat[193];

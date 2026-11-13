@@ -59,10 +59,11 @@ We aim to respond promptly and will remove material where appropriate.
   `Core/HLE/proAdhocServer.cpp` at `3bc60270eae3069f13dfbfdb7292a7e1375de6f6`
   (Copyright (c) 2014- PPSSPP Project, GPL-2.0-or-later, PPSSPP's port of
   Coldbird's aemu server), conveyed as GPL-3.0-or-later. The relay codec
-  (`src/core/nk_adhoc_relay.c`) encodes the aemu_postoffice wire format; its
-  login checks and port offset are translated from PPSSPP's `proAdhocServer.cpp`
-  and `Core/HLE/sceNetAdhoc.cpp` (Copyright (c) 2013- PPSSPP Project) at the same
-  revision, and it is conveyed as GPL-3.0-or-later. Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
+  (`src/core/nk_adhoc_relay.c`) encodes the aemu_postoffice wire format, and no
+  aemu_postoffice code is imported; its login checks are translated from
+  `login_user_data` in PPSSPP's `proAdhocServer.cpp` and its port offset from
+  PPSSPP's `Core/HLE/sceNetAdhoc.cpp` (Copyright (c) 2013- PPSSPP Project) at the
+  same revision, and it is conveyed as GPL-3.0-or-later. Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
 - **PSPSDK / PSPDEV** — permissive per-component declarations and BSD-family
   notices for public ABI definitions and source-owned fixtures. The applicable
   notices are in `THIRD_PARTY_LICENSES/PSPSDK.txt` and `assets/upstream/`.

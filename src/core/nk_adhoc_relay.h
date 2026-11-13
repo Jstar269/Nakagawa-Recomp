@@ -24,9 +24,9 @@
  *     the connections;
  *   - that a PDP or PTP length over its limit ends the session: the client in that project's
  *     client/postoffice.c (marked GPL-3.0-only), which does the same;
- *   - the login checks (nk_relay_mac_ok, nk_relay_product_ok, nk_lobby_login): PPSSPP's
- *     Core/HLE/proAdhocServer.cpp login_user_data at 3bc60270eae3069f13dfbfdb7292a7e1375de6f6
- *     (GPL-2.0-or-later), rewritten from it on 2026-11-12;
+ *   - the login checks (nk_relay_product_ok, nk_relay_mac_ok, nk_relay_nickname_ok and the
+ *     checks in nk_lobby_login): PPSSPP's Core/HLE/proAdhocServer.cpp login_user_data at
+ *     3bc60270eae3069f13dfbfdb7292a7e1375de6f6 (GPL-2.0-or-later), written from it on 2026-11-12;
  *   - the port offset (nk_relay_port_out, nk_relay_port_in): PPSSPP's Core/HLE/sceNetAdhoc.cpp
  *     offset_port_simple and reverse_port_simple at the same revision (GPL-2.0-or-later,
  *     Copyright (c) 2013- PPSSPP Project), and its PortOffset default in Core/Config.cpp.
@@ -53,7 +53,7 @@ extern "C" {
 
 #define NK_RELAY_MAC_LEN 6u
 #define NK_RELAY_GROUP_LEN 8u
-#define NK_RELAY_NICKNAME_LEN 128u /* the field; the text is at most 127 bytes */
+#define NK_RELAY_NICKNAME_LEN 128u /* the field; the text may fill it, with no terminator */
 #define NK_RELAY_PRODUCT_LEN 9u   /* the disc ID, for example ULUS12345 */
 
 /* ---- lobby (adhocctl protocol v1) --------------------------------------------------------- */
@@ -75,22 +75,26 @@ typedef enum NkLobbyOpcode {
 #define NK_LOBBY_BARE_SIZE 1u     /* PING, SCAN and DISCONNECT are the opcode alone */
 
 /* Server to client. */
-#define NK_LOBBY_S2C_SCAN_SIZE 15u          /* opcode, group 8, leader MAC 6 */
+#define NK_LOBBY_S2C_SCAN_SIZE 15u          /* opcode, group 8, the group's BSSID 6 */
 #define NK_LOBBY_S2C_SCAN_COMPLETE_SIZE 1u
 #define NK_LOBBY_S2C_CONNECT_SIZE 139u      /* opcode, nickname 128, MAC 6, peer id 4 */
 #define NK_LOBBY_S2C_DISCONNECT_SIZE 5u     /* opcode, peer id 4 */
-#define NK_LOBBY_S2C_CONNECT_BSSID_SIZE 7u  /* opcode, group leader MAC 6 */
+#define NK_LOBBY_S2C_CONNECT_BSSID_SIZE 7u  /* opcode, the group's BSSID 6 */
 #define NK_LOBBY_S2C_CHAT_SIZE 193u         /* opcode, message 64, nickname 128 */
 
-/* True when PPSSPP's ad hoc server accepts this MAC at login: neither all zero nor all ones. */
-bool nk_relay_mac_ok(const uint8_t mac[NK_RELAY_MAC_LEN]);
-/* True for exactly nine characters, each A-Z or 0-9, as PPSSPP's ad hoc server requires of a
- * product code (nine is the field's size). */
+/* The checks PPSSPP's ad hoc server makes of a LOGIN packet (login_user_data), in its order:
+ * product code, MAC, nickname. Each is false for NULL. */
+/* True for exactly nine characters, each A-Z or 0-9 (nine is the field's size). */
 bool nk_relay_product_ok(const char *product);
+/* True for any MAC but the all-ones and the all-zero one. */
+bool nk_relay_mac_ok(const uint8_t mac[NK_RELAY_MAC_LEN]);
+/* True for a nickname of 1 to 128 bytes: the server refuses only a first byte of zero, and 128
+ * is the field's size, so the longest fills it with no terminator. */
+bool nk_relay_nickname_ok(const char *nickname);
 
-/* The LOGIN packet. Returns NK_LOBBY_LOGIN_SIZE, or 0 (out untouched) when the MAC or product
- * code would be refused or the nickname is NULL, empty, or 128 bytes or longer. The nickname is
- * zero-padded; the field's last byte is always zero. */
+/* The LOGIN packet. Returns NK_LOBBY_LOGIN_SIZE, or 0 (out untouched) when any of the three
+ * checks above fails. The nickname is zero-padded to the field's 128 bytes; a 128-byte nickname
+ * fills it. */
 size_t nk_lobby_login(uint8_t out[NK_LOBBY_LOGIN_SIZE], const uint8_t mac[NK_RELAY_MAC_LEN],
                       const char *nickname, const char *product);
 /* The CONNECT packet (join or create the group). Returns NK_LOBBY_CONNECT_SIZE. */
@@ -102,8 +106,9 @@ size_t nk_lobby_bare(uint8_t out[NK_LOBBY_BARE_SIZE], NkLobbyOpcode opcode);
 typedef struct NkLobbyEvent {
     NkLobbyOpcode kind;
     uint8_t group[NK_RELAY_GROUP_LEN];           /* SCAN */
-    uint8_t mac[NK_RELAY_MAC_LEN];               /* SCAN (leader), CONNECT, CONNECT_BSSID */
-    char nickname[NK_RELAY_NICKNAME_LEN];        /* CONNECT, CHAT; always NUL-terminated */
+    uint8_t bssid[NK_RELAY_MAC_LEN];             /* SCAN, CONNECT_BSSID: the group's BSSID */
+    uint8_t mac[NK_RELAY_MAC_LEN];               /* CONNECT: the member's MAC */
+    char nickname[NK_RELAY_NICKNAME_LEN + 1u];   /* CONNECT, CHAT: the whole field, then a NUL */
     uint32_t peer_id;                            /* CONNECT, DISCONNECT: the server's id */
 } NkLobbyEvent;
 

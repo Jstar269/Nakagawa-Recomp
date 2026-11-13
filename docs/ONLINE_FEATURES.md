@@ -194,7 +194,8 @@ so it is its own explicit choice with its own sentence in Settings. It is off by
 - **Where the code comes from** (`src/core/PROVENANCE.md` has the details).
   - The relay codec (`src/core/nk_adhoc_relay.c/.h`) encodes and decodes the protocol's packets; no
     aemu_postoffice code is copied. The packet layouts and limits come from aemu_postoffice's headers. Its login
-    checks and port offset are translated from PPSSPP, so `nk_adhoc_relay.c` is labelled derived-translated.
+    checks (PPSSPP's `login_user_data`) and port offset are translated from PPSSPP, so `nk_adhoc_relay.c` is
+    labelled derived-translated.
   - The in-process medium's lobby (`src/core/nk_adhoc_net.c`) is translated from PPSSPP's ad hoc server
     (`Core/HLE/proAdhocServer.cpp`, GPL-2.0-or-later) and labelled derived-translated. Its PDP half is this
     project's own.

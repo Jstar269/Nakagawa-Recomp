@@ -3,10 +3,23 @@
  * Copyright (C) 2026 the Nakagawa Recomp authors
  *
  * The ad hoc relay's wire format (#1139): see nk_adhoc_relay.h, which says what each part was
- * written from. The login checks and the port offset are translated from PPSSPP at
- * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6 (GPL-2.0-or-later), modified for this project
- * (2026-11-12): C99, the offset passed in. Label: derived-translated
- * (docs/provenance/INDEPENDENCE_MODEL.md). This file is conveyed as GPL-3.0-or-later. */
+ * written from. The login checks (nk_relay_product_ok, nk_relay_mac_ok, nk_relay_nickname_ok and
+ * the checks in nk_lobby_login) are translated from login_user_data in PPSSPP's
+ * Core/HLE/proAdhocServer.cpp, and the port offset from offset_port_simple and reverse_port_simple
+ * in Core/HLE/sceNetAdhoc.cpp, both at 3bc60270eae3069f13dfbfdb7292a7e1375de6f6
+ * (GPL-2.0-or-later). Label: derived-translated (docs/provenance/INDEPENDENCE_MODEL.md). This file
+ * is conveyed as GPL-3.0-or-later.
+ *
+ * Modified for this project (2026-11-12; see src/core/PROVENANCE.md):
+ *   - C99. The checks take C strings where PPSSPP reads fixed packet fields, so a product code
+ *     must end after its nine bytes and a nickname within its 128 bytes; a longer one does not fit
+ *     the field and is refused. Inside the field the rules are PPSSPP's: nine characters A-Z or
+ *     0-9, and a nickname whose first byte is not zero, terminated or not.
+ *   - The port offset is passed in rather than read from settings.
+ * The login checks were first carried over, with small edits, from an earlier version of this
+ * file; a review of pull request #2549 found that one of them (a nickname of 128 bytes refused)
+ * was not PPSSPP's rule, and on 2026-11-12 all of them were deleted and written again from
+ * login_user_data. */
 
 #include "nk_adhoc_relay.h"
 
@@ -30,35 +43,47 @@ static uint32_t get32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-/* The login checks of PPSSPP's ad hoc server (Core/HLE/proAdhocServer.cpp login_user_data at
- * 3bc60270, GPL-2.0-or-later): it refuses the all-zero and the all-ones MAC, a product code with a
- * character outside A-Z and 0-9, and an empty nickname. */
-bool nk_relay_mac_ok(const uint8_t mac[NK_RELAY_MAC_LEN]) {
-    static const uint8_t k_zero[NK_RELAY_MAC_LEN] = {0, 0, 0, 0, 0, 0};
-    static const uint8_t k_ones[NK_RELAY_MAC_LEN] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
-    return mac && memcmp(mac, k_zero, NK_RELAY_MAC_LEN) != 0 && memcmp(mac, k_ones, NK_RELAY_MAC_LEN) != 0;
-}
+/* The login checks, rewritten on 2026-11-12 from login_user_data in PPSSPP's
+ * Core/HLE/proAdhocServer.cpp at 3bc60270. The server accepts a LOGIN packet when all three hold,
+ * checked in this order: each of the nine product-code bytes is A-Z or 0-9; the MAC is neither
+ * FF:FF:FF:FF:FF:FF nor 00:00:00:00:00:00; the nickname's first byte is not zero. It refuses
+ * anything else. It checks nothing more of the nickname: all 128 bytes of the field may be text,
+ * with no terminator. This API takes C strings, so a product code or nickname must also end
+ * within its field (nine and 128 bytes): a longer one cannot be sent. */
 
 bool nk_relay_product_ok(const char *product) {
     if (!product) return false;
     for (size_t i = 0; i < NK_RELAY_PRODUCT_LEN; i++) {
-        const char ch = product[i];
+        const char ch = product[i]; /* a terminator before the ninth byte fails here */
         if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))) return false;
     }
-    return product[NK_RELAY_PRODUCT_LEN] == '\0'; /* the field holds nine characters, no more */
+    return product[NK_RELAY_PRODUCT_LEN] == '\0';
+}
+
+bool nk_relay_mac_ok(const uint8_t mac[NK_RELAY_MAC_LEN]) {
+    static const uint8_t broadcast[NK_RELAY_MAC_LEN] = {0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu};
+    static const uint8_t none[NK_RELAY_MAC_LEN] = {0u, 0u, 0u, 0u, 0u, 0u};
+    if (!mac) return false;
+    return memcmp(mac, broadcast, NK_RELAY_MAC_LEN) != 0 && memcmp(mac, none, NK_RELAY_MAC_LEN) != 0;
+}
+
+bool nk_relay_nickname_ok(const char *nickname) {
+    if (!nickname || nickname[0] == '\0') return false;
+    for (size_t i = 1; i <= NK_RELAY_NICKNAME_LEN; i++)
+        if (nickname[i] == '\0') return true;
+    return false;
 }
 
 size_t nk_lobby_login(uint8_t out[NK_LOBBY_LOGIN_SIZE], const uint8_t mac[NK_RELAY_MAC_LEN],
                       const char *nickname, const char *product) {
-    if (!out || !nickname || !nk_relay_mac_ok(mac) || !nk_relay_product_ok(product)) return 0u;
-    size_t name_len = 0;
-    while (name_len < NK_RELAY_NICKNAME_LEN && nickname[name_len] != '\0') name_len++;
-    if (name_len == 0u || name_len == NK_RELAY_NICKNAME_LEN) return 0u;
-    memset(out, 0, NK_LOBBY_LOGIN_SIZE);
+    if (!out || !nk_relay_product_ok(product) || !nk_relay_mac_ok(mac) || !nk_relay_nickname_ok(nickname))
+        return 0u;
+    uint8_t *const name_field = out + 1u + NK_RELAY_MAC_LEN;
     out[0] = NK_LOBBY_LOGIN;
-    memcpy(out + 1, mac, NK_RELAY_MAC_LEN);
-    memcpy(out + 7, nickname, name_len);
-    memcpy(out + 7 + NK_RELAY_NICKNAME_LEN, product, NK_RELAY_PRODUCT_LEN);
+    memcpy(out + 1u, mac, NK_RELAY_MAC_LEN);
+    memset(name_field, 0, NK_RELAY_NICKNAME_LEN);
+    memcpy(name_field, nickname, strlen(nickname)); /* at most NK_RELAY_NICKNAME_LEN, checked */
+    memcpy(name_field + NK_RELAY_NICKNAME_LEN, product, NK_RELAY_PRODUCT_LEN);
     return NK_LOBBY_LOGIN_SIZE;
 }
 
@@ -78,9 +103,10 @@ size_t nk_lobby_bare(uint8_t out[NK_LOBBY_BARE_SIZE], NkLobbyOpcode opcode) {
     return NK_LOBBY_BARE_SIZE;
 }
 
-static void copy_name(char dst[NK_RELAY_NICKNAME_LEN], const uint8_t *src) {
-    memcpy(dst, src, NK_RELAY_NICKNAME_LEN - 1u);
-    dst[NK_RELAY_NICKNAME_LEN - 1u] = '\0';
+/* The whole 128-byte field, which a server may send with no terminator, then one. */
+static void copy_name(char dst[NK_RELAY_NICKNAME_LEN + 1u], const uint8_t *src) {
+    memcpy(dst, src, NK_RELAY_NICKNAME_LEN);
+    dst[NK_RELAY_NICKNAME_LEN] = '\0';
 }
 
 int nk_lobby_parse(const uint8_t *buf, size_t len, NkLobbyEvent *ev) {
@@ -102,7 +128,7 @@ int nk_lobby_parse(const uint8_t *buf, size_t len, NkLobbyEvent *ev) {
     switch (buf[0]) {
     case NK_LOBBY_SCAN:
         memcpy(ev->group, buf + 1, NK_RELAY_GROUP_LEN);
-        memcpy(ev->mac, buf + 1 + NK_RELAY_GROUP_LEN, NK_RELAY_MAC_LEN);
+        memcpy(ev->bssid, buf + 1 + NK_RELAY_GROUP_LEN, NK_RELAY_MAC_LEN);
         break;
     case NK_LOBBY_CONNECT:
         copy_name(ev->nickname, buf + 1);
@@ -113,7 +139,7 @@ int nk_lobby_parse(const uint8_t *buf, size_t len, NkLobbyEvent *ev) {
         ev->peer_id = get32(buf + 1);
         break;
     case NK_LOBBY_CONNECT_BSSID:
-        memcpy(ev->mac, buf + 1, NK_RELAY_MAC_LEN);
+        memcpy(ev->bssid, buf + 1, NK_RELAY_MAC_LEN);
         break;
     case NK_LOBBY_CHAT:
         copy_name(ev->nickname, buf + 1 + 64);

@@ -36,15 +36,26 @@
  *     SCAN_COMPLETE;
  *   - leaving tells each remaining member, newest first (DISCONNECT with the leaver's id), and the
  *     leaver nothing; logging out leaves the group the same way;
- *   - a join while in a group, a group name with a character outside A-Z, a-z and 0-9 (up to the
- *     first zero byte), a leave outside a group and a scan inside one are protocol errors: the
+ *   - a login is refused unless the product code is nine characters A-Z or 0-9, the MAC is
+ *     neither all ones nor all zero and the nickname's first byte is not zero (a nickname may fill
+ *     all 128 bytes of its field); the console stays logged out (NK_NET_BAD_ARG);
+ *   - a login while logged in, a join while in a group, a group name with a character outside
+ *     A-Z, a-z and 0-9 (up to the first zero byte), a leave outside a group and a scan inside one
+ *     are protocol errors: the
  *     server logs the console out (it leaves its group, its sockets close), and the call answers
  *     NK_NET_NOT_LOGGED_IN. The HLE layer refuses such calls itself before they reach a transport.
  *   - an event a console's full queue cannot hold is dropped and counted in events_dropped, as
- *     PPSSPP's server logs a failed send and carries on. A console whose count is above zero has an
- *     incomplete view of the lobby; the HLE layer must treat that as a fault, never carry on.
- * The medium's own rules: a MAC already logged in is refused (PPSSPP's server accepts it), and the
- * peer id is the console's index plus one. The server's product-code overrides, which let some
+ *     PPSSPP's server logs a failed send and carries on; nothing is retried and no call blocks.
+ *     The sender's call still answers NK_NET_OK, and only the receiver's count shows the loss, so
+ *     two consoles can then hold different views of one group. What the receiving guest sees is
+ *     the lobby without that event: a missed CONNECT leaves a member out of its peer list, a
+ *     missed DISCONNECT keeps a member that has left, a missed SCAN leaves a group out of the scan
+ *     result, and a missed CONNECT_BSSID or SCAN_COMPLETE never arrives. The count starts at zero
+ *     at each login. nk_adhoc_drop_report gives the line that names the console and the count.
+ *     The HLE layer does not link this seam yet (src/rt/hle_network.c); when it does, it logs
+ *     that line on reading a count above zero and carries on, as PPSSPP does.
+ * The medium's own rules: a MAC already logged in is refused (PPSSPP's server accepts it), a
+ * login resets events_dropped, and the peer id is the console's index plus one. The server's product-code overrides, which let some
  * product codes share groups, are not modelled: a game meets only consoles running its own
  * product code.
  * Datagrams follow UDP: one to a MAC or port nobody holds in the sender's group is dropped and
@@ -126,5 +137,11 @@ typedef struct NkLoopTrace {
  * and returns how many were queued; a return above NK_LOOPNET_TRACE means some were not kept.
  * Dropped events (events_dropped) are not in it. */
 size_t nk_loopnet_trace(NkAdhocLoopNet *net, NkLoopTrace *out, size_t max);
+
+/* For a log: when t's events_dropped is above zero, writes one line naming the transport, the
+ * console (the caller's number for it: the medium's index, or the HLE layer's own) and the count,
+ * cut to fit buf[cap] and always terminated when cap > 0, and returns the full line's length.
+ * Returns 0, with an empty buf, when nothing was dropped or t is NULL. */
+int nk_adhoc_drop_report(const NkAdhocTransport *t, unsigned console, char *buf, size_t cap);
 
 #endif

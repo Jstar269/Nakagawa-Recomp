@@ -28,19 +28,31 @@
  *     creates has its own and a test run is reproducible.
  *   - A MAC already logged in is refused (NK_NET_BAD_ARG). PPSSPP logs it and accepts it; the
  *     medium delivers datagrams by MAC, and two consoles with one MAC would make that ambiguous.
- *   - Where PPSSPP logs a client out for a request (a join while in a group, a group name with a
- *     character outside A-Z, a-z and 0-9, a leave outside a group, a scan inside one), the medium
+ *   - The login checks are nk_relay_product_ok, nk_relay_mac_ok and nk_relay_nickname_ok
+ *     (nk_adhoc_relay.c), PPSSPP's three checks in its order. They take C strings, so a product
+ *     code must end after nine bytes and a nickname within 128; a refused login answers
+ *     NK_NET_BAD_ARG and leaves the console logged out. A login empties the event queue and sets
+ *     events_dropped to zero, as a new connection starts with nothing sent and nothing lost.
+ *   - Where PPSSPP logs a client out for a request (a login while logged in, a join while in a
+ *     group, a group name with a character outside A-Z, a-z and 0-9, a leave outside a group, a
+ *     scan inside one), the medium
  *     logs the console out the same way: it leaves its group (the members are told) and its
  *     sockets close. The call answers NK_NET_NOT_LOGGED_IN, and the events it was already sent
  *     stay for it to take, as bytes already sent reach a client before its connection closes.
  *   - Left out: the product-code overrides (game_product_override), chat, the status log, the
  *     login timeout and the server's own sockets.
  *
+ * lo_login was first carried over, with small edits, from an earlier version of this file; a
+ * review of pull request #2549 found it, and on 2026-11-12 it was deleted and written again from
+ * login_user_data.
+ *
  * The PDP half (sockets, datagram queues, delivery by MAC and port inside the sender's group,
- * counted drops) is this project's own: PPSSPP's lobby server has no counterpart. */
+ * counted drops) and nk_adhoc_drop_report are this project's own: PPSSPP's lobby server has no
+ * counterpart. */
 
 #include "nk_adhoc_net.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -74,7 +86,7 @@ typedef struct Console {
     unsigned index;
     int logged_in;
     uint8_t mac[NK_RELAY_MAC_LEN];
-    char nickname[NK_RELAY_NICKNAME_LEN];
+    char nickname[NK_RELAY_NICKNAME_LEN + 1u]; /* up to 128 bytes, then a NUL */
     char product[NK_RELAY_PRODUCT_LEN + 1u];
     int group; /* index into net->groups, or -1 */
     NkLobbyEvent events[NK_NET_EVENT_QUEUE];
@@ -223,24 +235,35 @@ static int make_group(NkAdhocLoopNet *net, const char *product, const uint8_t na
     return -1;
 }
 
-/* login_user_data: the relay codec applies PPSSPP's login checks (nk_relay_mac_ok,
- * nk_relay_product_ok, a nickname of 1 to 127 bytes); a refused login stays logged out. */
+/* login_user_data. The server checks the product code (nine characters A-Z or 0-9), then the
+ * MAC (neither all ones nor all zero), then the nickname (a first byte that is not zero), and
+ * refuses a login that fails any of them: PPSSPP logs the client out, which for a client not yet
+ * logged in ends its connection; the console stays logged out and the call answers
+ * NK_NET_BAD_ARG. A login that passes saves the MAC, the nickname and the product code, which
+ * stands for PPSSPP's game node: groups are found per product code (find_group).
+ * The medium's own rules: a MAC another console holds is refused (PPSSPP logs it and accepts it),
+ * and a login starts with an empty event queue and a drop count of zero, as a new connection
+ * does. A LOGIN from a console already logged in is an opcode PPSSPP's server_loop does not take
+ * in that state, so the server logs the console out. */
 static int lo_login(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], const char *nickname,
                     const char *product) {
     Console *c = as_console(t);
-    uint8_t packet[NK_LOBBY_LOGIN_SIZE];
-    if (c->logged_in || nk_lobby_login(packet, mac, nickname, product) == 0u) return NK_NET_BAD_ARG;
+    if (c->logged_in) return drop_client(c);
+    if (!nk_relay_product_ok(product) || !nk_relay_mac_ok(mac) || !nk_relay_nickname_ok(nickname))
+        return NK_NET_BAD_ARG;
+    const NkAdhocLoopNet *net = c->net;
     for (unsigned i = 0; i < NK_LOOPNET_CONSOLES; i++) {
-        const Console *o = &c->net->consoles[i];
-        if (o != c && o->logged_in && memcmp(o->mac, mac, NK_RELAY_MAC_LEN) == 0) return NK_NET_BAD_ARG;
+        const Console *other = &net->consoles[i];
+        if (other->logged_in && memcmp(other->mac, mac, NK_RELAY_MAC_LEN) == 0) return NK_NET_BAD_ARG;
     }
     memcpy(c->mac, mac, NK_RELAY_MAC_LEN);
     memset(c->nickname, 0, sizeof c->nickname);
-    memcpy(c->nickname, nickname, strlen(nickname)); /* nk_lobby_login checked: under 128 bytes */
+    memcpy(c->nickname, nickname, strlen(nickname)); /* at most NK_RELAY_NICKNAME_LEN, checked */
     memcpy(c->product, product, NK_RELAY_PRODUCT_LEN);
     c->product[NK_RELAY_PRODUCT_LEN] = '\0';
     c->group = -1;
-    c->ev_head = c->ev_count = 0;
+    c->ev_head = c->ev_count = 0u;
+    c->ev_dropped = 0u;
     c->logged_in = 1;
     return NK_NET_OK;
 }
@@ -282,7 +305,7 @@ static int lo_connect(NkAdhocTransport *t, const uint8_t group[NK_RELAY_GROUP_LE
     NkLobbyEvent ev;
     memset(&ev, 0, sizeof ev);
     ev.kind = NK_LOBBY_CONNECT_BSSID;
-    memcpy(ev.mac, g->bssid, NK_RELAY_MAC_LEN);
+    memcpy(ev.bssid, g->bssid, NK_RELAY_MAC_LEN);
     send_event(c, &ev);
     return NK_NET_OK;
 }
@@ -317,7 +340,7 @@ static int lo_scan(NkAdhocTransport *t) {
         memset(&ev, 0, sizeof ev);
         ev.kind = NK_LOBBY_SCAN;
         memcpy(ev.group, g->name, NK_RELAY_GROUP_LEN);
-        memcpy(ev.mac, g->bssid, NK_RELAY_MAC_LEN);
+        memcpy(ev.bssid, g->bssid, NK_RELAY_MAC_LEN);
         send_event(c, &ev);
         below = g->number;
     }
@@ -462,4 +485,22 @@ size_t nk_loopnet_trace(NkAdhocLoopNet *net, NkLoopTrace *out, size_t max) {
     const size_t queued = net->trace_count;
     net->trace_count = 0;
     return queued;
+}
+
+int nk_adhoc_drop_report(const NkAdhocTransport *t, unsigned console, char *buf, size_t cap) {
+    if (buf && cap > 0u) buf[0] = '\0';
+    if (!t || !t->ops || !t->ops->events_dropped) return 0;
+    const uint32_t dropped = t->ops->events_dropped(t);
+    if (dropped == 0u) return 0;
+    /* snprintf cuts the line to fit and terminates it, and returns the full length. */
+    char *const dst = (buf && cap > 0u) ? buf : NULL;
+    const int n = snprintf(dst, dst ? cap : 0u,
+                           "adhoc %s: console %u dropped %lu lobby event(s) since login; its view of "
+                           "the group may be incomplete",
+                           t->ops->name ? t->ops->name : "?", console, (unsigned long)dropped);
+    if (n < 0) {
+        if (dst) dst[0] = '\0';
+        return 0;
+    }
+    return n;
 }

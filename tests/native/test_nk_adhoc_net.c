@@ -80,15 +80,17 @@ static void test_alone(void) {
     CHECK(a->ops->disconnect(a) == NK_NET_NOT_LOGGED_IN, "leave before login is refused");
     CHECK(a->ops->pdp_open(a, 0x1234) == NK_NET_NOT_LOGGED_IN, "a socket before login is refused");
     CHECK(login(a, k_a, "Alone", k_game) == NK_NET_OK, "login");
-    CHECK(login(a, k_a, "Alone", k_game) == NK_NET_BAD_ARG, "a second login is refused");
+    CHECK(login(a, k_a, "Alone", k_game) == NK_NET_NOT_LOGGED_IN && a->ops->scan(a) == NK_NET_NOT_LOGGED_IN,
+          "a second login is a protocol error: the console is logged out, as PPSSPP's server_loop does");
+    CHECK(login(a, k_a, "Alone", k_game) == NK_NET_OK, "and may log in again");
 
     CHECK(a->ops->scan(a) == NK_NET_OK, "scan");
     CHECK(take(a, ev, 8) == 1 && ev[0].kind == NK_LOBBY_SCAN_COMPLETE, "an empty scan only completes");
 
     CHECK(a->ops->connect(a, k_g1) == NK_NET_OK, "create");
     size_t n = take(a, ev, 8);
-    CHECK(n == 1 && ev[0].kind == NK_LOBBY_CONNECT_BSSID && is_own_bssid(ev[0].mac) &&
-              memcmp(ev[0].mac, k_a, 6) != 0,
+    CHECK(n == 1 && ev[0].kind == NK_LOBBY_CONNECT_BSSID && is_own_bssid(ev[0].bssid) &&
+              memcmp(ev[0].bssid, k_a, 6) != 0,
           "a creator alone hears only the group's BSSID, a locally administered address that is "
           "not its MAC (got %zu events)", n);
 
@@ -117,13 +119,30 @@ static void test_login_rules(void) {
     CHECK(login(a, zero, "Alpha", k_game) == NK_NET_BAD_ARG, "the all-zero MAC is refused");
     CHECK(login(a, ones, "Alpha", k_game) == NK_NET_BAD_ARG, "the all-ones MAC is refused");
     CHECK(login(a, k_a, "", k_game) == NK_NET_BAD_ARG, "an empty nickname is refused");
+    char too_long[NK_RELAY_NICKNAME_LEN + 2u];
+    memset(too_long, 'n', NK_RELAY_NICKNAME_LEN + 1u);
+    too_long[NK_RELAY_NICKNAME_LEN + 1u] = '\0';
+    CHECK(login(a, k_a, too_long, k_game) == NK_NET_BAD_ARG,
+          "a 129-byte nickname does not fit the 128-byte field and is refused");
     CHECK(login(a, k_a, "Alpha", "ulus10000") == NK_NET_BAD_ARG, "a product code in lower case");
     CHECK(login(a, k_a, "Alpha", NULL) == NK_NET_BAD_ARG && login(a, NULL, "Alpha", k_game) == NK_NET_BAD_ARG,
           "NULL arguments");
     CHECK(a->ops->scan(a) == NK_NET_NOT_LOGGED_IN, "a refused login leaves the console logged out");
-    CHECK(login(a, k_a, "Alpha", k_game) == NK_NET_OK, "then a valid login");
+    char longest[NK_RELAY_NICKNAME_LEN + 1u];
+    memset(longest, 'n', NK_RELAY_NICKNAME_LEN);
+    longest[NK_RELAY_NICKNAME_LEN] = '\0';
+    CHECK(login(a, k_a, longest, k_game) == NK_NET_OK,
+          "then a valid login, with a 128-byte nickname that fills the field (PPSSPP checks only "
+          "its first byte)");
     CHECK(login(b, k_a, "Copy", k_game) == NK_NET_BAD_ARG,
           "a MAC already logged in is refused (the medium's rule; PPSSPP's server accepts it)");
+    CHECK(login(b, k_b, "Bravo", k_game) == NK_NET_OK && a->ops->connect(a, k_g1) == NK_NET_OK &&
+              b->ops->connect(b, k_g1) == NK_NET_OK,
+          "B logs in and joins A's group");
+    NkLobbyEvent ev[4];
+    CHECK(take(b, ev, 4) == 2u && ev[0].kind == NK_LOBBY_CONNECT &&
+              strlen(ev[0].nickname) == NK_RELAY_NICKNAME_LEN && strcmp(ev[0].nickname, longest) == 0,
+          "and hears A's 128-byte nickname whole");
     nk_loopnet_destroy(net);
 }
 
@@ -145,7 +164,7 @@ static void test_join_order(void) {
     CHECK(trace_is(net, t_a, 1, "A creates"), "the creator alone hears the BSSID");
     CHECK(take(a, ev, 8) == 1, "one event for A");
     uint8_t bssid[6];
-    memcpy(bssid, ev[0].mac, 6);
+    memcpy(bssid, ev[0].bssid, 6);
 
     CHECK(b->ops->connect(b, k_g1) == NK_NET_OK, "B joins");
     static const NkLoopTrace t_b[] = {
@@ -154,7 +173,7 @@ static void test_join_order(void) {
     size_t n = take(b, ev, 8);
     CHECK(n == 2 && ev[0].kind == NK_LOBBY_CONNECT && memcmp(ev[0].mac, k_a, 6) == 0 &&
               strcmp(ev[0].nickname, "Alpha") == 0 && ev[0].peer_id == ID_A &&
-              ev[1].kind == NK_LOBBY_CONNECT_BSSID && memcmp(ev[1].mac, bssid, 6) == 0,
+              ev[1].kind == NK_LOBBY_CONNECT_BSSID && memcmp(ev[1].bssid, bssid, 6) == 0,
           "B hears of A with A's MAC, nickname and id, then the group's BSSID");
     n = take(a, ev, 8);
     CHECK(n == 1 && ev[0].kind == NK_LOBBY_CONNECT && memcmp(ev[0].mac, k_b, 6) == 0 &&
@@ -177,7 +196,7 @@ static void test_join_order(void) {
     n = take(d, ev, 8);
     CHECK(n == 4 && memcmp(ev[0].mac, k_c, 6) == 0 && memcmp(ev[1].mac, k_b, 6) == 0 &&
               memcmp(ev[2].mac, k_a, 6) == 0 && ev[3].kind == NK_LOBBY_CONNECT_BSSID &&
-              memcmp(ev[3].mac, bssid, 6) == 0,
+              memcmp(ev[3].bssid, bssid, 6) == 0,
           "D hears of C, B, A, then the same BSSID");
     take(a, ev, 8);
     take(b, ev, 8);
@@ -199,7 +218,7 @@ static void test_leave_order(void) {
     a->ops->connect(a, k_g1);
     take(a, ev, 8);
     uint8_t bssid[6];
-    memcpy(bssid, ev[0].mac, 6);
+    memcpy(bssid, ev[0].bssid, 6);
     b->ops->connect(b, k_g1);
     c->ops->connect(c, k_g1);
     d->ops->connect(d, k_g1);
@@ -225,7 +244,7 @@ static void test_leave_order(void) {
     a->ops->scan(a);
     size_t n = take(a, ev, 8);
     CHECK(n == 2 && ev[0].kind == NK_LOBBY_SCAN && memcmp(ev[0].group, k_g1, 8) == 0 &&
-              memcmp(ev[0].mac, bssid, 6) == 0 && ev[1].kind == NK_LOBBY_SCAN_COMPLETE,
+              memcmp(ev[0].bssid, bssid, 6) == 0 && ev[1].kind == NK_LOBBY_SCAN_COMPLETE,
           "the group outlives its creator with the same BSSID");
 
     /* B joins again: it hears of D and C, newest first, and the unchanged BSSID. */
@@ -236,7 +255,7 @@ static void test_leave_order(void) {
                                            {B, NK_LOBBY_CONNECT_BSSID, 0}};
     CHECK(trace_is(net, t_rejoin, 5, "B rejoins"), "a rejoin is a join");
     n = take(b, ev, 8);
-    CHECK(n == 3 && memcmp(ev[2].mac, bssid, 6) == 0, "the BSSID did not change");
+    CHECK(n == 3 && memcmp(ev[2].bssid, bssid, 6) == 0, "the BSSID did not change");
 
     /* Now B is the newest member: when D leaves, B hears first. */
     d->ops->disconnect(d);
@@ -257,8 +276,8 @@ static void test_leave_order(void) {
     a->ops->scan(a);
     CHECK(take(a, ev, 8) == 1 && ev[0].kind == NK_LOBBY_SCAN_COMPLETE, "the empty group is gone");
     a->ops->connect(a, k_g1);
-    CHECK(take(a, ev, 8) == 1 && ev[0].kind == NK_LOBBY_CONNECT_BSSID && is_own_bssid(ev[0].mac) &&
-              memcmp(ev[0].mac, bssid, 6) != 0,
+    CHECK(take(a, ev, 8) == 1 && ev[0].kind == NK_LOBBY_CONNECT_BSSID && is_own_bssid(ev[0].bssid) &&
+              memcmp(ev[0].bssid, bssid, 6) != 0,
           "a group made again gets a new BSSID");
     nk_loopnet_destroy(net);
 }
@@ -278,13 +297,13 @@ static void test_scan_order(void) {
     /* Made in the order GROUP001, MIKE0003, ALPHA002: name order would be ALPHA, GROUP, MIKE. */
     a->ops->connect(a, k_g1);
     take(a, ev, 8);
-    memcpy(bssid[0], ev[0].mac, 6);
+    memcpy(bssid[0], ev[0].bssid, 6);
     b->ops->connect(b, k_g3);
     take(b, ev, 8);
-    memcpy(bssid[1], ev[0].mac, 6);
+    memcpy(bssid[1], ev[0].bssid, 6);
     c->ops->connect(c, k_g2);
     take(c, ev, 8);
-    memcpy(bssid[2], ev[0].mac, 6);
+    memcpy(bssid[2], ev[0].bssid, 6);
     CHECK(memcmp(bssid[0], bssid[1], 6) != 0 && memcmp(bssid[1], bssid[2], 6) != 0 &&
               memcmp(bssid[0], bssid[2], 6) != 0,
           "each group has its own BSSID");
@@ -295,9 +314,9 @@ static void test_scan_order(void) {
                                          {D, NK_LOBBY_SCAN, 0}, {D, NK_LOBBY_SCAN_COMPLETE, 0}};
     CHECK(trace_is(net, t_scan, 4, "scan"), "only the scanner hears");
     size_t n = take(d, ev, 8);
-    CHECK(n == 4 && memcmp(ev[0].group, k_g2, 8) == 0 && memcmp(ev[0].mac, bssid[2], 6) == 0 &&
-              memcmp(ev[1].group, k_g3, 8) == 0 && memcmp(ev[1].mac, bssid[1], 6) == 0 &&
-              memcmp(ev[2].group, k_g1, 8) == 0 && memcmp(ev[2].mac, bssid[0], 6) == 0 &&
+    CHECK(n == 4 && memcmp(ev[0].group, k_g2, 8) == 0 && memcmp(ev[0].bssid, bssid[2], 6) == 0 &&
+              memcmp(ev[1].group, k_g3, 8) == 0 && memcmp(ev[1].bssid, bssid[1], 6) == 0 &&
+              memcmp(ev[2].group, k_g1, 8) == 0 && memcmp(ev[2].bssid, bssid[0], 6) == 0 &&
               ev[3].kind == NK_LOBBY_SCAN_COMPLETE,
           "ALPHA002, MIKE0003, GROUP001 (newest first), each with its BSSID, then complete");
 
@@ -488,6 +507,27 @@ static void test_event_overflow(void) {
               ev[0].kind == NK_LOBBY_CONNECT && ev[0].peer_id == ID_A,
           "and the lobby carries on");
     CHECK(a->ops->events_dropped(a) == 2u, "the count stays");
+
+    /* The report names the console and the count; the sender never learns of the drop. */
+    char line[160];
+    const char *want = "adhoc loopback: console 0 dropped 2 lobby event(s) since login; its view of "
+                       "the group may be incomplete";
+    CHECK(nk_adhoc_drop_report(a, 0, line, sizeof line) == (int)strlen(want) && strcmp(line, want) == 0,
+          "the report: %s", line);
+    CHECK(nk_adhoc_drop_report(b, 1, line, sizeof line) == 0 && line[0] == '\0',
+          "nothing to report for B");
+    char cut[8];
+    CHECK(nk_adhoc_drop_report(a, 0, cut, sizeof cut) == (int)strlen(want) && strlen(cut) == 7u &&
+              memcmp(cut, want, 7) == 0,
+          "a short buffer gets the line cut and terminated, and the full length");
+    CHECK(nk_adhoc_drop_report(NULL, 0, line, sizeof line) == 0 && line[0] == '\0', "no transport");
+
+    /* A new login is a new connection: the count starts again at zero. */
+    CHECK(a->ops->logout(a) == NK_NET_OK && a->ops->events_dropped(a) == 2u,
+          "the count survives the logout");
+    CHECK(login(a, k_a, "Alpha", k_game) == NK_NET_OK && a->ops->events_dropped(a) == 0u &&
+              nk_adhoc_drop_report(a, 0, line, sizeof line) == 0,
+          "and is zero after the next login");
     nk_loopnet_destroy(net);
 }
 
