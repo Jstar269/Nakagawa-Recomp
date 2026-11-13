@@ -341,6 +341,14 @@ static void test_check_boundaries(void) {
         free(field);
     }
     CHECK(!nk_relay_nickname_field_ok(NULL), "no field");
+    /* The field at the end of a buffer, then a guard byte the check must never read: its answer
+     * is the same whatever the guard holds. */
+    uint8_t guarded[NK_RELAY_NICKNAME_LEN + 1u];
+    memset(guarded, 'n', NK_RELAY_NICKNAME_LEN);
+    for (unsigned guard = 0; guard < 256u; guard++) {
+        guarded[NK_RELAY_NICKNAME_LEN] = (uint8_t)guard;
+        CHECK(nk_relay_nickname_field_ok(guarded), "a full field followed by guard byte %u", guard);
+    }
 }
 
 int main(void) {

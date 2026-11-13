@@ -682,6 +682,29 @@ static void test_group_numbers_past_32_bits(void) {
     nk_loopnet_destroy(net);
 }
 
+/* The skip holds against a live group numbered at or above 2^32 too: a new group whose number
+ * shares its low 32 bits with that group's moves on to the next number. */
+static void test_bssid_skip_above_32_bits(void) {
+    NkAdhocLoopNet *net = nk_loopnet_create();
+    NkAdhocTransport *a = nk_loopnet_console(net, A), *b = nk_loopnet_console(net, B);
+    NkLobbyEvent ev[8];
+    login(a, k_a, "Alpha", k_game);
+    login(b, k_b, "Bravo", k_game);
+    uint8_t bssid_a[6];
+    nk_loopnet_set_groups_made(net, UINT64_C(0x200000004));
+    a->ops->connect(a, k_g1); /* number 2^33 + 5 */
+    CHECK(take(a, ev, 8) == 1u, "A's group");
+    memcpy(bssid_a, ev[0].bssid, 6);
+    nk_loopnet_set_groups_made(net, UINT64_C(0x400000004));
+    b->ops->connect(b, k_g2); /* 2^34 + 5 shares A's low 32 bits, so 2^34 + 6 */
+    CHECK(take(b, ev, 8) == 1u, "B's group");
+    static const uint8_t want_a[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x05};
+    static const uint8_t want_b[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x06};
+    CHECK(memcmp(bssid_a, want_a, 6) == 0 && memcmp(ev[0].bssid, want_b, 6) == 0,
+          "B's group skips the number whose BSSID A's group, numbered above 2^32, holds");
+    nk_loopnet_destroy(net);
+}
+
 int main(void) {
     test_alone();
     test_login_rules();
@@ -698,6 +721,7 @@ int main(void) {
     test_socket_bounds();
     test_drop_counts_reset_at_login();
     test_group_numbers_past_32_bits();
+    test_bssid_skip_above_32_bits();
     if (g_failures) {
         fprintf(stderr, "test_nk_adhoc_net: %d failure(s)\n", g_failures);
         return 1;

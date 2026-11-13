@@ -22,7 +22,10 @@
  * in nk_lobby_login) are written from PPSSPP's login_user_data; none is from aemu_postoffice. An
  * earlier version of this file carried them over, with small edits, from its 2026-11-06 version,
  * which followed aemu_postoffice; reviews of pull request #2549 found this, and on 2026-11-12 each
- * was deleted and written again from login_user_data, nk_relay_product_ok last.
+ * was deleted and written again from login_user_data, nk_relay_product_ok last. The session that
+ * wrote nk_relay_product_ok again opened no aemu_postoffice source; it had read the old
+ * product-check body earlier, while checking src/core/PROVENANCE.md's wording, and wrote the new
+ * one from login_user_data without opening the old one again.
  *
  * Known limits for the wiring step (nothing calls this codec yet; the slice that opens the relay
  * connection decides them):
@@ -35,7 +38,13 @@
  *     product (a lower-case one too, as a PSP does), while the server's rule here refuses lower
  *     case; sceNetAdhocctlGetParameter writes at most 127 bytes of the nickname and a NUL, while
  *     the server accepts 128. The player caps a nickname at 32 bytes (#2197), so the second never
- *     shows today; the wiring step maps the first (refuse at login, or report it). */
+ *     shows today; the wiring step maps the first (refuse at login, or report it).
+ *   - An inbound relay port of 0 or of the offset itself (10000 by default) comes back as guest
+ *     port 0. A peer that follows the protocol never sends the second, since only port 0 maps
+ *     there and it goes out as 0; the consumer refuses a 0 from nk_relay_port_in.
+ *   - The codec keeps no state, so the reader that the wiring step adds caps its buffer at the
+ *     largest packet (193 bytes on the lobby, 14 + 10240 for a PDP datagram, 4 + 51200 for a PTP
+ *     block) and times out a packet a peer leaves unfinished. */
 
 #include "nk_adhoc_relay.h"
 
