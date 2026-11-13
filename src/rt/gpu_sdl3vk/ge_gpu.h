@@ -307,7 +307,7 @@ int gegpu_texscale_selftest(void); /* texture scaling and the smart 2D filter (t
 int gegpu_texrepl_only_prepare(const char *build_root); /* --repl-only: write the pack, set SR_TEX_REPLACE, before gegpu_init */
 int gegpu_texrepl_only_selftest(void); /* --repl-only: SR_TEX_REPLACE with no texture scaling */
 int gegpu_glyph_selftest(void);         /* sharp game text (glyph_recon.h) */
-int gegpu_glyph_authentic_selftest(void); /* --authentic: the scene, no glyph rebuilt, a hash of the picture */
+int gegpu_glyph_scene_selftest(void);   /* --scene-hash, --authentic: the scene and a hash of the picture */
 
 void gegpu_shutdown(void);
 
