@@ -3661,6 +3661,19 @@ class TestSanitizedBringup(unittest.TestCase):
             "the run stops here (#308)\n"),
             ("BOUNDARY", "VTIMER_HANDLER"))
 
+    def test_an_adhocctl_handler_fault_is_a_named_boundary(self):
+        # The exact line src/rt/hle_network.c prints when a sceNetAdhocctl handler faults on the
+        # library's thread (hle_thread_selftest checks the runtime prints it).
+        line = ("SEMANTIC_BOUNDARY: adhocctl-handler-fault; handler 0x089e0100 (id 0, event 1) "
+                "faulted at 0x089e0100 on the ad hoc control thread; the run stops here\n")
+        self.assertEqual(nk_cli.runtime_stop(line), ("BOUNDARY", "adhocctl-handler-fault"))
+        self.assertEqual(nk_cli.runtime_output_kind(line, []), "SEMANTIC_BOUNDARY")
+        # The form it replaced carries no code the classifier can name.
+        old = ("SEMANTIC_BOUNDARY: sceNetAdhocctl handler 0x089e0100 (id 0, event 1) faulted at "
+               "0x089e0100 on the ad hoc control thread; the run stops here\n")
+        self.assertIsNone(nk_cli.runtime_stop(old))
+        self.assertEqual(nk_cli.runtime_output_kind(old, []), "OTHER")
+
     def test_report_schema_rejects_unwhitelisted_and_address_shaped_values(self):
         report = nk_cli._new_bringup_report()
         report["guest_pc"] = "0x08800000"

@@ -8377,8 +8377,9 @@ static void test_unregistered_batch_refusals(void) {
 
 /* #1139 phase 0: the public PSPSDK ad hoc surface (pspnet_adhoc.h 22, pspnet_adhocctl.h 21,
  * pspnet_adhocmatching.h 16 prototypes; NIDs are sha1(name)) is refused by name with the offline
- * network code 0x80010086. That code is the runtime's documented refusal, not a measured ad hoc
- * result. A NID missing from the registry would reach sr_syscall's unknown-NID stop, so membership is
+ * network code 0x80010086, except the sceNetAdhocctl calls a lone console has recordings for
+ * (phase 1a, test_adhocctl_lone_console). That code is the runtime's documented refusal, not a
+ * measured ad hoc result. A NID missing from the registry would reach sr_syscall's unknown-NID stop, so membership is
  * checked before the call. */
 static void test_adhoc_named_refusals(void) {
     static const struct {
@@ -8407,26 +8408,13 @@ static void test_adhoc_named_refusals(void) {
         {0x8bea2b3eu, "sceNetAdhocPtpRecv"},
         {0x4da4c788u, "sceNetAdhocPtpSend"},
         {0xa62c6f57u, "sceNetAdhocTerm"},
-        {0x20b317a0u, "sceNetAdhocctlAddHandler"},
-        {0x0ad043edu, "sceNetAdhocctlConnect"},
-        {0xec0635c1u, "sceNetAdhocctlCreate"},
         {0xa5c055ceu, "sceNetAdhocctlCreateEnterGameMode"},
-        {0x6402490bu, "sceNetAdhocctlDelHandler"},
-        {0x34401d65u, "sceNetAdhocctlDisconnect"},
         {0xcf8e084du, "sceNetAdhocctlExitGameMode"},
         {0x99560abeu, "sceNetAdhocctlGetAddrByName"},
-        {0x362cbe8fu, "sceNetAdhocctlGetAdhocId"},
         {0x5a014ce0u, "sceNetAdhocctlGetGameModeInfo"},
         {0x8916c003u, "sceNetAdhocctlGetNameByAddr"},
-        {0x8db83fdcu, "sceNetAdhocctlGetPeerInfo"},
-        {0xe162cb14u, "sceNetAdhocctlGetPeerList"},
-        {0x81aee1beu, "sceNetAdhocctlGetScanInfo"},
-        {0x75ecd386u, "sceNetAdhocctlGetState"},
-        {0xe26f226eu, "sceNetAdhocctlInit"},
         {0x5e7f79c9u, "sceNetAdhocctlJoin"},
         {0x1ff89745u, "sceNetAdhocctlJoinEnterGameMode"},
-        {0x08fff7a0u, "sceNetAdhocctlScan"},
-        {0x9d689e13u, "sceNetAdhocctlTerm"},
         {0xec19337du, "sceNetAdhocMatchingAbortSendData"},
         {0xea3c6108u, "sceNetAdhocMatchingCancelTarget"},
         {0x8f58bedfu, "sceNetAdhocMatchingCancelTargetWithOpt"},
@@ -8444,8 +8432,9 @@ static void test_adhoc_named_refusals(void) {
         {0x32b156b3u, "sceNetAdhocMatchingStop"},
         {0x7945ecdau, "sceNetAdhocMatchingTerm"},
     };
-    expect(sizeof(adhoc) / sizeof(adhoc[0]) == 58u,
-           "the public ad hoc surface less sceNetAdhocctlGetParameter (test_net_core_without_network) has 58 prototypes");
+    expect(sizeof(adhoc) / sizeof(adhoc[0]) == 45u,
+           "the public ad hoc surface less the 14 modelled sceNetAdhocctl calls "
+           "(test_adhocctl_lone_console) has 45 prototypes");
     reset_fixture();
     sr_hle_init();
     for (size_t i = 0; i < sizeof(adhoc) / sizeof(adhoc[0]); i++) {
@@ -8458,6 +8447,822 @@ static void test_adhoc_named_refusals(void) {
         expect(sr_syscall(&cpu, adhoc[i].nid) == 0x80010086u,
                "public ad hoc NID refuses with the offline network code 0x80010086");
     }
+}
+
+/* #1139 phase 1a: sceNetAdhocctl on a console alone. A guest thread drives the production
+ * handlers through sr_syscall; the library's own thread (an HLE service thread) delivers each
+ * event to the registered guest handler, which records it with the guest time, the thread it ran
+ * on, and the state GetState gave it. Every expected value is a PSP recording (pspautotests
+ * 70e72391 tests/net/adhoc, cited at each handler in hle_network.c); the event times are the
+ * recorded medians, so each event must arrive at its request's time plus that median, not before.
+ *
+ * MUTANT: drop the 0xC00 stack check in h_NetAdhocctlInit -- stack 0x400 is accepted.
+ * MUTANT: deliver each event as soon as the library's thread runs -- it arrives before its time.
+ * MUTANT: allow five handlers -- the fifth AddHandler is accepted.
+ * MUTANT: no BUSY during a Create -- the Scan, Create and Disconnect cells fail.
+ * MUTANT: BUSY for every request while a Create or Connect is in flight -- the Connect during a
+ *   Create, and the Scan, Create and Connect during a Connect, answer BUSY instead of stopping.
+ * MUTANT: leave a handler's fault as a flag on the library's thread -- the fault child runs on.
+ * MUTANT: the fault line in the old "sceNetAdhocctl handler" form -- the fault cell finds no
+ *   SEMANTIC_BOUNDARY line tools/nk_cli.py classifies.
+ * MUTANT: exit 1 on a handler's fault without the line, or without the flight-recorder fatal --
+ *   the fault cell fails; so does a child that exits 1 before it runs the fixture.
+ * MUTANT: check BUSY before the group name -- a Create with an invalid group during a Create
+ *   answers BUSY instead of stopping.
+ * MUTANT: no check that the library's thread is alive -- a Create after the guest ended that
+ *   thread answers 0 and nothing ever answers it.
+ * MUTANT: sceNetTerm with sceNetAdhocctl live returns 0 -- the sceNetTerm cell fails.
+ * MUTANT (sched.c): a kick ends any delay of a service thread -- the handler's own guest delay is
+ *   cut short.
+ * MUTANT: no scanning state -- GetState stays 0 during a scan.
+ * MUTANT: start a request while in a group -- no ALREADY_CONNECTED events. */
+extern uint32_t sr_hle_test_adhocctl_thread(void);
+#define ADH_NID_INIT         0xe26f226eu
+#define ADH_NID_TERM         0x9d689e13u
+#define ADH_NID_ADD_HANDLER  0x20b317a0u
+#define ADH_NID_DEL_HANDLER  0x6402490bu
+#define ADH_NID_GET_STATE    0x75ecd386u
+#define ADH_NID_GET_PARAM    0xded9d28eu
+#define ADH_NID_GET_ID       0x362cbe8fu
+#define ADH_NID_PEER_LIST    0xe162cb14u
+#define ADH_NID_PEER_INFO    0x8db83fdcu
+#define ADH_NID_SCAN_INFO    0x81aee1beu
+#define ADH_NID_CREATE       0xec0635c1u
+#define ADH_NID_CONNECT      0x0ad043edu
+#define ADH_NID_SCAN         0x08fff7a0u
+#define ADH_NID_DISCONNECT   0x34401d65u
+#define ADH_NID_NET_INIT     0x39af39a6u
+#define ADH_NID_NET_TERM     0x281928a9u
+#define ADH_NID_LOCAL_ETHER  0x0bf0a3aeu
+#define ADH_NID_WLAN_ETHER   0x0c622081u
+enum {
+    ADH_MAIN_ENTRY = 0x089e0000u,
+    ADH_HANDLER = 0x089e0100u,
+    ADH_ID = 0x089e1000u,        /* AdhocId: type, product[9], padding[3] */
+    ADH_ID_LOWER = 0x089e1020u,
+    ADH_ID_TYPE3 = 0x089e1040u,
+    ADH_NAMES = 0x089e1100u,     /* group names, 16 bytes apart */
+    ADH_OUT = 0x089e1400u,
+    ADH_STATE_IN_HANDLER = 0x089e1410u,
+    ADH_PARAM = 0x089e1800u,
+    ADH_PEERS = 0x089e1c00u,
+    ADH_MAC = 0x089e1e00u,
+    ADH_WLAN_MAC = 0x089e1e10u,
+    ADH_LOG_MAX = 32
+};
+#define ADH_CREATE_US     1116728u
+#define ADH_CONNECT_US    4087045u
+#define ADH_DISCONNECT_US 104638u
+#define ADH_SCAN_US       991527u
+#define ADH_SLACK_US      50000u
+
+static struct {
+    int event;
+    uint32_t error, arg, uid, state_rc, state;
+    uint64_t at;
+} s_adh_log[ADH_LOG_MAX + 1];   /* the last entry stays empty: ADH_AT's answer out of range */
+#define ADH_AT(i) s_adh_log[(unsigned)(i) < ADH_LOG_MAX ? (unsigned)(i) : ADH_LOG_MAX]
+static unsigned s_adh_events;
+static int s_adh_done;
+
+/* What the handler does after it records an event; each mode applies to one event. */
+enum { ADH_MODE_RECORD = 0, ADH_MODE_TERM, ADH_MODE_INIT, ADH_MODE_DELAY, ADH_MODE_FAULT };
+#define ADH_HANDLER_DELAY_US 200000u
+#define ADH_STOPPED 0x80020002u   /* what a named stop answers in this harness (SCE_KERNEL_ERROR_NOTIMP) */
+static int s_adh_mode;
+static uint32_t s_adh_handler_rc;              /* the Term or Init the handler called */
+static uint64_t s_adh_delay_in, s_adh_delay_out;
+static uint32_t s_adh_loadexec_thread;
+extern int sr_hle_test_net_inited(void);
+extern int sr_hle_test_adhocctl_state(void);
+
+static uint32_t adh(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2) {
+    CpuState sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.r[4] = a0;
+    sc.r[5] = a1;
+    sc.r[6] = a2;
+    return sr_syscall(&sc, nid);
+}
+
+static void adh_handler_fn(CpuState *cpu) {
+    if (s_adh_events < ADH_LOG_MAX) {
+        s_adh_log[s_adh_events].event = (int)cpu->r[4];
+        s_adh_log[s_adh_events].error = cpu->r[5];
+        s_adh_log[s_adh_events].arg = cpu->r[6];
+        s_adh_log[s_adh_events].uid = sched_current_uid();
+        s_adh_log[s_adh_events].at = sched_vtime_us();
+        MEM_W32(ADH_STATE_IN_HANDLER, 0xffffffffu);
+        s_adh_log[s_adh_events].state_rc = adh(ADH_NID_GET_STATE, ADH_STATE_IN_HANDLER, 0u, 0u);
+        s_adh_log[s_adh_events].state = MEM_R32(ADH_STATE_IN_HANDLER);
+    }
+    s_adh_events++;
+    const int mode = s_adh_mode;
+    s_adh_mode = ADH_MODE_RECORD;
+    if (mode == ADH_MODE_TERM) {
+        s_adh_handler_rc = adh(ADH_NID_TERM, 0u, 0u, 0u);
+    } else if (mode == ADH_MODE_INIT) {
+        s_adh_handler_rc = adh(ADH_NID_INIT, 0x2000u, 0x30u, ADH_ID);
+    } else if (mode == ADH_MODE_DELAY) {
+        s_adh_delay_in = sched_vtime_us();
+        cpu->r[4] = ADH_HANDLER_DELAY_US;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+        s_adh_delay_out = sched_vtime_us();
+    } else if (mode == ADH_MODE_FAULT) {
+        cpu->flow_kind = SR_FLOW_FATAL;   /* as a fault inside the handler leaves it */
+        cpu->flow_target = ADH_HANDLER;
+        return;
+    }
+    cpu->r[2] = 0u;
+}
+
+/* The GetState result, with the state in *state (0xffffffff when nothing was written). */
+static uint32_t adh_get_state(uint32_t *state) {
+    MEM_W32(ADH_OUT, 0xffffffffu);
+    const uint32_t rc = adh(ADH_NID_GET_STATE, ADH_OUT, 0u, 0u);
+    *state = MEM_R32(ADH_OUT);
+    return rc;
+}
+
+static uint32_t adh_state(void) {
+    uint32_t state;
+    return adh_get_state(&state) == 0u ? state : 0xfffffff0u;
+}
+
+static void adh_delay_until(CpuState *cpu, uint64_t at) {
+    const uint64_t now = sched_vtime_us();
+    if (at <= now) return;
+    cpu->r[4] = (uint32_t)(at - now);
+    (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+}
+
+static uint32_t adh_name(unsigned slot, const char *name) {
+    const uint32_t addr = ADH_NAMES + 16u * slot;
+    for (unsigned i = 0; i < 16u; i++) MEM_W8(addr + i, 0u);
+    for (unsigned i = 0; name[i] && i < 15u; i++) MEM_W8(addr + i, (uint8_t)name[i]);
+    return addr;
+}
+
+static uint32_t adh_init(uint32_t stack, uint32_t priority, uint32_t id) {
+    return adh(ADH_NID_INIT, stack, priority, id);
+}
+
+/* Starts a request and follows it: 0 from the call, GetState `after_call` right after it and
+ * `waiting` once the library's thread has run, no event before the request's time plus delay_us,
+ * then exactly one event `event` (error 0) on the library's thread, by then with state `done`.
+ * The fixture's clock moves in scheduler quanta, so a sleeper wakes up to a few tens of ms after
+ * its deadline: the test looks ADH_SLACK_US before the event is due and ADH_SLACK_US after,
+ * and the event's own time must not be early and at most ADH_SLACK_US late. */
+static void adh_expect_request(CpuState *cpu, const char *what, uint32_t nid, uint32_t a0,
+                               uint64_t delay_us, uint32_t after_call, uint32_t waiting, int event,
+                               uint32_t done) {
+    char msg[256];
+    const unsigned n = s_adh_events;
+    const uint64_t t0 = sched_vtime_us();
+    const uint32_t rc = adh(nid, a0, 0u, 0u);
+    const uint64_t t1 = sched_vtime_us();
+    const uint32_t right_after = adh_state();
+    snprintf(msg, sizeof(msg), "%s: returns 0, state %u right after the call", what, after_call);
+    expect(rc == 0u && right_after == after_call && s_adh_events == n, msg);
+    adh_delay_until(cpu, t0 + delay_us - ADH_SLACK_US);
+    snprintf(msg, sizeof(msg), "%s: no event before %llu us, state %u meanwhile", what,
+             (unsigned long long)delay_us, waiting);
+    expect(s_adh_events == n && adh_state() == waiting, msg);
+    adh_delay_until(cpu, t1 + delay_us + ADH_SLACK_US);
+    const uint32_t thread = sr_hle_test_adhocctl_thread();
+    snprintf(msg, sizeof(msg), "%s: event %d (error 0) on the library thread at +%llu us, "
+             "with state %u set when the handler runs", what, event, (unsigned long long)delay_us, done);
+    const int ok = s_adh_events == n + 1u && ADH_AT(n).event == event && ADH_AT(n).error == 0u &&
+                   ADH_AT(n).uid == thread && thread != 0u && thread != sched_current_uid() &&
+                   ADH_AT(n).at >= t0 + delay_us && ADH_AT(n).at <= t1 + delay_us + ADH_SLACK_US &&
+                   ADH_AT(n).state_rc == 0u && ADH_AT(n).state == done && adh_state() == done;
+    if (!ok && n < ADH_LOG_MAX)
+        fprintf(stderr, "  %s: events %u (want %u), event %d error 0x%08x at %llu (window %llu..%llu, now "
+                "%llu), uid 0x%x (library 0x%x, caller 0x%x), handler state rc 0x%08x state %u\n", what,
+                s_adh_events, n + 1u, ADH_AT(n).event, ADH_AT(n).error,
+                (unsigned long long)ADH_AT(n).at, (unsigned long long)(t0 + delay_us),
+                (unsigned long long)(t1 + delay_us + ADH_SLACK_US), (unsigned long long)sched_vtime_us(),
+                ADH_AT(n).uid, thread, sched_current_uid(), ADH_AT(n).state_rc, ADH_AT(n).state);
+    expect(ok, msg);
+}
+
+static void adh_expect_size(const char *what, uint32_t nid, uint32_t buf, uint32_t want_rc) {
+    char msg[192];
+    MEM_W32(ADH_OUT + 4u, 0x1234u);
+    const uint32_t rc = adh(nid, ADH_OUT + 4u, buf, 0u);
+    snprintf(msg, sizeof(msg), "%s: 0x%08x with size 0", what, want_rc);
+    expect(rc == want_rc && MEM_R32(ADH_OUT + 4u) == 0u, msg);
+}
+
+static void adh_main_fn(CpuState *cpu) {
+    extern uint32_t sr_hle_test_unmodelled_stops(void);
+    uint32_t state;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u,
+           "adhocctl: sceNetInit as every recording starts");
+    for (int i = 0; i < 4; i++) MEM_W8(ADH_ID + (uint32_t)i, 0u);
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    for (int i = 0; i < 9; i++) MEM_W8(ADH_ID + 4u + (uint32_t)i, (uint8_t)product[i]);
+    for (int i = 0; i < 16; i++) MEM_W8(ADH_ID_LOWER + (uint32_t)i, MEM_R8(ADH_ID + (uint32_t)i));
+    for (int i = 0; i < 16; i++) MEM_W8(ADH_ID_TYPE3 + (uint32_t)i, MEM_R8(ADH_ID + (uint32_t)i));
+    MEM_W8(ADH_ID_LOWER + 4u, 't');
+    MEM_W32(ADH_ID_TYPE3, 3u);
+
+    /* Before init (adhocctl.expected:4-7). */
+    expect(adh_get_state(&state) == 0x80410b08u && state == 0xffffffffu &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0x80410b08u &&
+           adh(ADH_NID_CREATE, adh_name(0, "TEST"), 0u, 0u) == 0x80410b08u &&
+           adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u,
+           "adhocctl before init: NOT_INITIALIZED, the state untouched, and Term 0");
+
+    /* Init's checks (adhocctl.expected:10-18): nothing starts, and GetState stays NOT_INITIALIZED. */
+    static const struct { uint32_t stack, priority, id, rc; } init_cells[] = {
+        {0u, 0x30u, ADH_ID, 0x80410b13u},
+        {0x400u, 0x30u, ADH_ID, 0x80410b13u},
+        {0xbffu, 0x30u, ADH_ID, 0x80410b13u},
+        {0x2000u, 0u, ADH_ID, 0x80020193u},
+        {0x2000u, 0x80u, ADH_ID, 0x80020193u},
+        {0x2000u, 0x30u, 0u, 0x80410b04u},
+        {0x2000u, 0x30u, ADH_ID_TYPE3, 0x80410b04u},
+    };
+    const int threads_before = s_ntcb;
+    for (size_t i = 0; i < sizeof(init_cells) / sizeof(init_cells[0]); i++) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "adhocctl Init(0x%x, 0x%x, id 0x%08x) answers 0x%08x and starts "
+                 "nothing", init_cells[i].stack, init_cells[i].priority, init_cells[i].id,
+                 init_cells[i].rc);
+        expect(adh_init(init_cells[i].stack, init_cells[i].priority, init_cells[i].id) ==
+                   init_cells[i].rc &&
+               adh_get_state(&state) == 0x80410b08u && s_ntcb == threads_before, msg);
+    }
+    const int small_ok = adh_init(0xc00u, 0x30u, ADH_ID) == 0u && adh_get_state(&state) == 0u;
+    const uint32_t small_thread = sr_hle_test_adhocctl_thread();
+    const int small_term = adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u;
+    const int lower_ok = adh_init(0x2000u, 0x30u, ADH_ID_LOWER) == 0u && adh_get_state(&state) == 0u;
+    const uint32_t lower_thread = sr_hle_test_adhocctl_thread();
+    expect(small_ok && small_term && lower_ok && small_thread != 0u && lower_thread != 0u &&
+           adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u,
+           "adhocctl Init with stack 0xC00, and with a lower-case product, answers 0");
+    adh_delay_until(cpu, sched_vtime_us() + 100000u);   /* Term returns before the thread ends */
+    expect(tcb_by_uid(small_thread) == NULL && tcb_by_uid(lower_thread) == NULL,
+           "adhocctl Term: the library's thread ends after Term");
+
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u, "adhocctl Init(0x2000, 0x30, TEST000001) answers 0");
+    const uint32_t thread = sr_hle_test_adhocctl_thread();
+    TCB *lib = tcb_by_uid(thread);
+    expect(lib && strcmp(lib->name, "SceNetAdhocctl") == 0 && lib->priority == 0x30 &&
+           lib->stack_size >= 0x2000u,
+           "adhocctl Init starts the library's thread with the given priority and stack");
+    expect(adh_get_state(&state) == 0u && state == 0u, "adhocctl after Init: state 0 (adhocctl.expected:21)");
+    for (int i = 0; i < 16; i++) MEM_W8(ADH_OUT + 0x20u + (uint32_t)i, 0xccu);
+    int id_matches = adh(ADH_NID_GET_ID, ADH_OUT + 0x20u, 0u, 0u) == 0u;
+    for (int i = 0; i < 13; i++) id_matches &= MEM_R8(ADH_OUT + 0x20u + (uint32_t)i) == MEM_R8(ADH_ID + (uint32_t)i);
+    expect(id_matches, "adhocctl GetAdhocId: the id Init received (adhocctl.expected:22)");
+    expect(adh(ADH_NID_WLAN_ETHER, ADH_WLAN_MAC, 0u, 0u) == 0u &&
+           adh(ADH_NID_LOCAL_ETHER, ADH_MAC, 0u, 0u) == 0x80410180u,
+           "adhocctl: no local address before a group (adhocctl.expected:23)");
+
+    /* Disconnected (adhocctl.expected:26-30). */
+    expect(adh(ADH_NID_GET_PARAM, ADH_PARAM, 0u, 0u) == 0x80410b09u,
+           "adhocctl GetParameter out of a group: 0x80410b09");
+    adh_expect_size("adhocctl GetPeerList out of a group", ADH_NID_PEER_LIST, 0u, 0x80410682u);
+    adh_expect_size("adhocctl GetScanInfo out of a group", ADH_NID_SCAN_INFO, 0u, 0u);
+    expect(adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0u, "adhocctl Disconnect out of a group: 0");
+    adh_delay_until(cpu, sched_vtime_us() + 200000u);
+    expect(s_adh_events == 0u, "adhocctl: with no handler the Disconnect event reaches nobody");
+
+    /* Handlers (adhocctl.expected:33-39). */
+    expect(adh(ADH_NID_ADD_HANDLER, 0u, 0u, 0u) == 0x80410b04u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0x5150u, 0u) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 1u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 2u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 3u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0x80410b12u,
+           "adhocctl AddHandler: NULL refused, ids 0 and 1 for the same handler, four in all");
+    expect(adh(ADH_NID_DEL_HANDLER, 2u, 0u, 0u) == 0u && adh(ADH_NID_DEL_HANDLER, 3u, 0u, 0u) == 0u &&
+           adh(ADH_NID_DEL_HANDLER, 1u, 0u, 0u) == 0u &&
+           adh(ADH_NID_DEL_HANDLER, 100u, 0u, 0u) == 0x80410b06u &&
+           adh(ADH_NID_DEL_HANDLER, 0xffffffffu, 0u, 0u) == 0x80410b06u,
+           "adhocctl DelHandler: registered ids 0, 100 and -1 refused with 0x80410b06");
+
+    /* Group names (adhocctl.expected:42-45). */
+    adh_expect_request(cpu, "adhocctl Create(NULL)", ADH_NID_CREATE, 0u, ADH_CREATE_US, 0u, 0u, 1, 1u);
+    expect(ADH_AT(0).arg == 0x5150u, "adhocctl: the handler receives its own argument");
+    adh_expect_request(cpu, "adhocctl Disconnect", ADH_NID_DISCONNECT, 0u, ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+    expect(adh(ADH_NID_CREATE, adh_name(1, "BAD-NAME"), 0u, 0u) == 0x80410b04u &&
+           adh(ADH_NID_CREATE, adh_name(1, "BAD NAME"), 0u, 0u) == 0x80410b04u &&
+           adh(ADH_NID_CREATE, adh_name(1, "BAD_NAME"), 0u, 0u) == 0x80410b04u,
+           "adhocctl Create: '-', ' ' and '_' in the name are INVALID_ARG");
+
+    /* Create (adhocctl.expected:48-55). */
+    adh_expect_request(cpu, "adhocctl Create(TESTGRP1)", ADH_NID_CREATE, adh_name(2, "TESTGRP1"),
+                       ADH_CREATE_US, 0u, 0u, 1, 1u);
+    for (uint32_t i = 0; i < 148u; i++) MEM_W8(ADH_PARAM + i, 0xccu);
+    expect(adh(ADH_NID_GET_PARAM, ADH_PARAM, 0u, 0u) == 0u, "adhocctl GetParameter in a group: 0");
+    int group_ok = 1, nickname_ok = 1, bssid_local = 1;
+    const char want[8] = {'T', 'E', 'S', 'T', 'G', 'R', 'P', '1'};
+    for (uint32_t i = 0; i < 8u; i++) group_ok &= MEM_R8(ADH_PARAM + 4u + i) == (uint8_t)want[i];
+    static const char want_nick[] = "Player"; /* owner_name's neutral default with no SR_NICKNAME (#2197) */
+    for (uint32_t i = 0; i < 128u; i++)
+        nickname_ok &= MEM_R8(ADH_PARAM + 12u + i) == (i < sizeof want_nick ? (uint8_t)want_nick[i] : 0u);
+    for (uint32_t i = 0; i < 6u; i++) bssid_local &= MEM_R8(ADH_PARAM + 140u + i) == MEM_R8(ADH_WLAN_MAC + i);
+    const uint32_t channel = MEM_R32(ADH_PARAM);
+    expect((channel == 1u || channel == 6u || channel == 11u) && group_ok && nickname_ok &&
+           !bssid_local && (MEM_R8(ADH_PARAM + 140u) & 3u) == 2u &&
+           MEM_R8(ADH_PARAM + 146u) == 0xccu && MEM_R8(ADH_PARAM + 147u) == 0xccu,
+           "adhocctl GetParameter: channel 1/6/11, the group, the registry's owner_name as the nickname "
+           "(\"Player\" by default, NUL-padded; a nickname is set, as adhocctl.expected:50 records), "
+           "and a locally administered BSSID that is not the console's MAC");
+    for (uint32_t i = 0; i < 6u; i++) MEM_W8(ADH_MAC + i, 0xccu);
+    int local = adh(ADH_NID_LOCAL_ETHER, ADH_MAC, 0u, 0u) == 0u;
+    for (uint32_t i = 0; i < 6u; i++) local &= MEM_R8(ADH_MAC + i) == MEM_R8(ADH_WLAN_MAC + i);
+    expect(local, "adhocctl: in a group the local address is the console's MAC (adhocctl.expected:51)");
+    adh_expect_size("adhocctl GetPeerList in a group", ADH_NID_PEER_LIST, 0u, 0u);
+    adh_expect_size("adhocctl GetPeerList in a group, with a buffer", ADH_NID_PEER_LIST, ADH_PEERS, 0u);
+    expect(adh(ADH_NID_PEER_INFO, ADH_WLAN_MAC, 0x98u, ADH_PEERS) == 0x80410716u &&
+           adh(ADH_NID_PEER_INFO, ADH_OUT + 0x40u, 0x98u, ADH_PEERS) == 0x80410716u,
+           "adhocctl GetPeerInfo for the console and another MAC: 0x80410716");
+    adh_expect_size("adhocctl GetScanInfo in a group", ADH_NID_SCAN_INFO, 0u, 0u);
+
+    /* While connected (adhocctl.expected:58-62): each answers 0 and gets ALREADY_CONNECTED later. */
+    unsigned n = s_adh_events;
+    expect(adh(ADH_NID_CREATE, adh_name(3, "TESTGRP2"), 0u, 0u) == 0u &&
+           adh(ADH_NID_CONNECT, adh_name(3, "TESTGRP2"), 0u, 0u) == 0u &&
+           adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u && s_adh_events == n,
+           "adhocctl in a group: Create, Connect and Scan answer 0, with no event during the call");
+    adh_delay_until(cpu, sched_vtime_us() + 100000u);
+    int errors_ok = s_adh_events == n + 3u;
+    for (unsigned i = n; i < n + 3u && i < ADH_LOG_MAX; i++)
+        errors_ok &= ADH_AT(i).event == 0 && ADH_AT(i).error == 0x80410b02u && ADH_AT(i).state == 1u;
+    expect(errors_ok && adh_state() == 1u,
+           "adhocctl in a group: three events 0 (0x80410b02) within 100 ms, still in the group");
+
+    /* Disconnect, and Disconnect again (adhocctl.expected:65-70). */
+    adh_expect_request(cpu, "adhocctl Disconnect from TESTGRP1", ADH_NID_DISCONNECT, 0u,
+                       ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+    expect(adh(ADH_NID_GET_PARAM, ADH_PARAM, 0u, 0u) == 0x80410b09u,
+           "adhocctl GetParameter after leaving: 0x80410b09");
+    adh_expect_size("adhocctl GetPeerList after leaving", ADH_NID_PEER_LIST, 0u, 0x80410682u);
+    adh_expect_request(cpu, "adhocctl Disconnect again", ADH_NID_DISCONNECT, 0u, ADH_DISCONNECT_US,
+                       0u, 0u, 2, 0u);
+
+    /* Scan (adhocctl.expected:73-75; state 2 once the thread runs, scanstate.expected:5). */
+    adh_expect_request(cpu, "adhocctl Scan", ADH_NID_SCAN, 0u, ADH_SCAN_US, 0u, 2u, 3, 0u);
+    adh_expect_size("adhocctl GetScanInfo after a scan", ADH_NID_SCAN_INFO, 0u, 0u);
+
+    /* Connect to a group nobody hosts (adhocctl.expected:78-82; timing.expected:43). */
+    adh_expect_request(cpu, "adhocctl Connect(TESTGRP3)", ADH_NID_CONNECT, adh_name(4, "TESTGRP3"),
+                       ADH_CONNECT_US, 0u, 0u, 1, 1u);
+    expect(adh(ADH_NID_GET_PARAM, ADH_PARAM, 0u, 0u) == 0u && MEM_R8(ADH_PARAM + 11u) == '3',
+           "adhocctl GetParameter after Connect: group TESTGRP3");
+    adh_expect_request(cpu, "adhocctl Disconnect from TESTGRP3", ADH_NID_DISCONNECT, 0u,
+                       ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+
+    /* BUSY while a Create is in flight, and the Create still completes (ctlinit.expected:24, 29;
+     * abandon.expected:6, 30). */
+    n = s_adh_events;
+    const uint64_t t0 = sched_vtime_us();
+    expect(adh(ADH_NID_CREATE, adh_name(5, "ABANDON"), 0u, 0u) == 0u &&
+           adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0x80410b10u &&
+           adh(ADH_NID_CREATE, adh_name(6, "REJOIN"), 0u, 0u) == 0x80410b10u &&
+           adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0x80410b10u,
+           "adhocctl during a Create: Scan, Create and Disconnect answer BUSY (0x80410b10)");
+    /* Whether a PSP checks the group name or the request in flight first is UNMEASURED: an
+     * invalid name during a Create stops by name, not BUSY and not INVALID_ARG. */
+    const uint32_t bad_stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_CREATE, adh_name(7, "BAD-NAME"), 0u, 0u) == ADH_STOPPED &&
+           sr_hle_test_unmodelled_stops() == bad_stops + 1u,
+           "adhocctl: a Create with an invalid group during a Create is an UNMEASURED stop");
+    adh_delay_until(cpu, t0 + ADH_CREATE_US + ADH_SLACK_US);
+    expect(s_adh_events == n + 1u && ADH_AT(n).event == 1 && adh_state() == 1u &&
+           adh(ADH_NID_GET_PARAM, ADH_PARAM, 0u, 0u) == 0u && MEM_R8(ADH_PARAM + 4u) == 'A',
+           "adhocctl: the abandoned Create still connects, to its own group");
+    adh_expect_request(cpu, "adhocctl Disconnect from ABANDON", ADH_NID_DISCONNECT, 0u,
+                       ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+
+    /* BUSY is recorded for those three during a Create and for Disconnect during a Connect
+     * (abandon.expected:12); any other request while one is in flight stops by name. */
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    const uint64_t t2 = sched_vtime_us();
+    expect(adh(ADH_NID_CREATE, adh_name(9, "BUSYA"), 0u, 0u) == 0u &&
+           adh(ADH_NID_CONNECT, adh_name(10, "BUSYB"), 0u, 0u) == ADH_STOPPED &&
+           sr_hle_test_unmodelled_stops() == stops + 1u,
+           "adhocctl: a Connect during a Create is an UNMEASURED stop, not BUSY");
+    adh_delay_until(cpu, t2 + ADH_CREATE_US + ADH_SLACK_US);
+    expect(adh_state() == 1u && ADH_AT(s_adh_events - 1u).event == 1,
+           "adhocctl: that Create still completes");
+    adh_expect_request(cpu, "adhocctl Disconnect from BUSYA", ADH_NID_DISCONNECT, 0u,
+                       ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+    const uint64_t t3 = sched_vtime_us();
+    expect(adh(ADH_NID_CONNECT, adh_name(10, "BUSYB"), 0u, 0u) == 0u &&
+           adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0x80410b10u &&
+           adh(ADH_NID_SCAN, 0u, 0u, 0u) == ADH_STOPPED &&
+           adh(ADH_NID_CREATE, adh_name(11, "BUSYC"), 0u, 0u) == ADH_STOPPED &&
+           adh(ADH_NID_CONNECT, adh_name(11, "BUSYC"), 0u, 0u) == ADH_STOPPED &&
+           sr_hle_test_unmodelled_stops() == stops + 4u,
+           "adhocctl during a Connect: Disconnect answers BUSY (abandon.expected:12); Scan, Create and "
+           "Connect are UNMEASURED stops");
+    adh_delay_until(cpu, t3 + ADH_CONNECT_US + ADH_SLACK_US);
+    expect(adh_state() == 1u && ADH_AT(s_adh_events - 1u).event == 1,
+           "adhocctl: that Connect still completes");
+    adh_expect_request(cpu, "adhocctl Disconnect from BUSYB", ADH_NID_DISCONNECT, 0u,
+                       ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+
+    /* What no recording covers stops the run by name. */
+    stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u && adh(ADH_NID_CREATE, adh_name(7, "LATE"), 0u, 0u) != 0u &&
+           sr_hle_test_unmodelled_stops() == stops + 1u,
+           "adhocctl: a Create during a scan is an UNMEASURED stop");
+    adh_delay_until(cpu, sched_vtime_us() + ADH_SCAN_US + ADH_SLACK_US);
+    expect(ADH_AT(s_adh_events - 1u).event == 3 && adh_state() == 0u &&
+           adh(ADH_NID_CREATE, adh_name(7, "lower"), 0u, 0u) != 0u &&
+           sr_hle_test_unmodelled_stops() == stops + 2u && adh_state() == 0u,
+           "adhocctl: a lower-case group name is an UNMEASURED stop, and nothing starts");
+
+    /* Term in a group: no library, no local address (term.expected:25-26); Term takes the handlers
+     * with it, so four can be added again after Init (ctlinit.expected:3-28). */
+    adh_expect_request(cpu, "adhocctl Create(TERMGRP)", ADH_NID_CREATE, adh_name(8, "TERMGRP"),
+                       ADH_CREATE_US, 0u, 0u, 1, 1u);
+    n = s_adh_events;
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && adh_get_state(&state) == 0x80410b08u &&
+           adh(ADH_NID_LOCAL_ETHER, ADH_MAC, 0u, 0u) == 0x80410180u,
+           "adhocctl Term in a group: 0, then NOT_INITIALIZED and no local address");
+    adh_delay_until(cpu, sched_vtime_us() + 200000u);
+    expect(s_adh_events == n && tcb_by_uid(thread) == NULL,
+           "adhocctl Term: no event, and the library's thread is gone");
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 1u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 2u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 3u,
+           "adhocctl: after Term and Init, four handlers fit again");
+
+    /* Init again (adhocctl.expected:85-93). */
+    stops = sr_hle_test_unmodelled_stops();
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0x80410b07u && adh_get_state(&state) == 0x80410b08u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0x80410601u && adh_get_state(&state) == 0x80410b08u &&
+           adh(ADH_NID_DEL_HANDLER, 0u, 0u, 0u) == 0x80410b08u && adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && adh_get_state(&state) == 0x80410b08u &&
+           sr_hle_test_unmodelled_stops() == stops,
+           "adhocctl Init again: 0x80410b07 and uninitialized, then 0x80410601; DelHandler "
+           "NOT_INITIALIZED; Term 0 twice");
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) != 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+           "adhocctl: Init after that Term is an UNMEASURED stop");
+    adh_delay_until(cpu, sched_vtime_us() + 100000u);   /* the torn-down thread ends */
+    (void)adh(ADH_NID_NET_TERM, 0u, 0u, 0u);
+    s_adh_done = 1;
+    cpu->r[2] = 0u;
+}
+
+static int aot_spawn_self(const char *self, const char *mode);
+static int hle_scratch_root(char *out, size_t capacity);
+
+/* Every adhocctl fixture starts here: the default system profile (owner_name empty), user RAM
+ * as a game has it, the libraries uninitialized, and the recording handler at ADH_HANDLER. */
+static uint32_t adh_fixture_begin(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern void hle_net_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    sysreg_scratch_clean();
+    sysreg_restart();
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;   /* a main image in user RAM, as a game's is */
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    hle_net_reset();
+    sr_test_guest_fn_reset();
+    memset(s_adh_log, 0, sizeof(s_adh_log));
+    s_adh_events = 0u;
+    s_adh_done = 0;
+    s_adh_mode = ADH_MODE_RECORD;
+    s_adh_handler_rc = 0u;
+    s_adh_delay_in = s_adh_delay_out = 0u;
+    sr_test_register_guest_fn(ADH_HANDLER, adh_handler_fn);
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    return loaded_end;
+}
+
+static void adh_fixture_end(uint32_t loaded_end) {
+    extern void hle_net_reset(void);
+    hle_net_reset();
+    sr_test_guest_fn_reset();
+    sysreg_scratch_clean();   /* the process-wide scratch overlay main() set stays selected */
+    sysreg_restart();
+    s_fixture_loaded_end = loaded_end;
+}
+
+static void adh_run(uint32_t entry, void (*fn)(CpuState *)) {
+    sr_test_register_guest_fn(entry, fn);
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(entry, 0u, 0u);
+}
+
+/* sceNetInit, the id TEST000001, sceNetAdhocctlInit(0x2000, 0x30) and the recording handler as
+ * id 0, as every recording starts. */
+static int adh_startup(void) {
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    for (uint32_t i = 0; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    return net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u;
+}
+
+static void test_adhocctl_lone_console(void) {
+    const uint32_t loaded_end = adh_fixture_begin();
+    adh_run(ADH_MAIN_ENTRY, adh_main_fn);
+    expect(s_adh_done, "adhocctl: the lone-console fixture ran to its end");
+    adh_fixture_end(loaded_end);
+}
+
+/* A LoadExec with the library's thread alive and a Create in flight: the scheduler reset retires
+ * the thread and hle_net_reset leaves the libraries uninitialized; the next program's Init
+ * starts a new thread whose Create gets its own event at its own time, and nothing of the old
+ * program's arrives. */
+static void adh_loadexec_old_fn(CpuState *cpu) {
+    const int ok = adh_startup() && adh(ADH_NID_CREATE, adh_name(0, "LEXEC"), 0u, 0u) == 0u;
+    s_adh_loadexec_thread = sr_hle_test_adhocctl_thread();
+    expect(ok && s_adh_loadexec_thread != 0u,
+           "adhocctl LoadExec: a Create in flight on a live library thread");
+    s_adh_done = 1;
+    sched_request_guest_reset();
+    adh_delay_until(cpu, sched_vtime_us() + 1000u);   /* the scheduler stops at its next pass */
+    s_adh_done = 2;                                   /* never: the reset retires this thread */
+}
+
+static void adh_loadexec_new_fn(CpuState *cpu) {
+    expect(adh_startup(), "adhocctl after LoadExec: sceNetInit, Init and AddHandler answer 0");
+    const uint32_t thread = sr_hle_test_adhocctl_thread();
+    adh_expect_request(cpu, "adhocctl after LoadExec: Create(LEXEC2)", ADH_NID_CREATE,
+                       adh_name(1, "LEXEC2"), ADH_CREATE_US, 0u, 0u, 1, 1u);
+    expect(s_adh_events == 1u && thread != s_adh_loadexec_thread,
+           "adhocctl after LoadExec: one event, from the new program's thread");
+    adh_expect_request(cpu, "adhocctl after LoadExec: Disconnect", ADH_NID_DISCONNECT, 0u,
+                       ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && adh(ADH_NID_NET_TERM, 0u, 0u, 0u) == 0u,
+           "adhocctl after LoadExec: Term and sceNetTerm answer 0");
+    adh_delay_until(cpu, sched_vtime_us() + 100000u);
+    s_adh_done = 3;
+}
+
+/* Teardown under a handler, and sceNetTerm with the library live. */
+static void adh_teardown_fn(CpuState *cpu) {
+    uint32_t state;
+    expect(adh_startup(), "adhocctl teardown: sceNetInit, Init and AddHandler answer 0");
+
+    /* A handler that calls Term: 0, the library ends, and its thread ends once the handler
+     * returns (it is the thread the handler runs on). */
+    uint32_t lib = sr_hle_test_adhocctl_thread();
+    s_adh_mode = ADH_MODE_TERM;
+    uint64_t t0 = sched_vtime_us();
+    expect(adh(ADH_NID_CREATE, adh_name(0, "TERMA"), 0u, 0u) == 0u, "adhocctl Create(TERMA): 0");
+    adh_delay_until(cpu, t0 + ADH_CREATE_US + ADH_SLACK_US);
+    expect(s_adh_events == 1u && ADH_AT(0).event == 1 && ADH_AT(0).uid == lib && s_adh_handler_rc == 0u &&
+           adh_get_state(&state) == 0x80410b08u && tcb_by_uid(lib) == NULL,
+           "adhocctl: a handler that calls Term gets 0; the library is uninitialized and its thread "
+           "ends after the handler");
+
+    /* Term while a handler waits in a guest delay: the delay runs its full time, and the thread
+     * ends after the handler with no further event. */
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u && adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "adhocctl Init and AddHandler again after that Term");
+    lib = sr_hle_test_adhocctl_thread();
+    s_adh_mode = ADH_MODE_DELAY;
+    t0 = sched_vtime_us();
+    expect(adh(ADH_NID_CREATE, adh_name(1, "TERMB"), 0u, 0u) == 0u, "adhocctl Create(TERMB): 0");
+    adh_delay_until(cpu, t0 + ADH_CREATE_US + ADH_SLACK_US);
+    expect(s_adh_events == 2u && s_adh_delay_in != 0u && s_adh_delay_out == 0u,
+           "adhocctl: the handler waits in its own guest delay");
+    const uint64_t term_at = sched_vtime_us();
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && adh_get_state(&state) == 0x80410b08u,
+           "adhocctl Term while a handler waits in a delay: 0, and the library is uninitialized");
+    adh_delay_until(cpu, term_at + ADH_HANDLER_DELAY_US + ADH_SLACK_US);
+    expect(s_adh_delay_out >= s_adh_delay_in + ADH_HANDLER_DELAY_US && tcb_by_uid(lib) == NULL &&
+           s_adh_events == 2u,
+           "adhocctl: Term's kick leaves the handler's delay whole; the thread ends after the handler, "
+           "with no further event");
+
+    /* A request's kick while a handler waits in a delay: the delay runs its full time, and the
+     * request's event follows the handler, not before its own time. */
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u && adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "adhocctl Init and AddHandler again");
+    s_adh_mode = ADH_MODE_DELAY;
+    s_adh_delay_in = s_adh_delay_out = 0u;
+    t0 = sched_vtime_us();
+    expect(adh(ADH_NID_CREATE, adh_name(2, "KICKC"), 0u, 0u) == 0u, "adhocctl Create(KICKC): 0");
+    adh_delay_until(cpu, t0 + ADH_CREATE_US + ADH_SLACK_US);
+    expect(s_adh_events == 3u && s_adh_delay_in != 0u && s_adh_delay_out == 0u && adh_state() == 1u,
+           "adhocctl: in the group, with the handler in its delay");
+    const uint64_t disconnect_at = sched_vtime_us();
+    expect(adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0u, "adhocctl Disconnect while the handler waits: 0");
+    adh_delay_until(cpu, disconnect_at + ADH_HANDLER_DELAY_US + ADH_SLACK_US);
+    expect(s_adh_delay_out >= s_adh_delay_in + ADH_HANDLER_DELAY_US && s_adh_events == 4u &&
+           ADH_AT(3).event == 2 && ADH_AT(3).at >= s_adh_delay_out &&
+           ADH_AT(3).at >= disconnect_at + ADH_DISCONNECT_US && adh_state() == 0u,
+           "adhocctl: the Disconnect's kick leaves the handler's delay whole; its event follows the "
+           "handler");
+
+    /* sceNetTerm while sceNetAdhocctl is initialized: no recording does it (each ends adhocctl
+     * first), so it stops by name and leaves both libraries as they were. */
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_NET_TERM, 0u, 0u, 0u) == ADH_STOPPED && sr_hle_test_unmodelled_stops() == stops + 1u &&
+           sr_hle_test_net_inited() && sr_hle_test_adhocctl_state() == 0,
+           "sceNetTerm while sceNetAdhocctl is initialized: an UNMEASURED stop; both stay initialized");
+
+    /* A handler that calls Init: the recorded second Init (adhocctl.expected:85-87), from the
+     * library's own thread. */
+    lib = sr_hle_test_adhocctl_thread();
+    s_adh_mode = ADH_MODE_INIT;
+    t0 = sched_vtime_us();
+    expect(adh(ADH_NID_CREATE, adh_name(3, "INITD"), 0u, 0u) == 0u, "adhocctl Create(INITD): 0");
+    adh_delay_until(cpu, t0 + ADH_CREATE_US + ADH_SLACK_US);
+    expect(s_adh_events == 5u && ADH_AT(4).event == 1 && s_adh_handler_rc == 0x80410b07u &&
+           adh_get_state(&state) == 0x80410b08u && tcb_by_uid(lib) == NULL,
+           "adhocctl: a handler that calls Init gets 0x80410b07; the library is uninitialized and its "
+           "thread ends after the handler");
+    stops = sr_hle_test_unmodelled_stops();
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0x80410601u && adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           adh(ADH_NID_NET_TERM, 0u, 0u, 0u) == 0u && sr_hle_test_unmodelled_stops() == stops,
+           "adhocctl after it: Init 0x80410601, Term 0 and sceNetTerm 0");
+    s_adh_done = 1;
+}
+
+static void test_adhocctl_teardown(void) {
+    uint32_t loaded_end = adh_fixture_begin();
+    adh_run(ADH_MAIN_ENTRY, adh_loadexec_old_fn);
+    expect(s_adh_done == 1 && tcb_by_uid(s_adh_loadexec_thread) != NULL,
+           "adhocctl LoadExec: the old program stops with the library's thread alive");
+    extern void hle_net_reset(void);
+    expect(sched_reset_for_loadexec(), "adhocctl LoadExec: the scheduler retires the old threads");
+    hle_net_reset();
+    expect(sr_hle_test_adhocctl_state() == -1 && sr_hle_test_adhocctl_thread() == 0u &&
+           !sr_hle_test_net_inited() && tcb_by_uid(s_adh_loadexec_thread) == NULL && s_adh_events == 0u,
+           "adhocctl after LoadExec: both libraries uninitialized, the thread gone, and no event of "
+           "the old Create");
+    adh_run(ADH_MAIN_ENTRY + 0x10u, adh_loadexec_new_fn);
+    expect(s_adh_done == 3, "adhocctl after LoadExec: the new program ran to its end");
+    adh_fixture_end(loaded_end);
+
+    loaded_end = adh_fixture_begin();
+    adh_run(ADH_MAIN_ENTRY, adh_teardown_fn);
+    expect(s_adh_done == 1, "adhocctl teardown: the fixture ran to its end");
+    adh_fixture_end(loaded_end);
+}
+
+/* The guest ends the library's thread by uid while the library is initialized. */
+static void adh_lost_thread_fn(CpuState *cpu) {
+    /* The guest ends the library's thread by uid while the library is initialized: nothing
+     * would answer a request, so each request stops by name (UNMEASURED), first with the thread
+     * terminated (dormant), then with it deleted. Term and sceNetTerm still answer 0. */
+    const uint32_t nid_delete_thread = 0x9fa03cd3u;   /* sceKernelDeleteThread */
+    expect(adh_startup(), "adhocctl lost thread: sceNetInit, Init and AddHandler answer 0");
+    const uint32_t lib = sr_hle_test_adhocctl_thread();
+    cpu->r[4] = lib;
+    expect(lib != 0u && sr_syscall(cpu, NID_SCE_KERNEL_TERMINATE_THREAD) == 0u && sched_is_dormant(lib),
+           "adhocctl: the guest terminates the library's thread by uid");
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_CREATE, adh_name(4, "GONE"), 0u, 0u) == ADH_STOPPED &&
+           sr_hle_test_unmodelled_stops() == stops + 1u && adh_state() == 0u,
+           "adhocctl: a Create after the guest terminated the library's thread is an UNMEASURED stop");
+    cpu->r[4] = lib;
+    expect(sr_syscall(cpu, nid_delete_thread) == 0u && tcb_by_uid(lib) == NULL,
+           "adhocctl: the guest deletes the library's thread");
+    stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == ADH_STOPPED && adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == ADH_STOPPED &&
+           adh(ADH_NID_CONNECT, adh_name(4, "GONE"), 0u, 0u) == ADH_STOPPED &&
+           sr_hle_test_unmodelled_stops() == stops + 3u,
+           "adhocctl: Scan, Disconnect and Connect after the guest deleted the library's thread are "
+           "UNMEASURED stops");
+    stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && adh(ADH_NID_NET_TERM, 0u, 0u, 0u) == 0u &&
+           sr_hle_test_unmodelled_stops() == stops,
+           "adhocctl with its thread gone: Term 0 and sceNetTerm 0");
+    s_adh_done = 1;
+}
+
+static void test_adhocctl_lost_thread(void) {
+    const uint32_t loaded_end = adh_fixture_begin();
+    adh_run(ADH_MAIN_ENTRY, adh_lost_thread_fn);
+    expect(s_adh_done == 1, "adhocctl lost thread: the fixture ran to its end");
+    adh_fixture_end(loaded_end);
+}
+
+/* GetParameter's nickname is exactly the registry's owner_name: a profile that sets one gets it
+ * back, NUL-padded to 128 bytes. */
+static void adh_nickname_fn(CpuState *cpu) {
+    expect(adh_startup(), "adhocctl nickname: sceNetInit, Init and AddHandler answer 0");
+    adh_expect_request(cpu, "adhocctl nickname: Create(NICK)", ADH_NID_CREATE, adh_name(0, "NICK"),
+                       ADH_CREATE_US, 0u, 0u, 1, 1u);
+    for (uint32_t i = 0; i < 148u; i++) MEM_W8(ADH_PARAM + i, 0xccu);
+    const char want[] = "NKTEST";
+    int nickname_ok = adh(ADH_NID_GET_PARAM, ADH_PARAM, 0u, 0u) == 0u;
+    for (uint32_t i = 0; i < 128u; i++)
+        nickname_ok &= MEM_R8(ADH_PARAM + 12u + i) == (i < 6u ? (uint8_t)want[i] : 0u);
+    expect(nickname_ok, "adhocctl GetParameter: the profile's owner_name NKTEST, NUL-padded to 128 bytes");
+    adh_expect_request(cpu, "adhocctl nickname: Disconnect", ADH_NID_DISCONNECT, 0u,
+                       ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && adh(ADH_NID_NET_TERM, 0u, 0u, 0u) == 0u,
+           "adhocctl nickname: Term and sceNetTerm answer 0");
+    adh_delay_until(cpu, sched_vtime_us() + 100000u);
+    s_adh_done = 1;
+}
+
+static void test_adhocctl_nickname_from_profile(void) {
+    static const char overlay[] =
+        "{\"schema\": \"nakagawa.psp-system-registry-overlay\", \"schema_version\": 1, \"categories\": [],"
+        " \"keys\": [{\"category\": \"/CONFIG/SYSTEM\", \"name\": \"owner_name\", \"type\": \"str\","
+        " \"value_hex\": \"4e4b5445535400\"}]}";
+    const uint32_t loaded_end = adh_fixture_begin();
+    expect(sysreg_write_file(SYSREG_SCRATCH_FILE, overlay, sizeof(overlay) - 1u),
+           "adhocctl nickname: the owner_name overlay is written");
+    sysreg_restart();
+    adh_run(ADH_MAIN_ENTRY, adh_nickname_fn);
+    expect(s_adh_done == 1, "adhocctl nickname: the fixture ran to its end");
+    adh_fixture_end(loaded_end);
+}
+
+/* A handler that faults stops the run: the fault must not stay a flag on the library's thread,
+ * where the next thread's context would replace it and the game would wait on. */
+static void adh_fault_fn(CpuState *cpu) {
+    if (!adh_startup()) {
+        s_adh_done = 97;
+        return;
+    }
+    s_adh_mode = ADH_MODE_FAULT;
+    const uint64_t t0 = sched_vtime_us();
+    (void)adh(ADH_NID_CREATE, adh_name(0, "FAULT"), 0u, 0u);
+    adh_delay_until(cpu, t0 + ADH_CREATE_US + ADH_SLACK_US);
+    s_adh_done = 99;   /* the run went on past the handler's fault */
+}
+
+/* The child's stderr goes next to its flight-recorder bundle, whose absolute path the parent
+ * passes as SR_FLIGHT_OUTPUT: the child's working directory need not be the parent's. */
+static int adh_fault_log(char *log, size_t capacity, const char *bundle) {
+    const int n = bundle && bundle[0] ? snprintf(log, capacity, "%s.stderr", bundle) : -1;
+    return n > 0 && (size_t)n < capacity;
+}
+
+/* The bundle under HLE_BUILD_ROOT, made absolute, and the log beside it. */
+static int adh_fault_paths(char *log, char *bundle, size_t capacity) {
+    char root[MAX_PATH];
+    if (!hle_scratch_root(root, sizeof(root))) return 0;
+    const int b = snprintf(bundle, capacity, "%s/adhocctl_fault_child.json", root);
+    return b > 0 && (size_t)b < capacity && adh_fault_log(log, capacity, bundle);
+}
+
+static int run_adhocctl_handler_fault_child(void) {
+    char log[MAX_PATH];
+    if (!adh_fault_log(log, sizeof(log), getenv("SR_FLIGHT_OUTPUT")) || !freopen(log, "w", stderr)) return 96;
+    (void)adh_fixture_begin();
+    sr_flight_test_reset(SR_FLIGHT_CLASS_FATAL, 8u);   /* SR_FLIGHT_OUTPUT is the parent's */
+    adh_run(ADH_MAIN_ENTRY, adh_fault_fn);
+    return s_adh_done ? s_adh_done : 98;
+}
+
+static size_t adh_read_file(const char *path, char *out, size_t capacity) {
+    FILE *f = fopen(path, "rb");
+    size_t n = 0;
+    if (f) {
+        n = fread(out, 1, capacity - 1u, f);
+        fclose(f);
+    }
+    out[n] = '\0';
+    return n;
+}
+
+/* The fault must stop the run the way dispatch_call stops one: status 1, the SEMANTIC_BOUNDARY
+ * line tools/nk_cli.py classifies, naming the handler, and a flight-recorder fatal for it.
+ * Status 1 alone would accept any other exit(1) in the child. */
+static void test_adhocctl_handler_fault_stops(const char *self) {
+    char log[MAX_PATH], bundle[MAX_PATH];
+    if (!self || !adh_fault_paths(log, bundle, sizeof(log))) {
+        expect(0, "adhocctl handler fault: the selftest knows its own path and its scratch root");
+        return;
+    }
+    remove(log);
+    remove(bundle);
+    hle_test_setenv("SR_FLIGHT_OUTPUT", bundle);
+    const int status = aot_spawn_self(self, "--adhocctl-handler-fault-child");
+    hle_test_setenv("SR_FLIGHT_OUTPUT", NULL);
+    static char text[16384];
+    char msg[200];
+    snprintf(msg, sizeof(msg), "adhocctl: a handler's fault stops the run with status 1 (got %d)", status);
+    expect(status == 1, msg);
+    char want[160];
+    snprintf(want, sizeof(want), "SEMANTIC_BOUNDARY: adhocctl-handler-fault; handler 0x%08x (id 0, event 1) ",
+             ADH_HANDLER);
+    (void)adh_read_file(log, text, sizeof(text));
+    const char *line = strstr(text, want);
+    expect(line != NULL && (line == text || line[-1] == '\n'),
+           "adhocctl: the fault prints the classified SEMANTIC_BOUNDARY line with the handler's address");
+    (void)adh_read_file(bundle, text, sizeof(text));
+    char event[160];
+    snprintf(event, sizeof(event), "\"class\": \"fatal\", \"kind\": %u, \"arg0\": %u, \"arg1\": %u, \"arg2\": 1",
+             (unsigned)SR_FLIGHT_KIND_FATAL_DISPATCH, (unsigned)ADH_HANDLER, (unsigned)ADH_HANDLER);
+    expect(strstr(text, "\"terminal\": {\"reason\": \"fatal\"") != NULL && strstr(text, event) != NULL,
+           "adhocctl: the fault leaves a flight-recorder fatal for the handler, event 1");
+    remove(log);
+    remove(bundle);
 }
 
 extern void sr_hle_test_volatile_mem_reset(void);
@@ -52795,6 +53600,7 @@ static void test_vtimer_handler_return_below_100us_reschedules_100us_on(void) {
     s_pace_on = saved_pace;
 }
 
+/* Used by the AOT boundary cells and by test_adhocctl_handler_fault_stops, in both builds. */
 #ifndef _WIN32
 #include <sys/wait.h>
 #endif
@@ -54456,6 +55262,19 @@ static int hle_selftest_main(int argc, char **argv) {
         return s_failures ? 1 : 0;
     }
 
+    if (argc > 1 && strcmp(argv[1], "--adhocctl-handler-fault-child") == 0)
+        return run_adhocctl_handler_fault_child();
+    if (argc > 1 && strcmp(argv[1], "--adhocctl") == 0) {
+        test_adhocctl_lone_console();
+        test_adhocctl_teardown();
+        test_adhocctl_lost_thread();
+        test_adhocctl_nickname_from_profile();
+        test_adhocctl_handler_fault_stops(argv[0]);
+        fprintf(stderr, "adhocctl: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
     if (argc > 1 && strcmp(argv[1], "--msgpipe-rendezvous") == 0) {
         test_msgpipe_rendezvous();
         fprintf(stderr, "msgpipe-rendezvous: %d checks, %d failures\n", s_checks, s_failures);
@@ -54595,6 +55414,11 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sysreg_flush_failure();
     test_unregistered_batch_refusals();
     test_adhoc_named_refusals();
+    test_adhocctl_lone_console();
+    test_adhocctl_teardown();
+    test_adhocctl_lost_thread();
+    test_adhocctl_nickname_from_profile();
+    test_adhocctl_handler_fault_stops(argc > 0 ? argv[0] : NULL);
     test_unregistered_batch_profiler_refer_null();
     test_kernel_import_sweep_ge_head();
     test_ge_blocking_sync_waits_for_stalled_list();
