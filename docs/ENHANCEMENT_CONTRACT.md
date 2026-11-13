@@ -2016,15 +2016,16 @@ does, so it shows one device texel per guest texel. The texture's own width and 
 is clamped or wrapped at them, as the GE does, not at the target image's edge, so a texture inside a larger target never
 shows the target's pixels beyond it (`rtt-edge`), and a texture at an offset inside a target scales the same way
 (`rtt-scale-offset`).
-Every other read of a render target, including a read in another format, a swizzled or mipmapped read and another
-buffer width, decodes the target from guest memory at 1x. That is the GE's own picture of it, so such an effect shows
-1x detail at any render scale; it never shows a picture the PSP would not draw. A CPU read of a target a draw sampled
-returns its top-left device samples in its own format (the readback rule above, `rtt-scale`). A render-target read is
-found by address: depth read as a texture decodes from guest memory at 1x when its address lies outside every colour
-target's span. When it lies inside a colour target's span too, the read takes whichever was written last: depth
-written after the target's image last changed makes it a depth read, decoded from guest memory at 1x after the depth is
-committed there (`rtt-depth-alias`); otherwise the colour target's rules apply. The cases, the depth rule and the debug
-switch are in `src/rt/gpu_sdl3vk/README.md` (#2052).
+Every other read of a render target, including a read in another format, a swizzled or mipmapped read, another buffer
+width and a read through the 0x04200000 or 0x04600000 view of VRAM (`rtt-vram-view`; that the GE's texel fetch reorders
+through a view as a CPU access does is inferred, not measured), decodes the target from guest memory at 1x. That is the
+GE's own picture of it, so such an effect shows 1x detail at any render scale; it never shows a picture the PSP would
+not draw. A CPU read of a target a draw sampled returns its top-left device samples in its own format (the readback rule
+above, `rtt-scale`). A render-target read is found by address: depth read as a texture decodes from guest memory at 1x
+when its address lies outside every colour target's span. When it lies inside a colour target's span too, the read takes
+whichever was written last: depth written after the target's image last changed makes it a depth read, decoded from
+guest memory at 1x after the depth is committed there (`rtt-depth-alias`); otherwise the colour target's rules apply.
+The cases, the depth rule and the debug switch are in `src/rt/gpu_sdl3vk/README.md` (#2052).
 
 At 1x the readback is the PSP's value.
 
@@ -2035,8 +2036,9 @@ The render-target reads that decode at 1x (#2279; the README lists each with its
   format whose texel is not one depth value. The 1x decode is the read, swizzled, mipmapped or at another width too;
 - a scaled form could exist but is not implemented, so these read at 1x and #2279 stays open for them, each in a
   format whose texel is one of the buffer's values: a 16-bit target read as another 16-bit format, CLUT16 and CLUT32
-  at the target's pixel size, a swizzled read, a read with another non-zero buffer width, a mipmapped read, and a
-  depth read in a 16-bit format (outside every colour target, or inside one whose depth was written last).
+  at the target's pixel size, a swizzled read, a read with another non-zero buffer width, a read through the
+  0x04200000 or 0x04600000 view, a mipmapped read, and a depth read in a 16-bit format (outside every colour target,
+  or inside one whose depth was written last).
 
 `rtt-1x-reads` in `gpu-coherence-selftest` runs thirteen such reads at 1x, 2x and 4x (the README lists them): none
 binds a target's image, each depth read commits the GPU's depth first, and the reading target's guest VRAM equals
