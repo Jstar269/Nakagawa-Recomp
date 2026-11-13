@@ -512,7 +512,10 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                 head.align_y = NK_UI_ALIGN_CENTER;
                 if (nk_ui_begin_container(ui, TITLE_ID_ENH_HEAD, &head, NULL)) {
                     nk_ui_eyebrow(ui, TITLE_ID_ENH_EYEBROW, "Enhancements");
-                    if (title->enhancement_shown) nk_ui_tag(ui, TITLE_ID_ENH_TAG, "Experimental");
+                    if (title->enhancement_shown) {
+                        nk_ui_tag(ui, TITLE_ID_ENH_TAG,
+                                  title->enhancement_released ? "Optional" : "Experimental");
+                    }
                     nk_ui_end_container(ui);
                 }
                 /* The play mode (#2055): library default, Authentic, Enhanced or Ace for this

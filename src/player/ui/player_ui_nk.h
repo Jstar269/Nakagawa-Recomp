@@ -356,6 +356,10 @@ typedef struct {
        gives its place). Last, so the fixtures' positional lists stay valid. */
     bool queue_add_offered;
     bool queue_remove_offered;
+    /* The title's shipped package is released (player_app_title_60hz_released,
+       docs/ENHANCEMENT_CONTRACT.md section 9.10): the ENHANCEMENTS card's tag reads
+       OPTIONAL, else EXPERIMENTAL. Last, after the queue's fields, for the same reason. */
+    bool enhancement_released;
 } PlayerUiTitle;
 
 typedef struct {

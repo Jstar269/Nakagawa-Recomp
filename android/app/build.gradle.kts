@@ -11,6 +11,9 @@
 //               are bundled too. Without it the app has the launcher only.
 //   nk.abis     comma-separated ABIs, default arm64-v8a,x86_64.
 //   nk.depsDir  where the pinned SDL3 and SDL3_ttf sources live, default <repo>/build/android-deps.
+//   nk.toolchain the --out folder of tools/android_toolchain.py: the on-device clang, lld, make and
+//               Python, their sysroot, standard library and notices (android/toolchain/PROVENANCE.md),
+//               bundled for arm64-v8a. Without it the app carries no toolchain.
 
 import java.io.File
 
@@ -32,6 +35,12 @@ val titles: List<Pair<String, File>> = ((findProperty("nk.titles") as String?) ?
 val nativeTargets: List<String> =
     listOf("nakagawa_player", "SDL3-shared", "SDL3_ttf-shared") + titles.map { "nk_title_${it.first}" }
 val bundledAssets: File = layout.buildDirectory.dir("generated/nk-assets").get().asFile
+val toolchain: File? = (findProperty("nk.toolchain") as String?)?.let { File(it) }?.also { dir ->
+    require(File(dir, "toolchain-manifest.json").isFile) {
+        "nk.toolchain '$dir' holds no toolchain-manifest.json; run tools/android_toolchain.py --out there"
+    }
+    require(abis == listOf("arm64-v8a")) { "nk.toolchain is built for arm64-v8a only; set -Pnk.abis=arm64-v8a" }
+}
 
 // SDL's android-project Java classes are compiled from the pinned checkout, so it must exist
 // before Java compiles; the native build reuses the same checkout.
@@ -95,14 +104,26 @@ android {
         getByName("main") {
             java.directories.add("$depsDir/SDL/android-project/app/src/main/java")
             assets.directories.add(bundledAssets.path)
+            if (toolchain != null) {
+                // jniLibs/arm64-v8a/libnk_*.so and the CPython libraries; assets/toolchain/.
+                jniLibs.directories.add(File(toolchain, "jniLibs").path)
+                assets.directories.add(File(toolchain, "assets").path)
+            }
         }
     }
 
     packaging {
         jniLibs {
             // Extracted to the native library folder, so the launcher can name a title's library
-            // by path (as the desktop names an executable).
+            // by path (as the desktop names an executable), and so the toolchain's programs
+            // (libnk_clang.so and the rest) can be executed from there.
             useLegacyPackaging = true
+            // The toolchain's libraries ship as staged: its own are linked stripped, with a build
+            // ID that names those bytes, and CPython's are the release's. The NDK strip would
+            // rewrite them.
+            toolchain?.let { dir ->
+                File(dir, "jniLibs/arm64-v8a").listFiles()?.forEach { keepDebugSymbols += "**/${it.name}" }
+            }
         }
     }
 
