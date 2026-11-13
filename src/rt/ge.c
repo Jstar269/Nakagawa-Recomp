@@ -8515,7 +8515,7 @@ int ge_vramdump_write(const char *directory, uint32_t vblank,
         record->vblank = vblank;
         record->digest = digest;
         ge_vram_view_sources(display_addr, display_stride, display_format, 1, &record->sources);
-        memcpy(record->image_path, image_path, sizeof record->image_path);
+        snprintf(record->image_path, sizeof record->image_path, "%s", image_path);
         s_vram_capture_count++;
     }
     return 1;

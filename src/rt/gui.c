@@ -1938,7 +1938,7 @@ static void gui_pause_decode_vram(void) {
         return;
     }
     if (result != GE_VRAM_VIEW_SHOWN) {
-        s_pause_vram.note = view->capture > 0 ? "This window is not inside the captured VRAM."
+        s_pause_vram.note = view->capture > 0 ? "This window cannot be shown from the capture."
                                               : "This window cannot be read now.";
         return;
     }

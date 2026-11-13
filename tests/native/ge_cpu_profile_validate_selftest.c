@@ -2569,6 +2569,16 @@ static void test_ge_vram_capture(const char *dir) {
                               GE_VRAM_VIEW_CAPTURE_LOST,
                "vram_capture", "a changed capture file is refused");
     }
+    /* One that grew past the captured 2 MiB is refused too, though it starts with the image. */
+    capture_file(bin, sizeof bin, dir, second, "bin");
+    {
+        FILE *file = fopen(bin, "ab");
+        int grown = file != NULL && fputc(0x00, file) != EOF;
+        if (file) grown = fclose(file) == 0 && grown;
+        expect(grown && ge_vram_capture_decode(1u, 0, &display, out, 8u, &w, &h) ==
+                            GE_VRAM_VIEW_CAPTURE_LOST,
+               "vram_capture", "a capture file that grew is refused");
+    }
     for (uint32_t v = first; v <= second; v++) {
         capture_file(bin, sizeof bin, dir, v, "bin");
         capture_file(json, sizeof json, dir, v, "json");
@@ -2578,7 +2588,7 @@ static void test_ge_vram_capture(const char *dir) {
     expect(ge_vram_capture_decode(1u, 0, &display, out, 8u, &w, &h) == GE_VRAM_VIEW_CAPTURE_LOST,
            "vram_capture", "a removed capture file is refused");
     *state = saved;
-    printf("VRAM_CAPTURE cases=14\n");
+    printf("VRAM_CAPTURE cases=15\n");
 }
 
 static void test_ge_bounding_box_branch(void) {
