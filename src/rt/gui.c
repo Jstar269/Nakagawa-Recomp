@@ -1154,6 +1154,9 @@ void gui_init(const char *title) {
         s_offscreen_frames = 0;
         s_last_ns = SDL_GetTicksNS();
         s_on = 1;
+#ifdef SR_SDL3VK
+        gui_texdump_at_start();   /* no Vulkan GE here: an asked-for dump is refused and said */
+#endif
         /* window_ready is the established boot-gate name for the host-presenter
          * initialization milestone. The backend field makes the no-window case
          * explicit; this event does not claim that an OS window exists. */
@@ -1217,7 +1220,9 @@ void gui_init(const char *title) {
                      * CPU, which the movie upscaler takes without them. */
                     if (!gpu_ge_started) sr_movie_set_tracking(0);
                     gui_report_render_path(true, true, gpu_ge_asked, gpu_ge_started);
-                    if (gpu_ge_started) gui_texdump_at_start();
+                    /* Asked for with SR_TEX_DUMP=1: started, or refused with a TEX_DUMP line when the
+                       Vulkan GE did not start (a dump reads its texture cache). */
+                    gui_texdump_at_start();
                 }
                 sr_gui_request_launcher_foreground(true, NULL,
                                                    sr_gui_raise_sdl_window,
@@ -1294,6 +1299,9 @@ void gui_init(const char *title) {
         sr_gui_raise_gdi_window, "gdi");
     /* Here when SR_VIDEO=gdi asked for this window, or when Vulkan did not start. */
     gui_report_render_path(vulkan_asked, false, gpu_ge_asked, false);
+#ifdef SR_SDL3VK
+    gui_texdump_at_start();   /* no Vulkan GE in the GDI window: an asked-for dump is refused and said */
+#endif
     sr_gui_boot_event("BOOT_EVENT phase=window_ready backend=gdi");
 #else /* !_WIN32: no GDI presenter on this host */
     /* No Win32/GDI window exists here, so there is no fallback to take. The
@@ -1304,6 +1312,9 @@ void gui_init(const char *title) {
             "gui_init: SDL3/Vulkan init failed and no Win32/GDI presenter exists on "
             "this host; running without a window (framebuffer capture still works)\n");
     s_on = 0;
+#ifdef SR_SDL3VK
+    gui_texdump_at_start();   /* nor without a window: an asked-for dump is refused and said */
+#endif
     sr_gui_boot_event("BOOT_EVENT phase=window_unavailable backend=none");
 #endif /* _WIN32 */
 }

@@ -760,6 +760,25 @@ static uint32_t ref_crc32(const unsigned char *p, size_t n) {
     return c ^ 0xFFFFFFFFu;
 }
 
+/* The encoder's constant CRC table, every entry against the bit-by-bit definition (the table is
+ * constant so the texture dump's two workers share no state while they encode), and the check
+ * value of "123456789" through ref_crc32 and the table alike. */
+static void test_png_crc_table(void) {
+    const uint32_t *t = sr_png_crc_table();
+    int bad = 0;
+    for (uint32_t i = 0; i < 256u; i++) {
+        uint32_t c = i;
+        for (int k = 0; k < 8; k++) c = (c & 1u) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+        if (t[i] != c) bad++;
+    }
+    CHECK(bad == 0, "png crc table: every entry is the polynomial's");
+    const unsigned char check[] = "123456789";
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < 9u; i++) c = t[(c ^ check[i]) & 0xFFu] ^ (c >> 8);
+    CHECK((c ^ 0xFFFFFFFFu) == 0xCBF43926u && ref_crc32(check, 9u) == 0xCBF43926u,
+          "png crc table: the CRC-32 check value");
+}
+
 /* Parse a published PNG: the signature; IHDR (w x h, 8-bit RGB, no interlace); one IDAT whose
  * zlib stream is stored deflate blocks with a correct Adler-32; IEND last with nothing after it;
  * every chunk CRC right. Each decoded row must start with filter 0 and equal rgb. */
@@ -1255,6 +1274,7 @@ int main(int argc, char **argv) {
     test_probe_result_pinned();
     test_deferred_probe();
     test_watch_deferred_matches_synchronous();
+    test_png_crc_table();
     test_png_capture();
     test_screenshot_name();
     test_texdump_folder();

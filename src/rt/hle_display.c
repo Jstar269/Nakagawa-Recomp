@@ -1231,6 +1231,9 @@ void sr_vblank_tick(void) {
             hle_exit_close_audio_dump();
             /* The same for a video recording: its encoder is finished and the files muxed. */
             (void)sr_videorec_finish_status("SR_EXIT_AT_VBLANK", 0);
+            /* And the texture dump: the files its workers hold land and are counted, and its
+             * exit line is printed (ge_shared.h; nothing when no dump started). */
+            sr_texdump_exit_finish();
             sr_dump_calls();
             fflush(stderr);
             fflush(stdout);

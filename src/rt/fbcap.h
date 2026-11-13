@@ -215,6 +215,9 @@ int sr_png_encode_rgba(const uint32_t *rgba, uint32_t w, uint32_t h, uint8_t **o
  * to whole bytes: 63 + (9 R + 17) / 8. 0 when the encoder would refuse the size. The texture dump
  * reserves this much of its budget for a file that is still being encoded. */
 uint64_t sr_png_encode_bound(uint32_t w, uint32_t h);
+/* The 256-entry PNG CRC-32 table the encoder uses: constant, so encoders on several threads at
+ * once share no state (fbcap-selftest checks it against the bit-by-bit definition). */
+const uint32_t *sr_png_crc_table(void);
 
 /* What sr_file_publish_new did. */
 enum {
@@ -228,8 +231,8 @@ enum {
  * appears while the temp file is written. The temp sibling ("<path>.tmp<process id>.<n>") is
  * created exclusively, so nothing already at that name (another run's temp file, a link) is
  * written through. Every file call is the platform layer's wide-path one. Its temp names come from
- * a counter of this file's, so it is called from one thread (the guest thread: screenshots, the
- * dump's textures.ini). */
+ * a counter of this file's, so it is called from one thread (the guest thread: the dump's
+ * textures.ini). */
 int sr_file_publish_new(const char *path, const void *data, size_t len);
 /* sr_file_publish_new for callers on several threads at once (the texture dump's workers): the
  * temp names are "<path>.tmp<process id>.t<tag>.<n>", from `tag`, which the caller keeps unique

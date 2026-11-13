@@ -231,8 +231,8 @@
     X("SR_TEST_GUEST_MODULE_LOAD", "string", "unset: the test returns immediately", "hle_thread_selftest.c", "Selects the mode of the guest-module-load binding self-test.") \
     X("SR_TEXDUMP", "flag-presence", "off", "ge.c", "When set, enables texture dumping.") \
     X("SR_TEXDUMP_AFTER", "number", "0", "ge.c", "First GE frame from which textures are dumped when SR_TEXDUMP is set.") \
-    X("SR_TEX_DUMP", "string", "unset", "gui.c", "1 starts the player texture dump with an Enhanced or Ace run (as pause menu Settings > Dump textures does), into <user data>/texdump/<disc ID>.") \
-    X("SR_TEX_DUMP_BUDGET_MB", "number", "4096", "gpu_sdl3vk/ge_gpu.c", "Most MiB a run's player texture dump (pause menu, Settings > Dump textures) writes; the file that would pass it is not written and the dump stops.") \
+    X("SR_TEX_DUMP", "string", "unset", "gui.c", "1 starts the texture dump with a hand-started Enhanced or Ace run, into <user data>/texdump/<disc ID>; the launcher always masks it.") \
+    X("SR_TEX_DUMP_BUDGET_MB", "number", "4096", "gpu_sdl3vk/ge_gpu.c", "Most MiB (1 to 65536) a run's player texture dump writes; the file that would pass it is not written and the dump stops.") \
     X("SR_TEX_DUMP_MAX_FILES", "number", "20000", "gpu_sdl3vk/ge_gpu.c", "Most files (1 to 1000000) a run's player texture dump writes; reaching it stops the dump and the pause menu row says so.") \
     X("SR_TEX_REPLACE", "path", "unset", "gpu_sdl3vk/ge_gpu.c", "Texture pack folder (PPSSPP layout) the Vulkan GE reads when the SR_ACE line carries texpack=on; the launcher always exports it, empty unless the pack is on.") \
     X("SR_TEX_REPLACE_BUDGET_MB", "number", "256", "gpu_sdl3vk/ge_gpu.c", "Host memory, in MiB, for the replacement pack's decoded images; past it the least recently used is dropped.") \

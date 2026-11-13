@@ -122,7 +122,8 @@ void nk_tex_scale_release(NkTexScaleResult *res);
  * what it holds until taken. `run(ctx)` is called once, on a worker thread (with sync on, or when
  * no worker could start, on the submitting thread before submit returns); the job is then done
  * and waits for nk_tex_scale_take_work. `ctx` stays the caller's: nothing here reads or frees it,
- * and the caller must not touch it between a submit that returned 1 and the take that returns it.
+ * and the caller must not write it between a submit that returned 1 and the take that returns it
+ * (reading what the job never writes is safe: the dump compares a queued job's path).
  * Submit returns 1 when queued, 0 when the queue or the cap has no room (counted in
  * work_refused; the caller keeps `ctx`). Nothing waits: with hold on, a work job stays queued like
  * a scale. The owner takes every work job before nk_tex_scale_shutdown, which says so on stderr

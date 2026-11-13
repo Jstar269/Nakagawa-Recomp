@@ -861,6 +861,7 @@ def run(
     flight_output: Path | None = None,
     flight_trigger: str | None = None,
     extra_env: dict[str, str | None] | None = None,
+    texdump_refused: bool = False,
 ) -> int:
     # The runtime is spawned with cwd=ROOT, so a relative build_dir would make the
     # CHILD resolve the executable/image paths against ROOT rather than the
@@ -924,6 +925,11 @@ def run(
     for key in ("SR_VIDEOREC_DIR", "SR_VIDEOREC_CODEC", "SR_VIDEOREC_SIZE", "SR_VIDEOREC_START",
                 "SR_VIDEOREC_FFMPEG", "NK_VIDEOREC_FAKE_FFMPEG"):
         env.pop(key, None)
+    # So is a texture dump (#1880). texdump_refused asks for one where none can run (the offscreen
+    # presenter has no Vulkan GE): the run goes on, and must say the request was refused.
+    env.pop("SR_TEX_DUMP", None)
+    if texdump_refused:
+        env["SR_TEX_DUMP"] = "1"
     # extra_env names a value to set, or None to remove the variable for this route.
     for key, value in (extra_env or {}).items():
         if value is None:
@@ -958,6 +964,9 @@ def run(
     if offscreen and (failure := offscreen_present_evidence_failure(combined)):
         sys.stderr.write(combined)
         raise RuntimeError(f"offscreen presenter evidence {failure}")
+    if texdump_refused and ("TEX_DUMP: refused (" not in combined or "TEX_DUMP: on" in combined):
+        sys.stderr.write(combined)
+        raise RuntimeError("SR_TEX_DUMP=1 without the Vulkan GE was not refused with a TEX_DUMP line")
     print(
         f"DISPLAY_SMOKE_RUN status=PASS mode={mode} "
         f"frames={frames} framebuffer=0x{FRAMEBUFFER:08x} value=0x{expected:08x}"
@@ -2032,7 +2041,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "verify":
             return verify(args.build_dir)
         if args.command == "run":
-            return run(args.build_dir, gui=args.gui, offscreen=args.offscreen)
+            return run(args.build_dir, gui=args.gui, offscreen=args.offscreen,
+                       texdump_refused=args.offscreen)
         if args.command == "vramdump":
             return run_vramdump(args.build_dir)
         if args.command == "flight":

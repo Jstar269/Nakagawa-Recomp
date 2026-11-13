@@ -1367,7 +1367,9 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   and choosing a ZIP file itself in the player (a folder that holds a `textures.zip` works) are not done.
 - **Dump.** A player who wants a pack for their own game makes it from the game itself: in an Enhanced or Ace run
   on the Vulkan renderer, the pause menu's **Settings > Dump textures** (`gegpu_texdump_start`, started from
-  `gui.c`) writes every texture the game draws from then on, each level once, as an RGBA PNG named the way the
+  `gui.c`) writes every texture the Vulkan renderer's texture cache takes from then on (not one drawn only by the
+  software rasterizer, nor one larger than 512, which no pack can replace either), each level once, as an RGBA PNG
+  named the way the
   folder's pack names it (`nk_texrepl_file_key`), `<16 hex cache key><8 hex hash>.png` and `..._<level>.png` for mip
   levels, into `<user data>/texdump/<disc ID>` (`sr_texdump_folder`: one folder a disc ID, never shared). Before
   anything is made or written there, the folder is checked as a texture pack folder is (`sr_texdump_folder_problem`):
@@ -1414,11 +1416,18 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   again. Each variable takes a whole decimal number in its range and nothing else. While on, the row says how many
   files the run has saved. The switch is the run's alone, off at every start unless `SR_TEX_DUMP=1`, and never
   saved, and an authentic run has no row; `SR_TEX_DUMP=1` starts it with the run (`gui.c`), so a dump also holds
-  what the game shows before the first pause and a script can take one unattended. Stamps:
+  what the game shows before the first pause and a script can take one unattended, and a run without the Vulkan
+  renderer (it failed to start, the GDI window, the offscreen presenter) refuses it with a `TEX_DUMP: refused`
+  line. The launcher always exports `SR_TEX_DUMP` empty (`nk_launch.c`), so the variable works only for a runtime
+  started by hand: a value left in the environment never makes the games the library starts write their
+  textures. Stamps:
   `TEX_DUMP: on (hash=, budget_mb=, max_files=; ...)` when started, `TEX_DUMP: refused (<reason>)` (the row shows
   the reason too; a reason that names the folder names only its last component, never a full path), and
   `TEX_DUMP: off` and, at exit, `TEX_DUMP: exit (written=, already_there=, skipped=, changing=, failed=,
   queue_full=, writing=, mb=)`; the run waits at exit for every file handed to the workers, so `writing=` is 0 there.
+  That holds for the exit at `SR_EXIT_AT_VBLANK` too, which skips `atexit`: it finishes the dump through
+  `sr_texdump_exit_finish` before it ends the process. The PNG encoder's CRC table is constant, so the two
+  workers share no state while they encode.
   The project ships no texture and no upscaler: the images are the game's copyrighted images, from the player's own
   copy of the game, and stay on their PC.
 - **Tests.** `texrepl-selftest` checks the hashes against values taken from PPSSPP's own code and published xxHash
@@ -1510,14 +1519,18 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   with no file written (a dump that encoded or wrote on the guest thread fails there), drawn again it is not handed
   over twice; with the queue's other slots taken, the next texture is refused, counted and said, and looked at again
   on each draw; once the workers run, the first file lands and is counted when taken back, and the refused texture
-  is written on its next draw. `tex-scale-selftest` checks the work jobs themselves: each runs once, on a worker
+  is written on its next draw. Its `dump-exit` cell holds 20 levels with the workers and calls what the exit at
+  `SR_EXIT_AT_VBLANK` calls: every level is written whole by both workers at once, each file's CRCs right, and no
+  temp file is left. `tex-scale-selftest` checks the work jobs themselves: each runs once, on a worker
   thread, never the submitter's; held jobs stay queued with nobody waiting; the 64 slots and the host-memory cap
   refuse the next job; scale and work results are taken apart; a sync submit runs before it returns.
   `fbcap-selftest` checks the folder name, the folder check (ill-formed UTF-8 of each kind, a relative and, on
   Windows, a drive-relative path, 511 bytes taken and 512 refused, device and extended paths), the PNG encoder
   against the project's own inflater (`nk_psp_inflate.c`) and within `sr_png_encode_bound` (noise of 9-bit literals
-  included), and the no-replace publish, tagged and untagged, and a screenshot into a non-ASCII folder;
-  `test_overlay_screens` checks the row.
+  included), its CRC table against the bit-by-bit definition, and the no-replace publish, tagged and untagged, and
+  a screenshot into a non-ASCII folder; `test_overlay_screens` checks the row; `test_launch_resolution` checks that
+  the launcher masks an inherited `SR_TEX_DUMP=1`; and `display-smoke-run`'s offscreen run asks for a dump with
+  no Vulkan renderer and requires the `TEX_DUMP: refused` line.
 
 ### 10.13. Sharp Game Text
 

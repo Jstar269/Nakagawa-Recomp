@@ -1568,6 +1568,16 @@ static bool build_golden(char *out, size_t cap, size_t *used) {
         model.vram = NULL;
         model.developer = false;
     }
+    /* The Dump textures row (#1880), on and focused with files saved, at both window sizes,
+       appended so the cases above keep their bytes. */
+    model.texdump = 2;
+    model.texdump_saved = 540u;
+    nk_overlay_go(&state, NK_OVERLAY_SCREEN_SETTINGS, NK_OVERLAY_ID_TEXDUMP);
+    ok = ok && append_case(out, cap, used, "settings-texdump-on", ui, &state, &model);
+    narrow.texdump = 2;
+    narrow.texdump_saved = 540u;
+    nk_overlay_go(&state, NK_OVERLAY_SCREEN_SETTINGS, NK_OVERLAY_ID_TEXDUMP);
+    ok = ok && append_case(out, cap, used, "settings-texdump-on-960x600", small, &state, &narrow);
     nk_ui_destroy(ui);
     nk_ui_destroy(small);
     return ok;

@@ -5548,6 +5548,8 @@ static void tex_dump_redact(char *text, size_t cap, const char *dir) {
     snprintf(text, cap, "%s", out);
 }
 
+static void tex_dump_shutdown(void);
+
 int gegpu_texdump_start(const char *dir, char *err, size_t err_cap) {
     char ebuf[200];
     if (!err || !err_cap) { err = ebuf; err_cap = sizeof(ebuf); }
@@ -5632,6 +5634,9 @@ int gegpu_texdump_start(const char *dir, char *err, size_t err_cap) {
     memset(s_dump.churn, 0, sizeof(s_dump.churn));
     if (s_dump.stop == TEX_DUMP_STOP_WRITE) s_dump.stop = TEX_DUMP_GOING;   /* the budget and file limit stay spent */
     s_dump.on = 1;
+    /* A run that ends at SR_EXIT_AT_VBLANK skips atexit (and gegpu_shutdown): it finishes the dump
+       through this hook, so the files still with the workers land and the exit line is printed. */
+    sr_texdump_exit_hook(tex_dump_shutdown);
     static const char *const kind[] = { "quick", "xxh32", "xxh64" };
     fprintf(stderr, "TEX_DUMP: on (hash=%s, budget_mb=%llu, max_files=%llu; each texture drawn from now is written once)\n",
             kind[nk_texrepl_hash_kind(names)], mb, files);
@@ -5873,7 +5878,11 @@ static void tex_dump_note(TexEnt *e, uint32_t levels) {
 
 static void tex_dump_shutdown(void) {
     /* Every file handed to the workers lands (or fails) and is counted before the exit line: a
-     * test's hold is let go, and the guest thread waits here only because the run is ending. */
+     * test's hold is let go, and the guest thread waits here only because the run is ending. The
+     * wait is for the jobs already queued, which the workers run to the end; nothing new is
+     * queued once the guest thread is here. Reached from gegpu_shutdown, or from the exit at
+     * SR_EXIT_AT_VBLANK through sr_texdump_exit_finish; whichever comes second finds nothing. */
+    sr_texdump_exit_hook(NULL);
     if (s_dump.inflight) {
         nk_tex_scale_set_hold(0);
         nk_tex_scale_wait_idle();

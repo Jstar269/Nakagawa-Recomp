@@ -1863,6 +1863,17 @@ int sr_video_frame_recent(uint32_t addr, uint32_t bytes) {
     }
     return 0;
 }
+
+/* ---- The texture dump at SR_EXIT_AT_VBLANK (ge_shared.h, sr_texdump_exit_finish) ------------- */
+static void (*s_texdump_exit)(void);
+
+void sr_texdump_exit_hook(void (*finish)(void)) { s_texdump_exit = finish; }
+
+void sr_texdump_exit_finish(void) {
+    void (*finish)(void) = s_texdump_exit;
+    s_texdump_exit = NULL;
+    if (finish) finish();
+}
 static int s_capture_configured = 0;
 static uint32_t s_capture_frame = UINT32_MAX;
 static uint32_t s_capture_frame_end = UINT32_MAX;

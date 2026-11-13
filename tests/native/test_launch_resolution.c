@@ -273,6 +273,7 @@ static int write_launch_environment_probe(void) {
     const char *ace = getenv("SR_ACE");
     const char *ace_report = getenv("SR_ACE_REPORT");
     const char *texpack = getenv("SR_TEX_REPLACE");
+    const char *texdump = getenv("SR_TEX_DUMP");
     const char *host_time_zone = getenv("SR_HOST_TIME_ZONE");
     const char *code_capture = getenv("SR_CODE_CAPTURE");
     const char *boot_path = getenv("SR_BOOT_PATH");
@@ -303,6 +304,7 @@ static int write_launch_environment_probe(void) {
                      "SR_ACE=%s\n"
                      "SR_ACE_REPORT=%s\n"
                      "SR_TEX_REPLACE=%s\n"
+                     "SR_TEX_DUMP=%s\n"
                      "SR_HOST_TIME_ZONE=%s\n"
                      "SR_CODE_CAPTURE=%s\n"
                      "SR_BOOT_PATH=%s\n"
@@ -331,6 +333,7 @@ static int write_launch_environment_probe(void) {
                      ace ? ace : "<unset>",
                      ace_report ? ace_report : "<unset>",
                      texpack ? texpack : "<unset>",
+                     texdump ? texdump : "<unset>",
                      host_time_zone ? host_time_zone : "<unset>",
                      code_capture ? code_capture : "<unset>",
                      boot_path ? boot_path : "<unset>",
@@ -536,6 +539,10 @@ static void test_no_iso_child_environment(const char *test_executable,
     bool had_texpack;
     char *old_texpack = capture_environment_value("SR_TEX_REPLACE", &had_texpack);
     set_environment_value("SR_TEX_REPLACE", "poisoned-parent-pack");
+    /* Nor an inherited texture dump: the player starts one from the pause menu, in that run. */
+    bool had_texdump;
+    char *old_texdump = capture_environment_value("SR_TEX_DUMP", &had_texdump);
+    set_environment_value("SR_TEX_DUMP", "1");
     bool had_host_zone;
     char *old_host_zone = capture_environment_value("SR_HOST_TIME_ZONE", &had_host_zone);
     set_environment_value("SR_HOST_TIME_ZONE", "poisoned-parent-zone");
@@ -737,6 +744,7 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_ACE_REPORT=\n") != NULL);   /* the parent's path is masked */
     assert(strstr(observed, "poisoned-parent-report") == NULL);
     assert(strstr(observed, "SR_TEX_REPLACE=\n") != NULL);  /* and the parent's pack */
+    assert(strstr(observed, "SR_TEX_DUMP=\n") != NULL);     /* and the parent's dump switch */
     assert(strstr(observed, "poisoned-parent-pack") == NULL);
     /* The host's local time zone for the runtime's first-run seed (#1382): "<minutes>,<0|1>"
        from the platform, never an inherited value. */
@@ -900,6 +908,7 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(fclose(report) == 0);
     assert(strstr(observed, ";tess=off;twin=off;texpack=on\n") != NULL);
     assert(strstr(observed, "SR_TEX_REPLACE=fixture-pack-folder\n") != NULL);
+    assert(strstr(observed, "SR_TEX_DUMP=\n") != NULL);   /* masked in an Ace session too */
     assert(strstr(observed, "poisoned-parent-pack") == NULL);
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
     session.config.texpack_dir[0] = '\0';
@@ -1252,6 +1261,8 @@ static void test_no_iso_child_environment(const char *test_executable,
     free(old_ace);
     restore_environment_value("SR_TEX_REPLACE", old_texpack, had_texpack);
     free(old_texpack);
+    restore_environment_value("SR_TEX_DUMP", old_texdump, had_texdump);
+    free(old_texdump);
     restore_environment_value("SR_PRESENT_UPSCALE", old_upscale, had_upscale);
     free(old_upscale);
     restore_environment_value("SR_MOVIE_UPSCALE", old_movie, had_movie);

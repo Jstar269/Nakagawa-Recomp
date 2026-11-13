@@ -1843,6 +1843,109 @@ done:
     return 1;
 }
 
+/* PNG CRC-32, bit by bit: independent of the encoder's table. */
+static uint32_t xst_crc32(const unsigned char *p, size_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; i++) {
+        c ^= p[i];
+        for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+    }
+    return c ^ 0xFFFFFFFFu;
+}
+
+/* The PNG at dir/name: the signature, then chunks whose CRCs are all right, IEND last with nothing
+ * after it. */
+static int xst_dump_png_crcs_ok(const char *dir, const char *name) {
+    char path[600];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *fp = nk_fopen_utf8(path, "rb");
+    if (!fp) return 0;
+    unsigned char *b = (unsigned char *)malloc(1u << 20);
+    const size_t n = b ? fread(b, 1, 1u << 20, fp) : 0u;
+    fclose(fp);
+    static const unsigned char sig[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n' };
+    int ok = b && n > 8u && n < (1u << 20) && memcmp(b, sig, 8u) == 0, iend = 0;
+    size_t i = 8u;
+    while (ok && !iend && i + 12u <= n) {
+        const uint32_t len = ((uint32_t)b[i] << 24) | ((uint32_t)b[i + 1] << 16) | ((uint32_t)b[i + 2] << 8) | b[i + 3];
+        if (len > n - i - 12u) { ok = 0; break; }
+        const unsigned char *c = b + i + 8u + len;
+        const uint32_t crc = ((uint32_t)c[0] << 24) | ((uint32_t)c[1] << 16) | ((uint32_t)c[2] << 8) | c[3];
+        ok = xst_crc32(b + i + 4u, (size_t)len + 4u) == crc;
+        iend = memcmp(b + i + 4u, "IEND", 4u) == 0;
+        i += 12u + len;
+    }
+    free(b);
+    return ok && iend && i == n;
+}
+
+static bool xst_dump_count_tmp(const char *name, void *ctx) {
+    if (strstr(name, ".tmp")) ++*(int *)ctx;
+    return true;
+}
+
+/* The exit at SR_EXIT_AT_VBLANK (hle_display.c) skips atexit and calls sr_texdump_exit_finish
+ * before _Exit: with every level still held by the workers, that call must let both workers write
+ * them all, count them and leave no temp file. The files are written by the two workers at once,
+ * each through the encoder, so every one's CRCs are checked too. */
+#define XST_EXIT_LEVELS 20
+static int xst_cell_dump_exit(int f) {
+    (void)f;
+    uint32_t t[XST_W * XST_H];
+    char dir[400], names[XST_EXIT_LEVELS][64];
+    xst_dump_folder(dir, sizeof(dir), "texdump_gpu_exit");
+    xst_reset();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(0);
+    nk_tex_scale_set_hold(1);
+    const char *why = NULL;
+    int tmp = 0, landed = 0;
+    if (!xst_dump_start(dir)) { why = "the dump did not start"; goto done; }
+    for (int i = 0; i < XST_EXIT_LEVELS; i++) {
+        xst_pattern(t, 601u + 2u * (uint32_t)i);
+        xst_repl_name(t, names[i], sizeof(names[i]));
+        xst_upload(t);
+        xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+        if (!xst_dump_draw()) { why = "a draw failed"; goto done; }
+    }
+    if (s_dump.inflight != XST_EXIT_LEVELS || s_dump.written != 0u || xst_dump_has(dir, names[0])) {
+        why = "the levels were not all held by the workers before the exit";
+        goto done;
+    }
+    sr_texdump_exit_finish();   /* what the exit at SR_EXIT_AT_VBLANK calls */
+    if (s_dump.on || s_dump.inflight || s_dump.starts) {
+        why = "the exit did not finish the dump";
+        goto done;
+    }
+    for (int i = 0; i < XST_EXIT_LEVELS; i++) {
+        uint32_t w = 0, h = 0;
+        if (xst_dump_has(dir, names[i]) && xst_dump_png_size(dir, names[i], &w, &h) && w == XST_W && h == XST_H &&
+            xst_dump_png_crcs_ok(dir, names[i]))
+            landed++;
+    }
+    if (!nk_platform_list_files(dir, xst_dump_count_tmp, &tmp)) tmp = -1;
+    if (landed != XST_EXIT_LEVELS || tmp != 0 || xst_dump_files(dir) != XST_EXIT_LEVELS + 1) {
+        why = "a level the workers held at the exit was not written whole, or a temp file was left";
+        goto done;
+    }
+
+done:
+    nk_tex_scale_set_hold(0);
+    nk_tex_scale_wait_idle();
+    gegpu_texdump_stop();
+    tex_dump_collect();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(1);
+    if (why) {
+        fprintf(stderr, "gpu texscale selftest: FAIL dump-exit: %s (%d of %d whole, %d temp files)\n", why, landed,
+                XST_EXIT_LEVELS, tmp);
+        return 0;
+    }
+    printf("gpu texscale selftest: PASS %-12s the exit at SR_EXIT_AT_VBLANK lets the workers write all %d held "
+           "levels, every CRC right, no temp file left\n", "dump-exit", XST_EXIT_LEVELS);
+    return 1;
+}
+
 int gegpu_texrepl_only_prepare(const char *build_root) {
     char dir[400], path[480];
     snprintf(dir, sizeof(dir), "%s/texrepl_gpu_only_pack", build_root);
@@ -2025,11 +2128,12 @@ int gegpu_texscale_selftest(void) {
     static int (*const cells[])(int) = { xst_cell_scaled_draw, xst_cell_large, xst_cell_upload_cap,
                                          xst_cell_not_ready, xst_cell_rewrite, xst_cell_clut, xst_cell_replace,
                                          xst_cell_replace_palette, xst_cell_dump, xst_cell_dump_xxh,
-                                         xst_cell_dump_palette, xst_cell_dump_mip, xst_cell_dump_async, xst_cell_budget,
+                                         xst_cell_dump_palette, xst_cell_dump_mip, xst_cell_dump_async,
+                                         xst_cell_dump_exit, xst_cell_budget,
                                          xst_cell_rtt, xst_cell_color_test, xst_cell_onetoone };
     static const char *const names[] = { "scaled-draw", "large", "upload-cap", "not-ready", "rewrite", "clut",
                                          "replace", "replace-pal", "dump", "dump-xxh",
-                                         "dump-pal", "dump-mip", "dump-async", "budget", "rtt", "color-test",
+                                         "dump-pal", "dump-mip", "dump-async", "dump-exit", "budget", "rtt", "color-test",
                                          "onetoone" };
     /* The cells before onetoone check copies through 1:1 sprites, so they run with the 1:1 rule
      * off; onetoone turns it back on. */
