@@ -14355,6 +14355,452 @@ static int coherence_run_rtt_vram_view(void) {
     return ok;
 }
 
+/* ---- movie frames (#2111) -------------------------------------------------------------------
+ *
+ * Movie provenance (ge_shared.h) on the production path: the media HLE notes a decoded picture
+ * (sr_movie_note_picture, as sceMpegAvcDecode, sceMpegAvcCsc and the PSMF player do), and the
+ * renderer finds it at the texture upload (movie-texture: a picture in guest RAM, or a byte-exact copy
+ * of it in VRAM as Hot Shots Tennis makes, drawn as a textured sprite) or in the presented target
+ * (movie-target: a picture decoded into the VRAM framebuffer a GE target holds). gegpu_present then
+ * gives the presenter SDL3VK_FRAME_MOVIE, which the movie upscaler (gui.c) takes as it takes a CPU-presented frame; a stub
+ * pass in gui.c's place records what it was given. Each way the tag is dropped has its own step, and
+ * the frame's guest VRAM is compared byte for byte with tracking off. NK_MOVIE_MUTANT_NO_MATCH drops
+ * the match in the renderer: every "movie frame not found" step then fails
+ * (gpu-coherence-selftest-movie-mutant). */
+
+#define MVC_PIC    0x08200000u   /* movie-texture: the picture in guest RAM (below user RAM), 512 texels a row */
+#define MVC_OWNER  0x00F00000u   /* the decoder handle the notes carry (an opaque number) */
+#define MVC_BASE   0x04000000u   /* the displayed framebuffer, 8888, stride 512 */
+#define MVC_COPY   0x04110000u   /* movie-texture: a copy of the picture in VRAM, past the framebuffer */
+
+static struct { int calls, kind; } s_mvc;
+static int s_mvc_pass_runs;   /* presents the stub pass ran for, in the running cell */
+
+static void *mvc_upscale_pass(void *cmd, void *src, int w, int h, int out_w, int out_h, int kind,
+                              int *anime4k) {
+    (void)cmd; (void)src; (void)w; (void)h; (void)out_w; (void)out_h; (void)anime4k;
+    s_mvc.calls++;
+    s_mvc.kind = kind;
+    s_mvc_pass_runs++;
+    return NULL;   /* scaled as SR_PRESENT_SCALING says: the cell checks the kind, not a picture */
+}
+
+static uint32_t mvc_pixel(uint32_t x, uint32_t y, uint32_t frame) {
+    return 0xFF000000u | ((x * 3u + frame * 17u) & 0xFFu) | (((y * 5u + frame) & 0xFFu) << 8) |
+           (((x ^ y ^ frame) & 0xFFu) << 16);
+}
+
+/* A decoded picture: w x h pixels of frame `frame` at `addr`, `stride` pixels a row. A VRAM write is
+ * notified as sr_guest_copy_out's commit notifies the decoder's. */
+static void mvc_write_picture(uint32_t addr, uint32_t stride, uint32_t w, uint32_t h, uint32_t frame) {
+    uint32_t *p = (uint32_t *)SR_HOST(addr);
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) p[y * stride + x] = mvc_pixel(x, y, frame);
+    if (sr_vram_cpu_aperture(addr)) sr_gpu_vram_dirty(addr, ((h - 1u) * stride + w) * 4u);
+}
+
+static void mvc_state(void) {
+    wrap_state(MVC_BASE, 512u);
+    s_ge->scis_x2 = (int)DRAW_W - 1;
+    s_ge->tex_addr = MVC_PIC;
+    s_ge->tex_bufw = 512;
+    s_ge->tex_fmt = 3;
+    s_ge->tex_w = 512;
+    s_ge->tex_h = 512;
+    s_ge->tex_func = 3;      /* REPLACE: the framebuffer shows the texel */
+    s_ge->tex_filter = 0;    /* NEAREST */
+    ge_set_gpu_hooks(&k_hooks);
+}
+
+/* A through-mode sprite over [x0, x1) x [y0, y1): textured 1:1 from the picture, or one colour. */
+static int mvc_sprite(float x0, float y0, float x1, float y1, int textured, uint32_t colour) {
+    s_ge->tex_enable = textured;
+    ge_state_note_external_write();
+    s_tmpl_ok = 0;
+    GeVtx p0, p1;
+    wrap_vtx(&p0, x0, y0, colour);
+    wrap_vtx(&p1, x1, y1, colour);
+    p0.u = x0; p0.v = y0; p1.u = x1; p1.v = y1;
+    return hook_sprite(&p0, &p1, 0);
+}
+
+/* Presents the framebuffer and checks the kind the upscale pass was given. */
+static int mvc_present(const char *cell, const char *step, int want) {
+    memset(&s_mvc, 0, sizeof(s_mvc));
+    const int pr = gegpu_present(MVC_BASE, 3, 512u);
+    const int kind = sdl3vk_present_frame_kind();
+    /* The pass runs when the window's place is larger than the shown image (mvc_pass_ran checks
+     * that it ran at 1x); when it runs it is given the kind the presenter recorded. */
+    const int pass_ok = s_mvc.calls == 0 || (s_mvc.calls == 1 && s_mvc.kind == want);
+    if (pr != GEGPU_PRESENT_SHOWN || kind != want || !pass_ok) {
+        fprintf(stderr, "gpu coherence selftest [%s]: %s: present %d, frame kind %d (want %d), upscale "
+                        "pass calls %d given %d%s\n", cell, step, pr, kind, want, s_mvc.calls, s_mvc.kind,
+                want == SDL3VK_FRAME_MOVIE && kind != want ? " -- FAIL movie frame not found"
+                : kind == SDL3VK_FRAME_MOVIE ? " -- FAIL a frame that is not a movie frame was taken for one"
+                                              : "");
+        return 0;
+    }
+    return 1;
+}
+
+/* At 1x with no host twin the shown 480 x 272 picture is smaller than the 960 x 544 window, so
+ * the stub pass must have run: the movie upscaler's own entry point saw the movie frames. */
+static int mvc_pass_ran(const char *cell) {
+    if (s_scale != 1 || s_twin || s_mvc_pass_runs > 0) return 1;
+    fprintf(stderr, "gpu coherence selftest [%s]: the upscale pass never ran at 1x\n", cell);
+    return 0;
+}
+
+/* The tag's rules at the notes themselves, with no draw (ge.c): the picture's span, replacement,
+ * eviction, a swizzled view, the owner's release and tracking off. */
+static int mvc_notes_rules(void) {
+    const char *cell = "movie-notes";
+    int ok = 1;
+    SrMoviePicture pic;
+    uint32_t x = 0, y = 0;
+    sr_movie_set_tracking(0);
+    mvc_write_picture(MVC_PIC, 512u, 480u, 272u, 1u);
+    sr_movie_note_picture(MVC_OWNER, MVC_PIC, 512u, 3u, 480u, 272u);
+    if (sr_movie_find_pixel(MVC_PIC, 512u, 3u, NULL, NULL, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: a note was kept with tracking off\n", cell);
+        ok = 0;
+    }
+    sr_movie_set_tracking(1);
+    sr_movie_note_picture(MVC_OWNER, MVC_PIC, 512u, 3u, 480u, 272u);
+    const uint64_t first = sr_movie_clock();
+    if (!sr_movie_find_pixel(MVC_PIC + (100u * 512u + 479u) * 4u, 512u, 3u, &pic, &x, &y) || x != 479u ||
+        y != 100u || pic.seq != first || pic.owner != MVC_OWNER) {
+        fprintf(stderr, "gpu coherence selftest [%s]: the noted picture's last column is not found\n", cell);
+        ok = 0;
+    }
+    if (sr_movie_find_pixel(MVC_PIC + (100u * 512u + 480u) * 4u, 512u, 3u, NULL, NULL, NULL) ||
+        sr_movie_find_pixel(MVC_PIC + 272u * 512u * 4u, 512u, 3u, NULL, NULL, NULL) ||
+        sr_movie_find_pixel(MVC_PIC + 2u, 512u, 3u, NULL, NULL, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: a byte past the picture or between pixels matched\n", cell);
+        ok = 0;
+    }
+    /* A later picture over any byte replaces it. */
+    sr_movie_note_picture(MVC_OWNER, MVC_PIC + 271u * 512u * 4u, 512u, 3u, 16u, 16u);
+    if (sr_movie_alive(first) || sr_movie_find_pixel(MVC_PIC, 512u, 3u, NULL, NULL, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: a picture written over the last row kept the first\n", cell);
+        ok = 0;
+    }
+    /* More than SR_MOVIE_NOTES newer pictures drop the oldest. */
+    sr_movie_note_picture(MVC_OWNER, MVC_PIC, 512u, 3u, 16u, 16u);
+    const uint64_t oldest = sr_movie_clock();
+    for (uint32_t i = 1; i <= SR_MOVIE_NOTES; i++)
+        sr_movie_note_picture(MVC_OWNER, MVC_PIC + 0x100000u + i * 0x10000u, 512u, 3u, 16u, 16u);
+    if (sr_movie_alive(oldest)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: %d newer pictures did not drop the oldest\n", cell,
+                SR_MOVIE_NOTES);
+        ok = 0;
+    }
+    /* A picture behind a swizzled VRAM view is never noted; one behind the linear 0x044 view is, at
+     * its canonical address. */
+    const uint64_t before = sr_movie_clock();
+    sr_movie_note_picture(MVC_OWNER, 0x04240000u, 512u, 3u, 16u, 16u);
+    sr_movie_note_picture(MVC_OWNER, 0x04640000u, 512u, 3u, 16u, 16u);
+    if (sr_movie_clock() != before) {
+        fprintf(stderr, "gpu coherence selftest [%s]: a picture behind a swizzled view was noted\n", cell);
+        ok = 0;
+    }
+    sr_movie_note_picture(MVC_OWNER, 0x04440000u, 512u, 3u, 16u, 16u);
+    if (!sr_movie_find_pixel(0x04040000u, 512u, 3u, &pic, NULL, NULL) || pic.addr != 0x04040000u) {
+        fprintf(stderr, "gpu coherence selftest [%s]: the 0x044 view's picture is not at its canonical address\n",
+                cell);
+        ok = 0;
+    }
+    /* A wider picture than its stride, or no format the GE has, is no picture. */
+    sr_movie_note_picture(MVC_OWNER, MVC_PIC, 256u, 3u, 480u, 16u);
+    sr_movie_note_picture(MVC_OWNER, MVC_PIC, 512u, 4u, 16u, 16u);
+    if (sr_movie_clock() != before + 1u) {
+        fprintf(stderr, "gpu coherence selftest [%s]: a malformed picture was noted\n", cell);
+        ok = 0;
+    }
+    /* The owner's release, then tracking off, forget. */
+    sr_movie_note_picture(MVC_OWNER + 4u, MVC_PIC + 0x80000u, 512u, 3u, 16u, 16u);
+    sr_movie_forget_owner(MVC_OWNER);
+    if (sr_movie_find_pixel(0x04040000u, 512u, 3u, NULL, NULL, NULL) ||
+        !sr_movie_find_pixel(MVC_PIC + 0x80000u, 512u, 3u, NULL, NULL, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: a released owner's pictures were kept, or another's dropped\n",
+                cell);
+        ok = 0;
+    }
+    /* A byte-exact copy of a held picture elsewhere is found as that picture; one of another stride,
+     * one larger than the texture and one with a byte changed are not. */
+    for (uint32_t y = 0; y < 16u; y++)
+        memcpy(SR_HOST(MVC_PIC + 0xC0000u + y * 2048u), SR_HOST(MVC_PIC + 0x80000u + y * 2048u), 64u);
+    if (!sr_movie_find_copy(MVC_PIC + 0xC0000u, 512u, 3u, 16u, 16u, &pic) || pic.addr != MVC_PIC + 0x80000u ||
+        sr_movie_find_copy(MVC_PIC + 0xC0000u, 256u, 3u, 16u, 16u, NULL) ||
+        sr_movie_find_copy(MVC_PIC + 0xC0000u, 512u, 3u, 15u, 16u, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: a copy was not found, or found with another stride or "
+                        "in a smaller texture\n", cell);
+        ok = 0;
+    }
+    /* Two pixels that differ from the picture only in the top (alpha) bit, at odd places: the top
+     * bit of two 64-bit words, which a word-wise FNV fold cannot tell apart. */
+    ((uint8_t *)SR_HOST(MVC_PIC + 0xC0000u))[7] ^= 0x80u;
+    ((uint8_t *)SR_HOST(MVC_PIC + 0xC0000u + 5u * 2048u))[15] ^= 0x80u;
+    if (sr_movie_find_copy(MVC_PIC + 0xC0000u, 512u, 3u, 16u, 16u, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL a copy that differs from the picture was found "
+                        "(two alpha bits)\n", cell);
+        ok = 0;
+    }
+    ((uint8_t *)SR_HOST(MVC_PIC + 0xC0000u))[7] ^= 0x80u;
+    ((uint8_t *)SR_HOST(MVC_PIC + 0xC0000u + 5u * 2048u))[15] ^= 0x80u;
+    ((uint8_t *)SR_HOST(MVC_PIC + 0xC0000u + 15u * 2048u))[63] ^= 1u;
+    if (sr_movie_find_copy(MVC_PIC + 0xC0000u, 512u, 3u, 16u, 16u, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL a copy that differs from the picture was found "
+                        "(its last byte)\n", cell);
+        ok = 0;
+    }
+    sr_movie_set_tracking(0);
+    sr_movie_set_tracking(1);
+    if (sr_movie_find_pixel(MVC_PIC + 0x80000u, 512u, 3u, NULL, NULL, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: turning tracking off kept a note\n", cell);
+        ok = 0;
+    }
+    sr_movie_set_tracking(0);
+    if (ok) printf("gpu coherence selftest: PASS %-22s span, replacement, eviction, views, release, copies\n", cell);
+    return ok;
+}
+
+/* movie-texture's frame: an untextured clear, the picture drawn as a 480 x 272 sprite (or w x h),
+ * subtitles over its bottom rows, and with `cover` a full-screen draw after it. */
+static int mvc_tex_frame(float w, float h, int subtitles, int cover) {
+    int ok = mvc_sprite(0.0f, 0.0f, (float)DRAW_W, (float)FB_H, 0, 0xFF000000u);
+    ok = ok && mvc_sprite(0.0f, 0.0f, w, h, 1, 0xFFFFFFFFu);
+    if (subtitles) ok = ok && mvc_sprite(40.0f, 232.0f, 440.0f, 262.0f, 0, 0xFF808080u);
+    if (cover) ok = ok && mvc_sprite(0.0f, 0.0f, (float)DRAW_W, (float)FB_H, 0, 0xFFFF0000u);
+    return ok;
+}
+
+/* The frame's guest VRAM after a readback of its target. */
+static int mvc_guest_frame(uint32_t *out) {
+    if (s_nbatch && !submit_pending()) return 0;
+    Target *t = target_find_by_fba(MVC_BASE & 0x00FFFFFFu);
+    if (!t || !target_readback(t)) return 0;
+    memcpy(out, SR_HOST(MVC_BASE), 512u * FB_H * 4u);
+    return 1;
+}
+
+static int coherence_run_movie_texture(void) {
+    const char *cell = "movie-texture";
+    static uint32_t frame_on[512u * FB_H], frame_off[512u * FB_H];
+    unsigned long m0 = 0, tf0 = 0, gf0 = 0, m1 = 0, tf1 = 0, gf1 = 0;
+    int ok = mvc_notes_rules();
+    coherence_reset_targets();
+    s_mvc_pass_runs = 0;
+    sdl3vk_set_upscale_pass(mvc_upscale_pass);
+    memset(SR_HOST(MVC_BASE), 0, 512u * FB_H * 4u);
+    sr_gpu_vram_dirty(MVC_BASE, 512u * FB_H * 4u);
+    gegpu_movie_counts(&m0, &tf0, &gf0);
+    sr_movie_set_tracking(1);
+    mvc_state();
+
+    /* The decoder writes frame 1 and notes it; the GE draws it with subtitles over it. */
+    mvc_write_picture(MVC_PIC, 512u, 480u, 272u, 1u);
+    sr_movie_note_picture(MVC_OWNER, MVC_PIC, 512u, 3u, 480u, 272u);
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 1, 0) && mvc_present(cell, "drawn with subtitles", SDL3VK_FRAME_MOVIE);
+    ok = ok && mvc_guest_frame(frame_on);
+    ok = ok && mvc_present(cell, "presented again, nothing drawn", SDL3VK_FRAME_MOVIE);
+    /* The next frame: the same picture, drawn over whole by a later draw (a menu over the movie). */
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 0, 1) && mvc_present(cell, "hidden by a later draw", SDL3VK_FRAME_GE);
+    /* Less than half of the shown picture: a thumbnail. */
+    ok = ok && mvc_tex_frame(200.0f, 136.0f, 0, 0) && mvc_present(cell, "a thumbnail", SDL3VK_FRAME_GE);
+    /* Frame 2 decoded into the same buffer: a new note, a new upload. */
+    mvc_write_picture(MVC_PIC, 512u, 480u, 272u, 2u);
+    sr_movie_note_picture(MVC_OWNER, MVC_PIC, 512u, 3u, 480u, 272u);
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 0, 0) && mvc_present(cell, "the next picture", SDL3VK_FRAME_MOVIE);
+    /* The same bytes noted again (a decoder that wrote the same picture): the cache keeps the upload,
+     * and the entry is matched to the new note. */
+    sr_movie_note_picture(MVC_OWNER, MVC_PIC, 512u, 3u, 480u, 272u);
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 0, 0) && mvc_present(cell, "the same bytes noted again", SDL3VK_FRAME_MOVIE);
+    /* One pixel overwritten by the CPU (and notified, as a DMA or a write-back is): not the decoder's
+     * picture any more, even once the pixel is put back. */
+    uint32_t *pic = (uint32_t *)SR_HOST(MVC_PIC);
+    const uint32_t kept = pic[100u * 512u + 200u];
+    pic[100u * 512u + 200u] = kept ^ 0x00010101u;
+    sr_gpu_vram_dirty(MVC_PIC + (100u * 512u + 200u) * 4u, 4u);
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 0, 0) && mvc_present(cell, "one pixel overwritten", SDL3VK_FRAME_GE);
+    pic[100u * 512u + 200u] = kept;
+    sr_gpu_vram_dirty(MVC_PIC + (100u * 512u + 200u) * 4u, 4u);
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 0, 0) && mvc_present(cell, "the pixel put back", SDL3VK_FRAME_GE);
+    /* Decoded again, then the decoder deleted: the cached upload is no longer a movie picture. */
+    mvc_write_picture(MVC_PIC, 512u, 480u, 272u, 3u);
+    sr_movie_note_picture(MVC_OWNER, MVC_PIC, 512u, 3u, 480u, 272u);
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 0, 0) && mvc_present(cell, "decoded again", SDL3VK_FRAME_MOVIE);
+    sr_movie_forget_owner(MVC_OWNER);
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 0, 0) && mvc_present(cell, "the decoder deleted", SDL3VK_FRAME_GE);
+    /* The same buffer read as another format or another stride is not the picture. */
+    mvc_write_picture(MVC_PIC, 512u, 480u, 272u, 4u);
+    sr_movie_note_picture(MVC_OWNER, MVC_PIC, 512u, 3u, 480u, 272u);
+    s_ge->tex_fmt = 1;
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 0, 0) && mvc_present(cell, "read as 5551", SDL3VK_FRAME_GE);
+    s_ge->tex_fmt = 3;
+    s_ge->tex_bufw = 480;
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 0, 0) && mvc_present(cell, "read with stride 480", SDL3VK_FRAME_GE);
+    s_ge->tex_bufw = 512;
+    /* Drawn in two 240-wide strips whose textures start inside the picture, as titles that slice a
+     * picture for the texture cache do. */
+    ok = ok && mvc_sprite(0.0f, 0.0f, (float)DRAW_W, (float)FB_H, 0, 0xFF000000u);
+    {
+        GeVtx p0, p1;
+        s_ge->tex_addr = MVC_PIC;
+        s_ge->tex_enable = 1;
+        s_ge->tex_w = 256;
+        ge_state_note_external_write();
+        s_tmpl_ok = 0;
+        wrap_vtx(&p0, 0.0f, 0.0f, 0xFFFFFFFFu); wrap_vtx(&p1, 240.0f, 272.0f, 0xFFFFFFFFu);
+        p0.u = 0.0f; p0.v = 0.0f; p1.u = 240.0f; p1.v = 272.0f;
+        ok = ok && hook_sprite(&p0, &p1, 0);
+        s_ge->tex_addr = MVC_PIC + 240u * 4u;
+        ge_state_note_external_write();
+        s_tmpl_ok = 0;
+        wrap_vtx(&p0, 240.0f, 0.0f, 0xFFFFFFFFu); wrap_vtx(&p1, 480.0f, 272.0f, 0xFFFFFFFFu);
+        p0.u = 0.0f; p0.v = 0.0f; p1.u = 240.0f; p1.v = 272.0f;
+        ok = ok && hook_sprite(&p0, &p1, 0);
+        s_ge->tex_addr = MVC_PIC;
+        s_ge->tex_w = 512;
+    }
+    ok = ok && mvc_present(cell, "drawn in two strips", SDL3VK_FRAME_MOVIE);
+    /* The game copies the picture into VRAM with its own code and draws the copy (Hot Shots
+     * Tennis): a byte-exact copy is the picture; the same copy with one pixel changed is not. */
+    for (uint32_t y = 0; y < FB_H; y++)
+        memcpy(SR_HOST(MVC_COPY + y * 2048u), SR_HOST(MVC_PIC + y * 2048u), 480u * 4u);
+    sr_gpu_vram_dirty(MVC_COPY, 512u * FB_H * 4u);
+    s_ge->tex_addr = MVC_COPY;
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 0, 0) && mvc_present(cell, "a copy in VRAM", SDL3VK_FRAME_MOVIE);
+    ((uint32_t *)SR_HOST(MVC_COPY))[100u * 512u + 200u] ^= 0x00010101u;
+    sr_gpu_vram_dirty(MVC_COPY + (100u * 512u + 200u) * 4u, 4u);
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 0, 0) && mvc_present(cell, "a copy with a pixel changed", SDL3VK_FRAME_GE);
+    s_ge->tex_addr = MVC_PIC;
+    gegpu_movie_counts(&m1, &tf1, &gf1);
+    if (ok && (tf1 - tf0 != 7u || gf1 != gf0 || m1 == m0)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: counted %lu texture movie frames (want 7), %lu target "
+                        "ones (want 0), %lu matched uploads\n", cell, tf1 - tf0, gf1 - gf0, m1 - m0);
+        ok = 0;
+    }
+
+    /* Guest identity: the first frame again from the same guest state with tracking off is the
+     * same guest VRAM, byte for byte, and is a GE frame. */
+    sr_movie_set_tracking(0);
+    coherence_reset_targets();
+    memset(SR_HOST(MVC_BASE), 0, 512u * FB_H * 4u);
+    sr_gpu_vram_dirty(MVC_BASE, 512u * FB_H * 4u);
+    mvc_write_picture(MVC_PIC, 512u, 480u, 272u, 1u);
+    sr_movie_note_picture(MVC_OWNER, MVC_PIC, 512u, 3u, 480u, 272u);
+    mvc_state();
+    ok = ok && mvc_tex_frame(480.0f, 272.0f, 1, 0) && mvc_present(cell, "tracking off", SDL3VK_FRAME_GE);
+    ok = ok && mvc_guest_frame(frame_off);
+    if (ok && memcmp(frame_on, frame_off, sizeof(frame_on)) != 0) {
+        fprintf(stderr, "gpu coherence selftest [%s]: guest VRAM differs with tracking on and off\n", cell);
+        ok = 0;
+    }
+    if (ok && (frame_on[10u * 512u + 10u] & 0xFFFFFFu) != (mvc_pixel(10u, 10u, 1u) & 0xFFFFFFu)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: the frame does not show the picture\n", cell);
+        ok = 0;
+    }
+    ok = ok && mvc_pass_ran(cell);
+    sdl3vk_set_upscale_pass(NULL);
+    coherence_reset_targets();
+    if (ok) printf("gpu coherence selftest: PASS %-22s drawn picture found; 9 ways it is not; guest VRAM unchanged\n",
+                   cell);
+    return ok;
+}
+
+/* movie-target's GE frame: a full-screen draw into the framebuffer, then optionally a small UI box. */
+static int mvc_target_frame(void) {
+    s_ge->tex_enable = 0;
+    return mvc_sprite(0.0f, 0.0f, (float)DRAW_W, (float)FB_H, 0, 0xFF204060u);
+}
+
+static int coherence_run_movie_target(void) {
+    const char *cell = "movie-target";
+    static uint32_t frame_on[512u * FB_H], frame_off[512u * FB_H];
+    unsigned long m0 = 0, tf0 = 0, gf0 = 0, m1 = 0, tf1 = 0, gf1 = 0;
+    int ok = 1;
+    coherence_reset_targets();
+    s_mvc_pass_runs = 0;
+    sdl3vk_set_upscale_pass(mvc_upscale_pass);
+    memset(SR_HOST(MVC_BASE), 0, 512u * FB_H * 4u);
+    sr_gpu_vram_dirty(MVC_BASE, 512u * FB_H * 4u);
+    gegpu_movie_counts(&m0, &tf0, &gf0);
+    sr_movie_set_tracking(1);
+    mvc_state();
+
+    ok = ok && mvc_target_frame() && mvc_present(cell, "a GE frame", SDL3VK_FRAME_GE);
+    /* The decoder writes a picture into the displayed buffer and notes it. */
+    mvc_write_picture(MVC_BASE, 512u, 480u, 272u, 1u);
+    sr_movie_note_picture(MVC_OWNER, MVC_BASE, 512u, 3u, 480u, 272u);
+    ok = ok && mvc_present(cell, "decoded into the target", SDL3VK_FRAME_MOVIE);
+    ok = ok && mvc_guest_frame(frame_on);
+    ok = ok && mvc_present(cell, "presented again", SDL3VK_FRAME_MOVIE);
+    /* A GE write after it, however small: a prompt over the movie. */
+    ok = ok && mvc_sprite(200.0f, 250.0f, 210.0f, 260.0f, 0, 0xFFFFFFFFu) &&
+         mvc_present(cell, "a GE draw after it", SDL3VK_FRAME_GE);
+    /* The next picture. */
+    mvc_write_picture(MVC_BASE, 512u, 480u, 272u, 2u);
+    sr_movie_note_picture(MVC_OWNER, MVC_BASE, 512u, 3u, 480u, 272u);
+    ok = ok && mvc_present(cell, "the next picture", SDL3VK_FRAME_MOVIE);
+    /* One pixel overwritten by the CPU. */
+    uint32_t *fb = (uint32_t *)SR_HOST(MVC_BASE);
+    fb[50u * 512u + 60u] ^= 0x00010101u;
+    sr_gpu_vram_dirty(MVC_BASE + (50u * 512u + 60u) * 4u, 4u);
+    ok = ok && mvc_present(cell, "one pixel overwritten", SDL3VK_FRAME_GE);
+    /* Decoded again, then the decoder deleted. */
+    mvc_write_picture(MVC_BASE, 512u, 480u, 272u, 3u);
+    sr_movie_note_picture(MVC_OWNER, MVC_BASE, 512u, 3u, 480u, 272u);
+    ok = ok && mvc_present(cell, "decoded again", SDL3VK_FRAME_MOVIE);
+    sr_movie_forget_owner(MVC_OWNER);
+    ok = ok && mvc_present(cell, "the decoder deleted", SDL3VK_FRAME_GE);
+    /* A picture under half of the screen; one noted with another stride or format than the target's. */
+    mvc_write_picture(MVC_BASE, 512u, 240u, 136u, 4u);
+    sr_movie_note_picture(MVC_OWNER, MVC_BASE, 512u, 3u, 240u, 136u);
+    ok = ok && mvc_present(cell, "a quarter-screen picture", SDL3VK_FRAME_GE);
+    mvc_write_picture(MVC_BASE, 480u, 480u, 272u, 5u);
+    sr_movie_note_picture(MVC_OWNER, MVC_BASE, 480u, 3u, 480u, 272u);
+    ok = ok && mvc_present(cell, "noted with stride 480", SDL3VK_FRAME_GE);
+    sr_movie_note_picture(MVC_OWNER, MVC_BASE, 512u, 1u, 480u, 272u);
+    ok = ok && mvc_present(cell, "noted as 5551", SDL3VK_FRAME_GE);
+    /* A picture centred with bars above and below (480 x 204): still the frame's main content. */
+    mvc_write_picture(MVC_BASE + 34u * 512u * 4u, 512u, 480u, 204u, 6u);
+    sr_movie_note_picture(MVC_OWNER, MVC_BASE + 34u * 512u * 4u, 512u, 3u, 480u, 204u);
+    ok = ok && mvc_present(cell, "letterboxed", SDL3VK_FRAME_MOVIE);
+    gegpu_movie_counts(&m1, &tf1, &gf1);
+    if (ok && (gf1 - gf0 != 5u || tf1 != tf0)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: counted %lu target movie frames (want 5), %lu texture "
+                        "ones (want 0)\n", cell, gf1 - gf0, tf1 - tf0);
+        ok = 0;
+    }
+
+    /* Guest identity with tracking off, from the same guest state. */
+    sr_movie_set_tracking(0);
+    coherence_reset_targets();
+    memset(SR_HOST(MVC_BASE), 0, 512u * FB_H * 4u);
+    sr_gpu_vram_dirty(MVC_BASE, 512u * FB_H * 4u);
+    mvc_state();
+    ok = ok && mvc_target_frame() && mvc_present(cell, "tracking off: a GE frame", SDL3VK_FRAME_GE);
+    mvc_write_picture(MVC_BASE, 512u, 480u, 272u, 1u);
+    sr_movie_note_picture(MVC_OWNER, MVC_BASE, 512u, 3u, 480u, 272u);
+    ok = ok && mvc_present(cell, "tracking off: decoded", SDL3VK_FRAME_GE);
+    ok = ok && mvc_guest_frame(frame_off);
+    if (ok && memcmp(frame_on, frame_off, sizeof(frame_on)) != 0) {
+        fprintf(stderr, "gpu coherence selftest [%s]: guest VRAM differs with tracking on and off\n", cell);
+        ok = 0;
+    }
+    if (ok && frame_on[10u * 512u + 10u] != mvc_pixel(10u, 10u, 1u)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: the frame does not hold the decoded picture\n", cell);
+        ok = 0;
+    }
+    ok = ok && mvc_pass_ran(cell);
+    sdl3vk_set_upscale_pass(NULL);
+    coherence_reset_targets();
+    if (ok) printf("gpu coherence selftest: PASS %-22s decoded picture found; 5 ways it is not; guest VRAM unchanged\n",
+                   cell);
+    return ok;
+}
+
 static int coherence_selftest_cases(void) {
     /* SR_GPU_COHERENCE_CASE=scaled-upload (the harness's --case) runs that case alone, as the
      * recipe does at render scales 2 and 4: the other fixtures expect 1x pixels (a filtered sample
@@ -14411,6 +14857,8 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "fallback-notice") == 0) return coherence_run_fallback_notice();
         if (strcmp(only, "host-depth") == 0) return coherence_run_host_depth();
         if (strcmp(only, "wide-raster") == 0) return coherence_run_wide_raster();
+        if (strcmp(only, "movie-texture") == 0) return coherence_run_movie_texture();
+        if (strcmp(only, "movie-target") == 0) return coherence_run_movie_target();
         if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();
         if (strcmp(only, "clear-masks") == 0) return coherence_run_clear_masks();
         fprintf(stderr, "gpu coherence selftest: unknown SR_GPU_COHERENCE_CASE '%s'\n", only);
@@ -14443,6 +14891,8 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_sprite_semantics()) ok = 0;
     if (!coherence_run_software_sprite_semantics()) ok = 0;
     if (!coherence_run_wide_raster()) ok = 0;
+    if (!coherence_run_movie_texture()) ok = 0;   /* #2111 */
+    if (!coherence_run_movie_target()) ok = 0;
     if (!coherence_run_linear_sprite()) ok = 0;
     if (!coherence_run_tflt_filters()) ok = 0;
     if (!coherence_run_ring_wrap()) ok = 0;
