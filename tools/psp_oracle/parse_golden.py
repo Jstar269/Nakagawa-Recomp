@@ -2896,6 +2896,51 @@ _register_campaign_probe(
     {case: (9 if case.endswith("-draw") else 16) for case in GE_RASTER_CASES},
 )
 
+# ge-raster-bounds (187, probe_ge_sample.c): #2193's raster bounds cells. First `display-check`
+# (9 words: the display buffer, whether it overlaps the probe's VRAM block, whether the GE idled);
+# when it is SKIP every later record is SKIP with the same word count. Then per cell of the
+# grb_cells table, in order: one `-draw` record (9 words: the probe's own list's wait outcome,
+# the list length, fbw and zbw), then the cell's reads of the grb_reads table in order, each a summary (8 words:
+# the pixel count; the drawn, cleared, fill and other counts; the first other value and its
+# index; the first pixel) or 16 raw pixels. After the last cell, `vram-restore` (2 words).
+GE_RASTER_BOUNDS_READS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] = (
+    ("raster-512-x511", (("all", 8), ("c480", 8), ("row16", 8), ("r0-x496", 16))),
+    ("raster-500-x511", (("all", 8), ("r15-x488", 8), ("row16-x0", 8), ("row16-x12", 8),
+                         ("r16-x0", 16))),
+    ("raster-256-x479", (("all", 8), ("rows100to109", 8), ("row110-x0", 8),
+                         ("row110-x224", 8), ("row99", 8), ("row111", 8), ("r110-x216", 16))),
+    ("depth-zbw256-past", (("z-all", 8), ("z-row0", 8), ("z-rows1to10", 8),
+                           ("z-rows11to271", 8), ("z-row272", 8), ("c-all", 8),
+                           ("c-sprite", 8), ("z-r1-x0", 16), ("z-r10-x240", 16))),
+    ("depth-clear-scissor", (("z-all", 8), ("z-in", 8), ("z-out", 8), ("c-all", 8),
+                             ("z-r0-x92", 16), ("z-r271-x92", 16))),
+)
+GE_RASTER_BOUNDS_CELLS = tuple(cell for cell, _reads in GE_RASTER_BOUNDS_READS)
+GE_RASTER_BOUNDS_ROWS = (
+    ("display-check", 9),
+    *(row for cell, reads in GE_RASTER_BOUNDS_READS
+      for row in ((f"{cell}-draw", 9), *((f"{cell}-{read}", count) for read, count in reads))),
+    ("vram-restore", 2),
+)
+GE_RASTER_BOUNDS_CASES = tuple(case for case, _count in GE_RASTER_BOUNDS_ROWS)
+_register_campaign_probe(
+    "ge-raster-bounds", "PSP-GE-RASTER-002", GE_RASTER_BOUNDS_CASES, dict(GE_RASTER_BOUNDS_ROWS),
+)
+
+# ge-depth-round (188, probe_ge_sample.c): #343's depth rounding cells in the ge-raster window
+# and record shape. Per cell of the gdr_cells table, in order: one `-draw` record (9 words, as
+# ge-raster's), one record per window row y 0..3 (16 pixels) and one `-pass` record (4 words:
+# the pass mask of pixels 0..31 and 32..63, the kept and the other counts).
+GE_DEPTH_ROUND_CELLS = ("zr-thru-eq", "zr-thru-gt", "zr-xf-eq")
+GE_DEPTH_ROUND_CASES = tuple(
+    case for cell in GE_DEPTH_ROUND_CELLS
+    for case in (f"{cell}-draw", *(f"{cell}-r{y}" for y in GE_RASTER_ROWS), f"{cell}-pass"))
+_register_campaign_probe(
+    "ge-depth-round", "PSP-GE-RASTER-003", GE_DEPTH_ROUND_CASES,
+    {case: 9 if case.endswith("-draw") else 4 if case.endswith("-pass") else 16
+     for case in GE_DEPTH_ROUND_CASES},
+)
+
 # ge-mip (126, probe_ge_sample.c): the #1373 GE level-of-detail cells. The cells are the gm_cells
 # table of the block probe_ge_sample.c shares with tests/native/hle_thread_selftest.c, in order, with
 # the ge-raster record shape: one `-draw` record (9 words) and one record per window row.

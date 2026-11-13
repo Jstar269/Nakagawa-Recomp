@@ -3766,6 +3766,144 @@ static void test_psmf_player_display_in_vram_mirrors(void) {
     free(image);
 }
 
+/* Movie provenance (#2111, ge_shared.h) on the PSMF player's video output: with tracking on (the
+ * movie upscaler's switch), each picture scePsmfPlayerGetVideoData writes is noted where it landed,
+ * with its stride, format, size and the player's handle; a buffer behind a swizzled VRAM view is
+ * not; deleting the player forgets its pictures; with tracking off nothing is noted. Noting writes
+ * nothing: the picture changes exactly the display buffer's bytes either way. */
+static void test_movie_provenance_psmf_player(void) {
+    if (!sr_h264_backend_available()) {
+        fprintf(stderr, "SKIP: PSMF movie provenance needs an H.264 backend\n");
+        return;
+    }
+    uint32_t size = 0;
+    uint8_t *image = build_psmf_av(&size, AV_LAYOUT_SPLIT);
+    if (!image) { CHECK(0, "movie provenance stream builds"); return; }
+    av_latch_mpeglog();
+    s_player_image = image;
+    s_player_image_size = size;
+    lc_prepare_guest();
+    for (int pass = 0; pass < 2; pass++) {
+        const int tracking = pass == 0;
+        for (size_t d = 0; d < VRAM_DEST_COUNT; d++) {
+            if (!tracking && d) break;   /* tracking off: the linear base view is enough */
+            sr_movie_set_tracking(tracking);
+            vram_fill_sentinel();
+            MEM_W32(AV_VIDEO + 0, 64u);
+            MEM_W32(AV_VIDEO + 4, k_vram_dests[d].base);
+            CHECK(guest_mpeg_import(AV_NID_CREATE, AV_PLAYER, AV_CREATE, 0, 0, 0) == 0,
+                  "movie-provenance: the player is created");
+            const uint64_t clock = sr_movie_clock();
+            int first = lc_play_first_picture(AV_PLAYER);
+            CHECK(first && vram_changed_bytes() == 64u * 64u * 4u,
+                  "movie-provenance: the picture changes exactly the display buffer's bytes");
+            SrMoviePicture pic;
+            uint32_t x = 99u, y = 99u;
+            const uint32_t canon = sr_vram_cpu_address(k_vram_dests[d].base);
+            const int found = sr_movie_find_pixel(canon, 64u, 3u, &pic, &x, &y);
+            const int want = tracking && !k_vram_dests[d].swizzled;
+            if (found != want)
+                fprintf(stderr, "  movie provenance %s (tracking %d): found=%d want=%d\n",
+                        k_vram_dests[d].name, tracking, found, want);
+            CHECK(found == want, want ? "movie-provenance: the picture is noted where it landed"
+                                      : tracking ? "movie-provenance: a picture behind a swizzled view is not noted"
+                                                 : "movie-provenance: nothing is noted with tracking off");
+            if (found) {
+                CHECK(x == 0u && y == 0u && pic.addr == canon && pic.stride == 64u && pic.fmt == 3u &&
+                          pic.width == 64u && pic.height == 64u && pic.owner == AV_PLAYER && pic.seq > clock,
+                      "movie-provenance: the note has the picture's place, stride, format, size and player");
+                CHECK(sr_movie_find_pixel(canon + (63u * 64u + 63u) * 4u, 64u, 3u, NULL, &x, &y) &&
+                          x == 63u && y == 63u && !sr_movie_find_pixel(canon, 64u, 1u, NULL, NULL, NULL) &&
+                          !sr_movie_find_pixel(canon, 128u, 3u, NULL, NULL, NULL),
+                      "movie-provenance: its last pixel matches; another format or stride does not");
+            } else {
+                CHECK(sr_movie_clock() == clock, "movie-provenance: no note was made");
+            }
+            CHECK(guest_mpeg_import(AV_NID_DELETE, AV_PLAYER, 0, 0, 0, 0) == 0,
+                  "movie-provenance: the player is deleted");
+            CHECK(!sr_movie_find_pixel(canon, 64u, 3u, NULL, NULL, NULL),
+                  "movie-provenance: a deleted player's pictures are no longer movie frames");
+        }
+    }
+    sr_movie_set_tracking(0);
+    s_player_image = NULL;
+    s_player_image_size = 0;
+    free(image);
+}
+
+/* Movie provenance (#2111) on sceMpegAvcCsc: an 8888 conversion notes the w x h picture at the
+ * destination, with the context's handle; a 16-bit conversion, whose 32-pixel blocks lie 64 pixels
+ * apart, notes nothing; overwriting one pixel of the picture ends its note; sceMpegDelete forgets
+ * the context's pictures. */
+static void test_movie_provenance_mpeg_csc(void) {
+    enum {
+        MC_DESC = 0x08100000u, MC_DATA = 0x08110000u, MC_YCBCR = 0x08130000u,
+        MC_RANGE = 0x08140000u, MC_DEST = 0x08150000u, MC_PTR = 0x08160000u,
+        MC_INIT = 0x08170000u, MC_AU = 0x08180000u, MC_MODE = 0x08190000u,
+    };
+    if (!sr_h264_backend_available()) {
+        fprintf(stderr, "SKIP: sceMpegAvcCsc movie provenance needs an H.264 backend\n");
+        return;
+    }
+    const uint32_t width = 64u, height = 64u;
+    uint32_t au_off[FIX_PICTURES], au_len[FIX_PICTURES], es_len = 0;
+    uint8_t es[65536];
+    CHECK(build_stream(es, sizeof(es), au_off, au_len, &es_len), "movie-csc: the fixture builds");
+    if (!es_len) return;
+    sr_movie_set_tracking(1);
+    MEM_W32(MC_DESC, 0u);
+    CHECK(mpeg_create(MC_DESC, MC_DATA, 0x10000u, 0, 64u, 0, 0) == 0, "movie-csc: the context is created");
+    Mpeg *ctx = mpeg_find(MC_DESC);
+    if (!ctx) { CHECK(0, "movie-csc: the context is found"); sr_movie_set_tracking(0); return; }
+    ctx->streamWidth = width;
+    ctx->streamHeight = height;
+    ctx->h264 = sr_h264_create();
+    ctx->h264Init = 1;
+    ctx->streamEnded = 1;
+    CHECK(ctx->h264 >= 0 && sr_h264_submit_au(ctx->h264, es + au_off[0], au_len[0]) == 0,
+          "movie-csc: the picture reaches the decoder");
+    memset(SR_HOST(MC_AU), 0, 24u);
+    MEM_W32(MC_AU + 4u, 90000u);
+    CHECK(guest_mpeg_import(0x67179b1bu, MC_DESC, 1u, width, height, MC_YCBCR) == 0,
+          "movie-csc: the YCbCr storage initializes");
+    MEM_W32(MC_MODE, 0u);
+    MEM_W32(MC_MODE + 4u, 3u);
+    CHECK(guest_mpeg_import(0xa11c7026u, MC_DESC, MC_MODE, 0u, 0u, 0u) == 0, "movie-csc: RGBA output");
+    MEM_W32(MC_PTR, MC_YCBCR);
+    MEM_W32(MC_INIT, 0u);
+    (void)guest_mpeg_import(0xf0eb1125u, MC_DESC, MC_AU, MC_PTR, MC_INIT, 0u);
+    MEM_W32(MC_AU + 4u, 93003u);
+    MEM_W32(MC_INIT, 0u);
+    CHECK(guest_mpeg_import(0xf0eb1125u, MC_DESC, MC_AU, MC_PTR, MC_INIT, 0u) == 0 && MEM_R32(MC_INIT) == 1u,
+          "movie-csc: a picture decodes");
+    MEM_W32(MC_RANGE, 0u); MEM_W32(MC_RANGE + 4u, 0u);
+    MEM_W32(MC_RANGE + 8u, width); MEM_W32(MC_RANGE + 12u, height);
+    const uint64_t clock = sr_movie_clock();
+    CHECK(guest_mpeg_import(0x31bd0272u, MC_DESC, MC_YCBCR, MC_RANGE, 128u, MC_DEST) == 0,
+          "movie-csc: the 8888 conversion succeeds");
+    SrMoviePicture pic;
+    CHECK(sr_movie_find_pixel(MC_DEST, 128u, 3u, &pic, NULL, NULL) && pic.width == width &&
+              pic.height == height && pic.owner == MC_DESC && pic.seq > clock,
+          "movie-csc: the 8888 picture is noted at the destination with the context's handle");
+    MEM_W32(MC_DEST + (10u * 128u + 20u) * 4u, MEM_R32(MC_DEST + (10u * 128u + 20u) * 4u) ^ 1u);
+    CHECK(!sr_movie_find_pixel(MC_DEST, 128u, 3u, NULL, NULL, NULL),
+          "movie-csc: a picture with one pixel overwritten is no longer a movie frame");
+    CHECK(guest_mpeg_import(0x31bd0272u, MC_DESC, MC_YCBCR, MC_RANGE, 128u, MC_DEST) == 0 &&
+              sr_movie_find_pixel(MC_DEST, 128u, 3u, NULL, NULL, NULL),
+          "movie-csc: converting again notes the picture again");
+    /* 16-bit: a 64-pixel range, the measured shape (#302). */
+    MEM_W32(MC_MODE + 4u, 0u);
+    CHECK(guest_mpeg_import(0xa11c7026u, MC_DESC, MC_MODE, 0u, 0u, 0u) == 0, "movie-csc: 5650 output");
+    const uint64_t clock16 = sr_movie_clock();
+    CHECK(guest_mpeg_import(0x31bd0272u, MC_DESC, MC_YCBCR, MC_RANGE, 512u, MC_DEST + 0x20000u) == 0 &&
+              sr_movie_clock() == clock16,
+          "movie-csc: a 16-bit conversion is not noted");
+    CHECK(mpeg_delete(MC_DESC) == 0u && !sr_movie_find_pixel(MC_DEST, 128u, 3u, NULL, NULL, NULL),
+          "movie-csc: sceMpegDelete forgets the context's pictures");
+    mpeg_finish();
+    sr_movie_set_tracking(0);
+}
+
 /* One "key=value" number from a published counter line. */
 static int av_log_field(const char *line, const char *key, long long *out) {
     const char *p = (line && *line) ? strstr(line, key) : NULL;
@@ -5080,6 +5218,7 @@ static void test_mpeg_last_unit_keeps_its_ring_packets(void) {
         return;
     }
     MEM_W32(LU_PTR, LU_FRAME);
+    sr_movie_set_tracking(1);   /* movie provenance (#2111) on sceMpegAvcDecode, checked below */
     int pictures = 0, dryEarly = 0;
     for (int guard = 0; guard < 8 * AV_PICTURES && !ctx->videoEnd; guard++) {
         uint32_t r = mpeg_get_avc_au(LU_DESC, avc, LU_AU, LU_ATTR);
@@ -5092,7 +5231,15 @@ static void test_mpeg_last_unit_keeps_its_ring_packets(void) {
     CHECK(pictures == AV_PICTURES, "mpeg-last: every picture comes out");
     CHECK(!dryEarly, "mpeg-last: the ring is not empty while an access unit is still to come");
     CHECK(ctx->videoEnd && rb_get(LU_RING, RB_packetsAvail) == 0u, "mpeg-last: the last one empties the ring");
+    SrMoviePicture pic;
+    CHECK(sr_movie_find_pixel(LU_FRAME, 512u, 3u, &pic, NULL, NULL) && pic.addr == LU_FRAME &&
+              pic.stride == 512u && pic.width == ctx->streamWidth && pic.height == ctx->streamHeight &&
+              pic.owner == LU_DESC,
+          "movie provenance: sceMpegAvcDecode notes the 8888 picture it wrote, with the context's handle");
     mpeg_finish();
+    CHECK(!sr_movie_find_pixel(LU_FRAME, 512u, 3u, NULL, NULL, NULL),
+          "movie provenance: sceMpegFinish forgets every context's pictures");
+    sr_movie_set_tracking(0);
     free(image);
 }
 
@@ -6219,6 +6366,8 @@ int main(int argc, char **argv) {
     test_player_handle_word();
     test_player_audio_frame_over_2_kib();
     test_psmf_player_display_in_vram_mirrors();
+    test_movie_provenance_psmf_player();
+    test_movie_provenance_mpeg_csc();
     test_psmf_log_tick_instance_isolation();
     test_psmf_av_timing_first_principles();
     test_player_av_presentation_timing(AV_LAYOUT_SPLIT);

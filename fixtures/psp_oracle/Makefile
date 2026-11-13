@@ -291,6 +291,14 @@ CASE_ID = 157
 # reads of a framebuffer the GE just drew into, with and without TEXFLUSH and TEXSYNC.
 else ifeq ($(CASE),ge-rtt)
 CASE_ID = 158
+# 187: #2193's raster bounds cells (probe_ge_sample.c, PSP-GE-RASTER-002): colour writes past
+# the frame-buffer stride, depth writes past zbw, and a depth-only clear under a scissor.
+else ifeq ($(CASE),ge-raster-bounds)
+CASE_ID = 187
+# 188: #343's depth rounding cells (probe_ge_sample.c, PSP-GE-RASTER-003): fractional
+# through-mode and transform-mode depths read as colour through EQUAL and GREATER tests.
+else ifeq ($(CASE),ge-depth-round)
+CASE_ID = 188
 else ifeq ($(CASE),llsc-link)
 CASE_ID = 69
 else ifeq ($(CASE),fpu-cc)
@@ -800,6 +808,14 @@ OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE render-to-texture cells: the same source as the sample-point cells, case 158.
 else ifeq ($(CASE),ge-rtt)
 TARGET = $(BUILD_DIR)/ge_rtt
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE raster bounds cells: the same source as the sample-point cells, case 187.
+else ifeq ($(CASE),ge-raster-bounds)
+TARGET = $(BUILD_DIR)/ge_raster_bounds
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE depth rounding cells: the same source as the sample-point cells, case 188.
+else ifeq ($(CASE),ge-depth-round)
+TARGET = $(BUILD_DIR)/ge_depth_round
 OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
 # The instruction trace: its own source, the single-step trampoline and the fixtures
 # header, with the same writer, ThreadManForUser block and module lifecycle as the HLE

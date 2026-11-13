@@ -189,15 +189,23 @@ int sdl3vk_present_held(void);
  * present whose shown image (w x h, in TRANSFER_SRC_OPTIMAL) is smaller than its place in the
  * window, after the show pass and before the frame blit. It may record into the command buffer,
  * and returns an image of exactly out_w x out_h, in TRANSFER_SRC_OPTIMAL, that is copied 1:1 into
- * that place, or NULL to scale as SR_PRESENT_SCALING says. `cpu_frame` is 1 when the picture is
- * a CPU-presented frame (a movie, or any frame of a software-GE run; a held present repeats the
- * last one's kind). `*anime4k` (NULL when the caller does not ask) is set to 1 when Anime4K's
+ * that place, or NULL to scale as SR_PRESENT_SCALING says. `kind` is SDL3VK_FRAME_CPU for a
+ * CPU-presented frame (a movie, or any frame of a software-GE run), SDL3VK_FRAME_MOVIE for a GE
+ * image the GE renderer found to be a movie frame (#2111, sdl3vk_set_present_movie), and
+ * SDL3VK_FRAME_GE otherwise; a held present repeats the last one's kind. `*anime4k` (NULL when
+ * the caller does not ask) is set to 1 when Anime4K's
  * stages made the returned image, so record.json can name them. A capture always reads the
  * guest's frame, so what it returns is never captured. Registered only when SR_PRESENT_UPSCALE or
  * SR_MOVIE_UPSCALE asks for it; NULL removes it. Handles are Vulkan's, passed as void pointers. */
+enum { SDL3VK_FRAME_GE = 0, SDL3VK_FRAME_CPU = 1, SDL3VK_FRAME_MOVIE = 2 };
 typedef void *(*Sdl3VkUpscalePass)(void *cmd, void *src, int w, int h, int out_w, int out_h,
-                                   int cpu_frame, int *anime4k);
+                                   int kind, int *anime4k);
 void sdl3vk_set_upscale_pass(Sdl3VkUpscalePass pass);
+/* The GE renderer says, right before it presents a GPU image (sdl3vk_present_image_ex), whether
+ * that image is a movie frame (#2111): the next present only, CPU presents ignore it. */
+void sdl3vk_set_present_movie(int movie);
+/* The kind (SDL3VK_FRAME_*) the upscale passes were or would be given for the last present. */
+int  sdl3vk_present_frame_kind(void);
 /* The same for the recording (SR_VIDEOREC_DIR, #2138): called with the recording's place for a
  * recorded present whose shown image is smaller than it, so a recording made with the upscaler
  * on is enlarged by it as the window is. A separate pass, so its images keep the recording's
