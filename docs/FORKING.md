@@ -323,7 +323,7 @@ Where to read the check's summary, with its title line and its list of named pat
 The verdict's report and the check's summary each name a default branch commit, and the two can
 differ:
 
-- The verdict's first sentence, "Head `<head>` of #<n>, judged with the default branch at
+- The verdict's first sentence, "Head `<head>` of `#<n>`, judged with the default branch at
   `<commit>`", names the tip the verdict itself ran at. That is the default branch as it stood when
   the verdict started, which can be later than the tip the check judged: the verdict judges the
   newest check run for the head, whenever that run started.
