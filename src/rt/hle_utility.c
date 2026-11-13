@@ -1078,6 +1078,7 @@ void sr_hle_loadexec_reset_guest_state(void) {
     s_prx_staging = 0;
     s_psmfplayer_lib_version = 0u;
     atomic_store_explicit(&s_prx_started_count, 0, memory_order_release);
+    ge_finish_masked_reset_for_loadexec();
     loadexec_reset_user_partition();
 
     for (unsigned i = 0; i < FPL_MAX; i++) {

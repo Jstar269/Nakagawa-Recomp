@@ -30,6 +30,10 @@
       "maxLength": 128,
       "description": "Human-readable name of the enhancement package."
     },
+    "experimental": {
+      "type": "boolean",
+      "description": "false when the maintainer has released the package out of Experimental (docs/ENHANCEMENT_CONTRACT.md section 9.10). A package without it is experimental, and the player honours false only in a package found in the source tree's assets/enhancements/, never in one from the user's data folder."
+    },
     "version": {
       "type": "string",
       "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",

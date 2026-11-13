@@ -1037,6 +1037,7 @@ class NativePlayerUiTests(unittest.TestCase):
         package_built_by: str | None = None,
         disc_list: str | None = None,
         enhancement_packages: dict[str, str] | None = None,
+        enhancement_package_fields: dict[str, object] | None = None,
         expect_failure: bool = False,
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
@@ -1064,11 +1065,12 @@ class NativePlayerUiTests(unittest.TestCase):
             runtime_root.mkdir()
             for disc, title_id in (enhancement_packages or {}).items():
                 # A title's own enhancement package (docs/ENHANCEMENT_CONTRACT.md section 9.4):
-                # the player reads only its id and target title, so Ace is offered for it.
+                # the player reads its id, target title and experimental flag, so Ace is offered for it.
                 enhancements = runtime_root / "enhancements"
                 enhancements.mkdir(exist_ok=True)
                 (enhancements / f"{disc.lower()}-60hz.json").write_text(
-                    json.dumps({"id": "fixture-60hz", "target_title_id": title_id}),
+                    json.dumps({"id": "fixture-60hz", "target_title_id": title_id,
+                                **(enhancement_package_fields or {})}),
                     encoding="utf-8")
             tool_marker: Path | None = None
             if downloaded_tool_payload:
@@ -5317,6 +5319,44 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertTrue(lines and pages, f"Enhanced options not opened; focus trail {trail}")
         self.assertEqual(pages[-1]["title"], "TEST00006", run["stdout"])
         return lines, pages[-1]
+
+    @staticmethod
+    def enhancement_tags(run: dict[str, object], disc: str) -> list[str]:
+        """Each tag the ENHANCEMENTS card took for `disc`, in order, from the title model."""
+        return re.findall(r"next_ui_enhancement_tag disc=" + re.escape(disc) + r" tag=(\S+)",
+                          str(run["stdout"]))
+
+    def test_next_ui_enhancement_tag_reads_optional_only_for_the_released_shipped_package(
+            self) -> None:
+        """Contract section 9.10 (#1732): the ENHANCEMENTS card's tag comes from where the
+        title's package was found. A package in the source tree's assets/enhancements that
+        declares "experimental": false reads Optional; the same package without the flag, or
+        a copy in the user's data folder that declares it, reads Experimental."""
+        # The "ready" fixture reads the title's package when its play mode changes, so the run
+        # opens the title and steps Play mode once (to Authentic; the card stays for the package).
+        events = ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", *self.DOWN_TO_PLAY_MODE,
+                  "KEY_RETURN", "WAIT_MS=200")
+        package = {"id": "fixture-60hz", "target_title_id": "display-smoke-v1"}
+        released = {"experimental": False}
+        own = self.next_ui_run("ready", events, post_build_ready=True, wait_background=True,
+                               enhancement_packages={"TEST00006": "display-smoke-v1"},
+                               enhancement_package_fields=released)
+        self.assertEqual(self.enhancement_tags(own, "TEST00006")[-1:], ["Experimental"],
+                         own["stdout"])
+        with tempfile.TemporaryDirectory(prefix=".shipped-package-", dir=ROOT) as tmp:
+            source = Path(tmp)
+            (source / "tools").mkdir()
+            (source / "tools" / "nk_cli.py").write_text("# fixture\n", encoding="utf-8")
+            shipped = source / "assets" / "enhancements"
+            shipped.mkdir(parents=True)
+            leaf = shipped / "test00006-60hz.json"
+            for fields, tag in ((released, "Optional"), ({}, "Experimental")):
+                leaf.write_text(json.dumps({**package, **fields}), encoding="utf-8")
+                run = self.next_ui_run("ready", events, post_build_ready=True,
+                                       wait_background=True,
+                                       env_extra={"NK_INSTALL_ROOT": str(source)})
+                self.assertEqual(self.enhancement_tags(run, "TEST00006")[-1:], [tag],
+                                 run["stdout"])
 
     def test_next_ui_smooth_motion_says_why_it_is_off_at_60_fps(self) -> None:
         """Contract 10.5 (#2085; #2074 delta review B1): a game launched with its 60 FPS game
