@@ -158,7 +158,7 @@
     X("SR_MEMSTICK", "path", "memstick", "hle_thread_selftest.c,vfs_path.h", "Host directory that serves as the guest ms0: memory stick root.") \
     X("SR_MISS_SEEDS", "path", "unset (no file written)", "perf.c", "File to which the run's distinct dispatch-miss targets are written at exit, one guest address per line, for tools/miss_seeds.py.") \
     X("SR_MODULE_DIR", "path", "place_game_here/EXTRACTED/decrypted", "hle_kernel_module.c,hle_thread_selftest.c", "Directory holding the decrypted guest modules the runtime loads.") \
-    X("SR_MOVIE_UPSCALE", "string", "off", "gui.c", "Movie upscaler for CPU-presented frames: off, fsr1 or anime4k (Anime4K CNN x2 stages, then FSR 1); presentation only.") \
+    X("SR_MOVIE_UPSCALE", "string", "off", "gui.c", "Movie upscaler for movie frames (CPU-presented, or GE frames showing a decoded movie): off, fsr1 or anime4k (Anime4K CNN x2, then FSR 1); presentation only.") \
     X("SR_MPEGAV", "flag-presence", "off", "hle.c", "Enables MPEG/PSMF audio-video sync logging (also enabled by SR_MPEGLOG).") \
     X("SR_MPEGLOG", "flag-presence", "off", "debug.h,h264_ffmpeg.c,h264_mf.c,hle.c,hle_mpeg.c,mpeg.c", "Enables MPEG and H.264 decoder diagnostic logging in the video and MPEG HLE code.") \
     X("SR_MSGLOG", "flag-presence", "off", "hle_kernel_sync.c", "When set, logs message pipe creation and calls to stderr.") \

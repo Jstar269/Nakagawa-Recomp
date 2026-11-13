@@ -70,10 +70,35 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   off (`display-smoke-anime4k`, which needs a Vulkan device and a display, so it is a local gate).
   A run with it on is stamped as `SR_PRESENT_UPSCALE` is (`ACE_MODE: present upscale
   movie-anime4k`, the `phase=present_upscale` boot event and `runtime.enhancements`), so neither
-  `flight_diff.py` nor `boot_gate.py` takes it as authentic evidence. It reaches only frames the CPU
-  presents: a movie the GE presents (drawn as a texture, or decoded into a GE target) is a GE frame
-  and is not upscaled by it. An Authentic launcher session, the picture gate and the library sweep
-  run with it `off`, whatever the environment says.
+  `flight_diff.py` nor `boot_gate.py` takes it as authentic evidence. An Authentic launcher session,
+  the picture gate and the library sweep run with it `off`, whatever the environment says.
+- **Movie frames the GE presents (#2111).** With the movie upscaler on, the Vulkan GE renderer also
+  hands it a GE frame that shows a decoded movie, in the window and in a recording. Which pixels are
+  movie pixels comes from movie provenance, host-side metadata only (`src/rt/ge_shared.h`): the media
+  HLE notes each picture it writes (`sceMpegAvcDecode`, an 8888 `sceMpegAvcCsc`, the PSMF player's
+  video output) with its place, stride, format, size, decoder and a hash of its rows, and only while
+  the movie upscaler is on. A frame is a movie frame when movie pixels cover at least half of the shown
+  480 x 272, in either way a movie reaches the GE:
+  - *drawn as a texture* (LittleBigPlanet's intro): draws since the target was last presented sampled
+    a texture whose upload matched a noted picture (same stride and format, the texture's first texel
+    a pixel of the picture, the picture's rows unchanged); UI drawn over part of the movie (subtitles,
+    a prompt) keeps the frame a movie frame, and a later draw over the whole movie box does not;
+  - *decoded into a GE target* (Hot Shots Tennis's opening movie): the presented target holds a whole
+    noted picture of its stride and format, written after the GE's last write to that target and
+    unchanged since; any GE write after it, even one pixel of UI, leaves the frame to the GE.
+
+  A note stops matching when any byte of its picture changes (every match re-hashes the rows, so a
+  CPU, DMA or software-GE write over it, or the buffer reused, ends it), when a later picture is
+  written over it, when its decoder is deleted or released, after eight newer pictures, and when the
+  upscaler is off. A picture behind a swizzled VRAM view, a copy of a picture elsewhere, a 16-bit
+  `sceMpegAvcCsc` and a picture sampled from a render target are not matched: those frames stay GE
+  frames. The decision only chooses the upscaler for the shown picture: the target, guest VRAM, every
+  readback and capture and the guest flight events are the same with it on and off. Evidence:
+  `gpu-coherence-selftest`'s `movie-texture` and `movie-target` cases present each way through the
+  production path, check every way a note stops matching and compare guest VRAM with tracking off;
+  `gpu-coherence-selftest-movie-mutant` builds the renderer without the match and must see both cases
+  fail; `psmf-media-selftest` checks the notes each HLE writer makes. A run prints how many presents
+  were GE movie frames (`gegpu: movie frames (#2111)` and the movie upscaler's exit line).
   GPU cost at 4K: 0.75 ms per present for a 480x272 frame to 3811x2160 on an RTX 3080
   (`anime4k-selftest`).
 - **Forbidden:** Mutating GE display list commands, intercepting guest draw calls to alter gameplay geometry, or feeding host input back into the guest controller state.

@@ -1220,6 +1220,25 @@ gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
 		echo "gpu-coherence-twin-mutants: mutant $$m killed ($$kill)"; \
 	done
 
+# gpu-coherence-selftest-movie-mutant - the movie-texture and movie-target cases (#2111) must kill
+# NK_MOVIE_MUTANT_NO_MATCH in ge_gpu.c, which drops movie provenance's match at the texture upload and
+# at the present: each case's picture is then left to the GE (no movie upscaling), and the case must
+# fail with "movie frame not found". Exit 77 (no Vulkan device) is a SKIP, as for the selftest itself.
+gpu-coherence-selftest-movie-mutant: shader-verify $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
+	@bin=$(BUILD_DIR)/gpu_coherence_movie_mutant.exe; kill="FAIL movie frame not found"; \
+	$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DNK_MOVIE_MUTANT_NO_MATCH -ffunction-sections -fdata-sections \
+		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -Wl,--gc-sections -o $$bin \
+		tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
+		$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
+	for c in movie-texture movie-target; do \
+		$$bin --case $$c > $$bin.$$c.log 2>&1; result=$$?; \
+		if test $$result -eq 77; then echo "movie mutant ($$c): SKIP (no Vulkan device)"; exit 77; fi; \
+		if test $$result -eq 0; then cat $$bin.$$c.log; echo "movie mutant ($$c) unexpectedly passed" >&2; exit 1; fi; \
+		if ! grep -Fq "$$kill" $$bin.$$c.log; then cat $$bin.$$c.log; echo "movie mutant ($$c) failed for another reason" >&2; exit 1; fi; \
+		echo "gpu-coherence-selftest-movie-mutant: $$c killed ($$kill)"; \
+	done
+
 # vram-view-identity-selftest — the sources and decode the pause menu's VRAM viewer runs
 # (ge_vram_view_sources, ge_vram_view_decode, with gui.c's arguments) name the expected surfaces and
 # leave later frames, guest memory and the GE state unchanged (#314; timing is not covered).

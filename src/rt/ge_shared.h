@@ -557,6 +557,53 @@ void      ge_pow_selftest_mul(const uint32_t a[2], const uint32_t b[2], uint32_t
 /* Post-write notification for CPU-side writes that may alias GPU-cached framebuffers
  * (movie decode, DMA memcpy). No-op when no GPU backend is registered. */
 void      sr_gpu_vram_dirty(uint32_t addr, uint32_t bytes);
+/* Movie provenance (#2111): which guest pixels hold a decoded movie picture, for the movie
+ * upscaler (SR_MOVIE_UPSCALE) on the GE renderer. Host-side metadata only: nothing here reads
+ * or writes guest-visible state beyond hashing the picture's own bytes, and with tracking off
+ * (the default, and always in an authentic run) every call is a no-op and nothing matches.
+ * The media HLE (mpeg.c's sceMpegAvcDecode and 8888 sceMpegAvcCsc, hle_mpeg.c's PSMF player
+ * video output) notes each picture it writes, after the write; the renderer matches a texture
+ * it uploads or a target it presents against the notes. A note holds the picture's canonical
+ * address, stride in pixels, GE pixel format (0 5650, 1 5551, 2 4444, 3 8888), size, a
+ * sequence number from one increasing clock, and a hash of its rows taken when it was written.
+ * A note stops matching when:
+ *   - its bytes change (every match re-hashes the rows: a CPU, DMA or software-GE write over
+ *     any pixel, or the buffer reused for anything else);
+ *   - a later picture is noted over any of its bytes (it is replaced);
+ *   - its decoder is deleted or released (sr_movie_forget_owner), or tracking is turned off;
+ *   - more than SR_MOVIE_NOTES newer pictures were noted (the oldest is dropped).
+ * A picture through a swizzled VRAM view, or with a format or size outside the GE's, is never
+ * noted. The renderer adds its own rules for draws (ge_gpu.c, "Movie frames"). Guest thread
+ * only, like the HLE and the GE. */
+#define SR_MOVIE_NOTES 8
+typedef struct SrMoviePicture {
+    uint32_t addr;                         /* canonical: SR_PHYS, VRAM at 0x04000000 + offset */
+    uint32_t stride, fmt, width, height;   /* stride and size in pixels */
+    uint32_t owner;                        /* the decoder's guest handle */
+    uint64_t seq;                          /* > 0; later notes have larger numbers */
+    uint64_t hash;                         /* sr_movie_rows_hash of the rows when noted */
+} SrMoviePicture;
+void      sr_movie_set_tracking(int on);
+int       sr_movie_tracking(void);
+/* The last sequence number handed out (0 before the first note): a draw that stores it can
+ * later tell whether a picture was noted after it. */
+uint64_t  sr_movie_clock(void);
+void      sr_movie_note_picture(uint32_t owner, uint32_t addr, uint32_t stride, uint32_t fmt,
+                                uint32_t width, uint32_t height);
+void      sr_movie_forget_owner(uint32_t owner);
+/* 1 when the note with this sequence number is still held (not replaced, forgotten or dropped);
+ * its bytes are not re-hashed. */
+int       sr_movie_alive(uint64_t seq);
+/* The note whose picture holds the pixel at canonical address `addr` with this stride and
+ * format, re-hashed and unchanged: 1 and *out, or 0. (x, y) is that pixel in the picture. */
+int       sr_movie_find_pixel(uint32_t addr, uint32_t stride, uint32_t fmt, SrMoviePicture *out,
+                              uint32_t *x, uint32_t *y);
+/* The newest note whose whole picture lies in canonical [lo, hi) with this stride and format,
+ * noted after sequence `after`, re-hashed and unchanged: 1 and *out, or 0. */
+int       sr_movie_find_in(uint32_t lo, uint32_t hi, uint32_t stride, uint32_t fmt, uint64_t after,
+                           SrMoviePicture *out);
+uint64_t  sr_movie_rows_hash(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t width,
+                             uint32_t height);
 void      sr_vram_mark_renderer_pending(void);
 int       ge_zbuf_prepare_current(void);
 int       ge_zbuf_materialize_current(void);

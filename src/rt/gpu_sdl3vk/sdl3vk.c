@@ -268,7 +268,8 @@ static uint64_t s_present_submitted;  /* present submissions made, the newest on
 static uint64_t s_present_completed;  /* sdl3vk_present_completed */
 static Sdl3VkUpscalePass s_upscale_pass;
 static Sdl3VkUpscalePass s_rec_upscale_pass;  /* the recording's own upscaler (#2138) */
-static int s_upscale_cpu_frame;  /* the last source present's kind, for the held presents */
+static int s_upscale_cpu_frame;  /* the last source present's SDL3VK_FRAME_*, for the held presents */
+static int s_present_movie;      /* sdl3vk_set_present_movie: the next GPU image is a movie frame */
 /* What the last present's frame blit read: its source image and size, its place in the window and
  * its filter. The capture selftest checks the presentation upscaler's image is what reaches the
  * window. */
@@ -306,6 +307,9 @@ static void present_frame_submitted(PresentFrame *f) {
 void sdl3vk_set_upscale_pass(Sdl3VkUpscalePass pass) {
     s_upscale_pass = pass;
 }
+
+void sdl3vk_set_present_movie(int movie) { s_present_movie = movie ? 1 : 0; }
+int sdl3vk_present_frame_kind(void) { return s_upscale_cpu_frame; }
 
 void sdl3vk_set_record_upscale_pass(Sdl3VkUpscalePass pass) {
     s_rec_upscale_pass = pass;
@@ -2483,6 +2487,8 @@ static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_i
 }
 
 static int present_common(VkImage src, int srcw, int srch, const uint32_t *upload) {
+    const int movie = s_present_movie;   /* for this present only, whatever happens to it */
+    s_present_movie = 0;
     if (s_renderer_terminal) { sr_capture_fail("renderer is terminal"); return -1; }
     const char *why = NULL;
     int quit = 0;
@@ -2506,7 +2512,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
     if (s_rec_pending == f) sr_videorec_resolve_pending();
     int rec_in_submit = 0;
     if (upload) { memcpy(f->staging_map, upload, (size_t)srcw * (size_t)srch * 4u); src = f->fbimg; }
-    if (src) s_upscale_cpu_frame = upload != NULL;
+    if (src) s_upscale_cpu_frame = upload ? SDL3VK_FRAME_CPU : movie ? SDL3VK_FRAME_MOVIE : SDL3VK_FRAME_GE;
     VkCommandBuffer cmd = f->cmd;
 
     for (int attempt = 0; attempt < 2; attempt++) {

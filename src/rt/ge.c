@@ -816,6 +816,157 @@ void sr_gpu_vram_dirty(uint32_t addr, uint32_t bytes) {
     if (s_gpu && s_gpu->vram_dirty) s_gpu->vram_dirty(addr, bytes);
 }
 
+/* ---- Movie provenance (#2111; the contract is in ge_shared.h) ------------------------------ */
+
+static int s_movie_tracking;
+static uint64_t s_movie_clock;
+static SrMoviePicture s_movie_notes[SR_MOVIE_NOTES];   /* seq 0: an empty slot */
+
+static uint32_t movie_bpp(uint32_t fmt) { return fmt == 3u ? 4u : 2u; }
+
+/* The picture's canonical first byte and its span's length (first pixel to last), or 0 when it is
+ * not one plain guest span: out of range, through a swizzled VRAM view, or not a GE picture. */
+static int movie_span(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t width, uint32_t height,
+                      uint32_t *canon, uint32_t *bytes) {
+    if (fmt > 3u || !width || !height || width > stride || stride > 1024u || height > 1024u) return 0;
+    const uint64_t bpp = movie_bpp(fmt), pitch = (uint64_t)stride * bpp;
+    const uint64_t total = (uint64_t)(height - 1u) * pitch + (uint64_t)width * bpp;
+    if (total > UINT32_MAX || !sr_inrange_n(addr, (uint32_t)total) ||
+        sr_guest_span_hits_swizzled_vram_mirror(addr, (uint32_t)total))
+        return 0;
+    *canon = sr_vram_cpu_address(addr);
+    *bytes = (uint32_t)total;
+    return 1;
+}
+
+static uint32_t movie_note_bytes(const SrMoviePicture *n) {
+    const uint32_t bpp = movie_bpp(n->fmt);
+    return (n->height - 1u) * n->stride * bpp + n->width * bpp;
+}
+
+/* FNV-1a over the picture's rows (a 64-bit word at a time, then the tail bytes), seeded with its
+ * shape. Every byte of every row counts; the bytes between rows (stride past width) do not. Reads
+ * guest memory directly, never through the renderer's read hooks, so it materializes nothing. */
+uint64_t sr_movie_rows_hash(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t width,
+                            uint32_t height) {
+    uint32_t canon, bytes;
+    if (!movie_span(addr, stride, fmt, width, height, &canon, &bytes)) return 0;
+    const uint64_t prime = 1099511628211ull;
+    const uint32_t bpp = movie_bpp(fmt), row = width * bpp, pitch = stride * bpp;
+    uint64_t h = 1469598103934665603ull;
+    h ^= ((uint64_t)stride << 40) | ((uint64_t)fmt << 32) | ((uint64_t)width << 16) | height;
+    h *= prime;
+    for (uint32_t y = 0; y < height; y++) {
+        const uint8_t *p = (const uint8_t *)SR_HOST(canon + y * pitch);
+        uint32_t i = 0;
+        for (; i + 8u <= row; i += 8u) {
+            uint64_t w;
+            memcpy(&w, p + i, 8u);
+            h ^= w;
+            h *= prime;
+        }
+        for (; i < row; i++) {
+            h ^= p[i];
+            h *= prime;
+        }
+    }
+    return h ? h : 1u;   /* 0 means "no picture" */
+}
+
+void sr_movie_set_tracking(int on) {
+    s_movie_tracking = on ? 1 : 0;
+    if (!on) memset(s_movie_notes, 0, sizeof(s_movie_notes));
+}
+
+int sr_movie_tracking(void) { return s_movie_tracking; }
+uint64_t sr_movie_clock(void) { return s_movie_clock; }
+
+void sr_movie_note_picture(uint32_t owner, uint32_t addr, uint32_t stride, uint32_t fmt,
+                           uint32_t width, uint32_t height) {
+    if (!s_movie_tracking) return;
+    uint32_t canon, bytes;
+    if (!movie_span(addr, stride, fmt, width, height, &canon, &bytes)) return;
+    SrMoviePicture *slot = NULL;
+    for (int i = 0; i < SR_MOVIE_NOTES; i++) {
+        SrMoviePicture *n = &s_movie_notes[i];
+        /* A picture written over any byte of an older one replaces it. */
+        if (n->seq && n->addr < canon + (uint64_t)bytes && canon < n->addr + (uint64_t)movie_note_bytes(n))
+            n->seq = 0;
+        if (!n->seq) { if (!slot || slot->seq) slot = n; }
+        else if (!slot || (slot->seq && n->seq < slot->seq)) slot = n;
+    }
+    slot->addr = canon;
+    slot->stride = stride;
+    slot->fmt = fmt;
+    slot->width = width;
+    slot->height = height;
+    slot->owner = owner;
+    slot->hash = sr_movie_rows_hash(canon, stride, fmt, width, height);
+    slot->seq = ++s_movie_clock;
+}
+
+void sr_movie_forget_owner(uint32_t owner) {
+    for (int i = 0; i < SR_MOVIE_NOTES; i++)
+        if (s_movie_notes[i].seq && s_movie_notes[i].owner == owner) s_movie_notes[i].seq = 0;
+}
+
+int sr_movie_alive(uint64_t seq) {
+    if (!seq) return 0;
+    for (int i = 0; i < SR_MOVIE_NOTES; i++)
+        if (s_movie_notes[i].seq == seq) return 1;
+    return 0;
+}
+
+/* Whether note `n` still holds the bytes it was noted with. One whose bytes changed is dropped:
+ * whatever is there now is not the picture the decoder wrote. */
+static int movie_note_unchanged(SrMoviePicture *n) {
+    if (sr_movie_rows_hash(n->addr, n->stride, n->fmt, n->width, n->height) == n->hash) return 1;
+    n->seq = 0;
+    return 0;
+}
+
+int sr_movie_find_pixel(uint32_t addr, uint32_t stride, uint32_t fmt, SrMoviePicture *out,
+                        uint32_t *x, uint32_t *y) {
+    if (!s_movie_tracking) return 0;
+    SrMoviePicture *best = NULL;
+    uint32_t bx = 0, by = 0;
+    for (int i = 0; i < SR_MOVIE_NOTES; i++) {
+        SrMoviePicture *n = &s_movie_notes[i];
+        if (!n->seq || n->stride != stride || n->fmt != fmt || addr < n->addr) continue;
+        const uint32_t off = addr - n->addr, bpp = movie_bpp(fmt), pitch = stride * bpp;
+        if (off >= movie_note_bytes(n) || off % bpp) continue;
+        const uint32_t px = (off % pitch) / bpp, py = off / pitch;
+        if (px >= n->width || py >= n->height) continue;
+        if (best && best->seq > n->seq) continue;
+        if (!movie_note_unchanged(n)) continue;
+        best = n;
+        bx = px;
+        by = py;
+    }
+    if (!best) return 0;
+    if (out) *out = *best;
+    if (x) *x = bx;
+    if (y) *y = by;
+    return 1;
+}
+
+int sr_movie_find_in(uint32_t lo, uint32_t hi, uint32_t stride, uint32_t fmt, uint64_t after,
+                     SrMoviePicture *out) {
+    if (!s_movie_tracking) return 0;
+    SrMoviePicture *best = NULL;
+    for (int i = 0; i < SR_MOVIE_NOTES; i++) {
+        SrMoviePicture *n = &s_movie_notes[i];
+        if (!n->seq || n->seq <= after || n->stride != stride || n->fmt != fmt) continue;
+        if (n->addr < lo || (uint64_t)n->addr + movie_note_bytes(n) > hi) continue;
+        if (best && best->seq > n->seq) continue;
+        if (!movie_note_unchanged(n)) continue;
+        best = n;
+    }
+    if (!best) return 0;
+    if (out) *out = *best;
+    return 1;
+}
+
 /* Decode a GE 24-bit float mantissa word to IEEE-754 float.
  * The GE stores floats as the upper 24 bits of a 32-bit float (mantissa only; exp+sign). */
 static float decode_float24(uint32_t data) {
