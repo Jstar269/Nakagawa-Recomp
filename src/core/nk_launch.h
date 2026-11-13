@@ -171,8 +171,11 @@ typedef struct {
     uint32_t entry_point;
     /* The enhancement package of the enhanced build this session launches, from
        NkGameEntry.enhancement_package_id; empty for the authentic package. Only
-       an enhanced session exports SR_EXPERIMENTAL_60HZ=1. */
+       an enhanced session exports SR_EXPERIMENTAL_60HZ=1, and not one whose build
+       carries only a code-hook package (enhancement_hook_only). */
     char enhancement_package_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    /* NkGameEntry.enhancement_hook_only: no timing package in the build. */
+    bool enhancement_hook_only;
     bool package_launch;
     bool experimental_package;
     bool showcase_package;
@@ -210,8 +213,8 @@ bool nk_launch_runtime_package_available(const char *root, const char *title_id)
 
 /* The folder name under <root>/packages of the package `game` selects: its
  * disc ID, or <disc ID>-enhanced-<id> when game->enhancement_package_id names
- * an enhanced build. False when that id is not a valid enhancement package id
- * (nk_title_manifest_enhancement_id_valid), so no path is ever formed from it. */
+ * an enhanced build. False when that id is not a valid variant name
+ * (nk_title_manifest_enhancement_variant_valid), so no path is ever formed from it. */
 bool nk_launch_package_dir_name(const NkGameEntry *game, char *out, size_t out_size);
 
 /* Validate the v1 package discovered for a concrete player library entry: the
