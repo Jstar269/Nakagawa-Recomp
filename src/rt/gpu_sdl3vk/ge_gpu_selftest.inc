@@ -5052,8 +5052,9 @@ static int coherence_run_native_bulk_copy(void) {
  * background, so the second sprite reads what the first wrote: a state that reads its own
  * writes must split there (stencil_splits). The depth list fills a striped depth buffer in
  * clear mode, with the stencil test on, which clear mode ignores, then draws the states the
- * GPU path takes under the depth test (depth-fail and tested stencil-fail ops KEEP). No
- * primitive may take the software fallback. */
+ * GPU path takes under the depth test (depth-fail and tested stencil-fail ops KEEP, or
+ * agreeing depth-fail and depth-pass ops with any stencil-fail op). No primitive may take
+ * the software fallback. */
 #define STP_CELLS_X 24u
 #define STP_PITCH 10u
 #define STP_ORIGIN 16u
@@ -5158,7 +5159,7 @@ static uint32_t stp_matrix_list(uint32_t base, uint32_t fmt, int only) {
 
 /* Depth list: a striped depth buffer, then depth-tested cells. With `only` >= 0 the list
  * holds that cell alone, without the depth buffer. */
-#define STP_DEPTH_CELLS (8u * 6u + 5u)
+#define STP_DEPTH_CELLS (8u * 6u + 5u + 8u * 5u)
 static uint32_t stp_depth_list(uint32_t base, uint32_t fmt, int only) {
     static const uint32_t zfunc[4] = { 4u, 5u, 6u, 7u };   /* less, lequal, greater, gequal */
     StpList l; stp_begin(&l, base, fmt, 1);
@@ -5187,6 +5188,15 @@ static uint32_t stp_depth_list(uint32_t base, uint32_t fmt, int only) {
         stp_emit(&l, 0xE7, 0);
         stp_cell_sprites(&l, &vaddr, cell, 32768.0f);
     }
+    /* Agreeing depth-fail and depth-pass ops: a colour batch and a stencil batch. */
+    for (uint32_t func = 0; func < 8u; func++)
+        for (uint32_t op = 1; op < 6u; op++, cell++) {
+            if (only >= 0 && cell != (uint32_t)only) continue;
+            stp_cell_state(&l, cell, func, ((cell / 3u) % 6u) | (op << 8) | (op << 16));
+            stp_emit(&l, 0xDE, cell % 8u);         /* every depth function */
+            stp_emit(&l, 0xE7, (cell / 8u) & 1u);
+            stp_cell_sprites(&l, &vaddr, cell, 32768.0f);
+        }
     stp_end(&l);
     return 0x08040000u;
 }
@@ -6093,6 +6103,8 @@ static int coherence_run_fallback_reasons(void) {
         {"stencil keep", 0, 1, 4u, 2u, 0x050000u, -1},
         {"stencil zfail op", 0, 1, 4u, 1u, 0x000100u, GEGPU_FALLBACK_STENCIL},
         {"stencil zfail op, depth always", 0, 1, 1u, 1u, 0x010101u, -1},
+        {"stencil zfail op = zpass op", 0, 1, 7u, 2u, 0x040404u, -1},
+        {"stencil zfail op != zpass op", 0, 1, 7u, 1u, 0x010201u, GEGPU_FALLBACK_STENCIL},
     };
     s_ge->color_test_enable = 0;
     for (unsigned i = 0; i < sizeof(st) / sizeof(st[0]); i++) {
@@ -6105,6 +6117,22 @@ static int coherence_run_fallback_reasons(void) {
             ok = 0;
         }
     }
+    /* An agreeing state that textures from the framebuffer it draws keeps the two batches unless
+     * the alpha test reads the texel: the stencil batch would test what the colour batch drew. */
+    s_ge->clear = 0; s_ge->ztest_enable = 1; s_ge->ztest = 7u;
+    s_ge->stencil_test = 2u; s_ge->stencil_op = 0x020202u;
+    s_ge->tex_enable = 1; s_ge->tex_addr = s_ge->fbp; s_ge->tex_bufw = 512u; s_ge->tex_fmt = 3u;
+    s_ge->tex_w = 256; s_ge->tex_h = 256;
+    for (int t = 0; t < 2; t++) {
+        s_ge->atest_enable = t; s_ge->atest = 4u | (0x40u << 8) | (0xFFu << 16);
+        const int got = gpu_state_unsupported_reason(), want = t ? GEGPU_FALLBACK_STENCIL : -1;
+        if (got != want) {
+            fprintf(stderr, "gpu coherence selftest [fallback-reasons]: agreeing ops, texture = framebuffer, "
+                            "alpha test %s gave %d, want %d\n", t ? "on" : "off", got, want);
+            ok = 0;
+        }
+    }
+    s_ge->tex_enable = 0; s_ge->atest_enable = 0;
     /* Write masks: a channel whose native bits are all masked or all written is the colour write
      * mask's; any other falls back. Clear mode checks RGB when it writes colour (0x100) and alpha
      * when it writes alpha (0x200); a draw's alpha is the stencil plane. */
@@ -6136,11 +6164,261 @@ static int coherence_run_fallback_reasons(void) {
         }
     }
     *s_ge = saved;
-    if (ok) printf("gpu coherence selftest: PASS %-22s 12 cells, %u write-mask cells\n", "fallback-reasons",
+    if (ok) printf("gpu coherence selftest: PASS %-22s 16 cells, %u write-mask cells\n", "fallback-reasons",
                    (unsigned)(sizeof(wm) / sizeof(wm[0])));
     return ok;
 }
 
+/* The always-on fallback counts the render status reads (gegpu_fallback_counts, #2151). For each
+ * reason, after one GPU-drawn sprite, two primitives in that reason's state go through the real
+ * hook: each counts one software primitive for that reason and none for another, no GPU
+ * primitive is counted, and only the first counts a readback, because only then was the target
+ * GPU-valid. A colour buffer in main RAM has no target, so it counts no readback. The hooks are
+ * called directly, so ge.c draws nothing here; fallback-notice below draws a scene that falls
+ * back through ge.c. */
+static int fallback_counts_scene(int r, GeGpuFallbackCounts c[3]) {
+    const uint32_t base = 0x04000000u | 0x00100000u;
+    const char *name = gegpu_fallback_token(r);
+    GeState saved = *s_ge;
+    int ok = 1;
+    coherence_reset_targets();
+    if (!coherence_queue_g1_batch(base, 512u, 3u)) {
+        fprintf(stderr, "gpu coherence selftest [fallback-counts]: %s: the GPU sprite was not "
+                        "queued\n", name);
+        *s_ge = saved;
+        return 0;
+    }
+    gegpu_fallback_counts(&c[0]);
+    s_ge->clear = 0;
+    switch (r) {
+    case GEGPU_FALLBACK_STENCIL:      /* a depth-tested stencil-fail INCR */
+        s_ge->stencil_enable = 1; s_ge->ztest_enable = 1;
+        s_ge->stencil_test = 2u; s_ge->stencil_op = 4u;
+        break;
+    case GEGPU_FALLBACK_COLOR_TEST:    /* a modulated texel: psp.frag's colour is inexact */
+        s_ge->color_test_enable = 1; s_ge->color_test = 2u;
+        s_ge->tex_enable = 1; s_ge->tex_addr = 0x04180000u; s_ge->tex_w = s_ge->tex_h = 8;
+        s_ge->tex_func = 0x100u; s_ge->tex_filter = 0u; s_ge->tex_max_level = 0u;
+        break;
+    case GEGPU_FALLBACK_LOGIC_OP: s_ge->logic_op_enable = 1; break;
+    case GEGPU_FALLBACK_WRITE_MASK: s_ge->mask_rgb = 0x0000F0u; break;   /* half of red */
+    case GEGPU_FALLBACK_RAM_FB: s_ge->fbp = 0x08000000u; break;
+    case GEGPU_FALLBACK_WIDE_STRIDE: s_ge->fbw = 1024u; break;
+    case GEGPU_FALLBACK_MIPS:          /* level 7 of an 8x8 texture: no Vulkan chain holds it */
+        s_ge->tex_enable = 1; s_ge->tex_addr = 0x04180000u; s_ge->tex_w = s_ge->tex_h = 8;
+        s_ge->tex_filter = 4u; s_ge->tex_max_level = 7u;
+        break;
+    case GEGPU_FALLBACK_LINE:          /* a textured line: the GPU draws only untextured ones */
+        s_ge->tex_enable = 1; s_ge->tex_addr = 0x04180000u; s_ge->tex_w = s_ge->tex_h = 8;
+        break;
+    default: break;                    /* points always fall back */
+    }
+    GeVtx p0 = { 30.0f, 30.0f, 1.0f, 1.0f, 0, 0, 1.0f, 200, 100, 50, 255 };
+    GeVtx p1 = p0;
+    p1.x = 40.0f;
+    p1.y = 40.0f;
+    for (int k = 1; k <= 2; k++) {
+        int drawn = r == GEGPU_FALLBACK_LINE ? hook_line(&p0, &p1, 0)
+                  : r == GEGPU_FALLBACK_POINT ? hook_point(&p0, 0)
+                  : hook_sprite(&p0, &p1, 0);
+        if (drawn) {
+            fprintf(stderr, "gpu coherence selftest [fallback-counts]: %s: the GPU drew it\n", name);
+            ok = 0;
+        }
+        gegpu_fallback_counts(&c[k]);
+    }
+    *s_ge = saved;
+    return ok;
+}
+
+static int coherence_run_fallback_counts(void) {
+    GeState saved = *s_ge;
+    int ok = 1;
+    for (int r = 0; r < GEGPU_FALLBACK_REASONS; r++) {
+        const char *name = gegpu_fallback_token(r);
+        GeGpuFallbackCounts c[3];
+        memset(c, 0, sizeof(c));
+        if (!fallback_counts_scene(r, c)) ok = 0;
+        const unsigned long long want_rb = r == GEGPU_FALLBACK_RAM_FB ? 0u : 1u;
+        int bad = !c[0].ready || !c[2].ready || c[2].gpu_prims != c[0].gpu_prims ||
+                  c[1].sw_prims[r] != c[0].sw_prims[r] + 1u ||
+                  c[2].sw_prims[r] != c[0].sw_prims[r] + 2u ||
+                  c[1].readbacks[r] != c[0].readbacks[r] + want_rb ||
+                  c[2].readbacks[r] != c[1].readbacks[r];
+        for (int q = 0; q < GEGPU_FALLBACK_REASONS; q++)
+            if (q != r && (c[2].sw_prims[q] != c[0].sw_prims[q] ||
+                           c[2].readbacks[q] != c[0].readbacks[q]))
+                bad = 1;
+        if (bad) {
+            fprintf(stderr, "gpu coherence selftest [fallback-counts]: %s: sw_prims +%llu +%llu "
+                            "(want +1 +2) readbacks +%llu +%llu (want +%llu +%llu) gpu_prims +%u "
+                            "(want +0), ready %d\n", name,
+                    (unsigned long long)(c[1].sw_prims[r] - c[0].sw_prims[r]),
+                    (unsigned long long)(c[2].sw_prims[r] - c[0].sw_prims[r]),
+                    (unsigned long long)(c[1].readbacks[r] - c[0].readbacks[r]),
+                    (unsigned long long)(c[2].readbacks[r] - c[0].readbacks[r]),
+                    want_rb, want_rb, (unsigned)(c[2].gpu_prims - c[0].gpu_prims), c[2].ready);
+            ok = 0;
+        }
+    }
+    coherence_reset_targets();
+    *s_ge = saved;
+    if (ok) printf("gpu coherence selftest: PASS %-22s %d reasons through the hooks\n",
+                   "fallback-counts", GEGPU_FALLBACK_REASONS);
+    return ok;
+}
+
+/* The notice's logic on a scene that falls back for real (#2151). A frame is one display list
+ * run through ge.c: a sprite the GPU draws over the region, then two flat triangles under an
+ * XOR logic operation, which hook_tri hands to ge.c's software rasterizer. The GPU drew just
+ * before them, so each frame takes one readback. A run is the rule's whole span and the frame
+ * whose counts prime it: NK_RENDER_FALLBACK_WINDOWS x NK_RENDER_FALLBACK_WINDOW_FRAMES + 1
+ * frames. With the notice's logic on, each frame is followed by what gui.c runs after an accepted
+ * present (gegpu_fallback_counts, nk_render_fallback_window_step and the event's text); off, by
+ * nothing. On, it must report logic_op once, on the last frame, with the frames' exact counts.
+ * The picture after the last frame must be the same bytes on and off, and the same as those
+ * frames drawn by ge.c alone, so the software rasterizer's pixels are in it. */
+#define FNC_BASE (0x04000000u | 0x00100000u)
+#define FNC_FRAMES (NK_RENDER_FALLBACK_WINDOWS * NK_RENDER_FALLBACK_WINDOW_FRAMES + 1u)
+#define FNC_TRI_RGBA 0xFF5A3CA5u
+
+static uint32_t fnc_frame_list(uint32_t frame) {
+    StpList l; stp_begin(&l, FNC_BASE, 3u, 0);
+    stp_emit(&l, 0x24, 0);                               /* no stencil test */
+    stp_emit(&l, 0x21, 0);                               /* no blending */
+    uint32_t vaddr = 0x08060000u;
+    stp_sprite(&l, &vaddr, 0xFF000000u | (wrap_hash(0xF0A1u + frame) & 0x00FFFFFFu),
+               16.0f, 16.0f, 144.0f, 112.0f, 0.0f);
+    stp_emit(&l, 0xE6, 6u);                              /* XOR */
+    stp_emit(&l, 0x28, 1);
+    ParityGuestVtx *v = (ParityGuestVtx *)SR_HOST(vaddr);
+    v[0] = (ParityGuestVtx){ FNC_TRI_RGBA, 24.0f, 24.0f, 0.0f };
+    v[1] = (ParityGuestVtx){ FNC_TRI_RGBA, 136.0f, 24.0f, 0.0f };
+    v[2] = (ParityGuestVtx){ FNC_TRI_RGBA, 24.0f, 104.0f, 0.0f };
+    v[3] = (ParityGuestVtx){ FNC_TRI_RGBA, 136.0f, 24.0f, 0.0f };   /* the rectangle's other half */
+    v[4] = (ParityGuestVtx){ FNC_TRI_RGBA, 136.0f, 104.0f, 0.0f };
+    v[5] = (ParityGuestVtx){ FNC_TRI_RGBA, 24.0f, 104.0f, 0.0f };
+    stp_emit(&l, 0x01, vaddr & 0x00FFFFFFu);
+    stp_emit(&l, 0x04, (3u << 16) | 6u);
+    stp_emit(&l, 0x28, 0);
+    stp_end(&l);
+    return 0x08040000u;
+}
+
+/* One run of FNC_FRAMES frames over a fresh hashed background: on the GPU path with the notice's
+ * logic on (`notice` 1) or off (0), or through ge.c alone (`gpu` 0). Copies the picture after the
+ * last frame into `out`; with the logic on, returns its events in `ev` and their count in *nev,
+ * and the frame each was reported on in `at`. */
+static int fnc_run(int gpu, int notice, uint8_t *out, NkRenderFallbackEvent *ev, uint32_t *at,
+                   int *nev, GeGpuFallbackCounts *first, GeGpuFallbackCounts *last) {
+    NkRenderFallbackWindow window;
+    memset(&window, 0, sizeof(window));
+    *nev = 0;
+    coherence_reset_targets();
+    stp_fill_background(FNC_BASE, 3u);
+    ge_set_gpu_hooks(gpu ? &k_hooks : NULL);
+    for (uint32_t f = 0; f < FNC_FRAMES; f++) {
+        ge_run_list(fnc_frame_list(f), 0);
+        if (!notice) continue;
+        GeGpuFallbackCounts now;
+        gegpu_fallback_counts(&now);
+        if (f == 0) *first = now;
+        *last = now;
+        const uint16_t crossed = nk_render_fallback_window_step(&window, &now, NULL);
+        for (int r = 0; r < GEGPU_FALLBACK_REASONS; r++) {
+            if (!(crossed & (1u << r)) || *nev >= 4) continue;
+            char line[256];
+            ev[*nev] = nk_render_fallback_window_event(&window, (NkRenderEffect)r);
+            if (nk_render_fallback_event_format(&ev[*nev], line, sizeof(line)) <= 0) return 0;
+            at[*nev] = f;
+            (*nev)++;
+        }
+    }
+    ge_set_gpu_hooks(&k_hooks);
+    if (gpu) {
+        GeGpuFbDescriptor desc = { .addr = FNC_BASE, .format = 3, .stride = 512u, .width = 480,
+                                   .height = FB_H };
+        if (gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_FAILED) return 0;
+    }
+    memcpy(out, SR_HOST(FNC_BASE), FB_W * FB_H * 4u);
+    return 1;
+}
+
+static int coherence_run_fallback_notice(void) {
+    const uint32_t bytes = FB_W * FB_H * 4u, span = FNC_FRAMES - 1u;
+    uint8_t *on = (uint8_t *)malloc(bytes), *off = (uint8_t *)malloc(bytes);
+    uint8_t *soft = (uint8_t *)malloc(bytes);
+    NkRenderFallbackEvent ev[4];
+    uint32_t at[4] = { 0 };
+    int nev = 0, unused = 0, ok = 1;
+    GeGpuFallbackCounts first, last;
+    memset(&first, 0, sizeof(first));
+    memset(&last, 0, sizeof(last));
+    if (!on || !off || !soft) { free(on); free(off); free(soft); return 0; }
+    GeState saved = *s_ge;
+    if (!fnc_run(1, 1, on, ev, at, &nev, &first, &last) ||
+        !fnc_run(1, 0, off, NULL, NULL, &unused, NULL, NULL) ||
+        !fnc_run(0, 0, soft, NULL, NULL, &unused, NULL, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [fallback-notice]: a run failed (an event's text "
+                        "or the picture's sync)\n");
+        ok = 0;
+    }
+    const int lop = GEGPU_FALLBACK_LOGIC_OP;
+    /* The counts the frames made, from the first frame's end to the last's: two software
+     * triangles, one readback and one GPU sprite a frame, for logic_op only. */
+    const int counted = first.ready && last.ready &&
+        last.sw_prims[lop] - first.sw_prims[lop] == 2ull * span &&
+        last.readbacks[lop] - first.readbacks[lop] == span &&
+        (uint32_t)(last.gpu_prims - first.gpu_prims) == span;
+    if (ok && !counted) {
+        fprintf(stderr, "gpu coherence selftest [fallback-notice]: counts over %u frames: "
+                        "logic_op sw +%llu (want %u) readbacks +%llu (want %u) gpu +%u (want %u)\n",
+                span, (unsigned long long)(last.sw_prims[lop] - first.sw_prims[lop]), 2u * span,
+                (unsigned long long)(last.readbacks[lop] - first.readbacks[lop]), span,
+                (unsigned)(last.gpu_prims - first.gpu_prims), span);
+        ok = 0;
+    }
+    if (ok && (nev != 1 || ev[0].reason != NK_RENDER_EFFECT_LOGIC_OP || at[0] != FNC_FRAMES - 1u ||
+               ev[0].frames != span || ev[0].sw_prims != 2ull * span ||
+               ev[0].readbacks != span || ev[0].gpu_prims != span ||
+               ev[0].share_pm != (uint32_t)(1000u * 2u * span / (3u * span)))) {
+        fprintf(stderr, "gpu coherence selftest [fallback-notice]: %d events; the first: reason "
+                        "%d at frame %u frames=%u sw=%llu rb=%llu gpu=%llu share=%u\n", nev,
+                nev ? (int)ev[0].reason : -1, nev ? at[0] : 0u, nev ? ev[0].frames : 0u,
+                nev ? (unsigned long long)ev[0].sw_prims : 0ull,
+                nev ? (unsigned long long)ev[0].readbacks : 0ull,
+                nev ? (unsigned long long)ev[0].gpu_prims : 0ull, nev ? ev[0].share_pm : 0u);
+        ok = 0;
+    }
+    unsigned differ_off = 0, differ_soft = 0, xored = 0;
+    const uint32_t *pon = (const uint32_t *)on, *poff = (const uint32_t *)off;
+    const uint32_t *psoft = (const uint32_t *)soft;
+    for (uint32_t i = 0; ok && i < FB_W * FB_H; i++) {
+        if (pon[i] != poff[i] && !differ_off++)
+            fprintf(stderr, "gpu coherence selftest [fallback-notice]: logic on and off differ at "
+                            "x=%u y=%u: %08x %08x\n", i % FB_W, i / FB_W, pon[i], poff[i]);
+        if (i % FB_W < 480u && pon[i] != psoft[i] && !differ_soft++)
+            fprintf(stderr, "gpu coherence selftest [fallback-notice]: the GPU path and ge.c differ "
+                            "at x=%u y=%u: %08x %08x\n", i % FB_W, i / FB_W, pon[i], psoft[i]);
+    }
+    /* The triangles' pixels: the last sprite's colour XOR the triangles', in RGB. */
+    const uint32_t last_sprite = wrap_hash(0xF0A1u + FNC_FRAMES - 1u) & 0x00FFFFFFu;
+    if (ok) xored = (pon[64u * FB_W + 64u] & 0x00FFFFFFu) ==
+                    ((last_sprite ^ FNC_TRI_RGBA) & 0x00FFFFFFu);
+    if (ok && (differ_off || differ_soft || !xored)) {
+        fprintf(stderr, "gpu coherence selftest [fallback-notice]: %u pixels differ on and off, "
+                        "%u from ge.c; the triangles %s\n", differ_off, differ_soft,
+                xored ? "are drawn" : "are not in the picture");
+        ok = 0;
+    }
+    free(on); free(off); free(soft);
+    coherence_reset_targets();
+    *s_ge = saved;
+    if (ok) printf("gpu coherence selftest: PASS %-22s %u frames through ge.c and hook_tri: one "
+                   "logic_op event on the last, picture identical with the notice's logic on and "
+                   "off and equal to ge.c's\n", "fallback-notice", FNC_FRAMES);
+    return ok;
+}
 /* GPU transform and lighting parity (#318). Each cell is one display list of project-written
  * command words and generated vertices (no game data) drawing transform-mode triangles into a
  * cleared 512x272 8888 target with a depth buffer. It runs three ways: through the backend with
@@ -7064,7 +7342,7 @@ static int coherence_run_readback_rows(void) {
 #define WIDE_QUAD      0xff20c040u
 #define WIDE_BAR       0xff0000ffu
 #define WIDE_FADE      0xff808080u
-enum { WF_FADE = 1, WF_NARROW = 2, WF_NOCLEAR = 4, WF_LOGICOP = 8 };
+enum { WF_FADE = 1, WF_NARROW = 2, WF_NOCLEAR = 4, WF_LOGICOP = 8, WF_ZSTENCIL = 16 };
 
 typedef struct { float x0, x1, y0, y1; uint32_t c0, c1; int sprite, right; } WideShape;
 static const WideShape k_wide_shapes[] = {
@@ -7158,9 +7436,20 @@ static uint32_t wide_build(int flags) {
         TNLP_W(&L, 0x01, at);
         TNLP_W(&L, 0x04, (3u << 16) | 6u);
     }
+    if (flags & WF_ZSTENCIL) {                  /* depth NEVER; stencil ALWAYS, every op REPLACE 0x5A */
+        TNLP_W(&L, 0xDC, 1u | (0x5Au << 8) | (0xFFu << 16));
+        TNLP_W(&L, 0xDD, 0x020202u);
+        TNLP_W(&L, 0xDE, 0u);
+        TNLP_W(&L, 0x23, 1);
+        TNLP_W(&L, 0x24, 1);
+    }
     for (size_t i = 0; i < WIDE_NSHAPES; i++) {
         wide_shape(&L, &k_wide_shapes[i], 0.0f);
         wide_shape(&L, &k_wide_shapes[i], k_wide_shapes[i].right ? -(float)WIDE_K : (float)WIDE_K);
+    }
+    if (flags & WF_ZSTENCIL) {
+        TNLP_W(&L, 0x23, 0);
+        TNLP_W(&L, 0x24, 0);
     }
     TNLP_W(&L, 0x50, 0);
     TNLP_W(&L, 0x28, 0);
@@ -7408,6 +7697,36 @@ static int wide_aspect(const char *name, int win_w, int win_h, int want_wing, co
                    "wide-fill", name, fade, wing, s_scale);
     }
     return ok;
+}
+
+/* Wing primitives under a depth-blind stencil state (append_wing): the depth test NEVER passes
+ * and every stencil op is REPLACE 0x5A, so ge.c stores 0x5A on each covered pixel and no colour.
+ * At 1x the Vulkan canvas's and frame's stencil (alpha) must equal ge.c's on every pixel, and some
+ * must be 0x5A; one batch under the pipeline depth test would leave the alpha it found. Above 1x a
+ * readback is each pixel's top-left device sample, so shape edges may differ: there at least half
+ * of the pixels ge.c tags must hold 0x5A in the Vulkan canvas. */
+static int wide_zstencil(const WideBufs *B) {
+    int ok = wide_run(1, WIDE_D, WF_ZSTENCIL, B->gpu_on, B->gpu_wing) &&
+             wide_run(0, WIDE_D, WF_ZSTENCIL, B->sw_on, B->sw_wing);
+    unsigned differ = 0, tagged = 0, gpu_tagged = 0;
+    for (size_t i = 0; ok && i < (size_t)512u * FB_H; i++) {
+        differ += (B->gpu_wing[i] >> 24) != (B->sw_wing[i] >> 24);
+        tagged += (B->sw_wing[i] >> 24) == 0x5Au;
+        gpu_tagged += (B->sw_wing[i] >> 24) == 0x5Au && (B->gpu_wing[i] >> 24) == 0x5Au;
+    }
+    for (size_t i = 0; ok && i < (size_t)512u * FB_H; i++)   /* the frame: WIDE_FB, stride 512 */
+        if (i % 512u < 480u) differ += (B->gpu_on[i] >> 24) != (B->sw_on[i] >> 24);
+    if (s_scale > 1) differ = gpu_tagged * 2u >= tagged ? 0u : tagged - gpu_tagged;
+    if (!ok || differ || !tagged) {
+        fprintf(stderr, "gpu coherence selftest [wide-fill]: depth-blind stencil in the wings: ran=%d, %u stencil "
+                        "values differ from ge.c, %u canvas pixels hold 0x5A (scale %d)\n", ok, differ, tagged,
+                s_scale);
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %-22s depth-blind stencil at scale %d: %s, %u of %u wing pixels "
+           "0x5A\n", "wide-fill", s_scale,
+           s_scale > 1 ? "most tagged pixels kept" : "canvas and frame stencil equal ge.c", gpu_tagged, tagged);
+    return 1;
 }
 
 /* Frames after the first, at the 21:9 wing width, on the same canvases: a narrower scissor
@@ -7726,6 +8045,7 @@ static int coherence_run_wide_fill(void) {
     ok &= wide_aspect("21:9", 2520, 1080, WIDE_D, &B);
     ok &= wide_aspect("32:9", 3840, 1080, 240, &B);
     ok &= wide_frames(&B);
+    ok &= wide_zstencil(&B);
     ok &= wide_present(&B);
     coherence_reset_targets();
     free(buf);
@@ -10639,7 +10959,9 @@ static int coherence_run_dst_read_one(const char *name) {
  *  - depth legs: the draw-once state under the depth test, over a depth wall that hides the first
  *    sprite in part of the overlap. With depth writes off, or the depth test ALWAYS and depth writes
  *    on, it merges, and colour and depth equal ge.c. Under GEQUAL with depth writes on it must
- *    split: drawn last to first, the second sprite's depth would hide the first;
+ *    split: drawn last to first, the second sprite's depth would hide the first. With the
+ *    depth-fail op REPLACE as well (a depth-blind state, two batches), the hidden part of the
+ *    first sprite still writes the stencil that rejects the second there: it must split too;
  *  - kill legs: the alpha test rejects the first sprite of the pair, then the second: the pair
  *    still merges, and the sprite that is left shows in the overlap;
  *  - feedback leg (dro_feedback_list): the state textures from its own target, and the second
@@ -10887,12 +11209,15 @@ typedef struct SonZLeg {
     const char *name;
     uint32_t zfunc;
     int zwrite, once;
+    uint32_t zfail;                          /* the depth-fail op; 0 KEEP */
 } SonZLeg;
 
-static const SonZLeg k_son_zlegs[3] = {
-    { "GEQUAL, depth writes off", 7u, 0, 1 },
-    { "ALWAYS, depth writes on", 1u, 1, 1 },
-    { "GEQUAL, depth writes on", 7u, 1, 0 },
+#define SON_ZLEGS 4u
+static const SonZLeg k_son_zlegs[SON_ZLEGS] = {
+    { "GEQUAL, depth writes off", 7u, 0, 1, 0u },
+    { "ALWAYS, depth writes on", 1u, 1, 1, 0u },
+    { "GEQUAL, depth writes on", 7u, 1, 0, 0u },
+    { "GEQUAL, depth writes off, depth-fail op REPLACE", 7u, 0, 0, 2u },
 };
 
 /* Depth cleared to 0 and a depth-only wall at z 25000 across the left part of the pair's overlap,
@@ -10907,6 +11232,7 @@ static uint32_t son_depth_list(uint32_t fmt, const SonZLeg *leg) {
     stp_sprite(&l, &vaddr, 0u, 66.0f, 60.0f, 78.0f, 100.0f, 25000.0f);
     stp_emit(&l, 0xD3, 0);
     son_state(&l, 3u, 0x80u, 0x80u, 2u, 0x00u, 1);
+    if (leg->zfail) stp_emit(&l, 0xDD, (leg->zfail << 8) | (2u << 16));
     stp_emit(&l, 0xDE, leg->zfunc);
     stp_emit(&l, 0xE7, leg->zwrite ? 0u : 1u);
     son_pair(&l, &vaddr, 64.0f, 64.0f, 0x803050F0u, 0x60E0C020u, 20000.0f, 30000.0f);
@@ -11037,9 +11363,9 @@ static int coherence_run_stencil_once(void) {
     }
 
     /* depth legs */
-    for (uint32_t r = 0; r < 6u; r++) {
-        const SonZLeg *leg = &k_son_zlegs[r % 3u];
-        const uint32_t fmt = r < 3u ? 3u : 1u;
+    for (uint32_t r = 0; r < 2u * SON_ZLEGS; r++) {
+        const SonZLeg *leg = &k_son_zlegs[r % SON_ZLEGS];
+        const uint32_t fmt = r < SON_ZLEGS ? 3u : 1u;
         if (!son_run_both(fmt, son_depth_list(fmt, leg), 0, gpu_out, gz, wz, &run)) { ok = 0; continue; }
         const unsigned differing = son_differing(fmt, gpu_out, &at, &g, &w);
         unsigned zdiff = 0;
@@ -11087,7 +11413,7 @@ static int coherence_run_stencil_once(void) {
     free(gpu_out); free(gz); free(wz);
     if (ok)
         printf("gpu coherence selftest: PASS %-22s %s; matrix states=%u x 4 formats exact, %llu batches "
-               "reversed, %llu splits; anchors=%u; depth legs=6 colour and depth exact; kill legs=2; "
+               "reversed, %llu splits; anchors=%u; depth legs=8 colour and depth exact; kill legs=2; "
                "feedback leg splits (%s path)\n",
                "stencil-once",
                s_scale == 1 ? "mesh exact with no split" : "mesh not run above 1x", SON_STATES, matrix_once,
@@ -13702,6 +14028,253 @@ static int coherence_run_rtt_1x_reads(void) {
     return ok;
 }
 
+/* rtt-vram-view: textures read through each view of VRAM. The PSP maps VRAM four times
+ * (docs/HARDWARE_ORACLE.md, PSP-VRAM-MIRROR-001, measured for CPU accesses): 0x04000000 and
+ * 0x04400000 read each offset where it is, 0x04200000 reads offset o at o ^ 0x2040, and 0x04600000
+ * rotates bits 5..9 of o left one and then XORs 0x2040. ge.c decodes a texture through the view
+ * (sr_vram_cpu_address, #1049); the GPU path must give the same picture, then and after the source
+ * changes. T (8888, stride 512, at 0x100000) and U (5650, stride 512, at 0x010000) are drawn as
+ * 16 x 4 cells of distinct colours over their rows 0..63 and columns 0..255, so each view's
+ * reordering (16 or 32 pixels, 4 or 8 rows, 8- or 16-pixel pieces) moves cells. X (8888, 64 x 64,
+ * buffer width 64, at 0x1E8000, in no target) is written by the CPU. 64 x 64 sprites on M read,
+ * nearest and 1:1:
+ *   - pass 1 (row 0): T through 0x04000000 and 0x04400000 (each binds T's image directly), T through
+ *     0x04200000 and 0x04600000, U and X through 0x04200000 (none binds an image);
+ *   - the CPU then rewrites X's first 8 KiB, bytes the 0x04200000 view reads but which do not start
+ *     at the view's first byte (o ^ 0x2040), and notifies the write;
+ *   - pass 2 (row 80): T redrawn in other colours, then T through 0x04200000, X through 0x04200000,
+ *     and T through 0x04000000 (a direct bind).
+ * The two passes bind targets' images three times. Guest VRAM of M equals the software renderer's
+ * exactly at any scale: the cells are on whole guest pixels, so a target's top-left device samples
+ * are its software pixels. The software pictures show what each read must show: the reordering
+ * views differ from the plain read, the identity view does not, and the pass-2 reads of T and X
+ * differ from pass 1's, so a stale decode shows. The cell is a white-box check of the GPU path
+ * against the software renderer (ge.c), not a hardware oracle: that the GE's texel fetch reorders
+ * through a view as a CPU access does is inferred, not measured. */
+#define RVV_T     0x00100000u
+#define RVV_U     0x00010000u
+#define RVV_M     0x00060000u
+#define RVV_Z     0x001A0000u
+#define RVV_X     0x001E8000u
+#define RVV_VERTS 0x041F2000u
+#define RVV_LIST2 (COH_SAMPLE_LIST + 0x400u)
+enum { RVV_CELLS = 256, RVV_READS = 9, RVV_PASS1 = 6 };
+static int coherence_run_rtt_vram_view(void) {
+    const char *name = "rtt-vram-view";
+    const uint32_t ta = 0x04000000u | RVV_T, ua = 0x04000000u | RVV_U, ma = 0x04000000u | RVV_M;
+    const uint32_t xa = 0x04000000u | RVV_X;
+    const uint32_t stride = 512u, bytes = stride * FB_H * 4u, half_bytes = stride * FB_H * 2u;
+    const uint32_t xbytes = 64u * 64u * 4u, xrewrite = 0x2000u;
+    static const char *const read_name[RVV_READS] = {
+        "read of T through 0x04000000 (control)", "read of T through 0x04400000",
+        "read of T through 0x04200000", "read of T through 0x04600000", "read of U through 0x04200000",
+        "read of X through 0x04200000", "second read of T through 0x04200000, after T was redrawn",
+        "second read of X through 0x04200000, after the CPU wrote X", "second read of T through 0x04000000" };
+    /* per read: texture address (low 24 bits; the view is address bits 21 and 22), format, buffer
+     * width, sprite position on M */
+    static const uint32_t rd[RVV_READS][5] = {
+        { RVV_T, 3u, 512u, 0u, 0u }, { 0x400000u | RVV_T, 3u, 512u, 80u, 0u },
+        { 0x200000u | RVV_T, 3u, 512u, 160u, 0u }, { 0x600000u | RVV_T, 3u, 512u, 240u, 0u },
+        { 0x200000u | RVV_U, 0u, 512u, 320u, 0u }, { 0x200000u | RVV_X, 3u, 64u, 400u, 0u },
+        { 0x200000u | RVV_T, 3u, 512u, 0u, 80u }, { 0x200000u | RVV_X, 3u, 64u, 80u, 80u },
+        { RVV_T, 3u, 512u, 160u, 80u } };
+    /* for each read, the read whose software picture it must differ from (moved), or must equal
+     * (same), or RVV_READS for neither */
+    static const uint32_t differ_from[RVV_READS] = { RVV_READS, RVV_READS, 0u, 0u, RVV_READS, RVV_READS, 2u, 5u, 0u };
+    static const uint32_t same_as[RVV_READS] = { RVV_READS, 0u, RVV_READS, RVV_READS, RVV_READS, RVV_READS,
+                                                 RVV_READS, RVV_READS, RVV_READS };
+
+    RttCVtx *cv = (RttCVtx *)SR_HOST(RVV_VERTS);
+    RttCVtx *cv2 = cv + 2u * RVV_CELLS;
+    RawSpriteVtx *sv = (RawSpriteVtx *)(cv2 + 2u * RVV_CELLS);
+    const uint32_t cv_addr = RVV_VERTS & 0x00FFFFFFu;
+    const uint32_t cv2_addr = cv_addr + 2u * RVV_CELLS * (uint32_t)sizeof(RttCVtx);
+    const uint32_t sv_addr = cv2_addr + 2u * RVV_CELLS * (uint32_t)sizeof(RttCVtx);
+    const uint32_t vbytes = sv_addr + 2u * RVV_READS * (uint32_t)sizeof(RawSpriteVtx) - cv_addr;
+    for (uint32_t k = 0; k < RVV_CELLS; k++) {
+        const uint32_t x = (k % 16u) * 16u, y = (k / 16u) * 4u;
+        const uint32_t c = ((k * 37u + 11u) & 0xFFu) | (((k * 91u + 50u) & 0xFFu) << 8) |
+                           (((k * 53u + 200u) & 0xFFu) << 16) | 0xFF000000u;
+        const uint32_t c2 = ((k * 29u + 140u) & 0xFFu) | (((k * 71u + 3u) & 0xFFu) << 8) |
+                            (((k * 13u + 77u) & 0xFFu) << 16) | 0xFF000000u;
+        cv[2u * k] = (RttCVtx){ c, (float)x, (float)y, 0.0f };
+        cv[2u * k + 1u] = (RttCVtx){ c, (float)(x + 16u), (float)(y + 4u), 0.0f };
+        cv2[2u * k] = (RttCVtx){ c2, (float)x, (float)y, 0.0f };
+        cv2[2u * k + 1u] = (RttCVtx){ c2, (float)(x + 16u), (float)(y + 4u), 0.0f };
+    }
+    for (uint32_t k = 0; k < RVV_READS; k++) {
+        const float x = (float)rd[k][3], y = (float)rd[k][4];
+        sv[2u * k] = (RawSpriteVtx){ 0.0f, 0.0f, x, y, 0.0f };
+        sv[2u * k + 1u] = (RawSpriteVtx){ 64.0f, 64.0f, x + 64.0f, y + 64.0f, 0.0f };
+    }
+
+    uint32_t *dl = (uint32_t *)SR_HOST(COH_SAMPLE_LIST), *dl2 = (uint32_t *)SR_HOST(RVV_LIST2);
+    int p = 0;
+    #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    #define DL_SETUP()                                                                                  \
+        do {                                                                                            \
+            DL_EMIT(0x10, (RVV_VERTS & 0xFF000000u) >> 8);   /* BASE: vertex addresses in VRAM */      \
+            DL_EMIT(0x9C, RVV_T);                            /* T: 8888, stride 512 */                 \
+            DL_EMIT(0x9D, stride | (0x04u << 16));                                                      \
+            DL_EMIT(0xD2, 3);                                                                           \
+            DL_EMIT(0x9E, RVV_Z);                                                                       \
+            DL_EMIT(0x9F, 512u | (0x04u << 16));                                                        \
+            DL_EMIT(0xD3, 0);                                                                           \
+            DL_EMIT(0x1D, 0); DL_EMIT(0x1E, 0); DL_EMIT(0x1F, 0);                                       \
+            DL_EMIT(0x22, 0); DL_EMIT(0x23, 0); DL_EMIT(0x24, 0);   /* no alpha, depth, stencil */      \
+            DL_EMIT(0x25, 0); DL_EMIT(0x27, 0); DL_EMIT(0x28, 0);   /* no AA, colour test, logic */     \
+            DL_EMIT(0xE7, 1); DL_EMIT(0xE8, 0); DL_EMIT(0xE9, 0);   /* no depth write, no masks */      \
+            DL_EMIT(0x4C, 0); DL_EMIT(0x4D, 0); DL_EMIT(0xD6, 0); DL_EMIT(0xD7, 0xFFFFu);               \
+            DL_EMIT(0x15, 0); DL_EMIT(0x16, ((FB_H - 1) << 10) | (FB_W - 1));                           \
+            DL_EMIT(0xD4, 0); DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));                           \
+            DL_EMIT(0x50, 0); DL_EMIT(0x20, 0); DL_EMIT(0x21, 0);   /* flat, no dither, no blend */     \
+            DL_EMIT(0x12, (7u << 2) | (3u << 7) | (1u << 23));      /* 8888 colour, float pos */        \
+        } while (0)
+    #define DL_TEXTURED()                                                                               \
+        do {                                                                                            \
+            DL_EMIT(0x9C, RVV_M);                            /* M */                                    \
+            DL_EMIT(0x1E, 1);                                                                           \
+            DL_EMIT(0xB8, 6u | (6u << 8));                   /* 64 x 64 */                              \
+            DL_EMIT(0xC0, 0); DL_EMIT(0xC2, 0); DL_EMIT(0xC8, 0);                                       \
+            DL_EMIT(0xC6, 0);                                /* nearest */                              \
+            DL_EMIT(0xC7, 0x101u);                           /* clamp */                                \
+            DL_EMIT(0xC9, 3u | 0x100u);                      /* replace, RGBA */                        \
+            DL_EMIT(0xCB, 0);                                                                           \
+            DL_EMIT(0x12, 3u | (3u << 7) | (1u << 23));      /* float UV and position, through */      \
+        } while (0)
+    #define DL_READ(k)                                                                                  \
+        do {                                                                                            \
+            DL_EMIT(0xA0, rd[k][0]);                                                                    \
+            DL_EMIT(0xA8, rd[k][2] | (0x04u << 16));                                                    \
+            DL_EMIT(0xC3, rd[k][1]);                                                                    \
+            DL_EMIT(0x01, sv_addr + 2u * (k) * (uint32_t)sizeof(RawSpriteVtx));                         \
+            DL_EMIT(0x04, (6u << 16) | 2u);                                                             \
+        } while (0)
+    /* pass 1: T's and U's cells, then the six reads */
+    DL_SETUP();
+    DL_EMIT(0x01, cv_addr);
+    DL_EMIT(0x04, (6u << 16) | (2u * RVV_CELLS));          /* T's cells */
+    DL_EMIT(0x9C, RVV_U);                                  /* U: 5650, the same cells */
+    DL_EMIT(0xD2, 0);
+    DL_EMIT(0x01, cv_addr);
+    DL_EMIT(0x04, (6u << 16) | (2u * RVV_CELLS));
+    DL_EMIT(0xD2, 3);
+    DL_TEXTURED();
+    for (uint32_t k = 0; k < RVV_PASS1; k++) DL_READ(k);
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    /* pass 2: T redrawn, then the three reads */
+    dl = dl2; p = 0;
+    DL_SETUP();
+    DL_EMIT(0x01, cv2_addr);
+    DL_EMIT(0x04, (6u << 16) | (2u * RVV_CELLS));
+    DL_TEXTURED();
+    for (uint32_t k = RVV_PASS1; k < RVV_READS; k++) DL_READ(k);
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    #undef DL_READ
+    #undef DL_TEXTURED
+    #undef DL_SETUP
+    #undef DL_EMIT
+
+    uint32_t *gpu_m = (uint32_t *)malloc(bytes), *sw_m = (uint32_t *)malloc(bytes);
+    if (!gpu_m || !sw_m) { free(gpu_m); free(sw_m); return 0; }
+    uint64_t rtt = 0, direct = 0;
+    int ok = 1;
+    for (int run = 0; ok && run < 2; run++) {            /* run 0: the GPU; run 1: the software renderer */
+        if (run == 0) { coherence_reset_targets(); }
+        coherence_reset_depths();
+        memset(SR_HOST(ta), 0, bytes);
+        memset(SR_HOST(ua), 0, half_bytes);
+        memset(SR_HOST(ma), 0, bytes);
+        uint32_t *xp = (uint32_t *)SR_HOST(xa);
+        for (uint32_t i = 0; i < xbytes / 4u; i++) xp[i] = (i * 0x9E3779B1u) | 0xFF000000u;
+        sr_gpu_vram_dirty(RVV_VERTS, vbytes);
+        sr_gpu_vram_dirty(ta, bytes);
+        sr_gpu_vram_dirty(ua, half_bytes);
+        sr_gpu_vram_dirty(ma, bytes);
+        sr_gpu_vram_dirty(xa, xbytes);
+        ge_set_gpu_hooks(run == 0 ? &k_hooks : NULL);
+        const uint64_t rtt0 = s_cnt_rtt, direct0 = s_cnt_rtt_direct;
+        ok = ge_run_list(COH_SAMPLE_LIST, 0) == 0;
+        if (ok && run == 0) ok = !s_nbatch || submit_pending();
+        /* the CPU rewrites X's first 8 KiB, as a store through the plain address would, and says so */
+        for (uint32_t i = 0; ok && i < xrewrite / 4u; i++) xp[i] = (i * 0x85EBCA77u) | 0xFF000000u;
+        if (ok) sr_gpu_vram_dirty(xa, xrewrite);
+        ok = ok && ge_run_list(RVV_LIST2, 0) == 0;
+        if (run == 0) {
+            ok = ok && (!s_nbatch || submit_pending());
+            GeGpuFbDescriptor desc = { .addr = ma, .format = 3, .stride = stride, .width = 480, .height = FB_H };
+            ok = ok && gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK;
+            rtt = s_cnt_rtt - rtt0;
+            direct = s_cnt_rtt_direct - direct0;
+        }
+        ge_set_gpu_hooks(&k_hooks);
+        if (ok) memcpy(run == 0 ? gpu_m : sw_m, SR_HOST(ma), bytes);
+        else fprintf(stderr, "gpu coherence selftest [%s]: the %s run failed\n", name, run == 0 ? "GPU" : "software");
+    }
+    /* A wrong bind count fails the case, but the pictures are still compared, to show what it drew. */
+    const int counts_ok = rtt == 7u && direct == 3u;
+    if (ok && !counts_ok)
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %llu reads were render-target reads (want 7: X is in "
+                "no target) and %llu bound a target's image (want 3, the reads through 0x04000000 and "
+                "0x04400000)\n", name,
+                (unsigned long long)rtt, (unsigned long long)direct);
+    uint32_t wrong[RVV_READS] = {0}, varied[RVV_READS] = {0}, moved[RVV_READS] = {0}, outside = 0;
+    for (uint32_t gy = 0; ok && gy < FB_H; gy++) {
+        for (uint32_t gx = 0; gx < 480u; gx++) {
+            const uint32_t got = gpu_m[(size_t)gy * stride + gx], sw = sw_m[(size_t)gy * stride + gx];
+            uint32_t k = RVV_READS;
+            for (uint32_t j = 0; j < RVV_READS; j++)
+                if (gx - rd[j][3] < 64u && gy - rd[j][4] < 64u) k = j;
+            if (k == RVV_READS) {
+                if (got != sw && outside++ < 3u)
+                    fprintf(stderr, "gpu coherence selftest [%s]: guest pixel (%u,%u) outside the sprites = %08x, "
+                            "software %08x\n", name, gx, gy, got, sw);
+                continue;
+            }
+            const uint32_t u = gx - rd[k][3], v = gy - rd[k][4];
+            if (sw != sw_m[(size_t)rd[k][4] * stride + rd[k][3]]) varied[k] = 1;
+            const uint32_t ref = differ_from[k] < RVV_READS ? differ_from[k] : same_as[k];
+            if (ref < RVV_READS && sw != sw_m[(size_t)(rd[ref][4] + v) * stride + rd[ref][3] + u]) moved[k] = 1;
+            if (got != sw && wrong[k]++ < 3u)
+                fprintf(stderr, "gpu coherence selftest [%s]: %s: guest pixel (%u,%u) = %08x, software %08x "
+                        "(scale %d)\n", name, read_name[k], gx, gy, got, sw, s_scale);
+        }
+    }
+    const int compared = ok;   /* every read is reported, not only the first that fails */
+    for (uint32_t k = 0; compared && k < RVV_READS; k++) {
+        if (wrong[k])
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the %s: %u of 4096 guest pixels differ from the "
+                    "software renderer's (scale %d)\n", name, read_name[k], wrong[k], s_scale);
+        if (!varied[k])
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the %s: the software picture is one colour, so the "
+                    "comparison shows nothing\n", name, read_name[k]);
+        if (differ_from[k] < RVV_READS && !moved[k])
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the %s: its software picture equals the %s's\n", name,
+                    read_name[k], read_name[differ_from[k]]);
+        if (same_as[k] < RVV_READS && moved[k])
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the %s: its software picture differs from the %s's\n",
+                    name, read_name[k], read_name[same_as[k]]);
+        if (wrong[k] || !varied[k] || (differ_from[k] < RVV_READS && !moved[k]) || (same_as[k] < RVV_READS && moved[k]))
+            ok = 0;
+    }
+    if (compared && outside) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %u guest pixels outside the sprites differ\n", name, outside);
+        ok = 0;
+    }
+    ok = ok && counts_ok;
+    free(gpu_m); free(sw_m);
+    coherence_reset_targets();
+    coherence_reset_depths();
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s scale=%d textures read through each view of VRAM, twice: 0x04000000 "
+               "and 0x04400000 bind T's image, 0x04200000 and 0x04600000 bind none, a redrawn target and a "
+               "CPU-written texture read fresh, and guest VRAM equals the software renderer's exactly\n",
+               name, s_scale);
+    return ok;
+}
+
 static int coherence_selftest_cases(void) {
     /* SR_GPU_COHERENCE_CASE=scaled-upload (the harness's --case) runs that case alone, as the
      * recipe does at render scales 2 and 4: the other fixtures expect 1x pixels (a filtered sample
@@ -13744,13 +14317,18 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "dst-read") == 0) return coherence_run_dst_read();
         if (strncmp(only, "dst-read-", 9) == 0) return coherence_run_dst_read_one(only);
         if (strcmp(only, "stencil-once") == 0) return coherence_run_stencil_once();
+        if (strcmp(only, "stencil-parity") == 0) return coherence_run_stencil_parity();
+        if (strcmp(only, "fallback-reasons") == 0) return coherence_run_fallback_reasons();
         if (strcmp(only, "rtt-scale") == 0) return coherence_run_rtt_scale_at(0);
         if (strcmp(only, "rtt-scale-offset") == 0) return coherence_run_rtt_scale_at(1);
         if (strcmp(only, "rtt-edge") == 0) return coherence_run_rtt_edge();
         if (strcmp(only, "rtt-depth-alias") == 0) return coherence_run_rtt_depth_alias();
+        if (strcmp(only, "rtt-vram-view") == 0) return coherence_run_rtt_vram_view();
         if (strcmp(only, "color-test") == 0) return coherence_run_color_test();
         if (strcmp(only, "lines") == 0) return coherence_run_lines();
         if (strcmp(only, "rtt-1x-reads") == 0) return coherence_run_rtt_1x_reads();
+        if (strcmp(only, "fallback-counts") == 0) return coherence_run_fallback_counts();
+        if (strcmp(only, "fallback-notice") == 0) return coherence_run_fallback_notice();
         if (strcmp(only, "host-depth") == 0) return coherence_run_host_depth();
         if (strcmp(only, "wide-raster") == 0) return coherence_run_wide_raster();
         if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();
@@ -13844,10 +14422,14 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_rtt_edge()) ok = 0;
     if (!coherence_run_rtt_depth_alias()) ok = 0;
     if (!coherence_run_rtt_1x_reads()) ok = 0;
+    if (!coherence_run_rtt_vram_view()) ok = 0;
     if (!coherence_run_host_depth()) ok = 0;
     if (!coherence_run_ssaa_edge()) ok = 0;
     if (!coherence_run_ssaa_sprite()) ok = 0;
     if (!coherence_run_ssaa_limit()) ok = 0;
+    /* Last: its software fallbacks hand the colour and depth surfaces it drew to ge.c. */
+    if (!coherence_run_fallback_counts()) ok = 0;
+    if (!coherence_run_fallback_notice()) ok = 0;
     coherence_reset_targets();
     return ok;
 }

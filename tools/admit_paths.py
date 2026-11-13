@@ -51,7 +51,10 @@ annotation -- with no new admission, as long as the record still says the same.
 A path bound to its bytes (``--binding bytes``; the default for a
 ``third_party`` origin, a file imported byte-identical from an upstream
 revision) keeps its exact SHA-256: changing it needs a new admission that
-records it as a LOCAL DELTA (``--binding claim``).
+records it as a LOCAL DELTA (``--binding claim``). A binary file, a path under
+``assets/vfpu/`` and a path the release manifest waives are always bound to
+their bytes: the publication audit holds such bytes only to the pull request's
+own pin, so the admission is the decision about them.
 
 The command does the mechanical parts and nothing else:
 
@@ -123,8 +126,10 @@ import provenance_ledger  # noqa: E402
 from provenance_ledger import RefreshError  # noqa: E402
 import public_export  # noqa: E402
 from publication_policy import load_policy  # noqa: E402
+import publish_audit  # noqa: E402
 
 POLICY = "assets/public_source_profile.json"
+RELEASE_MANIFEST = "assets/release_manifest.json"
 EXPORT = "PUBLIC_EXPORT.json"
 LEDGER = "assets/public_provenance_ledger.json"
 TRUSTED_LEDGER = "docs/provenance/IMPLEMENTATION_PROVENANCE.json"
@@ -719,6 +724,7 @@ def _prepare_admission(
         raise AdmitError("ADMIT_NAME_INVALID", "--slug must be lowercase words joined by '-', --date YYYY-MM-DD")
 
     blobs: dict[str, tuple[str, str]] = {}
+    contents: dict[str, bytes] = {}
     digests: dict[str, str] = {}
     dirty = _text(pr, "status", "--porcelain=v1", "--", *paths)
     if dirty:
@@ -741,7 +747,18 @@ def _prepare_admission(
                 f"{path} is already {disposition} by the base publication policy",
             )
         blobs[path] = _blob(pr, head, path)
-        digests[path] = hashlib.sha256(_git(pr, "cat-file", "blob", blobs[path][1])).hexdigest()
+        contents[path] = _git(pr, "cat-file", "blob", blobs[path][1])
+        digests[path] = hashlib.sha256(contents[path]).hexdigest()
+    manifest_map: dict[str, dict] = {}
+    if _git(pr, "ls-tree", head, "--", RELEASE_MANIFEST):
+        manifest_map, manifest_findings = publish_audit.load_release_manifest_bytes(
+            _git(pr, "cat-file", "blob", f"{head}:{RELEASE_MANIFEST}"), RELEASE_MANIFEST)
+        if manifest_findings:
+            raise AdmitError("ADMIT_MANIFEST_UNREADABLE",
+                             f"{RELEASE_MANIFEST} at the pull request HEAD: {manifest_findings[0].detail}")
+
+    def byte_bound(path: str) -> bool:
+        return bool(publish_audit.requires_byte_binding(path, contents[path], manifest_map))
 
     statements = classify(paths, records, origins or {}, require_origin=not rekey)
     admission_path = authority_root / ADMISSIONS / f"admission-{slug}-{date}.json"
@@ -760,9 +777,20 @@ def _prepare_admission(
             # Recorded only where it departs from the default for the origin, so an admission
             # that takes the default keeps the record shape admissions had before V4.
             origin = (origins or {}).get(statement["path"], {})
+            if "binding" not in origin and byte_bound(statement["path"]):
+                origin = {**origin, "binding": "bytes"}
             chosen = statement_binding({**statement, **origin})
             if chosen != statement_binding(statement):
                 statement["binding"] = chosen
+    for statement in statements:
+        if statement_binding(statement) == "claim" and byte_bound(statement["path"]):
+            raise AdmitError(
+                "ADMISSION_BINDING_BYTES_REQUIRED",
+                f"{statement['path']} is binary, under assets/vfpu/ or waived by the release manifest, so its "
+                "admission must bind its bytes; "
+                + ("a re-key reuses the recorded claim binding, so admit the path again without --rekey"
+                   if rekey else "omit the claim binding or pass --binding bytes"),
+            )
     candidate_policy, delta_record, authority_bytes, admission_bytes = build_records(
         base_policy=base_policy, paths=paths, digests=digests,
         statements=statements, approval_basis=approval_basis, records=records,
@@ -1661,7 +1689,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--binding", choices=provenance_ledger.POLICY_DELTA_BINDINGS,
         help="bind the paths to their origin claim (edits flow without re-admission) or also to their exact "
-             "bytes (a byte-identical import); default: bytes for a third_party origin, claim otherwise",
+             "bytes (a byte-identical import); default: bytes for a third_party origin, a binary file, a VFPU "
+             "table or a path the release manifest waives (which only bytes may bind), claim otherwise",
     )
     parser.add_argument("--assisted-by", help="append an Assisted-by: trailer to the commits this makes")
     parser.add_argument("--push", action="store_true", help="also push the private records to the authority main")

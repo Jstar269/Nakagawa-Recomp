@@ -3004,7 +3004,11 @@ class BinaryWaiverPinTests(unittest.TestCase):
     * with ``--trusted-base``, a path the base holds is held to the base: the same waiver, and bytes the
       base vouches for, whatever the audited manifest says;
     * with ``--trusted-base``, every refused waiver is reported, binary finding or not;
-    * with ``--trusted-base``, the ``assets/vfpu/`` exemption covers only the file the base carries.
+    * with ``--trusted-base``, the ``assets/vfpu/`` exemption covers only the file the base carries;
+    * with ``--trusted-base``, a path the base's profile declares is held to the base like one it carries.
+
+    Every commit declares its own files in ``assets/public_source_profile.json`` unless a test says
+    otherwise.
     """
 
     SHOT = "docs/shot.png"
@@ -3018,6 +3022,7 @@ class BinaryWaiverPinTests(unittest.TestCase):
     OTHER_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"/>\n'
     TABLE = "assets/vfpu/table.dat"
     MANIFEST = "assets/release_manifest.json"
+    PROFILE = "assets/public_source_profile.json"
 
     def setUp(self) -> None:
         scratch = tempfile.TemporaryDirectory(prefix="nk-waiver-pin-")
@@ -3040,8 +3045,13 @@ class BinaryWaiverPinTests(unittest.TestCase):
             component["hashes"] = {"sha256": pin or hashlib.sha256(data).hexdigest()}
         return component
 
-    def _commit(self, files: dict[str, bytes], components: list[dict] | None) -> str:
-        """Commit exactly ``files`` plus a manifest of ``components`` (none when ``None``)."""
+    def _commit(self, files: dict[str, bytes], components: list[dict] | None,
+                declared: tuple[str, ...] = (), profile: bool = True) -> str:
+        """Commit exactly ``files`` plus a manifest of ``components`` (none when ``None``).
+
+        With ``profile`` the commit carries a publication profile whose ``include_paths`` are the
+        commit's own paths plus ``declared``.
+        """
         for path in sorted(self.repo.rglob("*"), reverse=True):
             if ".git" in path.relative_to(self.repo).parts:
                 continue
@@ -3052,6 +3062,9 @@ class BinaryWaiverPinTests(unittest.TestCase):
         tree = dict(files)
         if components is not None:
             tree[self.MANIFEST] = (json.dumps({"components": components}, indent=2) + "\n").encode("utf-8")
+        if profile:
+            include = sorted({*tree, self.PROFILE, *declared})
+            tree[self.PROFILE] = (json.dumps({"include_paths": include}, indent=2) + "\n").encode("utf-8")
         for rel, data in tree.items():
             target = self.repo.joinpath(*rel.split("/"))
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -3255,6 +3268,57 @@ class BinaryWaiverPinTests(unittest.TestCase):
         repinned = [self._component(self.SHOT, self.PNG), self._component(absent, self.PBP)]
         candidate = self._commit({self.SHOT: self.PNG, absent: self.PBP}, repinned)
         self.assertEqual(self._codes(candidate, base, absent), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+        # A waiver the base records without a pin approves no bytes there, whatever the audited
+        # manifest pins.
+        unpinned = [self._component(self.SHOT, self.PNG), self._component(absent, self.OTHER_PNG, pinned=False)]
+        unpinned_base = self._commit({self.SHOT: self.PNG}, unpinned)
+        for name, files, components in (
+            ("pinned to its bytes", {absent: self.OTHER_PNG}, recorded),
+            ("an executable pinned to its bytes", {absent: self.PBP}, repinned),
+        ):
+            with self.subTest(name):
+                candidate = self._commit({self.SHOT: self.PNG, **files}, components)
+                self.assertEqual(self._codes(candidate, unpinned_base, absent), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+        candidate = self._commit({self.SHOT: self.PNG, absent: self.OTHER_PNG}, unpinned)
+        self.assertEqual(self._codes(candidate, unpinned_base, absent), {"MAGIC", "APPROVED_BINARY_UNPINNED"})
+
+    def test_a_path_the_base_profile_declares_is_held_to_the_base(self) -> None:
+        # The base declares the path for publication but neither carries the file nor waives it, so
+        # it vouches for no bytes there: a waiver held only by the audited manifest's pin is refused.
+        declared = "docs/declared.png"
+        shot = self._component(self.SHOT, self.PNG)
+        before = self._commit({self.SHOT: self.PNG, declared: self.PNG}, [shot, self._component(declared, self.PNG)])
+        emptied = self._commit({self.SHOT: self.PNG}, [shot], declared=(declared,))
+        self.assertEqual(self._codes(emptied, before, declared), set())
+        self.assertEqual(self._codes(emptied, before), set())
+        for name, data in (("an executable", self.PBP), ("an image", self.OTHER_PNG)):
+            with self.subTest(name):
+                added = self._commit({self.SHOT: self.PNG, declared: data},
+                                     [shot, self._component(declared, data)], declared=(declared,))
+                self.assertEqual(self._codes(added, emptied, declared), {"MAGIC", "APPROVED_BINARY_UNPINNED"})
+                self.assertEqual(self._codes(added, emptied), set())
+        # The same holds for a VFPU table the base declares without carrying it.
+        table = self._commit({self.SHOT: self.PNG, self.TABLE: self.OPAQUE}, [shot], declared=(self.TABLE,))
+        emptied_table = self._commit({self.SHOT: self.PNG}, [shot], declared=(self.TABLE,))
+        self.assertEqual(self._codes(table, emptied_table, self.TABLE), {"MAGIC_UNKNOWN"})
+        # A path the base neither carries nor declares is new, and its own pin applies.
+        undeclared = self._commit({self.SHOT: self.PNG}, [shot])
+        self.assertEqual(self._codes(table, undeclared, self.TABLE), set())
+
+    def test_a_default_waiver_is_not_reported_as_a_manifest_waiver(self) -> None:
+        # A file under font/ with no component takes a waiver as its default disposition; a refusal
+        # says so instead of naming a release-manifest waiver that does not exist.
+        font = "font/extra.pgf"
+        shot = self._component(self.SHOT, self.PNG)
+        base = self._commit({self.SHOT: self.PNG, font: self.OPAQUE}, [shot])
+        candidate = self._commit({self.SHOT: self.PNG, font: self.OTHER_OPAQUE}, [shot])
+        code, output = self._run(candidate, base)
+        self.assertEqual(code, 1, output)
+        refusals = [line for line in output.splitlines()
+                    if line.startswith("APPROVED_BINARY_UNPINNED") and f": {font}: " in line]
+        self.assertEqual(len(refusals), 1, output)
+        self.assertIn("has no release-manifest component", refusals[0])
+        self.assertNotIn("release manifest waives", refusals[0])
 
     def test_a_prohibited_extension_is_held_to_the_base_as_well(self) -> None:
         guest = "fixtures/guest.prx"
@@ -3295,11 +3359,46 @@ class BinaryWaiverPinTests(unittest.TestCase):
         code, output = self._run(candidate, broken)
         self.assertEqual(code, 2, output)
         self.assertIn("is unusable", output)
+        shot = self._component(self.SHOT, self.PNG)
+        duplicated = self._commit({self.SHOT: self.PNG}, [shot, dict(shot, id="docs/shot-again")])
+        code, output = self._run(candidate, duplicated)
+        self.assertEqual(code, 2, output)
+        self.assertIn("is unusable: MANIFEST_DUPLICATE_PATH", output)
+        no_profile = self._commit({self.SHOT: self.PNG}, [shot], profile=False)
+        code, output = self._run(candidate, no_profile)
+        self.assertEqual(code, 2, output)
+        self.assertIn("the trusted base has no assets/public_source_profile.json", output)
+        for name, profile in (("not JSON", b"{"), ("no include list", b"{}\n"),
+                              ("not a list of paths", b'{"include_paths": [1]}\n')):
+            with self.subTest(name):
+                bad_profile = self._commit({self.SHOT: self.PNG, self.PROFILE: profile}, [shot], profile=False)
+                code, output = self._run(candidate, bad_profile)
+                self.assertEqual(code, 2, output)
+                self.assertIn("assets/public_source_profile.json is unusable", output)
         # A base that is named must be a commit: an empty value is not "no base".
         for empty in ("", "  "):
             code, output = self._run(candidate, empty)
             self.assertEqual(code, 2, output)
             self.assertIn("--trusted-base names no commit", output)
+
+
+class ByteBindingTests(unittest.TestCase):
+    """Which new paths an admission must bind to their bytes rather than to their origin claim."""
+
+    def test_waived_vfpu_and_binary_paths_need_their_bytes_bound(self) -> None:
+        waived = {"docs/mark.svg": {"disposition": "approved_binary"},
+                  "font/extra.pgf": {"disposition": "optional_excluded_if_unverified"},
+                  "docs/page.md": {"disposition": "included"}}
+        needs = publish_audit.requires_byte_binding
+        self.assertTrue(needs("docs/mark.svg", b"<svg/>\n", waived))
+        self.assertTrue(needs("font/extra.pgf", None, waived))
+        self.assertTrue(needs("assets/vfpu/table.dat", b"text\n", {}))
+        self.assertTrue(needs("docs/shot.png", b"\x89PNG\r\n\x1a\n", {}))
+        self.assertTrue(needs("docs/data.bin", bytes([0x13, 0x37, 0x00, 0x01]) * 10, {}))
+        # Known binary magic counts even when the rest of the file reads as text.
+        self.assertTrue(needs("docs/readme.txt", b"MZ this file otherwise reads as plain text\n", {}))
+        self.assertFalse(needs("docs/page.md", b"# Page\n", waived))
+        self.assertFalse(needs("docs/other.md", None, {}))
 
 
 class TrustedTreeAuditTests(unittest.TestCase):

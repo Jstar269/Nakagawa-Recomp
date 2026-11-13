@@ -26,14 +26,15 @@ static int value_on_off(const char *v, int *out) {
 }
 
 /* The line's keys. Each says whether a line must carry it, so the order of the table decides
-   nothing for the parser: tier is the one key a line may leave out (an Enhanced run). Each
-   also names the longest value ace_format writes for it, so ace_longest_line builds the
-   longest line from this table alone. */
+   nothing for the parser: the rows that are not required (tier, stick, load, depth, ssaa, peak,
+   glyphs, cull and mips) are the keys a line may leave out. Each also names the longest value ace_format writes
+   for it, so ace_longest_line builds the longest line from this table alone. */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
     ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TWIN, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_DEPTH,
     ACE_KEY_SSAA,
-    ACE_KEY_CULL, ACE_KEY_PEAK, ACE_KEY_GLYPHS
+    ACE_KEY_CULL, ACE_KEY_PEAK, ACE_KEY_GLYPHS,
+    ACE_KEY_MIPS
 } AceKey;
 
 static const struct {
@@ -59,6 +60,7 @@ static const struct {
     {"peak", ACE_KEY_PEAK, 0, "limit"},
     {"glyphs", ACE_KEY_GLYPHS, 0, "on"},
     {"cull", ACE_KEY_CULL, 0, "on"},
+    {"mips", ACE_KEY_MIPS, 0, "on"},
 };
 
 size_t ace_longest_line(char *out, size_t cap) {
@@ -180,6 +182,12 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                     why_set(why, why_cap, "glyphs is not part of this build"); return 0;
                 }
                 break;
+            case ACE_KEY_MIPS:
+                ok = value_on_off(v, &c.mips);
+                if (ok && c.mips && !ACE_HAS_MIPS) {
+                    why_set(why, why_cap, "mips is not part of this build"); return 0;
+                }
+                break;
             case ACE_KEY_TIER:
                 if (strcmp(v, "enhanced") == 0) { c.tier = ACE_TIER_ENHANCED; ok = 1; }
                 else if (strcmp(v, "ace") == 0) { c.tier = ACE_TIER_ACE; ok = 1; }
@@ -256,6 +264,12 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
                      on_off(c->notice), wide_word(c->wide), smooth_word(c->smooth),
                      sas_word(c->sas), tess_word(c->tess), on_off(c->twin));
     }
+    /* Written only when on, at its place in the key order (right after twin): a missing mips
+       is off, so every line without it keeps its text. */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->mips) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";mips=on");
+        n = m < 0 ? -1 : n + m;
+    }
     /* Written only when on: a missing stick is off, so every line without it keeps its text. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->stick) {
         const int m = snprintf(out + n, cap - (size_t)n, ";stick=%d", c->stick);
@@ -308,6 +322,7 @@ static int s_af_device;          /* the device's level when lower than the reque
 static int s_ssaa_limited;       /* the factor the renderer gave when lower than the request, else 0 */
 static char s_ssaa_why[128];     /* ...and why */
 static int s_confirmed[ACE_FEATURE_COUNT];
+static void (*s_exit_report[ACE_FEATURE_COUNT])(void);
 static uint64_t s_af_failures;
 static unsigned long s_cull_untracked;
 static unsigned long long s_stick_samples;   /* samples off rest the stick remap passed through */
@@ -322,7 +337,7 @@ static double s_peak_min_gain = 1.0;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
     "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull",
-    "depth", "twin", "ssaa", "peak", "glyphs"
+    "depth", "twin", "ssaa", "peak", "glyphs", "mips"
 };
 
 /* The run's observation state. */
@@ -383,6 +398,7 @@ int ace_init_spec(const char *spec, const char *report_path) {
     memset(&s_eff, 0, sizeof(s_eff));
     memset(s_unavailable, 0, sizeof(s_unavailable));
     memset(s_confirmed, 0, sizeof(s_confirmed));
+    memset(s_exit_report, 0, sizeof(s_exit_report));
     s_af_failures = 0;
     s_cull_untracked = 0;
     s_stick_samples = 0;
@@ -438,6 +454,7 @@ int ace_init_spec(const char *spec, const char *report_path) {
     if (s_req.peak)
         fprintf(stderr, "ACE_MODE: peak limit (the host hears SAS mixes unsaturated, through a true-peak "
                         "limiter; the guest's SAS bytes are unchanged)\n");
+    if (s_req.mips) fprintf(stderr, "ACE_MODE: mips on (textures with one level get host-built mip chains)\n");
     return 1;
 }
 
@@ -480,6 +497,7 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_WIDE: s_eff.wide = 0; break;
     case ACE_FEATURE_SMOOTH: s_eff.smooth = 0; break;
     case ACE_FEATURE_STICK: s_eff.stick = 0; break;
+    case ACE_FEATURE_MIPS: s_eff.mips = 0; break;
     case ACE_FEATURE_SAS: s_eff.sas = 0; break;
     case ACE_FEATURE_TESS: s_eff.tess = 0; break;
     case ACE_FEATURE_LOAD: s_eff.load = 0; break;
@@ -636,7 +654,11 @@ void ace_set_ssaa_effective(int factor, const char *reason) {
 static size_t words_add(char *out, size_t cap, size_t used, const char *word) {
     int n = snprintf(out + used, used < cap ? cap - used : 0, "%s%s",
                      used ? " \xC2\xB7 " : "", word);
-    if (n < 0 || used + (size_t)n >= cap) return used;
+    if (n < 0 || used + (size_t)n >= cap) {
+        /* snprintf wrote the part that fit: end the text where it was, so a word drops whole. */
+        if (used < cap) out[used] = '\0';
+        return used;
+    }
     return used + (size_t)n;
 }
 
@@ -654,6 +676,7 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.wide) used = words_add(out, cap, used, "ultrawide");
     if (s_eff.stick) used = words_add(out, cap, used, "stick remap");
     if (s_eff.load) used = words_add(out, cap, used, "short loads");
+    if (s_eff.mips) used = words_add(out, cap, used, "smooth far textures");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
     if (s_eff.depth) used = words_add(out, cap, used, "32-bit depth");
     if (s_eff.ssaa) used = words_add(out, cap, used, s_eff.ssaa == 4 ? "4x supersampling" : "2x supersampling");
@@ -1287,6 +1310,7 @@ size_t ace_report_json(char *out, size_t cap) {
     if (s_req.ssaa) ACE_PUT("  \"ssaa\": %d,\n", s_eff.ssaa ? s_eff.ssaa : 1);
     if (s_ssaa_limited) ACE_PUT("  \"ssaa_requested\": %d,\n", s_req.ssaa);
     if (s_req.glyphs) ACE_PUT("  \"glyphs\": %s,\n", s_eff.glyphs ? "true" : "false");
+    if (s_req.mips) ACE_PUT("  \"mips\": %s,\n", s_eff.mips ? "true" : "false");
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
     if (s_req.peak) ACE_PUT("  \"peak\": {\"on\": %s, \"pushes_wide\": %llu, \"frames_wide\": %llu, "
@@ -1380,6 +1404,10 @@ size_t ace_report_json(char *out, size_t cap) {
     return used;
 }
 
+void ace_set_exit_report(AceFeature feature, void (*report)(void)) {
+    if ((int)feature >= 0 && feature < ACE_FEATURE_COUNT) s_exit_report[feature] = report;
+}
+
 static void (*s_finish_hook)(void);
 void ace_set_finish_hook(void (*hook)(void)) { s_finish_hook = hook; }
 
@@ -1387,14 +1415,17 @@ void ace_finish(void) {
     char json[ACE_REPORT_MAX];
     if (!g_ace_on) return;
     if (s_finish_hook) s_finish_hook();   /* before the never-ran settle below */
+    for (int f = 0; f < ACE_FEATURE_COUNT; f++)
+        if (s_exit_report[f]) s_exit_report[f]();
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
                                                 ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL,
-                                                ACE_HAS_DEPTH, 1, ACE_HAS_SSAA, ACE_HAS_PEAK, ACE_HAS_GLYPHS };
+                                                ACE_HAS_DEPTH, 1, ACE_HAS_SSAA, ACE_HAS_PEAK, ACE_HAS_GLYPHS,
+                                                ACE_HAS_MIPS };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
                                         s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
                                         s_eff.load, s_eff.cull, s_eff.depth, s_eff.twin, s_eff.ssaa,
-                                        s_eff.peak, s_eff.glyphs };
+                                        s_eff.peak, s_eff.glyphs, s_eff.mips };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
@@ -1424,7 +1455,12 @@ void ace_finish(void) {
                 (unsigned long long)a->boxes_full, (unsigned long long)a->frames_overflow,
                 (unsigned long long)(a->frames_depth_unwritten + a->frames_depth_none + a->depth_refused));
     }
-    if (!len || !s_report_path[0]) return;
+    if (!s_report_path[0]) return;
+    if (!len) {
+        fprintf(stderr, "ACE_MODE: report not written (longer than ACE_REPORT_MAX, %u bytes)\n",
+                (unsigned)ACE_REPORT_MAX);
+        return;
+    }
     char tmp[sizeof(s_report_path) + 8];
     snprintf(tmp, sizeof(tmp), "%s.tmp", s_report_path);
     FILE *f = fopen(tmp, "wb");
