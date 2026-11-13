@@ -1672,12 +1672,12 @@ static int xst_cell_dump_palette(int f) {
     xst_state(XST_BASE, XST_TEX, 5u, 1, 1);
     for (uint32_t j = 0; j < 256u; j++) {
         uint32_t entry = 0xFF000000u | (xst_hash(0xD00u + j * 7u) & 0xFFFFFFu);
-        memcpy(&s_ge->clutram[j * 4u], &entry, 4);
+        memcpy(&s_ge->clutram[(size_t)j * 4u], &entry, 4);
     }
     s_ge->clut_fmt = 3u | (0xFFu << 8);
     ge_clut_note_load(256u * 4u);
     ge_state_note_external_write();
-    for (int i = 0; i < XST_W * XST_H; i++) memcpy(&lut[i], &s_ge->clutram[idx[i] * 4u], 4);
+    for (int i = 0; i < XST_W * XST_H; i++) memcpy(&lut[i], &s_ge->clutram[(size_t)idx[i] * 4u], 4);
     uint32_t last = 0, max = 0;
     ge_clut_load_extent(&last, &max);
     const uint32_t loaded = last < max ? last : max;

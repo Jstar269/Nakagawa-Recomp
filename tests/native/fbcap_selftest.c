@@ -1088,17 +1088,17 @@ static void test_png_encode(void) {
     uint32_t seed = 12345u;
     for (int y = 0; y < FH; y++)
         for (int x = 0; x < FW; x++)
-            flat[y * FW + x] = (x / 8 + y / 8) % 2 ? 0xFF2040E0u : 0x80C0A060u;
+            flat[(size_t)y * FW + x] = (x / 8 + y / 8) % 2 ? 0xFF2040E0u : 0x80C0A060u;
     for (int i = 0; i < NW * NH; i++) noise[i] = enc_rand(&seed);
     /* Rows that repeat a 7-texel run (matches of 258 bytes and short distances), and a row that
      * repeats one 1200 bytes back (a distance past 258 with extra bits). */
     for (int y = 0; y < LH; y++)
         for (int x = 0; x < LW; x++)
-            longrow[y * LW + x] = y % 3 == 2 ? longrow[(y - 1) * LW + x] : 0xFF000000u | (uint32_t)(x % 7) * 0x111111u;
+            longrow[(size_t)y * LW + x] = y % 3 == 2 ? longrow[(size_t)(y - 1) * LW + x] : 0xFF000000u | (uint32_t)(x % 7) * 0x111111u;
     size_t n = 0;
     const uint32_t one = 0x7F102030u;
     CHECK(encode_round_trips(flat, FW, FH, &n), "png encode: a flat texture inflates to exactly its rows");
-    CHECK(n > 0 && n < (size_t)FH * (1u + 4u * FW) / 8u, "png encode: a flat texture is compressed to under an eighth");
+    CHECK(n > 0 && n < (size_t)FH * (1u + 4u * (size_t)FW) / 8u, "png encode: a flat texture is compressed to under an eighth");
     CHECK(encode_round_trips(noise, NW, NH, &n), "png encode: noise (no matches) inflates exactly");
     CHECK(encode_round_trips(longrow, LW, LH, &n), "png encode: long and distant matches inflate exactly");
     CHECK(encode_round_trips(&one, 1u, 1u, &n), "png encode: a 1x1 image inflates exactly");
@@ -1111,16 +1111,16 @@ static void test_png_encode(void) {
     enum { BW = 512, BH = 512, PW = 256, PH = 256, DW = 16384, HALF = DW / 2 };
     static uint32_t big[BW * BH], far_px[DW], runs[PW * PH];
     for (int i = 0; i < BW * BH; i++) big[i] = enc_rand(&seed);
-    CHECK(encode_round_trips(big, BW, BH, &n) && n > (size_t)BH * (1u + 4u * BW),
+    CHECK(encode_round_trips(big, BW, BH, &n) && n > (size_t)BH * (1u + 4u * (size_t)BW),
           "png encode: 512x512 noise (output growth, window reuse) inflates exactly");
     for (int x = 0; x < DW; x++) far_px[x] = x < HALF ? enc_rand(&seed) : far_px[x - HALF];
     CHECK(encode_round_trips(far_px, DW, 1u, &n), "png encode: a repeat exactly 32768 bytes back inflates exactly");
-    CHECK(n < (1u + 4u * DW) * 5u / 8u, "png encode: a repeat exactly 32768 bytes back is matched");
+    CHECK(n < (1u + 4u * (size_t)DW) * 5u / 8u, "png encode: a repeat exactly 32768 bytes back is matched");
     CHECK(encode_round_trips(far_px, HALF, 2u, &n), "png encode: a repeat 32769 bytes back inflates exactly");
-    CHECK(n > 2u * (1u + 4u * HALF), "png encode: a repeat 32769 bytes back, past the window, is not matched");
+    CHECK(n > 2u * (1u + 4u * (size_t)HALF), "png encode: a repeat 32769 bytes back, past the window, is not matched");
     for (int y = 0; y < PH; y++)
         for (int x = 0; x < PW; x++)
-            runs[y * PW + x] = x < 3 ? enc_rand(&seed) : (x < 200 ? 0xFF336699u : 0xFF996633u);
+            runs[(size_t)y * PW + x] = x < 3 ? enc_rand(&seed) : (x < 200 ? 0xFF336699u : 0xFF996633u);
     CHECK(encode_round_trips(runs, PW, PH, &n), "png encode: runs past 258 bytes after a change inflate exactly");
     /* Transparent texels (bytes equal to the one before: matches one byte back) between noise. */
     for (int i = 0; i < PW * PH; i++) runs[i] = (i / 37) % 2 ? 0u : enc_rand(&seed);
