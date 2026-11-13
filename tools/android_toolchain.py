@@ -11,13 +11,21 @@ checked against its pinned SHA-256, is built three times:
 3. runtimes: compiler-rt builtins, libunwind, libc++abi and libc++, static, by the host clang;
 4. device: clang and lld for Android, by the host clang, linked against those runtimes. The
    build refuses a binary that holds the NDK's libc++ (its inline namespace is `__ndk1`).
+5. make: GNU make 4.4.1 from its pinned release tarball, configured for the device and
+   compiled by the host clang with make's own build.sh;
+6. python: the official CPython 3.15.2 Android release, checked by SHA-256 and shipped
+   unchanged, and libnk_python.so (android/toolchain/nk_python_launcher.c) built against it.
 
-`stage` then writes what the APK carries: `jniLibs/arm64-v8a/libnk_clang.so`, `libnk_lld.so`
-and `libnk_ld.so` (android/toolchain/nk_ld_launcher.c; Android runs only lib*.so files from an
-app's native library folder), and `assets/toolchain/sysroot.tar` and `clang-resource.tar`,
-with `toolchain-manifest.json` listing every file's SHA-256 and, under
-`assets/toolchain/NOTICES/llvm/`, the LICENSE.TXT of each LLVM project the binaries hold and
-the notices of the third-party code inside them (LLVM_THIRD_PARTY_FILES and _EXCERPTS).
+`stage` then writes what the APK carries (Android runs only lib*.so files from an app's native
+library folder):
+
+- `jniLibs/arm64-v8a/`: `libnk_clang.so`, `libnk_lld.so`, `libnk_make.so`, `libnk_python.so`
+  with CPython's libraries, and `libnk_ld.so` (android/toolchain/nk_ld_launcher.c);
+- `assets/toolchain/`: `sysroot.tar`, `clang-resource.tar` and `python-stdlib.tar`, and under
+  `NOTICES/` the LICENSE.TXT of each LLVM project the binaries hold, the notices of the
+  third-party code inside them (LLVM_THIRD_PARTY_FILES and _EXCERPTS), make's COPYING and
+  Python's licences (PYTHON_NOTICES);
+- `toolchain-manifest.json`, listing every file's SHA-256.
 
 Each stage writes into its own folder under --work and runs only when that folder has no
 `.done` stamp, so an interrupted build resumes. `--jobs` caps the compile jobs; links run one
@@ -46,6 +54,40 @@ LLVM_TARBALL = f"llvm-project-{LLVM_VERSION}.src.tar.xz"
 LLVM_URL = f"https://github.com/llvm/llvm-project/releases/download/llvmorg-{LLVM_VERSION}/{LLVM_TARBALL}"
 LLVM_SHA256 = "4633a23617fa31a3ea51242586ea7fb1da7140e426bd62fc164261fe036aa142"
 CLANG_MAJOR = LLVM_VERSION.split(".")[0]
+
+MAKE_VERSION = "4.4.1"
+MAKE_TARBALL = f"make-{MAKE_VERSION}.tar.gz"
+MAKE_URL = f"https://ftp.gnu.org/gnu/make/{MAKE_TARBALL}"
+MAKE_SHA256 = "dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3"
+#: GNU make's own switches for a cross build with no optional parts. Bionic has no confstr(),
+#: which make's posix_spawn path calls to find the default PATH, so make uses fork and exec.
+MAKE_CONFIGURE = (
+    "--host=aarch64-linux-android", "--disable-nls", "--without-guile", "--disable-load",
+    "--disable-dependency-tracking", "--disable-posix-spawn",
+)
+
+PYTHON_VERSION = "3.15.2"
+PYTHON_MINOR = ".".join(PYTHON_VERSION.split(".")[:2])
+PYTHON_TARBALL = f"python-{PYTHON_VERSION}-aarch64-linux-android.tar.gz"
+PYTHON_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/{PYTHON_TARBALL}"
+PYTHON_SHA256 = "cfd4f0fdaff465ba62ebf3c3df2c8c410d0802fef3f98897082460df704cfef6"
+#: The licences of the libraries the CPython release bundles, which its LICENSE.txt does not
+#: hold: (file under --extra, SHA-256, upstream URL at the pinned tag). Doc/license.rst lists
+#: the software incorporated into CPython itself (expat, libffi, libmpdec, mimalloc, zlib and
+#: the rest); SQLite 3.53.4 is in the public domain.
+PYTHON_NOTICES = (
+    ("pylic/cpython-license.rst", "0d4c04850f7320219853c3c9d20cf9d2c6916524030e147f220f2b96b5ae8aeb",
+     "https://raw.githubusercontent.com/python/cpython/v3.15.2/Doc/license.rst"),
+    ("pylic/openssl-LICENSE.txt", "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a",
+     "https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.9/LICENSE.txt"),
+    ("pylic/bzip2-LICENSE", "c6dbbf828498be844a89eaa3b84adbab3199e342eb5cb2ed2f0d4ba7ec0f38a3",
+     "https://sourceware.org/git/?p=bzip2.git;a=blob_plain;f=LICENSE;hb=bzip2-1.0.8"),
+    ("pylic/xz-COPYING", "29a1e305b2e34eefe5d4602d00cde1d528b71c5d9f2eec5106972cf6ddb6f73f",
+     "https://raw.githubusercontent.com/tukaani-project/xz/v5.4.6/COPYING"),
+    ("pylic/zstd-LICENSE", "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8",
+     "https://raw.githubusercontent.com/facebook/zstd/v1.5.7/LICENSE"),
+)
+PYTHON_LAUNCHER = Path(__file__).resolve().parent.parent / "android" / "toolchain" / "nk_python_launcher.c"
 
 API = 29
 TRIPLE = f"aarch64-unknown-linux-android{API}"
@@ -137,10 +179,17 @@ class Config:
     jobs: int
     host_cc: str
     host_cxx: str
+    make_tarball: Path
+    sh: str
+    python_tarball: Path
 
     @property
     def src(self) -> Path:
         return self.work / "src" / f"llvm-project-{LLVM_VERSION}.src"
+
+    @property
+    def make_src(self) -> Path:
+        return self.work / "src" / f"make-{MAKE_VERSION}"
 
     @property
     def build(self) -> Path:
@@ -162,9 +211,13 @@ class Config:
     def tool(self, name: str) -> str:
         return str(self.host_bin / f"{name}{EXE}")
 
-    def prefix_maps(self) -> str:
+    def prefix_map_args(self) -> list[str]:
         """Build paths out of the binaries: the source and work folders get fixed names."""
-        return f"-ffile-prefix-map={self.src}=/llvm-src -ffile-prefix-map={self.build}=/llvm-build"
+        return [f"-ffile-prefix-map={self.src}=/llvm-src", f"-ffile-prefix-map={self.build}=/llvm-build"]
+
+    def prefix_maps(self) -> str:
+        """prefix_map_args() as one string, for a CMake flags variable (not for an argv list)."""
+        return " ".join(self.prefix_map_args())
 
 
 def sha256_file(path: Path) -> str:
@@ -175,9 +228,9 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_tarball(path: Path, expected: str = LLVM_SHA256) -> None:
+def verify_tarball(path: Path, expected: str = LLVM_SHA256, url: str = LLVM_URL) -> None:
     if not path.is_file():
-        raise ToolchainError(f"{path}: missing; fetch {LLVM_URL}")
+        raise ToolchainError(f"{path}: missing; fetch {url}")
     actual = sha256_file(path)
     if actual != expected:
         raise ToolchainError(f"{path}: sha256 {actual}, pinned {expected}")
@@ -191,10 +244,12 @@ def _mark(folder: Path) -> None:
     (folder / ".done").write_text("done\n", encoding="utf-8")
 
 
-def _run(command: list[str], log: Path, what: str) -> None:
+def _run(command: list[str], log: Path, what: str, cwd: Path | None = None,
+         env: dict[str, str] | None = None) -> None:
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("wb") as handle:
-        result = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT, check=False)
+        result = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT, check=False,
+                                cwd=cwd, env=None if env is None else {**os.environ, **env})
     if result.returncode != 0:
         tail = log.read_bytes()[-3000:].decode(errors="replace")
         raise ToolchainError(f"{what} failed ({result.returncode}); see {log}:\n{tail}")
@@ -356,6 +411,198 @@ def stage_device(cfg: Config) -> None:
     _mark(folder)
 
 
+def make_configure(cfg: Config) -> tuple[list[str], dict[str, str]]:
+    """GNU make's configure, run in build/make, compiling with the host clang for the device."""
+    folder = cfg.build / "make"
+    source = Path(os.path.relpath(cfg.make_src, folder)).as_posix()
+    cc = (f"{Path(cfg.tool('clang')).as_posix()} --target={TRIPLE} --sysroot={cfg.sysroot.as_posix()} "
+          f"-resource-dir={cfg.resource.as_posix()}")
+    command = [cfg.sh, f"{source}/configure", *MAKE_CONFIGURE, f"CC={cc}",
+               # configure is run by a relative path, so the compiler sees relative sources.
+               f"CFLAGS=-O2 -ffile-prefix-map={source}=/make-src",
+               "LDFLAGS=-fuse-ld=lld -pie -Wl,--build-id=sha1 -Wl,--strip-all"]
+    # MSYS2's sh would turn the POSIX paths configure writes for the device, such as
+    # /usr/local/include, into Windows paths; elsewhere the variable means nothing.
+    env = {"MSYS2_ARG_CONV_EXCL": "*"}
+    shell = Path(cfg.sh)
+    if shell.parent != Path("."):
+        # configure's expr, sed and the rest must be the ones beside that shell: another
+        # POSIX layer's tools on PATH (Git for Windows', say) misparse its options.
+        env["PATH"] = f"{shell.parent}{os.pathsep}{os.environ.get('PATH', '')}"
+    return command, env
+
+
+def check_device_executable(data: bytes, binary: str, work: Path) -> None:
+    """A position-independent AArch64 ELF that names no build-machine path."""
+    if data[:5] != b"\x7fELF\x02" or int.from_bytes(data[16:18], "little") != 3 \
+            or int.from_bytes(data[18:20], "little") != 183:
+        raise ToolchainError(f"{binary}: not a position-independent AArch64 ELF")
+    for path in {work.as_posix(), str(work)}:
+        if path.encode() in data:
+            raise ToolchainError(f"{binary}: holds the build path {path}")
+
+
+def stage_make(cfg: Config) -> None:
+    """GNU make for the device: configure, then make's own build.sh, which needs no make."""
+    folder = cfg.build / "make"
+    if _done(folder):
+        return
+    if not _done(cfg.make_src):
+        verify_tarball(cfg.make_tarball, MAKE_SHA256, MAKE_URL)
+        cfg.make_src.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(cfg.make_tarball) as tar:
+            tar.extractall(cfg.make_src.parent, filter="data")
+        if not (cfg.make_src / "configure").is_file():
+            raise ToolchainError(f"{cfg.make_tarball}: no configure under {cfg.make_src.name}")
+        _mark(cfg.make_src)
+    folder.mkdir(parents=True, exist_ok=True)
+    command, env = make_configure(cfg)
+    _run(command, cfg.work / "logs" / "make-configure.log", "make configure", folder, env)
+    _run([cfg.sh, "./build.sh"], cfg.work / "logs" / "make-build.log", "make build", folder, env)
+    check_device_executable((folder / "make").read_bytes(), str(folder / "make"), cfg.work)
+    _mark(folder)
+
+
+def make_source_notice(reference: dict[str, object]) -> str:
+    """NOTICES/make/SOURCE.txt: where make's complete corresponding source is (GPL-3.0 section 6).
+
+    *reference* is package_notices.source_reference(): the repository and commit that hold the
+    scripts controlling make's build, as the desktop packages' SOURCE.txt names them.
+    """
+    commit = reference.get("commit") or "unknown (built without git metadata)"
+    lines = [
+        "GNU MAKE: COMPLETE CORRESPONDING SOURCE",
+        "",
+        f"libnk_make.so in this app is GNU make {MAKE_VERSION}, licensed under the GNU General",
+        "Public License version 3 or later (COPYING, beside this file). It is built, unmodified,",
+        "from this release tarball:",
+        "",
+        f"  File:    {MAKE_TARBALL}",
+        f"  From:    {MAKE_URL}",
+        f"  SHA-256: {MAKE_SHA256}",
+        "",
+        "It is configured with make's own configure and these options:",
+        "",
+        *(f"  {option}" for option in MAKE_CONFIGURE),
+        "",
+        "and compiled with make's own build.sh. The scripts that control the build are part of",
+        "Nakagawa Recomp: tools/android_toolchain.py (the configure options, the compiler and its",
+        "CC, CFLAGS and LDFLAGS) and tools/android_sysroot.py (the sysroot make is compiled and",
+        "linked against), at:",
+        "",
+        f"  Repository: {reference.get('repository')}",
+        f"  Commit:     {commit}",
+    ]
+    if reference.get("local_changes"):
+        lines.extend([
+            "",
+            "This build was made from a working tree with local changes to tracked files; its",
+            "scripts are the commit above plus those changes.",
+        ])
+    return "\n".join(lines) + "\n"
+
+
+def stage_make_notices(make_src: Path, notices: Path, reference: dict[str, object]) -> None:
+    """make's licence and source statement under *notices*/make/."""
+    folder = notices / "make"
+    folder.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(make_src / "COPYING", folder / "COPYING")
+    (folder / "SOURCE.txt").write_text(make_source_notice(reference), encoding="utf-8", newline="\n")
+
+
+@dataclass(frozen=True)
+class PythonPackage:
+    """What the APK takes from the CPython release, by path."""
+    libraries: dict[str, bytes]  # for the native library folder: libpython and the *_python libraries
+    headers: dict[str, bytes]  # include/python3.15/..., to compile the launcher
+    stdlib: dict[str, android_sysroot.Entry]  # lib/python3.15/..., without __pycache__
+    license: bytes
+
+
+def read_python_package(tarball: Path, expected: str = PYTHON_SHA256) -> PythonPackage:
+    """The CPython release's parts, read from the checked tarball without extracting it."""
+    verify_tarball(tarball, expected, PYTHON_URL)
+    libraries: dict[str, bytes] = {}
+    headers: dict[str, bytes] = {}
+    stdlib: dict[str, android_sysroot.Entry] = {}
+    stdlib_root = f"lib/python{PYTHON_MINOR}/"
+    with tarfile.open(tarball) as tar:
+        for member in tar.getmembers():
+            name = member.name.removeprefix("./")
+            if not name.startswith("prefix/") or member.isdir():
+                continue
+            path = name.removeprefix("prefix/")
+            folder, _, base = path.rpartition("/")
+            is_library = folder == "lib" and (base == f"libpython{PYTHON_MINOR}.so"
+                                              or (base.startswith("lib") and base.endswith("_python.so")))
+            is_header = path.startswith(f"include/python{PYTHON_MINOR}/")
+            is_stdlib = path.startswith(stdlib_root) and "__pycache__" not in path.split("/")
+            if not (is_library or is_header or is_stdlib):
+                continue
+            if not member.isfile():
+                raise ToolchainError(f"{tarball}: {name} is not a regular file")
+            handle = tar.extractfile(member)
+            if handle is None:
+                raise ToolchainError(f"{tarball}: cannot read {name}")
+            data = handle.read()
+            if is_library:
+                libraries[base] = data
+            elif is_header:
+                headers[path] = data
+            else:
+                stdlib[path] = android_sysroot.Entry(data, executable=path.endswith(".so"))
+    license_path = f"{stdlib_root}LICENSE.txt"
+    if f"libpython{PYTHON_MINOR}.so" not in libraries or license_path not in stdlib \
+            or f"include/python{PYTHON_MINOR}/Python.h" not in headers:
+        raise ToolchainError(f"{tarball}: not the CPython {PYTHON_VERSION} Android release layout")
+    return PythonPackage(libraries, headers, stdlib, stdlib[license_path].data)
+
+
+def read_pinned(path: Path, expected: str, url: str) -> bytes:
+    if not path.is_file():
+        raise ToolchainError(f"{path}: missing; fetch {url}")
+    data = path.read_bytes()
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != expected:
+        raise ToolchainError(f"{path}: sha256 {actual}, pinned {expected}")
+    return data
+
+
+def python_launcher_command(cfg: Config, libraries: list[str]) -> list[str]:
+    """The link of libnk_python.so against the release's libpython and the libraries it bundles.
+
+    A program the app starts is linked by the system's default search path, not the app's
+    native library folder, so the launcher looks beside itself ($ORIGIN). It also needs every
+    lib*_python.so: the extension modules in lib-dynload name them but have no search path of
+    their own, and the linker finds a library that is already loaded by its name.
+    """
+    folder = cfg.build / "python"
+    return [cfg.tool("clang"), f"--target={TRIPLE}", f"--sysroot={cfg.sysroot}",
+            f"-resource-dir={cfg.resource}", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+            f"-I{folder / 'include' / f'python{PYTHON_MINOR}'}", "-fPIE", "-pie", "-fuse-ld=lld",
+            "-Wl,--build-id=sha1", "-s", "-Wl,-rpath,$ORIGIN", *cfg.prefix_map_args(),
+            "-o", str(folder / "libnk_python.so"), str(PYTHON_LAUNCHER), f"-L{folder / 'lib'}",
+            "-Wl,--no-as-needed", *(f"-l:{name}" for name in libraries), "-Wl,--as-needed"]
+
+
+def stage_python(cfg: Config) -> None:
+    """The CPython release's libraries and standard library, and the launcher built against them."""
+    folder = cfg.build / "python"
+    if _done(folder):
+        return
+    package = read_python_package(cfg.python_tarball)
+    files = [*((f"lib/{name}", data) for name, data in package.libraries.items()),
+             *package.headers.items(), ("LICENSE.txt", package.license)]
+    for relative, data in files:
+        (folder / relative).parent.mkdir(parents=True, exist_ok=True)
+        (folder / relative).write_bytes(data)
+    android_sysroot.write_archive(package.stdlib, folder / "python-stdlib.tar")
+    _run(python_launcher_command(cfg, sorted(package.libraries)),
+         cfg.work / "logs" / "python-launcher.log", "building the python launcher")
+    check_device_executable((folder / "libnk_python.so").read_bytes(), "libnk_python.so", cfg.work)
+    _mark(folder)
+
+
 def _tree_entries(root: Path, prefix: str) -> dict[str, android_sysroot.Entry]:
     return {f"{prefix}/{path.relative_to(root).as_posix()}": android_sysroot.Entry(path.read_bytes())
             for path in sorted(root.rglob("*")) if path.is_file()}
@@ -383,12 +630,25 @@ def stage_output(cfg: Config, out: Path) -> dict[str, str]:
     device = cfg.build / "android"
     for name, target in (("clang", "libnk_clang.so"), ("lld", "libnk_lld.so")):
         shutil.copyfile((device / "bin" / name).resolve(), libs / target)  # linked stripped
+    shutil.copyfile(cfg.build / "make" / "make", libs / "libnk_make.so")
+    python = cfg.build / "python"
+    for library in sorted((python / "lib").glob("*.so")):
+        shutil.copyfile(library, libs / library.name)  # the CPython release's own binaries
+    shutil.copyfile(python / "libnk_python.so", libs / "libnk_python.so")
+    shutil.copyfile(python / "python-stdlib.tar", assets / "python-stdlib.tar")
+    (assets / "NOTICES" / "python").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(python / "LICENSE.txt", assets / "NOTICES" / "python" / "LICENSE.txt")
+    for relative, digest, url in PYTHON_NOTICES:
+        name = relative.removeprefix("pylic/")
+        (assets / "NOTICES" / "python" / name).write_bytes(read_pinned(cfg.extra / relative, digest, url))
     _run([cfg.tool("clang"), f"--target={TRIPLE}", f"--sysroot={cfg.sysroot}",
           f"-resource-dir={cfg.resource}", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
-          "-fPIE", "-pie", "-fuse-ld=lld", "-Wl,--build-id=sha1", "-s", cfg.prefix_maps(),
+          "-fPIE", "-pie", "-fuse-ld=lld", "-Wl,--build-id=sha1", "-s", *cfg.prefix_map_args(),
           "-o", str(libs / "libnk_ld.so"), str(LAUNCHER)],
          cfg.work / "logs" / "launcher.log", "building the ld launcher")
     shutil.copyfile(cfg.build / "sysroot.tar", assets / "sysroot.tar")
+    import package_notices  # the desktop packages' source reference; imported only to stage
+    stage_make_notices(cfg.make_src, assets / "NOTICES", package_notices.source_reference())
     notices = assets / "NOTICES" / "llvm"
     for project in LLVM_LICENSED:
         (notices / project).mkdir(parents=True, exist_ok=True)
@@ -405,6 +665,8 @@ def stage_output(cfg: Config, out: Path) -> dict[str, str]:
                 for path in sorted(out.rglob("*")) if path.is_file()
                 and path.name != "toolchain-manifest.json"}
     document = {"llvm": LLVM_VERSION, "llvm_sha256": LLVM_SHA256,
+                "make": MAKE_VERSION, "make_sha256": MAKE_SHA256,
+                "python": PYTHON_VERSION, "python_sha256": PYTHON_SHA256,
                 "bionic": android_sysroot.BIONIC_COMMIT, "api": API, "files": manifest}
     (out / "toolchain-manifest.json").write_text(json.dumps(document, indent=2) + "\n",
                                                  encoding="utf-8", newline="\n")
@@ -425,18 +687,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ninja", default="ninja")
     parser.add_argument("--host-cc", default="gcc")
     parser.add_argument("--host-cxx", default="g++")
+    parser.add_argument("--make-tarball", required=True, type=Path,
+                        help=f"{MAKE_TARBALL} from {MAKE_URL}")
+    parser.add_argument("--python-tarball", required=True, type=Path,
+                        help=f"{PYTHON_TARBALL} from {PYTHON_URL}")
+    parser.add_argument("--sh", default="sh", help="the POSIX shell that runs make's configure")
     parser.add_argument("--jobs", type=int, default=4, help="compile jobs (each can take 1 GB)")
     args = parser.parse_args(argv)
     if args.jobs < 1:
         parser.error("--jobs must be at least 1")
     cfg = Config(args.llvm_tarball.resolve(), args.bionic.resolve(), args.extra.resolve(),
-                 args.work.resolve(), args.cmake, args.ninja, args.jobs, args.host_cc, args.host_cxx)
+                 args.work.resolve(), args.cmake, args.ninja, args.jobs, args.host_cc, args.host_cxx,
+                 args.make_tarball.resolve(), args.sh, args.python_tarball.resolve())
     try:
         extract_source(cfg)
         stage_host(cfg)
         stage_sysroot(cfg)
         stage_runtimes(cfg)
         stage_device(cfg)
+        stage_make(cfg)
+        stage_python(cfg)
         manifest = stage_output(cfg, args.out.resolve())
     except (OSError, subprocess.CalledProcessError, ToolchainError, android_sysroot.SysrootError,
             android_sysroot.android_stubgen.SymbolFileError) as error:

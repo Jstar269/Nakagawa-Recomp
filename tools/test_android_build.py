@@ -153,6 +153,24 @@ class AndroidAppContractTests(unittest.TestCase):
                       '        "Ljava/lang/String;)Z"', posix)
         self.assertIn('return "nk_android_title_main";', title)
         self.assertIn("int nk_android_title_main(int argc, char **argv)", shim)
+        self.assertIn("private static native void nativeImportEnvironment();", launcher)
+        self.assertIn("JNICALL Java_io_github_jstar269_nakagawa_LauncherActivity_nativeImportEnvironment(\n"
+                      "    JNIEnv *env, jclass cls) {\n    (void)cls;\n    android_import_environment(env);", posix)
+
+    def test_the_player_starts_after_the_toolchain_variables_reach_native_code(self) -> None:
+        """Under an ARM translation layer the player library has its own libc, which took the
+        environment when it loaded; variables a toolchain unpack sets later reach it only through
+        nativeImportEnvironment, which must run after they are set and before the player's main()."""
+        java = ANDROID / "app" / "src" / "main" / "java" / "io" / "github" / "jstar269" / "nakagawa"
+        launcher = (java / "LauncherActivity.java").read_text(encoding="utf-8")
+        main = launcher[launcher.index("    protected void main() {"):]
+        main = main[:main.index("\n    }\n") + 6]
+        ready = re.search(r"install\.awaitReady\(\(\) -> NakagawaHost\.setToolchainEnvironment\(this\),\s+"
+                          r"LauncherActivity::nativeImportEnvironment\)", main)
+        self.assertIsNotNone(ready, main)
+        assert ready is not None
+        self.assertLess(ready.end(), main.index("super.main();"))
+        self.assertEqual(main.count("super.main();"), 1)
 
     def test_title_process_ends_without_the_framework_handlers(self) -> None:
         """exit() in the app process would run the framework's static destructors while its render

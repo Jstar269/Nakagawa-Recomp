@@ -33,6 +33,7 @@
  */
 
 #include "hle_internal.h"
+#include "ge_scene.h"
 #include "nid_names.h"   /* sr_nid_name(): names unknown NIDs in the trap below */
 #include "nk_nickname.h" /* the owner_name default: SR_NICKNAME or the neutral one */
 #define SR_EVIDENCE_NO_VFPU /* this file reads the NID table only */
@@ -2106,6 +2107,7 @@ uint32_t hle_unmodelled_stop(const char *import_name, const char *fmt, ...) {
     sr_hit_hle = 1;
     if (sr_sched_on) {
         sr_trace_close();
+        ge_scene_dump_finish();
         sr_compat_report();
         (void)sr_videorec_finish_status("an unsupported import stopped the run", 7);
         sr_perf_shutdown();
@@ -3575,7 +3577,9 @@ uint32_t ge_call_guest_gp_rv(CpuState *s, uint32_t fn, uint32_t gp,
  *
  * By default the runtime executes a display list synchronously inside the call that hands it
  * to the GE (sceGeListEnQueue, sceGeListUpdateStallAddr, sceGeContinue) and completes it
- * there: the finish callback runs and every later sync reads "done" with no guest time spent.
+ * there: the finish callback runs (or, while the CPU's interrupts are suspended or a handler
+ * runs, waits for them: hle_route.c ge_finish_callback) and every later sync reads "done"
+ * with no guest time spent.
  * On a PSP the GE draws while the CPU runs on, and sceGeDrawSync / sceGeListSync wait for it.
  *
  * With SR_GE_TIMING=1 a list that reached its END is GE_LIST_DRAWING until its completion
@@ -3617,9 +3621,12 @@ int ge_timing_on(void) {
     return s_ge_timing;
 }
 
-/* Scheduler hook: the earliest completion time of a drawing list, else UINT64_MAX. */
+/* Scheduler hook: 0 while a finish callback waits for the CPU's interrupts to be resumed (it is
+ * owed now; see ge_finish_callback), else the earliest completion time of a drawing list, else
+ * UINT64_MAX. */
 static uint64_t ge_timing_next_deadline_us(void) {
     uint64_t next = UINT64_MAX;
+    if (ge_finish_masked_pending()) return 0u;
     if (!s_ge_timing_drawing) return next;
     for (int i = 0; i < GE_LIST_MAX; i++)
         if (s_ge_lists[i].status == GE_LIST_DRAWING && s_ge_lists[i].done_us < next)
@@ -3627,9 +3634,17 @@ static uint64_t ge_timing_next_deadline_us(void) {
     return next;
 }
 
-/* Scheduler hook, run as an interrupt episode: complete every list whose time has passed,
- * in completion order, and run its finish callback. */
+/* Scheduler hook, after each owed VBLANK episode: every waiting finish callback (the ones that
+ * episode's handlers raised, and any a thread raised under the mask before the batch). */
+static void ge_finish_deliver_waiting(void) {
+    ge_finish_deliver_masked(s_cpu);
+}
+
+/* Scheduler hook, run as an interrupt episode: first the finish callbacks that waited for the
+ * CPU's interrupts (those lists completed earlier), then complete every list whose time has
+ * passed, in completion order, and run its finish callback. */
 static void ge_timing_service_due(void) {
+    ge_finish_deliver_masked(s_cpu);
     while (s_ge_timing_drawing) {
         uint64_t now = sched_vtime_us();
         int best = -1;
@@ -3647,6 +3662,7 @@ static void ge_timing_service_due(void) {
         if (ge_log_on())
             fprintf(stderr, "GE_TIMING: list_id=0x%08x completed at %llu us (modelled %llu us)\n",
                     l->uid, (unsigned long long)now, (unsigned long long)l->done_us);
+        ge_finish_from_ge_interrupt();   /* this is the GE finish interrupt: its callback runs now */
         ge_finish_callback(s_cpu, l->cbid, l->finish_id, l->cbarg);
     }
 }
@@ -4219,8 +4235,10 @@ void sr_hle_init(void) {
     hle_register_videocodec_handlers();
 #endif
 #ifndef SR_MPEG_MEDIA_SELFTEST
-    /* Opt-in GE completion timing: the hooks report nothing unless SR_GE_TIMING=1. */
+    /* GE completion interrupts: finish callbacks that waited for the CPU's interrupts to be
+     * resumed, and the opt-in timing model's drawing lists (nothing unless SR_GE_TIMING=1). */
     sched_set_ge_timing_hooks(ge_timing_next_deadline_us, ge_timing_service_due);
+    sched_set_ge_waiting_hook(ge_finish_deliver_waiting);
     (void)ge_timing_on();
     sched_set_vtimer_hooks(vtimer_next_deadline_us, vtimer_service_one);
 #endif
@@ -4365,7 +4383,7 @@ uint32_t sr_syscall(CpuState *s, uint32_t nid) {
         sr_hit_hle = 1;
         /* Under the fiber scheduler, longjmp across fibers is invalid; stop the process cleanly
          * after flushing the trace. The plain driver (no scheduler) keeps the longjmp boundary. */
-        if (sr_sched_on) { sr_trace_close(); sr_compat_report(); (void)sr_videorec_finish_status("an unregistered NID stopped the run", 7); sr_perf_shutdown(); sr_profile_dump_final(); SR_VERIFY_REPORT_NOW(); fflush(stderr); _Exit(7); }
+        if (sr_sched_on) { sr_trace_close(); ge_scene_dump_finish(); sr_compat_report(); (void)sr_videorec_finish_status("an unregistered NID stopped the run", 7); sr_perf_shutdown(); sr_profile_dump_final(); SR_VERIFY_REPORT_NOW(); fflush(stderr); _Exit(7); }
         longjmp(g_hle_jmp, 1);
     }
     if (hle_syslog_on()) {

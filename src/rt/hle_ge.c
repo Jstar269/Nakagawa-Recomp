@@ -229,8 +229,9 @@ static void ge_timing_charge_run(void) {
 }
 
 /* The GE ran the list in `slot` to its END.  By default it completes now and its finish
- * callback runs in this call, as it always has; with the model on it draws until the GE
- * timeline reaches the end of its work. */
+ * callback runs in this call, unless the CPU's interrupts are suspended or a handler runs,
+ * when it waits until one can be taken (hle_route.c ge_finish_callback); with the model on it
+ * draws until the GE timeline reaches the end of its work. */
 static void ge_list_reached_end(CpuState *s, int slot) {
     GeListInfo *l = &s_ge_lists[slot];
     l->executed = 1;

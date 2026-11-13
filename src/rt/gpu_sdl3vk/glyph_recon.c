@@ -40,22 +40,7 @@
 /* ---- the setting ---------------------------------------------------------------------------- */
 
 static NkGlyphConfig s_cfg;
-static char s_start_line[384];   /* what the last nk_glyph_init_from_env printed */
-
-static void set_why(char *why, size_t cap, const char *text) {
-    if (why && cap) snprintf(why, cap, "%s", text);
-}
-
-int nk_glyph_parse(const char *glyphs, NkGlyphConfig *out, char *why, size_t why_cap) {
-    memset(out, 0, sizeof(*out));
-    if (!glyphs || !glyphs[0] || strcmp(glyphs, "off") == 0) return 1;
-    if (strcmp(glyphs, "on") != 0) {
-        set_why(why, why_cap, "SR_GLYPHS takes off or on");
-        return 0;
-    }
-    out->on = 1;
-    return 1;
-}
+static char s_start_line[384];   /* what the last nk_glyph_init printed */
 
 void nk_glyph_configure(const NkGlyphConfig *cfg) {
     s_cfg = cfg ? *cfg : (NkGlyphConfig){ 0 };
@@ -68,8 +53,8 @@ size_t nk_glyph_admission_line(const NkGlyphConfig *cfg, char *out, size_t cap) 
     out[0] = '\0';
     if (!cfg || !cfg->on) return 0;
     const int n = snprintf(out, cap,
-                           "GLYPHS: guest-visible, on through SR_GLYPHS and not admitted under contract section "
-                           "11.2 (each present commits the frame to guest VRAM; see the contract's \"Sharp Game "
+                           "GLYPHS: guest-visible, on through the launch line's glyphs key and not admitted under "
+                           "contract section 11.2 (each present commits the frame to guest VRAM; see the contract's \"Sharp Game "
                            "Text\" entry)");
     return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1);
 }
@@ -82,11 +67,10 @@ static void start_line(const char *text) {
 
 const char *nk_glyph_start_lines(void) { return s_start_line; }
 
-const NkGlyphConfig *nk_glyph_init_from_env(int enhanced) {
-    const char *glyphs = getenv("SR_GLYPHS");
+const NkGlyphConfig *nk_glyph_init(int enhanced, int requested) {
     memset(&s_cfg, 0, sizeof(s_cfg));
     s_start_line[0] = '\0';
-    const int asked = glyphs && glyphs[0] && strcmp(glyphs, "off") != 0;
+    const int asked = requested != 0;
 #ifdef NK_GLYPH_MUTANT_NO_ACE_GATE
     enhanced = 1;   /* glyph-recon-mutant: the Ace gate removed; the settings cell must fail */
 #endif
@@ -95,13 +79,9 @@ const NkGlyphConfig *nk_glyph_init_from_env(int enhanced) {
         if (asked) start_line("GLYPHS: off (sharp game text needs Ace Mode)");
         return &s_cfg;
     }
-    char why[96], line[320];
-    NkGlyphConfig c;
-    if (!nk_glyph_parse(glyphs, &c, why, sizeof(why))) {
-        snprintf(line, sizeof(line), "GLYPHS: refused (%s)", why);
-        start_line(line);
-        return &s_cfg;
-    }
+    char line[320];
+    NkGlyphConfig c = { 0 };
+    c.on = asked;
     s_cfg = c;
     if (c.on) {
         snprintf(line, sizeof(line), "GLYPHS: on (per_present=%d, tolerance=%d)", NK_GLYPH_PER_PRESENT,

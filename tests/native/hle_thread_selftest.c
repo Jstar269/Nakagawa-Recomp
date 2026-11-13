@@ -578,6 +578,18 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     }
 }
 
+/* Ace Mode's peak=limit (#2137): a push that carries the SAS grain's unsaturated sum. It is a push
+ * like any other for the counters above; the sum is kept for the provenance cells. */
+static unsigned long s_audio_push_wide_calls;
+static int32_t s_audio_push_wide_capture[8192u * 2u];
+void sr_audio_push_wide(int ch, const int16_t *lr, const int32_t *wide, int nframes, int volL, int volR) {
+    s_audio_push_wide_calls++;
+    if (wide && nframes > 0)
+        memcpy(s_audio_push_wide_capture, wide,
+               ((size_t)nframes < 8192u ? (size_t)nframes : 8192u) * 2u * sizeof(*wide));
+    sr_audio_push(ch, lr, nframes, volL, volR);
+}
+
 void sr_audio_push_silence(int ch, int nframes) {
     s_audio_silence_calls++;
     if (nframes <= 0 || ch < 0 || ch >= 9) return;
@@ -633,6 +645,7 @@ int sr_audio_queued(int ch) {
 static void audio_fixture_reset(void) {
     s_oor_calls = 0;
     s_audio_push_calls = 0;
+    s_audio_push_wide_calls = 0;
     s_audio_queue_calls = 0;
     s_audio_push_frames = 0;
     s_audio_push_first_l = 0;
@@ -14292,6 +14305,7 @@ static void test_rtc_time_t_add_years_resolution_autotest(void) {
 enum {
     RTCA_NID_ADD_MICROS = 0x26d25a5du, RTCA_NID_ADD_SECONDS = 0xf2a4afe5u, RTCA_NID_ADD_DAYS = 0xe51b4b7au,
     RTCA_NID_DAY_OF_WEEK = 0x57726bc1u, RTCA_NID_CHECK_VALID = 0x4b1b5e82u,
+    RTCA_NID_ADD_MINUTES = 0xe6605bcau, RTCA_NID_ADD_HOURS = 0x26d7a24au, RTCA_NID_ADD_WEEKS = 0xcf3a2ca8u,
 };
 
 static int rtca_dst_is(uint16_t y, uint16_t mo, uint16_t d, uint16_t h, uint16_t mi, uint16_t sec, uint32_t us) {
@@ -14309,7 +14323,8 @@ static uint32_t rtca_add(uint32_t nid, uint16_t y, uint16_t mo, uint16_t d, uint
     expect(td24b_dispatch4(RTCT_NID_GET_TICK, RTCT_DATE, RTCT_SRC, 0u, 0u) == 0u, "the source date converts");
     MEM_W32(RTCT_DST, 0x1337u); MEM_W32(RTCT_DST + 4u, 0u);
     uint32_t lo = (uint32_t)(uint64_t)count, hi = (uint32_t)((uint64_t)count >> 32);
-    if (nid == RTCA_NID_ADD_DAYS) hi = 0u;   /* a 32-bit int argument: the 64-bit row is truncated */
+    if (nid == RTCA_NID_ADD_DAYS || nid == RTCA_NID_ADD_HOURS || nid == RTCA_NID_ADD_WEEKS)
+        hi = 0u;   /* a 32-bit int argument: the 64-bit row is truncated */
     return td24b_dispatch4(nid, RTCT_DST, RTCT_SRC, lo, hi);
 }
 
@@ -14317,6 +14332,72 @@ static uint32_t rtca_check_valid(uint16_t y, uint16_t mo, uint16_t d, uint16_t h
                                  uint32_t us) {
     rtct_date(y, mo, d, h, mi, sec, us);
     return td24b_dispatch4(RTCA_NID_CHECK_VALID, RTCT_DATE, 0u, 0u, 0u);
+}
+
+/* sceRtcTickAddMinutes, sceRtcTickAddHours and sceRtcTickAddWeeks against PSPAutotests
+ * tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): the 8 fixed rows of each function,
+ * each the autotest's own (its loop rows are not checked here). Minutes
+ * take a 64-bit count; hours and weeks a 32-bit int, so the autotest's 64-bit constants are
+ * truncated (+ 62135596800000445 hours lands in year 383). Before these handlers the three NIDs
+ * were unregistered imports. */
+static void test_rtc_tick_add_minutes_hours_weeks_autotest(void) {
+    reset_fixture();
+    sr_hle_init();
+    expect(sr_hle_test_is_registered(RTCA_NID_ADD_MINUTES) && sr_hle_test_is_registered(RTCA_NID_ADD_HOURS) &&
+               sr_hle_test_is_registered(RTCA_NID_ADD_WEEKS),
+           "sceRtcTickAddMinutes, -Hours and -Weeks are registered");
+    static const struct {
+        uint32_t nid;
+        uint16_t y, mo, d, h, mi;
+        long long count;
+        uint16_t ry, rmo, rd, rh, rmi, rsec;
+        uint32_t rus;
+    } rows[] = {
+        /* checkRtcTickAddMinutes */
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, -2000, 1969, 12, 30, 14, 40, 0, 445 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, 2000, 1970, 1, 2, 9, 20, 0, 445 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, -62135596800000445LL, 11640, 10, 4, 14, 46, 50, 248893 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, 62135596800000445LL, 52565, 4, 16, 17, 14, 59, 303613 },
+        { RTCA_NID_ADD_MINUTES, 1, 1, 1, 0, 10, -10, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_MINUTES, 1, 1, 1, 0, 10, -11, 60267, 1, 19, 8, 0, 49, 551616 },
+        { RTCA_NID_ADD_MINUTES, 9999, 12, 31, 23, 50, 9, 9999, 12, 31, 23, 59, 0, 0 },
+        { RTCA_NID_ADD_MINUTES, 9999, 12, 31, 23, 50, 10, 10000, 1, 1, 0, 0, 0, 0 },
+        /* checkRtcTickAddHours */
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, -2000, 1969, 10, 9, 16, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, 2000, 1970, 3, 25, 8, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, -62135596800000445LL, 3556, 10, 18, 11, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, 62135596800000445LL, 383, 3, 16, 13, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1, 1, 1, 10, 0, -10, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_HOURS, 1, 1, 1, 10, 0, -11, 60267, 1, 19, 7, 1, 49, 551616 },
+        { RTCA_NID_ADD_HOURS, 9999, 12, 31, 20, 0, 3, 9999, 12, 31, 23, 0, 0, 0 },
+        { RTCA_NID_ADD_HOURS, 9999, 12, 31, 20, 0, 4, 10000, 1, 1, 0, 0, 0, 0 },
+        /* checkRtcTickAddWeeks */
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, -2000, 1931, 9, 3, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, 2000, 2008, 5, 1, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, -62135596800000445LL, 6407, 10, 14, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, 62135596800000445LL, 57798, 4, 8, 8, 1, 49, 552061 },
+        { RTCA_NID_ADD_WEEKS, 1, 1, 8, 0, 0, -1, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_WEEKS, 1, 1, 8, 0, 0, -2, 60267, 1, 12, 8, 1, 49, 551616 },
+        { RTCA_NID_ADD_WEEKS, 9999, 12, 20, 0, 0, 1, 9999, 12, 27, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_WEEKS, 9999, 12, 20, 0, 0, 2, 10000, 1, 3, 0, 0, 0, 0 },
+    };
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        const uint32_t us = rows[i].y == 1970 ? 445u : 0u;   /* the autotest's 1970 rows carry .000445 */
+        char what[96];
+        snprintf(what, sizeof what, "arithmetic.expected row %u (nid 0x%08x, count %lld)", (unsigned)i,
+                 (unsigned)rows[i].nid, rows[i].count);
+        expect(rtca_add(rows[i].nid, rows[i].y, rows[i].mo, rows[i].d, rows[i].h, rows[i].mi, 0, us,
+                        rows[i].count) == 0u &&
+                   rtca_dst_is(rows[i].ry, rows[i].rmo, rows[i].rd, rows[i].rh, rows[i].rmi, rows[i].rsec,
+                               rows[i].rus),
+               what);
+    }
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    (void)td24b_dispatch4(RTCA_NID_ADD_MINUTES, 0u, RTCT_SRC, 1u, 0u);
+    (void)td24b_dispatch4(RTCA_NID_ADD_HOURS, RTCT_DST, 0u, 1u, 0u);
+    (void)td24b_dispatch4(RTCA_NID_ADD_WEEKS, 0u, RTCT_SRC, 1u, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 3u,
+           "the minute, hour and week adds stop by name on a NULL source or destination");
 }
 
 static void test_rtc_tick_add_day_of_week_check_valid_autotest(void) {
@@ -30565,6 +30646,8 @@ static void test_ge_finish_callbacks_do_not_nest(void) {
 #define GX_WORKER_ENTRY 0x08a380c0u
 
 extern unsigned sr_hle_test_ge_finish_runs(void);
+extern void sr_hle_test_ge_finish_masked_reset(void);
+extern int ge_finish_masked_pending(void);
 
 static struct {
     uint32_t worker_uid, main_uid;
@@ -30646,6 +30729,364 @@ static void test_ge_finish_callback_thread_exit(void) {
            "GE finish exit: another thread's list then has its finish callback run at once");
     expect(s_gx.stops_after_worker == s_gx.stops_before + 1u && sr_hle_test_ge_finish_runs() == 0u,
            "GE finish exit: ending with a completion waiting stops the run by name, not silently");
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
+    ge_tim_teardown();
+}
+
+/* A list that completes while the CPU cannot take an interrupt (its interrupts suspended, or an
+ * interrupt handler running) has its finish callback run once it can, as the GE finish interrupt
+ * would be taken on a PSP. The shape is Sonic Rivals' (ULUS10195, #2375) GE command queue: with
+ * interrupts suspended, or from its VBLANK handler, the game takes the entry at the queue's
+ * index, enqueues its list, and only then advances the index and lowers the count; its finish
+ * callback runs the same queue. The callback used to run inside sceGeListEnQueue, before the
+ * index moved, so it enqueued the same entry again and the queue advanced twice, skipping the
+ * next entry (the game's display flip).
+ * MUTANT: running the callback at once enqueues an entry twice and runs a callback under the
+ * mask; deferring only under sceKernelCpuSuspendIntr runs it inside the VBLANK handler; a
+ * last-in first-out wait reverses the completion order; a delivery loop that ignores a callback
+ * suspending interrupts again never returns (the test hangs); deferring ahead of a running
+ * callback's own run runs the next callback inside it at the resume; keeping the waiting
+ * completions after a callback stops the run makes the service loop spin (the test hangs);
+ * dropping the bound loses the 65th completion silently. */
+enum { GM_QUEUE = 0x08a39000u, GM_RING = GM_QUEUE + 8u, GM_RING_LEN = 4, GM_LOG = 80,
+       GM_VBLANK_FN = 0x08a38100u, GM_THREAD_ENTRY = 0x08a38140u };
+static struct {
+    unsigned callbacks, enqueues, masked_callbacks, thread_callbacks, suspend_in_callback;
+    unsigned in_handler, handler_callbacks, depth, max_depth, fatal_first, nest_one;
+    unsigned suspend_enqueue_stay, stay_prev, handlers, nevents;
+    uint32_t peek_list, peek;
+    uint32_t ids[GM_LOG], enqueued[GM_LOG], cb_gp[GM_LOG];
+    char events[2 * GM_LOG];
+    int process;
+} s_gm;
+
+/* The game's queue: count at +0, index at +4, list addresses from +8. */
+static void gm_process(CpuState *cpu) {
+    while ((int32_t)MEM_R32(GM_QUEUE) > 0) {
+        uint32_t idx = MEM_R32(GM_QUEUE + 4u);
+        uint32_t list = MEM_R32(GM_RING + 4u * idx);
+        if (s_gm.enqueues < GM_LOG) s_gm.enqueued[s_gm.enqueues] = list;
+        s_gm.enqueues++;
+        (void)ge_tim_enqueue(cpu, list);
+        MEM_W32(GM_QUEUE + 4u, (idx + 1u) % GM_RING_LEN);
+        MEM_W32(GM_QUEUE, MEM_R32(GM_QUEUE) - 1u);
+    }
+}
+
+static void gm_finish_fn(CpuState *cpu) {
+    if (s_gm.callbacks < GM_LOG) {
+        s_gm.ids[s_gm.callbacks] = cpu->r[4];
+        s_gm.cb_gp[s_gm.callbacks] = cpu->r[28];
+    }
+    if (s_gm.nevents < 2u * GM_LOG) s_gm.events[s_gm.nevents++] = 'C';
+    s_gm.callbacks++;
+    if (!sched_interrupts_enabled()) s_gm.masked_callbacks++;
+    if (!sched_is_intr_context()) s_gm.thread_callbacks++;
+    if (s_gm.in_handler) s_gm.handler_callbacks++;
+    if (++s_gm.depth > s_gm.max_depth) s_gm.max_depth = s_gm.depth;
+    if (s_gm.nest_one) {
+        /* A callback that suspends the interrupts, enqueues the next list and resumes them. */
+        s_gm.nest_one = 0;
+        uint32_t prev = sched_suspend_interrupts();
+        (void)ge_tim_enqueue(cpu, ge_chain_list(1));
+        sched_resume_interrupts(prev);
+    }
+    if (s_gm.suspend_enqueue_stay) {
+        /* A callback that suspends the interrupts, enqueues and returns with them suspended. */
+        s_gm.suspend_enqueue_stay = 0;
+        s_gm.stay_prev = sched_suspend_interrupts();
+        (void)ge_tim_enqueue(cpu, ge_chain_list(1));
+    }
+    if (s_gm.fatal_first) {
+        s_gm.fatal_first = 0;
+        cpu->flow_kind = SR_FLOW_FATAL;      /* the callback stops the run */
+    }
+    if (s_gm.suspend_in_callback) {
+        s_gm.suspend_in_callback = 0;
+        (void)sched_suspend_interrupts();   /* left suspended: the guest resumes later */
+    }
+    if (s_gm.process) gm_process(cpu);
+    s_gm.depth--;
+    cpu->r[2] = 0u;
+}
+
+/* The first callback reads the status of the list s_gm.peek_list (sceGeListSync mode 1). */
+static void gm_timing_finish_fn(CpuState *cpu) {
+    if (s_gm.callbacks++ == 0u) {
+        CpuState c;
+        memset(&c, 0, sizeof(c));
+        s_gm.peek = ge_tim_sync(&c, NID_SCE_GE_LIST_SYNC, s_gm.peek_list, 1u);
+    }
+    cpu->r[2] = 0u;
+}
+
+/* A VBLANK handler that runs the game's queue, as the title's does every frame. */
+static void gm_vblank_fn(CpuState *cpu) {
+    s_gm.in_handler = 1;
+    gm_process(cpu);
+    s_gm.in_handler = 0;
+    cpu->r[2] = 0u;
+}
+
+/* A VBLANK handler that enqueues one list on every VBLANK, whatever its callbacks did. */
+static void gm_vblank_one_fn(CpuState *cpu) {
+    if (s_gm.nevents < 2u * GM_LOG) s_gm.events[s_gm.nevents++] = 'H';
+    (void)ge_tim_enqueue(cpu, ge_chain_list(s_gm.handlers % GE_CHAIN_BURST));
+    s_gm.handlers++;
+    cpu->r[2] = 0u;
+}
+
+/* A guest thread whose list's finish callback suspends the interrupts, enqueues and resumes. */
+static void gm_thread_fn(CpuState *cpu) {
+    s_gm.nest_one = 1;
+    (void)ge_tim_enqueue(cpu, ge_chain_list(0));
+    cpu->r[2] = 0u;
+}
+
+static void gm_reset(void) {
+    memset(&s_gm, 0, sizeof s_gm);
+    sr_hle_test_ge_finish_masked_reset();
+}
+
+static void test_ge_finish_callback_waits_for_interrupts(void) {
+    CpuState cpu;
+    ge_tim_setup();
+    sr_hle_test_ge_lists_reset();
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gm_finish_fn);
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) ge_tim_write_list(ge_chain_list(i), 0u);
+
+    /* The game's queue holds two lists; it runs them with interrupts suspended. */
+    gm_reset();
+    s_gm.process = 1;
+    MEM_W32(GM_QUEUE, 2u);
+    MEM_W32(GM_QUEUE + 4u, 0u);
+    MEM_W32(GM_RING, ge_chain_list(0));
+    MEM_W32(GM_RING + 4u, ge_chain_list(1));
+    memset(&cpu, 0, sizeof(cpu));
+    uint32_t prev = sched_suspend_interrupts();
+    gm_process(&cpu);
+    expect(s_gm.callbacks == 0u,
+           "GE finish masked: no finish callback runs while the CPU's interrupts are suspended");
+    expect(s_gm.enqueues == 2u && s_gm.enqueued[0] == ge_chain_list(0) &&
+               s_gm.enqueued[1] == ge_chain_list(1) && MEM_R32(GM_QUEUE) == 0u &&
+               MEM_R32(GM_QUEUE + 4u) == 2u,
+           "GE finish masked: each queue entry is enqueued once and the queue advances once per entry");
+    expect(ge_tim_sync(&cpu, NID_SCE_GE_DRAW_SYNC, 1u, 0u) == 0u,
+           "GE finish masked: the lists themselves are complete at once, as before");
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 2u && s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(0)) &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: the resume runs both waiting callbacks, in completion order");
+    expect(s_gm.masked_callbacks == 0u,
+           "GE finish masked: they run with interrupts enabled");
+    expect(s_gm.enqueues == 2u, "GE finish masked: the callbacks find the queue already consumed");
+
+    /* The measured shape (CASE=display-ge-mask): a list enqueued stalled at its first word, then
+     * released by sceGeListUpdateStallAddr under the mask, runs to its end, and its callback runs
+     * only after the resume (PSP: 0/12 during the mask, 12/12 right after). */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ge_chain_list(2);
+    cpu.r[5] = ge_chain_list(2);            /* stall == list: nothing runs yet */
+    cpu.r[6] = s_ge_tim_cbid;
+    cpu.r[7] = 0u;
+    uint32_t qid = sr_syscall(&cpu, NID_SCE_GE_LIST_ENQUEUE);
+    prev = sched_suspend_interrupts();
+    cpu.r[4] = qid;
+    cpu.r[5] = ge_chain_list(2) + 8u;       /* past FINISH and END */
+    (void)sr_syscall(&cpu, NID_SCE_GE_LIST_UPDATE_STALL_ADDR);
+    unsigned during_mask = s_gm.callbacks;
+    int list_done = ge_tim_sync(&cpu, NID_SCE_GE_LIST_SYNC, qid, 1u) == 0u;
+    sched_resume_interrupts(prev);
+    expect(during_mask == 0u && list_done,
+           "GE finish masked: a list released under the mask completes, its callback does not run (display-ge-mask)");
+    expect(s_gm.callbacks == 1u && s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(2)),
+           "GE finish masked: its callback runs right after the resume (display-ge-mask)");
+
+    /* The same queue run from a VBLANK handler: on a PSP the handler runs with the CPU's
+     * interrupts off, so the finish callbacks run after it returns, each entry enqueued once. */
+    gm_reset();
+    s_gm.process = 1;
+    MEM_W32(GM_QUEUE, 2u);
+    MEM_W32(GM_QUEUE + 4u, 0u);
+    sr_test_register_guest_fn(GM_VBLANK_FN, gm_vblank_fn);
+    expect(td24b_dispatch4(NID_SCE_KERNEL_REGISTER_SUBINTR, 30u, 0u, GM_VBLANK_FN, 0u) == 0u &&
+               td24b_dispatch4(NID_SCE_KERNEL_ENABLE_SUBINTR, 30u, 0u, 0u, 0u) == 0u,
+           "GE finish masked: the VBLANK handler is registered and enabled");
+    sched_raise_interrupt(SCHED_INTR_VBLANK);
+    scheduler_service_pending();
+    (void)td24b_dispatch4(NID_SCE_KERNEL_RELEASE_SUBINTR, 30u, 0u, 0u, 0u);
+    expect(s_gm.enqueues == 2u && s_gm.enqueued[0] == ge_chain_list(0) &&
+               s_gm.enqueued[1] == ge_chain_list(1) && MEM_R32(GM_QUEUE) == 0u,
+           "GE finish masked: a VBLANK handler's queue run enqueues each entry once");
+    expect(s_gm.handler_callbacks == 0u && s_gm.callbacks == 2u &&
+               s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(0)) &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: the callbacks run after the VBLANK handler returns, in order");
+
+    /* A waiting callback that suspends the interrupts again holds the rest until the next resume. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(1));
+    s_gm.suspend_in_callback = 1;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && !sched_interrupts_enabled(),
+           "GE finish masked: a callback that suspends the interrupts holds the next one");
+    sched_resume_interrupts(1u);
+    expect(s_gm.callbacks == 2u && s_gm.masked_callbacks == 0u &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: the held callback runs at the next resume");
+
+    /* On a guest thread, a finish callback that suspends the interrupts, enqueues and resumes
+     * them: the new list's callback joins the thread's running callback's run and runs after it
+     * returns, not inside it from the resume. */
+    gm_reset();
+    sr_test_register_guest_fn(GM_THREAD_ENTRY, gm_thread_fn);
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(GM_THREAD_ENTRY, 0u, 0u);
+    expect(s_gm.callbacks == 2u && s_gm.max_depth == 1u && s_gm.thread_callbacks == 2u &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: a list completed under the mask inside a thread's callback runs after it");
+
+    /* A delivered callback that stops the run: the completions still waiting are dropped by name,
+     * and the service returns instead of finding them due for ever. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(1));
+    s_gm.fatal_first = 1;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && s_cpu->flow_kind == SR_FLOW_FATAL && !ge_finish_masked_pending(),
+           "GE finish masked: a callback that stops the run drops the completions still waiting");
+    s_cpu->flow_kind = 0u;
+
+    /* 64 completions wait; the 65th, with no room left, stops the run by name. */
+    gm_reset();
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) (void)ge_tim_enqueue(&cpu, ge_chain_list(i));
+    expect(s_gm.callbacks == 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+           "GE finish masked: a completion with no room left to wait stops the run by name");
+    sched_resume_interrupts(prev);
+    int in_order = s_gm.callbacks == GE_CHAIN_WAIT;
+    for (unsigned i = 0; i < GE_CHAIN_WAIT && in_order; i++)
+        in_order &= s_gm.ids[i] == ge_tim_finish_id(ge_chain_list(i));
+    expect(in_order, "GE finish masked: 64 waiting completions run first-in first-out at the resume");
+
+    /* L0 and L2 wait; at the resume L0's callback raises L1's completion while L2's still waits:
+     * L2's callback runs before L1's (completion order), and none runs inside another. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(2));
+    s_gm.nest_one = 1;   /* the first callback enqueues ge_chain_list(1) */
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 3u && s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(0)) &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(2)) &&
+               s_gm.ids[2] == ge_tim_finish_id(ge_chain_list(1)) && s_gm.max_depth == 1u,
+           "GE finish masked: a completion raised while others wait runs after them, in "
+           "completion order");
+
+    /* A delivered callback that suspends the interrupts, enqueues and returns with them still
+     * suspended: the new list's callback waits for the resume, not just for the callback. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    s_gm.suspend_enqueue_stay = 1;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && s_gm.masked_callbacks == 0u && !sched_interrupts_enabled() &&
+               ge_finish_masked_pending(),
+           "GE finish masked: a callback left with the interrupts suspended holds its run's next "
+           "callback");
+    sched_resume_interrupts(s_gm.stay_prev);
+    expect(s_gm.callbacks == 2u && s_gm.masked_callbacks == 0u &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)) && !ge_finish_masked_pending(),
+           "GE finish masked: that callback runs at the resume, with the interrupts enabled");
+
+    /* A LoadExec drops the completions still waiting: the new program owes them nothing. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    int waited = ge_finish_masked_pending();
+    sr_hle_loadexec_reset_guest_state();
+    sched_resume_interrupts(prev);
+    expect(waited && s_gm.callbacks == 0u && !ge_finish_masked_pending(),
+           "GE finish masked: a LoadExec drops the completions still waiting");
+
+    /* SR_GE_TIMING=1: the model's completion service is the GE finish interrupt itself, so each
+     * list's callback runs as that list completes: the second list is still drawing when the
+     * first list's callback reads it. */
+    gm_reset();
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_ge_timing(1);
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gm_timing_finish_fn);
+    ge_tim_write_list(ge_chain_list(0), 0u);
+    ge_tim_write_list(ge_chain_list(1), 0u);
+    const uint64_t saved_vtime = s_vtime_us;
+    s_vtime_us = 1000u;
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    s_gm.peek_list = ge_tim_enqueue(&cpu, ge_chain_list(1));
+    s_vtime_us = 1000000u;
+    scheduler_service_pending();
+    expect(s_gm.callbacks == 2u && s_gm.peek == 2u /* drawing */ && !ge_finish_masked_pending(),
+           "GE finish masked: an SR_GE_TIMING completion's callback runs when that list completes");
+    s_vtime_us = saved_vtime;
+    sr_hle_test_ge_timing(0);
+    sr_hle_test_ge_lists_reset();
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gm_finish_fn);
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) ge_tim_write_list(ge_chain_list(i), 0u);
+
+    /* Under the mask the waiting callback keeps the enqueuing context's $gp, as when it ran
+     * inline, not the $gp of whoever resumes the interrupts. */
+    const uint32_t thread_gp = 0x08b40000u;
+    const uint32_t saved_gp = s_cpu->r[28];
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[28] = thread_gp;
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    s_cpu->r[28] = 0x08b80000u;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && s_gm.cb_gp[0] == thread_gp,
+           "GE finish masked: a callback that waited under the mask runs with the enqueuing "
+           "context's $gp");
+
+    /* A VBLANK handler that enqueues one list on every VBLANK, with 70 episodes owed (a host
+     * stall): each callback runs when its episode returns, before the next handler, so no more
+     * than one completion waits and the 64 bound is not reached; and it runs with the
+     * handler's $gp (s_gp), not the interrupted thread's. */
+    gm_reset();
+    uint32_t stops_before = sr_hle_test_unmodelled_stops();
+    sr_test_register_guest_fn(GM_VBLANK_FN, gm_vblank_one_fn);
+    expect(td24b_dispatch4(NID_SCE_KERNEL_REGISTER_SUBINTR, 30u, 0u, GM_VBLANK_FN, 0u) == 0u &&
+               td24b_dispatch4(NID_SCE_KERNEL_ENABLE_SUBINTR, 30u, 0u, 0u, 0u) == 0u,
+           "GE finish masked: the one-list-per-VBLANK handler is registered and enabled");
+    s_cpu->r[28] = thread_gp;
+    s_pending_vblanks = 70u;
+    scheduler_service_pending();
+    (void)td24b_dispatch4(NID_SCE_KERNEL_RELEASE_SUBINTR, 30u, 0u, 0u, 0u);
+    int alternating = s_gm.nevents == 140u;
+    for (unsigned i = 0; i < 140u && alternating; i++)
+        alternating &= s_gm.events[i] == ((i & 1u) ? 'C' : 'H');
+    expect(alternating && s_gm.handlers == 70u && s_gm.callbacks == 70u &&
+               sr_hle_test_unmodelled_stops() == stops_before && !ge_finish_masked_pending(),
+           "GE finish masked: with 70 VBLANKs owed, each handler's callback runs before the next "
+           "handler and nothing stops");
+    int handler_gp = s_gp != thread_gp;   /* else the check could pass by coincidence */
+    for (unsigned i = 0; i < 70u; i++) handler_gp &= s_gm.cb_gp[i] == s_gp;
+    expect(handler_gp, "GE finish masked: a handler-raised callback runs with the handler's $gp "
+                       "(s_gp, set apart from the thread's)");
+    s_cpu->r[28] = saved_gp;
+
+    gm_reset();
     sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
     ge_tim_teardown();
 }
@@ -34325,6 +34766,112 @@ static void test_sas_mix_saturates_without_wrapping(void) {
            "__sceSasCoreWithMix at unity gain never inverts a sample when the voice sum overflows int32");
     expect(wrong == 0,
            "__sceSasCoreWithMix saturates twenty full-scale voices at +32767 once every envelope is up");
+}
+
+/* ---- #2137: Ace Mode's peak=limit, the SAS side -------------------------------------------------
+ *
+ * The overflow fixture: twenty full-scale PCM voices over caller PCM of -1000 through
+ * __sceSasCoreWithMix, so the sum passes 16 bits once the envelopes rise and stays under it on
+ * the first samples, then sceAudioOutputBlocking of that same buffer. With the wide mix on, the
+ * guest's bytes must be the PSP's, saturated, exactly as with it off; the host's push must carry
+ * the unsaturated sum where the store saturated and the guest's value everywhere else; and a
+ * buffer the game changed after the mix, or a copy of it elsewhere, must play as the guest has it.
+ *
+ * MUTANT: store the wide sum into guest memory (sas_output_write(out, i, 0, wl)) -- the guest
+ *   bytes differ from the run with the switch off and the first cell fails.
+ * MUTANT: drop the memcmp in sas_wide_for_output -- the changed buffer still plays the kept sum
+ *   and the provenance cell fails. */
+static void sas_peak_overflow_grain(CpuState *cpu, int wide, int16_t *guest) {
+    const uint32_t core = 0x08030000u, out = 0x08010000u, pcm = 0x08040000u;
+    const uint32_t grain = 256u, voices = 20u, pcm_samples = 512u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_sas_reset();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_hle_sas_set_wide_mix(wide);
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[29] = 0x09012000u;
+    cpu->r[4] = core; cpu->r[5] = grain; cpu->r[6] = 32; cpu->r[7] = 0; cpu->r[8] = 44100;
+    expect(sr_syscall(cpu, NID_SAS_INIT) == 0, "peak fixture: __sceSasInit accepts the 256-sample grain");
+    for (uint32_t i = 0; i < pcm_samples; i++) MEM_W16(pcm + i * 2u, 0x7fffu);
+    for (uint32_t v = 0; v < voices; v++) {
+        cpu->r[4] = core; cpu->r[5] = v; cpu->r[6] = pcm; cpu->r[7] = pcm_samples; cpu->r[8] = 0xffffffffu;
+        expect(sr_syscall(cpu, NID_SAS_SET_VOICE_PCM) == 0, "peak fixture: __sceSasSetVoicePCM");
+        cpu->r[4] = core; cpu->r[5] = v; cpu->r[6] = 0x1000; cpu->r[7] = 0x1000;
+        cpu->r[8] = 0x1000; cpu->r[9] = 0x1000;
+        expect(sr_syscall(cpu, NID_SAS_SET_VOLUME) == 0, "peak fixture: __sceSasSetVolume");
+        cpu->r[4] = core; cpu->r[5] = v;
+        expect(sr_syscall(cpu, NID_SAS_SET_KEY_ON) == 0, "peak fixture: __sceSasSetKeyOn");
+    }
+    int16_t bgm[256 * 2];
+    for (uint32_t i = 0; i < grain * 2u; i++) bgm[i] = -1000;
+    sas_write_pcm(out, bgm, grain);
+    cpu->r[4] = core; cpu->r[5] = out; cpu->r[6] = 0x1000; cpu->r[7] = 0x1000;
+    expect(sr_syscall(cpu, NID_SAS_CORE_WITH_MIX) == 0, "peak fixture: __sceSasCoreWithMix");
+    sas_read_pcm(out, guest, grain);
+    expect(audio_dispatch(cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, grain, 0u) == 0u,
+           "peak fixture: the regular channel takes 256-frame stereo blocks");
+}
+
+static void test_sas_peak_limit_keeps_guest_bytes_and_hands_the_host_the_sum(void) {
+    const uint32_t out = 0x08010000u, copy = 0x08050000u;
+    CpuState cpu;
+    int16_t off[256 * 2], on[256 * 2];
+
+    /* Off: the PSP's bytes, and a plain push of them. */
+    sas_peak_overflow_grain(&cpu, 0, off);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak off: the output plays the grain");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak off: the output is a plain push (no wide sum is kept)");
+    uint32_t saturated = 0, unsaturated = 0;
+    for (uint32_t i = 0; i < 256u * 2u; i++) {
+        if (off[i] == 32767) saturated++;
+        else if (off[i] > -32768) unsaturated++;
+    }
+    expect(saturated > 0 && unsaturated > 0,
+           "peak fixture: the grain saturates once the envelopes rise and not before");
+
+    /* On: the same bytes in guest memory, and the sum for the host. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    expect(memcmp(off, on, sizeof(off)) == 0,
+           "peak on: the guest's SAS bytes are byte-identical to the run with the switch off");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak on: the output plays the grain");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 1,
+           "peak on: the unchanged SAS buffer reaches the host as one wide push");
+    expect(memcmp(s_audio_push_capture, on, sizeof(on)) == 0,
+           "peak on: the wide push still carries the guest's own bytes beside the sum");
+    uint32_t past = 0, wrong = 0;
+    for (uint32_t i = 0; i < 256u * 2u; i++) {
+        const int32_t w = s_audio_push_wide_capture[i];
+        if (on[i] == 32767) { if (w > 32767) past++; else wrong++; }
+        else if (w != on[i]) wrong++;
+    }
+    expect(wrong == 0, "peak on: the sum differs from the guest only where the store saturated");
+    expect(past == saturated, "peak on: every saturated sample carries a sum past 16 bits");
+    /* Twenty unity voices at full scale over -1000: once the envelopes are up the sum is
+     * 20 * 32767 - 1000, far past what any int16 holds. */
+    expect(s_audio_push_wide_capture[255 * 2] > 20 * 30000,
+           "peak on: the sum keeps all twenty voices");
+
+    /* The game changed the buffer after the mix: it plays as the guest has it. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    MEM_W16(out + 255u * 4u, 0x1234u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak on, changed buffer: the output plays");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak on, changed buffer: a span the game wrote after the mix gets no kept sum");
+
+    /* A copy elsewhere is the game's own buffer: it plays as the guest has it. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    sas_write_pcm(copy, on, 256u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, copy) == 256u,
+           "peak on, copy: the output plays");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak on, copy: a buffer the SAS mixer never wrote gets no kept sum");
+    sr_hle_sas_set_wide_mix(0);
 }
 
 /* Production-dispatch SAS state regressions.  Each case uses only synthetic
@@ -52916,6 +53463,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_finish_callback_reports();
     test_ge_finish_callbacks_do_not_nest();
     test_ge_finish_callback_thread_exit();
+    test_ge_finish_callback_waits_for_interrupts();
     test_ge_queued_lists_run_in_order();
     test_ge_timing_blocking_sync_cannot_wait();
     test_volatile_mem_output_preflight();
@@ -53061,6 +53609,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_power_set_clock_frequency_range_checks();
     test_rtc_time_t_add_years_resolution_autotest();
     test_rtc_tick_add_day_of_week_check_valid_autotest();
+    test_rtc_tick_add_minutes_hours_weeks_autotest();
     test_imports_20261102_measured_contracts();
     test_psp_measured_umd_state_20261024();
     test_unregistered_batch_ctrl_sampling_getter();
@@ -53168,6 +53717,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();
     test_sas_mix_saturates_without_wrapping();
+    test_sas_peak_limit_keeps_guest_bytes_and_hands_the_host_the_sum();
     test_sas_state_contracts();
     test_sas_set_volume_accepts_negative();
     test_sas_voice_volume_defaults();
