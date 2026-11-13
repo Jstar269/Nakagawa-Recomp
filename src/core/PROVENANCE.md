@@ -144,11 +144,13 @@ format. None of these files opens a socket, resolves a name or connects.
   rather than written again: `lo_login` (its duplicate-MAC loop and field copies) and `nk_relay_product_ok`, and
   with them two of aemu_postoffice's rules and terms: a nickname of 128 bytes refused, and "leader MAC" for the
   group's BSSID. An independent review of pull request #2549 found this. In the second round `lo_login`,
-  `nk_relay_product_ok`, `nk_relay_mac_ok` and the checks in `nk_lobby_login` were deleted and written again from
-  PPSSPP's `login_user_data` alone; the nickname rule is now PPSSPP's (refused only when its first byte is zero,
-  so all 128 bytes of the field may be text, with no terminator), and the field is named the group's BSSID. The
-  first round's author states that its session did not open aemu_postoffice's source; the second round's session
-  opened neither aemu_postoffice's source nor the code it replaced.
+  `nk_relay_mac_ok` and the checks in `nk_lobby_login` were deleted and written again from PPSSPP's
+  `login_user_data` alone. `nk_relay_product_ok` was kept: its body is unchanged apart from comments, and its
+  behaviour is PPSSPP's product-code rule, the check in `login_user_data` (`Core/HLE/proAdhocServer.cpp`) that each
+  of the nine bytes of the product code is A-Z or 0-9. The nickname rule is now PPSSPP's (refused only when its
+  first byte is zero, so all 128 bytes of the field may be text, with no terminator), and the field is named the
+  group's BSSID. The first round's author states that its session did not open aemu_postoffice's source; the second round's session
+  opened neither aemu_postoffice's source nor the code it replaced, and kept `nk_relay_product_ok` as it was.
 
 | Path (under `src/`) | Lineage | Classification | PPSSPP pin | Local modifications | Notice lines in the file header | Commits here |
 | --- | --- | --- | --- | --- | --- | --- |

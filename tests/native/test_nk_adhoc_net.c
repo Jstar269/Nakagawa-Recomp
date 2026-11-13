@@ -413,6 +413,49 @@ static void test_protocol_errors(void) {
     nk_loopnet_destroy(net);
 }
 
+/* A LOGIN from a console that is logged in, in a group and holding a socket. PPSSPP's server_loop
+ * logs it out, so logout_user runs disconnect_user (each other member hears it go) and the
+ * connection closes, which on the medium closes the console's sockets. */
+static void test_login_while_grouped(void) {
+    NkAdhocLoopNet *net = nk_loopnet_create();
+    NkAdhocTransport *a = nk_loopnet_console(net, A), *b = nk_loopnet_console(net, B);
+    NkLobbyEvent ev[8];
+    CHECK(login(a, k_a, "Alpha", k_game) == NK_NET_OK && login(b, k_b, "Bravo", k_game) == NK_NET_OK &&
+              a->ops->connect(a, k_g1) == NK_NET_OK && b->ops->connect(b, k_g1) == NK_NET_OK,
+          "A and B log in and join one group");
+    take(a, ev, 8);
+    take(b, ev, 8);
+    const int sa = a->ops->pdp_open(a, 0x1000);
+    const int sb = b->ops->pdp_open(b, 0x2000);
+    CHECK(sa >= 0 && sb >= 0, "each opens a socket");
+    CHECK(b->ops->pdp_send(b, sb, k_a, 0x1000, "held", 4) == NK_NET_OK, "B queues a datagram on A's socket");
+    nk_loopnet_trace(net, NULL, 0);
+
+    CHECK(login(a, k_a, "Alpha", k_game) == NK_NET_NOT_LOGGED_IN, "a login while logged in logs A out");
+    static const NkLoopTrace t_out[] = {{B, NK_LOBBY_DISCONNECT, ID_A}};
+    CHECK(trace_is(net, t_out, 1, "login while grouped"), "B hears A leave the group, and nothing else is sent");
+    CHECK(take(b, ev, 8) == 1u && ev[0].kind == NK_LOBBY_DISCONNECT && ev[0].peer_id == ID_A,
+          "B's queue holds A's DISCONNECT");
+    CHECK(a->ops->pdp_send(a, sa, k_b, 0x2000, "x", 1) == NK_NET_NO_SOCKET, "A's socket is closed");
+    CHECK(a->ops->scan(a) == NK_NET_NOT_LOGGED_IN, "A is logged out");
+
+    CHECK(login(a, k_a, "Alpha", k_game) == NK_NET_OK, "A logs in again");
+    uint8_t mac[6], buf[8];
+    uint16_t port = 0;
+    uint32_t len = 0;
+    CHECK(a->ops->pdp_recv(a, sa, mac, &port, buf, sizeof buf, &len) == NK_NET_NO_SOCKET,
+          "A's old socket, with the datagram B queued on it, is gone after the new login");
+    CHECK(a->ops->pdp_open(a, 0x1000) >= 0, "and its port is free");
+    CHECK(a->ops->connect(a, k_g1) == NK_NET_OK, "A joins the group again");
+    const size_t n = take(a, ev, 8);
+    CHECK(n == 2u && ev[0].kind == NK_LOBBY_CONNECT && ev[0].peer_id == ID_B &&
+              ev[1].kind == NK_LOBBY_CONNECT_BSSID,
+          "the group held B alone: A hears B, then the BSSID (got %zu events)", n);
+    CHECK(take(b, ev, 8) == 1u && ev[0].kind == NK_LOBBY_CONNECT && ev[0].peer_id == ID_A,
+          "B hears A join once");
+    nk_loopnet_destroy(net);
+}
+
 static void test_pdp(void) {
     NkAdhocLoopNet *net = nk_loopnet_create();
     NkAdhocTransport *a = nk_loopnet_console(net, 0), *b = nk_loopnet_console(net, 1),
@@ -557,6 +600,7 @@ int main(void) {
     test_products_apart();
     test_group_names();
     test_protocol_errors();
+    test_login_while_grouped();
     test_pdp();
     test_event_overflow();
     test_trace_bound();
