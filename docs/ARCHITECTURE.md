@@ -247,8 +247,10 @@ These tools run on the development host before the native compiler.
   body's trace ran over first becomes an entry once that body is withdrawn), and each entry not
   withdrawn. What withdrawn bodies reach beyond that is their shadow: the sweeps skip it, so a
   seed whose evidence lies there is no evidence. The void is the part of the shadow from which
-  every path runs into a reserved word (none returns, leaves the image, stops at `jr`, a syscall
-  or `eret`, or enters an entry): proven never to run as working code. The rest of the shadow
+  every path runs into a reserved word (none returns, calls, since a callee may never return,
+  jumps or branches out of the image, stops at `jr`, a syscall, `break` or `eret`, or enters an
+  entry; a branch-likely's delay slot counts only on its taken path): proven never to run as
+  working code. The rest of the shadow
   stays executable, as before the withdrawal; a withdrawn address there has no translated body
   and, if called, runs on the interpreter floor, which refuses at the reserved word if it gets
   there. Discovery runs again until a pass withdraws nothing.
@@ -267,8 +269,9 @@ These tools run on the development host before the native compiler.
   and the descriptor registers an `SrModuleNonCode` record (count of withdrawn seeds and void words)
   only for a module that has one, so other descriptors are unchanged; a dispatch that reaches a
   withdrawn span stops with `NON_CODE_WITHDRAWN` (see [`DEBUGGING.md`](DEBUGGING.md)). The runtime
-  finds a module's span, and the executable's, by a binary search, and registration refuses spans
-  out of address order.
+  finds a module's span, and the executable's, by a binary search. A module's registration
+  refuses spans out of address order; the executable's spans, which the main image and each
+  `--extra-elf` image register in any order, are kept sorted.
   In the executable and an `--extra-elf` image the void leaves the registered executable spans, so
   a dispatch there stops as not executable, without that name. Codegen refuses the build
   (`NON_CODE_TRANSLATED`) if an entry, or a word it walked for any function it emits (translated

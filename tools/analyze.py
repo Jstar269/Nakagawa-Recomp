@@ -3105,20 +3105,42 @@ class _BodyWalk:
     def __init__(self, elf, ranges, boundaries, jumps):
         self.elf, self.ranges = elf, span_index(list(ranges))
         self.boundaries, self.jumps = boundaries, jumps
-        self.steps = {}
+        self.steps, self.words = {}, {}
+
+    def word(self, pc):
+        """The word at ``pc``, or None where the image has no four bytes."""
+        if pc not in self.words:
+            raw = self.elf.read_at_vaddr(pc, 4)
+            self.words[pc] = (None if raw is None or len(raw) < 4
+                              else int.from_bytes(raw[:4], "little"))
+        return self.words[pc]
 
     def step(self, pc):
         """(delay slot or None, ((successor, edge), ...)) of the word at ``pc``, by
         codegen._walk_body's rules for that word."""
         known = self.steps.get(pc)
         if known is None:
-            raw = self.elf.read_at_vaddr(pc, 4)
-            if raw is None or len(raw) < 4:
-                known = (None, ())
-            else:
-                known = self._step(pc, int.from_bytes(raw[:4], "little"))
+            word = self.word(pc)
+            known = (None, ()) if word is None else self._step(pc, word)
             self.steps[pc] = known
         return known
+
+    def _may_go_elsewhere(self, pc):
+        """Whether a path through the word at ``pc`` may go where the walk does not follow,
+        so the word's followed successors prove nothing about it: a call (the callee may
+        never return), a `break`, or a conditional branch whose target lies outside the
+        ranges."""
+        word = self.word(pc)
+        if word is None:
+            return True
+        op, funct = word >> 26, word & 0x3F
+        if op == 3 or (op == 0 and funct == 0x09 and (word >> 11) & 0x1F):  # jal, linked jalr
+            return True
+        if op == 0 and funct == 0x0D:                                       # break
+            return True
+        if op == 1 and _linked_branch_is_call(self.elf, pc, word, self.ranges):
+            return True
+        return is_cond_branch(word) and not in_ranges(branch_target(pc, word), self.ranges)
 
     def _step(self, pc, word):
         op, funct = word >> 26, word & 0x3F
@@ -3169,10 +3191,13 @@ class _BodyWalk:
 
     def doomed(self, starts, evidence):
         """The words of the reach of ``starts`` from which every path runs into a word of
-        ``evidence``: no path returns, leaves the ranges, stops at a `jr`, syscall or `eret`,
-        enters another entry along a fall-through, call return or `j`, or loops for ever
-        without one. Such a word can never run as part of working code. A delay slot is doomed
-        with its transfer when it is not also reached as a word of its own."""
+        ``evidence``: no path returns, calls (the callee may never return), leaves the ranges
+        (a jump or a branch out of them), stops at a `jr`, syscall, `break` or `eret`, enters
+        another entry along a fall-through or `j`, or loops for ever without one. Such a word
+        can never run as part of working code. A transfer whose delay slot is evidence is
+        doomed, except a branch-likely, whose slot runs only when it is taken: its path not
+        taken must be doomed too. A delay slot is doomed with its transfer when it is not also
+        reached as a word of its own."""
         seen, stack, nodes = set(), list(starts), {}
         while stack:
             pc = stack.pop()
@@ -3181,13 +3206,19 @@ class _BodyWalk:
             seen.add(pc)
             slot, edges = self.step(pc)
             followed = [s for s, edge in edges if self._follows(s, edge, True)]
-            leaves = len(followed) < len(edges) or any(not in_ranges(s, self.ranges) for s in followed)
+            leaves = (len(followed) < len(edges) or self._may_go_elsewhere(pc)
+                      or any(not in_ranges(s, self.ranges) for s in followed))
             nodes[pc] = (slot, followed, leaves)
             stack.extend(s for s in followed if s not in seen)
         doomed, pending, back = set(), {}, {}
         wave = []
         for pc, (slot, followed, leaves) in nodes.items():
-            if pc in evidence or (slot is not None and slot in evidence):
+            if slot is not None and slot in evidence and pc not in evidence \
+                    and _cfg_branch_likely(self.word(pc)):
+                if pc + 8 in followed and not leaves:      # not taken: the slot is skipped
+                    pending[pc] = 1
+                    back.setdefault(pc + 8, []).append(pc)
+            elif pc in evidence or (slot is not None and slot in evidence):
                 doomed.add(pc)
                 wave.append(pc)
             elif followed and not leaves:

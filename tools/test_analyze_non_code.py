@@ -615,9 +615,9 @@ class WithdrawalRulesTest(unittest.TestCase):
         self.assertEqual(translated(generated), translated(before))
         self.assertEqual(len(translated(generated)), 9)   # 0x1000 to 0x1024 but the padding at 0x101c
         self.assertNotIn("sr_unimplemented", function_text(generated, base))
-        # K's cold path (its call, delay slot and the data word after it) can only run into
-        # the data word: those leave the spans. K's own words stay: its hot path returns.
-        self.assertIn("sr_exec_span_register(0x00001000u, 0x0000103cu)", generated)
+        # K's cold path calls a function that never returns, then a data word follows. Only
+        # the data word leaves the spans: the call need not return, so its words are code.
+        self.assertIn("sr_exec_span_register(0x00001000u, 0x00001044u)", generated)
         self.assertIn("sr_exec_span_register(0x00001048u, 0x0000106cu)", generated)
         self.assertNotIn(f"void f_{k:08x}(CpuState *s) {{", generated)
         self.assertIn("executable: withdrew", log)
@@ -653,6 +653,74 @@ class WithdrawalRulesTest(unittest.TestCase):
         self.assertIn(u, {a for a, _ in module.functions})
         self.assertNotIn(u, {a for a, _ in module.stubbed})
         self.assertEqual(module.spans, [(g, d), (d + 8, u + 28)])
+
+    # A word leaves the spans only when every path from it runs into a reserved word. Each
+    # case below is a function, called only through a pointer, after a data seed (as above),
+    # whose own body holds a reserved word, so it is withdrawn; its words that a working path
+    # may run stay executable, and every word that leaves is proven non-code.
+    BREAK = 0x0000000D
+    OUTSIDE = LINK - 0x100            # below the image's text
+
+    def assert_proven(self, words, data_words, executable):
+        module, log = translate_image(overlay_image(words, data_words))
+        self.assertNotIn("NON_CODE_TRANSLATED", log)
+        self.assertTrue(module.non_code, log)
+        owned = {a for lo, hi in module.spans for a in range(lo, hi, 4)}
+        for address in executable:
+            self.assertIn(address, owned, hex(address))
+        elf = small_overlay(words, data_words)
+        with stock_analysis():
+            before, _ = translate_image(overlay_image(words, data_words))
+        void = ({a for lo, hi in before.spans for a in range(lo, hi, 4)} - owned)
+        self.assertTrue(void)
+        for address in void:
+            self.assertTrue(every_path_runs_into_a_reserved_word(elf, address)
+                            or every_path_runs_into_a_reserved_word(elf, address - 4),
+                            hex(address))
+        return module
+
+    def pointer_called_after_data(self, body):
+        """G, a function named by a data word; data D read as a seed; then ``body`` at U."""
+        g = TEXT
+        d = g + 24
+        u = d + 16
+        words = [PROLOGUE, 0xAFBF001C, ADDU, 0x8FBF001C, JR_RA, 0x27BD0020,
+                 PROLOGUE, RESERVED, ADDU, ADDU] + body(u)
+        return words, [g], u
+
+    def test_a_call_is_not_taken_to_return(self):
+        # U's cold path calls A, which never returns (it loops), and a data word follows the
+        # call. The call and its delay slot are code; only the data word is proven non-code.
+        def body(u):
+            a = u + 40
+            return [PROLOGUE, branch(5, 4, 0, u + 4, u + 24), 0, 0x8FBF001C, JR_RA, 0x27BD0020,
+                    jal(a), 0, RESERVED, 0, PROLOGUE, jump(a), 0]
+        words, data, u = self.pointer_called_after_data(body)
+        self.assert_proven(words, data + [u + 40], range(u, u + 32, 4))
+
+    def test_a_break_is_not_taken_to_fall_through(self):
+        # U's cold path is a `break`, then a data word.
+        def body(u):
+            return [PROLOGUE, branch(5, 4, 0, u + 4, u + 24), 0, 0x8FBF001C, JR_RA, 0x27BD0020,
+                    self.BREAK, RESERVED]
+        words, data, u = self.pointer_called_after_data(body)
+        self.assert_proven(words, data, range(u, u + 28, 4))
+
+    def test_a_branch_out_of_the_image_leaves_it(self):
+        # U branches out of the image (to code loaded elsewhere), else runs into a data word.
+        def body(u):
+            return [PROLOGUE, branch(5, 4, 0, u + 4, self.OUTSIDE), 0, RESERVED]
+        words, data, u = self.pointer_called_after_data(body)
+        self.assert_proven(words, data, range(u, u + 12, 4))
+
+    def test_a_branch_likely_slot_runs_only_when_taken(self):
+        # U's `beql` has a data word in its delay slot; that slot runs only when the branch is
+        # taken, and the path not taken returns. U's words before the slot are code.
+        def body(u):
+            return [PROLOGUE, branch(20, 4, 0, u + 4, u + 20), RESERVED, 0x8FBF001C, JR_RA,
+                    0x27BD0020]
+        words, data, u = self.pointer_called_after_data(body)
+        self.assert_proven(words, data, (u, u + 4) + tuple(range(u + 12, u + 24, 4)))
 
     def test_an_entry_in_a_kept_delay_slot_keeps_its_own_body(self):
         # K, E and W are named by data words. E is the delay slot of K's `j`; E is a `j` too,
@@ -962,16 +1030,55 @@ def generated_digest(image, base):
 
 
 def every_path_runs_into_a_reserved_word(elf, start):
-    """True when every path the CPU could take from ``start`` executes a reserved word: none
-    leaves the image, stops at a return, `jr`, syscall or `eret`, or loops for ever without one.
-    A call is taken to return. Unlike the analysis no entry ends a path, and nothing runs on past
-    the `b` idiom."""
-    walk = analyze._BodyWalk(elf, analyze.exec_ranges(elf), frozenset(), None)
+    """True when every path the CPU could take from ``start`` executes a reserved word. An
+    oracle independent of the analysis's walk, read from the words alone: a call may never
+    return, and a return, `jr`, syscall, `break`, `eret`, a jump or branch out of the image,
+    or a loop without a reserved word ends a path unproven. A branch-likely's delay slot runs
+    only when it is taken. Unlike the analysis no entry ends a path, and a `b` runs only to
+    its target."""
+    index = analyze.span_index(analyze.exec_ranges(elf))
+
+    def word(address):
+        raw = elf.read_at_vaddr(address, 4)
+        return int.from_bytes(raw, "little") if raw and len(raw) == 4 else None
 
     def reserved(address):
-        raw = elf.read_at_vaddr(address, 4)
-        return bool(raw) and len(raw) == 4 and bool(
-            analyze.reserved_encoding(int.from_bytes(raw, "little")))
+        value = word(address)
+        return value is not None and bool(analyze.reserved_encoding(value))
+
+    def paths(pc):
+        """None when a path from ``pc`` ends unproven at this word; [] when the word is
+        doomed by its delay slot; else the successors, every one of which must be doomed."""
+        w = word(pc)
+        if w is None or not analyze.in_ranges(pc, index):
+            return None
+        op, funct, rt = w >> 26, w & 0x3F, (w >> 16) & 0x1F
+        if (op == 0 and funct in (0x0C, 0x0D)) or w == 0x42000018:      # syscall, break, eret
+            return None
+        transfer = (op in (2, 3) or (op == 0 and funct in (0x08, 0x09))
+                    or analyze.is_cond_branch(w))
+        if not transfer:
+            return [pc + 4]
+        likely = analyze._cfg_branch_likely(w)
+        if reserved(pc + 4) and not likely:
+            return []                                     # the slot always runs
+        if op in (2, 3) or (op == 0 and funct in (0x08, 0x09)):
+            if op == 2:
+                target = (pc & 0xF0000000) | ((w & 0x3FFFFFF) << 2)
+                if target != pc and analyze.in_ranges(target, index):
+                    return [target]
+            return None                                   # a call, a return, a jump out
+        if op == 1 and rt in (0x10, 0x11, 0x12, 0x13) and \
+                analyze._linked_branch_is_call(elf, pc, w, index):
+            return None
+        target = analyze.branch_target(pc, w)
+        if not analyze.in_ranges(target, index):
+            return None
+        if likely and reserved(pc + 4):
+            return [pc + 8]                               # taken runs the reserved slot
+        if analyze.branch_kind(w) == analyze.BRANCH_UNCOND:
+            return [target]
+        return [target, pc + 8]
 
     state, stack = {}, [(start, None)]   # 1: on the current path, 2: every path from it is doomed
     while stack:
@@ -980,15 +1087,11 @@ def every_path_runs_into_a_reserved_word(elf, start):
             if state.get(pc) == 2 or reserved(pc):
                 state[pc] = 2
                 continue
-            if state.get(pc) == 1 or not analyze.in_ranges(pc, walk.ranges):
-                return False                 # a loop without a reserved word, or out of the image
-            slot, edges = walk.step(pc)
-            if slot is not None and reserved(slot):
-                state[pc] = 2
-                continue
-            successors = [s for s, edge in edges if edge != analyze._BODY_AFTER_B]
-            if not successors:
-                return False                 # a return, `jr`, syscall, `eret` or a jump out
+            if state.get(pc) == 1:
+                return False                 # a loop without a reserved word
+            successors = paths(pc)
+            if successors is None:
+                return False
             state[pc] = 1
         if successors:
             stack.append((pc, successors[1:]))
@@ -996,6 +1099,43 @@ def every_path_runs_into_a_reserved_word(elf, start):
         else:
             state[pc] = 2
     return True
+
+
+class VoidProofTest(unittest.TestCase):
+    """Every word the withdrawal takes out of a module's spans (executable without it, not
+    with it) is proven non-code, on a seeded corpus of random overlays with data words naming
+    random text addresses."""
+
+    def test_every_word_taken_out_is_proven_non_code(self):
+        rng = random.Random(2564)
+        size, images, removed = 80, 0, 0
+        for _ in range(400):
+            words = [random_body_word(rng, TEXT + 4 * i, size) for i in range(size)]
+            data = [TEXT + 4 * rng.randrange(size) for _ in range(rng.randrange(8))]
+            image = overlay_image(words, data)
+            try:
+                module, log = translate_image(image)
+            except AssertionError:
+                continue                     # a shape the generator refuses on main as well
+            if isinstance(module, int):
+                continue
+            self.assertNotIn("NON_CODE_TRANSLATED", log)
+            with stock_analysis():
+                before, _ = translate_image(image)
+            void = ({a for lo, hi in before.spans for a in range(lo, hi, 4)}
+                    - {a for lo, hi in module.spans for a in range(lo, hi, 4)})
+            if not void:
+                continue
+            images += 1
+            elf = small_overlay(words, data)
+            proven = {a for a in void if every_path_runs_into_a_reserved_word(elf, a)}
+            # A delay slot leaves with its transfer when that transfer is proven.
+            unproven = sorted(a for a in void - proven
+                              if not (a - 4 in proven and is_transfer(elf, a - 4)))
+            self.assertEqual(unproven, [], [f"{a:08x}" for a in unproven[:8]])
+            removed += len(void)
+        self.assertGreater(images, 300)
+        self.assertGreater(removed, 1500)
 
 
 class PublicFixtureTest(unittest.TestCase):
