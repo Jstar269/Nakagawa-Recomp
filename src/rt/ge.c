@@ -639,22 +639,36 @@ uint32_t ge_cpu_profile_validate(const GeCpuProfileStats *s, char *detail, size_
                      s->primitive_profile_actual_transformed_vertices,
                      s->primitive_profile_actual_decoded_vertices);
 
-        /* draw_prim decodes every through-mode use exactly once.  In transform mode it skips
-         * only the second corner of a sprite whose first corner transform_vtx_3d rejected, so
-         * each missing decode has its own reject. */
+        /* draw_prim decodes every through-mode use exactly once.  In transform mode a
+         * triangle use the vertex cache serves decodes nothing, and otherwise it skips only
+         * the second corner of a sprite whose first corner transform_vtx_3d rejected, so each
+         * missing decode is a cache hit or has its own reject. */
         {
             uint64_t through_uses = s->primitive_profile_through_vertex_uses;
             uint64_t transform_uses = s->primitive_profile_transform_vertex_uses;
             uint64_t transformed = s->primitive_profile_actual_transformed_vertices;
+            uint64_t hits = s->primitive_profile_vertex_cache_hits;
+            /* note_draw adds every use to primitive_profile_vertices and to the fetch/decode
+             * eligible population, and a cache hit takes itself out of the eligible ones (lit
+             * draws' lighting included), so eligible + hits is the uses exactly. */
+            uint64_t fetch_eligible =
+                s->primitive_profile_eligible[GE_PRIM_PROFILE_VERTEX_FETCH_DECODE];
             if ((s->primitive_profile_actual_through_vertices != through_uses ||
                  transformed > transform_uses ||
-                 transform_uses - transformed > s->primitive_profile_vertex_rejects) &&
+                 hits > transform_uses - transformed ||
+                 transform_uses - transformed - hits > s->primitive_profile_vertex_rejects ||
+                 !ge_profile_sum_eq(ge_profile_sum2(fetch_eligible, hits),
+                                    s->primitive_profile_vertices) ||
+                 s->primitive_profile_eligible[GE_PRIM_PROFILE_LIGHTING] >
+                     s->primitive_profile_eligible[GE_PRIM_PROFILE_TRANSFORM]) &&
                 ge_profile_fail(&v, GE_PROFILE_CHECK_DECODE_COVERAGE))
                 snprintf(detail, detail_size, "decode_coverage: through decoded=%" PRIu64
                          " uses=%" PRIu64 ", transform decoded=%" PRIu64 " uses=%" PRIu64
-                         " rejects=%" PRIu64, s->primitive_profile_actual_through_vertices,
-                         through_uses, transformed, transform_uses,
-                         s->primitive_profile_vertex_rejects);
+                         " vertex_cache_hits=%" PRIu64 " rejects=%" PRIu64
+                         " fetch_eligible=%" PRIu64 " vertices=%" PRIu64,
+                         s->primitive_profile_actual_through_vertices, through_uses, transformed,
+                         transform_uses, hits, s->primitive_profile_vertex_rejects,
+                         fetch_eligible, s->primitive_profile_vertices);
         }
 
         /* draw_prim's transform triangle loop records one acceptance verdict per candidate
@@ -2284,10 +2298,18 @@ void ge_set_frame(uint32_t frame) {
         s_wall_last = now;
         s_ge_ms_acc = 0;
         tnl_gestat_print(frame);
+        /* vcache_*: this window's per-draw vertex cache hits, misses and bypasses (ge_shared.h). */
+        static unsigned long vcache_hits_last, vcache_misses_last, vcache_bypasses_last;
+        unsigned long vcache_hits = g_ge_vertex_cache_hits - vcache_hits_last;
+        unsigned long vcache_misses = g_ge_vertex_cache_misses - vcache_misses_last;
+        unsigned long vcache_bypasses = g_ge_vertex_cache_bypasses - vcache_bypasses_last;
+        vcache_hits_last = g_ge_vertex_cache_hits;
+        vcache_misses_last = g_ge_vertex_cache_misses;
+        vcache_bypasses_last = g_ge_vertex_cache_bypasses;
         fprintf(stderr,
-            "GESTAT+ f=%" PRIu32 " blk3d=%lu skin=%lu bonew=%lu deg3d=%lu line3d=%lu nonfinite=%lu gpuprim=%lu zrange=%lu zr=[%" PRIu32 ",%" PRIu32 "] fmt=%" PRIu32 " zbp=0x%08" PRIx32 " fb=[0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu]\n",
+            "GESTAT+ f=%" PRIu32 " blk3d=%lu skin=%lu bonew=%lu deg3d=%lu line3d=%lu nonfinite=%lu gpuprim=%lu vcache_hits=%lu vcache_misses=%lu vcache_bypasses=%lu zrange=%lu zr=[%" PRIu32 ",%" PRIu32 "] fmt=%" PRIu32 " zbp=0x%08" PRIx32 " fb=[0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu]\n",
             frame, s_stat.blk3d, s_stat.skin, s_stat.bonew, s_stat.deg3d, s_stat.line3d, s_stat.nonfinite, s_stat.gpuprim,
-            s_stat.zrange, ge.minz, ge.maxz, ge.fbfmt, ge.zbp,
+            vcache_hits, vcache_misses, vcache_bypasses, s_stat.zrange, ge.minz, ge.maxz, ge.fbfmt, ge.zbp,
             s_stat.fbs[0], s_stat.fbn[0], s_stat.fbs[1], s_stat.fbn[1],
             s_stat.fbs[2], s_stat.fbn[2], s_stat.fbs[3], s_stat.fbn[3]);
         fprintf(stderr,
@@ -3464,13 +3486,19 @@ static uint32_t index_value(uint32_t ibase, int idxfmt, int i) {
     }
 }
 
-static uint32_t prim_vtx_addr(uint32_t vbase, uint32_t ibase, int idxfmt, int i, int stride) {
+/* Claim the sparse profile slot of one vertex decode (the vertex cache claims only on a miss,
+ * so claims stay one per decode). */
+static void primitive_profile_begin_vertex(void) {
     if (s_primitive_profile_counting) {
         int phase = primitive_profile_claim_vertex();
         s_primitive_profile_pending_phase = phase;
         s_primitive_profile_pending_started =
             phase == GE_PRIM_PROFILE_VERTEX_FETCH_DECODE ? SDL_GetTicksNS() : 0;
     }
+}
+
+static uint32_t prim_vtx_addr(uint32_t vbase, uint32_t ibase, int idxfmt, int i, int stride) {
+    primitive_profile_begin_vertex();
     uint32_t vi = idxfmt ? index_value(ibase, idxfmt, i) : (uint32_t)i;
     return vbase + vi * (uint32_t)stride;
 }
@@ -4936,6 +4964,148 @@ static void transform_vtx_clip(uint32_t addr, const VFmt *vf, CVtx *o) {
         s_primitive_profile_current_phase = -1;
         primitive_profile_clear_vertex_pending();
     }
+}
+
+/* Per-draw transformed-vertex cache for draw_prim_xform_triangles. transform_vtx_clip is a
+ * pure function of the vertex bytes at its address, the vertex format and the GE state. The
+ * format and the state do not change within one draw, and no guest code runs during a draw,
+ * but the draw's own pixels are written to its colour target, so a vertex under that target
+ * can change mid-draw. Depth surfaces are VRAM only (ge_zbuf_layout_valid). So a vertex is
+ * cached only when it lies wholly in plain RAM (ge_ram_span) and the draw's colour target is
+ * in VRAM; a vertex in VRAM, or any vertex of a draw that renders to RAM, is transformed every
+ * time, with no lookup and no store, and counted as a bypass. For a cached vertex, a CVtx
+ * stored for its address earlier in the same draw is bit-identical to transforming that
+ * address again.
+ * Indexed meshes share vertices between triangles and every fan shares its first vertex, so
+ * most of those transforms repeat. A non-indexed list, and a non-indexed strip that keeps its
+ * rolling pair, never use one address twice: those draws skip the cache (and its counters).
+ * A hit takes itself out of the sparse profile's eligible populations (fetch/decode,
+ * transform, lighting), because it does none of that work; the index read before a miss is
+ * outside the miss's fetch/decode sample.
+ *
+ * The table is direct mapped and keyed by the vertex address alone: an entry hits only when its
+ * full address matches and it was written in the current draw. The slot is the vertex index's
+ * low bits (within one draw, vertex base and stride are fixed, so the index is a function of the
+ * address). Each draw takes a new epoch, so no entry survives into the next draw, even at the
+ * same address. SR_GE_VERTEX_CACHE_DISABLE (nonzero) turns the cache off.
+ *
+ * SR_GE_VERTEX_CACHE_MUTANT (ge-vertex-cache-mutants only; never in a product build) breaks
+ * the cache: 1 never starts a new epoch, 2 does not check the address, 3 caches vertices
+ * outside plain RAM, 4 caches vertices while the colour target is in RAM, 5 caches vertices
+ * while a VRAM colour target's last rows reach main RAM. */
+#ifndef SR_GE_VERTEX_CACHE_MUTANT
+#define SR_GE_VERTEX_CACHE_MUTANT 0
+#endif
+enum { GE_VERTEX_CACHE_ENTRIES = 256 };
+typedef struct {
+    uint32_t addr;
+    uint32_t epoch;   /* 0: never written */
+    CVtx v;
+} GeVertexCacheEntry;
+static GeVertexCacheEntry s_vertex_cache[GE_VERTEX_CACHE_ENTRIES];
+static uint32_t s_vertex_cache_epoch;
+static int s_vertex_cache_on = -1;
+/* This draw: 0 no cache (off, or no address repeats), 1 bypass every vertex (colour target
+ * outside VRAM), 2 cache plain-RAM vertices. Set by vertex_cache_begin_draw. */
+static int s_vertex_cache_draw;
+unsigned long g_ge_vertex_cache_hits, g_ge_vertex_cache_misses, g_ge_vertex_cache_bypasses;
+
+static int vertex_cache_enabled(void) {
+    if (s_vertex_cache_on < 0) {
+        const char *disable = getenv("SR_GE_VERTEX_CACHE_DISABLE");
+        s_vertex_cache_on = !(disable && disable[0] && strcmp(disable, "0") != 0);
+    }
+    return s_vertex_cache_on;
+}
+
+void ge_vertex_cache_reload_env(void) {
+    s_vertex_cache_on = -1;
+}
+
+/* Start one draw: every entry of earlier draws becomes stale. `repeats`: the draw can use
+ * one address twice (indexed, a fan, or a strip without its rolling pair). */
+static void vertex_cache_begin_draw(int repeats) {
+#if SR_GE_VERTEX_CACHE_MUTANT != 1
+    if (++s_vertex_cache_epoch == 0u) {   /* wrapped: no stale entry may carry the new epoch */
+        memset(s_vertex_cache, 0, sizeof s_vertex_cache);
+        s_vertex_cache_epoch = 1u;
+    }
+#endif
+    if (!vertex_cache_enabled() || !repeats) {
+        s_vertex_cache_draw = 0;
+        return;
+    }
+#if SR_GE_VERTEX_CACHE_MUTANT != 4
+    /* The software rasterizer writes the colour target during the draw (ge_fb_store); in
+     * RAM it may overlap the vertices, which are cached only in plain RAM. A target in the
+     * VRAM window must also end below main RAM: pixels reach (271 * stride +
+     * raster_columns() - 1) (pixel_in_bounds: column 511 at most), and a garbage width could
+     * carry the last rows to SR_RAM_BASE. */
+    uint32_t fb = ge_fb_addr();
+    uint64_t stride = ge.fbw ? ge.fbw : 512u;
+    uint64_t fb_end = (uint64_t)fb + (271u * stride + (uint64_t)raster_columns()) * ((ge.fbfmt & 3) == 3 ? 4u : 2u);
+#if SR_GE_VERTEX_CACHE_MUTANT == 5
+    fb_end = SR_RAM_BASE;
+#endif
+    if ((fb & 0x0F000000u) != 0x04000000u || fb_end > SR_RAM_BASE) {
+        s_vertex_cache_draw = 1;
+        return;
+    }
+#endif
+    s_vertex_cache_draw = 2;
+}
+
+/* transform_vtx_clip of the draw's vertex i, through the cache. A miss claims the sparse
+ * profile slot and transforms, as prim_vtx_addr + transform_vtx_clip do; a hit decodes and
+ * transforms nothing, so the profile's actual decoded and transformed counts drop by its
+ * vertex_cache_hits. */
+static void transform_vtx_clip_cached(uint32_t vbase, uint32_t ibase, int idxfmt, int i,
+                                      const VFmt *vf, CVtx *o) {
+    if (!s_vertex_cache_draw) {
+        transform_vtx_clip(prim_vtx_addr(vbase, ibase, idxfmt, i, vf->stride), vf, o);
+        return;
+    }
+    uint32_t vi = idxfmt ? index_value(ibase, idxfmt, i) : (uint32_t)i;
+    uint32_t addr = vbase + vi * (uint32_t)vf->stride;
+#if SR_GE_VERTEX_CACHE_MUTANT != 3
+    int cacheable = ge_ram_span(addr, (uint32_t)vf->stride) != NULL;
+#else
+    int cacheable = 1;
+#endif
+    if (s_vertex_cache_draw == 1 || !cacheable) {
+        /* A draw rendering to RAM, or a vertex not in plain RAM (VRAM, which this draw's own
+         * pixels may rewrite, or a span the capture path reads): transform it every time,
+         * with no lookup and no store. */
+        g_ge_vertex_cache_bypasses++;
+        primitive_profile_begin_vertex();
+        transform_vtx_clip(addr, vf, o);
+        return;
+    }
+    GeVertexCacheEntry *e = &s_vertex_cache[vi & (GE_VERTEX_CACHE_ENTRIES - 1u)];
+    if (e->epoch == s_vertex_cache_epoch
+#if SR_GE_VERTEX_CACHE_MUTANT != 2
+        && e->addr == addr
+#endif
+        ) {
+        *o = e->v;
+        g_ge_vertex_cache_hits++;
+        if (s_primitive_profile_counting) {
+            /* primitive_profile_note_draw counted this use as eligible for each phase; a hit
+             * does none of them, and the samples come from the misses alone. */
+            s_cpu_profile_stats.primitive_profile_vertex_cache_hits++;
+            s_cpu_profile_stats.primitive_profile_eligible[GE_PRIM_PROFILE_VERTEX_FETCH_DECODE]--;
+            s_cpu_profile_stats.primitive_profile_eligible[GE_PRIM_PROFILE_TRANSFORM]--;
+            if (ge.lighting_enable)
+                s_cpu_profile_stats.primitive_profile_eligible[GE_PRIM_PROFILE_LIGHTING]--;
+        }
+        return;
+    }
+    g_ge_vertex_cache_misses++;
+    primitive_profile_begin_vertex();
+    transform_vtx_clip(addr, vf, o);
+    e->addr = addr;
+    e->epoch = s_vertex_cache_epoch;
+    e->v = *o;
 }
 
 /* Smallest clip-space w kept by the near clipper. */
@@ -7114,9 +7284,10 @@ static void draw_prim_xform_triangles(const DrawPrimCtx *c, int rt) {
     }
     int cache_strip = type == 4 && strip_cache_enabled() && count >= 3;
     CVtx strip_prev[2];
+    vertex_cache_begin_draw(idxfmt != 0 || type == 5 || (type == 4 && !cache_strip));
     if (cache_strip) {
-        transform_vtx_clip(prim_vtx_addr(vbase,ibase,idxfmt,0,vf.stride),&vf,&strip_prev[0]);
-        transform_vtx_clip(prim_vtx_addr(vbase,ibase,idxfmt,1,vf.stride),&vf,&strip_prev[1]);
+        transform_vtx_clip_cached(vbase,ibase,idxfmt,0,&vf,&strip_prev[0]);
+        transform_vtx_clip_cached(vbase,ibase,idxfmt,1,&vf,&strip_prev[1]);
     }
     for (int i = 2; i < count; i++) {
         int i0, i1, i2;
@@ -7127,12 +7298,12 @@ static void draw_prim_xform_triangles(const DrawPrimCtx *c, int rt) {
         CVtx cv[3], cl[4];
         if (cache_strip) {
             cv[0] = strip_prev[0]; cv[1] = strip_prev[1];
-            transform_vtx_clip(prim_vtx_addr(vbase,ibase,idxfmt,i2,vf.stride),&vf,&cv[2]);
+            transform_vtx_clip_cached(vbase,ibase,idxfmt,i2,&vf,&cv[2]);
             strip_prev[0] = strip_prev[1]; strip_prev[1] = cv[2];
         } else {
-            transform_vtx_clip(prim_vtx_addr(vbase,ibase,idxfmt,i0,vf.stride),&vf,&cv[0]);
-            transform_vtx_clip(prim_vtx_addr(vbase,ibase,idxfmt,i1,vf.stride),&vf,&cv[1]);
-            transform_vtx_clip(prim_vtx_addr(vbase,ibase,idxfmt,i2,vf.stride),&vf,&cv[2]);
+            transform_vtx_clip_cached(vbase,ibase,idxfmt,i0,&vf,&cv[0]);
+            transform_vtx_clip_cached(vbase,ibase,idxfmt,i1,&vf,&cv[1]);
+            transform_vtx_clip_cached(vbase,ibase,idxfmt,i2,&vf,&cv[2]);
         }
 
         uint64_t acceptance_started = tri_profile_slot == 0 ? SDL_GetTicksNS() : 0;

@@ -151,6 +151,7 @@ class TestGeCaptureWiring(unittest.TestCase):
         self.assertIn('env_enabled("SR_GE_REPLAY_WALL_PROFILE")', replay)
         self.assertIn('getenv("SR_GE_STRIP_CACHE_DISABLE")', ge)
         self.assertIn("strip_prev[0] = strip_prev[1]", ge)
+        self.assertIn('getenv("SR_GE_VERTEX_CACHE_DISABLE")', ge)
         self.assertIn("shadow[invalidations=%llu checks=%llu hits=%llu", gpu)
         self.assertIn("stats_emit(1)", gpu)
         self.assertIn('getenv("SR_GPU_TEX_SHADOW_DISABLE")', gpu)
@@ -283,7 +284,7 @@ class TestGeCaptureWiring(unittest.TestCase):
             "non_triangle_vertex_uses=24 through_vertex_uses=20 "
             "transform_vertex_uses=40 actual_decoded_vertices=60 actual_transformed_vertices=40 "
             "actual_through_vertices=20 strip_cache_commands=2 strip_cache_hits=4 "
-            "through_triangle_candidates=20 transform_triangle_candidates=35 "
+            "vertex_cache_hits=3 through_triangle_candidates=20 transform_triangle_candidates=35 "
             "transform_triangles_drawn=5 transform_triangles_clipped=1 "
             "transform_triangles_rejected=2 non_triangle_primitives=35 vertex_rejects=3 "
             "patch_commands=0 patch_control_vertices=0",
@@ -378,7 +379,14 @@ class TestGeCaptureWiring(unittest.TestCase):
         self.assertIn("$(RT_GE_O)", rule)
         self.assertNotIn("src/rt/ge.c", rule)
         self.assertIn("$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled", rule)
-        self.assertIn("native-core-tests: ge-cpu-profile-validate-selftest", makefile)
+        # The third run: every scene with the per-draw vertex cache off.
+        self.assertIn("\n\tSR_GE_VERTEX_CACHE_DISABLE=1 $(GE_CPU_PROFILE_VALIDATE_SELFTEST)\n", rule + "\n")
+        self.assertIn("native-core-tests: ge-cpu-profile-validate-selftest ge-vertex-cache-mutants",
+                      makefile)
+        mutants = makefile.split("\nge-vertex-cache-mutants:", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("for m in 1 2 3 4 5; do", mutants)
+        self.assertIn("-DSR_GE_VERTEX_CACHE_MUTANT=$$m", mutants)
+        self.assertIn("vertex_cache_overwrite\\[wide-vram-target\\]: cache on and off differ", mutants)
         replay = (RT / "ge_replay.c").read_text(encoding="utf-8")
         self.assertIn("ge_cpu_profile_validate(&ge_cpu_stats", replay)
         self.assertIn("return ge_cpu_failed ? 4 : 0;", replay)

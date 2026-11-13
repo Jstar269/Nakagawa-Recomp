@@ -458,6 +458,25 @@ aggregates the parts, so `CI required` fails when any part fails.
 `tools/test_public_ci_wiring.py` (`NativeToolsPartitionTests`) fails if a serial gate is
 dropped, runs in more than one part, or changes its command.
 
+The native core suite (`native-core-tests`: in `native_tools`' `core` part, in `linux_gcc16`,
+in `windows_runtime`'s `routes` group, and in the nightly and manual `c_coverage` job) includes
+the software GE's per-draw transformed-vertex cache. `ge-cpu-profile-validate-selftest`
+renders indexed lists, fans and strips with the cache on and off (`SR_GE_VERTEX_CACHE_DISABLE`)
+and requires identical colour and depth. Sixteen pairs draw the same mesh twice with one
+transform input changed in between (vertex bytes, view, projection, bone and texgen matrices,
+lights, material, vertex type, morph weights, viewport, texture scale, fog range): the second
+draw must transform every vertex again and match the cache-off draw. Draws whose colour target
+covers their own vertices must bypass the cache and leave identical bytes: a target in RAM, a
+target in VRAM over VRAM vertices, and a VRAM target so wide (65535 pixels) that its last row
+lands on plain-RAM vertices. `ge-vertex-cache-mutants` then compiles `src/rt/ge.c` five more
+times with `SR_GE_VERTEX_CACHE_MUTANT` (1: no new epoch per draw, 2: no address check, 3: VRAM
+vertices cached, 4: cached while rendering to RAM, 5: no check that a VRAM target's rows stay
+below main RAM) in its own build subdirectory and runs the selftest against each; each must
+fail with its own message, mutant 1 must also fail all sixteen state-change pairs with
+differing pixels, and 3, 4 and 5 must fail by differing target bytes. The four mutant builds
+and runs took 40 to 70 seconds on a 12-core Windows desktop under load (2026-11-11), once per
+suite run.
+
 ### Ubuntu packages and mirror outages
 
 Every step that installs Ubuntu packages (the native parts' dependencies, and

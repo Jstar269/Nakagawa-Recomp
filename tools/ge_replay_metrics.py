@@ -286,6 +286,7 @@ def parse_primitive_profile(text: str) -> dict[str, object]:
                 "non_triangle_vertex_uses", "through_vertex_uses", "transform_vertex_uses",
                 "actual_decoded_vertices", "actual_transformed_vertices",
                 "actual_through_vertices", "strip_cache_commands", "strip_cache_hits",
+                "vertex_cache_hits",
                 "through_triangle_candidates", "transform_triangle_candidates",
                 "transform_triangles_drawn", "transform_triangles_clipped",
                 "transform_triangles_rejected", "non_triangle_primitives", "vertex_rejects",
