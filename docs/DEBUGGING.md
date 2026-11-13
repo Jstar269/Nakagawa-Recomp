@@ -461,6 +461,32 @@ non-zero:
   them, so another round would build the same thing.
 - `BRINGUP_CAPTURE_MISSING`: the run named a capture the folder does not hold.
 
+**Data withdrawn from a fixed-address image.** An image without relocation evidence (an overlay
+or an executable loaded at a fixed address) can keep data in its code section, and codegen withdraws
+the seeds whose generated bodies would hold a word that no instruction has, and takes the words
+proven non-code (every path from each runs into such a word) out of the executable spans
+([`ARCHITECTURE.md`](ARCHITECTURE.md#codegen-internals)). Codegen prints one line per such image,
+`codegen: <image>: withdrew N seeds as non-code, W words proven non-code, S executable spans left
+(no relocation evidence; first reserved word: <class> (count), ...)`, where the image is
+the module's name, `executable`, or an `--extra-elf` file's name, and each class (a reserved
+opcode, SPECIAL function or REGIMM `rt`, or a branch with a nonzero `rt`) counts the withdrawals
+whose lowest reserved word is of it. A dispatch into a module's withdrawn span stops with
+`NON_CODE_WITHDRAWN: 0x... is <module>@0x..., in a span the build withdrew as non-code`. In the
+executable the withdrawn words leave its executable spans, so a dispatch there stops as not
+executable at that address, without the module line. Either way the game called into those words, so
+the withdrawal was wrong: report it as a translator bug with the address and the image, not as a
+missing function. A build that stops with `NON_CODE_TRANSLATED` is the same kind of bug, found
+before the run: a generated body owns a word the analysis withdrew. A withdrawn address whose
+words are not proven non-code stays executable: a call there runs on the interpreter floor.
+
+Codegen time on such an image stays high when its data holds many seeds whose bodies reach one
+another by conditional branches: each such body is clean when split at the next seed, so each
+seed is kept as an entry (the rule never takes a body that could translate), and code generation
+then walks each one's unsplit body through the same shared region and stubs it. On one title's
+overlay, 2,283 entries stay stubs and the package's codegen takes about 2,000 s (one reading),
+against 5,644 stubs and 9,698 s without the withdrawal. Remembering a failed walk across entries in codegen is the open follow-up; until
+then the time is the cost of the conservative rule, not a hang.
+
 The share is a time share. It overstates the interpreter's share of instructions, because the
 interpreter is slower per instruction. The exact instruction share still needs a
 `PERF_AOT_INSTRUCTIONS=1` build with `SR_PERF=1`. Time is charged to the tier that is running. A

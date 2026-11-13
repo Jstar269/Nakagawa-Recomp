@@ -1644,6 +1644,24 @@ RecompFn sr_module_code_lookup(uint32_t pc, int *in_bound_image);
 /* Fetch authority: -1 when no bound image owns pc, else 1/0 for whether one of the
  * owning image's executable spans covers pc's complete fetch slot. */
 int  sr_module_code_fetch_authority(uint32_t pc);
+/* Link ranges a module's analysis withdrew as non-code (tools/analyze.py, "Non-code in an
+ * image without relocation evidence"): words of its code section that only seeds running into
+ * reserved encodings reached. They lie outside the module's spans, so neither a body nor the
+ * interpreter runs them. The generated sr_register_all() registers one record per module that
+ * has such ranges, after the module itself; `entries` and `words` count the withdrawn seeds
+ * and words, for a reader of the generated code (the runtime reads neither). The registry
+ * lasts until sr_module_code_reset(), like the module registry. */
+typedef struct SrModuleNonCode {
+    const SrModuleCode *code;
+    const SrModuleSpan *spans;
+    uint32_t nspans;
+    uint32_t entries;
+    uint32_t words;
+} SrModuleNonCode;
+void sr_module_code_non_code_register(const SrModuleNonCode *record);
+/* 1 when `pc` lies in a non-code range of a bound module, with the module's name and the link
+ * address; 0 otherwise. A transfer that stops there names it (dispatch_run_interp). */
+int  sr_module_code_non_code(uint32_t pc, const char **name_out, uint32_t *link_out);
 /* 1 when a bound image covers pc and that image is the translation of code captures (#1933):
  * tools/code_capture.py names each such image code_capture_<load>_<fnv1a64>. */
 int  sr_module_code_capture_covers(uint32_t pc);

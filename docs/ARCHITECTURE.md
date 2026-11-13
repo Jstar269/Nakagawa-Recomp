@@ -220,6 +220,64 @@ These tools run on the development host before the native compiler.
 `codegen.py` is the translation core.
 
 - **Function discovery:** consumes `analyze.py` results.
+- **Non-code in an image without relocation evidence:** when the analyzer has no relocation
+  evidence for an image (`relocated_words` is `None`), it cannot tell a word that holds a code
+  address from any other. That is an overlay or an `ET_EXEC` executable loaded at a fixed address,
+  a code capture, a PRX whose relocation map is empty or that is analyzed without a base (the
+  pipeline never does the latter), and an `ET_REL` or relocation-bearing `ET_EXEC` loaded at a
+  nonzero base, which the loader relocates without recording the words. Its seed sweeps (address
+  pairs, `j`-shaped words, table stores, prologue words, the word after a terminator) and its
+  data-section pointers can then start functions inside the data its code section holds. For such
+  an image `analyze.py` judges every seed and call target the format does not name by the body
+  codegen would emit for it (`_BodyWalk`: the rules of `codegen.function_flow`, every entry and
+  every withdrawn address a boundary), and withdraws it when that body holds a word
+  `reserved_encoding` judges no instruction (a reserved opcode, SPECIAL function or REGIMM `rt`,
+  or a `blez`/`bgtz` form with `rt` set). The emitter and the interpreter refuse every such word,
+  so codegen could not have translated that body: a withdrawal takes no translation away. The body
+  judged is the split walk's (no edge enters another entry), which every form of the generated
+  walk owns. A seed that a body which stays may own (the unsplit walk's reach of a kept entry or
+  of a clean candidate, which follows a conditional edge into another entry) is never withdrawn,
+  and neither are the
+  entry point (and a prologue at the start of the executable segment), the exports and init
+  array, the import stubs, and the addresses a run reached (capture entries and miss seeds,
+  however they were first seeded); one of those whose body holds a reserved word stays. A valid
+  instruction the translator does not support is no evidence, and neither is a transfer out of the
+  image: a fixed-address overlay may call one loaded later. Every body that stays owns its unsplit
+  reach: each candidate whose body holds no reserved word, an entry or not (a clean seed a data
+  body's trace ran over first becomes an entry once that body is withdrawn), and each entry not
+  withdrawn. What withdrawn bodies reach beyond that is their shadow: the sweeps skip it, so a
+  seed whose evidence lies there is no evidence. The void is the part of the shadow from which
+  every path runs into a reserved word (none returns, calls, since a callee may never return,
+  jumps or branches out of the image, stops at `jr`, a syscall, `break` or `eret`, or enters an
+  entry; a branch-likely's delay slot counts only on its taken path): proven never to run as
+  working code. A delay slot needs that proof as a word of its own too (a jump may land on it),
+  and the delay slot of a transfer that stays executable is never void. The rest of the shadow
+  stays executable, as before the withdrawal; a withdrawn address there has no translated body
+  and, if called, runs on the interpreter floor, which refuses at the reserved word if it gets
+  there. Discovery runs again until a pass withdraws nothing.
+  Every entry that is not withdrawn stays an entry in the next pass, so a pass only adds
+  boundaries and no body that stays runs on into words it did not own; each pass that continues
+  withdraws at least one more address, so the loop ends without a limit. One walk answers for every
+  seed of a pass, so a word is stepped once however many bodies own it. A withdrawn address ends
+  every discovery path and stays a dispatch boundary in the generated code. An image whose code
+  holds no reserved word is not walked. The judging walk (`_BodyWalk` in `tools/analyze.py`) follows
+  `codegen._walk_body`'s rules for one shared walk over every seed; `tools/test_analyze_non_code.py`
+  runs both over a seeded corpus of random bodies and fails if a generated body leaves the judged
+  reach, or a judged body is not inside the generated split body. The one difference is a
+  transfer in a delay slot: the judging walk steps such a slot when a branch also lands on it,
+  the generated walk does not, and the emitter refuses every body with one, so it is a stub in
+  either case. In a runtime module the module's spans exclude the void,
+  and the descriptor registers an `SrModuleNonCode` record (count of withdrawn seeds and void words)
+  only for a module that has one, so other descriptors are unchanged; a dispatch that reaches a
+  withdrawn span stops with `NON_CODE_WITHDRAWN` (see [`DEBUGGING.md`](DEBUGGING.md)). The runtime
+  finds a module's span, and the executable's, by a binary search. A module's registration
+  refuses spans out of address order; the executable's spans, which the main image and each
+  `--extra-elf` image register in any order, are kept sorted.
+  In the executable and an `--extra-elf` image the void leaves the registered executable spans, so
+  a dispatch there stops as not executable, without that name. Codegen refuses the build
+  (`NON_CODE_TRANSLATED`) if an entry, or a word it walked for any function it emits (translated
+  or not), lies in the void: the analyzer and the generator would disagree about what is code.
+  Images with relocation evidence are untouched.
 - **Instruction translation:** emits C operating on the shared `CpuState` ABI.
 - **Narrow compatibility translations:** address-specific/custom behavior is allowed only when
   evidence justifies it and should be tracked as semantic debt rather than treated as a general
