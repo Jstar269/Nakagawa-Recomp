@@ -13715,8 +13715,8 @@ static int coherence_run_rtt_1x_reads(void) {
  * the match in the renderer: every "movie frame not found" step then fails
  * (gpu-coherence-selftest-movie-mutant). */
 
-#define MVC_PIC    0x09000000u   /* movie-texture: the picture in guest RAM, 512 texels a row */
-#define MVC_OWNER  0x09F00000u   /* the decoder handle the notes carry */
+#define MVC_PIC    0x08200000u   /* movie-texture: the picture in guest RAM (below user RAM), 512 texels a row */
+#define MVC_OWNER  0x00F00000u   /* the decoder handle the notes carry (an opaque number) */
 #define MVC_BASE   0x04000000u   /* the displayed framebuffer, 8888, stride 512 */
 #define MVC_COPY   0x04110000u   /* movie-texture: a copy of the picture in VRAM, past the framebuffer */
 
