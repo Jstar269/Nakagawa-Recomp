@@ -2460,6 +2460,137 @@ static void test_ge_vram_view_sources(void) {
     printf("VRAM_VIEW sources cases=13\n");
 }
 
+/* The VRAM viewer's Capture row (#314): ge_vramdump_write records each capture's VBLANK and
+ * the viewer's sources at that present, and ge_vram_capture_decode shows a window from the
+ * image the capture wrote, not from VRAM now. Captures go to `dir` and are removed after. */
+static void capture_file(char *path, size_t size, const char *dir, uint32_t vblank,
+                         const char *ext) {
+    snprintf(path, size, "%s/vram_%" PRIu32 ".%s", dir, vblank, ext);
+}
+
+static void test_ge_vram_capture(const char *dir) {
+    static const uint32_t first = 900001u, second = 900002u;
+    GeState *state = ge_state_ptr();
+    GeState saved = *state;
+    GeVramSources src;
+    uint32_t out[8], w = 99u, h = 99u, vblank = 0u;
+    const uint32_t display_px = 0x00112233u, live_px = 0x00FFFFFFu;
+    const uint16_t depth_z = 0xAB00u;
+    const uint32_t texels[2] = {0x80405060u, 0x01020304u};
+    char bin[1024], json[1024];
+    const GeVramWindow display = { 0x44000000u, 512u, 1u, 1u, 3u };
+    const GeVramWindow depth = { 0x04110000u, 512u, 1u, 1u, GE_VRAM_VIEW_DEPTH16 };
+    const GeVramWindow texture = { 0x041C0200u, 2u, 2u, 1u, 3u };
+
+    expect(ge_vram_capture_count() == 0u && !ge_vram_capture_info(0u, &vblank, &src) &&
+           ge_vram_capture_decode(0u, 0, &display, out, 8u, &w, &h) == GE_VRAM_VIEW_CAPTURE_LOST,
+           "vram_capture", "before any capture there is none to show");
+
+    memset(state, 0, sizeof(*state));
+    state->fbp = 0x00044000u;
+    state->fbw = 512u;
+    state->fbfmt = 1u;
+    state->zbp = 0x00110000u;
+    state->tex_addr = texture.addr;
+    state->tex_w = 2;
+    state->tex_h = 1;
+    state->tex_bufw = 2u;
+    state->tex_fmt = 3u;
+    memcpy(SR_HOST(0x04000000u), &display_px, 4u);
+    memcpy(SR_HOST(0x04110000u), &depth_z, 2u);
+    memcpy(SR_HOST(texture.addr), texels, sizeof texels);
+    expect(ge_vramdump_write(dir, first, 0x44000000u, 512u, 3u) == 1,
+           "vram_capture", "the capture is written");
+    expect(ge_vram_capture_count() == 1u && ge_vram_capture_info(0u, &vblank, &src) &&
+           vblank == first && src.present[GE_VRAM_VIEW_DISPLAY] &&
+           src.window[GE_VRAM_VIEW_DISPLAY].addr == 0x44000000u &&
+           src.window[GE_VRAM_VIEW_DISPLAY].format == 3u &&
+           src.window[GE_VRAM_VIEW_DRAW].addr == 0x04044000u &&
+           src.window[GE_VRAM_VIEW_DEPTH].addr == 0x04110000u &&
+           src.present[GE_VRAM_VIEW_TEXTURE] && !src.texture_swizzled,
+           "vram_capture", "the capture records its VBLANK and the sources at its present");
+
+    /* The game runs on: VRAM and the GE state change after the capture. */
+    memcpy(SR_HOST(0x04000000u), &live_px, 4u);
+    memset(SR_HOST(0x04110000u), 0, 2u);
+    memset(SR_HOST(texture.addr), 0, sizeof texels);
+    state->fbp = 0x00088000u;
+    expect(ge_vram_capture_info(0u, NULL, &src) &&
+           src.window[GE_VRAM_VIEW_DRAW].addr == 0x04044000u,
+           "vram_capture", "a capture's sources stay those of its present");
+    expect(ge_vram_view_decode(0, &display, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+           out[0] == 0xFFFFFFFFu, "vram_capture", "VRAM now holds the new pixel");
+    expect(ge_vram_capture_decode(0u, 0, &display, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+           out[0] == 0xFF112233u && w == 1u && h == 1u,
+           "vram_capture", "the capture shows the pixel it captured, opaque, uncached view folded");
+    expect(ge_vram_capture_decode(0u, 0, &depth, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+           out[0] == 0xFFABABABu, "vram_capture", "a captured depth buffer decodes as DEPTH16");
+    expect(ge_vram_capture_decode(0u, 1, &texture, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+           out[0] == 0xFF405060u && out[1] == 0xFF020304u && w == 2u && h == 1u,
+           "vram_capture", "a captured linear 8888 texture decodes from the image");
+
+    {
+        const GeVramWindow clut = { texture.addr, 2u, 2u, 1u, 5u };
+        const GeVramWindow past_end = { 0x041FFFFCu, 4u, 4u, 1u, 3u };
+        const GeVramWindow main_ram = { 0x08800000u, 4u, 1u, 1u, 3u };
+        const GeVramWindow wide = { 0x04000000u, 4u, 3u, 3u, 0u };
+        memset(out, 0xA5, sizeof out);
+        expect(ge_vram_capture_decode(0u, 1, &clut, out, 8u, &w, &h) ==
+                   GE_VRAM_VIEW_CAPTURE_TEXTURE && out[0] == 0xA5A5A5A5u,
+               "vram_capture", "a captured palette texture is refused, for nk_cli vram");
+        expect(ge_vram_capture_decode(0u, 0, &past_end, out, 8u, &w, &h) ==
+                   GE_VRAM_VIEW_UNREADABLE &&
+               ge_vram_capture_decode(0u, 0, &main_ram, out, 8u, &w, &h) ==
+                   GE_VRAM_VIEW_UNREADABLE &&
+               out[0] == 0xA5A5A5A5u && w == 0u && h == 0u,
+               "vram_capture", "a window not wholly inside the captured VRAM is refused");
+        expect(ge_vram_capture_decode(0u, 0, &wide, out, 8u, &w, &h) == GE_VRAM_VIEW_NO_ROOM &&
+               ge_vram_capture_decode(1u, 0, &display, out, 8u, &w, &h) ==
+                   GE_VRAM_VIEW_CAPTURE_LOST && out[0] == 0xA5A5A5A5u,
+               "vram_capture", "no room, or no such capture, is refused");
+    }
+
+    state->tex_swizzle = 1;
+    expect(ge_vramdump_write(dir, second, 0x44000000u, 512u, 3u) == 1 &&
+           ge_vram_capture_count() == 2u && ge_vram_capture_info(1u, &vblank, &src) &&
+           vblank == second && src.texture_swizzled &&
+           ge_vram_capture_decode(1u, 1, &texture, out, 8u, &w, &h) == GE_VRAM_VIEW_CAPTURE_TEXTURE &&
+           ge_vram_capture_decode(1u, 0, &display, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+           out[0] == 0xFFFFFFFFu,
+           "vram_capture", "captures are kept in order; a swizzled texture is refused");
+
+    /* A capture file changed or removed since it was written is refused, not shown. */
+    capture_file(bin, sizeof bin, dir, first, "bin");
+    {
+        FILE *file = fopen(bin, "r+b");
+        int changed = file != NULL && fseek(file, 0x100L, SEEK_SET) == 0 && fputc(0x5A, file) != EOF;
+        if (file) changed = fclose(file) == 0 && changed;
+        expect(changed && ge_vram_capture_decode(0u, 0, &display, out, 8u, &w, &h) ==
+                              GE_VRAM_VIEW_CAPTURE_LOST,
+               "vram_capture", "a changed capture file is refused");
+    }
+    /* One that grew past the captured 2 MiB is refused too, though it starts with the image. */
+    capture_file(bin, sizeof bin, dir, second, "bin");
+    {
+        FILE *file = fopen(bin, "ab");
+        int grown = file != NULL && fputc(0x00, file) != EOF;
+        if (file) grown = fclose(file) == 0 && grown;
+        expect(grown && ge_vram_capture_decode(1u, 0, &display, out, 8u, &w, &h) ==
+                            GE_VRAM_VIEW_CAPTURE_LOST,
+               "vram_capture", "a capture file that grew is refused");
+    }
+    for (uint32_t v = first; v <= second; v++) {
+        capture_file(bin, sizeof bin, dir, v, "bin");
+        capture_file(json, sizeof json, dir, v, "json");
+        remove(bin);
+        remove(json);
+    }
+    expect(ge_vram_capture_decode(1u, 0, &display, out, 8u, &w, &h) == GE_VRAM_VIEW_CAPTURE_LOST,
+           "vram_capture", "a removed capture file is refused");
+    *state = saved;
+    printf("VRAM_CAPTURE cases=15\n");
+}
+
 static void test_ge_bounding_box_branch(void) {
     /* Transform-mode boxes under emit_setup's perspective (w = -z) and 480x272 viewport. */
     s_vtx = BBOX_VERTS;
@@ -2822,6 +2953,22 @@ int main(int argc, char **argv) {
     test_ge_bounding_box_branch();
     test_ge_vram_view_decode();
     test_ge_vram_view_sources();
+    {
+        /* The capture files go next to this binary, in the build tree. */
+        char dir[1024];
+        const char *slash = strrchr(argv[0], '/');
+        const char *back = strrchr(argv[0], '\\');
+        size_t length;
+        if (back && (!slash || back > slash)) slash = back;
+        length = slash ? (size_t)(slash - argv[0]) : 0u;
+        if (length == 0u || length >= sizeof dir) {
+            snprintf(dir, sizeof dir, ".");
+        } else {
+            memcpy(dir, argv[0], length);
+            dir[length] = '\0';
+        }
+        test_ge_vram_capture(dir);
+    }
 
     printf("ge_cpu_profile_validate_selftest: strip_cache=%s scenarios=%u faults=%u failures=%d\n",
            strip_cache ? "on" : "off", s_scenarios, s_faults, s_failures);

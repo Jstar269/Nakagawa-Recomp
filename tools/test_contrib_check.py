@@ -437,6 +437,7 @@ class TestStrictCompileOnUnchangedMain(unittest.TestCase):
         "tests/native/test_player_screens.c",
         "src/rt/gpu_sdl3vk/ge_gpu.c",
         "fixtures/cosim/cosim_selftest.c",
+        "tests/native/texrepl_selftest.c",
     )
 
     def test_no_unchanged_source_fails_the_strict_compile(self) -> None:

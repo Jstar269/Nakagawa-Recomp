@@ -6312,6 +6312,130 @@ static void test_loadexec_retires_scheduler_world(void) {
            "replacement root starts with its own module $gp");
 }
 
+/* An HLE service thread (#1139): a kernel thread whose body is a host function. It is created
+ * with the kernel's user-thread checks and listed like any thread; it waits untimed in a delay,
+ * a kick hands it a guest-time deadline, it calls a guest function on its own thread, stack and
+ * $gp exactly at that deadline, and a kick to stop ends its body, after which the thread is gone.
+ *
+ * MUTANT: drop the priority check in sched_create_service_thread -- priority 0 is accepted.
+ * MUTANT: make sched_service_kick a no-op for a waiting thread -- the untimed wait never ends, no
+ *   call is made. MUTANT: wait with SCHED_WAIT_FOREVER whatever the deadline -- no call at the
+ *   deadline. MUTANT: exit a service thread with sched_exit_current -- its TCB stays listed. */
+enum {
+    SVC_MAIN_ENTRY = 0x09310000u,
+    SVC_GUEST_FN = 0x09310100u,
+    SVC_DEADLINE_US = 5000u
+};
+static struct {
+    uint32_t uid;
+    uint64_t deadline;
+    int stop, done, body_returned, listed, listed_delayed;
+    unsigned calls;
+    uint32_t body_sp, body_gp, call_uid, call_a0, call_a1, call_a2, call_sp, call_gp, call_ra;
+    uint64_t call_us;
+} g_svc;
+
+static void svc_guest_fn(CpuState *s) {
+    g_svc.calls++;
+    g_svc.call_uid = sched_current_uid();
+    g_svc.call_a0 = s->r[4];
+    g_svc.call_a1 = s->r[5];
+    g_svc.call_a2 = s->r[6];
+    g_svc.call_sp = s->r[29];
+    g_svc.call_gp = s->r[28];
+    g_svc.call_ra = s->r[31];
+    g_svc.call_us = sched_vtime_us();
+}
+
+static void svc_body(CpuState *cpu, void *arg) {
+    (void)arg;
+    g_svc.body_sp = cpu->r[29];
+    g_svc.body_gp = cpu->r[28];
+    while (!g_svc.stop) {
+        if (g_svc.deadline != SCHED_WAIT_FOREVER && sched_vtime_us() >= g_svc.deadline) {
+            g_svc.deadline = SCHED_WAIT_FOREVER;
+            cpu->r[4] = 1u;
+            cpu->r[5] = 0x80410b02u;
+            cpu->r[6] = 0xabcu;
+            cpu->r[29] = g_svc.body_sp;
+            cpu->r[31] = SR_HOST_RETURN_PC;
+            cpu->pc = SVC_GUEST_FN;
+            TestBody main_body = g_test_body;   /* the dispatch stand-in runs g_test_body */
+            g_test_body = svc_guest_fn;
+            dispatch_from_host(cpu, SVC_GUEST_FN);
+            g_test_body = main_body;
+            continue;
+        }
+        sched_service_wait(g_svc.deadline);
+    }
+    g_svc.body_returned = 1;
+}
+
+static void svc_visit(uint32_t uid, void *ctx) {
+    if (uid == g_svc.uid) (*(int *)ctx)++;
+}
+
+static void svc_main_body(CpuState *s) {
+    expect(sched_create_service_thread("SvcBad", 0, 0x1000u, svc_body, NULL) == 0x80020193u &&
+           sched_create_service_thread("SvcBad", 0x80, 0x1000u, svc_body, NULL) == 0x80020193u &&
+           sched_create_service_thread("SvcBad", 0x30, 0x1ffu, svc_body, NULL) == 0x80020194u &&
+           s_ntcb == 1,
+           "service thread: the kernel's priority and stack checks refuse and create nothing");
+    g_svc.deadline = SCHED_WAIT_FOREVER;
+    g_svc.uid = sched_create_service_thread("SvcTest", 0x30, 0x1000u, svc_body, NULL);
+    TCB *t = tcb_by_uid(g_svc.uid);
+    expect(g_svc.uid < 0x80000000u && t && strcmp(t->name, "SvcTest") == 0 &&
+           t->priority == 0x30 && t->stack_size >= 0x1000u && t->state == TH_READY,
+           "service thread: created and started with its name, priority and stack");
+    sched_visit_threadman_ids(SR_TMID_THREAD, svc_visit, &g_svc.listed);
+    expect(g_svc.listed == 1, "service thread: listed among the threads");
+
+    sched_delay_current(1000u);   /* the service thread runs and parks with no deadline */
+    sched_visit_threadman_ids(SR_TMID_DELAY_THREAD, svc_visit, &g_svc.listed_delayed);
+    expect(t->state == TH_WAIT_DELAY && t->wake == SCHED_WAIT_FOREVER && g_svc.calls == 0 &&
+           g_svc.listed_delayed == 1 && g_svc.body_sp == t->sp_init && g_svc.body_gp == t->gp_init &&
+           t->gp_init == (s->r[28] ? s->r[28] : s_gp),
+           "service thread: an untimed wait is a delay with no deadline, on its own stack and $gp");
+
+    const uint64_t t0 = sched_vtime_us();
+    g_svc.deadline = t0 + SVC_DEADLINE_US;
+    sched_service_kick(g_svc.uid);
+    sched_delay_current(1000u);
+    expect(g_svc.calls == 0 && t->state == TH_WAIT_DELAY && t->wake == g_svc.deadline,
+           "service thread: a kick ends the untimed wait; it then waits for its deadline");
+    sched_delay_current(SVC_DEADLINE_US);
+    expect(g_svc.calls == 1 && g_svc.call_uid == g_svc.uid && g_svc.call_us == t0 + SVC_DEADLINE_US &&
+           g_svc.call_a0 == 1u && g_svc.call_a1 == 0x80410b02u && g_svc.call_a2 == 0xabcu &&
+           g_svc.call_sp == t->sp_init && g_svc.call_gp == t->gp_init &&
+           g_svc.call_ra == SR_HOST_RETURN_PC,
+           "service thread: at the deadline it calls the guest function on its own thread");
+
+    g_svc.stop = 1;
+    sched_service_kick(g_svc.uid);
+    sched_delay_current(1000u);
+    g_svc.listed = 0;
+    sched_visit_threadman_ids(SR_TMID_THREAD, svc_visit, &g_svc.listed);
+    expect(g_svc.body_returned && tcb_by_uid(g_svc.uid) == NULL && g_svc.listed == 0 &&
+           g_svc.calls == 1,
+           "service thread: when its body returns the thread exits and is deleted");
+    g_svc.done = 1;
+}
+
+static int svc_stop(void) { return g_svc.done; }
+
+static void test_service_thread_waits_calls_and_ends(void) {
+    reset_sched();
+    begin_clock_fixture(1, 1000u);   /* paced on the test clock: a wait ends exactly at its deadline */
+    memset(&g_svc, 0, sizeof(g_svc));
+    g_cpu_store.r[28] = 0x002d8000u;
+    g_test_body = svc_main_body;
+    sr_sched_stop_requested = svc_stop;
+    sched_run(SVC_MAIN_ENTRY, 0u, 0u);
+    sr_sched_stop_requested = NULL;
+    s_host_ns_fn = NULL;
+    expect(g_svc.done, "service thread: the cell ran to its end");
+}
+
 /* ---- fast forward (recomp.h) ----------------------------------------------------------- */
 
 static void ff_reset(void) {
@@ -6505,6 +6629,7 @@ int main(int argc, char **argv) {
     test_stack_placement_prefers_the_highest_free_block();
     test_libc_thread_relocation();
     test_coro_self_switch_and_park();
+    test_service_thread_waits_calls_and_ends();
     test_callback_abi_packing();
     test_llsc_context_switch_breaks_the_window();
     test_llsc_yield_without_switch_keeps_the_window();

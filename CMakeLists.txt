@@ -23,6 +23,7 @@ set(CORE_SOURCES
     src/core/nk_font.c
     src/core/nk_pgf_host.c
     src/rt/pgf_public.c
+    src/rt/texrepl.c
     src/core/nk_iso.c
     src/core/nk_library.c
     src/core/nk_launch.c

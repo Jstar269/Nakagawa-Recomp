@@ -3205,6 +3205,7 @@ static void test_every_error_code_has_a_friendly_card(void) {
         "DISC_IMAGE_TRUNCATED", "PBP_PACKAGE_UNSUPPORTED", "PREREQUISITE_FETCH_START_FAILED",
         "PYTHON_BOOTSTRAP_FAILED", "DISK_FULL", "OFFLINE_OR_NETWORK_ERROR", "HASH_MISMATCH",
         "ENHANCEMENT_UNAVAILABLE", "PACKAGE_REBUILD_NOT_INCOMPATIBLE", "LAUNCH_DETAILS_UNAVAILABLE",
+        "TEXTURE_PACK_REFUSED",
     };
     PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
     assert(app != NULL);
@@ -9035,7 +9036,7 @@ static void test_play_mode_settings(void) {
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
                                       "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\"},") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -9234,7 +9235,7 @@ static void test_play_mode_sas_settings(void) {
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
                                       "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9262,7 +9263,7 @@ static void test_play_mode_sas_settings(void) {
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
                                       "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -9330,7 +9331,7 @@ static void test_play_mode_cull_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\", "
                                       "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -9420,7 +9421,7 @@ static void test_play_mode_stick_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"on\", "
                                       "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\"}") != NULL);
         free(saved);
     }
 
@@ -9584,7 +9585,7 @@ static void test_play_mode_load_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
                                       "\"load\": \"fast\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST95001\": {\"mode\": \"ace\", \"load\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9686,7 +9687,7 @@ static void test_play_mode_ssaa_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\", \"mips\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\", \"mips\": \"off\", \"texpack\": \"off\"}") != NULL);
         assert(strstr(saved, "\"ssaa\": \"4\"}") != NULL && strstr(saved, "\"ssaa\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9768,7 +9769,8 @@ static void test_play_mode_mips_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", \"mips\": \"on\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", \"mips\": \"on\", "
+                                      "\"texpack\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST95001\": {\"mode\": \"enhanced\", \"mips\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9849,7 +9851,7 @@ static void test_play_mode_tess_settings(void) {
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
                                       "\"upscale\": \"off\", \"stick\": \"off\", \"load\": \"off\", "
                                       "\"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);
@@ -9911,7 +9913,8 @@ static void test_graphics_presets(void) {
     char note[192];
     PlayerPlayResolved r, custom_r;
     NkRuntimeConfig config, custom_config;
-    PlayerSettings custom;
+    /* static: PlayerSettings is some 450 KB, and three on the stack overflow Windows' 1 MB main stack */
+    static PlayerSettings custom;
     assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
     snprintf(root, sizeof(root), "%s%cgraphics_preset_probe", cache_root, sep);
     assert(nk_platform_mkdir_p(root));
@@ -9934,7 +9937,7 @@ static void test_graphics_presets(void) {
         const PlayerGraphicsPresetRow *row = player_graphics_preset_row(p);
         assert(row && row->word && row->label && row->value);
         for (int fs = 0; fs < 2; fs++) {
-            PlayerSettings expected;
+            static PlayerSettings expected;   /* static: see custom above */
             player_app_settings_init_default(&app->settings);
             app->settings.fullscreen = fs != 0;
             app->settings.resolution_scale = row->resolution_scale == 1 ? 2 : 1;
@@ -10040,7 +10043,8 @@ static void test_graphics_presets(void) {
 
             /* A game's own value for a part wins over the preset. */
             {
-                PlayerSettings own = app->settings;
+                static PlayerSettings own;   /* static: see custom above */
+                own = app->settings;
                 PlayerTitlePlay *t = &own.title_play[0];
                 memset(t, 0, sizeof(*t));
                 snprintf(t->key, sizeof(t->key), "TEST92150"); /* its settings key */
@@ -10398,7 +10402,7 @@ static void test_play_mode_twin_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
                                       "\"load\": \"off\", \"twin\": \"on\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -10425,7 +10429,7 @@ static void test_play_mode_twin_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
                                       "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"on\"}") != NULL);
         free(saved);
     }
@@ -10584,6 +10588,7 @@ static void expect_line_parses_in_runtime(const PlayerPlayResolved *r) {
     assert(c.smooth == (r->part[PLAYER_PART_SMOOTH] ? ACE_SMOOTH_X2 : ACE_SMOOTH_OFF));
     assert(c.sas == (r->part[PLAYER_PART_SAS] ? ACE_SAS_SINC : ACE_SAS_OFF));
     assert(c.twin == (r->part[PLAYER_PART_TWIN] ? 1 : 0));
+    assert(c.texpack == r->part[PLAYER_PART_TEXPACK]);
     assert(ace_format(&c, canonical, sizeof(canonical)) && strcmp(canonical, line) == 0);
 }
 
@@ -10623,6 +10628,32 @@ static void test_play_mode_line_parses_in_runtime(void) {
         for (int p = 0; p < PLAYER_PART_COUNT; p++) own->part[p] = 0;  /* every part off */
         player_play_resolve(&settings, "TEST93001", &r);
         expect_line_parses_in_runtime(&r);
+        /* Every part at its largest value, with a pack stored so texpack is in effect. In Ace every key
+           the line can carry is then on, so the line's own key order (ace_format's), not the enum's
+           row order, decides where each lands: texpack after ssaa, before cull, and cull last. */
+        settings.title_pack_count = 1;
+        memcpy(settings.title_packs[0].key, "TEST93001", sizeof("TEST93001"));
+        snprintf(settings.title_packs[0].path, sizeof(settings.title_packs[0].path), "%s",
+                 "/packs/every-part");
+        for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+            const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+            int top = info->values[0];   /* the largest value: on, or the highest factor */
+            for (int i = 1; i < info->value_count; i++) if (info->values[i] > top) top = info->values[i];
+            own->part[p] = top;
+        }
+        player_play_resolve(&settings, "TEST93001", &r);
+        assert(r.part[PLAYER_PART_TEXPACK] == 1);
+        expect_line_parses_in_runtime(&r);
+        {
+            char line[ACE_SPEC_MAX];
+            assert(player_play_launch_line(&r, line, sizeof(line)));
+            const size_t n = strlen(line);
+            if (modes[m] == PLAYER_PLAY_ACE)
+                assert(n > 26u && strcmp(line + n - 26u, ";ssaa=4;texpack=on;cull=on") == 0);
+            else
+                assert(n > 18u && strcmp(line + n - 18u, ";ssaa=4;texpack=on") == 0 && !strstr(line, "cull"));
+        }
+        settings.title_pack_count = 0;
         own->mode = PLAYER_PLAY_AUTHENTIC;                            /* the title's Authentic */
         player_play_resolve(&settings, "TEST93001", &r);
         assert(!r.on);
@@ -10726,7 +10757,7 @@ static void test_play_mode_upscale_settings(void) {
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
                                       "\"upscale\": \"fsr1\", \"stick\": \"off\", \"load\": \"off\", "
                                       "\"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -10743,6 +10774,384 @@ static void test_play_mode_upscale_settings(void) {
     free(back);
     free(app);
     printf("[PLAYER_STATE_TEST] sharper enlarging is read, resolved, saved and exported PASSED\n");
+}
+
+/* A title's texture pack (docs/ENHANCEMENT_CONTRACT.md 10.12, 11.3.4): chosen on its page, read as
+ * the runtime reads it before it is stored, kept in settings.json by disc ID, carried on the launch
+ * line as texpack=on with its folder in NkRuntimeConfig.texpack_dir, refused whole when it does not
+ * read (on choosing and again at launch), and off for Authentic, a title without a pack, the part
+ * off and the acceptance checkpoint. */
+static void test_play_mode_texpack_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800], good[800], bad[800], file[900];
+    char line[ACE_SPEC_MAX];
+    PlayerPlayResolved r;
+    const PlayerEnhancedPartInfo *info = player_enhanced_part(PLAYER_PART_TEXPACK);
+    assert(info && strcmp(info->key, "texpack") == 0 && info->fresh == 0 && info->value_count == 2);
+    assert(strstr(info->sentence, "The game receives changed pictures.") != NULL);
+    for (int preset = PLAYER_PRESET_LOW; preset < PLAYER_PRESET_COUNT; preset++)
+        assert(player_graphics_preset_row(preset)->part[PLAYER_PART_TEXPACK] == -1);
+
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%ctexpack_settings_probe", cache_root, sep);
+    snprintf(good, sizeof(good), "%s%cHD pack", root, sep);
+    snprintf(bad, sizeof(bad), "%s%cbroken", root, sep);
+    assert(nk_platform_mkdir_p(good) && nk_platform_mkdir_p(bad));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    /* Two lines: one image, one texture to leave alone (PPSSPP's layout; no image is decoded). */
+    snprintf(file, sizeof(file), "%s%ctextures.ini", good, sep);
+    write_text_file(file, "[options]\nversion = 1\nhash = quick\n[hashes]\n"
+                          "0880000004040000deadbeef = a.png\n0880100004040000cafef00d =\n");
+    snprintf(file, sizeof(file), "%s%ctextures.ini", bad, sep);
+    write_text_file(file, "[options]\nhash = md5\n");
+
+    PlayerTexturePackInfo pack;
+    assert(player_texture_pack_inspect(good, NULL, &pack) && pack.ok && pack.textures == 2u &&
+           strcmp(pack.name, "HD pack") == 0);
+    assert(player_texture_pack_inspect(good, "TEST95001", &pack) && pack.ok);
+    assert(!player_texture_pack_inspect("", NULL, &pack) && !pack.ok);
+    /* A path the player could not keep is refused before anything is read: a relative one (read
+       against the game's working folder, not the player's), one that is not UTF-8 (settings.json
+       would no longer load), and one too long to store. */
+    assert(!player_texture_pack_inspect("relative pack", NULL, &pack) &&
+           strstr(pack.error, "not a full path") != NULL);
+    {
+        char odd[900], longer[900];
+        snprintf(odd, sizeof(odd), "%s%c\xff\xfe pack", root, sep);
+        assert(!player_texture_pack_inspect(odd, NULL, &pack) &&
+               strstr(pack.error, "not valid UTF-8") != NULL && strcmp(pack.name, "?") == 0);
+        int n = snprintf(longer, sizeof(longer), "%s", root);
+        while (n < 600) longer[n++] = 'x';
+        longer[n] = '\0';
+        assert(!player_texture_pack_inspect(longer, NULL, &pack) &&
+               strstr(pack.error, "512 characters") != NULL);
+    }
+    /* A pack whose [games] names other games only is made for another game: refused, naming it.
+       One that names this game (any case) reads, and so does one that names none. */
+    {
+        char other[800], mine[800];
+        snprintf(other, sizeof(other), "%s%cother game", root, sep);
+        snprintf(mine, sizeof(mine), "%s%cthis game", root, sep);
+        assert(nk_platform_mkdir_p(other) && nk_platform_mkdir_p(mine));
+        snprintf(file, sizeof(file), "%s%ctextures.ini", other, sep);
+        write_text_file(file, "[options]\nhash = quick\n[games]\nULUS10515 = textures.ini\n"
+                              "NPJH50001 = textures.ini\n");
+        snprintf(file, sizeof(file), "%s%ctextures.ini", mine, sep);
+        write_text_file(file, "[options]\nhash = quick\n[games]\nulus10515 = textures.ini\n"
+                              "test95001 = textures.ini\n");
+        assert(!player_texture_pack_inspect(other, "TEST95001", &pack) && !pack.ok &&
+               strcmp(pack.other_game, "ULUS10515") == 0 &&
+               strstr(pack.error, "made for ULUS10515 and other games") != NULL);
+        assert(player_texture_pack_inspect(other, "ulus10515", &pack) && pack.ok);
+        assert(player_texture_pack_inspect(other, NULL, &pack) && pack.ok);
+        assert(player_texture_pack_inspect(mine, "TEST95001", &pack) && pack.ok);
+    }
+    assert(!player_texture_pack_inspect(bad, NULL, &pack) && !pack.ok && pack.error[0] &&
+           strcmp(pack.name, "broken") == 0);
+
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+    player_app_settings_init_default(&app->settings);
+    app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+    app->game_count = 3;
+    snprintf(app->games[0].disc_id, sizeof(app->games[0].disc_id), "TEST95001");
+    snprintf(app->games[1].disc_id, sizeof(app->games[1].disc_id), "TEST95002");
+    snprintf(app->games[2].disc_id, sizeof(app->games[2].disc_id), "TEST95003");
+    assert(strlen(path) < sizeof(app->settings_path));
+    memcpy(app->settings_path, path, strlen(path) + 1u);
+
+    /* A pack that does not read is refused with its reason and changes nothing. */
+    assert(!player_app_set_title_pack(app, 0, bad));
+    assert(strcmp(app->last_error.error_code, "TEXTURE_PACK_REFUSED") == 0);
+    assert(strstr(app->last_error.message, pack.error) != NULL);
+    assert(player_settings_title_pack(&app->settings, "TEST95001") == NULL);
+    assert(player_app_title_part(app, 0, PLAYER_PART_TEXPACK) == -1);
+    app->last_error.error_code[0] = '\0';
+    {
+        /* So is a pack made for another game, and a folder whose path is not UTF-8: nothing is
+           stored, and the settings file still loads. */
+        char other[800], odd[900];
+        snprintf(other, sizeof(other), "%s%cother game", root, sep);
+        assert(!player_app_set_title_pack(app, 0, other));
+        assert(strcmp(app->last_error.error_code, "TEXTURE_PACK_REFUSED") == 0 &&
+               strstr(app->last_error.message, "made for ULUS10515") != NULL);
+        snprintf(odd, sizeof(odd), "%s%c\xff pack", root, sep);
+        assert(!player_app_set_title_pack(app, 0, odd));
+        assert(player_settings_title_pack(&app->settings, "TEST95001") == NULL);
+        app->last_error.error_code[0] = '\0';
+        assert(player_app_save_settings(app, path) == NK_OK);
+        memset(back, 0, sizeof(*back));
+        assert(player_app_load_settings(back, path) == NK_OK && back->settings_notice[0] == '\0');
+    }
+
+    /* One that reads is stored, and choosing it turns the part on for that title alone. */
+    assert(player_app_set_title_pack(app, 0, good));
+    assert(strcmp(player_settings_title_pack(&app->settings, "TEST95001"), good) == 0);
+    assert(player_app_title_part(app, 0, PLAYER_PART_TEXPACK) == 1);
+    assert(app->settings.enhanced.part[PLAYER_PART_TEXPACK] == 0);
+    player_play_resolve(&app->settings, "TEST95001", &r);
+    assert(r.on && r.part[PLAYER_PART_TEXPACK] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 11, ";texpack=on") == 0);
+    expect_line_parses_in_runtime(&r);
+    {
+        NkRuntimeConfig config;
+        memset(&config, 0, sizeof(config));
+        player_play_config_session(&app->settings, "TEST95001", false, false, &config, NULL);
+        assert(strcmp(config.texpack_dir, good) == 0 && strstr(config.ace_spec, ";texpack=on"));
+        /* The acceptance checkpoint runs authentic: no line, no folder. */
+        player_play_config_session(&app->settings, "TEST95001", false, true, &config, NULL);
+        assert(strcmp(config.ace_spec, "off") == 0 && config.texpack_dir[0] == '\0');
+        /* A title with no pack: nothing, even with the library's part on. */
+        app->settings.enhanced.part[PLAYER_PART_TEXPACK] = 1;
+        player_play_config_session(&app->settings, "TEST95002", false, false, &config, &r);
+        assert(r.on && r.part[PLAYER_PART_TEXPACK] == 0 && config.texpack_dir[0] == '\0' &&
+               strstr(config.ace_spec, "texpack") == NULL);
+        expect_line_parses_in_runtime(&r);
+        app->settings.enhanced.part[PLAYER_PART_TEXPACK] = 0;
+        /* Ace with its 60 FPS game logic keeps the pack. */
+        player_play_resolve(&app->settings, "TEST95001", &r);
+        player_play_apply_logic_60(&r, true);
+        assert(r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_TEXPACK] == 1);
+        expect_line_parses_in_runtime(&r);
+    }
+    /* The part off for the title keeps the folder and sends nothing. */
+    player_app_cycle_title_part(app, 0, PLAYER_PART_TEXPACK);          /* on -> off */
+    assert(player_app_title_part(app, 0, PLAYER_PART_TEXPACK) == 0);
+    player_play_resolve(&app->settings, "TEST95001", &r);
+    assert(r.on && r.part[PLAYER_PART_TEXPACK] == 0 &&
+           player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "texpack") == NULL);
+    assert(player_settings_title_pack(&app->settings, "TEST95001") != NULL);
+    player_app_cycle_title_part(app, 0, PLAYER_PART_TEXPACK);          /* off -> library (off) */
+    player_app_cycle_title_part(app, 0, PLAYER_PART_TEXPACK);          /* library -> on */
+    assert(player_app_title_part(app, 0, PLAYER_PART_TEXPACK) == 1);
+    /* Authentic turns it off with everything else. */
+    {
+        NkRuntimeConfig config;
+        memset(&config, 0, sizeof(config));
+        app->settings.enhanced.library = PLAYER_PLAY_AUTHENTIC;
+        player_play_config_session(&app->settings, "TEST95001", false, false, &config, &r);
+        assert(!r.on && strcmp(config.ace_spec, "off") == 0 && config.texpack_dir[0] == '\0');
+        app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+    }
+
+    /* The settings file keeps it by disc ID, the folder escaped, and reads it back. */
+    assert(player_app_set_title_pack(app, 2, good));
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        char expect[1800];
+        size_t used = (size_t)snprintf(expect, sizeof(expect), "\"texture_packs\": {\"TEST95001\": \"");
+        for (const char *c = good; *c && used + 3 < sizeof(expect); c++) {
+            if (*c == '\\' || *c == '"') expect[used++] = '\\';
+            expect[used++] = *c;
+        }
+        expect[used] = '\0';
+        assert(saved && strstr(saved, expect) != NULL);
+        assert(strstr(saved, "\"TEST95003\": \"") != NULL && strstr(saved, "TEST95002\": \"") == NULL);
+        assert(strstr(saved, "\"TEST95001\": {\"mode\": \"library\", \"texpack\": \"on\"}") != NULL);
+        free(saved);
+    }
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.title_pack_count == 2);
+    assert(strcmp(player_settings_title_pack(&back->settings, "TEST95001"), good) == 0);
+    assert(strcmp(player_settings_title_pack(&back->settings, "TEST95003"), good) == 0);
+    player_play_resolve(&back->settings, "TEST95001", &r);
+    assert(r.on && r.part[PLAYER_PART_TEXPACK] == 1);
+    /* A malformed member is skipped, and the player is told; the rest still read. */
+#if defined(_WIN32)
+#define TEXPACK_JSON_FULL "C:\\\\packs\\\\\\\"q\\\""
+#define TEXPACK_FULL "C:\\packs\\\"q\""
+#else
+#define TEXPACK_JSON_FULL "/packs/\\\"q\\\""
+#define TEXPACK_FULL "/packs/\"q\""
+#endif
+    write_text_file(path, "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\"},"
+                          " \"texture_packs\": {\"nonsense\": \"x\", \"TEST95002\": 7,"
+                          " \"TEST95003\": \"" TEXPACK_JSON_FULL "\"}}");
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.title_pack_count == 1);
+    assert(strcmp(player_settings_title_pack(&back->settings, "TEST95003"), TEXPACK_FULL) == 0);
+    assert(strstr(back->settings_notice, "2 texture pack choices") != NULL);
+    /* A relative folder and one past the store's 511 bytes are not kept either. A lower-case disc
+       ID is the same title as its upper-case form, and of two members for one title the last is
+       kept, as a JSON object reads. */
+    {
+        char json[2400], longer[700];
+        int n = snprintf(longer, sizeof(longer), "%s", TEXPACK_JSON_FULL); /* JSON text */
+        while (n < 600) longer[n++] = 'x';
+        longer[n] = '\0';
+        snprintf(json, sizeof(json),
+                 "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\"},"
+                 " \"texture_packs\": {\"TEST95001\": \"packs/relative\", \"TEST95002\": \"%s\","
+                 " \"test95003\": \"" TEXPACK_JSON_FULL "1\", \"TEST95003\": \"" TEXPACK_JSON_FULL "2\"}}",
+                 longer);
+        write_text_file(path, json);
+        memset(back, 0, sizeof(*back));
+        assert(player_app_load_settings(back, path) == NK_OK);
+        assert(back->settings.title_pack_count == 1);
+        assert(strcmp(player_settings_title_pack(&back->settings, "test95003"), TEXPACK_FULL "2") == 0);
+        assert(player_settings_title_pack(&back->settings, "TEST95001") == NULL &&
+               player_settings_title_pack(&back->settings, "TEST95002") == NULL);
+        assert(strstr(back->settings_notice, "2 texture pack choices") != NULL);
+    }
+#undef TEXPACK_JSON_FULL
+#undef TEXPACK_FULL
+
+    /* At launch the pack is read again: one that stopped reading is not used. */
+    snprintf(file, sizeof(file), "%s%ctextures.ini", good, sep);
+    write_text_file(file, "[options]\nhash = quick\n[hashes\n");
+    {
+        PlayerLaunchWork *work = (PlayerLaunchWork *)calloc(1, sizeof(*work));
+        assert(work);
+        assert(!player_app_launch_begin(app, 0, work));
+        assert(strcmp(app->last_error.error_code, "TEXTURE_PACK_REFUSED") == 0);
+        assert(strcmp(app->last_error.title, "Texture pack not used") == 0);
+        /* The card offers to play this run without the pack: that launch leaves the pack out of
+           its copy of the settings (no folder, no texpack on the line), the stored choice stays,
+           and the launch after it reads the pack again. */
+        assert(player_error_retry_label(&app->last_error) &&
+               strcmp(player_error_retry_label(&app->last_error), "Play without the pack") == 0);
+        app->request_launch = false;
+        assert(player_app_retry_from_error(app));
+        assert(app->request_launch && app->request_launch_index == 0);
+        assert(strcmp(app->launch_without_pack, "TEST95001") == 0);
+        memset(work, 0, sizeof(*work));
+        (void)player_app_launch_begin(app, 0, work);
+        assert(app->launch_without_pack[0] == '\0');
+        assert(player_settings_title_pack(&work->settings, "TEST95001") == NULL);
+        assert(player_settings_title_pack(&app->settings, "TEST95001") != NULL);
+        {
+            NkRuntimeConfig *config = (NkRuntimeConfig *)calloc(1, sizeof(*config));
+            PlayerPlayResolved played;
+            assert(config);
+            player_play_config_session(&work->settings, "TEST95001", false, false, config, &played);
+            assert(played.on && played.part[PLAYER_PART_TEXPACK] == 0);
+            assert(strstr(config->ace_spec, "texpack") == NULL && config->texpack_dir[0] == '\0');
+            free(config);
+        }
+        app->request_launch = false;
+        app->last_error.error_code[0] = '\0';
+        memset(work, 0, sizeof(*work));
+        assert(!player_app_launch_begin(app, 0, work));
+        assert(strcmp(app->last_error.error_code, "TEXTURE_PACK_REFUSED") == 0);
+        /* "Play without the pack" is armed only with its own request: while the game's package
+           rebuilds the request is refused and nothing stays armed, and a later ordinary request
+           clears one that never started. */
+        {
+            ErrorState card = app->last_error;
+            const bool was_building = app->build_session.is_building;
+            char was_disc[sizeof(app->build_session.disc_id)];
+            memcpy(was_disc, app->build_session.disc_id, sizeof(was_disc));
+            app->build_session.is_building = true;
+            snprintf(app->build_session.disc_id, sizeof(app->build_session.disc_id), "%s",
+                     app->games[0].disc_id);
+            app->request_launch = false;
+            assert(player_app_retry_from_error(app));
+            assert(!app->request_launch && app->launch_without_pack[0] == '\0');
+            app->build_session.is_building = was_building;
+            memcpy(app->build_session.disc_id, was_disc, sizeof(was_disc));
+            app->last_error = card;
+            assert(player_app_retry_from_error(app));
+            assert(app->request_launch && strcmp(app->launch_without_pack, "TEST95001") == 0);
+            player_app_request_launch(app, 0);
+            assert(app->request_launch && app->launch_without_pack[0] == '\0');
+            app->request_launch = false;
+            app->last_error = card;
+        }
+        /* Another game's launch does not take a "without the pack" meant for this one. */
+        snprintf(app->launch_without_pack, sizeof(app->launch_without_pack), "TEST95002");
+        memset(work, 0, sizeof(*work));
+        assert(!player_app_launch_begin(app, 0, work));
+        assert(strcmp(app->last_error.error_code, "TEXTURE_PACK_REFUSED") == 0 &&
+               app->launch_without_pack[0] == '\0');
+        app->last_error.error_code[0] = '\0';
+        free(work);
+    }
+    /* The page reads the pack when it opens, and shows the refusal. */
+    player_app_open_title_enhanced(app, 0);
+    {
+        const PlayerTexturePackInfo *shown = player_app_title_pack_info(app, 0);
+        assert(shown && !shown->ok && shown->error[0]);
+        assert(player_app_title_pack_info(app, 1) == NULL);
+    }
+    /* Removing forgets the folder (the folder stays) and returns the part to the library. */
+    player_app_clear_enhanced_page_pack(app);
+    assert(player_settings_title_pack(&app->settings, "TEST95001") == NULL);
+    assert(player_app_title_part(app, 0, PLAYER_PART_TEXPACK) == -1);
+    assert(player_app_title_pack_info(app, 0) == NULL);
+    {
+        FILE *still = fopen(file, "rb");
+        assert(still != NULL);
+        fclose(still);
+    }
+    /* The page sets the pack of its own title. */
+    write_text_file(file, "[options]\nhash = xxh64\n");
+    assert(player_app_set_enhanced_page_pack(app, good));
+    assert(player_settings_title_pack(&app->settings, "TEST95001") != NULL);
+    {
+        const PlayerTexturePackInfo *shown = player_app_title_pack_info(app, 0);
+        assert(shown && shown->ok && shown->textures == 0u && strcmp(shown->name, "HD pack") == 0);
+    }
+    /* The folder dialog's pick reaches the game it was opened for, even when the player has
+       moved to another game's page before it completes, and a game gone meanwhile takes none. */
+    player_app_clear_enhanced_page_pack(app);
+    player_app_begin_texpack_pick(app);
+    assert(app->request_texpack_folder_picker && strcmp(app->texpack_pick_disc, "TEST95001") == 0);
+    app->request_texpack_folder_picker = false;
+    player_app_open_title_enhanced(app, 1);
+    /* While that dialog is open, CHOOSE on another game's page opens no second one. */
+    player_app_begin_texpack_pick(app);
+    assert(!app->request_texpack_folder_picker && strcmp(app->texpack_pick_disc, "TEST95001") == 0);
+    assert(player_app_take_texpack_pick(app, good));
+    assert(player_settings_title_pack(&app->settings, "TEST95001") != NULL &&
+           player_settings_title_pack(&app->settings, "TEST95002") == NULL);
+    /* The open page (the second game's) keeps its own pack line: the pick did not replace it. */
+    assert(strcmp(app->texpack_page_key, "TEST95002") == 0);
+    /* A dialog closed without a folder lets the next CHOOSE open one. */
+    player_app_begin_texpack_pick(app);
+    assert(strcmp(app->texpack_pick_disc, "TEST95002") == 0);
+    player_app_cancel_texpack_pick(app);
+    assert(app->texpack_pick_disc[0] == '\0');
+    app->request_texpack_folder_picker = false;
+    player_app_begin_texpack_pick(app);
+    assert(strcmp(app->texpack_pick_disc, "TEST95002") == 0);
+    app->request_texpack_folder_picker = false;
+    app->game_count = 1;
+    assert(!player_app_take_texpack_pick(app, good));
+    assert(player_settings_title_pack(&app->settings, "TEST95002") == NULL);
+    app->game_count = 3;
+    player_app_open_title_enhanced(app, 0);
+
+    /* The store's bound: the 257th title is refused with a message, and nothing is lost. */
+    {
+        PlayerApp *many = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+        assert(many);
+        player_app_settings_init_default(&many->settings);
+        many->game_count = PLAYER_MAX_TITLE_PACKS + 1;
+        for (int i = 0; i < many->game_count; i++)
+            snprintf(many->games[i].disc_id, sizeof(many->games[i].disc_id), "TEST9%04d", i);
+        for (int i = 0; i < PLAYER_MAX_TITLE_PACKS; i++) assert(player_app_set_title_pack(many, i, good));
+        assert(!player_app_set_title_pack(many, PLAYER_MAX_TITLE_PACKS, good));
+        assert(strcmp(many->last_error.error_code, "TEXTURE_PACK_REFUSED") == 0);
+        assert(many->settings.title_pack_count == PLAYER_MAX_TITLE_PACKS);
+        assert(player_app_title_part(many, PLAYER_MAX_TITLE_PACKS, PLAYER_PART_TEXPACK) == -1);
+        free(many);
+    }
+
+    remove(path);
+    snprintf(file, sizeof(file), "%s%ctextures.ini", good, sep);
+    remove(file);
+    snprintf(file, sizeof(file), "%s%ctextures.ini", bad, sep);
+    remove(file);
+    (void)test_rmdir(good);
+    (void)test_rmdir(bad);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("[PLAYER_STATE_TEST] a title's texture pack is chosen, refused, saved, read back and launched PASSED\n");
 }
 
 /* Settings > Enhanced opened from a title (#2055): the page's rows act on that title, Back
@@ -11722,6 +12131,7 @@ int main(int argc, char **argv) {
     test_play_mode_line_parses_in_runtime();
     test_play_mode_line_room();
     test_play_mode_upscale_settings();
+    test_play_mode_texpack_settings();
     test_play_mode_title_page();
     /* Saves a library file under the cache root, so it runs only once that
      * root is the temporary one. */
@@ -12090,7 +12500,7 @@ int main(int argc, char **argv) {
     printf("[PLAYER_STATE_TEST] Subtest 9b: settings apply to the launch session\n");
     fflush(stdout);
     {
-        PlayerSettings applied;
+        static PlayerSettings applied;   /* static: PlayerSettings is some 450 KB */
         memset(&applied, 0, sizeof(applied));
         player_app_settings_init_default(&applied);
         applied.resolution_scale = 2;
@@ -16002,7 +16412,8 @@ int main(int argc, char **argv) {
            only. An Authentic launch exports the user's own display rows under every preset,
            exactly as with Custom; an Enhanced launch exports the preset's values. */
         {
-            PlayerSettings kept = rep->settings;
+            static PlayerSettings kept;   /* static: PlayerSettings is some 450 KB */
+            kept = rep->settings;
             char custom_display[256];
             rep->settings.resolution_scale = 2;
             rep->settings.present_scaling = NK_PRESENT_SCALING_INTEGER;

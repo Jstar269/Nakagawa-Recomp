@@ -2432,13 +2432,16 @@ class LiveRepositoryTests(unittest.TestCase):
         and the job must decline any other base.
         """
         raw = (ROOT / TRUSTED_WORKFLOW).read_text(encoding="utf-8")
+        # Two pull_request_target jobs check out code: the attestation (upstream) and the
+        # Fork provenance check (forks only, docs/FORKING.md). Both pin the default branch.
         checkout_refs = re.findall(r"^\s+ref: (.+)$", raw, re.MULTILINE)
         self.assertEqual(
-            checkout_refs, ["${{ github.event.repository.default_branch }}"],
-            "the trusted checkout must pin the default branch",
+            checkout_refs, ["${{ github.event.repository.default_branch }}"] * 2,
+            "every trusted checkout must pin the default branch",
         )
-        self.assertIn(
-            "github.event.pull_request.base.ref == github.event.repository.default_branch", raw,
+        self.assertEqual(
+            raw.count("github.event.pull_request.base.ref == github.event.repository.default_branch"), 2,
+            "both pull_request_target jobs must decline any other base",
         )
 
     def test_candidate_binary_job_is_main_only_and_sha_bound(self) -> None:

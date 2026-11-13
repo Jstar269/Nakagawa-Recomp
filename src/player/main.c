@@ -363,6 +363,60 @@ static void trigger_save_folder_picker(SDL_Window *window, PlayerApp *app) {
                             on_save_folder_dialog_callback, app);
 }
 
+/* A title's Enhanced page > Texture pack folder. As with a save, SDL may call back on another
+   thread, so the folder waits here for the main thread: 1 picked, 2 cancelled, 3 the picker
+   failed, 4 the path is too long to hold. */
+static char s_texpack_pick[NK_MAX_PATH];
+static char s_texpack_pick_error[256];
+static SDL_AtomicInt s_texpack_pick_state;
+
+static void on_texpack_folder_dialog_callback(void *userdata, const char *const *filelist,
+                                              int filter) {
+    (void)userdata;
+    (void)filter;
+    if (!filelist) {
+        (void)snprintf(s_texpack_pick_error, sizeof(s_texpack_pick_error), "%s", SDL_GetError());
+        SDL_SetAtomicInt(&s_texpack_pick_state, 3);
+    } else if (!filelist[0]) {
+        SDL_SetAtomicInt(&s_texpack_pick_state, 2);
+    } else if (strlen(filelist[0]) >= sizeof(s_texpack_pick)) {
+        SDL_SetAtomicInt(&s_texpack_pick_state, 4);
+    } else {
+        (void)snprintf(s_texpack_pick, sizeof(s_texpack_pick), "%s", filelist[0]);
+        SDL_SetAtomicInt(&s_texpack_pick_state, 1);
+    }
+}
+
+static void trigger_texpack_folder_picker(SDL_Window *window, PlayerApp *app) {
+    SDL_SetAtomicInt(&s_texpack_pick_state, 0);
+    player_host_show_picker(PLAYER_HOST_PICK_TEXPACK, window, player_picker_start(app),
+                            on_texpack_folder_dialog_callback, app);
+}
+
+static void player_take_texpack_folder_pick(PlayerApp *app) {
+    int state = SDL_GetAtomicInt(&s_texpack_pick_state);
+    if (state == 0) return;
+    SDL_SetAtomicInt(&s_texpack_pick_state, 0);
+    if (state != 1) player_app_cancel_texpack_pick(app);
+    if (state == 1) {
+        /* Read and refused with its reason, or stored for the game the dialog was opened for. */
+        (void)player_app_take_texpack_pick(app, s_texpack_pick);
+    } else if (state == 3) {
+        fprintf(stderr, "[PLAYER] The folder picker could not open: %s\n", s_texpack_pick_error);
+        player_app_set_error_with_details(
+            app, "TEXTURE_PACK_PICKER_FAILED", "The folder picker didn't open",
+            "Nakagawa couldn't show a folder picker, so no texture pack was chosen.",
+            s_texpack_pick_error, "Back", app->active_view == VIEW_ERROR ? VIEW_LIBRARY
+                                                                        : app->active_view);
+    } else if (state == 4) {
+        player_app_set_error(
+            app, "TEXTURE_PACK_PICKER_FAILED", "Texture pack not used",
+            "The folder you picked is too deep in other folders for Nakagawa to read, so no "
+            "texture pack was chosen. Move it somewhere shorter and choose it from there.",
+            "Back", app->active_view == VIEW_ERROR ? VIEW_LIBRARY : app->active_view);
+    }
+}
+
 static void player_take_save_folder_pick(PlayerApp *app) {
     int state = SDL_GetAtomicInt(&s_save_pick_state);
     if (state == 0) return;
@@ -1769,6 +1823,8 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
             player_app_toggle_share_system_libraries(app);
             break;
         case PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED: player_app_cycle_build_speed(app); break;
+        case PLAYER_UI_SETTINGS_CHOOSE_TEXPACK: player_app_begin_texpack_pick(app); break;
+        case PLAYER_UI_SETTINGS_REMOVE_TEXPACK: player_app_clear_enhanced_page_pack(app); break;
         case PLAYER_UI_SETTINGS_CLEAR_SHARED_LIBRARIES:
             player_app_clear_shared_library_cache(app);
             break;
@@ -5156,6 +5212,13 @@ static void player_frame_requests(PlayerRun *run) {
         }
     }
     player_take_save_folder_pick(app);
+    if (app->request_texpack_folder_picker) {
+        if (!player_ui_test_active(&run->ui_test)) {
+            app->request_texpack_folder_picker = false;
+            trigger_texpack_folder_picker(run->window, app);
+        }
+    }
+    player_take_texpack_folder_pick(app);
     if (app->request_open_folder) {
         app->request_open_folder = false;
         if (app->requested_open_path[0] &&
@@ -5442,6 +5505,10 @@ static void player_frame_render(PlayerRun *run) {
                 app, app->request_launch_index,
                 player_ui_nk_launcher_audio_closed(run->next_ui));
         }
+        /* A request dropped here (a launch already running, or one refused before
+           player_app_launch_begin) must not leave its "Play without the pack" for a later launch;
+           a launch that began has already taken it. */
+        app->launch_without_pack[0] = '\0';
     }
     if (app->request_factory_reset) {
         app->request_factory_reset = false;
