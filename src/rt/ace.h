@@ -47,10 +47,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define ACE_SPEC_MAX 192         /* SR_ACE value, terminator included; room for later parts */
+/* SR_ACE value, terminator included. It also sizes the launcher's copy (src/core/nk_launch.h
+   NkRuntimeConfig.ace_spec, which src/player/player_state.c checks at compile time) and the
+   flight recorder's (its schema's maxLength is ACE_SPEC_MAX - 1). ace-selftest and the player's
+   state test check that the longest line has room for eight more keys of its average length; a
+   longer line is refused ("line too long"), never cut. */
+#define ACE_SPEC_MAX 384
 /* ace_feature_words with every part on, terminator included. ace-selftest turns every part on and
-   fails when the words, or the launch line in ACE_SPEC_MAX, would no longer fit. */
-#define ACE_WORDS_MAX 288
+   fails when the words, or the launch line in ACE_SPEC_MAX, would no longer fit, or when eight
+   more words of their average length would not. */
+#define ACE_WORDS_MAX 640
 
 /* Features that are part of this build. A feature that is not must be off in SR_ACE. */
 #define ACE_HAS_WIDE 1          /* wide=fill: widescreen Fill (#1881), the 3D scene in wings */
@@ -610,9 +616,11 @@ void ace_smooth_aux_report(const AceSmoothAuxStats *s);
 
 /* ---- the per-run report -------------------------------------------------------------------- */
 
-/* The worst case, every block present and every number at its widest, is about 5.7 KB with
- * every optional key in the spec; ace_selftest's cell_report_worst checks that it fits. */
-#define ACE_REPORT_MAX 6144u
+/* The worst case, every block present, every number at its widest and a spec of ACE_SPEC_MAX - 1
+ * characters, is about 6 KB; ace_selftest's cell_report_worst checks that it fits with room for
+ * eight more features of its average size. The player reads the report into a buffer of this size
+ * (player_ace_last_session_line) and refuses a longer file. */
+#define ACE_REPORT_MAX 12288u
 /* The report's JSON for the run so far; 0 when it would not fit. */
 size_t ace_report_json(char *out, size_t cap);
 /* Settles the features that never ran (ace_confirm), then writes the report (SR_ACE_REPORT,

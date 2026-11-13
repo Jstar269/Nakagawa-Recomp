@@ -587,10 +587,11 @@ static const char *const k_pad_bindings[PLAYER_UI_CONTROLLER_BUTTONS] = {
 };
 /* When set, Select's controller binding in the controller cases. */
 static const char *k_pad_bindings_override;
-/* input_settings.c's words for the profile's default keyboard keys (#1299). */
+/* input_settings.c's words for the profile's default keyboard keys (#1299), with Cross and
+   Square on the mouse's left and back buttons (#1791). */
 static const char *const k_key_bindings[PLAYER_UI_CONTROLLER_BUTTONS] = {
     "Shift", "Enter", "Up Arrow", "Right Arrow", "Down Arrow", "Left Arrow",
-    "Q", "W", "S", "Z", "X", "A", "None", "None"
+    "Q", "W", "S", "Z", "Left Click", "Mouse 4", "None", "None"
 };
 /* The glyphs player_ui_nk.c gives the defaults (#1299): the controller's in the set of
    an Xbox-style pad, the keys as keycaps; Home and Hold are unbound. */
@@ -605,7 +606,7 @@ static const PlayerUiBindingGlyph k_pad_glyphs[PLAYER_UI_CONTROLLER_BUTTONS] = {
 static const PlayerUiBindingGlyph k_key_glyphs[PLAYER_UI_CONTROLLER_BUTTONS] = {
     GLYPH(CONFIRM, "SHIFT"), GLYPH(CONFIRM, "ENTER"), GLYPH(MOVE, NULL), GLYPH(MOVE, NULL),
     GLYPH(MOVE, NULL), GLYPH(MOVE, NULL), GLYPH(CONFIRM, "Q"), GLYPH(CONFIRM, "W"),
-    GLYPH(CONFIRM, "S"), GLYPH(CONFIRM, "Z"), GLYPH(CONFIRM, "X"), GLYPH(CONFIRM, "A"),
+    GLYPH(CONFIRM, "S"), GLYPH(CONFIRM, "Z"), GLYPH(CONFIRM, "L CLICK"), GLYPH(CONFIRM, "MOUSE 4"),
     NO_GLYPH, NO_GLYPH
 };
 /* The stick's four default keys (#1299), up, down, left and right. */

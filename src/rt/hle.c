@@ -293,6 +293,7 @@ uint32_t user_partition_last_heap(void) { return s_heap_last_bump ? s_heap_last_
 uint32_t sr_last_alloc_addr = 0;     /* last heap allocation rounded address */
 static int partition_hole_alloc_high(uint32_t size, uint32_t *base_out);
 static void partition_hole_release(uint32_t base, uint32_t size);
+static void partition_arena_released(uint32_t base, uint32_t size);
 /* Start the user partition after the complete flat image, including zero-filled BSS.
  * tools/prxload.py preserves the original ~PSP header's segment-memory sizes when a
  * stripped ELF has lost them. An explicit override may move the base higher, but may
@@ -322,6 +323,7 @@ void user_partition_init(void) {
     s_heap_base = base;
     sched_set_stack_range_refusal(sr_user_partition_overlaps);
     sched_set_partition_hole_allocator(partition_hole_alloc_high, partition_hole_release);
+    sched_set_arena_release_hook(partition_arena_released);
     s_part_top = et ? (uint32_t)strtoul(et, NULL, 16) : 0x0A000000u;
     if (s_part_top <= s_heap) {
         fprintf(stderr,
@@ -445,6 +447,44 @@ static void partition_free_block(uint32_t addr, uint32_t size) {
         s_heap = s_free_blocks[s_nfree_blocks - 1].addr;
         s_heap_last_bump = s_heap;
         s_nfree_blocks--;
+    }
+}
+
+/* sched.c hook: the owner of a thread stack or High block gave it back to the arena (a deleted
+ * thread's stack or a freed High block; a create the partition refuses does not call this). The
+ * part of it below the bump pointer lies in a gap a fixed reservation skipped while that stack or
+ * block was live; skipped_gap_pieces() left it out of the free list then, so the free list takes it
+ * back now and a later Low or fixed request can use it. A piece a live partition block covers (a
+ * fixed reservation is not checked against thread stacks, so it can sit on one) or a free entry
+ * already holds is left as it is: no range gets a second owner or a second free entry. The arena
+ * keeps its own record of the range but refuses it while it lies below the bump pointer, where
+ * every free entry lies, so the range has one owner at a time. Each piece starts 256-byte
+ * aligned. */
+static void partition_arena_released(uint32_t base, uint32_t size) {
+    if (!s_heap || size == 0u || size > UINT32_MAX - base) return;
+    const uint32_t end = base + size;
+    uint32_t cur = base < s_heap_base ? s_heap_base : base;
+    cur = (cur + 0xFFu) & ~0xFFu;   /* a user-RAM address: no wrap */
+    while (cur < end && cur < s_heap) {
+        uint32_t stop = end < s_heap ? end : s_heap;
+        uint32_t held_to = 0u;   /* nonzero: a live block or a free entry holds cur up to there */
+        for (int i = 0; i < s_nblocks; i++) {
+            if (s_blocks[i].uid == 0u || s_blocks[i].addr == 0u) continue;
+            const uint32_t a = s_blocks[i].addr, e = a + s_blocks[i].slot_size;
+            if (cur >= a && cur < e) { if (e > held_to) held_to = e; }
+            else if (a > cur && a < stop) stop = a;
+        }
+        for (int i = 0; i < s_nfree_blocks; i++) {
+            const uint32_t a = s_free_blocks[i].addr, e = a + s_free_blocks[i].size;
+            if (cur >= a && cur < e) { if (e > held_to) held_to = e; }
+            else if (a > cur && a < stop) stop = a;
+        }
+        if (held_to) {
+            cur = (held_to + 0xFFu) & ~0xFFu;
+            continue;
+        }
+        partition_free_block(cur, stop - cur);   /* may roll the bump pointer back to cur */
+        cur = stop;
     }
 }
 
@@ -677,6 +717,40 @@ uint32_t alloc_block_high(uint32_t size) {
     return uid;
 }
 
+/* The pieces of a skipped gap [lo, hi) that may join the free list, written to out[] (at most
+ * `max`); returns how many there are. A gap above the bump pointer can hold memory the partition
+ * never handed out but someone else owns: the runtime's stacks in kernel RAM (a low-based
+ * partition) and, in the thread-stack arena, live thread stacks and High blocks. Those stay with
+ * their owners; returning them would let a later Low first fit hand out a live stack or High
+ * block a second time. Each piece starts 256-byte aligned, as every Low take expects. When a
+ * thread stack or High block's owner later gives it back to the arena, partition_arena_released()
+ * returns the part no partition block holds to the free list. */
+static int skipped_gap_pieces(uint32_t lo, uint32_t hi, uint32_t out[][2], int max) {
+    int n = 0;
+    uint32_t cur = lo;
+    while (cur < hi) {
+        uint32_t stop = hi;
+        int keep = 1;
+        if (cur >= USER_PARTITION_RUNTIME_STACKS_BASE && cur < SR_NESTED_FRAME_END) {
+            keep = 0;
+            stop = SR_NESTED_FRAME_END;
+        } else {
+            /* The arena answers for its own range; outside it, it holds nothing up to its floor. */
+            keep = sched_stack_arena_free_at(cur, &stop);
+            if (cur < USER_PARTITION_RUNTIME_STACKS_BASE && stop > USER_PARTITION_RUNTIME_STACKS_BASE)
+                stop = USER_PARTITION_RUNTIME_STACKS_BASE;
+        }
+        if (stop > hi || stop <= cur) stop = hi;
+        const uint32_t start = (cur + 0xFFu) & ~0xFFu;   /* a user-RAM address: no wrap */
+        if (keep && start < stop) {
+            if (n < max) { out[n][0] = start; out[n][1] = stop; }
+            n++;
+        }
+        cur = stop;
+    }
+    return n;
+}
+
 /* Fixed-address reservation for the runtime module loader and for
  * sceKernelAllocPartitionMemory type 2 (PSP_SMEM_Addr / "Addr"): reserve exactly
  * [addr, addr+size) and return a block UID releasable with the existing free
@@ -685,9 +759,11 @@ uint32_t alloc_block_high(uint32_t size) {
  * [heap base, partition top).
  *
  * Later Low allocations can never be handed reserved space, structurally:
- *  - a reservation at/above the bump pointer jumps s_heap past its end, and any
- *    virgin gap left behind ([old heap, addr)) is returned to the free list, so
- *    the bump pointer only ever moves forward over reserved ranges;
+ *  - a reservation at/above the bump pointer jumps s_heap past its end, and the
+ *    virgin gap left behind ([old heap, addr)) is returned to the free list except
+ *    where the runtime's stacks or a live thread stack or High block lie
+ *    (skipped_gap_pieces), so the bump pointer only ever moves forward over reserved
+ *    ranges and no live object is handed out twice;
  *  - a reservation inside already-allocated space carves the range out of the
  *    free list (splitting one entry when strictly contained), so first-fit can
  *    never return overlapping space;
@@ -742,7 +818,8 @@ uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name) {
     }
 
     /* Capacity pre-check so a half-carved state is impossible: at most one split
-     * (a free entry strictly containing the range) plus at most one gap entry. */
+     * (a free entry strictly containing the range) plus one entry per piece of the
+     * skipped gap (skipped_gap_pieces). */
     int need_slots = 0;
     for (int i = 0; i < s_nfree_blocks; i++) {
         uint64_t f_end = (uint64_t)s_free_blocks[i].addr + (uint64_t)s_free_blocks[i].size;
@@ -751,12 +828,10 @@ uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name) {
     uint32_t gap_start = (old_heap + 0xFFu) & ~0xFFu;
     int have_gap = (addr > old_heap && gap_start < addr) ? 1 : 0;
     if (have_gap && gap_start < old_heap) return 0xFFFFFFFFu;   /* bump rounding wrapped */
-    if (have_gap) need_slots++;
-    /* A gap that spans the runtime's stacks (a low-based partition reserving above kernel
-     * RAM) is returned as the two pieces either side of them. */
-    int gap_splits = have_gap && gap_start < SR_NESTED_FRAME_END &&
-                     addr > USER_PARTITION_RUNTIME_STACKS_BASE;
-    if (gap_splits) need_slots++;
+    /* The skipped gap goes back as the pieces no one else owns (skipped_gap_pieces). */
+    uint32_t gap_pieces[HLE_MAX_FREE_BLOCKS][2];
+    int ngap = have_gap ? skipped_gap_pieces(gap_start, addr, gap_pieces, HLE_MAX_FREE_BLOCKS) : 0;
+    need_slots += ngap;
     if (s_nfree_blocks + need_slots > HLE_MAX_FREE_BLOCKS) return 0xFFFFFFFFu;
 
     int slot = -1;
@@ -797,17 +872,13 @@ uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name) {
         }
     }
 
-    /* Return the skipped virgin gap to the free list (aligned start keeps later
-     * Low heads 256-byte aligned: every Low take is a 0x100 multiple). The sliver
-     * below the alignment stays leaked, exactly like today's bump alignment. */
-    if (gap_splits) {
-        if (gap_start < USER_PARTITION_RUNTIME_STACKS_BASE)
-            free_list_insert_sorted(gap_start, USER_PARTITION_RUNTIME_STACKS_BASE - gap_start);
-        if (addr > SR_NESTED_FRAME_END)
-            free_list_insert_sorted(SR_NESTED_FRAME_END, addr - SR_NESTED_FRAME_END);
-    } else if (have_gap) {
-        free_list_insert_sorted(gap_start, addr - gap_start);
-    }
+    /* Return the skipped virgin gap's free pieces to the free list (aligned starts keep
+     * later Low heads 256-byte aligned: every Low take is a 0x100 multiple). The slivers
+     * below the alignment stay leaked, exactly like today's bump alignment. Space a live
+     * stack or High block holds is not returned now: partition_arena_released() returns it
+     * when its owner gives it back to the arena. */
+    for (int i = 0; i < ngap; i++)
+        free_list_insert_sorted(gap_pieces[i][0], gap_pieces[i][1] - gap_pieces[i][0]);
 
     if (end > s_heap) {
         s_heap = end;

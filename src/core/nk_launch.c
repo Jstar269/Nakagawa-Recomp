@@ -1080,6 +1080,7 @@ NkResult nk_launch_prepare_session(
     }
     snprintf(session->enhancement_package_id, sizeof(session->enhancement_package_id), "%s",
              game->enhancement_package_id);
+    session->enhancement_hook_only = game->enhancement_package_id[0] && game->enhancement_hook_only;
     int boot_written = snprintf(session->boot_executable,
                                 sizeof(session->boot_executable), "%s",
                                 boot_executable);
@@ -1618,12 +1619,13 @@ NkResult nk_launch_start(NkLaunchSession *session) {
         envp[env_count++] = env_launcher_display;
     }
     envp[env_count++] = env_volume;
-    /* Always set, so an inherited value cannot opt a launch in. On only for the
-       enhanced build, the one variant whose rewritten sites read it
-       (docs/ENHANCEMENT_CONTRACT.md section 9.1); the authentic package always
-       runs with it off. */
-    envp[env_count++] = session->enhancement_package_id[0] ? "SR_EXPERIMENTAL_60HZ=1"
-                                                           : "SR_EXPERIMENTAL_60HZ=0";
+    /* Always set, so an inherited value cannot opt a launch in. On only for an
+       enhanced build with a timing package, the one variant whose rewritten sites
+       read it (docs/ENHANCEMENT_CONTRACT.md section 9.1); the authentic package and
+       a build of a code-hook package alone, whose site runs on its own SR_ACE key
+       (section 11.3.6), always run with it off. */
+    envp[env_count++] = session->enhancement_package_id[0] && !session->enhancement_hook_only
+        ? "SR_EXPERIMENTAL_60HZ=1" : "SR_EXPERIMENTAL_60HZ=0";
     /* Likewise developer mode (#314): the game's developer HUD and pause pages follow the
        launcher's setting, never an inherited value. */
     envp[env_count++] = session->config.developer_mode ? "SR_DEVELOPER_MODE=1" : "SR_DEVELOPER_MODE=0";

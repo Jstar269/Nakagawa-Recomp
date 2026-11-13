@@ -563,6 +563,25 @@ static void test_no_iso_child_environment(const char *test_executable,
         assert(strstr(enhanced_session.last_error, "enhanced runtime package is missing") != NULL);
         assert(enhanced_session.executable_path[0] == '\0');
         assert(!enhanced_session.package_launch);
+        assert(!enhanced_session.enhancement_hook_only);
+        /* A culling build (contract 9.9) is held to its own folder the same way, and the
+           session keeps whether it carries a timing package. */
+        snprintf(enhanced_game.enhancement_package_id,
+                 sizeof(enhanced_game.enhancement_package_id), "fixture-60hz+fixture-cull");
+        assert(nk_launch_prepare_session(&enhanced_session, &enhanced_game, root) != NK_OK);
+        assert(strstr(enhanced_session.last_error, "enhanced runtime package is missing") != NULL);
+        assert(strcmp(enhanced_session.enhancement_package_id, "fixture-60hz+fixture-cull") == 0);
+        assert(!enhanced_session.enhancement_hook_only);
+        snprintf(enhanced_game.enhancement_package_id,
+                 sizeof(enhanced_game.enhancement_package_id), "fixture-cull");
+        enhanced_game.enhancement_hook_only = true;
+        assert(nk_launch_prepare_session(&enhanced_session, &enhanced_game, root) != NK_OK);
+        assert(enhanced_session.enhancement_hook_only);
+        enhanced_game.enhancement_hook_only = false;
+        snprintf(enhanced_game.enhancement_package_id,
+                 sizeof(enhanced_game.enhancement_package_id), "fixture-60hz+fixture-60hz");
+        assert(nk_launch_prepare_session(&enhanced_session, &enhanced_game, root) != NK_OK);
+        assert(strstr(enhanced_session.last_error, "not a valid package name") != NULL);
         snprintf(enhanced_game.enhancement_package_id,
                  sizeof(enhanced_game.enhancement_package_id), "../escape");
         assert(nk_launch_prepare_session(&enhanced_session, &enhanced_game, root) != NK_OK);
@@ -842,6 +861,30 @@ static void test_no_iso_child_environment(const char *test_executable,
         snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
     }
 
+    /* A culling build (contract 9.9, 11.3.6) exports 60 Hz on only when it carries the timing
+       package: beside it, on; the culling package alone, whose site runs on its own SR_ACE
+       key, off, whatever the parent had. */
+    for (int hook_only = 0; hook_only < 2; hook_only++) {
+        snprintf(session.enhancement_package_id, sizeof(session.enhancement_package_id), "%s",
+                 hook_only ? "fixture-cull" : "fixture-60hz+fixture-cull");
+        session.enhancement_hook_only = hook_only != 0;
+        set_environment_value("SR_EXPERIMENTAL_60HZ", "1");
+        assert(nk_launch_start(&session) == NK_OK);
+        child_exit = nk_launch_wait(&session, -1);
+        nk_launch_stop(&session);
+        assert(child_exit == 0);
+        report = fopen(report_path, "rb");
+        assert(report != NULL);
+        observed_size = fread(observed, 1, sizeof(observed) - 1, report);
+        observed[observed_size] = '\0';
+        assert(!ferror(report));
+        assert(fclose(report) == 0);
+        assert(strstr(observed, hook_only ? "SR_EXPERIMENTAL_60HZ=0\n"
+                                          : "SR_EXPERIMENTAL_60HZ=1\n") != NULL);
+    }
+    session.enhancement_package_id[0] = '\0';
+    session.enhancement_hook_only = false;
+
     /* A line with texpack=on exports the title's pack folder (contract section 10.12). */
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
              "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off;texpack=on");
@@ -860,6 +903,7 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "poisoned-parent-pack") == NULL);
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
     session.config.texpack_dir[0] = '\0';
+
     /* #2143: an imported homebrew program runs from its Memory Stick folder. The import's
        copy of the folder it was picked from sits beside its disc image ("<image>.ms0",
        nk_pbp_homebrew.h); the launch puts it on the title's Memory Stick and boots

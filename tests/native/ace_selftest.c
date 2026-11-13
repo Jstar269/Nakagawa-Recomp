@@ -455,7 +455,8 @@ static void cell_parse(void) {
           "duplicate key" },
         { "v1;tier=ace;af=16;text=on;readout=off;notice=on;smooth=off;sas=off;tess=off;twin=off", "missing key" },
         { "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;" ACE_TEST_X40
-          ACE_TEST_X40 ACE_TEST_X40 ACE_TEST_X40, "line too long" },
+          ACE_TEST_X40 ACE_TEST_X40 ACE_TEST_X40 ACE_TEST_X40 ACE_TEST_X40 ACE_TEST_X40 ACE_TEST_X40,
+          "line too long" },
         /* sas (#2054): required like every key, off or sinc, and nothing else. */
         { "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off", "missing key" },
         { "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=on", "bad value" },
@@ -1992,7 +1993,105 @@ static void cell_report_worst(void) {
     worst += (strlen("fill") - strlen("off")) + (strlen("match") - strlen("off")) + (strlen("sinc") - strlen("off"));
     CHECK(worst < ACE_REPORT_MAX, "the worst-case report needs %zu bytes; ACE_REPORT_MAX is %u",
           worst + 1u, ACE_REPORT_MAX);
+    /* Room for eight more features, each the size of today's average share of the worst case. */
+    const size_t share = (worst + ACE_FEATURE_COUNT - 1u) / ACE_FEATURE_COUNT;
+    CHECK(worst + 8u * share < ACE_REPORT_MAX,
+          "the worst-case report (%zu bytes) and eight more features of %zu bytes fit ACE_REPORT_MAX %u",
+          worst + 1u, share, ACE_REPORT_MAX);
+    /* A buffer one byte short of the report is refused whole: no bytes, length 0, which ace_finish
+       names ("report not written"). */
+    CHECK(ace_report_json(json, len) == 0 && json[0] == '\0', "a report one byte too long is refused");
     printf("ace-selftest: the worst-case report needs %zu of %u bytes\n", worst + 1u, ACE_REPORT_MAX);
+}
+
+/* Every part on, from the key table alone: the longest line (ace_longest_line) made one this build
+ * parses (smooth=match only where the build has it, tier=ace for the Ace-only keys), then each key
+ * at the first of these values the parser takes in its place. It is the line cell_switch builds
+ * for the words check, so a new key is turned on here with no edit either. */
+static int every_part_on_line(char *out, size_t cap) {
+    static const char *const k_on[] = {"on", "fill", "x2", "sinc", "16", "4", "ace"};
+    char longest[2 * ACE_SPEC_MAX], trial[2 * ACE_SPEC_MAX];
+    AceConfig c;
+    const size_t n = ace_longest_line(longest, sizeof(longest));
+    const char *match = strstr(longest, ";smooth=match");
+    char *tier;
+    if (n == 0 || match == NULL) return 0;
+    snprintf(out, cap, "%.*s;smooth=%s%s", (int)(match - longest), longest,
+             ACE_HAS_SMOOTH_MATCH ? "match" : "off", match + strlen(";smooth=match"));
+    tier = strstr(out, ";tier=enhanced");
+    if (tier == NULL) return 0;
+    memmove(tier + strlen(";tier=ace"), tier + strlen(";tier=enhanced"), strlen(tier + strlen(";tier=enhanced")) + 1u);
+    memcpy(tier + strlen(";tier="), "ace", 3u);
+    if (ace_parse(out, &c, NULL, 0) != 1) return 0;
+    for (char *key = strchr(out, ';'); key != NULL; key = strchr(key + 1, ';')) {
+        char *eq = strchr(key, '=');
+        if (eq == NULL) return 0;
+        const char *rest = strchr(eq, ';');
+        for (size_t v = 0; v < sizeof(k_on) / sizeof(k_on[0]); v++) {
+            snprintf(trial, sizeof(trial), "%.*s%s%s", (int)(eq + 1 - out), out, k_on[v], rest ? rest : "");
+            if (strlen(trial) < cap && ace_parse(trial, &c, NULL, 0) == 1) {
+                snprintf(out, cap, "%s", trial);
+                break;
+            }
+        }
+    }
+    return 1;
+}
+
+/* Room for later parts: the launch line and the badge words each hold the longest case the key
+ * table makes plus eight more keys or words of its average length, so the next parts do not each
+ * need a widening first. Past a limit the line is refused by name and the words drop whole, never
+ * cut. Nothing here names a key, so a part that lands changes no line of this cell. */
+static void cell_room(void) {
+    char longest[2 * ACE_SPEC_MAX], every[ACE_SPEC_MAX], more[2 * ACE_SPEC_MAX], why[64];
+    AceConfig c;
+    const size_t n = ace_longest_line(longest, sizeof(longest));
+    size_t keys = 0;
+    for (const char *s = longest; (s = strchr(s, ';')) != NULL; s++) keys++;
+    CHECK(n > 0 && keys > 0, "the longest line is computed (%s)", longest);
+    if (n == 0 || keys == 0) return;
+    const size_t avg = (n - strlen("v1") + keys - 1u) / keys;   /* ";key=value", rounded up */
+    CHECK(n + 8u * avg < ACE_SPEC_MAX,
+          "the longest line (%zu characters, %zu keys) and eight more keys of %zu fit ACE_SPEC_MAX %d",
+          n, keys, avg, ACE_SPEC_MAX);
+    CHECK(every_part_on_line(every, sizeof(every)), "every part on is a line this build takes (%s)", every);
+    /* Every part on and eight synthetic keys of that average length: the length check takes it, and
+       the key table refuses the first unknown key by name. One byte more is refused for its length
+       ("line too long", cell_parse's edge check). */
+    size_t used = (size_t)snprintf(more, sizeof(more), "%s", every);
+    for (int k = 0; k < 8 && avg > strlen(";k0=") && used < sizeof(more); k++) {
+        int w = snprintf(more + used, sizeof(more) - used, ";k%d=%.*s", k, (int)(avg - strlen(";k0=")),
+                         "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
+        if (w > 0) used += (size_t)w;
+    }
+    why[0] = '\0';
+    CHECK(used < (size_t)ACE_SPEC_MAX && ace_parse(more, &c, why, sizeof(why)) == 0 &&
+              strcmp(why, "unknown key") == 0,
+          "every part on and eight more keys (%zu characters) pass the length check (%s)", used, why);
+    printf("ace-selftest: the longest line is %zu of %d characters (%zu keys, %zu each); %zu more keys fit\n",
+           n, ACE_SPEC_MAX - 1, keys, avg, (ACE_SPEC_MAX - 1u - n) / avg);
+    /* The words with every part on, and eight more of their average length. */
+    char all[2 * ACE_WORDS_MAX], fit[ACE_WORDS_MAX];
+    const char *const sep = " \xC2\xB7 ";
+    CHECK(ace_init_spec(every, NULL) == 1, "every part on is a valid run (%s)", every);
+    const size_t w = ace_feature_words(all, sizeof(all));
+    size_t words = 1;
+    for (const char *s = all; (s = strstr(s, sep)) != NULL; s += strlen(sep)) words++;
+    const size_t word_avg = strlen(sep) + (w + words - 1u) / words;
+    CHECK(w > 0 && ace_feature_words(fit, sizeof(fit)) == w, "every part's words fit ACE_WORDS_MAX (%zu bytes)",
+          w + 1u);
+    CHECK(w + 8u * word_avg < ACE_WORDS_MAX,
+          "the words (%zu bytes, %zu words) and eight more of %zu bytes fit ACE_WORDS_MAX %d", w + 1u, words,
+          word_avg, ACE_WORDS_MAX);
+    /* One byte short: the last word drops whole, and the text (which the notice and the pause caption
+       show) is the full words' prefix up to the word before it, with no part of the dropped one. */
+    const size_t short_len = ace_feature_words(fit, w);
+    CHECK(short_len > 0 && short_len < w && strlen(fit) == short_len && strncmp(fit, all, short_len) == 0 &&
+              all[short_len] == ' ',
+          "words one byte short drop a whole word (%zu of %zu bytes: '%s')", short_len, w, fit);
+    printf("ace-selftest: the words with every part on take %zu of %d bytes (%zu words, %zu each); %zu more fit\n",
+           w + 1u, ACE_WORDS_MAX, words, word_avg, (ACE_WORDS_MAX - 1u - w) / word_avg);
+    (void)ace_init_spec("off", NULL);
 }
 
 /* What an in-between moved: the weight of a measurement, when a measurement may be read, and the
@@ -2272,6 +2371,7 @@ int main(int argc, char **argv) {
     cell_fast_forward_owed();
     cell_report(argc > 1 ? argv[1] : NULL);
     cell_report_worst();
+    cell_room();
     if (s_fail) {
         fprintf(stderr, "ace-selftest: %d check(s) FAILED\n", s_fail);
         return 1;
