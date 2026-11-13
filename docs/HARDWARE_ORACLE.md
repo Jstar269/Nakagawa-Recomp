@@ -785,9 +785,15 @@ One console is one data point; see §11. Nothing here closes issue #70
 - **PSP-3000 single-case run of `hle-io-trunc` (2026-11-02 UTC)**: at 21:40 UTC on boot 107, game context
   (standalone PSPLink: 19 threads, 52 modules), after the `transport-write` preflight (PSP-TRANSPORT-001 is not
   re-cited). Firmware recorded as 6.6.1 (system software 6.61; custom firmware ARK-5 5.1.0 at that time,
-  operator-declared). Case 105, `fixtures/psp_oracle/probe_hle_measure.c`, built from `08934592f`,
-  a commit that is not an ancestor of this tree; its case-105 functions, tables and constants and its Makefile
-  CASE and LIBS lines and import gate are identical to this tree's. The envelope is acceptance-eligible with 0
+  operator-declared). Case 105, `fixtures/psp_oracle/probe_hle_measure.c`, built from `08934592f`, a local
+  commit that is not in public history (not an ancestor of this tree). The case's own source is identical to
+  this tree's: at both commits the SHA-256 of its section of `probe_hle_measure.c` (from
+  `#if PSP_ORACLE_CASE == HLE_CASE_IO_TRUNC` to its `#endif`, 295 lines) is
+  `528e41f21ffd9f174aa8b1e4dd098db21402f9b1188f4a57a35e76723ef735fd`, of its case-id and campaign-id lines
+  `f95b29069036456fb91447665754c0d353efd6616f9360b778cc7fc0ea66be03`, and of its Makefile lines (the CASE, LIBS and
+  import-gate blocks, 8 lines) `c70288c741952a62893abf4fc6eab3e8894ac7ebc98f9d8f653646404a9b8fb8`. The shared probe
+  harness outside the case sections has changed since, so a PRX built from this tree is not byte-identical to
+  the one measured. The envelope is acceptance-eligible with 0
   blockers: evidence class `PSP_HARDWARE`, a clean committed source binding, a strict golden sequence (9 records
   and the done record, out0 9), all PASS, COMPLETE PASS. The raw envelope and host0 log stay in the private
   campaign directory.

@@ -16517,6 +16517,8 @@ class Record20261015Tests(unittest.TestCase):
         note = row["measurement_note"]
         for term in ("2026-11-02", "PSP-3000", "boot 107", "game context", "08934592f",
                      "not an ancestor of this tree", "identical to this tree's",
+                     "not in public history", "528e41f21ffd9f174aa8b1e4dd098db21402f9b1188f4a57a35e76723ef735fd",
+                     "not byte-identical to the one measured",
                      "acceptance-eligible with 0 blockers", "0x8001000d", "ABCDEFGHWX",
                      "src/rt/hle_data.c"):
             self.assertIn(term, note)
