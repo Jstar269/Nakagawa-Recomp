@@ -947,6 +947,7 @@ static unsigned long s_cnt_depth_commit = 0;   /* depth_readback_to_guest copies
 /* Movie pictures (#2111): texture uploads that were one, and presents handed to the movie
  * upscaler because a drawn (tex) or decoded-into (target) picture covered the frame. */
 static unsigned long s_cnt_movie_tex, s_cnt_movie_present_tex, s_cnt_movie_present_target;
+static unsigned long s_cnt_movie_present_ge;   /* presents while a note was held that stayed GE frames */
 static uint64_t s_cnt_tex_invalidations = 0;
 static uint64_t s_cnt_tex_clean_skips = 0;   /* CPU stores that skipped the texture scan (#282): */
 static uint64_t s_cnt_tex_quiet_skips = 0;   /* clean pages, and quiet pages */
@@ -3130,7 +3131,7 @@ static void stats_emit(int final) {
             "tris=%lu spr=%lu lines=%lu nonfinite=%lu tnl[prims=%lu tris=%lu] rtt=%lu snap=%lu "
             "present[gpu=%lu cpu=%lu] upload=%lu readback=%lu texup=%lu dirty=%lu xferblit=%lu pipes=%d texs=%d "
             "shadow[invalidations=%llu checks=%llu hits=%llu misses=%llu bytes=%llu avoided=%llu required=%llu] "
-            "movie[tex=%lu present_tex=%lu present_target=%lu] final=%d\n",
+            "movie[tex=%lu present_tex=%lu present_target=%lu present_ge_held=%lu dropped=%llu] final=%d\n",
             s_cnt_submit, (unsigned long long)s_cnt_batches, (unsigned long long)s_cnt_verts,
             s_cnt_submit ? (double)s_cnt_batches / (double)s_cnt_submit : 0.0,
             s_cnt_tri, s_cnt_spr, s_cnt_line, s_cnt_nonfinite, s_cnt_tnl_prims, s_cnt_tnl_tris,
@@ -3141,7 +3142,8 @@ static void stats_emit(int final) {
             (unsigned long long)s_cnt_shadow_checks, (unsigned long long)s_cnt_shadow_hits,
             (unsigned long long)s_cnt_shadow_misses, (unsigned long long)s_cnt_shadow_bytes,
             (unsigned long long)s_cnt_shadow_avoided, (unsigned long long)s_cnt_shadow_required,
-            s_cnt_movie_tex, s_cnt_movie_present_tex, s_cnt_movie_present_target, final);
+            s_cnt_movie_tex, s_cnt_movie_present_tex, s_cnt_movie_present_target, s_cnt_movie_present_ge,
+            (unsigned long long)sr_movie_dropped(), final);
 }
 
 static void stats_tick(void) { stats_emit(0); }
@@ -5747,8 +5749,10 @@ static int movie_draw_samples(const Batch *b) {
     const uint32_t flags = (uint32_t)b->pc.cfg[0] >> 8;
     const TexEnt *e = s_tex_cur;
     if (!(flags & F_TEX) || (flags & F_CLEAR) || b->tsrc || b->tsnap || !e || !e->movie_seq) return 0;
+    /* Any of the entry's own sets: level 0, anisotropic, the scaled image, or the host mip chain
+     * (Enhanced mips=on binds hm_set for a transformed, linearly minified draw). */
     if (!b->dset || (b->dset != e->set && b->dset != e->set_af && b->dset != e->xs.set &&
-                     b->dset != e->xs.set_af))
+                     b->dset != e->xs.set_af && !(e->hm_set && b->dset == e->hm_set)))
         return 0;
     return sr_movie_alive(e->movie_seq);
 }
@@ -5813,6 +5817,7 @@ static int movie_frame(Target *t) {
         if (px < x1 && py < y1 && (x1 - px) * (y1 - py) >= half) kind = 2;
     }
     t->mv_closed = 1;
+    if (!kind && sr_movie_held()) s_cnt_movie_present_ge++;
     if (kind == 1) s_cnt_movie_present_tex++;
     if (kind == 2) s_cnt_movie_present_target++;
     return kind;
@@ -8962,10 +8967,12 @@ void gegpu_shutdown(void) {
      * object that a recorded command or descriptor can reference. */
     (void)vkDeviceWaitIdle(s_dev);
     stats_emit(1);
-    if (s_cnt_movie_tex || s_cnt_movie_present_tex || s_cnt_movie_present_target)
+    if (s_cnt_movie_tex || s_cnt_movie_present_tex || s_cnt_movie_present_target || s_cnt_movie_present_ge)
         fprintf(stderr, "gegpu: movie frames (#2111): %lu presents of a drawn movie picture, %lu of one "
-                        "decoded into the target; %lu texture uploads were movie pictures\n",
-                s_cnt_movie_present_tex, s_cnt_movie_present_target, s_cnt_movie_tex);
+                        "decoded into the target; %lu texture uploads were movie pictures; %lu presents "
+                        "while a picture was held stayed GE frames; %llu notes dropped\n",
+                s_cnt_movie_present_tex, s_cnt_movie_present_target, s_cnt_movie_tex, s_cnt_movie_present_ge,
+                (unsigned long long)sr_movie_dropped());
     pcache_close(1);   /* the device is idle: every pipeline this run made is in the cache */
     if (s_ts_on) {
         /* The device is idle: the recordings still marked in flight have their times too. */

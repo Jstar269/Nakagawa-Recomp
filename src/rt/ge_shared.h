@@ -573,7 +573,11 @@ void      sr_gpu_vram_dirty(uint32_t addr, uint32_t bytes);
  *   - its decoder is deleted or released (sr_movie_forget_owner), or tracking is turned off;
  *   - SR_MOVIE_NOTES newer pictures were noted (the oldest is dropped).
  * A picture through a swizzled VRAM view, or with a format or size outside the GE's, is never
- * noted. The renderer adds its own rules for draws (ge_gpu.c, "Movie frames"). Guest thread
+ * noted. Every read of a picture's bytes (the hash, the copy comparison) is checked but not prepared:
+ * it reads guest memory as it is and never pulls GE writes held only in the GPU's image back into
+ * guest VRAM, since that would be guest-visible. Such writes are therefore invisible to the
+ * "unchanged" check; the target rule guards them with the target's write clock, and the texture
+ * rule by never matching a texture the renderer serves from a target (tsrc, tsnap). The renderer adds its own rules for draws (ge_gpu.c, "Movie frames"). Guest thread
  * only, like the HLE and the GE. */
 #define SR_MOVIE_NOTES 8
 typedef struct SrMoviePicture {
@@ -598,10 +602,11 @@ int       sr_movie_alive(uint64_t seq);
  * format, re-hashed and unchanged: 1 and *out, or 0. (x, y) is that pixel in the picture. */
 int       sr_movie_find_pixel(uint32_t addr, uint32_t stride, uint32_t fmt, SrMoviePicture *out,
                               uint32_t *x, uint32_t *y);
-/* The newest note whose picture's rows, byte for byte, start at canonical address `addr` with this
- * stride and format and fit in max_w x max_h pixels, the note itself unchanged: 1 and *out, or 0.
- * A copy the game made with its own code (no HLE call sees it) is found this way; a converted,
- * scaled, swizzled or partial copy is not. Each candidate costs one hash of the picture's rows. */
+/* The newest note whose picture's rows, compared byte for byte, start at canonical address `addr`
+ * with this stride and format and fit in max_w x max_h pixels, the note itself unchanged: 1 and
+ * *out, or 0. A copy the game made with its own code (no HLE call sees it) is found this way; a
+ * converted, scaled, swizzled or partial copy is not. A texture that is not the picture is refused
+ * within its first differing bytes; a copy costs one comparison and one hash of the note. */
 int       sr_movie_find_copy(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t max_w,
                              uint32_t max_h, SrMoviePicture *out);
 /* The newest note whose whole picture lies in canonical [lo, hi) with this stride and format,
@@ -610,6 +615,10 @@ int       sr_movie_find_in(uint32_t lo, uint32_t hi, uint32_t stride, uint32_t f
                            SrMoviePicture *out);
 uint64_t  sr_movie_rows_hash(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t width,
                              uint32_t height);
+/* Notes dropped because all SR_MOVIE_NOTES slots were held, and whether any note is held now (both
+ * for the renderer's movie counts). */
+uint64_t  sr_movie_dropped(void);
+int       sr_movie_held(void);
 void      sr_vram_mark_renderer_pending(void);
 int       ge_zbuf_prepare_current(void);
 int       ge_zbuf_materialize_current(void);

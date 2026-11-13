@@ -844,13 +844,18 @@ static uint32_t movie_note_bytes(const SrMoviePicture *n) {
     return (n->height - 1u) * n->stride * bpp + n->width * bpp;
 }
 
-/* FNV-1a over the picture's rows (a 64-bit word at a time, then the tail bytes), seeded with its
- * shape. Every byte of every row counts; the bytes between rows (stride past width) do not. Reads
- * guest memory directly, never through the renderer's read hooks, so it materializes nothing. */
+/* A change detector over the picture's rows, seeded with its shape: FNV-1a's prime a 64-bit word at
+ * a time, each multiply followed by a fold of the high half into the low (so a difference in any bit,
+ * bit 63 included, reaches every later step and two differences do not cancel), then the tail bytes.
+ * Every byte of every row counts; the bytes between rows (stride past width) do not. It is
+ * probabilistic: equal hashes say the bytes are very likely unchanged, never that two pictures are
+ * equal (sr_movie_find_copy compares bytes). The span is checked, not prepared: preparing would pull
+ * GE writes held only in the GPU's image back into guest VRAM, which the guest can see. */
 uint64_t sr_movie_rows_hash(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t width,
                             uint32_t height) {
     uint32_t canon, bytes;
     if (!movie_span(addr, stride, fmt, width, height, &canon, &bytes)) return 0;
+    if (!sr_guest_span_readable(canon, bytes)) return 0;
     const uint64_t prime = 1099511628211ull;
     const uint32_t bpp = movie_bpp(fmt), row = width * bpp, pitch = stride * bpp;
     uint64_t h = 1469598103934665603ull;
@@ -864,6 +869,7 @@ uint64_t sr_movie_rows_hash(uint32_t addr, uint32_t stride, uint32_t fmt, uint32
             memcpy(&w, p + i, 8u);
             h ^= w;
             h *= prime;
+            h ^= h >> 32;
         }
         for (; i < row; i++) {
             h ^= p[i];
@@ -873,12 +879,22 @@ uint64_t sr_movie_rows_hash(uint32_t addr, uint32_t stride, uint32_t fmt, uint32
     return h ? h : 1u;   /* 0 means "no picture" */
 }
 
+static uint64_t s_movie_dropped;   /* notes dropped because every slot was held (stats line) */
+
 void sr_movie_set_tracking(int on) {
     s_movie_tracking = on ? 1 : 0;
     if (!on) memset(s_movie_notes, 0, sizeof(s_movie_notes));
 }
 
 int sr_movie_tracking(void) { return s_movie_tracking; }
+uint64_t sr_movie_dropped(void) { return s_movie_dropped; }
+
+int sr_movie_held(void) {
+    if (!s_movie_tracking) return 0;
+    for (int i = 0; i < SR_MOVIE_NOTES; i++)
+        if (s_movie_notes[i].seq) return 1;
+    return 0;
+}
 uint64_t sr_movie_clock(void) { return s_movie_clock; }
 
 void sr_movie_note_picture(uint32_t owner, uint32_t addr, uint32_t stride, uint32_t fmt,
@@ -895,6 +911,7 @@ void sr_movie_note_picture(uint32_t owner, uint32_t addr, uint32_t stride, uint3
         if (!n->seq) { if (!slot || slot->seq) slot = n; }
         else if (!slot || (slot->seq && n->seq < slot->seq)) slot = n;
     }
+    if (slot->seq) s_movie_dropped++;   /* every slot held: the oldest note goes */
     slot->addr = canon;
     slot->stride = stride;
     slot->fmt = fmt;
@@ -950,6 +967,26 @@ int sr_movie_find_pixel(uint32_t addr, uint32_t stride, uint32_t fmt, SrMoviePic
     return 1;
 }
 
+#ifdef NK_MOVIE_MUTANT_COPY_HASH
+/* gpu-coherence-selftest-movie-mutant's second build: the copy is judged by the old word-wise FNV
+   fold, in which two differences in bit 63 of two words cancel. The alpha-bit cell must catch it. */
+static uint64_t movie_mutant_fold(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t w, uint32_t h) {
+    uint32_t canon, bytes;
+    if (!movie_span(addr, stride, fmt, w, h, &canon, &bytes) || !sr_guest_span_readable(canon, bytes)) return 0;
+    const uint32_t bpp = movie_bpp(fmt), row = w * bpp, pitch = stride * bpp;
+    uint64_t x = 1469598103934665603ull;
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *p = (const uint8_t *)SR_HOST(canon + y * pitch);
+        for (uint32_t i = 0; i + 8u <= row; i += 8u) {
+            uint64_t v;
+            memcpy(&v, p + i, 8u);
+            x = (x ^ v) * 1099511628211ull;
+        }
+    }
+    return x;
+}
+#endif
+
 int sr_movie_find_copy(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t max_w, uint32_t max_h,
                        SrMoviePicture *out) {
     if (!s_movie_tracking) return 0;
@@ -959,8 +996,25 @@ int sr_movie_find_copy(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t ma
         if (!n->seq || n->stride != stride || n->fmt != fmt || n->width > max_w || n->height > max_h)
             continue;
         if (best && best->seq > n->seq) continue;
-        /* The shape is in the hash's seed, so equal hashes mean equal rows of an equal shape. */
-        if (sr_movie_rows_hash(addr, stride, fmt, n->width, n->height) != n->hash) continue;
+        uint32_t canon, bytes;
+        if (!movie_span(addr, stride, fmt, n->width, n->height, &canon, &bytes) || canon == n->addr) continue;
+        /* Both spans checked (not prepared, as sr_movie_rows_hash), then the rows compared byte for
+         * byte: a texture that is not the picture differs within its first bytes, so a rejection
+         * costs next to nothing; a copy costs one pass, then one hash of the note. */
+        if (!sr_guest_span_readable(canon, bytes) || !sr_guest_span_readable(n->addr, movie_note_bytes(n)))
+            continue;
+#ifdef NK_MOVIE_MUTANT_COPY_HASH
+        if (movie_mutant_fold(canon, stride, fmt, n->width, n->height) !=
+            movie_mutant_fold(n->addr, stride, fmt, n->width, n->height))
+            continue;
+#else
+        const uint32_t row = n->width * movie_bpp(fmt), pitch = stride * movie_bpp(fmt);
+        uint32_t y = 0;
+        while (y < n->height &&
+               memcmp(SR_HOST(canon + y * pitch), SR_HOST(n->addr + y * pitch), row) == 0)
+            y++;
+        if (y != n->height) continue;
+#endif
         if (!movie_note_unchanged(n)) continue;
         best = n;
     }

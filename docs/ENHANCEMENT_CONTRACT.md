@@ -75,38 +75,70 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   GPU cost at 4K: 0.75 ms per present for a 480x272 frame to 3811x2160 on an RTX 3080
   (`anime4k-selftest`).
 - **Movie frames the GE presents (#2111).** With the movie upscaler on, the Vulkan GE renderer also
-  hands it a GE frame that shows a decoded movie, in the window and in a recording. Which pixels are
-  movie pixels comes from movie provenance, host-side metadata only (`src/rt/ge_shared.h`): the media
-  HLE notes each picture it writes (`sceMpegAvcDecode`, an 8888 `sceMpegAvcCsc`, the PSMF player's
-  video output) with its place, stride, format, size, decoder and a hash of its rows, and only while
-  the movie upscaler is on. A frame is a movie frame when its movie box (the box around its movie
-  pixels) covers at least half of the shown 480 x 272, in either way a movie reaches the GE:
+  hands it a GE frame that shows a decoded movie, in the window and in a recording. To recognise a
+  movie this part reads guest bytes, which the `presentation_only` observation boundary in the table
+  above (host swapchain state, frame timings, compositor layout) does not name. The owner admitted
+  it on 2026-11-13, for this part only and on the terms below: exactly these spans are read, only
+  read and never written, and guest timing is unaffected. The decision does not widen the boundary
+  for any other part.
+
+  *What it reads.* Only while `SR_MOVIE_UPSCALE` is on and the Vulkan GE draws (none of it runs
+  under the software GE or with the upscaler off):
+  - the media HLE's own arguments when it writes a decoded picture (`sceMpegAvcDecode`, an 8888
+    `sceMpegAvcCsc`, the PSMF player's video output): the picture's guest address, stride, format,
+    size and decoder handle, kept as a host-side note (`src/rt/ge_shared.h`), at most eight at a
+    time;
+  - the bytes of each noted picture's rows (width x height pixels at its stride, the bytes between
+    rows excluded), hashed when it is noted and again before a frame is taken for a movie frame;
+  - the bytes of a texture the renderer uploads (single-level, direct-colour, unswizzled, the note's
+    stride and format), compared with a note's rows byte for byte until the first difference;
+  - the GE state the renderer already holds: the texture address, stride and format, the descriptor
+    set a draw binds, and the presented target's address, stride, format and write order.
+
+  Every read is read-only, through checked guest spans and never through the read path that prepares
+  VRAM, so it pulls no GPU-held write back into guest memory. Nothing is written to guest memory,
+  guest VRAM, a guest register, a GE command or a readback, and no guest call waits on it. It adds
+  host work on the emulation thread (one hash of each noted picture, and a comparison and a hash for
+  each upload that matches): under `SR_DETERMINISTIC_CLOCK=1` no guest-visible timing depends on it,
+  and under the wall clock it takes host time as any host work does. It chooses only which upscaler
+  enlarges the shown picture.
+
+  *When a frame is a movie frame.* Its movie box (the box around its movie pixels) covers at least
+  half of the shown 480 x 272, in either way a movie reaches the GE:
   - *drawn as a texture* (Hot Shots Tennis's opening movie, and LittleBigPlanet's intro as #2111
     describes it): draws since the target was last presented sampled a texture whose upload matched
-    a noted picture (same stride and format, and the texture's first texel a pixel of the picture,
-    or the texture starting with a byte-exact copy of the picture that fits in it, as Hot Shots
-    Tennis makes with its own code before drawing it; the picture's rows unchanged); UI drawn over
-    part of the movie (subtitles, a prompt) keeps the frame a movie frame, and a later draw, line,
-    point or GE block transfer over the whole movie box does not (a primitive the software GE draws
+    a noted picture (same stride and format, and either the texture's first texel is a pixel of the
+    picture, or the texture starts with the picture's rows byte for byte, a copy such as Hot Shots
+    Tennis makes with its own code before drawing it; the note's rows unchanged), bound as level 0,
+    the anisotropic or scaled image, or the host mip chain (Enhanced `mips=on`); UI drawn over part
+    of the movie (subtitles, a prompt) keeps the frame a movie frame, and a later draw, line, point
+    or GE block transfer over the whole movie box does not (a primitive the software GE draws
     instead keeps it);
   - *decoded into a GE target*: the presented target holds a whole noted picture of its stride and
     format, written after the GE's last write to that target and unchanged since; any GE draw or GE
     block transfer after it, even one pixel of UI, leaves the frame to the GE (a CPU copy into VRAM
     outside the picture does not).
 
-  A note stops matching when any byte of its picture changes (every match re-hashes the rows, so a
-  CPU, DMA or software-GE write over it, or the buffer reused, ends it), when a later picture is
-  written over it, when its decoder is deleted or released, after eight newer pictures, and when the
-  upscaler is off. A picture behind a swizzled VRAM view, a copy that is converted, scaled, partial
-  or copied into a GE target, a 16-bit `sceMpegAvcCsc` and a picture sampled from a render target
-  are not matched: those frames stay GE frames. The decision only chooses the upscaler for the shown
-  picture: the target, guest VRAM, every readback and capture and the guest flight events are the
-  same with it on and off. Evidence:
-  `gpu-coherence-selftest`'s `movie-texture` and `movie-target` cases present each way through the
-  production path, check every way a note stops matching and compare guest VRAM with tracking off;
-  `gpu-coherence-selftest-movie-mutant` builds the renderer without the match and must see both cases
-  fail; `psmf-media-selftest` checks the notes each HLE writer makes. A run prints how many presents
-  were GE movie frames (`gegpu: movie frames (#2111)` and the movie upscaler's exit line).
+  A note stops matching when its rows' hash changes (a probabilistic change detector: a CPU, DMA or
+  software-GE write over the picture, or the buffer reused, ends it; a GE write held only in the
+  GPU's image is not seen, which the target rule covers with its write order and the texture rule by
+  never matching a texture served from a target), when a later picture is written over it, when its
+  decoder is deleted or released, when eight newer pictures were noted (counted as dropped), and
+  when the upscaler is off. A picture behind a swizzled VRAM view, a copy that is converted, scaled,
+  partial or copied into a GE target, a 16-bit `sceMpegAvcCsc`, a picture sampled from a render
+  target, and a picture written in more than eight strips (whose first strip is dropped) are not
+  matched: those frames stay GE frames.
+
+  Evidence: `gpu-coherence-selftest`'s `movie-texture` and `movie-target` cases present each way
+  through the production path, check every way a note stops matching, and compare one frame's guest
+  VRAM with tracking on and off; `gpu-mips-selftest`'s `movie` cell draws a transformed, linearly
+  filtered movie quad with the mip chain bound and without it; `gpu-coherence-selftest-movie-mutant`
+  builds the renderer without the match (both cases must fail) and with the copy judged by a
+  word-wise hash (the alpha-bit cell must fail); `psmf-media-selftest` checks the notes each HLE
+  writer makes. A run's `GEGPU stats` line (`SR_GPU_STATS`) and its shutdown line (`gegpu: movie
+  frames (#2111)`) count movie frames, presents that stayed GE frames while a picture was held, and
+  dropped notes. Not measured: the guest flight events with it on and off (no flight recording has
+  been compared), and the upscaled picture itself.
 - **Forbidden:** Mutating GE display list commands, intercepting guest draw calls to alter gameplay geometry, or feeding host input back into the guest controller state.
 
 ### 2.3. Guest Memory and Code Hooks (`guest_memory_code_hook`)

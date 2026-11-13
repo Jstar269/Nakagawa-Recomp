@@ -14210,9 +14210,21 @@ static int mvc_notes_rules(void) {
                         "in a smaller texture\n", cell);
         ok = 0;
     }
+    /* Two pixels that differ from the picture only in the top (alpha) bit, at odd places: the top
+     * bit of two 64-bit words, which a word-wise FNV fold cannot tell apart. */
+    ((uint8_t *)SR_HOST(MVC_PIC + 0xC0000u))[7] ^= 0x80u;
+    ((uint8_t *)SR_HOST(MVC_PIC + 0xC0000u + 5u * 2048u))[15] ^= 0x80u;
+    if (sr_movie_find_copy(MVC_PIC + 0xC0000u, 512u, 3u, 16u, 16u, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL a copy that differs from the picture was found "
+                        "(two alpha bits)\n", cell);
+        ok = 0;
+    }
+    ((uint8_t *)SR_HOST(MVC_PIC + 0xC0000u))[7] ^= 0x80u;
+    ((uint8_t *)SR_HOST(MVC_PIC + 0xC0000u + 5u * 2048u))[15] ^= 0x80u;
     ((uint8_t *)SR_HOST(MVC_PIC + 0xC0000u + 15u * 2048u))[63] ^= 1u;
     if (sr_movie_find_copy(MVC_PIC + 0xC0000u, 512u, 3u, 16u, 16u, NULL)) {
-        fprintf(stderr, "gpu coherence selftest [%s]: a copy with its last byte changed was found\n", cell);
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL a copy that differs from the picture was found "
+                        "(its last byte)\n", cell);
         ok = 0;
     }
     sr_movie_set_tracking(0);

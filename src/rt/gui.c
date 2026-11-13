@@ -1207,6 +1207,9 @@ void gui_init(const char *title) {
                         if (!gpu_ge_started)
                             fprintf(stderr, "gui_init: GPU GE init failed; software GE active\n");
                     }
+                    /* #2111: only the Vulkan GE reads movie notes; the software GE presents from the
+                     * CPU, which the movie upscaler takes without them. */
+                    if (!gpu_ge_started) sr_movie_set_tracking(0);
                     gui_report_render_path(true, true, gpu_ge_asked, gpu_ge_started);
                 }
                 sr_gui_request_launcher_foreground(true, NULL,

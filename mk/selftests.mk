@@ -1224,7 +1224,10 @@ gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
 # gpu-coherence-selftest-movie-mutant - the movie-texture and movie-target cases (#2111) must kill
 # NK_MOVIE_MUTANT_NO_MATCH in ge_gpu.c, which drops movie provenance's match at the texture upload and
 # at the present: each case's picture is then left to the GE (no movie upscaling), and the case must
-# fail with "movie frame not found". Exit 77 (no Vulkan device) is a SKIP, as for the selftest itself.
+# fail with "movie frame not found". A second build, NK_MOVIE_MUTANT_COPY_HASH in ge.c, judges a copy of a
+# picture by the word-wise FNV fold instead of comparing bytes: movie-texture's alpha-bit cell (two pixels
+# that differ only in their top bit) must then fail with "a copy that differs from the picture was found
+# (two alpha bits)". Exit 77 (no Vulkan device) is a SKIP, as for the selftest itself.
 gpu-coherence-selftest-movie-mutant: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@bin=$(BUILD_DIR)/gpu_coherence_movie_mutant.exe; kill="FAIL movie frame not found"; \
@@ -1238,7 +1241,19 @@ gpu-coherence-selftest-movie-mutant: shader-verify $(RT_GE_O)
 		if test $$result -eq 0; then cat $$bin.$$c.log; echo "movie mutant ($$c) unexpectedly passed" >&2; exit 1; fi; \
 		if ! grep -Fq "$$kill" $$bin.$$c.log; then cat $$bin.$$c.log; echo "movie mutant ($$c) failed for another reason" >&2; exit 1; fi; \
 		echo "gpu-coherence-selftest-movie-mutant: $$c killed ($$kill)"; \
-	done
+	done; \
+	bin=$(BUILD_DIR)/gpu_coherence_movie_copy_mutant.exe; kill="a copy that differs from the picture was found (two alpha bits)"; \
+	geobj=$(BUILD_DIR)/ge_movie_copy_mutant.o; \
+	$(CC) $(GE_CFLAGS) -DNK_MOVIE_MUTANT_COPY_HASH -c src/rt/ge.c -o $$geobj || exit 1; \
+	$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -ffunction-sections -fdata-sections \
+		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) $(LD_GC_SECTIONS) -o $$bin \
+		tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $$geobj src/rt/flight_recorder.c src/rt/perf.c \
+		$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
+	$$bin --case movie-texture > $$bin.log 2>&1; result=$$?; \
+	if test $$result -eq 77; then echo "movie copy mutant: SKIP (no Vulkan device)"; exit 77; fi; \
+	if test $$result -eq 0; then cat $$bin.log; echo "movie copy mutant unexpectedly passed" >&2; exit 1; fi; \
+	if ! grep -Fq "$$kill" $$bin.log; then cat $$bin.log; echo "movie copy mutant failed for another reason" >&2; exit 1; fi; \
+	echo "gpu-coherence-selftest-movie-mutant: copy-by-hash killed ($$kill)"
 
 # vram-view-identity-selftest — the sources and decode the pause menu's VRAM viewer runs
 # (ge_vram_view_sources, ge_vram_view_decode, with gui.c's arguments) name the expected surfaces and
