@@ -1212,6 +1212,13 @@ _Static_assert((int)SDL_SCANCODE_RETURN == 40, "SDL scancode drift from HID usag
 _Static_assert((int)SDL_SCANCODE_UP == 82, "SDL scancode drift from HID usage: UP");
 _Static_assert((int)SDL_SCANCODE_KP_0 == 98, "SDL scancode drift from HID usage: KP_0");
 _Static_assert((int)SDL_SCANCODE_RALT == 230, "SDL scancode drift from HID usage: RALT");
+/* The mouse buttons are profile keys past the keyboard's codes, in SDL's button order (#1791). */
+_Static_assert((int)SDL_SCANCODE_COUNT <= NK_HOST_KEY_MOUSE_FIRST, "SDL scancodes reach the mouse keys");
+_Static_assert(NK_HOST_KEY_MOUSE_LEFT - NK_HOST_KEY_MOUSE_FIRST == SDL_BUTTON_LEFT - 1, "mouse key drift: LEFT");
+_Static_assert(NK_HOST_KEY_MOUSE_MIDDLE - NK_HOST_KEY_MOUSE_FIRST == SDL_BUTTON_MIDDLE - 1, "mouse key drift: MIDDLE");
+_Static_assert(NK_HOST_KEY_MOUSE_RIGHT - NK_HOST_KEY_MOUSE_FIRST == SDL_BUTTON_RIGHT - 1, "mouse key drift: RIGHT");
+_Static_assert(NK_HOST_KEY_MOUSE_X1 - NK_HOST_KEY_MOUSE_FIRST == SDL_BUTTON_X1 - 1, "mouse key drift: X1");
+_Static_assert(NK_HOST_KEY_MOUSE_X2 - NK_HOST_KEY_MOUSE_FIRST == SDL_BUTTON_X2 - 1, "mouse key drift: X2");
 
 /* Versioned host input profile state (#357). */
 static NkInputProfile s_input_profile;
@@ -1309,6 +1316,11 @@ static uint32_t       s_claim_saved_pulse, s_claim_saved_pad_pulse;
 static float          s_mouse_fx, s_mouse_fy;
 static NkAimState     s_aim_state;
 static bool           s_mouse_captured;
+/* The mouse buttons the game has seen pressed (#1791), one bit per NK_HOST_KEY_MOUSE_* key:
+ * set by a press the game had the input for, cleared by its release (wherever it went) and by
+ * a focus loss, so a click made for a menu or the overlay is never held for the game, and no
+ * button stays down while the window is away. */
+static uint32_t       s_mouse_held;
 #define KEY_QUEUE_CAP 64
 static Sdl3VkKeyEvent s_key_queue[KEY_QUEUE_CAP];
 static int            s_key_head, s_key_count;
@@ -1467,6 +1479,27 @@ static void pause_request_latch(int request) {
     if (s_pause_request != SDL3VK_PAUSE_REQUEST_USER) s_pause_request = request;
 }
 
+/* The profile key of an SDL mouse button, or NK_HOST_KEY_NONE for a button with none. */
+static int mouse_button_key(Uint8 button) {
+    if (button < SDL_BUTTON_LEFT || button > SDL_BUTTON_X2) return NK_HOST_KEY_NONE;
+    return NK_HOST_KEY_MOUSE_FIRST + (int)(button - SDL_BUTTON_LEFT);
+}
+
+/* The keys SDL reports held and, past them, the mouse buttons in `mouse_held` (#1791): the one
+ * array the profile's key bindings read. Keyboard codes are copied as they are. */
+static void host_key_state(const bool *k, int key_count, uint32_t mouse_held,
+                           bool out[NK_HOST_KEY_LIMIT]) {
+    memset(out, 0, NK_HOST_KEY_LIMIT * sizeof(bool));
+    if (k && key_count > 0) {
+        memcpy(out, k, (size_t)(key_count < NK_HOST_KEY_MOUSE_FIRST ? key_count
+                                                                    : NK_HOST_KEY_MOUSE_FIRST) *
+                           sizeof(bool));
+    }
+    for (int i = 0; i < NK_HOST_KEY_MOUSE_COUNT; i++) {
+        out[NK_HOST_KEY_MOUSE_FIRST + i] = (mouse_held >> i) & 1u;
+    }
+}
+
 static void poll_input_on_this_stack(void *arg) {
     int *quit = (int *)arg;
     SDL_Event ev;
@@ -1485,7 +1518,16 @@ static void poll_input_on_this_stack(void *arg) {
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
             aim_reset();
+            s_mouse_held = 0;
             break;
+        case SDL_EVENT_MOUSE_BUTTON_UP: {
+            /* A release counts wherever the press went, so no click stays held. A tap or a pen
+             * lifting is not a mouse button letting go. */
+            const int key = mouse_button_key(ev.button.button);
+            if (ev.button.which == SDL_TOUCH_MOUSEID || ev.button.which == SDL_PEN_MOUSEID) break;
+            if (key != NK_HOST_KEY_NONE) s_mouse_held &= ~(1u << (key - NK_HOST_KEY_MOUSE_FIRST));
+            break;
+        }
         default: break;
         }
         /* While the overlay has the input every event is its own; nothing reaches the game. */
@@ -1527,6 +1569,18 @@ static void poll_input_on_this_stack(void *arg) {
             s_mouse_fx += ev.motion.xrel;
             s_mouse_fy += ev.motion.yrel;
             break;
+        case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+            /* A click is a key of the profile (#1791): held until its release, and a pulse
+             * so a click shorter than one poll still reaches the game. Unbound, it is nothing.
+             * A tap or a pen that SDL reports as a mouse is not a mouse button, and a click
+             * the on-screen keyboard has is its own. */
+            const int key = mouse_button_key(ev.button.button);
+            if (key == NK_HOST_KEY_NONE || s_text_claim) break;
+            if (ev.button.which == SDL_TOUCH_MOUSEID || ev.button.which == SDL_PEN_MOUSEID) break;
+            s_mouse_held |= 1u << (key - NK_HOST_KEY_MOUSE_FIRST);
+            s_button_pulse |= sdl3vk_map_key(padscript_active() ? NULL : sdl3vk_get_input_profile(), key);
+            break;
+        }
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN: {
             /* Guide asks for the pause and is consumed, whatever the profile binds to it. */
             if (ev.gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE) {
@@ -1547,7 +1601,9 @@ static void poll_input_on_this_stack(void *arg) {
     /* The profile's keyboard keys (#1299). Its defaults are the GDI front-end's map
      * (gui.c read_keys); SR_PADSCRIPT keeps the defaults, as it does for the gamepad. */
     const NkInputProfile *key_prof = padscript_active() ? NULL : sdl3vk_get_input_profile();
-    uint32_t b = sdl3vk_map_keyboard(key_prof, k, key_count);
+    bool keys[NK_HOST_KEY_LIMIT];
+    host_key_state(k, key_count, s_mouse_held, keys);
+    uint32_t b = sdl3vk_map_keyboard(key_prof, keys, NK_HOST_KEY_LIMIT);
     /* Tab held is fast forward (ace.h), unless the profile binds Tab to a PSP button or the
      * on-screen keyboard has the keys. */
     ace_ff_hold(!s_text_claim && SDL_SCANCODE_TAB < key_count && k[SDL_SCANCODE_TAB] &&
@@ -1579,7 +1635,7 @@ static void poll_input_on_this_stack(void *arg) {
             nk_input_profile_init_default(&def_profile);
             stick_prof = &def_profile;
         }
-        (void)nk_input_profile_eval_key_analog(stick_prof, k, key_count, &lx, &ly);
+        (void)nk_input_profile_eval_key_analog(stick_prof, keys, NK_HOST_KEY_LIMIT, &lx, &ly);
     }
     /* Mouse aiming (#1791): a moving mouse takes the nub; a still one leaves the controller's
      * and the keyboard's value. Off unless the profile turns it on, and never under SR_PADSCRIPT
@@ -3386,6 +3442,7 @@ void sdl3vk_shutdown(void) {
     if (s_pad)         { SDL_CloseGamepad(s_pad); s_pad = NULL; }
     if (s_win)         { SDL_DestroyWindow(s_win); s_win = NULL; }
     s_mouse_captured = false;                      /* the window took its grab with it */
+    s_mouse_held = 0;                              /* and no click outlives it */
     if (s_sdl_subsystems) {
         SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
         s_sdl_subsystems = 0;

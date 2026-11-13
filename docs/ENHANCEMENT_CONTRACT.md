@@ -516,29 +516,46 @@ declares.
 #### 9.10.1. *Hot Shots Tennis* (UCUS98701): `hst.timing.native_60hz`
 
 - **Status.** Released from package 14.0.0-pre1 by the owner's decision of 2026-11-12 (#1732), with the known
-  limits below. It is short of the goal #1732 sets, true 60 logic updates a second in menus, the title screen
-  and matches.
-- **Measured** (the side-by-side check of section 9.7, recorded in #2362). Package 14.0.0-pre1 against the authentic
-  game on a private full-match route (title screen, menus and one full match): 57.2 logic updates per game second in
-  the menus (with the boot), 59.9 on the title screen and 57.1 in a match. In that run 77 % of the match's seconds
-  after its entry load held 57 or more, with short dips (the lowest second 33), so the `SLOWED` line of section 9.5,
-  item 4 (three seconds in a row under 57) can appear in a match. No compared event differed from the authentic
-  game: the point winner, the ball's side and the ball's owner match, and both players' random-number seeds advance
-  1.98 and 2.03 times as often, as `rescale_probability` (section 9.3) expects. Shot-type changes were too few to
-  judge, and the tool's overall verdict reads `FAIL` only for reseeds it cannot resolve as generator steps, which
-  the authentic run has about as many of (35 against 38). The host was never fully idle: the measured run had 43 %
-  mean processor load from other work, and an earlier run at 53 % fell to 52.7 in the match (`SLOWED`).
+  limits below. The release carries to package 15.0.0-pre1 (#2547), which adds four sites to 14.0.0-pre1 and
+  changes no other; the coordinator recorded this on 2026-11-13. It is short of the goal #1732 sets, true 60 logic
+  updates a second in menus, the title screen and matches.
+- **Measured, 14.0.0-pre1** (the side-by-side check of section 9.7, recorded in #2362). Package 14.0.0-pre1
+  against the authentic game on a private full-match route (title screen, menus and one full match): 57.2 logic
+  updates per game second in the menus (with the boot), 59.9 on the title screen and 57.1 in a match. In that run
+  77 % of the match's seconds after its entry load held 57 or more, with short dips (the lowest second 33), so the
+  `SLOWED` line of section 9.5, item 4 (three seconds in a row under 57) can appear in a match. No compared event
+  differed from the authentic game: the point winner, the ball's side and the ball's owner match, and both players'
+  random-number seeds advance 1.98 and 2.03 times as often, as `rescale_probability` (section 9.3) expects.
+  Shot-type changes were too few to judge, and the tool's overall verdict reads `FAIL` only for reseeds it cannot
+  resolve as generator steps, which the authentic run has about as many of (35 against 38). The host was never
+  fully idle: the measured run had 43 % mean processor load from other work, and an earlier run at 53 % fell to
+  52.7 in the match (`SLOWED`).
+- **Measured, 15.0.0-pre1** (recorded in #2547). The package adds four of the eight `gate_30hz_store` sites of
+  #2360: the menu cursor ease (S0375) and the float ease of a ticker line (S0386). On private title runs (the
+  maintainer's copy), each ease timed from its stored values and the logic-update count: the cursor takes its 7
+  values in 12 updates, 0.200 s, as the authentic game does in 6 updates (14.0.0-pre1 took 0.100 s), and a second
+  cursor takes 0.167 s in both; the ticker's ease-in takes its 13 values in 24 updates, 0.400 s, in each of 8
+  eases, as the authentic game does (14.0.0-pre1 took 0.200 s). A side-by-side check (section 9.7) of a private
+  menus-and-match route found no compared event differing from the authentic game (authentic against 60 Hz
+  counts: points 18 and 18, point winners 33 and 33, ball side changes 69 and 62, a ratio of 1.13 per game second
+  inside its 99 % range of 0.72 to 1.77; both opponents' random-number generators at 1.97 and 2.06 against the
+  expected 2), but by the tool's own rules it is not a pass: it covers 79 % of the authentic run's game time,
+  under `--min-coverage` (0.9), and logic ran at 46.8 updates a second on a loaded host (`SLOWED`), each of which
+  makes it `INCOMPLETE`, and 73 generator steps are unresolved, which makes it exit 1 (`FAIL`). It ran on an
+  earlier build of the package that held all eight `gate_30hz_store` sites, not on 15.0.0-pre1; on that private
+  route the function of the four sites not shipped never ran.
 - **Known limits.**
-  1. Further sites belong in the next package update: the eight `gate_30hz_store` sites of #2360 (a cursor ease, a
-     step toward a target and a float ease, which run twice as fast at 60 Hz until then), and five triage rows
-     still open (#2362).
+  1. Further sites belong in the next package update: the four `gate_30hz_store` sites of #2360 that 15.0.0-pre1
+     does not carry (S0332, a step toward a target, which runs twice as fast at 60 Hz until then; no private route
+     reaches the screen that uses it, so its game time is not measured), and five triage rows still open (#2362).
   2. At 60 Hz the step from the main menu into single player takes 3.94 s longer than in the authentic game (288
      vertical blanks against 52). A 60 Hz run with an earlier package shows the same, so it is older than
      14.0.0-pre1. Its cause is not traced yet (#1732).
 
   Also recorded in #2362: when two bounces come 33 ms apart or less, the bounce-effect sites free their emitters
   up to two 60 Hz updates early.
-- **Not run.** A run on a fully idle host, and a measurement of whether 14.0.0-pre1 costs more per update than
+- **Not run.** A run on a fully idle host; a side-by-side check of 15.0.0-pre1 itself; the step into single
+  player (limit 2) with 15.0.0-pre1; and a measurement of whether 15.0.0-pre1 costs more per update than
   13.0.0-pre1.
 
 ## 10. Play Modes: Authentic, Enhanced and Ace

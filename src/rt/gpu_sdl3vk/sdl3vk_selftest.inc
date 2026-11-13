@@ -996,6 +996,245 @@ static int sdl3vk_mouse_aim_selftest(void) {
 }
 #undef AIM_CHECK
 
+/* ---- mouse buttons selftest (#1791); no Vulkan needed ----------------------------------
+ * Drives the real event path (poll_input) with pushed mouse button events. Unbound (every
+ * default mapping), a click changes nothing the game reads. Bound, a click presses its PSP
+ * control while held and still reaches the game when it is shorter than one poll; a side
+ * button pushes the stick; a focus loss lets go of every button; a click the overlay had is
+ * never held for the game; and SR_PADSCRIPT keeps the default mapping. */
+#define MBTN_CHECK(cond, ...) do { if (!(cond)) { \
+    fprintf(stderr, "mouse_buttons_selftest: " __VA_ARGS__); fputc('\n', stderr); ok = 0; } } while (0)
+
+static void mbtn_test_button(Uint8 button, bool down) {
+    SDL_Event ev;
+    SDL_zero(ev);
+    ev.type = down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+    ev.button.button = button;
+    ev.button.down = down;
+    ev.button.clicks = 1;
+    SDL_PushEvent(&ev);
+}
+
+/* One host poll and one game sample: the buttons and stick the game reads. */
+static uint32_t mbtn_test_sample(uint8_t *lx, uint8_t *ly) {
+    int quit = 0;
+    poll_input(&quit);
+    uint32_t seen = sdl3vk_buttons();
+    sdl3vk_consume_button_pulses();
+    sdl3vk_analog(lx, ly);
+    return seen;
+}
+
+static int sdl3vk_mouse_buttons_selftest(void) {
+    int ok = 1;
+    if (!SDL_InitSubSystem(SDL_INIT_EVENTS)) {
+        fprintf(stderr, "mouse_buttons_selftest: SDL events unavailable: %s\n", SDL_GetError());
+        return 0;
+    }
+    const char *tmp_profile = "selftest_mouse_buttons_profile.json";
+    char diag[NK_INPUT_DIAGNOSTIC_MAX_LEN] = {0};
+    uint8_t lx, ly;
+    uint32_t seen;
+    NkInputProfile custom;
+    s_aim_relative_mode = aim_test_grab;   /* aiming stays off; nothing may grab the pointer */
+    aim_test_grab_calls = 0;
+    s_mouse_held = 0;
+
+    /* Unbound (the default mapping): with every button held, and with a click inside one poll,
+     * the game reads exactly what it reads with no mouse at all. */
+    nk_input_profile_init_default(&custom);
+    MBTN_CHECK(nk_input_profile_save(&custom, tmp_profile, diag, sizeof(diag)) == NK_OK,
+               "profile save failed: %s", diag);
+    profile_test_setenv("NK_INPUT_PROFILE", tmp_profile);
+    sdl3vk_reset_input_profile();
+    sdl3vk_init_input_profile();
+    {
+        uint8_t base_lx, base_ly;
+        const uint32_t base = mbtn_test_sample(&base_lx, &base_ly);
+        for (Uint8 b = SDL_BUTTON_LEFT; b <= SDL_BUTTON_X2; b++) mbtn_test_button(b, true);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == base && lx == base_lx && ly == base_ly,
+                   "unbound: held buttons changed the pad (0x%x %u,%u; without 0x%x %u,%u)",
+                   seen, lx, ly, base, base_lx, base_ly);
+        for (Uint8 b = SDL_BUTTON_LEFT; b <= SDL_BUTTON_X2; b++) {
+            mbtn_test_button(b, false);
+            mbtn_test_button(b, true);
+            mbtn_test_button(b, false);
+        }
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == base && lx == base_lx && ly == base_ly,
+                   "unbound: clicks changed the pad (0x%x %u,%u)", seen, lx, ly);
+        MBTN_CHECK(aim_test_grab_calls == 0, "a click grabbed the pointer");
+    }
+
+    /* Bound: the left button is Cross, the right one R beside its W key, the back side button
+     * pushes the stick up. */
+    custom.psp_keys[NK_PSP_BTN_CROSS].primary = NK_HOST_KEY_MOUSE_LEFT;
+    custom.psp_keys[NK_PSP_BTN_RTRIGGER].secondary = NK_HOST_KEY_MOUSE_RIGHT;
+    custom.stick_keys[NK_PSP_STICK_UP].secondary = NK_HOST_KEY_MOUSE_X1;
+    MBTN_CHECK(nk_input_profile_save(&custom, tmp_profile, diag, sizeof(diag)) == NK_OK,
+               "profile save failed: %s", diag);
+    sdl3vk_reset_input_profile();
+    sdl3vk_init_input_profile();
+    (void)mbtn_test_sample(&lx, &ly);
+
+    mbtn_test_button(SDL_BUTTON_LEFT, true);
+    seen = mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK(seen == NK_PSP_BTN_CROSS_BIT, "left held: the game read 0x%x", seen);
+    seen = mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK(seen == NK_PSP_BTN_CROSS_BIT, "left still held: the game read 0x%x", seen);
+    mbtn_test_button(SDL_BUTTON_LEFT, false);
+    seen = mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK(seen == 0, "left released: the game read 0x%x", seen);
+
+    /* A click inside one poll is seen once, then gone. */
+    mbtn_test_button(SDL_BUTTON_RIGHT, true);
+    mbtn_test_button(SDL_BUTTON_RIGHT, false);
+    seen = mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK(seen == NK_PSP_BTN_RTRIGGER_BIT, "a quick right click: the game read 0x%x", seen);
+    seen = mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK(seen == 0, "the quick click stayed pressed (0x%x)", seen);
+
+    /* A side button is a stick key: the stick goes to its edge and comes back. */
+    mbtn_test_button(SDL_BUTTON_X1, true);
+    seen = mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK(seen == 0 && lx == 128 && ly == 0, "back button held: 0x%x %u,%u", seen, lx, ly);
+    mbtn_test_button(SDL_BUTTON_X1, false);
+    (void)mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK(lx == 128 && ly == 128, "back button released: the stick stayed at %u,%u", lx, ly);
+
+    /* A focus loss lets go of a held button: its release goes to another window. */
+    {
+        SDL_Event lost;
+        SDL_zero(lost);
+        lost.type = SDL_EVENT_WINDOW_FOCUS_LOST;
+        mbtn_test_button(SDL_BUTTON_LEFT, true);
+        (void)mbtn_test_sample(&lx, &ly);
+        SDL_PushEvent(&lost);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == 0 && s_mouse_held == 0, "a focus loss left the click held (0x%x)", seen);
+    }
+
+    /* Not mouse buttons: a button past the second side button, a tap or a pen that SDL
+     * reports as the mouse, and a click while the on-screen keyboard has the input. */
+    {
+        SDL_Event tap;
+        SDL_zero(tap);
+        tap.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+        tap.button.button = SDL_BUTTON_LEFT;
+        tap.button.down = true;
+        tap.button.which = SDL_TOUCH_MOUSEID;
+        SDL_PushEvent(&tap);
+        tap.button.which = SDL_PEN_MOUSEID;
+        SDL_PushEvent(&tap);
+        mbtn_test_button(SDL_BUTTON_X2 + 1, true);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == 0 && s_mouse_held == 0, "a tap, a pen or button 6 pressed 0x%x", seen);
+        mbtn_test_button(SDL_BUTTON_X2 + 1, false);
+        /* A tap or a pen lifting does not let go of a mouse button held down. */
+        mbtn_test_button(SDL_BUTTON_LEFT, true);
+        (void)mbtn_test_sample(&lx, &ly);
+        tap.type = SDL_EVENT_MOUSE_BUTTON_UP;
+        tap.button.down = false;
+        tap.button.which = SDL_TOUCH_MOUSEID;
+        SDL_PushEvent(&tap);
+        tap.button.which = SDL_PEN_MOUSEID;
+        SDL_PushEvent(&tap);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == NK_PSP_BTN_CROSS_BIT, "a tap or a pen lifting let go of left (0x%x)", seen);
+        mbtn_test_button(SDL_BUTTON_LEFT, false);
+        (void)mbtn_test_sample(&lx, &ly);
+        sdl3vk_set_text_claim(1);
+        mbtn_test_button(SDL_BUTTON_LEFT, true);
+        seen = mbtn_test_sample(&lx, &ly);
+        sdl3vk_set_text_claim(0);
+        MBTN_CHECK(seen == 0 && s_mouse_held == 0, "the on-screen keyboard's click pressed 0x%x", seen);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == 0, "the on-screen keyboard's click was held for the game (0x%x)", seen);
+        mbtn_test_button(SDL_BUTTON_LEFT, false);
+        (void)mbtn_test_sample(&lx, &ly);
+    }
+
+    /* The keyboard reads what it read before mouse buttons joined its array: every key alone,
+     * with a click bound and not held, maps as SDL's own 512-entry array maps. */
+    {
+        const NkInputProfile *prof = sdl3vk_get_input_profile();
+        static bool sdl_keys[SDL_SCANCODE_COUNT];
+        bool merged[NK_HOST_KEY_LIMIT];
+        int differ = 0;
+        for (int s = 0; s < SDL_SCANCODE_COUNT; s++) {
+            memset(sdl_keys, 0, sizeof(sdl_keys));
+            sdl_keys[s] = true;
+            host_key_state(sdl_keys, SDL_SCANCODE_COUNT, 0u, merged);
+            uint8_t a_lx = 128, a_ly = 128, b_lx = 128, b_ly = 128;
+            (void)nk_input_profile_eval_key_analog(prof, sdl_keys, SDL_SCANCODE_COUNT, &a_lx, &a_ly);
+            (void)nk_input_profile_eval_key_analog(prof, merged, NK_HOST_KEY_LIMIT, &b_lx, &b_ly);
+            if (sdl3vk_map_keyboard(prof, sdl_keys, SDL_SCANCODE_COUNT) !=
+                    sdl3vk_map_keyboard(prof, merged, NK_HOST_KEY_LIMIT) ||
+                a_lx != b_lx || a_ly != b_ly) {
+                differ++;
+            }
+        }
+        MBTN_CHECK(prof != NULL && prof->psp_keys[NK_PSP_BTN_CROSS].primary == NK_HOST_KEY_MOUSE_LEFT,
+                   "the bound profile is not the one in force");
+        MBTN_CHECK(differ == 0, "%d keys map differently through the merged array", differ);
+        host_key_state(NULL, 0, 1u << (NK_HOST_KEY_MOUSE_X1 - NK_HOST_KEY_MOUSE_FIRST), merged);
+        MBTN_CHECK(merged[NK_HOST_KEY_MOUSE_X1] && !merged[NK_HOST_KEY_MOUSE_LEFT] && !merged[0],
+                   "the held mask did not land on its own key");
+    }
+
+    /* A click the overlay had is the overlay's: pressed under the claim and still held after
+     * it ends, it is not a press for the game. One held before the claim and let go under it
+     * is released for the game too. */
+    {
+        PauseTestSink sink = {0};
+        sdl3vk_set_input_claim(pause_test_sink, &sink);
+        mbtn_test_button(SDL_BUTTON_LEFT, true);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == 0 && s_mouse_held == 0, "a claimed click reached the game (0x%x)", seen);
+        sdl3vk_set_input_claim(NULL, NULL);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == 0, "the overlay's click was held for the game (0x%x)", seen);
+        mbtn_test_button(SDL_BUTTON_LEFT, false);
+        (void)mbtn_test_sample(&lx, &ly);
+
+        mbtn_test_button(SDL_BUTTON_LEFT, true);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == NK_PSP_BTN_CROSS_BIT, "left before the claim: 0x%x", seen);
+        sdl3vk_set_input_claim(pause_test_sink, &sink);
+        mbtn_test_button(SDL_BUTTON_LEFT, false);
+        (void)mbtn_test_sample(&lx, &ly);
+        sdl3vk_set_input_claim(NULL, NULL);
+        seen = mbtn_test_sample(&lx, &ly);
+        MBTN_CHECK(seen == 0 && s_mouse_held == 0,
+                   "a click let go under the claim stayed held (0x%x)", seen);
+    }
+
+    /* SR_PADSCRIPT drives the pad with the default mapping: a bound click does nothing. */
+    profile_test_setenv("SR_PADSCRIPT", "synthetic_script_active");
+    mbtn_test_button(SDL_BUTTON_LEFT, true);
+    seen = mbtn_test_sample(&lx, &ly);
+    MBTN_CHECK((seen & NK_PSP_BTN_CROSS_BIT) == 0, "SR_PADSCRIPT: a click pressed Cross (0x%x)", seen);
+    mbtn_test_button(SDL_BUTTON_LEFT, false);
+    (void)mbtn_test_sample(&lx, &ly);
+    profile_test_setenv("SR_PADSCRIPT", NULL);
+
+    profile_test_setenv("NK_INPUT_PROFILE", NULL);
+    remove(tmp_profile);
+    sdl3vk_reset_input_profile();
+    s_aim_relative_mode = aim_relative_mode_default;
+    s_mouse_captured = false;
+    s_mouse_held = 0;
+    nk_input_gate_init(&s_gate);
+    s_button_pulse = s_pad_pulse = 0;
+    s_buttons = 0;
+    s_lx = s_ly = 128;
+    SDL_QuitSubSystem(SDL_INIT_EVENTS);
+    if (ok) printf("mouse_buttons_selftest: OK\n");
+    return ok;
+}
+#undef MBTN_CHECK
+
 /* Set while the lifecycle selftest holds its own SDL video reference: SDL_WasInit cannot tell
  * that reference from one sdl3vk leaked, so the per-step count then checks the gamepad
  * subsystem only, and the selftest checks video once after releasing its reference. */
@@ -1592,6 +1831,12 @@ static int sdl3vk_capture_selftest_body(void) {
     /* ---- mouse aiming (#1791); no Vulkan needed ------------------------------------ */
     if (!sdl3vk_mouse_aim_selftest()) {
         fprintf(stderr, "gpu capture selftest: mouse aim selftest failed\n");
+        return 1;
+    }
+
+    /* ---- mouse buttons (#1791); no Vulkan needed ----------------------------------- */
+    if (!sdl3vk_mouse_buttons_selftest()) {
+        fprintf(stderr, "gpu capture selftest: mouse buttons selftest failed\n");
         return 1;
     }
 
