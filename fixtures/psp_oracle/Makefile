@@ -232,6 +232,9 @@ CASE_ID = 159
 # 161: #1386's utility dialog status timing and wrong-state answers, in game context.
 else ifeq ($(CASE),hle-utility-dialogs)
 CASE_ID = 161
+# 166: #1386's netconf and game sharing dialog cells of 161 only (no savedata, no gamedata install).
+else ifeq ($(CASE),hle-utility-netconf-sharing)
+CASE_ID = 166
 # 162: #1380's flash0:/ms0:/disc0: seek cells and sceIoIoctl file commands (probe_hle_measure.c).
 else ifeq ($(CASE),hle-io-seek)
 CASE_ID = 162
@@ -655,6 +658,9 @@ OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),hle-utility-dialogs)
 TARGET = $(BUILD_DIR)/hle_utility_dialogs
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-utility-netconf-sharing)
+TARGET = $(BUILD_DIR)/hle_utility_netconf_sharing
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
 else ifeq ($(CASE),hle-io-seek)
 TARGET = $(BUILD_DIR)/hle_io_seek
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
@@ -1003,6 +1009,20 @@ USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhoc=0xE1D621D7,0xA62C6F57
 USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhocctl=0xE26F226E,0x9D689E13
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhocMatching --forbid-library sceNetResolver
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceHttp --forbid-library sceSsl --forbid-library sceReg
+endif
+# hle-utility-netconf-sharing: case 161's netconf and game sharing calls and net module pair only.
+# No savedata call, no gamedata install call and no UMD call is linked.
+ifeq ($(CASE),hle-utility-netconf-sharing)
+LIBS += -lpspnet_adhocctl -lpspnet_adhoc
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x2AD8E239,0x4DB1E739,0x6332AA39,0x91E70E35,0xF88155F6,0xC492F751,0x946963F3,0x7853182D,0xEFC6F80F,0x1579A159,0x64D50C56
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNet=0x39AF39A6,0x281928A9
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetInet=0x17943399,0xA9ED66B9,0x8D7284EA,0xCDA85C99,0x7AA671BC,0xFBABE411
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetApctl=0xE2F91F9B,0xB3EDD0EC
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhoc=0xE1D621D7,0xA62C6F57
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhocctl=0xE26F226E,0x9D689E13
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhocMatching --forbid-library sceNetResolver
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceHttp --forbid-library sceSsl --forbid-library sceReg
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceUmdUser
 endif
 ifeq ($(CASE),cpu-timing)
 # The shared probe cleanup checks interrupt state; cpu-timing also calls the

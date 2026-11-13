@@ -2065,6 +2065,20 @@ _register_campaign_probe(
     tuple(row for row, _ in HLE_UTILITY_DIALOGS_ROWS), dict(HLE_UTILITY_DIALOGS_ROWS),
 )
 
+# hle-utility-netconf-sharing (166, probe_hle_measure.c): the game sharing and netconf rows of
+# case 161 only, same shapes, game sharing first and netconf last. Case 161's netconf dialog
+# stayed RUNNING to the poll cap on boot 204 and the console needed a power cycle (its gamedata
+# install dialog did the same on boot 206), and a stuck dialog makes every later dialog cell
+# SKIP 5, so game sharing runs before netconf. No savedata, gamedata install or message dialog cell.
+HLE_UTILITY_NETCONF_SHARING_ROWS = (
+    *(row for row in HLE_UTILITY_DIALOGS_ROWS if row[0].startswith("sharing-")),
+    *(row for row in HLE_UTILITY_DIALOGS_ROWS if row[0].startswith("netconf-")),
+)
+_register_campaign_probe(
+    "hle-utility-netconf-sharing", "PSP-HLE-UTILITY-DIALOG-002",
+    tuple(row for row, _ in HLE_UTILITY_NETCONF_SHARING_ROWS),
+    dict(HLE_UTILITY_NETCONF_SHARING_ROWS),
+)
 # hle-io-seek (162, probe_hle_measure.c): #1380's seeks on a flash0: file (64- and 32-bit), the
 # sceIoIoctl file commands on a probe-owned ms0: file, two writes on descriptors opened without
 # PSP_O_WRONLY, then the same ioctl seek on disc0:/UMD_DATA.BIN (last: the only calls that could

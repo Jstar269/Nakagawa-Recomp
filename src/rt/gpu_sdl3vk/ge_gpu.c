@@ -146,8 +146,15 @@ static int s_scale = 1;     /* integer render scale (SR_GPU_SCALE), 1..MAX_SCALE
 #define SCL_W ((uint32_t)(FB_W * s_scale))   /* device-pixel canvas */
 #define SCL_H ((uint32_t)(FB_H * s_scale))
 /* The host twin's scale (#2050): the user's render scale, which the authentic chain keeps too
- * (s_tscale == s_scale). The twin code is written for any whole ratio between the two. */
+ * (s_tscale == s_scale), times the supersampling factor (s_ssaa). The twin code is written for
+ * any whole ratio between the two. */
 static int s_tscale = 1;
+/* Supersampling (#2073, ENHANCEMENT_CONTRACT.md 10.21): the Ace line's ssaa=2|4 runs the host twin
+ * at s_ssaa times the render scale per axis (s_tscale = s_scale * s_ssaa) and each present shows
+ * the twin's box-filtered average at the render scale (ssaa_resolve, Target.rimg). The authentic
+ * chain keeps s_scale, so guest VRAM, every readback and every GE decision are those of a run
+ * without it. 1 is off. */
+static int s_ssaa = 1;
 #define TSCL_W ((uint32_t)(FB_W * s_tscale))
 #define TSCL_H ((uint32_t)(FB_H * s_tscale))
 #define MAX_VERTS  131072
@@ -350,6 +357,7 @@ typedef struct {
     VkImageLayout tlayout;
     uint64_t wgen, tgen;
     uint32_t hud_zgen;                     /* batches that wrote it (Ace smooth motion, ace_hud.h) */
+    uint64_t zseq;                         /* s_write_seq of the last batch that wrote depth to it */
 } DepthEnt;
 
 /* CPU writes into a resident target are held as up to this many byte spans and applied
@@ -400,6 +408,11 @@ typedef struct Target {
     uint64_t wgen, tgen;
     uint32_t tseed;
     int tshow;                             /* the coming present shows the twin */
+    /* Supersampling (s_ssaa > 1): the twin's box-filtered average at the render scale, which the
+     * presenter shows in the twin's place (ssaa_resolve). Made and freed with the twin. */
+    VkImage rimg; VkDeviceMemory rmem;
+    VkImageLayout rlayout;
+    uint64_t cseq;                         /* s_write_seq of the image's last change (render_gen) */
 } Target;
 
 /* Ordered destination reads (#2109). On the interlock path (sdl3vk.h SDL3VK_DST_READ_INTERLOCK)
@@ -559,7 +572,7 @@ static uint64_t s_xs_serial = 0;          /* content generations handed out */
 static int s_tex_bound_scale = 1;          /* factor of the set tex_get last returned */
 static TexEnt *s_tex_cur;                  /* the cache entry tex_bind_set last handled (glyph_apply checks its set) */
 static int s_glyphs = 0;                   /* sharp game text is on and the render scale is above 1 (#2110) */
-static int s_glyphs_asked = 0;             /* SR_GLYPHS was on for this Ace run: the exit lines print */
+static int s_glyphs_asked = 0;             /* glyphs=on was on this Ace run's line: the exit lines print */
 static VkDescriptorSet s_tex_plain_set;    /* with a copy returned: the entry's unscaled set */
 /* A draw that maps one texel to one pixel binds the unscaled texture even when a copy is ready:
  * xBRZ adds no detail at that size, and a copy of an atlas (a font page) carries neighbouring
@@ -598,6 +611,12 @@ static VkBuffer s_xfer;                    /* pixel transfer staging (at least 1
 static VkDeviceMemory s_xfer_m;
 static void    *s_xfer_map;
 static GpuVert s_vcpu[MAX_VERTS];
+/* The host twin's own copy of s_vcpu, index for index, while the twin draws above 1x and the render
+ * scale is 1x (supersampling at render scale 1, contract 10.21). A primitive's fixes above 1x, the
+ * edge range (uv_edge_axis) and a nearest 1:1 sprite's texel alignment (sprite_nearest_axis), go
+ * into the twin's vertices only: the authentic ones stay exactly as at 1x, so guest memory does not
+ * change. NULL otherwise, and both passes draw s_vcpu (at a render scale above 1x both get the fixes). */
+static GpuVert *s_tvcpu;
 
 static VkDescriptorSetLayout s_dlayout;
 static VkDescriptorPool s_dpool_tex, s_dpool_fix;
@@ -720,8 +739,8 @@ static VkDescriptorSet s_dst_set, s_tdst_set;
 
 /* ---- the host twin (Enhanced: 32-bit colour, #2050) ----------------------------------------
  * With the twin on (Ace Mode only), each render target and depth buffer has a host-only twin at
- * s_tscale (the user's render scale, which the authentic images keep too, so s_tscale ==
- * s_scale), and every write to the authentic image also reaches
+ * s_tscale (the user's render scale, which the authentic images keep too, times the supersampling
+ * factor s_ssaa, 1 without it), and every write to the authentic image also reaches
  * its twin: each render op is recorded a second time into the twin at the twin's scale; each
  * upload from guest VRAM, CPU-write patch and depth upload reaches it as a nearest-filtered blit
  * of the rectangle the authentic image took (exact pixel replication); a block transfer is
@@ -753,6 +772,16 @@ static unsigned long s_cnt_twin_reseed = 0;
 static unsigned long s_cnt_twin_present_auth = 0;
 static const char *s_twin_lag_cause = NULL;  /* the write that last left a twin behind */
 static unsigned long s_cnt_twin_alloc_fail = 0;  /* twin allocations that failed (each turns it off) */
+/* Supersampling's halving step at 4x (2 x the render scale), shared by every target's resolve,
+ * and the resolves recorded. */
+static VkImage s_ssmid; static VkDeviceMemory s_ssmid_mem; static VkImageLayout s_ssmid_layout;
+static unsigned long s_cnt_ssaa_resolves = 0;
+#ifdef SR_GPU_COHERENCE_SELFTEST
+/* gegpu_selftest_ssaa_limits: the size check's GPU memory budget and largest image side, in
+ * place of the device's (0 keeps the device's). */
+static uint64_t s_ssaa_test_budget = 0;
+static uint32_t s_ssaa_test_dim = 0;
+#endif
 static int s_twin_unavailable = 0;         /* asked for and allowed, but this GPU refused it at init */
 static int s_twin_from_key = 0;            /* the launch line asks for the twin (twin=on): its report names the outcome */
 #ifdef SR_GPU_COHERENCE_SELFTEST
@@ -775,6 +804,7 @@ static void twin_blit(VkImage src, VkImageLayout *src_layout, VkImage dst, VkIma
                       VkImageAspectFlags aspect, VkImageLayout rest, uint32_t n,
                       const VkOffset2D *off, const VkExtent2D *ext);
 static int twin_seed_target(struct Target *t, int seeding);
+static void ssaa_resolve(struct Target *t);
 static int twin_seed_depth(DepthEnt *d, int seeding);
 static void twin_depth_free(DepthEnt *d);
 static VkDescriptorSet twin_dset(const Batch *b);
@@ -850,9 +880,13 @@ unsigned long s_cnt_present_gpu = 0;
 /* Public read-only accessor: number of GE list submissions since process start.
  * Unused by the recomp/runtime; kept available for downstream tools/diffing. */
 unsigned long sr_submit_count(void) { return s_cnt_submit; }
-static unsigned long s_cnt_present_cpu = 0, s_cnt_rtt = 0;
+static unsigned long s_cnt_present_cpu = 0, s_cnt_rtt = 0, s_cnt_rtt_direct = 0;
+/* One count over every target image change and depth write, so a texture read whose address lies
+ * in both a colour target and a depth buffer can tell which was written last (depth_containing). */
+static uint64_t s_write_seq = 0;
 static unsigned long s_cnt_readback = 0, s_cnt_upload = 0, s_cnt_dirty = 0;
 static unsigned long s_cnt_snap = 0, s_cnt_texup = 0, s_cnt_xferblit = 0;
+static unsigned long s_cnt_depth_commit = 0;   /* depth_readback_to_guest copies (rtt-1x-reads) */
 static uint64_t s_cnt_tex_invalidations = 0;
 static uint64_t s_cnt_tex_clean_skips = 0;   /* CPU stores that skipped the texture scan (#282): */
 static uint64_t s_cnt_tex_quiet_skips = 0;   /* clean pages, and quiet pages */
@@ -2549,7 +2583,8 @@ static int snapshot_copy_op(Target *t) {
 typedef struct {
     const Batch *arr;
     uint32_t b0, b1, v0, tv0, p0, param_base, ntverts;
-    VkDeviceSize vertex_offset, tvertex_offset;
+    /* twin_vertex_offset: where the twin's pass reads its vertices (s_tvcpu's copy, else vertex_offset) */
+    VkDeviceSize vertex_offset, tvertex_offset, twin_vertex_offset;
     /* rmw_op: an interlock op, recorded by record_rmw_range as runs of one kind; rmw: this run
      * holds destination-reading batches, recorded in the depth-only pass with the RMW variant;
      * zshader: that run tests and writes depth in the shader, against s_rmw_zbuf. */
@@ -2765,7 +2800,8 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
         cur_set = dset;
         if (bound_tnl != (int)b->key.tnl) {
             vkCmdBindVertexBuffers(s_cmd, 0, 1, b->key.tnl ? &s_cmd_slot->tbuf : &s_cmd_slot->vbuf,
-                                   b->key.tnl ? &r->tvertex_offset : &r->vertex_offset);
+                                   b->key.tnl ? &r->tvertex_offset
+                                              : twin ? &r->twin_vertex_offset : &r->vertex_offset);
             bound_tnl = (int)b->key.tnl;
         }
         if (b->key.tnl)
@@ -2799,38 +2835,45 @@ static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1, i
         p1 = i + 1u;
     }
     if (p0 == UINT32_MAX) p0 = p1 = 0;
-    if (!cmd_batch_begin_tnl(nverts, ntverts, p1)) return 0;
+    /* With s_tvcpu the twin's vertices follow the authentic ones in the ring, in the same order. */
+    const uint32_t nstaged = s_tvcpu ? 2u * nverts : nverts;
+    if (!cmd_batch_begin_tnl(nstaged, ntverts, p1)) return 0;
     uint32_t vertex_base = s_cmd_slot->vused;
     uint32_t tvertex_base = s_cmd_slot->tused;
     /* Records go where their staged index plus a non-negative delta lands, and the delta is
      * the draws' firstInstance, which psp_tnl.vert adds to each reference's index. */
     uint32_t param_base = s_cmd_slot->pused > p0 ? s_cmd_slot->pused : p0;
     uint64_t memcpy_started = cpu_profile_now();
-    memcpy(s_cmd_slot->vmap + vertex_base, s_vcpu + v0, (size_t)nverts * sizeof(GpuVert));
-    /* A write-once stencil batch (Batch.once) reads one snapshot, and Vulkan keeps the last fragment
-     * at a pixel where ge.c keeps the first one that passes: its triangles go into the ring last to
-     * first, each with its own vertex order (winding and the flat colour stay). The host twin's
-     * pass draws the same ring. An interlock op (rmw_op) orders the fragments itself and keeps the
-     * staged order. */
+    for (int copy = 0; copy < (s_tvcpu ? 2 : 1); copy++) {
+        const GpuVert *src = copy ? s_tvcpu : s_vcpu;
+        GpuVert *base = s_cmd_slot->vmap + vertex_base + (copy ? nverts : 0u);
+        memcpy(base, src + v0, (size_t)nverts * sizeof(GpuVert));
+        /* A write-once stencil batch (Batch.once) reads one snapshot, and Vulkan keeps the last
+         * fragment at a pixel where ge.c keeps the first one that passes: its triangles go into the
+         * ring last to first, each with its own vertex order (winding and the flat colour stay). The
+         * host twin's pass draws the same ring (or its own copy, staged alike). An interlock op
+         * (rmw_op) orders the fragments itself and keeps the staged order. */
 #if SR_GPU_STENCIL_ONCE_MUTANT != 1
-    for (uint32_t i = b0; i < b1 && !rmw_op; i++) {
-        const Batch *b = &arr[i];
-        if (!b->once || b->key.tnl) continue;
-        const uint32_t ntri = b->count / 3u;
-        GpuVert *dst = s_cmd_slot->vmap + vertex_base + (b->first - v0);
-        for (uint32_t tri = 0; tri < ntri; tri++)
-            memcpy(dst + 3u * tri, s_vcpu + b->first + 3u * (ntri - 1u - tri), 3u * sizeof(GpuVert));
-        s_cnt_once_batches++;
-        s_cnt_once_tris += ntri;
-    }
+        for (uint32_t i = b0; i < b1 && !rmw_op; i++) {
+            const Batch *b = &arr[i];
+            if (!b->once || b->key.tnl) continue;
+            const uint32_t ntri = b->count / 3u;
+            GpuVert *dst = base + (b->first - v0);
+            for (uint32_t tri = 0; tri < ntri; tri++)
+                memcpy(dst + (size_t)3u * tri, src + b->first + (size_t)3u * (ntri - 1u - tri), 3u * sizeof(GpuVert));
+            if (copy) continue;
+            s_cnt_once_batches++;
+            s_cnt_once_tris += ntri;
+        }
 #endif
+    }
     if (ntverts) {
         memcpy(s_cmd_slot->tmap + tvertex_base, s_tnl_vcpu + tv0, (size_t)ntverts * sizeof(GeTnlVtx));
         memcpy(s_cmd_slot->pmap + param_base, s_tnl_pcpu + p0, (size_t)(p1 - p0) * sizeof(GeTnlParams));
     }
     if (s_cpu_profile) {
         cpu_profile_add(GEGPU_CPU_MEMCPY, memcpy_started);
-        s_cpu_profile_stats.memcpy_bytes += (uint64_t)nverts * sizeof(GpuVert);
+        s_cpu_profile_stats.memcpy_bytes += (uint64_t)nstaged * sizeof(GpuVert);
     }
 
     uint64_t command_started = cpu_profile_now();
@@ -2842,8 +2885,10 @@ static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1, i
 
     VkDeviceSize vertex_offset = (VkDeviceSize)vertex_base * sizeof(GpuVert);
     VkDeviceSize tvertex_offset = (VkDeviceSize)tvertex_base * sizeof(GeTnlVtx);
+    VkDeviceSize twin_vertex_offset = s_tvcpu ? (VkDeviceSize)(vertex_base + nverts) * sizeof(GpuVert)
+                                              : vertex_offset;
     RangeRec rr = { arr, b0, b1, v0, tv0, p0, param_base, ntverts, vertex_offset, tvertex_offset,
-                    rmw_op, 0, 0 };
+                    twin_vertex_offset, rmw_op, 0, 0 };
     /* The host twin's pass draws on the twin's copy of what this op starts from: a twin that
      * is behind (some write did not reach it) is first re-seeded from the authentic image. */
     int twin_pass = s_twin && t->tfb && t->dep && t->dep->timg;
@@ -2889,18 +2934,18 @@ static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1, i
 
     s_replay_stats.batches += b1 - b0;
     s_replay_stats.draws += b1 - b0;
-    s_cmd_slot->vused += nverts;
+    s_cmd_slot->vused += nstaged;
     s_cmd_slot->tused += ntverts;
     if (ntverts) s_cmd_slot->pused = param_base + (p1 - p0);
     int ok = cmd_batch_record(SR_PERF_GE_RENDER_BATCH);
     t->gpu_valid = 1;
-    t->render_gen++;
+    t->render_gen++; t->cseq = ++s_write_seq;
     /* Only a batch that writes depth (a depth test with writes on, or a clear that fills depth)
      * makes the depth surface newer than guest VRAM. A title that writes no depth may leave zbp on
      * a colour buffer, and writing the untouched surface back would overwrite those pixels. */
     int zwrite = 0;
     for (uint32_t i = b0; i < b1 && !zwrite; i++) zwrite = arr[i].key.zwrite;
-    if (t->dep && zwrite) { t->dep->guest_dirty = 1; t->dep->hud_zgen++; }
+    if (t->dep && zwrite) { t->dep->guest_dirty = 1; t->dep->hud_zgen++; t->dep->zseq = t->cseq; }
     sr_vram_mark_renderer_pending();
     s_cnt_submit++;
     if (s_stats) {
@@ -3110,11 +3155,14 @@ static int target_prepare_present(Target *t) {
     t->tshow = 0;
     if (s_twin && t->timg && !s_twin_authentic_shown) {
         int in_step = t->tgen == t->wgen;
-        if (!in_step || t->tlayout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        /* With supersampling every present of the twin resolves it again: the resolve image is
+         * what the presenter shows. */
+        if (!in_step || t->tlayout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL || s_ssaa > 1) {
             if (!cmd_batch_begin(0)) return 0;
             if (in_step) {
                 to_layout(s_cmd, t->timg, VK_IMAGE_ASPECT_COLOR_BIT, &t->tlayout,
                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                if (s_ssaa > 1) ssaa_resolve(t);
             } else {
                 (void)twin_seed_target(t, 0);
                 s_cnt_twin_present_auth++;
@@ -3244,7 +3292,7 @@ static int target_upload(Target *t) {
     if (!upload_finish(&upload, SR_PERF_GE_TARGET_UPLOAD)) return 0;
     t->gpu_valid = 1;
     t->cpu_n = 0;                          /* the whole image now holds guest VRAM */
-    t->render_gen++;                       /* image content changed (snapshot reuse check) */
+    t->render_gen++; t->cseq = ++s_write_seq;                       /* image content changed (snapshot reuse check) */
     target_note_clean(t);                  /* VRAM is the source: in sync by definition */
     s_cnt_upload++;
     return 1;
@@ -3432,7 +3480,7 @@ static int target_patch_vram_dirty(Target *t, uint32_t dirty_addr, uint32_t dirt
     if (!upload_finish(&upload, SR_PERF_GE_TARGET_UPLOAD)) return 0;
 
     t->gpu_valid = 1;
-    t->render_gen++;
+    t->render_gen++; t->cseq = ++s_write_seq;
     if (was_clean || (overlap0 == target0 && overlap1 == target1))
         target_note_clean(t);
     s_cnt_upload++;
@@ -3492,8 +3540,13 @@ static void target_note_cpu_write(Target *t, uint32_t lo, uint32_t hi) {
 /* ---- the host twin (see s_twin) ---------------------------------------------------------- */
 
 static void twin_target_free(Target *t) {
-    if (!t->timg && !t->tview && !t->tmem) return;
+    if (!t->timg && !t->tview && !t->tmem && !t->rimg && !t->rmem) return;
     (void)sdl3vk_wait_image((void *)t->timg);
+    (void)sdl3vk_wait_image((void *)t->rimg);
+    if (t->rimg) vkDestroyImage(s_dev, t->rimg, NULL);
+    if (t->rmem) vkFreeMemory(s_dev, t->rmem, NULL);
+    t->rimg = VK_NULL_HANDLE; t->rmem = VK_NULL_HANDLE;
+    t->rlayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (t->tfb) vkDestroyFramebuffer(s_dev, t->tfb, NULL);
     if (t->tfb_rmw) vkDestroyFramebuffer(s_dev, t->tfb_rmw, NULL);
     if (t->trmw_set) vkFreeDescriptorSets(s_dev, s_dpool_rmw, 1, &t->trmw_set);
@@ -3525,6 +3578,11 @@ static void twin_off_for_run(const char *what) {
     if (!s_twin) return;
     fprintf(stderr, "TWIN: off for the rest of the run (%s could not be allocated): the authentic image "
             "is shown at %dx, as with the twin off\n", what, s_scale);
+    if (s_ssaa > 1) {
+        fprintf(stderr, "SSAA: off for the rest of the run with the twin (it renders the samples)\n");
+        /* The report, stamps and pause-menu words follow: supersampling is unavailable from here. */
+        ace_set_ssaa_effective(1, "the host twin, which renders its samples, was turned off for the rest of the run");
+    }
     if (ace_effective()->twin) {   /* the line asked for it, or SR_GPU_TWIN_COLOR ran it (ace_set_twin_running) */
         char why[96];
         snprintf(why, sizeof(why), "%s could not be allocated", what);
@@ -3569,6 +3627,12 @@ static int twin_target_make(Target *t) {
                     &t->timg, &t->tmem)) return 0;
     if (!make_view(t->timg, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, &t->tview)) return 0;
     t->tlayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (s_ssaa > 1) {
+        if (!make_image(SCL_W, SCL_H, VK_FORMAT_R8G8B8A8_UNORM,
+                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        VK_IMAGE_USAGE_SAMPLED_BIT, &t->rimg, &t->rmem)) return 0;
+        t->rlayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
     for (unsigned i = 0; i < TEX_FILTER_VARIANTS; i++) {
         t->tset[i] = make_descriptor(t->tview, s_smp[i], s_dpool_twin);
         if (!t->tset[i]) return 0;
@@ -3633,6 +3697,41 @@ static void twin_blit(VkImage src, VkImageLayout *src_layout, VkImage dst, VkIma
     to_layout(s_cmd, dst, aspect, dst_layout, rest);
     to_layout(s_cmd, src, aspect, src_layout, rest);
     s_cnt_twin_copies++;
+}
+
+/* One 2:1 step of the supersampling resolve (open command buffer): a linear blit of `src` (sw x sh)
+ * into the top-left (sw / 2) x (sh / 2) of `dst`. Each destination pixel's centre falls on the
+ * corner shared by its four source pixels, so linear filtering weighs them equally: a 2x2 box. */
+static void ssaa_half(VkImage src, VkImageLayout *src_layout, uint32_t sw, uint32_t sh, VkImage dst,
+                      VkImageLayout *dst_layout) {
+    VkImageBlit b;
+    memset(&b, 0, sizeof(b));
+    b.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    b.srcSubresource.layerCount = 1;
+    b.dstSubresource = b.srcSubresource;
+    b.srcOffsets[1] = (VkOffset3D){ (int32_t)sw, (int32_t)sh, 1 };
+    b.dstOffsets[1] = (VkOffset3D){ (int32_t)(sw / 2u), (int32_t)(sh / 2u), 1 };
+    to_layout(s_cmd, src, VK_IMAGE_ASPECT_COLOR_BIT, src_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    to_layout(s_cmd, dst, VK_IMAGE_ASPECT_COLOR_BIT, dst_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    vkCmdBlitImage(s_cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &b, VK_FILTER_LINEAR);
+}
+
+/* Supersampling's resolve of target `t` (open command buffer; s_ssaa > 1, the twin in step): its
+ * twin, at s_ssaa times the render scale, averaged into its resolve image at the render scale by
+ * 2:1 box steps (one at 2x, two through s_ssmid at 4x), so each resolved pixel is the plain mean of
+ * the s_ssaa x s_ssaa samples it covers. Both end ready for the presenter's blit. */
+static void ssaa_resolve(Target *t) {
+    if (s_ssaa == 4) {
+        ssaa_half(t->timg, &t->tlayout, TSCL_W, TSCL_H, s_ssmid, &s_ssmid_layout);
+        ssaa_half(s_ssmid, &s_ssmid_layout, TSCL_W / 2u, TSCL_H / 2u, t->rimg, &t->rlayout);
+        to_layout(s_cmd, s_ssmid, VK_IMAGE_ASPECT_COLOR_BIT, &s_ssmid_layout,
+                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    } else {
+        ssaa_half(t->timg, &t->tlayout, TSCL_W, TSCL_H, t->rimg, &t->rlayout);
+    }
+    to_layout(s_cmd, t->rimg, VK_IMAGE_ASPECT_COLOR_BIT, &t->rlayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    s_cnt_ssaa_resolves++;
 }
 
 /* Re-seed the whole twin of `t` from its authentic image (open command buffer): it is then in
@@ -3901,6 +4000,7 @@ static int depth_readback_to_guest(DepthEnt *d) {
         }
     }
     d->guest_dirty = 0;
+    s_cnt_depth_commit++;
     ge_zbuf_invalidate_guest_span(depth_first, depth_end - depth_first);
     if (sr_perf_enabled) sr_perf_vulkan_readback((uint32_t)readback_bytes(DEPTH_BPP));
     return 1;
@@ -4748,7 +4848,10 @@ static int tex_repl_find(const TexEnt *e, NkTexReplHit *hit, int *factor) {
  * only, like texture scaling: an authentic run names the request and obeys nothing. Replacement
  * changes the committed frame, so it is guest-visible (docs/ENHANCEMENT_CONTRACT.md, section 11.3
  * "Texture Replacement") and says so at start until its launch-line keys exist. A pack that cannot
- * be read, or whose textures.ini is malformed, is refused whole and the run goes on unreplaced. */
+ * be read (gone, unreadable, not a regular file), or whose textures.ini or ZIP is malformed, is
+ * refused whole: one TEX_REPLACE: refused line names why (the pack by its last path component only)
+ * and the run goes on unreplaced, never waiting on the pack. An image that cannot be used later is
+ * skipped on its own, noted, and counted in the exit line's skipped=. */
 static void tex_repl_init(int enhanced) {
     s_repl = NULL;
     const char *dir = getenv("SR_TEX_REPLACE");
@@ -4763,7 +4866,8 @@ static void tex_repl_init(int enhanced) {
         char *end = NULL;
         const unsigned long v = strtoul(mb, &end, 10);
         if (!end || *end || mb[0] < '0' || mb[0] > '9' || v < 1ul || v > 8192ul) {
-            fprintf(stderr, "TEX_REPLACE: refused (SR_TEX_REPLACE_BUDGET_MB takes 1 to 8192)\n");
+            fprintf(stderr, "TEX_REPLACE: refused (SR_TEX_REPLACE_BUDGET_MB takes 1 to 8192); "
+                            "the game runs without the pack\n");
             return;
         }
         budget = (uint64_t)v << 20;
@@ -4771,7 +4875,7 @@ static void tex_repl_init(int enhanced) {
     char err[200];
     s_repl = nk_texrepl_open(dir, budget, err, sizeof(err));
     if (!s_repl) {
-        fprintf(stderr, "TEX_REPLACE: refused (%s)\n", err);
+        fprintf(stderr, "TEX_REPLACE: refused (%s); the game runs without the pack\n", err);
         return;
     }
     /* The copies' VRAM is the scaled-copy budget, which a refused SR_TEX_SCALE setting leaves at 0. */
@@ -4797,12 +4901,12 @@ static void tex_repl_shutdown(void) {
     NkTexReplStats st;
     nk_texrepl_stats(s_repl, &st);
     fprintf(stderr, "TEX_REPLACE: exit (lookups=%llu, hits=%llu, misses=%llu, left_alone=%llu, "
-                    "queued=%llu, bound_draws=%llu, loaded=%llu, load_failed=%llu, over_budget=%llu, "
+                    "queued=%llu, bound_draws=%llu, loaded=%llu, load_failed=%llu, skipped=%llu, over_budget=%llu, "
                     "evicted=%llu, bad_factor=%llu, cache_peak_mb=%llu, decode_ms=%llu)\n",
             (unsigned long long)st.lookups, (unsigned long long)st.hits, (unsigned long long)st.misses,
             (unsigned long long)st.left_alone, (unsigned long long)s_cnt_repl_queued,
             (unsigned long long)s_cnt_repl_bound, (unsigned long long)st.loaded,
-            (unsigned long long)st.load_failed, (unsigned long long)st.over_budget,
+            (unsigned long long)st.load_failed, (unsigned long long)st.skipped, (unsigned long long)st.over_budget,
             (unsigned long long)st.evicted, (unsigned long long)st.bad_factor,
             (unsigned long long)(st.cache_peak >> 20), (unsigned long long)(st.decode_ns / 1000000ull));
     nk_texrepl_close(s_repl);
@@ -5200,10 +5304,12 @@ static void uv_edge_axis(double e0, double e1, double c0, double c1, float *lo, 
     *hi = (float)(a < b ? b : a);
 }
 
-/* Whether a primitive gets a range: textured, through mode, above 1x. */
-static int uv_edge_applies(int persp) {
-    return s_scale > 1 && !persp && s_ge->tex_enable && !s_ge->clear;
+/* Whether a primitive drawn at `scale` gets a range: textured, through mode, above 1x. */
+static int uv_edge_applies_at(int scale, int persp) {
+    return scale > 1 && !persp && s_ge->tex_enable && !s_ge->clear;
 }
+
+static int uv_edge_applies(int persp) { return uv_edge_applies_at(s_scale, persp); }
 
 /* A triangle with a horizontal and a vertical leg (at its snapped, rasterised positions) whose u
  * is constant along the vertical leg and v along the horizontal one has u a function of x alone
@@ -5244,6 +5350,7 @@ static void put_vert(float x, float y, float z, float rw, float u, float v, floa
     uint32_t cb = (uint32_t)(b < 0 ? 0 : b > 255 ? 255 : b);
     uint32_t ca = (uint32_t)(a < 0 ? 0 : a > 255 ? 255 : a);
     o->rgba = cr | (cg << 8) | (cb << 16) | (ca << 24);
+    if (s_tvcpu) s_tvcpu[s_nverts - 1u] = *o;
 }
 
 /* Ensure s_snapimg holds the CURRENT contents of `src`: pending batches submit first,
@@ -5454,6 +5561,19 @@ static Target *target_containing(uint32_t a) {
     }
     return best;
 }
+
+/* The depth buffer the renderer holds whose span (its stride times 272 rows of 16-bit values from
+ * its base) holds VRAM offset `a`, or NULL. A texture that starts there and inside a colour target
+ * reads whichever of the two was written last (build_state). */
+static DepthEnt *depth_containing(uint32_t a) {
+    for (int i = 0; i < MAX_DEP; i++) {
+        DepthEnt *d = &s_deps[i];
+        if (d->used && a >= d->zba && (uint64_t)a < (uint64_t)d->zba + (uint64_t)d->zstride * FB_H * 2u) return d;
+    }
+    return NULL;
+}
+
+static int hook_vram_read(uint32_t addr, uint32_t bytes);
 
 /* Build pipeline key + push constants for the current GE state. Always succeeds. */
 static void build_state(int persp, int sprite, Batch *b) {
@@ -5699,9 +5819,27 @@ static void build_state(int persp, int sprite, Batch *b) {
              * image has no mip levels, so a draw with mip levels on (#1373) reads the target
              * back and samples its chain from the texture cache. */
             (void)target_sync_cpu_writes(src);   /* a failure leaves it invalid: decoded from VRAM */
-            if (src->gpu_valid && !nortt && !ge_tex_mip_active(g) && g->tex_fmt == src->fmt && !g->tex_swizzle &&
-                (g->tex_bufw == src->stride || g->tex_bufw == 0) && (toff % bpp_s) == 0) {
+            /* Depth aliasing (#2052): the texture also starts inside a depth buffer the renderer
+             * holds. Depth written after the target's image last changed makes it a depth read,
+             * decoded from guest VRAM at 1x once the depth is committed there; otherwise the
+             * target's colour is the newer content and the rules below apply. Queued batches are
+             * submitted first, so both write counts include them. */
+            DepthEnt *zsrc = depth_containing(vram_off(g->tex_addr));
+            if (zsrc && s_nbatch && !submit_pending())
+                fprintf(stderr, "gegpu: a texture read inside depth buffer 0x%06x: the queued batches did not "
+                        "submit, so the newer of colour and depth is judged without them\n", zsrc->zba);
+            const int depth_read = zsrc && zsrc->zseq > src->cseq;
+            if (src->gpu_valid && !depth_read && !nortt && !ge_tex_mip_active(g) && g->tex_fmt == src->fmt &&
+                !g->tex_swizzle && (g->tex_bufw == src->stride || g->tex_bufw == 0) && (toff % bpp_s) == 0) {
                 uint32_t pix = toff / bpp_s;
+                /* The texture's own size and clamp bits (#2052): psp.frag clamps or wraps each texel
+                 * index at them, as ge.c does, not at the image's edge. A direct bind never has mip
+                 * levels, so these per-fragment LOD lanes are free (F_LODFRAG is off). */
+                b->pc.texenv[3] = (float)g->tex_w;
+                b->pc.fogcol[3] = (float)g->tex_h;
+                b->pc.cfg[1] |= (int32_t)(((g->tex_wrap & 1u) | (((g->tex_wrap >> 8) & 1u) << 1) |
+                                           ((g->tex_filter & 1u) << 2) | (((g->tex_filter >> 8) & 1u) << 3)) << 24);
+                s_cnt_rtt_direct++;
                 if (src == s_cur) {
                     /* feedback loop: sample a snapshot copy; reuse the previous snapshot
                      * while nothing new has rendered into the target */
@@ -5744,9 +5882,16 @@ static void build_state(int persp, int sprite, Batch *b) {
                 b->pc.texsize[3] = (float)(pix / src->stride);
             } else {
                 /* incompatible stride/format reinterpretation, or mip levels: VRAM + decoder.
-                 * A render target is drawn as the GE drew it: never from a scaled copy. */
-                (void)target_readback_span(src, vram_off(g->tex_addr),
-                                           tex_span_size(g->tex_bufw, g->tex_w, g->tex_h));
+                 * A render target is drawn as the GE drew it: never from a scaled copy. A depth
+                 * read commits what a CPU read would (the targets' pixels, then the depth). */
+                const uint32_t span = tex_span_size(g->tex_bufw, g->tex_w, g->tex_h);
+                if (depth_read) {
+                    if (!hook_vram_read(0x04000000u + vram_off(g->tex_addr), span))
+                        fprintf(stderr, "gegpu: a depth read at 0x%06x could not commit the depth to guest "
+                                "VRAM: it decodes what guest VRAM holds\n", vram_off(g->tex_addr));
+                } else {
+                    (void)target_readback_span(src, vram_off(g->tex_addr), span);
+                }
                 s_tex_noscale = 1;
                 b->dset = tex_get();
                 s_tex_noscale = 0;
@@ -6354,6 +6499,11 @@ static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
     put_vert(B->x, B->y, B->z, B->rw, B->u, B->v, B->fog, cb->r, cb->g, cb->b, cb->a);
     put_vert(C->x, C->y, C->z, C->rw, C->u, C->v, C->fog, C->r, C->g, C->b, C->a);
     memcpy(s_uv_box, k_uv_box_free, sizeof s_uv_box);
+    if (s_tvcpu && uv_edge_applies_at(s_tscale, persp)) {   /* the twin's range, above 1x */
+        tri_uv_edge_box(A, B, C);
+        for (uint32_t i = first; i < first + 3u; i++) memcpy(s_tvcpu[i].box, s_uv_box, sizeof s_uv_box);
+        memcpy(s_uv_box, k_uv_box_free, sizeof s_uv_box);
+    }
     cpu_profile_vertex_done(vertex_started, 3);
     append(&b, first, 3);
     if (!s_wing_dst) {   /* a wing canvas draw is not the target's: no count, no HUD box */
@@ -6537,6 +6687,25 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
     put_vert(xb, yb, z, 1.0f, ub, vb, fog, r, g, bb_, a);
     put_vert(xa, yb, z, 1.0f, ua, vb, fog, r, g, bb_, a);
     memcpy(s_uv_box, k_uv_box_free, sizeof s_uv_box);
+    if (s_tvcpu) {   /* the twin's vertices draw above 1x: the alignment and range above, for them */
+        float tua = ul, tub = ur, tva = vt, tvb = vbm, box[4];
+        if (s_ge->tex_enable && !(s_ge->tex_filter & 0x100u)) {
+            sprite_nearest_axis(&tua, &tub, xb - xa);
+            sprite_nearest_axis(&tva, &tvb, yb - ya);
+        }
+        memcpy(box, k_uv_box_free, sizeof box);
+        if (!glyph_bound && uv_edge_applies_at(s_tscale, persp)) {
+            uv_edge_axis(xa, xb, tua, tub, &box[0], &box[2]);
+            uv_edge_axis(ya, yb, tva, tvb, &box[1], &box[3]);
+        }
+        const float tu[6] = { tua, tub, tua, tub, tub, tua }, tv[6] = { tva, tva, tvb, tva, tvb, tvb };
+        for (uint32_t i = 0; i < 6u; i++) {
+            GpuVert *o = &s_tvcpu[first + i];
+            o->u = tu[i];
+            o->v = tv[i];
+            memcpy(o->box, box, sizeof box);
+        }
+    }
     cpu_profile_vertex_done(vertex_started, 6);
     append(&b, first, 6);
     if (!s_wing_dst) {
@@ -6865,7 +7034,7 @@ static int hook_xfer(uint32_t startdata) {
     twin_note_write(&dst->wgen, &dst->tgen, twin_copy, "a block transfer the twins could not repeat");
 #endif
     if (!cmd_submit_wait(SR_PERF_GE_TRANSFER_BLIT)) return 0;
-    dst->render_gen++;                       /* content changed (snapshot/present tracking) */
+    dst->render_gen++; dst->cseq = ++s_write_seq;                       /* content changed (snapshot/present tracking) */
     target_note_drawn(dst, (int)dx, (int)dy, (int)(dx + w), (int)(dy + h));
     if (g_ace_on) ace_note_target_draw(dst->fba);
     sr_vram_mark_renderer_pending();
@@ -6974,14 +7143,22 @@ void gegpu_flush(const char *reason) {
  * not GPU-resident (CPU-written movie frames, pre-GPU content) — caller uses the
  * guest-VRAM path. */
 /* The image the presenter shows for a target, as target_prepare_present chose it: the host twin
- * when it is on and in step, otherwise the authentic image guest VRAM is committed from. */
+ * when it is on and in step (with supersampling, its resolve at the render scale), otherwise the
+ * authentic image guest VRAM is committed from. */
 static VkImage present_image(const Target *t) {
-    return t->tshow ? t->timg : t->img;
+    return t->tshow ? (s_ssaa > 1 ? t->rimg : t->timg) : t->img;
 }
 
 static int present_scale(const Target *t) {
-    return t->tshow ? s_tscale : s_scale;
+    return t->tshow && s_ssaa == 1 ? s_tscale : s_scale;
 }
+
+#ifdef SR_GPU_COHERENCE_SELFTEST
+/* The layout field of present_image(t) (the selftest reads the shown image through it). */
+static VkImageLayout *present_layout(Target *t) {
+    return t->tshow ? (s_ssaa > 1 ? &t->rlayout : &t->tlayout) : &t->layout;
+}
+#endif
 
 /* ---- widescreen Fill: the presented picture (#1881) -------------------------------------------
  * With Fill on, gegpu_present shows one (480 + 2D) x 272 image at the shown image's scale: the
@@ -7165,7 +7342,8 @@ int gegpu_present(uint32_t fbaddr, int fmt, uint32_t stride) {
     stats_tick();
     VkImage shown = present_image(t);
     /* Keyed by the shown image: gui.c takes the HUD mask by the image it shows, which is the
-     * twin while the twin is shown. The authentic depth matches it (s_tscale == s_scale). */
+     * twin (or its supersampling resolve) while the twin is shown. The authentic depth matches it:
+     * the shown image is at the render scale (s_tscale == s_scale without supersampling). */
     if (g_ace_hud_on)
         ace_hud_present((int)(t - s_tgts), shown, t->dep ? t->dep->img : VK_NULL_HANDLE,
                         t->dep ? t->dep->layout : VK_IMAGE_LAYOUT_UNDEFINED, (int)SCL_W, (int)SCL_H,
@@ -7176,6 +7354,7 @@ int gegpu_present(uint32_t fbaddr, int fmt, uint32_t stride) {
     /* The frame was shown: its next draw begins a new frame, which clears its canvas first.
      * Presenting it again before then keeps its wings. */
     if (pr == GEGPU_PRESENT_SHOWN) ge_wide_shown(fbaddr);
+    if (pr == GEGPU_PRESENT_SHOWN && t->tshow && s_ssaa > 1) ace_confirm(ACE_FEATURE_SSAA);
     /* Only SDL's -1 is remapped: it is a present that failed after the target was prepared, so
      * the target's newest pixels may exist only in its image. SDL's 0 (user close), 1 (shown)
      * and 2 (display busy) are GEGPU_PRESENT_WINDOW_CLOSED, GEGPU_PRESENT_SHOWN and
@@ -7305,6 +7484,66 @@ static const GeGpuHooks k_hooks = {
     hook_tnl_prim, hook_wing_tri, hook_wing_sprite,
 };
 
+/* Supersampling's size check (ENHANCEMENT_CONTRACT.md 10.21). SSAA_EST_TARGETS is the render
+ * targets the estimate counts: a title's two display buffers and two others. The bytes a factor
+ * holds: those targets' twins with their depth twins, the twin snapshot, their resolve images at
+ * the render scale and, at 4x, the halving step. An estimate: a title with more live targets uses
+ * more, and a twin that later cannot be allocated turns the twin off with its own message. */
+#define SSAA_EST_TARGETS 4u
+static uint64_t ssaa_bytes(int scale, int f, unsigned depth_bpp) {
+    const uint64_t base = (uint64_t)FB_W * (uint64_t)scale * (uint64_t)FB_H * (uint64_t)scale;
+    const uint64_t px = base * (uint64_t)f * (uint64_t)f;
+    uint64_t bytes = px * ((uint64_t)SSAA_EST_TARGETS * (4u + depth_bpp) + 4u) + base * 4u * SSAA_EST_TARGETS;
+    if (f == 4) bytes += base * 4u * 4u;
+    return bytes;
+}
+
+/* The largest factor of `want` (4, then 2) whose twin fits: each side at most `max_dim`, and
+ * ssaa_bytes within `budget`. 1 when neither fits. `why` gets the reason the request did not fit
+ * (empty when it did) and, when nothing fits, the reason the last factor tried did not. */
+static int ssaa_choose(int want, int scale, uint32_t max_dim, uint64_t budget, unsigned depth_bpp,
+                       char *why, size_t cap) {
+    if (cap) why[0] = '\0';
+    char last[160] = "";
+    for (int f = want; f > 1; f /= 2) {
+        const uint32_t w = (uint32_t)FB_W * (uint32_t)(scale * f), h = (uint32_t)FB_H * (uint32_t)(scale * f);
+        const uint64_t need = ssaa_bytes(scale, f, depth_bpp);
+        const char *no = NULL;
+        char buf[160];
+        if (w > max_dim || h > max_dim) {
+            snprintf(buf, sizeof(buf), "%dx at render scale %dx needs %ux%u images, and this GPU's "
+                     "largest is %u", f, scale, w, h, max_dim);
+            no = buf;
+        } else if (need > budget) {
+            snprintf(buf, sizeof(buf), "%dx at render scale %dx needs about %llu MB of GPU memory, "
+                     "over the %llu MB budget", f, scale, (unsigned long long)(need >> 20),
+                     (unsigned long long)(budget >> 20));
+            no = buf;
+        }
+        if (!no) return f;
+        if (f == want && cap) snprintf(why, cap, "%s", no);
+        else snprintf(last, sizeof(last), "%s", no);
+    }
+    /* Nothing fits: the reason names every factor tried, the request's first. */
+    if (cap && last[0]) {
+        const size_t n = strlen(why);
+        if (n + 2u < cap) snprintf(why + n, cap - n, "; %s", last);
+    }
+    return 1;
+}
+
+/* The size check's GPU memory budget: half the largest device-local heap (the rest stays for
+ * textures, the authentic chain and the presenter). */
+static uint64_t ssaa_budget(void) {
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(s_pdev, &mp);
+    uint64_t best = 0;
+    for (uint32_t i = 0; i < mp.memoryHeapCount; i++)
+        if ((mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && mp.memoryHeaps[i].size > best)
+            best = mp.memoryHeaps[i].size;
+    return best / 2u;
+}
+
 #ifdef SR_GPU_COHERENCE_SELFTEST
 #include "ge_gpu_selftest.inc"
 #endif
@@ -7347,10 +7586,19 @@ static int twin_init(int color) {
     }
     s_tdst_set = make_dst_descriptor(s_tsnap_view, s_dpool_twin);
     if (!s_tdst_set) return 0;
+    if (s_ssaa == 4) {
+        if (!make_image(TSCL_W / 2u, TSCL_H / 2u, VK_FORMAT_R8G8B8A8_UNORM,
+                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                        &s_ssmid, &s_ssmid_mem)) return 0;
+        s_ssmid_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
     s_twin = 1;
     s_twin_color = color ? 1 : 0;
     fprintf(stderr, "TWIN: on (colour=%s, scale=%dx): the presenter shows the twin; guest VRAM keeps "
             "the authentic image\n", s_twin_color ? "full" : "native", s_tscale);
+    if (s_ssaa > 1)
+        fprintf(stderr, "SSAA: on (%dx: the twin renders %ux%u, and each present shows its box-filtered "
+                "average at %ux%u)\n", s_ssaa, TSCL_W, TSCL_H, SCL_W, SCL_H);
     return 1;
 }
 
@@ -7358,6 +7606,8 @@ static int twin_init(int color) {
  * buffers' twins are freed with them. */
 static void twin_release(void) {
     s_twin = s_twin_color = 0;
+    free(s_tvcpu);
+    s_tvcpu = NULL;
     if (s_dpool_twin) vkDestroyDescriptorPool(s_dev, s_dpool_twin, NULL);   /* frees its sets */
     s_dpool_twin = VK_NULL_HANDLE;
     memset(s_tsnap_set, 0, sizeof(s_tsnap_set));
@@ -7366,6 +7616,10 @@ static void twin_release(void) {
     if (s_tsnapimg) vkDestroyImage(s_dev, s_tsnapimg, NULL);
     if (s_tsnapimg_mem) vkFreeMemory(s_dev, s_tsnapimg_mem, NULL);
     s_tsnap_view = VK_NULL_HANDLE; s_tsnapimg = VK_NULL_HANDLE; s_tsnapimg_mem = VK_NULL_HANDLE;
+    if (s_ssmid) vkDestroyImage(s_dev, s_ssmid, NULL);
+    if (s_ssmid_mem) vkFreeMemory(s_dev, s_ssmid_mem, NULL);
+    s_ssmid = VK_NULL_HANDLE; s_ssmid_mem = VK_NULL_HANDLE;
+    s_ssmid_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
 int gegpu_init(void) {
@@ -7437,11 +7691,11 @@ int gegpu_init(void) {
      * the developer override and wins when it is set: =1 full colour, =native the twin with
      * native colour (the identity selftests), =off or =0 no twin. It is an Ace Mode feature: in
      * an authentic run it stays off whatever the environment says. The twin runs at the user's
-     * render scale beside the authentic chain, which keeps that scale too, so guest VRAM and
-     * every readback are the twin-off run's
+     * render scale (times the supersampling factor, s_tscale) beside the authentic chain, which
+     * keeps the render scale, so guest VRAM and every readback are the twin-off run's
      * (ENHANCEMENT_CONTRACT.md 10.11). It needs nearest blits of the colour and depth formats
      * (seeding). */
-    int twin_req = 0;
+    int twin_req = 0, twin_asked = 0;
     s_tscale = s_scale;                    /* set after the render scale is read */
     s_twin_from_key = 0;
     {
@@ -7464,6 +7718,46 @@ int gegpu_init(void) {
         const char *cap = getenv("SR_GPU_TWIN_CAPTURE");
         s_twin_authentic_shown = cap && strcmp(cap, "authentic") == 0;
     }
+    twin_asked = twin_req;   /* the line or SR_GPU_TWIN_COLOR, before supersampling adds its own */
+    /* Supersampling (#2073, 10.21): the Ace line's ssaa=2|4 runs the twin at that many times the
+     * render scale, with native colour unless the twin was asked for in full colour. The largest
+     * factor up to the request whose images fit the device (ssaa_choose) is used, and a lower one
+     * is reported; it needs linear blits of RGBA8 for its resolve. */
+    s_ssaa = 1;
+    if (g_ace_on && ace_effective()->ssaa > 1) {
+        const int want = ace_effective()->ssaa;
+        const VkFormatFeatureFlags lin = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
+                                         VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        VkFormatProperties cf;
+        vkGetPhysicalDeviceFormatProperties(s_pdev, VK_FORMAT_R8G8B8A8_UNORM, &cf);
+        uint64_t budget = ssaa_budget();
+        /* The twin is an image, a framebuffer and a viewport at its scale: the smallest of their
+         * limits bounds each side. */
+        uint32_t max_dim = props.limits.maxImageDimension2D;
+        const uint32_t lims[4] = { props.limits.maxFramebufferWidth, props.limits.maxFramebufferHeight,
+                                   props.limits.maxViewportDimensions[0], props.limits.maxViewportDimensions[1] };
+        for (int i = 0; i < 4; i++)
+            if (lims[i] < max_dim) max_dim = lims[i];
+#ifdef SR_GPU_COHERENCE_SELFTEST
+        if (s_ssaa_test_budget) budget = s_ssaa_test_budget;
+        if (s_ssaa_test_dim) max_dim = s_ssaa_test_dim;
+#endif
+        char why[320] = "";
+        int f = 1;
+        if ((cf.optimalTilingFeatures & lin) != lin)
+            snprintf(why, sizeof(why), "this GPU cannot average RGBA8 images with a linear blit");
+        else
+            f = ssaa_choose(want, s_scale, max_dim, budget, DEPTH_BPP, why, sizeof(why));   /* D16, D32: depth=32 */
+        ace_set_ssaa_effective(f, why);
+        if (f > 1) {
+            s_ssaa = f;
+            if (!twin_req) twin_req = 2;
+        } else {
+            fprintf(stderr, "SSAA: unavailable (%s): the picture is drawn at render scale %dx\n", why,
+                    s_scale);
+        }
+    }
+    s_tscale = s_scale * s_ssaa;
     if (twin_req) {
         const VkFormatFeatureFlags blit = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
         VkFormatProperties cf, df;
@@ -7477,6 +7771,9 @@ int gegpu_init(void) {
                                                                     : "no nearest blit of RGBA8 and D16 on this GPU");
             twin_req = 0;
             s_twin_unavailable = 1;
+            if (s_ssaa > 1) ace_set_ssaa_effective(1, "the host twin, which renders its samples, is unavailable");
+            s_ssaa = 1;
+            s_tscale = s_scale;
         }
     }
     s_xfer_align = props.limits.optimalBufferCopyOffsetAlignment;
@@ -7576,12 +7873,21 @@ int gegpu_init(void) {
     {
         /* Sharp game text (glyph_recon.h): Ace runs only. Its image lives in the scaled-copy budget
          * and takes one more descriptor set per entry that has one. */
-        const NkGlyphConfig *gl = nk_glyph_init_from_env(g_ace_on);
+#ifdef NK_GLYPH_GPU_MUTANT_IGNORE_KEY
+        const NkGlyphConfig *gl = nk_glyph_init(g_ace_on, 1);   /* gpu-glyph-mutant: the key ignored; key-off must fail */
+#else
+        const NkGlyphConfig *gl = nk_glyph_init(g_ace_on, ace_effective()->glyphs);
+#endif
         s_glyphs_asked = gl->on;
         s_glyphs = gl->on && s_scale >= NK_GLYPH_MIN_FACTOR && s_scale <= MAX_SCALE;
-        if (gl->on && !s_glyphs)
-            fprintf(stderr, "GLYPHS: idle (render scale %d leaves nothing to sharpen; it takes %d to %d)\n",
-                    s_scale, NK_GLYPH_MIN_FACTOR, MAX_SCALE);
+        if (gl->on && !s_glyphs) {
+            char why[96];
+            snprintf(why, sizeof why, "render scale %d leaves nothing to sharpen; it takes %d to %d", s_scale,
+                     NK_GLYPH_MIN_FACTOR, MAX_SCALE);
+            fprintf(stderr, "GLYPHS: idle (%s)\n", why);
+            ace_feature_unavailable(ACE_FEATURE_GLYPHS, why);
+        }
+        if (s_glyphs) ace_confirm(ACE_FEATURE_GLYPHS);   /* the renderer that rebuilds is up */
         if (s_glyphs && !nk_tex_scale_config()->budget_bytes) {
             NkTexScaleConfig c = *nk_tex_scale_config();
             c.budget_bytes = (uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20;
@@ -7724,9 +8030,33 @@ int gegpu_init(void) {
         if (s_twin_from_key) ace_feature_unavailable(ACE_FEATURE_TWIN, "the GPU could not make it");
         twin_release();
         s_twin_unavailable = 1;
-    } else if (twin_req) {
-        /* The selftest's failing-befores: a running twin is never confirmed (KEY_CONFIRM, the line asked
-         * for it), or a twin the line did not ask for is not reported (TWIN_REPORT, SR_GPU_TWIN_COLOR). */
+        if (s_ssaa > 1) ace_set_ssaa_effective(1, "the host twin, which renders its samples, could not be made");
+        s_ssaa = 1;
+        s_tscale = s_scale;
+    }
+    /* Supersampling at render scale 1: the twin draws above 1x from its own vertices (s_tvcpu). */
+    if (s_twin && s_ssaa > 1 && s_scale == 1) {
+        s_tvcpu = (GpuVert *)malloc((size_t)MAX_VERTS * sizeof(GpuVert));
+        if (!s_tvcpu) {
+            fprintf(stderr, "TWIN: unavailable (no memory for its vertices): native colour at render scale "
+                    "%dx\n", s_scale);
+            if (s_twin_from_key) ace_feature_unavailable(ACE_FEATURE_TWIN, "no memory for its vertices");
+            twin_release();
+            s_twin_unavailable = 1;
+            ace_set_ssaa_effective(1, "no memory for the host twin's vertices");
+            s_ssaa = 1;
+            s_tscale = s_scale;
+        }
+    }
+    /* A twin the line or SR_GPU_TWIN_COLOR asked for runs: the report says so. A twin that runs only
+     * for supersampling (twin_asked 0) is its machinery, not full colour, and is not reported.
+     * The selftest's failing-befores: a running twin is never confirmed (KEY_CONFIRM, the line asked
+     * for it), a twin the line did not ask for is not reported (TWIN_REPORT, SR_GPU_TWIN_COLOR), or
+     * supersampling's own twin is reported as full colour (SSAA_REPORT). */
+#ifdef SR_TWIN_SELFTEST_GPU_SSAA_REPORT
+    twin_asked = 1;
+#endif
+    if (s_twin && twin_asked) {
 #if !defined(SR_TWIN_SELFTEST_GPU_KEY_CONFIRM) && !defined(SR_TWIN_SELFTEST_GPU_TWIN_REPORT)
         ace_set_twin_running();
 #endif
