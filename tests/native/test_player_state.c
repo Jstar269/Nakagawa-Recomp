@@ -10724,7 +10724,7 @@ static void test_play_mode_line_parses_in_runtime(void) {
         expect_line_parses_in_runtime(&r);
         /* Every part at its largest value, with a pack stored so texpack is in effect. In Ace every key
            the line can carry is then on, so the line's own key order (ace_format's), not the enum's
-           row order, decides where each lands: texpack after ssaa, before cull, and cull last. */
+           row order, decides where each lands: texpack after ssaa, then shadow (Ace only), and cull last. */
         settings.title_pack_count = 1;
         memcpy(settings.title_packs[0].key, "TEST93001", sizeof("TEST93001"));
         snprintf(settings.title_packs[0].path, sizeof(settings.title_packs[0].path), "%s",
@@ -10742,10 +10742,13 @@ static void test_play_mode_line_parses_in_runtime(void) {
             char line[ACE_SPEC_MAX];
             assert(player_play_launch_line(&r, line, sizeof(line)));
             const size_t n = strlen(line);
+            static const char ace_tail[] = ";ssaa=4;texpack=on;shadow=soft;cull=on";
+            const size_t ace_n = sizeof(ace_tail) - 1u;
             if (modes[m] == PLAYER_PLAY_ACE)
-                assert(n > 26u && strcmp(line + n - 26u, ";ssaa=4;texpack=on;cull=on") == 0);
+                assert(n > ace_n && strcmp(line + n - ace_n, ace_tail) == 0);
             else
-                assert(n > 18u && strcmp(line + n - 18u, ";ssaa=4;texpack=on") == 0 && !strstr(line, "cull"));
+                assert(n > 18u && strcmp(line + n - 18u, ";ssaa=4;texpack=on") == 0 && !strstr(line, "cull") &&
+                       !strstr(line, "shadow"));
         }
         settings.title_pack_count = 0;
         own->mode = PLAYER_PLAY_AUTHENTIC;                            /* the title's Authentic */
