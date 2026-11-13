@@ -33,9 +33,9 @@ case-insensitive `true` or `false`; missing or malformed control state is red.
 | Mixed documentation/native changes | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the applicable product gates |
 | Ordinary push to `main` after a validated merge, including one with a path the classifier does not recognise | classification, hygiene/security with its Markdown step when needed and its compact main smoke steps, CI required | expensive platform matrix; the merged PR (or batch) carried it, and an unrecognised path already forced the full matrix there |
 | Workflow push to `main` (a changed workflow, action, CI classifier, aggregate or shard planner), or a push whose change set cannot be read | the full applicable validation above plus the main smoke steps | none of the substantive public gates |
-| Manual `workflow_dispatch` | the full matrix, Windows installer, and full Python tier, regardless of paths | none |
-| Nightly schedule (`17 3 * * *` UTC) | the full matrix, Windows installer, and full Python tier | none |
-| Merge-queue group (`merge_group`, `checks_requested`) | the full matrix, as for a manual dispatch, regardless of paths; every required check reports on the group commit | none |
+| Manual `workflow_dispatch` | the full matrix, Windows installer, full Python tier and C coverage, regardless of paths | none |
+| Nightly schedule (`17 3 * * *` UTC) | the full matrix, Windows installer, full Python tier and C coverage | none |
+| Merge-queue group (`merge_group`, `checks_requested`) | the full matrix, as for a manual dispatch but without C coverage, regardless of paths; every required check reports on the group commit | none |
 
 ### What else starts on a pull request push
 
@@ -57,7 +57,8 @@ change, a manual run, the nightly schedule, a merge group) used to need 23 jobs,
 pull request's run waited for runners while the first ran. The same checks then ran in 14
 jobs; the Android launcher build (`android_build`), added later, makes 15, a fourth Python
 shard makes 16, a fourth Windows group makes 17, and installer and Windows-runtime changes add
-one path-gated Windows installer job. Nothing was dropped and no
+one path-gated Windows installer job. The nightly schedule and a manual run add the informational
+C coverage job (`c_coverage`): 19 jobs in all, with the installer job they also run. Nothing was dropped and no
 command changed; jobs were merged and their steps run one after another. Three things differ in
 when or how a step runs, and none of them skips a step
 where it ran before:
@@ -78,6 +79,7 @@ The jobs:
 | `hygiene` ("Hygiene and security") | 3 jobs: `hygiene` 2.2 min, `markdown` 0.4 min, `main_smoke` (pushes to `main` and full-matrix events only) | 1 job, about 2.5 min: hygiene's steps, then the main smoke steps, then the Markdown lint |
 | `public_export` | 2 jobs: `public_export` 0.2 min, `profile_zero_fixture` 0.4 min | 1 job, about 0.7 min: the export audit, then the profile-zero fixture build |
 | `linux_gcc16` | 1 job, 3.3 min | unchanged (not required, a container job on a hosted runner) |
+| `c_coverage` ("C coverage (informational)") | not present | 1 job, added later, on the nightly schedule and a manual run only (not required, a hosted runner; [Coverage](#coverage)) |
 | `native_tools` | 3 parts, 7.9-9.2 min | unchanged |
 | `python_tools` | 6 shards, 4.2-18.2 min | 4 shards: `test_production_smoke` alone, about 16 min, and three of about 14 min |
 | `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 4 groups of parts, 8.1-13.9 min in run 43055225113 (smoke 8.1, routes 13.9, selftests 9.3, ladder-fuzz 9.7) |
@@ -616,13 +618,20 @@ each device pixel's own position, and so does its uv-edge-clamp case (also at sc
 device pixels outside a screen-aligned strip's or sprite's first and last pixel centres must show
 that edge pixel's 1x sample, with linear and nearest filtering and with repeat and clamp wrapping,
 while a sheared strip stays unclamped.
-The dst-read cells (#2109: order, mask, alpha, mixed, depth, ctest, feedback, ztest and pins) run alone at render scales 1 and 4,
+The dst-read cells (#2109: order, mask, alpha, mixed, depth, ctest, zrange, sfail, feedback, ztest and pins) run alone at render scales 1 and 4,
 once forced to the snapshot destination-read path and once to the interlock path (`--dst-read`). On the
 interlock path, overlapping shader-blend primitives must equal the software GE in colour with no snapshot copy,
-and the depth-tested pair of `dst-read-ztest` must equal it in depth too. `dst-read-depth` and `dst-read-ctest`, an
-alpha-tested and a colour-tested op that write depth, must keep the snapshot path on both paths and equal the
-software GE in colour and depth. `dst-read-feedback`, a stencil state that textures from its own target, must
-keep it too: the destination copy is the texture its second sprite samples. On
+and the depth-tested pair of `dst-read-ztest` must equal it in depth too. `dst-read-depth`, `dst-read-ctest`,
+`dst-read-zrange` and `dst-read-sfail` write depth under a kill the early depth test cannot undo (the alpha test,
+the color test, a narrow transform-mode depth range, a stencil-fail KEEP): on the interlock path their op must take
+the interlock with depth tested and written in the shader and equal the software GE in colour and depth, an
+overlapping pair, a primitive behind another in the same batch, a blended primitive under another depth test with
+depth writes off, and an opaque sprite behind the rejected one included; on the snapshot path their depth must equal it, and `dst-read-sfail` its colour too (a stencil
+batch that blends splits where its primitives overlap, a snapshot copy each). The cells run once more on the
+interlock path with `--depth 32` (#2051): there those four keep the snapshot path, with no depth run in the
+shader, because the shader's depth copy is 16-bit. `dst-read-feedback`, a stencil state that textures from
+its own target, must keep the snapshot path on both paths: the destination copy is the texture its second sprite
+samples. On
 the snapshot path, the known difference must stay inside each overlap, and the device must hold no interlock
 state. `stencil-once` runs alone too, at scales 1 and 4 on the snapshot path and at scale 1 on the interlock
 path: a write-once stencil state (the first fragment to pass at a pixel stores a stencil that rejects the later
@@ -638,10 +647,13 @@ pipeline cache (#2149) runs next, as three processes over one empty data root: c
 mutant targets follow, and each broken variant must fail its case with its own message:
 `gpu-coherence-selftest-snapbar-mutants` breaks the destination-snapshot copy's barriers three ways
 (`SR_GPU_SNAPBAR_MUTANT`, the submit-batch case), `gpu-coherence-pcache-mutant` makes pipelines bypass the
-pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths nine ways
-(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 10 run on the interlock path and are a SKIP on a device without it,
-the hosted lavapipe device included; 8 and 9 break the host twin's use of the interlock, and 10 runs mutant 9 with the
-full-colour twin),
+pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths sixteen ways
+(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 17 run on the interlock path and are a SKIP on a device without it,
+the hosted lavapipe device included; 8 and 9 break the host twin's use of the interlock, 10 runs mutant 9 with the
+full-colour twin, 3 sends all four kills back to the early depth test and 6, 11 and 12 one each, 13 makes the shader's depth
+test always pass, 14 skips the copy of the shader's depth back to the depth image, and 15 keeps such an op on the
+snapshot path as before the shader owned depth, 16 copies the twin's shader depth back into the image's, and 17
+writes depth for a batch whose depth writes are off),
 and `gpu-stencil-once-mutants` breaks the write-once stencil batch three ways (`SR_GPU_STENCIL_ONCE_MUTANT`: no
 reordering, every state called write-once, no depth condition).
 `fsr3-pass-selftest` runs FSR 3's eight compute passes on
@@ -1082,28 +1094,124 @@ whenever their jobs run; neither can change a gate's result.
   `omit = ["tools/test_*.py"]` in `[tool.coverage.run]` (`pyproject.toml`) keep
   the test modules themselves out of the number. Coverage records the run and
   exits with unittest's own status, so a failing shard still fails the job.
-- **C runtime (`native_tools`).** One additional step builds and runs the same
-  `native-core-tests` target in its own `$RUNNER_TEMP/native-core-coverage`
-  `BUILD_DIR`, with `--coverage` appended to the Makefile's own `CFLAGS` (read
-  back through `compiler-info`, so the measured build uses the default
-  configuration) and to `LDFLAGS`. The same step then runs `gcov -p -b -r` once per
-  object from the repository root, where the objects' recorded `src/...` source
-  paths resolve, and collects the reports in `$RUNNER_TEMP/native-core-gcov`. The
-  action's own `gcov` plugin is not used (`plugins: noop`): it runs gcov from the
-  build directory, cannot open any source there, and uploads header-only reports
-  that Codecov rejects. One run per object keeps a source shared by several
-  selftests from getting duplicate line records, `-r` keeps system headers and
-  generated fixtures out, and reports for the selftests' own `*_selftest.c` sources
-  are dropped, as `tools/test_*.py` is for Python. The unprofiled
-  `make CC=gcc native-core-tests` gate still runs first and is unchanged. The
-  `CFLAGS`/`LDFLAGS` route instruments the targets that compile through those
-  variables; a target that hard-codes its own compile flags is not measured, so
-  the C number is a lower bound for `src/` rather than a complete statement about
-  it.
+- **C runtime (`c_coverage`).** A job of its own, beside `native_tools`, builds and runs the
+  self-tests `native_tools` runs on Linux, from `native-core-tests` to the GPU self-tests on
+  lavapipe, a second time with gcov instrumentation (#2394).
+  It runs only on the nightly schedule and on a manual run (`workflow_dispatch`), under
+  `native_tools`' own condition (`run_native`), on a hosted `ubuntu-24.04` runner and never on
+  the self-hosted pool, so it cannot take a runner from a gate. `ci_required` neither needs nor
+  reads it: a failure shows red on this job and on the run without blocking anything. It stays
+  off pull requests, landing batches and merge groups because the
+  [Trusted CI verdict](#trusted-ci-verdict) is computed when the whole CI run completes, and
+  this job outlasts the required jobs: in run 43094169097 it took 24.6 minutes and the last
+  required job ended after 18.0, so on every pull request it would hold the verdict back
+  (figures below). Between measured commits Codecov carries
+  the `c` flag forward (`carryforward: true`), so a pull request's report shows the last
+  nightly figure. `native_tools`' gates run unprofiled and no longer wait for a measurement. Its
+  setup steps are `native_tools`' own, byte for byte (packages through `NK_APT_INSTALL`, the
+  pinned SDL3 and SDL3_ttf, PSPDEV), so the two jobs share their caches.
+
+  After the setup, wrappers named `gcc` and `g++` go first on `PATH`: each runs the real
+  compiler with `--coverage` added. The measuring steps then run the gates' commands
+  (`make CC=gcc native-core-tests`, and so on; only an isolated build root or directory moves
+  under `build/`), and every compile and link is instrumented, including the targets that
+  hard-code their own compile flags and the C++ reference interpreter. Before #2394 the C number came
+  from one extra build of `native-core-tests` in `native_tools`' core part, with `--coverage`
+  appended to the Makefile's `CFLAGS` and `LDFLAGS`, which measured only the targets that
+  compile through those variables. The setup builds the pinned libraries with the real
+  compilers, before the wrappers exist, so they stay out of the number.
+
+  The collection step runs `gcov -p -b -r` once per `*.gcno` notes file under `build/`, from
+  the repository root, where the objects' recorded `src/...` source paths resolve. The
+  action's own `gcov` plugin is not used (`plugins: noop`): it runs gcov from the build
+  directory, cannot open any source there, and uploads header-only reports that Codecov
+  rejects. One run per notes file keeps a source shared by several self-tests from getting
+  duplicate line records, and a notes file whose program never ran still reports its lines,
+  as not executed. Notes files of the mutants built inside measured targets (every path with
+  `mutant` in it) are skipped: lines only a mutant define compiles would otherwise count as
+  covered. A mutant that links a shared, unmutated object still adds its run to that object's
+  counts: the GPU coherence and first-bad-draw mutants link `ge.o`, so their runs count in
+  `src/rt/ge.c`. `-r` keeps system headers out, and reports for the tests' own sources (`tests/`,
+  `fixtures/`, `*selftest.c`, `*selftest.cpp`, `*selftest.inc`, `src/player/player_ui_test.c`) and for C
+  generated into `build/` are dropped, as `tools/test_*.py` is for Python. Everything is
+  uploaded once, under `flags: c`. A failure in any earlier step skips the upload, so a
+  partial run uploads nothing and the `c` flag carries the last complete report forward.
+
+  Measured, with the command `native_tools` runs for each:
+
+  - `native-core-tests`: the CPU self-tests, Ace Mode's among them (`ace-selftest`,
+    `ace-ui-selftest`, `ace-smooth-selftest`), the player state and input settings tests and
+    the player screens self-test (`nk-ui-player-screens-selftest`).
+  - `psmf-media-selftest` with the vendored FFmpeg H.264 subset (`H264_FFMPEG=1`).
+  - The HLE thread and title self-tests, the AOT return-boundary self-test, the scheduler
+    matrix (`sched-selftest`), dispatch isolation, cosimulation, snapshot execution and the
+    verify self-test.
+  - The self-tests `native_tools` compiles directly instead of through make, their steps
+    copied byte for byte: the C++ interpreter unit tests, the FPU/VFPU conversion, VFPU table
+    loader, watchpoints-file parser, strbuf and VFPU interpreter self-tests, and the ATRAC3+
+    decoder and bridge self-tests, UBSan builds included.
+  - `gui-present-selftest`, the player UI regressions and the player UI tests (overlays,
+    fonts, art).
+  - On lavapipe under Xvfb, as in `native_tools`: the GPU snapshot sync, capture, coherence,
+    VRAM view identity and texture scaling self-tests, the FSR 3 pass self-test and the FSR 3
+    frame generation refusal (cell `G-R`). As in `native_tools`, the step fails when the
+  device is not llvmpipe or the texture scaling self-test prints a `SKIP`, so a skip cannot
+  shrink the number unseen.
+
+  Not measured, each `native_tools` step named in `tools/test_public_ci_wiring.py`
+  (`CoverageWiringTests.C_NOT_MEASURED`), so a gate added later fails that test until it is
+  measured or named:
+
+  - Mutants: the separate mutant steps (`gpu-texscale-mutant`, the cosimulation mutation
+    corpus) are left out, and the objects the mutants inside measured targets compile for
+    themselves are skipped at collection. They run deliberately broken code. Their runs still
+    count in the unmutated objects they link.
+  - Not C self-tests: the import and fake-success audit, the provenance gap check, the 32-bit
+    format portability build (syntax only), the portable-object and GE profiling compiles, and
+    the FSR 3 shader reproduction.
+  - End-to-end routes: the CMake player build, test and smokes, the showcase, the installed
+    player smoke, the profile-zero route, and the codegen gates (run_elf, the MIPS
+    microtests, their golden traces and the framebuffer parity checks).
+  - The nightly selftest repeat, which reruns binaries already measured.
+
+  The Windows-only self-tests run in `windows_runtime` and are not measured. Self-tests that
+  need a real GPU (the FSR 3 frame generation cells beyond `G-R`) run in no hosted job.
+
+**Figures before and after #2394.** Codecov's totals per flag, from real runs:
+
+| Flag | Before: `main` at `8257cfc27` (run 43078241056) | After: `0889c5d90` (manual run 43094169097) |
+| --- | --- | --- |
+| Combined | 50.35 % of 141,165 lines in 355 files | 61.82 % of 234,377 lines in 597 files |
+| `python` | 80.59 % of 76,104 lines in 194 files | 80.62 % of 76,108 lines in 194 files |
+| `c` | 14.98 % of 65,061 lines in 161 files | 52.79 % of 158,269 lines in 403 files |
+| `c`, `src/` only | 15.48 % of 61,555 lines | 59.11 % of 131,899 lines |
+
+- **More lines, not only more hits.** The `c` flag now counts every file the self-tests
+  compile, so files no target built under `CFLAGS` before (the player, `src/core`, and the
+  vendored libraries the player tests link) enter the denominator. Vendored code under
+  `third_party/` is 25,875 of the lines, at 19.69 % (libchdr, rcheevos and dr_libs are linked
+  whole and exercised in part). The `src/` row leaves it out, and is the figure for the
+  project's own code.
+- **One correction after the run.** Run 43094169097 still counted `src/ref/selftest.cpp`
+  (495 lines at 98.99 %), the C++ interpreter's test source, which the filter now drops. Run
+  43102622567 on `301ccf224`, without it, measured `c` at 52.64 % of 157,773 lines in 402
+  files and combined at 61.74 % of 233,881 lines in 596 files; the `src/` row already leaves
+  it out.
+
+**Wall time.** `native_tools`' core part took 12 min 33 s in run 43078241056, 4 min 46 s of
+it the coverage build. Without that build it took 6 min 15 s in run 43089041907 and 8 min 10 s
+in run 43094169097. `c_coverage` took 24 min 35 s in run 43094169097:
+
+- 2 min 30 s of setup, 2 min 3 s of it rebuilding SDL3 and SDL3_ttf, because a changed
+  workflow file misses their cache;
+- 21 min 32 s measuring (native core suite 6 min 36 s, GPU self-tests 7 min 3 s);
+- 16 s for gcov collection and 14 s for the upload.
+
+It took 19 min 42 s in run 43102622567, on the head that added these figures.
 
 Both reports are uploaded with `codecov/codecov-action` (pinned by commit SHA)
 under `flags: python` and `flags: c`, authenticated with the job's OIDC identity
-(`use_oidc: true`, which is why those two jobs -- and only those two -- declare
+(`use_oidc: true`, which is why `python_tools` and `c_coverage` -- and only those two -- declare
 `id-token: write` beside `contents: read`). `fail_ci_if_error: false` keeps an
 upload or Codecov outage from failing the job.
 
@@ -1313,7 +1421,7 @@ as described below.
 
 | Check the verdict judges | Behaviour on a group commit |
 | --- | --- |
-| `CI required` | `ci.yml` runs the complete matrix, as for a manual dispatch. `hygiene` and `public_export` run ungated. |
+| `CI required` | `ci.yml` runs the complete matrix, as for a manual dispatch, except the informational C coverage job. `hygiene` and `public_export` run ungated. |
 | `Hygiene and security` | Ungated, as on every event. |
 | `OSV Vulnerability Scan` | `osv-scanner.yml` already triggers on `merge_group`. |
 | `dependency-review` | Passes `base-ref` and `head-ref` from the group payload. On a pull request they are empty, which the action reads as unset. |
@@ -1476,7 +1584,7 @@ and each token's remaining budget.
 
 | Code | Fails when |
 | --- | --- |
-| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
+| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`), the publication gate's code (`.gitattributes`, `tools/publish_audit.py`, `tools/policy_sync.py`, `tools/modified_file_notice_audit.py`, `tools/provenance_record_gap.py`, `tools/history_audit.py` and every module they load or run; `PROTECTED_EXTRA` in the verifier is the list), a `tools/` module named like a standard-library one (it would be imported in place of it) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
 | `CI_DEFINITION_BEHIND` | `main` changed one of those files after the branch point; the integrator merges `main` when it lands the pull request; the author merges it only for a real conflict in content that is not generated, or when asked (`AGENTS.md` section 10). No label waives it |
 | `CI_CONTEXT_COLLISION` | another workflow names `Trusted CI verdict`, or a check run uses that name |
 | `FOREIGN_PRODUCER` | a check run or status under an intended context is not from the intended workflow path and event at this head |
@@ -1491,6 +1599,30 @@ quick one: `CI required` did not run and `CI quick checks` succeeded. The verdic
 description starts with the code, which is how the landing desk tells a head that is ready for a batch from
 one whose checks are still running. Any other way for `CI required` not to succeed stays `JOB_FAILED`, which
 names `CI quick checks` when that is the job that failed ([Quick and full checks](#quick-and-full-checks)).
+
+The publication gate's code is protected because nothing else refuses a file that is outside the
+publication profile and is not implementation, such as game data or a key. The trusted attestation judges
+the profile's paths and new implementation paths only, and the audit runs from the pull request's own
+checkout, in the hygiene and public-export jobs. Without the approval a pull request could loosen the
+audit and pass it in the same change. The trusted attestation (`provenance-attestation.yml`) also runs the
+default branch's own `publish_audit.py --committed-tree` over the candidate, reading its tree from the
+objects (`git ls-tree`, `git cat-file`) and auditing exactly the files that tree lists. No `.gitattributes`
+or `.gitignore` line, VCS-looking directory name or repository-shaped root of the candidate can hide or
+rewrite a file, and the audit runs no Git command in the written tree; its own Git commands use a bare
+repository only when they name one (`safe.bareRepository=explicit`). The audit is also given the verdict base
+(`--trusted-base`): at a path that base already holds, a binary waiver covers only bytes the base vouches for,
+and the pull request's own manifest approves nothing there
+([Approved binaries](PUBLICATION_READINESS.md#approved-binaries-in-the-release-manifest)). The
+merge-group observation (`provenance-attestation-merge-group.yml`) does not run it, as it is not a required
+check. `GateCodeTests` in `tools/test_ci_trust_verdict.py` fails when one of those tools gains a local
+import or a `tools/` script it runs that is not protected, or pre-commit gains a hook that is not.
+`tools/verify_sbom.py`, which the public-export job runs to check the SBOM, is exempt: it does not decide
+which files may be published, and it loads the analyzer and code generator. That step accepts its expected
+`PROVENANCE_UNVERIFIED` failure only when the tool printed no `[FAILED CLOSED]` line and no gate's `[FAIL]`
+line, and the token follows the tool's last `[ALL GATES PASSED]` line. So a gate's printed output cannot
+turn a failed gate into the expected result. Code that runs in the pull request's own job could still change
+files on disk, which no output check sees; the control against a changed audit is the trusted attestation's
+own run of the default branch's audit.
 
 Whatever the `CI_DEFINITION_BEHIND` finding text says, who merges `main`, and when, is decided by
 [`AGENTS.md` section 10](../AGENTS.md#10-pr-and-integration-authorization), as the row above states.

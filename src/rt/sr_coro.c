@@ -357,13 +357,14 @@ void sr_coro_call_on_thread_stack(void (*fn)(void *arg), void *arg) {
 
 int sr_coro_thread_stack_calls_switch(void) { return 0; }
 
-#else  /* POSIX (Linux / Steam Deck / Android) */
+#else  /* POSIX (Linux / Steam Deck / Android / macOS) */
 
 /* Context-switch mechanism. glibc and musl provide getcontext/makecontext/swapcontext; Android's
- * bionic declares ucontext_t (for signal handlers) but implements none of the three, so Android
- * uses the stack-switch routine below. SR_CORO_BACKEND_ASM selects it on another POSIX host too,
- * which is how a Linux build exercises the Android path (make coro-selftest-asm). */
-#if defined(__ANDROID__) || defined(SR_CORO_BACKEND_ASM)
+ * bionic declares ucontext_t (for signal handlers) but implements none of the three, and macOS
+ * marks all three deprecated, so Android and macOS (#329) use the stack-switch routine below.
+ * SR_CORO_BACKEND_ASM selects it on another POSIX host too, which is how a Linux build exercises
+ * that path (make coro-selftest-asm). */
+#if defined(__ANDROID__) || defined(__APPLE__) || defined(SR_CORO_BACKEND_ASM)
 #define SR_CORO_ASM 1
 #if !defined(__x86_64__) && !defined(__aarch64__)
 #error "sr_coro: the stack-switch backend supports x86-64 (System V ABI) and AArch64 (AAPCS64) only"
@@ -392,6 +393,20 @@ void sr_coro_call_with_stack(void (*fn)(void *), void *arg, uintptr_t stack_top)
  * call starts: clear of the switch frame (which lies above it) and of any red zone. */
 #define SR_CORO_THREAD_CALL_GAP 4096u
 
+/* How the routines below are named to the assembler. ELF (Linux, Android) uses the C name, marks
+ * it hidden and records its type and size. Mach-O (macOS) prefixes C names with an underscore,
+ * spells a hidden global .private_extern and has neither .type nor .size. The routines touch
+ * neither x18 (reserved on Apple arm64) nor any other platform register. */
+#if defined(__APPLE__)
+#define SR_CORO_ASM_BEGIN(name, type) \
+    ".globl _" #name "\n" ".private_extern _" #name "\n" "_" #name ":\n"
+#define SR_CORO_ASM_END(name) ""
+#else
+#define SR_CORO_ASM_BEGIN(name, type) \
+    ".globl " #name "\n" ".hidden " #name "\n" ".type " #name "," type "\n" #name ":\n"
+#define SR_CORO_ASM_END(name) ".size " #name ", .-" #name "\n"
+#endif
+
 #if defined(__x86_64__)
 /* Frame, from the saved stack pointer up: MXCSR (4 bytes), x87 control word (2, padded to 4),
  * r15, r14, r13, r12, rbx, rbp, return address. */
@@ -399,10 +414,7 @@ void sr_coro_call_with_stack(void (*fn)(void *), void *arg, uintptr_t stack_top)
 __asm__(
     ".text\n"
     ".p2align 4\n"
-    ".globl sr_coro_stack_switch\n"
-    ".hidden sr_coro_stack_switch\n"
-    ".type sr_coro_stack_switch,@function\n"
-    "sr_coro_stack_switch:\n"
+    SR_CORO_ASM_BEGIN(sr_coro_stack_switch, "@function")
     "    pushq %rbp\n"
     "    pushq %rbx\n"
     "    pushq %r12\n"
@@ -424,14 +436,11 @@ __asm__(
     "    popq %rbx\n"
     "    popq %rbp\n"
     "    ret\n"
-    ".size sr_coro_stack_switch, .-sr_coro_stack_switch\n"
+    SR_CORO_ASM_END(sr_coro_stack_switch)
     /* sr_coro_call_with_stack(fn, arg, stack_top): call fn(arg) with the stack pointer at
      * stack_top (16-byte aligned), then return on the caller's stack; rbp holds the way back. */
     ".p2align 4\n"
-    ".globl sr_coro_call_with_stack\n"
-    ".hidden sr_coro_call_with_stack\n"
-    ".type sr_coro_call_with_stack,@function\n"
-    "sr_coro_call_with_stack:\n"
+    SR_CORO_ASM_BEGIN(sr_coro_call_with_stack, "@function")
     "    pushq %rbp\n"
     "    movq %rsp, %rbp\n"
     "    movq %rdx, %rsp\n"
@@ -441,7 +450,7 @@ __asm__(
     "    movq %rbp, %rsp\n"
     "    popq %rbp\n"
     "    ret\n"
-    ".size sr_coro_call_with_stack, .-sr_coro_call_with_stack\n");
+    SR_CORO_ASM_END(sr_coro_call_with_stack));
 #else
 /* Frame, from the saved stack pointer up: x19..x28, x29 (frame pointer), x30 (return address),
  * d8..d15, FPCR, padding to keep the stack pointer 16-byte aligned. */
@@ -449,10 +458,7 @@ __asm__(
 __asm__(
     ".text\n"
     ".p2align 4\n"
-    ".globl sr_coro_stack_switch\n"
-    ".hidden sr_coro_stack_switch\n"
-    ".type sr_coro_stack_switch,%function\n"
-    "sr_coro_stack_switch:\n"
+    SR_CORO_ASM_BEGIN(sr_coro_stack_switch, "%function")
     "    hint #34\n"                      /* BTI c: a no-op unless branch protection is on */
     "    sub sp, sp, #176\n"
     "    stp x19, x20, [sp, #0]\n"
@@ -484,13 +490,10 @@ __asm__(
     "    ldp d14, d15, [sp, #144]\n"
     "    add sp, sp, #176\n"
     "    ret\n"
-    ".size sr_coro_stack_switch, .-sr_coro_stack_switch\n"
+    SR_CORO_ASM_END(sr_coro_stack_switch)
     /* sr_coro_call_with_stack(fn, arg, stack_top): as on x86-64; x29 holds the way back. */
     ".p2align 4\n"
-    ".globl sr_coro_call_with_stack\n"
-    ".hidden sr_coro_call_with_stack\n"
-    ".type sr_coro_call_with_stack,%function\n"
-    "sr_coro_call_with_stack:\n"
+    SR_CORO_ASM_BEGIN(sr_coro_call_with_stack, "%function")
     "    hint #34\n"
     "    stp x29, x30, [sp, #-16]!\n"
     "    mov x29, sp\n"
@@ -501,7 +504,7 @@ __asm__(
     "    mov sp, x29\n"
     "    ldp x29, x30, [sp], #16\n"
     "    ret\n"
-    ".size sr_coro_call_with_stack, .-sr_coro_call_with_stack\n");
+    SR_CORO_ASM_END(sr_coro_call_with_stack));
 #endif
 #endif /* SR_CORO_ASM */
 
@@ -537,10 +540,14 @@ int sr_coro_stack_remaining(size_t *remaining_out) {
         stack_size = s_current->stack_size;
     } else {
         if (!s_current->stack || s_current->stack_size == 0) {
-            /* pthread_getattr_np is a GNU extension (glibc, also musl); a non-GNU
-             * libc reports the main stack as unavailable here, which the dispatcher
-             * turns into the named host-fiber-stack-bounds-unavailable stop rather
-             * than a guess. Guest fibers do not take this path. */
+            /* pthread_getattr_np is a GNU extension (glibc, also musl). macOS has none,
+             * so this file does not build there yet (#329): it needs Apple's
+             * pthread_get_stackaddr_np/pthread_get_stacksize_np here (the address is the
+             * stack's top, so the low bound is that minus the size), and _DARWIN_C_SOURCE
+             * for MAP_ANONYMOUS and MAP_NORESERVE under _POSIX_C_SOURCE. When the main
+             * stack's bounds are unavailable, the dispatcher stops with the named
+             * host-fiber-stack-bounds-unavailable reason rather than a guess. Guest fibers
+             * do not take this path. */
             pthread_attr_t attr;
             void *stack_addr = NULL;
             if (pthread_getattr_np(pthread_self(), &attr) != 0) return 0;

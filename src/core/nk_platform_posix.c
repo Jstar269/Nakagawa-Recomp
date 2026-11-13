@@ -619,6 +619,27 @@ bool nk_platform_get_app_data_dir(char *out_path, size_t max_len) {
     return nk_platform_get_path(NK_PATH_DATA, out_path, max_len);
 }
 
+bool nk_platform_real_path(const char *path, char *out_path, size_t max_len) {
+    return nk_platform_absolute_path(path, out_path, max_len);
+}
+
+FILE *nk_platform_open_regular_file(const char *path) {
+    if (!path || !*path) return NULL;
+    /* O_NONBLOCK: opening a FIFO must not wait for a writer before it is refused. */
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) return NULL;
+    struct stat st;
+    int flags = fcntl(fd, F_GETFL);
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || flags < 0 ||
+        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) != 0) {
+        close(fd);
+        return NULL;
+    }
+    FILE *file = fdopen(fd, "rb");
+    if (!file) close(fd);
+    return file;
+}
+
 bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len) {
     (void)out_path;
     (void)max_len;
@@ -633,6 +654,62 @@ bool nk_platform_get_desktop_dir(char *out_path, size_t max_len) {
     int written = snprintf(out_path, max_len, "%s/Desktop", home);
     if (written > 0 && (size_t)written < max_len && nk_platform_dir_exists(out_path)) return true;
     written = snprintf(out_path, max_len, "%s", home);
+    if (written > 0 && (size_t)written < max_len && nk_platform_dir_exists(out_path)) return true;
+    out_path[0] = '\0';
+    return false;
+}
+
+/* The folder user-dirs.dirs names for key ("XDG_DOWNLOAD_DIR" and so on): a line
+   KEY="$HOME/<path>" or KEY="/<path>", as xdg-user-dirs writes it. */
+static bool posix_xdg_user_dir(const char *key, const char *home, char *out_path,
+                               size_t max_len) {
+    char config[4096];
+    char line[4096];
+    const char *config_home = getenv("XDG_CONFIG_HOME");
+    size_t key_length = strlen(key);
+    bool found = false;
+    int written = config_home && config_home[0] == '/'
+        ? snprintf(config, sizeof(config), "%s/user-dirs.dirs", config_home)
+        : snprintf(config, sizeof(config), "%s/.config/user-dirs.dirs", home);
+    if (written <= 0 || (size_t)written >= sizeof(config)) return false;
+    FILE *file = fopen(config, "r");
+    if (!file) return false;
+    while (!found && fgets(line, sizeof(line), file)) {
+        char *value = line + key_length + 2;
+        char *end;
+        if (strncmp(line, key, key_length) != 0 || line[key_length] != '=' ||
+            line[key_length + 1] != '"' || (end = strchr(value, '"')) == NULL)
+            continue;
+        *end = '\0';
+        if (strncmp(value, "$HOME", 5) == 0 && (value[5] == '/' || value[5] == '\0'))
+            written = snprintf(out_path, max_len, "%s%s", home, value + 5);
+        else if (value[0] == '/')
+            written = snprintf(out_path, max_len, "%s", value);
+        else
+            continue;
+        found = written > 0 && (size_t)written < max_len;
+    }
+    fclose(file);
+    return found;
+}
+
+bool nk_platform_get_personal_dir(NkPersonalDir which, char *out_path, size_t max_len) {
+    static const char *const names[NK_PERSONAL_COUNT] = {
+        "Documents", "Downloads", "Music", "Pictures", "Videos", "Desktop"
+    };
+    static const char *const keys[NK_PERSONAL_COUNT] = {
+        "XDG_DOCUMENTS_DIR", "XDG_DOWNLOAD_DIR", "XDG_MUSIC_DIR", "XDG_PICTURES_DIR",
+        "XDG_VIDEOS_DIR", "XDG_DESKTOP_DIR"
+    };
+    if (!out_path || max_len == 0) return false;
+    out_path[0] = '\0';
+    if ((unsigned)which >= (unsigned)NK_PERSONAL_COUNT) return false;
+    const char *home = getenv("HOME");
+    if (!home || !*home) return false;
+    if (posix_xdg_user_dir(keys[which], home, out_path, max_len) &&
+        nk_platform_dir_exists(out_path))
+        return true;
+    int written = snprintf(out_path, max_len, "%s/%s", home, names[which]);
     if (written > 0 && (size_t)written < max_len && nk_platform_dir_exists(out_path)) return true;
     out_path[0] = '\0';
     return false;
@@ -1108,8 +1185,21 @@ static void android_import_environment(JNIEnv *env) {
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     jsize count = entries ? (*env)->GetArrayLength(env, entries) : 0;
     for (jsize i = 0; i < count; i++) {
+        /* No JNI call may follow one that left an exception pending: each is cleared here,
+           and the entry it concerns is named in the log as not applied. */
         jstring entry = (jstring)(*env)->GetObjectArrayElement(env, entries, i);
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            __android_log_print(ANDROID_LOG_ERROR, "nakagawa", "NK_ENV_IMPORT_FAILED entry=%d", (int)i);
+            continue;
+        }
         const char *text = entry ? (*env)->GetStringUTFChars(env, entry, NULL) : NULL;
+        if (entry && !text) {   /* GetStringUTFChars threw OutOfMemoryError */
+            (*env)->ExceptionClear(env);
+            __android_log_print(ANDROID_LOG_ERROR, "nakagawa", "NK_ENV_IMPORT_FAILED entry=%d", (int)i);
+            (*env)->DeleteLocalRef(env, entry);
+            continue;
+        }
         const char *eq = text ? strchr(text, '=') : NULL;
         if (eq && eq != text && (size_t)(eq - text) < 256u) {
             char name[256];
@@ -1122,6 +1212,17 @@ static void android_import_environment(JNIEnv *env) {
     }
     if (entries) (*env)->DeleteLocalRef(env, entries);
     (*env)->DeleteLocalRef(env, host);
+}
+
+/* LauncherActivity.nativeImportEnvironment, on SDL's thread just before the player's main():
+   the variables NakagawaHost set after this library loaded (a toolchain unpacked on this start
+   sets its own then), applied to this library's libc as JNI_OnLoad applied the earlier ones. */
+JNIEXPORT void JNICALL Java_io_github_jstar269_nakagawa_LauncherActivity_nativeImportEnvironment(
+    JNIEnv *env, jclass cls);
+JNIEXPORT void JNICALL Java_io_github_jstar269_nakagawa_LauncherActivity_nativeImportEnvironment(
+    JNIEnv *env, jclass cls) {
+    (void)cls;
+    android_import_environment(env);
 }
 
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
@@ -1380,6 +1481,8 @@ void nk_platform_close_process(NkProcessHandle *process) {
 static int s_android_log_pipe[2] = { -1, -1 };
 static char s_android_log_tag[32] = "nakagawa";
 static FILE *s_android_log_file;
+static pthread_t s_android_log_thread;
+static bool s_android_log_thread_running;
 
 static void *android_log_pump(void *arg) {
     (void)arg;
@@ -1387,6 +1490,7 @@ static void *android_log_pump(void *arg) {
     size_t used = 0;
     for (;;) {
         ssize_t n = read(s_android_log_pipe[0], buf + used, sizeof(buf) - 1u - used);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) break;
         used += (size_t)n;
         size_t start = 0;
@@ -1408,6 +1512,14 @@ static void *android_log_pump(void *arg) {
             used = 0;
         }
     }
+    if (used > 0) {   /* a last line with no newline */
+        buf[used] = '\0';
+        __android_log_write(ANDROID_LOG_INFO, s_android_log_tag, buf);
+        if (s_android_log_file) {
+            fprintf(s_android_log_file, "%s\n", buf);
+            fflush(s_android_log_file);
+        }
+    }
     return NULL;
 }
 
@@ -1416,13 +1528,19 @@ bool nk_platform_host_startup(const char *log_tag) {
     if (log_tag && log_tag[0]) snprintf(s_android_log_tag, sizeof(s_android_log_tag), "%s", log_tag);
     const char *log_path = getenv("NK_ANDROID_LOG_FILE");
     if (log_path && log_path[0]) s_android_log_file = fopen(log_path, "a");
-    if (s_android_log_pipe[0] < 0 && pipe(s_android_log_pipe) == 0) {
+    /* O_CLOEXEC: a child the runtime starts keeps no copy of the pipe's own write end, which would
+       hold off the end of file nk_platform_host_shutdown waits for. The standard streams it gets
+       are dup2() copies, inherited as on the desktop. */
+    if (s_android_log_pipe[0] < 0 && pipe2(s_android_log_pipe, O_CLOEXEC) == 0) {
         pthread_t thread;
         setvbuf(stdout, NULL, _IOLBF, 0);
         setvbuf(stderr, NULL, _IOLBF, 0);
         (void)dup2(s_android_log_pipe[1], STDOUT_FILENO);
         (void)dup2(s_android_log_pipe[1], STDERR_FILENO);
-        if (pthread_create(&thread, NULL, android_log_pump, NULL) == 0) pthread_detach(thread);
+        if (pthread_create(&thread, NULL, android_log_pump, NULL) == 0) {
+            s_android_log_thread = thread;
+            s_android_log_thread_running = true;
+        }
     }
     /* SDL_GetBasePath() is "./" on Android: the folder the app unpacked its bundled files to
        (fonts) is made the working directory so that relative base resolves there. */
@@ -1434,11 +1552,35 @@ bool nk_platform_host_startup(const char *log_tag) {
     }
     return true;
 }
+
+void nk_platform_host_shutdown(void) {
+    if (!s_android_log_thread_running) return;
+    s_android_log_thread_running = false;
+    fflush(stdout);
+    fflush(stderr);
+    /* The pump reads until every write end is closed: the two standard streams and the pipe's
+       own. Then it has written every line, and it ends. */
+    int null_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (null_fd >= 0) {
+        (void)dup2(null_fd, STDOUT_FILENO);
+        (void)dup2(null_fd, STDERR_FILENO);
+        close(null_fd);
+    }
+    close(s_android_log_pipe[1]);
+    s_android_log_pipe[1] = -1;
+    (void)pthread_join(s_android_log_thread, NULL);
+    if (s_android_log_file) {
+        fclose(s_android_log_file);
+        s_android_log_file = NULL;
+    }
+}
 #else
 bool nk_platform_host_startup(const char *log_tag) {
     (void)log_tag;
     return true;
 }
+
+void nk_platform_host_shutdown(void) {}
 #endif
 
 bool nk_platform_local_time_zone(int *standard_minutes, bool *daylight_now) {
@@ -1487,6 +1629,10 @@ NkHostKind nk_platform_host_kind(void) {
 
 bool nk_platform_is_path_separator(char c) {
     return c == '/';
+}
+
+bool nk_platform_path_is_absolute(const char *path) {
+    return path != NULL && path[0] == '/';
 }
 
 bool nk_platform_path_chars_equal(char a, char b) {

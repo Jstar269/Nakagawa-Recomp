@@ -59,6 +59,11 @@ class TitleManifestParityTests(unittest.TestCase):
             "src/core/nk_shared_helpers.c",
             "src/core/nk_iso.c", "src/core/nk_library.c", "src/core/nk_launch.c",
             "src/core/nk_title_manifest.c", "src/core/nk_json.c", "src/core/generated/nk_title_catalog.c",
+            # nk_launch.c starts a homebrew program from its Memory Stick folder
+            # (nk_pbp_homebrew.c), whose package reader reports through the PSP crypto
+            # engine (nk_psp_fail), which reads the key store.
+            "src/core/nk_pbp_homebrew.c", "src/core/nk_psp_crypto.c", "src/core/nk_psp_keystore.c",
+            "src/core/nk_psp_builtin_keys.c",
             PLATFORM_SRC,
             "tests/native/test_manifest_parser.c",
             *(["-lshell32", "-lole32", "-luuid"] if _WINDOWS else []),

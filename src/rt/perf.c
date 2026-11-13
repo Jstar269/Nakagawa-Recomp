@@ -1468,8 +1468,14 @@ void sr_perf_set_gpu_replay_source(SrPerfGpuReplaySource source) {
     seed_gpu_replay_base();
 }
 
+/* The counters belong to the scheduler's host thread and are not guarded. A host thread that
+ * reaches accounted code (the host worker's disc read, #2361) excludes itself: its clock reads
+ * return 0, and every accounting call takes a zero start as nothing to count. */
+static _Thread_local int s_perf_thread_excluded;
+void sr_perf_exclude_thread(void) { s_perf_thread_excluded = 1; }
+
 uint64_t sr_perf_now_ns_impl(void) {
-    return s_perf.enabled && !s_perf.shutdown ? raw_now_ns() : 0;
+    return s_perf.enabled && !s_perf.shutdown && !s_perf_thread_excluded ? raw_now_ns() : 0;
 }
 
 void sr_perf_guest_begin(void) {

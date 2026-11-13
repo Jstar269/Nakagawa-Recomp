@@ -254,6 +254,70 @@ only its package-rebuild steps, which need a runnable Python: it prints a `SKIP`
 [#360](https://github.com/Jstar269/nakagawa-recomp/issues/360) and exits 77, which CTest reports as
 skipped.
 
+## On-device toolchain
+
+To compile a title's generated C on the phone, the APK can carry a C toolchain: clang and lld
+21.1.8, GNU make 4.4.1, CPython 3.15.2 and a sysroot for `aarch64-linux-android29`. None of it comes
+from the NDK. `tools/android_toolchain.py` builds clang, lld, the runtimes, the sysroot and make
+from pinned sources, and stages the official CPython Android release unchanged
+([`android/toolchain/PROVENANCE.md`](../android/toolchain/PROVENANCE.md) has every pin and licence).
+The app unpacks it on the first start after an install or update, but nothing runs it yet; this
+section covers building it and putting it in the APK.
+
+1. Build and stage it on the PC, outside the repository. The inputs are the files that
+   `PROVENANCE.md` and `android/toolchain/sysroot-inputs.json` pin: the LLVM, make and CPython
+   tarballs, a bionic clone, and the folder of the other pinned files (`--extra`). With MSYS2
+   UCRT64's `bin` on `PATH`:
+
+   ```bash
+   python -I tools/android_toolchain.py --llvm-tarball <dl>/llvm-project-21.1.8.src.tar.xz \
+     --bionic <bionic clone> --extra <pinned files> \
+     --make-tarball <dl>/make-4.4.1.tar.gz \
+     --python-tarball <dl>/python-3.15.2-aarch64-linux-android.tar.gz \
+     --sh C:/msys64/usr/bin/sh.exe --cmake <sdk>/cmake/4.1.2/bin/cmake.exe \
+     --ninja <sdk>/cmake/4.1.2/bin/ninja.exe --work <scratch>/tc-work --out <scratch>/tc-out --jobs 3
+   ```
+
+   The first build takes about three hours at `--jobs 3`; each stage keeps a `.done` stamp, so an
+   interrupted build resumes. Two builds give the same bytes.
+
+2. Bundle it with `-Pnk.toolchain=<scratch>/tc-out -Pnk.abis=arm64-v8a` on the Gradle command
+   line ([Build](#build)). The app gets `libnk_clang.so`, `libnk_lld.so`, `libnk_ld.so`,
+   `libnk_make.so`, `libnk_python.so` and CPython's libraries in its native library folder, and
+   `assets/toolchain/` with the sysroot, clang's resource files, Python's standard library and
+   the notices. The toolchain is arm64 only, so Gradle refuses it with any other ABI, and also
+   refuses a folder without the `toolchain-manifest.json` that staging writes.
+
+Android runs only the `lib*.so` files in an app's native library folder, so each program is
+named that way. lld picks its role from its program name, so `libnk_ld.so` starts `libnk_lld.so`
+as `ld.lld`; clang takes it with `-fuse-ld=<native library folder>/libnk_ld.so`.
+
+The app (`NakagawaHost`, with `ToolchainArchive` reading the archives) unpacks
+`assets/toolchain/` into `toolchain/` in its files folder: `sysroot/` (clang's `--sysroot`),
+`clang-resource/` (its `-resource-dir`) and `python/` (Python's standard library). It sets
+`NK_ANDROID_TOOLCHAIN_DIR` to that folder, `PYTHONHOME` to `python/` inside it, and `TMPDIR`
+to the app's cache folder (clang's temporary files), and every program the app starts inherits
+them. It sets them only once the unpack is complete: after a failed one they are absent, and a
+consumer must read that as "no usable toolchain", not guess the folder. The unpack (about 4,300
+files) runs on a worker thread, once per process, on the first start after an install or update.
+Meanwhile the launcher shows the files done of the total, and the player starts once the unpack
+is complete. Before the player starts, the launcher sets the variables and applies them to the
+player library's own C library too (`nativeImportEnvironment`), which is a separate one when an
+arm64 player runs under an ARM translation layer; the programs the player starts then inherit
+them on either kind of device.
+
+A failed unpack deletes what it had written and shows its reason, a note that building on the
+device is unavailable until an unpack succeeds, and two buttons: **Try again**, and **Continue
+without the build tools**, which starts the player with the three variables unset (logged as
+`TOOLCHAIN_UNPACK_SKIPPED`). A touch presses either button; the arrow keys, Tab or a
+controller's D-pad move between them, and Enter or the A button presses the focused one. A file
+lock keeps a second process from unpacking at once, and every file is synced before the stamp
+that marks the unpack complete is written last; a failed, skipped or interrupted unpack leaves
+no stamp, so the next start unpacks again. The title
+process never unpacks the toolchain: it sets the variables only when a complete unpack is
+already there. The unpacker takes only folders and regular files, and refuses links, paths that
+leave the folder, damaged headers and archives that end early.
+
 ## Storage
 
 The player's data, settings, caches, logs and saves are in `Nakagawa/` in the app's private
