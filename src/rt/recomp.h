@@ -2682,6 +2682,18 @@ uint32_t sched_create_thread_ex(uint32_t entry, int priority, uint32_t stack_siz
                                 uint32_t attr, const char *name);
 /* The thread's entry is a guest code pointer (sceKernelCreateThread), not loader-known. */
 void     sched_mark_code_pointer_entry(uint32_t uid);
+/* HLE service threads (#1139): a kernel thread whose body is a host function, for a firmware
+ * library that runs a thread of its own. Created and started with the kernel's user-thread
+ * checks (priority 8..0x77: ILLEGAL_PRIORITY; stack under 0x200: ILLEGAL_STACK_SIZE); returns
+ * its UID or the kernel error. The body runs on the thread with that thread's CpuState and may
+ * call guest code; when it returns, the thread exits and is deleted. */
+typedef void (*SrSchedServiceBody)(CpuState *cpu, void *arg);
+uint32_t sched_create_service_thread(const char *name, int priority, uint32_t stack_size,
+                                     SrSchedServiceBody body, void *arg);
+/* On the service thread: wait until guest time deadline_us (UINT64_MAX: no deadline) or a kick. */
+void     sched_service_wait(uint64_t deadline_us);
+/* From any thread: end the service thread's wait now, or make its next wait return at once. */
+void     sched_service_kick(uint32_t uid);
 uint32_t sched_start_thread(uint32_t uid, uint32_t arglen, uint32_t argp);
 int      sched_thread_set_gp(uint32_t uid, uint32_t gp);
 int      sched_module_range_busy(uint32_t start, uint32_t end, uint32_t ignored_uid);

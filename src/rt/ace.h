@@ -11,13 +11,14 @@
  *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. stick, load, depth, ssaa, peak, glyphs, cull and mips are
- * the other keys a line may leave out: a missing stick, load, depth, ssaa, peak, glyphs, cull or
- * mips reads as off (section 11.2 item 2); stick has no off word, its value is the game's dead zone
- * (1..126), and a line that writes load=off, depth=off, ssaa=off, peak=off, glyphs=off, cull=off or
- * mips=off means the same as none; stick=<counts>, load=fast and cull=on need tier=ace, and
- * depth=32 (the 32-bit host depth buffer, #2051), ssaa=2|4 (supersampling, #2073), peak=limit,
- * glyphs=on (sharp game text, #2110) and mips=on do not. Every other
+ * line without it is an Enhanced run. stick, load, depth, ssaa, peak, glyphs, cull, mips and
+ * texpack are the other keys a line may leave out: a missing stick, load, depth, ssaa, peak, glyphs,
+ * cull, mips or texpack reads as off (section 11.2 item 2); stick has no off word, its value is the
+ * game's dead zone (1..126), and a line that writes load=off, depth=off, ssaa=off, peak=off,
+ * glyphs=off, cull=off, mips=off or texpack=off means the same as none; stick=<counts>, load=fast
+ * and cull=on need tier=ace, and depth=32 (the 32-bit host depth buffer, #2051), ssaa=2|4
+ * (supersampling, #2073), peak=limit, glyphs=on (sharp game text, #2110), mips=on and texpack=on
+ * (the title's texture pack, 11.3.4) do not. Every other
  * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
@@ -72,6 +73,7 @@
 #define ACE_HAS_PEAK 1          /* peak=limit: SAS mixes unsaturated through a true-peak limiter (#2137, 10.22) */
 #define ACE_HAS_GLYPHS 1        /* glyphs=on: sharp game text, glyphs rebuilt at the render scale (10.13, 11.3.5) */
 #define ACE_HAS_MIPS 1          /* mips=on: host-built mip chains for single-level textures (11.3.8) */
+#define ACE_HAS_TEXPACK 1       /* texpack=on: draw the title's texture pack, SR_TEX_REPLACE (11.3.4) */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
 typedef enum { ACE_SMOOTH_OFF = 0, ACE_SMOOTH_MATCH = 1, ACE_SMOOTH_X2 = 2 } AceSmooth;
@@ -109,6 +111,8 @@ typedef struct {
     int glyphs;      /* glyphs=on: small text sprites draw from glyphs rebuilt at the render scale
                         (guest-visible, 10.13 and 11.3.5) */
     int mips;        /* mips=on: textures the game gives one level get a host-built mip chain (11.3.8) */
+    int texpack;     /* texpack=on: the Vulkan renderer draws the pack SR_TEX_REPLACE names (guest-visible,
+                        11.3.4); without it no pack is read */
 } AceConfig;
 
 typedef enum {
@@ -129,6 +133,7 @@ typedef enum {
     ACE_FEATURE_PEAK,
     ACE_FEATURE_GLYPHS,
     ACE_FEATURE_MIPS,
+    ACE_FEATURE_TEXPACK,
     ACE_FEATURE_COUNT
 } AceFeature;
 

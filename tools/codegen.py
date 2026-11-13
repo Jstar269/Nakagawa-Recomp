@@ -6851,13 +6851,12 @@ def _load_code_hook_package(elf, known, symbols, code_hook_pkg_path, symbol_map_
     }
 
 
-def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhancement_data_root,
-                              symbol_map_path, code_hook_pkg_path=None):
-    """Load, verify and resolve the ``--enhancement-package`` into the ``ENHANCEMENT_*`` tables,
-    then the ``--code-hook-package`` beside it, if any (``_load_code_hook_package``).
+def _reset_enhancement_tables() -> None:
+    """Empty every ``ENHANCEMENT_*`` table, so no package is active.
 
-    The tables are reset first, so a run without a package starts empty. A package that fails
-    verification refuses the run (fail closed).
+    A run loads its package into these tables before it translates; ``main`` empties them again
+    when the run ends, so a package never stays active for code translated later in the same
+    process (an in-process caller of ``main``, then ``emit_function`` and the like).
     """
     global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY, ENHANCEMENT_STORE_KEY
     global ENHANCEMENT_ACE_SITES, ENHANCEMENT_HOOK_META
@@ -6871,6 +6870,21 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
     ENHANCEMENT_DATA_PATCHES.clear()
     ENHANCEMENT_DATA_FILES.clear()
     ENHANCEMENT_STORE_SITES.clear()
+    ENHANCEMENT_PHASE_STEPS.clear()
+    ENHANCEMENT_LAUNCH_SITES.clear()
+
+
+def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhancement_data_root,
+                              symbol_map_path, code_hook_pkg_path=None):
+    """Load, verify and resolve the ``--enhancement-package`` into the ``ENHANCEMENT_*`` tables,
+    then the ``--code-hook-package`` beside it, if any (``_load_code_hook_package``).
+
+    The tables are reset first, so a run without a package starts empty. A package that fails
+    verification refuses the run (fail closed).
+    """
+    global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY, ENHANCEMENT_STORE_KEY
+    global ENHANCEMENT_ACE_SITES, ENHANCEMENT_HOOK_META
+    _reset_enhancement_tables()
     if enhancement_pkg_path is not None:
         import hashlib
         try:
@@ -7844,6 +7858,8 @@ def main(argv):
         return refusal.status
     finally:
         stop_collecting_unverified_vfpu_uses()
+        # The package loaded for this run ends with it (_reset_enhancement_tables).
+        _reset_enhancement_tables()
 
 
 if __name__ == "__main__":

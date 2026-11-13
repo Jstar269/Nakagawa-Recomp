@@ -1593,7 +1593,7 @@ and each token's remaining budget.
 
 | Code | Fails when |
 | --- | --- |
-| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`), the publication gate's code (`.gitattributes`, `tools/publish_audit.py`, `tools/policy_sync.py`, `tools/modified_file_notice_audit.py`, `tools/provenance_record_gap.py`, `tools/history_audit.py` and every module they load or run; `PROTECTED_EXTRA` in the verifier is the list), a `tools/` module named like a standard-library one (it would be imported in place of it) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
+| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`, `tools/provenance_mode.py`), the publication gate's code (`.gitattributes`, `tools/publish_audit.py`, `tools/policy_sync.py`, `tools/modified_file_notice_audit.py`, `tools/provenance_record_gap.py`, `tools/history_audit.py` and every module they load or run; `PROTECTED_EXTRA` in the verifier is the list), a `tools/` module named like a standard-library one (it would be imported in place of it) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
 | `CI_DEFINITION_BEHIND` | `main` changed one of those files after the branch point; the integrator merges `main` when it lands the pull request; the author merges it only for a real conflict in content that is not generated, or when asked (`AGENTS.md` section 10). No label waives it |
 | `CI_CONTEXT_COLLISION` | another workflow names `Trusted CI verdict`, or a check run uses that name |
 | `FOREIGN_PRODUCER` | a check run or status under an intended context is not from the intended workflow path and event at this head |
@@ -1639,6 +1639,10 @@ Whatever the `CI_DEFINITION_BEHIND` finding text says, who merges `main`, and wh
 The intended producers are `CI required` and `Hygiene and security` from `ci.yml`, `OSV
 Vulnerability Scan` from `osv-scanner.yml`, `dependency-review` from `dependency-review.yml`
 (all `pull_request`), and the provenance attestation from `provenance-attestation.yml`.
+In a fork, where the attestation job is skipped, that last producer is the
+same workflow's **Fork provenance check** instead, by the same routes (`producers_for` in the verifier,
+[`FORKING.md`](FORKING.md)); the upstream, matched by repository ID or name, always judges the
+attestation.
 A run still in progress gives `pending`. While any producer has
 no run at the head yet, or its newest run is unfinished, the verifier reads only the head's
 workflow runs and posts `pending`. The full read, about a dozen API calls, waits for the
