@@ -5,6 +5,7 @@
 
 #include "player_state.h"
 #include "player_ui_art.h"
+#include "player_ui_music.h"
 #include "player_ui_sound.h"
 #include "iso_reader.h"
 #include "nk_platform.h"
@@ -173,6 +174,8 @@ struct PlayerUiNk {
     char enhanced_mode[48];
     const char *enhanced_modes[4];
     char enhanced_values[PLAYER_UI_ENHANCED_ROWS][48];
+    char texpack_value[200];
+    char texpack_sentence[400];
     char enhanced_library_values[PLAYER_UI_ENHANCED_ROWS][48];
     char settings_tools[PLAYER_UI_SETTINGS_TOOLS][192];
     /* The factory reset check's folders, looked up when the check opens. */
@@ -204,6 +207,9 @@ struct PlayerUiNk {
     NkUiPromptImages prompt_images;  /* Kenney glyphs; empty ones keep the geometry */
     PlayerUiArt *art;                /* disc ICON0 / PIC1, decoded at run time */
     PlayerUiSounds *sounds;          /* optional launcher sounds (ui_sounds) */
+    PlayerUiMusic *music;            /* optional launcher music (launcher_music, #2207) */
+    bool window_unfocused;           /* the launcher window lost input focus */
+    int music_reported;              /* the last PlayerUiMusicState written to the log */
     int pending_sound;               /* a PlayerUiSound for this frame, or -1 */
     NkUiId sound_focus;              /* focus after the last frame, for the move sound */
     /* Remove from library (#1304): the title the dialog is for, what it lists,
@@ -259,7 +265,8 @@ struct PlayerUiNk {
     bool rebuild_focus_pending;
     char rebuild_text[256];
     char rebuild_notice[96];
-    char library_notice[448];   /* the library file's notice and the drop summary together */
+    /* the data folder notice, the library file's notice and the drop summary together */
+    char library_notice[4u * NK_MAX_PATH + 192u + 192u + 256u + 4u];
     char verify_notice[96];     /* the library's disc check line */
     /* A rebuilding card's status word with its progress ("Rebuilding 40%"),
        or a queued card's with its place ("Queued 2 of 4"). */
@@ -412,6 +419,36 @@ static void player_ui_report_layout_error(void *user, const NkUiLayoutError *err
                        error->fatal ? "frame dropped" : "frame drawn", length, error->text);
 }
 
+/* The launcher music's track: beside the player, as the fonts are, else from
+   the working folder. The working folder is only for a development run from the
+   source tree; a packaged player has the track beside it. A track found in
+   neither is still looked for beside the player, so the missing file is named
+   there. */
+static PlayerUiMusic *player_ui_music_create_beside(const char *base_path) {
+    char path[2u * NK_MAX_PATH];
+    const char *track = PLAYER_UI_MUSIC_TRACK;
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    /* Stands in for a player folder whose track is missing or damaged. */
+    const char *test_track = getenv("NK_UI_TEST_MUSIC_FILE");
+    /* A decode that waits until it is cancelled, and an audio device that stops
+       taking data once the music fades out. */
+    player_ui_music_test_hold_decode(getenv("NK_UI_TEST_MUSIC_HOLD_DECODE") != NULL);
+    player_ui_music_test_stall_release(getenv("NK_UI_TEST_MUSIC_STALL") != NULL);
+    if (test_track != NULL && test_track[0] != '\0') {
+        return player_ui_music_create(test_track, PLAYER_UI_MUSIC_TRACK);
+    }
+#endif
+    if (base_path != NULL && player_ui_join_path(base_path, track, path, sizeof(path)) &&
+        player_ui_file_exists(path)) {
+        return player_ui_music_create(path, track);
+    }
+    if (player_ui_file_exists(track)) return player_ui_music_create(track, track);
+    if (base_path != NULL && player_ui_join_path(base_path, track, path, sizeof(path))) {
+        return player_ui_music_create(path, track);
+    }
+    return player_ui_music_create(track, track);
+}
+
 bool player_ui_nk_built_with_launcher(void) {
     return nk_ui_sdlr_available() && nk_ui_ttf_available();
 }
@@ -438,6 +475,10 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
         return NULL;
     }
     player->window = window;
+    /* A launcher that opens behind another window gets no focus event: the music
+       waits for focus (SDL_EVENT_WINDOW_FOCUS_GAINED) rather than assuming it. */
+    player->window_unfocused =
+        window != NULL && (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) == 0;
     player->rest_index = SIZE_MAX;
     player->backdrop_index = SIZE_MAX;
     player->router =nk_ui_router_create();
@@ -487,6 +528,8 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
     nk_ui_set_prompt_images(player->ui, &player->prompt_images);
     player->art = player_ui_art_create(player_ui_read_disc_art);
     player->sounds = player_ui_sounds_create();
+    player->music = player_ui_music_create_beside(base_path);
+    player->music_reported = PLAYER_UI_MUSIC_OFF;
     player->pending_sound = -1;
     player->last_view = VIEW_LIBRARY;
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
@@ -510,6 +553,7 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
 
 void player_ui_nk_destroy(PlayerUiNk *player) {
     if (player == NULL) return;
+    player_ui_music_destroy(player->music);
     player_ui_sounds_destroy(player->sounds);
     player_ui_art_destroy(player->art);
     nk_ui_sdlr_destroy(player->backend);
@@ -930,6 +974,31 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         model->enhanced_mode_sentence = app->title_enhancements[title].available
             ? "Ace is Enhanced plus this game's own 60 FPS game logic."
             : "Enhanced adds the parts below. " PLAYER_UI_ACE_NEEDS_PACKAGE;
+        /* The title's texture pack (contract 10.12): its folder's name and what it lists, as
+           read when the page opened or the pack changed. */
+        const char *pack = player_settings_title_pack(settings, game->disc_id);
+        const PlayerTexturePackInfo *info = player_app_title_pack_info(app, title);
+        model->texpack_row = true;
+        model->texpack_chosen = pack != NULL;
+        if (!pack) {
+            snprintf(player->texpack_value, sizeof(player->texpack_value), "None");
+            snprintf(player->texpack_sentence, sizeof(player->texpack_sentence),
+                     "Choose the folder of a texture pack you made or downloaded for this game. "
+                     "Nakagawa ships none.");
+        } else if (info && info->ok) {
+            snprintf(player->texpack_value, sizeof(player->texpack_value), "%s \xC2\xB7 %zu %s",
+                     info->name, info->textures, info->textures == 1u ? "texture" : "textures");
+            snprintf(player->texpack_sentence, sizeof(player->texpack_sentence),
+                     "Used while Texture pack is on and the game runs Enhanced or Ace.");
+        } else {
+            snprintf(player->texpack_value, sizeof(player->texpack_value), "Refused");
+            snprintf(player->texpack_sentence, sizeof(player->texpack_sentence),
+                     "This pack can't be used: %s. Fix it where it is; it is read again when this page "
+                     "opens and when the game starts.",
+                     info && info->error[0] ? info->error : "it was not read");
+        }
+        model->texpack_value = player->texpack_value;
+        model->texpack_sentence = player->texpack_sentence;
     }
     model->enhanced_row_count = 0;
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
@@ -1064,6 +1133,10 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.fullscreen = app->settings.fullscreen;
     model.volume = app->settings.master_volume;
     model.ui_sounds = app->settings.ui_sounds;
+    model.launcher_music = app->settings.launcher_music;
+    model.launcher_music_value = player_ui_music_row_value(app->settings.launcher_music,
+                                                           player_ui_music_state(player->music));
+    model.music_volume = app->settings.launcher_music_volume;
     model.launcher_fullscreen = app->settings.launcher_fullscreen;
     model.nickname = app->settings.nickname;
     model.build_speed = package_build_speed_name(app->settings.build_speed);
@@ -2454,6 +2527,63 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
     return true;
 }
 
+void player_ui_nk_note_window_focus(PlayerUiNk *player, bool focused) {
+    if (player == NULL) return;
+    player->window_unfocused = !focused;
+}
+
+void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app) {
+    PlayerUiMusicRequest request;
+    PlayerUiMusicState state;
+    if (player == NULL || app == NULL) return;
+    request.enabled = app->settings.launcher_music;
+    /* A game that is starting counts as running: the music fades out and lets go
+       of the audio device before the launch starts the game's process. */
+    request.in_launcher = !app->is_game_running && !app->launch_pending;
+    request.focused = !player->window_unfocused;
+    request.volume = app->settings.launcher_music_volume;
+    player_ui_music_update(player->music, &request, SDL_GetTicks());
+    {
+        uint32_t timeout_ms = player_ui_music_take_release_timeout(player->music);
+        if (timeout_ms != 0u) {
+            fprintf(stderr,
+                    "[PLAYER] LAUNCHER_MUSIC_RELEASE_TIMEOUT: the audio device stopped taking "
+                    "data; released after %u ms\n", (unsigned)timeout_ms);
+            player_dev_log_add(app, "audio",
+                               "LAUNCHER_MUSIC_RELEASE_TIMEOUT: the audio device stopped "
+                               "taking data; released after %u ms", (unsigned)timeout_ms);
+        }
+    }
+    state = player_ui_music_state(player->music);
+    if ((int)state == player->music_reported) return;
+    player->music_reported = (int)state;
+    if (state == PLAYER_UI_MUSIC_MISSING || state == PLAYER_UI_MUSIC_DAMAGED ||
+        state == PLAYER_UI_MUSIC_NO_DEVICE) {
+        const char *code = state == PLAYER_UI_MUSIC_MISSING ? "LAUNCHER_MUSIC_MISSING"
+                           : state == PLAYER_UI_MUSIC_DAMAGED ? "LAUNCHER_MUSIC_DAMAGED"
+                                                              : "LAUNCHER_MUSIC_NO_DEVICE";
+        fprintf(stderr, "[PLAYER] %s: %s\n", code, player_ui_music_detail(player->music));
+        player_dev_log_add(app, "audio", "%s: %s", code, player_ui_music_detail(player->music));
+    }
+}
+
+bool player_ui_nk_launcher_audio_closed(const PlayerUiNk *player) {
+    return player == NULL || (!player_ui_music_holds_audio(player->music) &&
+                              !player_ui_music_decoding(player->music));
+}
+
+bool player_ui_nk_music_decoding(const PlayerUiNk *player) {
+    return player != NULL && player_ui_music_decoding(player->music);
+}
+
+int player_ui_nk_music_state(const PlayerUiNk *player) {
+    return player != NULL ? (int)player_ui_music_state(player->music) : (int)PLAYER_UI_MUSIC_OFF;
+}
+
+const char *player_ui_nk_music_state_name(const PlayerUiNk *player) {
+    return player_ui_music_state_name((PlayerUiMusicState)player_ui_nk_music_state(player));
+}
+
 void player_ui_nk_note_gamepad(PlayerUiNk *player, uint32_t which, bool connected) {
     SDL_Event event;
     if (player == NULL || !player->ready) return;
@@ -3548,16 +3678,17 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                      "Version %.40s is out", app->update.check.newest.version);
             model.update_notice = player->update_notice;
         }
-        if (app->library_notice[0] != '\0' && app->drop_notice[0] != '\0') {
-            snprintf(player->library_notice, sizeof(player->library_notice), "%s %s",
-                     app->library_notice, app->drop_notice);
-            model.library_notice = player->library_notice;
-        } else if (app->library_notice[0] != '\0') {
-            model.library_notice = app->library_notice;
-        } else if (app->drop_notice[0] != '\0') {
-            /* The one summary of files dropped together (#2007). */
-            model.library_notice = app->drop_notice;
+        /* The data folder notice (#324), the library file's notice and the one summary of files
+           dropped together (#2007), in that order. */
+        const char *notices[3] = {app->data_folder_notice, app->library_notice, app->drop_notice};
+        player->library_notice[0] = '\0';
+        for (size_t i = 0u; i < 3u; ++i) {
+            if (notices[i][0] == '\0') continue;
+            size_t used = strlen(player->library_notice);
+            snprintf(player->library_notice + used, sizeof(player->library_notice) - used, "%s%s",
+                     used ? " " : "", notices[i]);
         }
+        if (player->library_notice[0] != '\0') model.library_notice = player->library_notice;
         if (player_app_rebuild_banner_visible(app)) {
             (void)player_app_rebuild_banner_text(app, player->rebuild_notice,
                                                  sizeof(player->rebuild_notice),

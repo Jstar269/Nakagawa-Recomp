@@ -665,6 +665,12 @@ def _write_record(target: Path, raw: bytes, created: list[Path], *, replace: boo
 
 def _authority_inputs(private_repo: Path) -> tuple[Path, Path, dict[str, dict]]:
     """Validate the private checkout once and return its committed ledger records."""
+    if not private_repo.is_dir():
+        raise AdmitError(
+            "AUTHORITY_MISSING",
+            f"{private_repo} is not a directory; pass the authority checkout (a fork seeds its own with "
+            "tools/fork_init.py, docs/FORKING.md)",
+        )
     authority_root = Path(_text(private_repo, "rev-parse", "--show-toplevel"))
     if _text(authority_root, "rev-parse", "--abbrev-ref", "HEAD") != "main":
         raise AdmitError("AUTHORITY_NOT_MAIN", "the authority checkout must have main checked out")

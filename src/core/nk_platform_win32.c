@@ -4,6 +4,7 @@
 #if defined(_WIN32) || defined(_WIN64)
 
 #include "nk_platform.h"
+#include "nk_data_migrate.h"
 #include "nk_types.h"
 #include <windows.h>
 #include <shellapi.h>
@@ -803,6 +804,12 @@ bool nk_platform_resolve_path(NkPathType type, char *out_path, size_t max_len) {
     return resolve_windows_path(type, out_path, max_len);
 }
 
+/* Windows has one layout, %LOCALAPPDATA%\Nakagawa, so there is nothing to decide (#324). */
+bool nk_platform_user_data_layout(struct NkUserDataLayout *out) {
+    if (out) memset(out, 0, sizeof(*out));
+    return false;
+}
+
 bool nk_platform_get_executable_path(char *out_path, size_t max_len) {
     if (!out_path || max_len == 0) return false;
     out_path[0] = '\0';
@@ -1575,6 +1582,18 @@ const char *nk_platform_env_home_dir(void) {
 
 const char *nk_platform_env_user_name(void) {
     return getenv("USERNAME");
+}
+
+int nk_platform_env_utf8(const char *name, char *out, size_t cap) {
+    WCHAR wname[128];
+    WCHAR probe[1];
+    if (!out || cap == 0) return -1;
+    out[0] = '\0';
+    if (!name || !utf8_to_wide(name, wname, sizeof(wname) / sizeof(wname[0]))) return -1;
+    SetLastError(ERROR_SUCCESS);
+    if (GetEnvironmentVariableW(wname, probe, 1) == 0)
+        return GetLastError() == ERROR_ENVVAR_NOT_FOUND ? 0 : 1;   /* unset, or set and empty */
+    return env_get_utf8(wname, out, cap) ? 1 : -1;
 }
 
 unsigned long nk_platform_process_id(void) {

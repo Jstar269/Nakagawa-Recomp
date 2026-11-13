@@ -642,13 +642,18 @@ typedef enum {
     PLAYER_UI_SETTINGS_OPEN_DATA_FOLDER,     /* the folder holding the library, games and settings */
     PLAYER_UI_SETTINGS_OPEN_LOGS,            /* the folder holding the logs */
     PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED,    /* Background, Balanced, Fastest */
+    PLAYER_UI_SETTINGS_CHOOSE_TEXPACK,       /* a title's Enhanced page: pick its pack's folder */
+    PLAYER_UI_SETTINGS_REMOVE_TEXPACK,       /* a title's Enhanced page: forget its pack */
     PLAYER_UI_SETTINGS_EDIT_NICKNAME,        /* the nickname editor (#2197) */
-    PLAYER_UI_SETTINGS_TOGGLE_DISCORD        /* Settings > Online and developer (#2259) */
+    PLAYER_UI_SETTINGS_TOGGLE_DISCORD,       /* Settings > Online and developer (#2259) */
+    PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC, /* launcher background music (#2207) */
+    PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN,
+    PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP
 } PlayerUiSettingsOp;
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
    PlayerEnhancedPart), in that order. */
-#define PLAYER_UI_ENHANCED_ROWS 15
+#define PLAYER_UI_ENHANCED_ROWS 16
 typedef struct {
     const char *name;           /* "Texture filtering" */
     const char *value;          /* "16x", "Off", "Library (On)" on a title's page */
@@ -706,6 +711,11 @@ typedef struct {
     bool fullscreen;
     int volume;                     /* 0-100 */
     bool ui_sounds;
+    /* Launcher music (#2207): the setting, the row's words ("Off", "On", or what
+       stops it: "On: file missing") and its own level, 0-100 */
+    bool launcher_music;
+    const char *launcher_music_value;
+    int music_volume;
     bool launcher_fullscreen;
     /* Accessibility (VIEW_ACCESSIBILITY_SETTINGS): each setting's word, whether it
        is in effect, and what Automatic follows now */
@@ -732,6 +742,12 @@ typedef struct {
     bool enhanced_on;               /* Enhanced or Ace in effect: the part rows can change */
     int enhanced_row_count;
     PlayerUiEnhancedRow enhanced_rows[PLAYER_UI_ENHANCED_ROWS];
+    /* A title's page only (texpack_row): the Texture pack folder row, its pack's name and texture
+       count or "None", and, with a pack chosen, a Remove row. */
+    bool texpack_row;
+    bool texpack_chosen;
+    const char *texpack_value;      /* "HD pack · 1,204 textures", "None" */
+    const char *texpack_sentence;
     const char *controller_line;    /* "Keyboard ready" or the pad's name */
     const char *saves_folder;
     const char *notice;             /* a settings notice (a failed save), or NULL */
@@ -1152,6 +1168,11 @@ enum {
     PLAYER_UI_ID_SETTINGS_OPEN_LOGS = 0x4554u,        /* Settings: shows the logs folder */
     PLAYER_UI_ID_SETTINGS_BUILD_SPEED = 0x4555u,      /* Build tools and cache: Build speed */
     PLAYER_UI_ID_SETTINGS_DISCORD = 0x4556u,          /* Settings > Online: Discord status */
+    PLAYER_UI_ID_SETTINGS_LAUNCHER_MUSIC = 0x4557u,   /* Settings: launcher music on or off */
+    PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_DOWN = 0x4558u,
+    PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP = 0x4559u,
+    PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE = 0x455Au,   /* a title's Enhanced page: Texture pack folder */
+    PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE = 0x455Bu,   /* a title's Enhanced page: Remove texture pack */
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
     PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */
@@ -1506,6 +1527,20 @@ bool player_ui_nk_handle_event(PlayerUiNk *player,
    bar's input chip follow it. `which` is the SDL joystick id. NULL player is a
    no-op. */
 void player_ui_nk_note_gamepad(PlayerUiNk *player, uint32_t which, bool connected);
+/* The launcher window gained or lost input focus: the launcher music pauses
+   while it is away. NULL player is a no-op. */
+void player_ui_nk_note_window_focus(PlayerUiNk *player, bool focused);
+/* Once per loop, whatever view shows: the launcher music follows its setting,
+   whether a game is starting or running, and the window's focus (#2207). */
+void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app);
+/* True when the launcher music holds no audio stream and no worker is decoding
+   the track: a game may start. True for a NULL player. */
+bool player_ui_nk_launcher_audio_closed(const PlayerUiNk *player);
+/* The launcher music's state (PlayerUiMusicState) and its name, for reports. */
+int player_ui_nk_music_state(const PlayerUiNk *player);
+/* Whether the launcher music's worker is reading or decoding the track. */
+bool player_ui_nk_music_decoding(const PlayerUiNk *player);
+const char *player_ui_nk_music_state_name(const PlayerUiNk *player);
 bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                          struct SDL_Renderer *renderer,
                          struct SDL_Window *window,

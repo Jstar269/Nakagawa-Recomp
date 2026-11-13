@@ -272,6 +272,7 @@ static int write_launch_environment_probe(void) {
     const char *reduce_motion = getenv("SR_REDUCE_MOTION");
     const char *ace = getenv("SR_ACE");
     const char *ace_report = getenv("SR_ACE_REPORT");
+    const char *texpack = getenv("SR_TEX_REPLACE");
     const char *host_time_zone = getenv("SR_HOST_TIME_ZONE");
     const char *code_capture = getenv("SR_CODE_CAPTURE");
     const char *boot_path = getenv("SR_BOOT_PATH");
@@ -301,6 +302,7 @@ static int write_launch_environment_probe(void) {
                      "SR_REDUCE_MOTION=%s\n"
                      "SR_ACE=%s\n"
                      "SR_ACE_REPORT=%s\n"
+                     "SR_TEX_REPLACE=%s\n"
                      "SR_HOST_TIME_ZONE=%s\n"
                      "SR_CODE_CAPTURE=%s\n"
                      "SR_BOOT_PATH=%s\n"
@@ -328,6 +330,7 @@ static int write_launch_environment_probe(void) {
                      reduce_motion ? reduce_motion : "<unset>",
                      ace ? ace : "<unset>",
                      ace_report ? ace_report : "<unset>",
+                     texpack ? texpack : "<unset>",
                      host_time_zone ? host_time_zone : "<unset>",
                      code_capture ? code_capture : "<unset>",
                      boot_path ? boot_path : "<unset>",
@@ -529,6 +532,10 @@ static void test_no_iso_child_environment(const char *test_executable,
     bool had_ace_report;
     char *old_ace_report = capture_environment_value("SR_ACE_REPORT", &had_ace_report);
     set_environment_value("SR_ACE_REPORT", "poisoned-parent-report.json");
+    /* Nor an inherited texture pack: only a line with texpack=on exports the title's folder. */
+    bool had_texpack;
+    char *old_texpack = capture_environment_value("SR_TEX_REPLACE", &had_texpack);
+    set_environment_value("SR_TEX_REPLACE", "poisoned-parent-pack");
     bool had_host_zone;
     char *old_host_zone = capture_environment_value("SR_HOST_TIME_ZONE", &had_host_zone);
     set_environment_value("SR_HOST_TIME_ZONE", "poisoned-parent-zone");
@@ -729,6 +736,8 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_ACE=off\n") != NULL);
     assert(strstr(observed, "SR_ACE_REPORT=\n") != NULL);   /* the parent's path is masked */
     assert(strstr(observed, "poisoned-parent-report") == NULL);
+    assert(strstr(observed, "SR_TEX_REPLACE=\n") != NULL);  /* and the parent's pack */
+    assert(strstr(observed, "poisoned-parent-pack") == NULL);
     /* The host's local time zone for the runtime's first-run seed (#1382): "<minutes>,<0|1>"
        from the platform, never an inherited value. */
     {
@@ -774,6 +783,8 @@ static void test_no_iso_child_environment(const char *test_executable,
                                   sizeof(session.config.ace_report_path),
                                   "%s%cace%cTEST00001.json", root, sep, sep);
     assert(ace_report_len > 0 && (size_t)ace_report_len < sizeof(session.config.ace_report_path));
+    /* A pack folder without texpack=on on the line is not exported. */
+    snprintf(session.config.texpack_dir, sizeof(session.config.texpack_dir), "fixture-pack-folder");
     session.config.fps_cap = -1;
     /* A launcher that does not know its display exports an empty value, which
        still masks the inherited one; the child then uses the primary display. */
@@ -796,6 +807,8 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_REDUCE_MOTION=off\n") != NULL);
     assert(strstr(observed, "SR_NICKNAME=Kaz \xE3\x83\x8A\n") != NULL);
     assert(strstr(observed, "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off\n") != NULL);
+    assert(strstr(observed, "SR_TEX_REPLACE=\n") != NULL);
+    assert(strstr(observed, "fixture-pack-folder") == NULL);
     /* An enhanced session follows the setting, and keeps the inherited movie upscaler. */
     assert(strstr(observed, "SR_PRESENT_UPSCALE=fsr1\n") != NULL);
     assert(strstr(observed, "SR_MOVIE_UPSCALE=anime4k\n") != NULL);
@@ -871,6 +884,25 @@ static void test_no_iso_child_environment(const char *test_executable,
     }
     session.enhancement_package_id[0] = '\0';
     session.enhancement_hook_only = false;
+
+    /* A line with texpack=on exports the title's pack folder (contract section 10.12). */
+    snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
+             "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off;texpack=on");
+    assert(nk_launch_start(&session) == NK_OK);
+    child_exit = nk_launch_wait(&session, -1);
+    nk_launch_stop(&session);
+    assert(child_exit == 0);
+    report = fopen(report_path, "rb");
+    assert(report != NULL);
+    observed_size = fread(observed, 1, sizeof(observed) - 1, report);
+    observed[observed_size] = '\0';
+    assert(!ferror(report));
+    assert(fclose(report) == 0);
+    assert(strstr(observed, ";tess=off;twin=off;texpack=on\n") != NULL);
+    assert(strstr(observed, "SR_TEX_REPLACE=fixture-pack-folder\n") != NULL);
+    assert(strstr(observed, "poisoned-parent-pack") == NULL);
+    snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
+    session.config.texpack_dir[0] = '\0';
 
     /* #2143: an imported homebrew program runs from its Memory Stick folder. The import's
        copy of the folder it was picked from sits beside its disc image ("<image>.ms0",
@@ -1218,6 +1250,8 @@ static void test_no_iso_child_environment(const char *test_executable,
 
     restore_environment_value("SR_ACE", old_ace, had_ace);
     free(old_ace);
+    restore_environment_value("SR_TEX_REPLACE", old_texpack, had_texpack);
+    free(old_texpack);
     restore_environment_value("SR_PRESENT_UPSCALE", old_upscale, had_upscale);
     free(old_upscale);
     restore_environment_value("SR_MOVIE_UPSCALE", old_movie, had_movie);
@@ -1682,11 +1716,11 @@ static void test_posix_data_directory_rule(void) {
 
     char data_root[256];
     assert(nk_platform_resolve_app_data_dir(data_root, sizeof(data_root)));
-    assert(strcmp(data_root, "/synthetic/xdg/nakagawa-recomp") == 0);
+    assert(strcmp(data_root, "/synthetic/xdg/Nakagawa/data") == 0);
     set_environment_value("XDG_DATA_HOME", "");
     assert(nk_platform_resolve_app_data_dir(data_root, sizeof(data_root)));
     assert(strcmp(data_root,
-                  "/synthetic/profile/.local/share/nakagawa-recomp") == 0);
+                  "/synthetic/profile/.local/share/Nakagawa/data") == 0);
 
     restore_environment_value("HOME", saved_home, home_was_set);
     restore_environment_value("XDG_DATA_HOME", saved_xdg, xdg_was_set);

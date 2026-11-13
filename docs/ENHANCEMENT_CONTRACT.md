@@ -70,12 +70,82 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   off (`display-smoke-anime4k`, which needs a Vulkan device and a display, so it is a local gate).
   A run with it on is stamped as `SR_PRESENT_UPSCALE` is (`ACE_MODE: present upscale
   movie-anime4k`, the `phase=present_upscale` boot event and `runtime.enhancements`), so neither
-  `flight_diff.py` nor `boot_gate.py` takes it as authentic evidence. It reaches only frames the CPU
-  presents: a movie the GE presents (drawn as a texture, or decoded into a GE target) is a GE frame
-  and is not upscaled by it. An Authentic launcher session, the picture gate and the library sweep
-  run with it `off`, whatever the environment says.
+  `flight_diff.py` nor `boot_gate.py` takes it as authentic evidence. An Authentic launcher session,
+  the picture gate and the library sweep run with it `off`, whatever the environment says.
   GPU cost at 4K: 0.75 ms per present for a 480x272 frame to 3811x2160 on an RTX 3080
   (`anime4k-selftest`).
+- **Movie frames the GE presents (#2111).** With the movie upscaler on, the Vulkan GE renderer also
+  hands it a GE frame that shows a decoded movie, in the window and in a recording. To recognise a
+  movie this part reads guest bytes, which the `presentation_only` observation boundary in the table
+  above (host swapchain state, frame timings, compositor layout) does not name. The owner admitted
+  it on 2026-11-13, for this part only and on the terms below: exactly these spans are read, only
+  read and never written, and guest timing does not depend on them. The decision does not widen the
+  boundary for any other part.
+
+  *What it reads.* Only while `SR_MOVIE_UPSCALE` is on and the Vulkan GE draws (none of it runs
+  under the software GE or with the upscaler off):
+  - the media HLE's own arguments when it writes a decoded picture (`sceMpegAvcDecode`, an 8888
+    `sceMpegAvcCsc`, the PSMF player's video output): the picture's guest address, stride, format,
+    size and decoder handle, kept as a host-side note (`src/rt/ge_shared.h`), at most eight at a
+    time;
+  - the bytes of each noted picture's rows (width x height pixels at its stride, the bytes between
+    rows excluded), hashed when it is noted and again each time a match below relies on it;
+  - the bytes of a texture the renderer uploads (single-level, direct-colour, unswizzled, the note's
+    stride and format), compared with a note's rows byte for byte until the first difference;
+  - the GE state the renderer already holds: the texture address, stride and format, the descriptor
+    set a draw binds, and the presented target's address, stride, format and write order.
+
+  Every read is read-only, through checked guest spans and never through the read path that prepares
+  VRAM, so it pulls no GPU-held write back into guest memory. Nothing is written to guest memory,
+  guest VRAM, a guest register, a GE command or a readback, and no guest call waits on it. It adds
+  host work on the emulation thread: one hash of each picture when it is noted; for each qualifying
+  upload, a comparison with each held note of its stride and format, up to the first differing byte;
+  and a re-hash of a note when such a comparison matches, when an upload's first texel lies in the
+  picture, when a cached texture is checked again after a newer note, and when a GE present looks for
+  a picture written into its target. All of it is host work, so by design no guest-visible timing
+  depends on it under `SR_DETERMINISTIC_CLOCK=1`; that has not been measured. Under the wall clock it
+  takes host time as any host work does. It chooses only which upscaler enlarges the shown picture.
+
+  *When a frame is a movie frame.* Its movie box (the box around its movie pixels) covers at least
+  half of the shown 480 x 272, in either way a movie reaches the GE:
+  - *drawn as a texture* (Hot Shots Tennis's opening movie, and LittleBigPlanet's intro as #2111
+    describes it): draws since the target was last presented sampled a texture whose upload matched
+    a noted picture (same stride and format, and either the texture's first texel is a pixel of the
+    picture, or the texture starts with the picture's rows byte for byte, a copy such as Hot Shots
+    Tennis makes with its own code before drawing it; the note's rows unchanged), bound as level 0,
+    the anisotropic or scaled image, or the host mip chain (Enhanced `mips=on`); UI drawn over part
+    of the movie (subtitles, a prompt) keeps the frame a movie frame, and a later draw, line, point
+    or GE block transfer over the whole movie box does not (a primitive the software GE draws
+    instead keeps it);
+  - *decoded into a GE target*: the presented target holds a whole noted picture of its stride and
+    format, written after the GE's last write to that target and unchanged since; any GE draw or GE
+    block transfer after it, even one pixel of UI, leaves the frame to the GE (a CPU copy into VRAM
+    outside the picture does not).
+
+  A note stops matching when its rows' hash changes (a probabilistic change detector: a CPU, DMA or
+  software-GE write over the picture, or the buffer reused, ends it; a GE write held only in the
+  GPU's image is not seen, which the target rule covers with its write order and the texture rule by
+  never matching a texture served from a target), when a later picture is written over it, when its
+  decoder is deleted or released, when eight newer pictures were noted (counted as dropped), and
+  when the upscaler is off. A picture behind a swizzled VRAM view, a copy that is converted, scaled,
+  partial or copied into a GE target, a 16-bit `sceMpegAvcCsc`, a picture sampled from a render
+  target, and a picture written in more than eight strips (whose first strip is dropped) are not
+  matched: those frames stay GE frames. Known limit: a picture of one solid colour (a fade to black)
+  is matched by any texture of its stride and format that starts with the same bytes, so while that
+  note is held, a frame that draws such a texture (a plain black background) over half the screen
+  goes to the movie upscaler, UI drawn over it included. Only the presented picture changes.
+
+  Evidence: `gpu-coherence-selftest`'s `movie-texture` and `movie-target` cases present each way
+  through the production path, check every way a note stops matching, and compare one frame's guest
+  VRAM with tracking on and off; `gpu-mips-selftest`'s `movie` cell draws a transformed, linearly
+  filtered movie quad with the mip chain bound and without it; `gpu-coherence-selftest-movie-mutant`
+  builds the renderer without the match (both cases must fail) and with the copy judged by a
+  word-wise hash (the alpha-bit cell must fail); `psmf-media-selftest` checks the notes each HLE
+  writer makes. A run's `GEGPU stats` line (`SR_GPU_STATS`) and its shutdown line (`gegpu: movie
+  frames (#2111)`) count movie frames, presents that stayed GE frames while a picture was held, and
+  dropped notes. Not measured: the guest flight events with it on and off (no flight recording has
+  been compared), guest timing with it on and off under `SR_DETERMINISTIC_CLOCK=1`, and the upscaled
+  picture itself.
 - **Forbidden:** Mutating GE display list commands, intercepting guest draw calls to alter gameplay geometry, or feeding host input back into the guest controller state.
 
 ### 2.3. Guest Memory and Code Hooks (`guest_memory_code_hook`)
@@ -505,8 +575,8 @@ The player offers three play modes per game (#2055):
   text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound, finer patches, smooth
   far textures, sharper enlarging and full 32-bit colour (section 10.11). A new library starts with texture
   filtering, crisp system text and the game badge on and the rest off, and a graphics preset sets crisp system text
-  and sharper enlarging (section 10.1); finer patches, smooth far textures and full 32-bit colour are in no preset.
-  Each one is a *part* that can be turned off for the library or for a single game.
+  and sharper enlarging, and Ultra also full 32-bit colour (section 10.1); finer patches and smooth far textures are
+  in no preset. Each one is a *part* that can be turned off for the library or for a single game.
 - **Ace** is Enhanced plus the improvements made for that game alone. Today that is the title's 60 FPS game logic
   package (section 9). The player offers Ace only for a title with a usable package; its own parts can be turned off
   for that game too.
@@ -523,14 +593,18 @@ The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch 
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `mips` (`on` or `off`,
 section 10.16), `stick` (the title's stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section
 11.3.10), `depth` (`32` or `off`, section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `peak` (`limit` or `off`,
-section 10.22), `glyphs` (`on` or `off`, sections 10.13 and 11.3.5) and `cull` (`on` or `off`, section 11.3.6) are the
-other keys a line may leave out: a missing `mips`, `stick`, `load`, `depth`, `ssaa`, `peak`, `glyphs` or `cull` is off,
-`stick=<counts>`, `load=fast` and `cull=on` need `tier=ace` (`mips=on`, `depth=32`, `ssaa=2|4`, `peak=limit` and
-`glyphs=on` do not), the launcher writes `;mips=on` for an Enhanced or Ace launch with that part on, `;load=fast` and
-`;cull=on` only for an Ace launch with that part on and `;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with
-supersampling on, and no launcher writes `depth` (section 11.3.12), `peak` (section 10.22) or `glyphs` (section
-11.3.5) yet: a line that carries one is written by hand. A line writes them only when on, in that order, `mips` right
-after `twin` and `cull` last, so a line with them off is the line without them, byte for byte. Every
+section 10.22), `glyphs` (`on` or `off`, sections 10.13 and 11.3.5), `texpack` (`on` or `off`, section 11.3.4) and
+`cull` (`on` or `off`, section 11.3.6) are the other keys a line may leave out: a missing `mips`, `stick`, `load`,
+`depth`, `ssaa`, `peak`, `glyphs`, `texpack` or `cull` is off, `stick=<counts>`, `load=fast` and `cull=on` need
+`tier=ace` (`mips=on`, `depth=32`, `ssaa=2|4`, `peak=limit`, `glyphs=on` and `texpack=on` do not), the launcher
+writes `;mips=on` for an Enhanced or Ace launch with that part on, `;load=fast` and `;cull=on` only for an Ace launch
+with that part on, `;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with supersampling on and `;texpack=on` for
+an Enhanced or Ace launch with the Texture pack part on for a title that has a pack, and no launcher writes `depth`
+(section 11.3.12), `peak` (section 10.22) or `glyphs` (section 11.3.5) yet: a line that carries one is written by
+hand. A line writes them only when on, in that order, `mips` right after `twin` and `cull` last, so a line with them
+off is the line without them, byte for byte. With `texpack=on` the launcher also exports `SR_TEX_REPLACE`, the
+title's pack folder; it always exports that variable, empty for any other line, so an inherited folder never reaches
+a run. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -538,7 +612,9 @@ Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`
 (section 9.4). Nor is sharper enlarging (`"upscale"`, #2122): the launcher exports it as `SR_PRESENT_UPSCALE`, `fsr1`
 for an Enhanced or Ace run with the part on, and `off` otherwise, and always `off` for Authentic (section 2.2). The
 part's value is the title's own, else the graphics preset's where it sets the part (Medium, Ultra and Handheld on,
-Low and High off), else the library's; crisp text (`text`) is resolved the same way, and every preset turns it on.
+Low and High off), else the library's. Crisp text (`text`) and full 32-bit colour (`twin`, section 10.11) are
+resolved the same way: every preset turns crisp text on, and Ultra turns full 32-bit colour on while the other
+presets leave it to the library.
 The launcher also exports `SR_MOVIE_UPSCALE=off` for an Authentic session; an Enhanced or Ace session
 keeps the inherited value, as the movie upscaler has no setting.
 
@@ -857,8 +933,14 @@ that builds one clip-space matrix per camera and tests object bounds against it.
 "enhanced": {"default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on", "wide": "off",
             "smooth": "off", "sas": "off", "tess": "off", "cull": "off", "upscale": "off", "stick": "off",
             "load": "off", "twin": "off", "mips": "off"},
-"title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}}
+"title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}},
+"texture_packs": {"ULUS10000": "C:\\path\\Packs\\My HD pack"}
 ```
+
+`"texture_packs"` maps a disc ID to the folder of the texture pack the player chose for it (section 10.12), at most
+256 of them; choosing one more is refused with a message. A member that is not a disc ID and a folder string is
+skipped. Choosing a pack sets that title's `"texpack"` part on; removing it forgets the folder (the folder itself
+is untouched) and returns the part to the library's.
 
 A title's `mode` is `library`, `authentic`, `enhanced` or `ace`; a part it does not name follows the library; its
 `"logic_60": "off"` turns Ace's 60 FPS game logic off. An entry that follows the library everywhere is not written.
@@ -1006,14 +1088,17 @@ at `s_twin`) for the Vulkan renderer, and in `src/rt/ge.c` (the comment at `s_tw
     not follow host GPU work (section 10.3). The second draw of each render op, and the drain when a twin allocation
     fails, are host waits.
   - I/O speed: unchanged. The twin performs no guest I/O.
-- **Default.** Off. The player's part "Full 32-bit colour" (the launch line's `twin=on`) or `SR_GPU_TWIN_COLOR`
+- **Default.** Off for a new library. The Ultra graphics preset turns it on (section 10.1, #2280); the other presets
+  do not change it, so it keeps the library's value. The player's part "Full 32-bit colour" (the launch line's `twin=on`), choosing Ultra or `SR_GPU_TWIN_COLOR`
   turns it on (see Setting). Turning it on by default needs section 11.2 item 4's "nothing worse" runs: picture-gate
   or route runs on *Hot Shots Tennis* and *LittleBigPlanet*, and a library sweep, each with the twin on against the
   same run with it off (#2050). The launch line carries its key (`twin`, below), which follows section 11.2 item 2:
   a library switch and a per-title switch, each off by default.
 - **Setting.** The launch line's `twin=off|on` (section 10.1), a required key: `twin=on` asks for full colour. The
   player writes it from the part "Full 32-bit colour" (`"twin"`, `on` or `off`) on the library's Settings > Enhanced
-  page and on each title's own page (sections 10.5 and 10.9); it is off unless the player turns it on.
+  page and on each title's own page (sections 10.5 and 10.9); it is off for a new library unless the player turns it
+  on or chooses the Ultra graphics preset (the other presets leave it to the library, and a title's own value wins
+  over Ultra).
   `SR_GPU_TWIN_COLOR=1` (full colour) or `native` (the twin with the authentic colour, which the identity self-tests
   use), read when the renderer starts (the software renderer: at its first colour write), stays as the developer
   override and wins whenever it is set: unset or empty leaves the choice to the launch line, `0` and `off` are off,
@@ -1044,30 +1129,41 @@ at `s_twin`) for the Vulkan renderer, and in `src/rt/ge.c` (the comment at `s_tw
 ### 10.12. Texture Replacement
 
 A user-supplied texture pack replaces guest textures in the Vulkan GE renderer (#1880), the way PPSSPP's texture
-packs do. It is guest-visible (section 11.1) and not admitted under section 11.2: section 11.3.4 is its entry, and
-this section says how it draws. The code is `src/rt/texrepl.c` (the pack reader and the hashes: no GPU, no guest
+packs do. It is guest-visible (section 11.1) and admitted under section 11.2, off by default: section 11.3.4 is
+its entry, and this section says how it draws. The code is `src/rt/texrepl.c` (the pack reader and the hashes: no GPU, no guest
 memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and its inflater
 `src/core/nk_psp_inflate.c`) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer`, section 10.10).
 
-- **Settings.** `SR_TEX_REPLACE=<folder>` names the pack and `SR_TEX_REPLACE_BUDGET_MB` (1 to 8192, default 256) bounds
-  the host memory its decoded images may hold, both read when the renderer starts. It takes effect only in Ace Mode:
-  in an authentic run the pack is not read whatever the environment says, and a request prints one
-  `TEX_REPLACE: off (texture replacement needs Ace Mode)` line. A pack whose folder, ZIP or `textures.ini` cannot
-  be read or is malformed (a line that is no comment, section or `key = value`, no `hash` type, an unknown one, a
-  `textures.ini` over 4 MiB or holding a NUL byte, which no text file holds and which would hide the text after
-  it, a damaged or unsafe ZIP) prints
-  `TEX_REPLACE: refused (<reason>); the game runs without the pack` and is refused whole; the reason names the pack
-  by its last path component only, and every control character in a reason or note (C0, DEL and the C1 range,
-  raw or in UTF-8), which a pack could use to send its own escape sequences to the terminal, is printed as `?`;
-  the run goes on unreplaced without waiting on the pack (a stored pack that
-  no longer reads, its folder gone or its ini broken, is refused the same way at the next start). One image that
+- **Settings.** A game's Enhanced page (section 10.5) has a **Texture pack folder** row: the player picks the pack's
+  folder (one that holds a `textures.zip` is read from that ZIP, below), and the row shows the folder's name and how
+  many textures it lists, or why it was refused. The part **Texture pack** (`"texpack"`, on or off) turns it on and
+  off for the library and for each title; choosing a pack turns it on for that title. The launch line then carries
+  `texpack=on` and the launcher exports the folder as `SR_TEX_REPLACE` (section 10.1), which the runtime also takes
+  as a ZIP file's path. `SR_TEX_REPLACE_BUDGET_MB` (1 to 8192, default 256, inherited) bounds the host memory its
+  decoded images may hold. Both are read when the renderer starts. The pack is read only in an Enhanced or Ace run
+  whose line carries `texpack=on`: an authentic run prints one
+  `TEX_REPLACE: off (texture replacement needs Enhanced or Ace)` line when the environment names a pack, and an
+  Enhanced or Ace run without the key prints `TEX_REPLACE: off (the launch line does not carry texpack=on)`; neither
+  reads it. A pack whose folder, ZIP or `textures.ini` cannot be read or is malformed (a line that is no comment,
+  section or `key = value`, no `hash` type, an unknown one, a `textures.ini` over 4 MiB or holding a NUL byte, which
+  no text file holds and which would hide the text after it, a damaged or unsafe ZIP) prints
+  `TEX_REPLACE: refused (<reason>); the game runs without the pack`, is refused whole, and the run's report names
+  `texpack` unavailable: a half-read pack would replace some textures and not others in a way nobody asked for. The
+  reason names the pack by its last path component only, and every control character in a reason or note (C0, DEL
+  and the C1 range, raw or in UTF-8), which a pack could use to send its own escape sequences to the terminal, is
+  printed as `?`; the run goes on unreplaced without waiting on the pack. One image that
   cannot be used (missing, gone since the pack opened, not a regular file, outside the pack folder, over 64 MiB, a
   bad PNG, the wrong size for its level, over the budget) is skipped: its texture is drawn as the game made it, a
   note says why, and the exit line's `skipped=` counts it once. That is the whole rule: the pack is used whole or not
   at all only for what is read at open (the folder or ZIP listing and `textures.ini`); images are read later, one
-  at a time, and each fails alone. There is no launch-line key, library setting or per-title setting yet; they come
-  with the launch-line pull request that follows #2074, and only that pull request admits the feature
-  (section 11.3.4).
+  at a time, and each fails alone. The player reads the pack the same way when it is chosen and again before each
+  launch, and refuses it with its reason (`TEXTURE_PACK_REFUSED`), as it does a pack whose `[games]` section lists
+  other games only (`nk_texrepl_names_game`; disc IDs compare in one form, upper case without `-` or `_`) or more
+  than 64, and a folder that is not a full UTF-8 path under 512 bytes. The runtime checks `[games]` again against
+  the run's `SR_DISC_ID` when it reads the pack, so a `textures.ini` changed after the launch check is still refused
+  for a game it does not name (a run with no `SR_DISC_ID` refuses a pack that names any game). A refused pack is
+  never stored. A stored pack that no longer reads is never used, whole or in part: the card says why and offers
+  **Play without the pack**, which starts that run with the pack left out and keeps the stored choice.
 - **The pack.** The project ships none and never downloads one: it is a folder or a ZIP file the user made or took
   from a community, kept locally. `SR_TEX_REPLACE` names either.
   - *A folder* is read as it is, unless it holds a `textures.zip`: then that ZIP is the pack and the folder's own
@@ -1114,8 +1210,8 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
     first), or whose level 0 is blank, has no chain: the texture is left alone. A level counts only when every
     level below it is a readable PNG and level *n* is level 0's size halved *n* times (at least 1), as PPSSPP
     loads a chain. `nk_texrepl_lookup_level` gives each level to the renderer; the renderer draws level 0 only.
-  - *Reported, not applied:* `[filtering]` (the game's own filtering is kept), `[games]` (per-game ini
-    overrides), `saveIndexed`, and any key or section this reader does not know, one `TEX_REPLACE: note:` line
+  - *Reported, not applied:* `[filtering]` (the game's own filtering is kept), `[games]`' per-game ini
+    overrides (its list of disc IDs is read, as **Settings** says), `saveIndexed`, and any key or section this reader does not know, one `TEX_REPLACE: note:` line
     each. A texture `[indexed]` marks (`true`, `1` or `gpu`, looked up with the same wildcards) is not
     replaced: its image holds palette indices for the game's palette to colour, which this build does not draw.
 - **Identity.** A texture is identified as in PPSSPP: its address (30 bits) and size code in the high half of the
@@ -1268,7 +1364,8 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   needed (a worker thread, as scaling has, and DDS or KTX2 files come after); the tallest row a game draws is not
   tracked, so a 512-high texture is hashed whole; the renderer's use of mip levels, same-size, larger or uneven
   images and a `[hashranges]` image drawn over its range, `[filtering]`, `[indexed]` images, `[games]` overrides,
-  a dump switch and a player toggle or per-title pack folder are not done.
+  a dump switch, and choosing a ZIP file itself in the player (a folder that holds a `textures.zip`
+  works) are not done.
 - **Tests.** `texrepl-selftest` checks the hashes against values taken from PPSSPP's own code and published xxHash
   vectors, the ini line and file-name rules, every `[hashes]` key form above, the mip chains (from ini lines and
   from files, gaps, `|`, a negative or missing level 0, a level of the wrong size), the lookup order with its last
@@ -1338,8 +1435,14 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   listed texture drawn from the pack's image from the draw that finds it, even with the 1:1 rule on, with
   `SR_TEX_REPLACE` alone and with xBRZ also on; a rewrite to unlisted
   content never drawn from the old image; the content returning replaced again; an image of no whole factor counted
-  and not used; an authentic start reading no pack; and an Ace start whose stored pack no longer reads (its folder
-  gone, its `textures.ini` malformed) refused, the renderer going on without it.
+  and not used; and neither an authentic start nor an Enhanced start without `texpack=on` reading a pack. Its
+  `replace-only` run, whose line carries `texpack=on`, refuses a stored pack that no longer reads (its folder gone,
+  its `textures.ini` naming no hash type or one the reader does not know), a budget out of range and a start that
+  names no folder, the renderer going on without the pack.
+  `ace-selftest` checks the key (optional, off when missing, on or off only, written after `peak` and before
+  `cull`); `test_player_state`'s `test_play_mode_texpack_settings` checks the settings round trip, the
+  refusals, the line and the folder a launch gets; `test_launch_resolution` checks that only a `texpack=on`
+  line exports the folder.
 
 ### 10.13. Sharp Game Text
 
@@ -2483,19 +2586,19 @@ observe.
 - **Nothing worse (section 11.2, item 4):** not shown. *Hot Shots Tennis* and *LittleBigPlanet* keep smart 2D off
   (section 10.10), and neither feature may be on by default before the runs item 4 lists exist.
 
-#### 11.3.4. Texture Replacement (Not Yet Admitted)
+#### 11.3.4. Texture Replacement (`texpack=on`)
 
 The feature of section 10.12 (#1880). Its presentation is described there; this entry is what the guest can observe.
 
-- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
-  so a frame drawn with a pack's image in place of a guest texture is the frame the guest keeps. The feature stays
-  outside section 11.2 until the requirements below exist. Until then it is reachable only through environment
-  variables, for development.
-- **Key.** None. `SR_TEX_REPLACE` and `SR_TEX_REPLACE_BUDGET_MB` are environment variables, not keys on the launch
-  line (section 10.1), and have no library or per-title setting, so the feature is not admitted. The pack itself is the user's own:
-  the project ships none.
-- **Never silent.** A run with a pack loaded prints, after its `TEX_REPLACE: on` line, one line naming the feature as
-  guest-visible, on through the environment and not admitted under section 11.2.
+- **Status: guest-visible, admitted under section 11.2, off by default.** Each present commits the frame it shows to
+  guest VRAM, so a frame drawn with a pack's image in place of a guest texture is the frame the guest keeps.
+- **Key.** `texpack=on` or `texpack=off` on the launch line (section 10.1), an optional key: a line without it is
+  off, and any other value refuses the line. The folder travels beside the line as `SR_TEX_REPLACE`, which the
+  launcher exports empty unless the line carries `texpack=on`. The library and each title can turn it on or off
+  alone (section 11.2, item 2): the part "Texture pack" on Settings > Enhanced and on each game's own page
+  (section 10.9). The pack itself is the user's own: the project ships none.
+- **Never silent.** A run with the key prints `ACE_MODE: texpack on (...)`; a run with a pack loaded prints, after
+  its `TEX_REPLACE: on` line, one line naming the feature as guest-visible under this entry.
 - **What it changes:** the frame a present commits, wherever a draw used a pack's image.
 - **VRAM bytes:** differ in those frames, at those draws' pixels.
 - **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them.
@@ -2507,11 +2610,24 @@ The feature of section 10.12 (#1880). Its presentation is described there; this 
   clocks are unchanged.
 - **I/O speed:** unchanged for the guest. The host reads the pack's files from its own disk, inside the
   pack's folder or ZIP only.
-- **Tier:** Enhanced. **Default:** off, and Ace-only: in an authentic run the pack is not read whatever the
-  environment says.
+- **Tier:** Enhanced: Enhanced and Ace runs alike. **Default:** off, and in no graphics preset. In an authentic run
+  the pack is not read whatever the environment says.
+- **Authentic stays byte-identical (section 11.2, item 1).** With the line `off`, `g_ace_on` stays 0 and
+  `tex_repl_init` reads no pack; `gpu-texscale-selftest`'s `replace` cell starts the renderer authentic and with an
+  Enhanced line without the key, with `SR_TEX_REPLACE` set, and checks that neither reads the pack. It also draws a
+  texture the pack lists after that authentic start and checks that the guest framebuffer is byte for byte the same
+  draw's after a start without `SR_TEX_REPLACE`, and that the draw with the pack read differs, so the comparison can
+  fail. The draws run in the cell's scaling state; only the start is authentic, and with the line `off` the rest of
+  the frame is the renderer's authentic path, which the pack never reaches.
 - **Nothing worse (section 11.2, item 4):** not shown. A pack is the user's own content, so what it does to a title
   is the pack's; the runs item 4 lists, for a title and a pack, do not exist yet, and the feature may not be on by
   default before they do.
+- **Per-title off switch (section 11.2, item 5).** None. No title is known to regress with a pack on, and a pack is
+  chosen title by title.
+- **Evidence tools (section 11.2, item 6).** The flight recorder's `runtime.enhancements` carries `texpack=on` with the
+  rest of the launch line (its `ace` string holds the parser's 191 characters, so a line with `cull=on` and
+  `texpack=on` is kept whole), the run's report names `texpack` and whether it was available, and section 10.4's
+  refusals apply to the run unchanged.
 
 #### 11.3.5. Sharp Game Text (`glyphs`, Not Yet Admitted)
 
@@ -2600,7 +2716,7 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the title page's play line names the reason while the part is on. The player checks only these fields:
   `build-package` checks the rest (section 9.9) and names any refusal in the build's own error. The row's text says the part acts only in games that have a culling build, and a run without
   one says so in the `ACE_MODE: cull unavailable (...)` line and the report. The runtime remembers at most 4096
-  distinct matrices (see Limits below); the report's
+  widened matrices still in guest memory (see Limits below); the report's
   `cull_untracked` counts the matrix uses it left alone once that table was full, and cull is confirmed only
   while that count is 0: a run with a nonzero count reports cull unavailable as `partial` (the matrices
   tracked before the table filled were widened, the rest were not), never as a complete run. The count is read
@@ -2622,15 +2738,24 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
 - **Package obligations.** The mechanism cannot check these, so the package author shows them for the title: (1) the
   call at the site leaves every listed matrix describing the camera it was built for, either rewritten at each call or
   unchanged since the last one (the runtime does not scale a matrix whose x row still holds the words it wrote, so a
-  matrix the call does not rebuild is not scaled twice); (2) the listed offsets are matrices only the title's visibility
+  matrix the call does not rebuild is not scaled twice), and never a saved copy of a matrix the hook already widened,
+  whether at another address or put back where it was after something else was written there (the runtime knows
+  its words only where they still are, so it would scale the copy again); (2) the
+  listed offsets are matrices only the title's visibility
   test reads, so the matrices the GE receives, and with them the centre picture, are untouched; (3) the title's logic
   that depends on what is visible is not a behaviour change to guard against, or is guarded.
 - **Limits.** It cannot create what the title never modelled, what it places only inside the original view, or what
   it hides by a rule that is not a horizontal clip test (a distance, a side-of-wall or a course-direction rule). The
-  wing cap of section 10.8 is unchanged. The table that keeps a matrix from being scaled twice holds 4096
-  distinct matrix addresses for the whole run and is never cleared; a title whose matrices move to new
-  addresses can fill it, after which new matrices are left unscaled (said once on stderr, counted in the
-  report's `cull_untracked`) instead of being scaled without a record.
+  wing cap of section 10.8 is unchanged. The table that keeps a matrix from being scaled twice is keyed by the
+  matrix's address and holds 4096 entries. An entry matters only while guest memory at its address still holds
+  the x row the hook wrote: once the title writes anything else there, the next call at that address scales what
+  it finds with or without the entry. So when a new address would take the table past three-quarters full, the
+  entries whose words are gone are dropped first (at most once per call), which changes no call's outcome while
+  package obligation (1) holds (no widened copy is put back where it was); a title that builds its
+  matrices in per-frame scratch memory, at addresses that move from frame to frame, reuses that room instead of
+  filling the table. Only when more than 4096 widened matrices are all still in guest memory at once is a new
+  matrix left unscaled (said once on stderr, counted in the report's `cull_untracked`) instead of being scaled
+  without a record.
 - **Tier:** Ace (one title). **Default:** off.
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.
 

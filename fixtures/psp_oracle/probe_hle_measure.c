@@ -8,7 +8,7 @@
 // before it exits. Every import is user-mode and comes from a per-family import
 // block (hle_*_imports.S) or the shared threadman_user_imports.S.
 //
-// Eight single-launch cases share this file: CASE=hle-vtimer-unit
+// These single-launch cases share this file: CASE=hle-vtimer-unit
 // (PSP-HLE-VTIMER-002), hle-vtimer-errors (PSP-HLE-VTIMER-003),
 // hle-kernel-pool-bounds (PSP-HLE-KERNEL-STATUS-002), hle-power-float-v0
 // (PSP-HLE-POWER-002), hle-null-out-pointers (PSP-HLE-NULL-OUT-001),
@@ -19,11 +19,13 @@
 // imports no InitStart call, and hle-utility-dialogs (PSP-HLE-UTILITY-DIALOG-001), which opens
 // the savedata, gamedata install, netconf and game sharing dialogs in game context and never
 // answers them, and hle-nickname-limit (PSP-HLE-NICKNAME-001, case 164), which reads the owner_name
-// key's type and size and the system-parameter string's length refusals and records no value bytes.
+// key's type and size and the system-parameter string's length refusals and records no value bytes,
+// and hle-io-trunc (PSP-HLE-IO-TRUNC-001, case 105), which records what PSP_O_TRUNC shows on a
+// probe-owned Memory Stick file.
 // Cases 97-101 have recorded PSP-3000 runs from
 // 2026-10-15: the VTimer and power cases were measured; pool-bounds was captured
 // only in its earlier revision, and the revised form has not run; null-out was
-// captured incomplete. Case 104 was measured on 2026-11-02 (docs/HARDWARE_ORACLE.md).
+// captured incomplete. Cases 104 and 105 were measured on 2026-11-02 (docs/HARDWARE_ORACLE.md).
 // Their pass rule is machinery only: a record is PASS when its calls completed and were
 // recorded in order, and SKIP only when the object a cell needs (a timer, pool or
 // block UID) was not obtained. A fixed-pool delete after a refused create is PASS
@@ -84,6 +86,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_AUDIO_SRC 102
 #define HLE_CASE_TIMER_ORDER 103
 #define HLE_CASE_SAVEDATA_GETSIZE 104
+#define HLE_CASE_IO_TRUNC 105
 #define HLE_CASE_SAVEDATA_NODATA 180
 #define HLE_CASE_UTILITY_NONE 140
 #define HLE_CASE_STD_HANDLES 156
@@ -155,6 +158,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "hle-savedata-getsize"
 #define HLE_TEST_ID "PSP-HLE-SAVEDATA-GETSIZE-001"
 #define HLE_LOG "host0:/hle_savedata_getsize_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_IO_TRUNC
+#define HLE_CAMPAIGN_ID "hle-io-trunc"
+#define HLE_TEST_ID "PSP-HLE-IO-TRUNC-001"
+#define HLE_LOG "host0:/hle_io_trunc_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_SAVEDATA_NODATA
 #define HLE_CAMPAIGN_ID "hle-savedata-nodata"
 #define HLE_TEST_ID "PSP-HLE-SAVEDATA-NODATA-001"
@@ -5346,6 +5353,303 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_NICKNAME_LIMIT */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_IO_TRUNC
+
+/* #1892: what the PSP does with PSP_O_TRUNC (0x0400) on the Memory Stick, and how a second
+   descriptor on the same file sees a truncation. PPSSPP's comment says the PSP truncates at
+   open but "if you seek later, you'll recover it"; nobody has measured it. The probe owns one
+   file, ms0:/NKTRUNC.BIN. It refuses (a STEP line, no record, COMPLETE FAIL) when that file
+   already exists, and touches nothing. It writes only that file and removes it in the last
+   cell, which runs even after a failed earlier cell. Every value is an observation recorded
+   as a word and never compared: PASS on every cell.
+
+   Words: sceIoOpen/Write/Read/Close/Remove returns as returned; st is sceIoGetstat's st_size
+   low word, or the error word when the call failed; an lseek is two words (low, high) of the
+   64-bit SceOff sceIoLseek returns; "bytes" is the first four bytes read, little-endian, 0 if
+   none; a dump is a count (or the open error) then the first 16 bytes as four such words.
+   Flags: RDONLY 1, WRONLY 2, RDWR 3, CREAT 0x200, TRUNC 0x400. base() writes the 16 bytes
+   ABCDEFGHIJKLMNOP with flags 0x0602 and its word is the first error or the byte count.
+
+   trunc-open-view (result A=open 0x0603): out0 base, out1 st while open, out2/3 lseek END,
+     out4/5 lseek SET 0, out6 read(A,4) count.
+   trunc-seek-read (result lseek(A,4,SET) low): out0 its high, out1 read(A,4) count, out2 bytes.
+   trunc-seek-write (result lseek(A,8,SET) low): out0 its high, out1 write(A,"WX",2), out2/3
+     lseek END, out4 close(A), out5 st, out6 dump count, out7-10 dump bytes.
+   trunc-close-nowrite (result A=open 0x0602): out0 base, out1 close(A), out2 st, out3 B=open
+     RDONLY, out4/5 lseek END, out6/7 lseek SET 4, out8 read(B,4) count, out9 bytes, out10 close(B).
+   trunc-recover-after-close (result A=open 0x0002): out0/1 lseek(A,8,SET), out2 write(A,"WX",2),
+     out3 close(A), out4 st, out5 dump count, out6-9 dump bytes.
+   two-fd-view (result B=open 0x0003): out0 base, out1 A=open 0x0602, out2/3 lseek(B) END before,
+     out4/5 lseek(B) END after, out6/7 lseek(B) SET 0, out8 read(B,4) count, out9 bytes, out10 st
+     with A open, out11 close(A), out12 st, out13/14 lseek(B) END, out15 close(B), out16 st.
+   two-fd-writer-survives (result A=open 0x0602): out0 base, out1 B=open 0x0003, out2/3 lseek(B)
+     END, out4/5 lseek(B) SET 0, out6 write(B,"abcdefghijkl",12), out7 close(A), out8 st,
+     out9 close(B), out10 st, out11 dump count, out12-15 dump bytes.
+   two-fd-trunc-writes-last (result A=open 0x0602): out0 base, out1 B=open 0x0003, out2
+     write(B,"abcdefghijkl",12), out3 close(B), out4 st, out5 write(A,"WX",2), out6 close(A),
+     out7 st, out8 dump count, out9-12 dump bytes.
+   remove-absent (result: the second sceIoRemove, which expects an error word): out0 the first
+     sceIoRemove, the cleanup of whatever the earlier cells left, out1 st. */
+#define HLE_IT_PATH "ms0:/NKTRUNC.BIN"
+#define HLE_IT_BASE_BYTES 16u
+#define HLE_IT_DUMP_BYTES 32u
+#define HLE_IT_F_BASE (PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC)
+#define HLE_IT_F_RDWR_TRUNC (PSP_O_RDWR | PSP_O_CREAT | PSP_O_TRUNC)
+_Static_assert(HLE_IT_F_BASE == 0x0602 && HLE_IT_F_RDWR_TRUNC == 0x0603,
+               "the probe flags are the documented words");
+
+static const char s_it_base[] = "ABCDEFGHIJKLMNOP";
+static const char s_it_wx[] = "WX";
+static const char s_it_lower[] = "abcdefghijkl";
+
+static uint32_t it_base(void)
+{
+    const SceUID fd = sceIoOpen(HLE_IT_PATH, HLE_IT_F_BASE, 0777);
+    if (fd < 0) {
+        return (uint32_t)fd;
+    }
+    const int wrote = sceIoWrite(fd, s_it_base, HLE_IT_BASE_BYTES);
+    const int closed = sceIoClose(fd);
+    return (uint32_t)(wrote < 0 ? wrote : (closed < 0 ? closed : wrote));
+}
+
+static uint32_t it_st(void)
+{
+    SceIoStat st;
+    memset(&st, 0, sizeof(st));
+    const int rc = sceIoGetstat(HLE_IT_PATH, &st);
+    return rc < 0 ? (uint32_t)rc : (uint32_t)st.st_size;
+}
+
+static void it_lseek(SceUID fd, SceOff offset, int whence, uint32_t *lo, uint32_t *hi)
+{
+    const uint64_t r = (uint64_t)sceIoLseek(fd, offset, whence);
+    *lo = (uint32_t)(r & 0xffffffffu);
+    *hi = (uint32_t)(r >> 32);
+}
+
+static void it_read4(SceUID fd, uint32_t *count, uint32_t *bytes)
+{
+    uint8_t buf[4] = {0, 0, 0, 0};
+    const int n = sceIoRead(fd, buf, sizeof(buf));
+    uint32_t word = 0;
+    *count = (uint32_t)n;
+    if (n > 0) {
+        memcpy(&word, buf, sizeof(word));
+    }
+    *bytes = word;
+}
+
+/* out[0] the count (or the open error), out[1..4] the first 16 bytes. */
+static void it_dump(uint32_t *out)
+{
+    uint8_t buf[HLE_IT_DUMP_BYTES];
+    memset(buf, 0, sizeof(buf));
+    memset(out, 0, 5u * sizeof(uint32_t));
+    const SceUID fd = sceIoOpen(HLE_IT_PATH, PSP_O_RDONLY, 0);
+    if (fd < 0) {
+        out[0] = (uint32_t)fd;
+        return;
+    }
+    const int n = sceIoRead(fd, buf, sizeof(buf));
+    (void)sceIoClose(fd);
+    out[0] = (uint32_t)n;
+    if (n <= 0) {
+        memset(buf, 0, sizeof(buf));
+    }
+    for (uint32_t i = 0; i < 4u; i++) {
+        memcpy(&out[1u + i], buf + 4u * i, sizeof(uint32_t));
+    }
+}
+
+/* Close a descriptor a cell left open; a closed or never-opened one is -1. */
+static void it_release(SceUID *fd)
+{
+    if (*fd >= 0) {
+        (void)sceIoClose(*fd);
+    }
+    *fd = -1;
+}
+
+static void it_trunc_group(void)
+{
+    uint32_t o[11];
+    uint32_t ignored;
+    uint32_t lo;
+    uint32_t dump[5];
+    SceUID a;
+
+    hle_step("trunc-open-view");
+    memset(o, 0, sizeof(o));
+    o[0] = it_base();
+    a = sceIoOpen(HLE_IT_PATH, HLE_IT_F_RDWR_TRUNC, 0777);
+    o[1] = it_st();
+    it_lseek(a, 0, PSP_SEEK_END, &o[2], &o[3]);
+    it_lseek(a, 0, PSP_SEEK_SET, &o[4], &o[5]);
+    it_read4(a, &o[6], &ignored);
+    hle_record("trunc-open-view", "PASS", (uint32_t)a, o, 7);
+
+    hle_step("trunc-seek-read");
+    memset(o, 0, sizeof(o));
+    it_lseek(a, 4, PSP_SEEK_SET, &lo, &o[0]);
+    it_read4(a, &o[1], &o[2]);
+    hle_record("trunc-seek-read", "PASS", lo, o, 3);
+
+    hle_step("trunc-seek-write");
+    memset(o, 0, sizeof(o));
+    it_lseek(a, 8, PSP_SEEK_SET, &lo, &o[0]);
+    o[1] = (uint32_t)sceIoWrite(a, s_it_wx, 2);
+    it_lseek(a, 0, PSP_SEEK_END, &o[2], &o[3]);
+    o[4] = (uint32_t)sceIoClose(a);
+    a = -1;
+    o[5] = it_st();
+    it_dump(dump);
+    memcpy(&o[6], dump, sizeof(dump));
+    hle_record("trunc-seek-write", "PASS", lo, o, 11);
+    it_release(&a);
+}
+
+static void it_close_group(void)
+{
+    uint32_t o[11];
+    uint32_t dump[5];
+    SceUID a;
+    SceUID b;
+
+    hle_step("trunc-close-nowrite");
+    memset(o, 0, sizeof(o));
+    o[0] = it_base();
+    a = sceIoOpen(HLE_IT_PATH, HLE_IT_F_BASE, 0777);
+    o[1] = (uint32_t)sceIoClose(a);
+    o[2] = it_st();
+    b = sceIoOpen(HLE_IT_PATH, PSP_O_RDONLY, 0);
+    o[3] = (uint32_t)b;
+    it_lseek(b, 0, PSP_SEEK_END, &o[4], &o[5]);
+    it_lseek(b, 4, PSP_SEEK_SET, &o[6], &o[7]);
+    it_read4(b, &o[8], &o[9]);
+    o[10] = (uint32_t)sceIoClose(b);
+    hle_record("trunc-close-nowrite", "PASS", (uint32_t)a, o, 11);
+
+    hle_step("trunc-recover-after-close");
+    memset(o, 0, sizeof(o));
+    a = sceIoOpen(HLE_IT_PATH, PSP_O_WRONLY, 0);
+    it_lseek(a, 8, PSP_SEEK_SET, &o[0], &o[1]);
+    o[2] = (uint32_t)sceIoWrite(a, s_it_wx, 2);
+    o[3] = (uint32_t)sceIoClose(a);
+    o[4] = it_st();
+    it_dump(dump);
+    memcpy(&o[5], dump, sizeof(dump));
+    hle_record("trunc-recover-after-close", "PASS", (uint32_t)a, o, 10);
+}
+
+static void it_two_fd_view(void)
+{
+    uint32_t o[17];
+    SceUID a;
+    SceUID b;
+
+    hle_step("two-fd-view");
+    memset(o, 0, sizeof(o));
+    o[0] = it_base();
+    b = sceIoOpen(HLE_IT_PATH, PSP_O_RDWR, 0777);
+    it_lseek(b, 0, PSP_SEEK_END, &o[2], &o[3]);
+    a = sceIoOpen(HLE_IT_PATH, HLE_IT_F_BASE, 0777);
+    o[1] = (uint32_t)a;
+    it_lseek(b, 0, PSP_SEEK_END, &o[4], &o[5]);
+    it_lseek(b, 0, PSP_SEEK_SET, &o[6], &o[7]);
+    it_read4(b, &o[8], &o[9]);
+    o[10] = it_st();
+    o[11] = (uint32_t)sceIoClose(a);
+    o[12] = it_st();
+    it_lseek(b, 0, PSP_SEEK_END, &o[13], &o[14]);
+    o[15] = (uint32_t)sceIoClose(b);
+    o[16] = it_st();
+    hle_record("two-fd-view", "PASS", (uint32_t)b, o, 17);
+}
+
+static void it_two_fd_writer_survives(void)
+{
+    uint32_t o[16];
+    uint32_t dump[5];
+    SceUID a;
+    SceUID b;
+
+    hle_step("two-fd-writer-survives");
+    memset(o, 0, sizeof(o));
+    o[0] = it_base();
+    a = sceIoOpen(HLE_IT_PATH, HLE_IT_F_BASE, 0777);
+    b = sceIoOpen(HLE_IT_PATH, PSP_O_RDWR, 0777);
+    o[1] = (uint32_t)b;
+    it_lseek(b, 0, PSP_SEEK_END, &o[2], &o[3]);
+    it_lseek(b, 0, PSP_SEEK_SET, &o[4], &o[5]);
+    o[6] = (uint32_t)sceIoWrite(b, s_it_lower, 12);
+    o[7] = (uint32_t)sceIoClose(a);
+    o[8] = it_st();
+    o[9] = (uint32_t)sceIoClose(b);
+    o[10] = it_st();
+    it_dump(dump);
+    memcpy(&o[11], dump, sizeof(dump));
+    hle_record("two-fd-writer-survives", "PASS", (uint32_t)a, o, 16);
+}
+
+static void it_two_fd_trunc_writes_last(void)
+{
+    uint32_t o[13];
+    uint32_t dump[5];
+    SceUID a;
+    SceUID b;
+
+    hle_step("two-fd-trunc-writes-last");
+    memset(o, 0, sizeof(o));
+    o[0] = it_base();
+    a = sceIoOpen(HLE_IT_PATH, HLE_IT_F_BASE, 0777);
+    b = sceIoOpen(HLE_IT_PATH, PSP_O_RDWR, 0777);
+    o[1] = (uint32_t)b;
+    o[2] = (uint32_t)sceIoWrite(b, s_it_lower, 12);
+    o[3] = (uint32_t)sceIoClose(b);
+    o[4] = it_st();
+    o[5] = (uint32_t)sceIoWrite(a, s_it_wx, 2);
+    o[6] = (uint32_t)sceIoClose(a);
+    o[7] = it_st();
+    it_dump(dump);
+    memcpy(&o[8], dump, sizeof(dump));
+    hle_record("two-fd-trunc-writes-last", "PASS", (uint32_t)a, o, 13);
+}
+
+/* The probe's file is removed here, and removed again: the second call is the cell. */
+static int it_remove_absent(void)
+{
+    uint32_t o[2];
+
+    hle_step("remove-absent");
+    const int cleanup = sceIoRemove(HLE_IT_PATH);
+    const int again = sceIoRemove(HLE_IT_PATH);
+    o[0] = (uint32_t)cleanup;
+    o[1] = it_st();
+    hle_record("remove-absent", "PASS", (uint32_t)again, o, 2);
+    return cleanup >= 0;
+}
+
+static int hle_run(void)
+{
+    SceIoStat st;
+    memset(&st, 0, sizeof(st));
+    hle_step("refuse-if-present");
+    if (sceIoGetstat(HLE_IT_PATH, &st) >= 0) {
+        hle_step("refused-ms0-NKTRUNC.BIN-exists");
+        return 0;
+    }
+    it_trunc_group();
+    it_close_group();
+    it_two_fd_view();
+    it_two_fd_writer_survives();
+    it_two_fd_trunc_writes_last();
+    return it_remove_absent();
+}
+
+#endif /* HLE_CASE_IO_TRUNC */
 
 /* ------------------------------------------------------------------------- */
 

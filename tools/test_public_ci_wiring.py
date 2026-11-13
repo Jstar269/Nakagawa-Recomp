@@ -3107,29 +3107,40 @@ class TrustedAttestationRouteTests(unittest.TestCase):
     HEAD = "a" * 40
     PLAIN = "Trusted provenance attestation"
     REPOSITORY = {"default_branch": "main"}
+    # The attest job runs in the upstream repository; a fork runs the Fork provenance check (docs/FORKING.md).
+    UPSTREAM = {"repository": "Jstar269/Nakagawa-Recomp", "repository_id": "1330183186"}
+    FORK = {"repository": "example-user/Nakagawa-Recomp", "repository_id": "42"}
 
     def setUp(self) -> None:
         self.text = _workflow_text("provenance-attestation.yml")
         self.blocks = _workflow_job_blocks("provenance-attestation.yml")
         self.attest = "\n".join(self.blocks["attest"])
+        self.fork = "\n".join(self.blocks["fork_check"])
         self.guard = _job_if(self.blocks["attest"])
+        self.fork_guard = _job_if(self.blocks["fork_check"])
         self.title = _run_name(self.text)
         producer = next(item for item in ci_trust_verdict.PRODUCERS if item.context == self.PLAIN)
         self.head_title = producer.run_title.format(head=self.HEAD)
 
     def _target(self, base: str = "main") -> dict[str, object]:
         pull = {"number": 7, "head": {"sha": self.HEAD}, "base": {"ref": base}}
-        return {"github": {"event_name": "pull_request_target",
+        return {"github": {"event_name": "pull_request_target", **self.UPSTREAM,
                            "event": {"pull_request": pull, "repository": self.REPOSITORY}}, "inputs": {}}
 
     def _ci(self, event: str = "pull_request") -> dict[str, object]:
         run = {"event": event, "head_sha": self.HEAD, "head_branch": "ci/x"}
-        return {"github": {"event_name": "workflow_run",
+        return {"github": {"event_name": "workflow_run", **self.UPSTREAM,
                            "event": {"workflow_run": run, "repository": self.REPOSITORY}}, "inputs": {}}
 
     def _dispatch(self, ref: str = "refs/heads/main", **inputs: str) -> dict[str, object]:
-        return {"github": {"event_name": "workflow_dispatch", "ref": ref, "event": {"repository": self.REPOSITORY}},
+        return {"github": {"event_name": "workflow_dispatch", "ref": ref, **self.UPSTREAM,
+                           "event": {"repository": self.REPOSITORY}},
                 "inputs": {"pull_request_number": "", "head_sha": "", "candidate_sha": "", **inputs}}
+
+    def _in_fork(self, context: dict[str, object]) -> dict[str, object]:
+        github = context["github"]
+        assert isinstance(github, dict)
+        return context | {"github": github | self.FORK}
 
     def test_a_requested_ci_run_starts_the_attestation(self) -> None:
         on_block = "\n".join(_on_block(self.text))
@@ -3144,13 +3155,39 @@ class TrustedAttestationRouteTests(unittest.TestCase):
                          ["  pull_request_target:", "  workflow_run:", "  workflow_dispatch:"])
 
     def test_the_attest_guard_is_pinned(self) -> None:
-        self.assertEqual(self.attest.count("\n".join([
+        routes = [
             "    if: >-",
-            "      ${{ (github.event_name == 'pull_request_target' &&",
-            "           github.event.pull_request.base.ref == github.event.repository.default_branch) ||",
-            "          (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request') ||",
-            "          (github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '') }}",
+            "      ${{ ((github.event_name == 'pull_request_target' &&",
+            "            github.event.pull_request.base.ref == github.event.repository.default_branch) ||",
+            "           (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request') ||",
+            "           (github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '')) &&",
+        ]
+        self.assertEqual(self.attest.count("\n".join(routes + [
+            "          (github.repository_id == '' || github.repository_id == '1330183186' || "
+            "github.repository == 'Jstar269/Nakagawa-Recomp') }}",
         ])), 1)
+        # The fork's job is guarded by the same three routes, and by the complement of the repository clause.
+        self.assertEqual(self.fork.count("\n".join(routes + [
+            "          (github.repository_id != '' && github.repository_id != '1330183186' && "
+            "github.repository != 'Jstar269/Nakagawa-Recomp') }}",
+        ])), 1)
+
+    def test_in_a_fork_the_fork_check_runs_on_the_same_routes_and_the_attestation_on_none(self) -> None:
+        judged = (self._target(), self._ci(), self._dispatch(pull_request_number="7", head_sha=self.HEAD))
+        skipped = (self._target("release"), self._ci("push"), self._ci("merge_group"),
+                   self._dispatch(candidate_sha="c" * 40))
+        for context in judged:
+            with self.subTest(event=_actions_value("github.event_name", context)):
+                self.assertTrue(_actions_eval(self.guard, context))
+                self.assertFalse(_actions_eval(self.fork_guard, context))
+                self.assertFalse(_actions_eval(self.guard, self._in_fork(context)))
+                self.assertTrue(_actions_eval(self.fork_guard, self._in_fork(context)))
+                # One title for both jobs: the verdict finds a fork's run by the same name.
+                self.assertEqual(_actions_value(self.title, self._in_fork(context)), self.head_title)
+        for context in skipped:
+            for where in (context, self._in_fork(context)):
+                self.assertFalse(_actions_eval(self.guard, where))
+                self.assertFalse(_actions_eval(self.fork_guard, where))
 
     def test_only_a_pull_requests_ci_run_is_attested(self) -> None:
         self.assertTrue(_actions_eval(self.guard, self._ci()))
@@ -3245,9 +3282,13 @@ class TrustedAttestationRouteTests(unittest.TestCase):
     def test_every_attestation_step_takes_its_target_from_the_resolver(self) -> None:
         text = _uncommented(self.text)
         # The event's values and the triggering run's head enter once, in the resolver step's env.
-        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.head\.sha", text)), 2)   # and the title
-        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.base\.sha", text)), 1)
-        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.number", text)), 2)      # and concurrency
+        # The fork job carries the same resolver step, so each value enters once more in it.
+        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.head\.sha", text)), 3)   # and the title
+        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.base\.sha", text)), 2)
+        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.number", text)), 3)      # and concurrency
+        self.assertEqual(self.fork.count("github.event.pull_request.head.sha"), 1)
+        self.assertEqual(self.fork.count("github.event.pull_request.base.sha"), 1)
+        self.assertEqual(self.fork.count("github.event.pull_request.number"), 1)
         # The merge base and the trusted tree audit read the head too.
         self.assertEqual(self.attest.count("${{ steps.target.outputs.head_sha }}"), 5)
         # The event's base is only checked to be on the default branch; the verdict base is the merge base.

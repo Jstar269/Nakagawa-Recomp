@@ -159,6 +159,16 @@
       "disposition": "vendored_source; MIT OR Unlicense upstream, used under Unlicense; linked into the player (PNG only)"
     },
     {
+      "id": "stb-vorbis",
+      "name": "stb_vorbis 1.24 Ogg Vorbis decoder",
+      "license": "Unlicense",
+      "origin": "https://github.com/nothings/stb",
+      "revision": "v1.24 / 9f755b604db3492df2cbeb39bf84b81e3e3932e3",
+      "notice_path": "third_party/stb/stb_vorbis.c",
+      "evidence_path": "third_party/stb/PROVENANCE.md",
+      "disposition": "vendored_source; MIT OR Unlicense upstream, used under Unlicense; linked into the player (launcher music)"
+    },
+    {
       "id": "rcheevos",
       "name": "rcheevos 12.5.0 RetroAchievements client library",
       "license": "MIT AND Zlib",
@@ -2273,6 +2283,24 @@
         "sha256": "5bb62847f130ced4299d758cee7d21bef49bff53c906e44e1ebc19d3d8f3a91a"
       },
       "comment": "Kenney Interface Sounds 1.0 clip, decoded once from the archive's Ogg Vorbis to 16-bit PCM WAV (LOCAL DELTA); embedded in the player by tools/gen_ui_assets.py; manifest in third_party/kenney/PROVENANCE.md."
+    },
+    {
+      "id": "launcher-music-chill-lofi",
+      "name": "Launcher music: ChillLofi.ogg",
+      "type": "asset",
+      "relationship": "CONTAINS",
+      "presence": "required",
+      "source_path": "assets/music/launcher/ChillLofi.ogg",
+      "upstream_origin": "https://opengameart.org/content/chill-lofi-inspired",
+      "license": "CC0-1.0",
+      "notice_path": "assets/music/launcher/PROVENANCE.md",
+      "disposition": "approved_binary",
+      "public_scope_included": true,
+      "optional": false,
+      "hashes": {
+        "sha256": "7ea7fd1b7c95ed1ca5f6ebb796626570137bcb75c7f2ea87b6c61212c7a86694"
+      },
+      "comment": "\"Chill lofi inspired\" by omfgdude, the OpenGameArt page's Ogg Vorbis upload, byte-identical (CC0-1.0); the optional launcher music (#2207), decoded by stb_vorbis and staged beside the player by tools/stage_runtime_dlls.py; manifest in assets/music/launcher/PROVENANCE.md."
     },
     {
       "id": "xbrz-golden-generator",

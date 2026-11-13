@@ -235,9 +235,11 @@ typedef enum {
     PLAYER_PLAY_ACE            /* offered only for a title with a usable package */
 } PlayerPlayMode;
 
-/* Enhanced's parts. Each is one row of player_enhanced_part(): a new part is one more enum
-   value and one more row, and settings, the launch line and both settings pages take it with
-   no other change. A part's value 0 is off. */
+/* Enhanced's parts. Each is one row of player_enhanced_part(), and the enum's order is the
+   Enhanced pages' row order and the settings file's order, so a new part is appended at the end.
+   The SR_ACE line has its own fixed key order (ace_format's; player_play_launch_line writes the
+   later keys, stick to cull, in that order after the others), where a part that the line carries
+   takes its place. A part's value 0 is off. */
 typedef enum {
     PLAYER_PART_FILTERING = 0, /* texture filtering: 0, 2, 4, 8 or 16 */
     PLAYER_PART_TEXT,          /* crisp system text (the on-screen keyboard): 0 or 1 */
@@ -268,6 +270,10 @@ typedef enum {
     PLAYER_PART_MIPS,          /* host-built mip chains (section 11.3.8): 0 off, 1 on. Appended; the
                                   SR_ACE line carries mips=on, right after twin, only when on; off in
                                   a fresh file */
+    PLAYER_PART_TEXPACK,       /* the title's texture pack (#1880, contract 11.3.4): 0 off, 1 on. In
+                                  effect only for a title with a pack chosen (PlayerTitlePack); the
+                                  line carries texpack=on and the folder reaches the runtime as
+                                  SR_TEX_REPLACE (NkRuntimeConfig.texpack_dir) */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -296,6 +302,27 @@ typedef struct {
     /* Ace's own parts, each -1 (on, the default) or 0 (off for this title). */
     int logic_60;                  /* the title's 60 FPS game logic package */
 } PlayerTitlePlay;
+
+/* A title's texture pack (docs/ENHANCEMENT_CONTRACT.md 10.12): the folder the player chose for it,
+   kept in settings.json's "texture_packs" map by disc ID. The folder is the player's own; the
+   project ships no pack. At most PLAYER_MAX_TITLE_PACKS titles have one: choosing one more says
+   so and stores nothing. */
+#define PLAYER_MAX_TITLE_PACKS 256
+typedef struct {
+    char key[PLAYER_DISC_ID_KEY_LEN];
+    char path[NK_MAX_PATH];
+} PlayerTitlePack;
+
+/* What a pack holds, as the title's page shows it, from reading it the way the runtime does
+   (src/rt/texrepl.h). A pack that fails that reading is refused whole, never half-applied. */
+typedef struct {
+    bool ok;
+    char name[128];        /* the folder's own name */
+    size_t textures;       /* the textures it lists, replacements and "leave alone" lines alike */
+    size_t notes;          /* what it holds that this build reads and does not apply */
+    char error[256];       /* why it was refused, when !ok */
+    char other_game[16];   /* refused as made for another game: the first disc ID its [games] lists */
+} PlayerTexturePackInfo;
 
 /* What a title launches with (player_play_resolve). */
 typedef struct {
@@ -328,6 +355,10 @@ typedef struct {
     int interface_size_pct; /* 0 = automatic (the display's scale), or 100, 125, 150, 200 */
     int text_size_pct;      /* 100 Standard, 125 Large, 150 Larger: the type only */
     bool ui_sounds;       /* launcher move/confirm/back sounds; off by default */
+    /* Launcher background music (#2207): off by default, at its own level, apart
+       from the game's volume, as the menu sounds are. */
+    bool launcher_music;
+    int launcher_music_volume; /* 0..100 */
     PlayerLibrarySort library_sort;
     bool launcher_window_maximized;
     bool launcher_window_position_valid;
@@ -354,6 +385,8 @@ typedef struct {
     PlayerEnhancedSettings enhanced;
     PlayerTitlePlay title_play[MAX_LIBRARY_GAMES];
     int title_play_count;
+    PlayerTitlePack title_packs[PLAYER_MAX_TITLE_PACKS];
+    int title_pack_count;
     /* Builds keep the compiled system libraries a disc carries in the data folder and
        reuse them for other games with the same library (#1306). On by default; the
        copies never leave this PC. */
@@ -480,9 +513,11 @@ typedef enum {
     PLAYER_ERROR_RETRY_NONE = 0,
     PLAYER_ERROR_RETRY_RESTART_GAME,  /* "Restart game": launch subject_disc_id again */
     PLAYER_ERROR_RETRY_BUILD,         /* "Try again": build subject_disc_id again */
-    PLAYER_ERROR_RETRY_DELETE_KEPT    /* "Delete kept copy": delete what the import of the
+    PLAYER_ERROR_RETRY_DELETE_KEPT,   /* "Delete kept copy": delete what the import of the
                                          program subject_disc_id kept after it left the
                                          library (player_app_delete_kept_homebrew) */
+    PLAYER_ERROR_RETRY_WITHOUT_PACK   /* "Play without the pack": launch subject_disc_id once with
+                                         its texture pack left out; the stored choice is kept */
 } PlayerErrorRetry;
 
 typedef struct {
@@ -937,6 +972,22 @@ struct PlayerApp {
        main.c opens it, and the folder picked waits in saves_picked (saves_pick_ready) until
        the Saves dialog takes it. A cancelled dialog leaves nothing. */
     bool request_save_folder_picker;
+    /* A title's Enhanced page asks for the host folder dialog to choose its texture pack
+       (player_app_begin_texpack_pick); main.c opens it and hands the folder to
+       player_app_take_texpack_pick. texpack_pick_disc is the game the dialog was opened for, so
+       a pick that completes after the page closed or moved still reaches that game alone. */
+    bool request_texpack_folder_picker;
+    char texpack_pick_disc[PLAYER_DISC_ID_KEY_LEN];
+    /* The game (normalised disc ID) whose requested launch leaves its texture pack out, armed by
+       the refusal card's "Play without the pack" together with its request_launch and taken by
+       that launch alone (player_app_launch_begin), whether it starts or not. A new request clears
+       it, and so does the event loop when it drops the request without a launch. */
+    char launch_without_pack[PLAYER_DISC_ID_KEY_LEN];
+    /* The pack of the title whose Enhanced page is open, read when the page opens or the pack
+       changes (player_app_title_pack_info), so the page never scans a folder each frame. */
+    char texpack_page_key[PLAYER_DISC_ID_KEY_LEN];
+    char texpack_page_path[NK_MAX_PATH];
+    PlayerTexturePackInfo texpack_page_info;
     int saves_pick_index;
     bool saves_pick_ready;
     char saves_picked[NK_MAX_PATH];
@@ -999,6 +1050,10 @@ struct PlayerApp {
     /* Why the library shows no saved games although library.json exists (a newer
      * player wrote it), or an empty string. Shown on the Library screen. */
     char library_notice[192];
+    /* The earlier data folders of a Linux or macOS install are in use and the new one exists too
+     * (#324, nk_data_layout_notice): both named, for the whole run, or an empty string. Shown on
+     * the Library screen. */
+    char data_folder_notice[4u * NK_MAX_PATH + 192u]; /* NK_DATA_LAYOUT_NOTICE_MAX */
 
     /* Files dropped on the window together (#2007): SDL sends them one event at a
      * time between a begin and a complete. Several are gathered in a batch, the
@@ -1593,7 +1648,8 @@ typedef struct {
     bool vsync;
     int fullscreen;       /* 1 on, 0 off, -1 left as the user set it */
     /* Each Enhanced part's value under this preset, or -1 where the library's own value
-       stays. Only presentation parts are set: Crisp system text and Sharper enlarging. */
+       stays. Only presentation parts are set: Crisp system text, Sharper enlarging and (under
+       Ultra) Full 32-bit colour. */
     int part[PLAYER_PART_COUNT];
 } PlayerGraphicsPresetRow;
 
@@ -1682,6 +1738,7 @@ void player_app_read_system_preferences(PlayerApp *app);
 bool player_app_reduce_motion(const PlayerApp *app);
 bool player_app_high_contrast_focus(const PlayerApp *app);
 void player_app_toggle_ui_sounds(PlayerApp *app);
+void player_app_toggle_launcher_music(PlayerApp *app);
 /* The library's sort: Recently played, Name A to Z, Recently added, and round
  * again. The change is saved. */
 void player_app_cycle_library_sort(PlayerApp *app);
@@ -1774,6 +1831,9 @@ void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
  * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
  * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
+ * ";ssaa=2" or ";ssaa=4" follows with the Supersampling part on, in either tier.
+ * ";texpack=on" follows only with the Texture pack part on for a title that has a pack, in
+ * either tier; a missing texpack is off.
  * ";cull=on" follows, last, only for Ace with the Wider culling part on; a missing cull is off.
  * Returns false when it does not fit. */
 bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap);
@@ -1788,6 +1848,35 @@ int player_play_present_upscale(const PlayerPlayResolved *play);
 void player_play_config_session(const PlayerSettings *settings, const char *disc_id,
                                 bool logic_60_package, bool acceptance, NkRuntimeConfig *config,
                                 PlayerPlayResolved *out);
+/* The folder chosen as a disc's texture pack, or NULL when it has none. */
+const char *player_settings_title_pack(const PlayerSettings *settings, const char *disc_id);
+/* Reads the pack at `path` as the runtime will (src/rt/texrepl.h) and fills *out. Returns out->ok:
+ * false, with out->error saying why, for a path that is not a full UTF-8 path under 512 bytes, a
+ * folder that cannot be read, a malformed textures.ini, or, with disc_id given, a pack whose
+ * [games] section names other games only (out->other_game names the first). It decodes no
+ * image: an image that is missing or does not decode is skipped when the game draws it. */
+bool player_texture_pack_inspect(const char *path, const char *disc_id,
+                                 PlayerTexturePackInfo *out);
+/* A title's texture pack (its Enhanced page). Choosing reads the pack first: one that fails is
+ * refused with a TEXTURE_PACK_REFUSED message and nothing changes; one that reads is stored and
+ * the title's Texture pack part is set On. Returns whether it was stored. Removing forgets the
+ * folder (the folder itself is untouched) and returns the part to the library's. */
+bool player_app_set_title_pack(PlayerApp *app, int game_index, const char *path);
+void player_app_clear_title_pack(PlayerApp *app, int game_index);
+/* The same for the title whose Enhanced page is open; nothing for the library's page. */
+bool player_app_set_enhanced_page_pack(PlayerApp *app, const char *path);
+/* The folder dialog for the open title page's pack: asks main.c to open it and remembers the
+ * game. Nothing on the library's page. */
+void player_app_begin_texpack_pick(PlayerApp *app);
+/* The dialog closed without a folder (cancelled, or it could not open): the next CHOOSE may open
+   one again. */
+void player_app_cancel_texpack_pick(PlayerApp *app);
+/* The dialog's folder, for the game it was opened for, wherever the player is now; a game gone
+ * from the library meanwhile takes nothing (and the developer log says so). */
+bool player_app_take_texpack_pick(PlayerApp *app, const char *path);
+void player_app_clear_enhanced_page_pack(PlayerApp *app);
+/* The pack of the title whose page is open, as last read, or NULL when it has none. */
+const PlayerTexturePackInfo *player_app_title_pack_info(const PlayerApp *app, int game_index);
 /* <user_root>/ace/<disc ID>.json: the runtime's per-run report for that disc. */
 bool player_ace_report_path(const char *user_root, const char *disc_id, char *out, size_t cap);
 /* The title page's "Last session" line from that report ("Last session: 16x filtering,
@@ -1832,6 +1921,8 @@ void player_app_toggle_share_system_libraries(PlayerApp *app);
    next build uses it; a running one keeps the speed it started with. */
 void player_app_cycle_build_speed(PlayerApp *app);
 void player_app_adjust_volume(PlayerApp *app, int delta);
+/* Steps the launcher music's level, kept within 0 to 100, and saves it. */
+void player_app_adjust_launcher_music_volume(PlayerApp *app, int delta);
 
 /* Index of the library entry carrying this disc ID, or -1 if there is none.
    nk_library_add_or_update updates an existing record IN PLACE, so the entry
@@ -1951,7 +2042,7 @@ void player_app_request_launch(PlayerApp *app, int game_index);
  * configuration (resolution, frame cap, vsync, fullscreen, master volume).
  * These are the user's own rows, what an Authentic session runs with; an Enhanced or Ace
  * session then takes the graphics preset's values (player_session_apply_graphics_preset).
- * The accessibility settings and ui_sounds are launcher-UI state and deliberately not copied. Kept as a
+ * The accessibility settings, ui_sounds and the launcher music are launcher-UI state and deliberately not copied. Kept as a
  * named seam so tests can pin the settings -> session mapping without
  * spawning a child. */
 void player_app_apply_settings_to_session(const PlayerSettings *settings,

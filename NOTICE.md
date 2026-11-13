@@ -54,6 +54,17 @@ We aim to respond promptly and will remove material where appropriate.
   `Core/FileSystems/BlockDevices.cpp` (GPL-2.0-or-later, conveyed as
   GPL-3.0-or-later). The keystore, inflate, elliptic-curve and
   container-framing files are project-authored. Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
+- **Ad hoc transport (#1139)** — the lobby of the in-process ad hoc medium
+  (`src/core/nk_adhoc_net.c`) is translated from PPSSPP's
+  `Core/HLE/proAdhocServer.cpp` at `3bc60270eae3069f13dfbfdb7292a7e1375de6f6`
+  (Copyright (c) 2014- PPSSPP Project, GPL-2.0-or-later, PPSSPP's port of
+  Coldbird's aemu server), conveyed as GPL-3.0-or-later. The relay codec
+  (`src/core/nk_adhoc_relay.c`) encodes the aemu_postoffice wire format, and no
+  aemu_postoffice code is imported; all its login checks, the product-code
+  check included, are translated from `login_user_data` in PPSSPP's
+  `proAdhocServer.cpp`, and its port offset from
+  PPSSPP's `Core/HLE/sceNetAdhoc.cpp` (Copyright (c) 2013- PPSSPP Project) at the
+  same revision, and it is conveyed as GPL-3.0-or-later. Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
 - **PSPSDK / PSPDEV** — permissive per-component declarations and BSD-family
   notices for public ABI definitions and source-owned fixtures. The applicable
   notices are in `THIRD_PARTY_LICENSES/PSPSDK.txt` and `assets/upstream/`.
@@ -175,6 +186,15 @@ We aim to respond promptly and will remove material where appropriate.
   built for PNG only into the `nk_ui` core and the player, where it decodes the
   embedded prompt glyphs and the `ICON0.PNG` / `PIC1.PNG` read at run time from the
   user's own disc image; those images are kept in memory only.
+- **stb_vorbis 1.24** — Sean Barrett; upstream offers `MIT OR Unlicense`, and the
+  project uses it under the public-domain (Unlicense) alternative. The byte-identical
+  source, with both licence texts at its end, and the pinned manifest are under
+  `third_party/stb/`. It is built into the player only, where it decodes the optional
+  launcher music.
+- **"Chill lofi inspired" (`ChillLofi.ogg`)** — CC0-1.0, by omfgdude, from OpenGameArt
+  (`https://opengameart.org/content/chill-lofi-inspired`). The optional launcher music,
+  byte-identical to the upload, under `assets/music/launcher/` with its manifest; it ships
+  beside the player.
 - **Kenney "Input Prompts" 1.5 and "Interface Sounds" 1.0** — CC0-1.0, by Kenney
   (kenney.nl). The 32 prompt glyphs and three UI sounds the player uses, each pack's
   `License.txt` and the pinned manifest are under `third_party/kenney/`;

@@ -341,6 +341,10 @@ typedef struct {
     /* Sharp game text (glyph_recon.h, glyph_gpu.inc): the rebuilt glyph rectangles of this page, in
      * a host-only image beside the guest-resolution one. NULL until a draw's rectangle is rebuilt. */
     struct GlSet *gl;
+    /* Movie frames (#2111): the sequence number of the noted movie picture this entry's content was
+     * uploaded from (tex_movie_match), 0 when it is not one. */
+    uint64_t movie_seq;
+    uint64_t movie_clock;                  /* sr_movie_clock() when it was last matched */
     /* Host mip chain (tex_mips.h, Enhanced mips=on): `img` has hm_levels levels, 1.. built on the
      * host from level 0 by the first bind after a decode that the chain applies to, and hm_set
      * samples them all. `view` and `set` keep level 0 alone, so a draw the chain does not apply
@@ -436,6 +440,13 @@ typedef struct Target {
     VkImage rimg; VkDeviceMemory rmem;
     VkImageLayout rlayout;
     uint64_t cseq;                         /* s_write_seq of the image's last change (render_gen) */
+    /* Movie frames (#2111, SR_MOVIE_UPSCALE on): [mv_x0, mv_x1) x [mv_y0, mv_y1), in guest pixels, is
+     * the box of this frame's draws that sampled a noted movie picture (empty: none); mv_clock is
+     * sr_movie_clock() at the GE's last write to the image; mv_closed says the target was presented
+     * since its last write, so the next one starts a new frame's box. */
+    int mv_x0, mv_y0, mv_x1, mv_y1;
+    uint64_t mv_clock;
+    int mv_closed;
 } Target;
 
 /* Ordered destination reads (#2109). On the interlock path (sdl3vk.h SDL3VK_DST_READ_INTERLOCK)
@@ -954,6 +965,10 @@ static uint64_t s_write_seq = 0;
 static unsigned long s_cnt_readback = 0, s_cnt_upload = 0, s_cnt_dirty = 0;
 static unsigned long s_cnt_snap = 0, s_cnt_texup = 0, s_cnt_xferblit = 0;
 static unsigned long s_cnt_depth_commit = 0;   /* depth_readback_to_guest copies (rtt-1x-reads) */
+/* Movie pictures (#2111): texture uploads that were one, and presents handed to the movie
+ * upscaler because a drawn (tex) or decoded-into (target) picture covered the frame. */
+static unsigned long s_cnt_movie_tex, s_cnt_movie_present_tex, s_cnt_movie_present_target;
+static unsigned long s_cnt_movie_present_ge;   /* presents while a note was held that stayed GE frames */
 static uint64_t s_cnt_tex_invalidations = 0;
 static int s_tmpl_ok;   /* the cached state template (state_get) is current; defined below */
 
@@ -3155,7 +3170,8 @@ static void stats_emit(int final) {
     fprintf(stderr, "GEGPU stats: submits=%lu batches=%llu verts=%llu avg_batches=%.2f "
             "tris=%lu spr=%lu lines=%lu nonfinite=%lu tnl[prims=%lu tris=%lu] rtt=%lu snap=%lu "
             "present[gpu=%lu cpu=%lu] upload=%lu readback=%lu texup=%lu dirty=%lu xferblit=%lu pipes=%d texs=%d "
-            "shadow[invalidations=%llu checks=%llu hits=%llu misses=%llu bytes=%llu avoided=%llu required=%llu] final=%d\n",
+            "shadow[invalidations=%llu checks=%llu hits=%llu misses=%llu bytes=%llu avoided=%llu required=%llu] "
+            "movie[tex=%lu present_tex=%lu present_target=%lu present_ge_held=%lu dropped=%llu] final=%d\n",
             s_cnt_submit, (unsigned long long)s_cnt_batches, (unsigned long long)s_cnt_verts,
             s_cnt_submit ? (double)s_cnt_batches / (double)s_cnt_submit : 0.0,
             s_cnt_tri, s_cnt_spr, s_cnt_line, s_cnt_nonfinite, s_cnt_tnl_prims, s_cnt_tnl_tris,
@@ -3166,7 +3182,8 @@ static void stats_emit(int final) {
             (unsigned long long)s_cnt_shadow_checks, (unsigned long long)s_cnt_shadow_hits,
             (unsigned long long)s_cnt_shadow_misses, (unsigned long long)s_cnt_shadow_bytes,
             (unsigned long long)s_cnt_shadow_avoided, (unsigned long long)s_cnt_shadow_required,
-            final);
+            s_cnt_movie_tex, s_cnt_movie_present_tex, s_cnt_movie_present_target, s_cnt_movie_present_ge,
+            (unsigned long long)sr_movie_dropped(), final);
 }
 
 static void stats_tick(void) { stats_emit(0); }
@@ -5199,21 +5216,44 @@ static int tex_repl_find(const TexEnt *e, NkTexReplHit *hit, int *factor) {
     return 1;
 }
 
-/* Texture replacement (#1880), read once when the renderer starts: SR_TEX_REPLACE names the pack's
- * folder, SR_TEX_REPLACE_BUDGET_MB (1 to 8192, default 256) bounds the decoded images kept. Ace Mode
- * only, like texture scaling: an authentic run names the request and obeys nothing. Replacement
- * changes the committed frame, so it is guest-visible (docs/ENHANCEMENT_CONTRACT.md, section 11.3
- * "Texture Replacement") and says so at start until its launch-line keys exist. A pack that cannot
- * be read (gone, unreadable, not a regular file), or whose textures.ini or ZIP is malformed, is
- * refused whole: one TEX_REPLACE: refused line names why (the pack by its last path component only)
- * and the run goes on unreplaced, never waiting on the pack. An image that cannot be used later is
- * skipped on its own, noted, and counted in the exit line's skipped=. */
+/* Texture replacement (#1880), read once when the renderer starts. The launch line's texpack=on
+ * (src/rt/ace.h) turns it on and SR_TEX_REPLACE names the pack's folder or ZIP; the launcher exports
+ * both, and SR_TEX_REPLACE empty unless the line carries texpack=on, so an inherited value cannot opt
+ * a launch in. SR_TEX_REPLACE_BUDGET_MB (1 to 8192, default 256) bounds the decoded images kept. An
+ * authentic run, or an Enhanced or Ace run without texpack=on, names the request and reads no pack.
+ * Replacement changes the committed frame, so it is guest-visible (docs/ENHANCEMENT_CONTRACT.md,
+ * section 11.3.4) and says so at start. A pack that cannot be read (gone, unreadable, not a regular
+ * file), whose textures.ini or ZIP is malformed, or whose [games] list names other games only, is
+ * refused whole: one TEX_REPLACE: refused line names why (the pack by its last path component only),
+ * the report names texpack unavailable, and the run goes on unreplaced, never waiting on the pack.
+ * An image that cannot be used later is skipped on its own, noted, and counted in the exit line's
+ * skipped=. */
 static void tex_repl_init(int enhanced) {
     s_repl = NULL;
-    const char *dir = getenv("SR_TEX_REPLACE");
-    if (!dir || !dir[0]) return;
+    /* Read through the wide environment on Windows: the player names the folder in UTF-8 and the
+     * launcher passes it as UTF-16, which the narrow getenv would turn into code-page bytes. */
+    static char dir[4096];
+    const int named = nk_platform_env_utf8("SR_TEX_REPLACE", dir, sizeof(dir));
+    const int wanted = enhanced && ace_requested()->texpack;
+    if (named == 0 || (named > 0 && !dir[0])) {
+        if (wanted) {
+            fprintf(stderr, "TEX_REPLACE: refused (texpack=on, but SR_TEX_REPLACE names no pack)\n");
+            ace_feature_unavailable(ACE_FEATURE_TEXPACK, "no pack folder was named");
+        }
+        return;
+    }
     if (!enhanced) {
-        fprintf(stderr, "TEX_REPLACE: off (texture replacement needs Ace Mode)\n");
+        fprintf(stderr, "TEX_REPLACE: off (texture replacement needs Enhanced or Ace)\n");
+        return;
+    }
+    if (!wanted) {
+        fprintf(stderr, "TEX_REPLACE: off (the launch line does not carry texpack=on)\n");
+        return;
+    }
+    if (named < 0) {
+        fprintf(stderr, "TEX_REPLACE: refused (SR_TEX_REPLACE is longer than %u bytes or not valid text); "
+                        "the game runs without the pack\n", (unsigned)(sizeof(dir) - 1u));
+        ace_feature_unavailable(ACE_FEATURE_TEXPACK, "the pack folder's name could not be read");
         return;
     }
     uint64_t budget = 0;
@@ -5224,6 +5264,7 @@ static void tex_repl_init(int enhanced) {
         if (!end || *end || mb[0] < '0' || mb[0] > '9' || v < 1ul || v > 8192ul) {
             fprintf(stderr, "TEX_REPLACE: refused (SR_TEX_REPLACE_BUDGET_MB takes 1 to 8192); "
                             "the game runs without the pack\n");
+            ace_feature_unavailable(ACE_FEATURE_TEXPACK, "SR_TEX_REPLACE_BUDGET_MB takes 1 to 8192");
             return;
         }
         budget = (uint64_t)v << 20;
@@ -5232,8 +5273,23 @@ static void tex_repl_init(int enhanced) {
     s_repl = nk_texrepl_open(dir, budget, err, sizeof(err));
     if (!s_repl) {
         fprintf(stderr, "TEX_REPLACE: refused (%s); the game runs without the pack\n", err);
+        ace_feature_unavailable(ACE_FEATURE_TEXPACK, "the texture pack was refused");
         return;
     }
+    /* The player checks the pack's [games] list when it is chosen and before the launch; the
+     * runtime checks it again against the run's own disc, so a textures.ini swapped in between is
+     * not used for a game it does not name. A pack that names no game does not say, and is read. */
+    const char *disc = getenv("SR_DISC_ID");
+    if (nk_texrepl_names_game(s_repl, disc) == 0) {
+        fprintf(stderr, "TEX_REPLACE: refused (its textures.ini [games] names other games only, not %s); "
+                        "the game runs without the pack\n",
+                disc && disc[0] ? disc : "this run, which has no SR_DISC_ID");
+        ace_feature_unavailable(ACE_FEATURE_TEXPACK, "the texture pack is for other games");
+        nk_texrepl_close(s_repl);
+        s_repl = NULL;
+        return;
+    }
+    ace_confirm(ACE_FEATURE_TEXPACK);
     /* The copies' VRAM is the scaled-copy budget, which a refused SR_TEX_SCALE setting leaves at 0. */
     if (!nk_tex_scale_config()->budget_bytes) {
         NkTexScaleConfig c = *nk_tex_scale_config();
@@ -5245,9 +5301,8 @@ static void tex_repl_init(int enhanced) {
             kind[nk_texrepl_hash_kind(s_repl)], (unsigned long long)nk_texrepl_entry_count(s_repl),
             (unsigned long long)nk_texrepl_diag_count(s_repl),
             (unsigned long long)((budget ? budget : (uint64_t)NK_TEXREPL_DEFAULT_BUDGET_MB << 20) >> 20));
-    fprintf(stderr, "TEX_REPLACE: guest-visible, on through SR_TEX_REPLACE and not admitted under contract "
-                    "section 11.2 (each present commits the frame to guest VRAM; see the contract's "
-                    "\"Texture Replacement\" entry)\n");
+    fprintf(stderr, "TEX_REPLACE: guest-visible (contract section 11.3.4): each present commits the frame, "
+                    "with the pack's images in it, to guest VRAM\n");
     tex_repl_flush_notes();
 }
 
@@ -5720,6 +5775,140 @@ static void tex_xs_retry(TexEnt *e, uint32_t levels) {
     tex_xs_offer(e, e->hash, levels);
 }
 
+/* ---- Movie frames (#2111) ---------------------------------------------------------------------
+ * The renderer's half of movie provenance (ge_shared.h). With SR_MOVIE_UPSCALE on (gui.c turns
+ * tracking on), presenting a GE target is a movie frame, which the movie upscaler enlarges as it
+ * does a CPU-presented one, when its movie box covers at least half of the shown 480 x 272:
+ *   texture  draws since the target was last presented sampled a cache entry whose upload matched
+ *            a noted picture (tex_movie_match); the movie box is the union of their boxes, clipped
+ *            to the scissor and the shown area. A later GE draw, line, point or block transfer
+ *            whose box covers the whole movie box hides the movie and empties the box; one over
+ *            part of it (subtitles, a prompt) does not, nor does a software-drawn primitive,
+ *            whose box is not known.
+ *   target   the target holds a whole noted picture, written after the GE's last write to the image
+ *            (any draw, block transfer or software-drawn primitive) and unchanged since; a GE write
+ *            after it, even one pixel of UI, leaves the frame to the GE.
+ * The decision only picks the upscaler that enlarges the shown picture, in the window and in a
+ * recording: no pixel of the target, guest VRAM, a readback or a capture changes. */
+
+/* The noted picture the texture being uploaded shows (its sequence number), or 0: a direct-colour,
+ * unswizzled single level whose first texel is a pixel of a noted picture with the same stride and
+ * format, or that starts with a byte-exact copy of one (a game that copies the decoded picture into
+ * VRAM itself, as Hot Shots Tennis does for its opening movie), the picture unchanged since it was
+ * noted. A render target read back through the cache is not one. */
+static uint64_t tex_movie_match(uint32_t levels) {
+    if (!sr_movie_tracking() || s_tex_noscale || levels != 1u || s_ge->tex_fmt > 3u || s_ge->tex_swizzle)
+        return 0;
+#ifdef NK_MOVIE_MUTANT_NO_MATCH   /* the selftest's mutant: no texture is ever a movie picture */
+    return 0;
+#else
+    SrMoviePicture pic;
+    const uint32_t at = tex_canonical(s_ge->tex_addr);
+    if (!sr_movie_find_pixel(at, s_ge->tex_bufw, s_ge->tex_fmt, &pic, NULL, NULL) &&
+        !sr_movie_find_copy(at, s_ge->tex_bufw, s_ge->tex_fmt, (uint32_t)s_ge->tex_w, (uint32_t)s_ge->tex_h,
+                            &pic))
+        return 0;
+    s_cnt_movie_tex++;
+    return pic.seq;
+#endif
+}
+
+/* A cache hit on entry `e`: its content is unchanged, but a picture noted since it was matched
+ * (the decoder wrote the same bytes again), or the end of the note it matched, changes whether it
+ * is a movie picture. Matching again hashes the picture once per note. */
+static void tex_movie_refresh(TexEnt *e, uint32_t levels) {
+    if (!sr_movie_tracking()) { e->movie_seq = 0; return; }
+    if (e->movie_clock == sr_movie_clock() && (!e->movie_seq || sr_movie_alive(e->movie_seq))) return;
+    e->movie_seq = tex_movie_match(levels);
+    e->movie_clock = sr_movie_clock();
+}
+
+/* Whether draw `b` samples the cache entry tex_get last bound, and that entry was uploaded from a
+ * noted picture that is still held. */
+static int movie_draw_samples(const Batch *b) {
+    const uint32_t flags = (uint32_t)b->pc.cfg[0] >> 8;
+    const TexEnt *e = s_tex_cur;
+    if (!(flags & F_TEX) || (flags & F_CLEAR) || b->tsrc || b->tsnap || !e || !e->movie_seq) return 0;
+    /* Any of the entry's own sets: level 0, anisotropic, the scaled image, or the host mip chain
+     * (Enhanced mips=on binds hm_set for a transformed, linearly minified draw). */
+    if (!b->dset || (b->dset != e->set && b->dset != e->set_af && b->dset != e->xs.set &&
+                     b->dset != e->xs.set_af && !(e->hm_set && b->dset == e->hm_set)))
+        return 0;
+    return sr_movie_alive(e->movie_seq);
+}
+
+/* A GE write to target `t`: a draw (movie = movie_draw_samples), a block transfer (scissored = 0:
+ * the scissor does not limit it) or a software-drawn primitive, over [x0, x1) x [y0, y1) in guest
+ * pixels (an empty box when it is not known). Nothing happens with tracking off. */
+static void movie_note_write(Target *t, int movie, int scissored, float x0, float y0, float x1,
+                             float y1) {
+    if (!t || !sr_movie_tracking()) return;
+    if (t->mv_closed) {
+        t->mv_x0 = t->mv_y0 = t->mv_x1 = t->mv_y1 = 0;
+        t->mv_closed = 0;
+    }
+    t->mv_clock = sr_movie_clock();
+    const float cx0 = scissored ? fmaxf(0.0f, (float)s_ge->scis_x1) : 0.0f;
+    const float cy0 = scissored ? fmaxf(0.0f, (float)s_ge->scis_y1) : 0.0f;
+    const float cx1 = scissored ? fminf((float)DRAW_W, (float)s_ge->scis_x2 + 1.0f) : (float)DRAW_W;
+    const float cy1 = scissored ? fminf((float)FB_H, (float)s_ge->scis_y2 + 1.0f) : (float)FB_H;
+    x0 = fmaxf(x0, cx0); y0 = fmaxf(y0, cy0); x1 = fminf(x1, cx1); y1 = fminf(y1, cy1);
+    if (!(x0 < x1) || !(y0 < y1)) return;
+    const int ix0 = (int)floorf(x0), iy0 = (int)floorf(y0), ix1 = (int)ceilf(x1), iy1 = (int)ceilf(y1);
+    const int have = t->mv_x0 < t->mv_x1 && t->mv_y0 < t->mv_y1;
+    if (movie) {
+        if (!have) {
+            t->mv_x0 = ix0; t->mv_y0 = iy0; t->mv_x1 = ix1; t->mv_y1 = iy1;
+        } else {
+            if (ix0 < t->mv_x0) t->mv_x0 = ix0;
+            if (iy0 < t->mv_y0) t->mv_y0 = iy0;
+            if (ix1 > t->mv_x1) t->mv_x1 = ix1;
+            if (iy1 > t->mv_y1) t->mv_y1 = iy1;
+        }
+    } else if (have && x0 <= (float)t->mv_x0 && y0 <= (float)t->mv_y0 && x1 >= (float)t->mv_x1 &&
+               y1 >= (float)t->mv_y1) {
+        t->mv_x0 = t->mv_y0 = t->mv_x1 = t->mv_y1 = 0;
+    }
+}
+
+/* Whether the present of `t` about to happen shows a movie frame (1 texture, 2 target, 0 none). It
+ * closes the frame: the target's next write starts a new movie box, and presenting it again before
+ * then decides the same way. */
+static int movie_frame(Target *t) {
+    if (!sr_movie_tracking()) return 0;
+    const int64_t half = (int64_t)DRAW_W * FB_H / 2;
+    int kind = 0;
+    if (t->mv_x0 < t->mv_x1 && t->mv_y0 < t->mv_y1 &&
+        (int64_t)(t->mv_x1 - t->mv_x0) * (t->mv_y1 - t->mv_y0) >= half)
+        kind = 1;
+    SrMoviePicture pic;
+    const uint32_t bpp = t->fmt == 3u ? 4u : 2u, lo = SR_VRAM_CPU_BASE + t->fba;
+#ifdef NK_MOVIE_MUTANT_NO_MATCH   /* the selftest's mutant: no target holds a movie picture */
+    const int mutant = 1;
+#else
+    const int mutant = 0;
+#endif
+    if (!kind && !mutant && t->stride &&
+        sr_movie_find_in(lo, lo + t->stride * FB_H * bpp, t->stride, t->fmt, t->mv_clock, &pic)) {
+        const uint32_t off = (pic.addr - lo) / bpp;
+        const int64_t px = off % t->stride, py = off / t->stride;
+        const int64_t x1 = px + pic.width < DRAW_W ? px + pic.width : DRAW_W;
+        const int64_t y1 = py + pic.height < FB_H ? py + pic.height : FB_H;
+        if (px < x1 && py < y1 && (x1 - px) * (y1 - py) >= half) kind = 2;
+    }
+    t->mv_closed = 1;
+    if (!kind && sr_movie_held()) s_cnt_movie_present_ge++;
+    if (kind == 1) s_cnt_movie_present_tex++;
+    if (kind == 2) s_cnt_movie_present_target++;
+    return kind;
+}
+
+void gegpu_movie_counts(unsigned long *tex_matches, unsigned long *tex_frames, unsigned long *target_frames) {
+    if (tex_matches) *tex_matches = s_cnt_movie_tex;
+    if (tex_frames) *tex_frames = s_cnt_movie_present_tex;
+    if (target_frames) *target_frames = s_cnt_movie_present_target;
+}
+
 static VkDescriptorSet tex_get(void) {
     s_tex_bound_scale = 1;
     s_tex_bound_hm = 0;
@@ -5768,10 +5957,14 @@ static VkDescriptorSet tex_get(void) {
             if (sr_perf_enabled) sr_perf_texture_cache(1);
             e->pending = 1;
             if (xs_enabled()) tex_xs_retry(e, levels);
+            tex_movie_refresh(e, levels);   /* #2111 */
             return tex_bind_set(e, levels);
         }
         if (!e->content_valid && e->hash == hash && tex_shadow_matches(e)) {
             e->content_valid = 1;
+            /* A notified write left these bytes as they were; the picture may still have changed. */
+            e->movie_clock = ~sr_movie_clock();
+            tex_movie_refresh(e, levels);   /* #2111 */
             tex_note_valid();
             e->pending = 1;
             s_cnt_shadow_avoided++;
@@ -5792,6 +5985,8 @@ static VkDescriptorSet tex_get(void) {
         e->hash = hash;
         e->gen = ++s_tex_gen;
         e->content_valid = 1;
+        e->movie_seq = tex_movie_match(levels);
+        e->movie_clock = sr_movie_clock();
         tex_note_valid();
         tex_shadow_store(e);
         e->pending = 1;
@@ -5828,6 +6023,8 @@ static VkDescriptorSet tex_get(void) {
     tex_ent_set_ranges(e);
     tex_clean_forget(e);
     e->content_valid = 1;
+    e->movie_seq = tex_movie_match(levels);
+    e->movie_clock = sr_movie_clock();
     tex_note_valid();
     tex_shadow_store(e);
     e->pending = 1;
@@ -6923,6 +7120,7 @@ static int software_fallback_begin_counted(int forced, int counted) {
     if (s_nbatch&&!submit_pending()) return 1;
 
     Target *t=is_vram(s_ge->fbp)?target_find_by_fba(vram_off(s_ge->fbp)):NULL;
+    movie_note_write(t, 0, 1, 0.0f, 0.0f, 0.0f, 0.0f);   /* a GE write the GPU does not draw (#2111) */
     if (t&&t->gpu_valid) {
         s_replay_stats.fallback_readbacks[reason]++;
         (void)target_readback(t);
@@ -7189,6 +7387,7 @@ static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
         s_tri_state.target = s_cur;
         s_tri_state.batch = b;
     }
+    const int movie = movie_draw_samples(&b);   /* before smart 2D or a 1:1 draw rebinds the set */
     if (hm_level0_candidate(&b)) {
         const float x[3] = { A->x, B->x, C->x }, y[3] = { A->y, B->y, C->y };
         const float u[3] = { A->u, B->u, C->u }, v[3] = { A->v, B->v, C->v };
@@ -7226,6 +7425,8 @@ static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
     cpu_profile_vertex_done(vertex_started, 3);
     append(&b, first, 3);
     if (!s_wing_dst) {   /* a wing canvas draw is not the target's: no count, no HUD box */
+        movie_note_write(s_cur, movie, 1, fminf(A->x, fminf(B->x, C->x)), fminf(A->y, fminf(B->y, C->y)),
+                         fmaxf(A->x, fmaxf(B->x, C->x)), fmaxf(A->y, fmaxf(B->y, C->y)));
         s_cnt_tri++;
         if (g_ace_hud_on)
             ace_hud_draw(&b, fminf(A->x, fminf(B->x, C->x)), fminf(A->y, fminf(B->y, C->y)),
@@ -7317,6 +7518,7 @@ static int hook_tnl_prim(const GeTnlPrim *p) {
     }
     s_tnl_box[pi] = (TnlBox){ first, s_ntnl, p->box[0], p->box[1], p->box[2], p->box[3] };
     append(&b, first, nv);
+    movie_note_write(s_cur, 0, 1, p->box[0], p->box[1], p->box[2], p->box[3]);   /* #2111 */
     s_cnt_tnl_prims++;
     s_cnt_tnl_tris += p->ntri;
     return cpu_profile_hook_leave(1);
@@ -7373,6 +7575,7 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
      * pixel (sprite_nearest_axis), so its readback stays exact whatever its origin. */
     float ul = (p0->x <= p1->x) ? u0 : u1, ur = (p0->x <= p1->x) ? u1 : u0;
     float vt = (p0->y <= p1->y) ? v0 : v1, vbm = (p0->y <= p1->y) ? v1 : v0;
+    const int movie = movie_draw_samples(&b);   /* before smart 2D, a 1:1 draw or a glyph rebinds the set */
     if (hm_level0_candidate(&b) &&
         (nk_smart2d_sprite(xa, ya, xb, yb, ul, vt, ur, vbm) ||
          (fabsf(ur - ul) <= fabsf(xb - xa) && fabsf(vbm - vt) <= fabsf(yb - ya))))
@@ -7439,6 +7642,7 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
     cpu_profile_vertex_done(vertex_started, 6);
     append(&b, first, 6);
     if (!s_wing_dst) {
+        movie_note_write(s_cur, movie, 1, xa, ya, xb, yb);
         s_cnt_spr++;
         if (g_ace_hud_on) ace_hud_draw(&b, xa, ya, xb, yb);
     }
@@ -7537,6 +7741,8 @@ static int hook_line(const GeVtx *A, const GeVtx *B, int persp) {
         if (have) { run = px; run_len = 1; run_minor = minor; }
     }
     cpu_profile_vertex_done(vertex_started, verts);
+    movie_note_write(s_cur, 0, 1, floorf(fminf(A->x, B->x)), floorf(fminf(A->y, B->y)),   /* #2111 */
+                     floorf(fmaxf(A->x, B->x)) + 1.0f, floorf(fmaxf(A->y, B->y)) + 1.0f);
     s_cnt_line++;
     return cpu_profile_hook_leave(1);
 }
@@ -7562,6 +7768,7 @@ static int hook_point(const GeVtx *A, int persp) {
     put_vert(x0,        y0 + 1.0f, A->z, A->rw, A->u, A->v, A->fog, A->r, A->g, A->b, A->a);
     cpu_profile_vertex_done(vertex_started, 6);
     append(&b, first, 6);
+    movie_note_write(s_cur, 0, 1, x0, y0, x0 + 1.0f, y0 + 1.0f);   /* #2111 */
     s_cnt_line++;
     return cpu_profile_hook_leave(1);
 }
@@ -7766,6 +7973,7 @@ static int hook_xfer(uint32_t startdata) {
     if (!cmd_submit_wait(SR_PERF_GE_TRANSFER_BLIT)) return 0;
     dst->render_gen++; dst->cseq = ++s_write_seq;                       /* content changed (snapshot/present tracking) */
     target_note_drawn(dst, (int)dx, (int)dy, (int)(dx + w), (int)(dy + h));
+    movie_note_write(dst, 0, 0, (float)dx, (float)dy, (float)(dx + w), (float)(dy + h));
     if (g_ace_on) ace_note_target_draw(dst->fba);
     sr_vram_mark_renderer_pending();
     dst->lru = s_lru++;
@@ -8079,6 +8287,8 @@ int gegpu_present(uint32_t fbaddr, int fmt, uint32_t stride) {
      * then exist only in its image. Report it apart from the NOT_RESIDENT declines, where no
      * target owns a newer frame, so gui_present syncs guest VRAM only for this code (issue #827). */
     if (!target_prepare_present(t)) return GEGPU_PRESENT_TARGET_FAILED;
+    /* A movie frame (#2111) goes to the movie upscaler, as a CPU-presented frame does. */
+    sdl3vk_set_present_movie(movie_frame(t) != 0);
     s_cnt_present_gpu++;
     ts_note_present();
     stats_tick();
@@ -8861,6 +9071,12 @@ void gegpu_shutdown(void) {
      * object that a recorded command or descriptor can reference. */
     (void)vkDeviceWaitIdle(s_dev);
     stats_emit(1);
+    if (s_cnt_movie_tex || s_cnt_movie_present_tex || s_cnt_movie_present_target || s_cnt_movie_present_ge)
+        fprintf(stderr, "gegpu: movie frames (#2111): %lu presents of a drawn movie picture, %lu of one "
+                        "decoded into the target; %lu texture uploads were movie pictures; %lu presents "
+                        "while a picture was held stayed GE frames; %llu notes dropped\n",
+                s_cnt_movie_present_tex, s_cnt_movie_present_target, s_cnt_movie_tex, s_cnt_movie_present_ge,
+                (unsigned long long)sr_movie_dropped());
     pcache_close(1);   /* the device is idle: every pipeline this run made is in the cache */
     if (s_ts_on) {
         /* The device is idle: the recordings still marked in flight have their times too. */

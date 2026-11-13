@@ -228,6 +228,12 @@ typedef struct {
     uint32_t last_import_nid;
     uint32_t last_import_ret;
     uint32_t last_import_repeats;
+    /* An HLE service thread (sched_create_service_thread, #1139) runs this host function as its
+     * body instead of guest code at `entry`. NULL for every guest thread. */
+    SrSchedServiceBody service_body;
+    void    *service_arg;
+    int      service_waiting;     /* parked in sched_service_wait's delay, which a kick ends */
+    int      service_kicked;      /* kicked while not waiting: the next wait returns at once */
 } TCB;
 
 static TCB      s_tcb[MAXTHREADS];
@@ -2610,7 +2616,12 @@ static void coro_body(void *param) {
         if (sched_uid_is_worker(t->uid)) fprintf(stderr, "DISPATCH uid=0x%x entry=0x%08x\n", t->uid, t->entry);
         t->has_unwind_jmp = 1;
         if (setjmp(t->unwind_jmp) == 0) {
-            dispatch_from_host(s_cpu, t->entry);  /* runs until the thread returns or exits */
+            if (t->service_body) {
+                t->service_body(s_cpu, t->service_arg);   /* a host body: until it returns */
+                s_cpu->r[2] = 0u;
+            } else {
+                dispatch_from_host(s_cpu, t->entry);  /* runs until the thread returns or exits */
+            }
         } else {
             /* longjmp path: sched_unwind_current() was called from recomp.c.
              * The C frames of any in-flight nested host->guest call were
@@ -2649,8 +2660,9 @@ static void coro_body(void *param) {
             /* The kernel runs a module's module_start in a thread of its own and deletes
              * that thread, freeing its stack, once module_start returns: measured on a
              * PSP-3000 (6.61, PSP-MODULE-START-001), where the returned thread's UID answers
-             * UNKNOWN_THID and the user partition gains exactly its 256 KiB stack. */
-            if (t->module_start) sched_exit_current_delete((int32_t)s_cpu->r[2]);
+             * UNKNOWN_THID and the user partition gains exactly its 256 KiB stack. A service
+             * thread is deleted the same way when its body returns (sched_create_service_thread). */
+            if (t->module_start || t->service_body) sched_exit_current_delete((int32_t)s_cpu->r[2]);
             else sched_exit_current((int32_t)s_cpu->r[2]);
         } else {
             fprintf(stderr, "coro_body: uid=0x%x returned outside its own schedule slot "
@@ -2839,6 +2851,62 @@ uint32_t sched_create_thread(uint32_t entry, int priority, uint32_t stack_size) 
 void sched_mark_code_pointer_entry(uint32_t uid) {
     TCB *t = tcb_by_uid(uid);
     if (t) t->entry_code_pointer = 1;
+}
+
+/* ---- HLE service threads (#1139) --------------------------------------------------------
+ * A firmware library that runs a thread of its own, such as sceNetAdhocctl's, which calls the
+ * game's handlers, is modelled by a kernel thread whose body is a host function. It is a thread
+ * like any other: a TCB with a stack from the arena, a name, a priority, the creator's $gp, a
+ * place in the thread listings, and the CPU only when the scheduler picks it. Its body waits in
+ * sched_service_wait and calls guest code through hle.c's scoped dispatch on its own CpuState.
+ * When the body returns, the thread exits and is deleted. */
+uint32_t sched_create_service_thread(const char *name, int priority, uint32_t stack_size,
+                                     SrSchedServiceBody body, void *arg) {
+    if (!body) return 0x80020192u;                 /* SCE_KERNEL_ERROR_ILLEGAL_ENTRY */
+    /* The kernel's checks for a user thread, in h_CreateThread's order (hle_kernel_thread.c):
+     * a priority of 8..0x77, then a stack of at least 0x200 bytes. The thread runs user code
+     * (the game's handlers), so the user-thread rules apply. */
+    if (priority < 8 || priority > 0x77) return SCE_KERNEL_ERROR_ILLEGAL_PRIORITY;
+    if (stack_size < 0x200u) return 0x80020194u;  /* SCE_KERNEL_ERROR_ILLEGAL_STACK_SIZE */
+    const uint32_t uid = sched_create_thread_ex(0u, priority, stack_size, 0u, name);
+    if (!uid) return SCE_KERNEL_ERROR_NO_MEMORY;
+    TCB *t = tcb_by_uid(uid);
+    t->service_body = body;
+    t->service_arg = arg;
+    const uint32_t started = sched_start_thread(uid, 0u, 0u);   /* a new thread is DORMANT: 0 */
+    return started == 0u ? uid : started;
+}
+
+/* On a service thread: wait until guest time reaches deadline_us (SCHED_WAIT_FOREVER: no
+ * deadline) or another thread kicks it. The wait is a delay, so the thread lists as delayed. */
+void sched_service_wait(uint64_t deadline_us) {
+    if (s_cur < 0 || !s_tcb[s_cur].service_body) return;
+    TCB *t = &s_tcb[s_cur];
+    if (t->service_kicked) {
+        t->service_kicked = 0;
+        return;
+    }
+    vtime_refresh();
+    if (deadline_us != SCHED_WAIT_FOREVER && s_vtime_us >= deadline_us) return;
+    t->service_waiting = 1;
+    sched_delay_current(deadline_us == SCHED_WAIT_FOREVER ? SCHED_WAIT_FOREVER
+                                                          : deadline_us - s_vtime_us);
+    t->service_waiting = 0;
+    t->service_kicked = 0;   /* the body re-reads its state after every wait */
+}
+
+/* Ends a service thread's wait now, or, when it is not in one (running, ready, or inside a
+ * guest call that blocked), makes its next wait return at once. A guest delay inside a handler
+ * is never cut short. */
+void sched_service_kick(uint32_t uid) {
+    TCB *t = tcb_by_uid(uid);
+    if (!t || !t->service_body || t->state == TH_DORMANT) return;
+    if (t->service_waiting && t->state == TH_WAIT_DELAY) {
+        vtime_refresh();
+        t->wake = s_vtime_us;   /* due now: the next scheduling decision promotes it */
+    } else {
+        t->service_kicked = 1;
+    }
 }
 
 /* Continuation of sched_create_thread: stack/UID seeding + libc/reent registration.

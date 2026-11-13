@@ -100,6 +100,10 @@ typedef struct {
        two sizes agree at compile time. */
     char ace_spec[384];
     char ace_report_path[NK_MAX_PATH];
+    /* The title's texture pack (docs/ENHANCEMENT_CONTRACT.md 10.12), exported as SR_TEX_REPLACE
+       only while ace_spec carries texpack=on, and empty otherwise, so an inherited folder can
+       never reach a launch. */
+    char texpack_dir[NK_MAX_PATH];
     /* The console nickname the player chose (#2197, src/core/nk_nickname.h), always exported as
        SR_NICKNAME so an inherited value cannot name the console. The runtime re-validates it
        and serves NK_NICKNAME_DEFAULT, with a log line, for an empty or invalid value. */

@@ -105,9 +105,13 @@ player-ui-tests: osk-overlay-paint-selftest ui-font-selftest nk-ui-player-screen
 		-o $(BUILD_ROOT)/test_ui_clip$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_ui_clip$(EXE_EXT)
 	$(CC) -std=c99 -Wall -Wextra -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(PLAYER_INCLUDES) $(LDFLAGS) tests/native/test_player_ui_art.c \
-		$(NK_UI_PLAYER_HOST_SRCS) src/ui/nk_ui_image.c src/ui/nk_ui_assets.c -lSDL3 \
+		$(NK_UI_PLAYER_HOST_SRCS) src/ui/nk_ui_image.c src/ui/nk_ui_assets.c -lSDL3 -lm \
 		-o $(BUILD_ROOT)/test_player_ui_art$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_player_ui_art$(EXE_EXT)
+	$(CC) -std=c99 -O2 -Wall -Wextra -Werror -DPLAYER_UI_MUSIC_TEST_SEAMS -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(PLAYER_INCLUDES) $(LDFLAGS) \
+		tests/native/test_player_ui_music.c src/player/ui/player_ui_music.c src/player/ui/player_ui_vorbis.c -lSDL3 -lm \
+		-o $(BUILD_ROOT)/test_player_ui_music$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_player_ui_music$(EXE_EXT) assets/music/launcher/ChillLofi.ogg
 
 .PHONY: nk-ui-player-screens-capture
 ifeq ($(SDL3_TTF_AVAILABLE),yes)
@@ -164,6 +168,35 @@ ed25519-verify-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(call ED25519_VERIFY_SELFTEST_CMD)
 
+# The ad hoc relay's wire format (src/core/nk_adhoc_relay.c, #1139): every lobby and relay packet
+# byte by byte, PPSSPP's login checks, partial and refused input, and the port offset. No socket
+# and no network.
+RELAY_CODEC_SELFTEST_SRCS := src/core/nk_adhoc_relay.c tests/native/test_nk_adhoc_relay.c
+define RELAY_CODEC_SELFTEST_CMD
+	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/core $(RELAY_CODEC_SELFTEST_SRCS) \
+		-o $(BUILD_ROOT)/test_nk_adhoc_relay$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_nk_adhoc_relay$(EXE_EXT)
+endef
+
+# The ad hoc transport seam and its in-process medium (src/core/nk_adhoc_net.c, #1139 phase 2): a
+# console alone and simulated consoles in one process, under the lobby rules of PPSSPP's ad hoc
+# server, which the medium's lobby is translated from. No socket and no network.
+ADHOC_NET_SELFTEST_SRCS := src/core/nk_adhoc_net.c src/core/nk_adhoc_relay.c tests/native/test_nk_adhoc_net.c
+define ADHOC_NET_SELFTEST_CMD
+	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/core $(ADHOC_NET_SELFTEST_SRCS) \
+		-o $(BUILD_ROOT)/test_nk_adhoc_net$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_nk_adhoc_net$(EXE_EXT)
+endef
+
+.PHONY: adhoc-net-selftest
+adhoc-net-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(call ADHOC_NET_SELFTEST_CMD)
+
+.PHONY: relay-codec-selftest
+relay-codec-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(call RELAY_CODEC_SELFTEST_CMD)
 # The console nickname rule (#2197, src/core/nk_nickname.h) that the player's Nickname setting
 # and the runtime's SR_NICKNAME share: the default, the 32-byte cap and the refused values.
 define NK_NICKNAME_SELFTEST_CMD
@@ -527,10 +560,15 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 		tests/native/test_input_profile.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_input_profile$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_input_profile$(EXE_EXT)
 	$(call ED25519_VERIFY_SELFTEST_CMD)
+	$(call RELAY_CODEC_SELFTEST_CMD)
+	$(call ADHOC_NET_SELFTEST_CMD)
 	$(call ACHIEVEMENTS_SELFTEST_CMD)
 	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_portable_mode.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_portable_mode$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_portable_mode$(EXE_EXT)
+	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
+		tests/native/native_test_isolation.c tests/native/test_data_migrate.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_data_migrate$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_data_migrate$(EXE_EXT)
 ifeq ($(OS),Windows_NT)
 	$(CC) -std=c99 -Wall -Wextra tests/native/argv_echo_helper.c -lshell32 -o $(BUILD_ROOT)/argv_echo_helper$(EXE_EXT)
 	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \

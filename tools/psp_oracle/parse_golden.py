@@ -1778,6 +1778,19 @@ _register_campaign_probe(
         "volatile-lock-before": 2,
     },
 )
+# hle-io-trunc (#1892): what PSP_O_TRUNC shows through the same and a second descriptor on the
+# Memory Stick. Every word is an observation (see probe_hle_measure.c for each cell's layout).
+_register_campaign_probe(
+    "hle-io-trunc", "PSP-HLE-IO-TRUNC-001",
+    ("trunc-open-view", "trunc-seek-read", "trunc-seek-write", "trunc-close-nowrite",
+     "trunc-recover-after-close", "two-fd-view", "two-fd-writer-survives",
+     "two-fd-trunc-writes-last", "remove-absent"),
+    {
+        "trunc-open-view": 7, "trunc-seek-read": 3, "trunc-seek-write": 11,
+        "trunc-close-nowrite": 11, "trunc-recover-after-close": 10, "two-fd-view": 17,
+        "two-fd-writer-survives": 16, "two-fd-trunc-writes-last": 13, "remove-absent": 2,
+    },
+)
 # hle-savedata-nodata (180, probe_hle_measure.c): savedata modes on a save that does not exist
 # (nodir), a save directory without PARAM.SFO (nosfo) and a probe-made save (data), then LOAD
 # and DELETE of the missing save last. Each dialog cell carries InitStart's return and 11
@@ -2883,6 +2896,51 @@ _register_campaign_probe(
     {case: (9 if case.endswith("-draw") else 16) for case in GE_RASTER_CASES},
 )
 
+# ge-raster-bounds (187, probe_ge_sample.c): #2193's raster bounds cells. First `display-check`
+# (9 words: the display buffer, whether it overlaps the probe's VRAM block, whether the GE idled);
+# when it is SKIP every later record is SKIP with the same word count. Then per cell of the
+# grb_cells table, in order: one `-draw` record (9 words: the probe's own list's wait outcome,
+# the list length, fbw and zbw), then the cell's reads of the grb_reads table in order, each a summary (8 words:
+# the pixel count; the drawn, cleared, fill and other counts; the first other value and its
+# index; the first pixel) or 16 raw pixels. After the last cell, `vram-restore` (2 words).
+GE_RASTER_BOUNDS_READS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] = (
+    ("raster-512-x511", (("all", 8), ("c480", 8), ("row16", 8), ("r0-x496", 16))),
+    ("raster-500-x511", (("all", 8), ("r15-x488", 8), ("row16-x0", 8), ("row16-x12", 8),
+                         ("r16-x0", 16))),
+    ("raster-256-x479", (("all", 8), ("rows100to109", 8), ("row110-x0", 8),
+                         ("row110-x224", 8), ("row99", 8), ("row111", 8), ("r110-x216", 16))),
+    ("depth-zbw256-past", (("z-all", 8), ("z-row0", 8), ("z-rows1to10", 8),
+                           ("z-rows11to271", 8), ("z-row272", 8), ("c-all", 8),
+                           ("c-sprite", 8), ("z-r1-x0", 16), ("z-r10-x240", 16))),
+    ("depth-clear-scissor", (("z-all", 8), ("z-in", 8), ("z-out", 8), ("c-all", 8),
+                             ("z-r0-x92", 16), ("z-r271-x92", 16))),
+)
+GE_RASTER_BOUNDS_CELLS = tuple(cell for cell, _reads in GE_RASTER_BOUNDS_READS)
+GE_RASTER_BOUNDS_ROWS = (
+    ("display-check", 9),
+    *(row for cell, reads in GE_RASTER_BOUNDS_READS
+      for row in ((f"{cell}-draw", 9), *((f"{cell}-{read}", count) for read, count in reads))),
+    ("vram-restore", 2),
+)
+GE_RASTER_BOUNDS_CASES = tuple(case for case, _count in GE_RASTER_BOUNDS_ROWS)
+_register_campaign_probe(
+    "ge-raster-bounds", "PSP-GE-RASTER-002", GE_RASTER_BOUNDS_CASES, dict(GE_RASTER_BOUNDS_ROWS),
+)
+
+# ge-depth-round (188, probe_ge_sample.c): #343's depth rounding cells in the ge-raster window
+# and record shape. Per cell of the gdr_cells table, in order: one `-draw` record (9 words, as
+# ge-raster's), one record per window row y 0..3 (16 pixels) and one `-pass` record (4 words:
+# the pass mask of pixels 0..31 and 32..63, the kept and the other counts).
+GE_DEPTH_ROUND_CELLS = ("zr-thru-eq", "zr-thru-gt", "zr-xf-eq")
+GE_DEPTH_ROUND_CASES = tuple(
+    case for cell in GE_DEPTH_ROUND_CELLS
+    for case in (f"{cell}-draw", *(f"{cell}-r{y}" for y in GE_RASTER_ROWS), f"{cell}-pass"))
+_register_campaign_probe(
+    "ge-depth-round", "PSP-GE-RASTER-003", GE_DEPTH_ROUND_CASES,
+    {case: 9 if case.endswith("-draw") else 4 if case.endswith("-pass") else 16
+     for case in GE_DEPTH_ROUND_CASES},
+)
+
 # ge-mip (126, probe_ge_sample.c): the #1373 GE level-of-detail cells. The cells are the gm_cells
 # table of the block probe_ge_sample.c shares with tests/native/hle_thread_selftest.c, in order, with
 # the ge-raster record shape: one `-draw` record (9 words) and one record per window row.
@@ -3009,13 +3067,14 @@ _register_campaign_probe(
 
 # vcodec-words (160, probe.c): the #286 (W-LLE-1) Media Engine boundary words. The fixed sequence
 # run_vcodec_words emits on every path (a call that was not made keeps its record's shape, status
-# SKIP): the load record; per codec type 0 and 1 the zero-filled context through Open, GetEDRAM,
-# Init and SetMemory (three 32-word chunks of the 96-word context each) and its teardown; per
-# picture width 480 (d480) and 464 (d464) the sceMpegCreate context, three decoded access units
-# with their output structs and band summaries, AU a0's eight band buffers in 120-word chunks,
-# for d480 the CscInit and CscAvc cells (four pixel modes, the first 8192 bytes of each in 128-word
-# chunks) and the teardown; the five CheckNeedMem cells; the unload record. Every step record is
-# 34 words (return, microseconds, 32 context words).
+# SKIP): the load record; for codec type 0 the zero-filled context through Open, GetEDRAM, Init
+# and SetMemory (three 32-word chunks of the 96-word context each) and its teardown; per picture
+# width 480 (d480) and 464 (d464) the sceMpegCreate context, three decoded access units with their
+# output structs and band summaries, AU a0's eight band buffers in 120-word chunks, for d480 the
+# CscInit and CscAvc cells (four pixel modes, the first 8192 bytes of each in 128-word chunks) and
+# the teardown; the type 1 cells, after the decode contexts because type 1's Open is refused on a
+# PSP-3000 (boot 149); the five CheckNeedMem cells; the unload record. Every step record is 34
+# words (return, microseconds, 32 context words).
 VCODEC_STEP_WORDS = 34
 VCODEC_CHUNK_WORDS = 120
 # Chunk records per band: 4 luma bands of 32640 bytes and 4 chroma bands of 16320 bytes.
@@ -3059,9 +3118,9 @@ def _vcodec_decode_rows(tag: str, with_csc: bool) -> tuple[tuple[str, int], ...]
 VCODEC_WORDS_ROWS = (
     ("vc-load", 5),
     *_vcodec_type_rows(0),
-    *_vcodec_type_rows(1),
     *_vcodec_decode_rows("d480", True),
     *_vcodec_decode_rows("d464", False),
+    *_vcodec_type_rows(1),
     *((f"vc-ac-{cell}", 67) for cell in VCODEC_AC_CELLS),
     ("vc-unload", 5),
 )
@@ -3415,6 +3474,7 @@ HLE_MACHINERY_STATUS_CASES = frozenset({
     "hle-vtimer-unit", "hle-vtimer-errors", "hle-kernel-pool-bounds", "hle-power-float-v0",
     "hle-null-out-pointers", "hle-audio-src", "hle-timer-order", "hle-savedata-getsize",
     "hle-savedata-nodata",
+    "hle-io-trunc",
 })
 VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: Cases whose every cell is an unconditional observation: each record is PASS. hle-io-seek,

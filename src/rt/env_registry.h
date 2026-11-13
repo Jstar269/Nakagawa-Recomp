@@ -62,7 +62,7 @@
     X("SR_DETERMINISTIC_CLOCK", "string", "empty (off)", "sched.c", "1 makes guest time follow the guest work, not the host clock; empty or 0 keeps the paced or turbo clock. 1 with SR_NOVBPACE=0 is rejected.") \
     X("SR_DETERMINISTIC_SLICE_US", "number", "100", "sched.c", "Guest microseconds the deterministic clock charges per scheduler boundary; a value outside 1..100000 or not a number is rejected.") \
     X("SR_DEVELOPER_MODE", "flag-nonzero", "off", "gpu_sdl3vk/sdl3vk.c", "Marks a hand-started run as a developer run in the SDL3 Vulkan presenter.") \
-    X("SR_DISC_ID", "string", "unset", "gui.c,hle_display.c,replay_checkpoint.c", "Disc identifier string set by the launcher: shown in the in-game pause overlay and used in screenshot file names.") \
+    X("SR_DISC_ID", "string", "unset", "gui.c,hle_display.c,replay_checkpoint.c,gpu_sdl3vk/ge_gpu.c", "Disc ID set by the launcher: pause overlay, screenshot names, and the texture pack [games] check (a pack listing only other games is refused).") \
     X("SR_DISPLOG", "flag-presence", "off", "guest_interp.c,recomp.c", "Logs each guest dispatch with target, source pc and return address to stderr.") \
     X("SR_DLGLOG", "flag-presence", "off", "debug.h,hle_utility.c,savedata.c", "Prints diagnostic lines to stderr for utility dialogs and savedata dialog calls.") \
     X("SR_EXEC_SHARE_JSON", "path", "unset (no JSON written)", "perf.c", "File to which the execution-share profile is written as JSON at exit.") \
@@ -158,7 +158,7 @@
     X("SR_MEMSTICK", "path", "memstick", "hle_thread_selftest.c,vfs_path.h", "Host directory that serves as the guest ms0: memory stick root.") \
     X("SR_MISS_SEEDS", "path", "unset (no file written)", "perf.c", "File to which the run's distinct dispatch-miss targets are written at exit, one guest address per line, for tools/miss_seeds.py.") \
     X("SR_MODULE_DIR", "path", "place_game_here/EXTRACTED/decrypted", "hle_kernel_module.c,hle_thread_selftest.c", "Directory holding the decrypted guest modules the runtime loads.") \
-    X("SR_MOVIE_UPSCALE", "string", "off", "gui.c", "Movie upscaler for CPU-presented frames: off, fsr1 or anime4k (Anime4K CNN x2 stages, then FSR 1); presentation only.") \
+    X("SR_MOVIE_UPSCALE", "string", "off", "gui.c", "Movie upscaler for movie frames (CPU-presented, or GE frames showing a decoded movie): off, fsr1 or anime4k (Anime4K CNN x2, then FSR 1); presentation only.") \
     X("SR_MPEGAV", "flag-presence", "off", "hle.c", "Enables MPEG/PSMF audio-video sync logging (also enabled by SR_MPEGLOG).") \
     X("SR_MPEGLOG", "flag-presence", "off", "debug.h,h264_ffmpeg.c,h264_mf.c,hle.c,hle_mpeg.c,mpeg.c", "Enables MPEG and H.264 decoder diagnostic logging in the video and MPEG HLE code.") \
     X("SR_MSGLOG", "flag-presence", "off", "hle_kernel_sync.c", "When set, logs message pipe creation and calls to stderr.") \
@@ -231,7 +231,7 @@
     X("SR_TEST_GUEST_MODULE_LOAD", "string", "unset: the test returns immediately", "hle_thread_selftest.c", "Selects the mode of the guest-module-load binding self-test.") \
     X("SR_TEXDUMP", "flag-presence", "off", "ge.c", "When set, enables texture dumping.") \
     X("SR_TEXDUMP_AFTER", "number", "0", "ge.c", "First GE frame from which textures are dumped when SR_TEXDUMP is set.") \
-    X("SR_TEX_REPLACE", "path", "unset", "gpu_sdl3vk/ge_gpu.c", "Folder of a PPSSPP-layout texture replacement pack (textures.ini, hash-named PNGs) the Vulkan GE draws guest textures from; Ace only.") \
+    X("SR_TEX_REPLACE", "path", "unset", "gpu_sdl3vk/ge_gpu.c", "Texture pack folder (PPSSPP layout) the Vulkan GE reads when the SR_ACE line carries texpack=on; the launcher always exports it, empty unless the pack is on.") \
     X("SR_TEX_REPLACE_BUDGET_MB", "number", "256", "gpu_sdl3vk/ge_gpu.c", "Host memory, in MiB, for the replacement pack's decoded images; past it the least recently used is dropped.") \
     X("SR_TEX_SCALE", "string", "off", "gpu_sdl3vk/tex_scale.c", "off or 2-6: the xBRZ factor host copies of guest textures are scaled by in the Vulkan GE texture cache; Ace Mode only.") \
     X("SR_TEX_SCALE_BUDGET_MB", "number", "512", "gpu_sdl3vk/tex_scale.c", "GPU memory, in MiB, the scaled texture copies may use; past it a texture is drawn unscaled.") \

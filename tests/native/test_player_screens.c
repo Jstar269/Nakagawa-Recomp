@@ -65,7 +65,8 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_TWIN] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_SSAA] = ENHANCED_WORDS(k_enhanced_ssaa_labels),
-    [PLAYER_PART_MIPS] = ENHANCED_WORDS(k_enhanced_switch_labels)};
+    [PLAYER_PART_MIPS] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_TEXPACK] = ENHANCED_WORDS(k_enhanced_switch_labels)};
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
 enum { ENHANCED_MAX_WORDS = 5 };
@@ -469,16 +470,20 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.scaling = "Sharp";
     settings.preset = "Medium";
     if (which == FLOW_SETTINGS_PRESET) {
-        /* High chosen (#2150): the notice line names the Enhanced parts it sets. The note is
-           player_app_graphics_preset_note's for High, the longest a preset writes. */
-        settings.preset = "High";
-        settings.preset_notice = "High is used in Enhanced and Ace, with crisp text on and FSR 1 "
-                                 "off. Authentic uses your settings.";
+        /* Ultra chosen (#2150, #2280): the notice line names the Enhanced parts it sets. The note
+           is player_app_graphics_preset_note's for Ultra, the longest a preset writes. */
+        settings.preset = "Ultra";
+        settings.preset_notice =
+            "Ultra is used in Enhanced and Ace, with crisp text, FSR 1 and full 32-bit colour "
+            "on. Authentic uses your settings.";
     }
     settings.vsync = true;
     /* The refresh-rate advisory case runs on a 144 Hz display; the rest on 60 Hz. */
     settings.display_refresh_hz = which == FLOW_SETTINGS_REFRESH ? 144.0 : 60.0;
     settings.volume = 80;
+    /* Launcher music (#2207): off, the default, at its default level. */
+    settings.launcher_music_value = "Off";
+    settings.music_volume = 80;
     settings.controller_line = "keyboard and mouse";
     settings.saves_folder = "C:/synthetic/Nakagawa/saves";
     /* Off, the default; its own case has the stored setting On (#2007). */
@@ -3206,6 +3211,12 @@ static void test_settings_pages(void) {
          "plus raises the volume"},
         {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_UI_SOUNDS, PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS,
          "the menu sounds button toggles them"},
+        {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_LAUNCHER_MUSIC,
+         PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC, "the launcher music button toggles it"},
+        {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_DOWN,
+         PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN, "minus lowers the music volume"},
+        {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP, PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP,
+         "plus raises the music volume"},
         {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_ACCESSIBILITY,
          PLAYER_UI_SETTINGS_OPEN_ACCESSIBILITY, "Accessibility opens its page"},
         {FLOW_SETTINGS_ACCESSIBILITY, PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE,
@@ -3320,11 +3331,12 @@ static void test_settings_pages(void) {
           "Settings on a 60 Hz display shows no refresh-rate advisory");
     CHECK(flow_case_fits(FLOW_SETTINGS_PRESET, 960, 540, dump, sizeof(dump)),
           "Settings with a graphics preset's note fits 960 x 540");
-    CHECK(strstr(dump, "High is used in Enhanced and Ace, with crisp text on and FSR 1") != NULL &&
+    CHECK(strstr(dump, "Ultra is used in Enhanced and Ace, with crisp text, FSR 1 and full 32-bit "
+                       "colour on. Authentic uses your settings.") != NULL &&
               strstr(dump, "Changes are saved as you make them") == NULL,
           "a graphics preset's note takes the Settings notice line");
-    CHECK(strstr(dump, "\"HIGH\"") != NULL,
-          "the graphics preset row says High");
+    CHECK(strstr(dump, "\"ULTRA\"") != NULL,
+          "the graphics preset row says Ultra");
     CHECK(dump_flow_case(FLOW_SETTINGS, dump, sizeof(dump)) &&
               strstr(dump, "Changes are saved as you make them") != NULL &&
               strstr(dump, "is used in Enhanced and Ace") == NULL,
@@ -3398,6 +3410,15 @@ static void test_settings_pages(void) {
     CHECK(PLAYER_UI_ID_ENHANCED_PART(14) == 0x4681u &&
               PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_MIPS) == 0x4681u && PLAYER_PART_COUNT >= 15,
           "the part rows' ids: the 15th in the second range, after the 14th");
+    /* The 16th (Texture pack, #1880) follows Smooth far textures, at 0x4682; 1200 tall shows its row. */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(15) == 0x4682u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_TEXPACK) == 0x4682u && PLAYER_PART_COUNT >= 16,
+          "the part rows' ids: the 16th in the second range, after the 15th");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1200, dump, sizeof(dump)) &&
+              strstr(dump, "\"SMOOTH FAR TEXTURES: OFF\"") != NULL &&
+              strstr(dump, "\"TEXTURE PACK: OFF\"") != NULL &&
+              strstr(dump, "Draws the texture pack") != NULL,
+          "Settings > Enhanced shows the Texture pack row after Smooth far textures");
     for (unsigned i = 0u; i < PLAYER_PART_COUNT; ++i) {
         PlayerUiAction part =
             activate_flow_button(PLAYER_UI_ID_ENHANCED_PART(i), FLOW_SETTINGS_ACE);

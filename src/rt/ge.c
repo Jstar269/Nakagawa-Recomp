@@ -816,6 +816,230 @@ void sr_gpu_vram_dirty(uint32_t addr, uint32_t bytes) {
     if (s_gpu && s_gpu->vram_dirty) s_gpu->vram_dirty(addr, bytes);
 }
 
+/* ---- Movie provenance (#2111; the contract is in ge_shared.h) ------------------------------ */
+
+static int s_movie_tracking;
+static uint64_t s_movie_clock;
+static SrMoviePicture s_movie_notes[SR_MOVIE_NOTES];   /* seq 0: an empty slot */
+
+static uint32_t movie_bpp(uint32_t fmt) { return fmt == 3u ? 4u : 2u; }
+
+/* The picture's canonical first byte and its span's length (first pixel to last), or 0 when it is
+ * not one plain guest span: out of range, through a swizzled VRAM view, or not a GE picture. */
+static int movie_span(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t width, uint32_t height,
+                      uint32_t *canon, uint32_t *bytes) {
+    if (fmt > 3u || !width || !height || width > stride || stride > 1024u || height > 1024u) return 0;
+    const uint64_t bpp = movie_bpp(fmt), pitch = (uint64_t)stride * bpp;
+    const uint64_t total = (uint64_t)(height - 1u) * pitch + (uint64_t)width * bpp;
+    if (total > UINT32_MAX || !sr_inrange_n(addr, (uint32_t)total) ||
+        sr_guest_span_hits_swizzled_vram_mirror(addr, (uint32_t)total))
+        return 0;
+    *canon = sr_vram_cpu_address(addr);
+    *bytes = (uint32_t)total;
+    return 1;
+}
+
+static uint32_t movie_note_bytes(const SrMoviePicture *n) {
+    const uint32_t bpp = movie_bpp(n->fmt);
+    return (n->height - 1u) * n->stride * bpp + n->width * bpp;
+}
+
+/* A change detector over the picture's rows, seeded with its shape: FNV-1a's prime a 64-bit word at
+ * a time, each multiply followed by a fold of the high half into the low (so a difference in any bit,
+ * bit 63 included, reaches every later step and two differences do not cancel), then the tail bytes.
+ * Every byte of every row counts; the bytes between rows (stride past width) do not. It is
+ * probabilistic: equal hashes say the bytes are very likely unchanged, never that two pictures are
+ * equal (sr_movie_find_copy compares bytes). The span is checked, not prepared: preparing would pull
+ * GE writes held only in the GPU's image back into guest VRAM, which the guest can see. */
+uint64_t sr_movie_rows_hash(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t width,
+                            uint32_t height) {
+    uint32_t canon, bytes;
+    if (!movie_span(addr, stride, fmt, width, height, &canon, &bytes)) return 0;
+    if (!sr_guest_span_readable(canon, bytes)) return 0;
+    const uint64_t prime = 1099511628211ull;
+    const uint32_t bpp = movie_bpp(fmt), row = width * bpp, pitch = stride * bpp;
+    uint64_t h = 1469598103934665603ull;
+    h ^= ((uint64_t)stride << 40) | ((uint64_t)fmt << 32) | ((uint64_t)width << 16) | height;
+    h *= prime;
+    for (uint32_t y = 0; y < height; y++) {
+        const uint8_t *p = (const uint8_t *)SR_HOST(canon + y * pitch);
+        uint32_t i = 0;
+        for (; i + 8u <= row; i += 8u) {
+            uint64_t w;
+            memcpy(&w, p + i, 8u);
+            h ^= w;
+            h *= prime;
+            h ^= h >> 32;
+        }
+        for (; i < row; i++) {
+            h ^= p[i];
+            h *= prime;
+        }
+    }
+    return h ? h : 1u;   /* 0 means "no picture" */
+}
+
+static uint64_t s_movie_dropped;   /* notes dropped because every slot was held (stats line) */
+
+void sr_movie_set_tracking(int on) {
+    s_movie_tracking = on ? 1 : 0;
+    if (!on) memset(s_movie_notes, 0, sizeof(s_movie_notes));
+}
+
+int sr_movie_tracking(void) { return s_movie_tracking; }
+uint64_t sr_movie_dropped(void) { return s_movie_dropped; }
+
+int sr_movie_held(void) {
+    if (!s_movie_tracking) return 0;
+    for (int i = 0; i < SR_MOVIE_NOTES; i++)
+        if (s_movie_notes[i].seq) return 1;
+    return 0;
+}
+uint64_t sr_movie_clock(void) { return s_movie_clock; }
+
+void sr_movie_note_picture(uint32_t owner, uint32_t addr, uint32_t stride, uint32_t fmt,
+                           uint32_t width, uint32_t height) {
+    if (!s_movie_tracking) return;
+    uint32_t canon, bytes;
+    if (!movie_span(addr, stride, fmt, width, height, &canon, &bytes)) return;
+    SrMoviePicture *slot = NULL;
+    for (int i = 0; i < SR_MOVIE_NOTES; i++) {
+        SrMoviePicture *n = &s_movie_notes[i];
+        /* A picture written over any byte of an older one replaces it. */
+        if (n->seq && n->addr < canon + (uint64_t)bytes && canon < n->addr + (uint64_t)movie_note_bytes(n))
+            n->seq = 0;
+        if (!n->seq) { if (!slot || slot->seq) slot = n; }
+        else if (!slot || (slot->seq && n->seq < slot->seq)) slot = n;
+    }
+    if (slot->seq) s_movie_dropped++;   /* every slot held: the oldest note goes */
+    slot->addr = canon;
+    slot->stride = stride;
+    slot->fmt = fmt;
+    slot->width = width;
+    slot->height = height;
+    slot->owner = owner;
+    slot->hash = sr_movie_rows_hash(canon, stride, fmt, width, height);
+    slot->seq = ++s_movie_clock;
+}
+
+void sr_movie_forget_owner(uint32_t owner) {
+    for (int i = 0; i < SR_MOVIE_NOTES; i++)
+        if (s_movie_notes[i].seq && s_movie_notes[i].owner == owner) s_movie_notes[i].seq = 0;
+}
+
+int sr_movie_alive(uint64_t seq) {
+    if (!seq) return 0;
+    for (int i = 0; i < SR_MOVIE_NOTES; i++)
+        if (s_movie_notes[i].seq == seq) return 1;
+    return 0;
+}
+
+/* Whether note `n` still holds the bytes it was noted with. One whose bytes changed is dropped:
+ * whatever is there now is not the picture the decoder wrote. */
+static int movie_note_unchanged(SrMoviePicture *n) {
+    if (sr_movie_rows_hash(n->addr, n->stride, n->fmt, n->width, n->height) == n->hash) return 1;
+    n->seq = 0;
+    return 0;
+}
+
+int sr_movie_find_pixel(uint32_t addr, uint32_t stride, uint32_t fmt, SrMoviePicture *out,
+                        uint32_t *x, uint32_t *y) {
+    if (!s_movie_tracking) return 0;
+    SrMoviePicture *best = NULL;
+    uint32_t bx = 0, by = 0;
+    for (int i = 0; i < SR_MOVIE_NOTES; i++) {
+        SrMoviePicture *n = &s_movie_notes[i];
+        if (!n->seq || n->stride != stride || n->fmt != fmt || addr < n->addr) continue;
+        const uint32_t off = addr - n->addr, bpp = movie_bpp(fmt), pitch = stride * bpp;
+        if (off >= movie_note_bytes(n) || off % bpp) continue;
+        const uint32_t px = (off % pitch) / bpp, py = off / pitch;
+        if (px >= n->width || py >= n->height) continue;
+        if (best && best->seq > n->seq) continue;
+        if (!movie_note_unchanged(n)) continue;
+        best = n;
+        bx = px;
+        by = py;
+    }
+    if (!best) return 0;
+    if (out) *out = *best;
+    if (x) *x = bx;
+    if (y) *y = by;
+    return 1;
+}
+
+#ifdef NK_MOVIE_MUTANT_COPY_HASH
+/* gpu-coherence-selftest-movie-mutant's second build: the copy is judged by the old word-wise FNV
+   fold, in which two differences in bit 63 of two words cancel. The alpha-bit cell must catch it. */
+static uint64_t movie_mutant_fold(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t w, uint32_t h) {
+    uint32_t canon, bytes;
+    if (!movie_span(addr, stride, fmt, w, h, &canon, &bytes) || !sr_guest_span_readable(canon, bytes)) return 0;
+    const uint32_t bpp = movie_bpp(fmt), row = w * bpp, pitch = stride * bpp;
+    uint64_t x = 1469598103934665603ull;
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *p = (const uint8_t *)SR_HOST(canon + y * pitch);
+        for (uint32_t i = 0; i + 8u <= row; i += 8u) {
+            uint64_t v;
+            memcpy(&v, p + i, 8u);
+            x = (x ^ v) * 1099511628211ull;
+        }
+    }
+    return x;
+}
+#endif
+
+int sr_movie_find_copy(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t max_w, uint32_t max_h,
+                       SrMoviePicture *out) {
+    if (!s_movie_tracking) return 0;
+    SrMoviePicture *best = NULL;
+    for (int i = 0; i < SR_MOVIE_NOTES; i++) {
+        SrMoviePicture *n = &s_movie_notes[i];
+        if (!n->seq || n->stride != stride || n->fmt != fmt || n->width > max_w || n->height > max_h)
+            continue;
+        if (best && best->seq > n->seq) continue;
+        uint32_t canon, bytes;
+        if (!movie_span(addr, stride, fmt, n->width, n->height, &canon, &bytes) || canon == n->addr) continue;
+        /* Both spans checked (not prepared, as sr_movie_rows_hash), then the rows compared byte for
+         * byte: a texture that is not the picture differs within its first bytes, so a rejection
+         * costs next to nothing; a copy costs one pass, then one hash of the note. */
+        if (!sr_guest_span_readable(canon, bytes) || !sr_guest_span_readable(n->addr, movie_note_bytes(n)))
+            continue;
+#ifdef NK_MOVIE_MUTANT_COPY_HASH
+        if (movie_mutant_fold(canon, stride, fmt, n->width, n->height) !=
+            movie_mutant_fold(n->addr, stride, fmt, n->width, n->height))
+            continue;
+#else
+        const uint32_t row = n->width * movie_bpp(fmt), pitch = stride * movie_bpp(fmt);
+        uint32_t y = 0;
+        while (y < n->height &&
+               memcmp(SR_HOST(canon + y * pitch), SR_HOST(n->addr + y * pitch), row) == 0)
+            y++;
+        if (y != n->height) continue;
+#endif
+        if (!movie_note_unchanged(n)) continue;
+        best = n;
+    }
+    if (!best) return 0;
+    if (out) *out = *best;
+    return 1;
+}
+
+int sr_movie_find_in(uint32_t lo, uint32_t hi, uint32_t stride, uint32_t fmt, uint64_t after,
+                     SrMoviePicture *out) {
+    if (!s_movie_tracking) return 0;
+    SrMoviePicture *best = NULL;
+    for (int i = 0; i < SR_MOVIE_NOTES; i++) {
+        SrMoviePicture *n = &s_movie_notes[i];
+        if (!n->seq || n->seq <= after || n->stride != stride || n->fmt != fmt) continue;
+        if (n->addr < lo || (uint64_t)n->addr + movie_note_bytes(n) > hi) continue;
+        if (best && best->seq > n->seq) continue;
+        if (!movie_note_unchanged(n)) continue;
+        best = n;
+    }
+    if (!best) return 0;
+    if (out) *out = *best;
+    return 1;
+}
+
 /* Decode a GE 24-bit float mantissa word to IEEE-754 float.
  * The GE stores floats as the upper 24 bits of a 32-bit float (mantissa only; exp+sign). */
 static float decode_float24(uint32_t data) {
@@ -5327,16 +5551,63 @@ unsigned long ge_wide_cull_untracked(void) { return s_cull_untracked; }
 
 /* A matrix the hook scaled is remembered with the four x-row words it left, so a call that finds
  * those words unchanged (the title did not rebuild the matrix since) does not scale it again. The
- * table is open-addressed by the matrix's full address and never evicts, so two matrices cannot
- * share an entry; when it is full a new matrix is left alone (said once, and counted in
- * s_cull_untracked for the run report), never scaled untracked. */
-#define GE_CULL_SEEN 4096u
-static struct { uint32_t addr; uint32_t row[4]; } s_cull_seen[GE_CULL_SEEN];
+ * table is open-addressed by the matrix's full address, so two matrices cannot share an entry.
+ *
+ * An entry decides a call only while guest memory at its address still holds the words it records:
+ * once the title has written anything else there, a call at that address scales what it finds,
+ * with or without the entry. So when a new address would take the table past GE_CULL_SWEEP_AT
+ * entries, the entries whose words are gone are dropped and the rest re-inserted in slot
+ * order (deterministic). That changes the outcome of no call unless the title later puts those very
+ * bits back at that address (package obligation (1) of contract 11.3.6 rules out restoring a
+ * widened copy). A title that builds its matrices in per-frame scratch memory, at addresses that
+ * move with whatever else the frame allocated, therefore reuses the room its earlier frames'
+ * matrices took instead of filling the table.
+ *
+ * Only matrices whose widened words are all still in guest memory hold an entry. If more than
+ * GE_CULL_SEEN of those exist at once, a new matrix is left alone (said once, and counted in
+ * s_cull_untracked for the run report), never scaled untracked. A sweep runs at most once per
+ * hook call, which bounds its cost to one scan per call while the table stays full (per call, not
+ * per frame: a site the title reaches many times a frame pays for each). The guest runs between two
+ * calls; a second sweep within one call could find only entries the call's own writes overwrote. */
+typedef struct { uint32_t addr; uint32_t row[4]; } GeCullSeen;
+static GeCullSeen s_cull_seen[GE_CULL_SEEN];
+static uint32_t s_cull_live;   /* entries in use */
+unsigned ge_wide_cull_table_live(void) { return s_cull_live; }
+
+static uint32_t cull_find(uint32_t m) {   /* m's slot, the free slot m would take, or GE_CULL_SEEN if full */
+    uint32_t slot = ((m >> 4) * 2654435761u) >> 20;   /* 12 bits */
+    for (uint32_t probes = 0; probes < GE_CULL_SEEN; probes++) {
+        if (s_cull_seen[slot].addr == 0u || s_cull_seen[slot].addr == m) return slot;
+        slot = (slot + 1u) % GE_CULL_SEEN;
+    }
+    return GE_CULL_SEEN;
+}
+
+static void cull_sweep(void) {   /* drop the entries whose words the title has since overwritten */
+    static GeCullSeen keep[GE_CULL_SEEN];
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < GE_CULL_SEEN; i++) {
+        const GeCullSeen *e = &s_cull_seen[i];
+        if (e->addr == 0u) continue;
+        /* The words are read through a direct host pointer, so the 64-byte span the entry passed
+         * when it was made is checked again here. An entry whose span is not readable guest
+         * memory decides no later call and is dropped with the overwritten ones. */
+        if (!sr_guest_span_readable(e->addr, 64u)) continue;
+        uint32_t now[4];
+        for (uint32_t k = 0; k < 4u; k++) memcpy(&now[k], SR_HOST(e->addr + 16u * k), sizeof now[k]);
+        if (memcmp(now, e->row, sizeof now) == 0) keep[n++] = *e;
+    }
+    if (n == s_cull_live) return;   /* every entry still decides a call: nothing to drop */
+    memset(s_cull_seen, 0, sizeof s_cull_seen);
+    for (uint32_t j = 0; j < n; j++) s_cull_seen[cull_find(keep[j].addr)] = keep[j];
+    s_cull_live = n;
+}
 
 void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count) {
     const int wing = s_wide_d;
     if (!s_cull_on || wing <= 0 || base == 0u || !offsets) return;
     const float inv = 480.0f / (480.0f + 2.0f * (float)wing);
+    int swept = 0;
     for (uint32_t i = 0; i < count; i++) {
         const uint32_t m = base + offsets[i];
         if (!sr_guest_span_writable_at(m, 64u, "clip_x_widen")) {
@@ -5350,18 +5621,19 @@ void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_
         }
         uint32_t row[4];   /* the x output row of a column-major matrix: elements 0, 4, 8 and 12 */
         for (uint32_t k = 0; k < 4u; k++) memcpy(&row[k], SR_HOST(m + 16u * k), sizeof row[k]);
-        uint32_t slot = ((m >> 4) * 2654435761u) >> 20;   /* 12 bits */
-        uint32_t probes = 0;
-        while (probes < GE_CULL_SEEN && s_cull_seen[slot].addr != 0u && s_cull_seen[slot].addr != m) {
-            slot = (slot + 1u) % GE_CULL_SEEN;
-            probes++;
+        uint32_t slot = cull_find(m);
+        if ((slot == GE_CULL_SEEN || s_cull_seen[slot].addr == 0u) && s_cull_live >= GE_CULL_SWEEP_AT &&
+            !swept) {
+            cull_sweep();   /* a new address: make room from the entries that no longer decide a call */
+            swept = 1;
+            slot = cull_find(m);
         }
-        if (probes == GE_CULL_SEEN) {
+        if (slot == GE_CULL_SEEN) {
             static int full_reported;
             if (!full_reported) {
                 full_reported = 1;
-                fprintf(stderr, "clip_x_widen: more than %u distinct matrices; the rest are left alone "
-                                "(said once)\n", GE_CULL_SEEN);
+                fprintf(stderr, "clip_x_widen: more than %u widened matrices are in guest memory at once; "
+                                "the rest are left alone (said once)\n", GE_CULL_SEEN);
             }
             s_cull_untracked++;
             continue;
@@ -5375,6 +5647,7 @@ void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_
             memcpy(&row[k], &v, sizeof v);
             memcpy(SR_HOST(m + 16u * k), &row[k], sizeof row[k]);
         }
+        if (s_cull_seen[slot].addr == 0u) s_cull_live++;
         s_cull_seen[slot].addr = m;
         memcpy(s_cull_seen[slot].row, row, sizeof row);
         s_cull_calls++;
@@ -8328,12 +8601,36 @@ static void ge_vramdump_surface(FILE *file, int *first, const char *name,
     fputc('}', file);
 }
 
+/* The SR_VRAMDUMP captures this run wrote, oldest first, for the VRAM viewer's Capture row
+ * (#314): each capture's VBLANK, the viewer's sources as the GE state and the display named
+ * them at that present, and where its raw image went, with a digest of the bytes written so a
+ * file changed or replaced since is refused rather than shown as that capture. */
+typedef struct {
+    uint32_t vblank;
+    uint64_t digest;
+    GeVramSources sources;
+    char image_path[1024];
+} GeVramCaptureRecord;
+static GeVramCaptureRecord s_vram_captures[GE_VRAM_CAPTURE_MAX];
+static unsigned s_vram_capture_count;
+
+/* FNV-1a, 64-bit: a check that the image read back is the image written, not a secret. */
+static uint64_t ge_vram_capture_digest(const uint8_t *bytes, size_t size) {
+    uint64_t hash = 0xCBF29CE484222325ull;
+    for (size_t i = 0; i < size; i++) {
+        hash ^= bytes[i];
+        hash *= 0x00000100000001B3ull;
+    }
+    return hash;
+}
+
 int ge_vramdump_write(const char *directory, uint32_t vblank,
                       uint32_t display_addr, uint32_t display_stride,
                       uint32_t display_format) {
     char image_name[64], image_path[1024], sidecar_path[1024];
     FILE *image = NULL, *sidecar = NULL;
     uint32_t clut_command, clut_bytes, clut_format, clut_stride;
+    uint64_t digest;
     int first_surface = 1, ok = 0;
 
     if (!directory || !directory[0]) return 0;
@@ -8357,6 +8654,8 @@ int ge_vramdump_write(const char *directory, uint32_t vblank,
         fprintf(stderr, "VRAMDUMP vblank=%" PRIu32 " FAIL (cannot open raw image)\n", vblank);
         return 0;
     }
+    digest = ge_vram_capture_digest((const uint8_t *)SR_HOST(GE_CAPTURE_VRAM_BASE),
+                                    GE_CAPTURE_VRAM_SIZE);
     {
         size_t written = fwrite(SR_HOST(GE_CAPTURE_VRAM_BASE), 1,
                                 GE_CAPTURE_VRAM_SIZE, image);
@@ -8484,7 +8783,95 @@ int ge_vramdump_write(const char *directory, uint32_t vblank,
         fprintf(stderr, "VRAMDUMP vblank=%" PRIu32 " FAIL (JSON sidecar write incomplete)\n", vblank);
         return 0;
     }
+    if (s_vram_capture_count < GE_VRAM_CAPTURE_MAX) {
+        GeVramCaptureRecord *record = &s_vram_captures[s_vram_capture_count];
+        record->vblank = vblank;
+        record->digest = digest;
+        ge_vram_view_sources(display_addr, display_stride, display_format, 1, &record->sources);
+        snprintf(record->image_path, sizeof record->image_path, "%s", image_path);
+        s_vram_capture_count++;
+    }
     return 1;
+}
+
+unsigned ge_vram_capture_count(void) {
+    return s_vram_capture_count;
+}
+
+int ge_vram_capture_info(unsigned index, uint32_t *vblank, GeVramSources *sources) {
+    if (index >= s_vram_capture_count) return 0;
+    if (vblank) *vblank = s_vram_captures[index].vblank;
+    if (sources) *sources = s_vram_captures[index].sources;
+    return 1;
+}
+
+/* Reads capture `index`'s raw image back into a new 2 MiB buffer, or NULL when the file is
+ * missing, is not exactly GE_CAPTURE_VRAM_SIZE bytes, or no longer holds the bytes written. */
+static uint8_t *ge_vram_capture_load(unsigned index) {
+    const GeVramCaptureRecord *record = &s_vram_captures[index];
+    uint8_t *image = (uint8_t *)malloc(GE_CAPTURE_VRAM_SIZE);
+    FILE *file;
+    int whole;
+    if (!image) return NULL;
+    file = fopen(record->image_path, "rb");
+    if (!file) {
+        free(image);
+        return NULL;
+    }
+    whole = fread(image, 1, GE_CAPTURE_VRAM_SIZE, file) == GE_CAPTURE_VRAM_SIZE &&
+            fgetc(file) == EOF && !ferror(file);
+    fclose(file);
+    if (!whole || ge_vram_capture_digest(image, GE_CAPTURE_VRAM_SIZE) != record->digest) {
+        free(image);
+        return NULL;
+    }
+    return image;
+}
+
+int ge_vram_capture_decode(unsigned index, int texture, const GeVramWindow *window,
+                           uint32_t *out, size_t capacity, uint32_t *width, uint32_t *height) {
+    uint32_t folded, offset, bpp;
+    uint64_t end;
+    uint8_t *image;
+    if (width) *width = 0u;
+    if (height) *height = 0u;
+    if (!out || !window) return GE_VRAM_VIEW_NO_ROOM;
+    if (index >= s_vram_capture_count) return GE_VRAM_VIEW_CAPTURE_LOST;
+    /* Only what the image holds as a linear surface: a swizzled, palette or compressed texture
+     * needs the capture's CLUT and the texture decoder, which nk_cli vram runs. */
+    if (texture && (window->format > 3u || s_vram_captures[index].sources.texture_swizzled))
+        return GE_VRAM_VIEW_CAPTURE_TEXTURE;
+    if (!window->width || !window->height || window->width > GE_VRAM_VIEW_MAX_WIDTH ||
+        window->height > GE_VRAM_VIEW_MAX_HEIGHT || window->stride < window->width ||
+        (window->format > 3u && window->format != GE_VRAM_VIEW_DEPTH16))
+        return GE_VRAM_VIEW_UNREADABLE;
+    if ((uint64_t)window->width * window->height > capacity) return GE_VRAM_VIEW_NO_ROOM;
+    /* The whole window inside the captured 2 MiB, or nothing is read. */
+    folded = ge_vram_view_fold(window->addr);
+    if ((folded & ~0x001FFFFFu) != GE_CAPTURE_VRAM_BASE) return GE_VRAM_VIEW_UNREADABLE;
+    offset = folded & 0x001FFFFFu;
+    bpp = window->format == 3u ? 4u : 2u;
+    end = offset + ((uint64_t)(window->height - 1u) * window->stride + window->width) * bpp;
+    if (end > GE_CAPTURE_VRAM_SIZE) return GE_VRAM_VIEW_UNREADABLE;
+    image = ge_vram_capture_load(index);
+    if (!image) return GE_VRAM_VIEW_CAPTURE_LOST;
+    for (uint32_t y = 0; y < window->height; y++) {
+        const uint8_t *row = image + offset + (size_t)y * window->stride * bpp;
+        uint32_t *dst = out + (size_t)y * window->width;
+        for (uint32_t x = 0; x < window->width; x++) {
+            if (window->format == GE_VRAM_VIEW_DEPTH16) {
+                uint16_t z;
+                memcpy(&z, row + (size_t)x * 2u, 2u);
+                dst[x] = ge_depth16_gray(z);
+            } else {
+                dst[x] = ge_direct_texel(row, x, window->format) | 0xFF000000u;
+            }
+        }
+    }
+    free(image);
+    if (width) *width = window->width;
+    if (height) *height = window->height;
+    return GE_VRAM_VIEW_SHOWN;
 }
 
 #ifdef SR_GE_VRAM_DECODER_CLI

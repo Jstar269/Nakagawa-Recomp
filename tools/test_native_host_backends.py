@@ -72,6 +72,7 @@ CORE_SOURCES = [
     "src/core/nk_disc_verify.c",
     "src/core/nk_zip.c",
     "src/core/nk_steam_shortcuts.c",
+    "src/core/nk_data_migrate.c",
     "src/core/generated/nk_title_catalog.c",
 ]
 
@@ -241,6 +242,11 @@ class NativeHostBackendTests(unittest.TestCase):
         cls._objects["src/player/setup_staging.c"] = _compile_object(
             cls, "src/player/setup_staging.c", "setup_staging.o", ("-Isrc/player",)
         )
+        # The texture pack reader: the player reads a title's pack as the runtime will
+        # (player_texture_pack_inspect), so player_state.c links against it.
+        cls._objects["src/rt/texrepl.c"] = _compile_object(
+            cls, "src/rt/texrepl.c", "texrepl.o"
+        )
         harnesses = {
             "tests/native/test_launch_resolution.c": (),
             "tests/native/test_player_state.c": ("-Isrc/player",),
@@ -283,6 +289,7 @@ class NativeHostBackendTests(unittest.TestCase):
                 "src/player/iso_reader.c",
                 "src/player/package_builder.c",
                 "src/player/setup_staging.c",
+                "src/rt/texrepl.c",
             ),
             extra_runs=(
                 ("--validate-package", runtime_root, "ULUS99998", "SYNTH00001", "1",
