@@ -3196,8 +3196,9 @@ class _BodyWalk:
         another entry along a fall-through or `j`, or loops for ever without one. Such a word
         can never run as part of working code. A transfer whose delay slot is evidence is
         doomed, except a branch-likely, whose slot runs only when it is taken: its path not
-        taken must be doomed too. A delay slot is doomed with its transfer when it is not also
-        reached as a word of its own."""
+        taken must be doomed too. The delay slot of a doomed transfer is a word of its own as
+        well (a call or jump may land on it): it is doomed only when it is evidence, or an
+        ordinary word that runs on into a doomed word."""
         seen, stack, nodes = set(), list(starts), {}
         while stack:
             pc = stack.pop()
@@ -3234,9 +3235,27 @@ class _BodyWalk:
                     doomed.add(previous)
                     wave.append(previous)
         words = set(doomed)
-        words.update(nodes[pc][0] for pc in doomed
-                     if nodes[pc][0] is not None and nodes[pc][0] not in nodes)
+        for pc in doomed:
+            slot = nodes[pc][0]
+            if slot is None or slot in nodes:
+                continue
+            after = slot + 4
+            if slot in evidence or (
+                    self.step(slot) == (None, ((after, _BODY_SEQ),))
+                    and not self._may_go_elsewhere(slot)
+                    and self._follows(after, _BODY_SEQ, True)
+                    and (after in doomed or after in evidence)):
+                words.add(slot)
         return words
+
+    def without_live_slots(self, void):
+        """``void`` less every word that is the delay slot of a transfer outside it: that
+        word runs as the slot whenever the transfer runs, so it stays executable."""
+        void = set(void)
+        for word in sorted(void):            # ascending: a slot kept keeps its own slot
+            if word - 4 not in void and self.step(word - 4)[0] == word:
+                void.discard(word)
+        return void
 
     def reserved(self, starts, evidence):
         """{start: (address, why)} for each of ``starts`` whose body holds a word of
@@ -3328,7 +3347,9 @@ def _non_code_entries(d, structural, evidence_cache=None):
         shadow |= walks[ranges].reach(withdrawn)
         void |= walks[ranges].doomed(withdrawn, evidence)
         owned |= walks[ranges].reach([a for a in starts if a in d.functions and a not in found])
-    return found, frozenset(void - owned), frozenset(shadow - owned)
+    # A word a body that stays runs, or the delay slot of a transfer that stays, is not void.
+    void = next(iter(walks.values())).without_live_slots(void - owned) if walks else set()
+    return found, frozenset(void), frozenset(shadow - owned)
 
 
 def _entry_order(entries):

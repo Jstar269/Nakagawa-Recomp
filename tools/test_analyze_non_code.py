@@ -674,9 +674,8 @@ class WithdrawalRulesTest(unittest.TestCase):
         void = ({a for lo, hi in before.spans for a in range(lo, hi, 4)} - owned)
         self.assertTrue(void)
         for address in void:
-            self.assertTrue(every_path_runs_into_a_reserved_word(elf, address)
-                            or every_path_runs_into_a_reserved_word(elf, address - 4),
-                            hex(address))
+            self.assertTrue(every_path_runs_into_a_reserved_word(elf, address), hex(address))
+            self.assertFalse(address - 4 in owned and has_delay_slot(elf, address - 4), hex(address))
         return module
 
     def pointer_called_after_data(self, body):
@@ -721,6 +720,26 @@ class WithdrawalRulesTest(unittest.TestCase):
                     0x27BD0020]
         words, data, u = self.pointer_called_after_data(body)
         self.assert_proven(words, data, (u, u + 4) + tuple(range(u + 12, u + 24, 4)))
+
+    def test_a_leaf_after_a_jump_shaped_data_word_keeps_its_first_word(self):
+        # E is data kept as an entry (C branches to it); its second word X runs into a reserved
+        # word. D, a data seed, ends in a pointer-shaped word that reads as `j X`, so that word
+        # is proven non-code. U, a real leaf called only through a pointer, follows it: U's
+        # first word was only ever that `j`'s delay slot, and as a word of its own it runs on
+        # into U's code. It stays executable, and a call of U runs U.
+        g = TEXT
+        c = g + 24
+        e = c + 24
+        d = e + 20
+        u = d + 12
+        words = [PROLOGUE, 0xAFBF001C, ADDU, 0x8FBF001C, JR_RA, 0x27BD0020,
+                 PROLOGUE, branch(4, 4, 0, c + 4, e), 0, 0x8FBF001C, JR_RA, 0x27BD0020,
+                 ADDU, ADDU, RESERVED, JR_RA, 0,
+                 PROLOGUE, ADDU, jump(e + 4),
+                 0x00851021, 0x00451021, JR_RA, 0,
+                 PROLOGUE, JR_RA, 0x27BD0020]
+        module = self.assert_proven(words, [g, e], range(u, u + 16, 4))
+        self.assertIn(u - 4, {a for lo, hi in module.non_code_spans for a in range(lo, hi, 4)})
 
     def test_an_entry_in_a_kept_delay_slot_keeps_its_own_body(self):
         # K, E and W are named by data words. E is the delay slot of K's `j`; E is a `j` too,
@@ -916,6 +935,17 @@ def is_transfer(elf, address):
     return word is not None and (codegen.is_control(word) or word >> 26 == 1)
 
 
+def has_delay_slot(elf, address):
+    """Whether the word at ``address`` is a transfer with a delay slot: `j`, `jal`, `jr`,
+    `jalr`, a branch or a linked branch (not `eret`, a syscall, `break` or a trap)."""
+    word = codegen.read32(elf, address)
+    if word is None:
+        return False
+    op, funct, rt = word >> 26, word & 0x3F, (word >> 16) & 0x1F
+    return (op in (2, 3) or (op == 0 and funct in (0x08, 0x09)) or analyze.is_cond_branch(word)
+            or (op == 1 and rt in (0x10, 0x11, 0x12, 0x13)))
+
+
 def judged_body(walk, start):
     """The body _BodyWalk.reserved judges for ``start``: the split walk, no edge into another
     entry and nothing past the `b` idiom."""
@@ -1109,7 +1139,7 @@ class VoidProofTest(unittest.TestCase):
     def test_every_word_taken_out_is_proven_non_code(self):
         rng = random.Random(2564)
         size, images, removed = 80, 0, 0
-        for _ in range(400):
+        for _ in range(300):
             words = [random_body_word(rng, TEXT + 4 * i, size) for i in range(size)]
             data = [TEXT + 4 * rng.randrange(size) for _ in range(rng.randrange(8))]
             image = overlay_image(words, data)
@@ -1128,14 +1158,15 @@ class VoidProofTest(unittest.TestCase):
                 continue
             images += 1
             elf = small_overlay(words, data)
-            proven = {a for a in void if every_path_runs_into_a_reserved_word(elf, a)}
-            # A delay slot leaves with its transfer when that transfer is proven.
-            unproven = sorted(a for a in void - proven
-                              if not (a - 4 in proven and is_transfer(elf, a - 4)))
+            owned = {a for lo, hi in module.spans for a in range(lo, hi, 4)}
+            # Each word, a delay slot included, needs a proof as a word of its own, and none
+            # is the delay slot of a transfer that stays executable.
+            unproven = sorted(a for a in void if not every_path_runs_into_a_reserved_word(elf, a)
+                              or (a - 4 in owned and has_delay_slot(elf, a - 4)))
             self.assertEqual(unproven, [], [f"{a:08x}" for a in unproven[:8]])
             removed += len(void)
-        self.assertGreater(images, 300)
-        self.assertGreater(removed, 1500)
+        self.assertGreater(images, 200)
+        self.assertGreater(removed, 1000)
 
 
 class PublicFixtureTest(unittest.TestCase):

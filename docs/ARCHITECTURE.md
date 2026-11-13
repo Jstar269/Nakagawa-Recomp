@@ -250,7 +250,8 @@ These tools run on the development host before the native compiler.
   every path runs into a reserved word (none returns, calls, since a callee may never return,
   jumps or branches out of the image, stops at `jr`, a syscall, `break` or `eret`, or enters an
   entry; a branch-likely's delay slot counts only on its taken path): proven never to run as
-  working code. The rest of the shadow
+  working code. A delay slot needs that proof as a word of its own too (a jump may land on it),
+  and the delay slot of a transfer that stays executable is never void. The rest of the shadow
   stays executable, as before the withdrawal; a withdrawn address there has no translated body
   and, if called, runs on the interpreter floor, which refuses at the reserved word if it gets
   there. Discovery runs again until a pass withdraws nothing.
