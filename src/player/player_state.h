@@ -1571,7 +1571,8 @@ typedef struct {
     bool vsync;
     int fullscreen;       /* 1 on, 0 off, -1 left as the user set it */
     /* Each Enhanced part's value under this preset, or -1 where the library's own value
-       stays. Only presentation parts are set: Crisp system text and Sharper enlarging. */
+       stays. Only presentation parts are set: Crisp system text, Sharper enlarging and (under
+       Ultra) Full 32-bit colour. */
     int part[PLAYER_PART_COUNT];
 } PlayerGraphicsPresetRow;
 

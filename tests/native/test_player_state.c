@@ -9635,7 +9635,10 @@ static void test_graphics_presets(void) {
                    strstr(note, " is used in Enhanced and Ace") != NULL &&
                    strstr(note, "Authentic uses your settings.") != NULL);
             assert(strcmp(note + strlen(row->label),
-                          row->part[PLAYER_PART_UPSCALE] == 1
+                          row->part[PLAYER_PART_TWIN] == 1
+                              ? " is used in Enhanced and Ace, with crisp text, FSR 1 and full "
+                                "32-bit colour on. Authentic uses your settings."
+                          : row->part[PLAYER_PART_UPSCALE] == 1
                               ? " is used in Enhanced and Ace, with crisp text and FSR 1 on. "
                                 "Authentic uses your settings."
                               : " is used in Enhanced and Ace, with crisp text on and FSR 1 off. "
@@ -9675,7 +9678,8 @@ static void test_graphics_presets(void) {
             for (int part = 0; part < PLAYER_PART_COUNT; part++) {
                 /* Only presentation parts; every other part is the library's. A new part
                    needs its own choice here and in k_graphics_presets. */
-                if (part == PLAYER_PART_TEXT || part == PLAYER_PART_UPSCALE) {
+                if (part == PLAYER_PART_TEXT || part == PLAYER_PART_UPSCALE ||
+                    (part == PLAYER_PART_TWIN && p == PLAYER_PRESET_ULTRA)) {
                     assert(row->part[part] == 0 || row->part[part] == 1);
                     assert(r.part[part] == row->part[part]);
                     assert(custom_r.part[part] == custom.enhanced.part[part]);
@@ -9684,10 +9688,14 @@ static void test_graphics_presets(void) {
                     assert(r.part[part] == custom_r.part[part]);
                 }
             }
-            /* Finer patches and Full 32-bit colour are in no preset: the row leaves both to the
-               library (a designated initializer would make a part it leaves out 0, "off"). */
-            assert(row->part[PLAYER_PART_TESS] == -1 && row->part[PLAYER_PART_TWIN] == -1);
+            /* Finer patches is in no preset; Full 32-bit colour (#2280) is turned on only by
+               Ultra, and the other presets leave it to the library (off by default). */
+            assert(row->part[PLAYER_PART_TESS] == -1);
+            assert(row->part[PLAYER_PART_TWIN] == (p == PLAYER_PRESET_ULTRA ? 1 : -1));
             assert(strstr(line, row->part[PLAYER_PART_TEXT] ? ";text=on" : ";text=off") != NULL);
+            assert(strstr(line, r.part[PLAYER_PART_TWIN] ? ";twin=on" : ";twin=off") != NULL);
+            assert(player_settings_library_part(&app->settings, PLAYER_PART_TWIN) ==
+                   (p == PLAYER_PRESET_ULTRA ? 1 : custom.enhanced.part[PLAYER_PART_TWIN]));
             assert(config.present_upscale == (row->part[PLAYER_PART_UPSCALE] == 1
                                                   ? NK_PRESENT_UPSCALE_FSR1
                                                   : NK_PRESENT_UPSCALE_OFF));
@@ -9722,13 +9730,73 @@ static void test_graphics_presets(void) {
     }
 
     /* The table (docs/PLAYER_UI_DESIGN.md): Crisp system text on in every preset; Sharper
-       enlarging on in Medium, Ultra and Handheld, off in Low and High. */
+       enlarging on in Medium, Ultra and Handheld, off in Low and High; Full 32-bit colour (#2280)
+       on only in Ultra, left to the library in every other preset. */
     for (int p = PLAYER_PRESET_LOW; p < PLAYER_PRESET_COUNT; p++) {
         const PlayerGraphicsPresetRow *row = player_graphics_preset_row(p);
         assert(row->part[PLAYER_PART_TEXT] == 1);
         assert(row->part[PLAYER_PART_UPSCALE] ==
                (p == PLAYER_PRESET_MEDIUM || p == PLAYER_PRESET_ULTRA ||
                 p == PLAYER_PRESET_HANDHELD));
+        assert(row->part[PLAYER_PART_TWIN] == (p == PLAYER_PRESET_ULTRA ? 1 : -1));
+    }
+
+    /* #2280: selecting Ultra turns Full 32-bit colour on for Enhanced and Ace sessions, the Settings
+       row and the launch line; the other presets leave a fresh library off; editing Full 32-bit
+       colour afterwards switches Ultra to Custom, while Custom and the other presets leave hand
+       edits behaving as before. */
+    {
+        NkRuntimeConfig cfg;
+        PlayerPlayResolved pr;
+        char pline[192];
+        for (int preset = PLAYER_PRESET_LOW; preset < PLAYER_PRESET_COUNT; preset++) {
+            player_app_settings_init_default(&app->settings);
+            app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+            player_app_apply_graphics_preset(app, preset);
+            assert(player_settings_library_part(&app->settings, PLAYER_PART_TWIN) ==
+                   (preset == PLAYER_PRESET_ULTRA ? 1 : 0));
+            graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+            assert(pr.on && pr.part[PLAYER_PART_TWIN] == (preset == PLAYER_PRESET_ULTRA ? 1 : 0));
+            assert(strstr(pline, preset == PLAYER_PRESET_ULTRA ? ";twin=on" : ";twin=off") != NULL);
+            if (preset != PLAYER_PRESET_ULTRA) {
+                player_app_cycle_enhanced_part(app, PLAYER_PART_TWIN);
+                assert(player_app_graphics_preset(app) == preset);
+                assert(app->settings.enhanced.part[PLAYER_PART_TWIN] == 1);
+                graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+                assert(pr.part[PLAYER_PART_TWIN] == 1 && strstr(pline, ";twin=on") != NULL);
+            }
+        }
+        /* Ace mode with Ultra chosen sets twin=on; editing Full 32-bit colour switches to Custom. */
+        player_app_settings_init_default(&app->settings);
+        app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+        player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
+        memset(&app->settings.title_play[0], 0, sizeof(app->settings.title_play[0]));
+        snprintf(app->settings.title_play[0].key, sizeof(app->settings.title_play[0].key),
+                 "TEST92150");
+        app->settings.title_play[0].mode = PLAYER_PLAY_ACE;
+        for (int part = 0; part < PLAYER_PART_COUNT; part++) {
+            app->settings.title_play[0].part[part] = -1;
+        }
+        app->settings.title_play[0].logic_60 = -1;
+        app->settings.title_play_count = 1;
+        graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(pr.on && pr.mode == PLAYER_PLAY_ACE && pr.part[PLAYER_PART_TWIN] == 1);
+        assert(strstr(pline, "tier=ace;") != NULL && strstr(pline, ";twin=on") != NULL);
+        app->settings.title_play_count = 0;
+
+        player_app_cycle_enhanced_part(app, PLAYER_PART_TWIN); /* shown On (Ultra), so Off */
+        assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+        assert(app->settings.enhanced.part[PLAYER_PART_TWIN] == 0);
+        assert(app->settings.enhanced.part[PLAYER_PART_TEXT] == 1 &&
+               app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 1);
+        graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(pr.part[PLAYER_PART_TWIN] == 0 && strstr(pline, ";twin=off") != NULL);
+        /* Choosing Custom and toggling by hand stays Custom and flips twin on and off. */
+        player_app_cycle_enhanced_part(app, PLAYER_PART_TWIN);
+        assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+        assert(app->settings.enhanced.part[PLAYER_PART_TWIN] == 1);
+        graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(pr.part[PLAYER_PART_TWIN] == 1 && strstr(pline, ";twin=on") != NULL);
     }
 
     /* Editing a part a preset sets, for the library, steps from the value the page shows (the
@@ -9773,9 +9841,11 @@ static void test_graphics_presets(void) {
         }
         assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
         assert(app->settings.enhanced.part[PLAYER_PART_TEXT] == 1);
+        assert(app->settings.enhanced.part[PLAYER_PART_TWIN] == 1);
         assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == (edit == 0 ? 1 : 0));
         graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
         assert(pr.part[PLAYER_PART_TEXT] == 1 && strstr(pline, ";text=on") != NULL);
+        assert(pr.part[PLAYER_PART_TWIN] == 1 && strstr(pline, ";twin=on") != NULL);
         assert(cfg.present_upscale == (edit == 0 ? NK_PRESENT_UPSCALE_FSR1
                                                  : NK_PRESENT_UPSCALE_OFF));
     }
@@ -9913,7 +9983,7 @@ static void test_graphics_presets(void) {
     assert(back->settings.resolution_scale == 1);
     assert(strcmp(player_app_graphics_preset_label(back), "Ultra") == 0);
     assert(player_app_graphics_preset_note(back, note, sizeof(note)) &&
-           strstr(note, "FSR 1 on") != NULL);
+           strstr(note, "FSR 1 and full 32-bit colour on") != NULL);
 
     /* The rows a file holds are kept as they are beside its preset. */
     write_text_file(path,
@@ -15439,6 +15509,11 @@ int main(int argc, char **argv) {
                                 enhanced ? "Enhanced" : "Authentic", report.display, expected);
                     }
                     assert(strcmp(report.display, expected) == 0);
+                    /* Full 32-bit colour (#2280): on under Ultra, the library's (off) otherwise. */
+                    if (enhanced) {
+                        assert(strstr(report.ace,
+                                      p == PLAYER_PRESET_ULTRA ? ";twin=on" : ";twin=off") != NULL);
+                    }
                 }
             }
             rep->settings = kept;

@@ -2311,30 +2311,31 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    millisecond (fsr1-selftest's cost cell). Low turns it off:
    its 1x frame is enlarged about 4x or more on any screen of 1080p or more, past that range, on
    the weakest GPUs (Medium's and Handheld's frame passes it too on 1440p and 4K); High
-   turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
-   motion, Widescreen, texture filtering, sound, the readout, the badge, Finer patches
-   (which changes GE timing, section 11.3.7), Short loads (which changes guest timing, section
-   11.3.10) or Full 32-bit colour (the host twin, section 10.11): those stay the library's and
-   each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and test_graphics_presets
-   checks that every other part is -1, so a new part needs a choice. */
-#define PRESET_PART_LIST(X, text, upscale)                                                \
+   turns it off as Ultra without it, the plain 4x picture. Full 32-bit colour (the host twin,
+   section 10.11, #2280) is on in Ultra and left to the library in every other preset. No row
+   sets frame pacing, Smooth motion, Widescreen, texture filtering, sound, the readout, the
+   badge, Finer patches (which changes GE timing, section 11.3.7) or Short loads (which changes
+   guest timing, section 11.3.10): those stay the library's and each game's own.
+   docs/PLAYER_UI_DESIGN.md lists the same values, and test_graphics_presets checks that every
+   other part is -1, so a new part needs a choice. */
+#define PRESET_PART_LIST(X, text, upscale, twin)                                          \
     X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
     X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1)    \
-    X(TWIN, -1) X(SSAA, -1)
+    X(TWIN, (twin)) X(SSAA, -1)
 #define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
 #define PRESET_PART_ONE(part, value) + 1
-#define PRESET_PARTS(text, upscale) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale)}
+#define PRESET_PARTS(text, upscale, twin) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale, twin)}
 static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
     [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1,
-                           PRESET_PARTS(1, 0)},
+                           PRESET_PARTS(1, 0, -1)},
     [PLAYER_PRESET_MEDIUM] = {"medium", "Medium", "Medium", 2, NK_PRESENT_SCALING_SHARP, true,
-                              -1, PRESET_PARTS(1, 1)},
+                              -1, PRESET_PARTS(1, 1, -1)},
     [PLAYER_PRESET_HIGH] = {"high", "High", "High", 4, NK_PRESENT_SCALING_SHARP, true, -1,
-                            PRESET_PARTS(1, 0)},
+                            PRESET_PARTS(1, 0, -1)},
     [PLAYER_PRESET_ULTRA] = {"ultra", "Ultra", "Ultra", 4, NK_PRESENT_SCALING_SHARP, true, -1,
-                             PRESET_PARTS(1, 1)},
+                             PRESET_PARTS(1, 1, 1)},
     [PLAYER_PRESET_HANDHELD] = {"handheld", "Handheld", "Handheld", 2,
-                                NK_PRESENT_SCALING_SHARP, true, 1, PRESET_PARTS(1, 1)},
+                                NK_PRESENT_SCALING_SHARP, true, 1, PRESET_PARTS(1, 1, -1)},
 };
 #undef PRESET_PARTS
 /* A new PLAYER_PART_* fails to compile here ("size of array is negative") until
@@ -2342,7 +2343,7 @@ static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
    length is checked against the enum. A part the list leaves out would read 0 (off), which
    test_graphics_presets also catches by requiring -1 for every part it does not set. */
 typedef char k_graphics_presets_name_every_part[
-    (0 PRESET_PART_LIST(PRESET_PART_ONE, 0, 0)) == PLAYER_PART_COUNT ? 1 : -1];
+    (0 PRESET_PART_LIST(PRESET_PART_ONE, 0, 0, 0)) == PLAYER_PART_COUNT ? 1 : -1];
 #undef PRESET_PART_ONE
 #undef PRESET_PART_SET
 #undef PRESET_PART_LIST
@@ -2369,19 +2370,29 @@ bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap
     if (!out || cap == 0) return false;
     out[0] = '\0';
     if (!row) return false;
-    /* The parts it sets, "with A and B on" or "with A on and B off", in short words (crisp
-       text, FSR 1): the line must stay one line, so the page fits 960 x 540 and 853 x 480
-       (test_player_screens.c). */
-    char list[2][96] = {"", ""}; /* [0] the parts it turns on, [1] those it turns off */
+    /* The parts it sets, "with A, B and C on" or "with A on and B off", in short words (crisp
+       text, FSR 1, full 32-bit colour): the line must stay one line, so the page fits 960 x 540
+       and 853 x 480 (test_player_screens.c). */
+    const char *words[2][PLAYER_PART_COUNT]; /* [0] parts it turns on, [1] those it turns off */
+    int counts[2] = {0, 0};
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
         if (row->part[p] < 0) continue;
-        char *into = list[row->part[p] != 0 ? 0 : 1];
-        size_t used = strlen(into);
+        int bucket = row->part[p] != 0 ? 0 : 1;
         const char *word = p == PLAYER_PART_TEXT      ? "crisp text"
                          : p == PLAYER_PART_UPSCALE ? "FSR 1"
+                         : p == PLAYER_PART_TWIN    ? "full 32-bit colour"
                                                     : player_enhanced_part(p)->name;
-        int w = snprintf(into + used, sizeof(list[0]) - used, "%s%s", used ? " and " : "", word);
-        if (w <= 0 || (size_t)w >= sizeof(list[0]) - used) return false;
+        words[bucket][counts[bucket]++] = word;
+    }
+    char list[2][96] = {"", ""};
+    for (int b = 0; b < 2; b++) {
+        size_t used = 0;
+        for (int i = 0; i < counts[b]; i++) {
+            const char *sep = i == 0 ? "" : i + 1 == counts[b] ? " and " : ", ";
+            int w = snprintf(list[b] + used, sizeof(list[b]) - used, "%s%s", sep, words[b][i]);
+            if (w <= 0 || (size_t)w >= sizeof(list[b]) - used) return false;
+            used += (size_t)w;
+        }
     }
     char with[224] = "";
     if (list[0][0] && list[1][0]) {
