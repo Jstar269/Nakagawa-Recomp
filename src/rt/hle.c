@@ -293,6 +293,7 @@ uint32_t user_partition_last_heap(void) { return s_heap_last_bump ? s_heap_last_
 uint32_t sr_last_alloc_addr = 0;     /* last heap allocation rounded address */
 static int partition_hole_alloc_high(uint32_t size, uint32_t *base_out);
 static void partition_hole_release(uint32_t base, uint32_t size);
+static void partition_arena_released(uint32_t base, uint32_t size);
 /* Start the user partition after the complete flat image, including zero-filled BSS.
  * tools/prxload.py preserves the original ~PSP header's segment-memory sizes when a
  * stripped ELF has lost them. An explicit override may move the base higher, but may
@@ -322,6 +323,7 @@ void user_partition_init(void) {
     s_heap_base = base;
     sched_set_stack_range_refusal(sr_user_partition_overlaps);
     sched_set_partition_hole_allocator(partition_hole_alloc_high, partition_hole_release);
+    sched_set_arena_release_hook(partition_arena_released);
     s_part_top = et ? (uint32_t)strtoul(et, NULL, 16) : 0x0A000000u;
     if (s_part_top <= s_heap) {
         fprintf(stderr,
@@ -4308,7 +4310,6 @@ void sr_hle_init(void) {
      * resumed, and the opt-in timing model's drawing lists (nothing unless SR_GE_TIMING=1). */
     sched_set_ge_timing_hooks(ge_timing_next_deadline_us, ge_timing_service_due);
     sched_set_ge_waiting_hook(ge_finish_deliver_waiting);
-    sched_set_arena_release_hook(partition_arena_released);
     (void)ge_timing_on();
     sched_set_vtimer_hooks(vtimer_next_deadline_us, vtimer_service_one);
 #endif
