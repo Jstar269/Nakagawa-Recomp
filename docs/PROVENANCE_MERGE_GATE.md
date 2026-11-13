@@ -533,7 +533,10 @@ that does not execute a single byte of candidate code.
 
 The gate ships in **observation mode**. It runs on every pull request, fails
 closed, and publishes its findings, but it is deliberately **not** a required
-status check and must not be described as enforcement.
+status check and must not be described as enforcement. It runs in the upstream
+repository only (matched by its ID or name, `tools/provenance_mode.py`); a fork,
+which has no access to the private authority, runs the `Fork provenance check`
+job of the same workflow instead ([FORKING.md](FORKING.md)).
 
 The reason is unchanged and unweakened: GitHub matches required checks by
 context *name*, both the trusted workflow and any candidate workflow run as

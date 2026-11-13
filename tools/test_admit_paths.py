@@ -2020,5 +2020,15 @@ class RecompJsonRegressionTest(unittest.TestCase):
                          provenance_ledger.claims_ledger_bytes(historical))
 
 
+class MissingAuthorityTest(unittest.TestCase):
+    def test_a_missing_authority_is_refused_with_a_code(self) -> None:
+        # A fork's first admission names an authority it has not seeded yet (docs/FORKING.md).
+        with tempfile.TemporaryDirectory(prefix="nk-admit-missing-") as scratch:
+            with self.assertRaises(AdmitError) as caught:
+                admit_paths._authority_inputs(Path(scratch) / "no-authority-here")
+        self.assertEqual(caught.exception.code, "AUTHORITY_MISSING")
+        self.assertIn("tools/fork_init.py", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
