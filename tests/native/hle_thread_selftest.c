@@ -47441,7 +47441,8 @@ static void gplayer_create(CpuState *s) {
 
 /* The module's scePsmfPlayerDelete(handle): a quit packet per worker, join, delete, delete box. */
 static void gplayer_delete(CpuState *s) {
-    const uint32_t data = MEM_R32(s->r[4]);
+    const uint32_t handle = s->r[4];   /* the kernel calls below reuse a0 */
+    const uint32_t data = MEM_R32(handle);
     const uint32_t mbx = MEM_R32(data);
     for (uint32_t i = 0; i < GPLAYER_WORKERS; i++) {
         const uint32_t msg = GPLAYER_MSG + 16u * i;
@@ -47459,7 +47460,7 @@ static void gplayer_delete(CpuState *s) {
         if (rc != 0u) { s->r[2] = rc; return; }
     }
     s->r[2] = late_obj_guest_call(s, NID_MBX_DELETE, mbx, 0u, 0u, 0u, 0u, 0u);
-    MEM_W32(s->r[4], 0u);
+    MEM_W32(handle, 0u);
 }
 
 static void gplayer_runner(CpuState *s) {
