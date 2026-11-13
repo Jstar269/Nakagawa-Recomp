@@ -219,7 +219,9 @@ static const struct {
     { "Left Shift", "SHIFT" }, { "Right Shift", "SHIFT" }, { "Left Ctrl", "CTRL" },
     { "Right Ctrl", "CTRL" },  { "Left Alt", "ALT" },      { "Right Alt", "ALT" },
     { "Backspace", "BKSP" },   { "Insert", "INS" },        { "Delete", "DEL" },
-    { "Page Up", "PG UP" },    { "Page Down", "PG DN" }
+    { "Page Up", "PG UP" },    { "Page Down", "PG DN" },
+    /* The mouse buttons (#1791); "Mouse 4" and "Mouse 5" fit as they are. */
+    { "Left Click", "L CLICK" }, { "Middle Click", "M CLICK" }, { "Right Click", "R CLICK" }
 };
 
 /* The pills of the pad inputs with no glyph of their own, per InputPadNames. */
