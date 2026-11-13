@@ -97,4 +97,115 @@ int nk_render_path_event_format(const NkRenderPath *path, char *out, size_t out_
  * end are allowed). False, with out untouched, for any other line or an unknown value. */
 bool nk_render_path_event_parse(const char *line, NkRenderPath *out);
 
+/* What the GPU GE renderer, while it runs, hands to the software renderer instead of drawing it
+ * (#2151), in the order of ge_gpu.h's GEGPU_FALLBACK_* reasons (ge_gpu.h checks that they
+ * agree). When one of them costs enough for long enough (the rule below), the runtime reports
+ * it once per run as
+ *   BOOT_EVENT phase=render_fallback reason=<name> frames=<n> sw_prims=<n> gpu_prims=<n>
+ *              readbacks=<n> share_pm=<n>
+ * (one line): the presents the rule watched, the reason's software primitives, the primitives the
+ * GPU drew, the reason's synchronous readbacks, and its share of all primitives in per mille. */
+typedef enum NkRenderEffect {
+    NK_RENDER_EFFECT_STENCIL,      /* stencil tests and operations the GPU path cannot match */
+    NK_RENDER_EFFECT_COLOR_TEST,   /* colour tests on a colour the shader computes inexactly */
+    NK_RENDER_EFFECT_LOGIC_OP,     /* logic operations */
+    NK_RENDER_EFFECT_WRITE_MASK,   /* partial colour write masks */
+    NK_RENDER_EFFECT_RAM_FB,       /* drawing into a frame buffer in main memory */
+    NK_RENDER_EFFECT_WIDE_STRIDE,  /* frame buffers wider than 512 pixels */
+    NK_RENDER_EFFECT_MIPS,         /* mipmap levels no Vulkan texture holds */
+    NK_RENDER_EFFECT_LINE,         /* lines the GPU path does not draw */
+    NK_RENDER_EFFECT_POINT,        /* points */
+    NK_RENDER_EFFECT_COUNT
+} NkRenderEffect;
+
+typedef struct NkRenderFallbackEvent {
+    NkRenderEffect reason;
+    uint32_t frames;
+    uint64_t sw_prims;
+    uint64_t gpu_prims;
+    uint64_t readbacks;
+    uint32_t share_pm;
+} NkRenderFallbackEvent;
+
+/* The reason's name in the event ("stencil", "color_test", ...); NULL when out of range. */
+const char *nk_render_effect_name(NkRenderEffect effect);
+
+/* Formats the event's text (without "t_ns"); returns its length, or 0 with out cleared when the
+ * reason is out of range or the text does not fit. */
+int nk_render_fallback_event_format(const NkRenderFallbackEvent *event, char *out,
+                                    size_t out_capacity);
+
+/* Reads a line the runtime wrote with nk_render_fallback_event_format (a trailing " t_ns=" and
+ * line end are allowed). False, with out untouched, for any other line, an unknown reason, or a
+ * missing or malformed number. */
+bool nk_render_fallback_event_parse(const char *line, NkRenderFallbackEvent *out);
+
+/* The cumulative counts a GPU renderer keeps of what it hands to the software renderer
+ * (gegpu_fallback_counts in src/rt/gpu_sdl3vk/ge_gpu.c fills one): ready while that renderer
+ * runs, the primitives it drew itself (wrapping at 2^32), and by effect the primitives it handed
+ * over and the synchronous readbacks those took. */
+typedef struct NkRenderFallbackCounts {
+    int ready;
+    uint32_t gpu_prims;
+    uint64_t sw_prims[NK_RENDER_EFFECT_COUNT];
+    uint64_t readbacks[NK_RENDER_EFFECT_COUNT];
+} NkRenderFallbackCounts;
+
+/* When an effect is reported: tumbling windows of NK_RENDER_FALLBACK_WINDOW_FRAMES accepted
+ * presents. An effect is over the rule in a window when its estimated cost there, its readbacks
+ * times NK_RENDER_FALLBACK_READBACK_US plus its software primitives times NK_RENDER_FALLBACK_PRIM_US,
+ * reaches NK_RENDER_FALLBACK_BUDGET_US (nk_render_fallback_cost_us). The budget is per effect:
+ * costs of different effects do not add up, so each report names an effect that costs the budget
+ * on its own. Over the rule in NK_RENDER_FALLBACK_WINDOWS windows in a row, an effect is reported
+ * once per run. Each value is measured, derived (with its arithmetic) or chosen, as
+ * src/rt/gpu_sdl3vk/README.md ("Software fallback report") sets out. */
+#define NK_RENDER_FALLBACK_WINDOW_FRAMES 120u /* chosen: 2 s at 60 presents a second */
+#define NK_RENDER_FALLBACK_WINDOWS 3u         /* chosen: at least 6 s in a row */
+#define NK_RENDER_FALLBACK_BUDGET_US 96000u   /* chosen: 0.8 ms a present x 120 presents */
+#define NK_RENDER_FALLBACK_READBACK_US 3200u  /* chosen in the derived 1,800-3,500 us */
+#define NK_RENDER_FALLBACK_PRIM_US 24u        /* chosen in the derived 22-28 us */
+/* Derived: one kind alone at the budget, 96,000 / 3,200 = 30 readbacks and 96,000 / 24 = 4,000
+ * software primitives a window. */
+#define NK_RENDER_FALLBACK_READBACKS (NK_RENDER_FALLBACK_BUDGET_US / NK_RENDER_FALLBACK_READBACK_US)
+#define NK_RENDER_FALLBACK_MIN_PRIMS (NK_RENDER_FALLBACK_BUDGET_US / NK_RENDER_FALLBACK_PRIM_US)
+
+/* An effect's estimated cost in a window, in microseconds: readbacks x NK_RENDER_FALLBACK_READBACK_US
+ * + software primitives x NK_RENDER_FALLBACK_PRIM_US, UINT64_MAX when that does not fit. */
+uint64_t nk_render_fallback_cost_us(uint64_t sw_prims, uint64_t readbacks);
+
+/* One accepted present's share of the counts. */
+typedef struct NkRenderFallbackDelta {
+    uint32_t gpu_prims;
+    uint64_t sw_prims[NK_RENDER_EFFECT_COUNT];
+    uint64_t readbacks[NK_RENDER_EFFECT_COUNT];
+} NkRenderFallbackDelta;
+
+/* The windows over the cumulative counts; all zero to start. */
+typedef struct NkRenderFallbackWindow {
+    int primed;                                     /* `last` holds a sample */
+    NkRenderFallbackCounts last;
+    uint32_t frames;                                /* accepted presents in this window */
+    uint64_t gpu, sw[NK_RENDER_EFFECT_COUNT], rb[NK_RENDER_EFFECT_COUNT];
+    uint32_t streak[NK_RENDER_EFFECT_COUNT];        /* windows in a row over the rule */
+    /* Those windows' sums, for the event. */
+    uint64_t span_gpu[NK_RENDER_EFFECT_COUNT], span_all_sw[NK_RENDER_EFFECT_COUNT];
+    uint64_t span_sw[NK_RENDER_EFFECT_COUNT], span_rb[NK_RENDER_EFFECT_COUNT];
+    uint16_t reported;                              /* 1 << effect: already reported */
+} NkRenderFallbackWindow;
+
+/* One accepted present, with the counts read after it. Fills `delta` (when not NULL) with its
+ * share, zero when the counts are not ready or started over (either restarts the window), and
+ * returns the effects that crossed the rule now (1 << effect), each once per run. */
+uint16_t nk_render_fallback_window_step(NkRenderFallbackWindow *window,
+                                        const NkRenderFallbackCounts *now,
+                                        NkRenderFallbackDelta *delta);
+
+/* The event for an effect nk_render_fallback_window_step just returned: the presents of the
+ * windows in a row that crossed (always NK_RENDER_FALLBACK_WINDOWS x
+ * NK_RENDER_FALLBACK_WINDOW_FRAMES under this rule; written out so a reader needs no
+ * constants), the effect's software primitives, the primitives the GPU drew, its readbacks,
+ * and its share of all primitives in per mille (reported, not part of the rule). */
+NkRenderFallbackEvent nk_render_fallback_window_event(const NkRenderFallbackWindow *window,
+                                                      NkRenderEffect effect);
+
 #endif

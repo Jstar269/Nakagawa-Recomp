@@ -214,7 +214,8 @@ int main(int argc, char **argv) {
                          : strcmp(argv[i], "--twin-ref") == 0 ? "SR_GPU_TWIN_REF"
                          : strcmp(argv[i], "--depth-ref") == 0 ? "SR_GPU_DEPTH_REF"
                          : strcmp(argv[i], "--ssaa-ref") == 0 ? "SR_GPU_SSAA_REF"
-                         : strcmp(argv[i], "--dst-read") == 0 ? "SR_GPU_DST_READ" : NULL;
+                         : strcmp(argv[i], "--dst-read") == 0 ? "SR_GPU_DST_READ"
+                         : strcmp(argv[i], "--ace") == 0 ? "SR_ACE" : NULL;
         if (!name || i + 1 >= argc || !set_env(name, argv[++i])) {
             fprintf(stderr, "usage: gpu_coherence_selftest [--scale N] [--case scaled-upload|mip-lod]\n");
             return 2;
@@ -229,7 +230,19 @@ int main(int argc, char **argv) {
     if (!arena) return 2;
     g_mem = arena + 0x08000000u;
     sr_perf_init();
-#ifdef SR_GPU_ACE_SELFTEST
+#if defined(SR_GPU_MIPS_SELFTEST)
+    /* Host mip chains (tex_mips.h): an Enhanced line with mips=on unless `--ace LINE` names another
+     * (one without mips checks that nothing changes with the part off). */
+    {
+        const char *line = getenv("SR_ACE");
+        if (!ace_init_spec(line ? line : "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;"
+                                         "tess=off;twin=off;mips=on", NULL)) {
+            fprintf(stderr, "gpu mips selftest: FAIL the Ace line was refused\n");
+            free(arena);
+            return 1;
+        }
+    }
+#elif defined(SR_GPU_ACE_SELFTEST)
     /* Ace Mode with 16x texture filtering, read before the device is made (src/rt/ace.h). */
     if (!ace_init_spec("v1;af=16;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off", NULL)) {
         fprintf(stderr, "gpu ace selftest: FAIL the Ace line was refused\n");
@@ -303,6 +316,8 @@ int main(int argc, char **argv) {
         free(arena);
         return 77;
     }
+#elif defined(SR_GPU_MIPS_SELFTEST)
+    ok = gegpu_mips_selftest();
 #elif defined(SR_GPU_SNAPSHOT_SYNC_SELFTEST)
     ok = gegpu_snapshot_sync_selftest();
 #elif defined(SR_GPU_GLYPH_SELFTEST)
@@ -318,15 +333,15 @@ int main(int argc, char **argv) {
         return 77;
     }
 #endif
-#if !defined(SR_GPU_ACE_SELFTEST) && !defined(SR_GPU_TEXSCALE_SELFTEST)
+#if !defined(SR_GPU_ACE_SELFTEST) && !defined(SR_GPU_TEXSCALE_SELFTEST) && !defined(SR_GPU_MIPS_SELFTEST)
     /* Ace Mode off (A2, src/rt/ace.h): every cell above ran with no anisotropic sampler,
      * and the texture pool kept its MAX_TEX sets. */
     {
         GeGpuAceStats ace;
         gegpu_ace_stats(&ace);
-        if (ace.af != 0 || ace.af_samplers != 0u || ace.tex_pool_sets == 0u) {
-            fprintf(stderr, "gpu coherence selftest: FAIL ace-off af=%d af_samplers=%llu pool=%u\n",
-                    ace.af, ace.af_samplers, ace.tex_pool_sets);
+        if (ace.af != 0 || ace.af_samplers != 0u || ace.tex_pool_sets == 0u || ace.mips_entries != 0u) {
+            fprintf(stderr, "gpu coherence selftest: FAIL ace-off af=%d af_samplers=%llu pool=%u mips=%llu\n",
+                    ace.af, ace.af_samplers, ace.tex_pool_sets, ace.mips_entries);
             ok = 0;
         } else {
             printf("gpu coherence selftest: PASS ace-off af=0 af_samplers=0 pool=%u\n",
@@ -338,7 +353,9 @@ int main(int argc, char **argv) {
     sdl3vk_shutdown();
     free(arena);
     if (!ok) return 1;
-#if defined(SR_GPU_ACE_SELFTEST)
+#if defined(SR_GPU_MIPS_SELFTEST)
+    puts("gpu mips selftest: OK");
+#elif defined(SR_GPU_ACE_SELFTEST)
     puts("gpu ace selftest: OK");
 #elif defined(SR_GPU_SNAPSHOT_SYNC_SELFTEST)
     puts("gpu snapshot sync selftest: OK");

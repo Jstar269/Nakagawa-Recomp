@@ -2262,6 +2262,25 @@ bool nk_title_manifest_enhancement_id_valid(const char *id) {
     return length > 0;
 }
 
+bool nk_title_manifest_enhancement_variant_valid(const char *variant) {
+    if (!variant) return false;
+    const char *plus = strchr(variant, '+');
+    if (!plus) return nk_title_manifest_enhancement_id_valid(variant);
+    size_t length = strlen(variant);
+    size_t first = (size_t)(plus - variant);
+    if (length > NK_MAX_ENHANCEMENT_PACKAGE_ID - 1u || first == 0u ||
+        first >= NK_MAX_ENHANCEMENT_PACKAGE_ID) {
+        return false;
+    }
+    char timing[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    memcpy(timing, variant, first);
+    timing[first] = '\0';
+    /* The second id holds no `+` either (the id check refuses it), and a build never
+       carries the same package twice. */
+    return nk_title_manifest_enhancement_id_valid(timing) &&
+           nk_title_manifest_enhancement_id_valid(plus + 1) && strcmp(timing, plus + 1) != 0;
+}
+
 bool nk_title_manifest_package_dir_name(const char *disc_id,
                                         const char *enhancement_package_id,
                                         char *out, size_t out_size) {
@@ -2273,7 +2292,7 @@ bool nk_title_manifest_package_dir_name(const char *disc_id,
     if (!enhancement_package_id || !enhancement_package_id[0]) {
         written = snprintf(out, out_size, "%s", normalized);
     } else {
-        if (!nk_title_manifest_enhancement_id_valid(enhancement_package_id)) return false;
+        if (!nk_title_manifest_enhancement_variant_valid(enhancement_package_id)) return false;
         written = snprintf(out, out_size, "%s-enhanced-%s", normalized,
                            enhancement_package_id);
     }
@@ -5135,25 +5154,39 @@ static bool package_catalog_identity_matches(const char *disc_id,
 
 /* A package is the variant its folder names. A build records the enhancement
    package it applied in the cache's codegen options (enhancement_package_id,
-   tools/nk_core/package_cache.py) and an authentic build records none, so an
-   enhanced build copied into the authentic folder, or one built from another
-   enhancement package, never launches as the variant the user chose. */
+   tools/nk_core/package_cache.py), and the code-hook package beside it
+   (code_hook_package_id, section 9.9), and an authentic build records neither,
+   so an enhanced build copied into the authentic folder, or one built from
+   other packages, never launches as the variant the user chose. */
 static bool package_validate_variant(const JsonNode *package,
                                      const char *enhancement_package_id,
                                      char *error, size_t error_size) {
     const JsonNode *options = obj_get(obj_get(package, "cache"), "codegen_options");
     const JsonNode *recorded = obj_get(options, "enhancement_package_id");
+    const JsonNode *recorded_hook = obj_get(options, "code_hook_package_id");
     if (!enhancement_package_id || !enhancement_package_id[0]) {
-        if (recorded || obj_get(options, "enhancement_package_epoch")) {
+        if (recorded || recorded_hook || obj_get(options, "enhancement_package_epoch")) {
             snprintf(error, error_size,
                      "The package in the authentic package folder is an enhanced build.");
             return false;
         }
         return true;
     }
+    /* <timing id>+<hook id>: the timing package is the build's enhancement package and
+       the code-hook package rides beside it; any other variant carries no code-hook
+       package beside its one package. */
+    char timing[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    const char *plus = strchr(enhancement_package_id, '+');
+    size_t first = plus ? (size_t)(plus - enhancement_package_id) : strlen(enhancement_package_id);
+    if (first >= sizeof(timing)) first = sizeof(timing) - 1u;
+    memcpy(timing, enhancement_package_id, first);
+    timing[first] = '\0';
     const char *recorded_id = NULL;
-    if (!package_string(recorded, &recorded_id) ||
-        strcmp(recorded_id, enhancement_package_id) != 0) {
+    const char *recorded_hook_id = NULL;
+    bool hook_ok = plus ? package_string(recorded_hook, &recorded_hook_id) &&
+                              strcmp(recorded_hook_id, plus + 1) == 0
+                        : recorded_hook == NULL;
+    if (!package_string(recorded, &recorded_id) || strcmp(recorded_id, timing) != 0 || !hook_ok) {
         snprintf(error, error_size,
                  "The enhanced package was not built from enhancement package %s.",
                  enhancement_package_id);
@@ -5233,7 +5266,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         return NK_RUNTIME_PACKAGE_INCOMPATIBLE;
     }
     bool enhanced = enhancement_package_id && enhancement_package_id[0];
-    if (enhanced && !nk_title_manifest_enhancement_id_valid(enhancement_package_id)) {
+    if (enhanced && !nk_title_manifest_enhancement_variant_valid(enhancement_package_id)) {
         if (reason && reason_size) snprintf(reason, reason_size,
             "The enhancement package id is not a valid package name.");
         return NK_RUNTIME_PACKAGE_INCOMPATIBLE;

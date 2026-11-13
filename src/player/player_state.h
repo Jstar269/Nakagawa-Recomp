@@ -211,6 +211,15 @@ typedef struct {
     /* Why a file that exists cannot be used; empty when there is no file or it
        is usable. */
     char problem[160];
+    /* The title's culling package (section 11.3.6), read the same way from
+       <disc ID, lowercase>-cull.json: it parses, its category is
+       guest_memory_code_hook, its id is a valid package name other than the
+       timing package's, and its target_title_id is the title's own. An Ace
+       launch with Wider culling on builds and launches with it (section 9.9). */
+    bool cull_available;
+    char cull_package_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    bool cull_shipped;
+    char cull_problem[160];
 } PlayerTitleEnhancement;
 
 /* The three play modes (docs/ENHANCEMENT_CONTRACT.md section 10, #2055). Authentic is the
@@ -256,6 +265,9 @@ typedef enum {
     PLAYER_PART_SSAA,          /* supersampling (#2073, section 10.21): 0 off, or the factor 2 or 4 per
                                   axis on top of the render scale. Host presentation only; off in a
                                   fresh file and in every preset */
+    PLAYER_PART_MIPS,          /* host-built mip chains (section 11.3.8): 0 off, 1 on. Appended; the
+                                  SR_ACE line carries mips=on, right after twin, only when on; off in
+                                  a fresh file */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -1023,6 +1035,16 @@ struct PlayerApp {
     NkRenderPath render_path;
     char render_path_disc[MAX_DISC_ID_LEN];
     bool render_notice_hidden[NK_RENDER_FALLBACK_COUNT];
+    /* What the GPU renderer of the latest launch hands to the software renderer for long
+       enough to slow the game, from its render_fallback boot events (#2151): one bit per
+       NkRenderEffect, and the sentence that names them. Cleared by each launch. Hide on the
+       game's page hides it for that game and the effects it named, for the rest of this
+       player session: another game, or an effect it did not name, shows it again. The last
+       game hidden is the one remembered. */
+    uint16_t render_effects;
+    char render_effects_text[384];
+    uint16_t render_effects_hidden;
+    char render_effects_hidden_disc[MAX_DISC_ID_LEN];
     bool close_confirmation_pending;
     char boot_event_file_path[MAX_PATH_LEN];
     bool should_quit;
@@ -1575,7 +1597,8 @@ typedef struct {
     bool vsync;
     int fullscreen;       /* 1 on, 0 off, -1 left as the user set it */
     /* Each Enhanced part's value under this preset, or -1 where the library's own value
-       stays. Only presentation parts are set: Crisp system text and Sharper enlarging. */
+       stays. Only presentation parts are set: Crisp system text, Sharper enlarging and (under
+       Ultra) Full 32-bit colour. */
     int part[PLAYER_PART_COUNT];
 } PlayerGraphicsPresetRow;
 
@@ -1709,6 +1732,18 @@ bool player_app_title_60hz_released(const PlayerApp *app, int game_index);
 void player_app_set_title_60hz(PlayerApp *app, int game_index, bool on);
 /* The --experimental-60hz flag: on for this session only, never saved. */
 void player_app_set_experimental_60hz_session(PlayerApp *app, bool on);
+/* An Ace launch of the title with its Wider culling part on (section 11.3.6): the launch line
+   carries cull=on, and the title builds and launches with its culling package when it has a
+   usable one (PlayerTitleEnhancement.cull_available). Authentic and Enhanced never. */
+bool player_app_title_cull_on(const PlayerApp *app, int game_index);
+/* Why the title's culling package cannot be used while player_app_title_cull_on asks for it
+   (PlayerTitleEnhancement.cull_problem), so the title page names it; "" when the part is off,
+   the package is usable, or the title has no culling package file. */
+const char *player_app_title_cull_problem(const PlayerApp *app, int game_index);
+/* The title's selected build carries its timing package, so its launch runs with the 60 FPS
+   game logic (player_play_config_session's logic_60_package): an enhanced build that is not
+   the culling package alone (GameRecord.enhancement_hook_only). */
+bool player_game_has_timing_package(const GameRecord *game);
 
 /* ---- The play modes (#2055; src/rt/ace.h) ---- */
 
@@ -1741,6 +1776,7 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
  * notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off" (tier=ace for Ace; smooth=match is never written).
+ * ";mips=on" follows twin only with the Smooth far textures part on; a missing mips is off.
  * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
  * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
@@ -1858,13 +1894,18 @@ void player_app_keep_waiting_for_stalled_game(PlayerApp *app);
    takes, and what may fix it. False, with both NULL, for no fallback. */
 bool player_render_notice_text(NkRenderFallback fallback, const char **heading,
                                const char **text);
-/* The notice for disc_id's page: the latest launch's fallback when that launch started this
-   disc, its render_path event has been read, and its notice is not hidden. */
+/* The sentence naming what the GPU renderer hands to the software renderer: effects is one
+   bit per NkRenderEffect. Writes "" and returns false for none or a sentence too long for out. */
+bool player_render_effects_text(uint16_t effects, char *out, size_t out_capacity);
+/* The notice for disc_id's page when the latest launch started this disc and its render_path
+   event has been read: its start-up fallback, or else, while the GPU renderer draws, the
+   effects it hands to the software renderer (render_fallback events), unless hidden. */
 bool player_app_render_notice(const PlayerApp *app, const char *disc_id, const char **heading,
                               const char **text);
-/* Hide: that fallback's notice stays hidden for the rest of this player session. */
+/* Hide: the notice shown stays hidden for the rest of this player session. */
 void player_app_hide_render_notice(PlayerApp *app);
-/* Reads one line of the session's boot events for the render_path event. */
+/* Reads one line of the session's boot events for the render_path and render_fallback
+   events. */
 void player_app_consume_render_path_line(PlayerApp *app, const char *line);
 
 /* One PLAY, split so its slow part can leave the UI thread (#1298). Checking a

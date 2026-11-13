@@ -28,6 +28,14 @@ static const uint8_t k_test_glyph_pixel = 0xFFu;
 typedef char player_screens_enhanced_rows_fit[
     PLAYER_PART_COUNT <= PLAYER_UI_ENHANCED_ROWS ? 1 : -1];
 
+/* The longest render notice (#2151): player_render_effects_text with every effect named;
+   test_player_state.c checks the player writes exactly this. */
+static const char k_render_effects_all[] =
+    "Some of this game's drawing is done in software because the GPU renderer cannot draw "
+    "it: stencil effects, colour-test effects, logic operations, partial colour writes, "
+    "pictures drawn in main memory, wide frame buffers, mipmapped textures, lines and "
+    "points. The game may run slower.";
+
 /* Each part's words, as player_state.c's k_enhanced_parts gives them. */
 static const char *const k_enhanced_af_labels[] = {"16x", "8x", "4x", "2x", "Off"};
 static const char *const k_enhanced_switch_labels[] = {"On", "Off"};
@@ -56,7 +64,8 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_STICK] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_TWIN] = ENHANCED_WORDS(k_enhanced_switch_labels),
-    [PLAYER_PART_SSAA] = ENHANCED_WORDS(k_enhanced_ssaa_labels)};
+    [PLAYER_PART_SSAA] = ENHANCED_WORDS(k_enhanced_ssaa_labels),
+    [PLAYER_PART_MIPS] = ENHANCED_WORDS(k_enhanced_switch_labels)};
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
 enum { ENHANCED_MAX_WORDS = 5 };
@@ -274,6 +283,7 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_REMOVE,
                FLOW_PAGE_STOP, FLOW_PAGE_TITLE_ACE, FLOW_PAGE_TITLE_ENHANCED,
                FLOW_PAGE_TITLE_AUTHENTIC, FLOW_PAGE_TITLE_RENDER,
+               FLOW_PAGE_TITLE_RENDER_EFFECTS,
                FLOW_PAGE_SAVES, FLOW_PAGE_SAVES_RESTORE, FLOW_PAGE_SAVES_REPLACE,
                FLOW_PAGE_TITLE_STEAM, FLOW_PAGE_STEAM, FLOW_PAGE_STEAM_ACCOUNTS,
                FLOW_PAGE_STEAM_BLOCKED, FLOW_PAGE_TITLE_TALL,
@@ -459,11 +469,12 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.scaling = "Sharp";
     settings.preset = "Medium";
     if (which == FLOW_SETTINGS_PRESET) {
-        /* High chosen (#2150): the notice line names the Enhanced parts it sets. The note is
-           player_app_graphics_preset_note's for High, the longest a preset writes. */
-        settings.preset = "High";
-        settings.preset_notice = "High is used in Enhanced and Ace, with crisp text on and FSR 1 "
-                                 "off. Authentic uses your settings.";
+        /* Ultra chosen (#2150, #2280): the notice line names the Enhanced parts it sets. The note
+           is player_app_graphics_preset_note's for Ultra, the longest a preset writes. */
+        settings.preset = "Ultra";
+        settings.preset_notice =
+            "Ultra is used in Enhanced and Ace, with crisp text, FSR 1 and full 32-bit colour "
+            "on. Authentic uses your settings.";
     }
     settings.vsync = true;
     /* The refresh-rate advisory case runs on a 144 Hz display; the rest on 60 Hz. */
@@ -579,10 +590,11 @@ static const char *const k_pad_bindings[PLAYER_UI_CONTROLLER_BUTTONS] = {
 };
 /* When set, Select's controller binding in the controller cases. */
 static const char *k_pad_bindings_override;
-/* input_settings.c's words for the profile's default keyboard keys (#1299). */
+/* input_settings.c's words for the profile's default keyboard keys (#1299), with Cross and
+   Square on the mouse's left and back buttons (#1791). */
 static const char *const k_key_bindings[PLAYER_UI_CONTROLLER_BUTTONS] = {
     "Shift", "Enter", "Up Arrow", "Right Arrow", "Down Arrow", "Left Arrow",
-    "Q", "W", "S", "Z", "X", "A", "None", "None"
+    "Q", "W", "S", "Z", "Left Click", "Mouse 4", "None", "None"
 };
 /* The glyphs player_ui_nk.c gives the defaults (#1299): the controller's in the set of
    an Xbox-style pad, the keys as keycaps; Home and Hold are unbound. */
@@ -597,7 +609,7 @@ static const PlayerUiBindingGlyph k_pad_glyphs[PLAYER_UI_CONTROLLER_BUTTONS] = {
 static const PlayerUiBindingGlyph k_key_glyphs[PLAYER_UI_CONTROLLER_BUTTONS] = {
     GLYPH(CONFIRM, "SHIFT"), GLYPH(CONFIRM, "ENTER"), GLYPH(MOVE, NULL), GLYPH(MOVE, NULL),
     GLYPH(MOVE, NULL), GLYPH(MOVE, NULL), GLYPH(CONFIRM, "Q"), GLYPH(CONFIRM, "W"),
-    GLYPH(CONFIRM, "S"), GLYPH(CONFIRM, "Z"), GLYPH(CONFIRM, "X"), GLYPH(CONFIRM, "A"),
+    GLYPH(CONFIRM, "S"), GLYPH(CONFIRM, "Z"), GLYPH(CONFIRM, "L CLICK"), GLYPH(CONFIRM, "MOUSE 4"),
     NO_GLYPH, NO_GLYPH
 };
 /* The stick's four default keys (#1299), up, down, left and right. */
@@ -894,13 +906,14 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         return player_ui_screen_title(ui, &title);
     }
     if (which == FLOW_PAGE_TITLE_ENHANCED || which == FLOW_PAGE_TITLE_AUTHENTIC ||
-        which == FLOW_PAGE_TITLE_RENDER) {
+        which == FLOW_PAGE_TITLE_RENDER || which == FLOW_PAGE_TITLE_RENDER_EFFECTS) {
         /* #2245: a game's page as the player fills it for the user's own disc on Enhanced (or
            Authentic): every Enhanced part on, the longest last-session line the runtime's
            report gives, the disc check, the compatibility notes with the developer view, and
            Rebuild beside PLAY. On main the page did not scroll at the design text size, so
            this page pushed the prompt bar off the window. The render case adds #2151's notice
-           with the longer of its two sentences (player_render_notice_text). */
+           with the longer of its two sentences (player_render_notice_text); the effects case
+           the longest sentence player_render_effects_text writes, every effect named. */
         static PlayerUiTitle fixture;
         PlayerUiTitleModel title;
         bool enhanced = which != FLOW_PAGE_TITLE_AUTHENTIC;
@@ -939,6 +952,9 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
                 "Vulkan did not start on this PC, so this game is drawn in software and shown "
                 "in a basic Windows window. The Internal resolution setting has no effect, and "
                 "the game may run slower. Updating the graphics driver may help.";
+        } else if (which == FLOW_PAGE_TITLE_RENDER_EFFECTS) {
+            title.render_notice_heading = "Partly drawn in software";
+            title.render_notice_text = k_render_effects_all;
         }
         return player_ui_screen_title(ui, &title);
     }
@@ -3314,11 +3330,12 @@ static void test_settings_pages(void) {
           "Settings on a 60 Hz display shows no refresh-rate advisory");
     CHECK(flow_case_fits(FLOW_SETTINGS_PRESET, 960, 540, dump, sizeof(dump)),
           "Settings with a graphics preset's note fits 960 x 540");
-    CHECK(strstr(dump, "High is used in Enhanced and Ace, with crisp text on and FSR 1") != NULL &&
+    CHECK(strstr(dump, "Ultra is used in Enhanced and Ace, with crisp text, FSR 1 and full 32-bit "
+                       "colour on. Authentic uses your settings.") != NULL &&
               strstr(dump, "Changes are saved as you make them") == NULL,
           "a graphics preset's note takes the Settings notice line");
-    CHECK(strstr(dump, "\"HIGH\"") != NULL,
-          "the graphics preset row says High");
+    CHECK(strstr(dump, "\"ULTRA\"") != NULL,
+          "the graphics preset row says Ultra");
     CHECK(dump_flow_case(FLOW_SETTINGS, dump, sizeof(dump)) &&
               strstr(dump, "Changes are saved as you make them") != NULL &&
               strstr(dump, "is used in Enhanced and Ace") == NULL,
@@ -3357,7 +3374,8 @@ static void test_settings_pages(void) {
     CHECK(flow_case_fits(FLOW_SETTINGS_ACE, 960, 540, dump, sizeof(dump)) &&
               flow_case_has_scroll(FLOW_SETTINGS_ACE, 960, 540),
           "Settings > Enhanced scrolls inside the 960 x 540 window");
-    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1000, dump, sizeof(dump)) &&
+    /* 1100 tall: the fifteenth row (Smooth far textures) is past the bottom of a 1000-tall window. */
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1100, dump, sizeof(dump)) &&
               strstr(dump, "\"PLAY MODE: ENHANCED\"") != NULL &&
               strstr(dump, "\"TEXTURE FILTERING: 16X\"") != NULL &&
               strstr(dump, "\"CRISP SYSTEM TEXT: ON\"") != NULL &&
@@ -3368,6 +3386,7 @@ static void test_settings_pages(void) {
               strstr(dump, "\"CLEAN PITCHED SOUND: OFF\"") != NULL &&
               strstr(dump, "\"SHARPER ENLARGING: OFF\"") != NULL &&
               strstr(dump, "\"SUPERSAMPLING: OFF\"") != NULL &&
+              strstr(dump, "\"SMOOTH FAR TEXTURES: OFF\"") != NULL &&
               /* The sentences wrap; their lines are dumped one by one. */
               strstr(dump, "Smooths steady 30 FPS scenes") != NULL &&
               strstr(dump, "Adds about 17 ms of delay.\"") != NULL &&
@@ -3386,6 +3405,10 @@ static void test_settings_pages(void) {
               PLAYER_UI_ID_ENHANCED_PART(13) == 0x4680u &&
               PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SSAA) == 0x4680u && PLAYER_PART_COUNT >= 14,
           "the part rows' ids: 13 in the first range, the 14th in the second");
+    /* The 15th (Smooth far textures) follows Supersampling in the second range, at 0x4681. */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(14) == 0x4681u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_MIPS) == 0x4681u && PLAYER_PART_COUNT >= 15,
+          "the part rows' ids: the 15th in the second range, after the 14th");
     for (unsigned i = 0u; i < PLAYER_PART_COUNT; ++i) {
         PlayerUiAction part =
             activate_flow_button(PLAYER_UI_ID_ENHANCED_PART(i), FLOW_SETTINGS_ACE);
@@ -3501,6 +3524,17 @@ static void test_settings_pages(void) {
                            "software") != NULL &&
               strstr(dump, "\"DRAWN IN SOFTWARE\"") != NULL && strstr(dump, "\"HIDE\"") != NULL,
           "the render notice shows its heading, its sentence and Hide on the game's page");
+    CHECK(flow_case_fits(FLOW_PAGE_TITLE_RENDER_EFFECTS, 1280, 720, dump, sizeof(dump)) &&
+              strstr(dump, "Some of this game's drawing is done in software") != NULL &&
+              strstr(dump, "\"PARTLY DRAWN IN SOFTWARE\"") != NULL &&
+              strstr(dump, "\"HIDE\"") != NULL,
+          "the render notice names every effect the GPU renderer hands to software, with Hide");
+    CHECK(flow_case_fits(FLOW_PAGE_TITLE_RENDER_EFFECTS, 960, 540, dump, sizeof(dump)),
+          "the longest render notice fits the 960 x 540 minimum window");
+    CHECK(activate_flow_button(PLAYER_UI_ID_TITLE_RENDER_NOTICE_HIDE,
+                               FLOW_PAGE_TITLE_RENDER_EFFECTS).kind ==
+              PLAYER_UI_ACTION_HIDE_RENDER_NOTICE,
+          "the effects notice's Hide asks to hide it");
     CHECK(dump_flow_case(FLOW_PAGE_TITLE_ENHANCED, dump, sizeof(dump)) &&
               strstr(dump, "DRAWN IN SOFTWARE") == NULL && strstr(dump, "\"HIDE\"") == NULL,
           "without a fallback the game's page has no render notice");
@@ -5365,7 +5399,8 @@ static int capture_screens(const char *directory) {
             {FLOW_DEVLOG, "developer-log", PLAYER_UI_ID_DEVELOPER_LOG_CLOSE},
             /* #2245 and #2151: the fullest Enhanced page, and with the render notice. */
             {FLOW_PAGE_TITLE_ENHANCED, "title-enhanced-full", PLAYER_UI_ID_TITLE_PRIMARY},
-            {FLOW_PAGE_TITLE_RENDER, "title-render-notice", PLAYER_UI_ID_TITLE_PRIMARY}
+            {FLOW_PAGE_TITLE_RENDER, "title-render-notice", PLAYER_UI_ID_TITLE_PRIMARY},
+            {FLOW_PAGE_TITLE_RENDER_EFFECTS, "title-render-effects", PLAYER_UI_ID_TITLE_PRIMARY}
         };
         for (size_t i = 0u; i < sizeof(flows) / sizeof(flows[0]); ++i) {
             g_flow_case = flows[i].which;
