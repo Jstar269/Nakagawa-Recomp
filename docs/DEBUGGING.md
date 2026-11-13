@@ -483,8 +483,8 @@ Codegen time on such an image stays high when its data holds many seeds whose bo
 another by conditional branches: each such body is clean when split at the next seed, so each
 seed is kept as an entry (the rule never takes a body that could translate), and code generation
 then walks each one's unsplit body through the same shared region and stubs it. On one title's
-overlay that is about 1,900 entries and 2,322 s of the package's codegen, against 9,698 s without
-the withdrawal. Remembering a failed walk across entries in codegen is the open follow-up; until
+overlay, 2,283 entries stay stubs and the package's codegen takes 2,196 s, against 5,644 stubs and
+9,698 s without the withdrawal. Remembering a failed walk across entries in codegen is the open follow-up; until
 then the time is the cost of the conservative rule, not a hang.
 
 The share is a time share. It overstates the interpreter's share of instructions, because the
