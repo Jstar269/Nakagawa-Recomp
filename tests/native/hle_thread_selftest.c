@@ -3297,6 +3297,7 @@ static void test_prx_export_relocation_behavior(void) {
 
 int sr_hle_test_last_prx_host_served(void);
 void sr_hle_test_unregister_late_imports(uint32_t lo, uint32_t hi);
+unsigned sr_hle_test_psmf_players_used(void);   /* hle_mpeg.c (#286) */
 int sr_hle_test_module_host_served(uint32_t uid);
 
 /* Replaces the first little-endian copy of `from` in the file with `to`. */
@@ -47352,12 +47353,14 @@ static void test_late_prx_unload_keeps_module_owned_objects(void) {
 
 /* ---- #286: a guest player's threads and queue go with its own Delete; unload leaves nothing ----
  *
- * A title that ships libpsmfplayer runs it: the module's scePsmfPlayerCreate starts the player's
- * worker threads (reader, video, control) blocked on a message box, and its scePsmfPlayerDelete
- * wakes them, joins them, deletes them and deletes the box. The PSP's own stop and unload tear
- * none of that down (#1106, test_late_prx_unload_keeps_module_owned_objects above), so the
- * guest's Delete is what removes them, and the runtime has to carry that out completely and keep
- * no player state of its own beside it.
+ * A title that ships libpsmfplayer runs it. This test models such a player: its
+ * scePsmfPlayerCreate starts three worker threads blocked on a message box, and its
+ * scePsmfPlayerDelete wakes them, joins them, deletes them and deletes the box (a model, not the
+ * real library's code). The PSP's own stop and unload leave module-owned objects alone (#1106,
+ * test_late_prx_unload_keeps_module_owned_objects above, measured for a semaphore, an event flag,
+ * a callback and a worker thread; a message box is inferred to behave the same), so the guest's
+ * Delete is what removes them, and the runtime has to carry that out completely and keep no
+ * player state of its own beside it.
  *
  * The synthetic module exports the two real scePsmfPlayer NIDs, which host HLE also registers.
  * Production StartModule links them ahead of the host handlers; the guest bodies make their
@@ -47385,7 +47388,6 @@ static void test_late_prx_unload_keeps_module_owned_objects(void) {
 #define GPLAYER_MSG            0x00251300u   /* one 16-byte quit packet per worker */
 #define GPLAYER_RECV_OUT       0x00251400u   /* one received-packet word per worker */
 #define GPLAYER_INFO           0x00251480u
-#define GPLAYER_UNKNOWN_THID   0x80020198u
 #define GPLAYER_START_NID      LATE_OBJ_START_NID
 #define GPLAYER_STOP_NID       LATE_OBJ_STOP_NID
 #define GPLAYER_UNLOAD_NID     LATE_OBJ_UNLOAD_NID
@@ -47474,6 +47476,9 @@ static void gplayer_runner(CpuState *s) {
         /* The loader publishes every export of the image; the fixture's table is empty, so
          * the second export goes into the same late-import registry by hand. */
         sr_hle_register_late_import(GPLAYER_DELETE_NID, GPLAYER_BASE + GPLAYER_DELETE_OFF);
+        expect(sr_hle_test_started_export(GPLAYER_CREATE_NID) == 0u &&
+                   sr_hle_test_started_export(GPLAYER_DELETE_NID) == 0u,
+               "guest player: before StartModule neither export is linked");
         expect(late_obj_guest_call(s, GPLAYER_START_NID, uid, 0u, 0u, 0u, 0u, 0u) == 0u &&
                    sr_hle_test_started_export(GPLAYER_CREATE_NID) ==
                        GPLAYER_BASE + GPLAYER_CREATE_OFF &&
@@ -47487,7 +47492,8 @@ static void gplayer_runner(CpuState *s) {
                        0u && MEM_R32(GPLAYER_HANDLE) == GPLAYER_DATA,
                "guest player: the module's own scePsmfPlayerCreate builds the player");
         expect(late_obj_guest_call(s, GPLAYER_STATUS_NID, GPLAYER_HANDLE, 0u, 0u, 0u, 0u, 0u) ==
-                   GPLAYER_HOST_NO_PLAYER,
+                   GPLAYER_HOST_NO_PLAYER &&
+                   sr_hle_test_psmf_players_used() == 0u,
                "guest player: the host player holds no instance for the guest's handle");
         const uint32_t mbx = MEM_R32(GPLAYER_DATA);
         uint32_t workers[GPLAYER_WORKERS];
@@ -47506,10 +47512,19 @@ static void gplayer_runner(CpuState *s) {
             s_gplayer_first_uids[0] = mbx;
             memcpy(&s_gplayer_first_uids[1], workers, sizeof workers);
         } else {
-            expect(mbx != s_gplayer_first_uids[0] && workers[0] != s_gplayer_first_uids[1] &&
+            int stale_gone = 1;
+            for (uint32_t i = 0; i < GPLAYER_WORKERS; i++)
+                stale_gone &= sched_thread_info(s_gplayer_first_uids[1u + i], &info) != 0;
+            MEM_W32(GPLAYER_INFO, 52u);
+            stale_gone &= late_obj_guest_call(s, NID_MBX_REFER, s_gplayer_first_uids[0],
+                                              GPLAYER_INFO, 0u, 0u, 0u, 0u) ==
+                          SCE_KERNEL_ERROR_UNKNOWN_MBXID;
+            expect(stale_gone && mbx != s_gplayer_first_uids[0] &&
+                       workers[0] != s_gplayer_first_uids[1] &&
                        workers[1] != s_gplayer_first_uids[2] &&
                        workers[2] != s_gplayer_first_uids[3],
-                   "guest player: the reloaded module's player has fresh objects");
+                   "guest player: the reloaded module's player has fresh objects, and the first "
+                   "player's stay gone");
         }
 
         expect(late_obj_guest_call(s, GPLAYER_DELETE_NID, GPLAYER_HANDLE, 0u, 0u, 0u, 0u, 0u) ==
@@ -47520,19 +47535,19 @@ static void gplayer_runner(CpuState *s) {
             quit &= s_gplayer_received[i] >= GPLAYER_MSG &&
                     s_gplayer_received[i] < GPLAYER_MSG + 16u * GPLAYER_WORKERS;
             gone &= late_obj_guest_call(s, LATE_OBJ_REFER_THREAD, workers[i], GPLAYER_INFO,
-                                        0u, 0u, 0u, 0u) == GPLAYER_UNKNOWN_THID &&
+                                        0u, 0u, 0u, 0u) == SCE_KERNEL_ERROR_UNKNOWN_THID &&
                     sched_thread_info(workers[i], &info) != 0;
         }
         expect(quit, "guest player: each worker received its quit packet and returned");
         expect(gone, "guest player: after Delete no worker thread resolves");
         MEM_W32(GPLAYER_INFO, 52u);
         expect(late_obj_guest_call(s, NID_MBX_REFER, mbx, GPLAYER_INFO, 0u, 0u, 0u, 0u) ==
-                   MBX_UNKNOWN_ID_ERR,
+                   SCE_KERNEL_ERROR_UNKNOWN_MBXID,
                "guest player: after Delete its message box does not resolve");
 
         expect(late_obj_guest_call(s, GPLAYER_STOP_NID, uid, 0u, 0u, 0u, 0u, 0u) == 0u &&
                    late_obj_guest_call(s, GPLAYER_UNLOAD_NID, uid, 0u, 0u, 0u, 0u, 0u) == 0u,
-               "guest player: the module stops and unloads; no leftover continuation refuses it");
+               "guest player: the module stops and unloads (no ready or running thread in it refuses it)");
         expect(sr_hle_resolve_late_import(GPLAYER_CREATE_NID) == SR_HLE_LATE_BUILTIN &&
                    sr_hle_resolve_late_import(GPLAYER_DELETE_NID) == SR_HLE_LATE_BUILTIN &&
                    sr_hle_test_started_export(GPLAYER_CREATE_NID) == 0u &&
@@ -47543,7 +47558,8 @@ static void gplayer_runner(CpuState *s) {
         expect(gplayer_live_threads_in_image() == live_before,
                "guest player: no live thread runs the unloaded module's code");
         expect(late_obj_guest_call(s, GPLAYER_STATUS_NID, GPLAYER_HANDLE, 0u, 0u, 0u, 0u, 0u) ==
-                   GPLAYER_HOST_NO_PLAYER,
+                   GPLAYER_HOST_NO_PLAYER &&
+                   sr_hle_test_psmf_players_used() == 0u,
                "guest player: after unload the host player still holds nothing for the handle");
         s_gplayer_cycles_done++;
     }
@@ -47581,6 +47597,8 @@ static void test_guest_player_unload_leaves_no_threads_or_queues(void) {
 
     s_cur = -1;
     remove(path);
+    /* A failed cycle can stop before unload: keep its exports from reaching later tests. */
+    sr_hle_test_unregister_late_imports(GPLAYER_BASE, GPLAYER_BASE + LIFECYCLE_IMAGE_SIZE);
     hle_test_setenv("SR_REAL_MODULE_START", "0");
     sr_test_guest_fn_reset();
     sr_hle_test_module_reset();
