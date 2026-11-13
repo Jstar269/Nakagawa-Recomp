@@ -3376,6 +3376,74 @@
         "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
       },
       {
+        "id": "PSP-GE-RASTER-002",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Built as the fixed-shape case 187 stream of #2193's raster bounds cells: colour writes past the frame-buffer stride (fbw 512, 500 and 256), depth writes past zbw 256, and a depth-only clear under a scissor, each read back as counts of drawn, cleared, fill and other pixels. Development runs of earlier builds on 2026-11-12 (PSP-3000, XMB context, boots 194 and 195) only set the block address and the RGB comparison. No hardware run is cited and no measurement is claimed.",
+        "group": "ge",
+        "source": "fixtures/psp_oracle/probe_ge_sample.c",
+        "prx": "ge_raster_bounds.prx",
+        "apis": [
+          "sceGeEdramGetAddr",
+          "sceGeListEnQueue",
+          "sceGeListSync",
+          "sceGeDrawSync",
+          "sceGeBreak",
+          "sceKernelDcacheWritebackAll",
+          "sceKernelDelayThread",
+          "sceKernelGetSystemTimeLow",
+          "sceDisplayGetFrameBuf"
+        ],
+        "diagnostic_case_ids": [
+          "ge-raster-bounds"
+        ],
+        "case_ids": [
+          "display-check",
+          "raster-*",
+          "depth-*",
+          "vram-restore",
+          "ge-raster-bounds-done"
+        ],
+        "invariant": "#2193: first the display buffer and whether it overlaps the probe's block or the GE never idled (then every later record is SKIP with its word count kept); then per cell in fixed order: the bounded wait outcome of the probe's own list, then fixed-shape reads of a 0x44000-byte colour block at VRAM 0x110000 (plain uncached mirror) and a 0x44000-byte depth block at 0x154000 (uncached 0x04200000 mirror): per read the pixel count and the counts equal to the drawn, cleared and fill values or anything else, or 16 raw pixels; the 0x88000 bytes are saved first and restored and checked at the end",
+        "issues": [
+          2193
+        ],
+        "risk": "low; This is the first recorded use of a GE-context enqueue in this project (PspGeListArgs with a context, as sceGuSendList passes; the boot 195 development run already used one): a FAIL on every -draw record means the enqueue was rejected, not a raster result. Project-written through-mode lists into a probe-owned 0x88000-byte VRAM block at 0x110000 (clear of both XMB display buffers, 0x0 and 0x88000); the probe first reads the display buffer and skips every cell (SKIP records, nothing touched) if it overlaps the block or cannot be read, waits (bounded) for the GE to idle before saving the block, fills it before each cell and restores it at the end; each list is queued with a GE context so the driver restores the GE state after a list that ends; each wait is bounded and decided by the probe's own list, with a sceGeBreak(1) reset only when that list has not ended by the deadline. No POWER RISK is known: the lists use no SIGNAL, JUMP, CALL or RET command (ge-signal's rjump-un, which stalled the console on boot 179, did); every record is written before the next cell, so a stall loses only the cell in flight and those after it; after a reset that leaves the GE busy every later cell is SKIP and the block is still restored. The block's ownership is an assumption: display-check sees only the buffer on screen, so the probe's fill may show on screen and a VSH write into the block would read as other",
+        "reset": "one PRX launch per boot, in XMB context, with no network or radio use; PSPLink soft reset before the next launch only after a read-only nkctl probe shows the launch finished with its done record; otherwise the owner power-cycles the console and nothing is retried on that boot"
+      },
+      {
+        "id": "PSP-GE-RASTER-003",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Built as the fixed-shape case 188 stream of #343's depth rounding cells (zr-thru-eq, zr-thru-gt, zr-xf-eq) in the ge-raster window and record shape: fractional through-mode and transform-mode depths read as colour through EQUAL and GREATER tests. A 0x1f, 0xe0 or 0xff pass mask reads \"truncate or reduced precision\", not truncation alone. Development runs of earlier builds on 2026-11-12 (PSP-3000, XMB context, boots 194 and 195) only set the RGB comparison. No hardware run is cited and no measurement is claimed.",
+        "group": "ge",
+        "source": "fixtures/psp_oracle/probe_ge_sample.c",
+        "prx": "ge_depth_round.prx",
+        "apis": [
+          "sceGeEdramGetAddr",
+          "sceGeListEnQueue",
+          "sceGeListSync",
+          "sceGeDrawSync",
+          "sceGeBreak",
+          "sceKernelDcacheWritebackAll",
+          "sceKernelDelayThread",
+          "sceKernelGetSystemTimeLow"
+        ],
+        "diagnostic_case_ids": [
+          "ge-depth-round"
+        ],
+        "case_ids": [
+          "zr-*",
+          "ge-depth-round-done"
+        ],
+        "invariant": "#343, per cell in fixed order: the bounded GE wait outcome and the window digest, the raw pixels of the 16x4 window x 16..31, y 8..11 of a 64x32 8888 buffer at VRAM 0x100000 after a per-pixel depth pass and a depth-tested draw, and the pass mask of the pixels that show their source colour",
+        "issues": [
+          343
+        ],
+        "risk": "low; This is the first recorded use of a GE-context enqueue in this project (PspGeListArgs with a context, as sceGuSendList passes; the boot 195 development run already used one): a FAIL on every -draw record means the enqueue was rejected, not a raster result. Project-written display lists into the ge-raster VRAM blocks (8 KiB colour at 0x100000 that the CPU clears first, and a depth buffer at 0x110000 that only the GE writes, at its 0x2040-XOR addresses within 0x110000..0x113fff); each list is queued with a GE context so the driver restores the GE state after a list that ends; each wait is bounded and decided by the probe's own list, with a sceGeBreak(1) reset only when that list has not ended by the deadline. No POWER RISK is known: the lists use no SIGNAL, JUMP, CALL or RET command (ge-signal's rjump-un, which stalled the console on boot 179, did); every record is written before the next cell, so a stall loses only the cell in flight and those after it; after a reset that leaves the GE busy every later cell is SKIP. The colour block at 0x100000 is not display-checked or restored and lies inside the XMB display buffer seen on boot 194, so a strip at the bottom of the screen may show the probe's pixels (main's ge-raster and ge-through-z used the same blocks)",
+        "reset": "one PRX launch per boot, in XMB context, with no network or radio use; PSPLink soft reset before the next launch only after a read-only nkctl probe shows the launch finished with its done record; otherwise the owner power-cycles the console and nothing is retried on that boot"
+      },
+      {
         "id": "PSP-GE-MIP-001",
         "status": "implemented",
         "hardware_evidence": "MEASURED",
