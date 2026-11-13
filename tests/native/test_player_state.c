@@ -8551,7 +8551,7 @@ static void assert_cull_build_matches_line(const PlayerApp *app, int index) {
     bool line_cull = strstr(config.ace_spec, ";cull=on") != NULL;
     bool usable = app->title_enhancements[index].cull_available;
     if (with_hook != (line_cull && usable)) {
-        fprintf(stderr, "cull build/line mismatch: variant=%s hook_only=%d usable=%d line=%s\n",
+        fprintf(stderr, "cull build and launch line mismatch: variant=%s hook_only=%d usable=%d line=%s\n",
                 game->enhancement_package_id, (int)game->enhancement_hook_only, (int)usable,
                 config.ace_spec);
     }
