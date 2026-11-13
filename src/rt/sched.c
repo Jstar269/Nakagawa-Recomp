@@ -208,12 +208,16 @@ typedef struct {
     uint32_t stack_base;          /* user-visible stack range, excluding synthetic TLS */
     uint32_t stack_size;          /* aligned user-visible stack bytes */
     uint32_t stack_reservation;   /* user stack plus synthetic TLS reservation */
+    int      stack_in_partition;  /* the stack is a block taken from the user partition's free
+                                   * list below its bump pointer, not from the arena above it */
     /* Flight-recorder thread snapshot (schema 6). import_active/import_nid hold this
      * thread's sr_import_active/sr_import_nid while it is switched out, so a block records
      * the import the thread itself is inside, never another thread's. */
     int      import_active;
     uint32_t import_nid;
     int      pc_stale;            /* switched out inside a call: saved.pc is its last yield */
+    int      yield_switched;      /* switched out by sr_yield's own switch and not resumed since:
+                                   * the one state in which the thread is parked (#2172) */
     int      has_block_nid;       /* the last block happened inside an import */
     uint32_t block_nid;           /* NID of that import */
     int      block_start_valid;   /* block_start_us is the start of the current wait */
@@ -224,6 +228,12 @@ typedef struct {
     uint32_t last_import_nid;
     uint32_t last_import_ret;
     uint32_t last_import_repeats;
+    /* An HLE service thread (sched_create_service_thread, #1139) runs this host function as its
+     * body instead of guest code at `entry`. NULL for every guest thread. */
+    SrSchedServiceBody service_body;
+    void    *service_arg;
+    int      service_waiting;     /* parked in sched_service_wait's delay, which a kick ends */
+    int      service_kicked;      /* kicked while not waiting: the next wait returns at once */
 } TCB;
 
 static TCB      s_tcb[MAXTHREADS];
@@ -347,6 +357,9 @@ static void sched_wait_record_wake(TCB *owner, int terminal, uint32_t result);
 static int      s_ntcb = 0;
 static int      s_cur = -1;      /* index of running thread, -1 = scheduler */
 static int      s_last_pick = -1;/* rotation cursor (file-scope so the selftest can reset it) */
+/* The thread whose delay wait may not expire in the next scheduling decision
+ * (sched_delay_current_dispatching); -1 when none. pick_next clears it once it has promoted. */
+static int      s_hold_expiry = -1;
 static uint32_t s_watchdog_spin_observations;
 /* CPU-wide PSP interrupt state.  Because scheduling is suppressed while this is
  * false, an interrupt-disabled state cannot migrate to another guest thread. */
@@ -623,7 +636,8 @@ uint32_t sched_guest_stack_floor_above(uint32_t addr) {
     uint32_t floor = SR_STACK_ARENA_CEIL;
     for (int i = 0; i < s_ntcb; i++) {
         const TCB *t = &s_tcb[i];
-        if (t->stack_reservation == 0u || t->stack_released) continue;
+        /* A stack in a free block below the bump pointer is not the partition's top. */
+        if (t->stack_reservation == 0u || t->stack_released || t->stack_in_partition) continue;
         if (t->stack_base >= addr && t->stack_base < floor) floor = t->stack_base;
     }
     return floor;
@@ -631,11 +645,31 @@ uint32_t sched_guest_stack_floor_above(uint32_t addr) {
 
 uint32_t sched_guest_stack_floor(void) { return sched_guest_stack_floor_above(0u); }
 
+/* 1 when a live thread stack, from either source, touches [base, end). */
+int sched_guest_stack_overlaps(uint32_t base, uint32_t end) {
+    for (int i = 0; i < s_ntcb; i++) {
+        const TCB *t = &s_tcb[i];
+        if (t->stack_reservation == 0u || t->stack_released) continue;
+        if (t->stack_base < end && t->stack_base + t->stack_reservation > base) return 1;
+    }
+    return 0;
+}
+
 /* The HLE user partition (hle.c) installs a check that refuses a stack range it has
  * handed out. A callback rather than a link-time reference: several fixtures link
  * sched.c without hle.c, and with no check installed every range is accepted. */
 static SrSchedStackRangeRefusal s_stack_range_refusal;
 void sched_set_stack_range_refusal(SrSchedStackRangeRefusal refusal) { s_stack_range_refusal = refusal; }
+
+/* The same partition's free blocks below its bump pointer (hle.c), for a stack no range above it
+ * holds. Unset in fixtures that link sched.c without hle.c: there every stack is an arena range. */
+static SrSchedPartitionHoleAlloc s_partition_hole_alloc;
+static SrSchedPartitionHoleRelease s_partition_hole_release;
+void sched_set_partition_hole_allocator(SrSchedPartitionHoleAlloc alloc,
+                                        SrSchedPartitionHoleRelease release) {
+    s_partition_hole_alloc = alloc;
+    s_partition_hole_release = release;
+}
 
 /* A PSP allocates a thread stack from the high end of the user partition: the highest free
  * block that holds the request, carved from that block's top. Measured on a PSP-3000
@@ -664,7 +698,17 @@ static int stack_range_alloc(uint32_t size, uint32_t *base_out) {
     return 0;
 }
 
-static void stack_range_release(uint32_t base, uint32_t size) {
+/* hle.c: told after a thread stack or High block's owner gives it back to the arena, so the user
+ * partition can take back the part of it that lies below its bump pointer
+ * (partition_arena_released). NULL: not told. */
+static SrSchedArenaRelease s_arena_release_hook;
+
+void sched_set_arena_release_hook(SrSchedArenaRelease release) { s_arena_release_hook = release; }
+
+/* Put [base, base+size) back among the arena's free ranges. stack_range_release() below is the
+ * owner's release; a create that took a range and then refused it calls this one directly: the
+ * range never had an owner, and the partition is not told. */
+static void stack_range_return(uint32_t base, uint32_t size) {
     if (!s_stack_allocator_ready || base == 0u || size == 0u) return;
     if (base < SR_STACK_ARENA_FLOOR || base > SR_STACK_ARENA_CEIL ||
         size > SR_STACK_ARENA_CEIL - base) {
@@ -706,6 +750,34 @@ static void stack_range_release(uint32_t base, uint32_t size) {
         }
     }
     stack_ranges_update_top();
+}
+
+static void stack_range_release(uint32_t base, uint32_t size) {
+    if (!s_stack_allocator_ready || base == 0u || size == 0u) return;
+    stack_range_return(base, size);
+    if (s_arena_release_hook) s_arena_release_hook(base, size);
+}
+
+/* For the HLE user partition (hle.c): whether the arena holds `addr`. Outside the arena it holds
+ * nothing: 1, with *end_out the arena's floor (an address below it) or UINT32_MAX (above it).
+ * Inside it: 1 when a free range holds it, with *end_out the end of that range; 0 when a live
+ * thread stack or High block holds it, with *end_out the start of the next free range above it
+ * (the arena ceiling when none). */
+int sched_stack_arena_free_at(uint32_t addr, uint32_t *end_out) {
+    if (!s_stack_allocator_ready) stack_ranges_reset();
+    if (addr < SR_STACK_ARENA_FLOOR) { *end_out = SR_STACK_ARENA_FLOOR; return 1; }
+    if (addr >= SR_STACK_ARENA_CEIL) { *end_out = UINT32_MAX; return 1; }
+    uint32_t next = SR_STACK_ARENA_CEIL;
+    for (int i = 0; i < s_stack_free_count; i++) {
+        const uint32_t base = s_stack_free[i].base, end = base + s_stack_free[i].size;
+        if (addr >= base && addr < end) {
+            *end_out = end;
+            return 1;
+        }
+        if (base > addr && base < next) next = base;
+    }
+    *end_out = next;
+    return 0;
 }
 
 /* A High block of the user partition (sceKernelAllocMemoryBlock placement 1). A PSP takes High
@@ -806,6 +878,7 @@ void sched_init(CpuState *cpu) {
     s_ntcb = 0;
     s_cur = -1;
     s_last_pick = -1;
+    s_hold_expiry = -1;
     s_watchdog_spin_observations = 0;
     s_root_seen = 0;
     s_tick = 0;
@@ -1007,6 +1080,12 @@ void sched_resume_interrupts(uint32_t state) {
 
 int sched_interrupts_enabled(void) {
     return s_interrupts_enabled;
+}
+
+/* An interrupt episode is running (scheduler_service_pending): on a PSP its handler runs with the
+ * CPU's interrupts off, so no other interrupt is taken until it returns. */
+int sched_servicing_interrupts(void) {
+    return s_servicing_interrupts;
 }
 
 int sched_is_intr_context(void) {
@@ -2308,6 +2387,16 @@ void sched_set_ge_timing_hooks(SrSchedGeNextDeadline next_deadline, SrSchedGeSer
     s_ge_timing_service = service_due;
 }
 
+/* Every waiting GE finish callback (hle_route.c ge_finish_callback: one a VBLANK episode's
+ * handlers raised waits while the handler runs, and one a thread raised under the mask waits for
+ * the resume) runs when each owed VBLANK episode returns, before the next one, so a backlog of
+ * episodes cannot pile completions up behind one another. */
+static SrSchedGeServiceDue s_ge_waiting_deliver;
+
+void sched_set_ge_waiting_hook(SrSchedGeServiceDue deliver_waiting) {
+    s_ge_waiting_deliver = deliver_waiting;
+}
+
 static uint64_t sched_ge_next_deadline(void) {
     return s_ge_timing_next ? s_ge_timing_next() : SCHED_WAIT_FOREVER;
 }
@@ -2462,6 +2551,18 @@ static void scheduler_service_pending(void) {
                 break;
             }
             deliver_vblank();
+            /* The waiting GE finish callbacks run at this episode's return, before the next
+             * owed episode, in interrupt context: the ones its handlers raised, and any a thread
+             * raised under the mask before this batch.  Whether a PSP takes a GE finish
+             * interrupt raised in a VBLANK handler before the next VBLANK edge it still owes
+             * is UNMEASURED; this keeps each callback next to the handler that raised it, as
+             * when it ran inside that handler. */
+            if (s_ge_waiting_deliver && s_interrupts_enabled) {
+                int save_cur = s_cur; s_cur = -1;
+                s_ge_waiting_deliver();
+                s_cur = save_cur;
+                sr_cpu_link_clear(s_cpu);
+            }
         }
         sr_perf_vblank_service(episodes);
     }
@@ -2515,7 +2616,12 @@ static void coro_body(void *param) {
         if (sched_uid_is_worker(t->uid)) fprintf(stderr, "DISPATCH uid=0x%x entry=0x%08x\n", t->uid, t->entry);
         t->has_unwind_jmp = 1;
         if (setjmp(t->unwind_jmp) == 0) {
-            dispatch_from_host(s_cpu, t->entry);  /* runs until the thread returns or exits */
+            if (t->service_body) {
+                t->service_body(s_cpu, t->service_arg);   /* a host body: until it returns */
+                s_cpu->r[2] = 0u;
+            } else {
+                dispatch_from_host(s_cpu, t->entry);  /* runs until the thread returns or exits */
+            }
         } else {
             /* longjmp path: sched_unwind_current() was called from recomp.c.
              * The C frames of any in-flight nested host->guest call were
@@ -2554,8 +2660,9 @@ static void coro_body(void *param) {
             /* The kernel runs a module's module_start in a thread of its own and deletes
              * that thread, freeing its stack, once module_start returns: measured on a
              * PSP-3000 (6.61, PSP-MODULE-START-001), where the returned thread's UID answers
-             * UNKNOWN_THID and the user partition gains exactly its 256 KiB stack. */
-            if (t->module_start) sched_exit_current_delete((int32_t)s_cpu->r[2]);
+             * UNKNOWN_THID and the user partition gains exactly its 256 KiB stack. A service
+             * thread is deleted the same way when its body returns (sched_create_service_thread). */
+            if (t->module_start || t->service_body) sched_exit_current_delete((int32_t)s_cpu->r[2]);
             else sched_exit_current((int32_t)s_cpu->r[2]);
         } else {
             fprintf(stderr, "coro_body: uid=0x%x returned outside its own schedule slot "
@@ -2599,9 +2706,22 @@ static void sched_release_thread_resources(TCB *t) {
     t->resources_released = 1;
 }
 
+static void stack_reservation_release(uint32_t base, uint32_t size, int in_partition) {
+    if (!in_partition) {
+        stack_range_release(base, size);
+        return;
+    }
+    if (!s_partition_hole_release) {
+        fprintf(stderr, "FATAL: guest stack [0x%08x,0x%08x) came from the user partition, "
+                "which has no release installed\n", base, base + size);
+        abort();
+    }
+    s_partition_hole_release(base, size);
+}
+
 static void sched_release_thread_stack(TCB *t) {
     if (!t || t->stack_released) return;
-    stack_range_release(t->stack_base, t->stack_reservation);
+    stack_reservation_release(t->stack_base, t->stack_reservation, t->stack_in_partition);
     t->stack_released = 1;
 }
 
@@ -2733,6 +2853,62 @@ void sched_mark_code_pointer_entry(uint32_t uid) {
     if (t) t->entry_code_pointer = 1;
 }
 
+/* ---- HLE service threads (#1139) --------------------------------------------------------
+ * A firmware library that runs a thread of its own, such as sceNetAdhocctl's, which calls the
+ * game's handlers, is modelled by a kernel thread whose body is a host function. It is a thread
+ * like any other: a TCB with a stack from the arena, a name, a priority, the creator's $gp, a
+ * place in the thread listings, and the CPU only when the scheduler picks it. Its body waits in
+ * sched_service_wait and calls guest code through hle.c's scoped dispatch on its own CpuState.
+ * When the body returns, the thread exits and is deleted. */
+uint32_t sched_create_service_thread(const char *name, int priority, uint32_t stack_size,
+                                     SrSchedServiceBody body, void *arg) {
+    if (!body) return 0x80020192u;                 /* SCE_KERNEL_ERROR_ILLEGAL_ENTRY */
+    /* The kernel's checks for a user thread, in h_CreateThread's order (hle_kernel_thread.c):
+     * a priority of 8..0x77, then a stack of at least 0x200 bytes. The thread runs user code
+     * (the game's handlers), so the user-thread rules apply. */
+    if (priority < 8 || priority > 0x77) return SCE_KERNEL_ERROR_ILLEGAL_PRIORITY;
+    if (stack_size < 0x200u) return 0x80020194u;  /* SCE_KERNEL_ERROR_ILLEGAL_STACK_SIZE */
+    const uint32_t uid = sched_create_thread_ex(0u, priority, stack_size, 0u, name);
+    if (!uid) return SCE_KERNEL_ERROR_NO_MEMORY;
+    TCB *t = tcb_by_uid(uid);
+    t->service_body = body;
+    t->service_arg = arg;
+    const uint32_t started = sched_start_thread(uid, 0u, 0u);   /* a new thread is DORMANT: 0 */
+    return started == 0u ? uid : started;
+}
+
+/* On a service thread: wait until guest time reaches deadline_us (SCHED_WAIT_FOREVER: no
+ * deadline) or another thread kicks it. The wait is a delay, so the thread lists as delayed. */
+void sched_service_wait(uint64_t deadline_us) {
+    if (s_cur < 0 || !s_tcb[s_cur].service_body) return;
+    TCB *t = &s_tcb[s_cur];
+    if (t->service_kicked) {
+        t->service_kicked = 0;
+        return;
+    }
+    vtime_refresh();
+    if (deadline_us != SCHED_WAIT_FOREVER && s_vtime_us >= deadline_us) return;
+    t->service_waiting = 1;
+    sched_delay_current(deadline_us == SCHED_WAIT_FOREVER ? SCHED_WAIT_FOREVER
+                                                          : deadline_us - s_vtime_us);
+    t->service_waiting = 0;
+    t->service_kicked = 0;   /* the body re-reads its state after every wait */
+}
+
+/* Ends a service thread's wait now, or, when it is not in one (running, ready, or inside a
+ * guest call that blocked), makes its next wait return at once. A guest delay inside a handler
+ * is never cut short. */
+void sched_service_kick(uint32_t uid) {
+    TCB *t = tcb_by_uid(uid);
+    if (!t || !t->service_body || t->state == TH_DORMANT) return;
+    if (t->service_waiting && t->state == TH_WAIT_DELAY) {
+        vtime_refresh();
+        t->wake = s_vtime_us;   /* due now: the next scheduling decision promotes it */
+    } else {
+        t->service_kicked = 1;
+    }
+}
+
 /* Continuation of sched_create_thread: stack/UID seeding + libc/reent registration.
  * Split out from the main function so the MAXTHREADS-reclaim path can share it
  * without a goto-forward-over-init. Returns the new thread's uid. */
@@ -2765,25 +2941,42 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
     if (user_sz < 0x200u) user_sz = 0x200u;
     uint32_t reservation = user_sz;
     uint32_t user_base = 0;
+    int in_partition = 0;
+    int overlapped = 0;
+    uint32_t overlap_base = 0;
     int stack_ok = stack_range_alloc(reservation, &user_base);
     if (stack_ok && s_stack_range_refusal &&
         s_stack_range_refusal(user_base, user_base + reservation)) {
-        /* The descending arena reached memory the user partition has handed out. A PSP
-         * allocates thread stacks from that partition, so the create fails for lack of
-         * memory instead of placing a stack over a live block. */
-        fprintf(stderr, "sched_create_thread: stack [0x%08x,0x%08x) would overlap live "
-                "user-partition memory -- failing create (maps to SCE_KERNEL_ERROR_NO_MEMORY)\n",
-                user_base, user_base + reservation);
-        stack_range_release(user_base, reservation);
+        /* The descending arena reached memory the user partition has handed out: no range
+         * above the partition's bump pointer holds the stack. The range never had an owner, so it
+         * goes back to the arena without telling the partition (stack_range_return): the hook
+         * would hand the partition pieces a live stack in a freed block holds. */
+        overlapped = 1;
+        overlap_base = user_base;
+        stack_range_return(user_base, reservation);
         stack_ok = 0;
     }
+    if (!stack_ok && s_partition_hole_alloc && s_partition_hole_alloc(reservation, &user_base)) {
+        /* The PSP's rule (stack_range_alloc) is the highest free block that holds the stack,
+         * and a block the guest freed below the bump pointer is one. */
+        in_partition = 1;
+        stack_ok = 1;
+    }
+    if (!stack_ok && overlapped)
+        fprintf(stderr, "sched_create_thread: stack [0x%08x,0x%08x) would overlap live "
+                "user-partition memory and no free partition block holds it -- failing create "
+                "(maps to SCE_KERNEL_ERROR_NO_MEMORY)\n",
+                overlap_base, overlap_base + reservation);
     /* The 0xFF fill and the k0/TLS seeding below write through host pointers over the
      * whole reservation, so the span is checked before anything is written. */
     if (stack_ok && !sr_guest_span_writable(user_base, reservation)) {
         fprintf(stderr, "sched_create_thread: stack [0x%08x,0x%08x) is not writable guest "
                 "memory -- failing create (maps to SCE_KERNEL_ERROR_NO_MEMORY)\n",
                 user_base, user_base + reservation);
-        stack_range_release(user_base, reservation);
+        /* Nobody owned it yet: a freed partition block goes back to the partition, an arena
+         * range to the arena without the release hook. */
+        if (in_partition) stack_reservation_release(user_base, reservation, 1);
+        else stack_range_return(user_base, reservation);
         stack_ok = 0;
     }
     if (!stack_ok) {
@@ -2830,6 +3023,7 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
     t->stack_base = user_base;
     t->stack_size = user_sz;
     t->stack_reservation = reservation;
+    t->stack_in_partition = in_partition;
     t->stack_released = 0;
     /* A new stack is filled with 0xFF unless the creation attribute has NO_FILLSTACK
      * (evidence at sched_thread_stack_free_size). On a filled stack the lowest word holds the
@@ -2887,6 +3081,7 @@ uint32_t sched_start_thread(uint32_t uid, uint32_t arglen, uint32_t argp) {
         /* The re-seeded pc is the entry, where the thread really resumes: the "switched out
          * inside a call" mark from its last run must not hide it from unload safety (#286). */
         t->pc_stale = 0;
+        t->yield_switched = 0;
         memset(&t->saved, 0, sizeof(t->saved));
         t->saved.r[26] = t->k0_init;
         t->saved.r[29] = t->sp_init;
@@ -3092,6 +3287,7 @@ static void sched_transfer_window_step(void) {
  * nothing about who runs next, it only restores the truth about who is runnable. */
 static void sched_promote_expired_waits(void) {
     for (int i = 0; i < s_ntcb; i++) {
+        if (i == s_hold_expiry) continue;   /* until the next pick (sched_delay_current_dispatching) */
         if ((s_tcb[i].state == TH_WAIT_DELAY || s_tcb[i].state == TH_WAIT_OBJ) &&
             /* An infinite wait has no deadline and can only be released by a
              * signal. Without this guard a virtual clock that reached the
@@ -3229,6 +3425,10 @@ static void sched_rotation_mark(int head) {
  * state yields an identical decision. Returns an index or -1 if nothing is runnable. */
 static int pick_next(void) {
     sched_promote_expired_waits();
+    /* A held delay (sched_delay_current_dispatching) sits out exactly this decision's promotion.
+     * When nobody else is ready this returns -1, the idle path finds the held deadline already
+     * due, and the next pick promotes it: a lone thread resumes one decision later. */
+    s_hold_expiry = -1;
     sched_transfer_window_step();
     int best_pri = 0;
     int have_ready = 0;
@@ -3888,9 +4088,40 @@ void sr_yield(CpuState *s) {
     memcpy(&t->saved, s, sizeof(CpuState));
     if (t->state == TH_RUNNING) t->state = TH_READY;
     s_pause_switch_from_yield = 1;
+    t->yield_switched = 1;
     switch_to_scheduler();
+    t->yield_switched = 0;
     s_pause_switch_from_yield = 0;
     /* resumed later: the scheduler restored our registers into *s before switching back to this coroutine */
+}
+
+/* Whether thread `uid` is parked, and its switched-out call records (#2172; "Resume at a PC"
+ * in docs/ARCHITECTURE.md). sr_yield names the point it continues at before it does its own
+ * work: it advances time, latches and services interrupts and callbacks, and only then, if
+ * another thread should run, switches. Until that switch the thread is running, so a frame
+ * list taken inside the yield would skip the rest of it. The switch above marks the thread
+ * (yield_switched) for as long as it is out; no other switch does. pc_stale is not that mark:
+ * it is derived from a flag only the yielding thread clears, so a thread resumed in between
+ * and switched out inside a call can read clear. A thread at the yield's switch is in no
+ * import; that is checked too. */
+SrResumeStatus sched_resume_switched_out(uint32_t uid, const SrAotReturnBoundaryStack **stack_out,
+                                         const char **why_out) {
+    TCB *t = tcb_by_uid(uid);
+    *stack_out = NULL;
+    *why_out = "";
+    if (t == NULL || !t->started || t->coro == NULL || t->state == TH_DORMANT) {
+        *why_out = "has not started or has ended";
+        return SR_RESUME_NO_FRAMES;
+    }
+    if ((int)(t - s_tcb) == s_cur || t->state == TH_RUNNING)
+        *why_out = "is running";
+    else if (!t->yield_switched)
+        *why_out = "was switched out inside a call, not by sr_yield's own switch";
+    else if (t->hle_depth != 0 || t->import_active)
+        *why_out = "is inside an import";
+    if ((*why_out)[0] != '\0') return SR_RESUME_NOT_PARKED;
+    *stack_out = &t->aot_return_boundary_stack;
+    return SR_RESUME_OK;
 }
 
 /* PSP scheduling is strict-priority preemptive: the moment a higher-priority thread becomes
@@ -4007,6 +4238,23 @@ void sched_delay_current(uint64_t usec) {
     /* Real microseconds of virtual time; any positive delay yields at least once. */
     t->wake = wake;
     switch_to_scheduler();
+}
+
+/* A delay wait whose block always hands the CPU to another ready thread, of any priority, before
+ * the waiter can resume. A 1 us deadline can be over already at the decision the block causes:
+ * on the virtual clock when that dispatch is charged a quantum (scheduler_keep_time_at_dispatch),
+ * on the paced clock when the host microsecond turns over before the scheduler samples it. The
+ * waiter, promoted in that same decision, would win it again at its own priority, so a
+ * lower-priority thread the caller waits for would not run. The hold covers that one decision's
+ * promotion only; from the next one on the wait ends at its deadline as sched_delay_current's.
+ * With no other thread ready, the waiter resumes at the next decision, after the idle path has
+ * found its deadline due (on the virtual clock that path charges its own quantum first). Ace's load skip
+ * (nk_ace_load_skip_wait, ENHANCEMENT_CONTRACT.md section 11.3.10) promises that ready threads of
+ * any priority run while it blocks; sceKernelDelayThread keeps sched_delay_current. */
+void sched_delay_current_dispatching(uint64_t usec) {
+    if (s_cur < 0) return;
+    s_hold_expiry = s_cur;
+    sched_delay_current(usec);
 }
 
 void sched_block_on(uint32_t obj) {
@@ -4226,6 +4474,7 @@ int sched_reset_for_loadexec(void) {
     s_ntcb = 0;
     s_cur = -1;
     s_last_pick = -1;
+    s_hold_expiry = -1;
     s_watchdog_spin_observations = 0;
     s_root_seen = 0;
     g_root_uid = SR_ROLE_UID_NONE;

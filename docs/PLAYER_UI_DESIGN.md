@@ -315,6 +315,28 @@ Optional launcher sounds (Kenney's CC0 "Interface Sounds": a tick when focus mov
 back) are off by default; **UI sounds** in Settings (`ui_sounds` in `settings.json`) turns them on. While they are off
 no audio device is opened, and they never play while a game runs.
 
+Optional launcher music ([#2207](https://github.com/Jstar269/nakagawa-recomp/issues/2207)) is off by default too:
+**Launcher music** in Settings (`launcher_music` in `settings.json`) turns it on, and **Music volume** sets its own
+level (`launcher_music_volume`, 0 to 100%, 80% by default; the track is mastered at about -22 LUFS, so 100% is that
+level). Like the menu sounds it does not follow **Game volume**, which is the game's. The track is "Chill lofi
+inspired" by omfgdude (CC0, from OpenGameArt; [`assets/music/launcher/`](../assets/music/launcher/PROVENANCE.md)). It
+ships beside the player and is decoded with the vendored stb_vorbis; nothing is downloaded. It plays only while the
+launcher shows (the library, Settings, a game's page, the launcher's cards): it fades in over 1.5 s, and loops from the
+recording's first to its last sound, so the loop has no gap and no click. When a game starts it fades out over 0.5 s
+and the launcher lets go of the audio device before the game's process starts, so it never mixes into the game's
+sound. A game started while the track is still decoding stops the decode, and the launch waits for its worker to
+finish first. The decoded track (about 22 MB) is not kept while a game runs: once the launcher is back and the music
+would be heard (the window has focus and Music volume is above 0), the track is decoded again on its worker (about
+half a second) and fades in from where it stopped. It also fades out and lets go
+of the device while the launcher window does not have focus (a launcher that opens without focus waits for it), and
+at Music volume 0. Turning the setting off fades it out over 50 ms. If the audio device stops taking data during a
+fade, the launcher closes it at the fade's length plus 0.25 s and logs `LAUNCHER_MUSIC_RELEASE_TIMEOUT` with the time
+it waited. While the setting is off nothing is read and no audio device is opened. A track that is missing, cannot
+be decoded, is a file larger than 64 MB or would decode to more than 64 MB of samples, or an audio device that cannot
+be opened, is named on the setting's row (On: file
+missing, On: file damaged, On: no sound device) and in the log (`LAUNCHER_MUSIC_MISSING`, `LAUNCHER_MUSIC_DAMAGED`,
+`LAUNCHER_MUSIC_NO_DEVICE`); the launcher stays silent and carries on.
+
 Only actions the screen handles appear in its prompt bar.
 
 ## Screens
@@ -403,10 +425,13 @@ one or two plain sentences on what to expect on this PC in `BODY_S` `paper`, the
 when there are any. The tier comes from the title's own player record, or else from its `docs/COMPATIBILITY.md`
 status word through the table in [Status words](COMPATIBILITY.md#status-words). The status word itself describes
 the project's test route and read as a claim about the user's game (#1297), so only developer mode names it, in a
-`FOOTNOTE`. A title with an enhancement package then has an ENHANCEMENTS card (eyebrow and an OPTIONAL tag): the
-switch 60 FPS GAME LOGIC: ON or OFF (`PRIMARY` while on, never the default focus, disabled while a game starts or
-runs or the title's package builds), then a `BODY_S` line saying it is an optional enhancement made for this game
-and that off plays the original game as released ([ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md#9-declarative-frame-rate-rescale-packages-60-hz-logic)
+`FOOTNOTE`. A title with an enhancement package then has an ENHANCEMENTS card (eyebrow and a tag, OPTIONAL for a
+package the maintainer released and EXPERIMENTAL for any other; [ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md#910-experimental-or-released)
+section 9.10). Only a package found in the source tree's `assets/enhancements/` can read OPTIONAL, never one from
+the user's data folder, which is tagged EXPERIMENTAL whatever it declares. The card holds the switch 60 FPS GAME
+LOGIC: ON or OFF (`PRIMARY` while on, never the default focus, disabled while a game starts or runs or the title's
+package builds), then a `BODY_S` line saying it is an optional enhancement made for this game and that off plays the
+original game as released ([ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md#9-declarative-frame-rate-rescale-packages-60-hz-logic)
 section 9). When the switch is saved on but the package is gone, the card stays and says why in `error`, and the
 primary action reads ENHANCEMENT UNAVAILABLE. Under the cards, one row that wraps at a larger text size: ADD TO
 STEAM (the [Add to Steam](#add-to-steam-built) dialog), REPORT A PROBLEM, and REMOVE FROM LIBRARY (a `DANGER`
@@ -551,8 +576,8 @@ it under the action row while BUILD PACKAGE waits for the files, with CHECK AGAI
 
 Built now (#1302): one page under the top bar with SETTINGS active, two cards of named rows, each value on the 34 px
 button that changes it: GAME (resolution, frame pacing, VSync, fullscreen, scaling) and LAUNCHER AND SOUND (game
-volume with - and +, launcher fullscreen, accessibility, menu sounds, controller settings, CHECK FOR UPDATES, then
-the controller and the saves folder as captions; CHECK FOR UPDATES opens the Updates card and asks GitHub, see
+volume with - and +, launcher fullscreen, accessibility, menu sounds, controller settings, CHECK FOR UPDATES,
+launcher music and music volume with - and +, then the controller and the saves folder as captions; CHECK FOR UPDATES opens the Updates card and asks GitHub, see
 [`SETUP.md`](SETUP.md#network-use)). Under them DONE (primary: saves and returns to the Library), ONLINE AND DEVELOPER,
 THIRD-PARTY NOTICES and BUILD TOOLS AND CACHE (#1306: the share libraries switch, CLEAR SHARED LIBRARY CACHE and
 REMOVE BUILD TOOLS); the online options, the notices, build tools and cache and the removal check are dialog cards.
@@ -567,14 +592,17 @@ PLAY MODE closes the GAME card (the play modes, docs/ENHANCEMENT_CONTRACT.md sec
 default (AUTHENTIC: OPTIONS or ENHANCED: OPTIONS; Authentic for a new library), and it opens Settings > Enhanced, a
 dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from the player's part table (TEXTURE
 FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; WIDESCREEN; SMOOTH MOTION; CLEAN
-PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; a new library has
-16x filtering, crisp text and the badge on and the rest off, and a graphics preset sets SHARPER ENLARGING and CRISP
-SYSTEM TEXT in Enhanced and Ace, below), each beside a sentence that says what it does and what it costs. A new part is a new row with no change to the page. While the mode is
-Authentic the part rows are disabled (`dim`, not focusable) and keep their values. The title page's ENHANCEMENTS
+PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; FULL 32-BIT COLOUR;
+SUPERSAMPLING; SMOOTH FAR TEXTURES; TEXTURE PACK; a
+new library has 16x filtering, crisp text and the badge on and the rest off, and a graphics preset sets SHARPER
+ENLARGING, CRISP SYSTEM TEXT and, under ULTRA, FULL 32-BIT COLOUR in Enhanced and Ace, below), each beside a
+sentence that says what it does and what it costs. A new part is a new row with no change to the page. While the
+mode is Authentic the part rows are disabled (`dim`, not focusable) and keep their values. The title page's ENHANCEMENTS
 card shows PLAY MODE for every game (LIBRARY DEFAULT, AUTHENTIC, ENHANCED, and ACE only for a game with a usable
 package; `PRIMARY` while Enhanced or Ace is in effect, never the default focus), ENHANCED OPTIONS, which opens the
-same page for that game alone (its play mode, and each part on LIBRARY (16X) or its own value; Done returns
-to the title page), and, while Ace is in effect, Ace's 60 FPS switch in the same row. Under the buttons come what is
+same page for that game alone (its play mode, and each part on LIBRARY (16X) or its own value, then TEXTURE PACK
+FOLDER, which picks the game's pack folder and shows its name and texture count or None, and, with a pack chosen,
+REMOVE TEXTURE PACK; Done returns to the title page), and, while Ace is in effect, Ace's 60 FPS switch in the same row. Under the buttons come what is
 on and, as its own `BODY_S` `muted` paragraph, the last session. Both sentences wrap whole, however many parts are
 on: the page body scrolls, so the card grows instead of ending either one in an ellipsis. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
 art's top right. In game, the pause menu's caption names the mode and its parts and its Settings page has a live
@@ -582,28 +610,28 @@ SPEED READOUT row; the launch notice (ENHANCED or ACE, top right, 3 s, a cut wit
 (top left) are chips on the 16 px safe area.
 GRAPHICS PRESET is the GAME card's last row (#2150). It steps through LOW, MEDIUM, HIGH, ULTRA and HANDHELD.
 A preset is used only by Enhanced and Ace sessions, where its values take the place of the RESOLUTION, SCALING,
-VSYNC and GAME FULLSCREEN rows and of two Enhanced parts' library values, CRISP SYSTEM TEXT and SHARPER ENLARGING
-(the FSR 1 upscaler). Choosing one changes none of those rows or parts, and an Authentic session always runs with
-the rows as the user set them, whatever the preset. The reason is that a render scale above 1x is not host-only: every
-present commits the frame to guest VRAM, so a game that copies its screen (a save picture) keeps the larger picture
-(`docs/ENHANCEMENT_CONTRACT.md` section 10.3, Pixels), and Authentic launch output must not change with a
-preset. Editing one of the rows a preset sets makes it CUSTOM, which means the rows apply in every session and
-the parts the preset set keep its values as the library's (below); GAME FULLSCREEN does so only under HANDHELD, the
-one preset that sets it. While a preset is chosen, the page's notice
-line says that it is used in Enhanced and Ace, names the parts it turns on and off, and says that Authentic uses
-the rows, in short words (`High is used in Enhanced and Ace, with crisp text on and FSR 1 off. Authentic uses your
-settings.`, the longest, on one line at 960 x 540 and 853 x 480). The settings file keeps the
-preset's name beside the rows, and a file without it, or with a name this build doesn't know, loads as CUSTOM. The
-values are the project's choice, and FSR 1's cost is measured only on an RTX 3080 (`docs/SETUP.md`). They live in one
-table, `k_graphics_presets` in `src/player/player_state.c`:
+VSYNC and GAME FULLSCREEN rows and of up to three Enhanced parts' library values: CRISP SYSTEM TEXT, SHARPER
+ENLARGING (the FSR 1 upscaler) and, under ULTRA, FULL 32-BIT COLOUR. Choosing one changes none of those rows or
+parts, and an Authentic session always runs with the rows as the user set them, whatever the preset. The reason is
+that a render scale above 1x is not host-only: every present commits the frame to guest VRAM, so a game that copies its
+screen (a save picture) keeps the larger picture (`docs/ENHANCEMENT_CONTRACT.md` section 10.3, Pixels), and Authentic
+launch output must not change with a preset. Editing one of the rows a preset sets makes it CUSTOM, which means the rows
+apply in every session and the parts the preset set keep its values as the library's (below); GAME FULLSCREEN does so
+only under HANDHELD, the one preset that sets it. While a preset is chosen, the page's notice line says that it is used
+in Enhanced and Ace, names the parts it turns on and off, and says that Authentic uses the rows, in short words (`Ultra
+is used in Enhanced and Ace, with crisp text, FSR 1 and full 32-bit colour on. Authentic uses your settings.`, the
+longest, on one line at 960 x 540 and 853 x 480). The settings file keeps the preset's name beside the rows, and a file
+without it, or with a name this build doesn't know, loads as CUSTOM. The values are the project's choice, and FSR 1's
+cost is measured only on an RTX 3080 (`docs/SETUP.md`); FULL 32-BIT COLOUR's is not measured on any GPU. They live in
+one table, `k_graphics_presets` in `src/player/player_state.c`:
 
-| Preset | Resolution | Scaling | VSync | Game fullscreen | Crisp system text | Sharper enlarging |
-| --- | --- | --- | --- | --- | --- | --- |
-| LOW | 1x (480x272) | Sharp | On | the row's | On | Off |
-| MEDIUM | 2x | Sharp | On | the row's | On | On |
-| HIGH | 4x | Sharp | On | the row's | On | Off |
-| ULTRA | 4x | Sharp | On | the row's | On | On |
-| HANDHELD | 2x | Sharp | On | On | On | On |
+| Preset | Resolution | Scaling | VSync | Game fullscreen | Crisp system text | Sharper enlarging | Full 32-bit colour |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| LOW | 1x (480x272) | Sharp | On | the row's | On | Off | the library's |
+| MEDIUM | 2x | Sharp | On | the row's | On | On | the library's |
+| HIGH | 4x | Sharp | On | the row's | On | Off | the library's |
+| ULTRA | 4x | Sharp | On | the row's | On | On | On |
+| HANDHELD | 2x | Sharp | On | On | On | On | the library's |
 
 A preset sets only presentation parts, which never reach the guest. CRISP SYSTEM TEXT draws the on-screen keyboard at
 the window's size and costs nothing while the keyboard is down, so every preset turns it on. SHARPER ENLARGING runs
@@ -613,11 +641,17 @@ to 2x (Performance) per axis ([GPUOpen: FidelityFX Super Resolution
 and ULTRA's 4x frame on a 1440p or 4K screen are in that range; on a 1440p or 4K screen MEDIUM's and HANDHELD's frame
 is enlarged 2.7x to 4x, past it, where HIGH or ULTRA is the better choice. LOW turns it off: its 1x frame is enlarged
 about 4x or more on any screen of 1080p or more, past that range everywhere, and LOW is for the weakest GPUs, where
-every pass counts. HIGH turns it off as ULTRA without it, the plain 4x picture. Where the GPU renderer cannot run FSR
+every pass counts. HIGH turns it off as ULTRA without it, the plain 4x picture. ULTRA also turns FULL 32-BIT COLOUR
+on (#2280), which changes only the picture the window shows; the other presets leave it to the library, so its
+second draw of each render op and its GPU memory stay off unless asked for. Where the GPU renderer cannot run FSR
 1, the normal scaling filter stays, as for the part. `fsr1-selftest` reports the pass's cost at each of these sizes
 (`docs/SETUP.md`). No preset sets frame pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN
-PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, the SPEED READOUT or the GAME BADGE:
-they change timing, framing, input, guest-visible output or the HUD, or have no measured cost on low-end GPUs, so they stay the library's and each game's.
+PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, the SPEED READOUT or
+the GAME BADGE: they change timing, framing, input, guest-visible output or the HUD, or have no measured cost on
+low-end GPUs, so they stay the library's and each game's. FULL 32-BIT COLOUR stays out of every preset but ULTRA for
+the same reason: its cost (a second draw of each render op and the twin's GPU memory) is not measured on any GPU, so
+only ULTRA, the preset for GPUs with headroom, turns it on, and under the others it stays the library's and each
+game's.
 
 The parts a preset sets are resolved with the rest (`player_play_resolve`): a game's own value, else the preset's,
 else the library's, so the launch line, `SR_PRESENT_UPSCALE` and both Enhanced pages agree. Settings > Enhanced shows

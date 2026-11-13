@@ -84,6 +84,7 @@ uint32_t sr_syscall(CpuState *s, uint32_t nid) {
     focus_init();
     for (int i = 0; i < s_focus_n; i++) {
         if (s_focus[i].nid != nid) continue;
+        sr_last_nid = nid;
         uint32_t ret = s_focus[i].unsupported_error ? s_focus[i].unsupported_error : s_focus[i].fn(s);
         s->r[2] = ret;
         return ret;
@@ -91,6 +92,15 @@ uint32_t sr_syscall(CpuState *s, uint32_t nid) {
     fprintf(stderr, "HLE-FOCUS: unimplemented nid 0x%08x in the focused media build\n", nid);
     fflush(stderr);
     abort();
+}
+
+/* hle_host.c owns the record of the NID being dispatched and hle.c the name lookup a stop
+ * message uses (hle_import_name(sr_last_nid)); the same contract over this file's registry. */
+uint32_t sr_last_nid;
+const char *hle_import_name(uint32_t nid) {
+    for (int i = 0; i < s_focus_n; i++)
+        if (s_focus[i].nid == nid) return s_focus[i].name;
+    return "unknown-import";
 }
 
 static uint32_t s_focus_uid = 0x110;
@@ -160,6 +170,16 @@ uint32_t hle_unmodelled_stop(const char *import_name, const char *fmt, ...) {
     fprintf(stderr, "UNSUPPORTED_IMPORT: %s %s; the run stops here (#308)\n", import_name, detail);
     focus_fail("hle_unmodelled_stop", "hle.c");
     return 0;   /* not reached: focus_fail aborts */
+}
+
+/* hle.c: the user partition's block allocator. _sceAtracGetContextAddress (hle_audio_codec.c,
+ * #322) takes its table of ATRAC contexts from it; no focused test calls that import, and no
+ * partition exists in this build, so a call that reaches the allocator names it and aborts. */
+uint32_t alloc_block(uint32_t size) {
+    (void)size; focus_fail("alloc_block", "hle.c user partition"); return 0xFFFFFFFFu;
+}
+uint32_t block_addr(uint32_t uid) {
+    (void)uid; focus_fail("block_addr", "hle.c user partition"); return 0;
 }
 
 uint32_t sr_hle_resolve_late_import(uint32_t nid) {

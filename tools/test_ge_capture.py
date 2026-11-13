@@ -109,7 +109,11 @@ class TestGeCaptureWiring(unittest.TestCase):
         self.assertIn("VERT_ARENA_VERTS", gpu)
         self.assertIn("s_cmd_slot->vmap + vertex_base", gpu)
         self.assertIn("vertex_base * sizeof(GpuVert)", gpu)
-        self.assertIn("s_cmd_slot->vused += nverts", gpu)
+        # With the host twin's own vertices staged after the authentic ones, a draw takes twice
+        # its vertex count from the arena, and the arena advances by what was staged.
+        self.assertIn("const uint32_t nstaged = s_tvcpu ? 2u * nverts : nverts;", gpu)
+        self.assertIn("cmd_batch_begin_tnl(nstaged, ntverts, p1)", gpu)
+        self.assertIn("s_cmd_slot->vused += nstaged", gpu)
 
     def test_mixed_waits_and_transfer_boundaries_are_explicit(self):
         gpu = (RT / "gpu_sdl3vk" / "ge_gpu.c").read_text(encoding="utf-8")

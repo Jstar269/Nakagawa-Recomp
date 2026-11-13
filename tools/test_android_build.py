@@ -153,6 +153,78 @@ class AndroidAppContractTests(unittest.TestCase):
                       '        "Ljava/lang/String;)Z"', posix)
         self.assertIn('return "nk_android_title_main";', title)
         self.assertIn("int nk_android_title_main(int argc, char **argv)", shim)
+        self.assertIn("private static native void nativeImportEnvironment();", launcher)
+        self.assertIn("JNICALL Java_io_github_jstar269_nakagawa_LauncherActivity_nativeImportEnvironment(\n"
+                      "    JNIEnv *env, jclass cls) {\n    (void)cls;\n    android_import_environment(env);", posix)
+
+    def test_the_player_starts_after_the_toolchain_variables_reach_native_code(self) -> None:
+        """Under an ARM translation layer the player library has its own libc, which took the
+        environment when it loaded; variables a toolchain unpack sets later reach it only through
+        nativeImportEnvironment, which must run after they are set and before the player's main()."""
+        java = ANDROID / "app" / "src" / "main" / "java" / "io" / "github" / "jstar269" / "nakagawa"
+        launcher = (java / "LauncherActivity.java").read_text(encoding="utf-8")
+        main = launcher[launcher.index("    protected void main() {"):]
+        main = main[:main.index("\n    }\n") + 6]
+        ready = re.search(r"install\.awaitReady\(\(\) -> NakagawaHost\.setToolchainEnvironment\(this\),\s+"
+                          r"LauncherActivity::nativeImportEnvironment\)", main)
+        self.assertIsNotNone(ready, main)
+        assert ready is not None
+        self.assertLess(ready.end(), main.index("super.main();"))
+        self.assertEqual(main.count("super.main();"), 1)
+
+    def test_title_process_ends_without_the_framework_handlers(self) -> None:
+        """exit() in the app process would run the framework's static destructors while its render
+        threads still run (FORTIFY abort). The runtime's atexit() and exit() go through the shim,
+        which runs only the runtime's handlers, drains the log copy and ends with _exit()."""
+        cmake = (ANDROID / "app" / "CMakeLists.txt").read_text(encoding="utf-8")
+        shim = (ANDROID / "app" / "src" / "main" / "cpp" / "nk_android_title.c").read_text(encoding="utf-8")
+        for symbol in ("exit", "_exit", "_Exit", "atexit"):
+            self.assertIn(f"-Wl,--wrap={symbol}", cmake)
+        self.assertIn("int __wrap_atexit(void (*handler)(void))", shim)
+        self.assertNotIn("__real_exit(", shim)
+        self.assertIn("__wrap_exit(main(argc, argv));", shim)
+        header = (ROOT / "src" / "core" / "nk_platform.h").read_text(encoding="utf-8")
+        self.assertIn("void nk_platform_host_shutdown(void);", header)
+        for source in ("nk_platform_posix.c", "nk_platform_win32.c"):
+            text = (ROOT / "src" / "core" / source).read_text(encoding="utf-8")
+            self.assertIn("void nk_platform_host_shutdown(void)", text)
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("cc"), "needs a Linux C compiler")
+    def test_the_title_shim_ends_the_process_as_exit_would(self) -> None:
+        """The shim built for Linux with the Android link's --wrap flags, around a stub runtime:
+        only the runtime's handlers run (one registered with the C library itself does not), last
+        registered first and once, a handler's own exit() goes on with the rest,
+        a second thread's exit() waits for the first, and the exit file is written after the log
+        is drained, with the status the process ends with."""
+        shim = ANDROID / "app" / "src" / "main" / "cpp" / "nk_android_title.c"
+        with tempfile.TemporaryDirectory(prefix="nk-title-shim-") as tmp:
+            work = Path(tmp)
+            (work / "harness.c").write_text(_TITLE_SHIM_HARNESS, encoding="utf-8")
+            program = work / "title"
+            wraps = [f"-Wl,--wrap={symbol}" for symbol in ("exit", "_exit", "_Exit", "atexit")]
+            subprocess.run(["cc", "-std=gnu11", "-Wall", "-Werror", "-I", str(ROOT / "src" / "core"),
+                            "-Dmain=nk_shim_runtime_main", "-c", str(shim), "-o", str(work / "shim.o")],
+                           check=True)
+            subprocess.run(["cc", "-std=gnu11", "-Wall", "-Werror", "-c",
+                            str(work / "harness.c"), "-o", str(work / "harness.o")], check=True)
+            subprocess.run(["cc", str(work / "harness.o"), str(work / "shim.o"), "-pthread", *wraps,
+                            "-o", str(program)], check=True)
+            cases = {
+                "order": (3, "b a shutdown(no-exit-file) "),
+                "nested": (5, "b nested a shutdown(no-exit-file) "),
+                "_exit": (4, "shutdown(no-exit-file) "),
+                "race": (2, "slow racer slow-done a shutdown(no-exit-file) "),
+                "foreign": (6, "a shutdown(no-exit-file) "),
+            }
+            for mode, (status, trace) in cases.items():
+                with self.subTest(mode=mode):
+                    env = dict(os.environ, NK_ANDROID_EXIT_FILE=str(work / f"exit-{mode}"),
+                               NK_TEST_TRACE=str(work / f"trace-{mode}"))
+                    env.pop("NK_ANDROID_PID_FILE", None)
+                    ran = subprocess.run([str(program), mode], env=env, check=False, timeout=60)
+                    self.assertEqual(ran.returncode, status)
+                    self.assertEqual((work / f"exit-{mode}").read_text(encoding="utf-8"), f"{status}\n")
+                    self.assertEqual((work / f"trace-{mode}").read_text(encoding="utf-8"), trace)
 
     def test_data_folder_has_the_name_every_host_uses(self) -> None:
         """The user data folder is called Nakagawa on every host; on Android it is in the
@@ -344,7 +416,9 @@ class AndroidMakeTargetTests(unittest.TestCase):
         link = next((line for line in out.splitlines() if f"-o {library}" in line), None)
         self.assertIsNotNone(link, "the compile goal links no libdemo.so")
         link_words = str(link).split()
-        for flag in ("-shared", "-Wl,--wrap=exit", "-Wl,--wrap=_exit", "-Wl,--wrap=_Exit"):
+        # The same four wraps as android/app/CMakeLists.txt: without atexit, the runtime's handlers
+        # would register with the C library, and the shim's _exit() would drop every one.
+        for flag in ("-shared", "-Wl,--wrap=exit", "-Wl,--wrap=_exit", "-Wl,--wrap=_Exit", "-Wl,--wrap=atexit"):
             self.assertIn(flag, link_words)
         rsp = (out.split(f"-o {library}", 1)[1]).split("\n", 3)[:3]
         self.assertIn("-lSDL3 -lvulkan", " ".join(rsp))
@@ -533,6 +607,70 @@ class AndroidTitleLibraryTests(unittest.TestCase):
 def cast_str(value: str | None) -> str:
     assert value is not None
     return value
+
+
+#: A stub runtime for the title shim (nk_android_title.c), built on Linux by
+#: test_the_title_shim_ends_the_process_as_exit_would. The shim's main() is renamed to
+#: nk_shim_runtime_main; each mode registers handlers and ends the process one way.
+_TITLE_SHIM_HARNESS = r"""
+#include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+int nk_android_title_main(int argc, char **argv);
+int __real_atexit(void (*handler)(void));
+
+static void say(const char *text) {
+    int fd = open(getenv("NK_TEST_TRACE"), O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) return;
+    if (write(fd, text, strlen(text)) < 0) {}
+    close(fd);
+}
+
+bool nk_platform_host_startup(const char *log_tag) { (void)log_tag; return true; }
+void nk_platform_host_shutdown(void) {
+    say(access(getenv("NK_ANDROID_EXIT_FILE"), F_OK) == 0 ? "shutdown(exit-file) " : "shutdown(no-exit-file) ");
+}
+
+static void handler_a(void) { say("a "); }
+static void handler_b(void) { say("b "); }
+static void handler_foreign(void) { say("foreign "); }   /* registered with the C library itself */
+static void handler_nested(void) { say("nested "); exit(5); }
+static atomic_int s_racer_started;
+static void *racer(void *arg) {
+    (void)arg;
+    say("racer ");
+    atomic_store(&s_racer_started, 1);
+    exit(9);   /* must wait for the exit the main thread owns */
+    return NULL;
+}
+static void handler_slow(void) {
+    say("slow ");
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, racer, NULL) == 0) {
+        while (!atomic_load(&s_racer_started)) sched_yield();
+        usleep(200000);   /* time for the racer to reach the exit lock */
+    }
+    say("slow-done ");
+}
+
+int nk_shim_runtime_main(int argc, char **argv) {
+    const char *mode = argc > 1 ? argv[1] : "";
+    if (strcmp(mode, "order") == 0) { atexit(handler_a); atexit(handler_b); return 3; }
+    if (strcmp(mode, "nested") == 0) { atexit(handler_a); atexit(handler_nested); atexit(handler_b); exit(1); }
+    if (strcmp(mode, "_exit") == 0) { atexit(handler_a); _exit(4); }
+    if (strcmp(mode, "race") == 0) { atexit(handler_a); atexit(handler_slow); exit(2); }
+    if (strcmp(mode, "foreign") == 0) { __real_atexit(handler_foreign); atexit(handler_a); exit(6); }
+    return 99;
+}
+
+int main(int argc, char **argv) { return nk_android_title_main(argc, argv); }
+"""
 
 
 if __name__ == "__main__":

@@ -1153,8 +1153,11 @@ def nan_trap_enabled(environment: Mapping[str, str] | None = None) -> bool:
 AOT_ENHANCEMENT_PACKAGE_EPOCH = "aot-enhancement-package-v1"
 AOT_LLVM_BACKEND_EPOCH = "aot-llvm-backend-v1"
 
-#: The sources that decide what the LLVM IR backend (#330) emits and what its IR calls.
-LLVM_BACKEND_SOURCES = ("tools/codegen_llvm.py", "tools/llvm_ir.py",
+#: The sources that decide what the LLVM IR backend (#330) emits and what its IR calls:
+#: the renderer, every tools/ module it imports (test_codegen_llvm derives that closure),
+#: and the runtime ABI shim. `tools/codegen.py`, which hands itself to the renderer rather
+#: than being imported by it, is keyed for both backends by its own hash (`codegen_sha256`).
+LLVM_BACKEND_SOURCES = ("tools/codegen_llvm.py", "tools/llvm_ir.py", "tools/lowering_plan.py",
                         "src/rt/llvm_abi.c", "src/rt/llvm_abi.h")
 
 
@@ -1189,9 +1192,10 @@ def llvm_backend_options(environment: Mapping[str, str] | None = None,
     """AOT cache-key options for the LLVM IR backend, or an empty dict for the C backend.
 
     The C backend returns `{}`, so its keys are unchanged. An LLVM build's key names the
-    backend's own sources and the exact Clang and llvm-link that compile its IR, so an
-    LLVM package is never reused for a C build, for another lowering, or across
-    toolchains; a missing tool fails closed.
+    backend's own sources and the clang and llvm-link programs that compile its IR (each
+    program's SHA-256 and version report, not the libraries it loads), so an LLVM package
+    is never reused for a C build, for another lowering, or after either program changes;
+    a missing tool fails closed.
     """
     env = os.environ if environment is None else environment
     if not llvm_backend_enabled(env):

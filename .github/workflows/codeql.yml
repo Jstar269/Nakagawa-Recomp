@@ -533,6 +533,33 @@ jobs:
             const fs = require("fs");
             const path = require("path");
             const zlib = require("zlib");
+
+            // BEGIN API retry
+            // GitHub's API now and then answers with a 5xx or drops the connection, which Octokit
+            // reports as status 500: a 502 on the processing-status read failed main's upload on
+            // 2026-11-13. Each API call below is retried on such an answer only, up to five tries,
+            // 5, 10, 20 and 40 s apart. Any other answer, or a fifth 5xx, fails the step and names
+            // the call. Sending the SARIF again after a 5xx is safe: a later upload for the same
+            // commit, ref and category supersedes the earlier one.
+            const API_TRIES = 5;
+            async function withRetry(what, call, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))) {
+              for (let attempt = 1; ; attempt += 1) {
+                try {
+                  return await call();
+                } catch (error) {
+                  const status = error?.status;
+                  if (typeof status !== "number" || status < 500 || attempt >= API_TRIES) {
+                    const answer = typeof status === "number" ? `HTTP ${status}` : "no HTTP status";
+                    const tries = attempt === 1 ? "1 try" : `${attempt} tries`;
+                    throw new Error(`${what} failed after ${tries} (${answer}): ${error?.message ?? error}`, { cause: error });
+                  }
+                  const delay = 5000 * 2 ** (attempt - 1);
+                  core.warning(`${what}: HTTP ${status} (${error.message}); try ${attempt + 1} of ${API_TRIES} in ${delay / 1000} s`);
+                  await sleep(delay);
+                }
+              }
+            }
+            // END API retry
             const expected = ["actions", "c-cpp", "python"];
             const dir = "codeql-sarif";
             const files = fs.readdirSync(dir).filter((name) => name.endsWith(".sarif")).sort();
@@ -601,9 +628,9 @@ jobs:
                 core.setFailed("pull request number is not numeric");
                 return;
               }
-              const { data: pr } = await github.rest.pulls.get({
+              const { data: pr } = await withRetry("Reading the pull request", () => github.rest.pulls.get({
                 owner, repo, pull_number: Number(process.env.PR_NUMBER),
-              });
+              }));
               if (pr.state !== "open" || pr.base.sha !== process.env.BASE_SHA ||
                   pr.head.sha !== process.env.HEAD_SHA || pr.merge_commit_sha !== targetSha) {
                 core.setFailed("PR base, head, or merge ref changed during CodeQL analysis; refusing a stale upload");
@@ -612,18 +639,18 @@ jobs:
             } else if (kind === "merge-group") {
               // The queue deletes its ref when the entry resolves: a missing or moved
               // ref means this group is no longer the commit that was analysed.
-              const { data: queued } = await github.request("GET /repos/{owner}/{repo}/git/ref/{+ref}", {
+              const { data: queued } = await withRetry("Reading the merge group ref", () => github.request("GET /repos/{owner}/{repo}/git/ref/{+ref}", {
                 owner, repo, ref: targetRef.slice("refs/".length),
-              });
+              }));
               if (queued.object.sha !== targetSha) {
                 core.setFailed("merge group ref moved during CodeQL analysis; refusing a stale upload");
                 return;
               }
             } else {
               const defaultBranch = context.payload.repository.default_branch;
-              const { data: ref } = await github.rest.git.getRef({
+              const { data: ref } = await withRetry("Reading the default branch", () => github.rest.git.getRef({
                 owner, repo, ref: `heads/${defaultBranch}`,
-              });
+              }));
               if (ref.object.sha !== targetSha) {
                 core.setFailed("default branch moved during CodeQL analysis; refusing a stale upload");
                 return;
@@ -636,13 +663,13 @@ jobs:
               runs,
             };
             const compressed = zlib.gzipSync(Buffer.from(JSON.stringify(sarif))).toString("base64");
-            const { data: uploaded } = await github.rest.codeScanning.uploadSarif({
+            const { data: uploaded } = await withRetry("Uploading the SARIF", () => github.rest.codeScanning.uploadSarif({
               owner,
               repo,
               commit_sha: targetSha,
               ref: targetRef,
               sarif: compressed,
-            });
+            }));
             if (!uploaded.id) {
               core.setFailed("Code Scanning did not return a SARIF upload id");
               return;
@@ -651,9 +678,9 @@ jobs:
             let processingStatus = "pending";
             let lastStatusData = null;
             for (let attempt = 0; attempt < 90; attempt += 1) {
-              const { data } = await github.rest.codeScanning.getSarif({
+              const { data } = await withRetry("Reading the SARIF processing status", () => github.rest.codeScanning.getSarif({
                 owner, repo, sarif_id: uploaded.id,
-              });
+              }));
               lastStatusData = data;
               processingStatus = data.processing_status;
               if (processingStatus === "complete") break;

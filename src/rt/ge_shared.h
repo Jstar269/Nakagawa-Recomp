@@ -461,8 +461,14 @@ int       ge_wide_set_wing(int wing);
  * many matrices it has scaled so far (the run reports the key as confirmed once that is above 0). */
 void      ge_wide_set_cull(int on);
 unsigned long ge_wide_cull_calls(void);
-/* Matrix uses left unscaled because the hook's 4096-entry table was full (contract 11.3.6). */
+/* Matrix uses left unscaled because the hook's 4096-entry table was full of matrices whose widened
+ * words were all still in guest memory (contract 11.3.6). */
 unsigned long ge_wide_cull_untracked(void);
+/* The hook's table: its size, and the fill at which a new address first drops the entries whose
+ * words are gone from guest memory; and the entries it holds now (the self-test checks the bound). */
+#define GE_CULL_SEEN 4096u
+#define GE_CULL_SWEEP_AT (GE_CULL_SEEN / 4u * 3u)
+unsigned  ge_wide_cull_table_live(void);
 int       ge_wide_wing(void);
 /* The display was given framebuffer `fb_addr`: its canvas exists from now on. The last two
  * distinct addresses keep canvases (double buffering). No effect while Fill is off. */
@@ -487,6 +493,18 @@ int       ge_wide_picture(uint32_t fb_addr, const uint32_t *frame, uint32_t *out
 /* The software canvas of fb_addr: GE_WIDE_CANVAS_W raw framebuffer words per row, in format
  * *fmt (GE pixel format 0..3); NULL when none was drawn by the software rasterizer. */
 const uint32_t *ge_wide_canvas(uint32_t fb_addr, int *fmt);
+/* The software renderer's host twin, Enhanced 32-bit colour (#2050, ENHANCEMENT_CONTRACT.md
+ * 10.11; ge.c's comment at s_twin_mode). ge_twin_present_row fills `width` RGBA8 words (red in
+ * the low byte) of row `y` of the framebuffer at fbaddr (GE format fmt 0..3, stride in pixels,
+ * 0 = 512): the twin's colour where its slot is valid, else the pixel as the CPU presenter
+ * converts it. It returns 0, and writes nothing, while the twin is off, while a GPU backend is
+ * registered, with SR_GPU_TWIN_CAPTURE=authentic, or for a row outside VRAM. ge_twin_mode: -1
+ * not decided yet, 0 off, 1 full colour, 2 native. ge_twin_set_mode (selftests): 1 or 2 turn it
+ * on with every slot empty (returns 0 when it cannot be allocated), 0 turns it off, -1 decides
+ * again from the environment on the next colour write; each frees the slots it no longer needs. */
+int       ge_twin_present_row(uint32_t fbaddr, int fmt, uint32_t stride, int y, uint32_t *out_rgba, int width);
+int       ge_twin_mode(void);
+int       ge_twin_set_mode(int mode);
 /* GPU transform and lighting (#318): on with SR_GPU_TNL=1, or set here (-1 re-reads the
  * environment). The counts are PRIMs the backend drew and PRIMs ge.c found ineligible or the
  * backend declined, since the last reset. */
@@ -546,6 +564,68 @@ void      ge_pow_selftest_mul(const uint32_t a[2], const uint32_t b[2], uint32_t
 /* Post-write notification for CPU-side writes that may alias GPU-cached framebuffers
  * (movie decode, DMA memcpy). No-op when no GPU backend is registered. */
 void      sr_gpu_vram_dirty(uint32_t addr, uint32_t bytes);
+/* Movie provenance (#2111): which guest pixels hold a decoded movie picture, for the movie
+ * upscaler (SR_MOVIE_UPSCALE) on the GE renderer. Host-side metadata only: nothing here reads
+ * or writes guest-visible state beyond hashing the picture's own bytes, and with tracking off
+ * (the default, and always in an authentic run) every call is a no-op and nothing matches.
+ * The media HLE (mpeg.c's sceMpegAvcDecode and 8888 sceMpegAvcCsc, hle_mpeg.c's PSMF player
+ * video output) notes each picture it writes, after the write; the renderer matches a texture
+ * it uploads or a target it presents against the notes. A note holds the picture's canonical
+ * address, stride in pixels, GE pixel format (0 5650, 1 5551, 2 4444, 3 8888), size, a
+ * sequence number from one increasing clock, and a hash of its rows taken when it was written.
+ * A note stops matching when:
+ *   - its bytes change (every match re-hashes the rows: a CPU, DMA or software-GE write over
+ *     any pixel, or the buffer reused for anything else);
+ *   - a later picture is noted over any of its bytes (it is replaced);
+ *   - its decoder is deleted or released (sr_movie_forget_owner), or tracking is turned off;
+ *   - SR_MOVIE_NOTES newer pictures were noted (the oldest is dropped).
+ * A picture through a swizzled VRAM view, or with a format or size outside the GE's, is never
+ * noted. Every read of a picture's bytes (the hash, the copy comparison) is checked but not prepared:
+ * it reads guest memory as it is and never pulls GE writes held only in the GPU's image back into
+ * guest VRAM, since that would be guest-visible. Such writes are therefore invisible to the
+ * "unchanged" check; the target rule guards them with the target's write clock, and the texture
+ * rule by never matching a texture the renderer serves from a target (tsrc, tsnap). The renderer adds its own rules for draws (ge_gpu.c, "Movie frames"). Guest thread
+ * only, like the HLE and the GE. */
+#define SR_MOVIE_NOTES 8
+typedef struct SrMoviePicture {
+    uint32_t addr;                         /* canonical: SR_PHYS, VRAM at 0x04000000 + offset */
+    uint32_t stride, fmt, width, height;   /* stride and size in pixels */
+    uint32_t owner;                        /* the decoder's guest handle */
+    uint64_t seq;                          /* > 0; later notes have larger numbers */
+    uint64_t hash;                         /* sr_movie_rows_hash of the rows when noted */
+} SrMoviePicture;
+void      sr_movie_set_tracking(int on);
+int       sr_movie_tracking(void);
+/* The last sequence number handed out (0 before the first note): a draw that stores it can
+ * later tell whether a picture was noted after it. */
+uint64_t  sr_movie_clock(void);
+void      sr_movie_note_picture(uint32_t owner, uint32_t addr, uint32_t stride, uint32_t fmt,
+                                uint32_t width, uint32_t height);
+void      sr_movie_forget_owner(uint32_t owner);
+/* 1 when the note with this sequence number is still held (not replaced, forgotten or dropped);
+ * its bytes are not re-hashed. */
+int       sr_movie_alive(uint64_t seq);
+/* The note whose picture holds the pixel at canonical address `addr` with this stride and
+ * format, re-hashed and unchanged: 1 and *out, or 0. (x, y) is that pixel in the picture. */
+int       sr_movie_find_pixel(uint32_t addr, uint32_t stride, uint32_t fmt, SrMoviePicture *out,
+                              uint32_t *x, uint32_t *y);
+/* The newest note whose picture's rows, compared byte for byte, start at canonical address `addr`
+ * with this stride and format and fit in max_w x max_h pixels, the note itself unchanged: 1 and
+ * *out, or 0. A copy the game made with its own code (no HLE call sees it) is found this way; a
+ * converted, scaled, swizzled or partial copy is not. A texture that is not the picture is refused
+ * within its first differing bytes; a copy costs one comparison and one hash of the note. */
+int       sr_movie_find_copy(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t max_w,
+                             uint32_t max_h, SrMoviePicture *out);
+/* The newest note whose whole picture lies in canonical [lo, hi) with this stride and format,
+ * noted after sequence `after`, re-hashed and unchanged: 1 and *out, or 0. */
+int       sr_movie_find_in(uint32_t lo, uint32_t hi, uint32_t stride, uint32_t fmt, uint64_t after,
+                           SrMoviePicture *out);
+uint64_t  sr_movie_rows_hash(uint32_t addr, uint32_t stride, uint32_t fmt, uint32_t width,
+                             uint32_t height);
+/* Notes dropped because all SR_MOVIE_NOTES slots were held, and whether any note is held now (both
+ * for the renderer's movie counts). */
+uint64_t  sr_movie_dropped(void);
+int       sr_movie_held(void);
 void      sr_vram_mark_renderer_pending(void);
 int       ge_zbuf_prepare_current(void);
 int       ge_zbuf_materialize_current(void);
@@ -638,8 +718,12 @@ enum {
     GE_VRAM_VIEW_SHOWN = 0,
     GE_VRAM_VIEW_UNREADABLE,          /* the window cannot be read now */
     GE_VRAM_VIEW_TEXTURE_REFUSED,     /* outside guest memory, over 512 pixels, or a GE capture runs */
-    GE_VRAM_VIEW_NO_ROOM              /* `out`, or a surface's window, is NULL; or `out` is
+    GE_VRAM_VIEW_NO_ROOM,             /* `out`, or a surface's window, is NULL; or `out` is
                                          smaller than the window */
+    GE_VRAM_VIEW_CAPTURE_LOST,        /* no such capture, or its image file is missing or
+                                         changed since it was written */
+    GE_VRAM_VIEW_CAPTURE_TEXTURE      /* a captured texture that is not a linear colour
+                                         surface (swizzled, palette or compressed) */
 };
 int       ge_vram_view_decode(int texture, const GeVramWindow *window, uint32_t *out,
                               size_t capacity, uint32_t *width, uint32_t *height);
@@ -679,5 +763,21 @@ const char *ge_profile_check_name(GeProfileCheck check);
 int       ge_vramdump_write(const char *directory, uint32_t vblank,
                             uint32_t display_addr, uint32_t display_stride,
                             uint32_t display_format);
+/* The VRAM viewer's Capture row (#314): the captures ge_vramdump_write wrote in this run,
+ * oldest first (the first GE_VRAM_CAPTURE_MAX; SR_VRAMDUMP takes at most that many).
+ * ge_vram_capture_info gives capture `index`'s VBLANK and the viewer's sources as they stood
+ * at that present (ge_vram_view_sources, the display from the capture's own arguments);
+ * 0 for no such capture. */
+#define GE_VRAM_CAPTURE_MAX 8u
+unsigned  ge_vram_capture_count(void);
+int       ge_vram_capture_info(unsigned index, uint32_t *vblank, GeVramSources *sources);
+/* ge_vram_view_decode for capture `index`: decodes `window` from the raw image the capture
+ * wrote, read back from its file and checked against a digest of the bytes written, instead
+ * of from guest memory now. A colour (PSM 0-3) or DEPTH16 window wholly inside the captured
+ * 2 MiB, VRAM mirrors folded; a texture (`texture` set, `window` its level 0) only when it is
+ * linear PSM 0-3 (else GE_VRAM_VIEW_CAPTURE_TEXTURE). Reads no guest memory or GE state. */
+int       ge_vram_capture_decode(unsigned index, int texture, const GeVramWindow *window,
+                                 uint32_t *out, size_t capacity, uint32_t *width,
+                                 uint32_t *height);
 
 #endif /* GE_SHARED_H */

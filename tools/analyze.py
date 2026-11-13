@@ -1598,7 +1598,15 @@ def _gpr_writes(word):
     ``"unknown"`` for an encoding this decoder does not classify."""
     op = word >> 26
     rs, rt, rd = (word >> 21) & 0x1F, (word >> 16) & 0x1F, (word >> 11) & 0x1F
-    if op in (1, 2, 3, 4, 5, 6, 7, 20, 21, 22, 23):
+    if op == 1:
+        if rt in (0x00, 0x01, 0x02, 0x03, 0x10, 0x11, 0x12, 0x13):
+            return None  # bltz/bgez(l), bltzal/bgezal(l)
+        if rt in (0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0E):
+            return frozenset()  # tgei/tgeiu/tlti/tltiu/teqi/tnei: a trap, not a transfer
+        return "unknown"
+    if op in (6, 7, 22, 23) and rt != 0:
+        return "unknown"  # blez/bgtz(l) need rt == 0; anything else is not a branch
+    if op in (2, 3, 4, 5, 6, 7, 20, 21, 22, 23):
         return None
     if op == 0:
         funct = word & 0x3F
@@ -1627,14 +1635,18 @@ def _gpr_writes(word):
 def _defining_word(elf, start, use_addr, reg):
     """The last word in ``[start, use_addr)`` that writes ``reg``, as
     ``(addr, word)``, or ``None`` if none does or the straight-line run is
-    broken by a control transfer or an unclassified encoding."""
+    broken by a control transfer, an unclassified encoding or any REGIMM word.
+
+    A REGIMM trap writes no GPR, so reading through it would be sound, but it
+    would change the answer for inputs that analyzed before; it stops the walk,
+    as it always has, until a change that regenerates the library takes it."""
     for addr in range(use_addr - 4, start - 4, -4):
         raw = elf.read_at_vaddr(addr, 4)
         if raw is None or len(raw) < 4:
             return None
         word = int.from_bytes(raw, "little")
         writes = _gpr_writes(word)
-        if writes is None or writes == "unknown":
+        if writes is None or writes == "unknown" or word >> 26 == 1:
             return None
         if reg in writes:
             return addr, word

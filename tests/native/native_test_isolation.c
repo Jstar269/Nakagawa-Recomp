@@ -33,6 +33,7 @@
 #endif
 
 #include "native_test_isolation.h"
+#include "nk_data_migrate.h"
 #include "nk_platform.h"
 
 #include <assert.h>
@@ -55,14 +56,23 @@
 static char g_test_root[NATIVE_TEST_PATH_MAX];
 static bool g_test_root_owned = false;
 
-static char g_real_config_probe[NATIVE_TEST_PATH_MAX];
+/* One real settings folder the guard watches, and what it held before the run. */
+typedef struct RealConfigProbe {
+    char path[NATIVE_TEST_PATH_MAX];
+    bool existed_before;
+    bool input_profiles_existed_before;
+    size_t input_profiles_file_count;
+    bool disc_profile_existed_before;
+    int64_t disc_profile_size;
+    uint64_t disc_profile_mtime;
+} RealConfigProbe;
+
+/* The real settings folders: on Linux and macOS both layouts' (#324, nk_data_migrate.h), the one in
+   use first, since a test that writes into the other one would switch a developer's install. */
+#define REAL_CONFIG_PROBES 2
+static RealConfigProbe g_real_config[REAL_CONFIG_PROBES];
+static size_t g_real_config_count = 0;
 static bool g_real_config_captured = false;
-static bool g_real_config_existed_before = false;
-static bool g_real_input_profiles_existed_before = false;
-static size_t g_real_input_profiles_file_count = 0;
-static bool g_real_disc_profile_existed_before = false;
-static int64_t g_real_disc_profile_size = -1;
-static uint64_t g_real_disc_profile_mtime = 0;
 
 /* These host-only catalog tests can link the PGF object file without a GE runtime. */
 volatile int g_sr_vram_read_pending;
@@ -400,92 +410,149 @@ static bool count_files_callback(const char *name, void *ctx) {
     return true;
 }
 
+static void add_real_config_probe(const char *path) {
+    if (!path || !path[0] || g_real_config_count >= REAL_CONFIG_PROBES) return;
+    for (size_t i = 0; i < g_real_config_count; ++i) {
+        if (strcmp(g_real_config[i].path, path) == 0) return;
+    }
+    RealConfigProbe *probe = &g_real_config[g_real_config_count];
+    memset(probe, 0, sizeof(*probe));
+    int written = snprintf(probe->path, sizeof(probe->path), "%s", path);
+    if (written <= 0 || (size_t)written >= sizeof(probe->path)) return;
+    g_real_config_count++;
+}
+
+static void snapshot_real_config_probe(RealConfigProbe *real) {
+    char sep = nk_platform_path_separator();
+    char probe[NATIVE_TEST_PATH_MAX + 64];
+    real->existed_before = nk_platform_dir_exists(real->path);
+    snprintf(probe, sizeof(probe), "%s%cinput_profiles", real->path, sep);
+    real->input_profiles_existed_before = nk_platform_dir_exists(probe);
+    if (real->input_profiles_existed_before) {
+        real->input_profiles_file_count = 0;
+        nk_platform_list_files(probe, count_files_callback, &real->input_profiles_file_count);
+    }
+    snprintf(probe, sizeof(probe), "%s%cinput_profiles%cUCUS98701.json", real->path, sep, sep);
+    real->disc_profile_existed_before = nk_platform_file_exists(probe);
+    real->disc_profile_size = -1;
+    real->disc_profile_mtime = 0;
+    if (real->disc_profile_existed_before) {
+        assert(get_file_metadata(probe, &real->disc_profile_size, &real->disc_profile_mtime));
+    }
+}
+
 void native_test_capture_real_config_probe(void) {
     if (g_real_config_captured) return;
     g_real_config_captured = true;
-    g_real_config_probe[0] = '\0';
-    char sep = nk_platform_path_separator();
+    g_real_config_count = 0;
+    memset(g_real_config, 0, sizeof(g_real_config));
 #if defined(_WIN32) || defined(_WIN64)
+    char sep = nk_platform_path_separator();
+    char path[NATIVE_TEST_PATH_MAX];
     const char *env_lad = getenv("LOCALAPPDATA");
     const char *env_ad = getenv("APPDATA");
     const char *base = (env_lad && env_lad[0]) ? env_lad : ((env_ad && env_ad[0]) ? env_ad : NULL);
     if (base) {
-        snprintf(g_real_config_probe, sizeof(g_real_config_probe),
-                 "%s%cNakagawa%cconfig", base, sep, sep);
+        snprintf(path, sizeof(path), "%s%cNakagawa%cconfig", base, sep, sep);
+        add_real_config_probe(path);
     }
 #elif defined(__ANDROID__)
+    char path[NATIVE_TEST_PATH_MAX];
     const char *env_android = getenv("NK_ANDROID_DATA_DIR");
     if (env_android && env_android[0]) {
-        snprintf(g_real_config_probe, sizeof(g_real_config_probe), "%s/config", env_android);
-    }
-#elif defined(__APPLE__)
-    const char *env_home = getenv("HOME");
-    if (env_home && env_home[0]) {
-        snprintf(g_real_config_probe, sizeof(g_real_config_probe),
-                 "%s/Library/Application Support/NakagawaRecomp/config", env_home);
+        snprintf(path, sizeof(path), "%s/config", env_android);
+        add_real_config_probe(path);
     }
 #else
-    const char *env_xdg = getenv("XDG_CONFIG_HOME");
-    const char *env_home = getenv("HOME");
-    if (env_xdg && env_xdg[0]) {
-        snprintf(g_real_config_probe, sizeof(g_real_config_probe),
-                 "%s/nakagawa-recomp", env_xdg);
-    } else if (env_home && env_home[0]) {
-        snprintf(g_real_config_probe, sizeof(g_real_config_probe),
-                 "%s/.config/nakagawa-recomp", env_home);
+    /* Linux and macOS: the settings folders of both layouts (#324, nk_data_migrate.h), the one in
+       use first, named by the production resolver without creating anything. */
+    NkUserDataLayout layout;
+    if (nk_platform_user_data_layout(&layout)) {
+        const NkDataLayoutFolders *in_use = layout.old_in_use ? &layout.old_layout : &layout.new_layout;
+        const NkDataLayoutFolders *other = layout.old_in_use ? &layout.new_layout : &layout.old_layout;
+        add_real_config_probe(in_use->path[NK_PATH_CONFIG]);
+        add_real_config_probe(other->path[NK_PATH_CONFIG]);
+    } else {
+        char path[NATIVE_TEST_PATH_MAX];
+        if (nk_platform_resolve_path(NK_PATH_CONFIG, path, sizeof(path))) add_real_config_probe(path);
     }
 #endif
-    if (g_real_config_probe[0]) {
-        char probe[NATIVE_TEST_PATH_MAX + 64];
-        g_real_config_existed_before = nk_platform_dir_exists(g_real_config_probe);
-        snprintf(probe, sizeof(probe), "%s%cinput_profiles", g_real_config_probe, sep);
-        g_real_input_profiles_existed_before = nk_platform_dir_exists(probe);
-        if (g_real_input_profiles_existed_before) {
-            g_real_input_profiles_file_count = 0;
-            nk_platform_list_files(probe, count_files_callback, &g_real_input_profiles_file_count);
-        }
-        snprintf(probe, sizeof(probe), "%s%cinput_profiles%cUCUS98701.json",
-                 g_real_config_probe, sep, sep);
-        g_real_disc_profile_existed_before = nk_platform_file_exists(probe);
-        if (g_real_disc_profile_existed_before) {
-            assert(get_file_metadata(probe, &g_real_disc_profile_size, &g_real_disc_profile_mtime));
-        }
+    for (size_t i = 0; i < g_real_config_count; ++i) {
+        snapshot_real_config_probe(&g_real_config[i]);
     }
 }
 
-void native_test_assert_real_config_untouched(void) {
-    if (!g_real_config_probe[0]) return;
+void native_test_recapture_real_config_probe(void) {
+    g_real_config_captured = false;
+    native_test_capture_real_config_probe();
+}
+
+static bool real_config_probe_unchanged(const RealConfigProbe *real, char *problem,
+                                        size_t problem_size) {
     char sep = nk_platform_path_separator();
     char probe[NATIVE_TEST_PATH_MAX + 64];
 
-    /* Disc profile assertion: must not be created if absent before; if it
-     * existed before the run, its size and mtime must be unchanged. */
-    snprintf(probe, sizeof(probe), "%s%cinput_profiles%cUCUS98701.json",
-             g_real_config_probe, sep, sep);
-    if (!g_real_disc_profile_existed_before) {
-        assert(!nk_platform_file_exists(probe));
+    /* The disc profile must not be created if absent before; if it existed before the run, its
+     * size and mtime must be unchanged. */
+    snprintf(probe, sizeof(probe), "%s%cinput_profiles%cUCUS98701.json", real->path, sep, sep);
+    if (!real->disc_profile_existed_before) {
+        if (nk_platform_file_exists(probe)) {
+            snprintf(problem, problem_size, "'%s' was created", probe);
+            return false;
+        }
     } else {
         int64_t current_size = -1;
         uint64_t current_mtime = 0;
-        assert(get_file_metadata(probe, &current_size, &current_mtime));
-        assert(current_size == g_real_disc_profile_size);
-        assert(current_mtime == g_real_disc_profile_mtime);
+        if (!get_file_metadata(probe, &current_size, &current_mtime) ||
+            current_size != real->disc_profile_size || current_mtime != real->disc_profile_mtime) {
+            snprintf(problem, problem_size, "'%s' was changed or removed", probe);
+            return false;
+        }
     }
 
-    /* Input profiles directory assertion: must not be created if absent;
-     * if it existed before, total file count within must be unchanged. */
-    snprintf(probe, sizeof(probe), "%s%cinput_profiles", g_real_config_probe, sep);
-    if (!g_real_input_profiles_existed_before) {
-        assert(!nk_platform_dir_exists(probe));
+    /* The input profiles folder must not be created if absent; if it existed before, the number
+     * of files in it must be unchanged. */
+    snprintf(probe, sizeof(probe), "%s%cinput_profiles", real->path, sep);
+    if (!real->input_profiles_existed_before) {
+        if (nk_platform_dir_exists(probe)) {
+            snprintf(problem, problem_size, "'%s' was created", probe);
+            return false;
+        }
     } else {
         size_t current_count = 0;
         nk_platform_list_files(probe, count_files_callback, &current_count);
-        assert(current_count == g_real_input_profiles_file_count);
+        if (current_count != real->input_profiles_file_count) {
+            snprintf(problem, problem_size, "the files in '%s' changed", probe);
+            return false;
+        }
     }
 
-    /* Real config directory assertion: must not be created if absent. */
-    if (!g_real_config_existed_before) {
-        assert(!nk_platform_dir_exists(g_real_config_probe));
+    /* The settings folder itself must not be created if absent. */
+    if (!real->existed_before && nk_platform_dir_exists(real->path)) {
+        snprintf(problem, problem_size, "'%s' was created", real->path);
+        return false;
+    }
+    return true;
+}
+
+bool native_test_real_config_unchanged(char *problem, size_t problem_size) {
+    char ignored[8];
+    if (!problem || problem_size == 0) {
+        problem = ignored;
+        problem_size = sizeof(ignored);
+    }
+    problem[0] = '\0';
+    for (size_t i = 0; i < g_real_config_count; ++i) {
+        if (!real_config_probe_unchanged(&g_real_config[i], problem, problem_size)) return false;
+    }
+    return true;
+}
+
+void native_test_assert_real_config_untouched(void) {
+    char problem[2 * NATIVE_TEST_PATH_MAX + 64];
+    if (!native_test_real_config_unchanged(problem, sizeof(problem))) {
+        fprintf(stderr, "NATIVE_TEST_GUARD: the real settings folder was touched: %s\n", problem);
+        abort();
     }
 }
 
@@ -494,5 +561,9 @@ const char *native_test_get_root(void) {
 }
 
 const char *native_test_get_real_config_probe(void) {
-    return g_real_config_probe;
+    return g_real_config_count > 0 ? g_real_config[0].path : "";
+}
+
+const char *native_test_get_real_config_probe_at(size_t index) {
+    return index < g_real_config_count ? g_real_config[index].path : "";
 }

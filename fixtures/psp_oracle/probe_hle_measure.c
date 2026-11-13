@@ -8,7 +8,7 @@
 // before it exits. Every import is user-mode and comes from a per-family import
 // block (hle_*_imports.S) or the shared threadman_user_imports.S.
 //
-// Eight single-launch cases share this file: CASE=hle-vtimer-unit
+// These single-launch cases share this file: CASE=hle-vtimer-unit
 // (PSP-HLE-VTIMER-002), hle-vtimer-errors (PSP-HLE-VTIMER-003),
 // hle-kernel-pool-bounds (PSP-HLE-KERNEL-STATUS-002), hle-power-float-v0
 // (PSP-HLE-POWER-002), hle-null-out-pointers (PSP-HLE-NULL-OUT-001),
@@ -19,11 +19,13 @@
 // imports no InitStart call, and hle-utility-dialogs (PSP-HLE-UTILITY-DIALOG-001), which opens
 // the savedata, gamedata install, netconf and game sharing dialogs in game context and never
 // answers them, and hle-nickname-limit (PSP-HLE-NICKNAME-001, case 164), which reads the owner_name
-// key's type and size and the system-parameter string's length refusals and records no value bytes.
+// key's type and size and the system-parameter string's length refusals and records no value bytes,
+// and hle-io-trunc (PSP-HLE-IO-TRUNC-001, case 105), which records what PSP_O_TRUNC shows on a
+// probe-owned Memory Stick file.
 // Cases 97-101 have recorded PSP-3000 runs from
 // 2026-10-15: the VTimer and power cases were measured; pool-bounds was captured
 // only in its earlier revision, and the revised form has not run; null-out was
-// captured incomplete. Case 104 was measured on 2026-11-02 (docs/HARDWARE_ORACLE.md).
+// captured incomplete. Cases 104 and 105 were measured on 2026-11-02 (docs/HARDWARE_ORACLE.md).
 // Their pass rule is machinery only: a record is PASS when its calls completed and were
 // recorded in order, and SKIP only when the object a cell needs (a timer, pool or
 // block UID) was not obtained. A fixed-pool delete after a refused create is PASS
@@ -84,12 +86,14 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_AUDIO_SRC 102
 #define HLE_CASE_TIMER_ORDER 103
 #define HLE_CASE_SAVEDATA_GETSIZE 104
+#define HLE_CASE_IO_TRUNC 105
 #define HLE_CASE_SAVEDATA_NODATA 180
 #define HLE_CASE_UTILITY_NONE 140
 #define HLE_CASE_STD_HANDLES 156
 #define HLE_CASE_AUDIO_REST 159
 #define HLE_CASE_SELF_STOP 167
 #define HLE_CASE_UTILITY_DIALOGS 161
+#define HLE_CASE_UTILITY_NETCONF_SHARING 166
 #define HLE_CASE_IO_SEEK 162
 #define HLE_CASE_IO_SEEK_EDGES 186
 #define HLE_CASE_NICKNAME_LIMIT 164
@@ -154,6 +158,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "hle-savedata-getsize"
 #define HLE_TEST_ID "PSP-HLE-SAVEDATA-GETSIZE-001"
 #define HLE_LOG "host0:/hle_savedata_getsize_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_IO_TRUNC
+#define HLE_CAMPAIGN_ID "hle-io-trunc"
+#define HLE_TEST_ID "PSP-HLE-IO-TRUNC-001"
+#define HLE_LOG "host0:/hle_io_trunc_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_SAVEDATA_NODATA
 #define HLE_CAMPAIGN_ID "hle-savedata-nodata"
 #define HLE_TEST_ID "PSP-HLE-SAVEDATA-NODATA-001"
@@ -178,6 +186,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "hle-utility-dialogs"
 #define HLE_TEST_ID "PSP-HLE-UTILITY-DIALOG-001"
 #define HLE_LOG "host0:/hle_utility_dialogs_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING
+#define HLE_CAMPAIGN_ID "hle-utility-netconf-sharing"
+#define HLE_TEST_ID "PSP-HLE-UTILITY-DIALOG-002"
+#define HLE_LOG "host0:/hle_utility_netconf_sharing_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_IO_SEEK
 #define HLE_CAMPAIGN_ID "hle-io-seek"
 #define HLE_TEST_ID "PSP-HLE-IO-SEEK-001"
@@ -3430,7 +3442,7 @@ static int hle_run(void)
 #endif /* HLE_CASE_AUDIO_REST */
 
 /* ------------------------------------------------------------------------- */
-#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING
 
 /* #1386 (W-HLE-1): utility dialog status timing after an InitStart, the wrong-state answers of
    netconf, the gamedata install dialog and game sharing, and the common result word a cancel
@@ -3441,16 +3453,18 @@ static int hle_run(void)
    after a soft reset): under the XMB a dialog stays at INIT (PSP-HLE-UTILITY-NONE-001 note).
 
    Safety rules, all kept in the code below:
-   - Order: savedata (mode 22 GETSIZE, which writes nothing), the gamedata install dialog, then
-     netconf, then game sharing last, so a hang in a radio dialog cannot lose an earlier record.
+   - Order (case 161; case 166's is below): savedata (mode 22 GETSIZE, which writes nothing), the
+     gamedata install dialog, then netconf, then game sharing last, so a hang in a radio dialog
+     cannot lose an earlier record.
      Every record is written as soon as its cell ends.
    - Nothing presses a button. A dialog only ever gets GetStatus, Update(1) and ShutdownStart,
      and the matrix calls below. A run still RUNNING after HLE_UD_CANCEL_POLLS polls is
      cancelled with ShutdownStart; one still at INIT after HLE_UD_INIT_CANCEL_POLLS polls gets one
      ShutdownStart too. Every wait is a vblank-counted bound.
-   - No network is joined, created or scanned for, and no setting or profile is written: netconf
-     runs action 0 (connect to an access point) with hotspot 0 and wifisp 0 and is never answered,
-     so it can only be cancelled. The only net calls are the module load/unload pair and each net
+   - The probe joins, creates and scans for no network and writes no setting or profile (a
+     RUNNING game sharing dialog may still use the radio on its own): netconf runs action 0
+     (connect to an access point) with hotspot 0 and wifisp 0 and is never answered, so it can
+     only be cancelled. The only net calls are the module load/unload pair and each net
      library's Init and Term (the Makefile pins every net library to exactly that pair). No apctl
      connect, ad hoc connect, create or join, scan or registry call is made or linked.
    - Game sharing shares HLE_UD_GS_DATA_BYTES of project-written pattern bytes in memory mode
@@ -3481,6 +3495,42 @@ static int hle_run(void)
    a block whose size word is 0, so no message dialog can open: the busy check comes before the
    size check (status.expected), so a busy slot still answers INVALID_STATUS, while a size check
    that came first would answer 0x80110004. An accepted one is recorded as stuck.
+
+   Case 166 (hle-utility-netconf-sharing, PSP-HLE-UTILITY-DIALOG-002) compiles this same section
+   with the savedata and gamedata install cells left out (#if HLE_CASE_UTILITY_DIALOGS blocks),
+   with the helpers, bounds and record shapes below unchanged, so its records are the sharing-*
+   and netconf-* rows of case 161. Main's record of case 161 (docs/HARDWARE_ORACLE.md,
+   PSP-HLE-UTILITY-DIALOG-001 captures 2026-11-12, neither capture acceptance-eligible): on boot
+   204 the netconf dialog this case runs, same block and calls, stayed RUNNING to the 600-poll cap,
+   a ShutdownStart while RUNNING returned 0x80110001, and PSPLink then went silent until the
+   owner power-cycled the console; on boot 206 the gamedata install dialog did the same. Nothing
+   in this probe presses a button, and ShutdownStart is its only way to end a RUNNING dialog, so
+   netconf-timing is expected to stick here as it did on boot 204. Game sharing has never run on
+   a console (on both boots it was SKIP 5) and has no expectation. A stuck dialog makes every
+   later dialog cell SKIP 5, so whichever dialog runs first is the one measured: case 166 runs
+   game sharing first and netconf last. (No record was lost on boot 204 or 206: each stream was
+   complete and PSPLink went silent only after the done record; every record is written to host0,
+   opened, written and closed, as soon as its cell ends.) The one launch is meant to measure the
+   sharing cells, and to show whether netconf sticks as on boot 204 when no savedata dialog has
+   run before it. Expected end when netconf sticks: netconf-timing records outcome 1, the netconf
+   state cells are SKIP 5, netconf-teardown runs and records each call's return, as it did under
+   the stuck dialog on boot 204 (all five setup calls undone, then the done record), COMPLETE
+   reports FAIL, and the console needs the owner's power cycle. The console is expected to need
+   that power cycle either way: on boot 204 it followed a teardown that completed, and on boot
+   206 it came with no net module loaded. One launch per boot.
+
+   Case 166 tears each group's net setup down exactly as case 161 does, on every path that ran a
+   setup, a stuck dialog's included. The two groups are coupled: netconf's setup loads COMMON and
+   calls sceNetInit again after sharing's teardown, so a sharing teardown that leaves either in
+   place makes netconf-setup fail and the netconf cells SKIP 6 (161 has the mirror case).
+
+   Operator conditions (README and manifest rows): game context, as for case 161; the WLAN switch
+   on. The probe does not read the switch, so a run with it off shows only what the net setup and
+   dialog cells return then. The game sharing dialog is expected to start the PSP's ad hoc radio
+   on its own and may offer its HLE_UD_GS_DATA_BYTES pattern bytes under HLE_UD_GS_NAME to a
+   nearby PSP in receive mode until it is shut down or the console is power-cycled; netconf may
+   scan for access points. The probe makes no connect call and answers no dialog, so nothing can
+   reach an access point or a server.
 
    Records, in order (a SKIP record keeps its word count, all words 0, and carries the reason in
    result: 1 a UMD is present, 2 the gamedata directory exists, 3 sceUmdCheckMedium failed, 4 the
@@ -3547,7 +3597,7 @@ static int hle_run(void)
      the Term calls and unloads in reverse order (ApctlTerm, InetTerm, NetTerm, unload INET,
      unload COMMON; AdhocctlTerm, AdhocTerm, NetTerm, unload ADHOC, unload COMMON), each made
      only when its setup call succeeded (HLE_SENTINEL otherwise). They run on every path that
-     ran a setup. */
+     ran a setup, a stuck dialog's included, in case 161 and in case 166. */
 
 #include <pspumd.h>
 #include <pspnet.h>
@@ -3615,19 +3665,23 @@ _Static_assert(HLE_UD_CLEAN_HEAD + 2u * HLE_UD_CLEAN_FILES == HLE_UD_CLEANUP_WOR
                "a cleanup record is its head, the removes and the sizes");
 _Static_assert(HLE_UD_TIMING_WORDS <= HLE_MAX_WORDS, "a timing record fits the writer");
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 int nkUtilSavedataInitStart(void *param);
 int nkUtilSavedataGetStatus(void);
 int nkUtilSavedataUpdate(int speed);
 int nkUtilSavedataShutdownStart(void);
+#endif
 int nkUtilMsgDialogInitStart(void *param);
 int nkUtilNetconfInitStart(void *param);
 int nkUtilNetconfGetStatus(void);
 int nkUtilNetconfUpdate(int speed);
 int nkUtilNetconfShutdownStart(void);
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 int nkUtilGamedataInstallInitStart(void *param);
 int nkUtilGamedataInstallGetStatus(void);
 int nkUtilGamedataInstallUpdate(int speed);
 int nkUtilGamedataInstallShutdownStart(void);
+#endif
 int nkUtilGameSharingInitStart(void *param);
 int nkUtilGameSharingGetStatus(void);
 int nkUtilGameSharingUpdate(int speed);
@@ -3666,20 +3720,26 @@ typedef struct HleUdRun {
     int init_cancel_called;
 } HleUdRun;
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 static uint8_t s_ud_sd[HLE_UD_SD_BYTES] __attribute__((aligned(64)));
 static uint32_t s_ud_sd_size_info[HLE_UD_SD_SIZE_INFO_WORDS] __attribute__((aligned(64)));
+#endif
 static uint8_t s_ud_nc[2][HLE_UD_NC_BYTES] __attribute__((aligned(64)));
 static uint8_t s_ud_nc_adhoc[16] __attribute__((aligned(64)));
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 static uint8_t s_ud_gd[2][HLE_UD_GD_BYTES] __attribute__((aligned(64)));
+#endif
 static uint8_t s_ud_gs[2][HLE_UD_GS_BYTES] __attribute__((aligned(64)));
 static uint8_t s_ud_gs_data[HLE_UD_GS_DATA_BYTES] __attribute__((aligned(64)));
 static uint8_t s_ud_msg[HLE_UD_MSG_BYTES] __attribute__((aligned(64)));
 static struct productStruct s_ud_product;
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 static SceIoDirent s_ud_dirent;
 static char s_ud_names[HLE_UD_CLEAN_FILES][HLE_UD_NAME_BYTES];
 static char s_ud_path[sizeof(HLE_UD_GD_DIR) + 1u + HLE_UD_NAME_BYTES];
 _Static_assert(sizeof(s_ud_path) >= sizeof(HLE_UD_GD_DIR) + HLE_UD_NAME_BYTES,
                "a file path is the directory, a slash, a name of at most 63 bytes and a NUL");
+#endif
 static uint32_t s_ud_stuck;
 static uint32_t s_ud_fail;
 
@@ -3715,6 +3775,7 @@ static void hle_ud_common(uint8_t *block, uint32_t bytes)
     hle_ud_put32(block, 0x1cu, HLE_SENTINEL); /* common result: an unwritten word shows */
 }
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 /* Savedata GETSIZE for a save no game owns, with an empty sizeInfo (no files listed). */
 static void hle_ud_fill_savedata(uint8_t *block)
 {
@@ -3729,6 +3790,7 @@ static void hle_ud_fill_savedata(uint8_t *block)
     hle_ud_put32(block, 0x5fcu, (uint32_t)(uintptr_t)s_ud_sd_size_info);
 }
 
+#endif
 /* Netconf action 0 (connect to an access point), no ad hoc group, hotspot 0, wifisp 0. */
 static void hle_ud_fill_netconf(uint8_t *block)
 {
@@ -3741,6 +3803,7 @@ static void hle_ud_fill_netconf(uint8_t *block)
     hle_ud_put32(block, 0x40u, 0u);           /* wifisp: off */
 }
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 /* The gamedata install block, mode 0 (no prompt), into the probe-owned directory. */
 static void hle_ud_fill_gamedata(uint8_t *block)
 {
@@ -3757,6 +3820,7 @@ static void hle_ud_fill_gamedata(uint8_t *block)
     hle_ud_put32(block, 0x564u, HLE_SENTINEL);
 }
 
+#endif
 /* Game sharing, single send, the probe's pattern bytes in memory. */
 static void hle_ud_fill_sharing(uint8_t *block)
 {
@@ -3772,6 +3836,7 @@ static void hle_ud_fill_sharing(uint8_t *block)
     hle_ud_put32(block, 0x60u, HLE_UD_GS_DATA_BYTES);
 }
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 static const HleUdType k_ud_savedata = {
     "savedata", nkUtilSavedataInitStart, nkUtilSavedataGetStatus, nkUtilSavedataUpdate,
     nkUtilSavedataShutdownStart, hle_ud_fill_savedata, s_ud_sd, s_ud_sd, 0x34u,
@@ -3781,6 +3846,7 @@ static const HleUdType k_ud_gamedata = {
     nkUtilGamedataInstallUpdate, nkUtilGamedataInstallShutdownStart, hle_ud_fill_gamedata,
     s_ud_gd[0], s_ud_gd[1], 0x55cu,
 };
+#endif
 static const HleUdType k_ud_netconf = {
     "netconf", nkUtilNetconfInitStart, nkUtilNetconfGetStatus, nkUtilNetconfUpdate,
     nkUtilNetconfShutdownStart, hle_ud_fill_netconf, s_ud_nc[0], s_ud_nc[1], 0x3cu,
@@ -4087,6 +4153,7 @@ static void hle_ud_states(const char *init_id, const char *running_id, const cha
     hle_ud_state(shutdown_id, t, HLE_UD_STATUS_SHUTDOWN, reason);
 }
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 /* The gamedata cells run only with no disc in the drive and no directory of that name. */
 static uint32_t hle_ud_gamedata_precheck(void)
 {
@@ -4217,6 +4284,8 @@ static void hle_ud_gamedata(void)
                   "gamedata-state-shutdown", &k_ud_gamedata, reason);
     hle_ud_gamedata_cleanup(reason);
 }
+
+#endif
 
 /* Netconf's net setup; *stage counts the calls that succeeded, in order. */
 static uint32_t hle_ud_netconf_setup(uint32_t *stage)
@@ -4388,6 +4457,7 @@ static void hle_ud_sharing(void)
     hle_ud_sharing_teardown(stage, reason == HLE_UD_SKIP_STUCK ? reason : 0u);
 }
 
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
 static int hle_run(void)
 {
     hle_ud_timing("savedata-timing-r1", &k_ud_savedata, 0u);
@@ -4398,6 +4468,19 @@ static int hle_run(void)
     hle_ud_sharing();
     return s_ud_fail == 0u;
 }
+#endif
+
+#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING
+/* Game sharing first, netconf last: netconf stuck RUNNING on boot 204 (case 161), and a stuck
+   dialog makes every later dialog cell SKIP 5, so sharing runs before it. No savedata or gamedata
+   install dialog is built in, and no message dialog is meant to open (size-0 block only). */
+static int hle_run(void)
+{
+    hle_ud_sharing();
+    hle_ud_netconf();
+    return s_ud_fail == 0u;
+}
+#endif
 
 #endif /* HLE_CASE_UTILITY_DIALOGS */
 
@@ -5270,6 +5353,303 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_NICKNAME_LIMIT */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_IO_TRUNC
+
+/* #1892: what the PSP does with PSP_O_TRUNC (0x0400) on the Memory Stick, and how a second
+   descriptor on the same file sees a truncation. PPSSPP's comment says the PSP truncates at
+   open but "if you seek later, you'll recover it"; nobody has measured it. The probe owns one
+   file, ms0:/NKTRUNC.BIN. It refuses (a STEP line, no record, COMPLETE FAIL) when that file
+   already exists, and touches nothing. It writes only that file and removes it in the last
+   cell, which runs even after a failed earlier cell. Every value is an observation recorded
+   as a word and never compared: PASS on every cell.
+
+   Words: sceIoOpen/Write/Read/Close/Remove returns as returned; st is sceIoGetstat's st_size
+   low word, or the error word when the call failed; an lseek is two words (low, high) of the
+   64-bit SceOff sceIoLseek returns; "bytes" is the first four bytes read, little-endian, 0 if
+   none; a dump is a count (or the open error) then the first 16 bytes as four such words.
+   Flags: RDONLY 1, WRONLY 2, RDWR 3, CREAT 0x200, TRUNC 0x400. base() writes the 16 bytes
+   ABCDEFGHIJKLMNOP with flags 0x0602 and its word is the first error or the byte count.
+
+   trunc-open-view (result A=open 0x0603): out0 base, out1 st while open, out2/3 lseek END,
+     out4/5 lseek SET 0, out6 read(A,4) count.
+   trunc-seek-read (result lseek(A,4,SET) low): out0 its high, out1 read(A,4) count, out2 bytes.
+   trunc-seek-write (result lseek(A,8,SET) low): out0 its high, out1 write(A,"WX",2), out2/3
+     lseek END, out4 close(A), out5 st, out6 dump count, out7-10 dump bytes.
+   trunc-close-nowrite (result A=open 0x0602): out0 base, out1 close(A), out2 st, out3 B=open
+     RDONLY, out4/5 lseek END, out6/7 lseek SET 4, out8 read(B,4) count, out9 bytes, out10 close(B).
+   trunc-recover-after-close (result A=open 0x0002): out0/1 lseek(A,8,SET), out2 write(A,"WX",2),
+     out3 close(A), out4 st, out5 dump count, out6-9 dump bytes.
+   two-fd-view (result B=open 0x0003): out0 base, out1 A=open 0x0602, out2/3 lseek(B) END before,
+     out4/5 lseek(B) END after, out6/7 lseek(B) SET 0, out8 read(B,4) count, out9 bytes, out10 st
+     with A open, out11 close(A), out12 st, out13/14 lseek(B) END, out15 close(B), out16 st.
+   two-fd-writer-survives (result A=open 0x0602): out0 base, out1 B=open 0x0003, out2/3 lseek(B)
+     END, out4/5 lseek(B) SET 0, out6 write(B,"abcdefghijkl",12), out7 close(A), out8 st,
+     out9 close(B), out10 st, out11 dump count, out12-15 dump bytes.
+   two-fd-trunc-writes-last (result A=open 0x0602): out0 base, out1 B=open 0x0003, out2
+     write(B,"abcdefghijkl",12), out3 close(B), out4 st, out5 write(A,"WX",2), out6 close(A),
+     out7 st, out8 dump count, out9-12 dump bytes.
+   remove-absent (result: the second sceIoRemove, which expects an error word): out0 the first
+     sceIoRemove, the cleanup of whatever the earlier cells left, out1 st. */
+#define HLE_IT_PATH "ms0:/NKTRUNC.BIN"
+#define HLE_IT_BASE_BYTES 16u
+#define HLE_IT_DUMP_BYTES 32u
+#define HLE_IT_F_BASE (PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC)
+#define HLE_IT_F_RDWR_TRUNC (PSP_O_RDWR | PSP_O_CREAT | PSP_O_TRUNC)
+_Static_assert(HLE_IT_F_BASE == 0x0602 && HLE_IT_F_RDWR_TRUNC == 0x0603,
+               "the probe flags are the documented words");
+
+static const char s_it_base[] = "ABCDEFGHIJKLMNOP";
+static const char s_it_wx[] = "WX";
+static const char s_it_lower[] = "abcdefghijkl";
+
+static uint32_t it_base(void)
+{
+    const SceUID fd = sceIoOpen(HLE_IT_PATH, HLE_IT_F_BASE, 0777);
+    if (fd < 0) {
+        return (uint32_t)fd;
+    }
+    const int wrote = sceIoWrite(fd, s_it_base, HLE_IT_BASE_BYTES);
+    const int closed = sceIoClose(fd);
+    return (uint32_t)(wrote < 0 ? wrote : (closed < 0 ? closed : wrote));
+}
+
+static uint32_t it_st(void)
+{
+    SceIoStat st;
+    memset(&st, 0, sizeof(st));
+    const int rc = sceIoGetstat(HLE_IT_PATH, &st);
+    return rc < 0 ? (uint32_t)rc : (uint32_t)st.st_size;
+}
+
+static void it_lseek(SceUID fd, SceOff offset, int whence, uint32_t *lo, uint32_t *hi)
+{
+    const uint64_t r = (uint64_t)sceIoLseek(fd, offset, whence);
+    *lo = (uint32_t)(r & 0xffffffffu);
+    *hi = (uint32_t)(r >> 32);
+}
+
+static void it_read4(SceUID fd, uint32_t *count, uint32_t *bytes)
+{
+    uint8_t buf[4] = {0, 0, 0, 0};
+    const int n = sceIoRead(fd, buf, sizeof(buf));
+    uint32_t word = 0;
+    *count = (uint32_t)n;
+    if (n > 0) {
+        memcpy(&word, buf, sizeof(word));
+    }
+    *bytes = word;
+}
+
+/* out[0] the count (or the open error), out[1..4] the first 16 bytes. */
+static void it_dump(uint32_t *out)
+{
+    uint8_t buf[HLE_IT_DUMP_BYTES];
+    memset(buf, 0, sizeof(buf));
+    memset(out, 0, 5u * sizeof(uint32_t));
+    const SceUID fd = sceIoOpen(HLE_IT_PATH, PSP_O_RDONLY, 0);
+    if (fd < 0) {
+        out[0] = (uint32_t)fd;
+        return;
+    }
+    const int n = sceIoRead(fd, buf, sizeof(buf));
+    (void)sceIoClose(fd);
+    out[0] = (uint32_t)n;
+    if (n <= 0) {
+        memset(buf, 0, sizeof(buf));
+    }
+    for (uint32_t i = 0; i < 4u; i++) {
+        memcpy(&out[1u + i], buf + 4u * i, sizeof(uint32_t));
+    }
+}
+
+/* Close a descriptor a cell left open; a closed or never-opened one is -1. */
+static void it_release(SceUID *fd)
+{
+    if (*fd >= 0) {
+        (void)sceIoClose(*fd);
+    }
+    *fd = -1;
+}
+
+static void it_trunc_group(void)
+{
+    uint32_t o[11];
+    uint32_t ignored;
+    uint32_t lo;
+    uint32_t dump[5];
+    SceUID a;
+
+    hle_step("trunc-open-view");
+    memset(o, 0, sizeof(o));
+    o[0] = it_base();
+    a = sceIoOpen(HLE_IT_PATH, HLE_IT_F_RDWR_TRUNC, 0777);
+    o[1] = it_st();
+    it_lseek(a, 0, PSP_SEEK_END, &o[2], &o[3]);
+    it_lseek(a, 0, PSP_SEEK_SET, &o[4], &o[5]);
+    it_read4(a, &o[6], &ignored);
+    hle_record("trunc-open-view", "PASS", (uint32_t)a, o, 7);
+
+    hle_step("trunc-seek-read");
+    memset(o, 0, sizeof(o));
+    it_lseek(a, 4, PSP_SEEK_SET, &lo, &o[0]);
+    it_read4(a, &o[1], &o[2]);
+    hle_record("trunc-seek-read", "PASS", lo, o, 3);
+
+    hle_step("trunc-seek-write");
+    memset(o, 0, sizeof(o));
+    it_lseek(a, 8, PSP_SEEK_SET, &lo, &o[0]);
+    o[1] = (uint32_t)sceIoWrite(a, s_it_wx, 2);
+    it_lseek(a, 0, PSP_SEEK_END, &o[2], &o[3]);
+    o[4] = (uint32_t)sceIoClose(a);
+    a = -1;
+    o[5] = it_st();
+    it_dump(dump);
+    memcpy(&o[6], dump, sizeof(dump));
+    hle_record("trunc-seek-write", "PASS", lo, o, 11);
+    it_release(&a);
+}
+
+static void it_close_group(void)
+{
+    uint32_t o[11];
+    uint32_t dump[5];
+    SceUID a;
+    SceUID b;
+
+    hle_step("trunc-close-nowrite");
+    memset(o, 0, sizeof(o));
+    o[0] = it_base();
+    a = sceIoOpen(HLE_IT_PATH, HLE_IT_F_BASE, 0777);
+    o[1] = (uint32_t)sceIoClose(a);
+    o[2] = it_st();
+    b = sceIoOpen(HLE_IT_PATH, PSP_O_RDONLY, 0);
+    o[3] = (uint32_t)b;
+    it_lseek(b, 0, PSP_SEEK_END, &o[4], &o[5]);
+    it_lseek(b, 4, PSP_SEEK_SET, &o[6], &o[7]);
+    it_read4(b, &o[8], &o[9]);
+    o[10] = (uint32_t)sceIoClose(b);
+    hle_record("trunc-close-nowrite", "PASS", (uint32_t)a, o, 11);
+
+    hle_step("trunc-recover-after-close");
+    memset(o, 0, sizeof(o));
+    a = sceIoOpen(HLE_IT_PATH, PSP_O_WRONLY, 0);
+    it_lseek(a, 8, PSP_SEEK_SET, &o[0], &o[1]);
+    o[2] = (uint32_t)sceIoWrite(a, s_it_wx, 2);
+    o[3] = (uint32_t)sceIoClose(a);
+    o[4] = it_st();
+    it_dump(dump);
+    memcpy(&o[5], dump, sizeof(dump));
+    hle_record("trunc-recover-after-close", "PASS", (uint32_t)a, o, 10);
+}
+
+static void it_two_fd_view(void)
+{
+    uint32_t o[17];
+    SceUID a;
+    SceUID b;
+
+    hle_step("two-fd-view");
+    memset(o, 0, sizeof(o));
+    o[0] = it_base();
+    b = sceIoOpen(HLE_IT_PATH, PSP_O_RDWR, 0777);
+    it_lseek(b, 0, PSP_SEEK_END, &o[2], &o[3]);
+    a = sceIoOpen(HLE_IT_PATH, HLE_IT_F_BASE, 0777);
+    o[1] = (uint32_t)a;
+    it_lseek(b, 0, PSP_SEEK_END, &o[4], &o[5]);
+    it_lseek(b, 0, PSP_SEEK_SET, &o[6], &o[7]);
+    it_read4(b, &o[8], &o[9]);
+    o[10] = it_st();
+    o[11] = (uint32_t)sceIoClose(a);
+    o[12] = it_st();
+    it_lseek(b, 0, PSP_SEEK_END, &o[13], &o[14]);
+    o[15] = (uint32_t)sceIoClose(b);
+    o[16] = it_st();
+    hle_record("two-fd-view", "PASS", (uint32_t)b, o, 17);
+}
+
+static void it_two_fd_writer_survives(void)
+{
+    uint32_t o[16];
+    uint32_t dump[5];
+    SceUID a;
+    SceUID b;
+
+    hle_step("two-fd-writer-survives");
+    memset(o, 0, sizeof(o));
+    o[0] = it_base();
+    a = sceIoOpen(HLE_IT_PATH, HLE_IT_F_BASE, 0777);
+    b = sceIoOpen(HLE_IT_PATH, PSP_O_RDWR, 0777);
+    o[1] = (uint32_t)b;
+    it_lseek(b, 0, PSP_SEEK_END, &o[2], &o[3]);
+    it_lseek(b, 0, PSP_SEEK_SET, &o[4], &o[5]);
+    o[6] = (uint32_t)sceIoWrite(b, s_it_lower, 12);
+    o[7] = (uint32_t)sceIoClose(a);
+    o[8] = it_st();
+    o[9] = (uint32_t)sceIoClose(b);
+    o[10] = it_st();
+    it_dump(dump);
+    memcpy(&o[11], dump, sizeof(dump));
+    hle_record("two-fd-writer-survives", "PASS", (uint32_t)a, o, 16);
+}
+
+static void it_two_fd_trunc_writes_last(void)
+{
+    uint32_t o[13];
+    uint32_t dump[5];
+    SceUID a;
+    SceUID b;
+
+    hle_step("two-fd-trunc-writes-last");
+    memset(o, 0, sizeof(o));
+    o[0] = it_base();
+    a = sceIoOpen(HLE_IT_PATH, HLE_IT_F_BASE, 0777);
+    b = sceIoOpen(HLE_IT_PATH, PSP_O_RDWR, 0777);
+    o[1] = (uint32_t)b;
+    o[2] = (uint32_t)sceIoWrite(b, s_it_lower, 12);
+    o[3] = (uint32_t)sceIoClose(b);
+    o[4] = it_st();
+    o[5] = (uint32_t)sceIoWrite(a, s_it_wx, 2);
+    o[6] = (uint32_t)sceIoClose(a);
+    o[7] = it_st();
+    it_dump(dump);
+    memcpy(&o[8], dump, sizeof(dump));
+    hle_record("two-fd-trunc-writes-last", "PASS", (uint32_t)a, o, 13);
+}
+
+/* The probe's file is removed here, and removed again: the second call is the cell. */
+static int it_remove_absent(void)
+{
+    uint32_t o[2];
+
+    hle_step("remove-absent");
+    const int cleanup = sceIoRemove(HLE_IT_PATH);
+    const int again = sceIoRemove(HLE_IT_PATH);
+    o[0] = (uint32_t)cleanup;
+    o[1] = it_st();
+    hle_record("remove-absent", "PASS", (uint32_t)again, o, 2);
+    return cleanup >= 0;
+}
+
+static int hle_run(void)
+{
+    SceIoStat st;
+    memset(&st, 0, sizeof(st));
+    hle_step("refuse-if-present");
+    if (sceIoGetstat(HLE_IT_PATH, &st) >= 0) {
+        hle_step("refused-ms0-NKTRUNC.BIN-exists");
+        return 0;
+    }
+    it_trunc_group();
+    it_close_group();
+    it_two_fd_view();
+    it_two_fd_writer_survives();
+    it_two_fd_trunc_writes_last();
+    return it_remove_absent();
+}
+
+#endif /* HLE_CASE_IO_TRUNC */
 
 /* ------------------------------------------------------------------------- */
 

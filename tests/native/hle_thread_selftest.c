@@ -578,6 +578,18 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     }
 }
 
+/* Ace Mode's peak=limit (#2137): a push that carries the SAS grain's unsaturated sum. It is a push
+ * like any other for the counters above; the sum is kept for the provenance cells. */
+static unsigned long s_audio_push_wide_calls;
+static int32_t s_audio_push_wide_capture[8192u * 2u];
+void sr_audio_push_wide(int ch, const int16_t *lr, const int32_t *wide, int nframes, int volL, int volR) {
+    s_audio_push_wide_calls++;
+    if (wide && nframes > 0)
+        memcpy(s_audio_push_wide_capture, wide,
+               ((size_t)nframes < 8192u ? (size_t)nframes : 8192u) * 2u * sizeof(*wide));
+    sr_audio_push(ch, lr, nframes, volL, volR);
+}
+
 void sr_audio_push_silence(int ch, int nframes) {
     s_audio_silence_calls++;
     if (nframes <= 0 || ch < 0 || ch >= 9) return;
@@ -633,6 +645,7 @@ int sr_audio_queued(int ch) {
 static void audio_fixture_reset(void) {
     s_oor_calls = 0;
     s_audio_push_calls = 0;
+    s_audio_push_wide_calls = 0;
     s_audio_queue_calls = 0;
     s_audio_push_frames = 0;
     s_audio_push_first_l = 0;
@@ -712,6 +725,7 @@ int gegpu_sync_guest_fb(const GeGpuFbDescriptor *desc) {
     if (desc) g_sync_last = *desc;
     return 2; /* GEGPU_SYNC_NO_TARGET */
 }
+void gegpu_note_guest_flip(void) {}
 void sr_profile_dump(void) {}
 void sr_profile_dump_final(void) {}
 uint64_t SDL_GetTicksNS(void) { return 0; }
@@ -3284,6 +3298,7 @@ static void test_prx_export_relocation_behavior(void) {
 
 int sr_hle_test_last_prx_host_served(void);
 void sr_hle_test_unregister_late_imports(uint32_t lo, uint32_t hi);
+unsigned sr_hle_test_psmf_players_used(void);   /* hle_mpeg.c (#286) */
 int sr_hle_test_module_host_served(uint32_t uid);
 
 /* Replaces the first little-endian copy of `from` in the file with `to`. */
@@ -8362,8 +8377,9 @@ static void test_unregistered_batch_refusals(void) {
 
 /* #1139 phase 0: the public PSPSDK ad hoc surface (pspnet_adhoc.h 22, pspnet_adhocctl.h 21,
  * pspnet_adhocmatching.h 16 prototypes; NIDs are sha1(name)) is refused by name with the offline
- * network code 0x80010086. That code is the runtime's documented refusal, not a measured ad hoc
- * result. A NID missing from the registry would reach sr_syscall's unknown-NID stop, so membership is
+ * network code 0x80010086, except the sceNetAdhocctl calls a lone console has recordings for
+ * (phase 1a, test_adhocctl_lone_console). That code is the runtime's documented refusal, not a
+ * measured ad hoc result. A NID missing from the registry would reach sr_syscall's unknown-NID stop, so membership is
  * checked before the call. */
 static void test_adhoc_named_refusals(void) {
     static const struct {
@@ -8392,26 +8408,13 @@ static void test_adhoc_named_refusals(void) {
         {0x8bea2b3eu, "sceNetAdhocPtpRecv"},
         {0x4da4c788u, "sceNetAdhocPtpSend"},
         {0xa62c6f57u, "sceNetAdhocTerm"},
-        {0x20b317a0u, "sceNetAdhocctlAddHandler"},
-        {0x0ad043edu, "sceNetAdhocctlConnect"},
-        {0xec0635c1u, "sceNetAdhocctlCreate"},
         {0xa5c055ceu, "sceNetAdhocctlCreateEnterGameMode"},
-        {0x6402490bu, "sceNetAdhocctlDelHandler"},
-        {0x34401d65u, "sceNetAdhocctlDisconnect"},
         {0xcf8e084du, "sceNetAdhocctlExitGameMode"},
         {0x99560abeu, "sceNetAdhocctlGetAddrByName"},
-        {0x362cbe8fu, "sceNetAdhocctlGetAdhocId"},
         {0x5a014ce0u, "sceNetAdhocctlGetGameModeInfo"},
         {0x8916c003u, "sceNetAdhocctlGetNameByAddr"},
-        {0x8db83fdcu, "sceNetAdhocctlGetPeerInfo"},
-        {0xe162cb14u, "sceNetAdhocctlGetPeerList"},
-        {0x81aee1beu, "sceNetAdhocctlGetScanInfo"},
-        {0x75ecd386u, "sceNetAdhocctlGetState"},
-        {0xe26f226eu, "sceNetAdhocctlInit"},
         {0x5e7f79c9u, "sceNetAdhocctlJoin"},
         {0x1ff89745u, "sceNetAdhocctlJoinEnterGameMode"},
-        {0x08fff7a0u, "sceNetAdhocctlScan"},
-        {0x9d689e13u, "sceNetAdhocctlTerm"},
         {0xec19337du, "sceNetAdhocMatchingAbortSendData"},
         {0xea3c6108u, "sceNetAdhocMatchingCancelTarget"},
         {0x8f58bedfu, "sceNetAdhocMatchingCancelTargetWithOpt"},
@@ -8429,8 +8432,9 @@ static void test_adhoc_named_refusals(void) {
         {0x32b156b3u, "sceNetAdhocMatchingStop"},
         {0x7945ecdau, "sceNetAdhocMatchingTerm"},
     };
-    expect(sizeof(adhoc) / sizeof(adhoc[0]) == 58u,
-           "the public ad hoc surface less sceNetAdhocctlGetParameter (test_net_core_without_network) has 58 prototypes");
+    expect(sizeof(adhoc) / sizeof(adhoc[0]) == 45u,
+           "the public ad hoc surface less the 14 modelled sceNetAdhocctl calls "
+           "(test_adhocctl_lone_console) has 45 prototypes");
     reset_fixture();
     sr_hle_init();
     for (size_t i = 0; i < sizeof(adhoc) / sizeof(adhoc[0]); i++) {
@@ -8443,6 +8447,822 @@ static void test_adhoc_named_refusals(void) {
         expect(sr_syscall(&cpu, adhoc[i].nid) == 0x80010086u,
                "public ad hoc NID refuses with the offline network code 0x80010086");
     }
+}
+
+/* #1139 phase 1a: sceNetAdhocctl on a console alone. A guest thread drives the production
+ * handlers through sr_syscall; the library's own thread (an HLE service thread) delivers each
+ * event to the registered guest handler, which records it with the guest time, the thread it ran
+ * on, and the state GetState gave it. Every expected value is a PSP recording (pspautotests
+ * 70e72391 tests/net/adhoc, cited at each handler in hle_network.c); the event times are the
+ * recorded medians, so each event must arrive at its request's time plus that median, not before.
+ *
+ * MUTANT: drop the 0xC00 stack check in h_NetAdhocctlInit -- stack 0x400 is accepted.
+ * MUTANT: deliver each event as soon as the library's thread runs -- it arrives before its time.
+ * MUTANT: allow five handlers -- the fifth AddHandler is accepted.
+ * MUTANT: no BUSY during a Create -- the Scan, Create and Disconnect cells fail.
+ * MUTANT: BUSY for every request while a Create or Connect is in flight -- the Connect during a
+ *   Create, and the Scan, Create and Connect during a Connect, answer BUSY instead of stopping.
+ * MUTANT: leave a handler's fault as a flag on the library's thread -- the fault child runs on.
+ * MUTANT: the fault line in the old "sceNetAdhocctl handler" form -- the fault cell finds no
+ *   SEMANTIC_BOUNDARY line tools/nk_cli.py classifies.
+ * MUTANT: exit 1 on a handler's fault without the line, or without the flight-recorder fatal --
+ *   the fault cell fails; so does a child that exits 1 before it runs the fixture.
+ * MUTANT: check BUSY before the group name -- a Create with an invalid group during a Create
+ *   answers BUSY instead of stopping.
+ * MUTANT: no check that the library's thread is alive -- a Create after the guest ended that
+ *   thread answers 0 and nothing ever answers it.
+ * MUTANT: sceNetTerm with sceNetAdhocctl live returns 0 -- the sceNetTerm cell fails.
+ * MUTANT (sched.c): a kick ends any delay of a service thread -- the handler's own guest delay is
+ *   cut short.
+ * MUTANT: no scanning state -- GetState stays 0 during a scan.
+ * MUTANT: start a request while in a group -- no ALREADY_CONNECTED events. */
+extern uint32_t sr_hle_test_adhocctl_thread(void);
+#define ADH_NID_INIT         0xe26f226eu
+#define ADH_NID_TERM         0x9d689e13u
+#define ADH_NID_ADD_HANDLER  0x20b317a0u
+#define ADH_NID_DEL_HANDLER  0x6402490bu
+#define ADH_NID_GET_STATE    0x75ecd386u
+#define ADH_NID_GET_PARAM    0xded9d28eu
+#define ADH_NID_GET_ID       0x362cbe8fu
+#define ADH_NID_PEER_LIST    0xe162cb14u
+#define ADH_NID_PEER_INFO    0x8db83fdcu
+#define ADH_NID_SCAN_INFO    0x81aee1beu
+#define ADH_NID_CREATE       0xec0635c1u
+#define ADH_NID_CONNECT      0x0ad043edu
+#define ADH_NID_SCAN         0x08fff7a0u
+#define ADH_NID_DISCONNECT   0x34401d65u
+#define ADH_NID_NET_INIT     0x39af39a6u
+#define ADH_NID_NET_TERM     0x281928a9u
+#define ADH_NID_LOCAL_ETHER  0x0bf0a3aeu
+#define ADH_NID_WLAN_ETHER   0x0c622081u
+enum {
+    ADH_MAIN_ENTRY = 0x089e0000u,
+    ADH_HANDLER = 0x089e0100u,
+    ADH_ID = 0x089e1000u,        /* AdhocId: type, product[9], padding[3] */
+    ADH_ID_LOWER = 0x089e1020u,
+    ADH_ID_TYPE3 = 0x089e1040u,
+    ADH_NAMES = 0x089e1100u,     /* group names, 16 bytes apart */
+    ADH_OUT = 0x089e1400u,
+    ADH_STATE_IN_HANDLER = 0x089e1410u,
+    ADH_PARAM = 0x089e1800u,
+    ADH_PEERS = 0x089e1c00u,
+    ADH_MAC = 0x089e1e00u,
+    ADH_WLAN_MAC = 0x089e1e10u,
+    ADH_LOG_MAX = 32
+};
+#define ADH_CREATE_US     1116728u
+#define ADH_CONNECT_US    4087045u
+#define ADH_DISCONNECT_US 104638u
+#define ADH_SCAN_US       991527u
+#define ADH_SLACK_US      50000u
+
+static struct {
+    int event;
+    uint32_t error, arg, uid, state_rc, state;
+    uint64_t at;
+} s_adh_log[ADH_LOG_MAX + 1];   /* the last entry stays empty: ADH_AT's answer out of range */
+#define ADH_AT(i) s_adh_log[(unsigned)(i) < ADH_LOG_MAX ? (unsigned)(i) : ADH_LOG_MAX]
+static unsigned s_adh_events;
+static int s_adh_done;
+
+/* What the handler does after it records an event; each mode applies to one event. */
+enum { ADH_MODE_RECORD = 0, ADH_MODE_TERM, ADH_MODE_INIT, ADH_MODE_DELAY, ADH_MODE_FAULT };
+#define ADH_HANDLER_DELAY_US 200000u
+#define ADH_STOPPED 0x80020002u   /* what a named stop answers in this harness (SCE_KERNEL_ERROR_NOTIMP) */
+static int s_adh_mode;
+static uint32_t s_adh_handler_rc;              /* the Term or Init the handler called */
+static uint64_t s_adh_delay_in, s_adh_delay_out;
+static uint32_t s_adh_loadexec_thread;
+extern int sr_hle_test_net_inited(void);
+extern int sr_hle_test_adhocctl_state(void);
+
+static uint32_t adh(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2) {
+    CpuState sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.r[4] = a0;
+    sc.r[5] = a1;
+    sc.r[6] = a2;
+    return sr_syscall(&sc, nid);
+}
+
+static void adh_handler_fn(CpuState *cpu) {
+    if (s_adh_events < ADH_LOG_MAX) {
+        s_adh_log[s_adh_events].event = (int)cpu->r[4];
+        s_adh_log[s_adh_events].error = cpu->r[5];
+        s_adh_log[s_adh_events].arg = cpu->r[6];
+        s_adh_log[s_adh_events].uid = sched_current_uid();
+        s_adh_log[s_adh_events].at = sched_vtime_us();
+        MEM_W32(ADH_STATE_IN_HANDLER, 0xffffffffu);
+        s_adh_log[s_adh_events].state_rc = adh(ADH_NID_GET_STATE, ADH_STATE_IN_HANDLER, 0u, 0u);
+        s_adh_log[s_adh_events].state = MEM_R32(ADH_STATE_IN_HANDLER);
+    }
+    s_adh_events++;
+    const int mode = s_adh_mode;
+    s_adh_mode = ADH_MODE_RECORD;
+    if (mode == ADH_MODE_TERM) {
+        s_adh_handler_rc = adh(ADH_NID_TERM, 0u, 0u, 0u);
+    } else if (mode == ADH_MODE_INIT) {
+        s_adh_handler_rc = adh(ADH_NID_INIT, 0x2000u, 0x30u, ADH_ID);
+    } else if (mode == ADH_MODE_DELAY) {
+        s_adh_delay_in = sched_vtime_us();
+        cpu->r[4] = ADH_HANDLER_DELAY_US;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+        s_adh_delay_out = sched_vtime_us();
+    } else if (mode == ADH_MODE_FAULT) {
+        cpu->flow_kind = SR_FLOW_FATAL;   /* as a fault inside the handler leaves it */
+        cpu->flow_target = ADH_HANDLER;
+        return;
+    }
+    cpu->r[2] = 0u;
+}
+
+/* The GetState result, with the state in *state (0xffffffff when nothing was written). */
+static uint32_t adh_get_state(uint32_t *state) {
+    MEM_W32(ADH_OUT, 0xffffffffu);
+    const uint32_t rc = adh(ADH_NID_GET_STATE, ADH_OUT, 0u, 0u);
+    *state = MEM_R32(ADH_OUT);
+    return rc;
+}
+
+static uint32_t adh_state(void) {
+    uint32_t state;
+    return adh_get_state(&state) == 0u ? state : 0xfffffff0u;
+}
+
+static void adh_delay_until(CpuState *cpu, uint64_t at) {
+    const uint64_t now = sched_vtime_us();
+    if (at <= now) return;
+    cpu->r[4] = (uint32_t)(at - now);
+    (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+}
+
+static uint32_t adh_name(unsigned slot, const char *name) {
+    const uint32_t addr = ADH_NAMES + 16u * slot;
+    for (unsigned i = 0; i < 16u; i++) MEM_W8(addr + i, 0u);
+    for (unsigned i = 0; name[i] && i < 15u; i++) MEM_W8(addr + i, (uint8_t)name[i]);
+    return addr;
+}
+
+static uint32_t adh_init(uint32_t stack, uint32_t priority, uint32_t id) {
+    return adh(ADH_NID_INIT, stack, priority, id);
+}
+
+/* Starts a request and follows it: 0 from the call, GetState `after_call` right after it and
+ * `waiting` once the library's thread has run, no event before the request's time plus delay_us,
+ * then exactly one event `event` (error 0) on the library's thread, by then with state `done`.
+ * The fixture's clock moves in scheduler quanta, so a sleeper wakes up to a few tens of ms after
+ * its deadline: the test looks ADH_SLACK_US before the event is due and ADH_SLACK_US after,
+ * and the event's own time must not be early and at most ADH_SLACK_US late. */
+static void adh_expect_request(CpuState *cpu, const char *what, uint32_t nid, uint32_t a0,
+                               uint64_t delay_us, uint32_t after_call, uint32_t waiting, int event,
+                               uint32_t done) {
+    char msg[256];
+    const unsigned n = s_adh_events;
+    const uint64_t t0 = sched_vtime_us();
+    const uint32_t rc = adh(nid, a0, 0u, 0u);
+    const uint64_t t1 = sched_vtime_us();
+    const uint32_t right_after = adh_state();
+    snprintf(msg, sizeof(msg), "%s: returns 0, state %u right after the call", what, after_call);
+    expect(rc == 0u && right_after == after_call && s_adh_events == n, msg);
+    adh_delay_until(cpu, t0 + delay_us - ADH_SLACK_US);
+    snprintf(msg, sizeof(msg), "%s: no event before %llu us, state %u meanwhile", what,
+             (unsigned long long)delay_us, waiting);
+    expect(s_adh_events == n && adh_state() == waiting, msg);
+    adh_delay_until(cpu, t1 + delay_us + ADH_SLACK_US);
+    const uint32_t thread = sr_hle_test_adhocctl_thread();
+    snprintf(msg, sizeof(msg), "%s: event %d (error 0) on the library thread at +%llu us, "
+             "with state %u set when the handler runs", what, event, (unsigned long long)delay_us, done);
+    const int ok = s_adh_events == n + 1u && ADH_AT(n).event == event && ADH_AT(n).error == 0u &&
+                   ADH_AT(n).uid == thread && thread != 0u && thread != sched_current_uid() &&
+                   ADH_AT(n).at >= t0 + delay_us && ADH_AT(n).at <= t1 + delay_us + ADH_SLACK_US &&
+                   ADH_AT(n).state_rc == 0u && ADH_AT(n).state == done && adh_state() == done;
+    if (!ok && n < ADH_LOG_MAX)
+        fprintf(stderr, "  %s: events %u (want %u), event %d error 0x%08x at %llu (window %llu..%llu, now "
+                "%llu), uid 0x%x (library 0x%x, caller 0x%x), handler state rc 0x%08x state %u\n", what,
+                s_adh_events, n + 1u, ADH_AT(n).event, ADH_AT(n).error,
+                (unsigned long long)ADH_AT(n).at, (unsigned long long)(t0 + delay_us),
+                (unsigned long long)(t1 + delay_us + ADH_SLACK_US), (unsigned long long)sched_vtime_us(),
+                ADH_AT(n).uid, thread, sched_current_uid(), ADH_AT(n).state_rc, ADH_AT(n).state);
+    expect(ok, msg);
+}
+
+static void adh_expect_size(const char *what, uint32_t nid, uint32_t buf, uint32_t want_rc) {
+    char msg[192];
+    MEM_W32(ADH_OUT + 4u, 0x1234u);
+    const uint32_t rc = adh(nid, ADH_OUT + 4u, buf, 0u);
+    snprintf(msg, sizeof(msg), "%s: 0x%08x with size 0", what, want_rc);
+    expect(rc == want_rc && MEM_R32(ADH_OUT + 4u) == 0u, msg);
+}
+
+static void adh_main_fn(CpuState *cpu) {
+    extern uint32_t sr_hle_test_unmodelled_stops(void);
+    uint32_t state;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u,
+           "adhocctl: sceNetInit as every recording starts");
+    for (int i = 0; i < 4; i++) MEM_W8(ADH_ID + (uint32_t)i, 0u);
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    for (int i = 0; i < 9; i++) MEM_W8(ADH_ID + 4u + (uint32_t)i, (uint8_t)product[i]);
+    for (int i = 0; i < 16; i++) MEM_W8(ADH_ID_LOWER + (uint32_t)i, MEM_R8(ADH_ID + (uint32_t)i));
+    for (int i = 0; i < 16; i++) MEM_W8(ADH_ID_TYPE3 + (uint32_t)i, MEM_R8(ADH_ID + (uint32_t)i));
+    MEM_W8(ADH_ID_LOWER + 4u, 't');
+    MEM_W32(ADH_ID_TYPE3, 3u);
+
+    /* Before init (adhocctl.expected:4-7). */
+    expect(adh_get_state(&state) == 0x80410b08u && state == 0xffffffffu &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0x80410b08u &&
+           adh(ADH_NID_CREATE, adh_name(0, "TEST"), 0u, 0u) == 0x80410b08u &&
+           adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u,
+           "adhocctl before init: NOT_INITIALIZED, the state untouched, and Term 0");
+
+    /* Init's checks (adhocctl.expected:10-18): nothing starts, and GetState stays NOT_INITIALIZED. */
+    static const struct { uint32_t stack, priority, id, rc; } init_cells[] = {
+        {0u, 0x30u, ADH_ID, 0x80410b13u},
+        {0x400u, 0x30u, ADH_ID, 0x80410b13u},
+        {0xbffu, 0x30u, ADH_ID, 0x80410b13u},
+        {0x2000u, 0u, ADH_ID, 0x80020193u},
+        {0x2000u, 0x80u, ADH_ID, 0x80020193u},
+        {0x2000u, 0x30u, 0u, 0x80410b04u},
+        {0x2000u, 0x30u, ADH_ID_TYPE3, 0x80410b04u},
+    };
+    const int threads_before = s_ntcb;
+    for (size_t i = 0; i < sizeof(init_cells) / sizeof(init_cells[0]); i++) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "adhocctl Init(0x%x, 0x%x, id 0x%08x) answers 0x%08x and starts "
+                 "nothing", init_cells[i].stack, init_cells[i].priority, init_cells[i].id,
+                 init_cells[i].rc);
+        expect(adh_init(init_cells[i].stack, init_cells[i].priority, init_cells[i].id) ==
+                   init_cells[i].rc &&
+               adh_get_state(&state) == 0x80410b08u && s_ntcb == threads_before, msg);
+    }
+    const int small_ok = adh_init(0xc00u, 0x30u, ADH_ID) == 0u && adh_get_state(&state) == 0u;
+    const uint32_t small_thread = sr_hle_test_adhocctl_thread();
+    const int small_term = adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u;
+    const int lower_ok = adh_init(0x2000u, 0x30u, ADH_ID_LOWER) == 0u && adh_get_state(&state) == 0u;
+    const uint32_t lower_thread = sr_hle_test_adhocctl_thread();
+    expect(small_ok && small_term && lower_ok && small_thread != 0u && lower_thread != 0u &&
+           adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u,
+           "adhocctl Init with stack 0xC00, and with a lower-case product, answers 0");
+    adh_delay_until(cpu, sched_vtime_us() + 100000u);   /* Term returns before the thread ends */
+    expect(tcb_by_uid(small_thread) == NULL && tcb_by_uid(lower_thread) == NULL,
+           "adhocctl Term: the library's thread ends after Term");
+
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u, "adhocctl Init(0x2000, 0x30, TEST000001) answers 0");
+    const uint32_t thread = sr_hle_test_adhocctl_thread();
+    TCB *lib = tcb_by_uid(thread);
+    expect(lib && strcmp(lib->name, "SceNetAdhocctl") == 0 && lib->priority == 0x30 &&
+           lib->stack_size >= 0x2000u,
+           "adhocctl Init starts the library's thread with the given priority and stack");
+    expect(adh_get_state(&state) == 0u && state == 0u, "adhocctl after Init: state 0 (adhocctl.expected:21)");
+    for (int i = 0; i < 16; i++) MEM_W8(ADH_OUT + 0x20u + (uint32_t)i, 0xccu);
+    int id_matches = adh(ADH_NID_GET_ID, ADH_OUT + 0x20u, 0u, 0u) == 0u;
+    for (int i = 0; i < 13; i++) id_matches &= MEM_R8(ADH_OUT + 0x20u + (uint32_t)i) == MEM_R8(ADH_ID + (uint32_t)i);
+    expect(id_matches, "adhocctl GetAdhocId: the id Init received (adhocctl.expected:22)");
+    expect(adh(ADH_NID_WLAN_ETHER, ADH_WLAN_MAC, 0u, 0u) == 0u &&
+           adh(ADH_NID_LOCAL_ETHER, ADH_MAC, 0u, 0u) == 0x80410180u,
+           "adhocctl: no local address before a group (adhocctl.expected:23)");
+
+    /* Disconnected (adhocctl.expected:26-30). */
+    expect(adh(ADH_NID_GET_PARAM, ADH_PARAM, 0u, 0u) == 0x80410b09u,
+           "adhocctl GetParameter out of a group: 0x80410b09");
+    adh_expect_size("adhocctl GetPeerList out of a group", ADH_NID_PEER_LIST, 0u, 0x80410682u);
+    adh_expect_size("adhocctl GetScanInfo out of a group", ADH_NID_SCAN_INFO, 0u, 0u);
+    expect(adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0u, "adhocctl Disconnect out of a group: 0");
+    adh_delay_until(cpu, sched_vtime_us() + 200000u);
+    expect(s_adh_events == 0u, "adhocctl: with no handler the Disconnect event reaches nobody");
+
+    /* Handlers (adhocctl.expected:33-39). */
+    expect(adh(ADH_NID_ADD_HANDLER, 0u, 0u, 0u) == 0x80410b04u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0x5150u, 0u) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 1u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 2u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 3u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0x80410b12u,
+           "adhocctl AddHandler: NULL refused, ids 0 and 1 for the same handler, four in all");
+    expect(adh(ADH_NID_DEL_HANDLER, 2u, 0u, 0u) == 0u && adh(ADH_NID_DEL_HANDLER, 3u, 0u, 0u) == 0u &&
+           adh(ADH_NID_DEL_HANDLER, 1u, 0u, 0u) == 0u &&
+           adh(ADH_NID_DEL_HANDLER, 100u, 0u, 0u) == 0x80410b06u &&
+           adh(ADH_NID_DEL_HANDLER, 0xffffffffu, 0u, 0u) == 0x80410b06u,
+           "adhocctl DelHandler: registered ids 0, 100 and -1 refused with 0x80410b06");
+
+    /* Group names (adhocctl.expected:42-45). */
+    adh_expect_request(cpu, "adhocctl Create(NULL)", ADH_NID_CREATE, 0u, ADH_CREATE_US, 0u, 0u, 1, 1u);
+    expect(ADH_AT(0).arg == 0x5150u, "adhocctl: the handler receives its own argument");
+    adh_expect_request(cpu, "adhocctl Disconnect", ADH_NID_DISCONNECT, 0u, ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+    expect(adh(ADH_NID_CREATE, adh_name(1, "BAD-NAME"), 0u, 0u) == 0x80410b04u &&
+           adh(ADH_NID_CREATE, adh_name(1, "BAD NAME"), 0u, 0u) == 0x80410b04u &&
+           adh(ADH_NID_CREATE, adh_name(1, "BAD_NAME"), 0u, 0u) == 0x80410b04u,
+           "adhocctl Create: '-', ' ' and '_' in the name are INVALID_ARG");
+
+    /* Create (adhocctl.expected:48-55). */
+    adh_expect_request(cpu, "adhocctl Create(TESTGRP1)", ADH_NID_CREATE, adh_name(2, "TESTGRP1"),
+                       ADH_CREATE_US, 0u, 0u, 1, 1u);
+    for (uint32_t i = 0; i < 148u; i++) MEM_W8(ADH_PARAM + i, 0xccu);
+    expect(adh(ADH_NID_GET_PARAM, ADH_PARAM, 0u, 0u) == 0u, "adhocctl GetParameter in a group: 0");
+    int group_ok = 1, nickname_ok = 1, bssid_local = 1;
+    const char want[8] = {'T', 'E', 'S', 'T', 'G', 'R', 'P', '1'};
+    for (uint32_t i = 0; i < 8u; i++) group_ok &= MEM_R8(ADH_PARAM + 4u + i) == (uint8_t)want[i];
+    static const char want_nick[] = "Player"; /* owner_name's neutral default with no SR_NICKNAME (#2197) */
+    for (uint32_t i = 0; i < 128u; i++)
+        nickname_ok &= MEM_R8(ADH_PARAM + 12u + i) == (i < sizeof want_nick ? (uint8_t)want_nick[i] : 0u);
+    for (uint32_t i = 0; i < 6u; i++) bssid_local &= MEM_R8(ADH_PARAM + 140u + i) == MEM_R8(ADH_WLAN_MAC + i);
+    const uint32_t channel = MEM_R32(ADH_PARAM);
+    expect((channel == 1u || channel == 6u || channel == 11u) && group_ok && nickname_ok &&
+           !bssid_local && (MEM_R8(ADH_PARAM + 140u) & 3u) == 2u &&
+           MEM_R8(ADH_PARAM + 146u) == 0xccu && MEM_R8(ADH_PARAM + 147u) == 0xccu,
+           "adhocctl GetParameter: channel 1/6/11, the group, the registry's owner_name as the nickname "
+           "(\"Player\" by default, NUL-padded; a nickname is set, as adhocctl.expected:50 records), "
+           "and a locally administered BSSID that is not the console's MAC");
+    for (uint32_t i = 0; i < 6u; i++) MEM_W8(ADH_MAC + i, 0xccu);
+    int local = adh(ADH_NID_LOCAL_ETHER, ADH_MAC, 0u, 0u) == 0u;
+    for (uint32_t i = 0; i < 6u; i++) local &= MEM_R8(ADH_MAC + i) == MEM_R8(ADH_WLAN_MAC + i);
+    expect(local, "adhocctl: in a group the local address is the console's MAC (adhocctl.expected:51)");
+    adh_expect_size("adhocctl GetPeerList in a group", ADH_NID_PEER_LIST, 0u, 0u);
+    adh_expect_size("adhocctl GetPeerList in a group, with a buffer", ADH_NID_PEER_LIST, ADH_PEERS, 0u);
+    expect(adh(ADH_NID_PEER_INFO, ADH_WLAN_MAC, 0x98u, ADH_PEERS) == 0x80410716u &&
+           adh(ADH_NID_PEER_INFO, ADH_OUT + 0x40u, 0x98u, ADH_PEERS) == 0x80410716u,
+           "adhocctl GetPeerInfo for the console and another MAC: 0x80410716");
+    adh_expect_size("adhocctl GetScanInfo in a group", ADH_NID_SCAN_INFO, 0u, 0u);
+
+    /* While connected (adhocctl.expected:58-62): each answers 0 and gets ALREADY_CONNECTED later. */
+    unsigned n = s_adh_events;
+    expect(adh(ADH_NID_CREATE, adh_name(3, "TESTGRP2"), 0u, 0u) == 0u &&
+           adh(ADH_NID_CONNECT, adh_name(3, "TESTGRP2"), 0u, 0u) == 0u &&
+           adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u && s_adh_events == n,
+           "adhocctl in a group: Create, Connect and Scan answer 0, with no event during the call");
+    adh_delay_until(cpu, sched_vtime_us() + 100000u);
+    int errors_ok = s_adh_events == n + 3u;
+    for (unsigned i = n; i < n + 3u && i < ADH_LOG_MAX; i++)
+        errors_ok &= ADH_AT(i).event == 0 && ADH_AT(i).error == 0x80410b02u && ADH_AT(i).state == 1u;
+    expect(errors_ok && adh_state() == 1u,
+           "adhocctl in a group: three events 0 (0x80410b02) within 100 ms, still in the group");
+
+    /* Disconnect, and Disconnect again (adhocctl.expected:65-70). */
+    adh_expect_request(cpu, "adhocctl Disconnect from TESTGRP1", ADH_NID_DISCONNECT, 0u,
+                       ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+    expect(adh(ADH_NID_GET_PARAM, ADH_PARAM, 0u, 0u) == 0x80410b09u,
+           "adhocctl GetParameter after leaving: 0x80410b09");
+    adh_expect_size("adhocctl GetPeerList after leaving", ADH_NID_PEER_LIST, 0u, 0x80410682u);
+    adh_expect_request(cpu, "adhocctl Disconnect again", ADH_NID_DISCONNECT, 0u, ADH_DISCONNECT_US,
+                       0u, 0u, 2, 0u);
+
+    /* Scan (adhocctl.expected:73-75; state 2 once the thread runs, scanstate.expected:5). */
+    adh_expect_request(cpu, "adhocctl Scan", ADH_NID_SCAN, 0u, ADH_SCAN_US, 0u, 2u, 3, 0u);
+    adh_expect_size("adhocctl GetScanInfo after a scan", ADH_NID_SCAN_INFO, 0u, 0u);
+
+    /* Connect to a group nobody hosts (adhocctl.expected:78-82; timing.expected:43). */
+    adh_expect_request(cpu, "adhocctl Connect(TESTGRP3)", ADH_NID_CONNECT, adh_name(4, "TESTGRP3"),
+                       ADH_CONNECT_US, 0u, 0u, 1, 1u);
+    expect(adh(ADH_NID_GET_PARAM, ADH_PARAM, 0u, 0u) == 0u && MEM_R8(ADH_PARAM + 11u) == '3',
+           "adhocctl GetParameter after Connect: group TESTGRP3");
+    adh_expect_request(cpu, "adhocctl Disconnect from TESTGRP3", ADH_NID_DISCONNECT, 0u,
+                       ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+
+    /* BUSY while a Create is in flight, and the Create still completes (ctlinit.expected:24, 29;
+     * abandon.expected:6, 30). */
+    n = s_adh_events;
+    const uint64_t t0 = sched_vtime_us();
+    expect(adh(ADH_NID_CREATE, adh_name(5, "ABANDON"), 0u, 0u) == 0u &&
+           adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0x80410b10u &&
+           adh(ADH_NID_CREATE, adh_name(6, "REJOIN"), 0u, 0u) == 0x80410b10u &&
+           adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0x80410b10u,
+           "adhocctl during a Create: Scan, Create and Disconnect answer BUSY (0x80410b10)");
+    /* Whether a PSP checks the group name or the request in flight first is UNMEASURED: an
+     * invalid name during a Create stops by name, not BUSY and not INVALID_ARG. */
+    const uint32_t bad_stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_CREATE, adh_name(7, "BAD-NAME"), 0u, 0u) == ADH_STOPPED &&
+           sr_hle_test_unmodelled_stops() == bad_stops + 1u,
+           "adhocctl: a Create with an invalid group during a Create is an UNMEASURED stop");
+    adh_delay_until(cpu, t0 + ADH_CREATE_US + ADH_SLACK_US);
+    expect(s_adh_events == n + 1u && ADH_AT(n).event == 1 && adh_state() == 1u &&
+           adh(ADH_NID_GET_PARAM, ADH_PARAM, 0u, 0u) == 0u && MEM_R8(ADH_PARAM + 4u) == 'A',
+           "adhocctl: the abandoned Create still connects, to its own group");
+    adh_expect_request(cpu, "adhocctl Disconnect from ABANDON", ADH_NID_DISCONNECT, 0u,
+                       ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+
+    /* BUSY is recorded for those three during a Create and for Disconnect during a Connect
+     * (abandon.expected:12); any other request while one is in flight stops by name. */
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    const uint64_t t2 = sched_vtime_us();
+    expect(adh(ADH_NID_CREATE, adh_name(9, "BUSYA"), 0u, 0u) == 0u &&
+           adh(ADH_NID_CONNECT, adh_name(10, "BUSYB"), 0u, 0u) == ADH_STOPPED &&
+           sr_hle_test_unmodelled_stops() == stops + 1u,
+           "adhocctl: a Connect during a Create is an UNMEASURED stop, not BUSY");
+    adh_delay_until(cpu, t2 + ADH_CREATE_US + ADH_SLACK_US);
+    expect(adh_state() == 1u && ADH_AT(s_adh_events - 1u).event == 1,
+           "adhocctl: that Create still completes");
+    adh_expect_request(cpu, "adhocctl Disconnect from BUSYA", ADH_NID_DISCONNECT, 0u,
+                       ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+    const uint64_t t3 = sched_vtime_us();
+    expect(adh(ADH_NID_CONNECT, adh_name(10, "BUSYB"), 0u, 0u) == 0u &&
+           adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0x80410b10u &&
+           adh(ADH_NID_SCAN, 0u, 0u, 0u) == ADH_STOPPED &&
+           adh(ADH_NID_CREATE, adh_name(11, "BUSYC"), 0u, 0u) == ADH_STOPPED &&
+           adh(ADH_NID_CONNECT, adh_name(11, "BUSYC"), 0u, 0u) == ADH_STOPPED &&
+           sr_hle_test_unmodelled_stops() == stops + 4u,
+           "adhocctl during a Connect: Disconnect answers BUSY (abandon.expected:12); Scan, Create and "
+           "Connect are UNMEASURED stops");
+    adh_delay_until(cpu, t3 + ADH_CONNECT_US + ADH_SLACK_US);
+    expect(adh_state() == 1u && ADH_AT(s_adh_events - 1u).event == 1,
+           "adhocctl: that Connect still completes");
+    adh_expect_request(cpu, "adhocctl Disconnect from BUSYB", ADH_NID_DISCONNECT, 0u,
+                       ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+
+    /* What no recording covers stops the run by name. */
+    stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u && adh(ADH_NID_CREATE, adh_name(7, "LATE"), 0u, 0u) != 0u &&
+           sr_hle_test_unmodelled_stops() == stops + 1u,
+           "adhocctl: a Create during a scan is an UNMEASURED stop");
+    adh_delay_until(cpu, sched_vtime_us() + ADH_SCAN_US + ADH_SLACK_US);
+    expect(ADH_AT(s_adh_events - 1u).event == 3 && adh_state() == 0u &&
+           adh(ADH_NID_CREATE, adh_name(7, "lower"), 0u, 0u) != 0u &&
+           sr_hle_test_unmodelled_stops() == stops + 2u && adh_state() == 0u,
+           "adhocctl: a lower-case group name is an UNMEASURED stop, and nothing starts");
+
+    /* Term in a group: no library, no local address (term.expected:25-26); Term takes the handlers
+     * with it, so four can be added again after Init (ctlinit.expected:3-28). */
+    adh_expect_request(cpu, "adhocctl Create(TERMGRP)", ADH_NID_CREATE, adh_name(8, "TERMGRP"),
+                       ADH_CREATE_US, 0u, 0u, 1, 1u);
+    n = s_adh_events;
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && adh_get_state(&state) == 0x80410b08u &&
+           adh(ADH_NID_LOCAL_ETHER, ADH_MAC, 0u, 0u) == 0x80410180u,
+           "adhocctl Term in a group: 0, then NOT_INITIALIZED and no local address");
+    adh_delay_until(cpu, sched_vtime_us() + 200000u);
+    expect(s_adh_events == n && tcb_by_uid(thread) == NULL,
+           "adhocctl Term: no event, and the library's thread is gone");
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 1u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 2u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 3u,
+           "adhocctl: after Term and Init, four handlers fit again");
+
+    /* Init again (adhocctl.expected:85-93). */
+    stops = sr_hle_test_unmodelled_stops();
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0x80410b07u && adh_get_state(&state) == 0x80410b08u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0x80410601u && adh_get_state(&state) == 0x80410b08u &&
+           adh(ADH_NID_DEL_HANDLER, 0u, 0u, 0u) == 0x80410b08u && adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && adh_get_state(&state) == 0x80410b08u &&
+           sr_hle_test_unmodelled_stops() == stops,
+           "adhocctl Init again: 0x80410b07 and uninitialized, then 0x80410601; DelHandler "
+           "NOT_INITIALIZED; Term 0 twice");
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) != 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+           "adhocctl: Init after that Term is an UNMEASURED stop");
+    adh_delay_until(cpu, sched_vtime_us() + 100000u);   /* the torn-down thread ends */
+    (void)adh(ADH_NID_NET_TERM, 0u, 0u, 0u);
+    s_adh_done = 1;
+    cpu->r[2] = 0u;
+}
+
+static int aot_spawn_self(const char *self, const char *mode);
+static int hle_scratch_root(char *out, size_t capacity);
+
+/* Every adhocctl fixture starts here: the default system profile (owner_name empty), user RAM
+ * as a game has it, the libraries uninitialized, and the recording handler at ADH_HANDLER. */
+static uint32_t adh_fixture_begin(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern void hle_net_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    sysreg_scratch_clean();
+    sysreg_restart();
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;   /* a main image in user RAM, as a game's is */
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    hle_net_reset();
+    sr_test_guest_fn_reset();
+    memset(s_adh_log, 0, sizeof(s_adh_log));
+    s_adh_events = 0u;
+    s_adh_done = 0;
+    s_adh_mode = ADH_MODE_RECORD;
+    s_adh_handler_rc = 0u;
+    s_adh_delay_in = s_adh_delay_out = 0u;
+    sr_test_register_guest_fn(ADH_HANDLER, adh_handler_fn);
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    return loaded_end;
+}
+
+static void adh_fixture_end(uint32_t loaded_end) {
+    extern void hle_net_reset(void);
+    hle_net_reset();
+    sr_test_guest_fn_reset();
+    sysreg_scratch_clean();   /* the process-wide scratch overlay main() set stays selected */
+    sysreg_restart();
+    s_fixture_loaded_end = loaded_end;
+}
+
+static void adh_run(uint32_t entry, void (*fn)(CpuState *)) {
+    sr_test_register_guest_fn(entry, fn);
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(entry, 0u, 0u);
+}
+
+/* sceNetInit, the id TEST000001, sceNetAdhocctlInit(0x2000, 0x30) and the recording handler as
+ * id 0, as every recording starts. */
+static int adh_startup(void) {
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    for (uint32_t i = 0; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    return net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u;
+}
+
+static void test_adhocctl_lone_console(void) {
+    const uint32_t loaded_end = adh_fixture_begin();
+    adh_run(ADH_MAIN_ENTRY, adh_main_fn);
+    expect(s_adh_done, "adhocctl: the lone-console fixture ran to its end");
+    adh_fixture_end(loaded_end);
+}
+
+/* A LoadExec with the library's thread alive and a Create in flight: the scheduler reset retires
+ * the thread and hle_net_reset leaves the libraries uninitialized; the next program's Init
+ * starts a new thread whose Create gets its own event at its own time, and nothing of the old
+ * program's arrives. */
+static void adh_loadexec_old_fn(CpuState *cpu) {
+    const int ok = adh_startup() && adh(ADH_NID_CREATE, adh_name(0, "LEXEC"), 0u, 0u) == 0u;
+    s_adh_loadexec_thread = sr_hle_test_adhocctl_thread();
+    expect(ok && s_adh_loadexec_thread != 0u,
+           "adhocctl LoadExec: a Create in flight on a live library thread");
+    s_adh_done = 1;
+    sched_request_guest_reset();
+    adh_delay_until(cpu, sched_vtime_us() + 1000u);   /* the scheduler stops at its next pass */
+    s_adh_done = 2;                                   /* never: the reset retires this thread */
+}
+
+static void adh_loadexec_new_fn(CpuState *cpu) {
+    expect(adh_startup(), "adhocctl after LoadExec: sceNetInit, Init and AddHandler answer 0");
+    const uint32_t thread = sr_hle_test_adhocctl_thread();
+    adh_expect_request(cpu, "adhocctl after LoadExec: Create(LEXEC2)", ADH_NID_CREATE,
+                       adh_name(1, "LEXEC2"), ADH_CREATE_US, 0u, 0u, 1, 1u);
+    expect(s_adh_events == 1u && thread != s_adh_loadexec_thread,
+           "adhocctl after LoadExec: one event, from the new program's thread");
+    adh_expect_request(cpu, "adhocctl after LoadExec: Disconnect", ADH_NID_DISCONNECT, 0u,
+                       ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && adh(ADH_NID_NET_TERM, 0u, 0u, 0u) == 0u,
+           "adhocctl after LoadExec: Term and sceNetTerm answer 0");
+    adh_delay_until(cpu, sched_vtime_us() + 100000u);
+    s_adh_done = 3;
+}
+
+/* Teardown under a handler, and sceNetTerm with the library live. */
+static void adh_teardown_fn(CpuState *cpu) {
+    uint32_t state;
+    expect(adh_startup(), "adhocctl teardown: sceNetInit, Init and AddHandler answer 0");
+
+    /* A handler that calls Term: 0, the library ends, and its thread ends once the handler
+     * returns (it is the thread the handler runs on). */
+    uint32_t lib = sr_hle_test_adhocctl_thread();
+    s_adh_mode = ADH_MODE_TERM;
+    uint64_t t0 = sched_vtime_us();
+    expect(adh(ADH_NID_CREATE, adh_name(0, "TERMA"), 0u, 0u) == 0u, "adhocctl Create(TERMA): 0");
+    adh_delay_until(cpu, t0 + ADH_CREATE_US + ADH_SLACK_US);
+    expect(s_adh_events == 1u && ADH_AT(0).event == 1 && ADH_AT(0).uid == lib && s_adh_handler_rc == 0u &&
+           adh_get_state(&state) == 0x80410b08u && tcb_by_uid(lib) == NULL,
+           "adhocctl: a handler that calls Term gets 0; the library is uninitialized and its thread "
+           "ends after the handler");
+
+    /* Term while a handler waits in a guest delay: the delay runs its full time, and the thread
+     * ends after the handler with no further event. */
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u && adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "adhocctl Init and AddHandler again after that Term");
+    lib = sr_hle_test_adhocctl_thread();
+    s_adh_mode = ADH_MODE_DELAY;
+    t0 = sched_vtime_us();
+    expect(adh(ADH_NID_CREATE, adh_name(1, "TERMB"), 0u, 0u) == 0u, "adhocctl Create(TERMB): 0");
+    adh_delay_until(cpu, t0 + ADH_CREATE_US + ADH_SLACK_US);
+    expect(s_adh_events == 2u && s_adh_delay_in != 0u && s_adh_delay_out == 0u,
+           "adhocctl: the handler waits in its own guest delay");
+    const uint64_t term_at = sched_vtime_us();
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && adh_get_state(&state) == 0x80410b08u,
+           "adhocctl Term while a handler waits in a delay: 0, and the library is uninitialized");
+    adh_delay_until(cpu, term_at + ADH_HANDLER_DELAY_US + ADH_SLACK_US);
+    expect(s_adh_delay_out >= s_adh_delay_in + ADH_HANDLER_DELAY_US && tcb_by_uid(lib) == NULL &&
+           s_adh_events == 2u,
+           "adhocctl: Term's kick leaves the handler's delay whole; the thread ends after the handler, "
+           "with no further event");
+
+    /* A request's kick while a handler waits in a delay: the delay runs its full time, and the
+     * request's event follows the handler, not before its own time. */
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u && adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "adhocctl Init and AddHandler again");
+    s_adh_mode = ADH_MODE_DELAY;
+    s_adh_delay_in = s_adh_delay_out = 0u;
+    t0 = sched_vtime_us();
+    expect(adh(ADH_NID_CREATE, adh_name(2, "KICKC"), 0u, 0u) == 0u, "adhocctl Create(KICKC): 0");
+    adh_delay_until(cpu, t0 + ADH_CREATE_US + ADH_SLACK_US);
+    expect(s_adh_events == 3u && s_adh_delay_in != 0u && s_adh_delay_out == 0u && adh_state() == 1u,
+           "adhocctl: in the group, with the handler in its delay");
+    const uint64_t disconnect_at = sched_vtime_us();
+    expect(adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0u, "adhocctl Disconnect while the handler waits: 0");
+    adh_delay_until(cpu, disconnect_at + ADH_HANDLER_DELAY_US + ADH_SLACK_US);
+    expect(s_adh_delay_out >= s_adh_delay_in + ADH_HANDLER_DELAY_US && s_adh_events == 4u &&
+           ADH_AT(3).event == 2 && ADH_AT(3).at >= s_adh_delay_out &&
+           ADH_AT(3).at >= disconnect_at + ADH_DISCONNECT_US && adh_state() == 0u,
+           "adhocctl: the Disconnect's kick leaves the handler's delay whole; its event follows the "
+           "handler");
+
+    /* sceNetTerm while sceNetAdhocctl is initialized: no recording does it (each ends adhocctl
+     * first), so it stops by name and leaves both libraries as they were. */
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_NET_TERM, 0u, 0u, 0u) == ADH_STOPPED && sr_hle_test_unmodelled_stops() == stops + 1u &&
+           sr_hle_test_net_inited() && sr_hle_test_adhocctl_state() == 0,
+           "sceNetTerm while sceNetAdhocctl is initialized: an UNMEASURED stop; both stay initialized");
+
+    /* A handler that calls Init: the recorded second Init (adhocctl.expected:85-87), from the
+     * library's own thread. */
+    lib = sr_hle_test_adhocctl_thread();
+    s_adh_mode = ADH_MODE_INIT;
+    t0 = sched_vtime_us();
+    expect(adh(ADH_NID_CREATE, adh_name(3, "INITD"), 0u, 0u) == 0u, "adhocctl Create(INITD): 0");
+    adh_delay_until(cpu, t0 + ADH_CREATE_US + ADH_SLACK_US);
+    expect(s_adh_events == 5u && ADH_AT(4).event == 1 && s_adh_handler_rc == 0x80410b07u &&
+           adh_get_state(&state) == 0x80410b08u && tcb_by_uid(lib) == NULL,
+           "adhocctl: a handler that calls Init gets 0x80410b07; the library is uninitialized and its "
+           "thread ends after the handler");
+    stops = sr_hle_test_unmodelled_stops();
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0x80410601u && adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           adh(ADH_NID_NET_TERM, 0u, 0u, 0u) == 0u && sr_hle_test_unmodelled_stops() == stops,
+           "adhocctl after it: Init 0x80410601, Term 0 and sceNetTerm 0");
+    s_adh_done = 1;
+}
+
+static void test_adhocctl_teardown(void) {
+    uint32_t loaded_end = adh_fixture_begin();
+    adh_run(ADH_MAIN_ENTRY, adh_loadexec_old_fn);
+    expect(s_adh_done == 1 && tcb_by_uid(s_adh_loadexec_thread) != NULL,
+           "adhocctl LoadExec: the old program stops with the library's thread alive");
+    extern void hle_net_reset(void);
+    expect(sched_reset_for_loadexec(), "adhocctl LoadExec: the scheduler retires the old threads");
+    hle_net_reset();
+    expect(sr_hle_test_adhocctl_state() == -1 && sr_hle_test_adhocctl_thread() == 0u &&
+           !sr_hle_test_net_inited() && tcb_by_uid(s_adh_loadexec_thread) == NULL && s_adh_events == 0u,
+           "adhocctl after LoadExec: both libraries uninitialized, the thread gone, and no event of "
+           "the old Create");
+    adh_run(ADH_MAIN_ENTRY + 0x10u, adh_loadexec_new_fn);
+    expect(s_adh_done == 3, "adhocctl after LoadExec: the new program ran to its end");
+    adh_fixture_end(loaded_end);
+
+    loaded_end = adh_fixture_begin();
+    adh_run(ADH_MAIN_ENTRY, adh_teardown_fn);
+    expect(s_adh_done == 1, "adhocctl teardown: the fixture ran to its end");
+    adh_fixture_end(loaded_end);
+}
+
+/* The guest ends the library's thread by uid while the library is initialized. */
+static void adh_lost_thread_fn(CpuState *cpu) {
+    /* The guest ends the library's thread by uid while the library is initialized: nothing
+     * would answer a request, so each request stops by name (UNMEASURED), first with the thread
+     * terminated (dormant), then with it deleted. Term and sceNetTerm still answer 0. */
+    const uint32_t nid_delete_thread = 0x9fa03cd3u;   /* sceKernelDeleteThread */
+    expect(adh_startup(), "adhocctl lost thread: sceNetInit, Init and AddHandler answer 0");
+    const uint32_t lib = sr_hle_test_adhocctl_thread();
+    cpu->r[4] = lib;
+    expect(lib != 0u && sr_syscall(cpu, NID_SCE_KERNEL_TERMINATE_THREAD) == 0u && sched_is_dormant(lib),
+           "adhocctl: the guest terminates the library's thread by uid");
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_CREATE, adh_name(4, "GONE"), 0u, 0u) == ADH_STOPPED &&
+           sr_hle_test_unmodelled_stops() == stops + 1u && adh_state() == 0u,
+           "adhocctl: a Create after the guest terminated the library's thread is an UNMEASURED stop");
+    cpu->r[4] = lib;
+    expect(sr_syscall(cpu, nid_delete_thread) == 0u && tcb_by_uid(lib) == NULL,
+           "adhocctl: the guest deletes the library's thread");
+    stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == ADH_STOPPED && adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == ADH_STOPPED &&
+           adh(ADH_NID_CONNECT, adh_name(4, "GONE"), 0u, 0u) == ADH_STOPPED &&
+           sr_hle_test_unmodelled_stops() == stops + 3u,
+           "adhocctl: Scan, Disconnect and Connect after the guest deleted the library's thread are "
+           "UNMEASURED stops");
+    stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && adh(ADH_NID_NET_TERM, 0u, 0u, 0u) == 0u &&
+           sr_hle_test_unmodelled_stops() == stops,
+           "adhocctl with its thread gone: Term 0 and sceNetTerm 0");
+    s_adh_done = 1;
+}
+
+static void test_adhocctl_lost_thread(void) {
+    const uint32_t loaded_end = adh_fixture_begin();
+    adh_run(ADH_MAIN_ENTRY, adh_lost_thread_fn);
+    expect(s_adh_done == 1, "adhocctl lost thread: the fixture ran to its end");
+    adh_fixture_end(loaded_end);
+}
+
+/* GetParameter's nickname is exactly the registry's owner_name: a profile that sets one gets it
+ * back, NUL-padded to 128 bytes. */
+static void adh_nickname_fn(CpuState *cpu) {
+    expect(adh_startup(), "adhocctl nickname: sceNetInit, Init and AddHandler answer 0");
+    adh_expect_request(cpu, "adhocctl nickname: Create(NICK)", ADH_NID_CREATE, adh_name(0, "NICK"),
+                       ADH_CREATE_US, 0u, 0u, 1, 1u);
+    for (uint32_t i = 0; i < 148u; i++) MEM_W8(ADH_PARAM + i, 0xccu);
+    const char want[] = "NKTEST";
+    int nickname_ok = adh(ADH_NID_GET_PARAM, ADH_PARAM, 0u, 0u) == 0u;
+    for (uint32_t i = 0; i < 128u; i++)
+        nickname_ok &= MEM_R8(ADH_PARAM + 12u + i) == (i < 6u ? (uint8_t)want[i] : 0u);
+    expect(nickname_ok, "adhocctl GetParameter: the profile's owner_name NKTEST, NUL-padded to 128 bytes");
+    adh_expect_request(cpu, "adhocctl nickname: Disconnect", ADH_NID_DISCONNECT, 0u,
+                       ADH_DISCONNECT_US, 1u, 1u, 2, 0u);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && adh(ADH_NID_NET_TERM, 0u, 0u, 0u) == 0u,
+           "adhocctl nickname: Term and sceNetTerm answer 0");
+    adh_delay_until(cpu, sched_vtime_us() + 100000u);
+    s_adh_done = 1;
+}
+
+static void test_adhocctl_nickname_from_profile(void) {
+    static const char overlay[] =
+        "{\"schema\": \"nakagawa.psp-system-registry-overlay\", \"schema_version\": 1, \"categories\": [],"
+        " \"keys\": [{\"category\": \"/CONFIG/SYSTEM\", \"name\": \"owner_name\", \"type\": \"str\","
+        " \"value_hex\": \"4e4b5445535400\"}]}";
+    const uint32_t loaded_end = adh_fixture_begin();
+    expect(sysreg_write_file(SYSREG_SCRATCH_FILE, overlay, sizeof(overlay) - 1u),
+           "adhocctl nickname: the owner_name overlay is written");
+    sysreg_restart();
+    adh_run(ADH_MAIN_ENTRY, adh_nickname_fn);
+    expect(s_adh_done == 1, "adhocctl nickname: the fixture ran to its end");
+    adh_fixture_end(loaded_end);
+}
+
+/* A handler that faults stops the run: the fault must not stay a flag on the library's thread,
+ * where the next thread's context would replace it and the game would wait on. */
+static void adh_fault_fn(CpuState *cpu) {
+    if (!adh_startup()) {
+        s_adh_done = 97;
+        return;
+    }
+    s_adh_mode = ADH_MODE_FAULT;
+    const uint64_t t0 = sched_vtime_us();
+    (void)adh(ADH_NID_CREATE, adh_name(0, "FAULT"), 0u, 0u);
+    adh_delay_until(cpu, t0 + ADH_CREATE_US + ADH_SLACK_US);
+    s_adh_done = 99;   /* the run went on past the handler's fault */
+}
+
+/* The child's stderr goes next to its flight-recorder bundle, whose absolute path the parent
+ * passes as SR_FLIGHT_OUTPUT: the child's working directory need not be the parent's. */
+static int adh_fault_log(char *log, size_t capacity, const char *bundle) {
+    const int n = bundle && bundle[0] ? snprintf(log, capacity, "%s.stderr", bundle) : -1;
+    return n > 0 && (size_t)n < capacity;
+}
+
+/* The bundle under HLE_BUILD_ROOT, made absolute, and the log beside it. */
+static int adh_fault_paths(char *log, char *bundle, size_t capacity) {
+    char root[MAX_PATH];
+    if (!hle_scratch_root(root, sizeof(root))) return 0;
+    const int b = snprintf(bundle, capacity, "%s/adhocctl_fault_child.json", root);
+    return b > 0 && (size_t)b < capacity && adh_fault_log(log, capacity, bundle);
+}
+
+static int run_adhocctl_handler_fault_child(void) {
+    char log[MAX_PATH];
+    if (!adh_fault_log(log, sizeof(log), getenv("SR_FLIGHT_OUTPUT")) || !freopen(log, "w", stderr)) return 96;
+    (void)adh_fixture_begin();
+    sr_flight_test_reset(SR_FLIGHT_CLASS_FATAL, 8u);   /* SR_FLIGHT_OUTPUT is the parent's */
+    adh_run(ADH_MAIN_ENTRY, adh_fault_fn);
+    return s_adh_done ? s_adh_done : 98;
+}
+
+static size_t adh_read_file(const char *path, char *out, size_t capacity) {
+    FILE *f = fopen(path, "rb");
+    size_t n = 0;
+    if (f) {
+        n = fread(out, 1, capacity - 1u, f);
+        fclose(f);
+    }
+    out[n] = '\0';
+    return n;
+}
+
+/* The fault must stop the run the way dispatch_call stops one: status 1, the SEMANTIC_BOUNDARY
+ * line tools/nk_cli.py classifies, naming the handler, and a flight-recorder fatal for it.
+ * Status 1 alone would accept any other exit(1) in the child. */
+static void test_adhocctl_handler_fault_stops(const char *self) {
+    char log[MAX_PATH], bundle[MAX_PATH];
+    if (!self || !adh_fault_paths(log, bundle, sizeof(log))) {
+        expect(0, "adhocctl handler fault: the selftest knows its own path and its scratch root");
+        return;
+    }
+    remove(log);
+    remove(bundle);
+    hle_test_setenv("SR_FLIGHT_OUTPUT", bundle);
+    const int status = aot_spawn_self(self, "--adhocctl-handler-fault-child");
+    hle_test_setenv("SR_FLIGHT_OUTPUT", NULL);
+    static char text[16384];
+    char msg[200];
+    snprintf(msg, sizeof(msg), "adhocctl: a handler's fault stops the run with status 1 (got %d)", status);
+    expect(status == 1, msg);
+    char want[160];
+    snprintf(want, sizeof(want), "SEMANTIC_BOUNDARY: adhocctl-handler-fault; handler 0x%08x (id 0, event 1) ",
+             ADH_HANDLER);
+    (void)adh_read_file(log, text, sizeof(text));
+    const char *line = strstr(text, want);
+    expect(line != NULL && (line == text || line[-1] == '\n'),
+           "adhocctl: the fault prints the classified SEMANTIC_BOUNDARY line with the handler's address");
+    (void)adh_read_file(bundle, text, sizeof(text));
+    char event[160];
+    snprintf(event, sizeof(event), "\"class\": \"fatal\", \"kind\": %u, \"arg0\": %u, \"arg1\": %u, \"arg2\": 1",
+             (unsigned)SR_FLIGHT_KIND_FATAL_DISPATCH, (unsigned)ADH_HANDLER, (unsigned)ADH_HANDLER);
+    expect(strstr(text, "\"terminal\": {\"reason\": \"fatal\"") != NULL && strstr(text, event) != NULL,
+           "adhocctl: the fault leaves a flight-recorder fatal for the handler, event 1");
+    remove(log);
+    remove(bundle);
 }
 
 extern void sr_hle_test_volatile_mem_reset(void);
@@ -9300,6 +10120,7 @@ static uint32_t utility_status(CpuState *cpu, uint32_t nid) {
     utility_end_frame();
     return status;
 }
+static int utility_poll_to_finished(CpuState *cpu, uint32_t update, uint32_t status);
 
 /* A zeroed parameter block whose common result field (+0x1c) holds a sentinel: an InitStart
  * that takes the block writes 0 there, so a refused one is visible by the sentinel staying. */
@@ -9470,13 +10291,16 @@ static void test_utility_dialog_single_slot(void) {
                utility_call(&cpu, NID_MSG_DIALOG_SHUTDOWN, 0u) == 0x80110005u &&
                utility_call(&cpu, NID_MSG_DIALOG_UPDATE, 0u) == 0x80110005u,
            "the message dialog that gave up the slot answers WRONG_TYPE");
+    MEM_W32(UTILITY_SAVEDATA_PARAM_ADDR + 0x30u, 22u); /* GETSIZE, its work: no memory-stick I/O */
     expect(utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 2u &&
+               utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0x80110001u &&
+               utility_poll_to_finished(&cpu, NID_SAVEDATA_DIALOG_UPDATE, NID_SAVEDATA_DIALOG_STATUS) &&
                utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0u &&
                utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0x80110001u &&
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 4u &&
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0u,
-           "the savedata dialog, started a frame ago, is RUNNING, then winds down to NONE after "
-           "ShutdownStart");
+           "the savedata dialog, started a frame ago, is RUNNING and refuses ShutdownStart; it "
+           "finishes, then winds down to NONE after ShutdownStart");
     expect(utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0x80110001u,
            "savedata ShutdownStart at NONE returns INVALID_STATUS");
     expect(utility_call(&cpu, NID_SAVEDATA_DIALOG_UPDATE, 0u) == 0x80110001u &&
@@ -9490,11 +10314,25 @@ static void test_utility_dialog_single_slot(void) {
             continue;
         utility_param_block(UTILITY_OTHER_PARAM_ADDR, utility_fixture_size(init));
         snprintf(what, sizeof(what), "%sInitStart takes the free slot; the dialog reports INIT, "
-                 "then winds down to NONE after ShutdownStart", dialogs[i].name);
+                 "and ShutdownStart during INIT and RUNNING returns INVALID_STATUS",
+                 dialogs[i].name);
         expect(utility_call(&cpu, init, UTILITY_OTHER_PARAM_ADDR) == 0u &&
                    MEM_R32(UTILITY_OTHER_PARAM_ADDR + 0x1cu) == 0u &&
+                   utility_call(&cpu, dialogs[i].shutdown, 0u) == 0x80110001u &&
                    utility_status(&cpu, dialogs[i].status) == 1u &&
                    utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u &&
+                   utility_call(&cpu, dialogs[i].shutdown, 0u) == 0x80110001u &&
+                   utility_status(&cpu, dialogs[i].status) == 2u,
+               what);
+        /* Gamedata and sharing get no Update, which would create memory-stick directories: the
+         * test reset frees their slot. */
+        if (init != NID_NETCONF_DIALOG_INIT) {
+            sr_hle_test_osk_slot_reset();
+            continue;
+        }
+        snprintf(what, sizeof(what), "%s finishes, then winds down to NONE after ShutdownStart",
+                 dialogs[i].name);
+        expect(utility_poll_to_finished(&cpu, dialogs[i].update, dialogs[i].status) &&
                    utility_call(&cpu, dialogs[i].shutdown, 0u) == 0u &&
                    utility_status(&cpu, dialogs[i].status) == 4u &&
                    utility_status(&cpu, dialogs[i].status) == 0u,
@@ -9632,15 +10470,16 @@ static void test_msg_dialog_abort_without_update(void) {
     sr_hle_test_osk_slot_reset();
 }
 
-/* #1386 cancel cleanup: a game that gives up on a dialog calls ShutdownStart while it is still
- * RUNNING. Savedata, netconf, gamedata and game sharing take that (the message dialog refuses it,
- * tests/utility/dialog/status.expected). The shutdown must leave nothing behind: the dialog winds
- * down to NONE, writes no result into the abandoned block, and the next InitStart, of the same
- * type or another, starts fresh from INIT with a cleared result word. Which status a non-message
- * dialog reports after a RUNNING shutdown is not measured; only that the slot comes back is
- * asserted. Gamedata and sharing are cancelled before their first Update, which would create
- * memory-stick directories. */
-static void test_utility_dialog_cancel_cleanup(void) {
+/* #1386 cancel: a game that gives up on a dialog may call ShutdownStart while it is still INIT or
+ * RUNNING. Every type refuses it with INVALID_STATUS and changes nothing (utility_shutdown_refused,
+ * src/rt/hle_utility.c): the message dialog's measured rule (tests/utility/dialog/status.expected),
+ * and what the PSP-3000 captures of 2026-11-12 (PSP-HLE-UTILITY-DIALOG-001, not acceptance-eligible)
+ * recorded for savedata, netconf and gamedata install while RUNNING. INIT for those three and game
+ * sharing in any state are UNMEASURED. The dialog keeps the slot and moves on as before: no other
+ * InitStart takes the slot, and a dialog that does its work runs to FINISHED, shuts down, and the
+ * next InitStart of its type starts from INIT with a cleared result word. Gamedata and sharing get
+ * no Update, which would create memory-stick directories, so the test reset frees their slot. */
+static void test_utility_dialog_refused_cancel(void) {
     static const UtilityDialogNids dialogs[] = {
         { "sceUtilitySavedata", NID_SAVEDATA_DIALOG_INIT, NID_SAVEDATA_DIALOG_UPDATE,
           NID_SAVEDATA_DIALOG_STATUS, NID_SAVEDATA_DIALOG_SHUTDOWN },
@@ -9662,38 +10501,48 @@ static void test_utility_dialog_cancel_cleanup(void) {
         const uint32_t block = savedata ? UTILITY_SAVEDATA_PARAM_ADDR : UTILITY_OTHER_PARAM_ADDR;
         if (savedata) utility_savedata_block();
         else utility_param_block(block, utility_fixture_size(dialogs[i].init));
-        snprintf(what, sizeof(what), "%s reaches RUNNING before it is cancelled", dialogs[i].name);
+        snprintf(what, sizeof(what), "%s refuses ShutdownStart during INIT with INVALID_STATUS "
+                 "and still moves on to RUNNING", dialogs[i].name);
         expect(utility_call(&cpu, dialogs[i].init, block) == 0u &&
+                   utility_call(&cpu, dialogs[i].shutdown, 0u) == 0x80110001u &&
                    utility_status(&cpu, dialogs[i].status) == 1u &&
                    utility_status(&cpu, dialogs[i].status) == 2u,
                what);
         if (works) (void)utility_call(&cpu, dialogs[i].update, 0u); /* its work has started */
-        snprintf(what, sizeof(what), "%s accepts ShutdownStart while RUNNING", dialogs[i].name);
-        expect(utility_call(&cpu, dialogs[i].shutdown, 0u) == 0u, what);
-        int none = 0;
-        for (int frame = 0; frame < 4 && !none; frame++)
-            none = utility_status(&cpu, dialogs[i].status) == 0u;
-        snprintf(what, sizeof(what), "%s winds down to NONE after a cancel", dialogs[i].name);
-        expect(none, what);
-        /* Nothing may write into the abandoned block from here on. */
+        snprintf(what, sizeof(what), "%s refuses ShutdownStart while RUNNING with INVALID_STATUS "
+                 "and stays RUNNING", dialogs[i].name);
+        expect(utility_call(&cpu, dialogs[i].shutdown, 0u) == 0x80110001u &&
+                   utility_status(&cpu, dialogs[i].status) == 2u,
+               what);
+
+        /* The refused cancel left the slot to the dialog. */
+        utility_param_block(UTILITY_MSG_PARAM_ADDR, 0x2c4u);
+        snprintf(what, sizeof(what), "a message InitStart is refused while %s, its cancel refused, "
+                 "holds the slot", dialogs[i].name);
+        expect(utility_call(&cpu, NID_MSG_DIALOG_INIT, UTILITY_MSG_PARAM_ADDR) == 0x80110001u &&
+                   MEM_R32(UTILITY_MSG_PARAM_ADDR + 0x1cu) == UTILITY_RESULT_UNTOUCHED,
+               what);
+        if (!works) {
+            sr_hle_test_osk_slot_reset();
+            continue;
+        }
+        snprintf(what, sizeof(what), "%s runs to FINISHED after its refused cancel and winds down "
+                 "to NONE after ShutdownStart", dialogs[i].name);
+        expect(utility_poll_to_finished(&cpu, dialogs[i].update, dialogs[i].status) &&
+                   utility_call(&cpu, dialogs[i].shutdown, 0u) == 0u &&
+                   utility_status(&cpu, dialogs[i].status) == 4u &&
+                   utility_status(&cpu, dialogs[i].status) == 0u,
+               what);
+        /* Nothing may write into the block once the dialog is back at NONE. */
         MEM_W32(block + 0x1cu, UTILITY_RESULT_UNTOUCHED);
         for (int k = 0; k < 4; k++) {
             (void)utility_call(&cpu, dialogs[i].update, 0u);
             (void)utility_status(&cpu, dialogs[i].status);
         }
-        snprintf(what, sizeof(what), "%s writes no result into its cancelled block", dialogs[i].name);
+        snprintf(what, sizeof(what), "%s writes nothing into its block after NONE", dialogs[i].name);
         expect(MEM_R32(block + 0x1cu) == UTILITY_RESULT_UNTOUCHED, what);
-
-        /* A message dialog takes the freed slot and finishes into its own block only. */
-        utility_param_block(UTILITY_MSG_PARAM_ADDR, 0x2c4u);
-        snprintf(what, sizeof(what), "a message dialog starts after %s is cancelled", dialogs[i].name);
-        expect(msg_dialog_run_to_finished(&cpu, UTILITY_MSG_PARAM_ADDR), what);
-        snprintf(what, sizeof(what), "the message dialog leaves the cancelled %s block alone",
+        snprintf(what, sizeof(what), "%s starts again from INIT with its result word cleared",
                  dialogs[i].name);
-        expect(MEM_R32(block + 0x1cu) == UTILITY_RESULT_UNTOUCHED, what);
-
-        /* The same type starts again from INIT with its result word cleared. */
-        snprintf(what, sizeof(what), "%s starts again from INIT after a cancel", dialogs[i].name);
         expect(utility_call(&cpu, dialogs[i].init, block) == 0u &&
                    MEM_R32(block + 0x1cu) == 0u &&
                    utility_status(&cpu, dialogs[i].status) == 1u,
@@ -9864,15 +10713,19 @@ static void test_utility_dialog_status_sequence(void) {
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0u,
            "the next savedata dialog runs to NONE");
 
-    /* The edges: a cancel from RUNNING, and a caller better than 0x20, are unmeasured and keep
-     * the reported SHUTDOWN. */
+    /* The edges: a cancel from RUNNING is refused (utility_shutdown_refused), and a caller better
+     * than 0x20 is UNMEASURED and keeps the reported SHUTDOWN. */
     utility_savedata_block();
     expect(utility_call(&cpu, NID_SAVEDATA_DIALOG_INIT, UTILITY_SAVEDATA_PARAM_ADDR) == 0u &&
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 1u &&
+               utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0x80110001u &&
+               utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 2u,
+           "a savedata ShutdownStart during RUNNING returns INVALID_STATUS to a caller at 0x6F and "
+           "the dialog stays RUNNING");
+    expect(utility_poll_to_finished(&cpu, NID_SAVEDATA_DIALOG_UPDATE, NID_SAVEDATA_DIALOG_STATUS) &&
                utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0u &&
-               utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 4u &&
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0u,
-           "a savedata ShutdownStart during RUNNING still reports SHUTDOWN to a caller at 0x6F");
+           "that savedata dialog finishes and a caller at 0x6F sees NONE after ShutdownStart");
     expect(utility_change_priority(&cpu, 0x10u) == 0u && utility_savedata_start_to_finished(&cpu),
            "savedata reaches FINISHED for a caller at 0x10");
     expect(utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0u &&
@@ -10336,11 +11189,13 @@ static void test_io_devctl_memory_stick(void) {
 /* ---- savedata GETSIZE / SIZES free space (#308) ---------------------------------------------
  * GETSIZE reports a shortfall, never the size of the data. On a PSP (pspautotests
  * tests/utility/savedata/getsize.expected, revision 2ed7c9c5) a zero-filled sizeInfo with no
- * entries for a save that exists changes only sectorSize (0x8000), freeSectors, freeKB and
+ * entries for a save that exists changes only sectorSize (0x8000 there; the PSP-3000 run of
+ * PSP-HLE-SAVEDATA-GETSIZE-001 reported 0x10000, see do_getsize), freeSectors, freeKB and
  * freeString, and the result is 0. A save that does not exist fills in the same figures and
- * reports RW_NO_DATA (PPSSPP as the behaviour reference, UNMEASURED on a PSP). Free space is the
- * host-backed Memory Stick the capacity devctl measures, in 32 KiB sectors; the shortfall
- * arithmetic for listed entries follows PPSSPP SavedataParam::GetSize as a behaviour reference. */
+ * reports RW_NO_DATA, and leaves overwriteKB and overwriteString alone
+ * (PSP-HLE-SAVEDATA-GETSIZE-001). Free space is the host-backed Memory Stick the capacity devctl
+ * measures, in 32 KiB sectors; the shortfall arithmetic for listed entries follows PPSSPP
+ * SavedataParam::GetSize as a behaviour reference. */
 extern void sr_hle_test_set_memstick_free_bytes(int mode, uint64_t bytes);
 
 enum {
@@ -10412,6 +11267,9 @@ static int getsize_write_host_file(const char *path, size_t bytes) {
 static void test_savedata_getsize_free_space(void) {
     static const char ms_root[] = HLE_BUILD_ROOT "/hle_savedata_getsize";
     static const char zero8[8] = { 0 };
+    static const char preset8[8] = { (char)0xA5, (char)0xA5, (char)0xA5, (char)0xA5,
+                                     (char)0xA5, (char)0xA5, (char)0xA5, (char)0xA5 };
+    enum { SAVEDATA_GETSIZE_OUT_BYTES = 44 };   /* sizeInfo after its four input words */
     const char *old_root_value = getenv("SR_MEMSTICK");
     char *old_root = old_root_value ? (char *)malloc(strlen(old_root_value) + 1u) : NULL;
     char text[8], save_host[512], file_host[600];
@@ -10443,7 +11301,7 @@ static void test_savedata_getsize_free_space(void) {
                    MEM_R32(GETSIZE_INFO_ADDR + 8u) == 0u && MEM_R32(GETSIZE_INFO_ADDR + 12u) == 0u,
                "GETSIZE leaves the entry counts and pointers alone");
         expect(MEM_R32(GETSIZE_INFO_ADDR + 16u) == 0x8000u,
-               "GETSIZE reports the PSP's 32 KiB savedata sector size");
+               "GETSIZE reports pspautotests' 32 KiB savedata sector size (a PSP-3000 reported 0x10000)");
         expect(sectors >= lo / 0x8000u && sectors <= hi / 0x8000u,
                "GETSIZE freeSectors * 0x8000 is the host-backed free space the devctl reports");
         expect(MEM_R32(GETSIZE_INFO_ADDR + 24u) == sectors * 32u,
@@ -10459,18 +11317,23 @@ static void test_savedata_getsize_free_space(void) {
     }
 
     /* 2. One secure entry of a few KB on a missing save fits: nothing needed, still no data. A
-     * game reads this pair as "no save yet, and room to make one". */
+     * game reads this pair as "no save yet, and room to make one". As on a PSP
+     * (PSP-HLE-SAVEDATA-GETSIZE-001), a preset shows what is left alone: neededKB is written,
+     * the other three are not. */
     {
         getsize_param(22u, "_GameData0");
         getsize_entry(GETSIZE_SECURE_ADDR, 0x2000u, "DATA.BIN");
         MEM_W32(GETSIZE_INFO_ADDR + 0u, 1u);
         MEM_W32(GETSIZE_INFO_ADDR + 8u, GETSIZE_SECURE_ADDR);
+        memset(g_mem_base + GETSIZE_INFO_ADDR + 16u, 0xA5, SAVEDATA_GETSIZE_OUT_BYTES);
         expect(sr_savedata_execute(GETSIZE_PARAM_ADDR) == 0x80110327u &&
                    MEM_R32(GETSIZE_INFO_ADDR + 16u) == 0x8000u &&
-                   MEM_R32(GETSIZE_INFO_ADDR + 36u) == 0u && MEM_R32(GETSIZE_INFO_ADDR + 48u) == 0u &&
-                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 40u, zero8) &&
-                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, zero8),
-               "GETSIZE for one small secure file on a missing save reports RW_NO_DATA, neededKB 0, overwriteKB 0");
+                   MEM_R32(GETSIZE_INFO_ADDR + 36u) == 0u,
+               "GETSIZE for one small secure file on a missing save reports RW_NO_DATA, neededKB 0");
+        expect(MEM_R32(GETSIZE_INFO_ADDR + 48u) == 0xA5A5A5A5u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 40u, preset8) &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, preset8),
+               "GETSIZE on a missing save that fits leaves neededString and the overwrite fields alone");
     }
 
     /* 3. A shortfall: 64 KiB free (plus a partial sector), more data than that. */
@@ -10500,6 +11363,28 @@ static void test_savedata_getsize_free_space(void) {
         expect(MEM_R32(GETSIZE_INFO_ADDR + 48u) == 71u &&
                    getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, "71 KB\0\0"),
                "GETSIZE overwriteKB and overwriteString discount the files the save already holds");
+    }
+    /* A shortfall on a missing save writes the needed fields and leaves the overwrite fields
+     * alone, and a text field stops at its NUL (the write mask PSP-HLE-SAVEDATA-GETSIZE-001
+     * measured). The figures are not the PSP's: see do_getsize. */
+    {
+        getsize_param(22u, "_GameData0");
+        getsize_entry(GETSIZE_SECURE_ADDR, 0x20000u, "DATA.BIN");
+        MEM_W32(GETSIZE_INFO_ADDR + 0u, 1u);
+        MEM_W32(GETSIZE_INFO_ADDR + 8u, GETSIZE_SECURE_ADDR);
+        memset(g_mem_base + GETSIZE_INFO_ADDR + 16u, 0xA5, SAVEDATA_GETSIZE_OUT_BYTES);
+        expect(sr_savedata_execute(GETSIZE_PARAM_ADDR) == 0x80110327u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 28u, "64 KB\0\xA5\xA5"),
+               "GETSIZE on a missing save reports RW_NO_DATA and writes freeString through its NUL only");
+        /* write = 0x20010, free = 0x10000: 0x10010 bytes short, 65 KB rounded up. PPSSPP's
+         * arithmetic, not the measured one (a PSP charges three clusters more and wraps at 32
+         * bits; do_getsize). This cell pins which fields are written, not the PSP's figure. */
+        expect(MEM_R32(GETSIZE_INFO_ADDR + 36u) == 65u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 40u, "65 KB\0\xA5\xA5"),
+               "GETSIZE on a missing save writes the shortfall to neededKB and neededString");
+        expect(MEM_R32(GETSIZE_INFO_ADDR + 48u) == 0xA5A5A5A5u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, preset8),
+               "GETSIZE on a missing save leaves overwriteKB and overwriteString alone");
     }
     /* Existing data the write replaces can make it fit again. */
     snprintf(file_host, sizeof(file_host), "%s/DATA.BIN", save_host);
@@ -11687,8 +12572,8 @@ static void test_osk_nested_ranges(void) {
 /* #1386: wrong-state results for the dialogs the OSK measurements do not cover. Netconf, gamedata
  * and sharing have no capture of their own (PSPAutotests utility/dialog measures message and
  * savedata, #363 the OSK); each refuses Update and ShutdownStart at NONE and a repeated
- * ShutdownStart, as every measured type does. Their results from INIT, RUNNING and FINISHED are
- * unmeasured and not asserted here. */
+ * ShutdownStart, as every measured type does. Their refusals during INIT and RUNNING are
+ * test_utility_dialog_refused_cancel's (UNMEASURED or captured only). */
 static void test_utility_dialog_wrong_states_unmeasured_types(void) {
     static const UtilityDialogNids dialogs[] = {
         { "sceUtilityNetconf", NID_NETCONF_DIALOG_INIT, NID_NETCONF_DIALOG_UPDATE,
@@ -11857,6 +12742,11 @@ static void reset_fixture(void) {
     s_stack_top = SR_STACK_ARENA_CEIL;
     stack_ranges_reset();
     s_vtime_us = 0;
+    /* The turbo clock charges its 10 ms quantum every TIMESLICE dispatches, counted on from the
+     * case before; some cases dispatch a host-dependent number of times, so a case's quantum fell
+     * where its predecessors left it. Each case starts the count afresh, so the quantum falls a
+     * whole TIMESLICE of dispatches in (PSP-DMAC-002 b3 failed when it fell inside the scenario). */
+    s_dispatches_since_time = 0u;
     s_tick = 0;
     s_interrupts_enabled = 1;
     s_dispatch_enabled = 1;
@@ -14255,6 +15145,7 @@ static void test_rtc_time_t_add_years_resolution_autotest(void) {
 enum {
     RTCA_NID_ADD_MICROS = 0x26d25a5du, RTCA_NID_ADD_SECONDS = 0xf2a4afe5u, RTCA_NID_ADD_DAYS = 0xe51b4b7au,
     RTCA_NID_DAY_OF_WEEK = 0x57726bc1u, RTCA_NID_CHECK_VALID = 0x4b1b5e82u,
+    RTCA_NID_ADD_MINUTES = 0xe6605bcau, RTCA_NID_ADD_HOURS = 0x26d7a24au, RTCA_NID_ADD_WEEKS = 0xcf3a2ca8u,
 };
 
 static int rtca_dst_is(uint16_t y, uint16_t mo, uint16_t d, uint16_t h, uint16_t mi, uint16_t sec, uint32_t us) {
@@ -14272,7 +15163,8 @@ static uint32_t rtca_add(uint32_t nid, uint16_t y, uint16_t mo, uint16_t d, uint
     expect(td24b_dispatch4(RTCT_NID_GET_TICK, RTCT_DATE, RTCT_SRC, 0u, 0u) == 0u, "the source date converts");
     MEM_W32(RTCT_DST, 0x1337u); MEM_W32(RTCT_DST + 4u, 0u);
     uint32_t lo = (uint32_t)(uint64_t)count, hi = (uint32_t)((uint64_t)count >> 32);
-    if (nid == RTCA_NID_ADD_DAYS) hi = 0u;   /* a 32-bit int argument: the 64-bit row is truncated */
+    if (nid == RTCA_NID_ADD_DAYS || nid == RTCA_NID_ADD_HOURS || nid == RTCA_NID_ADD_WEEKS)
+        hi = 0u;   /* a 32-bit int argument: the 64-bit row is truncated */
     return td24b_dispatch4(nid, RTCT_DST, RTCT_SRC, lo, hi);
 }
 
@@ -14280,6 +15172,72 @@ static uint32_t rtca_check_valid(uint16_t y, uint16_t mo, uint16_t d, uint16_t h
                                  uint32_t us) {
     rtct_date(y, mo, d, h, mi, sec, us);
     return td24b_dispatch4(RTCA_NID_CHECK_VALID, RTCT_DATE, 0u, 0u, 0u);
+}
+
+/* sceRtcTickAddMinutes, sceRtcTickAddHours and sceRtcTickAddWeeks against PSPAutotests
+ * tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): the 8 fixed rows of each function,
+ * each the autotest's own (its loop rows are not checked here). Minutes
+ * take a 64-bit count; hours and weeks a 32-bit int, so the autotest's 64-bit constants are
+ * truncated (+ 62135596800000445 hours lands in year 383). Before these handlers the three NIDs
+ * were unregistered imports. */
+static void test_rtc_tick_add_minutes_hours_weeks_autotest(void) {
+    reset_fixture();
+    sr_hle_init();
+    expect(sr_hle_test_is_registered(RTCA_NID_ADD_MINUTES) && sr_hle_test_is_registered(RTCA_NID_ADD_HOURS) &&
+               sr_hle_test_is_registered(RTCA_NID_ADD_WEEKS),
+           "sceRtcTickAddMinutes, -Hours and -Weeks are registered");
+    static const struct {
+        uint32_t nid;
+        uint16_t y, mo, d, h, mi;
+        long long count;
+        uint16_t ry, rmo, rd, rh, rmi, rsec;
+        uint32_t rus;
+    } rows[] = {
+        /* checkRtcTickAddMinutes */
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, -2000, 1969, 12, 30, 14, 40, 0, 445 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, 2000, 1970, 1, 2, 9, 20, 0, 445 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, -62135596800000445LL, 11640, 10, 4, 14, 46, 50, 248893 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, 62135596800000445LL, 52565, 4, 16, 17, 14, 59, 303613 },
+        { RTCA_NID_ADD_MINUTES, 1, 1, 1, 0, 10, -10, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_MINUTES, 1, 1, 1, 0, 10, -11, 60267, 1, 19, 8, 0, 49, 551616 },
+        { RTCA_NID_ADD_MINUTES, 9999, 12, 31, 23, 50, 9, 9999, 12, 31, 23, 59, 0, 0 },
+        { RTCA_NID_ADD_MINUTES, 9999, 12, 31, 23, 50, 10, 10000, 1, 1, 0, 0, 0, 0 },
+        /* checkRtcTickAddHours */
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, -2000, 1969, 10, 9, 16, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, 2000, 1970, 3, 25, 8, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, -62135596800000445LL, 3556, 10, 18, 11, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, 62135596800000445LL, 383, 3, 16, 13, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1, 1, 1, 10, 0, -10, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_HOURS, 1, 1, 1, 10, 0, -11, 60267, 1, 19, 7, 1, 49, 551616 },
+        { RTCA_NID_ADD_HOURS, 9999, 12, 31, 20, 0, 3, 9999, 12, 31, 23, 0, 0, 0 },
+        { RTCA_NID_ADD_HOURS, 9999, 12, 31, 20, 0, 4, 10000, 1, 1, 0, 0, 0, 0 },
+        /* checkRtcTickAddWeeks */
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, -2000, 1931, 9, 3, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, 2000, 2008, 5, 1, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, -62135596800000445LL, 6407, 10, 14, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, 62135596800000445LL, 57798, 4, 8, 8, 1, 49, 552061 },
+        { RTCA_NID_ADD_WEEKS, 1, 1, 8, 0, 0, -1, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_WEEKS, 1, 1, 8, 0, 0, -2, 60267, 1, 12, 8, 1, 49, 551616 },
+        { RTCA_NID_ADD_WEEKS, 9999, 12, 20, 0, 0, 1, 9999, 12, 27, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_WEEKS, 9999, 12, 20, 0, 0, 2, 10000, 1, 3, 0, 0, 0, 0 },
+    };
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        const uint32_t us = rows[i].y == 1970 ? 445u : 0u;   /* the autotest's 1970 rows carry .000445 */
+        char what[96];
+        snprintf(what, sizeof what, "arithmetic.expected row %u (nid 0x%08x, count %lld)", (unsigned)i,
+                 (unsigned)rows[i].nid, rows[i].count);
+        expect(rtca_add(rows[i].nid, rows[i].y, rows[i].mo, rows[i].d, rows[i].h, rows[i].mi, 0, us,
+                        rows[i].count) == 0u &&
+                   rtca_dst_is(rows[i].ry, rows[i].rmo, rows[i].rd, rows[i].rh, rows[i].rmi, rows[i].rsec,
+                               rows[i].rus),
+               what);
+    }
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    (void)td24b_dispatch4(RTCA_NID_ADD_MINUTES, 0u, RTCT_SRC, 1u, 0u);
+    (void)td24b_dispatch4(RTCA_NID_ADD_HOURS, RTCT_DST, 0u, 1u, 0u);
+    (void)td24b_dispatch4(RTCA_NID_ADD_WEEKS, 0u, RTCT_SRC, 1u, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 3u,
+           "the minute, hour and week adds stop by name on a NULL source or destination");
 }
 
 static void test_rtc_tick_add_day_of_week_check_valid_autotest(void) {
@@ -26552,8 +27510,9 @@ static void test_ge_linear_filter_stays_inside_region(void) {
 
 /* ==== GE raster cells (PSP-GE-RASTER-001, #343) ====
  * This block is carried byte for byte by fixtures/psp_oracle/probe_ge_sample.c (the PSP
- * side, CASE=ge-raster) and tests/native/hle_thread_selftest.c (the software GE side);
- * tools/test_psp_oracle.py pins the copy. Each cell is one display list of project-written
+ * side, CASE=ge-raster), tests/native/hle_thread_selftest.c (the software GE side) and
+ * src/rt/gpu_sdl3vk/ge_gpu_selftest.inc (the Vulkan side); tools/test_psp_oracle.py pins
+ * the copies. Each cell is one display list of project-written
  * command words over generated patterns (no game data). It draws into the 16x4 window
  * x 16..31, y 8..11 of a 64x32 colour buffer at VRAM offset GR_FB_OFFSET whose other pixels
  * are 0 and whose window holds gr_dst() before the list runs. The base state turns every
@@ -30428,6 +31387,550 @@ static void test_ge_finish_callback_reports(void) {
     ge_tim_teardown();
 }
 
+/* #2375: a finish callback that enqueues the next list. An enqueued list runs at once here, so
+ * its finish callback used to run inside the one that enqueued it, a guest-call frame deeper per
+ * list, until the owner's frames ran out and the fifth callback in the chain was refused. On a
+ * PSP finish callbacks run from the GE interrupt handler, which does not re-enter itself: each
+ * runs after the previous returns, in completion order.
+ * MUTANT: running a completion's callback at once while one is running nests them (depth 4, the
+ * chain stops after 4 callbacks); running the waiting ones last-in first-out reverses the burst
+ * order; dropping the full-queue stop runs or loses the 65th completion silently. */
+/* GE_CHAIN_WAIT is the runtime's GE_LIST_MAX (hle_internal.h): the completions that may wait. */
+enum { GE_CHAIN_LEN = 6, GE_CHAIN_WAIT = 64, GE_CHAIN_BURST = GE_CHAIN_WAIT + 1 };
+static unsigned s_ge_chain_depth, s_ge_chain_max_depth, s_ge_chain_calls;
+static unsigned s_ge_chain_next, s_ge_chain_last, s_ge_chain_burst;
+static uint32_t s_ge_chain_ids[GE_CHAIN_BURST + 1];
+
+static uint32_t ge_chain_list(unsigned i) { return GE_TIM_DL2 + 0x100u * i; }
+
+static void ge_chain_finish_fn(CpuState *cpu) {
+    if (++s_ge_chain_depth > s_ge_chain_max_depth) s_ge_chain_max_depth = s_ge_chain_depth;
+    if (s_ge_chain_calls <= GE_CHAIN_BURST) s_ge_chain_ids[s_ge_chain_calls] = cpu->r[4];
+    s_ge_chain_calls++;
+    if (s_ge_chain_burst) {
+        unsigned n = s_ge_chain_burst;
+        s_ge_chain_burst = 0u;               /* only the first callback enqueues the burst */
+        for (unsigned i = 0; i < n; i++) (void)ge_tim_enqueue(cpu, ge_chain_list(i));
+    } else if (s_ge_chain_next < s_ge_chain_last) {
+        (void)ge_tim_enqueue(cpu, ge_chain_list(s_ge_chain_next++));
+    }
+    s_ge_chain_depth--;
+    cpu->r[2] = 0u;
+}
+
+static void ge_chain_reset(void) {
+    s_ge_chain_depth = s_ge_chain_max_depth = s_ge_chain_calls = 0u;
+    s_ge_chain_next = s_ge_chain_last = s_ge_chain_burst = 0u;
+    memset(s_ge_chain_ids, 0, sizeof(s_ge_chain_ids));
+}
+
+static void test_ge_finish_callbacks_do_not_nest(void) {
+    CpuState cpu;
+    ge_tim_setup();
+    sr_hle_test_ge_lists_reset();
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_chain_finish_fn);
+    ge_tim_write_list(GE_TIM_DL, 0u);
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) ge_tim_write_list(ge_chain_list(i), 0u);
+
+    /* A chain: each callback enqueues the next list. */
+    ge_chain_reset();
+    s_ge_chain_last = GE_CHAIN_LEN - 1u;
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect(s_ge_chain_calls == GE_CHAIN_LEN,
+           "GE finish: a callback chain of 6 lists runs all 6 finish callbacks");
+    expect(s_ge_chain_max_depth == 1u,
+           "GE finish: a list completed inside a finish callback runs its callback after it returns");
+    int in_order = s_ge_chain_ids[0] == ge_tim_finish_id(GE_TIM_DL);
+    for (unsigned i = 1; i < GE_CHAIN_LEN; i++)
+        in_order &= s_ge_chain_ids[i] == ge_tim_finish_id(ge_chain_list(i - 1u));
+    expect(in_order, "GE finish: chained finish callbacks run in completion order");
+
+    /* A burst: the first callback enqueues 65 lists; 64 wait their turn, in order, and the 65th
+     * completion, with no room left to wait, stops the run by name. */
+    ge_chain_reset();
+    s_ge_chain_burst = GE_CHAIN_BURST;
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect(s_ge_chain_max_depth == 1u && s_ge_chain_calls == 1u + GE_CHAIN_WAIT,
+           "GE finish: 64 completions raised in one callback each run after it, one at a time");
+    in_order = 1;
+    for (unsigned i = 0; i < GE_CHAIN_WAIT; i++)
+        in_order &= s_ge_chain_ids[1u + i] == ge_tim_finish_id(ge_chain_list(i));
+    expect(in_order, "GE finish: completions raised in one callback run first-in first-out");
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u,
+           "GE finish: a completion with no room left to wait stops the run by name");
+
+    /* Nothing is left waiting: the next list's callback runs at once, at depth 1. */
+    ge_chain_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect(s_ge_chain_calls == 1u && s_ge_chain_max_depth == 1u &&
+               s_ge_chain_ids[0] == ge_tim_finish_id(GE_TIM_DL),
+           "GE finish: after a chain the next list's callback runs at once, alone");
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
+    ge_tim_teardown();
+}
+
+/* The waiting completions belong to the thread whose callback raised them. A worker thread whose
+ * finish callback ends the thread (sceKernelExitThread inside the callback) must give its run
+ * back, so a list another thread completes afterwards has its callback run at once; a worker
+ * that ends with a completion still waiting stops the run by name instead of dropping it.
+ * Real scheduler threads, real sceGeListEnQueue and sceKernelExitThread.
+ * MUTANT: one process-wide "callback running" flag, never cleared by the exit, leaves the main
+ * thread's later callback waiting forever (it never runs; reasoned, not built); dropping
+ * ge_finish_release_owner() from thread teardown leaves the dead worker's run open and loses its
+ * waiting completion without a stop (2 checks fail, measured). */
+#define GX_MAIN_ENTRY   0x08a38080u
+#define GX_WORKER_ENTRY 0x08a380c0u
+
+extern unsigned sr_hle_test_ge_finish_runs(void);
+extern void sr_hle_test_ge_finish_masked_reset(void);
+extern int ge_finish_masked_pending(void);
+
+static struct {
+    uint32_t worker_uid, main_uid;
+    int exit_with_waiting;           /* the worker's callback raises one more completion first */
+    int worker_after_enqueue;        /* the worker body ran past its enqueue */
+    unsigned calls, worker_calls, main_calls;
+    unsigned runs_after_worker, stops_before, stops_after_worker;
+    unsigned main_calls_after;
+    int main_done;
+} s_gx;
+
+static void gx_finish_fn(CpuState *cpu) {
+    const uint32_t uid = sched_current_uid();
+    s_gx.calls++;
+    if (uid == s_gx.worker_uid) {
+        s_gx.worker_calls++;
+        if (s_gx.exit_with_waiting) (void)ge_tim_enqueue(cpu, GE_TIM_DL2);
+        (void)sfs_call(cpu, NID_SCE_KERNEL_EXIT_THREAD, 0u, 0u, 0u, 0u);
+        return;   /* not reached: the thread ended */
+    }
+    if (uid == s_gx.main_uid) s_gx.main_calls++;
+    cpu->r[2] = 0u;
+}
+
+static void gx_worker_fn(CpuState *cpu) {
+    (void)ge_tim_enqueue(cpu, GE_TIM_DL);
+    s_gx.worker_after_enqueue = 1;
+    cpu->r[2] = 0u;
+}
+
+static uint32_t gx_run_worker(CpuState *cpu) {
+    const uint32_t w = sfs_call(cpu, NID_SCE_KERNEL_CREATE_THREAD, sfs_thread_name(), GX_WORKER_ENTRY,
+                                0x18u, 0u);
+    s_gx.worker_uid = w;
+    (void)sfs_call(cpu, NID_SCE_KERNEL_START_THREAD, w, 0u, 0u, 0u);
+    (void)sfs_call(cpu, NID_SCE_KERNEL_WAIT_THREAD_END, w, 0u, 0u, 0u);
+    return w;
+}
+
+static void gx_main_fn(CpuState *cpu) {
+    s_gx.main_uid = sfs_call(cpu, NID_SCE_KERNEL_GET_THREAD_ID, 0u, 0u, 0u, 0u);
+
+    /* A worker ends inside its finish callback with nothing waiting. */
+    s_gx.exit_with_waiting = 0;
+    const uint32_t w1 = gx_run_worker(cpu);
+    s_gx.runs_after_worker = sr_hle_test_ge_finish_runs();
+    (void)ge_tim_enqueue(cpu, GE_TIM_DL);
+    s_gx.main_calls_after = s_gx.main_calls;
+    (void)sfs_call(cpu, NID_SCE_KERNEL_DELETE_THREAD, w1, 0u, 0u, 0u);
+
+    /* A worker ends inside its finish callback with one completion waiting. */
+    s_gx.exit_with_waiting = 1;
+    s_gx.stops_before = sr_hle_test_unmodelled_stops();
+    const uint32_t w2 = gx_run_worker(cpu);
+    s_gx.stops_after_worker = sr_hle_test_unmodelled_stops();
+    (void)sfs_call(cpu, NID_SCE_KERNEL_DELETE_THREAD, w2, 0u, 0u, 0u);
+    s_gx.main_done = 1;
+    cpu->r[2] = 0u;
+}
+
+static void test_ge_finish_callback_thread_exit(void) {
+    ge_tim_setup();
+    sr_hle_test_ge_lists_reset();
+    memset(&s_gx, 0, sizeof s_gx);
+    s_gx.worker_uid = s_gx.main_uid = 0xffffffffu;
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gx_finish_fn);
+    sr_test_register_guest_fn(GX_MAIN_ENTRY, gx_main_fn);
+    sr_test_register_guest_fn(GX_WORKER_ENTRY, gx_worker_fn);
+    ge_tim_write_list(GE_TIM_DL, 0u);
+    ge_tim_write_list(GE_TIM_DL2, 0u);
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(GX_MAIN_ENTRY, 0u, 0u);
+    expect(s_gx.main_done, "GE finish exit: the main body ran to its end");
+    expect(s_gx.worker_calls == 2u && !s_gx.worker_after_enqueue,
+           "GE finish exit: each worker's callback ran and ended the worker inside it");
+    expect(s_gx.runs_after_worker == 0u,
+           "GE finish exit: a thread that ends inside its finish callback gives its run back");
+    expect(s_gx.main_calls_after == 1u,
+           "GE finish exit: another thread's list then has its finish callback run at once");
+    expect(s_gx.stops_after_worker == s_gx.stops_before + 1u && sr_hle_test_ge_finish_runs() == 0u,
+           "GE finish exit: ending with a completion waiting stops the run by name, not silently");
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
+    ge_tim_teardown();
+}
+
+/* A list that completes while the CPU cannot take an interrupt (its interrupts suspended, or an
+ * interrupt handler running) has its finish callback run once it can, as the GE finish interrupt
+ * would be taken on a PSP. The shape is Sonic Rivals' (ULUS10195, #2375) GE command queue: with
+ * interrupts suspended, or from its VBLANK handler, the game takes the entry at the queue's
+ * index, enqueues its list, and only then advances the index and lowers the count; its finish
+ * callback runs the same queue. The callback used to run inside sceGeListEnQueue, before the
+ * index moved, so it enqueued the same entry again and the queue advanced twice, skipping the
+ * next entry (the game's display flip).
+ * MUTANT: running the callback at once enqueues an entry twice and runs a callback under the
+ * mask; deferring only under sceKernelCpuSuspendIntr runs it inside the VBLANK handler; a
+ * last-in first-out wait reverses the completion order; a delivery loop that ignores a callback
+ * suspending interrupts again never returns (the test hangs); deferring ahead of a running
+ * callback's own run runs the next callback inside it at the resume; keeping the waiting
+ * completions after a callback stops the run makes the service loop spin (the test hangs);
+ * dropping the bound loses the 65th completion silently. */
+enum { GM_QUEUE = 0x08a39000u, GM_RING = GM_QUEUE + 8u, GM_RING_LEN = 4, GM_LOG = 80,
+       GM_VBLANK_FN = 0x08a38100u, GM_THREAD_ENTRY = 0x08a38140u };
+static struct {
+    unsigned callbacks, enqueues, masked_callbacks, thread_callbacks, suspend_in_callback;
+    unsigned in_handler, handler_callbacks, depth, max_depth, fatal_first, nest_one;
+    unsigned suspend_enqueue_stay, stay_prev, handlers, nevents;
+    uint32_t peek_list, peek;
+    uint32_t ids[GM_LOG], enqueued[GM_LOG], cb_gp[GM_LOG];
+    char events[2 * GM_LOG];
+    int process;
+} s_gm;
+
+/* The game's queue: count at +0, index at +4, list addresses from +8. */
+static void gm_process(CpuState *cpu) {
+    while ((int32_t)MEM_R32(GM_QUEUE) > 0) {
+        uint32_t idx = MEM_R32(GM_QUEUE + 4u);
+        uint32_t list = MEM_R32(GM_RING + 4u * idx);
+        if (s_gm.enqueues < GM_LOG) s_gm.enqueued[s_gm.enqueues] = list;
+        s_gm.enqueues++;
+        (void)ge_tim_enqueue(cpu, list);
+        MEM_W32(GM_QUEUE + 4u, (idx + 1u) % GM_RING_LEN);
+        MEM_W32(GM_QUEUE, MEM_R32(GM_QUEUE) - 1u);
+    }
+}
+
+static void gm_finish_fn(CpuState *cpu) {
+    if (s_gm.callbacks < GM_LOG) {
+        s_gm.ids[s_gm.callbacks] = cpu->r[4];
+        s_gm.cb_gp[s_gm.callbacks] = cpu->r[28];
+    }
+    if (s_gm.nevents < 2u * GM_LOG) s_gm.events[s_gm.nevents++] = 'C';
+    s_gm.callbacks++;
+    if (!sched_interrupts_enabled()) s_gm.masked_callbacks++;
+    if (!sched_is_intr_context()) s_gm.thread_callbacks++;
+    if (s_gm.in_handler) s_gm.handler_callbacks++;
+    if (++s_gm.depth > s_gm.max_depth) s_gm.max_depth = s_gm.depth;
+    if (s_gm.nest_one) {
+        /* A callback that suspends the interrupts, enqueues the next list and resumes them. */
+        s_gm.nest_one = 0;
+        uint32_t prev = sched_suspend_interrupts();
+        (void)ge_tim_enqueue(cpu, ge_chain_list(1));
+        sched_resume_interrupts(prev);
+    }
+    if (s_gm.suspend_enqueue_stay) {
+        /* A callback that suspends the interrupts, enqueues and returns with them suspended. */
+        s_gm.suspend_enqueue_stay = 0;
+        s_gm.stay_prev = sched_suspend_interrupts();
+        (void)ge_tim_enqueue(cpu, ge_chain_list(1));
+    }
+    if (s_gm.fatal_first) {
+        s_gm.fatal_first = 0;
+        cpu->flow_kind = SR_FLOW_FATAL;      /* the callback stops the run */
+    }
+    if (s_gm.suspend_in_callback) {
+        s_gm.suspend_in_callback = 0;
+        (void)sched_suspend_interrupts();   /* left suspended: the guest resumes later */
+    }
+    if (s_gm.process) gm_process(cpu);
+    s_gm.depth--;
+    cpu->r[2] = 0u;
+}
+
+/* The first callback reads the status of the list s_gm.peek_list (sceGeListSync mode 1). */
+static void gm_timing_finish_fn(CpuState *cpu) {
+    if (s_gm.callbacks++ == 0u) {
+        CpuState c;
+        memset(&c, 0, sizeof(c));
+        s_gm.peek = ge_tim_sync(&c, NID_SCE_GE_LIST_SYNC, s_gm.peek_list, 1u);
+    }
+    cpu->r[2] = 0u;
+}
+
+/* A VBLANK handler that runs the game's queue, as the title's does every frame. */
+static void gm_vblank_fn(CpuState *cpu) {
+    s_gm.in_handler = 1;
+    gm_process(cpu);
+    s_gm.in_handler = 0;
+    cpu->r[2] = 0u;
+}
+
+/* A VBLANK handler that enqueues one list on every VBLANK, whatever its callbacks did. */
+static void gm_vblank_one_fn(CpuState *cpu) {
+    if (s_gm.nevents < 2u * GM_LOG) s_gm.events[s_gm.nevents++] = 'H';
+    (void)ge_tim_enqueue(cpu, ge_chain_list(s_gm.handlers % GE_CHAIN_BURST));
+    s_gm.handlers++;
+    cpu->r[2] = 0u;
+}
+
+/* A guest thread whose list's finish callback suspends the interrupts, enqueues and resumes. */
+static void gm_thread_fn(CpuState *cpu) {
+    s_gm.nest_one = 1;
+    (void)ge_tim_enqueue(cpu, ge_chain_list(0));
+    cpu->r[2] = 0u;
+}
+
+static void gm_reset(void) {
+    memset(&s_gm, 0, sizeof s_gm);
+    sr_hle_test_ge_finish_masked_reset();
+}
+
+static void test_ge_finish_callback_waits_for_interrupts(void) {
+    CpuState cpu;
+    ge_tim_setup();
+    sr_hle_test_ge_lists_reset();
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gm_finish_fn);
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) ge_tim_write_list(ge_chain_list(i), 0u);
+
+    /* The game's queue holds two lists; it runs them with interrupts suspended. */
+    gm_reset();
+    s_gm.process = 1;
+    MEM_W32(GM_QUEUE, 2u);
+    MEM_W32(GM_QUEUE + 4u, 0u);
+    MEM_W32(GM_RING, ge_chain_list(0));
+    MEM_W32(GM_RING + 4u, ge_chain_list(1));
+    memset(&cpu, 0, sizeof(cpu));
+    uint32_t prev = sched_suspend_interrupts();
+    gm_process(&cpu);
+    expect(s_gm.callbacks == 0u,
+           "GE finish masked: no finish callback runs while the CPU's interrupts are suspended");
+    expect(s_gm.enqueues == 2u && s_gm.enqueued[0] == ge_chain_list(0) &&
+               s_gm.enqueued[1] == ge_chain_list(1) && MEM_R32(GM_QUEUE) == 0u &&
+               MEM_R32(GM_QUEUE + 4u) == 2u,
+           "GE finish masked: each queue entry is enqueued once and the queue advances once per entry");
+    expect(ge_tim_sync(&cpu, NID_SCE_GE_DRAW_SYNC, 1u, 0u) == 0u,
+           "GE finish masked: the lists themselves are complete at once, as before");
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 2u && s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(0)) &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: the resume runs both waiting callbacks, in completion order");
+    expect(s_gm.masked_callbacks == 0u,
+           "GE finish masked: they run with interrupts enabled");
+    expect(s_gm.enqueues == 2u, "GE finish masked: the callbacks find the queue already consumed");
+
+    /* The measured shape (CASE=display-ge-mask): a list enqueued stalled at its first word, then
+     * released by sceGeListUpdateStallAddr under the mask, runs to its end, and its callback runs
+     * only after the resume (PSP: 0/12 during the mask, 12/12 right after). */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ge_chain_list(2);
+    cpu.r[5] = ge_chain_list(2);            /* stall == list: nothing runs yet */
+    cpu.r[6] = s_ge_tim_cbid;
+    cpu.r[7] = 0u;
+    uint32_t qid = sr_syscall(&cpu, NID_SCE_GE_LIST_ENQUEUE);
+    prev = sched_suspend_interrupts();
+    cpu.r[4] = qid;
+    cpu.r[5] = ge_chain_list(2) + 8u;       /* past FINISH and END */
+    (void)sr_syscall(&cpu, NID_SCE_GE_LIST_UPDATE_STALL_ADDR);
+    unsigned during_mask = s_gm.callbacks;
+    int list_done = ge_tim_sync(&cpu, NID_SCE_GE_LIST_SYNC, qid, 1u) == 0u;
+    sched_resume_interrupts(prev);
+    expect(during_mask == 0u && list_done,
+           "GE finish masked: a list released under the mask completes, its callback does not run (display-ge-mask)");
+    expect(s_gm.callbacks == 1u && s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(2)),
+           "GE finish masked: its callback runs right after the resume (display-ge-mask)");
+
+    /* The same queue run from a VBLANK handler: on a PSP the handler runs with the CPU's
+     * interrupts off, so the finish callbacks run after it returns, each entry enqueued once. */
+    gm_reset();
+    s_gm.process = 1;
+    MEM_W32(GM_QUEUE, 2u);
+    MEM_W32(GM_QUEUE + 4u, 0u);
+    sr_test_register_guest_fn(GM_VBLANK_FN, gm_vblank_fn);
+    expect(td24b_dispatch4(NID_SCE_KERNEL_REGISTER_SUBINTR, 30u, 0u, GM_VBLANK_FN, 0u) == 0u &&
+               td24b_dispatch4(NID_SCE_KERNEL_ENABLE_SUBINTR, 30u, 0u, 0u, 0u) == 0u,
+           "GE finish masked: the VBLANK handler is registered and enabled");
+    sched_raise_interrupt(SCHED_INTR_VBLANK);
+    scheduler_service_pending();
+    (void)td24b_dispatch4(NID_SCE_KERNEL_RELEASE_SUBINTR, 30u, 0u, 0u, 0u);
+    expect(s_gm.enqueues == 2u && s_gm.enqueued[0] == ge_chain_list(0) &&
+               s_gm.enqueued[1] == ge_chain_list(1) && MEM_R32(GM_QUEUE) == 0u,
+           "GE finish masked: a VBLANK handler's queue run enqueues each entry once");
+    expect(s_gm.handler_callbacks == 0u && s_gm.callbacks == 2u &&
+               s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(0)) &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: the callbacks run after the VBLANK handler returns, in order");
+
+    /* A waiting callback that suspends the interrupts again holds the rest until the next resume. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(1));
+    s_gm.suspend_in_callback = 1;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && !sched_interrupts_enabled(),
+           "GE finish masked: a callback that suspends the interrupts holds the next one");
+    sched_resume_interrupts(1u);
+    expect(s_gm.callbacks == 2u && s_gm.masked_callbacks == 0u &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: the held callback runs at the next resume");
+
+    /* On a guest thread, a finish callback that suspends the interrupts, enqueues and resumes
+     * them: the new list's callback joins the thread's running callback's run and runs after it
+     * returns, not inside it from the resume. */
+    gm_reset();
+    sr_test_register_guest_fn(GM_THREAD_ENTRY, gm_thread_fn);
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(GM_THREAD_ENTRY, 0u, 0u);
+    expect(s_gm.callbacks == 2u && s_gm.max_depth == 1u && s_gm.thread_callbacks == 2u &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: a list completed under the mask inside a thread's callback runs after it");
+
+    /* A delivered callback that stops the run: the completions still waiting are dropped by name,
+     * and the service returns instead of finding them due for ever. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(1));
+    s_gm.fatal_first = 1;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && s_cpu->flow_kind == SR_FLOW_FATAL && !ge_finish_masked_pending(),
+           "GE finish masked: a callback that stops the run drops the completions still waiting");
+    s_cpu->flow_kind = 0u;
+
+    /* 64 completions wait; the 65th, with no room left, stops the run by name. */
+    gm_reset();
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) (void)ge_tim_enqueue(&cpu, ge_chain_list(i));
+    expect(s_gm.callbacks == 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+           "GE finish masked: a completion with no room left to wait stops the run by name");
+    sched_resume_interrupts(prev);
+    int in_order = s_gm.callbacks == GE_CHAIN_WAIT;
+    for (unsigned i = 0; i < GE_CHAIN_WAIT && in_order; i++)
+        in_order &= s_gm.ids[i] == ge_tim_finish_id(ge_chain_list(i));
+    expect(in_order, "GE finish masked: 64 waiting completions run first-in first-out at the resume");
+
+    /* L0 and L2 wait; at the resume L0's callback raises L1's completion while L2's still waits:
+     * L2's callback runs before L1's (completion order), and none runs inside another. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(2));
+    s_gm.nest_one = 1;   /* the first callback enqueues ge_chain_list(1) */
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 3u && s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(0)) &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(2)) &&
+               s_gm.ids[2] == ge_tim_finish_id(ge_chain_list(1)) && s_gm.max_depth == 1u,
+           "GE finish masked: a completion raised while others wait runs after them, in "
+           "completion order");
+
+    /* A delivered callback that suspends the interrupts, enqueues and returns with them still
+     * suspended: the new list's callback waits for the resume, not just for the callback. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    s_gm.suspend_enqueue_stay = 1;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && s_gm.masked_callbacks == 0u && !sched_interrupts_enabled() &&
+               ge_finish_masked_pending(),
+           "GE finish masked: a callback left with the interrupts suspended holds its run's next "
+           "callback");
+    sched_resume_interrupts(s_gm.stay_prev);
+    expect(s_gm.callbacks == 2u && s_gm.masked_callbacks == 0u &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)) && !ge_finish_masked_pending(),
+           "GE finish masked: that callback runs at the resume, with the interrupts enabled");
+
+    /* A LoadExec drops the completions still waiting: the new program owes them nothing. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    int waited = ge_finish_masked_pending();
+    sr_hle_loadexec_reset_guest_state();
+    sched_resume_interrupts(prev);
+    expect(waited && s_gm.callbacks == 0u && !ge_finish_masked_pending(),
+           "GE finish masked: a LoadExec drops the completions still waiting");
+
+    /* SR_GE_TIMING=1: the model's completion service is the GE finish interrupt itself, so each
+     * list's callback runs as that list completes: the second list is still drawing when the
+     * first list's callback reads it. */
+    gm_reset();
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_ge_timing(1);
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gm_timing_finish_fn);
+    ge_tim_write_list(ge_chain_list(0), 0u);
+    ge_tim_write_list(ge_chain_list(1), 0u);
+    const uint64_t saved_vtime = s_vtime_us;
+    s_vtime_us = 1000u;
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    s_gm.peek_list = ge_tim_enqueue(&cpu, ge_chain_list(1));
+    s_vtime_us = 1000000u;
+    scheduler_service_pending();
+    expect(s_gm.callbacks == 2u && s_gm.peek == 2u /* drawing */ && !ge_finish_masked_pending(),
+           "GE finish masked: an SR_GE_TIMING completion's callback runs when that list completes");
+    s_vtime_us = saved_vtime;
+    sr_hle_test_ge_timing(0);
+    sr_hle_test_ge_lists_reset();
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gm_finish_fn);
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) ge_tim_write_list(ge_chain_list(i), 0u);
+
+    /* Under the mask the waiting callback keeps the enqueuing context's $gp, as when it ran
+     * inline, not the $gp of whoever resumes the interrupts. */
+    const uint32_t thread_gp = 0x08b40000u;
+    const uint32_t saved_gp = s_cpu->r[28];
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[28] = thread_gp;
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    s_cpu->r[28] = 0x08b80000u;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && s_gm.cb_gp[0] == thread_gp,
+           "GE finish masked: a callback that waited under the mask runs with the enqueuing "
+           "context's $gp");
+
+    /* A VBLANK handler that enqueues one list on every VBLANK, with 70 episodes owed (a host
+     * stall): each callback runs when its episode returns, before the next handler, so no more
+     * than one completion waits and the 64 bound is not reached; and it runs with the
+     * handler's $gp (s_gp), not the interrupted thread's. */
+    gm_reset();
+    uint32_t stops_before = sr_hle_test_unmodelled_stops();
+    sr_test_register_guest_fn(GM_VBLANK_FN, gm_vblank_one_fn);
+    expect(td24b_dispatch4(NID_SCE_KERNEL_REGISTER_SUBINTR, 30u, 0u, GM_VBLANK_FN, 0u) == 0u &&
+               td24b_dispatch4(NID_SCE_KERNEL_ENABLE_SUBINTR, 30u, 0u, 0u, 0u) == 0u,
+           "GE finish masked: the one-list-per-VBLANK handler is registered and enabled");
+    s_cpu->r[28] = thread_gp;
+    s_pending_vblanks = 70u;
+    scheduler_service_pending();
+    (void)td24b_dispatch4(NID_SCE_KERNEL_RELEASE_SUBINTR, 30u, 0u, 0u, 0u);
+    int alternating = s_gm.nevents == 140u;
+    for (unsigned i = 0; i < 140u && alternating; i++)
+        alternating &= s_gm.events[i] == ((i & 1u) ? 'C' : 'H');
+    expect(alternating && s_gm.handlers == 70u && s_gm.callbacks == 70u &&
+               sr_hle_test_unmodelled_stops() == stops_before && !ge_finish_masked_pending(),
+           "GE finish masked: with 70 VBLANKs owed, each handler's callback runs before the next "
+           "handler and nothing stops");
+    int handler_gp = s_gp != thread_gp;   /* else the check could pass by coincidence */
+    for (unsigned i = 0; i < 70u; i++) handler_gp &= s_gm.cb_gp[i] == s_gp;
+    expect(handler_gp, "GE finish masked: a handler-raised callback runs with the handler's $gp "
+                       "(s_gp, set apart from the thread's)");
+    s_cpu->r[28] = saved_gp;
+
+    gm_reset();
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
+    ge_tim_teardown();
+}
+
 /* #1374: lists enqueued while another list is still on the GE wait their turn, in enqueue
  * order, as the GE driver's queue runs them (uofw src/kd/ge/ge.c _sceGeListEnQueue and
  * _sceGeFinishInterrupt). The queued-list peek (1) is uofw's SCE_GE_LIST_QUEUED and
@@ -32129,6 +33632,40 @@ static void dch_scenario_fifo(void) {
     s_dch_pending_after[1] = dch_pending(0) && dch_pending(2);
 }
 
+/* Whatever dispatch count the cases before leave, the arrival-order scenario runs the same. Each
+ * round leaves a count that puts the clock's quantum on one of the scenario's first 64 dispatches
+ * (counted from 0); reset_fixture starts the count afresh, so every round is the same run. Before
+ * it did, a quantum on dispatches 2 to 6 failed the queueing check and one on dispatch 11 the
+ * order and timing checks. The scenario itself takes fewer than 64 dispatches, so these phases
+ * cover it. */
+#define DCH_FIFO_PHASES 64u
+
+static void test_dmac_fifo_whatever_the_inherited_clock_phase(void) {
+    const uint32_t dispatches = s_dispatches_since_time;
+    unsigned failed = 0u;
+    uint32_t longest = 0u;
+    for (uint32_t phase = 0u; phase < DCH_FIFO_PHASES; phase++) {
+        memset(s_dch_pending_after, 0, sizeof s_dch_pending_after);
+        s_dispatches_since_time = TIMESLICE - 1u - phase;
+        dch_setup(dch_scenario_fifo);
+        if (s_dispatches_since_time > longest) longest = s_dispatches_since_time;
+        const int ok = s_dch_pending_after[0] && s_dch_pending_after[1] && s_dch[0].order == 1 &&
+                       s_dch[1].order == 2 && s_dch[2].order == 3 &&
+                       s_dch[1].exit_us >= s_dch[0].deadline_us + 58u &&
+                       s_dch[2].exit_us >= s_dch[1].exit_us + 58u;
+        if (!ok && failed++ == 0u)
+            printf("dmac fifo: first failing inherited phase %u: orders %d/%d/%d, exits %llu/%llu/%llu us\n",
+                   phase, s_dch[0].order, s_dch[1].order, s_dch[2].order,
+                   (unsigned long long)s_dch[0].exit_us, (unsigned long long)s_dch[1].exit_us,
+                   (unsigned long long)s_dch[2].exit_us);
+    }
+    printf("dmac fifo: %u of %u inherited clock phases failed; the scenario took %u dispatches\n", failed,
+           (unsigned)DCH_FIFO_PHASES, (unsigned)longest);
+    expect(failed == 0u, "PSP-DMAC-002 b3: the arrival-order scenario holds at every inherited clock phase");
+    expect(longest < DCH_FIFO_PHASES, "the inherited phases cover every dispatch of the scenario");
+    s_dispatches_since_time = dispatches;
+}
+
 static void test_dmac_queued_callers_are_served_in_arrival_order(void) {
     memset(s_dch_pending_after, 0, sizeof s_dch_pending_after);
     dch_setup(dch_scenario_fifo);
@@ -33471,6 +35008,370 @@ extern void sr_hle_test_atrac_reinit_reset(void);
 extern uint32_t sr_hle_test_atrac_release_count(void);
 extern void sr_hle_test_atrac_release_reset(void);
 
+/* #322: _sceAtracGetContextAddress hands out a guest context that follows the ID's state.
+ * Field offsets are PPSSPP's SceAtracContext (the info block at +0x80), not PSP-measured. */
+#define NID_SCE_ATRAC_GET_CONTEXT_ADDRESS 0x231fc6b7u
+#define NID_SCE_ATRAC_SET_LOOP_NUM_322    0x868120b5u
+#define NID_SCE_ATRAC_GET_LOOP_STATUS_322 0xfaa4f89bu
+static void test_atrac_guest_context_322(void) {
+    enum { SRC = 0x08006000u, TRACK = 0x08002000u, PCM_OUT = 0x08003000u, OUT_N = 0x08004100u,
+           OUT_END = 0x08004104u, OUT_REMAIN = 0x08004108u, LOOP_OUT = 0x08004110u,
+           LOOP_FLAG = 0x08004114u, SECOND = 0x08007000u, FRAMES = 8u, PREFIX_FRAMES = 4u };
+    const uint32_t prefix = TD1096_HEADER + PREFIX_FRAMES * TD1096_FRAME;
+    const uint32_t file_size = TD1096_HEADER + FRAMES * TD1096_FRAME;
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;   /* a main image in user RAM, as a game's is */
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, 3u, 0u, 0u, 0u) == ATRAC_ERROR_NO_ATRACID,
+           "_sceAtracGetContextAddress refuses an ID that is not in use (#322)");
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    expect(id < 8u, "context fixture: an AT3 ID");
+    if (id >= 8u) {
+        s_fixture_loaded_end = loaded_end;
+        sr_hle_test_partition_reset();
+        return;
+    }
+    const uint32_t ctx = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u);
+    const uint32_t info = ctx + 0x80u;
+    expect(ctx >= 0x08a00000u && ctx < 0x0a000000u && (ctx & 0xffu) == 0u,
+           "_sceAtracGetContextAddress returns a 0x100-byte context in the user partition (#322)");
+    if (!(ctx >= 0x08a00000u && ctx < 0x0a000000u)) {
+        (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+        s_fixture_loaded_end = loaded_end;
+        sr_hle_test_partition_reset();
+        return;
+    }
+    expect(MEM_R8(info + 0x15u) == 1u && MEM_R16(info + 0x1au) == ATRAC_CODEC_AT3 &&
+               MEM_R32(info + 0x38u) == 0u && MEM_R32(ctx + 0xfcu) == id,
+           "an ID with no track: state NO_DATA (1), its codec, no buffer, and the ID at +0xfc");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) == ctx,
+           "a second call returns the same context");
+
+    /* SetData: a streamed prefix shorter than the file. */
+    td1096_build_at3_frames(SRC, 0x0270u, FRAMES, FRAMES * ATRAC3_FRAME_SAMPLES, 0u);
+    for (uint32_t b = 0; b < prefix; b++) MEM_W8(TRACK + b, MEM_R8(SRC + b));
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, TRACK, prefix, 0u) == 0u,
+           "context fixture: SetData takes the streamed prefix");
+    expect(MEM_R8(info + 0x15u) == 4u && MEM_R8(info + 0x17u) == 2u &&
+               MEM_R16(info + 0x18u) == TD1096_FRAME && MEM_R16(info + 0x1au) == ATRAC_CODEC_AT3 &&
+               MEM_R32(info + 0x1cu) == TD1096_HEADER && MEM_R32(info + 0x24u) == file_size &&
+               MEM_R32(info + 0x38u) == TRACK && MEM_R32(info + 0x40u) == prefix &&
+               MEM_R32(info + 0x3cu) == 0u && MEM_R32(info + 0x44u) == 0u,
+           "after SetData the context names the stream: state, channels, frame size, codec, data "
+           "offset, file size, buffer and buffer size");
+
+    /* loopNum follows SetLoopNum, and a game's own write is what the library reads. */
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_322, id, 2u, 0u, 0u) == 0u &&
+               MEM_R32(info + 0x28u) == 2u,
+           "sceAtracSetLoopNum is written to the context's loopNum");
+    MEM_W32(info + 0x28u, 7u);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_LOOP_STATUS_322, id, LOOP_OUT, LOOP_FLAG, 0u) == 0u &&
+               MEM_R32(LOOP_OUT) == 7u,
+           "a loopNum the game writes into the context is the one the library reports");
+    MEM_W32(info + 0x28u, 0u);
+
+    /* The second buffer. */
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_SECOND_BUFFER, id, SECOND, 0x800u, 0u) == 0u &&
+               MEM_R32(info + 0x3cu) == SECOND && MEM_R32(info + 0x44u) == 0x800u,
+           "sceAtracSetSecondBuffer is written to secondBuffer and secondBufferByte");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_SECOND_BUFFER, id, 0u, 0u, 0u) == 0u &&
+               MEM_R32(info + 0x3cu) == 0u && MEM_R32(info + 0x44u) == 0u,
+           "clearing the second buffer clears it in the context");
+
+    /* DecodeData publishes too: a field that is not read back is the library's again, and a
+     * context the game only wrote such fields into still decodes. */
+    MEM_W32(info + 0x38u, 0x0badf00du);
+    MEM_W32(ctx + 0xfcu, 0xffu);
+    {
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        uint32_t ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(OUT_N) > 0u && sr_hle_test_unmodelled_stops() == stops,
+               "a context whose other fields the game wrote still decodes");
+    }
+    expect(MEM_R8(info + 0x15u) == 4u && MEM_R32(info + 0x28u) == 0u &&
+               MEM_R32(info + 0x38u) == TRACK && MEM_R32(ctx + 0xfcu) == id,
+           "sceAtracDecodeData rewrites the context from the library's state");
+
+    /* AddStreamData: the context keeps naming the same buffer and file. */
+    {
+        enum { WP = 0x08004200u, WB = 0x08004204u, RO = 0x08004208u };
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_STREAM_DATA_INFO, id, WP, WB, RO) == 0u &&
+                   MEM_R32(WB) >= TD1096_FRAME,
+               "context fixture: the ring has room for a frame");
+        uint32_t wp = MEM_R32(WP), ro = MEM_R32(RO);
+        for (uint32_t b = 0; b < TD1096_FRAME; b++) MEM_W8(wp + b, MEM_R8(SRC + ro + b));
+        MEM_W32(info + 0x24u, 0u);
+        expect(td24b_dispatch4(0x7db31251u, id, TD1096_FRAME, 0u, 0u) == 0u &&
+                   MEM_R32(info + 0x24u) == file_size && MEM_R32(info + 0x38u) == TRACK,
+               "sceAtracAddStreamData publishes the context");
+    }
+
+    /* A state the game writes is not taken: honouring one is unmeasured, so the next call stops
+     * the run by name, whatever the value. With the runtime's own state back, calls go on. */
+    {
+        enum { REMAIN = 0x08004220u };
+        static const uint8_t written[] = { 2u, 1u, 0x10u };
+        static const char *const what[] = {
+            "ALL_DATA_LOADED written over a streamed track",
+            "NO_DATA written over a streamed track",
+            "FOR_SCESAS (a SAS voice's source) written over a streamed track",
+        };
+        char name[200];
+        for (size_t i = 0; i < sizeof(written); i++) {
+            uint32_t stops = sr_hle_test_unmodelled_stops();
+            MEM_W8(info + 0x15u, written[i]);
+            uint32_t ret = td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+            snprintf(name, sizeof(name), "%s stops the next call by name (#322)", what[i]);
+            expect(sr_hle_test_unmodelled_stops() == stops + 1u && ret != 0u, name);
+        }
+        MEM_W8(info + 0x15u, 4u);
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u) == 0u &&
+                   MEM_R32(REMAIN) != 0xffffffffu && sr_hle_test_unmodelled_stops() == stops,
+               "with the runtime's own state in the context, calls go on");
+    }
+
+    /* Release clears the context; the slot's next owner starts from NO_DATA. */
+    expect(td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u) == 0u,
+           "context fixture: release the ID");
+    int zero = 1;
+    for (uint32_t off = 0; off < 0x100u; off += 4u) if (MEM_R32(ctx + off) != 0u) zero = 0;
+    expect(zero, "sceAtracReleaseAtracID clears the ID's context");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) == ATRAC_ERROR_NO_ATRACID,
+           "a released ID has no context");
+    uint32_t again = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    expect(again == id && td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, again, 0u, 0u, 0u) == ctx &&
+               MEM_R8(info + 0x15u) == 1u && MEM_R32(info + 0x38u) == 0u,
+           "the slot's next ID gets the same context, back at NO_DATA");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, again, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
+/* #322: two IDs, a program switch, and a partition that cannot hold the contexts. */
+static uint32_t ctx322_syscall(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2; cpu.r[7] = a3;
+    return sr_syscall(&cpu, nid);
+}
+static void test_atrac_context_ids_loadexec_322(void) {
+    enum { NID_ALLOC_PART = 0x237dbd4fu, NID_FREE_PART = 0xb6d61d02u, NID_GET_HEAD = 0x9d9a5ba1u,
+           NID_MAX_FREE = 0xa291f107u, GAME_BYTES = 0x800u };
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+
+    /* Two IDs: separate contexts 0x100 apart in one table, each with its own ID at +0xfc. */
+    uint32_t id0 = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t id1 = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    expect(id0 < 8u && id1 < 8u && id0 != id1, "context fixture: two AT3 IDs");
+    uint32_t ctx0 = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id0, 0u, 0u, 0u);
+    uint32_t ctx1 = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id1, 0u, 0u, 0u);
+    uint32_t table = ctx0 - id0 * 0x100u;
+    expect(ctx0 >= 0x08a00000u && ctx0 < 0x0a000000u && ctx1 >= 0x08a00000u && ctx1 < 0x0a000000u &&
+               ctx0 != ctx1 && ctx1 - id1 * 0x100u == table &&
+               MEM_R32(ctx0 + 0xfcu) == id0 && MEM_R32(ctx1 + 0xfcu) == id1,
+           "two ATRAC IDs get separate contexts, 0x100 apart in one table, each with its ID at +0xfc");
+    if (!(ctx0 >= 0x08a00000u && ctx0 < 0x0a000000u)) {
+        s_fixture_loaded_end = loaded_end;
+        sr_hle_test_partition_reset();
+        return;
+    }
+    uint8_t before[0x100];
+    for (uint32_t b = 0; b < 0x100u; b++) before[b] = (uint8_t)MEM_R8(ctx0 + b);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_322, id1, 3u, 0u, 0u) == 0u &&
+               MEM_R32(ctx1 + 0x80u + 0x28u) == 3u,
+           "context fixture: SetLoopNum on the second ID");
+    int same = 1;
+    for (uint32_t b = 0; b < 0x100u; b++) if (MEM_R8(ctx0 + b) != before[b]) same = 0;
+    expect(same, "a call on one ID leaves another ID's context untouched");
+
+    /* The table's block UID, found the way a game could: the block whose head is the table. */
+    uint32_t table_uid = 0u;
+    for (uint32_t u = 0x100u; u < 0x4000u && !table_uid; u++)
+        if (ctx322_syscall(NID_GET_HEAD, u, 0u, 0u, 0u) == table) table_uid = u;
+    expect(table_uid != 0u, "context fixture: the context table is a partition block");
+
+    /* sceKernelLoadExec: the next program's partition is empty and its UIDs start again, so one
+     * of its blocks takes the old table's UID. Its next context must not land in that block. */
+    sr_hle_loadexec_reset_guest_state();
+    uint32_t game_uid = 0u;
+    for (int n = 0; n < 0x4000 && game_uid < table_uid; n++) {
+        uint32_t u = ctx322_syscall(NID_ALLOC_PART, 2u, 0u, 0u, GAME_BYTES);
+        if (u == 0u || (u & 0x80000000u)) break;
+        game_uid = u;
+        if (u < table_uid) (void)ctx322_syscall(NID_FREE_PART, u, 0u, 0u, 0u);
+    }
+    uint32_t game = game_uid == table_uid ? ctx322_syscall(NID_GET_HEAD, game_uid, 0u, 0u, 0u) : 0u;
+    expect(game_uid == table_uid && game != 0u && !(game & 0x80000000u),
+           "context fixture: after LoadExec a block of the next program takes the old table's UID");
+    if (game) for (uint32_t b = 0; b < GAME_BYTES; b++) MEM_W8(game + b, 0xa5u);
+    uint32_t nid = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t nctx = nid < 8u ? td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, nid, 0u, 0u, 0u) : 0u;
+    int intact = game != 0u;
+    for (uint32_t b = 0; game && b < GAME_BYTES; b++) if (MEM_R8(game + b) != 0xa5u) intact = 0;
+    expect(nid < 8u && nctx >= 0x08800000u && nctx < 0x0a000000u &&
+               (nctx + 0x100u <= game || nctx >= game + GAME_BYTES) && intact,
+           "after LoadExec the next program's context table is a new block, and the block that "
+           "reused the old table's UID is left untouched (#322)");
+
+    /* A partition that cannot hold the 0x800 bytes of contexts: no PSP result fits, so the call
+     * stops the run by name (ATRAC_CONTEXT_NO_MEMORY on stderr). */
+    if (nid < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, nid, 0u, 0u, 0u);
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    uint32_t fid = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t max_free = ctx322_syscall(NID_MAX_FREE, 0u, 0u, 0u, 0u);
+    uint32_t fill = max_free >= 0x100u ? ctx322_syscall(NID_ALLOC_PART, 2u, 0u, 0u, max_free) : 0u;
+    expect(fid < 8u && fill != 0u && !(fill & 0x80000000u) &&
+               ctx322_syscall(NID_MAX_FREE, 0u, 0u, 0u, 0u) < 0x800u,
+           "context fixture: the partition is full");
+    {
+        FILE *capture = NULL;
+        int saved_fd = -1;
+        char log[1024];
+        log[0] = '\0';
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+        (void)td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, fid, 0u, 0u, 0u);
+        if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+        expect(sr_hle_test_unmodelled_stops() == stops + 1u && capturing &&
+                   strstr(log, "ATRAC_CONTEXT_NO_MEMORY") != NULL,
+               "_sceAtracGetContextAddress stops the run by name (ATRAC_CONTEXT_NO_MEMORY) when the "
+               "partition cannot hold the contexts");
+    }
+    expect(ctx322_syscall(NID_FREE_PART, fill, 0u, 0u, 0u) == 0u &&
+               td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, fid, 0u, 0u, 0u) >= 0x08a00000u,
+           "once the partition has room the next call allocates the contexts");
+    if (fid < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, fid, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
+
+/* #322: a whole AT3 track whose context state the game overwrites. Before, a written streamed
+ * state was taken as a label only, and every DecodeData returned 0 samples with no end flag. One
+ * DecodeData is enough to tell: it must stop by name. */
+static void test_atrac_context_state_write_322(void) {
+    enum { SRC = 0x08006000u, TRACK = 0x08010000u, PCM_OUT = 0x08003000u, OUT_N = 0x08004100u,
+           OUT_END = 0x08004104u, OUT_REMAIN = 0x08004108u, REMAIN = 0x08004220u, FRAMES = 8u };
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t file_size = TD1096_HEADER + FRAMES * TD1096_FRAME;
+    td1096_build_at3_frames(SRC, 0x0270u, FRAMES, FRAMES * ATRAC3_FRAME_SAMPLES, 0u);
+    for (uint32_t b = 0; b < file_size; b++) MEM_W8(TRACK + b, MEM_R8(SRC + b));
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t set = id < 8u ? td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, TRACK, file_size, 0u) : 1u;
+    uint32_t ctx = set == 0u ? td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) : 0u;
+    const uint32_t info = ctx + 0x80u;
+    int ready = ctx >= 0x08a00000u && ctx < 0x0a000000u && MEM_R8(info + 0x15u) == 2u;
+    expect(ready, "state-write fixture: a whole AT3 track is ALL_DATA_LOADED in its context");
+    if (ready) {
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        uint32_t ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(OUT_N) > 0u && sr_hle_test_unmodelled_stops() == stops,
+               "a context the game only reads decodes as before");
+        MEM_W32(info + 0x28u, 1u);   /* the game keeps its own loop count */
+        ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(OUT_N) > 0u && sr_hle_test_unmodelled_stops() == stops,
+               "a context the game wrote loopNum into decodes as before");
+        MEM_W32(info + 0x28u, 0u);
+
+        MEM_W8(info + 0x15u, 4u);   /* STREAMED_WITHOUT_LOOP over a whole track */
+        MEM_W32(OUT_N, 0xdeadbeefu);
+        MEM_W32(OUT_END, 0xdeadbeefu);
+        ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(sr_hle_test_unmodelled_stops() == stops + 1u && ret != 0u,
+               "a streamed state written over a whole track stops DecodeData by name, not 0 "
+               "samples with no end flag (#322)");
+        MEM_W8(info + 0x15u, 2u);
+        ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(OUT_N) > 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+               "with its own state back, the track decodes on");
+
+        MEM_W8(info + 0x15u, 1u);   /* NO_DATA over a held track */
+        ret = td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+        expect(sr_hle_test_unmodelled_stops() == stops + 2u && ret != 0u,
+               "NO_DATA written over a held track stops the next call by name (#322)");
+        MEM_W8(info + 0x15u, 2u);
+    }
+    if (id < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
+/* #322: an ATRAC3+ prefix with a fact chunk and no fmt chunk is a track whose frame size is 0,
+ * kept as ALL_DATA_LOADED. A streamed state written into its context must stop the run by name:
+ * the remaining-frame and reset arithmetic divide by the frame size. The dividing calls run only
+ * once the stop has been counted, so a build that takes the state fails here instead of crashing. */
+static void test_atrac_context_zero_frame_322(void) {
+    enum { TRACK = 0x08002000u, REMAIN = 0x08004220u, RESET_INFO = 0x08004300u };
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+
+    for (uint32_t b = 0; b < 0x40u; b++) MEM_W8(TRACK + b, 0u);
+    MEM_W32(TRACK + 0x00u, 0x46464952u);   /* "RIFF" */
+    MEM_W32(TRACK + 0x04u, 0x1000u);
+    MEM_W32(TRACK + 0x08u, 0x45564157u);   /* "WAVE" */
+    MEM_W32(TRACK + 0x0cu, 0x74636166u);   /* "fact" */
+    MEM_W32(TRACK + 0x10u, 8u);
+    MEM_W32(TRACK + 0x14u, 2048u);         /* samples */
+    MEM_W32(TRACK + 0x18u, 0u);            /* delay */
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, 0x1000u /* ATRAC3+ */, 0u, 0u, 0u);
+    uint32_t set = id < 8u ? td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, TRACK, 0x40u, 0u) : 1u;
+    uint32_t ctx = set == 0u ? td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) : 0u;
+    const uint32_t info = ctx + 0x80u;
+    int ready = ctx >= 0x08a00000u && ctx < 0x0a000000u;
+    expect(ready && MEM_R8(info + 0x15u) == 2u && MEM_R16(info + 0x18u) == 0u,
+           "zero-frame fixture: a fact-only ATRAC3+ prefix is ALL_DATA_LOADED with frame size 0");
+    if (ready) {
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        MEM_W8(info + 0x15u, 4u);   /* STREAMED_WITHOUT_LOOP */
+        (void)td24b_dispatch4(NID_SCE_ATRAC_GET_LOOP_STATUS_322, id, REMAIN, REMAIN + 4u, 0u);
+        int stopped = sr_hle_test_unmodelled_stops() == stops + 1u;
+        expect(stopped, "a streamed state written for a track whose frame size is 0 stops the run "
+                        "by name (#322)");
+        if (stopped) {
+            /* Only reached once the written state is refused: these divide by the frame size. */
+            uint32_t r1 = td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+            MEM_W8(info + 0x15u, 3u);   /* HALFWAY_BUFFER */
+            uint32_t r2 = td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+            MEM_W8(info + 0x15u, 5u);
+            uint32_t r3 = td24b_dispatch4(NID_SCE_ATRAC_GET_BUFFER_INFO_FOR_RESETTING, id, 0u,
+                                          RESET_INFO, 0u);
+            expect(sr_hle_test_unmodelled_stops() == stops + 4u && r1 != 0u && r2 != 0u && r3 != 0u,
+                   "with a written state, GetRemainFrame and GetBufferInfoForResetting stop by "
+                   "name and never divide by a frame size of 0");
+        }
+        MEM_W8(info + 0x15u, 2u);
+        stops = sr_hle_test_unmodelled_stops();
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u) == 0u &&
+                   MEM_R32(REMAIN) == 0xffffffffu && sr_hle_test_unmodelled_stops() == stops,
+               "with its own state back, the zero-frame track answers ALL_DATA_LOADED");
+    }
+    if (id < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
 static void test_td24d_hle_batch(void) {
     reset_fixture();
     sr_hle_init();
@@ -34069,6 +35970,112 @@ static void test_sas_mix_saturates_without_wrapping(void) {
            "__sceSasCoreWithMix at unity gain never inverts a sample when the voice sum overflows int32");
     expect(wrong == 0,
            "__sceSasCoreWithMix saturates twenty full-scale voices at +32767 once every envelope is up");
+}
+
+/* ---- #2137: Ace Mode's peak=limit, the SAS side -------------------------------------------------
+ *
+ * The overflow fixture: twenty full-scale PCM voices over caller PCM of -1000 through
+ * __sceSasCoreWithMix, so the sum passes 16 bits once the envelopes rise and stays under it on
+ * the first samples, then sceAudioOutputBlocking of that same buffer. With the wide mix on, the
+ * guest's bytes must be the PSP's, saturated, exactly as with it off; the host's push must carry
+ * the unsaturated sum where the store saturated and the guest's value everywhere else; and a
+ * buffer the game changed after the mix, or a copy of it elsewhere, must play as the guest has it.
+ *
+ * MUTANT: store the wide sum into guest memory (sas_output_write(out, i, 0, wl)) -- the guest
+ *   bytes differ from the run with the switch off and the first cell fails.
+ * MUTANT: drop the memcmp in sas_wide_for_output -- the changed buffer still plays the kept sum
+ *   and the provenance cell fails. */
+static void sas_peak_overflow_grain(CpuState *cpu, int wide, int16_t *guest) {
+    const uint32_t core = 0x08030000u, out = 0x08010000u, pcm = 0x08040000u;
+    const uint32_t grain = 256u, voices = 20u, pcm_samples = 512u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_sas_reset();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_hle_sas_set_wide_mix(wide);
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[29] = 0x09012000u;
+    cpu->r[4] = core; cpu->r[5] = grain; cpu->r[6] = 32; cpu->r[7] = 0; cpu->r[8] = 44100;
+    expect(sr_syscall(cpu, NID_SAS_INIT) == 0, "peak fixture: __sceSasInit accepts the 256-sample grain");
+    for (uint32_t i = 0; i < pcm_samples; i++) MEM_W16(pcm + i * 2u, 0x7fffu);
+    for (uint32_t v = 0; v < voices; v++) {
+        cpu->r[4] = core; cpu->r[5] = v; cpu->r[6] = pcm; cpu->r[7] = pcm_samples; cpu->r[8] = 0xffffffffu;
+        expect(sr_syscall(cpu, NID_SAS_SET_VOICE_PCM) == 0, "peak fixture: __sceSasSetVoicePCM");
+        cpu->r[4] = core; cpu->r[5] = v; cpu->r[6] = 0x1000; cpu->r[7] = 0x1000;
+        cpu->r[8] = 0x1000; cpu->r[9] = 0x1000;
+        expect(sr_syscall(cpu, NID_SAS_SET_VOLUME) == 0, "peak fixture: __sceSasSetVolume");
+        cpu->r[4] = core; cpu->r[5] = v;
+        expect(sr_syscall(cpu, NID_SAS_SET_KEY_ON) == 0, "peak fixture: __sceSasSetKeyOn");
+    }
+    int16_t bgm[256 * 2];
+    for (uint32_t i = 0; i < grain * 2u; i++) bgm[i] = -1000;
+    sas_write_pcm(out, bgm, grain);
+    cpu->r[4] = core; cpu->r[5] = out; cpu->r[6] = 0x1000; cpu->r[7] = 0x1000;
+    expect(sr_syscall(cpu, NID_SAS_CORE_WITH_MIX) == 0, "peak fixture: __sceSasCoreWithMix");
+    sas_read_pcm(out, guest, grain);
+    expect(audio_dispatch(cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, grain, 0u) == 0u,
+           "peak fixture: the regular channel takes 256-frame stereo blocks");
+}
+
+static void test_sas_peak_limit_keeps_guest_bytes_and_hands_the_host_the_sum(void) {
+    const uint32_t out = 0x08010000u, copy = 0x08050000u;
+    CpuState cpu;
+    int16_t off[256 * 2], on[256 * 2];
+
+    /* Off: the PSP's bytes, and a plain push of them. */
+    sas_peak_overflow_grain(&cpu, 0, off);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak off: the output plays the grain");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak off: the output is a plain push (no wide sum is kept)");
+    uint32_t saturated = 0, unsaturated = 0;
+    for (uint32_t i = 0; i < 256u * 2u; i++) {
+        if (off[i] == 32767) saturated++;
+        else if (off[i] > -32768) unsaturated++;
+    }
+    expect(saturated > 0 && unsaturated > 0,
+           "peak fixture: the grain saturates once the envelopes rise and not before");
+
+    /* On: the same bytes in guest memory, and the sum for the host. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    expect(memcmp(off, on, sizeof(off)) == 0,
+           "peak on: the guest's SAS bytes are byte-identical to the run with the switch off");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak on: the output plays the grain");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 1,
+           "peak on: the unchanged SAS buffer reaches the host as one wide push");
+    expect(memcmp(s_audio_push_capture, on, sizeof(on)) == 0,
+           "peak on: the wide push still carries the guest's own bytes beside the sum");
+    uint32_t past = 0, wrong = 0;
+    for (uint32_t i = 0; i < 256u * 2u; i++) {
+        const int32_t w = s_audio_push_wide_capture[i];
+        if (on[i] == 32767) { if (w > 32767) past++; else wrong++; }
+        else if (w != on[i]) wrong++;
+    }
+    expect(wrong == 0, "peak on: the sum differs from the guest only where the store saturated");
+    expect(past == saturated, "peak on: every saturated sample carries a sum past 16 bits");
+    /* Twenty unity voices at full scale over -1000: once the envelopes are up the sum is
+     * 20 * 32767 - 1000, far past what any int16 holds. */
+    expect(s_audio_push_wide_capture[255 * 2] > 20 * 30000,
+           "peak on: the sum keeps all twenty voices");
+
+    /* The game changed the buffer after the mix: it plays as the guest has it. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    MEM_W16(out + 255u * 4u, 0x1234u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak on, changed buffer: the output plays");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak on, changed buffer: a span the game wrote after the mix gets no kept sum");
+
+    /* A copy elsewhere is the game's own buffer: it plays as the guest has it. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    sas_write_pcm(copy, on, 256u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, copy) == 256u,
+           "peak on, copy: the output plays");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak on, copy: a buffer the SAS mixer never wrote gets no kept sum");
+    sr_hle_sas_set_wide_mix(0);
 }
 
 /* Production-dispatch SAS state regressions.  Each case uses only synthetic
@@ -38332,6 +40339,103 @@ static void test_partition_unknown_block_codes(void) {
 /* A live thread stack is not free partition memory: the reported free sizes and every
  * allocation end at the lowest live stack, so a game that takes the reported free
  * memory never receives a block over its own stack. */
+/* A thread stack that sat in a gap a fixed reservation skipped goes back to the free list once
+ * the thread is deleted: a create, reserve-over, delete, free loop gets its space back every round
+ * (the bump pointer returns to where it started), where each round used to lose one stack's span
+ * for the rest of the run. */
+static void test_partition_skipped_gap_space_comes_back(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_hle_test_partition_heap_ptr(void);
+    extern int sr_hle_test_partition_free_block_count(void);
+    extern uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name);
+    const uint32_t NID_FREE_PART = 0xb6d61d02u;
+    const uint32_t NID_DELETE_THREAD = 0x9fa03cd3u;
+    enum { ROUNDS = 100 };
+    CpuState cpu;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;   /* a main image in user RAM, as a game's is */
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t heap0 = sr_hle_test_partition_heap_ptr();
+    const int free0 = sr_hle_test_partition_free_block_count();
+    int rounds = 0;
+    for (; rounds < ROUNDS; rounds++) {
+        uint32_t upper = sched_create_thread(0x2000u, 32, 0x8000u);
+        uint32_t upper_floor = sched_guest_stack_floor();
+        uint32_t lower = sched_create_thread(0x2004u, 32, 0x8000u);
+        if (!upper || !lower || sched_guest_stack_floor() >= upper_floor) break;
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = upper;
+        if (sr_syscall(&cpu, NID_DELETE_THREAD) != 0u) break;
+        /* The bump pointer jumps over the lower thread's live stack. */
+        uint32_t fixed = sr_alloc_block_at(upper_floor, 0x1000u, "over-upper");
+        if (fixed == 0xFFFFFFFFu || fixed == 0u || sr_hle_test_partition_heap_ptr() <= upper_floor) break;
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = lower;
+        if (sr_syscall(&cpu, NID_DELETE_THREAD) != 0u) break;
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fixed;
+        if (sr_syscall(&cpu, NID_FREE_PART) != 0u) break;
+        if (sr_hle_test_partition_heap_ptr() != heap0 || sr_hle_test_partition_free_block_count() != free0)
+            break;
+    }
+    expect(rounds == ROUNDS,
+           "a stack freed inside a skipped gap comes back: 100 create/reserve/delete/free rounds each "
+           "end with the bump pointer and the free list where they started");
+
+    /* A create whose arena range would reach a fixed reservation the bump pointer has passed gives
+     * that range back to the arena only, and takes the top of the gap the reservation skipped, the
+     * highest free block (#2469): the bump pointer and the reservation stay as they were, and a
+     * later Low block lands outside the reservation. A refused range over a live stack in such a
+     * gap: test_refused_arena_range_spares_a_freed_block_stack. */
+    extern uint32_t alloc_block(uint32_t size);
+    extern uint32_t sr_last_alloc_addr;
+    uint32_t keep = sched_create_thread(0x2000u, 32, 0x8000u);
+    uint32_t keep_floor = sched_guest_stack_floor();
+    uint32_t below = sr_alloc_block_at(keep_floor - 0x10000u, 0x10000u, "below-stacks");
+    const uint32_t heap1 = sr_hle_test_partition_heap_ptr();
+    const int free1 = sr_hle_test_partition_free_block_count();
+    uint32_t in_gap = sched_create_thread(0x2004u, 32, 0x8000u);
+    TCB *in_gap_tcb = in_gap ? tcb_by_uid(in_gap) : NULL;
+    expect(keep != 0u && below != 0xFFFFFFFFu && below != 0u && heap1 == keep_floor && in_gap_tcb &&
+               in_gap_tcb->stack_base == keep_floor - 0x18000u,
+           "a thread create whose arena range would reach a passed fixed reservation takes the top "
+           "of the skipped gap");
+    expect(sr_hle_test_partition_heap_ptr() == heap1 && sr_hle_test_partition_free_block_count() == free1,
+           "the stack in the skipped gap leaves the bump pointer and the free-list count as they were");
+    uint32_t low = alloc_block(0x8000u);
+    uint32_t low_addr = sr_last_alloc_addr;
+    expect(low != 0xFFFFFFFFu &&
+               (low_addr + 0x8000u <= keep_floor - 0x10000u || low_addr >= keep_floor),
+           "a Low block after the create in the skipped gap lands outside the fixed reservation");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = low;
+    (void)sr_syscall(&cpu, NID_FREE_PART);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = in_gap;
+    (void)sr_syscall(&cpu, NID_DELETE_THREAD);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = below;
+    (void)sr_syscall(&cpu, NID_FREE_PART);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = keep;
+    (void)sr_syscall(&cpu, NID_DELETE_THREAD);
+
+    /* A fixed reservation that sits on a live thread stack (sr_alloc_block_at does not check
+     * thread stacks) stays the reservation's when that thread is deleted: the release frees none
+     * of it, so the bump pointer cannot roll back under the live reservation. */
+    uint32_t t = sched_create_thread(0x2000u, 32, 0x8000u);
+    uint32_t t_floor = sched_guest_stack_floor();
+    uint32_t on_stack = sr_alloc_block_at(t_floor, 0x1000u, "on-live-stack");
+    const uint32_t heap2 = sr_hle_test_partition_heap_ptr();
+    const int free2 = sr_hle_test_partition_free_block_count();
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = t;
+    uint32_t del = sr_syscall(&cpu, NID_DELETE_THREAD);
+    expect(t != 0u && on_stack != 0xFFFFFFFFu && on_stack != 0u && heap2 == t_floor + 0x1000u &&
+               del == 0u,
+           "a fixed reservation is placed on a live thread stack and the thread is deleted");
+    expect(sr_hle_test_partition_heap_ptr() == heap2 && sr_hle_test_partition_free_block_count() == free2,
+           "deleting a thread whose stack a live fixed reservation covers frees none of the reservation");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = on_stack;
+    (void)sr_syscall(&cpu, NID_FREE_PART);
+    expect(sr_hle_test_partition_heap_ptr() == heap0 && sr_hle_test_partition_free_block_count() == free0,
+           "after the skipped-gap checks the bump pointer and the free list are back where they started");
+    s_fixture_loaded_end = 0x00400000u;
+}
+
 static void test_partition_ends_at_lowest_live_stack(void) {
     extern void sr_hle_test_partition_reset(void);
     extern uint32_t sr_hle_test_partition_heap_ptr(void);
@@ -38371,8 +40475,8 @@ static void test_partition_ends_at_lowest_live_stack(void) {
     uint32_t head = sr_syscall(&cpu, NID_GET_HEAD);
     expect(head + (max_free & ~0xFFu) <= floor, "the block taken ends at or below the stack");
 
-    /* A fixed reservation keeps its previous bounds: a title profile's late module base
-     * may lie above the lowest live stack, as one reviewed profile's does. */
+    /* A fixed reservation keeps its previous bounds even above the lowest live stack: a module
+     * loaded at a fixed base or a sceKernelAllocPartitionMemory type 2 block can sit there. */
     extern uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name);
     reset_fixture();
     sr_hle_test_partition_reset();
@@ -38384,9 +40488,66 @@ static void test_partition_ends_at_lowest_live_stack(void) {
            "two stacked threads are created");
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = upper;
     expect(sr_syscall(&cpu, 0x9fa03cd3u) == 0u, "the dormant upper thread is deleted");
+    const uint32_t lower_floor = sched_guest_stack_floor();
+    const uint32_t gap_start = (sr_hle_test_partition_heap_ptr() + 0xFFu) & ~0xFFu;
+    expect(gap_start < lower_floor, "the bump pointer lies below the lower live stack");
     uint32_t between = sr_alloc_block_at(upper_floor, 0x1000u, "between-stacks");
     expect(between != FAIL && between != 0u,
            "a fixed reservation above the lowest live stack succeeds");
+    /* The reservation jumped the bump pointer over the lower thread's live stack. The skipped
+     * range goes back to the free list, but not the live stack inside it: no free entry
+     * covers [lower_floor, upper_floor), and a Low block one 256-byte step larger than the
+     * free space below the stack is refused instead of being placed over it. */
+    extern int sr_hle_test_partition_free_block_count(void);
+    extern int sr_hle_test_partition_get_free_block(int idx, uint32_t *addr_out, uint32_t *size_out);
+    int free_over_stack = 0;
+    for (int i = 0; i < sr_hle_test_partition_free_block_count(); i++) {
+        uint32_t f_addr = 0u, f_size = 0u;
+        if (sr_hle_test_partition_get_free_block(i, &f_addr, &f_size) &&
+            f_addr < upper_floor && f_addr + f_size > lower_floor)
+            free_over_stack = 1;
+    }
+    expect(!free_over_stack, "no free-list entry covers the lower thread's live stack");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = (lower_floor - gap_start) + 0x100u;
+    uint32_t over = sr_syscall(&cpu, NID_ALLOC_PART);
+    expect(over == 0x800200d9u /* MEMBLOCK_ALLOC_FAILED */,
+           "a Low block reaching into the lower live stack is refused");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = lower_floor - gap_start;
+    uint32_t below = sr_syscall(&cpu, NID_ALLOC_PART);
+    expect(below != 0x800200d9u && below != FAIL && below != 0u,
+           "the free space below the lower live stack is still handed out");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = below;
+    expect(sr_syscall(&cpu, NID_GET_HEAD) == gap_start,
+           "the block below the lower live stack starts at the old bump pointer");
+
+    /* The same with a High block in the skipped range instead of a live stack. */
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    upper = sched_create_thread(0x2000u, 32, 0x8000u);
+    upper_floor = sched_guest_stack_floor();
+    /* sceKernelAllocMemoryBlock type 1 is the High path (sceKernelAllocPartitionMemory's type 1
+     * is placed Low here). */
+    title_hle_write_cstr(0x00280010u, "high");
+    const uint32_t high = memblock_alloc(0x00280010u, 1u, 0x8000u, 0u);
+    expect(high != 0x800200d9u && high < 0x80000000u && high != 0u, "a High block is allocated");
+    const uint32_t high_head = memblock_addr(high, 0x00280004u);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = upper;
+    expect(sr_syscall(&cpu, 0x9fa03cd3u) == 0u, "the dormant thread above the High block is deleted");
+    expect((sr_hle_test_partition_heap_ptr() + 0xFFu) < high_head && high_head + 0x8000u <= upper_floor,
+           "the High block lies between the bump pointer and the deleted stack");
+    between = sr_alloc_block_at(upper_floor, 0x1000u, "above-high");
+    expect(between != FAIL && between != 0u, "a fixed reservation above the High block succeeds");
+    int free_over_high = 0;
+    for (int i = 0; i < sr_hle_test_partition_free_block_count(); i++) {
+        uint32_t f_addr = 0u, f_size = 0u;
+        if (sr_hle_test_partition_get_free_block(i, &f_addr, &f_size) &&
+            f_addr < high_head + 0x8000u && f_addr + f_size > high_head)
+            free_over_high = 1;
+    }
+    expect(!free_over_high, "no free-list entry covers the live High block");
     s_fixture_loaded_end = 0x00400000u;
 }
 
@@ -38825,6 +40986,177 @@ static void test_partition_spans_the_whole_user_partition(void) {
     }
     expect(pieces >= 2 && overlapping == 0,
            "the skipped span returns to the free list around the runtime's stacks");
+}
+
+/* A PSP takes a thread stack, and a High memory block, from the highest free block of the user
+ * partition that holds it (sched.c stack_range_alloc), and a block the guest freed below the
+ * partition's bump pointer is such a block. A title that keeps the whole partition for its own
+ * heap frees exactly a stack's size and then creates the thread (Discussion #2445). Before, the
+ * runtime looked only above the bump pointer, so sceKernelCreateThread returned NO_MEMORY, the
+ * High block MEMBLOCK_ALLOC_FAILED, and the title unloaded itself before its first frame. */
+#define FPB_NID_ALLOC_PART 0x237dbd4fu
+#define FPB_NID_GET_HEAD   0x9d9a5ba1u
+#define FPB_NID_FREE_PART  0xb6d61d02u
+#define FPB_NID_MAX_FREE   0xa291f107u
+#define FPB_NAME           0x00280010u
+#define FPB_ADDR_OUT       0x00280004u
+#define FPB_ENTRY          0x08900000u
+
+static uint32_t fpb_call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2; cpu.r[7] = a3;
+    return sr_syscall(&cpu, nid);
+}
+static uint32_t fpb_max_free(void) { return fpb_call(FPB_NID_MAX_FREE, 0u, 0u, 0u, 0u); }
+static uint32_t fpb_low(uint32_t size) { return fpb_call(FPB_NID_ALLOC_PART, 2u, 0u, 0u, size); }
+static uint32_t fpb_head(uint32_t uid) { return fpb_call(FPB_NID_GET_HEAD, uid, 0u, 0u, 0u); }
+static uint32_t fpb_free(uint32_t uid) { return fpb_call(FPB_NID_FREE_PART, uid, 0u, 0u, 0u); }
+/* sceKernelCreateThread through its production handler (attr 0 in t0). */
+static uint32_t fpb_thread(uint32_t stack) {
+    return fpb_call(NID_SCE_KERNEL_CREATE_THREAD, FPB_NAME, FPB_ENTRY, 32u, stack);
+}
+static uint32_t fpb_stack_base(uint32_t uid) {
+    TCB *t = uid < 0x80000000u ? tcb_by_uid(uid) : NULL;
+    return t ? t->stack_base : 0u;
+}
+
+static void test_high_requests_take_a_freed_partition_block(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name);
+    const uint32_t NO_MEMORY = 0x80020190u;
+    const uint32_t main_top = 0x0a000000u - 0x8000u;   /* below the main thread's stack */
+
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    title_hle_write_cstr(FPB_NAME, "fpb");
+    expect(sched_create_thread(0x2004u, 32, 0x8000u) != 0u, "freed block: a main thread is created");
+
+    /* Low blocks A, H and C, then H is freed: a 0x3000-byte block below the bump pointer. */
+    uint32_t a = fpb_low(0x10000u), h = fpb_low(0x3000u), c = fpb_low(0x1000u);
+    uint32_t hole = fpb_head(h);
+    expect(a < 0x80000000u && h < 0x80000000u && c < 0x80000000u && fpb_free(h) == 0u,
+           "freed block: three Low blocks, the middle one freed");
+
+    /* While the arena above the bump pointer holds the stack, that is where it goes: it is higher. */
+    uint32_t above = fpb_thread(0x2000u);
+    expect(fpb_stack_base(above) == main_top - 0x2000u,
+           "freed block: with room above the bump pointer the stack is carved there, not in the block");
+    expect(fpb_call(NID_SCE_KERNEL_DELETE_THREAD, above, 0u, 0u, 0u) == 0u, "freed block: that thread is deleted");
+
+    /* B takes everything above the bump pointer; only the freed block is left. */
+    uint32_t b = fpb_low(fpb_max_free());
+    expect(b < 0x80000000u && fpb_max_free() == 0x3000u, "freed block: the partition is full but for the block");
+
+    uint32_t worker = fpb_thread(0x2000u);
+    expect(fpb_stack_base(worker) == hole + 0x1000u,
+           "freed block: sceKernelCreateThread carves the stack from the top of the freed block");
+    expect(fpb_max_free() == 0x1000u && sched_guest_stack_floor() == main_top,
+           "freed block: the rest stays free and the partition's top does not move");
+    uint32_t small = fpb_thread(0x1000u);
+    expect(fpb_stack_base(small) == hole, "freed block: a second stack takes the rest");
+    expect(fpb_thread(0x200u) == NO_MEMORY && fpb_max_free() == 0u,
+           "freed block: with no free block left a further create returns NO_MEMORY");
+    expect(fpb_call(NID_SCE_KERNEL_DELETE_THREAD, worker, 0u, 0u, 0u) == 0u &&
+               fpb_call(NID_SCE_KERNEL_DELETE_THREAD, small, 0u, 0u, 0u) == 0u &&
+               fpb_max_free() == 0x3000u,
+           "freed block: deleting the threads gives the block back, coalesced");
+    expect(fpb_thread(0x3100u) == NO_MEMORY && fpb_max_free() == 0x3000u,
+           "freed block: a larger stack is still refused and the block stays free");
+
+    uint32_t high = memblock_alloc(FPB_NAME, 1u, 0x3000u, 0u);
+    expect(high < 0x80000000u && memblock_addr(high, FPB_ADDR_OUT) == hole && fpb_max_free() == 0u,
+           "freed block: a High memory block of that size takes the freed block");
+    expect(memblock_free(high) == 0u && fpb_max_free() == 0x3000u,
+           "freed block: freeing the High block gives it back to the partition");
+
+    /* Freeing the blocks above a live stack in the freed block stops the bump pointer at it. */
+    uint32_t pinned = fpb_thread(0x3000u);
+    expect(fpb_stack_base(pinned) == hole && fpb_free(b) == 0u && fpb_free(c) == 0u &&
+               fpb_max_free() == main_top - (hole + 0x3000u),
+           "freed block: the blocks above a stack in it free down to the stack's end, not past it");
+    expect(fpb_call(NID_SCE_KERNEL_DELETE_THREAD, pinned, 0u, 0u, 0u) == 0u &&
+               fpb_max_free() == main_top - hole,
+           "freed block: deleting that thread joins its block to the free space above");
+    (void)fpb_free(a);
+
+    /* A fixed reservation above a live High block returns the skipped gap to the free list, all of
+     * it but the High block (sr_alloc_block_at, skipped_gap_pieces). A stack is never carved over
+     * that High block: it takes the highest free block, the gap below the High block. */
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    title_hle_write_cstr(FPB_NAME, "fpb");
+    expect(sched_create_thread(0x2004u, 32, 0x8000u) != 0u, "freed block: a main thread again");
+    uint32_t h1 = memblock_alloc(FPB_NAME, 1u, 0x100u, 0u);
+    uint32_t h2 = memblock_alloc(FPB_NAME, 1u, 0x100u, 0u);
+    uint32_t h2_addr = memblock_addr(h2, FPB_ADDR_OUT);
+    expect(memblock_addr(h1, FPB_ADDR_OUT) == main_top - 0x100u && h2_addr == main_top - 0x200u &&
+               memblock_free(h1) == 0u,
+           "freed block: two High blocks at the top, the upper one freed");
+    uint32_t fixed = sr_alloc_block_at(main_top - 0x100u, 0x100u, "fixed");
+    expect(fixed != 0xFFFFFFFFu, "freed block: a fixed reservation where the upper High block was");
+    uint32_t under = fpb_thread(0x200u);
+    expect(fpb_stack_base(under) == h2_addr - 0x200u && memblock_addr(h2, FPB_ADDR_OUT) == h2_addr,
+           "freed block: no stack is carved over the live High block in the skipped gap; it goes "
+           "below it");
+    (void)fpb_call(NID_SCE_KERNEL_DELETE_THREAD, under, 0u, 0u, 0u);
+    (void)memblock_free(h2);
+
+    s_fixture_loaded_end = 0x00400000u;
+    sr_hle_test_partition_reset();
+}
+
+/* A stack in a freed partition block (#2469) and the arena release hook (partition_arena_released)
+ * meet when a create's arena range is refused over that stack. The refused range never had an
+ * owner, so it goes back to the arena without the hook; the hook would see the live stack as
+ * neither a partition block nor a free entry and give its memory to the free list. Layout: a fixed
+ * reservation F at the partition's top skips a 0x2000-byte gap G, which goes to the free list.
+ * Each 0x2000-byte create first takes the arena range R = [main_top - 0x2000, main_top), which
+ * overlaps F and is refused; the first then takes G, so its stack S covers R's lower half. */
+static void test_refused_arena_range_spares_a_freed_block_stack(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name);
+    const uint32_t NO_MEMORY = 0x80020190u;
+    const uint32_t main_top = 0x0a000000u - 0x8000u;   /* below the main thread's stack */
+
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    title_hle_write_cstr(FPB_NAME, "fpb");
+    expect(sched_create_thread(0x2004u, 32, 0x8000u) != 0u, "refused range: a main thread is created");
+
+    uint32_t low = fpb_low(fpb_max_free() - 0x3000u);
+    expect(low < 0x80000000u && fpb_max_free() == 0x3000u,
+           "refused range: a Low block leaves 0x3000 bytes under the main thread");
+    uint32_t fixed = sr_alloc_block_at(main_top - 0x1000u, 0x1000u, "fixed");
+    expect(fixed != 0xFFFFFFFFu && fpb_max_free() == 0x2000u,
+           "refused range: a fixed reservation at the top skips a 0x2000-byte gap to the free list");
+
+    uint32_t s1 = fpb_thread(0x2000u);
+    expect(fpb_stack_base(s1) == main_top - 0x3000u && fpb_max_free() == 0u,
+           "refused range: with the arena range refused, the stack takes the skipped gap");
+    expect(fpb_thread(0x2000u) == NO_MEMORY,
+           "refused range: a second create, its arena range refused over the first stack, has no "
+           "room");
+    expect(fpb_max_free() == 0u,
+           "refused range: the refused arena range gave none of the live stack to the free list");
+    expect(fpb_low(0x100u) >= 0x80000000u,
+           "refused range: no Low block is placed over the live stack");
+    expect(fpb_call(NID_SCE_KERNEL_DELETE_THREAD, s1, 0u, 0u, 0u) == 0u && fpb_max_free() == 0x2000u,
+           "refused range: deleting the thread gives the gap back to the partition once");
+    uint32_t s2 = fpb_thread(0x2000u);
+    expect(fpb_stack_base(s2) == main_top - 0x3000u && fpb_max_free() == 0u,
+           "refused range: the next stack takes the gap again");
+    (void)fpb_call(NID_SCE_KERNEL_DELETE_THREAD, s2, 0u, 0u, 0u);
+    (void)fpb_free(low);
+
+    s_fixture_loaded_end = 0x00400000u;
+    sr_hle_test_partition_reset();
 }
 
 static void test_alloc_block_at_fixed_address(void) {
@@ -40087,6 +42419,35 @@ static void test_fpl_blocking_waits(void) {
     expect(MEM_R32(out2) == 0xfeedfaceu, "FPL: deleted pool writes no output pointer");
     sr_coro_destroy(w_del.tcb->coro); w_del.tcb->coro = NULL;
     s_cur = (int)(cur - s_tcb);
+}
+
+/* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, hle-std-handles, 2026-11-06, PSP-3000): a one-byte
+ * sceIoWrite to Stdout and to Stderr returns 1; sceIoClose of the Stdout handle returns
+ * 0x800200D1 and closes nothing, so a later write returns 1 and sceKernelStdout returns the same
+ * handle. The cells hold whatever value the runtime hands out for the handles. */
+static void test_std_handles_measured(void) {
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t buf = 0x00240c00u;
+    MEM_W8(buf, (uint8_t)'x');
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    const uint32_t out = sr_syscall(&cpu, 0xa6bab2e9u);   /* sceKernelStdout */
+    memset(&cpu, 0, sizeof cpu);
+    const uint32_t err = sr_syscall(&cpu, 0xf78ba90au);   /* sceKernelStderr */
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out; cpu.r[5] = buf; cpu.r[6] = 1u;
+    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u, "std handles: a 1-byte write to Stdout returns 1 (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = err; cpu.r[5] = buf; cpu.r[6] = 1u;
+    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u, "std handles: a 1-byte write to Stderr returns 1 (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out;
+    expect(sr_syscall(&cpu, 0x810c4bc3u) == 0x800200d1u,
+           "std handles: sceIoClose of Stdout returns 0x800200D1 (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out; cpu.r[5] = buf; cpu.r[6] = 1u;
+    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u,
+           "std handles: Stdout still takes a write after the refused close (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu);
+    expect(sr_syscall(&cpu, 0xa6bab2e9u) == out,
+           "std handles: sceKernelStdout returns the same handle after the close (PSP-HLE-STDIO-001)");
 }
 
 static void test_vpl_blocking_waits(void) {
@@ -44003,7 +46364,7 @@ static void test_ace_stick_remap_reaches_the_guest_only_from_the_live_stick(void
     extern int s_ctrl_test_stick;
     extern int ace_init_spec(const char *spec, const char *report_path);
     static const char stick_line[] =
-        "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;stick=64";
+        "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;stick=64";
     CpuState cpu;
     RouteStickRead r;
     const int test_stick = s_ctrl_test_stick;
@@ -44831,14 +47192,15 @@ static uint32_t s_selfstop_guest_gp;
 static uint32_t s_selfstop_guest_returned;
 static uint32_t s_selfstop_guest_pc;
 static int s_selfstop_guest_in_scheduler;
+static uint32_t s_selfstop_guest_args[3] = {0u, 4u, SELFSTOP_ARG_ADDR};
 static void selfstop_guest_entry(CpuState *s) {
     s->pc = LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF;
     s->r[28] = s_selfstop_guest_gp;
     s_selfstop_guest_pc = s->pc;
     s_selfstop_guest_in_scheduler = sched_guest_thread_running();
-    s->r[4] = 0u; /* first argument is unnamed in the public PSPSDK declaration */
-    s->r[5] = 4u;
-    s->r[6] = SELFSTOP_ARG_ADDR;
+    s->r[4] = s_selfstop_guest_args[0]; /* unnamed in the public PSPSDK declaration */
+    s->r[5] = s_selfstop_guest_args[1];
+    s->r[6] = s_selfstop_guest_args[2];
     (void)sr_syscall(s, NID_SCE_KERNEL_SELF_STOP_UNLOAD_MODULE);
     s_selfstop_guest_returned = 1u; /* the API is terminal on the modeled success path */
 }
@@ -45375,6 +47737,51 @@ static void test_late_prx_unload_reload_lifecycle(void) {
     expect(sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u &&
                sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == 0u,
            "self-stop: caller exit retires the module record, image and exports");
+
+    /* PSP-HLE-SELFSTOP-001 (docs/HARDWARE_ORACLE.md, 2026-11-08, PSP-3000), form (1, 0, NULL):
+     * a first argument of 1 behaves as 0 does. The call does not return, module_stop runs once
+     * with argument size 0 and argp 0, and the module is unloaded. */
+    self_uid = sr_hle_test_load_prx_image(path_b, LIFECYCLE_MOD_B_BASE, LIFECYCLE_EXPORT_B,
+                                          LIFECYCLE_PATCH_OFF_A_1);
+    expect(self_uid != 0u &&
+               sr_hle_test_set_module_image(self_uid, LIFECYCLE_MOD_B_BASE,
+                                            LIFECYCLE_MOD_B_BASE + LIFECYCLE_IMAGE_SIZE, self_gp),
+           "self-stop (1, 0, NULL): module image loads");
+    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, lifecycle_start_fn);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = self_uid;
+    expect(sr_syscall(&cpu, 0x50f0c1ecu) == 0u, "self-stop (1, 0, NULL): module starts");
+    /* Only (1, 0, NULL) was measured: a first argument of 1 with an argument block stays refused,
+     * so the call returns and the module stays loaded. */
+    s_lifecycle_stop_calls = 0u;
+    s_selfstop_guest_returned = 0u;
+    s_selfstop_guest_args[0] = 1u;
+    s_selfstop_guest_args[1] = 4u;
+    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
+    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
+    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
+    expect(s_selfstop_guest_returned == 1u && s_lifecycle_stop_calls == 0u &&
+               sr_hle_test_module_count() == 1u,
+           "self-stop (1, 4, argp): unmeasured form is refused and the module stays loaded");
+    s_lifecycle_stop_calls = 0u;
+    s_lifecycle_stop_arglen = 0xffffffffu;
+    s_lifecycle_stop_argp_word = 0xffffffffu;
+    s_selfstop_guest_returned = 0u;
+    s_selfstop_guest_args[0] = 1u;
+    s_selfstop_guest_args[1] = 0u;
+    s_selfstop_guest_args[2] = 0u;
+    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
+    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
+    s_selfstop_guest_args[0] = 0u;
+    s_selfstop_guest_args[1] = 4u;
+    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
+    expect(s_selfstop_guest_returned == 0u,
+           "self-stop (1, 0, NULL): the call does not return (PSP-HLE-SELFSTOP-001)");
+    expect(s_lifecycle_stop_calls == 1u && s_lifecycle_stop_arglen == 0u &&
+               s_lifecycle_stop_argp_word == 0u,
+           "self-stop (1, 0, NULL): module_stop runs once with size 0 and argp 0 (PSP-HLE-SELFSTOP-001)");
+    expect(sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u,
+           "self-stop (1, 0, NULL): the module is unloaded (PSP-HLE-SELFSTOP-001)");
 
     remove(path_a);
     remove(path_b);
@@ -46353,6 +48760,259 @@ static void test_late_prx_unload_keeps_module_owned_objects(void) {
     sr_hle_test_module_reset();
 }
 
+/* ---- #286: a guest player's threads and queue go with its own Delete; unload leaves nothing ----
+ *
+ * A title that ships libpsmfplayer runs it. This test models such a player: its
+ * scePsmfPlayerCreate starts three worker threads blocked on a message box, and its
+ * scePsmfPlayerDelete wakes them, joins them, deletes them and deletes the box (a model, not the
+ * real library's code). The PSP's own stop and unload leave module-owned objects alone (#1106,
+ * test_late_prx_unload_keeps_module_owned_objects above, measured for a semaphore, an event flag,
+ * a callback and a worker thread; a message box is inferred to behave the same), so the guest's
+ * Delete is what removes them, and the runtime has to carry that out completely and keep no
+ * player state of its own beside it.
+ *
+ * The synthetic module exports the two real scePsmfPlayer NIDs, which host HLE also registers.
+ * Production StartModule links them ahead of the host handlers; the guest bodies make their
+ * kernel calls through sr_syscall like translated code. Each of two load-start-play-delete-stop-
+ * unload cycles checks that: the host player never held the handle (scePsmfPlayerGetCurrentStatus,
+ * which the module does not export, answers the host's unknown-player status); after the guest
+ * Delete the three threads and the box no longer resolve; unload is not refused by a leftover
+ * continuation, retires both exports to host HLE and releases the image; and no live thread whose
+ * entry lies in the image remains. The second cycle shows that a reload starts a fresh player.
+ * Nothing here is a hardware value: the error codes are the kernel's unknown-UID answers the
+ * thread and message-box selftests above already pin. */
+#define GPLAYER_BASE           0x09380000u
+#define GPLAYER_CREATE_NID     0x235d8787u   /* scePsmfPlayerCreate */
+#define GPLAYER_DELETE_NID     0x9b71a274u   /* scePsmfPlayerDelete */
+#define GPLAYER_STATUS_NID     0xf8ef08a6u   /* scePsmfPlayerGetCurrentStatus, host-only here */
+#define GPLAYER_HOST_NO_PLAYER 0x80616001u   /* the host handler's unknown-player status */
+#define GPLAYER_CREATE_OFF     LIFECYCLE_PATCH_OFF_A_1
+#define GPLAYER_DELETE_OFF     LIFECYCLE_PATCH_OFF_A_2
+#define GPLAYER_WORKER_OFF     0x90u         /* three entries, 8 bytes apart, inside the image */
+#define GPLAYER_WORKERS        3u
+#define GPLAYER_RUNNER_ENTRY   0x08ffde80u
+#define GPLAYER_HANDLE         0x00251000u   /* the title's PsmfPlayer handle */
+#define GPLAYER_DATA           0x00251100u   /* player data: mbx uid, then the worker uids */
+#define GPLAYER_NAME           0x00251200u
+#define GPLAYER_MSG            0x00251300u   /* one 16-byte quit packet per worker */
+#define GPLAYER_RECV_OUT       0x00251400u   /* one received-packet word per worker */
+#define GPLAYER_INFO           0x00251480u
+#define GPLAYER_START_NID      LATE_OBJ_START_NID
+#define GPLAYER_STOP_NID       LATE_OBJ_STOP_NID
+#define GPLAYER_UNLOAD_NID     LATE_OBJ_UNLOAD_NID
+
+static const char *s_gplayer_path;
+static uint32_t s_gplayer_received[GPLAYER_WORKERS];
+static uint32_t s_gplayer_first_uids[1u + GPLAYER_WORKERS];
+static int      s_gplayer_cycles_done;
+
+static int gplayer_live_threads_in_image(void) {
+    int n = 0;
+    for (int i = 0; i < s_ntcb; i++) {
+        const TCB *t = &s_tcb[i];
+        if (!t->deleted && t->entry >= GPLAYER_BASE &&
+            t->entry < GPLAYER_BASE + LIFECYCLE_IMAGE_SIZE)
+            n++;
+    }
+    return n;
+}
+
+static void gplayer_worker(CpuState *s, unsigned idx) {
+    const uint32_t mbx = MEM_R32(GPLAYER_DATA);
+    s->r[4] = mbx;
+    s->r[5] = GPLAYER_RECV_OUT + 4u * idx;
+    s->r[6] = 0u;                                          /* no timeout: wait for the quit */
+    uint32_t rc = sr_syscall(s, NID_MBX_RECV);
+    s_gplayer_received[idx] = rc == 0u ? MEM_R32(GPLAYER_RECV_OUT + 4u * idx) : rc;
+    s->r[2] = 0u;                                          /* returning ends the worker */
+}
+static void gplayer_worker0(CpuState *s) { gplayer_worker(s, 0u); }
+static void gplayer_worker1(CpuState *s) { gplayer_worker(s, 1u); }
+static void gplayer_worker2(CpuState *s) { gplayer_worker(s, 2u); }
+
+/* The module's scePsmfPlayerCreate(handle, data): a message box and three workers waiting on it. */
+static void gplayer_create(CpuState *s) {
+    const uint32_t handle = s->r[4];
+    uint32_t mbx = late_obj_guest_call(s, NID_MBX_CREATE, GPLAYER_NAME, 0u, 0u, 0u, 0u, 0u);
+    if ((int32_t)mbx <= 0) { s->r[2] = mbx; return; }
+    MEM_W32(GPLAYER_DATA, mbx);
+    for (uint32_t i = 0; i < GPLAYER_WORKERS; i++) {
+        uint32_t uid = late_obj_guest_call(s, NID_SCE_KERNEL_CREATE_THREAD, GPLAYER_NAME,
+                                           GPLAYER_BASE + GPLAYER_WORKER_OFF + 8u * i,
+                                           16u, 0x1000u, 0u, 0u);
+        if ((int32_t)uid <= 0) { s->r[2] = uid; return; }
+        MEM_W32(GPLAYER_DATA + 4u + 4u * i, uid);
+        uint32_t rc = late_obj_guest_call(s, NID_SCE_KERNEL_START_THREAD, uid, 0u, 0u,
+                                          0u, 0u, 0u);
+        if (rc != 0u) { s->r[2] = rc; return; }
+    }
+    MEM_W32(handle, GPLAYER_DATA);
+    s->r[2] = 0u;
+}
+
+/* The module's scePsmfPlayerDelete(handle): a quit packet per worker, join, delete, delete box. */
+static void gplayer_delete(CpuState *s) {
+    const uint32_t handle = s->r[4];   /* the kernel calls below reuse a0 */
+    const uint32_t data = MEM_R32(handle);
+    const uint32_t mbx = MEM_R32(data);
+    for (uint32_t i = 0; i < GPLAYER_WORKERS; i++) {
+        const uint32_t msg = GPLAYER_MSG + 16u * i;
+        MEM_W32(msg, 0u);
+        MEM_W32(msg + 4u, 0u);
+        uint32_t rc = late_obj_guest_call(s, NID_MBX_SEND, mbx, msg, 0u, 0u, 0u, 0u);
+        if (rc != 0u) { s->r[2] = rc; return; }
+    }
+    for (uint32_t i = 0; i < GPLAYER_WORKERS; i++) {
+        const uint32_t uid = MEM_R32(data + 4u + 4u * i);
+        uint32_t rc = late_obj_guest_call(s, NID_SCE_KERNEL_WAIT_THREAD_END, uid, 0u, 0u,
+                                          0u, 0u, 0u);
+        if (rc != 0u) { s->r[2] = rc; return; }
+        rc = late_obj_guest_call(s, NID_SCE_KERNEL_DELETE_THREAD, uid, 0u, 0u, 0u, 0u, 0u);
+        if (rc != 0u) { s->r[2] = rc; return; }
+    }
+    s->r[2] = late_obj_guest_call(s, NID_MBX_DELETE, mbx, 0u, 0u, 0u, 0u, 0u);
+    MEM_W32(handle, 0u);
+}
+
+static void gplayer_runner(CpuState *s) {
+    SrThreadInfo info;
+    for (int cycle = 0; cycle < 2; cycle++) {
+        const int live_before = gplayer_live_threads_in_image();
+        uint32_t uid = sr_hle_test_load_prx_image(s_gplayer_path, GPLAYER_BASE,
+                                                  GPLAYER_CREATE_NID, GPLAYER_CREATE_OFF);
+        expect(uid != 0u, "guest player: the module image loads");
+        if (uid == 0u) break;
+        /* The loader publishes every export of the image; the fixture's table is empty, so
+         * the second export goes into the same late-import registry by hand. */
+        sr_hle_register_late_import(GPLAYER_DELETE_NID, GPLAYER_BASE + GPLAYER_DELETE_OFF);
+        expect(sr_hle_test_started_export(GPLAYER_CREATE_NID) == 0u &&
+                   sr_hle_test_started_export(GPLAYER_DELETE_NID) == 0u,
+               "guest player: before StartModule neither export is linked");
+        expect(late_obj_guest_call(s, GPLAYER_START_NID, uid, 0u, 0u, 0u, 0u, 0u) == 0u &&
+                   sr_hle_test_started_export(GPLAYER_CREATE_NID) ==
+                       GPLAYER_BASE + GPLAYER_CREATE_OFF &&
+                   sr_hle_test_started_export(GPLAYER_DELETE_NID) ==
+                       GPLAYER_BASE + GPLAYER_DELETE_OFF,
+               "guest player: the started module's Create and Delete are linked ahead of host HLE");
+
+        MEM_W32(GPLAYER_HANDLE, 0u);
+        memset(s_gplayer_received, 0xff, sizeof s_gplayer_received);
+        expect(late_obj_guest_call(s, GPLAYER_CREATE_NID, GPLAYER_HANDLE, 0u, 0u, 0u, 0u, 0u) ==
+                       0u && MEM_R32(GPLAYER_HANDLE) == GPLAYER_DATA,
+               "guest player: the module's own scePsmfPlayerCreate builds the player");
+        expect(late_obj_guest_call(s, GPLAYER_STATUS_NID, GPLAYER_HANDLE, 0u, 0u, 0u, 0u, 0u) ==
+                   GPLAYER_HOST_NO_PLAYER &&
+                   sr_hle_test_psmf_players_used() == 0u,
+               "guest player: the host player holds no instance for the guest's handle");
+        const uint32_t mbx = MEM_R32(GPLAYER_DATA);
+        uint32_t workers[GPLAYER_WORKERS];
+        int waiting = 1;
+        for (uint32_t i = 0; i < GPLAYER_WORKERS; i++) {
+            workers[i] = MEM_R32(GPLAYER_DATA + 4u + 4u * i);
+            waiting &= sched_thread_info(workers[i], &info) == 0 && info.waitId == mbx;
+        }
+        expect(waiting && gplayer_live_threads_in_image() == live_before + (int)GPLAYER_WORKERS,
+               "guest player: its three workers run module code and wait on its message box");
+        MEM_W32(GPLAYER_INFO, 52u);
+        expect(late_obj_guest_call(s, NID_MBX_REFER, mbx, GPLAYER_INFO, 0u, 0u, 0u, 0u) == 0u &&
+                   MEM_R32(GPLAYER_INFO + 40u) == GPLAYER_WORKERS,
+               "guest player: the message box counts the three waiting workers");
+        if (cycle == 0) {
+            s_gplayer_first_uids[0] = mbx;
+            memcpy(&s_gplayer_first_uids[1], workers, sizeof workers);
+        } else {
+            int stale_gone = 1;
+            for (uint32_t i = 0; i < GPLAYER_WORKERS; i++)
+                stale_gone &= sched_thread_info(s_gplayer_first_uids[1u + i], &info) != 0;
+            MEM_W32(GPLAYER_INFO, 52u);
+            stale_gone &= late_obj_guest_call(s, NID_MBX_REFER, s_gplayer_first_uids[0],
+                                              GPLAYER_INFO, 0u, 0u, 0u, 0u) ==
+                          SCE_KERNEL_ERROR_UNKNOWN_MBXID;
+            expect(stale_gone && mbx != s_gplayer_first_uids[0] &&
+                       workers[0] != s_gplayer_first_uids[1] &&
+                       workers[1] != s_gplayer_first_uids[2] &&
+                       workers[2] != s_gplayer_first_uids[3],
+                   "guest player: the reloaded module's player has fresh objects, and the first "
+                   "player's stay gone");
+        }
+
+        expect(late_obj_guest_call(s, GPLAYER_DELETE_NID, GPLAYER_HANDLE, 0u, 0u, 0u, 0u, 0u) ==
+                       0u && MEM_R32(GPLAYER_HANDLE) == 0u,
+               "guest player: the module's own scePsmfPlayerDelete returns 0");
+        int quit = 1, gone = 1;
+        for (uint32_t i = 0; i < GPLAYER_WORKERS; i++) {
+            quit &= s_gplayer_received[i] >= GPLAYER_MSG &&
+                    s_gplayer_received[i] < GPLAYER_MSG + 16u * GPLAYER_WORKERS;
+            gone &= late_obj_guest_call(s, LATE_OBJ_REFER_THREAD, workers[i], GPLAYER_INFO,
+                                        0u, 0u, 0u, 0u) == SCE_KERNEL_ERROR_UNKNOWN_THID &&
+                    sched_thread_info(workers[i], &info) != 0;
+        }
+        expect(quit, "guest player: each worker received its quit packet and returned");
+        expect(gone, "guest player: after Delete no worker thread resolves");
+        MEM_W32(GPLAYER_INFO, 52u);
+        expect(late_obj_guest_call(s, NID_MBX_REFER, mbx, GPLAYER_INFO, 0u, 0u, 0u, 0u) ==
+                   SCE_KERNEL_ERROR_UNKNOWN_MBXID,
+               "guest player: after Delete its message box does not resolve");
+
+        expect(late_obj_guest_call(s, GPLAYER_STOP_NID, uid, 0u, 0u, 0u, 0u, 0u) == 0u &&
+                   late_obj_guest_call(s, GPLAYER_UNLOAD_NID, uid, 0u, 0u, 0u, 0u, 0u) == 0u,
+               "guest player: the module stops and unloads (no ready or running thread in it refuses it)");
+        expect(sr_hle_resolve_late_import(GPLAYER_CREATE_NID) == SR_HLE_LATE_BUILTIN &&
+                   sr_hle_resolve_late_import(GPLAYER_DELETE_NID) == SR_HLE_LATE_BUILTIN &&
+                   sr_hle_test_started_export(GPLAYER_CREATE_NID) == 0u &&
+                   sr_hle_test_started_export(GPLAYER_DELETE_NID) == 0u,
+               "guest player: unload hands both NIDs back to host HLE");
+        expect(sr_hle_test_image_count() == 0u && sr_hle_test_started_image_count() == 0,
+               "guest player: unload releases the image");
+        expect(gplayer_live_threads_in_image() == live_before,
+               "guest player: no live thread runs the unloaded module's code");
+        expect(late_obj_guest_call(s, GPLAYER_STATUS_NID, GPLAYER_HANDLE, 0u, 0u, 0u, 0u, 0u) ==
+                   GPLAYER_HOST_NO_PLAYER &&
+                   sr_hle_test_psmf_players_used() == 0u,
+               "guest player: after unload the host player still holds nothing for the handle");
+        s_gplayer_cycles_done++;
+    }
+    s->r[2] = 0u;
+}
+
+static void test_guest_player_unload_leaves_no_threads_or_queues(void) {
+    const char *path = HLE_BUILD_ROOT "/hle_guest_player.prx";
+
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    sr_hle_test_module_reset();
+    hle_test_setenv("SR_REAL_MODULE_START", "1");
+
+    expect(sr_hle_test_is_registered(GPLAYER_CREATE_NID) &&
+               sr_hle_test_is_registered(GPLAYER_DELETE_NID) &&
+               sr_hle_test_is_registered(GPLAYER_STATUS_NID),
+           "guest player: host HLE registers the scePsmfPlayer NIDs the module shadows");
+    expect(write_lifecycle_prx(path, 0x286aaaaau), "guest player: synthetic module image written");
+    s_gplayer_path = path;
+    s_gplayer_cycles_done = 0;
+    sr_test_register_guest_fn(GPLAYER_BASE + LIFECYCLE_START_OFF, lifecycle_start_fn);
+    sr_test_register_guest_fn(GPLAYER_BASE + LIFECYCLE_STOP_OFF, lifecycle_stop_fn);
+    sr_test_register_guest_fn(GPLAYER_BASE + GPLAYER_CREATE_OFF, gplayer_create);
+    sr_test_register_guest_fn(GPLAYER_BASE + GPLAYER_DELETE_OFF, gplayer_delete);
+    sr_test_register_guest_fn(GPLAYER_BASE + GPLAYER_WORKER_OFF, gplayer_worker0);
+    sr_test_register_guest_fn(GPLAYER_BASE + GPLAYER_WORKER_OFF + 8u, gplayer_worker1);
+    sr_test_register_guest_fn(GPLAYER_BASE + GPLAYER_WORKER_OFF + 16u, gplayer_worker2);
+    sr_test_register_guest_fn(GPLAYER_RUNNER_ENTRY, gplayer_runner);
+    title_hle_write_cstr(GPLAYER_NAME, "guest-psmf-player");
+
+    sched_run(GPLAYER_RUNNER_ENTRY, 0u, 0u);
+    expect(s_gplayer_cycles_done == 2, "guest player: both load-to-unload cycles ran to the end");
+
+    s_cur = -1;
+    remove(path);
+    /* A failed cycle can stop before unload: keep its exports from reaching later tests. */
+    sr_hle_test_unregister_late_imports(GPLAYER_BASE, GPLAYER_BASE + LIFECYCLE_IMAGE_SIZE);
+    hle_test_setenv("SR_REAL_MODULE_START", "0");
+    sr_test_guest_fn_reset();
+    sr_hle_test_module_reset();
+}
+
 /* ---- scePowerUnregisterCallback: release a slot scePowerRegisterCallback filled ----
  *
  * Measured on PSP-3000, firmware 6.6.1, 2026-10-22 (merged PR #1153):
@@ -46777,7 +49437,7 @@ static void test_wc_display_getmode_and_start_cb(void) {
 static void test_ace_load_skip_wait_only_where_the_stock_call_blocks(void) {
     enum { NID_WAIT_VBLANK_START = 0x984c27e7u };
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     CpuState cpu;
     reset_fixture();
     sr_hle_init();
@@ -46815,7 +49475,15 @@ static void test_ace_load_skip_wait_only_where_the_stock_call_blocks(void) {
 /* A skipped wait still blocks, for the shortest real delay, so a loading loop that spins until a
  * lower-priority loader thread finishes does finish: the loader runs during the skip, as it would
  * during the stock wait, and sees the waiter in a delay wait. A zero delay or a rotation would not
- * let it run (#340), and the loop would spin to its bound. */
+ * let it run (#340), and the loop would spin to its bound.
+ *
+ * The virtual clock this fixture runs on charges a whole quantum at every TIMESLICE-th dispatch
+ * (scheduler_keep_time_at_dispatch), and the count carries over from every case before this one.
+ * When that charge fell on the decision the skip's block caused, the 1 us wait was already over
+ * there and the waiter, ready again at its higher priority, won it before the loader had run: the
+ * loop took a second skip. Which dispatch it fell on varied with the cases run before, so one run
+ * in many failed. The case therefore runs once with the charge at each of its first
+ * ACE_SKIP_PHASES dispatches, the decision after the block among them. */
 static volatile uint32_t s_ace_skip_loaded;
 static volatile uint32_t s_ace_skip_loaded_in_loop;
 static volatile uint32_t s_ace_skip_iterations;
@@ -46828,6 +49496,7 @@ enum {
     ACE_SKIP_WAITER_ENTRY = 0x08990300u,
     ACE_SKIP_LOADER_ENTRY = 0x08990340u,
     ACE_SKIP_LOOP_BOUND = 64u,
+    ACE_SKIP_PHASES = 16u,
 };
 
 static void ace_skip_loader_guest_fn(CpuState *cpu) {
@@ -46858,9 +49527,11 @@ static void ace_skip_waiter_guest_fn(CpuState *cpu) {
     cpu->r[2] = 0u;
 }
 
-static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
+/* One run of the case with the clock's next quantum due at dispatch phase + 1; 1 when every
+ * property held. Only the first failing run reports its properties. */
+static int ace_skip_yield_round(uint32_t phase, int report) {
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     reset_fixture();
     sr_hle_init();
     sr_test_guest_fn_reset();
@@ -46876,19 +49547,70 @@ static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
     sr_test_register_guest_fn(ACE_SKIP_LOADER_ENTRY, ace_skip_loader_guest_fn);
     g_worker_uid = SR_ROLE_UID_NONE;
     memset(s_cpu, 0, sizeof(*s_cpu));
+    s_dispatches_since_time = TIMESLICE - 1u - phase;
 
     sched_run(ACE_SKIP_WAITER_ENTRY, 0u, 0u);
 
-    expect(s_ace_skip_loader_lower, "ace load skip yield: the loader was ready at a lower priority");
-    expect(s_ace_skip_loaded_in_loop == 1u,
-           "ace load skip yield: the lower-priority loader ran during a skipped wait, before the loop ended");
-    expect(s_ace_skip_iterations == 1u, "ace load skip yield: the loading loop finished at its first skipped wait");
-    expect(s_ace_skip_waiter_state == TH_WAIT_DELAY,
-           "ace load skip yield: the waiter was in a delay wait while the loader ran");
-    expect(s_ace_skip_v0 == 0u, "ace load skip yield: a skipped wait returns 0 in $v0");
-    expect(ace_load_waits_skipped() == 1u, "ace load skip yield: the one skip is counted");
+    const int lower = s_ace_skip_loader_lower;
+    const int loaded_in_loop = s_ace_skip_loaded_in_loop == 1u;
+    const int first_skip = s_ace_skip_iterations == 1u;
+    const int delay_wait = s_ace_skip_waiter_state == TH_WAIT_DELAY;
+    const int v0 = s_ace_skip_v0 == 0u;
+    const int counted = ace_load_waits_skipped() == 1u;
+    if (report) {
+        printf("ace load skip yield: the first failing run had the quantum at dispatch %u\n",
+               (unsigned)phase + 1u);
+        expect(lower, "ace load skip yield: the loader was ready at a lower priority");
+        expect(loaded_in_loop,
+               "ace load skip yield: the lower-priority loader ran during a skipped wait, before the loop ended");
+        expect(first_skip, "ace load skip yield: the loading loop finished at its first skipped wait");
+        expect(delay_wait, "ace load skip yield: the waiter was in a delay wait while the loader ran");
+        expect(v0, "ace load skip yield: a skipped wait returns 0 in $v0");
+        expect(counted, "ace load skip yield: the one skip is counted");
+    }
     (void)ace_init_spec("off", NULL);
     sr_test_guest_fn_reset();
+    return lower && loaded_in_loop && first_skip && delay_wait && v0 && counted;
+}
+
+/* A thread alone: its skip still blocks, and with nobody else ready it resumes and finishes. */
+static volatile uint32_t s_ace_skip_lone_resumed;
+
+static void ace_skip_lone_guest_fn(CpuState *cpu) {
+    cpu->r[2] = 0x5au;
+    expect(nk_ace_load_skip_wait(cpu, "T", 0x08800000u) == 1, "ace load skip alone: the wait is skipped");
+    s_ace_skip_lone_resumed = cpu->r[2] == 0u ? 1u : 2u;
+    cpu->r[2] = 0u;
+}
+
+static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
+    static const char k_load_fast[] =
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
+    /* The cases after this one keep the dispatch count they would have had. */
+    const uint32_t dispatches = s_dispatches_since_time;
+    unsigned failed = 0u;
+    for (uint32_t phase = 0u; phase < ACE_SKIP_PHASES; phase++) {
+        const int ok = ace_skip_yield_round(phase, 0);
+        if (!ok && failed++ == 0u) (void)ace_skip_yield_round(phase, 1);
+    }
+    printf("ace load skip yield: %u of %u clock phases failed\n", failed, (unsigned)ACE_SKIP_PHASES);
+    expect(failed == 0u, "ace load skip yield: at every clock phase the loop finished at its first skipped wait");
+
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    s_ace_skip_lone_resumed = 0u;
+    expect(ace_init_spec(k_load_fast, NULL) == 1, "ace load skip alone: load=fast is on");
+    sr_test_register_guest_fn(ACE_SKIP_WAITER_ENTRY, ace_skip_lone_guest_fn);
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(ACE_SKIP_WAITER_ENTRY, 0u, 0u);
+    expect(s_ace_skip_lone_resumed == 1u,
+           "ace load skip alone: with no other thread ready the skipped wait resumes, returning 0");
+    expect(ace_load_waits_skipped() == 1u, "ace load skip alone: the one skip is counted");
+    (void)ace_init_spec("off", NULL);
+    sr_test_guest_fn_reset();
+    s_dispatches_since_time = dispatches;
 }
 
 /* The pacing guard (ENHANCEMENT_CONTRACT.md 11.3.10), through the real skip on a running
@@ -46929,7 +49651,7 @@ static void ace_pacing_guest_fn(CpuState *cpu) {
 
 static void test_ace_load_skip_wait_stops_once_it_paces_updates(void) {
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     enum { UPDATES = (int)(sizeof(s_ace_pacing_skips) / sizeof(s_ace_pacing_skips[0])) };
     char captured[4096];
     FILE *capture = NULL;
@@ -50878,6 +53600,51 @@ static void test_vtimer_handler_return_below_100us_reschedules_100us_on(void) {
     s_pace_on = saved_pace;
 }
 
+/* Used by the AOT boundary cells and by test_adhocctl_handler_fault_stops, in both builds. */
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
+/* Re-execute this binary in `mode` (one argument) and return its exit status, or -1 when it could not be
+ * started or waited for. The command line is quoted (exit_game_spawn_child says why). */
+static int aot_spawn_self(const char *self, const char *mode) {
+#ifdef _WIN32
+    wchar_t wide_self[EXITGAME_SPAWN_CAP];
+    wchar_t wide_mode[EXITGAME_SPAWN_CAP];
+    wchar_t command[EXITGAME_SPAWN_CAP];
+    if (MultiByteToWideChar(CP_ACP, 0, self, -1, wide_self, EXITGAME_SPAWN_CAP) <= 0 ||
+        MultiByteToWideChar(CP_ACP, 0, mode, -1, wide_mode, EXITGAME_SPAWN_CAP) <= 0) {
+        return -1;
+    }
+    size_t written = append_quoted_argument(command, EXITGAME_SPAWN_CAP, wide_self);
+    if (written == 0 || written + 1 >= EXITGAME_SPAWN_CAP) return -1;
+    command[written++] = L' ';
+    if (append_quoted_argument(command + written, EXITGAME_SPAWN_CAP - written, wide_mode) == 0)
+        return -1;
+    STARTUPINFOW startup;
+    PROCESS_INFORMATION child;
+    DWORD status = 0;
+    ZeroMemory(&startup, sizeof(startup));
+    startup.cb = sizeof(startup);
+    if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &child))
+        return -1;
+    int waited = WaitForSingleObject(child.hProcess, INFINITE) == WAIT_OBJECT_0 &&
+                 GetExitCodeProcess(child.hProcess, &status);
+    CloseHandle(child.hThread);
+    CloseHandle(child.hProcess);
+    return waited ? (int)status : -1;
+#else
+    pid_t child = fork();
+    if (child == 0) {
+        execl(self, self, mode, (char *)NULL);
+        _exit(127);
+    }
+    if (child < 0) return -1;
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status)) return -1;
+    return WEXITSTATUS(status);
+#endif
+}
+
 #ifdef SR_HLE_AOT_BOUNDARY_TEST
 /* This is the same wrapper emitted by emit_checked_body_call: set the linked
  * resume address, establish its explicit return boundary, call the native body,
@@ -51250,14 +54017,217 @@ static void test_aot_return_boundary_thread_isolation(void) {
     test_aot_return_boundary_nonlocal_return();
 }
 
+/* ---- a parked thread is one sr_yield has switched out (#2172) ---------------------------
+ *
+ * "Resume at a PC" in docs/ARCHITECTURE.md. A state-resumable body names the point it
+ * continues at before it enters sr_yield, and the real sr_yield then advances time, services
+ * what is due and only afterwards decides whether to switch. This runs that with the real
+ * scheduler: one thread at a loop edge whose yield services an alarm and then switches to a
+ * peer. Described from the alarm handler, inside the yield, the thread must be refused;
+ * described from the peer, after the yield's own switch, it is its one frame. */
+enum {
+    RESUME_PARK_ENTRY = 0x088a4000u,
+    RESUME_PARK_LOOP  = 0x088a4010u,   /* the loop edge's target */
+    RESUME_PARK_EDGE  = 0x088a4020u,   /* the edge's own PC */
+    RESUME_PARK_PEER  = 0x088a4100u,
+    RESUME_PARK_ALARM = 0x088a4200u,
+};
+
+static uint32_t s_resume_park_uid;
+static uint32_t s_resume_park_sp;
+static unsigned s_resume_park_handler_calls;
+static unsigned s_resume_park_peer_runs;
+static unsigned s_resume_park_passes;
+static int s_resume_park_running_in_handler;
+static int s_resume_park_in_yield;
+static int s_resume_park_marked_out;
+static int s_resume_park_peer_marked;
+static int s_resume_park_marked_after;
+static int s_resume_park_named_in_handler;
+static SrResumeStatus s_resume_park_in_handler;
+static SrResumeStatus s_resume_park_fiber_in_handler;
+static SrResumeStatus s_resume_park_from_peer;
+static SrResumeStatus s_resume_park_peer_itself;
+static SrResumeStatus s_resume_park_other_switch;
+static SrResumeStatus s_resume_park_in_import;
+static uint32_t s_resume_park_peer_uid;
+static int s_resume_park_peer_waited;
+static int s_resume_park_peer_marked_in_wait;
+static char s_resume_park_other_detail[160];
+static SrResumeFrame s_resume_park_frames[4];
+static uint32_t s_resume_park_count;
+static char s_resume_park_detail[160];
+
+static void resume_park_alarm_handler(CpuState *s) {
+    /* Interrupt context, under the parking thread's own sr_yield: its point is named, and
+     * the rest of the yield (this handler, the decision to switch) is still running. */
+    SrResumeFrame frames[4];
+    uint32_t count = 9u;
+    TCB *t = tcb_by_uid(s_resume_park_uid);
+    s_resume_park_handler_calls++;
+    s_resume_park_running_in_handler = t != NULL && t->state == TH_RUNNING;
+    s_resume_park_named_in_handler = s_resume_park_in_yield;
+    s_resume_park_in_handler = sched_resume_describe(s_resume_park_uid, frames, 4u, &count, NULL, 0u);
+    s_resume_park_fiber_in_handler = sr_resume_describe(NULL, s, frames, 4u, &count, NULL, 0u);
+    s->r[2] = 0u;   /* one shot */
+}
+
+static void resume_park_peer(CpuState *s) {
+    /* The parking thread is switched out, by its yield's own switch. */
+    SrResumeFrame frames[4];
+    uint32_t count = 9u;
+    TCB *t = tcb_by_uid(s_resume_park_uid);
+    s_resume_park_peer_runs++;
+    s_resume_park_marked_out = t != NULL && t->yield_switched;
+    s_resume_park_peer_marked = s_cur >= 0 && s_tcb[s_cur].yield_switched;
+    s_resume_park_from_peer = sched_resume_describe(
+        s_resume_park_uid, s_resume_park_frames, 4u, &s_resume_park_count,
+        s_resume_park_detail, sizeof s_resume_park_detail);
+    s_resume_park_peer_itself = sched_resume_describe(sched_current_uid(), frames, 4u, &count, NULL, 0u);
+    if (t != NULL) {
+        /* The same records inside an import (a flag check: a thread at the yield's own
+         * switch is in no import). */
+        t->import_active = 1;
+        s_resume_park_in_import = sched_resume_describe(s_resume_park_uid, frames, 4u, &count, NULL, 0u);
+        t->import_active = 0;
+    }
+    /* A real switch that is not the yield's own: the peer blocks in sceKernelDelayThread, the
+     * parked thread runs again, and it describes the peer (resume_park_body). */
+    s_resume_park_peer_uid = sched_current_uid();
+    CpuState sc;
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = 1000u;
+    (void)sr_syscall(&sc, NID_SCE_KERNEL_DELAY_THREAD);
+    s_resume_park_peer_waited = 1;
+    s->r[2] = 0u;
+}
+
+static void resume_park_body(CpuState *s) {
+    s_resume_park_uid = sched_current_uid();
+    /* The call record a host entry leaves. This harness enters a thread through its dispatch
+     * stand-in, whose record names no resume PC, so the body gives that record the fields
+     * dispatch_from_host would have left. */
+    SrAotReturnBoundary *root = sr_aot_return_boundary_top;
+    if (root == NULL || root->state != s) return;
+    root->resume_pc = SR_HOST_RETURN_PC;
+    root->has_resume_pc = 1u;
+    root->dispatch_owned = 1u;
+    root->callee = RESUME_PARK_ENTRY;
+    root->flags = SR_BOUNDARY_CALLEE | SR_BOUNDARY_HOST_ENTRY;
+    const uint32_t sp_entry = s->r[29];
+    s_resume_park_sp = sp_entry;
+
+    /* An alarm that is due when the yield services interrupts, and a peer of the same
+     * priority for the yield to switch to afterwards. */
+    CpuState sc;
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = 1000u;
+    sc.r[5] = RESUME_PARK_ALARM;
+    const uint32_t alarm = sr_syscall(&sc, NID_SCE_KERNEL_SET_ALARM);
+    const uint32_t peer = sched_create_thread(RESUME_PARK_PEER, s_tcb[s_cur].priority, 0x4000u);
+    if (peer != 0u) (void)sched_start_thread(peer, 0u, 0u);
+    for (unsigned i = 0; i < SCHED_ALARM_MAX; i++)
+        if (s_alarms[i].uid == alarm && s_vtime_us < s_alarms[i].deadline)
+            s_vtime_us = s_alarms[i].deadline;
+
+    /* The loop edge: the slice ends here. */
+    atomic_store_explicit(&sr_timeslice, 1, memory_order_relaxed);
+    s_resume_park_in_yield = 1;
+    SR_YIELD_PARK(s, RESUME_PARK_EDGE, RESUME_PARK_ENTRY, RESUME_PARK_LOOP,
+                  SR_RESUME_POINT_YIELD, sp_entry);
+    s_resume_park_in_yield = 0;
+    s_resume_park_marked_after = s_tcb[s_cur].yield_switched;
+    s_resume_park_passes++;
+    if (s_resume_park_peer_uid != 0u && !s_resume_park_peer_waited) {
+        /* The peer is out in its delay, switched by the wait and not by a yield. */
+        SrResumeFrame frames[4];
+        uint32_t count = 9u;
+        TCB *peer = tcb_by_uid(s_resume_park_peer_uid);
+        s_resume_park_peer_marked_in_wait = peer == NULL || peer->yield_switched;
+        s_resume_park_other_switch = sched_resume_describe(
+            s_resume_park_peer_uid, frames, 4u, &count,
+            s_resume_park_other_detail, sizeof s_resume_park_other_detail);
+    }
+}
+
+static void test_resume_describe_from_the_scheduler(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    sr_aot_return_boundaries_reset();
+    s_resume_park_uid = 0u;
+    s_resume_park_sp = 0u;
+    s_resume_park_handler_calls = 0u;
+    s_resume_park_peer_runs = 0u;
+    s_resume_park_passes = 0u;
+    s_resume_park_running_in_handler = 0;
+    s_resume_park_named_in_handler = 0;
+    s_resume_park_in_yield = 0;
+    s_resume_park_marked_out = 0;
+    s_resume_park_peer_marked = 1;
+    s_resume_park_marked_after = 1;
+    s_resume_park_in_handler = s_resume_park_fiber_in_handler = SR_RESUME_OK;
+    s_resume_park_from_peer = s_resume_park_peer_itself = SR_RESUME_BAD_FRAMES;
+    s_resume_park_other_switch = s_resume_park_in_import = SR_RESUME_OK;
+    s_resume_park_peer_uid = 0u;
+    s_resume_park_peer_waited = 0;
+    s_resume_park_peer_marked_in_wait = 1;
+    s_resume_park_other_detail[0] = '\0';
+    s_resume_park_count = 0u;
+    memset(s_resume_park_frames, 0, sizeof s_resume_park_frames);
+    s_resume_park_detail[0] = '\0';
+    sr_test_register_guest_fn(RESUME_PARK_ENTRY, resume_park_body);
+    sr_test_register_guest_fn(RESUME_PARK_PEER, resume_park_peer);
+    sr_test_register_guest_fn(RESUME_PARK_ALARM, resume_park_alarm_handler);
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+
+    sched_run(RESUME_PARK_ENTRY, 0u, 0u);
+
+    expect(s_resume_park_handler_calls == 1u && s_resume_park_peer_runs == 1u &&
+               s_resume_park_passes == 1u,
+           "resume describe: the yield serviced the alarm, switched to the peer and came back");
+    expect(s_resume_park_named_in_handler,
+           "resume describe: the alarm handler ran inside the yield, after the body named its point");
+    expect(s_resume_park_running_in_handler,
+           "resume describe: the yielding thread was still the running one in the handler");
+    expect(s_resume_park_in_handler == SR_RESUME_NOT_PARKED,
+           "resume describe: a thread inside its own yield, servicing an interrupt, is not parked");
+    expect(s_resume_park_fiber_in_handler == SR_RESUME_NOT_PARKED,
+           "resume describe: the running fiber is refused even with its point named");
+    expect(s_resume_park_from_peer == SR_RESUME_OK && s_resume_park_count == 1u &&
+               s_resume_park_frames[0].body == RESUME_PARK_ENTRY &&
+               s_resume_park_frames[0].pc == RESUME_PARK_LOOP &&
+               s_resume_park_frames[0].kind == SR_RESUME_POINT_YIELD &&
+               s_resume_park_frames[0].sp == s_resume_park_sp,
+           "resume describe: after the yield's own switch the thread is its one frame");
+    if (s_resume_park_from_peer != SR_RESUME_OK)
+        fprintf(stderr, "  resume describe: %s (%s)\n",
+                sr_resume_status_name(s_resume_park_from_peer), s_resume_park_detail);
+    expect(s_resume_park_marked_out && !s_resume_park_peer_marked && !s_resume_park_marked_after,
+           "resume describe: the yield's switch marks the thread it switched out, only that one, "
+           "and only until it runs again");
+    expect(s_resume_park_peer_itself == SR_RESUME_NOT_PARKED,
+           "resume describe: the thread that asks is running and is not parked");
+    expect(s_resume_park_other_switch == SR_RESUME_NOT_PARKED && !s_resume_park_peer_marked_in_wait &&
+               strstr(s_resume_park_other_detail, "not by sr_yield's own switch") != NULL,
+           "resume describe: a thread switched out by a blocking wait is unmarked and not parked");
+    if (s_resume_park_other_switch != SR_RESUME_NOT_PARKED || s_resume_park_peer_marked_in_wait)
+        fprintf(stderr, "  resume describe, blocked peer: %s marked=%d (%s)\n",
+                sr_resume_status_name(s_resume_park_other_switch), s_resume_park_peer_marked_in_wait,
+                s_resume_park_other_detail);
+    expect(s_resume_park_peer_waited, "resume describe: the peer's delay ended and it finished");
+    expect(s_resume_park_in_import == SR_RESUME_NOT_PARKED,
+           "resume describe: a thread inside an import is not parked");
+    sr_aot_return_boundaries_reset();
+    sr_test_guest_fn_reset();
+}
+
 /* #1375: a thread created through sceKernelCreateThread with entry 0 holds a null code
  * pointer. It stops by name when it is first scheduled, through the real coro_body and
  * recomp.c's stop, before any guest code runs; on this zero-based registry the offset-0
  * function would otherwise run as the thread. A loader entry of 0 (the boot thread's
  * module_start at offset 0) is not a code pointer and runs. */
-#ifndef _WIN32
-#include <sys/wait.h>
-#endif
 enum {
     NULLENTRY_LAUNCHER = 0x088a0400u,
     NULLENTRY_NAME = 0x00250b80u,
@@ -51297,47 +54267,6 @@ static int run_null_thread_entry_child(void) {
     sched_run(NULLENTRY_LAUNCHER, 0u, 0u);
     if ((int32_t)s_nullentry_create_result <= 0 || s_nullentry_start_result != 0u) return 97;
     return s_nullentry_offset0_runs ? 99 : 96; /* fail-open: the thread ran, or never started */
-}
-
-/* Re-execute this binary in `mode` and return its exit status, or -1 when it could not be
- * started or waited for. The command line is quoted (exit_game_spawn_child says why). */
-static int aot_spawn_self(const char *self, const char *mode) {
-#ifdef _WIN32
-    wchar_t wide_self[EXITGAME_SPAWN_CAP];
-    wchar_t wide_mode[EXITGAME_SPAWN_CAP];
-    wchar_t command[EXITGAME_SPAWN_CAP];
-    if (MultiByteToWideChar(CP_ACP, 0, self, -1, wide_self, EXITGAME_SPAWN_CAP) <= 0 ||
-        MultiByteToWideChar(CP_ACP, 0, mode, -1, wide_mode, EXITGAME_SPAWN_CAP) <= 0) {
-        return -1;
-    }
-    size_t written = append_quoted_argument(command, EXITGAME_SPAWN_CAP, wide_self);
-    if (written == 0 || written + 1 >= EXITGAME_SPAWN_CAP) return -1;
-    command[written++] = L' ';
-    if (append_quoted_argument(command + written, EXITGAME_SPAWN_CAP - written, wide_mode) == 0)
-        return -1;
-    STARTUPINFOW startup;
-    PROCESS_INFORMATION child;
-    DWORD status = 0;
-    ZeroMemory(&startup, sizeof(startup));
-    startup.cb = sizeof(startup);
-    if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &child))
-        return -1;
-    int waited = WaitForSingleObject(child.hProcess, INFINITE) == WAIT_OBJECT_0 &&
-                 GetExitCodeProcess(child.hProcess, &status);
-    CloseHandle(child.hThread);
-    CloseHandle(child.hProcess);
-    return waited ? (int)status : -1;
-#else
-    pid_t child = fork();
-    if (child == 0) {
-        execl(self, self, mode, (char *)NULL);
-        _exit(127);
-    }
-    if (child < 0) return -1;
-    int status = 0;
-    if (waitpid(child, &status, 0) != child || !WIFEXITED(status)) return -1;
-    return WEXITSTATUS(status);
-#endif
 }
 
 static void test_aot_null_thread_entry(const char *self) {
@@ -52212,6 +55141,75 @@ int main(int argc, char **argv) {
     return rc;
 }
 
+/* #322: no ATRAC call divides by a frame size of 0. Each route runs in a child process, so a
+ * build that still divides fails its check with the child's crash status (0xC0000094 on Windows,
+ * SIGFPE on POSIX) instead of ending this binary. */
+#define ATRAC_ZERO_FRAME_CHILD "--atrac-zero-frame-child="
+/* The child: 0 when the route stopped the run by name, 2 when the fixture could not be built, 1
+ * otherwise. Once the game has written the state, the next call may stop already; that counts. */
+static int run_atrac_zero_frame_child(const char *route) {
+    enum { TRACK = 0x08002000u, OUT = 0x08004220u, RESET_INFO = 0x08004300u, PCM = 0x08003000u,
+           NID_ADD_STREAM_DATA = 0x7db31251u };
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    const int no_data = strcmp(route, "no-data") == 0;
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, 0x1000u /* ATRAC3+ */, 0u, 0u, 0u);
+    if (id >= 8u) return 2;
+    if (!no_data) {
+        /* A fact-only ATRAC3+ prefix: RIFF, WAVE and a fact chunk, no fmt chunk. */
+        for (uint32_t b = 0; b < 0x40u; b++) MEM_W8(TRACK + b, 0u);
+        MEM_W32(TRACK + 0x00u, 0x46464952u);
+        MEM_W32(TRACK + 0x04u, 0x1000u);
+        MEM_W32(TRACK + 0x08u, 0x45564157u);
+        MEM_W32(TRACK + 0x0cu, 0x74636166u);
+        MEM_W32(TRACK + 0x10u, 8u);
+        MEM_W32(TRACK + 0x14u, 2048u);
+        if (td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, TRACK, 0x40u, 0u) != 0u) return 2;
+        uint32_t ctx = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u);
+        if (ctx < 0x08a00000u || ctx >= 0x0a000000u || MEM_R16(ctx + 0x80u + 0x18u) != 0u) return 2;
+        MEM_W8(ctx + 0x80u + 0x15u, 1u);   /* the game writes NO_DATA */
+        if (strcmp(route, "no-data-state") != 0) {
+            (void)td24b_dispatch4(NID_ADD_STREAM_DATA, id, 0u, 0u, 0u);
+            if (sr_hle_test_unmodelled_stops() > stops) return 0;
+        }
+    }
+    if (no_data || strcmp(route, "no-data-state") == 0 || strcmp(route, "add-stream") == 0) {
+        (void)td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, OUT, 0u, 0u);
+    } else if (strcmp(route, "add-stream-decode") == 0) {
+        (void)td1096_decode(id, PCM, OUT, OUT + 4u, OUT + 8u);
+    } else if (strcmp(route, "add-stream-reset") == 0) {
+        (void)td24b_dispatch4(NID_SCE_ATRAC_GET_BUFFER_INFO_FOR_RESETTING, id, 0u, RESET_INFO, 0u);
+    } else {
+        return 2;
+    }
+    return sr_hle_test_unmodelled_stops() > stops ? 0 : 1;
+}
+static void test_atrac_zero_frame_routes_322(const char *self) {
+    static const char *const routes[] = { "no-data", "no-data-state", "add-stream",
+                                          "add-stream-decode", "add-stream-reset" };
+    static const char *const what[] = {
+        "sceAtracGetRemainFrame on an ID that never received a track",
+        "sceAtracGetRemainFrame after NO_DATA is written into a zero-frame track's context",
+        "sceAtracGetRemainFrame after NO_DATA and sceAtracAddStreamData(id, 0) on a zero-frame track",
+        "sceAtracDecodeData after NO_DATA and sceAtracAddStreamData(id, 0) on a zero-frame track",
+        "sceAtracGetBufferInfoForResetting after NO_DATA and sceAtracAddStreamData(id, 0) on a "
+        "zero-frame track",
+    };
+    char mode[96];
+    char name[256];
+    for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
+        snprintf(mode, sizeof(mode), "%s%s", ATRAC_ZERO_FRAME_CHILD, routes[i]);
+        int status = self ? aot_spawn_self(self, mode) : -1;
+        snprintf(name, sizeof(name), "%s stops the run by name and never divides by a frame size "
+                                     "of 0 (child status %d, #322)", what[i], status);
+        expect(status == 0, name);
+    }
+}
+
 static int hle_selftest_main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--psp-oracle") == 0)
         return run_psp_oracle(argc, argv);
@@ -52237,6 +55235,12 @@ static int hle_selftest_main(int argc, char **argv) {
     expect(sr_coro_current() == s_sched_coro,
            "the adopted scheduler coroutine is the one currently running");
 
+    if (argc > 1 && strncmp(argv[1], ATRAC_ZERO_FRAME_CHILD, strlen(ATRAC_ZERO_FRAME_CHILD)) == 0) {
+        int rc = run_atrac_zero_frame_child(argv[1] + strlen(ATRAC_ZERO_FRAME_CHILD));
+        free(g_mem_base);
+        return rc;
+    }
+
     if (argc > 1 && strcmp(argv[1], "--rtc-rfc2822-local") == 0) {
         test_rtc_rfc2822_local();
         fprintf(stderr, "rtc-rfc2822-local: %d checks, %d failures\n", s_checks, s_failures);
@@ -52254,6 +55258,19 @@ static int hle_selftest_main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--power-battery") == 0) {
         test_psp_measured_power_battery_20261024();
         fprintf(stderr, "power-battery: %d checks, %d failures\n", s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
+
+    if (argc > 1 && strcmp(argv[1], "--adhocctl-handler-fault-child") == 0)
+        return run_adhocctl_handler_fault_child();
+    if (argc > 1 && strcmp(argv[1], "--adhocctl") == 0) {
+        test_adhocctl_lone_console();
+        test_adhocctl_teardown();
+        test_adhocctl_lost_thread();
+        test_adhocctl_nickname_from_profile();
+        test_adhocctl_handler_fault_stops(argv[0]);
+        fprintf(stderr, "adhocctl: %d checks, %d failures\n", s_checks, s_failures);
         free(g_mem_base);
         return s_failures ? 1 : 0;
     }
@@ -52276,6 +55293,13 @@ static int hle_selftest_main(int argc, char **argv) {
 #ifdef SR_HLE_AOT_BOUNDARY_TEST
     if (argc > 1 && strcmp(argv[1], "--null-thread-entry-child") == 0)
         return run_null_thread_entry_child();
+    if (argc > 1 && strcmp(argv[1], "--resume-describe") == 0) {
+        test_resume_describe_from_the_scheduler();
+        fprintf(stderr, "resume-describe-selftest: %d checks, %d failures\n",
+                s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--aot-return-boundary") == 0) {
         test_aot_return_boundary_thread_isolation();
         test_aot_null_thread_entry(argv[0]);
@@ -52390,6 +55414,11 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sysreg_flush_failure();
     test_unregistered_batch_refusals();
     test_adhoc_named_refusals();
+    test_adhocctl_lone_console();
+    test_adhocctl_teardown();
+    test_adhocctl_lost_thread();
+    test_adhocctl_nickname_from_profile();
+    test_adhocctl_handler_fault_stops(argc > 0 ? argv[0] : NULL);
     test_unregistered_batch_profiler_refer_null();
     test_kernel_import_sweep_ge_head();
     test_ge_blocking_sync_waits_for_stalled_list();
@@ -52402,6 +55431,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_break_continue();
     test_ge_completion_timing();
     test_ge_finish_callback_reports();
+    test_ge_finish_callbacks_do_not_nest();
+    test_ge_finish_callback_thread_exit();
+    test_ge_finish_callback_waits_for_interrupts();
     test_ge_queued_lists_run_in_order();
     test_ge_timing_blocking_sync_cannot_wait();
     test_volatile_mem_output_preflight();
@@ -52414,7 +55446,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_storage_dialog_parameter_sizes();
     test_netconf_parameter_sizes();
     test_utility_dialog_single_slot();
-    test_utility_dialog_cancel_cleanup();
+    test_utility_dialog_refused_cancel();
     test_utility_dialog_status_sequence();
     test_utility_dialog_frame_driven_status();
     test_utility_dialog_start_up_during_status_spin();
@@ -52531,6 +55563,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_dmac_small_body_bypasses_the_channel();
     test_dmac_refused_try_copies_head_and_tail();
     test_dmac_queued_callers_are_served_in_arrival_order();
+    test_dmac_fifo_whatever_the_inherited_clock_phase();
     test_display_framebuf_latch();
     test_time_domains_are_coherent();
     test_kernel_import_sweep_sysclock_conversion();
@@ -52546,6 +55579,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_power_set_clock_frequency_range_checks();
     test_rtc_time_t_add_years_resolution_autotest();
     test_rtc_tick_add_day_of_week_check_valid_autotest();
+    test_rtc_tick_add_minutes_hours_weeks_autotest();
     test_imports_20261102_measured_contracts();
     test_psp_measured_umd_state_20261024();
     test_unregistered_batch_ctrl_sampling_getter();
@@ -52649,10 +55683,16 @@ static int hle_selftest_main(int argc, char **argv) {
     test_at3_set_data_delay_2048_1096();
     test_atrac_set_entry_points_1379();
     test_atrac_aa3_and_reinit_1379();
+    test_atrac_guest_context_322();
+    test_atrac_context_ids_loadexec_322();
+    test_atrac_context_state_write_322();
+    test_atrac_context_zero_frame_322();
+    test_atrac_zero_frame_routes_322(argc > 0 ? argv[0] : NULL);
     test_td24d_hle_batch();
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();
     test_sas_mix_saturates_without_wrapping();
+    test_sas_peak_limit_keeps_guest_bytes_and_hands_the_host_the_sum();
     test_sas_state_contracts();
     test_sas_set_volume_accepts_negative();
     test_sas_voice_volume_defaults();
@@ -52684,8 +55724,11 @@ static int hle_selftest_main(int argc, char **argv) {
     test_td28_partition_free_reuse();
     test_alloc_block_at_fixed_address();
     test_partition_ends_at_lowest_live_stack();
+    test_partition_skipped_gap_space_comes_back();
     test_max_free_unchanged_after_top_stack_deleted();
     test_partition_spans_the_whole_user_partition();
+    test_high_requests_take_a_freed_partition_block();
+    test_refused_arena_range_spares_a_freed_block_stack();
     test_partition_unknown_block_codes();
     test_module_id_queries_resolve_owning_module();
     test_query_module_info_answers_main_module_record();
@@ -52696,6 +55739,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_tlspl_lifecycle_and_thread_isolation();
     test_wb_tlspl_vpl_cells();
     test_vpl_blocking_waits();
+    test_std_handles_measured();
     test_kernel_pool_bounds_measured();
     test_mbx_lifecycle_and_ordering();
     test_intr_context_conformance();
@@ -52715,6 +55759,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ctrl_sampling_contract();
     test_volatile_partition_allocator();
     test_late_prx_unload_keeps_module_owned_objects();
+    test_guest_player_unload_leaves_no_threads_or_queues();
     test_power_unregister_callback_slots();
     test_wc_power_register_callback_errors();
     test_wc_volatile_unlock_mode();

@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import sys
 from collections import Counter
+from typing import Any, Protocol, cast
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -32,6 +33,7 @@ EXPECTED_PROVENANCE_FAMILIES = frozenset({
     "vulkan",
     "vfpu",
     "stb-image",
+    "stb-vorbis",
     "kenney-ui-assets",
 })
 
@@ -136,6 +138,14 @@ def verify_provenance_families(manifest_data: dict) -> list[str]:
     return errors
 
 
+class _ReleaseLockState(Protocol):
+    """The lock objects ``verify_release_locks`` last validated, kept as function attributes."""
+
+    last_validated_py_lock: Path | None
+    last_validated_toolchain_policy: dict[str, Any] | None
+    last_validated_observed_toolchain: dict[str, Any] | None
+
+
 def verify_release_locks(
     manifest_path: Path,
     release_index_path: Path = generate_sbom.PYTHON_RELEASE_INDEX_PATH,
@@ -145,9 +155,9 @@ def verify_release_locks(
     expected_release_version: str | None = None,
 ) -> list[str]:
     """Validate the declared Python dependency lock and toolchain policy."""
-    verify_release_locks.last_validated_py_lock = None
-    verify_release_locks.last_validated_toolchain_policy = None
-    verify_release_locks.last_validated_observed_toolchain = None
+    _release_lock_state.last_validated_py_lock = None
+    _release_lock_state.last_validated_toolchain_policy = None
+    _release_lock_state.last_validated_observed_toolchain = None
     errors: list[str] = []
     if not manifest_path.is_file():
         return [f"Release manifest file missing: {manifest_path}"]
@@ -257,10 +267,13 @@ def verify_release_locks(
     except Exception as exc:
         errors.append(f"Failed to parse release manifest {manifest_path}: {exc}")
 
-    verify_release_locks.last_validated_py_lock = py_lock_path
-    verify_release_locks.last_validated_toolchain_policy = toolchain_policy
-    verify_release_locks.last_validated_observed_toolchain = observed_data
+    _release_lock_state.last_validated_py_lock = py_lock_path
+    _release_lock_state.last_validated_toolchain_policy = toolchain_policy
+    _release_lock_state.last_validated_observed_toolchain = observed_data
     return errors
+
+
+_release_lock_state = cast(_ReleaseLockState, verify_release_locks)
 
 
 def _lock_file_entry_errors(spdx_data: dict,
@@ -805,7 +818,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     verified_digests: dict = {"python": None}
     if args.spdx:
-        validated_lock = verify_release_locks.last_validated_py_lock
+        validated_lock = _release_lock_state.last_validated_py_lock
         if validated_lock is not None and validated_lock.resolve() != args.py_lock.resolve():
             errors.append(
                 f"Python lockfile passed via --py-lock ({args.py_lock}) is not the lockfile declared "

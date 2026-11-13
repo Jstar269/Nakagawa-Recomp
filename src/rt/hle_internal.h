@@ -555,6 +555,7 @@ typedef struct {
     uint8_t *host_frame;          /* one frame copied out of the guest ring */
     int host_frame_cap;           /* allocated size of host_frame */
     int16_t *host_pcm;            /* decode output staging, channels*2048 */
+    uint32_t ctxAddr;             /* guest context from _sceAtracGetContextAddress (#322), 0 = none */
 } Atrac;
 enum {
     UTILITY_SLOT_NONE = 0, UTILITY_SLOT_SAVEDATA, UTILITY_SLOT_MSG, UTILITY_SLOT_NETCONF,
@@ -1296,6 +1297,7 @@ extern int g_atrac_out_nbufs;
 void atrac_release_decoder(Atrac *a);
 extern int s_atrac_caps_configured;
 extern uint32_t s_atrac_slot_codec[8];
+void hle_atrac_context_reset(void);
 void dialog_lock(void);
 void dialog_unlock(void);
 extern int s_utility_slot;
@@ -1431,6 +1433,11 @@ void hle_state_sample_close(void);
 void hle_enhancement_speed_vblank(uint32_t vcount);
 extern GeCallback s_ge_cb[16];
 void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t user_arg);
+void ge_finish_release_owner(uint32_t owner);
+int ge_finish_masked_pending(void);
+void ge_finish_deliver_masked(CpuState *s);
+void ge_finish_from_ge_interrupt(void);
+void ge_finish_masked_reset_for_loadexec(void);
 void ge_sync_wake(void);
 extern GeListInfo s_ge_lists[GE_LIST_MAX];
 extern uint64_t s_ge_list_done_bits;
@@ -1480,6 +1487,7 @@ void hle_register_exit_game_handler(void);
 void hle_register_devkit_version_handler(void);
 void hle_register_ctrl_sampling_handlers(void);
 void hle_register_gpi_gpo_handlers(void);
+void hle_register_std_handle_handlers(void);
 void hle_register_mpeg_shared_handlers(void);
 void hle_register_mpeg_avc_decode_handler(void);
 void hle_register_mpeg_userdata_handlers(void);

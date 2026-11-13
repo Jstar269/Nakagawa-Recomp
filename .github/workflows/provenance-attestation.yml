@@ -112,11 +112,19 @@ jobs:
     # pull_request_target route skips it here, and the other two routes fail in
     # the first step, which finds no pull request into the default branch.
     # A workflow_run of CI attests only when that CI run is a pull request's.
+    #
+    # It runs only in the upstream repository, matched by its numeric ID (which
+    # survives a rename or a transfer) or by its name, and in any run whose ID is
+    # empty, which fails closed to this strict job. A fork runs the Fork
+    # provenance check below instead; nothing a pull request or a repository
+    # variable controls can move the upstream onto that path
+    # (tools/provenance_mode.py, docs/FORKING.md).
     if: >-
-      ${{ (github.event_name == 'pull_request_target' &&
-           github.event.pull_request.base.ref == github.event.repository.default_branch) ||
-          (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request') ||
-          (github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '') }}
+      ${{ ((github.event_name == 'pull_request_target' &&
+            github.event.pull_request.base.ref == github.event.repository.default_branch) ||
+           (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request') ||
+           (github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '')) &&
+          (github.repository_id == '' || github.repository_id == '1330183186' || github.repository == 'Jstar269/Nakagawa-Recomp') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     # Read-only. pull-requests: read is for the lookup in the first step.
@@ -486,15 +494,24 @@ jobs:
       # checkout and never an archive, so no .gitattributes line of the
       # candidate can hide a file. The profile is the candidate's, which the
       # step above has just held to the trusted authority: a path it adds,
-      # removes or excludes is one a maintainer admitted. No secret is in this
-      # step's environment. A finding fails the job.
+      # removes or excludes is one a maintainer admitted. The release manifest
+      # is the candidate's too, and it waives binary findings for the files it
+      # approves, so the audit is given the verdict base: at a path the base
+      # already holds, a binary waiver covers only the file the base carries,
+      # and nothing in the candidate's manifest approves other bytes there. No
+      # secret is in this step's environment. A finding fails the job.
       - name: Audit the candidate tree with the trusted publication audit
         env:
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+          BASE_SHA: ${{ steps.base.outputs.base_sha }}
         run: |
           set -euo pipefail
           if [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::the candidate head is not a full commit SHA"
+            exit 1
+          fi
+          if [[ ! "${BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::the verdict base is not a full commit SHA"
             exit 1
           fi
           mkdir -p "${RUNNER_TEMP}/tree-audit"
@@ -503,6 +520,7 @@ jobs:
           python tools/publish_audit.py \
             --repo-root "${GITHUB_WORKSPACE}" \
             --committed-tree "${HEAD_SHA}" \
+            --trusted-base "${BASE_SHA}" \
             --policy "${RUNNER_TEMP}/tree-audit/public_source_profile.json" \
             --public-scope --provenance-self-consistency
           touch "${RUNNER_TEMP}/tree-audit/passed"
@@ -564,6 +582,144 @@ jobs:
             cat "${RUNNER_TEMP}/verify/report.txt" 2>/dev/null || echo 'the verifier did not produce a report'
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
+
+  fork_check:
+    # A fork of the upstream has no access to the upstream's private trusted
+    # ledger, so the job above cannot run there (docs/FORKING.md). This job is
+    # its exact complement: it runs only where the job above does not, by the
+    # same three routes and under the same run title, never reads a repository
+    # secret, and never contacts the private authority. Like the job above it
+    # runs the default branch's tools on the candidate's objects as data, so a
+    # pull request cannot replace the check with its own code:
+    #
+    #   * the candidate's workflows may not answer to either check's name;
+    #   * the trusted publication audit runs on the candidate's exact tree with
+    #     --public-scope --provenance-self-consistency, which refuses game data,
+    #     keys, private and user paths, unclassified paths and an inconsistent
+    #     public ledger exactly as on the upstream;
+    #   * the paths the pull request adds to the publication profile are listed:
+    #     on a fork, the fork maintainer's admission (tools/fork_init.py,
+    #     tools/admit_paths.py) and review are the provenance authority.
+    name: Fork provenance check
+    if: >-
+      ${{ ((github.event_name == 'pull_request_target' &&
+            github.event.pull_request.base.ref == github.event.repository.default_branch) ||
+           (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request') ||
+           (github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '')) &&
+          (github.repository_id != '' && github.repository_id != '1330183186' && github.repository != 'Jstar269/Nakagawa-Recomp') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    # Read-only. pull-requests: read is for the lookup in the resolver step.
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out the trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+
+      # A second guard behind the job condition: the trusted tool refuses to run
+      # the fork check for the upstream repository, by ID or by name.
+      - name: Confirm this repository is a fork
+        run: python tools/provenance_mode.py --require fork
+
+      # The same step as in the job above, word for word (a wiring test keeps
+      # the two identical).
+      - name: Resolve the pull request at the named head
+        id: target
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_PR_NUMBER: ${{ inputs.pull_request_number }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          resolve=(python tools/ci_trust_verdict.py --repository "${GITHUB_REPOSITORY}"
+                   --default-branch "${DEFAULT_BRANCH}" --attestation-target)
+          case "${EVENT_NAME}" in
+            pull_request_target)
+              case "${EVENT_PR_NUMBER}" in
+                ''|*[!0-9]*) echo "pull request number is not numeric" >&2; exit 1 ;;
+              esac
+              for value in "${EVENT_HEAD_SHA}" "${EVENT_BASE_SHA}"; do
+                [[ "${value}" =~ ^[0-9a-f]{40}$ ]] || { echo "sha malformed" >&2; exit 1; }
+              done
+              {
+                echo "number=${EVENT_PR_NUMBER}"
+                echo "head_sha=${EVENT_HEAD_SHA}"
+                echo "base_sha=${EVENT_BASE_SHA}"
+              } >> "${GITHUB_OUTPUT}"
+              ;;
+            workflow_run)
+              "${resolve[@]}" --head-sha "${RUN_HEAD_SHA}"
+              ;;
+            workflow_dispatch)
+              # The verdict accepts a dispatched attestation only from the default
+              # branch. Any other ref fails here, so nobody waits on an ignored run.
+              if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+                echo "dispatch an attestation from ${DEFAULT_BRANCH}, not ${GITHUB_REF}" >&2
+                exit 1
+              fi
+              case "${INPUT_PR_NUMBER}" in
+                ''|0*|*[!0-9]*) echo "pull request number is not a plain positive number" >&2; exit 1 ;;
+              esac
+              "${resolve[@]}" --pull-request "${INPUT_PR_NUMBER}" --head-sha "${INPUT_HEAD_SHA}"
+              ;;
+            *)
+              echo "unsupported event ${EVENT_NAME}" >&2
+              exit 1
+              ;;
+          esac
+
+      # The same data-only fetch as the job above.
+      # codeql[actions/untrusted-checkout/critical]
+      - name: Fetch the candidate objects without checking them out
+        env:
+          PR_NUMBER: ${{ steps.target.outputs.number }}
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+          BASE_SHA: ${{ steps.target.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          case "${PR_NUMBER}" in
+            ''|*[!0-9]*) echo "pull request number is not numeric" >&2; exit 1 ;;
+          esac
+          for value in "${HEAD_SHA}" "${BASE_SHA}"; do
+            [[ "${value}" =~ ^[0-9a-f]{40}$ ]] || { echo "sha malformed" >&2; exit 1; }
+          done
+          git fetch --no-tags --no-recurse-submodules --quiet \
+            "https://github.com/${GITHUB_REPOSITORY}.git" \
+            "+refs/pull/${PR_NUMBER}/head:refs/candidate/head"
+          fetched="$(git rev-parse refs/candidate/head)"
+          if [ "${fetched}" != "${HEAD_SHA}" ]; then
+            echo "candidate head moved during this run: event named ${HEAD_SHA}, fetched ${fetched}" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${BASE_SHA}" HEAD; then
+            echo "event base ${BASE_SHA} is not an ancestor of the default branch" >&2
+            exit 1
+          fi
+
+      - name: Check the candidate with the trusted publication audit
+        env:
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+          BASE_SHA: ${{ steps.target.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          python tools/provenance_mode.py fork-check --repo "${GITHUB_WORKSPACE}" \
+            --base "${BASE_SHA}" --tip HEAD --candidate "${HEAD_SHA}" --summary "${GITHUB_STEP_SUMMARY}"
 
   showcase_prx:
     name: Showcase demo PRXs (PSPDEV)

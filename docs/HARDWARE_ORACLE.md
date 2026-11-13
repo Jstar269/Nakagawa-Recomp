@@ -63,9 +63,32 @@ relative path and SHA-256, and the gate verifies that file. Without that directo
 claim reports `NOT_RUN`, never `MEASURED`; the public checks (cell names and order, record names,
 window digests) still run. Software, Vulkan, or PPSSPP data cannot be promoted by setting a
 hardware label. The current command-word case reports `NOT_RUN`.
-**GE raster pixel conformance is partial (#343, open):** the `ge-raster`, `ge-weight` and
-`ge-rtt` cells are measured and in the corpus; the command-word case, the Vulkan comparison and
-the families no cell covers are not.
+
+**GE raster pixel conformance is partial (#343, open).** In the corpus and measured: the 189
+`ge-raster`, 16 `ge-weight` and 9 `ge-rtt` cells, each for its exact states only. The software GE
+gives every `ge-raster` cell (`test_ge_raster_cells_match_psp`); no test yet runs the `ge-weight` or
+`ge-rtt` cells through it. On Vulkan at render scale 1 (`gpu_coherence_selftest --case psp-raster`, in the
+`ge-raster` entry below), 146 `ge-raster` cells drawn on the GPU equal the PSP, 20 stay within 2 per
+colour field of it (most differ by 1 or 2, depending on the driver), and 23 are drawn by the software fallback. Other pixel evidence measured on a
+PSP but not in `ge_corpus.json`: PSP-GE-SAMPLE-001, PSP-GE-THROUGHZ-001, PSP-GE-MIP-001, PSP-GE-MIP-002,
+PSP-GE-LIGHT-001, PSP-GE-OVERLAP-001, and the colour cells of PSP-GE-RASTER-002 and the cells of PSP-GE-RASTER-003
+(their entries below). Not measured at all:
+
+- the command-word case above (`NOT_RUN`);
+- the depth the GE stores for a fractional z: every `ge-raster` depth is an integer and
+  PSP-GE-THROUGHZ-001 does not show the stored word, so depth rounding and the transform-mode depth
+  range mapping are not pinned (PSP-GE-RASTER-003's pass masks read "truncate or reduced precision", not
+  truncation alone);
+- the depth cells of PSP-GE-RASTER-002 (UNDECIDED: the depth view read 0 for every word);
+- clipping, the guard band and back-face culling;
+- scissor rectangles smaller than the surface: every cell scissors to the full surface;
+- index buffers, and vertex formats no cell uses;
+- swizzled, DXT and 32-bit-index CLUT textures;
+- lighting beyond PSP-GE-LIGHT-001's cells (other light types and colours, several lights), texture
+  projection and texture-coordinate generation, and splines and patches;
+- on Vulkan: render scales above 1, the 23 fallback cells (no Vulkan claim), the 20 rounding cells
+  (a known gap, tracked on #343), and the `ge-weight` and `ge-rtt` cells, which no Vulkan case
+  draws.
 
 ## Measured to date (index — exact cells only, do not generalize)
 
@@ -762,6 +785,44 @@ One console is one data point; see §11. Nothing here closes issue #70
     - A text field is written through its NUL and no further: the bytes after it keep their presets.
   - *Context.* Launched under the XMB (22 threads, 70 modules), InitStart for savedata returned 0 and the status stayed at INIT past 360 vblanks, an `SceUtilityInit` thread stayed behind, and later InitStarts returned 0x80110001 (two launches, 2026-10-31, withdrawn probe). In game context the same utility ran to completion, so a savedata probe needs game context.
 
+- **PSP-3000 single-case run of `hle-io-trunc` (2026-11-02 UTC)**: at 21:40 UTC on boot 107, game context
+  (standalone PSPLink: 19 threads, 52 modules), after the `transport-write` preflight (PSP-TRANSPORT-001 is not
+  re-cited). Firmware recorded as 6.6.1 (system software 6.61; custom firmware ARK-5 5.1.0 at that time,
+  operator-declared). Case 105, `fixtures/psp_oracle/probe_hle_measure.c`, built from `08934592f`, a local
+  commit that is not in public history (not an ancestor of this tree). The case's own source is identical to
+  this tree's: at both commits the SHA-256 of its section of `probe_hle_measure.c` (from
+  `#if PSP_ORACLE_CASE == HLE_CASE_IO_TRUNC` to its `#endif`, 295 lines) is
+  `528e41f21ffd9f174aa8b1e4dd098db21402f9b1188f4a57a35e76723ef735fd`, of its case-id and campaign-id lines
+  `f95b29069036456fb91447665754c0d353efd6616f9360b778cc7fc0ea66be03`, and of its Makefile lines (the CASE, LIBS and
+  import-gate blocks, 8 lines) `c70288c741952a62893abf4fc6eab3e8894ac7ebc98f9d8f653646404a9b8fb8`. The shared probe
+  harness outside the case sections has changed since, so a PRX built from this tree is not byte-identical to
+  the one measured. The envelope is acceptance-eligible with 0
+  blockers: evidence class `PSP_HARDWARE`, a clean committed source binding, a strict golden sequence (9 records
+  and the done record, out0 9), all PASS, COMPLETE PASS. The raw envelope and host0 log stay in the private
+  campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-02, `08934592f`) |
+  | --- | --- | --- | --- |
+  | `PSP-HLE-IO-TRUNC-001` | `trunc-open-view`, `trunc-seek-read`, `trunc-seek-write`, `trunc-close-nowrite`, `trunc-recover-after-close`, `two-fd-view`, `two-fd-writer-survives`, `two-fd-trunc-writes-last`, `remove-absent`, `hle-io-trunc-done` (boot 107) | files larger than 16 bytes, other devices than `ms0:`, `PSP_O_APPEND` with `PSP_O_TRUNC`, a truncating open beside a read-only descriptor, the XMB context | MEASURED (`hle-io-trunc`) |
+
+  `hle-io-trunc` (#1892): the probe owns `ms0:/NKTRUNC.BIN` and writes the 16 bytes `ABCDEFGHIJKLMNOP` (flags
+  0x0602) before each group. What the cells establish, for this file only, with the agreement of the runtime on
+  this tree read from its source (`src/rt/hle_data.c`, #1907: `PSP_O_TRUNC` cuts the host file at open, and a
+  write through that descriptor brings the old bytes below it back; `src/rt/hle_io.c`: each write is flushed to
+  the host file, and the remove errors):
+
+  | Cell | Measured (2026-11-02, boot 107, `08934592f`) | Runtime (`src/rt/hle_data.c` and `hle_io.c`, this tree) |
+  | --- | --- | --- |
+  | `trunc-open-view` | An `RDWR\|CREAT\|TRUNC` (0x0603) open returns a descriptor; while it is open `sceIoGetstat` gives size 0, lseek END 0, lseek to 0 returns 0, and a 4-byte read 0 | Agrees |
+  | `trunc-seek-read` | lseek to 4 returns 4; a 4-byte read there returns 0 | Agrees |
+  | `trunc-seek-write` | lseek to 8 returns 8, a write of `WX` returns 2, lseek END then gives 10; close 0, size 10, content `ABCDEFGHWX` | Agrees |
+  | `trunc-close-nowrite` | A 0x0602 open closed with no write: close 0, size 0; a fresh read-only open sees END 0, lseek to 4 returns 4 and a read there 0 | Agrees |
+  | `trunc-recover-after-close` | Then a `WRONLY` open (no TRUNC), lseek to 8, a write of `WX` (2), close 0: size 10, content `ABCDEFGHWX` | Disagrees: the kept bytes go with the truncating descriptor's close, so the runtime writes `WX` after 8 zero bytes |
+  | `two-fd-view` | With an `RDWR` descriptor B open (END 16), a 0x0602 open is refused with 0x8001000d; B still sees END 16 and reads `ABCD`, the size stays 16 throughout, closing the refused id returns 0x80020323, and B closes with 0 | Disagrees: the runtime opens the truncating descriptor beside B and cuts the file |
+  | `two-fd-writer-survives` | A 0x0602 open A, then an `RDWR` open B: B sees END 0, writes `abcdefghijkl` (12); A closes with 0 and the size reads 0; B closes with 0 and the size reads 12, content `abcdefghijkl` | Final size and content agree; the size 0 between A's and B's close does not, since the runtime flushes each write to the host file |
+  | `two-fd-trunc-writes-last` | A 0x0602 open A, then B writes `abcdefghijkl` (12) and closes (size 12); A writes `WX` (2) at its offset 0 and closes: size 2, content `WX` | Disagrees: the runtime keeps the longer end, 12 bytes `WXcdefghijkl` |
+  | `remove-absent` | `sceIoRemove` returns 0, a second one 0x80010002, and `sceIoGetstat` then 0x80010002 | Agrees |
+
 - **PSP-3000 single-case runs on public commits `22b027f6` and `7fc1641e` (2026-10-15)**: firmware 6.6.1, PSPLink 3.2.1, operator-declared model PSP-3000. `22b027f6` is the pre-merge head of the change that added the `vfpu-transcendental-corpus`, `hle-timer-order` and `hle-audio-src` probes. The first two probes are unchanged in the merged commit `7fc1641e`, which also changed the `hle-audio-src` pass rule: its two final-cleanup cells became PASS records in place of SKIP records. That case was therefore re-run from `7fc1641e`. Each case was one runner invocation with the `transport-write` preflight, which passed on every launch (PSP-TRANSPORT-001 is not re-cited). A row cites only the cells named in it, and cells not named here are not measured by this entry. Raw envelopes and host0 logs stay in the private campaign directory.
 
   | Evidence id | Cells cited | Not cited | Outcome (2026-10-15) |
@@ -1262,6 +1323,26 @@ One console is one data point; see §11. Nothing here closes issue #70
     filtering, through-mode triangle coverage, points, 16-bit framebuffer conversion, dithering, pixel masks,
     the sixteen logic operations, and transform-mode triangles and sprites.
 
+  The Vulkan backend runs the same cells: `src/rt/gpu_sdl3vk/ge_gpu_selftest.inc` carries the block and the
+  PSP digest table byte for byte (`tools/test_psp_oracle.py` pins all three copies), and
+  `gpu_coherence_selftest --case psp-raster` (also in its default pass) draws every cell through `ge.c` with the
+  GPU hooks on at render scale 1 and compares the window it reads back with the PSP's digest. On 2026-11-11 146
+  cells are drawn on the GPU and equal the PSP. 23 are drawn by the software fallback and equal the PSP after
+  the readback, which proves nothing about the Vulkan raster: the depth test with stencil (`z-lt-st`,
+  `z-gt-st`), points (`e-points`), partial pixel masks (`msk-8888`, `msk-565`, `clr-ca-msk`) and the logic
+  operations (`lo-*`). 20 are drawn on the GPU and differ from the PSP by at most 2 per colour field, because
+  Vulkan most likely blends and combines texture and vertex colours in floating point where the PSP truncates integer
+  products: `b-sa-isa`, `b-dc-sc`, `b-idc-isc`, `b-da-ida`, `b-sub-sa-fix`, `b-rsub-sa-isa`, `tf-mod-rgb`,
+  `tf-mod-rgb-x2`, `tf-mod-rgba`, `tf-mod-rgba-x2`, `tf-mod-rgba-1`, `tf-dec-rgba`, `tf-dec-rgba-x2`,
+  `tf-bld-rgb`, `tf-bld-rgb-x2`, `tf-bld-rgba`, `tf-bld-rgba-x2`, `tfa-mod-rgba`, `tfa-bld-rgba` and
+  `tfa-add-rgba`; each of their pixels must stay within 2 per field of the window `ge.c` draws alone, which
+  equals the PSP's. Whether a rounding cell lands on the PSP's value depends on the driver: on an RTX 3080 all 20
+  differ by 1 or 2, while lavapipe (hosted CI) draws `tf-mod-rgba-1` exactly, so the case accepts an equal
+  window for these cells and reports how many were exact. The case pins all three classes, so a cell that moves between them fails, and so does a
+  cell whose readback fails or that neither class drew. It found that a clear with a partial pixel mask was
+  drawn unmasked on the GPU (`clr-ca-msk`); such a clear now falls back to `ge.c`, as a masked draw already
+  did.
+
 - **PSP-3000 single-case runs of the `ge-mip` and `ge-sync-ids` probes on commit `66940d76` (2026-10-31)**:
   system software 6.61, ARK-5.1.0 (owner); `pspver` 6.6.0. PSPLink 3.2.1, operator-declared model PSP-3000,
   boot 86. PSPLink `pspver` read 6.6.0 (`0x06060010`) at the cited launch, and that is the firmware declared to
@@ -1421,6 +1502,68 @@ One console is one data point; see §11. Nothing here closes issue #70
     (`sceIoGetstat` `0x80010002`).
   - *`sceIoWriteAsync` of 4 bytes on a `PSP_O_RDONLY` descriptor* returns `0x80020323` at once and queues nothing,
     so no poll or wait was made; the close returns 0.
+
+- **PSP-3000 single-case run of `sas-mix` (2026-11-12 UTC)**: one PSP-3000, game context (entered from the XMB by one `nkctl --owner-present game-context` soft reset, the owner at the console), one launch on its own boot (boot 197) after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). Firmware identity: console
+  PSP-3000; system software 6.61 (operator-declared; `flash0:/vsh/etc/version.txt` read `release:6.61:` on
+  2026-11-10); PSPLink `pspver` printed `0x06060110` ("6.6.1") in the game context on this boot, which the runner
+  records as 6.6.1; custom firmware ARK-5 with cIPL, version 5.2.0 (operator-declared, not read by a tool); PSPLink
+  v3.2.1 built from `pspdev/psplinkusb` `7a0035d9`. `sas-mix` (case 155, `run_sas_mix` in
+  `fixtures/psp_oracle/probe.c`) at `3872796c`, 204 cells and the done record (out0 `0xcc`). The envelope is
+  acceptance-eligible with 0 blockers (evidence class `PSP_HARDWARE`, source commit binding on a clean committed
+  tree), every record is PASS, and the stream ends COMPLETE PASS. After the done record the case unloaded SASCORE,
+  then AVCODEC (the first run of that unload), and the teardown found the module set the launch started from; the
+  PSP stayed qualified on boot 197 afterwards. Every record's result and out words equal those of the 2026-11-07
+  (boot 146) and 2026-11-11 (boot 191) captures. The raw envelope and host0 log stay in the private campaign
+  directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-12) |
+  | --- | --- | --- | --- |
+  | `PSP-SAS-003` | `sas-mix-*` (boot 197) | other volumes, mix gains, pitches and inputs; the XMB context; unloading SASCORE while a SAS core is initialised as a separate claim | MEASURED: 204 records and the done record, all PASS |
+
+  The values are listed under [PSP-SAS-003 capture 2026-11-07](#psp-sas-003-capture-2026-11-07).
+
+- **PSP-3000 single-case run of `sas-adsr` (2026-11-13 UTC)**: one PSP-3000, game context (entered from the XMB by
+  one `nkctl --owner-present game-context` soft reset, the owner at the console), one launch on its own boot (boot 208)
+  after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). Firmware identity: console PSP-3000;
+  system software 6.61 (operator-declared); PSPLink `pspver` printed `0x06060110` ("6.6.1") in the game context on
+  this boot (`0x06060010` in the XMB context before and after), which the runner records as 6.6.1; custom firmware
+  ARK-5 with cIPL, version 5.2.0 (operator-declared, not read by a tool); PSPLink v3.2.1 built from
+  `pspdev/psplinkusb` `7a0035d9`. `sas-adsr` (case 152, `fixtures/psp_oracle/probe.c`) at `06a6c942c`, 696 records
+  and the done record (out0 `0x2b7`). The envelope is acceptance-eligible with 0 blockers (evidence class
+  `PSP_HARDWARE`, source commit binding on a clean committed tree), every record is PASS, and the stream ends COMPLETE
+  PASS. After the done record the case unloaded SASCORE, then AVCODEC, and the teardown found the module set the
+  launch started from; the PSP stayed qualified on boot 208 afterwards. Every record's result and out words equal
+  those of the 2026-11-10 capture (boot 185, `74acbe42`) and the 2026-11-05 run. The raw envelope and host0 log stay
+  in the private campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-13) |
+  | --- | --- | --- | --- |
+  | `PSP-SAS-002` | `sas-adsr-*` (boot 208) | other envelope settings, grains and voices; the XMB context; unloading SASCORE while a SAS core is initialised as a separate claim | MEASURED: 696 records and the done record, all PASS |
+
+  The values are listed in the `sas-adsr` row of `fixtures/psp_oracle/README.md` and under
+  [PSP-SAS-002 capture 2026-11-10](#psp-sas-002-capture-2026-11-10).
+
+- **PSP-3000 single-case run of `hle-std-handles` in the game context (2026-11-12 UTC)**: one PSP-3000, game
+  context (entered from the XMB by one `nkctl --owner-present game-context` soft reset, the owner at the console),
+  one launch on its own boot (boot 200) after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited).
+  Firmware identity as for the `sas-mix` run above: system software 6.61 (operator-declared); PSPLink `pspver`
+  printed `0x06060110` ("6.6.1") in the game context on this boot; custom firmware ARK-5 with cIPL, version 5.2.0
+  (operator-declared, not read by a tool); PSPLink v3.2.1 built from `pspdev/psplinkusb` `7a0035d9`.
+  `hle-std-handles` (case 156, `fixtures/psp_oracle/probe_hle_measure.c`) at `3872796c`: 4 records and the done
+  record (out0 4), all PASS, COMPLETE PASS, acceptance-eligible with 0 blockers (evidence class `PSP_HARDWARE`,
+  source commit binding on a clean committed tree). The raw envelope and host0 log stay in the private campaign
+  directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-12, `3872796c`) |
+  | --- | --- | --- | --- |
+  | `PSP-HLE-STDIO-001` | `stdio-handles`, `stdio-write-stdout`, `stdio-write-stderr`, `stdio-close-stdout`, `hle-std-handles-done` (boot 200, game context) | a read from Stdin, the UID values on other boots | MEASURED (`hle-std-handles`) |
+
+  In the game context `sceKernelStdin`, `sceKernelStdout` and `sceKernelStderr` returned the same three distinct
+  UIDs as the XMB run on boot 135 (`0x0093a513`, `0x00938a15`, `0x00936f17`), and a one-byte `sceIoWrite` returned 1
+  on Stdout and on Stderr. `sceIoClose` of the Stdout UID returned `0x80020325` here, where the XMB run returned
+  `0x800200d1`; it again closed nothing: a write afterwards returned 1 and `sceKernelStdout` returned the same UID.
+  The two runs also differ in custom firmware version (ARK-5 5.1.0 with `pspver` declared 6.6.0 on boot 135,
+  ARK-5 5.2.0 with 6.6.1 on boot 200); which factor decides the close's answer is not measured.
 
 - **PSP-3000 single-case runs of `hle-issues-batch`, `hle-kernel-pool-bounds` and `registry-font` (2026-11-10)**:
   one PSP-3000, all three PRXs built from `979c6a1dd`, XMB context, one launch per boot (boots 172, 173 and 174),
@@ -1604,6 +1747,36 @@ One console is one data point; see §11. Nothing here closes issue #70
     an inference, as the probe did not read there.
   - *XMB context.* The VSH draws its own lists, so a cell's time may include its work. A VSH write to either block
     during a cell would show as extra colour pixels or changed depth words; none appeared.
+
+- **PSP-3000 single-case runs of `ge-raster-bounds` and `ge-depth-round` (2026-11-13 UTC)**: one PSP-3000, XMB
+  context, one launch per boot (boots 214 and 215), an unattended run with nobody at the console. Firmware identity:
+  console PSP-3000; system software 6.61 (operator-declared); custom firmware ARK-5 with cIPL, version 5.2.0
+  (operator-declared, not read by a tool); PSPLink built from `pspdev/psplinkusb` `7a0035d9`. Both cases (cases 187
+  and 188, `fixtures/psp_oracle/probe_ge_sample.c`) were built from `05aafe975`, the head of the pull request that
+  added them; it is not an ancestor of this tree, and its `probe_ge_sample.c` and its Makefile CASE lines for these
+  cases are identical to this tree's. Each envelope is acceptance-eligible with 0 blockers (evidence class
+  `PSP_HARDWARE`, source commit binding on a clean committed tree), every record is PASS, each stream ends COMPLETE
+  PASS, every wait ended DONE and no `sceGeBreak` reset ran. The raw envelopes and host0 logs stay in the private
+  campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-13) |
+  | --- | --- | --- | --- |
+  | `PSP-GE-RASTER-002` | `raster-*`, `ge-raster-bounds-done` (boot 214) | `depth-zbw256-past` and `depth-clear-scissor` (UNDECIDED, below); other formats, strides and scissors; the game context | MEASURED: 38 records and the done record, all PASS |
+  | `PSP-GE-RASTER-003` | `zr-*`, `ge-depth-round-done` (boot 215) | other depths, depth functions and vertex formats; the stored depth word itself; the game context | MEASURED: 18 records and the done record, all PASS |
+
+  What the cells establish, for these exact lists only:
+  - *Colour runs on linearly past the frame-buffer width (`ge-raster-bounds`).* A sprite to x 511 at fbw 500 drew
+    8012 pixels (500x16+12): row 16 x 0..11 is drawn and x 12 onwards keeps the fill. A sprite on rows 100..109
+    under scissor x 0..479 at fbw 256 drew 2784 pixels (256x10+224): row 110 x 0..223 is drawn and x 224 onwards
+    keeps the fill. Only the scissor clips.
+  - *Alpha byte.* Drawn 8888 pixels read `0x5a00ff00`: they keep the fill's alpha (stencil) byte.
+  - *Depth cells UNDECIDED.* The depth view the case reads through the `0x04200000` mirror read 0 for every word in
+    `depth-zbw256-past` and `depth-clear-scissor`, including the depth fill the case's own expectations say it
+    should show. These reads therefore do not show the depth the GE stored; they are recorded as read, and neither
+    cell is measured.
+  - *Depth rounding (`ge-depth-round`).* The pass masks read `0x1f1f1f1f` in both words for `zr-thru-eq`,
+    `0xe0e0e0e0` for `zr-thru-gt` and `0xffffffff` for `zr-xf-eq`, that is 0x1f, 0xe0 and 0xff per eight pixels:
+    "truncate or reduced precision" by the probe's reading key in all three cells. Truncation alone is not claimed.
 
 - **PSP-3000 single-case run of `vfpu-reserved-widths` (2026-11-10 UTC)**: one PSP-3000, XMB context, one launch on
   its own boot after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited), with the owner present
@@ -3767,6 +3940,7 @@ not expected PSP values.
 | `hle-timer-order` | `PSP-HLE-TIMER-ORDER-001` | `MEASURED` (2026-10-15, `22b027f6`; single launch, not in the campaign queue) | Two equal-delay alarms set A then B; long-delay then short-delay alarm; nominally equal VTimer handler and alarm; SetAlarm(0). Each callback stores a shared sequence number and system-time low/high words. Every wait has an elapsed-time deadline; cancel all alarms and stop/delete the VTimer. Ordering only, no absolute-time claim; 18 result records. |
 | `hle-savedata-getsize` | `PSP-HLE-SAVEDATA-GETSIZE-001` | `MEASURED` (2026-11-02, `eded11ac`, boot 107; single launch, not in the campaign queue) | #308: savedata mode 22 for a save that does not exist, under the probe-owned names `NKPROBE01` and `GETSIZE`: one secure entry that fits, no entries, one secure entry larger than the Memory Stick, and a NULL `sizeInfo` last, each dialog polled once a vblank at most 1200 times, recording InitStart's return, the common result word, the bind word, the status sequence and the 15 `sizeInfo` words; `sceIoGetstat` of the save directory around each dialog, where any return but 0x80010002 makes COMPLETE report FAIL and the host contract refuse the stream, because the cells then measured nothing. The recorded stream predates that check and passes it. Read-only on the Memory Stick; needs game context and a runner `--timeout` of at least 120 s. |
 | `hle-savedata-nodata` | `PSP-HLE-SAVEDATA-NODATA-001` | `CAPTURED` (2026-11-10, PSP-3000, boot 183, game context, `dbb47db4`; 35 records, 34 PASS and 1 SKIP; `nodir-load` stayed VISIBLE to its bound and the console needed a power cycle; not acceptance-eligible; single launch, not in the campaign queue) | The answers `src/rt/savedata.c` marks UNMEASURED: savedata modes on a save that is not there, under the probe-owned game name `NKPROBE01`, driven as a game drives it (GetStatus once a vblank, `Update(1)` while VISIBLE, ShutdownStart once at QUIT, at most 1200 polls). State A, no directory (`NODIR`): modes 0, 8, 11, 12, 15, 16, 19, 20, 21, 9 and 22 (the GETSIZE control). State B, `ms0:/PSP/SAVEDATA/NKPROBE01NOSFO`, which the probe makes with one 16-byte `DATA.BIN` of its own and no `PARAM.SFO`: modes 0, 8, 11, 12, 15, 16, 20, 21 and 9, then the probe removes its file and the directory. State C, `NKPROBE01DATA` made by AUTOSAVE (1 KiB of probe pattern bytes, a synthetic 16-byte key, SFO strings `NK probe`, no icons): modes 0, 8, 11, 12, 15, 20 on a file not in the save, then 9; if the directory is still there the probe removes each regular file in it and the directory. Each dialog records InitStart's return, the common result word, the bind word, the status sequence, `sceIoGetstat` of the save directory before and after, and the mode's output words (dataSize and the read buffer, the SIZES blocks, the LIST `idList` entries, the FILES counts and entries, the GETSIZE `sizeInfo`), each preset so that a word left untouched shows. Last, LOAD (mode 2) and DELETE (mode 10) of `NODIR`: these may show a system dialog; owner present to press a button (cross). Each is polled for under 30 s (1790 vblanks); one still VISIBLE at the bound records TIMEOUT and gets one ShutdownStart, and after any TIMEOUT no further savedata call is made (later dialog cells are SKIP). When any `NKPROBE01*` save directory exists at start, every cell is SKIP and nothing on the Memory Stick is touched. Game context only: under the XMB a dialog stays at INIT. One launch, a runner `--timeout` of at least 240 s, 34 result records. See [PSP-HLE-SAVEDATA-NODATA-001 capture 2026-11-10](#psp-hle-savedata-nodata-001-capture-2026-11-10). |
+| `hle-io-trunc` | `PSP-HLE-IO-TRUNC-001` | `MEASURED` (2026-11-02, PSP-3000, boot 107, game context, `08934592f`; 9 records; single launch, not in the campaign queue) | #1892: `PSP_O_TRUNC` on one probe-owned Memory Stick file, `ms0:/NKTRUNC.BIN`, refused untouched if it exists: what a truncating open shows through the same descriptor (size, seek, read, a seek-and-write), after a close without a write, and beside a second descriptor; then the file is removed twice. Every word is an observation. Writes and removes only that file. See the [2026-11-02 `hle-io-trunc` bullet](#measured-to-date-index--exact-cells-only-do-not-generalize). |
 | `hle-issues-batch` | `PSP-HLE-ISSUES-001` | `MEASURED` (2026-11-10, PSP-3000, boot 172, `979c6a1dd`; 1858 records and the done record; observed earlier from `da97b2c0` without a runner envelope; single launch, not in the campaign queue) | #356 model getters: `kuKernelGetModel` and the `SysMemUserForUser` `sceKernelGetModel` import (NID `0x6373995d`), each twice with `$v0` preset to `0xA5A5A5A5`, with the import stub's words after loading; the `SysMemForKernel` getter through `sctrlHENFindFunction` and `kuKernelCall` (only for a kernel-RAM address). #326, two passes: `vscmp.s/p/t/q` and the same-register form over six NaN/infinity/signed-zero/denormal operand sets (C200 lanes, VFPU_CC, changed-word census), and one `vrndi.s` step from each of 2 x 448 written RCX states (RCX0-7 after the write and after the step). 1858 result records; register-only VFPU cells and read-only getters. |
 | `hle-intr-cells` | `PSP-HLE-INTR-001` | `MEASURED` (2026-10-29, `77a1a5e3`, boot 66; observed earlier from `da97b2c0` without a runner envelope; single launch, not in the campaign queue) | #325: VTimer and alarm handlers returning a reschedule interval then 0 (20 ms series, 1 us series, mixed series): the sequence number, scheduled and actual VTimer time and system time of every call, and whether a call follows a return of 0; a VBLANK sub-interrupt handler in the first free slot of 0..15, counted while free, across 20 ms, 50 ms and 20 ms `sceKernelCpuSuspendIntr` windows, and while one entry holds for 25 ms. Every VTimer is stopped and deleted, every alarm cancelled, every suspension resumed, and the handler disabled and released whenever a slot was registered. Risk medium: interrupts suspended for at most 50 ms. |
 | `intr-cause` | `PSP-INTR-CAUSE-001` | `MEASURED` (2026-10-29, `2c199df8`, boot 67; single launch, not in the campaign queue) | #325: COP0 Cause, Status and Count and the Allegrex interrupt-enable word, read in kernel mode by one `kuKernelCall` each, with the system time and `sceDisplayGetVcount`: four reads with interrupts enabled after a VBLANK start, then per pass (two passes) a read every 1 ms through a 24 ms `sceKernelCpuSuspendIntr` window, one read 200 us after the resume and the window summary. Read-only; nothing is installed. 58 result records. |
@@ -3781,6 +3955,8 @@ not expected PSP values.
 | `dma-timing` | `PSP-DMAC-002` | `MEASURED` (2026-10-29, `0e40e7d3`, `281a21a4` and `1310e632`; single launches, not in the campaign queue) | #303: `sceDmacMemcpy` / `sceDmacTryMemcpy` per-call duration by size (0x10 to 0x100000) and main-RAM/VRAM pair, relative-alignment cost, BUSY against the NULL and zero-size checks, what a refused Try copies, the order of queued callers, the busy window, and the sizes a pending transfer lets through. 202 result records in the last build. |
 | `ge-raster` | `PSP-GE-RASTER-001` | `MEASURED` (2026-10-29, `990748ec`; single launch, not in the campaign queue) | #343: the raw pixels of a 16x4 window after 189 project-written display lists: blend factors and equations, alpha, colour, stencil and depth tests, texture functions, formats, CLUT modes and row pitch, wrap and clamp, triangle, line and point coverage, 16-bit framebuffers, dithering, pixel masks, logic operations, clear mode, and transform-mode triangles, sprites and fog. 945 result records. |
 | `ge-through-z` | `PSP-GE-THROUGHZ-001` | `MEASURED` (2026-11-10, PSP-3000, boot 180, XMB context, `e4e6a3a2`; 23 records) | Through-mode vertex z outside 0..65535, fractional, infinite and NaN: the depth word the GE writes under a 16x16 sprite (depth test ALWAYS, writes on, cleared to 0x1234) and whether colour is written: clamp, wrap or a dropped draw (a Ridge Racer 2 fix). Every z, +inf and NaN included, drew all 256 colour pixels; no word of the depth block the probe read linearly changed, so the stored depth, and clamp or wrap, is not shown. |
+| `ge-raster-bounds` | `PSP-GE-RASTER-002` | `MEASURED` (2026-11-13 UTC, PSP-3000, boot 214, XMB context, `05aafe975`; 38 records and the done record, all PASS, acceptance-eligible; unattended run; the depth cells UNDECIDED) | #2193: colour writes past the frame-buffer stride (fbw 512, 500, 256), depth writes past zbw 256, and a depth-only clear under a scissor. Colour written past the frame-buffer width continues linearly (8012 pixels at fbw 500, 2784 at fbw 256) and only the scissor clips; drawn 8888 pixels keep the fill's alpha byte (`0x5a00ff00`). The depth view read 0 for every word, so `depth-zbw256-past` and `depth-clear-scissor` are UNDECIDED, not measured. See the `ge-raster-bounds` run in the measured-to-date index. Development runs of earlier builds (PSP-3000, XMB context, 2026-11-12, boots 194 and 195) are not results. |
+| `ge-depth-round` | `PSP-GE-RASTER-003` | `MEASURED` (2026-11-13 UTC, PSP-3000, boot 215, XMB context, `05aafe975`; 18 records and the done record, all PASS, acceptance-eligible; unattended run) | #343 cells `zr-thru-eq`, `zr-thru-gt` and `zr-xf-eq`: whether the GE truncates or rounds a fractional depth, read as colour in the `ge-raster` window (a 0x1f, 0xe0 or 0xff mask reads "truncate or reduced precision"). The pass masks read 0x1f, 0xe0 and 0xff per eight pixels, so "truncate or reduced precision" in all three cells; truncation alone is not claimed. Development runs of earlier builds (PSP-3000, XMB context, 2026-11-12, boots 194 and 195) are not results. |
 | `insn-trace` | `PSP-TRACE-001` | `MEASURED` (2026-10-29, `84568280`; 2026-11-02, `1fbab0c6`, boot 98; single launches, not in the campaign queue) | #312: per instruction of four source-owned microprograms single-stepped on the Allegrex (ALU, shifts, compares, mult/divu, loads and stores of every width, a delay-slot loop; branches and likely branches, bal/bltzal calls returning by jr, a store in a delay slot; `add.s`/`mfc1`/`c.eq.s`/`cfc1` and `mfv`/`mtv`), the traced register state, including FCR31 and selected VFPU registers, and any store. 136 result records in 2026-10-29's two-fixture build, 149 in the four-fixture build; the v2 traces agree with Nakagawa's. See [#1375 and #312 runs 2026-11-02](#1375-and-312-runs-2026-11-02). |
 | `ge-sync-ids` | `PSP-GE-SYNC-001` | `MEASURED` (2026-10-31, `66940d76`, boot 86; single launch, not in the campaign queue; captured earlier from `96fe29f6` and `f6da6125`) | #1374: `sceGeListSync`, `sceGeDrawSync` and `sceGeListDeQueue` on an unknown queue id, on completed lists before and after later lists, on a list a `sceGeBreak(1)` reset removed, and with sync types other than 0 and 1, each blocking call bounded in a helper thread. See [PSP-GE-SYNC-001 runs 2026-10-31](#psp-ge-sync-001-runs-2026-10-31). |
 | `ge-signal` | `PSP-GE-SIGNAL-001` | `CAPTURED` (2026-11-10, PSP-3000, boot 179, XMB context, `80e7c9eb`; 37 records, 12 of 14 cells; incomplete, stalled at `rjump-un`, console power-cycled; not acceptance-eligible) | #2095: whether the signal handler runs for SIGNAL behaviours 0x01-0x03 (and the undefined 0x00 and 0x04), whether the list waits for it, whether 0x03 pauses until `sceGeContinue`, what a NULL-handler callback id does, and where RJUMP and RCALL go with an aligned and an unaligned offset; every cell bounded, a `sceGeBreak(1)` reset after a `TIMEOUT`. Continue and reset are decided from the probe's own list state and a bounded (100 ms) idle wait, never one `sceGeDrawSync(1)` sample, as the VSH draws its own lists in the XMB context. POWER RISK: `rjump-un` and `rcall-un` are not to be re-run unattended. See [PSP-GE-SIGNAL-001 capture 2026-11-10](#psp-ge-signal-001-capture-2026-11-10). |
@@ -3789,13 +3965,14 @@ not expected PSP values.
 | `ge-clut-mip` | `PSP-GE-MIP-002` | `MEASURED` (2026-11-06, PSP-3000, boot 134, `2795f150`; 94 records) | Multi-CLUT mip sampling cells across palette formats, banks and level selection. |
 | `ge-weight` | `PSP-GE-WEIGHT-001` | `MEASURED` (2026-11-06, PSP-3000, boot 136, `d5fed0ba`; 288 records) | Weighted-vertex format and count combinations with raw GE output windows. |
 | `ge-rtt` | `PSP-GE-RTT-001` | `MEASURED` (2026-11-06, PSP-3000, boot 137, `cb3702cf`; 126 records) | Render-to-texture CPU reads, flush variants and output pixels. |
-| `hle-std-handles` | `PSP-HLE-STDIO-001` | `MEASURED` (2026-11-06, PSP-3000, boot 135, `d5fed0ba`; 4 records) | Standard-handle write and close results; the probe does not read stdin. |
+| `hle-std-handles` | `PSP-HLE-STDIO-001` | `MEASURED` (2026-11-06, PSP-3000, boot 135, `d5fed0ba`, XMB context; again 2026-11-12, boot 200, `3872796c`, game context; 4 records each) | Standard-handle write and close results; the probe does not read stdin. The close of Stdout answered `0x800200d1` on boot 135 (XMB, ARK-5 5.1.0) and `0x80020325` on boot 200 (game context, ARK-5 5.2.0); which factor decides it is not measured. |
 | `hle-audio-rest` | `PSP-HLE-AUDIO-REST-001` | `MEASURED` (2026-11-06, PSP-3000, boot 138, `8db3ec9d`; 102 records) | RestLen and RestLength after 32 blocking-output calls at 1024, 2048 and 4096 frames. |
-| `sas-adsr` | `PSP-SAS-002` | `CAPTURED` (2026-11-10, PSP-3000, boot 185, game context, `74acbe42`; 696 records, complete, all PASS; not acceptance-eligible: loaded module not proven unloaded) | The SAS envelope for #1296; every record repeats the 2026-11-05 values. See [PSP-SAS-002 capture 2026-11-10](#psp-sas-002-capture-2026-11-10). |
-| `sas-mix` | `PSP-SAS-003` | `CAPTURED` (2026-11-07, PSP-3000, boot 146, game context, `979de58f`; 205 records, complete, all PASS; not acceptance-eligible: loaded module not proven unloaded) | Synthetic volume, WithMix and pitch cells for #2135 and #2054. See [PSP-SAS-003 capture 2026-11-07](#psp-sas-003-capture-2026-11-07). |
+| `sas-adsr` | `PSP-SAS-002` | `MEASURED` (2026-11-13 UTC, PSP-3000, boot 208, game context, `06a6c942c`; 696 records and the done record, all PASS, acceptance-eligible; captured earlier on boot 185 with the same records) | The SAS envelope for #1296; every record repeats the 2026-11-05 values. See [PSP-SAS-002 capture 2026-11-10](#psp-sas-002-capture-2026-11-10). |
+| `sas-mix` | `PSP-SAS-003` | `MEASURED` (2026-11-12, PSP-3000, boot 197, game context, `3872796c`; 205 records, all PASS, acceptance-eligible; captured earlier on boots 146 and 191 with the same records) | Synthetic volume, WithMix and pitch cells for #2135 and #2054. See [PSP-SAS-003 capture 2026-11-07](#psp-sas-003-capture-2026-11-07). |
 | `vcodec-words` | `PSP-VCODEC-001` | `NOT_RUN` | Built Media Engine boundary-word cells over synthetic AVC access units; no hardware result is claimed. |
 | `hle-self-stop-unload` | `PSP-HLE-SELFSTOP-001` | `MEASURED` (2026-11-08, PSP-3000, boot 165, `935f225d`; 6 records) | #341: sceKernelSelfStopUnloadModule from a helper PRX's own thread: the call does not return, module_stop runs once and the module is unloaded. |
-| `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | `NOT_RUN` | Built #1386 dialog timing and wrong-state cells; no hardware result is claimed. |
+| `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | `NOT_RUN` (captured twice, PSP-3000, game context, 2026-11-12 boots 204 and 206; not acceptance-eligible) | Built #1386 dialog timing and wrong-state cells; no hardware result is claimed. A netconf dialog (boot 204) and a gamedata install dialog (boot 206) stayed RUNNING to the poll cap and the console then needed a power cycle: [captures](#psp-hle-utility-dialog-001-captures-2026-11-12). |
+| `hle-utility-netconf-sharing` | `PSP-HLE-UTILITY-DIALOG-002` | `CAPTURED` (2026-11-13 UTC, PSP-3000, boot 211, game context, `e8b9b0cd5`; game sharing stayed RUNNING to the poll cap, the netconf cells did not run, and the console needed a power cycle; not acceptance-eligible) | See [PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13](#psp-hle-utility-dialog-002-capture-2026-11-13). Built #1386 game sharing and netconf dialog cells (case 166), game sharing first and netconf last, with no savedata and no gamedata install dialog; no hardware result is claimed. POWER RISK, owner present, one launch per boot: case 161's netconf dialog stuck RUNNING on boot 204 ([captures](#psp-hle-utility-dialog-001-captures-2026-11-12)), so netconf-timing is expected to stick here too and the console to need a power cycle either way (on boot 204 it followed a net teardown that completed; case 166 tears down as case 161 does). Game context, WLAN switch on; the game sharing dialog is expected to use the PSP's ad hoc radio, and nothing is sent to an access point or any server. |
 | `hle-io-seek` | `PSP-HLE-IO-SEEK-001` | `MEASURED` (2026-11-08, PSP-3000, boot 156, `59520eb0`; 30 records) | #1380: flash0 seeks (64- and 32-bit), sceIoIoctl file commands, and writes on read-only descriptors. |
 | `hle-io-seek-edges` | `PSP-HLE-IO-SEEK-002` | `MEASURED` (2026-11-11, PSP-3000, boot 192, `1a5157e37`; 24 records) | #1380: flash0 SEEK_CUR and past-0x100000000 seeks, and Memory Stick open-flag and async-write cells on a probe-owned file. |
 | `hle-nickname-limit` | `PSP-HLE-NICKNAME-001` | `MEASURED` (2026-11-08, PSP-3000, boot 155, `07e58170`; 16 records) | W-NET-1 (#2197): the owner_name key type and the nickname string call at eight buffer lengths; no value bytes. |
@@ -3812,7 +3989,73 @@ not expected PSP values.
 | `vfpu-prefix-state` | `PSP-VFPU-PREFIX-001` | `MEASURED` (2026-11-10, PSP-3000, boot 175, `48cea955`; 199 records) | #326: non-identity vpfxs/vpfxt/vpfxd on vadd/vmul/vdot/vmin/vmov/vneg/vzero/vidt .q over NaN, inf, denormal and -0 lanes; prefix lifetime across vnop, vsync, vflush, a branch, add.s, mtv, mfv, lv.q, vpfxt and mfvc with the raw prefix control words; vfim.s/viim.s under a pending vpfxd. |
 | `vfpu-wider-ops` | `PSP-VFPU-WIDEROPS-001` | `MEASURED` (2026-11-10, PSP-3000, boot 176, `9426722a`; 223 records) | #326: vdiv.p/.t/.q, vsin/vcos/vrcp .p/.t/.q, vrsq.q, vsqrt.q, vocp.s/.q, the .p/.t dot and matrix forms over finite order-sensitive, NaN, inf and denormal cells, and vidt.q/.p into every column and row register of one matrix. |
 | `vfpu-reserved-widths` | `PSP-VFPU-RESERVED-001` | `MEASURED` (2026-11-10, PSP-3000, boot 182, `c6abab53`; 9 records; POWER RISK: reserved encodings; owner present) | #326: hand-encoded vus2i.t/.q and vs2i.t/.q words (refused by psp-as) over a sentinel image, M200 and C000 recorded. No word raised an exception; at .t and .q each form wrote what its .p form writes, four lanes from two source words. |
-| `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (not registered; captured twice, PSP-3000, firmware 6.6.1: 2026-11-07 boot 145 and 2026-11-08 boot 152; rerun required; the probe prints `test_id=PSP-MPEG-001` and the cell is registered here as `PSP-MPEG-YCBCR-001`) | Each mode begins from a fresh stream, ringbuffer and MPEG context. The capture measured mode 2 (query 128, a 128-byte header after a decode, a CSC of zero pixels), the CSC y and h refusals and the 16-bit CSC output (#302). Mode 3's second decode never returned on boot 145 and again on boot 152 (the first returned 0 and left a 16-byte header over a black 4:2:0 frame); the probe now bounds each mode 2 and 3 decode with a 3 s helper thread and stops making MPEG calls after a block. |
+| `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (not registered; captured three times, PSP-3000, firmware 6.6.1: 2026-11-07 boot 145, 2026-11-08 boot 152 and 2026-11-12 boot 202 in the game context; rerun required; the probe prints `test_id=PSP-MPEG-001` and the cell is registered here as `PSP-MPEG-YCBCR-001`) | Each mode begins from a fresh stream, ringbuffer and MPEG context. The capture measured mode 2 (query 128, a 128-byte header after a decode, a CSC of zero pixels), the CSC y and h refusals and the 16-bit CSC output (#302). Mode 3's second decode never returned on boot 145 and again on boot 152 (the first returned 0 and left a 16-byte header over a black 4:2:0 frame); the probe now bounds each mode 2 and 3 decode with a 3 s helper thread and stops making MPEG calls after a block. On boot 202, at `3872796c` with that bound, mode 3's first decode returned 0 and the second again did not return: the bound recorded `0x800201a8`, and the CSC and decode-stop cells were not called. That envelope is not acceptance-eligible either: the probe still prints the earlier `RC` status, its completion contract is unregistered and its module was not proven unloaded. The console powered off during the Nakagawa Link reset that followed it. |
+
+### PSP-HLE-UTILITY-DIALOG-001 captures 2026-11-12
+
+`hle-utility-dialogs` (case 161, `fixtures/psp_oracle/probe_hle_measure.c`) ran twice on 2026-11-12 (UTC) on the
+PSP-3000 at `3872796c`, each in the game context (entered from the XMB by one
+`nkctl --owner-present game-context` soft reset, the owner at the console and pressing nothing), each after a `transport-write` preflight. Firmware: system software 6.61
+(operator-declared); PSPLink `pspver` 0x06060110, recorded as 6.6.1; custom firmware ARK-5 with cIPL, version 5.2.0
+(operator-declared). Neither envelope is acceptance-eligible, so these captures establish nothing about PSP
+behaviour; the values below are what was captured. Each stream is complete (24 records and the done record, out0
+`0x18`) and ends COMPLETE FAIL with three blockers: "loaded module was not proven unloaded",
+`PHYSICAL_INTERVENTION_REQUIRED` and a record that did not pass. Each time a dialog stayed RUNNING to the poll cap,
+PSPLink then stopped answering, and the console needed a power cycle by the owner. The raw envelopes and host0 logs
+stay in the private campaign directory.
+
+- Boot 204, a UMD in the drive. The three `savedata-timing` runs (mode 22 GETSIZE on a save no game owns) each
+  returned 0 from InitStart and reached NONE. Run 1 went INIT at vblank 0, RUNNING at 7, FINISHED at 125 and NONE
+  at 127 (126 polls, 116 Update calls); its first ShutdownStart, at the cancel bound while RUNNING (vblank 67),
+  returned `0x80110001`, and its second, at FINISHED, was accepted. Runs 2 and 3 went RUNNING at 7, FINISHED at 11,
+  NONE at 13 (13 and 14 polls, 4 Update calls each, one ShutdownStart at FINISHED returning 0). The common result
+  word after each run was `0x80110327`. The gamedata timing and state cells were SKIP with reason 1 (a UMD present) and `gamedata-cleanup` with reason 7. `netconf-setup`
+  passed; in `netconf-timing` InitStart returned 0, the dialog went RUNNING at vblank 44 and was still RUNNING at
+  the 600-poll cap (563 Update calls, last poll at vblank 616); the first ShutdownStart while RUNNING (vblank 111)
+  returned `0x80110001`; a second was made at the next cancel bound, its return is not recorded, and the dialog
+  stayed RUNNING; `hotspot_connected` stayed 0. Every later dialog cell was SKIP with reason 5
+  (an earlier dialog stuck); `netconf-teardown` undid all 5 setup calls.
+- Boot 206, the UMD removed. The `savedata-timing` runs gave the same shape (run 1: RUNNING at 7, FINISHED at 126,
+  NONE at 127, a ShutdownStart at vblank 66 while RUNNING returning `0x80110001`; runs 2 and 3: RUNNING at 6 and 7,
+  FINISHED at 10 and 11, NONE at 11 and 12), each ending with the common result word `0x80110327`.
+  `gamedata-precheck` found no disc and no probe directory (`sceUmdCheckMedium` 0, the Dopen and the Getstat both
+  `0x80010002`). In `gamedata-timing` InitStart returned 0, the install dialog went RUNNING at vblank 48 and was
+  still RUNNING at the 600-poll cap (559 Update calls, last poll at vblank 615); the first ShutdownStart while
+  RUNNING (vblank 114) returned `0x80110001`; a second was made at the next cancel bound, its return is not
+  recorded, and the dialog stayed RUNNING; the progress word stayed 0. `gamedata-cleanup` found
+  no directory to remove (its Dopen `0x80010002`). Every later dialog cell, net setup included, was SKIP with reason
+  5, so no netconf or game sharing cell ran.
+
+Every ShutdownStart these captures recorded while RUNNING (four of the six issued) returned `0x80110001`. The
+runtime's utility slot now refuses ShutdownStart during INIT and RUNNING with `0x80110001` for every dialog type, as
+the message dialog's measured rule does (`utility_shutdown_refused` in `src/rt/hle_utility.c`); for savedata, netconf
+and gamedata while RUNNING that agrees with these captures, and for game sharing while RUNNING it agrees with the
+[PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13](#psp-hle-utility-dialog-002-capture-2026-11-13); the other cells
+stay UNMEASURED. An acceptance-eligible run is needed before any of it is a measured claim (#1386).
+
+### PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13
+
+`hle-utility-netconf-sharing` (case 166, `fixtures/psp_oracle/probe_hle_measure.c`) ran once on 2026-11-13 (UTC) on
+the PSP-3000, boot 211, in the game context (entered from the XMB by one `nkctl --owner-present game-context` soft
+reset, the owner at the console), built from `e8b9b0cd5`, a descendant of this tree's base whose
+`fixtures/psp_oracle` sources and `tools/psp_oracle/parse_golden.py` are identical to this tree's. Firmware: system
+software 6.61 (operator-declared); PSPLink `pspver` 0x06060110, recorded as 6.6.1 in the game context; custom
+firmware ARK-5 with cIPL, version 5.2.0 (operator-declared, not read by a tool); PSPLink built from
+`pspdev/psplinkusb` `7a0035d9`. The envelope is not acceptance-eligible: the loaded module was not proven unloaded
+and the console needed a power cycle. The capture is therefore `CAPTURED`, establishes nothing about PSP behaviour,
+and no cell is MEASURED; the values below are what it shows. The raw envelope and host0 log stay in the private
+campaign directory.
+
+- The sharing net setup returned 0 for all five calls.
+- Game sharing InitStart returned 0. The status went NONE, then INIT at vblank 0, then RUNNING at vblank 44, and
+  stayed RUNNING to the 600-poll cap.
+- The first ShutdownStart, sent while RUNNING at vblank 111, returned `0x80110001`; 2 ShutdownStart calls were made
+  in all, and the dialog stayed RUNNING.
+- The common result word (+0x1c) and the sharing result word (+0x4c) both read `0x80110703`.
+- The sharing teardown returned 0 for all five calls.
+
+No netconf cell ran: the case runs netconf only if game sharing does not stick, so this capture shows nothing about
+the netconf dialog.
 
 ### PSP-HLE-SAVEDATA-NODATA-001 capture 2026-11-10
 
@@ -3891,9 +4134,9 @@ It is the first run of the current status encoding, which writes `PASS` or `ERRO
 earlier source revision wrote `RC`. The two streams have the same 696 case ids, and every record has the same result
 and out words in both. The values described in `fixtures/psp_oracle/README.md` are therefore what both runs show. The
 case used to keep AVCODEC and SASCORE loaded (as `sas-init` does), so the module set after it always differed from
-the one before the launch. Since 2026-11-11 it unloads SASCORE, then AVCODEC, after its done record, so a rerun can
-pass the runner's teardown check; no such rerun has been made, and that rerun is also the first run of the unload
-itself (unloading SASCORE while a SAS core is initialised is not measured).
+the one before the launch. Since 2026-11-11 it unloads SASCORE, then AVCODEC, after its done record. The 2026-11-13
+(UTC) rerun on boot 208 at `06a6c942c` passed the runner's teardown check and is acceptance-eligible; its 696 records
+equal this capture's, so it measures the values above (see the `sas-adsr` run in the measured-to-date index).
 
 ### PSP-SAS-003 capture 2026-11-07
 
@@ -3907,8 +4150,8 @@ the XMB context); custom firmware ARK-5 with cIPL, version 5.1.0 (operator-decla
 is complete: 205 records (204 cells and the done record, out0 `0xcc`), all PASS, COMPLETE PASS, after a
 `transport-write` preflight. The envelope is not acceptance-eligible: its one acceptance blocker is "loaded module
 was not proven unloaded" (the teardown found the post-unload module set different from the one before the launch),
-and the runner's recovery then reset the PSP to boot 147. The capture is therefore `CAPTURED` and establishes nothing
-about PSP behaviour; the values below are what it shows. The case kept AVCODEC and SASCORE loaded, so the module set
+and the runner's recovery then reset the PSP to boot 147. This capture alone established nothing about PSP
+behaviour; the 2026-11-12 run measures the values below. The case kept AVCODEC and SASCORE loaded, so the module set
 after it differed.
 
 A second capture on 2026-11-11 (UTC), boot 191, game context, at `a39f7a14c` (the same `sas_mix` source as
@@ -3919,9 +4162,12 @@ modules after the unload against 52 before the launch), "source worktree is dirt
 with uncommitted edits, so `a39f7a14c` is the commit the probe reported, not a clean-source binding) and
 `PHYSICAL_INTERVENTION_REQUIRED`; the runner's recovery then could not get a PSPLink reply, so the Nakagawa Link
 watchdog reset the PSP to boot 192. Since 2026-11-11 the case unloads SASCORE, then AVCODEC, after its done record,
-so a rerun can pass the teardown check; no such rerun has been made, and that rerun is also the first run of the
-unload itself (unloading SASCORE while a SAS core is initialised is not measured). The raw envelopes, host0 logs and
-decode stay in the private campaign directory.
+so a rerun can pass the teardown check. That rerun ran on 2026-11-12 (UTC), boot 197, game context, at `3872796c`,
+ARK-5 5.2.0 (`pspver` 0x06060110, recorded as 6.6.1): the same 205 records with the same result and out words, all
+PASS, COMPLETE PASS, acceptance-eligible with 0 blockers, and the teardown found the module set the launch started
+from. It was the first run of the unload itself; that unloading SASCORE while a SAS core is initialised succeeds is
+shown only by that teardown, not by a record. The raw envelopes, host0 logs and decode stay in the private
+campaign directory.
 
 The voice is a flat VAG of sample `0x0700`, whose full-scale output is `0x06fe`.
 
