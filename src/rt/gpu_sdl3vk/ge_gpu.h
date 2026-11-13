@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "../../core/nk_shared_helpers.h"
+
 /* Pure parser for the render-scale environment (Settings > Internal Render
  * Resolution). The explicit diagnostic SR_GPU_SCALE wins when present; otherwise
  * the player-facing SR_RESOLUTION_SCALE is used. Values clamp to
@@ -202,6 +204,30 @@ enum {
     GEGPU_FALLBACK_MIPS, GEGPU_FALLBACK_LINE, GEGPU_FALLBACK_POINT, GEGPU_FALLBACK_REASONS
 };
 
+/* Each reason's token in the render_fallback boot event and the player (#2151); NULL out of range. */
+static inline const char *gegpu_fallback_token(int reason) {
+    static const char *const tokens[GEGPU_FALLBACK_REASONS] = {
+        "stencil", "color_test", "logic_op", "write_mask", "ram_fb", "wide_stride", "mips",
+        "line", "point",
+    };
+    return reason >= 0 && reason < GEGPU_FALLBACK_REASONS ? tokens[reason] : NULL;
+}
+
+/* The render_fallback boot event and the player name these reasons as nk_shared_helpers.h's
+ * NkRenderEffect, in this order (#2151); the rule that decides when one is reported is there
+ * too (NK_RENDER_FALLBACK_*). */
+_Static_assert(GEGPU_FALLBACK_REASONS == (int)NK_RENDER_EFFECT_COUNT &&
+               GEGPU_FALLBACK_STENCIL == (int)NK_RENDER_EFFECT_STENCIL &&
+               GEGPU_FALLBACK_COLOR_TEST == (int)NK_RENDER_EFFECT_COLOR_TEST &&
+               GEGPU_FALLBACK_LOGIC_OP == (int)NK_RENDER_EFFECT_LOGIC_OP &&
+               GEGPU_FALLBACK_WRITE_MASK == (int)NK_RENDER_EFFECT_WRITE_MASK &&
+               GEGPU_FALLBACK_RAM_FB == (int)NK_RENDER_EFFECT_RAM_FB &&
+               GEGPU_FALLBACK_WIDE_STRIDE == (int)NK_RENDER_EFFECT_WIDE_STRIDE &&
+               GEGPU_FALLBACK_MIPS == (int)NK_RENDER_EFFECT_MIPS &&
+               GEGPU_FALLBACK_LINE == (int)NK_RENDER_EFFECT_LINE &&
+               GEGPU_FALLBACK_POINT == (int)NK_RENDER_EFFECT_POINT,
+               "the render_fallback event names the GE's fallback reasons in their order");
+
 typedef struct GeGpuReplayStats {
     unsigned long long queue_submits;
     unsigned long long render_submits;
@@ -215,7 +241,7 @@ typedef struct GeGpuReplayStats {
      * fallbacks that took a GPU-valid colour target back to guest VRAM (a synchronous
      * colour and depth readback each), by reason: GEGPU_FALLBACK_*. */
     unsigned long long fallback_prims;
-    unsigned long long fallback_readbacks[9];
+    unsigned long long fallback_readbacks[GEGPU_FALLBACK_REASONS];
     /* Stencil primitives that started a new batch because their box met the batch's
      * earlier primitives and the state reads what it writes (a snapshot copy between). */
     unsigned long long stencil_splits;
@@ -245,6 +271,14 @@ typedef struct GeGpuReplayStats {
 void gegpu_replay_stats_reset(void);
 void gegpu_replay_stats_get(GeGpuReplayStats *out);
 void gegpu_cpu_profile_stats_get(GeGpuCpuProfileStats *out);
+
+/* The always-on counts the render fallback status reads once per accepted present (gui.c,
+ * #2151), indexed by GEGPU_FALLBACK_*: cumulative for the run, never reset, so a reader takes
+ * deltas. All zero, with ready 0, while the GPU GE is not running. gpu_prims counts the
+ * triangles, sprites and lines drawn on the GPU (a T&L primitive by its triangles), mod 2^32;
+ * sw_prims each primitive drawn by ge.c instead; readbacks is fallback_readbacks above. */
+typedef NkRenderFallbackCounts GeGpuFallbackCounts;
+void gegpu_fallback_counts(GeGpuFallbackCounts *out);
 
 /* Selftest entry points: defined only in selftest builds (see ge_gpu.c), but
  * declared unconditionally so no translation unit ever sees an implicit
