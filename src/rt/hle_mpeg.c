@@ -59,6 +59,15 @@ SrPsmfPlayer s_psmf_players[4];
  * player path being involved in a no-new-frame stretch. File-local: no other translation
  * unit consumes them (the watchdog that prints them lives in this file). */
 unsigned long s_psmf_calls = 0, s_psmf_getvideo = 0, s_psmf_getaudio = 0;
+#ifdef SR_HLE_THREAD_SELFTEST
+/* hle_thread_selftest (#286): how many host player slots are in use, whatever key holds them. */
+unsigned sr_hle_test_psmf_players_used(void) {
+    unsigned n = 0;
+    for (size_t i = 0; i < sizeof(s_psmf_players) / sizeof(s_psmf_players[0]); i++)
+        n += s_psmf_players[i].used != 0;
+    return n;
+}
+#endif
 static SrPsmfPlayer *psmf_slot(uint32_t guest, int create) {
     SrPsmfPlayer *freeSlot = NULL;
     for (size_t i = 0; i < sizeof(s_psmf_players) / sizeof(s_psmf_players[0]); i++) {
