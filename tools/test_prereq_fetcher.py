@@ -301,9 +301,21 @@ class TestPrerequisiteFetcher(unittest.TestCase):
             with patch.dict(os.environ, {"HOME": str(home), "XDG_CONFIG_HOME": ""}, clear=True):
                 self.assertEqual(default_data_root(), home / ".local" / "share" / "nakagawa-recomp",
                                  "old settings found through HOME choose the old layout")
-            with patch.dict(os.environ, {"XDG_DATA_HOME": "relative"}, clear=True):
+            # Without HOME or an absolute XDG_DATA_HOME there is no folder, as in the player (which
+            # never read the password database); origin/main's tools fell back to it.
+            for environment in ({"XDG_DATA_HOME": "relative"}, {}):
+                with patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_DIR_UNAVAILABLE"):
+                        default_data_root()
+            # A path too long for the player to name (NK_MAX_PATH) is no folder either.
+            overlong = str(self.root / ("0" * 200) / ("0" * 200) / ("0" * 200))
+            fresh_home = str(self.root / "fresh-home")
+            with patch.dict(os.environ, {"HOME": fresh_home, "XDG_DATA_HOME": overlong}, clear=True):
                 with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_DIR_UNAVAILABLE"):
                     default_data_root()
+        with patch.object(sys, "platform", "darwin"), patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_DIR_UNAVAILABLE"):
+                default_data_root()
 
     def test_happy_path_extracts_only_verified_payload_and_records_license(self) -> None:
         item = self.item()

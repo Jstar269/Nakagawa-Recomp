@@ -418,21 +418,11 @@ void native_test_capture_real_config_probe(void) {
     if (env_android && env_android[0]) {
         snprintf(g_real_config_probe, sizeof(g_real_config_probe), "%s/config", env_android);
     }
-#elif defined(__APPLE__)
-    const char *env_home = getenv("HOME");
-    if (env_home && env_home[0]) {
-        snprintf(g_real_config_probe, sizeof(g_real_config_probe),
-                 "%s/Library/Application Support/NakagawaRecomp/config", env_home);
-    }
 #else
-    const char *env_xdg = getenv("XDG_CONFIG_HOME");
-    const char *env_home = getenv("HOME");
-    if (env_xdg && env_xdg[0]) {
-        snprintf(g_real_config_probe, sizeof(g_real_config_probe),
-                 "%s/nakagawa-recomp", env_xdg);
-    } else if (env_home && env_home[0]) {
-        snprintf(g_real_config_probe, sizeof(g_real_config_probe),
-                 "%s/.config/nakagawa-recomp", env_home);
+    /* Linux and macOS: the settings folder of whichever layout the real profile uses (#324,
+       nk_data_migrate.h), found by the production resolver without creating anything. */
+    if (!nk_platform_resolve_path(NK_PATH_CONFIG, g_real_config_probe, sizeof(g_real_config_probe))) {
+        g_real_config_probe[0] = '\0';
     }
 #endif
     if (g_real_config_probe[0]) {

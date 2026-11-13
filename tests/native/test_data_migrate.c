@@ -57,9 +57,10 @@ static void test_notice(void) {
           "no notice when only one layout holds data");
     layout.old_layout.holds_data = true;
     CHECK(nk_data_layout_notice(&layout, notice, sizeof(notice)), "a notice when both hold data");
-    CHECK(strcmp(notice, "Both /h/.local/share/Nakagawa and /h/.local/share/nakagawa-recomp and "
-                         "/h/.config/nakagawa-recomp hold Nakagawa data; Nakagawa uses the first.") == 0,
-          "it names the new folder, then the old data and settings folders");
+    CHECK(strcmp(notice, "Nakagawa uses /h/.local/share/Nakagawa. Nakagawa data is also in "
+                         "/h/.local/share/nakagawa-recomp (settings in /h/.config/nakagawa-recomp), "
+                         "which is not used.") == 0,
+          "it names the folder in use, then the old data and settings folders");
     CHECK(!nk_data_layout_notice(&layout, notice, 16u) && notice[0] == '\0',
           "a notice that does not fit is not cut short");
 }
@@ -230,7 +231,7 @@ static void test_rule_table(void) {
         if (shown) {
             char new_root[NK_MAX_PATH];
             parent_of(g_layout.new_layout.path[NK_PATH_DATA], new_root, sizeof(new_root));
-            CHECK(strncmp(notice, "Both ", 5u) == 0 && strstr(notice, new_root) == notice + 5 &&
+            CHECK(strncmp(notice, "Nakagawa uses ", 14u) == 0 && strstr(notice, new_root) == notice + 14 &&
                       strstr(notice, g_layout.old_layout.path[NK_PATH_DATA]) != NULL,
                   "the notice names the folder in use first, then the other");
         }
@@ -309,8 +310,21 @@ static void test_variables(void) {
     snprintf(want, sizeof(want), "%s/.config/nakagawa-recomp", home);
     CHECK(strcmp(g_layout.old_layout.path[NK_PATH_CONFIG], want) == 0,
           "the old settings are in ~/.config, as before");
+    /* A path too long to name (NK_MAX_PATH) is no folder, as in the tools. */
+    char long_home[NATIVE_TEST_PATH_MAX];
+    snprintf(long_home, sizeof(long_home), "%s/%0200d/%0200d/%0200d", root, 0, 0, 0);
+    native_test_set_env("XDG_DATA_HOME", long_home);
+    CHECK(nk_platform_user_data_layout(&g_layout) && !g_layout.old_in_use &&
+              !g_layout.new_layout.path[NK_PATH_DATA][0] && !g_layout.old_layout.path[NK_PATH_DATA][0],
+          "an overlong XDG_DATA_HOME names no data folder in either layout");
+    CHECK(!nk_platform_resolve_path(NK_PATH_DATA, got, sizeof(got)), "so there is none to use");
+    native_test_set_env("XDG_DATA_HOME", NULL);
+
+    CHECK(nk_platform_user_data_layout(&g_layout), "the layouts again");
     make_state(&g_layout.old_layout, "settings");
-    native_test_set_env("XDG_CONFIG_HOME", "");
+    /* HOME with a trailing '/' names the same folders and makes the resolver decide again. */
+    snprintf(want, sizeof(want), "%s/", home);
+    native_test_set_env("HOME", want);
     CHECK(nk_platform_user_data_layout(&g_layout) && g_layout.old_in_use &&
               resolves_to(&g_layout.old_layout),
           "old settings found through HOME choose the old layout");

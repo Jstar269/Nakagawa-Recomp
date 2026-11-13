@@ -139,7 +139,8 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   `~/.local/share/Nakagawa`) on Linux, and `~/Library/Application Support/Nakagawa` on macOS. Linux keeps
   the cache in `~/.cache/nakagawa-recomp` and the logs in `~/.local/state/nakagawa-recomp/logs` (or under
   `$XDG_CACHE_HOME` and `$XDG_STATE_HOME`); an XDG variable that is not an absolute path is ignored, as
-  the XDG specification says.
+  the XDG specification says. Without `HOME` (or an absolute `$XDG_DATA_HOME`) there is no data folder,
+  and the Python tools stop with `DATA_DIR_UNAVAILABLE`.
 - **If you used an earlier Linux or macOS build.** Your install stays where it is, for good: Linux's
   `~/.local/share/nakagawa-recomp` (or `$XDG_DATA_HOME/nakagawa-recomp`) with its settings in
   `~/.config/nakagawa-recomp`, or macOS's `~/Library/Application Support/NakagawaRecomp`. Nakagawa

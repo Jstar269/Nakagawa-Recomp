@@ -22,7 +22,7 @@ static void parent_of(const char *path, char *out, size_t cap) {
 }
 
 /* How to name a layout: the one folder that holds its config, data and saves folders (the new
-   layout, and macOS's old one), else its data folder and its config folder (Linux's old one). */
+   layout, and macOS's old one), else its data folder with its settings folder (Linux's old one). */
 static bool name_layout(const NkDataLayoutFolders *folders, char *out, size_t cap) {
     char config[NK_MAX_PATH], data[NK_MAX_PATH], saves[NK_MAX_PATH];
     parent_of(folders->path[NK_PATH_CONFIG], config, sizeof(config));
@@ -30,7 +30,7 @@ static bool name_layout(const NkDataLayoutFolders *folders, char *out, size_t ca
     parent_of(folders->path[NK_PATH_SAVES], saves, sizeof(saves));
     int written = config[0] && strcmp(config, data) == 0 && strcmp(data, saves) == 0
                       ? snprintf(out, cap, "%s", data)
-                      : snprintf(out, cap, "%s and %s", folders->path[NK_PATH_DATA],
+                      : snprintf(out, cap, "%s (settings in %s)", folders->path[NK_PATH_DATA],
                                  folders->path[NK_PATH_CONFIG]);
     return written > 0 && (size_t)written < cap;
 }
@@ -41,11 +41,11 @@ bool nk_data_layout_notice(const NkUserDataLayout *layout, char *out, size_t cap
     if (!layout || !layout->new_layout.holds_data || !layout->old_layout.holds_data) return false;
     const NkDataLayoutFolders *in_use = layout->old_in_use ? &layout->old_layout : &layout->new_layout;
     const NkDataLayoutFolders *other = layout->old_in_use ? &layout->new_layout : &layout->old_layout;
-    char used[2 * NK_MAX_PATH + 8], unused[2 * NK_MAX_PATH + 8];
+    char used[2 * NK_MAX_PATH + 16], unused[2 * NK_MAX_PATH + 16];
     if (!name_layout(in_use, used, sizeof(used)) || !name_layout(other, unused, sizeof(unused))) {
         return false;
     }
-    int written = snprintf(out, cap, "Both %s and %s hold Nakagawa data; Nakagawa uses the first.",
+    int written = snprintf(out, cap, "Nakagawa uses %s. Nakagawa data is also in %s, which is not used.",
                            used, unused);
     if (written <= 0 || (size_t)written >= cap) {
         out[0] = '\0';

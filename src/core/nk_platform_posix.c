@@ -684,30 +684,52 @@ static void layout_folders(bool old, NkDataLayoutFolders *folders) {
    again, which a test does between its cases and a start never does. */
 static pthread_mutex_t s_layout_lock = PTHREAD_MUTEX_INITIALIZER;
 static NkUserDataLayout s_layout;
-static char s_layout_key[3u * NK_MAX_PATH + 8u];
-static bool s_layout_decided = false;
+static char *s_layout_key = NULL; /* HOME, XDG_DATA_HOME and XDG_CONFIG_HOME as last decided */
 
-static void layout_key_part(char *key, size_t cap, const char *variable) {
-    const char *value = getenv(variable);
-    size_t used = strlen(key);
-    (void)snprintf(key + used, cap - used, "%c%s\n", value ? '=' : '-', value ? value : "");
+/* Whether the variables the rule reads are the ones it decided with: each as '-' (unset) or '='
+   and its value, one per line, compared in place without a copy. */
+static bool layout_key_matches(const char *key) {
+    static const char *const variables[3] = {"HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"};
+    if (!key) return false;
+    for (size_t i = 0; i < 3u; ++i) {
+        const char *value = getenv(variables[i]);
+        if (*key++ != (value ? '=' : '-')) return false;
+        size_t length = value ? strlen(value) : 0u;
+        if (value && strncmp(key, value, length) != 0) return false;
+        key += length;
+        if (*key++ != '\n') return false;
+    }
+    return *key == '\0';
 }
 
-/* Decides when needed; returns the decision under the lock into *out when it is not NULL. */
+static char *layout_key_make(void) {
+    static const char *const variables[3] = {"HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"};
+    size_t size = 1u;
+    for (size_t i = 0; i < 3u; ++i) {
+        const char *value = getenv(variables[i]);
+        size += 2u + (value ? strlen(value) : 0u);
+    }
+    char *key = (char *)malloc(size);
+    if (!key) return NULL;
+    key[0] = '\0';
+    for (size_t i = 0; i < 3u; ++i) {
+        const char *value = getenv(variables[i]);
+        size_t used = strlen(key);
+        (void)snprintf(key + used, size - used, "%c%s\n", value ? '=' : '-', value ? value : "");
+    }
+    return key;
+}
+
+/* Decides when needed; returns the decision under the lock into *out when it is not NULL. Out of
+   memory for the key, the decision is still made and used, and made again at the next lookup. */
 static bool layout_old_in_use(NkUserDataLayout *out) {
-    char key[sizeof(s_layout_key)] = "";
-    layout_key_part(key, sizeof(key), "HOME");
-    layout_key_part(key, sizeof(key), "XDG_DATA_HOME");
-    layout_key_part(key, sizeof(key), "XDG_CONFIG_HOME");
-    /* A key that does not fit is never kept, so such an environment decides on every lookup. */
-    bool keyed = strlen(key) + 1u < sizeof(key);
     pthread_mutex_lock(&s_layout_lock);
-    if (!s_layout_decided || !keyed || strcmp(key, s_layout_key) != 0) {
+    if (!layout_key_matches(s_layout_key)) {
         layout_folders(false, &s_layout.new_layout);
         layout_folders(true, &s_layout.old_layout);
         s_layout.old_in_use = !s_layout.new_layout.holds_data && s_layout.old_layout.holds_data;
-        memcpy(s_layout_key, key, sizeof(key));
-        s_layout_decided = keyed;
+        free(s_layout_key);
+        s_layout_key = layout_key_make();
     }
     bool old = s_layout.old_in_use;
     if (out) *out = s_layout;
