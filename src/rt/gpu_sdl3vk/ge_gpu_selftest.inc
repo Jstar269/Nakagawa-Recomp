@@ -5052,8 +5052,9 @@ static int coherence_run_native_bulk_copy(void) {
  * background, so the second sprite reads what the first wrote: a state that reads its own
  * writes must split there (stencil_splits). The depth list fills a striped depth buffer in
  * clear mode, with the stencil test on, which clear mode ignores, then draws the states the
- * GPU path takes under the depth test (depth-fail and tested stencil-fail ops KEEP). No
- * primitive may take the software fallback. */
+ * GPU path takes under the depth test (depth-fail and tested stencil-fail ops KEEP, or
+ * agreeing depth-fail and depth-pass ops with any stencil-fail op). No primitive may take
+ * the software fallback. */
 #define STP_CELLS_X 24u
 #define STP_PITCH 10u
 #define STP_ORIGIN 16u
@@ -5158,7 +5159,7 @@ static uint32_t stp_matrix_list(uint32_t base, uint32_t fmt, int only) {
 
 /* Depth list: a striped depth buffer, then depth-tested cells. With `only` >= 0 the list
  * holds that cell alone, without the depth buffer. */
-#define STP_DEPTH_CELLS (8u * 6u + 5u)
+#define STP_DEPTH_CELLS (8u * 6u + 5u + 8u * 5u)
 static uint32_t stp_depth_list(uint32_t base, uint32_t fmt, int only) {
     static const uint32_t zfunc[4] = { 4u, 5u, 6u, 7u };   /* less, lequal, greater, gequal */
     StpList l; stp_begin(&l, base, fmt, 1);
@@ -5187,6 +5188,15 @@ static uint32_t stp_depth_list(uint32_t base, uint32_t fmt, int only) {
         stp_emit(&l, 0xE7, 0);
         stp_cell_sprites(&l, &vaddr, cell, 32768.0f);
     }
+    /* Agreeing depth-fail and depth-pass ops: a colour batch and a stencil batch. */
+    for (uint32_t func = 0; func < 8u; func++)
+        for (uint32_t op = 1; op < 6u; op++, cell++) {
+            if (only >= 0 && cell != (uint32_t)only) continue;
+            stp_cell_state(&l, cell, func, ((cell / 3u) % 6u) | (op << 8) | (op << 16));
+            stp_emit(&l, 0xDE, cell % 8u);         /* every depth function */
+            stp_emit(&l, 0xE7, (cell / 8u) & 1u);
+            stp_cell_sprites(&l, &vaddr, cell, 32768.0f);
+        }
     stp_end(&l);
     return 0x08040000u;
 }
@@ -6093,6 +6103,8 @@ static int coherence_run_fallback_reasons(void) {
         {"stencil keep", 0, 1, 4u, 2u, 0x050000u, -1},
         {"stencil zfail op", 0, 1, 4u, 1u, 0x000100u, GEGPU_FALLBACK_STENCIL},
         {"stencil zfail op, depth always", 0, 1, 1u, 1u, 0x010101u, -1},
+        {"stencil zfail op = zpass op", 0, 1, 7u, 2u, 0x040404u, -1},
+        {"stencil zfail op != zpass op", 0, 1, 7u, 1u, 0x010201u, GEGPU_FALLBACK_STENCIL},
     };
     s_ge->color_test_enable = 0;
     for (unsigned i = 0; i < sizeof(st) / sizeof(st[0]); i++) {
@@ -6105,6 +6117,22 @@ static int coherence_run_fallback_reasons(void) {
             ok = 0;
         }
     }
+    /* An agreeing state that textures from the framebuffer it draws keeps the two batches unless
+     * the alpha test reads the texel: the stencil batch would test what the colour batch drew. */
+    s_ge->clear = 0; s_ge->ztest_enable = 1; s_ge->ztest = 7u;
+    s_ge->stencil_test = 2u; s_ge->stencil_op = 0x020202u;
+    s_ge->tex_enable = 1; s_ge->tex_addr = s_ge->fbp; s_ge->tex_bufw = 512u; s_ge->tex_fmt = 3u;
+    s_ge->tex_w = 256; s_ge->tex_h = 256;
+    for (int t = 0; t < 2; t++) {
+        s_ge->atest_enable = t; s_ge->atest = 4u | (0x40u << 8) | (0xFFu << 16);
+        const int got = gpu_state_unsupported_reason(), want = t ? GEGPU_FALLBACK_STENCIL : -1;
+        if (got != want) {
+            fprintf(stderr, "gpu coherence selftest [fallback-reasons]: agreeing ops, texture = framebuffer, "
+                            "alpha test %s gave %d, want %d\n", t ? "on" : "off", got, want);
+            ok = 0;
+        }
+    }
+    s_ge->tex_enable = 0; s_ge->atest_enable = 0;
     /* Write masks: a channel whose native bits are all masked or all written is the colour write
      * mask's; any other falls back. Clear mode checks RGB when it writes colour (0x100) and alpha
      * when it writes alpha (0x200); a draw's alpha is the stencil plane. */
@@ -6136,7 +6164,7 @@ static int coherence_run_fallback_reasons(void) {
         }
     }
     *s_ge = saved;
-    if (ok) printf("gpu coherence selftest: PASS %-22s 12 cells, %u write-mask cells\n", "fallback-reasons",
+    if (ok) printf("gpu coherence selftest: PASS %-22s 16 cells, %u write-mask cells\n", "fallback-reasons",
                    (unsigned)(sizeof(wm) / sizeof(wm[0])));
     return ok;
 }
@@ -7064,7 +7092,7 @@ static int coherence_run_readback_rows(void) {
 #define WIDE_QUAD      0xff20c040u
 #define WIDE_BAR       0xff0000ffu
 #define WIDE_FADE      0xff808080u
-enum { WF_FADE = 1, WF_NARROW = 2, WF_NOCLEAR = 4, WF_LOGICOP = 8 };
+enum { WF_FADE = 1, WF_NARROW = 2, WF_NOCLEAR = 4, WF_LOGICOP = 8, WF_ZSTENCIL = 16 };
 
 typedef struct { float x0, x1, y0, y1; uint32_t c0, c1; int sprite, right; } WideShape;
 static const WideShape k_wide_shapes[] = {
@@ -7158,9 +7186,20 @@ static uint32_t wide_build(int flags) {
         TNLP_W(&L, 0x01, at);
         TNLP_W(&L, 0x04, (3u << 16) | 6u);
     }
+    if (flags & WF_ZSTENCIL) {                  /* depth NEVER; stencil ALWAYS, every op REPLACE 0x5A */
+        TNLP_W(&L, 0xDC, 1u | (0x5Au << 8) | (0xFFu << 16));
+        TNLP_W(&L, 0xDD, 0x020202u);
+        TNLP_W(&L, 0xDE, 0u);
+        TNLP_W(&L, 0x23, 1);
+        TNLP_W(&L, 0x24, 1);
+    }
     for (size_t i = 0; i < WIDE_NSHAPES; i++) {
         wide_shape(&L, &k_wide_shapes[i], 0.0f);
         wide_shape(&L, &k_wide_shapes[i], k_wide_shapes[i].right ? -(float)WIDE_K : (float)WIDE_K);
+    }
+    if (flags & WF_ZSTENCIL) {
+        TNLP_W(&L, 0x23, 0);
+        TNLP_W(&L, 0x24, 0);
     }
     TNLP_W(&L, 0x50, 0);
     TNLP_W(&L, 0x28, 0);
@@ -7408,6 +7447,36 @@ static int wide_aspect(const char *name, int win_w, int win_h, int want_wing, co
                    "wide-fill", name, fade, wing, s_scale);
     }
     return ok;
+}
+
+/* Wing primitives under a depth-blind stencil state (append_wing): the depth test NEVER passes
+ * and every stencil op is REPLACE 0x5A, so ge.c stores 0x5A on each covered pixel and no colour.
+ * At 1x the Vulkan canvas's and frame's stencil (alpha) must equal ge.c's on every pixel, and some
+ * must be 0x5A; one batch under the pipeline depth test would leave the alpha it found. Above 1x a
+ * readback is each pixel's top-left device sample, so shape edges may differ: there at least half
+ * of the pixels ge.c tags must hold 0x5A in the Vulkan canvas. */
+static int wide_zstencil(const WideBufs *B) {
+    int ok = wide_run(1, WIDE_D, WF_ZSTENCIL, B->gpu_on, B->gpu_wing) &&
+             wide_run(0, WIDE_D, WF_ZSTENCIL, B->sw_on, B->sw_wing);
+    unsigned differ = 0, tagged = 0, gpu_tagged = 0;
+    for (size_t i = 0; ok && i < (size_t)512u * FB_H; i++) {
+        differ += (B->gpu_wing[i] >> 24) != (B->sw_wing[i] >> 24);
+        tagged += (B->sw_wing[i] >> 24) == 0x5Au;
+        gpu_tagged += (B->sw_wing[i] >> 24) == 0x5Au && (B->gpu_wing[i] >> 24) == 0x5Au;
+    }
+    for (size_t i = 0; ok && i < (size_t)512u * FB_H; i++)   /* the frame: WIDE_FB, stride 512 */
+        if (i % 512u < 480u) differ += (B->gpu_on[i] >> 24) != (B->sw_on[i] >> 24);
+    if (s_scale > 1) differ = gpu_tagged * 2u >= tagged ? 0u : tagged - gpu_tagged;
+    if (!ok || differ || !tagged) {
+        fprintf(stderr, "gpu coherence selftest [wide-fill]: depth-blind stencil in the wings: ran=%d, %u stencil "
+                        "values differ from ge.c, %u canvas pixels hold 0x5A (scale %d)\n", ok, differ, tagged,
+                s_scale);
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %-22s depth-blind stencil at scale %d: %s, %u of %u wing pixels "
+           "0x5A\n", "wide-fill", s_scale,
+           s_scale > 1 ? "most tagged pixels kept" : "canvas and frame stencil equal ge.c", gpu_tagged, tagged);
+    return 1;
 }
 
 /* Frames after the first, at the 21:9 wing width, on the same canvases: a narrower scissor
@@ -7726,6 +7795,7 @@ static int coherence_run_wide_fill(void) {
     ok &= wide_aspect("21:9", 2520, 1080, WIDE_D, &B);
     ok &= wide_aspect("32:9", 3840, 1080, 240, &B);
     ok &= wide_frames(&B);
+    ok &= wide_zstencil(&B);
     ok &= wide_present(&B);
     coherence_reset_targets();
     free(buf);
@@ -10639,7 +10709,9 @@ static int coherence_run_dst_read_one(const char *name) {
  *  - depth legs: the draw-once state under the depth test, over a depth wall that hides the first
  *    sprite in part of the overlap. With depth writes off, or the depth test ALWAYS and depth writes
  *    on, it merges, and colour and depth equal ge.c. Under GEQUAL with depth writes on it must
- *    split: drawn last to first, the second sprite's depth would hide the first;
+ *    split: drawn last to first, the second sprite's depth would hide the first. With the
+ *    depth-fail op REPLACE as well (a depth-blind state, two batches), the hidden part of the
+ *    first sprite still writes the stencil that rejects the second there: it must split too;
  *  - kill legs: the alpha test rejects the first sprite of the pair, then the second: the pair
  *    still merges, and the sprite that is left shows in the overlap;
  *  - feedback leg (dro_feedback_list): the state textures from its own target, and the second
@@ -10887,12 +10959,15 @@ typedef struct SonZLeg {
     const char *name;
     uint32_t zfunc;
     int zwrite, once;
+    uint32_t zfail;                          /* the depth-fail op; 0 KEEP */
 } SonZLeg;
 
-static const SonZLeg k_son_zlegs[3] = {
-    { "GEQUAL, depth writes off", 7u, 0, 1 },
-    { "ALWAYS, depth writes on", 1u, 1, 1 },
-    { "GEQUAL, depth writes on", 7u, 1, 0 },
+#define SON_ZLEGS 4u
+static const SonZLeg k_son_zlegs[SON_ZLEGS] = {
+    { "GEQUAL, depth writes off", 7u, 0, 1, 0u },
+    { "ALWAYS, depth writes on", 1u, 1, 1, 0u },
+    { "GEQUAL, depth writes on", 7u, 1, 0, 0u },
+    { "GEQUAL, depth writes off, depth-fail op REPLACE", 7u, 0, 0, 2u },
 };
 
 /* Depth cleared to 0 and a depth-only wall at z 25000 across the left part of the pair's overlap,
@@ -10907,6 +10982,7 @@ static uint32_t son_depth_list(uint32_t fmt, const SonZLeg *leg) {
     stp_sprite(&l, &vaddr, 0u, 66.0f, 60.0f, 78.0f, 100.0f, 25000.0f);
     stp_emit(&l, 0xD3, 0);
     son_state(&l, 3u, 0x80u, 0x80u, 2u, 0x00u, 1);
+    if (leg->zfail) stp_emit(&l, 0xDD, (leg->zfail << 8) | (2u << 16));
     stp_emit(&l, 0xDE, leg->zfunc);
     stp_emit(&l, 0xE7, leg->zwrite ? 0u : 1u);
     son_pair(&l, &vaddr, 64.0f, 64.0f, 0x803050F0u, 0x60E0C020u, 20000.0f, 30000.0f);
@@ -11037,9 +11113,9 @@ static int coherence_run_stencil_once(void) {
     }
 
     /* depth legs */
-    for (uint32_t r = 0; r < 6u; r++) {
-        const SonZLeg *leg = &k_son_zlegs[r % 3u];
-        const uint32_t fmt = r < 3u ? 3u : 1u;
+    for (uint32_t r = 0; r < 2u * SON_ZLEGS; r++) {
+        const SonZLeg *leg = &k_son_zlegs[r % SON_ZLEGS];
+        const uint32_t fmt = r < SON_ZLEGS ? 3u : 1u;
         if (!son_run_both(fmt, son_depth_list(fmt, leg), 0, gpu_out, gz, wz, &run)) { ok = 0; continue; }
         const unsigned differing = son_differing(fmt, gpu_out, &at, &g, &w);
         unsigned zdiff = 0;
@@ -11087,7 +11163,7 @@ static int coherence_run_stencil_once(void) {
     free(gpu_out); free(gz); free(wz);
     if (ok)
         printf("gpu coherence selftest: PASS %-22s %s; matrix states=%u x 4 formats exact, %llu batches "
-               "reversed, %llu splits; anchors=%u; depth legs=6 colour and depth exact; kill legs=2; "
+               "reversed, %llu splits; anchors=%u; depth legs=8 colour and depth exact; kill legs=2; "
                "feedback leg splits (%s path)\n",
                "stencil-once",
                s_scale == 1 ? "mesh exact with no split" : "mesh not run above 1x", SON_STATES, matrix_once,
@@ -13744,6 +13820,8 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "dst-read") == 0) return coherence_run_dst_read();
         if (strncmp(only, "dst-read-", 9) == 0) return coherence_run_dst_read_one(only);
         if (strcmp(only, "stencil-once") == 0) return coherence_run_stencil_once();
+        if (strcmp(only, "stencil-parity") == 0) return coherence_run_stencil_parity();
+        if (strcmp(only, "fallback-reasons") == 0) return coherence_run_fallback_reasons();
         if (strcmp(only, "rtt-scale") == 0) return coherence_run_rtt_scale_at(0);
         if (strcmp(only, "rtt-scale-offset") == 0) return coherence_run_rtt_scale_at(1);
         if (strcmp(only, "rtt-edge") == 0) return coherence_run_rtt_edge();

@@ -66,7 +66,8 @@
  *    stencil test and ops against the destination snapshot, with pipeline blending off.
  *    Where the depth test runs, its fail op (unless it always passes) and the stencil-fail
  *    op must be KEEP, so the pipeline depth test and a discard give ge.c's order exactly
- *    (stencil_gpu_supported);
+ *    (stencil_gpu_supported), unless the depth-fail and depth-pass ops agree: that draw is
+ *    a colour batch and a stencil batch (append_depth_blind);
  *    other states take the software rasterizer. A stencil state whose result depends on
  *    the stencil it overwrites (stencil_reads_own_writes) never shares a batch between
  *    primitives whose boxes meet, so each reads a snapshot holding the ones before it.
@@ -5966,9 +5967,11 @@ static int blend_needs_shader(uint32_t sfp, uint32_t dfp, uint32_t eq, uint32_t 
 }
 
 /* Stencil states that never read the destination, for an 8888 target outside clear mode. A
- * test that always passes never runs the stencil-fail op, and the depth-fail op is KEEP
- * wherever the depth test can fail (stencil_gpu_supported), so a written pixel stores the
- * depth-pass op's value under the alpha write mask (ge.c put_px_rgba_tested):
+ * test that always passes never runs the stencil-fail op, and the depth-fail op must be KEEP
+ * wherever the depth test can fail (a depth-fail op that agrees with the depth-pass op stores
+ * its value on the pixels the pipeline depth test drops, so that state keeps the shader's
+ * stencil and append_depth_blind's two batches), so a written pixel stores the depth-pass op's
+ * value under the alpha write mask (ge.c put_px_rgba_tested):
  *  - KEEP, or a mask that keeps all eight bits: the old stencil, which the colour write mask
  *    preserves (SFIX_KEEP), as for a draw without the stencil test;
  *  - ZERO or REPLACE under a mask of 0: a constant, 0 or the unmasked reference. Unblended,
@@ -5993,6 +5996,7 @@ static int stencil_fixed_alpha(const GeState *g) {
     const uint32_t amask = (uint32_t)g->mask_alpha & 0xFFu, zpass = (g->stencil_op >> 16) & 7u;
     if (zpass == 0u || amask == 0xFFu) return SFIX_KEEP;
     if (amask != 0u) return SFIX_NONE;
+    if (g->ztest_enable && (g->ztest & 7u) != 1u && ((g->stencil_op >> 8) & 7u) != 0u) return SFIX_NONE;
     const int value = zpass == 1u ? 0 : zpass == 2u ? (int)((g->stencil_test >> 8) & 0xFFu) : -1;
     if (value < 0 || (blended && value != 0)) return SFIX_NONE;
     return value;
@@ -6068,6 +6072,17 @@ static int stencil_write_once(uint32_t fmt, uint32_t test, uint32_t ops) {
         if (sh_stencil_pass(func, ref, (fmt == 0u ? 0u : stored) & smask)) return 0;
     }
     return 1;
+}
+
+/* Whether a stencil state under the depth test takes append_depth_blind's two batches: its
+ * depth-fail and depth-pass ops agree and are not KEEP, and the single batch cannot draw it. One
+ * batch is exact when the depth test always passes (the depth-fail op never runs) and the
+ * stencil-fail op is KEEP or never runs (stencil_gpu_supported's rule). `func` is the stencil test
+ * function, `ops` the packed ops (sfail | zfail << 8 | zpass << 16). */
+static int stencil_split_needed(int ztest_on, int zalways, uint32_t func, uint32_t ops) {
+    const uint32_t sfail = ops & 7u, zfail = (ops >> 8) & 7u;
+    if (!ztest_on || zfail == 0u || zfail != ((ops >> 16) & 7u)) return 0;
+    return !(zalways && (sfail == 0u || (func & 7u) == 1u));
 }
 
 /* Find the target that holds VRAM offset `a` (gpu_valid not required). The GE has no buffer height
@@ -6289,8 +6304,14 @@ static void build_state(int persp, int sprite, Batch *b) {
 #else
         const int depth_fixed = !k->zwrite || k->zfunc == VK_COMPARE_OP_ALWAYS;
 #endif
-        b->once = (uint8_t)(depth_fixed && stencil_write_once(g->fbfmt & 3u, (uint32_t)b->pc.bl[2],
-                                                              (uint32_t)b->pc.bl[3]));
+        /* A depth-blind state (append_depth_blind) draws its colour in a batch that writes no
+         * stencil, so a later primitive of the run does not see an earlier one's stencil there:
+         * drawn last to first, it would keep a colour ge.c rejects. Such a state is not
+         * write-once; its primitives split where they meet (stencil_reads_own_writes). */
+        const int depth_blind = stencil_split_needed(k->ztest, k->zfunc == VK_COMPARE_OP_ALWAYS,
+                                                     g->stencil_test, (uint32_t)b->pc.bl[3]);
+        b->once = (uint8_t)(depth_fixed && !depth_blind &&
+                            stencil_write_once(g->fbfmt & 3u, (uint32_t)b->pc.bl[2], (uint32_t)b->pc.bl[3]));
     } else if (sfix >= 0 && k->blend_on) {
         k->azero = 1;                     /* stencil_fixed_alpha: blended, the constant is 0 */
     } else if (sfix >= 0) {
@@ -6578,9 +6599,22 @@ static SnapRect s_tail_prims;
 
 /* A wing primitive's batch: the wing list, merged with the previous one when it continues
  * it on the same canvas. A stencil batch that reads its own writes is never merged. */
+static int stencil_depth_blind(const Batch *b);
+static void depth_blind_pair(const Batch *b, Batch *colour, Batch *stencil);
+
 static void append_wing(Batch *b, uint32_t first, uint32_t count) {
     if (b->sw <= 0 || count == 0) return;
     s_cnt_wing++;
+    if (stencil_depth_blind(b)) {                  /* the two batches of append_depth_blind */
+        Batch pair[2];
+        depth_blind_pair(b, &pair[0], &pair[1]);
+        for (int i = 0; i < 2; i++) {
+            pair[i].first = first; pair[i].count = count;
+            s_wbatch_w[s_nwbatch] = s_wing_dst;
+            s_wbatch[s_nwbatch++] = pair[i];
+        }
+        return;
+    }
     if (s_nwbatch && s_wbatch_w[s_nwbatch - 1] == s_wing_dst && !stencil_reads_own_writes(b)) {
         Batch *last = &s_wbatch[s_nwbatch - 1];
         if (last->first + last->count == first &&
@@ -6597,6 +6631,65 @@ static void append_wing(Batch *b, uint32_t first, uint32_t count) {
     s_wbatch[s_nwbatch++] = *b;
 }
 
+/* A depth-tested stencil state whose depth-fail and depth-pass ops agree (and are not KEEP)
+ * leaves the same stencil on every covered pixel the stencil test passes, whatever the depth
+ * test says: only the colour and depth depend on it. ge.c's order is then two batches over
+ * the same vertices. The colour batch runs the pipeline depth test with the stencil (alpha)
+ * channel masked and a stencil-fail op of KEEP, so a pixel failing the stencil test is
+ * discarded before it can write colour or depth. The stencil batch runs the stencil test and
+ * ops on every covered pixel, with the depth test always passing and no depth write, and
+ * writes alpha alone. The colour batch goes first, so both read the stencil as it was before
+ * the draw; primitives join a pair only where the state does not read its own writes or
+ * their boxes do not meet, as in append. */
+static int stencil_depth_blind(const Batch *b) {
+    const uint32_t flags = (uint32_t)b->pc.cfg[0] >> 8;
+    return (flags & F_STENCIL) && stencil_split_needed(b->key.ztest, b->key.zfunc == VK_COMPARE_OP_ALWAYS,
+                                                       (uint32_t)b->pc.bl[2], (uint32_t)b->pc.bl[3]);
+}
+
+static int batch_extends(const Batch *last, const Batch *b, uint32_t first) {
+    return last->first + last->count == first && !memcmp(&last->key, &b->key, sizeof(b->key)) &&
+           last->sx == b->sx && last->sy == b->sy && last->sw == b->sw && last->sh == b->sh &&
+           !memcmp(last->bconst, b->bconst, sizeof(b->bconst)) &&
+           !memcmp(&last->pc, &b->pc, sizeof(b->pc)) && last->dset == b->dset;
+}
+
+static void depth_blind_pair(const Batch *b, Batch *colour, Batch *stencil) {
+    *colour = *b;
+    *stencil = *b;
+    colour->key.cmask = (uint8_t)(colour->key.cmask & ~VK_COLOR_COMPONENT_A_BIT);
+    colour->pc.bl[3] = (int32_t)((uint32_t)b->pc.bl[3] & ~7u);
+    stencil->key.zfunc = VK_COMPARE_OP_ALWAYS;
+    stencil->key.zwrite = 0;
+    stencil->key.zbias = 0;
+    stencil->key.cmask = VK_COLOR_COMPONENT_A_BIT;
+    stencil->key.blend_on = 0;
+    stencil->key.srcf = stencil->key.dstf = stencil->key.eq = 0;
+}
+
+static void append_depth_blind(const Batch *b, uint32_t first, uint32_t count, int self_dep,
+                               const SnapRect *prim) {
+    Batch colour, stencil;
+    depth_blind_pair(b, &colour, &stencil);
+    if (s_nbatch >= 2) {
+        Batch *last_colour = &s_batch[s_nbatch - 2], *last_stencil = &s_batch[s_nbatch - 1];
+        if (batch_extends(last_colour, &colour, first) && batch_extends(last_stencil, &stencil, first)) {
+            if (!self_dep || !snap_rect_overlap(&s_tail_prims, prim)) {
+                last_colour->count += count;
+                last_stencil->count += count;
+                if (self_dep) snap_rect_union(&s_tail_prims, prim);
+                return;
+            }
+            s_replay_stats.stencil_splits++;
+        }
+    }
+    colour.first = stencil.first = first;
+    colour.count = stencil.count = count;
+    s_batch[s_nbatch++] = colour;
+    s_batch[s_nbatch++] = stencil;
+    s_tail_prims = *prim;
+}
+
 static void append(Batch *b, uint32_t first, uint32_t count) {
     if (__builtin_expect(s_wing_dst != NULL, 0)) { append_wing(b, first, count); return; }
     if (s_cpu_profile) s_cpu_profile_stats.append_calls++;
@@ -6610,14 +6703,14 @@ static void append(Batch *b, uint32_t first, uint32_t count) {
     const int self_dep = !(b->once && !b->key.tnl) && stencil_reads_own_writes(b);
     SnapRect prim = !self_dep ? k_snap_rect_empty
                   : b->key.tnl ? tnl_rect(b, first, count) : verts_rect(b, first, count);
+    if (stencil_depth_blind(b)) {
+        append_depth_blind(b, first, count, self_dep, &prim);
+        return;
+    }
     if (s_nbatch) {
         Batch *last = &s_batch[s_nbatch - 1];
         if (s_cpu_profile) s_cpu_profile_stats.append_compare_calls++;
-        if (last->first + last->count == first &&
-            !memcmp(&last->key, &b->key, sizeof(b->key)) &&
-            last->sx == b->sx && last->sy == b->sy && last->sw == b->sw && last->sh == b->sh &&
-            !memcmp(last->bconst, b->bconst, sizeof(b->bconst)) &&
-            !memcmp(&last->pc, &b->pc, sizeof(b->pc)) && last->dset == b->dset) {
+        if (batch_extends(last, b, first)) {
             if (!self_dep || !snap_rect_overlap(&s_tail_prims, &prim)) {
                 last->count += count;
                 if (self_dep) snap_rect_union(&s_tail_prims, &prim);
@@ -6634,7 +6727,8 @@ static void append(Batch *b, uint32_t first, uint32_t count) {
 
 static void ensure_room(uint32_t verts) {
     if (s_cpu_profile) s_cpu_profile_stats.ensure_room_calls++;
-    if (s_nverts + verts > MAX_VERTS || s_nbatch >= MAX_BATCH - 1 || s_nwbatch >= MAX_BATCH - 1) {
+    if (s_nverts + verts > MAX_VERTS || s_nbatch >= MAX_BATCH - 2 ||   /* room for a pair */
+        s_nwbatch >= MAX_BATCH - 2) {
         if (s_cpu_profile) s_cpu_profile_stats.ensure_room_flushes++;
         submit_pending();
     }
@@ -6674,11 +6768,26 @@ static int native_alpha_mask_exact(void) {
  * pixel the depth test would also reject, or a depth-fail pixel, can only be dropped: the
  * ops for them must be KEEP while the depth test is on. A test that always passes never
  * runs its fail op: a stencil test the stencil-fail op, a depth test the depth-fail op.
+ * Agreeing depth-fail and depth-pass ops take two batches instead (append_depth_blind),
+ * except for a draw that textures from the framebuffer it draws with the alpha or colour test
+ * on: its stencil batch would test texels its colour batch has just drawn.
  * Clear mode ignores the stencil test (ge.c put_px_rgba). */
+static int tex_reads_own_fb_tested(void) {
+    const GeState *g = s_ge;
+    if (!g->tex_enable || !g->tex_addr || !is_vram(g->tex_addr) || !is_vram(g->fbp)) return 0;
+    if (!(g->atest_enable && (g->atest & 7u) != 1u) && !color_test_active(g)) return 0;
+    const uint64_t fb0 = vram_off(g->fbp), t0 = vram_off(g->tex_addr);
+    const uint64_t fb1 = fb0 + (uint64_t)(g->fbw ? g->fbw : 512u) * FB_H * ((g->fbfmt & 3u) == 3u ? 4u : 2u);
+    const uint64_t t1 = t0 + tex_span_size(g->tex_bufw, (int)g->tex_w, (int)g->tex_h);
+    return t0 < fb1 && fb0 < t1;
+}
+
 static int stencil_gpu_supported(void) {
     if (!s_ge->stencil_enable || s_ge->clear || !s_ge->ztest_enable) return 1;
     const uint32_t func = s_ge->stencil_test & 7u, sfail = s_ge->stencil_op & 7u;
     const uint32_t zfail = (s_ge->stencil_op >> 8) & 7u;
+    if (stencil_split_needed(1, (s_ge->ztest & 7u) == 1u, func, s_ge->stencil_op))
+        return !tex_reads_own_fb_tested();
     return (sfail == 0u || func == 1u) && (zfail == 0u || (s_ge->ztest & 7u) == 1u);
 }
 
@@ -7109,6 +7218,12 @@ static int hook_tnl_prim(const GeTnlPrim *p) {
     state_get(1, 0, &b);
     if (nocull) b.key.cull = VK_CULL_MODE_NONE;
     b.key.tnl = 1;
+    /* A depth-blind state whose stencil reads its own writes (append_depth_blind) splits primitives
+     * that meet, but a T&L primitive is one append: its colour batch would test every triangle
+     * against the stencil from before the primitive. Decline: ge.c's T&L then sends each
+     * triangle to hook_tri, which splits them. */
+    if (p->ntri > 1u && stencil_depth_blind(&b) && stencil_reads_own_writes(&b))
+        return cpu_profile_hook_leave(0);
     /* Without a target, decline: ge.c's own T&L then reaches hook_tri, which decides the
      * draw exactly as it does when GPU T&L is off. */
     if (!begin_target()) return cpu_profile_hook_leave(0);
