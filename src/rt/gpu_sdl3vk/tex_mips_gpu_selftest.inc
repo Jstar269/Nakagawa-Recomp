@@ -38,6 +38,8 @@
  *  - gates: a through-mode draw and a draw whose texture function ignores the alpha of a
  *    texture that has some bind level 0 alone, and a color-tested draw stays with the software
  *    renderer, which has no chain.
+ *  - movie (#2111): a decoded picture drawn as a transformed, linearly filtered, minified quad over
+ *    the whole frame is a movie frame, with the chain bound (mips on) or level 0 (mips off).
  * With mips off (`--ace` with a line that has no mips) the run checks the other side: no chain
  * is made, nothing is bound, and the minified cell shows the aliasing the chain removes.
  */
@@ -200,6 +202,48 @@ static void hm_say(const char *cell, const HmRange *r) {
             r->n, r->lo[0], r->hi[0], r->lo[1], r->hi[1], r->lo[2], r->hi[2], s_scale);
 }
 
+/* movie (#2111): a decoded 8888 picture drawn over the whole frame as a transformed quad with a
+   linear filter, minified (1024 x 544 texels over 480 x 272, repeating). The whole 512 x 512
+   texture is opaque, so the chain's alpha rule does not keep level 0. Mips on, the draw binds the
+   host chain's set and is still a movie frame; mips off, it binds level 0 and is one too. */
+static int hm_movie_cell(int on) {
+    coherence_reset_targets();
+    memset(SR_HOST(MVC_BASE), 0, 512u * FB_H * 4u);
+    sr_gpu_vram_dirty(MVC_BASE, 512u * FB_H * 4u);
+    sr_movie_set_tracking(1);
+    mvc_write_picture(MVC_PIC, 512u, 512u, 512u, 9u);
+    sr_movie_note_picture(MVC_OWNER, MVC_PIC, 512u, 3u, 480u, 272u);
+    mvc_state();
+    s_ge->tex_enable = 1;
+    s_ge->tex_filter = 0x101u;   /* linear min and mag */
+    s_ge->vtype &= ~(1u << 23);  /* transformed */
+    ge_state_note_external_write();
+    s_tmpl_ok = 0;
+    GeVtx a = { 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 255, 255, 255, 255 };
+    GeVtx b = { 480.0f, 0.0f, 1.0f, 1.0f, 1024.0f, 0.0f, 1.0f, 255, 255, 255, 255 };
+    GeVtx d = { 0.0f, 272.0f, 1.0f, 1.0f, 0.0f, 544.0f, 1.0f, 255, 255, 255, 255 };
+    GeVtx e = { 480.0f, 272.0f, 1.0f, 1.0f, 1024.0f, 544.0f, 1.0f, 255, 255, 255, 255 };
+    const int drew = hook_tri(&a, &b, &e, 1) && hook_tri(&a, &e, &d, 1);
+    const int chain = s_tex_bound_hm;
+    const int ok = drew && chain == on && mvc_present("movie", on ? "a transformed linear quad, mips on"
+                                                         : "a transformed linear quad, mips off",
+                                            SDL3VK_FRAME_MOVIE);
+    sr_movie_set_tracking(0);
+    if (!ok) {
+        const TexEnt *me = s_tex_cur;
+        fprintf(stderr, "gpu mips selftest [movie]: drew %d, chain bound %d (want %d); entry levels %u, "
+                        "made %d, set %d, ready %d, alpha %d, skip %d; plain target %llu alpha %llu stream %llu "
+                        "budget %llu\n", drew, chain, on, me ? me->hm_levels : 0u, me ? (int)me->hm_made : -1,
+                me && me->hm_set, me ? me->hm_ready : -1, me ? me->hm_alpha : -1, me ? (int)me->hm_skip : -1,
+                (unsigned long long)s_hm_stats.plain_target, (unsigned long long)s_hm_stats.plain_alpha,
+                (unsigned long long)s_hm_stats.plain_stream, (unsigned long long)s_hm_stats.plain_budget);
+    } else {
+        printf("gpu mips selftest: PASS movie       a transformed, linear movie quad is a movie frame (%s)\n",
+               on ? "the chain bound" : "level 0");
+    }
+    return ok;
+}
+
 int gegpu_mips_selftest(void) {
     const uint32_t base = 0x04000000u | HM_FBA;
     const int on = s_hm;
@@ -257,6 +301,7 @@ int gegpu_mips_selftest(void) {
     if (ok) printf("gpu mips selftest: PASS minified    r %u-%u (%s) scale=%d\n", r.lo[0], r.hi[0],
                    on ? "the chain's grey" : "level 0 aliases, mips off", s_scale);
     if (!on) {
+        ok = ok && hm_movie_cell(on);
         free(dev);
         coherence_reset_targets();
         return ok;
@@ -548,6 +593,7 @@ int gegpu_mips_selftest(void) {
                 (unsigned long long)s_hm_stats.bytes, (unsigned long long)s_hm_stats.entries);
         ok = 0;
     }
+    ok = ok && hm_movie_cell(on);
     free(dev);
     coherence_reset_targets();
     return ok;
