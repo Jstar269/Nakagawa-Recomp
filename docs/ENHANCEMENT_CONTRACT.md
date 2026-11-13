@@ -2067,8 +2067,8 @@ host's output.
 
 ### 10.23. Soft Shadows
 
-Many PSP games draw a character's shadow as one small texture, a dark disc or blob whose alpha falls from opaque to
-clear over a few texels, stretched across a quad under the character. Above 1x those few texels become a hard,
+An Ace part (#1732). Many PSP games draw a character's shadow as one small texture, a dark disc or blob whose alpha
+falls from opaque to clear over a few texels, stretched across a quad under the character. Above 1x those few texels become a hard,
 stepped rim. This feature draws the textures a title's package names as its shadows with a smooth edge, at every
 render scale: at 1x the softened copy is sampled at guest resolution, so the rim is softer there too. It is
 guest-visible (section 11.1): section 11.3.13 is its entry and says what the guest can observe; this section says how
@@ -2101,7 +2101,8 @@ filter `nk_tex_soften_alpha_edge` and the digest `nk_tex_soft_shadow_digest` in 
   one texture: to list candidates for a title whose shadow digest is not known yet, the author declares one
   placeholder texture (any 64 lowercase hex digits, which no texture matches) and replaces it with the digests found.
   A listing names sizes and keyed digests, never texels.
-- **Softened copy.** A match takes a 4x copy through the scaled-copy machinery of section 10.10: its VRAM budget
+- **Softened copy.** A match takes a 4x copy in place of any xBRZ copy (xBRZ scales only the textures no pack image
+  and no declaration claims), through the scaled-copy machinery of section 10.10: its VRAM budget
   (512 MiB when `SR_TEX_SCALE` sets none), its reclaim, retry and stale rules, and the texture's own filter and wrap
   state as the copy's sampler. The copy is made on the renderer thread and stored at once, as a replacement image is,
   so the draw that found it is normally the first to show it (a draw that finds the upload budget of that present
@@ -2135,9 +2136,13 @@ filter `nk_tex_soften_alpha_edge` and the digest `nk_tex_soft_shadow_digest` in 
     published form, that the declaration digest and the cache key cover it, and, on a synthetic executable, the one
     declaration call codegen emits with the executable's key and the declared digests, and none without the part.
   - `ace-selftest` pins the key, its values, its Ace gate, the declaration's refusals and the report fields.
-  - `gpu-coherence-selftest --case soft-shadow` draws two synthetic CLUT4 discs magnified at render scale 4 with the
-    part on, off and undeclared. The declared disc gets a smooth ramp and keeps its interior, and the undeclared one
-    is drawn exactly as stock. Guest VRAM outside the frame is unchanged, and the counts on the exit line match.
+  - `gpu-coherence-selftest --case soft-shadow` draws synthetic discs magnified at render scales 1 and 4 with the
+    part on, off and undeclared, with xBRZ off and at each factor from 2 to 6: two declared discs (CLUT4 and 4444)
+    get a smooth ramp, keep their interior and are the same frame whatever the xBRZ factor, and the undeclared disc
+    is drawn exactly as with the part off. A freed copy is made again without a second hash; a texture the guest
+    rewrites to undeclared content gives up its copy for what the part-off run draws, and takes it back when the
+    declared content returns; a replacement pack's image for a declared texture is drawn instead, unhashed. Guest
+    VRAM outside the frame is unchanged, and the counts on the exit line match.
   - `test_player_state` and the player screens test pin the part, its settings, presets and launch line.
 
 **Next layer: real shadow maps.** Softening a blob keeps the title's own shadow shape. Shadows cast by the scene's
@@ -3168,7 +3173,7 @@ The feature of section 10.20 (#2051). How it tests is described there; this entr
 
 #### 11.3.13. Soft Shadows (`shadow=soft`, Not Yet Admitted)
 
-The feature of section 10.23. How it draws is described there; this entry is what the guest can observe.
+The feature of section 10.23 (#1732). How it draws is described there; this entry is what the guest can observe.
 
 - **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
   so a frame drawn with a softened shadow is the frame the guest keeps. Its key, its library and per-title settings
@@ -3190,7 +3195,10 @@ The feature of section 10.23. How it draws is described there; this entry is wha
   draw that binds a softened copy, and otherwise reports it unavailable with one of three reasons: nothing declared,
   the software renderer, or no declared texture drawn by the Vulkan GE renderer.
 - **What it changes:** the pixels a declared texture covers, in the frame a present commits: around the shadow's rim,
-  the stepped alpha becomes a smooth ramp. The interior and the clear surround keep their alpha (section 10.23).
+  the stepped alpha becomes a smooth ramp. The interior and the clear surround keep their alpha (section 10.23). The
+  copy's colour is interpolated bilinearly too, so a declared texture whose colour varies, drawn with a nearest
+  filter, also changes inside its rim, where its colour steps between texels; a texture of one colour, such as a
+  black blob, changes only at its rim.
 - **VRAM bytes:** differ in those frames, at the pixels of draws that use a declared texture, where the softened rim
   blends differently from the stock one. Host memory holds the copy: at most 256 x 256 RGBA8888 texels (256 KiB) a
   texture, inside the scaled-copy budget.
@@ -3209,6 +3217,10 @@ The feature of section 10.23. How it draws is described there; this entry is wha
   guest observes: it only prints lines on stderr.
 - **Limits.** It changes a shadow's edge, not its shape, position or the geometry it falls on. A shadow drawn as
   several textures, drawn with mip levels, larger than 64 x 64, or drawn by the software renderer is not softened.
+  The digest is over the decoded texels, so a palette texture has one digest for each palette it is drawn with: a
+  shadow whose palette the title animates needs a digest for each state, and a state left out is drawn stock. A
+  change to how the renderer decodes a texture format (`ge_decode_tex_rgba`) changes the digests of every texture
+  of that format, so a package's digests stop matching and the run reports no declared texture drawn.
   Real cast shadows are a separate, scene-level layer (section 10.23, "Next layer").
 - **Tier:** Ace (one title). **Default:** off, and in no graphics preset.
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.

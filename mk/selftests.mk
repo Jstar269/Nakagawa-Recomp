@@ -969,11 +969,14 @@ asset-index-selftest:
 # writing the depth readback's hash that the key-on run must match (`--depth-ref`), then the
 # whole suite with the key on, and host-depth once more with the native twin. soft-shadow (Ace's
 # shadow=soft) runs alone at scales 1 and 4, three times at each: without the key (`--soft-shadow
-# off`, which writes its stock frames' hashes to a reference file), with a synthetic disc declared
-# (`on`: soft edges, stock interior, stock for an undeclared disc and with the part off, guest VRAM
-# untouched, a freed copy made again without a second hash) and with the key but nothing declared
-# (`undeclared`: the part unavailable); both later runs draw the off run's stock frames. Each is
-# selected by arguments: a
+# off`, which writes its stock and part-off frames' hashes to a reference file), with two synthetic
+# discs declared, CLUT4 and 4444 (`on`: soft edges, stock interiors, an undeclared disc as with the
+# part off, guest VRAM untouched, a freed copy made again without a second hash, the copy's size
+# change when the guest rewrites a texture, a replacement pack before a soft copy) and with the key
+# but nothing declared (`undeclared`: the part unavailable); both later runs draw the off run's
+# frames. It runs again with xBRZ on (`--tex-scale`) at every factor the scaler takes, off and on
+# at scale 1 (undeclared too at 2) and at factor 4 at scale 4: a declared disc stays the soft frame
+# xBRZ-off draws. Each is selected by arguments: a
 # VAR=value prefix needs a POSIX shell, and cmd.exe does not take one. The host twin (#2050) runs
 # after them: twin-off runs of twin-scene write reference files that the twin-on runs at the
 # same scale check (guest VRAM always, the shown images for the native twin), `--twin native`
@@ -1063,6 +1066,19 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
 	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
 	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow undeclared --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 2 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x2.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 2 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x2.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 2 --soft-shadow undeclared --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x2.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 3 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x3.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 3 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x3.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x4.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x4.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 5 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x5.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 5 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x5.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 6 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x6.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 6 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x6.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 4 --tex-scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_x4.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 4 --tex-scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_x4.txt --case soft-shadow
 	$(GPU_COHERENCE_BIN) --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
 	$(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
 	$(GPU_COHERENCE_BIN) --scale 4 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s4.txt

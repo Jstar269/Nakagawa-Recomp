@@ -255,7 +255,7 @@ typedef enum {
     PLAYER_PART_UPSCALE,       /* the presentation upscaler (#2122): 0 off, 1 FSR 1. It reaches the
                                   runtime as SR_PRESENT_UPSCALE (NkRuntimeConfig.present_upscale),
                                   not in the SR_ACE line */
-    PLAYER_PART_STICK,        /* stick dead-zone remap (section 11.3.11): 0 off, 1 on. Acts only for a
+    PLAYER_PART_STICK,         /* stick dead-zone remap (section 11.3.11): 0 off, 1 on. Acts only for a
                                   title whose catalog entry declares a stick dead zone. Appended: the
                                   enum fixes the Settings > Enhanced rows and the saved order; the Ace
                                   line still writes stick before cull */

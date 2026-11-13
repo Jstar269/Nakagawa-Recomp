@@ -239,6 +239,7 @@ int main(int argc, char **argv) {
     (void)repl_only;   /* read only in the texture scaling build */
     (void)scene_hash;  /* read only in the sharp game text build */
     (void)glyphs_key;
+    (void)soft_mode;   /* read only in the coherence build, not the mips or Ace filtering build */
     if (!host_mem_type_selection_ok()) return 1;
     uint8_t *arena = (uint8_t *)calloc(0x0c000000u, 1);
     if (!arena) return 2;

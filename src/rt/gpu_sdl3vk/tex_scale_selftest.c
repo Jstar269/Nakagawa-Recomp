@@ -20,10 +20,11 @@
  *     pixel centres fall just below the texel lattice; every draw it accepts reads one texel per
  *     pixel under both of psp.frag's filter rules at 1x;
  *   - soft shadows (Ace's shadow=soft): the softened copy of a synthetic 12x12 disc equals a
- *     direct, non-separable integer reference texel for texel and a pinned centre row; on a 32x32
+ *     direct, non-separable integer reference texel for texel and a pinned centre row; on a 40x40
  *     disc at every factor (2-4) and edge (1-4) the flat interior and outside keep their alpha
  *     exactly, the alpha mass stays within the stated rounding bound, the centre row is a monotone
- *     ramp with more levels than the hard edge, and two runs agree byte for byte; a factor, edge or
+ *     ramp with more levels and a smaller largest step than the hard edge's own row, and two runs
+ *     agree byte for byte; a factor, edge or
  *     size out of bounds is refused with the output untouched;
  *   - the texture digest: HMAC-SHA-256 equals RFC 4231 test cases 1, 2 and 6 (whole and split
  *     messages), and the match rule's message (domain, u16 sizes, R, G, B, A texels) equals a
@@ -619,14 +620,14 @@ static void test_smart2d(void) {
 /* ---- soft shadows ------------------------------------------------------------------------ */
 
 /* A synthetic hard-edged disc of side n (centre between the middle texels): alpha 255 inside
- * radius r0, a one-texel rim of 237 to r1, a last ring of 7 to r2 and 0 outside, radii in texels
- * times two (q = (2x - n + 1)^2 + (2y - n + 1)^2 is four times the squared distance). R, G and B
- * vary over the texture so the colour upscale is checked too. */
+ * radius r0, a rim of 200 to r1, a last ring of 48 to r2 and 0 outside, radii in texels times two
+ * (q = (2x - n + 1)^2 + (2y - n + 1)^2 is four times the squared distance). The levels are the
+ * test's own. R, G and B vary over the texture so the colour upscale is checked too. */
 static void soft_disc(uint32_t *t, int n, int r0, int r1, int r2) {
     for (int y = 0; y < n; y++)
         for (int x = 0; x < n; x++) {
             const int dx = 2 * x - n + 1, dy = 2 * y - n + 1, q = dx * dx + dy * dy;
-            const uint32_t a = q < r0 * r0 ? 255u : q < r1 * r1 ? 237u : q < r2 * r2 ? 7u : 0u;
+            const uint32_t a = q < r0 * r0 ? 255u : q < r1 * r1 ? 200u : q < r2 * r2 ? 48u : 0u;
             t[y * n + x] = (a << 24) | (0x40u << 16) | ((uint32_t)(9 * y) << 8) | (uint32_t)(19 * x);
         }
 }
@@ -685,11 +686,11 @@ static int soft_row_ramp(const uint32_t *o, int ow, int row, int c0, int *levels
 }
 
 static void test_soften(void) {
-    enum { SN = 12, BN = 32 };
+    enum { SN = 12, BN = 40 };
     static uint32_t small[SN * SN], big[BN * BN];
     static uint32_t out[(BN * 4) * (BN * 4)], again[(BN * 4) * (BN * 4)];
     soft_disc(small, SN, 6, 8, 9);
-    soft_disc(big, BN, 18, 20, 21);
+    soft_disc(big, BN, 22, 25, 27);
 
     /* Bounds: refused, and the output untouched. */
     {
@@ -717,9 +718,9 @@ static void test_soften(void) {
      * the alpha of output row 23 (through the centre) is pinned. */
     {
         static const uint8_t k_row23[48] = {
-            0, 0, 3, 13, 30, 53, 79, 106, 134, 162, 190, 215, 234, 246, 251, 253,
-            254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 254,
-            253, 251, 246, 234, 215, 190, 162, 134, 106, 79, 53, 30, 13, 3, 0, 0,
+            0, 0, 3, 11, 25, 44, 67, 92, 118, 146, 174, 199, 219, 234, 243, 248,
+            252, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 254, 252,
+            248, 243, 234, 219, 199, 174, 146, 118, 92, 67, 44, 25, 11, 3, 0, 0,
         };
         int bad = 0, bx = 0, by = 0;
         CHECK(nk_tex_soften_alpha_edge(small, SN, SN, 4, 1, out) == 1, "soften: the 12x12 disc is refused");
@@ -741,8 +742,11 @@ static void test_soften(void) {
         printf("\n");
     }
 
-    /* The 32x32 disc at every factor and edge: interior, mass, ramp and determinism. */
-    int checked_in = 0, checked_out = 0;
+    /* The 40x40 disc at every factor and edge: interior, mass, ramp and determinism. The ramp is
+     * measured against the hard edge's own centre row. */
+    int checked_in = 0, checked_out = 0, hard_levels = 0, hard_jump = 0;
+    CHECK(soft_row_ramp(big, BN, BN / 2, BN / 2 - 1, &hard_levels, &hard_jump) && hard_levels == 4,
+          "soften: the hard disc's centre row is not a 4-level step (%d levels)", hard_levels);
     for (uint32_t f = NK_TEX_SOFT_FACTOR_MIN; f <= NK_TEX_SOFT_FACTOR_MAX; f++)
         for (uint32_t e = NK_TEX_SOFT_EDGE_MIN; e <= NK_TEX_SOFT_EDGE_MAX; e++) {
             const int ow = BN * (int)f, oh = ow, reach = (int)e + 1;
@@ -775,13 +779,13 @@ static void test_soften(void) {
                   (unsigned long long)out_mass, (unsigned long long)(src_mass * f * f), ow * oh / 2);
             int levels = 0, jump = 0;
             const int mono = soft_row_ramp(out, ow, oh / 2, ow / 2 - 1, &levels, &jump);
-            CHECK(mono && levels > 4 && jump < 230, "soften: factor %u edge %u: the centre row is not a ramp "
-                  "(monotone %d, %d levels, largest step %d; the hard edge has 4 levels and a step of 230)",
-                  f, e, mono, levels, jump);
+            CHECK(mono && levels > hard_levels && jump < hard_jump, "soften: factor %u edge %u: the centre row is "
+                  "not a ramp (monotone %d, %d levels, largest step %d; the hard edge has %d levels and a step of %d)",
+                  f, e, mono, levels, jump, hard_levels, hard_jump);
             if (f == NK_TEX_SOFT_FACTOR && e == 2u)
-                printf("tex scale selftest: soft 32x32 disc factor 4 edge 2: mass %llu vs %llu (bound %d), "
-                       "centre row %d levels, largest step %d\n", (unsigned long long)out_mass,
-                       (unsigned long long)(src_mass * f * f), ow * oh / 2, levels, jump);
+                printf("tex scale selftest: soft 40x40 disc factor 4 edge 2: mass %llu vs %llu (bound %d), "
+                       "centre row %d levels, largest step %d (hard edge %d, %d)\n", (unsigned long long)out_mass,
+                       (unsigned long long)(src_mass * f * f), ow * oh / 2, levels, jump, hard_levels, hard_jump);
         }
     CHECK(checked_in > 0 && checked_out > 0, "soften: the interior rule checked %d inside and %d outside texels",
           checked_in, checked_out);

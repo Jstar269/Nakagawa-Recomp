@@ -100,7 +100,7 @@ typedef struct {
     int tier;        /* AceTier */
     int sas;         /* AceSas: SAS voices mix through a band-limited resampler (host-only) */
     int tess;        /* finer patches (#2053): 0 off, or the factor 2, 3 or 4 on the guest's division */
-    int cull;       /* cull=on: a title's culling is widened to the wings (guest-visible, 11.3.6) */
+    int cull;        /* cull=on: a title's culling is widened to the wings (guest-visible, 11.3.6) */
     int stick;       /* stick=<counts>: 0 off, else the square stick dead zone the title ignores, 1..126
                         (guest-visible, 11.3.11) */
     int load;        /* load=fast: the waits a title's load part declares are skipped (guest timing, 11.3.10) */

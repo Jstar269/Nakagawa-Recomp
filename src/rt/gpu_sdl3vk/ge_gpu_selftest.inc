@@ -12131,61 +12131,105 @@ static int coherence_run_rtt_scale_at(int offset) {
     return ok;
 }
 
+#include "../../../tests/native/synthetic_png.h"   /* the pack file the soft-shadow case writes */
+
 /* ---- soft shadows (Ace's shadow=soft, tex_scale.h, contract section 10.23) -------------------- */
-/* A synthetic blob shadow: a 32x32 CLUT4 disc whose palette is black with alpha 0, 7, 237 and 255
- * (a hard edge with a one-texel rim), drawn magnified four times as a through-mode sprite, nearest
- * and clamped, blended (source alpha, one minus source alpha) over a white frame, so a pixel's red
- * channel is 255 minus the alpha it showed. Disc A is the one gegpu_soft_shadow_prepare declares;
- * disc B (smaller) is never declared. */
+/* Synthetic blob shadows: 16x16 black discs with a hard edge and a one-texel rim, drawn magnified
+ * four times as through-mode sprites, nearest and clamped, blended (source alpha, one minus source
+ * alpha) over a white frame, so a pixel's red channel is 255 minus the alpha it showed. Disc A (CLUT4,
+ * palette 8888, its rows padded to the GE's whole 16-byte lines) and disc C (4444) are the ones
+ * gegpu_soft_shadow_prepare declares, with edges 2 and 1; disc B (CLUT4, smaller) is never declared.
+ * The sizes and alpha levels are the test's own. */
 #define SSH_BASE   (0x04000000u | 0x00160000u)
 #define SSH_STRIDE 512u
-#define SSH_TEX_A  0x04040000u
+#define SSH_TEX_A  0x04040000u   /* the run's draws */
 #define SSH_TEX_B  0x04041000u
-#define SSH_N      32
-#define SSH_EDGE   2
+#define SSH_TEX_C  0x04042000u
+#define SSH_TEX_A0 0x04043000u   /* soft copies made with xBRZ off */
+#define SSH_TEX_C0 0x04044000u
+#define SSH_TEX_AR 0x04045000u   /* the part off, xBRZ as the run has it */
+#define SSH_TEX_BR 0x04046000u
+#define SSH_TEX_CR 0x04047000u
+#define SSH_TEX_S  0x04048000u   /* rewritten in place: the copy's size changes */
+#define SSH_TEX_P  0x04049000u   /* listed in a replacement pack */
 #define SSH_X0     40
 #define SSH_Y0     20
 #define SSH_ZOOM   4
 #define SSH_VRAM   0x00200000u
+#define SSH_PACK_COLOUR 0xFF3060C0u
 
-static const uint32_t k_ssh_alpha[4] = { 0u, 7u, 237u, 255u };
+typedef struct SshDisc {
+    uint32_t fmt;     /* 4 CLUT4, 2 4444 */
+    int n;            /* square, n texels a side */
+    int bufw;         /* texels from one row to the next */
+    int r0, r1, r2;   /* radii in half texels: alpha level 3 inside r0, 2 to r1, 1 to r2, 0 outside */
+    int edge;         /* the declared edge, 0 for an undeclared disc */
+} SshDisc;
+
+static const SshDisc k_ssh_a = { 4u, 16, 32, 10, 12, 14, 2 };
+static const SshDisc k_ssh_b = { 4u, 16, 32, 6, 8, 10, 0 };
+static const SshDisc k_ssh_c = { 2u, 16, 16, 8, 11, 13, 1 };
+static const uint32_t k_ssh_alpha[4] = { 0u, 48u, 200u, 255u };   /* CLUT4: the palette's alphas */
+static const uint32_t k_ssh_nibble[4] = { 0u, 3u, 12u, 15u };     /* 4444: alpha n * 17 */
 static const uint8_t k_ssh_key[32] = {
     0x53, 0x59, 0x4e, 0x54, 0x48, 0x45, 0x54, 0x49, 0x43, 0x20, 0x73, 0x6f, 0x66, 0x74, 0x20, 0x73,
     0x68, 0x61, 0x64, 0x6f, 0x77, 0x20, 0x74, 0x65, 0x73, 0x74, 0x20, 0x6b, 0x65, 0x79, 0x00, 0x01,
 };
 
-/* Palette index of texel (x, y): 3 inside radius r0, 2 to r1, 1 to r2, 0 outside (radii in half
- * texels, from the centre between the middle texels). */
-static uint32_t ssh_index(int x, int y, int r0, int r1, int r2) {
-    const int dx = 2 * x - SSH_N + 1, dy = 2 * y - SSH_N + 1, q = dx * dx + dy * dy;
-    return q < r0 * r0 ? 3u : q < r1 * r1 ? 2u : q < r2 * r2 ? 1u : 0u;
+/* Alpha level (0..3) of texel (x, y), from the centre between the middle texels. */
+static uint32_t ssh_index(const SshDisc *d, int x, int y) {
+    const int dx = 2 * x - d->n + 1, dy = 2 * y - d->n + 1, q = dx * dx + dy * dy;
+    return q < d->r0 * d->r0 ? 3u : q < d->r1 * d->r1 ? 2u : q < d->r2 * d->r2 ? 1u : 0u;
+}
+
+/* The texel the GE decodes: black, with the level's alpha (CLUT 8888's entry, or 4444's nibble). */
+static uint32_t ssh_rgba(const SshDisc *d, uint32_t level) {
+    return (d->fmt == 4u ? k_ssh_alpha[level] : k_ssh_nibble[level] * 17u) << 24;
 }
 
 int gegpu_soft_shadow_prepare(const char *mode) {
-    uint32_t t[SSH_N * SSH_N];
-    uint8_t digest[1][32];
-    const uint8_t edge[1] = { SSH_EDGE };
+    uint32_t t[16 * 16];
+    uint8_t digest[2][32];
+    const SshDisc *declared[2] = { &k_ssh_a, &k_ssh_c };
+    uint8_t edge[2];
     if (!mode || (strcmp(mode, "on") != 0 && strcmp(mode, "off") != 0 && strcmp(mode, "undeclared") != 0))
         return 0;
     if (strcmp(mode, "undeclared") == 0) return nk_ace_soft_shadows_declare(k_ssh_key, NULL, 0u, NULL);
-    /* The texels the GE decodes for disc A (CLUT 8888: the palette entry), hashed as a package would. */
-    for (int y = 0; y < SSH_N; y++)
-        for (int x = 0; x < SSH_N; x++) t[y * SSH_N + x] = k_ssh_alpha[ssh_index(x, y, 18, 20, 21)] << 24;
-    if (!nk_tex_soft_shadow_digest(k_ssh_key, t, SSH_N, SSH_N, digest[0])) return 0;
+    /* The texels the GE decodes for discs A and C, hashed as a package would. */
+    for (int k = 0; k < 2; k++) {
+        const SshDisc *d = declared[k];
+        for (int y = 0; y < d->n; y++)
+            for (int x = 0; x < d->n; x++) t[y * d->n + x] = ssh_rgba(d, ssh_index(d, x, y));
+        if (!nk_tex_soft_shadow_digest(k_ssh_key, t, (uint32_t)d->n, (uint32_t)d->n, digest[k])) return 0;
+        edge[k] = (uint8_t)d->edge;
+    }
     /* Declared in "off" too: without the key, a declaration changes nothing. */
-    return nk_ace_soft_shadows_declare(k_ssh_key, (const uint8_t (*)[32])digest, 1u, edge);
+    return nk_ace_soft_shadows_declare(k_ssh_key, (const uint8_t (*)[32])digest, 2u, edge);
 }
 
-static void ssh_upload(uint32_t addr, int r0, int r1, int r2) {
+static uint32_t ssh_bytes(const SshDisc *d) {
+    return d->fmt == 4u ? (uint32_t)(d->bufw * d->n / 2) : (uint32_t)(d->bufw * d->n * 2);
+}
+
+/* Disc `d`'s texels written to guest VRAM at `addr`, and the write noted. */
+static void ssh_upload(uint32_t addr, const SshDisc *d) {
     uint8_t *p = (uint8_t *)SR_HOST(addr);
-    for (int y = 0; y < SSH_N; y++)
-        for (int x = 0; x < SSH_N; x += 2)   /* CLUT4: the left texel in the low nibble */
-            p[(y * SSH_N + x) / 2] = (uint8_t)(ssh_index(x, y, r0, r1, r2) | (ssh_index(x + 1, y, r0, r1, r2) << 4));
-    sr_gpu_vram_dirty(addr, SSH_N * SSH_N / 2);
+    for (int y = 0; y < d->n; y++)
+        for (int x = 0; x < d->n; x++) {
+            const uint32_t level = ssh_index(d, x, y);
+            if (d->fmt == 4u) {   /* CLUT4: the left texel in the low nibble */
+                uint8_t *b = &p[(y * d->bufw + x) / 2];
+                *b = (uint8_t)((x & 1) ? ((*b & 0x0Fu) | (level << 4)) : ((*b & 0xF0u) | level));
+            } else {              /* 4444: alpha in the top nibble, black */
+                const uint16_t v = (uint16_t)(k_ssh_nibble[level] << 12);
+                memcpy(&p[(y * d->bufw + x) * 2], &v, 2);
+            }
+        }
+    sr_gpu_vram_dirty(addr, ssh_bytes(d));
 }
 
-/* One frame: the white target, the disc at `tex` drawn, read back to guest VRAM and copied out. */
-static int ssh_frame(uint32_t tex, uint32_t *out) {
+/* One frame: the white target, disc `d` at `tex` drawn, read back to guest VRAM and copied out. */
+static int ssh_frame(uint32_t tex, const SshDisc *d, uint32_t *out) {
     uint32_t *fb = (uint32_t *)SR_HOST(SSH_BASE);
     coherence_reset_targets();
     memset(fb, 0xFF, SSH_STRIDE * FB_H * 4u);
@@ -12193,10 +12237,10 @@ static int ssh_frame(uint32_t tex, uint32_t *out) {
     wrap_state(SSH_BASE, SSH_STRIDE);
     s_ge->tex_enable = 1;
     s_ge->tex_addr = tex;
-    s_ge->tex_bufw = SSH_N;
-    s_ge->tex_fmt = 4u;                      /* CLUT4 */
-    s_ge->tex_w = SSH_N;
-    s_ge->tex_h = SSH_N;
+    s_ge->tex_bufw = (uint32_t)d->bufw;
+    s_ge->tex_fmt = d->fmt;
+    s_ge->tex_w = d->n;
+    s_ge->tex_h = d->n;
     s_ge->tex_func = 0x103u;                 /* REPLACE, with the texture's alpha */
     s_ge->tex_filter = 0u;                   /* nearest: the stock edge is a step of whole texels */
     s_ge->tex_wrap = 0x101u;
@@ -12212,11 +12256,44 @@ static int ssh_frame(uint32_t tex, uint32_t *out) {
     s_tmpl_ok = 0;
     GeVtx p0, p1;
     wrap_vtx(&p0, (float)SSH_X0, (float)SSH_Y0, 0xFFFFFFFFu); p0.u = 0.0f; p0.v = 0.0f;
-    wrap_vtx(&p1, (float)(SSH_X0 + SSH_N * SSH_ZOOM), (float)(SSH_Y0 + SSH_N * SSH_ZOOM), 0xFFFFFFFFu);
-    p1.u = (float)SSH_N; p1.v = (float)SSH_N;
+    wrap_vtx(&p1, (float)(SSH_X0 + d->n * SSH_ZOOM), (float)(SSH_Y0 + d->n * SSH_ZOOM), 0xFFFFFFFFu);
+    p1.u = (float)d->n; p1.v = (float)d->n;
     const int ok = hook_sprite(&p0, &p1, 0) && s_cur && target_readback(s_cur);
     if (ok) memcpy(out, fb, SSH_STRIDE * FB_H * 4u);
     return ok;
+}
+
+/* Two frames of the same draw: an xBRZ copy is queued by the first and bound by the second (the
+ * scaler runs synchronously in this case). `first` may be NULL. */
+static int ssh_frames(uint32_t tex, const SshDisc *d, uint32_t *first, uint32_t *out) {
+    return ssh_frame(tex, d, first ? first : out) && ssh_frame(tex, d, out);
+}
+
+/* The parts that make a copy, switched for one draw and put back: soft shadows, xBRZ's factor and
+ * the replacement pack. With all three off no copy is offered or bound, so a draw is stock. */
+typedef struct SshParts {
+    int soft, xs;
+    NkTexRepl *repl;
+} SshParts;
+
+static SshParts ssh_parts(int soft, int xs, NkTexRepl *repl) {
+    const SshParts was = { s_soft_on, s_xs_factor, s_repl };
+    s_soft_on = soft;
+    s_xs_factor = xs;
+    s_repl = repl;
+    return was;
+}
+
+static void ssh_parts_restore(SshParts was) {
+    s_soft_on = was.soft;
+    s_xs_factor = was.xs;
+    s_repl = was.repl;
+}
+
+static TexEnt *ssh_entry(uint32_t addr) {
+    for (int i = 0; i < s_tex_n; i++)
+        if (s_tex[i].addr == addr) return &s_tex[i];
+    return NULL;
 }
 
 static uint64_t ssh_fnv(const uint32_t *px) {
@@ -12226,15 +12303,19 @@ static uint64_t ssh_fnv(const uint32_t *px) {
     return h;
 }
 
-/* Red along the guest row through the disc's centre, from just left of the centre outward past
- * the quad's edge: non-decreasing for a monotone ramp. Returns that, with the distinct values and
- * the largest step. */
-static int ssh_row_ramp(const uint32_t *fb, int *levels, int *jump) {
-    const int y = SSH_Y0 + SSH_N * SSH_ZOOM / 2;
+static int ssh_same(const uint32_t *a, const uint32_t *b) {
+    return memcmp(a, b, (size_t)SSH_STRIDE * FB_H * 4u) == 0;
+}
+
+/* Red along the guest row through disc `d`'s centre, from just left of the centre outward past the
+ * quad's edge: non-decreasing for a monotone ramp. Returns that, with the distinct values and the
+ * largest step. */
+static int ssh_row_ramp(const SshDisc *d, const uint32_t *fb, int *levels, int *jump) {
+    const int y = SSH_Y0 + d->n * SSH_ZOOM / 2;
     int prev = -1, mono = 1, seen[256] = {0};
     *levels = 0;
     *jump = 0;
-    for (int x = SSH_X0 + SSH_N * SSH_ZOOM / 2 - 1; x >= SSH_X0 - 2; x--) {
+    for (int x = SSH_X0 + d->n * SSH_ZOOM / 2 - 1; x >= SSH_X0 - 2; x--) {
         const int r = (int)(fb[y * (int)SSH_STRIDE + x] & 0xFFu);
         if (prev >= 0 && r < prev) mono = 0;
         if (prev >= 0 && r - prev > *jump) *jump = r - prev;
@@ -12244,38 +12325,167 @@ static int ssh_row_ramp(const uint32_t *fb, int *levels, int *jump) {
     return mono;
 }
 
-/* SR_GPU_COHERENCE_CASE=soft-shadow at render scale 1 or 4 (the harness's --soft-shadow MODE sets the
- * Ace line and the declaration before the renderer starts):
- *   on          disc A is drawn from its softened copy from the first draw: its centre row is a
- *               monotone ramp with more levels and a smaller largest step than stock, its flat
- *               interior is stock's, and the part counts the match, the copy queued and the bind and
- *               confirms itself; a freed copy is made again without hashing again and draws the
- *               same; disc B, undeclared, is byte-identical to stock;
- *   off         (no shadow key, a declaration in force) nothing is hashed or copied, and both discs
- *               are stock;
- *   undeclared  (shadow=soft, nothing declared) the part is unavailable with its reason, and both
- *               discs are stock.
- * Stock is the same draw with the part off on this renderer; with SR_GPU_SOFT_SHADOW_REF the off
- * run writes the stock frames' hashes and the other runs must draw the same. In every mode guest
- * VRAM outside the committed frame is unchanged. */
+/* A declared disc drawn soft against its stock frame: a monotone centre-row ramp with more levels
+ * and a smaller largest step, the flat interior (a guest pixel whose texel has only level-3 texels
+ * within the edge plus one) stock's, and not stock as a whole. Returns the interior pixel count, or
+ * -1 after printing why it failed. */
+static int ssh_soft_edge_check(const char *name, const char *what, const SshDisc *d, const uint32_t *soft,
+                               const uint32_t *stock) {
+    int levels = 0, jump = 0, levels_stock = 0, jump_stock = 0;
+    const int mono = ssh_row_ramp(d, soft, &levels, &jump), mono_stock = ssh_row_ramp(d, stock, &levels_stock, &jump_stock);
+    if (!mono || !mono_stock || levels <= levels_stock || jump >= jump_stock) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: the edge is not a ramp: monotone %d (stock %d), %d levels "
+                        "(stock %d), largest step %d (stock %d)\n", name, what, mono, mono_stock, levels, levels_stock,
+                jump, jump_stock);
+        return -1;
+    }
+    int interior = 0, bad = 0;
+    const int reach = d->edge + 1;
+    for (int y = SSH_Y0; y < SSH_Y0 + d->n * SSH_ZOOM; y++)
+        for (int x = SSH_X0; x < SSH_X0 + d->n * SSH_ZOOM; x++) {
+            const int sx = (x - SSH_X0) / SSH_ZOOM, sy = (y - SSH_Y0) / SSH_ZOOM;
+            int flat = 1;
+            for (int j = sy - reach; j <= sy + reach && flat; j++)
+                for (int i = sx - reach; i <= sx + reach && flat; i++)
+                    flat = j >= 0 && j < d->n && i >= 0 && i < d->n && ssh_index(d, i, j) == 3u;
+            if (!flat) continue;
+            interior++;
+            if ((soft[y * (int)SSH_STRIDE + x] & 0xFFFFFFu) != (stock[y * (int)SSH_STRIDE + x] & 0xFFFFFFu)) bad++;
+        }
+    if (bad || interior == 0 || ssh_same(soft, stock)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: %d of %d interior pixels differ from stock%s\n", name,
+                what, bad, interior, ssh_same(soft, stock) ? "; drawn as stock (vacuous)" : "");
+        return -1;
+    }
+    return interior;
+}
+
+static int ssh_fail(const char *name, const char *why) {
+    fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s\n", name, why);
+    return 0;
+}
+
+/* The copy's size changes when the content does (ge_gpu.c tex_xs_offer): disc A's content at
+ * SSH_TEX_S takes its soft copy; the guest rewrites it in place to disc B's (undeclared), and the
+ * held copy gives way to what the part-off run draws (xBRZ's copy, or none); A's content again
+ * takes the soft copy back from that draw, freeing the xBRZ copy without losing the match it just
+ * made, so a freed soft copy is made again without a second hash. */
+static int ssh_size_change(const char *name, const uint32_t *soft_a, const uint32_t *ref_b, uint32_t *tmp) {
+    const uint64_t repl_bound0 = s_cnt_repl_bound;
+    ssh_upload(SSH_TEX_S, &k_ssh_a);
+    if (!ssh_frame(SSH_TEX_S, &k_ssh_a, tmp) || !ssh_same(tmp, soft_a))
+        return ssh_fail(name, "size change: disc A's content at another address is not drawn soft from the first draw");
+    TexEnt *e = ssh_entry(SSH_TEX_S);
+    if (!e || !e->xs.soft || e->xs.repl_factor != NK_TEX_SOFT_FACTOR)
+        return ssh_fail(name, "size change: no soft copy held before the rewrite");
+    ssh_upload(SSH_TEX_S, &k_ssh_b);
+    if (!ssh_frames(SSH_TEX_S, &k_ssh_b, NULL, tmp) || !ssh_same(tmp, ref_b) || e->xs.soft || e->xs.repl_factor ||
+        s_cnt_repl_bound != repl_bound0) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL size change: rewritten to an undeclared disc, the texture "
+                        "is not drawn as with the part off (frame %s, soft %d, replacement factor %d, replaced binds "
+                        "%llu, were %llu)\n", name, ssh_same(tmp, ref_b) ? "same" : "differs", e->xs.soft,
+                e->xs.repl_factor, (unsigned long long)s_cnt_repl_bound, (unsigned long long)repl_bound0);
+        return 0;
+    }
+    const uint64_t hashed0 = s_cnt_soft_hashed;
+    ssh_upload(SSH_TEX_S, &k_ssh_a);
+    if (!ssh_frame(SSH_TEX_S, &k_ssh_a, tmp) || !ssh_same(tmp, soft_a) || !e->xs.soft ||
+        s_cnt_soft_hashed != hashed0 + 1u)
+        return ssh_fail(name, "size change: disc A's content back is not drawn soft from the first draw, hashed once");
+    if (!submit_pending() || !cmd_drain(GEGPU_BOUNDARY_LIFETIME))
+        return ssh_fail(name, "size change: the drain failed");
+    const uint64_t hashed1 = s_cnt_soft_hashed;
+    tex_xs_release(e);
+    s_cnt_present_gpu++;   /* the next present: a budget retry runs at most once per present */
+    if (!ssh_frame(SSH_TEX_S, &k_ssh_a, tmp) || !ssh_same(tmp, soft_a) || !e->xs.soft || s_cnt_soft_hashed != hashed1) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL size change: the soft copy made after the size change, "
+                        "freed, is not made again from the kept match (hashed %llu, was %llu; soft %d)\n", name,
+                (unsigned long long)s_cnt_soft_hashed, (unsigned long long)hashed1, e->xs.soft);
+        return 0;
+    }
+    return 1;
+}
+
+/* A replacement pack's image comes before a soft copy: disc C's content at SSH_TEX_P (declared,
+ * 16x16, so a pack can name it) listed in a synthetic pack at factor 4 is drawn from the pack's
+ * solid image from the first draw, and is never hashed for a shadow. */
+static int ssh_pack_first(const char *name, uint32_t *tmp) {
+    char dir[400], path[480], err[200];
+    enum { PW = 64 };
+    static uint32_t img[PW * PW];
+    for (int i = 0; i < PW * PW; i++) img[i] = SSH_PACK_COLOUR;
+    ssh_upload(SSH_TEX_P, &k_ssh_c);
+    snprintf(dir, sizeof(dir), "%s/soft_shadow_pack", SR_SELFTEST_BUILD_ROOT);
+    nk_platform_mkdir_p(dir);
+    const uint64_t key = nk_texrepl_cache_key(SSH_TEX_P, k_ssh_c.fmt, 4u | (4u << 8), 0u);
+    snprintf(path, sizeof(path), "%s/%016llx%08x.png", dir, (unsigned long long)key,
+             nk_texrepl_quick_hash(SR_HOST(SSH_TEX_P), ssh_bytes(&k_ssh_c), SSH_TEX_P));
+    if (!synpng_write(path, PW, PW, img)) return ssh_fail(name, "pack: cannot write the synthetic pack");
+    NkTexRepl *pack = nk_texrepl_open(dir, 0, err, sizeof(err));
+    if (!pack) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL pack: %s\n", name, err);
+        return 0;
+    }
+    const SshParts was = ssh_parts(s_soft_on, s_xs_factor, pack);
+    const uint64_t hashed0 = s_cnt_soft_hashed, repl_bound0 = s_cnt_repl_bound;
+    int ok = ssh_frame(SSH_TEX_P, &k_ssh_c, tmp);
+    ssh_parts_restore(was);
+    int off = 0;
+    for (int y = SSH_Y0; ok && y < SSH_Y0 + k_ssh_c.n * SSH_ZOOM; y++)
+        for (int x = SSH_X0; x < SSH_X0 + k_ssh_c.n * SSH_ZOOM; x++)
+            if ((tmp[y * (int)SSH_STRIDE + x] & 0xFFFFFFu) != (SSH_PACK_COLOUR & 0xFFFFFFu)) off++;
+    const TexEnt *e = ssh_entry(SSH_TEX_P);
+    if (!ok || off || !e || e->xs.soft || s_cnt_soft_hashed != hashed0 || s_cnt_repl_bound <= repl_bound0) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL pack: a declared texture the pack lists is not drawn from "
+                        "the pack's image unhashed (%d pixels not the image's, soft %d, hashed %llu, was %llu, "
+                        "replaced binds %llu, were %llu)\n", name, off, e ? e->xs.soft : -1,
+                (unsigned long long)s_cnt_soft_hashed, (unsigned long long)hashed0,
+                (unsigned long long)s_cnt_repl_bound, (unsigned long long)repl_bound0);
+        ok = 0;
+    }
+    nk_texrepl_close(pack);
+    return ok;
+}
+
+/* SR_GPU_COHERENCE_CASE=soft-shadow at render scale 1 or 4, with xBRZ off or at any factor
+ * (--tex-scale; the harness's --soft-shadow MODE sets the Ace line and the declaration before the
+ * renderer starts). Stock is a draw with every copy off (no soft copy, no xBRZ, no pack); "part off"
+ * is the same content at a fresh address drawn with the part off and xBRZ as the run has it.
+ *   on          discs A and C are drawn from their softened copies from the first draw: each centre
+ *               row is a monotone ramp with more levels and a smaller largest step than stock, the
+ *               flat interior is stock's, and the part counts each match, copy and bind and confirms
+ *               itself; with xBRZ on, each is the same soft frame drawn with xBRZ off, and not xBRZ's;
+ *               a freed copy is made again without hashing again and draws the same; the copy's size
+ *               change (ssh_size_change) and a pack's precedence (ssh_pack_first) hold;
+ *   off         (no shadow key, a declaration in force) nothing is hashed or copied soft;
+ *   undeclared  (shadow=soft, nothing declared) the part is unavailable with its reason, and nothing
+ *               is hashed or copied soft.
+ * In every mode each disc is drawn as with the part off, but for the declared discs in "on"; disc B
+ * is hashed and not matched in "on"; with xBRZ on its copy shows (part off is not stock). With
+ * SR_GPU_SOFT_SHADOW_REF the off run writes the stock and part-off frames' hashes and the other runs
+ * at the same scale and factor must draw the same. Guest VRAM outside the committed frame is
+ * unchanged by the run's draws. */
 static int coherence_run_soft_shadow(void) {
     const char *name = "soft-shadow";
+    enum { F_A1, F_A, F_C1, F_C, F_B, F_A0, F_C0, F_AR, F_BR, F_CR, F_PA, F_PB, F_PC, F_AGAIN, F_TMP, F_COUNT };
     const size_t fbytes = (size_t)SSH_STRIDE * FB_H * 4u, fb_off = SSH_BASE & 0x00FFFFFFu;
     const int asked = ace_requested()->shadow == ACE_SHADOW_SOFT, declared = nk_ace_soft_shadows()->count > 0;
-    const int want_on = g_ace_on && asked && declared;
-    uint32_t *soft = (uint32_t *)malloc(fbytes), *stock = (uint32_t *)malloc(fbytes);
-    uint32_t *b_on = (uint32_t *)malloc(fbytes), *b_off = (uint32_t *)malloc(fbytes);
-    uint32_t *again = (uint32_t *)malloc(fbytes);
+    const int want_on = g_ace_on && asked && declared, xs = s_xs_factor;
+    const char *xs_env = getenv("SR_TEX_SCALE");
+    const int xs_want = xs_env && xs_env[0] >= '2' && xs_env[0] <= '9' && !xs_env[1] ? xs_env[0] - '0' : 0;
+    uint32_t *fr = (uint32_t *)malloc(fbytes * F_COUNT);
     uint8_t *vram0 = (uint8_t *)malloc(SSH_VRAM);
-    int ok = soft && stock && b_on && b_off && again && vram0;
+    int ok = fr && vram0;
+#define SSH_F(i) (fr + (size_t)(i) * (fbytes / 4u))
     if (ok && s_scale != 1 && s_scale != 4) {
         fprintf(stderr, "gpu coherence selftest [%s]: FAIL runs at render scale 1 or 4 (--scale), not %d\n", name,
                 s_scale);
         ok = 0;
     }
-    if (ok && s_soft_on != want_on) {
-        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the part is %s (Ace %d, shadow=soft %d, declared %d)\n",
-                name, s_soft_on ? "on" : "off", g_ace_on, asked, declared);
+    if (ok && (s_soft_on != want_on || xs != xs_want)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the part is %s (Ace %d, shadow=soft %d, declared %d), xBRZ "
+                        "factor %d (asked %d)\n", name, s_soft_on ? "on" : "off", g_ace_on, asked, declared, xs,
+                xs_want);
         ok = 0;
     }
     if (ok && asked && !declared) {
@@ -12287,23 +12497,48 @@ static int coherence_run_soft_shadow(void) {
             ok = 0;
         }
     }
+    nk_tex_scale_set_sync(1);
     if (ok) {
-        ssh_upload(SSH_TEX_A, 18, 20, 21);
-        ssh_upload(SSH_TEX_B, 14, 16, 17);
+        ssh_upload(SSH_TEX_A, &k_ssh_a);
+        ssh_upload(SSH_TEX_B, &k_ssh_b);
+        ssh_upload(SSH_TEX_C, &k_ssh_c);
+        ssh_upload(SSH_TEX_A0, &k_ssh_a);
+        ssh_upload(SSH_TEX_C0, &k_ssh_c);
+        ssh_upload(SSH_TEX_AR, &k_ssh_a);
+        ssh_upload(SSH_TEX_BR, &k_ssh_b);
+        ssh_upload(SSH_TEX_CR, &k_ssh_c);
         memcpy(vram0, SR_HOST(0x04000000u), SSH_VRAM);
-        ok = ssh_frame(SSH_TEX_A, soft);
     }
-    const uint64_t hashed_a = s_cnt_soft_hashed, matched_a = s_cnt_soft_matched;
-    const uint64_t queued_a = s_cnt_soft_queued, bound_a = s_cnt_soft_bound;
-    ok = ok && ssh_frame(SSH_TEX_B, b_on);   /* decoded, and offered, with the part as the run has it */
-    if (ok) {
-        const int saved = s_soft_on;         /* stock: the same draws with the part off */
-        s_soft_on = 0;
-        ok = ssh_frame(SSH_TEX_A, stock) && ssh_frame(SSH_TEX_B, b_off);
-        s_soft_on = saved;
+    /* The run's draws, counted after each disc. */
+    uint64_t cnt[3][4] = {{0}};
+    const uint32_t run_tex[3] = { SSH_TEX_A, SSH_TEX_C, SSH_TEX_B };
+    const SshDisc *run_disc[3] = { &k_ssh_a, &k_ssh_c, &k_ssh_b };
+    const int run_first[3] = { F_A1, F_C1, -1 }, run_out[3] = { F_A, F_C, F_B };
+    for (int k = 0; k < 3 && ok; k++) {
+        ok = ssh_frames(run_tex[k], run_disc[k], run_first[k] >= 0 ? SSH_F(run_first[k]) : NULL, SSH_F(run_out[k]));
+        cnt[k][0] = s_cnt_soft_hashed;
+        cnt[k][1] = s_cnt_soft_matched;
+        cnt[k][2] = s_cnt_soft_queued;
+        cnt[k][3] = s_cnt_soft_bound;
     }
-    if (!ok && soft && stock && b_on && b_off && again && vram0)
-        fprintf(stderr, "gpu coherence selftest [%s]: FAIL a draw or its readback failed\n", name);
+    if (ok) {   /* the declared discs with xBRZ off, the part as the run has it */
+        const SshParts was = ssh_parts(s_soft_on, 0, s_repl);
+        ok = ssh_frames(SSH_TEX_A0, &k_ssh_a, NULL, SSH_F(F_A0)) && ssh_frames(SSH_TEX_C0, &k_ssh_c, NULL, SSH_F(F_C0));
+        ssh_parts_restore(was);
+    }
+    if (ok) {   /* part off, xBRZ as the run has it */
+        const SshParts was = ssh_parts(0, xs, s_repl);
+        ok = ssh_frames(SSH_TEX_AR, &k_ssh_a, NULL, SSH_F(F_AR)) && ssh_frames(SSH_TEX_BR, &k_ssh_b, NULL, SSH_F(F_BR)) &&
+             ssh_frames(SSH_TEX_CR, &k_ssh_c, NULL, SSH_F(F_CR));
+        ssh_parts_restore(was);
+    }
+    if (ok) {   /* stock: the run's own textures with every copy off */
+        const SshParts was = ssh_parts(0, 0, NULL);
+        ok = ssh_frame(SSH_TEX_A, &k_ssh_a, SSH_F(F_PA)) && ssh_frame(SSH_TEX_B, &k_ssh_b, SSH_F(F_PB)) &&
+             ssh_frame(SSH_TEX_C, &k_ssh_c, SSH_F(F_PC));
+        ssh_parts_restore(was);
+    }
+    if (!ok && fr && vram0) fprintf(stderr, "gpu coherence selftest [%s]: FAIL a draw or its readback failed\n", name);
     /* Guest VRAM outside the committed frame: the textures and everything else, byte for byte. */
     if (ok) {
         const uint8_t *now = (const uint8_t *)SR_HOST(0x04000000u);
@@ -12316,113 +12551,107 @@ static int coherence_run_soft_shadow(void) {
             }
         }
     }
-    int levels_soft = 0, jump_soft = 0, levels_stock = 0, jump_stock = 0, interior = 0;
+    if (ok && !ssh_same(SSH_F(F_B), SSH_F(F_BR)))
+        ok = ssh_fail(name, "the undeclared disc is not drawn as with the part off");
+    if (ok && xs && (ssh_same(SSH_F(F_AR), SSH_F(F_PA)) || ssh_same(SSH_F(F_BR), SSH_F(F_PB))))
+        ok = ssh_fail(name, "with xBRZ on, the part-off frames are stock (xBRZ's copy never showed)");
+    int interior_a = 0, interior_c = 0;
     if (ok && want_on) {
-        const int mono = ssh_row_ramp(soft, &levels_soft, &jump_soft);
-        const int mono_stock = ssh_row_ramp(stock, &levels_stock, &jump_stock);
-        if (!mono || !mono_stock || levels_soft <= levels_stock || jump_soft >= jump_stock) {
-            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the edge is not a ramp: monotone %d (stock %d), %d levels "
-                            "(stock %d), largest step %d (stock %d)\n", name, mono, mono_stock, levels_soft,
-                    levels_stock, jump_soft, jump_stock);
+        interior_a = ssh_soft_edge_check(name, "disc A (CLUT4)", &k_ssh_a, SSH_F(F_A), SSH_F(F_PA));
+        interior_c = interior_a < 0 ? -1 : ssh_soft_edge_check(name, "disc C (4444)", &k_ssh_c, SSH_F(F_C), SSH_F(F_PC));
+        ok = interior_a > 0 && interior_c > 0;
+        if (ok && (!ssh_same(SSH_F(F_A1), SSH_F(F_A)) || !ssh_same(SSH_F(F_C1), SSH_F(F_C))))
+            ok = ssh_fail(name, "a declared disc's first draw is not its soft copy");
+        /* Soft over xBRZ: the declared discs' frames are the soft frames xBRZ-off draws, never xBRZ's. */
+        if (ok && (!ssh_same(SSH_F(F_A), SSH_F(F_A0)) || !ssh_same(SSH_F(F_C), SSH_F(F_C0)))) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL with xBRZ at %d a declared disc is not the soft frame "
+                            "drawn with xBRZ off (disc A %s, disc C %s)\n", name, xs,
+                    ssh_same(SSH_F(F_A), SSH_F(F_A0)) ? "same" : "differs", ssh_same(SSH_F(F_C), SSH_F(F_C0)) ? "same" : "differs");
             ok = 0;
         }
-        /* The flat interior: a guest pixel whose texel has only alpha-255 texels within SSH_EDGE + 1. */
-        int bad = 0;
-        for (int y = SSH_Y0; y < SSH_Y0 + SSH_N * SSH_ZOOM; y++)
-            for (int x = SSH_X0; x < SSH_X0 + SSH_N * SSH_ZOOM; x++) {
-                const int sx = (x - SSH_X0) / SSH_ZOOM, sy = (y - SSH_Y0) / SSH_ZOOM, reach = SSH_EDGE + 1;
-                int flat = 1;
-                for (int j = sy - reach; j <= sy + reach && flat; j++)
-                    for (int i = sx - reach; i <= sx + reach && flat; i++)
-                        flat = j >= 0 && j < SSH_N && i >= 0 && i < SSH_N && ssh_index(i, j, 18, 20, 21) == 3u;
-                if (!flat) continue;
-                interior++;
-                if ((soft[y * (int)SSH_STRIDE + x] & 0xFFFFFFu) != (stock[y * (int)SSH_STRIDE + x] & 0xFFFFFFu)) bad++;
-            }
-        if (bad || interior == 0) {
-            fprintf(stderr, "gpu coherence selftest [%s]: FAIL %d of %d interior pixels differ from stock\n", name, bad,
-                    interior);
-            ok = 0;
-        }
-        if (memcmp(soft, stock, fbytes) == 0) {
-            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the declared disc is drawn as stock (vacuous)\n", name);
-            ok = 0;
-        }
-        if (matched_a != 1u || queued_a != 1u || bound_a < 1u || !s_soft_confirmed ||
-            s_cnt_soft_matched != matched_a || s_cnt_soft_hashed != hashed_a + 1u) {
-            fprintf(stderr, "gpu coherence selftest [%s]: FAIL counts: disc A hashed %llu, matched %llu, queued %llu, "
-                            "bound %llu, confirmed %d; after disc B hashed %llu, matched %llu\n", name,
-                    (unsigned long long)hashed_a, (unsigned long long)matched_a, (unsigned long long)queued_a,
-                    (unsigned long long)bound_a, s_soft_confirmed, (unsigned long long)s_cnt_soft_hashed,
-                    (unsigned long long)s_cnt_soft_matched);
+        if (ok && xs && (ssh_same(SSH_F(F_A), SSH_F(F_AR)) || ssh_same(SSH_F(F_C), SSH_F(F_CR))))
+            ok = ssh_fail(name, "with xBRZ on a declared disc is drawn as with the part off");
+        /* A: hashed, matched, queued, bound; C the same; B hashed and not matched. */
+        if (ok && (cnt[0][0] != 1u || cnt[0][1] != 1u || cnt[0][2] != 1u || cnt[0][3] < 1u || !s_soft_confirmed ||
+                   cnt[1][0] != 2u || cnt[1][1] != 2u || cnt[1][2] != 2u || cnt[1][3] <= cnt[0][3] ||
+                   cnt[2][0] != 3u || cnt[2][1] != 2u || cnt[2][2] != 2u)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL counts (hashed, matched, queued, bound): after disc A "
+                            "%llu %llu %llu %llu, after C %llu %llu %llu %llu, after B %llu %llu %llu; confirmed %d\n",
+                    name, (unsigned long long)cnt[0][0], (unsigned long long)cnt[0][1], (unsigned long long)cnt[0][2],
+                    (unsigned long long)cnt[0][3], (unsigned long long)cnt[1][0], (unsigned long long)cnt[1][1],
+                    (unsigned long long)cnt[1][2], (unsigned long long)cnt[1][3], (unsigned long long)cnt[2][0],
+                    (unsigned long long)cnt[2][1], (unsigned long long)cnt[2][2], s_soft_confirmed);
             ok = 0;
         }
         /* A freed copy (a budget reclaim, tex_xs_release) is made again on the next present's hit from
          * the match the entry keeps: not hashed again, queued once more, and drawn as before. */
-        TexEnt *ea = NULL;
-        for (int i = 0; i < s_tex_n && !ea; i++)
-            if (s_tex[i].xs.soft && s_tex[i].xs.factor) ea = &s_tex[i];
-        if (ok && (!ea || !submit_pending() || !cmd_drain(GEGPU_BOUNDARY_LIFETIME))) {
-            fprintf(stderr, "gpu coherence selftest [%s]: FAIL no softened copy to free, or the drain failed\n", name);
-            ok = 0;
-        }
+        TexEnt *ea = ssh_entry(SSH_TEX_A);
+        if (ok && (!ea || !ea->xs.soft || !ea->xs.factor || !submit_pending() || !cmd_drain(GEGPU_BOUNDARY_LIFETIME)))
+            ok = ssh_fail(name, "no softened copy to free, or the drain failed");
         if (ok) {
             const uint64_t hashed0 = s_cnt_soft_hashed, queued0 = s_cnt_soft_queued, bound0 = s_cnt_soft_bound;
             tex_xs_release(ea);
             s_cnt_present_gpu++;   /* the next present: a budget retry runs at most once per present */
-            ok = ssh_frame(SSH_TEX_A, again);
+            ok = ssh_frame(SSH_TEX_A, &k_ssh_a, SSH_F(F_AGAIN));
             if (!ok)
                 fprintf(stderr, "gpu coherence selftest [%s]: FAIL the redraw after the free failed\n", name);
             else if (s_cnt_soft_hashed != hashed0 || s_cnt_soft_queued != queued0 + 1u ||
-                     s_cnt_soft_bound <= bound0 || !ea->xs.soft || memcmp(again, soft, fbytes) != 0) {
+                     s_cnt_soft_bound <= bound0 || !ea->xs.soft || !ssh_same(SSH_F(F_AGAIN), SSH_F(F_A))) {
                 fprintf(stderr, "gpu coherence selftest [%s]: FAIL after the copy was freed: hashed %llu (was %llu), "
                                 "queued %llu (was %llu), bound %llu (was %llu), soft %d, frame %s\n", name,
                         (unsigned long long)s_cnt_soft_hashed, (unsigned long long)hashed0,
                         (unsigned long long)s_cnt_soft_queued, (unsigned long long)queued0,
                         (unsigned long long)s_cnt_soft_bound, (unsigned long long)bound0, ea->xs.soft,
-                        memcmp(again, soft, fbytes) ? "differs" : "same");
+                        ssh_same(SSH_F(F_AGAIN), SSH_F(F_A)) ? "same" : "differs");
                 ok = 0;
             }
         }
+        ok = ok && ssh_size_change(name, SSH_F(F_A), SSH_F(F_BR), SSH_F(F_TMP));
+        ok = ok && ssh_pack_first(name, SSH_F(F_TMP));
     } else if (ok) {
-        if (memcmp(soft, stock, fbytes) != 0 || s_cnt_soft_hashed || s_cnt_soft_queued || s_cnt_soft_bound) {
-            fprintf(stderr, "gpu coherence selftest [%s]: FAIL with the part off disc A is not stock, or something was "
-                            "hashed (%llu) or copied (%llu)\n", name, (unsigned long long)s_cnt_soft_hashed,
-                    (unsigned long long)s_cnt_soft_queued);
+        if (!ssh_same(SSH_F(F_A), SSH_F(F_AR)) || !ssh_same(SSH_F(F_C), SSH_F(F_CR)) || s_cnt_soft_hashed ||
+            s_cnt_soft_queued || s_cnt_soft_bound) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL with the part off a declared disc is not drawn as with "
+                            "the part off, or something was hashed (%llu) or copied soft (%llu)\n", name,
+                    (unsigned long long)s_cnt_soft_hashed, (unsigned long long)s_cnt_soft_queued);
             ok = 0;
         }
     }
-    if (ok && memcmp(b_on, b_off, fbytes) != 0) {
-        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the undeclared disc is not byte-identical to stock\n", name);
-        ok = 0;
-    }
-    /* Across runs: the off run's stock frames are every run's. */
+    nk_tex_scale_set_sync(0);
+    /* Across runs: the off run's stock and part-off frames are every run's at its scale and factor. */
     const char *ref = getenv("SR_GPU_SOFT_SHADOW_REF");
+    const int frames_ref[5] = { F_PA, F_PB, F_PC, F_AR, F_BR };
     if (ok && ref && ref[0]) {
-        const uint64_t ha = ssh_fnv(stock), hb = ssh_fnv(b_off);
+        unsigned long long h[5], r[5] = {0};
+        for (int i = 0; i < 5; i++) h[i] = (unsigned long long)ssh_fnv(SSH_F(frames_ref[i]));
         if (!asked) {
             FILE *f = fopen(ref, "w");
-            ok = f && fprintf(f, "%016llx %016llx\n", (unsigned long long)ha, (unsigned long long)hb) > 0;
+            ok = f && fprintf(f, "%016llx %016llx %016llx %016llx %016llx\n", h[0], h[1], h[2], h[3], h[4]) > 0;
             if (f) ok = fclose(f) == 0 && ok;
             if (!ok) fprintf(stderr, "gpu coherence selftest [%s]: FAIL cannot write %s\n", name, ref);
         } else {
-            unsigned long long ra = 0, rb = 0;
             FILE *f = fopen(ref, "r");
-            const int got = f && fscanf(f, "%llx %llx", &ra, &rb) == 2;
+            int got = f && fscanf(f, "%llx %llx %llx %llx %llx", &r[0], &r[1], &r[2], &r[3], &r[4]) == 5;
             if (f) fclose(f);
-            if (!got || ra != ha || rb != hb) {
-                fprintf(stderr, "gpu coherence selftest [%s]: FAIL the stock frames differ from the off run's (%s: %s)\n",
-                        name, ref, got ? "other hashes" : "unreadable; run --soft-shadow off first");
+            for (int i = 0; i < 5 && got; i++) got = r[i] == h[i] ? got : -1;
+            if (got != 1) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL the stock or part-off frames differ from the off "
+                                "run's (%s: %s)\n", name, ref, got ? "other hashes" : "unreadable; run --soft-shadow off first");
                 ok = 0;
             }
         }
     }
     if (ok)
-        printf("gpu coherence selftest: PASS %-22s mode=%s part=%s centre row %d levels, largest step %d (stock %d, %d); "
-               "%d interior pixels stock; undeclared disc stock; VRAM outside the frame unchanged%s\n", name,
-               !asked ? "off" : declared ? "on" : "undeclared", s_soft_on ? "on" : "off", levels_soft, jump_soft,
-               levels_stock, jump_stock, interior, ref && ref[0] ? "; stock frames match the off run" : "");
-    free(soft); free(stock); free(b_on); free(b_off); free(again); free(vram0);
+        printf("gpu coherence selftest: PASS %-22s mode=%s part=%s xbrz=%d: %s; undeclared disc as with the part off; "
+               "VRAM outside the frame unchanged%s\n", name, !asked ? "off" : declared ? "on" : "undeclared",
+               s_soft_on ? "on" : "off", xs,
+               want_on ? "declared CLUT4 and 4444 discs soft (ramps, stock interiors), soft over xBRZ, a freed copy "
+                         "made again unhashed, the size change and a pack's precedence"
+                       : "nothing hashed or copied soft",
+               !(ref && ref[0]) ? "" : asked ? "; stock and part-off frames match the off run's" : "; wrote the stock and "
+                                                                                                    "part-off frames' hashes");
+#undef SSH_F
+    free(fr); free(vram0);
     return ok;
 }
 

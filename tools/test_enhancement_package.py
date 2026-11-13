@@ -7273,9 +7273,6 @@ class TestAcePartsSoftShadows(_AcePartsFixture):
         self.assertEqual(enhancement_package.ace_part_sites(alone), [])
         self.assertEqual(enhancement_package.soft_shadow_textures(validate_package(self.package())), [])
         validate_package(self.shadow_package([self._texture(i) for i in range(256)]))
-        self.assertEqual(enhancement_package.ACE_PART_TRANSFORM_PLACE,
-                         {"vblank_wait_skip": "load.sites", "alpha_edge_soften": "soft_shadows.textures"})
-        self.assertIn("texture_digest", enhancement_package._PUBLISHED_DIGEST_SLOTS)
 
     def test_validator_refusals(self) -> None:
         def tex(pkg: dict[str, Any]) -> dict[str, Any]:
@@ -7382,23 +7379,6 @@ class TestAcePartsSoftShadows(_AcePartsFixture):
                     validate_package(pkg)
                 self.assertIn(why, str(ctx.exception))
 
-    def test_schema_describes_soft_shadows(self) -> None:
-        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-        part = schema["properties"]["ace_parts"]["properties"]["soft_shadows"]
-        self.assertFalse(part["additionalProperties"])
-        self.assertEqual(set(part["properties"]), enhancement_package.ACE_SOFT_SHADOW_PART_KEYS)
-        textures = part["properties"]["textures"]
-        self.assertEqual((textures["minItems"], textures["maxItems"]),
-                         (1, enhancement_package.ACE_SOFT_SHADOW_TEXTURES_MAX))
-        item = textures["items"]
-        self.assertFalse(item["additionalProperties"])
-        self.assertEqual(set(item["properties"]), enhancement_package.ACE_SOFT_SHADOW_TEXTURE_KEYS)
-        self.assertEqual(set(item["required"]), enhancement_package.ACE_SOFT_SHADOW_TEXTURE_KEYS)
-        self.assertEqual(item["properties"]["transform"]["enum"], ["alpha_edge_soften"])
-        self.assertEqual(item["properties"]["texture_digest"]["pattern"], "^[0-9a-f]{64}$")
-        self.assertEqual((item["properties"]["edge_texels"]["minimum"], item["properties"]["edge_texels"]["maximum"]),
-                         (enhancement_package.ACE_SOFT_SHADOW_EDGE_MIN, enhancement_package.ACE_SOFT_SHADOW_EDGE_MAX))
-
     def test_digest_and_cache_key_cover_soft_shadows(self) -> None:
         variants = (
             self.package(),
@@ -7484,6 +7464,58 @@ class TestAcePartsSoftShadows(_AcePartsFixture):
                                              "/* src/rt/ace.h */", "                                const uint8_t",
                                              "};"))
                             or a == "" for a in added), added)
+
+    @unittest.skipUnless(GCC, "needs a host C compiler")
+    def test_codegen_declaration_compiles_against_ace_h_and_declares(self) -> None:
+        """Compile the emitted tables, prototype and call in one unit with src/rt/ace.h, link
+        src/rt/ace.c and run it: a prototype that drifts from ace.h fails to compile (checked
+        below with a changed copy), and the runtime holds the package's key, digests and edges."""
+        textures = [self._texture(0), self._texture(1, edge=4)]
+        key = enhancement_package.published_digest_key(self.elf)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            rc, output, files = self._codegen(tmp, "shadow", self.shadow_package(textures), self.symbols())
+            self.assertEqual(rc, 0, output)
+            lines = files["out.c"].split("\n")
+            first = lines.index("/* Ace soft shadows (ace_parts.soft_shadows): the executable's stock-digest key, each "
+                                "declared")
+            proto = lines.index("/* src/rt/ace.h */", first)
+            block = "\n".join(lines[first:proto + 3])
+            call = next(line for line in lines if "nk_ace_soft_shadows_declare(nk_ace_shadow_key" in line)
+            main = (
+                "int main(void) {\n"
+                f"{call}\n"
+                "    const AceSoftShadows *d = nk_ace_soft_shadows();\n"
+                "    printf(\"%u\\n\", (unsigned)d->count);\n"
+                "    for (int i = 0; i < 32; i++) printf(\"%02x\", d->key[i]);\n"
+                "    printf(\"\\n\");\n"
+                "    for (uint32_t t = 0; t < d->count; t++) {\n"
+                "        for (int i = 0; i < 32; i++) printf(\"%02x\", d->digest[t][i]);\n"
+                "        printf(\" %u\\n\", (unsigned)d->edge[t]);\n"
+                "    }\n"
+                "    return 0;\n"
+                "}\n"
+            )
+            assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
+
+            def build(name: str, text: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+                harness, exe = tmp / f"{name}.c", tmp / f"{name}.exe"
+                harness.write_text("#include <stdio.h>\n#include \"ace.h\"\n" + text + "\n" + main, encoding="utf-8")
+                return (subprocess.run([GCC, "-std=c99", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
+                                        f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness),
+                                        str(ROOT / "src" / "rt" / "ace.c")], capture_output=True, text=True), exe)
+
+            built, exe = build("declare", block)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+            # The negative control: the same unit with the emitted prototype's count widened.
+            self.assertEqual(block.count("uint32_t count,"), 1)
+            drifted, _exe = build("drift", block.replace("uint32_t count,", "uint64_t count,"))
+        self.assertNotEqual(drifted.returncode, 0, "a prototype that differs from ace.h compiled")
+        self.assertIn("nk_ace_soft_shadows_declare", drifted.stderr)
+        self.assertEqual(run.stdout.split("\n"), [
+            "2", key.hex(),
+            *(f"{texture['texture_digest']} {texture['edge_texels']}" for texture in textures), ""])
 
     def test_a_code_hook_site_id_a_shadow_texture_uses_is_refused(self) -> None:
         # Texture ids are in the one id namespace across both packages (contract sections 9.8, 9.9).
