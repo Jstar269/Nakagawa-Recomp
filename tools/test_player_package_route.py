@@ -101,9 +101,9 @@ LOW_FIXED_ADDRESS_BASE = 0x08804000
 
 HOMEBREW_REQUIRED = "NK_HOMEBREW_E2E_REQUIRED"
 # A folder of programs built from the fixtures below by a host with PSPDEV, for a host
-# without it (hosted CI's Windows routes, once its public_export job builds them; until then
-# hosted CI skips the tests that need the programs): <dir>/<fixture>/EBOOT.PBP beside a copy of the
-# fixture's main.c and Makefile it was built from, and <dir>/SHA256SUMS over all of them.
+# without it (hosted CI's Windows smoke part runs the homebrew tests on the folder its
+# public_export job builds, .github/workflows/ci.yml): <dir>/<fixture>/EBOOT.PBP beside a
+# copy of the fixture's main.c and Makefile it was built from, and <dir>/SHA256SUMS over all.
 HOMEBREW_PREBUILT = "NK_HOMEBREW_EBOOT_DIR"
 HOMEBREW_FIXTURE = ROOT / "fixtures" / "pspdev_phase5"
 # The homebrew folder probe (#2143), fixtures/homebrew_view/main.c built by
@@ -957,7 +957,11 @@ class TestPlayerPackageRoute(unittest.TestCase):
                 )
                 self.skip_if_toolchain_unusable(built)
                 if not binary.is_file():
-                    self.skipTest(f"the player package route needs {binary.name}; build failed")
+                    # The build's own last lines, so a run that must not skip (hosted CI's
+                    # homebrew routes, NK_HOMEBREW_E2E_REQUIRED=1) says why it failed.
+                    tail = "\n".join((built.stdout + built.stderr).splitlines()[-25:])
+                    self.skipTest(f"the player package route needs {binary.name}; build failed "
+                                  f"(exit {built.returncode}):\n{tail}")
 
     def require_homebrew_toolchain(self) -> None:
         """skip_if_toolchain_unavailable, but a failure under NK_HOMEBREW_E2E_REQUIRED=1.

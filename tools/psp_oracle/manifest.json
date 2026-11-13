@@ -1385,6 +1385,65 @@
         "reset": "one PRX launch; PSPLink soft reset before the next launch"
       },
       {
+        "id": "PSP-HLE-IO-TRUNC-001",
+        "status": "implemented",
+        "hardware_evidence": "MEASURED",
+        "evidence_ref": "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize",
+        "evidence_cases": [
+          "trunc-open-view",
+          "trunc-seek-read",
+          "trunc-seek-write",
+          "trunc-close-nowrite",
+          "trunc-recover-after-close",
+          "two-fd-view",
+          "two-fd-writer-survives",
+          "two-fd-trunc-writes-last",
+          "remove-absent",
+          "hle-io-trunc-done"
+        ],
+        "measurement_note": "Measured by the 2026-11-02 (21:40 UTC) PSP-3000 launch of commit 08934592f, case hle-io-trunc, on boot 107 in the game context (standalone PSPLink: 19 threads, 52 modules), after the transport-write preflight. Firmware: recorded as 6.6.1 (system software 6.61; custom firmware ARK-5 5.1.0 at that time, operator-declared). 08934592f is a local commit that is not in public history (not an ancestor of this tree). The case's own source is identical to this tree's: at both commits the SHA-256 of its probe_hle_measure.c section (#if PSP_ORACLE_CASE == HLE_CASE_IO_TRUNC to its #endif, 295 lines) is 528e41f21ffd9f174aa8b1e4dd098db21402f9b1188f4a57a35e76723ef735fd, of its case-id and campaign-id lines f95b29069036456fb91447665754c0d353efd6616f9360b778cc7fc0ea66be03, and of its Makefile CASE, LIBS and import-gate lines c70288c741952a62893abf4fc6eab3e8894ac7ebc98f9d8f653646404a9b8fb8. The shared probe harness outside the case sections has changed since, so a PRX built from this tree is not byte-identical to the one measured. The envelope is acceptance-eligible with 0 blockers: evidence class PSP_HARDWARE, a clean committed source binding, 9 records and the done record (out0 9), all PASS, COMPLETE PASS. With the probe-owned file ms0:/NKTRUNC.BIN holding the 16 bytes ABCDEFGHIJKLMNOP: an RDWR|CREAT|TRUNC open returns a descriptor, and while it is open sceIoGetstat gives size 0, lseek END 0 and a 4-byte read 0; lseek to 4 returns 4 and a read there 0; lseek to 8 and a 2-byte write of WX return 8 and 2, lseek END then gives 10, and after close the file is 10 bytes, ABCDEFGHWX. A TRUNC open closed with no write leaves size 0, and a fresh read-only open sees END 0 and reads 0 at 4; a later WRONLY open (no TRUNC) that seeks to 8 and writes WX still leaves 10 bytes, ABCDEFGHWX. With a second RDWR descriptor B open, a TRUNC open is refused with 0x8001000d (closing that refused id returns 0x80020323), and the file and B keep 16 bytes (B reads ABCD). With a TRUNC descriptor A open first, a RDWR descriptor B sees END 0, writes 12 bytes abcdefghijkl, and the size reads 0 after A's close and 12 after B's close, content abcdefghijkl; when B writes its 12 and closes (size 12) and A then writes WX and closes, the file is 2 bytes, WX. sceIoRemove of the file returns 0, and again 0x80010002, as does sceIoGetstat. Against src/rt/hle_data.c and src/rt/hle_io.c (PSP_O_TRUNC cuts at open and a write through that descriptor brings the old bytes back): the same-descriptor cells and the close-without-write cell agree; four cells do not: the old bytes after the truncating descriptor closes (the runtime no longer has them), the 0x8001000d refusal beside an open RDWR descriptor (the runtime opens and cuts), the size 0 while B's write is in flight before B closes (the runtime flushes each write to the host file), and the 2-byte result when the truncating descriptor writes last (the runtime keeps the longer end). The raw stream stays in the private campaign directory.",
+        "group": "system",
+        "source": "fixtures/psp_oracle/probe_hle_measure.c",
+        "prx": "hle_io_trunc.prx",
+        "apis": [
+          "sceIoClose",
+          "sceIoGetstat",
+          "sceIoLseek",
+          "sceIoOpen",
+          "sceIoRead",
+          "sceIoRemove",
+          "sceIoWrite",
+          "sceKernelDelayThread",
+          "sceKernelDeleteThread",
+          "sceKernelExitThread",
+          "sceKernelGetThreadId",
+          "sceKernelSleepThread",
+          "sceKernelWaitThreadEnd",
+          "sceKernelWakeupThread"
+        ],
+        "diagnostic_case_ids": [
+          "hle-io-trunc"
+        ],
+        "case_ids": [
+          "trunc-open-view",
+          "trunc-seek-read",
+          "trunc-seek-write",
+          "trunc-close-nowrite",
+          "trunc-recover-after-close",
+          "two-fd-view",
+          "two-fd-writer-survives",
+          "two-fd-trunc-writes-last",
+          "remove-absent",
+          "hle-io-trunc-done"
+        ],
+        "invariant": "One probe-owned file, ms0:/NKTRUNC.BIN, refused untouched if it already exists. Base content is the 16 bytes ABCDEFGHIJKLMNOP written with flags 0x0602. It records, as observations only, what a PSP_O_TRUNC (0x0400) open shows through the same descriptor (size, lseek END and SET, read, a seek-and-write after the truncating open), after the descriptor closes without a write, and through a second descriptor opened before, during and after the truncating open (view, a write through the second descriptor that survives the first one's close, and a write through the truncating descriptor after the second one wrote). The last cell removes the file and removes it again.",
+        "issues": [
+          1892
+        ],
+        "risk": "low; writes and removes one probe-owned file on the Memory Stick",
+        "reset": "one PRX launch, in game context as on boot 107; PSPLink soft reset before the next launch"
+      },
+      {
         "id": "PSP-HLE-SAVEDATA-NODATA-001",
         "status": "implemented",
         "hardware_evidence": "CAPTURED",
@@ -3315,6 +3374,74 @@
         "issues": [],
         "risk": "low; project-written through-mode sprite lists into the ge-raster/ge-rtt VRAM blocks at 0x100000 and 0x110000, each wait bounded with a sceGeBreak(1) reset after a TIMEOUT; the infinity and NaN cells run last",
         "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
+      },
+      {
+        "id": "PSP-GE-RASTER-002",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Built as the fixed-shape case 187 stream of #2193's raster bounds cells: colour writes past the frame-buffer stride (fbw 512, 500 and 256), depth writes past zbw 256, and a depth-only clear under a scissor, each read back as counts of drawn, cleared, fill and other pixels. Development runs of earlier builds on 2026-11-12 (PSP-3000, XMB context, boots 194 and 195) only set the block address and the RGB comparison. No hardware run is cited and no measurement is claimed.",
+        "group": "ge",
+        "source": "fixtures/psp_oracle/probe_ge_sample.c",
+        "prx": "ge_raster_bounds.prx",
+        "apis": [
+          "sceGeEdramGetAddr",
+          "sceGeListEnQueue",
+          "sceGeListSync",
+          "sceGeDrawSync",
+          "sceGeBreak",
+          "sceKernelDcacheWritebackAll",
+          "sceKernelDelayThread",
+          "sceKernelGetSystemTimeLow",
+          "sceDisplayGetFrameBuf"
+        ],
+        "diagnostic_case_ids": [
+          "ge-raster-bounds"
+        ],
+        "case_ids": [
+          "display-check",
+          "raster-*",
+          "depth-*",
+          "vram-restore",
+          "ge-raster-bounds-done"
+        ],
+        "invariant": "#2193: first the display buffer and whether it overlaps the probe's block or the GE never idled (then every later record is SKIP with its word count kept); then per cell in fixed order: the bounded wait outcome of the probe's own list, then fixed-shape reads of a 0x44000-byte colour block at VRAM 0x110000 (plain uncached mirror) and a 0x44000-byte depth block at 0x154000 (uncached 0x04200000 mirror): per read the pixel count and the counts equal to the drawn, cleared and fill values or anything else, or 16 raw pixels; the 0x88000 bytes are saved first and restored and checked at the end",
+        "issues": [
+          2193
+        ],
+        "risk": "low; This is the first recorded use of a GE-context enqueue in this project (PspGeListArgs with a context, as sceGuSendList passes; the boot 195 development run already used one): a FAIL on every -draw record means the enqueue was rejected, not a raster result. Project-written through-mode lists into a probe-owned 0x88000-byte VRAM block at 0x110000 (clear of both XMB display buffers, 0x0 and 0x88000); the probe first reads the display buffer and skips every cell (SKIP records, nothing touched) if it overlaps the block or cannot be read, waits (bounded) for the GE to idle before saving the block, fills it before each cell and restores it at the end; each list is queued with a GE context so the driver restores the GE state after a list that ends; each wait is bounded and decided by the probe's own list, with a sceGeBreak(1) reset only when that list has not ended by the deadline. No POWER RISK is known: the lists use no SIGNAL, JUMP, CALL or RET command (ge-signal's rjump-un, which stalled the console on boot 179, did); every record is written before the next cell, so a stall loses only the cell in flight and those after it; after a reset that leaves the GE busy every later cell is SKIP and the block is still restored. The block's ownership is an assumption: display-check sees only the buffer on screen, so the probe's fill may show on screen and a VSH write into the block would read as other",
+        "reset": "one PRX launch per boot, in XMB context, with no network or radio use; PSPLink soft reset before the next launch only after a read-only nkctl probe shows the launch finished with its done record; otherwise the owner power-cycles the console and nothing is retried on that boot"
+      },
+      {
+        "id": "PSP-GE-RASTER-003",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Built as the fixed-shape case 188 stream of #343's depth rounding cells (zr-thru-eq, zr-thru-gt, zr-xf-eq) in the ge-raster window and record shape: fractional through-mode and transform-mode depths read as colour through EQUAL and GREATER tests. A 0x1f, 0xe0 or 0xff pass mask reads \"truncate or reduced precision\", not truncation alone. Development runs of earlier builds on 2026-11-12 (PSP-3000, XMB context, boots 194 and 195) only set the RGB comparison. No hardware run is cited and no measurement is claimed.",
+        "group": "ge",
+        "source": "fixtures/psp_oracle/probe_ge_sample.c",
+        "prx": "ge_depth_round.prx",
+        "apis": [
+          "sceGeEdramGetAddr",
+          "sceGeListEnQueue",
+          "sceGeListSync",
+          "sceGeDrawSync",
+          "sceGeBreak",
+          "sceKernelDcacheWritebackAll",
+          "sceKernelDelayThread",
+          "sceKernelGetSystemTimeLow"
+        ],
+        "diagnostic_case_ids": [
+          "ge-depth-round"
+        ],
+        "case_ids": [
+          "zr-*",
+          "ge-depth-round-done"
+        ],
+        "invariant": "#343, per cell in fixed order: the bounded GE wait outcome and the window digest, the raw pixels of the 16x4 window x 16..31, y 8..11 of a 64x32 8888 buffer at VRAM 0x100000 after a per-pixel depth pass and a depth-tested draw, and the pass mask of the pixels that show their source colour",
+        "issues": [
+          343
+        ],
+        "risk": "low; This is the first recorded use of a GE-context enqueue in this project (PspGeListArgs with a context, as sceGuSendList passes; the boot 195 development run already used one): a FAIL on every -draw record means the enqueue was rejected, not a raster result. Project-written display lists into the ge-raster VRAM blocks (8 KiB colour at 0x100000 that the CPU clears first, and a depth buffer at 0x110000 that only the GE writes, at its 0x2040-XOR addresses within 0x110000..0x113fff); each list is queued with a GE context so the driver restores the GE state after a list that ends; each wait is bounded and decided by the probe's own list, with a sceGeBreak(1) reset only when that list has not ended by the deadline. No POWER RISK is known: the lists use no SIGNAL, JUMP, CALL or RET command (ge-signal's rjump-un, which stalled the console on boot 179, did); every record is written before the next cell, so a stall loses only the cell in flight and those after it; after a reset that leaves the GE busy every later cell is SKIP. The colour block at 0x100000 is not display-checked or restored and lies inside the XMB display buffer seen on boot 194, so a strip at the bottom of the screen may show the probe's pixels (main's ge-raster and ge-through-z used the same blocks)",
+        "reset": "one PRX launch per boot, in XMB context, with no network or radio use; PSPLink soft reset before the next launch only after a read-only nkctl probe shows the launch finished with its done record; otherwise the owner power-cycles the console and nothing is retried on that boot"
       },
       {
         "id": "PSP-GE-MIP-001",
@@ -7954,8 +8081,10 @@
     {
       "id": "PSP-SAS-002",
       "status": "implemented",
-      "hardware_evidence": "CAPTURED",
-      "evidence_note": "Captured by the 2026-11-10 PSP-3000 launch of commit 74acbe42, case sas-adsr, on boot 185 in the game context. Firmware: system software 6.61 (release:6.61:, system:58401@release_661,0x06060110:); PSPLink pspver 0x06060110, which the runner records as 6.6.1; custom firmware ARK-5 with cIPL, version 5.1.0 (operator-declared, not read by a tool). 74acbe42 is an ancestor of this tree, and its probe.c sas-adsr section and its Makefile CASE and LIBS lines are identical to this tree's, apart from the two AV-module unloads after the done record added on 2026-11-11, which run after every record. The stream is complete (696 records, all PASS, and COMPLETE PASS) after a transport-write preflight. The envelope is not acceptance-eligible: its one acceptance blocker is \"loaded module was not proven unloaded\". The capture therefore establishes nothing about PSP behaviour. Every one of its 696 records has the same result and out words as the 2026-11-05 run of the earlier source revision (its RC records), so the values in fixtures/psp_oracle/README.md stand as what both runs show. The case kept AVCODEC and SASCORE loaded; since 2026-11-11 it unloads SASCORE, then AVCODEC, after its done record, so a rerun can pass the runner's teardown check. No such rerun has been made, and it is also the first run of the unload itself (unloading SASCORE while a SAS core is initialised is not measured).",
+      "hardware_evidence": "MEASURED",
+      "evidence_ref": "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize",
+      "evidence_cases": ["sas-adsr-*"],
+      "measurement_note": "Measured by the 2026-11-13 (UTC) PSP-3000 launch (system software 6.61, operator-declared; pspver 0x06060110 recorded as 6.6.1 in the game context; custom firmware ARK-5 5.2.0 with cIPL, operator-declared; PSPLink built from pspdev/psplinkusb 7a0035d9; boot 208, game context entered by one nkctl game-context soft reset with the owner at the console, one launch on its own boot after the transport-write preflight) of commit 06a6c942c, case sas-adsr: 696 records and the done record, all PASS, COMPLETE PASS, acceptance-eligible with 0 blockers. After the done record the case unloaded SASCORE, then AVCODEC, and the teardown found the module set the launch started from; this is the first acceptance-eligible run of that unload in this case. Every record's result and out words equal the 2026-11-10 capture (boot 185, 74acbe42, ARK-5 5.1.0), which was not acceptance-eligible ('loaded module was not proven unloaded'), and the 2026-11-05 run of the earlier source revision (its RC records), so the values in fixtures/psp_oracle/README.md are what this run measures. The raw stream stays in the private campaign directory.",
       "group": "audio",
       "source": "fixtures/psp_oracle/probe.c",
       "prx": "nakagawa_psp_oracle.prx",
@@ -8034,6 +8163,22 @@
       "issues": [1386],
       "risk": "POWER RISK; a netconf or gamedata install dialog still RUNNING at the poll cap left PSPLink silent and needed a power cycle (boots 204 and 206); run only with the owner present. Cleanup is restricted to the probe-owned directory",
       "reset": "one PRX launch; PSPLink soft reset before the next launch"
+    },
+    {
+      "id": "PSP-HLE-UTILITY-DIALOG-002",
+      "status": "implemented",
+      "hardware_evidence": "CAPTURED",
+      "evidence_note": "Built as case 166: the game sharing and netconf cells of case 161 only, game sharing first and netconf last, with no savedata and no gamedata install dialog. Captured by the 2026-11-13 (UTC) PSP-3000 launch of commit e8b9b0cd5, case hle-utility-netconf-sharing, on boot 211 in the game context (entered from the XMB by one owner-present soft reset, the owner at the console). Firmware: system software 6.61 (operator-declared); PSPLink pspver 0x06060110, recorded as 6.6.1 in the game context; custom firmware ARK-5 with cIPL, version 5.2.0 (operator-declared, not read by a tool); PSPLink built from pspdev/psplinkusb 7a0035d9. e8b9b0cd5 is a descendant of this tree's base, and its fixtures/psp_oracle sources and tools/psp_oracle/parse_golden.py are identical to this tree's. Not acceptance-eligible: the loaded module was not proven unloaded and the console needed a power cycle, so the capture establishes nothing about PSP behaviour and no cell is MEASURED; what it shows: the sharing net setup returned 0 for all five calls; game sharing InitStart returned 0; the status went NONE, then INIT at vblank 0, then RUNNING at vblank 44, and stayed RUNNING to the 600-poll cap; the first ShutdownStart, sent while RUNNING at vblank 111, returned 0x80110001 (2 ShutdownStart calls in all); the common result word (+0x1c) and the sharing result word (+0x4c) both read 0x80110703; the sharing teardown returned 0 for all five calls. The case runs netconf only if game sharing does not stick, so the netconf cells did not run and nothing about netconf is shown. Case 161's netconf dialog, the same block and calls, stayed RUNNING to the poll cap on boot 204 (PSP-HLE-UTILITY-DIALOG-001, not acceptance-eligible). The raw stream stays in the private campaign directory.",
+      "group": "system",
+      "source": "fixtures/psp_oracle/probe_hle_measure.c",
+      "prx": "hle_utility_netconf_sharing.prx",
+      "apis": ["sceUtilityNetconfInitStart", "sceUtilityNetconfGetStatus", "sceUtilityNetconfUpdate", "sceUtilityNetconfShutdownStart", "sceUtilityGameSharingInitStart", "sceUtilityGameSharingGetStatus", "sceUtilityGameSharingUpdate", "sceUtilityGameSharingShutdownStart"],
+      "diagnostic_case_ids": ["hle-utility-netconf-sharing"],
+      "case_ids": ["sharing-*", "netconf-*"],
+      "invariant": "Each game sharing and netconf timing and wrong-state call has a fixed-shape record, written to host0 as soon as its cell ends, and bounded status polling; the probe makes no connect, join, create or scan call, answers no dialog, changes no setting and runs no savedata or gamedata install dialog. After a stuck dialog every later dialog cell is SKIP 5, and each group's net teardown still runs on every path that ran its setup, as in case 161, with each call's return recorded (NOT_RUN until measured).",
+      "issues": [1386],
+      "risk": "POWER RISK; case 161's netconf dialog stayed RUNNING to the poll cap on boot 204 and PSPLink then went silent until the owner power-cycled the console, after a teardown that completed and the done record (its gamedata install dialog did the same on boot 206 with no net module loaded); case 166 runs that netconf cell last and expects it to stick the same way, so the console is expected to need a power cycle after this case either way. RADIO: the game sharing dialog is expected to start the PSP's ad hoc radio (2.4 GHz) on its own, and may offer 256 project pattern bytes named NKORACL to a nearby PSP in receive mode until it is shut down or the console is power-cycled; the netconf dialog may scan for access points. No connect call is made and no dialog is answered, so nothing is sent to an access point or any server. Run only with the owner present, in the game context, with the WLAN switch on",
+      "reset": "game context: standalone PSPLink entered from the XMB by one owner-present soft reset, as case 161 was captured; the WLAN switch on (the probe does not read it, so the owner records its position; with it off the net setup and dialog cells record only what the PSP returns then); one hle-utility-netconf-sharing launch per boot; after a run that ended with a stuck dialog or a silent PSPLink, the owner power-cycles the console before any further launch, and nothing is retried on that boot; a PSPLink soft reset or Nakagawa Link reset before the next launch only after a run that ended with no stuck dialog, followed by the game-context entry again"
     },
     {
       "id": "PSP-HLE-IO-SEEK-001",

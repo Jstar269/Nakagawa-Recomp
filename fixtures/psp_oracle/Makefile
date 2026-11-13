@@ -210,6 +210,8 @@ else ifeq ($(CASE),hle-timer-order)
 CASE_ID = 103
 else ifeq ($(CASE),hle-savedata-getsize)
 CASE_ID = 104
+else ifeq ($(CASE),hle-io-trunc)
+CASE_ID = 105
 # 180: savedata modes on a missing save, a directory without PARAM.SFO and a probe-made save.
 else ifeq ($(CASE),hle-savedata-nodata)
 CASE_ID = 180
@@ -230,6 +232,9 @@ CASE_ID = 159
 # 161: #1386's utility dialog status timing and wrong-state answers, in game context.
 else ifeq ($(CASE),hle-utility-dialogs)
 CASE_ID = 161
+# 166: #1386's netconf and game sharing dialog cells of 161 only (no savedata, no gamedata install).
+else ifeq ($(CASE),hle-utility-netconf-sharing)
+CASE_ID = 166
 # 162: #1380's flash0:/ms0:/disc0: seek cells and sceIoIoctl file commands (probe_hle_measure.c).
 else ifeq ($(CASE),hle-io-seek)
 CASE_ID = 162
@@ -286,6 +291,14 @@ CASE_ID = 157
 # reads of a framebuffer the GE just drew into, with and without TEXFLUSH and TEXSYNC.
 else ifeq ($(CASE),ge-rtt)
 CASE_ID = 158
+# 187: #2193's raster bounds cells (probe_ge_sample.c, PSP-GE-RASTER-002): colour writes past
+# the frame-buffer stride, depth writes past zbw, and a depth-only clear under a scissor.
+else ifeq ($(CASE),ge-raster-bounds)
+CASE_ID = 187
+# 188: #343's depth rounding cells (probe_ge_sample.c, PSP-GE-RASTER-003): fractional
+# through-mode and transform-mode depths read as colour through EQUAL and GREATER tests.
+else ifeq ($(CASE),ge-depth-round)
+CASE_ID = 188
 else ifeq ($(CASE),llsc-link)
 CASE_ID = 69
 else ifeq ($(CASE),fpu-cc)
@@ -627,6 +640,9 @@ OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),hle-savedata-getsize)
 TARGET = $(BUILD_DIR)/hle_savedata_getsize
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-io-trunc)
+TARGET = $(BUILD_DIR)/hle_io_trunc
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
 else ifeq ($(CASE),hle-savedata-nodata)
 TARGET = $(BUILD_DIR)/hle_savedata_nodata
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
@@ -649,6 +665,9 @@ TARGET = $(BUILD_DIR)/hle_audio_rest
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),hle-utility-dialogs)
 TARGET = $(BUILD_DIR)/hle_utility_dialogs
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-utility-netconf-sharing)
+TARGET = $(BUILD_DIR)/hle_utility_netconf_sharing
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
 else ifeq ($(CASE),hle-io-seek)
 TARGET = $(BUILD_DIR)/hle_io_seek
@@ -789,6 +808,14 @@ OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE render-to-texture cells: the same source as the sample-point cells, case 158.
 else ifeq ($(CASE),ge-rtt)
 TARGET = $(BUILD_DIR)/ge_rtt
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE raster bounds cells: the same source as the sample-point cells, case 187.
+else ifeq ($(CASE),ge-raster-bounds)
+TARGET = $(BUILD_DIR)/ge_raster_bounds
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE depth rounding cells: the same source as the sample-point cells, case 188.
+else ifeq ($(CASE),ge-depth-round)
+TARGET = $(BUILD_DIR)/ge_depth_round
 OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
 # The instruction trace: its own source, the single-step trampoline and the fixtures
 # header, with the same writer, ThreadManForUser block and module lifecycle as the HLE
@@ -963,6 +990,10 @@ endif
 ifeq ($(CASE),hle-savedata-getsize)
 USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C
 endif
+# hle-io-trunc (case 105) takes the CRT's pair and nothing else from sceUtility: no dialog.
+ifeq ($(CASE),hle-io-trunc)
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343
+endif
 ifeq ($(CASE),hle-savedata-nodata)
 USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C
 endif
@@ -994,6 +1025,20 @@ USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhoc=0xE1D621D7,0xA62C6F57
 USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhocctl=0xE26F226E,0x9D689E13
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhocMatching --forbid-library sceNetResolver
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceHttp --forbid-library sceSsl --forbid-library sceReg
+endif
+# hle-utility-netconf-sharing: case 161's netconf and game sharing calls and net module pair only.
+# No savedata call, no gamedata install call and no UMD call is linked.
+ifeq ($(CASE),hle-utility-netconf-sharing)
+LIBS += -lpspnet_adhocctl -lpspnet_adhoc
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x2AD8E239,0x4DB1E739,0x6332AA39,0x91E70E35,0xF88155F6,0xC492F751,0x946963F3,0x7853182D,0xEFC6F80F,0x1579A159,0x64D50C56
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNet=0x39AF39A6,0x281928A9
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetInet=0x17943399,0xA9ED66B9,0x8D7284EA,0xCDA85C99,0x7AA671BC,0xFBABE411
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetApctl=0xE2F91F9B,0xB3EDD0EC
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhoc=0xE1D621D7,0xA62C6F57
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhocctl=0xE26F226E,0x9D689E13
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhocMatching --forbid-library sceNetResolver
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceHttp --forbid-library sceSsl --forbid-library sceReg
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceUmdUser
 endif
 ifeq ($(CASE),cpu-timing)
 # The shared probe cleanup checks interrupt state; cpu-timing also calls the

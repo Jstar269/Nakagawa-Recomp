@@ -791,6 +791,9 @@ _WINDOWS_SERIAL_GATES = {
     "Build and run the full platform ladder": "VULKAN_SDK=/ucrt64 platform-ladder",
     "Build and run profile-zero production routes": "VULKAN_SDK=/ucrt64 profile-zero-e2e",
     "Fetch the profile-zero fixture built from source": "name: profile-zero-fixture",
+    "Fetch the homebrew fixtures built from source": "name: homebrew-fixtures",
+    "Run the homebrew import routes on the fixtures built from source":
+        "test_player_package_route.TestPlayerPackageRoute.test_homebrew_finds_its_own_files_in_its_memory_stick_folder",
     "Build and run display presentation smoke": "VULKAN_SDK=/ucrt64 display-smoke-run",
     "Build and run AOT/interpreter cosimulation gate": "VULKAN_SDK=/ucrt64 cosim-selftest",
     "Prove the cosimulation comparator is load-bearing": "VULKAN_SDK=/ucrt64 cosim-mutants",
@@ -912,11 +915,20 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
         self.assertIn("    name: Windows runtime compile gate (${{ matrix.group }})", text)
         self.assertNotIn("matrix.part ", text)
         self.assertNotIn("matrix.part}", text)
-        # A group's limit is the sum of its parts' former 25-minute limits.
+        # A group's limit is the sum of its parts' former 25-minute limits, plus the own
+        # limit of each step added to one of its parts since (#2143).
         self.assertIn("    timeout-minutes: ${{ matrix.timeout }}", text)
+        step_limits: dict[str, int] = {}
+        for name, step in self.steps.items():
+            limit = re.search(r"(?m)^ {8}timeout-minutes: (\d+)$", "\n".join(step or []))
+            if limit:
+                part = self.part_of(name)
+                self.assertIsNotNone(part, f"{name}: a step with its own limit must be in a part")
+                step_limits[cast(str, part)] = step_limits.get(cast(str, part), 0) + int(limit.group(1))
+        self.assertEqual(step_limits, {"smoke": 15})
         for group, (parts, timeout) in _windows_matrix_entries(self.block).items():
             with self.subTest(group=group):
-                self.assertEqual(timeout, 25 * len(parts))
+                self.assertEqual(timeout, sum(25 + step_limits.get(part, 0) for part in parts))
         self.assertIn("      fail-fast: false", text)
 
     def test_grouped_fuzz_shards_rebuild_and_rerun_in_order(self) -> None:
@@ -1859,6 +1871,8 @@ class PublicExportJobTests(unittest.TestCase):
         "Upload the verified fixture",
         "Gate profile-zero imports on HLE review status",
         "Build Nakagawa Font Copy",
+        "Build the homebrew fixtures for the Windows job",
+        "Upload the homebrew fixtures",
     )
     PROFILE_ZERO_CONDITION = "if: ${{ env.BUILD_PROFILE_ZERO == 'true' }}"
 
@@ -2013,7 +2027,8 @@ class PublicExportJobTests(unittest.TestCase):
             " ".join(line.strip() for line in block[env_start:steps_start]),
             "env: BUILD_PROFILE_ZERO: >- ${{ needs.classify.outputs.allow_substantive == 'true' && "
             "(needs.classify.outputs.run_python == 'true' || "
-            "needs.classify.outputs.run_windows == 'true') }}",
+            "needs.classify.outputs.run_windows == 'true' || "
+            "needs.classify.outputs.run_installer == 'true') }}",
         )
         ungated = "\n".join(block[:env_start] + block[steps_start:])
         for gate in ("run_python", "run_native", "run_windows", "run_markdown", "run_main_smoke",
@@ -2072,6 +2087,52 @@ class PublicExportJobTests(unittest.TestCase):
                 self.assertIn("needs.public_export.result == 'success'", consumer)
                 self.assertIn("name: profile-zero-fixture", consumer)
                 self.assertIn("path: fixtures/profile_zero/prebuilt", consumer)
+
+    def test_homebrew_fixtures_are_built_from_source_for_the_windows_job(self) -> None:
+        """#2143: the homebrew route tests run on Windows on programs this run built."""
+        build = "\n".join(_ci_step(self.blocks["public_export"],
+                                   "Build the homebrew fixtures for the Windows job") or [])
+        self.assertIn("for fixture in pspdev_phase5 homebrew_view; do", build)
+        self.assertIn('if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then', build)
+        self.assertIn('printf \'%s\\n\' "$GITHUB_SHA" > "$out/BUILT_FROM"', build)
+        self.assertIn("sha256sum BUILT_FROM */EBOOT.PBP */main.c */Makefile > SHA256SUMS", build)
+        self.assertIn("sha256sum --check --strict SHA256SUMS", build)
+        upload = "\n".join(_ci_step(self.blocks["public_export"], "Upload the homebrew fixtures") or [])
+        self.assertIn("name: homebrew-fixtures", upload)
+        self.assertIn("if-no-files-found: error", upload)
+
+        windows = self.blocks["windows_runtime"]
+        fetch = "Fetch the homebrew fixtures built from source"
+        run = "Run the homebrew import routes on the fixtures built from source"
+        # The smoke part (the shortest measured group), after its display smoke; the fetch
+        # comes first.
+        self.assertLess(_ci_step_index(windows, "Build and run display presentation smoke"),
+                        _ci_step_index(windows, fetch))
+        names = self._step_names(windows)
+        self.assertEqual(names[names.index(fetch) + 1], run)
+        for name in (fetch, run):
+            with self.subTest(step=name):
+                self.assertIn("        if: contains(matrix.parts, 'smoke')", _ci_step(windows, name) or [])
+        self.assertIn("path: ${{ runner.temp }}/homebrew-fixtures",
+                      "\n".join(_ci_step(windows, fetch) or []))
+        step = "\n".join(_ci_step(windows, run) or [])
+        self.assertIn('NK_HOMEBREW_E2E_REQUIRED: "1"', step)
+        self.assertIn("NK_HOMEBREW_EBOOT_DIR: ${{ runner.temp }}/homebrew-fixtures", step)
+        self.assertIn("timeout-minutes: 15", step)
+        # The tests build the player: without the UCRT64 Vulkan headers that build fails
+        # and the route would never run (the bare-OK check below would then fail the step).
+        self.assertIn("VULKAN_SDK: /ucrt64", step)
+        self.assertIn("MAKEFLAGS: -j4", step)
+        self.assertIn("command -v pwsh\n", step)
+        self.assertIn("command -v git\n", step)
+        self.assertIn('(cd "$dir" && sha256sum --check --strict SHA256SUMS)', step)
+        self.assertIn('if [ "$built_from" != "$SR_SOURCE_COMMIT" ]; then', step)
+        self.assertIn("test_homebrew_eboot_imports_and_builds_as_experimental", step)
+        self.assertIn("test_homebrew_finds_its_own_files_in_its_memory_stick_folder", step)
+        self.assertIn("test_homebrew_second_folder_stop_keeps_folders_out_of_the_report", step)
+        # A skip is not a pass.
+        self.assertIn("tail -n 1 \"$log\" | tr -d '\\r' | grep -qx 'OK'", step)
+        self.assertIn("    SR_SOURCE_COMMIT: ${{ github.sha }}", "\n".join(windows))
 
     def test_ci_required_still_requires_hygiene_and_export(self) -> None:
         required = "\n".join(self.blocks["ci_required"])
@@ -3044,29 +3105,40 @@ class TrustedAttestationRouteTests(unittest.TestCase):
     HEAD = "a" * 40
     PLAIN = "Trusted provenance attestation"
     REPOSITORY = {"default_branch": "main"}
+    # The attest job runs in the upstream repository; a fork runs the Fork provenance check (docs/FORKING.md).
+    UPSTREAM = {"repository": "Jstar269/Nakagawa-Recomp", "repository_id": "1330183186"}
+    FORK = {"repository": "example-user/Nakagawa-Recomp", "repository_id": "42"}
 
     def setUp(self) -> None:
         self.text = _workflow_text("provenance-attestation.yml")
         self.blocks = _workflow_job_blocks("provenance-attestation.yml")
         self.attest = "\n".join(self.blocks["attest"])
+        self.fork = "\n".join(self.blocks["fork_check"])
         self.guard = _job_if(self.blocks["attest"])
+        self.fork_guard = _job_if(self.blocks["fork_check"])
         self.title = _run_name(self.text)
         producer = next(item for item in ci_trust_verdict.PRODUCERS if item.context == self.PLAIN)
         self.head_title = producer.run_title.format(head=self.HEAD)
 
     def _target(self, base: str = "main") -> dict[str, object]:
         pull = {"number": 7, "head": {"sha": self.HEAD}, "base": {"ref": base}}
-        return {"github": {"event_name": "pull_request_target",
+        return {"github": {"event_name": "pull_request_target", **self.UPSTREAM,
                            "event": {"pull_request": pull, "repository": self.REPOSITORY}}, "inputs": {}}
 
     def _ci(self, event: str = "pull_request") -> dict[str, object]:
         run = {"event": event, "head_sha": self.HEAD, "head_branch": "ci/x"}
-        return {"github": {"event_name": "workflow_run",
+        return {"github": {"event_name": "workflow_run", **self.UPSTREAM,
                            "event": {"workflow_run": run, "repository": self.REPOSITORY}}, "inputs": {}}
 
     def _dispatch(self, ref: str = "refs/heads/main", **inputs: str) -> dict[str, object]:
-        return {"github": {"event_name": "workflow_dispatch", "ref": ref, "event": {"repository": self.REPOSITORY}},
+        return {"github": {"event_name": "workflow_dispatch", "ref": ref, **self.UPSTREAM,
+                           "event": {"repository": self.REPOSITORY}},
                 "inputs": {"pull_request_number": "", "head_sha": "", "candidate_sha": "", **inputs}}
+
+    def _in_fork(self, context: dict[str, object]) -> dict[str, object]:
+        github = context["github"]
+        assert isinstance(github, dict)
+        return context | {"github": github | self.FORK}
 
     def test_a_requested_ci_run_starts_the_attestation(self) -> None:
         on_block = "\n".join(_on_block(self.text))
@@ -3081,13 +3153,39 @@ class TrustedAttestationRouteTests(unittest.TestCase):
                          ["  pull_request_target:", "  workflow_run:", "  workflow_dispatch:"])
 
     def test_the_attest_guard_is_pinned(self) -> None:
-        self.assertEqual(self.attest.count("\n".join([
+        routes = [
             "    if: >-",
-            "      ${{ (github.event_name == 'pull_request_target' &&",
-            "           github.event.pull_request.base.ref == github.event.repository.default_branch) ||",
-            "          (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request') ||",
-            "          (github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '') }}",
+            "      ${{ ((github.event_name == 'pull_request_target' &&",
+            "            github.event.pull_request.base.ref == github.event.repository.default_branch) ||",
+            "           (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request') ||",
+            "           (github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '')) &&",
+        ]
+        self.assertEqual(self.attest.count("\n".join(routes + [
+            "          (github.repository_id == '' || github.repository_id == '1330183186' || "
+            "github.repository == 'Jstar269/Nakagawa-Recomp') }}",
         ])), 1)
+        # The fork's job is guarded by the same three routes, and by the complement of the repository clause.
+        self.assertEqual(self.fork.count("\n".join(routes + [
+            "          (github.repository_id != '' && github.repository_id != '1330183186' && "
+            "github.repository != 'Jstar269/Nakagawa-Recomp') }}",
+        ])), 1)
+
+    def test_in_a_fork_the_fork_check_runs_on_the_same_routes_and_the_attestation_on_none(self) -> None:
+        judged = (self._target(), self._ci(), self._dispatch(pull_request_number="7", head_sha=self.HEAD))
+        skipped = (self._target("release"), self._ci("push"), self._ci("merge_group"),
+                   self._dispatch(candidate_sha="c" * 40))
+        for context in judged:
+            with self.subTest(event=_actions_value("github.event_name", context)):
+                self.assertTrue(_actions_eval(self.guard, context))
+                self.assertFalse(_actions_eval(self.fork_guard, context))
+                self.assertFalse(_actions_eval(self.guard, self._in_fork(context)))
+                self.assertTrue(_actions_eval(self.fork_guard, self._in_fork(context)))
+                # One title for both jobs: the verdict finds a fork's run by the same name.
+                self.assertEqual(_actions_value(self.title, self._in_fork(context)), self.head_title)
+        for context in skipped:
+            for where in (context, self._in_fork(context)):
+                self.assertFalse(_actions_eval(self.guard, where))
+                self.assertFalse(_actions_eval(self.fork_guard, where))
 
     def test_only_a_pull_requests_ci_run_is_attested(self) -> None:
         self.assertTrue(_actions_eval(self.guard, self._ci()))
@@ -3182,9 +3280,13 @@ class TrustedAttestationRouteTests(unittest.TestCase):
     def test_every_attestation_step_takes_its_target_from_the_resolver(self) -> None:
         text = _uncommented(self.text)
         # The event's values and the triggering run's head enter once, in the resolver step's env.
-        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.head\.sha", text)), 2)   # and the title
-        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.base\.sha", text)), 1)
-        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.number", text)), 2)      # and concurrency
+        # The fork job carries the same resolver step, so each value enters once more in it.
+        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.head\.sha", text)), 3)   # and the title
+        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.base\.sha", text)), 2)
+        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.number", text)), 3)      # and concurrency
+        self.assertEqual(self.fork.count("github.event.pull_request.head.sha"), 1)
+        self.assertEqual(self.fork.count("github.event.pull_request.base.sha"), 1)
+        self.assertEqual(self.fork.count("github.event.pull_request.number"), 1)
         # The merge base and the trusted tree audit read the head too.
         self.assertEqual(self.attest.count("${{ steps.target.outputs.head_sha }}"), 5)
         # The event's base is only checked to be on the default branch; the verdict base is the merge base.
@@ -3973,6 +4075,27 @@ class CiRunHarness(unittest.TestCase):
         block = "\n".join(_workflow_job_blocks("ci.yml")["public_export"])
         expression = _matched(re.search(r"BUILD_PROFILE_ZERO: >-\s*\$\{\{(.*?)\}\}", block, re.S)).group(1)
         return _actions_eval(expression, {"needs": {"classify": {"outputs": outputs}}})
+
+
+class WindowsRoutesFixtureTests(CiRunHarness):
+    """Every run that starts the Windows job also builds the fixtures its parts download."""
+
+    def test_the_fixtures_are_built_whenever_the_windows_routes_run(self) -> None:
+        # Failing before: an installer-only change starts windows_runtime (run_installer) with
+        # run_python and run_windows false, so public_export built neither the profile-zero nor
+        # the homebrew fixtures, and the routes and smoke parts' downloads failed.
+        event = {"action": "synchronize", "pull_request": {"number": 7, "draft": False,
+                                                           "base": {"sha": "a" * 40}}}
+        cases = (["assets/installer/nakagawa.iss"], ["assets/upstream/innosetup.lock.json"],
+                 ["tools/build_installer.py"], ["LICENSE"], ["src/rt/driver.c"], ["docs/CI.md"])
+        for paths in cases:
+            with self.subTest(paths=paths):
+                run = self._evaluate("pull_request", event, paths=paths)
+                if "windows_runtime" in run.ran:
+                    self.assertTrue(self._profile_zero(run.outputs))
+        installer = self._evaluate("pull_request", event, paths=["assets/installer/nakagawa.iss"])
+        self.assertIn("windows_runtime", installer.ran)
+        self.assertEqual(installer.outputs["run_windows"], "false")
 
 
 class DraftLightCiWiringTests(CiRunHarness):

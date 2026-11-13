@@ -2432,13 +2432,16 @@ class LiveRepositoryTests(unittest.TestCase):
         and the job must decline any other base.
         """
         raw = (ROOT / TRUSTED_WORKFLOW).read_text(encoding="utf-8")
+        # Two pull_request_target jobs check out code: the attestation (upstream) and the
+        # Fork provenance check (forks only, docs/FORKING.md). Both pin the default branch.
         checkout_refs = re.findall(r"^\s+ref: (.+)$", raw, re.MULTILINE)
         self.assertEqual(
-            checkout_refs, ["${{ github.event.repository.default_branch }}"],
-            "the trusted checkout must pin the default branch",
+            checkout_refs, ["${{ github.event.repository.default_branch }}"] * 2,
+            "every trusted checkout must pin the default branch",
         )
-        self.assertIn(
-            "github.event.pull_request.base.ref == github.event.repository.default_branch", raw,
+        self.assertEqual(
+            raw.count("github.event.pull_request.base.ref == github.event.repository.default_branch"), 2,
+            "both pull_request_target jobs must decline any other base",
         )
 
     def test_candidate_binary_job_is_main_only_and_sha_bound(self) -> None:
@@ -3966,6 +3969,27 @@ class PolicyDeltaV4Tests(_PolicyDeltaV4Fixture):
         self._land(rebased, main_1, v4_2)
 
     # -- canaries: each must fail closed ----------------------------------------
+
+    def test_a_binary_file_admitted_bound_to_its_claim_only_fails(self) -> None:
+        shot = "docs/new-shot.png"
+        head = self._change("pr-shot", self.base, {shot: b"\x89PNG\r\n\x1a\n" + bytes(range(32))}, include=[shot])
+        self._refused("POLICY_DELTA_BINARY_CLAIM_BOUND", head, self.base, self._v4(self.base, head, "claim"))
+        self._land(head, self.base, self._v4(self.base, head, "bytes", bindings={shot: "bytes"}))
+
+    def test_a_path_the_release_manifest_waives_admitted_bound_to_its_claim_only_fails(self) -> None:
+        mark = "docs/new-mark.svg"
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg"/>\n'
+        waived = {"components": [{"id": mark, "source_path": mark, "disposition": "approved_binary",
+                                  "hashes": {"sha256": _sha(svg)}}]}
+        manifests = (
+            ("waived", json.dumps(waived).encode("utf-8") + b"\n", "POLICY_DELTA_BINARY_CLAIM_BOUND"),
+            ("unreadable", b"{\n", "POLICY_DELTA_MANIFEST_UNREADABLE"),
+        )
+        for label, manifest, code in manifests:
+            with self.subTest(label):
+                head = self._change(f"pr-mark-{label}", self.base,
+                                    {mark: svg, verifier.MANIFEST_PATH: manifest}, include=[mark])
+                self._refused(code, head, self.base, self._v4(self.base, head, f"claim-{label}"))
 
     def test_a_byte_identical_import_edited_after_admission_fails(self) -> None:
         head = self._vendored_pr()

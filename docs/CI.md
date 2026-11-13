@@ -100,8 +100,15 @@ The jobs:
   under the former job's condition (`allow_substantive` and `run_python` or `run_windows`,
   carried by the job's `BUILD_PROFILE_ZERO`), and upload the same `profile-zero-fixture`
   artifact. Their `python3` is now the job's CPython 3.15.2 rather than the runner image's.
+  Under the same condition, the job then builds the two homebrew fixtures
+  (`fixtures/pspdev_phase5`, `fixtures/homebrew_view`) and uploads them as `homebrew-fixtures`
+  for the Windows `smoke` part (#2143). `BUILD_PROFILE_ZERO` also holds for `run_installer`:
+  an installer-only change (`assets/installer/**`, say) starts the Windows job with
+  `run_python` and `run_windows` both false, and its `smoke` and `routes` parts download
+  this job's artifacts.
   The Python, native and Windows jobs wait for this job as before; native now also waits for
-  the fixture build, about 25 seconds.
+  the fixture builds: about 25 seconds for the profile-zero fixture, plus a few seconds for
+  the two homebrew programs (3 seconds locally in WSL).
 - **Python.** Four shards over the full suite, and four over the Makefile-coupled subset
   (see [Python test sharding](#python-test-sharding)). `test_production_smoke` alone takes
   about 16 minutes and has a shard to itself, so a fifth shard would not shorten the job.
@@ -143,8 +150,10 @@ The jobs:
 only when `run_installer` is true. The Markdown lint, the main smoke and the fixture build reach it through the
 two always-required jobs they now belong to, so `tools/ci_required.py` no longer takes a result
 or run flag of their own. Each merged job's `timeout-minutes` covers its parts: hygiene 35
-(15 + 10 + 10), public export 30 (15 + 15), each Windows group 25 per part (50, 75 and
-25), and each Python shard 60, twice the former 30 because it does about twice the work.
+(15 + 10 + 10), public export 30 (15 + 15), each Windows group 25 per part plus the own
+limit of a step added to a part since (smoke 40 with the homebrew import routes' 15, routes
+25, ladder-fuzz 75, selftests 25), and each Python shard 60, twice the former 30 because it
+does about twice the work.
 
 The trade-offs: a step that fails stops the later steps of its own job, so a pull request that
 fails, for example, the Windows smoke part does not learn about its routes part in the same run
@@ -1584,7 +1593,7 @@ and each token's remaining budget.
 
 | Code | Fails when |
 | --- | --- |
-| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`), the publication gate's code (`.gitattributes`, `tools/publish_audit.py`, `tools/policy_sync.py`, `tools/modified_file_notice_audit.py`, `tools/provenance_record_gap.py`, `tools/history_audit.py` and every module they load or run; `PROTECTED_EXTRA` in the verifier is the list), a `tools/` module named like a standard-library one (it would be imported in place of it) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
+| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`, `tools/provenance_mode.py`), the publication gate's code (`.gitattributes`, `tools/publish_audit.py`, `tools/policy_sync.py`, `tools/modified_file_notice_audit.py`, `tools/provenance_record_gap.py`, `tools/history_audit.py` and every module they load or run; `PROTECTED_EXTRA` in the verifier is the list), a `tools/` module named like a standard-library one (it would be imported in place of it) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
 | `CI_DEFINITION_BEHIND` | `main` changed one of those files after the branch point; the integrator merges `main` when it lands the pull request; the author merges it only for a real conflict in content that is not generated, or when asked (`AGENTS.md` section 10). No label waives it |
 | `CI_CONTEXT_COLLISION` | another workflow names `Trusted CI verdict`, or a check run uses that name |
 | `FOREIGN_PRODUCER` | a check run or status under an intended context is not from the intended workflow path and event at this head |
@@ -1630,6 +1639,10 @@ Whatever the `CI_DEFINITION_BEHIND` finding text says, who merges `main`, and wh
 The intended producers are `CI required` and `Hygiene and security` from `ci.yml`, `OSV
 Vulnerability Scan` from `osv-scanner.yml`, `dependency-review` from `dependency-review.yml`
 (all `pull_request`), and the provenance attestation from `provenance-attestation.yml`.
+In a fork, where the attestation job is skipped, that last producer is the
+same workflow's **Fork provenance check** instead, by the same routes (`producers_for` in the verifier,
+[`FORKING.md`](FORKING.md)); the upstream, matched by repository ID or name, always judges the
+attestation.
 A run still in progress gives `pending`. While any producer has
 no run at the head yet, or its newest run is unfinished, the verifier reads only the head's
 workflow runs and posts `pending`. The full read, about a dozen API calls, waits for the
@@ -2154,6 +2167,49 @@ developer runs locally, without private inputs:
   result file, save and first rasterized frame with the values pinned in
   `tools/test_profile_zero_e2e.py` (`CROSS_HOST_DIGESTS`), so Windows and Linux must
   produce the same bytes (#306).
+  The `smoke` part runs the homebrew import route tests (#2143,
+  `tools/test_player_package_route.py`), on the player the tests build, through the code the
+  player's library uses when a user picks a homebrew `EBOOT.PBP`
+  (`player_psn_package_inspect` and `player_psn_package_convert`) and its launch
+  (`--launch-index`, `nk_launch_start`):
+  - `test_homebrew_eboot_imports_and_builds_as_experimental`: `fixtures/pspdev_phase5`
+    imports and builds a package as an Experimental title.
+  - `test_homebrew_finds_its_own_files_in_its_memory_stick_folder`: `fixtures/homebrew_view`,
+    imported from a folder that also holds `DATA.TXT`, builds, launches and runs. The test
+    checks what the program writes on its Memory Stick: `NAKAGAWA_TEST/HOMEBREW_VIEW.TXT` must
+    say it was started as `ms0:/PSP/GAME/NKHBVIEW/EBOOT.PBP`, read `DATA.TXT` beside itself and
+    not found `MISSING.TXT`, and the `WRITTEN.TXT` it writes beside itself must be there and
+    nowhere else.
+  - `test_homebrew_second_folder_stop_keeps_folders_out_of_the_report`: the same program added
+    from a second folder stops with `HOMEBREW_ALREADY_ADDED`, and a problem report built from
+    that run names neither folder.
+
+  The Windows runner has no PSPDEV, so the programs come from the `public_export` job, built
+  with the locked PSPDEV from the fixtures' own `main.c` and `Makefile`. That job puts them in
+  one folder: each program's `EBOOT.PBP` beside the sources it was built from, `BUILT_FROM`
+  (the commit) and `SHA256SUMS` over all of them. It uploads the folder as the
+  `homebrew-fixtures` artifact, and the step downloads it. The step checks `SHA256SUMS` and
+  that `BUILT_FROM` is its own commit (`SR_SOURCE_COMMIT`), and the tests check that the
+  sources are byte for byte the checkout's. The artifact comes from this run, so `BUILT_FROM`
+  cannot differ today; it is there so that a folder handed over another way (a cache, another
+  run) is refused rather than trusted. The step sets `NK_HOMEBREW_E2E_REQUIRED=1`, so a missing
+  or unreadable folder, or a tool or player build the route lacks, fails it and never skips
+  (a failed player build reports the build's last lines), and it fails unless the summary is a
+  bare `OK`, so a skipped test does not pass. The tests build the player themselves, so the
+  step sets `VULKAN_SDK=/ucrt64`, as the other Windows steps pass it, and `MAKEFLAGS=-j4`.
+  Before it was added, the route was checked to fail for the right reason with each half
+  broken in turn: with the import keeping no copy of the program's folder, the folder probe
+  found no Memory Stick folder in the import and the second-folder test was not stopped; with
+  the launch booting the program from its disc image, the probe wrote
+  `ARGV0=disc0:/PSP_GAME/SYSDIR/EBOOT.BIN` and `DATA_BYTES=-1`, and the test failed on it.
+  **Minutes added:** not yet measured on a hosted runner. Locally the step took 419 seconds
+  (Windows 11, `-j4`, a shared host, no compiler cache), most of it the player build and the
+  two package builds. No compiler-cache saving is assumed: the player and its two test
+  programs are each compiled and linked by one command, which the cache does not store, and
+  the builds run under a fresh temporary folder. The step's own limit is 15 minutes and the
+  `smoke` group's limit is 40, its former 25 plus those 15. The steps run in `smoke`, measured
+  at 8.1 minutes, rather than in `routes`, measured at 13.9, so that the longest Windows group
+  stays below a Python shard. The first full run records the real figure here.
   The same job builds Nakagawa Font Copy (`src/psp_companion/Makefile`), the PSP app
   behind the player's font import, through its user-mode import gate; nothing from
   that build is uploaded. Public

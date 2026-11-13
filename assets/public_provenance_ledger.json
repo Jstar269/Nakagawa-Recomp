@@ -761,6 +761,17 @@
       }
     },
     {
+      "path": "android/app/src/main/java/io/github/jstar269/nakagawa/ToolchainArchive.java",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_toolchain_archive_360_20261112",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "android/app/src/main/res/values/strings.xml",
       "classification": "project_authored_attested",
       "evidence": {
@@ -832,6 +843,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "android_toolchain_360_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "android/toolchain/nk_python_launcher.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_python_launcher_360_20261109",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -1637,6 +1659,14 @@
     },
     {
       "path": "docs/FAILURE_CODES.md",
+      "classification": "reviewed_documentation",
+      "evidence": {
+        "source": "public documentation review",
+        "statement": "generic/public documentation; no private operational evidence"
+      }
+    },
+    {
+      "path": "docs/FORKING.md",
       "classification": "reviewed_documentation",
       "evidence": {
         "source": "public documentation review",
@@ -4006,6 +4036,52 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "nk-achievements-bridge-1316",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/core/nk_adhoc_net.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk_adhoc_net_lobby_ppsspp_1139_20261112",
+        "evidence_tier": "R",
+        "upstream": "documented upstream family",
+        "license": "GPL-3.0-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/core/nk_adhoc_net.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-adhoc-net-medium-1139",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/core/nk_adhoc_relay.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk_adhoc_relay_codec_1139_20261112",
+        "evidence_tier": "R",
+        "upstream": "documented upstream family",
+        "license": "GPL-3.0-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/core/nk_adhoc_relay.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-adhoc-relay-wire-1139",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -7896,6 +7972,39 @@
         "upstream": "documented upstream family",
         "license": "GPL-2.0-or-later",
         "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/tex_mips.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ge_host_mips_20261110",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/tex_mips_gpu_selftest.inc",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ge_host_mips_20261110",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/tex_mips_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ge_host_mips_20261110",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
       }
     },
     {
@@ -13263,6 +13372,28 @@
       }
     },
     {
+      "path": "tests/native/test_nk_adhoc_net.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-adhoc-net-medium-1139",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/test_nk_adhoc_relay.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-adhoc-relay-wire-1139",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/test_nk_nickname.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -17061,6 +17192,17 @@
       }
     },
     {
+      "path": "tools/fork_init.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fork_path_20261108",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tools/form_sweep.py",
       "classification": "project_authored_attested",
       "evidence": {
@@ -18162,6 +18304,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "provenance-refresh-workflow-20260827",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/provenance_mode.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fork_path_20261108",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -19490,6 +19643,17 @@
       }
     },
     {
+      "path": "tools/test_fork_init.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fork_path_20261108",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tools/test_form_sweep.py",
       "classification": "project_authored_attested",
       "evidence": {
@@ -20629,6 +20793,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "provenance-tooling",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/test_provenance_mode.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fork_path_20261108",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null

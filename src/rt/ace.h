@@ -11,12 +11,14 @@
  *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. stick, load, depth, ssaa, peak and cull are the other keys a
- * line may leave out: a missing stick, load, depth, ssaa, peak or cull reads as off (section 11.2
- * item 2); stick has no off word, its value is the game's dead zone (1..126), and a line that writes
- * load=off, depth=off, ssaa=off, peak=off or cull=off means the same as none; stick=<counts>,
- * load=fast and cull=on need tier=ace, and depth=32 (the 32-bit host depth buffer, #2051), ssaa=2|4
- * (supersampling, #2073) and peak=limit do not. Every other
+ * line without it is an Enhanced run. stick, load, depth, ssaa, peak, glyphs, cull, mips and
+ * texpack are the other keys a line may leave out: a missing stick, load, depth, ssaa, peak, glyphs,
+ * cull, mips or texpack reads as off (section 11.2 item 2); stick has no off word, its value is the
+ * game's dead zone (1..126), and a line that writes load=off, depth=off, ssaa=off, peak=off,
+ * glyphs=off, cull=off, mips=off or texpack=off means the same as none; stick=<counts>, load=fast
+ * and cull=on need tier=ace, and depth=32 (the 32-bit host depth buffer, #2051), ssaa=2|4
+ * (supersampling, #2073), peak=limit, glyphs=on (sharp game text, #2110), mips=on and texpack=on
+ * (the title's texture pack, 11.3.4) do not. Every other
  * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
@@ -27,9 +29,11 @@
  * are today's, and nothing is printed. With Ace on, guest logic and the guest timing model are
  * unchanged; host presentation changes (and, with sas=sinc, the mixed SAS sample values; with
  * tess=2..4, the pixels of every triangle patch and the GE timing model's clocks under
- * SR_GE_TIMING=1; with load=fast, the guest timing of a title's declared loading waits; with
- * depth=32, which surface wins where two lie within one 16-bit depth step; with peak=limit, only
- * the host's sound: the guest's SAS bytes stay the PSP's), and
+ * SR_GE_TIMING=1; with mips=on, the pixels of minified textured 3D draws; with load=fast, the
+ * guest timing of a title's declared loading waits; with depth=32, which surface wins where two
+ * lie within one 16-bit depth step; with peak=limit, only the host's sound: the guest's SAS bytes
+ * stay the PSP's; with glyphs=on at a render scale of 2 to 4, the pixels of small text sprites in
+ * the frames the guest keeps), and
  * the run says so ("ACE_MODE: on (...)" at start, an exit line, and the flight recorder's
  * runtime.enhancements block).
  *
@@ -43,7 +47,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define ACE_SPEC_MAX 192         /* SR_ACE value, terminator included; room for later parts */
+/* SR_ACE value, terminator included. It also sizes the launcher's copy (src/core/nk_launch.h
+   NkRuntimeConfig.ace_spec, which src/player/player_state.c checks at compile time) and the
+   flight recorder's (its schema's maxLength is ACE_SPEC_MAX - 1). ace-selftest and the player's
+   state test check that the longest line has room for eight more keys of its average length; a
+   longer line is refused ("line too long"), never cut. */
+#define ACE_SPEC_MAX 384
+/* ace_feature_words with every part on, terminator included. ace-selftest turns every part on and
+   fails when the words, or the launch line in ACE_SPEC_MAX, would no longer fit, or when eight
+   more words of their average length would not. */
+#define ACE_WORDS_MAX 640
 
 /* Features that are part of this build. A feature that is not must be off in SR_ACE. */
 #define ACE_HAS_WIDE 1          /* wide=fill: widescreen Fill (#1881), the 3D scene in wings */
@@ -58,6 +71,9 @@
 #define ACE_HAS_LOAD 1          /* load=fast: a title's declared loading waits return at once (11.3.10) */
 #define ACE_HAS_DEPTH 1         /* depth=32: a 32-bit float host depth buffer (#2051, 10.20, 11.3.12) */
 #define ACE_HAS_PEAK 1          /* peak=limit: SAS mixes unsaturated through a true-peak limiter (#2137, 10.22) */
+#define ACE_HAS_GLYPHS 1        /* glyphs=on: sharp game text, glyphs rebuilt at the render scale (10.13, 11.3.5) */
+#define ACE_HAS_MIPS 1          /* mips=on: host-built mip chains for single-level textures (11.3.8) */
+#define ACE_HAS_TEXPACK 1       /* texpack=on: draw the title's texture pack, SR_TEX_REPLACE (11.3.4) */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
 typedef enum { ACE_SMOOTH_OFF = 0, ACE_SMOOTH_MATCH = 1, ACE_SMOOTH_X2 = 2 } AceSmooth;
@@ -92,6 +108,11 @@ typedef struct {
                         host presentation only (10.21) */
     int peak;        /* peak=limit: the host hears SAS mixes unsaturated, through a true-peak limiter
                         (host-only, 10.22) */
+    int glyphs;      /* glyphs=on: small text sprites draw from glyphs rebuilt at the render scale
+                        (guest-visible, 10.13 and 11.3.5) */
+    int mips;        /* mips=on: textures the game gives one level get a host-built mip chain (11.3.8) */
+    int texpack;     /* texpack=on: the Vulkan renderer draws the pack SR_TEX_REPLACE names (guest-visible,
+                        11.3.4); without it no pack is read */
 } AceConfig;
 
 typedef enum {
@@ -110,6 +131,9 @@ typedef enum {
     ACE_FEATURE_TWIN,
     ACE_FEATURE_SSAA,
     ACE_FEATURE_PEAK,
+    ACE_FEATURE_GLYPHS,
+    ACE_FEATURE_MIPS,
+    ACE_FEATURE_TEXPACK,
     ACE_FEATURE_COUNT
 } AceFeature;
 
@@ -131,8 +155,12 @@ size_t ace_longest_line(char *out, size_t cap);
 extern int g_ace_on;   /* the run's switch: 1 only after a valid line with Ace on */
 
 /* Reads SR_ACE once (and SR_ACE_REPORT when on), prints the start stamp or the refusal, and
- * sets g_ace_on. Returns g_ace_on. ace_init_spec does the same for a given value (tests). */
+ * sets g_ace_on. Returns g_ace_on. ace_init_spec does the same for a given value (tests).
+ * A retired variable that is set (ace_retired_env) stops the run first: the named line and exit 1. */
 int ace_init_from_env(void);
+/* SR_GLYPHS (its value, NULL or "" for unset) once switched sharp game text; the launch line's glyphs
+ * key replaced it. Returns 1 and writes the line that names the key to `why` when it is set, else 0. */
+int ace_retired_env(const char *glyphs, char *why, size_t why_cap);
 int ace_init_spec(const char *spec, const char *report_path);
 /* The requested line, and what this host gave (a feature it cannot provide is off here). A host twin
  * that SR_GPU_TWIN_COLOR turned on counts as given (ace_set_twin_running). */
@@ -145,6 +173,10 @@ const char *ace_tier_name(void);
 /* A feature this host cannot provide: off for the run, named once on stderr and in the report.
  * The others stay on. */
 void ace_feature_unavailable(AceFeature feature, const char *reason);
+/* A part's own exit stamp, which ace_finish prints before "ACE_MODE: exit": the SR_EXIT_AT_VBLANK
+   path ends with _Exit and skips a renderer's shutdown, but not ace_finish. The reporter prints at
+   most once per run, so the renderer's shutdown may call it too; NULL removes it. */
+void ace_set_exit_report(AceFeature feature, void (*report)(void));
 /* A feature that really ran: texture filtering once the GPU renderer made its pool for it, the
  * in-game UI's three once its pass is registered. At exit a feature that is on but was never
  * confirmed is reported unavailable (its renderer or presenter did not start), so the report
@@ -584,10 +616,11 @@ void ace_smooth_aux_report(const AceSmoothAuxStats *s);
 
 /* ---- the per-run report -------------------------------------------------------------------- */
 
-/* The worst case, every block present and every number at its widest, is about 5.5 KB with
- * stick, load, depth, twin, ssaa and peak in the spec; ace_selftest's cell_report_worst checks
- * that it fits. */
-#define ACE_REPORT_MAX 6144u
+/* The worst case, every block present, every number at its widest and a spec of ACE_SPEC_MAX - 1
+ * characters, is about 6 KB; ace_selftest's cell_report_worst checks that it fits with room for
+ * eight more features of its average size. The player reads the report into a buffer of this size
+ * (player_ace_last_session_line) and refuses a longer file. */
+#define ACE_REPORT_MAX 12288u
 /* The report's JSON for the run so far; 0 when it would not fit. */
 size_t ace_report_json(char *out, size_t cap);
 /* Settles the features that never ran (ace_confirm), then writes the report (SR_ACE_REPORT,

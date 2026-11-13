@@ -54,6 +54,17 @@ We aim to respond promptly and will remove material where appropriate.
   `Core/FileSystems/BlockDevices.cpp` (GPL-2.0-or-later, conveyed as
   GPL-3.0-or-later). The keystore, inflate, elliptic-curve and
   container-framing files are project-authored. Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
+- **Ad hoc transport (#1139)** — the lobby of the in-process ad hoc medium
+  (`src/core/nk_adhoc_net.c`) is translated from PPSSPP's
+  `Core/HLE/proAdhocServer.cpp` at `3bc60270eae3069f13dfbfdb7292a7e1375de6f6`
+  (Copyright (c) 2014- PPSSPP Project, GPL-2.0-or-later, PPSSPP's port of
+  Coldbird's aemu server), conveyed as GPL-3.0-or-later. The relay codec
+  (`src/core/nk_adhoc_relay.c`) encodes the aemu_postoffice wire format, and no
+  aemu_postoffice code is imported; all its login checks, the product-code
+  check included, are translated from `login_user_data` in PPSSPP's
+  `proAdhocServer.cpp`, and its port offset from
+  PPSSPP's `Core/HLE/sceNetAdhoc.cpp` (Copyright (c) 2013- PPSSPP Project) at the
+  same revision, and it is conveyed as GPL-3.0-or-later. Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
 - **PSPSDK / PSPDEV** — permissive per-component declarations and BSD-family
   notices for public ABI definitions and source-owned fixtures. The applicable
   notices are in `THIRD_PARTY_LICENSES/PSPSDK.txt` and `assets/upstream/`.
@@ -125,7 +136,15 @@ We aim to respond promptly and will remove material where appropriate.
   binaries: Henry Spencer's regex (BSD-3-Clause), BLAKE3 (CC0-1.0 or Apache-2.0), Ryu
   (Boost Software License 1.0), the Unicode conversion code and name tables (Unicode
   licence), MD5 (public domain or cut-down BSD), `strlcpy` (ISC) and xxHash
-  (BSD-2-Clause).
+  (BSD-2-Clause). The same tool builds GNU make 4.4.1 (GPL-3.0-or-later) from its
+  pinned release tarball and ships its `COPYING` and a `SOURCE.txt` that names the
+  tarball, its SHA-256 and the build scripts' commit; a release that ships the APK
+  carries that tarball, and `tools/android_toolchain.py` at the release's revision
+  (it holds make's configure and build settings), as make's corresponding source.
+  It also stages the official CPython 3.15.2 Android release unchanged (PSF-2.0,
+  with OpenSSL 3.5.9 under Apache-2.0 and SQLite 3.53.4 in the public domain), with
+  the release's `LICENSE.txt`, CPython's `Doc/license.rst`, and the licence files
+  of OpenSSL 3.5.9, bzip2 1.0.8, XZ Utils 5.4.6 and Zstandard 1.5.7.
 - **Opt-in LLVM IR backend toolchain (#330)** — nothing vendored, linked or shipped.
   `CODEGEN_BACKEND=llvm` runs the developer's own `clang` and `llvm-link` (MSYS2 UCRT64
   `mingw-w64-ucrt-x86_64-clang` and `mingw-w64-ucrt-x86_64-llvm-tools`, which MSYS2's

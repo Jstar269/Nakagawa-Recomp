@@ -62,7 +62,7 @@
     X("SR_DETERMINISTIC_CLOCK", "string", "empty (off)", "sched.c", "1 makes guest time follow the guest work, not the host clock; empty or 0 keeps the paced or turbo clock. 1 with SR_NOVBPACE=0 is rejected.") \
     X("SR_DETERMINISTIC_SLICE_US", "number", "100", "sched.c", "Guest microseconds the deterministic clock charges per scheduler boundary; a value outside 1..100000 or not a number is rejected.") \
     X("SR_DEVELOPER_MODE", "flag-nonzero", "off", "gpu_sdl3vk/sdl3vk.c", "Marks a hand-started run as a developer run in the SDL3 Vulkan presenter.") \
-    X("SR_DISC_ID", "string", "unset", "gui.c,hle_display.c,replay_checkpoint.c", "Disc identifier string set by the launcher: shown in the in-game pause overlay and used in screenshot file names.") \
+    X("SR_DISC_ID", "string", "unset", "gui.c,hle_display.c,replay_checkpoint.c,gpu_sdl3vk/ge_gpu.c", "Disc ID set by the launcher: pause overlay, screenshot names, and the texture pack [games] check (a pack listing only other games is refused).") \
     X("SR_DISPLOG", "flag-presence", "off", "guest_interp.c,recomp.c", "Logs each guest dispatch with target, source pc and return address to stderr.") \
     X("SR_DLGLOG", "flag-presence", "off", "debug.h,hle_utility.c,savedata.c", "Prints diagnostic lines to stderr for utility dialogs and savedata dialog calls.") \
     X("SR_EXEC_SHARE_JSON", "path", "unset (no JSON written)", "perf.c", "File to which the execution-share profile is written as JSON at exit.") \
@@ -114,7 +114,7 @@
     X("SR_GE_STRIP_CACHE_DISABLE", "flag-nonzero", "off (strip cache enabled)", "ge.c", "When nonzero, disables the GE strip cache.") \
     X("SR_GE_TIMING", "string", "off (enabled only when exactly \"1\")", "hle.c", "Set to 1 to turn on the measured GE time model and print a GE_TIMING banner.") \
     X("SR_GE_TRANSITION_TRACE", "path", "off", "ge.c", "Writes a GE transition trace to this file; 1 uses a default log path and 0 or empty disables it.") \
-    X("SR_GLYPHS", "string", "off", "gpu_sdl3vk/glyph_recon.c", "on redraws text as sharp glyphs rebuilt at the render scale (scale 2 to 4) from the game's own anti-aliased texels; Ace Mode only.") \
+    X("SR_GLYPHS", "string", "unset", "ace.c", "Retired (sharp game text is the SR_ACE line's glyphs=on key): any non-empty value refuses the run at start with a line that names the key.") \
     X("SR_GPU_CAPTURE_TERMINAL_CASE", "string", "unset: lifecycle self-test runs", "gpu_sdl3vk/sdl3vk.c", "Names a terminal-fault case for the GPU capture self-test; when set, the lifecycle self-test is skipped.") \
     X("SR_GPU_COHERENCE_CASE", "string", "unset (run all cases)", "gpu_sdl3vk/ge_gpu.c", "Restricts the GPU coherence self-test to one case; scaled-upload, mip-lod or readback-rows.") \
     X("SR_GPU_CPU_PROFILE", "flag-nonzero", "off", "ge.c,ge_replay.c,gpu_sdl3vk/ge_gpu.c", "Enables CPU-side profiling of GPU and GE replay paths, with wall-phase stats in replay.") \
@@ -128,7 +128,7 @@
     X("SR_GPU_READBACK_FULL", "flag-nonzero", "off (only the rows guest memory keeps are copied)", "gpu_sdl3vk/ge_gpu.c", "When enabled, a readback to guest memory copies the whole scaled target, the reference path for the narrowed copy.") \
     X("SR_GPU_SCALE", "number", "1 (falls back to SR_RESOLUTION_SCALE)", "gpu_sdl3vk/ge_gpu.c", "Internal render scale multiplier for the GPU GE renderer.") \
     X("SR_GPU_SSAA_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test ssaa-edge case: a run without supersampling writes it, a supersampled run at that scale checks it.") \
-    X("SR_GPU_STATS", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c", "Enables statistics output in the Vulkan GE backend.") \
+    X("SR_GPU_STATS", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c,gui.c", "Enables statistics output in the Vulkan GE backend, with a line for each accepted present that handed primitives to the software rasterizer.") \
     X("SR_GPU_SUBMIT_BATCH", "number", "SUBMIT_BATCH_MAX", "gpu_sdl3vk/ge_gpu.c", "Number of GPU ops per submit batch; values outside 1 to the maximum are ignored.") \
     X("SR_GPU_SYNC_SUBMIT", "flag-nonzero", "off (asynchronous submit)", "gpu_sdl3vk/ge_gpu.c", "When enabled, GPU command submission is synchronous instead of asynchronous.") \
     X("SR_GPU_TEX_SHADOW_DISABLE", "flag-nonzero", "off (texture shadow enabled)", "gpu_sdl3vk/ge_gpu.c", "Disables the GPU texture shadow when set to a non-empty value other than 0.") \
@@ -231,7 +231,7 @@
     X("SR_TEST_GUEST_MODULE_LOAD", "string", "unset: the test returns immediately", "hle_thread_selftest.c", "Selects the mode of the guest-module-load binding self-test.") \
     X("SR_TEXDUMP", "flag-presence", "off", "ge.c", "When set, enables texture dumping.") \
     X("SR_TEXDUMP_AFTER", "number", "0", "ge.c", "First GE frame from which textures are dumped when SR_TEXDUMP is set.") \
-    X("SR_TEX_REPLACE", "path", "unset", "gpu_sdl3vk/ge_gpu.c", "Folder of a PPSSPP-layout texture replacement pack (textures.ini, hash-named PNGs) the Vulkan GE draws guest textures from; Ace only.") \
+    X("SR_TEX_REPLACE", "path", "unset", "gpu_sdl3vk/ge_gpu.c", "Texture pack folder (PPSSPP layout) the Vulkan GE reads when the SR_ACE line carries texpack=on; the launcher always exports it, empty unless the pack is on.") \
     X("SR_TEX_REPLACE_BUDGET_MB", "number", "256", "gpu_sdl3vk/ge_gpu.c", "Host memory, in MiB, for the replacement pack's decoded images; past it the least recently used is dropped.") \
     X("SR_TEX_SCALE", "string", "off", "gpu_sdl3vk/tex_scale.c", "off or 2-6: the xBRZ factor host copies of guest textures are scaled by in the Vulkan GE texture cache; Ace Mode only.") \
     X("SR_TEX_SCALE_BUDGET_MB", "number", "512", "gpu_sdl3vk/tex_scale.c", "GPU memory, in MiB, the scaled texture copies may use; past it a texture is drawn unscaled.") \

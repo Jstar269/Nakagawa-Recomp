@@ -204,9 +204,22 @@ typedef struct {
     /* The file read is the shipped published package, not one in the user's
        data folder. */
     bool shipped;
+    /* The package is experimental: true unless it is the usable shipped package and
+       declares "experimental": false (docs/ENHANCEMENT_CONTRACT.md section 9.10). A
+       file in the user's data folder stays experimental whatever it declares. */
+    bool experimental;
     /* Why a file that exists cannot be used; empty when there is no file or it
        is usable. */
     char problem[160];
+    /* The title's culling package (section 11.3.6), read the same way from
+       <disc ID, lowercase>-cull.json: it parses, its category is
+       guest_memory_code_hook, its id is a valid package name other than the
+       timing package's, and its target_title_id is the title's own. An Ace
+       launch with Wider culling on builds and launches with it (section 9.9). */
+    bool cull_available;
+    char cull_package_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    bool cull_shipped;
+    char cull_problem[160];
 } PlayerTitleEnhancement;
 
 /* The three play modes (docs/ENHANCEMENT_CONTRACT.md section 10, #2055). Authentic is the
@@ -222,9 +235,11 @@ typedef enum {
     PLAYER_PLAY_ACE            /* offered only for a title with a usable package */
 } PlayerPlayMode;
 
-/* Enhanced's parts. Each is one row of player_enhanced_part(): a new part is one more enum
-   value and one more row, and settings, the launch line and both settings pages take it with
-   no other change. A part's value 0 is off. */
+/* Enhanced's parts. Each is one row of player_enhanced_part(), and the enum's order is the
+   Enhanced pages' row order and the settings file's order, so a new part is appended at the end.
+   The SR_ACE line has its own fixed key order (ace_format's; player_play_launch_line writes the
+   later keys, stick to cull, in that order after the others), where a part that the line carries
+   takes its place. A part's value 0 is off. */
 typedef enum {
     PLAYER_PART_FILTERING = 0, /* texture filtering: 0, 2, 4, 8 or 16 */
     PLAYER_PART_TEXT,          /* crisp system text (the on-screen keyboard): 0 or 1 */
@@ -252,6 +267,13 @@ typedef enum {
     PLAYER_PART_SSAA,          /* supersampling (#2073, section 10.21): 0 off, or the factor 2 or 4 per
                                   axis on top of the render scale. Host presentation only; off in a
                                   fresh file and in every preset */
+    PLAYER_PART_MIPS,          /* host-built mip chains (section 11.3.8): 0 off, 1 on. Appended; the
+                                  SR_ACE line carries mips=on, right after twin, only when on; off in
+                                  a fresh file */
+    PLAYER_PART_TEXPACK,       /* the title's texture pack (#1880, contract 11.3.4): 0 off, 1 on. In
+                                  effect only for a title with a pack chosen (PlayerTitlePack); the
+                                  line carries texpack=on and the folder reaches the runtime as
+                                  SR_TEX_REPLACE (NkRuntimeConfig.texpack_dir) */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -280,6 +302,27 @@ typedef struct {
     /* Ace's own parts, each -1 (on, the default) or 0 (off for this title). */
     int logic_60;                  /* the title's 60 FPS game logic package */
 } PlayerTitlePlay;
+
+/* A title's texture pack (docs/ENHANCEMENT_CONTRACT.md 10.12): the folder the player chose for it,
+   kept in settings.json's "texture_packs" map by disc ID. The folder is the player's own; the
+   project ships no pack. At most PLAYER_MAX_TITLE_PACKS titles have one: choosing one more says
+   so and stores nothing. */
+#define PLAYER_MAX_TITLE_PACKS 256
+typedef struct {
+    char key[PLAYER_DISC_ID_KEY_LEN];
+    char path[NK_MAX_PATH];
+} PlayerTitlePack;
+
+/* What a pack holds, as the title's page shows it, from reading it the way the runtime does
+   (src/rt/texrepl.h). A pack that fails that reading is refused whole, never half-applied. */
+typedef struct {
+    bool ok;
+    char name[128];        /* the folder's own name */
+    size_t textures;       /* the textures it lists, replacements and "leave alone" lines alike */
+    size_t notes;          /* what it holds that this build reads and does not apply */
+    char error[256];       /* why it was refused, when !ok */
+    char other_game[16];   /* refused as made for another game: the first disc ID its [games] lists */
+} PlayerTexturePackInfo;
 
 /* What a title launches with (player_play_resolve). */
 typedef struct {
@@ -338,6 +381,8 @@ typedef struct {
     PlayerEnhancedSettings enhanced;
     PlayerTitlePlay title_play[MAX_LIBRARY_GAMES];
     int title_play_count;
+    PlayerTitlePack title_packs[PLAYER_MAX_TITLE_PACKS];
+    int title_pack_count;
     /* Builds keep the compiled system libraries a disc carries in the data folder and
        reuse them for other games with the same library (#1306). On by default; the
        copies never leave this PC. */
@@ -464,9 +509,11 @@ typedef enum {
     PLAYER_ERROR_RETRY_NONE = 0,
     PLAYER_ERROR_RETRY_RESTART_GAME,  /* "Restart game": launch subject_disc_id again */
     PLAYER_ERROR_RETRY_BUILD,         /* "Try again": build subject_disc_id again */
-    PLAYER_ERROR_RETRY_DELETE_KEPT    /* "Delete kept copy": delete what the import of the
+    PLAYER_ERROR_RETRY_DELETE_KEPT,   /* "Delete kept copy": delete what the import of the
                                          program subject_disc_id kept after it left the
                                          library (player_app_delete_kept_homebrew) */
+    PLAYER_ERROR_RETRY_WITHOUT_PACK   /* "Play without the pack": launch subject_disc_id once with
+                                         its texture pack left out; the stored choice is kept */
 } PlayerErrorRetry;
 
 typedef struct {
@@ -921,6 +968,22 @@ struct PlayerApp {
        main.c opens it, and the folder picked waits in saves_picked (saves_pick_ready) until
        the Saves dialog takes it. A cancelled dialog leaves nothing. */
     bool request_save_folder_picker;
+    /* A title's Enhanced page asks for the host folder dialog to choose its texture pack
+       (player_app_begin_texpack_pick); main.c opens it and hands the folder to
+       player_app_take_texpack_pick. texpack_pick_disc is the game the dialog was opened for, so
+       a pick that completes after the page closed or moved still reaches that game alone. */
+    bool request_texpack_folder_picker;
+    char texpack_pick_disc[PLAYER_DISC_ID_KEY_LEN];
+    /* The game (normalised disc ID) whose requested launch leaves its texture pack out, armed by
+       the refusal card's "Play without the pack" together with its request_launch and taken by
+       that launch alone (player_app_launch_begin), whether it starts or not. A new request clears
+       it, and so does the event loop when it drops the request without a launch. */
+    char launch_without_pack[PLAYER_DISC_ID_KEY_LEN];
+    /* The pack of the title whose Enhanced page is open, read when the page opens or the pack
+       changes (player_app_title_pack_info), so the page never scans a folder each frame. */
+    char texpack_page_key[PLAYER_DISC_ID_KEY_LEN];
+    char texpack_page_path[NK_MAX_PATH];
+    PlayerTexturePackInfo texpack_page_info;
     int saves_pick_index;
     bool saves_pick_ready;
     char saves_picked[NK_MAX_PATH];
@@ -1015,6 +1078,16 @@ struct PlayerApp {
     NkRenderPath render_path;
     char render_path_disc[MAX_DISC_ID_LEN];
     bool render_notice_hidden[NK_RENDER_FALLBACK_COUNT];
+    /* What the GPU renderer of the latest launch hands to the software renderer for long
+       enough to slow the game, from its render_fallback boot events (#2151): one bit per
+       NkRenderEffect, and the sentence that names them. Cleared by each launch. Hide on the
+       game's page hides it for that game and the effects it named, for the rest of this
+       player session: another game, or an effect it did not name, shows it again. The last
+       game hidden is the one remembered. */
+    uint16_t render_effects;
+    char render_effects_text[384];
+    uint16_t render_effects_hidden;
+    char render_effects_hidden_disc[MAX_DISC_ID_LEN];
     bool close_confirmation_pending;
     char boot_event_file_path[MAX_PATH_LEN];
     bool should_quit;
@@ -1567,7 +1640,8 @@ typedef struct {
     bool vsync;
     int fullscreen;       /* 1 on, 0 off, -1 left as the user set it */
     /* Each Enhanced part's value under this preset, or -1 where the library's own value
-       stays. Only presentation parts are set: Crisp system text and Sharper enlarging. */
+       stays. Only presentation parts are set: Crisp system text, Sharper enlarging and (under
+       Ultra) Full 32-bit colour. */
     int part[PLAYER_PART_COUNT];
 } PlayerGraphicsPresetRow;
 
@@ -1690,12 +1764,28 @@ bool player_app_title_60hz_on(const PlayerApp *app, int game_index);
 /* Saved on, but the title has no usable enhancement package: nothing launches
  * or builds until the package is back, or Ace or its 60 FPS game logic is turned off. */
 bool player_app_title_60hz_blocked(const PlayerApp *app, int game_index);
+/* The title's usable package is the shipped one and the maintainer released it
+ * ("experimental": false, docs/ENHANCEMENT_CONTRACT.md section 9.10): the title page tags
+ * the 60 FPS switch OPTIONAL, else EXPERIMENTAL. */
+bool player_app_title_60hz_released(const PlayerApp *app, int game_index);
 /* The title page's 60 FPS switch, Ace's own part: on chooses Ace for the title with its 60 FPS
  * game logic, off keeps Ace and turns that part off. Re-selects the title's package variant
  * and asks for its package to be checked. */
 void player_app_set_title_60hz(PlayerApp *app, int game_index, bool on);
 /* The --experimental-60hz flag: on for this session only, never saved. */
 void player_app_set_experimental_60hz_session(PlayerApp *app, bool on);
+/* An Ace launch of the title with its Wider culling part on (section 11.3.6): the launch line
+   carries cull=on, and the title builds and launches with its culling package when it has a
+   usable one (PlayerTitleEnhancement.cull_available). Authentic and Enhanced never. */
+bool player_app_title_cull_on(const PlayerApp *app, int game_index);
+/* Why the title's culling package cannot be used while player_app_title_cull_on asks for it
+   (PlayerTitleEnhancement.cull_problem), so the title page names it; "" when the part is off,
+   the package is usable, or the title has no culling package file. */
+const char *player_app_title_cull_problem(const PlayerApp *app, int game_index);
+/* The title's selected build carries its timing package, so its launch runs with the 60 FPS
+   game logic (player_play_config_session's logic_60_package): an enhanced build that is not
+   the culling package alone (GameRecord.enhancement_hook_only). */
+bool player_game_has_timing_package(const GameRecord *game);
 
 /* ---- The play modes (#2055; src/rt/ace.h) ---- */
 
@@ -1728,9 +1818,13 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
  * notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off" (tier=ace for Ace; smooth=match is never written).
+ * ";mips=on" follows twin only with the Smooth far textures part on; a missing mips is off.
  * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
  * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
+ * ";ssaa=2" or ";ssaa=4" follows with the Supersampling part on, in either tier.
+ * ";texpack=on" follows only with the Texture pack part on for a title that has a pack, in
+ * either tier; a missing texpack is off.
  * ";cull=on" follows, last, only for Ace with the Wider culling part on; a missing cull is off.
  * Returns false when it does not fit. */
 bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap);
@@ -1745,6 +1839,35 @@ int player_play_present_upscale(const PlayerPlayResolved *play);
 void player_play_config_session(const PlayerSettings *settings, const char *disc_id,
                                 bool logic_60_package, bool acceptance, NkRuntimeConfig *config,
                                 PlayerPlayResolved *out);
+/* The folder chosen as a disc's texture pack, or NULL when it has none. */
+const char *player_settings_title_pack(const PlayerSettings *settings, const char *disc_id);
+/* Reads the pack at `path` as the runtime will (src/rt/texrepl.h) and fills *out. Returns out->ok:
+ * false, with out->error saying why, for a path that is not a full UTF-8 path under 512 bytes, a
+ * folder that cannot be read, a malformed textures.ini, or, with disc_id given, a pack whose
+ * [games] section names other games only (out->other_game names the first). It decodes no
+ * image: an image that is missing or does not decode is skipped when the game draws it. */
+bool player_texture_pack_inspect(const char *path, const char *disc_id,
+                                 PlayerTexturePackInfo *out);
+/* A title's texture pack (its Enhanced page). Choosing reads the pack first: one that fails is
+ * refused with a TEXTURE_PACK_REFUSED message and nothing changes; one that reads is stored and
+ * the title's Texture pack part is set On. Returns whether it was stored. Removing forgets the
+ * folder (the folder itself is untouched) and returns the part to the library's. */
+bool player_app_set_title_pack(PlayerApp *app, int game_index, const char *path);
+void player_app_clear_title_pack(PlayerApp *app, int game_index);
+/* The same for the title whose Enhanced page is open; nothing for the library's page. */
+bool player_app_set_enhanced_page_pack(PlayerApp *app, const char *path);
+/* The folder dialog for the open title page's pack: asks main.c to open it and remembers the
+ * game. Nothing on the library's page. */
+void player_app_begin_texpack_pick(PlayerApp *app);
+/* The dialog closed without a folder (cancelled, or it could not open): the next CHOOSE may open
+   one again. */
+void player_app_cancel_texpack_pick(PlayerApp *app);
+/* The dialog's folder, for the game it was opened for, wherever the player is now; a game gone
+ * from the library meanwhile takes nothing (and the developer log says so). */
+bool player_app_take_texpack_pick(PlayerApp *app, const char *path);
+void player_app_clear_enhanced_page_pack(PlayerApp *app);
+/* The pack of the title whose page is open, as last read, or NULL when it has none. */
+const PlayerTexturePackInfo *player_app_title_pack_info(const PlayerApp *app, int game_index);
 /* <user_root>/ace/<disc ID>.json: the runtime's per-run report for that disc. */
 bool player_ace_report_path(const char *user_root, const char *disc_id, char *out, size_t cap);
 /* The title page's "Last session" line from that report ("Last session: 16x filtering,
@@ -1843,13 +1966,18 @@ void player_app_keep_waiting_for_stalled_game(PlayerApp *app);
    takes, and what may fix it. False, with both NULL, for no fallback. */
 bool player_render_notice_text(NkRenderFallback fallback, const char **heading,
                                const char **text);
-/* The notice for disc_id's page: the latest launch's fallback when that launch started this
-   disc, its render_path event has been read, and its notice is not hidden. */
+/* The sentence naming what the GPU renderer hands to the software renderer: effects is one
+   bit per NkRenderEffect. Writes "" and returns false for none or a sentence too long for out. */
+bool player_render_effects_text(uint16_t effects, char *out, size_t out_capacity);
+/* The notice for disc_id's page when the latest launch started this disc and its render_path
+   event has been read: its start-up fallback, or else, while the GPU renderer draws, the
+   effects it hands to the software renderer (render_fallback events), unless hidden. */
 bool player_app_render_notice(const PlayerApp *app, const char *disc_id, const char **heading,
                               const char **text);
-/* Hide: that fallback's notice stays hidden for the rest of this player session. */
+/* Hide: the notice shown stays hidden for the rest of this player session. */
 void player_app_hide_render_notice(PlayerApp *app);
-/* Reads one line of the session's boot events for the render_path event. */
+/* Reads one line of the session's boot events for the render_path and render_fallback
+   events. */
 void player_app_consume_render_path_line(PlayerApp *app, const char *line);
 
 /* One PLAY, split so its slow part can leave the UI thread (#1298). Checking a

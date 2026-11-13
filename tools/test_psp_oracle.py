@@ -2734,16 +2734,16 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 160)
+        self.assertEqual(len(routes), 164)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(len(ids), len(set(ids)))
-        self.assertEqual(set(range(1, 79)) | set(range(90, 105)) | {180} | {106, 107, 108, 109}
+        self.assertEqual(set(range(1, 79)) | set(range(90, 106)) | {180} | {106, 107, 108, 109}
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185, 186},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185, 186, 187, 188},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -3021,6 +3021,17 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         self.assertIn("out[13] = reported_w;", csc)
         self.assertIn("out[14] = reported_h;", csc)
         self.assertLess(csc.index("geometry_ok"), csc.index("VCW_OP_CSCAVC"))
+        # Boot 149: type 1's Open is refused while its Init and SetMemory succeed. Its cells run after
+        # both decode contexts, and every teardown deletes a context once Open, Init or SetMemory
+        # succeeded, so no initialised context outlives its cell.
+        cases = list(spec.semantic_cases)
+        self.assertLess(cases.index("vc-t0-delete"), cases.index("vc-d480-input"))
+        self.assertLess(cases.index("vc-d464-delete"), cases.index("vc-t1-open-c0"))
+        self.assertLess(cases.index("vc-t1-delete"), cases.index("vc-ac-1000"))
+        teardown = section[section.index("static void vcw_teardown("):section.index("/* ---- item 1:")]
+        self.assertIn("const int wanted[3] = {stop_ok, edram_ok, delete_ok};", teardown)
+        self.assertEqual(section.count("ok[0] || ok[2] || ok[3]);"), 2)
+        self.assertNotIn("ok[1], ok[0]);", section)
 
     def test_vcodec_csc_geometry_fail_record_keeps_raw_dimensions_without_a_return_value(self) -> None:
         meta = META.format(source="psp", model="synthetic", firmware="test",
@@ -3685,6 +3696,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 "PSP-VRAM-MIRROR-001",
                 # The 2026-11-02 game-context run of eded11ac.
                 "PSP-HLE-SAVEDATA-GETSIZE-001",
+                # The 2026-11-02 acceptance-eligible game-context hle-io-trunc run of 08934592f
+                # (#1892, boot 107).
+                "PSP-HLE-IO-TRUNC-001",
                 # The 2026-10-27 acceptance-eligible ge-timing runs of 8f707fc0 (#1296).
                 "PSP-GE-TIMING-001",
                 # The 2026-10-27 acceptance-eligible cpu-timing run of 3a14a88e (#1296).
@@ -3746,6 +3760,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 # 5.2.0) run of 1a5157e37.
                 "PSP-HLE-IO-SEEK-002",
                 "PSP-SAS-003",
+                # The 2026-11-13 (UTC) acceptance-eligible sas-adsr (#1296, boot 208, game
+                # context, ARK-5 5.2.0) run of 06a6c942c.
+                "PSP-SAS-002",
                 # The 2026-11-10 acceptance-eligible hle-issues-batch (#326, #356, boot 172) and
                 # hle-kernel-pool-bounds (boot 173) runs of 979c6a1dd.
                 "PSP-HLE-ISSUES-001", "PSP-HLE-KERNEL-STATUS-002",
@@ -3785,9 +3802,10 @@ class PspDmacProbeTests(unittest.TestCase):
                 # 2026-11-10: hle-savedata-nodata (dbb47db4, boot 183, game context): 34 PASS and
                 # 1 SKIP; nodir-load stayed VISIBLE to its bound and the console needed a power cycle.
                 "PSP-HLE-SAVEDATA-NODATA-001",
-                # 2026-11-10: sas-adsr (74acbe42, boot 185, game context): a complete all-PASS
-                # stream whose envelope is blocked by "loaded module was not proven unloaded".
-                "PSP-SAS-002",
+                # 2026-11-13 (UTC): hle-utility-netconf-sharing (e8b9b0cd5, boot 211, game
+                # context): the game sharing dialog stayed RUNNING to the poll cap, netconf did
+                # not run, and the console needed a power cycle.
+                "PSP-HLE-UTILITY-DIALOG-002",
             },
         )
 
@@ -5537,16 +5555,42 @@ def _c_walk(name, env, functions, defines, arrays, emit, active=()):
             _c_walk(callee, inner, functions, defines, arrays, emit, active + (name,))
 
 
+_SHARED_FAMILY_SECTIONS = {"HLE_CASE_UTILITY_NETCONF_SHARING": "HLE_CASE_UTILITY_DIALOGS"}
+
+
+def _select_case_blocks(section: str, macro: str) -> str:
+    """Resolve the `#if PSP_ORACLE_CASE == X` / `#else` / `#endif` blocks inside a section that
+    two cases compile (161 and 166 share one): keep the lines `macro` builds, drop the rest.
+    The section's own header and closing #endif are outside any block and kept as they are."""
+    out: list[str] = []
+    stack: list[tuple[bool, bool]] = []  # (is a case block, lines kept)
+    for index, line in enumerate(section.split("\n")):
+        text = line.strip()
+        case = re.fullmatch(r"#if PSP_ORACLE_CASE == (\w+)", text)
+        if index > 0 and case:
+            stack.append((True, case.group(1) == macro))
+        elif index > 0 and text.startswith("#if"):
+            stack.append((False, True))
+        elif text == "#else" and stack and stack[-1][0]:
+            stack[-1] = (True, not stack[-1][1])
+        elif text.startswith("#endif") and stack:
+            stack.pop()
+        elif all(kept for _is_case, kept in stack):
+            out.append(line)
+    return "\n".join(out)
+
+
 def _probe_cells(probe: str, macro: str) -> tuple[list[tuple[str, int]], int]:
     """The (cell, out-word count) pairs a family's record calls can emit, in source order,
     and the number of hle_step calls the walk reaches. A cell can appear more than once
     when a skip branch and a record branch both emit it."""
-    anchor = re.search(rf"\*/\n#if PSP_ORACLE_CASE == {macro}\n", probe)
+    host = _SHARED_FAMILY_SECTIONS.get(macro, macro)
+    anchor = re.search(rf"\*/\n#if PSP_ORACLE_CASE == {host}(?: \|\| [^\n]*)?\n", probe)
     if anchor is None:
         raise AssertionError(f"no family section for {macro}")
-    end_marker = f"#endif /* {macro} */"
+    end_marker = f"#endif /* {host} */"
     end = probe.index(end_marker, anchor.start()) + len(end_marker)
-    section = _c_code(probe[anchor.start():end])
+    section = _c_code(_select_case_blocks(probe[anchor.start():end], macro))
     code = _c_code(probe)
     defines = {name: int(value, 0) for name, value in re.findall(
         r"^#define\s+(\w+)\s+(0x[0-9A-Fa-f]+|\d+)[uUlL]*\s*$", code, re.M)}
@@ -5668,6 +5712,9 @@ class HleMeasureProbeTests(unittest.TestCase):
          "HLE_CASE_STD_HANDLES", "PSP-HLE-STDIO-001"),
         ("hle-utility-dialogs", 161, "hle_utility_dialogs", "hle_utility_imports.S",
          "HLE_CASE_UTILITY_DIALOGS", "PSP-HLE-UTILITY-DIALOG-001"),
+        ("hle-utility-netconf-sharing", 166, "hle_utility_netconf_sharing",
+         "hle_utility_imports.S", "HLE_CASE_UTILITY_NETCONF_SHARING",
+         "PSP-HLE-UTILITY-DIALOG-002"),
         ("hle-io-seek", 162, "hle_io_seek", None,
          "HLE_CASE_IO_SEEK", "PSP-HLE-IO-SEEK-001"),
         # #1380's cells hle-io-seek left open: flash0: SEEK_CUR and past-2^32 seeks, ms0: flags.
@@ -5678,6 +5725,9 @@ class HleMeasureProbeTests(unittest.TestCase):
         # #341 part 2: loads the helper PRX of case 172 (probe_hle_self_stop_helper.c).
         ("hle-self-stop-unload", 167, "hle_self_stop_unload", None,
          "HLE_CASE_SELF_STOP", "PSP-HLE-SELFSTOP-001"),
+        # #1892: PSP_O_TRUNC on one probe-owned ms0: file; links the CRT's sceUtility pair only.
+        ("hle-io-trunc", 105, "hle_io_trunc", "hle_utility_imports.S",
+         "HLE_CASE_IO_TRUNC", "PSP-HLE-IO-TRUNC-001"),
     )
     ALL_FAMILIES = FAMILIES + SINGLE_LAUNCH_FAMILIES + TABLE_FAMILIES + LATER_FAMILIES
     # Every family block: file -> (library, version word, {function: NID}). The
@@ -5765,6 +5815,21 @@ class HleMeasureProbeTests(unittest.TestCase):
             "nkUtilGamedataInstallGetStatus": 0xB57E95D9,
             "nkUtilGamedataInstallUpdate": 0x4AECD179,
             "nkUtilGamedataInstallShutdownStart": 0x32E32DCB,
+            "nkUtilGameSharingInitStart": 0xC492F751,
+            "nkUtilGameSharingGetStatus": 0x946963F3,
+            "nkUtilGameSharingUpdate": 0x7853182D,
+            "nkUtilGameSharingShutdownStart": 0xEFC6F80F,
+            "sceUtilityLoadNetModule": 0x1579A159,
+            "sceUtilityUnloadNetModule": 0x64D50C56,
+        },
+        # hle-utility-netconf-sharing: case 161's set minus savedata and the gamedata install
+        # dialog (in case 161 it stayed RUNNING on boot 206, as netconf did on boot 204).
+        ("hle_utility_imports.S", 166): {
+            "nkUtilMsgDialogInitStart": 0x2AD8E239,
+            "nkUtilNetconfInitStart": 0x4DB1E739,
+            "nkUtilNetconfGetStatus": 0x6332AA39,
+            "nkUtilNetconfUpdate": 0x91E70E35,
+            "nkUtilNetconfShutdownStart": 0xF88155F6,
             "nkUtilGameSharingInitStart": 0xC492F751,
             "nkUtilGameSharingGetStatus": 0x946963F3,
             "nkUtilGameSharingUpdate": 0x7853182D,
@@ -5913,11 +5978,15 @@ class HleMeasureProbeTests(unittest.TestCase):
                       self._imports(self._block_text(block, case_id))}
         return names
 
-    @staticmethod
-    def _family_span(text: str, macro: str) -> tuple[int, int]:
+    # Case 166 compiles case 161's section; the cells only 161 builds sit in `#if 161` blocks.
+    SHARED_SECTIONS = {"HLE_CASE_UTILITY_NETCONF_SHARING": "HLE_CASE_UTILITY_DIALOGS"}
+
+    @classmethod
+    def _family_span(cls, text: str, macro: str) -> tuple[int, int]:
         # Each family section opens right after its separator comment; the header
         # #if chain that names the same macro does not, so it is never matched.
-        match = re.search(rf"\*/\n#if PSP_ORACLE_CASE == {macro}\n", text)
+        macro = cls.SHARED_SECTIONS.get(macro, macro)
+        match = re.search(rf"\*/\n#if PSP_ORACLE_CASE == {macro}(?: \|\| [^\n]*)?\n", text)
         if match is None:
             raise AssertionError(f"no family section for {macro}")
         end_marker = f"#endif /* {macro} */"
@@ -5926,13 +5995,17 @@ class HleMeasureProbeTests(unittest.TestCase):
 
     def _section(self, macro: str) -> str:
         start, end = self._family_span(self.probe, macro)
-        return self.probe[start:end]
+        text = self.probe[start:end]
+        if macro in self.SHARED_SECTIONS:
+            text = _select_case_blocks(text, macro)
+        return text
 
     def _shared_section(self) -> str:
         """Probe text outside every family section (common helpers and main)."""
         text = self.probe
-        for _case, _cid, _stem, _block, macro, _test in reversed(self.ALL_FAMILIES):
-            start, end = self._family_span(text, macro)
+        spans = sorted({self._family_span(text, macro)
+                        for _case, _cid, _stem, _block, macro, _test in self.ALL_FAMILIES})
+        for start, end in reversed(spans):
             text = text[:start] + text[end:]
         return text
 
@@ -6011,14 +6084,16 @@ class HleMeasureProbeTests(unittest.TestCase):
         hle-sysparam can import no savedata call."""
         block = "hle_utility_imports.S"
         self.assertEqual(re.findall(r"^#if PSP_ORACLE_CASE == (\d+)$", self._block_text(block),
-                                    re.MULTILINE), ["104", "180", "140", "161"])
+                                    re.MULTILINE), ["104", "180", "140", "161", "166"])
         self.assertIn("#define HLE_CASE_SAVEDATA_GETSIZE 104\n", self.probe)
         self.assertIn("else ifeq ($(CASE),hle-savedata-getsize)\nCASE_ID = 104\n", self.makefile)
         users = [(case, case_id) for case, case_id, _stem, linked, _macro, _test
                  in self.ALL_FAMILIES if linked == block]
         self.assertEqual(users, [("hle-sysparam", 95), ("hle-savedata-getsize", 104),
                                  ("hle-utility-none", 140), ("hle-savedata-nodata", 180),
-                                 ("hle-utility-dialogs", 161), ("hle-nickname-limit", 164)])
+                                 ("hle-utility-dialogs", 161),
+                                 ("hle-utility-netconf-sharing", 166),
+                                 ("hle-nickname-limit", 164), ("hle-io-trunc", 105)])
         for case, case_id in users:
             with self.subTest(case=case):
                 gate = self.makefile.split(f"\nifeq ($(CASE),{case})\n", 1)[1].split("endif", 1)[0]
@@ -6122,6 +6197,11 @@ class HleMeasureProbeTests(unittest.TestCase):
             self.assertNotIn(writer, arest[reserve:release])
         arest_lines = (self.probe.count("\n", 0, arest_start + reserve),
                        self.probe.count("\n", 0, arest_start + release))
+        # hle-io-trunc's it_st() is a sceIoGetstat helper; every call to it runs inside a cell
+        # that has already written its step.
+        it_st_start = self.probe.index("static uint32_t it_st(void)")
+        it_st_lines = (self.probe.count("\n", 0, it_st_start),
+                       self.probe.count("\n", 0, self.probe.index("\n}\n", it_st_start)))
         checked = 0
         for index, line in enumerate(lines):
             if not self.MEASURED_CALL_RE.search(line):
@@ -6132,6 +6212,8 @@ class HleMeasureProbeTests(unittest.TestCase):
                 continue  # the callback samples time; host logging is unsafe there
             if arest_lines[0] <= index <= arest_lines[1]:
                 continue  # covered by the run's one step (above)
+            if it_st_lines[0] <= index <= it_st_lines[1]:
+                continue  # called only inside a stepped hle-io-trunc cell (above)
             checked += 1
             window = lines[max(0, index - 3):index]
             self.assertTrue(any("hle_step(" in previous for previous in window),
@@ -6236,7 +6318,9 @@ class HleMeasureProbeTests(unittest.TestCase):
                           "HLE_IS_FILE", "HLE_IS_FILE", "HLE_IS_MISSING",
                           # hle-io-seek-edges: its ms0: file on a setup failure, the file the
                           # RDONLY|CREAT|EXCL cell created (only when it exists), then cleanup.
-                          "HLE_ISE_FILE", "HLE_ISE_MISSING", "HLE_ISE_FILE", "HLE_ISE_MISSING"])
+                          "HLE_ISE_FILE", "HLE_ISE_MISSING", "HLE_ISE_FILE", "HLE_ISE_MISSING",
+                          # hle-io-trunc: its ms0: file, then the same file again (the cell).
+                          "HLE_IT_PATH", "HLE_IT_PATH"])
         issues = (self.fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         self.assertNotRegex(issues, r"\bsceIoRemove\s*\(")
 
@@ -12313,6 +12397,623 @@ class GeRasterProbeTests(unittest.TestCase):
         self.assertEqual(tuple(re.findall(r'\{"([a-z0-9-]+)", 0x[0-9a-f]{16}ull\}', table)), cells)
 
 
+class _GeNewCaseMixin:
+    """Shared loading for the two #2193/#343 GE cases that have not run on a PSP yet."""
+
+    probe: ClassVar[str]
+    makefile: ClassVar[str]
+    readme: ClassVar[str]
+    doc: ClassVar[str]
+    section: ClassVar[str]
+    bodies: ClassVar[dict[str, str]]
+    row: ClassVar[dict[str, Any]]
+
+    CASE: ClassVar[str]
+    CASE_ID: ClassVar[int]
+    MACRO: ClassVar[str]
+    TEST_ID: ClassVar[str]
+
+    @classmethod
+    def _load(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        cls.doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        rows = [test for test in manifest["tests"] if test["id"] == cls.TEST_ID]
+        assert len(rows) == 1, cls.TEST_ID
+        cls.row = rows[0]
+        start = cls.probe.index(f"#if PSP_ORACLE_CASE == {cls.MACRO}\n\n")
+        end = cls.probe.index(f"#endif /* {cls.MACRO} */", start)
+        cls.section = _c_code(cls.probe[start:end])
+        cls.bodies = _c_function_bodies(cls.section)
+
+    def _check_route(self) -> None:
+        case, stem = self.CASE, self.CASE.replace("-", "_")
+        test = cast(unittest.TestCase, self)
+        test.assertIn(f"else ifeq ($(CASE),{case})\nCASE_ID = {self.CASE_ID}\n", self.makefile)
+        test.assertIn(f"else ifeq ($(CASE),{case})\nTARGET = $(BUILD_DIR)/{stem}\n"
+                      "OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        test.assertIn(f"#define {self.MACRO} {self.CASE_ID}\n", self.probe)
+        test.assertIn(f'#define HLE_CAMPAIGN_ID "{case}"\n#define HLE_TEST_ID "{self.TEST_ID}"\n'
+                      f'#define HLE_LOG "host0:/{stem}_log.txt"', self.probe)
+        test.assertEqual(_campaign_host0_log_path(Path("/scratch"), case).name, f"{stem}_log.txt")
+        test.assertEqual(_campaign_completeness_contract(case), "strict-golden-sequence")
+        test.assertNotIn(case, CAMPAIGN_QUEUE_CASES)
+        # Not run on a PSP: the README, the pending-campaign table and the manifest say so.
+        readme = [line for line in self.readme.splitlines()
+                  if line.startswith(f"| `{case}` | `{self.TEST_ID}` |")]
+        test.assertEqual(len(readme), 1)
+        test.assertIn("**NOT_RUN**; no hardware result is claimed.", readme[0])
+        test.assertIn(f"| `{case}` | `{self.TEST_ID}` | `NOT_RUN` |", self.doc)
+        test.assertEqual(self.row["status"], "implemented")
+        test.assertEqual(self.row["hardware_evidence"], "NOT_RUN")
+        for key in ("measurement_note", "evidence_cases", "evidence_ref"):
+            test.assertNotIn(key, self.row)
+        test.assertIn("No hardware run is cited and no measurement is claimed.",
+                      self.row["evidence_note"])
+        test.assertEqual(self.row["source"], "fixtures/psp_oracle/probe_ge_sample.c")
+        test.assertEqual(self.row["prx"], f"{stem}.prx")
+        test.assertEqual(self.row["diagnostic_case_ids"], [case])
+
+    def _check_bounded(self, prefix: str, extra: frozenset[str], polls: int) -> None:
+        test = cast(unittest.TestCase, self)
+        test.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), {
+            "sceGeEdramGetAddr", "sceGeListEnQueue", "sceGeListSync", "sceGeDrawSync",
+            "sceGeBreak", "sceKernelDcacheWritebackAll", "sceKernelDelayThread",
+            "sceKernelGetSystemTimeLow"} | extra)
+        test.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "sceGu", "sceIo"):
+            test.assertNotIn(banned, self.section)
+        test.assertEqual(self.section.count(f"i < {prefix}_WAIT_POLLS; i++"), polls)
+        test.assertIn(f"#define {prefix}_WAIT_POLLS 5000u", self.section)
+        # Every loop runs to a constant, a table count or a fixed read size.
+        for loop in re.finditer(r"\bfor \(", self.section):
+            header = self.section[loop.end():_c_close(self.section, loop.end() - 1)]
+            test.assertRegex(header, r"^(?:unsigned|uint32_t) (\w+) = 0; (?:!overlap && )?\1 < "
+                                     r"(?:\d+u|[A-Z][A-Z0-9_]*"
+                                     r"(?: \* [A-Z][A-Z0-9_]*)?|rows|cols|3u && c->w\[i\] != 0u); \1\+\+$")
+        for delay in re.findall(r"sceKernelDelayThread\((\w+)\)", self.section):
+            test.assertEqual(delay, f"{prefix}_WAIT_POLL_US")
+        # Each list is queued with a GE context, so the driver restores the GE state after it.
+        draw = self.bodies[f"{prefix.lower()}_draw"]
+        test.assertIn(f"args.context = &s_{prefix.lower()}_ctx;", draw)
+        test.assertIn(f"sceGeListEnQueue(s_{prefix.lower()}_list, NULL, -1, &args)", draw)
+        test.assertLess(draw.index("hle_step("), draw.index("sceGeListEnQueue("))
+        test.assertLess(draw.index("sceKernelDcacheWritebackAll();"), draw.index("sceGeListEnQueue("))
+        # The probe's own list decides the end of the wait, never another client's (the VSH's)
+        # lists: a peek of PSP_GE_LIST_DONE, or 0x80000100 once its slot is freed after it ended
+        # (PSP-GE-SYNC-001). sceGeBreak(1) runs only when the deadline passed without either.
+        p = prefix.lower()
+        wait = self.bodies[f"{p}_wait"]
+        test.assertIn(f"s_{p}_list_state = sceGeListSync(qid, 1);", wait)
+        test.assertIn(f"if (s_{p}_list_state == PSP_GE_LIST_DONE) {{", wait)
+        test.assertIn(f"if ((uint32_t)s_{p}_list_state == 0x80000100u) {{", wait)
+        test.assertIn(f"return {prefix}_WAIT_REJECTED;", wait)
+        test.assertNotIn("sceGeDrawSync(", wait)
+        test.assertNotIn("sceGeBreak(", wait)
+        test.assertLess(draw.index("sceGeListEnQueue("), draw.index(f"{p}_wait(qid);"))
+        test.assertEqual(draw.count("sceGeBreak("), 1)
+        breaking = draw.index(f"if (wait == {prefix}_WAIT_DEADLINE) {{")
+        reset = draw.index("reset_rc = sceGeBreak(1, &param);")
+        test.assertLess(breaking, reset)
+        test.assertLess(reset, _c_close(draw, draw.index("{", breaking)))
+        test.assertIn(f'const char *status = wait == {prefix}_WAIT_REJECTED ? "FAIL"\n'
+                      f'                         : wait == {prefix}_WAIT_DEADLINE ? "TIMEOUT" : "PASS";\n'
+                      "    hle_record(row, status, (uint32_t)qid, draw, 9);", draw)
+        test.assertIn("elapsed, wait, (uint32_t)reset_rc, words,", draw)
+        for code, value in (("DONE", 0), ("FREED", 1), ("DEADLINE", 2), ("REJECTED", 3)):
+            test.assertIn(f"#define {prefix}_WAIT_{code} {value}u", self.section)
+
+    def _check_stream(self, status: str = "PASS") -> None:
+        test = cast(unittest.TestCase, self)
+        spec, counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        test.assertEqual(spec.test_id, self.TEST_ID)
+        test.assertEqual(spec.terminal_case, f"{self.CASE}-done")
+        lines = [META.format(source="psp", model="PSP-3000", firmware="6.61-ARK",
+                             binary=MEASURED_SHA, commit=MEASURED_COMMIT)]
+        for case in spec.semantic_cases:
+            outs = " ".join(f"out{i}=0x00000000" for i in range(counts[case]))
+            lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id={self.TEST_ID} case_id={case} "
+                         f"status={status} result=0x00000000 {outs}\n")
+        lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id={self.TEST_ID} case_id={self.CASE}-done "
+                     f"status=PASS result=0x00000000 out0=0x{len(spec.semantic_cases):08x}\n")
+        report = parse_campaign_probe_output("".join(lines), self.CASE)
+        test.assertTrue(report.complete)
+        # The manifest's case patterns name every record and only those.
+        import fnmatch
+        patterns = self.row["case_ids"]
+        test.assertEqual(patterns[-1], f"{self.CASE}-done")
+        for case in (*spec.semantic_cases, spec.terminal_case):
+            test.assertTrue(any(fnmatch.fnmatchcase(case, pattern) for pattern in patterns), case)
+
+
+class GeRasterBoundsProbeTests(_GeNewCaseMixin, unittest.TestCase):
+    """CASE=ge-raster-bounds (187, PSP-GE-RASTER-002) in probe_ge_sample.c: #2193's five cells,
+    named as the request names them, on a probe-owned VRAM block that is saved and restored, with
+    reads that tell a write bounded by the stride (or the scissor) from one that runs on linearly.
+    Built, not run on a PSP."""
+
+    CASE = "ge-raster-bounds"
+    CASE_ID = 187
+    MACRO = "GE_CASE_RASTER_BOUNDS"
+    TEST_ID = "PSP-GE-RASTER-002"
+    CELLS = ("raster-512-x511", "raster-500-x511", "raster-256-x479", "depth-zbw256-past",
+             "depth-clear-scissor")
+    BLOCK = 0x44000
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._load()
+
+    def _cells(self) -> list[tuple[str, str, int, int, int, int, int, int]]:
+        table = _matched(re.search(r"grb_cells\[GRB_CELL_COUNT\] = \{(.*?)\n\};", self.section, re.S))
+        kinds = {"GRB_K_COLOUR": "colour", "GRB_K_ZBW": "zbw", "GRB_K_ZCLEAR": "zclear"}
+        return [(name, kinds[kind], *(int(value) for value in values))
+                for name, kind, *values in re.findall(
+                    r'\{"([\w-]+)", (GRB_K_\w+), (\d+)u, (\d+)u, (\d+)u, (\d+)u, (\d+)u, (\d+)u\}',
+                    table.group(1))]
+
+    def _reads(self) -> list[tuple[int, int, str, str, int, int, int, int]]:
+        table = _matched(re.search(r"grb_reads\[GRB_READ_COUNT\] = \{(.*?)\n\};", self.section, re.S))
+        return [(int(cell), int(raw), buf, suffix, int(r0), int(rows), int(c0), int(cols))
+                for cell, raw, buf, suffix, r0, rows, c0, cols in re.findall(
+                    r'\{(\d+)u, (\d)u, GRB_BUF_([CZ]), "([\w-]+)", (\d+)u, (\d+)u, (\d+)u, (\d+)u\}',
+                    table.group(1))]
+
+    def test_route_registration_log_and_not_run_status(self) -> None:
+        self._check_route()
+        self.assertEqual(self.row["issues"], [2193])
+
+    def test_cells_are_the_requested_ones_in_order(self) -> None:
+        cells = self._cells()
+        self.assertEqual(tuple(cell[0] for cell in cells), self.CELLS)
+        self.assertEqual(parse_golden.GE_RASTER_BOUNDS_CELLS, self.CELLS)
+        self.assertIn(f"#define GRB_CELL_COUNT {len(self.CELLS)}u", self.section)
+        # name, kind, psm, fbw, zbw, scissor x1, sprite rows y0 .. y1 - 1
+        self.assertEqual(cells, [
+            ("raster-512-x511", "colour", 3, 512, 512, 511, 0, 16),
+            ("raster-500-x511", "colour", 3, 500, 512, 511, 0, 16),
+            ("raster-256-x479", "colour", 3, 256, 512, 479, 100, 110),
+            ("depth-zbw256-past", "zbw", 0, 512, 256, 511, 0, 10),
+            ("depth-clear-scissor", "zclear", 0, 512, 512, 99, 0, 0),
+        ])
+
+    def test_lists_and_vertices_draw_what_the_request_asks(self) -> None:
+        listing = self.bodies["grb_list"]
+        for fragment in ("GRB_W(0x9c, GRB_FB_OFFSET);", "GRB_W(0x9d, c->fbw);",
+                         "GRB_W(0x9e, GRB_ZB_OFFSET);", "GRB_W(0x9f, c->zbw);",
+                         "GRB_W(0x16, 511u | ((GRB_ROWS - 1u) << 10));",
+                         "GRB_W(0xd5, (uint32_t)c->sx1 | ((GRB_ROWS - 1u) << 10));",
+                         "GRB_W(0x12, 0x0080019cu);", "GRB_W(0xd3, 0x401u);", "GRB_W(0x23, 1);",
+                         "GRB_W(0x1e, 0);", "GRB_W(0xde, 1);",
+                         "GRB_W(0x01, vtx + 2u * 16u);"):
+            self.assertIn(fragment, listing)
+        # Depth writes go on only around the depth draws and off again.
+        self.assertEqual(listing.count("GRB_W(0xe7, 0);"), 1)
+        self.assertEqual(listing.count("GRB_W(0xe7, 1);"), 2)
+        vertices = self.bodies["grb_vertices"]
+        for fragment in ("GRB_GREEN, 0.0f, (float)c->y0, 0.0f", "GRB_GREEN, 512.0f, (float)c->y1, 0.0f",
+                         "GRB_RED, 0.0f, 0.0f, (float)GRB_ZCLEAR",
+                         "GRB_RED, 512.0f, (float)GRB_ROWS, (float)GRB_ZCLEAR",
+                         "GRB_GREEN, 256.0f, (float)c->y0, (float)GRB_ZSPRITE",
+                         "GRB_GREEN, 512.0f, (float)c->y1, (float)GRB_ZSPRITE"):
+            self.assertIn(fragment, vertices)
+        for fragment in ("#define GRB_ZCLEAR 0x4000u", "#define GRB_ZSPRITE 0x0100u",
+                         "#define GRB_GREEN 0xff00ff00u", "#define GRB_RED 0xff0000ffu",
+                         "#define GRB_FILL 0x5a5a5a5au", "#define GRB_ROWS 272u"):
+            self.assertIn(fragment, self.section)
+
+    def test_vram_stays_in_the_owned_block_which_is_saved_and_restored(self) -> None:
+        fb = int(_matched(re.search(r"#define GRB_FB_OFFSET (0x[0-9a-f]+)u", self.section)).group(1), 16)
+        zb = int(_matched(re.search(r"#define GRB_ZB_OFFSET (0x[0-9a-f]+)u", self.section)).group(1), 16)
+        block = int(_matched(re.search(r"#define GRB_BLOCK_BYTES (0x[0-9a-f]+)u", self.section))
+                    .group(1), 16)
+        self.assertEqual((fb, zb, block), (0x110000, 0x154000, self.BLOCK))
+        self.assertEqual(block, 512 * 272 * 2)
+        # Depth directly after colour, inside VRAM; the depth base has bits 6 and 13 clear and its
+        # low 14 bits zero, so the GE's 0x2040 XOR keeps every depth word inside the block.
+        self.assertEqual(zb, fb + block)
+        self.assertLessEqual(zb + block, 0x200000)
+        self.assertEqual(zb & 0x3FFF, 0)
+        self.assertEqual((zb + block) & 0x3FFF, 0)
+        self.assertIn("#define GRB_SAVE_WORDS ((2u * GRB_BLOCK_BYTES) / 4u)", self.section)
+        run = self.bodies["hle_run"]
+        self.assertIn("(vram | 0x40000000u) + GRB_FB_OFFSET", run)
+        self.assertIn("(vram | 0x40200000u) + GRB_ZB_OFFSET", run)
+        save = run.index("s_grb_save[i] = s_grb_vram[i];")
+        first = run.index("if (grb_draw(i)) {")
+        restore = run.index("s_grb_vram[i] = s_grb_save[i];")
+        self.assertLess(run.index('hle_step("vram-save");'), save)
+        self.assertLess(save, first)
+        self.assertLess(first, run.index('hle_step("vram-restore");'))
+        self.assertLess(run.index('hle_step("vram-restore");'), restore)
+        self.assertLess(restore, run.index('hle_record("vram-restore", mismatches == 0u ? "PASS" : "FAIL"'))
+        # Nothing else writes VRAM: the fill and the restore are the only stores through it.
+        self.assertEqual(re.findall(r"s_grb_vram\[i\] = (\w+(?:\[i\])?);", self.section),
+                         ["GRB_FILL", "s_grb_save[i]"])
+        self.assertNotIn("s_grb_zview[", self.section.replace("return s_grb_zview[k];", ""))
+
+    def _model(self, cell: tuple[str, str, int, int, int, int, int, int], linear: bool):
+        """The colour and depth blocks after the cell's list, if the GE bounds each write by the
+        stride and the scissor (linear False) or forms y * stride + x for every x the scissor
+        passes (linear True). For depth-clear-scissor, linear True means the clear ignores the
+        scissor."""
+        _name, kind, psm, fbw, zbw, sx1, y0, y1 = cell
+        fill16, fill32 = 0x5A5A, 0x5A5A5A5A
+        colour = [fill32] * (self.BLOCK // 4) if psm == 3 else [fill16] * (self.BLOCK // 2)
+        depth = [fill16] * (self.BLOCK // 2)
+        green = 0xFF00FF00 if psm == 3 else 0x07E0
+        if kind == "colour":
+            for y in range(y0, y1):
+                for x in range(0, min(512, sx1 + 1)):
+                    if linear or x < fbw:
+                        colour[y * fbw + x] = green
+        else:
+            right = 511 if kind == "zbw" or linear else sx1
+            for y in range(272):
+                for x in range(0, right + 1):
+                    if kind == "zclear" or linear or x < zbw:
+                        depth[y * zbw + x] = 0x4000
+            if kind == "zbw":
+                for y in range(y0, y1):
+                    for x in range(256, 512):
+                        colour[y * fbw + x] = green
+                        if linear or x < zbw:
+                            depth[y * zbw + x] = 0x0100
+        return colour, depth
+
+    def _summaries(self, linear: bool) -> dict[str, tuple[int, ...]]:
+        cells = self._cells()
+        out: dict[str, tuple[int, ...]] = {}
+        for index, raw, buf, suffix, row0, rows, col0, cols in self._reads():
+            cell = cells[index]
+            colour, depth = self._model(cell, linear)
+            pixels = depth if buf == "Z" else colour
+            stride = cell[4] if buf == "Z" else cell[3]
+            if buf == "Z":
+                values = (0x0100, 0x4000, 0x5A5A)
+            elif cell[2] == 3:
+                values = (0xFF00FF00, 0xFF0000FF, 0x5A5A5A5A)
+            else:
+                values = (0x07E0, 0x001F, 0x5A5A)
+            if rows == 0:
+                base, rows, cols = 0, 1, len(pixels)
+            else:
+                base = row0 * stride + col0
+                # The probe's own fit check: inside the stride and inside the block.
+                self.assertLessEqual(col0 + cols, stride, suffix)
+            self.assertLessEqual(base + (rows - 1) * stride + cols, len(pixels), suffix)
+            if raw:
+                self.assertEqual(cols, 16, suffix)
+                out[f"{cell[0]}-{suffix}"] = tuple(pixels[base + x] for x in range(16))
+                continue
+            seen = [pixels[base + y * stride + x] for y in range(rows) for x in range(cols)]
+            out[f"{cell[0]}-{suffix}"] = (len(seen), *(seen.count(v) for v in values),
+                                          sum(1 for p in seen if p not in values))
+        return out
+
+    def test_reads_match_the_registry_fit_their_blocks_and_tell_the_models_apart(self) -> None:
+        reads = self._reads()
+        self.assertIn(f"#define GRB_READ_COUNT {len(reads)}u", self.section)
+        cells = self._cells()
+        expected = [(f"{cells[index][0]}-{suffix}", 16 if raw else 8)
+                    for index, raw, _buf, suffix, *_rest in reads]
+        # The stream is the cells in order, each its -draw record then its reads, then the restore.
+        self.assertEqual([cell for cell, _reads in parse_golden.GE_RASTER_BOUNDS_READS], list(self.CELLS))
+        registry = [(f"{cell}-{read}", count) for cell, reads in parse_golden.GE_RASTER_BOUNDS_READS
+                    for read, count in reads]
+        self.assertEqual(registry, expected)
+        self.assertEqual(sorted(index for index, *_ in reads), [index for index, *_ in reads])
+        bounded, linear = self._summaries(False), self._summaries(True)
+        # (pixels, drawn, cleared, fill, other) where the two models part, as the request asks.
+        for read, if_bounded, if_linear in (
+            ("raster-500-x511-row16-x0", (12, 0, 0, 12, 0), (12, 12, 0, 0, 0)),
+            ("raster-500-x511-all", (0x11000, 8000, 0, 0x11000 - 8000, 0),
+             (0x11000, 8012, 0, 0x11000 - 8012, 0)),
+            ("raster-256-x479-row110-x0", (224, 0, 0, 224, 0), (224, 224, 0, 0, 0)),
+            ("raster-256-x479-all", (0x11000, 2560, 0, 0x11000 - 2560, 0),
+             (0x11000, 2784, 0, 0x11000 - 2784, 0)),
+            ("depth-zbw256-past-z-rows1to10", (2560, 0, 2560, 0, 0), (2560, 2560, 0, 0, 0)),
+            ("depth-zbw256-past-z-row272", (256, 0, 0, 256, 0), (256, 0, 256, 0, 0)),
+            ("depth-zbw256-past-z-all", (0x22000, 0, 69632, 0x22000 - 69632, 0),
+             (0x22000, 2560, 69888 - 2560, 0x22000 - 69888, 0)),
+            ("depth-clear-scissor-z-out", (112064, 0, 0, 112064, 0), (112064, 0, 112064, 0, 0)),
+            ("depth-clear-scissor-z-all", (0x22000, 0, 27200, 0x22000 - 27200, 0),
+             (0x22000, 0, 0x22000, 0, 0)),
+        ):
+            with self.subTest(read=read):
+                self.assertEqual(bounded[read], if_bounded)
+                self.assertEqual(linear[read], if_linear)
+        # Reads both models agree on: the controls, and raster-512-x511 (drawn to x 511 either way).
+        for read, both in (
+            ("raster-512-x511-c480", (512, 512, 0, 0, 0)),
+            ("raster-512-x511-row16", (512, 0, 0, 512, 0)),
+            ("raster-500-x511-r15-x488", (12, 12, 0, 0, 0)),
+            ("raster-500-x511-row16-x12", (488, 0, 0, 488, 0)),
+            ("raster-256-x479-rows100to109", (2560, 2560, 0, 0, 0)),
+            ("raster-256-x479-row110-x224", (32, 0, 0, 32, 0)),
+            ("raster-256-x479-row99", (256, 0, 0, 256, 0)),
+            ("raster-256-x479-row111", (256, 0, 0, 256, 0)),
+            ("depth-zbw256-past-z-row0", (256, 0, 256, 0, 0)),
+            ("depth-zbw256-past-c-sprite", (2560, 2560, 0, 0, 0)),
+            ("depth-clear-scissor-z-in", (27200, 0, 27200, 0, 0)),
+            ("depth-clear-scissor-c-all", (0x22000, 0, 0, 0x22000, 0)),
+        ):
+            with self.subTest(read=read):
+                self.assertEqual(bounded[read], both)
+                self.assertEqual(linear[read], both)
+        self.assertEqual(bounded["raster-500-x511-r16-x0"], (0x5A5A5A5A,) * 16)
+        self.assertEqual(linear["raster-500-x511-r16-x0"], (0xFF00FF00,) * 12 + (0x5A5A5A5A,) * 4)
+        self.assertEqual(linear["raster-256-x479-r110-x216"], (0xFF00FF00,) * 8 + (0x5A5A5A5A,) * 8)
+        self.assertEqual(linear["depth-zbw256-past-z-r1-x0"], (0x0100,) * 16)
+        self.assertEqual(bounded["depth-zbw256-past-z-r1-x0"], (0x4000,) * 16)
+        self.assertEqual(bounded["depth-clear-scissor-z-r0-x92"], (0x4000,) * 8 + (0x5A5A,) * 8)
+
+    def test_section_is_bounded_and_calls_only_the_ge_and_cache_imports(self) -> None:
+        # The display read is the one call beyond the GE and cache imports.
+        self._check_bounded("GRB", frozenset({"sceDisplayGetFrameBuf"}), 3)
+        read = self.bodies["grb_read"]
+        self.assertIn("if (!fits) {", read)
+        self.assertLess(read.index("if (!fits) {"), read.index("grb_pixel("))
+        self.assertIn("#include <pspdisplay.h>", self.section)
+        self.assertNotIn("#include <pspdisplay.h>", self.probe[:self.probe.index(
+            "#if PSP_ORACLE_CASE == GE_CASE_RASTER_BOUNDS\n")])
+
+    def test_display_check_and_ge_idle_come_before_any_vram_or_ge_use(self) -> None:
+        run = self.bodies["hle_run"]
+        check = run.index("sceDisplayGetFrameBuf(&top, &width, &format, PSP_DISPLAY_SETBUF_IMMEDIATE)")
+        idle = run.index("if (sceGeDrawSync(1) == PSP_GE_LIST_DONE) {")
+        record = run.index('hle_record("display-check", overlap || !ge_idle ? "SKIP" : "PASS", '
+                           "address, check, 9);")
+        skip = run.index("if (overlap || !ge_idle) {\n        grb_skip_all(address);\n"
+                         "        return 1;\n    }")
+        first_vram = min(run.index(token) for token in ("sceGeEdramGetAddr(", "s_grb_vram", "grb_draw("))
+        self.assertEqual(run.index('hle_step("display-check");'), run.index("hle_step("))
+        self.assertLess(check, idle)
+        self.assertLess(idle, record)
+        self.assertLess(record, skip)
+        self.assertLess(skip, first_vram)
+        # The span compared, as VRAM offsets with the cached/uncached and mirror bits masked off;
+        # an unreadable display counts as an overlap.
+        for fragment in (
+            "const int known = fb_rc >= 0 && top != NULL && width > 0 && width <= 4096 && format >= 0 &&",
+            "const uint32_t span = known ? (uint32_t)width * GRB_ROWS * (format == 3 ? 4u : 2u) : 0u;",
+            "const int in_vram = (address & 0x0f800000u) == 0x04000000u;",
+            "const uint32_t offset = address & 0x001fffffu;",
+            "const int overlap = !known || (in_vram && offset < GRB_FB_OFFSET + 2u * GRB_BLOCK_BYTES &&",
+            "offset + span > GRB_FB_OFFSET);",
+            "for (unsigned i = 0; !overlap && i < GRB_WAIT_POLLS; i++) {",
+            "const uint32_t check[9] = {(uint32_t)fb_rc, address, (uint32_t)width, (uint32_t)format,",
+            "offset, span, (uint32_t)overlap, (uint32_t)ge_idle, idle_polls};"):
+            self.assertIn(fragment, run)
+        # The skip path writes every later record as SKIP with its usual word count.
+        skip_from = self.bodies["grb_skip_from"]
+        skip_all = self.bodies["grb_skip_all"]
+        for fragment in ('hle_record(row, "SKIP", address, s_grb_out, 9);',
+                         'hle_record(row, "SKIP", address, s_grb_out, grb_reads[i].raw ? 16u : 8u);'):
+            self.assertIn(fragment, skip_from)
+        self.assertIn("if (c < first) {\n            continue;\n        }", skip_from)
+        self.assertIn("grb_skip_from(0u, address);", skip_all)
+        self.assertIn('hle_record("vram-restore", "SKIP", address, s_grb_out, 2);', skip_all)
+        for body in (skip_from, skip_all):
+            for banned in ("sceGe", "s_grb_vram", "s_grb_zview", "grb_draw("):
+                self.assertNotIn(banned, body)
+
+    def test_a_reset_that_leaves_the_ge_busy_skips_the_later_cells(self) -> None:
+        # After sceGeBreak(1), word 2 is the whole GE's state after the bounded idle wait; when the
+        # GE is still busy no later list is queued, every later cell is SKIP with its usual word
+        # count, and the block is still restored.
+        draw = self.bodies["grb_draw"]
+        self.assertIn("wedged = draw_state != PSP_GE_LIST_DONE;", draw)
+        self.assertIn("            draw_state = sceGeDrawSync(1);\n"
+                      "            if (draw_state == PSP_GE_LIST_DONE) {", draw)
+        self.assertTrue(draw.rstrip().endswith("return wedged;\n}"))
+        run = self.bodies["hle_run"]
+        branch = run.index("if (grb_draw(i)) {")
+        self.assertLess(branch, run.index("grb_skip_from(i + 1u, GRB_SKIP_WEDGED);"))
+        self.assertLess(run.index("grb_skip_from(i + 1u, GRB_SKIP_WEDGED);"), run.index("break;", branch))
+        self.assertLess(branch, run.index('hle_step("vram-restore");'))
+        self.assertIn("#define GRB_SKIP_WEDGED 0xffffffffu", self.section)
+
+    def test_a_skipped_run_keeps_the_stream_shape(self) -> None:
+        # Every record SKIP (the display overlapped or the GE never idled) still parses as the
+        # complete fixed-shape stream.
+        self._check_stream("SKIP")
+
+    def test_8888_colour_counts_compare_rgb_only(self) -> None:
+        # Seen on a development run of ge-depth-round (PSP-3000, XMB context, 2026-11-12 boot 195, built from 24acc82e; not a
+        # recorded result): a draw with the stencil test off
+        # leaves the 8888 alpha (stencil) byte as it was, so a drawn pixel reads 0x5a00ff00 over
+        # the fill, never 0xff00ff00. The counts compare RGB for 8888 colour, all bits otherwise.
+        self.assertIn("const uint32_t m = r->buf == GRB_BUF_C && c->psm == 3u ? 0x00ffffffu : 0xffffffffu;",
+                      self.section)
+        self.assertIn("const uint32_t q = p & m;", self.section)
+        for k in range(3):
+            self.assertIn(f"q == (v[{k}] & m)", self.section)
+        self.assertNotIn("p == v[0]", self.section)
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        self._check_stream()
+        spec, counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        self.assertEqual(spec.semantic_cases[:2], ("display-check", "raster-512-x511-draw"))
+        self.assertEqual(counts["display-check"], 9)
+        self.assertEqual(spec.semantic_cases[-1], "vram-restore")
+        self.assertEqual(len(spec.semantic_cases), 1 + len(self.CELLS) + 31 + 1)
+        self.assertEqual(counts["vram-restore"], 2)
+        self.assertEqual({counts[f"{cell}-draw"] for cell in self.CELLS}, {9})
+        self.assertIn("const uint32_t draw[9] = {", self.bodies["grb_draw"])
+        self.assertIn("c->fbw, c->zbw};", self.bodies["grb_draw"])
+
+
+class GeDepthRoundProbeTests(_GeNewCaseMixin, unittest.TestCase):
+    """CASE=ge-depth-round (188, PSP-GE-RASTER-003) in probe_ge_sample.c: #343's three depth
+    rounding cells in the ge-raster window, list and record shape, without touching the cell block
+    PSP-GE-RASTER-001's records are bound to; each cell's pass mask tells truncation from rounding.
+    Built, not run on a PSP."""
+
+    CASE = "ge-depth-round"
+    CASE_ID = 188
+    MACRO = "GE_CASE_DEPTH_ROUND"
+    TEST_ID = "PSP-GE-RASTER-003"
+    CELLS = ("zr-thru-eq", "zr-thru-gt", "zr-xf-eq")
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._load()
+
+    def test_route_registration_log_and_not_run_status(self) -> None:
+        self._check_route()
+        self.assertEqual(self.row["issues"], [343])
+
+    def test_cells_are_the_requested_ones_in_order(self) -> None:
+        table = _matched(re.search(r"gdr_cells\[GDR_CELL_COUNT\] = \{(.*?)\n\};", self.section, re.S))
+        cells = re.findall(r'\{"([\w-]+)", (\d)u, ([\d.]+)f, \{(0x[0-9a-f]+)u, (0x[0-9a-f]+)u, '
+                           r'(0x[0-9a-f]+|0)u\}\}', table.group(1))
+        self.assertEqual(tuple(cell[0] for cell in cells), self.CELLS)
+        self.assertEqual(parse_golden.GE_DEPTH_ROUND_CELLS, self.CELLS)
+        # Depth test on, then EQUAL (2) or GREATER (6); the transform cell also turns texture off.
+        self.assertEqual(cells, [
+            ("zr-thru-eq", "0", "32768.0", "0x23000001", "0xde000002", "0"),
+            ("zr-thru-gt", "0", "32768.5", "0x23000001", "0xde000006", "0"),
+            ("zr-xf-eq", "1", "0.0", "0x23000001", "0xde000002", "0x1e000000"),
+        ])
+        self.assertIn("static const float gdr_thru_frac[8] = {0.0f, 0.25f, 0.5f, 0.75f, 0.99609375f,\n"
+                      "                                        -0.25f, -0.5f, -0.75f};", self.section)
+        # A truncate-column mask is read as "truncate or reduced precision" wherever it is cited.
+        self.assertIn('A 0x1f, 0xe0 or 0xff mask reads "truncate or reduced precision"', self.probe)
+        self.assertIn('pass mask reads "truncate or reduced precision"', self.row["evidence_note"])
+        self.assertIn("first recorded use of a GE-context enqueue", self.row["risk"])
+        self.assertIn('mask reads "truncate or reduced precision"', self.doc)
+        self.assertIn("static const float gdr_xf_frac[4] = {0.0f, 0.25f, 0.5f, 0.75f};", self.section)
+
+    def test_the_ge_raster_block_is_repeated_not_changed(self) -> None:
+        block = GeRasterProbeTests._block(self.probe)
+        self.assertNotIn("zr-", block)
+        self.assertNotIn("gdr_", block)
+        raster = _c_function_bodies(_c_code(block))
+        for name in ("gr_byte", "gr_rgba", "gr_tvtx", "gr_xvtx", "gr_digest"):
+            with self.subTest(function=name):
+                ours = self.bodies[name.replace("gr_", "gdr_")]
+                self.assertEqual(re.sub(r"\bGDR_", "GR_", ours.replace("gdr_", "gr_")),
+                                 raster[name])
+
+        # The list's words up to the test draw are gr_list's for an 8888 GR_K_ZSPRITE cell over
+        # the GR_T_8888 texture: the same commands in the same order.
+        def commands(body: str, prefix: str) -> list[str]:
+            end = body.index(f"{prefix}_W(0x01, vtx + 2u * {prefix}_N * 24u);")
+            return re.findall(rf"\b{prefix}_W\(([^,]+),", body[:end])
+        theirs = [cmd for cmd in commands(raster["gr_list"], "GR")
+                  if cmd not in ("0xb0", "0xb1", "0xc5", "0xc4")]
+        self.assertEqual(commands(self.bodies["gdr_list"], "GDR"), theirs)
+        for fragment in ("GDR_W(0xd3, 0x401u);", "GDR_W(0x04, (6u << 16) | (2u * GDR_N));",
+                         "GDR_W(0x12, 0x0080019fu);", "GDR_W(0xc9, 0x103u);",
+                         "GDR_W(0x44, gdr_fbits(16384.0f) >> 8);",
+                         "GDR_W(0x47, gdr_fbits(32768.0f) >> 8);", "GDR_W(0x12, 0x0000019cu);"):
+            self.assertIn(fragment, self.bodies["gdr_list"])
+        self.assertIn("0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};", self.bodies["gdr_list"])
+        for fragment in ("#define GDR_FB_OFFSET 0x00100000u", "#define GDR_ZB_OFFSET 0x00110000u",
+                         "#define GDR_STRIDE 64u", "#define GDR_ROWS 32u", "#define GDR_WX 16u",
+                         "#define GDR_WY 8u", "#define GDR_WW 16u", "#define GDR_WH 4u"):
+            self.assertIn(fragment, self.section)
+
+    def test_pass_masks_tell_truncation_from_rounding(self) -> None:
+        import math
+        import struct
+
+        def f32(value: float) -> float:
+            return cast(float, struct.unpack("<f", struct.pack("<f", value))[0])
+
+        thru = (0.0, 0.25, 0.5, 0.75, 0.99609375, -0.25, -0.5, -0.75)
+        xf = (0.0, 0.25, 0.5, 0.75)
+        models = {
+            "truncate": math.floor,
+            "half-up": lambda z: math.floor(z + 0.5),
+            "half-even": round,
+        }
+        # Every depth the cells name is exact in float, including the transform cell's vertex z
+        # scaled back by the viewport.
+        for frac in thru:
+            self.assertEqual(f32(32768.0 + frac), 32768.0 + frac)
+        for i in range(64):
+            z = ((i >> 2) & 1) + xf[i & 3]
+            self.assertEqual(f32(32768.0 + 16384.0 * f32(z / 16384.0)), 32768.0 + z)
+
+        def mask(cell: str, model: Any) -> int:
+            bits = 0
+            for i in range(64):
+                if cell == "zr-xf-eq":
+                    stored = model(32768.0 + ((i >> 2) & 1))
+                    ok = model(32768.0 + ((i >> 2) & 1) + xf[i & 3]) == stored
+                else:
+                    stored = model(32768.0 + thru[i & 7])
+                    frag = model(32768.0 if cell == "zr-thru-eq" else 32768.5)
+                    ok = frag == stored if cell == "zr-thru-eq" else frag > stored
+                bits |= int(ok) << i
+            return bits
+
+        table = {"zr-thru-eq": (0x1F, 0x63, 0x67), "zr-thru-gt": (0xE0, 0xE3, 0x80),
+                 "zr-xf-eq": (0xFF, 0x33, 0x37)}
+        for cell, expected in table.items():
+            with self.subTest(cell=cell):
+                got = tuple(mask(cell, model) for model in models.values())
+                self.assertEqual(got, tuple(byte * 0x0101010101010101 for byte in expected))
+                self.assertEqual(len(set(got)), 3)
+                self.assertRegex(self.probe, rf" \* +{cell} +0x{expected[0]:02x} +0x{expected[1]:02x}"
+                                             rf" +0x{expected[2]:02x}\n")
+
+    def test_a_reset_that_leaves_the_ge_busy_skips_the_later_cells(self) -> None:
+        draw = self.bodies["gdr_draw"]
+        self.assertIn("wedged = draw_state != PSP_GE_LIST_DONE;", draw)
+        self.assertTrue(draw.rstrip().endswith("return wedged;\n}"))
+        run = self.bodies["hle_run"]
+        branch = run.index("if (gdr_draw(&gdr_cells[i], gdr_phys(s_gdr_tex))) {")
+        self.assertLess(branch, run.index("gdr_skip_from(i + 1u);"))
+        skip = self.bodies["gdr_skip_from"]
+        for fragment in ('hle_record(row, "SKIP", GDR_SKIP_WEDGED, zero, 9);',
+                         'hle_record(row, "SKIP", GDR_SKIP_WEDGED, zero, GDR_WW);',
+                         'hle_record(row, "SKIP", GDR_SKIP_WEDGED, zero, 4);'):
+            self.assertIn(fragment, skip)
+        self.assertNotIn("sceGe", skip)
+
+    def test_pass_and_kept_compare_rgb_only(self) -> None:
+        # Seen on a development run (PSP-3000, XMB context, 2026-11-12 boot 195, built from 24acc82e; not a recorded
+        # result): every pixel that passed showed the
+        # source RGB with the destination's alpha (stencil) byte, so a 32-bit compare gave a zero
+        # mask in all three cells.
+        self.assertIn("if (((p ^ gdr_rgba(1u, i)) & 0x00ffffffu) == 0u) {", self.section)
+        self.assertIn("} else if (((p ^ gdr_rgba(5u, i)) & 0x00ffffffu) == 0u) {", self.section)
+        self.assertNotIn("p == gdr_rgba(", self.section)
+
+    def test_section_is_bounded_and_calls_only_the_ge_and_cache_imports(self) -> None:
+        self._check_bounded("GDR", frozenset(), 2)
+        # The CPU writes only the ge-raster colour block; the depth buffer is the GE's.
+        draw = self.bodies["gdr_draw"]
+        self.assertIn("for (unsigned i = 0; i < GDR_STRIDE * GDR_ROWS; i++) {", draw)
+        self.assertNotIn("GDR_ZB_OFFSET", draw)
+        self.assertLessEqual(2 * 64 * 6 + 2 * 64 * 4, int(_matched(re.search(
+            r"#define GDR_VTX_WORDS (\d+)u", self.section)).group(1)))
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        self._check_stream()
+        spec, counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        self.assertEqual(spec.semantic_cases, tuple(
+            case for cell in self.CELLS
+            for case in (f"{cell}-draw", f"{cell}-r0", f"{cell}-r1", f"{cell}-r2", f"{cell}-r3",
+                         f"{cell}-pass")))
+        self.assertEqual({counts[f"{cell}-draw"] for cell in self.CELLS}, {9})
+        self.assertEqual({counts[f"{cell}-r3"] for cell in self.CELLS}, {16})
+        self.assertEqual({counts[f"{cell}-pass"] for cell in self.CELLS}, {4})
+        draw = self.bodies["gdr_draw"]
+        self.assertIn('hle_record(row, "PASS", y, &s_gdr_win[y * GDR_WW], GDR_WW);', draw)
+        self.assertIn('hle_record(row, "PASS", 0, pass, 4);', draw)
+        self.assertIn("pass[i / 32u] |= 1u << (i % 32u);", draw)
+
+
 class KernelSemanticsProbeTests(unittest.TestCase):
     """CASE=kernel-semantics (127, PSP-KERNEL-SEM-001) in probe_kernel_semantics.c: the v0.0.2
     kernel cells (#1287, #1390, #1383, #1380, #1382). The writer and module lifecycle are the HLE
@@ -12746,6 +13447,242 @@ class HleUtilityNoneProbeTests(unittest.TestCase):
         self.assertNotIn("InitStart(", section)
 
 
+class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
+    """CASE=hle-utility-netconf-sharing (166, PSP-HLE-UTILITY-DIALOG-002): case 161's game sharing
+    and netconf cells only, sharing first. Case 161's netconf dialog stayed RUNNING to the poll
+    cap on boot 204 and its gamedata install dialog on boot 206, each followed by a power cycle,
+    so netconf runs last, after every sharing record is written, and no gamedata, savedata or
+    message-dialog open can be built into it."""
+
+    probe: ClassVar[str]
+    makefile: ClassVar[str]
+    imports: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
+
+    def test_route_and_registry(self) -> None:
+        self.assertIn("else ifeq ($(CASE),hle-utility-netconf-sharing)\nCASE_ID = 166\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_UTILITY_NETCONF_SHARING 166\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "hle-utility-netconf-sharing"\n'
+                      '#define HLE_TEST_ID "PSP-HLE-UTILITY-DIALOG-002"\n'
+                      '#define HLE_LOG "host0:/hle_utility_netconf_sharing_log.txt"', self.probe)
+        spec, _counts = CAMPAIGN_PROBE_CASES["hle-utility-netconf-sharing"]
+        rows = tuple(row for row, _ in parse_golden.HLE_UTILITY_NETCONF_SHARING_ROWS)
+        self.assertEqual(spec.ordered_cases[:-1], rows)
+        self.assertEqual(len(rows), 14)
+        # Game sharing first; netconf, the cell that stuck on boot 204, last of all.
+        self.assertEqual(rows[0], "sharing-setup")
+        self.assertLess(rows.index("sharing-teardown"), rows.index("netconf-setup"))
+        self.assertEqual(rows[-1], "netconf-teardown")
+        self.assertEqual(rows[7:9], ("netconf-setup", "netconf-timing"))
+        self.assertFalse(any(row.startswith(("gamedata", "savedata")) for row in rows))
+        # The same cells and word counts as case 161's sharing and netconf rows.
+        self.assertEqual(dict(parse_golden.HLE_UTILITY_NETCONF_SHARING_ROWS),
+                         {row: count for row, count in parse_golden.HLE_UTILITY_DIALOGS_ROWS
+                          if row.startswith(("sharing-", "netconf-"))})
+        # The source walk yields the registry's cells in the registry's order.
+        self.assertEqual(_out_count_mismatches(self.probe, "hle-utility-netconf-sharing",
+                                               "HLE_CASE_UTILITY_NETCONF_SHARING"), [])
+
+    def test_run_is_sharing_then_netconf_and_gamedata_is_not_compiled(self) -> None:
+        run = self.probe[self.probe.index("/* Game sharing first, netconf last"):]
+        run = run[run.index("static int hle_run"):run.index("\n}\n")]
+        self.assertEqual(re.findall(r"\b(hle_ud_\w+)\(", run), ["hle_ud_sharing", "hle_ud_netconf"])
+        self.assertNotIn("gamedata", run)
+        # Every gamedata and savedata definition sits under the case-161-only guard.
+        for marker in ("static const HleUdType k_ud_gamedata = {",
+                       "static uint32_t hle_ud_gamedata_precheck(void)",
+                       "static void hle_ud_gamedata(void)",
+                       "static void hle_ud_fill_gamedata(uint8_t *block)",
+                       "int nkUtilGamedataInstallInitStart(void *param);"):
+            with self.subTest(marker=marker):
+                before = self.probe[:self.probe.index(marker)]
+                opened = before.rindex("#if ")
+                self.assertTrue(before[opened:].startswith(
+                    "#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS\n"), marker)
+                self.assertNotIn("#endif", before[opened:])
+
+    def test_import_set_has_no_gamedata_savedata_or_umd_call(self) -> None:
+        block = self.imports[self.imports.index("#if PSP_ORACLE_CASE == 166\n"):]
+        block = block[:block.index("#endif")]
+        names = re.findall(r"IMPORT_FUNC\s+\"sceUtility\", 0x[0-9A-F]{8}, (\w+)", block)
+        self.assertEqual(len(names), 11)
+        self.assertFalse([n for n in names if "Gamedata" in n or "Savedata" in n])
+        self.assertEqual([n for n in names if "MsgDialog" in n], ["nkUtilMsgDialogInitStart"])
+        gate = self.makefile[self.makefile.index(
+            "ifeq ($(CASE),hle-utility-netconf-sharing)\nLIBS"):]
+        gate = gate[:gate.index("\nendif\n")]
+        self.assertIn("--forbid-library sceUmdUser", gate)
+        self.assertNotIn("-lpspumd", gate)
+        self.assertNotIn("0x24AC31EB", gate)  # gamedata InitStart
+        self.assertNotIn("0x50C4CD57", gate)  # savedata InitStart
+
+    def _section(self) -> str:
+        return self.probe[self.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || "):
+                          self.probe.index("#endif /* HLE_CASE_UTILITY_DIALOGS */")]
+
+    def test_net_teardown_runs_on_every_path_and_records_each_return_as_in_161(self) -> None:
+        # Both cases resolve to case 161's teardown call: a stuck dialog does not skip it, so
+        # under a stuck netconf dialog the teardown runs as it did on boot 204.
+        section = self._section()
+        for macro in ("HLE_CASE_UTILITY_NETCONF_SHARING", "HLE_CASE_UTILITY_DIALOGS"):
+            code = _c_code(_select_case_blocks(section, macro))
+            for kind in ("netconf", "sharing"):
+                with self.subTest(macro=macro, kind=kind):
+                    group = code[code.index(f"static void hle_ud_{kind}(void)"):]
+                    group = group[:group.index("\n}\n")]
+                    self.assertEqual(re.findall(rf"hle_ud_{kind}_teardown\((.*)\);", group),
+                                     ["stage, reason == HLE_UD_SKIP_STUCK ? reason : 0u"])
+                    self.assertNotIn("s_ud_stuck", group)
+        # The only skip a teardown gets is its setup's own SKIP 5, made before any setup call.
+        code = _c_code(section)
+        for kind in ("netconf", "sharing"):
+            with self.subTest(kind=kind):
+                setup = code[code.index(f"static uint32_t hle_ud_{kind}_setup("):]
+                setup = setup[:setup.index("\n}\n")]
+                skip = setup[setup.index("if (s_ud_stuck) {"):setup.index("return HLE_UD_SKIP_STUCK;")]
+                self.assertNotIn("*stage", skip)
+                self.assertNotIn("sceNet", skip)
+                # Each teardown call's return is a recorded word of the teardown cell.
+                teardown = code[code.index(f"static void hle_ud_{kind}_teardown("):]
+                teardown = teardown[:teardown.index("\n}\n")]
+                self.assertEqual(re.findall(r"out\[(\d)\] = \(uint32_t\)sce\w+\(", teardown),
+                                 ["0", "1", "2", "3", "4"])
+                self.assertIn(f'hle_record("{kind}-teardown", "PASS", stage, out, '
+                              "HLE_UD_NET_WORDS);", teardown)
+        counts = dict(parse_golden.HLE_UTILITY_NETCONF_SHARING_ROWS)
+        self.assertEqual((counts["sharing-teardown"], counts["netconf-teardown"]), (5, 5))
+        # Case 166's only block of its own is its hle_run; no teardown is special-cased.
+        own = [block[:block.index("#endif")] for block in
+               section.split("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING\n")[1:]]
+        self.assertEqual([block.count("static int hle_run(void)") for block in own], [1])
+        self.assertNotIn("_teardown", "".join(own))
+        header = " ".join(section[:section.index("*/")].split())
+        for term in ("Case 166 tears each group's net setup down exactly as case 161 does, on every "
+                     "path that ran a setup, a stuck dialog's included",
+                     "netconf-teardown runs and records each call's return, as it did under the "
+                     "stuck dialog on boot 204",
+                     "The console is expected to need that power cycle either way",
+                     "teardown and cleanup still run.",
+                     "a stuck dialog's included, in case 161 and in case 166"):
+            with self.subTest(term=term):
+                self.assertIn(term, header)
+        for gone in ("skips the net teardown", "loaded module was not proven unloaded"):
+            self.assertNotIn(gone, header)
+
+    def test_records_state_the_expected_netconf_stick_and_the_power_cycle(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json").read_text(
+            encoding="utf-8"))
+        row = next(t for t in manifest["tests"] if t["id"] == "PSP-HLE-UTILITY-DIALOG-002")
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
+        self.assertEqual(row["case_ids"], ["sharing-*", "netconf-*"])
+        self.assertTrue(row["risk"].startswith("POWER RISK; case 161's netconf dialog"))
+        for field in ("risk", "evidence_note"):
+            with self.subTest(field=field):
+                self.assertIn("boot 204", row[field])
+        # Operator steps in the other owner-present rows' form: the game context, the WLAN
+        # switch, one launch per boot and a power cycle after a stuck run.
+        self.assertTrue(row["reset"].startswith("game context: standalone PSPLink entered from the "
+                                                "XMB by one owner-present soft reset"))
+        for term in ("the WLAN switch on (the probe does not read it, so the owner records its "
+                     "position;",
+                     "one hle-utility-netconf-sharing launch per boot;",
+                     "the owner power-cycles the console before any further launch",
+                     "nothing is retried on that boot"):
+            with self.subTest(term=term):
+                self.assertIn(term, row["reset"])
+        for term in ("expected to need a power cycle after this case either way",
+                     "RADIO: the game sharing dialog is expected to start the PSP's ad hoc radio",
+                     "named NKORACL", "nothing is sent to an access point or any server",
+                     "in the game context, with the WLAN switch on"):
+            with self.subTest(term=term):
+                self.assertIn(term, row["risk"])
+        # The teardown rule: it always runs and its returns are recorded cells, NOT_RUN.
+        self.assertIn("each group's net teardown still runs on every path that ran its setup, as "
+                      "in case 161, with each call's return recorded (NOT_RUN until measured)",
+                      row["invariant"])
+        self.assertNotIn("SKIP 5, so the net modules stay loaded", row["invariant"])
+        header = " ".join(self._section()[:self._section().index("*/")].split())
+        parser = (root / "tools" / "psp_oracle" / "parse_golden.py").read_text(encoding="utf-8")
+        parser = parser[parser.index("# hle-utility-netconf-sharing (166"):
+                        parser.index("# hle-io-seek (162")]
+        hardware = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        readme = (root / "fixtures" / "psp_oracle" / "README.md").read_text(encoding="utf-8")
+        texts = {"header": header, "parser": parser,
+                 "docs": next(line for line in hardware.splitlines()
+                              if line.startswith("| `hle-utility-netconf-sharing` |")),
+                 "readme": next(line for line in readme.splitlines()
+                                if line.startswith("| `hle-utility-netconf-sharing` |")),
+                 **{field: row[field] for field in ("risk", "evidence_note", "invariant", "reset")}}
+        for name, text in texts.items():
+            with self.subTest(text=name):
+                # Main records no utility dialog hang on boot 147 (that boot is a sas-mix reset).
+                self.assertNotIn("boot 147", text)
+        for name in ("header", "parser", "docs", "readme"):
+            with self.subTest(cites=name):
+                self.assertIn("boot 204", texts[name])
+        self.assertIn("one launch per boot", texts["docs"])
+        self.assertIn("Game context, WLAN switch on", texts["docs"])
+        for term in ("Operator steps:", "one launch per boot;", "the WLAN switch on",
+                     "ad hoc radio", "nothing is sent to an access point or any server",
+                     "the console is expected to need a power cycle after this case either way"):
+            with self.subTest(readme=term):
+                self.assertIn(term, texts["readme"])
+
+    def test_the_2026_11_13_run_is_a_sharing_capture_and_claims_nothing_about_netconf(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json").read_text(
+            encoding="utf-8"))
+        row = next(t for t in manifest["tests"] if t["id"] == "PSP-HLE-UTILITY-DIALOG-002")
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
+        for absent in ("measurement_note", "evidence_cases", "evidence_ref"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, row)
+        note = row["evidence_note"]
+        for term in ("2026-11-13 (UTC)", "PSP-3000", "boot 211", "game context", "e8b9b0cd5",
+                     "system software 6.61", "6.6.1", "ARK-5 with cIPL, version 5.2.0",
+                     "7a0035d9", "not acceptance-eligible", "establishes nothing about PSP behaviour",
+                     "InitStart returned 0", "INIT at vblank 0", "RUNNING at vblank 44",
+                     "600-poll cap", "vblank 111", "0x80110001", "2 ShutdownStart calls",
+                     "+0x1c", "+0x4c", "0x80110703", "all five", "netconf cells did not run",
+                     "power cycle"):
+            with self.subTest(term=term):
+                self.assertIn(term, note)
+        hardware = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        readme = (root / "fixtures" / "psp_oracle" / "README.md").read_text(encoding="utf-8")
+        docs_row = next(line for line in hardware.splitlines()
+                        if line.startswith("| `hle-utility-netconf-sharing` |"))
+        readme_row = next(line for line in readme.splitlines()
+                          if line.startswith("| `hle-utility-netconf-sharing` |"))
+        self.assertIn("| `CAPTURED` (2026-11-13 UTC, PSP-3000, boot 211, game context, "
+                      "`e8b9b0cd5`;", docs_row)
+        self.assertIn("(#psp-hle-utility-dialog-002-capture-2026-11-13)", docs_row)
+        self.assertIn("**CAPTURED** on 2026-11-13 UTC", readme_row)
+        start = hardware.index("### PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13")
+        section = " ".join(hardware[start:hardware.index("\n### ", start + 1)].split())
+        for term in ("boot 211", "`e8b9b0cd5`", "`0x80110001`", "`0x80110703`",
+                     "not acceptance-eligible", "establishes nothing about PSP behaviour",
+                     "the owner at the console", "No netconf cell ran"):
+            with self.subTest(section=term):
+                self.assertIn(term, section)
+        # Nothing is said about how netconf behaves: its cells did not run.
+        for text in (note, docs_row, readme_row, section):
+            for claim in ("netconf-timing returned", "netconf dialog went", "netconf stayed"):
+                self.assertNotIn(claim, text)
+        # The shared ShutdownStart paragraph cites this capture for the sharing dialog.
+        paragraph = " ".join(hardware[hardware.index(
+            "Every ShutdownStart these captures recorded while RUNNING"):start].split())
+        self.assertIn("game sharing while RUNNING", paragraph)
+        self.assertIn("[PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13]", paragraph)
+
+
 class HleUtilityDialogsProbeTests(unittest.TestCase):
     """CASE=hle-utility-dialogs (161, PSP-HLE-UTILITY-DIALOG-001) in probe_hle_measure.c: #1386's
     dialog status timing and wrong-state answers in game context. These pin the safety design:
@@ -12763,7 +13700,8 @@ class HleUtilityDialogsProbeTests(unittest.TestCase):
         cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
-        start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS\n\n")
+        start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || "
+                                "PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING\n\n")
         cls.section = cls.probe[start:cls.probe.index("#endif /* HLE_CASE_UTILITY_DIALOGS */")]
 
     def _body(self, signature: str) -> str:
@@ -12915,6 +13853,8 @@ class HleUtilityDialogsProbeTests(unittest.TestCase):
                 self.assertEqual(starts, sorted(starts, reverse=True))
                 self.assertEqual(stops, sorted(stops))
                 group = self._body(f"static void hle_ud_{kind}(void)")
+                # Case 161's form; case 166's own (a stuck dialog skips it) is pinned in
+                # HleUtilityNetconfSharingProbeTests.
                 self.assertIn(f"hle_ud_{kind}_teardown(stage, reason == HLE_UD_SKIP_STUCK ? "
                               "reason : 0u);", group)
 
@@ -16212,12 +17152,16 @@ class Record20261015Tests(unittest.TestCase):
             ("ge-through-z", "PSP-GE-THROUGHZ-001", "MEASURED"),
             ("vfpu-reserved-widths", "PSP-VFPU-RESERVED-001", "MEASURED"),
             ("hle-savedata-nodata", "PSP-HLE-SAVEDATA-NODATA-001", "CAPTURED"),
-            ("sas-adsr", "PSP-SAS-002", "CAPTURED"),
+            ("sas-adsr", "PSP-SAS-002", "MEASURED"),
             ("sas-mix", "PSP-SAS-003", "MEASURED"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
+            ("hle-utility-netconf-sharing", "PSP-HLE-UTILITY-DIALOG-002", "CAPTURED"),
             ("hle-io-seek-edges", "PSP-HLE-IO-SEEK-002", "MEASURED"),
+            ("ge-raster-bounds", "PSP-GE-RASTER-002", "NOT_RUN"),
+            ("ge-depth-round", "PSP-GE-RASTER-003", "NOT_RUN"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
+            ("hle-io-trunc", "PSP-HLE-IO-TRUNC-001", "MEASURED"),
         )
         docs = {row[0]: row for row in self._table_rows(self.doc) if len(row) == 4}
         readme = {row[0]: row for row in self._table_rows(self.readme) if len(row) == 3}
@@ -16240,17 +17184,41 @@ class Record20261015Tests(unittest.TestCase):
             self.assertIn(term, note)
         self.assertIn("- **PSP-3000 single-case run of `hle-io-seek-edges` (2026-11-11 UTC)**", self.doc)
 
-    def test_the_sas_adsr_capture_is_captured_with_its_blocker(self) -> None:
-        row = self.rows["PSP-SAS-002"]
-        self.assertEqual(row["hardware_evidence"], "CAPTURED")
-        self.assertNotIn("measurement_note", row)
-        note = row["evidence_note"]
-        for term in ("2026-11-10", "PSP-3000", "boot 185", "game context", "74acbe42",
-                     "identical to this tree's", "system software 6.61", "0x06060110",
-                     "ARK-5 with cIPL, version 5.1.0", "696 records", "not acceptance-eligible",
-                     "loaded module was not proven unloaded",
-                     "establishes nothing about PSP behaviour", "2026-11-05"):
+    def test_the_io_trunc_run_is_measured_in_game_context(self) -> None:
+        """#1892: the 2026-11-02 hle-io-trunc run was built from 08934592f, which is not an
+        ancestor of this tree, so the record must say its case-105 source is identical here."""
+        row = self.rows["PSP-HLE-IO-TRUNC-001"]
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertNotIn("evidence_note", row)
+        self.assertEqual(row["evidence_ref"],
+                         "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        note = row["measurement_note"]
+        for term in ("2026-11-02", "PSP-3000", "boot 107", "game context", "08934592f",
+                     "not an ancestor of this tree", "identical to this tree's",
+                     "not in public history", "528e41f21ffd9f174aa8b1e4dd098db21402f9b1188f4a57a35e76723ef735fd",
+                     "not byte-identical to the one measured",
+                     "acceptance-eligible with 0 blockers", "0x8001000d", "ABCDEFGHWX",
+                     "src/rt/hle_data.c and src/rt/hle_io.c"):
             self.assertIn(term, note)
+        self.assertIn("- **PSP-3000 single-case run of `hle-io-trunc` (2026-11-02 UTC)**", self.doc)
+
+    def test_the_sas_adsr_rerun_is_measured_and_keeps_its_capture(self) -> None:
+        row = self.rows["PSP-SAS-002"]
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertNotIn("evidence_note", row)
+        self.assertEqual(row["evidence_cases"], ["sas-adsr-*"])
+        note = row["measurement_note"]
+        for term in ("2026-11-13", "PSP-3000", "boot 208", "game context", "06a6c942c",
+                     "ARK-5 5.2.0", "7a0035d9", "0x06060110", "696 records",
+                     "acceptance-eligible with 0 blockers", "unloaded SASCORE, then AVCODEC",
+                     "boot 185, 74acbe42", "loaded module was not proven unloaded", "2026-11-05"):
+            self.assertIn(term, note)
+        self.assertIn("- **PSP-3000 single-case run of `sas-adsr` (2026-11-13 UTC)**", self.doc)
+        # Public text says the owner was at the console, never where the owner was.
+        for text in (note, self.doc):
+            self.assertNotIn("owner at home", text)
+        # The 2026-11-10 section keeps the capture and points at the rerun.
         self.assertIn("### PSP-SAS-002 capture 2026-11-10", self.doc)
         self.assertIn("(#psp-sas-002-capture-2026-11-10)", self.doc)
 
