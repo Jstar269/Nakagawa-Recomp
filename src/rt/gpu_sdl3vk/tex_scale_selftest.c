@@ -705,7 +705,11 @@ static void test_soften(void) {
                   bad[i].w, bad[i].h, bad[i].f, bad[i].e);
         }
         CHECK(nk_tex_soften_alpha_edge(NULL, SN, SN, 4, 1, out) == 0, "soften: a NULL source is not refused");
-        CHECK(nk_tex_soften_alpha_edge(big, 64, 64, 4, 4, out) == 1 && nk_tex_soften_alpha_edge(big, 1, 1, 2, 1, out) == 1,
+        /* The largest texture has buffers of its own size: 64x64 in, 256x256 out. */
+        static uint32_t max_src[64 * 64], max_out[(64 * 4) * (64 * 4)];
+        soft_disc(max_src, 64, 36, 40, 42);
+        CHECK(nk_tex_soften_alpha_edge(max_src, 64, 64, 4, 4, max_out) == 1 &&
+              nk_tex_soften_alpha_edge(big, 1, 1, 2, 1, out) == 1,
               "soften: 64x64 at factor 4 edge 4, or 1x1 at factor 2 edge 1, is refused");
     }
 
