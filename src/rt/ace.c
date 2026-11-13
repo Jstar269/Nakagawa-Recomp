@@ -654,7 +654,11 @@ void ace_set_ssaa_effective(int factor, const char *reason) {
 static size_t words_add(char *out, size_t cap, size_t used, const char *word) {
     int n = snprintf(out + used, used < cap ? cap - used : 0, "%s%s",
                      used ? " \xC2\xB7 " : "", word);
-    if (n < 0 || used + (size_t)n >= cap) return used;
+    if (n < 0 || used + (size_t)n >= cap) {
+        /* snprintf wrote the part that fit: end the text where it was, so a word drops whole. */
+        if (used < cap) out[used] = '\0';
+        return used;
+    }
     return used + (size_t)n;
 }
 

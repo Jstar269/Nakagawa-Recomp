@@ -2019,9 +2019,11 @@ static void cell_room(void) {
     CHECK(w + 8u * word_avg < ACE_WORDS_MAX,
           "the words (%zu bytes, %zu words) and eight more of %zu bytes fit ACE_WORDS_MAX %d", w + 1u, words,
           word_avg, ACE_WORDS_MAX);
-    /* One byte short: the last word drops whole, and the rest is the full words' prefix. */
+    /* One byte short: the last word drops whole, and the text (which the notice and the pause caption
+       show) is the full words' prefix up to the word before it, with no part of the dropped one. */
     const size_t short_len = ace_feature_words(fit, w);
-    CHECK(short_len > 0 && short_len < w && strncmp(fit, all, short_len) == 0 && all[short_len] == ' ',
+    CHECK(short_len > 0 && short_len < w && strlen(fit) == short_len && strncmp(fit, all, short_len) == 0 &&
+              all[short_len] == ' ',
           "words one byte short drop a whole word (%zu of %zu bytes: '%s')", short_len, w, fit);
     printf("ace-selftest: the words with every part on take %zu of %d bytes (%zu words, %zu each); %zu more fit\n",
            w + 1u, ACE_WORDS_MAX, words, word_avg, (ACE_WORDS_MAX - 1u - w) / word_avg);
