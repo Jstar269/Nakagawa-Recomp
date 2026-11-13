@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
+/* realpath() is XSI rather than base POSIX: -std=c99 on glibc declares it only with this. */
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
 /* setenv/unsetenv are POSIX: without this, -std=c99 on glibc leaves them undeclared. */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
