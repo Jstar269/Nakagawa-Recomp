@@ -8,7 +8,7 @@
 // before it exits. Every import is user-mode and comes from a per-family import
 // block (hle_*_imports.S) or the shared threadman_user_imports.S.
 //
-// Nine single-launch cases share this file: CASE=hle-vtimer-unit
+// These single-launch cases share this file: CASE=hle-vtimer-unit
 // (PSP-HLE-VTIMER-002), hle-vtimer-errors (PSP-HLE-VTIMER-003),
 // hle-kernel-pool-bounds (PSP-HLE-KERNEL-STATUS-002), hle-power-float-v0
 // (PSP-HLE-POWER-002), hle-null-out-pointers (PSP-HLE-NULL-OUT-001),
@@ -25,7 +25,7 @@
 // Cases 97-101 have recorded PSP-3000 runs from
 // 2026-10-15: the VTimer and power cases were measured; pool-bounds was captured
 // only in its earlier revision, and the revised form has not run; null-out was
-// captured incomplete. Case 104 was measured on 2026-11-02 (docs/HARDWARE_ORACLE.md).
+// captured incomplete. Cases 104 and 105 were measured on 2026-11-02 (docs/HARDWARE_ORACLE.md).
 // Their pass rule is machinery only: a record is PASS when its calls completed and were
 // recorded in order, and SKIP only when the object a cell needs (a timer, pool or
 // block UID) was not obtained. A fixed-pool delete after a refused create is PASS

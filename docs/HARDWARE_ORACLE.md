@@ -797,11 +797,12 @@ One console is one data point; see §11. Nothing here closes issue #70
   | `PSP-HLE-IO-TRUNC-001` | `trunc-open-view`, `trunc-seek-read`, `trunc-seek-write`, `trunc-close-nowrite`, `trunc-recover-after-close`, `two-fd-view`, `two-fd-writer-survives`, `two-fd-trunc-writes-last`, `remove-absent`, `hle-io-trunc-done` (boot 107) | files larger than 16 bytes, other devices than `ms0:`, `PSP_O_APPEND` with `PSP_O_TRUNC`, a truncating open beside a read-only descriptor, the XMB context | MEASURED (`hle-io-trunc`) |
 
   `hle-io-trunc` (#1892): the probe owns `ms0:/NKTRUNC.BIN` and writes the 16 bytes `ABCDEFGHIJKLMNOP` (flags
-  0x0602) before each group. What the cells establish, for this file only, with the agreement of `src/rt/hle_data.c`
-  on this tree (#1907: `PSP_O_TRUNC` cuts the host file at open, and a write through that descriptor brings the
-  old bytes below it back) read from its source:
+  0x0602) before each group. What the cells establish, for this file only, with the agreement of the runtime on
+  this tree read from its source (`src/rt/hle_data.c`, #1907: `PSP_O_TRUNC` cuts the host file at open, and a
+  write through that descriptor brings the old bytes below it back; `src/rt/hle_io.c`: each write is flushed to
+  the host file, and the remove errors):
 
-  | Cell | Measured (2026-11-02, boot 107, `08934592f`) | Runtime (`src/rt/hle_data.c`, this tree) |
+  | Cell | Measured (2026-11-02, boot 107, `08934592f`) | Runtime (`src/rt/hle_data.c` and `hle_io.c`, this tree) |
   | --- | --- | --- |
   | `trunc-open-view` | An `RDWR\|CREAT\|TRUNC` (0x0603) open returns a descriptor; while it is open `sceIoGetstat` gives size 0, lseek END 0, lseek to 0 returns 0, and a 4-byte read 0 | Agrees |
   | `trunc-seek-read` | lseek to 4 returns 4; a 4-byte read there returns 0 | Agrees |
