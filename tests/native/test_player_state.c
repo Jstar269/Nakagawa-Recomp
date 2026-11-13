@@ -8547,8 +8547,7 @@ static void assert_cull_build_matches_line(const PlayerApp *app, int index) {
     memset(&config, 0, sizeof(config));
     PlayerPlayResolved play;
     player_play_config_session(&app->settings, game->disc_id,
-                               game->enhancement_package_id[0] && !game->enhancement_hook_only,
-                               false, &config, &play);
+                               player_game_has_timing_package(game), false, &config, &play);
     bool line_cull = strstr(config.ace_spec, ";cull=on") != NULL;
     bool usable = app->title_enhancements[index].cull_available;
     if (with_hook != (line_cull && usable)) {
@@ -8901,6 +8900,30 @@ static void test_play_mode_settings(void) {
         player_app_cycle_title_play_mode(app, 2);                     /* Ace -> library */
         assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_LIBRARY);
         assert(!app->games[2].enhancement_package_id[0]);
+        /* The library's play mode reselects every title's build: with the session's 60 FPS
+           switch, a title following the library on Enhanced runs its timing package, and the
+           library turned to Authentic runs none. Failing before: the toggle kept the timing
+           build, which then launched with the line "off" and SR_EXPERIMENTAL_60HZ=1. */
+        player_app_set_experimental_60hz_session(app, true);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        assert(player_game_has_timing_package(&app->games[2]));
+        player_app_toggle_library_play_mode(app);                     /* Enhanced -> Authentic */
+        assert(app->settings.enhanced.library == PLAYER_PLAY_AUTHENTIC);
+        assert(!app->games[2].enhancement_package_id[0] &&
+               !player_game_has_timing_package(&app->games[2]));
+        player_app_toggle_library_play_mode(app);                     /* Authentic -> Enhanced */
+        assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        player_app_set_experimental_60hz_session(app, false);
+        assert(!app->games[2].enhancement_package_id[0]);
+        /* The culling package alone carries no timing package. */
+        GameRecord hook_only = app->games[2];
+        snprintf(hook_only.enhancement_package_id, sizeof(hook_only.enhancement_package_id),
+                 "fixture-cull");
+        hook_only.enhancement_hook_only = true;
+        assert(!player_game_has_timing_package(&hook_only));
+        hook_only.enhancement_hook_only = false;
+        assert(player_game_has_timing_package(&hook_only));
     }
 
     /* Per-part off switches at the library's level: a following title gets them. */

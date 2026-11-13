@@ -1721,6 +1721,10 @@ bool player_app_title_cull_on(const PlayerApp *app, int game_index);
    (PlayerTitleEnhancement.cull_problem), so the title page names it; "" when the part is off,
    the package is usable, or the title has no culling package file. */
 const char *player_app_title_cull_problem(const PlayerApp *app, int game_index);
+/* The title's selected build carries its timing package, so its launch runs with the 60 FPS
+   game logic (player_play_config_session's logic_60_package): an enhanced build that is not
+   the culling package alone (GameRecord.enhancement_hook_only). */
+bool player_game_has_timing_package(const GameRecord *game);
 
 /* ---- The play modes (#2055; src/rt/ace.h) ---- */
 

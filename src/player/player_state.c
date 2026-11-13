@@ -3026,6 +3026,10 @@ bool player_app_title_cull_on(const PlayerApp *app, int game_index) {
     return play.on && play.mode == PLAYER_PLAY_ACE && play.part[PLAYER_PART_CULL] == 1;
 }
 
+bool player_game_has_timing_package(const GameRecord *game) {
+    return game && game->enhancement_package_id[0] && !game->enhancement_hook_only;
+}
+
 const char *player_app_title_cull_problem(const PlayerApp *app, int game_index) {
     if (!player_app_title_cull_on(app, game_index)) return "";
     const PlayerTitleEnhancement *enhancement = &app->title_enhancements[game_index];
@@ -5398,8 +5402,7 @@ void player_launch_work_run(PlayerLaunchWork *work) {
     {
         PlayerPlayResolved ace;
         player_play_config_session(&work->settings, game->disc_id,
-                                   game->enhancement_package_id[0] != '\0' &&
-                                       !game->enhancement_hook_only,
+                                   player_game_has_timing_package(game),
                                    work->headless_accept_presented_frames > 0u, &session->config,
                                    &ace);
         work->play_mode = ace.on ? ace.mode : PLAYER_PLAY_AUTHENTIC;

@@ -2368,9 +2368,11 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   selects the culling build exactly when the launch line carries `cull=on`: an Ace launch with the part on,
   including a title on Enhanced that the session's `--experimental-60hz` runs as Ace. It then builds and launches
   `<timing id>+<hook id>` when the 60 FPS game logic is on, else the culling package alone, which exports
-  `SR_EXPERIMENTAL_60HZ=0`. Authentic and Enhanced never do. A title without a usable culling package keeps its
-  other build; when its culling file exists but cannot be used, the title page's play line names the reason while
-  the part is on. The row's text says the part acts only in games that have a culling build, and a run without
+  `SR_EXPERIMENTAL_60HZ=0`. Authentic and Enhanced never do. The title page offers Ace only to a title with a usable
+  timing package, so the culling package alone is the build of such a title with its 60 FPS game logic turned off.
+  A title without a usable culling package keeps its other build; when its culling file exists but cannot be used,
+  the title page's play line names the reason while the part is on. The player checks only these fields:
+  `build-package` checks the rest (section 9.9) and names any refusal in the build's own error. The row's text says the part acts only in games that have a culling build, and a run without
   one says so in the `ACE_MODE: cull unavailable (...)` line and the report. The runtime remembers at most 4096
   distinct matrices (see Limits below); the report's
   `cull_untracked` counts the matrix uses it left alone once that table was full, and cull is confirmed only

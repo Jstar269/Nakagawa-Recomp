@@ -160,9 +160,10 @@ struct PlayerUiNk {
     char settings_saves[NK_MAX_PATH];
     /* The play mode on the open title's page: what it turns on, and its last session, read
        at most every two seconds (the runtime writes the report when a game ends). */
-    /* Every part named, with the 60 FPS and smooth-motion words and a culling package's
-       problem (PlayerTitleEnhancement.cull_problem, 160): the line is never cut. */
-    char ace_line[PLAYER_PART_COUNT * 64 + 192 + 192];
+    /* Every part named, with the 60 FPS and smooth-motion words (192) and a culling
+       package's problem (PlayerTitleEnhancement.cull_problem, 160, after a 41-character
+       sentence): the line is never cut. */
+    char ace_line[PLAYER_PART_COUNT * 64 + 192 + 256];
     char enhanced_smooth_sentence[160];  /* the Smooth motion row's words under 60 FPS logic */
     char ace_last_session[200];
     char ace_last_disc[NK_MAX_DISC_ID_LEN];
