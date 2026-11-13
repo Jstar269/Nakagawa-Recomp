@@ -75,6 +75,37 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;cull=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate cull");
     }
+    /* texpack (contract 11.3.4): optional like cull, a missing key and texpack=off are both off, and
+       an Enhanced line may carry it (it is an Enhanced item, not Ace-only). */
+    {
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.texpack == 0, "a missing texpack is off");
+        snprintf(spec, sizeof(spec), "%s;texpack=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.texpack == 0, "texpack=off is off");
+        snprintf(spec, sizeof(spec), "%s;texpack=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.texpack == 1 &&
+              c.tier == ACE_TIER_ENHANCED, "texpack=on in an Enhanced line");
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 11, ";texpack=on") == 0,
+              "texpack=on formats with the key last in a line without cull (%s)", out);
+        c.texpack = 0;
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "texpack") == NULL,
+              "off writes no texpack key (%s)", out);
+        /* The project's one key order: texpack after peak, cull last, whatever order a line uses. */
+        snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;texpack=on;peak=limit", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.cull == 1 && c.texpack == 1 &&
+              ace_format(&c, out, sizeof(out)) &&
+              strcmp(out + strlen(out) - 30, ";peak=limit;texpack=on;cull=on") == 0,
+              "peak, texpack and cull format in that order, cull last (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;texpack=yes", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "bad value") == 0 && c.on == 0,
+              "texpack=yes is a bad value");
+        snprintf(spec, sizeof(spec), "%s;texpack=on;texpack=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0,
+              "a duplicate texpack");
+        snprintf(spec, sizeof(spec), "%s;texpack=C:/packs", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0, "a folder is never a texpack value");
+    }
     /* peak (contract 10.22, #2137): optional, a missing key and peak=off are both off, peak=limit is
        an Enhanced part (no tier=ace), it formats after the other optional keys and before cull, and a
        line without it formats as before. */
@@ -355,6 +386,21 @@ static void cell_parse(void) {
             CHECK(ace_parse(out, &back, why, sizeof(why)) == 1 && memcmp(&back, &c, sizeof(c)) == 0,
                   "the line with every optional key round-trips (%s)", out);
         }
+        /* The same line with texpack=on as well (contract 11.3.4): texpack goes after peak and glyphs,
+           before cull, which stays last. */
+        {
+            static const char tail_texpack[] =
+                ";twin=off;mips=on;stick=64;load=fast;depth=32;ssaa=4;peak=limit;glyphs=on;texpack=on;cull=on";
+            AceConfig back;
+            snprintf(spec, sizeof(spec), "%s;texpack=on;tier=ace;cull=on;depth=32;ssaa=4;peak=limit;glyphs=on;"
+                                         "load=fast;stick=64;mips=on", base);
+            CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.texpack == 1 && c.glyphs == 1 && c.mips == 1 &&
+                      ace_format(&c, out, sizeof(out)) && strlen(out) > sizeof(tail_texpack) &&
+                      strcmp(out + strlen(out) - (sizeof(tail_texpack) - 1u), tail_texpack) == 0,
+                  "texpack goes after peak and glyphs and before cull (%s)", out);
+            CHECK(ace_parse(out, &back, why, sizeof(why)) == 1 && memcmp(&back, &c, sizeof(c)) == 0,
+                  "the line with every optional key and texpack round-trips (%s)", out);
+        }
         snprintf(spec, sizeof(spec), "%s;mips=2", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "bad value") == 0 && c.on == 0,
               "mips=2 is a bad value");
@@ -448,7 +494,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");
@@ -501,7 +547,8 @@ static void cell_parse(void) {
         const AceConfig l = { .on = 1, .af = 16, .wide = ACE_WIDE_FILL,
                               .smooth = ACE_SMOOTH_MATCH, .tier = ACE_TIER_ENHANCED,
                               .sas = ACE_SAS_SINC, .cull = 1, .stick = ACE_STICK_COUNTS_MAX,
-                              .load = 1, .depth = 32, .ssaa = 4, .peak = 1, .glyphs = 1, .mips = 1 };
+                              .load = 1, .depth = 32, .ssaa = 4, .peak = 1, .glyphs = 1, .mips = 1,
+                              .texpack = 1 };
         char longest[512];
         const size_t longest_len = ace_longest_line(longest, sizeof(longest));
         char edge[ACE_SPEC_MAX + 1];
@@ -572,6 +619,7 @@ static void cell_parse(void) {
         ACE_WIDEST(glyphs, 0, 1);
         ACE_WIDEST(cull, 0, 1);
         ACE_WIDEST(mips, 0, 1);
+        ACE_WIDEST(texpack, 0, 1);
 #undef ACE_WIDEST
         AceConfig back;
         const int formatted = ace_format(&w, big, sizeof(big));
@@ -732,6 +780,22 @@ static void cell_switch(void) {
     CHECK(ace_effective()->cull == 0 && ace_requested()->cull == 1 &&
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": false") != NULL &&
           strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
+    /* texpack: named in the words and the report; a refused pack is unavailable, never quietly on. */
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;"
+                        "texpack=on", NULL) == 1 && ace_effective()->texpack == 1, "texpack=on turns texpack on");
+    CHECK(ace_feature_words(words, sizeof(words)) > 0 && strcmp(words, "texture pack") == 0,
+          "texpack feature words: '%s'", words);
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"texpack\": true") != NULL,
+          "the report names texpack:\n%s", json);
+    ace_feature_unavailable(ACE_FEATURE_TEXPACK, "the texture pack was refused");
+    CHECK(ace_effective()->texpack == 0 && ace_requested()->texpack == 1 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"texpack\": false") != NULL &&
+          strstr(json, "the texture pack was refused") != NULL,
+          "a refused pack is reported unavailable:\n%s", json);
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off",
+                        NULL) == 1 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "texpack") == NULL,
+          "a run without texpack does not name it:\n%s", json);
     /* The finish hook runs before the report, so a table that fills after the last present still reads
      * partial (the exit-at-VBLANK path never goes through the presenter again). "Runs first" is
      * testable because only a feature's first unavailable reason is kept: a hook run after the

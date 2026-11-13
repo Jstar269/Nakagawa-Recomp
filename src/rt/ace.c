@@ -27,14 +27,14 @@ static int value_on_off(const char *v, int *out) {
 
 /* The line's keys. Each says whether a line must carry it, so the order of the table decides
    nothing for the parser: the rows that are not required (tier, stick, load, depth, ssaa, peak,
-   glyphs, cull and mips) are the keys a line may leave out. Each also names the longest value ace_format writes
+   glyphs, cull, mips and texpack) are the keys a line may leave out. Each also names the longest value ace_format writes
    for it, so ace_longest_line builds the longest line from this table alone. */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
     ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TWIN, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_DEPTH,
     ACE_KEY_SSAA,
     ACE_KEY_CULL, ACE_KEY_PEAK, ACE_KEY_GLYPHS,
-    ACE_KEY_MIPS
+    ACE_KEY_MIPS, ACE_KEY_TEXPACK
 } AceKey;
 
 static const struct {
@@ -61,6 +61,7 @@ static const struct {
     {"glyphs", ACE_KEY_GLYPHS, 0, "on"},
     {"cull", ACE_KEY_CULL, 0, "on"},
     {"mips", ACE_KEY_MIPS, 0, "on"},
+    {"texpack", ACE_KEY_TEXPACK, 0, "on"},
 };
 
 size_t ace_longest_line(char *out, size_t cap) {
@@ -146,6 +147,12 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                 ok = value_on_off(v, &c.cull);
                 if (ok && c.cull && !ACE_HAS_CULL) {
                     why_set(why, why_cap, "cull is not part of this build"); return 0;
+                }
+                break;
+            case ACE_KEY_TEXPACK:
+                ok = value_on_off(v, &c.texpack);
+                if (ok && c.texpack && !ACE_HAS_TEXPACK) {
+                    why_set(why, why_cap, "texpack is not part of this build"); return 0;
                 }
                 break;
             case ACE_KEY_STICK:
@@ -301,6 +308,12 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
         const int m = snprintf(out + n, cap - (size_t)n, ";glyphs=on");
         n = m < 0 ? -1 : n + m;
     }
+    /* Likewise texpack, after peak and glyphs, before cull: a missing texpack is off. It is an
+       Enhanced item, so either tier may carry it. */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->texpack) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";texpack=on");
+        n = m < 0 ? -1 : n + m;
+    }
     /* The same for cull, which stays last: written only when on. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->cull) {
         const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
@@ -337,7 +350,7 @@ static double s_peak_min_gain = 1.0;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
     "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull",
-    "depth", "twin", "ssaa", "peak", "glyphs", "mips"
+    "depth", "twin", "ssaa", "peak", "glyphs", "mips", "texpack"
 };
 
 /* The run's observation state. */
@@ -451,6 +464,8 @@ int ace_init_spec(const char *spec, const char *report_path) {
         fprintf(stderr, "ACE_MODE: glyphs on (small text sprites draw from glyphs rebuilt at the render "
                         "scale; the frames the game keeps in VRAM change where they do)\n");
     if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
+    if (s_req.texpack)
+        fprintf(stderr, "ACE_MODE: texpack on (the title's texture pack replaces the textures it lists)\n");
     if (s_req.peak)
         fprintf(stderr, "ACE_MODE: peak limit (the host hears SAS mixes unsaturated, through a true-peak "
                         "limiter; the guest's SAS bytes are unchanged)\n");
@@ -502,6 +517,7 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_TESS: s_eff.tess = 0; break;
     case ACE_FEATURE_LOAD: s_eff.load = 0; break;
     case ACE_FEATURE_CULL: s_eff.cull = 0; break;
+    case ACE_FEATURE_TEXPACK: s_eff.texpack = 0; break;
     case ACE_FEATURE_DEPTH: s_eff.depth = 0; break;
     case ACE_FEATURE_TWIN: s_eff.twin = 0; break;
     case ACE_FEATURE_SSAA: s_eff.ssaa = 0; break;
@@ -678,6 +694,7 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.load) used = words_add(out, cap, used, "short loads");
     if (s_eff.mips) used = words_add(out, cap, used, "smooth far textures");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
+    if (s_eff.texpack) used = words_add(out, cap, used, "texture pack");
     if (s_eff.depth) used = words_add(out, cap, used, "32-bit depth");
     if (s_eff.ssaa) used = words_add(out, cap, used, s_eff.ssaa == 4 ? "4x supersampling" : "2x supersampling");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
@@ -1313,6 +1330,7 @@ size_t ace_report_json(char *out, size_t cap) {
     if (s_req.mips) ACE_PUT("  \"mips\": %s,\n", s_eff.mips ? "true" : "false");
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
+    if (s_req.texpack) ACE_PUT("  \"texpack\": %s,\n", s_eff.texpack ? "true" : "false");
     if (s_req.peak) ACE_PUT("  \"peak\": {\"on\": %s, \"pushes_wide\": %llu, \"frames_wide\": %llu, "
                             "\"frames_limited\": %llu, \"min_gain\": %.4f},\n",
                             s_eff.peak ? "true" : "false", (unsigned long long)s_peak_pushes,
@@ -1421,11 +1439,11 @@ void ace_finish(void) {
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
                                                 ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL,
                                                 ACE_HAS_DEPTH, 1, ACE_HAS_SSAA, ACE_HAS_PEAK, ACE_HAS_GLYPHS,
-                                                ACE_HAS_MIPS };
+                                                ACE_HAS_MIPS, ACE_HAS_TEXPACK };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
                                         s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
                                         s_eff.load, s_eff.cull, s_eff.depth, s_eff.twin, s_eff.ssaa,
-                                        s_eff.peak, s_eff.glyphs, s_eff.mips };
+                                        s_eff.peak, s_eff.glyphs, s_eff.mips, s_eff.texpack };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
@@ -1436,6 +1454,7 @@ void ace_finish(void) {
                 ? "did not run: this title's build declares no load part, or none of its waits was reached"
                 : f == ACE_FEATURE_PEAK
                 ? "did not run: this build has no SAS mixer or no host audio backend"
+                : f == ACE_FEATURE_TEXPACK ? "did not run: only the Vulkan renderer draws texture packs"
                 : "did not run: its renderer or presenter did not start");
     }
     size_t len = ace_report_json(json, sizeof(json));

@@ -153,6 +153,17 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   textures the game already shrinks itself are drawn as before. A run's log ends with a `HOST_MIPS: exit` line
   that counts the textures and the build time. The rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1016-smooth-far-textures-host-mip-chains).
+- **Texture packs (Texture pack).** A part of Enhanced and Ace, off by default and in no graphics preset. On a
+  game's Enhanced page, **Texture pack folder** picks the folder of a pack you made or downloaded for that game (a folder
+  that holds a `textures.zip` is read from that ZIP), and turns **Texture pack** on for it; the row shows the folder's name and how many textures it lists. Packs use the
+  layout PSP emulators read (a `textures.ini` and hash-named PNG files), and Nakagawa ships none. A pack whose folder,
+  ZIP or `textures.ini` cannot be read, or whose `[games]` section lists other games only, is refused with the reason,
+  before it is stored and again before each launch, where **Play without the pack** starts that run without it. An image the pack lists that is missing or does not decode is
+  skipped on its own, and that texture is drawn as the game made it.
+  The launch line carries `texpack=on` and the folder travels as `SR_TEX_REPLACE`. It changes the frames the game
+  can read back ([section 11.3.4](ENHANCEMENT_CONTRACT.md#1134-texture-replacement-texpackon)); the rules are in
+  [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1012-texture-replacement), and how to use one is in
+  [`YOUR_OWN_GAMES.md`](YOUR_OWN_GAMES.md#texture-packs).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release
