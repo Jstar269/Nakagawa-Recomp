@@ -240,7 +240,8 @@ static int SDLCALL player_ui_music_load(void *data) {
                        "the file could not be read (%s)", SDL_GetError());
     } else {
         PlayerUiVorbisResult result = player_ui_vorbis_decode(
-            (const unsigned char *)bytes, size, player_ui_music_cancelled, music,
+            (const unsigned char *)bytes, size, PLAYER_UI_MUSIC_MAX_PCM_BYTES,
+            player_ui_music_cancelled, music,
             &music->loaded, music->load_detail, sizeof(music->load_detail));
         SDL_free(bytes);
         if (result != PLAYER_UI_VORBIS_OK) {
@@ -494,11 +495,17 @@ void player_ui_music_update(PlayerUiMusic *music, const PlayerUiMusicRequest *re
         music->state = music->failure;
         return;
     }
+    gain = (float)(request->volume < 0 ? 0 : request->volume > 100 ? 100 : request->volume) /
+           100.0f;
     if (!music->have_pcm) {
         /* Nothing is read or decoded while a game runs: the track loads when the
-           launcher is back. */
+           launcher is back, and only once it would be heard. */
         if (!request->in_launcher) {
             music->state = PLAYER_UI_MUSIC_STOPPED;
+            return;
+        }
+        if (!request->focused || gain <= 0.0f) {
+            music->state = PLAYER_UI_MUSIC_PAUSED;
             return;
         }
         player_ui_music_start_load(music);
@@ -512,8 +519,6 @@ void player_ui_music_update(PlayerUiMusic *music, const PlayerUiMusicRequest *re
         }
         /* Decoded here, with no worker: the track plays from this frame on. */
     }
-    gain = (float)(request->volume < 0 ? 0 : request->volume > 100 ? 100 : request->volume) /
-           100.0f;
     /* At Music volume 0 the music holds no device, as when the window is away. */
     audible = request->in_launcher && request->focused && gain > 0.0f;
     if (audible) {

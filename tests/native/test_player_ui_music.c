@@ -65,8 +65,19 @@ static int test_track_decodes_and_loops(const char *track) {
     uint64_t decode_started;
     CHECK(bytes != NULL, "the shipped track is readable");
     decode_started = SDL_GetTicks();
-    CHECK(player_ui_vorbis_decode(bytes, size, NULL, NULL, &pcm, detail, sizeof(detail)) ==
-              PLAYER_UI_VORBIS_OK, detail);
+    {
+        /* The decoded size is bounded before anything is allocated: the track
+           (about 22 MB of samples) against a 1 MB limit. */
+        PlayerUiPcm refused;
+        CHECK(player_ui_vorbis_decode(bytes, size, 1024u * 1024u, NULL, NULL, &refused, detail,
+                                      sizeof(detail)) == PLAYER_UI_VORBIS_TOO_LARGE &&
+                  refused.samples == NULL && strstr(detail, "more than 1 MB") != NULL,
+              "a stream that decodes past the limit is refused by name");
+    }
+    CHECK(player_ui_vorbis_decode(bytes, size, PLAYER_UI_MUSIC_MAX_PCM_BYTES, NULL, NULL, &pcm,
+                                  detail, sizeof(detail)) == PLAYER_UI_VORBIS_OK, detail);
+    CHECK(pcm.frames * 2u * sizeof(int16_t) < PLAYER_UI_MUSIC_MAX_PCM_BYTES,
+          "the shipped track is inside the limit");
     /* What decoding the track again on the launcher's return costs. */
     printf("decoded the whole track in %llu ms\n",
            (unsigned long long)(SDL_GetTicks() - decode_started));
@@ -135,14 +146,17 @@ static int test_track_decodes_and_loops(const char *track) {
         unsigned char junk[4096];
         PlayerUiPcm none;
         for (size_t i = 0; i < sizeof(junk); ++i) junk[i] = (unsigned char)(i * 37u + 11u);
-        CHECK(player_ui_vorbis_decode(junk, sizeof(junk), NULL, NULL, &none, detail,
+        CHECK(player_ui_vorbis_decode(junk, sizeof(junk), PLAYER_UI_MUSIC_MAX_PCM_BYTES, NULL,
+                                      NULL, &none, detail,
                                       sizeof(detail)) == PLAYER_UI_VORBIS_NOT_VORBIS &&
                   none.samples == NULL && detail[0] != '\0',
               "bytes that are not Ogg Vorbis are refused, with a reason");
         bytes[0] = 'X';
-        CHECK(player_ui_vorbis_decode(bytes, size, NULL, NULL, &none, detail, sizeof(detail)) ==
+        CHECK(player_ui_vorbis_decode(bytes, size, PLAYER_UI_MUSIC_MAX_PCM_BYTES, NULL, NULL,
+                                      &none, detail, sizeof(detail)) ==
                   PLAYER_UI_VORBIS_NOT_VORBIS, "a broken first page is refused");
-        CHECK(player_ui_vorbis_decode(NULL, 0u, NULL, NULL, &none, detail, sizeof(detail)) ==
+        CHECK(player_ui_vorbis_decode(NULL, 0u, PLAYER_UI_MUSIC_MAX_PCM_BYTES, NULL, NULL,
+                                      &none, detail, sizeof(detail)) ==
                   PLAYER_UI_VORBIS_NOT_VORBIS, "nothing is refused");
     }
     /* A track that is all digital silence has nothing to loop. */
@@ -292,6 +306,7 @@ static int test_decode_release_and_transitions(const char *track) {
     PlayerUiMusicRequest off = {false, true, true, 80};
     PlayerUiMusicRequest game = {true, false, true, 80};
     PlayerUiMusicRequest game_away = {true, false, false, 80};
+    PlayerUiMusicRequest away = {true, true, false, 80};
     PlayerUiMusic *music;
     uint64_t t0;
     uint64_t stopped_at;
@@ -366,6 +381,15 @@ static int test_decode_release_and_transitions(const char *track) {
     CHECK(player_ui_music_test_pcm_frames(music) == 0u, "no decoded track is kept for the game");
     stopped_at = player_ui_music_test_cursor(music);
     CHECK(stopped_at > 0u, "where the loop stood is kept");
+    /* Back in the launcher but unheard (no focus, or volume 0): nothing is read. */
+    player_ui_music_update(music, &away, SDL_GetTicks());
+    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_PAUSED &&
+              !player_ui_music_decoding(music) && player_ui_music_test_pcm_frames(music) == 0u,
+          "without focus the track is not decoded again");
+    player_ui_music_update(music, &quiet, SDL_GetTicks());
+    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_PAUSED &&
+              !player_ui_music_decoding(music) && player_ui_music_test_pcm_frames(music) == 0u,
+          "at volume 0 the track is not decoded again");
     CHECK(wait_for(music, &on, PLAYER_UI_MUSIC_PLAYING), "back in the launcher it plays");
     CHECK(player_ui_music_test_pcm_frames(music) > 0u, "decoded again");
     CHECK(player_ui_music_test_cursor(music) >= stopped_at &&

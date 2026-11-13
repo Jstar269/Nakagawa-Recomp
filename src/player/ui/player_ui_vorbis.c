@@ -66,6 +66,7 @@ void player_ui_pcm_free(PlayerUiPcm *pcm) {
 }
 
 PlayerUiVorbisResult player_ui_vorbis_decode(const unsigned char *bytes, size_t size,
+                                             uint64_t max_pcm_bytes,
                                              PlayerUiVorbisCancel cancel, void *cancel_user,
                                              PlayerUiPcm *out, char *detail,
                                              size_t detail_size) {
@@ -111,7 +112,21 @@ PlayerUiVorbisResult player_ui_vorbis_decode(const unsigned char *bytes, size_t 
         stb_vorbis_close(vorbis);
         return PLAYER_UI_VORBIS_UNSUPPORTED;
     }
-    /* At most 600 s x 192 kHz x 2 channels x 2 bytes: well inside size_t. */
+    {
+        /* frames x channels x 2 bytes, checked against the limit by division,
+           so the product is never formed when it would be too large. */
+        uint64_t frame_bytes = (uint64_t)info.channels * (uint64_t)sizeof(int16_t);
+        if ((uint64_t)declared > max_pcm_bytes / frame_bytes ||
+            (uint64_t)declared * frame_bytes > (uint64_t)SIZE_MAX) {
+            char text[160];
+            (void)snprintf(text, sizeof(text), "the stream decodes to more than %llu MB "
+                           "(%u frames, %d channels)",
+                           (unsigned long long)(max_pcm_bytes >> 20), declared, info.channels);
+            player_ui_vorbis_detail(detail, detail_size, text);
+            stb_vorbis_close(vorbis);
+            return PLAYER_UI_VORBIS_TOO_LARGE;
+        }
+    }
     samples = (int16_t *)malloc((size_t)declared * (size_t)info.channels * sizeof(int16_t));
     if (samples == NULL) {
         player_ui_vorbis_detail(detail, detail_size, "out of memory for the decoded track");

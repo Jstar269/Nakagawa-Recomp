@@ -23,7 +23,8 @@ typedef enum {
     PLAYER_UI_VORBIS_UNSUPPORTED,  /* channels, rate or length outside what the launcher plays */
     PLAYER_UI_VORBIS_INCOMPLETE,   /* fewer frames decoded than the stream declares */
     PLAYER_UI_VORBIS_NO_MEMORY,
-    PLAYER_UI_VORBIS_CANCELLED
+    PLAYER_UI_VORBIS_CANCELLED,
+    PLAYER_UI_VORBIS_TOO_LARGE     /* the decoded samples would exceed the caller's limit */
 } PlayerUiVorbisResult;
 
 /* Interleaved signed 16-bit frames. */
@@ -41,10 +42,14 @@ typedef struct {
    launcher is closing). May be NULL. */
 typedef bool (*PlayerUiVorbisCancel)(void *user);
 
-/* Decodes `size` bytes. On PLAYER_UI_VORBIS_OK `out` owns its samples (free
-   them with player_ui_pcm_free); on any other result `out` is empty and
-   `detail` says what was wrong, in words. */
+/* Decodes `size` bytes. The samples buffer is at most `max_pcm_bytes`: a
+   stream whose declared frames x channels x 2 bytes is larger is refused
+   (PLAYER_UI_VORBIS_TOO_LARGE) before anything is allocated. On
+   PLAYER_UI_VORBIS_OK `out` owns its samples (free them with
+   player_ui_pcm_free); on any other result `out` is empty and `detail` says
+   what was wrong, in words. */
 PlayerUiVorbisResult player_ui_vorbis_decode(const unsigned char *bytes, size_t size,
+                                             uint64_t max_pcm_bytes,
                                              PlayerUiVorbisCancel cancel, void *cancel_user,
                                              PlayerUiPcm *out, char *detail,
                                              size_t detail_size);

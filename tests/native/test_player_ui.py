@@ -2892,7 +2892,8 @@ class NativePlayerUiTests(unittest.TestCase):
             ):
                 with self.subTest(name):
                     run = self.next_ui_run(
-                        "settings", (f"WAIT_MUSIC={state},30000", "WAIT_MS=100"),
+                        "settings", ("FOCUS_GAINED", f"WAIT_MUSIC={state},30000",
+                                     "WAIT_MS=100"),
                         settings={"launcher_music": True},
                         env_extra={**self.MUSIC_AUDIO, "NK_UI_TEST_MUSIC_FILE": str(path)},
                     )

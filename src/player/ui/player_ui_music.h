@@ -22,8 +22,9 @@ extern "C" {
    and last non-silent frames, so the loop has no gap and no click. A game that
    starts cancels and joins a decode still running, and the decoded track (about
    22 MB) is freed while a game runs: it is decoded again on its worker (about
-   half a second) when the launcher is back. While the setting is off, or the Music
-   volume is 0, no audio device is opened; while it is off nothing is read. A
+   half a second) when the launcher is back. The track is read and decoded only
+   when it would be heard: the setting on, the launcher showing with focus, and a
+   Music volume above 0. Otherwise no audio device is opened either. A
    missing or damaged file, or no audio device, is a named state, never a
    pretend play. */
 
@@ -61,6 +62,10 @@ typedef struct {
 #define PLAYER_UI_MUSIC_RELEASE_GRACE_MS 250u
 /* A track file larger than this is refused as damaged before it is read. */
 #define PLAYER_UI_MUSIC_MAX_FILE_BYTES (64u * 1024u * 1024u)
+/* The decoded track (16-bit samples) is at most this large: a stream that
+   would decode to more is refused as damaged before its buffer is allocated.
+   The shipped track decodes to about 22 MB. */
+#define PLAYER_UI_MUSIC_MAX_PCM_BYTES (64u * 1024u * 1024u)
 
 /* The track, relative to the player's folder (staged by
    tools/stage_runtime_dlls.py with the launcher's fonts). A development run from
