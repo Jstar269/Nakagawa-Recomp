@@ -108,10 +108,12 @@ Roadmap items decided with the table:
 * **Python on Linux:** the builder and `pyproject.toml` accept CPython 3.14 and 3.15
   (`src/player/package_builder.c`, `requires-python`). 3.15 stays the default. Widen further only to
   what the tool suite actually passes on, and only after the full suite runs green on that version.
-* **One app ID on every host:** `nakagawa-recomp`, with the OS's own casing only where the OS
-  expects it. Today the data folders are `Nakagawa` (Windows), `nakagawa-recomp` (Linux) and
-  `NakagawaRecomp` (macOS); unify them before a release ships on a second host, with a migration from
-  the old Windows folder.
+* **One app ID on every host:** `nakagawa-recomp` names the repository and the release files. A
+  fresh install's per-user data folder is `Nakagawa` on Windows, Linux and macOS, with `config`,
+  `data` and `saves` inside it (section 8); Linux keeps its cache and logs in the XDG cache and
+  state homes. A Linux or macOS install from before
+  [#324](https://github.com/Jstar269/nakagawa-recomp/issues/324) keeps its `nakagawa-recomp` or
+  `NakagawaRecomp` folders while they exist; no move is offered.
 * **Code signing:** v0.0.1 and v0.0.2 ship unsigned. Until a build is signed, each
   release publishes the ZIP's SHA-256 and GitHub build attestations for every binary, and the release notes
   explain the SmartScreen prompt. The signing procedure is prepared
@@ -679,8 +681,23 @@ moves all of it into one folder (`nk_platform_set_app_data_dir_override`).
 | `Nakagawa\cache\` | the platform cache folder (`NK_PATH_CACHE`) | player |
 | `Nakagawa\fonts\` | optional UI font overrides | user |
 
-Linux uses `$XDG_DATA_HOME/nakagawa-recomp` (else `~/.local/share/nakagawa-recomp`) and the XDG
-config and cache homes; macOS uses `~/Library/Application Support/NakagawaRecomp`. Each launch
+A fresh Linux or macOS install uses the same `Nakagawa` folder. Linux puts it in `$XDG_DATA_HOME`
+(else `~/.local/share`) with `config`, `data` and `saves` inside it, and keeps the cache in
+`$XDG_CACHE_HOME/nakagawa-recomp` (else `~/.cache/nakagawa-recomp`) and the logs in
+`$XDG_STATE_HOME/nakagawa-recomp/logs` (else `~/.local/state/nakagawa-recomp/logs`); an XDG variable
+that is not an absolute path is ignored, as the XDG specification says. macOS puts it in
+`~/Library/Application Support`, with all five folders inside it. An install from before
+[#324](https://github.com/Jstar269/nakagawa-recomp/issues/324) keeps its folders where they are:
+Linux's `$XDG_DATA_HOME/nakagawa-recomp` with its settings in `$XDG_CONFIG_HOME/nakagawa-recomp`,
+macOS's `~/Library/Application Support/NakagawaRecomp`. Each process chooses once, by one rule that
+the player (`src/core/nk_platform_posix.c`) and the Python tools (`tools/nk_core/prereq_fetcher.py`)
+share: the earlier folders when any of their settings, data or saves folders is present (by `lstat`,
+so an empty folder or a dangling link counts; nothing inside is read), else the new folder. Nothing
+is recorded, so the next start that sees an earlier folder uses it again. The rule and its cases are
+in `src/core/nk_data_migrate.h`, and both test suites read the cases from there. When the earlier
+folders are in use and the new one exists too, the library screen names both. Nothing is ever
+moved, copied, merged or deleted between them, and moving an existing install is not offered; a user
+who wants the new folder moves the earlier ones away. Each launch
 still starts one child process per title (Section 2, Option C), with the #297 run-package and
 save-root semantics unchanged.
 

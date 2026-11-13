@@ -42,7 +42,8 @@ for example ``python tools/stage_install.py --dest <folder> --start-menu-shortcu
 #324): ``bin/``, ``source/``, the icon, the marker, any half-finished ``.old`` or
 ``.staging-*`` copy, and the shortcuts and desktop entries the marker records. It never
 reads or deletes the per-user folders: the library, saves, settings, logs, fonts and
-cache live under ``%LOCALAPPDATA%\\Nakagawa`` (or ``~/.local/share/nakagawa-recomp``),
+cache live under ``%LOCALAPPDATA%\\Nakagawa`` (on Linux ``~/.local/share/Nakagawa``, or
+``~/.local/share/nakagawa-recomp`` for an earlier install),
 not in the install. In portable mode (a ``bin/portable.txt``) the data folder
 ``bin/data``, the portable marker and the install marker stay where they are, so the
 user's data is never removed with the program. A recorded path whose name this tool would

@@ -1056,7 +1056,7 @@ class NativePlayerUiTests(unittest.TestCase):
             # The player's data folder (LOCALAPPDATA on Windows, XDG_DATA_HOME elsewhere), with
             # a disc list the user imported (nk_disc_verify.h).
             data_folder = (localappdata / "Nakagawa" / "data" if os.name == "nt"
-                           else userprofile / "data" / "nakagawa-recomp")
+                           else userprofile / "data" / "Nakagawa" / "data")
             if disc_list is not None:
                 (data_folder / "verification").mkdir(parents=True)
                 (data_folder / "verification" / "redump.dat").write_text(disc_list,
@@ -1234,13 +1234,13 @@ class NativePlayerUiTests(unittest.TestCase):
                 write_large_library(
                     scratch,
                     localappdata / "Nakagawa" / "data" if os.name == "nt"
-                    else userprofile / "data" / "nakagawa-recomp",
+                    else userprofile / "data" / "Nakagawa" / "data",
                     library_titles,
                 )
             if settings is not None:
                 # A settings.json saved before this run, where the player reads it.
                 config = (localappdata / "Nakagawa" / "config" if os.name == "nt"
-                          else userprofile / "config" / "nakagawa-recomp")
+                          else userprofile / "data" / "Nakagawa" / "config")
                 config.mkdir(parents=True, exist_ok=True)
                 (config / "settings.json").write_text(
                     json.dumps({"schema_version": 2, **settings}), encoding="utf-8")
@@ -2455,7 +2455,7 @@ class NativePlayerUiTests(unittest.TestCase):
             localappdata.mkdir()
             runtime_root.mkdir()
             config = (localappdata / "Nakagawa" / "config" if os.name == "nt"
-                      else scratch / "config" / "nakagawa-recomp")
+                      else scratch / "data" / "Nakagawa" / "config")
             if settings is not None:
                 config.mkdir(parents=True)
                 (config / "settings.json").write_text(

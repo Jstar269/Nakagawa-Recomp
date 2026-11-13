@@ -32,6 +32,8 @@ from nk_core.prereq_fetcher import (
     download_verified_item,
     install_items,
     _pinned_sources,
+    _data_root_before_324,
+    _layout_folders,
     main as fetcher_main,
     stage_bundle,
     stage_sources,
@@ -158,7 +160,7 @@ class TestPrerequisiteFetcher(unittest.TestCase):
             "HOME": str(home),
             "USERPROFILE": str(home),
         }
-        expected = _MockPosixPath(str(home)) / "Library" / "Application Support" / "NakagawaRecomp" / "data"
+        expected = _MockPosixPath(str(home)) / "Library" / "Application Support" / "Nakagawa" / "data"
         with patch.dict(os.environ, environment, clear=True), \
              patch.object(os, "name", "posix"), \
              patch.object(sys, "platform", "darwin"), \
@@ -182,6 +184,168 @@ class TestPrerequisiteFetcher(unittest.TestCase):
             )
 
         self.assertEqual(roots, {name: expected for name in roots})
+
+    @staticmethod
+    def _rule_cases() -> list[dict[str, str]]:
+        """The rule's cases, from the table the player's test reads too (src/core/nk_data_migrate.h)."""
+        header = (REPOSITORY_ROOT_FOR_TESTS / "src" / "core" / "nk_data_migrate.h").read_text(encoding="utf-8")
+        table = header.split("BEGIN DATA FOLDER RULE CASES", 1)[1].split("END DATA FOLDER RULE CASES", 1)[0]
+        rows = [line.strip().lstrip("*").split() for line in table.splitlines()]
+        rows = [row for row in rows if len(row) == 5]
+        columns = rows[0]
+        return [dict(zip(columns, row, strict=True)) for row in rows[1:]]
+
+    @staticmethod
+    def _environment(root: Path) -> dict[str, str]:
+        return {
+            "HOME": str(root / "home"),
+            "XDG_DATA_HOME": str(root / "share"),
+            "XDG_CONFIG_HOME": str(root / "config"),
+            "XDG_CACHE_HOME": str(root / "cache"),
+            "XDG_STATE_HOME": str(root / "state"),
+        }
+
+    @staticmethod
+    def _make_state(folders: tuple[str, str, str], cache: tuple[Path, Path], state: str) -> None:
+        """One layout's state, as the table's header in nk_data_migrate.h describes it."""
+        config, data, saves = (Path(folder) for folder in folders)
+
+        def put(folder: Path, name: str) -> None:
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_text("{}", encoding="utf-8")
+
+        if state == "empty":
+            for folder in (config, data, saves):
+                folder.mkdir(parents=True, exist_ok=True)
+        elif state == "emptydata":
+            data.mkdir(parents=True)
+        elif state == "emptyconfig":
+            config.mkdir(parents=True)
+        elif state == "dangling":
+            data.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(data.parent / "unmounted-drive" / "nakagawa-recomp", data)
+        elif state == "fonts":
+            put(data / "fonts" / "v2", "jpn0.pgf")
+        elif state == "cache":
+            put(cache[0], "shader.bin")
+            put(cache[1], "player.log")
+        elif state == "settings":
+            put(config, "settings.json")
+        elif state == "library":
+            put(data, "library.json")
+        elif state == "saves":
+            put(saves / "ULUS10000", "DATA.BIN")
+        else:
+            assert state == "none", state
+
+    @staticmethod
+    def _cache_folders(root: Path, platform: str, old: bool) -> tuple[Path, Path]:
+        """The cache and logs folders the player uses (nk_platform_posix.c)."""
+        if platform != "darwin":
+            return root / "cache" / "nakagawa-recomp", root / "state" / "nakagawa-recomp" / "logs"
+        library = root / "home" / "Library"
+        if old:
+            return library / "Caches" / "NakagawaRecomp", library / "Logs" / "NakagawaRecomp"
+        return (library / "Application Support" / "Nakagawa" / "cache",
+                library / "Application Support" / "Nakagawa" / "logs")
+
+    @unittest.skipUnless(os.name == "posix", "the rule is for Linux and macOS paths")
+    def test_tools_follow_the_shared_rule_table(self) -> None:
+        """#324: every case of the player's rule, from the one table both suites read."""
+        cases = self._rule_cases()
+        self.assertGreaterEqual(len(cases), 14)
+        for platform in ("linux", "darwin"):
+            for number, case in enumerate(cases):
+                with self.subTest(platform=platform, case=case["case"]):
+                    root = self.root / f"{platform}-{number}"
+                    (root / "home").mkdir(parents=True)
+                    with patch.dict(os.environ, self._environment(root), clear=True), \
+                         patch.object(sys, "platform", platform):
+                        new = _layout_folders(False, platform)
+                        old = _layout_folders(True, platform)
+                        self._make_state(new, self._cache_folders(root, platform, False), case["new"])
+                        self._make_state(old, self._cache_folders(root, platform, True), case["old"])
+                        got = default_data_root()
+                        before_324 = _data_root_before_324()
+                    # The old layout is the one the tools resolved before #324, and the folder the
+                    # player's rule reads for it.
+                    self.assertEqual(Path(old[1]), before_324)
+                    self.assertEqual(got, before_324 if case["layout"] == "old" else Path(new[1]))
+                    if platform == "linux":
+                        self.assertEqual(Path(new[1]), root / "share" / "Nakagawa" / "data")
+
+    @unittest.skipUnless(os.name == "posix", "the rule is for Linux and macOS paths")
+    def test_the_decision_is_kept_for_the_process(self) -> None:
+        """#324: an old folder that appears later does not switch a running tool."""
+        with patch.dict(os.environ, self._environment(self.root), clear=True), \
+             patch.object(sys, "platform", "linux"):
+            new = self.root / "share" / "Nakagawa" / "data"
+            self.assertEqual(default_data_root(), new)
+            (self.root / "share" / "nakagawa-recomp").mkdir(parents=True)
+            self.assertEqual(default_data_root(), new)
+
+    @unittest.skipUnless(os.name == "posix", "the rule is for Linux and macOS paths")
+    def test_old_folders_moved_away_between_two_starts(self) -> None:
+        """#324: nothing is recorded; once the old folders are moved away the new one is used."""
+        environment = self._environment(self.root)
+        old = self.root / "share" / "nakagawa-recomp"
+        new = self.root / "share" / "Nakagawa" / "data"
+        old.mkdir(parents=True)
+        (old / "library.json").write_text("{}", encoding="utf-8")
+        new.mkdir(parents=True)
+        (new / "library.json").write_text("{}", encoding="utf-8")
+        with patch.dict(os.environ, environment, clear=True), patch.object(sys, "platform", "linux"):
+            self.assertEqual(default_data_root(), old, "both exist: the old layout is used")
+        old.rename(self.root / "moved-away")
+        # HOME spelled with a trailing "/" names the same folders and decides afresh, as a new start.
+        environment["HOME"] += "/"
+        with patch.dict(os.environ, environment, clear=True), patch.object(sys, "platform", "linux"):
+            self.assertEqual(default_data_root(), new, "the old folders are gone: the new one is used")
+
+    @unittest.skipUnless(os.name == "posix", "the rule is for Linux and macOS paths")
+    def test_xdg_variables_and_home(self) -> None:
+        """#324: a relative XDG value is ignored (XDG spec); HOME is the fallback, as in the player."""
+        home = self.root / "home"
+        home.mkdir()
+        with patch.object(sys, "platform", "linux"):
+            with patch.dict(os.environ, {"HOME": str(home), "XDG_DATA_HOME": "relative/share"},
+                            clear=True):
+                self.assertEqual(default_data_root(), home / ".local" / "share" / "Nakagawa" / "data")
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                self.assertEqual(default_data_root(), home / ".local" / "share" / "Nakagawa" / "data")
+                settings = home / ".config" / "nakagawa-recomp"
+                settings.mkdir(parents=True)
+                (settings / "settings.json").write_text("{}", encoding="utf-8")
+            with patch.dict(os.environ, {"HOME": str(home), "XDG_CONFIG_HOME": ""}, clear=True):
+                self.assertEqual(default_data_root(), home / ".local" / "share" / "nakagawa-recomp",
+                                 "old settings found through HOME choose the old layout")
+            # Without HOME or an absolute XDG_DATA_HOME there is no folder, as in the player (which
+            # never read the password database); origin/main's tools fell back to it.
+            for environment in ({"XDG_DATA_HOME": "relative"}, {}):
+                with patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_DIR_UNAVAILABLE"):
+                        default_data_root()
+            # A path too long for the player to name (NK_MAX_PATH) is no folder either.
+            overlong = str(self.root / ("0" * 200) / ("0" * 200) / ("0" * 200))
+            fresh_home = str(self.root / "fresh-home")
+            with patch.dict(os.environ, {"HOME": fresh_home, "XDG_DATA_HOME": overlong}, clear=True):
+                with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_DIR_UNAVAILABLE"):
+                    default_data_root()
+        with patch.object(sys, "platform", "darwin"), patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_DIR_UNAVAILABLE"):
+                default_data_root()
+
+    @unittest.skipUnless(os.name == "posix", "the rule is for Linux and macOS paths")
+    def test_old_settings_without_home_name_no_data_folder(self) -> None:
+        """#324: the old layout found through XDG_CONFIG_HOME alone, with HOME and XDG_DATA_HOME
+        unset: the player names no data folder (nk_platform_posix.c), so the tools stop with
+        DATA_DIR_UNAVAILABLE too instead of finding a home folder in the password database."""
+        config = self.root / "config"
+        (config / "nakagawa-recomp").mkdir(parents=True)
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(config)}, clear=True), \
+             patch.object(sys, "platform", "linux"):
+            with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_DIR_UNAVAILABLE"):
+                default_data_root()
 
     def test_happy_path_extracts_only_verified_payload_and_records_license(self) -> None:
         item = self.item()
