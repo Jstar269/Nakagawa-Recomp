@@ -637,6 +637,22 @@ static void test_pad_lost(void) {
     nk_ui_destroy(ui);
 }
 
+/* The bounds of the first command of `kind` that `id` drew this frame; false when none did. */
+static bool frame_bounds(NkUi *ui, NkOverlayState *state, const NkOverlayModel *model, NkUiId id,
+                         int kind, int out[4]) {
+    const NkUiDrawList *list;
+    nk_ui_begin(ui, 0.0);
+    (void)nk_overlay_frame(ui, state, model);
+    list = nk_ui_end(ui);
+    for (uint32_t i = 0u; list != NULL && i < list->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &list->cmd[i];
+        if (cmd->element_id != id || (int)cmd->kind != kind) continue;
+        for (int k = 0; k < 4; ++k) out[k] = (int)cmd->bounds[k];
+        return true;
+    }
+    return false;
+}
+
 /* Element `id`'s fill and text in `list`, drawn whole: each clip is its bounds
    (no scroll container or window edge cuts it), between top and bottom. Its
    borders are not counted: a focused control's ring is drawn outside it. */
@@ -904,6 +920,21 @@ static NkOverlayVram synthetic_vram(void) {
     return vram;
 }
 
+/* Two SR_VRAMDUMP captures as the host records them: at VBLANK 120 the display scans out
+   0x04000000 and a linear 5650 texture is bound in VRAM; at VBLANK 240 the buffers have
+   flipped and no depth buffer or texture is named. */
+static const NkOverlayVramCapture g_captures[2] = {
+    {120u,
+     {{0x04000000u, 512u, 480u, 272u, 3u}, {0x04088000u, 512u, 480u, 272u, 3u},
+      {0x04110000u, 512u, 480u, 272u, NK_OVERLAY_VRAM_DEPTH16},
+      {0x04150000u, 64u, 64u, 32u, 0u}},
+     {true, true, true, true}, false},
+    {240u,
+     {{0x04088000u, 512u, 480u, 272u, 3u}, {0x04000000u, 512u, 480u, 272u, 3u},
+      {0u, 0u, 0u, 0u, 0u}, {0u, 0u, 0u, 0u, 0u}},
+     {true, true, false, false}, false}
+};
+
 static NkOverlayProfile synthetic_profile(void) {
     NkOverlayProfile profile;
     static const NkOverlayProfileRow rows[] = {
@@ -1056,12 +1087,120 @@ static void test_vram_page(void) {
     model.vram = NULL;
     CHECK(frame_has_text(ui, &state, &model, "Nothing to show"),
           "vram: no host data shows an empty picture, not a stale one");
+    {
+        /* Design pass (#314): the empty picture's words sit in the middle of the box, and the
+           window's size lines up with the rows' labels. */
+        int box[4], words[4], label[4], size[4];
+        CHECK(frame_bounds(ui, &state, &model, NK_OVERLAY_ID(0x006004u), NK_UI_DRAW_RECTANGLE,
+                           box) &&
+                  frame_bounds(ui, &state, &model, NK_OVERLAY_ID(0x006006u), NK_UI_DRAW_TEXT,
+                               words) &&
+                  abs((words[0] + words[2]) - (box[0] + box[2])) <= 2 &&
+                  abs((words[1] + words[3]) - (box[1] + box[3])) <= 2,
+              "vram: an empty picture centres its words in the box");
+        model.vram = &vram;
+        CHECK(frame_bounds(ui, &state, &model, NK_OVERLAY_ID(0x006101u), NK_UI_DRAW_TEXT, label) &&
+                  frame_bounds(ui, &state, &model, NK_OVERLAY_ID(0x006008u), NK_UI_DRAW_TEXT,
+                               size) &&
+                  size[0] == label[0],
+              "vram: the window's size starts where the rows' labels start");
+    }
     model.vram = &vram;
     action = frame_with(ui, &state, &model, NK_UI_EV_BACK, NK_UI_DIR_NONE);
     CHECK(action.kind == NK_OVERLAY_ACT_NONE && state.screen == NK_OVERLAY_SCREEN_MENU,
           "vram: Back returns to the menu");
     nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
     CHECK(!state.vram.chosen, "vram: a new pause starts the viewer afresh");
+    nk_ui_destroy(ui);
+}
+
+/* With SR_VRAMDUMP captures the page gains a Capture row, first: each step moves to the next
+   capture (or back to VRAM now) and asks for a decode, the sources become that capture's,
+   and a moved window stays where it is. Without captures there is no such row. */
+static void test_vram_captures(void) {
+    NkUi *ui = overlay_ui(1280, 800, 1.0f);
+    NkOverlayModel model = base_model(1280.0f, 800.0f);
+    NkOverlayVram vram = synthetic_vram();
+    NkOverlayState state;
+    NkOverlayAction action;
+    if (ui == NULL) return;
+    model.developer = true;
+    model.vram = &vram;
+    vram.captures = g_captures;
+    vram.capture_count = 2u;
+    nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
+    nk_overlay_go(&state, NK_OVERLAY_SCREEN_VRAM, 0u);
+    action = frame_with(ui, &state, &model, -1, NK_UI_DIR_NONE);
+    CHECK(action.kind == NK_OVERLAY_ACT_VRAM_VIEW && state.vram.capture == 0 &&
+          state.vram.source == NK_OVERLAY_VRAM_DISPLAY && state.vram.view.addr == 0x04000000u,
+          "capture: the viewer starts on VRAM now");
+    (void)settle(ui, &state, &model);
+    CHECK(nk_ui_focused(ui) == NK_OVERLAY_ID_VRAM_CAPTURE,
+          "capture: the Capture row comes first when captures exist");
+    CHECK(frame_has_text(ui, &state, &model, "Live") &&
+              frame_has_text(ui, &state, &model, "as the guest would read it"),
+          "capture: VRAM now reads Live, with the live footnote");
+    action = frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+    CHECK(action.kind == NK_OVERLAY_ACT_VRAM_VIEW && state.vram.capture == 1 &&
+              state.vram.source == NK_OVERLAY_VRAM_DISPLAY &&
+              state.vram.view.addr == 0x04000000u,
+          "capture: right on CAPTURE moves to the first capture, on the same source");
+    CHECK(frame_has_text(ui, &state, &model, "VBLANK 120") &&
+              frame_has_text(ui, &state, &model, "captured at that VBLANK"),
+          "capture: the row names the capture's VBLANK, and the footnote says it is captured");
+    action = frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+    CHECK(action.kind == NK_OVERLAY_ACT_VRAM_VIEW && state.vram.capture == 2 &&
+              state.vram.view.addr == 0x04088000u,
+          "capture: the next capture's display framebuffer is its own");
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_DOWN);
+    CHECK(nk_ui_focused(ui) == NK_OVERLAY_ID_VRAM_SOURCE, "capture: down reaches SOURCE");
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+    CHECK(state.vram.source == NK_OVERLAY_VRAM_DRAW && state.vram.view.addr == 0x04000000u,
+          "capture: SOURCE lists the capture's draw framebuffer");
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+    CHECK(state.vram.source == NK_OVERLAY_VRAM_DISPLAY,
+          "capture: sources the capture does not name are skipped, though named now");
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_UP);
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_LEFT);
+    CHECK(state.vram.capture == 1, "capture: left steps back a capture");
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_DOWN);
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_LEFT);
+    CHECK(state.vram.source == NK_OVERLAY_VRAM_TEXTURE && state.vram.view.addr == 0x04150000u &&
+              state.vram.view.format == 0u && state.vram.view.width == 64u,
+          "capture: the capture's texture is the one bound at its present");
+    CHECK(frame_has_text(ui, &state, &model, "64 \xC3\x97 32 px") &&
+              !frame_has_text(ui, &state, &model, "swizzled"),
+          "capture: the texture's swizzle is the capture's, not the live one");
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_UP);
+    action = frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+    CHECK(action.kind == NK_OVERLAY_ACT_VRAM_VIEW && state.vram.capture == 2 &&
+              state.vram.source == NK_OVERLAY_VRAM_DISPLAY &&
+              state.vram.view.addr == 0x04088000u,
+          "capture: a capture without the texture falls back to its first source");
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+    CHECK(state.vram.capture == 0 && state.vram.view.addr == 0x04000000u &&
+              frame_has_text(ui, &state, &model, "Live"),
+          "capture: past the last capture comes VRAM now again");
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_DOWN);
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_DOWN);
+    CHECK(nk_ui_focused(ui) == NK_OVERLAY_ID_VRAM_ADDRESS, "capture: down twice reaches ADDRESS");
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+    CHECK(state.vram.source == NK_OVERLAY_VRAM_CUSTOM &&
+              state.vram.view.addr == 0x04000000u + 512u * 272u * 4u,
+          "capture: ADDRESS moves the window");
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_UP);
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_UP);
+    action = frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+    CHECK(action.kind == NK_OVERLAY_ACT_VRAM_VIEW && state.vram.capture == 1 &&
+              state.vram.source == NK_OVERLAY_VRAM_CUSTOM &&
+              state.vram.view.addr == 0x04000000u + 512u * 272u * 4u,
+          "capture: a moved window stays where it is in the capture");
+    vram.capture_count = 0u;
+    action = frame_with(ui, &state, &model, -1, NK_UI_DIR_NONE);
+    CHECK(action.kind == NK_OVERLAY_ACT_VRAM_VIEW && state.vram.capture == 0 &&
+              state.vram.source == NK_OVERLAY_VRAM_DISPLAY &&
+              !frame_has(ui, &state, &model, NK_OVERLAY_ID_VRAM_CAPTURE),
+          "capture: a capture the host no longer offers starts the viewer again on VRAM now");
     nk_ui_destroy(ui);
 }
 
@@ -1294,6 +1433,14 @@ static void test_describe_controls(void) {
     CHECK(row_is(&controls, "Cross", "X", ""),
           "describe: no profile is the window's default keyboard and no pad binding");
     CHECK(row_is(&controls, "Select", "Shift", ""), "describe: both shift keys read Shift");
+
+    /* A mouse button (#1791) is named like a key, in its slot's order. */
+    key(&profile, NK_PSP_BTN_CROSS, "mouse:left", "x");
+    key(&profile, NK_PSP_BTN_RTRIGGER, NULL, "mouse:x1");
+    nk_overlay_describe_controls(&controls, &profile, NK_UI_PAD_LETTERS_A_SOUTH);
+    CHECK(row_is(&controls, "Cross", "Left Click / X", "B"),
+          "describe: a click is named in words beside the key");
+    CHECK(row_is(&controls, "R", "Mouse 4", ""), "describe: a side button alone is named");
 }
 
 static bool append_text(char *out, size_t cap, size_t *used, const char *text, size_t length) {
@@ -1387,6 +1534,40 @@ static bool build_golden(char *out, size_t cap, size_t *used) {
     narrow.ace_readout = 2;
     nk_overlay_go(&state, NK_OVERLAY_SCREEN_SETTINGS, NK_OVERLAY_ID_FULLSCREEN);
     ok = ok && append_case(out, cap, used, "settings-display-rows-960x600", small, &state, &narrow);
+    {
+        /* A keyboard-and-mouse mapping (#1791), described from the profile the window maps
+           through, appended so the cases above keep their bytes: the clicks are named the
+           way the keyboard column names keys. */
+        static NkOverlayControls mouse_controls;
+        NkInputProfile mouse_profile;
+        nk_input_profile_init_default(&mouse_profile);
+        mouse_profile.psp_keys[NK_PSP_BTN_CROSS].primary = NK_HOST_KEY_MOUSE_LEFT;
+        mouse_profile.psp_keys[NK_PSP_BTN_CROSS].secondary = nk_host_key_from_name("x");
+        mouse_profile.psp_keys[NK_PSP_BTN_RTRIGGER].primary = NK_HOST_KEY_MOUSE_RIGHT;
+        mouse_profile.psp_keys[NK_PSP_BTN_TRIANGLE].secondary = NK_HOST_KEY_MOUSE_X2;
+        nk_overlay_describe_controls(&mouse_controls, &mouse_profile, NK_UI_PAD_LETTERS_A_SOUTH);
+        NkOverlayModel mouse_model = base_model(1280.0f, 800.0f);
+        mouse_model.controls = mouse_controls.rows;
+        mouse_model.control_count = mouse_controls.count;
+        nk_overlay_go(&state, NK_OVERLAY_SCREEN_CONTROLS, 0u);
+        ok = ok && append_case(out, cap, used, "controls-mouse-buttons", ui, &state, &mouse_model);
+        /* The VRAM viewer on a SR_VRAMDUMP capture (#314), appended so the cases above keep
+           their bytes. */
+        NkOverlayVram vram = synthetic_vram();
+        model.developer = true;
+        model.vram = &vram;
+        vram.captures = g_captures;
+        vram.capture_count = sizeof(g_captures) / sizeof(g_captures[0]);
+        nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
+        nk_overlay_go(&state, NK_OVERLAY_SCREEN_VRAM, 0u);
+        state.vram.chosen = true;
+        state.vram.capture = 1;
+        state.vram.source = NK_OVERLAY_VRAM_DISPLAY;
+        state.vram.view = g_captures[0].sources[NK_OVERLAY_VRAM_DISPLAY];
+        ok = ok && append_case(out, cap, used, "vram-capture", ui, &state, &model);
+        model.vram = NULL;
+        model.developer = false;
+    }
     nk_ui_destroy(ui);
     nk_ui_destroy(small);
     return ok;
@@ -1565,6 +1746,7 @@ int main(int argc, char **argv) {
     test_menu_height_sweep();
     test_developer_gate();
     test_vram_page();
+    test_vram_captures();
     test_vram_clamp();
     test_developer_pages_fit();
     test_describe_controls();

@@ -72,6 +72,7 @@ PUBLIC_TARGETS := \
 	cosim-selftest-split \
 	cosim-selftest-opt \
 	cosim-selftest-promoted \
+	cosim-selftest-resume \
 	cosim-selftest-run \
 	cosim-selftest-clean \
 	cosim-mutants \
@@ -98,6 +99,8 @@ PUBLIC_TARGETS := \
 	gui-present-selftest \
 	clay-layout-selftest \
 	ed25519-verify-selftest \
+	relay-codec-selftest \
+	adhoc-net-selftest \
 	achievements-selftest \
 	nk-nickname-selftest \
 	nk-ui-core-selftest \
@@ -133,6 +136,7 @@ PUBLIC_TARGETS := \
 	ge-tnl-census-selftest \
 	xr-selftest \
 	ge-patch-tess-selftest \
+	ge-scene-selftest \
 	ge-flight-overhead \
 	vfpu-tables-selftest \
 	watchpoints-file-selftest \
@@ -173,12 +177,18 @@ PUBLIC_TARGETS := \
 	atrac3p-title-accept \
 	gpu-coherence-selftest \
 	gpu-coherence-selftest-snapbar-mutants \
+	gpu-coherence-twin-mutants \
+	gpu-coherence-selftest-movie-mutant \
 	gpu-coherence-pcache-mutant \
 	vram-view-identity-selftest \
 	gpu-dst-read-mutants \
 	gpu-stencil-once-mutants \
 	gpu-snapsync-selftest \
 	gpu-ace-selftest \
+	gpu-mips-selftest \
+	gpu-mips-mutant \
+	tex-mips-selftest \
+	tex-mips-mutant \
 	tex-scale-selftest \
 	pipeline-cache-selftest \
 	tex-scale-gate-mutant \
@@ -279,6 +289,7 @@ HELP_DESCRIPTION_cosim-selftest := run the source-owned AOT/interpreter cosimula
 HELP_DESCRIPTION_cosim-selftest-split := run the cosimulation with every body split at other entries
 HELP_DESCRIPTION_cosim-selftest-opt := run the cosimulation with generated code at COSIM_OPT_LEVEL (#1730)
 HELP_DESCRIPTION_cosim-selftest-promoted := run the cosimulation with codegen register promotion (#284)
+HELP_DESCRIPTION_cosim-selftest-resume := run the cosimulation with resume points and resume every parked thread (#2172)
 HELP_DESCRIPTION_cosim-selftest-run := build and run the cosimulation harness
 HELP_DESCRIPTION_cosim-selftest-clean := remove cosimulation artifacts
 HELP_DESCRIPTION_cosim-mutants := run the cosimulation negative corpus
@@ -308,6 +319,8 @@ HELP_DESCRIPTION_heap-selftest := run the heap and allocator selftest
 HELP_DESCRIPTION_profiler-selftest := run the profiler selftest
 HELP_DESCRIPTION_gui-present-selftest := run the host present pacing selftest
 HELP_DESCRIPTION_clay-layout-selftest := build and run the vendored Clay layout selftest
+HELP_DESCRIPTION_adhoc-net-selftest := check the ad hoc transport seam on simulated consoles in one process, with no network
+HELP_DESCRIPTION_relay-codec-selftest := check the ad hoc relay's lobby and relay packets byte by byte, with no network
 HELP_DESCRIPTION_achievements-selftest := run the RetroAchievements bridge (vendored rcheevos) against an in-process fake server, with no network
 HELP_DESCRIPTION_ed25519-verify-selftest := check nk_ed25519_verify (vendored Monocypher) against the RFC 8032 vectors and nk_minisign_verify against real minisign output
 HELP_DESCRIPTION_nk-nickname-selftest := check the console nickname rule (src/core/nk_nickname.h): the Player default, the 32-byte cap and the refused values
@@ -344,6 +357,7 @@ HELP_DESCRIPTION_ge-cpu-profile-validate-selftest := run the GE CPU-profile vali
 HELP_DESCRIPTION_ge-tnl-census-selftest := run the GPU T&L decline census selftest (#318) on the production GE object
 HELP_DESCRIPTION_xr-selftest := run the OpenXR (VR) module selftest (#791) against a fake OpenXR runtime: no headset or loader needed
 HELP_DESCRIPTION_ge-patch-tess-selftest := run the finer Bezier and spline patch selftest on the production GE object (no GPU)
+HELP_DESCRIPTION_ge-scene-selftest := run the GE scene record selftest (#1330): the dump, a consumer and the no-consumer identity on the production GE object
 HELP_DESCRIPTION_ge-flight-overhead := measure the disarmed flight recorder cost on the GE draw path (recorder linked vs absent; no game data)
 HELP_DESCRIPTION_vfpu-tables-selftest := run the VFPU table-loader selftest
 HELP_DESCRIPTION_watchpoints-file-selftest := run the watchpoints-file selftest
@@ -384,12 +398,18 @@ HELP_DESCRIPTION_audio-resampler-bench := run the synthetic-input audio resample
 HELP_DESCRIPTION_atrac3p-title-accept := run the optional ATRAC3+ title acceptance route
 HELP_DESCRIPTION_gpu-coherence-selftest := run the GPU coherence selftest
 HELP_DESCRIPTION_gpu-coherence-selftest-snapbar-mutants := prove the GPU coherence selftest kills three broken snapshot-copy barrier variants
+HELP_DESCRIPTION_gpu-coherence-twin-mutants := prove the GPU coherence selftest kills thirteen broken host-twin variants (builds thirteen binaries; not part of native-core-tests)
+HELP_DESCRIPTION_gpu-coherence-selftest-movie-mutant := prove the GPU coherence selftest's movie cells kill a renderer that drops the movie provenance match (#2111)
 HELP_DESCRIPTION_gpu-coherence-pcache-mutant := prove pipeline-cache-cold fails when pipelines bypass the Vulkan pipeline cache
-HELP_DESCRIPTION_vram-view-identity-selftest := check that the GE decoders the pause menu's VRAM viewer calls leave later frames, guest memory and the GE state unchanged (#314; needs a Vulkan device and fails without one)
-HELP_DESCRIPTION_gpu-dst-read-mutants := prove the GPU coherence dst-read cells kill seven broken destination-read variants
+HELP_DESCRIPTION_vram-view-identity-selftest := check that the sources and decode the pause menu's VRAM viewer runs name the expected surfaces and leave later frames, guest memory and the GE state unchanged (#314; needs a Vulkan device and fails without one)
+HELP_DESCRIPTION_gpu-dst-read-mutants := prove the GPU coherence dst-read cells kill nine broken destination-read variants
 HELP_DESCRIPTION_gpu-stencil-once-mutants := prove the GPU coherence stencil-once case kills three broken write-once stencil batch variants
 HELP_DESCRIPTION_gpu-snapsync-selftest := run the GPU snapshot-sync selftest
 HELP_DESCRIPTION_gpu-ace-selftest := run Ace Mode's texture filtering selftest on a real Vulkan device (SKIPs without one)
+HELP_DESCRIPTION_gpu-mips-selftest := run the host-built mip chain selftest (Enhanced mips=on) on a real Vulkan device (SKIPs without one)
+HELP_DESCRIPTION_gpu-mips-mutant := prove the host mip chain selftest kills a late build that records its barrier before a command buffer begins, and an eager build at every decode
+HELP_DESCRIPTION_tex-mips-selftest := run the host-built mip chain builder's CPU selftest (linear-light box filter, alpha weighting, colour-key fill; no GPU)
+HELP_DESCRIPTION_tex-mips-mutant := build tex-mips-selftest without the colour-key fill and require its key-edge cell to fail
 HELP_DESCRIPTION_tex-scale-selftest := run the xBRZ texture scaling selftest against the pinned upstream goldens (no GPU)
 HELP_DESCRIPTION_pipeline-cache-selftest := run the GPU pipeline cache file checks and their atomic write (no GPU)
 HELP_DESCRIPTION_tex-scale-gate-mutant := prove the texture scaling selftest kills a build without the Ace gate

@@ -32,9 +32,10 @@ FORBIDDEN_WILDCARD_RECORDS = ("tooling-general",)
 
 class TestWildcardBackedClassificationRepair(unittest.TestCase):
     def _ledger(self) -> dict:
-        return json.loads(
+        ledger: dict = json.loads(
             (ROOT / "assets" / "public_provenance_ledger.json").read_text(encoding="utf-8")
         )
+        return ledger
 
     def test_canonical_classifier_is_record_free_and_deterministic(self):
         """With no detailed-ledger record (wildcards are never expanded), the

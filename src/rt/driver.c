@@ -45,6 +45,19 @@ void sr_register_all(void);
 extern void sr_audio_pause_enter(void);
 extern void sr_audio_pause_leave(void);
 extern int sr_audio_pause_script_ready(void);
+extern int sr_audio_init(void);
+/* Ace Mode's peak=limit (#2137): the host audio backend's true-peak limiter (audio_sdl3.c). */
+extern int sr_audio_set_true_peak_limiter(int on);
+extern void sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
+                                     double *min_gain);
+
+/* peak=limit's totals into the Ace report: registered after ace_finish, so it runs first. */
+static void driver_peak_stats_to_ace(void) {
+    uint64_t pushes = 0, frames = 0, limited = 0;
+    double min_gain = 1.0;
+    sr_audio_true_peak_stats(&pushes, &frames, &limited, &min_gain);
+    ace_set_peak_stats(pushes, frames, limited, min_gain);
+}
 
 /* The window's overlay callbacks join once gui_init has a presenter that can draw it. */
 static SrPauseHost s_driver_pause_host = {
@@ -546,6 +559,13 @@ int main(int argc, char **argv) {
         if (ace_effective()->tess > 1 && ge_patch_tess_init(ace_effective()->tess) > 1)
             ace_confirm(ACE_FEATURE_TESS);
         (void)atexit(ace_finish);
+        /* peak=limit (#2137): the SAS mixer keeps the sums it saturates and the host audio
+         * backend limits them; it runs once both have the switch, before the first grain. A link
+         * without either (the headless gate) refuses it, and ace_finish reports it as never run. */
+        if (ace_effective()->peak && sr_hle_sas_set_wide_mix(1) && sr_audio_set_true_peak_limiter(1)) {
+            ace_confirm(ACE_FEATURE_PEAK);
+            (void)atexit(driver_peak_stats_to_ace);
+        }
     }
 
     for (int i = 1; i < argc; i++) {
@@ -710,6 +730,20 @@ have_image:;
          * is process-start-only; LoadExec uses the explicit teardown/rebind seam below. */
         sched_init(&s);
         sched_preempt_timer_start();
+        /* The host audio device opens here, once, before the guest's first instruction
+         * (#2361). Opening it takes tens of milliseconds, and every guest thread runs on this
+         * one host thread, so an open at the guest's first audio call would stall sound and
+         * picture together just as the game begins to play. It comes after
+         * sched_preempt_timer_start, which raises this thread's priority in a paced run (the
+         * turbo and deterministic clocks raise nothing): on Linux the threads a raised thread
+         * creates inherit its nice value, and SDL's audio device thread is created by this
+         * open. sr_audio_init makes the same decision as at a first audio call:
+         * SR_AUDIO_DISABLED=1, SR_AUDIO_BACKEND=null (none, 0, off), or SR_HEADLESS=1 without
+         * SR_AUDIO_BACKEND opens nothing, and a failed open is reported once and the run goes
+         * on silently, so the result is not needed here. Outside the LoadExec loop: a replacement
+         * program keeps the open device. A run without the scheduler (below) opens the device
+         * at its first audio call. */
+        (void)sr_audio_init();
         for (;;) {
             sr_driver_boot_event("BOOT_EVENT phase=guest_start mode=scheduler entry=0x%08x", entry);
             sched_run(entry, s.r[4], s.r[5]);

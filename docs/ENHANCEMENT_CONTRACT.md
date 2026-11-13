@@ -70,12 +70,82 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   off (`display-smoke-anime4k`, which needs a Vulkan device and a display, so it is a local gate).
   A run with it on is stamped as `SR_PRESENT_UPSCALE` is (`ACE_MODE: present upscale
   movie-anime4k`, the `phase=present_upscale` boot event and `runtime.enhancements`), so neither
-  `flight_diff.py` nor `boot_gate.py` takes it as authentic evidence. It reaches only frames the CPU
-  presents: a movie the GE presents (drawn as a texture, or decoded into a GE target) is a GE frame
-  and is not upscaled by it. An Authentic launcher session, the picture gate and the library sweep
-  run with it `off`, whatever the environment says.
+  `flight_diff.py` nor `boot_gate.py` takes it as authentic evidence. An Authentic launcher session,
+  the picture gate and the library sweep run with it `off`, whatever the environment says.
   GPU cost at 4K: 0.75 ms per present for a 480x272 frame to 3811x2160 on an RTX 3080
   (`anime4k-selftest`).
+- **Movie frames the GE presents (#2111).** With the movie upscaler on, the Vulkan GE renderer also
+  hands it a GE frame that shows a decoded movie, in the window and in a recording. To recognise a
+  movie this part reads guest bytes, which the `presentation_only` observation boundary in the table
+  above (host swapchain state, frame timings, compositor layout) does not name. The owner admitted
+  it on 2026-11-13, for this part only and on the terms below: exactly these spans are read, only
+  read and never written, and guest timing does not depend on them. The decision does not widen the
+  boundary for any other part.
+
+  *What it reads.* Only while `SR_MOVIE_UPSCALE` is on and the Vulkan GE draws (none of it runs
+  under the software GE or with the upscaler off):
+  - the media HLE's own arguments when it writes a decoded picture (`sceMpegAvcDecode`, an 8888
+    `sceMpegAvcCsc`, the PSMF player's video output): the picture's guest address, stride, format,
+    size and decoder handle, kept as a host-side note (`src/rt/ge_shared.h`), at most eight at a
+    time;
+  - the bytes of each noted picture's rows (width x height pixels at its stride, the bytes between
+    rows excluded), hashed when it is noted and again each time a match below relies on it;
+  - the bytes of a texture the renderer uploads (single-level, direct-colour, unswizzled, the note's
+    stride and format), compared with a note's rows byte for byte until the first difference;
+  - the GE state the renderer already holds: the texture address, stride and format, the descriptor
+    set a draw binds, and the presented target's address, stride, format and write order.
+
+  Every read is read-only, through checked guest spans and never through the read path that prepares
+  VRAM, so it pulls no GPU-held write back into guest memory. Nothing is written to guest memory,
+  guest VRAM, a guest register, a GE command or a readback, and no guest call waits on it. It adds
+  host work on the emulation thread: one hash of each picture when it is noted; for each qualifying
+  upload, a comparison with each held note of its stride and format, up to the first differing byte;
+  and a re-hash of a note when such a comparison matches, when an upload's first texel lies in the
+  picture, when a cached texture is checked again after a newer note, and when a GE present looks for
+  a picture written into its target. All of it is host work, so by design no guest-visible timing
+  depends on it under `SR_DETERMINISTIC_CLOCK=1`; that has not been measured. Under the wall clock it
+  takes host time as any host work does. It chooses only which upscaler enlarges the shown picture.
+
+  *When a frame is a movie frame.* Its movie box (the box around its movie pixels) covers at least
+  half of the shown 480 x 272, in either way a movie reaches the GE:
+  - *drawn as a texture* (Hot Shots Tennis's opening movie, and LittleBigPlanet's intro as #2111
+    describes it): draws since the target was last presented sampled a texture whose upload matched
+    a noted picture (same stride and format, and either the texture's first texel is a pixel of the
+    picture, or the texture starts with the picture's rows byte for byte, a copy such as Hot Shots
+    Tennis makes with its own code before drawing it; the note's rows unchanged), bound as level 0,
+    the anisotropic or scaled image, or the host mip chain (Enhanced `mips=on`); UI drawn over part
+    of the movie (subtitles, a prompt) keeps the frame a movie frame, and a later draw, line, point
+    or GE block transfer over the whole movie box does not (a primitive the software GE draws
+    instead keeps it);
+  - *decoded into a GE target*: the presented target holds a whole noted picture of its stride and
+    format, written after the GE's last write to that target and unchanged since; any GE draw or GE
+    block transfer after it, even one pixel of UI, leaves the frame to the GE (a CPU copy into VRAM
+    outside the picture does not).
+
+  A note stops matching when its rows' hash changes (a probabilistic change detector: a CPU, DMA or
+  software-GE write over the picture, or the buffer reused, ends it; a GE write held only in the
+  GPU's image is not seen, which the target rule covers with its write order and the texture rule by
+  never matching a texture served from a target), when a later picture is written over it, when its
+  decoder is deleted or released, when eight newer pictures were noted (counted as dropped), and
+  when the upscaler is off. A picture behind a swizzled VRAM view, a copy that is converted, scaled,
+  partial or copied into a GE target, a 16-bit `sceMpegAvcCsc`, a picture sampled from a render
+  target, and a picture written in more than eight strips (whose first strip is dropped) are not
+  matched: those frames stay GE frames. Known limit: a picture of one solid colour (a fade to black)
+  is matched by any texture of its stride and format that starts with the same bytes, so while that
+  note is held, a frame that draws such a texture (a plain black background) over half the screen
+  goes to the movie upscaler, UI drawn over it included. Only the presented picture changes.
+
+  Evidence: `gpu-coherence-selftest`'s `movie-texture` and `movie-target` cases present each way
+  through the production path, check every way a note stops matching, and compare one frame's guest
+  VRAM with tracking on and off; `gpu-mips-selftest`'s `movie` cell draws a transformed, linearly
+  filtered movie quad with the mip chain bound and without it; `gpu-coherence-selftest-movie-mutant`
+  builds the renderer without the match (both cases must fail) and with the copy judged by a
+  word-wise hash (the alpha-bit cell must fail); `psmf-media-selftest` checks the notes each HLE
+  writer makes. A run's `GEGPU stats` line (`SR_GPU_STATS`) and its shutdown line (`gegpu: movie
+  frames (#2111)`) count movie frames, presents that stayed GE frames while a picture was held, and
+  dropped notes. Not measured: the guest flight events with it on and off (no flight recording has
+  been compared), guest timing with it on and off under `SR_DETERMINISTIC_CLOCK=1`, and the upscaled
+  picture itself.
 - **Forbidden:** Mutating GE display list commands, intercepting guest draw calls to alter gameplay geometry, or feeding host input back into the guest controller state.
 
 ### 2.3. Guest Memory and Code Hooks (`guest_memory_code_hook`)
@@ -105,6 +175,7 @@ PSP titles commonly lock physics and animation loops to 30 Hz or 60 Hz VBLANK ti
 
 - **Allowed:** Interpolating host rendering between consecutive guest frames; adjusting presentation swap intervals; multiplying display updates while keeping guest timer tick counts authentic; applying the declarative frame-rate rescale transforms of section 9.2 to verified symbolic sites during an explicit AOT enhancement epoch.
 - **Forbidden:** Speeding up the guest real-time clock (`sceKernelGetSystemTime*`, `sceRtc*`, audio hardware sample clocks) to force higher frame rates, which breaks real-time clocks, physics, and audio synchronization. Only frame-counted logic is rescaled; the game's real-time clock stays 100% authentic.
+- **Guest memory:** A timing transform writes guest memory only where it replaces, at the same place, a value the stock logic itself stores there, with that value's 60 Hz image (section 9.2, "Guest memory written by a timing transform"). Any other write belongs to section 2.3.
 - **RNG Policy for 60 Hz Rescaling:** Frame-rate rescale packages must declare an explicit `rng_policy` (`rescale_probability` or `subtick_30hz`) with its rationale. Under `rescale_probability`, stateless per-update probability thresholds use `probability_per_update_x0.5` ($p_{60} = 0.5\,p_{30}$) so expected events per second remain invariant at 60 Hz, while stateful multi-roll PRNG sequences or coupled physics/particle steps use `gate_30hz` to step on alternate 60 Hz ticks (30 Hz cadence) without altering PRNG state evolution.
 
 ---
@@ -153,7 +224,7 @@ I publish a title's packages as site data, so that a user who builds from source
 - each site's change: one of the declared transforms of section 9.2, never code or values;
 - for each byte range a site reads or replaces, a digest of the stock bytes, keyed by the executable (below).
 
-It holds no game bytes: no instruction words, data, tables, strings or values copied from the disc, and no patched code. Every symbolic name is project-authored (from a decompilation or named by the project), never taken from the executable's own symbol table. A disc file path and a CSV column name appear only as locators, naming where a data transform applies. A store site that checks the values the game's loader stores publishes only keyed digests of them (`stock_value_digests`, never `stock_values`): when the game stores a value, the runtime digests it, compares, and scales the value it observed, and on a mismatch it stops the run, naming the site. Where a transform's result depends on the stock value (such as twice it), the package publishes the rule, never the result.
+It holds no game bytes: no instruction words, data, tables, strings or values copied from the disc, and no patched code. Every symbolic name is project-authored (from a decompilation or named by the project), never taken from the executable's own symbol table. A disc file path and a CSV column name appear only as locators, naming where a data transform applies. A store site that checks the values the game's loader stores publishes only keyed digests of them (`stock_value_digests`, never `stock_values`): when the game stores a value, the runtime digests it, compares, and scales the value it observed, and on a mismatch it stops the run, naming the site. Where a transform's result depends on the stock value (such as twice it), the package publishes the rule, never the result. The same holds for a transform whose rule is built from other stock values (the site references of section 9.2): the package names the sites that pin them, each with its keyed digest, and the values and every factor computed from them are read and computed from the user's executable when the package is built.
 
 **Keyed digests.** A plain SHA-256 of one 32-bit instruction word can be inverted by trying all $2^{32}$ words, so it would publish the word. Every stock digest in a published package is therefore an HMAC-SHA-256 whose key is derived from the whole executable (a different hash from the published executable digest, so that digest does not give the key away). Only someone who holds the executable can compute or check it, and they already have the bytes.
 
@@ -162,6 +233,8 @@ It holds no game bytes: no instruction words, data, tables, strings or values co
 **Why this is publishable.** It is the same practice as decompilation projects that publish symbol maps (function names and addresses for one ROM checksum) and emulator patch and cheat databases that publish addresses and their own replacement values for a named game ID. In each case the game comes only from the user's own copy, and the published file is useless without it.
 
 **Where they live.** Published packages are separate data files in `assets/enhancements/`, one per disc and package, and pass the publication audit's no-game-bytes check before they enter the public tree. That check sees only the file. It refuses any property outside the format, and any string holding an address, an instruction-word-shaped or long hex run, a base64-like run or an escaped byte. It cannot tell a keyed digest from 32 raw bytes, and no pattern check can stop free text encoded on purpose; those are its stated limits. The export command holds the executable and computes every digest from it, so it is what makes each digest a digest, and review covers the text.
+
+**How a player gets one.** The source tree, which every release carries beside the player, ships these files, so a published package needs no copying. The player and `build-package --experimental-60hz` look for `<user data>/enhancements/<disc_id>-60hz.json` first and, only when that file does not exist, for the same name in `assets/enhancements/` (section 9.4). A file in the user's data folder always comes first, even one that cannot be used, so a package author can try a new declaration; build-package refuses a shipped file that is not in the published form.
 
 ---
 
@@ -172,7 +245,7 @@ Enhancement packages are declared as versioned JSON manifests adhering to `asset
 The declaration schema is kept lean and focused on core metadata and capability requests:
 
 - **Required root properties:** `schema_version` (must be 1), `id` (package identifier), `display_name`, `version` (semver), `category` (one of the 6 recognized categories), `target_title_id` (title ID or `*`), and `capabilities` (non-empty array of symbolic capability names).
-- **Optional root properties:** `min_runtime_version` (semver), `hooks` (array of hook objects with `symbol` and `type` only), and—for declarative frame-rate rescale packages (category `timing_frame_presentation`, and the `game_version`, `executable_sha256` and `sites` of a `guest_memory_code_hook` package, section 11.3.6)—`game_version` (exact title version string), `executable_sha256` (64-char lowercase hex SHA-256 of the stock guest ELF), `rng_policy` (`mode` and `reason`), and `sites` (non-empty array of symbolic instruction-site transform descriptors).
+- **Optional root properties:** `experimental` (`true` or `false`; a package without it is experimental, section 9.10), `min_runtime_version` (semver), `hooks` (array of hook objects with `symbol` and `type` only), and—for declarative frame-rate rescale packages (category `timing_frame_presentation`, and the `game_version`, `executable_sha256` and `sites` of a `guest_memory_code_hook` package, section 11.3.6)—`game_version` (exact title version string), `executable_sha256` (64-char lowercase hex SHA-256 of the stock guest ELF), `rng_policy` (`mode` and `reason`), and `sites` (non-empty array of symbolic instruction-site transform descriptors).
 - **Symbolic site descriptors (`sites`):** Each site entry declares `id` (site identifier), `function` (symbolic function name, never a raw hex address or `FUN_`/`sub_`/`loc_`/`func_` stem), `insn_offset` (non-negative 4-byte-aligned byte offset inside the function), `stock_digest` (64-char lowercase hex SHA-256 of the expected little-endian stock MIPS instruction word or words), optional `word_count` (an integer from 1 to 16, default `1`, the number of words `stock_digest` covers; only `1` has a defined rewrite, so a larger value refuses the package), and `transform` (one of the site transforms of section 9.2). A `gate_30hz_alt` site also declares `alternates`, a list of 1 to 4 distinct function symbols; every other transform refuses that field. A `clip_x_widen` site (category `guest_memory_code_hook`, section 11.3.6) also declares `clip_register` (`v0` or `v1`) and `clip_offsets` (1 to 4 distinct 16-byte-aligned byte offsets from 0 to 65536); no other transform takes them, and a `guest_memory_code_hook` package takes no other transform and carries only `game_version`, `executable_sha256` and `sites` of the timing fields.
 - **Published packages (section 5.1):** a published package adds `published_package` (must be 1), `disc_id`, `disc_version`, `digest_scheme` (`hmac-sha256-executable-key-v1`) and `site_map` (each symbolic name the package uses and its `0x%08x` address, and no other), and requires `executable_sha256`. Its stock digests (`stock_digest`, `low_stock_digest`, a data site's `stock_digest`, a data file's `sha256`) are HMAC-SHA-256 under `published_digest_key()`, SHA-256 of a fixed tag and the whole executable. It may not declare `stock_values`: a store site declares `stock_value_digests` instead, the keyed digests (`keyed_stock_value_digest()`) of the tag `stock value`, the site id and each stock value's 32 bits. Codegen embeds the key in the user's own build, and the store-site check (`nk_enh_store`) digests each value the game stores, compares it, and scales the observed value as the builder scales a stock value; a mismatch, or a result outside the f32 or s32 range, stops the run with `ENHANCEMENT_DATA_MISMATCH`, naming the site. `python tools/enhancement_package.py --publish <package> --elf <selected.elf> --base <hex> --disc-id <ID> --disc-version <n.nn> --out <disc_id>-<kind>.json` writes one from a private package and its `.symbols.json`, after checking that it resolves back to the same declaration. Its names come only from that symbol map, and it refuses any name the executable's own symbol table holds. A function without a decompilation name may carry a project-assigned name ending in its own address (`hst_fn_0001ea64`); a name whose 8-hex suffix differs from its site-map address is refused. A published package's `version` has no build metadata and a pre-release tag of at most 16 characters, and its `rng_policy.reason` is at most 1024 characters. Codegen resolves a published package only through `resolve_published_package()`, which refuses `modified_executable` and `site_mismatch`; build-package refuses `other_disc`, `other_revision` and `modified_executable` first, from the disc's PARAM.SFO. `tools/publish_audit.py` (`check_enhancement_packages`) refuses any package outside `assets/enhancements/`, any `.symbols.json`, and any file there, whatever its extension, that is not a valid published package named `<disc id, lowercase>-<kind>.json`. It also refuses a package in which any string or key, outside the digest slots and the site map's addresses, holds an address literal, an 8-hex-digit token delimited by anything but a letter or digit (an instruction word, or an address; a site-map name's own-address suffix is the one exception), a run of more than 8 hex digits, a base64-like run of 32 or more characters, an escaped byte or a control character. A regular-expression gate cannot stop text encoded on purpose: shorter base64 runs, or hex in chunks of 7 digits or fewer, pass it. Bounded fields (`rng_policy.reason` at 1024 characters) limit that, and review covers the rest. The audit checks only a digest's shape: it cannot tell a keyed digest from 32 raw bytes without the executable, so the export command, which computes every digest from the executable, is what makes it a digest.
 - **No speculative payloads:** Unimplemented category payloads (`assets`, `presentation`, `timing`, `camera`, `save_data`) remain forbidden in the schema until their respective runtime loaders land.
@@ -250,13 +323,46 @@ Each `sites` entry names a symbolic `function`, a 4-byte-aligned `insn_offset`, 
 | `count_x2` | positive `addi`/`addiu`/`slti`/`sltiu` immediate; `andi` mask $2^n-1$; `lui` of a normal float; `sll`; integer loads; `lwc1`/`swc1`; `sw` (only with `stock_values`, §9.6); `lv.s` (the loaded VFPU register is scaled); single-precision arithmetic and `cvt.s.w`; a unit countdown `addiu rt, rt, -1` | the produced value is doubled (a countdown is gated) |
 | `count_x2_even` | `slti`/`sltiu rt, rs, n` with $0 < n \le$ `0x3FFF` and `rt` neither `$zero` nor `rs` | a bound on a counter of logic updates since an event: true while `rs` $< 2n$ and `rs` is even, so the $n$ events of the stock window still happen, one every second update, at the stock instants (`count_x2` would make $2n$ of them, twice as dense). Under `slti` a negative `rs` stays true, as in stock, so an inactive value such as $-1$ keeps its meaning; under `sltiu` it is a large unsigned value, false in both forms. The resolver refuses the site unless `rs` is loaded from memory (`lb`, `lbu`, `lh`, `lhu` or `lw`) within the 16 instructions before the compare, with no branch, jump or call in between, and not in the delay slot of a jump, a call or a branch-likely. The check reads backward in address order and does not see a branch from elsewhere into those instructions. The site's evidence shows the rest: that the stored count advances by one every update |
 | `step_x0.5`, `probability_per_update_x0.5` | as `count_x2` except integer loads, plus accumulating `+1`/`-1`/`addu`/`subu` updates | the produced value is halved (exactly, or by gating a unit or register step); `add.s fd, fd, ft` halves the addend `ft` |
-| `decay_k_to_1-sqrt(1-k)` | `lui` of a float $k \in (0, 1)$; `lwc1` or `lv.s` of the factor | $k \to 1 - \sqrt{1-k}$, evaluated as $k / (1 + \sqrt{1-k})$ in double so that a small $k$ does not cancel to 0, and rounded to the upper half; after an `lwc1` or `lv.s` the loaded register is mapped at run time, and a value outside $(0, 1)$ keeps its stock value and is reported once per site (`ENHANCEMENT_FACTOR_KEPT`) |
-| `retention_m_to_sqrt(m)` | `lui` of a float $m \in (0, 1)$; `lwc1` or `lv.s` of the factor | $m \to \sqrt{m}$, rounded to the upper half; after an `lwc1` or `lv.s` as for `decay_k_to_1-sqrt(1-k)` |
+| `decay_k_to_1-sqrt(1-k)` | `lui` of a float $k \in (0, 1)$; `lwc1` or `lv.s` of the factor; `mov.s` that copies the factor (section 11.3.2.7) | $k \to 1 - \sqrt{1-k}$, evaluated as $k / (1 + \sqrt{1-k})$ in double so that a small $k$ does not cancel to 0, and rounded to the upper half; after an `lwc1` or `lv.s` the loaded register is mapped at run time, after a `mov.s` only the copy, and a value outside $(0, 1)$ keeps its stock value and is reported once per site (`ENHANCEMENT_FACTOR_KEPT`) |
+| `retention_m_to_sqrt(m)` | `lui` of a float $m \in (0, 1)$; `lwc1` or `lv.s` of the factor; `add.s`, `sub.s`, `mul.s` or `div.s` whose result is the factor (such as $1 - cL$); `mov.s` that copies the factor (section 11.3.2.7) | $m \to \sqrt{m}$, rounded to the upper half; after an `lwc1` or `lv.s` as for `decay_k_to_1-sqrt(1-k)`, and likewise after the arithmetic instruction, whose result register is mapped at run time; after a `mov.s` only the copy |
 | `accel_x0.25` | `lui` of a float (or a `lui`/`ori` pair) | the per-update acceleration is divided by 4 (two exponent steps on a lone `lui`) |
 | `launch_velocity_x0.5` | a `lui`/`ori` float pair with `acceleration_site` | the launch velocity $v_0 \to v_0/2 + g/8$, where $g$ is the stock value of the named `accel_x0.25` site |
 | `offset_x2` | `addi`/`addiu` with a nonzero immediate, also when the destination is a source | an additive offset counted in updates (a lookahead, a delay added to a base) doubles: $n \to 2n$ |
 | `window_start_x2` | `addi`/`addiu` with an immediate of $-2$ or less | the start of a window that ends one before a per-update counter: $k \to 2k+1$, so the window spans twice as many updates |
 | `argument_x2` | the instruction at a function's entry (`insn_offset` 0), with `arguments` naming the registers (`a0`-`a3`, `t0`-`t3`) | a helper that takes durations in updates from every caller doubles them once per call, after its stock entry instruction, which may not write them; a function that branches back to its entry is refused |
+| `value_reference` | `lwc1` or `lv.s` of read-only data; a `lui`/`ori` float pair (`word_count: 2`, or a lone `lui` with `low_insn_offset`) | none: the instruction keeps its one stock form. The site pins one stock float, digest-checked like every site, for the site references below. Every such site is read when the package is resolved, referenced or not, and one that pins nothing refuses the package. It takes no `requires` and no `stock_values` |
+| `gate_30hz_phase` | `jal`; a single-precision compare (`c.cond.s`) with `odd_phase_condition`; `lwc1` or `lv.s` of a value; each with `phase_time` (a `register`, `s0`-`s7`, and a 4-byte-aligned `offset`) and `step_site` | the site keeps the stock instants of one state, counted on that state's own time: the float $t$ at `offset` from the register, read through the guest accessors when the site runs (for a call, after its delay slot). The state's time is the guest's own float32 sum: zero when the state is entered, then $t \leftarrow \mathrm{fl}(t + h/2)$ once per 60 Hz update, $h$ being the stock step. The resolver builds the values of that sum exactly, a few rows for each binade, up to one update before the sum stops advancing (or $2^{31}-1$ updates), and the generated code finds $n$, the number of updates since zero, by matching $t$ against them bit for bit. The rounding error of the sum is therefore part of the model: it cannot move a phase, however long the state lasts. After an even $n$ the stock instruction runs. After an odd $n$ a call is skipped (its delay slot still runs); a compare runs and then the FPU condition flag takes `odd_phase_condition`; a load runs and then its register reads $+0.0$. A $t$ that is not a value of the sum (the time was set or advanced some other way) runs the stock instruction, and the site reports once (`ENHANCEMENT_PHASE_KEPT`); while the time stays off the sum, a gated call or load acts on every update. The value at which the sum stops advancing (after 6 days of state time for a step of 1/60 s) is treated the same way: it repeats on every update from then on, so no count can be read off it. A report says that state's time left its sum, so the phases the site computes for that state afterwards are not to be trusted either until the state is entered again; a tool that accepts a 60 Hz run checks for the line, as for `ENHANCEMENT_DATA_SITE_NOT_REACHED` (§9.6). One case cannot be reported: a time that starts at a non-zero value which happens to lie on the sum is, in every later bit, the time of a state that has run that many updates, so its parity can be the wrong one with no sign of it. Only the evidence that the time is zero when the state is entered excludes it. The resolver refuses the site unless: of the instructions that can run before it, along every path of its function, exactly one writes the register, and no path from the entry reaches the site without running that write (the graph is read as for `gate_30hz_alt`, and calls are taken to preserve `s0`-`s7`); a gated call's delay slot does not write the register; for a call, no path of the caller reads `$v0`, `$v1`, `f0`-`f3`, HI or LO before writing it, up to its next call, a return counting as a read of `$v0`, `$v1` and `f0`, as for `gate_30hz_alt`; for a compare, it is not in a delay slot, and a `bc1f` or `bc1t` (or their likely forms) follows within 4 instructions, with no call, jump, other branch, other compare or `ctc1` in between. A gated load needs neither of those, because the call it feeds always runs; it is refused when it is the load of the state's own time (the gate would zero what it counts; the time load is matched by its base register, so a load of the time through a copy of that register is the site's evidence), and when the title stores the gated register before overwriting it: read forward from the load to the first branch, jump or call and its delay slot, 16 instructions at most, a `swc1` of a gated FPU register, an `sv.s` of a gated VFPU register, or a store of a general register that an `mfc1` or `mfv` copied it to refuses, since that store would write a zero the stock code never stores. Copies through other FPU or VFPU registers and an `sv.q` are not followed, and VFPU registers are not otherwise tracked. The site's evidence shows the rest: that the field is the state's time, zero when the state is entered and advanced by the step once per update, after the site has run in that update (a state whose time advances before the site reads the other parity, and this transform does not fit it); that the step is fixed; for a call, that it is a per-update effect with no step in it; for a load, that the value only scales such an effect, so that zero makes it nothing ($v + 0 \cdot k$ is $v$ in every bit, except that a $-0.0$ becomes $+0.0$); for a compare, that `odd_phase_condition` is its no-event direction, and that its threshold is not within float32 rounding of a whole number of stock steps (the 60 Hz sum and the stock sum differ in their last bits, so such a threshold could pass one stock step apart) |
+| `velocity_source_x_kappa` | `lwc1`; `lv.s`; `lv.q`; `swc1` (which may declare `stock_values`, §9.6); each with `damping_site` and `damping_step_site` | a source of velocity change (an acceleration, the size of an impulse) is multiplied by $\kappa$ (below), in double, and rounded to single precision once: after an `lwc1` or `lv.s` the loaded register, after an `lv.q` each of the four loaded lanes; a `swc1` stores the scaled copy. An `lv.q` site in a delay slot is refused. The site's evidence shows that every lane an `lv.q` loads is such a source or zero |
+| `launch_from_rest_60hz` | `jal`, with `velocity_offset` (4-byte-aligned), `gravity_axis` (0 or 1), `gravity_site`, `damping_site`, `damping_step_site` and `step_site`, in a package that names the capability `launch_velocity_write` | the stock call runs unchanged. Before it, `$a0` as the site passes it (after the delay slot) and the float of the other axis are taken. After it, of the two floats at `velocity_offset` and `velocity_offset + 4` from that `$a0`: the one `gravity_axis` names becomes $\kappa v + q g$ (below), the image of a velocity set from rest; the other becomes $b + \kappa (v - b)$, $b$ being its value before the call, so only what the call changed is scaled, a velocity the body already carried is never scaled, and a float the call left unchanged is not written. Each is computed in double as one fused multiply-add and rounded to single precision once. They are read and written through the guest accessors, so a bad pointer faults as the guest's own access would. The resolver refuses the site unless the function it calls stores both floats itself, at those offsets from its entry `$a0`, on every path that returns (copies of `$a0` are followed as for `gate_30hz_alt`; a store made by a function the callee calls does not count). The runtime counts the calls made and the maps applied; when a call is not followed by its map (the callee did not return in the same host frame, or a guest access of the map faulted) the velocity keeps what the call left, and the end of the run names the site (`ENHANCEMENT_LAUNCH_NOT_MAPPED`). The site's evidence shows the rest: that `$a0` is the body and the offset its velocity; that gravity acts on that axis only and the body takes the damping the sites name; that the body is at rest along gravity when the site runs, so that its velocity there is its support's and not an image (a launch in flight that is already mapped would add the offset twice); that on the other axis the callee adds to the velocity and what the body carried there is zero or already an image (a carried velocity the title sets directly each update, or a callee that overwrites that float, leaves it off by $(1 - \kappa)$ of the carried value until something sets it again); and that the callee cannot block. A tool that accepts a 60 Hz run checks for `ENHANCEMENT_LAUNCH_NOT_MAPPED` |
+
+**Damped motion: the two-update image.** A stock update that runs $v \leftarrow (v + g h + I)\,m$, then $x \leftarrow x + v h$, with retention $m = 1 - cL$, has an exact image in two updates of half a step, $w \leftarrow (w + a + I')\,\mu$, then $x \leftarrow x + w h/2$. Writing $v^* = g h m / (1 - m)$ for stock's terminal velocity, the two reach the same $x$ at the end of every pair exactly when $\mu = \sqrt{m}$, $a = \kappa\, g\, h/2$ and $w - v^* = \kappa\,(v - v^*)$, with $\kappa = 2\mu / (1 + \mu)$. Each rule follows. `retention_m_to_sqrt(m)` gives $\mu$. `velocity_source_x_kappa` on the gravity the integrator loads gives $a$, with the step site halved as usual. An impulse in flight scales by $\kappa$ and goes wholly into the first update of its pair, which is what `velocity_source_x_kappa` on its size and `gate_30hz_phase` on its call, or on the load of its size, declare. A velocity that is set from rest, where the map does not hold, becomes $\kappa V + q g$ with $q = h \mu^2 / (1 + \mu)^2$, which is `launch_from_rest_60hz`. The parts go together: without any one of them the pair ends differ by far more than rounding. At the end of a pair the velocity is the image $w$, not stock's $v$, so code that reads the body's velocity in flight sees that.
+
+**When the image is exact, and what "exact" means.** The image holds, for the position and for the velocity as its image, at the end of every pair, when all of the following are true of the title's own integrator, and each site's evidence shows them:
+
+- $m$, $g$ and $h$ are constant through the flight: one damping for the body (not one per material or medium), one gravity, a fixed step;
+- each update applies the force, then the damping, then moves by the new velocity;
+- a launch, and every impulse, is applied before the integrator, in the first update of a pair;
+- nothing clamps the velocity and nothing collides between two pair ends.
+
+"Exact" is what float32 code gives, not what the algebra gives. Every guest operation and every emitted statement rounds to single precision, so at a pair end the 60 Hz position agrees with stock's to rounding, in most bits and not in all. `tools/test_enhancement_package.py` runs the emitted statements through a 90-update flight with a launch and timed impulses, in float32 and bit for bit against a float32 model of these rules. On that model the worst pair-end difference is $3.2 \times 10^{-7}$ of the arc's height along gravity (5 of the 90 pair ends bit-identical) and $4.6 \times 10^{-7}$ of the distance covered on the other axis (6 of 90), and a test that needs no compiler bounds both at $10^{-6}$. Those are that flight's figures. The difference is rounding accumulated over the flight, at most 6 float32 steps of the largest position it reaches, so it is a larger share of a small arc than of a large one. A double-precision model of the same flight agrees to $10^{-12}$; that figure is the algebra's, not the code's.
+
+Where a condition does not hold, the same constants are a first-order approximation, and what a player sees is an arc that is slightly off, not a failure. In a model with a damping of 1.6 % per update: damping applied before the force, 1.0 % of the arc's height; moving by the old velocity (explicit Euler), 1.3 %; an impulse in the second update of its pair, 0.09 %; a clamp on the fall speed, the image is lost at the clamp, 4.9 % over 90 updates. The errors scale with the damping per update. A title whose integrator has another form needs other constants, which these transforms do not declare.
+
+**Landing is not moved to the stock update.** A decision, not an oversight. The flight is stock's at every pair end, but the title tests contact on every 60 Hz update, so a body can touch down on the odd update of a pair, half a stock step (1/60 s) before the update on which stock would have seen it: in the model, for 4 of 8 launch speeds. The landing update, the position along the ground at landing (by up to the horizontal velocity times $h/2$) and the velocity the collision response reads (the image, at a mid-pair instant) then differ from stock's. The samples between pair ends are also points stock never computes: the highest of them can lie up to 0.24 % above stock's highest. No transform here gates contact to pair ends; a title for which the landing update matters needs its own site. For a player: the character can be grounded one 60 Hz update (1/60 s) before stock would have grounded it, so the next jump input can be accepted one update sooner, the landing point shifts by up to the horizontal speed times 1/60 s, and a chain of jumps on a held button runs with a period up to 1/60 s shorter per landing.
+
+**Site references.** $g$, $c$, $L$ and $h$ are stock values, named by `gravity_site`, `damping_site`, `damping_step_site` and `step_site`: each holds the id of another site of the package whose instruction pins one float, as `acceleration_site` does for `launch_velocity_x0.5`.
+
+- **What may be named.** $g$, $c$ and $L$ are named through `value_reference` sites only: a value another transform rescales is not the value the title then uses (with the halved step as $L$, the title would compute $1 - cL/2$ and the retention site would take the root of that). `step_site` may also name the `step_x0.5` site that halves the step, since that site is what makes the 60 Hz step $h/2$. One site pins one quantity: a site named for two of them, in one site or across the package, refuses it.
+- **How the value is read.** The site is a `lui`/`ori` pair (or a lone `lui` with `low_insn_offset`), or an `lwc1` or `lv.s` whose base register is a constant: within the 16 instructions before the load, a `lui` of that register and at most one `addiu` or `ori` of it. Delay slots are read as the code they are. A load that is itself a delay slot runs after everything before its branch, jump or call. A conditional branch that is not a likely form is passed, because on the path that falls through to the load its delay slot and the code before it both ran, so a `lui` in that slot counts. Any other transfer ends the scan: after a jump, a call, a branch-likely or a branch that is always taken, the code that follows is not reached with that slot run. The taken path of a branch is checked where the scan can see it: a branch or jump among those 16 instructions whose target lies at or before the load, and whose taken path skips the `lui` or the `addiu`/`ori` (they lie after its delay slot and before its target), would reach the load around the code that builds its address, and refuses. A branch with the `lui` in its own delay slot, or one taken past code that does not build the address, builds it on both paths and is accepted. The check reads backward in address order and does not see a branch from farther away into those instructions, nor a backward branch from after the load into them.
+- **Only data the title cannot change.** The word is read from an allocated `PROGBITS` section that is neither writable nor executable. A value in writable data is refused: the title could change it while it runs, and $\kappa$ and $q$ are fixed when the package is built.
+- **Nor the package.** A data site (§9.6) whose span covers a word pinned for $g$, $c$ or $L$, or by a `value_reference` no site names, is refused, for the same reason a rewritten site may not be named. The word of the step may be rescaled by a data site, as it may be by its `step_x0.5` site.
+- **What is refused.** Any referenced value that is not finite, $cL$ outside $(0, 1)$, and a step whose half is not a positive float32. $\kappa$ and $q$ are computed in double from the stock single-precision values. A package holds none of these numbers, published or not: it holds the rule and the sites.
+
+Nothing ties $\kappa$ and $q$ to the retention the title computes at run time beyond these checks: the retention site maps whatever value in $(0, 1)$ it finds. That the body's retention is always $1 - cL$ with the pinned $c$ and $L$ is the first condition above, and part of the evidence.
+
+**Guest memory written by a timing transform.** Decision of 2026-11-10 (#2366): a transform of this section writes guest memory only where it replaces, at the same place, a value the stock logic itself stores there, with that value's 60 Hz image. Two forms do. A `swc1` or `sw` store site makes the title's own store instruction store the scaled value. `launch_from_rest_60hz` writes after a call, so the resolver proves that the called function stores both floats itself, the package must name the capability `launch_velocity_write` (the validator refuses the site without it), and the transform's section 11.3.2 entry lists every field written. Any other write to guest memory needs a `guest_memory_code_hook` package (section 2.3), as `clip_x_widen` does, and the validator refuses such a transform in a timing package. A transform that only reads guest memory to decide what a site does (`gate_30hz_phase`) is not a write; its entry says what it reads. Its gated load changes a register, not memory, but the title's own instructions could carry that zero into memory: the resolver refuses the store it can see (the gated register, or a general-register copy of it, stored in the straight-line code after the load), and every other use of the gated value is the site's evidence.
+
+**Host arithmetic.** The scale by $\kappa$, the launch map and `sqrtf` run in the host's round-to-nearest, whatever rounding mode the guest has selected, and set no cause or flag bit in FCR31. The launch map's fused multiply-add is one correctly rounded operation where the C library's `fma` is; the rounding to single precision hides nearly every difference.
 
 A semi-implicit Euler motion (`v += g`, then `x += v`, once per update) reaches $x_n = n v_0 + g\,n(n+1)/2$. With $g/4$ per 60 Hz update and $v_0/2 + g/8$ at launch it reaches the same $x$ at every second update, which is what `accel_x0.25` and `launch_velocity_x0.5` declare together. The acceleration site must pin its whole float: a two-word site, or `low_insn_offset` and `low_stock_digest` naming the `ori` that completes a lone `lui` (read, never rewritten). A site with `operand: f64_high` is the `lui` of a double's upper word: `count_x2`, `step_x0.5`, `probability_per_update_x0.5` and `accel_x0.25` step its 11-bit exponent exactly, and other transforms refuse it.
 
@@ -270,12 +376,12 @@ Every frame-rate rescale package declares `rng_policy`. Under `rescale_probabili
 
 1. Draft a package for a new title: `python tools/enhancement_package.py --draft <selected.elf> --title-id <library title_id> --out <disc_id>-60hz.json` reads the decrypted executable from the title's package cache and recognises its frame-pacing wait: a VBLANK counter that one routine increments by 1 (it reports whether that routine is registered as a VBLANK sub-interrupt handler, also through one wrapper), that the wait compares with `slti`/`sltiu rX, 2` and clears with `sw zero`; or `sceDisplayWaitVblankStartMulti(2)` and its CB form. Each becomes a `vblank_wait_2_to_1` site, with a `<package>.symbols.json` sidecar that names the routines `draft_fn_<address>`. The routines that call a pacing wait are printed as update-boundary candidates. The draft sets `update_boundary` only when there is exactly one, and that routine must still be confirmed to run once per logic update. Other VBLANK waits, for example two plain `sceDisplayWaitVblankStart` calls per frame, are printed for review, because no transform rewrites them. The draft validates but contains none of the title's frame-counted constants: those still come from the title's own code (sections 9.2 and 9.6).
 2. Validate a package: `python tools/enhancement_package.py path/to/pkg-60hz.json`.
-3. Build a package build: `python tools/nk_cli.py build-package <DISC_ID> --enhancement-package path/to/pkg-60hz.json` (or `--experimental-60hz` with the package at `<user data>/enhancements/<disc_id>-60hz.json`, the disc ID in lowercase, for example `ulus12345-60hz.json`), or pass `ENHANCEMENT_PACKAGE=path/to/pkg-60hz.json` to `make`. Codegen resolves function names from the ELF symbol table or a `<package>.symbols.json` sidecar.
-4. Run the built executable with `SR_EXPERIMENTAL_60HZ=1` for 60 Hz logic, or without it for the authentic 30 Hz game. The player selects the package from the title's setting (section 9.1, item 2). A title has an enhancement package when `<user data>/enhancements/<disc_id>-60hz.json` (lowercase disc ID) parses, its `id` matches `^[a-z0-9][a-z0-9._-]{0,63}$` and its `target_title_id` is the title's own; the player reads only those fields and never forms a path from an id that fails the pattern. With the setting on, the player validates and launches `packages/<disc_id>-enhanced-<pkg_id>` with the same manifest, ABI and identity checks as the authentic package, and the package must record that enhancement package id in its codegen options; the authentic folder must record none. Each package has its own status: when the enhanced package is missing or stale, the title's primary action builds it (`build-package --experimental-60hz`) and nothing launches the authentic package in its place. When the setting is on but the enhancement package is gone, the title neither builds nor plays until it is turned off or the package is restored.
+3. Build a package build: `python tools/nk_cli.py build-package <DISC_ID> --enhancement-package path/to/pkg-60hz.json` (or `--experimental-60hz` with the package at `<user data>/enhancements/<disc_id>-60hz.json`, the disc ID in lowercase, for example `ulus12345-60hz.json`, else the published package of that name in `assets/enhancements/`, section 5.1), or pass `ENHANCEMENT_PACKAGE=path/to/pkg-60hz.json` to `make`. Codegen resolves function names from the ELF symbol table or a `<package>.symbols.json` sidecar.
+4. Run the built executable with `SR_EXPERIMENTAL_60HZ=1` for 60 Hz logic, or without it for the authentic 30 Hz game. The player selects the package from the title's setting (section 9.1, item 2). A title has an enhancement package when `<user data>/enhancements/<disc_id>-60hz.json` (lowercase disc ID), or when that file does not exist the shipped `assets/enhancements/<disc_id>-60hz.json` of the source tree beside the player (the tree it finds `tools/nk_cli.py` in), parses, its `id` matches `^[a-z0-9][a-z0-9._-]{0,63}$` and its `target_title_id` is the title's own; the player reads only those fields and `experimental` (section 9.10), and never forms a path from an id that fails the pattern. With the setting on, the player validates and launches `packages/<disc_id>-enhanced-<pkg_id>` with the same manifest, ABI and identity checks as the authentic package, and the package must record that enhancement package id in its codegen options; the authentic folder must record none. Each package has its own status: when the enhanced package is missing or stale, the title's primary action builds it (`build-package --experimental-60hz`) and nothing launches the authentic package in its place. When the setting is on but the enhancement package is gone, the title neither builds nor plays until it is turned off or the package is restored.
 
 ### 9.5. Update Boundary: Gating Counts Logic Updates
 
-A gated statement (a `gate_30hz`, `gate_30hz_hold` or `gate_30hz_store` site, and the unit steps and countdowns whose rewrite is a gate) runs when the number of logic updates begun so far is even. A `gate_30hz_alt` site keeps its own phase on the same count instead (section 9.2): it makes its alternates only in an update right after one in which it made the stock call, and otherwise makes the stock call (a second run in the same update repeats that update's choice), so a function reached again after a scene change runs before its alternates. The package says where an update begins with `update_boundary`: a symbolic `function`, a 4-byte-aligned `insn_offset` and the `stock_digest` of one instruction that runs exactly once per logic update, usually the first instruction of the title's per-frame body. While `SR_EXPERIMENTAL_60HZ=1`, that instruction first advances the counter `nk_enhancement_updates` and then runs its stock statement unchanged; with the toggle off nothing is counted.
+A gated statement (a `gate_30hz`, `gate_30hz_hold` or `gate_30hz_store` site, and the unit steps and countdowns whose rewrite is a gate) runs when the number of logic updates begun so far is even. A `gate_30hz_alt` site keeps its own phase on the same count instead (section 9.2): it makes its alternates only in an update right after one in which it made the stock call, and otherwise makes the stock call (a second run in the same update repeats that update's choice), so a function reached again after a scene change runs before its alternates. The package says where an update begins with `update_boundary`: a symbolic `function`, a 4-byte-aligned `insn_offset` and the `stock_digest` of one instruction that runs exactly once per logic update, usually the first instruction of the title's per-frame body. While `SR_EXPERIMENTAL_60HZ=1`, that instruction first advances the counter `nk_enhancement_updates` and then runs its stock statement unchanged; with the toggle off nothing is counted. A `gate_30hz_phase` site does not use this count and needs no `update_boundary`: its phase is the number of updates its own state has run, read off that state's time (section 9.2), which starts with the state and stops while the state does, whatever the parity of the update the state was entered on.
 
 1. **Required when anything gates.** The validator refuses a package with a `gate_30hz`, `gate_30hz_hold`, `gate_30hz_alt` or `gate_30hz_store` site and no `update_boundary`, and codegen refuses one whose planned rewrites include any gate without it.
 2. **Verified like a site.** The boundary's function resolves and its stock word is checked against `stock_digest` the same way, fail-closed. It may not be a control transfer or a rewritten site, and a package whose boundary is never emitted is refused like an unemitted site.
@@ -283,7 +389,7 @@ A gated statement (a `gate_30hz`, `gate_30hz_hold` or `gate_30hz_store` site, an
 4. **Slowdown is reported.** An update that takes longer than one VBLANK of host time is followed by the title's own wait for the next VBLANK, so the logic runs below 60 updates per second while every per-update step stays halved: the game plays slower than the original. The generated start-up hands `nk_enhancement_updates` to the runtime (`sr_enhancement_register_updates()`), which compares it once a second. Logic that runs but stays under 57 updates per second for three seconds in a row is logged as `ENHANCEMENT_LOGIC_SLOWED` and shown in the game window as a red `60 FPS logic: <n>/s - SLOWED` line, with or without the F3 HUD. A second with no update at all (a load or a pause) clears the count.
 5. **Why it is declared, not inferred.** A `vblank_wait_2_to_1` site is the compare inside a title's wait loop, which can run several times in one update, so it does not mark where an update begins. The package names the boundary explicitly.
 
-This package format is experimental and opt-in.
+This package format is opt-in; whether a package is experimental is section 9.10.
 
 ### 9.6. Data Sites and Data Files
 
@@ -303,7 +409,7 @@ Some titles parse a table from disc at load time and store each field into RAM w
 - **A store site that never runs.** With the toggle on, when the process ends, each site with `stock_values` that stored no value prints `ENHANCEMENT_DATA_SITE_NOT_REACHED: site <id> at 0x<pc> stored no value in this run; whatever it should have rescaled stayed stock`: the title filled the field on another path, and its readers saw stock values. A run stopped by `ENHANCEMENT_DATA_MISMATCH` prints only the mismatch. The line is printed at an ordinary exit and on the runtime's `_Exit` paths (the headless end of run, a route failure, a capture exit, an unsupported import, a guest fault), through `sr_at_process_end()` in `src/rt/perf.h`. It is a report and leaves the exit status as it is: those statuses already mean something (a route result, a capture code), and the site may legitimately not have run yet when the run ends early. A tool that accepts a 60 Hz run checks for the line.
 - **Choosing the store.** The site must be the last store of the value: after any clamp or range check the title applies to the field, or a scaled value the title clamps afterwards is lost without a line. If a later store cannot be ruled out, keep the scaled values inside the clamp.
 - **A scaled value that is also a stock value.** The check compares the stored value with the stock list, so it cannot tell a stock value from an already scaled value that equals another stock value (stock values 30 and 60 with `count_x2`: a re-stored 60 that was a scaled 30 is scaled again to 120). The package is not refused, because one table can hold both v and 2v, but codegen prints `warning: enhancement site <id>: stock value <v> scales to <w>, which is also a stock value; ...` once per such value. The package author checks that no path stores an already scaled value again through that instruction.
-- **`requires`** is a non-empty list of site ids, each another site of the package that declares `stock_values`. The site runs its rewrite only after every required site has applied at least once in the run; until then it runs its stock statement, and the first time that happens it prints `ENHANCEMENT_SITE_GATED: site <id> at 0x<pc> runs stock: <required id> has not applied` once. It works for every rewrite kind; on a gated call (`gate_30hz`, `gate_30hz_hold` or `gate_30hz_alt` on a `jal`) the stock statement is the call made on every update, with no alternates. The package refuses an unknown id, the site's own id, a duplicate, an id that names a data site or data file, and a required site that itself declares `requires`.
+- **`requires`** is a non-empty list of site ids, each another site of the package that declares `stock_values`. The site runs its rewrite only after every required site has applied at least once in the run; until then it runs its stock statement, and the first time that happens it prints `ENHANCEMENT_SITE_GATED: site <id> at 0x<pc> runs stock: <required id> has not applied` once. It works for every rewrite kind; on a gated call (`gate_30hz`, `gate_30hz_hold`, `gate_30hz_alt` or `gate_30hz_phase` on a `jal`) the stock statement is the call made on every update, with no alternates, and on a `launch_from_rest_60hz` site it is the call with no map after it. The package refuses an unknown id, the site's own id, a duplicate, an id that names a data site or data file, and a required site that itself declares `requires`.
 - **"In the run" means the process.** Application counts and the gate are kept for the life of the process, including after an in-process `LoadExec`: a site that applied before it still counts as applied.
 
 ### 9.7. Side-by-Side Timing Check
@@ -324,6 +430,141 @@ python tools/enhancement_package.py --compare-rates stock/samples.csv enhanced/s
 
 Sample specs and routes name guest addresses, so they stay private with the package; the check itself is generic.
 
+### 9.8. Ace Parts (`ace_parts`)
+
+A timing package may also carry Ace parts: items for its one title that belong to the Ace tier (section 10) and
+that a player turns on or off apart from the 60 FPS game logic. The field is an object of named parts:
+
+```json
+"ace_parts": {"load": {"sites": [{"id": "...", "function": "...", "insn_offset": 0, "stock_digest": "...",
+                                  "transform": "vblank_wait_skip"}]}}
+```
+
+- **Names.** The part names are a closed list: today only `load` (section 11.3.10). Any other name refuses the
+  package, as does an empty `ace_parts` or a part with no sites.
+- **Sites.** Each site has an `id`, a symbolic `function`, a 4-byte-aligned `insn_offset`, the `stock_digest` of one
+  stock instruction word, an optional `word_count` that may only be 1, and a `transform` from the parts' own list
+  (below). A site resolves and is verified like a `sites` entry (section 9.2), fail-closed, and in a published
+  package (section 5.1) its function is in the site map and its digest is keyed, as for `sites`.
+- **One namespace.** Site ids and instruction words are shared by `sites`, every part's sites and the
+  `update_boundary`. The validator refuses a duplicate id, an Ace part site on a word a `sites` entry (any of its
+  `word_count` words), another part site or the `update_boundary` already covers, an Ace part site that declares
+  `requires`, and any `requires` that names an Ace part site. It compares words by `function` and `insn_offset` in a
+  private declaration, and again by site-map address in a published package (section 5.1), whose site map may give
+  one address two names; the publish gate runs the same check. Codegen compares the resolved addresses, whatever
+  the names: it refuses a part site whose word is a 60 Hz site's word or the boundary's.
+- **Their own transforms.** The parts' transforms are a set of their own, disjoint from the transforms of section
+  9.2: a 60 Hz transform in `ace_parts`, or a part transform in `sites`, is an unknown transform and refuses the
+  package.
+- **Their own switch.** A part site is gated at run time only by its part's `SR_ACE` key (section 10.1), never by
+  `SR_EXPERIMENTAL_60HZ` or the update count. With the key off the stock statement runs. A package without
+  `ace_parts` generates exactly the code it generated before; with them, the generated C differs only at each part
+  site's statement, at the `update_boundary`'s statement, which also calls `nk_ace_load_update()` for the `load`
+  part's pacing guard (section 11.3.10), and in the declaration digest, which covers `ace_parts` like every other
+  field, so the AOT cache key changes with it.
+
+| Transform | Instructions with a defined rewrite | Rewrite |
+| --- | --- | --- |
+| `vblank_wait_skip` | `jal` whose target is the executable's import stub of `sceDisplayWaitVblankStart` (NID `0x984C27E7`); any other target refuses the package | the delay slot runs as stock; the call runs unless the runtime skips it (`nk_ace_load_skip_wait()`), which it does only while the run's `load=fast` is in effect and waits are permitted, that is, where the stock call would block. A skipped call still blocks the thread, for 1 µs, the shortest delay wait the scheduler has (that of `sceKernelDelayThread(1)`), so ready threads of any priority run as during the stock wait, and it leaves `$v0` = 0, the stock function's return there. Where waits are not permitted the stock call runs and returns `CAN_NOT_WAIT`. A package with a `load` part must declare an `update_boundary`, and the site may not be in its function, compared by name, by site-map address in a published package, and by resolved address in codegen. Nothing else about where the site sits is checked: a wait in a caller or a callee of the boundary's function is accepted, and the site's own evidence must show it is reached only while loading (section 11.3.10) |
+
+### 9.9. A Code-Hook Package Beside the Timing Package
+
+A build carries one enhancement package and, beside it, at most one `guest_memory_code_hook` package (section 2.3),
+so a title's Ace items that change guest memory build together with its 60 FPS game logic. The code-hook package
+stays a package of its own: the rule of section 9.2 holds as it is, and a timing package still refuses a code-hook
+transform such as `clip_x_widen` (the decision of 2026-11-10, #2366, under "Guest memory written by a timing
+transform"). A timing transform writes guest memory only where it replaces a value the title's own logic stores
+there; `clip_x_widen` writes the x row of matrices the title built, a value no stock store of that site writes, so
+it is a code hook and keeps that category's declaration and checks. The two are joined only in the build, where
+each keeps its own category, digest and checks.
+
+- **Naming it.** `build-package` takes `--code-hook-package <path>`, or `--ace-cull`, which reads
+  `<user data>/enhancements/<disc_id>-cull.json` (lowercase disc ID), else a published package of that name in
+  `assets/enhancements/` (section 5.1). Make takes `ENHANCEMENT_CODE_HOOK_PACKAGE=<path>` beside
+  `ENHANCEMENT_PACKAGE`, and codegen `--code-hook-package` beside `--enhancement-package`. An environment that
+  names one on its own is refused, as for the enhancement package.
+- **Checks.** The code-hook package is validated, matched to the disc, title and executable, and its sites
+  resolved and verified as the enhancement package's are. Each of these refuses the build by name, and nothing is
+  merged: a second package whose category is not `guest_memory_code_hook`; an enhancement package that is a
+  code-hook package too; a code-hook package for another title; a site id both packages use; a code-hook site at
+  a word the enhancement package rewrites (a 60 Hz site, an Ace part site or the `update_boundary`) or at the delay
+  slot of a rewritten call; a code-hook call whose delay slot is such a word, inside the span the enhancement
+  package rewrites; a code-hook site whose rewrite keeps run-time state; a code-hook call to a function that a
+  `gate_30hz_alt` site of the enhancement package lists as an alternate (on an alternate update that site calls the
+  alternate itself, so the hook would act only on the other updates); and a code-hook package with no sites. Codegen
+  refuses `--code-hook-package` without `--enhancement-package`.
+- **The build.** The code-hook sites join the site table and are emitted as they would be in a build of that
+  package alone; the generated code gains one header line naming the code-hook package's id, version, site count
+  and digest; the package's cache key gains its id, its digest and, when it has one, its symbols sidecar's digest.
+  A build of a timing package with a code-hook package is `packages/<disc_id>-enhanced-<timing id>+<hook id>` (no
+  package id holds a `+`, and the joined name may have at most 64 characters); a code-hook package with no timing
+  package is the build's one package, `packages/<disc_id>-enhanced-<hook id>`.
+- **Without one** the generated output, the package directory and the cache key are byte-identical to a build
+  before this section.
+
+### 9.10. Experimental or Released
+
+A package is experimental unless it declares `"experimental": false`; the validator refuses any value other than
+`true` or `false`. The player treats a missing or non-boolean value, and a package it cannot use, as experimental.
+The flag changes one thing: the title page's ENHANCEMENTS card tags the title's 60 FPS game logic switch
+EXPERIMENTAL for an experimental package and OPTIONAL for a released one. The switch keeps its tier (Ace), its
+default (off, section 9.1, item 2) and what it runs. The flag is part of the declaration, so it is in the
+declaration digest and the AOT cache key like every other field (section 9.8): the next build of the enhanced
+package misses the cache once. An enhanced package already built keeps launching, because the player checks only the
+enhancement package id a build records, not its declaration.
+
+Only the maintainer releases a package the project ships in `assets/enhancements/` (section 5.1), by a decision
+recorded in an entry for that package under this section, with what was measured and the limits known when it was
+released (the entries below). The player honours `"experimental": false` only in a
+package it finds in the source tree's `assets/enhancements/` (section 5.1), never in one from the user's data
+folder: a package there, which comes first, still loads and plays but is always shown as experimental, whatever it
+declares.
+
+#### 9.10.1. *Hot Shots Tennis* (UCUS98701): `hst.timing.native_60hz`
+
+- **Status.** Released from package 14.0.0-pre1 by the owner's decision of 2026-11-12 (#1732), with the known
+  limits below. The release carries to package 15.0.0-pre1 (#2547), which adds four sites to 14.0.0-pre1 and
+  changes no other; the coordinator recorded this on 2026-11-13. It is short of the goal #1732 sets, true 60 logic
+  updates a second in menus, the title screen and matches.
+- **Measured, 14.0.0-pre1** (the side-by-side check of section 9.7, recorded in #2362). Package 14.0.0-pre1
+  against the authentic game on a private full-match route (title screen, menus and one full match): 57.2 logic
+  updates per game second in the menus (with the boot), 59.9 on the title screen and 57.1 in a match. In that run
+  77 % of the match's seconds after its entry load held 57 or more, with short dips (the lowest second 33), so the
+  `SLOWED` line of section 9.5, item 4 (three seconds in a row under 57) can appear in a match. No compared event
+  differed from the authentic game: the point winner, the ball's side and the ball's owner match, and both players'
+  random-number seeds advance 1.98 and 2.03 times as often, as `rescale_probability` (section 9.3) expects.
+  Shot-type changes were too few to judge, and the tool's overall verdict reads `FAIL` only for reseeds it cannot
+  resolve as generator steps, which the authentic run has about as many of (35 against 38). The host was never
+  fully idle: the measured run had 43 % mean processor load from other work, and an earlier run at 53 % fell to
+  52.7 in the match (`SLOWED`).
+- **Measured, 15.0.0-pre1** (recorded in #2547). The package adds four of the eight `gate_30hz_store` sites of
+  #2360: the menu cursor ease (S0375) and the float ease of a ticker line (S0386). On private title runs (the
+  maintainer's copy), each ease timed from its stored values and the logic-update count: the cursor takes its 7
+  values in 12 updates, 0.200 s, as the authentic game does in 6 updates (14.0.0-pre1 took 0.100 s), and a second
+  cursor takes 0.167 s in both; the ticker's ease-in takes its 13 values in 24 updates, 0.400 s, in each of 8
+  eases, as the authentic game does (14.0.0-pre1 took 0.200 s). A side-by-side check (section 9.7) of a private
+  menus-and-match route found no compared event differing from the authentic game (authentic against 60 Hz
+  counts: points 18 and 18, point winners 33 and 33, ball side changes 69 and 62, a ratio of 1.13 per game second
+  inside its 99 % range of 0.72 to 1.77; both opponents' random-number generators at 1.97 and 2.06 against the
+  expected 2), but by the tool's own rules it is not a pass: it covers 79 % of the authentic run's game time,
+  under `--min-coverage` (0.9), and logic ran at 46.8 updates a second on a loaded host (`SLOWED`), each of which
+  makes it `INCOMPLETE`, and 73 generator steps are unresolved, which makes it exit 1 (`FAIL`). It ran on an
+  earlier build of the package that held all eight `gate_30hz_store` sites, not on 15.0.0-pre1; on that private
+  route the function of the four sites not shipped never ran.
+- **Known limits.**
+  1. Further sites belong in the next package update: the four `gate_30hz_store` sites of #2360 that 15.0.0-pre1
+     does not carry (S0332, a step toward a target, which runs twice as fast at 60 Hz until then; no private route
+     reaches the screen that uses it, so its game time is not measured), and five triage rows still open (#2362).
+  2. At 60 Hz the step from the main menu into single player takes 3.94 s longer than in the authentic game (288
+     vertical blanks against 52). A 60 Hz run with an earlier package shows the same, so it is older than
+     14.0.0-pre1. Its cause is not traced yet (#1732).
+
+  Also recorded in #2362: when two bounces come 33 ms apart or less, the bounce-effect sites free their emitters
+  up to two 60 Hz updates early.
+- **Not run.** A run on a fully idle host; a side-by-side check of 15.0.0-pre1 itself; the step into single
+  player (limit 2) with 15.0.0-pre1; and a measurement of whether 15.0.0-pre1 costs more per update than
+  13.0.0-pre1.
+
 ## 10. Play Modes: Authentic, Enhanced and Ace
 
 The player offers three play modes per game (#2055):
@@ -331,10 +572,11 @@ The player offers three play modes per game (#2055):
 - **Authentic** is the standard: the game as released, recreating the PSP as closely as the project can. It is the
   default for a new library.
 - **Enhanced** turns on the project-authored improvements that work for any game: texture filtering, crisp system
-  text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound, finer patches and sharper
-  enlarging. A new library starts with texture filtering, crisp system text and the game badge on and the rest off,
-  and a graphics preset sets crisp system text and sharper enlarging (section 10.1); finer patches are in no preset.
-  Each one is a *part* that can be turned off for the library or for a single game.
+  text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound, finer patches, smooth
+  far textures, sharper enlarging and full 32-bit colour (section 10.11). A new library starts with texture
+  filtering, crisp system text and the game badge on and the rest off, and a graphics preset sets crisp system text
+  and sharper enlarging, and Ultra also full 32-bit colour (section 10.1); finer patches and smooth far textures are
+  in no preset. Each one is a *part* that can be turned off for the library or for a single game.
 - **Ace** is Enhanced plus the improvements made for that game alone. Today that is the title's 60 FPS game logic
   package (section 9). The player offers Ace only for a title with a usable package; its own parts can be turned off
   for that game too.
@@ -347,9 +589,22 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 ### 10.1. The Launch Line
 
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
-`v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
-run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `cull` (`on` or `off`,
-section 11.3.6) is the other key a line may leave out: a missing `cull` is off, and `cull=on` needs `tier=ace`. Every
+`v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off`. `tier` (`enhanced` or `ace`) only names the
+run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `mips` (`on` or `off`,
+section 10.16), `stick` (the title's stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section
+11.3.10), `depth` (`32` or `off`, section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `peak` (`limit` or `off`,
+section 10.22), `glyphs` (`on` or `off`, sections 10.13 and 11.3.5), `texpack` (`on` or `off`, section 11.3.4) and
+`cull` (`on` or `off`, section 11.3.6) are the other keys a line may leave out: a missing `mips`, `stick`, `load`,
+`depth`, `ssaa`, `peak`, `glyphs`, `texpack` or `cull` is off, `stick=<counts>`, `load=fast` and `cull=on` need
+`tier=ace` (`mips=on`, `depth=32`, `ssaa=2|4`, `peak=limit`, `glyphs=on` and `texpack=on` do not), the launcher
+writes `;mips=on` for an Enhanced or Ace launch with that part on, `;load=fast` and `;cull=on` only for an Ace launch
+with that part on, `;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with supersampling on and `;texpack=on` for
+an Enhanced or Ace launch with the Texture pack part on for a title that has a pack, and no launcher writes `depth`
+(section 11.3.12), `peak` (section 10.22) or `glyphs` (section 11.3.5) yet: a line that carries one is written by
+hand. A line writes them only when on, in that order, `mips` right after `twin` and `cull` last, so a line with them
+off is the line without them, byte for byte. With `texpack=on` the launcher also exports `SR_TEX_REPLACE`, the
+title's pack folder; it always exports that variable, empty for any other line, so an inherited folder never reaches
+a run. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -357,7 +612,9 @@ Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`
 (section 9.4). Nor is sharper enlarging (`"upscale"`, #2122): the launcher exports it as `SR_PRESENT_UPSCALE`, `fsr1`
 for an Enhanced or Ace run with the part on, and `off` otherwise, and always `off` for Authentic (section 2.2). The
 part's value is the title's own, else the graphics preset's where it sets the part (Medium, Ultra and Handheld on,
-Low and High off), else the library's; crisp text (`text`) is resolved the same way, and every preset turns it on.
+Low and High off), else the library's. Crisp text (`text`) and full 32-bit colour (`twin`, section 10.11) are
+resolved the same way: every preset turns crisp text on, and Ultra turns full 32-bit colour on while the other
+presets leave it to the library.
 The launcher also exports `SR_MOVIE_UPSCALE=off` for an Authentic session; an Enhanced or Ace session
 keeps the inherited value, as the movie upscaler has no setting.
 
@@ -371,7 +628,8 @@ scaling or the smart 2D filter, which names the request and does not obey it (se
 `TWIN: refused` line when `SR_GPU_TWIN_COLOR` is set, which changes nothing else (section 10.11), one line that
 names an unknown or refused `SR_GPU_DST_READ` value, which changes nothing else, and the
 `sdl3vk: destination reads: interlock|snapshot` line that every run prints (below). Finer patches (section 10.14)
-have no environment variable, so an authentic run prints nothing for them.
+have no environment variable, so an authentic run prints nothing for them. Nor has the host depth buffer (section
+10.20): an authentic run makes the 16-bit depth buffer it always made and prints nothing for it.
 `gpu-coherence-selftest` checks the samplers and the pool; `display-smoke` keeps its image hash.
 
 One device feature setting outside Ace applies to every run, Authentic included, because it is a correctness fix and not an
@@ -395,11 +653,21 @@ the device is created with no feature outside Ace.
   the filtered picture: the same class as a render scale above 1x, and the launcher says so. The launch notice, the
   speed readout and the crisp keyboard draw only on the swapchain image, never on the frame a capture reads, and so
   do Smooth motion's in-between frames (section 10.6).
+- **Supersampling:** `ssaa=2` or `ssaa=4` changes only the image the presenter shows; the frames a present commits
+  to guest VRAM are those of a run without it (section 10.21).
 - **Sound:** `sas=sinc` writes band-limited sample values into the guest's SAS output buffer, so it is a
-  guest-visible item. Its entry is section 11.3.1.
+  guest-visible item. Its entry is section 11.3.1. `peak=limit` changes only what the host plays: the guest's SAS
+  buffer keeps the PSP's saturated bytes (section 10.22).
 - **Patches:** `tess=2` to `tess=4` draws every triangle patch with finer triangles, which changes the frames a
   present commits to guest VRAM, and under `SR_GE_TIMING=1` it alters the GE timing model's clocks. It is a
   guest-visible item. Its entry is section 11.3.7.
+- **Input:** `stick=<counts>` (Ace only) changes the left-stick values of the live host samples the guest latches,
+  never when they are latched. It is a guest-visible item. Its entry is section 11.3.11.
+- **Loads:** `load=fast` (Ace only) shortens the display waits a title's own loading screen paces itself with, so
+  it changes guest timing. It is a guest-visible item, not yet admitted. Its entry is section 11.3.10.
+- **Depth:** `depth=32` gives the Vulkan renderer a 32-bit float depth buffer, which changes which surface wins
+  where two lie within one 16-bit depth step, in the frames a present commits to guest VRAM. The depth the guest
+  reads stays 16-bit and unchanged. It is a guest-visible item, not yet admitted. Its entry is section 11.3.12.
 
 ### 10.4. Stamps and Evidence
 
@@ -422,6 +690,12 @@ with resolves in this order:
    Ace includes Enhanced, with the title's own choices first.
 3. **Ace's parts.** The title's 60 FPS game logic is on unless the title turned it off. A title whose package has gone
    is blocked, not quietly played without it, until the package is back or the part or Ace is turned off.
+
+A title whose published package ships in `assets/enhancements/` (section 5.1) is offered Ace with nothing to install:
+choosing Ace for it runs its 60 FPS game logic, as item 3 says. Ace stays a per-title choice; shipping a package never
+changes the library's default or a title that follows it. The player offers Ace from the package's title alone; the
+build then checks the disc's revision and its executable against the package, and a disc they do not match is
+refused there, with nothing built and nothing launched in its place.
 
 A title's 60 FPS game logic and smooth motion may be on together (owner decision of 2026-11-04, replacing the earlier
 rule that refused the pair, #1272): the package keeps the game's logic at 60 Hz, and interpolation presents
@@ -450,8 +724,10 @@ off by default.
 
 ### 10.6. Smooth Motion
 
-With `smooth=x2`, a title the 30 Hz detector holds steady at 30 presents at the VBLANK rate. The code is
-`src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure pacing rule in `src/rt/ace.c`.
+With `smooth=x2`, a title the 30 Hz detector holds steady at 30 is presented at the VBLANK rate: every second
+picture is an in-between made from the two frames around it. That doubles the pictures, not always the motion.
+Content the search cannot follow is shown as in the old frame and still moves 30 times a second ("What it follows"
+below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure pacing rule in `src/rt/ace.c`.
 
 - **How a frame is made.** Block-matched motion between two private copies of consecutive presented frames, in a
   compute pass on the present's command buffer. It does not need #318, and it treats a GPU target and a CPU frame (a
@@ -487,28 +763,79 @@ With `smooth=x2`, a title the 30 Hz detector holds steady at 30 presents at the 
   frame to overflow the mask prints a warning.
 - **When.** The flip of frame B shows the in-between of A and B; the next VBLANK shows B. Nothing is shown before the
   guest made it, so a frame is never predicted. The cost is one VBLANK of added delay (about 17 ms), reported in the
-  run's report as `added_delay_ms`. A flip that arrives first replaces the held frame.
+  run's report as `added_delay_ms`. A new flip that arrives before B's present replaces it, counted in
+  `presents.superseded`: one VBLANK of delay does not fit a frame that is on screen for one VBLANK (a title leaving
+  30 FPS), and holding each frame back instead would keep every later frame one VBLANK late.
+- **A busy display never costs a real frame** outside fast forward (see "Only at 30" below). While the guest is
+  paced to real time, a present does not wait for the display (`src/rt/gpu_sdl3vk/README.md`): when the display
+  cannot take a frame, the present returns at once and shows nothing. When that happens to B's present, B stays
+  owed. It is tried again at each later VBLANK until a present shows it: one with no flip, or one whose flip's own
+  present found the display busy too. The first flip whose present the display takes shows B in place of its
+  in-between, then its own frame at its VBLANK, however many flips the display missed in between. Frames whose
+  presents the display never took are not shown, as without smooth motion; every frame whose present it took is
+  shown, in order. So a frame whose in-between was shown is never dropped for a made-up picture, and a display that
+  takes only every second present shows the real frames, with `SMOOTH OFF` on the readout. A title that flips each
+  frame twice is no different: when the flips in between found the display busy, the second flip of a newer frame
+  is that frame's first present, so it shows B and holds its own frame, owed in turn, for the next present. What a
+  present shows changes the pace only once that present has reached the screen. When the present that shows B fails
+  after its submission (an out-of-date window, say), nothing reached the screen, as with a busy display: B stays
+  owed, the pass drops the frame it recorded with it, and the CPU present that takes over shows B and holds C. When
+  that one fails too, B's VBLANK shows it and C is lost, as a failed present loses a frame without smooth motion.
+  B is given up when a present fails before its submission, when its VBLANK's own present fails (a failure that
+  repeats, such as a minimised window, never leaves an old frame waiting to be shown after newer ones), when the
+  window closes, or when the renderer can present nothing any more. `presents.busy` counts the held presents the
+  display could not take or that failed and were tried again, and `presents.superseded` every held frame that never
+  reached the screen.
 - **Only consecutive frames.** An in-between is made of a frame and the one flipped just before it. When that one
   never reached a present (the presenter's slot rule dropped its flip on a busy PC, or the present failed), the
   pass still holds an older frame, and an in-between of the two would put a fast-moving object in the wrong place
   or lose it. The new frame is then shown as it is and kept, and the report counts it in `presents.unpaired`.
-- **Only at 30.** Every other detector class, a pause and a static picture show each frame as it comes, as without
-  the feature. A title that runs 60 FPS game logic is such a class in this build (section 10.5). The detector enters
+- **Only at 30.** Every other detector class, a pause, a static picture and fast forward (section 10.15) show each
+  frame as it comes, as without the feature. Fast forward keeps each frame it shows, so the first in-between after it
+  is made of two frames shown one after the other. A frame still held or owed when fast forward starts is
+  superseded by the first new frame (`presents.superseded`), which is shown as it comes. A title that runs 60 FPS game logic is such a class in this build (section 10.5). The detector enters
   30 Hz after a second of agreement and leaves after half a second of disagreement.
-- **Never off without saying so.** The setting's description says it acts on steady 30 FPS scenes only. With the
-  speed readout on, its text ends with `SMOOTH n`, the distinct pictures a second that reached the screen (the
-  in-betweens, the held real frames and any new frame shown as it is; a present the presenter dropped is not
-  counted), or `SMOOTH OFF` for a second in which it added none: another frame rate, a PC that cannot keep up, or
-  no Vulkan device for it.
+- **Never off without saying so, and never more than it moved.** The setting's description says it smooths
+  steady 30 FPS scenes only where it can follow the motion. With the speed readout on, its text ends with
+  `SMOOTH n`, or with `SMOOTH OFF` for a second in which no in-between was shown: another frame rate, a PC that
+  cannot keep up, or no Vulkan device for it. `n` counts what moved, not what was presented: the real pictures
+  that reached the screen in that second (the held frames and any new frame shown as it is; a present the
+  presenter dropped is not counted), plus each in-between by its measured weight (next item). A scene whose
+  in-betweens repeat the old frame reads `SMOOTH 30` at sixty presents a second.
+- **What an in-between moved.** Every in-between is measured against its two frames in its own command buffer
+  (`shaders/ace_measure.comp`), on a 480 x 272 grid of the picture, by the largest channel difference in 1/255.
+  A pixel is moving when the two real frames differ there by more than 40. Over the moving pixels the pass sums
+  the in-between's distance to the old frame and to the new one. The phase is the old sum over both: 0 for a
+  repeat of the old frame, one half when the changing content sits half-way, 1 for the new frame. The weight is
+  twice the smaller sum over both: 0 at either end, 1 at one half, and 0 when nothing differs. A plain blend of
+  the two frames also weighs 1, so the weight says the content is between the frames, not that it is sharp. The
+  counts of moving pixels within 6 of the old frame and of the new one tell the two apart: a carried object
+  leaves its old place showing the new frame, a blend shows neither. The pass also counts the pixels the two
+  frames agree on (within 40) that the in-between shows more than 64 from both. That is an object drawn in mid
+  flight or a hole in something that stood still, and the count cannot tell which. Only an in-between that
+  reached the screen is counted. Its numbers are read once the presenter has seen the submission that carried
+  its commands finish, a few presents later. One that cannot be read then is counted, never guessed, and the last
+  few of a run are not read. A device that cannot build the measure pass has no smooth motion for the run, and the
+  report says it is unavailable. The report's `smooth_motion` block holds the run's totals (`measured`,
+  `unread`, `moving_px`, `old_px`, `new_px`, `novel_px`), the pooled `phase` and the mean `weight`.
 - **Recording.** A run recording (`SR_VIDEOREC_DIR`) holds what the window shows, in-betweens included: the recorder
   keeps each in-between for its own VBLANK and writes the held real frame at the next one. Its `frames.csv` and
   `logic.srt` still count only the game's own flips.
 - **UI.** A pixel that did not change between the two frames is copied, so a HUD stays exact while the scene moves
   behind it.
-- **Known limit.** A figure whose pose changes a lot between two frames on a plain floor (a player serving) can
-  lose most of its pixels in the in-between: no vector carries it, and at each pixel the composition takes whichever
-  frame shows the floor there. The composition judges pixels, not objects, so such a figure flickers for one
-  picture in two.
+- **What it follows.** The search matches blocks of two finished pictures. It finds motion of the picture as a
+  whole or in large parts (a scroll, a camera move) and shows that half-way. It does not find a figure whose pose
+  changes a lot between two frames, or a small object that travels further than its own size (a ball). Those keep
+  the old frame ("Where the search guesses" below), so they still move 30 times a second, one VBLANK late.
+  Measured on 2026-11-09 on a deterministic recording of a private route through a *Hot Shots Tennis* rally, with
+  a package built after #2320 landed: a pooled phase of 0.019 and a mean weight of 0.085. (A run before #2320
+  measured a phase of 0.03, with 92.5% of the moving pixels shown as the old frame.) For such a scene the feature
+  adds presents, not motion, and the readout says so.
+- **Which titles use what.** A title with a 60 FPS game logic package (section 9; *Hot Shots Tennis* has one)
+  gets every frame from the game itself. That is its path to 60, and the player turns smooth motion off for that
+  launch (section 10.5). A 30 FPS title without a package has only smooth motion, with the limit above.
+  In-betweens drawn from the game's own draws with interpolated positions, which would follow figures and small
+  objects exactly, are not built yet (#1272).
 - **Cuts.** When a third of the blocks fit nothing or disagree with their neighbours, the two frames are different
   pictures: the in-between is the old frame, and the new one follows on its VBLANK.
 - **Where the search guesses.** In a block whose two frames differ, a vector is a guess when moving it two samples
@@ -516,14 +843,14 @@ With `smooth=x2`, a title the 30 Hz detector holds steady at 30 presents at the 
   looks alike but differs and that neither it nor the coarser level's 3x3 vectors carry unchanged (a textured
   floor). Every changed pixel within two blocks of a guess keeps the old frame. So a figure whose pose changes too
   much for any vector (a player serving on a plain court) shows whole, as in the old frame, and never partly as
-  floor. This supersedes the earlier figure-flicker limit. Limits: in such a scene most moving pixels repeat the
-  real frame instead of moving halfway; a small fast object near a guess (a ball in hand) freezes where it was in
-  the old frame; and on strongly blocky textured floors a few pixels can still be wrong (4 to 12 in a probe).
+  floor. Limits: in such a scene most moving pixels repeat the real frame instead of moving halfway; a small fast
+  object near a guess (a ball in hand) freezes where it was in the old frame; and on strongly blocky textured floors
+  a few pixels can still be wrong (4 to 12 in a probe).
 - **What it never touches.** The in-between and the held frame are private images blitted to the swapchain. The
   flip's own present still commits the real frame to guest VRAM and gives any capture the real frame. The VBLANK's
   present latches no input and serves no capture.
-- **Stamps.** The report adds `presents` (real, between, held, superseded, unpaired) and `present_interval_ms`. Section 10.4
-  applies: the run is refused as evidence.
+- **Stamps.** The report adds `presents` (real, between, held, superseded, unpaired, busy), `smooth_motion` and
+  `present_interval_ms`. Section 10.4 applies: the run is refused as evidence.
 
 ### 10.7. Band-Limited SAS Resampling
 
@@ -604,9 +931,16 @@ that builds one clip-space matrix per camera and tests object bounds against it.
 
 ```json
 "enhanced": {"default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on", "wide": "off",
-            "smooth": "off", "sas": "off", "tess": "off", "upscale": "off"},
-"title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}}
+            "smooth": "off", "sas": "off", "tess": "off", "cull": "off", "upscale": "off", "stick": "off",
+            "load": "off", "twin": "off", "mips": "off"},
+"title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}},
+"texture_packs": {"ULUS10000": "C:\\path\\Packs\\My HD pack"}
 ```
+
+`"texture_packs"` maps a disc ID to the folder of the texture pack the player chose for it (section 10.12), at most
+256 of them; choosing one more is refused with a message. A member that is not a disc ID and a folder string is
+skipped. Choosing a pack sets that title's `"texpack"` part on; removing it forgets the folder (the folder itself
+is untouched) and returns the part to the library's.
 
 A title's `mode` is `library`, `authentic`, `enhanced` or `ace`; a part it does not name follows the library; its
 `"logic_60": "off"` turns Ace's 60 FPS game logic off. An entry that follows the library everywhere is not written.
@@ -629,7 +963,9 @@ when `"enhanced"` is absent, maps them as below, and writes the new keys from th
 
 `tests/native/test_player_state.c` (`test_play_mode_settings`, `test_play_mode_settings_mapping`) checks the names,
 the precedence, the off switches at both levels and this mapping; `test_play_mode_upscale_settings` checks sharper
-enlarging (`"upscale"`: `fsr1` or `off`) and the upscaler it sets for the launch.
+enlarging (`"upscale"`: `fsr1` or `off`) and the upscaler it sets for the launch; `test_play_mode_ssaa_settings`
+checks supersampling (`"ssaa"`: `2`, `4` or `off`) and its place on the launch line; `test_play_mode_mips_settings`
+checks smooth far textures (`"mips"`: `on` or `off`) and the `mips=on` it adds to the launch line.
 
 ### 10.10. Texture Scaling and the Smart 2D Filter
 
@@ -712,81 +1048,237 @@ The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture
 
 ### 10.11. Full 32-Bit Colour (the Host Twin)
 
-The game's 16-bit render targets are presented in full 32-bit colour without dither (#2050), in the Vulkan GE renderer.
+The game's 16-bit render targets are presented in full 32-bit colour without dither (#2050), in both GE renderers.
 It is a presentation-only change (section 2.2): it changes only the image the host shows, never what the guest
 draws, reads or waits for. The code is the host twin in `src/rt/gpu_sdl3vk/ge_gpu.c` (its header and the comment
-at `s_twin`).
+at `s_twin`) for the Vulkan renderer, and in `src/rt/ge.c` (the comment at `s_twin_mode`) for the software renderer.
 
 - **How.** Every render target and depth buffer gets a host-only twin at the user's render scale. Every write to the
   authentic image reaches its twin, in order: each render op is drawn a second time into the twin without dither or
   the 16-bit colour snap, and uploads, CPU-write patches, depth uploads, block transfers and destination snapshots
   are repeated on it. Twin passes sample twins, so a render-to-texture chain stays full colour. The presenter shows
   a twin only while it holds every write its image took; otherwise it shows the authentic image and re-seeds the twin.
+- **The software renderer.** The same switch turns on a twin in `ge.c`, decided on the renderer's first colour write
+  and inert while the Vulkan renderer draws. It keeps one host slot per 2-byte unit of the 2 MiB of VRAM (an 8888
+  pixel uses the slot of its first unit; 9 MiB of host memory): the twin's 8-bit colour, and a witness, the exact
+  value the authentic write left in VRAM. Each colour write is computed a second time from the same source colour,
+  with the same blend and logic op but no dither and no 16-bit colour snap, against the twin's colour where the slot
+  is valid and against the authentic pixel where it is not. A slot is valid only while VRAM still holds its witness
+  in the same format, so a write the twin does not take (a CPU store, DMA, the fast clear path) shows, and is
+  blended against, its authentic value from that pixel on. The twin's alpha is the alpha the authentic write left
+  (the stencil, in the target's format, as the Vulkan twin snaps it); a stencil-only write updates it, and a write
+  mask over colour bits leaves the pixel authentic. Block transfers within VRAM copy the slots with the bytes. The
+  CPU presenter shows the slots (`ge_twin_present_row`), each pixel without a valid slot as the CPU presenter converts it with the twin off.
+  `gpu-coherence-selftest` twin-soft checks it on twin-scene's list: guest VRAM equals the twin-off run byte for
+  byte, the shown gradients are smooth, and T1 and T3 are within one step per colour channel of the Vulkan twin.
+- **Render-to-texture in the software renderer.** Its texture fetches read guest VRAM, so a target drawn from a
+  render target's texture takes that texture's 16-bit texels into its twin: twin-scene's T2 shows T1's dithered
+  5551 texels in the software renderer, and T1's full colour twin in the Vulkan renderer. Its own blends and its
+  presentation are still full colour.
 - **Guest memory.** The authentic chain keeps the user's render scale, and nothing reads a twin back. Guest VRAM,
   every readback, every block transfer into RAM and the frame each present commits to guest VRAM are the twin-off
   run's at the same scale, byte for byte (`gpu-coherence-selftest` twin-scene, at scales 1, 2 and 4). Present-source
   captures follow the shown image, so they hold the twin's picture; `SR_GPU_TWIN_CAPTURE=authentic` shows and
   captures the authentic image instead.
 - **What the guest can observe (section 11.1).** Each of the four items is unchanged:
-  - VRAM bytes and other guest memory: unchanged, byte for byte (twin-scene, above).
+  - VRAM bytes and other guest memory: unchanged, byte for byte (twin-scene and twin-soft, above).
   - Readbacks: unchanged. GE and display readbacks, block transfers into RAM and the committed frame read the
     authentic image, as with the twin off (twin-scene).
   - Timing the guest can measure: unchanged. The guest timing model (VBLANK schedule, GE timing, media clocks) does
     not follow host GPU work (section 10.3). The second draw of each render op, and the drain when a twin allocation
     fails, are host waits.
   - I/O speed: unchanged. The twin performs no guest I/O.
-- **Default.** Off. It stays off by default until section 11.2 item 4's "nothing worse" runs pass: picture-gate or
-  route runs on *Hot Shots Tennis* and *LittleBigPlanet*, and a library sweep, each with the twin on against the same
-  run with it off. When the Ace launch line carries its key (`twin`, below), the key follows section 11.2 item 2.
-- **Setting.** `SR_GPU_TWIN_COLOR=1` (full colour) or `native` (the twin with the authentic colour, which the identity
-  self-tests use), read when the renderer starts. Unset, empty, `0` and `off` are off. Any other value prints
-  `TWIN: refused (...)` and leaves it off. It takes effect only in Ace Mode: in an authentic run it stays off whatever
-  the environment says, and a request prints one `TWIN: off (the host twin needs Ace Mode)` line. Until the Ace
-  launch line carries its key (`twin`, beside `tex`, `s2d` and `glyphs`, with the per-title switches of section
-  10.5, after #2074), the variable is the only way to turn it on, and it is off by default.
+- **Default.** Off for a new library. The Ultra graphics preset turns it on (section 10.1, #2280); the other presets
+  do not change it, so it keeps the library's value. The player's part "Full 32-bit colour" (the launch line's `twin=on`), choosing Ultra or `SR_GPU_TWIN_COLOR`
+  turns it on (see Setting). Turning it on by default needs section 11.2 item 4's "nothing worse" runs: picture-gate
+  or route runs on *Hot Shots Tennis* and *LittleBigPlanet*, and a library sweep, each with the twin on against the
+  same run with it off (#2050). The launch line carries its key (`twin`, below), which follows section 11.2 item 2:
+  a library switch and a per-title switch, each off by default.
+- **Setting.** The launch line's `twin=off|on` (section 10.1), a required key: `twin=on` asks for full colour. The
+  player writes it from the part "Full 32-bit colour" (`"twin"`, `on` or `off`) on the library's Settings > Enhanced
+  page and on each title's own page (sections 10.5 and 10.9); it is off for a new library unless the player turns it
+  on or chooses the Ultra graphics preset (the other presets leave it to the library, and a title's own value wins
+  over Ultra).
+  `SR_GPU_TWIN_COLOR=1` (full colour) or `native` (the twin with the authentic colour, which the identity self-tests
+  use), read when the renderer starts (the software renderer: at its first colour write), stays as the developer
+  override and wins whenever it is set: unset or empty leaves the choice to the launch line, `0` and `off` are off,
+  and any other value prints `TWIN: refused (...)` and leaves it off. When the variable turns off a twin the line
+  asked for, the run names `twin` unavailable ("SR_GPU_TWIN_COLOR overrides it") in the report. `gpu-coherence-selftest`
+  twin-key turns the twin on through `twin=on` alone, in both renderers, and checks the report, with the variable
+  unset and set. A twin that the line or the variable turned on is reported on (`effective.twin` true, and in the
+  pause caption), so `SR_GPU_TWIN_COLOR=1` with the key off reports it too; `twin-key --twin-key off --twin 1` checks that. The twin takes effect only in Ace Mode: in an
+  authentic run it stays off whatever the environment says, and a request prints one `TWIN: off (the host twin
+  needs Ace Mode)` line. When the key asked for it and it does not come up (the `TWIN: unavailable` and `TWIN: off
+  for the rest of the run` cases below), the run names `twin` unavailable on stderr and in the report; a twin that
+  ran is confirmed, so a run where the renderer never started it is reported as not run (section 10.4).
+  Supersampling (section 10.21) also runs the twin, with the authentic colour unless the twin was asked
+  for in full colour; a twin that runs only for supersampling is not reported (`effective.twin` stays false,
+  and `twin` is not named unavailable); `twin-key` with `--ssaa 2` checks that.
 - **Cost.** Each render op is drawn twice at the render scale, and the twins use as much GPU memory as the targets.
+  In the software renderer each colour write is computed twice, and the slots take 9 MiB of host memory.
 - **Fail-closed.** A GPU without nearest blits of RGBA8 and D16 prints `TWIN: unavailable (...)` and runs without it.
   If any twin allocation fails during the run, one `TWIN: off for the rest of the run (...)` line is printed, every
-  twin is freed, and the run continues exactly as a twin-off run at the user's scale (`twin-alloc-fail`).
+  twin is freed, and the run continues exactly as a twin-off run at the user's scale (`twin-alloc-fail`). A software
+  renderer that cannot allocate its slots prints `TWIN: unavailable (the software renderer could not allocate its
+  twin)` and runs without it.
 - **Stamps.** `TWIN: on (colour=full|native, scale=<n>x)` at start, and `TWIN: exit (ops=, copies=, reseeds=,
-  authentic_presents=, alloc_failures=)` at exit. Section 10.4 applies: the run is an Ace run, refused as evidence.
+  authentic_presents=, alloc_failures=)` at exit; the software renderer's are `TWIN: on (software renderer,
+  colour=full|native)` and `TWIN: exit (software renderer, pixels=, units_copied=)`. Section 10.4 applies: the run
+  is an Ace run, refused as evidence.
 
 ### 10.12. Texture Replacement
 
 A user-supplied texture pack replaces guest textures in the Vulkan GE renderer (#1880), the way PPSSPP's texture
-packs do. It is guest-visible (section 11.1) and not admitted under section 11.2: section 11.3.4 is its entry, and
-this section says how it draws. The code is `src/rt/texrepl.c` (the pack reader and the hashes: no GPU, no guest
-memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer`, section 10.10).
+packs do. It is guest-visible (section 11.1) and admitted under section 11.2, off by default: section 11.3.4 is
+its entry, and this section says how it draws. The code is `src/rt/texrepl.c` (the pack reader and the hashes: no GPU, no guest
+memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and its inflater
+`src/core/nk_psp_inflate.c`) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer`, section 10.10).
 
-- **Settings.** `SR_TEX_REPLACE=<folder>` names the pack and `SR_TEX_REPLACE_BUDGET_MB` (1 to 8192, default 256) bounds
-  the host memory its decoded images may hold, both read when the renderer starts. It takes effect only in Ace Mode:
-  in an authentic run the pack is not read whatever the environment says, and a request prints one
-  `TEX_REPLACE: off (texture replacement needs Ace Mode)` line. A folder that cannot be read, or whose
-  `textures.ini` is malformed (a line that is no comment, section or `key = value`, no `hash` type, an unknown one),
-  prints `TEX_REPLACE: refused (<reason>)` and loads nothing: a half-read pack would replace some textures and not
-  others in a way nobody asked for. There is no launch-line key, library setting or per-title setting yet; they come
-  with the launch-line pull request that follows #2074, and only that pull request admits the feature
-  (section 11.3.4).
-- **The pack.** The project ships none and never downloads one: it is a folder the user made or took from a
-  community, kept locally. A `textures.ini` is optional. `[options]` takes `hash = quick | xxh32 | xxh64` (required
-  when the file exists; a folder with no ini reads as `quick`), `ignoreAddress`, `reduceHash`,
-  `skipLastDXT1Blocks128x64` and `skipLastDXT1Blocks128x128`; `[hashes]` maps `<16 hex digits><8 hex digits>` to a
-  file, and an empty value marks a texture to leave alone; `[hashranges]` and `[reducehashranges]` are read as
-  PPSSPP reads them. A PNG named `<16 hex digits><8 hex digits>.png` in the folder's root needs no ini line.
-  Everything else (the `[filtering]`, `[indexed]` and `[games]` sections, `saveIndexed`, `ignoreMipmap`, mip-level
-  files, DDS, KTX2 and ZIM files, and any key or section this reader does not know) is reported, one `TEX_REPLACE:
-  note:` line each, and not applied.
+- **Settings.** A game's Enhanced page (section 10.5) has a **Texture pack folder** row: the player picks the pack's
+  folder (one that holds a `textures.zip` is read from that ZIP, below), and the row shows the folder's name and how
+  many textures it lists, or why it was refused. The part **Texture pack** (`"texpack"`, on or off) turns it on and
+  off for the library and for each title; choosing a pack turns it on for that title. The launch line then carries
+  `texpack=on` and the launcher exports the folder as `SR_TEX_REPLACE` (section 10.1), which the runtime also takes
+  as a ZIP file's path. `SR_TEX_REPLACE_BUDGET_MB` (1 to 8192, default 256, inherited) bounds the host memory its
+  decoded images may hold. Both are read when the renderer starts. The pack is read only in an Enhanced or Ace run
+  whose line carries `texpack=on`: an authentic run prints one
+  `TEX_REPLACE: off (texture replacement needs Enhanced or Ace)` line when the environment names a pack, and an
+  Enhanced or Ace run without the key prints `TEX_REPLACE: off (the launch line does not carry texpack=on)`; neither
+  reads it. A pack whose folder, ZIP or `textures.ini` cannot be read or is malformed (a line that is no comment,
+  section or `key = value`, no `hash` type, an unknown one, a `textures.ini` over 4 MiB or holding a NUL byte, which
+  no text file holds and which would hide the text after it, a damaged or unsafe ZIP) prints
+  `TEX_REPLACE: refused (<reason>); the game runs without the pack`, is refused whole, and the run's report names
+  `texpack` unavailable: a half-read pack would replace some textures and not others in a way nobody asked for. The
+  reason names the pack by its last path component only, and every control character in a reason or note (C0, DEL
+  and the C1 range, raw or in UTF-8), which a pack could use to send its own escape sequences to the terminal, is
+  printed as `?`; the run goes on unreplaced without waiting on the pack. One image that
+  cannot be used (missing, gone since the pack opened, not a regular file, outside the pack folder, over 64 MiB, a
+  bad PNG, the wrong size for its level, over the budget) is skipped: its texture is drawn as the game made it, a
+  note says why, and the exit line's `skipped=` counts it once. That is the whole rule: the pack is used whole or not
+  at all only for what is read at open (the folder or ZIP listing and `textures.ini`); images are read later, one
+  at a time, and each fails alone. The player reads the pack the same way when it is chosen and again before each
+  launch, and refuses it with its reason (`TEXTURE_PACK_REFUSED`), as it does a pack whose `[games]` section lists
+  other games only (`nk_texrepl_names_game`; disc IDs compare in one form, upper case without `-` or `_`) or more
+  than 64, and a folder that is not a full UTF-8 path under 512 bytes. The runtime checks `[games]` again against
+  the run's `SR_DISC_ID` when it reads the pack, so a `textures.ini` changed after the launch check is still refused
+  for a game it does not name (a run with no `SR_DISC_ID` refuses a pack that names any game). A refused pack is
+  never stored. A stored pack that no longer reads is never used, whole or in part: the card says why and offers
+  **Play without the pack**, which starts that run with the pack left out and keeps the stored choice.
+- **The pack.** The project ships none and never downloads one: it is a folder or a ZIP file the user made or took
+  from a community, kept locally. `SR_TEX_REPLACE` names either.
+  - *A folder* is read as it is, unless it holds a `textures.zip`: then that ZIP is the pack and the folder's own
+    files are not read, as in PPSSPP (a `TEX_REPLACE: note:` line says so).
+  - *A ZIP file* (or that `textures.zip`) is read in place: nothing is extracted or written. Its root is the
+    archive's top when `textures.ini` is there; otherwise, when every entry sits in one top-level folder (entries
+    starting with `.` and the `__MACOSX` folder macOS adds are not counted) and `textures.ini` is in that folder,
+    that folder is the root, the way packs are often zipped with their folder. A ZIP with no `textures.ini` in
+    either place is refused, as PPSSPP refuses a ZIP pack without one. Names in a ZIP are matched with case
+    ignored, as PPSSPP's ZIP lookups ignore it. The archive's whole structure is checked when the pack opens, by
+    `nk_zip.c`'s rules (APPNOTE layout, every name safe, no two names equal when case is ignored, no ZIP64, no
+    encryption); stored and DEFLATE entries are read, with data descriptors. A damaged structure or an unsafe name
+    refuses the pack whole with the reader's code (`TEX_REPLACE: refused (texture pack ZIP refused (ZIP_...)...)`).
+    Each file's CRC-32 is checked when it is first read: a damaged image is noted and that texture drawn as the
+    game made it, like a damaged PNG in a folder.
+  - *`textures.ini`* (optional in a folder; a folder with none reads as `quick`). The line rules are PPSSPP's:
+    `;` or `#` starts a comment line, `#` starts a comment after a value unless the value is in double quotes,
+    `\#` is a `#`, the blanks around a key or value and one pair of quotes around a value are removed, a section
+    header starts its line and any text after its `]` is a comment, and only the first section of each name is
+    read (a later one is noted). `[options]` takes `hash = quick | xxh32 | xxh64` (required), `ignoreAddress`,
+    `reduceHash`, `skipLastDXT1Blocks128x64`, `skipLastDXT1Blocks128x128`, `ignoreMipmap` (which PPSSPP uses only
+    when dumping) and `version`; the first line of each counts, and a value that is not a bool or a number leaves
+    the option at its default, as PPSSPP's reader does, with a note. `[hashranges]` (`addr,w,h = newW,newH`; a
+    range larger than its texture or empty is not read) and `[reducehashranges]` (`w,h = fraction`; 0 or a value
+    that is not a finite number is not read) are read as PPSSPP reads them, a later line for the same texture
+    replacing an earlier one. The lines are sorted once at open and looked up by binary search, so any number the
+    4 MiB `textures.ini` holds is read.
+  - *`[hashes]` keys* are read as PPSSPP reads them, with the C library's `sscanf("%16llx%8x_%d")` and at least
+    its first field matched: up to 16 hex digits of key, up to 8 of data hash, then `_<level>`; a field not
+    matched is 0. So every form PPSSPP takes is taken: the full `<16><8>` name, `<16><8>_<level>`, a 16-digit
+    key alone (any data hash), a shorter key, a name with blanks between the two fields, a 25-digit name (the
+    25th digit is no level). A level past an `int`'s range, where `sscanf`'s `%d` is undefined, is read as the
+    largest or smallest `int` (so `_99999999999` is level 2,147,483,647, a chain no image reaches). A key whose
+    part is zero is a wildcard (see **Identity**). A value is a file under
+    the pack's root; an empty value marks a texture to leave alone; a value that leaves the root is not read.
+  - *Hash-named files* in the root need no ini line: a name of 24 characters, or 26 to 27 with `_` as the 25th,
+    before `.png`, `.dds`, `.ktx2` or `.zim`, read with the same `sscanf`. DDS, KTX2 and ZIM files are listed
+    (so a texture they name matches and no wildcard is tried for it) but not decoded: one note counts them, and
+    the texture is drawn as the game made it. A `[hashes]` line for the same key and level replaces a file.
+  - *Mip levels.* The lines and files of one key make its mip chain as PPSSPP's alias map does: the last entry
+    for each level counts; levels are taken from 0 up while they follow one another (a gap ends the chain, with
+    a note); a value holding `|` names several levels, since PPSSPP joins and splits the names with `|`; a blank
+    name ends the chain; at most 12 levels. A key whose entries do not start at level 0 (a negative level sorts
+    first), or whose level 0 is blank, has no chain: the texture is left alone. A level counts only when every
+    level below it is a readable PNG and level *n* is level 0's size halved *n* times (at least 1), as PPSSPP
+    loads a chain. `nk_texrepl_lookup_level` gives each level to the renderer; the renderer draws level 0 only.
+  - *Reported, not applied:* `[filtering]` (the game's own filtering is kept), `[games]`' per-game ini
+    overrides (its list of disc IDs is read, as **Settings** says), `saveIndexed`, and any key or section this reader does not know, one `TEX_REPLACE: note:` line
+    each. A texture `[indexed]` marks (`true`, `1` or `gpu`, looked up with the same wildcards) is not
+    replaced: its image holds palette indices for the game's palette to colour, which this build does not draw.
 - **Identity.** A texture is identified as in PPSSPP: its address (30 bits) and size code in the high half of the
   key, its quick (or xxh) hash of the guest bytes in the low half, and for a palette format the palette's XXH32
   hash (seed 0xC0108888) folded into the key together with the CLUTFORMAT command word, opcode byte 0xC5
   included. The bytes hashed are PPSSPP's: the last CLUT load's size plus the format's index start position,
   capped at the largest load seen. A run in which the game has loaded no palette yet hashes the 16 or 256
-  entries the texture can index, which a replayed capture is the only case of. Lookup tries, in PPSSPP's order, the exact key, the palette alone, the key with
-  no data hash, the data hash with no address, and the address alone.
+  entries the texture can index, which a replayed capture is the only case of. Lookup tries, in PPSSPP's order,
+  the exact key, the palette alone, the key with no data hash, the data hash with no address, the address and
+  data hash without the palette, the address alone, and last the data hash alone; with `ignoreAddress` the
+  address is zeroed first and the steps that keep it are skipped.
 - **Which textures.** One level (no mip chain), not a render target, whose guest bytes the renderer can read
   directly. The image must be a whole factor from 2 to 6 of the texture, the same on both axes, and no side may
   pass 2048 texels; any other image is counted (`bad_factor`) and the texture is drawn as the game made it. Only PNG
-  is read, and only level 0.
+  is decoded, and the renderer draws only level 0.
+- **Where an emulator pack cannot match, and why.** Each of these was checked in this build's code; a pack that
+  depends on one replaces less here than in PPSSPP, or is refused.
+  - *512-high textures.* PPSSPP hashes a texture 512 texels high only down to the tallest row the game has drawn
+    from it (`maxSeenV`) when no `[hashranges]` line covers it; the renderer does not track that row and passes 0,
+    so such a texture is hashed whole and its pack name does not match unless a `[hashranges]` line gives the
+    height.
+  - *`[hashranges]` images.* The range changes the hash as in PPSSPP, but the image must still be a whole factor of
+    the whole texture (`nk_texrepl_factor` on the texture's own size): an image drawn for the range only, which
+    PPSSPP stretches over the range, is counted `bad_factor` and not drawn.
+  - *Image size.* PPSSPP draws an image of any size; here it must be 2 to 6 times the texture on both axes and at
+    most 2048 texels a side. Same-size images (factor 1), larger factors and uneven ones are not drawn.
+  - *Mipmapped textures.* A guest texture with more than one level is never replaced, even by a pack that lists
+    its levels: the reader gives the levels, but the renderer does not use them yet.
+  - *Image formats.* DDS, KTX2 and ZIM files match but are not decoded, so their textures are drawn as the game
+    made them; PPSSPP uploads them.
+  - *`[indexed]` and `[filtering]`.* An indexed texture is not replaced (above); a `[filtering]` line's filter
+    is not applied.
+  - *`[games]` overrides.* A pack that keeps per-game settings in a second ini named by `[games]` is read with its
+    main `textures.ini` only.
+  - *The address in the key.* Without `ignoreAddress` (which needs `xxh32` or `xxh64`), a pack names textures
+    by the guest address they were loaded at in the run it was made from. They match here only when the game
+    loads them at the same address, so on the same disc version and with the same memory layout; this project's
+    HLE allocator has not been checked against PPSSPP's placement, so a pack made in PPSSPP without
+    `ignoreAddress` may miss textures here that PPSSPP finds.
+  - *Render targets and unreadable sources.* A texture the game renders to, or whose bytes the renderer cannot
+    read directly (`tex_source_ptr`), is never hashed or replaced.
+  - *Case in a folder.* PPSSPP's folder reader ignores case on every system; this reader opens a folder pack's
+    files by their exact name, so on a case-sensitive file system (Linux, Android) a `[hashes]` value whose case
+    differs from the file's does not load. ZIP packs ignore case everywhere.
+  - *Refused here, loaded there.* Lines PPSSPP keeps as comments refuse the pack here: a line with no `=` or
+    nothing before it, a `#` before the `=`, a line before any section, an indented section header, a `[` with no `]`. A
+    `textures.zip` that is not a valid ZIP refuses the pack (PPSSPP falls back to the folder). A ZIP with ZIP64
+    (more than 65,534 entries or 4 GiB), encryption, a method other than stored or DEFLATE, or a name
+    `nk_zip.c` refuses (a Windows-reserved name or character, a `.` or `..` folder, two names equal when case is
+    ignored) is refused; PPSSPP's ZIP library may read it. So is a DEFLATE entry, `textures.ini` included, packed
+    in more than its declared size plus an eighth plus 64 bytes: no archiver we measured (Python `zipfile`, 7-Zip,
+    Windows `tar.exe` and `Compress-Archive`, at every level) comes near that (stored blocks cost 5 bytes in
+    65,535), so the rest is padding a reader would have to work through. An encoder that flushes after every few
+    bytes can pass it, and such an entry is refused. A `textures.ini` over
+    4 MiB refuses the pack. Images
+    PPSSPP may still read are skipped here: a folder file that is a link or junction leading out of the pack, a
+    device or FIFO, a name the ZIP reader refuses (`CON.png`, `CON .png`, `a.png.`), a file over 64 MiB, a PNG with
+    any chunk's CRC wrong (libpng, which PPSSPP uses, by default only warns about a bad CRC in an ancillary chunk),
+    a PNG whose image data unpacks to more or less than its `IHDR` implies or whose Adler-32 is wrong (libpng
+    ignores extra data and, by default, a bad Adler-32), bytes after the Adler-32 inside the image data, and a grey
+    or RGB `tRNS` naming a sample the image's depth cannot hold. A second `PLTE` is refused and a `PLTE` in a grey
+    image ignored, as libpng does. A palette longer than its depth can index (more than 16 entries in a 4-bit image)
+    is kept whole, as stb_image keeps it, and so is a `tRNS` of that length, whose alpha values then apply to the
+    entries the pixels name; libpng cuts such a palette to the entries the depth can index and drops that `tRNS`
+    whole, so the same image is opaque there.
+  - *The skip-last-DXT1 options* (`skipLastDXT1Blocks128x64`, `skipLastDXT1Blocks128x128`) are applied as
+    PPSSPP applies them, so they are not a difference.
 - **How it draws.** The image is stored as the entry's scaled copy: an image `factor` times the guest texture,
   sampled on its own texel lattice (section 10.10, "Sampling"). It is finished work, so no worker is involved, and
   it is normally stored in the draw that finds it. Storing goes through the collect step scaled copies use, which
@@ -799,21 +1291,80 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   do. A texture the guest rewrites is looked up again: its new content is replaced by the image the pack lists for
   it, or scaled or drawn as made, and the old image is never drawn. Replaced content that returns is replaced again.
 - **Budget.** Decoded images stay in host memory up to `SR_TEX_REPLACE_BUDGET_MB`, the least recently used dropped
-  first and decoded again when next needed; an image the budget cannot hold is counted (`over_budget`) and its
-  texture drawn as made. The copies share the GPU budget of `SR_TEX_SCALE_BUDGET_MB` (512 MiB by default) and its
+  first (taken from the tail of a list, so making room never scans the images) and decoded again when next
+  needed; an image the budget cannot hold is counted (`over_budget`) and its texture drawn as made. An image
+  dropped and wanted again is decoded again at once the first time; after its kth decode (k from 2) its next
+  2^(k-1) - 1 lookups, at most 65,535, draw the texture as made and are counted (`deferred`), and a note says it
+  was evicted and decoded again. Two images taking turns in a budget for one thus cost about 2 log2 n decodes
+  over n lookups, not n. Each file is held once, however many keys or mip levels name it. While every held image
+  is in use, an image whose size is known and does not fit is not read again until one is released; one larger
+  than the whole budget is never read again. The copies share the GPU budget of `SR_TEX_SCALE_BUDGET_MB` (512 MiB by default) and its
   reclamation (section 10.10).
 - **Guest memory and files.** Texture bytes are read through the same host view the cache's content hash reads;
-  nothing is written to guest memory, the CLUT or a texture source. Files are read only from inside the pack folder
-  (a name or `[hashes]` value that leaves it is refused); nothing is uploaded and no network connection is made.
+  nothing is written to guest memory, the CLUT or a texture source. Files are read only from inside the pack's root,
+  the folder or the ZIP (a name or `[hashes]` value that leaves it is refused); a ZIP is never extracted, a
+  DEFLATE entry being unpacked in memory straight into a buffer of its declared size; nothing is uploaded and no network
+  connection is made. A folder's files are checked on the handle opened, not the name: one is read only when it is
+  a regular disk file (Windows: `GetFileType` is `FILE_TYPE_DISK` and it is no folder; POSIX: `fstat` says
+  `S_ISREG`, the file opened without blocking so a FIFO is refused at once) whose final path, links and junctions
+  resolved (`GetFinalPathNameByHandleW`; `/proc/self/fd` or `realpath`), is inside the folder's own final path.
+  On Windows every file is opened with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, so a link to a named
+  pipe gives the pipe's server no more than the user's identity, never the right to act as the user, before the
+  handle check refuses it. A name the ZIP reader refuses (a device name such as `CON.png`, `COM1.png` or `CON .png`, blanks before the
+  extension dropped as Windows drops them; a trailing dot or space; a character Windows refuses) is not opened at
+  all. That rule is a first line only; the handle check above is the guard. Reads are capped: `textures.ini` at 4 MiB, an image at 64 MiB,
+  in a folder or a ZIP alike; a ZIP image's data is unpacked only up to the size it declares, and a ZIP whose
+  entries declare more than 8 GiB unpacked in all (`NK_TEXREPL_MAX_PACK_BYTES`) or hold more than 65,534 entries is
+  refused whole. What a pack holds in memory is its index (about 80 bytes an entry, from the bench below) and the
+  decoded images, which the budget bounds. A folder's `textures.zip`, and a ZIP named as the pack, is opened only when it is a
+  regular file (the folder's inside the folder); the ZIP reader then opens it again by name, on every platform,
+  so a file swapped in that moment is not caught by the handle check, though the ZIP's own checks still apply. A
+  PNG is checked before any pixel memory is allocated: the signature, `IHDR` first with 1 to 2048 texels a side
+  and a pixel format the PNG standard defines, every chunk whole with its CRC right, `PLTE` and `tRNS` where and as
+  long as the format allows, the `IDAT` chunks one after another, and `IEND`; its pixels (width x height x 4 bytes)
+  must fit the budget, and the image data, all `IDAT` chunks together, may be at most R + R/8 + 70 bytes, R being
+  the size `IHDR` implies (each row's filter byte and bytes, each Adam7 pass's rows): stored blocks need R plus 5
+  bytes for each 65,535, and an image whose data is longer is refused by name ("its image data is N bytes, more
+  than R can need"), so a small image cannot carry megabytes of empty blocks for the reader to work through. The
+  reader decodes PNG itself: the image data is unpacked by the project's inflater (`nk_psp_inflate.c`) straight
+  into a buffer of exactly R bytes, and data that would unpack past it stops there and refuses the image, so a
+  small PNG cannot make the reader allocate or work beyond what its `IHDR` declares; the Adler-32 must follow the
+  stream's last block at once. The inflater builds the fixed Huffman tables once per stream, not once per block,
+  and the ZIP reader's CRC-32 table is a constant. The memory one decode takes, at most the file (with a DEFLATE
+  ZIP entry, its packed bytes too, while they are unpacked), then the joined image data and the R-byte buffer,
+  then that buffer and the pixels, is recorded in the pack's statistics (`decode_peak`); for the largest image,
+  2048 x 2048 at 16 bits a channel, R is 32 MiB and the joined data at most 36 MiB, so a 64 MiB file with its
+  data in several `IDAT` chunks peaks at 132 MiB (one `IDAT` chunk is unpacked where it lies, with nothing
+  joined). Reading such a file from a DEFLATE ZIP entry, whose packed size may be 9/8 of the file and 64 bytes
+  more, peaks at 136 MiB and 64 bytes while it is unpacked, before the decode starts. Every DEFLATE stream the
+  shared inflater unpacks (a PNG's, a ZIP entry's, a CSO block's, a module's gzip payload) may have at most 64
+  dynamic Huffman blocks and one more for every 64 bytes it has written (`NK_INFLATE_DYNAMIC_FREE`,
+  `src/core/nk_psp_inflate.h`), so the code tables it costs follow its output. 64 is half zlib's smallest block
+  (127 symbols at memLevel 1), so no stream zlib writes without flushing can be refused; its smallest blocks
+  and a flush every 513 bytes used at most 0.25 of it, measured. A PNG refused by it says so in its note. `nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own.
+  One file is read, checked, decoded, noted and counted against the budget once, however many `[hashes]` lines
+  or names reach it: names are first grouped as written, and before a file's bytes are read its identity (the
+  ZIP entry a name resolves to, case ignored; a folder file's volume and 128-bit file ID, or device and inode) is
+  looked up among the files already read or found damaged, so another case, an 8.3 name or a link shares the
+  first name's image, or its refusal. A file whose system gives no file ID has no identity and is read under each
+  name, as distinct files would be. A file refused before it is read (over 64 MiB, not a regular file, outside
+  the pack) is noted once for each name that reaches it, which costs no read. Identities are kept while the pack
+  is open, so a file deleted and replaced meanwhile may share the old file's image under a name not yet read;
+  the table, outside `index_bytes`, takes 36 bytes a slot and is kept at most half full: at least 64 slots, and
+  under four for each file read or found damaged just after it doubles.
+- **Sorting.** The index, the hash ranges and the ZIP reader's name and offset checks sort with one project heapsort
+  (`nk_zip_sort`, at most about 2n log2 n comparisons whatever the order), not the C library's `qsort`, which
+  some C libraries make quadratic for a crafted order.
 - **Stamps.** `TEX_REPLACE: on (hash=, entries=, notes=, budget_mb=)` at start, followed by the line section 11.3.4
   describes and one `TEX_REPLACE: note:` line for each thing read and not applied (a file that cannot be read or decoded is
   noted at its first use, when it is found, not only counted), and at exit `TEX_REPLACE: exit
-  (lookups=, hits=, misses=, left_alone=, queued=, bound_draws=, loaded=, load_failed=, over_budget=, evicted=,
+  (lookups=, hits=, misses=, left_alone=, queued=, bound_draws=, loaded=, load_failed=, skipped=, over_budget=, evicted=,
   bad_factor=, cache_peak_mb=, decode_ms=)`. Section 10.4 applies: the run is an Ace run.
-- **Not yet.** Decoding a PNG runs on the renderer thread the first time an image is needed (a worker thread, as
-  scaling has, and DDS or KTX2 files come after); the tallest row a game draws is not tracked, so a 512-high texture
-  is hashed whole; same-size replacement (factor 1), mip levels, `[filtering]` and `[indexed]`, ZIP packs and a
-  player toggle or per-title pack folder are not done.
+- **Not yet.** Decoding a PNG (and unpacking it from a ZIP) runs on the renderer thread the first time an image is
+  needed (a worker thread, as scaling has, and DDS or KTX2 files come after); the tallest row a game draws is not
+  tracked, so a 512-high texture is hashed whole; the renderer's use of mip levels, same-size, larger or uneven
+  images and a `[hashranges]` image drawn over its range, `[filtering]`, `[indexed]` images, `[games]` overrides,
+  and choosing a ZIP file itself in the player (a folder that holds a `textures.zip` works) are not done.
 - **Dump.** A player who wants a pack for their own game makes it from the game itself: in an Enhanced or Ace run
   on the Vulkan renderer, the pause menu's **Settings > Dump textures** (`gegpu_texdump_start`, started from
   `gui.c`) writes every texture the game draws from then on, each level once, as an RGBA PNG named the way the
@@ -856,13 +1407,82 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   The project ships no texture and no upscaler: the images are the game's copyrighted images, from the player's own
   copy of the game, and stay on their PC.
 - **Tests.** `texrepl-selftest` checks the hashes against values taken from PPSSPP's own code and published xxHash
-  vectors, the ini and file-name rules, the lookup order, palette identity (against PPSSPP's formula worked out
-  separately, with a pack file named the way PPSSPP names it), malformed packs, path escapes and the
-  budget, on synthetic packs. `gpu-texscale-selftest`'s `replace` cell runs the production path on a Vulkan device: a
+  vectors, the ini line and file-name rules, every `[hashes]` key form above, the mip chains (from ini lines and
+  from files, gaps, `|`, a negative or missing level 0, a level of the wrong size), the lookup order with its last
+  wildcard, palette identity (against PPSSPP's formula worked out separately, with a pack file named the way PPSSPP
+  names it), `[indexed]`, malformed packs, path escapes and the budget, on synthetic packs; and ZIP packs written by
+  the test: `textures.ini` at the top (DEFLATE-compressed by zlib itself) or in one top-level folder, stored,
+  DEFLATE and data-descriptor entries, names in other case, a folder's `textures.zip`, a damaged image, and
+  ini-less, two-folder, cut, `..`-named, malformed and bzip2 archives refused whole; a small PNG cut at every
+  length and with every byte flipped (all refused), its image-data bytes flipped with the CRC made right (each
+  decodes at its size or is refused), `IHDR` sizes of 0, 4096 and 2^31 and a 2048x2048 one over a 1 MiB cap, and
+  bad images in a pack skipped, noted and counted once; device names, a trailing dot, a junction or link out of
+  the pack (a file link in it still read), a FIFO image and a FIFO `textures.zip` (POSIX), a `textures.ini` over
+  4 MiB, and a missing pack's message carrying no folder above it; every `IHDR` pixel format over the same data,
+  and a seeded pass of 30,000 random mutations (1 to 8 bytes, CRCs made right) over three images, each decoded
+  within its `IHDR` size or refused; images deleted after the pack opened, skipped at once; and, through
+  `nk_texrepl_open`, every ZIP refusal: absolute, drive-letter, backslash, `..` and device names, duplicate names
+  and names equal but for case, ZIP64, encryption, a local header that disagrees with the central directory,
+  overlapping entries, a central directory outside the file, the archive cut at every length, entries declaring
+  12 GiB, and an image declaring 100 MiB or unpacking past its declared size (skipped, the rest of the pack used).
+  The selftest also writes PNGs of its own (stored and fixed-Huffman DEFLATE, one or several `IDAT` chunks, every
+  filter, Adam7, palette and `tRNS`, 1- to 16-bit) and decodes each with this reader and with stb_image
+  (`third_party/stb`, used only by the test), which must agree to the byte; image data longer than the image is
+  refused, and 60,000 seeded mutations of those seeds must be refused by both or decoded alike. PNGs with their
+  CRCs and Adler-32 right meet each of the decoder's own checks (a palette index past `PLTE`, filter type 5, a
+  wrong Adler-32, a `PLTE` of 4 bytes or 257 entries, an RGB `tRNS` of 4 bytes, a second `PLTE`, a chunk between two `IDAT`s) and
+  are refused for that reason, and a 4-bit palette image with 256 `PLTE` entries and a grey image with a `PLTE`
+  decode as stb_image decodes them. A 1x1 PNG whose
+  data unpacks to 64 MiB, listed under 81 wildcard keys, is skipped 81 times within the time bound, nothing cached,
+  `decode_peak` within the file's size and 4 KiB, the file read and refused once (its data, over R + R/8 + 70
+  bytes, refused before it is unpacked), and a 1024 x 1024 one unpacking past its size refused within 5 s; a ZIP
+  image and a `textures.ini` behind 1 MiB of empty DEFLATE blocks are refused at open. The three shapes of the
+  security review's slow decode each have a cell: a 1x1 PNG whose 64 MiB of data is all empty fixed-Huffman
+  blocks, and one all empty dynamic blocks, refused within 2 s by the input bound; 5.6 million empty ancillary
+  chunks before a good 1x1 image, decoded within 2 s (each chunk's CRC-32 from the constant table); 1 MiB of
+  empty fixed blocks building the Huffman tables exactly twice, counted in the selftest's build
+  (`NK_INFLATE_COUNT_BUILDS`), where tables built per block came to about 1.7 million; the Adler-32 one byte late refused;
+  and the largest image the bound lets through, 2048 x 2048 at 16 bits a channel holding 36 MiB of empty dynamic
+  blocks, refused within 2 s by the dynamic-block budget (77 ms measured, 3.1 to 3.4 s before it), and the same image with
+  the most empty dynamic blocks the budget allows (64, then one after every 64 bytes it writes) decoded within 5 s
+  (722 ms measured, 2.05 s under AddressSanitizer); 64 empty
+  dynamic blocks unpack, a 65th is refused after 64 blocks' tables, and 2 KiB written first earns 32 more, not 33;
+  400 KiB in dynamic blocks of 300 bytes, and in blocks of 513 bytes each followed by a flush's empty stored block,
+  unpack. Two images taking turns in a budget for one, 1,000 rounds, are decoded 16 to 24
+  times, every lookup either served or `deferred`; 40,000 held images make room for one 200 x 200 image within
+  0.25 s, all 40,000 evicted; a DEFLATE ZIP image's `decode_peak` counts its packed bytes beside the file. A
+  `textures.ini` key holding ESC, a UTF-8 CSI, a raw CSI byte and a cut UTF-8 sequence, and a refused line holding an OSC sequence, reach the notes and
+  the refusal with `?` for each control character; a level of `_99999999999` is level 2,147,483,647; a NUL byte
+  refuses the pack, naming its line; the sort is checked on every order up to 7 items, against its comparison bound on
+  McIlroy's adversary and on the order that costs the C library's `qsort` most; then 16,384 `[hashes]` lines,
+  16,384 `[indexed]` lines, 16,384 lines each of `[hashranges]` and `[reducehashranges]`, and a 16,384-entry ZIP (names and local headers) in that order open within a bound on
+  the comparisons their sorts make, counted at the comparison functions in the selftest's build
+  (`NK_SORT_COUNT_COMPARES`), so a sort that went back to `qsort` fails where `qsort` has such an order. A good
+  image and a refused one, each listed under 81 keys, are read once (`reads`), the good one decoded and held once,
+  and so is one file named 81 ways (case spellings in a ZIP and in a Windows folder, links in a POSIX folder), and
+  a damaged ZIP entry named 81 ways is unpacked and refused once.
+  With the budget full of pinned images a third is read once, not on each lookup, and served once they are
+  released; a mip level whose image is the wrong size is not decoded, nor read again when that size is already
+  known; a chain whose level 0 image proved unusable through another key serves none of its higher levels;
+  `[hashranges]` lines are checked for the last line winning, a non-finite fraction noted, and 175,000 lines in
+  reverse order (4.0 MB) read within 5 s and the comparison bound. These cells are fixed and seeded mutations, not coverage-guided fuzzing; the selftest also runs under
+  AddressSanitizer and UndefinedBehaviorSanitizer on Linux. A file link needs Developer Mode on Windows, so that
+  check is skipped there, and said, without it. `test_nk_zip` checks the
+  reader's options: DEFLATE read only when asked, its level bits, damaged, short and long streams, a stream that
+  stops at its declared size before a bad block, empty-block padding at and past its limit, data descriptors, device
+  names with blanks before the extension, and the caps. `texrepl_selftest --bench N` measures an N-texture synthetic pack as a folder and as
+  a ZIP (open, lookup and first-use times, index size and process memory). `gpu-texscale-selftest`'s `replace` cell runs the production path on a Vulkan device: a
   listed texture drawn from the pack's image from the draw that finds it, even with the 1:1 rule on, with
   `SR_TEX_REPLACE` alone and with xBRZ also on; a rewrite to unlisted
   content never drawn from the old image; the content returning replaced again; an image of no whole factor counted
-  and not used; and an authentic start reading no pack. Its `dump` cell checks the dump in a folder whose name holds
+  and not used; and neither an authentic start nor an Enhanced start without `texpack=on` reading a pack. Its
+  `replace-only` run, whose line carries `texpack=on`, refuses a stored pack that no longer reads (its folder gone,
+  its `textures.ini` naming no hash type or one the reader does not know), a budget out of range and a start that
+  names no folder, the renderer going on without the pack.
+  `ace-selftest` checks the key (optional, off when missing, on or off only, written after `peak` and before
+  `cull`); `test_player_state`'s `test_play_mode_texpack_settings` checks the settings round trip, the
+  refusals, the line and the folder a launch gets; `test_launch_resolution` checks that only a `texpack=on`
+  line exports the folder. `gpu-texscale-selftest`'s `dump` cell checks the dump in a folder whose name holds
   an accented letter and a CJK ideograph: refused in an authentic run, nothing written while off, a texture already
   in the cache and a newly decoded one written under the names a pack gives them (worked out in the cell from the
   cache key and the quick hash), the folder read back as a pack giving the textures' own pixels with no `[games]`
@@ -883,18 +1503,24 @@ into a glyph's edge. This feature (#2110) rebuilds the rectangle a draw samples,
 render scale. It needs no font outline and no hook in the game's code, so it works whichever code drew the page, a
 font the user supplied from their own console included, and it works for *Hot Shots Tennis*, which draws through its
 own font library, and for *LittleBigPlanet*, which draws from pre-built atlases. It is guest-visible (section 11.1)
-and not admitted under section 11.2: section 11.3.5 is its entry, and this section says how it draws. The code is
+and not yet admitted under section 11.2: section 11.3.5 is its entry, and this section says how it draws. The code is
 `src/rt/gpu_sdl3vk/glyph_recon.c` (the setting, the refusals, the rebuild and its check: no GPU, no guest memory) and
 `glyph_gpu.inc`, included by `ge_gpu.c`.
 
-- **Settings.** `SR_GLYPHS=off|on`, read when the renderer starts; unset is off. It takes effect only in Ace Mode: in
-  an authentic run it is not read, and a request prints one `GLYPHS: off (sharp game text needs Ace Mode)` line. Any
-  other value prints `GLYPHS: refused (SR_GLYPHS takes off or on)` and the feature stays off. It needs a render scale
-  of 2 to 4, the factor the rebuild is made at (4 is the renderer's largest scale; the rebuild itself is tested up to
-  6); at 1x there is nothing to sharpen and a run prints
-  `GLYPHS: idle (render scale <n> leaves nothing to sharpen; it takes 2 to 4)`. It is not the launch line's `text`
-  key (section 10.1), which only sets the on-screen keyboard to the window's resolution; neither reads or implies the
-  other. It has no launch-line key, library setting or per-title setting; section 11.3.5 says what admission needs.
+- **Settings.** The launch line's `glyphs` key (section 10.1): `glyphs=on`, or `glyphs=off` or no key for off. It
+  is optional and an Enhanced part, so an Enhanced or an Ace line may carry it; any other value refuses the whole
+  line (`ACE_MODE: refused (bad value)`), and the run is Authentic. The renderer takes it once when it starts
+  (`nk_glyph_init`). An authentic run has no valid line with Ace on, so nothing can turn the feature on there,
+  and the unit's own Ace gate keeps it off even if asked (the `glyph-recon-selftest` settings cell). It needs a render scale of 2 to 4, the
+  factor the rebuild is made at (4 is the renderer's largest scale; the rebuild itself is tested up to 6); at 1x
+  there is nothing to sharpen, a run prints `GLYPHS: idle (render scale <n> leaves nothing to sharpen; it takes 2
+  to 4)`, and the report names `glyphs` unavailable with that reason. A run on the software GE, which has no
+  rebuild, names it unavailable at exit (`did not run: its renderer or presenter did not start`). It is not the
+  launch line's `text` key, which only sets the on-screen keyboard to the window's resolution; neither reads or
+  implies the other. It has no library or per-title setting yet; section 11.3.5 says what admission needs. The
+  `SR_GLYPHS` environment variable that switched it before the key is retired: set to any value, the run refuses to
+  start with one line that names `glyphs=on` and exits 1, as an invalid `SR_NOVBPACE` does, so a script that set it
+  is told rather than silently losing the part.
 - **Which draws.** A sprite primitive that maps one texel to one pixel (the smart 2D test of section 10.10, either
   direction) over a rectangle of whole texels, each side 4 to 64 texels, inside a cached texture that has one level,
   is not a render target and lies in main RAM, in 4444, 8888 or an indexed 4-bit or 8-bit format. Text drawn as
@@ -976,7 +1602,9 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   the same draws rebuild the same tiles whatever the host's speed. The work is bounded by a count: at most 48
   rectangles are checked or rebuilt per present, and a draw past the count is drawn as the game made it and offered
   again by the next draw. No time budget exists.
-- **Stamps.** `GLYPHS: on (per_present=48, tolerance=2)` at start, followed by the line section 11.3.5 describes, and
+- **Stamps.** `ACE_MODE: glyphs on (...)` after the `ACE_MODE: on` line, `GLYPHS: on (per_present=48,
+  tolerance=2)` when the renderer starts, followed by the line section 11.3.5 describes, the report's `glyphs`
+  (`true`, or `false` with its reason under `unavailable`) and the feature words' `sharp game text`, and
   at exit `GLYPHS: draws (bound=, tiles_built=, tiles_kept=, tiles_stale=, page_decodes=, images=, capped=,
   budget_short=, tiles_full=)` and `GLYPHS: exit (refused: <name>=<count>, ...)`. Section 10.4 applies: the run is an Ace run.
 - **Limits.** One page holds at most 768 tiles; a draw past that is drawn as made (`tiles_full`). Text drawn as
@@ -989,8 +1617,8 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   dither, the common 4444 case, is clean), a glow with a 1.25-texel falloff (1.02 to 1.18) by 64 to 69, and a soft shape
   sharing a rectangle with text (an H and a glow, 1.02 to 1.12) by up to 100. A crisp anti-aliased box or disk at a
   sub-texel offset also runs back at its corners (19, 49, 81 and 159 of 255 for a box at factors 2, 3, 4 and 6), in
-  the edge rebuild and not only in soft art. The feature is not part of the settings pages or the launch line. It is off unless `SR_GLYPHS=on` in an Ace
-  run; turning it on by default or putting it in a preset needs the owner's decision, to which these costs apply.
+  the edge rebuild and not only in soft art. The feature is on the launch line and not on the settings pages. It is off unless the
+  line carries `glyphs=on`; turning it on by default or putting it in a preset needs the owner's decision, to which these costs apply.
 - **Tests.** `glyph-recon-selftest` checks the setting and its Ace gate, every named refusal, the classifier, and the
   rebuild at every factor for 4444, 8888, indexed 4-bit and indexed 8-bit pages (block means, colour, repeatability,
   fewer soft pixels than a bilinear enlargement, no dependence on neighbouring cells), the downsample check
@@ -1011,9 +1639,15 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   bars of one colour (shallow, steep, four texels and two) and a box shadow draw without a ribbed row or column; the descriptor pool holds a set
   for every image an entry can have; a rewritten page draws its new tile and never the old, also when the rewrite
   misses the bytes the cache's content hash samples, and an unchanged cell keeps its tile; the 48-per-present count; guest memory and
-  the CLUT unchanged; the setting idle at 1x; and an authentic run that rebuilds nothing and draws the same picture
-  with `SR_GLYPHS` unset and on. `gpu-glyph-mutant` removes the content check of a bound tile, keys the tiles on the
-  cache's sampled content hash instead of its generation, removes the per-present count, and the VRAM, hard-edge, colour and Ace guards, each of which must fail its own cell.
+  the CLUT unchanged; the setting idle at 1x; and the key off byte for byte: one scene drawn in an authentic run, in an
+  Ace run whose line has no `glyphs` key and in one with `glyphs=off` rebuilds and decodes nothing and has one picture
+  hash (the device image and the frame the guest keeps), and with `glyphs=on` it draws rebuilt glyphs and another
+  hash. `ace-selftest` checks the key: its values, that `glyphs=off` formats as the line without it, its place after
+  `ssaa` and `peak` and before `cull`, the stamp's line, the feature words, and the report when the renderer confirms it, names
+  it unavailable or never starts; and it starts Ace Mode as a run does with `SR_GLYPHS=on` and checks that the
+  process stops with exit 1 and the line that names `glyphs=on`. `gpu-glyph-mutant` removes the content check of a bound tile, keys the tiles on the
+  cache's sampled content hash instead of its generation, removes the per-present count, and the VRAM, hard-edge and
+  colour guards, and builds a renderer that ignores the key, each of which must fail its own cell.
 
 ### 10.14. Finer Bezier and Spline Patches
 
@@ -1093,7 +1727,8 @@ window's keys turn it on, and it never runs in an Authentic run.
 - **The speed readout and the Ace report.** Their window is a second of wall time, so time at the fast-forward speed is
   never judged: the readout hides while fast forward runs, skipped slots are not counted, no second counts as PC
   LIMITED in the report, and the first full second at normal speed brings the readout back (`ace_note_fast_forward`
-  in `src/rt/ace.h`).
+  in `src/rt/ace.h`). Smooth motion makes no in-betweens while it runs (section 10.6), so the report's
+  `smooth_motion` block and in-between count hold only pictures made at normal speed.
 - **Limit.** With **Frame pacing** set to no extra cap and vsync on, each present waits for the display, so fast
   forward runs no faster than the display's refresh allows: about 1x on a 60 Hz display. Under the default PSP
   timing, presents beyond the scanout rate are dropped and the guest never waits on them.
@@ -1106,9 +1741,363 @@ window's keys turn it on, and it never runs in an Authentic run.
   output path, the guest queue seeded from the host's depth once per run and draining in guest time, and the host
   queue and pushes back after it stops. `ace-selftest` pins the readout and the report.
 
+### 10.16. Smooth Far Textures (Host Mip Chains)
+
+Most PSP games give a texture one level and let the GE sample it with a bilinear filter however small it is drawn
+(#1273). At 1x a far surface is a few pixels across and the aliasing is part of the PSP's picture; at 4x the same
+surface covers sixteen times the pixels, each of which samples one point of a texture many texels across, so the
+surface shimmers as the camera moves. This feature builds a mip chain on the host for such a texture and samples it
+trilinearly, the way the GE samples a chain the game supplies. It is guest-visible (section 11.1), as texture
+filtering is: section 11.3.8 is its entry and says what the guest can observe; this section says how it draws. The
+code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions in `src/rt/gpu_sdl3vk/ge_gpu.c`
+(the cache, the bind and the stamps); the software renderer has no chain.
+
+- **Setting.** The optional `mips` key of the `SR_ACE` launch line (section 10.1): `mips=on`, or no key, which is
+  off. In the player it is the part "Smooth far textures" (`"mips"`: `on` or `off`) on the library's
+  Settings > Enhanced page and on each game's own page (section 10.9). It is off in a fresh settings file, is in no
+  graphics preset and is not turned on by choosing Enhanced or Ace. An authentic run has no launch line, so the
+  chain code never runs there: no buffer, no chain, no extra descriptor set, and the shader branch is never taken.
+- **Which textures.** A cache entry gets a chain when the game gives it one level (no `TEXMODE` maximum level), its
+  minifying filter is linear, both sides are powers of two up to 512 texels with the longer at least 2, and no byte
+  of it lies in a live render target. A texture the game mips keeps the game's own chain (#1373) and gets none of these. A render
+  target, read back as a texture, never gets one: its contents are guest drawing, not texture data. A texture that
+  changes every frame, from a CPU write or a DMA, is decoded again as before, and its chain follows it: built again
+  for contents the renderer has not seen, or taken from the chain cache (below) for contents it has.
+  A CLUT texture's palette is part of its cache key, so each palette has its own entry and its own chain, and a
+  palette animation that comes back to a palette finds the chain it built the first time.
+- **When a chain is built.** At the first bind after a decode that the chain applies to (the next item), not at the
+  decode: a decode uploads level 0 alone and marks the chain stale. The bind builds it from the texels that decode
+  left, or, when the texture was decoded for an earlier draw, decodes level 0 again first. The chain's view,
+  sampler and descriptor set are made at the first such bind too. Contents that only through-mode draws,
+  alpha-unused or alpha-tested draws, 1:1 draws or render targets ever meet, such as a loading screen's or a menu's
+  textures, cost no build. Two limits keep builds off the frames that cannot afford them, and a draw either limit
+  stops binds level 0, as with the part off:
+  - **The build budget.** The builds started in one guest frame, from one of the guest's display flips to the
+    next, stop once they have read 131,072 level-0 texels (two 256x256 textures); one build may run past it by its
+    own size, and a chain taken from the cache, or contents refused below, charge a sixteenth of their texels. A
+    later bind builds the chain. The budget counts texels and guest flips, not host time or host presents (which
+    a frame cap drops on a wall-clock grid), because a chain changes the frame the guest keeps: which draws bind
+    one is the same on every host and in every deterministic run started from boot, record and replay included
+    (a saved state does not carry the budget, the streaming table or the chain cache).
+  - **Streaming textures.** A texture address whose contents are decoded anew in three guest frames in a row,
+    each within two frames of the last (a movie on a surface, a palette fade, which makes a new entry at each step, a
+    texture rewritten every frame), would build chains that are replaced before they are seen again. While it
+    streams, contents the chain cache holds bind their kept chain, and contents a streaming address has shown once
+    before (a slot several textures share in turn) are built when they come back; contents new to both keep level
+    0, and their hash is noted in a ring of 1,024. Once the address holds still for longer than two frames, its
+    next draw builds as usual.
+- **Which draws.** A draw binds the chain only when it is transformed (through-mode HUDs, menus and text keep
+  level 0, as texture filtering's rule has it), its minifying filter is linear, and, for a texture with any alpha
+  under 255, the draw blends by the texture's alpha and does not alpha-test it: the texture function is RGBA, the
+  source or the destination blend factor reads the source alpha, and the alpha test is off. A draw that shows a
+  keyed texel's colour as it is would show the fill colour described below instead, so it keeps level 0. An
+  alpha-tested draw keeps level 0 because the chain's alpha is a plain mean: a far cut-out (foliage, a fence, hair)
+  would thin out under a high reference or fill in under a low one, and the depth and stencil it writes would
+  follow; with level 0 its coverage stays the game's own. A draw that maps texels 1:1 onto guest pixels (the smart
+  2D test of section 10.10), or a sprite that magnifies its texture, is never minified at any render scale, so it
+  binds level 0 too, and sharp game text (10.13) and the smart 2D filter take it as they do with the part off. A colour-tested draw with a linear filter is drawn by the software
+  renderer, as with the part off, so it never samples a chain (the colour test keys on the game's own texels). Each
+  rule is rechecked at every bind, and the exit stamp counts the binds each rule kept at level 0.
+- **How a level is built.** After the palette lookup, from the RGBA8 texels the renderer uploads as level 0, which
+  it never changes. Each texel of the next level is the mean of a 2x2 block of the level above in linear light (the
+  sRGB curve decoded, averaged, encoded), with colour weighted by alpha so a transparent texel adds no colour, and
+  alpha averaged plainly; a block with no alpha at all takes the plain mean of its colours, with alpha 0. Then each
+  texel with alpha 0 takes the colour of its nearest texel with alpha above 0 (a two-pass chamfer distance over the
+  whole level, with no wrap), so no bilinear or anisotropic tap, which can span three texels, blends a colour key's
+  colour into a visible edge. A level of one texel ends the chain: 1 + log2 of the longer side levels.
+- **How it samples.** The sampler filters each level linearly and between levels linearly (trilinear), with 16x,
+  8x, 4x or 2x anisotropy when texture filtering is on, from level 0 to the last level. The shader branch
+  (`psp.frag`, flag bit 23) samples with gradients it computes from the device-pixel derivatives of the texture
+  coordinate before the PSP's 1/16-texel snap, so the level is chosen per device pixel: there is no level-of-detail
+  bias, and the render scale is in the gradient. A texture drawn at two texels per guest pixel is minified at 1x
+  and samples level 1; at 2x and above it is not minified and samples level 0, as the game draws it. The same entry
+  keeps a one-level view and sampler for every draw that does not bind the chain, so those draws sample exactly as
+  they do with the part off.
+- **The texture scaler and texture replacement** (sections 10.10 and 10.12). A scaled copy or a replacement
+  texture, when one exists for the entry, is what the draw samples, and it has no chain yet; a chain for those
+  images is later work. The smart 2D filter never takes a draw that binds the chain.
+- **Memory and cost.** A chain adds a third of level 0's bytes or less (a 64x64 texture: 1365 texels on top of
+  4096), in the same image as level 0, plus one descriptor set an entry. The chain is freed with its entry at
+  eviction and at shutdown. The builder's two buffers, made once when the part is on, hold a 512x512 chain's levels below level 0
+  (0.33 MiB)
+  and its float work area (2.25 MiB). A build is CPU work on the GE thread, bounded per guest frame by the build
+  budget above. A game that streams several textures
+  through one VRAM slot in turn decodes each of them again and again, so the renderer keeps built chains in a host
+  cache keyed by a 64-bit hash of every decoded level-0 texel and the size: contents it has seen upload their kept
+  chain instead of building it (the hash costs about a fifteenth of a build). The cache holds at most 32 MiB, about
+  two and a half times the chains Hot Shots Tennis keeps resident at 4x, and drops the least recently used chain
+  first. The exit stamp gives the builds, the reuses, the level-0 decodes a late build repeated, the time of all
+  three and the cache's peak. On LittleBigPlanet's first story level at 4x the cache saved 59 of about 9,000
+  builds, as nearly all of that title's contents are new; on Hot Shots Tennis it saved more builds than were made.
+  A 3D texture atlas also bleeds between its cells at far levels, as any mip chain does: the key fill covers only
+  texels with alpha 0.
+- **Stamps.** `ACE_MODE: mips on (textures with one level get host-built mip chains)` after the `ACE_MODE: on` line;
+  `HOST_MIPS: on (filter=box in linear light, alpha-weighted, key fill; bias=0 at <S>x; anisotropy=<A>)` and the
+  guest-visible line section 11.3.8 describes when the renderer starts; `HOST_MIPS: exit (entries=, sets=, builds=,
+  reused=, redecodes=, texels=, build_ms=, bound=, plain_alpha_unused=, plain_alpha_test=, plain_onetoone=,
+  plain_budget=, plain_stream=, plain_target=, set_failures=, chain_peak_kib=, cache_peak_kib=, frame_peak_ms=)`
+  (`entries` are the images with a chain, `sets` the ones a draw has bound; `build_ms` is the time of the repeated
+  decodes, the hash, the cache lookup, the builds and the copies into the upload buffer, and `frame_peak_ms` the
+  most of it one guest frame took; `texels` counts built ones; `plain_onetoone` counts draws, the other `plain_`
+  fields binds) when it
+  stops, or, on the `SR_EXIT_AT_VBLANK` path that skips the renderer's shutdown, from `ace_finish` (once either
+  way). The report's `effective` block has `"mips"`, the game badge lists "smooth far textures", and the flight
+  recorder's `runtime.enhancements` carries the launch line. Section 10.4 applies: the run is an Enhanced run. If the
+  builder's buffers cannot be made, the part is unavailable for the run and the report says so.
+- **Tests.**
+  - `tex-mips-selftest` runs `tex_mips.h` alone: the level count and chain size, the sRGB round trip, the
+    table-driven encode against the search at every midpoint and a sweep of 0..1, a checker whose every level is the
+    linear-light grey (188, not the gamma mean 128), alpha weighting (one opaque blue texel among three transparent
+    red ones gives blue at alpha 64), a colour-keyed edge whose fill leaves no key colour in any level, and a texture
+    with no alpha at all. `tex-mips-mutant` builds it without the fill and requires the key-edge cell to fail for
+    that reason.
+  - `gpu-mips-selftest` runs `ge_gpu.c`'s own hooks on a Vulkan device and reads the target at device resolution: a
+    64x64 single-level CLUT checker drawn 5 pixels wide samples the chain's grey, not level 0's aliasing; a draw at
+    two texels per guest pixel matches the same draw on level 0 alone pixel for pixel from 2x, and is the chain's
+    grey at 1x; a second palette builds a second chain and the first palette, back again, finds its own; a rewrite
+    of the texels rebuilds the chain, and the checker written back takes its cached chain with no build; new
+    contents drawn in through mode build nothing, and the first minified draw of them decodes level 0 again and
+    builds once, after a submit that closes the command buffer; an alpha-tested draw of a texture with alpha, and a
+    transformed draw at 1:1, bind level 0; past the build budget a draw binds level 0 and builds nothing, and with
+    budget it builds; with room for two 64x64 textures, two new contents build in one guest frame and the third
+    binds level 0 until the next, which guest flips that no host present follows still open; new contents at the
+    address in three frames in a row keep level 0 at the third,
+    while it streams contents the cache holds bind their chain, contents refused once build when they come back
+    and contents new again keep level 0, and the address held still builds again; a colour-keyed edge blended over black takes no key colour; through-mode and
+    alpha-unused draws keep level 0, and a colour-tested draw stays with the software renderer; the chain bytes
+    are 1365 texels an entry. It runs at render
+    scales 4, 2 and 1, with 16x texture filtering, and with the part off, where the minified draw must show level
+    0's aliasing and no entry may have a chain, and the key-off cell requires the draw the renderer made before
+    the part: an image of the game's one level, no chain view, sampler, set or builder buffers, the entry's own
+    set bound and no chain flag in the batch. `gpu-mips-mutant` builds it four times: recording the late build's
+    barrier before a command buffer begins and building at every decode, which the deferred cell must kill, and
+    giving an entry chain levels with the key off, which the key-off cell must kill, and keying the budget on
+    host presents, which the budget cell must kill.
+  - `ace-selftest` pins the key: optional, `on` or `off`, in an Enhanced or Ace line, written only when on, after
+    `twin` and before `stick`, `load`, `depth` and `cull`; the longest line the key table allows (`ace_longest_line`)
+    fits `ACE_SPEC_MAX`, and so
+    the flight recorder's field, and every part on, found from that table, has badge words that fit `ACE_WORDS_MAX`;
+    `ace_finish` runs a part's exit stamp once. `test_play_mode_mips_settings` in `tests/native/test_player_state.c`
+    checks the part at both levels, its save and load, and the launch line, with `mips` after `twin` and `cull` after `mips`.
+    `gpu-coherence-selftest`'s authentic run requires no entry to have a chain.
+
+### 10.20. Higher-Precision Host Depth (`depth=32`)
+
+The PSP's depth buffer holds 16 bits, and the Vulkan renderer keeps that format (`D16_UNORM`). Games set their near
+and far planes for the PSP's screen, so surfaces that lie less than one 16-bit step apart, often far away, flicker
+against each other (z-fighting), and the flicker is easier to see above 1x. This feature gives the Vulkan renderer a
+32-bit float depth buffer for every game, with no per-title data (#2051). It is guest-visible (section 11.1):
+section 11.3.12 is its entry and says what the guest can observe; this section says how it tests. The code is in
+`src/rt/gpu_sdl3vk/ge_gpu.c` (`s_depth_fmt`, `depth_unorm`, `depth_texel`, `PipeKey.zbias`).
+
+- **Setting.** The `depth` key of the `SR_ACE` launch line (section 10.1): `depth=32`, or `depth=off`, the same as no
+  key. It is an Enhanced part and needs no `tier=ace`. The renderer reads it once when it starts; there is no
+  environment variable for it. The player has no setting for it yet, so no launcher writes the key (section
+  11.3.12).
+- **The buffer.** The depth attachment is `D32_SFLOAT` on the scale the 16-bit buffer uses: a draw at 16-bit depth z
+  stores z / 65535 (`psp.vert`, `psp_tnl.vert`), now without rounding it to a step. A device that cannot render to and
+  copy that format keeps `D16_UNORM`, and one `ACE_MODE: depth unavailable (...)` line says so. The host twin (section
+  10.11) keeps a depth twin of the same format, and Smooth motion's depth copy (section 10.6) is `R32_SFLOAT` instead
+  of `R16_UNORM`, which its passes sample as the same 0 to 1 values.
+- **How a test decides.** The fixed-function test compares the unrounded values. Rounding is monotonic, so where the
+  two values round to different 16-bit steps the answer is the PSP's. Only where they round to the same step can it
+  differ:
+  - LESS and GREATER, and LEQUAL and GEQUAL with depth writes on: the nearer surface by its unrounded depth wins,
+    where the PSP's test sees two equal values (its strict tests fail them, its or-equal tests pass them). This is
+    what removes z-fighting.
+  - LEQUAL and GEQUAL with depth writes off (decals, shadows and many effect passes): the fragment's depth leans
+    toward passing by a depth bias of 64 units of the primitive's float exponent (`DEPTH32_TIE_BIAS`), at most a
+    quarter of a 16-bit step. A surface drawn on the plane it lies on, from other vertices, then passes as it does at
+    16 bits instead of failing on float rounding, and as the draw writes no depth, no stored value moves. The same
+    lean also passes such a draw where its surface lies less than the bias behind the stored one, across a step
+    boundary too, where the PSP fails it.
+  - EQUAL and NOTEQUAL compare unrounded values. A pass drawn again from the same vertices (a second texture or a
+    lighting pass) has the same depth and gets the PSP's answer. A different surface that rounds to the same step
+    without lying exactly on the stored one fails EQUAL, where the PSP passes it.
+  - A surface with depth writes on, drawn with LEQUAL or GEQUAL on the plane of another from other vertices, is
+    decided by float rounding pixel by pixel where the PSP passes every pixel, so it can speckle. That, and the EQUAL
+    case above, are why the feature is off by default.
+  - Through-mode draws (2D overlays) and every line, 3D lines included, carry whole-step depths (a line's depth is
+    cut to its step), while a 3D surface stores its depth with its fraction. Such a draw at the step a surface
+    rounds to, with LEQUAL or GEQUAL, meets the cases above at each pixel: it fails where it lies on the losing side
+    of the stored value by more than the lean, or by any amount when it writes depth, where the PSP passes it. A
+    cut line can lie almost a whole step from the surface it was drawn on, so lines show this most.
+
+  ALWAYS, NEVER and clear mode are unchanged, and so is the minz/maxz range test, which rounds the fragment's depth
+  to a step in `psp.frag`, except that on a draw with the lean a device may give the shader the leaned depth, which
+  can move a pixel within a quarter step of the range's edge to the other side.
+- **What the guest reads.** Depth crosses to and from guest memory at 16 bits. An upload of guest depth stores step /
+  65535, the value a draw at that step stores (`depth_unorm`), so a draw at that step passes EQUAL against it. A
+  readback rounds each value to the nearest step (`depth_texel`), as the 16-bit attachment's conversion does. The
+  step stored at a pixel is the same with the key on and off: a test whose answer the key changes compares two
+  values of one step, and the value it keeps lies in that step either way, while a draw the lean passes writes no
+  depth. So a depth readback, depth read as a texture through guest memory, and the software renderer when a draw
+  falls back to it see the same 16-bit depth, except for a value near half way between two steps: Vulkan leaves the
+  precision of a 16-bit attachment's conversion to the driver, so such a value may land in the other step with the
+  key off (lavapipe stores 17/32 of a step as the lower step), while `depth_texel` rounds it to the nearest. The
+  colour is what changes.
+- **The software renderer** (`src/rt/ge.c`) keeps its 16-bit depth. It is the PSP's model and the renderer of the
+  fallback paths, so a frame it draws z-fights as on the PSP; this feature is a property of the Vulkan renderer's host
+  buffer.
+- **Cost.** Each depth buffer takes 4 bytes a device pixel instead of 2: at 4x (2048 x 1088 device pixels) about 8.9
+  MB instead of 4.5 MB, and as much again for its host twin. A depth readback or upload moves twice the bytes. A
+  draw that writes no depth with LEQUAL or GEQUAL uses a pipeline with depth bias, so such a state can take one more
+  pipeline.
+- **Stamps.** `ACE_MODE: on (...)` is followed by `ACE_MODE: depth 32 (...)`; the renderer prints
+  `HOST_DEPTH: on (D32_SFLOAT; ...)` when it makes the buffer; the report has `"depth": 32`, or 16 when the device
+  refused it; the badge's words name "32-bit depth"; the flight recorder's `runtime.enhancements` keeps the whole
+  line (its field holds `ACE_SPEC_MAX` characters; at 95 it cut an Enhanced line with `depth=32` to `depth=3`).
+  Section 10.4 applies: the run is an Enhanced or Ace run.
+- **Tests.** `ace-selftest` pins the key, its values, its place in the line, the stamp's line and the report.
+  `gpu-coherence-selftest` runs `host-depth` with the key off and on (`--depth 32`) at scales 1 and 4:
+  - z-fight: a surface drawn after a nearer one with GEQUAL and depth writes, behind it by one step closing to a
+    small fraction of one (1/256 at the last device pixel at scale 1, 1/1024 at scale 4): with the key off the far surface shows where the two round to one step, which is the defect; with the
+    key on the near surface shows at every pixel;
+  - decal: a quad drawn on its base's plane from other vertices with GEQUAL, and with LEQUAL, and depth writes off,
+    covers every pixel it spans, with the key on and off;
+  - depth-equal: the base's own vertices drawn again with EQUAL cover every pixel; one step nearer, none;
+  - upload: every 16-bit value written by the CPU reads back from the device unchanged, and a quad at a written
+    step passes EQUAL against it while one a step away fails, from 0 to 65535;
+  - readback: a scene's depth committed to guest VRAM hashes to the same value with the key on as the key-off run
+    at the same scale (`--depth-ref`). The scene is a z-fight the key changes (the far surface shows at some
+    pixels with the key off and at none with it on, which the test checks), drawn so that every pixel stores the
+    near surface's step either way and that step is whole at each device pixel centre, away from the half steps
+    where a 16-bit conversion's rounding is the driver's.
+
+  The whole suite also runs once with `--depth 32`, and its cells that read the device's depth image read it at
+  either format.
+
+### 10.21. Supersampling (`ssaa`)
+
+An Enhanced part (#2073), in the Vulkan GE renderer: each frame is drawn at 2 or 4 times the render scale on each
+axis, and the presenter shows the average of the samples that fall in each pixel. It smooths the edges of
+triangles, alpha-tested cut-outs and shader-made edges, which a higher render scale alone leaves stepped. It is a
+presentation-only change (section 2.2), in the render-scale class: it changes the image the host shows, never
+what the guest draws into, reads or waits for. The code is the comment at `s_ssaa` in
+`src/rt/gpu_sdl3vk/ge_gpu.c`.
+
+- **Setting.** Settings > Enhanced offers **Supersampling** (2x, 4x or Off), for the library or for one game
+  (section 10.5), and the launch line carries it as `ssaa=2` or `ssaa=4` for an Enhanced or Ace launch with it
+  on (section 10.1); a missing key or `ssaa=off` is off. It needs no `tier=ace`. It is off in a fresh settings
+  file and in no graphics preset, because of its cost (below): a preset leaves it as it is. It has no other switch.
+- **How.** It runs the host twin (section 10.11) at the render scale times the factor; the twin keeps the authentic
+  colour unless full colour was asked for. At each present the twin is averaged down to the render scale by
+  halving blits with linear filtering: one at 2x, two at 4x. Each halving step weighs four samples equally and
+  stores 8 bits a channel, so at 2x each shown pixel is the mean of the 4 samples it covers, rounded once, and at
+  4x the mean of the 16 it covers within two such roundings. Dither stays keyed to guest pixels, as at any render
+  scale. At render scale 1 the twin draws from its own copy of the vertices, with the above-1x texture fixes
+  (the render-scale item's edge box and nearest-sprite alignment, section 11.1) applied at the twin's scale; the
+  authentic chain keeps the 1x vertices unchanged. The presenter, the speed readout, Smooth motion and Widescreen
+  Fill take that image at the render scale, as without supersampling, so Fill's wings are drawn as usual.
+- **Guest memory.** The authentic chain keeps the render scale, and nothing reads the twin or its average back,
+  so guest VRAM, every readback, every block transfer into RAM and the frame each present commits to guest VRAM
+  are those of a run without supersampling at the same render scale. The tests: ssaa-edge hashes guest VRAM after
+  its scene is read back and requires the hash of a run without supersampling, at 2x and 4x and render scales 1
+  and 2; twin-scene and the whole suite run with it on at 2x and 4x, so every readback and block-transfer case
+  meets its own expected bytes with it on. Section 11.1's four items are unchanged, as for the twin: the extra GPU
+  work is a host wait, never in the guest timing model.
+- **What the picture shows.** Without it every pixel of a black-and-white scene is black or white; with it, pixels
+  on an edge take the shades between, only within a pixel and a half of the edge, and every other pixel keeps its
+  value (ssaa-edge, which reads the image the production present step, `target_prepare_present`, hands the
+  presenter). 4x gives more shades than 2x can. A nearest-filtered sprite drawn one texel per guest pixel shows
+  the authentic image at every pixel, since each guest pixel's samples hold the same texel (ssaa-sprite, at
+  render scales 1 and 2). Present-source captures follow the shown image, so they hold the averaged picture.
+- **Size check.** At start the renderer checks the twin's images against the GPU: each side at most the device's
+  largest image, framebuffer and viewport (`maxImageDimension2D`, `maxFramebufferWidth` and `Height`,
+  `maxViewportDimensions`), and an estimate of the memory the factor holds within half of the largest
+  device-local memory heap. The estimate counts four render targets (two display buffers and two others), each
+  with its twin and depth twin at the twin's scale (2 bytes a depth sample, 4 with `depth=32`, section 10.20) and
+  its average at the render scale, the twin snapshot, and at 4x the halving step. If 4x does not fit and 2x does, the run uses 2x and says so in one
+  `ACE_MODE: ssaa 2 (asked for 4: <reason>)` line; if nothing fits, supersampling is unavailable for the run
+  (`SSAA: unavailable (<reason>)`, the reason naming each factor tried; the Ace report and stamps say so, the
+  report's reason cut to its 95 characters). It never falls back to 1x without a
+  message. A GPU without linear blits of RGBA8, or one that refuses the twin, makes it unavailable the same way.
+  The estimate is not a promise: a title with more live render targets uses more, and a twin allocation that fails
+  later turns the twin off for the rest of the run with one `TWIN: off ...` line and one
+  `SSAA: off for the rest of the run with the twin` line (section 10.11), and the Ace report then gives
+  `"ssaa": 1` with the factor asked for (twin-alloc-fail with `--ssaa 2`). At render scale 1 a failed allocation of the twin's vertices makes it
+  unavailable the same way. `ssaa-limit` forces small limits and checks the factor chosen, the reason given and
+  the Ace report.
+- **Cost.** Every render op is drawn a second time, into the twin, at factor x factor times the render scale's
+  pixels: 4 times at 2x and 16 times at 4x, plus one or two blits per present. The estimate above, with 16-bit depth, is
+  17 MB at render scale 1 and 2x, 64 MB at 1x and 4x, 68 MB and 255 MB at 2x render scale, and 272 MB and 1020 MB at 4x
+  render scale (render scale 4 with 4x makes 8192 x 4352 images).
+- **Stamps.** `ACE_MODE: ssaa <n>` at start; `SSAA: on (<n>x: the twin renders <w>x<h>, ...)` when the twin starts;
+  the Ace report's `"ssaa"` (the factor in effect, 1 when unavailable) and `"ssaa_requested"` when the size check
+  lowered it; and "2x supersampling" or "4x supersampling" in the pause menu's list of parts. Section 10.4
+  applies.
+- **Tests.** `gpu-coherence-selftest` runs ssaa-edge without supersampling to write a reference at render scales 1
+  and 2 and at 2x and 4x against it, twin-scene, ssaa-sprite at 2x and 4x (render scale 1) and at 4x (render
+  scale 2), the whole suite at 2x and at 4x, twin-gate with it on, and ssaa-limit with a forced memory budget and
+  a forced largest side. `ace-selftest` checks the key's parsing,
+  order, report and words; `test_player_state` the setting, its presets and its launch line.
+
+### 10.22. Unclipped SAS Mixes Through a True-Peak Limiter (`peak=limit`)
+
+The PSP's SAS core adds a grain's voices, and with `__sceSasCoreWithMix` the caller's own PCM, then stores the sum
+as int16, saturated. Some games clip their own sound this way: #2135 counted 126 full-scale samples in a 4 s burst
+at the Hot Shots Tennis (UCUS98701) title logo on a PSP-3000. Authentic keeps doing exactly that. `peak=limit`
+(#2137) plays the same mix without the hardware's clipping: the unsaturated sum, through a true-peak limiter at the
+host's output.
+
+- **The line.** `peak=limit` sits after `ssaa` and before `glyphs` and `cull` and is written only when on;
+  a missing `peak` and `peak=off` are off. It is an Enhanced part and needs no `tier=ace`. A build without it
+  (`ACE_HAS_PEAK`) refuses the line.
+- **What the guest sees: nothing.** The guest's SAS buffer gets the PSP's saturated bytes in every mode, because a
+  game may read it back; `hle-thread-selftest` checks them byte for byte against a run with the part off. The
+  limiter keeps a channel's queue depth: a push of n frames queues n frames.
+- **Where the wider mix comes from: provenance, checked by bytes.** The guest reads SAS output from guest memory, so
+  the sum can reach the host only through the buffer the game hands to `sceAudioOutput*`. The other design, a host
+  mix fed beside the guest's in place of that output, would have to guess which output carries which grain and
+  would drop whatever the game does to the buffer after the mix (its own volume, its own music, a copy). So the
+  SAS mixer (`src/rt/hle_audio.c`) keeps, for the host only, the last eight stereo grains whose sum it saturated:
+  the address, the bytes it stored and the sum before saturation, with the same voices, envelopes, resampler
+  (`sas=sinc` included) and input gain as the stored grain. A new mix over a kept grain's span forgets it. An
+  output (`sceAudioOutputBlocking`, `sceAudioOutputPannedBlocking`, `sceAudioOutput2OutputBlocking`, and
+  `sceAudioSRCOutputBlocking` at 44.1 kHz) whose span holds a kept grain's bytes unchanged gives the host that
+  grain's sum for those frames; a span the game changed after the mix, a copy of the grain elsewhere, a mono
+  output, a 48 kHz SRC output and the raw four-plane output mode play the guest's bytes. Where the store did not
+  saturate, the sum is the stored value, so nothing is kept.
+- **The limiter (`src/rt/audio_sdl3.c`).** With the part on, every push of every channel passes through one limiter
+  per channel in place of the per-sample clamp, at the channel volume and master volume as before. Each frame's peak
+  is its own sample and the inter-sample peaks on either side, read at 4x through a 16-tap-a-phase windowed-sinc
+  interpolator. The gain a frame needs is the ceiling over its peak; the gain applied is a minimum over the next 64
+  frames, released exponentially (50 ms), then averaged over 64 frames, so it falls over 1.45 ms before a peak and
+  is at most what the peak needs when it arrives. The ceiling is -0.3 dBTP as that detector reads it; read at 16x,
+  the overflow fixture's hard 62000-count step rings 0.13 dB past it, still under full scale. The output is 71
+  frames (1.61 ms) late. A frame below the ceiling comes out bit-exact unless a peak's attack or release reaches it
+  (the release is back within half a count of unity well inside a second), so the level is the PSP's wherever the
+  PSP did not clip; only the overs are rounded off instead of cut. A stream that stops leaves its last 71 frames in the
+  limiter until that channel's next push or hold of silence (`sr_audio_push_silence`, which passes through the
+  limiter too), which plays them first, in order. A push or hold that finds the channel played dry (a device pull
+  found nothing) drops them instead (after the gap they would be a 1.6 ms fragment ahead of the new sound); a hold
+  also drops the converter's kept-back frames, a push leaves them in place. Nothing is invented. The video
+  recorder (`sr_videorec_audio`) and the counters keep the guest's copy.
+- **Off.** Without `peak=limit` neither side runs: the SAS mixer keeps nothing, `sr_audio_push` is the plain push,
+  and `sr_audio_push_wide` is the plain push of the guest's copy (`audio-selftest` checks the bytes). Fast forward
+  pushes nothing, so nothing is limited while it runs.
+- **Stamps and the report.** `ACE_MODE: peak limit (...)` at start; the badge's words say "unclipped sound"; the
+  report's `"peak"` block gives `on`, `pushes_wide` (pushes that carried a kept sum), `frames_wide` (their frames
+  where the sum and the guest's copy differ), `frames_limited` (output frames whose bytes the gain changed) and
+  `min_gain`. The part
+  is confirmed once the SAS mixer and the audio backend both take the switch (`driver.c`); a link without either,
+  the headless gate, reports it as never run. Section 10.4 applies.
+- **Tests.** `hle-thread-selftest` runs the overflow fixture (twenty full-scale voices over caller PCM through
+  `__sceSasCoreWithMix`): the guest's bytes are identical with the part on and off; the output of that buffer
+  carries the sum, past 16 bits exactly where the store saturated and the guest's value elsewhere; a buffer changed
+  after the mix and a copy play the guest's bytes. `audio-selftest` checks that the part off is the plain push; that
+  quiet audio comes out bit-exact and 71 frames late with an unchanged queue depth; that a hold of silence keeps
+  the order; and that a sine reaching 6.6 dB
+  past 16 bits leaves no sample past the ceiling and a true peak (read at 16x) under full scale, a gain that falls
+  before the overflow arrives, the
+  passage before it bit-exact and the one after it at the input's level within 0.1 dB.
+- **Not yet.** The player has no part for it yet: a launch line names it by hand. The Hot Shots Tennis title-logo
+  check (no full-scale sample, and the non-clipping music at the PSP's -15.6 dBFS) waits for the #2135 console read.
+- **Tier:** Enhanced. **Default:** off, and in no graphics preset.
+
 ## 11. Guest-Visible Items
 
-Sections 10.3, 10.6, 10.8 and 10.11 describe host-only features: what the guest reads, in its registers, memory and timing, is the
+Sections 10.3, 10.6, 10.8, 10.11 and 10.22 describe host-only features: what the guest reads, in its registers, memory and timing, is the
 same with them on or off. The owner's decision of 2026-11-04 (#2055) is that Enhanced does not have to stay fully
 Authentic: a change that improves a game without making anything worse is allowed, even when the guest can observe
 it. This section is the class for those changes. It adds to the classes above and removes none of them.
@@ -1176,16 +2165,37 @@ bind directly: the same pixel format as the target, not swizzled, mipmapping not
 the PSP's sample lattice in guest texels: linear filtering, in sixteenths of a guest texel, blends the device texels
 there, so an effect drawn into a smaller buffer and sampled back with linear filtering (a bloom or glow pass) keeps
 its detail (`rtt-scale` in `gpu-coherence-selftest`). Nearest filtering takes each guest texel's centre, as the PSP
-does, so it shows one device texel per guest texel.
-Every other read of a render target, including a read in another format, a swizzled or mipmapped read and another
-buffer width, decodes the target from guest memory at 1x. That is the GE's own picture of it, so such an effect shows
-1x detail at any render scale; it never shows a picture the PSP would not draw. A render-target read is found by
-address alone: depth read as a texture decodes from guest memory at 1x when its address lies outside every colour
-target's span, and if it lies inside one and the read passes the rules above, that colour target's image is bound
-instead, because the renderer does not detect depth aliasing. The cases, the depth rule and the debug switch are in
-`src/rt/gpu_sdl3vk/README.md` (#2052).
+does, so it shows one device texel per guest texel. The texture's own width and height bound the read: each texel index
+is clamped or wrapped at them, as the GE does, not at the target image's edge, so a texture inside a larger target never
+shows the target's pixels beyond it (`rtt-edge`), and a texture at an offset inside a target scales the same way
+(`rtt-scale-offset`).
+Every other read of a render target, including a read in another format, a swizzled or mipmapped read, another buffer
+width and a read through the 0x04200000 or 0x04600000 view of VRAM (`rtt-vram-view`; that the GE's texel fetch reorders
+through a view as a CPU access does is inferred, not measured), decodes the target from guest memory at 1x. That is the
+GE's own picture of it, so such an effect shows 1x detail at any render scale; it never shows a picture the PSP would
+not draw. A CPU read of a target a draw sampled returns its top-left device samples in its own format (the readback rule
+above, `rtt-scale`). A render-target read is found by address: depth read as a texture decodes from guest memory at 1x
+when its address lies outside every colour target's span. When it lies inside a colour target's span too, the read takes
+whichever was written last: depth written after the target's image last changed makes it a depth read, decoded from
+guest memory at 1x after the depth is committed there (`rtt-depth-alias`); otherwise the colour target's rules apply.
+The cases, the depth rule and the debug switch are in `src/rt/gpu_sdl3vk/README.md` (#2052).
 
 At 1x the readback is the PSP's value.
+
+The render-target reads that decode at 1x (#2279; the README lists each with its reason) fall into two groups:
+
+- no scaled form exists, because the texture's texels are not the target's pixels: 8888 read as 16-bit or CLUT16,
+  16-bit as 8888 or CLUT32, CLUT4, CLUT8, DXT, an address off the target's pixel boundaries, and depth read in a
+  format whose texel is not one depth value. The 1x decode is the read, swizzled, mipmapped or at another width too;
+- a scaled form could exist but is not implemented, so these read at 1x and #2279 stays open for them, each in a
+  format whose texel is one of the buffer's values: a 16-bit target read as another 16-bit format, CLUT16 and CLUT32
+  at the target's pixel size, a swizzled read, a read with another non-zero buffer width, a read through the
+  0x04200000 or 0x04600000 view, a mipmapped read, and a depth read in a 16-bit format (outside every colour target,
+  or inside one whose depth was written last).
+
+`rtt-1x-reads` in `gpu-coherence-selftest` runs thirteen such reads at 1x, 2x and 4x (the README lists them): none
+binds a target's image, each depth read commits the GPU's depth first, and the reading target's guest VRAM equals
+the software renderer's.
 
 ### 11.2. What an Item Must Have
 
@@ -1409,6 +2419,191 @@ The fourth section 9 transform admitted under this section, by its own entry as 
 - **"Nothing worse".** Not shown here: the private comparison runs of section 11.2, item 4 come with the pull request
   that turns a title's 60 FPS game logic on by default.
 
+##### 11.3.2.3. The 60 FPS logic transform `gate_30hz_phase`
+
+Admitted under this section by its own entry, as section 11.3.2 asks.
+
+- **Key and off switch.** Those of section 11.3.2: the title's "60 FPS game logic" setting, which launches the
+  enhanced package with `SR_EXPERIMENTAL_60HZ=1`, and per title the same setting off, which runs every stock statement.
+  A package leaves the transform out for its title by not naming it.
+- **What it changes.** At a `gate_30hz_phase` site the stock instruction keeps the stock instants of one state. After
+  an odd number of that state's updates a call is skipped, a compare reads as its `odd_phase_condition`, and a loaded
+  value reads `+0.0` (section 9.2).
+- **What it reads.** One float of guest memory, at the declared offset from the declared register, each time the site
+  runs: through the guest accessors, as a load at the site would read it. No transform before this one reads guest
+  memory at a declared register and offset to decide what a 60 Hz site does; `clip_x_widen` (section 11.3.6) does so
+  for another class of package. The argument for allowing it is that the read replaces a counter the runtime would
+  otherwise keep beside the guest (the update count of section 9.5) with the title's own record of the same thing,
+  which is right where the count is wrong: after a state entered on an odd update, and across a pause that stops the
+  state and not the count. The resolver proves the register holds one known value at the site. The phase is not
+  estimated from the float: the float is matched exactly against the values the state's own float32 sum takes, so
+  it is right for as long as the state lasts, and a float that is not one of those values is not guessed at: the
+  site runs stock and reports. What the field means is the author's evidence, as for every site.
+- **What the guest can observe.**
+  - Guest registers and memory: no memory is written. After an odd number of updates a skipped call's work does not
+    happen, and `$v0`, `$v1`, `f0`-`f3`, HI and LO keep their earlier values (the resolver refuses a site whose
+    caller reads them); after a gated compare the FPU condition flag (`fpcond` and bit 23 of FCR31) holds
+    `odd_phase_condition` and not the compare's result, for every later reader of the flag; after a gated `lwc1` or
+    `lv.s` the loaded FPU or VFPU register holds `+0.0` and not the stored value, for every later reader of the
+    register, while the memory it was loaded from is unchanged. The resolver refuses a gated load of the state's
+    own time and one whose register the title stores right after it (section 9.2); what else the title does with
+    the register is the site's evidence.
+  - A fault stock does not have: the read is a guest access at an instruction that may have none (a `jal`, a
+    compare). With a bad pointer in the declared register it faults there; under `--lle-cpu` that is an address
+    error at that instruction, raised for a `jal` after its delay slot has run.
+  - VRAM bytes: no transform writes VRAM; the frames drawn follow the logic.
+  - Readbacks: unchanged.
+  - Timing the guest can measure: no VBLANK, DMA, GE list or media clock changes. A skipped call is less work.
+  - I/O speed: unchanged.
+- **Lines a 60 Hz run is checked for.** `ENHANCEMENT_PHASE_KEPT: site <id> at 0x<pc> read the time <t>, which its
+  state does not reach by adding <step> from zero; it runs its stock instruction`, once per site. It means a state's
+  time left its sum (or reached the value where the sum stops advancing), and that the site's phases for that state
+  are not to be trusted until the state is entered again. A tool that accepts a 60 Hz run checks for it.
+- **Tier and default.** Ace, off by default, as section 11.3.2.
+- **Authentic stays byte-identical.** As section 11.3.2: without `--enhancement-package` codegen output is unchanged,
+  a package without such a site carries none of its run-time code, and with the package built in and the toggle off
+  the site runs its stock statement, with no read (the `else` form of every rewritten statement).
+  `test_generated_statements_match_the_rules_when_run` in `tools/test_enhancement_package.py` builds a fixture with
+  the package and without it, runs both, and checks that the toggle-off output equals the Authentic output byte for
+  byte, and the toggle-on run time by time against the rule, for both flag values, under `--lle-cpu`, and with
+  sites held by `requires`. It also runs the generated lookup against the state's float32 sum for two million
+  updates (nine hours of state time); `test_phase_follows_the_states_float32_time_for_hours` checks the rows
+  themselves for five step values.
+- **Sampled checking.** As section 11.3.2: a sampled call whose body holds the site reports a mismatch there with the
+  toggle on. A skipped call starts no check.
+- **"Nothing worse".** Not shown here: the private comparison runs of section 11.2, item 4 come with the pull request
+  that turns a title's 60 FPS game logic on by default.
+
+##### 11.3.2.4. The 60 FPS logic transform `velocity_source_x_kappa`
+
+Admitted under this section by its own entry.
+
+- **Key and off switch.** Those of section 11.3.2. A package leaves the transform out for its title by not naming it.
+- **What it changes.** The value a site loads or stores, a source of velocity change, is multiplied by
+  $\kappa = 2\mu / (1 + \mu)$, $\mu = \sqrt{1 - cL}$, where $c$ and $L$ are stock values of the title read from its
+  executable's read-only data (section 9.2). For a lightly damped body $\kappa$ is just below 1.
+- **What the guest can observe.**
+  - Guest registers and memory: after an `lwc1`, `lv.s` or `lv.q` site the loaded FPU register, VFPU register or
+    four VFPU lanes hold the stock value times $\kappa$; the memory they were loaded from is unchanged, so every
+    other reader of it sees the stock value. A `swc1` site stores the scaled value and leaves its register alone, so
+    every later reader of the stored field sees the scaled value. Everything computed from these follows. The
+    multiply is the host's (section 9.2, "Host arithmetic").
+  - VRAM bytes: no transform writes VRAM; the frames drawn follow the logic.
+  - Readbacks: unchanged.
+  - Timing the guest can measure: no VBLANK, DMA, GE list or media clock changes. What the logic does when differs
+    in one way a player can meet (section 9.2, "Landing is not moved to the stock update"): with the arc at stock's
+    positions on every second update, the character can be grounded one 60 Hz update (1/60 s) before stock would
+    have grounded it. The next jump input can then be accepted one update sooner, the landing point shifts by up to
+    the horizontal speed times 1/60 s, and a chain of jumps on a held button runs up to 1/60 s shorter per landing.
+  - I/O speed: unchanged.
+- **Tier and default.** Ace, off by default, as section 11.3.2.
+- **Authentic stays byte-identical.** As section 11.3.2: every rewritten statement keeps its stock statement as its
+  `else` form, and `test_emitted_forms` in `tools/test_enhancement_package.py` checks that for each site of the
+  fixture and that a build without the package holds none of the rewrite.
+  `test_kappa_scale_is_one_rounding_in_every_form` compiles the emitted scale of each form, runs it, and checks its
+  bits against the rule and against a checked store's table.
+- **Sampled checking.** As section 11.3.2.
+- **"Nothing worse".** `test_emitted_statements_follow_the_stock_arc_in_float32` and
+  `test_the_float32_model_stays_within_a_millionth_of_the_stock_arc` pin what the factor is for: with it, and the
+  transforms of sections 11.3.2.3, 11.3.2.5 and 11.3.2.6, the emitted statements bring a float32 flight to within
+  $10^{-6}$ of its height of the stock flight at the end of every pair of updates (section 9.2 states the
+  conditions). The private comparison runs come with the pull request that turns a title's 60 FPS game logic on by
+  default.
+
+##### 11.3.2.5. The 60 FPS logic transform `launch_from_rest_60hz`
+
+Admitted under this section by its own entry, and under the decision of section 9.2 ("Guest memory written by a
+timing transform").
+
+- **Key and off switch.** Those of section 11.3.2. A package leaves the transform out for its title by not naming it.
+  A package that names it must also name the capability `launch_velocity_write`.
+- **What it changes.** After the call at the site returns, the velocity the callee left on the body in `$a0` is mapped
+  to its two-update image: on the gravity axis $\kappa v + q g$; on the other axis only the change the call made is
+  scaled by $\kappa$ (section 9.2).
+- **Every field read and written.** Read before the call: the float of the other axis, at `velocity_offset` or
+  `velocity_offset + 4` from the site's `$a0`. Read after the call: both floats, at `velocity_offset` and
+  `velocity_offset + 4`. Written after the call: the float of the gravity axis, always; the float of the other axis,
+  when the call changed it. Nothing else is written. All of it goes through the guest accessors, once per run of the
+  site.
+- **Why a timing transform may write here.** A launch from rest is the one point where no scaling of a constant gives
+  the image, because the image of a velocity that is set, not accumulated, has an additive term ($q g$, about a
+  quarter of a step of gravity). The write replaces, at the same place, values the stock callee has just stored
+  there: the resolver reads the callee and refuses the site unless it stores both floats, from its entry `$a0`, on
+  every path that returns. The values come from those floats and from stock values read from the executable's
+  read-only data. It is declared, digest-checked and fail-closed like every site. That `$a0` is the body and the
+  offset its velocity is the author's evidence.
+- **What the guest can observe.**
+  - Guest registers and memory: the fields above; no register differs. Everything the logic computes from the
+    velocity follows, as section 9.2 says of the velocity in flight. The two floats are written one after the
+    other: a fault on the second leaves the first already mapped.
+  - A fault stock does not have: the reads and writes are guest accesses at a `jal`. With a bad pointer in `$a0`
+    they fault there; under `--lle-cpu` that is an address error at the `jal`, raised after its delay slot has run.
+  - VRAM bytes: no transform writes VRAM; the frames drawn follow the logic.
+  - Readbacks: unchanged.
+  - Timing the guest can measure: no VBLANK, DMA, GE list or media clock changes. The launch is what puts the
+    60 Hz arc on stock's positions at every second update, and with that arc the landing can come one 60 Hz update
+    (1/60 s) before stock's: the next jump input can be accepted one update sooner and the landing point shifts by
+    up to the horizontal speed times 1/60 s (section 9.2, "Landing is not moved to the stock update").
+  - I/O speed: unchanged.
+- **When the map is not applied.** The map belongs to the statement that makes the call. When the runtime does not
+  continue the caller there, or a guest access of the map faults, the velocity keeps the value the call left, and
+  the run's last lines say so: `ENHANCEMENT_LAUNCH_NOT_MAPPED: site <id> at 0x<pc>: <k> of <n> call(s) were not
+  followed by the launch map; the velocity they left kept its stock value`. A tool that accepts a 60 Hz run checks
+  for it.
+- **Tier and default.** Ace, off by default, as section 11.3.2.
+- **Authentic stays byte-identical.** As section 11.3.2. `test_generated_statements_match_the_rules_when_run` checks
+  that the toggle-off statement leaves the body's floats, the words beside them and `$a0` as the Authentic statement
+  does, byte for byte, and the toggle-on result bit for bit against the rule, for either gravity axis, with and
+  without a carried velocity, and that two calls that do not return to the statement are named at the end of the run.
+- **Sampled checking.** As section 11.3.2: a sampled call whose body holds the site reports a mismatch there with the
+  toggle on.
+- **"Nothing worse".** As section 11.3.2.4.
+
+##### 11.3.2.6. `retention_m_to_sqrt(m)` on an Arithmetic Result
+
+`retention_m_to_sqrt(m)` on a `lui`, an `lwc1` or an `lv.s` predates this section. Its form on `add.s`, `sub.s`,
+`mul.s` or `div.s` is admitted here by its own entry.
+
+- **Key and off switch.** Those of section 11.3.2. A package leaves the form out for its title by not naming it.
+- **What it changes.** The result register of the arithmetic instruction, a per-update retention the title computes
+  (such as $1 - cL$), is replaced by its square root when it lies in $(0, 1)$; outside that range it keeps its stock
+  value and the site reports once (`ENHANCEMENT_FACTOR_KEPT`), as the `lwc1` form does.
+- **What the guest can observe.**
+  - Guest registers and memory: the one FPU register, and everything computed from it. No memory is written. The
+    square root is the host's `sqrtf` (section 9.2, "Host arithmetic").
+  - VRAM bytes, readbacks, timing the guest can measure and I/O speed: unchanged, as section 11.3.2.4.
+- **Tier and default.** Ace, off by default, as section 11.3.2.
+- **Authentic stays byte-identical.** As section 11.3.2; `test_emitted_forms` checks the emitted statement and its
+  stock `else` form.
+- **Sampled checking.** As section 11.3.2.
+- **"Nothing worse".** As section 11.3.2.4; in the double-precision model the arc differs from stock's when the
+  retention of half a step is $1 - cL/2$ in place of the square root.
+
+##### 11.3.2.7. Decay and Retention on a Register Copy
+
+`decay_k_to_1-sqrt(1-k)` and `retention_m_to_sqrt(m)` on a `mov.s fd, fs` that copies a per-update factor are
+admitted here by their own entry. A title can load one constant once and use it twice, for example 0.2 as a blend
+factor applied every update and 0.2 as a duration in seconds. A site on the load would change both; a site on the
+copy changes only the factor.
+
+- **Key and off switch.** Those of section 11.3.2. A package leaves the form out for its title by not naming it.
+- **What it changes.** After the stock copy, the destination register `fd` is mapped as the `lwc1` form maps its
+  loaded register: inside $(0, 1)$ to $1 - \sqrt{1-k}$ or $\sqrt{m}$; outside it, `fd` keeps its stock value and the
+  site reports once (`ENHANCEMENT_FACTOR_KEPT`). The source register `fs` keeps its stock value, so a copy onto
+  itself (`fd` equal to `fs`) refuses the package, as do `mov.d` and any other instruction this section and
+  section 9.2 do not name.
+- **What the guest can observe.**
+  - Guest registers and memory: the one FPU register `fd`, and everything computed from it. No memory is written.
+    The map is the one the `lwc1` form uses: the decay in double on the host, the square root the host's
+    `sqrtf` (section 9.2, "Host arithmetic").
+  - VRAM bytes, readbacks, timing the guest can measure and I/O speed: unchanged, as section 11.3.2.4.
+- **Tier and default.** Ace, off by default, as section 11.3.2.
+- **Authentic stays byte-identical.** As section 11.3.2. `test_mapped_register_copy_keeps_its_source_when_run`
+  compiles the emitted statement and runs it: with the toggle off both registers hold the stock copy; with it on,
+  `fd` is the mapped factor and `fs` keeps its stock bits.
+- **Sampled checking.** As section 11.3.2.
+- **"Nothing worse".** As section 11.3.2.4.
+
 #### 11.3.3. Texture Scaling and the Smart 2D Filter (Not Yet Admitted)
 
 The two features of section 10.10 (#1273). Their presentation is described there; this entry is what the guest can
@@ -1441,74 +2636,95 @@ observe.
 - **Nothing worse (section 11.2, item 4):** not shown. *Hot Shots Tennis* and *LittleBigPlanet* keep smart 2D off
   (section 10.10), and neither feature may be on by default before the runs item 4 lists exist.
 
-#### 11.3.4. Texture Replacement (Not Yet Admitted)
+#### 11.3.4. Texture Replacement (`texpack=on`)
 
 The feature of section 10.12 (#1880). Its presentation is described there; this entry is what the guest can observe.
 
-- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
-  so a frame drawn with a pack's image in place of a guest texture is the frame the guest keeps. The feature stays
-  outside section 11.2 until the requirements below exist. Until then it is reachable only through environment
-  variables, for development.
-- **Key.** None. `SR_TEX_REPLACE` and `SR_TEX_REPLACE_BUDGET_MB` are environment variables, not keys on the launch
-  line (section 10.1), and have no library or per-title setting, so the feature is not admitted. The pack itself is the user's own:
-  the project ships none.
-- **Never silent.** A run with a pack loaded prints, after its `TEX_REPLACE: on` line, one line naming the feature as
-  guest-visible, on through the environment and not admitted under section 11.2.
+- **Status: guest-visible, admitted under section 11.2, off by default.** Each present commits the frame it shows to
+  guest VRAM, so a frame drawn with a pack's image in place of a guest texture is the frame the guest keeps.
+- **Key.** `texpack=on` or `texpack=off` on the launch line (section 10.1), an optional key: a line without it is
+  off, and any other value refuses the line. The folder travels beside the line as `SR_TEX_REPLACE`, which the
+  launcher exports empty unless the line carries `texpack=on`. The library and each title can turn it on or off
+  alone (section 11.2, item 2): the part "Texture pack" on Settings > Enhanced and on each game's own page
+  (section 10.9). The pack itself is the user's own: the project ships none.
+- **Never silent.** A run with the key prints `ACE_MODE: texpack on (...)`; a run with a pack loaded prints, after
+  its `TEX_REPLACE: on` line, one line naming the feature as guest-visible under this entry.
 - **What it changes:** the frame a present commits, wherever a draw used a pack's image.
 - **VRAM bytes:** differ in those frames, at those draws' pixels.
 - **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them.
   Texture readbacks and render-to-texture results are unchanged: a render target is never replaced.
-- **Timing:** differs. The first use of an image decodes its PNG on the renderer thread, the thread the guest runs
-  on, and storing the image is an upload there (section 10.10, "Never waited on", bounds it to 8 MiB per present
+- **Timing:** differs. The first use of an image reads it (from a ZIP, unpacking it) and decodes its PNG on the
+  renderer thread, the thread the guest runs on, and storing the image is an upload there (section 10.10, "Never waited on", bounds it to 8 MiB per present
   for scaled copies; a replacement is normally stored in the draw that finds it, so a pack of large images can
   lengthen the frames that first draw them). Not measured on a title. The VBLANK schedule, the GE timing model and the media
   clocks are unchanged.
-- **I/O speed:** unchanged for the guest. The host reads the pack's files from its own disk, inside the folder only.
-- **Tier:** Enhanced. **Default:** off, and Ace-only: in an authentic run the pack is not read whatever the
-  environment says.
+- **I/O speed:** unchanged for the guest. The host reads the pack's files from its own disk, inside the
+  pack's folder or ZIP only.
+- **Tier:** Enhanced: Enhanced and Ace runs alike. **Default:** off, and in no graphics preset. In an authentic run
+  the pack is not read whatever the environment says.
+- **Authentic stays byte-identical (section 11.2, item 1).** With the line `off`, `g_ace_on` stays 0 and
+  `tex_repl_init` reads no pack; `gpu-texscale-selftest`'s `replace` cell starts the renderer authentic and with an
+  Enhanced line without the key, with `SR_TEX_REPLACE` set, and checks that neither reads the pack. It also draws a
+  texture the pack lists after that authentic start and checks that the guest framebuffer is byte for byte the same
+  draw's after a start without `SR_TEX_REPLACE`, and that the draw with the pack read differs, so the comparison can
+  fail. The draws run in the cell's scaling state; only the start is authentic, and with the line `off` the rest of
+  the frame is the renderer's authentic path, which the pack never reaches.
 - **Nothing worse (section 11.2, item 4):** not shown. A pack is the user's own content, so what it does to a title
   is the pack's; the runs item 4 lists, for a title and a pack, do not exist yet, and the feature may not be on by
   default before they do.
+- **Per-title off switch (section 11.2, item 5).** None. No title is known to regress with a pack on, and a pack is
+  chosen title by title.
+- **Evidence tools (section 11.2, item 6).** The flight recorder's `runtime.enhancements` carries `texpack=on` with the
+  rest of the launch line (its `ace` string holds the parser's 191 characters, so a line with `cull=on` and
+  `texpack=on` is kept whole), the run's report names `texpack` and whether it was available, and section 10.4's
+  refusals apply to the run unchanged.
 
-#### 11.3.5. Sharp Game Text (Not Admitted)
+#### 11.3.5. Sharp Game Text (`glyphs`, Not Yet Admitted)
 
 The feature of section 10.13 (#2110). Its presentation is described there; this entry is what the guest can observe.
 
-- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
-  so a frame drawn with a rebuilt glyph is the frame the guest keeps. The feature is outside section 11.2: the
-  requirements below do not exist, and it is reachable only through an environment variable, for development.
-- **Key and off switch.** The feature has no launch-line key. `SR_GLYPHS` is an environment variable, not a key on
-  the launch line (section 10.1), and has no library or per-title setting. Its off switch is the variable unset or
-  `off`, and an authentic run, which never reads it. Admission under section 11.2 needs all three; the key name
-  `glyphs` is reserved for it.
+- **Status: guest-visible, not yet admitted under section 11.2.** Each present commits the frame it shows to guest
+  VRAM, so a frame drawn with a rebuilt glyph is the frame the guest keeps. Of what section 11.2 asks, the key exists
+  and the library and per-title switches and the private runs of item 4 do not (below); the admission is the owner's.
+- **Key and off switch.** `glyphs=on` on the launch line (section 10.1), an optional key: a line without it, or with
+  `glyphs=off`, is off and formats byte for byte as a line from before the key, and any other value refuses the line.
+  It needs no `tier=ace`: it is an Enhanced part. Its off switch is the key off or missing, and an authentic run,
+  which has no valid line with Ace on. It has no library or per-title setting, and the player never writes it, so a
+  player launch cannot turn it on: only a title's runtime started directly, with `SR_ACE` set by hand to a line that
+  carries `;glyphs=on`, can. Admission under section 11.2 needs both switches. The `SR_GLYPHS` environment
+  variable it replaces is retired: set, the run refuses to start and names the key (section 10.13).
 - **How it relates to the `text` key.** Not at all. `text` (section 10.1) draws the on-screen keyboard at the window's
   resolution on the presented image and changes no guest frame; `glyphs` rebuilds the game's own text inside the
   frame the game draws. Neither reads or implies the other, and `text=on` with `glyphs` off leaves a game's text as
   the game drew it.
-- **The cost of adding a key to the `SR_ACE` launch line.** Every key but `tier` is required (section 10.1), so a line
-  an older launcher wrote has no `glyphs` and is refused whole: the run is Authentic with an
-  `ACE_MODE: refused (<reason>)` line. A new required key also has to be written in every place that builds or checks
-  a full line: files outside the documents spell one out (among them `src/player/player_state.h`, `src/rt/ace.h`,
-  `tests/native/ace_selftest.c`, the launch-resolution and player-state tests, and the flight diff and package cache
-  tests). Beyond those, the key needs its row in the parser's table in
-  `src/rt/ace.c`, `AceConfig`, the canonical line, the report's `effective` block, the feature words, and the settings
-  pages and per-title precedence of sections 10.5 and 10.9. Making the key optional, as `tier` is, avoids the first
-  cost and not the second, and changes the rule that every other key is required. Which of the two is a decision
-  admission needs, with the library and per-title switches.
-- **Never silent.** A run with the feature on prints, after its `GLYPHS: on` line, one line naming it as guest-visible,
-  on through the environment and not admitted under section 11.2. The `glyph-recon-selftest` settings cell pins it.
+- **The cost of adding a key to the `SR_ACE` launch line.** A required key would refuse every line an older launcher
+  wrote and would have to be spelled out wherever a full line is built or checked (`src/player/player_state.h`, the
+  launch-resolution, player-state, flight diff and package cache tests among them). `glyphs` is optional, as `stick`,
+  `load`, `depth`, `ssaa`, `peak` and `cull` are, so it costs neither: a line without it is valid and unchanged, and only
+  `ace_format` writes it, when on. What it did cost: its row in the parser's table in `src/rt/ace.c` (with `on`, its
+  longest value, for `ace_longest_line`), `AceConfig` and `AceFeature`, the canonical line, the start line, the
+  report's `glyphs` field, the feature words, the exit check that names a part no renderer started, and
+  `ace-selftest`'s cells and worst-case line. A line with every part on is longer by `;glyphs=on` (10 characters);
+  `ace-selftest` builds the worst-case report from that line and checks it fits `ACE_REPORT_MAX`, and checks that
+  the longest line the key table makes fits `ACE_SPEC_MAX`. Still to come for admission: the settings pages and per-title
+  precedence of sections 10.5 and 10.9.
+- **Never silent.** A run with the feature on prints `ACE_MODE: glyphs on (...)` with the other Ace lines and,
+  after its `GLYPHS: on` line, one line naming it as guest-visible, on through the launch line's `glyphs` key and not
+  admitted under section 11.2. The `glyph-recon-selftest` settings cell pins it, and the report carries `glyphs`.
 - **What it changes:** the frame a present commits, wherever a sprite draw used a rebuilt glyph at a render scale of 2
   to 4.
 - **VRAM bytes:** differ in those frames, at those draws' pixels.
 - **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them.
   Texture readbacks and render-to-texture results are unchanged: a render target is never a page, and a page in VRAM
-  is never read. The feature adds no renderer readback. In an authentic run every glyph branch sits behind one switch
-  that stays 0, and `gpu-glyph-selftest` compares the picture of a scene drawn with `SR_GLYPHS` unset and set.
+  is never read. The feature adds no renderer readback. With the key off or missing, and in an authentic run, every
+  glyph branch sits behind one switch that stays 0, and `gpu-glyph-selftest` shows the picture of a scene is the same
+  byte for byte authentic, with no key and with `glyphs=off`, and differs with `glyphs=on`.
 - **Timing:** differs. A rectangle is checked or rebuilt on the renderer thread, the thread the guest runs on, at
   most 48 per present (section 10.13), so a scene that first draws many new glyphs takes a little longer for its
   first frames. Not measured on a title. The VBLANK schedule, the GE timing model and the media clocks are unchanged.
 - **I/O speed:** unchanged.
-- **Tier:** Enhanced. **Default:** off, and Ace-only: in an authentic run it stays off whatever the environment says.
+- **Tier:** Enhanced. **Default:** off: only a line with `glyphs=on` turns it on, and an authentic run has no valid
+  line with Ace on.
   Turning it on by default, or putting it in a preset, needs the owner's decision first, because of the trade-off in
   section 10.13 (some small, dense or filtered text is drawn smooth, and some soft art can still rib).
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic. The private runs item 4 lists, before
@@ -1535,13 +2751,27 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the key and Widescreen has a wing (`D` > 0); with either missing, the stock call runs and nothing is written. The run
   names it (`ACE_MODE: cull on (...)`, the report's `cull`), and reports it unavailable when no matrix was scaled by
   the end of the run: the title's build has no culling package, or Widescreen is off. The package build is chosen by
-  the title's own data (section 5); the launcher picking it for an Ace launch with the part on is a separate
-  change. The player cannot tell ahead of a launch which games have a culling build, so the row's text says it
-  acts only in games that do, and a run without one says so in the `ACE_MODE: cull unavailable (...)` line and
-  the report. The runtime remembers at most 4096 distinct matrices (see Limits below); the report's
+  the title's own data (section 5): `build-package --ace-cull` adds the title's culling package, beside the timing
+  package when the build has one (`--experimental-60hz` or `--enhancement-package`) and as the build's one package
+  otherwise (section 9.9). The player reads the title's `<disc id>-cull.json` beside its `-60hz.json`, from the
+  user's `enhancements` folder, else the shipped one, and reads only its `id`, `target_title_id` and `category`: it
+  is usable when its category is `guest_memory_code_hook`, its target is the title, and beside a usable timing
+  package its id differs from that package's and `<timing id>+<hook id>` has at most 64 characters. The player
+  selects the culling build exactly when the launch line carries `cull=on`: an Ace launch with the part on,
+  including a title on Enhanced that the session's `--experimental-60hz` runs as Ace. It then builds and launches
+  `<timing id>+<hook id>` when the 60 FPS game logic is on, else the culling package alone, which exports
+  `SR_EXPERIMENTAL_60HZ=0`. Authentic and Enhanced never do. The title page offers Ace only to a title with a usable
+  timing package, so the culling package alone is the build of such a title with its 60 FPS game logic turned off.
+  A title without a usable culling package keeps its other build; when its culling file exists but cannot be used,
+  the title page's play line names the reason while the part is on. The player checks only these fields:
+  `build-package` checks the rest (section 9.9) and names any refusal in the build's own error. The row's text says the part acts only in games that have a culling build, and a run without
+  one says so in the `ACE_MODE: cull unavailable (...)` line and the report. The runtime remembers at most 4096
+  widened matrices still in guest memory (see Limits below); the report's
   `cull_untracked` counts the matrix uses it left alone once that table was full, and cull is confirmed only
   while that count is 0: a run with a nonzero count reports cull unavailable as `partial` (the matrices
-  tracked before the table filled were widened, the rest were not), never as a complete run.
+  tracked before the table filled were widened, the rest were not), never as a complete run. The count is read
+  again when the run ends, on every exit path that writes the report, so a table that fills in the last frame
+  still reads partial.
 - **What it changes:** for the matrices at `clip_offsets`, 4 floats per listed matrix (its x output row) of guest memory
   per call, only while Widescreen is on and the key is on; and so which objects the title submits, and any logic the
   title gates on the same visibility test (animation or AI updates on visible objects, fixed object or display-list
@@ -1558,15 +2788,24 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
 - **Package obligations.** The mechanism cannot check these, so the package author shows them for the title: (1) the
   call at the site leaves every listed matrix describing the camera it was built for, either rewritten at each call or
   unchanged since the last one (the runtime does not scale a matrix whose x row still holds the words it wrote, so a
-  matrix the call does not rebuild is not scaled twice); (2) the listed offsets are matrices only the title's visibility
+  matrix the call does not rebuild is not scaled twice), and never a saved copy of a matrix the hook already widened,
+  whether at another address or put back where it was after something else was written there (the runtime knows
+  its words only where they still are, so it would scale the copy again); (2) the
+  listed offsets are matrices only the title's visibility
   test reads, so the matrices the GE receives, and with them the centre picture, are untouched; (3) the title's logic
   that depends on what is visible is not a behaviour change to guard against, or is guarded.
 - **Limits.** It cannot create what the title never modelled, what it places only inside the original view, or what
   it hides by a rule that is not a horizontal clip test (a distance, a side-of-wall or a course-direction rule). The
-  wing cap of section 10.8 is unchanged. The table that keeps a matrix from being scaled twice holds 4096
-  distinct matrix addresses for the whole run and is never cleared; a title whose matrices move to new
-  addresses can fill it, after which new matrices are left unscaled (said once on stderr, counted in the
-  report's `cull_untracked`) instead of being scaled without a record.
+  wing cap of section 10.8 is unchanged. The table that keeps a matrix from being scaled twice is keyed by the
+  matrix's address and holds 4096 entries. An entry matters only while guest memory at its address still holds
+  the x row the hook wrote: once the title writes anything else there, the next call at that address scales what
+  it finds with or without the entry. So when a new address would take the table past three-quarters full, the
+  entries whose words are gone are dropped first (at most once per call), which changes no call's outcome while
+  package obligation (1) holds (no widened copy is put back where it was); a title that builds its
+  matrices in per-frame scratch memory, at addresses that move from frame to frame, reuses that room instead of
+  filling the table. Only when more than 4096 widened matrices are all still in guest memory at once is a new
+  matrix left unscaled (said once on stderr, counted in the report's `cull_untracked`) instead of being scaled
+  without a record.
 - **Tier:** Ace (one title). **Default:** off.
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.
 
@@ -1606,3 +2845,270 @@ The feature of section 10.14 (#2053). How it draws is described there; this entr
   It is in no graphics preset, because it changes GE timing.
 - **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
   exist.
+
+#### 11.3.8. Smooth Far Textures (`mips`)
+
+The feature of section 10.16 (#1273). How it draws is described there; this entry is what the guest can observe.
+
+- **Status: guest-visible.** Each present commits the frame it shows to guest VRAM, so a frame with a smoothed
+  texture is the frame the guest keeps, as with texture filtering. Its key, its library and per-title settings and
+  this entry are in place (section 11.2, items 2, 3 and 6). The runs of item 4 do not exist, so it stays off by
+  default and in no preset.
+- **Key and off switch.** `mips=on` on the launch line (section 10.1), an optional key like `cull`: a line without it,
+  or with `mips=off`, has it off, and any other value refuses the line. Its off switch is `"mips": "off"` for the
+  library or for one game (section 10.9); an unknown value in a settings file reads as off, an unset value in the
+  library block is off, an unset value for one game follows the library setting, and an authentic run, which has no
+  line, never has a chain.
+- **Never silent.** A run with it on prints, after its `HOST_MIPS: on` line, `HOST_MIPS: guest-visible: every present
+  commits the smoothed frame to guest VRAM (ENHANCEMENT_CONTRACT.md 11.3.8)`, and at its end the `HOST_MIPS: exit`
+  line with the entries, builds and binds, and the binds each rule kept at level 0 (section 10.16).
+- **What it changes:** the pixels of transformed draws that minify a single-level texture with a linear filter, in
+  the frames a present commits: they show the chain's filtered colour instead of a bilinear sample of level 0.
+  Through-mode draws, colour-tested and alpha-tested draws, alpha-unused draws of a keyed texture, 1:1 draws,
+  render targets and textures the game mips are unchanged.
+- **VRAM bytes:** differ in those frames, at the colour of those draws' pixels. Depth and stencil do not change: a
+  draw that binds the chain is not alpha-tested (section 10.16) and not colour-tested, so the chain decides no
+  fragment's coverage. CLUT loads and CPU reads of VRAM see the changed colour like any other reader.
+- **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them, and
+  for a render-to-texture pass that draws such a texture minified.
+- **Timing:** unchanged in guest time: the GE timing model (on or off) charges the draw by its texture and
+  footprint, not by the level the host samples, and the VBLANK schedule and the media clocks are unchanged. A chain
+  is built on the GE thread, the thread the guest runs on, at the first draw after each upload that samples it, so
+  a frame that brings many new textures into such draws can take longer in host time. The build budget
+  (section 10.16) bounds the builds: on the measured host (Windows 11, 2026-11-10) the builder read about 82
+  million level-0 texels a second, so a guest frame's budget of builds costs about 1.6 ms, and the worst frame of
+  builds, the budget plus one 512x512 build that starts just under it, about 4.8 ms. Chains taken from the cache
+  and contents refused while streaming are charged a sixteenth of their texels but may each decode level 0 again,
+  hash it and upload a kept chain; the exit stamp's `frame_peak_ms` is the measured worst frame of all of it. On LittleBigPlanet's first story level at 4x, before the
+  budget, builds took 7.1 s of an 8,740-VBLANK run, all in its intro and loading screens; on Hot Shots Tennis, 25 to
+  31 ms. With the budget (2026-11-12, the same host, an RTX 3080, render scale 4, nothing else running): on the same
+  LittleBigPlanet run (8,730 VBLANKs) builds took 484 and 490 ms in all over two runs, 187 binds were drawn plain
+  for the budget, and the worst frame (`frame_peak_ms`) took 1.9 and 2.3 ms; on a Hot Shots Tennis match (8,760
+  VBLANKs) builds took 14.9 ms, 17 binds were drawn plain for the budget, and the worst frame took 3.9 ms.
+- **I/O speed:** unchanged.
+- **Tier:** Enhanced. **Default:** off. It is in no graphics preset.
+- **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
+  exist.
+
+#### 11.3.10. Short Loads (`load=fast`, Not Yet Admitted)
+
+The `load` Ace part of section 9.8, for a title that paces a loading screen with display waits of its own.
+
+- **Status: guest-visible, not admitted under section 11.2.** It changes guest timing. It is an Ace part of the
+  title's own timing package, built into that title's AOT output; its key, its library and per-title settings and
+  this entry are in place (section 11.2, items 2, 3 and 6); the runs of item 4 exist for one title (below) and have
+  not been reviewed.
+- **Mechanism.** Each `vblank_wait_skip` site in `ace_parts.load` names one `jal` to the executable's
+  `sceDisplayWaitVblankStart` import stub, by symbolic function and offset with the stock word's digest (section 9.8).
+  The site's delay slot runs as stock. Generated code then asks `nk_ace_load_skip_wait()` (`src/rt/hle_display.c`). It
+  skips the call only where the stock call would block: waits are permitted (interrupts and thread dispatch are
+  enabled), the run's line carries `load=fast` (`nk_ace_load_fast()`, `src/rt/ace.c`, which counts the skip), and
+  the pacing guard (below) has not fired. Then the call is not made. The thread instead blocks for 1 µs, the shortest delay wait the scheduler has (that of
+  `sceKernelDelayThread(1)`); for that moment it is visibly in a delay wait, not a display wait. Ready threads of any
+  priority, lower ones included, can then run as they would during the stock wait, and the waiter resumes at its
+  next scheduling point instead of the next VBLANK. The decision its block causes always runs another ready thread
+  first, even when the 1 µs is already over by then (`sched_delay_current_dispatching()`, `src/rt/sched.c`). A zero delay or a ready-queue rotation would not do this: on the
+  PSP, `sceKernelDelayThread(0)` returns without yielding even to a thread of equal priority (#340), and a rotation
+  yields only to threads of equal or higher priority, so a lower-priority thread would not run. `$v0` is then 0,
+  which is what the stock function returns after its wait. With the key
+  off, or where waits are not permitted (the stock call then returns `SCE_KERNEL_ERROR_CAN_NOT_WAIT` without
+  blocking), the skip steps aside and the stock call runs. Nothing else in the title's code changes.
+- **Key.** `load=fast` or `load=off` on the launch line (section 10.1), an optional key: a line without it reads as
+  off, any other value is refused, and `load=fast` is refused unless the line carries `tier=ace`. The player has a
+  library setting and a per-title setting, "Short loads", each able to turn it off alone (section 11.2,
+  item 2); the line carries `;load=fast` only for an Ace launch with the part on, so every other line is as it was.
+  The run names it (`ACE_MODE: load fast (...)` at start, `ACE_MODE: load waits skipped <n> (longest run <m> logic
+  updates; ...)` at exit, the report's `load`, `load_waits_skipped`, `load_skip_max_run` and `load_paced`), and
+  confirms it the first time a declared wait is skipped. A run that asked for
+  it and never reached a site reports it unavailable at exit (`ACE_MODE: load unavailable (...)`, the report's
+  `unavailable.load`): the title's build has no load part, or none of its declared waits ran.
+- **What it changes:** only the declared display waits, and only while the key is on and the wait would block: each
+  returns with 0 after the 1 µs delay wait above, instead of blocking until the next VBLANK starts. A wait called where waits are not
+  permitted runs as stock and returns `CAN_NOT_WAIT`, as it would without the key. The code before and after a wait runs as stock, including any fade
+  or progress step the loading loop runs between waits. VBLANK interrupts, sub-interrupt handlers,
+  `sceDisplayGetVcount` and the audio threads keep running on host time. So fewer VBLANKs pass during the shortened
+  stretch, and the frames the wait would have shown are not presented: a fade or a progress bar can jump or finish
+  before it is seen.
+- **VRAM bytes:** the loop draws what it draws in stock, but fewer of its frames reach the screen, and a step the
+  title counts in VBLANKs elsewhere (a fade timed by `sceDisplayGetVcount` or a VBLANK handler) can show fewer of its
+  stages in the frames that are drawn.
+- **Readbacks:** unchanged for a frame the loop draws; a readback of the display or of a counter the VBLANK handler
+  advances sees fewer VBLANKs per pass of the loop.
+- **Timing:** differs: each skipped wait shortens its pass of the loop by up to one VBLANK of guest time, and the
+  loading stretch ends sooner in host time. The VBLANK schedule, the RTC and system time, the media clocks and the GE
+  timing model are unchanged. A skipped wait that paced logic updates would run them unpaced, so the logic update
+  counter of section 9.5 is unaffected only if each declared wait is reached only while loading.
+- **What the tools check.** A package with a load part must declare an `update_boundary`, and no site may sit in
+  the boundary's own function: the validator compares function names, and site-map addresses in a published
+  package, and codegen compares resolved addresses, so a second name for that function does not pass. That is all
+  they check. Nothing walks the call graph: a wait in a function that calls the boundary's function (a main loop
+  that calls the update) or in one that function calls in every update (a present or flip helper) is accepted.
+  Keeping such waits out rests on the site's own evidence (package obligation 1, below); the pacing guard only
+  limits the damage at run time.
+- **Pacing guard.** A package with a load part also calls `nk_ace_load_update()` at its `update_boundary`, ungated;
+  it does nothing unless the run's `load=fast` is in effect, so every other run is unchanged. The runtime counts the
+  consecutive logic updates in each of which at least one declared wait was skipped. When that run reaches
+  `ACE_LOAD_PACING_UPDATES` (`src/rt/ace.h`, 8 updates: four times the longest run measured on the title's loads,
+  2 updates, below), the site paces updates, not a load: nothing is skipped for the rest of the run, so every declared wait
+  runs its stock call, and one `ENHANCEMENT_LOAD_PACING:` line names the site, by id and by its `jal`'s address,
+  whose skip reached the threshold. The report's `load_skip_max_run` is the longest run seen and `load_paced` says
+  whether the guard fired; the exit line names both. Until it fires, a pacing site runs that many updates unpaced,
+  so the guard does not replace the evidence of obligation 1. It sees only waits skipped in consecutive updates
+  that reach the boundary: a wait in a loop that never reaches it (a menu loop with its own logic) or one skipped
+  only every other update does not fire it, and a real load that spans the threshold's updates (a loading loop
+  that calls the update, or a loader thread) does, which turns the part off for the run and costs nothing else.
+  The threshold is one value for every title, set from one title's loads; it is provisional until a second title
+  is measured.
+- **I/O speed:** unchanged. Reads take what they take; only the display waits between them are shorter.
+- **Package obligations.** The mechanism cannot check these, so the package author shows them for the title: (1)
+  each declared wait paces a loading screen only, not a loop that runs or reaches a logic update. The tools check
+  only the boundary's own function (above), so the declaration shows that each wait is reached only while loading:
+  the site's callers up to the title's main loop, from its decompilation or disassembly, and a run with `load=fast`
+  through the title's loads and play whose report shows `load_paced` false and a `load_skip_max_run` below the
+  guard's threshold; (2) the loop makes
+  progress without a VBLANK: it ends on the load's own completion, not on a count of VBLANKs it waited for; (3) nothing
+  the title keeps after the load depends on how many VBLANKs passed during it.
+- **Limits.** It skips only the waits a package declares: a loading screen paced by another wait
+  (`sceDisplayWaitVblankStartCB`, a semaphore its VBLANK handler signals, or a thread delay) is unchanged. It does
+  not make a read faster. The section adds no code and changes no word when a package has no `ace_parts`, and with
+  the key off the stock call runs.
+- **Tier:** Ace (one title). **Default:** off, and in no graphics preset.
+- **Measured (Hot Shots Tennis, UCUS98701, one declared wait, 60 FPS package, Vulkan GE, hidden window, Windows 11,
+  other builds running on the machine), at the head with the shortest-delay skip and the pacing guard.** The title
+  follows each file-binder open on its main thread with three passes of a fade step and a plain display wait; the
+  open has completed before them. On a scripted 12,000-VBLANK route from boot through the menus, a match load and a
+  rally, `load=fast` skipped 261 waits (87 opens). The longest run of consecutive logic updates with a skip was 2
+  (`load_skip_max_run`), and the guard did not fire (`load_paced` false). Only the route's picture checkpoints were
+  compared, and they stop at the match-type menu. Each was reached earlier, within its checkpoint's tolerance: the
+  title screen at VBLANK 1,281 instead of 1,321 (40 VBLANKs, about 0.67 s sooner), the load dialog at 2,206 instead
+  of 2,250, the main menu at 2,342 instead of 2,398 (56 VBLANKs, about 0.93 s), the single-player menu at 2,638
+  instead of 2,686 and the match-type menu at 3,719 instead of 3,771 (52 VBLANKs, about 0.87 s). The match load and
+  the rally were not compared by checkpoint. The fade step still runs three times per open, so each screen the route
+  checks after a load shows the stock picture. The title's frame-pacing wait (its package's `vblank_wait_2_to_1`
+  site) is not a load site and still paces every logic update.
+- **Nothing worse (section 11.2, item 4):** the run above, which has not been reviewed.
+
+#### 11.3.11. Stick Dead-Zone Remap (`stick`)
+
+For a title whose stick reading ignores part of the stick's throw. *Hot Shots Tennis* (UCUS98701) centres each stick
+byte `b` (0 to 255) as `x = b - (b > 128) - 127`, so 128 reads +1, 127 reads 0, 0 reads -127 and 255 reads +127. It
+counts an axis only when `|x| >= 64`, and it moves the player by the direction of `(x, y)` scaled by `(m - 64) / 63`
+with `m = max(|x|, |y|)`, nothing while `m <= 64`: a square dead zone of 64 counts, with 64 to 127 as its live range.
+This reading is of the title's stick-reading function at `0x0001e268` in its `EBOOT.BIN`: it centres each axis as
+`x = b - (b > 128) - 127`, treats `max(|x|, |y|) <= 64` (a magnitude of at most 64/127) as rest, and scales by `(m / 127 - 0.503937) / 0.496063`, which
+is `(m - 64) / 63`. It comes from a decompilation of that function that is not yet byte-matched (a near miss), not from
+a measurement. The host has its own dead zone (the input profile's per-axis `deadzone_inner`, 7849 of 32767 by
+default, inside which the byte is 128, outside which the value is not rescaled), so a gamepad had to be pushed past
+half its throw before the player moved. The remap maps the host's live range onto the game's: with the host's dead
+zone smaller than the game's, the first live host count reaches the edge of the game's dead zone.
+
+- **Status: guest-visible, not admitted under section 11.2.** The guest reads changed stick values. Its key, its
+  library and per-title settings and this entry are in place (section 11.2, items 2, 3 and 6); the runs of item 4 do
+  not exist.
+- **Mechanism.** The dead zone is the title's own data: its public title manifest's optional
+  `"input": {"analog_dead_zone": {"shape": "square", "counts": G}}` (`assets/title_manifest.schema.json`; `shape` is
+  only `square`, `counts` an integer from 1 to 126), checked by `tools/title_manifest.py` and the native manifest
+  parser alike and carried into the generated catalog as `NkTitleEntry.analog_dead_zone_counts` (0 when none is
+  declared). An overlay manifest is checked the same way and carries its own value in its entry, as it carries every
+  other field: nothing is merged from a public entry, so an overlay without the block has no dead zone and the line
+  carries no `stick`. The player refuses an overlay for a disc the public catalog already names, so it cannot replace
+  a public title's value; an overlay loaded with an override replaces the public entry whole. The runtime remaps the
+  live host stick where the controller ring latches a sample in analog mode (`src/rt/hle_route.c`), before the sample
+  is stored or recorded. `D` is the host's dead zone in centred counts: the larger of the X and Y axes'
+  `deadzone_inner * 255 / 65535` (rounded down) from the active input profile, 30 by default, and 0 without an SDL3
+  presenter. The host's own byte conversion is not symmetric about 128, so with the default 7849 its first live
+  value is +30 on the positive side and -32 on the negative side: a push of +30 is still at `m = D` and reaches the
+  game at `G - 1`, and both sides first move the player at 32 counts; a `D` below 0 or of 127 or more reads as 0, and any `D` from 0 to 126 is used as it is, at or above `G`
+  too. With `h = b - 128` per axis, clamped to -127..127, and `m = max(|hx|, |hy|)`:
+  - `m = 0` (rest) leaves both bytes as they are, and an axis at rest keeps its byte;
+  - past the host's dead zone, `m > D`: the target magnitude is `m' = G + (m - D) * (127 - G) / (127 - D)`, rounded down;
+  - up to it, `0 < m <= D` (a source with less dead zone than the host's, such as the mouse): `m' = m * (G - 1) / D`,
+    rounded down, still inside the game's dead zone;
+  - both axes scale by `m' / m`, rounded to nearest, keep their signs (the direction is kept) and are clamped to 127,
+    then go back to bytes through the exact inverse of the title's centring: `x >= 1` is `x + 128`, `x <= 0` is
+    `x + 127`.
+
+  So `m = 127` maps to 127 (bytes 0 and 255 are unchanged, and with them the keyboard's and the digital edges),
+  `m = D` (for `D >= 1`) reaches the game at `G - 1`, and the game's movement scale becomes `(m - D) / (127 - D)`
+  within one count. With `D < G` a push just past `D` reaches the game at `G` (scale 0). With `D >= G` the host has
+  fewer live counts than the game, so the first one lands one slope step past the edge, at
+  `G + floor((127 - G) / (127 - D))`: `G = 10` and `D = 30` give 9 at `m = 30` and 11 at `m = 31`; `G = 64` and
+  `D = 100` give 63 at `m = 100` and 66 at `m = 101`.
+  With `G = 64` and `D = 30`: `m` 0, 30, 31, 40, 64, 96 and 127 give the game 1 (rest, untouched), 63, 64,
+  70, 86, 106 and 127, a scale of 0, 0, 0, 0.095, 0.349, 0.667 and 1.0 against the ideal 0, 0, 0.010, 0.103, 0.351,
+  0.680 and 1.0. The curve is `ace_stick_remap` in `src/rt/ace.c`, a pure function.
+- **Why square, not radial.** The title's own dead zone and scale use the Chebyshev magnitude `max(|x|, |y|)` against
+  64, so the remap uses the same magnitude. A radial remap that put the host's dead-zone edge at radius `G` would
+  leave a diagonal push there at about `(G / sqrt(2), G / sqrt(2))`, (45, 45) for `G = 64`, still inside the game's
+  square dead zone, so diagonals would keep a dead band. With the host's dead zone smaller than the game's (`D < G`,
+  the default), the Chebyshev remap puts the first live host push on the game's dead-zone edge in every direction;
+  with `D >= G` it lands one slope step past the edge, as above. A per-axis remap, each axis on its own curve, would
+  also fit the square dead zone and would not couple the axes, but it would bend the direction: (127, 40) would
+  become (127, 70), and the title moves the player along the direction of `(x, y)`, so the player would go
+  somewhere else. It is the faithful choice for this title's own dead-zone code.
+- **Key.** `stick=<counts>` on the launch line (section 10.1), an optional key with the title's `G` as its value, 1 to
+  126 in plain decimal: a line without it reads as off, any other value is refused, and `stick=<counts>` is refused
+  unless the line carries `tier=ace`. The player has a library setting and a per-title setting, "Stick dead
+  zone", each able to turn it off alone (section 11.2, item 2), off in a fresh file and in no graphics preset; the
+  line carries `;stick=<counts>` only for an Ace launch with the part on of a title whose catalog entry declares a
+  dead zone, so every other line is as it was. The runtime does not check the value against the title: a hand-written
+  `SR_ACE` line with `stick=<counts>` applies that `G` to whatever title runs. The run names it (`ACE_MODE: stick remap <counts> (...)`, the
+  report's `"stick": {"counts", "host_dead_zone", "samples_remapped"}`), and reports it unavailable when no live
+  sample off rest was remapped by the end of the run.
+- **What it changes:** the left-stick bytes of every live host sample off rest that the guest latches in analog mode,
+  and so how far the player moves for a given push, and which small pushes count in the title's menus. Because the
+  remap scales both axes by one factor of the Chebyshev magnitude, it also changes two things a per-axis remap would
+  not:
+  - **A round host stick is pushed outward.** With `G = 64` and `D = 30`, the host diagonal (90, 90), about the full
+    throw of a round gate, reaches the game as (102, 102), a Euclidean radius of about 144 counts. The game's scale
+    there is `(102 - 64) / 63`, about 0.60 (0.41 without the remap), so a full host diagonal reaches only about 0.60
+    of the game's full speed; only a host value of 127 on one axis reaches 1.0.
+  - **Each axis's output depends on the other.** With `y` held at 40, `x` going from 40 to 127 takes `y`'s output
+    from 70 down to 40 (with `x` at 40, 60, 90 and 127, the game reads `x` as 70, 83, 102 and 127 and `y` as 70, 55,
+    45 and 40), so a
+    per-axis test in the title, such as its `|x| >= 64` menu step, can switch off as the other axis is pushed further.
+
+  Whether a PSP's own stick can produce such value pairs, such as (102, 102), is not measured.
+- **What it never changes:** an Authentic run, an Enhanced run and an Ace run without the key latch the bytes the
+  window gave, byte for byte. A sample in digital mode is not touched. A route's stick (`SR_PADSCRIPT`) and a
+  replay's recorded sample (`SR_REPLAY`) are already the guest's bytes and pass through unchanged, so a replay, and
+  a pad script while nobody moves the live stick, give the same samples with the item on or off (a route step that
+  does not hold the stick lets the live stick through, and that is remapped); a recording made with it on records the remapped
+  bytes, which its replay hands back as they are.
+- **VRAM bytes:** unchanged by the item itself; the frames differ only where the game moves differently.
+- **Readbacks:** unchanged by the item itself, as for VRAM.
+- **Timing:** unchanged. The sample is latched at the same time; only its stick bytes differ. The VBLANK schedule,
+  the GE timing model and the media clocks are unchanged.
+- **I/O speed:** unchanged.
+- **Tier:** Ace (one title). **Default:** off.
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic (`ace-selftest`'s stick cells,
+  `hle-thread-selftest`'s latch cell, `gui-present-selftest`'s dead-zone cell, the player's
+  `test_play_mode_stick_settings`, and the manifest tests).
+
+#### 11.3.12. Higher-Precision Host Depth (`depth=32`, Not Yet Admitted)
+
+The feature of section 10.20 (#2051). How it tests is described there; this entry is what the guest can observe.
+
+- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
+  so a frame whose z-fighting the key removed is the frame the guest keeps. Its key and this entry are in place
+  (section 11.2, items 3 and 6). The library and per-title settings of item 2 are not: the player does not write the
+  key yet. The runs of item 4 do not exist.
+- **Key and off switch.** `depth=32` or `depth=off` on the launch line (section 10.1), an optional key; a line with
+  any other value is refused, and the run is Authentic. `depth=off` and a line without the key are off. An authentic
+  run has no line, so it never has the 32-bit buffer.
+- **Never silent.** A run with it on prints `ACE_MODE: depth 32 (...)`, and `HOST_DEPTH: on (...)` when the renderer
+  makes the buffer, or `ACE_MODE: depth unavailable (...)` when the device cannot.
+- **What it changes:** the colour of pixels where two surfaces lie within one 16-bit depth step of each other, in the
+  ways section 10.20 lists for each depth test: z-fighting surfaces show the nearer one, a draw that writes no depth
+  with LEQUAL or GEQUAL can pass up to a quarter step behind, an EQUAL pass on a different surface can fail, and a
+  coplanar surface that writes depth can speckle.
+- **VRAM bytes:** the colour bytes of those pixels differ, in the frames a present commits. The depth bytes do not:
+  the step stored at every pixel is the one the 16-bit buffer stores (section 10.20).
+- **Readbacks:** a colour readback, save picture or screenshot that covers those pixels differs the same way. A depth
+  readback, and depth read through guest memory, is unchanged.
+- **Timing:** unchanged. The GE timing model (`SR_GE_TIMING=1`) charges depth-tested spans whatever the host
+  buffer's format. The larger buffer and its readbacks are host GPU time and memory (section 10.20).
+- **I/O speed:** unchanged.
+- **Tier:** Enhanced. **Default:** off, and in no graphics preset.
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic (`ace-selftest`, and
+  `gpu-coherence-selftest`'s `host-depth`); no title has been run with it.

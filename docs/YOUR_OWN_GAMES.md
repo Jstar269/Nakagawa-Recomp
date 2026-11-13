@@ -199,17 +199,34 @@ PGD-protected data aren't supported.
 PSP homebrew (programs the community wrote, with no game from a shop in them) is added the same way: pick its
 `EBOOT.PBP`. A homebrew program is not encrypted, so it needs no keys. The player writes a small disc image
 from the package once, on this PC, in `<user data>/discs/<key>/<key>.iso`, holding the program and its icon, and
-adds that image as if you had picked it. The key is made from the program and its title, so the same homebrew is
-the same game wherever you add it from, and the library shows it as **Beta / unofficial**. Homebrew is
+adds that image as if you had picked it. The folder the `EBOOT.PBP` is in comes with it, copied beside the image
+(`<key>.ms0`): the program runs from `ms0:/PSP/GAME/<folder>/` on its own Memory Stick, as on a PSP, so it finds
+the files it keeps beside itself. Each start copies the files the Memory Stick lacks from that copy, so what
+the program writes there stays. When a release changes only the files beside the program, copy it over the
+folder and pick its `EBOOT.PBP` again: the next start replaces each file the program left as it was, and
+keeps each one it changed or wrote. A release whose program changed is another title, with its own key and
+its own Memory Stick. A program added before its folder came along stops with a message asking you to pick it again.
+Keep each program in its own folder, as `PSP/GAME/<folder>/` on a PSP's Memory Stick has it, and named
+`EBOOT.PBP` in capitals, the one name a PSP starts a program from; a package with another name is refused with
+a message saying so. The key is made from the program and its title, so the same homebrew is
+the same game wherever you add it from, and the library shows it as **Beta / unofficial**. It is added from
+one folder: the same `EBOOT.PBP` picked in a second folder stops with a message naming the first folder,
+when it is known, and what clears the stop, which is removing the title with **Also delete the decrypted files and disc copy**
+ticked or, once the title has left the library, **Delete kept copy** on the message. Either way the files the
+program wrote on its Memory Stick stay; files an earlier start put there then count as the program's own and
+are kept, also when a later release changes them. Two different
+programs can, very rarely, get the same key: the second is then refused by name, and nothing of the first
+is replaced. Homebrew is
 **Experimental**: nobody has checked a program unless [`COMPATIBILITY.md`](COMPATIBILITY.md#homebrew-limits)
-says so. Your `EBOOT.PBP` is only read, never changed.
+says so. Your `EBOOT.PBP` and its folder are only read, never changed.
 
 Some homebrew can't run, and the player says which kind when you pick it: an encrypted program, kernel-mode
 homebrew and custom-firmware plugins (they need the PSP's own kernel), and anything that is not a PSP program.
 A program that writes its own machine code while it runs, such as an emulator with a JIT, starts and then stops
-at the first jump into that code. Only the `EBOOT.PBP` is imported: files that sit beside it in the program's
-folder (data, plugins, configuration) are not available to the program, so a program that needs them stops when
-it looks for one. [Homebrew limits](COMPATIBILITY.md#homebrew-limits) lists each kind.
+at the first jump into that code. A folder too large to copy (over 1 GiB, 4,096 files and folders, or 16 levels
+of folders), one that holds a link or a file kept in the cloud, one with a name a PSP's Memory Stick can't hold,
+and one that is or holds one of your personal folders (your home folder, Desktop, Documents, Downloads and the
+like) is refused when you pick the program. [Homebrew limits](COMPATIBILITY.md#homebrew-limits) lists each kind.
 
 ### Supplying title manifests
 
@@ -227,28 +244,58 @@ finds the same title the player does.
 
 ## Graphics presets
 
-**Settings > Graphics preset** picks a set of display settings and two Enhanced options in one choice. A preset is
-used only when a game plays in Enhanced or Ace. In Authentic, a game always runs with your own **Resolution**,
+**Settings > Graphics preset** picks a set of display settings and up to three Enhanced options in one choice. A
+preset is used only when a game plays in Enhanced or Ace. In Authentic, a game always runs with your own **Resolution**,
 **Scaling**, **VSync** and **Game fullscreen** settings, whatever the preset, because a larger render scale also
 changes what the game can copy from its own screen, such as a save picture. Choosing a preset doesn't change those
 settings. Changing **Resolution**, **Scaling** or **VSync** yourself, or **Game fullscreen** under Handheld (the one
 preset that sets it), sets the preset back to **Custom**, which uses your settings everywhere.
 
-| Preset | Resolution | Scaling | VSync | Game fullscreen | Crisp system text | Sharper enlarging |
-| --- | --- | --- | --- | --- | --- | --- |
-| Low | 1x (480x272) | Sharp | On | your setting | On | Off |
-| Medium | 2x | Sharp | On | your setting | On | On |
-| High | 4x | Sharp | On | your setting | On | Off |
-| Ultra | 4x | Sharp | On | your setting | On | On |
-| Handheld | 2x | Sharp | On | On | On | On |
+| Preset | Resolution | Scaling | VSync | Game fullscreen | Crisp system text | Sharper enlarging | Full 32-bit colour |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Low | 1x (480x272) | Sharp | On | your setting | On | Off | your setting |
+| Medium | 2x | Sharp | On | your setting | On | On | your setting |
+| High | 4x | Sharp | On | your setting | On | Off | your setting |
+| Ultra | 4x | Sharp | On | your setting | On | On | On |
+| Handheld | 2x | Sharp | On | On | On | On | your setting |
 
-In Enhanced and Ace, a preset's **Crisp system text** and **Sharper enlarging** (the FSR 1 upscaler) take the place of
-the library's; Settings > Enhanced shows them as, for example, **On (Ultra)**. A game's own value for either, on its
-Enhanced options page, still wins. Changing either one on Settings > Enhanced sets the preset back to **Custom**.
-Whenever a preset becomes **Custom**, these two options keep the values it gave them. FSR 1 works only where the
-window is larger than the game's picture, and where the graphics card can't run it, the normal scaling filter stays.
-The other Enhanced options, such as **Smooth motion**, **Widescreen** and **Texture filtering**, stay as you set them
-under every preset.
+In Enhanced and Ace, a preset's **Crisp system text**, **Sharper enlarging** (the FSR 1 upscaler) and, under **Ultra**,
+**Full 32-bit colour** take the place of the library's; Settings > Enhanced shows them as, for example, **On (Ultra)**.
+A game's own value for any of them, on its Enhanced options page, still wins. Changing one of them on Settings >
+Enhanced sets the preset back to **Custom**. Whenever a preset becomes **Custom**, the options the preset set keep the
+values it gave them; presets other than **Ultra** leave **Full 32-bit colour** as you set it. FSR 1 works only where the
+window is larger than the game's picture, and where the graphics card can't run it, the normal scaling filter stays. The
+other Enhanced options, such as **Smooth motion**, **Widescreen** and **Texture filtering**, stay as you set them under
+every preset.
+
+## Texture packs
+
+A texture pack replaces a game's textures with sharper images while the game plays in Enhanced or Ace. Nakagawa
+ships no pack and downloads none: a pack is a folder you made yourself or got from a community for your game, in
+the layout PSP emulators use (a `textures.ini` and PNG files named for the textures they replace). A folder that
+holds a `textures.zip` is read from that ZIP.
+
+1. Put the pack's folder anywhere on your PC.
+2. On the game's page, open **Enhanced options** and choose **Texture pack folder**. Pick the folder that holds the
+   `textures.ini`, the PNG files or the `textures.zip`. The row then shows the folder's name and how many textures
+   it lists, and **Texture pack** turns on for that game.
+3. Play the game in Enhanced or Ace. In Authentic, the pack is not used.
+
+Nakagawa reads the pack's list (the folder or ZIP and its `textures.ini`) when you choose it and again each time
+the game starts. If it cannot read that list (the folder or ZIP has gone, a file in its place is not an ordinary
+file, the ZIP is damaged, or the `textures.ini` has a line it does not understand), or the pack says it is made for
+another game (its `[games]` section lists other games only, or more than 64), it says why and does not use the
+pack. When that happens as you start the game, **Play without the pack** starts it without the pack this time and
+keeps your choice. To use the pack again, fix it where it is or choose another; **Remove texture pack** or turning
+**Texture pack** off stops Nakagawa asking. **Remove texture pack** forgets the folder for that game and does not
+delete it.
+
+An image the pack lists is read the first time the game draws its texture. An image that is missing, damaged, too
+large, linked to a place outside the pack's folder, or the wrong size is skipped on its own: that texture is drawn
+as the game made it, and the rest of the pack is used.
+
+The details, including what a pack made for an emulator cannot match here, are in
+[`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1012-texture-replacement).
 
 ## Keep it to your own games
 

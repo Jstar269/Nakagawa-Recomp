@@ -13,8 +13,13 @@
  *
  * The images are reused by the frames in flight, on one queue: each pass's barriers order it
  * after the previous present's use, and nothing here waits for the GPU except a size change.
+ *
+ * After the compose pass a measure pass (ace_measure.comp) reads the pair and the in-between and
+ * adds up how far the in-between moved what changed, into a host-visible ring of records, one per
+ * in-between (ace_smooth_motion). It only reads the images, so the in-between is the same either way.
  */
 #include "ace_smooth.h"
+#include "ace_hud.h"      /* ace_hud_depth_float: the depth format of the copies (#2051) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +30,9 @@ static const uint32_t k_match_spv[] =
 ;
 static const uint32_t k_compose_spv[] =
 #include "ace_compose_comp.inc"
+;
+static const uint32_t k_measure_spv[] =
+#include "ace_measure_comp.inc"
 ;
 
 #define LEVELS 3
@@ -63,6 +71,17 @@ typedef struct {
 typedef char ace_push_fits[sizeof(ComposePush) <= sizeof(MatchPush) ? 1 : -1];
 
 typedef struct {
+    int32_t size[2];
+    uint32_t slot;
+} MeasurePush;
+typedef char ace_measure_push_fits[sizeof(MeasurePush) <= sizeof(MatchPush) ? 1 : -1];
+
+/* A motion record: the seven AceSmoothMotion counters, then the serial's low 32 bits. */
+#define MOTION_WORDS 8u
+#define MOTION_SERIAL_WORD 7u
+#define MOTION_BYTES (MOTION_WORDS * 4u)
+
+typedef struct {
     VkImage image;
     VkDeviceMemory memory;
     VkImageView view;
@@ -86,18 +105,24 @@ struct AceBetween {
     int have_depth[2];
     /* What the pairs ran with (AceSmoothAuxStats' pair counts). */
     uint64_t pairs, pairs_mask, pairs_depth, depth_refused;
-    VkBuffer zstage;               /* D16 texels on their way into depth[] */
+    VkBuffer zstage;               /* depth texels on their way into depth[] (D16, or D32: ace_hud_depth_float) */
+    int zfloat;                    /* 1: depth[] is R32_SFLOAT and zstage holds D32 texels */
     VkDeviceMemory zstage_memory;
     VkBuffer stats;
     VkDeviceMemory stats_memory;
+    /* The motion ring: ACE_SMOOTH_MOTION_RING records, mapped for the host to read. */
+    VkBuffer motion;
+    VkDeviceMemory motion_memory;
+    const volatile uint32_t *motion_map;
+    uint64_t serial;               /* the newest in-between's, 0 before the first */
     VkSampler linear, nearest;
     VkDescriptorSetLayout dsl;
     VkDescriptorPool pool;
     /* [old frame index][pass]: pass 0..2 the levels, 3 compose. */
     VkDescriptorSet sets[2][LEVELS + 1];
     VkPipelineLayout layout;
-    VkPipeline match, compose;
-    VkShaderModule match_mod, compose_mod;
+    VkPipeline match, compose, measure;
+    VkShaderModule match_mod, compose_mod, measure_mod;
 
     PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties;
 #define ACE_FN(name) PFN_vk##name name
@@ -113,7 +138,7 @@ struct AceBetween {
     ACE_FN(CmdPipelineBarrier); ACE_FN(CmdBlitImage); ACE_FN(CmdBindPipeline);
     ACE_FN(CmdBindDescriptorSets); ACE_FN(CmdPushConstants); ACE_FN(CmdDispatch);
     ACE_FN(CmdFillBuffer); ACE_FN(CmdUpdateBuffer); ACE_FN(CmdCopyImageToBuffer);
-    ACE_FN(CmdCopyBufferToImage);
+    ACE_FN(CmdCopyBufferToImage); ACE_FN(MapMemory);
 #undef ACE_FN
 };
 
@@ -121,15 +146,18 @@ static void set_error(char *error, size_t cap, const char *text) {
     if (error && cap) snprintf(error, cap, "%s", text);
 }
 
-static uint32_t memory_type(AceBetween *s, uint32_t bits) {
+static uint32_t memory_type_with(AceBetween *s, uint32_t bits, VkMemoryPropertyFlags want) {
     VkPhysicalDeviceMemoryProperties mp;
     s->GetPhysicalDeviceMemoryProperties(s->init.physical_device, &mp);
     for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
-        if ((bits & (1u << i)) &&
-            (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+        if ((bits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & want) == want)
             return i;
     }
     return UINT32_MAX;
+}
+
+static uint32_t memory_type(AceBetween *s, uint32_t bits) {
+    return memory_type_with(s, bits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 }
 
 static int img_make(AceBetween *s, Img *im, VkFormat format, int w, int h, int mips,
@@ -192,6 +220,31 @@ static int buf_make(AceBetween *s, VkBuffer *buf, VkDeviceMemory *mem, VkDeviceS
            s->BindBufferMemory(s->dev, *buf, *mem, 0) == VK_SUCCESS;
 }
 
+/* The motion ring, host-visible and coherent, mapped for good, and zeroed: no record carries a
+ * serial before the GPU writes one. */
+static int motion_make(AceBetween *s) {
+    VkDeviceSize size = (VkDeviceSize)ACE_SMOOTH_MOTION_RING * MOTION_BYTES;
+    VkBufferCreateInfo bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size = size;
+    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (s->CreateBuffer(s->dev, &bi, NULL, &s->motion) != VK_SUCCESS) return 0;
+    VkMemoryRequirements mr;
+    s->GetBufferMemoryRequirements(s->dev, s->motion, &mr);
+    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, mr.size,
+                                 memory_type_with(s, mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) };
+    void *map = NULL;
+    if (mai.memoryTypeIndex == UINT32_MAX ||
+        s->AllocateMemory(s->dev, &mai, NULL, &s->motion_memory) != VK_SUCCESS ||
+        s->BindBufferMemory(s->dev, s->motion, s->motion_memory, 0) != VK_SUCCESS ||
+        s->MapMemory(s->dev, s->motion_memory, 0, VK_WHOLE_SIZE, 0, &map) != VK_SUCCESS) return 0;
+    memset(map, 0, (size_t)size);
+    s->motion_map = (const volatile uint32_t *)map;
+    return 1;
+}
+
 static void buf_free(AceBetween *s, VkBuffer *buf, VkDeviceMemory *mem) {
     if (*buf) s->DestroyBuffer(s->dev, *buf, NULL);
     if (*mem) s->FreeMemory(s->dev, *mem, NULL);
@@ -213,6 +266,7 @@ static void sized_free(AceBetween *s) {
 
 static void write_sets(AceBetween *s) {
     VkDescriptorBufferInfo stats = { s->stats, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo motion = { s->motion, 0, VK_WHOLE_SIZE };
     for (int old = 0; old < 2; old++) {
         for (int pass = 0; pass <= LEVELS; pass++) {
             int compose = pass == LEVELS;
@@ -231,15 +285,15 @@ static void write_sets(AceBetween *s) {
                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
             VkDescriptorImageInfo depth_b = { s->nearest, s->depth[!old].view,
                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-            VkWriteDescriptorSet w[9];
+            VkWriteDescriptorSet w[10];
             memset(w, 0, sizeof(w));
-            static const uint32_t binding[9] = { 0, 1, 2, 5, 3, 6, 7, 8, 9 };
-            for (int i = 0; i < 9; i++) {
+            static const uint32_t binding[10] = { 0, 1, 2, 5, 3, 6, 7, 8, 9, 10 };
+            for (int i = 0; i < 10; i++) {
                 w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 w[i].dstSet = s->sets[old][pass];
                 w[i].descriptorCount = 1;
                 w[i].dstBinding = (i == 4 && compose) ? 4u : binding[i];
-                w[i].descriptorType = (i < 3 || i >= 7) ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                w[i].descriptorType = (i < 3 || i == 7 || i == 8) ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
                                     : i == 4 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
                                              : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             }
@@ -252,7 +306,8 @@ static void write_sets(AceBetween *s) {
             w[6].pBufferInfo = &mask_b;
             w[7].pImageInfo = &depth_a;
             w[8].pImageInfo = &depth_b;
-            s->UpdateDescriptorSets(s->dev, 9, w, 0, NULL);
+            w[9].pBufferInfo = &motion;
+            s->UpdateDescriptorSets(s->dev, 10, w, 0, NULL);
         }
     }
 }
@@ -273,10 +328,14 @@ static int sized_make(AceBetween *s, int w, int h) {
                       VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)) return 0;
     if (!img_make(s, &s->out, FRAME_FORMAT, w, h, 1,
                   VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return 0;
+    /* The depth copies keep the source's precision: R16 for D16, R32F for depth=32's D32. Both
+     * sample as 0..1, so the passes read either alike. */
+    s->zfloat = ace_hud_depth_float();
     for (int i = 0; i < 2; i++)
-        if (!img_make(s, &s->depth[i], VK_FORMAT_R16_UNORM, w, h, 1,
+        if (!img_make(s, &s->depth[i], s->zfloat ? VK_FORMAT_R32_SFLOAT : VK_FORMAT_R16_UNORM, w, h, 1,
                       VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)) return 0;
-    if (!buf_make(s, &s->zstage, &s->zstage_memory, (VkDeviceSize)w * (VkDeviceSize)h * 2u,
+    if (!buf_make(s, &s->zstage, &s->zstage_memory,
+                  (VkDeviceSize)w * (VkDeviceSize)h * (s->zfloat ? 4u : 2u),
                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)) return 0;
     s->w = w;
     s->h = h;
@@ -547,6 +606,35 @@ VkImage ace_smooth_record_aux(AceBetween *s, VkCommandBuffer cmd, VkImage src, i
                              &s->sets[old][LEVELS], 0, NULL);
     s->CmdPushConstants(cmd, s->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(cp), &cp);
     s->CmdDispatch(cmd, ((uint32_t)w + 15u) / 16u, ((uint32_t)h + 15u) / 16u, 1);
+
+    /* The measure: its record zeroed, the pass, then the serial written, for the host. */
+    s->serial++;
+    uint32_t slot = (uint32_t)(s->serial % ACE_SMOOTH_MOTION_RING);
+    VkDeviceSize at = (VkDeviceSize)slot * MOTION_BYTES;
+    field_written(s, cmd, &s->out);
+    /* The slot was last written by the measure and the serial fill ACE_SMOOTH_MOTION_RING
+     * in-betweens ago. */
+    buffer_barrier(s, cmd, s->motion, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT);
+    s->CmdFillBuffer(cmd, s->motion, at, MOTION_BYTES, 0u);
+    buffer_barrier(s, cmd, s->motion, VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    MeasurePush mp;
+    mp.size[0] = w;
+    mp.size[1] = h;
+    mp.slot = slot;
+    s->CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s->measure);
+    s->CmdPushConstants(cmd, s->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(mp), &mp);
+    s->CmdDispatch(cmd, (ACE_SMOOTH_HUD_W + 15u) / 16u, (ACE_SMOOTH_HUD_H + 15u) / 16u, 1);
+    buffer_barrier(s, cmd, s->motion, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    s->CmdFillBuffer(cmd, s->motion, at + MOTION_SERIAL_WORD * 4u, 4u, (uint32_t)s->serial);
+    buffer_barrier(s, cmd, s->motion, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT);
+
     img_barrier(s, cmd, &s->out, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0);
     return s->out.image;
@@ -569,9 +657,44 @@ VkImage ace_smooth_held(AceBetween *s, VkCommandBuffer cmd) {
     return im->image;
 }
 
+VkImage ace_smooth_previous(AceBetween *s, VkCommandBuffer cmd) {
+    if (!s || !cmd || !s->have[!s->cur]) return VK_NULL_HANDLE;
+    Img *im = &s->frame[!s->cur];
+    if (im->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+        img_barrier(s, cmd, im, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0);
+    return im->image;
+}
+
+void ace_smooth_unrecord(AceBetween *s) {
+    if (!s || !s->have[!s->cur]) return;
+    s->have[s->cur] = 0;
+    s->cur = !s->cur;
+}
+
 void ace_smooth_size(const AceBetween *s, int *w, int *h) {
     if (w) *w = s ? s->w : 0;
     if (h) *h = s ? s->h : 0;
+}
+
+uint64_t ace_smooth_between_serial(const AceBetween *s) {
+    return s ? s->serial : 0;
+}
+
+int ace_smooth_motion(const AceBetween *s, uint64_t serial, AceSmoothMotion *out) {
+    if (!s || !out || !s->motion_map || serial == 0 || serial > s->serial ||
+        serial + ACE_SMOOTH_MOTION_RING <= s->serial) return 0;
+    const volatile uint32_t *r = s->motion_map + (serial % ACE_SMOOTH_MOTION_RING) * MOTION_WORDS;
+    /* A command buffer that never ran left the slot with an older in-between's record. */
+    if (r[MOTION_SERIAL_WORD] != (uint32_t)serial) return 0;
+    out->moving = r[0];
+    out->eq_old = r[1];
+    out->eq_new = r[2];
+    out->sum_old = r[3];
+    out->sum_new = r[4];
+    out->novel = r[5];
+    out->sampled = r[6];
+    return 1;
 }
 
 static VkShaderModule shader_make(AceBetween *s, const uint32_t *code, size_t bytes) {
@@ -615,16 +738,18 @@ static int fixed_make(AceBetween *s) {
     for (int i = 0; i < 2; i++)
         if (!buf_make(s, &s->mask[i], &s->mask_memory[i], ACE_SMOOTH_HUD_WORDS * 4u,
                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)) return 0;
+    if (!motion_make(s)) return 0;
 
     /* 0-2 the frames and the coarser field, 3 or 4 the pass's output, 5 the cut count, 6-7 the
-     * two HUD masks, 8-9 the two depth copies. */
-    VkDescriptorSetLayoutBinding b[10];
+     * two HUD masks, 8-9 the two depth copies, 10 the motion ring. The measure pass uses the
+     * compose pass's sets: it reads the in-between through binding 4. */
+    VkDescriptorSetLayoutBinding b[11];
     memset(b, 0, sizeof(b));
-    for (uint32_t i = 0; i < 10; i++) {
+    for (uint32_t i = 0; i < 11; i++) {
         b[i].binding = i;
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        b[i].descriptorType = (i < 3 || i >= 8) ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+        b[i].descriptorType = (i < 3 || i == 8 || i == 9) ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
                             : (i == 3 || i == 4) ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
                                                  : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     }
@@ -632,7 +757,7 @@ static int fixed_make(AceBetween *s) {
     VkDescriptorSetLayoutCreateInfo dl;
     memset(&dl, 0, sizeof(dl));
     dl.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dl.bindingCount = 10;
+    dl.bindingCount = 11;
     dl.pBindings = b;
     if (s->CreateDescriptorSetLayout(s->dev, &dl, NULL, &s->dsl) != VK_SUCCESS) return 0;
 
@@ -640,7 +765,7 @@ static int fixed_make(AceBetween *s) {
     VkDescriptorPoolSize sizes[3] = {
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, sets * 5u },
         { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, sets },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sets * 3u },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sets * 4u },
     };
     VkDescriptorPoolCreateInfo dp;
     memset(&dp, 0, sizeof(dp));
@@ -670,10 +795,12 @@ static int fixed_make(AceBetween *s) {
     if (s->CreatePipelineLayout(s->dev, &pl, NULL, &s->layout) != VK_SUCCESS) return 0;
     s->match_mod = shader_make(s, k_match_spv, sizeof(k_match_spv));
     s->compose_mod = shader_make(s, k_compose_spv, sizeof(k_compose_spv));
-    if (!s->match_mod || !s->compose_mod) return 0;
+    s->measure_mod = shader_make(s, k_measure_spv, sizeof(k_measure_spv));
+    if (!s->match_mod || !s->compose_mod || !s->measure_mod) return 0;
     s->match = pipeline_make(s, s->match_mod);
     s->compose = pipeline_make(s, s->compose_mod);
-    return s->match && s->compose;
+    s->measure = pipeline_make(s, s->measure_mod);
+    return s->match && s->compose && s->measure;
 }
 
 AceBetween *ace_smooth_create(const AceSmoothInit *init, char *error, size_t error_size) {
@@ -717,7 +844,7 @@ AceBetween *ace_smooth_create(const AceSmoothInit *init, char *error, size_t err
     DEV(CreateComputePipelines); DEV(DestroyPipeline); DEV(DeviceWaitIdle);
     DEV(CmdPipelineBarrier); DEV(CmdBlitImage); DEV(CmdBindPipeline); DEV(CmdBindDescriptorSets);
     DEV(CmdPushConstants); DEV(CmdDispatch); DEV(CmdFillBuffer); DEV(CmdUpdateBuffer);
-    DEV(CmdCopyImageToBuffer); DEV(CmdCopyBufferToImage);
+    DEV(CmdCopyImageToBuffer); DEV(CmdCopyBufferToImage); DEV(MapMemory);
 #undef DEV
     if (!fixed_make(s)) {
         set_error(error, error_size, "a Vulkan object could not be made");
@@ -733,12 +860,15 @@ void ace_smooth_destroy(AceBetween *s) {
     sized_free(s);
     if (s->match) s->DestroyPipeline(s->dev, s->match, NULL);
     if (s->compose) s->DestroyPipeline(s->dev, s->compose, NULL);
+    if (s->measure) s->DestroyPipeline(s->dev, s->measure, NULL);
     if (s->match_mod) s->DestroyShaderModule(s->dev, s->match_mod, NULL);
     if (s->compose_mod) s->DestroyShaderModule(s->dev, s->compose_mod, NULL);
+    if (s->measure_mod) s->DestroyShaderModule(s->dev, s->measure_mod, NULL);
     if (s->layout) s->DestroyPipelineLayout(s->dev, s->layout, NULL);
     if (s->pool) s->DestroyDescriptorPool(s->dev, s->pool, NULL);
     if (s->dsl) s->DestroyDescriptorSetLayout(s->dev, s->dsl, NULL);
     buf_free(s, &s->stats, &s->stats_memory);
+    buf_free(s, &s->motion, &s->motion_memory);   /* freeing the memory unmaps it */
     for (int i = 0; i < 2; i++) buf_free(s, &s->mask[i], &s->mask_memory[i]);
     if (s->linear) s->DestroySampler(s->dev, s->linear, NULL);
     if (s->nearest) s->DestroySampler(s->dev, s->nearest, NULL);

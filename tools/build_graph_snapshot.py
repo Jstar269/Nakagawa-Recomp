@@ -30,6 +30,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = 1
@@ -114,7 +115,7 @@ def snapshot(build_dir: Path, game: str) -> dict:
             doc = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        section = next(iter(doc.get("sections", {}).values()), {})
+        section: dict[str, Any] = next(iter(doc.get("sections", {}).values()), {})
         profile_hashes[m.group(1)] = section.get("profile_hash", "")
 
     try:

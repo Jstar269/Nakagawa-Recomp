@@ -136,6 +136,17 @@ typedef struct {
     uint32_t format;
 } NkOverlayVramSurface;
 
+/* A VRAM capture this run wrote (SR_VRAMDUMP): its VBLANK, and the sources the display and
+   the GE state named at that present. At most NK_OVERLAY_VRAM_CAPTURES (GE_VRAM_CAPTURE_MAX
+   in src/rt/ge_shared.h). */
+#define NK_OVERLAY_VRAM_CAPTURES 8u
+typedef struct {
+    uint32_t vblank;
+    NkOverlayVramSurface sources[NK_OVERLAY_VRAM_SOURCE_COUNT];
+    bool present[NK_OVERLAY_VRAM_SOURCE_COUNT];
+    bool texture_swizzled;
+} NkOverlayVramCapture;
+
 /* What the host knows of VRAM while the game is paused. */
 typedef struct {
     NkOverlayVramSurface sources[NK_OVERLAY_VRAM_SOURCE_COUNT];
@@ -143,6 +154,10 @@ typedef struct {
     bool texture_swizzled;
     const NkUiImage *image;   /* the window decoded; NULL when it could not be read */
     const char *note;         /* why there is no image, or a caveat; NULL for none */
+    /* The captures, oldest first. With none the page has no Capture row and shows live
+       VRAM only. */
+    const NkOverlayVramCapture *captures;
+    size_t capture_count;
 } NkOverlayVram;
 
 /* The viewer's window, kept in the overlay state while the game stays paused. */
@@ -150,6 +165,7 @@ typedef struct {
     int source;               /* NkOverlayVramSource */
     NkOverlayVramSurface view;
     bool chosen;              /* false: start from the display framebuffer */
+    int capture;              /* 0: VRAM now; n: the window in captures[n - 1] */
 } NkOverlayVramView;
 
 /* Bytes per pixel of a window format (8888: 4, the rest 2). */
@@ -276,6 +292,7 @@ const char *nk_overlay_scaling_label(int scaling);
 #define NK_OVERLAY_ID_VRAM_ADDRESS NK_OVERLAY_ID(0x000602u)
 #define NK_OVERLAY_ID_VRAM_STRIDE NK_OVERLAY_ID(0x000603u)
 #define NK_OVERLAY_ID_VRAM_FORMAT NK_OVERLAY_ID(0x000604u)
+#define NK_OVERLAY_ID_VRAM_CAPTURE NK_OVERLAY_ID(0x000605u)  /* only when captures exist */
 #define NK_OVERLAY_ID_VRAM_BACK NK_OVERLAY_ID(0x000610u)
 #define NK_OVERLAY_ID_PROFILE_BACK NK_OVERLAY_ID(0x000701u)
 

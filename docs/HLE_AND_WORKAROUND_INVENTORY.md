@@ -46,23 +46,23 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **707** (dedicated **609**, fake_success **4**, controlled_unsupported **94**).
-Semantic handler census: **584** handlers across **30** API families, covering **616** handler-associated NID registrations.
+Registered NIDs: **711** (dedicated **627**, fake_success **4**, controlled_unsupported **80**).
+Semantic handler census: **601** handlers across **30** API families, covering **634** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 345 | 356 |
+| `partial` | 348 | 360 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 221 | 229 |
+| `unreviewed` | 235 | 243 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | `newlib` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `other` | 1 | 1 | 0 | 0 | 0 | 2 | 2 |
-| `sceAtrac` | 0 | 0 | 0 | 0 | 32 | 32 | 33 |
-| `sceAudio` | 0 | 11 | 0 | 0 | 5 | 16 | 17 |
+| `sceAtrac` | 0 | 0 | 0 | 0 | 33 | 33 | 34 |
+| `sceAudio` | 0 | 11 | 0 | 0 | 5 | 16 | 18 |
 | `sceAudiocodec` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceCtrl` | 0 | 12 | 0 | 0 | 0 | 12 | 12 |
 | `sceDisplay` | 1 | 14 | 0 | 0 | 1 | 16 | 16 |
@@ -76,20 +76,20 @@ Semantic handler census: **584** handlers across **30** API families, covering *
 | `sceMp3` | 0 | 0 | 0 | 0 | 20 | 20 | 20 |
 | `sceMpeg` | 0 | 12 | 0 | 2 | 26 | 40 | 40 |
 | `sceMpegbase` | 0 | 6 | 0 | 0 | 0 | 6 | 6 |
-| `sceNet` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
+| `sceNet` | 0 | 5 | 0 | 0 | 13 | 18 | 18 |
 | `sceNp` | 0 | 2 | 0 | 0 | 0 | 2 | 2 |
 | `sceOpen` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `scePower` | 0 | 19 | 0 | 0 | 0 | 19 | 24 |
 | `scePsmf` | 0 | 4 | 0 | 0 | 14 | 18 | 18 |
 | `sceReg` | 0 | 15 | 0 | 0 | 0 | 15 | 15 |
-| `sceRtc` | 5 | 12 | 0 | 0 | 1 | 18 | 18 |
+| `sceRtc` | 5 | 15 | 0 | 0 | 1 | 21 | 21 |
 | `sceSas` | 0 | 0 | 0 | 1 | 27 | 28 | 32 |
 | `sceUmd` | 0 | 11 | 1 | 0 | 2 | 14 | 14 |
 | `sceUtility` | 0 | 10 | 0 | 0 | 27 | 37 | 37 |
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **345** | **1** | **3** | **221** | **584** | **616** |
+| **Total** | **14** | **348** | **1** | **3** | **235** | **601** | **634** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -198,11 +198,13 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
   - Evidence: fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-ch-output-blocking-0, audio-ch-output-blocking-1
-- **`h_AudioRestLen`** (`sceAudio`): `sceAudioGetChannelRestLength` (0xb011922f)
-  - Limitation: the cells query channel 0 before and after blocking output and just after release; invalid-channel error behavior and other queue states are unmeasured (#341)
+- **`h_AudioRestLen`** (`sceAudio`): `sceAudioGetChannelRestLength` (0xb011922f), `sceAudioGetChannelRestLen` (0xe9d97901)
+  - Limitation: serves sceAudioGetChannelRestLength and sceAudioGetChannelRestLen; the PSP-AUDIO-001 cells query both on channel 0 before and after blocking output and just after release, and PSP-HLE-AUDIO-REST-001 finds them equal (F or F - 64) after each blocking output on stereo channels of 1024, 2048 and 4096 frames, which is evidence that the two calls give one answer, not that this handler gives the console's: the runtime's blocking output returns with up to two blocks queued (#67), so both calls can read up to 2F there where the console held one block (#279, open); invalid-channel error behavior and other queue states are unmeasured for both calls (#341, #2361)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
   - Evidence: fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-ch-query-before, audio-ch-query-after, audio-ch-query-released
+  - Evidence: tools/psp_oracle/manifest.json:PSP-HLE-AUDIO-REST-001
+  - Evidence: fixtures/psp_oracle/probe_hle_measure.c:hle_arest_size
 - **`h_AudioSRCChRelease`** (`sceAudio`): `sceAudioSRCChRelease` (0x5c37c0ae)
   - Limitation: release after a blocking output (0) and release with nothing reserved (0x80260008) are measured (PSP-HLE-AUDIO-SRC-001); whether a release succeeds while samples are still queued, as the Output2 busy rule does, and releasing a reservation made through the other API (refused here as not reserved) are unmeasured (#339)
 - **`h_AudioSRCChReserve`** (`sceAudio`): `sceAudioSRCChReserve` (0x38553111)
@@ -470,29 +472,38 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Limitation: request completion uses a deterministic synthetic import-boundary scheduler; PSP ioctl timing and callback ordering remain unmeasured
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
 - **`h_IoLseek`** (`sceIo`): `sceIoLseek` (0x27eb27b8)
-  - Limitation: PSP-IO-001 measures 64-bit SEEK_SET 32, SEEK_CUR -16, SEEK_END 0 and the end position after a 32-byte append on one host0 file; PSP-IO-EOF-001 measures a Memory Stick seek before the start as EINVAL with the position unchanged (pspautotests revision f573fe8c9122a8ff5db4f030d74557bed644b4e0 records -1 there, kept for other devices), a seek and write past the end extending the file, and a read past the end returning 0; PSP-KERNEL-SEM-001 measures a Memory Stick position as 32 bits wide (0xFFFFFFFF accepted, beyond it EINVAL with the position unchanged); other devices keep IO_LSEEK_OUT_OF_RANGE there (#1380); invalid whence and error precedence remain unmeasured (#341). UMD block-device seeks follow PSP-UMDRAW-001's captured but not acceptance-qualified cells (sector positions, SEEK_END at the last sector, 0x8001b003 for a negative or far-past-the-disc position); the refusal edge between the last sector and the captured far position is inferred
+  - Limitation: PSP-IO-001 measures 64-bit SEEK_SET 32, SEEK_CUR -16, SEEK_END 0 and the end position after a 32-byte append on one host0 file; PSP-IO-EOF-001 measures a Memory Stick seek before the start as EINVAL with the position unchanged (pspautotests revision f573fe8c9122a8ff5db4f030d74557bed644b4e0 records -1 there, kept for other devices), a seek and write past the end extending the file, and a read past the end returning 0; PSP-KERNEL-SEM-001 measures a Memory Stick position as 32 bits wide (0xFFFFFFFF accepted, beyond it EINVAL with the position unchanged); other devices keep IO_LSEEK_OUT_OF_RANGE there (#1380); PSP-HLE-IO-SEEK-001 measures a read-only flash0: file refusing SEEK_SET and SEEK_END destinations before the start or past the end with 0x80010016 and the position unchanged (high word 0xFFFFFFFF at -1 and size + 16, 0 at 0xFFFFFFFF and 0x100000000 from SEEK_SET), measured on ltn0.pgf; on flash0: SEEK_CUR, the async calls, the 0xFFFFFFFF and 0x100000000 band from SEEK_END, where the high word changes between size + 16 and 0xFFFFFFFF, destinations past 0x100000000 and files other than ltn0.pgf are unmeasured; invalid whence and error precedence remain unmeasured (#341). UMD block-device seeks follow PSP-UMDRAW-001's captured but not acceptance-qualified cells (sector positions, SEEK_END at the last sector, 0x8001b003 for a negative or far-past-the-disc position; the negative refusal rests on them alone) and PSP-IO-EOF-002's measured edge: one and two sectors past the last sector, SEEK_END +1 and SEEK_SET 0x100000000 answer 0x8001b003 with the high word 0xFFFFFFFF and the position unchanged
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-001: io-lseek and io-append)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: io-seek64, io-seek64-rdwr)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001: io-eof-seek-negative, io-eof-seek-negative-rdonly, io-eof-write-past, io-eof-read-past)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-flash-*)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-EOF-002: umd-eof-raw-seek-past)
+  - Evidence: tests/native/hle_thread_selftest.c:test_flash0_font_device
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_block_device_sectors
+  - Evidence: tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall
 - **`h_IoLseek32`** (`sceIo`): `sceIoLseek32` (0x68963324)
-  - Limitation: the Memory Stick and disc0: rules are measured; a seek before the start on other devices is not (#341)
+  - Limitation: the Memory Stick, disc0: and flash0: (SEEK_SET and SEEK_END, PSP-HLE-IO-SEEK-001, on ltn0.pgf) rules are measured; a flash0: SEEK_CUR and a seek before the start on other devices are not (#341)
   - Evidence: PSPAutotests tests/io/file/file.expected (sceIoLseek32(fd, -10, SEEK_END) 26 on a 36-byte file)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001 and PSP-IO-EOF-002: a Memory Stick seek before the start answers 0x80010016 and a disc0: seek outside the file 0x80010005, position unchanged)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-flash-*)
   - Evidence: tests/native/hle_thread_selftest.c:test_fd_namespace
+  - Evidence: tests/native/hle_thread_selftest.c:test_flash0_font_device
 - **`h_IoLseek32Async`** (`sceIo`): `sceIoLseek32Async` (0x1b385d8f)
   - Limitation: request completion uses a deterministic synthetic import-boundary scheduler; PSP timing and callback ordering remain unmeasured
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
 - **`h_IoLseekAsync`** (`sceIo`): `sceIoLseekAsync` (0x71b19e77)
-  - Limitation: request completion uses a deterministic synthetic import-boundary scheduler; 64-bit seek timing and callback ordering are not hardware-measured
+  - Limitation: request completion uses a deterministic synthetic import-boundary scheduler; 64-bit seek timing and callback ordering are not hardware-measured; a flash0: destination follows sceIoLseek's PSP-HLE-IO-SEEK-001 rule, high word included, which was measured through sceIoLseek and sceIoLseek32 only
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
+  - Evidence: tests/native/hle_thread_selftest.c:test_flash0_font_device
 - **`h_IoOpen`** (`sceIo`): `sceIoOpen` (0x109f50bc)
-  - Limitation: measured coverage is one host0 file's create/write/read/append/missing-file path, PSP-UMDIO-001's fixed open paths and flags, PSP-KERNEL-SEM-001's Memory Stick exclusive create and PSP-IO-EOF-001's missing-file opens; an open without PSP_O_CREAT never creates a file (write-only, read-write, read-only and write-only with PSP_O_TRUNC each answer 0x80010002), a create under a missing directory is 0x80010002, and PSP_O_CREAT|PSP_O_EXCL on an existing file is EEXIST with the file unchanged (#1380); other flag combinations and general error precedence remain unmeasured (#341). UMD block-device reads and seeks are covered under sceIoRead and sceIoLseek
+  - Limitation: measured coverage is one host0 file's create/write/read/append/missing-file path, PSP-UMDIO-001's fixed open paths and flags, PSP-KERNEL-SEM-001's Memory Stick exclusive create and PSP-IO-EOF-001's missing-file opens; an open without PSP_O_CREAT never creates a file (write-only, read-write, read-only and write-only with PSP_O_TRUNC each answer 0x80010002), a create under a missing directory is 0x80010002, PSP_O_CREAT|PSP_O_EXCL on an existing file is EEXIST with the file unchanged, and PSP_O_RDONLY|PSP_O_CREAT on a missing Memory Stick file is 0x80010016 and creates nothing (#1380); the same open of an existing file, or with PSP_O_APPEND, PSP_O_TRUNC or PSP_O_EXCL, is unmeasured and stops at IO_OPEN_READ_ONLY_CREATE (0x80010086, nothing opened or changed), on ms0: and fatms0: alike; other flag combinations and general error precedence remain unmeasured (#341). UMD block-device reads and seeks are covered under sceIoRead and sceIoLseek
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-001: io-open-create, io-write, io-read-verify, io-append, io-errors)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-UMDIO-001: io-open-0000..0012)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: io-missing-parent, io-excl-new, io-excl-existing)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001: io-eof-missing)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*)
   - Evidence: tests/native/hle_thread_selftest.c:test_ms0_unified_namespace
+  - Evidence: tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall
 - **`h_IoOpenAsync`** (`sceIo`): `sceIoOpenAsync` (0x89aa9906)
   - Limitation: open runs its host lookup at submission to return the PSP-visible fd, then completes as a pending request on the import-boundary service and notifies the fd's async callback; async timing and callback ordering are synthetic, not hardware-measured, and a failed open returns its error directly instead of an fd carrying it
   - Evidence: tests/native/hle_thread_selftest.c:test_fd_namespace
@@ -501,10 +512,11 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Limitation: the pending interval is a deterministic synthetic import-boundary policy, not PSP-measured timing
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
 - **`h_IoRead`** (`sceIo`): `sceIoRead` (0x6a638d83)
-  - Limitation: PSP-IO-001 measures one 64-byte host0 read that returns 64 matching bytes, and that reading descriptor -1 returns a negative result (the exact code is not recorded in public evidence); pspautotests revision f573fe8c9122a8ff5db4f030d74557bed644b4e0 records a read past the end of a file returning 0 (#1380); short reads at end of file, zero-length file reads, partial-read position advance, unreadable buffers, write-only descriptors and standard-stream reads remain unmeasured (#341). UMD block-device reads follow PSP-UMDRAW-001's captured but not acceptance-qualified cells (counts and results in 2048-byte sectors, the position advancing by the count, 0x80010016 for a zero count); a read crossing the last sector stays at the raw-device boundary, and the runtime refuses a destination outside guest memory where the console overran the buffer
+  - Limitation: PSP-IO-001 measures one 64-byte host0 read that returns 64 matching bytes, and that reading descriptor -1 returns a negative result (the exact code is not recorded in public evidence); pspautotests revision f573fe8c9122a8ff5db4f030d74557bed644b4e0 records a read past the end of a file returning 0 (#1380); short reads at end of file, zero-length file reads, partial-read position advance, unreadable buffers, write-only descriptors and standard-stream reads remain unmeasured (#341). UMD block-device reads follow PSP-UMDRAW-001's captured but not acceptance-qualified cells (counts and results in 2048-byte sectors, the position advancing by the count, 0x80010016 for a zero count); a read crossing the last sector stays at the raw-device boundary, and the runtime refuses a destination outside guest memory where the console overran the buffer. A read of a file of the disc parks its thread for a synthetic drive time, the low estimate of PPSSPP's sceIo.cpp (100 bytes per microsecond, at least 100 microseconds, no seek or spin-up time): no UMD read time is measured, nor whether two readers queue, nor a read made with dispatch or interrupts disabled or outside a guest thread, which returns at once (#1296, #2361)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-001: io-read-verify and io-errors)
   - Evidence: tests/native/hle_thread_selftest.c:test_ms0_unified_namespace
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_block_device_sectors
+  - Evidence: tests/native/hle_thread_selftest.c:test_umd_read_parks_its_thread_for_the_drives_time
 - **`h_IoReadAsync`** (`sceIo`): `sceIoReadAsync` (0xa0b5a7c2)
   - Limitation: request completion uses a deterministic synthetic import-boundary scheduler; PSP timing and callback ordering remain unmeasured
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
@@ -523,9 +535,11 @@ Semantic handler census: **584** handlers across **30** API families, covering *
 - **`h_IoWaitAsyncCB`** (`sceIo`): `sceIoWaitAsyncCB` (0x35dbd746)
   - Limitation: callback dispatch is modeled at the wait boundary; PSP blocking and callback interleaving remain unmeasured
 - **`h_IoWrite`** (`sceIo`): `sceIoWrite` (0x42ec03ac)
-  - Limitation: PSP-IO-001 measures a 64-byte write that returns 64 on a created host0 file and a 32-byte write through an append-mode descriptor that returns 32; read-only descriptors, short writes, zero-length writes, unreadable source buffers, raw devices and standard-stream writes remain unmeasured (#341); a write that would carry the 32-bit position past its range fails closed with IO_WRITE_OUT_OF_RANGE (#1380)
+  - Limitation: PSP-IO-001 measures a 64-byte write that returns 64 on a created host0 file and a 32-byte write through an append-mode descriptor that returns 32; PSP-HLE-IO-SEEK-001 measures a write through a PSP_O_RDONLY Memory Stick descriptor as 0x80020323 with the file unchanged (#1380), which sceIoWriteAsync shares unmeasured; read-only descriptors on other devices, short writes, zero-length writes, unreadable source buffers, raw devices and standard-stream writes remain unmeasured (#341); a write that would carry the 32-bit position past its range fails closed with IO_WRITE_OUT_OF_RANGE (#1380)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-001: io-write and io-append)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*)
   - Evidence: tests/native/hle_thread_selftest.c:test_ms0_unified_namespace
+  - Evidence: tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall
 - **`h_IoWriteAsync`** (`sceIo`): `sceIoWriteAsync` (0x0facab19)
   - Limitation: request completion uses a deterministic synthetic import-boundary scheduler; PSP timing and callback ordering remain unmeasured
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
@@ -546,7 +560,7 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01 and PSP-B2-01 FPL cells)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-001 FPL create, exhaustion, status, free and delete cells)
 - **`h_AllocateVpl`** (`sceKernel`): `sceKernelAllocateVpl` (0xbed27435)
-  - Limitation: ordinary allocation, one finite timeout, measured pool accounting, one-waiter hand-off and the invalid sizes are covered; invalid output pointers and fragmented-pool behaviour beyond the measured cases are not measured (#341)
+  - Limitation: ordinary allocation, one finite timeout, measured pool accounting, one-waiter hand-off and the invalid sizes are covered; a request within the create size that no block can hold is refused with 0x800201B7 instead of waiting (unmeasured for the last 8 bytes below poolSize); invalid output pointers and fragmented-pool behaviour beyond the measured cases are not measured (#341)
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01 and PSP-B2-01 VPL cells)
   - Evidence: PSPAutotests tests/threads/vpl/allocate.expected (0 bytes, -1 bytes and more than the pool 0x800201B7)
   - Evidence: tests/native/hle_thread_selftest.c:test_wb_tlspl_vpl_cells
@@ -634,9 +648,10 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_evf_create_and_refer
   - Evidence: tests/native/hle_thread_selftest.c:test_sync_objects_past_the_old_table
 - **`h_CreateFpl`** (`sceKernel`): `sceKernelCreateFpl` (0xc07bb470)
-  - Limitation: the cited cells cover valid pool creation and block/status behavior; the handler converts zero block size/count to 16/1, a branch not established by those cited valid-pool cells, and allocation exhaustion plus partition, attribute, and option error precedence need separate evidence
+  - Limitation: valid pool creation, block size 0 and a pool the partition cannot hold are measured; a block count of 0 still becomes 1, a create with no free FPL slot keeps its pre-measurement code, and partition, attribute and option error precedence need separate evidence
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-001: fpl-create and valid pool status/allocation cells)
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics: FPL blocks are blockSize apart)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-002: block size 0 is 0x800201B7, a 0x7FFFFFFF-byte block 0x80020190)
 - **`h_CreateLwMutex`** (`sceKernel`): `sceKernelCreateLwMutex` (0x19cff145)
   - Limitation: the cells cover recursive and non-recursive initialization, workarea fields, and one waiter hand-off; invalid workareas, unsupported attribute bits, negative counts, option data, and multi-waiter ordering are not established
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-B1-01 and PSP-B2-01: LwMutex creation workarea and one-waiter hand-off)
@@ -889,9 +904,11 @@ Semantic handler census: **584** handlers across **30** API families, covering *
 - **`h_ReferVTimerStatus`** (`sceKernel`): `sceKernelReferVTimerStatus` (0x5f32beaa)
   - Limitation: return 0, the deleted-UID code, and the active, current, schedule, handler and common states are measured (PR #1003); base equals GetVTimerBase while running and reads 0 once stopped (PSP-HLE-VTIMER-002), and its value (guest time at Start) and the microsecond unit are consistent with that run, not measured exactly; NULL pointer returns ILLEGAL_ADDR as a runtime safety choice after PSP-3000 hung on ReferSystemStatus(NULL) (PSP-HLE-NULL-OUT-001), not a measured VTimer result; the caller-size write rule for size 0 is the sema/evf/mbx rule applied without a VTimer cite (#325)
 - **`h_ReferVplStatus`** (`sceKernel`): `sceKernelReferVplStatus` (0x39810265)
-  - Limitation: the name, size word and wait count are reproduced; poolSize and freeSize follow this runtime's accounting, not the PSP's per-block headers (0xFFE0 for a 0x10000 pool) (#341)
+  - Limitation: the name, size word, wait count, poolSize and freeSize are reproduced; a pool size that is not a multiple of 8 is rounded down here, which is unmeasured (#341)
   - Evidence: PSPAutotests tests/threads/vpl/refer.expected (the name at +4; input size 0 is left alone)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-B1-01: a 1024-byte VPL reports 992 bytes; each block costs roundup(size, 8) + 8)
   - Evidence: tests/native/hle_thread_selftest.c:test_wb_tlspl_vpl_cells
+  - Evidence: tests/native/hle_thread_selftest.c:test_kernel_pool_bounds_measured
 - **`h_RegisterSubIntr`** (`sceKernel`): `sceKernelRegisterSubIntrHandler` (0xca04a2b9)
   - Limitation: the recorded codes and VBLANK delivery are reproduced; the GE interrupt (line 25) stops the run by name because this runtime delivers no GE sub-interrupt, and a Register from interrupt context is not measured (#341)
   - Evidence: PSPAutotests tests/intr/registersub.expected at f573fe8c (the code for every line and every VBLANK sub-interrupt -2 to 69; a NULL handler answers 0 and registers nothing; a held number answers FOUND_HANDLER and keeps the first handler)
@@ -997,11 +1014,13 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Limitation: two valid allocations, the measured exhaustion code, and pool status are covered; invalid output pointers, invalid UIDs, and other exhaustion/error precedence are not established
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-001: fpl-try-alloc-a, fpl-try-alloc-b, and fpl-try-alloc-exhausted)
 - **`h_TryAllocateVpl`** (`sceKernel`): `sceKernelTryAllocateVpl` (0xaf36d708)
-  - Limitation: the recorded codes are reproduced; the point where a pool runs out differs because the PSP's per-block header accounting is not modelled, and invalid output pointers are unmeasured (#341)
+  - Limitation: the recorded codes and the measured header accounting are reproduced; where the header bytes sit, a request within the create size but beyond what the pool hands out (0x800201B7 here), and invalid output pointers are unmeasured (#341)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-B1-01: 1024-byte VPL accounting and high-down allocation placement)
   - Evidence: PSPAutotests tests/threads/vpl/try.expected (0 bytes, -1 bytes and more than the pool 0x800201B7; a request no free block can hold 0x80020190)
   - Evidence: tests/native/hle_thread_selftest.c:test_wb_tlspl_vpl_cells
   - Evidence: tests/native/hle_thread_selftest.c:test_vpl_nonblocking_roundtrip
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-002: a 0x1000-byte VPL gives 15 allocations of 0x100, the 16th 0x80020190)
+  - Evidence: tests/native/hle_thread_selftest.c:test_kernel_pool_bounds_measured
 - **`h_TryLockLwMutex`** (`sceKernel`): `_sceKernelTryLockLwMutex` (0x71040d5c), `sceKernelTryLockLwMutex` (0xdc692ee3)
   - Limitation: normal acquisition, count-zero refusal, non-recursive self-contention, and another-owner contention are measured; negative counts, invalid-workarea error precedence, interrupt context, and several-waiter ordering are not measured
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01 and PSP-B2-01 LwMutex cells)
@@ -1300,14 +1319,26 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Limitation: adds the sign-extended 32-bit day count times 86400000000 modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded); a NULL or unmapped source or destination is not measured and stops the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_day_of_week_check_valid_autotest
   - Evidence: PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddDays
+- **`h_RtcTickAddHours`** (`sceRtc`): `sceRtcTickAddHours` (0x26d7a24a)
+  - Limitation: adds the sign-extended 32-bit hour count times 3600000000 modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded, the fixed rows; the autotest's loop rows are not checked); a NULL or unmapped source or destination is not measured and stops the run by name
+  - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_minutes_hours_weeks_autotest
+  - Evidence: PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddHours, the 8 fixed rows
 - **`h_RtcTickAddMicroseconds`** (`sceRtc`): `sceRtcTickAddMicroseconds` (0x26d25a5d)
   - Limitation: adds the 64-bit count modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded); a NULL or unmapped source or destination is not measured and stops the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_day_of_week_check_valid_autotest
   - Evidence: PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddMicroseconds
+- **`h_RtcTickAddMinutes`** (`sceRtc`): `sceRtcTickAddMinutes` (0xe6605bca)
+  - Limitation: adds the 64-bit count times 60000000 modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded, the fixed rows; the autotest's loop rows are not checked); a NULL or unmapped source or destination is not measured and stops the run by name
+  - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_minutes_hours_weeks_autotest
+  - Evidence: PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddMinutes, the 8 fixed rows
 - **`h_RtcTickAddSeconds`** (`sceRtc`): `sceRtcTickAddSeconds` (0xf2a4afe5)
   - Limitation: adds the 64-bit count times 1000000 modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded); a NULL or unmapped source or destination is not measured and stops the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_day_of_week_check_valid_autotest
   - Evidence: PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddSeconds
+- **`h_RtcTickAddWeeks`** (`sceRtc`): `sceRtcTickAddWeeks` (0xcf3a2ca8)
+  - Limitation: adds the sign-extended 32-bit week count times 604800000000 modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded, the fixed rows; the autotest's loop rows are not checked); a NULL or unmapped source or destination is not measured and stops the run by name
+  - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_minutes_hours_weeks_autotest
+  - Evidence: PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddWeeks, the 8 fixed rows
 - **`h_RtcTickAddYears`** (`sceRtc`): `sceRtcTickAddYears` (0x42842c77)
   - Limitation: moves the calendar year with the leap day clamped to February 28, and a result outside years 1..9999 returns 0 with dest unwritten (pspautotests-recorded); a source tick past year 9999 and NULL or unmapped pointers are not measured and stop the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_time_t_add_years_resolution_autotest

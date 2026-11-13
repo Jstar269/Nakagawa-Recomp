@@ -34,6 +34,7 @@ import argparse
 import bisect
 from collections.abc import Callable, Iterator, Mapping, Sequence
 import copy
+import functools
 import hashlib
 import hmac
 import json
@@ -83,6 +84,10 @@ SITE_TRANSFORMS = frozenset({
     "gate_30hz_alt",
     "gate_30hz_store",
     "clip_x_widen",
+    "gate_30hz_phase",
+    "velocity_source_x_kappa",
+    "launch_from_rest_60hz",
+    "value_reference",
 })
 
 # Transforms of a guest_memory_code_hook package (contract section 10.8, "Next layer"): they act
@@ -91,6 +96,25 @@ SITE_TRANSFORMS = frozenset({
 CODE_HOOK_TRANSFORMS = frozenset({
     "clip_x_widen",
 })
+
+# Ace parts (contract section 9.8): per-title items of the Ace tier that a timing package carries
+# beside its 60 Hz sites. Each part is gated at run time by its own SR_ACE key, never by
+# SR_EXPERIMENTAL_60HZ. Their transforms are a set of their own, disjoint from SITE_TRANSFORMS,
+# so a 60 Hz transform in ace_parts, or an ace_parts transform in sites, refuses by construction.
+ACE_PART_NAMES = frozenset({"load"})
+ACE_PART_TRANSFORMS = frozenset({"vblank_wait_skip"})
+ACE_PART_KEYS = frozenset({"sites"})
+ACE_PART_SITE_KEYS = frozenset({
+    "id",
+    "function",
+    "insn_offset",
+    "stock_digest",
+    "word_count",
+    "transform",
+})
+# The one import a vblank_wait_skip site may call: codegen checks the jal's target stub.
+VBLANK_WAIT_SKIP_NID = 0x984C27E7
+VBLANK_WAIT_SKIP_IMPORT = "sceDisplayWaitVblankStart"
 
 # What a site's instruction builds, when its encoding alone cannot say: the upper
 # word of a double is built by a lui like a float, with a different exponent field.
@@ -118,6 +142,38 @@ ARGUMENT_REGISTERS = {
     "t3": 11,
 }
 
+# The callee-saved registers a gate_30hz_phase site may read its state pointer from.
+PHASE_REGISTERS = {f"s{n}": 16 + n for n in range(8)}
+
+# The stock values a transform's rule is built from (contract section 9.2). Each key holds the id
+# of another site of the package, whose instruction pins one float of the stock executable: the
+# resolver reads the value there, so a package never carries it.
+#   step_site          h, the stock logic step;
+#   gravity_site       g, the stock acceleration;
+#   damping_site       c, the stock damping coefficient;
+#   damping_step_site  L, the step the stock damping multiplies c by (m = 1 - c*L).
+SITE_REFERENCES = {
+    "gate_30hz_phase": ("step_site",),
+    "velocity_source_x_kappa": ("damping_site", "damping_step_site"),
+    "launch_from_rest_60hz": ("gravity_site", "damping_site", "damping_step_site", "step_site"),
+}
+REFERENCE_KEYS = frozenset(key for keys in SITE_REFERENCES.values() for key in keys)
+# What a reference may name. A value another transform rescales is not the stock value the title
+# then uses, so g, c and L are pinned by sites that rewrite nothing. The step is the exception:
+# the site that halves it is the site that says what the 60 Hz step is.
+REFERENCE_TARGETS = {
+    "gravity_site": ("value_reference",),
+    "damping_site": ("value_reference",),
+    "damping_step_site": ("value_reference",),
+    "step_site": ("value_reference", "step_x0.5"),
+}
+# A timing transform may write guest memory only where it replaces, at the same place, a value
+# the stock logic itself stores there (its 60 Hz image), and only in a package that names the
+# capability (contract section 9.2). Any other write needs a guest_memory_code_hook package.
+GUEST_WRITE_CAPABILITIES = {
+    "launch_from_rest_60hz": "launch_velocity_write",
+}
+
 RNG_POLICY_MODES = frozenset({
     "rescale_probability",
     "subtick_30hz",
@@ -127,6 +183,7 @@ ROOT_KEYS = frozenset({
     "schema_version",
     "id",
     "display_name",
+    "experimental",
     "version",
     "category",
     "target_title_id",
@@ -140,6 +197,7 @@ ROOT_KEYS = frozenset({
     "update_boundary",
     "data_sites",
     "data_files",
+    "ace_parts",
 })
 
 REQUIRED_ROOT_KEYS = frozenset({
@@ -164,6 +222,7 @@ OPTIONAL_TIMING_PACKAGE_KEYS = frozenset({
     "update_boundary",
     "data_sites",
     "data_files",
+    "ace_parts",
 })
 
 # A data site: constants in the executable's loaded data, rescaled once at load.
@@ -250,6 +309,11 @@ SITE_KEYS = frozenset({
     "alternates",
     "clip_register",
     "clip_offsets",
+    "phase_time",
+    "odd_phase_condition",
+    "velocity_offset",
+    "gravity_axis",
+    *REFERENCE_KEYS,
 })
 
 # The instruction where one logic update of the title begins: it runs exactly once per update.
@@ -431,6 +495,10 @@ def validate_package(data: Any) -> dict[str, Any]:
         fail("display_name", "display_name must not have leading or trailing whitespace")
     if not (1 <= len(name) <= 128):
         fail("display_name", f"display_name length must be between 1 and 128 characters, got {len(name)}")
+
+    # Validate optional experimental (section 9.10): a package without it is experimental.
+    if "experimental" in data and not isinstance(data["experimental"], bool):
+        fail("experimental", f"experimental must be true or false, got {type(data['experimental']).__name__}")
 
     # Validate version
     ver = data["version"]
@@ -665,7 +733,17 @@ def validate_package(data: Any) -> dict[str, Any]:
                 if target["transform"] != "accel_x0.25":
                     fail(f"sites[{idx}].acceleration_site",
                          f"acceleration_site {accel!r} must be an accel_x0.25 site")
-        _validate_requires(sites)
+            for key in SITE_REFERENCES.get(site["transform"], ()):
+                if site[key] not in site_ids or site[key] == site["id"]:
+                    fail(f"sites[{idx}].{key}", f"{key} {site[key]!r} must name another site of this package")
+        _validate_reference_roles(sites)
+        for idx, site in enumerate(sites):
+            capability = GUEST_WRITE_CAPABILITIES.get(site["transform"])
+            if capability is not None and capability not in seen_caps:
+                fail(f"sites[{idx}].transform",
+                     f"{site['transform']} writes guest memory: the package must name the capability "
+                     f"{capability!r} in capabilities")
+        _validate_requires(sites, _ace_part_ids(data))
 
         # Validate update_boundary: where one logic update begins. Gated sites run on
         # alternate updates counted there, so a package that gates must declare it.
@@ -695,8 +773,110 @@ def validate_package(data: Any) -> dict[str, Any]:
             _validate_data_sites(data["data_sites"])
         if "data_files" in data:
             _validate_data_files(data["data_files"])
+        if "ace_parts" in data:
+            _validate_ace_parts(data, seen_site_ids)
 
     return data
+
+
+def _validate_ace_parts(data: Mapping[str, Any], site_ids: set[str]) -> None:
+    """``ace_parts`` (contract section 9.8): named parts, each a list of one-word sites.
+
+    Site ids and instruction words share one namespace with ``sites`` and the
+    ``update_boundary``: an ace_parts site may not reuse an id or cover a word either
+    already covers, may not declare ``requires``, and no ``requires`` may name it. A
+    ``load`` part needs an ``update_boundary``, and none of its sites may be in that
+    function. Here words and functions are compared by name; a published package's are
+    compared again by site-map address (:func:`_check_ace_part_namespace`), and codegen
+    compares the resolved addresses.
+    """
+    parts = data["ace_parts"]
+    if not isinstance(parts, dict) or not parts:
+        fail("ace_parts", "ace_parts must be a non-empty object of part name -> part")
+    unknown_parts = sorted(set(parts) - ACE_PART_NAMES)
+    if unknown_parts:
+        fail("ace_parts", f"Unknown ace part {unknown_parts}; must be one of {sorted(ACE_PART_NAMES)}")
+    if "load" in parts and "update_boundary" not in data:
+        # The boundary marks the logic update's function, which no skipped wait may pace;
+        # without it nothing would keep a load site out of the update loop.
+        fail("update_boundary", "A package with ace_parts.load must declare update_boundary: no "
+                                "vblank_wait_skip site may be in the function where a logic update begins")
+    for name in sorted(parts):
+        part_path = f"ace_parts.{name}"
+        part = parts[name]
+        _check_keys(part, part_path, ACE_PART_KEYS, ("sites",), "ace part")
+        sites = part["sites"]
+        if not isinstance(sites, list) or not sites:
+            fail(f"{part_path}.sites", "an ace part's sites must be a non-empty array")
+        for idx, site in enumerate(sites):
+            path = f"{part_path}.sites[{idx}]"
+            if isinstance(site, dict) and "requires" in site:
+                fail(f"{path}.requires", "an ace_parts site cannot declare requires: it runs on its own "
+                                         "SR_ACE key, never on another site's applications")
+            _check_keys(site, path, ACE_PART_SITE_KEYS,
+                        ("id", "function", "insn_offset", "stock_digest", "transform"), "ace part site")
+            _check_id(site["id"], f"{path}.id", site_ids, "site")
+            _check_instruction_location(site, path, "site")
+            if "word_count" in site:
+                word_count = site["word_count"]
+                if not isinstance(word_count, int) or isinstance(word_count, bool) or word_count != 1:
+                    fail(f"{path}.word_count", f"an ace_parts site is one word: word_count must be 1, "
+                                               f"got {word_count!r}")
+            else:
+                site["word_count"] = 1
+            transform = site["transform"]
+            if not isinstance(transform, str) or transform not in ACE_PART_TRANSFORMS:
+                fail(f"{path}.transform", f"Unknown ace part transform: {transform!r}; must be one of "
+                                          f"{sorted(ACE_PART_TRANSFORMS)}")
+    _check_ace_part_namespace(data, lambda fn: fn, "by name")
+
+
+def _check_ace_part_namespace(data: Mapping[str, Any], fn_key: Any, how: str) -> None:
+    """Refuse an ``ace_parts`` site on a word that a ``sites`` entry (any of its ``word_count``
+    words) or the ``update_boundary`` covers, or on another part site's word, and a
+    ``vblank_wait_skip`` site in the boundary's function. ``fn_key`` maps a function name to
+    what identifies the function: the name itself, or a published site map's address, so that
+    two names for one address are one function. Only that function is checked: nothing walks
+    the call graph, so a wait in a caller or a callee of it passes here and rests on the site's
+    own evidence (contract section 11.3.10, "What the tools check")."""
+    def word(fn: str, offset: int) -> tuple[Any, int]:
+        key = fn_key(fn)
+        # An address names the word itself; a name stays paired with its offset.
+        return (None, key + offset) if isinstance(key, int) else (key, offset)
+
+    covered: dict[tuple[Any, int], str] = {}
+    for site in data.get("sites", ()):
+        for i in range(int(site.get("word_count", 1))):
+            covered.setdefault(word(site["function"], int(site["insn_offset"]) + 4 * i),
+                               f"site {site['id']!r}" + (f" (its word {i + 1})" if i else ""))
+    boundary = data.get("update_boundary")
+    if boundary is not None:
+        covered.setdefault(word(boundary["function"], int(boundary["insn_offset"])), "the update_boundary")
+    for path, site in ace_part_sites(data):
+        pos = word(site["function"], int(site["insn_offset"]))
+        if pos in covered:
+            fail(path, f"an ace_parts site may not cover a word {covered[pos]} already covers "
+                       f"({site['function']!r}, insn_offset={site['insn_offset']}, compared {how})")
+        covered[pos] = f"site {site['id']!r}"
+        if (site["transform"] == "vblank_wait_skip" and boundary is not None
+                and fn_key(site["function"]) == fn_key(boundary["function"])):
+            # The wait would sit in the loop that runs the logic update: skipping it would run
+            # updates unpaced, so game time and the update counter would run fast.
+            fail(path, f"a vblank_wait_skip site may not be in the update_boundary's function "
+                       f"{boundary['function']!r} (compared {how}): skipping that wait would run "
+                       f"logic updates unpaced")
+
+
+def _ace_part_ids(data: Mapping[str, Any]) -> set[str]:
+    """The site ids an ``ace_parts`` section declares, read before it is validated."""
+    ids: set[str] = set()
+    parts = data.get("ace_parts")
+    if isinstance(parts, dict):
+        for part in parts.values():
+            sites = part.get("sites") if isinstance(part, dict) else None
+            if isinstance(sites, list):
+                ids.update(s["id"] for s in sites if isinstance(s, dict) and isinstance(s.get("id"), str))
+    return ids
 
 
 def _validate_site_extras(site: Mapping[str, Any], path: str) -> None:
@@ -757,13 +937,16 @@ def _validate_site_extras(site: Mapping[str, Any], path: str) -> None:
     for key in ("stock_values", "stock_value_digests"):
         # Only a scaling transform rewrites a stored value (swc1, or sw under count_x2): no other site
         # checks values. gate_30hz_store gates a store but never changes the value it stores.
-        if key in site and transform not in SCALE_FACTORS:
+        if key in site and transform not in STORE_VALUE_TRANSFORMS:
             fail(f"{path}.{key}", f"{key} belongs only to a store site under a scaling transform "
-                                  f"({', '.join(sorted(SCALE_FACTORS))})")
+                                  f"({', '.join(sorted(STORE_VALUE_TRANSFORMS))})")
     if "requires" in site:
         required = site["requires"]
         if not isinstance(required, list) or not required or not all(isinstance(r, str) for r in required):
             fail(f"{path}.requires", "requires must be a non-empty list of site ids")
+        if transform == "value_reference":
+            fail(f"{path}.requires", "a value_reference site has no rewrite for requires to hold back")
+    _validate_two_update_extras(site, path)
     if transform == "clip_x_widen":
         # Contract section 10.8: after the call at the site returns, the runtime scales the
         # x output row of the 4x4 clip matrices at clip_offsets from the pointer in clip_register.
@@ -802,8 +985,76 @@ def _validate_site_extras(site: Mapping[str, Any], path: str) -> None:
         fail(f"{path}.word_count", "gate_30hz_store names one store (word_count 1)")
 
 
-def _validate_requires(sites: Sequence[Mapping[str, Any]]) -> None:
-    """``requires`` names other sites of the package that declare ``stock_values``."""
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_two_update_extras(site: Mapping[str, Any], path: str) -> None:
+    """The fields of gate_30hz_phase, velocity_source_x_kappa, launch_from_rest_60hz and
+    value_reference (contract section 9.2): site references, the phase time and the launch velocity."""
+    transform = site["transform"]
+    wanted = SITE_REFERENCES.get(transform, ())
+    for key in sorted(REFERENCE_KEYS):
+        if key in wanted:
+            if not isinstance(site.get(key), str) or not SITE_ID_RE.match(site[key]):
+                fail(f"{path}.{key}", f"{transform} needs {key}, the id of the site that pins that stock value")
+        elif key in site:
+            users = sorted(tf for tf, keys in SITE_REFERENCES.items() if key in keys)
+            fail(f"{path}.{key}", f"{key} belongs only to {', '.join(users)}")
+    if transform in SITE_REFERENCES and site["word_count"] != 1:
+        fail(f"{path}.word_count", f"{transform} names one instruction (word_count 1)")
+    if transform == "value_reference" and site["word_count"] not in (1, 2):
+        fail(f"{path}.word_count", "value_reference names one load, or a lui/ori float pair (word_count 2)")
+    if transform == "gate_30hz_phase":
+        phase = site.get("phase_time")
+        if (not isinstance(phase, dict) or set(phase) != {"register", "offset"}
+                or not isinstance(phase["register"], str) or phase["register"] not in PHASE_REGISTERS
+                or not _is_int(phase["offset"]) or not 0 <= phase["offset"] <= 65532 or phase["offset"] % 4):
+            fail(f"{path}.phase_time",
+                 f"gate_30hz_phase needs phase_time, an object with register (one of {sorted(PHASE_REGISTERS)}) "
+                 "and offset (4-byte-aligned, in [0, 65532]): where the state's own time is read")
+        if "odd_phase_condition" in site and not isinstance(site["odd_phase_condition"], bool):
+            fail(f"{path}.odd_phase_condition", "odd_phase_condition must be true or false")
+    else:
+        for key in ("phase_time", "odd_phase_condition"):
+            if key in site:
+                fail(f"{path}.{key}", f"{key} belongs only to gate_30hz_phase")
+    if transform == "launch_from_rest_60hz":
+        offset = site.get("velocity_offset")
+        if (not isinstance(offset, int) or isinstance(offset, bool)
+                or not 0 <= offset <= 65528 or offset % 4):
+            fail(f"{path}.velocity_offset",
+                 "launch_from_rest_60hz needs velocity_offset, the 4-byte-aligned offset in [0, 65528] of the "
+                 "body's two velocity floats from the pointer in $a0")
+        if not _is_int(site.get("gravity_axis")) or site["gravity_axis"] not in (0, 1):
+            fail(f"{path}.gravity_axis",
+                 "launch_from_rest_60hz needs gravity_axis, 0 or 1: which of the two floats gravity acts on")
+    else:
+        for key in ("velocity_offset", "gravity_axis"):
+            if key in site:
+                fail(f"{path}.{key}", f"{key} belongs only to launch_from_rest_60hz")
+
+
+def _validate_reference_roles(sites: Sequence[Mapping[str, Any]]) -> None:
+    """A reference names a site whose value no transform changes, and one site pins one quantity."""
+    by_id = {site["id"]: site for site in sites}
+    roles: dict[str, str] = {}
+    for idx, site in enumerate(sites):
+        for key in SITE_REFERENCES.get(site["transform"], ()):
+            name = site[key]
+            path = f"sites[{idx}].{key}"
+            transform = by_id[name]["transform"]
+            if transform not in REFERENCE_TARGETS[key]:
+                fail(path, f"{key} {name!r} names a {transform} site; it must name a "
+                           f"{' or '.join(REFERENCE_TARGETS[key])} site, so the value it pins is the one the "
+                           f"title uses")
+            if roles.setdefault(name, key) != key:
+                fail(path, f"site {name!r} is named as {roles[name]} and as {key}: one site pins one quantity")
+
+
+def _validate_requires(sites: Sequence[Mapping[str, Any]], ace_ids: frozenset[str] | set[str] = frozenset()) -> None:
+    """``requires`` names other sites of the package that declare ``stock_values``, never an
+    ``ace_parts`` site (``ace_ids``)."""
     by_id = {site["id"]: site for site in sites}
     for idx, site in enumerate(sites):
         required = site.get("requires")
@@ -815,6 +1066,9 @@ def _validate_requires(sites: Sequence[Mapping[str, Any]]) -> None:
         for name in required:
             if name == site["id"]:
                 fail(path, f"a site cannot require its own id {name!r}")
+            if name in ace_ids:
+                fail(path, f"requires names {name!r}, an ace_parts site: a 60 Hz site cannot wait "
+                           "on an Ace part, which runs only on its own SR_ACE key")
             target = by_id.get(name)
             if target is None or ("stock_values" not in target and "stock_value_digests" not in target):
                 fail(path, f"requires names sites that declare stock_values or stock_value_digests; "
@@ -1109,12 +1363,23 @@ def _words_bytes(words: Sequence[int]) -> bytes:
     return b"".join(struct.pack("<I", int(w) & 0xFFFFFFFF) for w in words)
 
 
+def ace_part_sites(data: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
+    """Every ``ace_parts`` site of a validated declaration, with its path, in part-name order."""
+    out: list[tuple[str, Mapping[str, Any]]] = []
+    for name in sorted(data.get("ace_parts", {})):
+        for idx, site in enumerate(data["ace_parts"][name]["sites"]):
+            out.append((f"ace_parts.{name}.sites[{idx}]({site['id']})", site))
+    return out
+
+
 def _published_names(data: Mapping[str, Any]) -> set[str]:
     """Every symbolic name a declaration resolves: the names its site map must hold."""
     names: set[str] = set()
     for site in data.get("sites", ()):
         names.add(site["function"])
         names.update(site.get("alternates", ()))
+    for _path, site in ace_part_sites(data):
+        names.add(site["function"])
     if "update_boundary" in data:
         names.add(data["update_boundary"]["function"])
     for site in data.get("data_sites", ()):
@@ -1175,6 +1440,9 @@ def _validate_published_package(data: dict[str, Any]) -> dict[str, Any]:
     unused = sorted(set(site_map) - used)
     if unused:
         fail("site_map", f"site_map names {unused}, which no site uses: publish no other addresses")
+    if "ace_parts" in declaration:
+        # Two names may share an address, so the namespace is checked again by address.
+        _check_ace_part_namespace(declaration, lambda fn: int(site_map[fn], 16), "by site-map address")
     return data
 
 
@@ -1289,6 +1557,25 @@ def elf_readers(elf: Any) -> tuple[ReadFn, ReadFn]:
     return read_words, read_data
 
 
+def elf_constant_reader(elf: Any) -> ReadFn:
+    """``read_const(vaddr, size)`` over an ``analyze.Elf``: initialised bytes of one allocated
+    PROGBITS section that is neither writable nor executable, as the loader places them, or
+    ``None``. That is data the title cannot change while it runs, which is what a site reference
+    may pin (contract section 9.2): a value read here at build time is the value at run time."""
+    def read_const(vaddr: int, count: int) -> bytes | None:
+        rebase = elf.reloc.lo if elf.reloc is not None else 0
+        for sec in elf.sections:
+            if sec["typ"] != 1 or not sec["flags"] & 2 or sec["flags"] & 5:
+                continue
+            lo = sec["addr"] + rebase
+            if lo <= vaddr and vaddr + count <= lo + sec["size"]:
+                raw = elf.read_at_vaddr(vaddr, count)
+                return None if raw is None else bytes(raw)
+        return None
+
+    return read_const
+
+
 def _stock_locations(declaration: Mapping[str, Any],
                      symbols: Mapping[str, int]) -> list[tuple[str, Mapping[str, Any], str, int, int]]:
     """Every stock-digest field of a declaration: (path, owner, field, vaddr, word count)."""
@@ -1303,6 +1590,9 @@ def _stock_locations(declaration: Mapping[str, Any],
         boundary = declaration["update_boundary"]
         out.append(("update_boundary", boundary, "stock_digest",
                     int(symbols[boundary["function"]]) + int(boundary["insn_offset"]), 1))
+    for path, site in ace_part_sites(declaration):
+        out.append((path, site, "stock_digest",
+                    int(symbols[site["function"]]) + int(site["insn_offset"]), 1))
     return out
 
 
@@ -1380,6 +1670,7 @@ def publish_package(
     read_data_fn: ReadFn | None = None,
     data_root: Path | str | None = None,
     notes: list[str] | None = None,
+    read_const_fn: ReadFn | None = None,
 ) -> dict[str, Any]:
     """The published form of a private declaration and its symbol map (section 5.1).
 
@@ -1411,13 +1702,31 @@ def publish_package(
         if words is None or len(words) != count or compute_stock_words_digest(words) != owner[field]:
             fail(path, f"the {field} does not match the executable's words at its site")
         owner[field] = keyed_stock_digest(key, _words_bytes(words))  # type: ignore[index]
+    inputs: dict[str, dict[str, float]] = {}
+    if any("stock_values" in site and site["transform"] in SITE_REFERENCES
+           for site in declaration.get("sites", ())):
+        # A store site scaled by a factor the resolver computes: read the stock values it
+        # references from the executable, as verify_and_resolve_sites() does.
+        located: dict[str, _Located] = {}
+        pair_values: dict[str, float] = {}
+        for idx, site in enumerate(declaration["sites"]):
+            fn = int(resolved[site["function"]])
+            words = [int(w) & 0xFFFFFFFF for w in read_words_fn(fn + int(site["insn_offset"]),
+                                                                 int(site.get("word_count", 1)))]
+            located[site["id"]] = (site, f"sites[{idx}]({site['id']})", fn, fn + int(site["insn_offset"]), words)
+            if "low_insn_offset" in site:
+                low = read_words_fn(fn + int(site["low_insn_offset"]), 1)
+                pair_values[site["id"]] = _lui_ori_value(site, words[0], int(low[0]) & 0xFFFFFFFF)
+            elif len(words) == 2:
+                pair_values[site["id"]] = _lui_ori_value(site, words[0], words[1])
+        inputs = _reference_inputs(located, pair_values, read_words_fn, read_const_fn)
     for site in declaration.get("sites", ()):
         if "stock_values" not in site:
             continue
         # The values the loader stores are read from the game: only their keyed digests are
         # published. The run-time check digests the value being stored (section 5.1).
         word = read_words_fn(int(resolved[site["function"]]) + int(site["insn_offset"]), 1)
-        rewrite = plan_site_rewrite(site, int(word[0]))
+        rewrite = plan_site_rewrite(site, int(word[0]), inputs.get(site["id"]))
         if notes is not None:
             notes.extend(store_value_overlaps(site["id"], rewrite))
         site["stock_value_digests"] = [keyed_stock_value_digest(key, site["id"], bits)
@@ -2011,6 +2320,12 @@ def _move_source(w: int) -> int | None:
 
 def _entry_a0_at_calls(graph: _Graph, site_path: str) -> dict[int, bool]:
     """For each call slot: whether $a0 holds the function's entry $a0 there on every path."""
+    return _entry_a0_flow(graph)[1]
+
+
+def _entry_a0_flow(graph: _Graph) -> tuple[dict[int, frozenset[int]], dict[int, bool]]:
+    """Which general registers hold the function's entry $a0 before each instruction, on every
+    path, and for each call slot whether $a0 does when the call is made."""
     every = frozenset(range(1, 32))
     state: dict[int, frozenset[int]] = {graph.fn: frozenset((4,))}
     at_call: dict[int, bool] = {}
@@ -2040,7 +2355,7 @@ def _entry_a0_at_calls(graph: _Graph, site_path: str) -> dict[int, bool]:
             if old is None or new != old:
                 state[m] = new
                 todo.append(m)
-    return at_call
+    return state, at_call
 
 
 def _check_alt_gate_target(site_path: str, target: int, alternates: Sequence[int], read_words_fn: Any,
@@ -2080,10 +2395,10 @@ def _check_alt_gate_target(site_path: str, target: int, alternates: Sequence[int
 
 
 def _check_caller_ignores_results(site_path: str, fn_addr: int, site_addr: int, read_words_fn: Any,
-                                  known_sorted: Sequence[int]) -> None:
+                                  known_sorted: Sequence[int], transform: str = "gate_30hz_alt") -> None:
     """After a gated call, no path of the caller reads $v0, $v1, f0-f3, HI or LO before writing it,
     up to its next call; a return counts as reading $v0, $v1 and f0."""
-    where = f"gate_30hz_alt caller 0x{fn_addr:08x}"
+    where = f"{transform} caller 0x{fn_addr:08x}"
     graph = _Graph(fn_addr, _function_end(fn_addr, known_sorted, where, site_path), read_words_fn, where,
                    site_path, known_sorted)
     seen: set[tuple[int, frozenset[int]]] = set()
@@ -2283,6 +2598,376 @@ def _resolve_alternates(pending: Sequence[tuple[Mapping[str, Any], str, int, int
         resolved_by_addr[site_addr]["rewrite"]["alternates"] = addrs
 
 
+# --- Stock values a site references, and gate_30hz_phase's static checks (section 9.2) --------
+
+REFERENCE_SCAN_WORDS = 16
+PHASE_COMPARE_SCAN_WORDS = 4
+PHASE_STORE_SCAN_WORDS = 16
+
+#: One located site: (site, path, function address, site address, stock words).
+_Located = tuple[Mapping[str, Any], str, int, int, list[int]]
+
+
+def _falls_through(w: int, pc: int) -> bool:
+    """A conditional branch that is not a likely form and not always taken: on the path that falls
+    through it, its delay slot and the code before it have both run."""
+    op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
+    if _branch_target(w, pc) is None or _is_likely_branch(w):
+        return False
+    return not ((op == 0x04 and rs == rt) or (op == 0x01 and rt == 0x01 and rs == 0))
+
+
+def _loaded_float_address(path: str, name: str, fn_addr: int, site_addr: int, word: int,
+                          read_words_fn: Any) -> int:
+    """The address an ``lwc1`` or ``lv.s`` at ``site_addr`` loads from, when its base register is a
+    constant built in the straight-line code before it: a ``lui``, then at most one
+    ``addiu``/``ori`` of the same register.
+
+    Delay slots are read as the code they are. A load that is itself a delay slot runs after
+    everything before its branch, jump or call. A conditional branch that is not a likely form is
+    passed: on the path that falls through to the load, its delay slot and the code before it
+    both ran, so a ``lui`` in that slot counts. Any other transfer ends the scan: after a jump, a
+    call or a branch-likely the code that follows is not reached with that transfer's slot run.
+
+    The taken path of a branch is checked too, where this scan can see it: a branch or jump in
+    the instructions read whose target lies at or before the load, and whose taken path skips
+    the ``lui`` or the ``addiu``/``ori`` (they lie after its delay slot and before its target),
+    reaches the load by a second path around the code that builds the address, and refuses.
+    Read backward in address order, like _check_even_counter; a branch from farther away into
+    those instructions is not seen."""
+    base = (word >> 21) & 31
+    imm = word & (0xFFFC if word >> 26 == 0x32 else 0xFFFF)  # lv.s keeps a register bit in its low bits
+    offset = imm - 0x10000 if imm & 0x8000 else imm
+    low: int | None = None
+    low_pc: int | None = None
+    lo = max(fn_addr, site_addr - 4 * REFERENCE_SCAN_WORDS)
+    pc = site_addr - 4
+    while pc >= lo and base != 0:
+        w = _read_word(read_words_fn, pc)
+        if w is None:
+            break
+        op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
+        transfer = _branch_target(w, pc) is not None or _is_jump(w)
+        if transfer and pc != site_addr - 4 and not _falls_through(w, pc):
+            break
+        written = _gpr_destination(w)
+        if written == -1:
+            fail(path, f"site {name!r}: cannot tell whether 0x{w:08x} at 0x{pc:08x} writes the base "
+                       f"register of its load (fail-closed refusal)")
+        if written == base:
+            prev = _read_word(read_words_fn, pc - 4) if pc > fn_addr else None
+            if (prev is not None and (_branch_target(prev, pc - 4) is not None or _is_jump(prev))
+                    and not _falls_through(prev, pc - 4)):
+                break  # the slot of a jump, a call or a branch-likely: not run on the way to the load
+            if op == 0x0F:
+                built = (pc,) if low_pc is None else (pc, low_pc)
+                _refuse_second_path(path, name, lo, built, site_addr, read_words_fn)
+                return (((w & 0xFFFF) << 16) + (low or 0) + offset) & 0xFFFFFFFF
+            if op in (0x09, 0x0D) and rs == base and rt == base and low is None:
+                low = _sx16(w & 0xFFFF) if op == 0x09 else w & 0xFFFF
+                low_pc = pc
+            else:
+                fail(path, f"site {name!r}: the base register of its load is computed at 0x{pc:08x} "
+                           f"(0x{w:08x}), not a constant address (fail-closed refusal)")
+        pc -= 4
+    fail(path, f"site {name!r} does not load from a constant address: no lui of its base register in the "
+               f"straight-line code before it (fail-closed refusal)")
+
+
+def _refuse_second_path(path: str, name: str, lo: int, built: tuple[int, ...], site_addr: int,
+                        read_words_fn: Any) -> None:
+    """No branch or jump among the instructions read before a referenced load (from ``lo``) is
+    taken to the load, or before it, around an instruction in ``built`` (the ``lui`` and the
+    ``addiu``/``ori`` that build its address). A taken transfer runs its delay slot and skips
+    the instructions from the one after that slot up to its target, so only those are compared:
+    a branch with the ``lui`` in its slot, or one past code that does not build the address, is
+    two paths that both build it."""
+    for pc in range(lo, site_addr, 4):
+        w = _read_word(read_words_fn, pc)
+        if w is None:
+            continue
+        target = _branch_target(w, pc)
+        if target is None and w >> 26 == 0x02:
+            target = ((pc + 4) & 0xF0000000) | ((w & 0x03FFFFFF) << 2)
+        if target is not None and target <= site_addr and any(pc + 8 <= a < target for a in built):
+            fail(path, f"site {name!r}: the transfer at 0x{pc:08x} can land at 0x{target:08x}, inside the code "
+                       f"that builds its load's address: the load is reached by two paths (fail-closed refusal)")
+
+
+def _referenced_float(path: str, name: str, located: Mapping[str, _Located],
+                      pair_values: Mapping[str, float], read_words_fn: Any,
+                      read_const_fn: Any) -> tuple[float, int | None]:
+    """The stock float the site ``name`` pins, and the address of its word when it is data: the
+    constant its ``lui``/``ori`` builds, or the word of read-only data its ``lwc1`` or ``lv.s``
+    loads."""
+    address: int | None = None
+    if name in pair_values:
+        value = pair_values[name]
+    else:
+        _site, _path, fn_addr, site_addr, words = located[name]
+        if len(words) != 1 or words[0] >> 26 not in (0x31, 0x32):
+            fail(path, f"site {name!r} does not pin a float: it must be a lui/ori pair (word_count 2, or a "
+                       f"lone lui with low_insn_offset), or an lwc1 or lv.s of read-only data "
+                       f"(fail-closed refusal)")
+        address = _loaded_float_address(path, name, fn_addr, site_addr, words[0], read_words_fn)
+        if read_const_fn is None:
+            fail(path, f"site {name!r} loads its float from the executable's data, which this resolver "
+                       f"was not given (fail-closed refusal)")
+        raw = read_const_fn(address, 4)
+        if raw is None or len(raw) != 4:
+            fail(path, f"site {name!r} loads from 0x{address:08x}, which is not read-only initialised data "
+                       f"of the executable: a value the title can change while it runs cannot be pinned "
+                       f"(fail-closed refusal)")
+        value = struct.unpack("<f", bytes(raw))[0]
+    if not math.isfinite(value):
+        fail(path, f"site {name!r} pins a float that is not finite (fail-closed refusal)")
+    return float(value), address
+
+
+def _reference_inputs(located: Mapping[str, _Located], pair_values: Mapping[str, float],
+                      read_words_fn: Any, read_const_fn: Any,
+                      data_words: dict[str, int] | None = None) -> dict[str, dict[str, float]]:
+    """For each site that references stock values: what its plan needs, computed from them.
+    Every value_reference site is read, referenced or not: one that pins nothing refuses.
+    ``data_words`` receives, by site id, the address of each pinned float that is a word of data."""
+    cache: dict[str, float] = {}
+
+    def pinned(path: str, name: str) -> float:
+        if name not in cache:
+            cache[name], address = _referenced_float(path, name, located, pair_values, read_words_fn,
+                                                     read_const_fn)
+            if address is not None and data_words is not None:
+                data_words[name] = address
+        return cache[name]
+
+    out: dict[str, dict[str, float]] = {}
+    for site, site_path, _fn_addr, _site_addr, _words in located.values():
+        if site["transform"] == "value_reference":
+            pinned(site_path, site["id"])
+        keys = SITE_REFERENCES.get(site["transform"])
+        if not keys:
+            continue
+        values = {key: pinned(f"{site_path}.{key}", site[key]) for key in keys}
+        inputs: dict[str, float] = {}
+        try:
+            if "damping_site" in values:
+                kappa, q = two_update_factors(values["damping_site"], values["damping_step_site"],
+                                              values.get("step_site"))
+                inputs["kappa"] = kappa
+                if q is not None:
+                    inputs["gravity_offset"] = q * values["gravity_site"]
+            else:
+                # A gate counts half steps: the state's time must be a sum this model can follow.
+                phase_runs(values["step_site"] / 2.0)
+                inputs["half_step"] = values["step_site"] / 2.0
+        except ValueError as exc:
+            fail(site_path, f"{exc} (fail-closed refusal)")
+        out[site["id"]] = inputs
+    return out
+
+
+def _check_data_sites_leave_pinned_words(validated: Mapping[str, Any], data_words: Mapping[str, int],
+                                         symbol_to_addr: Mapping[str, int]) -> None:
+    """No data site rescales a word a site reference pins: a value the package changes at load is
+    not the stock value the title then uses. The step is the stated exception (contract section
+    9.2): a word named only as ``step_site`` may be halved, by a site or by a data site."""
+    steps = {site["step_site"] for site in validated["sites"] if "step_site" in site}
+    for idx, data_site in enumerate(validated.get("data_sites", ())):
+        if data_site["symbol"] not in symbol_to_addr:
+            continue  # verify_and_resolve_data_sites() refuses it by name
+        lo, length = _data_site_span(data_site, symbol_to_addr)
+        for name, address in sorted(data_words.items()):
+            if name not in steps and lo < address + 4 and address < lo + length:
+                fail(f"data_sites[{idx}]({data_site['id']})",
+                     f"rescales the word at 0x{address:08x} that site {name!r} pins: a pinned value must be "
+                     f"the one the title uses (fail-closed refusal)")
+
+
+def _check_straight_line_site(site_path: str, fn_addr: int, site_addr: int, read_words_fn: Any,
+                              what: str) -> None:
+    """The site is not the delay slot of a branch, a jump or a call."""
+    prev = _read_word(read_words_fn, site_addr - 4) if site_addr > fn_addr else None
+    if prev is not None and (_branch_target(prev, site_addr - 4) is not None or _is_jump(prev)):
+        fail(site_path, f"{what} is in the delay slot of 0x{prev:08x} at 0x{site_addr - 4:08x} "
+                        f"(fail-closed refusal)")
+
+
+def _check_phase_register(site_path: str, graph: _Graph, site_addr: int, reg: int, is_call: bool) -> None:
+    """``reg`` is written exactly once before the site, on every path from the function's entry.
+
+    Of the instructions that can run before the site, along any path of the function's graph,
+    exactly one writes ``reg``, and no path from the entry reaches the site without running it. So
+    the register holds that one write's value there, never its caller's and never a second
+    write's. A write that only follows the site (the epilogue's restore) is not counted. Calls
+    are taken to preserve s0-s7 (the PSP ABI)."""
+    name = _reg_name(reg)
+
+    def writes(n: int) -> bool:
+        w = graph.words[n]
+        uses = _uses(w)
+        if uses is not None:
+            return reg in uses[1]
+        dest = _gpr_destination(w)
+        if dest == -1:
+            fail(site_path, f"{graph.where} has a word this check cannot read at 0x{n:08x} (0x{w:08x}): it "
+                            f"may write {name} (fail-closed refusal)")
+        return dest == reg
+
+    if site_addr not in graph.succ or site_addr in graph.slots:
+        fail(site_path, f"{graph.where} does not reach the site at 0x{site_addr:08x} as an instruction of its "
+                        f"own (fail-closed refusal)")
+    if is_call and writes(site_addr + 4):
+        fail(site_path, f"the delay slot of the gated call writes {name}, the register its phase time is "
+                        f"read from (fail-closed refusal)")
+    preds: dict[int, list[int]] = {}
+    for n, nxt in graph.succ.items():
+        for m in nxt:
+            preds.setdefault(m, []).append(n)
+    before: set[int] = set()
+    todo = [site_addr]
+    while todo:
+        for p in preds.get(todo.pop(), ()):
+            if p not in before:
+                before.add(p)
+                todo.append(p)
+    writers = sorted(n for n in before if writes(n))
+    if len(writers) != 1:
+        at = ", ".join(f"0x{a:08x}" for a in writers) or "none"
+        fail(site_path, f"{graph.where} writes {name} {len(writers)} times on its paths to the site ({at}); "
+                        f"exactly one write must come before it, so the register holds one known value "
+                        f"there (fail-closed refusal)")
+    if site_addr in graph.reach([graph.fn], avoid=frozenset(writers)):
+        fail(site_path, f"{graph.where} reaches the site on a path that does not write {name} first, at "
+                        f"0x{writers[0]:08x}: the register would hold its caller's value (fail-closed refusal)")
+
+
+def _check_phase_compare(site_path: str, graph: _Graph, site_addr: int) -> None:
+    """The flag the compare sets is next read by a ``bc1f``/``bc1t`` in the instructions right after
+    it, with no call, jump, other branch or other write of the flag in between."""
+    pc = site_addr + 4
+    for _ in range(PHASE_COMPARE_SCAN_WORDS):
+        w = graph.words.get(pc)
+        if w is None:
+            fail(site_path, f"{graph.where} cannot be read at 0x{pc:08x}, after the compare (fail-closed refusal)")
+        op, rs, fn = w >> 26, (w >> 21) & 31, w & 0x3F
+        if op == 0x11 and rs == 0x08:
+            return
+        if _is_jump(w) or _branch_target(w, pc) is not None:
+            fail(site_path, f"a call, jump or branch at 0x{pc:08x} follows the compare before any bc1f or bc1t "
+                            f"reads its flag (fail-closed refusal)")
+        if op == 0x11 and (rs == 0x06 or (rs in (0x10, 0x14) and fn >= 0x30)):
+            fail(site_path, f"the instruction at 0x{pc:08x} writes the FPU condition flag before any bc1f or "
+                            f"bc1t reads the compare's (fail-closed refusal)")
+        pc += 4
+    fail(site_path, f"no bc1f or bc1t reads the compare's flag in the {PHASE_COMPARE_SCAN_WORDS} instructions "
+                    f"after it (fail-closed refusal)")
+
+
+def _check_phase_gate(site_path: str, fn_addr: int, site_addr: int, rewrite: Mapping[str, Any],
+                      read_words_fn: Any, known_functions: Sequence[int]) -> None:
+    """Every static condition of a gate_30hz_phase site (contract section 9.2)."""
+    known_sorted = sorted(set(int(a) for a in known_functions))
+    where = f"gate_30hz_phase function 0x{fn_addr:08x}"
+    graph = _Graph(fn_addr, _function_end(fn_addr, known_sorted, where, site_path), read_words_fn, where,
+                   site_path, known_sorted)
+    is_call = rewrite["kind"] == "gate_phase"
+    _check_phase_register(site_path, graph, site_addr, int(rewrite["reg"]), is_call)
+    if is_call:
+        _check_caller_ignores_results(site_path, fn_addr, site_addr, read_words_fn, known_sorted,
+                                      "gate_30hz_phase")
+    elif rewrite["kind"] == "gate_phase_cond":
+        _check_phase_compare(site_path, graph, site_addr)
+    else:
+        _check_gated_load(site_path, graph, site_addr, rewrite)
+
+
+def _check_gated_load(site_path: str, graph: _Graph, site_addr: int, rewrite: Mapping[str, Any]) -> None:
+    """A gated load is not the load of the state's own time, and the title does not store the
+    gated register before it overwrites it.
+
+    The zero is for an effect the value scales. Zeroing the time itself would feed the gate its
+    own output, and a store of the register would write to guest memory a zero the stock code
+    never stores there. Read forward in address order from the load to the first branch, jump or
+    call and its delay slot, PHASE_STORE_SCAN_WORDS instructions at most: a ``swc1`` of a gated
+    FPU register, an ``sv.s`` of a gated VFPU register, or a store of a general register that an
+    ``mfc1`` or ``mfv`` copied it to, refuses. A later ``lwc1``, ``lv.s`` or FPU result into the
+    register ends the scan. Copies through other FPU or VFPU registers, and an ``sv.q``, are not
+    followed: every other use of the gated value is the site's evidence."""
+    word = graph.words[site_addr]
+    base = (word >> 21) & 31
+    load_offset = _sx16(word & (0xFFFC if word >> 26 == 0x32 else 0xFFFF))
+    if base == rewrite["reg"] and load_offset == rewrite["offset"]:
+        fail(site_path, "the gated load is the load of the state's own time: the gate would zero what it "
+                        "counts (fail-closed refusal)")
+    fpr = rewrite.get("value_reg")
+    vreg = rewrite.get("value_vreg")
+    copies: set[int] = set()
+    pc, left, last = site_addr + 4, PHASE_STORE_SCAN_WORDS, None
+    while left > 0:
+        w = graph.words.get(pc)
+        if w is None:
+            return
+        op, rs, rt, fs = w >> 26, (w >> 21) & 31, (w >> 16) & 31, (w >> 11) & 31
+        stored = ((op == 0x39 and rt == fpr) or (op == 0x3A and (rt | ((w & 3) << 5)) == vreg)
+                  or (op in (0x28, 0x29, 0x2B) and rt in copies))
+        if stored:
+            fail(site_path, f"the instruction at 0x{pc:08x} stores the gated register: after an odd number of "
+                            f"updates it would write a zero the stock code never stores (fail-closed refusal)")
+        copied = (op == 0x11 and rs == 0x00 and fs == fpr) or (op == 0x12 and rs == 0x03 and (w & 0x7F) == vreg)
+        written = _gpr_destination(w)
+        if copied:
+            copies.add(rt)
+        elif written in copies:
+            copies.discard(written)
+        if (fpr is not None and fpr in _fpr_uses(w)[1]) or (op == 0x32 and (rt | ((w & 3) << 5)) == vreg):
+            return  # the register holds another value from here on
+        if last is not None:
+            return  # that was the delay slot of the first transfer
+        if _branch_target(w, pc) is not None or _is_jump(w):
+            last = pc
+        pc, left = pc + 4, left - 1
+
+
+def _store_span(w: int) -> tuple[int, int, int] | None:
+    """``(base register, offset, size)`` of a word, float or VFPU store; None for anything else."""
+    op, base = w >> 26, (w >> 21) & 31
+    if op in (0x2B, 0x39):  # sw, swc1
+        return base, _sx16(w & 0xFFFF), 4
+    if op in (0x3A, 0x3E):  # sv.s, sv.q: the low two bits belong to the register
+        return base, _sx16(w & 0xFFFC), 4 if op == 0x3A else 16
+    return None
+
+
+def _check_launch_callee(site_path: str, site_addr: int, word: int, offset: int, read_words_fn: Any,
+                         known_functions: Sequence[int]) -> None:
+    """The function a launch_from_rest_60hz site calls stores both velocity floats itself, at
+    ``offset`` and ``offset + 4`` from its entry ``$a0``, on every path that returns.
+
+    That is what lets a timing transform write them: after the call it replaces, at the same
+    place, a value the stock logic has just stored (contract section 9.2). A store counts when
+    its base register holds the entry ``$a0`` on every path (copies are followed, as for
+    gate_30hz_alt); a store made by a function the callee calls does not."""
+    known_sorted = sorted(set(int(a) for a in known_functions))
+    target = ((site_addr + 4) & 0xF0000000) | ((word & 0x03FFFFFF) << 2)
+    where = f"launch_from_rest_60hz callee 0x{target:08x}"
+    graph = _Graph(target, _function_end(target, known_sorted, where, site_path), read_words_fn, where, site_path,
+                   known_sorted)
+    returning = graph.returning()
+    if graph.fn not in returning:
+        fail(site_path, f"{where} has no path that returns (fail-closed refusal)")
+    holders, _at_call = _entry_a0_flow(graph)
+    for at in (offset, offset + 4):
+        stores: set[int] = set()
+        for n in graph.succ:
+            span = _store_span(graph.words[n])
+            if span is not None and span[0] in holders.get(n, ()) and span[1] <= at and at + 4 <= span[1] + span[2]:
+                stores.add(n)
+        if _EXIT in graph.reach([graph.fn], avoid=frozenset(stores), within=returning):
+            fail(site_path, f"{where} can return without storing the float at {at} from its entry $a0: a "
+                            f"launch map may only replace a value the stock code itself stores there "
+                            f"(fail-closed refusal)")
+
+
 def verify_and_resolve_sites(
     pkg_data: Mapping[str, Any],
     *,
@@ -2290,6 +2975,7 @@ def verify_and_resolve_sites(
     symbol_to_addr: Mapping[str, int],
     read_words_fn: Any,
     known_functions: Sequence[int] = (),
+    read_const_fn: Any = None,
 ) -> dict[int, dict[str, Any]]:
     """Verify package executable and site stock-word digests fail-closed.
 
@@ -2302,6 +2988,9 @@ def verify_and_resolve_sites(
         known_functions: Sorted sequence of known function start vaddrs in the ELF.
             Used as a deterministic fallback when ``symbol_to_addr`` does not map a
             symbol and exactly one function in the ELF matches ``(insn_offset, stock_digest)``.
+        read_const_fn: Callable ``(vaddr, size) -> bytes | None`` reading read-only initialised
+            data of the executable (elf_constant_reader), for a referenced site whose float is
+            loaded from data.
 
     Returns:
         Mapping of resolved instruction ``vaddr -> site dict`` (augmented with
@@ -2369,6 +3058,11 @@ def verify_and_resolve_sites(
             )
         pending.append((site, site_path, fn_addr, site_addr, stock_words))
 
+    located: dict[str, _Located] = {entry[0]["id"]: entry for entry in pending}
+    data_words: dict[str, int] = {}
+    inputs = _reference_inputs(located, stock_values, read_words_fn, read_const_fn, data_words)
+    _check_data_sites_leave_pinned_words(validated, data_words, symbol_to_addr)
+
     for site, site_path, fn_addr, site_addr, stock_words in pending:
         if site["transform"] == "launch_velocity_x0.5":
             accel = site["acceleration_site"]
@@ -2379,11 +3073,21 @@ def verify_and_resolve_sites(
             rewrites = plan_float_pair_rewrite(site, stock_words[0], stock_words[1],
                                                acceleration=stock_values[accel])
         elif len(stock_words) == 1:
-            rewrites = [plan_site_rewrite(site, stock_words[0])]
+            rewrites = [plan_site_rewrite(site, stock_words[0], inputs.get(site["id"]))]
             if site["transform"] == "gate_30hz_hold":
                 _check_hold_callee(site_path, site_addr, stock_words[0], read_words_fn)
             elif site["transform"] == "count_x2_even":
                 _check_even_counter(site_path, fn_addr, site_addr, stock_words[0], read_words_fn)
+            elif site["transform"] == "gate_30hz_phase":
+                _check_phase_gate(site_path, fn_addr, site_addr, rewrites[0], read_words_fn, known_functions)
+            elif site["transform"] == "launch_from_rest_60hz":
+                _check_launch_callee(site_path, site_addr, stock_words[0], rewrites[0]["offset"], read_words_fn,
+                                     known_functions)
+            elif rewrites[0]["kind"] == "scale_vq_reg":
+                _check_straight_line_site(site_path, fn_addr, site_addr, read_words_fn, "an lv.q site")
+        elif site["transform"] == "value_reference":
+            # A pinned lui/ori pair: its value is in stock_values, and neither word is rewritten.
+            rewrites = [{"kind": "reference"}, {"kind": "reference"}]
         else:
             for key in ("stock_values", "stock_value_digests"):
                 if key in site:
@@ -2446,11 +3150,57 @@ def verify_and_resolve_update_boundary(
     return {"fn_addr": fn_addr, "site_addr": site_addr, "stock_word": int(words[0]) & 0xFFFFFFFF}
 
 
+def verify_and_resolve_ace_parts(
+    pkg_data: Mapping[str, Any],
+    *,
+    symbol_to_addr: Mapping[str, int],
+    read_words_fn: Any,
+    known_functions: Sequence[int] = (),
+) -> dict[int, dict[str, Any]]:
+    """Resolve and verify every ``ace_parts`` site fail-closed (contract section 9.8).
+
+    Returns ``vaddr -> site dict`` augmented with ``part``, ``fn_addr``, ``site_addr``,
+    ``stock_words`` and its ``rewrite``. A ``vblank_wait_skip`` site must be a ``jal``; that
+    its target is the ``sceDisplayWaitVblankStart`` import stub is checked by codegen, which
+    owns the import table. The executable digest is checked by :func:`verify_and_resolve_sites`,
+    which callers run first.
+    """
+    validated = validate_package(dict(pkg_data))
+    known_set = set(int(a) for a in known_functions)
+    cache: dict[str, int] = {}
+    resolved: dict[int, dict[str, Any]] = {}
+    for name in sorted(validated.get("ace_parts", {})):
+        for idx, site in enumerate(validated["ace_parts"][name]["sites"]):
+            path = f"ace_parts.{name}.sites[{idx}]({site['id']})"
+            fn_addr = _resolve_function_address(
+                validated, site["function"], path, symbol_to_addr, read_words_fn, known_functions, cache,
+            )
+            site_addr, words = _read_verified_words(
+                site["function"], fn_addr, int(site["insn_offset"]), 1, site["stock_digest"], path,
+                read_words_fn, known_set,
+            )
+            word = int(words[0]) & 0xFFFFFFFF
+            if site["transform"] == "vblank_wait_skip" and (word >> 26) != 0x03:
+                fail(path, f"a vblank_wait_skip site must be a jal to {VBLANK_WAIT_SKIP_IMPORT}, "
+                           f"got 0x{word:08x} (fail-closed refusal)")
+            if site_addr in resolved:
+                fail(path, f"Duplicate resolved instruction address 0x{site_addr:08x} (fail-closed refusal)")
+            entry = dict(site)
+            entry.update(part=name, fn_addr=fn_addr, site_addr=site_addr, stock_words=[word],
+                         rewrite={"kind": site["transform"]})
+            resolved[site_addr] = entry
+    return resolved
+
+
 def _function_locations(validated: Mapping[str, Any], fn_name: str) -> list[tuple[int, int, str]]:
     """Every (insn_offset, word_count, stock_digest) the package pins inside ``fn_name``."""
     locations = [
         (int(s["insn_offset"]), int(s.get("word_count", 1)), s["stock_digest"])
         for s in validated["sites"] if s["function"] == fn_name
+    ]
+    locations += [
+        (int(s["insn_offset"]), 1, s["stock_digest"])
+        for _path, s in ace_part_sites(validated) if s["function"] == fn_name
     ]
     boundary = validated.get("update_boundary")
     if boundary is not None and boundary["function"] == fn_name:
@@ -2742,10 +3492,17 @@ SCALE_FACTORS = {
     "probability_per_update_x0.5": 0.5,
 }
 
+# The transforms whose swc1 or sw site may check the values it stores (stock_values): the constant
+# scales above, and the scale by kappa, whose factor the resolver computes.
+STORE_VALUE_TRANSFORMS = frozenset(SCALE_FACTORS) | {"velocity_source_x_kappa"}
+
 _IMM_ARITH_OPS = (0x08, 0x09, 0x0A, 0x0B)  # addi, addiu, slti, sltiu
 _INT_LOAD_OPS = (0x20, 0x21, 0x23, 0x24, 0x25)  # lb, lh, lw, lbu, lhu
 _GATE_STORE_OPS = (0x28, 0x29, 0x2B, 0x39)  # sb, sh, sw, swc1
 _FPU_RESULT_FUNCS = (0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x07)  # add sub mul div abs mov neg
+_FPU_ARITHMETIC_FUNCS = (0x00, 0x01, 0x02, 0x03)  # add.s sub.s mul.s div.s
+_FPU_MOV_S = 0x06
+_FPU_UNARY_FUNCS = (0x05, 0x06, 0x07)  # abs.s mov.s neg.s: the ft field must be 0
 
 
 def _f32(bits: int) -> float:
@@ -2883,9 +3640,124 @@ def store_value_overlaps(site_id: str, rewrite: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def plan_site_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
-    """The one defined rewrite of a verified stock word, with a store site's stock values."""
-    rewrite = _plan_word_rewrite(site, w)
+def two_update_factors(damping: float, damping_step: float,
+                       step: float | None = None) -> tuple[float, float | None]:
+    """``(kappa, q)``: the two-update image of one stock update (contract section 9.2).
+
+    Stock runs ``v = (v + g*h + I) * m`` then ``x += v*h`` once per update, with ``m = 1 - c*L``
+    (``damping`` c, ``damping_step`` L, ``step`` h). Two updates of ``w = (w + a + I') * mu`` then
+    ``x += w*h/2`` reach the same ``x`` at the end of every pair exactly when ``mu = sqrt(m)``,
+    ``a = kappa*g*h/2`` and ``w - v* = kappa*(v - v*)``, where ``kappa = 2*mu/(1 + mu)`` and ``v*`` is
+    stock's terminal velocity ``g*h*m/(1 - m)``. So a velocity change scales by kappa, and a
+    velocity that is set from rest becomes ``kappa*V + q*g`` with ``q = h*mu^2/(1 + mu)^2``.
+    ``q`` is None without ``step``. Raises ValueError unless ``0 < c*L < 1`` and ``h > 0``.
+    """
+    product = damping * damping_step
+    if not (math.isfinite(product) and 0.0 < product < 1.0):
+        raise ValueError(f"the stock damping per update, c*L = {product!r}, is outside (0, 1)")
+    mu = math.sqrt(1.0 - product)
+    kappa = 2.0 * mu / (1.0 + mu)
+    if step is None:
+        return kappa, None
+    if not (math.isfinite(step) and step > 0.0):
+        raise ValueError(f"the stock step h = {step!r} is not a positive number")
+    return kappa, step * mu * mu / ((1.0 + mu) * (1.0 + mu))
+
+
+#: A state's updates are counted up to this bound; past it a site keeps its stock instruction.
+PHASE_UPDATES_MAX = 0x7FFFFFFF
+#: A float32 sum of a constant needs a few rows for each binade it passes through, under a hundred
+#: in all. A step that would need more than this is one this model does not describe: refused.
+PHASE_ROWS_MAX = 512
+
+
+@functools.lru_cache(maxsize=32)
+def phase_runs(half_step: float) -> tuple[tuple[int, int, float, float, float], ...]:
+    """Every time a state can read, as the guest's own float32 sum: ``t = 0``, then
+    ``t = fl32(t + half_step)`` once per update.
+
+    Rows ``(n0, count, a0, a1, delta)``: after ``n0 + k`` updates the time is exactly
+    ``a0 + k*delta`` for ``0 <= k <= count``, and ``a1`` is the last of them. Inside one binade a
+    float32 sum of a constant advances by a constant, so a few rows per binade cover the whole
+    life of a state. The rows end one update before the sum stops advancing (the value it then
+    repeats belongs to no single update, so it is on no row), where it overflows, or at
+    PHASE_UPDATES_MAX. A time is matched against them exactly, so rounding error in the sum
+    cannot move a phase: it is part of the model. Raises ValueError unless ``half_step`` is a
+    positive float32."""
+    d = float(half_step)
+    if not (math.isfinite(d) and d > 0.0 and _f32(_f32_bits(d)) == d):
+        raise ValueError(f"half the stock step, {d!r}, is not a positive float32 a state's time can count")
+
+    def after(a: float) -> float:
+        try:
+            return _f32(_f32_bits(a + d))  # the double sum of two float32 values this close is exact
+        except OverflowError:
+            return math.inf  # past the largest float32 the guest's sum is infinite, and stays so
+
+    runs: list[tuple[int, int, float, float, float]] = []
+    n, a = 0, 0.0
+    stalled = False
+    while n < PHASE_UPDATES_MAX:
+        delta = after(a) - a
+        if delta <= 0.0 or not math.isfinite(delta):
+            stalled = delta <= 0.0  # adding the step no longer changes the time; or it overflows
+            break
+
+        def repeats(k: int, a: float = a, delta: float = delta) -> bool:
+            return after(a + k * delta) == a + (k + 1) * delta
+
+        count = 1
+        if a > 0.0 and repeats(1):
+            # Two equal steps inside one binade: the rounding has settled, and every step that
+            # starts in this binade adds the same (the steps hold on a prefix). Find the last one;
+            # a step that starts exactly on the next power of two is taken too when it repeats.
+            top = math.ldexp(1.0, math.frexp(a)[1])
+            low, high = 1, min(int((top - a) // delta), PHASE_UPDATES_MAX - n - 1)
+            while low < high:
+                mid = (low + high + 1) // 2
+                if repeats(mid):
+                    low = mid
+                else:
+                    high = mid - 1
+            count = low + 1
+        runs.append((n, count, a, a + count * delta, delta))
+        n, a = n + count, a + count * delta
+        if len(runs) > PHASE_ROWS_MAX:
+            raise ValueError(f"half the stock step, {d!r}, is not a positive float32 a state's time can count: "
+                             f"its sum does not settle into {PHASE_ROWS_MAX} rows")
+    if stalled and runs:
+        # The last value is the one the sum then repeats on every update: no update count, and so
+        # no phase, can be read off it. Leave it out, so a state that has stalled is reported.
+        n0, count, a0, a1, delta = runs.pop()
+        if count > 1:
+            runs.append((n0, count - 1, a0, a1 - delta, delta))
+    return tuple(runs)
+
+
+def phase_of_time(time: float, half_step: float) -> int | None:
+    """The phase of a gate_30hz_phase site whose state time reads ``time``: 0 after an even number
+    of updates since the time was zero (a stock instant: the stock instruction runs), 1 after an
+    odd number. None when ``time`` is not a value the state's own float32 sum of ``half_step``
+    reaches before it stops advancing (phase_runs): the site then runs its stock instruction and
+    reports once. The generated code looks the time up in the same rows
+    (nk_enhancement_phase_odd)."""
+    x = float(time)
+    for n0, _count, a0, a1, delta in phase_runs(half_step):
+        if a0 <= x <= a1:
+            k = (x - a0) / delta
+            return (n0 + int(k)) & 1 if k == math.floor(k) else None
+    return None
+
+
+def plan_site_rewrite(site: Mapping[str, Any], w: int,
+                      inputs: Mapping[str, float] | None = None) -> dict[str, Any]:
+    """The one defined rewrite of a verified stock word, with a store site's stock values.
+
+    ``inputs`` holds what the resolver computed from the stock values a site references
+    (SITE_REFERENCES): ``kappa``, ``gravity_offset`` (q*g) and ``half_step`` (h/2, the step a
+    60 Hz update adds to a state's time).
+    """
+    rewrite = _plan_word_rewrite(site, w, inputs)
     if "stock_value_digests" in site:
         if rewrite["kind"] not in ("scale_f_store", "scale_int_store"):
             raise EnhancementPackageError(
@@ -2907,7 +3779,16 @@ def plan_site_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
     return rewrite
 
 
-def _plan_word_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
+def _resolved_input(site: Mapping[str, Any], inputs: Mapping[str, float] | None, name: str) -> float:
+    if inputs is None or name not in inputs:
+        raise EnhancementPackageError(
+            f"site {site['id']}: transform {site['transform']!r} is planned from the stock values its "
+            f"sites reference; resolve the package against its executable (fail-closed refusal)")
+    return float(inputs[name])
+
+
+def _plan_word_rewrite(site: Mapping[str, Any], w: int,
+                       inputs: Mapping[str, float] | None = None) -> dict[str, Any]:
     """Return the one defined rewrite of a verified stock word for its declared transform.
 
     The rewrite depends only on the declared transform and the instruction's own
@@ -2926,9 +3807,24 @@ def _plan_word_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
       ``scale_f_store``   store FPR ``reg`` multiplied by ``factor`` (the register is kept);
       ``scale_int_store`` store GPR ``reg`` doubled (the register is kept; count_x2 on ``sw``);
       ``scale_f_addend``  run ``fd = fd +/- ft`` with ``ft`` multiplied by ``factor``;
-      ``map_f_reg``       after the stock lwc1, map FPR ``reg`` by ``map`` (decay or retention);
+      ``map_f_reg``       after the stock lwc1 or mov.s (or, for retention, the stock
+                          single-precision arithmetic), map FPR ``reg`` by ``map`` (decay or
+                          retention);
       ``scale_v_reg``     after the stock lv.s, multiply VFPU register ``vreg`` by ``factor``;
+      ``scale_vq_reg``    after the stock lv.q, multiply the four lanes of VFPU register ``vreg``
+                          by ``factor``;
       ``map_v_reg``       after the stock lv.s, map VFPU register ``vreg`` by ``map``;
+      ``gate_phase``      make the stock call unless the float at ``offset`` from GPR ``reg`` is the
+                          state's time after an odd number of updates of ``half_step``;
+      ``gate_phase_cond`` after the stock compare, on such an odd phase, set the FPU condition
+                          flag to ``condition``;
+      ``gate_phase_zero_f``, ``gate_phase_zero_v``  after the stock lwc1 or lv.s, on such an odd
+                          phase, set FPR ``value_reg`` or VFPU register ``value_vreg`` to +0.0;
+      ``launch_from_rest`` after the stock jal returns, map the two floats at ``offset`` from the
+                          site's $a0: on ``axis`` the float times ``kappa`` plus
+                          ``gravity_offset``; on the other, only the change the call made is
+                          scaled by ``kappa``;
+      ``reference``       no rewrite: the site pins a stock value other sites reference;
       ``clip_x_widen``    after the stock jal returns, scale the x row of the clip matrices at ``offsets``
                           from GPR ``reg`` by the run-time widen factor (contract section 10.8).
     """
@@ -3038,6 +3934,58 @@ def _plan_word_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
             _refuse(site, w, "gate_30hz_store refuses a store to the stack frame ($sp base)")
         return {"kind": "gate"}
 
+    if tf == "value_reference":
+        # No rewrite. The resolver reads the float this instruction loads, or builds with its
+        # pinned low word (verify_and_resolve_sites), for the sites that reference it.
+        if op in (0x31, 0x32) or (op == 0x0F and "low_insn_offset" in site):
+            return {"kind": "reference"}
+        _refuse(site, w, "value_reference pins the float an lwc1 or lv.s loads, or a lui/ori pair builds")
+
+    if tf == "gate_30hz_phase":
+        # The phase comes from the state's own time, not the update count: a call is skipped,
+        # and a compare reads as declared, half a stock step after each stock instant.
+        phase = {"reg": PHASE_REGISTERS[site["phase_time"]["register"]],
+                 "offset": int(site["phase_time"]["offset"]),
+                 "half_step": _resolved_input(site, inputs, "half_step")}
+        if is_jal:
+            if "odd_phase_condition" in site:
+                _refuse(site, w, "odd_phase_condition belongs to a compare site; a call is skipped")
+            return {"kind": "gate_phase", **phase}
+        if is_fpu_s and fn >= 0x30:
+            if "odd_phase_condition" not in site:
+                _refuse(site, w, "a gate_30hz_phase compare needs odd_phase_condition")
+            return {"kind": "gate_phase_cond", **phase, "condition": bool(site["odd_phase_condition"])}
+        if op in (0x31, 0x32):
+            # A value the stock update uses once per stock step (the size of an impulse): half a
+            # step later it loads as zero, so what it scales still runs and adds nothing.
+            if "odd_phase_condition" in site:
+                _refuse(site, w, "odd_phase_condition belongs to a compare site; a load reads +0.0")
+            if op == 0x31:
+                return {"kind": "gate_phase_zero_f", **phase, "value_reg": rt}
+            return {"kind": "gate_phase_zero_v", **phase, "value_vreg": vt}
+        _refuse(site, w, "gate_30hz_phase takes a jal, a single-precision compare (c.cond.s), "
+                         "or an lwc1 or lv.s of a value")
+
+    if tf == "launch_from_rest_60hz":
+        if not is_jal:
+            _refuse(site, w, "launch_from_rest_60hz takes a jal: it acts after the call returns")
+        return {"kind": "launch_from_rest", "offset": int(site["velocity_offset"]),
+                "axis": int(site["gravity_axis"]), "kappa": _resolved_input(site, inputs, "kappa"),
+                "gravity_offset": _resolved_input(site, inputs, "gravity_offset")}
+
+    if tf == "velocity_source_x_kappa":
+        # A source of velocity change (an acceleration, an impulse): the value times kappa.
+        kappa = _resolved_input(site, inputs, "kappa")
+        if op == 0x31:  # lwc1
+            return {"kind": "scale_f_reg", "reg": rt, "factor": kappa}
+        if op == 0x32:  # lv.s
+            return {"kind": "scale_v_reg", "vreg": vt, "factor": kappa}
+        if op == 0x39:  # swc1
+            return {"kind": "scale_f_store", "reg": rt, "factor": kappa}
+        if op == 0x36 and not w & 2:  # lv.q: all four loaded lanes are scaled
+            return {"kind": "scale_vq_reg", "vreg": rt | ((w & 1) << 5), "factor": kappa}
+        _refuse(site, w, "velocity_source_x_kappa takes an lwc1, an lv.s, an lv.q or a swc1")
+
     if tf == "gate_30hz":
         if is_jal or is_jalr:
             return {"kind": "gate"}
@@ -3055,8 +4003,17 @@ def _plan_word_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
             return {"kind": "map_f_reg", "reg": rt, "map": mapping}
         if op == 0x32:  # lv.s of a per-update factor: map the loaded VFPU register
             return {"kind": "map_v_reg", "vreg": vt, "map": mapping}
+        if mapping == "retention" and is_fpu_s and fn in _FPU_ARITHMETIC_FUNCS:
+            # The retention is computed (such as 1 - c*L): map the result register.
+            return {"kind": "map_f_reg", "reg": sa, "map": mapping}
+        if is_fpu_s and fn == _FPU_MOV_S and rt == 0 and sa != rd:
+            # mov.s fd, fs copies the factor: map the copy only. The source register may hold the
+            # same value for another use (a duration, say) that must keep its stock value, so a
+            # copy onto itself (fd == fs) is refused.
+            return {"kind": "map_f_reg", "reg": sa, "map": mapping}
         if op != 0x0F:
-            _refuse(site, w, "expects the lui of a float constant, an lwc1 or an lv.s")
+            _refuse(site, w, "expects the lui of a float constant, an lwc1, an lv.s or a mov.s"
+                             + (", or single-precision arithmetic" if mapping == "retention" else ""))
         value = _f32(imm16 << 16)
         if not 0.0 < value < 1.0:
             _refuse(site, w, f"float constant {value!r} is outside (0, 1)")
@@ -3117,7 +4074,7 @@ def _plan_word_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
         return {"kind": "scale_int_store", "reg": rt}
     if is_fpu_s and fn in (0x00, 0x01) and sa == rd and rt != rd:
         return {"kind": "scale_f_addend", "reg": rt, "factor": factor}
-    if is_fpu_s and fn in _FPU_RESULT_FUNCS:
+    if is_fpu_s and fn in _FPU_RESULT_FUNCS and (fn not in _FPU_UNARY_FUNCS or rt == 0):
         return {"kind": "scale_f_reg", "reg": sa, "factor": factor}
     if op == 0x11 and rs == 0x14 and fn == 0x20:  # cvt.s.w
         return {"kind": "scale_f_reg", "reg": sa, "factor": factor}
@@ -3809,7 +4766,8 @@ def _publish_main(args: argparse.Namespace) -> int:
     notes: list[str] = []
     published = publish_package(
         package, symbols, executable=data, disc_id=args.disc_id, disc_version=args.disc_version,
-        read_words_fn=read_words, read_data_fn=read_data, data_root=args.data_root, notes=notes)
+        read_words_fn=read_words, read_data_fn=read_data, data_root=args.data_root, notes=notes,
+        read_const_fn=elf_constant_reader(elf))
     for note in notes:
         print(f"warning: enhancement {note}", file=sys.stderr)
     resolved, _ = resolve_published_package(

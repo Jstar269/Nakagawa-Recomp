@@ -54,7 +54,7 @@ def load_manifest() -> dict:
         return returned
 
 
-def load_sbom_inputs() -> tuple[dict, list[dict], list[dict]]:
+def load_sbom_inputs() -> tuple[dict, list[dict]]:
     data = load_manifest()
     py_packages = generate_sbom.parse_python_lockfile(PY_LOCK)
     return data, py_packages
@@ -106,6 +106,22 @@ class TestReleaseManifest(unittest.TestCase):
         for family in (stb, kenney):
             self.assertTrue((ROOT / family["notice_path"]).is_file(), family["notice_path"])
             self.assertTrue((ROOT / family["evidence_path"]).is_file(), family["evidence_path"])
+
+    def test_stb_vorbis_family_is_pinned_public_domain(self):
+        """#2207: the launcher music's decoder, linked into the player, is in the SBOM. Its
+        own file carries its licence text; third_party/stb/LICENSE is stb_image's pin."""
+        families = {item.get("id"): item for item in load_manifest()["provenance_families"]}
+        vorbis = families["stb-vorbis"]
+        self.assertEqual(vorbis["license"], "Unlicense")
+        self.assertEqual(vorbis["origin"], "https://github.com/nothings/stb")
+        self.assertIn("9f755b604db3492df2cbeb39bf84b81e3e3932e3", vorbis["revision"])
+        self.assertEqual(vorbis["notice_path"], "third_party/stb/stb_vorbis.c")
+        self.assertEqual(vorbis["evidence_path"], "third_party/stb/PROVENANCE.md")
+        self.assertIn("linked into the player", vorbis["disposition"])
+        notice = (ROOT / vorbis["notice_path"]).read_text(encoding="utf-8")
+        self.assertIn("Public Domain (www.unlicense.org)", notice)
+        evidence = (ROOT / vorbis["evidence_path"]).read_text(encoding="utf-8")
+        self.assertIn("9f755b604db3492df2cbeb39bf84b81e3e3932e3", evidence)
 
     def test_monocypher_family_is_pinned_cc0_and_not_claimed_as_runtime_linked(self):
         family = next(

@@ -610,11 +610,13 @@ coverage classes, such as `unverified` and `synthetic`, are defined in [`HLE_COV
 | `SR_GEWATCH_AFTER=N` | Start GE watch after frame N |
 | `SR_GEMATW=1` | Log GE matrix writes |
 | `SR_NO2DZ=1` | Disable 2D Z-buffer |
-| `SR_GPU_STATS=1` | Emit bounded Vulkan submission/batch/texture/snapshot counters without per-submit logging |
+| `SR_GPU_STATS=1` | Emit bounded Vulkan submission/batch/texture/snapshot counters without per-submit logging, and a `GEGPU_FALLBACK present` line for each accepted present that handed primitives to the software rasterizer: the primitives the GPU drew and, by reason, those it handed over and their readbacks (#2151) |
 | `SR_GPU_TIMESTAMPS=1` | Measure GPU time with Vulkan timestamp queries: each GE command buffer split by op kind (render batch, snapshot copy, upload, readback, other), printed as a `GEGPU_TS` line every 60 presents and a `GEGPU_TS_TOTAL` line at exit, and the presentation blit; with `SR_PERF_FRAMES` the times also fill the `gpu_*` columns. An op on the interlock destination-read path (#2109) takes no snapshot copy, and its time counts as render batch. Ops overlap on the GPU, so the split is an attribution and the sum is the whole execution span. It changes no rendering, guest memory or wait |
-| `SR_GPU_TWIN_COLOR=1\|native` | Host twin (#2050), Ace Mode only: `1` presents full 32-bit colour without dither, `native` keeps the authentic colour (for identity checks). Any other value except `0` and `off` is refused. Guest VRAM is unchanged ([ENHANCEMENT_CONTRACT.md 10.11](ENHANCEMENT_CONTRACT.md#1011-full-32-bit-colour-the-host-twin)). Prints `TWIN:` lines at start and exit |
+| `SR_GPU_TWIN_COLOR=1\|native\|0\|off` | Developer override of the launch line's `twin` key (the player's "Full 32-bit colour", #2050), for the Vulkan and the software renderer. It wins whenever it is set, so it overrides the player's setting: `1` turns on full 32-bit colour without dither (also when the player left it off), `native` keeps the authentic colour (for identity checks), `0` and `off` turn off a twin the line asked for (the Ace report names `twin` unavailable: SR_GPU_TWIN_COLOR overrides it); unset or empty leaves the choice to the line. Ace Mode only. Any other value is refused. Guest VRAM is unchanged ([ENHANCEMENT_CONTRACT.md 10.11](ENHANCEMENT_CONTRACT.md#1011-full-32-bit-colour-the-host-twin)). Prints `TWIN:` lines at start and exit |
 | `SR_GPU_TWIN_CAPTURE=authentic` | With the twin on, present and capture the authentic image instead of the twin |
 | `SR_GPU_TWIN_DUMP=PREFIX` | `gpu-coherence-selftest` twin-scene: write each shown image as `PREFIX_t<n>_s<scale>.raw` (RGBA) |
+| `SR_GPU_DEPTH_REF=PATH` | `gpu-coherence-selftest` host-depth case: a run without `depth=32` writes this reference (its depth readback hash), a `depth=32` run at the same scale checks against it (the harness's `--depth-ref`) |
+| `SR_GPU_SSAA_REF=PATH` | `gpu-coherence-selftest` ssaa-edge case: a run without supersampling writes this reference (its guest VRAM hash), a supersampled run at the same scale checks against it (the harness's `--ssaa-ref`) |
 | `SR_GPU_TWIN_REF=PATH` | `gpu-coherence-selftest` twin cases: a twin-off run writes this reference, a twin-on run at the same scale checks against it (the harness's `--twin-ref`) |
 | `SR_GEDUMP=1` | Per-primitive `GE PRIM` lines (through and transform), bounded to the first ~40 |
 | `SR_GE_ENQUEUE_TRACE=1` | Trace GE enqueue/stall-update provenance without enabling the broader GE dump |
@@ -1328,7 +1330,7 @@ itself, with no GPU or window.
 
 #### Headless VRAM capture and PNG export
 
-Set `SR_VRAMDUMP=<vblank>[,<vblank>...]` and `SR_VRAMDUMP_DIR=<existing-directory>` to capture at up to eight unique vblank numbers. A request is serviced only when that vblank presents a display frame; an unpresented selection is reported as `NOT_CAPTURED`. Each serviced selection writes `vram_<vblank>.bin` (the complete 2 MiB PSP VRAM image) and `vram_<vblank>.json` (display and GE draw framebuffers, depth buffer, bound texture-level registers, and loaded CLUT metadata/data). This is off by default and host-side. A GPU backend may materialize pending render-target state at the capture boundary before copying it. A texture level outside the captured VRAM image is marked `in_vram: false` and cannot be exported from that snapshot; report it as an unavailable VRAM surface under issue #314.
+Set `SR_VRAMDUMP=<vblank>[,<vblank>...]` and `SR_VRAMDUMP_DIR=<existing-directory>` to capture at up to eight unique vblank numbers. A request is serviced only when that vblank presents a display frame; an unpresented selection is reported as `NOT_CAPTURED`. Each serviced selection writes `vram_<vblank>.bin` (the complete 2 MiB PSP VRAM image) and `vram_<vblank>.json` (display and GE draw framebuffers, depth buffer, bound texture-level registers, and loaded CLUT metadata/data). This is off by default and host-side. A GPU backend may materialize pending render-target state at the capture boundary before copying it. A texture level outside the captured VRAM image is marked `in_vram: false` and cannot be exported from that snapshot; report it as an unavailable VRAM surface under issue #314. In developer mode the pause menu's VRAM viewer also shows the captures the run wrote ([Developer mode](#developer-mode-profile-hud-vram-viewer-and-profile-page)).
 
 Decode one surface from a raw image with `nk_cli vram`:
 
@@ -1343,7 +1345,22 @@ nk_cli vram --from-sidecar capture/vram_120.json --out-dir capture/png
 
 Supported formats are `5650`, `5551`, `4444`, `8888`, `CLUT4`, `CLUT8`, `CLUT16`, `CLUT32`, `DXT1`, `DXT3`, `DXT5`, and `DEPTH16`. `--swizzled` applies PSP swizzle addressing to non-DXT textures. Sidecar mode exports each named VRAM surface, including the loaded palette and a grayscale depth preview. The CLI compiles the existing GE sampler into a temporary decoder with GCC, so Windows users need UCRT64 GCC on `PATH`.
 
-`mingw32-make --no-print-directory display-smoke-run` checks raw-to-PNG pixels against the display smoke fixture's host-sink PPM and checks that enabling the capture leaves that PPM byte-identical. This headless check uses the existing `SR_FIRST_FRAME_DUMP` host-sink PPM; `SR_FBSNAP` and `SR_FBDUMP` captures are published from the same `SR_VIDEO=offscreen` sink as well. The interactive in-player VRAM panel remains UNBUILT; the headless viewer is the partial capability tracked by [#314](https://github.com/Jstar269/nakagawa-recomp/issues/314).
+`mingw32-make --no-print-directory display-smoke-run` checks raw-to-PNG pixels against the display smoke fixture's host-sink PPM and checks that enabling the capture leaves that PPM byte-identical. This headless check uses the existing `SR_FIRST_FRAME_DUMP` host-sink PPM; `SR_FBSNAP` and `SR_FBDUMP` captures are published from the same `SR_VIDEO=offscreen` sink as well. The in-player VRAM viewer is developer mode's pause page ([Developer mode](#developer-mode-profile-hud-vram-viewer-and-profile-page)); what it still lacks is tracked by [#314](https://github.com/Jstar269/nakagawa-recomp/issues/314).
+
+#### GE scene dump
+
+Set `SR_GESCENE=<frame>` and `SR_GESCENE_DIR=<existing-directory>` to write every PRIM of one GE
+frame to `gescene_f<frame>.bin`: each draw's identity, the GE state it draws with (matrices, lights,
+material, texture, targets) and its vertices in model space, before skinning. The format is
+versioned and documented in `src/rt/ge_scene.h`. The runtime prints
+`GESCENE: frame <n>: <k> records -> <path>` once a later frame begins. It prints
+`GESCENE NOT_CAPTURED (...)` if the run ends first, by any exit, `SR_EXIT_AT_VBLANK` and the other
+debug stops included; a file already started then holds only part of the frame. It prints
+`GESCENE CONFIG_FAIL (...)` for a frame number that is not plain digits or is above 4294967295, an
+`SR_GESCENE_DIR` too long for a path, or an unset or empty `SR_GESCENE_DIR`, and
+`GESCENE WRITE_FAIL (...)` if the file cannot be created (a folder that does not exist), written or
+closed. Off by default and host-side; with no dump, nothing the GE draws changes. The file holds
+decoded game geometry: like a VRAM dump, it is private evidence and never published.
 
 #### Where `SR_EXIT_AT_VBLANK` actually stops
 
@@ -1423,7 +1440,8 @@ Use the deterministic clock. Under the paced clock, guest time follows the host,
 from the first checkpoint on by design. To narrow a mismatch:
 
 - a `ram.<addr>` chunk: set a memory watch on that MiB;
-- a `cpu.<uid>` thread: arm `SR_FLIGHT_TRIGGER` near the mismatching vblank on the next run.
+- a `cpu.<uid>` thread: replay the recording with `SR_FLIGHT` set. Its first mismatch freezes the
+  flight record there (see "Recording and replaying a run" below).
 
 Hashing all of RAM takes a noticeable fraction of a second per checkpoint, so raise
 `SR_REPLAY_CHECKPOINT_EVERY` on long runs. A checkpoint file holds no game bytes, but it describes a
@@ -1473,6 +1491,26 @@ reaches it and writes exactly one verdict to stderr:
 | `REPLAY_MISSING_ANSWER call=osk request=<k> frame=<f> detail=<why>` | exit 1: the guest asked for an answer the recording does not hold. Nothing is made up |
 | `REPLAY_COMPLETE frame=<f> checkpoints=<n> answers=<k>` | every checkpoint matched. Input recorded after the last one is still served; the pad and the keyboard each go live when the recording runs out |
 | `REPLAY_NOT_RUN reached=<f> end=<f> checkpoints=<i>/<n>` | at exit, when the run stopped before the recording was used up. This is never a pass |
+
+With the flight recorder on (`SR_FLIGHT`, below), the first mismatch also arms it, so the record
+keeps the events just before the divergence:
+
+- With no `SR_FLIGHT_TRIGGER` mode armed, the mismatch arms the `checkpoint:KIND:N:0` mode at the
+  newest recorded event, the `N`th of its kind, and the record freezes there with terminal
+  `trigger`. The bundle has the events, policy and terminal of a run armed with that spec from the
+  start. Its thread table and refusal counts are read as the replay stops at the mismatch. stderr says
+  `SR_FLIGHT: the replay mismatch froze the record at event <seq> (SR_FLIGHT_TRIGGER=checkpoint:<kind>:<n>:0)`.
+- A mode you armed is left in charge, and stderr says so and nothing more.
+- When the frozen ring no longer holds the newest event before the last matching checkpoint (at
+  least `limit` events happened since), the bundle starts after that checkpoint. stderr then also
+  gives the next run's trigger,
+  `SR_FLIGHT_TRIGGER=checkpoint:<kind>:<n>:<limit-1>`. It opens the window at the newest event
+  before the last matching checkpoint, so the next replay, with the same `SR_FLIGHT`, keeps the
+  first `limit - 1` events after that checkpoint, where the divergence began. The two bundles
+  bracket the span. The position is exact only when the enabled classes record the same events
+  in both replays; check with `tools/flight_diff.py`.
+
+These `SR_FLIGHT:` lines are not verdicts. Without `SR_FLIGHT` the mismatch prints none.
 
 The pad is recorded after the route, the stick mode and the keyboard have shaped it, so a replay needs
 neither the person nor the script, and a pause requested during a replay does not change it. Route
@@ -1556,9 +1594,26 @@ given reports `SKIP` with the reason rather than passing, and a quantity the run
 publish is reported as absent.
 
 **Audio drift** is the one that was unmeasurable until the telemetry published it. The runtime
-reads `sr_audio_queued()` — the queue depth the blocking output paces against — in
-`src/rt/hle_audio.c`, in the same place it computes the delay from it, and prints one reading per
-300 delivered vblanks (about five seconds) behind `SR_AUDIOSTAT`:
+reads the queue depth the blocking output paces against in `src/rt/hle_audio.c`
+(`hle_audio_queued()`), in the same place it computes the delay from it, and prints one reading per
+300 delivered vblanks (about five seconds) behind `SR_AUDIOSTAT`. That depth is the host mixer's
+queue less what the mixer holds for its output device: one device pull and one display period (736
+frames), so far as the channel's own two periods do not already cover them. Against the 441-frame
+pulls of WASAPI and the 1024-frame pulls of DirectSound on the reference PC, a 1024-frame or
+2048-frame channel holds nothing back, and a 256-frame one holds 665 or 1248 frames. A channel
+the device has played dry (a pull came while its stream had nothing to give) gets the hold as
+silence ahead of its next push; when that push is a counted dropout, `starved_ms` includes the
+silence. The start-up line
+`audio: the host device takes N frames at R Hz per pull (T ms, M mixer frames)` gives SDL's chunk
+size at the device's rate and the same in 44.1 kHz mixer frames; the hold uses the mixer-frame
+figure, or the larger pull the device was measured to take: the widest single pull since the
+device last changed, plus the frames a rate-converting stream keeps back. Pulls the device takes
+together in a burst change the figure only once such a burst has found a playing channel short. `queued=` in
+`AUDIOSTAT_HOST` is the
+mixer's whole queue, the hold included, and so are `q_min_ms` and `q_max_ms` in `PERF_AUDIO`,
+which leave out only silence queued for the push that reports them. A queue whose stream can
+give the device nothing reads 0 everywhere, to the guest as well: a stream that converts the
+sample rate keeps its last few frames back, and they are not counted as queued:
 
 ```text
 AUDIOSTAT_LEAD: vbl=9300 ch=8 outputs=268 queued=8820 lead_ms=200
@@ -1608,6 +1663,8 @@ scan: they are excluded from `presenting` and never counted as a stall.
 | `SR_FBDUMP=N` | At vcount=N publish the presented frame as `present_source.ppm` and exit; status 0 only if a capture was truly published, else 1 |
 | `SR_VRAMDUMP=V[,V...]` | Capture the raw 2 MiB guest VRAM image and GE metadata at up to eight unique presented vblanks; pair with `SR_VRAMDUMP_DIR` |
 | `SR_VRAMDUMP_DIR=PATH` | Existing directory for `vram_<vblank>.bin` and `.json` capture files |
+| `SR_GESCENE=F` | Dump GE frame `F`'s scene records (one per PRIM: identity, state, model-space vertices); pair with `SR_GESCENE_DIR` |
+| `SR_GESCENE_DIR=PATH` | Existing directory for the `gescene_f<frame>.bin` scene dump |
 | `SR_VIDEOREC_DIR=PATH` | Record the run: one video frame per VBLANK at the presenter's output size plus the game's mixed audio, on one guest timeline. Needs `SR_DETERMINISTIC_CLOCK=1`; without it the recording is refused ([Recording a video of a run](#recording-a-video-of-a-run)) |
 | `SR_VIDEOREC_CODEC=ffv1\|x264rgb\|nvenc\|raw` | Encoder for a recording (default `ffv1`, lossless); `raw` writes unencoded frames and needs no FFmpeg. An encoder that cannot run refuses the recording; it never falls back to `raw` |
 | `SR_VIDEOREC_SIZE=WxH` | Output size of a recording, independent of the window (even numbers); default: the window's size at the first recorded present |
@@ -1640,7 +1697,7 @@ committed.
 | `SR_HLE_DIAGNOSTICS=1` | Enable the retained title-scoped HLE diagnostic reads only for a validated `codegen_profile: "hst"` build; generic and public fixture profiles remain inert |
 | `SR_REAL_MODULE_START` | `sceKernelStartModule` entry gate, tri-state. `1` runs a translated/real `module_start` for any module; unset (the default) runs it for `libfont.prx` and for guest-placed modules whose exports host HLE does not serve, so the guest owns its own readiness while `psmf.prx`, `libpsmfplayer.prx` and unknown paths keep the host bypass; `sceKernelLoadModule` resolves a relative path against the calling thread's `sceIoChdir` directory, as `sceIoOpen` does, so a title that loads `Target/libfont.prx` from its data directory gets the translated module its manifest declares; `0` is the environmental kill switch and runs no `module_start` for any module. For libfont, disabled or unavailable startup reports `LIBFONT_STARTUP_UNAVAILABLE`, does not write readiness, writes the semantic boundary `libfont-startup-unavailable` (issue 299) to `SR_BOOT_EVENT_FILE` and stops the run with exit status 11. Any other value is refused with one diagnostic and the default is used. Tracked runtime-placed module records use real stop/unload transitions; stop invokes `module_stop` only if the start entry ran and its translation is available. Unknown IDs keep trace behavior when the gate is disabled. |
 | `SR_USER_DATA_ROOT=ABSOLUTE_PATH` | The per-user data directory, which is the one font root: the runtime reads the imported font cache at `<this>/fonts/v2` for the `flash0:` font device and the HLE `sceFont` shim. The launcher sets it for the child, overriding any inherited value. Unset uses the platform per-user directory; a runtime root does not move it. A relative or empty value is named once on stderr (`flash0: SR_USER_DATA_ROOT ...`) and skips the user-imported source, so the project font is served; it never falls back to another root. "Unreadable" means the environment read itself failed (the process could not read its own environment); that is named the same way, and skips the source too. Only an absent variable takes the platform directory. |
-| `SR_GAME_TITLE=NAME`, `SR_DISC_ID=ID` | The game's name (its PARAM.SFO TITLE) for the window caption and the pause overlay, and the disc ID the pause overlay shows ([#1159](https://github.com/Jstar269/nakagawa-recomp/issues/1159)). The runtime drops control characters and malformed UTF-8 from the name. The launcher sets both for the child, empty when it has none, so an inherited value never names another game. Unset or empty captions the window "Nakagawa Recomp" alone, and the pause shows "Paused" and no disc ID. |
+| `SR_GAME_TITLE=NAME`, `SR_DISC_ID=ID` | The game's name (its PARAM.SFO TITLE) for the window caption and the pause overlay, and the disc ID the pause overlay shows ([#1159](https://github.com/Jstar269/nakagawa-recomp/issues/1159)). The disc ID also decides whether a texture pack whose `textures.ini` has a `[games]` list is read: one that names other games only, or any game when `SR_DISC_ID` is unset, is refused. The runtime drops control characters and malformed UTF-8 from the name. The launcher sets both for the child, empty when it has none, so an inherited value never names another game. Unset or empty captions the window "Nakagawa Recomp" alone, and the pause shows "Paused" and no disc ID. |
 | `SR_UI_ROOT=PATH` | The player's folder, where the pause overlay finds the UI fonts (`assets/fonts/ui`) and, if one was put there, the SDL3_ttf library. The launcher sets it for the child. Unset or empty tries the runtime's own folder and the working directory; when neither has them the pause shows the frozen frame without its pages and says why once (`SR_PAUSE: the overlay pages are unavailable ...`). |
 | `SR_LAUNCHER_DISPLAY_BOUNDS=X,Y,W,H` | Desktop bounds of the display that holds the launcher window, set by the launcher (SDL display IDs are per process, so it passes bounds). The game window, windowed or fullscreen, opens centred on the display that contains the centre of that rectangle. Empty uses the primary display; a malformed value, or one no display contains, also uses the primary and says so on stderr (`sdl3vk: ... opening on the primary display`). |
 | `SR_FONTDIR=ABSOLUTE_PATH` | Override the project font directory (relative values are rejected; unset uses the executable's sibling `font`). The `flash0:` font device and the HLE `sceFont` shim both serve the slot files named in `src/core/nk_font_slots.h`, from the user-imported cache first and then from this directory. A cache file is served only when its manifest vouches for it (listed, size and SHA-256 match, accepted by the reader as that slot); otherwise the slot falls through to this directory with a named `flash0:` refusal. This directory never serves files from an imported cache (a directory holding `manifest.json`, or the cache itself); `SR_FONTLOG=1` names each slot's source |
@@ -2321,6 +2378,11 @@ player and game behave as they do for everyone ([#314](https://github.com/Jstar2
   them, DEPTH16 is shown as `SR_VRAMDUMP`'s decoder shows it, and the bound texture goes through the texture
   decoder with the GE state untouched. Like any CPU read, a surface the GPU rasterizer still owns is first brought
   back to guest memory. Alpha is shown opaque. The texture is refused while a GE capture runs.
+  When the run wrote `SR_VRAMDUMP` captures, a `Capture` row comes first: `Live`, or a capture's VBLANK (the first
+  eight). On a capture the sources are the ones that present named, and the window decodes from the
+  `vram_<vblank>.bin` the capture wrote, read back and checked against a digest of the bytes written: a file changed
+  or removed since is refused. A captured texture decodes when it is linear 5650, 5551, 4444 or 8888 in VRAM; a
+  swizzled, palette or compressed one is refused with a pointer to `nk_cli vram`.
 - **Profile page.** The pause menu's `Profile` shows the profile HUD's rows, both directions' hottest transition PC
   and up to 60 bars. Opening it turns the counters on if nothing had; they then collect while the game runs.
 
@@ -2351,7 +2413,8 @@ player and game behave as they do for everyone ([#314](https://github.com/Jstar2
   is counted under its rule name (`rule=blend-2lsb`), and a frame with only those reports
   `result=RULE_ONLY`. Each buffer is compared over everything a draw can write there (the scissor,
   or a transfer's rectangle). When a buffer cannot be compared in full (more than 32 buffers, a
-  stride past 1024, a scissor past the 480x272 that ge.c rasterizes, depth past ge.c's 272 rows),
+  stride past 1024, a scissor past 512 columns or 272 rows (both renderers draw up to the target's
+  stride, 512 at most, and compare that), depth past ge.c's 272 rows),
   the tool prints `result=INCOMPLETE` with a
   `GE_FBD_UNCOMPARED` line per buffer and exits 5, and a capture with no draw is `result=NO_DRAWS`
   (exit 6): neither is ever `NO_DIFFERENCE`. A capture of a title is private, and so are its report
@@ -2360,7 +2423,7 @@ player and game behave as they do for everyone ([#314](https://github.com/Jstar2
   executed Vulkan mutants and the overlapping-blend capture (#2109): a known difference on the
   snapshot destination-read path, `NO_DIFFERENCE` on the interlock path. `--dst-read
   snapshot|interlock` picks the path for a replay (`SR_GPU_DST_READ`, `src/rt/gpu_sdl3vk/README.md`).
-  `ge_replay --write-synthetic <path> [basic|overlap|wide|empty|many|deep]` writes those captures.
+  `ge_replay --write-synthetic <path> [basic|overlap|wide|past|empty|many|deep]` writes those captures.
 - **Capture frames unattended.** Set `SR_NOINPUT=1` so the automatic START pulse does not reach the game, bound the run
   with `SR_EXIT_AT_VBLANK` ([where it stops](#where-sr_exit_at_vblank-actually-stops)), and capture with
   `SR_FBSNAP_WINDOWS` ([both ends of a transition](#capturing-both-ends-of-a-transition--snapwindows)).
@@ -2515,3 +2578,16 @@ retail title is private: keep it out of the repository and every upload.
    that was not asked for (`SR_VIDEO=gdi`, `SR_GPU_GE` unset) is `fallback=none`. The native player names a fallback
    on the game's page, with Hide for the rest of its session. Primitives the GPU renderer hands to the software
    rasterizer during a frame (`GEGPU_FALLBACK_*`) are not part of this line.
+5. Check what the GPU renderer hands to the software rasterizer: while the GPU GE runs, `gegpu_fallback_counts`
+   counts each primitive drawn by `ge.c` instead, and each synchronous readback that took, by reason, always.
+   After each accepted present `gui_present` steps the rule in `src/core/nk_shared_helpers.h`
+   ([thresholds and their basis](../src/rt/gpu_sdl3vk/README.md#software-fallback-report-2151)): a reason whose
+   estimated cost (readbacks and software primitives at their per-unit costs) reaches the budget in each of three
+   windows of 120 presents in a row is reported once per run as
+   `BOOT_EVENT phase=render_fallback reason=<name> frames=<n> sw_prims=<n> gpu_prims=<n> readbacks=<n> share_pm=<n>`
+   (`nk_render_fallback_event_format` in `src/core/nk_shared_helpers.c`; the names are `stencil`, `color_test`,
+   `logic_op`, `write_mask`, `ram_fb`, `wide_stride`, `mips`, `line`, `point`). The native player names those
+   effects on the game's page ("Partly drawn in software"); Hide hides them for that game and those effects for
+   the rest of its session. With `SR_GPU_STATS=1` each accepted present that handed anything to the software
+   rasterizer also prints `GEGPU_FALLBACK present gpu=<n> <name>=<software primitives>/<readbacks>...` for the
+   reasons it had, the figures the rule is checked against; a present that handed nothing prints nothing.

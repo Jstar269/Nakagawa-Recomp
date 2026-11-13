@@ -83,6 +83,7 @@
 
 #include "hle_internal.h"
 #include "atrac3p_bridge.h"
+#include "psmf_producer.h"
 
 /* ---- named results (all synthetic: the codes a PSP returns for these refusals are not measured;
  * W-LLE-1) ---- */
@@ -1169,9 +1170,10 @@ static uint32_t h_AudiocodecDecode(CpuState *s) {
         return vc_refuse(call, "input is not a readable guest span", AC_ERR_PRIV_REQUIRED);
     if (hdr[0] != 0x0Fu || hdr[1] != 0xD0u)
         return vc_refuse(call, "input without the PSMF ATRAC3plus frame header is not modelled", AC_ERR_ME);
-    /* The same expression, precedence included, as mpeg.c's mpeg_audio_decode_frame
-     * (sceMpegAtracDecode): the two must agree. */
-    const uint32_t frame_bytes = (uint32_t)(((hdr[2] & 3u) << 8) | ((uint32_t)hdr[3] * 8u)) + 0x10u;
+    /* The frame size from the 10-bit size code, the one definition mpeg.c, the PSMF player and
+     * the producer use (sr_psmf_audio_frame_bytes): the code is ORed together before the
+     * multiply, so a frame over 2 KiB keeps its high bits (#2205). */
+    const uint32_t frame_bytes = sr_psmf_audio_frame_bytes(hdr);
     const int data = (int)(frame_bytes - 8u);
     const int channels = (hdr[2] >> 2) & 7;
     if (channels < 1 || channels > 2)

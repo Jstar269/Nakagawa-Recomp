@@ -88,14 +88,20 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   target as a storage image, blends, and stores it inside a pixel-ordered interlock, so
   overlapping primitives match `ge.c`. These batches record in a depth-only render pass with
   the colour image in `GENERAL`. The other batches of the op keep the fixed-function pass, with
-  a barrier at each switch, and the op takes no snapshot copy. The variant tests depth early,
-  so an op whose destination-reading batch writes depth and may still kill a fragment in the
-  shader keeps the snapshot path (the alpha test, the color test, the transform-mode depth range
-  when it is narrower than 0–65535, or a stencil-fail KEEP). So does an op whose stencil state
-  also blends in fixed function, an op whose destination-reading batch textures from its own
-  target (the destination copy is its texture), every op into a widescreen wing canvas (which has
-  no RMW objects), and
-  every op while the host twin runs. The `submit-batch` and `gpu-timestamps` cells hold the
+  a barrier at each switch, and the op takes no snapshot copy. The variant tests depth early.
+  A run of these batches that holds one that writes depth and may still kill a fragment in the
+  shader (the alpha test, the color test, the transform-mode depth range when it is narrower
+  than 0–65535, or a stencil-fail KEEP) tests and writes depth in the shader instead, inside the
+  interlock and after those kills: the run's box of the D16 depth image is copied into a storage
+  buffer before its pass and back after it, bit for bit, and its pipelines test no depth. With
+  depth=32 (#2051) the depth image is D32, which that copy does not pack, so such an op keeps
+  the snapshot path. An op
+  keeps the snapshot path when its destination-reading batch textures from its own target (the
+  destination copy is its texture), and every op into a widescreen wing canvas does (it has no
+  RMW objects). The host twin (#2050) does not change the path: the image is drawn as in a
+  twin-off run, and the twin's pass of an interlock op records the same runs into the twin, which
+  it loads and stores as a storage image in place of the twin snapshot. The `submit-batch` and
+  `gpu-timestamps` cells hold the
   snapshot path on every device, since they count and time snapshot copies. The interlock path is
   taken where the device has it; `SR_GPU_DST_READ` forces a path. On the snapshot path the
   device, images, render passes and default shader are made exactly as before. The
@@ -293,6 +299,25 @@ into one target and read it back as a texture keep the scale in these cases:
     positions fall unevenly across device texels and the detail is finer than 1x but uneven.
   - Nearest filtering takes the centre of each guest texel, as the PSP does, so a nearest read of
     a target shows one device texel per guest texel at any render scale.
+  - The texture's own width and height bound the read, as on the PSP: each texel index is clamped
+    or wrapped at them (the texture's clamp bits), not at the edge of the target's image, so a
+    texture inside a larger target never shows the target's pixels beyond it (`rtt-edge`, clamped
+    and repeated, linear and nearest). `psp.frag` gets the size in `texenv.a` and `fogcol.a`, the
+    clamp bits in `cfg.y` bits 24 and 25 and the minification and magnification filters in bits
+    26 and 27, lanes the per-fragment level of detail uses only for a mipmapped read, which is
+    never bound directly. Each fragment picks its filter from its footprint per guest pixel, as
+    `ge.c` does. With different minification and magnification filters the shader fetches every
+    sample itself (for nearest the device texel at the guest texel's centre, as below; for linear
+    the four taps), since a Vulkan sampler may judge the footprint another way. A linear tap pair that straddles a repeated texture's seam is
+    fetched and blended in the shader, wrapped in device texels. Rows of the texture below the
+    target's 272 rows read the image's last row.
+  - A texture that starts inside the target, at a pixel-aligned offset, is read through that
+    offset (`texsize.zw`): `rtt-scale-offset` runs the bloom-like pass with its buffer as a
+    sub-rectangle of a 512-wide target.
+- **A CPU read of a target a draw sampled** returns its top-left device samples in the target's own
+  format, the readback-rows contract: 1x pixels, the software renderer's except where an edge
+  passes between a guest pixel's centre and its top-left device sample (`rtt-scale` reads its
+  quarter-size buffer back after sampling it).
 - **A block transfer between targets** copies at render scale (`hook_xfer`).
 
 A texture is a render-target read when its address lies inside the span of a colour target the
@@ -301,7 +326,8 @@ rows (`target_containing` in `ge_gpu.c`). The direct
 bind then needs all of these: the texture format equals the target's pixel format, the texture is
 not swizzled and mipmapping is not active (a mipmap filter with a maximum level above 0), its
 buffer width equals the target's stride (or is 0), the texture address is pixel-aligned inside the
-target, and the target's image holds the guest's latest CPU writes. Any other read of a render
+target and in the 0x04000000 or 0x04400000 view of VRAM, and the target's image holds the guest's
+latest CPU writes. Any other read of a render
 target reads the target back to guest VRAM and decodes it there at 1x, the way the GE drew it, so
 the effect shows 1x detail at any render scale. Those reads include:
 
@@ -311,14 +337,190 @@ the effect shows 1x detail at any render scale. Those reads include:
 - a swizzled read;
 - a read with mipmapping active;
 - a read with another buffer width;
+- a read through the 0x04200000 or 0x04600000 view of VRAM (below);
 - a read of a target whose CPU writes could not be copied into its image.
 
+The PSP maps its 2 MiB of VRAM four times. Measured with CPU loads and stores
+(`docs/HARDWARE_ORACLE.md`, `PSP-VRAM-MIRROR-001`): the 0x04000000 and 0x04400000 views read each
+offset where it is, the 0x04200000 view reads offset `o` at `o ^ 0x2040`, and the 0x04600000 view
+rotates bits 5..9 of `o` left one and then XORs `0x2040` (the uncached 0x44xxxxxx aliases alike).
+`ge.c` decodes a texture given through a view with the same transforms (`sr_vram_cpu_address`, issue
+1049). That the GE's own texel fetch applies them is inferred, not measured: a title draws its movie
+as a texture through a view after writing the frames there with the CPU (#1049), which shows only if
+the fetch undoes the write's transform. A read through 0x04200000 or 0x04600000 therefore never
+binds the target's image, whose pixels are in plain order. Both views change only offset bits 5..9
+and 13, so a texture read through one reads bytes of the 16 KiB-aligned blocks around it: the read,
+from a target or not, first reads back every target's pixels in those blocks, then decodes guest
+VRAM through the view at 1x. Such a source usually has no content hash, so the texture cache keeps
+its decode current another way: its source range is those blocks, so a notified CPU write to any
+byte the view reads makes it stale, and so does a readback, which marks every cached texture over
+the guest VRAM it writes stale (one with a content hash revalidates against its copy). The cell
+`rtt-vram-view` in `gpu-coherence-selftest` runs at 1x, 2x and 4x against the software renderer: an
+8888 and a 5650 target read through each view, then the 8888 target redrawn and read through
+0x04200000 again, and a texture in no target read through 0x04200000 before and after a CPU write to
+bytes that only the 16 KiB blocks cover.
+
 Depth is matched by address like any texture. A depth buffer read as a texture decodes guest VRAM
-at 1x when its address lies outside every colour target's span. If it lies inside one and the read
-passes the rules above, that colour target's image is bound instead: the renderer does not detect
-depth aliasing.
+at 1x when its address lies outside every colour target's span. When the texture's address lies
+inside both a colour target's span and a depth buffer the renderer holds (its stride times 272 rows
+of 16-bit values from its base; `depth_containing`: the texture's start address decides, as for
+colour targets), the read takes whichever of the two buffers was written last. Each change to a
+target's image takes the next value of one count (`cseq`), a batch that writes depth stamps its
+depth buffer with its own (`zseq`), and queued batches are submitted first. Depth written after the
+target last changed makes it a depth read: it commits what a CPU read would (the targets' drawn
+pixels in the span, then the whole depth buffer) and decodes guest VRAM at 1x, through the depth
+buffer's own address or the 0x04200000 linear view alike (`rtt-depth-alias`). Otherwise the
+target's colour is the newer content and the rules above apply, so a title that leaves its depth
+address on a colour buffer it draws (and writes no depth there) keeps the direct bind
+(`rtt-depth-alias` draws the colour target over the depth buffer's rows and reads it again). The
+choice is per buffer, not per pixel: a depth buffer some batch wrote after the colour target
+changed is read whole, rows that batch did not reach included, as a CPU read of it is; and a
+colour target that changed after the depth was written is bound whole, its rows where depth was
+written later than its last draw there included (those rows show the target's colour where the
+PSP's VRAM holds depth).
 
 `SR_GPU_NORTT=1` sends every render-target read through that 1x path, for bisecting.
+
+### The reads that decode at 1x (#2279)
+
+Each read below decodes guest VRAM at 1x at every render scale: the GE's own decode of the target's
+memory, exact, but with 1x detail (a depth read outside every colour target may then be upscaled by
+texture scaling, below). The reads fall into two groups.
+
+**No scaled form exists.** The texture's texel grid is not the target's pixel grid, so a texel has
+no device samples of its own, and the 1x decode is the read:
+
+- an 8888 target read as a 16-bit format or CLUT16 (a texel is half a pixel), and a 16-bit target
+  read as 8888 or CLUT32 (a texel spans two pixels);
+- CLUT4 and CLUT8 (a texel is a nibble or a byte of a pixel);
+- DXT (a 4 x 4 block of texels is 8 or 16 bytes of pixels);
+- an address that is not on a pixel boundary of the target (each texel straddles two pixels);
+- a depth buffer read as 8888, CLUT32, CLUT4, CLUT8 or DXT (a texel is not one depth value).
+
+These stay in this group when the read is also swizzled, mipmapped, at another buffer width or
+through the 0x04200000 or 0x04600000 view.
+
+**A scaled form could exist, but the renderer has none.** Here each texel is one pixel, or one
+depth value, of a buffer the GPU holds at render scale: the read is in a format whose texel is one
+of the buffer's values (the target's own format, another format of the same size, CLUT16 of a
+16-bit target or CLUT32 of an 8888 target; for depth, a 16-bit format or CLUT16), so a scaled read
+is possible. These read at 1x only because no such path is implemented; #2279 stays open for them.
+What each path would need:
+
+- a 16-bit target read as another 16-bit format (5650, 5551, 4444): repack each filter tap from
+  the target's format into the texture's, in the shader, before filtering;
+- CLUT16 of a 16-bit target, CLUT32 of an 8888 target: take each tap's value in the target's
+  format and look it up in the palette, a lookup that runs only in the texture decoder today;
+- a swizzled read, or a read with another non-zero buffer width: find the target pixel that holds
+  each tap's texel (a swizzled texture takes the buffer's 16-byte by 8-row blocks in another order;
+  another width puts texture rows across the target's rows), and filter only between texels,
+  whose neighbours are not the target's neighbouring pixels;
+- a read through the 0x04200000 or 0x04600000 view: each texel is still one target pixel, only
+  reordered in 32- or 64-byte pieces and 8 KiB halves of each 16 KiB block, so a scaled path would
+  map each tap's address through the view's mapping (`sr_vram_cpu_address`) to the target pixel
+  that holds it, and filter only between texels, as for a swizzled read;
+- a mipmapped read (a mipmap filter and a highest level above 0): the texture cache builds the
+  whole chain from guest VRAM and a target image has no mip levels, so level 0 would come from the
+  target's image and each other level from its own address, at its own scale;
+- a depth read, outside every colour target or inside one whose depth was written last
+  (`rtt-depth-alias`): the renderer never samples a depth image as a texture. A scaled read would
+  sample it, take the 16-bit value guest VRAM would hold, and repack it into the texture's format,
+  through the address order of the view it is read through (the depth address's stored order, the
+  0x04200000 linear view or the 0x04600000 view, `PSP-VRAM-MIRROR-001`).
+
+A depth read outside every colour target goes through the GE's CPU-read path
+(`sr_ge_vram_read_prepare`), which commits the GPU's depth to guest VRAM first, and decodes there
+at 1x through each of the three views. Like any texture outside every colour target, that 1x decode
+may then be upscaled by texture scaling when it is on; a read inside a colour target never is.
+
+`rtt-1x-reads` in `gpu-coherence-selftest` runs thirteen of these reads at 1x, 2x and 4x: an 8888
+target read as 4444, CLUT8, CLUT4, DXT1, CLUT32, and in its own format swizzled, mipmapped and at
+half its buffer width; a 5650 target read as 5551 and as 8888; and Z, the targets' depth buffer,
+outside every colour target, as 4444 through the three views. None binds a target's image, each
+depth read commits depth the GPU wrote since the last commit, and the reading target's guest VRAM
+equals the software renderer's exactly. A control read in the target's own format binds its image
+directly. A read that gains a scaled path leaves this cell for one like `rtt-scale`. The reads the
+cell does not run, among them an unaligned read, CLUT16, DXT3 and DXT5, the other pairs of formats,
+and swizzled, mipmapped or other-width reads of a 16-bit target, take the same 1x path by the bind
+rule above.
+
+## Software fallback report (#2151)
+
+A primitive in a state this renderer cannot draw goes to `ge.c`'s software rasterizer
+(`software_fallback_begin`), with a synchronous colour and depth readback when its target was on the
+GPU. `gegpu_fallback_counts` counts both by reason (`GEGPU_FALLBACK_*`), always: one increment per
+software primitive, on top of the `fallback_prims` count that was already unconditional. A T&L
+primitive that falls back is not counted itself: its triangles reach `hook_tri`, which counts those it
+hands to `ge.c` (it may draw some on the GPU instead), and the readback its fallback took is counted. The
+GPU's T&L primitives count by their triangles, so both sides count triangles. Not counted: block transfers
+`ge.c` runs on the CPU (`hook_xfer` declining) and the readbacks of guest VRAM reads
+(`hook_vram_read`), which are not primitives.
+
+After each accepted present `gui.c` steps `nk_render_fallback_window_step` (`src/core/nk_shared_helpers.c`):
+tumbling windows of `NK_RENDER_FALLBACK_WINDOW_FRAMES` presents. A reason is over the rule in a window
+when its estimated cost there reaches the budget: its readbacks times `NK_RENDER_FALLBACK_READBACK_US`
+plus its software primitives times `NK_RENDER_FALLBACK_PRIM_US`, at least `NK_RENDER_FALLBACK_BUDGET_US`
+(`nk_render_fallback_cost_us`, integer microseconds, saturating at the 64-bit limit). The cost does not
+depend on how busy the rest of the scene is. Over the rule in `NK_RENDER_FALLBACK_WINDOWS` windows in a
+row, it is reported once per run as `BOOT_EVENT phase=render_fallback` (`docs/DEBUGGING.md`), and the
+native player names it on the game's page. The event's `share_pm` (the reason's share of all primitives)
+is reported for the reader; the rule does not use it. Its `frames` is the span the rule watched, always
+`NK_RENDER_FALLBACK_WINDOWS` x `NK_RENDER_FALLBACK_WINDOW_FRAMES` (360) under this rule.
+
+The budget is per effect: costs of different effects do not add up. The report names an effect, and an
+effect that costs the budget on its own is one the person can be told about; a sum would also name
+effects whose own cost is negligible. Two effects each just under the budget are therefore not reported,
+which is the deliberate limit of this rule (`shared-helpers-selftest` checks it).
+
+Where the boundary lies: one kind alone reaches the budget at exactly `NK_RENDER_FALLBACK_READBACKS` (30)
+readbacks or `NK_RENDER_FALLBACK_MIN_PRIMS` (4,000) software primitives a window, the two limits the rule
+had before the kinds were added up; with both kinds, at `readbacks x 3,200 + primitives x 24 >= 96,000`,
+so 29 readbacks and 3,999 primitives (188,776 µs) are reported, and one cheap primitive a present with no
+readback (120 x 24 = 2,880 µs) never is.
+
+Reading the counts and stepping the rule change nothing the renderer draws: `fallback-notice` in
+`gpu-coherence-selftest` draws 361 frames that fall back through `ge.c` and `hook_tri`, with the rule
+run after each frame and without it, and requires one `logic_op` report on the last frame with the
+frames' exact counts, and the same picture both ways, equal to `ge.c`'s alone.
+
+### The values and their basis (2026-11-12)
+
+Each figure is **measured** (taken directly from a run), **derived** (computed from measured figures,
+arithmetic shown) or **chosen** (a rule parameter, a budget, or one value picked inside a derived range).
+
+| Figure | Value | Kind | Basis |
+| --- | --- | --- | --- |
+| Cost of a fallback readback | 1.8 to 3.5 ms | Derived | A least-squares fit of each perf interval's `vulkan_readback_ms` against its fallback readbacks, in six earlier private runs with fallback readbacks (Hot Shots Tennis on an older build, four runs, and two other titles); any other readback fitted under 0.02 ms. |
+| Cost of a software primitive | 22 to 28 µs | Derived | The same fit of `ge_cpu_ms` against software primitives, in the three of those runs where it could separate the primitives from their readbacks (in the other three it could not). |
+| `NK_RENDER_FALLBACK_BUDGET_US` | 96,000 µs a window | Chosen | About 0.8 ms a present, 5 % of a 16.7 ms present period at 60 presents a second: 0.8 ms x 120 presents. |
+| `NK_RENDER_FALLBACK_READBACK_US` | 3,200 µs | Chosen | One value inside the derived 1,800 to 3,500 µs, toward the costlier end, so readbacks are not undercounted; it divides the budget exactly. |
+| `NK_RENDER_FALLBACK_PRIM_US` | 24 µs | Chosen | One value inside the derived 22 to 28 µs, near the middle; it divides the budget exactly. |
+| `NK_RENDER_FALLBACK_READBACKS` | 30 a window | Derived | 96,000 / 3,200 = 30: readbacks alone at the budget. At the derived range, 30 x 1.8 to 3.5 ms / 120 = 0.45 to 0.88 ms a present. |
+| `NK_RENDER_FALLBACK_MIN_PRIMS` | 4,000 a window | Derived | 96,000 / 24 = 4,000: primitives alone at the budget. At the derived range, 4,000 x 22 to 28 µs / 120 = 0.73 to 0.93 ms a present. |
+| `NK_RENDER_FALLBACK_WINDOW_FRAMES` | 120 presents | Chosen | 2 s at 60 presents a second, 4 s at 30, so a single transition or menu frame does not fill a window. |
+| `NK_RENDER_FALLBACK_WINDOWS` | 3 in a row | Chosen | A report needs at least 6 s of sustained cost, the kind that makes a game run slower. |
+
+The largest window cost the rule computes without saturating is 2^64 - 1 µs; a window's counts would need
+more than 5.7 x 10^15 readbacks to reach it, and `nk_render_fallback_cost_us` returns that limit rather
+than a wrapped value if they ever did.
+
+For scale (measured with this report's first version, on the GPU GE with `SR_GPU_STATS=1`): the Hot Shots Tennis rally drew
+39,283,321 GPU primitives over 11,674 presents, 3,365 a present (its title screen 33,953 over 3,507,
+about 10 a present; both routes together 39,317,274 over 15,181, 2,590 a present). LittleBigPlanet, a
+play route run twice in Authentic, drew 33,945,546 over 10,243 presents, 3,314 a present (3,366 and 3,262
+in the two runs). The primitive threshold, about 33 a present, is then about 1 % of such a scene; the
+rule does not depend on that share.
+
+Neither title drew a primitive in software or took a fallback readback on those routes, so neither
+reports anything and no new renderer code runs for them. Their data cannot place the thresholds (no
+fallback to measure); the costs come from the earlier runs, and the thresholds should be checked again on
+a title whose GPU path falls back.
+
+To measure again: run a title on the GPU GE with `SR_GPU_STATS=1`. Each accepted present that handed
+anything to the software renderer prints `GEGPU_FALLBACK present gpu=<n>` followed by
+`<reason>=<software primitives>/<readbacks>` for each reason it had; a present that did not prints
+nothing. Count the presents (the perf CSV or the run's frame count), sum the lines over windows of
+presents and compare with the rule.
 
 ## Environment variables
 

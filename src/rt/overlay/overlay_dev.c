@@ -4,7 +4,9 @@
 /* The overlay's developer pages (#314), offered from the pause menu in developer mode
    only. The VRAM viewer shows a window of guest VRAM (or the bound texture) that the host
    decoded while the game is paused: Source, Address, Stride and Format are focusable rows
-   that left and right change, and every change asks the host to decode the new window.
+   that left and right change, and every change asks the host to decode the new window. When
+   the run wrote SR_VRAMDUMP captures, a Capture row first chooses between VRAM now and each
+   capture: the sources and the picture are then that capture's.
    The Profile page shows the nakagawa-perf-v1 counters the host formatted, with one bar
    per closed telemetry interval. Both pages only read what the model gives them. */
 
@@ -25,6 +27,7 @@
 #define DEV_ID_INFO DEV_ID(0x006008u)
 #define DEV_ID_NOTE DEV_ID(0x006009u)
 #define DEV_ID_FOOT DEV_ID(0x00600Au)
+#define DEV_ID_DETAIL DEV_ID(0x00600Bu)
 #define DEV_ID_PART DEV_ID(0x006100u)     /* + 0x10 per row, + k per part */
 #define DEV_ID_PART_SPAN 0x800u
 
@@ -131,16 +134,37 @@ static const char *source_name(int source) {
     }
 }
 
-/* Puts the window on a source the GE state names; a source it does not name leaves the
-   window where it is. The texture keeps its own place and format: the host decodes it
-   through the texture decoder, not as a VRAM window. */
+/* The capture the view is on, or NULL for VRAM now. */
+static const NkOverlayVramCapture *view_capture(const NkOverlayVram *vram, int capture) {
+    if (vram == NULL || vram->captures == NULL || capture <= 0 ||
+        (size_t)capture > vram->capture_count) {
+        return NULL;
+    }
+    return &vram->captures[capture - 1];
+}
+
+static bool source_present(const NkOverlayVram *vram, int capture, int source) {
+    const NkOverlayVramCapture *taken = view_capture(vram, capture);
+    if (vram == NULL || source < 0 || source >= (int)NK_OVERLAY_VRAM_SOURCE_COUNT) return false;
+    return taken != NULL ? taken->present[source] : vram->present[source];
+}
+
+static bool source_swizzled(const NkOverlayVram *vram, int capture) {
+    const NkOverlayVramCapture *taken = view_capture(vram, capture);
+    if (vram == NULL) return false;
+    return taken != NULL ? taken->texture_swizzled : vram->texture_swizzled;
+}
+
+/* Puts the window on a source the GE state names (at the view's capture, or now); a source it
+   does not name leaves the window where it is. The texture keeps its own place and format:
+   the host decodes it through the texture decoder, not as a VRAM window. */
 static bool choose_source(NkOverlayVramView *view, const NkOverlayVram *vram, int source) {
-    if (vram == NULL || source < 0 || source >= (int)NK_OVERLAY_VRAM_SOURCE_COUNT ||
-        !vram->present[source]) {
+    const NkOverlayVramCapture *taken = view_capture(vram, view->capture);
+    if (!source_present(vram, view->capture, source)) {
         return false;
     }
     view->source = source;
-    view->view = vram->sources[source];
+    view->view = taken != NULL ? taken->sources[source] : vram->sources[source];
     if (source != NK_OVERLAY_VRAM_TEXTURE) nk_overlay_vram_clamp(&view->view);
     return true;
 }
@@ -202,16 +226,28 @@ static int value_row(NkUi *ui, NkUiId id, unsigned row, const char *label, const
     return change;
 }
 
-/* The next source the GE state names, `dir` along the list from `from` (wrapping); `from`
-   when none other is named. */
-static int next_source(const NkOverlayVram *vram, int from, int dir) {
+/* The next source the GE state names at `capture`, `dir` along the list from `from`
+   (wrapping); `from` when none other is named. */
+static int next_source(const NkOverlayVram *vram, int capture, int from, int dir) {
     int count = (int)NK_OVERLAY_VRAM_SOURCE_COUNT;
     int at = from;
     for (int i = 0; i < count; ++i) {
         at = (at + dir + count) % count;
-        if (vram != NULL && vram->present[at]) return at;
+        if (source_present(vram, capture, at)) return at;
     }
     return from;
+}
+
+/* Moves the view to the next capture (or to VRAM now), on the same source there when that
+   capture names it, else on the first source it names; a moved window stays where it is. */
+static void step_capture(NkOverlayVramView *view, const NkOverlayVram *vram, int dir) {
+    int count = (int)vram->capture_count + 1;
+    view->capture = (view->capture + dir + count) % count;
+    if (view->source == NK_OVERLAY_VRAM_CUSTOM || choose_source(view, vram, view->source)) return;
+    if (!choose_source(view, vram,
+                       next_source(vram, view->capture, (int)NK_OVERLAY_VRAM_SOURCE_COUNT - 1, 1))) {
+        make_custom(view);
+    }
 }
 
 static size_t format_index(uint32_t format) {
@@ -241,7 +277,10 @@ static void vram_picture(NkUi *ui, const NkOverlayVram *vram, float width) {
         art.contain_scale = 1.0f;
         (void)nk_ui_image_art(ui, DEV_ID_IMAGE, nk_overlay_grow(), nk_overlay_grow(), &art);
     } else {
-        nk_ui_text_role(ui, DEV_ID_EMPTY, "Nothing to show", NK_UI_TYPE_CAPTION, theme->dim);
+        /* One line, so the box centres it (a wrapping run would fill the box's width). */
+        NkUiTextStyle empty = nk_ui_type(NK_UI_TYPE_CAPTION, theme->dim);
+        empty.wrap = false;
+        nk_ui_text(ui, DEV_ID_EMPTY, "Nothing to show", &empty);
     }
     nk_ui_end_container(ui);
 }
@@ -261,6 +300,12 @@ NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOv
     float picture;
     char text[96];
     int change;
+    bool captures = vram != NULL && vram->captures != NULL && vram->capture_count > 0u;
+    if (view->capture != 0 && view_capture(vram, view->capture) == NULL) {
+        /* A capture the model no longer offers: start again from VRAM now. */
+        view->capture = 0;
+        view->chosen = false;
+    }
     if (!view->chosen) {
         /* The display framebuffer first, or the first source the GE state names. */
         view->chosen = true;
@@ -271,7 +316,8 @@ NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOv
         view->view.width = 480u;
         view->view.height = 272u;
         if (!choose_source(view, vram, NK_OVERLAY_VRAM_DISPLAY)) {
-            (void)choose_source(view, vram, next_source(vram, NK_OVERLAY_VRAM_DISPLAY, 1));
+            (void)choose_source(view, vram,
+                                next_source(vram, view->capture, NK_OVERLAY_VRAM_DISPLAY, 1));
         }
         nk_overlay_vram_clamp(&view->view);
         moved = true;
@@ -292,13 +338,26 @@ NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOv
             vram_picture(ui, vram, picture);
             if (nk_ui_begin_container(ui, DEV_ID_ROWS, &rows, NULL)) {
                 NkOverlayVramSurface *w = &view->view;
+                if (captures) {
+                    const NkOverlayVramCapture *taken = view_capture(vram, view->capture);
+                    if (taken != NULL) {
+                        (void)snprintf(text, sizeof(text), "VBLANK %u", (unsigned)taken->vblank);
+                    } else {
+                        (void)snprintf(text, sizeof(text), "Live");
+                    }
+                    change = value_row(ui, NK_OVERLAY_ID_VRAM_CAPTURE, 4u, "Capture", text);
+                    if (change != 0) {
+                        step_capture(view, vram, change);
+                        moved = true;
+                    }
+                }
                 change = value_row(ui, NK_OVERLAY_ID_VRAM_SOURCE, 0u, "Source",
                                    source_name(view->source));
                 if (change != 0) {
                     /* From a moved window either way goes back to the first named source. */
                     int to = view->source == NK_OVERLAY_VRAM_CUSTOM
-                        ? next_source(vram, (int)NK_OVERLAY_VRAM_SOURCE_COUNT - 1, 1)
-                        : next_source(vram, view->source, change);
+                        ? next_source(vram, view->capture, (int)NK_OVERLAY_VRAM_SOURCE_COUNT - 1, 1)
+                        : next_source(vram, view->capture, view->source, change);
                     moved = choose_source(view, vram, to) || moved;
                 }
                 (void)snprintf(text, sizeof(text), "0x%08X", (unsigned)w->addr);
@@ -336,16 +395,26 @@ NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOv
                     nk_overlay_vram_clamp(w);
                     moved = true;
                 }
-                (void)snprintf(text, sizeof(text), "%u \xC3\x97 %u px%s", (unsigned)w->width,
-                               (unsigned)w->height,
-                               view->source == NK_OVERLAY_VRAM_TEXTURE && vram != NULL &&
-                                       vram->texture_swizzled ? ", swizzled" : "");
-                nk_ui_text_role(ui, DEV_ID_INFO, nk_ui_frame_text(ui, text), NK_UI_TYPE_DATA,
-                                theme->muted);
-                if (vram != NULL && vram->note != NULL && vram->note[0] != '\0') {
-                    NkUiTextStyle note = nk_ui_type(NK_UI_TYPE_CAPTION, theme->warning);
-                    note.wrap = true;
-                    nk_ui_text(ui, DEV_ID_NOTE, vram->note, &note);
+                {
+                    /* The size and any note line up with the rows' labels. */
+                    NkUiLayout detail = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_grow(),
+                                                          nk_overlay_fit(), NK_UI_SPACE_1);
+                    detail.padding_left = detail.padding_right = NK_UI_SPACE_3;
+                    if (nk_ui_begin_container(ui, DEV_ID_DETAIL, &detail, NULL)) {
+                        (void)snprintf(text, sizeof(text), "%u \xC3\x97 %u px%s", (unsigned)w->width,
+                                       (unsigned)w->height,
+                                       view->source == NK_OVERLAY_VRAM_TEXTURE &&
+                                               source_swizzled(vram, view->capture)
+                                           ? ", swizzled" : "");
+                        nk_ui_text_role(ui, DEV_ID_INFO, nk_ui_frame_text(ui, text), NK_UI_TYPE_DATA,
+                                        theme->muted);
+                        if (vram != NULL && vram->note != NULL && vram->note[0] != '\0') {
+                            NkUiTextStyle note = nk_ui_type(NK_UI_TYPE_CAPTION, theme->warning);
+                            note.wrap = true;
+                            nk_ui_text(ui, DEV_ID_NOTE, vram->note, &note);
+                        }
+                        nk_ui_end_container(ui);
+                    }
                 }
                 nk_ui_end_container(ui);
             }
@@ -356,8 +425,11 @@ NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOv
         NkUiTextStyle foot = nk_ui_type(NK_UI_TYPE_FOOTNOTE, theme->dim);
         foot.wrap = true;
         nk_ui_text(ui, DEV_ID_FOOT,
-                   "Read-only. The paused game's memory as the guest would read it; nothing "
-                   "is written to it.", &foot);
+                   view->capture > 0
+                       ? "Read-only. VRAM as it was captured at that VBLANK, read back from the "
+                         "capture's file; nothing is written to it."
+                       : "Read-only. The paused game's memory as the guest would read it; "
+                         "nothing is written to it.", &foot);
     }
     if (nk_ui_button(ui, NK_OVERLAY_ID_VRAM_BACK, "Back", 0u) ||
         nk_ui_take_event(ui, NK_UI_EV_BACK, NULL)) {

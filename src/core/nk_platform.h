@@ -198,12 +198,36 @@ bool nk_platform_get_app_data_dir(char *out_path, size_t max_len);
 /* Resolve the pre-canonical Windows profile location used by older builds.
  * Returns false on non-Windows hosts or when USERPROFILE is unavailable. */
 bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len);
+/* The default per-user folders of a Linux or macOS install (#324, nk_data_migrate.h): both
+ * layouts' folders, whether each exists, and the one this process uses, decided by the rule there
+ * the first time a folder is looked up. False, with *out cleared, where there is one layout (Windows,
+ * Android) or an override names the folders (--user-data-root, portable mode). */
+struct NkUserDataLayout;
+bool nk_platform_user_data_layout(struct NkUserDataLayout *out);
 
 /* The user's Desktop folder, where a first run's file pickers open. Windows:
  * FOLDERID_Desktop, which follows a Desktop the user or a sync tool moved.
  * POSIX: the Desktop folder in the home folder when it exists, else the home
  * folder itself. False when there is none. */
 bool nk_platform_get_desktop_dir(char *out_path, size_t max_len);
+/* The user's personal folders. */
+typedef enum {
+    NK_PERSONAL_DOCUMENTS = 0,
+    NK_PERSONAL_DOWNLOADS,
+    NK_PERSONAL_MUSIC,
+    NK_PERSONAL_PICTURES,
+    NK_PERSONAL_VIDEOS,
+    NK_PERSONAL_DESKTOP,
+    NK_PERSONAL_COUNT
+} NkPersonalDir;
+/* Where one of them is. Windows: its known folder (FOLDERID_Documents and so on),
+ * which follows a folder the user or a sync tool moved. POSIX: the folder the
+ * desktop's user-dirs.dirs names (XDG_DOCUMENTS_DIR and so on, in
+ * $XDG_CONFIG_HOME or ~/.config), so a localized name is found, else the folder of
+ * the English name in the home folder. False when it does not exist. Unlike
+ * nk_platform_get_desktop_dir, NK_PERSONAL_DESKTOP never falls back to the home
+ * folder. */
+bool nk_platform_get_personal_dir(NkPersonalDir which, char *out_path, size_t max_len);
 #if defined(_WIN32) || defined(_WIN64)
 /* Unit-testable Windows base selection: LOCALAPPDATA, Known Folder, APPDATA.
  * USERPROFILE is deliberately not a candidate. */
@@ -226,6 +250,20 @@ bool nk_platform_resolve_windows_data_base(
  * exist); POSIX uses realpath (which does), so callers should resolve paths
  * they have already confirmed. */
 bool nk_platform_absolute_path(const char *path, char *out_path, size_t max_len);
+
+/* The path the existing file or folder at `path` really has, every symlink,
+ * junction, mount alias (subst), short 8.3 name and "." or ".." resolved, so two
+ * names of one folder compare equal. POSIX: realpath. Win32: the handle's final
+ * path (GetFinalPathNameByHandleW), without its \\?\ prefix. False when the path
+ * does not exist or cannot be resolved. */
+bool nk_platform_real_path(const char *path, char *out_path, size_t max_len);
+
+/* Open the regular file at `path` for reading in binary mode, refusing anything
+ * else: a symlink, junction or other reparse point (a cloud placeholder among
+ * them) is not followed, and a folder, a device or a FIFO is not opened. Checked on
+ * the open handle, so the file cannot be swapped for a link between a check and the
+ * open. NULL on refusal or failure. */
+FILE *nk_platform_open_regular_file(const char *path);
 
 /* Whether `path` is longer than the file APIs this process uses accept, so a
  * create or open of it fails for its length alone. On Win32 that is MAX_PATH
@@ -409,6 +447,10 @@ NkHostKind nk_platform_host_kind(void);
 bool nk_platform_path_chars_equal(char a, char b);
 /* '\\' or '/' on Win32; '/' on POSIX. */
 bool nk_platform_is_path_separator(char c);
+/* Whether `path` is absolute as written. Win32: a drive letter, ':' and a separator, or two
+   separators (a UNC or \\?\ path); POSIX: a leading '/'. The text alone: nothing is resolved
+   or looked up. False for NULL. */
+bool nk_platform_path_is_absolute(const char *path);
 
 /* The raw environment values naming the user: the profile folder (USERPROFILE on Win32,
    HOME on POSIX) and the account name (USERNAME on Win32, USER on POSIX). NULL when unset.
@@ -416,9 +458,41 @@ bool nk_platform_is_path_separator(char c);
    nk_platform_get_path. */
 const char *nk_platform_env_home_dir(void);
 const char *nk_platform_env_user_name(void);
+/* Environment variable `name` in UTF-8, for a value that is a path. Win32 reads the wide
+   environment, so a folder whose name is outside the ANSI code page arrives whole (the narrow
+   getenv gives code-page bytes, which a UTF-8 path reader refuses or reads as '?'); POSIX gives
+   the bytes as they are. Returns 1 with the value in `out` (an empty value included), 0 when the
+   variable is unset (`out` empty), and -1 when it does not fit `cap` bytes or is not valid
+   UTF-16 (`out` empty). */
+int nk_platform_env_utf8(const char *name, char *out, size_t cap);
 
 /* This process's id (_getpid on Win32, getpid on POSIX). */
 unsigned long nk_platform_process_id(void);
+
+/* The client end of a named pipe another program on this PC serves: local IPC, never a
+   network connection. Discord Rich Presence (#2259) talks to the Discord app through one.
+   Win32: the named pipe <name> on this PC (the local pipe namespace only), opened for
+   overlapped I/O so a write can give up and no read waits, at identification level only, so
+   the program serving the pipe cannot act as this user. POSIX: unsupported; supported() is
+   false and open fails. */
+typedef struct {
+    void *handle;  /* Win32: the pipe's HANDLE */
+    bool open;
+} NkLocalPipe;
+
+bool nk_platform_local_pipe_supported(void);
+/* Connect to the pipe `name` (no directory: "discord-ipc-0"). False, quietly, when nobody
+   serves it or it is busy. */
+bool nk_platform_local_pipe_open(NkLocalPipe *pipe, const char *name);
+/* Write all `len` bytes within timeout_ms. False on a short write, a broken pipe or the
+   timeout; the caller then closes the pipe. */
+bool nk_platform_local_pipe_write(NkLocalPipe *pipe, const void *data, size_t len,
+                                  unsigned timeout_ms);
+/* Read what has already arrived, up to cap bytes, without waiting: the count read, 0 when
+   nothing is waiting, -1 when the other end closed the pipe or it failed. */
+long nk_platform_local_pipe_read(NkLocalPipe *pipe, void *buf, size_t cap);
+/* Close it; safe on a zeroed or closed pipe. */
+void nk_platform_local_pipe_close(NkLocalPipe *pipe);
 
 /* The OS error code of the last failed nk_platform or nk_*_utf8 file call on this thread:
    GetLastError() on Win32, errno on POSIX. Read it straight after the failing call. */
@@ -449,6 +523,13 @@ void nk_platform_setup_standard_streams(const char *fallback_log_name);
    SDL_GetBasePath() points there. Everywhere else it does nothing and returns true. False when
    the Android folder is missing; the process can still run but finds no bundled files. */
 bool nk_platform_host_startup(const char *log_tag);
+
+/* Process end, for a process that ends without exit()'s cleanup (Android's title process, see
+   android/app/src/main/cpp/nk_android_title.c). Android: flush stdout and stderr, and wait until
+   nk_platform_host_startup's copy has written every line to the system log and the log file, so
+   the last lines of a run are not lost; the streams go nowhere afterwards. Everywhere else it
+   does nothing. */
+void nk_platform_host_shutdown(void);
 
 #ifdef __cplusplus
 }

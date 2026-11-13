@@ -11,9 +11,13 @@ compared with the analyzer without ever changing what it decided.
 ``AnalysisIrModuleGateTests`` is the standing gate on whole modules: it runs the same chain
 (codegen ``--cfg-report``, ``analysis_ir.py build``, ``analysis_ir.py verify``) on every
 single-image module of the source-owned platform ladder, which carry imports, relocations, data
-pointers, scheduler and FPU code and a filesystem workload, and it checks that a wrong IR still
-fails ``verify``. A change to the analyzer, to codegen's ownership map or to the IR that breaks
-parity fails here instead of surfacing in a review of a private title.
+pointers, scheduler and FPU code and a filesystem workload, on the AOT/interpreter cosimulation
+guest (``fixtures/cosim``), and on the two PSPSDK showcase titles (``fixtures/showcase``, built
+when PSPDEV is present), and it checks that a wrong IR still fails ``verify``. It also runs
+codegen on each module without ``--cfg-report`` and checks that every file codegen writes is
+byte-identical to the run that wrote the report and built and verified the IR, so the analysis
+output never changes the generated C. A change to the analyzer, to codegen's ownership map or to
+the IR that breaks parity fails here instead of surfacing in a review of a private title.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from typing import NamedTuple
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +42,15 @@ import analysis_ir  # noqa: E402
 LADDER = ROOT / "fixtures" / "platform_ladder"
 sys.path.insert(0, str(LADDER))
 import generate as ladder  # noqa: E402
+
+SHOWCASE = ROOT / "fixtures" / "showcase"
+sys.path.insert(0, str(SHOWCASE))
+import showcase  # noqa: E402
+
+COSIM_GENERATOR = ROOT / "fixtures" / "cosim" / "generate.py"
+# mk/cosim_snapshot.mk: COSIM_BASE_ADDR, FUNCS_PER_CHUNK=1 and COSIM_CODEGEN_ARGS.
+COSIM_BASE = 0x08900000
+COSIM_CODEGEN_ARGS = ("--funcs-per-chunk=1", "--stack-census")
 
 BASE = 0x1000
 NOP = 0x00000000
@@ -238,42 +252,146 @@ def _run_tool(*args: str) -> subprocess.CompletedProcess:
                           check=False)
 
 
+class Module(NamedTuple):
+    """One source-owned guest module and the codegen arguments its own build uses."""
+
+    name: str
+    elf: Path
+    base: int
+    codegen_args: tuple[str, ...]
+
+
+def _codegen_outputs(out_dir: Path) -> dict[str, bytes]:
+    """Every file codegen wrote under `out_dir`, by relative path."""
+    return {path.relative_to(out_dir).as_posix(): path.read_bytes()
+            for path in sorted(out_dir.rglob("*")) if path.is_file()}
+
+
 class AnalysisIrModuleGateTests(unittest.TestCase):
-    def _chain(self, workload: str, root: Path) -> tuple[Path, Path]:
-        """Generate the module, run codegen with --cfg-report, build the IR; return both paths."""
+    _showcase_dir: tempfile.TemporaryDirectory | None = None
+    _showcase_modules: tuple[Module, ...] | None = None
+    _showcase_missing: str | None = None
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if cls._showcase_dir is not None:
+            cls._showcase_dir.cleanup()
+            cls._showcase_dir = None
+
+    def _ladder_module(self, workload: str, root: Path) -> Module:
         fixture = root / "fixture"
         self.assertEqual(ladder.generate(fixture, workload), 0, workload)
+        return Module(workload, fixture / "guest.prx", ladder.PLANS[workload].base,
+                      ("--funcs-per-chunk=2",))
+
+    def _cosim_module(self, root: Path) -> Module:
+        fixture = root / "fixture"
+        made = _run_tool(str(COSIM_GENERATOR), "generate", "--out-dir", str(fixture))
+        self.assertEqual(made.returncode, 0, f"cosim: generate {made.stdout}{made.stderr}")
+        return Module("cosim", fixture / "guest.prx", COSIM_BASE, COSIM_CODEGEN_ARGS)
+
+    def _modules(self, root: Path) -> list[Module]:
+        """The ladder's single-image modules and the cosimulation guest, each in its own folder."""
+        modules = [self._ladder_module(workload, root / workload) for workload in LADDER_MODULES]
+        modules.append(self._cosim_module(root / "cosim"))
+        return modules
+
+    @classmethod
+    def _showcase(cls) -> tuple[Module, ...]:
+        """The showcase titles' PSPDEV PRXs, built once; NOT_RUN without PSPDEV."""
+        if cls._showcase_modules is None and cls._showcase_missing is None:
+            try:
+                showcase._check_pspdev()
+            except (showcase.ShowcaseError, OSError) as missing:
+                cls._showcase_missing = f"NOT_RUN: the showcase PRXs need PSPDEV: {missing}"
+            else:
+                cls._showcase_dir = tempfile.TemporaryDirectory()
+                built = []
+                for demo in showcase.DEMOS:
+                    prx = showcase._build_prx(demo, Path(cls._showcase_dir.name) / str(demo["id"]))
+                    manifest = json.loads((ROOT / str(demo["manifest"])).read_text(encoding="utf-8"))
+                    # tools/title_codegen_plan.py: the manifest's base and the default chunk size.
+                    built.append(Module(str(demo["id"]), prx, int(manifest["executable"]["base"]),
+                                        ("--funcs-per-chunk=2000",)))
+                cls._showcase_modules = tuple(built)
+        if cls._showcase_missing is not None:
+            raise unittest.SkipTest(cls._showcase_missing)
+        assert cls._showcase_modules is not None
+        return cls._showcase_modules
+
+    def _codegen(self, module: Module, out_dir: Path, *extra: str) -> None:
+        out_dir.mkdir(parents=True)
+        gen = _run_tool(str(TOOLS / "codegen.py"), str(module.elf), str(out_dir / "out.c"),
+                        f"--base={module.base:#x}", "--profile=none", *module.codegen_args, *extra)
+        self.assertEqual(gen.returncode, 0, f"{module.name}: codegen {gen.stdout}{gen.stderr}")
+
+    def _chain(self, module: Module, root: Path) -> tuple[Path, Path]:
+        """Run codegen with --cfg-report and build the IR; return both paths."""
         report = root / "cfg.json"
-        gen = _run_tool(str(TOOLS / "codegen.py"), str(fixture / "guest.prx"), str(root / "out.c"),
-                        f"--base={ladder.PLANS[workload].base:#x}", "--profile=none",
-                        "--funcs-per-chunk=2", f"--cfg-report={report}")
-        self.assertEqual(gen.returncode, 0, f"{workload}: codegen {gen.stdout}{gen.stderr}")
+        self._codegen(module, root / "with-report", f"--cfg-report={report}")
         ir_path = root / "ir.json"
         built = _run_tool(str(TOOLS / "analysis_ir.py"), "build", "--cfg-report", str(report),
                           "--out", str(ir_path))
-        self.assertEqual(built.returncode, 0, f"{workload}: build {built.stderr}")
+        self.assertEqual(built.returncode, 0, f"{module.name}: build {built.stderr}")
         return report, ir_path
 
+    def _verify_passes(self, module: Module, root: Path) -> None:
+        report, ir_path = self._chain(module, root)
+        before = hashlib.sha256(report.read_bytes()).hexdigest()
+        verified = _run_tool(str(TOOLS / "analysis_ir.py"), "verify", "--ir", str(ir_path),
+                             "--cfg-report", str(report))
+        self.assertEqual(verified.returncode, 0, f"{module.name}: {verified.stdout}")
+        self.assertIn("ANALYSIS_IR_PARITY PASS findings=0", verified.stdout)
+        self.assertEqual(hashlib.sha256(report.read_bytes()).hexdigest(), before,
+                         "verify changed the CFG report")
+        # A pass over an empty IR would prove nothing.
+        summary = analysis_ir.load_ir(ir_path.read_text(encoding="utf-8"))["summary"]
+        self.assertGreaterEqual(summary["functions"], 1, module.name)
+        self.assertGreaterEqual(summary["blocks"], summary["functions"], module.name)
+        self.assertGreater(summary["instructions"], 0, module.name)
+
+    def _codegen_unchanged(self, module: Module, root: Path) -> None:
+        self._codegen(module, root / "without-report")
+        report, ir_path = self._chain(module, root)
+        verified = _run_tool(str(TOOLS / "analysis_ir.py"), "verify", "--ir", str(ir_path),
+                             "--cfg-report", str(report))
+        self.assertEqual(verified.returncode, 0, f"{module.name}: {verified.stdout}")
+        plain = _codegen_outputs(root / "without-report")
+        analysed = _codegen_outputs(root / "with-report")
+        self.assertIn("out.c", plain, module.name)
+        self.assertEqual(sorted(analysed), sorted(plain),
+                         f"{module.name}: --cfg-report changed the files codegen writes")
+        for name, data in plain.items():
+            self.assertEqual(hashlib.sha256(analysed[name]).hexdigest(),
+                             hashlib.sha256(data).hexdigest(),
+                             f"{module.name}: {name} differs with the analysis output")
+
     def test_verify_passes_on_every_source_owned_module(self):
-        for workload in LADDER_MODULES:
-            with self.subTest(workload=workload), tempfile.TemporaryDirectory() as tmp:
-                report, ir_path = self._chain(workload, Path(tmp))
-                before = hashlib.sha256(report.read_bytes()).hexdigest()
-                verified = _run_tool(str(TOOLS / "analysis_ir.py"), "verify", "--ir", str(ir_path),
-                                     "--cfg-report", str(report))
-                self.assertEqual(verified.returncode, 0, f"{workload}: {verified.stdout}")
-                self.assertIn("ANALYSIS_IR_PARITY PASS findings=0", verified.stdout)
-                self.assertEqual(hashlib.sha256(report.read_bytes()).hexdigest(), before,
-                                 "verify changed the CFG report")
-                # A pass over an empty IR would prove nothing.
-                summary = analysis_ir.load_ir(ir_path.read_text(encoding="utf-8"))["summary"]
-                self.assertGreaterEqual(summary["functions"], 1, workload)
-                self.assertGreaterEqual(summary["blocks"], summary["functions"], workload)
-                self.assertGreater(summary["instructions"], 0, workload)
+        with tempfile.TemporaryDirectory() as tmp:
+            for module in self._modules(Path(tmp) / "modules"):
+                with self.subTest(module=module.name):
+                    self._verify_passes(module, Path(tmp) / "runs" / module.name)
+
+    def test_verify_passes_on_the_showcase_titles(self):
+        for module in self._showcase():
+            with self.subTest(module=module.name), tempfile.TemporaryDirectory() as tmp:
+                self._verify_passes(module, Path(tmp))
+
+    def test_analysis_output_leaves_the_generated_c_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for module in self._modules(Path(tmp) / "modules"):
+                with self.subTest(module=module.name):
+                    self._codegen_unchanged(module, Path(tmp) / "runs" / module.name)
+
+    def test_analysis_output_leaves_the_showcase_c_unchanged(self):
+        for module in self._showcase():
+            with self.subTest(module=module.name), tempfile.TemporaryDirectory() as tmp:
+                self._codegen_unchanged(module, Path(tmp))
 
     def test_verify_fails_when_a_module_ir_is_wrong(self):
         with tempfile.TemporaryDirectory() as tmp:
-            report, ir_path = self._chain("ladder-sched", Path(tmp))
+            module = self._ladder_module("ladder-sched", Path(tmp) / "module")
+            report, ir_path = self._chain(module, Path(tmp))
             ir = json.loads(ir_path.read_text(encoding="utf-8"))
             owned = next(i for i in ir["instructions"] if i["owners"])
             owned["owners"] = [0xFFFFFFF0]

@@ -947,16 +947,24 @@ static void test_teardown(void) {
 #define G_AOUT     0x08942000u   /* one 0x2000-byte block, then a guard */
 #define AC_CODEC   0x1000u
 
-/* A PSMF audio frame: the 8-byte 0x0FD0 header (channel id in bits 2-4 of byte 2, size code in
- * byte 3; data = code * 8 + 8 bytes), then the body, zero-padded. Returns the data size. */
-static uint32_t put_audio_frame(uint32_t at, int channels, const uint8_t *body, uint32_t body_len) {
-    const uint8_t code = 1u;
-    const uint32_t data = (uint32_t)code * 8u + 8u;
+/* A PSMF audio frame: the 8-byte 0x0FD0 header (channel id in bits 2-4 of byte 2; the 10-bit
+ * size code in bits 0-1 of byte 2 and all of byte 3, in 8-byte units; data = code * 8 + 8 bytes),
+ * then the body, zero-padded. Returns the data size. The expected size is written out here, not
+ * taken from sr_psmf_audio_frame_bytes, so the test checks the helper too. */
+static uint32_t put_audio_frame_sized(uint32_t at, int channels, uint32_t code, const uint8_t *body,
+                                      uint32_t body_len) {
+    const uint32_t data = code * 8u + 8u;
     uint8_t *p = host(at);
     memset(p, 0, 8u + data);
-    p[0] = 0x0Fu; p[1] = 0xD0u; p[2] = (uint8_t)(channels << 2); p[3] = code;
+    p[0] = 0x0Fu; p[1] = 0xD0u;
+    p[2] = (uint8_t)((channels << 2) | ((code >> 8) & 3u));
+    p[3] = (uint8_t)code;
     memcpy(p + 8, body, body_len);
     return data;
+}
+
+static uint32_t put_audio_frame(uint32_t at, int channels, const uint8_t *body, uint32_t body_len) {
+    return put_audio_frame_sized(at, channels, 1u, body, body_len);
 }
 
 /* The block a separate decoder makes from the same frame, as interleaved stereo bytes. */
@@ -1142,6 +1150,21 @@ static void test_audiocodec(void) {
     CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == 0u && memcmp(host(G_AOUT), expect, 0x2000u) == 0 &&
               MEM_R32(G_AC + 36u) == 0u,
           "decode: words that give a size of 0 still write the stereo block, and +36 holds 0");
+
+    /* Frames over 2 KiB set the size code's high bits in byte 2 (#2205). The code is 8-byte units,
+     * so it is ORed together before the multiply: code 0x101 is a 0x810-byte data part (0x818 with
+     * the header), where multiplying byte 3 before the OR would give 0x110. */
+    data = put_audio_frame_sized(G_AIN, 2, 0x101u, k_terminator, sizeof(k_terminator));
+    CHECK(data == 0x810u && host(G_AIN)[2] == 0x09u && host(G_AIN)[3] == 0x01u,
+          "decode: the over-2-KiB stereo fixture sets bits 0-1 of byte 2");
+    ac_set_io(2u, 2u);
+    CHECK(reference_block(2, host(G_AIN + 8u), data, expect),
+          "decode: the reference decoder takes the over-2-KiB stereo frame");
+    CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == 0u && memcmp(host(G_AOUT), expect, 0x2000u) == 0 &&
+              bytes_are(G_AOUT + 0x2000u, 64u, 0xAAu),
+          "decode: an over-2-KiB stereo frame writes the reference block");
+    CHECK(MEM_R32(G_AC + 28u) == 0x810u,
+          "decode: +28 is the over-2-KiB frame's size, the size code ORed before the multiply");
 
     /* Refusals leave the output untouched. */
     ac_set_io(2u, 2u);

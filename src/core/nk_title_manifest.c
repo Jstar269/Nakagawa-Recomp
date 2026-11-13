@@ -96,6 +96,7 @@ typedef struct {
     uint32_t expected_data_file_count;
     bool requires_font_firmware;
     bool requires_psmf;
+    uint8_t analog_dead_zone_counts;   /* input.analog_dead_zone.counts; 0 when not declared */
     NkModuleDefinition modules[MAX_MODULES];
     char module_names[MAX_MODULES][129];
     int module_count;
@@ -162,6 +163,7 @@ static void overlay_slot_anchor(OverlayStorageSlot *dest) {
     dest->entry.expected_data_file_count = dest->expected_data_file_count;
     dest->entry.requires_font_firmware = dest->requires_font_firmware;
     dest->entry.requires_psmf = dest->requires_psmf;
+    dest->entry.analog_dead_zone_counts = dest->analog_dead_zone_counts;
     for (int m = 0; m < dest->module_count; m++) {
         dest->modules[m].name = dest->module_names[m];
     }
@@ -606,6 +608,7 @@ typedef struct ManifestParse {
     size_t loose_root_count;
     bool has_font_feature;
     bool has_psmf_feature;
+    uint8_t analog_dead_zone_counts;
     uint32_t expected_file_count;
     uint32_t fallback_entry;
 } ManifestParse;
@@ -620,7 +623,7 @@ static bool manifest_parse_identity(ManifestParse *mp) {
         "schema_version", "id", "display_name", "kind", "disc", "executable",
         "modules", "filesystem", "hle_profile", "feature_requirements",
         "compatibility_manifest", "verification_profile", "codegen_profile", "notes",
-        "runtime_contract", "profile_zero", "runtime_bindings", "game_name", NULL
+        "runtime_contract", "profile_zero", "runtime_bindings", "game_name", "input", NULL
     };
     static const char * const required_root_keys[] = {
         "schema_version", "id", "display_name", "kind", "executable",
@@ -1324,7 +1327,7 @@ static bool manifest_parse_features(ManifestParse *mp) {
     return true;
 }
 
-/* The optional compatibility manifest and notes (checks 13-14). */
+/* The optional compatibility manifest, notes and input (checks 13-14a). */
 static bool manifest_parse_optional_fields(ManifestParse *mp) {
     char *error_buf = mp->error_buf;
     size_t error_buf_len = mp->error_buf_len;
@@ -1345,6 +1348,42 @@ static bool manifest_parse_optional_fields(ManifestParse *mp) {
             if (error_buf) snprintf(error_buf, error_buf_len, "$.notes: must be a string <= 2048 characters");
             return false;
         }
+    }
+
+    /* 14a. input (optional): how the title reads its controls. The rules are
+       tools/title_manifest.py validate_input's. An overlay carries the value in its own
+       entry, as it carries every other field; nothing is merged from a public entry. An
+       overlay that declares no input block has none. */
+    JsonNode *input_node = obj_get(root, "input");
+    if (input_node) {
+        static const char * const input_keys[] = {"analog_dead_zone", NULL};
+        static const char * const zone_keys[] = {"shape", "counts", NULL};
+        if (!check_object_keys(input_node, "$.input", input_keys, input_keys, error_buf, error_buf_len)) {
+            return false;
+        }
+        JsonNode *zone = obj_get(input_node, "analog_dead_zone");
+        if (!check_object_keys(zone, "$.input.analog_dead_zone", zone_keys, zone_keys,
+                               error_buf, error_buf_len)) {
+            return false;
+        }
+        JsonNode *shape = obj_get(zone, "shape");
+        if (shape->type != JSON_STRING || strcmp(shape->u.str_val, "square") != 0) {
+            if (error_buf) snprintf(error_buf, error_buf_len,
+                                    "$.input.analog_dead_zone.shape: unsupported dead-zone shape");
+            return false;
+        }
+        JsonNode *counts = obj_get(zone, "counts");
+        if (counts->type != JSON_NUMBER || !counts->u.num.is_integer) {
+            if (error_buf) snprintf(error_buf, error_buf_len,
+                                    "$.input.analog_dead_zone.counts: must be an integer");
+            return false;
+        }
+        if (counts->u.num.int_val < 1 || counts->u.num.int_val > 126) {
+            if (error_buf) snprintf(error_buf, error_buf_len,
+                                    "$.input.analog_dead_zone.counts: must be in range 1..126");
+            return false;
+        }
+        mp->analog_dead_zone_counts = (uint8_t)counts->u.num.int_val;
     }
     return true;
 }
@@ -1616,6 +1655,7 @@ static void manifest_build_slot(const ManifestParse *mp, OverlayStorageSlot *out
     out->expected_data_file_count = mp->expected_file_count;
     out->requires_font_firmware = mp->has_font_feature;
     out->requires_psmf = mp->has_psmf_feature;
+    out->analog_dead_zone_counts = mp->analog_dead_zone_counts;
 
     out->module_count = (int)mp->mods_node->u.arr.count;
     for (int i = 0; i < out->module_count; i++) {
@@ -1656,6 +1696,7 @@ static void manifest_build_slot(const ManifestParse *mp, OverlayStorageSlot *out
     out->entry.expected_data_file_count = out->expected_data_file_count;
     out->entry.requires_font_firmware = out->requires_font_firmware;
     out->entry.requires_psmf = out->requires_psmf;
+    out->entry.analog_dead_zone_counts = out->analog_dead_zone_counts;
     out->entry.modules = out->modules;
     out->entry.module_count = out->module_count;
 }
@@ -2221,6 +2262,25 @@ bool nk_title_manifest_enhancement_id_valid(const char *id) {
     return length > 0;
 }
 
+bool nk_title_manifest_enhancement_variant_valid(const char *variant) {
+    if (!variant) return false;
+    const char *plus = strchr(variant, '+');
+    if (!plus) return nk_title_manifest_enhancement_id_valid(variant);
+    size_t length = strlen(variant);
+    size_t first = (size_t)(plus - variant);
+    if (length > NK_MAX_ENHANCEMENT_PACKAGE_ID - 1u || first == 0u ||
+        first >= NK_MAX_ENHANCEMENT_PACKAGE_ID) {
+        return false;
+    }
+    char timing[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    memcpy(timing, variant, first);
+    timing[first] = '\0';
+    /* The second id holds no `+` either (the id check refuses it), and a build never
+       carries the same package twice. */
+    return nk_title_manifest_enhancement_id_valid(timing) &&
+           nk_title_manifest_enhancement_id_valid(plus + 1) && strcmp(timing, plus + 1) != 0;
+}
+
 bool nk_title_manifest_package_dir_name(const char *disc_id,
                                         const char *enhancement_package_id,
                                         char *out, size_t out_size) {
@@ -2232,7 +2292,7 @@ bool nk_title_manifest_package_dir_name(const char *disc_id,
     if (!enhancement_package_id || !enhancement_package_id[0]) {
         written = snprintf(out, out_size, "%s", normalized);
     } else {
-        if (!nk_title_manifest_enhancement_id_valid(enhancement_package_id)) return false;
+        if (!nk_title_manifest_enhancement_variant_valid(enhancement_package_id)) return false;
         written = snprintf(out, out_size, "%s-enhanced-%s", normalized,
                            enhancement_package_id);
     }
@@ -5094,25 +5154,39 @@ static bool package_catalog_identity_matches(const char *disc_id,
 
 /* A package is the variant its folder names. A build records the enhancement
    package it applied in the cache's codegen options (enhancement_package_id,
-   tools/nk_core/package_cache.py) and an authentic build records none, so an
-   enhanced build copied into the authentic folder, or one built from another
-   enhancement package, never launches as the variant the user chose. */
+   tools/nk_core/package_cache.py), and the code-hook package beside it
+   (code_hook_package_id, section 9.9), and an authentic build records neither,
+   so an enhanced build copied into the authentic folder, or one built from
+   other packages, never launches as the variant the user chose. */
 static bool package_validate_variant(const JsonNode *package,
                                      const char *enhancement_package_id,
                                      char *error, size_t error_size) {
     const JsonNode *options = obj_get(obj_get(package, "cache"), "codegen_options");
     const JsonNode *recorded = obj_get(options, "enhancement_package_id");
+    const JsonNode *recorded_hook = obj_get(options, "code_hook_package_id");
     if (!enhancement_package_id || !enhancement_package_id[0]) {
-        if (recorded || obj_get(options, "enhancement_package_epoch")) {
+        if (recorded || recorded_hook || obj_get(options, "enhancement_package_epoch")) {
             snprintf(error, error_size,
                      "The package in the authentic package folder is an enhanced build.");
             return false;
         }
         return true;
     }
+    /* <timing id>+<hook id>: the timing package is the build's enhancement package and
+       the code-hook package rides beside it; any other variant carries no code-hook
+       package beside its one package. */
+    char timing[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    const char *plus = strchr(enhancement_package_id, '+');
+    size_t first = plus ? (size_t)(plus - enhancement_package_id) : strlen(enhancement_package_id);
+    if (first >= sizeof(timing)) first = sizeof(timing) - 1u;
+    memcpy(timing, enhancement_package_id, first);
+    timing[first] = '\0';
     const char *recorded_id = NULL;
-    if (!package_string(recorded, &recorded_id) ||
-        strcmp(recorded_id, enhancement_package_id) != 0) {
+    const char *recorded_hook_id = NULL;
+    bool hook_ok = plus ? package_string(recorded_hook, &recorded_hook_id) &&
+                              strcmp(recorded_hook_id, plus + 1) == 0
+                        : recorded_hook == NULL;
+    if (!package_string(recorded, &recorded_id) || strcmp(recorded_id, timing) != 0 || !hook_ok) {
         snprintf(error, error_size,
                  "The enhanced package was not built from enhancement package %s.",
                  enhancement_package_id);
@@ -5192,7 +5266,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         return NK_RUNTIME_PACKAGE_INCOMPATIBLE;
     }
     bool enhanced = enhancement_package_id && enhancement_package_id[0];
-    if (enhanced && !nk_title_manifest_enhancement_id_valid(enhancement_package_id)) {
+    if (enhanced && !nk_title_manifest_enhancement_variant_valid(enhancement_package_id)) {
         if (reason && reason_size) snprintf(reason, reason_size,
             "The enhancement package id is not a valid package name.");
         return NK_RUNTIME_PACKAGE_INCOMPATIBLE;

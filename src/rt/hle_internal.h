@@ -240,11 +240,10 @@ typedef struct {
     int nwaiters;
 } FplPool;
 
-/* Variable Pool (VPL): one SysMem partition block per pool, with a host-side first-fit
+/* Variable Pool (VPL): one SysMem partition block per pool, with a host-side free list
  * free list for the pool span, waiter queuing, and blocking allocation support (PR-G).
- * The pool's kernel header and exact PSP alignment are UNMEASURED; this implementation
- * exposes the requested span and uses 16-byte chunks, the smallest conservative
- * alignment for guest allocations. */
+ * The accounting is the PSP-B1-01 measurement (hle_kernel_memory.c: a 0x20-byte pool
+ * header, roundup(size, 8) + 8 bytes per block, carved from the top down). */
 #define VPL_MAX 16
 #define VPL_MAX_WAITERS 64
 typedef struct { uint32_t addr, size; } VplSpan;
@@ -252,8 +251,8 @@ typedef struct { uint32_t addr, size; } VplAlloc;
 typedef struct { uint32_t thread_uid; uint32_t size; } VplWaiter;
 /* The free spans (sorted by address) and the live blocks are host arrays that grow on
  * demand. A PSP keeps a block's header inside the pool, so only the pool's own bytes bound
- * how many blocks it holds; every block here is at least VPL_ALIGN bytes, which bounds
- * both arrays by size / VPL_ALIGN + 1. A fixed table made the 129th live block of a pool
+ * how many blocks it holds; every block here costs at least 16 bytes, which bounds
+ * both arrays by size / 16 + 1. A fixed table made the 129th live block of a pool
  * with free space read as exhausted, and a blocking AllocateVpl then never returned. */
 typedef struct {
     uint32_t base, size, block_uid;
@@ -422,7 +421,7 @@ typedef struct {
  * remembered delivery matches it, first time only:
  *   video  present time = guest time of the present
  *   audio  play time    = guest time of the submit + the host queue lead ahead of it
- * (sr_audio_queued() before the push, 44.1 kHz frames; no host queue (-1) is "not
+ * (hle_audio_play_lead() before the push, 44.1 kHz frames; no host queue (-1) is "not
  * measured" and is counted as such, it never reads as a lead of zero).
  * The per-stream presentation offset is play_time - pts (pts converted from 90 kHz to
  * microseconds), kept exactly in units of 1/9 microsecond because 1 tick = 100/9 us.  The A/V
@@ -438,7 +437,7 @@ typedef struct {
  * drawn); one whose render target is never presented stays pending and is counted.
  *
  * Nothing here changes behaviour: no guest memory is written, no time advances, and the
- * only host call on a match is one sr_audio_queued() read.  A delivery that is never
+ * only host call on a match is one hle_audio_play_lead() read.  A delivery that is never
  * presented/played (overwritten by a later delivery, pushed out of the ring, or still waiting
  * when the report is made) is counted, never hidden.
  *
@@ -556,6 +555,7 @@ typedef struct {
     uint8_t *host_frame;          /* one frame copied out of the guest ring */
     int host_frame_cap;           /* allocated size of host_frame */
     int16_t *host_pcm;            /* decode output staging, channels*2048 */
+    uint32_t ctxAddr;             /* guest context from _sceAtracGetContextAddress (#322), 0 = none */
 } Atrac;
 enum {
     UTILITY_SLOT_NONE = 0, UTILITY_SLOT_SAVEDATA, UTILITY_SLOT_MSG, UTILITY_SLOT_NETCONF,
@@ -759,6 +759,7 @@ typedef struct {
     FdKind kind;                 /* descriptor identity is independent of its number */
     uint8_t std_stream;          /* 0=stdin, 1=stdout, 2=stderr for FD_KIND_STD */
     uint8_t raw_umd;             /* 1 = UMD block device: size and off count 2048-byte sectors */
+    uint8_t on_umd;              /* 1 = a file of the disc, or one served in its place: a read takes the drive's time */
     uint32_t lba, size, off;
     int64_t async_res;
     int writable;
@@ -1214,8 +1215,11 @@ extern int s_psmf_av_test_queue;
 int64_t psmf_av_now_us(void);
 int psmf_av_queue_frames(int ch);
 /* The audio queue depth in frames the guest sees on `ch` (-1: no host output). Under the
- * deterministic clock it is a model that drains in guest time (#2037), not the host mixer's. */
+ * deterministic clock it is a model that drains in guest time (#2037), not the host mixer's.
+ * Otherwise it leaves out what the host mixer holds for its device (hle_audio.c). */
 int hle_audio_queued(int ch);
+/* The frames of `ch` not played yet, that hold included: when a pushed frame is heard. */
+int hle_audio_play_lead(int ch);
 void psmf_av_window_tick(int64_t now_us);
 void psmf_av_final(const char *reason);
 void psmf_av_exit_report(void);
@@ -1293,6 +1297,7 @@ extern int g_atrac_out_nbufs;
 void atrac_release_decoder(Atrac *a);
 extern int s_atrac_caps_configured;
 extern uint32_t s_atrac_slot_codec[8];
+void hle_atrac_context_reset(void);
 void dialog_lock(void);
 void dialog_unlock(void);
 extern int s_utility_slot;
@@ -1363,7 +1368,10 @@ int io_host_seek(FILE *host, uint32_t offset);
 int io_restore_truncated_gap(Fd *f);
 uint32_t h_IoWrite(CpuState *s);
 uint32_t h_IoRead(CpuState *s);
-uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence, const char *api, uint32_t *position);
+uint32_t io_read_now(CpuState *s);   /* the read itself, with no drive time: a queued request's completion */
+uint32_t hle_io_umd_read_us(uint64_t bytes);   /* how long the UMD drive takes to transfer that much (hle_io.c) */
+void hle_io_release_thread(uint32_t thread_uid);   /* a thread ended: abandon the disc fetch it waited for */
+uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence, const char *api, uint32_t *position, uint32_t *error_high);
 uint32_t h_IoLseek32(CpuState *s);
 /* The volatile-memory lock handlers (hle_kernel_memory.c); hle_power.c registers their scePower
  * aliases. */
@@ -1425,6 +1433,11 @@ void hle_state_sample_close(void);
 void hle_enhancement_speed_vblank(uint32_t vcount);
 extern GeCallback s_ge_cb[16];
 void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t user_arg);
+void ge_finish_release_owner(uint32_t owner);
+int ge_finish_masked_pending(void);
+void ge_finish_deliver_masked(CpuState *s);
+void ge_finish_from_ge_interrupt(void);
+void ge_finish_masked_reset_for_loadexec(void);
 void ge_sync_wake(void);
 extern GeListInfo s_ge_lists[GE_LIST_MAX];
 extern uint64_t s_ge_list_done_bits;
@@ -1474,6 +1487,7 @@ void hle_register_exit_game_handler(void);
 void hle_register_devkit_version_handler(void);
 void hle_register_ctrl_sampling_handlers(void);
 void hle_register_gpi_gpo_handlers(void);
+void hle_register_std_handle_handlers(void);
 void hle_register_mpeg_shared_handlers(void);
 void hle_register_mpeg_avc_decode_handler(void);
 void hle_register_mpeg_userdata_handlers(void);

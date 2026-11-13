@@ -72,6 +72,7 @@ CORE_SOURCES = [
     "src/core/nk_disc_verify.c",
     "src/core/nk_zip.c",
     "src/core/nk_steam_shortcuts.c",
+    "src/core/nk_data_migrate.c",
     "src/core/generated/nk_title_catalog.c",
 ]
 
@@ -223,6 +224,9 @@ class NativeHostBackendTests(unittest.TestCase):
         cls._objects["src/player/player_state.c"] = _compile_object(
             cls, "src/player/player_state.c", "player_state.o", ("-Isrc/player",)
         )
+        cls._objects["src/player/discord_presence.c"] = _compile_object(
+            cls, "src/player/discord_presence.c", "discord_presence.o", ("-Isrc/player",)
+        )
         cls._objects["src/player/input_settings.c"] = _compile_object(
             cls, "src/player/input_settings.c", "input_settings.o", ("-Isrc/player",)
         )
@@ -237,6 +241,11 @@ class NativeHostBackendTests(unittest.TestCase):
         )
         cls._objects["src/player/setup_staging.c"] = _compile_object(
             cls, "src/player/setup_staging.c", "setup_staging.o", ("-Isrc/player",)
+        )
+        # The texture pack reader: the player reads a title's pack as the runtime will
+        # (player_texture_pack_inspect), so player_state.c links against it.
+        cls._objects["src/rt/texrepl.c"] = _compile_object(
+            cls, "src/rt/texrepl.c", "texrepl.o"
         )
         harnesses = {
             "tests/native/test_launch_resolution.c": (),
@@ -275,10 +284,12 @@ class NativeHostBackendTests(unittest.TestCase):
             self, "tests/native/test_player_state.c", "test_player_state",
             extra_sources=(
                 "src/player/player_state.c",
+                "src/player/discord_presence.c",
                 "src/player/input_settings.c",
                 "src/player/iso_reader.c",
                 "src/player/package_builder.c",
                 "src/player/setup_staging.c",
+                "src/rt/texrepl.c",
             ),
             extra_runs=(
                 ("--validate-package", runtime_root, "ULUS99998", "SYNTH00001", "1",
@@ -571,7 +582,7 @@ class NativeHostBackendTests(unittest.TestCase):
         sites = {"if (!sdl3vk_poll()) gui_quit_request();": 2,
                  "if (msg.message == WM_QUIT) { gui_quit_request(); continue; }": 1,
                  "if (gpu_action == GUI_GPU_CLOSED) gui_quit_request();": 1,
-                 "if (present_result == 0) gui_quit_request();": 1,
+                 "if (cpu_result == 0) gui_quit_request();": 1,
                  "if (result == 0) gui_quit_request();": 1,
                  "if (!sdl3vk_poll()) return gui_pause_quit();": 1,
                  "if (presented == 0) return gui_pause_quit();": 1,
@@ -613,6 +624,107 @@ class NativeHostBackendTests(unittest.TestCase):
         teardown = driver.index("    sr_perf_shutdown();\n    gui_shutdown();\n    sr_trace_close();\n")
         self.assertGreater(teardown, driver.index("sched_run(entry, s.r[4], s.r[5]);"),
                            "the driver must tear down after the scheduler returns")
+
+
+class CoroutineAsmTargetTests(unittest.TestCase):
+    """The stack-switch routine in src/rt/sr_coro.c, assembled for each object format it
+    serves: ELF for Linux and Android, Mach-O for macOS (#329). Mach-O prefixes C names with an
+    underscore and has no .type or .size, so the ELF spelling does not assemble there. No macOS
+    SDK is needed: the source is preprocessed for each target with empty system headers (only
+    the top-level __asm__ statements are kept), and the extracted assembly is assembled by
+    clang's integrated assembler and its symbols read with llvm-nm and llvm-readobj. Android
+    and macOS select the routine themselves; glibc keeps ucontext unless SR_CORO_BACKEND_ASM
+    asks for the routine, as `make coro-selftest-asm` does."""
+
+    TARGETS = {
+        "arm64-apple-macos11": ("_sr_coro_stack_switch", "_sr_coro_call_with_stack"),
+        "x86_64-apple-macos11": ("_sr_coro_stack_switch", "_sr_coro_call_with_stack"),
+        "aarch64-linux-android29": ("sr_coro_stack_switch", "sr_coro_call_with_stack"),
+        "x86_64-linux-gnu": ("sr_coro_stack_switch", "sr_coro_call_with_stack"),
+    }
+    clang: ClassVar[str]
+    nm: ClassVar[str]
+    readobj: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        clang = shutil.which("clang")
+        if clang is None:
+            raise unittest.SkipTest("clang is unavailable; the cross-assembly check did not run")
+        tool_dir = Path(os.path.realpath(clang)).parent
+
+        def llvm_tool(name: str) -> str:
+            found = next((str(candidate) for candidate in (tool_dir / name, tool_dir / f"{name}.exe")
+                          if candidate.is_file()), shutil.which(name))
+            if found is None:
+                raise unittest.SkipTest(f"{name} is unavailable; the cross-assembly check did not run")
+            return found
+
+        cls.clang, cls.nm, cls.readobj = clang, llvm_tool("llvm-nm"), llvm_tool("llvm-readobj")
+
+    def _assembly(self, target: str, stubs: Path) -> str:
+        source = ROOT / "src" / "rt" / "sr_coro.c"
+        for header in re.findall(r"#include <([^>]+)>",
+                                 source.read_text(encoding="utf-8")
+                                 + (ROOT / "src" / "rt" / "sr_coro.h").read_text(encoding="utf-8")):
+            (stubs / header).parent.mkdir(parents=True, exist_ok=True)
+            (stubs / header).touch()
+        selection = ["-DSR_CORO_BACKEND_ASM"] if target.endswith("-linux-gnu") else []
+        completed = subprocess.run(
+            [self.clang, f"--target={target}", "-E", "-P", "-nostdinc", f"-I{stubs}",
+             f"-I{ROOT / 'src' / 'rt'}", *selection, str(source)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        blocks = re.findall(r"^__asm__\((.*?)\);", completed.stdout, flags=re.M | re.S)
+        literals = [re.findall(r'"((?:[^"\\]|\\.)*)"', block) for block in blocks]
+        return "".join(part.encode("latin-1").decode("unicode_escape")
+                       for block in literals for part in block)
+
+    def test_each_target_assembles_the_routine_under_its_own_names(self) -> None:
+        for target, symbols in self.TARGETS.items():
+            with self.subTest(target=target), tempfile.TemporaryDirectory(
+                    prefix="nakagawa-coro-asm-") as temp:
+                directory = Path(temp)
+                (directory / "include").mkdir()
+                assembly = self._assembly(target, directory / "include")
+                self.assertTrue(assembly, f"{target} selects no stack-switch routine")
+                (directory / "coro.s").write_text(assembly, encoding="utf-8")
+                assembled = subprocess.run(
+                    [self.clang, f"--target={target}", "-c", str(directory / "coro.s"),
+                     "-o", str(directory / "coro.o")],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(assembled.returncode, 0, assembled.stderr)
+                # Each routine is a defined, hidden text symbol: no other image binds to it.
+                for symbol in symbols:
+                    if "apple" in target:
+                        self.assertIn(f"(__TEXT,__text) private external {symbol}",
+                                      self._run(self.nm, "-m", directory / "coro.o"))
+                    else:
+                        listing = self._run(self.readobj, "--symbols", directory / "coro.o")
+                        block = re.search(r"Name: " + re.escape(symbol) + r" \(.*?\n  \}",
+                                          listing, flags=re.S)
+                        self.assertIsNotNone(block, listing)
+                        assert block is not None
+                        for expected in ("Type: Function", "STV_HIDDEN", "Section: .text"):
+                            self.assertIn(expected, block.group(0), symbol)
+
+    def _run(self, *command: object) -> str:
+        completed = subprocess.run([str(part) for part in command],
+                                   capture_output=True, text=True, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout
+
+    def test_apple_assembly_carries_no_elf_directive(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nakagawa-coro-asm-") as temp:
+            assembly = self._assembly("arm64-apple-macos11", Path(temp))
+        self.assertTrue(assembly.strip(), "no coroutine routine was produced for Apple")
+        self.assertNotIn(".type", assembly)
+        self.assertNotIn(".size", assembly)
+        self.assertNotIn(".hidden", assembly)
+        self.assertNotRegex(assembly, r"\bx18\b")
 
 
 if __name__ == "__main__":

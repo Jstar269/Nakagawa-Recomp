@@ -67,6 +67,18 @@ typedef struct {
     bool shifted;            /* the letters show, and type, in upper case */
 } UiKeyboard;
 
+/* One frame's presses of the pad's shortcuts (X or Square, Y or Triangle, L or R, Start,
+   B). A screen that draws something before the keyboard that would take them first (the
+   library's top bar takes L / R and Start) takes them with ui_keyboard_take_pad before
+   drawing it and hands them to ui_keyboard_draw. */
+typedef struct {
+    bool remove; /* X or Square: delete */
+    bool space;  /* Y or Triangle: a space */
+    bool shift;  /* L or R */
+    bool done;   /* Start */
+    bool back;   /* B, Esc: Cancel */
+} UiKeyboardPad;
+
 /* How one keyboard is drawn: its ids and its two closing keys' words. */
 typedef struct {
     NkUiId key_base;          /* + the key's place: UI_KEYBOARD_KEY_COUNT focusable ids */
@@ -75,6 +87,7 @@ typedef struct {
     NkUiId cancel_id;
     const char *done_label;   /* "Done" when NULL */
     const char *cancel_label; /* "Cancel" when NULL */
+    const UiKeyboardPad *pad; /* taken earlier this frame; NULL: taken while it is drawn */
 } UiKeyboardView;
 
 typedef enum {
@@ -103,6 +116,9 @@ uint32_t ui_keyboard_key_char(unsigned place, bool shifted);
 /* `codepoint` in UTF-8 in out (at least 5 bytes, NUL-terminated); its length, or 0 for
    a surrogate or a value past U+10FFFF. */
 size_t ui_keyboard_utf8(uint32_t codepoint, char *out);
+
+/* Takes this frame's pad shortcuts into `pad`, so nothing drawn after this sees them. */
+void ui_keyboard_take_pad(NkUi *ui, UiKeyboardPad *pad);
 
 /* Draws the keyboard in the open container and answers this frame's presses: a key
    types or deletes through the rules above, Shift turns the letter case over, and the

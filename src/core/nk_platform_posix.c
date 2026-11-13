@@ -18,10 +18,12 @@
 #define _FILE_OFFSET_BITS 64
 
 #include "nk_platform.h"
+#include "nk_data_migrate.h"
 #include "nk_types.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -514,19 +516,11 @@ static bool resolve_rooted_path(const char *root, NkPathType type, char sep, cha
     return written > 0 && (size_t)written < max_len;
 }
 
-static bool resolve_posix_path(NkPathType type, char *out_path, size_t max_len) {
-    if (!out_path || max_len == 0) return false;
-    if (s_app_data_dir_override[0]) {
-        return resolve_rooted_path(s_app_data_dir_override, type, '/', out_path, max_len);
-    }
-
-#if defined(__ANDROID__)
-    /* No HOME or XDG folders on Android: the per-user folders are in the app's private files
-       folder, which the activity names in NK_ANDROID_DATA_DIR, laid out as an override is. */
-    const char *android_root = getenv("NK_ANDROID_DATA_DIR");
-    if (!android_root || !android_root[0]) return false;
-    return resolve_rooted_path(android_root, type, '/', out_path, max_len);
-#elif defined(__APPLE__)
+#if !defined(__ANDROID__)
+/* The default per-user folders from before #324, resolved exactly as they were until then: the
+   layout an existing Linux or macOS install keeps (nk_data_migrate.h). */
+static bool resolve_old_layout_path(NkPathType type, char *out_path, size_t max_len) {
+#if defined(__APPLE__)
     const char *home = getenv("HOME");
     if (!home) return false;
     int written = 0;
@@ -601,8 +595,184 @@ static bool resolve_posix_path(NkPathType type, char *out_path, size_t max_len) 
     }
 #endif
 
-#if !defined(__ANDROID__)
     return written > 0 && (size_t)written < max_len;
+}
+
+static bool join_path(char *out, size_t cap, const char *base, const char *rest) {
+    int written = snprintf(out, cap, "%s%s", base, rest);
+    return written > 0 && (size_t)written < cap;
+}
+
+#if !defined(__APPLE__)
+/* An XDG base folder: the variable when it is set to an absolute path (trailing '/' dropped), else
+   HOME and the default below it. A relative value is ignored, as the XDG Base Directory
+   specification says. False when neither is usable or the path does not fit. */
+static bool xdg_base(const char *variable, const char *below_home, char *out, size_t cap) {
+    const char *value = getenv(variable);
+    if (value && value[0] == '/') {
+        size_t length = strlen(value);
+        while (length > 1u && value[length - 1u] == '/') length--;
+        if (length >= cap) return false;
+        memcpy(out, value, length);
+        out[length] = '\0';
+        return true;
+    }
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) return false;
+    return join_path(out, cap, home, below_home);
+}
+#endif
+
+/* The default per-user folders of a fresh install (#324): settings, data and saves in `Nakagawa`
+   in the host's data base, beside each other as on Windows. macOS keeps its cache and logs there
+   too; Linux keeps them in the XDG cache and state homes, where they always were. */
+static bool resolve_new_layout_path(NkPathType type, char *out_path, size_t max_len) {
+#if defined(__APPLE__)
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) return false;
+    const char *rest = NULL;
+    switch (type) {
+        case NK_PATH_CONFIG: rest = "/Library/Application Support/Nakagawa/config"; break;
+        case NK_PATH_DATA:   rest = "/Library/Application Support/Nakagawa/data"; break;
+        case NK_PATH_SAVES:  rest = "/Library/Application Support/Nakagawa/saves"; break;
+        case NK_PATH_CACHE:  rest = "/Library/Application Support/Nakagawa/cache"; break;
+        case NK_PATH_LOGS:   rest = "/Library/Application Support/Nakagawa/logs"; break;
+        default: return false;
+    }
+    return join_path(out_path, max_len, home, rest);
+#else
+    char base[NK_MAX_PATH];
+    switch (type) {
+        case NK_PATH_CACHE:
+            return xdg_base("XDG_CACHE_HOME", "/.cache", base, sizeof(base)) &&
+                   join_path(out_path, max_len, base, "/nakagawa-recomp");
+        case NK_PATH_LOGS:
+            return xdg_base("XDG_STATE_HOME", "/.local/state", base, sizeof(base)) &&
+                   join_path(out_path, max_len, base, "/nakagawa-recomp/logs");
+        case NK_PATH_CONFIG:
+            return xdg_base("XDG_DATA_HOME", "/.local/share", base, sizeof(base)) &&
+                   join_path(out_path, max_len, base, "/Nakagawa/config");
+        case NK_PATH_DATA:
+            return xdg_base("XDG_DATA_HOME", "/.local/share", base, sizeof(base)) &&
+                   join_path(out_path, max_len, base, "/Nakagawa/data");
+        case NK_PATH_SAVES:
+            return xdg_base("XDG_DATA_HOME", "/.local/share", base, sizeof(base)) &&
+                   join_path(out_path, max_len, base, "/Nakagawa/saves");
+        default:
+            return false;
+    }
+#endif
+}
+
+/* A layout exists, as nk_data_migrate.h defines it: its settings, data or saves folder is present
+   by lstat (an empty folder or a dangling link counts; nothing inside is read). */
+static bool layout_exists(const NkDataLayoutFolders *folders) {
+    static const NkPathType kinds[3] = {NK_PATH_CONFIG, NK_PATH_DATA, NK_PATH_SAVES};
+    for (size_t i = 0; i < 3u; ++i) {
+        struct stat st;
+        const char *path = folders->path[kinds[i]];
+        if (path[0] && lstat(path, &st) == 0) return true;
+    }
+    return false;
+}
+
+static void layout_folders(bool old, NkDataLayoutFolders *folders) {
+    memset(folders, 0, sizeof(*folders));
+    for (int type = NK_PATH_CONFIG; type <= NK_PATH_SAVES; ++type) {
+        char *path = folders->path[type];
+        bool named = old ? resolve_old_layout_path((NkPathType)type, path, NK_MAX_PATH)
+                         : resolve_new_layout_path((NkPathType)type, path, NK_MAX_PATH);
+        if (!named) path[0] = '\0';
+    }
+    folders->exists = layout_exists(folders);
+}
+
+/* The layout in use, decided by the rule (nk_data_migrate.h) the first time a folder is looked up
+   and kept for the run. Only a change of HOME or an XDG variable the rule reads makes it decide
+   again, which a test does between its cases and a start never does. */
+static pthread_mutex_t s_layout_lock = PTHREAD_MUTEX_INITIALIZER;
+static NkUserDataLayout s_layout;
+static char *s_layout_key = NULL; /* HOME, XDG_DATA_HOME and XDG_CONFIG_HOME as last decided */
+
+/* Whether the variables the rule reads are the ones it decided with: each as '-' (unset) or '='
+   and its value, one per line, compared in place without a copy. */
+static bool layout_key_matches(const char *key) {
+    static const char *const variables[3] = {"HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"};
+    if (!key) return false;
+    for (size_t i = 0; i < 3u; ++i) {
+        const char *value = getenv(variables[i]);
+        if (*key++ != (value ? '=' : '-')) return false;
+        size_t length = value ? strlen(value) : 0u;
+        if (value && strncmp(key, value, length) != 0) return false;
+        key += length;
+        if (*key++ != '\n') return false;
+    }
+    return *key == '\0';
+}
+
+static char *layout_key_make(void) {
+    static const char *const variables[3] = {"HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"};
+    size_t size = 1u;
+    for (size_t i = 0; i < 3u; ++i) {
+        const char *value = getenv(variables[i]);
+        size += 2u + (value ? strlen(value) : 0u);
+    }
+    char *key = (char *)malloc(size);
+    if (!key) return NULL;
+    key[0] = '\0';
+    for (size_t i = 0; i < 3u; ++i) {
+        const char *value = getenv(variables[i]);
+        size_t used = strlen(key);
+        (void)snprintf(key + used, size - used, "%c%s\n", value ? '=' : '-', value ? value : "");
+    }
+    return key;
+}
+
+/* Decides when needed; returns the decision under the lock into *out when it is not NULL. Out of
+   memory for the key, the decision is still made and used, and made again at the next lookup. */
+static bool layout_old_in_use(NkUserDataLayout *out) {
+    pthread_mutex_lock(&s_layout_lock);
+    if (!layout_key_matches(s_layout_key)) {
+        layout_folders(false, &s_layout.new_layout);
+        layout_folders(true, &s_layout.old_layout);
+        s_layout.old_in_use = s_layout.old_layout.exists;
+        free(s_layout_key);
+        s_layout_key = layout_key_make();
+    }
+    bool old = s_layout.old_in_use;
+    if (out) *out = s_layout;
+    pthread_mutex_unlock(&s_layout_lock);
+    return old;
+}
+#endif
+
+static bool resolve_posix_path(NkPathType type, char *out_path, size_t max_len) {
+    if (!out_path || max_len == 0) return false;
+    if (s_app_data_dir_override[0]) {
+        return resolve_rooted_path(s_app_data_dir_override, type, '/', out_path, max_len);
+    }
+
+#if defined(__ANDROID__)
+    /* No HOME or XDG folders on Android: the per-user folders are in the app's private files
+       folder, which the activity names in NK_ANDROID_DATA_DIR, laid out as an override is. */
+    const char *android_root = getenv("NK_ANDROID_DATA_DIR");
+    if (!android_root || !android_root[0]) return false;
+    return resolve_rooted_path(android_root, type, '/', out_path, max_len);
+#else
+    return layout_old_in_use(NULL) ? resolve_old_layout_path(type, out_path, max_len)
+                                   : resolve_new_layout_path(type, out_path, max_len);
+#endif
+}
+
+bool nk_platform_user_data_layout(struct NkUserDataLayout *out) {
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+#if defined(__ANDROID__)
+    return false;
+#else
+    if (s_app_data_dir_override[0]) return false;
+    (void)layout_old_in_use(out);
+    return true;
 #endif
 }
 
@@ -640,6 +810,27 @@ bool nk_platform_get_app_data_dir(char *out_path, size_t max_len) {
     return nk_platform_get_path(NK_PATH_DATA, out_path, max_len);
 }
 
+bool nk_platform_real_path(const char *path, char *out_path, size_t max_len) {
+    return nk_platform_absolute_path(path, out_path, max_len);
+}
+
+FILE *nk_platform_open_regular_file(const char *path) {
+    if (!path || !*path) return NULL;
+    /* O_NONBLOCK: opening a FIFO must not wait for a writer before it is refused. */
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) return NULL;
+    struct stat st;
+    int flags = fcntl(fd, F_GETFL);
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || flags < 0 ||
+        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) != 0) {
+        close(fd);
+        return NULL;
+    }
+    FILE *file = fdopen(fd, "rb");
+    if (!file) close(fd);
+    return file;
+}
+
 bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len) {
     (void)out_path;
     (void)max_len;
@@ -654,6 +845,62 @@ bool nk_platform_get_desktop_dir(char *out_path, size_t max_len) {
     int written = snprintf(out_path, max_len, "%s/Desktop", home);
     if (written > 0 && (size_t)written < max_len && nk_platform_dir_exists(out_path)) return true;
     written = snprintf(out_path, max_len, "%s", home);
+    if (written > 0 && (size_t)written < max_len && nk_platform_dir_exists(out_path)) return true;
+    out_path[0] = '\0';
+    return false;
+}
+
+/* The folder user-dirs.dirs names for key ("XDG_DOWNLOAD_DIR" and so on): a line
+   KEY="$HOME/<path>" or KEY="/<path>", as xdg-user-dirs writes it. */
+static bool posix_xdg_user_dir(const char *key, const char *home, char *out_path,
+                               size_t max_len) {
+    char config[4096];
+    char line[4096];
+    const char *config_home = getenv("XDG_CONFIG_HOME");
+    size_t key_length = strlen(key);
+    bool found = false;
+    int written = config_home && config_home[0] == '/'
+        ? snprintf(config, sizeof(config), "%s/user-dirs.dirs", config_home)
+        : snprintf(config, sizeof(config), "%s/.config/user-dirs.dirs", home);
+    if (written <= 0 || (size_t)written >= sizeof(config)) return false;
+    FILE *file = fopen(config, "r");
+    if (!file) return false;
+    while (!found && fgets(line, sizeof(line), file)) {
+        char *value = line + key_length + 2;
+        char *end;
+        if (strncmp(line, key, key_length) != 0 || line[key_length] != '=' ||
+            line[key_length + 1] != '"' || (end = strchr(value, '"')) == NULL)
+            continue;
+        *end = '\0';
+        if (strncmp(value, "$HOME", 5) == 0 && (value[5] == '/' || value[5] == '\0'))
+            written = snprintf(out_path, max_len, "%s%s", home, value + 5);
+        else if (value[0] == '/')
+            written = snprintf(out_path, max_len, "%s", value);
+        else
+            continue;
+        found = written > 0 && (size_t)written < max_len;
+    }
+    fclose(file);
+    return found;
+}
+
+bool nk_platform_get_personal_dir(NkPersonalDir which, char *out_path, size_t max_len) {
+    static const char *const names[NK_PERSONAL_COUNT] = {
+        "Documents", "Downloads", "Music", "Pictures", "Videos", "Desktop"
+    };
+    static const char *const keys[NK_PERSONAL_COUNT] = {
+        "XDG_DOCUMENTS_DIR", "XDG_DOWNLOAD_DIR", "XDG_MUSIC_DIR", "XDG_PICTURES_DIR",
+        "XDG_VIDEOS_DIR", "XDG_DESKTOP_DIR"
+    };
+    if (!out_path || max_len == 0) return false;
+    out_path[0] = '\0';
+    if ((unsigned)which >= (unsigned)NK_PERSONAL_COUNT) return false;
+    const char *home = getenv("HOME");
+    if (!home || !*home) return false;
+    if (posix_xdg_user_dir(keys[which], home, out_path, max_len) &&
+        nk_platform_dir_exists(out_path))
+        return true;
+    int written = snprintf(out_path, max_len, "%s/%s", home, names[which]);
     if (written > 0 && (size_t)written < max_len && nk_platform_dir_exists(out_path)) return true;
     out_path[0] = '\0';
     return false;
@@ -1129,8 +1376,21 @@ static void android_import_environment(JNIEnv *env) {
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     jsize count = entries ? (*env)->GetArrayLength(env, entries) : 0;
     for (jsize i = 0; i < count; i++) {
+        /* No JNI call may follow one that left an exception pending: each is cleared here,
+           and the entry it concerns is named in the log as not applied. */
         jstring entry = (jstring)(*env)->GetObjectArrayElement(env, entries, i);
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            __android_log_print(ANDROID_LOG_ERROR, "nakagawa", "NK_ENV_IMPORT_FAILED entry=%d", (int)i);
+            continue;
+        }
         const char *text = entry ? (*env)->GetStringUTFChars(env, entry, NULL) : NULL;
+        if (entry && !text) {   /* GetStringUTFChars threw OutOfMemoryError */
+            (*env)->ExceptionClear(env);
+            __android_log_print(ANDROID_LOG_ERROR, "nakagawa", "NK_ENV_IMPORT_FAILED entry=%d", (int)i);
+            (*env)->DeleteLocalRef(env, entry);
+            continue;
+        }
         const char *eq = text ? strchr(text, '=') : NULL;
         if (eq && eq != text && (size_t)(eq - text) < 256u) {
             char name[256];
@@ -1143,6 +1403,17 @@ static void android_import_environment(JNIEnv *env) {
     }
     if (entries) (*env)->DeleteLocalRef(env, entries);
     (*env)->DeleteLocalRef(env, host);
+}
+
+/* LauncherActivity.nativeImportEnvironment, on SDL's thread just before the player's main():
+   the variables NakagawaHost set after this library loaded (a toolchain unpacked on this start
+   sets its own then), applied to this library's libc as JNI_OnLoad applied the earlier ones. */
+JNIEXPORT void JNICALL Java_io_github_jstar269_nakagawa_LauncherActivity_nativeImportEnvironment(
+    JNIEnv *env, jclass cls);
+JNIEXPORT void JNICALL Java_io_github_jstar269_nakagawa_LauncherActivity_nativeImportEnvironment(
+    JNIEnv *env, jclass cls) {
+    (void)cls;
+    android_import_environment(env);
 }
 
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
@@ -1401,6 +1672,8 @@ void nk_platform_close_process(NkProcessHandle *process) {
 static int s_android_log_pipe[2] = { -1, -1 };
 static char s_android_log_tag[32] = "nakagawa";
 static FILE *s_android_log_file;
+static pthread_t s_android_log_thread;
+static bool s_android_log_thread_running;
 
 static void *android_log_pump(void *arg) {
     (void)arg;
@@ -1408,6 +1681,7 @@ static void *android_log_pump(void *arg) {
     size_t used = 0;
     for (;;) {
         ssize_t n = read(s_android_log_pipe[0], buf + used, sizeof(buf) - 1u - used);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) break;
         used += (size_t)n;
         size_t start = 0;
@@ -1429,6 +1703,14 @@ static void *android_log_pump(void *arg) {
             used = 0;
         }
     }
+    if (used > 0) {   /* a last line with no newline */
+        buf[used] = '\0';
+        __android_log_write(ANDROID_LOG_INFO, s_android_log_tag, buf);
+        if (s_android_log_file) {
+            fprintf(s_android_log_file, "%s\n", buf);
+            fflush(s_android_log_file);
+        }
+    }
     return NULL;
 }
 
@@ -1437,13 +1719,19 @@ bool nk_platform_host_startup(const char *log_tag) {
     if (log_tag && log_tag[0]) snprintf(s_android_log_tag, sizeof(s_android_log_tag), "%s", log_tag);
     const char *log_path = getenv("NK_ANDROID_LOG_FILE");
     if (log_path && log_path[0]) s_android_log_file = fopen(log_path, "a");
-    if (s_android_log_pipe[0] < 0 && pipe(s_android_log_pipe) == 0) {
+    /* O_CLOEXEC: a child the runtime starts keeps no copy of the pipe's own write end, which would
+       hold off the end of file nk_platform_host_shutdown waits for. The standard streams it gets
+       are dup2() copies, inherited as on the desktop. */
+    if (s_android_log_pipe[0] < 0 && pipe2(s_android_log_pipe, O_CLOEXEC) == 0) {
         pthread_t thread;
         setvbuf(stdout, NULL, _IOLBF, 0);
         setvbuf(stderr, NULL, _IOLBF, 0);
         (void)dup2(s_android_log_pipe[1], STDOUT_FILENO);
         (void)dup2(s_android_log_pipe[1], STDERR_FILENO);
-        if (pthread_create(&thread, NULL, android_log_pump, NULL) == 0) pthread_detach(thread);
+        if (pthread_create(&thread, NULL, android_log_pump, NULL) == 0) {
+            s_android_log_thread = thread;
+            s_android_log_thread_running = true;
+        }
     }
     /* SDL_GetBasePath() is "./" on Android: the folder the app unpacked its bundled files to
        (fonts) is made the working directory so that relative base resolves there. */
@@ -1455,11 +1743,35 @@ bool nk_platform_host_startup(const char *log_tag) {
     }
     return true;
 }
+
+void nk_platform_host_shutdown(void) {
+    if (!s_android_log_thread_running) return;
+    s_android_log_thread_running = false;
+    fflush(stdout);
+    fflush(stderr);
+    /* The pump reads until every write end is closed: the two standard streams and the pipe's
+       own. Then it has written every line, and it ends. */
+    int null_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (null_fd >= 0) {
+        (void)dup2(null_fd, STDOUT_FILENO);
+        (void)dup2(null_fd, STDERR_FILENO);
+        close(null_fd);
+    }
+    close(s_android_log_pipe[1]);
+    s_android_log_pipe[1] = -1;
+    (void)pthread_join(s_android_log_thread, NULL);
+    if (s_android_log_file) {
+        fclose(s_android_log_file);
+        s_android_log_file = NULL;
+    }
+}
 #else
 bool nk_platform_host_startup(const char *log_tag) {
     (void)log_tag;
     return true;
 }
+
+void nk_platform_host_shutdown(void) {}
 #endif
 
 bool nk_platform_local_time_zone(int *standard_minutes, bool *daylight_now) {
@@ -1510,6 +1822,10 @@ bool nk_platform_is_path_separator(char c) {
     return c == '/';
 }
 
+bool nk_platform_path_is_absolute(const char *path) {
+    return path != NULL && path[0] == '/';
+}
+
 bool nk_platform_path_chars_equal(char a, char b) {
     return a == b;
 }
@@ -1522,8 +1838,53 @@ const char *nk_platform_env_user_name(void) {
     return getenv("USER");
 }
 
+int nk_platform_env_utf8(const char *name, char *out, size_t cap) {
+    if (!out || cap == 0) return -1;
+    out[0] = '\0';
+    const char *value = name ? getenv(name) : NULL;
+    if (!value) return 0;
+    const size_t n = strlen(value);
+    if (n >= cap) return -1;
+    memcpy(out, value, n + 1u);
+    return 1;
+}
+
 unsigned long nk_platform_process_id(void) {
     return (unsigned long)getpid();
+}
+
+/* Local pipes are unsupported on POSIX: every open fails and the caller's feature stays
+   off. */
+bool nk_platform_local_pipe_supported(void) {
+    return false;
+}
+
+bool nk_platform_local_pipe_open(NkLocalPipe *pipe, const char *name) {
+    (void)name;
+    if (pipe) memset(pipe, 0, sizeof(*pipe));
+    return false;
+}
+
+bool nk_platform_local_pipe_write(NkLocalPipe *pipe, const void *data, size_t len,
+                                  unsigned timeout_ms) {
+    (void)pipe;
+    (void)data;
+    (void)len;
+    (void)timeout_ms;
+    return false;
+}
+
+long nk_platform_local_pipe_read(NkLocalPipe *pipe, void *buf, size_t cap) {
+    (void)pipe;
+    (void)buf;
+    (void)cap;
+    return -1;
+}
+
+void nk_platform_local_pipe_close(NkLocalPipe *pipe) {
+    if (!pipe) return;
+    pipe->handle = NULL;
+    pipe->open = false;
 }
 
 int nk_platform_last_os_error(void) {

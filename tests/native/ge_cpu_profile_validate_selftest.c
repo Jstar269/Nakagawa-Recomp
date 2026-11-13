@@ -1473,6 +1473,213 @@ static void test_ge_wide_fill(void) {
     free(on);
 }
 
+/* The GE clock charges a sprite for the columns ge.c rasterizes (#2193): on a 512 stride a
+ * scissor to x 511 times the 32 columns past 480 too, on a 500 stride the 20 up to its last
+ * column, and on a 480 stride 480 columns, as before. One through-mode sprite, x 0-512, rows
+ * 0-15, no texture, wing off. */
+static double wide_raster_sprite_clk(uint32_t fbw, uint32_t x2) {
+    const uint32_t through = (7u << 2) | (3u << 7) | (1u << 23);
+    memset(SR_HOST(WIDE_VRAM), 0, WIDE_VRAM_SIZE);
+    s_pc = LIST_WIDE;
+    s_wide_vc = WIDE_VERTS;
+    W(0x10, 0x080000u);
+    W(0x13, 0u);
+    W(0x9C, WIDE_FB & 0x00FFFFFFu);
+    W(0x9D, fbw);
+    W(0xD2, 3u);
+    W(0x15, 0u);
+    W(0x16, (271u << 10) | 511u);
+    W(0xD4, 0u);
+    W(0xD5, (271u << 10) | x2);
+    for (uint32_t cmd = 0x17; cmd <= 0x28; cmd++) W(cmd, 0u);   /* every unit off */
+    W(0x50, 0u);
+    const uint32_t at = s_wide_vc;
+    wide_vtx(WIDE_BAR, 0.0f, 0.0f);
+    wide_vtx(WIDE_BAR, 512.0f, 16.0f);
+    W(0x12, through);
+    W(0x01, at & 0x00FFFFFFu);
+    W(0x04, (6u << 16) | 2u);
+    W(0x0F, 0u);
+    W(0x0C, 0u);
+    expect(ge_run_list(LIST_WIDE, 0) == 0, "wide_raster_clk", "list did not reach END");
+    return ge_timing_run_clk();
+}
+
+static void test_ge_wide_raster_timing(void) {
+    ge_wide_set_wing(0);
+    ge_timing_set_enabled(1);
+    const double wide = wide_raster_sprite_clk(512u, 511u);
+    const double screen = wide_raster_sprite_clk(512u, 479u);
+    const double narrow = wide_raster_sprite_clk(480u, 511u);
+    const double mid = wide_raster_sprite_clk(500u, 511u);
+    const double small = wide_raster_sprite_clk(256u, 479u);
+    ge_timing_set_enabled(0);
+    if (!(screen > 0.0 && wide > screen && narrow == screen && mid > screen && mid < wide &&
+          small > 0.0 && small < screen)) {
+        fprintf(stderr, "wide_raster_clk: GE clock %.3f (512 stride, x2 511), %.3f (512 stride, x2 479), "
+                        "%.3f (480 stride, x2 511), %.3f (500 stride, x2 511), %.3f (256 stride, x2 479)\n",
+                wide, screen, narrow, mid, small);
+        expect(0, "wide_raster_clk",
+               "a 512 scissor times 512 columns on a 512 stride, 500 on a 500 stride, 480 on a 480 stride, "
+               "and 256 on a 256 stride");
+    }
+}
+
+/* Every raster write stays inside the buffer it writes (#2193): colour inside the target's
+ * stride, depth inside the depth buffer's zbw columns and 272 rows. Column x of row y is guest
+ * address (y * stride + x), so a write past the stride lands in the next row, or past the last
+ * row. Three cells, software rasterizer, wing off:
+ *   colour: a 256-stride 8888 target, scissor x2 479, a sprite x 0-512 on rows 100-109. Rows
+ *     100-109 must hold it in columns 0-255, and nothing else may change: not row 110, not the
+ *     row past the buffer.
+ *   depth: a 512-stride target with a 256-wide depth buffer, cleared to depth A, then a
+ *     depth-writing sprite (ALWAYS, depth B) on rows 0-9 at x 256-511, outside the depth
+ *     buffer's columns. Every depth pixel must still hold A, and the row past the buffer its
+ *     sentinel.
+ *   clear: a depth clear (depth C) under a scissor of x 0-99 must write columns 0-99 only. */
+#define RSB_FB         0x04000000u
+#define RSB_ZB         0x04100000u
+#define RSB_BG         0x5a5a5a5au
+#define RSB_SPRITE     0xff3080c0u
+#define RSB_DEPTH_SENT 0x1234u
+#define RSB_DEPTH_A    0x4000u
+#define RSB_DEPTH_B    0x0100u
+#define RSB_DEPTH_C    0x7777u
+
+static void rsb_vtx(uint32_t color, float x, float y, float z) {
+    uint8_t *d = (uint8_t *)SR_HOST(s_wide_vc);
+    const float pos[3] = { x, y, z };
+    memcpy(d, &color, 4);
+    memcpy(d + 4, pos, 12);
+    s_wide_vc += 16u;
+}
+
+static void rsb_sprite(uint32_t color, float x0, float y0, float x1, float y1, float z) {
+    const uint32_t at = s_wide_vc;
+    rsb_vtx(color, x0, y0, z);
+    rsb_vtx(color, x1, y1, z);
+    W(0x01, at & 0x00FFFFFFu);
+    W(0x04, (6u << 16) | 2u);
+}
+
+/* The list's state: an 8888 target at RSB_FB with stride fbw, depth at RSB_ZB with stride
+ * zbw, every unit off, depth writes on with the test ALWAYS (enabled per cell), the region the
+ * whole 512x272 and the scissor x 0 to scis_x2 on every row. */
+static void rsb_begin(uint32_t fbw, uint32_t zbw, uint32_t scis_x2) {
+    s_pc = LIST_WIDE;
+    s_wide_vc = WIDE_VERTS;
+    W(0x10, 0x080000u);
+    W(0x13, 0u);
+    W(0x9C, RSB_FB & 0x00FFFFFFu);
+    W(0x9D, fbw | ((RSB_FB & 0xFF000000u) >> 8));
+    W(0x9E, RSB_ZB & 0x00FFFFFFu);
+    W(0x9F, zbw | ((RSB_ZB & 0xFF000000u) >> 8));
+    W(0xD2, 3u);
+    W(0x15, 0u);
+    W(0x16, (271u << 10) | 511u);
+    W(0xD4, 0u);
+    W(0xD5, (271u << 10) | scis_x2);
+    for (uint32_t cmd = 0x17; cmd <= 0x28; cmd++) W(cmd, 0u);   /* every unit off */
+    W(0xE8, 0u);                                                  /* colour and alpha masks open */
+    W(0xE9, 0u);
+    W(0xD3, 0u);
+    W(0xE7, 0u);                                                  /* depth writes on */
+    W(0xDE, 1u);                                                  /* depth test ALWAYS */
+    W(0x50, 0u);
+    W(0x12, (7u << 2) | (3u << 7) | (1u << 23));                  /* 8888, float, through */
+}
+
+static void rsb_end(const char *scenario) {
+    W(0x0F, 0u);
+    W(0x0C, 0u);
+    expect(ge_run_list(LIST_WIDE, 0) == 0, scenario, "list did not reach END");
+}
+
+static uint32_t rsb_fb(uint32_t linear) {
+    uint32_t v;
+    memcpy(&v, SR_HOST(RSB_FB + linear * 4u), 4);
+    return v;
+}
+
+/* Guest depth pixel `linear` (y * zbw + x), at the address ge.c's depth surface uses for it. */
+static void *rsb_depth(uint32_t linear) {
+    return SR_HOST((RSB_ZB + linear * 2u) ^ 0x2040u);
+}
+
+/* A CPU write of guest depth: ge.c's cached surface over it is stale, as after a guest store. */
+static void rsb_fill_depth(uint32_t pixels, uint16_t z) {
+    for (uint32_t i = 0; i < pixels; i++) memcpy(rsb_depth(i), &z, 2);
+    ge_zbuf_invalidate_guest_span(RSB_ZB, pixels * 2u + 0x2040u);
+}
+
+/* Columns below `cols` hold `inside`, the rest `outside`, and the row past the buffer the
+ * sentinel, once ge.c has written its depth surface back to guest memory. */
+static void rsb_check_depth(const char *scenario, uint32_t zbw, uint32_t cols, uint16_t inside,
+                            uint16_t outside) {
+    if (!ge_zbuf_materialize_current()) {
+        expect(0, scenario, "the depth surface was not written back to guest memory");
+        return;
+    }
+    for (uint32_t i = 0; i < zbw * 273u; i++) {
+        const uint32_t x = i % zbw, y = i / zbw;
+        const uint16_t want = y >= 272u ? RSB_DEPTH_SENT : (x < cols ? inside : outside);
+        uint16_t got;
+        memcpy(&got, rsb_depth(i), 2);
+        if (got != want) {
+            fprintf(stderr, "%s: depth pixel (%u,%u) of a %u-wide depth buffer is 0x%04x, want 0x%04x\n",
+                    scenario, (unsigned)x, (unsigned)y, (unsigned)zbw, got, want);
+            expect(0, scenario, y >= 272u ? "a depth write landed past the depth buffer's last row"
+                                          : "a depth write landed outside the pixel it was given");
+            return;
+        }
+    }
+}
+
+static void test_ge_raster_stride_bounds(void) {
+    ge_wide_set_wing(0);
+
+    /* colour: a 256 stride, scissor x2 479 */
+    for (uint32_t i = 0; i < 256u * 273u; i++) {
+        const uint32_t bg = RSB_BG;
+        memcpy(SR_HOST(RSB_FB + i * 4u), &bg, 4);
+    }
+    rsb_begin(256u, 256u, 479u);
+    rsb_sprite(RSB_SPRITE, 0.0f, 100.0f, 512.0f, 110.0f, 0.0f);
+    rsb_end("raster_stride_colour");
+    for (uint32_t i = 0; i < 256u * 273u; i++) {
+        const uint32_t y = i / 256u;
+        const uint32_t want = y >= 100u && y < 110u ? RSB_SPRITE : RSB_BG;
+        if ((rsb_fb(i) & 0x00ffffffu) != (want & 0x00ffffffu)) {
+            fprintf(stderr, "raster_stride_colour: pixel (%u,%u) of a 256-stride target is %08x, want %08x\n",
+                    (unsigned)(i % 256u), (unsigned)y, rsb_fb(i), want);
+            expect(0, "raster_stride_colour",
+                   y >= 272u ? "a colour write landed past the target's last row"
+                             : "a colour write past the stride landed in another row");
+            break;
+        }
+    }
+
+    /* depth: a 512-stride target, a 256-wide depth buffer */
+    rsb_fill_depth(256u * 273u, RSB_DEPTH_SENT);
+    rsb_begin(512u, 256u, 511u);
+    W(0xD3, 1u | (4u << 8));                                      /* clear mode: depth only */
+    rsb_sprite(RSB_SPRITE, 0.0f, 0.0f, 512.0f, 272.0f, (float)RSB_DEPTH_A);
+    W(0xD3, 0u);
+    W(0x23, 1u);                                                  /* depth test on, ALWAYS */
+    rsb_sprite(RSB_SPRITE, 256.0f, 0.0f, 512.0f, 10.0f, (float)RSB_DEPTH_B);
+    rsb_end("raster_stride_depth");
+    rsb_check_depth("raster_stride_depth", 256u, 256u, RSB_DEPTH_A, RSB_DEPTH_A);
+
+    /* clear: a depth clear under a 100-column scissor */
+    rsb_fill_depth(256u * 273u, RSB_DEPTH_SENT);
+    rsb_begin(512u, 256u, 99u);
+    W(0xD3, 1u | (4u << 8));
+    rsb_sprite(RSB_SPRITE, 0.0f, 0.0f, 512.0f, 272.0f, (float)RSB_DEPTH_C);
+    W(0xD3, 0u);
+    rsb_end("raster_stride_depth_clear");
+    rsb_check_depth("raster_stride_depth_clear", 256u, 100u, RSB_DEPTH_C, RSB_DEPTH_SENT);
+}
+
 static void print_mask(FILE *out, uint32_t mask) {
     if (!mask) { fputs("none", out); return; }
     const char *sep = "";
@@ -2146,6 +2353,244 @@ static void test_ge_vram_view_decode(void) {
     printf("VRAM_VIEW decode cases=11\n");
 }
 
+/* The viewer's sources and decode (#314), the functions gui.c's pause page calls: which
+ * buffer, stride, size and format each source names (the depth buffer's GE-local ZBP folded
+ * onto VRAM, its stride falling back to FBW and then 512), sources the state does not name are
+ * absent, and a decode is opaque, sized as asked, and refused without writing. */
+static void test_ge_vram_view_sources(void) {
+    static const uint32_t base = 0x041C0000u;
+    GeState *state = ge_state_ptr();
+    GeState saved = *state;
+    GeVramSources src;
+    uint32_t out[8], w = 99u, h = 99u;
+
+    memset(state, 0, sizeof(*state));
+    ge_vram_view_sources(0x44088000u, 512u, 7u, 0, &src);
+    expect(!src.present[GE_VRAM_VIEW_DISPLAY] && !src.present[GE_VRAM_VIEW_DRAW] &&
+           !src.present[GE_VRAM_VIEW_DEPTH] && !src.present[GE_VRAM_VIEW_TEXTURE],
+           "vram_view_sources", "nothing named, nothing offered");
+
+    ge_vram_view_sources(0x44088000u, 512u, 7u, 1, &src);
+    expect(src.present[GE_VRAM_VIEW_DISPLAY] && src.window[GE_VRAM_VIEW_DISPLAY].addr == 0x44088000u &&
+           src.window[GE_VRAM_VIEW_DISPLAY].stride == 512u &&
+           src.window[GE_VRAM_VIEW_DISPLAY].width == 480u &&
+           src.window[GE_VRAM_VIEW_DISPLAY].height == 272u &&
+           src.window[GE_VRAM_VIEW_DISPLAY].format == 3u, "vram_view_sources",
+           "the display is the shown buffer at its stride, 480 x 272, in its colour format");
+
+    state->fbp = 0x00044000u;
+    state->fbw = 512u;
+    state->fbfmt = 1u;
+    state->zbp = 0x00110000u;
+    ge_vram_view_sources(0, 0, 0, 0, &src);
+    expect(src.present[GE_VRAM_VIEW_DRAW] && src.window[GE_VRAM_VIEW_DRAW].addr == 0x04044000u &&
+           src.window[GE_VRAM_VIEW_DRAW].stride == 512u && src.window[GE_VRAM_VIEW_DRAW].format == 1u &&
+           src.window[GE_VRAM_VIEW_DRAW].width == 480u && src.window[GE_VRAM_VIEW_DRAW].height == 272u &&
+           src.window[GE_VRAM_VIEW_DEPTH].width == 480u && src.window[GE_VRAM_VIEW_DEPTH].height == 272u,
+           "vram_view_sources", "the draw target is the GE-local FBP folded onto VRAM, 480 x 272 at FBW "
+           "in FBPSM, and the depth buffer is 480 x 272");
+    expect(src.present[GE_VRAM_VIEW_DEPTH] && src.window[GE_VRAM_VIEW_DEPTH].addr == 0x04110000u &&
+           src.window[GE_VRAM_VIEW_DEPTH].stride == 512u &&
+           src.window[GE_VRAM_VIEW_DEPTH].format == GE_VRAM_VIEW_DEPTH16, "vram_view_sources",
+           "a GE-local ZBP folds onto VRAM; without ZBW the depth stride is FBW; DEPTH16");
+    state->zbp = 0x44110000u;
+    state->zbw = 256u;
+    ge_vram_view_sources(0, 0, 0, 0, &src);
+    expect(src.window[GE_VRAM_VIEW_DEPTH].addr == 0x04110000u &&
+           src.window[GE_VRAM_VIEW_DEPTH].stride == 256u, "vram_view_sources",
+           "an uncached ZBP folds onto VRAM and ZBW is the depth stride");
+    state->fbw = 0u;
+    state->zbw = 0u;
+    ge_vram_view_sources(0, 0, 0, 0, &src);
+    expect(!src.present[GE_VRAM_VIEW_DRAW] && src.window[GE_VRAM_VIEW_DEPTH].stride == 512u,
+           "vram_view_sources", "no FBW: no draw target, and the depth stride is 512");
+
+    state->tex_addr = base + 0x200u;
+    state->tex_w = 2;
+    state->tex_h = 1;
+    state->tex_bufw = 0u;
+    state->tex_fmt = 5u;
+    state->tex_swizzle = 1;
+    ge_vram_view_sources(0, 0, 0, 0, &src);
+    expect(src.present[GE_VRAM_VIEW_TEXTURE] && src.window[GE_VRAM_VIEW_TEXTURE].addr == base + 0x200u &&
+           src.window[GE_VRAM_VIEW_TEXTURE].stride == 2u &&
+           src.window[GE_VRAM_VIEW_TEXTURE].width == 2u &&
+           src.window[GE_VRAM_VIEW_TEXTURE].height == 1u &&
+           src.window[GE_VRAM_VIEW_TEXTURE].format == 5u && src.texture_swizzled,
+           "vram_view_sources", "the texture is its address, buffer width (else width), size, PSM "
+           "and swizzle");
+    state->tex_bufw = 8u;
+    ge_vram_view_sources(0, 0, 0, 0, &src);
+    expect(src.window[GE_VRAM_VIEW_TEXTURE].stride == 8u &&
+           src.window[GE_VRAM_VIEW_TEXTURE].width == 2u, "vram_view_sources",
+           "a texture's buffer width, when set, is its stride and its width stays its own");
+
+    /* The decode: a 5551 pixel with alpha clear shows opaque, sized as the window. */
+    {
+        const uint16_t clear_alpha = 0x7C00u;
+        const GeVramWindow window = { base + 0x100u, 1u, 1u, 1u, 1u };
+        memcpy(SR_HOST(base + 0x100u), &clear_alpha, 2u);
+        expect(ge_vram_view_decode(0, &window, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+               out[0] == 0xFFFF0000u && w == 1u && h == 1u, "vram_view_sources",
+               "a decoded window is opaque and sized as asked");
+        const GeVramWindow wide = { base, 4u, 3u, 3u, 0u };
+        memset(out, 0xA5, sizeof out);
+        expect(ge_vram_view_decode(0, &wide, out, 8u, &w, &h) == GE_VRAM_VIEW_NO_ROOM &&
+               out[0] == 0xA5A5A5A5u && w == 0u && h == 0u, "vram_view_sources",
+               "a window larger than the buffer is refused and writes nothing");
+        const GeVramWindow outside = { 0xFFFFF000u, 4u, 1u, 1u, 3u };
+        expect(ge_vram_view_decode(0, &outside, out, 8u, &w, &h) == GE_VRAM_VIEW_UNREADABLE &&
+               out[0] == 0xA5A5A5A5u, "vram_view_sources", "an unreadable window is refused");
+    }
+    {
+        uint32_t texels[2] = {0x00223344u, 0x55667788u};
+        memcpy(SR_HOST(base + 0x200u), texels, sizeof texels);
+        state->tex_fmt = 3u;
+        state->tex_swizzle = 0;
+        state->tex_bufw = 2u;
+        expect(ge_vram_view_decode(1, NULL, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+               out[0] == 0xFF223344u && out[1] == 0xFF667788u && w == 2u && h == 1u,
+               "vram_view_sources", "the bound texture decodes opaque at its own size");
+        g_ge_capture_active = 1;
+        expect(ge_vram_view_decode(1, NULL, out, 8u, &w, &h) == GE_VRAM_VIEW_TEXTURE_REFUSED,
+               "vram_view_sources", "no texture is decoded while a GE capture runs");
+        g_ge_capture_active = 0;
+    }
+    *state = saved;
+    printf("VRAM_VIEW sources cases=13\n");
+}
+
+/* The VRAM viewer's Capture row (#314): ge_vramdump_write records each capture's VBLANK and
+ * the viewer's sources at that present, and ge_vram_capture_decode shows a window from the
+ * image the capture wrote, not from VRAM now. Captures go to `dir` and are removed after. */
+static void capture_file(char *path, size_t size, const char *dir, uint32_t vblank,
+                         const char *ext) {
+    snprintf(path, size, "%s/vram_%" PRIu32 ".%s", dir, vblank, ext);
+}
+
+static void test_ge_vram_capture(const char *dir) {
+    static const uint32_t first = 900001u, second = 900002u;
+    GeState *state = ge_state_ptr();
+    GeState saved = *state;
+    GeVramSources src;
+    uint32_t out[8], w = 99u, h = 99u, vblank = 0u;
+    const uint32_t display_px = 0x00112233u, live_px = 0x00FFFFFFu;
+    const uint16_t depth_z = 0xAB00u;
+    const uint32_t texels[2] = {0x80405060u, 0x01020304u};
+    char bin[1024], json[1024];
+    const GeVramWindow display = { 0x44000000u, 512u, 1u, 1u, 3u };
+    const GeVramWindow depth = { 0x04110000u, 512u, 1u, 1u, GE_VRAM_VIEW_DEPTH16 };
+    const GeVramWindow texture = { 0x041C0200u, 2u, 2u, 1u, 3u };
+
+    expect(ge_vram_capture_count() == 0u && !ge_vram_capture_info(0u, &vblank, &src) &&
+           ge_vram_capture_decode(0u, 0, &display, out, 8u, &w, &h) == GE_VRAM_VIEW_CAPTURE_LOST,
+           "vram_capture", "before any capture there is none to show");
+
+    memset(state, 0, sizeof(*state));
+    state->fbp = 0x00044000u;
+    state->fbw = 512u;
+    state->fbfmt = 1u;
+    state->zbp = 0x00110000u;
+    state->tex_addr = texture.addr;
+    state->tex_w = 2;
+    state->tex_h = 1;
+    state->tex_bufw = 2u;
+    state->tex_fmt = 3u;
+    memcpy(SR_HOST(0x04000000u), &display_px, 4u);
+    memcpy(SR_HOST(0x04110000u), &depth_z, 2u);
+    memcpy(SR_HOST(texture.addr), texels, sizeof texels);
+    expect(ge_vramdump_write(dir, first, 0x44000000u, 512u, 3u) == 1,
+           "vram_capture", "the capture is written");
+    expect(ge_vram_capture_count() == 1u && ge_vram_capture_info(0u, &vblank, &src) &&
+           vblank == first && src.present[GE_VRAM_VIEW_DISPLAY] &&
+           src.window[GE_VRAM_VIEW_DISPLAY].addr == 0x44000000u &&
+           src.window[GE_VRAM_VIEW_DISPLAY].format == 3u &&
+           src.window[GE_VRAM_VIEW_DRAW].addr == 0x04044000u &&
+           src.window[GE_VRAM_VIEW_DEPTH].addr == 0x04110000u &&
+           src.present[GE_VRAM_VIEW_TEXTURE] && !src.texture_swizzled,
+           "vram_capture", "the capture records its VBLANK and the sources at its present");
+
+    /* The game runs on: VRAM and the GE state change after the capture. */
+    memcpy(SR_HOST(0x04000000u), &live_px, 4u);
+    memset(SR_HOST(0x04110000u), 0, 2u);
+    memset(SR_HOST(texture.addr), 0, sizeof texels);
+    state->fbp = 0x00088000u;
+    expect(ge_vram_capture_info(0u, NULL, &src) &&
+           src.window[GE_VRAM_VIEW_DRAW].addr == 0x04044000u,
+           "vram_capture", "a capture's sources stay those of its present");
+    expect(ge_vram_view_decode(0, &display, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+           out[0] == 0xFFFFFFFFu, "vram_capture", "VRAM now holds the new pixel");
+    expect(ge_vram_capture_decode(0u, 0, &display, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+           out[0] == 0xFF112233u && w == 1u && h == 1u,
+           "vram_capture", "the capture shows the pixel it captured, opaque, uncached view folded");
+    expect(ge_vram_capture_decode(0u, 0, &depth, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+           out[0] == 0xFFABABABu, "vram_capture", "a captured depth buffer decodes as DEPTH16");
+    expect(ge_vram_capture_decode(0u, 1, &texture, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+           out[0] == 0xFF405060u && out[1] == 0xFF020304u && w == 2u && h == 1u,
+           "vram_capture", "a captured linear 8888 texture decodes from the image");
+
+    {
+        const GeVramWindow clut = { texture.addr, 2u, 2u, 1u, 5u };
+        const GeVramWindow past_end = { 0x041FFFFCu, 4u, 4u, 1u, 3u };
+        const GeVramWindow main_ram = { 0x08800000u, 4u, 1u, 1u, 3u };
+        const GeVramWindow wide = { 0x04000000u, 4u, 3u, 3u, 0u };
+        memset(out, 0xA5, sizeof out);
+        expect(ge_vram_capture_decode(0u, 1, &clut, out, 8u, &w, &h) ==
+                   GE_VRAM_VIEW_CAPTURE_TEXTURE && out[0] == 0xA5A5A5A5u,
+               "vram_capture", "a captured palette texture is refused, for nk_cli vram");
+        expect(ge_vram_capture_decode(0u, 0, &past_end, out, 8u, &w, &h) ==
+                   GE_VRAM_VIEW_UNREADABLE &&
+               ge_vram_capture_decode(0u, 0, &main_ram, out, 8u, &w, &h) ==
+                   GE_VRAM_VIEW_UNREADABLE &&
+               out[0] == 0xA5A5A5A5u && w == 0u && h == 0u,
+               "vram_capture", "a window not wholly inside the captured VRAM is refused");
+        expect(ge_vram_capture_decode(0u, 0, &wide, out, 8u, &w, &h) == GE_VRAM_VIEW_NO_ROOM &&
+               ge_vram_capture_decode(1u, 0, &display, out, 8u, &w, &h) ==
+                   GE_VRAM_VIEW_CAPTURE_LOST && out[0] == 0xA5A5A5A5u,
+               "vram_capture", "no room, or no such capture, is refused");
+    }
+
+    state->tex_swizzle = 1;
+    expect(ge_vramdump_write(dir, second, 0x44000000u, 512u, 3u) == 1 &&
+           ge_vram_capture_count() == 2u && ge_vram_capture_info(1u, &vblank, &src) &&
+           vblank == second && src.texture_swizzled &&
+           ge_vram_capture_decode(1u, 1, &texture, out, 8u, &w, &h) == GE_VRAM_VIEW_CAPTURE_TEXTURE &&
+           ge_vram_capture_decode(1u, 0, &display, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+           out[0] == 0xFFFFFFFFu,
+           "vram_capture", "captures are kept in order; a swizzled texture is refused");
+
+    /* A capture file changed or removed since it was written is refused, not shown. */
+    capture_file(bin, sizeof bin, dir, first, "bin");
+    {
+        FILE *file = fopen(bin, "r+b");
+        int changed = file != NULL && fseek(file, 0x100L, SEEK_SET) == 0 && fputc(0x5A, file) != EOF;
+        if (file) changed = fclose(file) == 0 && changed;
+        expect(changed && ge_vram_capture_decode(0u, 0, &display, out, 8u, &w, &h) ==
+                              GE_VRAM_VIEW_CAPTURE_LOST,
+               "vram_capture", "a changed capture file is refused");
+    }
+    /* One that grew past the captured 2 MiB is refused too, though it starts with the image. */
+    capture_file(bin, sizeof bin, dir, second, "bin");
+    {
+        FILE *file = fopen(bin, "ab");
+        int grown = file != NULL && fputc(0x00, file) != EOF;
+        if (file) grown = fclose(file) == 0 && grown;
+        expect(grown && ge_vram_capture_decode(1u, 0, &display, out, 8u, &w, &h) ==
+                            GE_VRAM_VIEW_CAPTURE_LOST,
+               "vram_capture", "a capture file that grew is refused");
+    }
+    for (uint32_t v = first; v <= second; v++) {
+        capture_file(bin, sizeof bin, dir, v, "bin");
+        capture_file(json, sizeof json, dir, v, "json");
+        remove(bin);
+        remove(json);
+    }
+    expect(ge_vram_capture_decode(1u, 0, &display, out, 8u, &w, &h) == GE_VRAM_VIEW_CAPTURE_LOST,
+           "vram_capture", "a removed capture file is refused");
+    *state = saved;
+    printf("VRAM_CAPTURE cases=15\n");
+}
+
 static void test_ge_bounding_box_branch(void) {
     /* Transform-mode boxes under emit_setup's perspective (w = -z) and 480x272 viewport. */
     s_vtx = BBOX_VERTS;
@@ -2384,6 +2829,8 @@ int main(int argc, char **argv) {
     test_ge_immediate_mode();
     test_ge_immediate_stream();
     test_ge_wide_fill();
+    test_ge_wide_raster_timing();
+    test_ge_raster_stride_bounds();
     build_lists();
     expect_api_contract();
 
@@ -2505,6 +2952,23 @@ int main(int argc, char **argv) {
     test_ge_vram_depth_bit13_absolute_xor();
     test_ge_bounding_box_branch();
     test_ge_vram_view_decode();
+    test_ge_vram_view_sources();
+    {
+        /* The capture files go next to this binary, in the build tree. */
+        char dir[1024];
+        const char *slash = strrchr(argv[0], '/');
+        const char *back = strrchr(argv[0], '\\');
+        size_t length;
+        if (back && (!slash || back > slash)) slash = back;
+        length = slash ? (size_t)(slash - argv[0]) : 0u;
+        if (length == 0u || length >= sizeof dir) {
+            snprintf(dir, sizeof dir, ".");
+        } else {
+            memcpy(dir, argv[0], length);
+            dir[length] = '\0';
+        }
+        test_ge_vram_capture(dir);
+    }
 
     printf("ge_cpu_profile_validate_selftest: strip_cache=%s scenarios=%u faults=%u failures=%d\n",
            strip_cache ? "on" : "off", s_scenarios, s_faults, s_failures);

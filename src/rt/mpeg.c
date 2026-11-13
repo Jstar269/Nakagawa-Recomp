@@ -29,6 +29,7 @@
 #endif
 #include "recomp.h"
 #include "sr_h264.h"
+#include "ge_shared.h"       /* movie provenance (#2111) */
 #include "psmf_producer.h"
 #include "atrac3p_bridge.h"
 /* Outside the SR_SDL3VK guard on purpose: call_guest3() is unconditional, so a
@@ -576,6 +577,7 @@ uint32_t mpeg_finish(void) {
     }
 #endif
     for (int i = 0; i < 8; i++) if (s_mpeg[i].used) {
+        sr_movie_forget_owner(s_mpeg[i].guestAddr);   /* #2111 */
         ycbcr_reset_mpeg(s_mpeg[i].guestAddr);
         mpeg_audio_close(&s_mpeg[i]);
     }
@@ -697,6 +699,7 @@ uint32_t mpeg_delete(uint32_t mpegAddr) {
     Mpeg *ctx = mpeg_find(mpegAddr);
     if (!ctx) return (uint32_t)-1;
     mpeg_pictures_report(ctx, "delete");
+    sr_movie_forget_owner(ctx->guestAddr);   /* its pictures are no longer movie frames (#2111) */
 #ifdef SR_SDL3VK
     if (ctx->h264 >= 0) { sr_h264_destroy(ctx->h264); ctx->h264 = -1; }
 #endif
@@ -1162,6 +1165,13 @@ uint32_t mpeg_avc_decode(uint32_t mpegAddr, uint32_t auAddr, uint32_t frameWidth
         gotFrame = sr_h264_frame_ex(ctx->h264, eos, &target, &info);
         if (gotFrame > 0) { ctx->h264Frames++; ctx->picDelivered++; }
         else if (eos) ctx->h264Units = ctx->h264Frames;
+        /* Movie provenance (#2111, ge_shared.h): the picture now in the buffer, for the movie
+         * upscaler. A no-op unless SR_MOVIE_UPSCALE is on. */
+        if (gotFrame > 0 && info.width > 0 && info.height > 0 &&
+            info.delivered_format >= SR_H264_PIXEL_5650 && info.delivered_format <= SR_H264_PIXEL_8888)
+            sr_movie_note_picture(ctx->guestAddr, buffer, width,
+                                  (uint32_t)(info.delivered_format - SR_H264_PIXEL_5650),
+                                  (uint32_t)info.width, (uint32_t)info.height);
     }
 #endif
     if (gotFrame <= 0 && !ctx->h264Frames) {
@@ -1956,6 +1966,11 @@ uint32_t mpeg_avc_csc(uint32_t mpegAddr, uint32_t buf, uint32_t rangeAddr, uint3
 #endif
     }
     free(out);
+    /* Movie provenance (#2111, ge_shared.h): an 8888 conversion writes one w x h picture at dest;
+     * the 16-bit modes write 32-pixel blocks 64 pixels apart, which is no picture a texture or a
+     * framebuffer shows whole, so they are not noted. */
+    if (ctx->pixelMode == 3 && !mode2)
+        sr_movie_note_picture(ctx->guestAddr, span.first, frameWidth, 3u, (uint32_t)w, (uint32_t)h);
     if (getenv("SR_MPEGLOG")) {
         static int n = 0;
         if (n++ < 32 || (n & 0xFF) == 0)
