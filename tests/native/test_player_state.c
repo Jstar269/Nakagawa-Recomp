@@ -8792,7 +8792,8 @@ static void test_play_mode_settings(void) {
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"},") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -8990,7 +8991,8 @@ static void test_play_mode_sas_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9017,7 +9019,8 @@ static void test_play_mode_sas_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -9084,7 +9087,8 @@ static void test_play_mode_cull_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -9173,7 +9177,8 @@ static void test_play_mode_stick_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"on\", "
-                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         free(saved);
     }
 
@@ -9336,7 +9341,8 @@ static void test_play_mode_load_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"fast\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"load\": \"fast\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST95001\": {\"mode\": \"ace\", \"load\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9438,7 +9444,7 @@ static void test_play_mode_ssaa_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\"}") != NULL);
+        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\", \"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"ssaa\": \"4\"}") != NULL && strstr(saved, "\"ssaa\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9471,6 +9477,81 @@ static void test_play_mode_ssaa_settings(void) {
     free(app);
     printf("PASS: supersampling is off by default and in every preset, read and saved at both levels, "
            "and Enhanced and Ace launches carry it\n");
+}
+
+/* Smooth far textures (contract 10.16, 11.3.8): off in a fresh file and in every preset; a
+ * library "mips" and a title's own are read, the title's wins, both survive a save and a load, an
+ * Enhanced or Ace launch with the part on carries ";mips=on" right after twin, and a launch with it off carries
+ * no key, so its line is the line of a build without the part. */
+static void test_play_mode_mips_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_mips_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+    assert(player_enhanced_part(PLAYER_PART_MIPS)->fresh == 0);
+    assert(strcmp(player_enhanced_part(PLAYER_PART_MIPS)->key, "mips") == 0);
+
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"mips\": \"on\"},"
+        " \"title_play\": {\"TEST95001\": {\"mode\": \"enhanced\", \"mips\": \"off\"},"
+        " \"TEST95002\": {\"mode\": \"ace\"}, \"TEST95003\": {\"mode\": \"authentic\"}}}");
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_MIPS] == 1);
+    player_play_resolve(&app->settings, "TEST95001", &r);
+    assert(r.on && r.part[PLAYER_PART_MIPS] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "mips") == NULL);
+    player_play_resolve(&app->settings, "TEST95002", &r);       /* follows the library */
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_MIPS] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line + strlen(line) - 8, ";mips=on") == 0);
+    /* With Wider culling on too, cull stays last though its part comes before mips in the enum:
+       the line follows ace_format's key order (mips right after twin, cull last). */
+    r.part[PLAYER_PART_CULL] = 1;
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 25, ";twin=off;mips=on;cull=on") == 0);
+    r.part[PLAYER_PART_CULL] = 0;
+    player_play_resolve(&app->settings, "TEST95004", &r);       /* Enhanced by the library */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_MIPS] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line + strlen(line) - 8, ";mips=on") == 0);
+    player_play_resolve(&app->settings, "TEST95003", &r);       /* Authentic has no line */
+    assert(!r.on);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", \"mips\": \"on\"}") != NULL);
+        assert(strstr(saved, "\"TEST95001\": {\"mode\": \"enhanced\", \"mips\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_MIPS] == 1);
+    player_play_resolve(&back->settings, "TEST95001", &r);
+    assert(r.on && r.part[PLAYER_PART_MIPS] == 0);
+
+    /* A file that never had the key, or has a word this build does not know, leaves it off. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\"},"
+        " \"title_play\": {\"TEST95001\": {\"mode\": \"ace\", \"mips\": \"max\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_MIPS] == 0);
+    player_play_resolve(&app->settings, "TEST95001", &r);
+    assert(r.on && r.part[PLAYER_PART_MIPS] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "mips") == NULL);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: smooth far textures is off by default, read and saved at both levels, and launched only when on\n");
 }
 
 /* Finer patches (contract 10.14, 11.3.7) at both levels: off in a fresh file and in no graphics
@@ -9525,7 +9606,8 @@ static void test_play_mode_tess_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
                                       "\"upscale\": \"off\", \"stick\": \"off\", \"load\": \"off\", "
-                                      "\"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);
@@ -9994,7 +10076,8 @@ static void test_play_mode_twin_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"off\", \"twin\": \"on\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"on\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -10020,7 +10103,8 @@ static void test_play_mode_twin_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"on\"}") != NULL);
         free(saved);
     }
@@ -10320,7 +10404,8 @@ static void test_play_mode_upscale_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
                                       "\"upscale\": \"fsr1\", \"stick\": \"off\", \"load\": \"off\", "
-                                      "\"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+                                      "\"twin\": \"off\", \"ssaa\": \"off\", "
+                                      "\"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -11127,6 +11212,7 @@ int main(int argc, char **argv) {
     test_play_mode_stick_settings();
     test_play_mode_load_settings();
     test_play_mode_ssaa_settings();
+    test_play_mode_mips_settings();
     test_play_mode_tess_settings();
     test_play_mode_twin_settings();
     test_player_nickname();

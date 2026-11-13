@@ -1259,6 +1259,12 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"ssaa", "Supersampling",
      "Smooths jagged edges. 2x takes 4 times the GPU work, 4x 16 times.",
      3, k_part_ssaa_values, k_part_ssaa_labels, k_part_ssaa_words, 0},
+    /* A guest-visible item (contract 11.3.8): every present commits the smoothed frame to guest VRAM,
+       as texture filtering does. Off by default until its "nothing worse" runs exist (11.2 item 4),
+       with its own off switch in the library and each title (item 2). */
+    {"mips", "Smooth far textures",
+     "Slightly less shimmer on far textures. Uses CPU; may stutter on new textures.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -2320,7 +2326,7 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
 #define PRESET_PART_LIST(X, text, upscale)                                                \
     X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
     X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1)    \
-    X(TWIN, -1) X(SSAA, -1)
+    X(TWIN, -1) X(SSAA, -1) X(MIPS, -1)
 #define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
 #define PRESET_PART_ONE(part, value) + 1
 #define PRESET_PARTS(text, upscale) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale)}
@@ -3113,6 +3119,9 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
            enum's. */
         if (p == PLAYER_PART_UPSCALE || p == PLAYER_PART_STICK || p == PLAYER_PART_LOAD ||
             p == PLAYER_PART_SSAA || p == PLAYER_PART_CULL) continue;
+        /* A missing mips is off (contract 11.3.8): the key is written only when the part is on,
+           right after twin. */
+        if (p == PLAYER_PART_MIPS && play->part[p] != 1) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
