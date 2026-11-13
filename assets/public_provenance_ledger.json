@@ -18962,6 +18962,17 @@
       }
     },
     {
+      "path": "tools/test_analyze_non_code.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "analyze_non_code_test_2373_20261112",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tools/test_analyze_tailcall.py",
       "classification": "project_authored_attested",
       "evidence": {

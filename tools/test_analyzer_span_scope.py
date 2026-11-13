@@ -441,10 +441,10 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
 
         original_trace = analyze.trace_function
 
-        def trace_and_record_calls(elf, start, ranges, covered, calls, hc, walked=None):
+        def trace_and_record_calls(elf, start, ranges, covered, calls, hc, walked=None, **options):
             if tracked_calls[0] is None:
                 tracked_calls[0] = calls
-            return original_trace(elf, start, ranges, covered, calls, hc, walked=walked)
+            return original_trace(elf, start, ranges, covered, calls, hc, walked=walked, **options)
 
         with redirect_stderr(io.StringIO()), \
              mock.patch.object(analyze, "set", counted_set, create=True), \
@@ -2048,8 +2048,8 @@ class TraceMemoTests(unittest.TestCase):
         final: dict = {}
         original = analyze.trace_function
 
-        def recording_trace(elf, start, ranges, covered, calls, hc, walked=None):
-            new_calls = original(elf, start, ranges, covered, calls, hc, walked=walked)
+        def recording_trace(elf, start, ranges, covered, calls, hc, walked=None, **options):
+            new_calls = original(elf, start, ranges, covered, calls, hc, walked=walked, **options)
             steps.append((start, tuple(ranges), tuple(new_calls)))
             final["covered"] = covered
             final["calls"] = calls
