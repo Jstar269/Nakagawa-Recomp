@@ -3763,6 +3763,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 # The 2026-11-13 (UTC) acceptance-eligible sas-adsr (#1296, boot 208, game
                 # context, ARK-5 5.2.0) run of 06a6c942c.
                 "PSP-SAS-002",
+                # The 2026-11-13 (UTC) acceptance-eligible ge-raster-bounds (#2193, boot 214) and
+                # ge-depth-round (#343, boot 215) runs of 05aafe975, XMB context, unattended.
+                "PSP-GE-RASTER-002", "PSP-GE-RASTER-003",
                 # The 2026-11-10 acceptance-eligible hle-issues-batch (#326, #356, boot 172) and
                 # hle-kernel-pool-bounds (boot 173) runs of 979c6a1dd.
                 "PSP-HLE-ISSUES-001", "PSP-HLE-KERNEL-STATUS-002",
@@ -12444,18 +12447,25 @@ class _GeNewCaseMixin:
         test.assertEqual(_campaign_host0_log_path(Path("/scratch"), case).name, f"{stem}_log.txt")
         test.assertEqual(_campaign_completeness_contract(case), "strict-golden-sequence")
         test.assertNotIn(case, CAMPAIGN_QUEUE_CASES)
-        # Not run on a PSP: the README, the pending-campaign table and the manifest say so.
+        # Measured by the 2026-11-13 (UTC) unattended XMB-context run of 05aafe975 on the
+        # PSP-3000: the README, the pending-campaign table and the manifest say so.
         readme = [line for line in self.readme.splitlines()
                   if line.startswith(f"| `{case}` | `{self.TEST_ID}` |")]
         test.assertEqual(len(readme), 1)
-        test.assertIn("**NOT_RUN**; no hardware result is claimed.", readme[0])
-        test.assertIn(f"| `{case}` | `{self.TEST_ID}` | `NOT_RUN` |", self.doc)
+        test.assertIn("**MEASURED** on 2026-11-13 UTC (PSP-3000, boot ", readme[0])
+        test.assertNotIn("**NOT_RUN**", readme[0])
+        test.assertIn(f"| `{case}` | `{self.TEST_ID}` | `MEASURED` (2026-11-13 UTC, PSP-3000, boot ",
+                      self.doc)
         test.assertEqual(self.row["status"], "implemented")
-        test.assertEqual(self.row["hardware_evidence"], "NOT_RUN")
-        for key in ("measurement_note", "evidence_cases", "evidence_ref"):
-            test.assertNotIn(key, self.row)
-        test.assertIn("No hardware run is cited and no measurement is claimed.",
-                      self.row["evidence_note"])
+        test.assertEqual(self.row["hardware_evidence"], "MEASURED")
+        test.assertNotIn("evidence_note", self.row)
+        test.assertEqual(self.row["evidence_ref"],
+                         "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize")
+        note = self.row["measurement_note"]
+        for term in ("2026-11-13 (UTC)", "PSP-3000", "system software 6.61", "ARK-5", "5.2.0",
+                     "pspdev/psplinkusb 7a0035d9", "XMB context", "05aafe975", "unattended",
+                     "acceptance-eligible with 0 blockers", "COMPLETE PASS"):
+            test.assertIn(term, note)
         test.assertEqual(self.row["source"], "fixtures/psp_oracle/probe_ge_sample.c")
         test.assertEqual(self.row["prx"], f"{stem}.prx")
         test.assertEqual(self.row["diagnostic_case_ids"], [case])
@@ -12536,7 +12546,7 @@ class GeRasterBoundsProbeTests(_GeNewCaseMixin, unittest.TestCase):
     """CASE=ge-raster-bounds (187, PSP-GE-RASTER-002) in probe_ge_sample.c: #2193's five cells,
     named as the request names them, on a probe-owned VRAM block that is saved and restored, with
     reads that tell a write bounded by the stride (or the scissor) from one that runs on linearly.
-    Built, not run on a PSP."""
+    Measured on the PSP-3000 on 2026-11-13 (UTC), boot 214; the depth cells stay undecided."""
 
     CASE = "ge-raster-bounds"
     CASE_ID = 187
@@ -12565,9 +12575,37 @@ class GeRasterBoundsProbeTests(_GeNewCaseMixin, unittest.TestCase):
                     r'\{(\d+)u, (\d)u, GRB_BUF_([CZ]), "([\w-]+)", (\d+)u, (\d+)u, (\d+)u, (\d+)u\}',
                     table.group(1))]
 
-    def test_route_registration_log_and_not_run_status(self) -> None:
+    def test_route_registration_log_and_measured_status(self) -> None:
         self._check_route()
         self.assertEqual(self.row["issues"], [2193])
+
+    def test_the_2026_11_13_run_measures_the_colour_cells_and_leaves_depth_undecided(self) -> None:
+        # The depth view read 0 for every word, the fill included, so no depth-* cell is cited.
+        self.assertEqual(self.row["evidence_cases"],
+                         ["raster-*", "ge-raster-bounds-done"])
+        self.assertEqual(self.row["uncited_cases"], ["display-check", "depth-*", "vram-restore"])
+        note = self.row["measurement_note"]
+        for term in ("boot 214", "38 records and the done record", "continues linearly",
+                     "8012", "500x16+12", "2784", "256x10+224", "Only the scissor clips",
+                     "0x5a00ff00", "read 0 for every word", "depth-zbw256-past",
+                     "depth-clear-scissor", "UNDECIDED", "not measured"):
+            with self.subTest(term=term):
+                self.assertIn(term, note)
+        docs_row = next(line for line in self.doc.splitlines()
+                        if line.startswith(f"| `{self.CASE}` |"))
+        readme_row = next(line for line in self.readme.splitlines()
+                          if line.startswith(f"| `{self.CASE}` |"))
+        for row in (docs_row, readme_row):
+            with self.subTest(row=row[:40]):
+                self.assertIn("boot 214", row)
+                self.assertIn("`05aafe975`", row)
+                self.assertIn("UNDECIDED", row)
+        start = self.doc.index("- **PSP-3000 single-case runs of `ge-raster-bounds` and `ge-depth-round`")
+        run = " ".join(self.doc[start:self.doc.index("\n- **", start + 1)].split())
+        for term in ("boots 214 and 215", "`05aafe975`", "unattended", "8012", "2784",
+                     "`0x5a00ff00`", "UNDECIDED"):
+            with self.subTest(run=term):
+                self.assertIn(term, run)
 
     def test_cells_are_the_requested_ones_in_order(self) -> None:
         cells = self._cells()
@@ -12854,7 +12892,7 @@ class GeDepthRoundProbeTests(_GeNewCaseMixin, unittest.TestCase):
     """CASE=ge-depth-round (188, PSP-GE-RASTER-003) in probe_ge_sample.c: #343's three depth
     rounding cells in the ge-raster window, list and record shape, without touching the cell block
     PSP-GE-RASTER-001's records are bound to; each cell's pass mask tells truncation from rounding.
-    Built, not run on a PSP."""
+    Measured on the PSP-3000 on 2026-11-13 (UTC), boot 215."""
 
     CASE = "ge-depth-round"
     CASE_ID = 188
@@ -12866,9 +12904,27 @@ class GeDepthRoundProbeTests(_GeNewCaseMixin, unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._load()
 
-    def test_route_registration_log_and_not_run_status(self) -> None:
+    def test_route_registration_log_and_measured_status(self) -> None:
         self._check_route()
         self.assertEqual(self.row["issues"], [343])
+
+    def test_the_2026_11_13_run_reads_the_truncate_masks_without_claiming_truncation(self) -> None:
+        self.assertEqual(self.row["evidence_cases"], ["zr-*", "ge-depth-round-done"])
+        note = self.row["measurement_note"]
+        for term in ("boot 215", "18 records and the done record", "zr-thru-eq 0x1f1f1f1f",
+                     "zr-thru-gt 0xe0e0e0e0", "zr-xf-eq 0xffffffff",
+                     "truncate or reduced precision", "truncation alone is not claimed"):
+            with self.subTest(term=term):
+                self.assertIn(term, note)
+        docs_row = next(line for line in self.doc.splitlines()
+                        if line.startswith(f"| `{self.CASE}` |"))
+        readme_row = next(line for line in self.readme.splitlines()
+                          if line.startswith(f"| `{self.CASE}` |"))
+        for row in (docs_row, readme_row):
+            with self.subTest(row=row[:40]):
+                self.assertIn("boot 215", row)
+                self.assertIn("`05aafe975`", row)
+                self.assertIn("truncate or reduced precision", row)
 
     def test_cells_are_the_requested_ones_in_order(self) -> None:
         table = _matched(re.search(r"gdr_cells\[GDR_CELL_COUNT\] = \{(.*?)\n\};", self.section, re.S))
@@ -12886,7 +12942,7 @@ class GeDepthRoundProbeTests(_GeNewCaseMixin, unittest.TestCase):
                       "                                        -0.25f, -0.5f, -0.75f};", self.section)
         # A truncate-column mask is read as "truncate or reduced precision" wherever it is cited.
         self.assertIn('A 0x1f, 0xe0 or 0xff mask reads "truncate or reduced precision"', self.probe)
-        self.assertIn('pass mask reads "truncate or reduced precision"', self.row["evidence_note"])
+        self.assertIn('pass mask reads "truncate or reduced precision"', self.row["measurement_note"])
         self.assertIn("first recorded use of a GE-context enqueue", self.row["risk"])
         self.assertIn('mask reads "truncate or reduced precision"', self.doc)
         self.assertIn("static const float gdr_xf_frac[4] = {0.0f, 0.25f, 0.5f, 0.75f};", self.section)
@@ -17158,8 +17214,8 @@ class Record20261015Tests(unittest.TestCase):
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
             ("hle-utility-netconf-sharing", "PSP-HLE-UTILITY-DIALOG-002", "CAPTURED"),
             ("hle-io-seek-edges", "PSP-HLE-IO-SEEK-002", "MEASURED"),
-            ("ge-raster-bounds", "PSP-GE-RASTER-002", "NOT_RUN"),
-            ("ge-depth-round", "PSP-GE-RASTER-003", "NOT_RUN"),
+            ("ge-raster-bounds", "PSP-GE-RASTER-002", "MEASURED"),
+            ("ge-depth-round", "PSP-GE-RASTER-003", "MEASURED"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
             ("hle-io-trunc", "PSP-HLE-IO-TRUNC-001", "MEASURED"),
         )
