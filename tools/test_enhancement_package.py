@@ -916,6 +916,35 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
         out_dir.mkdir()
         return self._run_codegen(elf_path, out_dir / "out.c", [f"--enhancement-package={pkg_path}"])
 
+    def test_a_run_leaves_no_package_active_after_it_returns(self) -> None:
+        """The package a run loads ends with the run: code translated afterwards in the same process
+        (tools/test_cpu_lle.py's fixtures, translated at the site addresses this ELF uses) is
+        authentic. A package left active once rewrote those fixtures with nk_enhancement_on()."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            elf_path = tmp / "synth.elf"
+            elf_bytes = _write_synthetic_mips_elf(elf_path, self.words, self.entry)
+            pkg, symbols = self._make_package_and_symbols(elf_bytes)
+            pkg_path = tmp / "synth-60hz.json"
+            pkg_path.write_text(json.dumps(pkg), encoding="utf-8")
+            (tmp / "synth-60hz.symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
+            out_dir = tmp / "out"
+            out_dir.mkdir()
+            rc, output, files = self._run_codegen(
+                elf_path, out_dir / "out.c", [f"--enhancement-package={pkg_path}"])
+            self.assertEqual(rc, 0, output)
+            self.assertIn(b"nk_enhancement_on", b"\n".join(files.values()))
+        self.assertEqual(codegen.ENHANCEMENT_SITES, {})
+        self.assertEqual(codegen.ENHANCEMENT_ACE_SITES, {})
+        self.assertIsNone(codegen.ENHANCEMENT_PKG_META)
+        self.assertIsNone(codegen.ENHANCEMENT_HOOK_META)
+        self.assertIsNone(codegen.ENHANCEMENT_UPDATE_BOUNDARY)
+        self.assertIsNone(codegen.ENHANCEMENT_STORE_KEY)
+        for table in (codegen.ENHANCEMENT_APPLIED, codegen.ENHANCEMENT_DATA_PATCHES,
+                      codegen.ENHANCEMENT_DATA_FILES, codegen.ENHANCEMENT_STORE_SITES,
+                      codegen.ENHANCEMENT_PHASE_STEPS, codegen.ENHANCEMENT_LAUNCH_SITES):
+            self.assertFalse(table)
+
     def test_gated_sites_count_logic_updates_at_the_update_boundary(self) -> None:
         """The boundary statement counts each update once; gates read that count, not the display."""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -4689,6 +4718,23 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             with self.assertRaisesRegex(EnhancementPackageError, "does not match the executable"):
                 self._publish(elf_bytes, wrong)
 
+    def test_shipped_hot_shots_tennis_package_holds_its_eased_fields(self) -> None:
+        """Pins the four gate_30hz_store sites (section 11.3.2.2) that package 15.0.0-pre1 ships: the
+        menu cursor ease (S0375) and the ticker's float ease (S0386), by id, function, instruction
+        offset and transform. The validator checks each site's map name, word count and the update
+        boundary (test_shipped_packages_validate_and_pass_the_publication_check); what the gate does
+        is proven on a fixture by test_gate_30hz_store_holds_each_30hz_value_for_two_updates, and the
+        game time of each ease by the private runs section 9.10.1 records."""
+        package = json.loads((ROOT / "assets" / "enhancements" / "ucus98701-60hz.json").read_text("utf-8"))
+        stores = sorted((site["id"], site["function"], site["insn_offset"], site["transform"])
+                        for site in package["sites"] if site["transform"] == "gate_30hz_store")
+        self.assertEqual(stores, [
+            ("S0375_a", "hst_fn_0010bc70", 1160, "gate_30hz_store"),
+            ("S0375_b", "hst_fn_0010bc70", 1244, "gate_30hz_store"),
+            ("S0386_a", "hst_fn_00110bfc", 248, "gate_30hz_store"),
+            ("S0386_b", "hst_fn_00110bfc", 264, "gate_30hz_store"),
+        ])
+
     def test_shipped_packages_validate_and_pass_the_publication_check(self) -> None:
         """Every package in assets/enhancements/ is a valid published package with no findings.
 
@@ -4708,15 +4754,34 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                 self.assertEqual(publish_audit.check_enhancement_packages({rel: (data, None)}), [])
 
     def test_shipped_packages_are_experimental_until_released(self) -> None:
-        """Section 9.10: no package the project ships is released yet, so none declares
-        "experimental": false. Releasing one adds its entry under section 9.10 and its name here."""
-        released: frozenset[str] = frozenset()
+        """Section 9.10: a package the project ships declares "experimental": false only when
+        its release entry under section 9.10 names it. Hot Shots Tennis was released by the
+        owner's decision of 2026-11-12 (section 9.10.1); a re-export from a declaration without
+        the flag would put it back to Experimental.
+
+        The entry also records the version the release covers: the last package version its
+        Status names must be the shipped package's version, so a new version must update the
+        entry (what was measured and the limits known) in the same change."""
+        released = {"ucus98701-60hz.json": "#### 9.10.1."}
+        contract = (ROOT / "docs" / "ENHANCEMENT_CONTRACT.md").read_text(encoding="utf-8")
         shipped = sorted((ROOT / "assets" / "enhancements").glob("*.json"))
         self.assertTrue(shipped)
         for path in shipped:
             with self.subTest(package=path.name):
                 package = json.loads(path.read_text("utf-8"))
                 self.assertEqual(package.get("experimental") is False, path.name in released)
+                if path.name not in released:
+                    continue
+                entry = contract[contract.index(released[path.name]):]
+                following = re.search(r"\n#{1,4} ", entry)
+                entry = entry[:following.start()] if following else entry
+                status = re.search(r"^- \*\*Status\.\*\* (.*?)(?=^- \*\*|\Z)", entry, re.M | re.S)
+                self.assertIsNotNone(status, f"{released[path.name]} has a Status item")
+                assert status is not None
+                versions = re.findall(r"\bpackage (\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?)",
+                                      " ".join(status.group(1).split()))
+                self.assertTrue(versions, f"{released[path.name]} Status names a package version")
+                self.assertEqual(versions[-1], package["version"])
 
     def test_validator_refuses_malformed_published_packages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

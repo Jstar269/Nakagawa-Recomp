@@ -1817,6 +1817,17 @@ const char *nk_platform_env_user_name(void) {
     return getenv("USER");
 }
 
+int nk_platform_env_utf8(const char *name, char *out, size_t cap) {
+    if (!out || cap == 0) return -1;
+    out[0] = '\0';
+    const char *value = name ? getenv(name) : NULL;
+    if (!value) return 0;
+    const size_t n = strlen(value);
+    if (n >= cap) return -1;
+    memcpy(out, value, n + 1u);
+    return 1;
+}
+
 unsigned long nk_platform_process_id(void) {
     return (unsigned long)getpid();
 }

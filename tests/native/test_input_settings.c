@@ -133,6 +133,21 @@ static void test_binding_words_fit(void) {
             check_binding_words("a host axis", words);
         }
     }
+    /* A mouse button (#1791) alone, and beside Space, either way round. Like two long key
+     * names, a click beside a long key ("Middle Click / Page Down") may end in "...". */
+    for (int key = NK_HOST_KEY_MOUSE_FIRST; key < NK_HOST_KEY_LIMIT; key++) {
+        state.profile.psp_keys[NK_PSP_BTN_CROSS].primary = key;
+        state.profile.psp_keys[NK_PSP_BTN_CROSS].secondary = NK_HOST_KEY_NONE;
+        input_settings_format_key_binding(&state, INPUT_CONTROL_BTN_CROSS, words, sizeof(words));
+        check_binding_words("a mouse button", words);
+        state.profile.psp_keys[NK_PSP_BTN_CROSS].secondary = nk_host_key_from_name("space");
+        input_settings_format_key_binding(&state, INPUT_CONTROL_BTN_CROSS, words, sizeof(words));
+        check_binding_words("a mouse button and a key", words);
+        state.profile.psp_keys[NK_PSP_BTN_CROSS].primary = nk_host_key_from_name("space");
+        state.profile.psp_keys[NK_PSP_BTN_CROSS].secondary = key;
+        input_settings_format_key_binding(&state, INPUT_CONTROL_BTN_CROSS, words, sizeof(words));
+        check_binding_words("a key and a mouse button", words);
+    }
     printf("[INPUT_SETTINGS_TEST] Subtest 1b PASSED!\n");
 }
 
@@ -1327,7 +1342,10 @@ static void test_binding_glyphs(void) {
     static const struct { const char *name; const char *legend; } legends[] = {
         {"rshift", "SHIFT"}, {"lctrl", "CTRL"}, {"ralt", "ALT"}, {"backspace", "BKSP"},
         {"pagedown", "PG DN"}, {"delete", "DEL"}, {"kp_enter", "ENTER"}, {"kp_5", "5"},
-        {"kp_divide", "/"}, {"space", "SPACE"}, {"semicolon", ";"}, {"7", "7"}
+        {"kp_divide", "/"}, {"space", "SPACE"}, {"semicolon", ";"}, {"7", "7"},
+        /* The mouse buttons (#1791). */
+        {"mouse:left", "L CLICK"}, {"mouse:middle", "M CLICK"}, {"mouse:right", "R CLICK"},
+        {"mouse:x1", "MOUSE 4"}, {"mouse:x2", "MOUSE 5"}
     };
     for (size_t i = 0; i < sizeof(legends) / sizeof(legends[0]); i++) {
         state.profile.psp_keys[NK_PSP_BTN_HOME].primary = nk_host_key_from_name(legends[i].name);
@@ -1344,6 +1362,20 @@ static void test_binding_glyphs(void) {
     assert(input_settings_assign_key(&state, INPUT_CONTROL_BTN_START, nk_host_key_from_name("c")));
     input_settings_key_glyph(&state, INPUT_CONTROL_BTN_START, &glyph);
     expect_glyph(&glyph, INPUT_GLYPH_KEY, "C", "Start after rebinding to C");
+    /* A mouse button is a key of the mapping (#1791): it binds, reads and moves like one. */
+    {
+        char words[64];
+        assert(input_settings_assign_key(&state, INPUT_CONTROL_BTN_CROSS, NK_HOST_KEY_MOUSE_LEFT));
+        input_settings_format_key_binding(&state, INPUT_CONTROL_BTN_CROSS, words, sizeof(words));
+        assert(strcmp(words, "Left Click") == 0);
+        input_settings_key_glyph(&state, INPUT_CONTROL_BTN_CROSS, &glyph);
+        expect_glyph(&glyph, INPUT_GLYPH_KEY, "L CLICK", "Cross after binding the left button");
+        assert(input_settings_assign_key(&state, INPUT_CONTROL_BTN_CIRCLE, NK_HOST_KEY_MOUSE_LEFT));
+        assert(state.profile.psp_keys[NK_PSP_BTN_CIRCLE].primary == NK_HOST_KEY_MOUSE_LEFT);
+        assert(state.profile.psp_keys[NK_PSP_BTN_CROSS].primary != NK_HOST_KEY_MOUSE_LEFT &&
+               state.profile.psp_keys[NK_PSP_BTN_CROSS].secondary != NK_HOST_KEY_MOUSE_LEFT);
+        assert(nk_input_profile_validate(&state.profile, NULL, 0) == NK_OK);
+    }
 
     /* A pad input with no glyph of its own is named the way the pad's family names it. */
     static const struct { NkBindingSource source; const char *legends[INPUT_PAD_NAMES_COUNT]; } pills[] = {

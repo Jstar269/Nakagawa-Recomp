@@ -1584,6 +1584,18 @@ const char *nk_platform_env_user_name(void) {
     return getenv("USERNAME");
 }
 
+int nk_platform_env_utf8(const char *name, char *out, size_t cap) {
+    WCHAR wname[128];
+    WCHAR probe[1];
+    if (!out || cap == 0) return -1;
+    out[0] = '\0';
+    if (!name || !utf8_to_wide(name, wname, sizeof(wname) / sizeof(wname[0]))) return -1;
+    SetLastError(ERROR_SUCCESS);
+    if (GetEnvironmentVariableW(wname, probe, 1) == 0)
+        return GetLastError() == ERROR_ENVVAR_NOT_FOUND ? 0 : 1;   /* unset, or set and empty */
+    return env_get_utf8(wname, out, cap) ? 1 : -1;
+}
+
 unsigned long nk_platform_process_id(void) {
     return (unsigned long)_getpid();
 }
