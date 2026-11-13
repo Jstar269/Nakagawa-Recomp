@@ -271,6 +271,9 @@ typedef struct GeGpuReplayStats {
 void gegpu_replay_stats_reset(void);
 void gegpu_replay_stats_get(GeGpuReplayStats *out);
 void gegpu_cpu_profile_stats_get(GeGpuCpuProfileStats *out);
+/* Movie frames (#2111, ge_shared.h's movie provenance): texture uploads that matched a noted movie
+ * picture, and presents decided to be movie frames, drawn as a texture or decoded into the target. */
+void gegpu_movie_counts(unsigned long *tex_matches, unsigned long *tex_frames, unsigned long *target_frames);
 
 /* The always-on counts the render fallback status reads once per accepted present (gui.c,
  * #2151), indexed by GEGPU_FALLBACK_*: cumulative for the run, never reset, so a reader takes

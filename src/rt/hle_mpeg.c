@@ -421,6 +421,7 @@ static void psmf_media_reset(SrPsmfPlayer *p) {
  * got none. */
 void psmf_player_release(SrPsmfPlayer *p) {
     if (!p) return;
+    sr_movie_forget_owner(p->guest);   /* its pictures are no longer movie frames (#2111) */
     psmf_flush(p);
     if (p->producer) { sr_psmf_producer_close(p->producer); p->producer = NULL; }
     if (p->h264 >= 0) { sr_h264_destroy(p->h264); p->h264 = -1; }
@@ -596,6 +597,13 @@ static int psmf_video_take(SrPsmfPlayer *p, uint32_t displaybuf, int bufw,
         else
             psmf_av_delivered(PSMF_AV_VIDEO, displaybuf, 0u, value, 1);
     }
+    /* Movie provenance (#2111, ge_shared.h): the picture now in the display buffer, for the
+     * movie upscaler. A no-op unless SR_MOVIE_UPSCALE is on. delivered_format is one of the
+     * four SR_H264_PIXEL_* formats from 5650 on (checked above), so the difference is 0..3. */
+    if (bufw > 0)
+        sr_movie_note_picture(p->guest, displaybuf, (uint32_t)bufw,
+                              (uint32_t)(info.delivered_format - SR_H264_PIXEL_5650),
+                              (uint32_t)info.width, (uint32_t)info.height);
     p->videoFramesOut++;
     return 1;
 }
