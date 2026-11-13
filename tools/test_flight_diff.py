@@ -350,7 +350,8 @@ class ComparabilityContractTests(unittest.TestCase):
         # characters (its field is declared with ACE_SPEC_MAX, which ace-selftest checks against the
         # longest line the key table formats), and the schema allows as many.
         long_line = ("v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=fill;smooth=x2;sas=sinc;tess=4;"
-                     "twin=off;stick=126;load=fast;depth=32;ssaa=4;texpack=on;cull=on")
+                     "twin=off;mips=on;stick=126;load=fast;depth=32;ssaa=4;peak=limit;glyphs=on;texpack=on;"
+                     "cull=on")
         self.assertGreater(len(long_line), 95)
         ace["runtime"]["enhancements"] = {"ace": long_line}
         flight_diff.validate_bundle(ace)

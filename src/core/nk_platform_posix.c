@@ -1185,8 +1185,21 @@ static void android_import_environment(JNIEnv *env) {
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     jsize count = entries ? (*env)->GetArrayLength(env, entries) : 0;
     for (jsize i = 0; i < count; i++) {
+        /* No JNI call may follow one that left an exception pending: each is cleared here,
+           and the entry it concerns is named in the log as not applied. */
         jstring entry = (jstring)(*env)->GetObjectArrayElement(env, entries, i);
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            __android_log_print(ANDROID_LOG_ERROR, "nakagawa", "NK_ENV_IMPORT_FAILED entry=%d", (int)i);
+            continue;
+        }
         const char *text = entry ? (*env)->GetStringUTFChars(env, entry, NULL) : NULL;
+        if (entry && !text) {   /* GetStringUTFChars threw OutOfMemoryError */
+            (*env)->ExceptionClear(env);
+            __android_log_print(ANDROID_LOG_ERROR, "nakagawa", "NK_ENV_IMPORT_FAILED entry=%d", (int)i);
+            (*env)->DeleteLocalRef(env, entry);
+            continue;
+        }
         const char *eq = text ? strchr(text, '=') : NULL;
         if (eq && eq != text && (size_t)(eq - text) < 256u) {
             char name[256];
@@ -1199,6 +1212,17 @@ static void android_import_environment(JNIEnv *env) {
     }
     if (entries) (*env)->DeleteLocalRef(env, entries);
     (*env)->DeleteLocalRef(env, host);
+}
+
+/* LauncherActivity.nativeImportEnvironment, on SDL's thread just before the player's main():
+   the variables NakagawaHost set after this library loaded (a toolchain unpacked on this start
+   sets its own then), applied to this library's libc as JNI_OnLoad applied the earlier ones. */
+JNIEXPORT void JNICALL Java_io_github_jstar269_nakagawa_LauncherActivity_nativeImportEnvironment(
+    JNIEnv *env, jclass cls);
+JNIEXPORT void JNICALL Java_io_github_jstar269_nakagawa_LauncherActivity_nativeImportEnvironment(
+    JNIEnv *env, jclass cls) {
+    (void)cls;
+    android_import_environment(env);
 }
 
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {

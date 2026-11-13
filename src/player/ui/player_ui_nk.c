@@ -287,7 +287,8 @@ struct PlayerUiNk {
     char play_reported[PLAYER_UI_TITLE_CAP][16];   /* the play mode badge last printed */
     char enhanced_reported[512];                    /* Settings > Enhanced as last printed */
     char ace_line_reported[PLAYER_PART_COUNT * 64 + 192]; /* the play line last printed */
-    char preset_note_reported[200];                 /* the main Settings page's preset note */
+    char enhancement_tag_reported[PLAYER_UI_TITLE_CAP][16]; /* the ENHANCEMENTS tag printed */
+    char preset_note_reported[200];                /* the main Settings page's preset note */
     int disc_reported_view;  /* the game-found card whose rows were printed, or -1 */
 #endif
     bool ready;
@@ -2923,6 +2924,18 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         out->enhancement_on = player_app_title_60hz_on(app, index);
         out->enhancement_session = app->experimental_60hz_session &&
                                    enhancement->available && !saved;
+        out->enhancement_released = player_app_title_60hz_released(app, index);
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+        /* The word scr_title.c tags the card with, from the value the screen reads. */
+        const char *tag = !out->enhancement_shown ? "none"
+                          : out->enhancement_released ? "Optional" : "Experimental";
+        if (strcmp(player->enhancement_tag_reported[index], tag) != 0) {
+            snprintf(player->enhancement_tag_reported[index],
+                     sizeof(player->enhancement_tag_reported[index]), "%s", tag);
+            printf("[PLAYER_UI_TEST] next_ui_enhancement_tag disc=%s tag=%s\n", game->disc_id,
+                   tag);
+        }
+#endif
         out->enhancement_enabled = !app->launch_pending && !app->is_game_running &&
             !out->enhancement_session &&
             !(app->build_session.is_building &&

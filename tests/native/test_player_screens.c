@@ -28,6 +28,14 @@ static const uint8_t k_test_glyph_pixel = 0xFFu;
 typedef char player_screens_enhanced_rows_fit[
     PLAYER_PART_COUNT <= PLAYER_UI_ENHANCED_ROWS ? 1 : -1];
 
+/* The longest render notice (#2151): player_render_effects_text with every effect named;
+   test_player_state.c checks the player writes exactly this. */
+static const char k_render_effects_all[] =
+    "Some of this game's drawing is done in software because the GPU renderer cannot draw "
+    "it: stencil effects, colour-test effects, logic operations, partial colour writes, "
+    "pictures drawn in main memory, wide frame buffers, mipmapped textures, lines and "
+    "points. The game may run slower.";
+
 /* Each part's words, as player_state.c's k_enhanced_parts gives them. */
 static const char *const k_enhanced_af_labels[] = {"16x", "8x", "4x", "2x", "Off"};
 static const char *const k_enhanced_switch_labels[] = {"On", "Off"};
@@ -57,6 +65,7 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_TWIN] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_SSAA] = ENHANCED_WORDS(k_enhanced_ssaa_labels),
+    [PLAYER_PART_MIPS] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_TEXPACK] = ENHANCED_WORDS(k_enhanced_switch_labels)};
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
@@ -137,44 +146,44 @@ static const PlayerUiTitle k_titles[] = {
      "", "", "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Showcase Breakout", "TEST00008", "Needs setup", "",
      "Showcase profile-zero acceptance remains open.", "", NULL, "",
      "", "", "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PLAYABLE, false, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Experimental Fixture", "TEST00006", "Experimental", "",
      "Source-owned compatibility fixture.", "", NULL, "", "", "",
      "RETRY PACKAGE CHECK", "◆", 0xC29AF4FFu,
      PLAYER_UI_PRIMARY_RETRY_PACKAGE_CHECK, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_NONE, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Untested Fixture", "TEST00005", "Untested", "",
      "No compatibility record exists.", "", NULL, "", "", "",
      "BUILD PACKAGE", "?", 0xC29AF4FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_NONE, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Phase Five", "TEST00004", "Needs setup", "",
      "Player launch stops at the package boundary.", "", NULL, "",
      "", "", "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_WONT_BOOT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Title Two", "TEST00002", "Needs setup", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Profile", "TEST00001", "Ready", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false}
 };
 
 /* A library with the demos that come with Nakagawa among the user's games, in
@@ -185,25 +194,25 @@ static const PlayerUiTitle k_demo_titles[] = {
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Title Two", "TEST00002", "Needs setup", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Scene Demo", "TEST00007", "Ready", "",
      "Shows a synthetic cube with sound.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Profile", "TEST00001", "Ready", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false}
 };
 
 /* The demos alone: a first start with nothing added yet. */
@@ -213,13 +222,13 @@ static const PlayerUiTitle k_demo_only_titles[] = {
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
     {"Synthetic Scene Demo", "TEST00007", "Ready", "",
      "Shows a synthetic cube with sound.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false}
 };
 
 /* What-to-expect cards: a player tier with plain words, with known issues, the
@@ -275,6 +284,7 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_REMOVE,
                FLOW_PAGE_STOP, FLOW_PAGE_TITLE_ACE, FLOW_PAGE_TITLE_ENHANCED,
                FLOW_PAGE_TITLE_AUTHENTIC, FLOW_PAGE_TITLE_RENDER,
+               FLOW_PAGE_TITLE_RENDER_EFFECTS,
                FLOW_PAGE_SAVES, FLOW_PAGE_SAVES_RESTORE, FLOW_PAGE_SAVES_REPLACE,
                FLOW_PAGE_TITLE_STEAM, FLOW_PAGE_STEAM, FLOW_PAGE_STEAM_ACCOUNTS,
                FLOW_PAGE_STEAM_BLOCKED, FLOW_PAGE_TITLE_TALL,
@@ -892,13 +902,14 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         return player_ui_screen_title(ui, &title);
     }
     if (which == FLOW_PAGE_TITLE_ENHANCED || which == FLOW_PAGE_TITLE_AUTHENTIC ||
-        which == FLOW_PAGE_TITLE_RENDER) {
+        which == FLOW_PAGE_TITLE_RENDER || which == FLOW_PAGE_TITLE_RENDER_EFFECTS) {
         /* #2245: a game's page as the player fills it for the user's own disc on Enhanced (or
            Authentic): every Enhanced part on, the longest last-session line the runtime's
            report gives, the disc check, the compatibility notes with the developer view, and
            Rebuild beside PLAY. On main the page did not scroll at the design text size, so
            this page pushed the prompt bar off the window. The render case adds #2151's notice
-           with the longer of its two sentences (player_render_notice_text). */
+           with the longer of its two sentences (player_render_notice_text); the effects case
+           the longest sentence player_render_effects_text writes, every effect named. */
         static PlayerUiTitle fixture;
         PlayerUiTitleModel title;
         bool enhanced = which != FLOW_PAGE_TITLE_AUTHENTIC;
@@ -937,6 +948,9 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
                 "Vulkan did not start on this PC, so this game is drawn in software and shown "
                 "in a basic Windows window. The Internal resolution setting has no effect, and "
                 "the game may run slower. Updating the graphics driver may help.";
+        } else if (which == FLOW_PAGE_TITLE_RENDER_EFFECTS) {
+            title.render_notice_heading = "Partly drawn in software";
+            title.render_notice_text = k_render_effects_all;
         }
         return player_ui_screen_title(ui, &title);
     }
@@ -3349,7 +3363,8 @@ static void test_settings_pages(void) {
     CHECK(flow_case_fits(FLOW_SETTINGS_ACE, 960, 540, dump, sizeof(dump)) &&
               flow_case_has_scroll(FLOW_SETTINGS_ACE, 960, 540),
           "Settings > Enhanced scrolls inside the 960 x 540 window");
-    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1000, dump, sizeof(dump)) &&
+    /* 1100 tall: the fifteenth row (Smooth far textures) is past the bottom of a 1000-tall window. */
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1100, dump, sizeof(dump)) &&
               strstr(dump, "\"PLAY MODE: ENHANCED\"") != NULL &&
               strstr(dump, "\"TEXTURE FILTERING: 16X\"") != NULL &&
               strstr(dump, "\"CRISP SYSTEM TEXT: ON\"") != NULL &&
@@ -3360,6 +3375,7 @@ static void test_settings_pages(void) {
               strstr(dump, "\"CLEAN PITCHED SOUND: OFF\"") != NULL &&
               strstr(dump, "\"SHARPER ENLARGING: OFF\"") != NULL &&
               strstr(dump, "\"SUPERSAMPLING: OFF\"") != NULL &&
+              strstr(dump, "\"SMOOTH FAR TEXTURES: OFF\"") != NULL &&
               /* The sentences wrap; their lines are dumped one by one. */
               strstr(dump, "Smooths steady 30 FPS scenes") != NULL &&
               strstr(dump, "Adds about 17 ms of delay.\"") != NULL &&
@@ -3378,6 +3394,19 @@ static void test_settings_pages(void) {
               PLAYER_UI_ID_ENHANCED_PART(13) == 0x4680u &&
               PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SSAA) == 0x4680u && PLAYER_PART_COUNT >= 14,
           "the part rows' ids: 13 in the first range, the 14th in the second");
+    /* The 15th (Smooth far textures) follows Supersampling in the second range, at 0x4681. */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(14) == 0x4681u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_MIPS) == 0x4681u && PLAYER_PART_COUNT >= 15,
+          "the part rows' ids: the 15th in the second range, after the 14th");
+    /* The 16th (Texture pack, #1880) follows Smooth far textures, at 0x4682; 1200 tall shows its row. */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(15) == 0x4682u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_TEXPACK) == 0x4682u && PLAYER_PART_COUNT >= 16,
+          "the part rows' ids: the 16th in the second range, after the 15th");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1200, dump, sizeof(dump)) &&
+              strstr(dump, "\"SMOOTH FAR TEXTURES: OFF\"") != NULL &&
+              strstr(dump, "\"TEXTURE PACK: OFF\"") != NULL &&
+              strstr(dump, "Draws the texture pack") != NULL,
+          "Settings > Enhanced shows the Texture pack row after Smooth far textures");
     for (unsigned i = 0u; i < PLAYER_PART_COUNT; ++i) {
         PlayerUiAction part =
             activate_flow_button(PLAYER_UI_ID_ENHANCED_PART(i), FLOW_SETTINGS_ACE);
@@ -3493,6 +3522,17 @@ static void test_settings_pages(void) {
                            "software") != NULL &&
               strstr(dump, "\"DRAWN IN SOFTWARE\"") != NULL && strstr(dump, "\"HIDE\"") != NULL,
           "the render notice shows its heading, its sentence and Hide on the game's page");
+    CHECK(flow_case_fits(FLOW_PAGE_TITLE_RENDER_EFFECTS, 1280, 720, dump, sizeof(dump)) &&
+              strstr(dump, "Some of this game's drawing is done in software") != NULL &&
+              strstr(dump, "\"PARTLY DRAWN IN SOFTWARE\"") != NULL &&
+              strstr(dump, "\"HIDE\"") != NULL,
+          "the render notice names every effect the GPU renderer hands to software, with Hide");
+    CHECK(flow_case_fits(FLOW_PAGE_TITLE_RENDER_EFFECTS, 960, 540, dump, sizeof(dump)),
+          "the longest render notice fits the 960 x 540 minimum window");
+    CHECK(activate_flow_button(PLAYER_UI_ID_TITLE_RENDER_NOTICE_HIDE,
+                               FLOW_PAGE_TITLE_RENDER_EFFECTS).kind ==
+              PLAYER_UI_ACTION_HIDE_RENDER_NOTICE,
+          "the effects notice's Hide asks to hide it");
     CHECK(dump_flow_case(FLOW_PAGE_TITLE_ENHANCED, dump, sizeof(dump)) &&
               strstr(dump, "DRAWN IN SOFTWARE") == NULL && strstr(dump, "\"HIDE\"") == NULL,
           "without a fallback the game's page has no render notice");
@@ -5357,7 +5397,8 @@ static int capture_screens(const char *directory) {
             {FLOW_DEVLOG, "developer-log", PLAYER_UI_ID_DEVELOPER_LOG_CLOSE},
             /* #2245 and #2151: the fullest Enhanced page, and with the render notice. */
             {FLOW_PAGE_TITLE_ENHANCED, "title-enhanced-full", PLAYER_UI_ID_TITLE_PRIMARY},
-            {FLOW_PAGE_TITLE_RENDER, "title-render-notice", PLAYER_UI_ID_TITLE_PRIMARY}
+            {FLOW_PAGE_TITLE_RENDER, "title-render-notice", PLAYER_UI_ID_TITLE_PRIMARY},
+            {FLOW_PAGE_TITLE_RENDER_EFFECTS, "title-render-effects", PLAYER_UI_ID_TITLE_PRIMARY}
         };
         for (size_t i = 0u; i < sizeof(flows) / sizeof(flows[0]); ++i) {
             g_flow_case = flows[i].which;
@@ -5665,9 +5706,22 @@ static void test_title_enhancement_card(void) {
               strstr(dump, "Off plays the original") != NULL,
           "the card says it is Ace's improvement for this game and that off is the original");
     CHECK(strstr(dump, "Experimental") != NULL || strstr(dump, "EXPERIMENTAL") != NULL,
-          "the card is tagged experimental until matches hold 60 updates a second");
+          "the card is tagged experimental unless its package is released");
+    CHECK(strstr(dump, "Optional") == NULL && strstr(dump, "OPTIONAL") == NULL,
+          "an experimental package's card is not tagged optional");
     CHECK(strstr(dump, "Turn it off to play the original game.") == NULL,
           "a usable package has no problem line");
+    /* A package that declares "experimental": false (ENHANCEMENT_CONTRACT.md section 9.10). */
+    title.enhancement_released = true;
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_title(ui, &model);
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "Optional") != NULL || strstr(dump, "OPTIONAL") != NULL,
+          "a released package's card is tagged optional");
+    CHECK(strstr(dump, "Experimental") == NULL && strstr(dump, "EXPERIMENTAL") == NULL,
+          "a released package's card is not tagged experimental");
+    title.enhancement_released = false;
     CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_PRIMARY,
           "PLAY, not the enhancement switch, is the title's default focus");
     for (int move = 0; move < 6 && !reached; ++move) {

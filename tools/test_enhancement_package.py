@@ -362,6 +362,22 @@ class TestEnhancementPackageSchema(unittest.TestCase):
                     validate_package(pkg)
                 self.assertIn(f"Missing required property '{field}'", str(ctx.exception))
 
+    def test_experimental_is_an_optional_boolean(self) -> None:
+        """experimental (section 9.10) may be left out or be true or false, and nothing else."""
+        for value in (True, False):
+            with self.subTest(value=value):
+                pkg = copy.deepcopy(self.valid_presentation_pkg)
+                pkg["experimental"] = value
+                self.assertIs(validate_package(pkg)["experimental"], value)
+        bad_values: tuple[object, ...] = ("false", 0, None, [])
+        for bad in bad_values:
+            with self.subTest(value=bad):
+                pkg = copy.deepcopy(self.valid_presentation_pkg)
+                pkg["experimental"] = bad
+                with self.assertRaises(EnhancementPackageError) as ctx:
+                    validate_package(pkg)
+                self.assertIn("experimental must be true or false", str(ctx.exception))
+
     def test_capabilities_validation(self) -> None:
         """Capabilities list must be non-empty array of unique valid identifiers."""
         # Empty array
@@ -4690,6 +4706,19 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                 package = json.loads(data.decode("utf-8"))
                 validate_package(copy.deepcopy(package))
                 self.assertEqual(publish_audit.check_enhancement_packages({rel: (data, None)}), [])
+
+    def test_shipped_packages_are_experimental_until_released(self) -> None:
+        """Section 9.10: a package the project ships declares "experimental": false only when
+        its release entry under section 9.10 names it. Hot Shots Tennis was released by the
+        owner's decision of 2026-11-12 (section 9.10.1); a re-export from a declaration without
+        the flag would put it back to Experimental."""
+        released = frozenset({"ucus98701-60hz.json"})
+        shipped = sorted((ROOT / "assets" / "enhancements").glob("*.json"))
+        self.assertTrue(shipped)
+        for path in shipped:
+            with self.subTest(package=path.name):
+                package = json.loads(path.read_text("utf-8"))
+                self.assertEqual(package.get("experimental") is False, path.name in released)
 
     def test_validator_refuses_malformed_published_packages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

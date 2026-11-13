@@ -99,11 +99,12 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   uploads per frame, which can make a busy game drop frames. The scaler builds no lookup table, so it adds no fixed
   memory cost. The rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1010-texture-scaling-and-the-smart-2d-filter).
-- **Sharp game text (Ace Mode, development only).** It is reachable only through the `SR_GLYPHS` environment
-  variable (`on`), has no setting in the player, and is not an admitted Enhanced item, because it
-  changes the frames the game can read back
-  ([section 11.3.5](ENHANCEMENT_CONTRACT.md#1135-sharp-game-text-not-admitted)). At a render scale of 2 to 4, a
-  small sprite that maps one texel to one pixel over a page of anti-aliased text is redrawn from a version of just
+- **Sharp game text (Enhanced, not yet in the player).** It is the launch line's `glyphs=on` key and is not yet an
+  admitted Enhanced item, because it changes the frames the game can read back
+  ([section 11.3.5](ENHANCEMENT_CONTRACT.md#1135-sharp-game-text-glyphs-not-yet-admitted)). The player has no
+  setting for it and writes the launch line itself, so a player launch cannot turn it on; only a title's runtime
+  started directly, with `SR_ACE` set by hand to an Enhanced or Ace line that carries `;glyphs=on`, can. At a
+  render scale of 2 to 4, a small sprite that maps one texel to one pixel over a page of anti-aliased text is redrawn from a version of just
   that rectangle rebuilt at the render scale, checked against the game's own bytes. A page with a rebuilt rectangle
   costs the page's GPU memory times the render scale squared (a 256x256 page at 4x is 4 MB), taken from the
   same 512 MB budget as texture scaling (`SR_TEX_SCALE_BUDGET_MB`). At most 48 rectangles are checked or rebuilt per
@@ -130,6 +131,21 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   and 272 or 1020 MB at 4. At start the renderer checks that the images fit the GPU; when 4x does not, the run
   uses 2x, and when neither does, it runs without supersampling, and the log says why in either case. The rules
   are in [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1021-supersampling-ssaa).
+- **Smooth far textures.** A part of Enhanced and Ace, off by default and in no graphics preset: Settings >
+  Enhanced offers it as **Smooth far textures** (On or Off), for the library or for one game, and the launch
+  line carries it as `mips=on`. It is not on by choosing Enhanced or Ace, because it changes the frames the game can
+  read back ([section 11.3.8](ENHANCEMENT_CONTRACT.md#1138-smooth-far-textures-mips)). A texture the game gives
+  only one level gets smaller copies of itself, which a far 3D surface samples at a high render scale. That
+  reduces shimmer on such surfaces, but by little when texture filtering is on: on LittleBigPlanet's first level
+  at 4x, distant shimmer fell by 0.1 % with 16x filtering and by 2.2 % without it. The copies are built on the
+  game's own thread at the first draw that shows the texture small, so a scene that brings in many new textures
+  can stutter; each frame builds about two 256x256 textures' worth, plus at most one more that started under that limit (the rest draw unsmoothed until a later frame), and textures that
+  change every frame, such as movies, keep their one level while they change. The copies add up to a third of
+  the texture's GPU memory. Through-mode menus and text, alpha-tested cut-outs, textures drawn at their own size
+  or larger, and
+  textures the game already shrinks itself are drawn as before. A run's log ends with a `HOST_MIPS: exit` line
+  that counts the textures and the build time. The rules are in
+  [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1016-smooth-far-textures-host-mip-chains).
 - **Texture packs (Texture pack).** A part of Enhanced and Ace, off by default and in no graphics preset. On a
   game's Enhanced page, **Texture pack folder** picks the folder of a pack you made or downloaded for that game (a folder
   that holds a `textures.zip` is read from that ZIP), and turns **Texture pack** on for it; the row shows the folder's name and how many textures it lists. Packs use the

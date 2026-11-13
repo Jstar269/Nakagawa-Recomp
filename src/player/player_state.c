@@ -1260,6 +1260,12 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"ssaa", "Supersampling",
      "Smooths jagged edges. 2x takes 4 times the GPU work, 4x 16 times.",
      3, k_part_ssaa_values, k_part_ssaa_labels, k_part_ssaa_words, 0},
+    /* A guest-visible item (contract 11.3.8): every present commits the smoothed frame to guest VRAM,
+       as texture filtering does. Off by default until its "nothing worse" runs exist (11.2 item 4),
+       with its own off switch in the library and each title (item 2). */
+    {"mips", "Smooth far textures",
+     "Slightly less shimmer on far textures. Uses CPU; may stutter on new textures.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
     /* A guest-visible item (contract 11.3.4): off by default, in no preset, and in effect only for
        a title with a pack of the player's own chosen on its page. */
     {"texpack", "Texture pack",
@@ -2464,7 +2470,7 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
 #define PRESET_PART_LIST(X, text, upscale)                                                \
     X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
     X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1)    \
-    X(TWIN, -1) X(SSAA, -1) X(TEXPACK, -1)
+    X(TWIN, -1) X(SSAA, -1) X(MIPS, -1) X(TEXPACK, -1)
 #define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
 #define PRESET_PART_ONE(part, value) + 1
 #define PRESET_PARTS(text, upscale) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale)}
@@ -3003,6 +3009,7 @@ bool player_read_title_enhancement(const char *user_root, const char *shipped_ro
                                    const GameRecord *game, PlayerTitleEnhancement *out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
+    out->experimental = true;
     char key[PLAYER_DISC_ID_KEY_LEN];
     bool have_user = user_root && user_root[0];
     bool have_shipped = shipped_root && shipped_root[0];
@@ -3067,15 +3074,24 @@ bool player_read_title_enhancement(const char *user_root, const char *shipped_ro
     } else {
         snprintf(out->package_id, sizeof(out->package_id), "%s", id);
         out->available = true;
+        /* Only the shipped package's explicit false releases it (section 9.10): the maintainer
+           releases a shipped package, so a file in the user's data folder stays experimental
+           whatever it declares, and a missing or non-boolean value stays experimental. */
+        bool experimental = true;
+        if (out->shipped &&
+            nk_json_get_bool(nk_json_obj_get(package, "experimental"), &experimental) &&
+            !experimental) {
+            out->experimental = false;
+        }
     }
     if (package) nk_json_free(package);
     return out->available;
 }
 
 /* Section 11.2 item 5 of docs/ENHANCEMENT_CONTRACT.md, a per-title off switch carried in a
-   game's package, is not read here: the player reads only a package's id and target title
-   (player_read_title_enhancement), and no section 11 item is admitted yet. The first section
-   11.3 item lands that switch with it. */
+   game's package, is not read here: the player reads only a package's id, target title and
+   experimental flag (player_read_title_enhancement), and no section 11 item is admitted yet.
+   The first section 11.3 item lands that switch with it. */
 bool player_app_title_60hz_saved(const PlayerApp *app, const char *disc_id) {
     const PlayerTitlePlay *title = app ? player_settings_title_play(&app->settings, disc_id) : NULL;
     return title && title->mode == PLAYER_PLAY_ACE && title->logic_60 != 0;
@@ -3097,6 +3113,12 @@ bool player_app_title_60hz_blocked(const PlayerApp *app, int game_index) {
     if (!app || game_index < 0 || game_index >= app->game_count) return false;
     return player_app_title_60hz_saved(app, app->games[game_index].disc_id) &&
            !app->title_enhancements[game_index].available;
+}
+
+bool player_app_title_60hz_released(const PlayerApp *app, int game_index) {
+    if (!app || game_index < 0 || game_index >= app->game_count) return false;
+    const PlayerTitleEnhancement *enhancement = &app->title_enhancements[game_index];
+    return enhancement->available && enhancement->shipped && !enhancement->experimental;
 }
 
 /* The variant the title launches: its enhanced build when its 60 FPS game logic is on and its
@@ -3243,6 +3265,9 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
            whatever the enum's. */
         if (p == PLAYER_PART_UPSCALE || p == PLAYER_PART_STICK || p == PLAYER_PART_LOAD ||
             p == PLAYER_PART_SSAA || p == PLAYER_PART_TEXPACK || p == PLAYER_PART_CULL) continue;
+        /* A missing mips is off (contract 11.3.8): the key is written only when the part is on,
+           right after twin. */
+        if (p == PLAYER_PART_MIPS && play->part[p] != 1) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
@@ -5478,6 +5503,8 @@ static bool player_prepare_boot_event_file(PlayerApp *app) {
     app->stalled_game_restore_game_front_requested = false;
     app->render_path_known = false;
     app->render_path_disc[0] = '\0';
+    app->render_effects = 0u;
+    app->render_effects_text[0] = '\0';
 
     ++player_boot_event_sequence;
     if (!player_format_boot_event_path(app->boot_event_file_path,
@@ -6209,22 +6236,89 @@ bool player_render_notice_text(NkRenderFallback fallback, const char **heading,
     return h != NULL;
 }
 
+/* The effects in words, in NkRenderEffect order. */
+static const char *const player_render_effect_words[NK_RENDER_EFFECT_COUNT] = {
+    "stencil effects", "colour-test effects", "logic operations", "partial colour writes",
+    "pictures drawn in main memory", "wide frame buffers", "mipmapped textures", "lines",
+    "points"
+};
+
+bool player_render_effects_text(uint16_t effects, char *out, size_t out_capacity) {
+    int total = 0;
+    int done = 0;
+    size_t used = 0u;
+    if (!out || out_capacity == 0u) return false;
+    out[0] = '\0';
+    for (int i = 0; i < NK_RENDER_EFFECT_COUNT; ++i) total += (effects >> i) & 1u;
+    if (total == 0) return false;
+    int n = snprintf(out, out_capacity,
+                     "Some of this game's drawing is done in software because the GPU renderer "
+                     "cannot draw it: ");
+    if (n < 0 || (size_t)n >= out_capacity) {
+        out[0] = '\0';
+        return false;
+    }
+    used = (size_t)n;
+    for (int i = 0; i < NK_RENDER_EFFECT_COUNT; ++i) {
+        if (!((effects >> i) & 1u)) continue;
+        const char *sep = done == 0 ? "" : done == total - 1 ? " and " : ", ";
+        n = snprintf(out + used, out_capacity - used, "%s%s", sep, player_render_effect_words[i]);
+        if (n < 0 || used + (size_t)n >= out_capacity) {
+            out[0] = '\0';
+            return false;
+        }
+        used += (size_t)n;
+        done++;
+    }
+    n = snprintf(out + used, out_capacity - used, ". The game may run slower.");
+    if (n < 0 || used + (size_t)n >= out_capacity) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
 bool player_app_render_notice(const PlayerApp *app, const char *disc_id, const char **heading,
                               const char **text) {
     if (heading) *heading = NULL;
     if (text) *text = NULL;
     if (!app || !disc_id || !disc_id[0] || !app->render_path_known ||
         strcmp(app->render_path_disc, disc_id) != 0 ||
-        (unsigned)app->render_path.fallback >= NK_RENDER_FALLBACK_COUNT ||
-        app->render_notice_hidden[app->render_path.fallback]) {
+        (unsigned)app->render_path.fallback >= NK_RENDER_FALLBACK_COUNT) {
         return false;
     }
-    return player_render_notice_text(app->render_path.fallback, heading, text);
+    if (app->render_path.fallback != NK_RENDER_FALLBACK_NONE) {
+        if (app->render_notice_hidden[app->render_path.fallback]) return false;
+        return player_render_notice_text(app->render_path.fallback, heading, text);
+    }
+    /* Hidden only when this game hid every effect it reports now. */
+    const uint16_t hidden =
+        strcmp(app->render_effects_hidden_disc, disc_id) == 0 ? app->render_effects_hidden : 0u;
+    if (!app->render_path.gpu_ge || (app->render_effects & (uint16_t)~hidden) == 0u ||
+        !app->render_effects_text[0]) {
+        return false;
+    }
+    if (heading) *heading = "Partly drawn in software";
+    if (text) *text = app->render_effects_text;
+    return true;
 }
 
 void player_app_hide_render_notice(PlayerApp *app) {
     if (!app || !app->render_path_known ||
         (unsigned)app->render_path.fallback >= NK_RENDER_FALLBACK_COUNT) {
+        return;
+    }
+    if (app->render_path.fallback == NK_RENDER_FALLBACK_NONE) {
+        if (app->render_effects == 0u || !app->render_path_disc[0]) return;
+        if (strcmp(app->render_effects_hidden_disc, app->render_path_disc) != 0) {
+            snprintf(app->render_effects_hidden_disc, sizeof(app->render_effects_hidden_disc),
+                     "%s", app->render_path_disc);
+            app->render_effects_hidden = 0u;
+        }
+        app->render_effects_hidden |= app->render_effects;
+        player_dev_log_add(app, "runtime",
+                           "render notice hidden for this session: effects drawn in software "
+                           "on %s", app->render_path_disc);
         return;
     }
     app->render_notice_hidden[app->render_path.fallback] = true;
@@ -6234,7 +6328,26 @@ void player_app_hide_render_notice(PlayerApp *app) {
 
 void player_app_consume_render_path_line(PlayerApp *app, const char *line) {
     NkRenderPath path;
-    if (!app || app->render_path_known || !nk_render_path_event_parse(line, &path)) return;
+    NkRenderFallbackEvent fallback;
+    if (!app) return;
+    if (nk_render_fallback_event_parse(line, &fallback)) {
+        const uint16_t bit = (uint16_t)(1u << fallback.reason);
+        if (app->render_effects & bit) return;
+        app->render_effects |= bit;
+        (void)player_render_effects_text(app->render_effects, app->render_effects_text,
+                                         sizeof(app->render_effects_text));
+        player_dev_log_add(app, "runtime",
+                           "render fallback: reason=%s frames=%lu sw_prims=%llu gpu_prims=%llu "
+                           "readbacks=%llu share_pm=%lu",
+                           nk_render_effect_name(fallback.reason),
+                           (unsigned long)fallback.frames,
+                           (unsigned long long)fallback.sw_prims,
+                           (unsigned long long)fallback.gpu_prims,
+                           (unsigned long long)fallback.readbacks,
+                           (unsigned long)fallback.share_pm);
+        return;
+    }
+    if (app->render_path_known || !nk_render_path_event_parse(line, &path)) return;
     app->render_path = path;
     app->render_path_known = true;
     player_dev_log_add(app, "runtime", "render path: presenter=%s ge=%s fallback=%s",

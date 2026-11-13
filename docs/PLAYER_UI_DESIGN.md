@@ -403,10 +403,13 @@ one or two plain sentences on what to expect on this PC in `BODY_S` `paper`, the
 when there are any. The tier comes from the title's own player record, or else from its `docs/COMPATIBILITY.md`
 status word through the table in [Status words](COMPATIBILITY.md#status-words). The status word itself describes
 the project's test route and read as a claim about the user's game (#1297), so only developer mode names it, in a
-`FOOTNOTE`. A title with an enhancement package then has an ENHANCEMENTS card (eyebrow and an OPTIONAL tag): the
-switch 60 FPS GAME LOGIC: ON or OFF (`PRIMARY` while on, never the default focus, disabled while a game starts or
-runs or the title's package builds), then a `BODY_S` line saying it is an optional enhancement made for this game
-and that off plays the original game as released ([ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md#9-declarative-frame-rate-rescale-packages-60-hz-logic)
+`FOOTNOTE`. A title with an enhancement package then has an ENHANCEMENTS card (eyebrow and a tag, OPTIONAL for a
+package the maintainer released and EXPERIMENTAL for any other; [ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md#910-experimental-or-released)
+section 9.10). Only a package found in the source tree's `assets/enhancements/` can read OPTIONAL, never one from
+the user's data folder, which is tagged EXPERIMENTAL whatever it declares. The card holds the switch 60 FPS GAME
+LOGIC: ON or OFF (`PRIMARY` while on, never the default focus, disabled while a game starts or runs or the title's
+package builds), then a `BODY_S` line saying it is an optional enhancement made for this game and that off plays the
+original game as released ([ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md#9-declarative-frame-rate-rescale-packages-60-hz-logic)
 section 9). When the switch is saved on but the package is gone, the card stays and says why in `error`, and the
 primary action reads ENHANCEMENT UNAVAILABLE. Under the cards, one row that wraps at a larger text size: ADD TO
 STEAM (the [Add to Steam](#add-to-steam-built) dialog), REPORT A PROBLEM, and REMOVE FROM LIBRARY (a `DANGER`
@@ -568,7 +571,7 @@ default (AUTHENTIC: OPTIONS or ENHANCED: OPTIONS; Authentic for a new library), 
 dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from the player's part table (TEXTURE
 FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; WIDESCREEN; SMOOTH MOTION; CLEAN
 PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; FULL 32-BIT COLOUR;
-SUPERSAMPLING; TEXTURE PACK; a
+SUPERSAMPLING; SMOOTH FAR TEXTURES; TEXTURE PACK; a
 new library has 16x filtering, crisp text and the badge on and the rest off, and a graphics preset sets SHARPER
 ENLARGING and CRISP SYSTEM TEXT in Enhanced and Ace, below), each beside a sentence that says what it does and what it
 costs. A new part is a new row with no change to the page. While the mode is

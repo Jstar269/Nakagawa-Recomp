@@ -467,6 +467,54 @@ static void gui_ace_presented(int accepted, int display_busy) {
     }
     if (display_busy) ace_smooth_flip_busy();
 }
+
+/* ---- what the GPU GE renderer hands to the software renderer (#2151) -------------------------
+ * While the GPU GE runs, a primitive in a state it cannot draw goes to ge.c's software rasterizer,
+ * and when its target was on the GPU, with a synchronous readback (ge_gpu.c,
+ * software_fallback_begin). gegpu_fallback_counts counts both by reason, always. After each
+ * accepted present this reads them and steps nk_render_fallback_window_step, the rule in
+ * nk_shared_helpers.h that decides when a reason costs enough for long enough to tell the
+ * person: then it is reported once per run as BOOT_EVENT phase=render_fallback, and the player
+ * names it on the game's page. Reading the counts changes nothing the GE draws.
+ * gui-present-selftest drives this code with the counts stubbed. */
+static NkRenderFallbackWindow s_render_window;
+static int s_render_stats = -1;   /* SR_GPU_STATS: a line for each present that fell back; -1 unread */
+
+/* After each gui_present: an accepted present steps the windows. With SR_GPU_STATS, a present
+ * that handed anything to the software renderer also prints its counts, the figures the rule is
+ * checked against (src/rt/gpu_sdl3vk/README.md); a present that did not prints nothing. */
+static void gui_render_fallback_presented(int accepted) {
+    if (!accepted) return;
+    GeGpuFallbackCounts now;
+    NkRenderFallbackDelta delta;
+    gegpu_fallback_counts(&now);
+    const uint16_t crossed = nk_render_fallback_window_step(&s_render_window, &now, &delta);
+    if (s_render_stats < 0) {
+        const char *st = getenv("SR_GPU_STATS");
+        s_render_stats = st && st[0] && strcmp(st, "0") != 0;
+    }
+    if (s_render_stats) {
+        char line[512];
+        int used = snprintf(line, sizeof(line), "GEGPU_FALLBACK present gpu=%lu",
+                            (unsigned long)delta.gpu_prims);
+        int fell = 0;
+        for (int r = 0; r < GEGPU_FALLBACK_REASONS && used > 0 && (size_t)used < sizeof(line); r++) {
+            if (!delta.sw_prims[r] && !delta.readbacks[r]) continue;
+            fell = 1;
+            used += snprintf(line + used, sizeof(line) - (size_t)used, " %s=%llu/%llu",
+                             gegpu_fallback_token(r), (unsigned long long)delta.sw_prims[r],
+                             (unsigned long long)delta.readbacks[r]);
+        }
+        if (fell) fprintf(stderr, "%s\n", line);
+    }
+    for (int r = 0; r < GEGPU_FALLBACK_REASONS; r++) {
+        if (!(crossed & (1u << r))) continue;
+        const NkRenderFallbackEvent e = nk_render_fallback_window_event(&s_render_window,
+                                                                        (NkRenderEffect)r);
+        char line[256];
+        if (nk_render_fallback_event_format(&e, line, sizeof(line)) > 0) sr_gui_boot_event("%s", line);
+    }
+}
 #endif
 
 #ifdef SR_SDL3VK
@@ -605,7 +653,7 @@ static AceUi *s_ace_ui;
 static int s_ace_ui_ready;
 static int s_ace_keyboard_now;                    /* this present's keyboard is the UI pass's */
 static uint64_t s_ace_first_frame_ns;             /* the first accepted present: the notice starts */
-static char s_ace_words[160];
+static char s_ace_words[ACE_WORDS_MAX];
 
 static void gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     const AceConfig *ace = ace_effective();
@@ -1708,6 +1756,7 @@ pace:
 #endif
 #ifdef SR_SDL3VK
     gui_ace_presented(accepted, gui_present_busy(gpu_action, cpu_result));
+    gui_render_fallback_presented(accepted);
 #endif
     if (accepted) {
         s_shown_fb.addr = fbaddr;
@@ -2035,10 +2084,10 @@ static int gui_pause_compose(int w, int h, int rgba) {
         model.hud_on = sdl3vk_hud_is_enabled() != 0;
         /* Enhanced or Ace (ace.h): the menu says what it does; the readout is a live switch while
          * the in-game UI can draw it. Nothing in an authentic run. */
-        static char ace_caption[200];
+        static char ace_caption[ACE_WORDS_MAX + 40];   /* "<tier>: " and the words */
         ace_caption[0] = '\0';
         if (g_ace_on) {
-            char words[160];
+            char words[ACE_WORDS_MAX];
             if (ace_feature_words(words, sizeof(words)) > 0)
                 snprintf(ace_caption, sizeof(ace_caption), "%s: %s", ace_tier_name(), words);
             else
@@ -2977,12 +3026,161 @@ static void selftest_busy_display_keeps_real_frames(void) {
     busy_check_motion(&r, 1u);
     g_ace_on = 0;
 }
+
+/* ---- the render fallback rule and its event (#2151) -----------------------------------------
+ * gui_present's step after each present (gui_render_fallback_presented) with the GE's counts
+ * stubbed: the boot event it writes goes to SR_BOOT_EVENT_FILE, as in a player launch, and is
+ * read back with the player's parser. Each case uses the rule's own constants, so a change to
+ * them is tested as it stands. */
+static GeGpuFallbackCounts s_stub_fallback;
+void gegpu_fallback_counts(GeGpuFallbackCounts *out) { *out = s_stub_fallback; }
+
+static char s_fallback_events_path[1024];
+
+static void fallback_reset(void) {
+    FILE *f = fopen(s_fallback_events_path, "wb");
+    assert(f);
+    fclose(f);
+    memset(&s_render_window, 0, sizeof(s_render_window));
+    memset(&s_stub_fallback, 0, sizeof(s_stub_fallback));
+    s_stub_fallback.ready = 1;
+    s_stub_fallback.gpu_prims = 0xFFFFFF00u;   /* the GPU count wraps during each case */
+    gui_render_fallback_presented(1);          /* the first sample only primes the window */
+}
+
+/* One window of accepted presents; the first carries all of the window's counts, and a present
+ * the slot rule dropped (accepted 0) comes between each two. */
+static void fallback_window(int r, uint32_t gpu, unsigned long long sw, unsigned long long rb) {
+    for (uint32_t f = 0; f < NK_RENDER_FALLBACK_WINDOW_FRAMES; f++) {
+        if (f == 0) {
+            s_stub_fallback.gpu_prims += gpu;
+            s_stub_fallback.sw_prims[r] += sw;
+            s_stub_fallback.readbacks[r] += rb;
+        }
+        gui_render_fallback_presented(1);
+        gui_render_fallback_presented(0);
+    }
+}
+
+/* The events written since fallback_reset; every line must be one. */
+static int fallback_events(NkRenderFallbackEvent *out, int max) {
+    FILE *f = fopen(s_fallback_events_path, "rb");
+    char line[512];
+    int n = 0;
+    assert(f);
+    while (fgets(line, sizeof(line), f)) {
+        assert(n < max);
+        if (!nk_render_fallback_event_parse(line, &out[n])) {
+            fprintf(stderr, "gui-present-selftest: not a render_fallback event: %s", line);
+            abort();
+        }
+        n++;
+    }
+    fclose(f);
+    return n;
+}
+
+static void selftest_render_fallback_rule(int argc, char **argv) {
+    NkRenderFallbackEvent ev[8];
+    const uint32_t W = NK_RENDER_FALLBACK_WINDOW_FRAMES, K = NK_RENDER_FALLBACK_WINDOWS;
+    const unsigned long long P = NK_RENDER_FALLBACK_MIN_PRIMS, B = NK_RENDER_FALLBACK_READBACKS;
+    const uint32_t G = 400000u;                  /* GPU primitives a window: a busy scene */
+    assert(K >= 2u && P >= 2u && B >= 1u);
+    assert(argc >= 1 && argv[0]);
+    (void)snprintf(s_fallback_events_path, sizeof(s_fallback_events_path), "%s.events", argv[0]);
+#ifdef _WIN32
+    assert(_putenv_s("SR_BOOT_EVENT_FILE", s_fallback_events_path) == 0);
+#else
+    assert(setenv("SR_BOOT_EVENT_FILE", s_fallback_events_path, 1) == 0);
+#endif
+    s_render_stats = 0;
+
+    /* The event's names are the GE's reasons. */
+    for (int r = 0; r < GEGPU_FALLBACK_REASONS; r++)
+        assert(strcmp(gegpu_fallback_token(r), nk_render_effect_name((NkRenderEffect)r)) == 0);
+
+    /* At the primitive threshold: nothing until the K-th window in a row, then one event that
+     * carries those windows' counts; never a second one in the same run. */
+    fallback_reset();
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_STENCIL, G, P, 0u);
+    assert(fallback_events(ev, 8) == 0);
+    fallback_window(GEGPU_FALLBACK_STENCIL, G, P, 0u);
+    assert(fallback_events(ev, 8) == 1);
+    assert(ev[0].reason == NK_RENDER_EFFECT_STENCIL && ev[0].frames == K * W &&
+           ev[0].sw_prims == K * P && ev[0].gpu_prims == (unsigned long long)K * G &&
+           ev[0].readbacks == 0u && ev[0].share_pm == (uint32_t)(1000u * P / (G + P)));
+    for (uint32_t i = 0; i < K + 1u; i++) fallback_window(GEGPU_FALLBACK_STENCIL, G, P, 0u);
+    assert(fallback_events(ev, 8) == 1);
+
+    /* One primitive short at any share (all of them here), or one readback short: never. */
+    fallback_reset();
+    for (uint32_t i = 0; i < 2u * K; i++) fallback_window(GEGPU_FALLBACK_LINE, 0u, P - 1u, 0u);
+    for (uint32_t i = 0; i < 2u * K; i++)
+        fallback_window(GEGPU_FALLBACK_RAM_FB, 1000000u, 1u, B - 1u);
+    assert(fallback_events(ev, 8) == 0);
+
+    /* The cost decides, not the share: a busy scene of 10,000 GPU primitives a present with 90 a
+     * present drawn in software and no readback is under 1 % of the scene but about 2 ms a
+     * present at the derived cost, and is reported with its share. */
+    fallback_reset();
+    for (uint32_t i = 0; i < K; i++)
+        fallback_window(GEGPU_FALLBACK_RAM_FB, 10000u * W, 90u * W, 0u);
+    assert(fallback_events(ev, 8) == 1 && ev[0].reason == NK_RENDER_EFFECT_RAM_FB &&
+           ev[0].sw_prims == 90ull * W * K && ev[0].readbacks == 0u && ev[0].share_pm == 8u);
+
+    /* A window under the rule breaks the run of windows: K-1 over, one under, K-1 over is not
+     * enough; one more over is. */
+    fallback_reset();
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, P, 0u);
+    fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, P - 1u, 0u);
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, P, 0u);
+    assert(fallback_events(ev, 8) == 0);
+    fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, P, 0u);
+    assert(fallback_events(ev, 8) == 1 && ev[0].reason == NK_RENDER_EFFECT_COLOR_TEST);
+
+    /* Readbacks alone cross the rule, at a negligible share of primitives. */
+    fallback_reset();
+    for (uint32_t i = 0; i < K; i++)
+        fallback_window(GEGPU_FALLBACK_WRITE_MASK, 1000000u, 1u, B);
+    assert(fallback_events(ev, 8) == 1 && ev[0].reason == NK_RENDER_EFFECT_WRITE_MASK &&
+           ev[0].readbacks == (unsigned long long)K * B && ev[0].sw_prims == K &&
+           ev[0].share_pm == 0u);
+
+    /* Two reasons in the same windows, half of all primitives each: each is reported, in reason
+     * order. */
+    fallback_reset();
+    for (uint32_t i = 0; i < K; i++) {
+        s_stub_fallback.sw_prims[GEGPU_FALLBACK_POINT] += P;
+        fallback_window(GEGPU_FALLBACK_LOGIC_OP, 0u, P, 0u);
+    }
+    assert(fallback_events(ev, 8) == 2 && ev[0].reason == NK_RENDER_EFFECT_LOGIC_OP &&
+           ev[1].reason == NK_RENDER_EFFECT_POINT && ev[0].frames == K * W &&
+           ev[0].share_pm == 500u && ev[1].share_pm == 500u);
+
+    /* The GPU GE stopped (ready 0): nothing is counted, and its counts starting over make a new
+     * window rather than a negative one. */
+    fallback_reset();
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_MIPS, G, P, 0u);
+    s_stub_fallback.ready = 0;
+    gui_render_fallback_presented(1);
+    memset(&s_stub_fallback, 0, sizeof(s_stub_fallback));
+    s_stub_fallback.ready = 1;
+    gui_render_fallback_presented(1);           /* primes again */
+    fallback_window(GEGPU_FALLBACK_MIPS, G, P, 0u);
+    assert(fallback_events(ev, 8) == 0);
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_MIPS, G, P, 0u);
+    assert(fallback_events(ev, 8) == 1 && ev[0].reason == NK_RENDER_EFFECT_MIPS);
+
+    remove(s_fallback_events_path);
+}
 #endif /* SR_SDL3VK */
 
 /* The unset SR_FPS_CAP default is the PSP scanout period, not a slower title-specific
  * rate: a guest may submit a framebuffer several times per scanout and every submission
  * past the next output slot is dropped rather than delaying the guest. */
-int main(void) {
+int main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
     s_present_cap = present_cap_from_value(NULL);
     assert(PSP_SCANOUT_PERIOD_NS == 16683333ull);
     assert(present_period_ns() == PSP_SCANOUT_PERIOD_NS);
@@ -3014,6 +3212,7 @@ int main(void) {
     selftest_held_present_window_closed_requests_quit();
     selftest_stick_dead_zone_from_profile();
     selftest_busy_display_keeps_real_frames();
+    selftest_render_fallback_rule(argc, argv);
 #endif
     return 0;
 }

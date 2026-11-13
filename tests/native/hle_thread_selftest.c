@@ -725,6 +725,7 @@ int gegpu_sync_guest_fb(const GeGpuFbDescriptor *desc) {
     if (desc) g_sync_last = *desc;
     return 2; /* GEGPU_SYNC_NO_TARGET */
 }
+void gegpu_note_guest_flip(void) {}
 void sr_profile_dump(void) {}
 void sr_profile_dump_final(void) {}
 uint64_t SDL_GetTicksNS(void) { return 0; }
@@ -9313,6 +9314,7 @@ static uint32_t utility_status(CpuState *cpu, uint32_t nid) {
     utility_end_frame();
     return status;
 }
+static int utility_poll_to_finished(CpuState *cpu, uint32_t update, uint32_t status);
 
 /* A zeroed parameter block whose common result field (+0x1c) holds a sentinel: an InitStart
  * that takes the block writes 0 there, so a refused one is visible by the sentinel staying. */
@@ -9483,13 +9485,16 @@ static void test_utility_dialog_single_slot(void) {
                utility_call(&cpu, NID_MSG_DIALOG_SHUTDOWN, 0u) == 0x80110005u &&
                utility_call(&cpu, NID_MSG_DIALOG_UPDATE, 0u) == 0x80110005u,
            "the message dialog that gave up the slot answers WRONG_TYPE");
+    MEM_W32(UTILITY_SAVEDATA_PARAM_ADDR + 0x30u, 22u); /* GETSIZE, its work: no memory-stick I/O */
     expect(utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 2u &&
+               utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0x80110001u &&
+               utility_poll_to_finished(&cpu, NID_SAVEDATA_DIALOG_UPDATE, NID_SAVEDATA_DIALOG_STATUS) &&
                utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0u &&
                utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0x80110001u &&
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 4u &&
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0u,
-           "the savedata dialog, started a frame ago, is RUNNING, then winds down to NONE after "
-           "ShutdownStart");
+           "the savedata dialog, started a frame ago, is RUNNING and refuses ShutdownStart; it "
+           "finishes, then winds down to NONE after ShutdownStart");
     expect(utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0x80110001u,
            "savedata ShutdownStart at NONE returns INVALID_STATUS");
     expect(utility_call(&cpu, NID_SAVEDATA_DIALOG_UPDATE, 0u) == 0x80110001u &&
@@ -9503,11 +9508,25 @@ static void test_utility_dialog_single_slot(void) {
             continue;
         utility_param_block(UTILITY_OTHER_PARAM_ADDR, utility_fixture_size(init));
         snprintf(what, sizeof(what), "%sInitStart takes the free slot; the dialog reports INIT, "
-                 "then winds down to NONE after ShutdownStart", dialogs[i].name);
+                 "and ShutdownStart during INIT and RUNNING returns INVALID_STATUS",
+                 dialogs[i].name);
         expect(utility_call(&cpu, init, UTILITY_OTHER_PARAM_ADDR) == 0u &&
                    MEM_R32(UTILITY_OTHER_PARAM_ADDR + 0x1cu) == 0u &&
+                   utility_call(&cpu, dialogs[i].shutdown, 0u) == 0x80110001u &&
                    utility_status(&cpu, dialogs[i].status) == 1u &&
                    utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u &&
+                   utility_call(&cpu, dialogs[i].shutdown, 0u) == 0x80110001u &&
+                   utility_status(&cpu, dialogs[i].status) == 2u,
+               what);
+        /* Gamedata and sharing get no Update, which would create memory-stick directories: the
+         * test reset frees their slot. */
+        if (init != NID_NETCONF_DIALOG_INIT) {
+            sr_hle_test_osk_slot_reset();
+            continue;
+        }
+        snprintf(what, sizeof(what), "%s finishes, then winds down to NONE after ShutdownStart",
+                 dialogs[i].name);
+        expect(utility_poll_to_finished(&cpu, dialogs[i].update, dialogs[i].status) &&
                    utility_call(&cpu, dialogs[i].shutdown, 0u) == 0u &&
                    utility_status(&cpu, dialogs[i].status) == 4u &&
                    utility_status(&cpu, dialogs[i].status) == 0u,
@@ -9645,15 +9664,16 @@ static void test_msg_dialog_abort_without_update(void) {
     sr_hle_test_osk_slot_reset();
 }
 
-/* #1386 cancel cleanup: a game that gives up on a dialog calls ShutdownStart while it is still
- * RUNNING. Savedata, netconf, gamedata and game sharing take that (the message dialog refuses it,
- * tests/utility/dialog/status.expected). The shutdown must leave nothing behind: the dialog winds
- * down to NONE, writes no result into the abandoned block, and the next InitStart, of the same
- * type or another, starts fresh from INIT with a cleared result word. Which status a non-message
- * dialog reports after a RUNNING shutdown is not measured; only that the slot comes back is
- * asserted. Gamedata and sharing are cancelled before their first Update, which would create
- * memory-stick directories. */
-static void test_utility_dialog_cancel_cleanup(void) {
+/* #1386 cancel: a game that gives up on a dialog may call ShutdownStart while it is still INIT or
+ * RUNNING. Every type refuses it with INVALID_STATUS and changes nothing (utility_shutdown_refused,
+ * src/rt/hle_utility.c): the message dialog's measured rule (tests/utility/dialog/status.expected),
+ * and what the PSP-3000 captures of 2026-11-12 (PSP-HLE-UTILITY-DIALOG-001, not acceptance-eligible)
+ * recorded for savedata, netconf and gamedata install while RUNNING. INIT for those three and game
+ * sharing in any state are UNMEASURED. The dialog keeps the slot and moves on as before: no other
+ * InitStart takes the slot, and a dialog that does its work runs to FINISHED, shuts down, and the
+ * next InitStart of its type starts from INIT with a cleared result word. Gamedata and sharing get
+ * no Update, which would create memory-stick directories, so the test reset frees their slot. */
+static void test_utility_dialog_refused_cancel(void) {
     static const UtilityDialogNids dialogs[] = {
         { "sceUtilitySavedata", NID_SAVEDATA_DIALOG_INIT, NID_SAVEDATA_DIALOG_UPDATE,
           NID_SAVEDATA_DIALOG_STATUS, NID_SAVEDATA_DIALOG_SHUTDOWN },
@@ -9675,38 +9695,48 @@ static void test_utility_dialog_cancel_cleanup(void) {
         const uint32_t block = savedata ? UTILITY_SAVEDATA_PARAM_ADDR : UTILITY_OTHER_PARAM_ADDR;
         if (savedata) utility_savedata_block();
         else utility_param_block(block, utility_fixture_size(dialogs[i].init));
-        snprintf(what, sizeof(what), "%s reaches RUNNING before it is cancelled", dialogs[i].name);
+        snprintf(what, sizeof(what), "%s refuses ShutdownStart during INIT with INVALID_STATUS "
+                 "and still moves on to RUNNING", dialogs[i].name);
         expect(utility_call(&cpu, dialogs[i].init, block) == 0u &&
+                   utility_call(&cpu, dialogs[i].shutdown, 0u) == 0x80110001u &&
                    utility_status(&cpu, dialogs[i].status) == 1u &&
                    utility_status(&cpu, dialogs[i].status) == 2u,
                what);
         if (works) (void)utility_call(&cpu, dialogs[i].update, 0u); /* its work has started */
-        snprintf(what, sizeof(what), "%s accepts ShutdownStart while RUNNING", dialogs[i].name);
-        expect(utility_call(&cpu, dialogs[i].shutdown, 0u) == 0u, what);
-        int none = 0;
-        for (int frame = 0; frame < 4 && !none; frame++)
-            none = utility_status(&cpu, dialogs[i].status) == 0u;
-        snprintf(what, sizeof(what), "%s winds down to NONE after a cancel", dialogs[i].name);
-        expect(none, what);
-        /* Nothing may write into the abandoned block from here on. */
+        snprintf(what, sizeof(what), "%s refuses ShutdownStart while RUNNING with INVALID_STATUS "
+                 "and stays RUNNING", dialogs[i].name);
+        expect(utility_call(&cpu, dialogs[i].shutdown, 0u) == 0x80110001u &&
+                   utility_status(&cpu, dialogs[i].status) == 2u,
+               what);
+
+        /* The refused cancel left the slot to the dialog. */
+        utility_param_block(UTILITY_MSG_PARAM_ADDR, 0x2c4u);
+        snprintf(what, sizeof(what), "a message InitStart is refused while %s, its cancel refused, "
+                 "holds the slot", dialogs[i].name);
+        expect(utility_call(&cpu, NID_MSG_DIALOG_INIT, UTILITY_MSG_PARAM_ADDR) == 0x80110001u &&
+                   MEM_R32(UTILITY_MSG_PARAM_ADDR + 0x1cu) == UTILITY_RESULT_UNTOUCHED,
+               what);
+        if (!works) {
+            sr_hle_test_osk_slot_reset();
+            continue;
+        }
+        snprintf(what, sizeof(what), "%s runs to FINISHED after its refused cancel and winds down "
+                 "to NONE after ShutdownStart", dialogs[i].name);
+        expect(utility_poll_to_finished(&cpu, dialogs[i].update, dialogs[i].status) &&
+                   utility_call(&cpu, dialogs[i].shutdown, 0u) == 0u &&
+                   utility_status(&cpu, dialogs[i].status) == 4u &&
+                   utility_status(&cpu, dialogs[i].status) == 0u,
+               what);
+        /* Nothing may write into the block once the dialog is back at NONE. */
         MEM_W32(block + 0x1cu, UTILITY_RESULT_UNTOUCHED);
         for (int k = 0; k < 4; k++) {
             (void)utility_call(&cpu, dialogs[i].update, 0u);
             (void)utility_status(&cpu, dialogs[i].status);
         }
-        snprintf(what, sizeof(what), "%s writes no result into its cancelled block", dialogs[i].name);
+        snprintf(what, sizeof(what), "%s writes nothing into its block after NONE", dialogs[i].name);
         expect(MEM_R32(block + 0x1cu) == UTILITY_RESULT_UNTOUCHED, what);
-
-        /* A message dialog takes the freed slot and finishes into its own block only. */
-        utility_param_block(UTILITY_MSG_PARAM_ADDR, 0x2c4u);
-        snprintf(what, sizeof(what), "a message dialog starts after %s is cancelled", dialogs[i].name);
-        expect(msg_dialog_run_to_finished(&cpu, UTILITY_MSG_PARAM_ADDR), what);
-        snprintf(what, sizeof(what), "the message dialog leaves the cancelled %s block alone",
+        snprintf(what, sizeof(what), "%s starts again from INIT with its result word cleared",
                  dialogs[i].name);
-        expect(MEM_R32(block + 0x1cu) == UTILITY_RESULT_UNTOUCHED, what);
-
-        /* The same type starts again from INIT with its result word cleared. */
-        snprintf(what, sizeof(what), "%s starts again from INIT after a cancel", dialogs[i].name);
         expect(utility_call(&cpu, dialogs[i].init, block) == 0u &&
                    MEM_R32(block + 0x1cu) == 0u &&
                    utility_status(&cpu, dialogs[i].status) == 1u,
@@ -9877,15 +9907,19 @@ static void test_utility_dialog_status_sequence(void) {
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0u,
            "the next savedata dialog runs to NONE");
 
-    /* The edges: a cancel from RUNNING, and a caller better than 0x20, are unmeasured and keep
-     * the reported SHUTDOWN. */
+    /* The edges: a cancel from RUNNING is refused (utility_shutdown_refused), and a caller better
+     * than 0x20 is UNMEASURED and keeps the reported SHUTDOWN. */
     utility_savedata_block();
     expect(utility_call(&cpu, NID_SAVEDATA_DIALOG_INIT, UTILITY_SAVEDATA_PARAM_ADDR) == 0u &&
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 1u &&
+               utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0x80110001u &&
+               utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 2u,
+           "a savedata ShutdownStart during RUNNING returns INVALID_STATUS to a caller at 0x6F and "
+           "the dialog stays RUNNING");
+    expect(utility_poll_to_finished(&cpu, NID_SAVEDATA_DIALOG_UPDATE, NID_SAVEDATA_DIALOG_STATUS) &&
                utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0u &&
-               utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 4u &&
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0u,
-           "a savedata ShutdownStart during RUNNING still reports SHUTDOWN to a caller at 0x6F");
+           "that savedata dialog finishes and a caller at 0x6F sees NONE after ShutdownStart");
     expect(utility_change_priority(&cpu, 0x10u) == 0u && utility_savedata_start_to_finished(&cpu),
            "savedata reaches FINISHED for a caller at 0x10");
     expect(utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0u &&
@@ -11732,8 +11766,8 @@ static void test_osk_nested_ranges(void) {
 /* #1386: wrong-state results for the dialogs the OSK measurements do not cover. Netconf, gamedata
  * and sharing have no capture of their own (PSPAutotests utility/dialog measures message and
  * savedata, #363 the OSK); each refuses Update and ShutdownStart at NONE and a repeated
- * ShutdownStart, as every measured type does. Their results from INIT, RUNNING and FINISHED are
- * unmeasured and not asserted here. */
+ * ShutdownStart, as every measured type does. Their refusals during INIT and RUNNING are
+ * test_utility_dialog_refused_cancel's (UNMEASURED or captured only). */
 static void test_utility_dialog_wrong_states_unmeasured_types(void) {
     static const UtilityDialogNids dialogs[] = {
         { "sceUtilityNetconf", NID_NETCONF_DIALOG_INIT, NID_NETCONF_DIALOG_UPDATE,
@@ -30646,6 +30680,8 @@ static void test_ge_finish_callbacks_do_not_nest(void) {
 #define GX_WORKER_ENTRY 0x08a380c0u
 
 extern unsigned sr_hle_test_ge_finish_runs(void);
+extern void sr_hle_test_ge_finish_masked_reset(void);
+extern int ge_finish_masked_pending(void);
 
 static struct {
     uint32_t worker_uid, main_uid;
@@ -30727,6 +30763,364 @@ static void test_ge_finish_callback_thread_exit(void) {
            "GE finish exit: another thread's list then has its finish callback run at once");
     expect(s_gx.stops_after_worker == s_gx.stops_before + 1u && sr_hle_test_ge_finish_runs() == 0u,
            "GE finish exit: ending with a completion waiting stops the run by name, not silently");
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
+    ge_tim_teardown();
+}
+
+/* A list that completes while the CPU cannot take an interrupt (its interrupts suspended, or an
+ * interrupt handler running) has its finish callback run once it can, as the GE finish interrupt
+ * would be taken on a PSP. The shape is Sonic Rivals' (ULUS10195, #2375) GE command queue: with
+ * interrupts suspended, or from its VBLANK handler, the game takes the entry at the queue's
+ * index, enqueues its list, and only then advances the index and lowers the count; its finish
+ * callback runs the same queue. The callback used to run inside sceGeListEnQueue, before the
+ * index moved, so it enqueued the same entry again and the queue advanced twice, skipping the
+ * next entry (the game's display flip).
+ * MUTANT: running the callback at once enqueues an entry twice and runs a callback under the
+ * mask; deferring only under sceKernelCpuSuspendIntr runs it inside the VBLANK handler; a
+ * last-in first-out wait reverses the completion order; a delivery loop that ignores a callback
+ * suspending interrupts again never returns (the test hangs); deferring ahead of a running
+ * callback's own run runs the next callback inside it at the resume; keeping the waiting
+ * completions after a callback stops the run makes the service loop spin (the test hangs);
+ * dropping the bound loses the 65th completion silently. */
+enum { GM_QUEUE = 0x08a39000u, GM_RING = GM_QUEUE + 8u, GM_RING_LEN = 4, GM_LOG = 80,
+       GM_VBLANK_FN = 0x08a38100u, GM_THREAD_ENTRY = 0x08a38140u };
+static struct {
+    unsigned callbacks, enqueues, masked_callbacks, thread_callbacks, suspend_in_callback;
+    unsigned in_handler, handler_callbacks, depth, max_depth, fatal_first, nest_one;
+    unsigned suspend_enqueue_stay, stay_prev, handlers, nevents;
+    uint32_t peek_list, peek;
+    uint32_t ids[GM_LOG], enqueued[GM_LOG], cb_gp[GM_LOG];
+    char events[2 * GM_LOG];
+    int process;
+} s_gm;
+
+/* The game's queue: count at +0, index at +4, list addresses from +8. */
+static void gm_process(CpuState *cpu) {
+    while ((int32_t)MEM_R32(GM_QUEUE) > 0) {
+        uint32_t idx = MEM_R32(GM_QUEUE + 4u);
+        uint32_t list = MEM_R32(GM_RING + 4u * idx);
+        if (s_gm.enqueues < GM_LOG) s_gm.enqueued[s_gm.enqueues] = list;
+        s_gm.enqueues++;
+        (void)ge_tim_enqueue(cpu, list);
+        MEM_W32(GM_QUEUE + 4u, (idx + 1u) % GM_RING_LEN);
+        MEM_W32(GM_QUEUE, MEM_R32(GM_QUEUE) - 1u);
+    }
+}
+
+static void gm_finish_fn(CpuState *cpu) {
+    if (s_gm.callbacks < GM_LOG) {
+        s_gm.ids[s_gm.callbacks] = cpu->r[4];
+        s_gm.cb_gp[s_gm.callbacks] = cpu->r[28];
+    }
+    if (s_gm.nevents < 2u * GM_LOG) s_gm.events[s_gm.nevents++] = 'C';
+    s_gm.callbacks++;
+    if (!sched_interrupts_enabled()) s_gm.masked_callbacks++;
+    if (!sched_is_intr_context()) s_gm.thread_callbacks++;
+    if (s_gm.in_handler) s_gm.handler_callbacks++;
+    if (++s_gm.depth > s_gm.max_depth) s_gm.max_depth = s_gm.depth;
+    if (s_gm.nest_one) {
+        /* A callback that suspends the interrupts, enqueues the next list and resumes them. */
+        s_gm.nest_one = 0;
+        uint32_t prev = sched_suspend_interrupts();
+        (void)ge_tim_enqueue(cpu, ge_chain_list(1));
+        sched_resume_interrupts(prev);
+    }
+    if (s_gm.suspend_enqueue_stay) {
+        /* A callback that suspends the interrupts, enqueues and returns with them suspended. */
+        s_gm.suspend_enqueue_stay = 0;
+        s_gm.stay_prev = sched_suspend_interrupts();
+        (void)ge_tim_enqueue(cpu, ge_chain_list(1));
+    }
+    if (s_gm.fatal_first) {
+        s_gm.fatal_first = 0;
+        cpu->flow_kind = SR_FLOW_FATAL;      /* the callback stops the run */
+    }
+    if (s_gm.suspend_in_callback) {
+        s_gm.suspend_in_callback = 0;
+        (void)sched_suspend_interrupts();   /* left suspended: the guest resumes later */
+    }
+    if (s_gm.process) gm_process(cpu);
+    s_gm.depth--;
+    cpu->r[2] = 0u;
+}
+
+/* The first callback reads the status of the list s_gm.peek_list (sceGeListSync mode 1). */
+static void gm_timing_finish_fn(CpuState *cpu) {
+    if (s_gm.callbacks++ == 0u) {
+        CpuState c;
+        memset(&c, 0, sizeof(c));
+        s_gm.peek = ge_tim_sync(&c, NID_SCE_GE_LIST_SYNC, s_gm.peek_list, 1u);
+    }
+    cpu->r[2] = 0u;
+}
+
+/* A VBLANK handler that runs the game's queue, as the title's does every frame. */
+static void gm_vblank_fn(CpuState *cpu) {
+    s_gm.in_handler = 1;
+    gm_process(cpu);
+    s_gm.in_handler = 0;
+    cpu->r[2] = 0u;
+}
+
+/* A VBLANK handler that enqueues one list on every VBLANK, whatever its callbacks did. */
+static void gm_vblank_one_fn(CpuState *cpu) {
+    if (s_gm.nevents < 2u * GM_LOG) s_gm.events[s_gm.nevents++] = 'H';
+    (void)ge_tim_enqueue(cpu, ge_chain_list(s_gm.handlers % GE_CHAIN_BURST));
+    s_gm.handlers++;
+    cpu->r[2] = 0u;
+}
+
+/* A guest thread whose list's finish callback suspends the interrupts, enqueues and resumes. */
+static void gm_thread_fn(CpuState *cpu) {
+    s_gm.nest_one = 1;
+    (void)ge_tim_enqueue(cpu, ge_chain_list(0));
+    cpu->r[2] = 0u;
+}
+
+static void gm_reset(void) {
+    memset(&s_gm, 0, sizeof s_gm);
+    sr_hle_test_ge_finish_masked_reset();
+}
+
+static void test_ge_finish_callback_waits_for_interrupts(void) {
+    CpuState cpu;
+    ge_tim_setup();
+    sr_hle_test_ge_lists_reset();
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gm_finish_fn);
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) ge_tim_write_list(ge_chain_list(i), 0u);
+
+    /* The game's queue holds two lists; it runs them with interrupts suspended. */
+    gm_reset();
+    s_gm.process = 1;
+    MEM_W32(GM_QUEUE, 2u);
+    MEM_W32(GM_QUEUE + 4u, 0u);
+    MEM_W32(GM_RING, ge_chain_list(0));
+    MEM_W32(GM_RING + 4u, ge_chain_list(1));
+    memset(&cpu, 0, sizeof(cpu));
+    uint32_t prev = sched_suspend_interrupts();
+    gm_process(&cpu);
+    expect(s_gm.callbacks == 0u,
+           "GE finish masked: no finish callback runs while the CPU's interrupts are suspended");
+    expect(s_gm.enqueues == 2u && s_gm.enqueued[0] == ge_chain_list(0) &&
+               s_gm.enqueued[1] == ge_chain_list(1) && MEM_R32(GM_QUEUE) == 0u &&
+               MEM_R32(GM_QUEUE + 4u) == 2u,
+           "GE finish masked: each queue entry is enqueued once and the queue advances once per entry");
+    expect(ge_tim_sync(&cpu, NID_SCE_GE_DRAW_SYNC, 1u, 0u) == 0u,
+           "GE finish masked: the lists themselves are complete at once, as before");
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 2u && s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(0)) &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: the resume runs both waiting callbacks, in completion order");
+    expect(s_gm.masked_callbacks == 0u,
+           "GE finish masked: they run with interrupts enabled");
+    expect(s_gm.enqueues == 2u, "GE finish masked: the callbacks find the queue already consumed");
+
+    /* The measured shape (CASE=display-ge-mask): a list enqueued stalled at its first word, then
+     * released by sceGeListUpdateStallAddr under the mask, runs to its end, and its callback runs
+     * only after the resume (PSP: 0/12 during the mask, 12/12 right after). */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ge_chain_list(2);
+    cpu.r[5] = ge_chain_list(2);            /* stall == list: nothing runs yet */
+    cpu.r[6] = s_ge_tim_cbid;
+    cpu.r[7] = 0u;
+    uint32_t qid = sr_syscall(&cpu, NID_SCE_GE_LIST_ENQUEUE);
+    prev = sched_suspend_interrupts();
+    cpu.r[4] = qid;
+    cpu.r[5] = ge_chain_list(2) + 8u;       /* past FINISH and END */
+    (void)sr_syscall(&cpu, NID_SCE_GE_LIST_UPDATE_STALL_ADDR);
+    unsigned during_mask = s_gm.callbacks;
+    int list_done = ge_tim_sync(&cpu, NID_SCE_GE_LIST_SYNC, qid, 1u) == 0u;
+    sched_resume_interrupts(prev);
+    expect(during_mask == 0u && list_done,
+           "GE finish masked: a list released under the mask completes, its callback does not run (display-ge-mask)");
+    expect(s_gm.callbacks == 1u && s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(2)),
+           "GE finish masked: its callback runs right after the resume (display-ge-mask)");
+
+    /* The same queue run from a VBLANK handler: on a PSP the handler runs with the CPU's
+     * interrupts off, so the finish callbacks run after it returns, each entry enqueued once. */
+    gm_reset();
+    s_gm.process = 1;
+    MEM_W32(GM_QUEUE, 2u);
+    MEM_W32(GM_QUEUE + 4u, 0u);
+    sr_test_register_guest_fn(GM_VBLANK_FN, gm_vblank_fn);
+    expect(td24b_dispatch4(NID_SCE_KERNEL_REGISTER_SUBINTR, 30u, 0u, GM_VBLANK_FN, 0u) == 0u &&
+               td24b_dispatch4(NID_SCE_KERNEL_ENABLE_SUBINTR, 30u, 0u, 0u, 0u) == 0u,
+           "GE finish masked: the VBLANK handler is registered and enabled");
+    sched_raise_interrupt(SCHED_INTR_VBLANK);
+    scheduler_service_pending();
+    (void)td24b_dispatch4(NID_SCE_KERNEL_RELEASE_SUBINTR, 30u, 0u, 0u, 0u);
+    expect(s_gm.enqueues == 2u && s_gm.enqueued[0] == ge_chain_list(0) &&
+               s_gm.enqueued[1] == ge_chain_list(1) && MEM_R32(GM_QUEUE) == 0u,
+           "GE finish masked: a VBLANK handler's queue run enqueues each entry once");
+    expect(s_gm.handler_callbacks == 0u && s_gm.callbacks == 2u &&
+               s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(0)) &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: the callbacks run after the VBLANK handler returns, in order");
+
+    /* A waiting callback that suspends the interrupts again holds the rest until the next resume. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(1));
+    s_gm.suspend_in_callback = 1;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && !sched_interrupts_enabled(),
+           "GE finish masked: a callback that suspends the interrupts holds the next one");
+    sched_resume_interrupts(1u);
+    expect(s_gm.callbacks == 2u && s_gm.masked_callbacks == 0u &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: the held callback runs at the next resume");
+
+    /* On a guest thread, a finish callback that suspends the interrupts, enqueues and resumes
+     * them: the new list's callback joins the thread's running callback's run and runs after it
+     * returns, not inside it from the resume. */
+    gm_reset();
+    sr_test_register_guest_fn(GM_THREAD_ENTRY, gm_thread_fn);
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(GM_THREAD_ENTRY, 0u, 0u);
+    expect(s_gm.callbacks == 2u && s_gm.max_depth == 1u && s_gm.thread_callbacks == 2u &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: a list completed under the mask inside a thread's callback runs after it");
+
+    /* A delivered callback that stops the run: the completions still waiting are dropped by name,
+     * and the service returns instead of finding them due for ever. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(1));
+    s_gm.fatal_first = 1;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && s_cpu->flow_kind == SR_FLOW_FATAL && !ge_finish_masked_pending(),
+           "GE finish masked: a callback that stops the run drops the completions still waiting");
+    s_cpu->flow_kind = 0u;
+
+    /* 64 completions wait; the 65th, with no room left, stops the run by name. */
+    gm_reset();
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) (void)ge_tim_enqueue(&cpu, ge_chain_list(i));
+    expect(s_gm.callbacks == 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+           "GE finish masked: a completion with no room left to wait stops the run by name");
+    sched_resume_interrupts(prev);
+    int in_order = s_gm.callbacks == GE_CHAIN_WAIT;
+    for (unsigned i = 0; i < GE_CHAIN_WAIT && in_order; i++)
+        in_order &= s_gm.ids[i] == ge_tim_finish_id(ge_chain_list(i));
+    expect(in_order, "GE finish masked: 64 waiting completions run first-in first-out at the resume");
+
+    /* L0 and L2 wait; at the resume L0's callback raises L1's completion while L2's still waits:
+     * L2's callback runs before L1's (completion order), and none runs inside another. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(2));
+    s_gm.nest_one = 1;   /* the first callback enqueues ge_chain_list(1) */
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 3u && s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(0)) &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(2)) &&
+               s_gm.ids[2] == ge_tim_finish_id(ge_chain_list(1)) && s_gm.max_depth == 1u,
+           "GE finish masked: a completion raised while others wait runs after them, in "
+           "completion order");
+
+    /* A delivered callback that suspends the interrupts, enqueues and returns with them still
+     * suspended: the new list's callback waits for the resume, not just for the callback. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    s_gm.suspend_enqueue_stay = 1;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && s_gm.masked_callbacks == 0u && !sched_interrupts_enabled() &&
+               ge_finish_masked_pending(),
+           "GE finish masked: a callback left with the interrupts suspended holds its run's next "
+           "callback");
+    sched_resume_interrupts(s_gm.stay_prev);
+    expect(s_gm.callbacks == 2u && s_gm.masked_callbacks == 0u &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)) && !ge_finish_masked_pending(),
+           "GE finish masked: that callback runs at the resume, with the interrupts enabled");
+
+    /* A LoadExec drops the completions still waiting: the new program owes them nothing. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    int waited = ge_finish_masked_pending();
+    sr_hle_loadexec_reset_guest_state();
+    sched_resume_interrupts(prev);
+    expect(waited && s_gm.callbacks == 0u && !ge_finish_masked_pending(),
+           "GE finish masked: a LoadExec drops the completions still waiting");
+
+    /* SR_GE_TIMING=1: the model's completion service is the GE finish interrupt itself, so each
+     * list's callback runs as that list completes: the second list is still drawing when the
+     * first list's callback reads it. */
+    gm_reset();
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_ge_timing(1);
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gm_timing_finish_fn);
+    ge_tim_write_list(ge_chain_list(0), 0u);
+    ge_tim_write_list(ge_chain_list(1), 0u);
+    const uint64_t saved_vtime = s_vtime_us;
+    s_vtime_us = 1000u;
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    s_gm.peek_list = ge_tim_enqueue(&cpu, ge_chain_list(1));
+    s_vtime_us = 1000000u;
+    scheduler_service_pending();
+    expect(s_gm.callbacks == 2u && s_gm.peek == 2u /* drawing */ && !ge_finish_masked_pending(),
+           "GE finish masked: an SR_GE_TIMING completion's callback runs when that list completes");
+    s_vtime_us = saved_vtime;
+    sr_hle_test_ge_timing(0);
+    sr_hle_test_ge_lists_reset();
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gm_finish_fn);
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) ge_tim_write_list(ge_chain_list(i), 0u);
+
+    /* Under the mask the waiting callback keeps the enqueuing context's $gp, as when it ran
+     * inline, not the $gp of whoever resumes the interrupts. */
+    const uint32_t thread_gp = 0x08b40000u;
+    const uint32_t saved_gp = s_cpu->r[28];
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[28] = thread_gp;
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    s_cpu->r[28] = 0x08b80000u;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && s_gm.cb_gp[0] == thread_gp,
+           "GE finish masked: a callback that waited under the mask runs with the enqueuing "
+           "context's $gp");
+
+    /* A VBLANK handler that enqueues one list on every VBLANK, with 70 episodes owed (a host
+     * stall): each callback runs when its episode returns, before the next handler, so no more
+     * than one completion waits and the 64 bound is not reached; and it runs with the
+     * handler's $gp (s_gp), not the interrupted thread's. */
+    gm_reset();
+    uint32_t stops_before = sr_hle_test_unmodelled_stops();
+    sr_test_register_guest_fn(GM_VBLANK_FN, gm_vblank_one_fn);
+    expect(td24b_dispatch4(NID_SCE_KERNEL_REGISTER_SUBINTR, 30u, 0u, GM_VBLANK_FN, 0u) == 0u &&
+               td24b_dispatch4(NID_SCE_KERNEL_ENABLE_SUBINTR, 30u, 0u, 0u, 0u) == 0u,
+           "GE finish masked: the one-list-per-VBLANK handler is registered and enabled");
+    s_cpu->r[28] = thread_gp;
+    s_pending_vblanks = 70u;
+    scheduler_service_pending();
+    (void)td24b_dispatch4(NID_SCE_KERNEL_RELEASE_SUBINTR, 30u, 0u, 0u, 0u);
+    int alternating = s_gm.nevents == 140u;
+    for (unsigned i = 0; i < 140u && alternating; i++)
+        alternating &= s_gm.events[i] == ((i & 1u) ? 'C' : 'H');
+    expect(alternating && s_gm.handlers == 70u && s_gm.callbacks == 70u &&
+               sr_hle_test_unmodelled_stops() == stops_before && !ge_finish_masked_pending(),
+           "GE finish masked: with 70 VBLANKs owed, each handler's callback runs before the next "
+           "handler and nothing stops");
+    int handler_gp = s_gp != thread_gp;   /* else the check could pass by coincidence */
+    for (unsigned i = 0; i < 70u; i++) handler_gp &= s_gm.cb_gp[i] == s_gp;
+    expect(handler_gp, "GE finish masked: a handler-raised callback runs with the handler's $gp "
+                       "(s_gp, set apart from the thread's)");
+    s_cpu->r[28] = saved_gp;
+
+    gm_reset();
     sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
     ge_tim_teardown();
 }
@@ -33807,6 +34201,370 @@ extern uint32_t sr_hle_test_atrac_reinit_count(void);
 extern void sr_hle_test_atrac_reinit_reset(void);
 extern uint32_t sr_hle_test_atrac_release_count(void);
 extern void sr_hle_test_atrac_release_reset(void);
+
+/* #322: _sceAtracGetContextAddress hands out a guest context that follows the ID's state.
+ * Field offsets are PPSSPP's SceAtracContext (the info block at +0x80), not PSP-measured. */
+#define NID_SCE_ATRAC_GET_CONTEXT_ADDRESS 0x231fc6b7u
+#define NID_SCE_ATRAC_SET_LOOP_NUM_322    0x868120b5u
+#define NID_SCE_ATRAC_GET_LOOP_STATUS_322 0xfaa4f89bu
+static void test_atrac_guest_context_322(void) {
+    enum { SRC = 0x08006000u, TRACK = 0x08002000u, PCM_OUT = 0x08003000u, OUT_N = 0x08004100u,
+           OUT_END = 0x08004104u, OUT_REMAIN = 0x08004108u, LOOP_OUT = 0x08004110u,
+           LOOP_FLAG = 0x08004114u, SECOND = 0x08007000u, FRAMES = 8u, PREFIX_FRAMES = 4u };
+    const uint32_t prefix = TD1096_HEADER + PREFIX_FRAMES * TD1096_FRAME;
+    const uint32_t file_size = TD1096_HEADER + FRAMES * TD1096_FRAME;
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;   /* a main image in user RAM, as a game's is */
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, 3u, 0u, 0u, 0u) == ATRAC_ERROR_NO_ATRACID,
+           "_sceAtracGetContextAddress refuses an ID that is not in use (#322)");
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    expect(id < 8u, "context fixture: an AT3 ID");
+    if (id >= 8u) {
+        s_fixture_loaded_end = loaded_end;
+        sr_hle_test_partition_reset();
+        return;
+    }
+    const uint32_t ctx = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u);
+    const uint32_t info = ctx + 0x80u;
+    expect(ctx >= 0x08a00000u && ctx < 0x0a000000u && (ctx & 0xffu) == 0u,
+           "_sceAtracGetContextAddress returns a 0x100-byte context in the user partition (#322)");
+    if (!(ctx >= 0x08a00000u && ctx < 0x0a000000u)) {
+        (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+        s_fixture_loaded_end = loaded_end;
+        sr_hle_test_partition_reset();
+        return;
+    }
+    expect(MEM_R8(info + 0x15u) == 1u && MEM_R16(info + 0x1au) == ATRAC_CODEC_AT3 &&
+               MEM_R32(info + 0x38u) == 0u && MEM_R32(ctx + 0xfcu) == id,
+           "an ID with no track: state NO_DATA (1), its codec, no buffer, and the ID at +0xfc");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) == ctx,
+           "a second call returns the same context");
+
+    /* SetData: a streamed prefix shorter than the file. */
+    td1096_build_at3_frames(SRC, 0x0270u, FRAMES, FRAMES * ATRAC3_FRAME_SAMPLES, 0u);
+    for (uint32_t b = 0; b < prefix; b++) MEM_W8(TRACK + b, MEM_R8(SRC + b));
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, TRACK, prefix, 0u) == 0u,
+           "context fixture: SetData takes the streamed prefix");
+    expect(MEM_R8(info + 0x15u) == 4u && MEM_R8(info + 0x17u) == 2u &&
+               MEM_R16(info + 0x18u) == TD1096_FRAME && MEM_R16(info + 0x1au) == ATRAC_CODEC_AT3 &&
+               MEM_R32(info + 0x1cu) == TD1096_HEADER && MEM_R32(info + 0x24u) == file_size &&
+               MEM_R32(info + 0x38u) == TRACK && MEM_R32(info + 0x40u) == prefix &&
+               MEM_R32(info + 0x3cu) == 0u && MEM_R32(info + 0x44u) == 0u,
+           "after SetData the context names the stream: state, channels, frame size, codec, data "
+           "offset, file size, buffer and buffer size");
+
+    /* loopNum follows SetLoopNum, and a game's own write is what the library reads. */
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_322, id, 2u, 0u, 0u) == 0u &&
+               MEM_R32(info + 0x28u) == 2u,
+           "sceAtracSetLoopNum is written to the context's loopNum");
+    MEM_W32(info + 0x28u, 7u);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_LOOP_STATUS_322, id, LOOP_OUT, LOOP_FLAG, 0u) == 0u &&
+               MEM_R32(LOOP_OUT) == 7u,
+           "a loopNum the game writes into the context is the one the library reports");
+    MEM_W32(info + 0x28u, 0u);
+
+    /* The second buffer. */
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_SECOND_BUFFER, id, SECOND, 0x800u, 0u) == 0u &&
+               MEM_R32(info + 0x3cu) == SECOND && MEM_R32(info + 0x44u) == 0x800u,
+           "sceAtracSetSecondBuffer is written to secondBuffer and secondBufferByte");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_SECOND_BUFFER, id, 0u, 0u, 0u) == 0u &&
+               MEM_R32(info + 0x3cu) == 0u && MEM_R32(info + 0x44u) == 0u,
+           "clearing the second buffer clears it in the context");
+
+    /* DecodeData publishes too: a field that is not read back is the library's again, and a
+     * context the game only wrote such fields into still decodes. */
+    MEM_W32(info + 0x38u, 0x0badf00du);
+    MEM_W32(ctx + 0xfcu, 0xffu);
+    {
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        uint32_t ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(OUT_N) > 0u && sr_hle_test_unmodelled_stops() == stops,
+               "a context whose other fields the game wrote still decodes");
+    }
+    expect(MEM_R8(info + 0x15u) == 4u && MEM_R32(info + 0x28u) == 0u &&
+               MEM_R32(info + 0x38u) == TRACK && MEM_R32(ctx + 0xfcu) == id,
+           "sceAtracDecodeData rewrites the context from the library's state");
+
+    /* AddStreamData: the context keeps naming the same buffer and file. */
+    {
+        enum { WP = 0x08004200u, WB = 0x08004204u, RO = 0x08004208u };
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_STREAM_DATA_INFO, id, WP, WB, RO) == 0u &&
+                   MEM_R32(WB) >= TD1096_FRAME,
+               "context fixture: the ring has room for a frame");
+        uint32_t wp = MEM_R32(WP), ro = MEM_R32(RO);
+        for (uint32_t b = 0; b < TD1096_FRAME; b++) MEM_W8(wp + b, MEM_R8(SRC + ro + b));
+        MEM_W32(info + 0x24u, 0u);
+        expect(td24b_dispatch4(0x7db31251u, id, TD1096_FRAME, 0u, 0u) == 0u &&
+                   MEM_R32(info + 0x24u) == file_size && MEM_R32(info + 0x38u) == TRACK,
+               "sceAtracAddStreamData publishes the context");
+    }
+
+    /* A state the game writes is not taken: honouring one is unmeasured, so the next call stops
+     * the run by name, whatever the value. With the runtime's own state back, calls go on. */
+    {
+        enum { REMAIN = 0x08004220u };
+        static const uint8_t written[] = { 2u, 1u, 0x10u };
+        static const char *const what[] = {
+            "ALL_DATA_LOADED written over a streamed track",
+            "NO_DATA written over a streamed track",
+            "FOR_SCESAS (a SAS voice's source) written over a streamed track",
+        };
+        char name[200];
+        for (size_t i = 0; i < sizeof(written); i++) {
+            uint32_t stops = sr_hle_test_unmodelled_stops();
+            MEM_W8(info + 0x15u, written[i]);
+            uint32_t ret = td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+            snprintf(name, sizeof(name), "%s stops the next call by name (#322)", what[i]);
+            expect(sr_hle_test_unmodelled_stops() == stops + 1u && ret != 0u, name);
+        }
+        MEM_W8(info + 0x15u, 4u);
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u) == 0u &&
+                   MEM_R32(REMAIN) != 0xffffffffu && sr_hle_test_unmodelled_stops() == stops,
+               "with the runtime's own state in the context, calls go on");
+    }
+
+    /* Release clears the context; the slot's next owner starts from NO_DATA. */
+    expect(td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u) == 0u,
+           "context fixture: release the ID");
+    int zero = 1;
+    for (uint32_t off = 0; off < 0x100u; off += 4u) if (MEM_R32(ctx + off) != 0u) zero = 0;
+    expect(zero, "sceAtracReleaseAtracID clears the ID's context");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) == ATRAC_ERROR_NO_ATRACID,
+           "a released ID has no context");
+    uint32_t again = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    expect(again == id && td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, again, 0u, 0u, 0u) == ctx &&
+               MEM_R8(info + 0x15u) == 1u && MEM_R32(info + 0x38u) == 0u,
+           "the slot's next ID gets the same context, back at NO_DATA");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, again, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
+/* #322: two IDs, a program switch, and a partition that cannot hold the contexts. */
+static uint32_t ctx322_syscall(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2; cpu.r[7] = a3;
+    return sr_syscall(&cpu, nid);
+}
+static void test_atrac_context_ids_loadexec_322(void) {
+    enum { NID_ALLOC_PART = 0x237dbd4fu, NID_FREE_PART = 0xb6d61d02u, NID_GET_HEAD = 0x9d9a5ba1u,
+           NID_MAX_FREE = 0xa291f107u, GAME_BYTES = 0x800u };
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+
+    /* Two IDs: separate contexts 0x100 apart in one table, each with its own ID at +0xfc. */
+    uint32_t id0 = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t id1 = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    expect(id0 < 8u && id1 < 8u && id0 != id1, "context fixture: two AT3 IDs");
+    uint32_t ctx0 = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id0, 0u, 0u, 0u);
+    uint32_t ctx1 = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id1, 0u, 0u, 0u);
+    uint32_t table = ctx0 - id0 * 0x100u;
+    expect(ctx0 >= 0x08a00000u && ctx0 < 0x0a000000u && ctx1 >= 0x08a00000u && ctx1 < 0x0a000000u &&
+               ctx0 != ctx1 && ctx1 - id1 * 0x100u == table &&
+               MEM_R32(ctx0 + 0xfcu) == id0 && MEM_R32(ctx1 + 0xfcu) == id1,
+           "two ATRAC IDs get separate contexts, 0x100 apart in one table, each with its ID at +0xfc");
+    if (!(ctx0 >= 0x08a00000u && ctx0 < 0x0a000000u)) {
+        s_fixture_loaded_end = loaded_end;
+        sr_hle_test_partition_reset();
+        return;
+    }
+    uint8_t before[0x100];
+    for (uint32_t b = 0; b < 0x100u; b++) before[b] = (uint8_t)MEM_R8(ctx0 + b);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_322, id1, 3u, 0u, 0u) == 0u &&
+               MEM_R32(ctx1 + 0x80u + 0x28u) == 3u,
+           "context fixture: SetLoopNum on the second ID");
+    int same = 1;
+    for (uint32_t b = 0; b < 0x100u; b++) if (MEM_R8(ctx0 + b) != before[b]) same = 0;
+    expect(same, "a call on one ID leaves another ID's context untouched");
+
+    /* The table's block UID, found the way a game could: the block whose head is the table. */
+    uint32_t table_uid = 0u;
+    for (uint32_t u = 0x100u; u < 0x4000u && !table_uid; u++)
+        if (ctx322_syscall(NID_GET_HEAD, u, 0u, 0u, 0u) == table) table_uid = u;
+    expect(table_uid != 0u, "context fixture: the context table is a partition block");
+
+    /* sceKernelLoadExec: the next program's partition is empty and its UIDs start again, so one
+     * of its blocks takes the old table's UID. Its next context must not land in that block. */
+    sr_hle_loadexec_reset_guest_state();
+    uint32_t game_uid = 0u;
+    for (int n = 0; n < 0x4000 && game_uid < table_uid; n++) {
+        uint32_t u = ctx322_syscall(NID_ALLOC_PART, 2u, 0u, 0u, GAME_BYTES);
+        if (u == 0u || (u & 0x80000000u)) break;
+        game_uid = u;
+        if (u < table_uid) (void)ctx322_syscall(NID_FREE_PART, u, 0u, 0u, 0u);
+    }
+    uint32_t game = game_uid == table_uid ? ctx322_syscall(NID_GET_HEAD, game_uid, 0u, 0u, 0u) : 0u;
+    expect(game_uid == table_uid && game != 0u && !(game & 0x80000000u),
+           "context fixture: after LoadExec a block of the next program takes the old table's UID");
+    if (game) for (uint32_t b = 0; b < GAME_BYTES; b++) MEM_W8(game + b, 0xa5u);
+    uint32_t nid = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t nctx = nid < 8u ? td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, nid, 0u, 0u, 0u) : 0u;
+    int intact = game != 0u;
+    for (uint32_t b = 0; game && b < GAME_BYTES; b++) if (MEM_R8(game + b) != 0xa5u) intact = 0;
+    expect(nid < 8u && nctx >= 0x08800000u && nctx < 0x0a000000u &&
+               (nctx + 0x100u <= game || nctx >= game + GAME_BYTES) && intact,
+           "after LoadExec the next program's context table is a new block, and the block that "
+           "reused the old table's UID is left untouched (#322)");
+
+    /* A partition that cannot hold the 0x800 bytes of contexts: no PSP result fits, so the call
+     * stops the run by name (ATRAC_CONTEXT_NO_MEMORY on stderr). */
+    if (nid < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, nid, 0u, 0u, 0u);
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    uint32_t fid = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t max_free = ctx322_syscall(NID_MAX_FREE, 0u, 0u, 0u, 0u);
+    uint32_t fill = max_free >= 0x100u ? ctx322_syscall(NID_ALLOC_PART, 2u, 0u, 0u, max_free) : 0u;
+    expect(fid < 8u && fill != 0u && !(fill & 0x80000000u) &&
+               ctx322_syscall(NID_MAX_FREE, 0u, 0u, 0u, 0u) < 0x800u,
+           "context fixture: the partition is full");
+    {
+        FILE *capture = NULL;
+        int saved_fd = -1;
+        char log[1024];
+        log[0] = '\0';
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+        (void)td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, fid, 0u, 0u, 0u);
+        if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+        expect(sr_hle_test_unmodelled_stops() == stops + 1u && capturing &&
+                   strstr(log, "ATRAC_CONTEXT_NO_MEMORY") != NULL,
+               "_sceAtracGetContextAddress stops the run by name (ATRAC_CONTEXT_NO_MEMORY) when the "
+               "partition cannot hold the contexts");
+    }
+    expect(ctx322_syscall(NID_FREE_PART, fill, 0u, 0u, 0u) == 0u &&
+               td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, fid, 0u, 0u, 0u) >= 0x08a00000u,
+           "once the partition has room the next call allocates the contexts");
+    if (fid < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, fid, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
+
+/* #322: a whole AT3 track whose context state the game overwrites. Before, a written streamed
+ * state was taken as a label only, and every DecodeData returned 0 samples with no end flag. One
+ * DecodeData is enough to tell: it must stop by name. */
+static void test_atrac_context_state_write_322(void) {
+    enum { SRC = 0x08006000u, TRACK = 0x08010000u, PCM_OUT = 0x08003000u, OUT_N = 0x08004100u,
+           OUT_END = 0x08004104u, OUT_REMAIN = 0x08004108u, REMAIN = 0x08004220u, FRAMES = 8u };
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t file_size = TD1096_HEADER + FRAMES * TD1096_FRAME;
+    td1096_build_at3_frames(SRC, 0x0270u, FRAMES, FRAMES * ATRAC3_FRAME_SAMPLES, 0u);
+    for (uint32_t b = 0; b < file_size; b++) MEM_W8(TRACK + b, MEM_R8(SRC + b));
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t set = id < 8u ? td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, TRACK, file_size, 0u) : 1u;
+    uint32_t ctx = set == 0u ? td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) : 0u;
+    const uint32_t info = ctx + 0x80u;
+    int ready = ctx >= 0x08a00000u && ctx < 0x0a000000u && MEM_R8(info + 0x15u) == 2u;
+    expect(ready, "state-write fixture: a whole AT3 track is ALL_DATA_LOADED in its context");
+    if (ready) {
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        uint32_t ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(OUT_N) > 0u && sr_hle_test_unmodelled_stops() == stops,
+               "a context the game only reads decodes as before");
+        MEM_W32(info + 0x28u, 1u);   /* the game keeps its own loop count */
+        ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(OUT_N) > 0u && sr_hle_test_unmodelled_stops() == stops,
+               "a context the game wrote loopNum into decodes as before");
+        MEM_W32(info + 0x28u, 0u);
+
+        MEM_W8(info + 0x15u, 4u);   /* STREAMED_WITHOUT_LOOP over a whole track */
+        MEM_W32(OUT_N, 0xdeadbeefu);
+        MEM_W32(OUT_END, 0xdeadbeefu);
+        ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(sr_hle_test_unmodelled_stops() == stops + 1u && ret != 0u,
+               "a streamed state written over a whole track stops DecodeData by name, not 0 "
+               "samples with no end flag (#322)");
+        MEM_W8(info + 0x15u, 2u);
+        ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(OUT_N) > 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+               "with its own state back, the track decodes on");
+
+        MEM_W8(info + 0x15u, 1u);   /* NO_DATA over a held track */
+        ret = td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+        expect(sr_hle_test_unmodelled_stops() == stops + 2u && ret != 0u,
+               "NO_DATA written over a held track stops the next call by name (#322)");
+        MEM_W8(info + 0x15u, 2u);
+    }
+    if (id < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
+/* #322: an ATRAC3+ prefix with a fact chunk and no fmt chunk is a track whose frame size is 0,
+ * kept as ALL_DATA_LOADED. A streamed state written into its context must stop the run by name:
+ * the remaining-frame and reset arithmetic divide by the frame size. The dividing calls run only
+ * once the stop has been counted, so a build that takes the state fails here instead of crashing. */
+static void test_atrac_context_zero_frame_322(void) {
+    enum { TRACK = 0x08002000u, REMAIN = 0x08004220u, RESET_INFO = 0x08004300u };
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+
+    for (uint32_t b = 0; b < 0x40u; b++) MEM_W8(TRACK + b, 0u);
+    MEM_W32(TRACK + 0x00u, 0x46464952u);   /* "RIFF" */
+    MEM_W32(TRACK + 0x04u, 0x1000u);
+    MEM_W32(TRACK + 0x08u, 0x45564157u);   /* "WAVE" */
+    MEM_W32(TRACK + 0x0cu, 0x74636166u);   /* "fact" */
+    MEM_W32(TRACK + 0x10u, 8u);
+    MEM_W32(TRACK + 0x14u, 2048u);         /* samples */
+    MEM_W32(TRACK + 0x18u, 0u);            /* delay */
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, 0x1000u /* ATRAC3+ */, 0u, 0u, 0u);
+    uint32_t set = id < 8u ? td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, TRACK, 0x40u, 0u) : 1u;
+    uint32_t ctx = set == 0u ? td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) : 0u;
+    const uint32_t info = ctx + 0x80u;
+    int ready = ctx >= 0x08a00000u && ctx < 0x0a000000u;
+    expect(ready && MEM_R8(info + 0x15u) == 2u && MEM_R16(info + 0x18u) == 0u,
+           "zero-frame fixture: a fact-only ATRAC3+ prefix is ALL_DATA_LOADED with frame size 0");
+    if (ready) {
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        MEM_W8(info + 0x15u, 4u);   /* STREAMED_WITHOUT_LOOP */
+        (void)td24b_dispatch4(NID_SCE_ATRAC_GET_LOOP_STATUS_322, id, REMAIN, REMAIN + 4u, 0u);
+        int stopped = sr_hle_test_unmodelled_stops() == stops + 1u;
+        expect(stopped, "a streamed state written for a track whose frame size is 0 stops the run "
+                        "by name (#322)");
+        if (stopped) {
+            /* Only reached once the written state is refused: these divide by the frame size. */
+            uint32_t r1 = td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+            MEM_W8(info + 0x15u, 3u);   /* HALFWAY_BUFFER */
+            uint32_t r2 = td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+            MEM_W8(info + 0x15u, 5u);
+            uint32_t r3 = td24b_dispatch4(NID_SCE_ATRAC_GET_BUFFER_INFO_FOR_RESETTING, id, 0u,
+                                          RESET_INFO, 0u);
+            expect(sr_hle_test_unmodelled_stops() == stops + 4u && r1 != 0u && r2 != 0u && r3 != 0u,
+                   "with a written state, GetRemainFrame and GetBufferInfoForResetting stop by "
+                   "name and never divide by a frame size of 0");
+        }
+        MEM_W8(info + 0x15u, 2u);
+        stops = sr_hle_test_unmodelled_stops();
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u) == 0u &&
+                   MEM_R32(REMAIN) == 0xffffffffu && sr_hle_test_unmodelled_stops() == stops,
+               "with its own state back, the zero-frame track answers ALL_DATA_LOADED");
+    }
+    if (id < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
 
 static void test_td24d_hle_batch(void) {
     reset_fixture();
@@ -51577,6 +52335,50 @@ static void test_vtimer_handler_return_below_100us_reschedules_100us_on(void) {
     s_pace_on = saved_pace;
 }
 
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
+/* Re-execute this binary in `mode` (one argument) and return its exit status, or -1 when it could not be
+ * started or waited for. The command line is quoted (exit_game_spawn_child says why). */
+static int aot_spawn_self(const char *self, const char *mode) {
+#ifdef _WIN32
+    wchar_t wide_self[EXITGAME_SPAWN_CAP];
+    wchar_t wide_mode[EXITGAME_SPAWN_CAP];
+    wchar_t command[EXITGAME_SPAWN_CAP];
+    if (MultiByteToWideChar(CP_ACP, 0, self, -1, wide_self, EXITGAME_SPAWN_CAP) <= 0 ||
+        MultiByteToWideChar(CP_ACP, 0, mode, -1, wide_mode, EXITGAME_SPAWN_CAP) <= 0) {
+        return -1;
+    }
+    size_t written = append_quoted_argument(command, EXITGAME_SPAWN_CAP, wide_self);
+    if (written == 0 || written + 1 >= EXITGAME_SPAWN_CAP) return -1;
+    command[written++] = L' ';
+    if (append_quoted_argument(command + written, EXITGAME_SPAWN_CAP - written, wide_mode) == 0)
+        return -1;
+    STARTUPINFOW startup;
+    PROCESS_INFORMATION child;
+    DWORD status = 0;
+    ZeroMemory(&startup, sizeof(startup));
+    startup.cb = sizeof(startup);
+    if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &child))
+        return -1;
+    int waited = WaitForSingleObject(child.hProcess, INFINITE) == WAIT_OBJECT_0 &&
+                 GetExitCodeProcess(child.hProcess, &status);
+    CloseHandle(child.hThread);
+    CloseHandle(child.hProcess);
+    return waited ? (int)status : -1;
+#else
+    pid_t child = fork();
+    if (child == 0) {
+        execl(self, self, mode, (char *)NULL);
+        _exit(127);
+    }
+    if (child < 0) return -1;
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status)) return -1;
+    return WEXITSTATUS(status);
+#endif
+}
+
 #ifdef SR_HLE_AOT_BOUNDARY_TEST
 /* This is the same wrapper emitted by emit_checked_body_call: set the linked
  * resume address, establish its explicit return boundary, call the native body,
@@ -51949,14 +52751,217 @@ static void test_aot_return_boundary_thread_isolation(void) {
     test_aot_return_boundary_nonlocal_return();
 }
 
+/* ---- a parked thread is one sr_yield has switched out (#2172) ---------------------------
+ *
+ * "Resume at a PC" in docs/ARCHITECTURE.md. A state-resumable body names the point it
+ * continues at before it enters sr_yield, and the real sr_yield then advances time, services
+ * what is due and only afterwards decides whether to switch. This runs that with the real
+ * scheduler: one thread at a loop edge whose yield services an alarm and then switches to a
+ * peer. Described from the alarm handler, inside the yield, the thread must be refused;
+ * described from the peer, after the yield's own switch, it is its one frame. */
+enum {
+    RESUME_PARK_ENTRY = 0x088a4000u,
+    RESUME_PARK_LOOP  = 0x088a4010u,   /* the loop edge's target */
+    RESUME_PARK_EDGE  = 0x088a4020u,   /* the edge's own PC */
+    RESUME_PARK_PEER  = 0x088a4100u,
+    RESUME_PARK_ALARM = 0x088a4200u,
+};
+
+static uint32_t s_resume_park_uid;
+static uint32_t s_resume_park_sp;
+static unsigned s_resume_park_handler_calls;
+static unsigned s_resume_park_peer_runs;
+static unsigned s_resume_park_passes;
+static int s_resume_park_running_in_handler;
+static int s_resume_park_in_yield;
+static int s_resume_park_marked_out;
+static int s_resume_park_peer_marked;
+static int s_resume_park_marked_after;
+static int s_resume_park_named_in_handler;
+static SrResumeStatus s_resume_park_in_handler;
+static SrResumeStatus s_resume_park_fiber_in_handler;
+static SrResumeStatus s_resume_park_from_peer;
+static SrResumeStatus s_resume_park_peer_itself;
+static SrResumeStatus s_resume_park_other_switch;
+static SrResumeStatus s_resume_park_in_import;
+static uint32_t s_resume_park_peer_uid;
+static int s_resume_park_peer_waited;
+static int s_resume_park_peer_marked_in_wait;
+static char s_resume_park_other_detail[160];
+static SrResumeFrame s_resume_park_frames[4];
+static uint32_t s_resume_park_count;
+static char s_resume_park_detail[160];
+
+static void resume_park_alarm_handler(CpuState *s) {
+    /* Interrupt context, under the parking thread's own sr_yield: its point is named, and
+     * the rest of the yield (this handler, the decision to switch) is still running. */
+    SrResumeFrame frames[4];
+    uint32_t count = 9u;
+    TCB *t = tcb_by_uid(s_resume_park_uid);
+    s_resume_park_handler_calls++;
+    s_resume_park_running_in_handler = t != NULL && t->state == TH_RUNNING;
+    s_resume_park_named_in_handler = s_resume_park_in_yield;
+    s_resume_park_in_handler = sched_resume_describe(s_resume_park_uid, frames, 4u, &count, NULL, 0u);
+    s_resume_park_fiber_in_handler = sr_resume_describe(NULL, s, frames, 4u, &count, NULL, 0u);
+    s->r[2] = 0u;   /* one shot */
+}
+
+static void resume_park_peer(CpuState *s) {
+    /* The parking thread is switched out, by its yield's own switch. */
+    SrResumeFrame frames[4];
+    uint32_t count = 9u;
+    TCB *t = tcb_by_uid(s_resume_park_uid);
+    s_resume_park_peer_runs++;
+    s_resume_park_marked_out = t != NULL && t->yield_switched;
+    s_resume_park_peer_marked = s_cur >= 0 && s_tcb[s_cur].yield_switched;
+    s_resume_park_from_peer = sched_resume_describe(
+        s_resume_park_uid, s_resume_park_frames, 4u, &s_resume_park_count,
+        s_resume_park_detail, sizeof s_resume_park_detail);
+    s_resume_park_peer_itself = sched_resume_describe(sched_current_uid(), frames, 4u, &count, NULL, 0u);
+    if (t != NULL) {
+        /* The same records inside an import (a flag check: a thread at the yield's own
+         * switch is in no import). */
+        t->import_active = 1;
+        s_resume_park_in_import = sched_resume_describe(s_resume_park_uid, frames, 4u, &count, NULL, 0u);
+        t->import_active = 0;
+    }
+    /* A real switch that is not the yield's own: the peer blocks in sceKernelDelayThread, the
+     * parked thread runs again, and it describes the peer (resume_park_body). */
+    s_resume_park_peer_uid = sched_current_uid();
+    CpuState sc;
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = 1000u;
+    (void)sr_syscall(&sc, NID_SCE_KERNEL_DELAY_THREAD);
+    s_resume_park_peer_waited = 1;
+    s->r[2] = 0u;
+}
+
+static void resume_park_body(CpuState *s) {
+    s_resume_park_uid = sched_current_uid();
+    /* The call record a host entry leaves. This harness enters a thread through its dispatch
+     * stand-in, whose record names no resume PC, so the body gives that record the fields
+     * dispatch_from_host would have left. */
+    SrAotReturnBoundary *root = sr_aot_return_boundary_top;
+    if (root == NULL || root->state != s) return;
+    root->resume_pc = SR_HOST_RETURN_PC;
+    root->has_resume_pc = 1u;
+    root->dispatch_owned = 1u;
+    root->callee = RESUME_PARK_ENTRY;
+    root->flags = SR_BOUNDARY_CALLEE | SR_BOUNDARY_HOST_ENTRY;
+    const uint32_t sp_entry = s->r[29];
+    s_resume_park_sp = sp_entry;
+
+    /* An alarm that is due when the yield services interrupts, and a peer of the same
+     * priority for the yield to switch to afterwards. */
+    CpuState sc;
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = 1000u;
+    sc.r[5] = RESUME_PARK_ALARM;
+    const uint32_t alarm = sr_syscall(&sc, NID_SCE_KERNEL_SET_ALARM);
+    const uint32_t peer = sched_create_thread(RESUME_PARK_PEER, s_tcb[s_cur].priority, 0x4000u);
+    if (peer != 0u) (void)sched_start_thread(peer, 0u, 0u);
+    for (unsigned i = 0; i < SCHED_ALARM_MAX; i++)
+        if (s_alarms[i].uid == alarm && s_vtime_us < s_alarms[i].deadline)
+            s_vtime_us = s_alarms[i].deadline;
+
+    /* The loop edge: the slice ends here. */
+    atomic_store_explicit(&sr_timeslice, 1, memory_order_relaxed);
+    s_resume_park_in_yield = 1;
+    SR_YIELD_PARK(s, RESUME_PARK_EDGE, RESUME_PARK_ENTRY, RESUME_PARK_LOOP,
+                  SR_RESUME_POINT_YIELD, sp_entry);
+    s_resume_park_in_yield = 0;
+    s_resume_park_marked_after = s_tcb[s_cur].yield_switched;
+    s_resume_park_passes++;
+    if (s_resume_park_peer_uid != 0u && !s_resume_park_peer_waited) {
+        /* The peer is out in its delay, switched by the wait and not by a yield. */
+        SrResumeFrame frames[4];
+        uint32_t count = 9u;
+        TCB *peer = tcb_by_uid(s_resume_park_peer_uid);
+        s_resume_park_peer_marked_in_wait = peer == NULL || peer->yield_switched;
+        s_resume_park_other_switch = sched_resume_describe(
+            s_resume_park_peer_uid, frames, 4u, &count,
+            s_resume_park_other_detail, sizeof s_resume_park_other_detail);
+    }
+}
+
+static void test_resume_describe_from_the_scheduler(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    sr_aot_return_boundaries_reset();
+    s_resume_park_uid = 0u;
+    s_resume_park_sp = 0u;
+    s_resume_park_handler_calls = 0u;
+    s_resume_park_peer_runs = 0u;
+    s_resume_park_passes = 0u;
+    s_resume_park_running_in_handler = 0;
+    s_resume_park_named_in_handler = 0;
+    s_resume_park_in_yield = 0;
+    s_resume_park_marked_out = 0;
+    s_resume_park_peer_marked = 1;
+    s_resume_park_marked_after = 1;
+    s_resume_park_in_handler = s_resume_park_fiber_in_handler = SR_RESUME_OK;
+    s_resume_park_from_peer = s_resume_park_peer_itself = SR_RESUME_BAD_FRAMES;
+    s_resume_park_other_switch = s_resume_park_in_import = SR_RESUME_OK;
+    s_resume_park_peer_uid = 0u;
+    s_resume_park_peer_waited = 0;
+    s_resume_park_peer_marked_in_wait = 1;
+    s_resume_park_other_detail[0] = '\0';
+    s_resume_park_count = 0u;
+    memset(s_resume_park_frames, 0, sizeof s_resume_park_frames);
+    s_resume_park_detail[0] = '\0';
+    sr_test_register_guest_fn(RESUME_PARK_ENTRY, resume_park_body);
+    sr_test_register_guest_fn(RESUME_PARK_PEER, resume_park_peer);
+    sr_test_register_guest_fn(RESUME_PARK_ALARM, resume_park_alarm_handler);
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+
+    sched_run(RESUME_PARK_ENTRY, 0u, 0u);
+
+    expect(s_resume_park_handler_calls == 1u && s_resume_park_peer_runs == 1u &&
+               s_resume_park_passes == 1u,
+           "resume describe: the yield serviced the alarm, switched to the peer and came back");
+    expect(s_resume_park_named_in_handler,
+           "resume describe: the alarm handler ran inside the yield, after the body named its point");
+    expect(s_resume_park_running_in_handler,
+           "resume describe: the yielding thread was still the running one in the handler");
+    expect(s_resume_park_in_handler == SR_RESUME_NOT_PARKED,
+           "resume describe: a thread inside its own yield, servicing an interrupt, is not parked");
+    expect(s_resume_park_fiber_in_handler == SR_RESUME_NOT_PARKED,
+           "resume describe: the running fiber is refused even with its point named");
+    expect(s_resume_park_from_peer == SR_RESUME_OK && s_resume_park_count == 1u &&
+               s_resume_park_frames[0].body == RESUME_PARK_ENTRY &&
+               s_resume_park_frames[0].pc == RESUME_PARK_LOOP &&
+               s_resume_park_frames[0].kind == SR_RESUME_POINT_YIELD &&
+               s_resume_park_frames[0].sp == s_resume_park_sp,
+           "resume describe: after the yield's own switch the thread is its one frame");
+    if (s_resume_park_from_peer != SR_RESUME_OK)
+        fprintf(stderr, "  resume describe: %s (%s)\n",
+                sr_resume_status_name(s_resume_park_from_peer), s_resume_park_detail);
+    expect(s_resume_park_marked_out && !s_resume_park_peer_marked && !s_resume_park_marked_after,
+           "resume describe: the yield's switch marks the thread it switched out, only that one, "
+           "and only until it runs again");
+    expect(s_resume_park_peer_itself == SR_RESUME_NOT_PARKED,
+           "resume describe: the thread that asks is running and is not parked");
+    expect(s_resume_park_other_switch == SR_RESUME_NOT_PARKED && !s_resume_park_peer_marked_in_wait &&
+               strstr(s_resume_park_other_detail, "not by sr_yield's own switch") != NULL,
+           "resume describe: a thread switched out by a blocking wait is unmarked and not parked");
+    if (s_resume_park_other_switch != SR_RESUME_NOT_PARKED || s_resume_park_peer_marked_in_wait)
+        fprintf(stderr, "  resume describe, blocked peer: %s marked=%d (%s)\n",
+                sr_resume_status_name(s_resume_park_other_switch), s_resume_park_peer_marked_in_wait,
+                s_resume_park_other_detail);
+    expect(s_resume_park_peer_waited, "resume describe: the peer's delay ended and it finished");
+    expect(s_resume_park_in_import == SR_RESUME_NOT_PARKED,
+           "resume describe: a thread inside an import is not parked");
+    sr_aot_return_boundaries_reset();
+    sr_test_guest_fn_reset();
+}
+
 /* #1375: a thread created through sceKernelCreateThread with entry 0 holds a null code
  * pointer. It stops by name when it is first scheduled, through the real coro_body and
  * recomp.c's stop, before any guest code runs; on this zero-based registry the offset-0
  * function would otherwise run as the thread. A loader entry of 0 (the boot thread's
  * module_start at offset 0) is not a code pointer and runs. */
-#ifndef _WIN32
-#include <sys/wait.h>
-#endif
 enum {
     NULLENTRY_LAUNCHER = 0x088a0400u,
     NULLENTRY_NAME = 0x00250b80u,
@@ -51996,47 +53001,6 @@ static int run_null_thread_entry_child(void) {
     sched_run(NULLENTRY_LAUNCHER, 0u, 0u);
     if ((int32_t)s_nullentry_create_result <= 0 || s_nullentry_start_result != 0u) return 97;
     return s_nullentry_offset0_runs ? 99 : 96; /* fail-open: the thread ran, or never started */
-}
-
-/* Re-execute this binary in `mode` and return its exit status, or -1 when it could not be
- * started or waited for. The command line is quoted (exit_game_spawn_child says why). */
-static int aot_spawn_self(const char *self, const char *mode) {
-#ifdef _WIN32
-    wchar_t wide_self[EXITGAME_SPAWN_CAP];
-    wchar_t wide_mode[EXITGAME_SPAWN_CAP];
-    wchar_t command[EXITGAME_SPAWN_CAP];
-    if (MultiByteToWideChar(CP_ACP, 0, self, -1, wide_self, EXITGAME_SPAWN_CAP) <= 0 ||
-        MultiByteToWideChar(CP_ACP, 0, mode, -1, wide_mode, EXITGAME_SPAWN_CAP) <= 0) {
-        return -1;
-    }
-    size_t written = append_quoted_argument(command, EXITGAME_SPAWN_CAP, wide_self);
-    if (written == 0 || written + 1 >= EXITGAME_SPAWN_CAP) return -1;
-    command[written++] = L' ';
-    if (append_quoted_argument(command + written, EXITGAME_SPAWN_CAP - written, wide_mode) == 0)
-        return -1;
-    STARTUPINFOW startup;
-    PROCESS_INFORMATION child;
-    DWORD status = 0;
-    ZeroMemory(&startup, sizeof(startup));
-    startup.cb = sizeof(startup);
-    if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &child))
-        return -1;
-    int waited = WaitForSingleObject(child.hProcess, INFINITE) == WAIT_OBJECT_0 &&
-                 GetExitCodeProcess(child.hProcess, &status);
-    CloseHandle(child.hThread);
-    CloseHandle(child.hProcess);
-    return waited ? (int)status : -1;
-#else
-    pid_t child = fork();
-    if (child == 0) {
-        execl(self, self, mode, (char *)NULL);
-        _exit(127);
-    }
-    if (child < 0) return -1;
-    int status = 0;
-    if (waitpid(child, &status, 0) != child || !WIFEXITED(status)) return -1;
-    return WEXITSTATUS(status);
-#endif
 }
 
 static void test_aot_null_thread_entry(const char *self) {
@@ -52911,6 +53875,75 @@ int main(int argc, char **argv) {
     return rc;
 }
 
+/* #322: no ATRAC call divides by a frame size of 0. Each route runs in a child process, so a
+ * build that still divides fails its check with the child's crash status (0xC0000094 on Windows,
+ * SIGFPE on POSIX) instead of ending this binary. */
+#define ATRAC_ZERO_FRAME_CHILD "--atrac-zero-frame-child="
+/* The child: 0 when the route stopped the run by name, 2 when the fixture could not be built, 1
+ * otherwise. Once the game has written the state, the next call may stop already; that counts. */
+static int run_atrac_zero_frame_child(const char *route) {
+    enum { TRACK = 0x08002000u, OUT = 0x08004220u, RESET_INFO = 0x08004300u, PCM = 0x08003000u,
+           NID_ADD_STREAM_DATA = 0x7db31251u };
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    const int no_data = strcmp(route, "no-data") == 0;
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, 0x1000u /* ATRAC3+ */, 0u, 0u, 0u);
+    if (id >= 8u) return 2;
+    if (!no_data) {
+        /* A fact-only ATRAC3+ prefix: RIFF, WAVE and a fact chunk, no fmt chunk. */
+        for (uint32_t b = 0; b < 0x40u; b++) MEM_W8(TRACK + b, 0u);
+        MEM_W32(TRACK + 0x00u, 0x46464952u);
+        MEM_W32(TRACK + 0x04u, 0x1000u);
+        MEM_W32(TRACK + 0x08u, 0x45564157u);
+        MEM_W32(TRACK + 0x0cu, 0x74636166u);
+        MEM_W32(TRACK + 0x10u, 8u);
+        MEM_W32(TRACK + 0x14u, 2048u);
+        if (td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, TRACK, 0x40u, 0u) != 0u) return 2;
+        uint32_t ctx = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u);
+        if (ctx < 0x08a00000u || ctx >= 0x0a000000u || MEM_R16(ctx + 0x80u + 0x18u) != 0u) return 2;
+        MEM_W8(ctx + 0x80u + 0x15u, 1u);   /* the game writes NO_DATA */
+        if (strcmp(route, "no-data-state") != 0) {
+            (void)td24b_dispatch4(NID_ADD_STREAM_DATA, id, 0u, 0u, 0u);
+            if (sr_hle_test_unmodelled_stops() > stops) return 0;
+        }
+    }
+    if (no_data || strcmp(route, "no-data-state") == 0 || strcmp(route, "add-stream") == 0) {
+        (void)td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, OUT, 0u, 0u);
+    } else if (strcmp(route, "add-stream-decode") == 0) {
+        (void)td1096_decode(id, PCM, OUT, OUT + 4u, OUT + 8u);
+    } else if (strcmp(route, "add-stream-reset") == 0) {
+        (void)td24b_dispatch4(NID_SCE_ATRAC_GET_BUFFER_INFO_FOR_RESETTING, id, 0u, RESET_INFO, 0u);
+    } else {
+        return 2;
+    }
+    return sr_hle_test_unmodelled_stops() > stops ? 0 : 1;
+}
+static void test_atrac_zero_frame_routes_322(const char *self) {
+    static const char *const routes[] = { "no-data", "no-data-state", "add-stream",
+                                          "add-stream-decode", "add-stream-reset" };
+    static const char *const what[] = {
+        "sceAtracGetRemainFrame on an ID that never received a track",
+        "sceAtracGetRemainFrame after NO_DATA is written into a zero-frame track's context",
+        "sceAtracGetRemainFrame after NO_DATA and sceAtracAddStreamData(id, 0) on a zero-frame track",
+        "sceAtracDecodeData after NO_DATA and sceAtracAddStreamData(id, 0) on a zero-frame track",
+        "sceAtracGetBufferInfoForResetting after NO_DATA and sceAtracAddStreamData(id, 0) on a "
+        "zero-frame track",
+    };
+    char mode[96];
+    char name[256];
+    for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
+        snprintf(mode, sizeof(mode), "%s%s", ATRAC_ZERO_FRAME_CHILD, routes[i]);
+        int status = self ? aot_spawn_self(self, mode) : -1;
+        snprintf(name, sizeof(name), "%s stops the run by name and never divides by a frame size "
+                                     "of 0 (child status %d, #322)", what[i], status);
+        expect(status == 0, name);
+    }
+}
+
 static int hle_selftest_main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--psp-oracle") == 0)
         return run_psp_oracle(argc, argv);
@@ -52935,6 +53968,12 @@ static int hle_selftest_main(int argc, char **argv) {
     expect(s_sched_coro != NULL, "scheduler coroutine was adopted");
     expect(sr_coro_current() == s_sched_coro,
            "the adopted scheduler coroutine is the one currently running");
+
+    if (argc > 1 && strncmp(argv[1], ATRAC_ZERO_FRAME_CHILD, strlen(ATRAC_ZERO_FRAME_CHILD)) == 0) {
+        int rc = run_atrac_zero_frame_child(argv[1] + strlen(ATRAC_ZERO_FRAME_CHILD));
+        free(g_mem_base);
+        return rc;
+    }
 
     if (argc > 1 && strcmp(argv[1], "--rtc-rfc2822-local") == 0) {
         test_rtc_rfc2822_local();
@@ -52975,6 +54014,13 @@ static int hle_selftest_main(int argc, char **argv) {
 #ifdef SR_HLE_AOT_BOUNDARY_TEST
     if (argc > 1 && strcmp(argv[1], "--null-thread-entry-child") == 0)
         return run_null_thread_entry_child();
+    if (argc > 1 && strcmp(argv[1], "--resume-describe") == 0) {
+        test_resume_describe_from_the_scheduler();
+        fprintf(stderr, "resume-describe-selftest: %d checks, %d failures\n",
+                s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--aot-return-boundary") == 0) {
         test_aot_return_boundary_thread_isolation();
         test_aot_null_thread_entry(argv[0]);
@@ -53103,6 +54149,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_finish_callback_reports();
     test_ge_finish_callbacks_do_not_nest();
     test_ge_finish_callback_thread_exit();
+    test_ge_finish_callback_waits_for_interrupts();
     test_ge_queued_lists_run_in_order();
     test_ge_timing_blocking_sync_cannot_wait();
     test_volatile_mem_output_preflight();
@@ -53115,7 +54162,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_storage_dialog_parameter_sizes();
     test_netconf_parameter_sizes();
     test_utility_dialog_single_slot();
-    test_utility_dialog_cancel_cleanup();
+    test_utility_dialog_refused_cancel();
     test_utility_dialog_status_sequence();
     test_utility_dialog_frame_driven_status();
     test_utility_dialog_start_up_during_status_spin();
@@ -53352,6 +54399,11 @@ static int hle_selftest_main(int argc, char **argv) {
     test_at3_set_data_delay_2048_1096();
     test_atrac_set_entry_points_1379();
     test_atrac_aa3_and_reinit_1379();
+    test_atrac_guest_context_322();
+    test_atrac_context_ids_loadexec_322();
+    test_atrac_context_state_write_322();
+    test_atrac_context_zero_frame_322();
+    test_atrac_zero_frame_routes_322(argc > 0 ? argv[0] : NULL);
     test_td24d_hle_batch();
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();
