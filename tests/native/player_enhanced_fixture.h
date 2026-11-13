@@ -47,6 +47,8 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
                                     "on new textures."},
     {"Texture pack", "Off",
      "Draws the texture pack chosen on a game's page. The game receives changed pictures."},
+    {"Late pad sampling", "Off",
+     "Ace only, with 60 FPS logic. Reads the pad later in each frame; the game's timing changes."},
 };
 typedef char player_enhanced_fixture_matches_parts[
     sizeof(k_enhanced_parts) / sizeof(k_enhanced_parts[0]) == PLAYER_PART_COUNT ? 1 : -1];
