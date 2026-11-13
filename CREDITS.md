@@ -66,6 +66,11 @@ Nakagawa has since substantially extended and modified that codebase. This repos
 - **SDL, SDL_ttf and their dependencies** — staged beside the player with their licence texts (listed in [`NOTICE.md`](NOTICE.md)).
 - **stb_image 2.30 — Sean Barrett** — public domain (Unlicense), the alternative to MIT that upstream offers. The PNG
   decoder in [`third_party/stb/`](third_party/stb/), for the player's prompt glyphs and the disc art read from your own disc.
+- **stb_vorbis 1.24 — Sean Barrett** — public domain (Unlicense), the alternative to MIT that upstream offers. The Ogg
+  Vorbis decoder for the optional launcher music, in [`third_party/stb/`](third_party/stb/PROVENANCE.md).
+- **"Chill lofi inspired" — omfgdude ([OpenGameArt](https://opengameart.org/content/chill-lofi-inspired))** — CC0-1.0.
+  The optional launcher music, `ChillLofi.ogg` as its author uploaded it, in
+  [`assets/music/launcher/`](assets/music/launcher/PROVENANCE.md).
 - **Kenney "Input Prompts" and "Interface Sounds" — Kenney Vleugels ([kenney.nl](https://kenney.nl))** — CC0-1.0. The
   launcher's button prompt glyphs and its optional launcher sounds, in [`third_party/kenney/`](third_party/kenney/).
 - **Inno Setup 6.7.3 — Jordan Russell and Martijn Laan** — the Inno Setup License (a permissive, no-copyleft licence; text pinned by hash in [`assets/upstream/innosetup.lock.json`](assets/upstream/innosetup.lock.json)). A build tool for the Windows installer, not vendored: `tools/build_installer.py` runs the user's own pinned copy. The installer's `Setup.exe` embeds Inno's unmodified loader, whose copyright notice and web addresses stay intact.

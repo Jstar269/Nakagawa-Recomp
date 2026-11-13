@@ -1348,6 +1348,8 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->interface_size_pct = 0;
     settings->text_size_pct = 100;
     settings->ui_sounds = false;
+    settings->launcher_music = false;
+    settings->launcher_music_volume = 80;
     settings->library_sort = PLAYER_LIBRARY_SORT_PLAYED;
     settings->launcher_window_maximized = false;
     settings->launcher_window_position_valid = false;
@@ -2116,6 +2118,19 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.ui_sounds = sounds_val;
     }
 
+    NkJsonNode *music_node = nk_json_obj_get(root, "launcher_music");
+    bool music_val = false;
+    if (music_node && nk_json_get_bool(music_node, &music_val)) {
+        app->settings.launcher_music = music_val;
+    }
+    NkJsonNode *music_vol_node = nk_json_obj_get(root, "launcher_music_volume");
+    int64_t music_vol_val = 0;
+    if (music_vol_node && nk_json_get_int64(music_vol_node, &music_vol_val)) {
+        if (music_vol_val < 0) music_vol_val = 0;
+        if (music_vol_val > 100) music_vol_val = 100;
+        app->settings.launcher_music_volume = (int)music_vol_val;
+    }
+
     NkJsonNode *vol_node = nk_json_obj_get(root, "master_volume");
     int64_t vol_val = 0;
     if (vol_node && nk_json_get_int64(vol_node, &vol_val)) {
@@ -2321,6 +2336,8 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
     fprintf(f, "  \"text_size\": %d,\n",
             text_size_valid(app->settings.text_size_pct) ? app->settings.text_size_pct : 100);
     fprintf(f, "  \"ui_sounds\": %s,\n", app->settings.ui_sounds ? "true" : "false");
+    fprintf(f, "  \"launcher_music\": %s,\n", app->settings.launcher_music ? "true" : "false");
+    fprintf(f, "  \"launcher_music_volume\": %d,\n", app->settings.launcher_music_volume);
     fprintf(f, "  \"library_sort\": \"%s\",\n",
             kLibrarySortKeys[(int)app->settings.library_sort >= 0 &&
                                      app->settings.library_sort < PLAYER_LIBRARY_SORT_COUNT
@@ -2995,6 +3012,12 @@ const char *player_library_sort_label(PlayerLibrarySort sort) {
 void player_app_toggle_ui_sounds(PlayerApp *app) {
     if (!app) return;
     app->settings.ui_sounds = !app->settings.ui_sounds;
+    maybe_persist_settings(app);
+}
+
+void player_app_toggle_launcher_music(PlayerApp *app) {
+    if (!app) return;
+    app->settings.launcher_music = !app->settings.launcher_music;
     maybe_persist_settings(app);
 }
 
@@ -4115,6 +4138,15 @@ void player_app_adjust_volume(PlayerApp *app, int delta) {
     if (volume < 0) volume = 0;
     if (volume > 100) volume = 100;
     app->settings.master_volume = volume;
+    maybe_persist_settings(app);
+}
+
+void player_app_adjust_launcher_music_volume(PlayerApp *app, int delta) {
+    if (!app) return;
+    int volume = app->settings.launcher_music_volume + delta;
+    if (volume < 0) volume = 0;
+    if (volume > 100) volume = 100;
+    app->settings.launcher_music_volume = volume;
     maybe_persist_settings(app);
 }
 

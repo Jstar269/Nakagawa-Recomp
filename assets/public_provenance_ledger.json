@@ -1168,6 +1168,29 @@
       }
     },
     {
+      "path": "assets/music/launcher/ChillLofi.ogg",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "oga_chill_lofi_track_2207_20261112",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "CC0-1.0",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "assets/music/launcher/PROVENANCE.md",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_music_2207_20261112",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "assets/prereq_manifest.json",
       "classification": "project_authored_attested",
       "evidence": {
@@ -5073,6 +5096,28 @@
       }
     },
     {
+      "path": "src/player/ui/player_ui_music.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_music_2207_20261112",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/ui/player_ui_music.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_music_2207_20261112",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "src/player/ui/player_ui_nk.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -5111,6 +5156,28 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "pd-ui-art-and-sound-20261024",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/ui/player_ui_vorbis.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_music_2207_20261112",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/ui/player_ui_vorbis.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_music_2207_20261112",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -13558,6 +13625,17 @@
       }
     },
     {
+      "path": "tests/native/test_player_ui_music.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "launcher_music_2207_20261112",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/test_portable_mode.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -16592,6 +16670,18 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "stb-image-upstream-import-20261024",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT OR Unlicense",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/stb/stb_vorbis.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "stb_vorbis_import_2207_20261112",
         "evidence_tier": "S",
         "upstream": "documented upstream family",
         "license": "MIT OR Unlicense",
