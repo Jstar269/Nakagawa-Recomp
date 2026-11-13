@@ -1675,24 +1675,16 @@ static void texpack_utf8_trim(char *s) {
     if (lead >= 0x80u && n - (start - 1) < want) s[start - 1] = '\0';
 }
 
-/* A full path on this host: a relative one would be read against the game's working folder,
-   not the player's, and so could name another folder. */
-static bool texpack_path_full(const char *p) {
-#if defined(_WIN32)
-    return (isalpha((unsigned char)p[0]) && p[1] == ':' && (p[2] == '\\' || p[2] == '/')) ||
-           ((p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/'));
-#else
-    return p[0] == '/';
-#endif
-}
-
 /* Why a folder cannot be kept as a texture pack, or NULL when it can: settings.json holds UTF-8
    only (a file the loader refuses would lose every setting), the folder must be a full path, and
    it must fit PlayerTitlePack.path. */
 static const char *texpack_path_problem(const char *path) {
     if (!path || !path[0]) return "no folder was chosen";
     if (!texpack_utf8_valid(path)) return "the folder's path is not valid UTF-8";
-    if (!texpack_path_full(path)) return "the folder's path is not a full path";
+    /* A full path on this host (Win32: a drive letter, ':' and a separator, or two separators;
+       POSIX: a leading '/'): a relative one would be read against the game's working folder,
+       not the player's, and so could name another folder. */
+    if (!nk_platform_path_is_absolute(path)) return "the folder's path is not a full path";
     if (strlen(path) >= sizeof(((PlayerTitlePack *)0)->path))
         return "the folder's path is 512 characters or longer";
     return NULL;
