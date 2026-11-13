@@ -1576,6 +1576,7 @@ static void pace_set_speed(uint32_t speed) {
 }
 
 int sched_fast_forward_on(void) { return s_ff_speed > 1u; }
+uint32_t sched_fast_forward_speed(void) { return s_ff_speed; }
 uint32_t sched_fast_forward_epoch(void) { return s_ff_epoch; }
 
 /* SR_DETERMINISTIC_CLOCK: unset, empty or '0' = off; '1' = on. There is no automatic choice: a

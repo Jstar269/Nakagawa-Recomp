@@ -555,8 +555,9 @@ static void sr_gui_take_pause_request(void) {
                                   ? SR_PAUSE_SRC_PAD_LOST : SR_PAUSE_SRC_USER);
 }
 
-static void sync_sdl_input(void) {
-    s_input_poll_ns = sched_host_now_ns();
+/* Copies the presenter's input state. Only a copy after the presenter polled the host input
+ * (sync_sdl_input below) moves the poll stamp the input-latency measure starts from. */
+static void sync_sdl_input_state(void) {
     s_buttons = sdl3vk_buttons();
     sdl3vk_analog(&s_lx, &s_ly);
     {
@@ -568,6 +569,12 @@ static void sync_sdl_input(void) {
     s_pad_present = sdl3vk_pad_present();
     sr_gui_feed_keyboard();
     sr_gui_take_pause_request();
+}
+
+/* After a poll of the host input (sdl3vk_poll, or a present, which polls). */
+static void sync_sdl_input(void) {
+    s_input_poll_ns = sched_host_now_ns();
+    sync_sdl_input_state();
 }
 #endif
 
@@ -1330,7 +1337,7 @@ uint32_t gui_consume_button_pulses(void) {
 #ifdef SR_SDL3VK
     if (s_sdl3) {
         pulses = sdl3vk_consume_button_pulses();
-        sync_sdl_input();
+        sync_sdl_input_state();   /* no poll here: the poll stamp stays */
     }
 #endif
     return pulses;
@@ -2688,8 +2695,11 @@ static void selftest_held_present_passes_a_tap_to_the_game(void) {
     gui_ace_vblank(1u);
     assert(s_stub_held_calls == calls + 1u);
     assert(gui_input_poll_ns() == 123456789ull);   /* the poll behind the sample is stamped */
+    s_stub_now_ns = 987654321ull;
     assert((selftest_game_sample() & cross) != 0u);
     assert((selftest_game_sample() & cross) == 0u);
+    /* Consuming the pulses polls nothing, so the stamp stays the present's poll. */
+    assert(gui_input_poll_ns() == 123456789ull);
     ace_pace_stats(&after);
     assert(after.kind[ACE_PRESENT_HELD] == before.kind[ACE_PRESENT_HELD] + 1u);
     assert(!gui_quit_requested());

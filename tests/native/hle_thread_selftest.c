@@ -48450,10 +48450,15 @@ static void test_ctrl_late_refresh(void) {
     sr_hle_test_ctrl_ring_reset();
 }
 
-/* Late pad sampling through the real path (ace.h, contract 11.3.9): sched_vblank_deadline_ns on a
- * controlled host clock, then sr_enhancement_update_begin on a guest thread with the paced
- * scheduler: the plan warms on ACE_PAD_WARM measured updates, the thread is held in a delay wait,
- * the test runs as another thread during the hold, and the thread resumes into pad_refresh_live.
+/* Late pad sampling (ace.h, contract 11.3.9): sched_vblank_deadline_ns on a controlled host
+ * clock, then sr_enhancement_update_begin on a guest thread with the paced scheduler: the plan
+ * warms on ACE_PAD_WARM measured updates, the thread is held in a delay wait, the test runs as
+ * another thread during the hold, and the thread resumes into pad_refresh_live. The fixture is
+ * white-box: it stands in for each VBLANK by setting the scheduler's latch statics and calling
+ * sr_ctrl_sample (pad_vblank), and it resumes a held thread with vm_run instead of letting the
+ * scheduler wake it from the paced clock, so the cases pin the wake value, not the wake itself.
+ * Most cases close an update by calling sr_enhancement_update_waits directly; the case at the end
+ * reaches it through a thread's sceDisplayWaitVblankStart and the scheduler's sched_vblank_block.
  * Each case fails if its fix is reverted: a tap the VBLANK latched survives a release in the hold
  * (B1), a latch read in the hold blocks the refresh (B2), the deadline and so the hold stay
  * within one period of the last VBLANK when the paced clock runs ahead (B3), there is no hold
@@ -48702,6 +48707,27 @@ static void pad_update_resume(TCB *t, uint64_t at) {
     s_pad_host_ns = at;
     vm_run(t);
     liveness_finish_waiter(t);
+}
+
+/* A logic update the way a title runs one: the boundary, then the thread's display wait through
+ * the production dispatch (sceDisplayWaitVblankStart), which blocks it in the scheduler. */
+static int s_pad_wait_returned;
+static void pad_update_then_wait_body(void *arg) {
+    (void)arg;
+    sr_enhancement_update_begin();
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    (void)sr_syscall(&cpu, NID_CNW_WAIT_VBLANK_START);
+    s_pad_wait_returned = 1;
+    selftest_park_on_scheduler();
+}
+/* Another thread's display wait, with no boundary of its own. */
+static void pad_other_wait_body(void *arg) {
+    (void)arg;
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    (void)sr_syscall(&cpu, NID_CNW_WAIT_VBLANK_START);
+    selftest_park_on_scheduler();
 }
 
 /* An update the gates refuse to hold: it passes its boundary at once, and then its thread's
@@ -49090,6 +49116,141 @@ static void test_pad_late_through_the_boundary(void) {
         pad_update_resume(u, t + 12u * PAD_MS);
         expect(ace_pad_plan()->refreshed == 0u && pad_read_newest() == 0u,
                "pad: a pause that opened during the hold blocks the refresh");
+    }
+    pad_late_teardown();
+
+    /* Round 5 S1: a pause in the hold, or a change of speed before the update's wait, moves the
+     * VBLANK schedule under the update. Its wait comes long after the deadline it had, which is
+     * no miss: the update is dropped (interrupted), and the plan's costs, back-off and margin stay
+     * as they were. Fails if the wait is judged against the old deadline (late_held, a back-off of
+     * ACE_PAD_BACKOFF_UPDATES and a larger margin) or its time is stored as a cost. */
+    for (int speed = 0; speed < 2; speed++) {
+        pad_late_fixture();
+        const uint64_t t = s_pad_vblank_ns;
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: held before the pause or the speed change");
+        const AcePadPlan *p = ace_pad_plan();
+        uint64_t costs[ACE_PAD_COSTS];
+        memcpy(costs, p->cost, sizeof costs);
+        const uint32_t ncost = p->ncost, next = p->next;
+        const uint64_t margin = p->extra_margin_ns, measured = p->measured;
+        if (speed) s_ff_speed = SCHED_FAST_FORWARD_SPEED;   /* fast forward after the boundary */
+        else s_pause_count++;                               /* a pause opened and closed in the hold */
+        s_pad_host_ns = t + 12u * PAD_MS;
+        vm_run(u);                                          /* the hold ends */
+        s_cur = (int)(u - s_tcb);
+        s_pad_host_ns = t + 3000u * PAD_MS;                 /* the update's wait, 3 s on */
+        sr_enhancement_update_waits();
+        liveness_finish_waiter(u);
+        s_ff_speed = 1u;
+        expect(!p->open && p->interrupted == 1u && p->measured == measured && p->late_held == 0u &&
+                   p->late_unheld == 0u && p->backoff == 0u && p->extra_margin_ns == margin &&
+                   p->ncost == ncost && p->next == next && memcmp(costs, p->cost, sizeof costs) == 0,
+               speed ? "pad: an update whose wait follows a change of speed is dropped, not judged late"
+                     : "pad: an update whose wait follows a pause is dropped, not judged late");
+        pad_late_teardown();
+    }
+
+    /* Round 5 S2: a tap the refresh consumed into a sample no guest call reads. Without the part
+     * the pulse would still be pending at the next VBLANK, whose sample would carry it, so a
+     * reader of one buffer sees CROSS. With it, the next sample must carry it too. */
+    pad_late_fixture();
+    {
+        const uint64_t t = s_pad_vblank_ns;
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: held before the tap");
+        s_test_gui_buttons = 0u;
+        s_test_gui_pulse = NK_PSP_BTN_CROSS_BIT;            /* down and up during the hold */
+        s_pad_host_ns = t + 12u * PAD_MS;
+        vm_run(u);                                          /* the hold ends into the refresh */
+        s_cur = (int)(u - s_tcb);
+        s_pad_host_ns += 2u * PAD_MS;
+        sr_enhancement_update_waits();
+        liveness_finish_waiter(u);
+        s_cur = -1;
+        expect(ace_pad_plan()->refreshed == 1u && s_test_gui_pulse == 0u,
+               "pad: the refresh consumed the tap into the unread sample");
+        pad_vblank(t + PAD_PERIOD_NS);                      /* no read in between */
+        const uint32_t n = ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 1u);
+        expect(n == 1u && MEM_R32(CTRL_OK_BUF + 4u) == NK_PSP_BTN_CROSS_BIT,
+               "pad: a tap consumed into an unread sample reaches a reader of one buffer in the next one");
+        /* Once delivered, it is not delivered again. */
+        pad_vblank(t + 2u * PAD_PERIOD_NS);
+        expect(ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 1u) == 1u &&
+                   MEM_R32(CTRL_OK_BUF + 4u) == 0u,
+               "pad: the carried tap is in one sample after the refreshed one, not more");
+    }
+    pad_late_teardown();
+
+    /* Round 5 B2: the refreshed sample is what a VBLANK latch of the same host input holds. In
+     * analog mode with stick=<counts> (contract 11.3.11) the latch remaps the window's stick, so
+     * the refresh must too; without the key both keep the window's bytes. Fails if the refresh
+     * writes the raw host stick. */
+    for (int remap = 0; remap < 2; remap++) {
+        extern int s_ctrl_test_stick;
+        const int test_stick = s_ctrl_test_stick;
+        s_ctrl_test_stick = 0;                              /* the window's stick */
+        pad_fixture_line(remap ? PAD_LATE_LINE ";stick=40" : PAD_LATE_LINE);
+        expect(ace_effective()->pad == 1 && ace_effective()->stick == (remap ? 40 : 0),
+               "pad: pad=late, with or without stick=40");
+        expect(ctrlc_call(0x1f4011e6u /* sceCtrlSetSamplingMode */, 1u, 0u) == 0u, "pad: analog mode");
+        s_test_gui_stick_dead_zone = 10;
+        s_test_gui_lx = 128u;
+        s_test_gui_ly = 128u;
+        const uint64_t t = s_pad_vblank_ns + PAD_PERIOD_NS;
+        pad_vblank(t);                                      /* an analog sample at rest */
+        s_pad_host_ns = t + PAD_MS;
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: the analog update is held");
+        s_test_gui_lx = (uint8_t)(128u + 20u);              /* a slight push during the hold */
+        s_test_gui_ly = (uint8_t)(128u - 15u);
+        uint8_t want_x = s_test_gui_lx, want_y = s_test_gui_ly;
+        if (remap) ace_stick_sample(&want_x, &want_y, s_test_gui_stick_dead_zone);
+        expect(!remap || want_x != s_test_gui_lx, "pad: stick=40 moves this push");
+        pad_update_resume(u, t + 12u * PAD_MS);
+        const uint32_t n = ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u);
+        const uint32_t at = CTRL_OK_BUF + (n - 1u) * 16u;
+        expect(ace_pad_plan()->refreshed == 1u && n >= 1u && n <= 64u && MEM_R8(at + 8u) == want_x &&
+                   MEM_R8(at + 9u) == want_y,
+               remap ? "pad: the refreshed analog sample holds the stick=40 remap, as the latch's would"
+                     : "pad: without stick the refreshed analog sample holds the window's bytes");
+        /* The next VBLANK latches the same host input: the same bytes. */
+        pad_vblank(t + PAD_PERIOD_NS);
+        const uint32_t m = ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u);
+        expect(m == 1u && MEM_R8(CTRL_OK_BUF + 8u) == want_x && MEM_R8(CTRL_OK_BUF + 9u) == want_y,
+               "pad: the VBLANK latch of that input holds the same stick bytes");
+        s_test_gui_stick_dead_zone = 0;
+        s_test_gui_lx = 128u;
+        s_test_gui_ly = 128u;
+        s_ctrl_test_stick = test_stick;
+        pad_late_teardown();
+    }
+
+    /* Round 5 S3: the update's own display wait, through the production dispatch and the
+     * scheduler's sched_vblank_block, closes and measures it before the thread blocks; another
+     * thread's display wait leaves the plan as it was. Fails if sched_vblank_block stops calling
+     * sr_enhancement_update_waits. */
+    pad_late_fixture();
+    {
+        const uint64_t t = s_pad_vblank_ns;
+        const AcePadPlan *p = ace_pad_plan();
+        const uint64_t measured = p->measured;
+        s_pad_wait_returned = 0;
+        TCB *u = liveness_start_waiter(pad_update_then_wait_body, 0x2d11u, 30);
+        s_cur = -1;
+        expect(u && u->state == TH_WAIT_DELAY && p->held_updates == 1u, "pad: the waiting update is held");
+        s_pad_host_ns = t + 12u * PAD_MS;
+        vm_run(u);                                          /* the hold ends; the thread waits */
+        s_cur = -1;
+        expect(u->state == TH_WAIT_OBJ && u->wait_obj == VBLANK_WAIT_OBJ && !s_pad_wait_returned &&
+                   !p->open && p->measured == measured + 1u && p->late_held == 0u,
+               "pad: the update's display wait, through the scheduler, measures it before it blocks");
+        TCB *o = liveness_start_waiter(pad_other_wait_body, 0x2d12u, 30);
+        s_cur = -1;
+        expect(o && o->state == TH_WAIT_OBJ && o->wait_obj == VBLANK_WAIT_OBJ && p->measured == measured + 1u,
+               "pad: another thread's display wait leaves the plan as it was");
+        liveness_finish_waiter(o);
+        liveness_finish_waiter(u);
     }
     pad_late_teardown();
 }

@@ -2579,6 +2579,8 @@ int sched_clock_deterministic(void);
 #define SCHED_FAST_FORWARD_SPEED 3u
 /* 1 while guest time runs fast. */
 int sched_fast_forward_on(void);
+/* The speed guest time runs at: 1, or the fast-forward speed. */
+uint32_t sched_fast_forward_speed(void);
 /* How many times fast forward has started in this run (0 before the first). */
 uint32_t sched_fast_forward_epoch(void);
 /* f_00065c60 field-writer intercept: the container walker reads count from

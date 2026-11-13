@@ -631,16 +631,22 @@ void ace_smooth_aux_report(const AceSmoothAuxStats *s);
  * would have computed with that input, and the VBLANK schedule is unchanged: the hold only moves
  * the update's start later inside its own period. A hold whose update then overruns its
  * deadline lets the next VBLANK's sample in first (the next read returns one sample more) and
- * costs that update's frame (the contract's Timing item). The refresh keeps every button the
- * VBLANK's sample carried from a button pulse, so a press that sample delivered is never lost, and any guest read, peek or latch call
- * that was handed the sample (hle_input.c) leaves it as it was.
+ * costs that update's frame (the contract's Timing item). The refreshed sample is built as a
+ * VBLANK latch of the same host input would be (hle_route.c, ctrl_host_sample: buttons, stick
+ * and stick=<counts> remap). It keeps every press the sample carried (a pulse, a button down in
+ * it and up in the sample before, an unread earlier sample's press still down), so a press that
+ * sample delivered is never lost; a pulse the refresh consumed into a sample no guest call reads
+ * goes into the next sample too. Any guest read, peek or latch call that was handed the sample
+ * (hle_input.c) leaves it as it was.
  *
  * The plan decides how long to hold. An update's work is the time from the end of its hold to
  * its thread's first VBLANK wait. The hold leaves room for the longest work of the last
  * ACE_PAD_COSTS updates, a quarter of it again and ACE_PAD_MARGIN_NS, and holds only once
  * ACE_PAD_WARM updates in a row were measured. An update whose work ends after the deadline it
  * was held for is late: holding stops for ACE_PAD_BACKOFF_UPDATES updates and the margin grows
- * by ACE_PAD_MARGIN_STEP_NS, up to ACE_PAD_MARGIN_MAX_NS. A boundary reached again before the
+ * by ACE_PAD_MARGIN_STEP_NS, the added part up to ACE_PAD_MARGIN_MAX_NS. An update whose
+ * boundary and wait have a pause or a change of speed between them is dropped (interrupted):
+ * no cost, no verdict. A boundary reached again before the
  * previous update waited for a VBLANK (a load, a title that waits some other way) leaves that
  * update unmeasured and starts the warm count again, so a title whose updates do not end in a
  * VBLANK wait is never held. Callers pass the host clock in nanoseconds and one VBLANK period on
@@ -674,6 +680,7 @@ typedef struct {
     uint64_t late_unheld;            /* the same for updates that were not held */
     uint64_t refreshed;              /* pad samples refreshed at the end of a hold */
     uint64_t far_deadlines;          /* boundaries whose deadline was more than a period ahead */
+    uint64_t interrupted;            /* updates dropped: a pause or speed change before the wait */
 } AcePadPlan;
 
 void ace_pad_plan_reset(AcePadPlan *p);
@@ -687,6 +694,9 @@ uint64_t ace_pad_plan_begin(AcePadPlan *p, uint64_t now_ns, uint64_t deadline_ns
 void ace_pad_plan_release(AcePadPlan *p, uint64_t now_ns);
 /* The update's thread waits for a VBLANK: its work is done. Returns 1 for a miss. */
 int ace_pad_plan_wait(AcePadPlan *p, uint64_t now_ns);
+/* A pause or a change of speed came between the update's boundary and its wait: the update is
+ * closed with no cost and no verdict, and the plan's costs, back-off and margin stay as they were. */
+void ace_pad_plan_interrupt(AcePadPlan *p);
 /* The run's plan (pad=late asked for: the runtime's boundary hook drives it). */
 AcePadPlan *ace_pad_plan(void);
 

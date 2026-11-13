@@ -1026,11 +1026,13 @@ static void cell_switch(void) {
     ace_pad_plan()->held_updates = 4;
     ace_pad_plan()->hold_ns_sum = 4u * 8000000u;
     ace_pad_plan()->far_deadlines = 2;
+    ace_pad_plan()->interrupted = 3;
     ace_note_input_latency(12000000u);
     ace_note_frame_without_read();
     ace_note_frame_without_read();
     CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"pad\": {\"late\": true, \"updates\": 5") &&
-          strstr(json, "\"held\": 4, \"hold_mean_ms\": 8.00") && strstr(json, "\"far_deadline\": 2}") &&
+          strstr(json, "\"held\": 4, \"hold_mean_ms\": 8.00") &&
+          strstr(json, "\"far_deadline\": 2, \"interrupted\": 3}") &&
           strstr(json, "\"input_latency_ms\": {\"frames\": 1, \"frames_without_read\": 2, \"mean\": 12.00, "
                        "\"p50\": 12.5"),
           "the report carries the pad plan and the latency, frames with no read counted apart:\n%s", json);
@@ -2084,12 +2086,13 @@ static void cell_report_worst(void) {
     /* Late pad sampling's plan and latency measure (contract 11.3.9) at their widest. */
     AcePadPlan *pad = ace_pad_plan();
     pad->updates = pad->measured = pad->unmeasured = pad->late_held = pad->late_unheld = pad->refreshed =
-        pad->far_deadlines = pad->hold_ns_sum = pad->hold_ns_max = UINT64_MAX;
+        pad->far_deadlines = pad->interrupted = pad->hold_ns_sum = pad->hold_ns_max = UINT64_MAX;
     pad->held_updates = 1u;
     ace_note_input_latency(UINT64_MAX);
     ace_note_frame_without_read();
     size_t len = ace_report_json(json, sizeof(json));
-    CHECK(len > 0 && strstr(json, "\"far_deadline\": 18446744073709551615") && strstr(json, "\"input_latency_ms\""),
+    CHECK(len > 0 && strstr(json, "\"far_deadline\": 18446744073709551615, \"interrupted\": 18446744073709551615") &&
+              strstr(json, "\"input_latency_ms\""),
           "the worst-case report carries late pad sampling's objects:\n%s", json);
     CHECK(len > 0 && strstr(json, "\"cull_untracked\"") && strstr(json, "\"af_device_max\"") &&
               strstr(json, "\"af_sampler_failures\"") && strstr(json, "\"presents\"") &&
@@ -2578,6 +2581,28 @@ static void cell_pad_plan(void) {
     CHECK(plan_update(&p, t, t + PERIOD, MS(1), 1, &late) == 0, "after a far deadline the plan warms up again");
     CHECK(ace_pad_plan_begin(&p, t + 4u * PERIOD, t + 5u * PERIOD, 0u, 1) == 0 && p.far_deadlines == 3,
           "no period known: no hold");
+
+    /* An interrupted update (a pause or a speed change before its wait) closes with no cost and
+       no verdict: costs, back-off and margin stay, and a later wait finds nothing open. */
+    {
+        AcePadPlan q;
+        ace_pad_plan_reset(&q);
+        uint64_t u = 0;
+        int qlate = 0;
+        for (unsigned i = 0; i < ACE_PAD_WARM; i++, u += PERIOD)
+            (void)plan_update(&q, u, u + PERIOD, MS(2), 1, &qlate);
+        const AcePadPlan before = q;
+        CHECK(ace_pad_plan_begin(&q, u, u + PERIOD, PERIOD, 1) > 0 && q.open, "a warm update is held");
+        ace_pad_plan_interrupt(&q);
+        CHECK(!q.open && q.interrupted == 1u && q.measured == before.measured && q.ncost == before.ncost &&
+                  q.next == before.next && memcmp(q.cost, before.cost, sizeof(q.cost)) == 0 && !q.backoff &&
+                  q.extra_margin_ns == before.extra_margin_ns && !q.late_held,
+              "an interrupted update leaves the plan's costs, back-off and margin");
+        CHECK(ace_pad_plan_wait(&q, u + 600u * PERIOD) == 0 && q.late_held == 0u && q.measured == before.measured,
+              "a wait after an interrupted update finds nothing open");
+        ace_pad_plan_interrupt(&q);
+        CHECK(q.interrupted == 1u, "with nothing open, an interrupt counts nothing");
+    }
 
     /* The latency histogram: half-millisecond bins, percentiles at a bin's upper edge. */
     AceLatency l;

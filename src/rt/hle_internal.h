@@ -1575,6 +1575,10 @@ uint64_t ctrl_last_read_poll_ns(void);
 uint64_t ctrl_read_seq(void);
 int ctrl_refresh_allowed(void);
 int ctrl_refresh_newest(uint32_t buttons, uint8_t lx, uint8_t ly, uint64_t poll_ns, uint32_t taps);
+/* The button pulses a refresh consumed into the newest sample while no guest call has been handed
+ * it: the next VBLANK sample carries them, as it would carry the unconsumed pulses without the
+ * part. 0 unless a refresh ran. */
+uint32_t ctrl_unread_refresh_taps(void);
 
 
 /* Success-result exceptions named in the end-of-run summary. sceKernelVolatileMemUnlock is absent:

@@ -201,6 +201,7 @@ static uint64_t s_ctrl_ring_poll_ns[CTRL_RING];
 static uint32_t s_ctrl_newest_taps;
 static int s_ctrl_newest_refreshable;
 static int s_ctrl_newest_delivered;
+static uint32_t s_ctrl_newest_refresh_taps;   /* pulses refreshes consumed into the newest sample */
 static uint64_t s_ctrl_read_seq;   /* guest calls handed the newest sample; never reset */
 static uint64_t s_ctrl_last_read_poll_ns;
 
@@ -236,6 +237,7 @@ int ctrl_refresh_newest(uint32_t buttons, uint8_t lx, uint8_t ly, uint64_t poll_
     const int newest = (s_ctrl_w - 1 + CTRL_RING) % CTRL_RING;
     buttons |= s_ctrl_newest_taps;
     s_ctrl_newest_taps |= taps | (buttons & ~s_ctrl_ring[newest].btn);
+    s_ctrl_newest_refresh_taps |= taps;
     s_ctrl_ring[newest].btn = buttons;
     s_ctrl_ring[newest].lx = lx;
     s_ctrl_ring[newest].ly = ly;
@@ -244,6 +246,14 @@ int ctrl_refresh_newest(uint32_t buttons, uint8_t lx, uint8_t ly, uint64_t poll_
     s_ctrl_live.lx = lx;
     s_ctrl_live.ly = ly;
     return 1;
+}
+
+/* A pulse is a press, or a press and release, that the next sample must show. A refresh that
+ * consumed one put it in the newest sample only; while no guest call has been handed that sample,
+ * a reader of one buffer would never see it, where without the part the pulse would still be
+ * pending at the next VBLANK. sr_ctrl_sample adds these to that next sample. */
+uint32_t ctrl_unread_refresh_taps(void) {
+    return s_ctrl_sample_count && !s_ctrl_newest_delivered ? s_ctrl_newest_refresh_taps : 0u;
 }
 
 void ctrl_push(const CtrlSample *smp, uint32_t ts) {
@@ -262,6 +272,7 @@ void ctrl_push(const CtrlSample *smp, uint32_t ts) {
      * are not VBLANK samples, even once the cycle is back to 0. */
     s_ctrl_newest_refreshable = !s_ctrl_sampling_cycle && !s_ctrl_live_keyboard;
     s_ctrl_newest_delivered = 0;
+    s_ctrl_newest_refresh_taps = 0u;
     s_ctrl_w = (s_ctrl_w + 1) % CTRL_RING;
     if (s_ctrl_w == s_ctrl_r) s_ctrl_r = (s_ctrl_r + 1) % CTRL_RING;  /* drop oldest on overflow */
     s_ctrl_sample_count++;
@@ -494,6 +505,7 @@ void sr_hle_test_ctrl_ring_reset(void) {
     s_latch_seen_count = 0u;
     memset(s_ctrl_ring_poll_ns, 0, sizeof(s_ctrl_ring_poll_ns));
     s_ctrl_newest_taps = 0u;
+    s_ctrl_newest_refresh_taps = 0u;
     s_ctrl_newest_refreshable = 0;
     s_ctrl_newest_delivered = 0;
     s_ctrl_last_read_poll_ns = 0u;

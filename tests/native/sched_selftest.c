@@ -199,6 +199,17 @@ int sr_vblank_subintr(uint32_t no, uint32_t *handler, uint32_t *arg) {
     return 1;
 }
 int sr_vblank_dispatch_registered(void) { return 0; }
+/* Late pad sampling's display-wait hook (hle_route.c owns it): counted, with the calling
+ * thread and whether it was already registered as a VBLANK waiter, so a test can see that every
+ * display wait reaches it before the caller blocks. */
+static unsigned g_test_update_waits;
+static uint32_t g_test_update_waits_uid;
+static int g_test_update_waits_blocked;
+void sr_enhancement_update_waits(void) {
+    g_test_update_waits++;
+    g_test_update_waits_uid = s_cur >= 0 ? s_tcb[s_cur].uid : 0u;
+    g_test_update_waits_blocked = s_cur >= 0 && s_tcb[s_cur].wait_obj == VBLANK_WAIT_OBJ;
+}
 static unsigned g_test_vblank_delivered;
 void sr_vblank_tick(void) { g_test_vblank_delivered++; }
 /* Guest VCOUNT is advanced only through this seam (hle.c owns the real counter), so
@@ -1743,10 +1754,12 @@ enum {
 };
 static unsigned g_pp_rounds, g_pp_cap;
 static int g_pp_display_returned;
+static uint32_t g_pp_display_uid;
 static void ping_pong_body(CpuState *s) {
     (void)s;
     uint32_t entry = s_tcb[s_cur].entry;
     if (entry == PP_DISPLAY_ENTRY) {
+        g_pp_display_uid = s_tcb[s_cur].uid;
         sched_wait_vblank_start();
         g_pp_display_returned = 1;
         return;
@@ -1775,12 +1788,23 @@ static void test_threads_that_never_idle_still_reach_the_next_vblank(void) {
         g_pp_rounds = 0;
         g_pp_cap = paced ? PP_PACED_ROUNDS : PP_TURBO_ROUNDS;
         g_pp_display_returned = 0;
+        g_pp_display_uid = 0u;
+        g_test_update_waits = 0u;
+        g_test_update_waits_uid = 0u;
+        g_test_update_waits_blocked = -1;
         g_test_body = ping_pong_body;
         sr_sched_stop_requested = ping_pong_stop;
         sched_run(0x09340400u, 0u, 0u);
         sr_sched_stop_requested = NULL;
         s_host_ns_fn = NULL;
         expect(g_pp_rounds > 1u, "ping-pong: the two threads ran each other");
+        /* The display wait tells late pad sampling's hook (sr_enhancement_update_waits) that the
+         * waiting thread's update is done: once, from that thread, before it is registered as a
+         * VBLANK waiter. The ping-pong threads never wait for the display and never reach it. */
+        expect(g_test_update_waits == 1u && g_pp_display_uid != 0u &&
+                   g_test_update_waits_uid == g_pp_display_uid && g_test_update_waits_blocked == 0,
+               "ping-pong: the display wait reached the update-waits hook once, from its thread, "
+               "before it blocked");
         expect(g_pp_display_returned,
                paced ? "ping-pong: paced, the display waiter got its VBLANK with a thread always "
                        "ready"

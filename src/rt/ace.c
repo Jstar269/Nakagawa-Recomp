@@ -1397,6 +1397,12 @@ int ace_pad_plan_wait(AcePadPlan *p, uint64_t now_ns) {
     return 1;
 }
 
+void ace_pad_plan_interrupt(AcePadPlan *p) {
+    if (!p || !p->open) return;
+    p->open = 0;
+    p->interrupted++;
+}
+
 AcePadPlan *ace_pad_plan(void) { return &s_pad_plan; }
 
 void ace_latency_reset(AceLatency *l) {
@@ -1479,14 +1485,14 @@ size_t ace_report_json(char *out, size_t cap) {
         const AcePadPlan *pp = &s_pad_plan;
         ACE_PUT("  \"pad\": {\"late\": %s, \"updates\": %llu, \"measured\": %llu, \"unmeasured\": %llu, "
                 "\"held\": %llu, \"hold_mean_ms\": %.2f, \"hold_max_ms\": %.2f, \"late_held\": %llu, "
-                "\"late_unheld\": %llu, \"refreshed\": %llu, \"far_deadline\": %llu},\n",
+                "\"late_unheld\": %llu, \"refreshed\": %llu, \"far_deadline\": %llu, \"interrupted\": %llu},\n",
                 s_eff.pad ? "true" : "false", (unsigned long long)pp->updates,
                 (unsigned long long)pp->measured, (unsigned long long)pp->unmeasured,
                 (unsigned long long)pp->held_updates,
                 pp->held_updates ? (double)pp->hold_ns_sum / (double)pp->held_updates / 1e6 : 0.0,
                 (double)pp->hold_ns_max / 1e6, (unsigned long long)pp->late_held,
                 (unsigned long long)pp->late_unheld, (unsigned long long)pp->refreshed,
-                (unsigned long long)pp->far_deadlines);
+                (unsigned long long)pp->far_deadlines, (unsigned long long)pp->interrupted);
     }
     if (s_req.pad && (s_latency.count || s_latency.without_read))
         ACE_PUT("  \"input_latency_ms\": {\"frames\": %llu, \"frames_without_read\": %llu, \"mean\": %.2f, "
@@ -1634,13 +1640,15 @@ void ace_finish(void) {
                 (double)ace_latency_percentile_ns(&s_latency, 95) / 1e6, (double)s_latency.max_ns / 1e6,
                 (unsigned long long)s_latency.without_read);
     if (s_req.pad)
-        fprintf(stderr, "ACE_MODE: pad %s (%llu updates: %llu held, mean hold %.2f ms; %llu unmeasured; "
+        fprintf(stderr, "ACE_MODE: pad %s (%llu updates: %llu held, mean hold %.2f ms; %llu unmeasured, "
+                        "%llu interrupted; "
                         "late after a hold %llu, late without one %llu; %llu samples refreshed)\n",
                 s_eff.pad ? "late" : "off", (unsigned long long)s_pad_plan.updates,
                 (unsigned long long)s_pad_plan.held_updates,
                 s_pad_plan.held_updates ? (double)s_pad_plan.hold_ns_sum / (double)s_pad_plan.held_updates / 1e6
                                         : 0.0,
-                (unsigned long long)s_pad_plan.unmeasured, (unsigned long long)s_pad_plan.late_held,
+                (unsigned long long)s_pad_plan.unmeasured, (unsigned long long)s_pad_plan.interrupted,
+                (unsigned long long)s_pad_plan.late_held,
                 (unsigned long long)s_pad_plan.late_unheld, (unsigned long long)s_pad_plan.refreshed);
     if (s_req.smooth && s_have_aux_stats) {
         const AceSmoothAuxStats *a = &s_aux_stats;
