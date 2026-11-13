@@ -816,6 +816,11 @@ t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Managemen
 expect OK 1 2 4 0 da0703d7c2ddba1091082d7fe3f7a976aa82c32a
 end
 
+case rom: sizes of twenty and twenty-one digits
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t\n\t\t<rom name="x.iso" size="00000000000000000001" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/><rom name="x.iso" size="10000000000000000000" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/><rom name="x.iso" size="018446744073709551615" crc="0badf00d" sha1="cccccccccccccccccccccccccccccccccccccccc"/><rom name="x.iso" size="000000000000000000001" crc="0badf00d" sha1="dddddddddddddddddddddddddddddddddddddddd"/>\n\t</game>\n</datafile>\n
+expect OK 1 2 2 0 2c11026e1d87527765b82cd83629dd6390a14285
+end
+
 case rom: missing attributes
 t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t\n\t\t<rom sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" crc="0badf00d"/><rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
 expect OK 1 1 1 0 5c4332707278cc5f75a201d79b4e3aac10e4ba68
@@ -1026,7 +1031,7 @@ out
 h 504b030414000000080000002100646da8bc6b02000000000000080000006c6973742e646174
 deflate p10
 h 504b0102140014000000080000002100646da8bc6b020000000000000800000000000000000000000000000000006c6973742e646174504b0506000000000100010036000000910200000000
-expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: the file in it is empty.
 end
 
 case zip: compressed size short
@@ -1419,7 +1424,7 @@ out
 h 504b030414000000000000002100000000000000000000000000080000006c6973742e646174
 put p46
 h 504b01021400140000000000000021000000000000000000000000000800000000000000000000000000000000006c6973742e646174504b0506000000000100010036000000260000000000
-expect DISC_DAT_NOT_DATAFILE This file isn't a Redump datafile: it has no <datafile> element.
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: the file in it is empty.
 end
 
 case zip: empty file, deflated
@@ -1429,7 +1434,7 @@ out
 h 504b030414000000080000002100000000000200000000000000080000006c6973742e646174
 deflate p47
 h 504b01021400140000000800000021000000000002000000000000000800000000000000000000000000000000006c6973742e646174504b0506000000000100010036000000280000000000
-expect DISC_DAT_NOT_DATAFILE This file isn't a Redump datafile: it has no <datafile> element.
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: the file in it is empty.
 end
 
 case zip: stored, near 16 MiB
@@ -1531,6 +1536,258 @@ end
 case zip: empty, no file header
 h 504b0506000000000000000000000000000000000000
 expect DISC_DAT_NOT_DATAFILE The datafile holds a control character (byte 0x05) at offset 2.
+end
+
+case zip order: review 3, R1, 'A', 'B', code 286, declared 1
+h 504b03041400000008000060215a8b9ed9d304000000010000000a000000726564756d702e64617473741a03504b010214031400000008000060215a8b9ed9d304000000010000000a0000000000000000000000000000000000726564756d702e646174504b05060000000001000100380000002c0000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+end
+
+case zip order: review 3, R2, 'A', 'B', a copy with distance code 30, declared 1
+h 504b03041400000008000060215a8b9ed9d304000000010000000a000000726564756d702e6461747374023e504b010214031400000008000060215a8b9ed9d304000000010000000a0000000000000000000000000000000000726564756d702e646174504b05060000000001000100380000002c0000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+end
+
+case zip order: review 3, R3, 'A', 'B', a non-final end, then block type 3, declared 1
+h 504b03041400000008000060215a8b9ed9d304000000010000000a000000726564756d702e6461747274021c504b010214031400000008000060215a8b9ed9d304000000010000000a0000000000000000000000000000000000726564756d702e646174504b05060000000001000100380000002c0000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+end
+
+case zip order: review 3, R4 (control), 'A', 'B', a non-final end, then an empty final block, declared 1
+h 504b03041400000008000060215a8b9ed9d305000000010000000a000000726564756d702e6461747274020c00504b010214031400000008000060215a8b9ed9d305000000010000000a0000000000000000000000000000000000726564756d702e646174504b05060000000001000100380000002d0000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+end
+
+case zip order: review 3, R5, 'A', a copy of 3 ending past the size, then code 286, declared 3
+h 504b03041400000008000060215aa731a06604000000030000000a000000726564756d702e64617473048231504b010214031400000008000060215aa731a06604000000030000000a0000000000000000000000000000000000726564756d702e646174504b05060000000001000100380000002c0000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+end
+
+case zip order: review 3, R6 (control), a copy crossing the size, then code 286, declared 2
+h 504b03041400000008000060215abd1d60a904000000020000000a000000726564756d702e64617473048231504b010214031400000008000060215abd1d60a904000000020000000a0000000000000000000000000000000000726564756d702e646174504b05060000000001000100380000002c0000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+end
+
+case zip order: review 3, R7, a list, one more LF, then code 287, declared the list's size
+h 504b03041400000008000060215a15f7db5573000000700000000a000000726564756d702e646174b349492c494ccbcc49b5b3494fcc4db5b329cacf5528ceac4ab555325452482e4ab6553230303030303030505228ce4834b4554a4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c54d2b7b3d14f4fcc4db5b3d14f492c494ccbcc49b5e31a07504b010214031400000008000060215a15f7db5573000000700000000a0000000000000000000000000000000000726564756d702e646174504b05060000000001000100380000009b0000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+end
+
+case zip order: review 3, seeded mutant 18861
+h 504b03041400000008000060215a0000000020000000020000000a000000726564756d702e646174db1afa11faaa2a9c8f9dcaeba420cfe18a7378af5ce0bab75aec9bc34c5aa7b2504b010214031400000008000060215a0000000020000000020000000a0000000000000000000000000000000000726564756d702e646174504b0506000000000100010038000000480000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+end
+
+case zip order: review 3, seeded mutant 18955
+h 504b03041400000008000060215a0000000004000000010000000a000000726564756d702e646174fbed3ce6504b010214031400000008000060215a0000000004000000010000000a0000000000000000000000000000000000726564756d702e646174504b05060000000001000100380000002c0000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+end
+
+case zip order: review 3, seeded mutant 19124
+h 504b03041400000008000060215a0000000010000000020000000a000000726564756d702e646174520f0ea6e6ab758c7dc71cc8146161b0504b010214031400000008000060215a0000000010000000020000000a0000000000000000000000000000000000726564756d702e646174504b0506000000000100010038000000380000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+end
+
+case zip order: review 3, seeded mutant 19243
+h 504b03041400000008000060215a0000000010000000010000000a000000726564756d702e6461743a9f0e7a0619a9043705ae057aef240e504b010214031400000008000060215a0000000010000000010000000a0000000000000000000000000000000000726564756d702e646174504b0506000000000100010038000000380000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+end
+
+case zip order: review 3, seeded mutant 19683
+h 504b03041400000008000060215a0000000080000000010000000a000000726564756d702e64617492521d1b842dc2a0e9e1edc79e0b07e9da24c1098f18b8002b8aaa2edb423a5740cf930297b179539017b1aec7db0f2cdccfb2a493670edcd0c1ad55b5d14938735ca5239314675e35d9d512f00e21292acf914711fe5340c5503e0f0a2886628f77085d7ecd5ac1741d639560724d5f70f73e391420dd73cceb69f5a4b90f9c504b010214031400000008000060215a0000000080000000010000000a0000000000000000000000000000000000726564756d702e646174504b0506000000000100010038000000a80000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+end
+
+case zip order: a copy too far back, no room left
+reg p54
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+reg q54
+h 73041200
+out
+h 504b0304140000000800000021008b9ed9d30400000001000000080000006c6973742e646174
+put q54
+h 504b01021400140000000800000021008b9ed9d304000000010000000800000000000000000000000000000000006c6973742e646174504b05060000000001000100360000002a0000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+end
+
+case zip order: a copy too far back, room left
+reg p55
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+reg q55
+h 73041200
+out
+h 504b030414000000080000002100bd1d60a90400000002000000080000006c6973742e646174
+put q55
+h 504b0102140014000000080000002100bd1d60a904000000020000000800000000000000000000000000000000006c6973742e646174504b05060000000001000100360000002a0000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file does not inflate.
+end
+
+case zip order: cut inside the code past the size
+reg p56
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+reg q56
+h 7374
+out
+h 504b0304140000000800000021008b9ed9d30200000001000000080000006c6973742e646174
+put q56
+h 504b01021400140000000800000021008b9ed9d302000000010000000800000000000000000000000000000000006c6973742e646174504b0506000000000100010036000000280000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file does not inflate.
+end
+
+case zip order: cut where the byte past the size would be
+reg p57
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+reg q57
+h 7304
+out
+h 504b0304140000000800000021008b9ed9d30200000001000000080000006c6973742e646174
+put q57
+h 504b01021400140000000800000021008b9ed9d302000000010000000800000000000000000000000000000000006c6973742e646174504b0506000000000100010036000000280000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file does not inflate.
+end
+
+case zip order: a bad code, then the end, room left
+reg p58
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+reg q58
+h 731c03
+out
+h 504b030414000000080000002100bd1d60a90300000002000000080000006c6973742e646174
+put q58
+h 504b0102140014000000080000002100bd1d60a903000000020000000800000000000000000000000000000000006c6973742e646174504b0506000000000100010036000000290000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file does not inflate.
+end
+
+case zip order: a stored block past the size, cut
+reg p59
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+reg q59
+h 010300fcff4142
+out
+h 504b0304140000000800000021008b9ed9d30700000001000000080000006c6973742e646174
+put q59
+h 504b01021400140000000800000021008b9ed9d307000000010000000800000000000000000000000000000000006c6973742e646174504b05060000000001000100360000002d0000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file inflates past its declared size.
+end
+
+case zip order: a stored block cut at the size
+reg p60
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+reg q60
+h 010300fcff41
+out
+h 504b0304140000000800000021008b9ed9d30600000001000000080000006c6973742e646174
+put q60
+h 504b01021400140000000800000021008b9ed9d306000000010000000800000000000000000000000000000000006c6973742e646174504b05060000000001000100360000002c0000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file does not inflate.
+end
+
+case zip order: declared 0, a byte then a bad code
+reg p61
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+reg q61
+h 731c03
+out
+h 504b030414000000080000002100000000000300000000000000080000006c6973742e646174
+put q61
+h 504b01021400140000000800000021000000000003000000000000000800000000000000000000000000000000006c6973742e646174504b0506000000000100010036000000290000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: the file in it is empty.
+end
+
+case zip order: declared 0, stored, not at offset 0
+reg p62
+t
+out
+h 504b030414000000000000002100000000000000000000000000080000006c6973742e646174
+put p62
+h 504b01021400140000000000000021000000000000000000000000000800000000000000000000000000040000006c6973742e646174504b0506000000000100010036000000260000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: the file in it is empty.
+end
+
+case zip order: data past its end and a wrong CRC
+reg p63
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+reg q63
+h b3b1afc8cd51284b2d2acecccfb35532d43350b2b7e3b25174f1770e890c705548492c494ccbcc4955080875f2f1745650d2d5d7f7c94fcf2cacd0d77709715108f2f755f04dcc4b4c4fcd4dcd2b5170492c494ccbcc49d5d777f5535250ca282929b0d2d72f2f2fd7cbc94fcf2cacd04bcecfd577492c29d64f492c494ccbcc49d54b294951b2e3b249492c494ccbcc49b5e3e2b4c9484d4c492db2e3e2e4b4c94bcc4db50bcecfab54d05508c849ac0c2e492cc9cccf5308c82f2a494cca49b5d1cf4bcc4db5e3e2e4b4294b2d2acecccfb333323032d33534d43534523034d33530d23535b6d12f4b2d2acecccfb3e3e2e4b449492c49b533323032d33534d43534523034d33530d23535b6d14f492c49b5e3e2b4d1cf484d4c492db2e3e2b4494fcc4d55c84bcc4db5557257b2e3e2e4b4294e2dca4cccb10bf5090dd63534303031b4d12f4e2dca4cccb1e3e2e4b429cacf55c84bcc4db555aad0cb2cce575228ceac4ab555323430325152482e4ab65532484a4c49333048515228ce4834b4554a4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c54d2b7e3e2b4d14f4fcc4db5e3e2b4494fcc4d55c84bcc4db5557257b2e3e2e4b4294e2dca4cccb10bf5710dd63530303435d45108f5710dd63530303435b2d12f4e2dca4cccb1e3e2e4b429cacf55c84bcc4db555aad0cb2cce575228ceac4ab555323430325152482e4ab65532484a4c49333048515228ce4834b4554a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a52d2b7e3e2b4d14f4fcc4db5e3b2d14f492c494ccbcc49b5e3020000
+out
+h 504b030414000000080000002100656da8bc6c02000069020000080000006c6973742e646174
+put q63
+h 504b0102140014000000080000002100656da8bc6c020000690200000800000000000000000000000000000000006c6973742e646174504b0506000000000100010036000000920200000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file's compressed data goes on past its end.
+end
+
+case zip order: short and a wrong CRC
+reg p64
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+out
+h 504b030414000000080000002100656da8bc6b0200006e020000080000006c6973742e646174
+deflate p64
+h 504b0102140014000000080000002100656da8bc6b0200006e0200000800000000000000000000000000000000006c6973742e646174504b0506000000000100010036000000910200000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file's size or CRC-32 does not match its header.
+end
+
+case zip order: bzip2 named .txt
+reg p65
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+reg q65
+t BZh9garbage
+out
+h 504b0304140000000c0000002100646da8bc0b00000069020000080000006c6973742e747874
+put q65
+h 504b01021400140000000c0000002100646da8bc0b000000690200000800000000000000000000000000000000006c6973742e747874504b0506000000000100010036000000310000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: the file in it is compressed with a method other than deflate.
+end
+
+case zip order: encrypted, other flags and bzip2
+reg p66
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+reg q66
+t BZh9garbage
+out
+h 504b0304140051000c0000002100646da8bc0b00000069020000080000006c6973742e646174
+put q66
+h 504b01021400140051000c0000002100646da8bc0b000000690200000800000000000000000000000000000000006c6973742e646174504b0506000000000100010036000000310000000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: the file in it is encrypted.
+end
+
+case zip order: ZIP64 sizes and encrypted
+reg p67
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+out
+h 504b030414000100080000002100646da8bcffffffff69020000080000006c6973742e646174
+deflate p67
+h 504b0102140014000100080000002100646da8bcffffffff690200000800000000000000000000000000000000006c6973742e646174504b0506000000000100010036000000910200000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: it uses ZIP64.
+end
+
+case zip order: a .txt declared over 16 MiB
+reg p68
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+out
+h 504b030414000000080000002100646da8bc6b02000001000001080000006c6973742e747874
+deflate p68
+h 504b0102140014000000080000002100646da8bc6b020000010000010800000000000000000000000000000000006c6973742e747874504b0506000000000100010036000000910200000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: the file in it is not a .dat file.
+end
+
+case zip order: stored sizes differ and data past the directory
+reg p69
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+out
+h 504b030414000000000000002100646da8bc6e02000069020000080000006c6973742e646174
+put p69
+h 504b0102140014000000000000002100646da8bc6e020000690200000800000000000000000000000000000000006c6973742e646174504b05060000000001000100360000008f0200000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file's data does not end where its central directory starts.
+end
+
+case zip order: local name differs and bytes before the directory
+reg p70
+t <?xml version="1.0"?>\n<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">\n<datafile>\n\t<header>\n\t\t<name>Sony - PlayStation Portable</name>\n\t\t<version>2026-11-12 16-02-53</version>\n\t\t<date>2026-11-12 16-02-53</date>\n\t</header>\n\t<game name="G">\n\t\t<serial>ULUS-10041</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>\n\t</game>\n\t<game name="G">\n\t\t<serial>ULES-00151, ULES-00152</serial>\n\t\t<rom name="x.iso" size="1024" crc="0badf00d" sha1="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/>\n\t</game>\n</datafile>\n
+out
+h 504b030414000000080000002100646da8bc6b02000069020000090000006f746865722e646174
+deflate p70
+h 00504b0102140014000000080000002100646da8bc6b020000690200000800000000000000000000000000000000006c6973742e646174504b0506000000000100010036000000930200000000
+expect DISC_DAT_ZIP_INVALID The zip can't be read as a Redump datafile: its file's header disagrees with its central directory.
 end
 
 mutations 1731 4096

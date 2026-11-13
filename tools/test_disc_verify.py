@@ -1081,6 +1081,111 @@ def zip_bytes(payload: bytes, method: int) -> bytes:
     return body + central + _eocd(1, len(central), len(body))
 
 
+_DIST_EXTRA = [0, 0, 0, 0] + [n // 2 for n in range(2, 28)]
+
+
+def deflate_bits(*items: tuple) -> bytes:
+    """A deflate stream written item by item: ("block", final, type) a block header,
+    ("lit", symbol, ...) fixed literal/length codes (any of 0-287), ("dist", symbol, extra)
+    a fixed distance code (any of 0-31) and its extra bits, ("stored", data, length) a
+    stored block's aligned LEN, NLEN and data (``length`` need not be ``len(data)``)."""
+    out = bytearray()
+    acc = nbits = 0
+
+    def put(value: int, count: int) -> None:
+        nonlocal acc, nbits
+        acc |= value << nbits
+        nbits += count
+        while nbits >= 8:
+            out.append(acc & 0xFF)
+            acc >>= 8
+            nbits -= 8
+
+    for item in items:
+        if item[0] == "block":
+            put(item[1], 1)
+            put(item[2], 2)
+        elif item[0] == "lit":
+            for symbol in item[1:]:
+                put(*_FIXED_CODES[symbol])
+        elif item[0] == "dist":
+            put(int(f"{item[1]:05b}"[::-1], 2), 5)
+            put(item[2], _DIST_EXTRA[item[1]] if item[1] < 30 else 0)
+        else:
+            if nbits:
+                put(0, 8 - nbits)
+            length = item[2]
+            for byte in (length & 0xFF, length >> 8, ~length & 0xFF, (~length >> 8) & 0xFF, *item[1]):
+                put(byte, 8)
+    if nbits:
+        out.append(acc & 0xFF)
+    return bytes(out)
+
+
+# Review 3 of #2530 (record 2530-3da9f1a96084.md), B1: its seven reproductions (two of them
+# controls) and the five seeded mutants of its own differential run where a byte past the
+# declared size was followed by a bad code. Rule 2: that byte decides.
+REVIEW3_DEFLATE_ORDER = [
+    ("R1, 'A', 'B', code 286, declared 1",
+        "504b03041400000008000060215a8b9ed9d304000000010000000a000000726564756d702e6461747374"
+        "1a03504b010214031400000008000060215a8b9ed9d304000000010000000a0000000000000000000000"
+        "000000000000726564756d702e646174504b05060000000001000100380000002c0000000000"),
+    ("R2, 'A', 'B', a copy with distance code 30, declared 1",
+        "504b03041400000008000060215a8b9ed9d304000000010000000a000000726564756d702e6461747374"
+        "023e504b010214031400000008000060215a8b9ed9d304000000010000000a0000000000000000000000"
+        "000000000000726564756d702e646174504b05060000000001000100380000002c0000000000"),
+    ("R3, 'A', 'B', a non-final end, then block type 3, declared 1",
+        "504b03041400000008000060215a8b9ed9d304000000010000000a000000726564756d702e6461747274"
+        "021c504b010214031400000008000060215a8b9ed9d304000000010000000a0000000000000000000000"
+        "000000000000726564756d702e646174504b05060000000001000100380000002c0000000000"),
+    ("R4 (control), 'A', 'B', a non-final end, then an empty final block, declared 1",
+        "504b03041400000008000060215a8b9ed9d305000000010000000a000000726564756d702e6461747274"
+        "020c00504b010214031400000008000060215a8b9ed9d305000000010000000a00000000000000000000"
+        "00000000000000726564756d702e646174504b05060000000001000100380000002d0000000000"),
+    ("R5, 'A', a copy of 3 ending past the size, then code 286, declared 3",
+        "504b03041400000008000060215aa731a06604000000030000000a000000726564756d702e6461747304"
+        "8231504b010214031400000008000060215aa731a06604000000030000000a0000000000000000000000"
+        "000000000000726564756d702e646174504b05060000000001000100380000002c0000000000"),
+    ("R6 (control), a copy crossing the size, then code 286, declared 2",
+        "504b03041400000008000060215abd1d60a904000000020000000a000000726564756d702e6461747304"
+        "8231504b010214031400000008000060215abd1d60a904000000020000000a0000000000000000000000"
+        "000000000000726564756d702e646174504b05060000000001000100380000002c0000000000"),
+    ("R7, a list, one more LF, then code 287, declared the list's size",
+        "504b03041400000008000060215a15f7db5573000000700000000a000000726564756d702e646174b349"
+        "492c494ccbcc49b5b3494fcc4db5b329cacf5528ceac4ab555325452482e4ab655323030303030303050"
+        "5228ce4834b4554a4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c"
+        "4c4c4c4c4c54d2b7b3d14f4fcc4db5b3d14f492c494ccbcc49b5e31a07504b0102140314000000080000"
+        "60215a15f7db5573000000700000000a0000000000000000000000000000000000726564756d702e6461"
+        "74504b05060000000001000100380000009b0000000000"),
+    ("seeded mutant 18861",
+        "504b03041400000008000060215a0000000020000000020000000a000000726564756d702e646174db1a"
+        "fa11faaa2a9c8f9dcaeba420cfe18a7378af5ce0bab75aec9bc34c5aa7b2504b01021403140000000800"
+        "0060215a0000000020000000020000000a0000000000000000000000000000000000726564756d702e64"
+        "6174504b0506000000000100010038000000480000000000"),
+    ("seeded mutant 18955",
+        "504b03041400000008000060215a0000000004000000010000000a000000726564756d702e646174fbed"
+        "3ce6504b010214031400000008000060215a0000000004000000010000000a0000000000000000000000"
+        "000000000000726564756d702e646174504b05060000000001000100380000002c0000000000"),
+    ("seeded mutant 19124",
+        "504b03041400000008000060215a0000000010000000020000000a000000726564756d702e646174520f"
+        "0ea6e6ab758c7dc71cc8146161b0504b010214031400000008000060215a000000001000000002000000"
+        "0a0000000000000000000000000000000000726564756d702e646174504b050600000000010001003800"
+        "0000380000000000"),
+    ("seeded mutant 19243",
+        "504b03041400000008000060215a0000000010000000010000000a000000726564756d702e6461743a9f"
+        "0e7a0619a9043705ae057aef240e504b010214031400000008000060215a000000001000000001000000"
+        "0a0000000000000000000000000000000000726564756d702e646174504b050600000000010001003800"
+        "0000380000000000"),
+    ("seeded mutant 19683",
+        "504b03041400000008000060215a0000000080000000010000000a000000726564756d702e6461749252"
+        "1d1b842dc2a0e9e1edc79e0b07e9da24c1098f18b8002b8aaa2edb423a5740cf930297b179539017b1ae"
+        "c7db0f2cdccfb2a493670edcd0c1ad55b5d14938735ca5239314675e35d9d512f00e21292acf914711fe"
+        "5340c5503e0f0a2886628f77085d7ecd5ac1741d639560724d5f70f73e391420dd73cceb69f5a4b90f9c"
+        "504b010214031400000008000060215a0000000080000000010000000a00000000000000000000000000"
+        "00000000726564756d702e646174504b0506000000000100010038000000a80000000000"),
+]
+
+
 _zip_registers = iter(range(1_000_000))
 
 
@@ -1327,6 +1432,10 @@ def corpus_cases() -> list[tuple[str, list[Piece]]]:
         c_rom(SHA_A, size="18446744073709551615") + c_rom(SHA_B, size="18446744073709551616")
         + c_rom(SHA_C, size="+1") + c_rom("d" * 40, size=" 1")
         + c_rom("e" * 40, size="00000000000000000000001") + c_rom("f" * 40, size="0"))))
+    # Review 3 S1: twenty digits at most, whatever their value.
+    add("rom: sizes of twenty and twenty-one digits", c_dat(c_game(
+        c_rom(SHA_A, size="00000000000000000001") + c_rom(SHA_B, size="10000000000000000000")
+        + c_rom(SHA_C, size="018446744073709551615") + c_rom("d" * 40, size="000000000000000000001"))))
     add("rom: missing attributes", c_dat(c_game(f'<rom sha1="{SHA_A}" crc="0badf00d"/>'
                                                 + c_rom(SHA_B))))
     add("rom: references in a hash", c_dat(c_game(c_rom("&#97;" + "a" * 39) + c_rom(SHA_B))))
@@ -1462,6 +1571,46 @@ def corpus_cases() -> list[tuple[str, list[Piece]]]:
     add("zip: magic only", [("h", b"PK\x03\x04")])
     add("zip: disk number", zip_case(payload, disk=1))
     add("zip: empty, no file header", [("h", _eocd(0, 0, 0))])
+    # One input, two failures: rule 2's order decides (review 3 B1: a byte past the declared
+    # size, then a bad code, once had two names).
+    for name, hex_bytes in REVIEW3_DEFLATE_ORDER:
+        add(f"zip order: review 3, {name}", [("h", bytes.fromhex(hex_bytes))])
+    a, aa = zlib.crc32(b"A"), zlib.crc32(b"AA")
+    fixed = ("block", 1, 1)
+    far = (fixed, ("lit", 65, 257), ("dist", 4, 0), ("lit", 256))
+    add("zip order: a copy too far back, no room left", zip_case(
+        payload, packed=[("h", deflate_bits(*far))], usize=1, crc=a))
+    add("zip order: a copy too far back, room left", zip_case(
+        payload, packed=[("h", deflate_bits(*far))], usize=2, crc=aa))
+    add("zip order: cut inside the code past the size", zip_case(
+        payload, packed=[("h", deflate_bits(fixed, ("lit", 65, 66))[:2])], usize=1, crc=a))
+    add("zip order: cut where the byte past the size would be", zip_case(
+        payload, packed=[("h", deflate_bits(fixed, ("lit", 65)))], usize=1, crc=a))
+    add("zip order: a bad code, then the end, room left", zip_case(
+        payload, packed=[("h", deflate_bits(fixed, ("lit", 65, 286)))], usize=2, crc=aa))
+    add("zip order: a stored block past the size, cut", zip_case(
+        payload, packed=[("h", deflate_bits(("block", 1, 0), ("stored", b"AB", 3)))], usize=1, crc=a))
+    add("zip order: a stored block cut at the size", zip_case(
+        payload, packed=[("h", deflate_bits(("block", 1, 0), ("stored", b"A", 3)))], usize=1, crc=a))
+    add("zip order: declared 0, a byte then a bad code", zip_case(
+        payload, packed=[("h", deflate_bits(fixed, ("lit", 65, 286)))], usize=0, crc=0))
+    add("zip order: declared 0, stored, not at offset 0", zip_case(
+        [T(b"")], method=0, offset=4))
+    add("zip order: data past its end and a wrong CRC", zip_case(
+        payload, packed=[("h", packed + b"\0")], crc=zlib.crc32(good_bytes) ^ 1))
+    add("zip order: short and a wrong CRC", zip_case(
+        payload, usize=len(good_bytes) + 5, crc=zlib.crc32(good_bytes) ^ 1))
+    add("zip order: bzip2 named .txt", zip_case(
+        payload, method=12, packed=[T(b"BZh9garbage")], name=b"list.txt"))
+    add("zip order: encrypted, other flags and bzip2", zip_case(
+        payload, method=12, packed=[T(b"BZh9garbage")], flags=0x51))
+    add("zip order: ZIP64 sizes and encrypted", zip_case(payload, csize=0xFFFFFFFF, flags=0x1))
+    add("zip order: a .txt declared over 16 MiB", zip_case(
+        payload, name=b"list.txt", usize=16 * 1024 * 1024 + 1))
+    add("zip order: stored sizes differ and data past the directory", zip_case(
+        payload, method=0, csize=len(good_bytes) + 5, usize=len(good_bytes)))
+    add("zip order: local name differs and bytes before the directory", zip_case(
+        payload, lname=b"other.dat", after_data=b"\0"))
     return cases
 
 

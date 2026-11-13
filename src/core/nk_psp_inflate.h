@@ -73,7 +73,10 @@ int nk_psp_inflate_raw_into(const uint8_t *src, size_t srclen,
  * zlib module accepts (src/core/nk_disc_verify.c, whose list the command-line
  * tools also read): an incomplete Huffman code only when it is one code of one
  * bit, never for the code-length code; at most 30 distance codes; a cut stored
- * block copied as far as it goes before it is refused; and no allowance on
+ * block copied as far as it goes before it is refused; a copy with no room
+ * left for its first byte refused as an overflow before its distance is
+ * checked (in stream order, the first byte past dst_cap is the overflow, and a
+ * bad code or block header met before it is NK_INFLATE_ERR_FORMAT); and no allowance on
  * dynamic blocks (below), so the caller bounds its input instead. ``*consumed``
  * is required to tell whether bytes follow the final block.
  */

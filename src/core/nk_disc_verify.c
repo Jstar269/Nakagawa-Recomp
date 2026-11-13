@@ -1024,6 +1024,7 @@ static bool dat_text_from_zip(const uint8_t *zip, size_t size, char **out_text, 
                            "The datafile in the zip is larger than %u bytes.",
                            (unsigned)NK_DISC_DAT_MAX_BYTES);
     }
+    if (plain_size == 0u) return zip_fail(status, "the file in it is empty.");
     if (local_offset != 0u) return zip_fail(status, "its file does not start the zip.");
     if (central_offset < LOCAL) return zip_fail(status, disagrees);
     size_t local_name_length = read_le16(zip + 26u);

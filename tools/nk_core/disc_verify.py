@@ -54,7 +54,8 @@ header has the same values as ``NK_DISC_DAT_MAX_*``).
    extra field made of whole blocks with no ZIP64 block (0x0001); not encrypted (flag bits 0
    and 6); no flag bits but 1, 2 and 11 (so no data descriptor); stored (0) or deflated (8);
    a name with no NUL byte that ends in ``.dat`` (lower case); a declared size of at most
-   ``MAX_DAT_BYTES`` (``DISC_DAT_TOO_LARGE`` otherwise, before anything is inflated); its
+   ``MAX_DAT_BYTES`` (``DISC_DAT_TOO_LARGE`` otherwise, before anything is inflated) and not
+   0 (an empty file); its
    local header at offset 0, agreeing with the central entry on flags, method, CRC-32, both
    sizes and the name, its extra field whole blocks with no ZIP64 block; its data ending
    where the central directory starts. A stored entry's two sizes are equal. A deflated
@@ -63,7 +64,11 @@ header has the same values as ``NK_DISC_DAT_MAX_*``).
    code; at most 286 literal/length and 30 distance codes; no distance before the start)
    into at most its declared size: a stream that would write more is refused there (the
    declared size is never trusted, and never exceeded), as is one that does not inflate or
-   whose final block ends before its last byte. The bytes inflated must have the declared
+   whose final block ends before its last byte. The stream is decoded in order and the
+   first failure met decides: a malformed code, block header or distance, or the input
+   ending, met before the first byte past the declared size is "does not inflate"; that
+   byte is "inflates past its declared size" whatever follows it, and when a copy starts
+   with no room left, before its distance is checked. The bytes inflated must have the declared
    size and CRC-32. The ``.dat`` inside is then read as text, under rule 3 on.
 3. **Encoding.** One UTF-8 byte-order mark (``EF BB BF``) at the start is skipped. The rest
    must be UTF-8 (RFC 3629: no overlong form, no surrogate, nothing past U+10FFFF), else
@@ -671,20 +676,27 @@ def _extra_is_whole_without_zip64(extra: bytes) -> tuple[bool, bool]:
 
 
 def _inflate(packed: memoryview, size: int) -> bytes:
-    """A raw deflate stream inflated into at most ``size`` bytes (rule 2), in the order the C
-    reader's nk_psp_inflate_raw_zlib meets each failure: one that would write more is refused
-    where it would, before what follows it is read."""
+    """A raw deflate stream inflated into at most ``size`` (at least 1) bytes, under rule 2's
+    order, as the C reader's nk_psp_inflate_raw_zlib meets each failure: in stream order,
+    the first byte to write past ``size`` is the overflow, and a failure met before it is
+    the stream's."""
     inflater = zlib.decompressobj(-15)
     try:
-        plain = inflater.decompress(packed, size) if size else b""
-        if not inflater.eof:
-            more = inflater.decompress(inflater.unconsumed_tail if size else packed, 1)
-            if more:
-                raise _zip_refused("its file inflates past its declared size.")
-            if not inflater.eof:
-                raise _zip_refused("its file does not inflate.")
+        plain = inflater.decompress(packed, size)
     except zlib.error as exc:
         raise _zip_refused("its file does not inflate.") from exc
+    if not inflater.eof:
+        # zlib decodes on until it must write or read more, so it stopped either where the
+        # next byte goes past ``size`` (and resumes with that write, before any check of
+        # what follows, a copy's distance included) or for input there is not.
+        try:
+            more = inflater.decompress(inflater.unconsumed_tail, 1)
+        except zlib.error as exc:
+            raise _zip_refused("its file inflates past its declared size.") from exc
+        if more:
+            raise _zip_refused("its file inflates past its declared size.")
+        if not inflater.eof:
+            raise _zip_refused("its file does not inflate.")
     if inflater.unused_data:
         raise _zip_refused("its file's compressed data goes on past its end.")
     return plain
@@ -735,6 +747,8 @@ def _dat_from_zip(data: bytes) -> bytes:
         raise _zip_refused("the file in it is not a .dat file.")
     if plain_size > MAX_DAT_BYTES:
         raise _too_large(_ZIP_TOO_LARGE)
+    if plain_size == 0:
+        raise _zip_refused("the file in it is empty.")
     if local != 0:
         raise _zip_refused("its file does not start the zip.")
     local_name_length, local_extra_length = _u16(data, 26), _u16(data, 28)

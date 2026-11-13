@@ -568,6 +568,13 @@ static int nk_deflate(Bits *b, OutBuf *o, char *err, size_t err_len)
                 }
                 dist = (size_t)dist_base[dsym] + (size_t)extra;
 
+                /* zlib checks a copy's distance only when there is room for
+                   its first byte: with none, the write past the limit comes
+                   first. */
+                if (b->zlib_rules && o->len >= o->limit) {
+                    set_err(err, err_len, "inflate: output exceeds limit");
+                    return NK_INFLATE_ERR_OVERFLOW;
+                }
                 if (dist > o->len) {
                     set_err(err, err_len, "inflate: distance too far back");
                     return NK_INFLATE_ERR_FORMAT;
