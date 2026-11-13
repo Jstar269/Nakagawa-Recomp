@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **521** (declared in `recomp.h`: 444)
-- reach class: emitter-reached 94, production-runtime-only 386, selftest-only 0, address-only 8, none 33
-- provenance class of the home definition: declared-only 1, project_authored_attested 38, upstream_derived 482
+- helpers: **528** (declared in `recomp.h`: 451)
+- reach class: emitter-reached 95, production-runtime-only 392, selftest-only 0, address-only 8, none 33
+- provenance class of the home definition: declared-only 1, project_authored_attested 38, upstream_derived 489
 
 ## Helpers
 
@@ -98,6 +98,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `gui_headless_acceptance_ready` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
 | `gui_headless_acceptance_requested` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
 | `gui_init` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
+| `gui_input_poll_ns` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
 | `gui_interactive` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
 | `gui_on` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
 | `gui_pad_present` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
@@ -154,6 +155,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sched_fast_forward_on` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_guest_stack_overlaps` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_guest_thread_running` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_host_now_ns` | `rt/gui.c`, `rt/sched.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived; `rt/sched.c`: upstream_derived |
 | `sched_host_work_abandon` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_host_work_done` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_host_work_finish` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
@@ -170,6 +172,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sched_partition_alloc_high` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_partition_release_high` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_pause_active` | `rt/sched.c` | yes | none | `rt/sched.c`: upstream_derived |
+| `sched_pause_count` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_pause_pending` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_pause_request` | `rt/gui.c`, `rt/sched.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived; `rt/sched.c`: upstream_derived |
 | `sched_pause_source` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
@@ -231,6 +234,8 @@ does not make this file stale. `--details` prints them to stdout.
 | `sched_uid_is_launcher` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_uid_is_root` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_uid_is_worker` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_vblank_deadline_ns` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_vblank_period_ns` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_visit_threadman_ids` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_vtime_deadline_after` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_vtime_refresh` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
@@ -300,6 +305,8 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_enhancement_file_register` | `rt/hle_data.c` | yes | emitter-reached (direct) | `rt/hle_data.c`: upstream_derived |
 | `sr_enhancement_logic_slowed` | `rt/hle_route.c` | yes | address-only | `rt/hle_route.c`: upstream_derived |
 | `sr_enhancement_register_updates` | `rt/hle_route.c` | yes | emitter-reached (direct) | `rt/hle_route.c`: upstream_derived |
+| `sr_enhancement_update_begin` | `rt/hle_route.c` | yes | emitter-reached (direct) | `rt/hle_route.c`: upstream_derived |
+| `sr_enhancement_update_waits` | `rt/hle_route.c` | yes | production-runtime-only | `rt/hle_route.c`: upstream_derived |
 | `sr_enhancement_widen_clip_x` | `rt/ge.c` | yes | emitter-reached (direct) | `rt/ge.c`: upstream_derived |
 | `sr_exec_span_owns_fetch` | `rt/guest_interp.c` | yes | production-runtime-only | `rt/guest_interp.c`: project_authored_attested |
 | `sr_exec_span_register` | `rt/guest_interp.c` | yes | emitter-reached (direct) | `rt/guest_interp.c`: project_authored_attested |
