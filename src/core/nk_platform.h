@@ -209,6 +209,24 @@ bool nk_platform_set_old_user_data_layout(bool on);
  * POSIX: the Desktop folder in the home folder when it exists, else the home
  * folder itself. False when there is none. */
 bool nk_platform_get_desktop_dir(char *out_path, size_t max_len);
+/* The user's personal folders. */
+typedef enum {
+    NK_PERSONAL_DOCUMENTS = 0,
+    NK_PERSONAL_DOWNLOADS,
+    NK_PERSONAL_MUSIC,
+    NK_PERSONAL_PICTURES,
+    NK_PERSONAL_VIDEOS,
+    NK_PERSONAL_DESKTOP,
+    NK_PERSONAL_COUNT
+} NkPersonalDir;
+/* Where one of them is. Windows: its known folder (FOLDERID_Documents and so on),
+ * which follows a folder the user or a sync tool moved. POSIX: the folder the
+ * desktop's user-dirs.dirs names (XDG_DOCUMENTS_DIR and so on, in
+ * $XDG_CONFIG_HOME or ~/.config), so a localized name is found, else the folder of
+ * the English name in the home folder. False when it does not exist. Unlike
+ * nk_platform_get_desktop_dir, NK_PERSONAL_DESKTOP never falls back to the home
+ * folder. */
+bool nk_platform_get_personal_dir(NkPersonalDir which, char *out_path, size_t max_len);
 #if defined(_WIN32) || defined(_WIN64)
 /* Unit-testable Windows base selection: LOCALAPPDATA, Known Folder, APPDATA.
  * USERPROFILE is deliberately not a candidate. */
@@ -231,6 +249,20 @@ bool nk_platform_resolve_windows_data_base(
  * exist); POSIX uses realpath (which does), so callers should resolve paths
  * they have already confirmed. */
 bool nk_platform_absolute_path(const char *path, char *out_path, size_t max_len);
+
+/* The path the existing file or folder at `path` really has, every symlink,
+ * junction, mount alias (subst), short 8.3 name and "." or ".." resolved, so two
+ * names of one folder compare equal. POSIX: realpath. Win32: the handle's final
+ * path (GetFinalPathNameByHandleW), without its \\?\ prefix. False when the path
+ * does not exist or cannot be resolved. */
+bool nk_platform_real_path(const char *path, char *out_path, size_t max_len);
+
+/* Open the regular file at `path` for reading in binary mode, refusing anything
+ * else: a symlink, junction or other reparse point (a cloud placeholder among
+ * them) is not followed, and a folder, a device or a FIFO is not opened. Checked on
+ * the open handle, so the file cannot be swapped for a link between a check and the
+ * open. NULL on refusal or failure. */
+FILE *nk_platform_open_regular_file(const char *path);
 
 /* Whether `path` is longer than the file APIs this process uses accept, so a
  * create or open of it fails for its length alone. On Win32 that is MAX_PATH
@@ -414,6 +446,10 @@ NkHostKind nk_platform_host_kind(void);
 bool nk_platform_path_chars_equal(char a, char b);
 /* '\\' or '/' on Win32; '/' on POSIX. */
 bool nk_platform_is_path_separator(char c);
+/* Whether `path` is absolute as written. Win32: a drive letter, ':' and a separator, or two
+   separators (a UNC or \\?\ path); POSIX: a leading '/'. The text alone: nothing is resolved
+   or looked up. False for NULL. */
+bool nk_platform_path_is_absolute(const char *path);
 
 /* The raw environment values naming the user: the profile folder (USERPROFILE on Win32,
    HOME on POSIX) and the account name (USERNAME on Win32, USER on POSIX). NULL when unset.

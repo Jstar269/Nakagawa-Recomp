@@ -99,11 +99,12 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   uploads per frame, which can make a busy game drop frames. The scaler builds no lookup table, so it adds no fixed
   memory cost. The rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1010-texture-scaling-and-the-smart-2d-filter).
-- **Sharp game text (Ace Mode, development only).** It is reachable only through the `SR_GLYPHS` environment
-  variable (`on`), has no setting in the player, and is not an admitted Enhanced item, because it
-  changes the frames the game can read back
-  ([section 11.3.5](ENHANCEMENT_CONTRACT.md#1135-sharp-game-text-not-admitted)). At a render scale of 2 to 4, a
-  small sprite that maps one texel to one pixel over a page of anti-aliased text is redrawn from a version of just
+- **Sharp game text (Enhanced, not yet in the player).** It is the launch line's `glyphs=on` key and is not yet an
+  admitted Enhanced item, because it changes the frames the game can read back
+  ([section 11.3.5](ENHANCEMENT_CONTRACT.md#1135-sharp-game-text-glyphs-not-yet-admitted)). The player has no
+  setting for it and writes the launch line itself, so a player launch cannot turn it on; only a title's runtime
+  started directly, with `SR_ACE` set by hand to an Enhanced or Ace line that carries `;glyphs=on`, can. At a
+  render scale of 2 to 4, a small sprite that maps one texel to one pixel over a page of anti-aliased text is redrawn from a version of just
   that rectangle rebuilt at the render scale, checked against the game's own bytes. A page with a rebuilt rectangle
   costs the page's GPU memory times the render scale squared (a 256x256 page at 4x is 4 MB), taken from the
   same 512 MB budget as texture scaling (`SR_TEX_SCALE_BUDGET_MB`). At most 48 rectangles are checked or rebuilt per

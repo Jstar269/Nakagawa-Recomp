@@ -181,7 +181,7 @@ def default_data_root() -> Path:
     return _xdg_data_root()
 
 
-def _safe_relative_path(value: str) -> PurePosixPath:
+def _safe_relative_path(value: object) -> PurePosixPath:
     if not isinstance(value, str) or not value or "\\" in value:
         raise PrerequisiteFetchError("MANIFEST_INVALID: archive path is empty or malformed.")
     path = PurePosixPath(value)
@@ -912,7 +912,8 @@ def _ready_artifacts(manifest: dict) -> list[dict]:
 
 def _check_artifact_sources(item: dict, by_id: dict[str, dict]) -> set[str]:
     """Check one artifact's source references; return the source ids it names."""
-    source = by_id.get(item.get("source"))
+    source_id = item.get("source")
+    source = None if source_id is None else by_id.get(source_id)
     if source is None:
         raise PrerequisiteFetchError(f"SOURCE_UNPINNED: {item.get('id')} names no pinned source.")
     if source["version"] != item.get("version"):
@@ -1044,11 +1045,11 @@ def _read_archive_member(archive: Path | io.BytesIO, member: str, label: str) ->
                 return package.read(member)
         if isinstance(archive, io.BytesIO):
             archive.seek(0)
-            package = tarfile.open(fileobj=archive, mode="r:*")
+            tar = tarfile.open(fileobj=archive, mode="r:*")
         else:
-            package = tarfile.open(archive, mode="r:*")
-        with package:
-            stream = package.extractfile(member)
+            tar = tarfile.open(archive, mode="r:*")
+        with tar:
+            stream = tar.extractfile(member)
             if stream is None:
                 raise KeyError(member)
             returned: bytes = stream.read()
