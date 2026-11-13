@@ -406,6 +406,40 @@ static void cell_parse(void) {
               "mips=2 is a bad value");
         snprintf(spec, sizeof(spec), "%s;mips=on;mips=on", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate mips");
+    /* pad (contract 11.3.9): optional like cull; a missing key and pad=off are off, pad=late needs an
+     * Ace line, any other value refuses the line, and the canonical line writes the key only when it
+     * is on, after texpack and before cull. */
+    {
+        static const char base[] = "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.pad == 0, "a missing pad is off");
+        snprintf(spec, sizeof(spec), "%s;tier=ace;pad=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.pad == 0, "pad=off is off");
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "pad") == NULL, "pad=off writes no pad key (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;tier=ace;pad=late", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.pad == 1, "pad=late in an Ace line");
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 9, ";pad=late") == 0,
+              "an Ace line with pad=late formats with the key last in a line without cull (%s)", out);
+        c.pad = 0;
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "pad") == NULL, "off writes no pad key (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;pad=late", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "pad needs tier=ace") == 0 &&
+              c.on == 0 && c.pad == 0, "pad=late without tier=ace is refused (%s)", why);
+        static const char *const bad[] = {"on", "early", "LATE", "late ", "1", ""};
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            snprintf(spec, sizeof(spec), "%s;tier=ace;pad=%s", base, bad[i]);
+            CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && why[0] != '\0' && c.on == 0 && c.pad == 0,
+                  "pad=%s refuses the line (%s)", bad[i], why);
+        }
+        snprintf(spec, sizeof(spec), "%s;tier=ace;pad=late;pad=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate pad");
+        /* The project's one key order: texpack, then pad, then cull last, whatever order a line uses. */
+        snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;pad=late;texpack=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.cull && c.pad && c.texpack &&
+              ace_format(&c, out, sizeof(out)) &&
+              strcmp(out + strlen(out) - 28, ";texpack=on;pad=late;cull=on") == 0,
+              "texpack, pad and cull format in that order, cull last (%s)", out);
+    }
     }
     /* shadow (contract 11.3.13): optional like cull; shadow=off and a missing key are off, shadow=soft
        needs an Ace line, any other value is refused, and a line without it formats as before. */
@@ -439,12 +473,12 @@ static void cell_parse(void) {
         }
         snprintf(spec, sizeof(spec), "%s;tier=ace;shadow=soft;shadow=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate shadow");
-        /* The project's one key order: shadow after texpack, cull last, whatever order a line uses. */
-        snprintf(spec, sizeof(spec), "%s;cull=on;shadow=soft;tier=ace;texpack=on", base);
+        /* The project's one key order: texpack, pad, shadow, cull last, whatever order a line uses. */
+        snprintf(spec, sizeof(spec), "%s;cull=on;shadow=soft;pad=late;tier=ace;texpack=on", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.shadow == ACE_SHADOW_SOFT && c.texpack == 1 &&
-              c.cull == 1 && ace_format(&c, out, sizeof(out)) &&
-              strcmp(out + strlen(out) - 31, ";texpack=on;shadow=soft;cull=on") == 0,
-              "texpack, shadow and cull format in that order, cull last (%s)", out);
+              c.pad == 1 && c.cull == 1 && ace_format(&c, out, sizeof(out)) &&
+              strcmp(out + strlen(out) - 40, ";texpack=on;pad=late;shadow=soft;cull=on") == 0,
+              "texpack, pad, shadow and cull format in that order, cull last (%s)", out);
         {
             AceConfig back;
             CHECK(ace_parse(out, &back, why, sizeof(why)) == 1 && memcmp(&back, &c, sizeof(c)) == 0,
@@ -592,7 +626,7 @@ static void cell_parse(void) {
                               .smooth = ACE_SMOOTH_MATCH, .tier = ACE_TIER_ENHANCED,
                               .sas = ACE_SAS_SINC, .cull = 1, .stick = ACE_STICK_COUNTS_MAX,
                               .load = 1, .depth = 32, .ssaa = 4, .peak = 1, .glyphs = 1, .mips = 1,
-                              .texpack = 1, .shadow = ACE_SHADOW_SOFT };
+                              .texpack = 1, .pad = 1, .shadow = ACE_SHADOW_SOFT };
         char longest[512];
         const size_t longest_len = ace_longest_line(longest, sizeof(longest));
         char edge[ACE_SPEC_MAX + 1];
@@ -1024,6 +1058,90 @@ static void cell_switch(void) {
               strstr(json, "\"load_paced\": false") != NULL, "an unfired guard is reported:\n%s", json);
     }
 
+    /* pad=late (contract 11.3.9): stamped, reported with the plan's counts, and a run whose boundary
+     * never ran reports it unavailable instead of claiming it. */
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;"
+                        "tier=ace;pad=late", NULL) == 1 && ace_effective()->pad == 1 && ace_pad_requested(),
+          "pad=late turns pad on");
+    CHECK(strcmp(ace_spec_text(), "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;"
+                                  "sas=off;tess=off;twin=off;pad=late") == 0,
+          "the stamp's line carries pad=late: '%s'", ace_spec_text());
+    ace_pad_plan()->updates = 5;
+    ace_pad_plan()->held_updates = 4;
+    ace_pad_plan()->hold_ns_sum = 4u * 8000000u;
+    ace_pad_plan()->far_deadlines = 2;
+    ace_pad_plan()->interrupted = 3;
+    ace_note_input_latency(12000000u);
+    ace_note_frame_without_read();
+    ace_note_frame_without_read();
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"pad\": {\"late\": true, \"updates\": 5") &&
+          strstr(json, "\"held\": 4, \"hold_mean_ms\": 8.00") &&
+          strstr(json, "\"far_deadline\": 2, \"interrupted\": 3}") &&
+          strstr(json, "\"input_latency_ms\": {\"frames\": 1, \"frames_without_read\": 2, \"mean\": 12.00, "
+                       "\"p50\": 12.5"),
+          "the report carries the pad plan and the latency, frames with no read counted apart:\n%s", json);
+    /* Only frames with no read: counted, nothing measured. */
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;"
+                        "tier=ace;pad=late", NULL) == 1, "pad=late again");
+    ace_note_frame_without_read();
+    CHECK(ace_report_json(json, sizeof(json)) > 0 &&
+          strstr(json, "\"input_latency_ms\": {\"frames\": 0, \"frames_without_read\": 1, \"mean\": 0.00, "),
+          "a run whose frames all lacked a read reports no measure:\n%s", json);
+    /* With cull too: the words name pad before cull, and the report carries both. */
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=fill;smooth=off;sas=off;tess=off;twin=off;"
+                        "tier=ace;cull=on;pad=late", NULL) == 1 && ace_effective()->pad == 1 &&
+              ace_effective()->cull == 1,
+          "pad=late with cull=on");
+    {
+        char pad_words[256];
+        CHECK(ace_feature_words(pad_words, sizeof(pad_words)) > 0 && strstr(pad_words, "late pad sampling") &&
+                  strstr(pad_words, "wider culling") &&
+                  strstr(pad_words, "late pad sampling") < strstr(pad_words, "wider culling"),
+              "the words name pad before cull (%s)", pad_words);
+        CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"pad\": {") && strstr(json, "\"cull\": "),
+              "the report has pad and cull:\n%s", json);
+    }
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;"
+                        "tier=ace;pad=late", NULL) == 1 && ace_pad_plan()->updates == 0, "a new run starts a new plan");
+    ace_finish();
+    CHECK(ace_effective()->pad == 0 && ace_requested()->pad == 1 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"pad\": \"did not run: no update boundary") != NULL,
+          "a pad run with no boundary is reported unavailable:\n%s", json);
+    /* Off means off: an Ace line without the key and one with pad=off are the same run, stamped with
+       the same line, and the latency hooks the display and input paths call change nothing in its
+       report, which names neither the part nor the measure. An authentic run has no report. */
+    {
+        static char before[ACE_REPORT_MAX];
+        static const char *const off_lines[] = {
+            "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace",
+            "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;pad=off",
+            "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off",
+        };
+        for (size_t i = 0; i < sizeof(off_lines) / sizeof(off_lines[0]); i++) {
+            CHECK(ace_init_spec(off_lines[i], NULL) == 1 && ace_effective()->pad == 0 && ace_requested()->pad == 0 &&
+                      !ace_pad_requested() && strstr(ace_spec_text(), "pad") == NULL,
+                  "'%s' has no late pad sampling (%s)", off_lines[i], ace_spec_text());
+            const size_t n0 = ace_report_json(before, sizeof(before));
+            ace_note_input_latency(12000000u);
+            ace_note_frame_without_read();
+            const size_t n1 = ace_report_json(json, sizeof(json));
+            CHECK(n0 > 0 && n1 == n0 && memcmp(before, json, n0) == 0 && strstr(json, "\"pad\"") == NULL &&
+                      strstr(json, "input_latency") == NULL,
+                  "'%s': the latency hooks leave the report's bytes as they were:\n%s", off_lines[i], json);
+            ace_finish();
+            CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"pad\"") == NULL,
+                  "'%s': the exit names no pad part:\n%s", off_lines[i], json);
+        }
+        char missing[ACE_SPEC_MAX];
+        CHECK(ace_init_spec(off_lines[0], NULL) == 1, "the line without pad again");
+        snprintf(missing, sizeof(missing), "%s", ace_spec_text());
+        CHECK(ace_init_spec(off_lines[1], NULL) == 1 && strcmp(ace_spec_text(), missing) == 0,
+              "pad=off is stamped as the line without the key ('%s', '%s')", ace_spec_text(), missing);
+        CHECK(ace_init_spec("off", NULL) == 0 && !ace_pad_requested(), "an authentic run has no late pad sampling");
+    }
+    CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->pad == 0 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"pad\"") == NULL &&
+          strstr(json, "input_latency") == NULL, "an Enhanced run without either says nothing of them");
     /* shadow=soft (contract 11.3.13): named in the words and the report; a declaration is kept apart
        from the line and checked whole; with nothing declared, or nothing drawn, ace_finish reports it
        unavailable with the reason; a renderer that does not soften names its own. */
@@ -2051,7 +2169,7 @@ static void cell_report_worst(void) {
     memset(reason, 'r', sizeof(reason));
     reason[sizeof(reason) - 1] = '\0';
     CHECK(ace_init_spec("v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;smooth=x2;sas=sinc;"
-                        "tess=off;twin=off;mips=on;stick=126;load=fast;depth=32;ssaa=4;peak=limit;glyphs=on;cull=on",
+                        "tess=off;twin=off;mips=on;stick=126;load=fast;depth=32;ssaa=4;peak=limit;glyphs=on;pad=late;cull=on",
                         NULL), "the longest line was refused");
     ace_set_peak_stats(UINT64_MAX, UINT64_MAX, UINT64_MAX, 1e-9);
     ace_set_af_effective(8, NULL);
@@ -2070,7 +2188,17 @@ static void cell_report_worst(void) {
     AceSmoothAuxStats st;
     memset(&st, 0xFF, sizeof(st));
     ace_smooth_aux_report(&st);
+    /* Late pad sampling's plan and latency measure (contract 11.3.9) at their widest. */
+    AcePadPlan *pad = ace_pad_plan();
+    pad->updates = pad->measured = pad->unmeasured = pad->late_held = pad->late_unheld = pad->refreshed =
+        pad->far_deadlines = pad->interrupted = pad->hold_ns_sum = pad->hold_ns_max = UINT64_MAX;
+    pad->held_updates = 1u;
+    ace_note_input_latency(UINT64_MAX);
+    ace_note_frame_without_read();
     size_t len = ace_report_json(json, sizeof(json));
+    CHECK(len > 0 && strstr(json, "\"far_deadline\": 18446744073709551615, \"interrupted\": 18446744073709551615") &&
+              strstr(json, "\"input_latency_ms\""),
+          "the worst-case report carries late pad sampling's objects:\n%s", json);
     CHECK(len > 0 && strstr(json, "\"cull_untracked\"") && strstr(json, "\"af_device_max\"") &&
               strstr(json, "\"af_sampler_failures\"") && strstr(json, "\"presents\"") &&
               strstr(json, "\"added_delay_ms\"") && strstr(json, "\"smooth_motion\"") &&
@@ -2442,6 +2570,158 @@ static void cell_pace(void) {
           "intervals fall in 1 ms bins, the last open-ended");
 }
 
+/* ---- late pad sampling: the hold plan (contract 11.3.9) ------------------------------------ */
+
+#define MS(x) ((uint64_t)((x) * 1000000.0))
+#define PERIOD MS(16.683333)
+
+/* One update of the plan: the boundary at `at` with the next deadline `deadline`, then `work` of
+ * work after whatever hold the plan asks for. Returns the hold, and sets *late. */
+static uint64_t plan_update(AcePadPlan *p, uint64_t at, uint64_t deadline, uint64_t work, int allow, int *late) {
+    const uint64_t hold = ace_pad_plan_begin(p, at, deadline, PERIOD, allow);
+    ace_pad_plan_release(p, at + hold);
+    const int miss = ace_pad_plan_wait(p, at + hold + work);
+    if (late) *late = (deadline && at + hold + work > deadline) || miss;
+    return hold;
+}
+
+static void cell_pad_plan(void) {
+    AcePadPlan p;
+    int late = 0;
+    uint64_t t = MS(1000);
+
+    /* No hold until ACE_PAD_WARM updates were measured; then the hold leaves the longest work, a
+       quarter of it again and the margin before the deadline. */
+    ace_pad_plan_reset(&p);
+    for (uint32_t i = 0; i < ACE_PAD_WARM; i++, t += PERIOD)
+        CHECK(plan_update(&p, t, t + PERIOD, MS(4), 1, &late) == 0 && !late, "no hold while warming (%u)", i);
+    uint64_t hold = plan_update(&p, t, t + PERIOD, MS(4), 1, &late);
+    CHECK(hold == PERIOD - MS(4) - MS(1) - ACE_PAD_MARGIN_NS && !late,
+          "a warm plan holds to the deadline minus 1.25x the work and the margin (%llu)", (unsigned long long)hold);
+    CHECK(p.held_updates == 1 && p.measured == ACE_PAD_WARM + 1u, "the plan counts its holds and measures");
+
+    /* Steady work never ends late: 600 updates of 2 to 6 ms of work, every one held. */
+    ace_pad_plan_reset(&p);
+    t = MS(1000);
+    uint64_t lates = 0;
+    for (uint32_t i = 0; i < 600; i++, t += PERIOD) {
+        const uint64_t work = MS(2) + (uint64_t)(i * 7919u % 4001u) * 1000u;
+        (void)plan_update(&p, t, t + PERIOD, work, 1, &late);
+        lates += (uint64_t)late;
+    }
+    CHECK(lates == 0 && p.late_held == 0 && p.held_updates == 600u - ACE_PAD_WARM,
+          "steady work: %llu late, %llu held", (unsigned long long)lates, (unsigned long long)p.held_updates);
+    CHECK(p.hold_ns_sum / p.held_updates > MS(5), "the mean hold is several ms (%llu)",
+          (unsigned long long)(p.hold_ns_sum / p.held_updates));
+
+    /* A spike past the reserve is late once; then the plan holds nothing for the backoff and
+       keeps a wider margin after it. */
+    {
+        hold = plan_update(&p, t, t + PERIOD, MS(15), 1, &late);
+        t += PERIOD;
+        CHECK(hold > 0 && late && p.late_held == 1, "a held update with a long spike is late");
+        uint32_t held_after = 0;
+        for (uint32_t i = 0; i < ACE_PAD_BACKOFF_UPDATES; i++, t += PERIOD)
+            held_after += plan_update(&p, t, t + PERIOD, MS(4), 1, &late) != 0;
+        CHECK(held_after == 0, "no hold during the backoff (%u)", held_after);
+        CHECK(p.extra_margin_ns == ACE_PAD_MARGIN_STEP_NS, "the margin grew by one step");
+        hold = plan_update(&p, t, t + PERIOD, MS(4), 1, &late);
+        t += PERIOD;
+        CHECK(hold == PERIOD - MS(4) - MS(1) - ACE_PAD_MARGIN_NS - ACE_PAD_MARGIN_STEP_NS,
+              "after the backoff the plan holds again with the wider margin (%llu)", (unsigned long long)hold);
+    }
+
+    /* Work too long for any hold, a plan that may not hold, and no paced deadline: never held,
+       still measured. */
+    ace_pad_plan_reset(&p);
+    t = MS(1000);
+    for (uint32_t i = 0; i < 100; i++, t += PERIOD)
+        CHECK(plan_update(&p, t, t + PERIOD, MS(12), 1, &late) == 0, "12 ms of work leaves no hold");
+    for (uint32_t i = 0; i < 100; i++, t += PERIOD)
+        CHECK(plan_update(&p, t, t + PERIOD, MS(1), 0, &late) == 0, "pad=off never holds");
+    for (uint32_t i = 0; i < 100; i++, t += PERIOD)
+        CHECK(plan_update(&p, t, 0, MS(1), 1, &late) == 0, "no deadline, no hold");
+    CHECK(p.held_updates == 0 && p.measured == 300 && p.updates == 300, "measured without a hold");
+
+    /* Updates that never wait for a VBLANK are unmeasured and restart the warm count. */
+    ace_pad_plan_reset(&p);
+    t = MS(1000);
+    for (uint32_t i = 0; i < 200; i++, t += PERIOD)
+        CHECK(ace_pad_plan_begin(&p, t, t + PERIOD, PERIOD, 1) == 0, "an update with no wait is never held");
+    CHECK(p.unmeasured == 199 && p.measured == 0, "unmeasured updates are counted (%llu)",
+          (unsigned long long)p.unmeasured);
+    ace_pad_plan_release(&p, t);
+    (void)ace_pad_plan_wait(&p, t + MS(2));
+    t += PERIOD;
+    CHECK(plan_update(&p, t, t + PERIOD, MS(2), 1, &late) == 0, "one measured update is not warm");
+
+    /* A boundary reached after its deadline (an overrun before it) is not held. */
+    ace_pad_plan_reset(&p);
+    t = MS(1000);
+    for (uint32_t i = 0; i < ACE_PAD_WARM; i++, t += PERIOD) (void)plan_update(&p, t, t + PERIOD, MS(3), 1, &late);
+    CHECK(plan_update(&p, t, t + MS(5), MS(3), 1, &late) == 0, "5 ms to the deadline: no hold");
+    CHECK(plan_update(&p, t + MS(6), t + MS(5), MS(3), 1, &late) == 0 && late && p.late_unheld >= 1,
+          "a boundary past its deadline is late without a hold");
+
+    /* Every hold is shorter than one period. A deadline more than a period ahead (a paced clock
+       running ahead of the host's) is not planned against: no hold, not judged late, and the plan
+       warms up again; so is any deadline when no period is known. */
+    ace_pad_plan_reset(&p);
+    t = MS(1000);
+    for (uint32_t i = 0; i < ACE_PAD_WARM; i++, t += PERIOD) (void)plan_update(&p, t, t + PERIOD, MS(1), 1, &late);
+    hold = plan_update(&p, t, t + PERIOD, MS(1), 1, &late);
+    t += PERIOD;
+    CHECK(hold > 0 && hold < PERIOD, "a deadline one period ahead: a hold shorter than the period (%llu)",
+          (unsigned long long)hold);
+    CHECK(plan_update(&p, t, t + PERIOD + 1u, MS(1), 1, &late) == 0 && p.far_deadlines == 1 && p.warm == 1 && !p.late_held &&
+              !p.late_unheld,
+          "a deadline 1 ns more than a period ahead: no hold, counted, the warm count restarted (%u)", p.warm);
+    t += PERIOD;
+    CHECK(ace_pad_plan_begin(&p, t, t + 600u * PERIOD, PERIOD, 1) == 0 && p.far_deadlines == 2 && p.warm == 0,
+          "a deadline ten seconds ahead: no hold");
+    ace_pad_plan_release(&p, t);
+    CHECK(ace_pad_plan_wait(&p, t + 2u * PERIOD) == 0 && p.late_unheld == 0,
+          "an update planned against no deadline is never late");
+    t += 3u * PERIOD;
+    CHECK(plan_update(&p, t, t + PERIOD, MS(1), 1, &late) == 0, "after a far deadline the plan warms up again");
+    CHECK(ace_pad_plan_begin(&p, t + 4u * PERIOD, t + 5u * PERIOD, 0u, 1) == 0 && p.far_deadlines == 3,
+          "no period known: no hold");
+
+    /* An interrupted update (a pause or a speed change before its wait) closes with no cost and
+       no verdict: costs, back-off and margin stay, and a later wait finds nothing open. */
+    {
+        AcePadPlan q;
+        ace_pad_plan_reset(&q);
+        uint64_t u = 0;
+        int qlate = 0;
+        for (unsigned i = 0; i < ACE_PAD_WARM; i++, u += PERIOD)
+            (void)plan_update(&q, u, u + PERIOD, MS(2), 1, &qlate);
+        const AcePadPlan before = q;
+        CHECK(ace_pad_plan_begin(&q, u, u + PERIOD, PERIOD, 1) > 0 && q.open, "a warm update is held");
+        ace_pad_plan_interrupt(&q);
+        CHECK(!q.open && q.interrupted == 1u && q.measured == before.measured && q.ncost == before.ncost &&
+                  q.next == before.next && memcmp(q.cost, before.cost, sizeof(q.cost)) == 0 && !q.backoff &&
+                  q.extra_margin_ns == before.extra_margin_ns && !q.late_held,
+              "an interrupted update leaves the plan's costs, back-off and margin");
+        CHECK(ace_pad_plan_wait(&q, u + 600u * PERIOD) == 0 && q.late_held == 0u && q.measured == before.measured,
+              "a wait after an interrupted update finds nothing open");
+        ace_pad_plan_interrupt(&q);
+        CHECK(q.interrupted == 1u, "with nothing open, an interrupt counts nothing");
+    }
+
+    /* The latency histogram: half-millisecond bins, percentiles at a bin's upper edge. */
+    AceLatency l;
+    ace_latency_reset(&l);
+    CHECK(ace_latency_percentile_ns(&l, 50) == 0, "no samples, no percentile");
+    for (uint32_t i = 0; i < 90; i++) ace_latency_note(&l, MS(10.2));
+    for (uint32_t i = 0; i < 10; i++) ace_latency_note(&l, MS(30.7));
+    ace_latency_note(&l, MS(500));
+    CHECK(l.count == 101 && l.max_ns == MS(500), "counted with the max");
+    CHECK(ace_latency_percentile_ns(&l, 50) == MS(10.5), "p50 (%llu)", (unsigned long long)ace_latency_percentile_ns(&l, 50));
+    CHECK(ace_latency_percentile_ns(&l, 95) == MS(31.0), "p95 (%llu)", (unsigned long long)ace_latency_percentile_ns(&l, 95));
+    CHECK(ace_latency_percentile_ns(&l, 100) == ACE_LAT_BINS * ACE_LAT_BIN_NS, "the last bin holds the rest");
+}
+
 int main(int argc, char **argv) {
     /* `--retired-env VALUE`: set SR_GLYPHS to VALUE (and SR_ACE off) and start Ace Mode the way a run does.
        ace_init_from_env must stop the process with exit 1 and its line; mk/selftests.mk checks both, so a
@@ -2465,6 +2745,7 @@ int main(int argc, char **argv) {
     cell_stick_host_dead_zone_at_or_above_g();
     cell_stick_round_host();
     cell_stick_run();
+    cell_pad_plan();
     cell_pace();
     cell_switch();
     cell_detector();
@@ -2482,6 +2763,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "ace-selftest: %d check(s) FAILED\n", s_fail);
         return 1;
     }
-    printf("ace-selftest: PASS (parse, stick, switch, detector, feed, readout, fast forward, report)\n");
+    printf("ace-selftest: PASS (parse, stick, pad plan, switch, detector, feed, readout, fast forward, report)\n");
     return 0;
 }

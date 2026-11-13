@@ -653,7 +653,7 @@ typedef enum {
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
    PlayerEnhancedPart), in that order. */
-#define PLAYER_UI_ENHANCED_ROWS 17
+#define PLAYER_UI_ENHANCED_ROWS 18
 typedef struct {
     const char *name;           /* "Texture filtering" */
     const char *value;          /* "16x", "Off", "Library (On)" on a title's page */
