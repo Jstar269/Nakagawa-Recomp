@@ -48887,7 +48887,11 @@ static void test_pad_late_through_the_boundary(void) {
             pad_fixture_line(off_lines[i]);
             char msg[192];
             const uint64_t t = s_pad_vblank_ns;
-            expect(!ace_effective()->pad && g_ace_on == (i < 2u), "pad: the off line has no late pad sampling");
+            expect(!ace_effective()->pad && g_ace_on == (i < 2u) && !ace_pad_requested(),
+                   "pad: the off line has no late pad sampling");
+            /* Off means off: the warm-up's boundaries and waits left the plan untouched. */
+            snprintf(msg, sizeof msg, "pad: the plan saw no update with '%s'", off_lines[i]);
+            expect(ace_pad_plan()->updates == 0u && ace_pad_plan()->measured == 0u, msg);
             TCB *u = pad_update_start();
             snprintf(msg, sizeof msg, "pad: no hold with '%s'", off_lines[i]);
             expect(u && s_pad_body_done && u->state != TH_WAIT_DELAY && ace_pad_plan()->held_updates == 0u &&
@@ -48904,7 +48908,8 @@ static void test_pad_late_through_the_boundary(void) {
             expect(n == 1u && MEM_R32(CTRL_OK_BUF + 4u) == 0u && MEM_R32(CTRL_OK_BUF) == (uint32_t)(t / 1000u),
                    msg);
             snprintf(msg, sizeof msg, "pad: nothing held or refreshed with '%s'", off_lines[i]);
-            expect(ace_pad_plan()->held_updates == 0u && ace_pad_plan()->refreshed == 0u, msg);
+            expect(ace_pad_plan()->held_updates == 0u && ace_pad_plan()->refreshed == 0u &&
+                       ace_pad_plan()->updates == 0u, msg);
             pad_late_teardown();
         }
     }
