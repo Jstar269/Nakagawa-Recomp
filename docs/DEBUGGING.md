@@ -1330,7 +1330,7 @@ itself, with no GPU or window.
 
 #### Headless VRAM capture and PNG export
 
-Set `SR_VRAMDUMP=<vblank>[,<vblank>...]` and `SR_VRAMDUMP_DIR=<existing-directory>` to capture at up to eight unique vblank numbers. A request is serviced only when that vblank presents a display frame; an unpresented selection is reported as `NOT_CAPTURED`. Each serviced selection writes `vram_<vblank>.bin` (the complete 2 MiB PSP VRAM image) and `vram_<vblank>.json` (display and GE draw framebuffers, depth buffer, bound texture-level registers, and loaded CLUT metadata/data). This is off by default and host-side. A GPU backend may materialize pending render-target state at the capture boundary before copying it. A texture level outside the captured VRAM image is marked `in_vram: false` and cannot be exported from that snapshot; report it as an unavailable VRAM surface under issue #314.
+Set `SR_VRAMDUMP=<vblank>[,<vblank>...]` and `SR_VRAMDUMP_DIR=<existing-directory>` to capture at up to eight unique vblank numbers. A request is serviced only when that vblank presents a display frame; an unpresented selection is reported as `NOT_CAPTURED`. Each serviced selection writes `vram_<vblank>.bin` (the complete 2 MiB PSP VRAM image) and `vram_<vblank>.json` (display and GE draw framebuffers, depth buffer, bound texture-level registers, and loaded CLUT metadata/data). This is off by default and host-side. A GPU backend may materialize pending render-target state at the capture boundary before copying it. A texture level outside the captured VRAM image is marked `in_vram: false` and cannot be exported from that snapshot; report it as an unavailable VRAM surface under issue #314. In developer mode the pause menu's VRAM viewer also shows the captures the run wrote ([Developer mode](#developer-mode-profile-hud-vram-viewer-and-profile-page)).
 
 Decode one surface from a raw image with `nk_cli vram`:
 
@@ -1345,7 +1345,7 @@ nk_cli vram --from-sidecar capture/vram_120.json --out-dir capture/png
 
 Supported formats are `5650`, `5551`, `4444`, `8888`, `CLUT4`, `CLUT8`, `CLUT16`, `CLUT32`, `DXT1`, `DXT3`, `DXT5`, and `DEPTH16`. `--swizzled` applies PSP swizzle addressing to non-DXT textures. Sidecar mode exports each named VRAM surface, including the loaded palette and a grayscale depth preview. The CLI compiles the existing GE sampler into a temporary decoder with GCC, so Windows users need UCRT64 GCC on `PATH`.
 
-`mingw32-make --no-print-directory display-smoke-run` checks raw-to-PNG pixels against the display smoke fixture's host-sink PPM and checks that enabling the capture leaves that PPM byte-identical. This headless check uses the existing `SR_FIRST_FRAME_DUMP` host-sink PPM; `SR_FBSNAP` and `SR_FBDUMP` captures are published from the same `SR_VIDEO=offscreen` sink as well. The interactive in-player VRAM panel remains UNBUILT; the headless viewer is the partial capability tracked by [#314](https://github.com/Jstar269/nakagawa-recomp/issues/314).
+`mingw32-make --no-print-directory display-smoke-run` checks raw-to-PNG pixels against the display smoke fixture's host-sink PPM and checks that enabling the capture leaves that PPM byte-identical. This headless check uses the existing `SR_FIRST_FRAME_DUMP` host-sink PPM; `SR_FBSNAP` and `SR_FBDUMP` captures are published from the same `SR_VIDEO=offscreen` sink as well. The in-player VRAM viewer is developer mode's pause page ([Developer mode](#developer-mode-profile-hud-vram-viewer-and-profile-page)); what it still lacks is tracked by [#314](https://github.com/Jstar269/nakagawa-recomp/issues/314).
 
 #### GE scene dump
 
@@ -2378,6 +2378,11 @@ player and game behave as they do for everyone ([#314](https://github.com/Jstar2
   them, DEPTH16 is shown as `SR_VRAMDUMP`'s decoder shows it, and the bound texture goes through the texture
   decoder with the GE state untouched. Like any CPU read, a surface the GPU rasterizer still owns is first brought
   back to guest memory. Alpha is shown opaque. The texture is refused while a GE capture runs.
+  When the run wrote `SR_VRAMDUMP` captures, a `Capture` row comes first: `Live`, or a capture's VBLANK (the first
+  eight). On a capture the sources are the ones that present named, and the window decodes from the
+  `vram_<vblank>.bin` the capture wrote, read back and checked against a digest of the bytes written: a file changed
+  or removed since is refused. A captured texture decodes when it is linear 5650, 5551, 4444 or 8888 in VRAM; a
+  swizzled, palette or compressed one is refused with a pointer to `nk_cli vram`.
 - **Profile page.** The pause menu's `Profile` shows the profile HUD's rows, both directions' hottest transition PC
   and up to 60 bars. Opening it turns the counters on if nothing had; they then collect while the game runs.
 
