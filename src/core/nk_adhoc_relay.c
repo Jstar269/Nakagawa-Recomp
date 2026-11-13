@@ -18,8 +18,10 @@
  *   - The port offset is passed in rather than read from settings.
  * The login checks were first carried over, with small edits, from an earlier version of this
  * file; a review of pull request #2549 found that one of them (a nickname of 128 bytes refused)
- * was not PPSSPP's rule, and on 2026-11-12 all of them were deleted and written again from
- * login_user_data. */
+ * was not PPSSPP's rule, and on 2026-11-12 nk_relay_mac_ok and the checks in nk_lobby_login were
+ * deleted and written again from login_user_data. nk_relay_product_ok was kept: its body is
+ * unchanged apart from comments, and its behaviour is PPSSPP's product-code rule, the check in
+ * login_user_data that each of the nine bytes of the product code is A-Z or 0-9. */
 
 #include "nk_adhoc_relay.h"
 
