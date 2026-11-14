@@ -502,6 +502,16 @@ bool nk_platform_find_system_ui_font(char *out_path, size_t max_len);
    changes. False, leaving both untouched, when the command line cannot be converted. */
 bool nk_platform_init_utf8_main(int *argc, char ***argv);
 
+/* Keep run-time library loads out of the current folder and PATH. Win32: every later
+   LoadLibrary by bare name (SDL's vulkan-1.dll, a plug-in) searches only the executable's
+   own folder, System32 and folders added with AddDllDirectory, so a DLL planted in the
+   folder the program was started from, or anywhere on PATH, is never loaded. DLLs staged
+   beside the executable (tools/stage_runtime_dlls.py) still load. The DLLs the executable
+   imports are resolved by the loader before main and are unaffected. Call it first in main.
+   POSIX: nothing to do (the dynamic loader never searches the current folder by default);
+   true. False when Windows refuses the setting. */
+bool nk_platform_harden_library_search(void);
+
 /* Give a GUI program usable stdout and stderr. Win32 (a -mwindows program has no console):
    standard handles it was started with are kept; otherwise the streams go to the parent
    terminal's console when there is one, else to `fallback_log_name` in the NK_PATH_LOGS

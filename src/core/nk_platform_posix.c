@@ -1898,6 +1898,11 @@ bool nk_platform_find_system_ui_font(char *out_path, size_t out_len) {
     return false;
 }
 
+bool nk_platform_harden_library_search(void) {
+    /* dlopen of a bare name searches the configured library paths, never the current folder. */
+    return true;
+}
+
 bool nk_platform_init_utf8_main(int *argc, char ***argv) {
     /* POSIX arguments are already UTF-8 bytes. */
     return argc != NULL && argv != NULL;

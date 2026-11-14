@@ -1743,6 +1743,10 @@ bool nk_platform_find_system_ui_font(char *out_path, size_t out_len) {
     return false;
 }
 
+bool nk_platform_harden_library_search(void) {
+    return SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS) != 0;
+}
+
 bool nk_platform_init_utf8_main(int *argc, char ***argv) {
     if (!argc || !argv) return false;
     SetConsoleOutputCP(CP_UTF8);

@@ -19,6 +19,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32) && defined(NK_UI_WITH_SDL_TTF)
+#include <windows.h>
+#endif
+
 static char g_nk_ui_ttf_error[256] = "";
 
 static void nk_ui_ttf_set_error(const char *message) {
@@ -463,28 +467,78 @@ static void nk_ui_ttf_clear_library(NkUiTtf *ttf) {
     memset(&ttf->api, 0, sizeof(ttf->api));
 }
 
+#if defined(_WIN32)
+#define NK_UI_TTF_DEFAULT_MAX 2u
+#define NK_UI_TTF_PATH_MAX 1024u
+
+/* Windows: the fallback SDL3_ttf.dll by full path, never by bare name, which the loader's
+   legacy search would also look for in the current folder and on PATH. First beside this
+   executable, where packages stage it (tools/stage_runtime_dlls.py), then beside the
+   SDL3.dll this process already runs, the same folder in a package and the toolchain's bin
+   folder in a development build. */
+static size_t nk_ui_ttf_default_paths(char out[NK_UI_TTF_DEFAULT_MAX][NK_UI_TTF_PATH_MAX]) {
+    size_t n = 0;
+    const char *base = SDL_GetBasePath();
+    HMODULE sdl = GetModuleHandleW(L"SDL3.dll");
+    if (base != NULL && base[0] != '\0') {
+        int written = snprintf(out[n], NK_UI_TTF_PATH_MAX, "%sSDL3_ttf.dll", base);
+        if (written > 0 && (size_t)written < NK_UI_TTF_PATH_MAX) ++n;
+    }
+    if (sdl != NULL) {
+        wchar_t wide[NK_UI_TTF_PATH_MAX];
+        char folder[NK_UI_TTF_PATH_MAX];
+        DWORD length = GetModuleFileNameW(sdl, wide, NK_UI_TTF_PATH_MAX);
+        wchar_t *slash = length > 0 && length < NK_UI_TTF_PATH_MAX ? wcsrchr(wide, L'\\') : NULL;
+        if (slash != NULL) {
+            int bytes;
+            slash[1] = L'\0';
+            bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1, folder,
+                                        (int)sizeof(folder), NULL, NULL);
+            if (bytes > 0) {
+                int written = snprintf(out[n], NK_UI_TTF_PATH_MAX, "%sSDL3_ttf.dll", folder);
+                if (written > 0 && (size_t)written < NK_UI_TTF_PATH_MAX &&
+                    (n == 0 || SDL_strcasecmp(out[0], out[n]) != 0)) {
+                    ++n;
+                }
+            }
+        }
+    }
+    return n;
+}
+#endif
+
 NkUiTtf *nk_ui_ttf_create(const char *const *library_paths, size_t count) {
 #if defined(_WIN32)
-    static const char *const default_name = "SDL3_ttf.dll";
-#elif defined(__APPLE__)
+    char defaults[NK_UI_TTF_DEFAULT_MAX][NK_UI_TTF_PATH_MAX];
+    const size_t default_count = nk_ui_ttf_default_paths(defaults);
+#else
+#if defined(__APPLE__)
     static const char *const default_name = "libSDL3_ttf.0.dylib";
 #elif defined(__ANDROID__)
     static const char *const default_name = "libSDL3_ttf.so";   /* APK libraries carry no version */
 #else
     static const char *const default_name = "libSDL3_ttf.so.0";
 #endif
+    const size_t default_count = 1u;
+#endif
     NkUiTtf *ttf;
     size_t i;
-    char reason[200] = "";
+    /* Room for a full candidate path and SDL's message; nk_ui_ttf_set_error keeps the start. */
+    char reason[1400] = "";
     nk_ui_ttf_set_error("");
     ttf = (NkUiTtf *)calloc(1, sizeof(*ttf));
     if (ttf == NULL) {
         nk_ui_ttf_set_error("out of memory");
         return NULL;
     }
-    for (i = 0; i <= count && ttf->library == NULL; ++i) {
-        const char *candidate = i < count && library_paths != NULL ?
-                                library_paths[i] : default_name;
+    for (i = 0; i < count + default_count && ttf->library == NULL; ++i) {
+#if defined(_WIN32)
+        const char *candidate = i < count ? (library_paths != NULL ? library_paths[i] : NULL)
+                                          : defaults[i - count];
+#else
+        const char *candidate = i < count ? (library_paths != NULL ? library_paths[i] : NULL)
+                                          : default_name;
+#endif
         SDL_SharedObject *library;
         if (candidate == NULL || candidate[0] == '\0') {
             continue;

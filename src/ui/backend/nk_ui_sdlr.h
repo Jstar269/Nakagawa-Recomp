@@ -79,8 +79,11 @@ void nk_ui_sdlr_get_stats(const NkUiSdlr *renderer, NkUiSdlrStats *out);
 bool nk_ui_ttf_available(void);
 
 /* Loads SDL3_ttf and starts a text engine. `library_paths` lists candidate
-   shared-library paths tried in order, then the platform default name. NULL and
-   0 try only the default. Returns NULL on failure; nk_ui_ttf_last_error() then
+   shared-library paths tried in order, then the platform default. NULL and 0 try
+   only the default. On Windows the default is a full path, never a bare name: the
+   SDL3_ttf.dll beside the executable, then the one beside the SDL3.dll in use; a
+   copy in the current folder or on PATH is never loaded. Elsewhere it is the
+   library's soname. Returns NULL on failure; nk_ui_ttf_last_error() then
    names the reason (build without SDL3_ttf, library not found, symbol missing,
    TTF_Init failed). */
 NkUiTtf *nk_ui_ttf_create(const char *const *library_paths, size_t count);
