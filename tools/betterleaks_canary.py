@@ -193,7 +193,7 @@ def run(binary: str) -> int:
         )
         _require("mixed-case-path-variation", _scan(binary, "dir", str(mixed_case_path)), 1)
 
-        moved_fixture = temp_root / "tests" / "fixtures" / "history-audit-copy.py"
+        moved_fixture = temp_root / "fixtures" / "history-audit-copy.py"
         moved_fixture.parent.mkdir()
         deliberate_value = "gh" + "p_" + "123456789012345678901234567890123456"
         _write_synthetic_fixture(

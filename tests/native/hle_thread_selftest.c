@@ -55413,7 +55413,7 @@ static void test_aot_null_thread_entry(const char *self) {
  * the bitstream syntax, no encoder and no recorded audio), fed the way a game feeds it:
  * sceMp3GetInfoToAddStreamData says where and how much, the test copies that much of the file
  * into guest memory and calls sceMp3NotifyAddStreamData. HOST_TESTED, not PSP_HARDWARE evidence. */
-#include "../../tests/fixtures/mp3_tone/mp3_tone.h"
+#include "../fixtures/mp3_tone/mp3_tone.h"
 
 extern void sr_hle_test_mp3_reset(void);
 extern void sr_hle_test_set_compiled_sdk_version(uint32_t version);

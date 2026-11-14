@@ -64,16 +64,16 @@ class HstManagerManifestTests(unittest.TestCase):
         # legacy retail layout. The synthetic route discovers its ELF from the
         # generic tests/fixtures/ candidates instead.
         fixtures = self.root / "tests" / "fixtures"
-        fixtures.mkdir(exist_ok=True)
+        fixtures.mkdir(parents=True, exist_ok=True)
         (fixtures / "synthetic.elf").write_text("synthetic private binding\n", encoding="ascii")
-        # The manager now anchors every managed path to its own script location and fails
+        # The manager anchors every managed path to the parent of its own tools/ folder and fails
         # closed when the workspace identity anchors are missing, so the harness
         # stages a complete fake workspace: the manager itself, its dot-sourced helpers
         # and the repository identity files.
-        self.manager_copy = self.root / MANAGER.name
-        shutil.copy2(MANAGER, self.manager_copy)
         tools_dir = self.root / "tools"
         tools_dir.mkdir(exist_ok=True)
+        self.manager_copy = tools_dir / MANAGER.name
+        shutil.copy2(MANAGER, self.manager_copy)
         for helper in (
             "nk_safety.ps1",
             "vulkan_sdk.ps1",

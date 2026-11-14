@@ -293,7 +293,7 @@ class AndroidDeviceTestRunnerTests(unittest.TestCase):
         env = {"NK_TEST_SCRATCH_DIR": str(self.binary / "build"), "SR_GESTAT": "1",
                "NK_ADB": "C:/sdk/adb.exe", "PATH": "C:/Windows"}
         script = runner.remote_run_script(self.device, self.paths, str(self.source), "test_x",
-                                          ["--input", str(self.source / "tests" / "fixtures" / "a b")], env)
+                                          ["--input", str(self.source / "fixtures" / "a b")], env)
         self.assertEqual(
             script,
             f"mkdir -p {DEVICE}/src && cd {DEVICE}/src && "
