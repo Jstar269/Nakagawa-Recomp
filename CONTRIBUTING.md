@@ -54,7 +54,7 @@ your own, with its own provenance authority, see [docs/FORKING.md](docs/FORKING.
 The player's accessibility statement, with what works, what does not and how to report a barrier, is
 [ACCESSIBILITY.md](ACCESSIBILITY.md). If you change the launcher or the documentation, follow its
 "Contributing accessibly" list and update its tables when a change adds, changes or removes a barrier.
-For questions that are not about code, [SUPPORT.md](SUPPORT.md) says where to go.
+For questions that are not about code, [SUPPORT.md](.github/SUPPORT.md) says where to go.
 
 ## Licensing
 

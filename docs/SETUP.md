@@ -974,7 +974,7 @@ exist there, and optional modules are included only when named with
 `bss_metadata_source: "psp-header"`. `--public-safe` is available for synthetic fixture builds.
 The output directory must be untracked and dedicated. The package schema and explicit unsupported
 semantic-boundary records are defined in
-[`RUNTIME_PACKAGING_ARCHITECTURE.md`](RUNTIME_PACKAGING_ARCHITECTURE.md#5-local-aot-package-contract-v1).
+[`RUNTIME_PACKAGING_ARCHITECTURE.md`](RUNTIME_PACKAGING_ARCHITECTURE.md#5-local-aot-package-contract-v2).
 Inputs whose paths contain spaces or shell-sensitive characters (common under a Windows profile
 directory) are copied into `<output-dir>/staged-inputs/` so the Make recipes can use them. When the
 output directory contains spaces, the route builds in a Make-safe workspace—resolved from

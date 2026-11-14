@@ -34,7 +34,7 @@
       "license": "GPL-2.0-or-later",
       "origin": "https://github.com/sal063/PSP-recompilation-project",
       "revision": "da17b0e1db209206a407d097d132201e516e3855",
-      "notice_path": "THIRD_PARTY_LICENSES/SAL063_CREDITS.txt",
+      "notice_path": "third_party/licenses/SAL063_CREDITS.txt",
       "evidence_path": "assets/public_provenance_ledger.json",
       "disposition": "included_with_attribution"
     },
@@ -44,7 +44,7 @@
       "license": "GPL-2.0-or-later and component notices",
       "origin": "https://github.com/hrydgard/ppsspp",
       "revision": "f0baf3ade7bcb6c86f0835962b36eb4e51559d8f",
-      "notice_path": "THIRD_PARTY_LICENSES/SAL063_CREDITS.txt",
+      "notice_path": "third_party/licenses/SAL063_CREDITS.txt",
       "evidence_path": "assets/public_provenance_ledger.json",
       "disposition": "included_data_and_attribution; PGF_surface_excluded"
     },
@@ -54,7 +54,7 @@
       "license": "BSD-3-Clause and per-component",
       "origin": "https://github.com/pspdev/pspsdk",
       "revision": "see assets/upstream/pspdev.lock.json",
-      "notice_path": "THIRD_PARTY_LICENSES/PSPSDK.txt",
+      "notice_path": "third_party/licenses/PSPSDK.txt",
       "evidence_path": "assets/upstream/pspdev.evidence.json",
       "disposition": "included_notice_and_synthetic_fixtures"
     },
@@ -510,7 +510,7 @@
       "presence": "notice_lineage",
       "upstream_origin": "https://github.com/pspdev/pspsdk",
       "license": "BSD-3-Clause",
-      "notice_path": "THIRD_PARTY_LICENSES/PSPSDK.txt",
+      "notice_path": "third_party/licenses/PSPSDK.txt",
       "disposition": "SOURCE_LINEAGE",
       "public_scope_included": true,
       "optional": false,

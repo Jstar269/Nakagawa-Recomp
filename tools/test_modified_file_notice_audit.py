@@ -20,14 +20,14 @@ class ModifiedFileNoticeAuditTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
         (root / "docs/provenance").mkdir(parents=True)
-        (root / "THIRD_PARTY_LICENSES").mkdir()
+        (root / "third_party" / "licenses").mkdir(parents=True)
         (root / "LICENSE").write_text("GNU GENERAL PUBLIC LICENSE\nVersion 3\n", encoding="utf-8")
-        (root / "THIRD_PARTY_LICENSES/GPL-2.0.txt").write_text(
+        (root / "third_party/licenses/GPL-2.0.txt").write_text(
             "GNU GENERAL PUBLIC LICENSE\nVersion 2, June 1991\n"
             "This License applies to any program or other work\n",
             encoding="utf-8",
         )
-        (root / "THIRD_PARTY_LICENSES/SAL063_CREDITS.txt").write_text("sal063\n", encoding="utf-8")
+        (root / "third_party/licenses/SAL063_CREDITS.txt").write_text("sal063\n", encoding="utf-8")
         (root / "NOTICE.md").write_text("lineage\n", encoding="utf-8")
         (root / "src").mkdir()
         (root / "src/sample.c").write_text(source, encoding="utf-8")
@@ -35,8 +35,8 @@ class ModifiedFileNoticeAuditTests(unittest.TestCase):
         manifest = {
             "required_license_files": [
                 {"path": "LICENSE"},
-                {"path": "THIRD_PARTY_LICENSES/GPL-2.0.txt"},
-                {"path": "THIRD_PARTY_LICENSES/SAL063_CREDITS.txt"},
+                {"path": "third_party/licenses/GPL-2.0.txt"},
+                {"path": "third_party/licenses/SAL063_CREDITS.txt"},
                 {"path": "NOTICE.md"},
             ],
             "files": [

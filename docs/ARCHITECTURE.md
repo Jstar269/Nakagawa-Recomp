@@ -449,7 +449,7 @@ codegen and generated-code build profiles, so every object that includes it rebu
 it found it (the MIPS32 Release 2 operation). Both execution tiers implement this:
 `tools/codegen.py` `_ll_sc_stmt()` and the production interpreter in `src/rt/guest_interp.c`;
 the reference interpreter in `src/ref/interp.cpp` follows the same rule. A PSP-3000 measured
-it (`PSP-LLSC-001`, [hardware oracle index](HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize)):
+it (`PSP-LLSC-001`, [hardware oracle index](HARDWARE_ORACLE.md#measured-to-date-index--exact-cells-only-do-not-generalize)):
 a second `sc` after a successful one, with no new `ll`, stores and writes 1, and an `sc` to an
 address other than the one `ll` loaded also stores and writes 1, so `sc` keeps the link and
 compares no address. `tests/native/cpu_lle_selftest.c` and `src/ref/selftest.cpp` run the probe's
