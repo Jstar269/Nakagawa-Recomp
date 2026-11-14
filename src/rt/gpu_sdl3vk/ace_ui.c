@@ -76,19 +76,61 @@ static uint32_t faded(uint32_t rgba, float a) {
  * can come out a pixel or two narrower than the run shaped whole, and the Vulkan backend clips a
  * run to its box; so each run is laid out with its spaces made no-break spaces, which keeps it
  * one slice, measured and drawn alike (as the launcher keeps a folder path on one line). */
-static const char *one_line(NkUi *ui, const char *text) {
-    char buf[1024];
+static void no_break(const char *text, size_t length, char *buf, size_t cap) {
     size_t used = 0;
-    for (const char *p = text; *p && used + 3u < sizeof(buf); p++) {
-        if (*p == ' ') {
+    for (size_t i = 0; i < length && text[i] && used + 3u < cap; i++) {
+        if (text[i] == ' ') {
             buf[used++] = (char)0xC2;
             buf[used++] = (char)0xA0;
         } else {
-            buf[used++] = *p;
+            buf[used++] = text[i];
         }
     }
     buf[used] = '\0';
+}
+
+static const char *one_line(NkUi *ui, const char *text) {
+    char buf[1024];
+    no_break(text, strlen(text), buf, sizeof(buf));
     return nk_ui_frame_text(ui, buf);
+}
+
+/* The most whole words from the start of `text` that fit `width` as one such run: their length
+ * in bytes, at least the first word (a word wider than the line is the caller's to cut). */
+static size_t line_of_words(const NkUi *ui, const char *text, const NkUiTextStyle *style, float width) {
+    char buf[1024];
+    size_t fit = 0, end = 0;
+    while (text[end]) {
+        while (text[end] && text[end] != ' ') end++;
+        no_break(text, end, buf, sizeof(buf));
+        if (fit && nk_ui_text_width(ui, buf, style) > width) break;
+        fit = end;
+        while (text[end] == ' ') end++;
+    }
+    return fit;
+}
+
+/* One line of wrapped words from *rest, as a run measured whole: a line the layout engine
+ * wrapped is sized from its words measured one by one, so it could lose its end to the clip
+ * (above). The whole words that fit `width`; on the last line, an ellipsis after them when words
+ * are left over. Moves *rest past what it took. */
+static const char *words_line(NkUi *ui, const char **rest, const NkUiTextStyle *style, float width,
+                              int last) {
+    static const char ellipsis[] = "\xE2\x80\xA6";
+    char run[1024];
+    const char *text = *rest;
+    size_t length = line_of_words(ui, text, style, width);
+    const char *after = text + length;
+    while (after[0] == ' ') after++;
+    const int cut = last && after[0];
+    if (cut) length = line_of_words(ui, text, style, width - nk_ui_text_width(ui, ellipsis, style));
+    no_break(text, length, run, sizeof(run) - sizeof(ellipsis));
+    if (cut) strcat(run, ellipsis);
+    *rest = cut ? "" : after;
+    /* A single word wider than the line is shortened like any other run. */
+    if (nk_ui_text_width(ui, run, style) > width)
+        return one_line(ui, nk_ui_text_clamp(ui, run, style, width, 1));
+    return nk_ui_frame_text(ui, run);
 }
 
 /* A chip: surface_high with a line_strong edge, or paper on it with a strong edge in high
@@ -273,6 +315,49 @@ static void keyboard_layout(NkUi *ui, const NkUiTheme *theme, const OskOverlay *
     nk_ui_end_container(ui);
 }
 
+/* The render notice (#2151): one chip at the bottom left, its heading in the warning colour, the
+ * words wrapped to at most three lines, and the way to hide it. It does not fade: it stays until
+ * the person hides it. */
+static void host_notice_layout(NkUi *ui, const NkUiTheme *theme, const AceUiFrame *f,
+                               float logical_w) {
+    float chip_w = logical_w - 2.0f * NK_UI_SPACE_4;
+    if (chip_w > 440.0f) chip_w = 440.0f;
+    const float inner = chip_w - 2.0f * NK_UI_SPACE_3;
+    NkUiLayout fill = layout(NK_UI_LAYOUT_ROW, sizing(NK_UI_SIZE_GROW, 0.0f),
+                             sizing(NK_UI_SIZE_GROW, 0.0f), 0.0f);
+    if (nk_ui_begin_container(ui, ACE_UI_ID_HOST_FILL, &fill, NULL)) nk_ui_end_container(ui);
+    NkUiLayout row = layout(NK_UI_LAYOUT_ROW, sizing(NK_UI_SIZE_GROW, 0.0f),
+                            sizing(NK_UI_SIZE_FIT, 0.0f), 0.0f);
+    row.align_x = NK_UI_ALIGN_START;
+    if (!nk_ui_begin_container(ui, ACE_UI_ID_HOST_ROW, &row, NULL)) return;
+    NkUiLayout chip = layout(NK_UI_LAYOUT_COLUMN, sizing(NK_UI_SIZE_FIXED, chip_w),
+                             sizing(NK_UI_SIZE_FIT, 0.0f), 2.0f);
+    chip.padding_left = chip.padding_right = NK_UI_SPACE_3;
+    chip.padding_top = chip.padding_bottom = NK_UI_SPACE_2;
+    NkUiStyle style = chip_style(theme, f->high_contrast, 1.0f);
+    if (nk_ui_begin_container(ui, ACE_UI_ID_HOST_NOTICE, &chip, &style)) {
+        NkUiTextStyle head = nk_ui_type(NK_UI_TYPE_LABEL_S, theme->warning);
+        NkUiTextStyle words = nk_ui_type(NK_UI_TYPE_CAPTION, theme->paper);
+        NkUiTextStyle hint = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
+        head.wrap = false;
+        words.wrap = false;
+        hint.wrap = false;
+        if (f->host_notice_head && f->host_notice_head[0])
+            nk_ui_text(ui, ACE_UI_ID_HOST_NOTICE_HEAD,
+                       one_line(ui, nk_ui_text_clamp(ui, f->host_notice_head, &head, inner, 1)), &head);
+        const char *rest = f->host_notice;
+        for (int line = 0; line < ACE_UI_HOST_NOTICE_LINES && rest[0]; line++)
+            nk_ui_text(ui, ACE_UI_ID_HOST_NOTICE_TEXT + (NkUiId)line,
+                       words_line(ui, &rest, &words, inner, line + 1 == ACE_UI_HOST_NOTICE_LINES),
+                       &words);
+        if (f->host_notice_hint && f->host_notice_hint[0])
+            nk_ui_text(ui, ACE_UI_ID_HOST_NOTICE_HINT,
+                       one_line(ui, nk_ui_text_clamp(ui, f->host_notice_hint, &hint, inner, 1)), &hint);
+        nk_ui_end_container(ui);
+    }
+    nk_ui_end_container(ui);
+}
+
 void ace_ui_viewport(const AceUiFrame *f, NkUiViewport *vp) {
     memset(vp, 0, sizeof(*vp));
     if (!f) return;
@@ -351,6 +436,8 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *f) {
                                  sizing(NK_UI_SIZE_GROW, 0.0f), 0.0f);
         if (nk_ui_begin_container(ui, ACE_UI_ID_FILL, &fill, NULL)) nk_ui_end_container(ui);
         keyboard_layout(ui, theme, f->keyboard, scale.logical_w, scale.logical_h, f->high_contrast);
+    } else if (f->host_notice && f->host_notice[0]) {
+        host_notice_layout(ui, theme, f, scale.logical_w);
     }
     nk_ui_end_container(ui);
 }
@@ -359,7 +446,8 @@ int ace_ui_frame_wants(const AceUiFrame *f) {
     if (!f || f->pixel_w <= 0 || f->pixel_h <= 0) return 0;
     return (f->readout && f->readout[0]) ||
            (f->notice && f->notice[0] && f->notice_alpha > 0.0f) ||
-           (f->keyboard && f->keyboard->status == OSK_OVERLAY_OPEN);
+           (f->keyboard && f->keyboard->status == OSK_OVERLAY_OPEN) ||
+           (f->host_notice && f->host_notice[0]);
 }
 
 /* ---- Vulkan ------------------------------------------------------------------------------- */

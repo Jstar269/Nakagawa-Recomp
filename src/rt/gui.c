@@ -523,6 +523,194 @@ static void gui_render_fallback_presented(int accepted) {
 }
 #endif
 
+#if defined(SR_SDL3VK) || defined(_WIN32) || defined(SR_GUI_PRESENT_SELFTEST)
+/* ---- the notice over the picture (#2151) ------------------------------------------------------
+ * A run that started on a slower path than it asked for (NkRenderPath.fallback, the fact the
+ * render_path boot event gives the player) says so over the picture, in an authentic run too
+ * (the owner's decision of 2026-11-06; docs/ENHANCEMENT_CONTRACT.md, section 10.24). It is drawn
+ * on the window only: by the UI pass on the swapchain image after the frame blit, or as a band of
+ * text on the GDI window; never on guest memory, a capture or a recording. It does not fade. The
+ * person hides it for the rest of the run: any pause hides it, and so does asking for one (Esc,
+ * F1 or Guide) when the pause is refused; under GDI, which has no pause, F1 hides it. Hiding it
+ * changes nothing the player is told. An effect the GPU renderer hands to the software renderer
+ * while the game runs (render_fallback above) is named on the game's page, not here. */
+typedef struct {
+    NkRenderFallback fallback;   /* what the run reported at start; NONE: nothing to say */
+    int unavailable;             /* this run cannot draw it (no in-game UI): said once at start */
+    int dismissed;               /* the person hid it, for the rest of the run */
+} RenderNotice;
+
+static RenderNotice s_render_notice;
+
+/* The notice for a start-up fallback: its heading (the player's own), what happened and what may
+ * help, and how to hide it. 1, or 0 when there is nothing to say. */
+static int render_notice_words(NkRenderFallback fallback, const char **head, const char **text,
+                               const char **hint) {
+    switch (fallback) {
+    case NK_RENDER_FALLBACK_GDI_PRESENTER:
+        *head = "Drawn in software";
+        *text = "Vulkan did not start on this PC, so the game is drawn in software and may run "
+                "slower. Updating the graphics driver may help.";
+        *hint = "F1 hides this";
+        return 1;
+    case NK_RENDER_FALLBACK_SOFTWARE_GE:
+        *head = "Drawn in software";
+        *text = "The GPU renderer did not start on this PC, so the game is drawn in software and "
+                "may run slower. Updating the graphics driver may help.";
+        *hint = "Esc or Guide opens the menu and hides this";
+        return 1;
+    case NK_RENDER_FALLBACK_NONE:
+    case NK_RENDER_FALLBACK_COUNT:
+    default:
+        return 0;
+    }
+}
+
+/* Whether the notice is drawn now: there is one, this run can draw it, the person has not hidden
+ * it, and no on-screen keyboard is open (the keyboard stands where the notice would). */
+static int render_notice_shows(const RenderNotice *n, int keyboard_open) {
+    const char *head, *text, *hint;
+    return !n->unavailable && !n->dismissed && !keyboard_open &&
+           render_notice_words(n->fallback, &head, &text, &hint);
+}
+
+/* The person hides the notice: 1 when there was one to hide. A run with nothing to say, or one
+ * that could not draw it, stays as it is: nothing is reported hidden that never showed. */
+static int render_notice_dismiss(RenderNotice *n) {
+    const char *head, *text, *hint;
+    if (n->unavailable || n->dismissed || !render_notice_words(n->fallback, &head, &text, &hint))
+        return 0;
+    n->dismissed = 1;
+    return 1;
+}
+
+static void gui_render_notice_dismiss(void) {
+    if (render_notice_dismiss(&s_render_notice))
+        fprintf(stderr, "RENDER_NOTICE: hidden for the rest of this run\n");
+}
+#endif
+
+#ifdef _WIN32
+/* ---- the notice on the GDI window (#2151) -----------------------------------------------------
+ * A band of text over the foot of the picture. It is composed once for the window's size into a
+ * memory bitmap and copied after each frame, and the frame is drawn around it (a clip), so
+ * neither flickers. It exists on the window only: the frame copy that captures and recordings
+ * read is never touched. */
+typedef struct {
+    HDC dc;                      /* the composed band, or NULL */
+    HBITMAP bitmap;
+    HGDIOBJ stock_bitmap;        /* the DC's own, put back before the DC is deleted */
+    int client_w, client_h;      /* the client area it was last composed for; 0 before any */
+    int h;                       /* its height: whole lines, at most half the client area; 0 when
+                                    it could not be made at that size */
+    int said;                    /* that failure was said (once a run) */
+} GdiNoticeBand;
+
+#ifndef SR_GUI_PRESENT_SELFTEST
+static GdiNoticeBand s_gdi_band;   /* the window's; the selftest draws with its own */
+#endif
+
+static void gdi_notice_band_release(GdiNoticeBand *b) {
+    if (b->dc && b->stock_bitmap) SelectObject(b->dc, b->stock_bitmap);
+    if (b->dc) DeleteDC(b->dc);
+    if (b->bitmap) DeleteObject(b->bitmap);
+    b->dc = NULL;
+    b->bitmap = NULL;
+    b->stock_bitmap = NULL;
+    b->client_w = b->client_h = b->h = 0;
+}
+
+/* The band for this client area, composed when the area is not the one it was last composed
+ * for: its height, or 0 when it cannot be made at this size, which is said once a run (another
+ * size is tried again). The words are in the system's message font, wrapped to the window's
+ * width; a window too small for all of them shows the whole lines that fit in its lower half. */
+static int gdi_notice_band(GdiNoticeBand *b, HDC target, int client_w, int client_h,
+                           NkRenderFallback fallback) {
+    const char *head, *text, *hint;
+    char line[400];
+    if (client_w <= 0 || client_h <= 0) return 0;
+    if (b->client_w == client_w && b->client_h == client_h) return b->h;
+    gdi_notice_band_release(b);
+    if (!render_notice_words(fallback, &head, &text, &hint)) return 0;
+    snprintf(line, sizeof(line), "%s: %s %s.", head, text, hint);
+    b->client_w = client_w;
+    b->client_h = client_h;
+
+    NONCLIENTMETRICSA metrics;
+    HFONT font = NULL;
+    memset(&metrics, 0, sizeof(metrics));
+    metrics.cbSize = sizeof(metrics);
+    if (SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0))
+        font = CreateFontIndirectA(&metrics.lfMessageFont);
+    b->dc = CreateCompatibleDC(target);
+    if (b->dc) {
+        HGDIOBJ stock_font = SelectObject(b->dc, font ? (HGDIOBJ)font : GetStockObject(DEFAULT_GUI_FONT));
+        TEXTMETRICA tm;
+        memset(&tm, 0, sizeof(tm));
+        (void)GetTextMetricsA(b->dc, &tm);
+        const int line_h = tm.tmHeight > 0 ? (int)tm.tmHeight : 16;
+        const int pad_x = line_h / 2 > 4 ? line_h / 2 : 4;
+        const int pad_y = line_h / 3 > 3 ? line_h / 3 : 3;
+        RECT measure = { 0, 0, client_w - 2 * pad_x, 0 };
+        int h = 0;
+        if (measure.right > 0 &&
+            DrawTextA(b->dc, line, -1, &measure, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT) > 0)
+            h = (int)measure.bottom + 2 * pad_y;
+        if (h > client_h / 2) h = client_h / 2;
+        if (h >= line_h + 2 * pad_y) b->bitmap = CreateCompatibleBitmap(target, client_w, h);
+        if (b->bitmap) {
+            RECT all = { 0, 0, client_w, h };
+            RECT edge = { 0, 0, client_w, 1 };
+            RECT words = { pad_x, pad_y, client_w - pad_x, h - pad_y };
+            b->stock_bitmap = SelectObject(b->dc, b->bitmap);
+            SetBkColor(b->dc, RGB(24, 24, 28));
+            ExtTextOutA(b->dc, 0, 0, ETO_OPAQUE, &all, "", 0, NULL);
+            SetBkColor(b->dc, RGB(96, 96, 104));
+            ExtTextOutA(b->dc, 0, 0, ETO_OPAQUE, &edge, "", 0, NULL);
+            SetBkMode(b->dc, TRANSPARENT);
+            SetTextColor(b->dc, RGB(240, 240, 240));
+            /* DT_EDITCONTROL: a line that does not fit whole is not drawn. */
+            DrawTextA(b->dc, line, -1, &words, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
+            b->h = h;
+        }
+        SelectObject(b->dc, stock_font);
+    }
+    if (font) DeleteObject(font);
+    if (!b->bitmap) {
+        /* Nothing is kept but the size that failed, so the next frame at it does not try again. */
+        if (b->dc) DeleteDC(b->dc);
+        b->dc = NULL;
+        if (!b->said) {
+            b->said = 1;
+            fprintf(stderr, "RENDER_NOTICE: the notice could not be drawn on the GDI window "
+                            "(%d x %d)\n", client_w, client_h);
+        }
+    }
+    return b->h;
+}
+
+/* Before the frame is drawn on the GDI window: while the render notice shows, its band is made
+ * for this client area and the frame is clipped around it. Returns the band's height; 0 with no
+ * notice, and then the DC is as it was. */
+static int gdi_notice_begin(HDC dc, int client_w, int client_h, const RenderNotice *notice,
+                            GdiNoticeBand *band) {
+    int band_h = 0;
+    if (render_notice_shows(notice, 0))
+        band_h = gdi_notice_band(band, dc, client_w, client_h, notice->fallback);
+    else if (band->dc)
+        gdi_notice_band_release(band);
+    if (band_h) ExcludeClipRect(dc, 0, client_h - band_h, client_w, client_h);
+    return band_h;
+}
+
+/* After the frame: the clip is lifted and the band is copied over the foot of the picture. */
+static void gdi_notice_end(HDC dc, int client_w, int client_h, int band_h, const GdiNoticeBand *band) {
+    if (!band_h) return;
+    SelectClipRgn(dc, NULL);
+    BitBlt(dc, 0, client_h - band_h, client_w, band_h, band->dc, 0, 0, SRCCOPY);
+}
+#endif /* _WIN32 */
+
 #ifdef SR_SDL3VK
 /* The window's keys and typed text go to the in-window keyboard while it is open. The text
  * input is claimed only then, so Escape opens the pause the rest of the time. */
@@ -548,9 +736,11 @@ static void sr_gui_feed_keyboard(void) {
 
 /* Esc, F1 or Guide (or the open pad going away) asks the scheduler for a pause. The request
  * only latches: the pause opens at the scheduler's next switch point, and a refused request
- * leaves the game running (sched.c logs why). */
+ * leaves the game running (sched.c logs why). The person's own request also hides the render
+ * notice (#2151), whether or not the pause then opens. */
 static void sr_gui_take_pause_request(void) {
     int request = sdl3vk_take_pause_request();
+    if (request == SDL3VK_PAUSE_REQUEST_USER) gui_render_notice_dismiss();
     if (request == SDL3VK_PAUSE_REQUEST_NONE || !sr_sched_on) return;
     (void)sched_pause_request(request == SDL3VK_PAUSE_REQUEST_PAD_LOST
                                   ? SR_PAUSE_SRC_PAD_LOST : SR_PAUSE_SRC_USER);
@@ -649,6 +839,8 @@ static uint32_t read_keys(void) {
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_CLOSE || m == WM_DESTROY) { PostQuitMessage(0); return 0; }
     if (m == WM_KEYDOWN && w == VK_ESCAPE) { PostQuitMessage(0); return 0; }
+    /* F1 hides the render notice (#2151): this window has no pause menu to do it. */
+    if (m == WM_KEYDOWN && w == VK_F1) { gui_render_notice_dismiss(); return 0; }
     return DefWindowProc(h, m, w, l);
 }
 #endif /* _WIN32: the keyboard fallback and the window class are Win32-only */
@@ -658,13 +850,15 @@ static void gui_release_presenter(void);
 
 #if defined(SR_SDL3VK) && !defined(SR_GUI_PRESENT_SELFTEST)
 /* ---- Ace Mode's in-game UI (ace.h, gpu_sdl3vk/ace_ui.h) ---------------------------------------
- * Made once at start in an Ace run that shows any of it; an authentic run never makes it and
- * never registers the presenter's UI pass. Without SDL3_ttf, the UI fonts or the Vulkan backend
- * the three features are off for the run, said once, and the keyboard keeps today's path. */
+ * Made once at start in an Ace run that shows any of it, or for the render notice (#2151) when
+ * one is due; an authentic run with nothing to say never makes it and never registers the
+ * presenter's UI pass. Without SDL3_ttf, the UI fonts or the Vulkan backend the three features
+ * are off for the run, said once, and the keyboard keeps today's path. */
 #define ACE_NOTICE_NS 3000000000ull              /* the launch notice stays 3 s */
 static NkOverlayFonts *s_ace_fonts;
 static AceUi *s_ace_ui;
-static int s_ace_ui_ready;
+static int s_ui_ready;                            /* the UI exists and its pass is registered */
+static int s_ace_ui_ready;                        /* ... and it is Ace Mode's: its features are on */
 static int s_ace_keyboard_now;                    /* this present's keyboard is the UI pass's */
 static uint64_t s_ace_first_frame_ns;             /* the first accepted present: the notice starts */
 static char s_ace_words[ACE_WORDS_MAX];
@@ -686,12 +880,15 @@ static void gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     /* The player's Reduce motion choice, as the pause overlay reads it. */
     f.reduce_motion = nk_overlay_reduce_motion(getenv("SR_REDUCE_MOTION"),
                                                nk_platform_prefers_reduced_motion());
-    /* The readout steps aside while the developer HUD shows. */
-    if (ace->readout && sdl3vk_hud_mode() == SDL3VK_HUD_OFF && ace_readout_view(&view)) {
+    /* The readout steps aside while the developer HUD shows. A UI made only for the render
+     * notice is not Ace Mode's: it shows no readout and no launch notice. */
+    if (s_ace_ui_ready && ace->readout && sdl3vk_hud_mode() == SDL3VK_HUD_OFF &&
+        ace_readout_view(&view)) {
         f.readout = view.text;
         f.readout_warning = view.pc_limited;
     }
-    if (ace->notice && s_ace_first_frame_ns && now - s_ace_first_frame_ns < ACE_NOTICE_NS) {
+    if (s_ace_ui_ready && ace->notice && s_ace_first_frame_ns &&
+        now - s_ace_first_frame_ns < ACE_NOTICE_NS) {
         double left = (double)(ACE_NOTICE_NS - (now - s_ace_first_frame_ns)) / 1e9;
         double shown = (double)(now - s_ace_first_frame_ns) / 1e9;
         f.notice_head = ace_tier_name();
@@ -704,6 +901,10 @@ static void gui_ace_ui_pass(const Sdl3VkUiPass *p) {
         }
     }
     if (s_ace_keyboard_now) f.keyboard = sr_osk_overlay_view();
+    /* The render notice (#2151), in any mode, until the person hides it. */
+    if (render_notice_shows(&s_render_notice, sr_osk_overlay_active()))
+        (void)render_notice_words(s_render_notice.fallback, &f.host_notice_head, &f.host_notice,
+                                  &f.host_notice_hint);
     if (!ace_ui_frame_wants(&f)) return;
     AceUiTarget t;
     memset(&t, 0, sizeof(t));
@@ -727,17 +928,16 @@ static void gui_ace_ui_off(const char *why) {
     if (ace_effective()->notice) ace_feature_unavailable(ACE_FEATURE_NOTICE, reason);
 }
 
-static void gui_ace_ui_init(void) {
-    const AceConfig *ace = ace_effective();
-    char error[256] = "";
+/* The UI's fonts and renderer, and its pass registered with the presenter: 1, or 0 with the
+ * reason. Shared by an Ace run's UI and the render notice (#2151); it confirms no Ace feature. */
+static int gui_ui_create(char *error, size_t error_size) {
     Sdl3VkInfo vi;
-    if (!g_ace_on || !(ace->text || ace->readout || ace->notice)) return;
     memset(&vi, 0, sizeof(vi));
     if (!sdl3vk_get_vk(&vi) || !vi.get_instance_proc_addr) {
-        gui_ace_ui_off("no Vulkan device");
-        return;
+        snprintf(error, error_size, "no Vulkan device");
+        return 0;
     }
-    s_ace_fonts = nk_overlay_fonts_create(getenv("SR_UI_ROOT"), error, sizeof(error));
+    s_ace_fonts = nk_overlay_fonts_create(getenv("SR_UI_ROOT"), error, error_size);
     if (s_ace_fonts) {
         AceUiInit init;
         memset(&init, 0, sizeof(init));
@@ -749,16 +949,28 @@ static void gui_ace_ui_init(void) {
         init.queue_family = vi.queue_family;
         init.frames_in_flight = SDL3VK_PRESENT_FRAMES;   /* the pass checks every slot */
         init.text = nk_overlay_fonts_text(s_ace_fonts);
-        s_ace_ui = ace_ui_create(&init, error, sizeof(error));
+        s_ace_ui = ace_ui_create(&init, error, error_size);
     }
     if (!s_ace_ui) {
         nk_overlay_fonts_destroy(s_ace_fonts);
         s_ace_fonts = NULL;
-        gui_ace_ui_off(error[0] ? error : "unknown");
+        if (!error[0]) snprintf(error, error_size, "unknown");
+        return 0;
+    }
+    sdl3vk_set_ui_pass(gui_ace_ui_pass);
+    s_ui_ready = 1;
+    return 1;
+}
+
+static void gui_ace_ui_init(void) {
+    const AceConfig *ace = ace_effective();
+    char error[256] = "";
+    if (!g_ace_on || !(ace->text || ace->readout || ace->notice)) return;
+    if (!gui_ui_create(error, sizeof(error))) {
+        gui_ace_ui_off(error);
         return;
     }
     (void)ace_feature_words(s_ace_words, sizeof(s_ace_words));
-    sdl3vk_set_ui_pass(gui_ace_ui_pass);
     s_ace_ui_ready = 1;
     ace_confirm(ACE_FEATURE_TEXT);
     ace_confirm(ACE_FEATURE_READOUT);
@@ -1077,7 +1289,8 @@ static void gui_ace_smooth_release(void) {
 }
 
 static void gui_ace_ui_release(void) {
-    if (s_ace_ui_ready) sdl3vk_set_ui_pass(NULL);
+    if (s_ui_ready) sdl3vk_set_ui_pass(NULL);
+    s_ui_ready = 0;
     s_ace_ui_ready = 0;
     ace_ui_destroy(s_ace_ui);
     s_ace_ui = NULL;
@@ -1111,6 +1324,25 @@ static void gui_report_render_path(bool vulkan_asked, bool vulkan_started, bool 
     if (nk_render_path_event_format(&path, line, sizeof(line)) > 0) {
         sr_gui_boot_event("%s", line);
     }
+    /* The same fact goes over the picture (#2151). On the Vulkan presenter the UI pass draws it:
+     * the UI is made here, at start, unless an Ace run made it already, so no present pays for
+     * it. A run that cannot make it says so; the boot event above still carries the fact. */
+    memset(&s_render_notice, 0, sizeof(s_render_notice));
+    s_render_notice.fallback = path.fallback;
+    if (!render_notice_shows(&s_render_notice, 0)) return;
+#ifdef SR_SDL3VK
+    if (path.vulkan && !s_ui_ready) {
+        char error[256] = "";
+        if (!gui_ui_create(error, sizeof(error))) {
+            s_render_notice.unavailable = 1;
+            fprintf(stderr, "RENDER_NOTICE: fallback=%s is not shown over the picture: the in-game "
+                            "UI is unavailable (%s)\n", nk_render_fallback_name(path.fallback), error);
+            return;
+        }
+    }
+#endif
+    fprintf(stderr, "RENDER_NOTICE: fallback=%s is shown over the picture until hidden\n",
+            nk_render_fallback_name(path.fallback));
 }
 #endif
 
@@ -1561,8 +1793,11 @@ static int gdi_blit(void) {
         ReleaseDC(s_hwnd, dc);
         return 0;
     }
+    /* The render notice's band (#2151) is on the window only; s_px is never touched. */
+    int band_h = gdi_notice_begin(dc, (int)cr.right, (int)cr.bottom, &s_render_notice, &s_gdi_band);
     int scanlines = StretchDIBits(dc, 0, 0, cr.right, cr.bottom, 0, 0, PSP_W, PSP_H,
                                   s_px, &s_bmi, DIB_RGB_COLORS, SRCCOPY);
+    gdi_notice_end(dc, (int)cr.right, (int)cr.bottom, band_h, &s_gdi_band);
     ReleaseDC(s_hwnd, dc);
     return scanlines > 0;
 }
@@ -2317,6 +2552,7 @@ void gui_pause_enter(void) {
 #ifdef SR_SDL3VK
     if (!s_sdl3 || s_pause_open) return;
     s_pause_open = 1;
+    gui_render_notice_dismiss();   /* any pause hides the render notice (#2151) */
     s_pause_resume = 0;
     s_pause_dirty = 1;
     s_pause_base_dirty = 1;
@@ -2451,6 +2687,7 @@ static void gui_release_presenter(void) {
     }
 #endif
 #ifdef _WIN32
+    gdi_notice_band_release(&s_gdi_band);
     if (s_hwnd) DestroyWindow(s_hwnd);
     s_hwnd = NULL;
 #endif
@@ -2681,13 +2918,24 @@ static uint64_t s_stub_now_ns;
 uint64_t sched_host_now_ns(void) { return s_stub_now_ns; }
 void sdl3vk_set_text_claim(int on) { if (on) selftest_unexpected("sdl3vk_set_text_claim(1)"); }
 int sdl3vk_take_key_events(Sdl3VkKeyEvent *out, int max) { (void)out; (void)max; return 0; }
-int sdl3vk_take_pause_request(void) { return SDL3VK_PAUSE_REQUEST_NONE; }
+/* The presenter's latched pause request, taken once; a request passed on to the scheduler is
+ * expected only by the test that sets one. */
+static int s_stub_pause_request = SDL3VK_PAUSE_REQUEST_NONE;
+static int s_stub_sched_pause_expected;
+static unsigned s_stub_sched_pause_calls;
+static SrPauseSource s_stub_sched_pause_source;
+int sdl3vk_take_pause_request(void) {
+    const int request = s_stub_pause_request;
+    s_stub_pause_request = SDL3VK_PAUSE_REQUEST_NONE;
+    return request;
+}
 int sr_osk_overlay_active(void) { return 0; }
 void sr_osk_overlay_key(OskKey key) { (void)key; selftest_unexpected("sr_osk_overlay_key"); }
 void sr_osk_overlay_type(uint32_t codepoint) { (void)codepoint; selftest_unexpected("sr_osk_overlay_type"); }
 SrPauseVerdict sched_pause_request(SrPauseSource source) {
-    (void)source;
-    selftest_unexpected("sched_pause_request");
+    if (!s_stub_sched_pause_expected) selftest_unexpected("sched_pause_request");
+    s_stub_sched_pause_calls++;
+    s_stub_sched_pause_source = source;
     return (SrPauseVerdict)0;
 }
 int sr_exit_request_stop_due(void) { s_stub_stop_due_calls++; return 0; }
@@ -3313,7 +3561,215 @@ static void selftest_render_fallback_rule(int argc, char **argv) {
 
     remove(s_fallback_events_path);
 }
+
+/* The person's own pause request (Esc, F1 or Guide) hides the render notice through the input
+ * path every present runs (sync_sdl_input_state), whether or not a pause can open; the pad going
+ * away asks for a pause too but is not the person hiding anything (the pause it opens hides the
+ * notice, gui_pause_enter); and a run with nothing to say hides nothing in advance. */
+static void selftest_render_notice_pause_request_hides(void) {
+    s_render_notice.fallback = NK_RENDER_FALLBACK_SOFTWARE_GE;
+    s_render_notice.dismissed = 0;
+    s_stub_sched_pause_expected = 1;
+    s_stub_sched_pause_calls = 0;
+
+    sync_sdl_input_state();                              /* no request: nothing changes */
+    assert(render_notice_shows(&s_render_notice, 0) && s_stub_sched_pause_calls == 0u);
+
+    s_stub_pause_request = SDL3VK_PAUSE_REQUEST_PAD_LOST;
+    sync_sdl_input_state();
+    assert(render_notice_shows(&s_render_notice, 0));
+    assert(s_stub_sched_pause_calls == 1u && s_stub_sched_pause_source == SR_PAUSE_SRC_PAD_LOST);
+
+    s_stub_pause_request = SDL3VK_PAUSE_REQUEST_USER;
+    sync_sdl_input_state();
+    assert(s_render_notice.dismissed && !render_notice_shows(&s_render_notice, 0));
+    assert(s_stub_sched_pause_calls == 2u && s_stub_sched_pause_source == SR_PAUSE_SRC_USER);
+    assert(s_render_notice.fallback == NK_RENDER_FALLBACK_SOFTWARE_GE);   /* the fact stays */
+
+    /* Without the scheduler no pause opens; the request still hides the notice. */
+    s_render_notice.dismissed = 0;
+    s_stub_sched_pause_expected = 0;
+    sr_sched_on = 0;
+    s_stub_pause_request = SDL3VK_PAUSE_REQUEST_USER;
+    sync_sdl_input_state();
+    assert(s_render_notice.dismissed && s_stub_sched_pause_calls == 2u);
+    sr_sched_on = 1;
+
+    s_render_notice.fallback = NK_RENDER_FALLBACK_NONE;
+    s_render_notice.dismissed = 0;
+    s_stub_sched_pause_expected = 1;
+    s_stub_pause_request = SDL3VK_PAUSE_REQUEST_USER;
+    sync_sdl_input_state();
+    assert(!s_render_notice.dismissed && s_stub_sched_pause_calls == 3u);
+    s_stub_sched_pause_expected = 0;
+}
 #endif /* SR_SDL3VK */
+
+/* ---- the notice over the picture (#2151) ------------------------------------------------------
+ * Its words and when it shows: every start-up fallback the render_path event can name has a
+ * notice and "none" has none, in any mode (nothing here reads Ace Mode's state); an open
+ * keyboard takes its place without hiding it for good; hiding it lasts and changes no fact. */
+static void selftest_render_notice(void) {
+    RenderNotice n;
+    memset(&n, 0, sizeof(n));
+    assert(n.fallback == NK_RENDER_FALLBACK_NONE);
+    assert(!render_notice_shows(&n, 0) && !render_notice_shows(&n, 1));
+    assert(!render_notice_dismiss(&n) && !n.dismissed);
+
+    for (int f = 0; f <= NK_RENDER_FALLBACK_COUNT; f++) {
+        const char *head = NULL, *text = NULL, *hint = NULL;
+        const int has = render_notice_words((NkRenderFallback)f, &head, &text, &hint);
+        assert(has == (f != NK_RENDER_FALLBACK_NONE && f != NK_RENDER_FALLBACK_COUNT));
+        if (!has) {
+            assert(!head && !text && !hint);
+            continue;
+        }
+        /* The player's heading for the same fact (player_render_notice_text), what happened,
+         * what it costs and what may help; short enough for the chip's three lines. */
+        assert(strcmp(head, "Drawn in software") == 0);
+        assert(strstr(text, "did not start on this PC") && strstr(text, "drawn in software") &&
+               strstr(text, "may run slower") && strstr(text, "graphics driver"));
+        assert(strlen(text) <= 160u && hint[0] && strstr(hint, "hides this"));
+    }
+    {
+        const char *head, *text, *hint;
+        assert(render_notice_words(NK_RENDER_FALLBACK_GDI_PRESENTER, &head, &text, &hint));
+        assert(strncmp(text, "Vulkan did not start", 20) == 0 && strcmp(hint, "F1 hides this") == 0);
+        assert(render_notice_words(NK_RENDER_FALLBACK_SOFTWARE_GE, &head, &text, &hint));
+        assert(strncmp(text, "The GPU renderer did not start", 30) == 0);
+        assert(strcmp(hint, "Esc or Guide opens the menu and hides this") == 0);
+    }
+
+    n.fallback = NK_RENDER_FALLBACK_SOFTWARE_GE;
+    assert(render_notice_shows(&n, 0));
+    assert(!render_notice_shows(&n, 1) && !n.dismissed);   /* the keyboard stands there */
+    assert(render_notice_shows(&n, 0));
+    assert(render_notice_dismiss(&n) && n.dismissed);
+    assert(!render_notice_shows(&n, 0) && !render_notice_dismiss(&n));
+    assert(n.fallback == NK_RENDER_FALLBACK_SOFTWARE_GE);
+
+    /* A run that could not make the in-game UI draws nothing, and a pause there hides nothing:
+     * no "hidden" is reported for a notice that never showed. */
+    memset(&n, 0, sizeof(n));
+    n.fallback = NK_RENDER_FALLBACK_SOFTWARE_GE;
+    n.unavailable = 1;
+    assert(!render_notice_shows(&n, 0));
+    assert(!render_notice_dismiss(&n) && !n.dismissed);
+}
+
+#ifdef _WIN32
+/* One frame as gdi_blit draws it: the notice's clip, the frame, the notice's band. */
+static int gdi_test_frame(HDC dc, int w, int h, const uint32_t *px, const BITMAPINFO *src,
+                          const RenderNotice *notice, GdiNoticeBand *band) {
+    const int band_h = gdi_notice_begin(dc, w, h, notice, band);
+    const int scanlines = StretchDIBits(dc, 0, 0, w, h, 0, 0, PSP_W, PSP_H, px, src,
+                                        DIB_RGB_COLORS, SRCCOPY);
+    gdi_notice_end(dc, w, h, band_h, band);
+    return scanlines;
+}
+
+/* The GDI window's frame with and without the notice, drawn into a memory bitmap with the two
+ * calls gdi_blit makes around its StretchDIBits. With nothing to say, or after the person hid it,
+ * the bitmap is byte for byte that StretchDIBits call alone; while the notice shows, only the
+ * band at the foot differs, the band is at most the lower half at any size, and drawing it again
+ * changes nothing. The first size's frame with the notice is written beside the binary for
+ * review. */
+static void selftest_gdi_notice(const char *argv0) {
+    static const struct { int w, h; } sizes[] = {
+        { 960, 544 }, { 480, 272 }, { 1920, 1088 }, { 1400, 900 }, { 240, 136 }, { 200, 600 },
+    };
+    static uint32_t px[PSP_W * PSP_H];
+    BITMAPINFO src;
+    /* No channel of the picture is as dark as the band, so a band pixel is never the picture's. */
+    for (uint32_t i = 0; i < (uint32_t)(PSP_W * PSP_H); i++)
+        px[i] = 0x00404040u | ((i * 2654435761u) >> 8);
+    memset(&src, 0, sizeof(src));
+    src.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    src.bmiHeader.biWidth = PSP_W;
+    src.bmiHeader.biHeight = -PSP_H;
+    src.bmiHeader.biPlanes = 1;
+    src.bmiHeader.biBitCount = 32;
+    src.bmiHeader.biCompression = BI_RGB;
+
+    for (size_t s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s++) {
+        const int w = sizes[s].w, h = sizes[s].h;
+        const size_t bytes = (size_t)w * (size_t)h * 4u;
+        BITMAPINFO dst = src;
+        uint32_t *bits = NULL;
+        dst.bmiHeader.biWidth = w;
+        dst.bmiHeader.biHeight = -h;
+        HDC dc = CreateCompatibleDC(NULL);
+        HBITMAP dib = CreateDIBSection(NULL, &dst, DIB_RGB_COLORS, (void **)&bits, NULL, 0);
+        uint32_t *plain = (uint32_t *)malloc(bytes), *before = (uint32_t *)malloc(bytes);
+        uint32_t *shown = (uint32_t *)malloc(bytes);
+        assert(dc && dib && bits && plain && before && shown);
+        HGDIOBJ stock = SelectObject(dc, dib);
+        RenderNotice notice;
+        GdiNoticeBand band;
+        memset(&notice, 0, sizeof(notice));
+        memset(&band, 0, sizeof(band));
+
+        /* What the presenter drew before this change. */
+        assert(StretchDIBits(dc, 0, 0, w, h, 0, 0, PSP_W, PSP_H, px, &src, DIB_RGB_COLORS, SRCCOPY) > 0);
+        GdiFlush();
+        memcpy(plain, bits, bytes);
+        memset(bits, 0, bytes);
+
+        assert(gdi_test_frame(dc, w, h, px, &src, &notice, &band) > 0);
+        GdiFlush();
+        memcpy(before, bits, bytes);
+        assert(memcmp(before, plain, bytes) == 0 && !band.dc && !band.h);
+
+        notice.fallback = NK_RENDER_FALLBACK_GDI_PRESENTER;
+        assert(gdi_test_frame(dc, w, h, px, &src, &notice, &band) > 0);
+        GdiFlush();
+        memcpy(shown, bits, bytes);
+        const int band_h = band.h;
+        assert(band.dc && band_h > 0 && band_h <= h / 2);
+        const size_t above = (size_t)w * (size_t)(h - band_h);
+        assert(memcmp(shown, before, above * 4u) == 0);
+        size_t ground = 0, words = 0;
+        for (size_t i = above; i < (size_t)w * (size_t)h; i++) {
+            const uint32_t c = shown[i] & 0x00FFFFFFu;
+            if (i < above + (size_t)w) assert(c == 0x00606068u);      /* the band's top edge */
+            else if (c == 0x0018181Cu) ground++;
+            else if ((c & 0xFFu) >= 0x80u && ((c >> 8) & 0xFFu) >= 0x80u && (c >> 16) >= 0x80u) words++;
+        }
+        assert(ground > (size_t)w * (size_t)(band_h - 1) / 2u && words > 0u);
+        if (s == 0) {
+            char path[1024];
+            (void)snprintf(path, sizeof(path), "%s.gdi_notice.ppm", argv0);
+            FILE *f = fopen(path, "wb");
+            assert(f);
+            fprintf(f, "P6\n%d %d\n255\n", w, h);
+            for (size_t i = 0; i < (size_t)w * (size_t)h; i++) {
+                const unsigned char rgb[3] = { (unsigned char)(shown[i] >> 16),
+                                               (unsigned char)(shown[i] >> 8), (unsigned char)shown[i] };
+                fwrite(rgb, 1, 3, f);
+            }
+            fclose(f);
+            printf("gui-present-selftest: the GDI frame with the render notice is in %s\n", path);
+        }
+
+        HDC kept = band.dc;
+        assert(gdi_test_frame(dc, w, h, px, &src, &notice, &band) > 0);
+        GdiFlush();
+        assert(band.dc == kept && memcmp(bits, shown, bytes) == 0);
+
+        assert(render_notice_dismiss(&notice));
+        assert(gdi_test_frame(dc, w, h, px, &src, &notice, &band) > 0);
+        GdiFlush();
+        assert(memcmp(bits, plain, bytes) == 0 && !band.dc);
+
+        SelectObject(dc, stock);
+        DeleteObject(dib);
+        DeleteDC(dc);
+        free(plain);
+        free(before);
+        free(shown);
+    }
+}
+#endif
 
 /* The unset SR_FPS_CAP default is the PSP scanout period, not a slower title-specific
  * rate: a guest may submit a framebuffer several times per scanout and every submission
@@ -3346,6 +3802,11 @@ int main(int argc, char **argv) {
     selftest_two_flips_per_scanout_present_once_per_scanout();
     selftest_burst_presents_once();
     selftest_explicit_cap_halves_scanout_flips();
+    selftest_render_notice();
+#ifdef _WIN32
+    assert(argc >= 1 && argv[0]);
+    selftest_gdi_notice(argv[0]);
+#endif
 #ifdef SR_SDL3VK
     selftest_display_busy_frames();
     selftest_held_present_passes_a_tap_to_the_game();
@@ -3353,6 +3814,7 @@ int main(int argc, char **argv) {
     selftest_stick_dead_zone_from_profile();
     selftest_busy_display_keeps_real_frames();
     selftest_render_fallback_rule(argc, argv);
+    selftest_render_notice_pause_request_hides();
 #endif
     return 0;
 }

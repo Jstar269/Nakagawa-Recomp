@@ -463,7 +463,8 @@ plus its software primitives times `NK_RENDER_FALLBACK_PRIM_US`, at least `NK_RE
 (`nk_render_fallback_cost_us`, integer microseconds, saturating at the 64-bit limit). The cost does not
 depend on how busy the rest of the scene is. Over the rule in `NK_RENDER_FALLBACK_WINDOWS` windows in a
 row, it is reported once per run as `BOOT_EVENT phase=render_fallback` (`docs/DEBUGGING.md`), and the
-native player names it on the game's page. The event's `share_pm` (the reason's share of all primitives)
+native player names it on the game's page. It is not named over the picture: the render notice in the game
+window is only for a run that started on a slower path (`docs/ENHANCEMENT_CONTRACT.md`, section 10.24). The event's `share_pm` (the reason's share of all primitives)
 is reported for the reader; the rule does not use it. Its `frames` is the span the rule watched, always
 `NK_RENDER_FALLBACK_WINDOWS` x `NK_RENDER_FALLBACK_WINDOW_FRAMES` (360) under this rule.
 

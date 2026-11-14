@@ -11,7 +11,7 @@ Nakagawa Recomp's primary architectural foundation is verifiable, measurable, an
 To prevent runtime contamination, title-specific regressions, and untracked behavior:
 
 1. **Authentic mode is authoritative:** All canonical correctness suites, hardware-oracle measurements, public acceptance tests, and private fidelity routes execute strictly with all host enhancements disabled.
-2. **Untouched baseline:** In authentic mode, the runtime and recompiled code execute with zero enhancement overhead, zero mutation of guest state, and zero host presentation deviations. The instruction trace and hardware-observable behavior remain bit-for-bit identical to standard recompilation.
+2. **Untouched baseline:** In authentic mode, the runtime and recompiled code execute with zero enhancement overhead, zero mutation of guest state, and zero host presentation deviations apart from the render notice (section 10.24), a host-window fact shown only when the run started on a slower drawing path and that changes no guest byte. The instruction trace and hardware-observable behavior remain bit-for-bit identical to standard recompilation.
 3. **Opt-in layering:** Host enhancements (such as HD texture replacement, high-refresh pacing, free cameras, or debug overlays) are explicit, isolated capabilities layered strictly above the authentic baseline.
 4. **No hidden emulator hacks:** Enhancements are never implemented as ad hoc bypasses, magic memory writes, or hardcoded addresses inside the generic runtime core.
 
@@ -645,8 +645,8 @@ keeps the inherited value, as the movie upscaler has no setting.
 
 With `SR_ACE=off` (the default: players opt in) every Ace branch sits behind one switch that stays false: the Vulkan
 device is created with no Ace feature (its one other feature setting is the destination-read path below), every
-sampler and the texture descriptor pool are as before, the presenter registers no UI pass, and the observation
-counters do not run. Nothing is printed, except one `TEX_SCALE: off` line when the environment asks for texture
+sampler and the texture descriptor pool are as before, the presenter registers no UI pass unless the render notice
+is due (section 10.24), and the observation counters do not run. Nothing is printed, except one `TEX_SCALE: off` line when the environment asks for texture
 scaling or the smart 2D filter, which names the request and does not obey it (section 10.10), one `TWIN: off` or
 `TWIN: refused` line when `SR_GPU_TWIN_COLOR` is set, which changes nothing else (section 10.11), one line that
 names an unknown or refused `SR_GPU_DST_READ` value, which changes nothing else, and the
@@ -654,6 +654,11 @@ names an unknown or refused `SR_GPU_DST_READ` value, which changes nothing else,
 have no environment variable, so an authentic run prints nothing for them. Nor has the host depth buffer (section
 10.20): an authentic run makes the 16-bit depth buffer it always made and prints nothing for it.
 `gpu-coherence-selftest` checks the samplers and the pool; `display-smoke` keeps its image hash.
+
+The render notice (section 10.24) is the one thing an authentic run may draw over the picture, and only when the run
+started on a slower drawing path than it asked for. It is drawn on the swapchain image or the GDI window, never on
+guest memory, a capture, a recording or the frame a test reads, and such a run prints its `RENDER_NOTICE:` lines. An
+authentic run with nothing to say makes no UI, registers no pass and prints none of them.
 
 One device feature setting outside Ace applies to every run, Authentic included, because it is a correctness fix and not an
 enhancement: the destination-read path of shader blends and the stencil test (#2109,
@@ -2277,6 +2282,50 @@ also needs a shadow-compare sampler and a receiver pass, and must suppress the t
 shadows draw. That is GE scene-level work, comparable to the RTX Remix seam
 ([#1330](https://github.com/Jstar269/Nakagawa-Recomp/issues/1330)), not a texture change, and this feature does not
 start it.
+
+### 10.24. The Render Notice
+
+The runtime says over the picture when it draws the game a slower way than the run asked for
+([#2151](https://github.com/Jstar269/Nakagawa-Recomp/issues/2151)). The owner decided on 2026-11-06 that the notice
+shows in Authentic mode too and that the user can dismiss it. It is not an enhancement and no play mode turns it on
+or off: it is a host-window fact, and it changes no guest byte, no capture and no recording (section 10.2).
+
+- **When.** Only for the two start-up fallbacks the `render_path` boot event names
+  ([`docs/DEBUGGING.md`](DEBUGGING.md#performance-issues)): `gdi_presenter` (SDL3/Vulkan did not start, so the
+  Windows GDI window shows a software-drawn picture) and `software_ge` (the GPU renderer was asked for and did not
+  start). A path that was not asked for (`SR_VIDEO=gdi`, `SR_GPU_GE` unset) is no fallback and shows nothing. The
+  notice has the heading the player's game page uses for the same fact, "Drawn in software", one sentence that says
+  what did not start, that the game may run slower and that updating the graphics driver may help, and the way to
+  hide it.
+- **Not in the window.** An effect the GPU renderer hands to the software rasterizer while the game runs (a
+  `render_fallback` event) is named on the game's page in the player, not over the picture: the in-game UI is made
+  at start so that no present pays for it, an authentic run with nothing to say at start makes none, and the notice
+  could name no action for the person to take.
+- **Where it is drawn.** On the Vulkan presenter, a chip at the bottom left of the window, drawn by the presenter's
+  UI pass on the swapchain image after the frame blit, through the in-game UI
+  ([`src/rt/gpu_sdl3vk/ace_ui.h`](../src/rt/gpu_sdl3vk/ace_ui.h)). The UI is made at start when the notice is due,
+  unless an Ace run made it already; a UI made only for the notice draws no Ace readout and no launch notice. The
+  chip scales with the window's display scale, wraps its words to at most three lines, stays inside the 16 px safe
+  area, and gives its place to an open on-screen keyboard. On the GDI window it is a band of text in the system's
+  message font over the foot of the picture, wrapped to the window's width and never taller than the lower half.
+- **Hiding it.** It does not fade. On the Vulkan presenter any pause hides it for the rest of the run: opening the
+  pause menu (Esc, F1 or Guide), the automatic pause when the pad goes away, and a pause request the runtime
+  refuses. The GDI window has no pause menu; F1 hides it there. Hiding it changes nothing the player is told: the
+  boot event and the game's page keep the fact. There is no setting and no environment switch.
+- **When it cannot be drawn.** A run that cannot make the in-game UI (no UI fonts, no SDL3_ttf, a Vulkan object that
+  cannot be made) prints `RENDER_NOTICE: fallback=<name> is not shown over the picture: the in-game UI is
+  unavailable (<reason>)` and reports nothing hidden at a later pause, and a GDI window too small for one line
+  prints that the notice could not be drawn. A
+  host with neither presenter has no window to draw on and reports `window_unavailable`. A run that shows it
+  prints `RENDER_NOTICE: fallback=<name> is shown over the picture until hidden`, and
+  `RENDER_NOTICE: hidden for the rest of this run` when the person hides it.
+- **Tests.** `gui-present-selftest` checks the words, when the notice shows, that the person's pause request hides
+  it through the input path every present runs and that the pad going away does not, and, on Windows, the GDI frame:
+  byte for byte the earlier `StretchDIBits` call with nothing to say or after hiding, and only the band differing
+  while it shows, at six window sizes. `ace-ui-selftest` lays the chip out at thirteen window sizes and display
+  scales, alone and beside Ace Mode's chips, and draws it on a Vulkan device, where every pixel outside the chip
+  stays the frame's. `gpu-capture-selftest` presents through a UI pass that paints the whole swapchain image and
+  checks that the capture is the guest's frame, byte for byte the capture of a present without the pass.
 
 ## 11. Guest-Visible Items
 

@@ -6,9 +6,14 @@
  *   layout  CPU only: the readout, the launch notice and the keyboard at the overlay's window
  *           sizes and two ultrawide windows: every element inside the window and its 16 px safe
  *           area, the two chips apart, the keyboard under them; an empty frame draws nothing.
+ *           The render notice (#2151) at those sizes and at small and scaled windows: at the
+ *           bottom left, inside the safe area, its words inside it, under the top chips, and
+ *           out of the keyboard's way; alone in an authentic run's frame it is wanted.
  *   gpu     on a headless Vulkan device: the pass loads an image cleared to one colour, draws
  *           the chips and the keyboard over it, and leaves every other pixel as it was. The
- *           image is written to <dir>/ace_ui_selftest.ppm for review. Exit 77 without Vulkan.
+ *           image is written to <dir>/ace_ui_selftest.ppm for review. Then the render notice
+ *           alone, as an authentic run draws it: its chip at the bottom left and every other
+ *           pixel the frame's (<dir>/ace_ui_selftest_notice.ppm). Exit 77 without Vulkan.
  *
  * Linked from ace_ui.c, osk_overlay.c, nk_ui and its Vulkan backend alone: a reference from the
  * UI pass to anything of the runtime fails the link (invariant S1). With --fonts <player
@@ -82,6 +87,18 @@ static bool text_raster(void *user, int font, int px, uint32_t glyph, NkUiGlyphB
 
 static const NkUiTextBackend k_blocks = {NULL, text_measure, text_shape, text_raster};
 
+/* The same glyphs measured as a shaping font measures: a run shaped whole comes out wider than
+ * its words measured one by one (here a twelfth of the type size for every eight bytes of a run).
+ * A line the layout engine wrapped is sized from its words, so the backend's clip to the run's
+ * box would cut its end; the render notice's lines must each be one run, measured whole. */
+static NkUiTextSize text_measure_shaped(void *user, int font, int px, const char *s, size_t n) {
+    NkUiTextSize size = text_measure(user, font, px, s, n);
+    size.width += (float)(n / 8u) * (float)px / 12.0f;
+    return size;
+}
+
+static const NkUiTextBackend k_shaped = {NULL, text_measure_shaped, text_shape, text_raster};
+
 /* ---- frames ---------------------------------------------------------------------------------- */
 
 static OskOverlay s_keyboard;
@@ -92,6 +109,13 @@ static void keyboard_open(void) {
     osk_overlay_reset(&s_keyboard);
     osk_overlay_open(&s_keyboard, desc, initial, 16, 0u);
 }
+
+/* The render notice as gui.c words it (render_notice_words, #2151): the longer of its two texts. */
+static const char k_host_head[] = "Drawn in software";
+static const char k_host_words[] =
+    "The GPU renderer did not start on this PC, so the game is drawn in software and may run "
+    "slower. Updating the graphics driver may help.";
+static const char k_host_hint[] = "Esc or Guide opens the menu and hides this";
 
 static AceUiFrame frame_full(int w, int h, float scale) {
     AceUiFrame f;
@@ -134,6 +158,43 @@ static const NkUiDrawList *build(NkUi *ui, const AceUiFrame *f, float *density) 
     nk_ui_begin(ui, f->now_s);
     ace_ui_layout(ui, f);
     return nk_ui_end(ui);
+}
+
+/* The render notice's words as the list draws them: the union of their lines' bounds, the lines
+ * joined by single spaces (a no-break space read as a space), and how many lines there are.
+ * Every line must be a run no wider, measured whole, than the box it is clipped to. */
+static int host_words(const NkUiDrawList *list, int bounds[4], char *joined, size_t cap, int w, int h) {
+    int lines = 0;
+    size_t used = 0;
+    joined[0] = '\0';
+    for (uint32_t i = 0; i < list->ncmd; i++) {
+        const NkUiDrawCmd *c = &list->cmd[i];
+        if (c->kind != NK_UI_DRAW_TEXT || c->element_id < ACE_UI_ID_HOST_NOTICE_TEXT ||
+            c->element_id >= ACE_UI_ID_HOST_NOTICE_TEXT + ACE_UI_HOST_NOTICE_LINES) continue;
+        const NkUiTextRun *run = (const NkUiTextRun *)c->custom;
+        const float whole = text_measure_shaped(NULL, run->font, run->size_px, run->text, run->length).width;
+        CHECK(whole <= (float)(c->bounds[2] - c->bounds[0]) + 1.0f,
+              "%dx%d: line %d of the render notice is %.1f px shaped whole in a %d px box: its end "
+              "would be clipped", w, h, lines, (double)whole, c->bounds[2] - c->bounds[0]);
+        if (!lines) memcpy(bounds, c->bounds, sizeof(int) * 4u);
+        if (c->bounds[0] < bounds[0]) bounds[0] = c->bounds[0];
+        if (c->bounds[1] < bounds[1]) bounds[1] = c->bounds[1];
+        if (c->bounds[2] > bounds[2]) bounds[2] = c->bounds[2];
+        if (c->bounds[3] > bounds[3]) bounds[3] = c->bounds[3];
+        if (lines && used + 1u < cap) joined[used++] = ' ';
+        for (size_t k = 0; k < run->length && used + 1u < cap; k++) {
+            if ((unsigned char)run->text[k] == 0xC2u && k + 1u < run->length &&
+                (unsigned char)run->text[k + 1u] == 0xA0u) {
+                joined[used++] = ' ';
+                k++;
+            } else {
+                joined[used++] = run->text[k];
+            }
+        }
+        joined[used] = '\0';
+        lines++;
+    }
+    return lines;
 }
 
 /* ---- layout ---------------------------------------------------------------------------------- */
@@ -184,6 +245,111 @@ static void cell_layout(void) {
                   f.pixel_h, i);
         }
     }
+    /* The render notice (#2151) at the sizes above and at small and scaled windows (a 1x game
+     * window at 200% and 150% display scale, a window smaller than the game's, a tall one): at
+     * the bottom left, inside the safe area, under the top chips, its words wrapped inside it;
+     * the open keyboard takes its place. It is laid out twice: beside Ace Mode's chips, and
+     * alone, as an authentic run's frame holds it. */
+    static const struct { int w, h; float scale; } host_sizes[] = {
+        {960, 600, 1.0f}, {1280, 800, 1.0f}, {1920, 1200, 1.5f}, {480, 272, 1.0f},
+        {960, 544, 1.0f}, {1280, 720, 1.0f}, {2560, 1080, 1.0f}, {5120, 1440, 2.0f},
+        {480, 272, 2.0f}, {720, 408, 1.5f}, {320, 180, 1.0f}, {640, 1136, 1.0f},
+        {3840, 2160, 2.0f},
+    };
+    config.text = &k_shaped;
+    NkUi *shaped = nk_ui_create(&config);
+    CHECK(shaped != NULL, "nk_ui_create (shaped text)");
+    for (size_t s = 0; shaped && s < sizeof(host_sizes) / sizeof(host_sizes[0]); s++) {
+        for (int alone = 0; alone < 2; alone++) {
+            AceUiFrame f = frame_full(host_sizes[s].w, host_sizes[s].h, host_sizes[s].scale);
+            f.keyboard = NULL;
+            if (alone) {
+                f.readout = NULL;
+                f.notice = NULL;
+            }
+            f.host_notice_head = k_host_head;
+            f.host_notice = k_host_words;
+            f.host_notice_hint = k_host_hint;
+            float density = 1.0f;
+            const NkUiDrawList *list = build(shaped, &f, &density);
+            CHECK(list != NULL, "%dx%d host: the frame was dropped", f.pixel_w, f.pixel_h);
+            if (!list) continue;
+            int readout[4], notice[4], host[4], head[4], text[4] = {0, 0, 0, 0}, hint[4];
+            char joined[512];
+            int safe = (int)(16.0f * density) - 1;
+            CHECK(element_bounds(list, ACE_UI_ID_HOST_NOTICE, host), "%dx%d: no render notice",
+                  f.pixel_w, f.pixel_h);
+            const int lines = host_words(list, text, joined, sizeof(joined), f.pixel_w, f.pixel_h);
+            CHECK(element_bounds(list, ACE_UI_ID_HOST_NOTICE_HEAD, head) && lines >= 1 &&
+                  element_bounds(list, ACE_UI_ID_HOST_NOTICE_HINT, hint),
+                  "%dx%d: the render notice lacks its heading, words or hint", f.pixel_w, f.pixel_h);
+            /* Every word is there, on two or three lines: nothing was cut or ended in an ellipsis. */
+            CHECK(lines >= 2 && lines <= ACE_UI_HOST_NOTICE_LINES && strcmp(joined, k_host_words) == 0,
+                  "%dx%d: the render notice's %d line(s) read \"%s\"", f.pixel_w, f.pixel_h, lines,
+                  joined);
+            CHECK(host[0] >= safe && host[1] >= safe && host[2] <= f.pixel_w - safe &&
+                  host[3] <= f.pixel_h - safe, "%dx%d: the render notice (%d,%d)-(%d,%d) leaves the "
+                  "safe area", f.pixel_w, f.pixel_h, host[0], host[1], host[2], host[3]);
+            CHECK(host[0] < f.pixel_w / 2 && host[3] > f.pixel_h / 2 && host[3] >= f.pixel_h - safe - 4,
+                  "%dx%d: the render notice is not at the bottom left", f.pixel_w, f.pixel_h);
+            CHECK(head[0] >= host[0] && head[2] <= host[2] && head[1] >= host[1] &&
+                  text[0] >= host[0] && text[2] <= host[2] && text[1] >= head[3] &&
+                  hint[0] >= host[0] && hint[2] <= host[2] && hint[1] >= text[3] && hint[3] <= host[3],
+                  "%dx%d: the heading, words and hint are not one under the other inside the render "
+                  "notice", f.pixel_w, f.pixel_h);
+            if (alone) {
+                CHECK(!element_bounds(list, ACE_UI_ID_READOUT, readout) &&
+                      !element_bounds(list, ACE_UI_ID_NOTICE, notice),
+                      "%dx%d: an authentic frame drew an Ace chip", f.pixel_w, f.pixel_h);
+            } else {
+                CHECK(element_bounds(list, ACE_UI_ID_READOUT, readout) &&
+                      element_bounds(list, ACE_UI_ID_NOTICE, notice), "%dx%d host: no top chips",
+                      f.pixel_w, f.pixel_h);
+                CHECK(host[1] >= readout[3] && host[1] >= notice[3],
+                      "%dx%d: the render notice covers a chip", f.pixel_w, f.pixel_h);
+            }
+            for (uint32_t i = 0; i < list->ncmd; i++) {
+                const NkUiDrawCmd *c = &list->cmd[i];
+                if (c->kind == NK_UI_DRAW_SCISSOR_START || c->kind == NK_UI_DRAW_SCISSOR_END) continue;
+                CHECK(c->bounds[0] >= 0 && c->bounds[1] >= 0 && c->bounds[2] <= f.pixel_w &&
+                      c->bounds[3] <= f.pixel_h, "%dx%d host: command %u outside the window",
+                      f.pixel_w, f.pixel_h, i);
+            }
+            f.keyboard = &s_keyboard;
+            list = build(shaped, &f, &density);
+            CHECK(list && !element_bounds(list, ACE_UI_ID_HOST_NOTICE, host) &&
+                  element_bounds(list, ACE_UI_ID_KEYBOARD, host),
+                  "%dx%d: the render notice did not step aside for the keyboard", f.pixel_w, f.pixel_h);
+        }
+    }
+    /* Words too long for three lines end in an ellipsis on the third; nothing spills out. */
+    if (shaped) {
+        static const char k_long[] =
+            "one two three four five six seven eight nine ten eleven twelve thirteen fourteen "
+            "fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three "
+            "twenty-four twenty-five twenty-six twenty-seven twenty-eight twenty-nine thirty "
+            "thirty-one thirty-two thirty-three thirty-four thirty-five thirty-six thirty-seven";
+        AceUiFrame f = frame_full(960, 544, 1.0f);
+        f.keyboard = NULL;
+        f.host_notice_head = k_host_head;
+        f.host_notice = k_long;
+        f.host_notice_hint = k_host_hint;
+        float density = 1.0f;
+        int host[4], text[4] = {0, 0, 0, 0};
+        char joined[512];
+        const NkUiDrawList *list = build(shaped, &f, &density);
+        CHECK(list && element_bounds(list, ACE_UI_ID_HOST_NOTICE, host), "long words: no render notice");
+        if (list) {
+            const int lines = host_words(list, text, joined, sizeof(joined), f.pixel_w, f.pixel_h);
+            const size_t n = strlen(joined);
+            CHECK(lines == ACE_UI_HOST_NOTICE_LINES && n > 3u && strcmp(joined + n - 3u, "\xE2\x80\xA6") == 0 &&
+                  strncmp(joined, k_long, n - 3u) == 0,
+                  "long words: %d line(s) read \"%s\"", lines, joined);
+            CHECK(text[0] >= host[0] && text[2] <= host[2] && text[3] <= host[3],
+                  "long words: the lines leave the render notice");
+        }
+        nk_ui_destroy(shaped);
+    }
     /* Nothing to show: no frame is wanted, and a hidden notice draws nothing. */
     AceUiFrame empty;
     memset(&empty, 0, sizeof(empty));
@@ -201,6 +367,15 @@ static void cell_layout(void) {
     closed.readout = NULL;
     closed.notice = NULL;
     CHECK(!ace_ui_frame_wants(&closed), "a closed keyboard is wanted");
+    /* An authentic run's frame holds the render notice alone: wanted then, and only then. */
+    empty.notice = NULL;
+    empty.host_notice_head = k_host_head;
+    empty.host_notice_hint = k_host_hint;
+    CHECK(!ace_ui_frame_wants(&empty), "a render notice with no words is wanted");
+    empty.host_notice = "";
+    CHECK(!ace_ui_frame_wants(&empty), "an empty render notice is wanted");
+    empty.host_notice = k_host_words;
+    CHECK(ace_ui_frame_wants(&empty), "the render notice alone is not wanted");
     nk_ui_destroy(ui);
 }
 
@@ -541,6 +716,30 @@ static int cell_gpu(const char *dir, const char *fonts_root) {
         snprintf(path, sizeof(path), "%s%sace_ui_selftest.ppm", dir ? dir : "", dir ? "/" : "");
         write_ppm(path, w, h);
         printf("ace-ui-selftest: gpu frame written to %s\n", path);
+        /* An authentic run's render notice alone (#2151): its chip covers the bottom left; the
+         * rest of the frame, the top corners and the safe area stay the game's. Hidden again,
+         * the pass draws nothing and the frame is the game's everywhere. */
+        AceUiFrame host;
+        memset(&host, 0, sizeof(host));
+        host.pixel_w = w;
+        host.pixel_h = h;
+        host.display_scale = 1.0f;
+        host.host_notice_head = k_host_head;
+        host.host_notice = k_host_words;
+        host.host_notice_hint = k_host_hint;
+        CHECK(present(ui, &host, w, h, 0) == 1, "the render notice did not draw");
+        CHECK(pixel(w, 24, h - 24) != frame_colour, "no render notice at the bottom left");
+        CHECK(pixel(w, 22, 22) == frame_colour && pixel(w, w - 22, 22) == frame_colour &&
+              pixel(w, w / 2, h / 2) == frame_colour && pixel(w, w - 24, h - 24) == frame_colour,
+              "the render notice changed the frame outside its chip");
+        CHECK(pixel(w, 8, h - 8) == frame_colour && pixel(w, 8, 8) == frame_colour,
+              "the render notice changed the safe area");
+        snprintf(path, sizeof(path), "%s%sace_ui_selftest_notice.ppm", dir ? dir : "", dir ? "/" : "");
+        write_ppm(path, w, h);
+        printf("ace-ui-selftest: render notice frame written to %s\n", path);
+        host.host_notice = NULL;
+        CHECK(present(ui, &host, w, h, 0) == 0, "a hidden render notice drew");
+        CHECK(pixel(w, 24, h - 24) == frame_colour, "a hidden render notice left its chip");
         ace_ui_destroy(ui);
     }
 #if defined(NK_UI_WITH_SDL_TTF)
