@@ -373,6 +373,180 @@ static void test_mouse_aim_settings(void) {
 }
 
 /* -----------------------------------------------------------------------------
+ * The Controls page's mouse aiming settings (#1791): its steps stay on their grid,
+ * it opens and closes, it is the keyboard and mouse's to reset, and what it sets
+ * is what a launched game is handed and what moves that game's stick.
+ * -------------------------------------------------------------------------- */
+static void test_mouse_aim_page(void) {
+    printf("[INPUT_SETTINGS_TEST] Mouse aiming page: steps, open and close, reset, handoff (#1791)...\n");
+    InputSettingsState state;
+    char diag[NK_INPUT_DIAGNOSTIC_MAX_LEN];
+    char file_path[512];
+    snprintf(file_path, sizeof(file_path), "%s/mouse_aim_page_profile.json", SR_SELFTEST_BUILD_ROOT);
+    remove(file_path);
+    input_settings_init(&state);
+    snprintf(state.profile_path, sizeof(state.profile_path), "%s", file_path);
+
+    /* The speed: every 10 up to 200, every 50 from there to the top, and back the same way.
+       A step that changes nothing does not mark the mapping changed, so nothing is written. */
+    assert(state.profile.aim.sensitivity == 100 && !state.dirty);
+    assert(input_settings_step_aim_sensitivity(&state, 1) && state.profile.aim.sensitivity == 110 &&
+           state.dirty);
+    assert(input_settings_step_aim_sensitivity(&state, -1) && state.profile.aim.sensitivity == 100);
+    for (int v = 110; v <= INPUT_AIM_SPEED_COARSE_FROM; v += INPUT_AIM_SPEED_FINE_STEP) {
+        assert(input_settings_step_aim_sensitivity(&state, 1) && state.profile.aim.sensitivity == v);
+    }
+    for (int v = 250; v <= NK_AIM_SENSITIVITY_MAX; v += INPUT_AIM_SPEED_COARSE_STEP) {
+        assert(input_settings_step_aim_sensitivity(&state, 1) && state.profile.aim.sensitivity == v);
+    }
+    state.dirty = false;
+    assert(!input_settings_step_aim_sensitivity(&state, 1) &&
+           state.profile.aim.sensitivity == NK_AIM_SENSITIVITY_MAX && !state.dirty);
+    for (int v = 950; v >= INPUT_AIM_SPEED_COARSE_FROM; v -= INPUT_AIM_SPEED_COARSE_STEP) {
+        assert(input_settings_step_aim_sensitivity(&state, -1) && state.profile.aim.sensitivity == v);
+    }
+    for (int v = 190; v >= INPUT_AIM_SPEED_FINE_STEP; v -= INPUT_AIM_SPEED_FINE_STEP) {
+        assert(input_settings_step_aim_sensitivity(&state, -1) && state.profile.aim.sensitivity == v);
+    }
+    state.dirty = false;
+    assert(!input_settings_step_aim_sensitivity(&state, -1) &&
+           state.profile.aim.sensitivity == INPUT_AIM_SPEED_FINE_STEP && !state.dirty);
+    /* A value between two steps (a hand-edited profile) moves onto the grid in the direction
+       pressed; one under the lowest step stays until it is stepped up. */
+    static const struct { int from; int direction; int to; } off_grid[] = {
+        {203, 1, 250}, {203, -1, 200}, {13, 1, 20}, {13, -1, 10}, {199, 1, 200}, {201, -1, 200},
+        {999, 1, 1000}, {999, -1, 950}, {7, 1, 10}, {7, -1, 7}, {1, -1, 1}, {1, 1, 10}
+    };
+    for (size_t i = 0; i < sizeof(off_grid) / sizeof(off_grid[0]); i++) {
+        state.profile.aim.sensitivity = (int16_t)off_grid[i].from;
+        bool moved = input_settings_step_aim_sensitivity(&state, off_grid[i].direction);
+        assert(state.profile.aim.sensitivity == off_grid[i].to);
+        assert(moved == (off_grid[i].from != off_grid[i].to));
+    }
+
+    /* The smoothing: every 5 from 0 to NK_AIM_SMOOTHING_MAX. */
+    assert(state.profile.aim.smoothing == 0);
+    state.dirty = false;
+    assert(!input_settings_step_aim_smoothing(&state, -1) && state.profile.aim.smoothing == 0 &&
+           !state.dirty);
+    for (int v = INPUT_AIM_SMOOTHING_STEP; v <= NK_AIM_SMOOTHING_MAX; v += INPUT_AIM_SMOOTHING_STEP) {
+        assert(input_settings_step_aim_smoothing(&state, 1) && state.profile.aim.smoothing == v &&
+               state.dirty);
+    }
+    state.dirty = false;
+    assert(!input_settings_step_aim_smoothing(&state, 1) &&
+           state.profile.aim.smoothing == NK_AIM_SMOOTHING_MAX && !state.dirty);
+    state.profile.aim.smoothing = 93;
+    assert(input_settings_step_aim_smoothing(&state, 1) && state.profile.aim.smoothing == 95);
+    state.profile.aim.smoothing = 93;
+    assert(input_settings_step_aim_smoothing(&state, -1) && state.profile.aim.smoothing == 90);
+    state.profile.aim.smoothing = 3;
+    assert(input_settings_step_aim_smoothing(&state, -1) && state.profile.aim.smoothing == 0);
+    assert(!input_settings_step_aim_sensitivity(NULL, 1) && !input_settings_step_aim_smoothing(NULL, 1));
+
+    /* The page opens from the keyboard keys and stops a wait for a key; Done, choosing a
+       device and leaving the Controls page all close it. */
+    input_settings_set_device(&state, INPUT_DEVICE_KEYBOARD);
+    assert(!input_settings_aim_is_open(&state) && !input_settings_aim_is_open(NULL));
+    assert(input_settings_start_capture(&state, INPUT_CONTROL_BTN_START) &&
+           input_settings_is_capturing(&state));
+    input_settings_open_aim(&state);
+    assert(input_settings_aim_is_open(&state) && !input_settings_is_capturing(&state));
+    input_settings_close_aim(&state);
+    assert(!input_settings_aim_is_open(&state));
+    input_settings_open_aim(&state);
+    input_settings_set_device(&state, INPUT_DEVICE_CONTROLLER);
+    assert(!input_settings_aim_is_open(&state));
+    input_settings_set_device(&state, INPUT_DEVICE_KEYBOARD);
+    input_settings_open_aim(&state);
+    assert(input_settings_flush(&state) == NK_OK && !input_settings_aim_is_open(&state));
+    input_settings_open_aim(NULL);
+    input_settings_close_aim(NULL);
+
+    /* Reset to defaults: mouse aiming is the keyboard and mouse's. The controller's reset
+       leaves it as set, with the keys; the keyboard's turns it off at the default speed and
+       leaves the controller's buttons. */
+    NkBindingSource left_stick = { NK_BINDING_HOST_BUTTON, NK_HOST_BUTTON_LEFT_STICK, 0 };
+    state.profile.aim.sensitivity = 150;
+    state.profile.aim.smoothing = 40;
+    assert(input_settings_set_aim_mouse(&state, true));
+    assert(input_settings_toggle_aim_invert(&state, NK_PSP_AXIS_ANALOG_X));
+    assert(input_settings_assign_binding(&state, INPUT_CONTROL_BTN_START, left_stick));
+    input_settings_set_device(&state, INPUT_DEVICE_CONTROLLER);
+    input_settings_reset_device_to_defaults(&state);
+    assert(state.profile.psp_buttons[INPUT_CONTROL_BTN_START].primary.index == NK_HOST_BUTTON_START);
+    assert(state.profile.aim.mouse && state.profile.aim.sensitivity == 150 &&
+           state.profile.aim.smoothing == 40 && state.profile.aim.invert_x &&
+           !state.profile.aim.invert_y);
+    assert(input_settings_assign_binding(&state, INPUT_CONTROL_BTN_START, left_stick));
+    input_settings_set_device(&state, INPUT_DEVICE_KEYBOARD);
+    input_settings_reset_device_to_defaults(&state);
+    assert(!state.profile.aim.mouse && state.profile.aim.sensitivity == NK_AIM_SENSITIVITY_DEFAULT &&
+           state.profile.aim.smoothing == 0 && !state.profile.aim.invert_x);
+    assert(state.profile.psp_buttons[INPUT_CONTROL_BTN_START].primary.index ==
+           NK_HOST_BUTTON_LEFT_STICK);
+
+    /* What the page sets reaches a running game. The file a launched game is handed
+       (NK_INPUT_PROFILE) is read with the runtime's own loader, and the runtime's own
+       nk_aim_apply turns a poll's mouse movement into the stick: off, the stick stays at
+       rest; on at 200% with left and right inverted, 4 counts right are half deflection to
+       the left (4 * 200% of the 16 counts that are full deflection), where 100% uninverted
+       would be a quarter to the right. */
+    {
+        char handed_path[NK_MAX_PATH] = {0};
+        NkInputProfile handed;
+        NkAimState aim_state;
+        uint8_t lx = 128, ly = 128;
+        assert(input_settings_save_if_dirty(&state) == NK_OK && !state.dirty);
+        assert(input_settings_write_disc_profile(&state, "UCUS98701", handed_path, sizeof(handed_path),
+                                                 diag, sizeof(diag)) == NK_OK);
+        assert(nk_input_profile_load(&handed, handed_path, diag, sizeof(diag)) == NK_OK);
+        nk_aim_state_reset(&aim_state);
+        assert(!handed.aim.mouse && !nk_aim_apply(&handed.aim, &aim_state, 4, 0, &lx, &ly) &&
+               lx == 128 && ly == 128);
+
+        assert(input_settings_set_aim_mouse(&state, true));
+        while (state.profile.aim.sensitivity < 200) {
+            assert(input_settings_step_aim_sensitivity(&state, 1));
+        }
+        assert(state.profile.aim.sensitivity == 200);
+        assert(input_settings_toggle_aim_invert(&state, NK_PSP_AXIS_ANALOG_X));
+        assert(input_settings_save_if_dirty(&state) == NK_OK && !state.dirty);
+        assert(input_settings_write_disc_profile(&state, "UCUS98701", handed_path, sizeof(handed_path),
+                                                 diag, sizeof(diag)) == NK_OK);
+        assert(nk_input_profile_load(&handed, handed_path, diag, sizeof(diag)) == NK_OK);
+        assert(handed.aim.mouse && handed.aim.sensitivity == 200 && handed.aim.invert_x &&
+               !handed.aim.invert_y && handed.aim.smoothing == 0);
+        nk_aim_state_reset(&aim_state);
+        lx = ly = 128;
+        assert(nk_aim_apply(&handed.aim, &aim_state, 4, 0, &lx, &ly));
+        assert(lx == 128 - 63 && ly == 128);
+
+        /* A game's own mapping carries its own aiming, and the global one keeps its own. */
+        assert(input_settings_set_scope(&state, "UCUS98701"));
+        assert(state.profile.aim.mouse && state.profile.aim.sensitivity == 200);
+        assert(input_settings_set_aim_mouse(&state, false));
+        assert(input_settings_save_if_dirty(&state) == NK_OK);
+        assert(input_settings_write_disc_profile(&state, "UCUS98701", handed_path, sizeof(handed_path),
+                                                 diag, sizeof(diag)) == NK_OK);
+        assert(nk_input_profile_load(&handed, handed_path, diag, sizeof(diag)) == NK_OK);
+        assert(!handed.aim.mouse);
+        assert(input_settings_set_scope(&state, NULL) && state.profile.aim.mouse);
+        remove(handed_path);
+    }
+
+    /* A new run reads the saved file back. */
+    {
+        InputSettingsState again;
+        assert(input_settings_load(&again, file_path) == NK_OK && !again.has_load_diagnostic);
+        assert(again.profile.aim.mouse && again.profile.aim.sensitivity == 200 &&
+               again.profile.aim.invert_x && !input_settings_aim_is_open(&again));
+    }
+    remove(file_path);
+    printf("[INPUT_SETTINGS_TEST] Mouse aiming page PASSED!\n");
+}
+
+/* -----------------------------------------------------------------------------
  * 6. Reset to Defaults
  * -------------------------------------------------------------------------- */
 static void test_reset_to_defaults(void) {
@@ -1433,6 +1607,7 @@ int main(void) {
     test_deadzone_and_trigger_bounds();
     test_reset_to_defaults();
     test_mouse_aim_settings();
+    test_mouse_aim_page();
     test_save_load_roundtrip();
     test_sr_padscript_semantics_untouched();
     test_env_clearing_consistency();

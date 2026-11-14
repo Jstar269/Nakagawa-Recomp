@@ -282,6 +282,11 @@ typedef enum {
                                   shadows get soft edges; Ace only, and a title whose package declares
                                   none ignores it. Appended after pad; the Ace line writes shadow after
                                   pad, before cull */
+    PLAYER_PART_PEAK,          /* unclipped sound (#2137, section 10.22): 0 off, 1 limit. The host plays
+                                  SAS mixes unsaturated, through a true-peak limiter; the guest's SAS
+                                  bytes are the PSP's. Enhanced and Ace; off in a fresh file and in
+                                  every preset. Appended; the Ace line writes peak after ssaa, before
+                                  texpack */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -1845,6 +1850,8 @@ void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
  * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
  * ";ssaa=2" or ";ssaa=4" follows with the Supersampling part on, in either tier.
+ * ";peak=limit" follows ssaa, before texpack, with the Unclipped sound part on, in either tier;
+ * a missing peak is off.
  * ";texpack=on" follows only with the Texture pack part on for a title that has a pack, in
  * either tier; a missing texpack is off.
  * ";pad=late" follows texpack, before cull, only for Ace with the Late pad sampling part on; a
