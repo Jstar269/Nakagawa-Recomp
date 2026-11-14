@@ -5827,6 +5827,33 @@ class NativePlayerUiTests(unittest.TestCase):
         for words in self.EVERY_PART_WORDS:
             self.assertIn(words, ace)
 
+    def test_next_ui_play_line_names_texture_scaling_and_smart_2d(self) -> None:
+        """The game page's play line names Texture scaling with its factor and the Smart 2D filter
+        (with its capital D) when the settings file turns them on, at the library's level and at
+        the title's own, and names neither while they are off."""
+        def play_line(enhanced: dict[str, str], title: dict[str, str]) -> str:
+            settings = {"enhanced": {"default": "enhanced", **enhanced},
+                        "title_play": {"TEST00006": title}}
+            run = self.next_ui_run(
+                "ready", ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300"),
+                post_build_ready=True, wait_background=True, settings=settings,
+                enhancement_packages={"TEST00006": "display-smoke-v1"})
+            lines = re.findall(r"next_ui_title_play_line disc=TEST00006 line=(.+?)\r?$",
+                               str(run["stdout"]), re.M)
+            self.assertTrue(lines, run["stdout"])
+            return str(lines[-1])
+
+        off = play_line({}, {"mode": "enhanced"})
+        self.assertTrue(off.startswith("Enhanced for this game: "), off)
+        self.assertNotIn("texture scaling", off)
+        self.assertNotIn("smart 2", off)
+        library = play_line({"texscale": "4", "smart2d": "on"}, {"mode": "enhanced"})
+        self.assertTrue(library.endswith("4x texture scaling, smart 2D filter."), library)
+        own = play_line({"texscale": "4", "smart2d": "on"},
+                        {"mode": "enhanced", "texscale": "6", "smart2d": "off"})
+        self.assertTrue(own.endswith("6x texture scaling."), own)
+        self.assertNotIn("smart 2", own)
+
     def culling_play_line(self, steps: int, culling: dict[str, object]) -> str:
         """The packaged TEST00006's play line with every part on in the library (Wider culling
         among them) and `culling` as its culling package, its own play mode stepped `steps`

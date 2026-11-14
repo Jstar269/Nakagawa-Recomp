@@ -2804,7 +2804,11 @@ static void player_ui_title_ace(PlayerUiNk *player, const PlayerApp *app, int in
             } else {
                 snprintf(part, sizeof(part), "%s", info->name);
             }
-            for (char *c = part; *c; c++) *c = (char)tolower((unsigned char)*c);
+            /* Lower case, but for a "2D": the Smart 2D filter reads "smart 2D filter". */
+            for (char *c = part; *c; c++) {
+                if (*c == 'D' && c > part && c[-1] >= '0' && c[-1] <= '9') continue;
+                *c = (char)tolower((unsigned char)*c);
+            }
             int n = snprintf(words + used, sizeof(words) - used, "%s%s", count ? ", " : "", part);
             if (n < 0 || used + (size_t)n >= sizeof(words)) break;
             used += (size_t)n;

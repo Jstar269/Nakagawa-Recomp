@@ -1207,6 +1207,9 @@ static const char *const k_part_pad_words[] = {"late", "off"};
 static const char *const k_part_shadow_words[] = {"soft", "off"};
 static const char *const k_part_upscale_labels[] = {"FSR 1", "Off"};
 static const char *const k_part_upscale_words[] = {"fsr1", "off"};
+static const int k_part_texscale_values[] = {2, 3, 4, 5, 6, 0};
+static const char *const k_part_texscale_labels[] = {"2x", "3x", "4x", "5x", "6x", "Off"};
+static const char *const k_part_texscale_words[] = {"2", "3", "4", "5", "6", "off"};
 
 static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"af", "Texture filtering",
@@ -1288,6 +1291,18 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"shadow", "Soft shadows",
      "Ace only, in games whose package names their shadows. Changes what the frame shows.",
      2, k_part_switch_values, k_part_switch_labels, k_part_shadow_words, 0},
+    /* Guest-visible items (contract 10.10 and 11.3.3): every present commits the frame, scaled copies
+       and nearest 2D draws included, to guest VRAM. Off by default and in no preset until their
+       "nothing worse" runs exist (11.2 item 4), each with its own off switch in the library and each
+       title (item 2). Smart 2D makes anti-aliased glyph text blocky, which its sentence says. Each
+       sentence fits two lines beside its button at the design text size: a third line would move
+       every row's sentence under its button (scr_wizard_column). */
+    {"texscale", "Texture scaling",
+     "Redraws textures with xBRZ. Uses GPU memory; the game receives changed pictures.",
+     6, k_part_texscale_values, k_part_texscale_labels, k_part_texscale_words, 0},
+    {"smart2d", "Smart 2D filter",
+     "Sharp HUD art above 1x, but blocky soft text. The game receives changed pictures.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -2491,15 +2506,16 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    section 10.11, #2280) is on in Ultra and left to the library in every other preset. No row
    sets frame pacing, Smooth motion, Widescreen, texture filtering, sound, the readout, the
    badge, Finer patches (which changes GE timing, section 11.3.7), Short loads (which changes
-   guest timing, section 11.3.10), a texture pack (the title's own, 11.3.4) or Soft shadows
-   (the title's own declared shadows, 11.3.13): those stay the library's and each game's own.
+   guest timing, section 11.3.10), a texture pack (the title's own, 11.3.4), Soft shadows
+   (the title's own declared shadows, 11.3.13), Texture scaling or the Smart 2D filter (both
+   reach the guest and are not admitted, 11.3.3): those stay the library's and each game's own.
    docs/PLAYER_UI_DESIGN.md lists the same values, and test_graphics_presets checks that every
    other part is -1, so a new part needs a choice. */
 #define PRESET_PART_LIST(X, text, upscale, twin)                                          \
     X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
     X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1)    \
     X(TWIN, (twin)) X(SSAA, -1) X(MIPS, -1) X(TEXPACK, -1)                                \
-    X(PAD, -1) X(SHADOW, -1)
+    X(PAD, -1) X(SHADOW, -1) X(TEXSCALE, -1) X(SMART2D, -1)
 #define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
 #define PRESET_PART_ONE(part, value) + 1
 #define PRESET_PARTS(text, upscale, twin) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale, twin)}
@@ -3395,10 +3411,11 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
         /* The upscaler travels as SR_PRESENT_UPSCALE (player_play_present_upscale), which the
            launcher exports for every session; the runtime's SR_ACE line has no such key. Stick,
-           load, ssaa, texpack, pad, shadow and cull come last, in the Ace line's own order
-           (src/rt/ace.c), whatever the enum's. */
+           load, ssaa, texpack, pad, shadow, texscale, smart2d and cull come last, in the Ace line's
+           own order (src/rt/ace.c), whatever the enum's. */
         if (p == PLAYER_PART_UPSCALE || p == PLAYER_PART_STICK || p == PLAYER_PART_LOAD ||
             p == PLAYER_PART_SSAA || p == PLAYER_PART_TEXPACK || p == PLAYER_PART_SHADOW ||
+            p == PLAYER_PART_TEXSCALE || p == PLAYER_PART_SMART2D ||
             p == PLAYER_PART_CULL) continue;
         /* A missing mips is off (contract 11.3.8): the key is written only when the part is on,
            right after twin. */
@@ -3453,6 +3470,22 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_SHADOW] == 1) {
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_SHADOW].key,
                      enhanced_part_word(PLAYER_PART_SHADOW, 1));
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
+    }
+    /* Texture scaling and the smart 2D filter are Enhanced parts (contract 10.10, 11.3.3): either
+       tier carries texscale=<factor> and smart2d=on, each only when on, after shadow and before
+       cull, as ace_format writes them. A missing key is off, so a line with both off is the line
+       from before the parts. */
+    if (play->part[PLAYER_PART_TEXSCALE] >= 2 && play->part[PLAYER_PART_TEXSCALE] <= ACE_TEXSCALE_MAX) {
+        n = snprintf(out + used, cap - used, ";%s=%d", k_enhanced_parts[PLAYER_PART_TEXSCALE].key,
+                     play->part[PLAYER_PART_TEXSCALE]);
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
+    }
+    if (play->part[PLAYER_PART_SMART2D] == 1) {
+        n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_SMART2D].key,
+                     enhanced_part_word(PLAYER_PART_SMART2D, 1));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
     }

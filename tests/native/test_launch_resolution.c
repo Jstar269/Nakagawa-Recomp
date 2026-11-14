@@ -913,6 +913,26 @@ static void test_no_iso_child_environment(const char *test_executable,
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
     session.config.texpack_dir[0] = '\0';
 
+    /* A line with texscale and smart2d reaches the runtime whole (contract section 10.10): the
+       launcher exports the session's line as SR_ACE and adds no variable of its own for either. */
+    snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
+             "v1;tier=enhanced;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off;"
+             "texscale=4;smart2d=on");
+    assert(nk_launch_start(&session) == NK_OK);
+    child_exit = nk_launch_wait(&session, -1);
+    nk_launch_stop(&session);
+    assert(child_exit == 0);
+    report = fopen(report_path, "rb");
+    assert(report != NULL);
+    observed_size = fread(observed, 1, sizeof(observed) - 1, report);
+    observed[observed_size] = '\0';
+    assert(!ferror(report));
+    assert(fclose(report) == 0);
+    assert(strstr(observed, "SR_ACE=v1;tier=enhanced;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;"
+                            "sas=off;tess=off;twin=off;texscale=4;smart2d=on\n") != NULL);
+    assert(strstr(observed, "SR_TEX_REPLACE=\n") != NULL);   /* no pack rides along */
+    snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
+
     /* #2143: an imported homebrew program runs from its Memory Stick folder. The import's
        copy of the folder it was picked from sits beside its disc image ("<image>.ms0",
        nk_pbp_homebrew.h); the launch puts it on the title's Memory Stick and boots

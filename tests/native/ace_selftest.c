@@ -8,7 +8,7 @@
  * ace.c to any runtime function fails the link, which is invariant S1's link test for ace.c.
  */
 /* glibc hides setenv under strict C99 unless a POSIX feature level is selected before any system
- * header is included (the --retired-env mode below sets SR_GLYPHS). */
+ * header is included (the --retired-env mode below sets SR_GLYPHS, SR_TEX_SCALE or SR_SMART_2D). */
 #ifndef _WIN32
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -485,6 +485,108 @@ static void cell_parse(void) {
                   "the line with shadow, texpack and cull round-trips (%s)", out);
         }
     }
+    /* texscale and smart2d (contract 10.10, 11.3.3): optional like texpack, in an Enhanced or an Ace
+       line; a missing key and its off word are both off, a line without them formats as before, and
+       any value outside off, 2..6 (texscale) or on, off (smart2d) refuses the line. */
+    {
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.texscale == 0 && c.smart2d == 0,
+              "a missing texscale and a missing smart2d are off");
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out, "v1;tier=enhanced;af=16;text=on;readout=off;"
+                  "notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off") == 0,
+              "a line without the two keys formats as it did before them (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;texscale=off;smart2d=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.texscale == 0 && c.smart2d == 0,
+              "texscale=off and smart2d=off are off (%s)", why);
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "texscale") == NULL && strstr(out, "smart2d") == NULL,
+              "off writes neither key (%s)", out);
+        for (int f = 2; f <= ACE_TEXSCALE_MAX; f++) {
+            char tail[32];
+            snprintf(spec, sizeof(spec), "%s;texscale=%d", base, f);
+            snprintf(tail, sizeof(tail), ";texscale=%d", f);
+            CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.texscale == f && c.smart2d == 0 &&
+                      c.tier == ACE_TIER_ENHANCED, "texscale=%d in an Enhanced line (%s)", f, why);
+            CHECK(ace_format(&c, out, sizeof(out)) && strlen(out) > strlen(tail) &&
+                      strcmp(out + strlen(out) - strlen(tail), tail) == 0,
+                  "texscale=%d formats with the key last in a line without cull (%s)", f, out);
+        }
+        snprintf(spec, sizeof(spec), "%s;smart2d=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.smart2d == 1 && c.texscale == 0 &&
+                  c.tier == ACE_TIER_ENHANCED, "smart2d=on alone in an Enhanced line (%s)", why);
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 11, ";smart2d=on") == 0,
+              "smart2d=on formats with the key last (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;tier=ace;smart2d=on;texscale=4", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.texscale == 4 && c.smart2d == 1 &&
+                  c.tier == ACE_TIER_ACE, "both keys in an Ace line, in any order (%s)", why);
+        {
+            static const char *const bad_scale[] = { "1", "7", "0", "on", "x2", "44", "4x", " 4", "2.0", "-2", "Off" };
+            static const char *const bad_smart[] = { "yes", "1", "2", "On", "on ", "nearest" };
+            for (size_t i = 0; i < sizeof(bad_scale) / sizeof(bad_scale[0]); i++) {
+                snprintf(spec, sizeof(spec), "%s;texscale=%s", base, bad_scale[i]);
+                CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "bad value") == 0 &&
+                          c.on == 0 && c.texscale == 0, "texscale=%s is a bad value (%s)", bad_scale[i], why);
+            }
+            for (size_t i = 0; i < sizeof(bad_smart) / sizeof(bad_smart[0]); i++) {
+                snprintf(spec, sizeof(spec), "%s;smart2d=%s", base, bad_smart[i]);
+                CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "bad value") == 0 &&
+                          c.on == 0 && c.smart2d == 0, "smart2d=%s is a bad value (%s)", bad_smart[i], why);
+            }
+        }
+        snprintf(spec, sizeof(spec), "%s;texscale=", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0, "texscale with no value is refused");
+        snprintf(spec, sizeof(spec), "%s;texscale=2;texscale=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate texscale");
+        snprintf(spec, sizeof(spec), "%s;smart2d=on;smart2d=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate smart2d");
+        /* The project's one key order: shadow, texscale, smart2d, cull last, whatever order a line uses. */
+        snprintf(spec, sizeof(spec), "%s;cull=on;smart2d=on;texscale=6;shadow=soft;tier=ace;texpack=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.texscale == 6 && c.smart2d == 1 && c.cull == 1 &&
+                  ace_format(&c, out, sizeof(out)) &&
+                  strcmp(out + strlen(out) - 53, ";texpack=on;shadow=soft;texscale=6;smart2d=on;cull=on") == 0,
+              "texpack, shadow, texscale, smart2d and cull format in that order, cull last (%s)", out);
+        {
+            AceConfig back;
+            CHECK(ace_parse(out, &back, why, sizeof(why)) == 1 && memcmp(&back, &c, sizeof(c)) == 0,
+                  "the line with texscale, smart2d and cull round-trips (%s)", out);
+        }
+    }
+    /* SR_TEX_SCALE and SR_SMART_2D, retired by those keys: set to anything, "off" included, the run
+       refuses to start and names the key; unset or empty, nothing; and a name that was never a
+       switch is not refused. */
+    {
+        static const char *const set[] = { "4", "off", "on", "2" };
+        char line[256];
+        CHECK(ace_retired_env_count() == 3u && strcmp(ace_retired_env_name(0), "SR_GLYPHS") == 0 &&
+                  strcmp(ace_retired_env_name(1), "SR_TEX_SCALE") == 0 &&
+                  strcmp(ace_retired_env_name(2), "SR_SMART_2D") == 0 && ace_retired_env_name(3) == NULL,
+              "the retired variables are SR_GLYPHS, SR_TEX_SCALE and SR_SMART_2D");
+        CHECK(ace_retired_env_named("SR_TEX_SCALE", NULL, line, sizeof(line)) == 0 && line[0] == '\0' &&
+                  ace_retired_env_named("SR_TEX_SCALE", "", line, sizeof(line)) == 0 &&
+                  ace_retired_env_named("SR_SMART_2D", NULL, line, sizeof(line)) == 0 &&
+                  ace_retired_env_named("SR_SMART_2D", "", line, sizeof(line)) == 0,
+              "SR_TEX_SCALE and SR_SMART_2D unset or empty pass");
+        for (size_t i = 0; i < sizeof(set) / sizeof(set[0]); i++) {
+            char quoted[32];
+            snprintf(quoted, sizeof(quoted), "'%s'", set[i]);
+            CHECK(ace_retired_env_named("SR_TEX_SCALE", set[i], line, sizeof(line)) == 1 &&
+                      strncmp(line, "SR_TEX_SCALE: retired", 21) == 0 && strstr(line, "texscale=2..6") != NULL &&
+                      strstr(line, quoted) != NULL && strstr(line, "unset SR_TEX_SCALE") != NULL,
+                  "SR_TEX_SCALE=%s refuses the run and names the texscale key: '%s'", set[i], line);
+            CHECK(ace_retired_env_named("SR_SMART_2D", set[i], line, sizeof(line)) == 1 &&
+                      strncmp(line, "SR_SMART_2D: retired", 20) == 0 && strstr(line, "smart2d=on") != NULL &&
+                      strstr(line, quoted) != NULL && strstr(line, "unset SR_SMART_2D") != NULL,
+                  "SR_SMART_2D=%s refuses the run and names the smart2d key: '%s'", set[i], line);
+        }
+        CHECK(ace_retired_env_named("SR_TEX_SCALE_BUDGET_MB", "512", line, sizeof(line)) == 0 && line[0] == '\0' &&
+                  ace_retired_env_named("SR_TEX_REPLACE", "x", line, sizeof(line)) == 0 &&
+                  ace_retired_env_named(NULL, "x", line, sizeof(line)) == 0,
+              "a variable that is still read is not retired");
+        CHECK(ace_retired_env_named("SR_GLYPHS", "on", line, sizeof(line)) == 1 &&
+                  strcmp(line, "SR_GLYPHS: retired, and set to 'on'; sharp game text is the launch line's "
+                               "glyphs=on key (SR_ACE=v1;...;glyphs=on, contract section 10.13); unset SR_GLYPHS") == 0,
+              "SR_GLYPHS keeps its line: '%s'", line);
+    }
     /* Every key but tier is required, whatever its place: leaving out any one of them refuses
        the line, leaving out tier does not (src/rt/ace.c names the required keys one by one). */
     {
@@ -572,7 +674,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");
@@ -626,7 +728,8 @@ static void cell_parse(void) {
                               .smooth = ACE_SMOOTH_MATCH, .tier = ACE_TIER_ENHANCED,
                               .sas = ACE_SAS_SINC, .cull = 1, .stick = ACE_STICK_COUNTS_MAX,
                               .load = 1, .depth = 32, .ssaa = 4, .peak = 1, .glyphs = 1, .mips = 1,
-                              .texpack = 1, .pad = 1, .shadow = ACE_SHADOW_SOFT };
+                              .texpack = 1, .pad = 1, .shadow = ACE_SHADOW_SOFT,
+                              .texscale = ACE_TEXSCALE_MAX, .smart2d = 1 };
         char longest[512];
         const size_t longest_len = ace_longest_line(longest, sizeof(longest));
         char edge[ACE_SPEC_MAX + 1];
@@ -698,6 +801,8 @@ static void cell_parse(void) {
         ACE_WIDEST(cull, 0, 1);
         ACE_WIDEST(mips, 0, 1);
         ACE_WIDEST(texpack, 0, 1);
+        ACE_WIDEST(texscale, 0, 2, 3, 4, 5, 6);
+        ACE_WIDEST(smart2d, 0, 1);
 #undef ACE_WIDEST
         AceConfig back;
         const int formatted = ace_format(&w, big, sizeof(big));
@@ -874,6 +979,58 @@ static void cell_switch(void) {
                         NULL) == 1 &&
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "texpack") == NULL,
           "a run without texpack does not name it:\n%s", json);
+    /* texscale and smart2d (contract 11.3.3): named in the words and the report with what the run got;
+     * a request the renderer refuses is unavailable, never quietly on; and one no renderer confirmed
+     * is reported at exit as a part that did not run. */
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;"
+                        "texscale=4;smart2d=on", NULL) == 1 && ace_effective()->texscale == 4 &&
+              ace_effective()->smart2d == 1 && ace_requested()->texscale == 4 && ace_requested()->smart2d == 1,
+          "texscale=4;smart2d=on turns both on at the line's values");
+    CHECK(strcmp(ace_spec_text(), "v1;tier=enhanced;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;"
+                                  "sas=off;tess=off;twin=off;texscale=4;smart2d=on") == 0,
+          "the run's canonical line carries both keys: '%s'", ace_spec_text());
+    CHECK(ace_feature_words(words, sizeof(words)) > 0 &&
+              strcmp(words, "4x texture scaling \xC2\xB7 smart 2D filter") == 0,
+          "texscale and smart2d feature words: '%s'", words);
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"texscale\": 4,") != NULL &&
+              strstr(json, "\"smart2d\": true") != NULL, "the report names texscale and smart2d:\n%s", json);
+    ace_feature_unavailable(ACE_FEATURE_TEXSCALE, "SR_TEX_SCALE_BUDGET_MB takes 1 to 8192");
+    CHECK(ace_effective()->texscale == 0 && ace_requested()->texscale == 4 && ace_effective()->smart2d == 1 &&
+              ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"texscale\": 0,") != NULL &&
+              strstr(json, "\"smart2d\": true") != NULL &&
+              strstr(json, "\"texscale\": \"SR_TEX_SCALE_BUDGET_MB takes 1 to 8192\"") != NULL,
+          "a refused texscale is reported unavailable and leaves smart2d as it was:\n%s", json);
+    CHECK(ace_feature_words(words, sizeof(words)) > 0 && strcmp(words, "smart 2D filter") == 0,
+          "an unavailable texscale leaves the words: '%s'", words);
+    ace_feature_unavailable(ACE_FEATURE_SMART2D, "test");
+    CHECK(ace_effective()->smart2d == 0 && ace_requested()->smart2d == 1 &&
+              ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"smart2d\": false") != NULL,
+          "an unavailable smart2d is off for the run:\n%s", json);
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;"
+                        "texscale=2;smart2d=on", "") == 1, "texscale=2;smart2d=on again");
+    ace_confirm(ACE_FEATURE_TEXSCALE);
+    ace_finish();   /* texscale ran; smart2d was never confirmed: no renderer took it */
+    CHECK(ace_effective()->texscale == 2 && ace_effective()->smart2d == 0 &&
+              ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"texscale\": 2,") != NULL &&
+              strstr(json, "\"smart2d\": false") != NULL &&
+              strstr(json, "did not run: only the Vulkan renderer has the smart 2D filter") != NULL &&
+              strstr(json, "only the Vulkan renderer scales textures") == NULL,
+          "a confirmed texscale stays on and an unconfirmed smart2d is reported as not run:\n%s", json);
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;"
+                        "texscale=3", "") == 1, "texscale=3 alone");
+    ace_finish();
+    CHECK(ace_effective()->texscale == 0 && ace_report_json(json, sizeof(json)) > 0 &&
+              strstr(json, "did not run: only the Vulkan renderer scales textures") != NULL &&
+              strstr(json, "smart2d") == NULL,
+          "an unconfirmed texscale is reported as not run, and smart2d is not named:\n%s", json);
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off",
+                        NULL) == 1 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "texscale") == NULL &&
+          strstr(json, "smart2d") == NULL && ace_effective()->texscale == 0 && ace_effective()->smart2d == 0,
+          "a run without the keys names neither:\n%s", json);
+    CHECK(ace_init_spec("off", NULL) == 0 && ace_effective()->texscale == 0 && ace_effective()->smart2d == 0 &&
+              ace_requested()->texscale == 0 && ace_requested()->smart2d == 0,
+          "an authentic run has both off");
     /* The finish hook runs before the report, so a table that fills after the last present still reads
      * partial (the exit-at-VBLANK path never goes through the presenter again). "Runs first" is
      * testable because only a feature's first unavailable reason is kept: a hook run after the
@@ -2723,21 +2880,33 @@ static void cell_pad_plan(void) {
 }
 
 int main(int argc, char **argv) {
-    /* `--retired-env VALUE`: set SR_GLYPHS to VALUE (and SR_ACE off) and start Ace Mode the way a run does.
+    /* `--retired-env VALUE [NAME]`: set NAME (SR_GLYPHS when not given) to VALUE, clear the other retired
+       variables, set SR_ACE off, and start Ace Mode the way a run does.
        ace_init_from_env must stop the process with exit 1 and its line; mk/selftests.mk checks both, so a
        start that ignores the retired variable fails there. Returning here is that failure. */
     if (argc >= 3 && strcmp(argv[1], "--retired-env") == 0) {
+        const char *name = argc >= 4 ? argv[3] : "SR_GLYPHS";
+        int set_failed = 0;
+        for (size_t i = 0; i < ace_retired_env_count(); i++) {
+            const char *other = ace_retired_env_name(i);
+            const char *value = strcmp(other, name) == 0 ? argv[2] : "";
 #ifdef _WIN32
-        const int set_failed = _putenv_s("SR_GLYPHS", argv[2]) != 0 || _putenv_s("SR_ACE", "off") != 0;
+            set_failed |= _putenv_s(other, value) != 0;
 #else
-        const int set_failed = setenv("SR_GLYPHS", argv[2], 1) != 0 || setenv("SR_ACE", "off", 1) != 0;
+            set_failed |= (value[0] ? setenv(other, value, 1) : unsetenv(other)) != 0;
+#endif
+        }
+#ifdef _WIN32
+        set_failed |= _putenv_s(name, argv[2]) != 0 || _putenv_s("SR_ACE", "off") != 0;
+#else
+        set_failed |= setenv(name, argv[2], 1) != 0 || setenv("SR_ACE", "off", 1) != 0;
 #endif
         if (set_failed) {
-            fprintf(stderr, "ace-selftest: FAIL could not set SR_GLYPHS for --retired-env\n");
+            fprintf(stderr, "ace-selftest: FAIL could not set %s for --retired-env\n", name);
             return 2;
         }
         ace_init_from_env();
-        fprintf(stderr, "ace-selftest: FAIL SR_GLYPHS=%s did not stop the run at start\n", argv[2]);
+        fprintf(stderr, "ace-selftest: FAIL %s=%s did not stop the run at start\n", name, argv[2]);
         return 3;
     }
     cell_parse();

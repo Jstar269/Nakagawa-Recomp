@@ -51,6 +51,10 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
      "Ace only, with 60 FPS logic. Reads the pad later in each frame; the game's timing changes."},
     {"Soft shadows", "Off", "Ace only, in games whose package names their shadows. Changes what the frame "
                             "shows."},
+    {"Texture scaling", "Off",
+     "Redraws textures with xBRZ. Uses GPU memory; the game receives changed pictures."},
+    {"Smart 2D filter", "Off",
+     "Sharp HUD art above 1x, but blocky soft text. The game receives changed pictures."},
 };
 typedef char player_enhanced_fixture_matches_parts[
     sizeof(k_enhanced_parts) / sizeof(k_enhanced_parts[0]) == PLAYER_PART_COUNT ? 1 : -1];

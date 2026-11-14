@@ -2038,6 +2038,16 @@ int gegpu_texrepl_only_selftest(void) {
     uint32_t a[XST_W * XST_H], b[XST_W * XST_H], want[XST_W * XST_H], plain[XST_W * XST_H];
     uint32_t *rimg = xst_repl_image(rf, 0xD000u);
     if (!rimg) return 0;
+    /* The harness sets the retired SR_TEX_SCALE=4 and SR_SMART_2D=on before the renderer starts, and
+     * its line carries neither texscale nor smart2d: no environment variable turns either on. */
+    if (s_xs_factor != 0 || s_xs_smart2d != 0 || ace_requested()->texscale || ace_requested()->smart2d) {
+        const char *env_scale = getenv("SR_TEX_SCALE"), *env_smart = getenv("SR_SMART_2D");
+        fprintf(stderr, "gpu texscale selftest: FAIL replace-only: a line without texscale and smart2d started "
+                        "texture scaling at %d and smart 2D at %d (SR_TEX_SCALE=%s, SR_SMART_2D=%s)\n",
+                s_xs_factor, s_xs_smart2d, env_scale ? env_scale : "unset", env_smart ? env_smart : "unset");
+        free(rimg);
+        return 0;
+    }
     if (!s_repl || s_xs_factor != 0 || !nk_tex_scale_config()->budget_bytes) {
         fprintf(stderr, "gpu texscale selftest: FAIL replace-only: the pack was not read at start (pack %p, "
                         "texture scale factor %d, copy budget %llu)\n", (void *)s_repl, s_xs_factor,
@@ -2194,8 +2204,27 @@ int gegpu_texscale_selftest(void) {
     const int f = s_xs_factor;
     if (!f || !s_xs_smart2d) {
         fprintf(stderr, "gpu texscale selftest: FAIL texture scaling or the smart 2D filter is off (factor %d, "
-                        "smart2d %d): the Ace line or SR_TEX_SCALE/SR_SMART_2D did not take\n", f, s_xs_smart2d);
+                        "smart2d %d): the Ace line's texscale and smart2d keys did not take\n", f, s_xs_smart2d);
         return 0;
+    }
+    /* The wiring under test: the factor and the filter in force are the launch line's texscale and
+     * smart2d (ace.h), which gegpu_init handed to nk_tex_scale_init, and the run's report says both
+     * ran. */
+    {
+        static char json[ACE_REPORT_MAX];
+        char want[32];
+        snprintf(want, sizeof(want), "\"texscale\": %d,", f);
+        if (f != ace_requested()->texscale || f != ace_effective()->texscale || !ace_requested()->smart2d ||
+            !ace_effective()->smart2d || !ace_report_json(json, sizeof(json)) || !strstr(json, want) ||
+            !strstr(json, "\"smart2d\": true")) {
+            fprintf(stderr, "gpu texscale selftest: FAIL the renderer's factor %d and smart 2D %d are not the "
+                            "launch line's (texscale=%d, smart2d=%d; in effect %d, %d), or the report does not "
+                            "name them\n", f, s_xs_smart2d, ace_requested()->texscale, ace_requested()->smart2d,
+                    ace_effective()->texscale, ace_effective()->smart2d);
+            return 0;
+        }
+        printf("gpu texscale selftest: PASS %-12s the launch line's texscale=%d and smart2d=on are the renderer's "
+               "factor and filter\n", "launch-line", f);
     }
     int ok = 1;
     static int (*const cells[])(int) = { xst_cell_scaled_draw, xst_cell_large, xst_cell_upload_cap,

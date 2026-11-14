@@ -178,7 +178,8 @@ osk-text-entry-selftest:
 # report and an off run's silence. Built from ace.c and its test alone: a reference from ace.c
 # to anything but the C library fails this link, which is the S1 link test for ace.c. Then the
 # retired SR_GLYPHS (#2110): with it set, starting Ace Mode as a run does stops the process with
-# exit 1 and the line that names glyphs=on, before SR_ACE is read.
+# exit 1 and the line that names glyphs=on, before SR_ACE is read. The same for SR_TEX_SCALE and
+# SR_SMART_2D, which the line's texscale and smart2d keys replaced.
 native-core-tests: ace-selftest
 ace-selftest:
 	$(NK_REQUIRE_POSIX_SHELL)
@@ -189,6 +190,14 @@ ace-selftest:
 	if [ $$rc -ne 1 ] || ! grep -aq "^SR_GLYPHS: retired, and set to 'on'; .*glyphs=on" $(BUILD_DIR)/ace_retired_env.log; then \
 		cat $(BUILD_DIR)/ace_retired_env.log; echo "FAIL ace-selftest --retired-env (exit $$rc): a set SR_GLYPHS did not stop the run with its line"; exit 1; fi; \
 	echo "PASS ace-selftest --retired-env: SR_GLYPHS=on stops the run at start (exit 1) and names glyphs=on"
+	@rc=0; $(BUILD_DIR)/ace_selftest$(EXE_EXT) --retired-env 4 SR_TEX_SCALE > $(BUILD_DIR)/ace_retired_env_texscale.log 2>&1 || rc=$$?; \
+	if [ $$rc -ne 1 ] || ! grep -aq "^SR_TEX_SCALE: retired, and set to '4'; .*texscale=2\.\.6" $(BUILD_DIR)/ace_retired_env_texscale.log; then \
+		cat $(BUILD_DIR)/ace_retired_env_texscale.log; echo "FAIL ace-selftest --retired-env (exit $$rc): a set SR_TEX_SCALE did not stop the run with its line"; exit 1; fi; \
+	echo "PASS ace-selftest --retired-env: SR_TEX_SCALE=4 stops the run at start (exit 1) and names texscale=2..6"
+	@rc=0; $(BUILD_DIR)/ace_selftest$(EXE_EXT) --retired-env off SR_SMART_2D > $(BUILD_DIR)/ace_retired_env_smart2d.log 2>&1 || rc=$$?; \
+	if [ $$rc -ne 1 ] || ! grep -aq "^SR_SMART_2D: retired, and set to 'off'; .*smart2d=on" $(BUILD_DIR)/ace_retired_env_smart2d.log; then \
+		cat $(BUILD_DIR)/ace_retired_env_smart2d.log; echo "FAIL ace-selftest --retired-env (exit $$rc): a set SR_SMART_2D did not stop the run with its line"; exit 1; fi; \
+	echo "PASS ace-selftest --retired-env: SR_SMART_2D=off stops the run at start (exit 1) and names smart2d=on"
 
 # motion-match-selftest - the draw matcher of render-state motion (src/rt/motion_match.c, #2081):
 # anchors, reorder, spawn and despawn, rebuilds at a new address, ties, teleports and each
@@ -1669,7 +1678,7 @@ texrepl-mutant:
 	else echo "PASS texrepl-mutant (killed by the palette identity check, exit $$rc)"; fi
 
 # tex-scale-gate-mutant - the selftest above built with NK_TEX_SCALE_MUTANT_NO_ACE_GATE, which lets
-# an authentic start read SR_TEX_SCALE and SR_SMART_2D. It passes only when the settings cell fails
+# an authentic start take a texscale and smart2d request. It passes only when the settings cell fails
 # for that reason, so the Ace gate is under test (contract section 11.2, item 1).
 tex-scale-gate-mutant:
 	$(NK_REQUIRE_POSIX_SHELL)
@@ -1681,7 +1690,7 @@ tex-scale-gate-mutant:
 		$(LIBS) -lm || exit 1; \
 	rc=0; $(BUILD_DIR)/tex_scale_gate_mutant$(EXE_EXT) > $(BUILD_DIR)/tex_scale_gate_mutant.log 2>&1 || rc=$$?; \
 	if [ $$rc -eq 0 ]; then echo "FAIL tex-scale-gate-mutant (the mutant passed: the Ace gate is untested)"; exit 1; \
-	elif ! grep -q "FAIL settings: SR_TEX_SCALE=4 SR_SMART_2D=on with Ace Mode off" $(BUILD_DIR)/tex_scale_gate_mutant.log; then \
+	elif ! grep -q "FAIL settings: texscale=4 smart2d=on with Ace Mode off" $(BUILD_DIR)/tex_scale_gate_mutant.log; then \
 		cat $(BUILD_DIR)/tex_scale_gate_mutant.log; echo "FAIL tex-scale-gate-mutant (exit $$rc, but not from the gate check)"; exit 1; \
 	else grep "FAIL settings" $(BUILD_DIR)/tex_scale_gate_mutant.log; echo "PASS tex-scale-gate-mutant (killed by the gate check, exit $$rc)"; fi
 

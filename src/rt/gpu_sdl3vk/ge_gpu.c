@@ -609,6 +609,8 @@ static uint64_t s_cnt_af_samplers = 0;
  * run, and then no scaled image, job or thread is ever made and no draw's filter changes. */
 static int s_xs_factor = 0;
 static int s_xs_smart2d = 0;
+/* The launch line's texscale key takes the factors the scaler does (ace.c cannot include tex_scale.h). */
+_Static_assert(ACE_TEXSCALE_MAX == NK_TEX_SCALE_MAX, "ace.h texscale range is tex_scale.h's");
 /* Host mip chains (tex_mips.h), read once at init: 0 in an authentic run and with the part off,
  * and then no entry has a chain, no chain sampler or set is made and no draw sets F_HOSTMIP. */
 static int s_hm = 0;
@@ -5330,7 +5332,7 @@ static void tex_repl_init(int enhanced) {
         return;
     }
     ace_confirm(ACE_FEATURE_TEXPACK);
-    /* The copies' VRAM is the scaled-copy budget, which a refused SR_TEX_SCALE setting leaves at 0. */
+    /* The copies' VRAM is the scaled-copy budget, which a refused texture-scaling request leaves at 0. */
     if (!nk_tex_scale_config()->budget_bytes) {
         NkTexScaleConfig c = *nk_tex_scale_config();
         c.budget_bytes = (uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20;
@@ -5965,7 +5967,7 @@ static void tex_soft_init(void) {
         ace_feature_unavailable(ACE_FEATURE_SHADOW, ACE_SOFT_SHADOW_NONE_DECLARED);
         return;
     }
-    /* The copies' VRAM is the scaled-copy budget, which a refused SR_TEX_SCALE setting leaves at 0. */
+    /* The copies' VRAM is the scaled-copy budget, which a refused texture-scaling request leaves at 0. */
     if (!nk_tex_scale_config()->budget_bytes) {
         NkTexScaleConfig c = *nk_tex_scale_config();
         c.budget_bytes = (uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20;
@@ -9560,9 +9562,20 @@ int gegpu_init(void) {
     /* Texture scaling and the smart 2D filter (tex_scale.h): Ace runs only. A scaled copy
      * brings its own set (and anisotropic set), so the pool doubles again for it. */
     {
-        const NkTexScaleConfig *xs = nk_tex_scale_init_from_env(g_ace_on);
+        /* The launch line's texscale and smart2d keys (ace.h): all zero in an authentic run. A
+         * request the scaler refuses (a budget outside its range) is unavailable for the run, and
+         * one that took is confirmed, so the report never claims a part that did not run. */
+        const int want_factor = g_ace_on ? ace_effective()->texscale : 0;
+        const int want_smart2d = g_ace_on ? ace_effective()->smart2d : 0;
+        char refused[96];
+        const NkTexScaleConfig *xs = nk_tex_scale_init(g_ace_on, want_factor, want_smart2d, refused,
+                                                       sizeof(refused));
         s_xs_factor = xs->factor;
         s_xs_smart2d = xs->smart2d;
+        if (refused[0] && want_factor) ace_feature_unavailable(ACE_FEATURE_TEXSCALE, refused);
+        if (refused[0] && want_smart2d) ace_feature_unavailable(ACE_FEATURE_SMART2D, refused);
+        if (s_xs_factor) ace_confirm(ACE_FEATURE_TEXSCALE);
+        if (s_xs_smart2d) ace_confirm(ACE_FEATURE_SMART2D);
     }
     tex_repl_init(g_ace_on);
     tex_soft_init();

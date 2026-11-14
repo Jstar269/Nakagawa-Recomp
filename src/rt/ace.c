@@ -27,7 +27,8 @@ static int value_on_off(const char *v, int *out) {
 
 /* The line's keys. Each says whether a line must carry it, so the order of the table decides
    nothing for the parser: the rows that are not required (tier, stick, load, depth, ssaa, peak,
-   glyphs, cull, mips, texpack, pad and shadow) are the keys a line may leave out. Each also names the
+   glyphs, cull, mips, texpack, pad, shadow, texscale and smart2d) are the keys a line may leave out.
+   Each also names the
    longest value ace_format writes for it, so ace_longest_line builds the longest line from this table
    alone. */
 typedef enum {
@@ -36,7 +37,8 @@ typedef enum {
     ACE_KEY_SSAA,
     ACE_KEY_CULL, ACE_KEY_PEAK, ACE_KEY_GLYPHS,
     ACE_KEY_MIPS, ACE_KEY_TEXPACK,
-    ACE_KEY_PAD, ACE_KEY_SHADOW
+    ACE_KEY_PAD, ACE_KEY_SHADOW,
+    ACE_KEY_TEXSCALE, ACE_KEY_SMART2D
 } AceKey;
 
 static const struct {
@@ -66,6 +68,8 @@ static const struct {
     {"texpack", ACE_KEY_TEXPACK, 0, "on"},
     {"pad", ACE_KEY_PAD, 0, "late"},
     {"shadow", ACE_KEY_SHADOW, 0, "soft"},
+    {"texscale", ACE_KEY_TEXSCALE, 0, "6"},
+    {"smart2d", ACE_KEY_SMART2D, 0, "on"},
 };
 
 size_t ace_longest_line(char *out, size_t cap) {
@@ -164,6 +168,22 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                 ok = value_on_off(v, &c.texpack);
                 if (ok && c.texpack && !ACE_HAS_TEXPACK) {
                     why_set(why, why_cap, "texpack is not part of this build"); return 0;
+                }
+                break;
+            case ACE_KEY_TEXSCALE:
+                /* off, or one digit from 2 to ACE_TEXSCALE_MAX: the xBRZ factor. */
+                if (strcmp(v, "off") == 0) { c.texscale = 0; ok = 1; }
+                else if (v[0] >= '2' && v[0] <= '0' + ACE_TEXSCALE_MAX && v[1] == '\0') {
+                    c.texscale = v[0] - '0'; ok = 1;
+                }
+                if (ok && c.texscale && !ACE_HAS_TEXSCALE) {
+                    why_set(why, why_cap, "texscale is not part of this build"); return 0;
+                }
+                break;
+            case ACE_KEY_SMART2D:
+                ok = value_on_off(v, &c.smart2d);
+                if (ok && c.smart2d && !ACE_HAS_SMART2D) {
+                    why_set(why, why_cap, "smart2d is not part of this build"); return 0;
                 }
                 break;
             case ACE_KEY_STICK:
@@ -347,6 +367,16 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
         const int m = snprintf(out + n, cap - (size_t)n, ";shadow=%s", shadow_word(c->shadow));
         n = m < 0 ? -1 : n + m;
     }
+    /* Likewise texscale and smart2d, after shadow, before cull: a missing one is off, so every line
+       without them keeps its text (contract 10.10). They are Enhanced items: either tier carries them. */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->texscale >= 2 && c->texscale <= ACE_TEXSCALE_MAX) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";texscale=%d", c->texscale);
+        n = m < 0 ? -1 : n + m;
+    }
+    if (n > 0 && (size_t)n < cap && c && c->on && c->smart2d) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";smart2d=on");
+        n = m < 0 ? -1 : n + m;
+    }
     /* The same for cull, which stays last: written only when on. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->cull) {
         const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
@@ -387,7 +417,7 @@ static AceLatency s_latency;
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
     "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull",
     "depth", "twin", "ssaa", "peak", "glyphs", "mips", "texpack",
-    "pad", "shadow"
+    "pad", "shadow", "texscale", "smart2d"
 };
 
 /* The run's observation state. */
@@ -515,26 +545,63 @@ int ace_init_spec(const char *spec, const char *report_path) {
     if (s_req.pad)
         fprintf(stderr, "ACE_MODE: pad late (each logic update starts closer to its VBLANK deadline "
                         "and reads a fresher pad sample)\n");
+    if (s_req.texscale)
+        fprintf(stderr, "ACE_MODE: texscale %d (textures are drawn from xBRZ copies %d times their size; "
+                        "the frames the game keeps in VRAM change where they are drawn)\n",
+                s_req.texscale, s_req.texscale);
+    if (s_req.smart2d)
+        fprintf(stderr, "ACE_MODE: smart2d on (2D draws that map one texel to one pixel sample nearest "
+                        "above 1x; the frames the game keeps in VRAM change where they do)\n");
     return 1;
 }
 
+/* The variables a launch-line key replaced: what each switched, the key that does it now, an
+   example of the key on a line, and the contract section that describes it. */
+static const struct {
+    const char *name, *what, *key, *example, *section;
+} k_ace_retired_env[] = {
+    {"SR_GLYPHS", "sharp game text", "glyphs=on", "glyphs=on", "10.13"},
+    {"SR_TEX_SCALE", "texture scaling", "texscale=2..6", "texscale=4", "10.10"},
+    {"SR_SMART_2D", "the smart 2D filter", "smart2d=on", "smart2d=on", "10.10"},
+};
+
+size_t ace_retired_env_count(void) { return sizeof(k_ace_retired_env) / sizeof(k_ace_retired_env[0]); }
+
+const char *ace_retired_env_name(size_t i) {
+    return i < ace_retired_env_count() ? k_ace_retired_env[i].name : NULL;
+}
+
+int ace_retired_env_named(const char *name, const char *value, char *why, size_t why_cap) {
+    why_set(why, why_cap, "");
+    if (!name || !value || !value[0]) return 0;
+    for (size_t i = 0; i < ace_retired_env_count(); i++) {
+        if (strcmp(name, k_ace_retired_env[i].name) != 0) continue;
+        if (why && why_cap)
+            snprintf(why, why_cap, "%s: retired, and set to '%.16s%s'; %s is the launch line's "
+                                   "%s key (SR_ACE=v1;...;%s, contract section %s); unset %s",
+                     k_ace_retired_env[i].name, value, strlen(value) > 16 ? "..." : "",
+                     k_ace_retired_env[i].what, k_ace_retired_env[i].key, k_ace_retired_env[i].example,
+                     k_ace_retired_env[i].section, k_ace_retired_env[i].name);
+        return 1;
+    }
+    return 0;
+}
+
 int ace_retired_env(const char *glyphs, char *why, size_t why_cap) {
-    if (!glyphs || !glyphs[0]) { why_set(why, why_cap, ""); return 0; }
-    if (why && why_cap)
-        snprintf(why, why_cap, "SR_GLYPHS: retired, and set to '%.16s%s'; sharp game text is the launch line's "
-                               "glyphs=on key (SR_ACE=v1;...;glyphs=on, contract section 10.13); unset SR_GLYPHS",
-                 glyphs, strlen(glyphs) > 16 ? "..." : "");
-    return 1;
+    return ace_retired_env_named("SR_GLYPHS", glyphs, why, why_cap);
 }
 
 int ace_init_from_env(void) {
     char why[256];
     /* A variable that used to switch a part on refuses the run rather than doing nothing without a word,
        as an invalid SR_NOVBPACE or SR_DETERMINISTIC_CLOCK does (sched.c). */
-    if (ace_retired_env(getenv("SR_GLYPHS"), why, sizeof(why))) {
-        fprintf(stderr, "%s\n", why);
-        fflush(stderr);
-        exit(1);
+    for (size_t i = 0; i < ace_retired_env_count(); i++) {
+        if (ace_retired_env_named(k_ace_retired_env[i].name, getenv(k_ace_retired_env[i].name), why,
+                                  sizeof(why))) {
+            fprintf(stderr, "%s\n", why);
+            fflush(stderr);
+            exit(1);
+        }
     }
     return ace_init_spec(getenv("SR_ACE"), getenv("SR_ACE_REPORT"));
 }
@@ -570,6 +637,8 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_PEAK: s_eff.peak = 0; break;
     case ACE_FEATURE_GLYPHS: s_eff.glyphs = 0; break;
     case ACE_FEATURE_PAD: s_eff.pad = 0; break;
+    case ACE_FEATURE_TEXSCALE: s_eff.texscale = 0; break;
+    case ACE_FEATURE_SMART2D: s_eff.smart2d = 0; break;
     default: break;
     }
     fprintf(stderr, "ACE_MODE: %s unavailable (%s)\n", k_feature_key[feature], s_unavailable[feature]);
@@ -767,6 +836,12 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.pad) used = words_add(out, cap, used, "late pad sampling");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
     if (s_eff.texpack) used = words_add(out, cap, used, "texture pack");
+    if (s_eff.texscale) {
+        char xs[32];
+        snprintf(xs, sizeof(xs), "%dx texture scaling", s_eff.texscale);
+        used = words_add(out, cap, used, xs);
+    }
+    if (s_eff.smart2d) used = words_add(out, cap, used, "smart 2D filter");
     if (s_eff.shadow) used = words_add(out, cap, used, "soft shadows");
     if (s_eff.depth) used = words_add(out, cap, used, "32-bit depth");
     if (s_eff.ssaa) used = words_add(out, cap, used, s_eff.ssaa == 4 ? "4x supersampling" : "2x supersampling");
@@ -1522,6 +1597,9 @@ size_t ace_report_json(char *out, size_t cap) {
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
     if (s_req.texpack) ACE_PUT("  \"texpack\": %s,\n", s_eff.texpack ? "true" : "false");
+    /* 0 when the renderer could not give it; the request is in "spec". */
+    if (s_req.texscale) ACE_PUT("  \"texscale\": %d,\n", s_eff.texscale);
+    if (s_req.smart2d) ACE_PUT("  \"smart2d\": %s,\n", s_eff.smart2d ? "true" : "false");
     if (s_req.peak) ACE_PUT("  \"peak\": {\"on\": %s, \"pushes_wide\": %llu, \"frames_wide\": %llu, "
                             "\"frames_limited\": %llu, \"min_gain\": %.4f},\n",
                             s_eff.peak ? "true" : "false", (unsigned long long)s_peak_pushes,
@@ -1654,12 +1732,13 @@ void ace_finish(void) {
                                                 ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL,
                                                 ACE_HAS_DEPTH, 1, ACE_HAS_SSAA, ACE_HAS_PEAK, ACE_HAS_GLYPHS,
                                                 ACE_HAS_MIPS, ACE_HAS_TEXPACK,
-                                                ACE_HAS_PAD, ACE_HAS_SHADOW };
+                                                ACE_HAS_PAD, ACE_HAS_SHADOW,
+                                                ACE_HAS_TEXSCALE, ACE_HAS_SMART2D };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
                                         s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
                                         s_eff.load, s_eff.cull, s_eff.depth, s_eff.twin, s_eff.ssaa,
                                         s_eff.peak, s_eff.glyphs, s_eff.mips, s_eff.texpack,
-                                        s_eff.pad, s_eff.shadow };
+                                        s_eff.pad, s_eff.shadow, s_eff.texscale, s_eff.smart2d };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
@@ -1671,6 +1750,8 @@ void ace_finish(void) {
                 : f == ACE_FEATURE_PEAK
                 ? "did not run: this build has no SAS mixer or no host audio backend"
                 : f == ACE_FEATURE_TEXPACK ? "did not run: only the Vulkan renderer draws texture packs"
+                : f == ACE_FEATURE_TEXSCALE ? "did not run: only the Vulkan renderer scales textures"
+                : f == ACE_FEATURE_SMART2D ? "did not run: only the Vulkan renderer has the smart 2D filter"
                 : f == ACE_FEATURE_PAD
                 ? "did not run: no update boundary ran (no 60 FPS game logic package, or it is off)"
                 : f == ACE_FEATURE_SHADOW

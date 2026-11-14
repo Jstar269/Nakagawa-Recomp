@@ -31,25 +31,21 @@ static void set_why(char *why, size_t cap, const char *text) {
     if (why && cap) snprintf(why, cap, "%s", text);
 }
 
-int nk_tex_scale_parse(const char *scale, const char *smart2d, const char *budget_mb,
+int nk_tex_scale_parse(int factor, int smart2d, const char *budget_mb,
                        NkTexScaleConfig *out, char *why, size_t why_cap) {
     NkTexScaleConfig c = { 0, 0, (uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20 };
     memset(out, 0, sizeof(*out));
     out->budget_bytes = c.budget_bytes;
-    if (scale && scale[0] && strcmp(scale, "off") != 0) {
-        if (scale[1] != '\0' || scale[0] < '2' || scale[0] > '0' + NK_TEX_SCALE_MAX) {
-            set_why(why, why_cap, "SR_TEX_SCALE takes off, 2, 3, 4, 5 or 6");
-            return 0;
-        }
-        c.factor = scale[0] - '0';
+    if (factor != 0 && (factor < 2 || factor > NK_TEX_SCALE_MAX)) {
+        set_why(why, why_cap, "texscale takes off, 2, 3, 4, 5 or 6");
+        return 0;
     }
-    if (smart2d && smart2d[0]) {
-        if (strcmp(smart2d, "on") == 0) c.smart2d = 1;
-        else if (strcmp(smart2d, "off") != 0) {
-            set_why(why, why_cap, "SR_SMART_2D takes off or on");
-            return 0;
-        }
+    c.factor = factor;
+    if (smart2d != 0 && smart2d != 1) {
+        set_why(why, why_cap, "smart2d takes off or on");
+        return 0;
     }
+    c.smart2d = smart2d;
     if (budget_mb && budget_mb[0]) {
         char *end = NULL;
         unsigned long v = strtoul(budget_mb, &end, 10);
@@ -75,13 +71,13 @@ size_t nk_tex_scale_admission_line(const NkTexScaleConfig *cfg, char *out, size_
     out[0] = '\0';
     if (!cfg || (!cfg->factor && !cfg->smart2d)) return 0;
     const int n = snprintf(out, cap,
-                           "TEX_SCALE: guest-visible, on through SR_TEX_SCALE/SR_SMART_2D and not admitted under "
-                           "contract section 11.2 (each present commits the frame to guest VRAM; see the contract's "
-                           "\"Texture Scaling and the Smart 2D Filter\" entry)");
+                           "TEX_SCALE: guest-visible, on through the launch line's texscale/smart2d keys and not "
+                           "admitted under contract section 11.2 (each present commits the frame to guest VRAM; see "
+                           "the contract's \"Texture Scaling and the Smart 2D Filter\" entry)");
     return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1);
 }
 
-static char s_start_line[384];   /* what the last nk_tex_scale_init_from_env printed */
+static char s_start_line[384];   /* what the last nk_tex_scale_init printed */
 
 static void start_line(const char *text) {
     const size_t used = strlen(s_start_line);
@@ -91,27 +87,27 @@ static void start_line(const char *text) {
 
 const char *nk_tex_scale_start_lines(void) { return s_start_line; }
 
-const NkTexScaleConfig *nk_tex_scale_init_from_env(int enhanced) {
-    const char *scale = getenv("SR_TEX_SCALE");
-    const char *smart = getenv("SR_SMART_2D");
-    const char *budget = getenv("SR_TEX_SCALE_BUDGET_MB");
+const NkTexScaleConfig *nk_tex_scale_init(int enhanced, int factor, int smart2d, char *refused,
+                                          size_t refused_cap) {
     memset(&s_cfg, 0, sizeof(s_cfg));
     s_start_line[0] = '\0';
-    int asked = (scale && scale[0] && strcmp(scale, "off") != 0) ||
-                (smart && smart[0] && strcmp(smart, "off") != 0);
+    set_why(refused, refused_cap, "");
+    const int asked = factor != 0 || smart2d != 0;
 #ifdef NK_TEX_SCALE_MUTANT_NO_ACE_GATE
     enhanced = 1;   /* tex-scale-gate-mutant: the Ace gate removed; the settings cell must fail */
 #endif
     if (!enhanced) {
         /* Authentic: nothing is read further, and a request is named, not obeyed. */
-        if (asked) start_line("TEX_SCALE: off (texture scaling and the smart 2D filter need Ace Mode)");
+        if (asked) start_line("TEX_SCALE: off (texture scaling and the smart 2D filter need Enhanced or Ace)");
         return &s_cfg;
     }
+    const char *budget = getenv("SR_TEX_SCALE_BUDGET_MB");
     char why[96], line[256];
     NkTexScaleConfig c;
-    if (!nk_tex_scale_parse(scale, smart, budget, &c, why, sizeof(why))) {
+    if (!nk_tex_scale_parse(factor, smart2d, budget, &c, why, sizeof(why))) {
         snprintf(line, sizeof(line), "TEX_SCALE: refused (%s)", why);
         start_line(line);
+        set_why(refused, refused_cap, why);
         return &s_cfg;
     }
     s_cfg = c;
