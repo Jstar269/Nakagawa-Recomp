@@ -1118,7 +1118,9 @@ static int parse_ini(NkTexRepl *p, char *text, char *err, size_t err_cap) {
             break;
         }
         case SEC_GAMES:
-            games++;
+            /* A line that names this ini itself (the dump's own `<ID> = textures.ini`) only lists the
+             * game; any other value is a per-game override, which is not applied and is reported. */
+            if (!ci_equal(value, "textures.ini")) games++;
             switch (game_push(p, key)) {
             case 0: snprintf(err, err_cap, "out of memory"); return 0;
             case -1:
@@ -1799,12 +1801,17 @@ uint32_t nk_texrepl_hash_texture(const NkTexRepl *p, const uint8_t *data, size_t
 
 /* ------------------------------------------------------------------------------ lookup */
 
-/* PPSSPP's LookupWildcard order over a sorted key table, the key with its address zeroed first
- * under ignoreAddress. */
-static const void *wildcard(const NkTexRepl *p, const void *base, size_t n, size_t stride, const NkTexReplId *id) {
+uint64_t nk_texrepl_file_key(const NkTexRepl *p, const NkTexReplId *id) {
     uint64_t ck = nk_texrepl_cache_key(id->addr, id->format, id->dim, id->clut_hash);
+    if (p && p->ignore_address) ck &= 0xFFFFFFFFull;
+    return ck;
+}
+
+/* PPSSPP's LookupWildcard order over a sorted key table, the key with its address zeroed first
+ * under ignoreAddress (nk_texrepl_file_key, which the texture dump names its files with). */
+static const void *wildcard(const NkTexRepl *p, const void *base, size_t n, size_t stride, const NkTexReplId *id) {
+    uint64_t ck = nk_texrepl_file_key(p, id);
     uint32_t hash = id->hash;
-    if (p->ignore_address) ck &= 0xFFFFFFFFull;
     const void *a;
     if (!n) return NULL;
     if ((a = key_find(base, n, stride, ck, hash))) return a;

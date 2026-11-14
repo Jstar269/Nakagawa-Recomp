@@ -33,6 +33,21 @@
  *                    image; the build with NK_TEXREPL_MUTANT_NO_CLUTFORMAT_XOR fails here;
  *   replace-only     (`--repl-only`) SR_TEX_REPLACE alone, with no texture scaling: the pack is read at
  *                    start, a listed texture is drawn from its image, an unlisted one as made;
+ *   dump             the texture dump (gegpu_texdump_start), into a folder whose name is not ASCII, is
+ *                    refused in an authentic run and writes nothing while off; once on, a texture already
+ *                    in the cache and a newly decoded one are written under the names a pack gives them
+ *                    (cache key and quick hash, worked out here), the folder reads back as a pack holding
+ *                    the textures' own pixels (its own [games] line not reported), a file already there
+ *                    (the player's own included) is never written again, a movie picture is skipped while
+ *                    the movie writes there and written once it no longer does, the budget, the file
+ *                    limit and the first failed write each stop the dump and say why on the row, an
+ *                    address new in every present stops being dumped after its run while another goes
+ *                    on, and is dumped again once it has held still, SR_TEX_DUMP_BUDGET_MB and SR_TEX_DUMP_MAX_FILES take a whole number
+ *                    in range only, and a refusal names no full path;
+ *   dump-xxh         under a textures.ini with xxh32 or xxh64 and ignoreAddress, files are named without
+ *                    the address and found by the pack at another address;
+ *   dump-pal         a CLUT8 texture is dumped under PPSSPP's name with its palette's colours;
+ *   dump-mip         a mip-mapped texture's levels are dumped each at its size, level 1 as "_1";
  *   guest-bytes      after every cell, no guest VRAM byte outside the drawn frame and no CLUT
  *                    byte changes while the scales land;
  *   smart2d          at a render scale above 1, a 1:1 linear sprite samples nearest (every
@@ -1188,6 +1203,822 @@ static int xst_cell_replace_palette(int f) {
  * draws a listed texture, which an address-only file lists, and an unlisted one. */
 #define XST_ONLY_TEX_B (XST_TEX + 0x1000u)
 
+/* The dump cells write into folders whose names hold an accented letter and a CJK ideograph, as a
+ * user data folder under a user name like that does: every file call is a wide-path one. */
+#define XST_DUMP_NONASCII " \xC3\xA9\xE6\x97\xA5"   /* " ", U+00E9, U+65E5 in UTF-8 */
+#define XST_DUMP_VIDEO (XST_TEX + 0x20000u)       /* a movie picture's address (dump cell only) */
+#define XST_DUMP_OTHER (XST_TEX + 0x2000u)        /* a second texture address */
+void ge_set_frame(uint32_t frame);   /* ge.c: the VBLANK a movie span's age is counted in */
+
+static int xst_dump_has(const char *dir, const char *name) {
+    char path[600];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    return nk_platform_file_exists(path);
+}
+
+static int xst_dump_fail(const char *why) {
+    fprintf(stderr, "gpu texscale selftest: FAIL dump: %s\n", why);
+    gegpu_texdump_stop();
+    return 0;
+}
+
+/* A clean folder `<build root>/<leaf>` with the non-ASCII suffix, into `dir`. The build root is
+ * made a full path first: the dump takes only a full path, as the launcher's user data folder is. */
+static void xst_dump_folder(char *dir, size_t cap, const char *leaf) {
+    static char root[400];
+    if (!root[0] && !nk_platform_absolute_path(SR_SELFTEST_BUILD_ROOT, root, sizeof(root)))
+        snprintf(root, sizeof(root), "%s", SR_SELFTEST_BUILD_ROOT);   /* then the dump refuses it, and says so */
+    snprintf(dir, cap, "%s/%s" XST_DUMP_NONASCII, root, leaf);
+    (void)nk_platform_remove_tree(dir, NULL);   /* an earlier run's files */
+}
+
+/* The 16x16 8888 texture `t` at `addr`, with the state that draws it. */
+static void xst_dump_upload_at(uint32_t addr, const uint32_t *t) {
+    memcpy(SR_HOST(addr), t, sizeof(uint32_t) * XST_W * XST_H);
+    sr_gpu_vram_dirty(addr, sizeof(uint32_t) * XST_W * XST_H);
+    xst_state(XST_BASE, addr, 3u, 1, 1);
+}
+
+static int xst_dump_draw(void) {
+    s_tmpl_ok = 0;
+    return xst_draw(20.0f, 140.0f);
+}
+
+/* The files in `dir`. */
+static bool xst_dump_count_file(const char *name, void *ctx) {
+    (void)name;
+    ++*(int *)ctx;
+    return true;
+}
+static int xst_dump_files(const char *dir) {
+    int n = 0;
+    return nk_platform_list_files(dir, xst_dump_count_file, &n) ? n : -1;
+}
+
+/* The width and height a PNG's IHDR gives, or 0. */
+static int xst_dump_png_size(const char *dir, const char *name, uint32_t *w, uint32_t *h) {
+    char path[600];
+    unsigned char b[24];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *fp = nk_fopen_utf8(path, "rb");
+    const size_t got = fp ? fread(b, 1, sizeof(b), fp) : 0u;
+    if (fp) fclose(fp);
+    if (got != sizeof(b) || memcmp(b + 12, "IHDR", 4u) != 0) return 0;
+    *w = ((uint32_t)b[16] << 24) | ((uint32_t)b[17] << 16) | ((uint32_t)b[18] << 8) | b[19];
+    *h = ((uint32_t)b[20] << 24) | ((uint32_t)b[21] << 16) | ((uint32_t)b[22] << 8) | b[23];
+    return 1;
+}
+
+/* Back to a dump that goes on, for the next check: the run's budget and file limit as at start. */
+static void xst_dump_resume(void) {
+    s_dump.stop = TEX_DUMP_GOING;
+    s_dump.budget = (uint64_t)TEX_DUMP_DEFAULT_BUDGET_MB << 20;
+    s_dump.max_files = TEX_DUMP_DEFAULT_MAX_FILES;
+}
+
+static int xst_dump_start(const char *dir) {
+    char err[200];
+    if (gegpu_texdump_start(dir, err, sizeof(err))) return 1;
+    fprintf(stderr, "gpu texscale selftest: FAIL dump: the dump did not start (%s)\n", err);
+    return 0;
+}
+
+static int xst_cell_dump(int f) {
+    (void)f;
+    uint32_t a[XST_W * XST_H], b[XST_W * XST_H], c[XST_W * XST_H], d[XST_W * XST_H];
+    xst_pattern(a, 101u);
+    xst_pattern(b, 103u);
+    xst_pattern(c, 107u);
+    xst_pattern(d, 109u);
+    char dir[400], path[600], name_a[64], name_b[64], name_c[64], name_d[64], err[200];
+    xst_dump_folder(dir, sizeof(dir), "texdump_gpu");
+    xst_repl_name(a, name_a, sizeof(name_a));
+    xst_repl_name(b, name_b, sizeof(name_b));
+    xst_repl_name(c, name_c, sizeof(name_c));
+    xst_repl_name(d, name_d, sizeof(name_d));
+    xst_reset();
+    nk_tex_scale_set_sync(1);
+    memset(&s_dump, 0, sizeof(s_dump));   /* a run of its own: the budget and file count from zero */
+
+    /* 1. An authentic run refuses the dump. */
+    const int ace_saved = g_ace_on;
+    g_ace_on = 0;
+    const int authentic_started = gegpu_texdump_start(dir, err, sizeof(err));
+    const int authentic_row = gegpu_texdump_row();
+    g_ace_on = ace_saved;
+    if (authentic_started || authentic_row != 0) return xst_dump_fail("an authentic run started the dump or offered its row");
+
+    /* 2. Off: a drawn texture is not written. */
+    xst_upload(b);
+    xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+    if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+    if (gegpu_texdump_row() != 1 || xst_dump_has(dir, name_b)) return xst_dump_fail("a texture was written while the dump was off");
+
+    /* 3. On: the texture already in the cache (drawn again, a cache hit) and new content at the
+     * same address (a decode) are both written, under the names a pack gives them, in a folder
+     * whose name is not ASCII. */
+    xst_setenv("SR_DISC_ID", "TEST00042");
+    const int started = gegpu_texdump_start(dir, err, sizeof(err));
+    xst_setenv("SR_DISC_ID", NULL);
+    if (!started) return xst_dump_fail(err);
+    if (gegpu_texdump_row() != 2 || !xst_dump_has(dir, "textures.ini")) return xst_dump_fail("the dump did not start with a textures.ini");
+    {
+        /* Its [games] names the run's game, so the player takes the folder as this game's pack. */
+        char ini[600], text[600];
+        snprintf(ini, sizeof(ini), "%s/textures.ini", dir);
+        FILE *fi = nk_fopen_utf8(ini, "rb");
+        const size_t got = fi ? fread(text, 1, sizeof(text) - 1u, fi) : 0u;
+        if (fi) fclose(fi);
+        text[got] = '\0';
+        if (!strstr(text, "[games]\nTEST00042 = textures.ini\n"))
+            return xst_dump_fail("the dump's textures.ini does not name the run's game in [games]");
+    }
+    if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+    if (!xst_dump_has(dir, name_b)) return xst_dump_fail("a texture already in the cache was not written when drawn again");
+    xst_upload(a);
+    if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+    if (!xst_dump_has(dir, name_a)) return xst_dump_fail("a newly decoded texture was not written");
+    {
+        unsigned long long saved = 0, changing = 9;
+        const char *stopped = "x";
+        gegpu_texdump_status(&saved, &changing, &stopped);
+        if (saved != 2u || changing != 0u || stopped != NULL) return xst_dump_fail("the row's status does not count the two files");
+    }
+
+    /* 4. The folder reads back as a pack holding each texture's own pixels, and its own [games]
+     * line is not reported as an override that is not applied. */
+    NkTexRepl *pack = nk_texrepl_open(dir, 0, err, sizeof(err));
+    if (!pack) return xst_dump_fail(err);
+    int same = 1, games_note = 0;
+    for (int k = 0; k < 2 && same; k++) {
+        const uint32_t *t = k ? b : a;
+        NkTexReplId id;
+        memset(&id, 0, sizeof(id));
+        id.addr = XST_TEX;
+        id.format = 3u;
+        id.dim = 4u | (4u << 8);
+        id.hash = nk_texrepl_quick_hash(t, sizeof(uint32_t) * XST_W * XST_H, XST_TEX);
+        NkTexReplHit hit;
+        if (!nk_texrepl_lookup(pack, &id, &hit)) { same = 0; break; }
+        same = hit.w == XST_W && hit.h == XST_H && memcmp(hit.rgba, t, sizeof(uint32_t) * XST_W * XST_H) == 0;
+        nk_texrepl_unpin(pack, &hit);
+    }
+    for (size_t i = 0; i < nk_texrepl_diag_count(pack); i++)
+        if (strstr(nk_texrepl_diag(pack, i), "[games]")) games_note = 1;
+    nk_texrepl_close(pack);
+    if (!same) return xst_dump_fail("the dump folder, read as a pack, does not give the textures' own pixels");
+    if (games_note) return xst_dump_fail("the reader reports the dump's own [games] line as not applied");
+
+    /* 5. Started again: content already in the folder is counted, not written again. */
+    gegpu_texdump_stop();
+    const unsigned long long written0 = s_dump.written, present0 = s_dump.present;
+    if (!xst_dump_start(dir)) return 0;
+    if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+    if (s_dump.written != written0 || s_dump.present <= present0)
+        return xst_dump_fail("a texture the folder already holds was written again");
+
+    /* 6. A file the player put there (an enlarged image saved in place) is never replaced. */
+    {
+        static const char mine[] = "the player's own image";
+        char buf[64];
+        snprintf(path, sizeof(path), "%s/%s", dir, name_d);
+        FILE *fo = nk_fopen_utf8(path, "wb");
+        const int put = fo && fwrite(mine, 1, sizeof(mine) - 1u, fo) == sizeof(mine) - 1u;
+        if (fo) fclose(fo);
+        if (!put) return xst_dump_fail("the test could not write the player's file");
+        const unsigned long long w0 = s_dump.written, p0 = s_dump.present;
+        xst_upload(d);
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        FILE *fi = nk_fopen_utf8(path, "rb");
+        const size_t got = fi ? fread(buf, 1, sizeof(buf) - 1u, fi) : 0u;
+        if (fi) fclose(fi);
+        buf[got] = '\0';
+        if (strcmp(buf, mine) != 0 || s_dump.written != w0 || s_dump.present != p0 + 1u)
+            return xst_dump_fail("a file already in the folder was replaced");
+    }
+
+    /* 7. A movie picture is skipped: the movie decoders note where they write. */
+    {
+        const unsigned long long w0 = s_dump.written, k0 = s_dump.skipped;
+        sr_video_frame_note(XST_DUMP_VIDEO, sizeof(uint32_t) * XST_W * XST_H);
+        xst_dump_upload_at(XST_DUMP_VIDEO, c);
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        if (s_dump.written != w0 || s_dump.skipped != k0 + 1u) return xst_dump_fail("a movie picture was dumped");
+        s_cnt_present_gpu++;
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        if (s_dump.written != w0 || s_dump.skipped != k0 + 1u)
+            return xst_dump_fail("a movie picture drawn again was dumped, or counted twice");
+        /* Once the movie no longer writes there (its span is past ge.c's 120 VBLANKs), the same
+         * entry's texture is a texture the game loaded at that address: it is written. This cell
+         * runs at VBLANK 0 (nothing else here sets the frame), so 1000 is well past the span. */
+        ge_set_frame(1000u);
+        s_cnt_present_gpu++;
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        if (s_dump.written != w0 + 1u || s_dump.skipped != k0 + 1u)
+            return xst_dump_fail("a texture at a movie's old address was not dumped once the movie ended");
+        xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+    }
+
+    /* 8. The budget: a file that would pass it is not written, and the dump stops and says why. */
+    s_dump.budget = s_dump.written_bytes;
+    xst_upload(c);
+    if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+    if (xst_dump_has(dir, name_c) || s_dump.stop != TEX_DUMP_STOP_BUDGET) return xst_dump_fail("a file past the budget was written");
+    {
+        const char *stopped = NULL;
+        gegpu_texdump_status(NULL, NULL, &stopped);
+        if (!stopped || !strstr(stopped, "budget")) return xst_dump_fail("the row does not say the budget stopped the dump");
+        /* The budget is the run's: turned on again, the dump stays stopped and says so. */
+        gegpu_texdump_stop();
+        if (!xst_dump_start(dir)) return 0;
+        stopped = NULL;
+        gegpu_texdump_status(NULL, NULL, &stopped);
+        if (!stopped || s_dump.stop != TEX_DUMP_STOP_BUDGET) return xst_dump_fail("a spent budget was forgotten when the dump was turned on again");
+    }
+    gegpu_texdump_stop();
+    if (gegpu_texdump_row() != 1) return xst_dump_fail("the row does not read off after the dump stops");
+    xst_dump_resume();
+
+    /* 9. The file limit: one more file is written, then the dump stops and says why. */
+    if (!xst_dump_start(dir)) return 0;
+    s_dump.max_files = s_dump.written + 1u;
+    {
+        uint32_t e1[XST_W * XST_H], e2[XST_W * XST_H];
+        xst_pattern(e1, 211u);
+        xst_pattern(e2, 223u);
+        const unsigned long long w0 = s_dump.written;
+        xst_upload(e1);
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        xst_upload(e2);
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        const char *stopped = NULL;
+        gegpu_texdump_status(NULL, NULL, &stopped);
+        if (s_dump.written != w0 + 1u || s_dump.stop != TEX_DUMP_STOP_COUNT || !stopped || !strstr(stopped, "file limit"))
+            return xst_dump_fail("the file limit did not stop the dump after one more file");
+    }
+    gegpu_texdump_stop();
+    xst_dump_resume();
+
+    /* 10. The first write that fails (here the folder is gone) stops the whole dump; no texture
+     * after it is tried. Turned on again, it tries again. */
+    if (!xst_dump_start(dir)) return 0;
+    if (!nk_platform_remove_tree(dir, NULL)) return xst_dump_fail("the test could not remove the dump folder");
+    {
+        uint32_t g1[XST_W * XST_H], g2[XST_W * XST_H];
+        xst_pattern(g1, 227u);
+        xst_pattern(g2, 229u);
+        const unsigned long long w0 = s_dump.written, f0 = s_dump.failed;
+        xst_upload(g1);
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        const char *stopped = NULL;
+        gegpu_texdump_status(NULL, NULL, &stopped);
+        if (s_dump.stop != TEX_DUMP_STOP_WRITE || s_dump.failed != f0 + 1u || !stopped || !strstr(stopped, "could not be written"))
+            return xst_dump_fail("a failed write did not stop the dump and say why");
+        if (!nk_platform_mkdir_p(dir)) return xst_dump_fail("the test could not make the folder again");
+        xst_upload(g2);
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        if (s_dump.failed != f0 + 1u || s_dump.written != w0 || xst_dump_files(dir) != 0)
+            return xst_dump_fail("a texture was tried after the dump stopped on a failed write");
+        gegpu_texdump_stop();
+        if (!xst_dump_start(dir)) return 0;
+        if (s_dump.stop != TEX_DUMP_GOING) return xst_dump_fail("turned on again, the dump stays stopped by an earlier write");
+        xst_upload(g2);
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        if (s_dump.written != w0 + 1u) return xst_dump_fail("turned on again, the dump does not write");
+    }
+
+    /* 11. An address whose texture is new in every present (an animation) stops being dumped after
+     * TEX_DUMP_CHURN_RUN presents in a row, with one note; another address goes on. */
+    {
+        /* Past the gap first: the texture written just above does not start the run. */
+        s_cnt_present_gpu += TEX_DUMP_CHURN_GAP + 1u;
+        const unsigned long long w0 = s_dump.written;
+        uint32_t frame[XST_W * XST_H];
+        for (uint32_t k = 0; k < TEX_DUMP_CHURN_RUN + 5u; k++) {
+            xst_pattern(frame, 1000u + k);
+            xst_upload(frame);
+            s_cnt_present_gpu++;   /* a present between the frames */
+            if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        }
+        unsigned long long changing = 0;
+        gegpu_texdump_status(NULL, &changing, NULL);
+        if (s_dump.written != w0 + (TEX_DUMP_CHURN_RUN - 1u) || s_dump.churn_addrs != 1u || changing != 1u ||
+            s_dump.changing != 6u || s_dump.stop != TEX_DUMP_GOING)
+            return xst_dump_fail("an animated texture was not cut off after its run, or not counted");
+        xst_pattern(frame, 3001u);
+        xst_dump_upload_at(XST_DUMP_OTHER, frame);
+        s_cnt_present_gpu++;
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        if (s_dump.written != w0 + TEX_DUMP_CHURN_RUN) return xst_dump_fail("another address stopped being dumped with the animated one");
+        xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+        /* Within TEX_DUMP_CHURN_QUIET presents of its last change, the cut-off address stays cut off. */
+        s_cnt_present_gpu += TEX_DUMP_CHURN_QUIET - 2u;
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        gegpu_texdump_status(NULL, &changing, NULL);
+        if (s_dump.written != w0 + TEX_DUMP_CHURN_RUN || s_dump.churn_addrs != 1u || changing != 1u)
+            return xst_dump_fail("an animated texture was dumped, or no longer counted, before it held still");
+        /* Once it has held still that long, its last content (skipped while it changed) is written,
+         * and the address is no longer counted as cut off. */
+        s_cnt_present_gpu += 4u;
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        gegpu_texdump_status(NULL, &changing, NULL);
+        if (s_dump.written != w0 + TEX_DUMP_CHURN_RUN + 1u || s_dump.churn_addrs != 0u || changing != 0u)
+            return xst_dump_fail("an animated texture that held still was not dumped again");
+    }
+    gegpu_texdump_stop();
+
+    /* 12. SR_TEX_DUMP_BUDGET_MB and SR_TEX_DUMP_MAX_FILES take a whole number in range, nothing else. */
+    {
+        static const char *const bad_mb[] = { "0", "65537", "12abc", "+5", " 5", "-1", "99999999999999999999" };
+        for (size_t i = 0; i < sizeof(bad_mb) / sizeof(bad_mb[0]); i++) {
+            xst_setenv("SR_TEX_DUMP_BUDGET_MB", bad_mb[i]);
+            const int took = gegpu_texdump_start(dir, err, sizeof(err));
+            gegpu_texdump_stop();
+            if (took || !strstr(err, "SR_TEX_DUMP_BUDGET_MB")) {
+                xst_setenv("SR_TEX_DUMP_BUDGET_MB", NULL);
+                return xst_dump_fail("a malformed or out-of-range SR_TEX_DUMP_BUDGET_MB was taken");
+            }
+        }
+        static const struct { const char *v; uint64_t mb; } good_mb[] = { {"1", 1u}, {"65536", 65536u}, {"", 4096u}, {NULL, 4096u} };
+        for (size_t i = 0; i < sizeof(good_mb) / sizeof(good_mb[0]); i++) {
+            xst_setenv("SR_TEX_DUMP_BUDGET_MB", good_mb[i].v);
+            const int took = xst_dump_start(dir);
+            const uint64_t budget = s_dump.budget;
+            gegpu_texdump_stop();
+            if (!took || budget != good_mb[i].mb << 20) {
+                xst_setenv("SR_TEX_DUMP_BUDGET_MB", NULL);
+                return xst_dump_fail("a valid SR_TEX_DUMP_BUDGET_MB was not taken as given");
+            }
+        }
+        xst_setenv("SR_TEX_DUMP_BUDGET_MB", NULL);
+        static const char *const bad_n[] = { "0", "1000001", "7x", "+7" };
+        for (size_t i = 0; i < sizeof(bad_n) / sizeof(bad_n[0]); i++) {
+            xst_setenv("SR_TEX_DUMP_MAX_FILES", bad_n[i]);
+            const int took = gegpu_texdump_start(dir, err, sizeof(err));
+            gegpu_texdump_stop();
+            if (took || !strstr(err, "SR_TEX_DUMP_MAX_FILES")) {
+                xst_setenv("SR_TEX_DUMP_MAX_FILES", NULL);
+                return xst_dump_fail("a malformed or out-of-range SR_TEX_DUMP_MAX_FILES was taken");
+            }
+        }
+        xst_setenv("SR_TEX_DUMP_MAX_FILES", "7");
+        const int took = xst_dump_start(dir);
+        const unsigned long long max_files = s_dump.max_files;
+        gegpu_texdump_stop();
+        xst_setenv("SR_TEX_DUMP_MAX_FILES", NULL);
+        if (!took || max_files != 7u) return xst_dump_fail("a valid SR_TEX_DUMP_MAX_FILES was not taken as given");
+    }
+
+    /* 13. A refusal names no full path: a folder whose textures.ini does not read refuses the
+     * start with the reader's reason, and the folder itself is named by its last component. */
+    {
+        char bad[400], ini[600];
+        xst_dump_folder(bad, sizeof(bad), "texdump_gpu_badini");
+        snprintf(ini, sizeof(ini), "%s/textures.ini", bad);
+        if (!nk_platform_mkdir_p(bad) || sr_file_publish_new(ini, "[options]\nversion = 1\n", 22u) != SR_PUBLISH_WRITTEN)
+            return xst_dump_fail("the test could not write the unreadable ini");
+        const int took = gegpu_texdump_start(bad, err, sizeof(err));
+        gegpu_texdump_stop();
+        if (took || !strstr(err, "no hash type") || strstr(err, SR_SELFTEST_BUILD_ROOT))
+            return xst_dump_fail("an unreadable textures.ini did not refuse the start with its reason alone");
+        char text[300];
+        snprintf(text, sizeof(text), "texture pack folder '%s' cannot be read", bad);
+        tex_dump_redact(text, sizeof(text), bad);
+        if (strcmp(text, "texture pack folder 'texdump_gpu_badini" XST_DUMP_NONASCII "' cannot be read") != 0)
+            return xst_dump_fail("a reason that names the folder keeps more than its last component");
+        /* The folder is checked as a pack folder is before anything is made in it: a relative path
+         * and ill-formed UTF-8 are refused with their reason. */
+        if (gegpu_texdump_start("texdump_gpu_relative", err, sizeof(err)) || !strstr(err, "full path"))
+            return xst_dump_fail("a relative dump folder was taken");
+        snprintf(text, sizeof(text), "%s/\xC0\xAF", SR_SELFTEST_BUILD_ROOT);
+        if (gegpu_texdump_start(text, err, sizeof(err)) || !strstr(err, "UTF-8"))
+            return xst_dump_fail("a dump folder that is not valid UTF-8 was taken");
+    }
+    memset(&s_dump, 0, sizeof(s_dump));
+    printf("gpu texscale selftest: PASS %-12s refused when authentic, nothing while off, cached and new textures "
+           "written under their pack names in a non-ASCII folder and read back, none twice, a player's file kept, "
+           "a movie skipped, the budget, file limit and a failed write stopping it, an animation cut off, the "
+           "variables parsed, refusals without paths\n", "dump");
+    return 1;
+}
+
+/* Under an edited textures.ini (xxh32 or xxh64 with ignoreAddress), the dump names each file the
+ * way that ini asks, without the address, so the pack made from the folder finds the texture at
+ * any address. */
+static int xst_cell_dump_xxh(int f) {
+    (void)f;
+    static const char *const kinds[] = { "xxh32", "xxh64" };
+    for (size_t k = 0; k < 2u; k++) {
+        uint32_t t[XST_W * XST_H];
+        xst_pattern(t, 401u + (uint32_t)k);
+        char dir[400], ini[600], text[160], name[64], full[64], err[200];
+        xst_dump_folder(dir, sizeof(dir), "texdump_gpu_xxh");
+        snprintf(ini, sizeof(ini), "%s/textures.ini", dir);
+        const int n = snprintf(text, sizeof(text), "[options]\nversion = 1\nhash = %s\nignoreAddress = true\n", kinds[k]);
+        if (!nk_platform_mkdir_p(dir) || sr_file_publish_new(ini, text, (size_t)n) != SR_PUBLISH_WRITTEN)
+            return xst_dump_fail("the test could not write the edited textures.ini");
+        NkTexRepl *pk = nk_texrepl_open(dir, 0, err, sizeof(err));
+        if (!pk) return xst_dump_fail(err);
+        const uint32_t hash = nk_texrepl_hash_texture(pk, (const uint8_t *)t, sizeof(t), XST_TEX, XST_W, XST_W, XST_H, 3u, 0);
+        nk_texrepl_close(pk);
+        const uint64_t key = nk_texrepl_cache_key(XST_TEX, 3u, 4u | (4u << 8), 0u);
+        snprintf(name, sizeof(name), "%016llx%08x.png", (unsigned long long)(key & 0xFFFFFFFFull), hash);
+        snprintf(full, sizeof(full), "%016llx%08x.png", (unsigned long long)key, hash);
+        xst_reset();
+        nk_tex_scale_set_sync(1);
+        memset(&s_dump, 0, sizeof(s_dump));
+        if (!xst_dump_start(dir)) return 0;
+        xst_upload(t);
+        xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        gegpu_texdump_stop();
+        if (!xst_dump_has(dir, name) || xst_dump_has(dir, full))
+            return xst_dump_fail("under ignoreAddress the file is not named without the address");
+        pk = nk_texrepl_open(dir, 0, err, sizeof(err));
+        if (!pk) return xst_dump_fail(err);
+        NkTexReplId id;
+        memset(&id, 0, sizeof(id));
+        id.addr = XST_TEX + 0x10000u;   /* the same content somewhere else */
+        id.format = 3u;
+        id.dim = 4u | (4u << 8);
+        id.hash = hash;
+        NkTexReplHit hit;
+        const int found = nk_texrepl_lookup(pk, &id, &hit);
+        const int same = found && hit.w == XST_W && hit.h == XST_H && memcmp(hit.rgba, t, sizeof(t)) == 0;
+        if (found) nk_texrepl_unpin(pk, &hit);
+        nk_texrepl_close(pk);
+        if (!same) return xst_dump_fail("a file dumped under ignoreAddress is not found by the pack at another address");
+    }
+    memset(&s_dump, 0, sizeof(s_dump));
+    printf("gpu texscale selftest: PASS %-12s under xxh32 and xxh64 with ignoreAddress the files are named "
+           "without the address and found at any address\n", "dump-xxh");
+    return 1;
+}
+
+/* A palette (CLUT8) texture is dumped under the name PPSSPP gives it (the key and palette identity
+ * written out from PPSSPP's formula here), holding the colours the palette gives each texel. */
+static int xst_cell_dump_palette(int f) {
+    (void)f;
+    uint32_t pat[XST_W * XST_H], lut[XST_W * XST_H];
+    uint8_t *idx = (uint8_t *)SR_HOST(XST_TEX);
+    char dir[400], name[64], err[200];
+    xst_dump_folder(dir, sizeof(dir), "texdump_gpu_pal");
+    xst_reset();
+    nk_tex_scale_set_sync(1);
+    memset(&s_dump, 0, sizeof(s_dump));
+    xst_pattern(pat, 19u);
+    for (int i = 0; i < XST_W * XST_H; i++) idx[i] = (uint8_t)(pat[i] & 0x0Fu);
+    sr_gpu_vram_dirty(XST_TEX, XST_W * XST_H);
+    xst_state(XST_BASE, XST_TEX, 5u, 1, 1);
+    for (uint32_t j = 0; j < 256u; j++) {
+        uint32_t entry = 0xFF000000u | (xst_hash(0xD00u + j * 7u) & 0xFFFFFFu);
+        memcpy(&s_ge->clutram[(size_t)j * 4u], &entry, 4);
+    }
+    s_ge->clut_fmt = 3u | (0xFFu << 8);
+    ge_clut_note_load(256u * 4u);
+    ge_state_note_external_write();
+    for (int i = 0; i < XST_W * XST_H; i++) memcpy(&lut[i], &s_ge->clutram[(size_t)idx[i] * 4u], 4);
+    uint32_t last = 0, max = 0;
+    ge_clut_load_extent(&last, &max);
+    const uint32_t loaded = last < max ? last : max;
+    const uint32_t cluthash = nk_texrepl_xxh32(s_ge->clutram, loaded, 0xC0108888u) ^ (0xC5000000u | s_ge->clut_fmt);
+    const uint64_t key = (((uint64_t)(XST_TEX & 0x3FFFFFFFu) << 32) | (4u | (4u << 8))) ^ cluthash;
+    const uint32_t hash = nk_texrepl_quick_hash(idx, XST_W * XST_H, XST_TEX);
+    snprintf(name, sizeof(name), "%016llx%08x.png", (unsigned long long)key, hash);
+    if (!xst_dump_start(dir)) return 0;
+    if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+    gegpu_texdump_stop();
+    if (!xst_dump_has(dir, name)) return xst_dump_fail("a CLUT8 texture is not dumped under the name PPSSPP gives it");
+    NkTexRepl *pk = nk_texrepl_open(dir, 0, err, sizeof(err));
+    if (!pk) return xst_dump_fail(err);
+    NkTexReplId id;
+    memset(&id, 0, sizeof(id));
+    id.addr = XST_TEX;
+    id.format = 5u;
+    id.dim = 4u | (4u << 8);
+    id.clut_hash = cluthash;
+    id.hash = hash;
+    NkTexReplHit hit;
+    const int found = nk_texrepl_lookup(pk, &id, &hit);
+    const int same = found && hit.w == XST_W && hit.h == XST_H && memcmp(hit.rgba, lut, sizeof(lut)) == 0;
+    if (found) nk_texrepl_unpin(pk, &hit);
+    nk_texrepl_close(pk);
+    memset(&s_dump, 0, sizeof(s_dump));
+    if (!same) return xst_dump_fail("a dumped CLUT8 texture does not hold the colours its palette gives");
+    printf("gpu texscale selftest: PASS %-12s a CLUT8 texture is dumped under PPSSPP's name with its palette's colours\n",
+           "dump-pal");
+    return 1;
+}
+
+/* A mip-mapped texture is dumped level by level: level 0 under the pack name, level 1 as "_1",
+ * each at its own size. */
+static int xst_cell_dump_mip(int f) {
+    (void)f;
+    uint32_t t0[XST_W * XST_H], t1[(XST_W / 2) * (XST_H / 2)];
+    char dir[400], name0[64], name1[72];
+    xst_dump_folder(dir, sizeof(dir), "texdump_gpu_mip");
+    xst_reset();
+    nk_tex_scale_set_sync(1);
+    memset(&s_dump, 0, sizeof(s_dump));
+    xst_pattern(t0, 501u);
+    for (int i = 0; i < (XST_W / 2) * (XST_H / 2); i++) t1[i] = 0xFF000000u | xst_hash(600u + (uint32_t)i);
+    xst_repl_name(t0, name0, sizeof(name0));   /* also uploads level 0 */
+    const uint32_t l1 = XST_TEX + sizeof(t0);
+    memcpy(SR_HOST(l1), t1, sizeof(t1));
+    sr_gpu_vram_dirty(l1, sizeof(t1));
+    snprintf(name1, sizeof(name1), "%.*s_1.png", (int)(strlen(name0) - 4u), name0);
+    xst_state(XST_BASE, XST_TEX, 3u, 0, 1);
+    s_ge->tex_filter |= 4u;          /* mipmapped minification: the levels are sampled */
+    s_ge->tex_max_level = 1u;
+    s_ge->tex_level_mode = 1u;       /* constant level */
+    s_ge->tex_lod_bias = 0.0f;
+    s_ge->tex_mip_addr[0] = l1;
+    s_ge->tex_mip_bufw[0] = XST_W / 2;
+    s_ge->tex_mip_wlog2[0] = 3u;
+    s_ge->tex_mip_hlog2[0] = 3u;
+    ge_state_note_external_write();
+    int ok = xst_dump_start(dir) && xst_dump_draw();
+    gegpu_texdump_stop();
+    s_ge->tex_filter &= ~4u;
+    s_ge->tex_max_level = 0u;
+    s_ge->tex_level_mode = 0u;
+    ge_state_note_external_write();
+    memset(&s_dump, 0, sizeof(s_dump));
+    if (!ok) return xst_dump_fail("the mip-mapped draw failed");
+    uint32_t w0 = 0, h0 = 0, w1 = 0, h1 = 0;
+    if (!xst_dump_png_size(dir, name0, &w0, &h0) || !xst_dump_png_size(dir, name1, &w1, &h1) ||
+        w0 != XST_W || h0 != XST_H || w1 != XST_W / 2 || h1 != XST_H / 2)
+        return xst_dump_fail("a mip-mapped texture's levels are not each dumped at their own size");
+    printf("gpu texscale selftest: PASS %-12s a mip-mapped texture's levels are dumped, level 1 as _1\n", "dump-mip");
+    return 1;
+}
+
+/* A work job that does nothing: it only takes a slot on the workers' queue. */
+static void xst_dump_filler(void *ctx) { (void)ctx; }
+
+/* The dump off the guest thread (#1880): with the scaler's workers held, a texture the dump writes
+ * is handed to them and the draw returns before any encode or write (a dump on the guest thread
+ * writes the file inside the draw and fails here); drawn again it is not handed over twice. With
+ * the queue full, the next texture is refused loudly (counted in queue_full, said once), not
+ * dropped: once the queue has room it is written on its next draw. Files are counted only when
+ * taken back on the guest thread. */
+static int xst_cell_dump_async(int f) {
+    (void)f;
+    uint32_t a[XST_W * XST_H], b[XST_W * XST_H];
+    char dir[400], name_a[64], name_b[64];
+    xst_pattern(a, 401u);
+    xst_pattern(b, 409u);
+    xst_dump_folder(dir, sizeof(dir), "texdump_gpu_async");
+    xst_repl_name(a, name_a, sizeof(name_a));
+    xst_repl_name(b, name_b, sizeof(name_b));
+    xst_reset();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(0);
+    nk_tex_scale_set_hold(1);
+    const char *why = NULL;
+    int fillers = 0, took = 0;
+    unsigned long long saved = 0;
+    if (!xst_dump_start(dir)) { why = "the dump did not start"; goto done; }
+
+    /* 1. Held: the level is handed over and the draw returns without it. */
+    xst_upload(a);
+    xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+    if (!xst_dump_draw()) { why = "a draw failed"; goto done; }
+    if (s_dump.inflight != 1u || nk_tex_scale_work_pending(tex_dump_job_run) != 1 || s_dump.written != 0u ||
+        xst_dump_has(dir, name_a)) {
+        why = "the draw wrote the file itself, or handed nothing to the workers";
+        goto done;
+    }
+    if (!xst_dump_draw() || s_dump.inflight != 1u || nk_tex_scale_work_pending(tex_dump_job_run) != 1) {
+        why = "a texture being written was handed over again";
+        goto done;
+    }
+
+    /* 2. The queue full (the rest of its slots taken by jobs that do nothing): the next texture is
+     * refused, counted and said, its level not handed over, and looked at again on later draws. */
+    while (nk_tex_scale_can_submit_work(64u) && nk_tex_scale_submit_work(xst_dump_filler, NULL, 64u)) fillers++;
+    if (fillers < 1 || nk_tex_scale_can_submit_work(64u)) { why = "the test could not fill the queue"; goto done; }
+    xst_upload(b);
+    if (!xst_dump_draw()) { why = "a draw failed"; goto done; }
+    if (s_dump.queue_full != 1u || !s_dump.queue_noted || s_dump.inflight != 1u || xst_dump_has(dir, name_b)) {
+        why = "a texture that found the queue full was not refused and counted";
+        goto done;
+    }
+    if (!xst_dump_draw() || s_dump.queue_full != 2u || s_dump.inflight != 1u) {
+        why = "a refused texture was not looked at again on its next draw";
+        goto done;
+    }
+
+    /* 3. Let go: the first file lands and is counted once taken back. */
+    nk_tex_scale_set_hold(0);
+    nk_tex_scale_wait_idle();
+    for (void *ctx = NULL; nk_tex_scale_take_work(xst_dump_filler, &ctx);) took++;
+    gegpu_texdump_status(&saved, NULL, NULL);
+    if (took != fillers || saved != 1u || s_dump.inflight != 0u || !xst_dump_has(dir, name_a)) {
+        why = "a file handed to the workers did not land, or was not counted when taken back";
+        goto done;
+    }
+
+    /* 4. The refused texture, drawn again with room on the queue, is written. */
+    if (!xst_dump_draw()) { why = "a draw failed"; goto done; }
+    nk_tex_scale_wait_idle();
+    gegpu_texdump_status(&saved, NULL, NULL);
+    if (saved != 2u || s_dump.queue_full != 2u || !xst_dump_has(dir, name_b)) {
+        why = "a texture refused for a full queue was dropped";
+        goto done;
+    }
+
+done:
+    nk_tex_scale_set_hold(0);
+    nk_tex_scale_wait_idle();
+    for (void *ctx = NULL; nk_tex_scale_take_work(xst_dump_filler, &ctx);) {}
+    gegpu_texdump_stop();
+    tex_dump_collect();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(1);   /* the cells after this one run with sync on, as before it */
+    if (why) return xst_dump_fail(why);
+    printf("gpu texscale selftest: PASS %-12s encode and write on the workers, the draw not waiting; a full "
+           "queue refused, counted and said, the texture written on a later draw (%d jobs filled it)\n",
+           "dump-async", fillers);
+    return 1;
+}
+
+/* PNG CRC-32, bit by bit: independent of the encoder's table. */
+static uint32_t xst_crc32(const unsigned char *p, size_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; i++) {
+        c ^= p[i];
+        for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+    }
+    return c ^ 0xFFFFFFFFu;
+}
+
+/* The PNG at dir/name: the signature, then chunks whose CRCs are all right, IEND last with nothing
+ * after it. */
+static int xst_dump_png_crcs_ok(const char *dir, const char *name) {
+    char path[600];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *fp = nk_fopen_utf8(path, "rb");
+    if (!fp) return 0;
+    unsigned char *b = (unsigned char *)malloc(1u << 20);
+    const size_t n = b ? fread(b, 1, 1u << 20, fp) : 0u;
+    fclose(fp);
+    static const unsigned char sig[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n' };
+    int ok = b && n > 8u && n < (1u << 20) && memcmp(b, sig, 8u) == 0, iend = 0;
+    size_t i = 8u;
+    while (ok && !iend && i + 12u <= n) {
+        const uint32_t len = ((uint32_t)b[i] << 24) | ((uint32_t)b[i + 1] << 16) | ((uint32_t)b[i + 2] << 8) | b[i + 3];
+        if (len > n - i - 12u) { ok = 0; break; }
+        const unsigned char *c = b + i + 8u + len;
+        const uint32_t crc = ((uint32_t)c[0] << 24) | ((uint32_t)c[1] << 16) | ((uint32_t)c[2] << 8) | c[3];
+        ok = xst_crc32(b + i + 4u, (size_t)len + 4u) == crc;
+        iend = memcmp(b + i + 4u, "IEND", 4u) == 0;
+        i += 12u + len;
+    }
+    free(b);
+    return ok && iend && i == n;
+}
+
+static bool xst_dump_count_tmp(const char *name, void *ctx) {
+    if (strstr(name, ".tmp")) ++*(int *)ctx;
+    return true;
+}
+
+/* The exit at SR_EXIT_AT_VBLANK (hle_display.c) skips atexit and calls sr_texdump_exit_finish
+ * before _Exit: with every level still held by the workers, that call must let both workers write
+ * them all, count them and leave no temp file. The files are written by the two workers at once,
+ * each through the encoder, so every one's CRCs are checked too. */
+#define XST_EXIT_LEVELS 20
+static int xst_cell_dump_exit(int f) {
+    (void)f;
+    uint32_t t[XST_W * XST_H];
+    char dir[400], names[XST_EXIT_LEVELS][64];
+    xst_dump_folder(dir, sizeof(dir), "texdump_gpu_exit");
+    xst_reset();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(0);
+    nk_tex_scale_set_hold(1);
+    const char *why = NULL;
+    int tmp = 0, landed = 0;
+    if (!xst_dump_start(dir)) { why = "the dump did not start"; goto done; }
+    for (int i = 0; i < XST_EXIT_LEVELS; i++) {
+        xst_pattern(t, 601u + 2u * (uint32_t)i);
+        xst_repl_name(t, names[i], sizeof(names[i]));
+        xst_upload(t);
+        xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+        if (!xst_dump_draw()) { why = "a draw failed"; goto done; }
+    }
+    if (s_dump.inflight != XST_EXIT_LEVELS || s_dump.written != 0u || xst_dump_has(dir, names[0])) {
+        why = "the levels were not all held by the workers before the exit";
+        goto done;
+    }
+    sr_texdump_exit_finish();   /* what the exit at SR_EXIT_AT_VBLANK calls */
+    if (s_dump.on || s_dump.inflight || s_dump.starts) {
+        why = "the exit did not finish the dump";
+        goto done;
+    }
+    for (int i = 0; i < XST_EXIT_LEVELS; i++) {
+        uint32_t w = 0, h = 0;
+        if (xst_dump_has(dir, names[i]) && xst_dump_png_size(dir, names[i], &w, &h) && w == XST_W && h == XST_H &&
+            xst_dump_png_crcs_ok(dir, names[i]))
+            landed++;
+    }
+    if (!nk_platform_list_files(dir, xst_dump_count_tmp, &tmp)) tmp = -1;
+    if (landed != XST_EXIT_LEVELS || tmp != 0 || xst_dump_files(dir) != XST_EXIT_LEVELS + 1) {
+        why = "a level the workers held at the exit was not written whole, or a temp file was left";
+        goto done;
+    }
+
+done:
+    nk_tex_scale_set_hold(0);
+    nk_tex_scale_wait_idle();
+    gegpu_texdump_stop();
+    tex_dump_collect();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(1);
+    if (why) {
+        fprintf(stderr, "gpu texscale selftest: FAIL dump-exit: %s (%d of %d whole, %d temp files)\n", why, landed,
+                XST_EXIT_LEVELS, tmp);
+        return 0;
+    }
+    printf("gpu texscale selftest: PASS %-12s the exit at SR_EXIT_AT_VBLANK lets the workers write all %d held "
+           "levels, every CRC right, no temp file left\n", "dump-exit", XST_EXIT_LEVELS);
+    return 1;
+}
+
+/* A run's end whose workers never finish: two jobs that block hold both workers, so the levels
+ * the dump queues behind them cannot start. The end (sr_texdump_exit_finish) must not wait for
+ * ever: it gives up after its bounded wait, says so, counts the levels it could not wait for and
+ * clears the dump. The levels then run once the blockers let go (the files land late), and the
+ * cell takes every job back so the pool is clean. */
+#define XST_STUCK_LEVELS 4
+static SDL_AtomicInt s_xst_block_go, s_xst_block_started;
+static void xst_dump_blocker(void *ctx) {
+    (void)ctx;
+    SDL_AddAtomicInt(&s_xst_block_started, 1);
+    while (!SDL_GetAtomicInt(&s_xst_block_go)) SDL_Delay(1);
+}
+
+static int xst_cell_dump_stuck(int f) {
+    (void)f;
+    uint32_t t[XST_W * XST_H];
+    char dir[400];
+    xst_dump_folder(dir, sizeof(dir), "texdump_gpu_stuck");
+    xst_reset();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(0);
+    nk_tex_scale_set_hold(0);
+    SDL_SetAtomicInt(&s_xst_block_go, 0);
+    SDL_SetAtomicInt(&s_xst_block_started, 0);
+    const char *why = NULL;
+    uint64_t spent = 0;
+    unsigned dropped = 0;
+    int blockers = 0;
+    for (int i = 0; i < 2; i++) blockers += nk_tex_scale_submit_work(xst_dump_blocker, NULL, 64u);
+    const uint64_t t0 = SDL_GetTicks();
+    while (SDL_GetAtomicInt(&s_xst_block_started) < 2 && SDL_GetTicks() - t0 < 5000u) SDL_Delay(1);
+    if (blockers != 2 || SDL_GetAtomicInt(&s_xst_block_started) != 2) { why = "the blockers did not hold both workers"; goto done; }
+    if (!xst_dump_start(dir)) { why = "the dump did not start"; goto done; }
+    for (int i = 0; i < XST_STUCK_LEVELS; i++) {
+        xst_pattern(t, 701u + 2u * (uint32_t)i);
+        xst_upload(t);
+        xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+        if (!xst_dump_draw()) { why = "a draw failed"; goto done; }
+    }
+    if (s_dump.inflight != XST_STUCK_LEVELS) { why = "the levels were not all queued behind the blockers"; goto done; }
+    s_dump_exit_wait_ms = 200u;
+    const uint64_t e0 = SDL_GetTicks();
+    sr_texdump_exit_finish();
+    spent = SDL_GetTicks() - e0;
+    dropped = s_dump_exit_dropped;
+    if (spent < 190u || spent > 3000u || dropped != XST_STUCK_LEVELS || s_dump.on || s_dump.inflight || s_dump.starts)
+        why = "the end did not give up after its bounded wait, or did not count what it left";
+
+done:
+    s_dump_exit_wait_ms = TEX_DUMP_EXIT_WAIT_MS;
+    SDL_SetAtomicInt(&s_xst_block_go, 1);
+    nk_tex_scale_wait_idle();
+    void *ctx = NULL;
+    while (nk_tex_scale_take_work(xst_dump_blocker, &ctx)) {}
+    while (nk_tex_scale_take_work(tex_dump_job_run, &ctx)) {
+        TexDumpJob *j = (TexDumpJob *)ctx;
+        free(j->rgba);
+        free(j);
+    }
+    gegpu_texdump_stop();
+    tex_dump_collect();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(1);
+    if (why) {
+        fprintf(stderr, "gpu texscale selftest: FAIL dump-stuck: %s (%llu ms, %u of %d counted as left)\n", why,
+                (unsigned long long)spent, dropped, XST_STUCK_LEVELS);
+        return 0;
+    }
+    printf("gpu texscale selftest: PASS %-12s an end whose workers never finish gives up after %llu ms and "
+           "counts the %u levels it left\n", "dump-stuck", (unsigned long long)spent, dropped);
+    return 1;
+}
+
 int gegpu_texrepl_only_prepare(const char *build_root) {
     char dir[400], path[480];
     snprintf(dir, sizeof(dir), "%s/texrepl_gpu_only_pack", build_root);
@@ -1369,10 +2200,14 @@ int gegpu_texscale_selftest(void) {
     int ok = 1;
     static int (*const cells[])(int) = { xst_cell_scaled_draw, xst_cell_large, xst_cell_upload_cap,
                                          xst_cell_not_ready, xst_cell_rewrite, xst_cell_clut, xst_cell_replace,
-                                         xst_cell_replace_palette,
-                                         xst_cell_budget, xst_cell_rtt, xst_cell_color_test, xst_cell_onetoone };
+                                         xst_cell_replace_palette, xst_cell_dump, xst_cell_dump_xxh,
+                                         xst_cell_dump_palette, xst_cell_dump_mip, xst_cell_dump_async,
+                                         xst_cell_dump_exit, xst_cell_dump_stuck, xst_cell_budget,
+                                         xst_cell_rtt, xst_cell_color_test, xst_cell_onetoone };
     static const char *const names[] = { "scaled-draw", "large", "upload-cap", "not-ready", "rewrite", "clut",
-                                         "replace", "replace-pal", "budget", "rtt", "color-test", "onetoone" };
+                                         "replace", "replace-pal", "dump", "dump-xxh",
+                                         "dump-pal", "dump-mip", "dump-async", "dump-exit", "dump-stuck", "budget", "rtt", "color-test",
+                                         "onetoone" };
     /* The cells before onetoone check copies through 1:1 sprites, so they run with the 1:1 rule
      * off; onetoone turns it back on. */
     s_xs_onetoone_plain = 0;

@@ -11,6 +11,9 @@
  *   - jobs: a queued job returns the same pixels with its serial and hash; a held queue keeps a
  *     job queued and a full one refuses the next; nothing waits for a worker; the host-memory cap
  *     refuses the job that would pass it, and can_submit always gives submit's answer;
+ *   - work jobs (the texture dump's): each runs once on a worker thread, held ones stay queued
+ *     without the submitter waiting, a full queue and the host-memory cap refuse the next, scale
+ *     and work results are taken apart, and a sync submit runs its job before returning;
  *   - settings, the per-size factor and the budget; with SR_TEX_SCALE and SR_SMART_2D set, an
  *     authentic start keeps both off and prints only the "need Ace Mode" line (the
  *     tex-scale-gate-mutant build, which removes that gate, must fail here);
@@ -33,6 +36,9 @@
 #include "tex_scale.h"
 #include "../../../third_party/xbrz/xbrz.h"
 #include "../vfpu_tables.h"   /* sr_vfpu_hmac_sha256 */
+
+#include <SDL3/SDL_thread.h>   /* the work test checks which thread a job ran on */
+#include <SDL3/SDL_timer.h>    /* the bounded wait is timed */
 
 #include <math.h>
 #include <stdio.h>
@@ -333,6 +339,106 @@ static void test_host_cap(void) {
     nk_tex_scale_shutdown();
     if (!s_fail) printf("tex scale selftest: PASS host-cap %d jobs of %llu MiB, can_submit equals submit\n", taken,
                         (unsigned long long)(each >> 20));
+}
+
+/* Work jobs (the texture dump's encode and write): run once each, on a worker thread, never on
+ * the submitting one; a held queue keeps them queued and the submitter never waits; they share
+ * the scale jobs' slots and host-memory cap, and a full queue refuses the next one (the caller
+ * keeps it); each kind of job is taken only by its own take call, and a work job only by its own
+ * function's; with sync on, one runs before submit returns. */
+typedef struct {
+    int runs;
+    SDL_ThreadID ran_on;
+    int on_worker;                 /* nk_tex_scale_on_worker() inside the job */
+} WorkProbe;
+static void work_probe(void *ctx) {
+    WorkProbe *p = (WorkProbe *)ctx;
+    p->runs++;
+    p->ran_on = SDL_GetCurrentThreadID();
+    p->on_worker = nk_tex_scale_on_worker();
+}
+static void work_other(void *ctx) { (void)ctx; }
+
+static void test_work(void) {
+    static WorkProbe probes[NK_TEX_SCALE_QUEUE + 1];
+    memset(probes, 0, sizeof(probes));
+    const SDL_ThreadID me = SDL_GetCurrentThreadID();
+    void *ctx = NULL;
+    CHECK(!nk_tex_scale_take_work(work_probe, &ctx) && ctx == NULL, "work: a result before any job");
+
+    /* Held: queued, not run, and nothing waits. */
+    nk_tex_scale_set_hold(1);
+    CHECK(nk_tex_scale_submit_work(work_probe, &probes[0], 1024u), "work: a held submit was refused");
+    nk_tex_scale_wait_idle();   /* returns at once: a held job is not waited for */
+    CHECK(probes[0].runs == 0 && nk_tex_scale_work_pending(work_probe) == 1 && nk_tex_scale_work_pending(work_other) == 0,
+          "work: a held job ran, or is not counted as pending for its own function alone");
+    CHECK(!nk_tex_scale_take_work(work_probe, &ctx), "work: a held job was taken");
+    /* The bounded wait a stop that ends the run uses: a job that cannot finish (held here) makes
+     * it return 0 once its time is up, not wait on; another function's jobs are not its own. */
+    const uint64_t wait_t0 = SDL_GetTicks();
+    const int waited = nk_tex_scale_wait_work(work_probe, 150u);
+    const uint64_t wait_ms = SDL_GetTicks() - wait_t0;
+    CHECK(!waited && wait_ms >= 140u && wait_ms < 5000u && nk_tex_scale_wait_work(work_other, 0u),
+          "work: the bounded wait returned %d after %llu ms for a held job (want 0 after about 150 ms)", waited,
+          (unsigned long long)wait_ms);
+    CHECK(!nk_tex_scale_on_worker(), "work: the submitting thread reads as a worker");
+    /* A scale job beside it: each take returns only its own kind. */
+    uint32_t tex[4 * 4];
+    for (int i = 0; i < 16; i++) tex[i] = 0xFF000000u | (uint32_t)(i * 0x050301u);
+    CHECK(nk_tex_scale_submit(77u, 5u, tex, 4, 4, 2, 1, 1), "work: a scale job beside a work job was refused");
+    int queued = 2, n = 1;
+    while (nk_tex_scale_can_submit_work(1024u)) {
+        if (!nk_tex_scale_submit_work(work_probe, &probes[n], 1024u)) break;
+        n++;
+        queued++;
+    }
+    CHECK(queued == NK_TEX_SCALE_QUEUE && !nk_tex_scale_can_submit_work(1024u) &&
+          !nk_tex_scale_submit_work(work_probe, &probes[NK_TEX_SCALE_QUEUE], 1024u) &&
+          probes[NK_TEX_SCALE_QUEUE].runs == 0,
+          "work: the queue held %d jobs, not %d, or took one more", queued, NK_TEX_SCALE_QUEUE);
+    nk_tex_scale_set_hold(0);
+    nk_tex_scale_wait_idle();
+    NkTexScaleResult r;
+    const int scale_took = nk_tex_scale_take(&r) && r.serial == 77u;
+    nk_tex_scale_release(&r);
+    CHECK(scale_took && !nk_tex_scale_take(&r), "work: the scale take did not return the scale job alone");
+    CHECK(!nk_tex_scale_take_work(work_other, &ctx), "work: another function's take returned this one's job");
+    CHECK(nk_tex_scale_wait_work(work_probe, 5000u), "work: the bounded wait did not see the jobs finish");
+    int taken = 0, once = 1, off_thread = 1, knew = 1;
+    while (nk_tex_scale_take_work(work_probe, &ctx)) {
+        const WorkProbe *p = (const WorkProbe *)ctx;
+        if (p->runs != 1) once = 0;
+        if (p->ran_on == me) off_thread = 0;
+        if (!p->on_worker) knew = 0;
+        taken++;
+    }
+    CHECK(taken == n && once && off_thread && knew,
+          "work: took %d of %d, each run once %d, on a worker thread %d, knew it was one %d", taken, n, once,
+          off_thread, knew);
+    /* The host-memory cap: an empty table takes a job of the whole cap (one job is always taken),
+     * and then refuses even one byte more. */
+    nk_tex_scale_set_hold(1);
+    CHECK(nk_tex_scale_submit_work(work_probe, &probes[0], (uint64_t)NK_TEX_SCALE_HOST_MB << 20),
+          "work: an empty table refused a job of the whole cap");
+    CHECK(!nk_tex_scale_can_submit_work(1u) && !nk_tex_scale_submit_work(work_probe, &probes[1], 1u),
+          "work: a job past the host-memory cap was taken");
+    nk_tex_scale_set_hold(0);
+    nk_tex_scale_wait_idle();
+    CHECK(nk_tex_scale_take_work(work_probe, &ctx) && ctx == &probes[0], "work: the large job was not returned");
+
+    /* Sync: it runs on the caller before submit returns. */
+    nk_tex_scale_set_sync(1);
+    WorkProbe sync_probe = { 0, 0, 0 };
+    CHECK(nk_tex_scale_submit_work(work_probe, &sync_probe, 64u) && sync_probe.runs == 1 && sync_probe.ran_on == me &&
+          nk_tex_scale_take_work(work_probe, &ctx) && ctx == &sync_probe,
+          "work: a sync submit did not run its job before returning");
+    nk_tex_scale_set_sync(0);
+    NkTexScaleStats st;
+    nk_tex_scale_stats(&st);
+    CHECK(st.work_refused >= 2u && st.work_done == st.work_submitted, "work: stats submitted=%llu done=%llu refused=%llu",
+          (unsigned long long)st.work_submitted, (unsigned long long)st.work_done, (unsigned long long)st.work_refused);
+    nk_tex_scale_shutdown();
+    if (!s_fail) printf("tex scale selftest: PASS work %d jobs on workers, held, full, cap, sync, taken apart\n", n);
 }
 
 /* ---- settings, factor, budget ------------------------------------------------------------ */
@@ -893,6 +999,7 @@ int main(void) {
     test_wrap_clamp();
     test_jobs();
     test_host_cap();
+    test_work();
     test_settings();
     test_smart2d();
     if (s_fail) return 1;

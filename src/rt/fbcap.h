@@ -35,6 +35,7 @@
 #ifndef NAKAGAWA_RECOMP_FBCAP_H
 #define NAKAGAWA_RECOMP_FBCAP_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -197,6 +198,57 @@ int sr_picture_watch_collect(SrPictureWatch *w, int block, uint32_t *brightest);
  * so every target that links the display path has it. A capture armed with a path ending in
  * ".png" is published as a PNG (8-bit RGB, stored deflate blocks), every other path as the P6
  * PPM described above. */
+
+/* Encode w x h RGBA8 pixels (R in the low byte of each word, rows packed) as a PNG in memory:
+ * 8-bit RGBA, no interlace, filter 0 on every row, and one IDAT holding a zlib stream of one
+ * fixed-Huffman deflate block with LZ77 matches (RFC 1951), so a texture with flat areas or
+ * repeats is a fraction of its raw size. The texture dump (ge_gpu.c, gegpu_texdump_start) writes
+ * its files with it. Returns 1 with *out (malloc'd; the caller frees it) and *out_len set, or 0
+ * with *out NULL when the arguments are invalid (w * 4 * h above UINT32_MAX, or an image past a
+ * PNG chunk's 2^31 - 1 bytes, included) or memory runs out. */
+int sr_png_encode_rgba(const uint32_t *rgba, uint32_t w, uint32_t h, uint8_t **out, size_t *out_len);
+/* The most bytes sr_png_encode_rgba can produce for a w x h image: the PNG's fixed 63 bytes
+ * (signature, IHDR, the IDAT's length, type and CRC, the zlib header and Adler-32, IEND) and the
+ * deflate stream, which spends at most 9 bits on each of the R = h * (1 + 4 * w) raw bytes (a
+ * fixed-Huffman literal from 144 up takes 9; a match of L >= 3 bytes takes at most 25 bits for
+ * L = 3 and less per byte for longer ones) plus 3 header bits and the 7-bit end code, rounded up
+ * to whole bytes: 63 + (9 R + 17) / 8. 0 when the encoder would refuse the size. The texture dump
+ * reserves this much of its budget for a file that is still being encoded. */
+uint64_t sr_png_encode_bound(uint32_t w, uint32_t h);
+/* The 256-entry PNG CRC-32 table the encoder uses: constant, so encoders on several threads at
+ * once share no state (fbcap-selftest checks it against the bit-by-bit definition). */
+const uint32_t *sr_png_crc_table(void);
+
+/* What sr_file_publish_new did. */
+enum {
+    SR_PUBLISH_FAILED = 0,   /* nothing was published; the temp file is removed */
+    SR_PUBLISH_WRITTEN = 1,  /* `path` now holds the bytes */
+    SR_PUBLISH_EXISTS = 2    /* `path` already existed and is left exactly as it was */
+};
+/* Publish `len` bytes as a new file at UTF-8 `path`: a temp sibling is written whole, flushed and
+ * closed, then moved to `path` with nk_rename_noreplace_utf8, so a reader never sees a part of
+ * the file and an existing file (a player's own edited image) is never replaced, even one that
+ * appears while the temp file is written. The temp sibling ("<path>.tmp<process id>.<n>") is
+ * created exclusively, so nothing already at that name (another run's temp file, a link) is
+ * written through. Every file call is the platform layer's wide-path one. Its temp names come from
+ * a counter of this file's, so it is called from one thread (the guest thread: the dump's
+ * textures.ini). */
+int sr_file_publish_new(const char *path, const void *data, size_t len);
+/* sr_file_publish_new for callers on several threads at once (the texture dump's workers): the
+ * temp names are "<path>.tmp<process id>.t<tag>.<n>", from `tag`, which the caller keeps unique
+ * among the publishes that can overlap, and no state here is shared. */
+int sr_file_publish_new_tagged(const char *path, const void *data, size_t len, unsigned long tag);
+
+/* The texture dump folder's path must be shorter than this, the length a texture pack folder may
+ * have (PlayerTitlePack.path), so the folder can be chosen as the game's pack as it is. */
+#define SR_TEXDUMP_DIR_MAX 512u
+/* Why `dir` cannot be the texture dump's folder, or NULL when it can. Checked as the texture pack
+ * folder is (player_state.c): not empty, strict UTF-8 (no overlong form, surrogate or code point
+ * past U+10FFFF, since every file call converts it to the platform's wide form), a full path on
+ * this host (nk_platform_path_is_absolute), shorter than SR_TEXDUMP_DIR_MAX bytes, and not in a
+ * Windows device or extended namespace ("\\.\", "\\?\" or their '/' spellings, which
+ * sr_texdump_folder never makes). The text alone: nothing is looked up. */
+const char *sr_texdump_folder_problem(const char *dir);
 
 #ifdef __cplusplus
 }

@@ -1835,6 +1835,59 @@ static void clut_lookup(uint32_t index, uint32_t level, int *r, int *g, int *b, 
 
 unsigned long g_tex_samples = 0, g_tex_nonzero = 0;
 static uint32_t s_ge_frame = 0;
+
+/* ---- Movie frames (ge_shared.h, sr_video_frame_note) ------------------------------------------
+ * The last GE_VIDEO_SPANS distinct spans a movie decoder wrote a picture to, each with the VBLANK
+ * (s_ge_frame) it was last written in. Addresses are kept in the canonical form the VRAM write
+ * hooks use, so a write through a VRAM mirror and a texture read of the same bytes compare. */
+#define GE_VIDEO_SPANS 8
+#define GE_VIDEO_RECENT_VBLANKS 120u
+static struct { uint32_t lo, hi, frame; int used; } s_video_spans[GE_VIDEO_SPANS];
+
+static uint32_t ge_video_canonical(uint32_t addr) {
+    return sr_vram_cpu_aperture(addr) ? sr_vram_cpu_address(addr) : SR_PHYS(addr);
+}
+
+void sr_video_frame_note(uint32_t addr, uint32_t bytes) {
+    if (!bytes) return;
+    const uint32_t lo = ge_video_canonical(addr);
+    const uint32_t hi = lo + bytes < lo ? UINT32_MAX : lo + bytes;
+    int slot = -1;
+    for (int i = 0; i < GE_VIDEO_SPANS; i++) {
+        if (s_video_spans[i].used && s_video_spans[i].lo == lo && s_video_spans[i].hi == hi) { slot = i; break; }
+        if (slot < 0 && !s_video_spans[i].used) slot = i;
+    }
+    if (slot < 0) {   /* every slot holds another span: the one written longest ago gives way */
+        slot = 0;
+        for (int i = 1; i < GE_VIDEO_SPANS; i++)
+            if (s_ge_frame - s_video_spans[i].frame > s_ge_frame - s_video_spans[slot].frame) slot = i;
+    }
+    s_video_spans[slot].lo = lo;
+    s_video_spans[slot].hi = hi;
+    s_video_spans[slot].frame = s_ge_frame;
+    s_video_spans[slot].used = 1;
+}
+
+int sr_video_frame_recent(uint32_t addr, uint32_t bytes) {
+    const uint32_t lo = ge_video_canonical(addr);
+    const uint32_t hi = lo + (bytes ? bytes : 1u) < lo ? UINT32_MAX : lo + (bytes ? bytes : 1u);
+    for (int i = 0; i < GE_VIDEO_SPANS; i++) {
+        if (!s_video_spans[i].used || s_ge_frame - s_video_spans[i].frame > GE_VIDEO_RECENT_VBLANKS) continue;
+        if (lo < s_video_spans[i].hi && s_video_spans[i].lo < hi) return 1;
+    }
+    return 0;
+}
+
+/* ---- The texture dump at a stop that ends the run (ge_shared.h, sr_texdump_exit_finish) ------- */
+static void (*s_texdump_exit)(void);
+
+void sr_texdump_exit_hook(void (*finish)(void)) { s_texdump_exit = finish; }
+
+void sr_texdump_exit_finish(void) {
+    void (*finish)(void) = s_texdump_exit;
+    s_texdump_exit = NULL;
+    if (finish) finish();
+}
 static int s_capture_configured = 0;
 static uint32_t s_capture_frame = UINT32_MAX;
 static uint32_t s_capture_frame_end = UINT32_MAX;

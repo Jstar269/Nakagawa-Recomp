@@ -592,9 +592,10 @@ static int psmf_video_take(SrPsmfPlayer *p, uint32_t displaybuf, int bufw,
         if (bufw > 0 && sr_guest_rect_geometry(displaybuf, 0u, 0u, (uint32_t)bufw,
                                                (uint32_t)info.width, (uint32_t)info.height,
                                                info.delivered_format == SR_H264_PIXEL_8888 ? 4u : 2u,
-                                               &span))
+                                               &span)) {
             psmf_av_delivered(PSMF_AV_VIDEO, span.first, span.total_bytes, value, 1);
-        else
+            sr_video_frame_note(span.first, span.total_bytes);   /* the texture dump skips a movie picture */
+        } else
             psmf_av_delivered(PSMF_AV_VIDEO, displaybuf, 0u, value, 1);
     }
     /* Movie provenance (#2111, ge_shared.h): the picture now in the display buffer, for the

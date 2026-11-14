@@ -25,7 +25,11 @@
 
 #define DUMP_CAP 1048576u
 #define CASE_DUMP_CAP 131072u
+/* frame_has_text reads a whole frame: a Settings page with every row passes CASE_DUMP_CAP. */
+#define TEXT_DUMP_CAP 262144u
 #define GOLDEN_PATH "fixtures/nk_ui/overlay.golden"
+
+static bool list_shows_whole(const NkUiDrawList *list, NkUiId id, int top, int bottom);
 
 static int failures;
 static const uint8_t k_test_glyph_pixel = 0xFFu;
@@ -165,7 +169,7 @@ static bool frame_has(NkUi *ui, NkOverlayState *state, const NkOverlayModel *mod
 
 static bool frame_has_text(NkUi *ui, NkOverlayState *state, const NkOverlayModel *model,
                            const char *needle) {
-    static char dump[CASE_DUMP_CAP];
+    static char dump[TEXT_DUMP_CAP];
     nk_ui_begin(ui, 0.0);
     (void)nk_overlay_frame(ui, state, model);
     if (nk_ui_end(ui) == NULL) return false;
@@ -290,6 +294,64 @@ static void test_ace(void) {
     model.ace_readout = 2;
     action = frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_LEFT);
     CHECK(action.kind == NK_OVERLAY_ACT_SET_READOUT && action.value == 0, "left turns it off");
+    nk_ui_destroy(ui);
+    /* The texture dump's row (ge_gpu.h): none in an authentic run (a zeroed model), a switch in an
+       Enhanced or Ace run, and the reason a start was refused in place of its description. */
+    ui = overlay_ui(1280, 800, 1.0f);
+    if (ui == NULL) return;
+    model = base_model(1280.0f, 800.0f);
+    memset(&state, 0, sizeof(state));
+    nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
+    state.screen = NK_OVERLAY_SCREEN_SETTINGS;
+    CHECK(!frame_has_text(ui, &state, &model, "Dump textures"),
+          "an authentic run has no texture dump row");
+    model.texdump = 1;
+    CHECK(frame_has_text(ui, &state, &model, "Dump textures") &&
+              frame_has_text(ui, &state, &model, "Saves the textures the game draws"),
+          "an Enhanced run offers the texture dump");
+    (void)settle(ui, &state, &model);
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_DOWN);
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_DOWN);
+    CHECK(nk_ui_focused(ui) == NK_OVERLAY_ID_TEXDUMP, "down from the HUD row reaches the dump row");
+    action = frame_with(ui, &state, &model, NK_UI_EV_ACTIVATE, NK_UI_DIR_NONE);
+    CHECK(action.kind == NK_OVERLAY_ACT_SET_TEXDUMP && action.value == 1,
+          "Confirm starts the dump");
+    model.texdump = 2;
+    action = frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_LEFT);
+    CHECK(action.kind == NK_OVERLAY_ACT_SET_TEXDUMP && action.value == 0, "left stops it");
+    model.texdump = 1;
+    model.texdump_note = "Not started: the dump folder could not be made.";
+    CHECK(frame_has_text(ui, &state, &model, "Not started: the dump folder could not be made.") &&
+              !frame_has_text(ui, &state, &model, "Saves the textures the game draws"),
+          "a refused start says why on the row");
+    /* On: the files saved; a stop of the whole dump (budget, file limit, a failed write) says why;
+       addresses that change every frame are counted. Off again, the plain description. */
+    model.texdump_note = NULL;
+    model.texdump = 2;
+    model.texdump_saved = 540u;
+    CHECK(frame_has_text(ui, &state, &model, "On: 540 files saved to your user data folder."),
+          "the row counts the files saved while the dump is on");
+    model.texdump_saved = 1u;
+    CHECK(frame_has_text(ui, &state, &model, "On: 1 file saved"), "one file is a file");
+    model.texdump_saved = 540u;
+    model.texdump_changing = 2u;
+    CHECK(frame_has_text(ui, &state, &model, "540 files saved. Stopped for 2 textures that change every frame."),
+          "the row says it stopped saving textures that change every frame");
+    {
+        static const char *const stops[] = { "the run's dump budget is used up",
+                                             "the run's file limit is reached",
+                                             "a file could not be written" };
+        for (size_t i = 0; i < sizeof(stops) / sizeof(stops[0]); ++i) {
+            char want[160];
+            model.texdump_stopped = stops[i];
+            snprintf(want, sizeof want, "Stopped: %s. 540 files saved.", stops[i]);
+            CHECK(frame_has_text(ui, &state, &model, want), "a stopped dump says why on the row");
+        }
+    }
+    model.texdump = 1;
+    CHECK(frame_has_text(ui, &state, &model, "Saves the textures the game draws") &&
+              !frame_has_text(ui, &state, &model, "Stopped:"),
+          "off, the row shows its plain description");
     nk_ui_destroy(ui);
     /* Both at every window size. */
     {
@@ -424,6 +486,10 @@ static void test_display_rows(void) {
             full.fullscreen = 2;
             full.pacing = 1 + NK_OVERLAY_PACING_UNCAPPED;
             full.ace_readout = 2;
+            full.texdump = 2;
+            /* The longest description the row can show while on. */
+            full.texdump_saved = 1000000u;
+            full.texdump_stopped = "the run's dump budget is used up";
             memset(&st, 0, sizeof(st));
             nk_overlay_open(&st, NK_OVERLAY_OPEN_USER);
             st.screen = NK_OVERLAY_SCREEN_SETTINGS;
@@ -455,6 +521,17 @@ static void test_display_rows(void) {
             CHECK(list != NULL && inside, "every Settings row fits every window");
             CHECK(found_card && clear,
                   "the Settings card with every row stays clear of the edges and the prompt bar");
+            /* The card scrolls when its rows do not fit, so fitting the card is not enough: the
+               last row, Dump textures, is drawn whole, uncut by the card's scroll and above the
+               prompt bar, as the page opens. */
+            {
+                /* overlay_quick.c part_id(5, 1) and (5, 2): the row's label and description. */
+                const NkUiId dump_label = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x002100u + 5u * 0x40u + 1u);
+                const NkUiId dump_text = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x002100u + 5u * 0x40u + 2u);
+                CHECK(list != NULL && list_shows_whole(list, dump_label, edge, bar_top) &&
+                          list_shows_whole(list, dump_text, edge, bar_top),
+                      "the Dump textures row is shown whole on every window as the Settings page opens");
+            }
             nk_ui_destroy(fit);
         }
     }
@@ -1491,6 +1568,16 @@ static bool build_golden(char *out, size_t cap, size_t *used) {
         model.vram = NULL;
         model.developer = false;
     }
+    /* The Dump textures row (#1880), on and focused with files saved, at both window sizes,
+       appended so the cases above keep their bytes. */
+    model.texdump = 2;
+    model.texdump_saved = 540u;
+    nk_overlay_go(&state, NK_OVERLAY_SCREEN_SETTINGS, NK_OVERLAY_ID_TEXDUMP);
+    ok = ok && append_case(out, cap, used, "settings-texdump-on", ui, &state, &model);
+    narrow.texdump = 2;
+    narrow.texdump_saved = 540u;
+    nk_overlay_go(&state, NK_OVERLAY_SCREEN_SETTINGS, NK_OVERLAY_ID_TEXDUMP);
+    ok = ok && append_case(out, cap, used, "settings-texdump-on-960x600", small, &state, &narrow);
     nk_ui_destroy(ui);
     nk_ui_destroy(small);
     return ok;

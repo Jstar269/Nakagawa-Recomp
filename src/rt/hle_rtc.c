@@ -227,6 +227,7 @@ static void hle_guest_fault(CpuState *s, const char *name, uint32_t addr, int st
         sr_trace_close();
         ge_scene_dump_finish();
         sr_compat_report();
+        sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
         (void)sr_videorec_finish_status("a guest fault stopped the run", HLE_GUEST_FAULT_EXIT);
         sr_perf_shutdown();
         sr_profile_dump_final();

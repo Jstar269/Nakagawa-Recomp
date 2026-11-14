@@ -142,6 +142,8 @@ int gui_quit_requested(void) {{ return 0; }}
 void gui_shutdown(void) {{}}
 int ge_capture_exit_due(void) {{ return 0; }}
 void ge_capture_exit_set_deferred(int deferred) {{ (void)deferred; }}
+/* No GE, so no texture dump to finish where the run ends (ge.c, ge_shared.h). */
+void sr_texdump_exit_finish(void) {{}}
 int (*sr_sched_stop_requested)(void) = NULL;
 const SrPauseHost *sr_sched_pause_host = NULL;
 void sr_audio_pause_enter(void) {{}}

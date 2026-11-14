@@ -302,8 +302,35 @@ The details, including what a pack made for an emulator cannot match here, are i
 - Only use games you own.
 - Don't share decrypted files, generated packages or disc images. Everything
   Nakagawa decrypts or builds stays in your user data folder.
+- Don't share dumped textures or texture packs made from them: they are your
+  game's pictures.
 - Issues, pull requests and project discussions must never contain game files,
   keys, or links to downloads or decryption tools.
+
+## Making a texture pack from your own game
+
+Nakagawa can save the textures your game draws, so you can enlarge them with an upscaler of your choice and play
+with the result as a texture pack. Nakagawa ships no textures and no upscaler, and the files stay on your PC.
+
+1. Start the game in Enhanced or Ace. Open the pause menu (Esc, F1 or the controller's Guide button), choose
+   **Settings**, and turn **Dump textures** on.
+2. Resume and play through the parts of the game you want. Each texture the game draws is saved once, as a PNG file,
+   in the `texdump` folder of your user data folder, in a folder named for the game's disc ID. The game keeps
+   running while the files are compressed and saved, but it can run less smoothly while the dump is on, most in busy
+   scenes where many textures appear for the first time; when it shows very many new textures at once, some are
+   saved the next time they are drawn. Turn **Dump textures** off when you have what you need, and the game runs as
+   before. It is off
+   again the next time the game starts, and only this switch starts it: a game started from the library never dumps
+   on its own, whatever your environment variables say. The row shows how many files are saved, and says why when the dump stops: the run
+   wrote as much as it may, or a file could not be written (a full disk, for example). Movies, and pictures that
+   change every frame, are not saved. A file already in the folder is never replaced.
+3. Enlarge the PNG files with your upscaler, 2 to 6 times their size (the same on both sides), keeping each file's
+   name. Delete the files you don't want to change.
+4. Choose that folder as the game's texture pack (the game's **Enhanced options** > **Texture pack folder**).
+
+The folder holds a `textures.ini` that tells Nakagawa how the files are named and which game they are for; leave
+it there. Keep the pack to
+yourself: its pictures come from your copy of the game.
 
 ## When something is not supported yet
 

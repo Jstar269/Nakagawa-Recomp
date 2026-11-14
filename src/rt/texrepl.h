@@ -170,6 +170,10 @@ int nk_texrepl_level_count(const NkTexRepl *pack, const NkTexReplId *id);
  * least 1), so a chain stops at its first unusable level. Returns 1 and fills `out` as
  * nk_texrepl_lookup does, or 0. The renderer does not draw levels above 0 yet. */
 int nk_texrepl_lookup_level(NkTexRepl *pack, const NkTexReplId *id, int level, NkTexReplHit *out);
+/* The cache key a file of this pack names texture `id` by first: nk_texrepl_cache_key, with the
+ * address dropped (the high 32 bits zero) when the pack's textures.ini sets ignoreAddress. The
+ * texture dump names its files with it, so they are the ones nk_texrepl_lookup reads. */
+uint64_t nk_texrepl_file_key(const NkTexRepl *pack, const NkTexReplId *id);
 void nk_texrepl_unpin(NkTexRepl *pack, NkTexReplHit *hit);
 /* Decodes PNG bytes as a pack image is decoded: refused, with a reason in `why`, unless the bytes
  * are a whole PNG (signature, IHDR first, every chunk's CRC right, an IDAT, IEND), 1 to

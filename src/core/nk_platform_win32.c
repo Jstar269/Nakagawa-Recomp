@@ -75,6 +75,17 @@ int nk_rename_utf8(const char *from, const char *to) {
                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) ? 0 : -1;
 }
 
+int nk_rename_noreplace_utf8(const char *from, const char *to) {
+    if (!from || !*from || !to || !*to) return -1;
+    WCHAR wfrom[32768];
+    WCHAR wto[32768];
+    if (!utf8_to_wide(from, wfrom, sizeof(wfrom) / sizeof(wfrom[0])) ||
+        !utf8_to_wide(to, wto, sizeof(wto) / sizeof(wto[0]))) return -1;
+    if (MoveFileExW(wfrom, wto, MOVEFILE_WRITE_THROUGH)) return 0;
+    const DWORD error = GetLastError();
+    return error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS ? 1 : -1;
+}
+
 bool nk_platform_file_exists(const char *path) {
     if (!path || !*path) return false;
     WCHAR wpath[32768];

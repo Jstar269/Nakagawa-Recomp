@@ -49,7 +49,8 @@ typedef enum {
     NK_OVERLAY_ACT_SET_READOUT,  /* value: 1 shows Ace Mode's speed readout, 0 hides it */
     NK_OVERLAY_ACT_SET_FULLSCREEN, /* value: 1 makes the game window fullscreen, 0 windowed */
     NK_OVERLAY_ACT_SET_PACING,   /* value: the new frame pacing (NK_OVERLAY_PACING_*) */
-    NK_OVERLAY_ACT_VRAM_VIEW     /* the VRAM viewer's window moved: decode it again */
+    NK_OVERLAY_ACT_VRAM_VIEW,    /* the VRAM viewer's window moved: decode it again */
+    NK_OVERLAY_ACT_SET_TEXDUMP   /* value: 1 starts the texture dump, 0 stops it */
 } NkOverlayActionKind;
 
 typedef struct {
@@ -233,6 +234,17 @@ typedef struct {
        the page never names a cap that is not in force. */
     int fullscreen;
     int pacing;                  /* 0: no row, else 1 + NK_OVERLAY_PACING_* in force */
+    /* The texture dump (ge_gpu.h), with the readout's convention: 0 no row (an authentic run, or
+       not the Vulkan renderer), 1 off, 2 on. `texdump_note`, when set, replaces the row's
+       description: why the last start was refused. While on, the description says how many
+       files the run has saved, why the dump stopped when it did (`texdump_stopped`: the
+       budget, the file limit or a failed write; NULL while it goes on), and how many textures
+       that change every frame it no longer saves (`texdump_changing`). */
+    int texdump;
+    const char *texdump_note;
+    unsigned long long texdump_saved;
+    unsigned long long texdump_changing;
+    const char *texdump_stopped;
 } NkOverlayModel;
 
 /* Which page is up and where focus returns. Zero-initialised is closed. */
@@ -268,6 +280,7 @@ const char *nk_overlay_scaling_label(int scaling);
 #define NK_OVERLAY_ID_HUD NK_OVERLAY_ID(0x000210u)
 #define NK_OVERLAY_ID_READOUT NK_OVERLAY_ID(0x000211u)  /* Ace Mode's speed readout */
 #define NK_OVERLAY_ID_FULLSCREEN NK_OVERLAY_ID(0x000212u)
+#define NK_OVERLAY_ID_TEXDUMP NK_OVERLAY_ID(0x000213u)   /* the texture dump */
 #define NK_OVERLAY_ID_PACING NK_OVERLAY_ID(0x000218u)   /* + 1 + NK_OVERLAY_PACING_* per option */
 #define NK_OVERLAY_ID_SETTINGS_BACK NK_OVERLAY_ID(0x000220u)
 #define NK_OVERLAY_ID_CONTROLS_BACK NK_OVERLAY_ID(0x000301u)

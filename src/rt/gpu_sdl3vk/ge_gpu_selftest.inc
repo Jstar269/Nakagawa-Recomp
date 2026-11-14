@@ -12447,6 +12447,138 @@ static int ssh_pack_first(const char *name, uint32_t *tmp) {
     return ok;
 }
 
+/* ---- A texture dump beside soft shadows and a pack (#1880 with #2371) --------------------------
+ * A dump writes the game's own texture, decoded from guest memory under its stock name, whatever
+ * the frame draws in its place. Disc C's content at SSH_TEX_D, declared, drawn first with soft
+ * shadows and xBRZ off and a dump on, then (rewritten by the guest) drawn soft, xBRZ as the run has
+ * it, with a dump on into a second folder: the two files have the stock name and the same bytes,
+ * and the file reads back as disc C's own texels. Then SSH_TEX_P, which the pack ssh_pack_first wrote lists, drawn from the
+ * pack's image with a dump on: the file is disc C's texels, not the pack's. */
+#define SSH_TEX_D 0x0404A000u
+static const SshDisc k_ssh_c_other = { 2u, 16, 16, 6, 9, 11, 0 };   /* 4444, undeclared */
+
+static int ssh_dump_fail(const char *name, const char *why) {
+    gegpu_texdump_stop();
+    return ssh_fail(name, why);
+}
+
+/* A clean folder `<full build root>/<leaf>`: the dump takes only a full path. */
+static int ssh_dump_folder(char *dir, size_t cap, const char *leaf) {
+    char root[400];
+    if (!nk_platform_absolute_path(SR_SELFTEST_BUILD_ROOT, root, sizeof(root))) return 0;
+    const int n = snprintf(dir, cap, "%s/%s", root, leaf);
+    if (n <= 0 || (size_t)n >= cap) return 0;
+    (void)nk_platform_remove_tree(dir, NULL);   /* an earlier run's files */
+    return 1;
+}
+
+/* Disc `d` (4444, so its name has no palette) at `addr`: the file a pack names for its content. */
+static void ssh_dump_name(uint32_t addr, const SshDisc *d, char *out, size_t cap) {
+    const uint64_t key = nk_texrepl_cache_key(addr, d->fmt, 4u | (4u << 8), 0u);
+    snprintf(out, cap, "%016llx%08x.png", (unsigned long long)key,
+             nk_texrepl_quick_hash(SR_HOST(addr), ssh_bytes(d), addr));
+}
+
+/* The whole file `dir`/`file` into `buf` (at most `cap` bytes); its size, or 0. */
+static size_t ssh_dump_read(const char *dir, const char *file, uint8_t *buf, size_t cap) {
+    char path[600];
+    snprintf(path, sizeof(path), "%s/%s", dir, file);
+    FILE *f = nk_fopen_utf8(path, "rb");
+    if (!f) return 0;
+    const size_t n = fread(buf, 1, cap, f);
+    const int more = fgetc(f) != EOF;
+    fclose(f);
+    return more ? 0 : n;
+}
+
+/* The folder read as a pack gives disc `d`'s own texels for its content at `addr`. */
+static int ssh_dump_stock_texels(const char *dir, uint32_t addr, const SshDisc *d) {
+    char err[200];
+    NkTexRepl *pack = nk_texrepl_open(dir, 0, err, sizeof(err));
+    if (!pack) return 0;
+    NkTexReplId id;
+    memset(&id, 0, sizeof(id));
+    id.addr = addr;
+    id.format = d->fmt;
+    id.dim = 4u | (4u << 8);
+    id.hash = nk_texrepl_quick_hash(SR_HOST(addr), ssh_bytes(d), addr);
+    NkTexReplHit hit;
+    int same = nk_texrepl_lookup(pack, &id, &hit);
+    if (same) {
+        same = hit.w == d->n && hit.h == d->n;
+        for (int y = 0; y < d->n && same; y++)
+            for (int x = 0; x < d->n && same; x++)
+                same = hit.rgba[(size_t)y * (size_t)d->n + (size_t)x] == ssh_rgba(d, ssh_index(d, x, y));
+        nk_texrepl_unpin(pack, &hit);
+    }
+    nk_texrepl_close(pack);
+    return same;
+}
+
+static int ssh_dump_stock(const char *name, uint32_t *tmp) {
+    enum { CAP = 16384 };
+    static uint8_t on_bytes[CAP], off_bytes[CAP];
+    char dir_on[480], dir_off[480], dir_pack[480], pack_dir[400], file[64], err[200];
+    if (!ssh_dump_folder(dir_on, sizeof(dir_on), "soft_shadow_dump_on") ||
+        !ssh_dump_folder(dir_off, sizeof(dir_off), "soft_shadow_dump_off") ||
+        !ssh_dump_folder(dir_pack, sizeof(dir_pack), "soft_shadow_dump_pack"))
+        return ssh_fail(name, "dump: the build root has no full path");
+    ssh_upload(SSH_TEX_D, &k_ssh_c);
+    ssh_dump_name(SSH_TEX_D, &k_ssh_c, file, sizeof(file));
+    /* Soft shadows and xBRZ off: the entry's first draw decodes the stock texture, into one folder. */
+    if (!gegpu_texdump_start(dir_off, err, sizeof(err))) return ssh_fail(name, err);
+    const SshParts was = ssh_parts(0, 0, s_repl);
+    const int drawn = ssh_frame(SSH_TEX_D, &k_ssh_c, tmp);
+    ssh_parts_restore(was);
+    gegpu_texdump_stop();
+    const TexEnt *e = ssh_entry(SSH_TEX_D);
+    if (!drawn || !e || e->xs.soft) return ssh_fail(name, "dump: the draw with soft shadows off failed or was soft");
+    /* The guest writes another 4444 texture there (drawn with the part off, so it is not hashed and
+     * the candidate list keeps its three contents) and then the same disc again: with soft shadows on
+     * (and xBRZ as the run has it) the content is decoded, matched and drawn from its soft copy, with a
+     * dump on into the other folder. */
+    ssh_upload(SSH_TEX_D, &k_ssh_c_other);
+    const SshParts was_o = ssh_parts(0, 0, s_repl);
+    const int drawn_o = ssh_frame(SSH_TEX_D, &k_ssh_c_other, tmp);
+    ssh_parts_restore(was_o);
+    if (!drawn_o) return ssh_fail(name, "dump: a draw failed");
+    ssh_upload(SSH_TEX_D, &k_ssh_c);
+    if (!gegpu_texdump_start(dir_on, err, sizeof(err))) return ssh_fail(name, err);
+    if (!ssh_frame(SSH_TEX_D, &k_ssh_c, tmp)) return ssh_dump_fail(name, "dump: a draw failed");
+    gegpu_texdump_stop();
+    if (!e->xs.soft) return ssh_fail(name, "dump: the declared disc was not drawn from its soft copy");
+    const size_t n_on = ssh_dump_read(dir_on, file, on_bytes, CAP), n_off = ssh_dump_read(dir_off, file, off_bytes, CAP);
+    if (!n_on || !n_off || n_on != n_off || memcmp(on_bytes, off_bytes, n_on) != 0) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL dump: the declared texture's file under its stock name "
+                        "differs with soft shadows on (%zu bytes) and off (%zu bytes), or is missing\n", name, n_on, n_off);
+        return 0;
+    }
+    if (!ssh_dump_stock_texels(dir_on, SSH_TEX_D, &k_ssh_c))
+        return ssh_fail(name, "dump: the file dumped with soft shadows on is not the texture's own texels");
+    /* A texture a pack replaces: drawn from the pack's image, dumped as the game's own. */
+    snprintf(pack_dir, sizeof(pack_dir), "%s/soft_shadow_pack", SR_SELFTEST_BUILD_ROOT);
+    NkTexRepl *pack = nk_texrepl_open(pack_dir, 0, err, sizeof(err));
+    if (!pack) return ssh_fail(name, err);
+    const uint64_t repl_bound0 = s_cnt_repl_bound;
+    int ok = gegpu_texdump_start(dir_pack, err, sizeof(err));
+    if (ok) {
+        const SshParts was_p = ssh_parts(s_soft_on, s_xs_factor, pack);
+        ok = ssh_frame(SSH_TEX_P, &k_ssh_c, tmp);
+        ssh_parts_restore(was_p);
+        gegpu_texdump_stop();
+    }
+    nk_texrepl_close(pack);
+    if (!ok) return ssh_fail(name, err[0] ? err : "dump: a draw failed");
+    const int pack_drawn = s_cnt_repl_bound > repl_bound0 &&
+                           (tmp[((size_t)SSH_Y0 + (size_t)8 * SSH_ZOOM) * SSH_STRIDE + (size_t)SSH_X0 + (size_t)8 * SSH_ZOOM] &
+                            0xFFFFFFu) ==
+                               (SSH_PACK_COLOUR & 0xFFFFFFu);
+    if (!pack_drawn) return ssh_fail(name, "dump: the texture the pack lists was not drawn from the pack's image");
+    if (!ssh_dump_stock_texels(dir_pack, SSH_TEX_P, &k_ssh_c))
+        return ssh_fail(name, "dump: a texture a pack replaces is not dumped as the game's own texels");
+    return 1;
+}
+
 /* SR_GPU_COHERENCE_CASE=soft-shadow at render scale 1 or 4, with xBRZ off or at any factor
  * (--tex-scale; the harness's --soft-shadow MODE sets the Ace line and the declaration before the
  * renderer starts). Stock is a draw with every copy off (no soft copy, no xBRZ, no pack); "part off"
@@ -12456,7 +12588,8 @@ static int ssh_pack_first(const char *name, uint32_t *tmp) {
  *               flat interior is stock's, and the part counts each match, copy and bind and confirms
  *               itself; with xBRZ on, each is the same soft frame drawn with xBRZ off, and not xBRZ's;
  *               a freed copy is made again without hashing again and draws the same; the copy's size
- *               change (ssh_size_change) and a pack's precedence (ssh_pack_first) hold;
+ *               change (ssh_size_change) and a pack's precedence (ssh_pack_first) hold; a texture dump
+ *               writes the stock texture under its stock name beside a soft copy and a pack (ssh_dump_stock);
  *   off         (no shadow key, a declaration in force) nothing is hashed or copied soft;
  *   undeclared  (shadow=soft, nothing declared) the part is unavailable with its reason, and nothing
  *               is hashed or copied soft.
@@ -12608,6 +12741,7 @@ static int coherence_run_soft_shadow(void) {
         }
         ok = ok && ssh_size_change(name, SSH_F(F_A), SSH_F(F_BR), SSH_F(F_TMP));
         ok = ok && ssh_pack_first(name, SSH_F(F_TMP));
+        ok = ok && ssh_dump_stock(name, SSH_F(F_TMP));
     } else if (ok) {
         if (!ssh_same(SSH_F(F_A), SSH_F(F_AR)) || !ssh_same(SSH_F(F_C), SSH_F(F_CR)) || s_cnt_soft_hashed ||
             s_cnt_soft_queued || s_cnt_soft_bound) {
@@ -12658,7 +12792,8 @@ static int coherence_run_soft_shadow(void) {
                "VRAM outside the frame unchanged%s\n", name, !asked ? "off" : declared ? "on" : "undeclared",
                s_soft_on ? "on" : "off", xs,
                want_on ? "declared CLUT4 and 4444 discs soft (ramps, stock interiors), soft over xBRZ, a freed copy "
-                         "made again unhashed, the size change and a pack's precedence"
+                         "made again unhashed, the size change and a pack's precedence, a dump's file the stock texture "
+                         "beside a soft copy and a pack"
                        : "nothing hashed or copied soft",
                !(ref && ref[0]) ? "" : asked ? "; stock and part-off frames match the off run's" : "; wrote the stock and "
                                                                                                     "part-off frames' hashes");
