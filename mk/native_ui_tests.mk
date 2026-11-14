@@ -249,7 +249,7 @@ nk-ui-player-screens-selftest:
 	$(BUILD_ROOT_RUN)/test_player_screens$(EXE_EXT)
 
 # nk-ui-overlay-screens-selftest - the in-game overlay's pages (#1159, C9c) on the SDL-free core:
-# page flow, focus, actions, fit at every capture size, and fixtures/nk_ui/overlay.golden.
+# page flow, focus, actions, fit at every capture size, and tests/fixtures/nk_ui/overlay.golden.
 .PHONY: nk-ui-overlay-screens-selftest
 nk-ui-overlay-screens-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"

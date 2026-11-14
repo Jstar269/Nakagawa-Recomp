@@ -156,7 +156,7 @@ LLSC_SEQUENCE = (
     NOP,                     # 0x34
 )
 
-# The three link windows PSP-LLSC-001 measured on a PSP-3000 (fixtures/psp_oracle/probe.c,
+# The three link windows PSP-LLSC-001 measured on a PSP-3000 (tests/fixtures/psp_oracle/probe.c,
 # run_llsc_link), one 16-byte row per cell with word A at +0 and word B at +4. Mirrored
 # word-for-word by LLSC_MEASURED_SEQUENCE in tests/native/cpu_lle_selftest.c, which pins both
 # lanes to the words the console returned.

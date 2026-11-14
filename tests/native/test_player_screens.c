@@ -7878,13 +7878,13 @@ int main(int argc, char **argv) {
     CHECK(build_title_golden(title, sizeof(title), &title_size),
           "build Title detail screen dumps");
     if (write && failures == 0) {
-        CHECK(write_golden("fixtures/nk_ui/library.golden", library, library_size),
+        CHECK(write_golden("tests/fixtures/nk_ui/library.golden", library, library_size),
               "write Library screen golden");
-        CHECK(write_golden("fixtures/nk_ui/title.golden", title, title_size),
+        CHECK(write_golden("tests/fixtures/nk_ui/title.golden", title, title_size),
               "write Title detail screen golden");
     } else if (failures == 0) {
-        compare_golden("fixtures/nk_ui/library.golden", library, library_size);
-        compare_golden("fixtures/nk_ui/title.golden", title, title_size);
+        compare_golden("tests/fixtures/nk_ui/library.golden", library, library_size);
+        compare_golden("tests/fixtures/nk_ui/title.golden", title, title_size);
     }
     if (capture_dir != NULL && failures == 0) {
         int capture_result = capture_screens(capture_dir);

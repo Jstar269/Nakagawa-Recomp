@@ -220,7 +220,7 @@ class TestPublishAudit(unittest.TestCase):
         # Unrelated public CSV files remain allowed under normal publication policy
         for path in (
             "docs/metrics.csv",
-            "fixtures/table.csv",
+            "tests/fixtures/table.csv",
             "tools/report.csv",
             "assets/symbols_public.csv",
         ):
@@ -247,7 +247,7 @@ class TestPublishAudit(unittest.TestCase):
     def test_prohibited_extension_passes_only_as_a_pinned_approved_binary(self):
         # Project-authored PSPDEV build output may carry a guest-executable
         # suffix, but only as a reviewed release-manifest binary with matching bytes.
-        rel = "fixtures/profile_zero/prebuilt/profile_zero_guest.prx"
+        rel = "tests/fixtures/profile_zero/prebuilt/profile_zero_guest.prx"
         reason = publish_audit._forbidden_path(rel)
         self.assertIsNotNone(reason)
         pinned = "ab" * 32
@@ -856,7 +856,7 @@ class TestPublishAudit(unittest.TestCase):
             ("src/project.c", b"/* SPDX-License-Identifier: GPL-2.0-or-later */\nint project;\n"),
             ("src/project.tsx", b"// SPDX-License-Identifier: GPL-2.0-or-later\nint project;\n"),
             ("CMakeLists.txt", b"# SPDX-License-Identifier: GPL-2.0-or-later\nproject(test)\n"),
-            ("fixtures/Makefile", b"# SPDX-License-Identifier: GPL-2.0-or-later\ntest:\n\ttrue\n"),
+            ("tests/fixtures/Makefile", b"# SPDX-License-Identifier: GPL-2.0-or-later\ntest:\n\ttrue\n"),
         )
         for source_path, source_bytes in cases:
             with self.subTest(source_path=source_path):
@@ -1678,7 +1678,7 @@ class TestPublishAudit(unittest.TestCase):
 
 
 # A tracked file whose *working-tree* bytes carry a publication finding while its staged
-# blob stays clean. This is the exact shape that let `nk_manager.ps1 -Action Verify`
+# blob stays clean. This is the exact shape that let `tools/nk_manager.ps1 -Action Verify`
 # report every gate PASS while the publication audit read different bytes: the audit
 # enumerated paths from the Git index and then read each path's staged blob, so an
 # unstaged edit was invisible to it.
@@ -1748,11 +1748,11 @@ def _make_publication_fixture_repo(repo: Path) -> Path:
 def _verify_suite_audit_invocations() -> list[list[str]]:
     """Extract the publish_audit argument lists that -Action Verify actually runs.
 
-    Parsed out of nk_manager.ps1 rather than restated here, so that dropping or
+    Parsed out of tools/nk_manager.ps1 rather than restated here, so that dropping or
     weakening a content source in the manager fails this test instead of leaving the
     regression asserting a command line the canonical gate no longer uses.
     """
-    manager = (publish_audit.ROOT / "nk_manager.ps1").read_text(encoding="utf-8")
+    manager = (publish_audit.ROOT / "tools" / "nk_manager.ps1").read_text(encoding="utf-8")
     start = manager.index("function Invoke-VerifySuite")
     rest = manager.find("\n    function ", start)
     body = manager[start : rest if rest != -1 else len(manager)]
@@ -1881,7 +1881,7 @@ class TestVerifyWorktreeTruth(unittest.TestCase):
         """Run the manager's own audit command lines against a tree with an unstaged finding.
 
         Executes tools/publish_audit.py's main() the way -Action Verify invokes it, so a
-        regression that drops --worktree from nk_manager.ps1 makes this fail rather than
+        regression that drops --worktree from tools/nk_manager.ps1 makes this fail rather than
         leaving a green Verify describing bytes nobody checked.
         """
         invocations = _verify_suite_audit_invocations()
@@ -2640,17 +2640,22 @@ class PathRuleMetadataTests(unittest.TestCase):
 
     def test_fixtures_under_tests_are_project_authored_whatever_their_extension(self):
         # The fixture tree holds files no extension rule names (a Makefile, assembly import
-        # stubs, golden text, a digest list); under tests/fixtures/ they keep the metadata the
-        # root fixtures/ folder gave them instead of becoming UNCLASSIFIED_PATH findings.
+        # stubs, golden text, a digest list); under tests/fixtures/ they take the project
+        # metadata instead of becoming UNCLASSIFIED_PATH findings. The root fixtures/ folder,
+        # where the tree used to live, has no rule of its own any more.
         for name in ("psp_oracle/Makefile", "psp_oracle/mutex_imports.S", "nk_ui/library.golden",
                      "profile_zero/prebuilt/SHA256SUMS", "fonts/gudea/Gudea-Regular.ttf"):
-            for folder in ("fixtures/", "tests/fixtures/"):
-                with self.subTest(path=folder + name):
-                    prov, _lic, _notice, _gen, disp, public = publish_audit._default_provenance(
-                        folder + name, None)
-                    self.assertEqual(prov, "project_authored")
-                    self.assertEqual(disp, "included")
-                    self.assertFalse(public, "metadata alone must never make a path public")
+            with self.subTest(path="tests/fixtures/" + name):
+                prov, _lic, _notice, _gen, disp, public = publish_audit._default_provenance(
+                    "tests/fixtures/" + name, None)
+                self.assertEqual(prov, "project_authored")
+                self.assertEqual(disp, "included")
+                self.assertFalse(public, "metadata alone must never make a path public")
+            with self.subTest(path="fixtures/" + name):
+                prov, *_rest = publish_audit._default_provenance("fixtures/" + name, None)
+                self.assertEqual(prov, "unclassified")
+        prov, *_rest = publish_audit._default_provenance("nk_manager.ps1", None)
+        self.assertEqual(prov, "project_authored", "a root script is still classed by its extension")
         # The rule is the fixture tree, not all of tests/: a file elsewhere under tests/ that no
         # extension rule names is still an UNCLASSIFIED_PATH finding.
         for path in ("tests/native/vectors.golden", "tests/native/Makefile", "tests/SHA256SUMS",
@@ -3359,7 +3364,7 @@ class BinaryWaiverPinTests(unittest.TestCase):
         self.assertNotIn("release manifest waives", refusals[0])
 
     def test_a_prohibited_extension_is_held_to_the_base_as_well(self) -> None:
-        guest = "fixtures/guest.prx"
+        guest = "tests/fixtures/guest.prx"
         built = b"\x7fELF" + bytes(36)
         base = self._commit({guest: built}, [self._component(guest, built)])
         self.assertEqual(self._codes(base, base, guest), set())

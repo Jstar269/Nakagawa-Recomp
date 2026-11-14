@@ -855,14 +855,14 @@ Drawn by the runtime over the frozen game frame under the `scrim` while the game
    ids made by adding to a base declares `<BASE>_SPAN`, and nothing else may fall inside it; ids that several screens
    name are `PLAYER_UI_ID_*` in screen 0x00. `PlayerUiIdSourceTests` in `tests/native/test_player_ui.py` checks the
    table, the ranges and the spans, and the screen tests fail on any id Clay reports twice in one frame.
-2. `mingw32-make nk-ui-player-screens-selftest` compares the draw-list dumps in `fixtures/nk_ui/*.golden` and runs
+2. `mingw32-make nk-ui-player-screens-selftest` compares the draw-list dumps in `tests/fixtures/nk_ui/*.golden` and runs
    the layout checks (ring outside the focused card, centred labels, grid gaps). After an intended change, run
    `build/test_player_screens --write-goldens` and say in the pull request why each golden changed.
 3. `mingw32-make nk-ui-player-screens-capture NK_UI_CAPTURE_DIR=<dir>` saves offscreen captures of each state at
    1280 x 800, 1920 x 1200 at 150% and 960 x 600, from synthetic fixture titles only. Compare them with the
    design boards before review.
 4. The in-game overlay's pages have their own gates: `mingw32-make nk-ui-overlay-screens-selftest` (flow, focus,
-   fit at those three sizes, and `fixtures/nk_ui/overlay.golden`; rewrite it with
+   fit at those three sizes, and `tests/fixtures/nk_ui/overlay.golden`; rewrite it with
    `build/test_overlay_screens --write-goldens`) and `mingw32-make nk-ui-overlay-host-selftest` (the runtime host on
    SDL3_ttf, the bundled fonts and real key events). `mingw32-make nk-ui-overlay-screens-capture
    NK_UI_CAPTURE_DIR=<dir>` saves every overlay page, the developer pages included, at those three sizes, drawn as

@@ -51,56 +51,56 @@
       "reason": "Python package marker: the package is imported by name (`from tools.nk_core import ...`), so the marker file itself is never written anywhere."
     },
     {
-      "path": "fixtures/*/README.md",
+      "path": "tests/fixtures/*/README.md",
       "reason": "Each fixture's own documentation. The build or the runbook names the fixture directory, and a bare README.md token cannot say which fixture it means."
     },
     {
-      "path": "fixtures/psp_oracle/Makefile",
-      "reason": "Built by the `make -C fixtures/psp_oracle` command documented in fixtures/psp_oracle/README.md; make finds the Makefile by directory convention."
+      "path": "tests/fixtures/psp_oracle/Makefile",
+      "reason": "Built by the `make -C tests/fixtures/psp_oracle` command documented in tests/fixtures/psp_oracle/README.md; make finds the Makefile by directory convention."
     },
     {
-      "path": "fixtures/psp_oracle/mutex_imports.S",
-      "reason": "Assembled by fixtures/psp_oracle/Makefile; its basename is shared with the fixtures/psp_phaseb copy of the same hand-written import shim."
+      "path": "tests/fixtures/psp_oracle/mutex_imports.S",
+      "reason": "Assembled by tests/fixtures/psp_oracle/Makefile; its basename is shared with the tests/fixtures/psp_phaseb copy of the same hand-written import shim."
     },
     {
-      "path": "fixtures/psp_threading_oracle/Makefile",
-      "reason": "Built by the `make -C fixtures/psp_threading_oracle` commands documented in fixtures/psp_threading_oracle/README.md; make finds the Makefile by directory convention."
+      "path": "tests/fixtures/psp_threading_oracle/Makefile",
+      "reason": "Built by the `make -C tests/fixtures/psp_threading_oracle` commands documented in tests/fixtures/psp_threading_oracle/README.md; make finds the Makefile by directory convention."
     },
     {
-      "path": "fixtures/nakagawa_minimal_v4/Makefile",
+      "path": "tests/fixtures/nakagawa_minimal_v4/Makefile",
       "reason": "Builds the minimal PSP lifecycle fixture whose directory tests/native/hle_thread_selftest.c names as the source of the payload it exercises. make finds the Makefile by directory convention, and the bare token `Makefile` is shared by the root and all ten fixture Makefiles, so it cannot say which one it names."
     },
     {
-      "path": "fixtures/nakagawa_minimal_v4/main.c",
+      "path": "tests/fixtures/nakagawa_minimal_v4/main.c",
       "reason": "The guest entry point of that fixture, linked as main.o through the PSPSDK build.mak its own Makefile includes. The bare stem `main` is what the hosted workflows write for the default branch and is the stem of all six tracked main.c files, so it cannot say which one it names."
     },
     {
-      "path": "fixtures/psp_phaseb/Makefile",
+      "path": "tests/fixtures/psp_phaseb/Makefile",
       "reason": "Read as a contract by tools/test_psp_oracle.py, which requires its psp-fixup-imports guard to stay, and built by the make -C invocation that guard describes. The bare token `Makefile` is shared by the root and all ten fixture Makefiles, so it cannot say which one it names."
     },
     {
-      "path": "fixtures/psp_phaseb/mutex_imports.S",
-      "reason": "Assembled into mutex_imports.o by fixtures/psp_phaseb/Makefile; its basename is shared with the fixtures/psp_oracle copy of the same hand-written import shim, so that token cannot say which one it names."
+      "path": "tests/fixtures/psp_phaseb/mutex_imports.S",
+      "reason": "Assembled into mutex_imports.o by tests/fixtures/psp_phaseb/Makefile; its basename is shared with the tests/fixtures/psp_oracle copy of the same hand-written import shim, so that token cannot say which one it names."
     },
     {
-      "path": "fixtures/psp_runner/Makefile",
+      "path": "tests/fixtures/psp_runner/Makefile",
       "reason": "Builds the resident PSPSDK runner that section 9 of docs/HARDWARE_ORACLE.md requires to stay tracked and excluded from the native build. make finds the Makefile by directory convention, and the bare token `Makefile` is shared by the root and all ten fixture Makefiles, so it cannot say which one it names."
     },
     {
-      "path": "fixtures/pspdev_phase5/Makefile",
+      "path": "tests/fixtures/pspdev_phase5/Makefile",
       "reason": "Builds the PSPDEV phase-5 guest whose sources tools/test_title_pspdev_phase5.py places in this directory for the manifest assets/titles/pspdev-phase5.json. make finds the Makefile by directory convention, and the bare token `Makefile` is shared by the root and all ten fixture Makefiles, so it cannot say which one it names."
     },
     {
-      "path": "fixtures/pspdev_phase5/main.c",
+      "path": "tests/fixtures/pspdev_phase5/main.c",
       "reason": "The guest entry point of that fixture, linked as main.o through the PSPSDK build.mak its own Makefile includes. The bare stem `main` is what the hosted workflows write for the default branch and is the stem of all six tracked main.c files, so it cannot say which one it names."
     },
     {
-      "path": "fixtures/vfpu_nan_payload/Makefile",
+      "path": "tests/fixtures/vfpu_nan_payload/Makefile",
       "reason": "Read as a contract by tools/test_vfpu_nan_payload.py, which spells this exact path and checks the probe build it describes. The bare token `Makefile` is shared by the root and all ten fixture Makefiles, so it cannot say which one it names."
     },
     {
-      "path": "fixtures/vfpu_oracle/Makefile",
-      "reason": "Builds the VFPU transcendental probe whose case header fixtures/vfpu_oracle/vfpu_oracle_cases.h the root Makefile compiles into src/rt/vfpu_oracle_host.c. The bare token `Makefile` is shared by the root and all ten fixture Makefiles, so it cannot say which one it names."
+      "path": "tests/fixtures/vfpu_oracle/Makefile",
+      "reason": "Builds the VFPU transcendental probe whose case header tests/fixtures/vfpu_oracle/vfpu_oracle_cases.h the root Makefile compiles into src/rt/vfpu_oracle_host.c. The bare token `Makefile` is shared by the root and all ten fixture Makefiles, so it cannot say which one it names."
     },
     {
       "path": "src/rt/h264_ffmpeg_sub/config.h",

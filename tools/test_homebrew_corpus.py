@@ -3,7 +3,7 @@
 
 """The public homebrew corpus must stay pinned, licence-compatible and honest (#2144).
 
-These tests build nothing and use no network. They check ``fixtures/homebrew_corpus/corpus.json``
+These tests build nothing and use no network. They check ``tests/fixtures/homebrew_corpus/corpus.json``
 against the PSPDEV lock, against PROVENANCE.md and CREDITS.md, and against the unit rules in
 ``tools/homebrew_corpus.py``. Where a PSPDEV is installed (``PSPDEV`` or ``/usr/local/pspdev``)
 they also recompute every pinned file's Git blob ID from its samples, so a toolchain that
@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import homebrew_corpus  # noqa: E402
 
-PROVENANCE = ROOT / "fixtures" / "homebrew_corpus" / "PROVENANCE.md"
+PROVENANCE = ROOT / "tests" / "fixtures" / "homebrew_corpus" / "PROVENANCE.md"
 CREDITS = ROOT / "CREDITS.md"
 COMPATIBILITY = ROOT / "docs" / "COMPATIBILITY.md"
 REQUIRED_ENV = "NK_HOMEBREW_CORPUS_REQUIRED"
@@ -136,7 +136,7 @@ class CorpusRecordsTests(unittest.TestCase):
 
     def test_credits_name_pspsdk_samples_and_the_corpus_page_lists_every_program(self) -> None:
         credits = CREDITS.read_text(encoding="utf-8")
-        self.assertIn("fixtures/homebrew_corpus/PROVENANCE.md", credits)
+        self.assertIn("tests/fixtures/homebrew_corpus/PROVENANCE.md", credits)
         page = COMPATIBILITY.read_text(encoding="utf-8")
         self.assertIn("## Homebrew corpus", page)
         for program in self.corpus["programs"]:

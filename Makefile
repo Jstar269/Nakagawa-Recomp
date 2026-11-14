@@ -14,7 +14,7 @@
 # Override these on the command line for your game (see README).
 # NOTE: HST (flat-PRX image) requires GAME_BASE=0 GAME_ENTRY=0. The defaults below
 # are for a generic rebased ELF. Using the wrong base → cascading label errors at link.
-# Prefer nk_manager.ps1 (sets the correct values automatically).
+# Prefer tools/nk_manager.ps1 (sets the correct values automatically).
 # The title link writes its object list with $(file ...), which needs GNU Make 4.0 or newer.
 ifeq ($(filter 4.% 5.% 6.% 7.% 8.% 9.%,$(MAKE_VERSION)),)
 $(error GNU Make 4.0 or newer is required (found $(MAKE_VERSION)); install a current GNU Make such as MSYS2 UCRT64 mingw32-make)
@@ -620,7 +620,7 @@ PSP_ORACLE_SOURCE_COMMIT ?= $(NK_GIT_REV_HEAD)
 PSP_ORACLE_MODEL         ?= unknown
 PSP_ORACLE_FIRMWARE      ?= unknown
 PSP_ORACLE_OUTPUT        ?= $(BUILD_DIR)/psp_oracle_nakagawa.txt
-PSP_ORACLE_SMOKE_ELF     ?= fixtures/psp_oracle/build/nakagawa_psp_oracle.elf
+PSP_ORACLE_SMOKE_ELF     ?= tests/fixtures/psp_oracle/build/nakagawa_psp_oracle.elf
 PSP_ORACLE_SMOKE_DIR     ?= $(BUILD_DIR)/psp_oracle_smoke
 PSP_ORACLE_SMOKE_EXE     ?= $(BUILD_DIR)/hle_thread_selftest_smoke.exe
 PSP_ORACLE_SMOKE_OUTPUT  ?= $(BUILD_DIR)/psp_oracle_smoke_nakagawa.txt
@@ -634,7 +634,7 @@ PSP_ORACLE_SMOKE_ADAPTER := $(PSP_ORACLE_SMOKE_DIR)/smoke_entry.c
 # two-phase `all` path so the test cannot substitute a reduced link harness.
 PRODUCTION_SMOKE_DIR       := $(BUILD_ROOT)/production-smoke
 PRODUCTION_SMOKE_FIXTURE   := $(PRODUCTION_SMOKE_DIR)/fixture
-PRODUCTION_SMOKE_GENERATOR := fixtures/production_smoke/generate.py
+PRODUCTION_SMOKE_GENERATOR := tests/fixtures/production_smoke/generate.py
 PRODUCTION_SMOKE_PRX       := $(PRODUCTION_SMOKE_FIXTURE)/guest.prx
 PRODUCTION_SMOKE_PSP       := $(PRODUCTION_SMOKE_FIXTURE)/guest.psp
 PRODUCTION_SMOKE_MAP       := $(PRODUCTION_SMOKE_DIR)/production_smoke.map
@@ -653,7 +653,7 @@ PRODUCTION_SMOKE_MAP       := $(PRODUCTION_SMOKE_DIR)/production_smoke.map
 DISPLAY_SMOKE_NAME      := display-smoke-v1
 DISPLAY_SMOKE_DIR       := $(BUILD_ROOT)/$(DISPLAY_SMOKE_NAME)
 DISPLAY_SMOKE_FIXTURE   := $(DISPLAY_SMOKE_DIR)/fixture
-DISPLAY_SMOKE_GENERATOR := fixtures/display_smoke/generate.py
+DISPLAY_SMOKE_GENERATOR := tests/fixtures/display_smoke/generate.py
 DISPLAY_SMOKE_PRX       := $(DISPLAY_SMOKE_FIXTURE)/guest.prx
 DISPLAY_SMOKE_PSP       := $(DISPLAY_SMOKE_FIXTURE)/guest.psp
 DISPLAY_SMOKE_BASE      := 0x08810000
@@ -665,7 +665,7 @@ DISPLAY_SMOKE_DEMO_FRAMES := 1800
 # The AOT-gap mode of the same fixture: identical guest addresses, but the
 # helper is omitted from native emission (--omit-aot) so region A reaches it
 # through the ordinary production dispatch() seam. The address must match
-# HELPER in fixtures/production_smoke/generate.py (it moved to 0x08804068 when
+# HELPER in tests/fixtures/production_smoke/generate.py (it moved to 0x08804068 when
 # the sceImpose language round trip extended region A).
 PRODUCTION_SMOKE_GAP_DIR       := $(BUILD_ROOT)/production-smoke-gap
 PRODUCTION_SMOKE_GAP_FIXTURE   := $(PRODUCTION_SMOKE_GAP_DIR)/fixture

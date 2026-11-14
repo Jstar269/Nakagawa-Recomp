@@ -59,7 +59,7 @@ except ImportError:  # direct ``python tools/psp_oracle/oracle_matrix.py`` invoc
 
 
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURE_ROOT = ROOT / "fixtures" / "psp_oracle"
+FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "psp_oracle"
 PREFLIGHT_CASE = "transport-write"
 MAX_CASES = 64
 MAX_CASE_TIMEOUT_SECONDS = 3600
@@ -202,7 +202,7 @@ def load_plan(path: Path, *, repo_root: Path = ROOT) -> MatrixPlan:
 
     repo_root = Path(repo_root).resolve()
     plan_dir = path.parent
-    host0_root = _resolve_under(repo_root / "fixtures" / "psp_oracle", raw["host0_root"], "host0_root")
+    host0_root = _resolve_under(repo_root / "tests" / "fixtures" / "psp_oracle", raw["host0_root"], "host0_root")
     evidence_dir = _resolve_under(plan_dir, raw["evidence_dir"], "evidence_dir")
 
     raw_cases = raw["cases"]
@@ -335,9 +335,9 @@ def build_script(plan: MatrixPlan, source_repo: str, cases: list[MatrixCase]) ->
         f'[ "$(git rev-parse HEAD)" = {q(plan.source_commit)} ] || fail head',
         '[ -z "$(git status --porcelain --untracked-files=normal)" ] || fail dirty',
         "build_case() {",
-        '  make -C fixtures/psp_oracle CASE="$1" BUILD_DIR="build/$1" EBOOT.PBP > "$work/$1.log" 2>&1'
+        '  make -C tests/fixtures/psp_oracle CASE="$1" BUILD_DIR="build/$1" EBOOT.PBP > "$work/$1.log" 2>&1'
         ' || { tail -n 20 "$work/$1.log"; fail "make $1"; }',
-        '  set -- "$1" "$2" fixtures/psp_oracle/build/"$1"/*.prx',
+        '  set -- "$1" "$2" tests/fixtures/psp_oracle/build/"$1"/*.prx',
         '  [ "$#" -eq 3 ] && [ -f "$3" ] || fail "prx $1"',
         '  cp "$3" "$2" || fail "stage $1"',
         '  echo "NK_MATRIX_BUILT $1 $(sha256sum "$2" | cut -c1-64)"',

@@ -115,7 +115,7 @@ class _AttestationRepo:
         self.content: dict[str, str] = dict(REQUIRED_FILES)
         self.content.update({
             "docs/guide.md": "# Guide\n\nSynthetic fixture.\n",
-            "fixtures/legit_probe/probe.c": SPDX_C,
+            "tests/fixtures/legit_probe/probe.c": SPDX_C,
             "src/rt/existing.c": SPDX_C,
             "tools/helper.py": SPDX_PY,
         })
@@ -224,7 +224,7 @@ class _AttestationRepo:
     def _classification_for(self, rel: str) -> str:
         if rel.startswith("docs/"):
             return "reviewed_documentation"
-        if rel.startswith("fixtures/") or rel.startswith("tools/test_"):
+        if rel.startswith("tests/fixtures/") or rel.startswith("tools/test_"):
             return "synthetic_fixture"
         if rel.endswith((".json", ".yaml", ".yml")):
             return "reviewed_configuration"
@@ -233,7 +233,7 @@ class _AttestationRepo:
     def _evidence_for(self, rel: str) -> dict:
         if rel.startswith(("docs/", "assets/")):
             return {"source": "synthetic publication fixture"}
-        if rel.startswith("fixtures/") or rel.startswith("tools/test_"):
+        if rel.startswith("tests/fixtures/") or rel.startswith("tools/test_"):
             return {"source": "path-reviewed fixture/test census",
                     "statement": "fixture or test data is synthetic and contains no retail bytes"}
         record_id = {
@@ -392,7 +392,7 @@ class TestReleaseAnchorRejectsSelfAuthorization(unittest.TestCase):
     def test_laundered_attestation_claim_on_fixture_path_rejected_at_release_anchor(self):
         repo = _AttestationRepo(self)
         repo.build_baseline()
-        path = "fixtures/evil_claim/probe.c"
+        path = "tests/fixtures/evil_claim/probe.c"
         repo.ledger_entries.append({
             "path": path,
             "classification": "project_authored_attested",  # claims a detailed-ledger record
@@ -520,7 +520,7 @@ class TestSelfConsistencyTripwire(unittest.TestCase):
     def test_tripwire_passes_new_deterministic_paths(self):
         repo = _AttestationRepo(self)
         repo.build_baseline()
-        new_fixture = "fixtures/extra_probe/extra.c"
+        new_fixture = "tests/fixtures/extra_probe/extra.c"
         new_doc = "docs/new_guide.md"
         repo.ledger_entries.append({
             "path": new_fixture,

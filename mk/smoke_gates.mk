@@ -42,10 +42,10 @@ production-smoke-clean:
 	$(MAKE) BUILD_DIR=$(PRODUCTION_SMOKE_DIR) clean
 
 showcase:
-	"$(PYTHON)" fixtures/showcase/showcase.py build
+	"$(PYTHON)" tests/fixtures/showcase/showcase.py build
 
 showcase-smoke: showcase
-	"$(PYTHON)" fixtures/showcase/showcase.py smoke
+	"$(PYTHON)" tests/fixtures/showcase/showcase.py smoke
 
 # The same showcase route on a POSIX host, with no WSL hop: PSPDEV builds the
 # guest PRX directly, `make all` (GAME_NAME/GAME_ELF/... exactly as the package
@@ -58,8 +58,8 @@ showcase-smoke: showcase
 # the repository for a source tree that is not a Git checkout; a real checkout
 # uses the default ignored build/ tree.
 showcase-linux:
-	"$(PYTHON)" fixtures/showcase/showcase.py build
-	"$(PYTHON)" fixtures/showcase/showcase.py smoke
+	"$(PYTHON)" tests/fixtures/showcase/showcase.py build
+	"$(PYTHON)" tests/fixtures/showcase/showcase.py smoke
 
 # display-smoke builds the guest and asserts the presented framebuffer word
 # headlessly. display-smoke-gui is the same image in the SDL3/Vulkan window and
@@ -180,7 +180,7 @@ perf-benchmark:
 # ---------------------------------------------------------------------------
 # Source-owned second-platform workload ladder.
 #
-# fixtures/platform_ladder/generate.py emits seven deliberately non-HST guest
+# tests/fixtures/platform_ladder/generate.py emits seven deliberately non-HST guest
 # identities (see that module's docstring) and drives each one through the
 # ordinary two-phase `all` target with PUBLIC_SAFE=1, no title manifest, no
 # SR_DATAROOT, no extra spans, and no compatibility overrides. Each workload
@@ -190,7 +190,7 @@ perf-benchmark:
 # through the production fatal boundary.
 # ---------------------------------------------------------------------------
 PLATFORM_LADDER_DIR       := $(BUILD_ROOT)/platform-ladder
-PLATFORM_LADDER_GENERATOR := fixtures/platform_ladder/generate.py
+PLATFORM_LADDER_GENERATOR := tests/fixtures/platform_ladder/generate.py
 
 PL_ZERO_BASE   := 0x08940000
 PL_RELOC_BASE  := 0x088C0000

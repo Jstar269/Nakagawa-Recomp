@@ -686,7 +686,7 @@ def _cell5_words() -> list[int]:
     The PSP FPU has FCC0 only: a guest ctc1 of 0xFE800000 (FCC0..FCC7 on MIPS IV)
     reads back 0x00800000, a c.eq.s with condition code 1..7 writes FCC0, and a
     bc1t/bc1f with condition code 1..7 tests FCC0. The words are the probe's own
-    encodings (fixtures/psp_oracle/probe.c, run_fpu_cc) for the codes used here.
+    encodings (tests/fixtures/psp_oracle/probe.c, run_fpu_cc) for the codes used here.
     """
     return [
         _lui(8, 0xFE80),                # t0 = 0xFE800000: every MIPS IV condition bit

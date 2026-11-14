@@ -206,7 +206,7 @@ def _write_stale_other_title_artifacts(root: Path) -> None:
 class NkCoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = Path(tempfile.mkdtemp(prefix="test_nk_core_"))
-        data_root = self.temp_dir / "fixtures" / "profile_zero"
+        data_root = self.temp_dir / "tests" / "fixtures" / "profile_zero"
         data_root.mkdir(parents=True)
         (data_root / "synthetic-data.txt").write_text(
             "Source-owned synthetic runtime data.\n", encoding="utf-8"
@@ -1373,7 +1373,7 @@ class GenericLauncherHostileTests(unittest.TestCase):
         self.temp_dir = Path(tempfile.mkdtemp(prefix="nk_launch_genericity_"))
         self.iso = self.temp_dir / "source.iso"
         self.iso.write_bytes(b"iso")
-        for relative in ("fixtures/pspdev_phase5", "fixtures/profile_zero"):
+        for relative in ("tests/fixtures/pspdev_phase5", "tests/fixtures/profile_zero"):
             data_root = self.temp_dir.joinpath(*relative.split("/"))
             data_root.mkdir(parents=True, exist_ok=True)
             (data_root / "synthetic-data.txt").write_text(
@@ -1465,11 +1465,11 @@ class GenericLauncherHostileTests(unittest.TestCase):
         self.assertEqual(env["PSP_ISO"], str(self.iso))
 
     def test_missing_declared_data_root_fails_with_a_named_reason(self) -> None:
-        shutil.rmtree(self.temp_dir / "fixtures" / "pspdev_phase5")
+        shutil.rmtree(self.temp_dir / "tests" / "fixtures" / "pspdev_phase5")
         _write_title_runtime(self.temp_dir, self.TITLE2_GAME, exe_ext=".exe")
         message = self._error(self._title2_manifest())
         self.assertIn("This game needs its data folder", message)
-        self.assertIn("fixtures/pspdev_phase5", message)
+        self.assertIn("tests/fixtures/pspdev_phase5", message)
         self.assertNotIn("#", message)
 
     def test_loose_root_environment_uses_manifest_and_masks_inherited_value(self) -> None:
@@ -1587,7 +1587,7 @@ class GenericLauncherHostileTests(unittest.TestCase):
     def test_paths_with_spaces_second_title_route(self) -> None:
         spaced_root = self.temp_dir / "root with spaces"
         exe, img = _write_title_runtime(spaced_root, self.TITLE2_GAME, exe_ext=".exe")
-        data_root = spaced_root / "fixtures" / "pspdev_phase5"
+        data_root = spaced_root / "tests" / "fixtures" / "pspdev_phase5"
         data_root.mkdir(parents=True)
         (data_root / "synthetic-data.txt").write_text(
             "Source-owned synthetic runtime data.\n", encoding="utf-8"
@@ -1770,7 +1770,7 @@ int main(int argc, char **argv) {
 
     @staticmethod
     def _write_phase5_data_root(root: Path) -> None:
-        data_root = root / "fixtures" / "pspdev_phase5"
+        data_root = root / "tests" / "fixtures" / "pspdev_phase5"
         data_root.mkdir(parents=True, exist_ok=True)
         (data_root / "synthetic-data.txt").write_text(
             "Source-owned synthetic runtime data.\n", encoding="utf-8"
@@ -1854,7 +1854,7 @@ int main(int argc, char **argv) {
         self.assertEqual(native.get("RESULT"), "-2")
         self.assertEqual(native.get("ERROR"), message)
         self.assertIn("This game needs its data folder", message)
-        self.assertIn("fixtures/pspdev_phase5", message)
+        self.assertIn("tests/fixtures/pspdev_phase5", message)
         self.assertNotIn("#", message)
 
     def test_no_data_title_launches_in_both_planners_without_dataroot(self) -> None:
@@ -2456,8 +2456,8 @@ class BoundedLibraryJsonTests(unittest.TestCase):
         self.assertEqual([item.name for item in self.temp_dir.iterdir()], [path.name])
 
     def test_v001_player_library_reads_through_the_cli_route(self) -> None:
-        # fixtures/user_data/v0.0.1/library.json is what the v0.0.1 player wrote.
-        fixture = REPO_ROOT / "fixtures" / "user_data" / "v0.0.1" / "library.json"
+        # tests/fixtures/user_data/v0.0.1/library.json is what the v0.0.1 player wrote.
+        fixture = REPO_ROOT / "tests" / "fixtures" / "user_data" / "v0.0.1" / "library.json"
         shutil.copyfile(fixture, self.temp_dir / "library.json")
         payload = nk_cli._read_library_json(self.temp_dir / "library.json")
         self.assertEqual(payload["schema_version"], 1)

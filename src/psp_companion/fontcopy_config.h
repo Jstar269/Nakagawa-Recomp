@@ -2,7 +2,7 @@
 // Copyright (C) 2026 the Nakagawa Recomp authors
 
 /* What Nakagawa Font Copy (src/psp_companion/fontcopy.c) copies and where it writes. These
- * choices live in a header so the host harness (fixtures/psp_oracle/io_cases_host.c, mode
+ * choices live in a header so the host harness (tests/fixtures/psp_oracle/io_cases_host.c, mode
  * fontcopy) runs exactly what the app runs; tools/test_psp_oracle.py checks them.
  *
  *  - Source: flash0:/font, listed and opened read-only through font_files.h. Only names ending

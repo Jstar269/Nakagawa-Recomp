@@ -144,7 +144,7 @@ class MatrixTestCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         base = Path(self._tmp.name)
         self.repo = base / "repo"
-        (self.repo / "fixtures" / "psp_oracle").mkdir(parents=True)
+        (self.repo / "tests" / "fixtures" / "psp_oracle").mkdir(parents=True)
         self.private = base / "private"
         self.private.mkdir()
         self.lock_path = base / "HARDWARE_LOCK.json"
@@ -205,7 +205,7 @@ class PlanValidationTests(MatrixTestCase):
 
     def test_valid_plan_resolves_private_and_scratch_paths(self) -> None:
         plan = self.load([{"case_id": "delay-zero", "timeout_seconds": 60}])
-        self.assertEqual(plan.host0_root, (self.repo / "fixtures/psp_oracle/build/host0-m1").resolve())
+        self.assertEqual(plan.host0_root, (self.repo / "tests/fixtures/psp_oracle/build/host0-m1").resolve())
         self.assertEqual(plan.evidence_dir, (self.private / "evidence").resolve())
         self.assertEqual(plan.max_contained_failures, 1)
         self.assertEqual(plan.cases[0].staged_name, "delay_zero.prx")
@@ -272,8 +272,8 @@ class BuildTests(MatrixTestCase):
     def test_wsl_path_style_converts_staged_paths(self) -> None:
         plan = self.load([{"case_id": "delay-zero", "timeout_seconds": 60}])
         wsl = om.MatrixPlan(**{**plan.__dict__, "path_style": "wsl",
-                               "host0_root": Path("X:/repo/fixtures/psp_oracle/build/h")})
-        self.assertIn("/mnt/x/repo/fixtures/psp_oracle/build/h/delay_zero.prx",
+                               "host0_root": Path("X:/repo/tests/fixtures/psp_oracle/build/h")})
+        self.assertIn("/mnt/x/repo/tests/fixtures/psp_oracle/build/h/delay_zero.prx",
                       om.build_script(wsl, "/mnt/x/repo/.git", [plan.cases[0]]))
 
     def test_build_script_reaches_the_shell_with_lf_line_ends(self) -> None:

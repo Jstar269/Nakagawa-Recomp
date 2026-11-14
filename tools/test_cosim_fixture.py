@@ -2,7 +2,7 @@
 
 """Structural gates for the AOT/interpreter cosimulation fixture.
 
-The executable comparison lives in ``fixtures/cosim/cosim_selftest.c`` and needs a
+The executable comparison lives in ``tests/fixtures/cosim/cosim_selftest.c`` and needs a
 built toolchain.  These tests are the part that can run anywhere: they check the
 properties the comparison silently DEPENDS on, each of which has already been
 observed to fail in practice or would make a cell pass vacuously.
@@ -22,8 +22,8 @@ except ModuleNotFoundError:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GENERATOR = ROOT / "fixtures" / "cosim" / "generate.py"
-FPU_REFERENCE = ROOT / "fixtures" / "cosim" / "fpu_reference.c"
+GENERATOR = ROOT / "tests" / "fixtures" / "cosim" / "generate.py"
+FPU_REFERENCE = ROOT / "tests" / "fixtures" / "cosim" / "fpu_reference.c"
 
 _spec = importlib.util.spec_from_file_location("cosim_generate", GENERATOR)
 cosim = importlib.util.module_from_spec(_spec)
@@ -293,7 +293,7 @@ int main(void) {
                 "-I",
                 str(ROOT / "src" / "rt"),
                 "-I",
-                str(ROOT / "fixtures" / "cosim"),
+                str(ROOT / "tests" / "fixtures" / "cosim"),
                 str(source),
                 str(FPU_REFERENCE),
                 "-lm",
@@ -640,7 +640,7 @@ class FixtureSemanticTests(unittest.TestCase):
         This is the FIXTURE half of the claim "the interpreter implements exactly
         what a cell executes". The INTERPRETER half is not a list at all: the
         harness probes the production decoder directly (`run_form_census()` in
-        fixtures/cosim/cosim_selftest.c) and requires the decoded set to equal the
+        tests/fixtures/cosim/cosim_selftest.c) and requires the decoded set to equal the
         set this inventory describes. Neither side is trusted to describe the
         other.
         """

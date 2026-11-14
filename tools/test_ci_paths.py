@@ -166,16 +166,16 @@ class CiPathClassificationTests(unittest.TestCase):
     def test_cosim_fixture_reaches_the_windows_gate(self) -> None:
         """The AOT/interpreter cosimulation gate only runs in the Windows job.
 
-        Its guest recipe, harness and mutation driver all live under fixtures/,
+        Its guest recipe, harness and mutation driver all live under tests/fixtures/,
         so a classification that treated them as inert data would let a change to
         the comparator -- or to the guest it compares -- ship without the gate
         ever executing. That is the false negative this classifier exists to
         prevent.
         """
         for path in (
-            "fixtures/cosim/generate.py",
-            "fixtures/cosim/cosim_selftest.c",
-            "fixtures/cosim/mutate.py",
+            "tests/fixtures/cosim/generate.py",
+            "tests/fixtures/cosim/cosim_selftest.c",
+            "tests/fixtures/cosim/mutate.py",
         ):
             with self.subTest(path=path):
                 result = classify([path])
@@ -250,7 +250,7 @@ class CiPathAdversarialTests(unittest.TestCase):
         "assets/vfpu/tables.bin",
         "assets/shaders/blit.frag",
         "nk.ps1",
-        "nk_manager.ps1",
+        "tools/nk_manager.ps1",
         "tools/title_codegen_plan.py",
         "tools/title_manifest.py",
         "tools/test_title_manifest.py",
@@ -270,8 +270,8 @@ class CiPathAdversarialTests(unittest.TestCase):
         # #308: the Windows staging smoke runs the player and the showcase disc writer, and
         # only the Windows job runs it, so each input must reach that job.
         "src/player/setup_staging.c",
-        "fixtures/showcase/showcase.py",
-        "fixtures/display_smoke/generate.py",
+        "tests/fixtures/showcase/showcase.py",
+        "tests/fixtures/display_smoke/generate.py",
     )
 
     def test_every_native_relevant_path_runs_native_and_windows(self) -> None:
@@ -377,7 +377,7 @@ class CiPathAdversarialTests(unittest.TestCase):
         with patch.dict(os.environ, {"GITHUB_REF": "refs/heads/main"}):
             for paths in (["new-tool-input.dat"],
                           ["tests/native/test_player_ui.py", "src/rt/hle.c"],
-                          ["fixtures/psp_oracle/Makefile", "docs/CI.md"]):
+                          ["tests/fixtures/psp_oracle/Makefile", "docs/CI.md"]):
                 with self.subTest(paths=paths):
                     result = classify(paths, event_name="push")
                     self.assertEqual(result["allow_substantive"], "false")
@@ -1684,7 +1684,7 @@ class PrecommitPathCoverageTests(unittest.TestCase):
         pattern = re.compile(textwrap.dedent(block.group(1)))
         for path in (
             "README.md", ".github/workflows/ci.yml", ".pre-commit-config.yaml",
-            "src/rt/hle.c", "tools/test_ci_paths.py", "fixtures/profile_zero/main.c",
+            "src/rt/hle.c", "tools/test_ci_paths.py", "tests/fixtures/profile_zero/main.c",
             "docs/build/layout.md", "tools/third_party_audit.py",
         ):
             with self.subTest(path=path):

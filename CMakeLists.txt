@@ -442,7 +442,7 @@ add_test(NAME player_screens_test COMMAND test_player_screens)
 set_tests_properties(player_screens_test PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-# The in-game overlay's pages (#1159, C9c): flow, focus, fit and fixtures/nk_ui/overlay.golden.
+# The in-game overlay's pages (#1159, C9c): flow, focus, fit and tests/fixtures/nk_ui/overlay.golden.
 add_executable(test_overlay_screens
     tests/native/test_overlay_screens.c
     ${NK_UI_CORE_SOURCES}

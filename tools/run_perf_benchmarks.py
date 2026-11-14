@@ -28,10 +28,10 @@ WORKLOADS = (
     ("platform-ladder-fs", ("platform-ladder-fs",)),
 )
 # The platform ladder deletes every ambient SR_* variable before it starts its child (the "SR_*
-# namespace rule" in fixtures/platform_ladder/generate.py), so SR_PERF never reaches those runs and
+# namespace rule" in tests/fixtures/platform_ladder/generate.py), so SR_PERF never reaches those runs and
 # no summary can exist. They are timed only; a missing summary there is the contract, not a failure.
 TIMING_ONLY = frozenset({"platform-ladder-gap", "platform-ladder-sched", "platform-ladder-fs"})
-TIMING_ONLY_NOTE = ("timed only: the platform ladder clears SR_* (fixtures/platform_ladder/generate.py, "
+TIMING_ONLY_NOTE = ("timed only: the platform ladder clears SR_* (tests/fixtures/platform_ladder/generate.py, "
                     "SR_* namespace rule), so it writes no SR_PERF summary")
 
 
@@ -131,7 +131,7 @@ def _run_overhead(make: str, python: str, output_root: Path, samples: int,
         return {"status": "BLOCKED", "build": build, "ratio": None}
     command = [
         python,
-        str(ROOT / "fixtures" / "production_smoke" / "generate.py"),
+        str(ROOT / "tests" / "fixtures" / "production_smoke" / "generate.py"),
         "run",
         "--build-dir",
         str(ROOT / build_prefix / "production-smoke-gap"),

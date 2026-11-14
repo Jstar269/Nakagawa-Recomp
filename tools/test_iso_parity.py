@@ -2448,7 +2448,7 @@ int main(int argc, char **argv) {{
         package_dir.mkdir(parents=True)
         (package_dir / f"{title_name}.exe").write_bytes(b"synthetic executable")
         (package_dir / f"{title_name}_image.bin").write_bytes(b"synthetic image")
-        data_root = runtime_root / "fixtures" / "profile_zero"
+        data_root = runtime_root / "tests" / "fixtures" / "profile_zero"
         data_root.mkdir(parents=True)
         # The project fonts are one valid synthetic PGF per slot, built by the writer (no real font).
         from pgf_writer import Glyph, build_pgf
@@ -2476,7 +2476,7 @@ int main(int argc, char **argv) {{
 
         data_root.rmdir()
         extracted_data_root = (
-            iso_file.parent / "EXTRACTED" / "PSP_GAME" / "USRDIR" / "fixtures" / "profile_zero"
+            iso_file.parent / "EXTRACTED" / "PSP_GAME" / "USRDIR" / "tests" / "fixtures" / "profile_zero"
         )
         extracted_data_root.mkdir(parents=True)
         extracted_ready = subprocess.run(
@@ -4001,7 +4001,7 @@ int main(int argc, char **argv) {{
         self.assertIn("data folder", missing_data.stdout.lower())
         self.assertNotIn("LAUNCH_PREPARE_OK", missing_data.stdout)
 
-        (mock_root / "fixtures" / "display_smoke").mkdir(parents=True)
+        (mock_root / "tests" / "fixtures" / "display_smoke").mkdir(parents=True)
 
         res = subprocess.run(cmd, capture_output=True, text=True, env=env)
         self.assertEqual(res.returncode, 0, f"Launch plan test failed: {res.stderr}")

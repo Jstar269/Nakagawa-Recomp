@@ -1177,7 +1177,7 @@ static SrGuestInterpResult execute_noncontrol(
          * `fmt` alone would decode every reserved COP1 encoding that happens to
          * share the fmt as a register move -- the precise "misreading one
          * silently rewrites the program" failure this file refuses elsewhere.
-         * Found by the interpreter form census in fixtures/cosim. */
+         * Found by the interpreter form census in tests/fixtures/cosim. */
         const int move_shape = (opcode & 0x7ffu) == 0u;
         if (fmt == 0x00u && move_shape) {         /* mfc1 rt, fs */
             write_gpr(s, ft, s->fi[fs]);

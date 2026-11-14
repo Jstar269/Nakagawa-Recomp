@@ -46,7 +46,7 @@ import codegen_llvm  # noqa: E402
 from test_llvm_ir import llvm_tool, verify  # noqa: E402
 
 BASE = 0x08900000
-COSIM_GENERATOR = ROOT / "fixtures" / "cosim" / "generate.py"
+COSIM_GENERATOR = ROOT / "tests" / "fixtures" / "cosim" / "generate.py"
 
 
 class FakeElf:
@@ -589,7 +589,7 @@ class MutantAnchorTests(unittest.TestCase):
     def setUpClass(cls):
         import importlib.util
         spec = importlib.util.spec_from_file_location(
-            "cosim_mutate", ROOT / "fixtures" / "cosim" / "mutate.py")
+            "cosim_mutate", ROOT / "tests" / "fixtures" / "cosim" / "mutate.py")
         cls.mutate = importlib.util.module_from_spec(spec)
         sys.modules["cosim_mutate"] = cls.mutate
         spec.loader.exec_module(cls.mutate)

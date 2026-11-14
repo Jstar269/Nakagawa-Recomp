@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
 import test_public_title_isolation
-MANAGER = ROOT / "nk_manager.ps1"
+MANAGER = ROOT / "tools" / "nk_manager.ps1"
 MANIFEST = ROOT / "assets" / "titles" / "hst-ucus98701.json"
 SYNTHETIC_MANIFEST = ROOT / "assets" / "titles" / "synthetic.json"
 HELPER = ROOT / "tools" / "title_manager_plan.ps1"
@@ -62,8 +62,8 @@ class HstManagerManifestTests(unittest.TestCase):
         )
         # Synthetic/generic manifests no longer discover the
         # legacy retail layout. The synthetic route discovers its ELF from the
-        # generic fixtures/ candidates instead.
-        fixtures = self.root / "fixtures"
+        # generic tests/fixtures/ candidates instead.
+        fixtures = self.root / "tests" / "fixtures"
         fixtures.mkdir(exist_ok=True)
         (fixtures / "synthetic.elf").write_text("synthetic private binding\n", encoding="ascii")
         # The manager now anchors every managed path to its own script location and fails
@@ -492,7 +492,7 @@ class HstManagerManifestTests(unittest.TestCase):
                 str(SYNTHETIC_MANIFEST),
                 "--manager-plan",
                 "--game-name=synthetic",
-                "--game-elf=fixtures/synthetic.elf",
+                "--game-elf=tests/fixtures/synthetic.elf",
                 "--build-dir=build/synthetic",
             ],
             cwd=ROOT,
@@ -545,7 +545,7 @@ class HstManagerManifestTests(unittest.TestCase):
         command = (
             f". '{HELPER}'; "
             f"try {{ Invoke-TitleManagerPlan -PlannerScript 'missing.py' -ManifestPath '{SYNTHETIC_MANIFEST}' "
-            f"-GameName synthetic -GameElf fixtures/synthetic.elf -BuildDir build/synthetic -ModuleDir modules "
+            f"-GameName synthetic -GameElf tests/fixtures/synthetic.elf -BuildDir build/synthetic -ModuleDir modules "
             f"-PspHeader header.bin -FuncsPerChunk 2000 -PythonCommand '{failing}'; exit 1 }} "
             "catch { Write-Output $_.Exception.Message; exit 0 }"
         )

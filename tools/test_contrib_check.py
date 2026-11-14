@@ -317,7 +317,7 @@ class TestStrictCompileUnavailableInputs(unittest.TestCase):
                 mock.patch.dict(contrib_check.os.environ, {"BUILD_ROOT": empty, "CC": "cc"}), \
                 mock.patch.object(contrib_check, "vulkan_include_flags", return_value=([], "")), \
                 mock.patch.object(contrib_check.subprocess, "run", side_effect=self._fail_if_compiled):
-            gate = contrib_check.c_gate(["fixtures/cosim/cosim_selftest.c"])
+            gate = contrib_check.c_gate(["tests/fixtures/cosim/cosim_selftest.c"])
         self.assertEqual(gate.status, contrib_check.NOT_RUN)
         self.assertIn("cosim_recomp_funcs.h", gate.detail)
         self.assertIn("make cosim-selftest", gate.detail)
@@ -331,7 +331,7 @@ class TestStrictCompileUnavailableInputs(unittest.TestCase):
                 (fixture / name).write_text("", encoding="ascii")
             with mock.patch.dict(contrib_check.os.environ, {"BUILD_ROOT": root}):
                 command, reason = contrib_check.strict_compile_command(
-                    "cc", "fixtures/cosim/cosim_selftest.c", [],
+                    "cc", "tests/fixtures/cosim/cosim_selftest.c", [],
                 )
         self.assertEqual(reason, "")
         self.assertIn(f"-I{root}/cosim", command)
@@ -363,8 +363,8 @@ class TestStrictCompileUnavailableInputs(unittest.TestCase):
         for header in ("pspkernel.h", "pspiofilemgr_fcntl.h", "psputility_osk.h"):
             with self.subTest(header=header):
                 gate = self._gate_for_output(
-                    "fixtures/psp_oracle/probe_ge_sample.c",
-                    f"fixtures/psp_oracle/probe_ge_sample.c:5:10: fatal error: {header}: "
+                    "tests/fixtures/psp_oracle/probe_ge_sample.c",
+                    f"tests/fixtures/psp_oracle/probe_ge_sample.c:5:10: fatal error: {header}: "
                     "No such file or directory\ncompilation terminated.",
                 )
                 self.assertEqual(gate.status, contrib_check.SKIP)
@@ -383,9 +383,9 @@ class TestStrictCompileUnavailableInputs(unittest.TestCase):
         for header in ("pspkernel.h", "vulkan/vulkan.h"):
             with self.subTest(header=header):
                 gate = self._gate_for_output(
-                    "fixtures/psp_oracle/probe_ge_sample.c",
-                    "fixtures/psp_oracle/probe_ge_sample.c:2:1: error: unknown type name 'foo_t'\n"
-                    f"fixtures/psp_oracle/probe_ge_sample.c:5:10: fatal error: {header}: "
+                    "tests/fixtures/psp_oracle/probe_ge_sample.c",
+                    "tests/fixtures/psp_oracle/probe_ge_sample.c:2:1: error: unknown type name 'foo_t'\n"
+                    f"tests/fixtures/psp_oracle/probe_ge_sample.c:5:10: fatal error: {header}: "
                     "No such file or directory\ncompilation terminated.",
                 )
                 self.assertEqual(gate.status, contrib_check.FAIL)
@@ -409,12 +409,12 @@ class TestStrictCompileUnavailableInputs(unittest.TestCase):
                 mock.patch.object(contrib_check, "vulkan_include_flags", return_value=([], "none")), \
                 mock.patch.object(contrib_check.subprocess, "run", side_effect=fake_run):
             gate = contrib_check.c_gate([
-                "src/rt/gpu_sdl3vk/ge_gpu.c", "fixtures/cosim/cosim_selftest.c", "src/rt/hle.c",
+                "src/rt/gpu_sdl3vk/ge_gpu.c", "tests/fixtures/cosim/cosim_selftest.c", "src/rt/hle.c",
             ])
         self.assertEqual(gate.status, contrib_check.FAIL)
         self.assertIn("src/rt/hle.c: ", gate.detail)
         self.assertIn("SKIP src/rt/gpu_sdl3vk/ge_gpu.c", gate.detail)
-        self.assertIn("NOT_RUN fixtures/cosim/cosim_selftest.c", gate.detail)
+        self.assertIn("NOT_RUN tests/fixtures/cosim/cosim_selftest.c", gate.detail)
 
     def test_a_deleted_source_is_not_compiled(self) -> None:
         with mock.patch.object(contrib_check.subprocess, "run", side_effect=self._fail_if_compiled):
@@ -436,7 +436,7 @@ class TestStrictCompileOnUnchangedMain(unittest.TestCase):
         "src/player/ui/scr_title.c",
         "tests/native/test_player_screens.c",
         "src/rt/gpu_sdl3vk/ge_gpu.c",
-        "fixtures/cosim/cosim_selftest.c",
+        "tests/fixtures/cosim/cosim_selftest.c",
         "tests/native/texrepl_selftest.c",
     )
 

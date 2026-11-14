@@ -1650,7 +1650,7 @@ def title_diagnostic_context(
     candidates.extend(
         (
             root / "build" / "fixtures" / f"{effective_name}.elf",
-            root / "fixtures" / f"{effective_name}.elf",
+            root / "tests" / "fixtures" / f"{effective_name}.elf",
             root / "eboot.elf",
         )
     )
@@ -1715,7 +1715,7 @@ def check_private_inputs(
         elf_path = next((path for path in elf_candidates if path.is_file()), elf_candidates[0])
         default_fixture_paths = (
             root / "build" / "fixtures" / f"{context.game_name}.elf",
-            root / "fixtures" / f"{context.game_name}.elf",
+            root / "tests" / "fixtures" / f"{context.game_name}.elf",
         )
         if (report.scope == "build" and context.kind == "synthetic" and not elf_path.is_file()
                 and not context.has_declared_executable_path

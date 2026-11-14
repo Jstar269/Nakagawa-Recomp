@@ -1926,15 +1926,18 @@ static void launch_remove_empty_dir(const char *path) {
     assert(rc == 0 && "fixture directory must be empty when removed");
 }
 
-/* Removes the pspdev data-root fixture under `root` (root/fixtures/pspdev_phase5)
+/* Removes the pspdev data-root fixture under `root` (root/tests/fixtures/pspdev_phase5)
  * and then `root` itself. */
 static void launch_remove_data_root_tree(const char *root, char sep) {
+    char tests[NK_MAX_PATH * 3];
     char fixtures[NK_MAX_PATH * 3];
     char pspdev[NK_MAX_PATH * 3];
-    launch_join_path(fixtures, sizeof(fixtures), root, sep, "fixtures");
+    launch_join_path(tests, sizeof(tests), root, sep, "tests");
+    launch_join_path(fixtures, sizeof(fixtures), tests, sep, "fixtures");
     launch_join_path(pspdev, sizeof(pspdev), fixtures, sep, "pspdev_phase5");
     launch_remove_empty_dir(pspdev);
     launch_remove_empty_dir(fixtures);
+    launch_remove_empty_dir(tests);
     launch_remove_empty_dir(root);
 }
 
@@ -1958,6 +1961,7 @@ static void test_game_data_root_status(const char *base, char sep) {
     char iso_extracted[NK_MAX_PATH * 2];
     char iso_psp_game[NK_MAX_PATH * 2];
     char iso_usrdir[NK_MAX_PATH * 2];
+    char iso_tests[NK_MAX_PATH * 2];
     char iso_fixtures[NK_MAX_PATH * 2];
     char iso_data_root[NK_MAX_PATH * 2];
     launch_join_path(empty_root, sizeof(empty_root), base, sep, "data_root_empty");
@@ -1968,7 +1972,8 @@ static void test_game_data_root_status(const char *base, char sep) {
     launch_join_path(iso_extracted, sizeof(iso_extracted), iso_dir, sep, "EXTRACTED");
     launch_join_path(iso_psp_game, sizeof(iso_psp_game), iso_extracted, sep, "PSP_GAME");
     launch_join_path(iso_usrdir, sizeof(iso_usrdir), iso_psp_game, sep, "USRDIR");
-    launch_join_path(iso_fixtures, sizeof(iso_fixtures), iso_usrdir, sep, "fixtures");
+    launch_join_path(iso_tests, sizeof(iso_tests), iso_usrdir, sep, "tests");
+    launch_join_path(iso_fixtures, sizeof(iso_fixtures), iso_tests, sep, "fixtures");
     launch_join_path(iso_data_root, sizeof(iso_data_root), iso_fixtures, sep, "pspdev_phase5");
     assert(nk_platform_mkdir_p(empty_root));
 
@@ -1997,7 +2002,7 @@ static void test_game_data_root_status(const char *base, char sep) {
     assert(status == NK_LAUNCH_DATA_ROOT_NOT_REQUIRED);
     assert(resolved[0] == '\0');
 
-    /* d. pspdev-phase5-v1 needs fixtures/pspdev_phase5. The runtime root is
+    /* d. pspdev-phase5-v1 needs tests/fixtures/pspdev_phase5. The runtime root is
      * empty and nothing is staged, so the answer is MISSING and the reason
      * names the required folder. */
     make_game(&g, "");
@@ -2006,7 +2011,7 @@ static void test_game_data_root_status(const char *base, char sep) {
     status = nk_launch_game_data_root_status(empty_root, &g, resolved, sizeof(resolved),
                                              reason, sizeof(reason));
     assert(status == NK_LAUNCH_DATA_ROOT_MISSING);
-    assert(strstr(reason, "fixtures/pspdev_phase5") != NULL);
+    assert(strstr(reason, "tests/fixtures/pspdev_phase5") != NULL);
     assert(resolved[0] == '\0');
 
     /* e. The runtime root holds the data root, and nothing is staged. */
@@ -2017,7 +2022,7 @@ static void test_game_data_root_status(const char *base, char sep) {
     status = nk_launch_game_data_root_status(runtime_root, &g, resolved, sizeof(resolved),
                                              reason, sizeof(reason));
     assert(status == NK_LAUNCH_DATA_ROOT_READY);
-    assert(launch_path_ends_with(resolved, "fixtures/pspdev_phase5"));
+    assert(launch_path_ends_with(resolved, "tests/fixtures/pspdev_phase5"));
 
     /* f. The staged prepared root holds the data root. The runtime root is
      * empty, so only the prepared-root branch can produce READY. */
@@ -2031,10 +2036,10 @@ static void test_game_data_root_status(const char *base, char sep) {
     status = nk_launch_game_data_root_status(empty_root, &g, resolved, sizeof(resolved),
                                              reason, sizeof(reason));
     assert(status == NK_LAUNCH_DATA_ROOT_READY);
-    assert(launch_path_ends_with(resolved, "fixtures/pspdev_phase5"));
+    assert(launch_path_ends_with(resolved, "tests/fixtures/pspdev_phase5"));
 
     /* g. Only the extracted disc folder holds the data root:
-     * <iso dir>/EXTRACTED/PSP_GAME/USRDIR/fixtures/pspdev_phase5. The runtime
+     * <iso dir>/EXTRACTED/PSP_GAME/USRDIR/tests/fixtures/pspdev_phase5. The runtime
      * root is empty and nothing is staged. */
     assert(nk_platform_mkdir_p(iso_data_root));
     write_file(iso_path, "iso");
@@ -2045,7 +2050,7 @@ static void test_game_data_root_status(const char *base, char sep) {
     status = nk_launch_game_data_root_status(empty_root, &g, resolved, sizeof(resolved),
                                              reason, sizeof(reason));
     assert(status == NK_LAUNCH_DATA_ROOT_READY);
-    assert(launch_path_ends_with(resolved, "fixtures/pspdev_phase5"));
+    assert(launch_path_ends_with(resolved, "tests/fixtures/pspdev_phase5"));
 
     /* h. Passing NULL output buffers resolves status safely without writing buffers. */
     make_game(&g, "");
@@ -2644,7 +2649,7 @@ int main(int argc, char **argv) {
 
     char data_dir[900];
     char expected_data_dir[900];
-    snprintf(data_dir, sizeof(data_dir), "%s%cfixtures%cdisplay_smoke", base, sep, sep);
+    snprintf(data_dir, sizeof(data_dir), "%s%ctests%cfixtures%cdisplay_smoke", base, sep, sep, sep);
     assert(nk_platform_mkdir_p(data_dir));
     assert(nk_platform_absolute_path(data_dir, expected_data_dir, sizeof(expected_data_dir)));
 

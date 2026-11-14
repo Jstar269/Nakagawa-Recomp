@@ -457,9 +457,9 @@ jobs:
           fi
 
       # The former profile_zero_fixture job. The profile-zero guest
-      # (fixtures/profile_zero/main.c) is built here from source with the PSPDEV
+      # (tests/fixtures/profile_zero/main.c) is built here from source with the PSPDEV
       # distribution pinned by assets/upstream/pspdev.lock.json and checked byte-for-byte
-      # against the committed fixtures/profile_zero/prebuilt/SHA256SUMS, so the repository
+      # against the committed tests/fixtures/profile_zero/prebuilt/SHA256SUMS, so the repository
       # stores no generated executable (#1100, OpenSSF OSPS-QA-05.01). The Python and
       # Windows route jobs download the verified bytes as an artifact. `python3` in these
       # steps is the CPython 3.15.2 set up above; the separate job ran the image's own.
@@ -509,9 +509,9 @@ jobs:
           set -euo pipefail
           out="$RUNNER_TEMP/profile-zero"
           mkdir -p "$out"
-          make --no-print-directory             -f "$PWD/fixtures/profile_zero/Makefile"             -C "$out"             VPATH="$PWD/fixtures/profile_zero"             TARGET=profile_zero_guest             EBOOT.PBP
-          cp "$out/EBOOT.PBP" "$out/profile_zero_guest.prx" fixtures/profile_zero/prebuilt/
-          (cd fixtures/profile_zero/prebuilt && sha256sum --check --strict SHA256SUMS)
+          make --no-print-directory             -f "$PWD/tests/fixtures/profile_zero/Makefile"             -C "$out"             VPATH="$PWD/tests/fixtures/profile_zero"             TARGET=profile_zero_guest             EBOOT.PBP
+          cp "$out/EBOOT.PBP" "$out/profile_zero_guest.prx" tests/fixtures/profile_zero/prebuilt/
+          (cd tests/fixtures/profile_zero/prebuilt && sha256sum --check --strict SHA256SUMS)
 
       - name: Upload the verified fixture
         if: ${{ env.BUILD_PROFILE_ZERO == 'true' }}
@@ -519,8 +519,8 @@ jobs:
         with:
           name: profile-zero-fixture
           path: |
-            fixtures/profile_zero/prebuilt/EBOOT.PBP
-            fixtures/profile_zero/prebuilt/profile_zero_guest.prx
+            tests/fixtures/profile_zero/prebuilt/EBOOT.PBP
+            tests/fixtures/profile_zero/prebuilt/profile_zero_guest.prx
           if-no-files-found: error
           retention-days: 7
 
@@ -532,7 +532,7 @@ jobs:
         # The step follows the upload, so a failing gate still leaves the bytes to inspect.
         run: >-
           python3 tools/hle_manifest.py --out "$RUNNER_TEMP/hle_manifest.json"
-          --imports fixtures/profile_zero/prebuilt/profile_zero_guest.prx
+          --imports tests/fixtures/profile_zero/prebuilt/profile_zero_guest.prx
           --check-profile-zero-imports
 
       - name: Build Nakagawa Font Copy
@@ -564,9 +564,9 @@ jobs:
           for fixture in pspdev_phase5 homebrew_view; do
             build="$RUNNER_TEMP/homebrew-build/$fixture"
             mkdir -p "$build" "$out/$fixture"
-            make --no-print-directory -B -f "$PWD/fixtures/$fixture/Makefile" -C "$build" \
-              VPATH="$PWD/fixtures/$fixture" EBOOT.PBP
-            cp "$build/EBOOT.PBP" "fixtures/$fixture/main.c" "fixtures/$fixture/Makefile" \
+            make --no-print-directory -B -f "$PWD/tests/fixtures/$fixture/Makefile" -C "$build" \
+              VPATH="$PWD/tests/fixtures/$fixture" EBOOT.PBP
+            cp "$build/EBOOT.PBP" "tests/fixtures/$fixture/main.c" "tests/fixtures/$fixture/Makefile" \
               "$out/$fixture/"
           done
           printf '%s\n' "$GITHUB_SHA" > "$out/BUILT_FROM"
@@ -718,7 +718,7 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: profile-zero-fixture
-          path: fixtures/profile_zero/prebuilt
+          path: tests/fixtures/profile_zero/prebuilt
 
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -1186,7 +1186,7 @@ jobs:
 
       - name: Run Linux cosimulation mutation corpus
         if: matrix.part == 'translation'
-        run: python3 fixtures/cosim/mutate.py --build-dir build/cosim --jobs 4
+        run: python3 tests/fixtures/cosim/mutate.py --build-dir build/cosim --jobs 4
 
       - name: Run Linux GPU snapshot sync selftest
         if: matrix.part == 'translation'
@@ -2160,7 +2160,7 @@ jobs:
               mv -- "$report" "$gcov_dir/${obj//\//#}##$report"
             done
           done
-          { grep -l -m1 -E '^ +-: +0:Source:(tests/|fixtures/|build/|src/player/player_ui_test\.c$|.*selftest\.(c|cpp|inc)$)' "$gcov_dir"/*.gcov || true; } \
+          { grep -l -m1 -E '^ +-: +0:Source:(tests/|build/|src/player/player_ui_test\.c$|.*selftest\.(c|cpp|inc)$)' "$gcov_dir"/*.gcov || true; } \
             | xargs -r rm -f --
           reports=("$gcov_dir"/*.gcov)
           test "${#reports[@]}" -gt 0
@@ -2455,7 +2455,7 @@ jobs:
           key: >-
             windows-ccache-v1-${{ matrix.group }}-${{ steps.compiler-cache-key.outputs.toolchain }}-${{
             hashFiles('Makefile', 'mk/**') }}-${{
-            hashFiles('src/**', 'third_party/**', 'tests/native/**', 'fixtures/**', 'tools/**', 'assets/**') }}
+            hashFiles('src/**', 'third_party/**', 'tests/native/**', 'tests/fixtures/**', 'tools/**', 'assets/**') }}
           restore-keys: |
             windows-ccache-v1-${{ matrix.group }}-${{ steps.compiler-cache-key.outputs.toolchain }}-${{ hashFiles('Makefile', 'mk/**') }}-
             windows-ccache-v1-${{ matrix.group }}-${{ steps.compiler-cache-key.outputs.toolchain }}-
@@ -2598,7 +2598,7 @@ jobs:
       # stage a TEST00007 disc headlessly and report STAGING_RESULT status=PASS, so a
       # Windows-only staging regression fails hosted CI. This runner has no PSPDEV, so
       # the disc wraps the source-owned display guest under the showcase's synthetic
-      # identity (fixtures/showcase/showcase.py stage-iso). Staging reads the disc
+      # identity (tests/fixtures/showcase/showcase.py stage-iso). Staging reads the disc
       # identity, the manifest and the executable's bytes, not the guest's code. Every
       # user-data root is redirected under the runner temp directory, never a profile.
       - name: Smoke the Windows player staging headlessly
@@ -2609,7 +2609,7 @@ jobs:
           smoke="$(cygpath -m "$RUNNER_TEMP")/windows-stage-smoke"
           mkdir -p "$smoke/disc" "$smoke/localappdata" "$smoke/appdata" "$smoke/userprofile"
           py="$(cygpath -u "$PYTHON")"
-          "$py" fixtures/showcase/showcase.py stage-iso --out-dir "$smoke/disc"
+          "$py" tests/fixtures/showcase/showcase.py stage-iso --out-dir "$smoke/disc"
           stage_output=$(LOCALAPPDATA="$smoke/localappdata" APPDATA="$smoke/appdata" \
             USERPROFILE="$smoke/userprofile" SDL_VIDEODRIVER=offscreen timeout 60s \
             build/nakagawa_player.exe "--iso=$smoke/disc/TEST00007.iso" --stage-only)
@@ -2648,7 +2648,7 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: profile-zero-fixture
-          path: fixtures/profile_zero/prebuilt
+          path: tests/fixtures/profile_zero/prebuilt
 
       # The two #309 manifests use this manifest-driven guest -> ProgramImage ->
       # AOT package -> production runtime route (#557). The Windows runner has no

@@ -221,8 +221,8 @@ STEPS: tuple[Step, ...] = (
     ),
     Step(
         "profile-zero prebuilt digests",
-        "see fixtures/profile_zero/README.md",
-        ("fixtures/profile_zero/prebuilt/SHA256SUMS",),
+        "see tests/fixtures/profile_zero/README.md",
+        ("tests/fixtures/profile_zero/prebuilt/SHA256SUMS",),
         skip="needs the pinned PSPDEV toolchain; CI checks it with sha256sum --check",
     ),
     Step(

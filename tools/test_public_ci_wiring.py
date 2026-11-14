@@ -26,7 +26,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-sys.path.insert(0, str(ROOT / "fixtures" / "showcase"))
+sys.path.insert(0, str(ROOT / "tests" / "fixtures" / "showcase"))
 
 import ci_required  # noqa: E402
 import ci_paths  # noqa: E402
@@ -1119,7 +1119,7 @@ _NATIVE_SERIAL_GATES = {
     "Run Linux snapshot execution selftest": "run: make CC=gcc snapshot-selftest",
     "Run Linux verify selftest": "run: make CC=gcc verify-selftest",
     "Run Linux cosimulation mutation corpus":
-        "run: python3 fixtures/cosim/mutate.py --build-dir build/cosim --jobs 4",
+        "run: python3 tests/fixtures/cosim/mutate.py --build-dir build/cosim --jobs 4",
     "Run Linux GPU snapshot sync selftest":
         'xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 make CC=gcc -j4 gpu-snapsync-selftest',
     "Run host present pacing selftest (links SDL3)": "run: make CC=gcc gui-present-selftest",
@@ -1458,7 +1458,7 @@ class WindowsCompilerCacheTests(unittest.TestCase):
         self.assertIn(
             "key: >- windows-ccache-v1-${{ matrix.group }}-${{ steps.compiler-cache-key.outputs.toolchain }}-${{ "
             "hashFiles('Makefile', 'mk/**') }}-${{ "
-            "hashFiles('src/**', 'third_party/**', 'tests/native/**', 'fixtures/**', 'tools/**', 'assets/**') }}",
+            "hashFiles('src/**', 'third_party/**', 'tests/native/**', 'tests/fixtures/**', 'tools/**', 'assets/**') }}",
             key,
         )
         # A fallback restore keeps the group and the toolchain: ccache still matches each
@@ -1573,7 +1573,7 @@ class WindowsPlayerStageSmokeTests(unittest.TestCase):
         self.assertNotIn("mingw32-make", self.text)
 
     def test_step_stages_a_test00007_disc_through_the_stage_only_route(self) -> None:
-        self.assertIn('"$py" fixtures/showcase/showcase.py stage-iso --out-dir', self.text)
+        self.assertIn('"$py" tests/fixtures/showcase/showcase.py stage-iso --out-dir', self.text)
         self.assertIn('py="$(cygpath -u "$PYTHON")"', self.text)
         self.assertIn('"--iso=$smoke/disc/TEST00007.iso" --stage-only)', self.text)
         self.assertIn('grep -Fq "STAGING_RESULT status=PASS"', self.text)
@@ -1595,7 +1595,7 @@ class WindowsPlayerStageSmokeTests(unittest.TestCase):
             self.assertIn(f'"$smoke/{directory}"', self.text)
 
     def test_disc_writer_action_is_the_one_the_step_calls(self) -> None:
-        showcase = (ROOT / "fixtures" / "showcase" / "showcase.py").read_text(encoding="utf-8")
+        showcase = (ROOT / "tests" / "fixtures" / "showcase" / "showcase.py").read_text(encoding="utf-8")
         self.assertIn('choices=("build", "build-prx", "smoke", "stage-iso", "loadexec-smoke")',
                       showcase)
         self.assertIn("def stage_iso(out_dir: Path) -> Path:", showcase)
@@ -2076,7 +2076,7 @@ class PublicExportJobTests(unittest.TestCase):
         self.assertIn("if-no-files-found: error", fixture)
         # #341: the verified guest's imports are gated on HLE review status.
         gate = "\n".join(_ci_step(block, "Gate profile-zero imports on HLE review status") or [])
-        self.assertIn("--imports fixtures/profile_zero/prebuilt/profile_zero_guest.prx", gate)
+        self.assertIn("--imports tests/fixtures/profile_zero/prebuilt/profile_zero_guest.prx", gate)
         self.assertIn("--check-profile-zero-imports", gate)
         # The PSP font-copy app is built with the same locked PSPDEV, through its import gate.
         app = "\n".join(_ci_step(block, "Build Nakagawa Font Copy") or [])
@@ -2089,7 +2089,7 @@ class PublicExportJobTests(unittest.TestCase):
                 consumer = "\n".join(self.blocks[job])
                 self.assertIn("needs.public_export.result == 'success'", consumer)
                 self.assertIn("name: profile-zero-fixture", consumer)
-                self.assertIn("path: fixtures/profile_zero/prebuilt", consumer)
+                self.assertIn("path: tests/fixtures/profile_zero/prebuilt", consumer)
 
     def test_homebrew_fixtures_are_built_from_source_for_the_windows_job(self) -> None:
         """#2143: the homebrew route tests run on Windows on programs this run built."""
@@ -2427,7 +2427,7 @@ class CoverageWiringTests(unittest.TestCase):
         self.assertIn('gcov_dir="$RUNNER_TEMP/c-coverage-gcov"', text)
         # The tests' own sources and generated C stay out of the number, and an empty set
         # of notes or reports fails the step instead of uploading nothing.
-        self.assertIn("0:Source:(tests/|fixtures/|build/|src/player/player_ui_test\\.c$|.*selftest\\.(c|cpp|inc)$)",
+        self.assertIn("0:Source:(tests/|build/|src/player/player_ui_test\\.c$|.*selftest\\.(c|cpp|inc)$)",
                       text)
         self.assertIn('test "${#notes[@]}" -gt 0', text)
         self.assertIn('test "${#reports[@]}" -gt 0', text)

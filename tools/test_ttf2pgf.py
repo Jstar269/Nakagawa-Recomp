@@ -5,7 +5,7 @@
 """Determinism, refusal, and reader round-trip coverage for tools/ttf2pgf.py (issue #313).
 
 Layer 1 (behavioural): convert the pinned public fixture font
-``fixtures/fonts/gudea/Gudea-Regular.ttf`` and open the result through the
+``tests/fixtures/fonts/gudea/Gudea-Regular.ttf`` and open the result through the
 public C reader ``src/rt/pgf_public.c`` with the harness
 ``tests/native/test_pgf_writer_roundtrip.c``.  Every guest record and every
 drawn sample must equal the converter's own raster, the source-owned ``H``
@@ -21,7 +21,7 @@ Layer 3 (refusals): malformed sfnt structures, unsupported outline and font
 forms, out-of-range parameters, and policy-violating output names are refused
 by name, and the CLI writes nothing on any refusal.
 
-The fixture bytes are pinned by ``fixtures/fonts/gudea/PIN.json``; no test
+The fixture bytes are pinned by ``tests/fixtures/fonts/gudea/PIN.json``; no test
 downloads anything, and no firmware, retail, or third-party PGF bytes are
 read anywhere.
 """
@@ -63,19 +63,19 @@ READER_C = RT / "pgf_public.c"
 TOOL = ROOT / "tools" / "ttf2pgf.py"
 CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
 
-FONT_DIR = ROOT / "fixtures" / "fonts" / "gudea"
+FONT_DIR = ROOT / "tests" / "fixtures" / "fonts" / "gudea"
 FONT = FONT_DIR / "Gudea-Regular.ttf"
 PIN = FONT_DIR / "PIN.json"
 LICENSE_TEXT = FONT_DIR / "OFL.txt"
-JAPANESE_FONT_DIR = ROOT / "fixtures" / "fonts" / "mplus1p"
+JAPANESE_FONT_DIR = ROOT / "tests" / "fixtures" / "fonts" / "mplus1p"
 JAPANESE_FONT = JAPANESE_FONT_DIR / "MPLUS1p-Regular.ttf"
 JAPANESE_PIN = JAPANESE_FONT_DIR / "PIN.json"
-KOREAN_FONT_DIR = ROOT / "fixtures" / "fonts" / "gowundodum"
+KOREAN_FONT_DIR = ROOT / "tests" / "fixtures" / "fonts" / "gowundodum"
 KOREAN_FONT = KOREAN_FONT_DIR / "GowunDodum-Regular.ttf"
 KOREAN_PIN = KOREAN_FONT_DIR / "PIN.json"
-LIBERATION_DIR = ROOT / "fixtures" / "fonts" / "liberation"
+LIBERATION_DIR = ROOT / "tests" / "fixtures" / "fonts" / "liberation"
 NOTO_JP_FONT = ROOT / "assets" / "fonts" / "ui" / "noto-sans-jp" / "NotoSansJP-Regular.ttf"
-NOTO_JP_PIN = ROOT / "fixtures" / "fonts" / "notosansjp" / "PIN.json"
+NOTO_JP_PIN = ROOT / "tests" / "fixtures" / "fonts" / "notosansjp" / "PIN.json"
 #: The console's Latin index order within a size group (#2005): family, then style.
 LATIN_FACES = (
     ("LiberationSans-Regular", "Regular"), ("LiberationSerif-Regular", "Regular"),
@@ -764,10 +764,10 @@ class IntegerRasterEquivalenceTests(unittest.TestCase):
     def test_latin_project_font_output_is_pinned(self) -> None:
         # The digest the converter has produced for the Latin project font since #1309's build;
         # the integer arithmetic must reproduce it byte for byte.
-        fixture = ROOT / "fixtures" / "fonts" / "mplus1p"
+        fixture = ROOT / "tests" / "fixtures" / "fonts" / "mplus1p"
         conversion = convert(
             (fixture / "MPLUS1p-Regular.ttf").read_bytes(),
-            input_path="fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf",
+            input_path="tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf",
             output_path="nkltn.pgf",
             pin=load_pin(fixture / "PIN.json", (fixture / "MPLUS1p-Regular.ttf").read_bytes()),
             code_points=ttf2pgf.latin_1_text_code_points(),

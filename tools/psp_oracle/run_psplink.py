@@ -162,7 +162,7 @@ else:
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RESULTS = ROOT / "oracle" / "hardware-results"
-DEFAULT_GE_CORPUS = ROOT / "fixtures" / "psp_oracle" / "ge_corpus.json"
+DEFAULT_GE_CORPUS = ROOT / "tests" / "fixtures" / "psp_oracle" / "ge_corpus.json"
 DEFAULT_GE_CORPUS_SCHEMA = ROOT / "assets" / "ge_corpus.schema.json"
 TERMINAL_OUTCOMES = frozenset({"HANG", "RESET"})
 RETIRED_CAMPAIGN_CASES = frozenset({"hle-null-out-pointers"})
@@ -4244,7 +4244,7 @@ def write_ge_corpus_probe_runs(
         runs[test_id] = {
             "test_id": test_id,
             "probe_case": probe_case,
-            "fixture": "fixtures/psp_oracle/probe_ge_sample.c",
+            "fixture": "tests/fixtures/psp_oracle/probe_ge_sample.c",
             "source_tier": "PSP_HARDWARE",
             "evidence_envelope": {
                 "EVIDENCE_CLASS": "PSP_HARDWARE",
@@ -4348,7 +4348,7 @@ def main(argv: list[str] | None = None) -> int:
         help="write the measured cells of these ge-raster, ge-weight or ge-rtt runner reports into "
              "the GE corpus, their raw results into --results-directory/ge-corpus",
     )
-    parser.add_argument("--ge-corpus", type=Path, help="GE corpus JSON under fixtures/psp_oracle")
+    parser.add_argument("--ge-corpus", type=Path, help="GE corpus JSON under tests/fixtures/psp_oracle")
     parser.add_argument("--ge-corpus-schema", type=Path, help="GE corpus schema JSON under assets")
     parser.add_argument("--binary", type=Path, help="source-owned PRX used to replace fixture metadata")
     parser.add_argument("--source-commit", help="exact source commit recorded in the result metadata")
@@ -4427,12 +4427,12 @@ def main(argv: list[str] | None = None) -> int:
                          "execution or capture options")
         corpus_path = (args.ge_corpus or DEFAULT_GE_CORPUS).resolve()
         schema_path = (args.ge_corpus_schema or DEFAULT_GE_CORPUS_SCHEMA).resolve()
-        allowed_corpus_root = (ROOT / "fixtures" / "psp_oracle").resolve()
+        allowed_corpus_root = (ROOT / "tests" / "fixtures" / "psp_oracle").resolve()
         allowed_schema_root = (ROOT / "assets").resolve()
         try:
             corpus_path.relative_to(allowed_corpus_root)
         except ValueError:
-            parser.error("--ge-corpus must stay under fixtures/psp_oracle")
+            parser.error("--ge-corpus must stay under tests/fixtures/psp_oracle")
         try:
             schema_path.relative_to(allowed_schema_root)
         except ValueError:
@@ -4527,11 +4527,11 @@ def main(argv: list[str] | None = None) -> int:
         if not math.isfinite(args.shell_verification_timeout) or args.shell_verification_timeout <= 0:
             parser.error("--shell-verification-timeout must be finite and positive")
         host0_root = args.host0_root.resolve()
-        fixture_root = (ROOT / "fixtures" / "psp_oracle").resolve()
+        fixture_root = (ROOT / "tests" / "fixtures" / "psp_oracle").resolve()
         try:
             host0_root.relative_to(fixture_root)
         except ValueError:
-            parser.error("--host0-root must be a scratch directory under fixtures/psp_oracle")
+            parser.error("--host0-root must be a scratch directory under tests/fixtures/psp_oracle")
         if not host0_root.is_dir():
             parser.error("--host0-root must be an existing scratch directory")
         cases: list[CampaignCase] = []

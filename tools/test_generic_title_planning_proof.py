@@ -118,7 +118,7 @@ class GenericTitleProofFixtures(unittest.TestCase):
         for hst_mod in HST_MODULES:
             self.assertNotIn(hst_mod, modules)
         # No HST disc, no .exe semantics, portable paths only.
-        self.assertEqual(normalized["filesystem"]["data_root"], "fixtures/profile_zero")
+        self.assertEqual(normalized["filesystem"]["data_root"], "tests/fixtures/profile_zero")
         self.assertFalse(any("\\" in p or ":" in p for p in [normalized["filesystem"]["data_root"]]))
         # Runtime bindings are disjoint from the other two synthetics.
         self.assertEqual(len(normalized["runtime_bindings"]["dispatch_aliases"]), 2)
@@ -437,7 +437,7 @@ class LegacyToolingRetirementTests(unittest.TestCase):
         )
         for relative in (
             "Makefile",
-            "nk_manager.ps1",
+            "tools/nk_manager.ps1",
             "tools/nk_safety.ps1",
             "tools/title_manager_plan.ps1",
         ):
@@ -453,7 +453,7 @@ class LegacyToolingRetirementTests(unittest.TestCase):
             *sorted((ROOT / "mk").glob("*.mk")),
             ROOT / "tools" / "copy_build_assets.ps1",
             ROOT / "nk.ps1",
-            ROOT / "nk_manager.ps1",
+            ROOT / "tools" / "nk_manager.ps1",
             ROOT / "assets" / "titles" / "README.md",
         ]
         for directory, suffixes in (

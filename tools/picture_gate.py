@@ -503,7 +503,7 @@ def run_route(route_path: Path, runs: int = 1, work_root: Path | None = None,
 # ---- display-smoke: the public proof --------------------------------------------------------
 
 def _load_display_smoke():
-    path = ROOT / "fixtures" / "display_smoke" / "generate.py"
+    path = ROOT / "tests" / "fixtures" / "display_smoke" / "generate.py"
     spec = importlib.util.spec_from_file_location("display_smoke_generate", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

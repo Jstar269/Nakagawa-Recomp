@@ -16,7 +16,7 @@
 # input at all, and no default build inherits any title's addresses.
 #
 # HST binds its real values through its title manifest
-# (assets/titles/hst-ucus98701.json, supplied by nk_manager.ps1 -TitleManifest or by
+# (assets/titles/hst-ucus98701.json, supplied by tools/nk_manager.ps1 -TitleManifest or by
 # TITLE_MANIFEST= on a direct Make command line). They are deliberately not encoded here.
 TITLE_MANIFEST ?=
 TITLE_CONFIG_TOOL := tools/title_runtime_config.py
@@ -82,7 +82,7 @@ $(TITLE_CONFIG_STAMP): $(BUILD_PROFILE_TOOL)
 
 $(TITLE_CONFIG_HEADER): $(TITLE_CONFIG_TOOL) tools/title_manifest.py $(TITLE_CONFIG_STAMP)
 ifeq ($(TITLE_CONFIG_HST_UNBOUND),1)
-	$(error GAME_NAME=hst needs a validated title manifest: pass TITLE_MANIFEST=<path> or use nk_manager.ps1 -TitleManifest. Direct Make does not infer HST defaults; generic builds need no manifest when they use a different GAME_NAME.)
+	$(error GAME_NAME=hst needs a validated title manifest: pass TITLE_MANIFEST=<path> or use tools/nk_manager.ps1 -TitleManifest. Direct Make does not infer HST defaults; generic builds need no manifest when they use a different GAME_NAME.)
 endif
 	"$(PYTHON)" $(TITLE_CONFIG_TOOL) $(TITLE_CONFIG_ARG) --output $@
 

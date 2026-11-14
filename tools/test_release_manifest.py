@@ -145,12 +145,12 @@ class TestReleaseManifest(unittest.TestCase):
             if item.get("id") == "fixture-fonts-gowundodum-regular"
         )
         pin = json.loads(
-            (ROOT / "fixtures" / "fonts" / "gowundodum" / "PIN.json").read_text(encoding="utf-8")
+            (ROOT / "tests" / "fixtures" / "fonts" / "gowundodum" / "PIN.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(component["source_path"], "fixtures/fonts/gowundodum/GowunDodum-Regular.ttf")
+        self.assertEqual(component["source_path"], "tests/fixtures/fonts/gowundodum/GowunDodum-Regular.ttf")
         self.assertEqual(component["upstream_origin"], "https://github.com/google/fonts")
         self.assertEqual(component["license"], "OFL-1.1")
-        self.assertEqual(component["notice_path"], "fixtures/fonts/gowundodum/OFL.txt")
+        self.assertEqual(component["notice_path"], "tests/fixtures/fonts/gowundodum/OFL.txt")
         self.assertEqual(component["disposition"], "approved_binary")
         self.assertEqual(component["hashes"]["sha256"], pin["sha256"])
         self.assertEqual(component["hashes"]["sha256"], sha256_of(ROOT / component["source_path"]))

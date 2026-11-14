@@ -623,7 +623,7 @@ def validate_meta(regs: list[dict]) -> None:
                 candidate_path, _, anchor = (part.strip() for part in ev.partition(":"))
                 if not (
                     candidate_path == "Makefile"
-                    or candidate_path.startswith(("src/", "tools/", "fixtures/", "tests/"))
+                    or candidate_path.startswith(("src/", "tools/", "tests/fixtures/", "tests/"))
                 ):
                     continue
                 has_executable_evidence = True
@@ -640,7 +640,7 @@ def validate_meta(regs: list[dict]) -> None:
             raise ManifestError(
                 f"handler {handler!r} is marked 'complete' but has no named executable evidence; "
                 "a complete handler must cite at least one executable evidence file in the repository "
-                "(under src/, tools/, fixtures/, tests/, or Makefile)"
+                "(under src/, tools/, tests/fixtures/, tests/, or Makefile)"
             )
         # Independent of evidence: a partial or compatibility handler must always
         # name its limitation, whether or not it also cites evidence.

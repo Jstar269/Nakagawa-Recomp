@@ -2,7 +2,7 @@
 # Copyright (C) 2026 the Nakagawa Recomp authors
 """Real-PSP instruction-trace differential (#312).
 
-The fixtures in ``fixtures/psp_oracle/insn_trace_fixtures.h`` run one instruction at a
+The fixtures in ``tests/fixtures/psp_oracle/insn_trace_fixtures.h`` run one instruction at a
 time on a PSP (``CASE=insn-trace``, ``probe_insn_trace.c``) and through Nakagawa's own
 code generator. This module turns both into v2 traces (``tools/TRACE_FORMAT.md``) and
 compares them with ``tracediff.strict_hardware_diff``, which names the first record that
@@ -39,7 +39,7 @@ import tempfile
 
 TOOLS = Path(__file__).resolve().parents[1]
 ROOT = TOOLS.parent
-FIXTURES_H = ROOT / "fixtures" / "psp_oracle" / "insn_trace_fixtures.h"
+FIXTURES_H = ROOT / "tests" / "fixtures" / "psp_oracle" / "insn_trace_fixtures.h"
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 

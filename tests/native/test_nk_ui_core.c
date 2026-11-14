@@ -1768,7 +1768,7 @@ static int test_control_owns_horizontal(void) {
 }
 
 static int test_golden(const char *actual, size_t actual_size) {
-    FILE *file = fopen("fixtures/nk_ui/core_synthetic.golden", "rb");
+    FILE *file = fopen("tests/fixtures/nk_ui/core_synthetic.golden", "rb");
     char expected[32768];
     size_t read_size;
     CHECK(file != NULL, "open checked-in core golden");

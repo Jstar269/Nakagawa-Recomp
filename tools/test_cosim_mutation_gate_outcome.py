@@ -4,7 +4,7 @@
 """Gate-outcome binding and bounded-wait regressions for the cosim mutation driver.
 
 A mutation verdict is only evidence when it agrees with what actually happened.
-``fixtures/cosim/mutate.py`` used to classify by substring alone, so a log
+``tests/fixtures/cosim/mutate.py`` used to classify by substring alone, so a log
 containing ``cosim: OK`` was scored as a pass even when the process exited
 nonzero, a bare ``cosim: FAIL`` counted as a kill without a located divergence,
 and an unbounded wait let a hung build own the rest of a CI job.
@@ -31,7 +31,7 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-MUTATE = ROOT / "fixtures" / "cosim" / "mutate.py"
+MUTATE = ROOT / "tests" / "fixtures" / "cosim" / "mutate.py"
 
 _spec = importlib.util.spec_from_file_location("cosim_mutate", MUTATE)
 mutate = importlib.util.module_from_spec(_spec)

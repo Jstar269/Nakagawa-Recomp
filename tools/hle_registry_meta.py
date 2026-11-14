@@ -435,8 +435,8 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "Makefile:display-smoke-run",
-            "fixtures/display_smoke/generate.py:verify",
-            "fixtures/display_smoke/generate.py:run",
+            "tests/fixtures/display_smoke/generate.py:verify",
+            "tests/fixtures/display_smoke/generate.py:run",
         ],
         "limitation": "display-smoke covers only a sync=1 8888 flip with stride 512; other format, address, stride, and error-precedence cases remain outside this route (#341)",
     },
@@ -444,7 +444,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "Makefile:display-smoke-run",
-            "fixtures/display_smoke/generate.py:run",
+            "tests/fixtures/display_smoke/generate.py:run",
             "tools/test_sched_invariants.py:test_the_two_display_nids_have_separate_handlers",
         ],
         "limitation": "display-smoke covers ordinary guest-thread waits; interrupt-context behavior and callback wait variants remain outside this route (#341)",
@@ -456,7 +456,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "Makefile:display-smoke-run",
-            "fixtures/display_smoke/generate.py:flight_smoke",
+            "tests/fixtures/display_smoke/generate.py:flight_smoke",
             "tests/native/hle_thread_selftest.c:test_flight_recorder_ge_present_events",
             "tests/native/hle_thread_selftest.c:test_ge_queued_lists_run_in_order",
         ],
@@ -1166,7 +1166,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "tools/psp_oracle/manifest.json:PSP-AUDIO-001",
-            "fixtures/psp_oracle/probe.c:run_audio_query",
+            "tests/fixtures/psp_oracle/probe.c:run_audio_query",
             "PSP-AUDIO-001 cells: audio-ch-release, audio-ch-query-released",
         ],
         "limitation": "the cells release channel 0 after the two valid blocking-output calls and query it after release; unreserved, out-of-range, and other channel-state release results are unmeasured (#341)",
@@ -1175,7 +1175,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "tools/psp_oracle/manifest.json:PSP-AUDIO-001",
-            "fixtures/psp_oracle/probe.c:run_audio_query",
+            "tests/fixtures/psp_oracle/probe.c:run_audio_query",
             "PSP-AUDIO-001 cell: audio-ch-reserve",
         ],
         "limitation": "audio-ch-reserve measures a successful reservation of channel 0 for 1024 stereo samples; automatic channel selection, invalid size or format, duplicate reservation, and exhaustion/error precedence are unmeasured (#341)",
@@ -1184,10 +1184,10 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "tools/psp_oracle/manifest.json:PSP-AUDIO-001",
-            "fixtures/psp_oracle/probe.c:run_audio_query",
+            "tests/fixtures/psp_oracle/probe.c:run_audio_query",
             "PSP-AUDIO-001 cells: audio-ch-query-before, audio-ch-query-after, audio-ch-query-released",
             "tools/psp_oracle/manifest.json:PSP-HLE-AUDIO-REST-001",
-            "fixtures/psp_oracle/probe_hle_measure.c:hle_arest_size",
+            "tests/fixtures/psp_oracle/probe_hle_measure.c:hle_arest_size",
         ],
         "limitation": "serves sceAudioGetChannelRestLength and sceAudioGetChannelRestLen; the PSP-AUDIO-001 cells query both on channel 0 before and after blocking output and just after release, and PSP-HLE-AUDIO-REST-001 finds them equal (F or F - 64) after each blocking output on stereo channels of 1024, 2048 and 4096 frames, which is evidence that the two calls give one answer, not that this handler gives the console's: the runtime's blocking output returns with up to two blocks queued (#67), so both calls can read up to 2F there where the console held one block (#279, open); invalid-channel error behavior and other queue states are unmeasured for both calls (#341, #2361)",
     },
@@ -1195,7 +1195,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "tools/psp_oracle/manifest.json:PSP-AUDIO-001",
-            "fixtures/psp_oracle/probe.c:run_audio_query",
+            "tests/fixtures/psp_oracle/probe.c:run_audio_query",
             "PSP-AUDIO-001 cells: audio-out2-query-before, audio-out2-query-after",
         ],
         "limitation": "the cells query rest samples on one valid 1024-sample Output2 reservation before and after one blocking output; the not-reserved code and other queue states are unmeasured (#341)",
@@ -1204,7 +1204,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "tools/psp_oracle/manifest.json:PSP-AUDIO-001",
-            "fixtures/psp_oracle/probe.c:run_audio_query",
+            "tests/fixtures/psp_oracle/probe.c:run_audio_query",
             "PSP-AUDIO-001 cell: audio-out2-output-blocking",
         ],
         "limitation": "audio-out2-output-blocking measures one valid silent 1024-sample block at volume 0x8000 and makes no acoustic claim; volumes above 0xFFFFF are refused with 0x8026000b following PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp, unmeasured; not-reserved, buffer-error and audio_output error-propagation behavior are not covered (the handler discards audio_output's return) (#341)",
@@ -1213,7 +1213,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "tools/psp_oracle/manifest.json:PSP-AUDIO-001",
-            "fixtures/psp_oracle/probe.c:run_audio_query",
+            "tests/fixtures/psp_oracle/probe.c:run_audio_query",
             "PSP-AUDIO-001 cell: audio-out2-release",
             "docs/HARDWARE_ORACLE.md",
         ],
@@ -1223,7 +1223,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "tools/psp_oracle/manifest.json:PSP-AUDIO-001",
-            "fixtures/psp_oracle/probe.c:run_audio_query",
+            "tests/fixtures/psp_oracle/probe.c:run_audio_query",
             "PSP-AUDIO-001 cell: audio-out2-reserve",
         ],
         "limitation": "audio-out2-reserve measures a valid 1024-sample reservation; duplicate Output2 reservation behavior and invalid size bounds are unmeasured (#341)",
@@ -1232,7 +1232,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "tools/psp_oracle/manifest.json:PSP-AUDIO-001",
-            "fixtures/psp_oracle/probe.c:run_audio_query",
+            "tests/fixtures/psp_oracle/probe.c:run_audio_query",
             "PSP-AUDIO-001 cells: audio-ch-output-blocking-0, audio-ch-output-blocking-1",
         ],
         "limitation": "the cells exercise two maximum-volume outputs with a valid silent stereo buffer and record timing and rest-length values, not audible output; mono, other volumes, invalid buffers/channels, and error precedence are unmeasured (#341)",
@@ -1241,7 +1241,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "complete",
         "evidence": [
             "tools/psp_oracle/manifest.json:PSP-HLE-GE-EDRAM-001",
-            "fixtures/psp_oracle/probe_hle_measure.c:hle_run",
+            "tests/fixtures/psp_oracle/probe_hle_measure.c:hle_run",
             "src/rt/hle_ge.c:h_GeEdramGetAddr",
             "PSP-HLE-GE-EDRAM-001 cell: edram-addr = 0x04000000",
         ],
@@ -1250,7 +1250,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "complete",
         "evidence": [
             "tools/psp_oracle/manifest.json:PSP-HLE-GE-EDRAM-001",
-            "fixtures/psp_oracle/probe_hle_measure.c:hle_run",
+            "tests/fixtures/psp_oracle/probe_hle_measure.c:hle_run",
             "src/rt/hle_ge.c:h_GeEdramGetSize",
             "PSP-HLE-GE-EDRAM-001 cell: edram-size = 0x00200000",
         ],
@@ -3144,7 +3144,7 @@ WAIVERS: tuple[FindingWaiver, ...] = ()
 
 # Issue #341 acceptance: no handler the public profile-zero guest imports stays
 # silently `unreviewed`. These are the NIDs the guest built from
-# fixtures/profile_zero/main.c imports today that still route to a dedicated
+# tests/fixtures/profile_zero/main.c imports today that still route to a dedicated
 # `unreviewed` handler. The list only shrinks:
 #   - tools/hle_manifest.py rejects an entry whose NID is no longer registered,
 #     whose name disagrees with the registration, that does not name #341, or

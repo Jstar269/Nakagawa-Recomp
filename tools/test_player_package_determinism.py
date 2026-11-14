@@ -108,7 +108,7 @@ GAME = "display_smoke"
 EXECUTABLE = f"{GAME}{'.exe' if os.name == 'nt' else ''}"
 # The recipe that assembles the guest and, beside it, the only analyzer output in
 # this tree that describes a source-owned ELF.
-FIXTURE_GENERATOR = ROOT / "fixtures" / "display_smoke" / "generate.py"
+FIXTURE_GENERATOR = ROOT / "tests" / "fixtures" / "display_smoke" / "generate.py"
 # The committed, publication-admitted source-owned title manifest for that guest.
 SOURCE_OWNED_TITLE = ROOT / "assets" / "titles" / "display-smoke.json"
 

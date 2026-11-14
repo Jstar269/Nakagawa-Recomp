@@ -90,13 +90,13 @@ def classify_file(path: str) -> tuple[str, str]:
         return "BACKEND", "BACKEND_EXPECTED"
     if parts[:2] == ("src", "ref"):
         return "REF", "TEST_ONLY" if name == "selftest.cpp" else "BACKEND_EXPECTED"
-    if parts[0] == "tools" and name == "nk_safety.ps1":
+    if parts[0] == "tools" and name in ("nk_safety.ps1", "nk_manager.ps1"):
         return "MANAGER", "CANONICAL_MANAGER"
     if parts[0] == "tools" and name.endswith(".ps1"):
         return "MANAGER", "BUILD_TOOL_ONLY"
     if parts[0] == "tools":
         return "TOOLS", "BUILD_TOOL_ONLY"
-    if p.name in ("nk_manager.ps1", "nk.ps1"):
+    if p.name == "nk.ps1":
         return "MANAGER", "CANONICAL_MANAGER"
     if p.name == "Makefile":
         return "TOOLS", "BUILD_TOOL_ONLY"
@@ -210,7 +210,6 @@ def scan() -> list[dict]:
     ]
     extra_files = [
         ROOT / "Makefile",
-        ROOT / "nk_manager.ps1",
         ROOT / "nk.ps1",
     ]
     for root in roots:

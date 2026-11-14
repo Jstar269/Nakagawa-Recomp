@@ -69,19 +69,19 @@ CROSS_HOST_DIGESTS: dict[str, dict[str, str]] = {
 }
 # Set by the hosted CI steps: the route must run there, so a missing dependency fails.
 PROFILE_ZERO_REQUIRED = "NK_PROFILE_ZERO_REQUIRED"
-# PSPDEV build output of fixtures/profile_zero/{main.c,Makefile}. Only the digests
+# PSPDEV build output of tests/fixtures/profile_zero/{main.c,Makefile}. Only the digests
 # (SHA256SUMS) are committed: the repository stores no generated executable (#1100,
 # OpenSSF OSPS-QA-05.01). Hosted CI builds the bytes from source in the
 # profile-zero steps of the public_export job and hands them to the route jobs; a host with PSPDEV
 # rebuilds them itself. Either way they must match the pinned digests, and they are
 # reproducible only with the distribution pinned by assets/upstream/pspdev.lock.json (#708).
-PREBUILT_DIR = ROOT / "fixtures" / "profile_zero" / "prebuilt"
+PREBUILT_DIR = ROOT / "tests" / "fixtures" / "profile_zero" / "prebuilt"
 PREBUILT_SUMS = PREBUILT_DIR / "SHA256SUMS"
 PREBUILT_EBOOT = PREBUILT_DIR / "EBOOT.PBP"
 PREBUILT_GUEST = PREBUILT_DIR / "profile_zero_guest.prx"
 PSPDEV_LOCK_PATH = ROOT / "assets" / "upstream" / "pspdev.lock.json"
 PSPDEV_EVIDENCE_PATH = ROOT / "assets" / "upstream" / "pspdev.evidence.json"
-PSPDEV_README_PATH = ROOT / "fixtures" / "profile_zero" / "README.md"
+PSPDEV_README_PATH = ROOT / "tests" / "fixtures" / "profile_zero" / "README.md"
 PSPDEV_REQUIRED_TOOLS = ("psp-config", "psp-gcc", "psp-prxgen", "pack-pbp")
 
 
@@ -235,7 +235,7 @@ def _pinned_fixture_digests() -> dict[str, str]:
     if not PREBUILT_SUMS.is_file():
         raise AssertionError(
             f"committed profile-zero fixture digest list is missing: {PREBUILT_SUMS} "
-            "(rebuild it with PSPDEV; see fixtures/profile_zero/README.md)"
+            "(rebuild it with PSPDEV; see tests/fixtures/profile_zero/README.md)"
         )
     digests: dict[str, str] = {}
     for line in PREBUILT_SUMS.read_text(encoding="ascii").splitlines():
@@ -266,7 +266,7 @@ def _verify_committed_fixture() -> dict[str, str]:
         raise unittest.SkipTest(
             "NOT_RUN: the profile-zero fixture bytes are absent. Hosted CI builds them in "
             "the profile-zero steps of the public_export job; locally, install the pinned PSPDEV (see "
-            "fixtures/profile_zero/README.md)."
+            "tests/fixtures/profile_zero/README.md)."
         )
     present = {
         path.name
@@ -320,8 +320,8 @@ def _verify_rebuild_matches_committed(manifest: dict, output_dir: Path, guest: P
             raise AssertionError(
                 f"PSPDEV rebuild for {manifest['id']} does not reproduce the committed "
                 f"fixture {path.name}: expected sha256 {expected}, got {actual}. "
-                "Regenerate and explain fixtures/profile_zero/prebuilt (see "
-                "fixtures/profile_zero/README.md); drift must never be tolerated silently."
+                "Regenerate and explain tests/fixtures/profile_zero/prebuilt (see "
+                "tests/fixtures/profile_zero/README.md); drift must never be tolerated silently."
             )
 
 
@@ -424,7 +424,7 @@ def _verify_backend_matches_authority(backend: tuple[str, str | None]) -> None:
             f"{PSPDEV_LOCK_PATH} ({authority['release']}, {authority['asset']}); "
             "the committed profile-zero fixture is reproducible only from that "
             "exact release asset, so the rebuild-and-compare refuses to run "
-            "(see fixtures/profile_zero/README.md):\n" + "\n".join(mismatches)
+            "(see tests/fixtures/profile_zero/README.md):\n" + "\n".join(mismatches)
         )
 
 
@@ -849,10 +849,10 @@ class ProfileZeroManifestTests(unittest.TestCase):
         if not (ROOT / ".git").exists():
             self.skipTest("NOT_RUN: not a git checkout")
         tracked = subprocess.run(
-            ["git", "ls-files", "--", "fixtures/profile_zero/prebuilt"],
+            ["git", "ls-files", "--", "tests/fixtures/profile_zero/prebuilt"],
             cwd=ROOT, capture_output=True, text=True, check=True,
         ).stdout.split()
-        self.assertEqual(tracked, ["fixtures/profile_zero/prebuilt/SHA256SUMS"])
+        self.assertEqual(tracked, ["tests/fixtures/profile_zero/prebuilt/SHA256SUMS"])
 
     def test_committed_fixture_matches_its_digests_and_manifest_entries(self) -> None:
         digests = _verify_committed_fixture()
@@ -903,7 +903,7 @@ class ProfileZeroManifestTests(unittest.TestCase):
         if backend is None:
             print(
                 "profile-zero-e2e: PSPDEV/PSPSDK is absent; the route runs on the "
-                "fixture bytes staged in fixtures/profile_zero/prebuilt (the CI artifact "
+                "fixture bytes staged in tests/fixtures/profile_zero/prebuilt (the CI artifact "
                 "built from source), checked against the pinned digests",
                 file=sys.stderr,
                 flush=True,

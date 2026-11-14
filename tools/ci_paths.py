@@ -596,7 +596,7 @@ def _is_python_tool(path: str) -> bool:
 #: Those gates run make targets and fixed ``unittest`` module names, never a discovery
 #: sweep (that is the Python shards' job), so a test module none of these files names is
 #: executed by the Python shards alone.
-#: ``tests/`` and ``fixtures/`` are included because a native-side Python driver can import a
+#: ``tests/`` (the fixture tree included) is listed because a native-side Python driver can import a
 #: tools test module (``tests/native/test_player_ui.py`` imports ``test_player_package_route``).
 _NATIVE_GATE_SOURCE_GLOBS = (
     "Makefile",
@@ -606,7 +606,6 @@ _NATIVE_GATE_SOURCE_GLOBS = (
     ".github/workflows/*.yml",
     ".github/actions/**/*.yml",
     "tests/**/*.py",
-    "fixtures/**/*.py",
     "tools/*.sh",
     "tools/*.ps1",
 )

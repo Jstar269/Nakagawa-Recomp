@@ -6,7 +6,7 @@
 
 Two distinct kinds of assertion live here and must not be conflated.
 
-**Hardware-measured (tier H).**  ``fixtures/vfpu_addressing/hardware_vfpu_addr_001.json``
+**Hardware-measured (tier H).**  ``tests/fixtures/vfpu_addressing/hardware_vfpu_addr_001.json``
 records what a PSP-3001 actually did: all 128 scalar encodings, and 14 selected
 wide encodings.  Tests against those cases are evidence about silicon.  The raw
 captures stay private; ``tools/psp_oracle/verify_vfpu_addr.py`` re-derives each
@@ -37,7 +37,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import codegen
 import scratch_dir
-FIXTURE = ROOT / "fixtures" / "vfpu_addressing" / "hardware_vfpu_addr_001.json"
+FIXTURE = ROOT / "tests" / "fixtures" / "vfpu_addressing" / "hardware_vfpu_addr_001.json"
 SELFTEST = ROOT / "tests" / "native" / "vfpu_addr_selftest.c"
 
 WIDTHS = (1, 2, 3, 4)

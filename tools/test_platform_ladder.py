@@ -30,7 +30,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
-GENERATOR_PATH = ROOT / "fixtures" / "platform_ladder" / "generate.py"
+GENERATOR_PATH = ROOT / "tests" / "fixtures" / "platform_ladder" / "generate.py"
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 

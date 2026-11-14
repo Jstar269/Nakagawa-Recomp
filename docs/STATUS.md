@@ -82,7 +82,7 @@ overstated. State it exactly this way:
 - Current evidence covers **both CALL and TAIL** tier crossings, for the **implemented
   interpreter instruction subset only**. That subset is enumerated in
   `src/rt/guest_interp.h` and is checked in both directions against the cells that execute
-  it ([`fixtures/cosim/README.md`](../fixtures/cosim/README.md)).
+  it ([`tests/fixtures/cosim/README.md`](../tests/fixtures/cosim/README.md)).
 - Unsupported forms still **fail closed** rather than being decoded as some unrelated
   arithmetic form. Nested interpreted calls are outside the current floor: the interpreter
   carries one call boundary, not a stack of them.

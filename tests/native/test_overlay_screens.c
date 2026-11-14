@@ -4,7 +4,7 @@
 /* The in-game overlay's pages (#1159, C9c) on the SDL-free nk_ui core: page flow,
    focus, the actions each control returns, the layout at every supported window
    size, the developer pages and their gate (#314), and draw-list goldens
-   (fixtures/nk_ui/overlay.golden). Synthetic models only: no game, no SDL, no fonts.
+   (tests/fixtures/nk_ui/overlay.golden). Synthetic models only: no game, no SDL, no fonts.
    Run with --write-goldens after an intended change and say in the pull request why
    the golden moved. */
 
@@ -27,7 +27,7 @@
 #define CASE_DUMP_CAP 131072u
 /* frame_has_text reads a whole frame: a Settings page with every row passes CASE_DUMP_CAP. */
 #define TEXT_DUMP_CAP 262144u
-#define GOLDEN_PATH "fixtures/nk_ui/overlay.golden"
+#define GOLDEN_PATH "tests/fixtures/nk_ui/overlay.golden"
 
 static bool list_shows_whole(const NkUiDrawList *list, NkUiId id, int top, int bottom);
 

@@ -1,0 +1,955 @@
+# Source-owned PSP oracle probes
+
+This directory contains source-owned PSPDEV/PSPLink fixtures. They are
+synthetic and independent of the HST executable, retail assets, firmware
+files, keys, and private traces.
+
+The fixture prints the versioned `NAKAGAWA_PSP_META` and
+`NAKAGAWA_PSP_TEST` records defined in
+[`tools/psp_oracle/protocol.py`](../../../tools/psp_oracle/protocol.py). Every
+campaign case also writes each line to its own host0 log through one durable
+writer (`probe_emit_durable()`: append, then close). The log is named as
+`_campaign_host0_log_path` in `tools/psp_oracle/run_psplink.py` expects: the
+case id with `-` turned into `_` and a `dma_` prefix turned into `dmac_`, plus
+`_log.txt` (for example `host0:/smoke_log.txt`). The campaign runner reads that
+log; PSPLink stdout is a secondary copy. Before a
+call that could hang or fault the console, a probe also writes a
+`NAKAGAWA_PSP_STEP schema=1 case_id=<id> step=<name>` progress marker
+(`probe_step()`), appended to the host0 log and closed before the call runs,
+so a launch that never returns still names its last step. The parser collects
+step markers (`ParsedOutput.steps`, `last_step`) and never counts them as
+records. A probe never waits without a bound: GE waits poll the non-blocking
+sync peek against a deadline, kernel waits carry timeouts, and exhaustion loops
+stop at a documented cap; a bound that expires is recorded as a `TIMEOUT`
+outcome with the last observed state. The
+default `CASE=smoke` build emits `PSP-SMOKE-001`; kernel sessions build one
+case per launch with `CASE=callback-notify-check`, `CASE=wait-cancel`,
+`CASE=thread-lifecycle`, `CASE=thread-delete-lifecycle`,
+`CASE=thread-delete-followup`, `CASE=thread-delete-explicit`, or
+`CASE=thread-delete-boundary`. DMA sessions use `CASE=dma-concurrency`, the
+Tier S/B `CASE=dma-invalid-tail-*` cases described below, or the size-matrix
+cases described below. Display/interrupt-mask
+sessions use `CASE=display-mask-vcount`, `CASE=display-mask-duty`, or
+`CASE=display-ge-mask`. Transport sessions use `CASE=transport-write`, which
+emits `PSP-TRANSPORT-001`/`host0-write-readback`. Lifecycle sessions use
+`CASE=thread-exit-delete` (`PSP-THREAD-EXIT-001`, 12 cells). Allocator
+sessions use `CASE=dmac-survey` (`PSP-DMAC-001`/`allocator-survey`). The
+thread-free `CASE=dma-size-matrix` control allocates both spans from partition
+2 with page-aligned data and guard redzones, separating a true API-wide size
+limit from invalid-tail boundary behavior. `CASE=dma-size-matrix-cell`
+requires `DMAC_SIZE_REQUEST=<supported-size>` and runs one requested size per
+session. The thread-free
+`CASE=model-profile` control records the raw `kuKernelGetModel()` PSPSDK/
+kubridge ordinal, `sceKernelDevkitVersion()` word, and CPU clock. A host-side
+decoder maps the ordinal to a generation and retail family; it never applies
+the PSPSDK enum table to the kernel-only `sceKernelGetModel()` original/slim
+convention.
+
+`CASE=cpu-timing` measures generic Allegrex instruction classes and PSP syscall
+fast paths using fixed synthetic buffers. It runs at 333/166 MHz and restores
+the boot clocks before teardown; raw measurements are retained in the private
+host0 log.
+
+`CASE=thread-k0-block` (`PSP-THREAD-K0-001`, 9 records) reads k0 and the
+64-word k0 block of the probe thread and of new threads, and checks whether a
+thread that reuses a dirtied stack still starts with k0+4 == 0 (#363).
+
+`CASE=memory-edge` (`PSP-MEMEDGE-001`, 74 cells and a done record) measures where
+user RAM and VRAM end and calls `sceIoWrite`, `sceIoRead`, `sceDmacMemcpy` and
+`sceDmacTryMemcpy` with a buffer placed at that edge (#303, #1380). The placement
+helper is `mem_edge.h`, which another probe can include to put a buffer's last or
+first N bytes at a measured boundary; the probe reports success in the record's
+`setup_mask` word. A write past an edge runs only after the same API refused the same
+overrun on the reading side; a cell that cannot be recorded in user mode is a `SKIP`
+row with its reason.
+
+Bounded follow-up cases for issues #69, #311, and #303 are `CASE=ge-nan`,
+`CASE=audio-query`, and `CASE=dma-cells`; these remain `NOT_RUN`. The
+`CASE=delay-zero` records were measured on the accepted 2026-10-01 PSPLink
+campaign and are indexed in `docs/HARDWARE_ORACLE.md`.
+
+## Transport write-readback (`CASE=transport-write`)
+
+The PSP writes a fixed 64-byte pattern (byte `i` =
+`(0x5A ^ (i * 0x25 + (i >> 3))) & 0xFF`) to the probe-owned disposable path
+`host0:/nakagawa_transport_write.bin`, reads it back, and reports FNV-1a,
+written/read-back sizes, a self-match flag, and the CPU clock in MHz
+(`scePowerGetCpuClockFrequencyInt`). The host independently regenerates the
+pattern and compares bytes and SHA-256. Only that one path is touched; the
+host removes it after verification. `status=PASS` means the PSP-side
+write/read-back matched; file acceptance additionally requires the host-side
+byte/SHA comparison.
+
+## Thread exit/delete boundary (`CASE=thread-exit-delete`)
+
+Twelve cells: implicit return / `sceKernelExitThread` /
+`sceKernelExitDeleteThread` across `0x77`, `0`, `-17` (`0xffffffef`), and
+`0x800201ac`. Each cell records the `WaitThreadEnd` return, the
+`ReferThreadStatus` exit status and thread state, and the raw results of a
+post-mortem delete and a restart attempt. `ExitDeleteThread` cells
+specifically measure whether the UID is gone (delete/restart raw codes) and
+what a joiner observes. `result` is the `WaitThreadEnd` return; `PASS` means
+the harness completed, not that any outcome matched an expectation. One
+thread per cell, sequential, immediate exits; accepted restarts are
+waited on and deleted so the launch leaks nothing in-process.
+
+## Allocator boundary survey (`CASE=dmac-survey`)
+
+An earlier invalid-tail probe's compiled-in user-end assumption
+(`0x0A000000`) was rejected by the firmware on 64 MiB units (partition 2
+allocates there), so that historical shape skipped by design. This case scans
+partition-2 fixed-address allocatability upward from the old assumption in
+64 KiB steps (32 attempts), freeing every success immediately, and emits the
+highest provable base plus the first failure. Thread-free and write-free;
+failures are ordinary error codes. It settles no DMA semantics. The current
+bounded Tier S/B cells are described below.
+Display-wait sessions use `CASE=display-wait-late`,
+`CASE=display-wait-priority`, or `CASE=display-vblank-window`. Plain-mutex
+sessions use one of the four `CASE=mutex-*` cases described below.
+
+The thread-delete follow-up is a bounded two-control probe for the
+second-order `sceKernelWaitThreadEnd` discrepancy: semaphore handshakes prove
+both joiners entered and completed the inner wait on a terminate-deleted
+target, one returns the error-shaped inner result and the other explicitly
+returns `0x77`, and each `SceKernelThreadInfo` state is recorded after the
+outer wait. The explicit sibling uses the same synchronization but calls
+`sceKernelExitThread(0x800201ac)` and `sceKernelExitThread(0x78)` directly.
+The PSP-3001/6.61-ARK controls establish that signed-negative status values
+(`0x800201a8`, `0x800201ac`, and ordinary `-17`) normalize to `0x800200d2` on
+the measured non-delete exit paths, while ordinary positive values propagate
+unchanged. `ExitDeleteThread` is deliberately outside this measurement. The
+raw hardware stream remains local until its current-session model/firmware
+metadata is confirmed.
+
+The bounded `thread-delete-boundary` case passes
+`SCE_KERNEL_ERROR_WAIT_TIMEOUT` (`0x800201a8`) through explicit
+`sceKernelExitThread`, then uses the existing ordinary `-17` control. It is
+intentionally limited to those two boundary values; it is not an error-code
+matrix.
+
+All records contain only scalar arithmetic and API results; pointers and raw
+memory are never treated as stable evidence.
+
+## Display-wait cases (issue 70)
+
+Three cases answer what a PSP display wait actually does, because
+`docs/PSP_INTR_WAITS_MATRIX.md` recorded the normal-context rows for both NIDs
+as `hardware = unknown / WOULD_BLOCK control`: only the error cells had ever been
+measured. Each is bounded by both an elapsed-system-time test and an iteration
+cap, so a stopped clock yields a finite record rather than a hang, and none of
+them touches game content or firmware state.
+
+`CASE=display-wait-late` (`PSP-DISPLAY-002`) phase-aligns to an edge, busy-spins a
+controlled fraction of a calibrated period without any voluntary yield, then
+times the call under test. Offsets of 2/8, 6/8, 10/8, 14/8 and 20/8 of a period
+straddle one and two boundaries, so "several periods elapsed while the caller was
+busy" is covered rather than only a narrow late window. A separate in-vblank cell
+polls `sceDisplayIsVblank` and calls from inside the interval, which is the only
+phase at which the two NIDs can differ. The period is calibrated on the same
+device in the same run; nothing assumes 60000/1001.
+
+`CASE=display-wait-priority` (`PSP-DISPLAY-003`) runs identical high-priority work
+twice, once alone and once alongside an always-runnable lower-priority peer that
+never issues a blocking call. Per iteration the caller samples the peer's counter
+before its display wait, after it, and again after a pure-CPU spin, so progress
+made while BLOCKED is separated from progress made while merely RUNNABLE. The
+control/experiment pair is what distinguishes "a real block hands the CPU over"
+from "the syscall behaves differently because another thread exists".
+
+`CASE=display-vblank-window` (`PSP-DISPLAY-004`) aligns to an edge and times
+`sceDisplayIsVblank`'s falling transition, recording hcount at entry and exit so
+the interval is expressed in the display's own units as well as microseconds.
+
+## Issue 23 DMA cases
+
+`CASE=dma-concurrency` (records also appended to `host0:/dmac_concurrency_log.txt`) runs three 64-trial API combinations:
+
+- `sceDmacMemcpy` then `sceDmacTryMemcpy`;
+- `sceDmacTryMemcpy` then `sceDmacTryMemcpy`;
+- `sceDmacTryMemcpy` then `sceDmacMemcpy`.
+
+Each trial starts the first 1 MiB VRAM-to-VRAM call in a priority-`0x10`
+thread while the main thread remains at priority `0x20`. This reproduces the
+public PSPAutotests scheduling shape. It records whether the first caller had
+entered, whether it had returned, whether it remained pending when the second
+caller started, and whether the measured call intervals overlapped. The record
+also correlates BUSY with the pending/returned snapshot: BUSY after return is
+the observable needed to show that the first syscall returned while its DMA
+state remained active. Timing or thread state alone is not described as
+in-flight DMA proof.
+
+The concurrency record uses `result` for the last second-caller return (or a
+setup error) and these scalar outputs:
+
+| Field | Meaning |
+| --- | --- |
+| `out0` | Completed trial count |
+| `out1` / `out2` | First / second API (`0` blocking, `1` try) |
+| `out3` / `out4` | First-entered / first-returned snapshots before the second call |
+| `out5` | First-entered/not-returned snapshots before the second call |
+| `out6` | Second-call start times earlier than the first-call return time |
+| `out7` / `out8` | First-call zero / other return counts |
+| `out9` / `out10` / `out11` | Second-call BUSY (`0x80000021`) / zero / other counts |
+| `out12` / `out13` | BUSY while first pending / after first returned |
+| `out14` / `out15` | Minimum / maximum contiguous transferred prefix |
+| `out16` | Trials whose contiguous prefix was exactly `0xC000` |
+| `out17` | Trials with non-sentinel mutation after the contiguous prefix |
+| `out18` / `out19` | First-call minimum / maximum wall time in microseconds |
+| `out20` / `out21` | Second-call minimum / maximum wall time in microseconds |
+| `out22` | First-caller thread priority |
+| `out23` | Last first-caller return |
+
+The sequential `dma-size-matrix` records cover `0xBFFF`, `0xC000`,
+`0xC001`, `0xD000`, `0xF000`, `0xFFFF`, `0x10000`, and `0x100000` (1 MiB)
+for both APIs. Each API/size cell is repeated three times. Each requested data
+span is inside a distinct `sceKernelAllocPartitionMemory` block from user
+partition 2. Data begins at a 4 KiB aligned address, with a 4 KiB leading
+redzone and at least a 4 KiB trailing redzone in each block. Blocks are freed
+after both APIs finish for that size. The 1 MiB cell allocates `0x102000` bytes
+per buffer, rather than borrowing the full VRAM range. The record uses `result`
+for the last DMAC return and these outputs: `out0` requested bytes, `out1`
+maximum contiguous copied prefix, `out2` maximum non-sentinel bytes after that
+prefix, `out3` full-source integrity flag, `out4` maximum elapsed microseconds,
+`out5` API (`0` blocking, `1` try), `out6` trial count, `out7` failed-trial
+count, `out8` source-redzone mutation count, `out9` destination trailing
+redzone mutations, `out10` destination leading redzone mutations, `out11`
+data alignment, `out12` allocation bytes per buffer, `out13` partition id,
+`out14` redzone bytes, `out15` source data address, `out16` destination data
+address, and `out17`/`out18` source/destination block UIDs. Before every call,
+the probe initializes both owned blocks and writes back then invalidates both
+full block ranges. After the call it invalidates both full block ranges before
+inspection. Each completed API/size record is appended to host0 and its file
+is closed before the next cell. A PASS record
+requires every trial to return zero, copy the complete requested prefix, leave
+the requested tail and all source/destination redzones unchanged, and emit all
+16 matrix records in full-matrix mode. `dma-size-matrix-cell` emits the two
+API records for exactly one selected size and is used for incremental hardware
+sessions; the runner validates the requested size, block ownership fields,
+guard counts, and complete two-record pair before that session qualifies.
+These partition-owned spans control for transfer size without assuming that
+unallocated VRAM is available to the probe. The probe itself does not promote
+results to public hardware evidence.
+
+The existing runner can retain and validate one selected size after launching
+the PRX. Build one `dma-size-matrix-cell` PRX for a supported request and use
+the matching campaign case id; include `transport-write` first in every
+session to requalify host0:
+
+```powershell
+python tools/psp_oracle/run_psplink.py `
+  --host0-root tests/fixtures/psp_oracle/build/w6-size-bfff `
+  --campaign-case transport-write=tests/fixtures/psp_oracle/build/w6-size-bfff/transport_write.prx `
+  --campaign-case dmac-size-matrix-size-0x0000bfff=tests/fixtures/psp_oracle/build/w6-size-bfff/dmac_size_matrix_cell.prx `
+  --source-commit <exact-clean-commit> --model <operator-recorded-model> --firmware <operator-recorded-firmware> `
+  --session-id <hardware-lock-holder-session>
+```
+
+The runner reads `dmac_size_matrix_cell_log.txt` from the host0 scratch root
+after the module unloads. Use a fresh scratch root per size so each session's
+host0 log and envelope remain available; the first transport failure stops
+before the matrix cell runs.
+
+The bounded invalid-tail cells use five isolated launches:
+
+- `dma-invalid-tail-s0` (Tier S pointer/size controls for both APIs);
+- `dma-invalid-tail-memcpy-dst`;
+- `dma-invalid-tail-memcpy-src`;
+- `dma-invalid-tail-try-dst`;
+- `dma-invalid-tail-try-src`.
+
+The Makefile keeps these variants at `PSP_LARGE_MEMORY=0`. Each allocates one
+page-aligned `0x11000`-byte block from the high end of partition 2. The block
+contains a `0x1000` pre-guard, the `0xC000` payload, a `0x1000` post-guard, a
+`0x2000` owned overflow band, and a `0x1000` tail-guard. While holding it, the
+probe uses `PSP_SMEM_Addr` to check one page at both `block_end` and
+`block_begin - 0x1000`; either successful neighbor allocation makes the run
+`SKIP` before DMAC. The full request is statically constrained to the owned
+post-guard and overflow band. Cache writeback/invalidation brackets each
+transfer. `setup_mask=0x0F` means block allocation, page geometry, end-neighbor
+refusal, and begin-neighbor refusal passed (bits 0 through 3 respectively).
+Any pre/tail guard mutation fails the record and its parser.
+
+Tier S emits eight size-zero records: S0-a null destination, S0-b null source,
+S0-c both pointers owned, and S0-d destination `0xFFFFFFFF`, each for memcpy
+and try. Every cell must keep `P`, payload mutations, and all guards at zero.
+Tier B emits four records for each existing launch, with deltas 1, 4, `0x1000`,
+and `0x2000`; destination overrun bytes are classified separately in the
+post-guard and overflow band. These are bounded declared-payload controls,
+not actually invalid physical spans. All Tier S/B hardware results remain
+`NOT_RUN`; the K3/K4 invalid-span distinction remains in the works under #303.
+
+Terminal outcomes are deliberately distinct:
+
+| Outcome | Required evidence |
+| --- | --- |
+| Result | The complete Tier S set (8 records) or one Tier B delta set (4 records) exists; retain every scalar and status. |
+| Skip | An explicit `status=SKIP` record proves that a pre-call safety gate stopped the case. |
+| Hang | No test record, host `process_status=TIMEOUT`, and a human observes that the device remains stalled without rebooting. |
+| Reset | No test record and a human observes a device reboot/reset and PSPLink session loss. Never infer this from host process exit alone. |
+| Inconclusive | No record and neither physical observation is established, including launch or transport failures. |
+
+Run the capture with `--out <case>.runner.json`. After a no-record outcome, the
+operator records the physical observation without altering the original report:
+
+```powershell
+python tools/psp_oracle/run_psplink.py `
+  --annotate-report <case>.runner.json `
+  --observed-terminal-outcome HANG `
+  --out <case>.hang.json
+```
+
+Use `RESET` instead only after observing a reset. The annotation command
+rejects any capture that already contains a test record and marks terminal
+outcomes ineligible for scalar-result acceptance.
+
+## Display / interrupt-mask cases (issue #70)
+
+Three cases answer what happens to the display domain while CPU interrupt
+delivery is masked. Build one per launch, as with every other case.
+
+`CASE=display-mask-vcount` holds `sceKernelCpuSuspendIntr` for 4000, 16700,
+30000 and 50000 us — 12 trials each — and samples `sceDisplayGetVcount`
+*immediately after* `sceKernelCpuResumeIntr`. That sample is the one the
+accepted interrupt-conformance record (historical tracker item #88) never took,
+and it is what separates "the counter catches up by every elapsed period" from "exactly one deferred event is credited" from "the
+elapsed periods are gone". The case never assumes a period length: it calibrates
+the device's own vblank period in the same run over 60 `sceDisplayWaitVblankStart`
+intervals and reports it in `result` and `out26`. Every spin is bounded by BOTH
+elapsed system time and an iteration cap, so a stopped clock cannot turn a probe
+into a hang.
+
+One record is emitted per duration, `case_id=display-mask-vcount-<N>us`:
+
+| Field | Meaning |
+| --- | --- |
+| `out0` / `out1` | Trials completed / requested mask microseconds |
+| `out2` / `out3` | Minimum / maximum measured masked span |
+| `out4` / `out5` | Minimum / maximum source periods the span crossed |
+| `out6` / `out7` | Minimum / maximum VCOUNT delta observed *during* the mask |
+| `out8` / `out9` | Minimum / maximum VCOUNT delta immediately *after* resume |
+| `out10` / `out11` | Trials crediting exactly 0 / exactly 1 |
+| `out12` / `out13` | Trials crediting the full period count / a partial catch-up |
+| `out14` / `out15` | Minimum / maximum VCOUNT step at the next WaitVblankStart |
+| `out16`–`out19` | Accumulated-Hcount delta during the mask / immediately after |
+| `out20` / `out21` | Summed credited increments / summed elapsed periods |
+| `out22` / `out23` | Mean span; trials in which system time advanced |
+| `out24` / `out25` | Minimum / maximum current Hcount sampled under the mask |
+| `out26` / `out27` | Calibrated period in nanoseconds; CPU clock in MHz |
+| `out28` | Trials whose next WaitVblankStart advanced VCOUNT by exactly 1 |
+
+`out12` and `out13` are the falsifiers. `PASS` means only that every trial ran
+and the masked window really elapsed; it makes no claim about which semantic the
+numbers show.
+
+`CASE=display-mask-duty` is the same question asked as a sustained duty cycle —
+repeated 33 ms or 66 ms masks separated by 2 ms servicing gaps across a 2 s
+window — where the three candidate semantics separate by a factor of about four
+in accumulated VCOUNT. It was run on 2026-10-15 on commit `e45e667b` (firmware
+6.6.1): both records PASS, which is machinery only. The result is indexed in
+`docs/HARDWARE_ORACLE.md` and is not granted through `PSP-DISPLAY-001`, which cites
+`docs/ARCHITECTURE.md#clocks`.
+
+`CASE=display-ge-mask` asks whether the GE keeps executing while CPU interrupts
+are masked, and is deliberately stall-gated so that "the GE simply finished
+before the mask opened" cannot produce a false positive. A list of 16 chained
+block transfers (512x32 px at 4 bpp, 1 MiB total) is enqueued **already stalled
+at its first word**; the destination is proven still at its sentinel; only then
+are interrupts suspended and the stall released. Every destination read goes
+through the uncached VRAM mirror, so a stale CPU cache line cannot be misread as
+"the GE did not progress". Three records are emitted:
+
+- `ge-mask-controlB-enabled-release` — released with interrupts enabled; the
+  destination MUST change.
+- `ge-mask-controlA-stall-held` — masked with the stall still held; the
+  destination MUST NOT change.
+- `ge-mask-primary-masked-release` — released while masked; the measurement.
+
+`out4`/`out5`/`out6` count trials in which all tiles / some tiles / no tiles
+changed before resume, and `out13`/`out14` separate a completion callback seen
+*during* the mask from one seen only after resume. Those two are reported as
+distinct facts: GE memory work and GE completion notification are not the same
+hardware domain.
+
+## Plain-mutex cases
+
+Four cases isolate the unresolved plain-Mutex cells left open by PR #52. The
+mutex syscalls are absent from the installed PSPSDK headers, so
+`mutex_imports.S` declares a complete `ThreadManForUser` import block (both the
+custom mutex NIDs and every `ThreadManForUser` function referenced by the probe
+and PSPSDK CRT) so that the library's stubs remain contiguous in `.sceStub.text`.
+The Makefile overrides `FIXUP` to fail closed if `psp-fixup-imports` emits
+out-of-order stub warnings (issue #400). `probe.c` mirrors the documented
+`SceKernelMutexInfo` layout. Only scalar return values are treated as evidence.
+
+- `CASE=mutex-refer-unlocked` — creates one unlocked and one locked mutex,
+  refers both, unlocks the second, and refers again. The raw `lockThread`
+  words for all three states plus the referring thread id are recorded so the
+  unlocked-value convention (`0` vs `0xffffffff`) is decided by bits, not by
+  documentation.
+- `CASE=mutex-timeout-quanta` — a worker thread performs timed locks across
+  1, 25, 250, and 1000 us requests (10 trials each), records the remaining-
+  time word and measured min/max elapsed per interval, one `LockMutexCB`
+  sample at 250 us, and a final lock with a 100 ms timeout released early via
+  the owning unlock. This arbitrates alleged 25 us/250 us quantization against
+  the measured clock.
+- `CASE=mutex-priority-inheritance` — a low-priority owner holds an
+  attr-`0x100` mutex while a higher-priority waiter blocks. Owner priority is
+  sampled before, during, and after the wait (both via `ReferThreadStatus`
+  from main and `GetThreadCurrentPriority` from the owner itself), deciding
+  whether PSP boosts the owner.
+- `CASE=mutex-interrupt-context` — registers a VBLANK sub-interrupt handler
+  that samples 20 firings. The header record carries the raw
+  `sceKernelRegisterSubIntrHandler` and `sceKernelEnableSubIntr` returns (context)
+  and the completed trial count. Each trial record is machinery-only: it reads
+  `status=PASS result=0x00000001` when the handler reached the end of its body, so
+  all six mutex cells were written and the trial was stored. `out0` is the raw
+  `sceKernelIsCpuIntrEnable()` return (context only). `out1`..`out6` are the raw
+  returns of `LockMutex` (bad UID, bad count, valid unlocked), `LockMutexCB`,
+  `TryLockMutex` and `UnlockMutex` (non-owner). Neither the probe nor the host
+  checker compares a returned value with an expected value; the runtime's tests do
+  that (the interrupt conformance matrix in `src/rt/intr_conformance.h` and the
+  interrupt-context mutex cells of `hle-thread-selftest`). Interrupt context
+  is established by construction: a trial exists only because the VBLANK
+  sub-interrupt dispatch ran `oracle_subintr_handler`. The kernel query
+  `sceKernelIsIntrContext()` is not used: it lives in the kernel-only library
+  InterruptManagerForKernel, which a user-mode probe cannot import.
+  The rule was corrected on 2026-10-15 from a value rule to this completion rule.
+  Archives recorded under the value rule (each trial FAIL with result 0) are refused
+  by the current checker. The corrected probe, built from `ec5dd563`, was re-run on a
+  PSP-3000 (6.61) on 2026-10-15. The run is acceptance-eligible, and all 20 trials
+  completed.
+
+All four emit `PSP-MUTEX-001` records. `status=PASS` means only that the
+machinery ran and every scalar was captured; it makes no claim that any host
+implementation matches until the comparison protocol runs on the capture.
+
+> **Operator note.** Never send the PSPLink shell command `exit` from a capture
+> driver. `exit` terminates PSPLink on the device and returns it to the XMB,
+> which looks exactly like a probe-induced reset and is not one. Close the
+> client's stdin instead.
+
+## Exception and kernel-object probes (campaign psp-hw-20260917)
+
+The original exception and kernel-object cases are standalone probes. The
+`exception-a3-fetch-*` follow-ups share `probe_exception_a3.c` and write a small
+protocol stream before the intentional user-mode fetch fault. Each case is one
+launch; the hardware runner retains PSPLink's `exprint` reply before recovery.
+
+| Case | Source | What it measures | Ends by |
+| --- | --- | --- | --- |
+| `exception-a1` | `probe_exception_a1.c` | A user-mode `break`: EPC, Cause and Status in PSPLink's exception frame. | Raising the exception. |
+| `exception-a2` | `probe_exception_a2.c` | The same `break` in the delay slot of an always-taken branch (the Cause BD bit). | Raising the exception. |
+| `exception-a3` | `probe_exception_a3.c` | A user-mode load from a kernel-segment address (AdEL and BadVAddr). | Raising the exception. |
+| `exception-a3-fetch-zero` | `probe_exception_a3.c` | User-mode instruction fetch from 0. ExcCode, EPC, BadVAddr and Cause.BD are in the runner's teardown `exprint` reply. | Raising the exception. |
+| `exception-a3-fetch-08000000` | `probe_exception_a3.c` | User-mode instruction fetch from 0x08000000. Exception fields are in the runner's teardown `exprint` reply. | Raising the exception. |
+| `exception-a3-fetch-40000000` | `probe_exception_a3.c` | User-mode instruction fetch from 0x40000000. Exception fields are in the runner's teardown `exprint` reply. | Raising the exception. |
+| `kobj-b1` | `psp_b1.c` | Wait-free callback, semaphore, event-flag, FPL, VPL, VTimer and LwMutex return codes and status layouts. | Returning from `main`. |
+| `wait-b2` | `psp_b2.c` | Contended waits with one bounded helper thread: wake, delete, cancel and LwMutex hand-off. | Returning from `main`. |
+| `kernel-b3` | `psp_b3.c` | Message pipes, mailboxes, sleep/wakeup/suspend/terminate, release-wait, alarms and delay timing. | Parking in `sceKernelSleepThread()`. |
+
+The hardware runner issues `exprint` after each exception case and keeps its
+reply in the teardown report. On the measured PSPLink setup, a probe that
+returned from `main` after creating threads (`wait-b2`) left PSPLink and exited
+to the XMB, which is why `kernel-b3` parks instead.
+
+The kernel-object probes link `threadman_user_imports.S`, one complete
+ThreadManForUser import block: PSPSDK ships heavyweight-mutex stubs only for
+the kernel library, and a second partial block would split the library's stub
+run. Add any newly used ThreadManForUser NID there, and nothing else: every
+PRX that links the file gets every stub in it. `display_user_imports.S` is the
+user sceDisplay block (`sceDisplaySetHoldMode`,
+`sceDisplayWaitVblankStartMultiCB`), linked only into `kernel-misc`.
+
+### User-mode import gate
+
+Every probe is a user-mode module, and the PSP refuses to load a user-mode PRX
+that imports a kernel-only library (`0x8002013C`, library not found), so no
+probe code runs. After `psp-fixup-imports`, the Makefile runs
+`tools/psp_oracle/user_mode_imports.py` on the linked ELF. The build fails when
+a user-mode module imports a library whose name ends in `_driver` or
+`ForKernel`, or another known kernel-only library, and the message names each
+library and its NIDs. A rejected ELF is deleted, so a later `make` cannot
+package it. Use the user library that exports the same NIDs (for example
+`sceDisplay`, not `sceDisplay_driver`), and never link a PSPSDK `*_kernel*` or
+`*_driver` archive into a probe. The gate can also be run by hand on a PRX:
+`python3 tools/psp_oracle/user_mode_imports.py build/nakagawa_psp_oracle.prx`.
+
+## Bounded follow-up probes
+
+Their hardware status is in the
+[measured index](../../../docs/HARDWARE_ORACLE.md#measured-to-date-index--exact-cells-only-do-not-generalize):
+`ge-nan` and `audio-query` ran on a PSP-3000 on 2026-10-10 (`f6ccfb33`) and again on
+2026-10-15 (`f2d6c91a`).
+
+These probes write only scalar records to `host0:`. No `ms0:` output or private
+input is used. Their ordered result streams have strict completion parsers in
+`tools/psp_oracle/parse_golden.py`, registered by campaign case in
+`tools/psp_oracle/run_psplink.py`.
+
+- `CASE=ge-nan` (`ge-nan`, `PSP-GE-001`) records raw input and VFPU result
+  words for qNaN, `+Inf`, `-Inf`, `-0`, and the minimum positive denormal. For
+  each input it also records a framebuffer hash and changed-pixel count after
+  2D screen-coordinate, 3D clip-position, and lit-normal GE draws. It emits 20
+  measurement records and `ge-nan-done`; it does not repeat the already
+  measured `vasin` domain-edge words. The renderer records integer bit
+  patterns and hashes, never formatted floats. `ge-nan-done` also carries the
+  GE teardown outcome: `TIMEOUT`, with the last draw state as its result, when
+  the GE did not reach idle before `sceGuTerm`.
+- `CASE=audio-query` (`audio-query`, `PSP-AUDIO-001`) records both
+  `sceAudioGetChannelRestLen` and `sceAudioGetChannelRestLength`, two
+  `sceAudioOutputBlocking` calls at 512 samples maximum, one
+  `sceAudioOutput2OutputBlocking` call, rest-sample queries, return values,
+  and elapsed microseconds. The output buffer contains silence. Each reserved
+  channel is released, including when a later query or output call fails. It
+  emits 13 measurement records and `audio-done`.
+- `CASE=dma-cells` (`dma-cells`, `PSP-DMAC-001`) exercises both copy APIs with
+  source-only, destination-only, and paired offsets 1, 2, 3, 5, 6, 7, 9, 10,
+  11, 13, 14, and 15 bytes. These cover the requested 1/2/3 residues modulo 4
+  and the unaligned residues modulo 16. It also measures overlap in both
+  directions at 1, 2, 3, 7, and 15 bytes. Every span and guard is inside a
+  probe-owned buffer, and cache writeback/invalidation brackets each call. It
+  emits 92 measurement records and `dmac-cells-done`; the existing size matrix
+  is not repeated.
+- `CASE=delay-zero` (`delay-zero`, `PSP-KERNEL-002`) calls
+  `sceKernelDelayThreadCB(0)` and `sceKernelDelayThread(0)` once each with an
+  equal-priority ready worker and a pending callback. Each record carries
+  before/after worker and callback counts, the raw notify and delay returns,
+  thread priorities/status, cleanup return, and the system-time delta. It emits
+  two measurement records and `delay-zero-done`. A `SKIP` means setup did not
+  leave the worker ready and callback pending at the call boundary.
+
+The five `CASE=dma-invalid-tail-*` launches remain one case per launch. Tier S
+uses only size-zero requests. Tier B keeps the complete requested source and
+destination spans inside the probe-owned scratch block or module-owned array;
+it measures bounded overrun classification and never treats `K` as a physical
+invalid boundary. An unowned destination tail remains `SKIP`; invalid-span
+validation and K3/K4 remain `NOT_RUN` under #303.
+
+## Allegrex and syscall timing (`CASE=cpu-timing`; [issue #1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296))
+
+The CPU timing case uses an unrolled eight-instruction body, a matched loop
+control, eight rounds, and seven trials at each block size. The instruction
+cells cover integer add/shift/logic, multiply and divide with `mflo`, cached
+and streamed loads/stores, taken and not-taken branches with delay slots, FPU
+add/multiply/divide, and VFPU add/multiply. The streamed cells use a 128 KiB
+synthetic buffer and one cache-line stride; the hot cells repeatedly access one
+word. The case changes the PSP clock to 333/166 MHz for the measurements and
+restores the boot CPU and bus clocks before teardown.
+
+Each instruction record's `result` is hundredths of a CPU cycle per counted
+instruction after subtracting the matched loop control. Its outputs are the
+instruction count, median measured microseconds, median control microseconds,
+and CPU MHz. The syscall cells use repeated calls with a matched no-op call
+loop and report hundredths of a CPU cycle per API call. They cover setting the
+currently displayed framebuffer to the same buffer, accumulated hcount,
+completed `sceGeDrawSync(0)`, empty GE list enqueue and stall release, and
+uncontended semaphore and lightweight-mutex pairs. `sceDisplayWaitVblankStart`
+is recorded separately as wall latency because the scheduler owns the wait;
+it is not charged as CPU service time. Blocking `sceGeDrawSync(0)` uses four calls
+per trial in a helper thread with a 100 ms caller timeout and termination path.
+GE enqueue and stall-update measurements queue one stalled list per trial,
+advance the stall address to the byte end returned by `sceGuFinish()`, and wait
+for idle before the next trial. GE list completion is polled for at most 250 ms
+and reset on timeout.
+
+The display cell needs a displayed framebuffer. Standalone PSPLink (the game
+context after a PSPLink reset) displays none, so there the probe displays its
+own 8888 buffer, stride 512, at the start of eDRAM, as a game would, measures,
+and then sets back the null framebuffer the PSP reported. Both changes use
+`PSP_DISPLAY_SETBUF_NEXTFRAME` and wait for the vblank that latches them: an
+immediate set that changes the stride or format returns `0x80000107`. The
+`cpu-timing-framebuffer` row follows the display cell: `result` is 1 when the
+probe displayed its own buffer and 0 when it re-set the PSP's; `out0` is the
+`sceDisplayGetFrameBuf` (or probe `sceDisplaySetFrameBuf`) result, `out1-3` the
+buffer, stride and format the cell used, and `out4` the restoring
+`sceDisplaySetFrameBuf` result (0 when nothing was restored).
+
+After the GE cells, `cpu-timing-gu-teardown` records the GE teardown (`out0`
+reset issued, `out1` `sceGeBreak` result, `out2` last draw state, `out3` elapsed
+us, `out4` `sceGuTerm` ran; `TIMEOUT` when the GE did not reach idle, `SKIP`
+when `sceGuInit` was never called). The GE cells are written only after it.
+
+The 65 semantic rows end with `cpu-timing-done` (clock restoration), followed
+by `cpu-timing-complete` with `out0=65`. The runner checks their exact order and
+field counts. Framebuffer, GE-idle, or sync setup refusals emit `SKIP` rows in
+the same shape; any non-`PASS` measurement makes the capture ineligible. The
+GE enqueue and stall-update rows also report `out4` as the first negative PSP
+return code, `out5` as successful enqueues in the last trial, and `out6` as
+stall-update attempts in the last trial.
+
+**GE teardown.** `sceGuInit` registers libpspgu's GE signal and finish
+callbacks, which are code in the probe PRX, and only `sceGuTerm` removes them.
+Every case that calls `sceGuInit` (`ge-nan`, `vram-mirror`, `ge-timing`, `cpu-timing`)
+therefore ends in `ge_gu_teardown` on every path once `sceGuInit` has run: a
+bounded wait for the GE to go idle, a queue reset (`sceGeBreak(1)`) and a
+second bounded wait when it is still busy, then the unregistration of the
+case's own GE callback, then `sceGuTerm`. `sceGuTerm` runs even when the GE
+never reached idle, so no handler outlives the unloaded module, and the case
+records whether it did. A source test in `tools/test_psp_oracle.py` refuses
+any path that returns between `sceGuInit` or `sceGeSetCallback` and that
+teardown.
+
+## Pending PSP-3000 campaign
+
+The cases below are synthetic probes. A case's hardware status is `NOT_RUN` until a run is cited; a complete parser only proves that the record stream is
+complete and well formed. It does not decide which PSP return values or
+ordering semantics are correct. `llsc-link`, `vfpu-compare` and `fpu-cc` were measured on a
+PSP-3000 on 2026-10-15 (build `e45e667b`); the
+[measured index](../../../docs/HARDWARE_ORACLE.md#measured-to-date-index--exact-cells-only-do-not-generalize)
+publishes their words.
+
+| Case | Test id | Measurements |
+| --- | --- | --- |
+| `kernel-alarm` | `PSP-ALARM-001` | `SetAlarm` with a null handler and zero clock, alarm-table exhaustion count and error (capped at 1024 pending alarms; `out2` is the cap), cancellation after firing/cancel/unknown UID, handler-return re-arm timing, and a bounded semaphore wait from an alarm handler with interrupt state. |
+| `thread-scheduler` | `PSP-THREAD-003` | Suspend UID 0 and self, resume UID 0, out-of-range ready-queue rotation, ready order after rotation (bounded wait; `TIMEOUT` if the third thread never runs), and timeout of a waiting thread while suspended. |
+| `wait-outcomes` | `PSP-WAIT-001` | Semaphore and event-flag signal/cancel operations that occur before a deadline but are dispatched afterward. |
+| `ge-break-continue` | `PSP-GE-CONTROL-001` | Break without an active list, continue without a paused list, invalid break mode, list/draw sync statuses for paused work, the continue result with a bounded drain (`ge-continue-drain`, `TIMEOUT` with the last states if the GE does not go idle), a queue reset when needed (`ge-quiesce-after-continue`), cancelled work, and a final quiesce (`ge-quiesce-after-cancel`). |
+| `ge-signal` | `PSP-GE-SIGNAL-001` | Built case 181 from `probe.c`. Per cell one project-written display list of material-colour markers around a SIGNAL/END pair, with signal and finish handlers registered by `sceGeSetCallback` that record their call count, arguments, `sceGeListSync(qid, 1)`, the marker and the time at the call: a FINISH-only control, behaviours 0x01, 0x02 and 0x03 with handlers and with a NULL-handler callback id, 0x02 with the handler held 5 ms, the undefined 0x00 and 0x04, then RJUMP and RCALL with a 0x20 and (last) an unaligned 0x22 offset. Each cell polls the list state every 1 ms for 100 ms (run-length encoded), calls `sceGeContinue` in a helper thread with a deadline if the list still reads queued, drawing, stalled or paused, polls 100 ms more, waits up to 100 ms for the GE to go idle and resets the queues with `sceGeBreak(1)` (`TIMEOUT`) only if the list still reads 1-4 or the GE is still busy. Neither decision rests on one `sceGeDrawSync(1)` sample, since the VSH draws its own lists in the XMB context. No VRAM; teardown restores the markers and unregisters both callback ids. **CAPTURED** on 2026-11-10 UTC (PSP-3000, boot 179, XMB context, `80e7c9eb`; 37 records, 12 of 14 cells, 35 PASS and 2 TIMEOUT; incomplete: it stalled at `rjump-un` and the console needed a power cycle; not acceptance-eligible), so no hardware result is claimed. POWER RISK: `rjump-un` and `rcall-un` are not to be re-run unattended. |
+| `vram-mirror` | `PSP-VRAM-MIRROR-001` | **MEASURED** on 2026-10-16 (PSP-3000 / 6.61; probe revisions `24c1472e`, `fd3efc64`, `df41dba2`). At sampled word-aligned offsets, CPU position-pattern reads establish identity mirrors at `0x04000000`/`0x04400000`, XOR `0x2040` at `0x04200000`, and the bits-5..9 rotation plus XOR `0x2040` at `0x04600000`; uncached forms agree. Sub-word address bits were not independently measured. Mirror write scans and GE depth/colour rows are recorded. The GE depth rule reported by the integrator is `(y * 1024 + 2x) ^ 0x2040` for a 512-pixel, 16-bit buffer. **MEASURED** on 2026-10-21 (PSP-3000 / 6.61, `VRAM_MIRROR_DEPTH_BIAS` and the opt-in `VRAM_MIRROR_FULL_SCAN=1` whole-VRAM scan): with a depth buffer at `0x0ce000` (bit 13 set) the XOR applies to the absolute VRAM offset, `(zbp + y * 1024 + 2x) ^ 0x2040` (0 mismatches over 8,640 samples; the buffer-relative form gives 1,328); with `0x0cc040` (bit 6 set) the GE wrote no depth anywhere in VRAM, which is unresolved ([#1049](https://github.com/Jstar269/nakagawa-recomp/issues/1049)). Raw PSP words remain private. The probe backs up and verifies restoration of all 2 MiB. After the four GE steps it runs the GE teardown, and `vram-restore` `out4` records whether the GE was idle at its end. |
+| `late-prx-target` | `PSP-LATE-PRX-001` | A late-loaded module that owns a semaphore-blocked waiter thread, an event flag and a callback, whose `module_stop` returns 0 without touching them; PSPLink `modstop`/`modunld` then stop and unload it. **MEASURED** on 2026-10-21 (PSP-3000 / 6.61): stop returned 0 and the module was unloaded, but the waiter, the parked main thread, the semaphore, the event flag and the callback all survived as orphans ([#1106](https://github.com/Jstar269/nakagawa-recomp/issues/1106)). What a waiter receives on wake after unload is not measured. |
+| `at3-decode` | `PSP-AT3-001` | One bounded ATRAC3 decode run of an AT3 stream staged in `host0:` (never part of the repository): AVCODEC and ATRAC3PLUS load, `sceAtracGetAtracID(0x1001)`, `sceAtracSetData`, repeated `sceAtracDecodeData` until the buffered frames run out, stream-position queries, release and unload, each preceded by a durable step marker; the PCM of every call is reduced to a hash, a peak and a few leading samples in the private host0 log. Ends in the normal teardown. **MEASURED** on 2026-10-21 and 2026-10-22 (PSP-3000 / 6.61): codec `0x1001` is accepted; the first decode returns 955 samples, then 24 decodes return 1024 samples each, and the call after the last buffered frame returns `0x80630023` with 0 samples ([#1096](https://github.com/Jstar269/nakagawa-recomp/issues/1096)). On 2026-10-24 the same stream ran once per value of the 8-byte fact chunk's delay word: delays 0 and 1024 gave a 955-sample first call, delay 955 gave 1024, delay 500 made the first decode return `0x80630002` with 0 samples, and delay 2048 made `sceAtracSetData` return `0x80630008`; every full run again returned `0x80630023` with 0 samples and end flag 0 on the call after the last buffered frame ([#1096](https://github.com/Jstar269/nakagawa-recomp/issues/1096)). On 2026-10-28 (two boots, standalone PSPLink) the case also timed each call and ran a lower-priority peer that counts only while the probe thread is not runnable: each decode that returns 1024 samples takes 1,152-1,203 us (median 1,177) with the peer running for about 1 ms of it, as during the 1 ms `sceKernelDelayThread` control, so the caller blocks; the buffer-empty call takes 7 us. With an ATRAC3+ stream staged as `host0:/at3p-input-buffer.bin` (2 channels, 744-byte frames), each call that returns 2048 samples takes 2,964-3,113 us (median 3,055), again with the caller blocked, and its buffer-empty call takes 8 us. The first call's full PCM, dumped to the host0 log, is file frame 1 decoded after frame 0 (frame 0's output discarded) ([#1096](https://github.com/Jstar269/nakagawa-recomp/issues/1096), [#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)). The `sceUtilityLoadAvModule` calls need the game context: from the VSH context they return `0x80020f39`. |
+| `fake-success` | `PSP-FAKE-001` | States of handlers that had answered success unconditionally. Default launch, no dialog: `sceKernelVolatileMemLock`/`TryLock`/`Unlock` with the lock held (a helper thread issues every call that can block), the `scePowerRegisterCallback`/`scePowerUnregisterCallback` slot matrix (Unregister only on slots the probe registered a moment earlier, or out of range), and `sceUtilityOsk*` with no keyboard ever opened. Ends in the normal teardown. `FAKE_SUCCESS_OSK_CYCLE=1` adds an on-screen-keyboard cycle that needs a person to finish the dialog; run it only attended, and never soft reset with a keyboard open. **MEASURED** on 2026-10-22 (PSP-3000 / 6.61): Lock blocks while held and TryLock returns `0x802b0200`; Unregister of an empty slot returns `0x80000025`; ShutdownStart with no keyboard returns `0x80110005` ([#363](https://github.com/Jstar269/nakagawa-recomp/issues/363)). |
+| `font-userpgf` | `PSP-FONT-USERPGF-001` | How the resident font library reads a project PGF ([#1055](https://github.com/Jstar269/nakagawa-recomp/issues/1055)). The library must be resident (`ldstart host0:/libfont.prx`, a private input never committed). Each job runs in its own lower-priority thread under a progress watchdog and uses a fresh library handle: a console font (`flash0:/font/ltn0.pgf`, opened `PSP_O_RDONLY`; from memory, by file name, and `sceFontOpen` by index), the converter's `nkltn.pgf` and five header/record variants staged as `host0:/fup/p0.pgf`..`p5.pgf` (the files are data: any PGFs can be staged under those names), then for `A g - 1 space e-acute` the raw font info, char info, shadow char info and the glyph image drawn into a zeroed 96x96 8-bit buffer (non-zero rows recorded). A job that stops making progress is recorded as `HANG` with the thread state, wait object, run clocks and the library allocation list; the first hang is held for 120 s (until `host0:/fup/release` exists) so PSPLink `thctx`/`exprint` can read it, then the thread is terminated and the next job runs. The imports are pinned to thirteen `sceLibFont` calls and no `sceReg` (the Makefile builds `libfont_imports.S` with `-DLIBFONT_USERPGF` for this case only). Console font bytes and glyph images stay in the private host0 log. **MEASURED** on 2026-10-23 (PSP-3000 / 6.61, probe `87bb96da`): the console font opens and draws identically by all three routes; every project PGF variant stops inside `sceFontOpenUserMemory`/`sceFontOpenUserFile` on a `break 7` (division-by-zero guard) in `sceFont_Library`, because header byte `0x20` is 0 (console fonts: 4). **MEASURED** again on 2026-10-23 (third boot, probe `acb05aa5`, header-corrected files staged as `p0`..`p5`): with bytes `0x20`/`0x21` set to 4 every variant opens and `sceFontGetFontInfo` returns 0 (the header maxima pass through), with or without byte `0x174` set (it is not needed to open); `sceFontGetCharInfo` and `sceFontGetCharGlyphImage` then return `0x80460001` and write nothing for `A g - 1 space e-acute` in every variant. Static reading of the library shows the glyph-record address is the pointer value times the header `u16` at `0x100`, which is 4 on console fonts and 0 in the converter's output. **MEASURED** on 2026-10-23 (fourth boot, probe `cd20b5a4`, six variants with `0x100` = 4 on top of `0x20`/`0x21` = 4, plus a file-name open): all open, `sceFontGetFontInfo` returns 0, and `GetCharInfo`/`GetCharGlyphImage` still return `0x80460001`; `0x100` = 4 alone is not enough. The probe's allocator shows why: after open the library asks for 12 allocations of `0xfffffff8` bytes (refused), where the console font asks for 88 and 225 bytes (record size less 8, then width times height). The size is the 14-bit first field of the glyph record minus 8; the converter writes 0 there, console fonts write the record length (340 of 340 consecutive records in a console-derived font file, 4-aligned). **MEASURED** on 2026-10-23 (fifth boot, probe `cd20b5a4`, six variants with that field set to `12 + bitmap bytes`): all six variants and `sceFontOpenUserFile` open and `GetCharInfo`/`GetCharGlyphImage` return 0 for `A g - 1 space e-acute`; with `0x100` = 0 (control) nothing draws; without the role bit (44) the metrics come back as raw table bytes and the bitmaps are scrambled; the variant with role bit, record left/top, header size/resolution and version/shadow changes returns the project's own metrics and clean glyphs. The header changes alone (resolution; version, vertical advance, shadow width) and byte `0x174` change nothing. **MEASURED** on 2026-10-23 (sixth boot, probe `cd20b5a4`, `fup5`): the converter's own output (record length, role bit, record left/top, `0x100` = 4, `0x20`/`0x21` = 4) draws correct metrics and bitmaps for `A g - 1 space e-acute`; without the role bit the metrics are raw table bytes and the bitmaps scrambled; without record left/top the drawn bitmaps are identical and only `bitmapTop` is 0; adding the header changes or byte `0x174` changes nothing drawn; `0x100` = 0 draws nothing. |
+| `ge-timing` | `PSP-GE-TIMING-001` | GE execution time and CPU-visible completion for the GE timing model ([#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)). Each cell builds a list with libpspgu in `GU_SEND` mode, applies an untimed setup list, then enqueues the work list (no stall, the probe's own callback) 8 times (`t0-empty`: 32) and records, in microseconds from just before `sceGeListEnQueue`, the enqueue return, the finish callback and the first `sceGeDrawSync(1)` that reads done. Cells: `t0` empty list; `t1` NOP, `t2` state and `t3` world-matrix runs (unit: words); `t4` clear-mode screen strips, colour or colour+depth, 8888 or 5650 (pixels); `t5` through-mode sprites of 8/32/128 px over 384x256, one PRIM or one per sprite (pixels); `t6` one-pixel through triangles, one PRIM or one per triangle (triangles); `t7` transformed tiny triangles as list/strip/indexed, `t8` by vertex format, `t9` with 0/1/4 lights, `t10` with 1/4/8 float weights (vertices: 1536/6144/18432); `t11` textured screen strips for 5650/8888/T4/T8 (each unswizzled and swizzled) and DXT1, 64 and 512 px textures, nearest and linear (pixels); `t12` blend, alpha test, depth test+write, dither, and fog against a transformed baseline (pixels); `t13` CLUT loads of 16/256 entries (entries); `t14` RAM-to-eDRAM and eDRAM-to-eDRAM 8888 block transfers of 64x64/256x256/480x272 (bytes); `t15` two lists back to back. Round two: `s1` through-mode sprites of every width and height in {8..256} tiling 256x256 (pixels); `s2` two-triangle quads of the same sizes; `s3` textured strips for 8888 (unswizzled and swizzled), 5650, T8 and DXT1 at 128 and 256 px; `s4` a vertex-bound draw and four colour clears in one list. Timing records: `out0` size, `out1` units, `out2` list bytes, `out3` reps, `out4` timeouts, `out5` enqueue errors, `out6-8` finish min/median/max, `out9-11` idle min/median/max, `out12` enqueue median, `out13/14` CPU/bus MHz, `out15` last enqueue error. Completion cells, one record per rep, on a 16-pass 8-px sprite list: `c13-peeks` (list and draw peek values and when they change, when the last pass's final pixel reaches eDRAM through the uncached mirror, the callback time), `c4-signal` (a `SIGNAL` with behaviour CONTINUE halfway), `c5-busyenq` (an empty list enqueued while it runs), and `c2-drawsync` / `c6-listsync` (a helper thread blocks in `sceGeDrawSync(0)` or `sceGeListSync(qid, 0)`, bounded by `sceKernelWaitThreadEnd`). Every wait is bounded at 250 ms; a timeout resets the queues and is recorded. The matrix runs at 222/111 MHz and again at 333/166 MHz. Then `gt-gu-teardown` records the GE teardown (`out0` reset issued, `out1` `sceGeBreak` result, `out2` last draw state, `out3` elapsed us, `out4` `sceGuTerm` ran; `TIMEOUT` when the GE did not reach idle), the boot clocks are restored (`gt-done`), and `ge-timing-done` closes the stream with `out0` the number of records before it. The runner checks the exact order and shape of all 671 records against the contract in `tools/psp_oracle/parse_golden.py`; a clock pass that cannot set its clocks emits only `gt-b<bus>-clock` (`SKIP`) and so never yields an eligible stream. The stream takes about 45 s, so the runner refuses a `--timeout` below 180 s for this case: a stop at the case timeout would come mid-list. `MEASURED` on 2026-10-27 by two acceptance-eligible launches from `8f707fc0`, one in the XMB (VSH) context and one in standalone PSPLink (game context); the derived costs are in [`docs/HARDWARE_ORACLE.md`](../../../docs/HARDWARE_ORACLE.md#psp-ge-timing-001-measured-runs-2026-10-27) and the logs stay private. Earlier complete runs: 2026-10-25, probe `d8d3d0f2`, then `e9ad91d9` with round two ([#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)). |
+| `sas-init` | `PSP-SAS-001` | `__sceSasInit` on a core that is already initialized ([#1595](https://github.com/Jstar269/nakagawa-recomp/discussions/1595)). AVCODEC and SASCORE load, then: init a 64-byte-aligned core (grain 256, 32 voices, output mode 0); the same init again; a re-init with grain 512, 16 voices and output mode 1, then `__sceSasGetGrain` and `__sceSasGetOutputmode`; an init of a second core, then both cores' grain; a re-init over a voice keyed on with synthetic VAG data and mixed for one grain (end flag and envelope height before and after, and after one more `__sceSasCore`); an init of a misaligned core. Every call's return is one `RC` record. Ends in the normal teardown with the AV modules still loaded. **MEASURED** on 2026-10-28 (PSP-3000 / 6.61, standalone PSPLink): every init returns 0, including the second init of the same core; the re-init's grain (`0x200`) and output mode (1) take effect; after the second core's init the first core still reports grain `0x200`; the end flags read `0xfffffffe` with voice 0 playing and `0xffffffff` straight after the re-init and after the next `__sceSasCore`; the misaligned core returns `0x80420005`. |
+| `sas-adsr` | `PSP-SAS-002` | The SAS envelope ([#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)). AVCODEC and SASCORE load; one looping synthetic VAG voice; heights from `__sceSasGetEnvelopeHeight` after every `__sceSasCore`. Nine `__sceSasSetSimpleADSR` pairs at grain 256 (640 grains after KeyOn, 384 after KeyOff); a 32-row `__sceSasSetADSRmode` table on a known baseline (SetADSRmode, SetADSR, SetSL), 8 grains on and 8 off per row; explicit-curve runs (the exponent attack at grains 256 and 64, a sustain level on and half a step off a decay step) and pairs p1 and p2 again at grain 64. Every call's return and every height is a `PASS` record (`ERROR` for a table entry outside the height buffer); `sas-adsr-done` is `PASS` when SASCORE loaded and `SKIP` otherwise, and is not a correctness verdict. The values below were first recorded under the earlier `RC` encoding. **MEASURED** on 2026-11-05 (PSP-3000 / 6.61, standalone PSPLink in game context; probe from `52830b68`, transport-write PRX from `999f3ce3`, whose source is the same for this case): init, SetVoice, SetVolume, SetSimpleADSR, SetADSR and SetSL return 0 in every run; the height is 0 before KeyOn and 0 after KeyOn until the first `__sceSasCore`. `__sceSasSetADSRmode` accepts attack curves 0, 2 and 4, decay and release curves 1, 3 and 5, and sustain curves 0 to 5; it returns `0x80420013` for attack 1, 3 or 5, decay or release 0, 2 or 4, sustain 6, and all four at 5, and after a refusal the heights equal the baseline's, so nothing is applied in part. A curve in a phase the mask leaves out is not checked (mask 1 with decay 0, sustain 6 and release 0 returns 0, heights as the baseline). The top bit (`0x80000000`) is ignored: each such row returns 0 and gives the same heights as the curve without it. A single-phase mask changes only that phase. KeyOff returns `0x80420016` when the envelope has already reached 0 (pairs p0, p5 and p8, and decay curve 5 under mask 2); otherwise 0. The end flag reads `0xffffffff` once the envelope ends and `0xfffffffe` while voice 0 still sounds (pairs p3 and p4, and the grain-64 p1 and p2 runs). With the sustain level `0x30000000` and with `0x30080000`, a linear decay of `0x00100000` per step from the top stops at `0x30000000` in both: it steps while the height is above the level and does not clamp to it. The exponent attack at grain 64 reads at grain 3 the height grain 256 reads at grain 0 (`0x00a76d9d`). Pair p8's sustain reaches 0 at grain 585. The current PASS/ERROR status encoding is **MEASURED** on 2026-11-13 UTC (PSP-3000 / 6.61, ARK-5 5.2.0, boot 208, game context, `06a6c942c`; 696 records and the done record, all PASS, acceptance-eligible; the case unloaded SASCORE, then AVCODEC): every record has the same result and out words as the 2026-11-05 run and as the 2026-11-10 capture (boot 185, `74acbe42`), which was not acceptance-eligible (loaded module not proven unloaded). |
+| `refer-status-size` | `PSP-KERNEL-STATUS-001` | Semaphore, event-flag, and mailbox status structures with size words 0, 8, 40, and full size; records the changed bytes and returned size word. |
+| `registry-readonly` | `PSP-REGISTRY-001` | Read-only registry/category enumeration under `/CONFIG`, key names/types/sizes, modeled setting values only, and unknown-category/key, small-buffer, and handle-exhaustion results (`registry-errors`; at most 256 opens, `out6` says whether an open failed first), then the forged-handle call last (`registry-bad-handle`). |
+| `llsc-link` | `PSP-LLSC-001` | A plain `ll`/`sc` pair (control), a second `sc` after a successful `sc` with no new `ll`, and an `sc` to an address other than the one `ll` linked. Each record carries the `sc` result, the word `ll` loaded, both words after the cell, and the project's model words. Measured: every `sc` reported 1 and stored, matching the model. |
+| `kernel-misc` | `PSP-KERNEL-MISC-001` | Wide system-clock conversion, default controller mode, thread/global profiler returns, basic VTimer behavior, display calls, battery-icon status, and UMD-popup return values. |
+| `vfpu-compare` | `PSP-VFPU-CMP-001` | `vscmp.s`, `vsge.s`, and `vslt.s` on 15 operand pairs (less-than, equal, greater, signed zeros in both orders, quiet, signalling, and negative NaN on each side, infinities). Each record carries the observed word, the project's model word at build time, and both operands. Measured: `vsge.s`/`vslt.s` write 0.0 for a NaN; `vscmp.s` orders a NaN by sign and magnitude, which the model now does. |
+| `fpu-cc` | `PSP-FPU-CC-001` | COP1 condition codes 0..7: FCR31 condition-bit writability, the FCR31 word after an equal and an unequal `c.eq.s` with each code, and whether `bc1t`/`bc1f` with each code are taken under FCC0, no flag, and the code's own flag. A reserved encoding may end the launch with an exception; the last STEP line names the cell. Measured: no exception; only FCC0 exists, and every code writes and tests it. |
+| `vfpu-transcendental-corpus` | `PSP-VFPU-TRANSCENDENTAL-001` | Raw result words for vsin, vcos, vexp2, vlog2, vrsq, vrcp, vsqrt, vasin, vnrcp, vnsin, and vrexp2 over 63 deterministic input words per operation. The VASIN special table substitutes three in-domain words for its already measured edge inputs. Records use 8-word chunks (7 words in each final chunk): 88 data records plus one completion record; the parser checks format only. `MEASURED` on 2026-10-15 (`22b027f6`). |
+| `registry-font` | `PSP-REGISTRY-002` | Read-only walk of `/DATA/FONT` (with `PROPERTY/INFO<n>`) and `/SYSPROFILE/RESOLUTION`: whether the registry handle lists the root (`font-category-0000`), then every key's name, type, size, value and enumeration order (`font-category-*`, `font-key-*`), and `font-registry-done` with the record, open and refusal counts. **CAPTURED** on 2026-11-10 (PSP-3000, boot 174, `979c6a1dd`; 3 records, `font-category-0000` FAIL, not acceptance-eligible): `sceRegGetKeysNum` on the registry handle returned `0x8008272E`, so no category was opened and no subtree was walked. |
+| `umd-io` | `PSP-UMDIO-001` | Fixed lists of `sceIoOpen` (`PSP_O_RDONLY`, or `PSP_O_RDONLY` with the `0x000f0000` bits a title passes for `umd0:`) and `sceIoDopen` paths: `umd0:`, `umd1:`, `umd:`, `umd0:/`, `umd1:/`, `disc0:` with and without a path, and `msstor0p1:/` (`io-open-*`, `io-dopen-*`, each with its close result), with `sceUmdCheckMedium`/`sceUmdGetDriveStat` before and after (`umd-state-*`). |
+| `umd-raw-read` | `PSP-UMDRAW-001` | Read-only raw UMD seeks and reads: 64-bit and 32-bit offsets, position advance, byte/sector-16 comparison, fixed read sizes through 32,768 bytes, unaligned and far-past-end reads, one async read/poll/wait, and getstat. The first eight bytes of designated sector-16 reads are the only disc bytes recorded; wait completes before close. Hardware capture is incomplete at the 32,768-byte cell; no console semantics are measured. |
+| `hle-vtimer-unit` | `PSP-HLE-VTIMER-002` | One VTimer: start; a `sceKernelGetVTimerTime` and a system-clock reading either side of a bounded 20 ms delay; the VTimer base and Refer base field while running and after stop; stop; delete. Each 64-bit clock is recorded as its low word then its high word. |
+| `hle-vtimer-errors` | `PSP-HLE-VTIMER-003` | Start, stop, and `sceKernelGetVTimerTime` on a deleted UID, then a cleanup delete of that UID after its last use; a live timer created and deleted; up to 64 creates; out1 records whether a refusal occurred; every created timer deleted. The NULL option pointer of `sceKernelCreateVTimer` is the optional argument. |
+| `hle-kernel-pool-bounds` | `PSP-HLE-KERNEL-STATUS-002` | FPL creation with block size 0 and with a 0x7fffffff-byte block, each deleted when its create returned a pool; a refused create gives a PASS delete cell with out0 0 and no delete call; VPL allocation: up to 64 allocations; out1 records whether a refusal occurred; every block freed and the VPL deleted. The NULL option pointers of the pool creates are the optional argument. **MEASURED** on 2026-11-10 (PSP-3000, boot 173, `979c6a1dd`; 9 records, all PASS, acceptance-eligible). |
+| `hle-power-float-v0` | `PSP-HLE-POWER-002` | Raw `$v0` and `$f0` bits of `scePowerGetPllClockFrequencyFloat`, `scePowerGetCpuClockFrequencyFloat`, and `scePowerGetBusClockFrequencyFloat`, one call each, through a short assembly wrapper. |
+| `hle-null-out-pointers` | `PSP-HLE-NULL-OUT-001` | Retired and never to be scheduled. The captured run stopped at `sceKernelReferSystemStatus(NULL)` and required a power cycle. The kernel pointer check does not reject address 0, so the call writes through NULL and faults; the VTimer getters also write through their output pointers. No game can rely on these results. |
+| `hle-audio-src` | `PSP-HLE-AUDIO-SRC-001` | No-reservation release/output, a 1024-sample/44100-Hz/stereo reservation, second reserve, one silent output block, release after drain and release again; six invalid shapes with immediate release on unexpected success; Output2/SRC reservations in both orders with cleanup. One launch, 18 result records, `MEASURED` on 2026-10-15 (`7fc1641e`); the public NID corpus has no SRC rest-sample query. |
+| `hle-timer-order` | `PSP-HLE-TIMER-ORDER-001` | Same-delay A/B alarms, longer-then-shorter alarms, a nominally equal VTimer/alarm pair, and SetAlarm(0); each callback stores one shared sequence number and system-time low/high words. Waits are bounded and all alarms are canceled; the VTimer is stopped and deleted. Ordering only, no absolute-time claim; one launch, `MEASURED` on 2026-10-15 (`22b027f6`). |
+| `hle-savedata-getsize` | `PSP-HLE-SAVEDATA-GETSIZE-001` | #308: savedata mode 22 for a save that does not exist, under the probe-owned names `NKPROBE01` and `GETSIZE`, driven as a game drives it (GetStatus once a vblank, `Update(1)` while running, ShutdownStart once finished, at most 1200 polls): one secure entry that fits, no entries, one secure entry larger than the Memory Stick, and a NULL `sizeInfo`, last. Each dialog records InitStart's return, the common result word, the bind word, the status sequence and the 15 `sizeInfo` words, preset so that an unwritten word shows. `sceIoGetstat` of the save directory before and after each dialog, and one volatile-memory TryLock and Unlock before the first. A directory that is not absent makes COMPLETE report FAIL, and the host contract refuses the stream. Read-only on the Memory Stick; no dialog UI, no button press. One launch in game context, 10 result records, `MEASURED`. |
+| `hle-savedata-nodata` | `PSP-HLE-SAVEDATA-NODATA-001` | Case 180: savedata modes on a save that is not there, under the probe-owned game name `NKPROBE01`, driven as a game drives it (GetStatus once a vblank, `Update(1)` while VISIBLE, ShutdownStart once at QUIT, at most 1200 polls). State A, no directory (`NODIR`): modes 0, 8, 11, 12, 15, 16, 19, 20, 21, 9 and 22 (the GETSIZE control). State B, `ms0:/PSP/SAVEDATA/NKPROBE01NOSFO`, which the probe makes with one 16-byte `DATA.BIN` of its own and no `PARAM.SFO`: modes 0, 8, 11, 12, 15, 16, 20, 21 and 9, then the probe removes its file and the directory. State C, `NKPROBE01DATA` made by AUTOSAVE (1 KiB of probe pattern bytes, a synthetic 16-byte key, SFO strings `NK probe`, no icons): modes 0, 8, 11, 12, 15, 20 on a file not in the save, then 9; if the directory is still there the probe removes each regular file in it and the directory. Each dialog records InitStart's return, the common result word, the bind word, the status sequence, `sceIoGetstat` of the save directory before and after, and the mode's output words (dataSize and the read buffer, the SIZES blocks, the LIST `idList` entries, the FILES counts and entries, the GETSIZE `sizeInfo`), each preset so that a word left untouched shows. Last, LOAD (mode 2) and DELETE (mode 10) of `NODIR`: these may show a system dialog; owner present to press a button (cross). Each is polled for under 30 s (1790 vblanks); one still VISIBLE at the bound records TIMEOUT and gets one ShutdownStart, and after any TIMEOUT no further savedata call is made (later dialog cells are SKIP). When any `NKPROBE01*` save directory exists at start, every cell is SKIP and nothing on the Memory Stick is touched. Game context only: under the XMB a dialog stays at INIT. One launch, a runner `--timeout` of at least 240 s, 34 result records. **CAPTURED** on 2026-11-10 UTC (PSP-3000, boot 183, game context, `dbb47db4`; 35 records, 34 PASS and 1 SKIP; `nodir-load` stayed VISIBLE to its bound, `nodir-delete` did not run, and the console needed a power cycle; not acceptance-eligible), so no hardware result is claimed. No probe directory was left on the Memory Stick. |
+| `hle-io-trunc` | `PSP-HLE-IO-TRUNC-001` | Case 105, built from `probe_hle_measure.c`. #1892: `PSP_O_TRUNC` on one probe-owned Memory Stick file, `ms0:/NKTRUNC.BIN`, refused untouched if it exists: what a truncating open shows through the same descriptor (size, seek, read, a seek-and-write), after a close without a write, and beside a second descriptor; then the file is removed twice. Every word is an observation. Writes and removes only that file. One launch in game context. **MEASURED** on 2026-11-02 (PSP-3000, boot 107, `08934592f`; 9 records, all PASS, acceptance-eligible). |
+| `hle-issues-batch` | `PSP-HLE-ISSUES-001` | Built from `probe_hle_issues.c`. #356: `kuKernelGetModel` and the `SysMemUserForUser` `sceKernelGetModel` import (NID `0x6373995d`, a hand-written stub) twice each through a wrapper that presets `$v0` to `0xA5A5A5A5`, each row recording the returned `$v0`, the stub's two words after loading and the firmware word; then the kernel getter (`SysMemForKernel` NIDs `0x07c586a1` and `0x6373995d`) found with `sctrlHENFindFunction` and called through `kuKernelCall` only when its address lies in kernel RAM. #326, two passes: `vscmp` at every width and the same-register form over six NaN, infinity, signed-zero and denormal operand sets, then one `vrndi.s` step from each of 2 x 448 written RCX states. One launch, 1858 result records. **MEASURED** on 2026-11-10 (PSP-3000, boot 172, `979c6a1dd`; 1858 records and the done record, all PASS, acceptance-eligible). |
+| `hle-intr-cells` | `PSP-HLE-INTR-001` | Built from `probe_hle_issues.c`. #325: three VTimer handlers and two alarm handlers that return a reschedule interval and then 0 (each call's sequence number, scheduled and actual VTimer time and system time); a VBLANK sub-interrupt handler in the first free slot of 0..15, counted while free, across 20 ms, 50 ms and 20 ms `sceKernelCpuSuspendIntr` windows, and while one entry holds for 25 ms. Every VTimer is stopped and deleted, every alarm cancelled, every suspension resumed, and the handler disabled and released whenever a slot was registered. One launch, at most 72 lines (57 result records), `MEASURED` on 2026-10-29 (`77a1a5e3`). |
+| `vfpu-funnel` | `PSP-VFPU-FUNNEL-001` | Built from `probe_hle_issues.c`. #326, two passes, register-only: the raw result word of `vfad.p/.t/.q` and `vavg.p/.t/.q` (C000 into S200, plus the three words after it, VFPU_CC and a changed-word census of the rest of the register file) over 26 operand sets chosen so that different summation orders and `x / n` against `x * (1 / n)` give different bits (2^24 with three ones and its reverse, 1e30 against -1e30, signed zeros, infinities, quiet and signalling NaNs, denormals, FLT_MAX), each under no S prefix, negate-all and a wzyx swizzle with lanes 0 and 2 negated. One launch, 936 result records, one step per form, pass and size; MEASURED 2026-10-29 at `8d0f75ad` (acceptance-eligible, both passes identical). |
+| `vfpu-sort` | `PSP-VFPU-SORT-001` | Built from `probe_hle_issues.c`. #326, two passes, register-only: the raw result words of `vsrt1.q`, `vsrt2.q`, `vsrt3.q` and `vsrt4.q` (C000 into C200, VFPU_CC and a changed-word census of the rest of the register file) over 24 operand sets that put the compared lane pairs in several positions (ordinary orders, equal values and signed zeros, quiet, negative, signalling and payload NaNs against numbers, infinities, denormals, neighbouring floats), each under no S prefix, negate-all and a wzyx swizzle with lanes 0 and 2 negated. One launch, 576 result records, one step per form and pass; MEASURED 2026-10-29 at `9171f055` (acceptance-eligible, both passes identical). |
+| `vfpu-forms2` | `PSP-VFPU-FORMS2-001` | Built from `probe_hle_issues.c`. #326, two passes, register-only: the raw words of `vrnds.s` (24 seeds from two RCX states, with RCX after the write, after the seed and after one `vrndi.s` draw), `vrndi`, `vrndf1` and `vrndf2` at .p, .t and .q from eight RCX states, `vf2h.p`/`.q` over 28 operand quads and `vc2i.s` over ten byte patterns, the conversions under no S prefix, negate-all and wzyx with lanes 0 and 2 negated. MEASURED 2026-10-29 at `97827132` (docs/HARDWARE_ORACLE.md). |
+| `vfpu-unmodeled` | `PSP-VFPU-UNMODELED-001` | Built case 163 from `probe_hle_issues.c`. #326, two passes, register-only: the raw words of the VFPU forms the runtime refuses as unmodeled. `vsgn.q`, `vt4444.p`/`.t`, `vbfy1.s`/`.t` and `vbfy2.p` under no S prefix and negate-all, `vcrs.s`/`.p`/`.q`, `vcmov` with imm3 7 (four words, VFPU_CC 0x00, 0x3f and 0x15), and `mfvc`/`mtvc` of control 255 with controls 0-15 read before and after. Each image cell records VFPU_CC, a changed-word census and the first 12 changed words; each control cell the GPR and 32 control words. POWER RISK: a refused form may raise an exception that stops the launch (nothing catches it); the control-255 words run last and need the owner present. **MEASURED** on 2026-11-08 (PSP-3000, boot 157, `d1d8558a`; 115 records, all PASS, acceptance-eligible; the PSP needed its watchdog afterwards, so POWER RISK stays). |
+| `vfpu-quad-wb` | `PSP-VFPU-QUADWB-001` | Built case 165 from `probe_hle_issues.c`. #326, two passes: `lv.q` and `sv.q` with the write-back flag (word bit 1) at offsets 0, 16, 32 and -16 from a non-zero, 16-byte-aligned base in the middle of a probe-owned 1024-byte buffer (the base register after each form, the lanes loaded or stored, the buffer address, a changed-word census and the buffer words at base plus offset), then four back-to-back wb `sv.q` at +0/+16/+32/+48 from one base with the base register read after each (does it drift). Raw words only; a step before each form. POWER RISK: the effect of the flag on the console is unknown and nothing catches an exception; the run of four runs last, and the case needs the owner present. **MEASURED** on 2026-11-08 (PSP-3000, boot 159, `ecc203af`; 19 records, all PASS, acceptance-eligible). |
+| `vfpu-convert` | `PSP-VFPU-CONVERT-001` | Built case 170 from `probe_hle_issues.c`. #326, two passes, register-only: the raw result words of the VFPU float/integer conversions the second title executes. `vf2iz.s`/`.q` at scales 0, 1, 8, 15, 16, 23, 30 and 31, `vf2in.s`, `vf2iu.s` and `vf2id.s` at scales 0 and 8, `vi2f.s`/`.p`/`.t`/`.q` at scales 0, 8 and 31, and `vi2s.q`, `vi2us.q`, `vi2c.q` and `vi2uc.q`, under identity prefixes (none issued). Three images of eight operands per kind (floats: +-0, +-0.5, +-1.5, +-2.5, +-1, the neighbours of +-2^31, +-inf, quiet NaNs of both signs, a signalling pattern, +-smallest denormal, FLT_MAX; integers: 0, 1, 2, 0x7fffffff, 0x80000000, 0xffffffff, 16-bit and byte boundary words), one instruction word converting several operands, the eight destination words recorded per cell. One launch, 228 result records, one step per form and pass. Register-only, owner present. **MEASURED** on 2026-11-08 (PSP-3000, boot 160, `266552d0`; 229 records, all PASS, acceptance-eligible). |
+| `vfpu-cc-cmov` | `PSP-VFPU-CCCMOV-001` | Built case 169 from `probe_hle_issues.c`. #326, two passes, register-only, owner present: the raw VFPU_CC words of `vcmp` (all 16 conditions at .s/.q over four operand sets of finite orderings, signed zeros and denormals, infinities and NaNs, each from the presets 0x00 and 0x3f so lane preservation beyond the width shows; VFPU_CC read at once, after a vsync, after a vflush and through a dependent `vcmovt.q` imm3 6), `vcmovt`/`vcmovf` imm3 0-6 at .s/.p/.q (C200 and VFPU_CC after, under nine presets) and `mfvc`/`mtvc` of VFPU_CC (twelve write/readback words). Identity vpfxs/vpfxt before every word, a step marker before each form group, 152 result records. POWER RISK: low; every word is a valid form, but an exception would stop the launch. **MEASURED** on 2026-11-08 (PSP-3000; vcmov, mtvc and mfvc cells on boot 159 of `750c5fb1`, 217 records; vcmp cells re-run on boot 161 of `831d54f0`, 153 records; no exception). |
+| `vfpu-vus2i` | `PSP-VFPU-VUS2I-001` | Built case 171 from `probe_hle_issues.c`. #326, two passes, register-only: the raw result words of `vus2i.s`/`.p` and `vs2i.s`/`.p` (the output is double width: one source lane makes two words, the low half going to the even lane) over twelve source words (0, 1, 0x8000, 0xffff, 0xffff0000, 0x80000000, 0x7fff8001, 0xffff0001, 0x12345678, 0xffffffff, 0x10000, 0x80008000; `.p` takes (word, next word) pairs), of `vsgn.p`/`.t`/`.q` over float lanes (+-1, +-0, 2.5, -3.5, qNaN, +inf, +-smallest denormal, a negative qNaN, a signalling NaN), and three droppable `vflush-*` cells (a pending S prefix negating lane 0, `vflush` 0xffff040d, then `vmov.s` or `vadd.s`, plus a control without the flush). Identity prefixes (none issued) except the vflush cells. Per record: out0-3 = C200 and out4-7 = C000 after the words. One launch, 120 result records, one step per form and pass. Register-only, owner present. **MEASURED** on 2026-11-08 (PSP-3000, boot 164, `3cf15b8c`; 120 records, all PASS, acceptance-eligible; the `vflush-vadd` cells are not interpretable and are not cited). |
+| `vfpu-basic-arith` | `PSP-VFPU-BASICARITH-001` | Built case 168 from `probe_hle_issues.c`. #326, two passes, register-only, owner present: the raw result words of `vadd`, `vsub`, `vmul`, `vmin` and `vmax` at `.s`/`.p`/`.t`/`.q` and `vdiv.s` (all 400 ordered pairs of 20 operand classes, lane-packed into 7 records per form), `vscl.p`/`.q` (every scalar over every operand), `vmov`, `vabs` and `vneg` at `.s`/`.p`/`.q` (the 20 operands) and `vzero`, `vone` and `vidt` (the four C200 words), under no S prefix. The classes are +-0, +-smallest and largest denormal, +-smallest normal, +-1, +-2^127, +-FLT_MAX, +-inf and a quiet and a signalling NaN of each sign with distinct payloads. 358 result records. POWER RISK: `vidt.s` is a form the assembler refuses and may raise an exception that stops the launch (nothing catches it); it runs last, after a durable step marker. **MEASURED** on 2026-11-08 (PSP-3000, boot 166, `187681f0`; 359 records, all PASS, acceptance-eligible, no exception; the vidt.s word did not fault). |
+| `vfpu-wide-dot-matrix` | `PSP-VFPU-WIDEDOT-001` | Built case 173 from `probe_hle_issues.c`. #326, two passes, register-only: the raw result words of `vdot.p`/`.q`, `vhdp.q`, `vcrsp.t`, `vqmul.q`, `vtfm4.q`, `vhtfm4.q`, `vmmul.q` (both source-matrix encodings), `vmscl.q`, `vmzero.q`, `vmidt.q`, `vmone.q`, `vmmov.q` and `vrot.q`, with the source register image words recorded beside the destination words and no prefix issued. Operands are a finite base, one lane (or one diagonal matrix element for the matrix forms) at a time of +qNaN `0x7fc00011`, -NaN `0xffc00022`, sNaN `0x7f800033`, +-inf, +-smallest denormal and -0, and order-sensitive four-term sums (`1, 2^-24, 2^-24, 2^-24`, `2^24, 1, 1, 1`, `1e8, 1, -1e8, 1` and reversals). 366 result records. Every word was accepted by `psp-as`; none was refused. **MEASURED** on 2026-11-09 UTC (PSP-3000, boot 168, `b2271c93`; 367 records, all PASS, acceptance-eligible). |
+| `vfpu-mfv-mtv` | `PSP-VFPU-MFVMTV-001` | Built case 174 from `probe_hle_issues.c`. #326, two passes, register-only: whether any bit of a general-register word changes through `mtv.s` then `mfv.s`. Seventeen words (+0, -0, +-smallest and largest denormal, quiet NaNs `0x7fc00011` and `0xffc00022`, signalling NaNs `0x7f800033` and `0xff800044`, +-inf, FLT_MAX, 1.0, `0xdeadbeef`, `0xffffffff` and a closing +0) go through S000 and again through S733; per pass `mtv-mfv-p<pass>` (result = the mtv S000 word, out0-16 = the read-back words) and `mtv-mfv2-p<pass>` (result = the mtv S733 word). No control register is written. One launch, 4 result records, one step per pass. Register-only, owner present. **MEASURED** on 2026-11-09 UTC (PSP-3000, boot 167, `1301371e`; 5 records, all PASS, acceptance-eligible; every word came back bit for bit). |
+| `vfpu-constants` | `PSP-VFPU-CONSTANTS-001` | Built case 175 from `probe_hle_issues.c`. #326, two passes, register-only: the raw destination words of `vcst.s` and `vcst.q` for every constant index 0-31 over an image of sentinel words (`0x7a5a5a5a`, so an unwritten lane is visible). Per pass `vcst-s-p<pass>` and `vcst-q-p<pass>` (indices 0-19: out = lane 0 (`.s`) or lanes 0-3 (`.q`) per index, then a guard word, the first destination word past the written lanes) and `vcst-s-res-p<pass>` and `vcst-q-res-p<pass>` (the reserved indices 20-31, run last after both passes of the rest). Every cell is an emitted word: psp-as accepts only named constants (indices 1-19) and no numeric index. One launch, 8 result records, one step per record. POWER RISK: a reserved index may raise an exception that stops the launch; run with the owner present. **MEASURED** on 2026-11-10 UTC (PSP-3000, boot 178, `9426722a`; 9 records, all PASS, acceptance-eligible; no reserved index faulted). |
+| `vfpu-round-sep` | `PSP-VFPU-ROUNDSEP-001` | Built case 176 from `probe_hle_issues.c`. #326, two passes, register-only: the raw result words of `vdot.q`, `vmscl.q`, `vmul.s`, `vadd.s` and `vsub.s` over operands whose exact result lies between two float32 values (carry-out sums above 2.0 and 4.0, products of 1+2^-23-style mantissas in all sign pairs), separating round-to-nearest-even from truncation in the multi-term adder and in single products; each cell records its source image words beside the destination words. **MEASURED** on 2026-11-09 UTC (PSP-3000, boot 169, `f50333e8`; 15 records, all PASS, acceptance-eligible). |
+| `vfpu-prefix-state` | `PSP-VFPU-PREFIX-001` | Built case 182 from `probe_hle_issues.c`. #326, two passes, register-only: the raw result words of `vadd.q`, `vmul.q`, `vdot.q`, `vmin.q` and `vmov.q` under six non-identity `vpfxs` words (swizzle, abs, negate, the eight constants) and five `vpfxt` words, and of `vadd.q`, `vmov.q`, `vneg.q`, `vzero.q` and `vidt.q` under four `vpfxd` words (write mask, saturate [0:1] and [-1:1]), over a finite, a NaN/inf/denormal/-0 and a mixed operand set; whether a pending `vpfxs` survives `vnop`, `vsync`, `vflush`, a taken branch, `add.s`, `mtv`, `mfv`, `lv.q`, `vpfxt` or `mfvc` and is consumed after one VFPU instruction (and `vpfxd` across `vnop`, `vsync`, `vflush`), with VFPU_PFXS/PFXT/PFXD read by `mfvc` before, between and after; and `vfim.s`/`viim.s` result words with and without a pending `vpfxd`. 198 records plus the done record. **MEASURED** on 2026-11-10 UTC (PSP-3000, boot 175, `48cea955`; 199 records, all PASS, acceptance-eligible). |
+| `vfpu-wider-ops` | `PSP-VFPU-WIDEROPS-001` | Built case 183 from `probe_hle_issues.c`. #326, two passes, register-only: the raw result words of `vdiv.p`/`.t`/`.q` over the 20 operand classes of `vfpu-basic-arith` against 1, +0, +inf, qNaN and the smallest denormal; `vsin`, `vcos`, `vrcp` at `.p`/`.t`/`.q`, `vrsq.q`, `vsqrt.q`, `vocp.s`/`.q` over the 20 special encodings of the transcendental corpus; `vdot.t`, `vhdp.p`/`.t`, `vscl.t`, `vcrs.t`, `vmmul.p`/`.t`, `vtfm2.p`, `vtfm3.t`, `vhtfm2.p`, `vhtfm3.t`, `vmscl.p`/`.t`, `vmmov.p`/`.t` (a finite order-sensitive cell and a NaN, an inf and a denormal cell each) and `vmidt`/`vmzero`/`vmone` at `.p`/`.t`; `vidt.q` and `vidt.p` into every legal column and row register of M200, `vzero.t` and `vone.t`. 222 records plus the done record. **MEASURED** on 2026-11-10 UTC (PSP-3000, boot 176, `9426722a`; 223 records, all PASS, acceptance-eligible). |
+| `vfpu-reserved-widths` | `PSP-VFPU-RESERVED-001` | Built case 184 from `probe_hle_issues.c`. #326, two passes, register-only. POWER RISK: reserved encodings; owner present. The raw M200 and C000 words after the hand-encoded `vus2i.t` (`0xd03a8008`), `vus2i.q` (`0xd03a8088`), `vs2i.t` (`0xd03b8008`) and `vs2i.q` (`0xd03b8088`) words, which psp-as refuses, each behind its own step marker over a sentinel image; `vdiv` has no reserved width, so none is run. A reserved word may raise an exception that stops the launch; run it last, in its own launch. 8 records plus the done record. **MEASURED** on 2026-11-10 UTC (PSP-3000, boot 182, `c6abab53`; 9 records, all PASS, acceptance-eligible; no word raised an exception, and at `.t` and `.q` each form wrote what its `.p` form writes). |
+| `intr-cause` | `PSP-INTR-CAUSE-001` | Built from `probe_hle_issues.c`. #325: COP0 Cause, Status and Count and the Allegrex interrupt-enable word (`mfic $0`), each read in kernel mode by one `kuKernelCall` of a read-only function, with the system time and `sceDisplayGetVcount` after it: four reads with interrupts enabled after a VBLANK start, then per pass (two passes) a read every 1 ms through a 24 ms `sceKernelCpuSuspendIntr` window that starts after a VBLANK start, one read 200 us after the resume and the window summary. Nothing is installed. One launch, 58 result records, `MEASURED` on 2026-10-29 (`2c199df8`). |
+| `ge-clut-mip` | `PSP-GE-MIP-002` | Built from `probe_ge_sample.c`. #1732 multi-CLUT mip sampling cells. **MEASURED** on 2026-11-06 (PSP-3000, boot 134, `2795f150`; 94 records, all PASS, acceptance-eligible). |
+| `ge-weight` | `PSP-GE-WEIGHT-001` | Built from `probe_ge_sample.c`. #343 weighted-vertex formats and weight counts with raw GE output windows. **MEASURED** on 2026-11-06 (PSP-3000, boot 136, `d5fed0ba`; 288 records, all PASS, acceptance-eligible). |
+| `ge-rtt` | `PSP-GE-RTT-001` | Built from `probe_ge_sample.c`. #343 render-to-texture CPU reads, flush variants and output pixels. **MEASURED** on 2026-11-06 (PSP-3000, boot 137, `cb3702cf`; 126 records, all PASS, acceptance-eligible). |
+| `ge-through-z` | `PSP-GE-THROUGHZ-001` | Built case 185 from `probe_ge_sample.c`. One through-mode list per cell (float positions, 8888 vertex colour, no texture): a 16x16 flat sprite into the ge-raster/ge-rtt 64x32 blocks at VRAM 0x100000 (5650 colour) and 0x110000 (16-bit depth, cleared to 0x1234), depth test ALWAYS with depth writes on, at z = -1.0, -0.5, 0.0, 0.5, 1.5, 65535.0, 65535.5, 65536.0, 70000.0 and last +inf and NaN. Per cell the GE wait outcome, the colour pixels written, the changed depth words (count, lowest, highest, first index) and the depth words under the sprite; meant to decide clamp, wrap or a dropped draw, but this revision scans the depth block linearly, so it decides only whether the draw is dropped. **MEASURED** on 2026-11-10 UTC (PSP-3000, boot 180, XMB context, `e4e6a3a2`; 23 records, all PASS, acceptance-eligible): every z, +inf and NaN included, drew all 256 colour pixels, and no word of the depth block read linearly changed, so the stored depth, and clamp or wrap, is not shown. |
+| `ge-raster-bounds` | `PSP-GE-RASTER-002` | Built case 187 from `probe_ge_sample.c`. #2193, five through-mode cells: `raster-512-x511`, `raster-500-x511` and `raster-256-x479` (8888 sprites to x 512 at fbw 512, 500 and 256, scissor x 0..511 or 0..479: are columns past the stride drawn, and do they run on into the next row?), `depth-zbw256-past` (zbw 256: a 512x272 depth-only clear to 0x4000, then a depth-0x0100 sprite at x 256..511, rows 0..9: do depth rows 1..10 read 0x0100?) and `depth-clear-scissor` (a 512x272 depth-only clear under scissor x 0..99: does depth change outside it?). A probe-owned 0x88000-byte VRAM block at 0x110000 (clear of the XMB's display buffers at 0x0 and 0x88000), used only when `sceDisplayGetFrameBuf` shows the display outside it and the GE idles (else every record is SKIP and nothing is touched), saved first and restored at the end; each read is the count of drawn, cleared, fill and other pixels, or 16 raw pixels. **MEASURED** on 2026-11-13 UTC (PSP-3000, boot 214, XMB context, `05aafe975`; 38 records and the done record, all PASS, acceptance-eligible; unattended run): colour written past the frame-buffer width continues linearly (8012 pixels at fbw 500, 500x16+12; 2784 at fbw 256, 256x10+224) and only the scissor clips; drawn 8888 pixels read `0x5a00ff00`, keeping the fill's alpha byte. The depth view read 0 for every word, the depth fill included, so `depth-zbw256-past` and `depth-clear-scissor` are UNDECIDED and not measured (see `docs/HARDWARE_ORACLE.md`). One launch per boot, in XMB context; no network or radio use. Every record is written and closed before the next cell starts, so a stall loses only the cell in flight and the cells after it; the probe-owned block then stays unrestored, which the display check found off screen. The block's ownership is an assumption: the check sees only the buffer on screen, so the probe's fill may show on screen and a VSH write into the block would read as "other". After a reset that leaves the GE busy, every later cell is SKIP and the block is still restored. A launch that ends without its done record: the owner power-cycles the console and nothing is retried on that boot. Development runs of earlier builds on 2026-11-12 (boots 194 and 195) are not results. |
+| `ge-depth-round` | `PSP-GE-RASTER-003` | Built case 188 from `probe_ge_sample.c`. #343, in the `ge-raster` window and record shape: `zr-thru-eq` and `zr-thru-gt` (through-mode depths 32768 plus 0, 0.25, 0.5, 0.75, 255/256, -0.25, -0.5 and -0.75, then the test sprite at 32768.0 with EQUAL or 32768.5 with GREATER) and `zr-xf-eq` (transform-mode window depths of an integer plus 0, 0.25, 0.5 and 0.75 against that integer, EQUAL), read as colour, with a pass-mask record per cell; a 0x1f, 0xe0 or 0xff mask reads "truncate or reduced precision". First recorded use of a GE-context enqueue for both cases: a FAIL on every `-draw` is a rejected enqueue, not a raster result. **MEASURED** on 2026-11-13 UTC (PSP-3000, boot 215, XMB context, `05aafe975`; 18 records and the done record, all PASS, acceptance-eligible; unattended run): the pass masks read 0x1f (`zr-thru-eq`), 0xe0 (`zr-thru-gt`) and 0xff (`zr-xf-eq`) per eight pixels, "truncate or reduced precision" in all three cells; truncation alone is not claimed. One launch per boot, in XMB context; no network or radio use. Every record is written and closed before the next cell starts, so a stall loses only the cell in flight and the cells after it; the colour block at 0x100000 is not restored and lies inside the XMB display buffer seen on boot 194, so a strip at the bottom of the screen may show the probe's pixels until the XMB redraws (main's ge-raster and ge-through-z used the same blocks). After a reset that leaves the GE busy, every later cell is SKIP. A launch that ends without its done record: the owner power-cycles the console and nothing is retried on that boot. Development runs of earlier builds on 2026-11-12 (boots 194 and 195) are not results. |
+| `hle-std-handles` | `PSP-HLE-STDIO-001` | Built from `probe_hle_measure.c`. Standard-handle write and close results; the probe does not read stdin. **MEASURED** on 2026-11-06 (PSP-3000, boot 135, `d5fed0ba`, XMB context; 4 records, all PASS, acceptance-eligible) and again on 2026-11-12 in the game context (boot 200, `3872796c`, ARK-5 5.2.0; same UIDs and writes, the close of Stdout answered `0x80020325` there and `0x800200d1` on boot 135 under ARK-5 5.1.0; which factor decides it is not measured). |
+| `hle-audio-rest` | `PSP-HLE-AUDIO-REST-001` | Built from `probe_hle_measure.c`. RestLen and RestLength after 32 blocking-output calls at 1024, 2048 and 4096 frames. **MEASURED** on 2026-11-06 (PSP-3000, boot 138, `8db3ec9d`; 102 records, all PASS, acceptance-eligible). |
+| `sas-mix` | `PSP-SAS-003` | Built case 155 from `probe.c`. #2135/#2054 synthetic volume, WithMix and pitch cells. **MEASURED** on 2026-11-12 (PSP-3000, boot 197, game context, `3872796c`; 205 records, all PASS, acceptance-eligible; the case unloaded SASCORE and AVCODEC after its done record). The earlier captures (boot 146, `979de58f`; boot 191, `a39f7a14c`) gave the same records but were not acceptance-eligible. |
+| `vcodec-words` | `PSP-VCODEC-001` | Built case 160 from `probe.c`. #286 Media Engine boundary words over synthetic AVC access units. **NOT_RUN**; no hardware result is claimed. |
+| `hle-self-stop-unload` | `PSP-HLE-SELFSTOP-001` | Built case 167 from `probe_hle_measure.c`, with its helper PRX built as case 172 `hle-self-stop-helper` (`probe_hle_self_stop_helper.c`); both PRXs must sit in the host0 directory. #341 `sceKernelSelfStopUnloadModule` from the helper's thread, three argument forms. **MEASURED** on 2026-11-08 (PSP-3000, boot 165, `935f225d`; 6 records, all PASS, acceptance-eligible). |
+| `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | Built case 161 from `probe_hle_measure.c`. #1386 dialog timing and wrong-state cells. **NOT_RUN**; no hardware result is claimed. POWER RISK: captured twice in the game context on 2026-11-12, not acceptance-eligible; a netconf and a gamedata install dialog stayed RUNNING to the poll cap and the console needed a power cycle each time. |
+| `hle-utility-netconf-sharing` | `PSP-HLE-UTILITY-DIALOG-002` | Built case 166 from `probe_hle_measure.c`. #1386 game sharing and netconf dialog timing and wrong-state cells of case 161, game sharing first and netconf last, with no savedata and no gamedata install dialog. **CAPTURED** on 2026-11-13 UTC (PSP-3000, boot 211, game context, `e8b9b0cd5`; not acceptance-eligible), so no hardware result is claimed: game sharing InitStart returned 0 and the dialog stayed RUNNING to the poll cap, a ShutdownStart while RUNNING returned `0x80110001`, the result words read `0x80110703`, the net setup and teardown calls returned 0, and the console needed a power cycle; the netconf cells did not run (see `docs/HARDWARE_ORACLE.md`, "PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13"). **POWER RISK**: case 161's netconf dialog, the same cell, stayed RUNNING to the poll cap on boot 204 and the console needed a power cycle, so netconf-timing is expected to stick here too. A stuck dialog makes every later dialog cell SKIP 5, so game sharing runs first. Each group's net teardown runs on every path, as in case 161, and records each call's return; the console is expected to need a power cycle after this case either way (on boot 204 it followed a teardown that completed). Operator steps: the owner present; the game context (standalone PSPLink entered from the XMB by one owner-present soft reset, as for case 161); the WLAN switch on, its position recorded by the owner (the probe does not read it; with it off the cells record only what the PSP returns then); one launch per boot; after a stuck dialog or a silent PSPLink the owner power-cycles the console before any further launch. Radio: the game sharing dialog is expected to start the PSP's ad hoc radio on its own and may offer 256 project pattern bytes named `NKORACL` to a nearby PSP in receive mode until it is shut down or the console is power-cycled; netconf may scan for access points. No connect call is made and no dialog is answered, so nothing is sent to an access point or any server. |
+| `hle-io-seek` | `PSP-HLE-IO-SEEK-001` | Built case 162 from `probe_hle_measure.c`. #1380 flash0: seeks, sceIoIoctl file commands on ms0: and disc0:, and writes on read-only descriptors. **MEASURED** on 2026-11-08 (PSP-3000, boot 156, `59520eb0`; 30 records, all PASS, acceptance-eligible). |
+| `hle-io-seek-edges` | `PSP-HLE-IO-SEEK-002` | Built case 186 from `probe_hle_measure.c`. #1380 cells `hle-io-seek` left open: flash0: SEEK_CUR (64- and 32-bit) and 64-bit seeks past 0x100000000 and around the high-word boundaries, then on a probe-owned `ms0:/NKIOSK02` file `PSP_O_RDONLY` with `PSP_O_CREAT`, alone and with `PSP_O_TRUNC` or `PSP_O_EXCL`, and `sceIoWriteAsync` on a read-only descriptor with a bounded poll; no disc0: call. **MEASURED** 2026-11-11 (PSP-3000, boot 192, `1a5157e37`, 24 records, acceptance-eligible); see `docs/HARDWARE_ORACLE.md`. |
+| `hle-nickname-limit` | `PSP-HLE-NICKNAME-001` | Built case 164 from `probe_hle_measure.c`. W-NET-1 (#2197), read-only: the `owner_name` key's return, type and size under `/CONFIG/SYSTEM` (opened only after `/CONFIG` listed it as a directory; no `sceRegGetKeyValue`), then the return of `sceUtilityGetSystemParamString(1, ...)` at buffer lengths 0x10, 0x11, 0x20, 0x21, 0x40, 0x41, 0x80 and 0x81 and a summary row (key size, nickname byte length as a number, success mask, agreement counts). No value bytes are recorded or written. **MEASURED** on 2026-11-08 (PSP-3000, boot 155, `07e58170`; 16 records, all PASS, acceptance-eligible). |
+| `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | Modes 2 and 3 are built and now use fresh stream setup per mode. **NOT_RUN**; no new result is claimed. The owner-present rerun on 2026-11-12 (boot 202, game context) again blocked in mode 3's second decode and is not acceptance-eligible (the probe prints the earlier `RC` status). |
+
+### #1375 entry and NULL-code probes
+
+These cases use `probe_hle_issues.c`. `CASE=null-code-registration` records
+`$ra`, `$sp`, `$gp`, `$a0-$a3` and `$t0-$t3` at thread, callback, alarm, VTimer and
+VBLANK sub-interrupt entries, then the NULL registration results for CreateThread,
+CreateCallback, RegisterSubIntrHandler and GeSetCallback. It never enables or queues
+a NULL interrupt/GE handler.
+`null-thread-invocation` and `null-callback-invocation` are separate follow-ups and
+must only run if the entry measurements show user-mode invocation context.
+The 2026-11-01 PSP captures are summarized in `../../../docs/HARDWARE_ORACLE.md`: both NULL
+thread/callback registrations were accepted, and all five entry stubs recorded their
+registers. The P1/P2 envelope is captured but not acceptance-eligible because the
+sub-interrupt and GE non-invocation rows are intentional `SKIP`s. The NULL thread
+follow-up faulted at user EPC 0; the NULL callback follow-up stopped at
+`sceKernelCheckCallback` and the watchdog recovered the PSP without an exception frame.
+The fetch-zero case also captured an exprint frame. The `0x08000000` A3 PRX was refused
+after its transport preflight, and `0x40000000` was not launched, because the recovered
+PSP reported `pspver 6.6.1` instead of the required `6.6.0`. Launches now declare the
+measured `pspver` to the runner. Both fetches were captured on 2026-11-02 at `pspver 6.6.1`
+as instruction bus errors (Cause `0x10000018`, EPC = the target).
+
+### #312 instruction trace
+
+`CASE=insn-trace` records the selected FPU and VFPU registers in the source-owned
+`fpu-state` and `vfpu-state` fixtures, along with the existing GPR, HI/LO and store
+state. `CASE=insn-trace-exception` raises a `break` in a branch delay slot; the
+runner keeps its EPC, Cause, BadVAddr and Status frame from `exprint` in teardown.
+On 2026-11-02 (`pspver` 6.6.1, exact source commit `1fbab0c6`) the `insn-trace` run
+was acceptance-eligible, and all four fixtures' PSP traces agree with Nakagawa's;
+`tools/test_insn_trace.py` pins their digests. The `insn-trace-exception` frame
+(EPC = the branch, Cause `0x90000024`) and the `0x08000000` and `0x40000000` fetch
+frames were captured as diagnostics. See `docs/HARDWARE_ORACLE.md`, "#1375 and #312
+runs 2026-11-02".
+
+The eight `hle-*` rows are single-launch probes built from `probe_hle_measure.c`, and they are
+not in the campaign queue. `hle-savedata-getsize` needs a runner `--timeout` of at least 120 s and
+game context: under the XMB the savedata utility does not leave INIT. `hle-savedata-nodata` (case 180,
+captured once on 2026-11-10, not measured) needs game context too and a runner `--timeout` of at least 240 s, and its last two cells
+need the owner present to press a button. Five cases ran on a PSP-3000 on 2026-10-15 (build `b5d6fc5b`):
+`hle-vtimer-unit`, `hle-vtimer-errors` and `hle-power-float-v0` were measured, and the measured
+index publishes their words; `hle-kernel-pool-bounds` was captured only, and its revised
+form was measured on 2026-11-10 (`979c6a1dd`); `hle-null-out-pointers` did not complete and is retired, never to be scheduled. Cases `hle-audio-src`
+(from `7fc1641e`, after a first run from `22b027f6` that was captured only) and `hle-timer-order`
+(from `22b027f6`) ran on 2026-10-15 and were measured, as was the `vfpu-transcendental-corpus`
+launch from `22b027f6`. The `hle-audio-src` stream is bounded at
+49 progress/result lines (18 result records); `hle-timer-order` is bounded at 39 lines
+(18 result records); the earlier five launches write at most 29 lines (STEP, TEST, META,
+the `-done` record and COMPLETE). At three host0 operations per line plus the six-operation
+round trip, the 49-line launch fits the default 30 s timeout only if each host0 operation
+averages under about 0.2 s (for the 29-line `hle-vtimer-unit` launch, under about 0.3 s;
+that launch was the binding one among the first five). No host0 operation cost has been
+measured, so measure it in the first session and raise `--timeout` for these cases if it
+is higher (the 2026-10-15 session used a 240 s case timeout). The audio case makes two silent
+blocking SRC calls, at most one 1024-sample stereo block each. Timer waits are bounded by
+250 ms elapsed-time deadlines. The VFPU corpus has no host I/O during its instruction span
+and records 89 result records. `hle-null-out-pointers` passes NULL as a mandatory out pointer.
+Risk high: a NULL mandatory out-pointer may fault in kernel mode; schedule last in a session, after every other case. On 2026-10-15 the stream stopped at the first NULL call's step and the console needed a power cycle, so plan one after this case.
+
+The `hle-issues-batch` (106) and `hle-intr-cells` (107) rows are single-launch probes built from
+`probe_hle_issues.c`, outside the campaign queue. They live apart from `probe_hle_measure.c`
+because they do what its families never may: `hle-intr-cells` registers a VBLANK sub-interrupt
+handler, sets VTimer and alarm handlers and suspends interrupts, and `hle-issues-batch` calls a
+kernel getter through the ARK kernel bridge (`-lpspkubridge -lpspsystemctrl_user`). The file
+repeats `probe_hle_measure.c`'s log writer, host0 round trip and module lifecycle unchanged
+(`tools/test_psp_oracle.py` pins both copies), and the Makefile pins each case's extra imports
+with `--exact-library`. `hle-issues-batch` writes 1911 lines (1858 records, 50 steps, the `-done`
+record, META and COMPLETE), so give it a case timeout of several minutes; the VFPU cells write one
+step per operand set or carry-grid row, never inside a cell. `hle-intr-cells` writes no step inside
+a timed window or a handler; its stream length depends on how many handler calls the console
+made, and `parse_hle_intr_cells_output` reads those counts from the stream and checks the probe's
+own bookkeeping. `hle-intr-cells` was measured from `77a1a5e3` on 2026-10-29 and `hle-issues-batch` from
+`979c6a1dd` on 2026-11-10. `intr-cause` (120) also links the kernel bridge
+(`-lpspkubridge`, `kuKernelCall` only); its reader runs in kernel mode and only reads COP0 and the
+interrupt-enable word, and no host0 write happens while interrupts are suspended.
+
+The registry case opens the registry and every category in read mode. It never
+calls a set, create, remove, or flush API. It records values only for the
+runtime-modeled keys `language`, `button_assign`, date/time format, `timezone`,
+`summer_time`, and `adhoc_channel`; all other keys contribute only name, type,
+and size. Registry and console-specific capture output stays in the private
+campaign output directory.
+
+The font-registry case (`registry-font`) runs the walk in `registry_walk.h`.
+Opening a missing category creates it on the console, so the walk never opens
+a category by a literal path:
+
+- The root is listed through the registry handle (`sceRegGetKeysNum` and
+  `sceRegGetKeys` take no name, so they cannot create anything). If the handle
+  does not list the root, nothing is opened. The listing counts as the root only
+  if it shows `CONFIG`, the one root category already measured, as a directory
+  (`font-registry-done` `out6`); otherwise no root child is opened.
+- A category is opened only after its already-open parent listed it,
+  `sceRegGetKeyInfo` on that parent reported a directory, and its name is 1 to
+  25 bytes of `[A-Za-z0-9_.-]`. Its path is the parent's path plus that name.
+- Only `/DATA`, `/DATA/FONT` and below, `/SYSPROFILE`, and
+  `/SYSPROFILE/RESOLUTION` and below are entered. Values are read only inside
+  `/DATA/FONT` and `/SYSPROFILE/RESOLUTION`; other keys record name, type and
+  size.
+- Keys per category (64), depth (6), categories opened (96) and value size
+  (1024 bytes) are bounded, and every buffer is static.
+
+`registry_walk_host.c` runs the same walk against a fake registry that creates
+a category on a missing open, as the console does; `tools/test_psp_oracle.py`
+replays its call log against these rules. The Makefile passes
+`--exact-library sceReg=...` to `tools/psp_oracle/user_mode_imports.py` for both
+registry cases, so a build fails unless the probe imports exactly the eight
+read calls; the gate also refuses any other `sceReg` NID in every probe.
+
+The open-list case (`umd-io`, `umd_io.h`) never activates, deactivates or reads the
+UMD: the Makefile pins its `sceUmdUser` imports to `sceUmdCheckMedium` and
+`sceUmdGetDriveStat`. It opens with read-only flags only, performs no descriptor data
+operations, closes every descriptor, and behaves the same with or without a UMD inserted.
+
+The raw-read case (`umd-raw-read`, also in `umd_io.h`) opens only `umd0:` with
+read-only flags. It reads at most 32,768 bytes per call and records only return values, seek
+words, byte counts, and the first eight bytes of designated sector-16 reads with a zero flag.
+It polls an async read once and waits once before closing. It never writes through or changes
+the UMD descriptor; the host harness uses a synthetic disc and makes no claim about console
+semantics. The 2026-10-17 capture stopped before the 32,768-byte cell returned; behavior remains
+unmeasured. The last marker precedes that cell's seek/read pair, so it does not identify which
+call stopped returning. The current source marks each seek and read separately; it has not been
+rerun. Another launch requires a fresh physical power-cycle.
+
+The font-file case (`font-files`, `PSP-FONTFILES-001`, `font_files.h`) is not in
+the campaign queue; it runs only on the maintainer's request. It lists
+`flash0:/font` (falling back to `flash0:/font/`; if neither opens it records both
+results and stops), opens each regular file `PSP_O_RDONLY`, and copies it to
+`host0:/fonts/<name>` in 64 KiB chunks. Each copy is verified by SHA-256 over
+the flash0 read, a host0 read-back and a second flash0 read (`font-copy-*`
+`out8` bits). Only names of 1 to 63 bytes of `[A-Za-z0-9_.-]` not starting with
+`.` and files up to 16 MiB are copied; other entries are recorded and skipped.
+Nothing writes to `flash0:`. The copies and digests are the maintainer's private
+evidence and are never committed. Inside `font_files.h` the copies' opens track
+only their descriptors, so probe teardown keeps the copies (`docs/HARDWARE_ORACLE.md`
+has the 2026-11-11 runs). `io_cases_host.c` runs both cases against a fake file
+system for the tests in `tools/test_psp_oracle.py`.
+
+The font-list case (`font-list`, `PSP-FONTLIST-001`, `font_list.h`) is not in the
+campaign queue; it runs only on the maintainer's request, with a user-mode
+`sceLibFont` module resident (loaded through PSPLink before the launch). In the
+2026-10-15 run PSPLink could not start the firmware's own copy from `flash0:`, so
+the operator loaded a `sceLibFont` module from their own software on `host0:`;
+that module is private input and is never committed. The case asks
+that library for the system font list the way a title does: `sceFontNewLib` with a
+static arena allocator and no file callbacks, `sceFontGetNumFontList`,
+`sceFontGetFontList`, one `sceFontGetFontInfoByIndexNumber` per index (at most 64),
+then `sceFontDoneLib`. Each entry's 168 raw bytes are recorded as `raw_hex` with
+words 0-7 and 40-41 as `out0`-`out9`. The probe imports exactly the five
+`sceLibFont` calls and nothing from `sceReg` (the import gate fails the build
+otherwise), opens no font and no file, and writes only its host0 log. Font names
+and file names inside the entries are console strings and stay in that private
+log. `io_cases_host.c` (mode `fontlist`) runs the case against a fake font library
+for the tests in `tools/test_psp_oracle.py`.
+
+The host campaign plan requires one staged PRX for each queued case. It launches
+one PRX per boot and issues a PSPLink soft reset between completed cases. The
+queue starts with `transport-write`, then runs the new cases in the table
+order, then every remaining README `NOT_RUN` probe: `smoke`,
+`thread-exit-delete`, `teardown-test`, `io-matrix`, `display-mask-duty`,
+`display-wait-late`, `display-wait-priority`, `display-vblank-window`,
+`fpu-vector`, `cache-alias`, `audio-query`, `ge-nan`, `dma-cells`, the five
+`dma-invalid-tail-*` launches, and the four `mutex-*` launches. `delay-zero` is
+not queued because it is already measured.
+
+The private plan is a schema 1 JSON object with these fields: `campaign_id`,
+`session_id` (the hardware lock holder), `source_commit`, `console_model`,
+`host0_root`, `report_path`, `checkpoint_path`, and the ordered `cases` (each with
+`case_id`, `prx`, and `timeout_seconds`). The optional `expected_firmware` is
+compared exactly with PSPLink's `pspver` version, so it must use that form:
+`6.6.1` for firmware 6.61. Validation refuses `6.61` and any other form. The
+optional `model_code` is the raw non-negative PspModel integer.
+
+Validate the private queue offline before a hardware session:
+
+```powershell
+python tools/psp_oracle/run_psplink.py --campaign-plan <private-campaign-plan.json> --dry-run
+```
+
+The actual campaign requires the hardware lock to be `HELD` by the session in
+the private plan. The lock must also contain a fresh `device_state_attestation`
+for that same session. The record has schema 1, a non-negative `boot_number`,
+`qualification_result` equal to `QUALIFIED`, a UTC `qualified_at_utc`, the
+matching `session_id`, and a `watchdog_state` with the same boot number and
+`healthy: true`, a boolean `armed`, and a non-negative integer `remaining_s`.
+Here `healthy` means the watchdog is running without disabled, crashed,
+exhausted, or low-battery flags. The separate `healthy_uptime_reached` field
+preserves the watchdog's 600-second boot-loop-counter milestone.
+Its qualification time must be no earlier than the lock's
+`acquired_utc`, no more than 30 minutes old, and no more than five seconds in
+the future. Every mode that touches the PSP goes through the same lock gate.
+`--campaign-case` and `--command` require `--session-id`, which names the lock
+holder. The gate is checked before the USBHostFS transport starts, and it is
+read again before each case's soft reset, before each launch, and before every
+PSPLink `reset`. A refusal stops with `HARDWARE_LOCK_REFUSED` before the next
+PSP action. In plan mode it keeps the checkpoint at the unlaunched case.
+
+After an interrupted case, the checkpoint records its attested boot number.
+The campaign resumes automatically only when the held session provides a fresh
+qualified device-state record with a strictly higher boot number. The former
+`--confirm-power-cycle` override is removed; a person's confirmation alone
+cannot identify which boot ran the interrupted case. A missing, stale,
+wrong-session, unqualified, or same/older-boot record fails closed. No automatic
+retry or semantic result is inferred from a host timeout.
+
+The checkpoint never loses its resume position. A stop before the next case is
+launched, such as `TRANSPORT_START_FAILED` or a failed baseline snapshot, leaves
+the checkpoint `IN_PROGRESS` at that case and needs no newer boot. Only a
+launched case without a clean completion, or a failed soft reset, waits for a
+new qualified boot. The checkpoint also records whether
+the `transport-write` preflight qualified host0; a campaign resumes past the
+preflight only when it did, and an interrupted preflight resumes at
+`transport-write`. Interrupted cases accumulate in `interrupted_cases`.
+
+The runner waits for each case's host0 log until the probe appends its
+completion marker, which every probe writes after its last record. A slow stream
+keeps the wait open up to the plan's `timeout_seconds` for that case; for example,
+the registry census writes hundreds of records and a durable step marker before
+each risky call. Once the marker arrives the stream is final, and the runner
+checks the records against their contract. A finished stream that violates its
+contract is torn down normally and its envelope names the protocol failure, so it
+is not mistaken for an unfinished probe. Only a stream without a marker at the
+timeout (or a failed launch) stops the queue. That stop reason gives the record
+count, the time of the last host0 write after launch, and the last step marker.
+
+A host-side exception never crashes the queue. The case ends as `HOST_ERROR`, and
+the report's `host_error` names the exception type, the raising function and the
+message. If the probe was launched, the runner still unloads it and compares S2
+with S0. A verified-clean teardown records the case as interrupted and keeps the
+checkpoint `IN_PROGRESS` at the next case. Any other outcome stops and needs a
+newer qualified boot record to resume. Verbatim console captures from the
+2026-10-08 session under `tests/fixtures/psp_oracle_captures/` pin the parsers and
+runner stages against real probe output.
+
+## Build and hardware handoff
+
+### Device build identity
+
+The main `probe.c` reports its full `PROBE_BUILD_COMMIT_FULL` Git object id in
+`source_commit`. The Makefile requires that id to resolve to the checked-out
+`HEAD` and refuses to build from a dirty source tree. The host binds only a full
+40- or 64-digit hexadecimal object id, using case-insensitive equality; a short
+hash prefix is `IDENTITY_NOT_BOUND`, never a match. A different full id is
+`IDENTITY_MISMATCH`, and either status blocks acceptance while preserving the
+device's reported value in the envelope.
+
+The probe cannot hash its own loaded PRX, so `binary_sha256` remains zero on the
+device. The host records the staged PRX digest as a host measurement and labels
+the binary binding `PLACEHOLDER`; this does not replace the separate device
+`source_commit` comparison.
+
+Build when PSPDEV is installed:
+
+```powershell
+make -C tests/fixtures/psp_oracle
+```
+
+For example, to build the callback case in WSL with PSPDEV:
+
+```bash
+make -C tests/fixtures/psp_oracle clean
+make -C tests/fixtures/psp_oracle CASE=callback-notify-check EBOOT.PBP
+```
+
+To build the complete DMA matrix without running it:
+
+```bash
+for case in dma-concurrency dma-invalid-tail-s0 \
+  dma-invalid-tail-memcpy-dst dma-invalid-tail-memcpy-src \
+  dma-invalid-tail-try-dst dma-invalid-tail-try-src; do
+  make -C tests/fixtures/psp_oracle clean
+  make -C tests/fixtures/psp_oracle CASE="$case" EBOOT.PBP
+done
+```
+
+The loop above deliberately overwrites the ignored build output. A hardware
+operator must build, launch, and capture each case before moving to the next;
+do not use the loop as a hardware runner. Start with `dma-concurrency`. Run the
+four invalid-tail cases separately only after confirming the expected PSP
+model/firmware and a working PSPLink reset path.
+
+The expected output is a PRX under the fixture's ignored `build/` directory.
+Signing, PSPLink launch, and USB/driver setup remain explicit maintainer
+actions. No firmware or driver installer is part of this repository.

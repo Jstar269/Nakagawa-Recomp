@@ -193,8 +193,8 @@ DEBT_BUDGETS: dict[str, int] = {
 #: tracked script missing from this map may not use SilentlyContinue at all, so the
 #: total ceiling above is the sum of these entries.
 POWERSHELL_SILENTLY_CONTINUE_INVENTORY: dict[str, int] = {
-    "nk_manager.ps1": 24,
     "tools/copy_build_assets.ps1": 3,
+    "tools/nk_manager.ps1": 24,
     "tools/nk_safety.ps1": 11,
     "tools/test_manager_safety.ps1": 3,
     "tools/test_visual_oracle.ps1": 3,
@@ -202,13 +202,12 @@ POWERSHELL_SILENTLY_CONTINUE_INVENTORY: dict[str, int] = {
     "tools/vulkan_sdk.ps1": 1,
 }
 
-#: A script that is moving keeps its ceiling at its new path. The trusted audit of a pull
-#: request is the default branch's copy, so the new path has to be known here before the
-#: move lands; the move itself renames the inventory key, empties this map and renames the
-#: "nk_manager.ps1" label the total-ceiling finding carries in ``_debt_budget_findings``.
-POWERSHELL_SILENTLY_CONTINUE_MOVES: dict[str, str] = {
-    "tools/nk_manager.ps1": "nk_manager.ps1",
-}
+#: A script that is moving keeps its ceiling at its new path (new path -> inventory key). The
+#: trusted audit of a pull request is the default branch's copy, so the new path has to be
+#: known here before the move lands; the move itself renames the inventory key, empties this
+#: map and renames the script's label on the total-ceiling finding in
+#: ``_debt_budget_findings``. Empty: no script is moving.
+POWERSHELL_SILENTLY_CONTINUE_MOVES: dict[str, str] = {}
 
 # A `uses:` key, not the tail of another key such as `statuses: write`.
 ACTION_USE = re.compile(r"(?<![\w-])uses:\s*([^\s#]+)")
@@ -1909,7 +1908,7 @@ def _debt_budget_findings(repo_root: Path = ROOT, paths: list[str] | None = None
     ceiling = DEBT_BUDGETS["powershell_silently_continue"]
     if ps_count > ceiling:
         findings.append(
-            Finding("DEBT_BUDGET", "nk_manager.ps1",
+            Finding("DEBT_BUDGET", "tools/nk_manager.ps1",
                     f"PowerShell SilentlyContinue count {ps_count} exceeds debt ceiling {ceiling}")
         )
 
@@ -2265,7 +2264,7 @@ def _default_provenance(
 
     # android/ is the Android host target (#360): Gradle, NDK, Java and manifest
     # sources of the same project, admitted like any other path.
-    if rel_path.startswith(("src/", "tools/", "mk/", "assets/", "fixtures/", "tests/fixtures/", "docs/", "android/")) or ext in SOURCE_EXTENSIONS or ext in (".md", ".txt", ".json", ".jsonc", ".yml", ".yaml", ".toml", ".ps1", ".glsl") or rel_path in ("Makefile", "pyproject.toml", "nk.ps1", "nk_manager.ps1"):
+    if rel_path.startswith(("src/", "tools/", "mk/", "assets/", "tests/fixtures/", "docs/", "android/")) or ext in SOURCE_EXTENSIONS or ext in (".md", ".txt", ".json", ".jsonc", ".yml", ".yaml", ".toml", ".ps1", ".glsl") or rel_path in ("Makefile", "pyproject.toml", "nk.ps1"):
         gen_kind = "documentation" if (rel_path.startswith("docs/") or ext == ".md") else ("data" if ext in (".json", ".jsonc", ".dat") else ("script" if ext in (".ps1", ".sh") else "source"))
         return "project_authored", "GPL-2.0-or-later", "NOTICE.md", gen_kind, "included", policy_public
 

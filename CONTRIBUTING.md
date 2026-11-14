@@ -233,7 +233,7 @@ Two more routes also need no game:
 - `mingw32-make production-smoke`, `platform-ladder` and `cosim-selftest` exercise the two-phase pipeline,
   relocations, the scheduler and AOT-versus-interpreter parity on synthetic inputs
   ([docs/SETUP.md](docs/SETUP.md#public-synthetic-verification-routes)).
-- The source-owned PSP demos and the oracle fixtures under `fixtures/` build with PSPDEV, the PSP toolchain,
+- The source-owned PSP demos and the oracle fixtures under `tests/fixtures/` build with PSPDEV, the PSP toolchain,
   which on Windows runs inside WSL 2 (`mingw32-make showcase showcase-smoke`; setup in
   [docs/SETUP.md](docs/SETUP.md#showcase-demos-on-windows-wsl-2-and-pspdev)). They need no disc either.
 
@@ -242,7 +242,7 @@ machine because it also runs heavy native fixtures. Hosted CI runs it in shards 
 landing batch, and on a pull request that runs the full checks. So run only the modules for the files you
 changed.
 
-What does need your own copy of a game: building or running a title (`nk_manager.ps1 -Action BuildFull` with a
+What does need your own copy of a game: building or running a title (`tools/nk_manager.ps1 -Action BuildFull` with a
 title manifest, the library sweep, `make verify` and the private-title routes) and matching work in a
 decompilation project. What needs a physical PSP is labelled `needs-psp-hardware` and you can skip it. Issues
 labelled [`no-disc-needed`](https://github.com/Jstar269/nakagawa-recomp/labels/no-disc-needed) are written to be done entirely with the commands above.
@@ -314,7 +314,7 @@ selection cannot drift from the hosted one. Set `CONTRIB_BASE` to measure agains
 Run checks proportional to the change:
 
 ```powershell
-.\nk_manager.ps1 -Action Test  # uses the public synthetic manifest by default
+.\tools\nk_manager.ps1 -Action Test  # uses the public synthetic manifest by default
 mingw32-make --no-print-directory native-core-tests  # runtime change
 mingw32-make --no-print-directory display-smoke      # codegen/pipeline change: full build of a synthetic fixture, no game needed
 python -m unittest tools.test_<name>                 # each Python test module that matches a file you changed
@@ -345,7 +345,7 @@ when hosted CI cannot
 ([what hosted CI does not run](docs/CI.md#what-hosted-ci-does-not-run)).
 
 To rebuild a game you own, pass its local title manifest:
-`.\nk_manager.ps1 -Action BuildFast -TitleManifest <your manifest> -GameName <name>` for a runtime-only change, or
+`.\tools\nk_manager.ps1 -Action BuildFast -TitleManifest <your manifest> -GameName <name>` for a runtime-only change, or
 `-Action BuildFull` after a codegen or pipeline change ([docs/SETUP.md](docs/SETUP.md#3-build)). The repository
 carries one retail manifest, Hot Shots Tennis (`assets/titles/hst-ucus98701.json`); a manifest for any other
 retail game stays local unless a maintainer admits it as a public path.

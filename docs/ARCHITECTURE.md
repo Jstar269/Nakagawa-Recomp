@@ -131,7 +131,7 @@ report is an optimizing IR or a production HST switch.
 
 `assets/titles/synthetic.json` and `synthetic-title2.json` carry the source-owned
 `psp-core-v1` / `profile-zero-v1` contract. Their shared PSPDEV fixture points to
-`fixtures/profile_zero`; each acceptance case names `profile-zero-e2e` as its
+`tests/fixtures/profile_zero`; each acceptance case names `profile-zero-e2e` as its
 proving gate and retains its declared evidence class. That gate drives both
 manifests through ProgramImage, analyzer/AOT package generation, and the headless
 production runtime. The fixtures cover the public source route only; broader
@@ -187,6 +187,7 @@ compile, and execute the header; no retail input is required.
 ```text
 NakagawaRecomp/
 ├── tools/              # Python offline compilation, verification, and audit tooling
+│   └── nk_manager.ps1  # Canonical build/run/inspection orchestration
 ├── src/
 │   ├── core/           # Shared native library, title, and launch services
 │   ├── player/         # Native player UI and setup staging
@@ -199,7 +200,6 @@ NakagawaRecomp/
 ├── build/              # Generated build output (Git-ignored)
 ├── docs/               # Maintained documentation and dated investigation records
 ├── Makefile            # Build driver
-├── nk_manager.ps1      # Canonical build/run/inspection orchestration
 ├── nk.ps1              # Simple build, doctor, and play entry point
 └── README.md           # Project entry point
 ```
@@ -511,7 +511,7 @@ The `all` target intentionally invokes Make twice:
 
 `mingw32-make production-smoke` generates a deterministic PSP-shaped ELF/PRX fixture under
 `build/production-smoke/`, then enters the ordinary two-phase `all` target with `PUBLIC_SAFE=1`.
-The fixture is a recipe in [`fixtures/production_smoke/`](../fixtures/production_smoke/); the PRX,
+The fixture is a recipe in [`tests/fixtures/production_smoke/`](../tests/fixtures/production_smoke/); the PRX,
 `~PSP` header, relocated image, generated C, objects, link map, executable, and run logs remain
 ignored build outputs.
 
@@ -554,7 +554,7 @@ interpreter.
 #### AOT/interpreter cosimulation
 
 `mingw32-make cosim-selftest` takes the same seam further: one pipeline run over a source-owned
-synthetic guest ([`fixtures/cosim/`](../fixtures/cosim/)) produces both execution lanes for the same
+synthetic guest ([`tests/fixtures/cosim/`](../tests/fixtures/cosim/)) produces both execution lanes for the same
 guest bytes, and a comparator runs every cell twice — once through the generated `f_<addr>` body,
 once through the production interpreter floor with that body absent from the dispatch table — then
 reports the **first** difference. Selection is at run time rather than through `--omit-aot`, so one
@@ -585,7 +585,7 @@ universal. Both lanes are instead normalized to one **handoff target** and requi
 agree, and each lane's own PC behavior is asserted so a change fails the gate rather than silently
 redefining the field. `next_pc` and `in_delay_slot` are asserted to remain unclaimed by both lanes,
 keeping a future COP0 BD/EPC model free of an existing consumer. The full contract, the cell list
-and the limits of the evidence are in [`fixtures/cosim/README.md`](../fixtures/cosim/README.md).
+and the limits of the evidence are in [`tests/fixtures/cosim/README.md`](../tests/fixtures/cosim/README.md).
 
 ### Compile flags
 
@@ -873,7 +873,7 @@ The same lane refuses each frame list and each set of call records above by name
 nothing changed, except `body-stale`: stale-code detection is an environment switch the fixture
 runs without. Every other cosimulation lane runs the same cases on ordinary output and requires
 every thread to be refused. The cells, the mutants and the limits of the evidence are in
-[`fixtures/cosim/README.md`](../fixtures/cosim/README.md).
+[`tests/fixtures/cosim/README.md`](../tests/fixtures/cosim/README.md).
 
 **What is not claimed, and is refused today.** This is the generated-code half of a direct state.
 Not built yet, each a separate change under #2172:
@@ -1155,7 +1155,7 @@ host work is added, its row must say how a paused guest is kept from observing i
 ## Environment Variables
 
 The runtime has many diagnostic and behavior switches. This table is intentionally a selected
-architecture-level subset; `docs/DEBUGGING.md`, `nk_manager.ps1`, and the implementing source are
+architecture-level subset; `docs/DEBUGGING.md`, `tools/nk_manager.ps1`, and the implementing source are
 the maintained references for exact behavior.
 
 | Variable | Values | Purpose |

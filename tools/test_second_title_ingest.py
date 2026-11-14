@@ -216,7 +216,7 @@ int main(void) {
 
         # A launchable synthetic title includes its catalogued data root. The
         # runtime correctly refuses to prepare a session without it (#731).
-        data_root = self.temp_dir / "fixtures" / "pspdev_phase5"
+        data_root = self.temp_dir / "tests" / "fixtures" / "pspdev_phase5"
         data_root.mkdir(parents=True)
         (data_root / "synthetic-data.txt").write_text(
             "Source-owned synthetic runtime data.\n", encoding="utf-8"

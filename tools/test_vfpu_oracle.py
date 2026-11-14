@@ -20,8 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from makefile_text import read_makefile  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-CASES = ROOT / "fixtures" / "vfpu_oracle" / "vfpu_oracle_cases.h"
-PROBE = ROOT / "fixtures" / "vfpu_oracle" / "vfpu_probe.c"
+CASES = ROOT / "tests" / "fixtures" / "vfpu_oracle" / "vfpu_oracle_cases.h"
+PROBE = ROOT / "tests" / "fixtures" / "vfpu_oracle" / "vfpu_probe.c"
 HOST = ROOT / "src" / "rt" / "vfpu_oracle_host.c"
 MAKEFILE = read_makefile(ROOT, errors="replace")
 

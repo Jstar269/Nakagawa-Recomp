@@ -1090,7 +1090,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertNotEqual(orch.state, "VERIFY_RESULT")
 
     def test_17_real_adapter_runs_multiple_cases_unloads_and_binds_console_metadata(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-sim-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             cases = []
@@ -1178,7 +1178,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
             transport.run("some-unmodeled-command", 1.0)
 
     def test_failed_teardown_reset_fallback_stays_unqualified(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-teardown-fallback-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"
@@ -1206,7 +1206,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertIn("loaded module was not proven unloaded", failed["ACCEPTANCE_BLOCKERS"])
 
     def test_campaign_model_profile_mismatch_is_refused_without_rewriting_raw_value(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(
             prefix="runner-model-identity-mismatch-", dir=fixture_dir
         ) as scratch_name:
@@ -1236,7 +1236,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         )
 
     def test_campaign_waits_for_complete_fpu_host0_stream_before_unload(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-fpu-completion-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             cases = []
@@ -1303,7 +1303,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertIn("one or more scalar result records did not pass", envelope["ACCEPTANCE_BLOCKERS"])
 
     def test_campaign_incomplete_fpu_timeout_still_unloads_and_stays_unqualified(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-fpu-timeout-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             cases = []
@@ -1349,7 +1349,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         )
 
     def test_campaign_rejects_nonregular_host0_result_before_reading(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-unsafe-host0-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             cases = []
@@ -1509,7 +1509,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
             self.assertIn("changed during capture", problem or "")
 
     def test_unregistered_campaign_row_is_never_a_complete_stream(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         record = (
             CAMPAIGN_META
             + "NAKAGAWA_PSP_TEST schema=1 test_id=SYNTHETIC "
@@ -1786,7 +1786,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         )
 
     def test_campaign_host0_only_records_qualify_without_stdout_records(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-host0-only-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"
@@ -1812,7 +1812,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertIn("case_id=host0-write-readback", envelope["RAW_RESULT"])
 
     def test_campaign_healthy_transport_write_then_second_case_same_session(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(
             prefix="runner-second-healthy-case-", dir=fixture_dir
         ) as scratch_name:
@@ -1852,7 +1852,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
                 self.assertTrue(envelope["ACCEPTANCE_ELIGIBLE"])
 
     def test_campaign_missing_second_host0_roundtrip_fails_closed(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(
             prefix="runner-second-roundtrip-fault-", dir=fixture_dir
         ) as scratch_name:
@@ -1890,7 +1890,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertEqual(report["terminal_reason"], "HOST0_ROUNDTRIP_FAILED")
 
     def test_campaign_device_identity_is_compared_before_canonicalization(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         for device_commit, expected_binding, expected_eligible, expected_blocker in (
             (SOURCE_COMMIT, "MATCH", True, None),
             ("f" * 40, "MISMATCH", False, "IDENTITY_MISMATCH"),
@@ -1937,7 +1937,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
                     )
 
     def test_campaign_stale_host0_log_is_cleared_and_rejected_by_mtime(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-stale-host0-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"
@@ -1964,7 +1964,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertNotIn("stale result must not qualify", envelope["RAW_RESULT"])
 
     def test_campaign_dirty_source_tree_cannot_qualify_records(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-dirty-source-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"
@@ -1989,7 +1989,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertFalse(envelope["ACCEPTANCE_ELIGIBLE"])
 
     def test_campaign_stdout_host0_disagreement_is_a_named_failure(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-channel-mismatch-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             cases = []
@@ -2062,7 +2062,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
             _parse_campaign_records(metadata + records[0], case_id)
 
     def test_18_real_adapter_bounds_timeouts_and_keeps_partial_output_nonsemantic(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-timeout-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             cases = []
@@ -2110,7 +2110,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
             "status=PASS result=0x1\n"
             "NAKAGAWA_PSP_STEP schema=1 case_id=hung-case step=bad-handle\n"
         )
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-hung-step-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             cases = []
@@ -2166,7 +2166,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         )
 
     def test_19_real_adapter_attempts_l0_l1_l2_then_stops_at_physical_intervention(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-escalation-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             transport_write = scratch / "transport-write.prx"
@@ -2207,7 +2207,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
 
     @patch.object(run_psplink_module, "_read_hardware_lock", _lock_held)
     def test_20_process_transport_uses_argv_templates_timeout_and_owned_server_lifecycle(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-process-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             created = []
@@ -2260,7 +2260,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         # SIGHUP, so it never releases the PSPLink USB interface, and the next server's first
         # PSPLink command was lost (PSP-3000, 2026-11-11). stop() sends `exit` instead, which
         # runs usbhostfs_pc's own exit_app; terminate is only the fallback.
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-exit-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             created = []
@@ -2301,7 +2301,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
 
     @patch.object(run_psplink_module, "_read_hardware_lock", _lock_held)
     def test_stop_terminates_a_usbhostfs_that_ignores_its_exit_command(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-exit-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             process = CommandInputUsbHostFsProcess(USBHOSTFS_BANNER, obeys_exit=False)
@@ -2359,7 +2359,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         )
 
     def _started_command_input_server(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         scratch = tempfile.TemporaryDirectory(prefix="runner-exit-", dir=fixture_dir)
         process = CommandInputUsbHostFsProcess(USBHOSTFS_BANNER)
 
@@ -2411,7 +2411,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         )
 
     def test_21_nonfinite_timeout_is_rejected_before_transport_starts(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-unbounded-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"
@@ -2438,7 +2438,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertEqual(result, (None, "partial\ufffd", "truncated", "TIMEOUT"))
 
     def test_23_firmware_mismatch_stops_without_physical_intervention_claim(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-identity-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"
@@ -2458,7 +2458,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertFalse(any(command == "reset" for command, _timeout in transport.commands))
 
     def test_24_qualified_cleanup_failure_uses_l2_reset_then_transport_reattach(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-ladder-order-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             cases = []
@@ -2492,7 +2492,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertEqual(transport.restarts, 1)
 
     def test_missing_s1_snapshot_blocks_recovery_even_when_unload_fails(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-missing-s1-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             cases = []
@@ -2521,7 +2521,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertEqual(transport.restarts, 0)
 
     def test_host0_capture_timeout_blocks_recovery_even_when_unload_fails(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-missing-capture-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"
@@ -2547,7 +2547,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertEqual(transport.restarts, 0)
 
     def test_failed_case_with_cleanup_failure_does_not_reset(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         failed_log = (
             CAMPAIGN_META
             + "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 "
@@ -2581,7 +2581,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertEqual(transport.restarts, 0)
 
     def test_second_case_teardown_failure_cannot_issue_a_second_l2_reset(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-reset-once-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             cases = []
@@ -2609,7 +2609,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertEqual(report["terminal_reason"], "PHYSICAL_INTERVENTION_REQUIRED")
 
     def test_exprint_observation_is_diagnostic_and_not_a_pass_gate(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-exprint-diagnostic-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"
@@ -2983,7 +2983,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertIn("USBHostFS reported `waiting for device`", " ".join(runner.recovery_events))
 
     def test_shell_qualification_retries_one_lost_ver_and_campaign_passes(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-ver-retry-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"
@@ -3009,7 +3009,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertTrue(report["envelopes"][0]["ACCEPTANCE_ELIGIBLE"])
 
     def test_initial_shell_qualification_exhaustion_is_a_transport_start_failure(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-ver-exhausted-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"
@@ -3044,7 +3044,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertTrue(transport.stopped)
 
     def test_transport_start_failure_stops_before_any_psplink_command(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-start-fail-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"
@@ -3070,7 +3070,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertIn("no power cycle is required", report["recovery_events"][-1])
 
     def test_campaign_unknown_model_is_captured_but_not_acceptance_eligible(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-unknown-model-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"
@@ -3101,7 +3101,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
                 self.assertFalse(is_unmeasured(label))
 
     def test_session_qualification_reflects_the_session_not_the_case_phase(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         for failing, expected in ((False, "QUALIFIED"), (True, "QUALIFIED")):
             with self.subTest(failing=failing), tempfile.TemporaryDirectory(
                 prefix="runner-session-status-", dir=fixture_dir
@@ -3128,7 +3128,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
                     self.assertFalse(envelope["ACCEPTANCE_ELIGIBLE"])
 
     def test_campaign_unmeasured_model_is_not_acceptance_eligible(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-unmeasured-model-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"
@@ -3229,7 +3229,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
 
     @patch.object(run_psplink_module, "_read_hardware_lock", _lock_held)
     def test_27_shared_psplink_device_is_attached_and_verified(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="usbipd-reattach-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             process = FakeUsbHostFsProcess(USBHOSTFS_BANNER)
@@ -3300,7 +3300,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         ])
 
     def test_28_transport_reattach_failure_stops_after_one_attach_attempt(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="usbipd-reattach-fail-", dir=fixture_dir) as scratch_name:
             calls = []
 
@@ -3330,7 +3330,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertFalse(any("bind" in " ".join(command) for command in calls))
 
     def test_29_absent_psplink_device_reports_manual_recovery_without_attach(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="usbipd-absent-", dir=fixture_dir) as scratch_name:
             calls = []
 
@@ -3354,7 +3354,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertEqual(calls, [["usbipd", "list"]])
 
     def test_30_unbound_psplink_device_reports_manual_bind_without_running_it(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="usbipd-unbound-", dir=fixture_dir) as scratch_name:
             calls = []
 
@@ -3406,7 +3406,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
                 _parse_campaign_records(malformed, case_id)
 
     def test_campaign_queue_dry_run_validates_all_staged_cases_without_launching(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(
             prefix="campaign-plan-dry-run-", dir=fixture_dir
         ) as scratch_name:
@@ -3454,7 +3454,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
             self.assertFalse((output_root / "checkpoint.json").exists())
 
     def test_campaign_resets_between_cases_and_reuses_preflight_qualification(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(
             prefix="campaign-reset-between-", dir=fixture_dir
         ) as scratch_name:
@@ -3484,7 +3484,7 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertTrue(transport.stopped)
 
     def test_campaign_timeout_stops_without_cleanup_or_automatic_reset(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(
             prefix="campaign-timeout-stop-", dir=fixture_dir
         ) as scratch_name:
@@ -3998,7 +3998,7 @@ class CampaignPlanCheckpointTests(unittest.TestCase):
         ]
 
     def test_campaign_resume_requires_a_new_qualified_boot_and_keeps_the_resume_position(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="campaign-checkpoint-", dir=fixture_dir) as scratch_name:
             plan_path = self._plan(Path(scratch_name))
 
@@ -4049,7 +4049,7 @@ class CampaignPlanCheckpointTests(unittest.TestCase):
             self.assertEqual(checkpoint["interrupted_cases"], ["kernel-alarm", "thread-scheduler"])
 
     def test_fresh_campaign_transport_start_failure_stays_at_the_preflight(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="campaign-start-fail-", dir=fixture_dir) as scratch_name:
             plan_path = self._plan(Path(scratch_name))
             transport = SimulatedPsplinkTransport(start_error="usbhostfs_pc printed nothing")
@@ -4063,7 +4063,7 @@ class CampaignPlanCheckpointTests(unittest.TestCase):
         self.assertEqual(transport.commands, [])
 
     def test_failed_preflight_round_trip_resumes_at_the_preflight(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="campaign-preflight-", dir=fixture_dir) as scratch_name:
             plan_path = self._plan(Path(scratch_name))
             transport = SimulatedPsplinkTransport(fail_host0_roundtrip_cases={"transport-write"})
@@ -4151,7 +4151,7 @@ class HardwareLockGateTests(unittest.TestCase):
         return CampaignCase("transport-write", binary, 1.0)
 
     def test_runner_refuses_at_start_without_any_psplink_command(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="lock-start-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             transport = SimulatedPsplinkTransport(lock_held_checks=0)
@@ -4167,7 +4167,7 @@ class HardwareLockGateTests(unittest.TestCase):
         self.assertTrue(transport.stopped)
 
     def test_runner_rechecks_the_lock_before_each_reset_and_launch(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         for held_checks, expected_launches, expected_resets in (
             # start, case-1 entry, case-1 launch pass; case-2 entry refuses before its reset
             (3, ["transport-write"], 0),
@@ -4204,7 +4204,7 @@ class HardwareLockGateTests(unittest.TestCase):
                 self.assertEqual(len(report["envelopes"]), 1)
 
     def test_campaign_plan_refuses_without_writing_a_checkpoint(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="lock-plan-", dir=fixture_dir) as scratch_name:
             plan_path = CampaignPlanCheckpointTests()._plan(Path(scratch_name))
             factory_calls = []
@@ -4223,7 +4223,7 @@ class HardwareLockGateTests(unittest.TestCase):
         self.assertFalse(checkpoint_written)
 
     def test_campaign_plan_revoked_lock_stops_before_the_next_case_without_power_cycle(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="lock-plan-revoke-", dir=fixture_dir) as scratch_name:
             helper = CampaignPlanCheckpointTests()
             plan_path = helper._plan(Path(scratch_name))
@@ -4266,14 +4266,14 @@ class HardwareLockGateTests(unittest.TestCase):
         ]
 
     def test_campaign_case_mode_requires_a_session_id(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="lock-case-", dir=fixture_dir) as scratch_name:
             with self.assertRaises(SystemExit) as raised:
                 run_psplink_module.main(self._campaign_case_argv(Path(scratch_name)))
         self.assertEqual(raised.exception.code, 2)
 
     def test_campaign_case_mode_refuses_before_spawning_the_transport(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="lock-case-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             argv = self._campaign_case_argv(scratch, "--session-id", "synthetic-session")
@@ -4292,7 +4292,7 @@ class HardwareLockGateTests(unittest.TestCase):
     def test_campaign_case_refuses_a_timeout_that_would_stop_ge_timing_mid_stream(self):
         # 2026-10-26: the 30 s default stopped ge-timing (46 s on a PSP-3000) with GE work in flight; the probe
         # thread survived the stop, host0 went silent and the device needed a power cycle.
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         minimum = run_psplink_module.CAMPAIGN_CASE_MIN_TIMEOUT_SECONDS["ge-timing"]
         with tempfile.TemporaryDirectory(prefix="lock-case-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
@@ -4362,7 +4362,7 @@ class ExpectedFirmwareFormTests(unittest.TestCase):
             )
 
     def test_plan_rejects_firmware_that_cannot_match_pspver(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         for value in ("6.61", "6.61-ARK", "6.6.1 ", "v6.6.1", "", 661, ["6.6.1"]):
             with self.subTest(value=value), tempfile.TemporaryDirectory(
                 prefix="fw-plan-", dir=fixture_dir
@@ -4376,7 +4376,7 @@ class ExpectedFirmwareFormTests(unittest.TestCase):
                 self.assertIn("for example 6.6.1 for firmware 6.61", report["reason"])
 
     def test_plan_accepts_the_pspver_form_and_an_absent_field(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         for fields in ({"expected_firmware": "6.6.1"}, {}):
             with self.subTest(fields=fields), tempfile.TemporaryDirectory(
                 prefix="fw-plan-ok-", dir=fixture_dir
@@ -4385,7 +4385,7 @@ class ExpectedFirmwareFormTests(unittest.TestCase):
                 self.assertEqual((code, report["status"]), (0, "VALIDATED_OFFLINE"))
 
     def test_plan_rejects_a_model_code_that_would_be_silently_ignored(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         for value in ("3", True, -1, 3.0):
             with self.subTest(value=value), tempfile.TemporaryDirectory(
                 prefix="model-plan-", dir=fixture_dir
@@ -4401,7 +4401,7 @@ class ExpectedFirmwareFormTests(unittest.TestCase):
                 source_commit=SOURCE_COMMIT, expected_firmware="6.61",
             )
         self.assertIn("6.6.1", str(raised.exception))
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="fw-cli-", dir=fixture_dir) as scratch_name:
             argv = HardwareLockGateTests()._campaign_case_argv(
                 Path(scratch_name), "--session-id", "synthetic-session", "--firmware", "6.61"
@@ -4421,7 +4421,7 @@ class ExpectedFirmwareFormTests(unittest.TestCase):
 
 
 
-CONSOLE_CAPTURES = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle_captures"
+CONSOLE_CAPTURES = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle_captures"
 # Verbatim host0 logs from the 2026-10-08 PSP-3000 session, written by the
 # project-authored synthetic probes. They hold kernel object UIDs, return codes
 # and counts, a placeholder binary digest and a project commit id: no serial,
@@ -4522,7 +4522,7 @@ class ConsoleCaptureRegressionTests(unittest.TestCase):
         return runner, transport, cases
 
     def test_campaign_runs_real_kernel_alarm_capture_end_to_end(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="capture-alarm-", dir=fixture_dir) as scratch_name:
             runner, transport, cases = self._campaign(
                 Path(scratch_name), ("transport-write", "kernel-alarm"),
@@ -4542,7 +4542,7 @@ class ConsoleCaptureRegressionTests(unittest.TestCase):
         self.assertFalse(alarm["ACCEPTANCE_ELIGIBLE"])
 
     def test_campaign_partial_console_capture_stops_as_an_incomplete_case(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         for name, case_id in PARTIAL_CONSOLE_CAPTURES.items():
             with self.subTest(capture=name), tempfile.TemporaryDirectory(
                 prefix="capture-partial-", dir=fixture_dir
@@ -4594,7 +4594,7 @@ class HostErrorContainmentTests(unittest.TestCase):
         )
 
     def test_error_after_unload_with_clean_teardown_needs_no_power_cycle(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         crash = AttributeError("'str' object has no attribute 'status'")
         with tempfile.TemporaryDirectory(prefix="host-error-clean-", dir=fixture_dir) as name:
             transport = self._alarm_transport()
@@ -4617,7 +4617,7 @@ class HostErrorContainmentTests(unittest.TestCase):
         self.assertEqual(checkpoint["failed_case_id"], "kernel-alarm")
 
     def test_error_before_unload_still_unloads_the_probe(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         for fail_unload, expected_state, expected_code in (
             (False, "IN_PROGRESS", 2),
             (True, "WAITING_FOR_NEW_QUALIFIED_BOOT", 3),
@@ -4651,7 +4651,7 @@ class HostErrorContainmentTests(unittest.TestCase):
                 )
 
     def test_error_before_launch_keeps_the_case_queued(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         remote_path = _raise_on_second_call(
             run_psplink_module._host0_remote_path,
             RuntimeError("synthetic host fault before launch"),
@@ -4671,7 +4671,7 @@ class HostErrorContainmentTests(unittest.TestCase):
         self.assertEqual(checkpoint["interrupted_cases"], [])
 
     def test_error_in_initial_qualification_is_named(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="host-error-qualify-", dir=fixture_dir) as name:
             code, report, checkpoint = self._plan_run(
                 Path(name), self._alarm_transport(),
@@ -4684,7 +4684,7 @@ class HostErrorContainmentTests(unittest.TestCase):
         self.assertEqual((checkpoint["state"], checkpoint["next_case_index"]), ("IN_PROGRESS", 0))
 
     def test_campaign_plan_finalizes_the_checkpoint_if_the_runner_raises(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
 
         def explode(runner, *args, **kwargs):
             kwargs["on_case_start"](0, CampaignCase("transport-write", Path("x.prx"), 1.0),
@@ -4855,7 +4855,7 @@ class ProgressiveHost0StreamTests(unittest.TestCase):
         return report, transport, time.monotonic() - started
 
     def test_slow_finished_stream_is_captured_whole_and_never_unloaded_early(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="slow-registry-", dir=fixture_dir) as name:
             report, transport, elapsed = self._run_registry(Path(name), 60.0)
             transport.writer.join(5.0)
@@ -4880,7 +4880,7 @@ class ProgressiveHost0StreamTests(unittest.TestCase):
         self.assertIn("ldstart host0:/smoke.prx", commands)
 
     def test_unfinished_slow_stream_names_its_progress_and_stops(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         unfinished = _registry_census_stream().rsplit("NAKAGAWA_PSP_COMPLETE", 1)[0]
         with tempfile.TemporaryDirectory(prefix="slow-unfinished-", dir=fixture_dir) as name:
             scratch = Path(name)
@@ -4996,7 +4996,7 @@ class RealProbeContractTests(unittest.TestCase):
             _parse_campaign_records(self._records(text), "mutex-interrupt-context")
 
     def test_superseded_mutex_capture_is_refused_by_the_current_checker(self):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="capture-mutex-", dir=fixture_dir) as name:
             runner, _transport, cases = ConsoleCaptureRegressionTests()._campaign(
                 Path(name), ("transport-write", "mutex-interrupt-context"),
@@ -5040,7 +5040,7 @@ class Host0RemotePathTests(unittest.TestCase):
         self.assertEqual(run_psplink_module._host0_remote_path(Path("x/y.prx"), None), "y.prx")
 
     def test_a_campaign_prx_outside_the_root_stops_with_a_report(self) -> None:
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-outside-root-", dir=fixture_dir) as scratch_name, \
                 tempfile.TemporaryDirectory() as other_name:
             scratch = Path(scratch_name)
@@ -5100,12 +5100,12 @@ class HleFamilyHost0RoundTripTests(unittest.TestCase):
     """An HLE family's launch must leave the host0 round-trip file the runner verifies."""
 
     PROBE_HLE_SOURCE = (
-        Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle" / "probe_hle_measure.c"
+        Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" / "probe_hle_measure.c"
     )
     PATTERN = "(uint8_t)(0x5Au ^ (i * 0x25u + (i >> 3)))"
 
     def _launch(self, roundtrip: bytes | None):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(
             prefix="runner-hle-roundtrip-", dir=fixture_dir
         ) as scratch_name:
@@ -5196,7 +5196,7 @@ class PostUnloadSettleTests(unittest.TestCase):
         self.addCleanup(source_check.stop)
 
     def _run_transport_write(self, transport, **run_options):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-settle-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"
@@ -5354,7 +5354,7 @@ class Host0DriverWarmupTests(unittest.TestCase):
     """The host0 driver thread belongs to the S0 baseline, not to the teardown diff."""
 
     def _run_transport_write(self, **transport_options):
-        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="runner-host0-warmup-", dir=fixture_dir) as scratch_name:
             scratch = Path(scratch_name)
             binary = scratch / "transport-write.prx"

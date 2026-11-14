@@ -5,7 +5,7 @@
  * list, checksums and their minisign signatures, the download's verification and
  * the install folder. Every answer comes from a fake transport; nothing here
  * touches the internet (AGENTS.md section 5).
- * fixtures/update_check/github_releases_20261028.json is the public Releases API
+ * tests/fixtures/update_check/github_releases_20261028.json is the public Releases API
  * answer for this repository, recorded on 2026-10-28 with its author and uploader
  * objects removed.
  *
@@ -250,7 +250,7 @@ static void test_versions(void) {
 
 static void test_recorded_release_list(void) {
     size_t length = 0;
-    char *json = read_fixture("fixtures/update_check/github_releases_20261028.json", &length);
+    char *json = read_fixture("tests/fixtures/update_check/github_releases_20261028.json", &length);
     NkUpdateRelease release;
     NkUpdateError error;
     assert(nk_update_parse_releases(json, length, &release, &error));

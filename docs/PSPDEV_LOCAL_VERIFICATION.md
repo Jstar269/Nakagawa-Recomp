@@ -32,7 +32,7 @@ The release changed the profile-zero output bytes. `main.o` and the generated
 `PARAM.SFO` are byte-identical to the `v20261001` build; the PRX changed because
 newlib's `makebuf.o` in `libc.a` and `_stat` in PSPSDK's `libcglue.a` were
 rebuilt with `st_blksize` buffering (details in
-`fixtures/profile_zero/README.md`), and `EBOOT.PBP` changed because it contains
+`tests/fixtures/profile_zero/README.md`), and `EBOOT.PBP` changed because it contains
 the PRX. The same recipe with the `v20261001` archive still reproduces the
 previous digests. Only the generated-output checksum file was refreshed. The
 new digests are
@@ -45,7 +45,7 @@ With `v20261101` at `/usr/local/pspdev`, the documented `showcase-smoke` passed
 both TEST00007 and TEST00008 (frame, input, audio, pause and headless capture),
 and the PSP oracle smoke case built. The default `tools.test_profile_zero_e2e`
 run passes its lock/evidence checks and skips the production runtime route as
-configured; with the rebuilt bytes staged in `fixtures/profile_zero/prebuilt/`,
+configured; with the rebuilt bytes staged in `tests/fixtures/profile_zero/prebuilt/`,
 its committed-digest case passes as well. The opt-in `NK_TEST_TIER=full`
 runtime route was not run for this pin.
 
@@ -190,7 +190,7 @@ upstream build metadata proves that relationship.
 Nakagawa's publication audit rejects `.elf`, `.prx`, `.pbp`, and `.sfo` files by extension. The
 project's PSP fixtures are rebuilt from source with the pinned toolchain: the repository commits
 only their source and, for profile zero, the digests of the build output
-(`fixtures/profile_zero/prebuilt/SHA256SUMS`), never the executables. A fixture that needs a
+(`tests/fixtures/profile_zero/prebuilt/SHA256SUMS`), never the executables. A fixture that needs a
 committed binary needs a narrowly scoped exception with a per-artifact manifest (source hashes,
 exact toolchain identity, commands, output hashes, licensing, expected parser behavior, and a
 statement excluding Sony SDK/firmware/retail material).

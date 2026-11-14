@@ -6,7 +6,7 @@ Two layers:
 
 * the behavioral half runs ``tools/test_visual_oracle.ps1``, which exercises the real
   helpers against real processes and directories (Windows only -- skipped elsewhere);
-* the static half pins the contract in ``nk_manager.ps1`` that those helpers exist to
+* the static half pins the contract in ``tools/nk_manager.ps1`` that those helpers exist to
   enforce, so the manager cannot quietly go back to sleeping a whole deadline or writing
   a second run on top of a first.
 """
@@ -26,7 +26,7 @@ import hle_sources  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MANAGER = ROOT / "nk_manager.ps1"
+MANAGER = ROOT / "tools" / "nk_manager.ps1"
 SUPPORT = ROOT / "tools" / "nk_safety.ps1"
 PS_TESTS = ROOT / "tools" / "test_visual_oracle.ps1"
 
@@ -196,7 +196,7 @@ class VisualOracleContractTests(unittest.TestCase):
         self.assertEqual(
             [],
             unknown,
-            "nk_manager.ps1 binds parameters its tools/nk_safety.ps1 helpers do not declare: "
+            "tools/nk_manager.ps1 binds parameters its tools/nk_safety.ps1 helpers do not declare: "
             + ", ".join(sorted(set(unknown))),
         )
 

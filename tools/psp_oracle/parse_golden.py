@@ -55,7 +55,7 @@ def _int_field(values: Mapping[str, int | str], field: str) -> int:
 # ---------------------------------------------------------------------------
 # PSP-AUDIO-001 audio reservation/query probe
 #
-# The record contract is derived from ``fixtures/psp_oracle/probe.c``
+# The record contract is derived from ``tests/fixtures/psp_oracle/probe.c``
 # ``run_audio_query`` at the frozen source commit: four self-contained
 # reserve/release cells emitted in order by ``emit_record_extended``, then the
 # ``audio-done`` completion sentinel whose ``out0`` is the literal ``4u`` the
@@ -2758,7 +2758,7 @@ _register_campaign_probe(
 )
 
 # insn-trace (119, probe_insn_trace.c): the #312 real-PSP instruction trace. Per fixture of
-# fixtures/psp_oracle/insn_trace_fixtures.h, an `<id>-init` record (44 words), one
+# tests/fixtures/psp_oracle/insn_trace_fixtures.h, an `<id>-init` record (44 words), one
 # `<id>-sNNNN` record per executed instruction (44 words: pc, op, r1..r25, r29..r31, hi,
 # lo, selected f0..f3/fcr31, v0..v3/v32, and the store's address and value) and an `<id>-end`
 # record (4 words). The step counts are those of the
@@ -3154,7 +3154,7 @@ _register_campaign_probe(
     {case: (10 if case.endswith("-draw") else 16) for case in GE_RTT_CASES},
 )
 
-# The #343 GE pixel corpus (fixtures/psp_oracle/ge_corpus.json, `probe_runs`) carries the measured
+# The #343 GE pixel corpus (tests/fixtures/psp_oracle/ge_corpus.json, `probe_runs`) carries the measured
 # results of these three probes. Per probe: its test id, its cells in stream order, and the record
 # suffixes the corpus keeps for each cell. A `-draw` record holds the GE wait outcome and timings and
 # is not kept, except the ge-raster window digest the PSP computed, which must equal the digest of
@@ -3832,7 +3832,7 @@ def _validate_registry_name(value: str, *, category: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# PSP-REGISTRY-002 read-only font-registry walk (fixtures/psp_oracle/registry_walk.h)
+# PSP-REGISTRY-002 read-only font-registry walk (tests/fixtures/psp_oracle/registry_walk.h)
 #
 # The stream is font-registry-open, then font-category/font-key records in the
 # walk's enumeration order, then font-registry-done. The parser re-checks the
@@ -4176,7 +4176,7 @@ def _s32(value: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# PSP-FONTFILES-001 read-only copy of flash0:/font (fixtures/psp_oracle/font_files.h)
+# PSP-FONTFILES-001 read-only copy of flash0:/font (tests/fixtures/psp_oracle/font_files.h)
 #
 # font-dir-open, then (when the listing opened) font-mkdir, font-entry-NNNN in
 # listing order, font-dir-close, one font-copy-NNNN per copy candidate, and
@@ -4378,7 +4378,7 @@ def parse_font_files_output(text: str, *, require_complete: bool = True) -> Font
 
 # ---------------------------------------------------------------------------
 # PSP-FONTLIST-001 the system font list as the console's own font library reports
-# it (fixtures/psp_oracle/font_list.h)
+# it (tests/fixtures/psp_oracle/font_list.h)
 #
 # font-list-newlib, then (when the library opened) font-list-count, and when the
 # count is positive font-list-list, font-list-entry-NNNN for every requested
@@ -4560,7 +4560,7 @@ def parse_font_list_output(text: str, *, require_complete: bool = True) -> FontL
 
 
 # ---------------------------------------------------------------------------
-# PSP-UMDIO-001 bare-device and disc open results (fixtures/psp_oracle/umd_io.h)
+# PSP-UMDIO-001 bare-device and disc open results (tests/fixtures/psp_oracle/umd_io.h)
 #
 # umd-state-before, io-open-NNNN for each fixed open, io-dopen-NNNN for each
 # fixed dopen, umd-state-after, umdio-done. The path lists below mirror the
@@ -4682,7 +4682,7 @@ def parse_umd_io_output(text: str, *, require_complete: bool = True,
 
 
 # ---------------------------------------------------------------------------
-# PSP-UMDRAW-001 raw UMD read/seek observations (fixtures/psp_oracle/umd_io.h)
+# PSP-UMDRAW-001 raw UMD read/seek observations (tests/fixtures/psp_oracle/umd_io.h)
 #
 # The parser accepts only the probe's fixed records and scalar fields. Seek
 # results are low word then high word; sector-16 reads expose only their first
@@ -4804,7 +4804,7 @@ def parse_umd_raw_read_output(text: str, *, require_complete: bool = True) -> Um
 # ---------------------------------------------------------------------------
 # PSP-CACHE-001 dcache/uncached-alias probe
 #
-# The record contract is derived from ``fixtures/psp_oracle/probe.c``
+# The record contract is derived from ``tests/fixtures/psp_oracle/probe.c``
 # ``run_cache_alias`` at the frozen source commit: four ``defer_record`` calls in
 # emission order followed by the ``cache-done`` completion sentinel, all flushed
 # by ``flush_deferred(emulated, "PSP-CACHE-001")`` after the last cache-sensitive
@@ -4884,7 +4884,7 @@ def parse_cache_alias_output(
 # ---------------------------------------------------------------------------
 # PSP-IO-001 IoFileMgr matrix probe
 #
-# The record contract is derived from ``fixtures/psp_oracle/probe.c``
+# The record contract is derived from ``tests/fixtures/psp_oracle/probe.c``
 # ``run_io_matrix`` at the frozen source commit: six ``defer_record`` calls in
 # emission order followed by the ``io-done`` completion sentinel, all flushed by
 # ``flush_deferred(emulated, "PSP-IO-001")`` after the last measured IoFileMgr

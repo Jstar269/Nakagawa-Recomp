@@ -145,7 +145,7 @@ STRICT_C_UNITS: dict[str, StrictUnit] = {
     ),
     "src/rt/vfpu_oracle_host.c": StrictUnit(
         recipes=("$(PSP_VFPU_ORACLE_EXE)",),
-        includes=("fixtures/vfpu_oracle",),
+        includes=("tests/fixtures/vfpu_oracle",),
     ),
     # FSR 3's host and pass read AMD's resource identifiers from the imported SDK headers.
     "src/rt/fsr3_host.c": StrictUnit(
@@ -187,7 +187,7 @@ STRICT_C_UNITS: dict[str, StrictUnit] = {
             "vfpu_fuzz_cases.h", "{build_dir}", "-I$(BUILD_DIR)", "make vfpu_fuzz",
         ),),
     ),
-    "fixtures/cosim/cosim_selftest.c": StrictUnit(
+    "tests/fixtures/cosim/cosim_selftest.c": StrictUnit(
         recipes=("cosim-selftest-run",),
         defines=("SR_INSTRUCTION_TRACE",),
         # cosim-selftest generates the fixture into $(BUILD_ROOT)/cosim and runs
@@ -578,7 +578,7 @@ def run(base: str) -> list[Gate]:
     routing = ci_paths.classify(paths)
     python_paths = [
         path for path in paths
-        if path.endswith(".py") and path.startswith(("tools/", "fixtures/"))
+        if path.endswith(".py") and path.startswith(("tools/", "tests/fixtures/"))
     ]
     print(f"contrib-check: base {base}, {len(paths)} changed path(s)")
     for path in paths:

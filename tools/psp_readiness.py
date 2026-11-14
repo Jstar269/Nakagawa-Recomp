@@ -240,7 +240,7 @@ def collect(*, run_focused: bool = False) -> dict[str, Any]:
     _add(checks, "hst_buildfull_artifact", "PASS" if binary.is_file() and chunks else "FAIL",
          f"linked executable and {len(chunks)} generated chunks present" if binary.is_file() and chunks else "BuildFull artifact is absent")
 
-    fixture_root = ROOT / "fixtures" / "psp_oracle"
+    fixture_root = ROOT / "tests" / "fixtures" / "psp_oracle"
     fixture_ok = (fixture_root / "probe.c").is_file() and (fixture_root / "Makefile").is_file()
     _add(checks, "source_owned_probe", "PASS" if fixture_ok else "FAIL",
          "probe source and PSPDEV Makefile present" if fixture_ok else "probe source is incomplete")

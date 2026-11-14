@@ -192,7 +192,7 @@ class VfpuTableManifestTests(unittest.TestCase):
         make = read_makefile(ROOT)
         self.assertIn("vfpu-tables-selftest:", make)
         self.assertIn("src/rt/vfpu_tables.c \\", make)  # in RT_SRCS
-        manager = (ROOT / "nk_manager.ps1").read_text(encoding="utf-8")
+        manager = (ROOT / "tools" / "nk_manager.ps1").read_text(encoding="utf-8")
         self.assertIn("vfpu-tables-selftest", manager)
 
 

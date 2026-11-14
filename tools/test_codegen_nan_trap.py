@@ -13,7 +13,7 @@ Three claims are proved here, all against the real code, never a re-implementati
 1. Shape. tools/codegen.py with --nan-trap emits an SR_NAN_TRAP_* check after
    every FPU and VFPU result write, carrying the guest PC, the mnemonic, the
    destination register and the operand variables.
-2. Zero cost. Over a real source-owned guest (fixtures/cosim), the generated C
+2. Zero cost. Over a real source-owned guest (tests/fixtures/cosim), the generated C
    is byte-identical with and without --nan-trap, and the object compiled from
    the untrapped chunk is byte-identical with and without -DSR_NAN_TRAP. The
    flag costs nothing when it is off.
@@ -61,7 +61,7 @@ import flight_diff  # noqa: E402
 RT = ROOT / "src" / "rt"
 CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
 PY = sys.executable
-COSIM_GENERATOR = ROOT / "fixtures" / "cosim" / "generate.py"
+COSIM_GENERATOR = ROOT / "tests" / "fixtures" / "cosim" / "generate.py"
 COSIM_BASE = "0x08900000"
 
 # COP1 word: opcode 0x11, fmt in rs, ft, fs, fd in sa, funct in bits 5:0.

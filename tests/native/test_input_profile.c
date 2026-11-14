@@ -2963,7 +2963,7 @@ static void test_stick_keys(void) {
  * -------------------------------------------------------------------------- */
 
 /* -----------------------------------------------------------------------------
- * Versioned profile files: fixtures/user_data holds profiles that earlier
+ * Versioned profile files: tests/fixtures/user_data holds profiles that earlier
  * players' own writers wrote (schema 1, schema 2, and v0.0.1's schema 3). Each
  * loads, and the first save over it keeps the original as <file>.v<n>.bak; a
  * newer file is never replaced (src/core/nk_user_data_schema.h).
@@ -3481,9 +3481,9 @@ static void test_versioned_profile_files(void) {
     printf("[INPUT_PROFILE_TEST] Versioned files: earlier players' profiles load, migrate "
            "and keep a backup; a newer one is kept...\n");
     assert(nk_platform_mkdir_p(VERSIONED_PROFILE_ROOT));
-    versioned_profile_case("fixtures/user_data/input_profile_v1.json", 1, 0);
-    versioned_profile_case("fixtures/user_data/input_profile_v2.json", 2, 1);
-    versioned_profile_case("fixtures/user_data/v0.0.1/input_profile.json", 3, 1);
+    versioned_profile_case("tests/fixtures/user_data/input_profile_v1.json", 1, 0);
+    versioned_profile_case("tests/fixtures/user_data/input_profile_v2.json", 2, 1);
+    versioned_profile_case("tests/fixtures/user_data/v0.0.1/input_profile.json", 3, 1);
 
     /* Schema 5 -> 6 on disk: a schema 5 profile (this writer's output with no mouse button,
      * labelled 5, the members a schema 5 player wrote) loads as the same mapping, and the

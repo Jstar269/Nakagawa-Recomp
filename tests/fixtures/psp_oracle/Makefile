@@ -1,0 +1,1274 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 the Nakagawa Recomp authors
+
+FIXTURE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+BUILD_DIR ?= build
+TARGET = $(BUILD_DIR)/nakagawa_psp_oracle
+OBJS = $(BUILD_DIR)/probe.o
+PSP_EBOOT = $(BUILD_DIR)/EBOOT.PBP
+PSP_EBOOT_SFO = $(BUILD_DIR)/PARAM.SFO
+
+# Build one deterministic probe case at a time.  A physical session should
+# rebuild with CASE=callback-notify-check, CASE=wait-cancel, or
+# CASE=thread-lifecycle rather than mixing unrelated waits in one launch.  The
+# Keep each Tier S/B launch isolated; an unexpected kernel response could
+# terminate it before the complete record set is emitted.
+CASE ?= smoke
+# The hand-authored mutex imports are needed by mutex probes and cpu-timing's
+# synchronization cells. Linking them into unrelated PRXs leaves PSP SDK
+# import stubs out of order.
+MUTEX_CASES = mutex-refer-unlocked mutex-timeout-quanta \
+              mutex-priority-inheritance mutex-interrupt-context cpu-timing
+ifneq ($(filter $(MUTEX_CASES),$(CASE)),)
+OBJS += $(BUILD_DIR)/mutex_imports.o
+endif
+
+ifeq ($(CASE),smoke)
+CASE_ID = 0
+else ifeq ($(CASE),callback-notify-check)
+CASE_ID = 1
+else ifeq ($(CASE),wait-cancel)
+CASE_ID = 2
+else ifeq ($(CASE),thread-lifecycle)
+CASE_ID = 3
+else ifeq ($(CASE),thread-delete-lifecycle)
+CASE_ID = 4
+else ifeq ($(CASE),thread-delete-followup)
+CASE_ID = 5
+else ifeq ($(CASE),thread-delete-explicit)
+CASE_ID = 6
+else ifeq ($(CASE),thread-delete-boundary)
+CASE_ID = 7
+else ifeq ($(CASE),dma-concurrency)
+CASE_ID = 8
+else ifeq ($(CASE),dma-invalid-tail-memcpy-dst)
+CASE_ID = 9
+else ifeq ($(CASE),dma-invalid-tail-memcpy-src)
+CASE_ID = 10
+else ifeq ($(CASE),dma-invalid-tail-try-dst)
+CASE_ID = 11
+else ifeq ($(CASE),dma-invalid-tail-try-src)
+CASE_ID = 12
+else ifeq ($(CASE),dma-invalid-tail-s0)
+CASE_ID = 60
+else ifeq ($(CASE),display-mask-vcount)
+CASE_ID = 13
+else ifeq ($(CASE),display-mask-duty)
+CASE_ID = 14
+else ifeq ($(CASE),display-ge-mask)
+CASE_ID = 15
+else ifeq ($(CASE),display-wait-late)
+CASE_ID = 16
+else ifeq ($(CASE),display-wait-priority)
+CASE_ID = 17
+else ifeq ($(CASE),display-vblank-window)
+CASE_ID = 18
+else ifeq ($(CASE),mutex-refer-unlocked)
+CASE_ID = 19
+else ifeq ($(CASE),mutex-timeout-quanta)
+CASE_ID = 20
+else ifeq ($(CASE),mutex-priority-inheritance)
+CASE_ID = 21
+else ifeq ($(CASE),mutex-interrupt-context)
+CASE_ID = 22
+else ifeq ($(CASE),exception-a1)
+CASE_ID = 23
+else ifeq ($(CASE),exception-a2)
+CASE_ID = 24
+else ifeq ($(CASE),exception-a3)
+CASE_ID = 25
+else ifeq ($(CASE),exception-a3-mload)
+CASE_ID = 29
+else ifeq ($(CASE),exception-a3-mstore)
+CASE_ID = 30
+else ifeq ($(CASE),exception-a3-delayslot)
+CASE_ID = 31
+else ifeq ($(CASE),exception-a3-half-load)
+CASE_ID = 32
+else ifeq ($(CASE),exception-a3-half-store)
+CASE_ID = 33
+else ifeq ($(CASE),exception-a3-unaligned)
+CASE_ID = 34
+else ifeq ($(CASE),exception-a3-vfpu-lvs)
+CASE_ID = 35
+else ifeq ($(CASE),exception-a3-vfpu-lvq4)
+CASE_ID = 36
+else ifeq ($(CASE),exception-a3-vfpu-lvq8)
+CASE_ID = 37
+else ifeq ($(CASE),exception-a3-vfpu-svq4)
+CASE_ID = 38
+else ifeq ($(CASE),exception-a3-vfpu-aligned)
+CASE_ID = 39
+else ifeq ($(CASE),exception-a3-vfpu-svs)
+CASE_ID = 40
+else ifeq ($(CASE),exception-a3-vfpu-svq8)
+CASE_ID = 41
+else ifeq ($(CASE),exception-a3-vfpu-lvq-delay)
+CASE_ID = 42
+else ifeq ($(CASE),exception-a3-vfpu-lvl-odd)
+CASE_ID = 43
+else ifeq ($(CASE),exception-a3-fetch-zero)
+CASE_ID = 132
+else ifeq ($(CASE),exception-a3-fetch-08000000)
+CASE_ID = 133
+else ifeq ($(CASE),exception-a3-fetch-40000000)
+CASE_ID = 134
+else ifeq ($(CASE),kobj-b1)
+CASE_ID = 26
+else ifeq ($(CASE),wait-b2)
+CASE_ID = 27
+else ifeq ($(CASE),kernel-b3)
+CASE_ID = 28
+else ifeq ($(CASE),transport-write)
+CASE_ID = 44
+else ifeq ($(CASE),thread-exit-delete)
+CASE_ID = 45
+else ifeq ($(CASE),dmac-survey)
+CASE_ID = 46
+else ifeq ($(CASE),ctrl-clock)
+CASE_ID = 47
+else ifeq ($(CASE),fpu-vector)
+CASE_ID = 48
+else ifeq ($(CASE),teardown-test)
+CASE_ID = 49
+else ifeq ($(CASE),io-matrix)
+CASE_ID = 50
+else ifeq ($(CASE),audio-query)
+CASE_ID = 51
+else ifeq ($(CASE),cache-alias)
+CASE_ID = 52
+else ifeq ($(CASE),dma-size-matrix)
+CASE_ID = 53
+else ifeq ($(CASE),model-profile)
+CASE_ID = 54
+else ifeq ($(CASE),dma-size-matrix-cell)
+CASE_ID = 55
+else ifeq ($(CASE),mbx-delete-wait)
+CASE_ID = 56
+else ifeq ($(CASE),ge-nan)
+CASE_ID = 57
+else ifeq ($(CASE),dma-cells)
+CASE_ID = 58
+else ifeq ($(CASE),delay-zero)
+CASE_ID = 59
+else ifeq ($(CASE),kernel-alarm)
+CASE_ID = 61
+else ifeq ($(CASE),thread-scheduler)
+CASE_ID = 62
+else ifeq ($(CASE),wait-outcomes)
+CASE_ID = 63
+else ifeq ($(CASE),ge-break-continue)
+CASE_ID = 64
+# 78: #1374 GE sync results for unknown, completed and cancelled queue ids, poll and
+# bounded blocking forms (probe.c, PSP-GE-SYNC-001).
+else ifeq ($(CASE),ge-sync-ids)
+CASE_ID = 78
+# 181: GE SIGNAL handler behaviours 0x00-0x04 (callback, wait, pause, continue) and RJUMP/RCALL
+# offset alignment, bounded per cell (probe.c, PSP-GE-SIGNAL-001).
+else ifeq ($(CASE),ge-signal)
+CASE_ID = 181
+else ifeq ($(CASE),refer-status-size)
+CASE_ID = 65
+else ifeq ($(CASE),registry-readonly)
+CASE_ID = 66
+else ifeq ($(CASE),kernel-misc)
+CASE_ID = 67
+else ifeq ($(CASE),vfpu-compare)
+CASE_ID = 68
+else ifeq ($(CASE),vfpu-transcendental-corpus)
+CASE_ID = 71
+# 90-103: the H-oracle HLE measurement families (probe_hle_measure.c). They are
+# numbered apart from the sequential probe.c cases so that new sequential
+# cases cannot collide with them; 97-103 are single-launch NOT_RUN cases.
+else ifeq ($(CASE),hle-kernel-status)
+CASE_ID = 90
+else ifeq ($(CASE),hle-vtimer)
+CASE_ID = 91
+else ifeq ($(CASE),hle-power-clock)
+CASE_ID = 92
+else ifeq ($(CASE),hle-hprm)
+CASE_ID = 93
+else ifeq ($(CASE),hle-ctrl-latch)
+CASE_ID = 94
+else ifeq ($(CASE),hle-sysparam)
+CASE_ID = 95
+else ifeq ($(CASE),hle-ge-edram)
+CASE_ID = 96
+else ifeq ($(CASE),hle-vtimer-unit)
+CASE_ID = 97
+else ifeq ($(CASE),hle-vtimer-errors)
+CASE_ID = 98
+else ifeq ($(CASE),hle-kernel-pool-bounds)
+CASE_ID = 99
+else ifeq ($(CASE),hle-power-float-v0)
+CASE_ID = 100
+else ifeq ($(CASE),hle-null-out-pointers)
+CASE_ID = 101
+else ifeq ($(CASE),hle-audio-src)
+CASE_ID = 102
+else ifeq ($(CASE),hle-timer-order)
+CASE_ID = 103
+else ifeq ($(CASE),hle-savedata-getsize)
+CASE_ID = 104
+else ifeq ($(CASE),hle-io-trunc)
+CASE_ID = 105
+# 180: savedata modes on a missing save, a directory without PARAM.SFO and a probe-made save.
+else ifeq ($(CASE),hle-savedata-nodata)
+CASE_ID = 180
+# 140: #1386's utility dialog calls at NONE (no InitStart is imported).
+else ifeq ($(CASE),hle-utility-none)
+CASE_ID = 140
+# 156: #341's standard handles, a write to each and a write after closing Stdout.
+else ifeq ($(CASE),hle-std-handles)
+CASE_ID = 156
+# 167: #341's sceKernelSelfStopUnloadModule from a helper PRX the probe loads (case 172, the helper).
+else ifeq ($(CASE),hle-self-stop-unload)
+CASE_ID = 167
+else ifeq ($(CASE),hle-self-stop-helper)
+CASE_ID = 172
+# 159: #279's audio channel rest length at each blocking-output return (1024, 2048, 4096).
+else ifeq ($(CASE),hle-audio-rest)
+CASE_ID = 159
+# 161: #1386's utility dialog status timing and wrong-state answers, in game context.
+else ifeq ($(CASE),hle-utility-dialogs)
+CASE_ID = 161
+# 166: #1386's netconf and game sharing dialog cells of 161 only (no savedata, no gamedata install).
+else ifeq ($(CASE),hle-utility-netconf-sharing)
+CASE_ID = 166
+# 162: #1380's flash0:/ms0:/disc0: seek cells and sceIoIoctl file commands (probe_hle_measure.c).
+else ifeq ($(CASE),hle-io-seek)
+CASE_ID = 162
+# 186: #1380's remaining seek cells: flash0: SEEK_CUR and past-0x100000000 seeks, and ms0:
+# open-flag and async-write cells on a probe-owned file (probe_hle_measure.c, PSP-HLE-IO-SEEK-002).
+else ifeq ($(CASE),hle-io-seek-edges)
+CASE_ID = 186
+# 164: W-NET-1's nickname limit: owner_name key info and the system-parameter string length
+# refusals, read-only (probe_hle_measure.c, PSP-HLE-NICKNAME-001).
+else ifeq ($(CASE),hle-nickname-limit)
+CASE_ID = 164
+# 106-108: the HLE issue cells (probe_hle_issues.c). 106 is the #356 model-getter and
+# #326 vrnd carry / vscmp batch; 107 the #325 interrupt and timer delivery cells; 108 the
+# #326 VFPU form words (vh2f, vuc2i, vsocp, vwbn, vrndf1/2).
+else ifeq ($(CASE),hle-issues-batch)
+CASE_ID = 106
+else ifeq ($(CASE),hle-intr-cells)
+CASE_ID = 107
+else ifeq ($(CASE),vfpu-forms)
+CASE_ID = 108
+# 109: the GE texture sample-point cells (probe_ge_sample.c, #282): which texel a
+# through-mode triangle pair and sprite show, nearest and bilinear.
+else ifeq ($(CASE),ge-sample)
+CASE_ID = 109
+# 123: the GE raster semantics corpus (probe_ge_sample.c, #343): blend, tests, texture
+# functions and formats, wrap, coverage, framebuffer formats, dither, masks, logic, clear, fog.
+else ifeq ($(CASE),ge-raster)
+CASE_ID = 123
+# 185: GE through-mode vertex z outside 0..65535, fractions, infinity and NaN: the depth
+# word and whether colour is written (probe_ge_sample.c, PSP-GE-THROUGHZ-001).
+else ifeq ($(CASE),ge-through-z)
+CASE_ID = 185
+# 126: the GE level-of-detail and mip cells (probe_ge_sample.c, #1373): constant, automatic
+# and slope TEXLEVEL modes over a texture whose every level is one colour.
+else ifeq ($(CASE),ge-mip)
+CASE_ID = 126
+# 139: the GE lighting cells (probe_ge_sample.c, #1732): the 8-bit specular and
+# powered-diffuse colour per specular coefficient, one flat-shaded quad per pixel.
+else ifeq ($(CASE),ge-light)
+CASE_ID = 139
+# 153: the GE overlap cells (probe_ge_sample.c, #2109): overlapping translucent layers in
+# one PRIM and in one PRIM each, in 8888 and in 5650 with and without dithering.
+else ifeq ($(CASE),ge-overlap)
+CASE_ID = 153
+# 154: the GE multi-CLUT mip cells (probe_ge_sample.c, #2031): which CLUT entry each mip
+# level of an indexed texture reads, with TEXMODE bit 8 clear and set.
+else ifeq ($(CASE),ge-clut-mip)
+CASE_ID = 154
+# 157: the GE weighted-vertex cells (probe_ge_sample.c, #343): weight formats, the weight
+# count, the bone each slot selects and the weighted vertex layout.
+else ifeq ($(CASE),ge-weight)
+CASE_ID = 157
+# 158: the GE render-to-texture cells (probe_ge_sample.c, #343): what a texture fetch
+# reads of a framebuffer the GE just drew into, with and without TEXFLUSH and TEXSYNC.
+else ifeq ($(CASE),ge-rtt)
+CASE_ID = 158
+# 187: #2193's raster bounds cells (probe_ge_sample.c, PSP-GE-RASTER-002): colour writes past
+# the frame-buffer stride, depth writes past zbw, and a depth-only clear under a scissor.
+else ifeq ($(CASE),ge-raster-bounds)
+CASE_ID = 187
+# 188: #343's depth rounding cells (probe_ge_sample.c, PSP-GE-RASTER-003): fractional
+# through-mode and transform-mode depths read as colour through EQUAL and GREATER tests.
+else ifeq ($(CASE),ge-depth-round)
+CASE_ID = 188
+else ifeq ($(CASE),llsc-link)
+CASE_ID = 69
+else ifeq ($(CASE),fpu-cc)
+CASE_ID = 70
+else ifeq ($(CASE),registry-font)
+CASE_ID = 72
+else ifeq ($(CASE),font-files)
+CASE_ID = 73
+else ifeq ($(CASE),umd-io)
+CASE_ID = 74
+else ifeq ($(CASE),umd-raw-read)
+CASE_ID = 77
+else ifeq ($(CASE),font-list)
+CASE_ID = 75
+else ifeq ($(CASE),vram-mirror)
+CASE_ID = 76
+else ifeq ($(CASE),late-prx-target)
+CASE_ID = 110
+else ifeq ($(CASE),at3-decode)
+CASE_ID = 111
+else ifeq ($(CASE),at3-delay-sweep)
+CASE_ID = 150
+else ifeq ($(CASE),mpeg-ycbcr)
+CASE_ID = 151
+else ifeq ($(CASE),fake-success)
+CASE_ID = 112
+else ifeq ($(CASE),font-userpgf)
+CASE_ID = 113
+else ifeq ($(CASE),ge-timing)
+CASE_ID = 114
+else ifeq ($(CASE),cpu-timing)
+CASE_ID = 115
+# 122: the #326 VFPU funnel add and average words (vfad, vavg; probe_hle_issues.c),
+# measured as case 118 before dma-timing took that number.
+else ifeq ($(CASE),vfpu-funnel)
+CASE_ID = 122
+# 125: the #326 VFPU sort words (vsrt1-vsrt4; probe_hle_issues.c), measured as case 120
+# before intr-cause took that number.
+else ifeq ($(CASE),vfpu-sort)
+CASE_ID = 125
+# 121: the #326 second VFPU forms batch (vrnds, wide vrndi/vrndf1/vrndf2, vf2h, vc2i;
+# probe_hle_issues.c).
+else ifeq ($(CASE),vfpu-forms2)
+CASE_ID = 121
+# 163: the #326 VFPU forms the runtime refuses as unmodeled (vcrs widths, vcmov imm3 7,
+# mfvc/mtvc of control 255, rejected VFPU9 widths; probe_hle_issues.c). POWER RISK: a refused
+# form may raise an exception that stops the launch.
+else ifeq ($(CASE),vfpu-unmodeled)
+CASE_ID = 163
+# 165: #326 lv.q/sv.q with the write-back flag, in a probe-owned buffer (probe_hle_issues.c).
+# POWER RISK: nothing catches an exception the flag may raise.
+else ifeq ($(CASE),vfpu-quad-wb)
+CASE_ID = 165
+# 170: the #326 VFPU float/integer conversions (vf2iz/vf2in/vf2iu/vf2id, vi2f, vi2s/vi2us/vi2c/vi2uc;
+# probe_hle_issues.c), register-only.
+else ifeq ($(CASE),vfpu-convert)
+CASE_ID = 170
+# 169: the #326 VFPU condition codes and conditional moves (vcmp, vcmovt/vcmovf, mfvc/mtvc of
+# VFPU_CC; probe_hle_issues.c). Owner present.
+else ifeq ($(CASE),vfpu-cc-cmov)
+CASE_ID = 169
+# 171: the #326 vus2i/vs2i double-width unpack, vsgn and vflush cells (probe_hle_issues.c),
+# register-only.
+else ifeq ($(CASE),vfpu-vus2i)
+CASE_ID = 171
+# 168: the #326 basic VFPU arithmetic forms (vadd/vsub/vmul/vmin/vmax .s-.q, vscl, vdiv.s, vneg/vabs/
+# vmov/vzero/vone/vidt; probe_hle_issues.c). POWER RISK: vidt.s is not an assembler form and may
+# raise a reserved-instruction exception; it runs last.
+else ifeq ($(CASE),vfpu-basic-arith)
+CASE_ID = 168
+# 173: the #326 wide dot-product and matrix VFPU forms (vdot, vhdp, vcrsp, vqmul, vtfm, vhtfm, vmmul, vmscl,
+# vmzero/vmidt/vmone/vmmov, vrot; probe_hle_issues.c), register-only.
+else ifeq ($(CASE),vfpu-wide-dot-matrix)
+CASE_ID = 173
+# 174: #326 mtv.s/mfv.s word round trip through two VFPU registers (probe_hle_issues.c); register-only.
+else ifeq ($(CASE),vfpu-mfv-mtv)
+CASE_ID = 174
+# 175: #326 vcst.s/vcst.q for indices 0-31 (probe_hle_issues.c); register-only. POWER RISK: the
+# reserved indices 20-31 may raise an exception; they run last.
+else ifeq ($(CASE),vfpu-constants)
+CASE_ID = 175
+# 176: the #326 rounding separation of vdot.q, vmscl.q, vmul.s, vadd.s and vsub.s (probe_hle_issues.c),
+# register-only.
+else ifeq ($(CASE),vfpu-round-sep)
+CASE_ID = 176
+# 182: the #326 VFPU prefix state (non-identity vpfxs/vpfxt/vpfxd, prefix lifetime, vfim.s/viim.s;
+# probe_hle_issues.c), register-only.
+else ifeq ($(CASE),vfpu-prefix-state)
+CASE_ID = 182
+# 183: the #326 wider VFPU forms (vdiv, vsin/vcos/vrcp/vrsq/vsqrt/vocp, the .p/.t dot and matrix
+# forms, vidt into every column and row register; probe_hle_issues.c), register-only.
+else ifeq ($(CASE),vfpu-wider-ops)
+CASE_ID = 183
+# 184: the #326 vus2i/vs2i words at the reserved widths .t and .q (probe_hle_issues.c), hand-encoded,
+# register-only. POWER RISK: reserved encodings; owner present. Run it last, in its own launch.
+else ifeq ($(CASE),vfpu-reserved-widths)
+CASE_ID = 184
+else ifeq ($(CASE),thread-k0-block)
+CASE_ID = 116
+else ifeq ($(CASE),sas-init)
+CASE_ID = 117
+# 152: the #1296 SimpleADSR envelope heights per grain (probe.c, run_sas_adsr).
+else ifeq ($(CASE),sas-adsr)
+CASE_ID = 152
+# 155: the #2135/#2054 SAS volume, WithMix and pitch cells (probe.c, run_sas_mix).
+else ifeq ($(CASE),sas-mix)
+CASE_ID = 155
+# 160: the #286 Media Engine boundary words: sceVideocodec, sceMpegbase and sceAudiocodec
+# CheckNeedMem on synthetic input (probe.c, run_vcodec_words).
+else ifeq ($(CASE),vcodec-words)
+CASE_ID = 160
+# 118: the #303 DMAC transfer-time and busy-channel cells (probe_dmac_timing.c).
+else ifeq ($(CASE),dma-timing)
+CASE_ID = 118
+# 138: the #303/#1380 memory-edge cells and the placement fixture mem_edge.h (probe_memory_edge.c).
+else ifeq ($(CASE),memory-edge)
+CASE_ID = 138
+# 119: the #312 real-PSP instruction trace (probe_insn_trace.c, insn_trace_tramp.S).
+else ifeq ($(CASE),insn-trace)
+CASE_ID = 119
+# 135: #312's standalone delay-slot exception fixture; the frame is captured from exprint.
+else ifeq ($(CASE),insn-trace-exception)
+CASE_ID = 135
+# 120: the #325 COP0 interrupt state (probe_hle_issues.c): Cause, Status, Count and the
+# interrupt-enable word read in kernel mode across a suspended VBLANK.
+else ifeq ($(CASE),intr-cause)
+CASE_ID = 120
+# 124: the module_start thread cell (probe_module_start.c): does the kernel delete the thread
+# that ran module_start, and free its stack, once module_start returns.
+else ifeq ($(CASE),module-start)
+CASE_ID = 124
+# 127: the v0.0.2 kernel semantics cells (probe_kernel_semantics.c): VBLANK sub-interrupt order,
+# controller sampling, volatile-lock types, Memory Stick exclusive create and 64-bit seeks,
+# WLAN state.
+else ifeq ($(CASE),kernel-semantics)
+CASE_ID = 127
+# 136: #1380's Memory Stick open-without-create, negative-seek and past-end write/read cells
+# (probe_kernel_semantics.c, its own probe-owned directory).
+else ifeq ($(CASE),io-seek-eof)
+CASE_ID = 136
+# 137: #1380's UMD cells: seeks and reads past the end of disc0: files and the raw umd0:
+# device, read-only (probe_kernel_semantics.c).
+else ifeq ($(CASE),io-umd-eof)
+CASE_ID = 137
+# 128: #1375 P1 plus non-invoking P2 registrations; 129/130 are separately guarded NULL invokes.
+else ifeq ($(CASE),null-code-registration)
+CASE_ID = 128
+else ifeq ($(CASE),null-thread-invocation)
+CASE_ID = 129
+else ifeq ($(CASE),null-callback-invocation)
+CASE_ID = 130
+else
+$(error unsupported CASE=$(CASE); see tests/fixtures/psp_oracle/README.md for the supported case names)
+endif
+
+CFLAGS = -O2 -G0 -Wall -Wextra -std=c11 -DPSP_ORACLE_CASE=$(CASE_ID)
+ifeq ($(CASE),dma-size-matrix-cell)
+ifeq ($(strip $(DMAC_SIZE_REQUEST)),)
+$(error CASE=dma-size-matrix-cell requires DMAC_SIZE_REQUEST=<supported size>)
+endif
+endif
+ifneq ($(filter dma-size-matrix dma-size-matrix-cell,$(CASE)),)
+ifneq ($(strip $(DMAC_SIZE_REQUEST)),)
+CFLAGS += -DDMAC_SIZE_REQUEST=$(DMAC_SIZE_REQUEST)
+endif
+endif
+
+# Cases 23-28 and 31-43 are standalone probes, each in its own source file, that
+# record the build commit in their output. The exception probes raise exactly
+# one exception and never return, except exception-a3-unaligned,
+# exception-a3-vfpu-aligned and exception-a3-vfpu-lvl-odd which are the negative
+# controls that return and write a results file; the kernel-object
+# probes use their own complete ThreadManForUser import block
+# (threadman_user_imports.S). CASE_IDs 29/30 are reserved for open PR #244
+# (exception-a3-mload/mstore) so a future merge cannot collide.
+PROBE_BUILD_COMMIT ?= $(shell git rev-parse --short HEAD)
+# The main probe emits this full object id in source_commit for host comparison.
+# Refuse an unknown, overridden, or dirty source tree instead of producing a
+# PRX that claims to represent a commit it does not contain.
+PROBE_BUILD_COMMIT_FULL ?= $(shell git rev-parse --verify HEAD 2>/dev/null)
+PROBE_BUILD_COMMIT_HEAD := $(shell git rev-parse --verify HEAD 2>/dev/null)
+PROBE_BUILD_TREE_STATUS := $(shell git status --porcelain --untracked-files=normal 2>/dev/null || echo __GIT_STATUS_UNAVAILABLE__)
+ifeq ($(strip $(PROBE_BUILD_COMMIT_FULL)),)
+$(error PROBE_BUILD_COMMIT could not be determined; refusing probe build)
+endif
+ifneq ($(PROBE_BUILD_COMMIT_FULL),$(PROBE_BUILD_COMMIT_HEAD))
+$(error PROBE_BUILD_COMMIT must match the clean checkout HEAD)
+endif
+ifneq ($(filter __GIT_STATUS_UNAVAILABLE__,$(PROBE_BUILD_TREE_STATUS)),)
+$(error source tree status could not be determined; refusing probe build)
+endif
+ifneq ($(strip $(PROBE_BUILD_TREE_STATUS)),)
+$(error source tree is dirty; refusing to embed PROBE_BUILD_COMMIT)
+endif
+$(shell mkdir -p "$(BUILD_DIR)")
+CFLAGS += -DPROBE_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT_FULL)\"
+ifeq ($(CASE),exception-a1)
+TARGET = $(BUILD_DIR)/psp_a1
+OBJS = $(BUILD_DIR)/probe_exception_a1.o
+CFLAGS += -DA1_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\"
+else ifeq ($(CASE),exception-a2)
+TARGET = $(BUILD_DIR)/psp_a2
+OBJS = $(BUILD_DIR)/probe_exception_a2.o
+CFLAGS += -DA2_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\"
+else ifeq ($(CASE),exception-a3)
+TARGET = $(BUILD_DIR)/psp_a3
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\"
+else ifeq ($(CASE),exception-a3-mload)
+TARGET = $(BUILD_DIR)/psp_a3_mload
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=2
+else ifeq ($(CASE),exception-a3-mstore)
+TARGET = $(BUILD_DIR)/psp_a3_mstore
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=3
+else ifeq ($(CASE),exception-a3-delayslot)
+TARGET = $(BUILD_DIR)/psp_a3_delayslot
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=4
+else ifeq ($(CASE),exception-a3-half-load)
+TARGET = $(BUILD_DIR)/psp_a3_half_load
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=5
+else ifeq ($(CASE),exception-a3-half-store)
+TARGET = $(BUILD_DIR)/psp_a3_half_store
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=6
+else ifeq ($(CASE),exception-a3-unaligned)
+TARGET = $(BUILD_DIR)/psp_a3_unaligned
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=7
+else ifeq ($(CASE),exception-a3-vfpu-lvs)
+TARGET = $(BUILD_DIR)/psp_a3_vfpu_lvs
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=8
+else ifeq ($(CASE),exception-a3-vfpu-lvq4)
+TARGET = $(BUILD_DIR)/psp_a3_vfpu_lvq4
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=9
+else ifeq ($(CASE),exception-a3-vfpu-lvq8)
+TARGET = $(BUILD_DIR)/psp_a3_vfpu_lvq8
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=10
+else ifeq ($(CASE),exception-a3-vfpu-svq4)
+TARGET = $(BUILD_DIR)/psp_a3_vfpu_svq4
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=11
+else ifeq ($(CASE),exception-a3-vfpu-aligned)
+TARGET = $(BUILD_DIR)/psp_a3_vfpu_aligned
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=12
+else ifeq ($(CASE),exception-a3-vfpu-svs)
+TARGET = $(BUILD_DIR)/psp_a3_vfpu_svs
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=13
+else ifeq ($(CASE),exception-a3-vfpu-svq8)
+TARGET = $(BUILD_DIR)/psp_a3_vfpu_svq8
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=14
+else ifeq ($(CASE),exception-a3-vfpu-lvq-delay)
+TARGET = $(BUILD_DIR)/psp_a3_vfpu_lvq_delay
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=15
+else ifeq ($(CASE),exception-a3-vfpu-lvl-odd)
+TARGET = $(BUILD_DIR)/psp_a3_vfpu_lvl_odd
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\" -DA3_CASE=16
+else ifeq ($(CASE),exception-a3-fetch-zero)
+TARGET = $(BUILD_DIR)/psp_a3_fetch_zero
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT_FULL)\" -DA3_CASE=17
+else ifeq ($(CASE),exception-a3-fetch-08000000)
+TARGET = $(BUILD_DIR)/psp_a3_fetch_08000000
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT_FULL)\" -DA3_CASE=18
+else ifeq ($(CASE),exception-a3-fetch-40000000)
+TARGET = $(BUILD_DIR)/psp_a3_fetch_40000000
+OBJS = $(BUILD_DIR)/probe_exception_a3.o
+CFLAGS += -DA3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT_FULL)\" -DA3_CASE=19
+else ifeq ($(CASE),kobj-b1)
+TARGET = $(BUILD_DIR)/psp_b1
+OBJS = $(BUILD_DIR)/psp_b1.o $(BUILD_DIR)/threadman_user_imports.o
+CFLAGS += -DB1_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\"
+else ifeq ($(CASE),wait-b2)
+TARGET = $(BUILD_DIR)/psp_b2
+OBJS = $(BUILD_DIR)/psp_b2.o $(BUILD_DIR)/threadman_user_imports.o
+CFLAGS += -DB2_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\"
+else ifeq ($(CASE),kernel-b3)
+TARGET = $(BUILD_DIR)/psp_b3
+OBJS = $(BUILD_DIR)/psp_b3.o $(BUILD_DIR)/threadman_user_imports.o
+CFLAGS += -DB3_BUILD_COMMIT=\"$(PROBE_BUILD_COMMIT)\"
+# HLE measurement families (hle-*): one PRX per family, all in
+# probe_hle_measure.c. Each links the complete ThreadManForUser block (module
+# lifecycle, and the ReferSystemStatus / VTimer / FPL NIDs) plus only its own
+# library block, so every PRX's import table is exactly its family's.
+else ifeq ($(CASE),hle-kernel-status)
+TARGET = $(BUILD_DIR)/hle_kernel_status
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-vtimer)
+TARGET = $(BUILD_DIR)/hle_vtimer
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-power-clock)
+TARGET = $(BUILD_DIR)/hle_power_clock
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_power_imports.o
+else ifeq ($(CASE),hle-hprm)
+TARGET = $(BUILD_DIR)/hle_hprm
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_hprm_imports.o
+else ifeq ($(CASE),hle-ctrl-latch)
+TARGET = $(BUILD_DIR)/hle_ctrl_latch
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_ctrl_imports.o
+else ifeq ($(CASE),hle-sysparam)
+TARGET = $(BUILD_DIR)/hle_sysparam
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-ge-edram)
+TARGET = $(BUILD_DIR)/hle_ge_edram
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_ge_imports.o
+else ifeq ($(CASE),hle-vtimer-unit)
+TARGET = $(BUILD_DIR)/hle_vtimer_unit
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-vtimer-errors)
+TARGET = $(BUILD_DIR)/hle_vtimer_errors
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-kernel-pool-bounds)
+TARGET = $(BUILD_DIR)/hle_kernel_pool_bounds
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-power-float-v0)
+TARGET = $(BUILD_DIR)/hle_power_float_v0
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_power_imports.o
+else ifeq ($(CASE),hle-null-out-pointers)
+TARGET = $(BUILD_DIR)/hle_null_out_pointers
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-audio-src)
+TARGET = $(BUILD_DIR)/hle_audio_src
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-timer-order)
+TARGET = $(BUILD_DIR)/hle_timer_order
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-savedata-getsize)
+TARGET = $(BUILD_DIR)/hle_savedata_getsize
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-io-trunc)
+TARGET = $(BUILD_DIR)/hle_io_trunc
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-savedata-nodata)
+TARGET = $(BUILD_DIR)/hle_savedata_nodata
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-utility-none)
+TARGET = $(BUILD_DIR)/hle_utility_none
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-std-handles)
+TARGET = $(BUILD_DIR)/hle_std_handles
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-self-stop-unload)
+TARGET = $(BUILD_DIR)/hle_self_stop_unload
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+# The helper PRX that case loads from host0 (probe_hle_self_stop_helper.c); built as its own CASE,
+# so build_probe_batch.sh copies it as hle_self_stop_helper.prx next to the probe.
+else ifeq ($(CASE),hle-self-stop-helper)
+TARGET = $(BUILD_DIR)/hle_self_stop_helper
+OBJS = $(BUILD_DIR)/probe_hle_self_stop_helper.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-audio-rest)
+TARGET = $(BUILD_DIR)/hle_audio_rest
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-utility-dialogs)
+TARGET = $(BUILD_DIR)/hle_utility_dialogs
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-utility-netconf-sharing)
+TARGET = $(BUILD_DIR)/hle_utility_netconf_sharing
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-io-seek)
+TARGET = $(BUILD_DIR)/hle_io_seek
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-io-seek-edges)
+TARGET = $(BUILD_DIR)/hle_io_seek_edges
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-nickname-limit)
+TARGET = $(BUILD_DIR)/hle_nickname_limit
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+# HLE issue cells: their own source, which installs and removes interrupt and timer
+# handlers (107) and reaches a kernel getter through the kernel bridge (106), so they
+# stay out of probe_hle_measure.c. Same ThreadManForUser block and module lifecycle.
+else ifeq ($(CASE),hle-issues-batch)
+TARGET = $(BUILD_DIR)/hle_issues_batch
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-intr-cells)
+TARGET = $(BUILD_DIR)/hle_intr_cells
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-forms)
+TARGET = $(BUILD_DIR)/vfpu_forms
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),intr-cause)
+TARGET = $(BUILD_DIR)/intr_cause
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-funnel)
+TARGET = $(BUILD_DIR)/vfpu_funnel
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-sort)
+TARGET = $(BUILD_DIR)/vfpu_sort
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-forms2)
+TARGET = $(BUILD_DIR)/vfpu_forms2
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-unmodeled)
+TARGET = $(BUILD_DIR)/vfpu_unmodeled
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-quad-wb)
+TARGET = $(BUILD_DIR)/vfpu_quad_wb
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-convert)
+TARGET = $(BUILD_DIR)/vfpu_convert
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-cc-cmov)
+TARGET = $(BUILD_DIR)/vfpu_cc_cmov
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-vus2i)
+TARGET = $(BUILD_DIR)/vfpu_vus2i
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-basic-arith)
+TARGET = $(BUILD_DIR)/vfpu_basic_arith
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-wide-dot-matrix)
+TARGET = $(BUILD_DIR)/vfpu_wide_dot_matrix
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-mfv-mtv)
+TARGET = $(BUILD_DIR)/vfpu_mfv_mtv
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-constants)
+TARGET = $(BUILD_DIR)/vfpu_constants
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-round-sep)
+TARGET = $(BUILD_DIR)/vfpu_round_sep
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-prefix-state)
+TARGET = $(BUILD_DIR)/vfpu_prefix_state
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-wider-ops)
+TARGET = $(BUILD_DIR)/vfpu_wider_ops
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-reserved-widths)
+TARGET = $(BUILD_DIR)/vfpu_reserved_widths
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE sample-point cells: their own source (raw display lists, no libpspgu) with the
+# same writer, ThreadManForUser block and module lifecycle as the HLE issue cells.
+else ifeq ($(CASE),ge-sample)
+TARGET = $(BUILD_DIR)/ge_sample
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The kernel semantics cells: their own source (they write and remove a Memory Stick
+# directory and allocate partition memory, which the HLE issue cells may not) with the same
+# writer, ThreadManForUser block and module lifecycle.
+else ifeq ($(CASE),kernel-semantics)
+TARGET = $(BUILD_DIR)/kernel_semantics
+OBJS = $(BUILD_DIR)/probe_kernel_semantics.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),io-seek-eof)
+TARGET = $(BUILD_DIR)/io_seek_eof
+OBJS = $(BUILD_DIR)/probe_kernel_semantics.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),io-umd-eof)
+TARGET = $(BUILD_DIR)/io_umd_eof
+OBJS = $(BUILD_DIR)/probe_kernel_semantics.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),null-code-registration)
+TARGET = $(BUILD_DIR)/null_code_registration
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),null-thread-invocation)
+TARGET = $(BUILD_DIR)/null_thread_invocation
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),null-callback-invocation)
+TARGET = $(BUILD_DIR)/null_callback_invocation
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+# The DMAC transfer-time cells: their own source with the same writer, ThreadManForUser
+# block and module lifecycle as the HLE issue cells.
+else ifeq ($(CASE),dma-timing)
+TARGET = $(BUILD_DIR)/dma_timing
+OBJS = $(BUILD_DIR)/probe_dmac_timing.o $(BUILD_DIR)/threadman_user_imports.o
+# The memory-edge cells: their own source with the same writer, ThreadManForUser block and
+# module lifecycle as the HLE issue cells, plus the placement header mem_edge.h.
+else ifeq ($(CASE),memory-edge)
+TARGET = $(BUILD_DIR)/memory_edge
+OBJS = $(BUILD_DIR)/probe_memory_edge.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE raster corpus: the same source as the sample-point cells, case 123.
+else ifeq ($(CASE),ge-raster)
+TARGET = $(BUILD_DIR)/ge_raster
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE through-mode depth cells: the same source as the sample-point cells, case 185.
+else ifeq ($(CASE),ge-through-z)
+TARGET = $(BUILD_DIR)/ge_through_z
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE mip cells: the same source as the sample-point cells, case 126.
+else ifeq ($(CASE),ge-mip)
+TARGET = $(BUILD_DIR)/ge_mip
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE lighting cells: the same source as the sample-point cells, case 139.
+else ifeq ($(CASE),ge-light)
+TARGET = $(BUILD_DIR)/ge_light
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE overlap cells: the same source as the sample-point cells, case 153.
+else ifeq ($(CASE),ge-overlap)
+TARGET = $(BUILD_DIR)/ge_overlap
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE multi-CLUT mip cells: the same source as the sample-point cells, case 154.
+else ifeq ($(CASE),ge-clut-mip)
+TARGET = $(BUILD_DIR)/ge_clut_mip
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE weighted-vertex cells: the same source as the sample-point cells, case 157.
+else ifeq ($(CASE),ge-weight)
+TARGET = $(BUILD_DIR)/ge_weight
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE render-to-texture cells: the same source as the sample-point cells, case 158.
+else ifeq ($(CASE),ge-rtt)
+TARGET = $(BUILD_DIR)/ge_rtt
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE raster bounds cells: the same source as the sample-point cells, case 187.
+else ifeq ($(CASE),ge-raster-bounds)
+TARGET = $(BUILD_DIR)/ge_raster_bounds
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE depth rounding cells: the same source as the sample-point cells, case 188.
+else ifeq ($(CASE),ge-depth-round)
+TARGET = $(BUILD_DIR)/ge_depth_round
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The instruction trace: its own source, the single-step trampoline and the fixtures
+# header, with the same writer, ThreadManForUser block and module lifecycle as the HLE
+# issue cells.
+else ifeq ($(CASE),insn-trace)
+TARGET = $(BUILD_DIR)/insn_trace
+OBJS = $(BUILD_DIR)/probe_insn_trace.o $(BUILD_DIR)/insn_trace_tramp.o $(BUILD_DIR)/threadman_user_imports.o
+# The exception fixture uses the same logger and module lifecycle, without the trampoline.
+else ifeq ($(CASE),insn-trace-exception)
+TARGET = $(BUILD_DIR)/insn_trace_exception
+OBJS = $(BUILD_DIR)/probe_insn_trace.o $(BUILD_DIR)/threadman_user_imports.o
+# The module_start thread cell: no main thread. Its own module_start replaces crt0's: the
+# source gives it the assembler name __wrap_module_start, --wrap=module_start points the export
+# table's reference there, and -e makes it the ELF entry point (the linker script's
+# ENTRY(module_start) would name crt0's). Same writer and ThreadManForUser block as the HLE
+# issue cells; the helper thread stands in for the main thread at teardown.
+else ifeq ($(CASE),module-start)
+TARGET = $(BUILD_DIR)/module_start
+OBJS = $(BUILD_DIR)/probe_module_start.o $(BUILD_DIR)/threadman_user_imports.o
+LDFLAGS += -Wl,--wrap=module_start -Wl,-e,__wrap_module_start
+endif
+CXXFLAGS = $(CFLAGS)
+ASFLAGS = $(CFLAGS)
+BUILD_PRX = 1
+PSP_FW_VERSION = 500
+# Keep only the invalid-tail variants at the bounded public memory baseline.
+# They discover and reserve a page-aligned high block at runtime, then prove
+# that an allocation beginning at the next address is rejected before issuing
+# the syscall. Existing probes and the concurrency case retain their prior
+# memory request.
+ifneq ($(filter dma-invalid-tail-%,$(CASE)),)
+PSP_LARGE_MEMORY = 0
+endif
+PSP_EBOOT_TITLE = Nakagawa PSP Oracle
+PSP_EBOOT_ICON = NULL
+LIBS = -lpspdmac -lpsppower -lpspge -lpspaudio
+ifneq ($(filter ge-nan vram-mirror ge-timing cpu-timing,$(CASE)),)
+LIBS := -lpspgum -lpspgu $(LIBS)
+endif
+# #1096: the AT3 decode probes link the user-mode ATRAC and utility stubs they call.
+ifneq ($(filter at3-decode at3-delay-sweep,$(CASE)),)
+LIBS += -lpspatrac3 -lpsputility
+endif
+# #302: the sceMpeg probe carries its own complete sceMpeg import block (probe.c: PSPSDK's
+# libpspmpeg.a lacks the YCbCr, CSC and decode-detail stubs) and links only the utility stubs.
+ifeq ($(CASE),mpeg-ycbcr)
+LIBS += -lpsputility
+endif
+# #286: the Media Engine boundary probe carries its own sceVideocodec, sceMpegbase and sceAudiocodec
+# import blocks (probe.c; the PSPSDK libraries are not linked) and links only the utility stubs. The
+# gate pins each library to exactly the calls the case makes: eight videocodec, three mpegbase (no
+# PESpacketCopy, no YCrCb copy) and CheckNeedMem from the audio codec.
+ifeq ($(CASE),vcodec-words)
+LIBS += -lpsputility
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceVideocodec=0xC01EC829,0x2D31F5B1,0x17099F0A,0x745A7B7A,0xDBA273FA,0xA2F0564E,0x4F160BF4,0x307E6E1C
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceMpegbase=0x492B5E4B,0x91929A21,0x0530BE4E
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceAudiocodec=0x9D3F790C
+endif
+# #1595: the SAS re-init probe links the user-mode sceSasCore and utility stubs it calls.
+ifeq ($(CASE),sas-init)
+LIBS += -lpspsascore -lpsputility
+endif
+# #1296: the SimpleADSR envelope probe links the same stubs.
+ifeq ($(CASE),sas-adsr)
+LIBS += -lpspsascore -lpsputility
+endif
+# #2135, #2054: the SAS volume and pitch probe links the same stubs.
+ifeq ($(CASE),sas-mix)
+LIBS += -lpspsascore -lpsputility
+endif
+# Fake-success audit: the OSK calls live in libpsputility; the volatile-memory calls are in SuspendForUser.
+ifeq ($(CASE),fake-success)
+LIBS += -lpsputility
+# FAKE_SUCCESS_OSK_CYCLE=1 adds the attended on-screen-keyboard cycle (a person must finish the dialog).
+ifeq ($(FAKE_SUCCESS_OSK_CYCLE),1)
+CFLAGS += -DFAKE_SUCCESS_OSK_CYCLE
+endif
+endif
+# #1049 caveat: an extra depth-buffer offset for CASE=vram-mirror (default 0 = the measured zbp 0x0cc000).
+VRAM_MIRROR_DEPTH_BIAS ?= 0x00000000
+ifeq ($(CASE),vram-mirror)
+CFLAGS += -DVRAM_MIRROR_DEPTH_BIAS=$(VRAM_MIRROR_DEPTH_BIAS)
+ifeq ($(VRAM_MIRROR_FULL_SCAN),1)
+CFLAGS += -DVRAM_MIRROR_FULL_SCAN
+endif
+endif
+ifeq ($(CASE),model-profile)
+LIBS += -lpspkubridge
+endif
+# hle-issues-batch: kuKernelGetModel, the hand-written sceKernelGetModel user import, and the
+# kernel getter through ARK's sctrlHENFindFunction + kuKernelCall.
+ifeq ($(CASE),hle-issues-batch)
+LIBS += -lpspkubridge -lpspsystemctrl_user
+# Exactly kuKernelGetModel + kuKernelCall, sctrlHENFindFunction, and SysMemUserForUser's
+# sceKernelGetModel (the hand stub) and sceKernelDevkitVersion plus the four memory calls
+# the PSPSDK libc glue imports; no interrupt-manager import at all.
+USER_MODE_IMPORT_GATE_ARGS += --exact-library KUBridge=0x24331850,0x9060F69D
+USER_MODE_IMPORT_GATE_ARGS += --exact-library SystemCtrlForUser=0x159AF5CC
+USER_MODE_IMPORT_GATE_ARGS += --exact-library SysMemUserForUser=0x6373995D,0x3FC9AE6A,0xA291F107,0x237DBD4F,0xB6D61D02,0x9D9A5BA1
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library InterruptManager
+endif
+# hle-intr-cells: exactly the four VBLANK sub-interrupt calls, and from Kernel_Library the
+# suspend/resume pair plus the two LwMutex calls the PSPSDK libc glue imports; nothing from
+# the kernel bridge.
+ifeq ($(CASE),hle-intr-cells)
+USER_MODE_IMPORT_GATE_ARGS += --exact-library InterruptManager=0xCA04A2B9,0xD61E6961,0xFB8E22EC,0x8A389411
+USER_MODE_IMPORT_GATE_ARGS += --exact-library Kernel_Library=0x092968F4,0x5F10D406,0xBEA46419,0x15B6446B
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library KUBridge --forbid-library SystemCtrlForUser
+endif
+ifeq ($(CASE),null-code-registration)
+USER_MODE_IMPORT_GATE_ARGS += --exact-library InterruptManager=0xCA04A2B9,0xD61E6961,0xFB8E22EC,0x8A389411
+USER_MODE_IMPORT_GATE_ARGS += --exact-library Kernel_Library=0xBEA46419,0x15B6446B
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceGe_user=0xB287BD61,0xA4FC06A4,0x05DB22CE
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library KUBridge --forbid-library SystemCtrlForUser
+endif
+ifneq ($(filter null-thread-invocation null-callback-invocation,$(CASE)),)
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library InterruptManager --forbid-library KUBridge --forbid-library SystemCtrlForUser
+endif
+# kernel-semantics: exactly the four VBLANK sub-interrupt calls, the six sceCtrl sampling calls,
+# the three volatile-lock calls, and from sceWlanDrv only the switch and power state: the gate
+# refuses sceWlanGetEtherAddr (the console's MAC) and any sceOpenPSID import, so the probe can
+# never read a console-bound value. Nothing from the kernel bridge.
+ifeq ($(CASE),kernel-semantics)
+LIBS += -lpspctrl -lpspwlan
+USER_MODE_IMPORT_GATE_ARGS += --exact-library InterruptManager=0xCA04A2B9,0xD61E6961,0xFB8E22EC,0x8A389411
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceCtrl=0x1F803938,0x3A622550,0x1F4011E6,0xDA6B76A1,0x6A2774F3,0x02BAAD91
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceSuspendForUser=0x3E0271D3,0xA14F40B2,0xA569E425
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceWlanDrv=0xD7763699,0x93440B11
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceOpenPSID --forbid-library KUBridge --forbid-library SystemCtrlForUser
+endif
+# io-seek-eof: file calls only (IoFileMgrForUser and the shared ThreadManForUser block); none
+# of kernel-semantics' interrupt, controller, suspend or WLAN imports, nothing from the bridge.
+ifeq ($(CASE),io-seek-eof)
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library InterruptManager --forbid-library sceCtrl
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceSuspendForUser --forbid-library sceWlanDrv
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceOpenPSID --forbid-library KUBridge --forbid-library SystemCtrlForUser
+endif
+# io-umd-eof: read-only file calls and exactly the two UMD state reads (sceUmdCheckMedium and
+# sceUmdGetDriveStat), so a build that imported sceUmdActivate or any other UMD call fails the
+# gate; none of kernel-semantics' interrupt, controller, suspend or WLAN imports.
+ifeq ($(CASE),io-umd-eof)
+LIBS += -lpspumd
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUmdUser=0x46EBB729,0x6B4A146C
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library InterruptManager --forbid-library sceCtrl
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceSuspendForUser --forbid-library sceWlanDrv
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceOpenPSID --forbid-library KUBridge --forbid-library SystemCtrlForUser
+endif
+# memory-edge: partition-memory, file and DMAC calls only; none of the interrupt, controller,
+# suspend or WLAN imports, nothing from the kernel bridge, and no OpenPSID.
+ifeq ($(CASE),memory-edge)
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library InterruptManager --forbid-library sceCtrl
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceSuspendForUser --forbid-library sceWlanDrv
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceOpenPSID --forbid-library KUBridge --forbid-library SystemCtrlForUser
+endif
+# intr-cause: exactly kuKernelCall from the kernel bridge, the two sceDisplay reads, and from
+# Kernel_Library the suspend/resume pair plus the two LwMutex calls the PSPSDK libc glue
+# imports; nothing from the interrupt manager or SystemCtrlForUser.
+ifeq ($(CASE),intr-cause)
+LIBS += -lpspkubridge
+USER_MODE_IMPORT_GATE_ARGS += --exact-library KUBridge=0x9060F69D
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceDisplay=0x984C27E7,0x9C6EAAD7
+USER_MODE_IMPORT_GATE_ARGS += --exact-library Kernel_Library=0x092968F4,0x5F10D406,0xBEA46419,0x15B6446B
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library InterruptManager --forbid-library SystemCtrlForUser
+endif
+# hle_utility_imports.S declares the two system-parameter Get calls (the CRT's timezone
+# setup calls the Int one in every PRX) and, for hle-savedata-getsize (case 104) and
+# hle-savedata-nodata (case 180) only, the four savedata dialog calls. Each build is pinned to exactly its own sceUtility set, so
+# hle-sysparam cannot import a savedata call and neither can import a Set call.
+ifeq ($(CASE),hle-sysparam)
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343
+endif
+ifeq ($(CASE),hle-savedata-getsize)
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C
+endif
+# hle-io-trunc (case 105) takes the CRT's pair and nothing else from sceUtility: no dialog.
+ifeq ($(CASE),hle-io-trunc)
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343
+endif
+ifeq ($(CASE),hle-savedata-nodata)
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C
+endif
+# hle-utility-none: GetStatus, Update and ShutdownStart of five dialogs and no InitStart, so no
+# dialog can be opened by this build.
+ifeq ($(CASE),hle-utility-none)
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x8874DBE0,0xD4B95FFB,0x9790B33C,0x9A1C91D7,0x95FC253B,0x67AF3428,0x6332AA39,0x91E70E35,0xF88155F6,0xB57E95D9,0x4AECD179,0x32E32DCB,0x946963F3,0x7853182D,0xEFC6F80F
+endif
+# hle-utility-dialogs: the four calls of savedata, netconf, game sharing and the gamedata install
+# dialog, the message dialog's InitStart, and the net module load/unload pair (sceUtility); the
+# UMD presence check; and from each net library only its Init and Term call. No connect, create,
+# join or scan call can be linked: each net library is pinned to that pair, and the libraries
+# with no Init/Term use here (matching, resolver, HTTP, SSL, the registry) are forbidden.
+# sceNetInet also carries the four calls every PRX imports from the PSPSDK libc glue's socket
+# fallback (Close, Recv, Send, GetErrno, used only on a socket descriptor, which this case never
+# opens). Only the two ad hoc libraries are added here: build.mak appends -lpspnet and
+# -lpspnet_apctl, and psp-gcc's lib spec appends -lpspnet_inet after the libc group. Naming
+# -lpspnet_inet here too would pull InetInit/InetTerm in an earlier link pass than the glue's
+# four calls, split the sceNetInet stubs into two runs, and psp-fixup-imports refuses that
+# ("stubs out of order").
+ifeq ($(CASE),hle-utility-dialogs)
+LIBS += -lpspumd -lpspnet_adhocctl -lpspnet_adhoc
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C,0x2AD8E239,0x4DB1E739,0x6332AA39,0x91E70E35,0xF88155F6,0x24AC31EB,0xB57E95D9,0x4AECD179,0x32E32DCB,0xC492F751,0x946963F3,0x7853182D,0xEFC6F80F,0x1579A159,0x64D50C56
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUmdUser=0x46EBB729
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNet=0x39AF39A6,0x281928A9
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetInet=0x17943399,0xA9ED66B9,0x8D7284EA,0xCDA85C99,0x7AA671BC,0xFBABE411
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetApctl=0xE2F91F9B,0xB3EDD0EC
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhoc=0xE1D621D7,0xA62C6F57
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhocctl=0xE26F226E,0x9D689E13
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhocMatching --forbid-library sceNetResolver
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceHttp --forbid-library sceSsl --forbid-library sceReg
+endif
+# hle-utility-netconf-sharing: case 161's netconf and game sharing calls and net module pair only.
+# No savedata call, no gamedata install call and no UMD call is linked.
+ifeq ($(CASE),hle-utility-netconf-sharing)
+LIBS += -lpspnet_adhocctl -lpspnet_adhoc
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x2AD8E239,0x4DB1E739,0x6332AA39,0x91E70E35,0xF88155F6,0xC492F751,0x946963F3,0x7853182D,0xEFC6F80F,0x1579A159,0x64D50C56
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNet=0x39AF39A6,0x281928A9
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetInet=0x17943399,0xA9ED66B9,0x8D7284EA,0xCDA85C99,0x7AA671BC,0xFBABE411
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetApctl=0xE2F91F9B,0xB3EDD0EC
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhoc=0xE1D621D7,0xA62C6F57
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhocctl=0xE26F226E,0x9D689E13
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhocMatching --forbid-library sceNetResolver
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceHttp --forbid-library sceSsl --forbid-library sceReg
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceUmdUser
+endif
+ifeq ($(CASE),cpu-timing)
+# The shared probe cleanup checks interrupt state; cpu-timing also calls the
+# lightweight-mutex lock/unlock pair through Kernel_Library.
+USER_MODE_IMPORT_GATE_ARGS += --exact-library Kernel_Library=0x092968F4,0x5F10D406,0x47A0B729,0xB55249D2,0xBEA46419,0x15B6446B
+endif
+# The registry cases may import only the eight read-only sceReg calls, exactly: the gate
+# below fails the build on any other sceReg NID (a set, create, remove or flush call).
+REGISTRY_CASES = registry-readonly registry-font
+ifneq ($(filter $(REGISTRY_CASES),$(CASE)),)
+LIBS += -lpspreg
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceReg=0x92E41280,0xFA8A5739,0x1D8A762E,0x0CAE832B,0x2C0DB9DD,0x2D211135,0xD4475AA8,0x28A8E98A
+endif
+# hle-nickname-limit: the two system-parameter Get calls only (the nickname string is read for its
+# return and length, never written), and from the registry exactly the seven read calls the guarded
+# walk makes: open and close of the registry and of a category, GetKeysNum, GetKeys and GetKeyInfo.
+# sceRegGetKeyValue (the nickname bytes) and every set, create, remove and flush call are not
+# importable: the gate fails the build on any other sceReg NID.
+ifeq ($(CASE),hle-nickname-limit)
+LIBS += -lpspreg
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceReg=0x92E41280,0xFA8A5739,0x1D8A762E,0x0CAE832B,0x2C0DB9DD,0x2D211135,0xD4475AA8
+endif
+# The UMD case reads the drive state only: exactly sceUmdCheckMedium and sceUmdGetDriveStat,
+# so a build that imported sceUmdActivate (or any other UMD call) fails the gate.
+ifeq ($(CASE),umd-io)
+LIBS += -lpspumd
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUmdUser=0x46EBB729,0x6B4A146C
+endif
+# Raw UMD reads are read-only on the UMD descriptor. The IoFileMgrForUser pin covers the case's
+# seek/read/async/stat calls, the durable host0 logger and round-trip cleanup, and the four
+# IoFileMgr stubs pulled by PSPSDK libc glue. The source test forbids write/control calls in the
+# raw UMD case itself, and the emulator devctl/stdout route is compiled out for this PSP-only case.
+ifeq ($(CASE),umd-raw-read)
+LIBS += -lpspumd
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUmdUser=0x46EBB729,0x6B4A146C
+USER_MODE_IMPORT_GATE_ARGS += --exact-library IoFileMgrForUser=0x109F50BC,0x27EB27B8,0x3251EA56,0x42EC03AC,0x55F4717D,0x68963324,0x6A638D83,0x810C4BC3,0xA0B5A7C2,0xACE946E8,0xB29DDF9C,0xE23EEC33,0xE3EB004C,0xEB092469,0xF27A9C51
+endif
+# The font-list case asks the console's own font library for the system font list. It links
+# the hand-authored sceLibFont stubs (libfont_imports.S) and may import exactly those five
+# calls; it may import nothing from sceReg, so the probe itself can neither open nor create a
+# registry category (the only registry reads are the library's own).
+ifeq ($(CASE),font-list)
+OBJS += $(BUILD_DIR)/libfont_imports.o
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceLibFont=0x67F17ED7,0x574B6FBC,0x27F6E642,0xBC75D85B,0x5333322D --forbid-library sceReg
+endif
+# The font-userpgf case (#1055) opens project and console PGFs in the resident font library and
+# draws glyphs. libfont_imports.S gains its eight extra imports only under -DLIBFONT_USERPGF, so
+# the font-list pin above is unchanged; this case is pinned to exactly the thirteen NIDs it calls.
+ifeq ($(CASE),font-userpgf)
+OBJS += $(BUILD_DIR)/libfont_imports.o
+LIBFONT_ASFLAGS = -DLIBFONT_USERPGF
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceLibFont=0x67F17ED7,0x574B6FBC,0x27F6E642,0xBC75D85B,0x5333322D,0xA834319D,0x57FCB733,0xBB8E7FE6,0x3AEA8CB6,0x0DA7535E,0xDCC80C2F,0x980F4895,0xAA3DE7B5 --forbid-library sceReg
+endif
+ifeq ($(CASE),kernel-misc)
+OBJS += $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/display_user_imports.o
+LIBS += -lpspctrl
+endif
+ifeq ($(CASE),wait-outcomes)
+OBJS += $(BUILD_DIR)/threadman_user_imports.o
+endif
+
+# The main probe exports module_stop (see "Module lifecycle" in probe.c), so it
+# replaces the SDK default syslib export table, which names only module_start
+# and module_info. The table is generated into the ignored build directory and
+# compiled by the SDK's %.c: %.exp and %.o: %.c rules.
+ifneq ($(filter $(BUILD_DIR)/probe.o,$(OBJS)),)
+PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
+endif
+# The HLE measurement probe (probe_hle_measure.c) has the same lifecycle, so it
+# exports module_stop from the same generated table.
+ifneq ($(filter $(BUILD_DIR)/probe_hle_measure.o,$(OBJS)),)
+PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
+endif
+# The HLE issue cells (probe_hle_issues.c) repeat that lifecycle.
+ifneq ($(filter $(BUILD_DIR)/probe_hle_issues.o,$(OBJS)),)
+PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
+endif
+# So do the GE sample-point cells (probe_ge_sample.c).
+ifneq ($(filter $(BUILD_DIR)/probe_ge_sample.o,$(OBJS)),)
+PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
+endif
+# And the kernel semantics cells (probe_kernel_semantics.c).
+ifneq ($(filter $(BUILD_DIR)/probe_kernel_semantics.o,$(OBJS)),)
+PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
+endif
+# And the memory-edge cells (probe_memory_edge.c).
+ifneq ($(filter $(BUILD_DIR)/probe_memory_edge.o,$(OBJS)),)
+PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
+endif
+# And the DMAC transfer-time cells (probe_dmac_timing.c).
+ifneq ($(filter $(BUILD_DIR)/probe_dmac_timing.o,$(OBJS)),)
+PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
+endif
+# And the instruction trace (probe_insn_trace.c).
+ifneq ($(filter $(BUILD_DIR)/probe_insn_trace.o,$(OBJS)),)
+PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
+endif
+# The self stop-unload helper (probe_hle_self_stop_helper.c) exports module_stop too.
+ifneq ($(filter $(BUILD_DIR)/probe_hle_self_stop_helper.o,$(OBJS)),)
+PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
+endif
+# And the module_start thread cell (probe_module_start.c), which defines its own module_stop.
+ifneq ($(filter $(BUILD_DIR)/probe_module_start.o,$(OBJS)),)
+PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
+endif
+
+PSPSDK = $(shell psp-config --pspsdk-path)
+ifeq ($(strip $(PSPSDK)),)
+$(error PSPDEV/PSPSDK is not available: psp-config --pspsdk-path failed)
+endif
+include $(PSPSDK)/lib/build.mak
+
+# Fail closed if psp-fixup-imports reports out-of-order stubs (issue #400),
+# then run the user-mode import gate on the fixed-up ELF: a user-mode probe
+# that imports a kernel-only library (*_driver, *ForKernel, ...) cannot load
+# on the PSP, so the build stops and names the library and its NIDs.
+# .DELETE_ON_ERROR removes a rejected ELF so a later make cannot package it.
+PYTHON ?= python3
+USER_MODE_IMPORT_GATE = $(FIXTURE_DIR)../../../tools/psp_oracle/user_mode_imports.py
+FIXUP = bash -c 'out=$$(psp-fixup-imports "$$1" 2>&1); rc=$$?; test -n "$$out" && echo "$$out"; echo "$$out" | grep -q "stubs out of order" && exit 1; test $$rc -eq 0 || exit $$rc; exec "$(PYTHON)" "$(USER_MODE_IMPORT_GATE)" $(USER_MODE_IMPORT_GATE_ARGS) "$$1"' --
+.DELETE_ON_ERROR:
+
+# Make judges staleness by file times alone, but the case selects the flags every
+# object is compiled with (PSP_ORACLE_CASE, the embedded build commit, A3_CASE,
+# DMAC_SIZE_REQUEST), the libraries the ELF links, and the PARAM.SFO memory size.
+# Without a dependency on that selection, `make CASE=a` then `make CASE=b` linked
+# case a's objects into case b's PRX, or failed to link when case b dropped a
+# library case a's objects import. The stamp holds the selection and the FORCE
+# rule rewrites it only when its content changes, so a new CASE (or commit)
+# rebuilds every linked object and PARAM.SFO while an unchanged rebuild stays a
+# no-op; the ELF and PRX follow from the objects. The stamp is not an ELF
+# prerequisite, so the SDK link rule's $^ still names only objects.
+BUILD_CONFIG = CASE=$(CASE) CFLAGS=$(CFLAGS) LIBS=$(LIBS) SFOFLAGS=$(SFOFLAGS)
+BUILD_CONFIG_STAMP = $(BUILD_DIR)/build-config.stamp
+EXTRA_CLEAN += $(BUILD_CONFIG_STAMP)
+$(OBJS) $(PSP_EBOOT_SFO): $(BUILD_CONFIG_STAMP)
+$(BUILD_CONFIG_STAMP): FORCE
+	@printf '%s\n' '$(subst ','\'',$(BUILD_CONFIG))' > $@.tmp; \
+	if cmp -s $@.tmp $@; then rm -f $@.tmp; \
+	else echo "build configuration changed (CASE=$(CASE)): rebuilding objects"; mv -f $@.tmp $@; fi
+.PHONY: FORCE
+FORCE:
+
+# The SDK's generic `%.o: %.c` rule expects source and object to share a
+# directory. Keep the source at the fixture root while placing all generated
+# objects under the ignored build directory.
+$(BUILD_DIR)/probe.o: probe.c registry_walk.h font_files.h umd_io.h font_list.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/probe_exports.exp: Makefile
+	printf '%s\n' 'PSP_BEGIN_EXPORTS' 'PSP_EXPORT_START(syslib, 0, 0x8000)' \
+		'PSP_EXPORT_FUNC_HASH(module_start)' 'PSP_EXPORT_FUNC_HASH(module_stop)' \
+		'PSP_EXPORT_VAR_HASH(module_info)' 'PSP_EXPORT_END' 'PSP_END_EXPORTS' > $@
+
+$(BUILD_DIR)/mutex_imports.o: mutex_imports.S
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/threadman_user_imports.o: threadman_user_imports.S
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/display_user_imports.o: display_user_imports.S
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/libfont_imports.o: libfont_imports.S
+	$(CC) $(ASFLAGS) $(LIBFONT_ASFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/probe_hle_measure.o: probe_hle_measure.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/probe_hle_issues.o: probe_hle_issues.c hle_vfpu_cells.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/probe_ge_sample.o: probe_ge_sample.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/probe_dmac_timing.o: probe_dmac_timing.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/probe_insn_trace.o: probe_insn_trace.c insn_trace_fixtures.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/probe_hle_self_stop_helper.o: probe_hle_self_stop_helper.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/probe_module_start.o: probe_module_start.c
+	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/probe_kernel_semantics.o: probe_kernel_semantics.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/probe_memory_edge.o: probe_memory_edge.c mem_edge.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/insn_trace_tramp.o: insn_trace_tramp.S
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/hle_power_imports.o: hle_power_imports.S
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/hle_hprm_imports.o: hle_hprm_imports.S
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/hle_ctrl_imports.o: hle_ctrl_imports.S
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/hle_utility_imports.o: hle_utility_imports.S
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/hle_ge_imports.o: hle_ge_imports.S
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/probe_exception_a1.o: probe_exception_a1.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/probe_exception_a2.o: probe_exception_a2.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/probe_exception_a3.o: probe_exception_a3.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/psp_b3.o: psp_b3.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/psp_b2.o: psp_b2.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/psp_b1.o: psp_b1.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Keep the documented `make EBOOT.PBP` invocation while storing generated files
+# under the ignored build directory.
+.PHONY: EBOOT.PBP
+EBOOT.PBP: $(PSP_EBOOT)

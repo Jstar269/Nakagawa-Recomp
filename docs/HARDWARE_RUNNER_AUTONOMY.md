@@ -39,7 +39,7 @@ one command (issue [#352](https://github.com/Jstar269/nakagawa-recomp/issues/352
 [Build order and open attestation](#9-build-order-and-open-attestation)).
 This document extends, and defers to, the implemented scalar-probe subset
 described in [HARDWARE_ORACLE.md](HARDWARE_ORACLE.md) and
-[`fixtures/psp_oracle/README.md`](../fixtures/psp_oracle/README.md).
+[`tests/fixtures/psp_oracle/README.md`](../tests/fixtures/psp_oracle/README.md).
 
 ## 1. Goal and current autonomy level
 
@@ -331,7 +331,7 @@ python tools/psp_oracle/oracle_matrix.py <private-matrix-plan.json>             
 
 The plan (schema 1) names the matrix and lock session, the source commit (the
 clean checkout `HEAD`), the operator-declared model, the expected firmware, a
-host0 scratch directory under `fixtures/psp_oracle`, a private evidence
+host0 scratch directory under `tests/fixtures/psp_oracle`, a private evidence
 directory, the ordered cases with their timeouts, and argv templates for the
 build shell, the PSPLink soft reset, the recover command, the probe command,
 and the runner's PSPSH and USBHostFS commands. A case may name a prebuilt PRX

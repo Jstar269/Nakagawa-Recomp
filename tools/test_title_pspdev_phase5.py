@@ -4,7 +4,7 @@
 """The second wholly source-owned title fixture must prove multi-title planning.
 
 `assets/titles/pspdev-phase5.json` describes a standard PSPDEV/PSPSDK module whose
-sources live in `fixtures/pspdev_phase5`. Its value is only realized if its
+sources live in `tests/fixtures/pspdev_phase5`. Its value is only realized if its
 configuration is *materially different* from the first synthetic fixture, so this
 suite asserts the difference and then walks the same manifest -> validated plan ->
 codegen/analyzer route with it. Nothing here reads a private manifest or any

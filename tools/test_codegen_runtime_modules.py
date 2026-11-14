@@ -48,7 +48,7 @@ from analyze import Elf, analyze, exec_ranges, in_ranges
 
 _SPEC = importlib.util.spec_from_file_location(
     "platform_ladder_generator_runtime_modules",
-    ROOT / "fixtures" / "platform_ladder" / "generate.py",
+    ROOT / "tests" / "fixtures" / "platform_ladder" / "generate.py",
 )
 ladder = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(ladder)

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 ROOT = Path(__file__).resolve().parent.parent
-CORPUS_PATH = ROOT / "fixtures" / "homebrew_corpus" / "corpus.json"
+CORPUS_PATH = ROOT / "tests" / "fixtures" / "homebrew_corpus" / "corpus.json"
 PSPDEV_LOCK_PATH = ROOT / "assets" / "upstream" / "pspdev.lock.json"
 
 #: Licences GPL-3.0-or-later can take in (AGENTS.md Section 4); the corpus admits only these.

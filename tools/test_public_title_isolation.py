@@ -250,7 +250,7 @@ class PublicTitleIsolationTests(unittest.TestCase):
                 },
                 "modules": [],
                 "filesystem": {
-                    "data_root": "fixtures/synthetic",
+                    "data_root": "tests/fixtures/synthetic",
                     "memory_stick_root": "build/test/memstick",
                     "device_prefixes": ["host0:", "ms0:"]
                 },
@@ -394,7 +394,7 @@ class PublicTitleIsolationTests(unittest.TestCase):
                 },
                 "modules": [],
                 "filesystem": {
-                    "data_root": "fixtures/synthetic",
+                    "data_root": "tests/fixtures/synthetic",
                     "memory_stick_root": "build/test/memstick",
                     "device_prefixes": ["host0:", "ms0:"]
                 },

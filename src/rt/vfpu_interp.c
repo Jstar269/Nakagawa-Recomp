@@ -63,7 +63,7 @@
  * HQ-1. All 128 scalar encodings and 14 selected wide encodings matched,
  * including the two discriminating cases -- triple width takes its row from
  * bit 6 alone, and transpose wraps as (row + lane) & 3 rather than saturating.
- * See fixtures/vfpu_addressing/hardware_vfpu_addr_001.json and issue #296.
+ * See tests/fixtures/vfpu_addressing/hardware_vfpu_addr_001.json and issue #296.
  *
  * Boundary: 14 of 512 wide encodings were observed on silicon. The remainder
  * are covered only by derived cross-implementation tests

@@ -3,9 +3,9 @@
 
 """The committed sceMp3 tone fixture header is exactly what its generator writes.
 
-fixtures/mp3_tone/mp3_tone.h feeds the sceMp3 HLE tests in tests/native/hle_thread_selftest.c.
+tests/fixtures/mp3_tone/mp3_tone.h feeds the sceMp3 HLE tests in tests/native/hle_thread_selftest.c.
 It is generated, not hand-edited, and it must stay source-authored: frames built from the
-MPEG-1 Layer III syntax by fixtures/mp3_tone/generate.py, with no encoder output or recorded
+MPEG-1 Layer III syntax by tests/fixtures/mp3_tone/generate.py, with no encoder output or recorded
 audio in the repository.
 """
 
@@ -17,8 +17,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-GENERATOR = ROOT / "fixtures" / "mp3_tone" / "generate.py"
-HEADER = ROOT / "fixtures" / "mp3_tone" / "mp3_tone.h"
+GENERATOR = ROOT / "tests" / "fixtures" / "mp3_tone" / "generate.py"
+HEADER = ROOT / "tests" / "fixtures" / "mp3_tone" / "mp3_tone.h"
 
 
 def _load_generator():
@@ -43,7 +43,7 @@ class Mp3ToneFixtureTests(unittest.TestCase):
         self.text = HEADER.read_text(encoding="utf-8")
 
     def test_header_is_fresh(self) -> None:
-        self.assertEqual(self.text, self.gen.render(), "run python fixtures/mp3_tone/generate.py")
+        self.assertEqual(self.text, self.gen.render(), "run python tests/fixtures/mp3_tone/generate.py")
         self.assertEqual(self.gen.main(["--check"]), 0)
 
     def test_frames_are_mpeg1_layer3_at_the_declared_size(self) -> None:

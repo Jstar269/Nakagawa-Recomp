@@ -407,7 +407,7 @@ require exact authority under the changed-path rule above:
 | `src/rt/` (runtime) | 2 | 152 |
 | root `.ps1` scripts | 3 | 3 |
 | `docs/` | 0 | 32 |
-| `fixtures/` | 0 | 26 |
+| `tests/fixtures/` | 0 | 26 |
 
 On that older snapshot, runtime, documentation and fixture work was essentially
 unaffected — the two frozen `src/rt` paths were the `guest_interp` pair, which is

@@ -62,7 +62,7 @@ Nakagawa has since substantially extended and modified that codebase. This repos
   [`third_party/rcheevos/`](third_party/rcheevos/PROVENANCE.md). Its MD5 (`src/rhash/md5.c`, `md5.h`) is
   L. Peter Deutsch's (Aladdin Enterprises), under the zlib licence.
 - **PSPSDK / PSPDEV contributors** — BSD-family notices for public ABI definitions and source-owned fixtures ([`third_party/licenses/PSPSDK.txt`](third_party/licenses/PSPSDK.txt)).
-- **PSPSDK sample programs — Jesper Svennevid, Donour Sizemore, James Forshaw, John Kelley, Marcus R. Brown, Frank Buss and weltall** — BSD-3-Clause. The public homebrew corpus ([#2144](https://github.com/Jstar269/nakagawa-recomp/issues/2144)) names four PSPSDK samples, pinned to the PSPDEV release; nothing is built or copied into the repository ([`fixtures/homebrew_corpus/PROVENANCE.md`](fixtures/homebrew_corpus/PROVENANCE.md)).
+- **PSPSDK sample programs — Jesper Svennevid, Donour Sizemore, James Forshaw, John Kelley, Marcus R. Brown, Frank Buss and weltall** — BSD-3-Clause. The public homebrew corpus ([#2144](https://github.com/Jstar269/nakagawa-recomp/issues/2144)) names four PSPSDK samples, pinned to the PSPDEV release; nothing is built or copied into the repository ([`tests/fixtures/homebrew_corpus/PROVENANCE.md`](tests/fixtures/homebrew_corpus/PROVENANCE.md)).
 - **SDL, SDL_ttf and their dependencies** — staged beside the player with their licence texts (listed in [`NOTICE.md`](NOTICE.md)).
 - **stb_image 2.30 — Sean Barrett** — public domain (Unlicense), the alternative to MIT that upstream offers. The PNG
   decoder in [`third_party/stb/`](third_party/stb/), for the player's prompt glyphs and the disc art read from your own disc.
@@ -99,7 +99,7 @@ Nakagawa has since substantially extended and modified that codebase. This repos
   libvulkan symbol files and `android/log.h` (Apache-2.0), read by `tools/android_sysroot.py` to build that
   toolchain's sysroot. **Khronos Vulkan-Headers v1.4.363** — Apache-2.0 OR MIT, the sysroot's Vulkan headers. None is
   vendored; the pins and SHA-256 values are in [`android/toolchain/`](android/toolchain/PROVENANCE.md).
-- **Font fixtures** — Gudea (Agustina Mingote), Gowun Dodum (The Gowun Dodum Project Authors), M+ 1p (The M+ Project Authors) and Liberation Sans and Liberation Serif 2.1.5 (Google Corporation and Red Hat, Inc.; Reserved Font Names Arimo, Tinos, Cousine and Liberation), all SIL Open Font License 1.1 ([`fixtures/fonts/`](fixtures/fonts/)). The build converts Liberation (Latin), Gowun Dodum (Korean) and Noto Sans JP with M+ 1p (Japanese) into the project's stand-in PSP fonts; Gudea is used only by tests.
+- **Font fixtures** — Gudea (Agustina Mingote), Gowun Dodum (The Gowun Dodum Project Authors), M+ 1p (The M+ Project Authors) and Liberation Sans and Liberation Serif 2.1.5 (Google Corporation and Red Hat, Inc.; Reserved Font Names Arimo, Tinos, Cousine and Liberation), all SIL Open Font License 1.1 ([`tests/fixtures/fonts/`](tests/fixtures/fonts/)). The build converts Liberation (Latin), Gowun Dodum (Korean) and Noto Sans JP with M+ 1p (Japanese) into the project's stand-in PSP fonts; Gudea is used only by tests.
 
 The authoritative, component-by-component provenance records are [`NOTICE.md`](NOTICE.md) and the
 [`public provenance ledger`](assets/public_provenance_ledger.json).

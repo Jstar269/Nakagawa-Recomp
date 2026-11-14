@@ -19,7 +19,7 @@
     }
   ],
   "filesystem": {
-    "data_root": "fixtures/profile_zero",
+    "data_root": "tests/fixtures/profile_zero",
     "memory_stick_root": "build/synthetic/memstick",
     "device_prefixes": ["host0:", "ms0:"]
   },
@@ -61,7 +61,7 @@
     },
     "resources": {
       "mode": "manifest-filesystem",
-      "locators": ["fixtures/profile_zero"]
+      "locators": ["tests/fixtures/profile_zero"]
     },
     "hle_overrides": [],
     "input_mapping": {
@@ -78,13 +78,13 @@
     "schema_version": 1,
     "runnable": true,
     "source_program": {
-      "source_files": ["fixtures/profile_zero/main.c"],
+      "source_files": ["tests/fixtures/profile_zero/main.c"],
       "entry_symbol": "main",
       "ownership": "project-authored-public"
     },
     "build": {
-      "makefile": "fixtures/profile_zero/Makefile",
-      "working_directory": "fixtures/profile_zero",
+      "makefile": "tests/fixtures/profile_zero/Makefile",
+      "working_directory": "tests/fixtures/profile_zero",
       "target": "EBOOT.PBP",
       "toolchain": "PSPDEV/PSPSDK (locally installed)"
     },

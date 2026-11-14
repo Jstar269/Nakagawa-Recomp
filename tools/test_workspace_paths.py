@@ -418,7 +418,7 @@ class TrackedMachinePathTests(unittest.TestCase):
       convention or on an explicit fixture/prose exception below.
 
     Files that are tests or examples by construction (``tools/test_*``,
-    ``tests/``, ``fixtures/``, ``*.test.*``) are the explicit test/example class
+    ``tests/``, ``tests/fixtures/``, ``*.test.*``) are the explicit test/example class
     of the acceptance item; the first layer still applies to them, and the
     inventory of their fixture paths lives in the issue rather than here.
     """

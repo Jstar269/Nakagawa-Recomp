@@ -119,7 +119,7 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
     for sub, op in ((5, "vscmp"), (6, "vsge"), (7, "vslt")):
         cases.append((_bin_word(0x1B, sub, 1, 0x40, 0x00, 0x20), f"{op}-s-measured", 1))
 
-    # The PSP-HLE-ISSUES-001 probe words (fixtures/psp_oracle/probe_hle_issues.c, issue #326):
+    # The PSP-HLE-ISSUES-001 probe words (tests/fixtures/psp_oracle/probe_hle_issues.c, issue #326):
     # vscmp.s/.p/.t/.q C200, C000, C100 and vscmp.q C200, C000, C000.
     # check_vscmp_hle_issues_cells() finds them by name and runs the probe's operand sets.
     for w, suffix, size in ((0x6E840008, "s", 1), (0x6E840088, "p", 2), (0x6E848008, "t", 3),

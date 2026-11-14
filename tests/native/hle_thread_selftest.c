@@ -3390,7 +3390,7 @@ static uint32_t utility_module_call(CpuState *cpu, uint32_t nid, uint32_t module
 }
 
 /* Production-helper coverage for the guest FD namespace.  The payload/path
- * intentionally match fixtures/nakagawa_minimal_v4: the real PSP fixture's
+ * intentionally match tests/fixtures/nakagawa_minimal_v4: the real PSP fixture's
  * byte-level oracle is `NAKAGAWA_MINIMAL SUM=5050\n`.  This native harness
  * exercises the same Open/Write/Close sequence against the production HLE
  * handlers and asserts the host bytes, while keeping private PSP artifacts out
@@ -27726,7 +27726,7 @@ static void test_ge_linear_filter_stays_inside_region(void) {
 }
 
 /* ==== GE raster cells (PSP-GE-RASTER-001, #343) ====
- * This block is carried byte for byte by fixtures/psp_oracle/probe_ge_sample.c (the PSP
+ * This block is carried byte for byte by tests/fixtures/psp_oracle/probe_ge_sample.c (the PSP
  * side, CASE=ge-raster), tests/native/hle_thread_selftest.c (the software GE side) and
  * src/rt/gpu_sdl3vk/ge_gpu_selftest.inc (the Vulkan side); tools/test_psp_oracle.py pins
  * the copies. Each cell is one display list of project-written
@@ -28321,7 +28321,7 @@ static uint64_t gr_digest(const uint32_t *px)
 /* ==== end of the GE raster cells ==== */
 
 /* ==== GE mip cells (PSP-GE-MIP-001, #1373) ====
- * This block is carried byte for byte by fixtures/psp_oracle/probe_ge_sample.c (the PSP
+ * This block is carried byte for byte by tests/fixtures/psp_oracle/probe_ge_sample.c (the PSP
  * side, CASE=ge-mip) and tests/native/hle_thread_selftest.c (the software GE side);
  * tools/test_psp_oracle.py pins the copy. Each cell is one display list of project-written
  * command words (no game data). It draws into the 16x4 window x 16..31, y 8..11 of a 64x32
@@ -28844,7 +28844,7 @@ static void test_ge_mip_cells_match_psp(void) {
 }
 
 /* ==== GE CLUT mip cells (PSP-GE-MIP-002, #2031) ====
- * The software GE side of fixtures/psp_oracle/probe_ge_sample.c CASE=ge-clut-mip (154, commit
+ * The software GE side of tests/fixtures/psp_oracle/probe_ge_sample.c CASE=ge-clut-mip (154, commit
  * 2795f150): the probe's cell table, texture and display list, with the CLUT tables at fixed
  * guest addresses instead of the probe's statics. Each cell is one display list of
  * project-written command words (no game data) in the ge-mip window: the 16x4 window x 16..31,
@@ -34500,7 +34500,7 @@ static void test_at3_synthetic_decode_bookkeeping(void) {
     for (uint32_t i = 0; i < ATRAC3_FRAME_SAMPLES * 2u; i++)
         MEM_W16(PCM_OUT + i * 2u, 0xa5a5u);
     uint32_t decode_ret = sr_syscall(&cpu, NID_SCE_ATRAC_DECODE_DATA);
-    /* PSP-3000 measurement (fixtures/psp_oracle/README.md `at3-decode`, #1096):
+    /* PSP-3000 measurement (tests/fixtures/psp_oracle/README.md `at3-decode`, #1096):
      * fact delay 0 gives a first call of 955 samples. */
     expect(decode_ret == 0u &&
                MEM_R32(OUT_N) == 955u &&
@@ -34573,7 +34573,7 @@ static void test_at3_synthetic_decode_bookkeeping(void) {
     }
 
     /* Buffer exhaustion, measured on a PSP-3000 on 2026-10-22 and 2026-10-24
-     * (#1096; fixtures/psp_oracle/README.md `at3-decode`): with more file data
+     * (#1096; tests/fixtures/psp_oracle/README.md `at3-decode`): with more file data
      * still to stream, the call after the last buffered frame returns
      * 0x80630023 with 0 samples and end flag 0. The synthetic file has eight
      * frames; SetData receives a four-frame prefix, leaving three decodable
@@ -34794,7 +34794,7 @@ extern void sr_hle_test_atrac_caps_reset(void);
 
 /* ---- issue #1096: the measured sceAtracSetData refusal of fact delay 2048 ----
  *
- * MEASURED on a PSP-3000 (2026-10-24; fixtures/psp_oracle/README.md
+ * MEASURED on a PSP-3000 (2026-10-24; tests/fixtures/psp_oracle/README.md
  * `at3-decode`): an AT3 stream whose 8-byte fact chunk carries delay 2048 is
  * refused by sceAtracSetData with 0x80630008, and the sceAtracDecodeData that
  * follows returns 0x80630010. Only delay 2048 is measured; 1024 and below are
@@ -55409,11 +55409,11 @@ static void test_aot_null_thread_entry(const char *self) {
 /* ---- sceMp3 -------------------------------------------------------------------------------
  * Production-dispatch regressions for the sceMp3 library. Every call enters the NID registry
  * through sr_syscall, the way a generated import stub does. The stream is the source-authored
- * tone fixture (fixtures/mp3_tone/generate.py: MPEG-1 Layer III frames written straight from
+ * tone fixture (tests/fixtures/mp3_tone/generate.py: MPEG-1 Layer III frames written straight from
  * the bitstream syntax, no encoder and no recorded audio), fed the way a game feeds it:
  * sceMp3GetInfoToAddStreamData says where and how much, the test copies that much of the file
  * into guest memory and calls sceMp3NotifyAddStreamData. HOST_TESTED, not PSP_HARDWARE evidence. */
-#include "../../fixtures/mp3_tone/mp3_tone.h"
+#include "../../tests/fixtures/mp3_tone/mp3_tone.h"
 
 extern void sr_hle_test_mp3_reset(void);
 extern void sr_hle_test_set_compiled_sdk_version(uint32_t version);

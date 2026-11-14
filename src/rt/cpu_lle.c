@@ -349,7 +349,7 @@ static void sr_cp0_delay_context(
  * MEASURED (runs PSP-A3-04 and PSP-A3-05, PSP-3000/6.61,
  * user-mode PRX probes via PSPLink; fixtures
  * `exception-a3-delayslot`, `exception-a3-half-load`, `exception-a3-half-store`
- * in fixtures/psp_oracle/probe_exception_a3.c, cells in
+ * in tests/fixtures/psp_oracle/probe_exception_a3.c, cells in
  * docs/HARDWARE_ORACLE.md "CPU exception delay-slot and width cells"):
  * a misaligned `lw` in the delay slot of an always-taken branch raises AdEL
  * with Cause 0x90000010 (ExcCode 4, BD 1), EPC at the branch address, and

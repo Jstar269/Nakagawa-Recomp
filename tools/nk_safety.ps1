@@ -5,7 +5,7 @@
 
 <#
 .SYNOPSIS
-    Fail-closed path, process, build, and run safety primitives shared by nk_manager.ps1 and tests.
+    Fail-closed path, process, build, and run safety primitives shared by tools/nk_manager.ps1 and tests.
 
 .DESCRIPTION
     These helpers are the ones whose silent failure modes are destructive or
@@ -641,7 +641,7 @@ function Write-SaveBaseManifest {
     $manifest = [ordered]@{
         format          = "nk-savebase-manifest/v1"
         created_utc     = ([DateTime]::UtcNow).ToString("o")
-        managed_by      = "nk_manager.ps1"
+        managed_by      = "tools/nk_manager.ps1"
         source_identity = [ordered]@{
             save_root_name    = [IO.Path]::GetFileName($SaveRootCanon)
             source_root_sha256 = $sourceHash

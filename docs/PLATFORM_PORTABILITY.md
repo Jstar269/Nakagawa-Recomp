@@ -54,7 +54,7 @@ primitives that `nk_platform.h` lists for units built without the platform layer
 
 ### 1. Keep Windows green and expose portable code
 
-- Keep `nk_manager.ps1` and the current Makefile as the validated Windows path.
+- Keep `tools/nk_manager.ps1` and the current Makefile as the validated Windows path.
 - Run the synthetic Windows runtime-object CI gate; it needs no proprietary inputs.
 - Run the Linux host-neutral object gate. It deliberately excludes unresolved GUI/HLE platform
   work and must not be described as Linux support.
