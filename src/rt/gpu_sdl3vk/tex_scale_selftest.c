@@ -14,7 +14,7 @@
  *   - work jobs (the texture dump's): each runs once on a worker thread, held ones stay queued
  *     without the submitter waiting, a full queue and the host-memory cap refuse the next, scale
  *     and work results are taken apart, and a sync submit runs its job before returning;
- *   - settings, the per-size factor and the budget; with SR_TEX_SCALE and SR_SMART_2D set, an
+ *   - settings, the per-size factor and the budget; with texscale and smart2d asked for, an
  *     authentic start keeps both off and prints only the "need Ace Mode" line (the
  *     tex-scale-gate-mutant build, which removes that gate, must fail here);
  *   - the smart 2D classifier: 1:1 sprites and triangles (either direction) are pixel-mapped;
@@ -47,7 +47,7 @@
 
 static int s_fail;
 
-/* Set (value) or remove (NULL) an environment variable for nk_tex_scale_init_from_env. */
+/* Set (value) or remove (NULL) an environment variable for nk_tex_scale_init. */
 static void set_env(const char *name, const char *value) {
 #ifdef _WIN32
     char buf[96];
@@ -446,64 +446,120 @@ static void test_work(void) {
 static void test_settings(void) {
     NkTexScaleConfig c;
     char why[96];
-    CHECK(nk_tex_scale_parse(NULL, NULL, NULL, &c, why, sizeof(why)) && c.factor == 0 && c.smart2d == 0 &&
+    CHECK(nk_tex_scale_parse(0, 0, NULL, &c, why, sizeof(why)) && c.factor == 0 && c.smart2d == 0 &&
           c.budget_bytes == ((uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20), "settings: unset is not off");
-    CHECK(nk_tex_scale_parse("off", "off", NULL, &c, why, sizeof(why)) && c.factor == 0, "settings: off");
-    CHECK(nk_tex_scale_parse("4", "on", "256", &c, why, sizeof(why)) && c.factor == 4 && c.smart2d == 1 &&
+    CHECK(nk_tex_scale_parse(0, 0, "", &c, why, sizeof(why)) && c.factor == 0 &&
+          c.budget_bytes == ((uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20), "settings: off, an empty budget");
+    CHECK(nk_tex_scale_parse(4, 1, "256", &c, why, sizeof(why)) && c.factor == 4 && c.smart2d == 1 &&
           c.budget_bytes == (256ull << 20), "settings: 4, on, 256");
-    static const char *const bad_scale[] = { "1", "7", "x2", "44", "4x", " 4", "" };
+    for (int f = 2; f <= NK_TEX_SCALE_MAX; f++)
+        CHECK(nk_tex_scale_parse(f, 0, NULL, &c, why, sizeof(why)) && c.factor == f && c.smart2d == 0,
+              "settings: texscale=%d refused (%s)", f, why);
+    CHECK(nk_tex_scale_parse(0, 1, NULL, &c, why, sizeof(why)) && c.factor == 0 && c.smart2d == 1,
+          "settings: smart2d alone refused (%s)", why);
+    static const int bad_scale[] = { 1, 7, -2, 44, 8, 100 };
     for (size_t i = 0; i < sizeof(bad_scale) / sizeof(bad_scale[0]); i++) {
-        if (!bad_scale[i][0]) continue;   /* empty is unset */
-        CHECK(!nk_tex_scale_parse(bad_scale[i], NULL, NULL, &c, why, sizeof(why)) && c.factor == 0,
-              "settings: SR_TEX_SCALE=%s accepted", bad_scale[i]);
+        why[0] = '\0';
+        CHECK(!nk_tex_scale_parse(bad_scale[i], 1, NULL, &c, why, sizeof(why)) && c.factor == 0 && c.smart2d == 0 &&
+              strcmp(why, "texscale takes off, 2, 3, 4, 5 or 6") == 0,
+              "settings: texscale=%d accepted, or a refusal left a feature on (%s)", bad_scale[i], why);
     }
-    CHECK(!nk_tex_scale_parse("2", "yes", NULL, &c, why, sizeof(why)) && c.factor == 0 && c.smart2d == 0,
-          "settings: SR_SMART_2D=yes accepted, or a refusal left a feature on");
-    CHECK(!nk_tex_scale_parse("2", NULL, "0", &c, why, sizeof(why)) &&
-          !nk_tex_scale_parse("2", NULL, "9000", &c, why, sizeof(why)) &&
-          !nk_tex_scale_parse("2", NULL, "-5", &c, why, sizeof(why)), "settings: a bad budget accepted");
-    /* Authentic, with both features asked for in the environment: neither takes, and the one
-     * line printed names the request without obeying it. */
-    set_env("SR_TEX_SCALE", "4");
-    set_env("SR_SMART_2D", "on");
+    why[0] = '\0';
+    CHECK(!nk_tex_scale_parse(2, 2, NULL, &c, why, sizeof(why)) && c.factor == 0 && c.smart2d == 0 &&
+          !nk_tex_scale_parse(2, -1, NULL, &c, why, sizeof(why)) && strcmp(why, "smart2d takes off or on") == 0,
+          "settings: a smart2d value outside 0 and 1 accepted, or a refusal left a feature on (%s)", why);
+    CHECK(!nk_tex_scale_parse(2, 0, "0", &c, why, sizeof(why)) &&
+          !nk_tex_scale_parse(2, 0, "9000", &c, why, sizeof(why)) &&
+          !nk_tex_scale_parse(2, 0, "-5", &c, why, sizeof(why)), "settings: a bad budget accepted");
+    /* Authentic, with both features asked for: neither takes, and the one line printed names the
+     * request without obeying it. (A real authentic run has no launch line to ask with; the gate
+     * is still the renderer's own, so it is tested here.) */
+    char refused[96];
     set_env("SR_TEX_SCALE_BUDGET_MB", NULL);
-    const NkTexScaleConfig *a = nk_tex_scale_init_from_env(0);
+    const NkTexScaleConfig *a = nk_tex_scale_init(0, 4, 1, refused, sizeof(refused));
     const char *lines = nk_tex_scale_start_lines();
     CHECK(a->factor == 0 && a->smart2d == 0 && nk_tex_scale_config()->factor == 0 &&
           nk_tex_scale_config()->smart2d == 0,
-          "settings: SR_TEX_SCALE=4 SR_SMART_2D=on with Ace Mode off turned a feature on (factor %d, smart2d %d)",
+          "settings: texscale=4 smart2d=on with Ace Mode off turned a feature on (factor %d, smart2d %d)",
           a->factor, a->smart2d);
-    CHECK(strcmp(lines, "TEX_SCALE: off (texture scaling and the smart 2D filter need Ace Mode)\n") == 0,
-          "settings: with Ace Mode off the start lines are not the one need-Ace-Mode line: \"%s\"", lines);
-    /* The same environment with Ace Mode on takes, and says it is not admitted. */
-    a = nk_tex_scale_init_from_env(1);
+    CHECK(strcmp(lines, "TEX_SCALE: off (texture scaling and the smart 2D filter need Enhanced or Ace)\n") == 0 &&
+          refused[0] == '\0',
+          "settings: with Ace Mode off the start lines are not the one need-Enhanced-or-Ace line: \"%s\"", lines);
+    /* The same request with Ace Mode on takes, and says it is guest-visible. */
+    a = nk_tex_scale_init(1, 4, 1, refused, sizeof(refused));
     lines = nk_tex_scale_start_lines();
-    CHECK(a->factor == 4 && a->smart2d == 1 && strstr(lines, "TEX_SCALE: on (xbrz=4, smart2d=on, budget_mb=512)\n") &&
-          strstr(lines, "not admitted"), "settings: SR_TEX_SCALE=4 SR_SMART_2D=on with Ace Mode on: \"%s\"", lines);
-    /* Unset, nothing at all is printed, in either mode. */
+    CHECK(a->factor == 4 && a->smart2d == 1 && refused[0] == '\0' &&
+          strstr(lines, "TEX_SCALE: on (xbrz=4, smart2d=on, budget_mb=512)\n") &&
+          strstr(lines, "TEX_SCALE: guest-visible (contract section 11.3.3): each present commits the frame, with "
+                        "its scaled copies and nearest 2D draws in it, to guest VRAM\n") &&
+          !strstr(lines, "not admitted"),
+          "settings: texscale=4 smart2d=on with Ace Mode on: \"%s\"", lines);
+    /* Each alone takes alone. */
+    a = nk_tex_scale_init(1, 3, 0, refused, sizeof(refused));
+    CHECK(a->factor == 3 && a->smart2d == 0 &&
+          strstr(nk_tex_scale_start_lines(), "TEX_SCALE: on (xbrz=3, smart2d=off, budget_mb=512)\n"),
+          "settings: texscale=3 alone: \"%s\"", nk_tex_scale_start_lines());
+    a = nk_tex_scale_init(1, 0, 1, NULL, 0);
+    CHECK(a->factor == 0 && a->smart2d == 1 &&
+          strstr(nk_tex_scale_start_lines(), "TEX_SCALE: on (xbrz=off, smart2d=on, budget_mb=512)\n"),
+          "settings: smart2d alone: \"%s\"", nk_tex_scale_start_lines());
+    /* No environment variable turns either on: with the retired names set and nothing asked for,
+     * both stay off and nothing is printed. (A run stops on them before the renderer starts,
+     * ace_retired_env_named; this is the renderer's own half.) */
+    set_env("SR_TEX_SCALE", "4");
+    set_env("SR_SMART_2D", "on");
+    a = nk_tex_scale_init(1, 0, 0, refused, sizeof(refused));
+    CHECK(a->factor == 0 && a->smart2d == 0 && nk_tex_scale_start_lines()[0] == '\0' && refused[0] == '\0',
+          "settings: SR_TEX_SCALE=4 SR_SMART_2D=on in the environment turned a feature on (factor %d, smart2d %d)",
+          a->factor, a->smart2d);
     set_env("SR_TEX_SCALE", NULL);
     set_env("SR_SMART_2D", NULL);
-    a = nk_tex_scale_init_from_env(0);
+    /* A refused request (a factor outside the list, a budget outside its range) leaves both off,
+     * names its reason on the start line and hands it back, so the caller can report the part as
+     * one that did not run. */
+    a = nk_tex_scale_init(1, 7, 1, refused, sizeof(refused));
+    CHECK(a->factor == 0 && a->smart2d == 0 && strcmp(refused, "texscale takes off, 2, 3, 4, 5 or 6") == 0 &&
+          strcmp(nk_tex_scale_start_lines(), "TEX_SCALE: refused (texscale takes off, 2, 3, 4, 5 or 6)\n") == 0,
+          "settings: texscale=7 was not refused with its reason: \"%s\" / \"%s\"", refused, nk_tex_scale_start_lines());
+    set_env("SR_TEX_SCALE_BUDGET_MB", "0");
+    a = nk_tex_scale_init(1, 2, 1, refused, sizeof(refused));
+    CHECK(a->factor == 0 && a->smart2d == 0 && strcmp(refused, "SR_TEX_SCALE_BUDGET_MB takes 1 to 8192") == 0 &&
+          strcmp(nk_tex_scale_start_lines(), "TEX_SCALE: refused (SR_TEX_SCALE_BUDGET_MB takes 1 to 8192)\n") == 0,
+          "settings: a bad budget was not refused with its reason: \"%s\" / \"%s\"", refused, nk_tex_scale_start_lines());
+    /* The budget is read only for an Enhanced or Ace run: an authentic start with a bad one says
+     * nothing and refuses nothing. */
+    a = nk_tex_scale_init(0, 0, 0, refused, sizeof(refused));
+    CHECK(a->factor == 0 && a->smart2d == 0 && nk_tex_scale_start_lines()[0] == '\0' && refused[0] == '\0',
+          "settings: an authentic start read the budget");
+    set_env("SR_TEX_SCALE_BUDGET_MB", "64");
+    a = nk_tex_scale_init(1, 2, 0, refused, sizeof(refused));
+    CHECK(a->factor == 2 && a->budget_bytes == (64ull << 20) && refused[0] == '\0' &&
+          strstr(nk_tex_scale_start_lines(), "TEX_SCALE: on (xbrz=2, smart2d=off, budget_mb=64)\n"),
+          "settings: a budget of 64 with texscale=2: \"%s\"", nk_tex_scale_start_lines());
+    set_env("SR_TEX_SCALE_BUDGET_MB", NULL);
+    /* Nothing asked for, nothing at all is printed, in either mode. */
+    a = nk_tex_scale_init(0, 0, 0, refused, sizeof(refused));
     CHECK(a->factor == 0 && a->smart2d == 0 && nk_tex_scale_start_lines()[0] == '\0',
           "settings: unset and authentic, something was printed or turned on");
-    a = nk_tex_scale_init_from_env(1);
+    a = nk_tex_scale_init(1, 0, 0, refused, sizeof(refused));
     CHECK(a->factor == 0 && a->smart2d == 0 && nk_tex_scale_start_lines()[0] == '\0',
           "settings: unset with Ace Mode on, something was printed or turned on");
     nk_tex_scale_configure(NULL);
-    /* an item on through the environment is never silent about being outside 11.2 admission */
+    /* an item that is on is never silent about being guest-visible */
     {
         char line[256];
         NkTexScaleConfig on = { 0, 0, 1u << 20 };
-        CHECK(nk_tex_scale_admission_line(&on, line, sizeof(line)) == 0 && line[0] == '\0',
-              "settings: admission line printed with both features off");
+        CHECK(nk_tex_scale_guest_visible_line(&on, line, sizeof(line)) == 0 && line[0] == '\0',
+              "settings: guest-visible line printed with both features off");
         static const int cases[][2] = { { 4, 0 }, { 0, 1 }, { 2, 1 } };
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
             on.factor = cases[i][0]; on.smart2d = cases[i][1];
-            const size_t n = nk_tex_scale_admission_line(&on, line, sizeof(line));
-            CHECK(n > 0 && n == strlen(line) && strstr(line, "TEX_SCALE: guest-visible") == line &&
-                  strstr(line, "SR_TEX_SCALE") && strstr(line, "not admitted") &&
-                  strstr(line, "section 11.2") && strstr(line, "Texture Scaling and the Smart 2D Filter"),
-                  "settings: admission line missing for xbrz=%d smart2d=%d", on.factor, on.smart2d);
+            const size_t n = nk_tex_scale_guest_visible_line(&on, line, sizeof(line));
+            CHECK(n > 0 && n == strlen(line) &&
+                  strstr(line, "TEX_SCALE: guest-visible (contract section 11.3.3): ") == line &&
+                  strstr(line, "guest VRAM") && !strstr(line, "not admitted") &&
+                  !strstr(line, "SR_TEX_SCALE") && !strstr(line, "SR_SMART_2D"),
+                  "settings: guest-visible line missing for xbrz=%d smart2d=%d: \"%s\"", on.factor, on.smart2d, line);
         }
     }
 

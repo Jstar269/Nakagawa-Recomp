@@ -49,6 +49,7 @@ typedef struct {
     int count;
 } EnhancedWords;
 static const char *const k_enhanced_ssaa_labels[] = {"2x", "4x", "Off"};
+static const char *const k_enhanced_texscale_labels[] = {"2x", "3x", "4x", "5x", "6x", "Off"};
 #define ENHANCED_WORDS(words) {(words), (int)(sizeof(words) / sizeof((words)[0]))}
 static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_FILTERING] = ENHANCED_WORDS(k_enhanced_af_labels),
@@ -69,10 +70,12 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_TEXPACK] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_PAD] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_SHADOW] = ENHANCED_WORDS(k_enhanced_switch_labels),
-    [PLAYER_PART_PEAK] = ENHANCED_WORDS(k_enhanced_switch_labels)};
+    [PLAYER_PART_PEAK] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_TEXSCALE] = ENHANCED_WORDS(k_enhanced_texscale_labels),
+    [PLAYER_PART_SMART2D] = ENHANCED_WORDS(k_enhanced_switch_labels)};
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
-enum { ENHANCED_MAX_WORDS = 5 };
+enum { ENHANCED_MAX_WORDS = 6 };
 static const char *const k_enhanced_library_modes[] = {"Authentic", "Enhanced"};
 static const char k_enhanced_smooth_at_60[] = "Off (this game runs at 60 FPS)";
 static const char *const k_enhanced_title_modes[] = {"Library (Enhanced)", "Authentic",
@@ -3494,6 +3497,24 @@ static void test_settings_pages(void) {
               strstr(dump, "Softens loud sound that the PSP clips.") != NULL &&
               strstr(dump, "1.6 ms later.\"") != NULL,
           "Settings > Enhanced shows the Unclipped sound row after Soft shadows");
+    /* The 20th and 21st (Texture scaling and the Smart 2D filter, contract 11.3.3) follow Unclipped
+       sound, at 0x4686 and 0x4687; 2400 tall shows both rows and what each costs. */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(19) == 0x4686u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_TEXSCALE) == 0x4686u &&
+              PLAYER_UI_ID_ENHANCED_PART(20) == 0x4687u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SMART2D) == 0x4687u && PLAYER_PART_COUNT >= 21,
+          "the part rows' ids: the 20th and 21st in the second range, after the 19th");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 2400, dump, sizeof(dump)) &&
+              strstr(dump, "\"UNCLIPPED SOUND: OFF\"") != NULL &&
+              strstr(dump, "\"TEXTURE SCALING: OFF\"") != NULL &&
+              strstr(dump, "\"SMART 2D FILTER: OFF\"") != NULL &&
+              strstr(dump, "\"UNCLIPPED SOUND: OFF\"") < strstr(dump, "\"TEXTURE SCALING: OFF\"") &&
+              strstr(dump, "\"TEXTURE SCALING: OFF\"") < strstr(dump, "\"SMART 2D FILTER: OFF\"") &&
+              strstr(dump, "Redraws textures with xBRZ.") != NULL &&
+              strstr(dump, "Sharp HUD art above 1x, but blocky soft") != NULL &&
+              strstr(dump, "game receives changed pictures.\"") != NULL &&
+              strstr(dump, "\xE2\x80\xA6\"") == NULL,
+          "Settings > Enhanced shows the Texture scaling and Smart 2D filter rows after Unclipped sound");
     for (unsigned i = 0u; i < PLAYER_PART_COUNT; ++i) {
         PlayerUiAction part =
             activate_flow_button(PLAYER_UI_ID_ENHANCED_PART(i), FLOW_SETTINGS_ACE);
@@ -4971,6 +4992,70 @@ static void test_game_page_text_is_never_cut(void) {
     g_flow_text_size_pct = saved;
 }
 
+/* Texture scaling and the Smart 2D filter (contract 11.3.3) with the parts on, on Settings >
+   Enhanced and on a game's own page: each row names its value at every factor, and at the 960 x
+   540 minimum window, at 960 x 544 (the PSP's picture at 2x) and at 1280 x 720, at every text
+   size up to Larger (150%), the page scrolls to both rows and draws what each costs whole, with
+   no sentence cut to an ellipsis. */
+static void test_texture_scaling_rows(void) {
+    static char dump[CASE_DUMP_CAP];
+    static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_TITLE};
+    static const struct { int w; int h; } sizes[] = {{960, 540}, {960, 544}, {1280, 720}};
+    static const int text_sizes[] = {100, 125, 150};
+    static const char *const ends[] = {"xBRZ.", "GPU", "blocky", "HUD"};
+    int saved = g_flow_text_size_pct;
+    memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+    g_enhanced_mode = NULL;
+    for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
+        /* Every factor's word on its row, with the smart 2D filter on beside it. */
+        for (int factor = 2; factor <= 6; ++factor) {
+            char needle[48], message[160];
+            g_enhanced_value[PLAYER_PART_TEXSCALE] = k_enhanced_texscale_labels[factor - 2];
+            g_enhanced_value[PLAYER_PART_SMART2D] = "On";
+            (void)snprintf(needle, sizeof(needle), "\"TEXTURE SCALING: %dX\"", factor);
+            (void)snprintf(message, sizeof(message),
+                           "page %d: the Texture scaling row reads %dx and the Smart 2D filter row On",
+                           (int)g, factor);
+            CHECK(dump_flow_case_sized(pages[g], 1600, 3200, dump, sizeof(dump)) &&
+                      strstr(dump, needle) != NULL && strstr(dump, "\"SMART 2D FILTER: ON\"") != NULL &&
+                      strstr(dump, "\"TEXTURE SCALING: OFF\"") == NULL &&
+                      strstr(dump, "\xE2\x80\xA6\"") == NULL,
+                  message);
+        }
+        /* A game's page follows the library until it has its own value. */
+        if (pages[g] == FLOW_SETTINGS_ACE_TITLE) {
+            g_enhanced_value[PLAYER_PART_TEXSCALE] = NULL;
+            g_enhanced_value[PLAYER_PART_SMART2D] = NULL;
+            CHECK(dump_flow_case_sized(pages[g], 1600, 3200, dump, sizeof(dump)) &&
+                      strstr(dump, "\"TEXTURE SCALING: LIBRARY (OFF)\"") != NULL &&
+                      strstr(dump, "\"SMART 2D FILTER: LIBRARY (OFF)\"") != NULL,
+                  "a game's page shows both rows following the library");
+        }
+        g_enhanced_value[PLAYER_PART_TEXSCALE] = "6x";
+        g_enhanced_value[PLAYER_PART_SMART2D] = "On";
+        for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+            g_flow_text_size_pct = text_sizes[t];
+            for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+                char message[200];
+                (void)snprintf(message, sizeof(message),
+                               "page %d with Texture scaling 6x and Smart 2D filter on draws both rows' "
+                               "sentences whole at %d x %d, %d%% text",
+                               (int)g, sizes[s].w, sizes[s].h, text_sizes[t]);
+                CHECK(flow_case_text_whole(pages[g], sizes[s].w, sizes[s].h, FLOW_ID_CARD, ends,
+                                           sizeof(ends) / sizeof(ends[0])),
+                      message);
+            }
+        }
+        g_flow_text_size_pct = saved;
+        CHECK(flow_case_fits(pages[g], 960, 540, dump, sizeof(dump)) &&
+                  flow_case_has_scroll(pages[g], 960, 540),
+              "the page with both parts on fits the 960 x 540 window through scrolling");
+    }
+    g_flow_text_size_pct = saved;
+    memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+    g_enhanced_mode = NULL;
+}
+
 static void test_refresh_advice_classifier(void) {
     static const double silent[] = {60.0, 120.0, 180.0, 240.0, 59.94, 119.88, 179.82,
                                     60000.0 / 1001.0, 59.9401, 0.0, -1.0};
@@ -5387,7 +5472,10 @@ static bool capture_text_size(const char *directory, const NkUiTextBackend *text
     static const struct { FlowCase which; const char *name; NkUiId focus; } flows[] = {
         {FLOW_SETTINGS, "settings", PLAYER_UI_ID_SETTINGS_RESOLUTION},
         {FLOW_SETTINGS_ACCESSIBILITY, "accessibility", PLAYER_UI_ID_SETTINGS_TEXT_SIZE},
-        {FLOW_CONTROLLER, "controls", PLAYER_UI_ID_CONTROLLER_BUTTON(0u)}
+        {FLOW_CONTROLLER, "controls", PLAYER_UI_ID_CONTROLLER_BUTTON(0u)},
+        /* Settings > Enhanced at its last rows, Texture scaling at 4x and the Smart 2D filter on. */
+        {FLOW_SETTINGS_ACE, "enhanced-texture-scaling",
+         PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SMART2D)}
     };
     SDL_Surface *surface = SDL_CreateSurface(pixel_w, pixel_h, SDL_PIXELFORMAT_RGBA32);
     SDL_Renderer *renderer = surface != NULL ? SDL_CreateSoftwareRenderer(surface) : NULL;
@@ -5446,6 +5534,8 @@ static bool capture_text_size(const char *directory, const NkUiTextBackend *text
         g_flow_width = scale.logical_w;
         g_flow_height = scale.logical_h;
         g_flow_text_size_pct = text_size_pct;
+        g_enhanced_value[PLAYER_PART_TEXSCALE] = "4x";
+        g_enhanced_value[PLAYER_PART_SMART2D] = "On";
         for (size_t i = 0u; ok && i < sizeof(flows) / sizeof(flows[0]); ++i) {
             g_flow_case = flows[i].which;
             nk_ui_focus(ui, flows[i].focus);
@@ -5453,6 +5543,8 @@ static bool capture_text_size(const char *directory, const NkUiTextBackend *text
                            pixel_h, flows[i].name);
             ok = capture_one(&rig, name, NULL, &title);
         }
+        g_enhanced_value[PLAYER_PART_TEXSCALE] = NULL;
+        g_enhanced_value[PLAYER_PART_SMART2D] = NULL;
         g_flow_case = FLOW_NONE;
         g_flow_width = 1280.0f;
         g_flow_height = 800.0f;
@@ -5738,16 +5830,28 @@ static int capture_screens(const char *directory) {
             /* #2245 and #2151: the fullest Enhanced page, and with the render notice. */
             {FLOW_PAGE_TITLE_ENHANCED, "title-enhanced-full", PLAYER_UI_ID_TITLE_PRIMARY},
             {FLOW_PAGE_TITLE_RENDER, "title-render-notice", PLAYER_UI_ID_TITLE_PRIMARY},
-            {FLOW_PAGE_TITLE_RENDER_EFFECTS, "title-render-effects", PLAYER_UI_ID_TITLE_PRIMARY}
+            {FLOW_PAGE_TITLE_RENDER_EFFECTS, "title-render-effects", PLAYER_UI_ID_TITLE_PRIMARY},
+            /* Settings > Enhanced and a game's own page at their last rows, with Texture scaling at
+               4x and the Smart 2D filter on (contract 11.3.3). */
+            {FLOW_SETTINGS_ACE, "settings-enhanced-texture-scaling",
+             PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SMART2D)},
+            {FLOW_SETTINGS_ACE_TITLE, "settings-enhanced-title-texture-scaling",
+             PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SMART2D)}
         };
+        g_enhanced_value[PLAYER_PART_TEXSCALE] = "4x";
+        g_enhanced_value[PLAYER_PART_SMART2D] = "On";
         for (size_t i = 0u; i < sizeof(flows) / sizeof(flows[0]); ++i) {
             g_flow_case = flows[i].which;
             nk_ui_focus(ui, flows[i].focus);
             if (!capture_one(&rig, flows[i].name, NULL, &title)) {
                 g_flow_case = FLOW_NONE;
+                g_enhanced_value[PLAYER_PART_TEXSCALE] = NULL;
+                g_enhanced_value[PLAYER_PART_SMART2D] = NULL;
                 goto done;
             }
         }
+        g_enhanced_value[PLAYER_PART_TEXSCALE] = NULL;
+        g_enhanced_value[PLAYER_PART_SMART2D] = NULL;
         /* The developer log with Clay's layout inspector on. */
         nk_ui_set_layout_debug(ui, true);
         if (!capture_one(&rig, "developer-log-inspector", NULL, &title)) {
@@ -7873,6 +7977,7 @@ int main(int argc, char **argv) {
     test_library_find_box_fits();
     test_library_find_filter_and_cap();
     test_nickname_keyboard();
+    test_texture_scaling_rows();
     CHECK(build_library_golden(library, sizeof(library), &library_size),
           "build Library screen dumps");
     CHECK(build_title_golden(title, sizeof(title), &title_size),

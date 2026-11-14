@@ -700,17 +700,27 @@ run, in the game badge, the pause menu and the stamps; a line without it is an E
 section 10.16), `stick` (the title's stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section
 11.3.10), `depth` (`32` or `off`, section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `peak` (`limit` or `off`,
 section 10.22), `glyphs` (`on` or `off`, sections 10.13 and 11.3.5), `texpack` (`on` or `off`, section 11.3.4),
-`shadow` (`soft` or `off`, sections 10.23 and 11.3.13) and `cull` (`on` or `off`, section 11.3.6) are the other keys a
-line may leave out: a missing `mips`, `stick`, `load`, `depth`, `ssaa`, `peak`, `glyphs`, `texpack`, `shadow` or
+`shadow` (`soft` or `off`, sections 10.23 and 11.3.13), `texscale` (`2` to `6` or `off`) and `smart2d` (`on` or
+`off`, both sections 10.10 and 11.3.3) and `cull` (`on` or `off`, section 11.3.6) are the other keys a
+line may leave out: a missing `mips`, `stick`, `load`, `depth`, `ssaa`, `peak`, `glyphs`, `texpack`, `shadow`,
+`texscale`, `smart2d` or
 `cull` is off, `stick=<counts>`, `load=fast`, `shadow=soft` and `cull=on` need `tier=ace` (`mips=on`, `depth=32`,
-`ssaa=2|4`, `peak=limit`, `glyphs=on` and `texpack=on` do not), the launcher writes `;mips=on` for an Enhanced or Ace
+`ssaa=2|4`, `peak=limit`, `glyphs=on`, `texpack=on`, `texscale=2..6` and `smart2d=on` do not), the launcher writes
+`;mips=on` for an Enhanced or Ace
 launch with that part on, `;load=fast`, `;shadow=soft` and `;cull=on` only for an Ace launch with that part on,
 `;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with supersampling on, `;peak=limit` for an Enhanced or Ace
-launch with the Unclipped sound part on and `;texpack=on` for an Enhanced or Ace
-launch with the Texture pack part on for a title that has a pack, and no launcher writes `depth` (section 11.3.12)
+launch with the Unclipped sound part on, `;texpack=on` for an Enhanced or Ace
+launch with the Texture pack part on for a title that has a pack, and `;texscale=<factor>` and `;smart2d=on` for an
+Enhanced or Ace launch with the Texture scaling or the Smart 2D filter part on, and no launcher writes `depth`
+(section 11.3.12)
 or `glyphs` (section 11.3.5) yet: a line that carries one is written by hand. A line writes
-them only when on, in that order, `mips` right after `twin`, `shadow` after `texpack` (and after `pad`, below) and `cull` last, so a line with
-them off is the line without them, byte for byte. With `texpack=on` the launcher also exports `SR_TEX_REPLACE`, the
+them only when on, in that order, `mips` right after `twin`, `shadow` after `texpack` (and after `pad`, below),
+`texscale` and then `smart2d` after `shadow`, and `cull` last, so a line with
+them off is the line without them, byte for byte. No environment variable switches a part the line carries:
+`SR_GLYPHS`, `SR_TEX_SCALE` and `SR_SMART_2D`, which once did, are retired, and a run started with one of them set to
+anything stops at once with a line that names the key (sections 10.10 and 10.13). The launcher exports all three
+empty, as it does `SR_TEX_DUMP`, so a game started from the player never inherits one and only a runtime started by
+hand is stopped (`test_launch_resolution`). With `texpack=on` the launcher also exports `SR_TEX_REPLACE`, the
 title's pack folder; it always exports that variable, empty for any other line, so an inherited folder never reaches
 a run. `pad` (`late` or `off`, section 11.3.9) may be left out too: a missing `pad` or `pad=off` is off, `pad=late`
 needs `tier=ace`, and the launcher writes `;pad=late` only for an Ace launch with that part on, after `texpack` and
@@ -1084,22 +1094,33 @@ when `"enhanced"` is absent, maps them as below, and writes the new keys from th
 the precedence, the off switches at both levels and this mapping; `test_play_mode_upscale_settings` checks sharper
 enlarging (`"upscale"`: `fsr1` or `off`) and the upscaler it sets for the launch; `test_play_mode_ssaa_settings`
 checks supersampling (`"ssaa"`: `2`, `4` or `off`) and its place on the launch line; `test_play_mode_mips_settings`
-checks smooth far textures (`"mips"`: `on` or `off`) and the `mips=on` it adds to the launch line.
+checks smooth far textures (`"mips"`: `on` or `off`) and the `mips=on` it adds to the launch line;
+`test_play_mode_texscale_settings` checks texture scaling and the smart 2D filter (`"texscale"`: `2` to `6` or `off`;
+`"smart2d"`: `on` or `off`), their place on the launch line, and that the runtime's parser reads the player's values
+back from the line a session is configured with.
 
 ### 10.10. Texture Scaling and the Smart 2D Filter
 
-Two features in the Vulkan GE renderer (#1273). Both are guest-visible (section 11.1) and are not admitted under
-section 11.2: section 11.3.3 is their entry and says what the guest can observe, and this section says how they draw.
+Two features in the Vulkan GE renderer (#1273). Both are guest-visible (section 11.1) and admitted under
+section 11.2, off by default: section 11.3.3 is their entry and says what the guest can observe and what evidence is
+still owed, and this section says how they draw.
 The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture cache; the scaler is xBRZ 1.9
 (`third_party/xbrz/`, GPL-3.0).
 
-- **Settings.** `SR_TEX_SCALE=off|2|3|4|5|6` (the xBRZ factor), `SR_SMART_2D=off|on` and `SR_TEX_SCALE_BUDGET_MB`
-  (1 to 8192, default 512: the GPU memory the scaled copies may hold), read when the renderer starts. Both features
-  take effect only in Ace Mode: in an authentic run they stay off whatever the environment says, and a request
-  prints one `TEX_SCALE: off (texture scaling and the smart 2D filter need Ace Mode)` line. A value outside the list
-  prints `TEX_SCALE: refused (<reason>)` and leaves both off. There is no launch-line key, library setting or
-  per-title setting yet: they come in the launch-line pull request that follows the Ace settings work (#2074), and
-  only that pull request admits the features (section 11.3.3).
+- **Settings.** The launch line's `texscale=off|2|3|4|5|6` (the xBRZ factor) and `smart2d=off|on` keys (section
+  10.1) switch them. In the player they are the parts "Texture scaling" (`"texscale"`: `2` to `6` or `off`) and
+  "Smart 2D filter" (`"smart2d"`: `on` or `off`) on the library's Settings > Enhanced page and on each game's own
+  page (section 10.9), off in a fresh settings file and set by no graphics preset; the launch line carries
+  `;texscale=<factor>` and `;smart2d=on` only for an Enhanced or Ace launch with that part on, after `shadow` and
+  before `cull`. `SR_TEX_SCALE_BUDGET_MB` (1 to 8192, default 512: the GPU memory the scaled copies may hold) is
+  read when the renderer starts, for an Enhanced or Ace run only. Both features take effect only in an Enhanced or
+  Ace run: an authentic run has no line to carry a key, and a renderer started without Ace Mode but handed a request
+  prints one `TEX_SCALE: off (texture scaling and the smart 2D filter need Enhanced or Ace)` line and obeys nothing.
+  A budget outside its range prints `TEX_SCALE: refused (<reason>)`, leaves both off and reports each requested
+  feature as a part that did not run (section 10.4). No environment variable turns either feature on: `SR_TEX_SCALE`
+  and `SR_SMART_2D`, which did before the keys existed, are retired, and a run started with either set to anything
+  (`off` included) stops at once with one line that names the key, as `SR_GLYPHS` does (section 10.13). Section
+  11.3.3 is their entry: admitted, off by default.
 - **What is scaled.** A texture the texture cache decodes, with one level (no mipmaps), after its palette lookup.
   The factor drops for a texture whose scaled side would pass 2048 texels, and a texture that would pass 2048 at 2x
   is not scaled. The image is padded by two texels, repeated or clamped by the texture's wrap mode, so a repeating
@@ -1155,13 +1176,21 @@ The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture
 - **Hot Shots Tennis and LittleBigPlanet keep smart 2D off.** Both draw text from an anti-aliased glyph page, one
   texel to one pixel. Nearest sampling turns each glyph texel into a hard block at a render scale above 1x, so the
   filter makes their text worse, not crisper. The evidence is the before-and-after runs at render scale 4 recorded in
-  #2092. `SR_SMART_2D` is off by default for every title, so nothing in the runtime names them. Their per-title
-  setting comes with the launch-line pull request that follows #2074 (section 11.3.3). Their text is what section 10.13 rebuilds.
+  #2092. Smart 2D is off by default for every title, so nothing in the runtime names them, and each game's own
+  Enhanced page can keep it off for that title when the library turns it on (section 10.9). Neither title's package
+  carries an off switch for it yet (section 11.3.3). Their text is what section 10.13 rebuilds.
 - **Tests.** `tex-scale-selftest` checks the C port against goldens from the upstream release, the borders, the job
-  queue, the settings (an authentic start with both variables set keeps both off) and the classifier, with refused
+  queue, the settings (a start without Ace Mode that is asked for both keeps both off; each takes alone; the retired
+  variables set in the environment turn nothing on; a factor or a budget outside its range is refused with its
+  reason) and the classifier, with refused
   draws at the edge of its tolerance. `tex-scale-gate-mutant` builds the selftest without the Ace gate and passes only
-  when the settings cell fails for that reason. `gpu-texscale-selftest` runs the production path on a Vulkan device
-  at render scales 1, 4 and 2, the budget's reclamation included; `gpu-texscale-mutant` builds a cache that binds a
+  when the settings cell fails for that reason. `ace-selftest` checks the two keys on the line (every value, the
+  refusals, the key order, the report and the words) and that a run with `SR_TEX_SCALE` or `SR_SMART_2D` set stops at
+  start. `gpu-texscale-selftest` runs the production path on a Vulkan device
+  at render scales 1, 4 and 2, the budget's reclamation included: its Ace line carries `texscale` and `smart2d=on`,
+  and its first cell checks that the renderer's factor and filter are the line's and that the report names them; its
+  replace-only run, whose line carries neither key, sets the retired variables and checks both features stay off.
+  `gpu-texscale-mutant` builds a cache that binds a
   copy without its content check (state, serial and hash) and passes only when the rewrite cell fails for that
   reason.
 
@@ -2319,7 +2348,7 @@ filter `nk_tex_soften_alpha_edge` and the digest `nk_tex_soft_shadow_digest` in 
   A listing names sizes and keyed digests, never texels.
 - **Softened copy.** A match takes a 4x copy in place of any xBRZ copy (xBRZ scales only the textures no pack image
   and no declaration claims), through the scaled-copy machinery of section 10.10: its VRAM budget
-  (512 MiB when `SR_TEX_SCALE` sets none), its reclaim, retry and stale rules, and the texture's own filter and wrap
+  (512 MiB when `SR_TEX_SCALE_BUDGET_MB` sets none), its reclaim, retry and stale rules, and the texture's own filter and wrap
   state as the copy's sampler. The copy is made on the renderer thread and stored at once, as a replacement image is,
   so the draw that found it is normally the first to show it (a draw that finds the upload budget of that present
   spent, or earlier finished copies waiting, shows it on a later draw). It is made in integer arithmetic: colour and alpha are each
@@ -2556,6 +2585,9 @@ the software renderer's.
 
 No guest-visible item is admitted by this section alone. Each lands in its own pull request with its entry added here
 (`11.3.<n>`), following the order of section 11.2. This section is the template that entry is checked against.
+The owner may admit an item that is off by default while its entry still lacks something section 11.2 asks for: the
+entry then names the decision in its status and lists each missing thing as evidence owed, and the item stays off by
+default until item 4 is met.
 
 #### 11.3.1. Band-Limited SAS Resampling (`sas=sinc`)
 
@@ -2924,20 +2956,38 @@ copy changes only the factor.
 - **Sampled checking.** As section 11.3.2.
 - **"Nothing worse".** As section 11.3.2.4.
 
-#### 11.3.3. Texture Scaling and the Smart 2D Filter (Not Yet Admitted)
+#### 11.3.3. Texture Scaling and the Smart 2D Filter (`texscale`, `smart2d`)
 
 The two features of section 10.10 (#1273). Their presentation is described there; this entry is what the guest can
 observe.
 
-- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
+- **Status: guest-visible, admitted under section 11.2 by the owner's decision of 2026-11-14 for v0.0.3, off by
+  default.** Each present commits the frame it shows to guest VRAM,
   so a frame drawn with a scaled copy, or with a 1:1 draw sampled nearest by smart 2D, is the frame the guest keeps.
-  The features stay outside section 11.2 until the requirements below exist. Until then they are reachable only
-  through environment variables, for development.
-- **Key.** None. `SR_TEX_SCALE` and `SR_SMART_2D` are environment variables, not keys on the launch line (section
-  10.1), and have no library or per-title setting, so the features are not admitted.
-- **Never silent.** A run with either feature on prints, after its `TEX_SCALE: on` line, one line naming the features
-  as guest-visible, on through the environment and not admitted under section 11.2. The `tex-scale-selftest`
-  settings cell pins it.
+  Their keys, their library and per-title settings and this entry are in place (section 11.2, items 2, 3 and 6).
+  The decision admits them with three things section 11.2 asks for still owed (section 11.3); they are known limits,
+  each described below, and no evidence for them exists yet: the comparison runs of item 4, the byte-for-byte
+  authentic-picture test of item 1, and an off switch for smart 2D in the packages of the two titles it is known to
+  make worse (item 5). Both parts stay off by default and in no preset until the runs of item 4 exist.
+- **Key and off switch.** `texscale=off`, or `texscale=2` to `texscale=6` (the xBRZ factor), and `smart2d=on` or
+  `smart2d=off` on the launch line (section 10.1), optional keys like `texpack`: a line without one, or with its
+  `off`, has it off and formats byte for byte as a line from before the keys. Any other value (`texscale=1`,
+  `texscale=7`, `smart2d=yes`) or either key twice refuses the line, and the run is Authentic (`ace-selftest`).
+  Neither needs `tier=ace`: they are Enhanced parts. The library and each title can turn each on or off alone
+  (section 11.2, item 2): the parts "Texture scaling" (`"texscale"`: `2` to `6` or `off`) and "Smart 2D filter"
+  (`"smart2d"`: `on` or `off`) on Settings > Enhanced and on each game's own page (section 10.9). A missing or
+  unknown value in a settings file reads as off. The launcher writes `;texscale=<factor>` and `;smart2d=on` only for
+  an Enhanced or Ace launch with that part on, after `shadow` and before `cull`; no graphics preset sets either, and
+  the acceptance checkpoint runs Authentic (`test_play_mode_texscale_settings`). No environment variable turns
+  either on: `SR_TEX_SCALE` and `SR_SMART_2D`, which did before the keys existed, are retired, and a run started with
+  either set to anything, `off` included, stops at start with a line that names the key (the `--retired-env` runs
+  of `ace-selftest`).
+- **Never silent.** A run with a key on prints `ACE_MODE: texscale <factor> (...)` or `ACE_MODE: smart2d on (...)`
+  with the other Ace lines and, after its `TEX_SCALE: on` line, one line naming the features as guest-visible
+  under this entry. The run's report carries
+  `texscale` (the factor in effect, 0 when the renderer could not give it) and `smart2d`. A request the renderer
+  refuses (a scaled-copy budget outside its range), or one no Vulkan renderer took, is reported at exit as a part that
+  did not run (section 10.4). The `tex-scale-selftest` settings cell and `ace-selftest` pin these lines.
 - **What it changes:** the frame a present commits, wherever a draw used a scaled copy or smart 2D at a render scale
   above 1x.
 - **VRAM bytes:** differ in those frames, at those draws' pixels.
@@ -2945,16 +2995,32 @@ observe.
   Texture readbacks and render-to-texture results are unchanged (section 10.10).
 - **Timing:** differs. Scaling runs on worker threads, but storing a finished copy is an upload on the renderer
   thread, the thread the guest runs on, and a budget reclaim drains the GE once (section 10.10), so a guest frame can
-  take longer. Measured at render scale 4 with `SR_TEX_SCALE=4 SR_SMART_2D=on` against the same build with both
+  take longer. Measured at render scale 4 with 4x texture scaling and smart 2D on (set through the environment variables of the time) against the same build with both
   off, in 200-second attract runs before the per-present store bound: *Hot Shots Tennis* presented 94.1% of its
   frame intervals at one VBLANK against 98.9% (625 two-VBLANK intervals against 99); *LittleBigPlanet* 98.7%
   against 97.1%, no loss. Storing is now bounded to 8 MiB of copies per present, the first copy of a present
   always (up to 16 MiB); the bounded build's pacing has not been measured. The VBLANK schedule, the GE timing model
   and the media clocks are unchanged.
 - **I/O speed:** unchanged.
-- **Tier:** Enhanced. **Default:** off, and Ace-only: in an authentic run both stay off whatever the environment says.
-- **Nothing worse (section 11.2, item 4):** not shown. *Hot Shots Tennis* and *LittleBigPlanet* keep smart 2D off
-  (section 10.10), and neither feature may be on by default before the runs item 4 lists exist.
+- **Tier:** Enhanced: Enhanced and Ace runs alike. **Default:** off, and in no graphics preset. An authentic run has
+  no valid line with Ace on, so both stay off whatever the environment says.
+- **Authentic stays byte-identical (section 11.2, item 1).** With the line `off`, `g_ace_on` stays 0, the renderer
+  hands the scaler no request, no scaled image, job or thread is made and no draw's filter changes. The tests pin
+  the switch, not a picture: `tex-scale-selftest`'s settings cell starts the scaler without Ace Mode with both
+  features asked for and checks that neither takes, and `tex-scale-gate-mutant` removes that gate and passes only
+  when the cell fails for it; `gpu-texscale-selftest`'s replace-only run starts the renderer on an Enhanced line
+  without either key, with the retired variables set, and checks that both features are off. No test here draws a
+  scene authentic and compares its framebuffer byte for byte with the same draw in a build without the features:
+  that test is owed.
+- **Nothing worse (section 11.2, item 4):** not shown; the runs are owed. *Hot Shots Tennis* and *LittleBigPlanet*
+  keep smart 2D off (section 10.10), and neither feature may be on by default before the runs item 4 lists exist.
+- **Per-title off switch (section 11.2, item 5).** None yet; it is owed. Smart 2D makes the text of *Hot Shots Tennis* and
+  *LittleBigPlanet* worse (section 10.10). The part is off for every title unless the player turns it on, and each
+  of those games' own pages can keep it off, but neither title's package carries the off switch item 5 asks for;
+  the part needs it before it can be on by default.
+- **Evidence tools (section 11.2, item 6).** The flight recorder's `runtime.enhancements` carries
+  `texscale=<factor>` and `smart2d=on` with the rest of the launch line, the run's report names both and whether
+  each ran, and section 10.4's refusals apply to the run unchanged.
 
 #### 11.3.4. Texture Replacement (`texpack=on`)
 

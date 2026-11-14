@@ -148,10 +148,15 @@ static int set_env(const char *name, const char *value) {
  * renderer starts; `--soft-ref PATH` sets SR_GPU_SOFT_SHADOW_REF, the file the off run writes its
  * stock frames' hashes to and the others compare against; `--shadow-candidates V` sets
  * SR_ACE_SHADOW_CANDIDATES.
+ * `--tex-scale N` (2 to 6) puts texscale=N on the Ace line the run makes: texture scaling is the
+ * launch line's key, and no variable turns it on. In the texture scaling build the line always
+ * carries texscale (2 unless `--tex-scale` names another) and smart2d=on; in the coherence build
+ * the soft-shadow, twin, depth and supersampling lines carry texscale=N when it is given.
  * Recipes pass arguments, not a `VAR=value` prefix, which cmd.exe does not accept. */
 int main(int argc, char **argv) {
     int twin_arg = 0, twin_key = 0, twin_key_on = 0, authentic = 0, repl_only = 0, pcache_arg = 0, depth_arg = 0;
-    int ssaa_arg = 0, ssaa_expect = 0, scene_hash = 0;
+    int ssaa_arg = 0, ssaa_expect = 0, scene_hash = 0, tex_scale_arg = 0;
+    char tex_scale_key[24] = "";   /* ";texscale=N" for the Ace line, or "" */
     unsigned long long ssaa_budget_mb = 0;
     unsigned ssaa_dim = 0;
     const char *glyphs_key = "on";
@@ -186,6 +191,15 @@ int main(int argc, char **argv) {
             continue;
         }
         if (strcmp(argv[i], "--repl-only") == 0) { repl_only = 1; continue; }
+        if (strcmp(argv[i], "--tex-scale") == 0) {
+            if (i + 1 >= argc || argv[i + 1][0] < '2' || argv[i + 1][0] > '0' + ACE_TEXSCALE_MAX || argv[i + 1][1]) {
+                fprintf(stderr, "gpu coherence selftest: --tex-scale takes a factor from 2 to %d\n", ACE_TEXSCALE_MAX);
+                return 2;
+            }
+            tex_scale_arg = argv[++i][0] - '0';
+            snprintf(tex_scale_key, sizeof tex_scale_key, ";texscale=%d", tex_scale_arg);
+            continue;
+        }
         if (strcmp(argv[i], "--twin") == 0) twin_arg = 1;
         if (strcmp(argv[i], "--depth") == 0) {
             if (i + 1 >= argc || strcmp(argv[++i], "32") != 0) {
@@ -222,7 +236,6 @@ int main(int argc, char **argv) {
         const char *name = strcmp(argv[i], "--scale") == 0 ? "SR_GPU_SCALE"
                          : strcmp(argv[i], "--case") == 0  ? "SR_GPU_COHERENCE_CASE"
                          : strcmp(argv[i], "--readback-full") == 0 ? "SR_GPU_READBACK_FULL"
-                         : strcmp(argv[i], "--tex-scale") == 0 ? "SR_TEX_SCALE"
                          : strcmp(argv[i], "--gpu-timestamps") == 0 ? "SR_GPU_TIMESTAMPS"
                          : strcmp(argv[i], "--twin") == 0 ? "SR_GPU_TWIN_COLOR"
                          : strcmp(argv[i], "--twin-ref") == 0 ? "SR_GPU_TWIN_REF"
@@ -270,10 +283,11 @@ int main(int argc, char **argv) {
     if (soft_mode) {
         /* An Ace run (shadow=soft needs tier=ace) with or without the key, and the declaration. */
         const int key = strcmp(soft_mode, "off") != 0;
-        if (!ace_init_spec(key ? "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;"
-                                 "tess=off;twin=off;shadow=soft"
-                               : "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;"
-                                 "tess=off;twin=off", NULL) ||
+        char soft_line[ACE_SPEC_MAX];
+        snprintf(soft_line, sizeof soft_line,
+                 "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off%s%s",
+                 key ? ";shadow=soft" : "", tex_scale_key);
+        if (!ace_init_spec(soft_line, NULL) ||
             !gegpu_soft_shadow_prepare(soft_mode)) {
             fprintf(stderr, "gpu coherence selftest: FAIL --soft-shadow %s: the Ace line or the declaration was refused\n",
                     soft_mode);
@@ -282,9 +296,9 @@ int main(int argc, char **argv) {
         }
     } else {
         char spec[192];
-        snprintf(spec, sizeof spec, "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=%s%s%s",
+        snprintf(spec, sizeof spec, "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=%s%s%s%s",
                  twin_key && twin_key_on ? "on" : "off", depth_arg ? ";depth=32" : "",
-                 ssaa_arg == 4 ? ";ssaa=4" : ssaa_arg == 2 ? ";ssaa=2" : "");
+                 ssaa_arg == 4 ? ";ssaa=4" : ssaa_arg == 2 ? ";ssaa=2" : "", tex_scale_key);
         if ((twin_arg || twin_key || depth_arg || ssaa_arg) && !authentic && !ace_init_spec(spec, NULL)) {
             fprintf(stderr, "gpu coherence selftest: FAIL the Ace line for the host twin, depth=32 or "
                     "supersampling was refused\n");
@@ -294,8 +308,8 @@ int main(int argc, char **argv) {
     }
 #endif
 #ifdef SR_GPU_TEXSCALE_SELFTEST
-    /* Texture scaling and the smart 2D filter take effect only in Ace Mode (tex_scale.h). The
-     * factor defaults to 2; `--tex-scale N` picks another. */
+    /* Texture scaling and the smart 2D filter take effect only in Ace Mode, from the line's texscale
+     * and smart2d keys (tex_scale.h). The factor defaults to 2; `--tex-scale N` picks another. */
 #ifdef SR_GPU_GLYPH_SELFTEST
     /* Sharp game text (glyph_recon.h) alone: Ace Mode with no texture scaling, and the line's glyphs key
      * on unless `--glyphs off|absent` says otherwise. `--authentic` leaves Ace Mode off. */
@@ -303,28 +317,38 @@ int main(int argc, char **argv) {
     snprintf(glyph_line, sizeof glyph_line,
              "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off%s",
              strcmp(glyphs_key, "on") == 0 ? ";glyphs=on" : strcmp(glyphs_key, "off") == 0 ? ";glyphs=off" : "");
-    if ((!authentic && !ace_init_spec(glyph_line, NULL)) ||
-        !set_env("SR_TEX_SCALE", "off") || !set_env("SR_SMART_2D", "off")) {
-        fprintf(stderr, "gpu glyph selftest: FAIL the Ace line or the settings were refused\n");
+    if (!authentic && !ace_init_spec(glyph_line, NULL)) {
+        fprintf(stderr, "gpu glyph selftest: FAIL the Ace line was refused\n");
         free(arena);
         return 1;
     }
 #else
     if (repl_only) {
-        /* SR_TEX_REPLACE alone (the documented default use): no texture scaling, no smart 2D, and
-         * the pack written and named before the renderer reads it. */
+        /* SR_TEX_REPLACE alone (the documented default use): a line with neither texscale nor
+         * smart2d, so no texture scaling and no smart 2D, and the pack written and named before the
+         * renderer reads it. */
+        /* The retired SR_TEX_SCALE and SR_SMART_2D are set as they once were used: the renderer
+         * must start with both features off (gegpu_texrepl_only_selftest checks it). The harness
+         * starts Ace Mode from its own line, so the run's start-up refusal of them does not apply. */
         if (!ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;texpack=on", NULL) ||
-            !set_env("SR_TEX_SCALE", "off") || !set_env("SR_SMART_2D", "off") ||
+            !set_env("SR_TEX_SCALE", "4") || !set_env("SR_SMART_2D", "on") ||
             !gegpu_texrepl_only_prepare(SR_SELFTEST_BUILD_ROOT)) {
             fprintf(stderr, "gpu texscale selftest: FAIL the Ace line, the settings or the synthetic pack were refused\n");
             free(arena);
             return 1;
         }
-    } else if (!ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off", NULL) ||
-        (!getenv("SR_TEX_SCALE") && !set_env("SR_TEX_SCALE", "2")) || !set_env("SR_SMART_2D", "on")) {
-        fprintf(stderr, "gpu texscale selftest: FAIL the Ace line or the settings were refused\n");
-        free(arena);
-        return 1;
+    } else {
+        /* The production wiring: the line's texscale and smart2d keys, which gegpu_init hands to
+         * nk_tex_scale_init. Nothing else in this harness turns either on. */
+        char xs_line[ACE_SPEC_MAX];
+        snprintf(xs_line, sizeof xs_line,
+                 "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;texscale=%d;smart2d=on",
+                 tex_scale_arg ? tex_scale_arg : 2);
+        if (!ace_init_spec(xs_line, NULL)) {
+            fprintf(stderr, "gpu texscale selftest: FAIL the Ace line was refused\n");
+            free(arena);
+            return 1;
+        }
     }
 #endif
 #endif

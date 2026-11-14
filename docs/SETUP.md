@@ -87,10 +87,17 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   1 to 8 before starting the player: it replaces the speed's job count (a Background build stays
   at low priority), and the build log and screen say so. `nk_cli.py build-package` takes the
   same speeds as `--build-speed`.
-- **Texture scaling (Ace Mode, development only).** It is reachable only through the `SR_TEX_SCALE` and
-  `SR_SMART_2D` environment variables, has no setting in the player, and is not admitted as an Enhanced or Ace
-  item yet, because it changes the frames the game can read back
-  ([section 11.3.3](ENHANCEMENT_CONTRACT.md#1133-texture-scaling-and-the-smart-2d-filter-not-yet-admitted)).
+- **Texture scaling and the Smart 2D filter.** Two parts of Enhanced and Ace, off by default and in no graphics
+  preset: Settings > Enhanced offers **Texture scaling** (2x to 6x, or Off) and **Smart 2D filter** (On or Off), for
+  the library or for one game. Texture scaling draws each texture from a larger copy made with xBRZ. The Smart 2D
+  filter keeps HUD art and sprites that a game draws one texel to one pixel sharp at an internal resolution above
+  1x; in a game that draws smooth-edged text that way it turns the text blocky (*Hot Shots Tennis* and
+  *LittleBigPlanet* do, so leave it off for them). The launch line carries `texscale=<factor>` and `smart2d=on`.
+  Both change the frames the game can read back; they are admitted as Enhanced items and stay off by default
+  ([section 11.3.3](ENHANCEMENT_CONTRACT.md#1133-texture-scaling-and-the-smart-2d-filter-texscale-smart2d)).
+  The `SR_TEX_SCALE` and `SR_SMART_2D` environment variables no longer switch them. A game started from the
+  player ignores them (the player hands the game an empty value for each, and for `SR_GLYPHS`, so the settings are
+  what count); a game's program started by hand with one set stops at once and names the setting to use.
   Each texture a game uploads is scaled once on two worker threads, off the game's thread: on the development PC (`-O2`, one thread) a 256x256 texture took about 2.0 ms at 2x, 2.8 ms at 4x
   and 4.6 ms at 6x, so a scene change that uploads many textures shows some of them unscaled for a moment. Each
   copy costs factor x factor times the texture's GPU memory (a 256x256 texture at 4x is 4 MB), up to a budget of

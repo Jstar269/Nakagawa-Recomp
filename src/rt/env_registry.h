@@ -219,7 +219,7 @@
     X("SR_SAMPLE_SPEC", "path", "unset (no state sampling)", "hle_route.c", "Path of a spec file listing guest state samples to take.") \
     X("SR_SASLOG", "flag-presence", "off", "hle_audio.c", "Enables SAS audio diagnostic logging.") \
     X("SR_SAVEDATA_LIST_SELECT", "string", "unset: the user picks from the list", "savedata.c", "Save name to choose automatically in the savedata list dialog; CANCEL cancels it.") \
-    X("SR_SMART_2D", "string", "off", "gpu_sdl3vk/tex_scale.c", "on samples nearest for a textured draw that maps one texel to one pixel (HUD, text) at a render scale above 1x; Ace Mode only.") \
+    X("SR_SMART_2D", "string", "unset", "ace.c", "Retired (the smart 2D filter is the SR_ACE line's smart2d=on key): any non-empty value refuses the run at start with a line that names the key.") \
     X("SR_STALE_DETECT", "flag-nonzero", "off", "stale_code.c", "When nonzero, enables stale translated-code detection.") \
     X("SR_STATLOG", "flag-presence", "off", "debug.h,hle_io.c", "Logs memory stick Getstat results to stderr.") \
     X("SR_STORE_CONTEXT_LIMIT", "number", "1", "debug.c", "Number of store-context entries kept, accepted from 1 to 1024.") \
@@ -239,7 +239,7 @@
     X("SR_TEX_DUMP_MAX_FILES", "number", "20000", "gpu_sdl3vk/ge_gpu.c", "Most files (1 to 1000000) a run's player texture dump writes; reaching it stops the dump and the pause menu row says so.") \
     X("SR_TEX_REPLACE", "path", "unset", "gpu_sdl3vk/ge_gpu.c", "Texture pack folder (PPSSPP layout) the Vulkan GE reads when the SR_ACE line carries texpack=on; the launcher always exports it, empty unless the pack is on.") \
     X("SR_TEX_REPLACE_BUDGET_MB", "number", "256", "gpu_sdl3vk/ge_gpu.c", "Host memory, in MiB, for the replacement pack's decoded images; past it the least recently used is dropped.") \
-    X("SR_TEX_SCALE", "string", "off", "gpu_sdl3vk/tex_scale.c", "off or 2-6: the xBRZ factor host copies of guest textures are scaled by in the Vulkan GE texture cache; Ace Mode only.") \
+    X("SR_TEX_SCALE", "string", "unset", "ace.c", "Retired (texture scaling is the SR_ACE line's texscale=2..6 key): any non-empty value refuses the run at start with a line that names the key.") \
     X("SR_TEX_SCALE_BUDGET_MB", "number", "512", "gpu_sdl3vk/tex_scale.c", "GPU memory, in MiB, the scaled texture copies may use; past it a texture is drawn unscaled.") \
     X("SR_THLOG", "flag-presence", "off", "debug.h,sched.c", "Enables scheduler and thread logging, including the sched debug class.") \
     X("SR_TRACE", "path", "logs/trace_window.txt", "flight_recorder.c", "Output file for the PC trace window; used only when SR_TRACE_PC is set.") \

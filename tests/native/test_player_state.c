@@ -9195,7 +9195,7 @@ static void test_play_mode_settings(void) {
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
                                       "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"},") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\", \"texscale\": \"off\", \"smart2d\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -9394,7 +9394,7 @@ static void test_play_mode_sas_settings(void) {
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
                                       "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\", \"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9422,7 +9422,7 @@ static void test_play_mode_sas_settings(void) {
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
                                       "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\", \"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -9490,7 +9490,7 @@ static void test_play_mode_cull_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\", "
                                       "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\", \"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -9577,7 +9577,7 @@ static void test_play_mode_shadow_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"soft\", \"peak\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"soft\", \"peak\": \"off\", \"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"ace\", \"shadow\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9706,7 +9706,7 @@ static void test_play_mode_peak_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"limit\"}") != NULL);
+        assert(saved && strstr(saved, "\"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"limit\", \"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST97001\": {\"mode\": \"library\", \"peak\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9803,7 +9803,7 @@ static void test_play_mode_stick_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"on\", "
                                       "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\", \"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL);
         free(saved);
     }
 
@@ -9967,7 +9967,7 @@ static void test_play_mode_load_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
                                       "\"load\": \"fast\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\", \"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST95001\": {\"mode\": \"ace\", \"load\": \"off\"}") != NULL);
         free(saved);
     }
@@ -10069,7 +10069,7 @@ static void test_play_mode_ssaa_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\", \"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\", \"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\", \"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL);
         assert(strstr(saved, "\"ssaa\": \"4\"}") != NULL && strstr(saved, "\"ssaa\": \"off\"}") != NULL);
         free(saved);
     }
@@ -10152,7 +10152,7 @@ static void test_play_mode_mips_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
                                       "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", \"mips\": \"on\", "
-                                      "\"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
+                                      "\"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\", \"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST95001\": {\"mode\": \"enhanced\", \"mips\": \"off\"}") != NULL);
         free(saved);
     }
@@ -10178,6 +10178,227 @@ static void test_play_mode_mips_settings(void) {
     free(back);
     free(app);
     printf("PASS: smooth far textures is off by default, read and saved at both levels, and launched only when on\n");
+}
+
+/* Texture scaling and the smart 2D filter (contract 10.10, 11.3.3, 11.2 item 2): both off in a fresh
+ * file and in every graphics preset; a library value and a title's own are read (texscale 2 to 6 or
+ * off, smart2d on or off), the title's wins, and both survive a save and a load. Enhanced and Ace
+ * launches carry ";texscale=<factor>" and ";smart2d=on" after shadow and before cull, each only when
+ * on, so a launch with both off writes the line of a build without the parts. Authentic and the
+ * acceptance checkpoint carry no line, an unknown word is off, each row steps through its values,
+ * and the line a session is configured with is one the runtime reads the same values from. */
+static void test_play_mode_texscale_settings(void) {
+    static const char k_plain[] =
+        "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off";
+    /* The same for the settings file below, whose "enhanced" block names no other part: each is off. */
+    static const char k_plain_read[] =
+        "v1;tier=enhanced;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off";
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[ACE_SPEC_MAX], why[64];
+    PlayerPlayResolved r;
+    AceConfig c;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_texscale_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    NkRuntimeConfig *config = (NkRuntimeConfig *)calloc(1, sizeof(NkRuntimeConfig));
+    assert(app && back && config);
+
+    /* Fresh: off, named, what each costs in its sentence, and no preset turns either on. */
+    player_app_settings_init_default(&app->settings);
+    const PlayerEnhancedPartInfo *xs = player_enhanced_part(PLAYER_PART_TEXSCALE);
+    const PlayerEnhancedPartInfo *s2 = player_enhanced_part(PLAYER_PART_SMART2D);
+    assert(app->settings.enhanced.part[PLAYER_PART_TEXSCALE] == 0 &&
+           app->settings.enhanced.part[PLAYER_PART_SMART2D] == 0);
+    assert(xs->fresh == 0 && xs->value_count == 6 && strcmp(xs->key, "texscale") == 0 &&
+           strcmp(xs->name, "Texture scaling") == 0);
+    assert(s2->fresh == 0 && s2->value_count == 2 && strcmp(s2->key, "smart2d") == 0 &&
+           strcmp(s2->name, "Smart 2D filter") == 0);
+    assert(strstr(xs->sentence, "xBRZ") != NULL && strstr(xs->sentence, "GPU memory") != NULL &&
+           strstr(xs->sentence, "game receives changed pictures") != NULL);
+    assert(strstr(s2->sentence, "blocky") != NULL &&
+           strstr(s2->sentence, "game receives changed pictures") != NULL);
+    for (int f = 2; f <= ACE_TEXSCALE_MAX; f++) {
+        char label[8];
+        snprintf(label, sizeof(label), "%dx", f);
+        assert(strcmp(player_enhanced_part_label(PLAYER_PART_TEXSCALE, f), label) == 0);
+    }
+    assert(strcmp(player_enhanced_part_label(PLAYER_PART_TEXSCALE, 0), "Off") == 0 &&
+           strcmp(player_enhanced_part_label(PLAYER_PART_TEXSCALE, 1), "Off") == 0 &&
+           strcmp(player_enhanced_part_label(PLAYER_PART_TEXSCALE, 7), "Off") == 0);
+    assert(strcmp(player_enhanced_part_label(PLAYER_PART_SMART2D, 1), "On") == 0 &&
+           strcmp(player_enhanced_part_label(PLAYER_PART_SMART2D, 0), "Off") == 0);
+    app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+    /* With both off the launch line is the line from before the parts, byte for byte. */
+    player_play_resolve(&app->settings, "TEST97003", &r);
+    assert(r.on && r.part[PLAYER_PART_TEXSCALE] == 0 && r.part[PLAYER_PART_SMART2D] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)));
+    if (strcmp(line, k_plain) != 0) {
+        fprintf(stderr, "FAIL: a fresh Enhanced launch line is '%s'\n", line);
+        assert(!"with both parts off the line is the one from before them");
+    }
+    for (int preset = PLAYER_PRESET_LOW; preset < PLAYER_PRESET_COUNT; preset++) {
+        assert(player_graphics_preset_row(preset)->part[PLAYER_PART_TEXSCALE] == -1 &&
+               player_graphics_preset_row(preset)->part[PLAYER_PART_SMART2D] == -1);
+        player_app_apply_graphics_preset(app, preset);
+        player_play_resolve(&app->settings, "TEST97003", &r);
+        assert(r.on && r.part[PLAYER_PART_TEXSCALE] == 0 && r.part[PLAYER_PART_SMART2D] == 0);
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "texscale") == NULL &&
+               strstr(line, "smart2d") == NULL);
+    }
+
+    /* The library at 4x with smart 2D on; one title at 6x without smart 2D, one with both off, one
+       with only texture scaling off, one following, one Ace, one Authentic. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"texscale\": \"4\", \"smart2d\": \"on\"},"
+        " \"title_play\": {\"TEST97001\": {\"texscale\": \"6\", \"smart2d\": \"off\"},"
+        " \"TEST97002\": {\"texscale\": \"off\", \"smart2d\": \"off\"},"
+        " \"TEST97004\": {\"mode\": \"ace\"},"
+        " \"TEST97005\": {\"mode\": \"authentic\"},"
+        " \"TEST97006\": {\"texscale\": \"off\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_TEXSCALE] == 4 &&
+           app->settings.enhanced.part[PLAYER_PART_SMART2D] == 1);
+    player_play_resolve(&app->settings, "TEST97001", &r);       /* the title's own wins */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_TEXSCALE] == 6 &&
+           r.part[PLAYER_PART_SMART2D] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=enhanced;") != NULL &&
+           strcmp(line + strlen(line) - 11, ";texscale=6") == 0 && strstr(line, "smart2d") == NULL);
+    expect_line_parses_in_runtime(&r);
+    player_play_resolve(&app->settings, "TEST97002", &r);       /* each title can turn both off */
+    assert(r.on && r.part[PLAYER_PART_TEXSCALE] == 0 && r.part[PLAYER_PART_SMART2D] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line, k_plain_read) == 0);
+    player_play_resolve(&app->settings, "TEST97006", &r);       /* ... or one of them alone */
+    assert(r.on && r.part[PLAYER_PART_TEXSCALE] == 0 && r.part[PLAYER_PART_SMART2D] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 11, ";smart2d=on") == 0 && strstr(line, "texscale") == NULL);
+    expect_line_parses_in_runtime(&r);
+    player_play_resolve(&app->settings, "TEST97003", &r);       /* follows the library */
+    assert(r.on && r.part[PLAYER_PART_TEXSCALE] == 4 && r.part[PLAYER_PART_SMART2D] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 22, ";texscale=4;smart2d=on") == 0);
+    expect_line_parses_in_runtime(&r);
+    player_play_resolve(&app->settings, "TEST97004", &r);       /* Ace carries them too */
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_TEXSCALE] == 4 &&
+           r.part[PLAYER_PART_SMART2D] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
+           strcmp(line + strlen(line) - 22, ";texscale=4;smart2d=on") == 0);
+    /* The line's own order (ace_format's): shadow, then texscale and smart2d, and cull last. */
+    r.part[PLAYER_PART_CULL] = 1;
+    r.part[PLAYER_PART_SHADOW] = 1;
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 42, ";shadow=soft;texscale=4;smart2d=on;cull=on") == 0);
+    expect_line_parses_in_runtime(&r);
+    player_play_resolve(&app->settings, "TEST97005", &r);       /* Authentic: no line */
+    assert(!r.on);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line, "off") == 0);
+
+    /* What a session is configured with (player_launch_work_run): the line in
+       NkRuntimeConfig.ace_spec, which nk_launch exports as SR_ACE (test_launch_resolution), and the
+       runtime reads the player's values back from it. */
+    player_play_config_session(&app->settings, "TEST97003", false, false, config, &r);
+    assert(strlen(config->ace_spec) > 22u &&
+           strcmp(config->ace_spec + strlen(config->ace_spec) - 22, ";texscale=4;smart2d=on") == 0);
+    assert(ace_parse(config->ace_spec, &c, why, sizeof(why)) == 1 && c.on && c.texscale == 4 && c.smart2d == 1);
+    player_play_config_session(&app->settings, "TEST97001", false, false, config, &r);
+    assert(ace_parse(config->ace_spec, &c, why, sizeof(why)) == 1 && c.on && c.texscale == 6 && c.smart2d == 0);
+    player_play_config_session(&app->settings, "TEST97002", false, false, config, &r);
+    assert(strcmp(config->ace_spec, k_plain_read) == 0 &&
+           ace_parse(config->ace_spec, &c, why, sizeof(why)) == 1 && c.on && c.texscale == 0 && c.smart2d == 0);
+    /* The acceptance checkpoint runs Authentic whatever the parts say, as a title on Authentic does. */
+    player_play_config_session(&app->settings, "TEST97003", false, true, config, &r);
+    assert(!r.on && strcmp(config->ace_spec, "off") == 0 &&
+           ace_parse(config->ace_spec, &c, why, sizeof(why)) == 1 && !c.on && c.texscale == 0 && c.smart2d == 0);
+    player_play_config_session(&app->settings, "TEST97005", false, false, config, &r);
+    assert(!r.on && strcmp(config->ace_spec, "off") == 0);
+
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"shadow\": \"off\", \"peak\": \"off\", \"texscale\": \"4\", \"smart2d\": \"on\"}") != NULL);
+        assert(strstr(saved, "\"texscale\": \"6\", \"smart2d\": \"off\"}") != NULL &&
+               strstr(saved, "\"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL &&
+               strstr(saved, "\"TEST97006\": {\"mode\": \"library\", \"texscale\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_TEXSCALE] == 4 &&
+           back->settings.enhanced.part[PLAYER_PART_SMART2D] == 1);
+    player_play_resolve(&back->settings, "TEST97001", &r);
+    assert(r.on && r.part[PLAYER_PART_TEXSCALE] == 6 && r.part[PLAYER_PART_SMART2D] == 0);
+    player_play_resolve(&back->settings, "TEST97006", &r);
+    assert(r.on && r.part[PLAYER_PART_TEXSCALE] == 0 && r.part[PLAYER_PART_SMART2D] == 1);
+
+    /* The rows step: the library's Off, 2x to 6x, Off; a title's Library default, each value, then
+       Library default again. */
+    app->game_count = 1;
+    snprintf(app->games[0].disc_id, sizeof(app->games[0].disc_id), "TEST97003");
+    app->settings.enhanced.part[PLAYER_PART_TEXSCALE] = 0;
+    app->settings.enhanced.part[PLAYER_PART_SMART2D] = 0;
+    for (int f = 2; f <= ACE_TEXSCALE_MAX; f++) {
+        player_app_cycle_enhanced_part(app, PLAYER_PART_TEXSCALE);
+        assert(app->settings.enhanced.part[PLAYER_PART_TEXSCALE] == f);
+        player_play_resolve(&app->settings, "TEST97003", &r);
+        assert(r.on && r.part[PLAYER_PART_TEXSCALE] == f);
+    }
+    player_app_cycle_enhanced_part(app, PLAYER_PART_TEXSCALE);
+    assert(app->settings.enhanced.part[PLAYER_PART_TEXSCALE] == 0);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_SMART2D);
+    assert(app->settings.enhanced.part[PLAYER_PART_SMART2D] == 1);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_SMART2D);
+    assert(app->settings.enhanced.part[PLAYER_PART_SMART2D] == 0);
+    assert(player_app_title_part(app, 0, PLAYER_PART_TEXSCALE) == -1);
+    for (int f = 2; f <= ACE_TEXSCALE_MAX; f++) {
+        player_app_cycle_title_part(app, 0, PLAYER_PART_TEXSCALE);
+        assert(player_app_title_part(app, 0, PLAYER_PART_TEXSCALE) == f);
+    }
+    player_play_resolve(&app->settings, "TEST97003", &r);       /* the library is off, the title 6x */
+    assert(r.on && r.part[PLAYER_PART_TEXSCALE] == ACE_TEXSCALE_MAX);
+    player_app_cycle_title_part(app, 0, PLAYER_PART_TEXSCALE);
+    assert(player_app_title_part(app, 0, PLAYER_PART_TEXSCALE) == 0);
+    player_app_cycle_title_part(app, 0, PLAYER_PART_TEXSCALE);
+    assert(player_app_title_part(app, 0, PLAYER_PART_TEXSCALE) == -1);
+    player_app_cycle_title_part(app, 0, PLAYER_PART_SMART2D);      /* library -> on */
+    assert(player_app_title_part(app, 0, PLAYER_PART_SMART2D) == 1);
+    player_play_resolve(&app->settings, "TEST97003", &r);
+    assert(r.on && r.part[PLAYER_PART_SMART2D] == 1 && r.part[PLAYER_PART_TEXSCALE] == 0);
+    player_app_cycle_title_part(app, 0, PLAYER_PART_SMART2D);      /* on -> off */
+    player_app_cycle_title_part(app, 0, PLAYER_PART_SMART2D);      /* off -> library */
+    assert(player_app_title_part(app, 0, PLAYER_PART_SMART2D) == -1);
+
+    /* A word this build does not know reads as off, never as more: a factor outside 2 to 6, a
+       switch word outside on and off. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"texscale\": \"7\", \"smart2d\": \"yes\"},"
+        " \"title_play\": {\"TEST97001\": {\"mode\": \"ace\", \"texscale\": \"1\", \"smart2d\": \"1\"},"
+        " \"TEST97002\": {\"texscale\": \"x4\", \"smart2d\": \"nearest\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_TEXSCALE] == 0 &&
+           app->settings.enhanced.part[PLAYER_PART_SMART2D] == 0);
+    for (int i = 1; i <= 3; i++) {
+        char disc[16];
+        snprintf(disc, sizeof(disc), "TEST9700%d", i);
+        player_play_resolve(&app->settings, disc, &r);
+        assert(r.on && r.part[PLAYER_PART_TEXSCALE] == 0 && r.part[PLAYER_PART_SMART2D] == 0);
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "texscale") == NULL &&
+               strstr(line, "smart2d") == NULL);
+    }
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(config);
+    free(back);
+    free(app);
+    printf("PASS: texture scaling and the smart 2D filter are off by default and in every preset, read and "
+           "saved at both levels, and Enhanced and Ace launches hand the runtime the chosen values\n");
 }
 
 /* Late pad sampling (contract 11.3.9, 11.2 item 2): off in a fresh file and in every graphics
@@ -10232,7 +10453,7 @@ static void test_play_mode_pad_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"late\", "
-                                      "\"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
+                                      "\"shadow\": \"off\", \"peak\": \"off\", \"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"ace\", \"pad\": \"off\"}") != NULL);
         free(saved);
     }
@@ -10313,7 +10534,7 @@ static void test_play_mode_tess_settings(void) {
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
                                       "\"upscale\": \"off\", \"stick\": \"off\", \"load\": \"off\", "
                                       "\"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\", \"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);
@@ -10864,7 +11085,7 @@ static void test_play_mode_twin_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
                                       "\"load\": \"off\", \"twin\": \"on\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\", \"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -10891,7 +11112,7 @@ static void test_play_mode_twin_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
                                       "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\", \"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"on\"}") != NULL);
         free(saved);
     }
@@ -11051,6 +11272,10 @@ static void expect_line_parses_in_runtime(const PlayerPlayResolved *r) {
     assert(c.sas == (r->part[PLAYER_PART_SAS] ? ACE_SAS_SINC : ACE_SAS_OFF));
     assert(c.twin == (r->part[PLAYER_PART_TWIN] ? 1 : 0));
     assert(c.texpack == r->part[PLAYER_PART_TEXPACK]);
+    /* Texture scaling and the smart 2D filter (11.3.3) reach the runtime at the part's own value, in
+       either tier: the factor the player chose is the factor the renderer is handed. */
+    assert(c.texscale == r->part[PLAYER_PART_TEXSCALE]);
+    assert(c.smart2d == r->part[PLAYER_PART_SMART2D]);
     /* Late pad sampling (11.3.9) reaches the runtime only from an Ace launch with the part on. */
     assert(c.pad == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_PAD] == 1 ? 1 : 0));
     assert(ace_format(&c, canonical, sizeof(canonical)) && strcmp(canonical, line) == 0);
@@ -11095,7 +11320,7 @@ static void test_play_mode_line_parses_in_runtime(void) {
         /* Every part at its largest value, with a pack stored so texpack is in effect. In Ace every key
            the line can carry is then on, so the line's own key order (ace_format's), not the enum's
            row order, decides where each lands: peak after ssaa, texpack after peak, then pad and shadow (both
-           Ace only), and cull last. */
+           Ace only), then texscale and smart2d (either tier), and cull last. */
         settings.title_pack_count = 1;
         memcpy(settings.title_packs[0].key, "TEST93001", sizeof("TEST93001"));
         snprintf(settings.title_packs[0].path, sizeof(settings.title_packs[0].path), "%s",
@@ -11113,8 +11338,9 @@ static void test_play_mode_line_parses_in_runtime(void) {
             char line[ACE_SPEC_MAX];
             assert(player_play_launch_line(&r, line, sizeof(line)));
             const size_t n = strlen(line);
-            static const char ace_tail[] = ";ssaa=4;peak=limit;texpack=on;pad=late;shadow=soft;cull=on";
-            static const char enhanced_tail[] = ";ssaa=4;peak=limit;texpack=on";
+            static const char ace_tail[] =
+                ";ssaa=4;peak=limit;texpack=on;pad=late;shadow=soft;texscale=6;smart2d=on;cull=on";
+            static const char enhanced_tail[] = ";ssaa=4;peak=limit;texpack=on;texscale=6;smart2d=on";
             const size_t ace_n = sizeof(ace_tail) - 1u;
             const size_t enhanced_n = sizeof(enhanced_tail) - 1u;
             if (modes[m] == PLAYER_PLAY_ACE)
@@ -11227,7 +11453,7 @@ static void test_play_mode_upscale_settings(void) {
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
                                       "\"upscale\": \"fsr1\", \"stick\": \"off\", \"load\": \"off\", "
                                       "\"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\", \"texscale\": \"off\", \"smart2d\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -12605,6 +12831,7 @@ int main(int argc, char **argv) {
     test_play_mode_line_room();
     test_play_mode_upscale_settings();
     test_play_mode_texpack_settings();
+    test_play_mode_texscale_settings();
     test_play_mode_title_page();
     /* Saves a library file under the cache root, so it runs only once that
      * root is the temporary one. */

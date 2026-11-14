@@ -17,17 +17,19 @@
  * too) hands the workers its own work jobs (below), which read only the host copies they are
  * given and write only the dump's files.
  *
- * Settings, read once when the renderer starts (nk_tex_scale_init_from_env):
- *   SR_TEX_SCALE      off | 2 | 3 | 4 | 5 | 6   xBRZ factor; unset is off
- *   SR_SMART_2D       off | on                  nearest filtering for pixel-mapped 2D draws
- *   SR_TEX_SCALE_BUDGET_MB  1..8192             VRAM for scaled copies (default 512)
- * Any other value refuses the setting: it stays off and one TEX_SCALE line names the reason.
+ * Settings, taken once when the renderer starts (nk_tex_scale_init):
+ *   texscale=off | 2 | 3 | 4 | 5 | 6   the launch line's xBRZ factor (ace.h); a missing key is off
+ *   smart2d=off | on                   the launch line's nearest filtering for pixel-mapped 2D draws
+ *   SR_TEX_SCALE_BUDGET_MB  1..8192    VRAM for scaled copies (default 512)
+ * Any other value refuses the request: both stay off and one TEX_SCALE line names the reason. No
+ * environment variable turns either feature on: SR_TEX_SCALE and SR_SMART_2D are retired, and a
+ * run that has one set stops at start (ace.h, ace_retired_env_named).
  *
  * Both features are guest-visible (docs/ENHANCEMENT_CONTRACT.md, the section 11.3 entry "Texture
  * Scaling and the Smart 2D Filter"): each present commits the frame, scaled copies and nearest 2D
- * draws included, to guest VRAM. They are not
- * admitted under section 11.2 until their launch-line keys and library and per-title switches
- * exist, so a run that turns one on through these variables says so at start.
+ * draws included, to guest VRAM. They are admitted under section 11.2, off by default (the entry
+ * lists the evidence still owed), and a run that turns one on says at start that it is
+ * guest-visible.
  */
 #ifndef NK_TEX_SCALE_H
 #define NK_TEX_SCALE_H
@@ -57,20 +59,24 @@ typedef struct NkTexScaleConfig {
     uint64_t budget_bytes; /* VRAM budget for scaled copies */
 } NkTexScaleConfig;
 
-/* Parse the three settings (NULL = unset). Returns 1 when they are valid (all-off included),
+/* Check the three settings: the factor (0 off, or 2 to NK_TEX_SCALE_MAX), smart 2D (0 or 1) and
+ * the budget's text (NULL or "" is the default). Returns 1 when they are valid (all-off included),
  * 0 with `why` filled when one is refused; `out` is then all off. Pure: no state. */
-int nk_tex_scale_parse(const char *scale, const char *smart2d, const char *budget_mb,
+int nk_tex_scale_parse(int factor, int smart2d, const char *budget_mb,
                        NkTexScaleConfig *out, char *why, size_t why_cap);
 
-/* Read the settings (only when `enhanced` is nonzero: an Ace run), print the TEX_SCALE line
- * when either feature is on or a setting was refused, and make them the run's configuration.
+/* Make the launch line's request (`factor` and `smart2d`, from ace_effective()) the run's
+ * configuration, only when `enhanced` is nonzero (an Enhanced or Ace run); SR_TEX_SCALE_BUDGET_MB
+ * is read then. Prints the TEX_SCALE lines when either feature is on or the request was refused;
+ * a refusal also writes its reason to `refused` (when given; "" otherwise), and leaves both off.
  * Returns the configuration in force. */
-const NkTexScaleConfig *nk_tex_scale_init_from_env(int enhanced);
-/* The start line naming a guest-visible configuration that is on through the environment,
- * outside section 11.2 admission. Writes it to `out` (without a newline) and returns its length
- * when either feature is on; returns 0 and writes an empty string when both are off. */
-size_t nk_tex_scale_admission_line(const NkTexScaleConfig *cfg, char *out, size_t cap);
-/* The lines the last nk_tex_scale_init_from_env printed, each ending in a newline ("" for
+const NkTexScaleConfig *nk_tex_scale_init(int enhanced, int factor, int smart2d, char *refused,
+                                          size_t refused_cap);
+/* The start line naming a configuration that is on as guest-visible under its contract entry.
+ * Writes it to `out` (without a newline) and returns its length when either feature is on;
+ * returns 0 and writes an empty string when both are off. */
+size_t nk_tex_scale_guest_visible_line(const NkTexScaleConfig *cfg, char *out, size_t cap);
+/* The lines the last nk_tex_scale_init printed, each ending in a newline ("" for
  * none), for the self-test. */
 const char *nk_tex_scale_start_lines(void);
 /* Tests: set the configuration directly (no environment, no line). */
