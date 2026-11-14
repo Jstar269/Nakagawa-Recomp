@@ -387,6 +387,46 @@ int main(void) {
                 HANDLE h;
                 ASSERT_INT_EQ(sr_vfs_open_contained_utf8(through, GENERIC_READ, 0,
                                                          OPEN_EXISTING, canonical, &h), 0);
+                /* Creating, truncating or opening for write THROUGH the link is
+                 * refused before anything happens outside: the outside file keeps
+                 * its bytes and no new outside file appears. */
+                {
+                    static const DWORD mutating[] = {CREATE_ALWAYS, TRUNCATE_EXISTING,
+                                                     OPEN_ALWAYS, CREATE_NEW};
+                    char fresh[800], fresh_outside[700];
+                    snprintf(fresh, sizeof(fresh), "%s\\fresh.txt", junction);
+                    snprintf(fresh_outside, sizeof(fresh_outside), "%s\\fresh.txt", sibling);
+                    for (size_t m = 0; m < sizeof(mutating) / sizeof(mutating[0]); ++m) {
+                        const char *target = mutating[m] == CREATE_NEW ? fresh : through;
+                        ASSERT_INT_EQ(sr_vfs_open_contained_utf8(target, GENERIC_READ | GENERIC_WRITE, 0,
+                                                                 mutating[m], canonical, &h), 0);
+                        WIN32_FILE_ATTRIBUTE_DATA kept;
+                        ASSERT_INT_EQ(GetFileAttributesExA(outside_file, GetFileExInfoStandard, &kept) &&
+                                      kept.nFileSizeLow == 7u && kept.nFileSizeHigh == 0u, 1);
+                        ASSERT_INT_EQ(GetFileAttributesA(fresh_outside) == INVALID_FILE_ATTRIBUTES, 1);
+                        if (GetFileAttributesA(fresh_outside) != INVALID_FILE_ATTRIBUTES)
+                            DeleteFileA(fresh_outside);
+                    }
+                    /* A normal file beside the link is created, written and truncated. */
+                    char beside[700];
+                    snprintf(beside, sizeof(beside), "%s\\beside.txt", test_root);
+                    ASSERT_INT_EQ(sr_vfs_open_contained_utf8(beside, GENERIC_READ | GENERIC_WRITE, 0,
+                                                             CREATE_NEW, canonical, &h), 1);
+                    if (h) CloseHandle(h);
+                    h = NULL;
+                    ASSERT_INT_EQ(sr_vfs_open_contained_utf8(beside, GENERIC_READ | GENERIC_WRITE, 0,
+                                                             CREATE_ALWAYS, canonical, &h), 1);
+                    if (h) CloseHandle(h);
+                    h = NULL;
+                    ASSERT_INT_EQ(sr_vfs_open_contained_utf8(beside, GENERIC_READ | GENERIC_WRITE, 0,
+                                                             TRUNCATE_EXISTING, canonical, &h), 1);
+                    if (h) CloseHandle(h);
+                    h = NULL;
+                    DeleteFileA(beside);
+                    /* The junction itself as the leaf (a folder link) is refused too. */
+                    ASSERT_INT_EQ(sr_vfs_open_contained_utf8(junction, GENERIC_READ | GENERIC_WRITE, 0,
+                                                             OPEN_ALWAYS, canonical, &h), 0);
+                }
                 /* mkdirs whose OWNED TAIL passes through a pre-planted link
                  * must fail closed AND must not create anything beyond it
                  * anywhere (F114-2). Plant the junction as the FIRST owned

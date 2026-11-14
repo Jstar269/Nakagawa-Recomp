@@ -6506,6 +6506,90 @@ static void test_ms0_unified_namespace(void) {
         nk_remove_utf8(victim);
     }
 
+    /* --- a folder link inside the Memory Stick: sceIoOpen that would create or truncate a file
+     * through it is refused before anything outside changes, with the code a read through the
+     * same link gets; a file beside the link still opens. Windows plants a junction (mklink /J
+     * needs no elevation), POSIX a symlink. --- */
+    {
+        char outside[512], victim[600], fresh_out[600], link[512];
+        const char sep = nk_platform_path_separator();
+        snprintf(outside, sizeof outside, "%s%c..%cms0_link_outside", ms_root, sep, sep);
+        snprintf(victim, sizeof victim, "%s%cVICTIM.BIN", outside, sep);
+        snprintf(fresh_out, sizeof fresh_out, "%s%cFRESH.BIN", outside, sep);
+        snprintf(link, sizeof link, "%s%cJDIR", ms_root, sep);
+        expect(nk_platform_mkdir_p(outside), "outside folder for the link fixture");
+        FILE *vf = fopen(victim, "wb");
+        if (vf) { fwrite(payload, 1, sizeof(payload) - 1u, vf); fclose(vf); }
+#ifdef _WIN32
+        char jcmd[1200];
+        snprintf(jcmd, sizeof jcmd, "cmd /c mklink /J \"%s\" \"%s\" >nul 2>&1", link, outside);
+        int made = system(jcmd) == 0 &&
+#else
+        int made = symlink("../ms0_link_outside", link) == 0 &&
+#endif
+                   !nk_platform_path_missing(link);
+        expect(made, "a folder link planted inside the Memory Stick");
+        if (made) {
+            static const struct { const char *guest; uint32_t flags; const char *what; } opens[] = {
+                {"ms0:/JDIR/FRESH.BIN", 0x0602u, "WRONLY|CREAT|TRUNC of a new file"},
+                {"ms0:/JDIR/FRESH.BIN", 0x0A02u, "WRONLY|CREAT|EXCL of a new file"},
+                {"ms0:/JDIR/FRESH.BIN", 0x0302u, "WRONLY|CREAT|APPEND of a new file"},
+                {"ms0:/JDIR/VICTIM.BIN", 0x0602u, "WRONLY|CREAT|TRUNC of an outside file"},
+                {"ms0:/JDIR/VICTIM.BIN", 0x0402u, "WRONLY|TRUNC of an outside file"},
+                {"ms0:/JDIR/VICTIM.BIN", 0x0003u, "RDWR of an outside file"},
+            };
+            fd_guest_copy(PATH_ADDR, "ms0:/JDIR/VICTIM.BIN", sizeof("ms0:/JDIR/VICTIM.BIN"));
+            fd_set_path(&cpu, PATH_ADDR, "ms0:/JDIR/VICTIM.BIN");
+            cpu.r[5] = 1u;
+            const uint32_t read_refusal = sr_hle_test_io_open(&cpu);
+            expect(read_refusal >= 0x80000000u, "a read through the folder link is refused");
+            for (size_t i = 0; i < sizeof(opens) / sizeof(opens[0]); ++i) {
+                fd_guest_copy(PATH_ADDR, opens[i].guest, strlen(opens[i].guest) + 1u);
+                fd_set_path(&cpu, PATH_ADDR, opens[i].guest);
+                cpu.r[5] = opens[i].flags;
+                cpu.r[6] = 0777u;
+                uint32_t rc = sr_hle_test_io_open(&cpu);
+                if (rc != read_refusal)
+                    fprintf(stderr, "  %s through the link answered 0x%08x, a read 0x%08x\n",
+                            opens[i].what, (unsigned)rc, (unsigned)read_refusal);
+                expect(rc == read_refusal, "a create or write open through a folder link is refused "
+                                           "like a read through it");
+                if (rc < 64u) {
+                    memset(&cpu, 0, sizeof cpu);
+                    cpu.r[4] = rc;
+                    sr_hle_test_io_close(&cpu);
+                }
+                expect(nk_platform_path_missing(fresh_out),
+                       "nothing is created outside the Memory Stick through a folder link");
+                expect(nk_platform_get_file_size(victim) == (int64_t)(sizeof(payload) - 1u),
+                       "an outside file keeps its bytes when opened through a folder link");
+                nk_remove_utf8(fresh_out);
+            }
+            fd_guest_copy(PATH_ADDR, "ms0:/JBESIDE.BIN", sizeof("ms0:/JBESIDE.BIN"));
+            fd_set_path(&cpu, PATH_ADDR, "ms0:/JBESIDE.BIN");
+            cpu.r[5] = 0x0602u;
+            cpu.r[6] = 0777u;
+            uint32_t beside = sr_hle_test_io_open(&cpu);
+            expect(beside < 64u, "a file beside the folder link is created");
+            if (beside < 64u) {
+                memset(&cpu, 0, sizeof cpu);
+                cpu.r[4] = beside;
+                sr_hle_test_io_close(&cpu);
+            }
+            char beside_host[600];
+            snprintf(beside_host, sizeof beside_host, "%s%cJBESIDE.BIN", ms_root, sep);
+            nk_remove_utf8(beside_host);
+#ifdef _WIN32
+            RemoveDirectoryA(link);
+#else
+            nk_remove_utf8(link);
+#endif
+        }
+        nk_remove_utf8(victim);
+        nk_remove_utf8(fresh_out);
+        rmdir(outside);
+    }
+
     /* cleanup */
     fd_host_path(host, sizeof(host), file_guest);
     nk_remove_utf8(host);

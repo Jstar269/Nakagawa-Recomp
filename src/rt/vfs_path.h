@@ -390,8 +390,30 @@ static inline int sr_vfs_dir_is_contained(const char *dir_utf8, const wchar_t *c
  * pass FILE_FLAG_OPEN_REPARSE_POINT to stay on a link OBJECT itself (delete /
  * attribute work), omit it to resolve through the link (read/write targets).
  * disposition is a CreateFileW creation disposition (OPEN_EXISTING for reads,
- * OPEN_ALWAYS for write-or-create); the containment verdict always applies to
- * whatever object the disposition produced, before any byte moves. */
+ * OPEN_ALWAYS for write-or-create).
+ *
+ * A disposition that can create or truncate (anything but OPEN_EXISTING) changes
+ * the file system before the handle exists, so the final-path check after the
+ * open would come too late: a junction planted in the folder above the leaf, or a
+ * link at the leaf itself, would already have created or emptied a file outside
+ * the root. Such an open is therefore checked first: the folder that will hold
+ * the leaf is opened and its final path verified, a leaf that is already a reparse
+ * point is refused, and the open itself passes FILE_FLAG_OPEN_REPARSE_POINT so a
+ * link swapped in at the leaf is acted on as the link object inside the root,
+ * never followed. A junction swapped in above the leaf between the folder check
+ * and the open is the same residual window sr_vfs_mkdirs_contained documents; the
+ * final-path check below still refuses that handle. */
+static inline int sr_vfs_create_target_is_contained(wchar_t *wpath, const wchar_t *canonical_root) {
+    wchar_t *sep = wcsrchr(wpath, L'\\');
+    if (!sep || sep == wpath || sep[1] == L'\0') return 0;
+    *sep = L'\0';
+    int parent_ok = sr_vfs_dir_is_contained_wide(wpath, canonical_root);
+    *sep = L'\\';
+    if (!parent_ok) return 0;
+    DWORD attrs = GetFileAttributesW(wpath);
+    return attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+}
+
 static inline int sr_vfs_open_contained_utf8(const char *path_utf8, DWORD desired_access,
                                              DWORD flags, DWORD disposition,
                                              const wchar_t *canonical_root, HANDLE *out) {
@@ -404,6 +426,14 @@ static inline int sr_vfs_open_contained_utf8(const char *path_utf8, DWORD desire
     MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path_utf8, -1, wpath, need);
     for (wchar_t *p = wpath; *p; p++) if (*p == L'/') *p = L'\\';
 
+    const int mutating = disposition != OPEN_EXISTING;
+    if (mutating) {
+        if (!sr_vfs_create_target_is_contained(wpath, canonical_root)) {
+            free(wpath);
+            return 0;
+        }
+        flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+    }
     HANDLE h = CreateFileW(wpath, desired_access,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            NULL, disposition, flags, NULL);
@@ -412,6 +442,16 @@ static inline int sr_vfs_open_contained_utf8(const char *path_utf8, DWORD desire
     if (!sr_vfs_handle_is_contained(h, canonical_root)) {
         CloseHandle(h);
         return 0;
+    }
+    if (mutating) {
+        /* A link that appeared at the leaf after the check was opened as itself;
+         * refuse it rather than hand a link object to a reader or writer. */
+        BY_HANDLE_FILE_INFORMATION info;
+        if (!GetFileInformationByHandle(h, &info) ||
+            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            CloseHandle(h);
+            return 0;
+        }
     }
     *out = h;
     return 1;

@@ -730,6 +730,17 @@ static int sd_win_open(const SavedataDir *d, const char *name, DWORD access, DWO
     if (!wpath) return 0;
     MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wpath, need);
     for (wchar_t *p = wpath; *p; p++) if (*p == L'/') *p = L'\\';
+    /* A create or truncate acts before the handle exists: check where it lands first, and never
+     * follow a link at the leaf (sr_vfs_open_contained_utf8 has the full rule). */
+    const int mutating = disposition != OPEN_EXISTING;
+    if (mutating) {
+        if (!sr_vfs_create_target_is_contained(wpath, d->canonical_root)) {
+            free(wpath);
+            if (err) *err = ERROR_ACCESS_DENIED;
+            return 0;
+        }
+        flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+    }
     HANDLE h = CreateFileW(wpath, access, share, NULL, disposition, flags, NULL);
     DWORD open_err = h == INVALID_HANDLE_VALUE ? GetLastError() : 0;
     free(wpath);
@@ -737,7 +748,10 @@ static int sd_win_open(const SavedataDir *d, const char *name, DWORD access, DWO
         if (err) *err = open_err;
         return 0;
     }
-    if (!sr_vfs_handle_is_contained(h, d->canonical_root)) {
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!sr_vfs_handle_is_contained(h, d->canonical_root) ||
+        (mutating && (!GetFileInformationByHandle(h, &info) ||
+                      (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0))) {
         CloseHandle(h);
         if (err) *err = ERROR_ACCESS_DENIED;
         return 0;
