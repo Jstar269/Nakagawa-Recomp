@@ -2917,6 +2917,38 @@ class MachinePortabilityTests(unittest.TestCase):
         flagged = {f.path for f in findings if "SilentlyContinue" in f.detail}
         self.assertEqual(flagged, {"tools/copy_build_assets.ps1", "unlisted.ps1"})
 
+    def test_the_manager_keeps_its_powershell_debt_ceiling_under_tools(self) -> None:
+        """The audit of a tree that has moved nk_manager.ps1 into tools/ applies the same ceiling.
+
+        The trusted audit of a pull request is the default branch's copy, so the new path has to
+        be known before the move lands; a tree that holds the script at both paths is over the
+        total.
+        """
+        import tempfile
+
+        import publish_audit
+
+        ceiling = publish_audit.POWERSHELL_SILENTLY_CONTINUE_INVENTORY["nk_manager.ps1"]
+        line = "Get-Item x -ErrorAction SilentlyContinue\n"
+
+        def flagged(files: dict[str, int]) -> set[str]:
+            with tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                (root / "tools").mkdir()
+                for rel, uses in files.items():
+                    (root / rel).write_text(line * uses, encoding="utf-8")
+                findings = publish_audit._debt_budget_findings(root, sorted(files))
+            return {f.path for f in findings if "SilentlyContinue" in f.detail}
+
+        self.assertEqual(flagged({"tools/nk_manager.ps1": ceiling}), set())
+        self.assertEqual(flagged({"tools/nk_manager.ps1": ceiling + 1}), {"tools/nk_manager.ps1"})
+        self.assertEqual(flagged({"tools/other_manager.ps1": 1}), {"tools/other_manager.ps1"})
+        both = dict(publish_audit.POWERSHELL_SILENTLY_CONTINUE_INVENTORY)
+        self.assertEqual(flagged(both), set())
+        both["tools/nk_manager.ps1"] = ceiling
+        self.assertTrue(flagged(both),
+                        "the total ceiling must hold a tree that keeps the script at both paths")
+
     def test_no_tracked_file_names_the_root_level_copy_build_assets_path(self) -> None:
         """A relocation is complete only when nothing still names the old path.
 

@@ -202,6 +202,14 @@ POWERSHELL_SILENTLY_CONTINUE_INVENTORY: dict[str, int] = {
     "tools/vulkan_sdk.ps1": 1,
 }
 
+#: A script that is moving keeps its ceiling at its new path. The trusted audit of a pull
+#: request is the default branch's copy, so the new path has to be known here before the
+#: move lands; the move itself renames the inventory key, empties this map and renames the
+#: "nk_manager.ps1" label the total-ceiling finding carries in ``_debt_budget_findings``.
+POWERSHELL_SILENTLY_CONTINUE_MOVES: dict[str, str] = {
+    "tools/nk_manager.ps1": "nk_manager.ps1",
+}
+
 # A `uses:` key, not the tail of another key such as `statuses: write`.
 ACTION_USE = re.compile(r"(?<![\w-])uses:\s*([^\s#]+)")
 FULL_SHA_ACTION = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*@[0-9a-fA-F]{40}$")
@@ -1890,7 +1898,8 @@ def _debt_budget_findings(repo_root: Path = ROOT, paths: list[str] | None = None
             continue
         script_count = len(ps_pat.findall(text))
         ps_count += script_count
-        script_ceiling = POWERSHELL_SILENTLY_CONTINUE_INVENTORY.get(rel, 0)
+        script_ceiling = POWERSHELL_SILENTLY_CONTINUE_INVENTORY.get(
+            POWERSHELL_SILENTLY_CONTINUE_MOVES.get(rel, rel), 0)
         if script_count > script_ceiling:
             findings.append(
                 Finding("DEBT_BUDGET", rel,
@@ -2256,7 +2265,7 @@ def _default_provenance(
 
     # android/ is the Android host target (#360): Gradle, NDK, Java and manifest
     # sources of the same project, admitted like any other path.
-    if rel_path.startswith(("src/", "tools/", "mk/", "assets/", "fixtures/", "docs/", "android/")) or ext in SOURCE_EXTENSIONS or ext in (".md", ".txt", ".json", ".jsonc", ".yml", ".yaml", ".toml", ".ps1", ".glsl") or rel_path in ("Makefile", "pyproject.toml", "nk.ps1", "nk_manager.ps1"):
+    if rel_path.startswith(("src/", "tools/", "mk/", "assets/", "fixtures/", "tests/fixtures/", "docs/", "android/")) or ext in SOURCE_EXTENSIONS or ext in (".md", ".txt", ".json", ".jsonc", ".yml", ".yaml", ".toml", ".ps1", ".glsl") or rel_path in ("Makefile", "pyproject.toml", "nk.ps1", "nk_manager.ps1"):
         gen_kind = "documentation" if (rel_path.startswith("docs/") or ext == ".md") else ("data" if ext in (".json", ".jsonc", ".dat") else ("script" if ext in (".ps1", ".sh") else "source"))
         return "project_authored", "GPL-2.0-or-later", "NOTICE.md", gen_kind, "included", policy_public
 
