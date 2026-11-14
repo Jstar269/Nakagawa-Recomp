@@ -9,6 +9,7 @@ import ast
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 import shlex
 import shutil
@@ -3064,12 +3065,21 @@ class MachinePortabilityTests(unittest.TestCase):
             "tools/test_provenance_ledger.py",
             "tools/test_build_truth.py",
         })
+        # A relative climb is qualified when it lands on the tree from where the file is
+        # (tests/native/x.c may say ../fixtures/).
+        climb = re.compile(r"((?:\.\./)+)$")
         offenders = []
         for entry, text in self._tracked_texts(allowed):
             for match in mention.finditer(text):
-                if not qualified.search(text[max(0, match.start() - 32):match.start()]):
-                    offenders.append(f"{entry}:{text.count(chr(10), 0, match.start()) + 1}")
-                    break
+                window = text[max(0, match.start() - 32):match.start()]
+                if qualified.search(window):
+                    continue
+                up = climb.search(window)
+                if up and posixpath.normpath(
+                        posixpath.join(posixpath.dirname(entry), up.group(1), "fixtures")) == "tests/fixtures":
+                    continue
+                offenders.append(f"{entry}:{text.count(chr(10), 0, match.start()) + 1}")
+                break
         self.assertEqual(offenders, [], "these tracked files still name a fixture folder at the repository root")
 
     def test_windows_package_build_uses_builtin_windows_powershell(self) -> None:
