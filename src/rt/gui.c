@@ -536,6 +536,7 @@ static void gui_render_fallback_presented(int accepted) {
  * while the game runs (render_fallback above) is named on the game's page, not here. */
 typedef struct {
     NkRenderFallback fallback;   /* what the run reported at start; NONE: nothing to say */
+    int unavailable;             /* this run cannot draw it (no in-game UI): said once at start */
     int dismissed;               /* the person hid it, for the rest of the run */
 } RenderNotice;
 
@@ -565,19 +566,20 @@ static int render_notice_words(NkRenderFallback fallback, const char **head, con
     }
 }
 
-/* Whether the notice is drawn now: there is one, the person has not hidden it, and no on-screen
- * keyboard is open (the keyboard stands where the notice would). */
+/* Whether the notice is drawn now: there is one, this run can draw it, the person has not hidden
+ * it, and no on-screen keyboard is open (the keyboard stands where the notice would). */
 static int render_notice_shows(const RenderNotice *n, int keyboard_open) {
     const char *head, *text, *hint;
-    return !n->dismissed && !keyboard_open &&
+    return !n->unavailable && !n->dismissed && !keyboard_open &&
            render_notice_words(n->fallback, &head, &text, &hint);
 }
 
-/* The person hides the notice: 1 when there was one to hide. A run with nothing to say stays as
- * it is, so nothing is hidden before it could show. */
+/* The person hides the notice: 1 when there was one to hide. A run with nothing to say, or one
+ * that could not draw it, stays as it is: nothing is reported hidden that never showed. */
 static int render_notice_dismiss(RenderNotice *n) {
     const char *head, *text, *hint;
-    if (n->dismissed || !render_notice_words(n->fallback, &head, &text, &hint)) return 0;
+    if (n->unavailable || n->dismissed || !render_notice_words(n->fallback, &head, &text, &hint))
+        return 0;
     n->dismissed = 1;
     return 1;
 }
@@ -1325,13 +1327,14 @@ static void gui_report_render_path(bool vulkan_asked, bool vulkan_started, bool 
     /* The same fact goes over the picture (#2151). On the Vulkan presenter the UI pass draws it:
      * the UI is made here, at start, unless an Ace run made it already, so no present pays for
      * it. A run that cannot make it says so; the boot event above still carries the fact. */
+    memset(&s_render_notice, 0, sizeof(s_render_notice));
     s_render_notice.fallback = path.fallback;
-    s_render_notice.dismissed = 0;
     if (!render_notice_shows(&s_render_notice, 0)) return;
 #ifdef SR_SDL3VK
     if (path.vulkan && !s_ui_ready) {
         char error[256] = "";
         if (!gui_ui_create(error, sizeof(error))) {
+            s_render_notice.unavailable = 1;
             fprintf(stderr, "RENDER_NOTICE: fallback=%s is not shown over the picture: the in-game "
                             "UI is unavailable (%s)\n", nk_render_fallback_name(path.fallback), error);
             return;
@@ -3644,6 +3647,14 @@ static void selftest_render_notice(void) {
     assert(render_notice_dismiss(&n) && n.dismissed);
     assert(!render_notice_shows(&n, 0) && !render_notice_dismiss(&n));
     assert(n.fallback == NK_RENDER_FALLBACK_SOFTWARE_GE);
+
+    /* A run that could not make the in-game UI draws nothing, and a pause there hides nothing:
+     * no "hidden" is reported for a notice that never showed. */
+    memset(&n, 0, sizeof(n));
+    n.fallback = NK_RENDER_FALLBACK_SOFTWARE_GE;
+    n.unavailable = 1;
+    assert(!render_notice_shows(&n, 0));
+    assert(!render_notice_dismiss(&n) && !n.dismissed);
 }
 
 #ifdef _WIN32

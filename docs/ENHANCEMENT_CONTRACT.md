@@ -2309,7 +2309,8 @@ or off: it is a host-window fact, and it changes no guest byte, no capture and n
   boot event and the game's page keep the fact. There is no setting and no environment switch.
 - **When it cannot be drawn.** A run that cannot make the in-game UI (no UI fonts, no SDL3_ttf, a Vulkan object that
   cannot be made) prints `RENDER_NOTICE: fallback=<name> is not shown over the picture: the in-game UI is
-  unavailable (<reason>)`, and a GDI window too small for one line prints that the notice could not be drawn. A
+  unavailable (<reason>)` and reports nothing hidden at a later pause, and a GDI window too small for one line
+  prints that the notice could not be drawn. A
   host with neither presenter has no window to draw on and reports `window_unavailable`. A run that shows it
   prints `RENDER_NOTICE: fallback=<name> is shown over the picture until hidden`, and
   `RENDER_NOTICE: hidden for the rest of this run` when the person hides it.
