@@ -219,6 +219,17 @@ void player_app_set_runtime_root(PlayerApp *app, const char *root) {
     player_app_runtime_package_cache_invalidate(app);
 }
 
+void player_app_set_install_root(PlayerApp *app, const char *root) {
+    if (!app) return;
+    snprintf(app->install_root, sizeof(app->install_root), "%s", root ? root : "");
+    /* player_app_init has already synchronized the library with no install root, so a title
+       whose only package is a shipped one was read as having none unless NK_INSTALL_ROOT or
+       the working directory named the source tree. Which package a title launches can change
+       here, so the cached package results go too, as in a library synchronization. */
+    player_app_refresh_title_enhancements(app);
+    player_app_runtime_package_cache_invalidate(app);
+}
+
 void player_app_runtime_package_cache_invalidate(PlayerApp *app) {
     if (!app) return;
     memset(app->runtime_package_cache, 0,

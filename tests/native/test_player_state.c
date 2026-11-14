@@ -8859,6 +8859,74 @@ static void test_play_mode_settings(void) {
         remove(file);
         player_app_refresh_title_enhancements(app);
         assert(!app->title_enhancements[1].available);
+        /* The executable's folder alone finds the shipped packages: NK_INSTALL_ROOT unset and a
+           working directory outside the source tree, which is how an installed player starts.
+           The library is synchronized before that folder is known (player_app_init), so the
+           title has no package until player_app_set_install_root records the folder; that call
+           reads the files again and re-selects what the title launches. Both layouts are
+           covered, <checkout>/build and the release's bin/ beside source/, and both kinds of
+           package. */
+        {
+            char cwd[NK_MAX_PATH], elsewhere[800], exe_dir[860], rel[760], cull[900];
+            assert(nk_ps_getcwd(cwd, sizeof(cwd)) != NULL);
+            snprintf(elsewhere, sizeof(elsewhere), "%s%cshipped_cwd", root, sep);
+            assert(nk_platform_mkdir_p(elsewhere));
+            nk_ps_set_env("NK_INSTALL_ROOT", NULL);
+            assert(nk_ps_chdir(elsewhere) == 0);
+            player_app_cycle_title_play_mode(app, 1);
+            player_app_cycle_title_play_mode(app, 1);
+            assert(player_app_title_play_mode(app, 1) == PLAYER_PLAY_ENHANCED);
+            player_app_set_experimental_60hz_session(app, true);
+            for (int layout = 0; layout < 2; layout++) {
+                if (layout == 0) {
+                    snprintf(exe_dir, sizeof(exe_dir), "%s%cbuild%c", src_root, sep, sep);
+                } else {
+                    snprintf(rel, sizeof(rel), "%s%cshipped_rel", root, sep);
+                    snprintf(exe_dir, sizeof(exe_dir), "%s%cbin%c", rel, sep, sep);
+                    snprintf(dir, sizeof(dir), "%s%csource%ctools", rel, sep, sep);
+                    assert(nk_platform_mkdir_p(dir));
+                    snprintf(file, sizeof(file), "%s%cnk_cli.py", dir, sep);
+                    write_text_file(file, "# fixture\n");
+                    snprintf(dir, sizeof(dir), "%s%csource%cassets%cenhancements", rel, sep, sep,
+                             sep);
+                    assert(nk_platform_mkdir_p(dir));
+                    snprintf(file, sizeof(file), "%s%ctest90002-60hz.json", dir, sep);
+                }
+                assert(nk_platform_mkdir_p(exe_dir));
+                snprintf(cull, sizeof(cull), "%s%ctest90002-cull.json", dir, sep);
+                write_text_file(file,
+                    "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\"}");
+                write_text_file(cull,
+                    "{\"id\": \"shipped-cull\", \"target_title_id\": \"fixture-title-2\","
+                    " \"category\": \"guest_memory_code_hook\"}");
+                /* As at start-up: synchronized with no install root, nothing is found. */
+                app->install_root[0] = '\0';
+                player_app_refresh_title_enhancements(app);
+                assert(!player_app_shipped_enhancements_root(app, found, sizeof(found)));
+                assert(!app->title_enhancements[1].available &&
+                       !app->title_enhancements[1].cull_available);
+                assert(app->games[1].enhancement_package_id[0] == '\0');
+                player_app_set_install_root(app, exe_dir);
+                assert(player_app_shipped_enhancements_root(app, found, sizeof(found)) &&
+                       strstr(found, layout == 0 ? "shipped_src" : "shipped_rel"));
+                assert(app->title_enhancements[1].available && app->title_enhancements[1].shipped &&
+                       strcmp(app->title_enhancements[1].package_id, "shipped-60hz") == 0);
+                assert(app->title_enhancements[1].cull_available &&
+                       app->title_enhancements[1].cull_shipped &&
+                       strcmp(app->title_enhancements[1].cull_package_id, "shipped-cull") == 0);
+                assert(strcmp(app->games[1].enhancement_package_id, "shipped-60hz") == 0);
+                remove(file);
+                remove(cull);
+            }
+            /* An unknown folder clears it: nothing is found, and the title launches authentic. */
+            player_app_set_install_root(app, NULL);
+            assert(app->install_root[0] == '\0' && !app->title_enhancements[1].available &&
+                   app->games[1].enhancement_package_id[0] == '\0');
+            player_app_set_experimental_60hz_session(app, false);
+            player_app_cycle_title_play_mode(app, 1);
+            assert(player_app_title_play_mode(app, 1) == PLAYER_PLAY_LIBRARY);
+            assert(nk_ps_chdir(cwd) == 0);
+        }
         restore_environment_value("NK_INSTALL_ROOT", saved_install, had_install);
         free(saved_install);
         app->games[1].title_id[0] = '\0';
