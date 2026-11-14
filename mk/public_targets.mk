@@ -133,6 +133,7 @@ PUBLIC_TARGETS := \
 	fp-convert-selftest \
 	ge-float24-selftest \
 	ge-cpu-profile-validate-selftest \
+	ge-vertex-cache-mutants \
 	ge-tnl-census-selftest \
 	xr-selftest \
 	ge-patch-tess-selftest \
@@ -354,6 +355,7 @@ HELP_DESCRIPTION_asset-index-selftest := run the asset-index selftest
 HELP_DESCRIPTION_fp-convert-selftest := run the FPU conversion selftest
 HELP_DESCRIPTION_ge-float24-selftest := run the GE float24/row-sum/reciprocal reference selftest
 HELP_DESCRIPTION_ge-cpu-profile-validate-selftest := run the GE CPU-profile validator selftest on the production GE object
+HELP_DESCRIPTION_ge-vertex-cache-mutants := prove the GE CPU-profile selftest kills four broken per-draw vertex caches (no epoch, no address check, VRAM vertices cached, cached while rendering to RAM)
 HELP_DESCRIPTION_ge-tnl-census-selftest := run the GPU T&L decline census selftest (#318) on the production GE object
 HELP_DESCRIPTION_xr-selftest := run the OpenXR (VR) module selftest (#791) against a fake OpenXR runtime: no headset or loader needed
 HELP_DESCRIPTION_ge-patch-tess-selftest := run the finer Bezier and spline patch selftest on the production GE object (no GPU)

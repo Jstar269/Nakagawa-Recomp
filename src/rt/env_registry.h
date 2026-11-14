@@ -115,6 +115,7 @@
     X("SR_GE_STRIP_CACHE_DISABLE", "flag-nonzero", "off (strip cache enabled)", "ge.c", "When nonzero, disables the GE strip cache.") \
     X("SR_GE_TIMING", "string", "off (enabled only when exactly \"1\")", "hle.c", "Set to 1 to turn on the measured GE time model and print a GE_TIMING banner.") \
     X("SR_GE_TRANSITION_TRACE", "path", "off", "ge.c", "Writes a GE transition trace to this file; 1 uses a default log path and 0 or empty disables it.") \
+    X("SR_GE_VERTEX_CACHE_DISABLE", "flag-nonzero", "off (vertex cache enabled)", "ge.c", "When nonzero, disables the GE per-draw transformed-vertex cache.") \
     X("SR_GLYPHS", "string", "unset", "ace.c", "Retired (sharp game text is the SR_ACE line's glyphs=on key): any non-empty value refuses the run at start with a line that names the key.") \
     X("SR_GPU_CAPTURE_TERMINAL_CASE", "string", "unset: lifecycle self-test runs", "gpu_sdl3vk/sdl3vk.c", "Names a terminal-fault case for the GPU capture self-test; when set, the lifecycle self-test is skipped.") \
     X("SR_GPU_COHERENCE_CASE", "string", "unset (run all cases)", "gpu_sdl3vk/ge_gpu.c", "Restricts the GPU coherence self-test to one case; scaled-upload, mip-lod or readback-rows.") \

@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **529** (declared in `recomp.h`: 452)
-- reach class: emitter-reached 95, production-runtime-only 393, selftest-only 0, address-only 8, none 33
-- provenance class of the home definition: declared-only 1, project_authored_attested 38, upstream_derived 490
+- helpers: **531** (declared in `recomp.h`: 454)
+- reach class: emitter-reached 96, production-runtime-only 394, selftest-only 0, address-only 8, none 33
+- provenance class of the home definition: declared-only 1, project_authored_attested 40, upstream_derived 490
 
 ## Helpers
 
@@ -416,6 +416,8 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_module_code_fnv1a64` | `rt/guest_interp.c` | yes | production-runtime-only | `rt/guest_interp.c`: project_authored_attested |
 | `sr_module_code_is_bound` | `rt/guest_interp.c` | yes | production-runtime-only | `rt/guest_interp.c`: project_authored_attested |
 | `sr_module_code_lookup` | `rt/guest_interp.c` | yes | production-runtime-only | `rt/guest_interp.c`: project_authored_attested |
+| `sr_module_code_non_code` | `rt/guest_interp.c` | yes | production-runtime-only | `rt/guest_interp.c`: project_authored_attested |
+| `sr_module_code_non_code_register` | `rt/guest_interp.c` | yes | emitter-reached (direct) | `rt/guest_interp.c`: project_authored_attested |
 | `sr_module_code_register` | `rt/guest_interp.c` | yes | emitter-reached (direct) | `rt/guest_interp.c`: project_authored_attested |
 | `sr_module_code_reset` | `rt/guest_interp.c` | yes | none | `rt/guest_interp.c`: project_authored_attested |
 | `sr_module_code_sha256` | `rt/hle_kernel_module.c` | yes | production-runtime-only | `rt/hle_kernel_module.c`: upstream_derived |
