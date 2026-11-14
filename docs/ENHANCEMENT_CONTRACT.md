@@ -1400,7 +1400,10 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   anything is made or written there, the folder is checked as a texture pack folder is (`sr_texdump_folder_problem`):
   strict UTF-8, a full path on this host (`nk_platform_path_is_absolute`), shorter than 512 bytes (the length a pack
   folder may have, so the folder can be chosen as the pack as it is), and no Windows device or extended namespace
-  (`\\.\`, `\\?\`); a refusal says which, without naming the path. A texture
+  (`\\.\`, `\\?\`); a refusal says which, without naming the path. What is written is always the game's own
+  texture, decoded from guest memory and named by its own content: a texture drawn from a scaled copy, a softened
+  copy (soft shadows, section 10.23) or a pack's image is dumped as the stock texture under the stock name, the
+  file a pack would replace, never the copy or the image the frame shows. A texture
   already in the cache is written the next time it is drawn. A folder without a `textures.ini` gets one first
   (`hash = quick`, and a `[games]` line for the run's `SR_DISC_ID`, so the player knows whose pack it is; the reader
   takes a line that names `textures.ini` itself as the game list, not as an override), and the folder is then read as
@@ -1566,7 +1569,11 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   themselves: each runs once, on a worker thread, never the submitter's, and knows it is on one; held jobs stay
   queued with nobody waiting; the bounded wait gives up on a held job after its time; the 64 slots and the
   host-memory cap refuse the next job; scale and work results are taken apart; a sync submit runs before it
-  returns.
+  returns. `gpu-coherence-selftest`'s `soft-shadow` case, in each run with the part on (scales 1 and 4, xBRZ off
+  and at every factor), dumps a declared texture drawn with soft shadows and xBRZ off and again, after the guest
+  rewrites it, drawn from its softened copy: both files have the stock name and the same bytes, and read back as
+  the texture's own texels; a
+  texture a pack lists, drawn from the pack's image, is dumped as the game's own texels.
   `fbcap-selftest` checks the folder name, the folder check (ill-formed UTF-8 of each kind, a relative and, on
   Windows, a drive-relative path, 511 bytes taken and 512 refused, device and extended paths), the PNG encoder
   against the project's own inflater (`nk_psp_inflate.c`) and within `sr_png_encode_bound` (noise of 9-bit literals

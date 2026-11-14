@@ -1018,7 +1018,8 @@ asset-index-selftest:
 # off`, which writes its stock and part-off frames' hashes to a reference file), with two synthetic
 # discs declared, CLUT4 and 4444 (`on`: soft edges, stock interiors, an undeclared disc as with the
 # part off, guest VRAM untouched, a freed copy made again without a second hash, the copy's size
-# change when the guest rewrites a texture, a replacement pack before a soft copy) and with the key
+# change when the guest rewrites a texture, a replacement pack before a soft copy, a texture dump
+# writing the stock texture beside a soft copy and a pack) and with the key
 # but nothing declared (`undeclared`: the part unavailable); both later runs draw the off run's
 # frames. It runs again with xBRZ on (`--tex-scale`) at every factor the scaler takes, off and on
 # at scale 1 (undeclared too at 2) and at factor 4 at scale 4: a declared disc stays the soft frame
