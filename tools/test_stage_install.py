@@ -358,7 +358,8 @@ class AppIdentityTests(unittest.TestCase):
 
     def test_launcher_sets_the_identity_before_anything_else_in_main(self):
         # The launcher's process takes the shared ID (player_host.c) as main()'s first act after
-        # the UTF-8 setup, before any window or SDL message box can open under another ID.
+        # the UTF-8 setup, before any window or SDL message box can open under another ID. Only
+        # the library-search limit comes before both: it must precede every run-time load.
         host = (stage_install.ROOT / "src" / "player" / "player_host.c").read_text(encoding="utf-8")
         body = host[host.index("void player_host_set_app_identity(void) {"):]
         body = body[:body.index("\n}\n")]
@@ -369,8 +370,10 @@ class AppIdentityTests(unittest.TestCase):
         calls = [line.strip() for line in start.splitlines()[1:]
                  if line.strip() and not line.strip().startswith(("/*", "*", "//"))
                  and not line.strip().endswith("*/")]
-        self.assertEqual(calls[:2], ["(void)nk_platform_init_utf8_main(&argc, &argv);",
-                                     "player_host_set_app_identity();"])
+        self.assertEqual(calls[:3], [
+            "const bool library_search_hardened = nk_platform_harden_library_search();",
+            "(void)nk_platform_init_utf8_main(&argc, &argv);",
+            "player_host_set_app_identity();"])
 
     def test_shortcut_path_reaches_the_shell_with_backslashes(self):
         # MSYS2's Python joins paths with '/', and the shell's property store refuses those.

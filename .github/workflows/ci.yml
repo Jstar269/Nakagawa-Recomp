@@ -2834,6 +2834,16 @@ jobs:
           py="$(cygpath -u "$PYTHON")"
           PYTHONPATH=tools "$py" -m unittest -v test_flash0_font
 
+      # tests/native/vfs_selftest.c holds the Win32 half of the Memory Stick containment checks
+      # (a junction and a hard link inside the root, creates and truncates through them); the
+      # python_tools shards run the same module on Linux, where that half is compiled out.
+      - name: Build and run the Win32 Memory Stick containment selftest
+        if: contains(matrix.parts, 'selftests')
+        shell: msys2 {0}
+        run: |
+          py="$(cygpath -u "$PYTHON")"
+          PYTHONPATH=tools "$py" -m unittest -v test_vfs_c
+
       # The Windows build decodes H.264 through Media Foundation (src/rt/h264_mf.c), so this
       # runs the source-authored PSMF/H.264 fixture on that backend (#283); native_tools runs
       # the same fixture on the vendored FFmpeg subset. When no decoder instance can be

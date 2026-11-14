@@ -1354,11 +1354,18 @@ class TestSavedataSecurityShape(unittest.TestCase):
             windows = code.split("#ifdef _WIN32", 1)[1].split("#el", 1)[0]
             self.assertTrue("sr_vfs_open_contained_utf8" in windows or "sd_win_open(" in windows, marker)
             self.assertNotIn("fopen(", windows, marker)
-        # sd_win_open is the transaction's own verified open: OPEN -> HANDLE -> FINAL PATH VERIFY.
+        # sd_win_open is the transaction's own verified open: OPEN -> HANDLE -> FINAL PATH VERIFY,
+        # through the opener it shares with the Memory Stick VFS (src/rt/vfs_path.h).
         start = text.index("static int sd_win_open")
         opener = text[start:text.index("static int sd_win_not_found", start)]
-        self.assertIn("CreateFileW(", opener)
-        self.assertIn("sr_vfs_handle_is_contained(h, d->canonical_root)", opener)
+        self.assertIn("sr_vfs_open_verified_wide(", opener)
+        self.assertIn("d->canonical_root", opener)
+        vfs_path = (ROOT / "src" / "rt" / "vfs_path.h").read_text(encoding="utf-8")
+        start = vfs_path.index("static inline HANDLE sr_vfs_open_verified_wide")
+        shared = vfs_path[start:vfs_path.index("\n}\n", start)]
+        self.assertIn("CreateFileW(", shared)
+        self.assertIn("sr_vfs_handle_is_contained(h, canonical_root)", shared)
+        self.assertIn("nNumberOfLinks != 1", shared)
 
 
 @unittest.skipUnless(CC, "no C compiler on PATH")

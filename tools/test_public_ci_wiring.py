@@ -807,6 +807,7 @@ _WINDOWS_SERIAL_GATES = {
     "Build and run strbuf checked-append formatting selftest": "CC=gcc VULKAN_SDK=/ucrt64 strbuf-selftest",
     "Build and run HLE thread selftest": "CC=gcc VULKAN_SDK=/ucrt64 hle-thread-selftest",
     "Build and run flash0 font device selftest": 'PYTHONPATH=tools "$py" -m unittest -v test_flash0_font',
+    "Build and run the Win32 Memory Stick containment selftest": 'PYTHONPATH=tools "$py" -m unittest -v test_vfs_c',
     "Build and run the Media Foundation H.264 media selftest": "CC=gcc VULKAN_SDK=/ucrt64 psmf-media-selftest",
     "Build and run the vendored FFmpeg H.264 media selftest on Windows":
         "CC=gcc VULKAN_SDK=/ucrt64 H264_FFMPEG=1 psmf-media-selftest",
