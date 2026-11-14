@@ -2837,7 +2837,7 @@ jobs:
       # tests/native/vfs_selftest.c holds the Win32 half of the Memory Stick containment checks
       # (a junction and a hard link inside the root, creates and truncates through them); the
       # python_tools shards run the same module on Linux, where that half is compiled out.
-      - name: Run the Win32 Memory Stick containment selftest
+      - name: Build and run the Win32 Memory Stick containment selftest
         if: contains(matrix.parts, 'selftests')
         shell: msys2 {0}
         run: |
