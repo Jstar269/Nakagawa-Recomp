@@ -82,6 +82,29 @@ class ModifiedFileNoticeAuditTests(unittest.TestCase):
         self.assertIn("src/sample.c: explicit modified-file notice is absent", findings)
         self.assertIn("src/sample.c: provenance pointer is absent", findings)
 
+    def test_fails_when_the_gpl2_text_lacks_its_markers(self) -> None:
+        root, manifest = self._fixture(
+            "// SPDX-License-Identifier: GPL-2.0-or-later\n"
+            "// Derived from sal063/PSP-recompilation-project (GPL-2.0-or-later)\n"
+            "// Modified by Nakagawa Recomp contributors, 2026-08-11.\n"
+            "// See NOTICE.md for upstream lineage and modification provenance.\n"
+        )
+        finding = "third_party/licenses/GPL-2.0.txt does not contain GPLv2 text markers"
+        self.assertNotIn(finding, audit(root, manifest, tracked_only=False)[0])
+        # Each of the three markers is required; every sample lacks exactly one of them: the
+        # version line (a GPLv3 text), the scope sentence, the title.
+        for text in (
+            "GNU GENERAL PUBLIC LICENSE\nVersion 3, 29 June 2007\n"
+            "This License applies to any program or other work\n",
+            "GNU GENERAL PUBLIC LICENSE\nVersion 2, June 1991\n",
+            "Version 2, June 1991\nThis License applies to any program or other work\n",
+        ):
+            with self.subTest(text=text):
+                (root / "third_party/licenses/GPL-2.0.txt").write_text(text, encoding="utf-8")
+                findings, _ = audit(root, manifest, tracked_only=False)
+                self.assertIn(finding, findings)
+                self.assertNotIn("LICENSE does not contain the repository GPL-3.0 text markers", findings)
+
 
 if __name__ == "__main__":
     unittest.main()
