@@ -292,7 +292,10 @@ struct PlayerUiNk {
     bool icon_reported[PLAYER_UI_TITLE_CAP];
     char status_reported[PLAYER_UI_TITLE_CAP][32]; /* the status word last printed */
     char play_reported[PLAYER_UI_TITLE_CAP][16];   /* the play mode badge last printed */
-    char enhanced_reported[512];                    /* Settings > Enhanced as last printed */
+    /* Settings > Enhanced as last printed: the title, mode and sentence, then "|key=value" for each
+       part, whose value is at most enhanced_values' 48 bytes. Sized by the part count, so one more
+       part cannot cut the line short. */
+    char enhanced_reported[PLAYER_PART_COUNT * 64 + 256];
     char ace_line_reported[PLAYER_PART_COUNT * 64 + 192]; /* the play line last printed */
     char enhancement_tag_reported[PLAYER_UI_TITLE_CAP][16]; /* the ENHANCEMENTS tag printed */
     char preset_note_reported[200];                /* the main Settings page's preset note */
