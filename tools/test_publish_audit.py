@@ -2633,6 +2633,34 @@ class AndroidTreeMetadataTests(unittest.TestCase):
         prov, *_rest = publish_audit._default_provenance("elsewhere/app/build.gradle.kts", None)
         self.assertEqual(prov, "unclassified")
 
+    def test_fixtures_under_tests_are_project_authored_whatever_their_extension(self):
+        # The fixture tree holds files no extension rule names (a Makefile, assembly import
+        # stubs, golden text, a digest list); under tests/fixtures/ they keep the metadata the
+        # root fixtures/ folder gave them instead of becoming UNCLASSIFIED_PATH findings.
+        for name in ("psp_oracle/Makefile", "psp_oracle/mutex_imports.S", "nk_ui/library.golden",
+                     "profile_zero/prebuilt/SHA256SUMS", "fonts/gudea/Gudea-Regular.ttf"):
+            for folder in ("fixtures/", "tests/fixtures/"):
+                with self.subTest(path=folder + name):
+                    prov, _lic, _notice, _gen, disp, public = publish_audit._default_provenance(
+                        folder + name, None)
+                    self.assertEqual(prov, "project_authored")
+                    self.assertEqual(disp, "included")
+                    self.assertFalse(public, "metadata alone must never make a path public")
+
+    def test_only_the_licence_texts_directly_under_third_party_licenses_are_notice_documents(self):
+        prov, lic, notice, gen, disp, _public = publish_audit._default_provenance(
+            "third_party/licenses/zlib.txt", None)
+        self.assertEqual((prov, lic, notice, gen, disp),
+                         ("notice_doc", "BSD-3-Clause", "third_party/licenses/zlib.txt",
+                          "documentation", "included"))
+        # A text in a subfolder (the DLL licence texts) keeps the general rule's class, and so
+        # does a file that only shares the folder's name as a prefix.
+        for path in ("third_party/licenses/sdl3/LICENSE.txt", "third_party/licenses-old/zlib.txt",
+                     "docs/third_party/licenses/zlib.txt"):
+            with self.subTest(path=path):
+                prov, _lic, notice, *_rest = publish_audit._default_provenance(path, None)
+                self.assertEqual((prov, notice), ("project_authored", "NOTICE.md"))
+
 
 class ExportPolicyDigestTests(unittest.TestCase):
     """A committed export control may declare ``policy_sha256`` or omit it.

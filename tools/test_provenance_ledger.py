@@ -409,6 +409,14 @@ class ProvenanceFailClosedTest(unittest.TestCase):
             "assets/example-lock.json": "reviewed_configuration",
             "db/schema.prisma": "reviewed_configuration",
             "fixtures/psp_oracle/probe.c": "synthetic_fixture",
+            # The fixture tree under tests/ keeps the class the root folder gave it, whatever
+            # the suffix rules below would say (documentation, configuration) or not say.
+            "tests/fixtures/psp_oracle/probe.c": "synthetic_fixture",
+            "tests/fixtures/psp_oracle/README.md": "synthetic_fixture",
+            "tests/fixtures/psp_oracle/ge_corpus.json": "synthetic_fixture",
+            "tests/fixtures/psp_oracle/mutex_imports.S": "synthetic_fixture",
+            "tests/fixtures/nk_ui/library.golden": "synthetic_fixture",
+            "tests/fixtures/fonts/gudea/Gudea-Regular.ttf": "synthetic_fixture",
             "tools/test_gen_nidnames.py": "synthetic_fixture",
             "assets/titles/synthetic.json": "public_factual_metadata",
         }

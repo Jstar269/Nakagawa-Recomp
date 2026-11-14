@@ -21,6 +21,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -1938,6 +1939,32 @@ class HookCheckTest(unittest.TestCase):
         self.assertTrue(hooks["trailing-whitespace"].search("src/core/nk_psp_aes.c"))
         self.assertTrue(hooks["end-of-file-fixer"].search("src/rt/minimp3/LICENSE"))
         self.assertFalse(hooks["end-of-file-fixer"].search("tools/admit_paths.py"))
+
+    def test_the_gudea_licence_keeps_its_recorded_whitespace_under_tests(self) -> None:
+        """The Gudea OFL text is an upstream copy with trailing whitespace on record.
+
+        An admission reads the trusted base's exclusions, so the base has to name the text at
+        ``tests/fixtures/`` before the pull request that moves it there can be admitted.
+        """
+        config = (ROOT / admit_paths.PRE_COMMIT_CONFIG).read_text(encoding="utf-8")
+        _top, hooks = admit_paths.rewriting_hook_exclusions(config)
+        self.assertTrue(hooks["trailing-whitespace"].search("tests/fixtures/fonts/gudea/OFL.txt"))
+        self.assertFalse(hooks["trailing-whitespace"].search("tests/fixtures/fonts/gudea/PIN.json"))
+
+    def test_no_hook_exclusion_names_a_path_the_top_level_exclusion_already_removes(self) -> None:
+        """An alternative behind the top-level ``exclude`` can never match, and reads as a rule that is not one."""
+        config = (ROOT / admit_paths.PRE_COMMIT_CONFIG).read_text(encoding="utf-8")
+        top, hooks = admit_paths.rewriting_hook_exclusions(config)
+        assert top is not None
+        for hook, pattern in sorted(hooks.items()):
+            body = re.fullmatch(r"\^\((.*)\)\$", pattern.pattern)
+            if body is None:
+                continue
+            for alternative in body.group(1).split("|"):
+                sample = alternative.replace(".*", "x").replace("\\", "")
+                with self.subTest(hook=hook, alternative=alternative):
+                    self.assertTrue(pattern.search(sample), "the sample path must be one the alternative matches")
+                    self.assertFalse(top.search(sample))
 
 
 class RecompJsonRegressionTest(unittest.TestCase):
