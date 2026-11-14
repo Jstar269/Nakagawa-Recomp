@@ -7,8 +7,9 @@
    implied (#520). CONTROLLER and KEYBOARD above the cards choose whose bindings the rows
    show; for the keyboard the stick card holds the stick's four keys and names the keys
    Nakagawa keeps, for the controller it chooses the stick (#1299). Every change is saved
-   as it is made. While a guided calibration runs, its step replaces the cards. Under a
-   top bar with SETTINGS active, as the Settings page. */
+   as it is made. While a guided calibration runs, its step replaces the cards, and so do
+   the mouse aiming settings, which MOUSE AIM under the keyboard's stick card opens
+   (#1791). Under a top bar with SETTINGS active, as the Settings page. */
 
 #include "player_ui_nk.h"
 #include "nk_ui_widgets.h"
@@ -40,6 +41,8 @@
 #define PAD_ID_GLYPH_CELLS_SPAN 0x20u
 #define PAD_ID_STEPPERS PAD_ID(0x000280u)     /* + k * 4, + 0-2: a stick card row's parts */
 #define PAD_ID_STEPPERS_SPAN 0x10u
+#define PAD_ID_AIM_ROWS PAD_ID(0x000300u)     /* + k * 4, + 0-3: a mouse aiming row's parts */
+#define PAD_ID_AIM_ROWS_SPAN 0x20u
 #define PAD_ID_TEXT PAD_ID(0x001000u)
 #define PAD_ID_TEXT_SPAN 0x1000u
 
@@ -392,8 +395,149 @@ static void controller_mapping(NkUi *ui, const PlayerUiControllerModel *model, f
             *result = controller_op(PLAYER_UI_CONTROLLER_TOGGLE_SCOPE, 0u);
         }
         nk_ui_spacer(ui, PAD_ID_SPACER, sizing_grow(), sizing_fixed(1.0f));
+        /* Mouse aiming (#1791) is the keyboard and mouse's: under the stick card, whose stick
+           it moves, its button says whether it is on and opens its settings. The card itself
+           has no room for it at the largest text size. */
+        if (model->keyboard &&
+            nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_AIM_OPEN,
+                         safe_text(model->aim, "Mouse aim: Off"), NK_UI_BUTTON_ROW)) {
+            *result = controller_op(PLAYER_UI_CONTROLLER_AIM_OPEN, 0u);
+        }
         if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_BACK, "Back", NK_UI_BUTTON_ROW)) {
             *result = controller_op(PLAYER_UI_CONTROLLER_BACK, 0u);
+        }
+        nk_ui_end_container(ui);
+    }
+    nk_ui_end_container(ui);
+}
+
+/* A mouse aiming row: its control in a cell on the left, then the setting in words. The
+   controls are full height (NK_UI_CONTROL_HEIGHT, the smallest pointer target), not the
+   cards' small inline ones. The cell is as wide in every row, so the controls read as one
+   column, as a Settings page's do, and Up and Down move straight through it: 112 px, or as
+   wide as a larger text size makes the switch's longer word or a stepper's two steps. Left
+   and Right stay in the row. */
+#define PAD_AIM_ROW(k) ((NkUiId)(PAD_ID_AIM_ROWS + (uint32_t)(k) * 4u))
+#define PAD_AIM_CELL_WIDTH 112.0f
+static float controller_aim_cell_width(NkUi *ui) {
+    float word = nk_ui_button_width(ui, "Off", 0u);
+    float steps = 2.0f * nk_ui_button_width(ui, "+", 0u) + NK_UI_SPACE_2;
+    float cell = PAD_AIM_CELL_WIDTH;
+    if (word > cell) cell = word;
+    if (steps > cell) cell = steps;
+    return cell;
+}
+
+/* Opens row k and its control cell. False: nothing is open. */
+static bool controller_aim_row_begin(NkUi *ui, uint32_t k, float cell_width) {
+    NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_3);
+    NkUiLayout cell = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(cell_width), sizing_fit(),
+                                  NK_UI_SPACE_2);
+    row.align_y = NK_UI_ALIGN_CENTER;
+    if (!nk_ui_begin_container(ui, PAD_AIM_ROW(k), &row, NULL)) return false;
+    if (!nk_ui_begin_container(ui, PAD_AIM_ROW(k) + 1u, &cell, NULL)) {
+        nk_ui_end_container(ui);
+        return false;
+    }
+    return true;
+}
+
+/* Closes the control cell, writes the setting's words in the room beside it, and closes
+   the row. */
+static void controller_aim_row_end(NkUi *ui, uint32_t k, const char *words, float room) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->paper);
+    NkUiLayout cell = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), 0.0f);
+    nk_ui_end_container(ui);
+    if (nk_ui_begin_container(ui, PAD_AIM_ROW(k) + 2u, &cell, NULL)) {
+        nk_ui_text(ui, PAD_AIM_ROW(k) + 3u, nk_ui_text_clamp(ui, words, &text, room, 1), &text);
+        nk_ui_end_container(ui);
+    }
+    nk_ui_end_container(ui);
+}
+
+/* A switch: On or Off on the button that changes it, filled while it is on. */
+static void controller_aim_switch(NkUi *ui, uint32_t k, const char *name, bool on, NkUiId id,
+                                  PlayerUiControllerOp op, float cell_width, float width,
+                                  PlayerUiAction *result) {
+    if (!controller_aim_row_begin(ui, k, cell_width)) return;
+    if (nk_ui_button(ui, id, on ? "On" : "Off",
+                     NK_UI_BUTTON_GROW | NK_UI_BUTTON_ROW | (on ? NK_UI_BUTTON_PRIMARY : 0u))) {
+        *result = controller_op(op, 0u);
+    }
+    controller_aim_row_end(ui, k, name, width - cell_width - NK_UI_SPACE_3);
+}
+
+/* A value in words after the - and + steps that change it. */
+static void controller_aim_stepper(NkUi *ui, uint32_t k, const char *value, NkUiId down,
+                                   NkUiId up, PlayerUiControllerOp down_op,
+                                   PlayerUiControllerOp up_op, float cell_width, float width,
+                                   PlayerUiAction *result) {
+    uint32_t flags = NK_UI_BUTTON_GROW | NK_UI_BUTTON_ROW;
+    if (!controller_aim_row_begin(ui, k, cell_width)) return;
+    if (nk_ui_button(ui, down, "-", flags)) *result = controller_op(down_op, 0u);
+    if (nk_ui_button(ui, up, "+", flags)) *result = controller_op(up_op, 0u);
+    controller_aim_row_end(ui, k, value, width - cell_width - NK_UI_SPACE_3);
+}
+
+/* The mouse aiming settings (#1791), in place of the cards while they are open: the switch,
+   the speed and the smoothing in steps, and each direction's inversion, for the mapping the
+   eyebrow names. Every change is saved as it is made; Done returns to the keyboard keys. */
+static void controller_aim(NkUi *ui, const PlayerUiControllerModel *model, float width,
+                           PlayerUiAction *result) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    char eyebrow[160];
+    float card = width - 2.0f * NK_UI_GUTTER_NARROW;
+    float inner;
+    NkUiLayout row;
+    if (card > 720.0f) card = 720.0f;
+    inner = card - 56.0f;
+    if (!nk_ui_dialog_begin(ui, FLOW_ID_CARD, card)) return;
+    (void)snprintf(eyebrow, sizeof(eyebrow), "Mouse aiming" FLOW_MIDDOT "%s",
+                   safe_text(model->scope, "global mapping"));
+    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, eyebrow,
+                     model->scope_title ? theme->ready : theme->accent_dark);
+    nk_ui_text_role(ui, FLOW_ID_TITLE, "Aim with the mouse", NK_UI_TYPE_TITLE, theme->paper);
+    {
+        NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY, theme->muted);
+        nk_ui_text(ui, FLOW_ID_LEAD,
+                   nk_ui_text_clamp(ui,
+                                    "In a game, the mouse pushes the PSP stick and the game "
+                                    "keeps the pointer until you pause. A change applies when "
+                                    "a game next starts.",
+                                    &text, inner, 3),
+                   &text);
+    }
+    if (scr_wizard_box_begin(ui, 0u)) {
+        float rows = inner - 32.0f;
+        float cell = controller_aim_cell_width(ui);
+        controller_aim_switch(ui, 0u, "Mouse aim", model->aim_on,
+                              PLAYER_UI_ID_CONTROLLER_AIM_TOGGLE,
+                              PLAYER_UI_CONTROLLER_AIM_TOGGLE, cell, rows, result);
+        controller_aim_stepper(ui, 1u, safe_text(model->aim_speed, "Speed 100%"),
+                               PLAYER_UI_ID_CONTROLLER_AIM_SPEED_DOWN,
+                               PLAYER_UI_ID_CONTROLLER_AIM_SPEED_UP,
+                               PLAYER_UI_CONTROLLER_AIM_SPEED_DOWN,
+                               PLAYER_UI_CONTROLLER_AIM_SPEED_UP, cell, rows, result);
+        controller_aim_stepper(ui, 2u, safe_text(model->aim_smoothing, "Smoothing 0%"),
+                               PLAYER_UI_ID_CONTROLLER_AIM_SMOOTHING_DOWN,
+                               PLAYER_UI_ID_CONTROLLER_AIM_SMOOTHING_UP,
+                               PLAYER_UI_CONTROLLER_AIM_SMOOTHING_DOWN,
+                               PLAYER_UI_CONTROLLER_AIM_SMOOTHING_UP, cell, rows, result);
+        controller_aim_switch(ui, 3u, "Invert left and right", model->aim_invert_x,
+                              PLAYER_UI_ID_CONTROLLER_AIM_INVERT_X,
+                              PLAYER_UI_CONTROLLER_AIM_INVERT_X, cell, rows, result);
+        controller_aim_switch(ui, 4u, "Invert up and down", model->aim_invert_y,
+                              PLAYER_UI_ID_CONTROLLER_AIM_INVERT_Y,
+                              PLAYER_UI_CONTROLLER_AIM_INVERT_Y, cell, rows, result);
+        nk_ui_end_container(ui);
+    }
+    row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
+    row.padding_top = NK_UI_SPACE_1;
+    if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
+        if (nk_ui_button(ui, PLAYER_UI_ID_CONTROLLER_AIM_DONE, "Done",
+                         NK_UI_BUTTON_PRIMARY | NK_UI_BUTTON_ROW)) {
+            *result = controller_op(PLAYER_UI_CONTROLLER_AIM_DONE, 0u);
         }
         nk_ui_end_container(ui);
     }
@@ -478,7 +622,12 @@ PlayerUiAction player_ui_screen_controller(NkUi *ui, const PlayerUiControllerMod
     static const NkUiPromptItem prompts_calibrating[] = {
         {NK_UI_PROMPT_ACT_CONFIRM, "Select"}, {NK_UI_PROMPT_ACT_BACK, "Cancel"}
     };
+    static const NkUiPromptItem prompts_aim[] = {
+        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Change"},
+        {NK_UI_PROMPT_ACT_BACK, "Back to the keys"}
+    };
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
+    bool aiming;
     bool calibrating;
     NkUiLayout layout;
     float width;
@@ -486,7 +635,8 @@ PlayerUiAction player_ui_screen_controller(NkUi *ui, const PlayerUiControllerMod
     if (ui == NULL || model == NULL) return result;
     width = model->logical_width > 80.0f ? model->logical_width : 1280.0f;
     height = model->logical_height > 80.0f ? model->logical_height : 800.0f;
-    calibrating = model->page != PLAYER_UI_CONTROLLER_PAGE_MAPPING;
+    aiming = model->page == PLAYER_UI_CONTROLLER_PAGE_AIM;
+    calibrating = model->page != PLAYER_UI_CONTROLLER_PAGE_MAPPING && !aiming;
     (void)nk_ui_waves_element(ui, PAD_ID_WAVES, (NkUiRect){0.0f, 0.0f, width, height}, 0u);
     layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_grow(), 0.0f);
     if (!nk_ui_begin_container(ui, PAD_ID_ROOT, &layout, NULL)) return result;
@@ -496,18 +646,20 @@ PlayerUiAction player_ui_screen_controller(NkUi *ui, const PlayerUiControllerMod
     }
     layout = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_grow(), 0.0f);
     layout.align_x = NK_UI_ALIGN_CENTER;
-    if (calibrating) {
+    if (calibrating || aiming) {
         layout.align_y = NK_UI_ALIGN_CENTER;
         layout.padding_top = layout.padding_bottom = NK_UI_SPACE_4;
     } else {
         layout.padding_top = height >= 680.0f ? NK_UI_SPACE_7 : NK_UI_SPACE_4;
     }
     if (nk_ui_begin_container(ui, PAD_ID_BODY, &layout, NULL)) {
-        if (calibrating) controller_calibration(ui, model, width, &result);
+        if (aiming) controller_aim(ui, model, width, &result);
+        else if (calibrating) controller_calibration(ui, model, width, &result);
         else controller_mapping(ui, model, width, height, &result);
         nk_ui_end_container(ui);
     }
-    nk_ui_prompt_bar(ui, PAD_ID_PROMPTS, "", calibrating ? prompts_calibrating : prompts,
+    nk_ui_prompt_bar(ui, PAD_ID_PROMPTS, "",
+                     aiming ? prompts_aim : calibrating ? prompts_calibrating : prompts,
                      calibrating ? 2u : 3u);
     nk_ui_end_container(ui);
     return result;

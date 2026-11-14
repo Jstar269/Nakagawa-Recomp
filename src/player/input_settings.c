@@ -407,6 +407,8 @@ void input_settings_reset_device_to_defaults(InputSettingsState *state) {
         memcpy(state->profile.psp_keys, defaults.psp_keys, sizeof(state->profile.psp_keys));
         memcpy(state->profile.stick_keys, defaults.stick_keys,
                sizeof(state->profile.stick_keys));
+        /* Mouse aiming is the keyboard and mouse's (#1791): off again, at the default speed. */
+        state->profile.aim = defaults.aim;
         input_settings_cancel_capture(state);
         state->save_diagnostic[0] = '\0';
         state->has_save_diagnostic = false;
@@ -414,14 +416,17 @@ void input_settings_reset_device_to_defaults(InputSettingsState *state) {
         state->dirty = true;
         return;
     }
-    /* The controller's defaults leave the keyboard keys as the user set them. */
+    /* The controller's defaults leave the keyboard keys and the mouse aiming settings as
+       the user set them. */
     NkKeyBinding keys[NK_PSP_BTN_COUNT];
     NkKeyBinding stick[NK_PSP_STICK_DIR_COUNT];
+    NkAimConfig aim = state->profile.aim;
     memcpy(keys, state->profile.psp_keys, sizeof(keys));
     memcpy(stick, state->profile.stick_keys, sizeof(stick));
     input_settings_reset_to_defaults(state);
     memcpy(state->profile.psp_keys, keys, sizeof(keys));
     memcpy(state->profile.stick_keys, stick, sizeof(stick));
+    state->profile.aim = aim;
     (void)store_current_scope(state);
 }
 
@@ -444,6 +449,7 @@ void input_settings_set_device(InputSettingsState *state, InputSettingsDevice de
     if (!state) return;
     if (device != INPUT_DEVICE_KEYBOARD) device = INPUT_DEVICE_CONTROLLER;
     input_settings_cancel_capture(state);
+    state->aim_open = false;
     state->device = device;
 }
 
@@ -824,6 +830,8 @@ NkResult input_settings_flush(InputSettingsState *state) {
     if (!state) return NK_ERROR_GENERIC;
     if (state->capturing) input_settings_cancel_capture(state);
     if (input_settings_is_calibrating(state)) input_settings_cancel_calibration(state);
+    /* The page opens on the mapping the next time, not on the mouse aiming settings. */
+    state->aim_open = false;
     if (!state->dirty && !state->unsaved) return NK_OK;
     return input_settings_save(state, NULL);
 }
@@ -1038,6 +1046,53 @@ bool input_settings_adjust_aim_smoothing(InputSettingsState *state, int32_t delt
     state->profile.aim.smoothing = (uint8_t)val;
     state->dirty = true;
     return true;
+}
+
+bool input_settings_step_aim_sensitivity(InputSettingsState *state, int direction) {
+    if (!state) return false;
+    const int32_t now = state->profile.aim.sensitivity;
+    int32_t next = now;
+    if (direction > 0) {
+        const int32_t step = now < INPUT_AIM_SPEED_COARSE_FROM ? INPUT_AIM_SPEED_FINE_STEP
+                                                               : INPUT_AIM_SPEED_COARSE_STEP;
+        /* A value under the lowest step (a hand-edited 1 to 9) steps up to it. */
+        next = now < INPUT_AIM_SPEED_FINE_STEP ? INPUT_AIM_SPEED_FINE_STEP
+                                               : (now / step + 1) * step;
+        if (next > NK_AIM_SENSITIVITY_MAX) next = NK_AIM_SENSITIVITY_MAX;
+    } else if (now > INPUT_AIM_SPEED_FINE_STEP) {
+        const int32_t step = now <= INPUT_AIM_SPEED_COARSE_FROM ? INPUT_AIM_SPEED_FINE_STEP
+                                                                : INPUT_AIM_SPEED_COARSE_STEP;
+        next = ((now - 1) / step) * step;
+    }
+    /* The one writer of the value, with its bounds. */
+    return next != now && input_settings_adjust_aim_sensitivity(state, next - now);
+}
+
+bool input_settings_step_aim_smoothing(InputSettingsState *state, int direction) {
+    if (!state) return false;
+    const int32_t now = state->profile.aim.smoothing;
+    int32_t next = now;
+    if (direction > 0) {
+        next = (now / INPUT_AIM_SMOOTHING_STEP + 1) * INPUT_AIM_SMOOTHING_STEP;
+        if (next > NK_AIM_SMOOTHING_MAX) next = NK_AIM_SMOOTHING_MAX;
+    } else if (now > 0) {
+        next = ((now - 1) / INPUT_AIM_SMOOTHING_STEP) * INPUT_AIM_SMOOTHING_STEP;
+    }
+    return next != now && input_settings_adjust_aim_smoothing(state, next - now);
+}
+
+void input_settings_open_aim(InputSettingsState *state) {
+    if (!state) return;
+    input_settings_cancel_capture(state);
+    state->aim_open = true;
+}
+
+void input_settings_close_aim(InputSettingsState *state) {
+    if (state) state->aim_open = false;
+}
+
+bool input_settings_aim_is_open(const InputSettingsState *state) {
+    return state != NULL && state->aim_open;
 }
 
 bool input_settings_start_calibration(InputSettingsState *state) {

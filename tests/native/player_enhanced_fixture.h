@@ -51,6 +51,8 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
      "Ace only, with 60 FPS logic. Reads the pad later in each frame; the game's timing changes."},
     {"Soft shadows", "Off", "Ace only, in games whose package names their shadows. Changes what the frame "
                             "shows."},
+    {"Unclipped sound", "Off", "Softens loud sound that the PSP clips. Changes only what you hear; sound "
+                               "plays 1.6 ms later."},
 };
 typedef char player_enhanced_fixture_matches_parts[
     sizeof(k_enhanced_parts) / sizeof(k_enhanced_parts[0]) == PLAYER_PART_COUNT ? 1 : -1];

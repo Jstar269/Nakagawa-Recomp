@@ -9195,7 +9195,7 @@ static void test_play_mode_settings(void) {
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
                                       "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\"},") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -9394,7 +9394,7 @@ static void test_play_mode_sas_settings(void) {
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
                                       "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9422,7 +9422,7 @@ static void test_play_mode_sas_settings(void) {
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
                                       "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -9490,7 +9490,7 @@ static void test_play_mode_cull_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\", "
                                       "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -9577,7 +9577,7 @@ static void test_play_mode_shadow_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"soft\"}") != NULL);
+        assert(saved && strstr(saved, "\"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"soft\", \"peak\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"ace\", \"shadow\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9604,6 +9604,140 @@ static void test_play_mode_shadow_settings(void) {
     free(app);
     printf("PASS: soft shadows are off by default and in every preset, read, resolved and saved at both "
            "levels, and only Ace launches them\n");
+}
+
+/* #2137, contract 10.22: Unclipped sound, the player's part for the launch line's peak=limit (the
+   runtime's true-peak limiter). Off in a fresh file and in every preset; read, resolved and saved
+   for the library and for one game; an Enhanced or an Ace launch carries peak=limit at its place in
+   the runtime's key order, and the session's own launch line (NkRuntimeConfig.ace_spec, which the
+   launcher exports as SR_ACE) carries it too, except for an acceptance run. */
+static void test_play_mode_peak_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[ACE_SPEC_MAX], back_line[ACE_SPEC_MAX], why[64];
+    AceConfig parsed;
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_peak_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+
+    /* Fresh: off, named, with what it changes and costs in the sentence; no preset sets it. */
+    const PlayerEnhancedPartInfo *info = player_enhanced_part(PLAYER_PART_PEAK);
+    assert(info && strcmp(info->key, "peak") == 0 && strcmp(info->name, "Unclipped sound") == 0 &&
+           info->fresh == 0 && info->value_count == 2 &&
+           strstr(info->sentence, "Changes only what you hear") != NULL &&
+           strstr(info->sentence, "1.6 ms later") != NULL);
+    assert(strcmp(player_enhanced_part_label(PLAYER_PART_PEAK, 1), "On") == 0 &&
+           strcmp(player_enhanced_part_label(PLAYER_PART_PEAK, 0), "Off") == 0);
+    player_app_settings_init_default(&app->settings);
+    assert(app->settings.enhanced.part[PLAYER_PART_PEAK] == 0);
+    app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+    for (int preset = PLAYER_PRESET_CUSTOM + 1; preset < PLAYER_PRESET_COUNT; preset++) {
+        assert(player_graphics_preset_row(preset)->part[PLAYER_PART_PEAK] == -1);
+        player_app_apply_graphics_preset(app, preset);
+        player_play_resolve(&app->settings, "TEST97003", &r);
+        assert(r.on && r.part[PLAYER_PART_PEAK] == 0);
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "peak") == NULL);
+    }
+
+    /* The library on: one title turns it off, one follows, one is on Ace, one on Authentic. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"peak\": \"limit\"},"
+        " \"title_play\": {\"TEST97001\": {\"peak\": \"off\"},"
+        " \"TEST97004\": {\"mode\": \"ace\"},"
+        " \"TEST97005\": {\"mode\": \"authentic\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_PEAK] == 1);
+    player_play_resolve(&app->settings, "TEST97001", &r);       /* the title's own wins */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_PEAK] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "peak") == NULL);
+    player_play_resolve(&app->settings, "TEST97003", &r);       /* follows the library: Enhanced */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_PEAK] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=enhanced;") != NULL &&
+           strcmp(line + strlen(line) - 11, ";peak=limit") == 0);
+    /* The runtime's own parser takes the Enhanced line, turns the limiter on, and writes the
+       same text back: the player and the runtime agree on the key, its word and its place. */
+    assert(ace_parse(line, &parsed, why, sizeof(why)) == 1 && parsed.peak == 1 &&
+           parsed.tier == ACE_TIER_ENHANCED);
+    assert(ace_format(&parsed, back_line, sizeof(back_line)) && strcmp(back_line, line) == 0);
+    player_play_resolve(&app->settings, "TEST97004", &r);       /* Ace carries it too */
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_PEAK] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
+           strcmp(line + strlen(line) - 11, ";peak=limit") == 0);
+    /* Its place among the keys a line may leave out: after ssaa, before texpack. */
+    r.part[PLAYER_PART_LOAD] = 1;
+    r.part[PLAYER_PART_SSAA] = 2;
+    r.part[PLAYER_PART_TEXPACK] = 1;
+    r.part[PLAYER_PART_PAD] = 1;
+    r.part[PLAYER_PART_SHADOW] = 1;
+    r.part[PLAYER_PART_CULL] = 1;
+    {
+        static const char tail[] =
+            ";load=fast;ssaa=2;peak=limit;texpack=on;pad=late;shadow=soft;cull=on";
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strlen(line) > strlen(tail) &&
+               strcmp(line + strlen(line) - strlen(tail), tail) == 0);
+        assert(ace_parse(line, &parsed, why, sizeof(why)) == 1 && parsed.peak == 1);
+        assert(ace_format(&parsed, back_line, sizeof(back_line)) && strcmp(back_line, line) == 0);
+    }
+    player_play_resolve(&app->settings, "TEST97005", &r);       /* Authentic: no line */
+    assert(!r.on);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line, "off") == 0);
+
+    /* The session a launch is configured with: its line is the one the launcher exports. An
+       acceptance run is Authentic whatever the settings say. */
+    {
+        NkRuntimeConfig config;
+        memset(&config, 0, sizeof(config));
+        player_play_config_session(&app->settings, "TEST97003", false, false, &config, &r);
+        assert(r.on && strcmp(config.ace_spec + strlen(config.ace_spec) - 11, ";peak=limit") == 0);
+        player_play_config_session(&app->settings, "TEST97001", false, false, &config, &r);
+        assert(r.on && strstr(config.ace_spec, "peak") == NULL);
+        player_play_config_session(&app->settings, "TEST97003", false, true, &config, &r);
+        assert(!r.on && strcmp(config.ace_spec, "off") == 0);
+    }
+
+    /* Saved at both levels, and read back by a new run. */
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"limit\"}") != NULL);
+        assert(strstr(saved, "\"TEST97001\": {\"mode\": \"library\", \"peak\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_PEAK] == 1);
+    player_play_resolve(&back->settings, "TEST97001", &r);
+    assert(r.on && r.part[PLAYER_PART_PEAK] == 0);
+    player_play_resolve(&back->settings, "TEST97003", &r);
+    assert(r.on && r.part[PLAYER_PART_PEAK] == 1);
+
+    /* A file that never had the key, and a word the part does not have, leave it off. */
+    write_text_file(path, "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\"}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_PEAK] == 0);
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\", \"peak\": \"on\"}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_PEAK] == 0);
+    player_play_resolve(&app->settings, "TEST97003", &r);
+    assert(r.on && r.part[PLAYER_PART_PEAK] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "peak") == NULL);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: unclipped sound is off by default and in every preset, read, resolved and saved at both "
+           "levels, and Enhanced and Ace launches carry peak=limit where the runtime writes it\n");
 }
 
 /* Stick dead-zone remap (contract 11.3.11, 11.2 item 2): a library "stick" and a title's own
@@ -9669,7 +9803,7 @@ static void test_play_mode_stick_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"on\", "
                                       "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
         free(saved);
     }
 
@@ -9833,7 +9967,7 @@ static void test_play_mode_load_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
                                       "\"load\": \"fast\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST95001\": {\"mode\": \"ace\", \"load\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9935,7 +10069,7 @@ static void test_play_mode_ssaa_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\", \"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\", \"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
         assert(strstr(saved, "\"ssaa\": \"4\"}") != NULL && strstr(saved, "\"ssaa\": \"off\"}") != NULL);
         free(saved);
     }
@@ -10018,7 +10152,7 @@ static void test_play_mode_mips_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
                                       "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", \"mips\": \"on\", "
-                                      "\"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\"}") != NULL);
+                                      "\"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST95001\": {\"mode\": \"enhanced\", \"mips\": \"off\"}") != NULL);
         free(saved);
     }
@@ -10098,7 +10232,7 @@ static void test_play_mode_pad_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"late\", "
-                                      "\"shadow\": \"off\"}") != NULL);
+                                      "\"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"ace\", \"pad\": \"off\"}") != NULL);
         free(saved);
     }
@@ -10179,7 +10313,7 @@ static void test_play_mode_tess_settings(void) {
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
                                       "\"upscale\": \"off\", \"stick\": \"off\", \"load\": \"off\", "
                                       "\"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);
@@ -10730,7 +10864,7 @@ static void test_play_mode_twin_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
                                       "\"load\": \"off\", \"twin\": \"on\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -10757,7 +10891,7 @@ static void test_play_mode_twin_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
                                       "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"on\"}") != NULL);
         free(saved);
     }
@@ -10960,7 +11094,8 @@ static void test_play_mode_line_parses_in_runtime(void) {
         expect_line_parses_in_runtime(&r);
         /* Every part at its largest value, with a pack stored so texpack is in effect. In Ace every key
            the line can carry is then on, so the line's own key order (ace_format's), not the enum's
-           row order, decides where each lands: texpack after ssaa, then pad and shadow (both Ace only), and cull last. */
+           row order, decides where each lands: peak after ssaa, texpack after peak, then pad and shadow (both
+           Ace only), and cull last. */
         settings.title_pack_count = 1;
         memcpy(settings.title_packs[0].key, "TEST93001", sizeof("TEST93001"));
         snprintf(settings.title_packs[0].path, sizeof(settings.title_packs[0].path), "%s",
@@ -10978,13 +11113,15 @@ static void test_play_mode_line_parses_in_runtime(void) {
             char line[ACE_SPEC_MAX];
             assert(player_play_launch_line(&r, line, sizeof(line)));
             const size_t n = strlen(line);
-            static const char ace_tail[] = ";ssaa=4;texpack=on;pad=late;shadow=soft;cull=on";
+            static const char ace_tail[] = ";ssaa=4;peak=limit;texpack=on;pad=late;shadow=soft;cull=on";
+            static const char enhanced_tail[] = ";ssaa=4;peak=limit;texpack=on";
             const size_t ace_n = sizeof(ace_tail) - 1u;
+            const size_t enhanced_n = sizeof(enhanced_tail) - 1u;
             if (modes[m] == PLAYER_PLAY_ACE)
                 assert(n > ace_n && strcmp(line + n - ace_n, ace_tail) == 0);
             else
-                assert(n > 18u && strcmp(line + n - 18u, ";ssaa=4;texpack=on") == 0 && !strstr(line, "cull") &&
-                       !strstr(line, "pad") && !strstr(line, "shadow"));
+                assert(n > enhanced_n && strcmp(line + n - enhanced_n, enhanced_tail) == 0 &&
+                       !strstr(line, "cull") && !strstr(line, "pad") && !strstr(line, "shadow"));
         }
         settings.title_pack_count = 0;
         own->mode = PLAYER_PLAY_AUTHENTIC;                            /* the title's Authentic */
@@ -11090,7 +11227,7 @@ static void test_play_mode_upscale_settings(void) {
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
                                       "\"upscale\": \"fsr1\", \"stick\": \"off\", \"load\": \"off\", "
                                       "\"twin\": \"off\", \"ssaa\": \"off\", "
-                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\"}") != NULL);
+                                      "\"mips\": \"off\", \"texpack\": \"off\", \"pad\": \"off\", \"shadow\": \"off\", \"peak\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -12454,6 +12591,7 @@ int main(int argc, char **argv) {
     test_play_mode_sas_settings();
     test_play_mode_cull_settings();
     test_play_mode_shadow_settings();
+    test_play_mode_peak_settings();
     test_play_mode_stick_settings();
     test_play_mode_load_settings();
     test_play_mode_ssaa_settings();
