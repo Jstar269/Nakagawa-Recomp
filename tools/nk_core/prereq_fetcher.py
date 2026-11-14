@@ -129,12 +129,39 @@ def default_data_root() -> Path:
     return Path(data)
 
 
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {f"{stem}{digit}" for stem in ("COM", "LPT") for digit in "123456789¹²³"}
+)
+
+
+def _windows_unsafe_part(part: str) -> bool:
+    """A name part Windows would not store as written.
+
+    ``:`` makes ``a/D:evil.dll`` drive-relative (outside the install folder) or names an
+    alternate data stream; a trailing dot or space is dropped, so ``a.`` lands on ``a``; a
+    device name (``NUL``, ``com1.txt``) opens the device. The rules match the player's ZIP
+    reader (``nk_zip_check_name`` in ``src/core/nk_zip.c``) and refuse what
+    ``tools/stage_install.py`` refuses for its own entry names (``:``, ``\\``, NUL).
+    """
+    if any(ord(char) < 0x20 or char in '<>:"|?*' for char in part):
+        return True
+    if part[-1] in ". ":
+        return True
+    return part.split(".", 1)[0].rstrip(" ").upper() in _WINDOWS_DEVICE_NAMES
+
+
 def _safe_relative_path(value: object) -> PurePosixPath:
     if not isinstance(value, str) or not value or "\\" in value:
         raise PrerequisiteFetchError("MANIFEST_INVALID: archive path is empty or malformed.")
     path = PurePosixPath(value)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise PrerequisiteFetchError("ARCHIVE_PATH_REJECTED: archive member escapes its install directory.")
+    if any(_windows_unsafe_part(part) for part in path.parts):
+        raise PrerequisiteFetchError(
+            "ARCHIVE_PATH_REJECTED: archive member name is not a plain Windows file name "
+            "(drive or stream colon, reserved character, trailing dot or space, or device name)."
+        )
     return path
 
 
@@ -359,6 +386,13 @@ def _extract_tar(item: dict, archive: Path, target: Path, notices_root: Path,
                 link = PurePosixPath(link_value)
                 if link.is_absolute() or "\\" in link_value:
                     raise PrerequisiteFetchError("ARCHIVE_LINK_REJECTED: package link is absolute or malformed.")
+                # The target is joined onto the install folder exactly like a member name, so it
+                # follows the same Windows name rule (a ``D:`` part would leave the folder).
+                if any(_windows_unsafe_part(part) for part in link.parts if part not in {".", ".."}):
+                    raise PrerequisiteFetchError(
+                        "ARCHIVE_LINK_REJECTED: package link target is not a plain Windows file name "
+                        "(drive or stream colon, reserved character, trailing dot or space, or device name)."
+                    )
                 combined = relative.parent.joinpath(link) if member.issym() else link
                 if any(part == ".." for part in combined.parts):
                     raise PrerequisiteFetchError("ARCHIVE_LINK_REJECTED: package link escapes its install directory.")

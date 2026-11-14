@@ -557,6 +557,8 @@ tree when a user-profile path or a workspace root appears in a first-party file.
 
 The native player (`nakagawa_player.exe`) requires `SDL3.dll` and the host Vulkan loader (`vulkan-1.dll`). It also loads `SDL3_ttf.dll` at run time for the readable UI font: `mingw32-make player` stages `SDL3_ttf.dll` and its full runtime dependency closure beside `build\nakagawa_player.exe` (`tools/stage_runtime_dlls.py`, with `SDL3_TTF_DLL` as the override in the same pattern as `SDL3_DLL`), so the same TTF font path is used whether the player is started from Explorer, a plain `cmd.exe` with no MSYS2 on `PATH`, a built title package, or the release layout. In a release archive, the matching `SDL3.dll`, `SDL3_ttf.dll` and its closure are already beside `bin/nakagawa_player.exe`; leave those files in `bin/`. In a source checkout, `tools/copy_build_assets.ps1` copies SDL3 and any imported MinGW runtime DLLs beside the built game executable and generates their third-party notices; the player target stages its own typography runtime the same way. Without `SDL3_ttf.dll` the launcher cannot start: the player says why in a message box and on stderr and exits with code 4, and the workspace doctor reports it as `RUNTIME_SDL3_TTF`.
 
+The player and every title executable start by limiting where Windows looks for a library they load after start-up (`SetDefaultDllDirectories`): the executable's own folder and System32, so such a library in the folder they were started from or on `PATH` is not picked up. This does not change how the DLLs an executable imports are found (Windows resolves those before the program starts, beside the executable first); the staged DLLs keep loading as before. `SDL3_ttf.dll`, which the player and the in-game overlay load after start-up, must be beside the executable or beside the `SDL3.dll` in use, not only on `PATH`.
+
 #### 1. SDL3.dll
 
 For a source build, install the MSYS2 UCRT64 SDL3 package described above. Do not copy the DLL into the repository root; the build asset script resolves the toolchain copy and stages it beside the player. For a release package, use the SDL3 DLL already present in `bin/`.
@@ -1225,6 +1227,15 @@ the zip's bundled build tools leave out the GFDL-licensed manuals in `share/doc`
 and `share/man` while keeping every licence file; the policy is in
 [`PREVIEW_RELEASE.md`](PREVIEW_RELEASE.md#bundled-prerequisite-licensing-policy).
 
+Archives are unpacked only after their hash matches, and every member must be a
+plain relative name a Windows folder stores as written. A backslash stops the
+install with `MANIFEST_INVALID`; an absolute path, a `..` part, a colon (a
+drive-relative `a/D:x.dll` or a data stream), a character Windows refuses
+(`<>"|?*` or a control character), a trailing dot or space, or a device name
+such as `NUL` or `COM1.txt` stops it with `ARCHIVE_PATH_REJECTED`. A tar link
+whose target has one of those parts stops it with `ARCHIVE_LINK_REJECTED`.
+Nothing is kept from a refused archive.
+
 Downloaded tools, verified archives, and extracted licence texts live under the
 current user's Nakagawa data folder in `prerequisites/`. **Settings → About &
 Licenses** lists installed components, versions, and licence identifiers and
@@ -1242,9 +1253,12 @@ UCRT64 package set. Linux prerequisite installation is not supported
 ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306)); the wider
 distribution and update contract remains tracked by [#324](https://github.com/Jstar269/nakagawa-recomp/issues/324).
 
-The player's UI typography loads `SDL3_ttf.dll` from beside the executable first,
-then from `PATH`; without it the built-in readable debug font is used. Placing
-`SDL3_ttf.dll` next to `nakagawa_player.exe` is enough — no rebuild required.
+The player's UI typography loads `SDL3_ttf.dll` by full path from beside the
+executable, then from beside the `SDL3.dll` it runs (with that folder searched for
+the library's own dependencies); it is never searched for by name, so a copy that
+is only in the current folder or on `PATH` is not used. Placing `SDL3_ttf.dll`
+(and its dependency closure) next to `nakagawa_player.exe` is enough — no rebuild
+required.
 
 ### Network use
 
@@ -1508,7 +1522,7 @@ outside the published repository.
 - **Preflight diagnostics:** run `.\nk.ps1 Doctor -TitleManifest C:\path\to\manifest.json -GameName game` (or `python tools/nk_doctor.py --title-manifest C:\path\to\manifest.json --game-name game`) to validate the toolchain, build dependencies, and the selected title's local inputs. Without a title selection, Doctor uses the public synthetic manifest.
 - **Missing Vulkan headers:** pass the correct `-VulkanSdk` path or `VULKAN_SDK=...` Make variable.
 - **`SDL3.dll` missing:** for the release package, keep `bin/SDL3.dll` beside `bin/nakagawa_player.exe`; for a source build, install the MSYS2 UCRT64 SDL3 package so `tools/copy_build_assets.ps1` stages it beside `build/nakagawa_player.exe`.
-- **The player says its launcher cannot start (exit code 4):** the launcher needs `SDL3_ttf.dll` and its dependency closure beside `nakagawa_player.exe` (or on `PATH`), and its UI fonts in `assets/fonts/ui`. Install the MSYS2 UCRT64 `sdl3-ttf` package and re-run `mingw32-make player`, which stages the whole closure, the fonts and their licence notices; the workspace doctor reports `RUNTIME_SDL3_TTF`/`RUNTIME_SDL3_TTF_CLOSURE`, and the player names the missing part in its message.
+- **The player says its launcher cannot start (exit code 4):** the launcher needs `SDL3_ttf.dll` and its dependency closure beside `nakagawa_player.exe` (the player never searches for it by name, so a copy only on `PATH` is not used), and its UI fonts in `assets/fonts/ui`. Install the MSYS2 UCRT64 `sdl3-ttf` package and re-run `mingw32-make player`, which stages the whole closure, the fonts and their licence notices; the workspace doctor reports `RUNTIME_SDL3_TTF`/`RUNTIME_SDL3_TTF_CLOSURE`, and the player names the missing part in its message.
 - **`PUBLIC_SAFE=1` active:** the runtime always compiles with `PUBLIC_SAFE=1`; the private-backend mode was retired on 2026-10-25. This mode links the public replacements — `iso_public.c` for ISO9660 lookups driven by `PSP_ISO`, `pgf_public.c` for fonts, and the SDL3 audio backend — plus `pgd_unavailable.c`. Disc routes keep working; PGD-protected data is refused in this mode, and the runtime refuses encrypted `~PSP` executables; the player decrypts them before a build (see [Encrypted executables](#encrypted-executables)).
 - **Missing ISO or missing extracted assets:** `place_game_here/ISO/<game>.iso` must be present, and `place_game_here/EXTRACTED/PSP_GAME/USRDIR/xbdata_extracted` (or configured `SR_DATAROOT`) must be populated. `SR_DATAROOT` may instead hold the read-only `<archive>.xb` archives; the runtime mounts those directly ([#298](https://github.com/Jstar269/nakagawa-recomp/issues/298)).
 - **No late PRX exports / asset lookups fail:** restore the required `place_game_here/EXTRACTED/` layout (decrypted `libfont.prx`, `scePsmf_library.prx`, `scePsmfP_library.prx`).

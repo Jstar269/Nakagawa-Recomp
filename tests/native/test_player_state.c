@@ -8217,6 +8217,90 @@ static void expect_input(const PlayerInputReport *input, PlayerInputClass input_
                                      ? files_needed : (size_t)PLAYER_INPUT_FILES_MAX));
 }
 
+/* nk_platform_harden_library_search, which the player's main calls first: afterwards a DLL
+   loaded by bare name is no longer looked for in the current folder or on PATH. The probes are
+   files that are no library at all under names nothing else uses, so the loader's answer says
+   where it looked: "not a valid application" (it found the planted file) before, "not found"
+   after. Windows only; POSIX has nothing to change and the call is true there. */
+static void test_library_search_leaves_current_folder_and_path(void) {
+#ifdef _WIN32
+    char temp[MAX_PATH], cwd_dir[MAX_PATH + 64], path_dir[MAX_PATH + 64], previous[MAX_PATH];
+    char cwd_probe_name[64], path_probe_name[64], file[MAX_PATH + 160];
+    const unsigned long pid = (unsigned long)GetCurrentProcessId();
+    DWORD length = GetTempPathA(MAX_PATH, temp);
+    assert(length > 0 && length < MAX_PATH);
+    assert(GetCurrentDirectoryA(MAX_PATH, previous) > 0);
+    snprintf(cwd_dir, sizeof(cwd_dir), "%snk_dll_cwd_%lu", temp, pid);
+    snprintf(path_dir, sizeof(path_dir), "%snk_dll_path_%lu", temp, pid);
+    snprintf(cwd_probe_name, sizeof(cwd_probe_name), "nk_cwd_probe_%lu.dll", pid);
+    snprintf(path_probe_name, sizeof(path_probe_name), "nk_path_probe_%lu.dll", pid);
+    (void)CreateDirectoryA(cwd_dir, NULL);
+    (void)CreateDirectoryA(path_dir, NULL);
+    const char *const dirs[2] = {cwd_dir, path_dir};
+    const char *const names[2] = {cwd_probe_name, path_probe_name};
+    for (int i = 0; i < 2; ++i) {
+        snprintf(file, sizeof(file), "%s\\%s", dirs[i], names[i]);
+        FILE *probe = fopen(file, "wb");
+        assert(probe != NULL);
+        fputs("MZ planted by test_player_state: not a library\n", probe);
+        fclose(probe);
+    }
+    DWORD path_chars = GetEnvironmentVariableA("PATH", NULL, 0);
+    char *old_path = (char *)calloc((size_t)path_chars + 1u, 1u);
+    char *new_path = (char *)calloc((size_t)path_chars + sizeof(path_dir) + 2u, 1u);
+    assert(old_path != NULL && new_path != NULL);
+    if (path_chars > 0) (void)GetEnvironmentVariableA("PATH", old_path, path_chars + 1u);
+    snprintf(new_path, (size_t)path_chars + sizeof(path_dir) + 2u, "%s;%s", path_dir, old_path);
+    assert(SetEnvironmentVariableA("PATH", new_path));
+    assert(SetCurrentDirectoryA(cwd_dir));
+
+    DWORD before[2];
+    for (int i = 0; i < 2; ++i) {
+        SetLastError(0);
+        HMODULE module = LoadLibraryA(names[i]);
+        before[i] = GetLastError();
+        if (module != NULL) FreeLibrary(module);
+        assert(module == NULL);
+    }
+    /* The probes work: without the setting the loader reaches the planted files. PATH is
+       always searched then; the current folder is too unless the machine's policy
+       (CWDIllegalInDllSearch) already removed it. */
+    if (before[0] != ERROR_BAD_EXE_FORMAT)
+        printf("[PLAYER_STATE_TEST] NOTE: this machine already keeps the current folder out of "
+               "the DLL search (error %lu)\n", (unsigned long)before[0]);
+    assert(before[1] == ERROR_BAD_EXE_FORMAT);
+
+    assert(nk_platform_harden_library_search());
+    for (int i = 0; i < 2; ++i) {
+        SetLastError(0);
+        HMODULE module = LoadLibraryA(names[i]);
+        DWORD after = GetLastError();
+        if (module != NULL) FreeLibrary(module);
+        if (module != NULL || after != ERROR_MOD_NOT_FOUND)
+            printf("[PLAYER_STATE_TEST] %s still reached (error %lu)\n", names[i],
+                   (unsigned long)after);
+        assert(module == NULL && after == ERROR_MOD_NOT_FOUND);
+    }
+    /* A DLL in a default folder (System32 here) still loads by bare name. */
+    HMODULE system = LoadLibraryA("version.dll");
+    assert(system != NULL);
+    FreeLibrary(system);
+
+    assert(SetCurrentDirectoryA(previous));
+    assert(SetEnvironmentVariableA("PATH", path_chars > 0 ? old_path : NULL));
+    free(old_path);
+    free(new_path);
+    for (int i = 0; i < 2; ++i) {
+        snprintf(file, sizeof(file), "%s\\%s", dirs[i], names[i]);
+        DeleteFileA(file);
+        RemoveDirectoryA(dirs[i]);
+    }
+    printf("[PLAYER_STATE_TEST] library search hardening PASSED\n");
+#else
+    assert(nk_platform_harden_library_search());
+#endif
+}
+
 /* #2140: the card names which build of the program a disc holds when the title's manifest
    records builds, refuses a known-bad one, and says nothing for a title that records none. */
 static void test_game_build_check_names_the_executable_build(void) {
@@ -18146,6 +18230,11 @@ int main(int argc, char **argv) {
     fflush(stdout);
     test_input_classification_and_check_again();
     test_game_build_check_names_the_executable_build();
+
+    /* Last: it changes how this whole process loads libraries. */
+    printf("[PLAYER_STATE_TEST] Subtest 27: library loads leave the current folder and PATH\n");
+    fflush(stdout);
+    test_library_search_leaves_current_folder_and_path();
 
     free(app);
     native_test_assert_real_config_untouched();

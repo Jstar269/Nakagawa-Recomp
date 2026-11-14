@@ -512,6 +512,13 @@ int main(int argc, char **argv) {
 #ifndef SR_SELFTEST_ONLY
 #ifdef _WIN32
     SetUnhandledExceptionFilter(sr_crash_filter);
+    /* Run-time DLL loads (SDL's vulkan-1.dll, the overlay's SDL3_ttf, OpenXR) search only this
+     * program's folder and System32, never the current folder or PATH: the player's rule
+     * (nk_platform_harden_library_search). Before SDL or any plug-in can load a library. */
+    if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS))
+        fprintf(stderr, "Windows refused to limit where DLLs are loaded from "
+                        "(SetDefaultDllDirectories, error %lu); the current folder and PATH may "
+                        "still be searched\n", (unsigned long)GetLastError());
 #endif
 #endif
 

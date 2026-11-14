@@ -996,6 +996,13 @@ static inline sr_cd_status sr_cd_open_file(const sr_cd_root *root, const char *r
         close(fd);
         return SR_CD_IO_ERROR;
     }
+    /* O_NOFOLLOW cannot see a hard link: its name is inside the root while the file may be
+     * outside it. A file with more than one link opens for reading only; nothing above has
+     * truncated it yet (O_TRUNC is never passed). */
+    if (mode != SR_CD_FILE_READ && info.st_nlink != 1) {
+        close(fd);
+        return SR_CD_NOT_CONTAINED;
+    }
     if (!S_ISREG(info.st_mode)) {
         close(fd);
         return SR_CD_NOT_CONTAINED;

@@ -5664,6 +5664,9 @@ static int player_shutdown(PlayerRun *run) {
 }
 
 int main(int argc, char *argv[]) {
+    /* Windows: a library loaded by name from here on is looked for only in this program's folder
+       and System32, not the current folder or PATH. First; reported once the streams exist. */
+    const bool library_search_hardened = nk_platform_harden_library_search();
     /* Windows: UTF-8 console output and argv rebuilt from the UTF-16 command line. */
     (void)nk_platform_init_utf8_main(&argc, &argv);
     /* One taskbar group for the launcher, its games and a pinned shortcut (#2006): set before
@@ -5678,6 +5681,11 @@ int main(int argc, char *argv[]) {
     /* Windows (a GUI-subsystem program): the parent console, or player-output.txt in the
        logs folder, unbuffered (#1303). Nothing to do elsewhere. */
     nk_platform_setup_standard_streams("player-output.txt");
+    if (!library_search_hardened) {
+        fprintf(stderr, "[PLAYER] Windows refused to limit where DLLs are loaded from "
+                        "(SetDefaultDllDirectories); the current folder and PATH may still be "
+                        "searched.\n");
+    }
     player_report_legacy_data_root();
 
     static PlayerRun run;

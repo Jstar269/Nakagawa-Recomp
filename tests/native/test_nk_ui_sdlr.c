@@ -40,6 +40,10 @@ int main(void) {
 #include <limits.h>
 #include <math.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 static int g_failures = 0;
 
 #define CHECK(condition, message) \
@@ -756,6 +760,80 @@ static int test_image_commands(void) {
     return 1;
 }
 
+#if defined(_WIN32)
+/* A copy of SDL3_ttf.dll in the current folder (here a file that is no library at all) is
+   never the one nk_ui_ttf_create loads: its Windows default is a full path, beside the
+   executable or beside the SDL3.dll in use. A bare name would reach the current folder
+   before PATH. The process first limits its library search as the player and title
+   executables do, so the real SDL3_ttf.dll beside SDL3.dll must still load with its own
+   imports from that folder. 1 passes, 0 fails, -1 when no SDL3_ttf.dll is in either default
+   place (main's SKIP). */
+static int planted_ttf_in_current_folder_is_ignored(void) {
+    char temp[MAX_PATH], folder[MAX_PATH + 64], planted[MAX_PATH + 96], previous[MAX_PATH];
+    char loaded[MAX_PATH] = "", reason[256], beside_sdl[MAX_PATH + 32] = "";
+    HMODULE module;
+    NkUiTtf *ttf;
+    FILE *file;
+    DWORD length = GetTempPathA(MAX_PATH, temp);
+    if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)) {
+        printf("FAIL cannot limit the library search as the player does (error %lu)\n",
+               (unsigned long)GetLastError());
+        return 0;
+    }
+    module = GetModuleHandleA("SDL3.dll");
+    if (module != NULL && GetModuleFileNameA(module, beside_sdl, MAX_PATH) > 0) {
+        char *slash = strrchr(beside_sdl, '\\');
+        if (slash != NULL) snprintf(slash + 1, sizeof(beside_sdl) - (size_t)(slash + 1 - beside_sdl),
+                                    "SDL3_ttf.dll");
+        else beside_sdl[0] = '\0';
+    }
+    if (length == 0 || length >= MAX_PATH ||
+        GetCurrentDirectoryA(MAX_PATH, previous) == 0) {
+        printf("FAIL the planted-library check cannot name its folders\n");
+        return 0;
+    }
+    snprintf(folder, sizeof(folder), "%snk_ttf_plant_%lu", temp,
+             (unsigned long)GetCurrentProcessId());
+    snprintf(planted, sizeof(planted), "%s\\SDL3_ttf.dll", folder);
+    (void)CreateDirectoryA(folder, NULL);
+    file = fopen(planted, "wb");
+    if (file == NULL) {
+        printf("FAIL cannot plant %s\n", planted);
+        return 0;
+    }
+    fputs("MZ planted by test_nk_ui_sdlr: not a library\n", file);
+    fclose(file);
+    if (!SetCurrentDirectoryA(folder)) {
+        printf("FAIL cannot enter %s\n", folder);
+        DeleteFileA(planted);
+        RemoveDirectoryA(folder);
+        return 0;
+    }
+    ttf = nk_ui_ttf_create(NULL, 0);
+    snprintf(reason, sizeof(reason), "%s", nk_ui_ttf_last_error());
+    module = GetModuleHandleA("SDL3_ttf.dll");
+    if (module != NULL) (void)GetModuleFileNameA(module, loaded, MAX_PATH);
+    if (ttf != NULL) nk_ui_ttf_destroy(ttf);
+    (void)SetCurrentDirectoryA(previous);
+    DeleteFileA(planted);
+    RemoveDirectoryA(folder);
+    if (ttf == NULL) {
+        if (beside_sdl[0] == '\0' || GetFileAttributesA(beside_sdl) == INVALID_FILE_ATTRIBUTES) {
+            return -1;
+        }
+        printf("FAIL %s exists but SDL3_ttf did not load with the library search limited "
+               "(a planted copy taken instead, or its imports not found): %s\n", beside_sdl, reason);
+        return 0;
+    }
+    if (_strnicmp(loaded, folder, strlen(folder)) == 0) {
+        printf("FAIL the SDL3_ttf.dll planted in the current folder was loaded: %s\n", loaded);
+        return 0;
+    }
+    printf("PASS planted SDL3_ttf.dll in the current folder ignored (loaded %s)\n", loaded);
+    return 1;
+}
+#endif
+
 static int test_availability(void) {
     CHECK(nk_ui_sdlr_available() && nk_ui_ttf_available(), "this build includes both halves");
     CHECK(nk_ui_sdlr_create(NULL, NULL) == NULL, "no renderer, no backend");
@@ -774,6 +852,9 @@ int main(void) {
             return 1;
         }
     }
+#if defined(_WIN32)
+    if (planted_ttf_in_current_folder_is_ignored() == 0) return 1;
+#endif
     g_ttf = nk_ui_ttf_create(NULL, 0);
     if (g_ttf == NULL) {
         printf("SKIP nk_ui_sdlr: SDL3_ttf is not usable here: %s\n", nk_ui_ttf_last_error());
