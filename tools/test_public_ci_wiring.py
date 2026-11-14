@@ -1863,8 +1863,8 @@ class PublicExportJobTests(unittest.TestCase):
     }
     MAIN_SMOKE_CONDITION = "if: ${{ needs.classify.outputs.run_main_smoke == 'true' }}"
     MARKDOWN_STEPS = {
-        "Set up Node.js": 'node-version: "26.13.0"',
-        "Lint repository Markdown": "run: npx --yes markdownlint-cli2@0.24.0",
+        "Set up Node.js": 'node-version: "26.13.1"',
+        "Lint repository Markdown": "run: npx --yes markdownlint-cli2@0.24.1",
     }
     MARKDOWN_CONDITION = "if: ${{ !cancelled() && needs.classify.outputs.run_markdown == 'true' }}"
     # The steps of the former profile_zero_fixture job, now after the export step.
@@ -1968,15 +1968,15 @@ class PublicExportJobTests(unittest.TestCase):
         self.assertEqual(package_versions, {
             "cfgv": "3.5.0",
             "distlib": "0.4.4",
-            "filelock": "4.2.9",
+            "filelock": "4.2.10",
             "identify": "2.6.20",
             "nodeenv": "1.12.0",
             "packaging": "26.3",
             "platformdirs": "4.14.5",
             "pre-commit": "4.7.0",
             "pyyaml": "6.0.3",
-            "python-discovery": "1.9.4",
-            "virtualenv": "21.15.5",
+            "python-discovery": "1.9.5",
+            "virtualenv": "21.15.6",
         })
         self.assertEqual(lock.count("--hash=sha256:"), len(package_versions))
 

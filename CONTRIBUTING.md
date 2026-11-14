@@ -162,7 +162,7 @@ maintainer adds the `ci-full-matrix` label
 | Check | What it verifies | If it fails |
 | --- | --- | --- |
 | Classify change | Which areas your change touches, so only relevant jobs run | Rarely fails; ask a maintainer |
-| Hygiene and security | pre-commit hooks: Ruff, whitespace and encoding, publication safety, secret scanning; then, as later steps of the same job, markdownlint when Markdown changed and, on pushes to `main`, manual runs and merge-queue groups, the main smoke | Run `python -m pre_commit run --files <your files>` locally; for the Markdown step, `npx --yes markdownlint-cli2@0.24.0 <file>` |
+| Hygiene and security | pre-commit hooks: Ruff, whitespace and encoding, publication safety, secret scanning; then, as later steps of the same job, markdownlint when Markdown changed and, on pushes to `main`, manual runs and merge-queue groups, the main smoke | Run `python -m pre_commit run --files <your files>` locally; for the Markdown step, `npx --yes markdownlint-cli2@0.24.1 <file>` |
 | Python tooling gates (0–3) | The `tools/` unit tests, split into four shards | Run the failing test module with `python -m unittest tools.<module>` |
 | Native and translation gates | Strict C builds (`-std=c99`/`c11 -Werror`) and runtime selftests on Linux | Compile the changed C file with the flags shown in the log |
 | Windows runtime compile gate (smoke, routes, ladder-fuzz, selftests) | The runtime builds with MSYS2 UCRT64 on Windows; each of the four jobs runs its parts one after another | Check Windows-only APIs and headers; the failing step names the part |
@@ -357,7 +357,7 @@ changes first) but silently skips anything you have edited and not staged.
 For documentation changes:
 
 ```powershell
-npx --yes markdownlint-cli2@0.24.0
+npx --yes markdownlint-cli2@0.24.1
 ```
 
 The repository also provides shared pre-commit hooks:
