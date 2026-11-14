@@ -587,8 +587,8 @@ declares.
 
 #### 9.10.2. *LittleBigPlanet* (UCUS98744): `lbp.timing.native_60hz`
 
-- **Status.** Experimental: not released. By the owner's decision of 2026-11-14 (#1931) the project ships it
-  without the run on an idle host it was held for, with the limits below. It declares no `"experimental"` field,
+- **Status.** Experimental: not released. By the owner's decision of 2026-11-14 the project ships it
+  without the run on an idle host it was held for (#1931 tracks the package), with the limits below. It declares no `"experimental"` field,
   so its switch is tagged EXPERIMENTAL. It is for disc version 2.00 only: build-package refuses disc version 1.00
   by name (`other_revision`, section 5.1). The version shipped is package 0.5.0-pre10.
 - **What it covers.** 80 sites and 3 data sites, every one a transform of section 9.2: the frame pacing (one
@@ -602,7 +602,8 @@ declares.
   (S001), the ramp of the screen overlay at the end of each pass (X001, X002), a camera zone's viewfinder pitch,
   yaw and zoom (Q001 to Q003), the camera zoom in create mode and the grid editor's cursor (Q004, Q005), the fade
   of the line from Sackboy to the popit cursor (Q006 to Q008) and the grid editor's tap window (Q009).
-- **Measured, 0.5.0-pre9** (recorded in #1931). On 2026-11-14, on a private route to the start of the first
+- **Measured, 0.5.0-pre9** (recorded in #1931, except the number of jumps and the side-by-side check, which
+  are recorded here). On 2026-11-14, on a private route to the start of the first
   story level (the maintainer's copy): three 60 Hz runs and one run of the authentic game, 175 s each. The host
   was not clean: background services kept it 16 to 18 % busy. In the level, about 51 s of each run:
   - a median of 60 logic updates and 60 frames a second in all three runs; update interval 16.7 ms at the median
