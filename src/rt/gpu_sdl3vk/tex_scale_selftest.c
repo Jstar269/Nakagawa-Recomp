@@ -485,13 +485,14 @@ static void test_settings(void) {
     CHECK(strcmp(lines, "TEX_SCALE: off (texture scaling and the smart 2D filter need Enhanced or Ace)\n") == 0 &&
           refused[0] == '\0',
           "settings: with Ace Mode off the start lines are not the one need-Enhanced-or-Ace line: \"%s\"", lines);
-    /* The same request with Ace Mode on takes, and says it is not admitted. */
+    /* The same request with Ace Mode on takes, and says it is guest-visible. */
     a = nk_tex_scale_init(1, 4, 1, refused, sizeof(refused));
     lines = nk_tex_scale_start_lines();
     CHECK(a->factor == 4 && a->smart2d == 1 && refused[0] == '\0' &&
           strstr(lines, "TEX_SCALE: on (xbrz=4, smart2d=on, budget_mb=512)\n") &&
-          strstr(lines, "TEX_SCALE: guest-visible, on through the launch line's texscale/smart2d keys and not "
-                        "admitted under contract section 11.2"),
+          strstr(lines, "TEX_SCALE: guest-visible (contract section 11.3.3): each present commits the frame, with "
+                        "its scaled copies and nearest 2D draws in it, to guest VRAM\n") &&
+          !strstr(lines, "not admitted"),
           "settings: texscale=4 smart2d=on with Ace Mode on: \"%s\"", lines);
     /* Each alone takes alone. */
     a = nk_tex_scale_init(1, 3, 0, refused, sizeof(refused));
@@ -544,21 +545,21 @@ static void test_settings(void) {
     CHECK(a->factor == 0 && a->smart2d == 0 && nk_tex_scale_start_lines()[0] == '\0',
           "settings: unset with Ace Mode on, something was printed or turned on");
     nk_tex_scale_configure(NULL);
-    /* an item that is on is never silent about being outside 11.2 admission */
+    /* an item that is on is never silent about being guest-visible */
     {
         char line[256];
         NkTexScaleConfig on = { 0, 0, 1u << 20 };
-        CHECK(nk_tex_scale_admission_line(&on, line, sizeof(line)) == 0 && line[0] == '\0',
-              "settings: admission line printed with both features off");
+        CHECK(nk_tex_scale_guest_visible_line(&on, line, sizeof(line)) == 0 && line[0] == '\0',
+              "settings: guest-visible line printed with both features off");
         static const int cases[][2] = { { 4, 0 }, { 0, 1 }, { 2, 1 } };
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
             on.factor = cases[i][0]; on.smart2d = cases[i][1];
-            const size_t n = nk_tex_scale_admission_line(&on, line, sizeof(line));
-            CHECK(n > 0 && n == strlen(line) && strstr(line, "TEX_SCALE: guest-visible") == line &&
-                  strstr(line, "the launch line's texscale/smart2d keys") && strstr(line, "not admitted") &&
-                  strstr(line, "section 11.2") && strstr(line, "Texture Scaling and the Smart 2D Filter") &&
+            const size_t n = nk_tex_scale_guest_visible_line(&on, line, sizeof(line));
+            CHECK(n > 0 && n == strlen(line) &&
+                  strstr(line, "TEX_SCALE: guest-visible (contract section 11.3.3): ") == line &&
+                  strstr(line, "guest VRAM") && !strstr(line, "not admitted") &&
                   !strstr(line, "SR_TEX_SCALE") && !strstr(line, "SR_SMART_2D"),
-                  "settings: admission line missing for xbrz=%d smart2d=%d: \"%s\"", on.factor, on.smart2d, line);
+                  "settings: guest-visible line missing for xbrz=%d smart2d=%d: \"%s\"", on.factor, on.smart2d, line);
         }
     }
 

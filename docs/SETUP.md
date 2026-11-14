@@ -93,8 +93,8 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   filter keeps HUD art and sprites that a game draws one texel to one pixel sharp at an internal resolution above
   1x; in a game that draws smooth-edged text that way it turns the text blocky (*Hot Shots Tennis* and
   *LittleBigPlanet* do, so leave it off for them). The launch line carries `texscale=<factor>` and `smart2d=on`.
-  Both change the frames the game can read back, and are not admitted as Enhanced items yet
-  ([section 11.3.3](ENHANCEMENT_CONTRACT.md#1133-texture-scaling-and-the-smart-2d-filter-texscale-smart2d-not-yet-admitted)).
+  Both change the frames the game can read back; they are admitted as Enhanced items and stay off by default
+  ([section 11.3.3](ENHANCEMENT_CONTRACT.md#1133-texture-scaling-and-the-smart-2d-filter-texscale-smart2d)).
   The `SR_TEX_SCALE` and `SR_SMART_2D` environment variables no longer switch them: a game started with either
   one set stops at once and names the setting to use.
   Each texture a game uploads is scaled once on two worker threads, off the game's thread: on the development PC (`-O2`, one thread) a 256x256 texture took about 2.0 ms at 2x, 2.8 ms at 4x

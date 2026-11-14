@@ -2508,7 +2508,7 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    badge, Finer patches (which changes GE timing, section 11.3.7), Short loads (which changes
    guest timing, section 11.3.10), a texture pack (the title's own, 11.3.4), Soft shadows
    (the title's own declared shadows, 11.3.13), Texture scaling or the Smart 2D filter (both
-   reach the guest and are not admitted, 11.3.3): those stay the library's and each game's own.
+   reach the guest and stay off by default, 11.3.3): those stay the library's and each game's own.
    docs/PLAYER_UI_DESIGN.md lists the same values, and test_graphics_presets checks that every
    other part is -1, so a new part needs a choice. */
 #define PRESET_PART_LIST(X, text, upscale, twin)                                          \

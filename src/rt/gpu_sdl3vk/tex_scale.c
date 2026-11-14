@@ -66,14 +66,13 @@ void nk_tex_scale_configure(const NkTexScaleConfig *cfg) {
 
 const NkTexScaleConfig *nk_tex_scale_config(void) { return &s_cfg; }
 
-size_t nk_tex_scale_admission_line(const NkTexScaleConfig *cfg, char *out, size_t cap) {
+size_t nk_tex_scale_guest_visible_line(const NkTexScaleConfig *cfg, char *out, size_t cap) {
     if (!out || cap == 0) return 0;
     out[0] = '\0';
     if (!cfg || (!cfg->factor && !cfg->smart2d)) return 0;
     const int n = snprintf(out, cap,
-                           "TEX_SCALE: guest-visible, on through the launch line's texscale/smart2d keys and not "
-                           "admitted under contract section 11.2 (each present commits the frame to guest VRAM; see "
-                           "the contract's \"Texture Scaling and the Smart 2D Filter\" entry)");
+                           "TEX_SCALE: guest-visible (contract section 11.3.3): each present commits the frame, "
+                           "with its scaled copies and nearest 2D draws in it, to guest VRAM");
     return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1);
 }
 
@@ -117,7 +116,7 @@ const NkTexScaleConfig *nk_tex_scale_init(int enhanced, int factor, int smart2d,
         snprintf(line, sizeof(line), "TEX_SCALE: on (xbrz=%s, smart2d=%s, budget_mb=%llu)", f,
                  c.smart2d ? "on" : "off", (unsigned long long)(c.budget_bytes >> 20));
         start_line(line);
-        if (nk_tex_scale_admission_line(&c, line, sizeof(line))) start_line(line);
+        if (nk_tex_scale_guest_visible_line(&c, line, sizeof(line))) start_line(line);
     }
     return &s_cfg;
 }

@@ -1005,8 +1005,9 @@ back from the line a session is configured with.
 
 ### 10.10. Texture Scaling and the Smart 2D Filter
 
-Two features in the Vulkan GE renderer (#1273). Both are guest-visible (section 11.1) and are not admitted under
-section 11.2: section 11.3.3 is their entry and says what the guest can observe, and this section says how they draw.
+Two features in the Vulkan GE renderer (#1273). Both are guest-visible (section 11.1) and admitted under
+section 11.2, off by default: section 11.3.3 is their entry and says what the guest can observe and what evidence is
+still owed, and this section says how they draw.
 The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture cache; the scaler is xBRZ 1.9
 (`third_party/xbrz/`, GPL-3.0).
 
@@ -1023,7 +1024,7 @@ The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture
   feature as a part that did not run (section 10.4). No environment variable turns either feature on: `SR_TEX_SCALE`
   and `SR_SMART_2D`, which did before the keys existed, are retired, and a run started with either set to anything
   (`off` included) stops at once with one line that names the key, as `SR_GLYPHS` does (section 10.13). Section
-  11.3.3 is their entry; they are not admitted.
+  11.3.3 is their entry: admitted, off by default.
 - **What is scaled.** A texture the texture cache decodes, with one level (no mipmaps), after its palette lookup.
   The factor drops for a texture whose scaled side would pass 2048 texels, and a texture that would pass 2048 at 2x
   is not scaled. The image is padded by two texels, repeated or clamped by the texture's wrap mode, so a repeating
@@ -2440,6 +2441,9 @@ the software renderer's.
 
 No guest-visible item is admitted by this section alone. Each lands in its own pull request with its entry added here
 (`11.3.<n>`), following the order of section 11.2. This section is the template that entry is checked against.
+The owner may admit an item that is off by default while its entry still lacks something section 11.2 asks for: the
+entry then names the decision in its status and lists each missing thing as evidence owed, and the item stays off by
+default until item 4 is met.
 
 #### 11.3.1. Band-Limited SAS Resampling (`sas=sinc`)
 
@@ -2808,17 +2812,19 @@ copy changes only the factor.
 - **Sampled checking.** As section 11.3.2.
 - **"Nothing worse".** As section 11.3.2.4.
 
-#### 11.3.3. Texture Scaling and the Smart 2D Filter (`texscale`, `smart2d`, Not Yet Admitted)
+#### 11.3.3. Texture Scaling and the Smart 2D Filter (`texscale`, `smart2d`)
 
 The two features of section 10.10 (#1273). Their presentation is described there; this entry is what the guest can
 observe.
 
-- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
+- **Status: guest-visible, admitted under section 11.2 by the owner's decision of 2026-11-14 for v0.0.3, off by
+  default.** Each present commits the frame it shows to guest VRAM,
   so a frame drawn with a scaled copy, or with a 1:1 draw sampled nearest by smart 2D, is the frame the guest keeps.
-  Their keys, their library and per-title settings and this entry are in place (section 11.2, items 2, 3 and 6). The
-  runs of item 4 do not exist, the picture comparison of item 1 is not in this repository (below), and the two
-  titles smart 2D is known to make worse have no off switch in their packages (item 5, below), so both stay off by
-  default and in no preset. The admission is the owner's.
+  Their keys, their library and per-title settings and this entry are in place (section 11.2, items 2, 3 and 6).
+  The decision admits them with three things section 11.2 asks for still owed (section 11.3); they are known limits,
+  each described below, and no evidence for them exists yet: the comparison runs of item 4, the byte-for-byte
+  authentic-picture test of item 1, and an off switch for smart 2D in the packages of the two titles it is known to
+  make worse (item 5). Both parts stay off by default and in no preset until the runs of item 4 exist.
 - **Key and off switch.** `texscale=off`, or `texscale=2` to `texscale=6` (the xBRZ factor), and `smart2d=on` or
   `smart2d=off` on the launch line (section 10.1), optional keys like `texpack`: a line without one, or with its
   `off`, has it off and formats byte for byte as a line from before the keys. Any other value (`texscale=1`,
@@ -2833,8 +2839,8 @@ observe.
   either set to anything, `off` included, stops at start with a line that names the key (the `--retired-env` runs
   of `ace-selftest`).
 - **Never silent.** A run with a key on prints `ACE_MODE: texscale <factor> (...)` or `ACE_MODE: smart2d on (...)`
-  with the other Ace lines and, after its `TEX_SCALE: on` line, one line naming the features as guest-visible, on
-  through the launch line's `texscale`/`smart2d` keys and not admitted under section 11.2. The run's report carries
+  with the other Ace lines and, after its `TEX_SCALE: on` line, one line naming the features as guest-visible
+  under this entry. The run's report carries
   `texscale` (the factor in effect, 0 when the renderer could not give it) and `smart2d`. A request the renderer
   refuses (a scaled-copy budget outside its range), or one no Vulkan renderer took, is reported at exit as a part that
   did not run (section 10.4). The `tex-scale-selftest` settings cell and `ace-selftest` pin these lines.
@@ -2860,11 +2866,11 @@ observe.
   features asked for and checks that neither takes, and `tex-scale-gate-mutant` removes that gate and passes only
   when the cell fails for it; `gpu-texscale-selftest`'s replace-only run starts the renderer on an Enhanced line
   without either key, with the retired variables set, and checks that both features are off. No test here draws a
-  scene authentic and compares its framebuffer byte for byte with the same draw in a build without the features;
-  admission needs one.
-- **Nothing worse (section 11.2, item 4):** not shown. *Hot Shots Tennis* and *LittleBigPlanet* keep smart 2D off
-  (section 10.10), and neither feature may be on by default before the runs item 4 lists exist.
-- **Per-title off switch (section 11.2, item 5).** None yet. Smart 2D makes the text of *Hot Shots Tennis* and
+  scene authentic and compares its framebuffer byte for byte with the same draw in a build without the features:
+  that test is owed.
+- **Nothing worse (section 11.2, item 4):** not shown; the runs are owed. *Hot Shots Tennis* and *LittleBigPlanet*
+  keep smart 2D off (section 10.10), and neither feature may be on by default before the runs item 4 lists exist.
+- **Per-title off switch (section 11.2, item 5).** None yet; it is owed. Smart 2D makes the text of *Hot Shots Tennis* and
   *LittleBigPlanet* worse (section 10.10). The part is off for every title unless the player turns it on, and each
   of those games' own pages can keep it off, but neither title's package carries the off switch item 5 asks for;
   the part needs it before it can be on by default.

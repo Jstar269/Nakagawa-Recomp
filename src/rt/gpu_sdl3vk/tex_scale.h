@@ -27,9 +27,9 @@
  *
  * Both features are guest-visible (docs/ENHANCEMENT_CONTRACT.md, the section 11.3 entry "Texture
  * Scaling and the Smart 2D Filter"): each present commits the frame, scaled copies and nearest 2D
- * draws included, to guest VRAM. They are not admitted under section 11.2: their keys and their
- * library and per-title switches exist, the comparison runs of its item 4 do not, so a run that
- * turns one on says so at start.
+ * draws included, to guest VRAM. They are admitted under section 11.2, off by default (the entry
+ * lists the evidence still owed), and a run that turns one on says at start that it is
+ * guest-visible.
  */
 #ifndef NK_TEX_SCALE_H
 #define NK_TEX_SCALE_H
@@ -72,10 +72,10 @@ int nk_tex_scale_parse(int factor, int smart2d, const char *budget_mb,
  * Returns the configuration in force. */
 const NkTexScaleConfig *nk_tex_scale_init(int enhanced, int factor, int smart2d, char *refused,
                                           size_t refused_cap);
-/* The start line naming a guest-visible configuration that is on through the launch line,
- * outside section 11.2 admission. Writes it to `out` (without a newline) and returns its length
- * when either feature is on; returns 0 and writes an empty string when both are off. */
-size_t nk_tex_scale_admission_line(const NkTexScaleConfig *cfg, char *out, size_t cap);
+/* The start line naming a configuration that is on as guest-visible under its contract entry.
+ * Writes it to `out` (without a newline) and returns its length when either feature is on;
+ * returns 0 and writes an empty string when both are off. */
+size_t nk_tex_scale_guest_visible_line(const NkTexScaleConfig *cfg, char *out, size_t cap);
 /* The lines the last nk_tex_scale_init printed, each ending in a newline ("" for
  * none), for the self-test. */
 const char *nk_tex_scale_start_lines(void);
