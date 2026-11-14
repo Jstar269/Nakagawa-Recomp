@@ -19,10 +19,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(_WIN32) && defined(NK_UI_WITH_SDL_TTF)
-#include <windows.h>
-#endif
-
 static char g_nk_ui_ttf_error[256] = "";
 
 static void nk_ui_ttf_set_error(const char *message) {
@@ -467,9 +463,13 @@ static void nk_ui_ttf_clear_library(NkUiTtf *ttf) {
     memset(&ttf->api, 0, sizeof(ttf->api));
 }
 
-#if defined(_WIN32)
 #define NK_UI_TTF_DEFAULT_MAX 2u
 #define NK_UI_TTF_PATH_MAX 1024u
+
+/* The host's default candidates and loader: the only host branch in this file (the UI
+   library links no platform layer). */
+#if defined(_WIN32)
+#include <windows.h>
 
 /* Windows: the fallback SDL3_ttf.dll by full path, never by bare name, which the loader's
    legacy search would also look for in the current folder and on PATH. First beside this
@@ -535,22 +535,29 @@ static SDL_SharedObject *nk_ui_ttf_load_object(const char *candidate) {
     if (cookie != NULL) (void)RemoveDllDirectory(cookie);
     return library;
 }
+#elif defined(__APPLE__)
+#define NK_UI_TTF_SONAME "libSDL3_ttf.0.dylib"
+#elif defined(__ANDROID__)
+#define NK_UI_TTF_SONAME "libSDL3_ttf.so"   /* APK libraries carry no version */
+#else
+#define NK_UI_TTF_SONAME "libSDL3_ttf.so.0"
+#endif
+
+#if defined(NK_UI_TTF_SONAME)
+/* Elsewhere one default, the library's soname, found by the dynamic linker's own search. */
+static size_t nk_ui_ttf_default_paths(char out[NK_UI_TTF_DEFAULT_MAX][NK_UI_TTF_PATH_MAX]) {
+    snprintf(out[0], NK_UI_TTF_PATH_MAX, "%s", NK_UI_TTF_SONAME);
+    return 1u;
+}
+
+static SDL_SharedObject *nk_ui_ttf_load_object(const char *candidate) {
+    return SDL_LoadObject(candidate);
+}
 #endif
 
 NkUiTtf *nk_ui_ttf_create(const char *const *library_paths, size_t count) {
-#if defined(_WIN32)
     char defaults[NK_UI_TTF_DEFAULT_MAX][NK_UI_TTF_PATH_MAX];
     const size_t default_count = nk_ui_ttf_default_paths(defaults);
-#else
-#if defined(__APPLE__)
-    static const char *const default_name = "libSDL3_ttf.0.dylib";
-#elif defined(__ANDROID__)
-    static const char *const default_name = "libSDL3_ttf.so";   /* APK libraries carry no version */
-#else
-    static const char *const default_name = "libSDL3_ttf.so.0";
-#endif
-    const size_t default_count = 1u;
-#endif
     NkUiTtf *ttf;
     size_t i;
     /* Room for a full candidate path and SDL's message; nk_ui_ttf_set_error keeps the start. */
@@ -562,22 +569,13 @@ NkUiTtf *nk_ui_ttf_create(const char *const *library_paths, size_t count) {
         return NULL;
     }
     for (i = 0; i < count + default_count && ttf->library == NULL; ++i) {
-#if defined(_WIN32)
         const char *candidate = i < count ? (library_paths != NULL ? library_paths[i] : NULL)
                                           : defaults[i - count];
-#else
-        const char *candidate = i < count ? (library_paths != NULL ? library_paths[i] : NULL)
-                                          : default_name;
-#endif
         SDL_SharedObject *library;
         if (candidate == NULL || candidate[0] == '\0') {
             continue;
         }
-#if defined(_WIN32)
         library = nk_ui_ttf_load_object(candidate);
-#else
-        library = SDL_LoadObject(candidate);
-#endif
         if (library == NULL) {
             snprintf(reason, sizeof(reason), "cannot load %s: %s", candidate, SDL_GetError());
             continue;
