@@ -1878,7 +1878,11 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertEqual(profile_path.read_bytes(), original_profile)
 
     def test_catalogued_display_smoke_plan_matches_main_bytes(self):
-        """Keep the catalogued package plan byte-identical to the current-main baseline."""
+        """Keep the catalogued package plan byte-identical to the current-main baseline.
+
+        The digest changed once with the fixture tree's move to tests/fixtures/: the plan's three
+        commands name the ELF path given below, and nothing else in it differs.
+        """
         import title_codegen_plan
         import title_manifest
 
@@ -1894,7 +1898,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
         plan_bytes = title_codegen_plan.canonical_json(plan).encode("utf-8")
         self.assertEqual(
             hashlib.sha256(plan_bytes).hexdigest(),
-            "d91456c94956e805509f5e3118bf77fa96d14641c37ce50abce81f8a2f16f46b",
+            "9179a38d7fac856165c8f9d27c41b522e06be654480e8d0a644d038e55886f85",
         )
 
     def test_build_validates_and_launches_through_the_player(self):

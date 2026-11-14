@@ -722,7 +722,7 @@ class Title2ContractTests(unittest.TestCase):
         env["SR_DATAROOT"] = "."
         result = subprocess.run(
             [sys.executable, "-c",
-             "import fixtures.platform_ladder.generate as g; "
+             "import sys; sys.path.insert(0, 'tests/fixtures/platform_ladder'); import generate as g; "
              "print(f'cell={g.TITLE2_MEM_CELL_INIT}->{g.TITLE2_MEM_CELL_EXPECTED}')"],
             capture_output=True, text=True, env=env, cwd=str(ROOT),
         )

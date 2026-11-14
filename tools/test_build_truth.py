@@ -3056,8 +3056,9 @@ class MachinePortabilityTests(unittest.TestCase):
         folders = sorted(child.name for child in tree.iterdir() if child.is_dir())
         self.assertGreaterEqual(len(folders), 20, "the fixture tree is missing")
         names = "|".join(re.escape(name) for name in folders)
-        # fixtures/<folder>, fixtures\<folder> and the pathlib form "fixtures" / "<folder>".
-        mention = re.compile(rf"""fixtures(?:[/\\]+|["']\s*/\s*["'])(?:{names})\b""")
+        # fixtures/<folder>, fixtures\<folder>, the pathlib form "fixtures" / "<folder>" and the
+        # module form fixtures.<folder>.
+        mention = re.compile(rf"""fixtures(?:[/\\]+|["']\s*/\s*["']|\.)(?:{names})\b""")
         qualified = re.compile(r"""(?:tests(?:[/\\]+|["']\s*/\s*["'])|build[/\\]+|["']build["']\s*/\s*["']|[\w.-])$""")
         # These name the old folder on purpose, to assert that it has no rule left.
         allowed = frozenset({
