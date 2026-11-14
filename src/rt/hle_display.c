@@ -217,6 +217,18 @@ static void picture_probe_collect(int block) {
     picture_probe_resumed(verdict, brightest);
 }
 
+/* Late pad sampling's input latency (ace.h), host-side only and kept only while the run's line
+ * asks for pad=late: a frame was set since the last present, the
+ * controller's read count (ctrl_read_seq) and the poll time of the newest sample read when it
+ * was set, and the read count the last measured frame was charged with. A read is charged to the
+ * first new frame set after it: a read after a frame's SetFrameBuf cannot be in that frame, and
+ * one whose frame was presented never ages into a later one. A flip of a latched frame or of the
+ * frame already shown leaves the read for the next new frame. */
+static int s_flip_set;
+static uint64_t s_flip_read_seq;
+static uint64_t s_flip_input_ns;
+static uint64_t s_flip_counted_seq;
+
 /* Present the active framebuffer, then close this frame's capture (fbcap.h): the presenter
  * that showed the frame has already serviced an armed capture, and an arm nobody serviced
  * (a skipped output slot, a presenter that declined the frame) resolves here as "nothing
@@ -239,11 +251,26 @@ static void display_present_active(void) {
         probe = sr_capture_arm_probe();
     /* Ace Mode's 30 Hz detector (ace.h) sees every flip here, before the presenter's own slot
      * rule can drop a second flip in one VBLANK. Off, nothing is read. */
+    int new_frame = 0;
     if (g_ace_on && s_display_active.addr) {
         uint32_t bytes = (uint32_t)(s_display_active.stride > 0 ? s_display_active.stride : 512) *
                          272u * (s_display_active.fmt == 3 ? 4u : 2u);
-        (void)ace_flip(s_display_active.addr & 0x1FFFFFu, bytes, s_vcount,
-                       sr_host_monotonic_ms() * 1000000ull);
+        new_frame = ace_flip(s_display_active.addr & 0x1FFFFFu, bytes, s_vcount,
+                             sr_host_monotonic_ms() * 1000000ull);
+    }
+    if (ace_pad_requested() && s_flip_set) {
+        /* A new frame set after a read no earlier frame was charged with is measured from that
+         * read's poll. Any other present, a repeat of the frame shown or a new frame set with no
+         * read since the last measured one, is counted, not measured: the age of an older read
+         * is not that frame's latency. */
+        const uint64_t now = sched_host_now_ns();
+        if (new_frame && s_flip_read_seq != s_flip_counted_seq) {
+            s_flip_counted_seq = s_flip_read_seq;
+            if (now > s_flip_input_ns) ace_note_input_latency(now - s_flip_input_ns);
+        } else {
+            ace_note_frame_without_read();
+        }
+        s_flip_set = 0;
     }
     /* A recording counts the guest's own flips beside the picture (videorec.h). */
     sr_videorec_guest_flip();
@@ -686,6 +713,11 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
         return display_setframebuf_reject(0x80000107u, addr, stride, fmt, sync);
 
     DisplayFrameState requested = { addr, stride, fmt };
+    if (ace_pad_requested()) {
+        s_flip_set = 1;
+        s_flip_read_seq = ctrl_read_seq();
+        s_flip_input_ns = ctrl_last_read_poll_ns();
+    }
     if (sync == 0u) {
         s_setfb.immediate++;
         /* PSP names sync=0 IMMEDIATE.  The host has no scanline clock, so this

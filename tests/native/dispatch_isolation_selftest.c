@@ -45,6 +45,7 @@ void sr_ge_vram_write_commit(uint32_t addr, uint32_t width) { (void)addr; (void)
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
+#include <io.h>
 #include <windows.h>
 #include <wchar.h>
 #else
@@ -540,6 +541,135 @@ static void test_mixed_overlay_is_identified_by_its_code_ranges(void) {
               !sr_module_code_is_bound(&k_mixed, NULL),
           "a write to a code range unbinds it");
 
+    sr_module_code_reset();
+}
+
+/* Words a module's analysis withdrew as non-code (tools/analyze.py) lie outside its spans and
+ * are named: a transfer into one stops with NON_CODE_WITHDRAWN (dispatch_run_interp), so a
+ * wrong withdrawal is one line in the log. */
+static const SrModuleSpan k_module_a_non_code_spans[] = { { MODULE_GAP_OFF, MODULE_GAP_OFF + 0x10u } };
+static const SrModuleNonCode k_module_a_non_code = {
+    &k_module_a, k_module_a_non_code_spans, 1u, 1u, 4u,
+};
+
+/* The stderr of one call, for a test that asserts the line a stop prints. */
+static FILE *s_capture;
+static int s_capture_fd = -1;
+
+static int stderr_capture_begin(void) {
+    s_capture = tmpfile();
+    if (!s_capture) return 0;
+    fflush(stderr);
+    s_capture_fd = dup(fileno(stderr));
+    if (s_capture_fd < 0 || dup2(fileno(s_capture), fileno(stderr)) < 0) {
+        if (s_capture_fd >= 0) close(s_capture_fd);
+        s_capture_fd = -1;
+        fclose(s_capture);
+        s_capture = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+/* Restores stderr, replays what was captured (so the run log keeps it) and returns it. */
+static const char *stderr_capture_end(char *out, size_t size) {
+    out[0] = '\0';
+    if (!s_capture) return out;
+    fflush(stderr);
+    rewind(s_capture);
+    size_t n = fread(out, 1u, size - 1u, s_capture);
+    out[n] = '\0';
+    dup2(s_capture_fd, fileno(stderr));
+    close(s_capture_fd);
+    s_capture_fd = -1;
+    fclose(s_capture);
+    s_capture = NULL;
+    fputs(out, stderr);
+    return out;
+}
+
+/* A module whose analysis withdrew non-code has a span per run of code between the
+ * withdrawn words. The lookup and the fetch-authority query find the span by a binary
+ * search: every span answers for its own words, and no gap, word before the first span or
+ * word past the last one is owned. */
+static uint32_t g_module_c_base;
+static const SrModuleFunc k_module_c_funcs[] = {
+    { 0x08u, 2u, module_a_entry }, { 0x20u, 2u, module_a_entry }, { 0x40u, 1u, module_a_entry },
+    { 0x60u, 2u, module_a_entry }, { 0x80u, 2u, module_a_entry },
+};
+static const SrModuleSpan k_module_c_spans[] = {
+    { 0x08u, 0x10u }, { 0x20u, 0x30u }, { 0x40u, 0x44u }, { 0x60u, 0x70u }, { 0x80u, 0x90u },
+};
+static const SrModuleCode k_module_c = {
+    "overlay_c.prx", 0x200u, NULL, 0x00u, 0x100u, 0x10u, 1u, NULL, &g_module_c_base,
+    k_module_c_funcs, 5u, k_module_c_spans, 5u, 0u, 0u, NULL, 0u, NULL, 0u,
+};
+
+static void test_runtime_module_spans_are_searched(void) {
+    SrModuleBindDetail detail;
+    static const uint32_t owned[] = { 0x08u, 0x0cu, 0x20u, 0x2cu, 0x40u, 0x60u, 0x6cu, 0x80u, 0x8cu };
+    static const uint32_t gaps[] = { 0x00u, 0x04u, 0x10u, 0x1cu, 0x30u, 0x44u, 0x5cu, 0x70u, 0x90u, 0xfcu };
+    sr_module_code_reset();
+    sr_exec_span_reset();
+    sr_module_code_register(&k_module_c);
+    CHECK(sr_module_code_bind(&k_module_c, MODULE_BASE_LOW, &detail) == SR_MODULE_BIND_OK,
+          "module C binds (address 0x%08x)", detail.address);
+    for (size_t i = 0; i < sizeof owned / sizeof owned[0]; i++)
+        CHECK(sr_module_code_fetch_authority(MODULE_BASE_LOW + owned[i]) == 1,
+              "a word of a span is executable (link 0x%02x)", owned[i]);
+    for (size_t i = 0; i < sizeof gaps / sizeof gaps[0]; i++) {
+        int in_bound = 0;
+        CHECK(sr_module_code_fetch_authority(MODULE_BASE_LOW + gaps[i]) == 0 &&
+                  sr_module_code_lookup(MODULE_BASE_LOW + gaps[i], &in_bound) == NULL && in_bound,
+              "a word outside every span is neither executable nor a body (link 0x%02x)", gaps[i]);
+    }
+    for (size_t i = 0; i < sizeof k_module_c_funcs / sizeof k_module_c_funcs[0]; i++)
+        CHECK(sr_module_code_lookup(MODULE_BASE_LOW + k_module_c_funcs[i].offset, NULL) ==
+                  k_module_c_funcs[i].fn,
+              "each span's entry is found (link 0x%02x)", k_module_c_funcs[i].offset);
+    sr_module_code_unbind(&k_module_c);
+    sr_module_code_reset();
+}
+
+static void test_runtime_module_non_code_is_named(void) {
+    SrModuleBindDetail detail;
+    const char *name = NULL;
+    uint32_t link = 0u;
+    char log[8192];
+    sr_module_code_reset();
+    sr_exec_span_reset();
+    sr_module_code_register(&k_module_a);
+    sr_module_code_non_code_register(&k_module_a_non_code);
+    sr_module_code_non_code_register(&k_module_a_non_code);   /* registers once */
+    CHECK(!sr_module_code_non_code(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u, &name, &link),
+          "an unbound module names nothing");
+    CHECK(sr_module_code_bind(&k_module_a, MODULE_BASE_LOW, &detail) == SR_MODULE_BIND_OK,
+          "module A binds (address 0x%08x)", detail.address);
+    CHECK(sr_module_code_non_code(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u, &name, &link) &&
+              name && strcmp(name, "overlay_a.prx") == 0 && link == MODULE_GAP_OFF + 4u,
+          "a withdrawn word of a bound module is named with its module and link address");
+    CHECK(sr_module_code_fetch_authority(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u) == 0,
+          "a withdrawn word is not executable");
+    int capturing = stderr_capture_begin();
+    CHECK(capturing, "stderr capture for the withdrawn-word stop");
+    Probe stop = probe(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u, PROBE_PC, PROBE_RA);
+    stderr_capture_end(log, sizeof log);
+    CHECK(!stop.body_ran && stop.dispatch_result < 0,
+          "a transfer into a withdrawn word runs nothing and fails");
+    CHECK(strstr(log, "NON_CODE_WITHDRAWN") && strstr(log, "overlay_a.prx@0x"),
+          "the stop names the withdrawn word with its module (NON_CODE_WITHDRAWN)");
+    CHECK(!sr_module_code_non_code(MODULE_BASE_LOW + 0x20u, NULL, NULL) &&
+              !sr_module_code_non_code(MODULE_BASE_LOW + MODULE_GAP_OFF + 0x10u, NULL, NULL),
+          "span words and words past the withdrawn range are not named");
+    sr_module_code_unbind(&k_module_a);
+    CHECK(!sr_module_code_non_code(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u, NULL, NULL),
+          "an unbound module's withdrawn words are not named");
+    sr_module_code_reset();
+    sr_module_code_register(&k_module_a);
+    CHECK(sr_module_code_bind(&k_module_a, MODULE_BASE_LOW, &detail) == SR_MODULE_BIND_OK,
+          "module A binds again after a reset");
+    CHECK(!sr_module_code_non_code(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u, NULL, NULL),
+          "a reset drops the non-code records with the modules");
     sr_module_code_reset();
 }
 
@@ -1149,6 +1279,97 @@ static void test_nested_call_ra_zero_cannot_return_from_the_interpreter_floor(vo
           sr_guest_interp_result_name(result), s.pc, g_interp_handoff_hits);
 
     sr_exec_span_reset();
+}
+
+/* The executable's spans, registered out of order and overlapping (the primary image and
+ * extra images each register their own, and withdrawn words split them), are searched as a
+ * sorted set: every word is owned exactly when some span holds its whole fetch slot, and a
+ * word that is not owned is a fetch boundary exactly when some span has start <= pc <= end.
+ * A seeded random set checks the same against a linear oracle. */
+#define EXEC_SPAN_BASE 0x00700000u
+typedef struct { uint32_t start, end; } ExecSpanCase;
+
+static void exec_span_oracle(const ExecSpanCase *spans, size_t count, uint32_t pc,
+                             int *owned, int *touched) {
+    *owned = 0;
+    *touched = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (pc >= spans[i].start && pc <= spans[i].end) {
+            *touched = 1;
+            if (pc < spans[i].end && spans[i].end - pc >= 4u) *owned = 1;
+        }
+    }
+}
+
+static void check_exec_spans(const ExecSpanCase *spans, size_t count, uint32_t lo, uint32_t hi,
+                             const char *what) {
+    sr_exec_span_reset();
+    for (size_t i = 0; i < count; i++)
+        CHECK(sr_exec_span_register(spans[i].start, spans[i].end),
+              "%s: span %zu [0x%08x, 0x%08x) registers", what, i, spans[i].start, spans[i].end);
+    int wrong = 0;
+    for (uint32_t pc = lo; pc < hi && wrong < 4; pc += 4u) {
+        int owned, touched;
+        exec_span_oracle(spans, count, pc, &owned, &touched);
+        if (sr_exec_span_owns_fetch(pc) != owned) {
+            CHECK(0, "%s: 0x%08x owned %d, expected %d", what, pc, !owned, owned);
+            wrong++;
+            continue;
+        }
+        if (owned) continue;
+        SrGuestInterpFault fault;
+        CpuState state = reject_state();
+        SrGuestInterpResult result = sr_guest_interp_run(&state, pc, &fault);
+        SrGuestInterpResult expected =
+            touched ? SR_GUEST_INTERP_FETCH_BOUNDARY : SR_GUEST_INTERP_NOT_EXECUTABLE;
+        if (result != expected) {
+            CHECK(0, "%s: interpreter fetch at 0x%08x returned %s, expected %s", what, pc,
+                  sr_guest_interp_result_name(result), sr_guest_interp_result_name(expected));
+            wrong++;
+        }
+    }
+    sr_exec_span_reset();
+}
+
+static void test_executable_spans_are_searched(void) {
+    const uint32_t b = EXEC_SPAN_BASE;
+    /* Out of order; nested; overlapping; one sharing a start; an exact duplicate; one whose
+     * end cuts its last word (end - pc < 4); gaps between. */
+    const ExecSpanCase fixed[9] = {
+        { b + 0x200u, b + 0x240u }, { b + 0x000u, b + 0x100u }, { b + 0x020u, b + 0x040u },
+        { b + 0x0f0u, b + 0x180u }, { b + 0x200u, b + 0x210u }, { b + 0x300u, b + 0x306u },
+        { b + 0x000u, b + 0x100u }, { b + 0x400u, b + 0x404u }, { b + 0x180u, b + 0x1a0u },
+    };
+    check_exec_spans(fixed, 9u, b - 0x20u, b + 0x440u, "fixed set");
+
+    /* A long earlier span must still be found behind many later, shorter ones. */
+    static ExecSpanCase shadowed[66];
+    shadowed[0].start = b;
+    shadowed[0].end = b + 0x1000u;
+    for (size_t i = 1; i < 66; i++) {
+        shadowed[i].start = b + 0x1100u + 0x10u * (uint32_t)(65u - i);
+        shadowed[i].end = shadowed[i].start + 8u;
+    }
+    shadowed[65].start = b + 0x10u;   /* a short span inside the long one */
+    shadowed[65].end = b + 0x18u;
+    check_exec_spans(shadowed, 66u, b - 0x10u, b + 0x1520u, "a long span behind short ones");
+
+    static ExecSpanCase random_set[200];
+    uint32_t x = 0x2564u;
+    for (unsigned round = 0; round < 8u; round++) {
+        size_t count = 2u + (size_t)(round * 25u);
+        for (size_t i = 0; i < count; i++) {
+            x = x * 1103515245u + 12345u;
+            uint32_t start = b + ((x >> 8) % 0x400u) * 4u;
+            x = x * 1103515245u + 12345u;
+            uint32_t length = 1u + (x >> 8) % ((round & 1u) ? 0x40u : 0x200u);
+            random_set[i].start = start;
+            random_set[i].end = start + length;
+        }
+        char what[32];
+        snprintf(what, sizeof what, "random set %u", round);
+        check_exec_spans(random_set, count, b - 0x10u, b + 0x1a00u, what);
+    }
 }
 
 static void test_interpreter_rejects_unowned_and_invalid_fetches(void) {
@@ -2553,6 +2774,9 @@ int main(int argc, char **argv) {
     test_call_boundary_keeps_callee_register_writes();
     test_historical_call_target_fails_at_named_boundary();
     test_runtime_module_binding_is_the_authority_for_its_range();
+    test_runtime_module_non_code_is_named();
+    test_runtime_module_spans_are_searched();
+    test_executable_spans_are_searched();
     test_code_overlays_follow_guest_memory();
     test_mixed_overlay_is_identified_by_its_code_ranges();
     test_late_import_retirement_is_visible_after_warm_dispatch();

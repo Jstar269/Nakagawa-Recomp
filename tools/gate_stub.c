@@ -228,7 +228,7 @@ void     gui_init(const char *title) { (void)title; }
 int      gui_on(void) { return 0; }
 void     gui_pump(void) {}
 uint32_t gui_buttons(void) { return 0u; }
-void     gui_consume_button_pulses(void) {}
+uint32_t gui_consume_button_pulses(void) { return 0u; }
 void     gui_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = 128; if (ly) *ly = 128; }
 int      gui_stick_dead_zone(void) { return 0; }
 int      gui_pad_present(void) { return 0; }

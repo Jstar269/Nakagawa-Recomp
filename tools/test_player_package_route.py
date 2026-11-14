@@ -2511,6 +2511,11 @@ class TestRuntimeDllStaging(unittest.TestCase):
             # The launcher music's track ships beside the player with the fonts (#2207),
             # without its folder's manifest.
             expected.add("assets/music/launcher/ChillLofi.ogg")
+            # The player's other bundled data goes with its fonts: the Redump PSP list (#1731).
+            redump_root = ROOT / "assets" / "redump"
+            expected |= {(Path("assets") / "redump" / path.name).as_posix()
+                         for path in redump_root.iterdir() if path.is_file()}
+            self.assertIn("assets/redump/redump-psp.zip", expected)
             self.assertEqual(set(staged), expected)
             self.assertFalse((player_dir / "assets/music/launcher/PROVENANCE.md").exists())
             for relative in expected:
@@ -2531,6 +2536,23 @@ class TestRuntimeDllStaging(unittest.TestCase):
             with self.assertRaises(stage_runtime_dlls.StageError) as ctx:
                 stage_runtime_dlls.stage_launcher_music(Path(tmp) / "player", repo_root=repo)
             self.assertIn("LAUNCHER_MUSIC_MISSING", str(ctx.exception))
+
+    def test_non_windows_player_staging_also_copies_the_redump_list(self) -> None:
+        # Linux and macOS take main()'s non-Windows branch; the player there needs the
+        # bundled Redump list beside it too, or every disc check says "no list" (#1731).
+        import stage_runtime_dlls
+
+        posix_os = SimpleNamespace(**{**vars(os), "name": "posix"})
+        with tempfile.TemporaryDirectory() as tmp:
+            player_dir = Path(tmp) / "player"
+            with patch.object(stage_runtime_dlls, "os", posix_os):
+                rc = stage_runtime_dlls.main(["--target", str(player_dir), "--include-ui-fonts"])
+            self.assertEqual(rc, 0)
+            staged = player_dir / "assets" / "redump" / "redump-psp.zip"
+            self.assertTrue(staged.is_file())
+            self.assertEqual(
+                staged.read_bytes(), (ROOT / "assets" / "redump" / "redump-psp.zip").read_bytes()
+            )
 
     def test_missing_sdl3_ttf_fails_the_stage_closed(self) -> None:
         import stage_runtime_dlls

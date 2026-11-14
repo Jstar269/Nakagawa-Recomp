@@ -3059,6 +3059,9 @@ typedef struct {
     PlayerDiscCheckItem item;
     bool verified_elsewhere;
     char data_root[NK_MAX_PATH];
+    /* The Redump list bundled beside the player (assets/redump); the user's
+       import in data_root takes precedence over it. */
+    char bundled_dat[NK_MAX_PATH];
     bool cancel_requested;
     bool finished;
     int percent;
@@ -3101,8 +3104,9 @@ static int SDLCALL disc_check_thread_main(void *userdata) {
     NkDiscExpandCallbacks callbacks = { disc_check_progress, disc_check_cancelled, job };
     NkDiscVerification check;
     player_ui_test_hold_disc_check();
-    bool hashed = nk_disc_verify_image(job->item.iso_path, job->data_root, job->item.disc_id,
-                                       job->verified_elsewhere, &callbacks, &check);
+    bool hashed = nk_disc_verify_image(job->item.iso_path, job->data_root, job->bundled_dat,
+                                       job->item.disc_id, job->verified_elsewhere, &callbacks,
+                                       &check);
     SDL_LockMutex(job->mutex);
     job->check = check;
     job->finished = true;
@@ -3130,8 +3134,14 @@ static void start_disc_check_job(PlayerApp *app, PlayerDiscCheckJob **job_slot) 
         return;
     }
     if (job) {
+        const char *base = SDL_GetBasePath();
         job->item = item;
         job->verified_elsewhere = verified_elsewhere;
+        /* No folder (or a path too long) leaves it empty: the import alone is
+           used, and with none the reason says no list was found. */
+        if (!base || !nk_disc_bundled_dat_path(base, job->bundled_dat, sizeof(job->bundled_dat))) {
+            job->bundled_dat[0] = '\0';
+        }
         job->mutex = SDL_CreateMutex();
     }
     if (job && job->mutex) {

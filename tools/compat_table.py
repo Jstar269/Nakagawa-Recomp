@@ -271,7 +271,8 @@ def render_markdown(summary: dict[str, Any], date: str) -> str:
             ]
         lines += [""]
     else:
-        lines += ["No Redump list was imported for this run, so every disc is **Not checked**.", ""]
+        lines += ["No Redump list was found for this run (neither the bundled list nor an import), "
+                  "so every disc is **Not checked**.", ""]
     header = "| Tier | " + " | ".join(VERIFICATION_LABELS[column] for column in VERIFICATION_COLUMNS)
     lines += ["The **Verified retail** column is the library's compatibility; modified and unknown "
               "images are counted beside it, apart.", ""]

@@ -257,6 +257,7 @@ typedef struct GeCpuProfileStats {
     uint64_t primitive_profile_actual_through_vertices;
     uint64_t primitive_profile_strip_cache_commands;
     uint64_t primitive_profile_strip_cache_hits;
+    uint64_t primitive_profile_vertex_cache_hits;  /* triangle vertex uses the per-draw cache served */
     uint64_t primitive_profile_through_triangle_candidates;
     uint64_t primitive_profile_transform_triangle_candidates;
     uint64_t primitive_profile_transform_triangles_drawn;
@@ -749,6 +750,17 @@ void      ge_clut_note_load(uint32_t bytes);
 void      ge_replay_restore(const GeState *state, const uint16_t *zbuf);
 void      ge_cpu_profile_reset(void);
 void      ge_cpu_profile_get(GeCpuProfileStats *out);
+/* The software GE's per-draw transformed-vertex cache (SR_GE_VERTEX_CACHE_DISABLE): triangle
+ * vertex uses it served, uses it transformed, and uses it bypassed (always transformed: a vertex
+ * outside plain RAM, or any vertex of a draw whose colour target is in RAM), whole run, counted
+ * whether or not a profile is on (SR_GESTAT's GESTAT+ line prints each window's share as
+ * vcache_hits, vcache_misses and vcache_bypasses). With the cache off, and in draws that never
+ * use an address twice (a non-indexed list, or a non-indexed strip with its rolling pair),
+ * none counts. */
+extern unsigned long g_ge_vertex_cache_hits, g_ge_vertex_cache_misses, g_ge_vertex_cache_bypasses;
+/* Re-read SR_GE_VERTEX_CACHE_DISABLE at the next draw (ge.c latches it); for selftests that
+ * compare both settings in one process. */
+void      ge_vertex_cache_reload_env(void);
 /* Check a ge_cpu_profile_get() snapshot against every GeProfileCheck relation and return
  * the mask of failed checks (0 when consistent; every bit when stats is NULL).  Pure: no
  * I/O, environment, or global state, so it adds nothing to the GE paths that produce the

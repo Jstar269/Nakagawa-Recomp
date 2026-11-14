@@ -670,6 +670,56 @@
               }
             }
           }
+        },
+        "soft_shadows": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "textures"
+          ],
+          "description": "Soft shadows (SR_ACE shadow=soft, sections 10.23 and 11.3.13): the title's blob-shadow textures, drawn by the Vulkan GE renderer from a copy with a softened alpha edge. Generated code declares them to the runtime once at start.",
+          "properties": {
+            "textures": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "texture_digest",
+                  "transform",
+                  "edge_texels"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$",
+                    "description": "Symbolic identifier, unique across sites and every ace part (one namespace with their site ids); raw address literals are forbidden."
+                  },
+                  "texture_digest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                    "description": "Lowercase hex HMAC-SHA-256 of the decoded level-0 texture under the executable's stock-digest key (section 10.23). Always keyed, in a private package as in a published one: it names a texture without revealing its size, palette or texels."
+                  },
+                  "transform": {
+                    "type": "string",
+                    "enum": [
+                      "alpha_edge_soften"
+                    ],
+                    "description": "alpha_edge_soften: while shadow=soft is in effect the texture is drawn from a 4x copy whose alpha edge is widened and smoothed."
+                  },
+                  "edge_texels": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4,
+                    "description": "The width of the texture's stock alpha ramp, in source texels."
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },

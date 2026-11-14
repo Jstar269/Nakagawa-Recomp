@@ -229,6 +229,8 @@ add_executable(test_disc_verify
 )
 target_link_libraries(test_disc_verify PRIVATE nakagawa_core)
 add_test(NAME disc_verify_test COMMAND test_disc_verify)
+# It reads the bundled Redump list at assets/redump/redump-psp.zip, relative to the checkout.
+set_tests_properties(disc_verify_test PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(test_nk_zip
     tests/native/test_nk_zip.c
@@ -829,6 +831,13 @@ if(BUILD_PLAYER)
             "${CMAKE_CURRENT_SOURCE_DIR}/assets/music/launcher/ChillLofi.ogg"
             "$<TARGET_FILE_DIR:nakagawa_player>/assets/music/launcher/ChillLofi.ogg"
         COMMENT "Staging the launcher music's track beside nakagawa_player"
+        VERBATIM
+    )
+    add_custom_command(TARGET nakagawa_player POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/redump"
+            "$<TARGET_FILE_DIR:nakagawa_player>/assets/redump"
+        COMMENT "Staging the bundled Redump PSP list beside nakagawa_player"
         VERBATIM
     )
     if(WIN32)

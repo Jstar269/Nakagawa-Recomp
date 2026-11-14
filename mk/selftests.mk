@@ -427,17 +427,61 @@ native-core-tests: ge-float24-selftest
 # each profile switch; then faults injected into copies of those blocks, each of which
 # must fail exactly the checks it breaks.  Also the VRAM viewer's sources and decode, and its
 # SR_VRAMDUMP captures (#314): two captures are written next to the binary and removed.  Run
-# twice because ge.c latches the strip-cache switch per process.  No game input.
+# twice because ge.c latches the strip-cache switch per process, and a third time with the
+# per-draw vertex cache off for the scenes (its own case compares the cache on and off in
+# every run).  No game input.
 GE_CPU_PROFILE_VALIDATE_SELFTEST := $(BUILD_DIR)/ge_cpu_profile_validate_selftest$(EXE_EXT)
 
 ge-cpu-profile-validate-selftest: $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_CPU_PROFILE_VALIDATE_SELFTEST) \
 		tests/native/ge_cpu_profile_validate_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
 		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST)
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled
+	SR_GE_VERTEX_CACHE_DISABLE=1 $(GE_CPU_PROFILE_VALIDATE_SELFTEST)
 
-native-core-tests: ge-cpu-profile-validate-selftest
+native-core-tests: ge-cpu-profile-validate-selftest ge-vertex-cache-mutants
+
+# ge-vertex-cache-mutants — the selftest's vertex cache case must kill each
+# SR_GE_VERTEX_CACHE_MUTANT in ge.c: 1 never starts a new epoch, so a draw reuses vertices an
+# earlier draw transformed at the same address under another world matrix; 2 does not check
+# the address, so a vertex whose index shares a table slot gets another vertex's result; 3
+# caches vertices outside plain RAM, so a draw whose VRAM target covers its own VRAM vertices
+# reuses vertices its pixels rewrote; 4 caches while the colour target is in RAM, the same
+# hazard for RAM vertices; 5 drops the check that a VRAM target's rows end below main RAM, so a
+# 65535-pixel-wide VRAM target whose last row covers plain-RAM vertices reuses vertices its
+# pixels rewrote. Each builds its own ge.c object and binary in its own subdirectory (the
+# selftest writes its VRAM captures next to its binary) and must fail with its own message (2
+# also by pixels, 3, 4 and 5 by target bytes that differ from the cache-off draw); mutant 1
+# must also fail every state-change pair (vertex data, matrices, lights, material, vertex type,
+# morph weights and the rest) with pixels that differ from the cache-off draw.
+ge-vertex-cache-mutants: $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)/ge-vertex-cache-mutants').mkdir(parents=True, exist_ok=True)"
+	@for m in 1 2 3 4 5; do \
+		case $$m in \
+			1) kill="FAIL vertex_cache\[epoch-second\]: a distinct vertex was not transformed in its draw";; \
+			2) kill="FAIL vertex_cache\[u16-list-texgen1\]: a distinct vertex was not transformed in its draw";; \
+			3) kill="FAIL vertex_cache_overwrite\[vram-target\]: cache on and off differ";; \
+			4) kill="FAIL vertex_cache_overwrite\[ram-target\]: cache on and off differ";; \
+			*) kill="FAIL vertex_cache_overwrite\[wide-vram-target\]: cache on and off differ";; \
+		esac; \
+		changes=0; if test $$m -eq 1; then changes=16; fi; \
+		pixels=""; if test $$m -eq 2; then pixels="^FAIL vertex_cache: cache on and off differ: [1-9][0-9]* framebuffer pixels"; fi; \
+		obj=$(BUILD_DIR)/ge-vertex-cache-mutants/ge_vertex_cache_mutant$$m.o; \
+		bin=$(BUILD_DIR)/ge-vertex-cache-mutants/ge_vertex_cache_mutant$$m$(EXE_EXT); \
+		$(CC) $(GE_CFLAGS) -DSR_GE_VERTEX_CACHE_MUTANT=$$m -c src/rt/ge.c -o $$obj || exit 1; \
+		$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $$bin tests/native/ge_cpu_profile_validate_selftest.c \
+			$$obj src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm || exit 1; \
+		$$bin > $$bin.log 2>&1; result=$$?; \
+		if test $$result -eq 0; then cat $$bin.log; echo "vertex cache mutant $$m unexpectedly passed" >&2; exit 1; fi; \
+		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "vertex cache mutant $$m failed for another reason" >&2; exit 1; fi; \
+		if test -n "$$pixels" && ! grep -Eq "$$pixels" $$bin.log; then cat $$bin.log; echo "vertex cache mutant $$m: no pixel differs from the cache-off draw" >&2; exit 1; fi; \
+		differ=$$(grep -Ec "^FAIL vertex_cache_change\[[a-z-]+\]: cache on and off differ" $$bin.log); \
+		if test $$changes -ne 0 && test "$$differ" -ne $$changes; then cat $$bin.log; echo "vertex cache mutant $$m: $$differ of $$changes state-change pairs differ" >&2; exit 1; fi; \
+		echo "ge-vertex-cache-mutants: mutant $$m killed ($$kill)"; \
+	done
 
 # ge-tnl-census-selftest -- why ge.c keeps its own T&L for a PRIM it could offer to the GPU T&L
 # route (#318): the production ge.o with SR_GPU_TNL's switch on and a backend stand-in, one
@@ -969,8 +1013,18 @@ asset-index-selftest:
 # VRAM) at 2 and 4 (the whole-suite run covers 1x). The 32-bit host depth buffer (#2051) runs
 # host-depth with the key off and then on (`--depth 32`) at scales 1 and 4, the key-off run
 # writing the depth readback's hash that the key-on run must match (`--depth-ref`), then the
-# whole suite with the key on, and host-depth once more with the native twin. Each is selected by
-# arguments: a
+# whole suite with the key on, and host-depth once more with the native twin. soft-shadow (Ace's
+# shadow=soft) runs alone at scales 1 and 4, three times at each: without the key (`--soft-shadow
+# off`, which writes its stock and part-off frames' hashes to a reference file), with two synthetic
+# discs declared, CLUT4 and 4444 (`on`: soft edges, stock interiors, an undeclared disc as with the
+# part off, guest VRAM untouched, a freed copy made again without a second hash, the copy's size
+# change when the guest rewrites a texture, a replacement pack before a soft copy) and with the key
+# but nothing declared (`undeclared`: the part unavailable); both later runs draw the off run's
+# frames. It runs again with xBRZ on (`--tex-scale`) at every factor the scaler takes, off and on
+# at scale 1 (undeclared too at 2) and at factor 4 at scale 4: a declared disc stays the soft frame
+# xBRZ-off draws. Three more runs set SR_ACE_SHADOW_CANDIDATES (`--shadow-candidates`): exactly 1
+# with the part on lists each distinct content hashed once; `yes`, or the part off, lists nothing.
+# Each is selected by arguments: a
 # VAR=value prefix needs a POSIX shell, and cmd.exe does not take one. The host twin (#2050) runs
 # after them: twin-off runs of twin-scene write reference files that the twin-on runs at the
 # same scale check (guest VRAM always, the shown images for the native twin), `--twin native`
@@ -1054,6 +1108,28 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --depth 32 --scale 4 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s4.txt
 	$(GPU_COHERENCE_BIN) --depth 32
 	$(GPU_COHERENCE_BIN) --twin native --depth 32 --case host-depth
+	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow undeclared --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow undeclared --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 2 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x2.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 2 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x2.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 2 --soft-shadow undeclared --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x2.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 3 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x3.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 3 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x3.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x4.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x4.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 5 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x5.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 5 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x5.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 6 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x6.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --tex-scale 6 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1_x6.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 4 --tex-scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_x4.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 4 --tex-scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_x4.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow on --shadow-candidates 1 --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow on --shadow-candidates yes --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow off --shadow-candidates 1 --case soft-shadow
 	$(GPU_COHERENCE_BIN) --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
 	$(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
 	$(GPU_COHERENCE_BIN) --scale 4 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
@@ -1407,7 +1483,9 @@ gpu-ace-selftest: shader-verify $(RT_GE_O)
 
 # tex-scale-selftest - texture scaling's CPU side (src/rt/gpu_sdl3vk/tex_scale.h): the C port of
 # xBRZ 1.9 (third_party/xbrz) against goldens from the pinned upstream C++ (xbrz_golden.cpp), the
-# wrap and clamp borders, the job queue, the settings and the smart 2D classifier. No GPU; the
+# wrap and clamp borders, the job queue, the settings and the smart 2D classifier, and soft
+# shadows' copy (exact texels of a synthetic disc, the interior and mass rules, the bounds) and
+# their texture digest (RFC 4231 HMAC-SHA-256 vectors, then the match rule). No GPU; the
 # worker threads need SDL3, so without it the recipe reports SKIP.
 TEX_SCALE_SDL_READY := $(and $(filter-out none,$(SDL3_PROVIDER)),$(if $(strip $(SDL3_ERROR)),,yes))
 tex-scale-selftest:
@@ -1416,7 +1494,7 @@ tex-scale-selftest:
 	@if [ -z "$(TEX_SCALE_SDL_READY)" ]; then echo "SKIP tex-scale-selftest (SDL3 not found by build discovery)"; exit 0; fi; \
 	$(CC) $(CFLAGS) -O2 -ffunction-sections -fdata-sections $(LDFLAGS) $(LD_GC_SECTIONS) \
 		-o $(BUILD_DIR)/tex_scale_selftest$(EXE_EXT) \
-		src/rt/gpu_sdl3vk/tex_scale_selftest.c src/rt/gpu_sdl3vk/tex_scale.c third_party/xbrz/xbrz.c \
+		src/rt/gpu_sdl3vk/tex_scale_selftest.c src/rt/gpu_sdl3vk/tex_scale.c third_party/xbrz/xbrz.c src/rt/vfpu_tables.c \
 		$(LIBS) -lm && $(BUILD_DIR)/tex_scale_selftest$(EXE_EXT)
 
 native-core-tests: tex-scale-selftest
@@ -1598,7 +1676,7 @@ tex-scale-gate-mutant:
 	@if [ -z "$(TEX_SCALE_SDL_READY)" ]; then echo "SKIP tex-scale-gate-mutant (SDL3 not found by build discovery)"; exit 0; fi; \
 	$(CC) $(CFLAGS) -O2 -ffunction-sections -fdata-sections $(LDFLAGS) $(LD_GC_SECTIONS) -DNK_TEX_SCALE_MUTANT_NO_ACE_GATE \
 		-o $(BUILD_DIR)/tex_scale_gate_mutant$(EXE_EXT) \
-		src/rt/gpu_sdl3vk/tex_scale_selftest.c src/rt/gpu_sdl3vk/tex_scale.c third_party/xbrz/xbrz.c \
+		src/rt/gpu_sdl3vk/tex_scale_selftest.c src/rt/gpu_sdl3vk/tex_scale.c third_party/xbrz/xbrz.c src/rt/vfpu_tables.c \
 		$(LIBS) -lm || exit 1; \
 	rc=0; $(BUILD_DIR)/tex_scale_gate_mutant$(EXE_EXT) > $(BUILD_DIR)/tex_scale_gate_mutant.log 2>&1 || rc=$$?; \
 	if [ $$rc -eq 0 ]; then echo "FAIL tex-scale-gate-mutant (the mutant passed: the Ace gate is untested)"; exit 1; \

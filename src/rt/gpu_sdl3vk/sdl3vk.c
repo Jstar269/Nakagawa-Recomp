@@ -1692,7 +1692,11 @@ int sdl3vk_get_vk(Sdl3VkInfo *out) {
 }
 
 uint32_t sdl3vk_buttons(void) { return s_buttons | s_button_pulse; }
-void sdl3vk_consume_button_pulses(void) { s_button_pulse = 0; }
+uint32_t sdl3vk_consume_button_pulses(void) {
+    const uint32_t pulses = s_button_pulse;
+    s_button_pulse = 0;
+    return pulses;
+}
 void sdl3vk_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = s_lx; if (ly) *ly = s_ly; }
 int  sdl3vk_pad_present(void) { return s_pad_present; }
 

@@ -437,35 +437,54 @@ that a player turns on or off apart from the 60 FPS game logic. The field is an 
 
 ```json
 "ace_parts": {"load": {"sites": [{"id": "...", "function": "...", "insn_offset": 0, "stock_digest": "...",
-                                  "transform": "vblank_wait_skip"}]}}
+                                  "transform": "vblank_wait_skip"}]},
+              "soft_shadows": {"textures": [{"id": "...", "texture_digest": "...", "transform": "alpha_edge_soften",
+                                             "edge_texels": 2}]}}
 ```
 
-- **Names.** The part names are a closed list: today only `load` (section 11.3.10). Any other name refuses the
-  package, as does an empty `ace_parts` or a part with no sites.
+- **Names.** The part names are a closed list: today `load` (section 11.3.10) and `soft_shadows` (sections 10.23 and
+  11.3.13). Any other name refuses the package, as does an empty `ace_parts`, a `load` part with no sites or a
+  `soft_shadows` part with no textures.
 - **Sites.** Each site has an `id`, a symbolic `function`, a 4-byte-aligned `insn_offset`, the `stock_digest` of one
   stock instruction word, an optional `word_count` that may only be 1, and a `transform` from the parts' own list
   (below). A site resolves and is verified like a `sites` entry (section 9.2), fail-closed, and in a published
   package (section 5.1) its function is in the site map and its digest is keyed, as for `sites`.
+- **Textures.** `soft_shadows` holds `textures`, not sites: 1 to 256 entries, each with an `id`, a `texture_digest`,
+  the `transform` `alpha_edge_soften` and `edge_texels`, the width of the texture's stock alpha ramp in source
+  texels, from 1 to 4. The digest is 64 lowercase hex digits and is always keyed: it is the HMAC-SHA-256 of the
+  texture under the executable's stock-digest key (section 5.1), by the match rule of section 10.23, in a private
+  package as in a published one. Publishing therefore leaves it as it is, and the published-text check passes it as
+  a digest slot while it still checks every other string of the entry. A digest declared twice refuses the package.
+  A texture is not in the executable, so the build cannot verify a digest: the renderer matches it at draw time.
 - **One namespace.** Site ids and instruction words are shared by `sites`, every part's sites and the
-  `update_boundary`. The validator refuses a duplicate id, an Ace part site on a word a `sites` entry (any of its
-  `word_count` words), another part site or the `update_boundary` already covers, an Ace part site that declares
+  `update_boundary`; a texture's `id` is in the same id namespace. The validator refuses a duplicate id, an Ace part
+  site on a word a `sites` entry (any of its `word_count` words), another part site or the `update_boundary` already
+  covers, an Ace part site that declares
   `requires`, and any `requires` that names an Ace part site. It compares words by `function` and `insn_offset` in a
   private declaration, and again by site-map address in a published package (section 5.1), whose site map may give
   one address two names; the publish gate runs the same check. Codegen compares the resolved addresses, whatever
   the names: it refuses a part site whose word is a 60 Hz site's word or the boundary's.
 - **Their own transforms.** The parts' transforms are a set of their own, disjoint from the transforms of section
   9.2: a 60 Hz transform in `ace_parts`, or a part transform in `sites`, is an unknown transform and refuses the
-  package.
+  package. Each part transform is valid in one place only: `vblank_wait_skip` in `load.sites` and
+  `alpha_edge_soften` in `soft_shadows.textures`; written anywhere else it refuses the package.
 - **Their own switch.** A part site is gated at run time only by its part's `SR_ACE` key (section 10.1), never by
   `SR_EXPERIMENTAL_60HZ` or the update count. With the key off the stock statement runs. A package without
   `ace_parts` generates exactly the code it generated before; with them, the generated C differs only at each part
   site's statement, at the `update_boundary`'s statement, which also calls `nk_ace_load_update()` for the `load`
-  part's pacing guard (section 11.3.10), and in the declaration digest, which covers `ace_parts` like every other
-  field, so the AOT cache key changes with it.
+  part's pacing guard (section 11.3.10), by the `soft_shadows` declaration below, and in the declaration digest,
+  which covers `ace_parts` like every other field, so the AOT cache key changes with it.
+- **The soft-shadow declaration.** A `soft_shadows` part rewrites no instruction. The generated `sr_register_all`
+  hands its textures to the runtime once, before the guest runs and whatever `SR_EXPERIMENTAL_60HZ` says:
+  `nk_ace_soft_shadows_declare(key, digests, count, edge_texels)` (`src/rt/ace.h`) with the executable's
+  stock-digest key (`enhancement_package.published_digest_key`, derived from the user's own executable, so it lives
+  only in their build), the declared digests in order and their edge widths. The runtime uses them only while the
+  run's `shadow=soft` is in effect (section 10.23).
 
 | Transform | Instructions with a defined rewrite | Rewrite |
 | --- | --- | --- |
 | `vblank_wait_skip` | `jal` whose target is the executable's import stub of `sceDisplayWaitVblankStart` (NID `0x984C27E7`); any other target refuses the package | the delay slot runs as stock; the call runs unless the runtime skips it (`nk_ace_load_skip_wait()`), which it does only while the run's `load=fast` is in effect and waits are permitted, that is, where the stock call would block. A skipped call still blocks the thread, for 1 µs, the shortest delay wait the scheduler has (that of `sceKernelDelayThread(1)`), so ready threads of any priority run as during the stock wait, and it leaves `$v0` = 0, the stock function's return there. Where waits are not permitted the stock call runs and returns `CAN_NOT_WAIT`. A package with a `load` part must declare an `update_boundary`, and the site may not be in its function, compared by name, by site-map address in a published package, and by resolved address in codegen. Nothing else about where the site sits is checked: a wait in a caller or a callee of the boundary's function is accepted, and the site's own evidence must show it is reached only while loading (section 11.3.10) |
+| `alpha_edge_soften` | none: it names a texture by its keyed digest, not an instruction | none in the generated code; while the run's `shadow=soft` is in effect, the Vulkan GE renderer draws a matching texture from a copy with a softened alpha edge (section 10.23) |
 
 ### 9.9. A Code-Hook Package Beside the Timing Package
 
@@ -593,18 +612,21 @@ The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch 
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `mips` (`on` or `off`,
 section 10.16), `stick` (the title's stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section
 11.3.10), `depth` (`32` or `off`, section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `peak` (`limit` or `off`,
-section 10.22), `glyphs` (`on` or `off`, sections 10.13 and 11.3.5), `texpack` (`on` or `off`, section 11.3.4) and
-`cull` (`on` or `off`, section 11.3.6) are the other keys a line may leave out: a missing `mips`, `stick`, `load`,
-`depth`, `ssaa`, `peak`, `glyphs`, `texpack` or `cull` is off, `stick=<counts>`, `load=fast` and `cull=on` need
-`tier=ace` (`mips=on`, `depth=32`, `ssaa=2|4`, `peak=limit`, `glyphs=on` and `texpack=on` do not), the launcher
-writes `;mips=on` for an Enhanced or Ace launch with that part on, `;load=fast` and `;cull=on` only for an Ace launch
-with that part on, `;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with supersampling on and `;texpack=on` for
-an Enhanced or Ace launch with the Texture pack part on for a title that has a pack, and no launcher writes `depth`
-(section 11.3.12), `peak` (section 10.22) or `glyphs` (section 11.3.5) yet: a line that carries one is written by
-hand. A line writes them only when on, in that order, `mips` right after `twin` and `cull` last, so a line with them
-off is the line without them, byte for byte. With `texpack=on` the launcher also exports `SR_TEX_REPLACE`, the
+section 10.22), `glyphs` (`on` or `off`, sections 10.13 and 11.3.5), `texpack` (`on` or `off`, section 11.3.4),
+`shadow` (`soft` or `off`, sections 10.23 and 11.3.13) and `cull` (`on` or `off`, section 11.3.6) are the other keys a
+line may leave out: a missing `mips`, `stick`, `load`, `depth`, `ssaa`, `peak`, `glyphs`, `texpack`, `shadow` or
+`cull` is off, `stick=<counts>`, `load=fast`, `shadow=soft` and `cull=on` need `tier=ace` (`mips=on`, `depth=32`,
+`ssaa=2|4`, `peak=limit`, `glyphs=on` and `texpack=on` do not), the launcher writes `;mips=on` for an Enhanced or Ace
+launch with that part on, `;load=fast`, `;shadow=soft` and `;cull=on` only for an Ace launch with that part on,
+`;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with supersampling on and `;texpack=on` for an Enhanced or Ace
+launch with the Texture pack part on for a title that has a pack, and no launcher writes `depth` (section 11.3.12),
+`peak` (section 10.22) or `glyphs` (section 11.3.5) yet: a line that carries one is written by hand. A line writes
+them only when on, in that order, `mips` right after `twin`, `shadow` after `texpack` (and after `pad`, below) and `cull` last, so a line with
+them off is the line without them, byte for byte. With `texpack=on` the launcher also exports `SR_TEX_REPLACE`, the
 title's pack folder; it always exports that variable, empty for any other line, so an inherited folder never reaches
-a run. Every
+a run. `pad` (`late` or `off`, section 11.3.9) may be left out too: a missing `pad` or `pad=off` is off, `pad=late`
+needs `tier=ace`, and the launcher writes `;pad=late` only for an Ace launch with that part on, after `texpack` and
+before `shadow` and `cull`. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -658,6 +680,9 @@ the device is created with no feature outside Ace.
 - **Sound:** `sas=sinc` writes band-limited sample values into the guest's SAS output buffer, so it is a
   guest-visible item. Its entry is section 11.3.1. `peak=limit` changes only what the host plays: the guest's SAS
   buffer keeps the PSP's saturated bytes (section 10.22).
+- **Input timing:** `pad=late` holds each 60 FPS logic update at its package's update boundary until shortly before
+  its VBLANK deadline, so the update reads a fresher pad sample. It changes when the update runs inside its period,
+  which the guest can measure, so it is a guest-visible item. Its entry is section 11.3.9.
 - **Patches:** `tess=2` to `tess=4` draws every triangle patch with finer triangles, which changes the frames a
   present commits to guest VRAM, and under `SR_GE_TIMING=1` it alters the GE timing model's clocks. It is a
   guest-visible item. Its entry is section 11.3.7.
@@ -2151,6 +2176,96 @@ host's output.
   check (no full-scale sample, and the non-clipping music at the PSP's -15.6 dBFS) waits for the #2135 console read.
 - **Tier:** Enhanced. **Default:** off, and in no graphics preset.
 
+### 10.23. Soft Shadows
+
+An Ace part (#1732). Many PSP games draw a character's shadow as one small texture, a dark disc or blob whose alpha
+falls from opaque to clear over a few texels, stretched across a quad under the character. Above 1x those few texels become a hard,
+stepped rim. This feature draws the textures a title's package names as its shadows with a smooth edge, at every
+render scale: at 1x the softened copy is sampled at guest resolution, so the rim is softer there too. It is
+guest-visible (section 11.1): section 11.3.13 is its entry and says what the guest can observe; this section says how
+it draws. The code is `tex_soft_init`, `tex_soft_match` and `tex_xs_offer` in `src/rt/gpu_sdl3vk/ge_gpu.c`, with the
+filter `nk_tex_soften_alpha_edge` and the digest `nk_tex_soft_shadow_digest` in `src/rt/gpu_sdl3vk/tex_scale.c`.
+
+- **Declaration.** The runtime softens only what a package declares, through
+  `nk_ace_soft_shadows_declare(key, digests, count, edge_texels)` (`src/rt/ace.h`) before the renderer starts: a
+  32-byte key, at most 256 digests, and for each one an edge width of 1 to 4 source texels. A declaration with a
+  missing key, more than 256 digests or an edge outside that range is refused whole and says why on one
+  `ACE_MODE: soft shadow declaration refused (...)` line. The declaration comes from the title's package field
+  `ace_parts.soft_shadows` (section 9.8): the generated `sr_register_all` passes the executable's stock-digest key,
+  the declared texture digests in order and their `edge_texels`, once, before the guest runs. A build whose package
+  has no such part declares nothing, and a run with the part on reports it unavailable (section 11.3.13).
+- **Match.** A texture is a candidate only when it has one mip level and is at most 64 x 64 texels, and no
+  replacement pack image (section 10.12) is found for it. Its digest is HMAC-SHA-256 (RFC 2104, on the runtime's
+  SHA-256) under the declared key, over the bytes `soft shadow texture v1`, a zero byte, the width and height as
+  16-bit little-endian integers, and the decoded level-0 texels as RGBA8888, red first. Each upload of a content is
+  hashed once: the answer is kept on the texture cache entry for that upload, so later draws, retries and a copy
+  remade after a reclaim do not hash it again; a texture the guest uploads again is hashed again. A texture whose
+  digest is not declared is drawn as before. A match is counted when it is hashed, so a declared texture that is
+  also a render target counts as matched but is never drawn soft (below).
+- **Finding a digest (`SR_ACE_SHADOW_CANDIDATES`).** A package author finds the digest a texture's
+  `texture_digest` must hold by running the title with the part on and `SR_ACE_SHADOW_CANDIDATES=1` (exactly `1`;
+  any other value lists nothing). After `SOFT_SHADOWS: listing candidates (...)`, the renderer prints, on stderr,
+  `SOFT_SHADOW: candidate <w>x<h> digest=<64 lowercase hex digits>` once for each distinct content it hashes, that is
+  for every texture the match rule above considers, declared or not, with its size in decimal. A run lists at most
+  1,024 distinct digests; past that, one `SOFT_SHADOWS: candidates past 1024 distinct textures are not listed` line
+  says so. The renderer hashes only while a declaration is in force, and a declaration needs the key and at least
+  one texture: to list candidates for a title whose shadow digest is not known yet, the author declares one
+  placeholder texture (any 64 lowercase hex digits, which no texture matches) and replaces it with the digests found.
+  A listing names sizes and keyed digests, never texels.
+- **Softened copy.** A match takes a 4x copy in place of any xBRZ copy (xBRZ scales only the textures no pack image
+  and no declaration claims), through the scaled-copy machinery of section 10.10: its VRAM budget
+  (512 MiB when `SR_TEX_SCALE` sets none), its reclaim, retry and stale rules, and the texture's own filter and wrap
+  state as the copy's sampler. The copy is made on the renderer thread and stored at once, as a replacement image is,
+  so the draw that found it is normally the first to show it (a draw that finds the upload budget of that present
+  spent, or earlier finished copies waiting, shows it on a later draw). It is made in integer arithmetic: colour and alpha are each
+  interpolated bilinearly with clamp-to-edge, and the alpha is then box-blurred over a square of radius
+  `edge x 4` output texels, also clamped to the copy's edges. The header states two guarantees and
+  `tex-scale-selftest` checks both: an output texel whose source neighbourhood (every texel within `edge + 1` source
+  texels) has one alpha keeps that alpha, so the opaque core and the clear surround are unchanged; and, for a
+  texture whose border band of `edge + 1` texels is clear, the copy's total alpha is 16 times the source's within
+  half an alpha step per output texel. The guest texture in VRAM is never written, and a texture that is also a
+  render target is never softened.
+- **Renderers.** Only the Vulkan GE renderer softens. The software renderer draws the stock texture, and a run with
+  the part on there reports it unavailable with that reason.
+- **Setting.** The `shadow` key of the `SR_ACE` launch line (section 10.1): `shadow=soft` or `shadow=off`, an
+  optional key; a missing one is off, `shadow=soft` needs `tier=ace`, and any other value refuses the line. In the
+  player it is the part "Soft shadows" (`"shadow"`: `soft` or `off`) on the library's Settings > Enhanced page and
+  on each game's own page (section 10.9), off in a fresh settings file and in no graphics preset; the launch line
+  carries `;shadow=soft` only for an Ace launch with the part on, after `;pad=late` and before `;cull=on`.
+- **Stamps.** `ACE_MODE: shadow soft (...)` at start, then
+  `SOFT_SHADOWS: on (declared=<n>, factor=4, budget_mb=<n>)` from the renderer, and
+  `SOFT_SHADOWS: exit (hashed=<n>, matched=<n>, queued=<n>, bound_draws=<n>)` when the run ends. The first draw
+  that binds a softened copy confirms the part in the report (`"shadow": "soft"`, `"shadow_declared"`); a run that
+  never binds one reports it unavailable, with the reason.
+- **Tests.**
+  - `tex-scale-selftest` checks the filter against a direct, unseparated reference on a synthetic disc, pins one
+    output row at edge 1, and checks the interior and alpha-mass guarantees, a monotone ramp and determinism for every
+    edge width, and the size refusals. It also checks HMAC-SHA-256 against RFC 4231 test cases 1, 2 and 6 and pins
+    the match rule's digest for a synthetic 2 x 1 texture, the candidate line for that digest, and the
+    once-per-content table behind it.
+  - `tools/test_enhancement_package.py` (`TestAcePartsSoftShadows`) checks the part's schema and validation, its
+    published form, that the declaration digest and the cache key cover it, and, on a synthetic executable, the one
+    declaration call codegen emits with the executable's key and the declared digests, and none without the part.
+  - `ace-selftest` pins the key, its values, its Ace gate, the declaration's refusals and the report fields.
+  - `gpu-coherence-selftest --case soft-shadow` draws synthetic discs magnified at render scales 1 and 4 with the
+    part on, off and undeclared, with xBRZ off and at each factor from 2 to 6: two declared discs (CLUT4 and 4444)
+    get a smooth ramp, keep their interior and are the same frame whatever the xBRZ factor, and the undeclared disc
+    is drawn exactly as with the part off. A freed copy is made again without a second hash; a texture the guest
+    rewrites to undeclared content gives up its copy for what the part-off run draws, and takes it back when the
+    declared content returns; a replacement pack's image for a declared texture is drawn instead, unhashed. With
+    `SR_ACE_SHADOW_CANDIDATES=1` and the part on, each distinct content hashed is listed once; with another value,
+    or the part off, nothing is listed. Guest VRAM outside the frame is unchanged, and the counts on the exit line
+    match.
+  - `test_player_state` and the player screens test pin the part, its settings, presets and launch line.
+
+**Next layer: real shadow maps.** Softening a blob keeps the title's own shadow shape. Shadows cast by the scene's
+geometry need a light-space depth pass over the title's shadow casters. That pass needs a GE scene seam that knows
+which draws are casters, and that knowledge has to come from package-declared draw classification. The renderer
+also needs a shadow-compare sampler and a receiver pass, and must suppress the title's own blob quads once real
+shadows draw. That is GE scene-level work, comparable to the RTX Remix seam
+([#1330](https://github.com/Jstar269/Nakagawa-Recomp/issues/1330)), not a texture change, and this feature does not
+start it.
+
 ## 11. Guest-Visible Items
 
 Sections 10.3, 10.6, 10.8, 10.11 and 10.22 describe host-only features: what the guest reads, in its registers, memory and timing, is the
@@ -2946,6 +3061,129 @@ The feature of section 10.16 (#1273). How it draws is described there; this entr
 - **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
   exist.
 
+#### 11.3.9. Late Pad Sampling (`pad=late`, Not Yet Admitted)
+
+An Ace part for a title with a 60 FPS timing package: each logic update starts closer to the VBLANK that shows it,
+so the pad sample it reads is younger when its frame reaches the screen.
+
+- **Status: guest-visible, not admitted under section 11.2.** It changes when, inside its VBLANK period, a logic
+  update runs. Its key, its library and per-title settings and this entry are in place (section 11.2, items 2, 3
+  and 6); the runs of item 4 exist for one title (below) and have not been reviewed, so it stays off by default and in
+  no preset.
+- **Mechanism.** The package's `update_boundary` (section 9.5) calls `sr_enhancement_update_begin()` on every update
+  while 60 FPS game logic is on. Only in a run whose line carries `pad=late` does the call do anything: the runtime
+  keeps the host cost of the last 64 updates, measured from the end of the update's hold (its boundary when it was not
+  held) to its next display wait (`sched_vblank_block`), and may hold an update. Once 30 updates in a row were
+  measured, an update reaching the boundary with more than its reserve left before the next VBLANK deadline waits there.
+  The reserve is the largest of those costs, a quarter of it again, and a 2 ms margin. The deadline is the next VBLANK
+  on the host clock: the paced time left until it, moved to the host clock at the current speed, so it stays exact after
+  a fast-forward span has put the paced clock ahead of the host's. It is never later than one VBLANK period after the
+  last VBLANK the scheduler latched, and a deadline more than one period ahead is not planned against (no hold, and the
+  30 updates are counted again). Every hold is shorter than one VBLANK period. The wait is an ordinary guest-thread
+  delay (`sched_delay_current`) and is never shorter than 1 ms. It is taken only where the thread could wait anyway
+  (never in an interrupt handler, a pending tail transfer, a pause request or the COSIM guest lane), not in fast forward
+  (whose guest time, the delay's clock, runs ahead of the host time the hold is planned on), and only where the gates a
+  refresh checks pass (the GDI window passes them, but its pump polls no input; see Limits): not under a route
+  (`SR_PADSCRIPT`), a recording or replay, the headless START pulse or a non-zero sampling cycle, not with no window a
+  person is at (the offscreen sink, a headless presenter) or while the on-screen keyboard is open, and not once the
+  newest sample was handed to a guest call. After the wait, the runtime polls the host input once more and rewrites the
+  newest controller sample in place, only if that poll read the host input (the GDI window reads its keys when it
+  presents, so there the sample stays as latched) and no guest call has been handed the sample yet: a buffer read or
+  peek, and a latch read or peek, all count. The rewritten sample is built as a VBLANK latch of the same host input is
+  (buttons, and in analog mode the stick with the `stick=<counts>` remap of section 11.3.11 when the line carries it).
+  It keeps every button its VBLANK latch took as a press,
+  one down in it and up in the sample before, whatever its source (a key, a gamepad button, a trigger or a stick bound
+  to a button), and one pressed and released since the sample before, and, while the sample before was handed to no
+  guest call, the presses that sample kept or a refresh added to it that are still down (a read of one buffer skips it),
+  so a press that sample carried is never lost to a release during the wait. A button pulse (a press and release) the
+  refresh takes into a sample no guest call is then handed goes into the next VBLANK's sample as well, where it would
+  have gone without the part, so a reader of one buffer still sees it. The sample whose press closed the on-screen
+  keyboard, a sample a sampling cycle latched, and a pause requested, opened or closed by then leave the sample as
+  latched. Its count of samples, its timestamp and its scripted-input id stay the same. An update whose work then ends
+  after the deadline it was held for is late. Holding stops for 300 updates and the margin grows by 1 ms; the added part
+  stops at 6 ms, so the margin reaches 8 ms at most. An update with a player pause or a change of speed (fast forward on
+  or off) between its boundary and its display wait is dropped instead: no cost, no verdict, counted as `interrupted`.
+- **Key.** `pad=late` or `pad=off` on the launch line (section 10.1), an optional key: a line without it reads as off,
+  any other value refuses the whole line (`ACE_MODE: refused (bad value)`, and the run is Authentic), and `pad=late` is
+  refused unless the line carries `tier=ace` (`ACE_MODE: refused (pad needs tier=ace)`). The player has a library
+  setting and a per-title setting, "Late pad sampling", each able to turn it off alone (section 11.2, item 2); the line
+  carries `;pad=late` only for an Ace launch with the part on. The run names it (`ACE_MODE: pad late (...)` at start, an
+  `ACE_MODE: pad` line at exit and the report's `pad` object with updates, holds, mean and largest hold, late updates,
+  refreshed samples, deadlines more than a period ahead and interrupted updates). It confirms the part when the
+  boundary first runs; a run that asked for it and in which no update boundary ran (no 60 FPS package, or
+  `SR_EXPERIMENTAL_60HZ` off) reports it unavailable at exit.
+- **Off is off.** With `pad` missing or `pad=off`, in Enhanced, Ace or Authentic, the boundary call returns at once:
+  no update is measured, held or refreshed, no latency is measured, and the start line, the exit lines and the report
+  are those of a build without the part. The guest reads the sample its VBLANK latched, with its timestamp, as without
+  the part (`hle-thread-selftest` and `ace-selftest` pin both). The one difference is in the generated code of a
+  package with an `update_boundary`: the boundary's line calls `sr_enhancement_update_begin()` inside the same
+  `nk_enhancement_on()` test that counts the update, so an Authentic run never reaches it.
+- **What it changes:** the time inside each VBLANK period at which an update begins, and the pad state of the newest
+  sample when no guest call has been handed it yet. A refreshed sample's content is up to one hold newer than its
+  `TimeStamp`: stamps stay monotonic, but a stamp no longer says when its content was polled. While no hold overruns,
+  the guest computes the same update from the input it reads, and the number of updates, the number of controller
+  samples and every sample's timestamp are those of a run without it. A hold whose update then overruns its deadline
+  changes both counts: the next VBLANK latches its sample during the update's work, after the hold, so the update's
+  next read of two or more buffers returns two samples where a run without it returns one (a read of one buffer
+  returns the newest), and the update waits for the VBLANK after, so one update (and its frame) is lost.
+- **VRAM bytes:** unchanged for the same input. A frame can show input from up to one period later than without it.
+- **Readbacks:** unchanged.
+- **Timing:** differs. A held update starts later in its period, by the hold, so the guest's system time read at its
+  start is later. During the hold the update's thread is in a delay wait (`TH_WAIT_DELAY`), which a run without it never
+  puts it in there: sceKernelReferThreadStatus and the thread lists show it waiting, and sceKernelReleaseWaitThread on
+  it is refused as on a thread that is not waiting (the runtime releases only object waits), where without the part it
+  would find the thread running or in its releasable VBLANK wait. Other guest threads that are ready while it waits run
+  during the hold, before the update's work rather than after it. The VBLANK schedule, the RTC, the media clocks and the
+  GE timing model are unchanged. The number of updates per second is unchanged unless a held update is late (an overrun,
+  above), which the back-off limits.
+- **I/O speed:** unchanged.
+- **Package obligations:** the package's `update_boundary` runs once per logic update (section 9.5), and the title
+  reads its pad after that point in the update. A title that reads the pad before its boundary gets no fresher sample
+  and no hold: once a guest call was handed the newest sample, the update is not held.
+- **Measured (Hot Shots Tennis, UCUS98701, 60 FPS package, Vulkan GE, hidden window, Windows 11, other builds running
+  on the machine).** At the title screen with live input, two pairs of 3,600-VBLANK runs:
+  - Sample-to-present latency (from the host poll behind the newest sample the guest read to the present of the frame
+    it set; the runtime's poll-to-present age, not press-to-photon latency): mean 24.76 and 24.73 ms off, 15.08 and
+    15.09 ms with `pad=late`; median 31.0 and 30.5 ms off, 19.0 and 19.5 ms on; 95th percentile 33.0 and 33.0 ms off,
+    33.0 and 32.5 ms on.
+  - About 84 % of updates were held (2,842 of 3,398 and 2,784 of 3,318), for a mean of 10 to 12 ms and at most 13.6 ms.
+  - Late updates, off: 10 and 7. With `pad=late`: 2 and 2 late after a hold, plus 9 and 4 late without one.
+  - In every run, every update was measured and none was left open (`unmeasured` 0), and each update set one new frame:
+    the new frames presented are the updates less one.
+  - One run on reported a largest latency of 1,275 ms that the repeat did not show (138 ms). It is a single frame
+    outside the 99th percentile (34 ms in both).
+  - These runs predate two corrections. The measure then also timed a frame the guest set with no pad read since the
+    previous present, from the last read however old, which is the likely source of that 1,275 ms frame. It now
+    times a present only when it shows a new frame set after a pad read, by any read path, that no earlier measured
+    frame was charged with, and counts every other present apart (`frames_without_read`): a repeated frame, or a new
+    frame with no such read. A read made after a frame was set is charged to the next new frame, which is the one it
+    can reach. The latch reads did not yet count as reads, and a tap latched at a VBLANK could be dropped.
+- **Measured again, quiet host.** The same title-screen run with live input, one 3,600-VBLANK pair at the corrected
+  measure, run alone on the machine:
+  - Sample-to-present latency over 3,521 and 3,528 measured frames: mean 16.81 ms off and 6.55 ms with `pad=late`,
+    median 17.0 and 4.5 ms, 95th percentile 17.5 and 17.0 ms. The largest frame was 132.9 ms off and 119.9 ms on;
+    which frame that is has not been traced.
+  - 3,523 updates off and 3,530 on, every one measured (`unmeasured` 0), with 3,522 and 3,529 new frames, the
+    updates less one. 2,872 updates were held (81 %), for a mean of 11.9 ms and at most 13.9 ms, under one period;
+    no deadline was more than a period ahead (`far_deadline` 0), and all 2,872 held samples were refreshed.
+  - Late updates: 2 off (without a hold), 2 on (both after a hold).
+  On a scripted menu, match load and rally route of 12,000 VBLANKs (a route's samples are not refreshed, so it shows
+  the hold's cost, not its gain), 8,744 updates off and 8,958 on, with 2,678 late updates off and 2,701 on, three and
+  four slowed-logic notices, and latency percentiles within 1 ms. These runs share the machine with other work, so
+  they show no regression at that load, not steady-state pacing. A route run is no longer held at all: the hold is
+  now skipped wherever no refresh can follow it.
+- **Limits.** The hold is planned from host costs, so a sudden expensive update after a run of cheap ones can be late
+  once before the back-off. A latency gain needs live host input polled by the window, and the gates are checked
+  when the update reaches its boundary: an input source that changes during the hold (the keyboard opens, a pause, a
+  read from another thread) leaves the sample as latched, and the hold has then been taken for nothing; so does the
+  GDI window, whose pump reads no input. The `SR_INLOG` log names a refresh in a `ctrl_refresh:` line, not a
+  `ctrl_latch:` line, so `tools/padscript_from_log.py`, which reads only `ctrl_latch:` lines, rebuilds what each
+  VBLANK latched from a log of a run with `pad=late`, not what the guest read. The latency measure and the plan's
+  counts now run only with `pad=late` (off is off, above): the "off" figures above were taken by builds that measured
+  every Ace run, and a run without the part no longer reports them.
+- **Tier:** Ace. **Default:** off. **Nothing worse (section 11.2, item 4):** the runs above, which have not been
+  reviewed.
+
 #### 11.3.10. Short Loads (`load=fast`, Not Yet Admitted)
 
 The `load` Ace part of section 9.8, for a title that paces a loading screen with display waits of its own.
@@ -3168,3 +3406,57 @@ The feature of section 10.20 (#2051). How it tests is described there; this entr
 - **Tier:** Enhanced. **Default:** off, and in no graphics preset.
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic (`ace-selftest`, and
   `gpu-coherence-selftest`'s `host-depth`); no title has been run with it.
+
+#### 11.3.13. Soft Shadows (`shadow=soft`, Not Yet Admitted)
+
+The feature of section 10.23 (#1732). How it draws is described there; this entry is what the guest can observe.
+
+- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
+  so a frame drawn with a softened shadow is the frame the guest keeps. Its key, its library and per-title settings
+  and this entry are in place (section 11.2, items 2, 3 and 6). Its declaration comes from the package's
+  `ace_parts.soft_shadows` (section 9.8), which generated code passes to the runtime once at start. No title's
+  package declares one yet, so every run with the part on reports it unavailable (`ACE_MODE: shadow unavailable
+  (nothing declared: this build's package carries no ace_parts.soft_shadows textures)`), and the runs of item 4 do
+  not exist.
+- **Mechanism.** A one-level texture of at most 64 x 64 texels whose keyed digest the package declares is drawn from
+  a 4x copy whose alpha edge is widened and smoothed (section 10.23), at every render scale, 1x included. The guest's
+  texture, its CLUT and every other draw are unchanged.
+- **Key and off switch.** `shadow=soft` or `shadow=off` on the launch line (section 10.1), an optional key: a line
+  without it reads as off, `shadow=soft` is refused unless the line carries `tier=ace`, and any other value refuses
+  the line. The player has a library setting and a per-title setting, "Soft shadows", each able to turn it off alone
+  (section 11.2, item 2); an unknown value in a settings file reads as off. The line carries `;shadow=soft` only for an
+  Ace launch with the part on, so every other line is as it was.
+- **Never silent.** A run with it on prints `ACE_MODE: shadow soft (...)`, naming the committed frame as changed, and
+  the renderer's `SOFT_SHADOWS: on` and `SOFT_SHADOWS: exit` lines. The report confirms the part on the first
+  draw that binds a softened copy, and otherwise reports it unavailable with one of three reasons: nothing declared,
+  the software renderer, or no declared texture drawn by the Vulkan GE renderer.
+- **What it changes:** the pixels a declared texture covers, in the frame a present commits: around the shadow's rim,
+  the stepped alpha becomes a smooth ramp. The interior and the clear surround keep their alpha (section 10.23). The
+  copy's colour is interpolated bilinearly too, so a declared texture whose colour varies, drawn with a nearest
+  filter, also changes inside its rim, where its colour steps between texels; a texture of one colour, such as a
+  black blob, changes only at its rim.
+- **VRAM bytes:** differ in those frames, at the pixels of draws that use a declared texture, where the softened rim
+  blends differently from the stock one. Host memory holds the copy: at most 256 x 256 RGBA8888 texels (256 KiB) a
+  texture, inside the scaled-copy budget.
+- **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them, and
+  for a render-to-texture pass that draws a declared texture. Texture readbacks are unchanged: the guest's texture is
+  never written.
+- **Timing:** differs in host time only. A candidate's digest is computed once per upload on the renderer thread, the
+  thread the guest runs on, over at most 16 KiB of texels, and a match's copy is made and uploaded there the first
+  time it is drawn. Not measured on a title. The GE timing model, the VBLANK schedule and the media clocks are
+  unchanged.
+- **I/O speed:** unchanged.
+- **Package obligations.** The package declares only textures that are shadows: a texture drawn for anything else
+  would be softened too. The published digest is keyed, so it names a texture without revealing it: the package
+  publishes no size, palette or texel data. The edge width it declares is the width of the stock ramp, in source
+  texels. The author finds each digest with `SR_ACE_SHADOW_CANDIDATES=1` (section 10.23), which changes nothing the
+  guest observes: it only prints lines on stderr.
+- **Limits.** It changes a shadow's edge, not its shape, position or the geometry it falls on. A shadow drawn as
+  several textures, drawn with mip levels, larger than 64 x 64, or drawn by the software renderer is not softened.
+  The digest is over the decoded texels, so a palette texture has one digest for each palette it is drawn with: a
+  shadow whose palette the title animates needs a digest for each state, and a state left out is drawn stock. A
+  change to how the renderer decodes a texture format (`ge_decode_tex_rgba`) changes the digests of every texture
+  of that format, so a package's digests stop matching and the run reports no declared texture drawn.
+  Real cast shadows are a separate, scene-level layer (section 10.23, "Next layer").
+- **Tier:** Ace (one title). **Default:** off, and in no graphics preset.
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.

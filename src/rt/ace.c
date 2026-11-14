@@ -27,14 +27,16 @@ static int value_on_off(const char *v, int *out) {
 
 /* The line's keys. Each says whether a line must carry it, so the order of the table decides
    nothing for the parser: the rows that are not required (tier, stick, load, depth, ssaa, peak,
-   glyphs, cull, mips and texpack) are the keys a line may leave out. Each also names the longest value ace_format writes
-   for it, so ace_longest_line builds the longest line from this table alone. */
+   glyphs, cull, mips, texpack, pad and shadow) are the keys a line may leave out. Each also names the
+   longest value ace_format writes for it, so ace_longest_line builds the longest line from this table
+   alone. */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
     ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TWIN, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_DEPTH,
     ACE_KEY_SSAA,
     ACE_KEY_CULL, ACE_KEY_PEAK, ACE_KEY_GLYPHS,
-    ACE_KEY_MIPS, ACE_KEY_TEXPACK
+    ACE_KEY_MIPS, ACE_KEY_TEXPACK,
+    ACE_KEY_PAD, ACE_KEY_SHADOW
 } AceKey;
 
 static const struct {
@@ -62,6 +64,8 @@ static const struct {
     {"cull", ACE_KEY_CULL, 0, "on"},
     {"mips", ACE_KEY_MIPS, 0, "on"},
     {"texpack", ACE_KEY_TEXPACK, 0, "on"},
+    {"pad", ACE_KEY_PAD, 0, "late"},
+    {"shadow", ACE_KEY_SHADOW, 0, "soft"},
 };
 
 size_t ace_longest_line(char *out, size_t cap) {
@@ -143,6 +147,13 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                     why_set(why, why_cap, "wide is not part of this build"); return 0;
                 }
                 break;
+            case ACE_KEY_SHADOW:
+                if (strcmp(v, "off") == 0) { c.shadow = ACE_SHADOW_OFF; ok = 1; }
+                else if (strcmp(v, "soft") == 0) { c.shadow = ACE_SHADOW_SOFT; ok = 1; }
+                if (ok && c.shadow && !ACE_HAS_SHADOW) {
+                    why_set(why, why_cap, "shadow is not part of this build"); return 0;
+                }
+                break;
             case ACE_KEY_CULL:
                 ok = value_on_off(v, &c.cull);
                 if (ok && c.cull && !ACE_HAS_CULL) {
@@ -195,6 +206,13 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                     why_set(why, why_cap, "mips is not part of this build"); return 0;
                 }
                 break;
+            case ACE_KEY_PAD:
+                if (strcmp(v, "off") == 0) { c.pad = 0; ok = 1; }
+                else if (strcmp(v, "late") == 0) { c.pad = 1; ok = 1; }
+                if (ok && c.pad && !ACE_HAS_PAD) {
+                    why_set(why, why_cap, "pad is not part of this build"); return 0;
+                }
+                break;
             case ACE_KEY_TIER:
                 if (strcmp(v, "enhanced") == 0) { c.tier = ACE_TIER_ENHANCED; ok = 1; }
                 else if (strcmp(v, "ace") == 0) { c.tier = ACE_TIER_ACE; ok = 1; }
@@ -245,6 +263,10 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
     if (c.stick && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "stick needs tier=ace"); return 0; }
     /* An Ace item (contract 11.3.10): it changes guest timing, for one title's declared waits. */
     if (c.load && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "load needs tier=ace"); return 0; }
+    /* Late pad sampling acts at a title package's update boundary (contract 11.3.9): Ace only. */
+    if (c.pad && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "pad needs tier=ace"); return 0; }
+    /* An Ace item (contract 11.3.13): it needs the title's own package to declare its shadows. */
+    if (c.shadow && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "shadow needs tier=ace"); return 0; }
     c.on = 1;
     if (out) *out = c;
     why_set(why, why_cap, "");
@@ -259,6 +281,7 @@ static const char *smooth_word(int v) {
 static const char *tier_word(int v) { return v == ACE_TIER_ACE ? "ace" : "enhanced"; }
 static const char *sas_word(int v) { return v == ACE_SAS_SINC ? "sinc" : "off"; }
 static const char *tess_word(int v) { return v == 2 ? "2" : v == 3 ? "3" : v == 4 ? "4" : "off"; }
+static const char *shadow_word(int v) { return v == ACE_SHADOW_SOFT ? "soft" : "off"; }
 
 int ace_format(const AceConfig *c, char *out, size_t cap) {
     int n;
@@ -314,6 +337,16 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
         const int m = snprintf(out + n, cap - (size_t)n, ";texpack=on");
         n = m < 0 ? -1 : n + m;
     }
+    /* Likewise pad, after texpack, before cull: a missing pad is off (contract 11.3.9). */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->pad) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";pad=late");
+        n = m < 0 ? -1 : n + m;
+    }
+    /* Likewise shadow, after pad, before cull: a missing shadow is off (contract 11.3.13). */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->shadow) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";shadow=%s", shadow_word(c->shadow));
+        n = m < 0 ? -1 : n + m;
+    }
     /* The same for cull, which stays last: written only when on. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->cull) {
         const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
@@ -338,6 +371,7 @@ static int s_confirmed[ACE_FEATURE_COUNT];
 static void (*s_exit_report[ACE_FEATURE_COUNT])(void);
 static uint64_t s_af_failures;
 static unsigned long s_cull_untracked;
+static AceSoftShadows s_soft;    /* the package's declaration; not part of SR_ACE, never reset by it */
 static unsigned long long s_stick_samples;   /* samples off rest the stick remap passed through */
 static int s_stick_host;                     /* the host dead zone it used last, in centred counts */
 static unsigned long long s_load_skipped;
@@ -347,10 +381,13 @@ static int s_load_update_skipped;    /* a wait was skipped since the last update
 static int s_load_paced;             /* the guard fired: nothing is skipped for the rest of the run */
 static uint64_t s_peak_pushes, s_peak_frames_wide, s_peak_frames_limited;   /* peak=limit's totals */
 static double s_peak_min_gain = 1.0;
+static AcePadPlan s_pad_plan;
+static AceLatency s_latency;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
     "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull",
-    "depth", "twin", "ssaa", "peak", "glyphs", "mips", "texpack"
+    "depth", "twin", "ssaa", "peak", "glyphs", "mips", "texpack",
+    "pad", "shadow"
 };
 
 /* The run's observation state. */
@@ -423,6 +460,8 @@ int ace_init_spec(const char *spec, const char *report_path) {
     s_load_paced = 0;
     s_peak_pushes = s_peak_frames_wide = s_peak_frames_limited = 0;
     s_peak_min_gain = 1.0;
+    ace_pad_plan_reset(&s_pad_plan);
+    ace_latency_reset(&s_latency);
     s_af_device = 0;
     s_ssaa_limited = 0;
     s_ssaa_why[0] = '\0';
@@ -463,6 +502,9 @@ int ace_init_spec(const char *spec, const char *report_path) {
     if (s_req.glyphs)
         fprintf(stderr, "ACE_MODE: glyphs on (small text sprites draw from glyphs rebuilt at the render "
                         "scale; the frames the game keeps in VRAM change where they do)\n");
+    if (s_req.shadow)
+        fprintf(stderr, "ACE_MODE: shadow soft (declared shadow textures are drawn with soft edges; "
+                        "the committed frame changes)\n");
     if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
     if (s_req.texpack)
         fprintf(stderr, "ACE_MODE: texpack on (the title's texture pack replaces the textures it lists)\n");
@@ -470,6 +512,9 @@ int ace_init_spec(const char *spec, const char *report_path) {
         fprintf(stderr, "ACE_MODE: peak limit (the host hears SAS mixes unsaturated, through a true-peak "
                         "limiter; the guest's SAS bytes are unchanged)\n");
     if (s_req.mips) fprintf(stderr, "ACE_MODE: mips on (textures with one level get host-built mip chains)\n");
+    if (s_req.pad)
+        fprintf(stderr, "ACE_MODE: pad late (each logic update starts closer to its VBLANK deadline "
+                        "and reads a fresher pad sample)\n");
     return 1;
 }
 
@@ -513,6 +558,7 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_SMOOTH: s_eff.smooth = 0; break;
     case ACE_FEATURE_STICK: s_eff.stick = 0; break;
     case ACE_FEATURE_MIPS: s_eff.mips = 0; break;
+    case ACE_FEATURE_SHADOW: s_eff.shadow = 0; break;
     case ACE_FEATURE_SAS: s_eff.sas = 0; break;
     case ACE_FEATURE_TESS: s_eff.tess = 0; break;
     case ACE_FEATURE_LOAD: s_eff.load = 0; break;
@@ -523,10 +569,35 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_SSAA: s_eff.ssaa = 0; break;
     case ACE_FEATURE_PEAK: s_eff.peak = 0; break;
     case ACE_FEATURE_GLYPHS: s_eff.glyphs = 0; break;
+    case ACE_FEATURE_PAD: s_eff.pad = 0; break;
     default: break;
     }
     fprintf(stderr, "ACE_MODE: %s unavailable (%s)\n", k_feature_key[feature], s_unavailable[feature]);
 }
+
+int nk_ace_soft_shadows_declare(const uint8_t key[32], const uint8_t (*digests)[32], uint32_t count,
+                                const uint8_t *edge_texels) {
+    const char *why = NULL;
+    if (!key) why = "no key";
+    else if (count > ACE_SOFT_SHADOW_MAX) why = "more than 256 textures";
+    else if (count && (!digests || !edge_texels)) why = "no digests or edge widths";
+    for (uint32_t i = 0; !why && i < count; i++)
+        if (edge_texels[i] < 1u || edge_texels[i] > 4u) why = "an edge width outside 1 to 4 texels";
+    memset(&s_soft, 0, sizeof(s_soft));
+    if (why) {
+        fprintf(stderr, "ACE_MODE: soft shadow declaration refused (%s)\n", why);
+        return 0;
+    }
+    memcpy(s_soft.key, key, sizeof(s_soft.key));
+    if (count) {
+        memcpy(s_soft.digest, digests, (size_t)count * sizeof(s_soft.digest[0]));
+        memcpy(s_soft.edge, edge_texels, count);
+    }
+    s_soft.count = count;
+    return 1;
+}
+
+const AceSoftShadows *nk_ace_soft_shadows(void) { return &s_soft; }
 
 void ace_set_cull_untracked(unsigned long n) {
     if (g_ace_on) s_cull_untracked = n;
@@ -693,8 +764,10 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.stick) used = words_add(out, cap, used, "stick remap");
     if (s_eff.load) used = words_add(out, cap, used, "short loads");
     if (s_eff.mips) used = words_add(out, cap, used, "smooth far textures");
+    if (s_eff.pad) used = words_add(out, cap, used, "late pad sampling");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
     if (s_eff.texpack) used = words_add(out, cap, used, "texture pack");
+    if (s_eff.shadow) used = words_add(out, cap, used, "soft shadows");
     if (s_eff.depth) used = words_add(out, cap, used, "32-bit depth");
     if (s_eff.ssaa) used = words_add(out, cap, used, s_eff.ssaa == 4 ? "4x supersampling" : "2x supersampling");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
@@ -1300,6 +1373,122 @@ static uint64_t aux_dropped(const AceSmoothAuxStats *a) {
     return a->boxes_large + a->boxes_target + a->boxes_outside + a->boxes_full;
 }
 
+/* ---- late pad sampling --------------------------------------------------------------------- */
+
+void ace_pad_plan_reset(AcePadPlan *p) {
+    if (p) memset(p, 0, sizeof(*p));
+}
+
+uint64_t ace_pad_plan_begin(AcePadPlan *p, uint64_t now_ns, uint64_t deadline_ns, uint64_t period_ns,
+                            int allow) {
+    if (!p) return 0;
+    if (p->open) {             /* the previous update never waited for a VBLANK */
+        p->unmeasured++;
+        p->warm = 0;
+    }
+    p->updates++;
+    p->open = 1;
+    p->held = 0;
+    p->release_ns = now_ns;
+    p->deadline_ns = deadline_ns;
+    /* A deadline more than one period ahead is not the next VBLANK on this clock (with no
+     * period known, every deadline counts as one): no hold, the update is not judged late
+     * against it, and the plan warms up again before it holds. */
+    const int too_far = deadline_ns && deadline_ns > now_ns && (!period_ns || deadline_ns - now_ns > period_ns);
+    if (too_far) {
+        p->far_deadlines++;
+        p->warm = 0;
+        p->deadline_ns = 0;
+    }
+    if (p->backoff) {
+        p->backoff--;
+        return 0;
+    }
+    if (too_far || !allow || !deadline_ns || p->warm < ACE_PAD_WARM || !p->ncost) return 0;
+    uint64_t work = 0;
+    for (uint32_t i = 0; i < p->ncost; i++)
+        if (p->cost[i] > work) work = p->cost[i];
+    const uint64_t reserve = work + work / 4u + ACE_PAD_MARGIN_NS + p->extra_margin_ns;
+    if (deadline_ns <= now_ns || deadline_ns - now_ns <= reserve + ACE_PAD_MIN_HOLD_NS) return 0;
+    /* The deadline is at most one period ahead here, so every hold is shorter than a period. */
+    const uint64_t hold = deadline_ns - now_ns - reserve;
+    p->held = 1;
+    p->held_updates++;
+    p->hold_ns_sum += hold;
+    if (hold > p->hold_ns_max) p->hold_ns_max = hold;
+    return hold;
+}
+
+void ace_pad_plan_release(AcePadPlan *p, uint64_t now_ns) {
+    if (p && p->open) p->release_ns = now_ns;
+}
+
+int ace_pad_plan_wait(AcePadPlan *p, uint64_t now_ns) {
+    if (!p || !p->open) return 0;
+    p->open = 0;
+    p->measured++;
+    p->cost[p->next] = now_ns > p->release_ns ? now_ns - p->release_ns : 0u;
+    p->next = (p->next + 1u) % ACE_PAD_COSTS;
+    if (p->ncost < ACE_PAD_COSTS) p->ncost++;
+    if (p->warm < ACE_PAD_WARM) p->warm++;
+    const int late = p->deadline_ns && now_ns > p->deadline_ns;
+    if (!late) return 0;
+    if (!p->held) {
+        p->late_unheld++;
+        return 0;
+    }
+    p->late_held++;
+    p->backoff = ACE_PAD_BACKOFF_UPDATES;
+    p->extra_margin_ns += ACE_PAD_MARGIN_STEP_NS;
+    if (p->extra_margin_ns > ACE_PAD_MARGIN_MAX_NS) p->extra_margin_ns = ACE_PAD_MARGIN_MAX_NS;
+    return 1;
+}
+
+void ace_pad_plan_interrupt(AcePadPlan *p) {
+    if (!p || !p->open) return;
+    p->open = 0;
+    p->interrupted++;
+}
+
+AcePadPlan *ace_pad_plan(void) { return &s_pad_plan; }
+
+void ace_latency_reset(AceLatency *l) {
+    if (l) memset(l, 0, sizeof(*l));
+}
+
+void ace_latency_note(AceLatency *l, uint64_t ns) {
+    if (!l) return;
+    uint64_t b = ns / ACE_LAT_BIN_NS;
+    if (b >= ACE_LAT_BINS) b = ACE_LAT_BINS - 1u;
+    l->bin[b]++;
+    l->count++;
+    l->sum_ns += ns;
+    if (ns > l->max_ns) l->max_ns = ns;
+}
+
+uint64_t ace_latency_percentile_ns(const AceLatency *l, unsigned pct) {
+    if (!l || !l->count) return 0;
+    if (pct > 100u) pct = 100u;
+    /* The upper edge of the first bin by which at least pct percent of the frames are counted. */
+    const uint64_t want = (l->count * pct + 99u) / 100u;
+    uint64_t seen = 0;
+    for (uint32_t b = 0; b < ACE_LAT_BINS; b++) {
+        seen += l->bin[b];
+        if (seen && seen >= want) return (uint64_t)(b + 1u) * ACE_LAT_BIN_NS;
+    }
+    return (uint64_t)ACE_LAT_BINS * ACE_LAT_BIN_NS;
+}
+
+int ace_pad_requested(void) { return g_ace_on && s_req.pad; }
+
+void ace_note_input_latency(uint64_t ns) {
+    if (ace_pad_requested()) ace_latency_note(&s_latency, ns);
+}
+
+void ace_note_frame_without_read(void) {
+    if (ace_pad_requested()) s_latency.without_read++;
+}
+
 size_t ace_report_json(char *out, size_t cap) {
     size_t used = 0;
     int n;
@@ -1328,6 +1517,8 @@ size_t ace_report_json(char *out, size_t cap) {
     if (s_ssaa_limited) ACE_PUT("  \"ssaa_requested\": %d,\n", s_req.ssaa);
     if (s_req.glyphs) ACE_PUT("  \"glyphs\": %s,\n", s_eff.glyphs ? "true" : "false");
     if (s_req.mips) ACE_PUT("  \"mips\": %s,\n", s_eff.mips ? "true" : "false");
+    if (s_req.shadow) ACE_PUT("  \"shadow\": \"%s\",\n  \"shadow_declared\": %u,\n",
+                              shadow_word(s_eff.shadow), (unsigned)s_soft.count);
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
     if (s_req.texpack) ACE_PUT("  \"texpack\": %s,\n", s_eff.texpack ? "true" : "false");
@@ -1337,6 +1528,29 @@ size_t ace_report_json(char *out, size_t cap) {
                             (unsigned long long)s_peak_frames_wide,
                             (unsigned long long)s_peak_frames_limited,
                             s_peak_min_gain);
+    /* Late pad sampling's plan and its latency measure: only a line that asks for pad=late runs
+       them, so a report without it keeps its bytes (contract 11.3.9). */
+    if (s_req.pad) {
+        const AcePadPlan *pp = &s_pad_plan;
+        ACE_PUT("  \"pad\": {\"late\": %s, \"updates\": %llu, \"measured\": %llu, \"unmeasured\": %llu, "
+                "\"held\": %llu, \"hold_mean_ms\": %.2f, \"hold_max_ms\": %.2f, \"late_held\": %llu, "
+                "\"late_unheld\": %llu, \"refreshed\": %llu, \"far_deadline\": %llu, \"interrupted\": %llu},\n",
+                s_eff.pad ? "true" : "false", (unsigned long long)pp->updates,
+                (unsigned long long)pp->measured, (unsigned long long)pp->unmeasured,
+                (unsigned long long)pp->held_updates,
+                pp->held_updates ? (double)pp->hold_ns_sum / (double)pp->held_updates / 1e6 : 0.0,
+                (double)pp->hold_ns_max / 1e6, (unsigned long long)pp->late_held,
+                (unsigned long long)pp->late_unheld, (unsigned long long)pp->refreshed,
+                (unsigned long long)pp->far_deadlines, (unsigned long long)pp->interrupted);
+    }
+    if (s_req.pad && (s_latency.count || s_latency.without_read))
+        ACE_PUT("  \"input_latency_ms\": {\"frames\": %llu, \"frames_without_read\": %llu, \"mean\": %.2f, "
+                "\"p50\": %.1f, \"p95\": %.1f, \"p99\": %.1f, \"max\": %.2f},\n",
+                (unsigned long long)s_latency.count, (unsigned long long)s_latency.without_read,
+                s_latency.count ? (double)s_latency.sum_ns / (double)s_latency.count / 1e6 : 0.0,
+                (double)ace_latency_percentile_ns(&s_latency, 50) / 1e6,
+                (double)ace_latency_percentile_ns(&s_latency, 95) / 1e6,
+                (double)ace_latency_percentile_ns(&s_latency, 99) / 1e6, (double)s_latency.max_ns / 1e6);
     ACE_PUT("  \"unavailable\": {");
     int first = 1;
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
@@ -1439,11 +1653,13 @@ void ace_finish(void) {
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
                                                 ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL,
                                                 ACE_HAS_DEPTH, 1, ACE_HAS_SSAA, ACE_HAS_PEAK, ACE_HAS_GLYPHS,
-                                                ACE_HAS_MIPS, ACE_HAS_TEXPACK };
+                                                ACE_HAS_MIPS, ACE_HAS_TEXPACK,
+                                                ACE_HAS_PAD, ACE_HAS_SHADOW };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
                                         s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
                                         s_eff.load, s_eff.cull, s_eff.depth, s_eff.twin, s_eff.ssaa,
-                                        s_eff.peak, s_eff.glyphs, s_eff.mips, s_eff.texpack };
+                                        s_eff.peak, s_eff.glyphs, s_eff.mips, s_eff.texpack,
+                                        s_eff.pad, s_eff.shadow };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
@@ -1455,6 +1671,11 @@ void ace_finish(void) {
                 : f == ACE_FEATURE_PEAK
                 ? "did not run: this build has no SAS mixer or no host audio backend"
                 : f == ACE_FEATURE_TEXPACK ? "did not run: only the Vulkan renderer draws texture packs"
+                : f == ACE_FEATURE_PAD
+                ? "did not run: no update boundary ran (no 60 FPS game logic package, or it is off)"
+                : f == ACE_FEATURE_SHADOW
+                ? (s_soft.count ? "did not run: no declared shadow texture was drawn by the Vulkan GE renderer"
+                                : ACE_SOFT_SHADOW_NONE_DECLARED)
                 : "did not run: its renderer or presenter did not start");
     }
     size_t len = ace_report_json(json, sizeof(json));
@@ -1462,6 +1683,25 @@ void ace_finish(void) {
     if (s_req.load) fprintf(stderr, "ACE_MODE: load waits skipped %llu (longest run %u logic updates; %s)\n",
                             s_load_skipped, s_load_run_max,
                             s_load_paced ? "paced updates, skipping stopped" : "no pacing seen");
+    if (s_req.pad && (s_latency.count || s_latency.without_read))
+        fprintf(stderr, "ACE_MODE: input latency (%llu frames: mean %.2f ms, p50 %.1f ms, p95 %.1f ms, "
+                        "max %.2f ms; %llu presents repeating a frame or with no new pad read)\n",
+                (unsigned long long)s_latency.count,
+                s_latency.count ? (double)s_latency.sum_ns / (double)s_latency.count / 1e6 : 0.0,
+                (double)ace_latency_percentile_ns(&s_latency, 50) / 1e6,
+                (double)ace_latency_percentile_ns(&s_latency, 95) / 1e6, (double)s_latency.max_ns / 1e6,
+                (unsigned long long)s_latency.without_read);
+    if (s_req.pad)
+        fprintf(stderr, "ACE_MODE: pad %s (%llu updates: %llu held, mean hold %.2f ms; %llu unmeasured, "
+                        "%llu interrupted; "
+                        "late after a hold %llu, late without one %llu; %llu samples refreshed)\n",
+                s_eff.pad ? "late" : "off", (unsigned long long)s_pad_plan.updates,
+                (unsigned long long)s_pad_plan.held_updates,
+                s_pad_plan.held_updates ? (double)s_pad_plan.hold_ns_sum / (double)s_pad_plan.held_updates / 1e6
+                                        : 0.0,
+                (unsigned long long)s_pad_plan.unmeasured, (unsigned long long)s_pad_plan.interrupted,
+                (unsigned long long)s_pad_plan.late_held,
+                (unsigned long long)s_pad_plan.late_unheld, (unsigned long long)s_pad_plan.refreshed);
     if (s_req.smooth && s_have_aux_stats) {
         const AceSmoothAuxStats *a = &s_aux_stats;
         fprintf(stderr, "ACE_MODE: smooth inputs (pairs %llu: HUD mask %llu, depth %llu; HUD boxes kept "

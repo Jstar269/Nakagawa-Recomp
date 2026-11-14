@@ -5,7 +5,7 @@
 > build-package / validate / launch route exist in the public source
 > ([#465](https://github.com/Jstar269/nakagawa-recomp/pull/465),
 > [#487](https://github.com/Jstar269/nakagawa-recomp/pull/487)), and so are local decryption of the user's own UMD
-> disc (#1494) and the disc check against the user's Redump list. Progress
+> disc (#1494) and the disc check against Redump's PSP list. Progress
 > reporting for every preparation route, and end-user play without compiling
 > on the user's PC, are not built and are marked as targets below.
 >
@@ -108,7 +108,7 @@ Status:
 The diagram below is the target separation. The implemented public slice currently reaches
 title lookup, bounded ISO inspection and ISO/XB staging, library package build and
 validation, launch-session validation, and child-process lifecycle. The player decrypts
-a UMD disc's encrypted program files locally with built-in tables (#1494) and checks it against the user's Redump list.
+a UMD disc's encrypted program files locally with built-in tables (#1494) and checks it against Redump's PSP list.
 
 ```text
 ┌────────────────────────────────────────────────────────┐

@@ -119,6 +119,9 @@ static MovieUpscale s_movie, s_movie_rec;
 #endif
 static int      s_offscreen = 0;        /* explicit host-memory presenter for headless bring-up */
 static uint32_t s_buttons = 0;
+/* The host clock (sched_host_now_ns) at the last poll that set s_buttons and the stick: the
+ * input-latency measure's start (ace.h). Host-side only. */
+static uint64_t s_input_poll_ns;
 static uint8_t  s_lx = 128, s_ly = 128;   /* live left-stick (0..255, 128=centre), latched each present */
 static int      s_stick_dead_zone = 0;     /* the input profile's stick dead zone in centred counts,
                                               latched with the stick; 0 without an SDL3 presenter */
@@ -553,7 +556,9 @@ static void sr_gui_take_pause_request(void) {
                                   ? SR_PAUSE_SRC_PAD_LOST : SR_PAUSE_SRC_USER);
 }
 
-static void sync_sdl_input(void) {
+/* Copies the presenter's input state. Only a copy after the presenter polled the host input
+ * (sync_sdl_input below) moves the poll stamp the input-latency measure starts from. */
+static void sync_sdl_input_state(void) {
     s_buttons = sdl3vk_buttons();
     sdl3vk_analog(&s_lx, &s_ly);
     {
@@ -565,6 +570,12 @@ static void sync_sdl_input(void) {
     s_pad_present = sdl3vk_pad_present();
     sr_gui_feed_keyboard();
     sr_gui_take_pause_request();
+}
+
+/* After a poll of the host input (sdl3vk_poll, or a present, which polls). */
+static void sync_sdl_input(void) {
+    s_input_poll_ns = sched_host_now_ns();
+    sync_sdl_input_state();
 }
 #endif
 
@@ -1220,6 +1231,9 @@ void gui_init(const char *title) {
                      * CPU, which the movie upscaler takes without them. */
                     if (!gpu_ge_started) sr_movie_set_tracking(0);
                     gui_report_render_path(true, true, gpu_ge_asked, gpu_ge_started);
+                    /* Soft shadows (shadow=soft) are made only by the Vulkan GE renderer. */
+                    if (!gpu_ge_started && g_ace_on && ace_effective()->shadow)
+                        ace_feature_unavailable(ACE_FEATURE_SHADOW, ACE_SOFT_SHADOW_SOFTWARE);
                     /* Asked for with SR_TEX_DUMP=1: started, or refused with a TEX_DUMP line when the
                        Vulkan GE did not start (a dump reads its texture cache). */
                     gui_texdump_at_start();
@@ -1334,16 +1348,19 @@ int gui_interactive(void) {
 #endif /* !SR_GUI_PRESENT_SELFTEST */
 #ifdef SR_GUI_INPUT_PATH
 uint32_t gui_buttons(void) { return s_buttons; }
+uint64_t gui_input_poll_ns(void) { return s_input_poll_ns; }
 void gui_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = s_lx; if (ly) *ly = s_ly; }
 int gui_stick_dead_zone(void) { return s_stick_dead_zone; }
 int gui_pad_present(void) { return s_pad_present; }
-void gui_consume_button_pulses(void) {
+uint32_t gui_consume_button_pulses(void) {
+    uint32_t pulses = 0u;
 #ifdef SR_SDL3VK
     if (s_sdl3) {
-        sdl3vk_consume_button_pulses();
-        sync_sdl_input();
+        pulses = sdl3vk_consume_button_pulses();
+        sync_sdl_input_state();   /* no poll here: the poll stamp stays */
     }
 #endif
+    return pulses;
 }
 #endif /* SR_GUI_INPUT_PATH */
 #ifndef SR_GUI_PRESENT_SELFTEST
@@ -1757,6 +1774,7 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
     /* GDI fallback is keyboard-only; controllers are handled by the SDL3 gamepad
      * subsystem (src/rt/gpu_sdl3vk) on the default Vulkan path. */
     gui_pump();
+    s_input_poll_ns = sched_host_now_ns();
     s_buttons = read_keys();
     s_lx = 128; s_ly = 128;
     s_pad_present = 0;
@@ -2646,13 +2664,21 @@ static unsigned s_stub_held_calls;
 static unsigned s_stub_stop_due_calls;
 
 uint32_t sdl3vk_buttons(void) { return s_stub_held | s_stub_pulse; }
-void sdl3vk_consume_button_pulses(void) { s_stub_pulse = 0; }
+uint32_t sdl3vk_consume_button_pulses(void) {
+    const uint32_t pulses = s_stub_pulse;
+    s_stub_pulse = 0;
+    return pulses;
+}
 void sdl3vk_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = 128; if (ly) *ly = 128; }
 int sdl3vk_pad_present(void) { return 1; }
 /* Each input read takes the stick dead zone from the session's input profile; NULL (no profile)
  * gives 0, which is what every test but the dead-zone one expects. */
 static const NkInputProfile *s_stub_profile;
 const NkInputProfile *sdl3vk_get_input_profile(void) { return s_stub_profile; }
+/* Each input poll stamps the host clock (late pad sampling's latency measure); the stub clock is
+ * what the test sets. */
+static uint64_t s_stub_now_ns;
+uint64_t sched_host_now_ns(void) { return s_stub_now_ns; }
 void sdl3vk_set_text_claim(int on) { if (on) selftest_unexpected("sdl3vk_set_text_claim(1)"); }
 int sdl3vk_take_key_events(Sdl3VkKeyEvent *out, int max) { (void)out; (void)max; return 0; }
 int sdl3vk_take_pause_request(void) { return SDL3VK_PAUSE_REQUEST_NONE; }
@@ -2725,11 +2751,16 @@ static void selftest_held_present_passes_a_tap_to_the_game(void) {
     AcePaceStats before, after;
     ace_pace_stats(&before);
     s_stub_tap = cross;
+    s_stub_now_ns = 123456789ull;
     unsigned calls = s_stub_held_calls;
     gui_ace_vblank(1u);
     assert(s_stub_held_calls == calls + 1u);
+    assert(gui_input_poll_ns() == 123456789ull);   /* the poll behind the sample is stamped */
+    s_stub_now_ns = 987654321ull;
     assert((selftest_game_sample() & cross) != 0u);
     assert((selftest_game_sample() & cross) == 0u);
+    /* Consuming the pulses polls nothing, so the stamp stays the present's poll. */
+    assert(gui_input_poll_ns() == 123456789ull);
     ace_pace_stats(&after);
     assert(after.kind[ACE_PRESENT_HELD] == before.kind[ACE_PRESENT_HELD] + 1u);
     assert(!gui_quit_requested());

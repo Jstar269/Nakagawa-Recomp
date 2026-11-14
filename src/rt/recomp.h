@@ -1545,6 +1545,15 @@ int sr_enhancement_file_register(const char *disc_path, const uint8_t stock_sha2
  * whether that logic has stayed under 60 updates/s long enough to report (section 9.5).
  * sr_enhancement_logic_slowed() may be called from the presenter thread. */
 void sr_enhancement_register_updates(const volatile uint32_t *counter);
+/* From generated code at the update boundary, right after the count advances (section 9.5), only
+ * while SR_EXPERIMENTAL_60HZ=1. Unless the run's SR_ACE line asks for pad=late it returns at
+ * once. With pad=late it measures the update and may hold the calling thread in a delay until shortly before the
+ * next VBLANK deadline and then refresh the newest pad sample the guest has not read
+ * (docs/ENHANCEMENT_CONTRACT.md section 11.3.9). */
+void sr_enhancement_update_begin(void);
+/* From the scheduler when a thread blocks on a VBLANK wait: the update's work is done if it is
+ * the thread that passed the boundary. */
+void sr_enhancement_update_waits(void);
 int sr_enhancement_logic_slowed(unsigned *rate);
 /* A clip_x_widen site (section 10.8), from generated code right after the call at the site
  * returns: the guest pointer `base` plus each of the `count` offsets addresses a column-major 4x4
@@ -1635,6 +1644,24 @@ RecompFn sr_module_code_lookup(uint32_t pc, int *in_bound_image);
 /* Fetch authority: -1 when no bound image owns pc, else 1/0 for whether one of the
  * owning image's executable spans covers pc's complete fetch slot. */
 int  sr_module_code_fetch_authority(uint32_t pc);
+/* Link ranges a module's analysis withdrew as non-code (tools/analyze.py, "Non-code in an
+ * image without relocation evidence"): words of its code section that only seeds running into
+ * reserved encodings reached. They lie outside the module's spans, so neither a body nor the
+ * interpreter runs them. The generated sr_register_all() registers one record per module that
+ * has such ranges, after the module itself; `entries` and `words` count the withdrawn seeds
+ * and words, for a reader of the generated code (the runtime reads neither). The registry
+ * lasts until sr_module_code_reset(), like the module registry. */
+typedef struct SrModuleNonCode {
+    const SrModuleCode *code;
+    const SrModuleSpan *spans;
+    uint32_t nspans;
+    uint32_t entries;
+    uint32_t words;
+} SrModuleNonCode;
+void sr_module_code_non_code_register(const SrModuleNonCode *record);
+/* 1 when `pc` lies in a non-code range of a bound module, with the module's name and the link
+ * address; 0 otherwise. A transfer that stops there names it (dispatch_run_interp). */
+int  sr_module_code_non_code(uint32_t pc, const char **name_out, uint32_t *link_out);
 /* 1 when a bound image covers pc and that image is the translation of code captures (#1933):
  * tools/code_capture.py names each such image code_capture_<load>_<fnv1a64>. */
 int  sr_module_code_capture_covers(uint32_t pc);
@@ -2357,7 +2384,8 @@ void     gui_init(const char *title);
 int      gui_on(void);
 int      gui_interactive(void);                  /* 1 when a person is at a real window: not offscreen, headless or acceptance */
 uint32_t gui_buttons(void);
-void     gui_consume_button_pulses(void);          /* after one PSP VBLANK sample */
+uint32_t gui_consume_button_pulses(void);          /* after one PSP VBLANK sample: the pulses it cleared */
+uint64_t gui_input_poll_ns(void);                  /* host clock of the last input poll (ace.h) */
 /* Gamepad buttons that went down since the last call, as PSP button bits: the on-screen
  * keyboard's pad input (osk_overlay.h). Taken every VBLANK whether or not it is open. Returns 0
  * when no SDL3 presenter is up (the GDI and offscreen presenters have no SDL3 gamepad). */
@@ -2455,6 +2483,7 @@ int      sched_pause_active(void);
 SrPauseSource sched_pause_source(void);
 int      sched_pause_pending(void);
 uint64_t sched_pause_total_ns(void);
+uint64_t sched_pause_count(void);                  /* pauses that have ended */
 uint32_t sr_display_vcount(void);
 
 typedef uint32_t (*HleFn)(CpuState *s);
@@ -2568,6 +2597,8 @@ int sched_clock_deterministic(void);
 #define SCHED_FAST_FORWARD_SPEED 3u
 /* 1 while guest time runs fast. */
 int sched_fast_forward_on(void);
+/* The speed guest time runs at: 1, or the fast-forward speed. */
+uint32_t sched_fast_forward_speed(void);
 /* How many times fast forward has started in this run (0 before the first). */
 uint32_t sched_fast_forward_epoch(void);
 /* f_00065c60 field-writer intercept: the container walker reads count from
@@ -2825,6 +2856,12 @@ void     sr_hle_release_thread_resources(uint32_t thread_uid); /* release HLE re
 /* Wait-object ids shared between hle.c (wait side) and sched.c (thread-dump side). */
 #define CTRL_WAIT_OBJ 0xC471D000u                   /* sceCtrl blocking reads park on this object */
 uint64_t sched_vtime_us(void);
+/* Late pad sampling (ace.h): the host clock, one VBLANK period on it, and the host time of the
+ * next VBLANK source event, never more than one period after the last VBLANK latch (0 when
+ * VBLANKs are not paced to the host clock or none has been latched). */
+uint64_t sched_host_now_ns(void);
+uint64_t sched_vblank_period_ns(void);
+uint64_t sched_vblank_deadline_ns(void);
 uint64_t sched_vtime_deadline_after(uint64_t delta); /* saturating guest-time deadline */
 void     sched_vtime_refresh(void);
 /* Display scanout observations derived from the same monotonic guest timeline.  The

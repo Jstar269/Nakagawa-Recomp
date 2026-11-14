@@ -12,6 +12,7 @@
 #include "tex_scale.h"
 
 #include "../../../third_party/xbrz/xbrz.h"
+#include "../vfpu_tables.h"   /* sr_vfpu_hmac_sha256: the soft-shadow texture digest */
 
 #include <SDL3/SDL_mutex.h>
 #include <SDL3/SDL_thread.h>
@@ -680,5 +681,134 @@ int nk_smart2d_triangle(const float x[3], const float y[3], const float u[3], co
             const float ex = cx[i] - x[0], ey = cy[j] - y[0];
             if (!on_centre(tu[0] + dudx * ex + dudy * ey) || !on_centre(tv[0] + dvdx * ex + dvdy * ey)) return 0;
         }
+    return 1;
+}
+
+/* ---- soft shadows ------------------------------------------------------------------------ */
+
+#define SOFT_AXIS_MAX (NK_TEX_SOFT_MAX_DIM * NK_TEX_SOFT_FACTOR_MAX)
+
+/* The bilinear taps of one axis (tex_scale.h): output texel i reads texels a[i] and b[i], b with
+ * weight wb[i] and a with 2 * factor - wb[i], both clamped to 0..n-1. */
+static void soft_axis(uint32_t n, uint32_t factor, uint16_t *a, uint16_t *b, uint16_t *wb) {
+    const int32_t d = 2 * (int32_t)factor;
+    for (uint32_t i = 0; i < n * factor; i++) {
+        const int32_t t = 2 * (int32_t)i + 1 - (int32_t)factor;   /* the coordinate times 2 * factor */
+        const int32_t lo = t >= 0 ? t / d : -((-t + d - 1) / d);    /* floor */
+        int32_t x0 = lo, x1 = lo + 1;
+        if (x0 < 0) x0 = 0;
+        if (x1 < 0) x1 = 0;
+        if (x0 > (int32_t)n - 1) x0 = (int32_t)n - 1;
+        if (x1 > (int32_t)n - 1) x1 = (int32_t)n - 1;
+        a[i] = (uint16_t)x0;
+        b[i] = (uint16_t)x1;
+        wb[i] = (uint16_t)(t - lo * d);
+    }
+}
+
+static inline uint32_t soft_clamp(int32_t v, uint32_t n) {
+    return v < 0 ? 0u : (v >= (int32_t)n ? n - 1u : (uint32_t)v);
+}
+
+int nk_tex_soften_alpha_edge(const uint32_t *src, uint32_t w, uint32_t h, uint32_t factor,
+                             uint32_t edge_texels, uint32_t *dst) {
+    if (!src || !dst || w < 1u || h < 1u || w > NK_TEX_SOFT_MAX_DIM || h > NK_TEX_SOFT_MAX_DIM ||
+        factor < NK_TEX_SOFT_FACTOR_MIN || factor > NK_TEX_SOFT_FACTOR_MAX ||
+        edge_texels < NK_TEX_SOFT_EDGE_MIN || edge_texels > NK_TEX_SOFT_EDGE_MAX)
+        return 0;
+    const uint32_t ow = w * factor, oh = h * factor, d = 2u * factor, dd = d * d;
+    const int32_t r = (int32_t)(edge_texels * factor);
+    const uint32_t k = 2u * (uint32_t)r + 1u;
+    /* The largest sum is 255 * dd * k * k (255 * 64 * 33 * 33 at factor 4, edge 4), under 2^25. */
+    uint16_t ax[SOFT_AXIS_MAX], bx[SOFT_AXIS_MAX], wx[SOFT_AXIS_MAX];
+    uint16_t ay[SOFT_AXIS_MAX], by[SOFT_AXIS_MAX], wy[SOFT_AXIS_MAX];
+    uint32_t *up = (uint32_t *)malloc(sizeof(uint32_t) * (size_t)ow * oh);
+    uint32_t *hs = (uint32_t *)malloc(sizeof(uint32_t) * (size_t)ow * oh);
+    uint32_t *rgb = (uint32_t *)malloc(sizeof(uint32_t) * (size_t)ow * oh);
+    if (!up || !hs || !rgb) { free(up); free(hs); free(rgb); return 0; }
+    soft_axis(w, factor, ax, bx, wx);
+    soft_axis(h, factor, ay, by, wy);
+    /* Bilinear: colour rounded to 8 bits, alpha kept times dd in `up`. */
+    for (uint32_t y = 0; y < oh; y++) {
+        const uint32_t *ra = src + (size_t)ay[y] * w, *rb = src + (size_t)by[y] * w;
+        const uint32_t vb = wy[y], va = d - vb;
+        for (uint32_t x = 0; x < ow; x++) {
+            const uint32_t ub = wx[x], ua = d - ub;
+            const uint32_t p00 = ra[ax[x]], p01 = ra[bx[x]], p10 = rb[ax[x]], p11 = rb[bx[x]];
+            uint32_t out = 0;
+            for (uint32_t c = 0; c < 4u; c++) {
+                const uint32_t sh = 8u * c;
+                const uint32_t v = va * (ua * ((p00 >> sh) & 0xFFu) + ub * ((p01 >> sh) & 0xFFu)) +
+                                   vb * (ua * ((p10 >> sh) & 0xFFu) + ub * ((p11 >> sh) & 0xFFu));
+                if (c < 3u) out |= ((v + dd / 2u) / dd) << sh;
+                else up[(size_t)y * ow + x] = v;
+            }
+            rgb[(size_t)y * ow + x] = out;
+        }
+    }
+    /* The box blur of the alpha: rows, then columns, each window clamped to the image. */
+    for (uint32_t y = 0; y < oh; y++)
+        for (uint32_t x = 0; x < ow; x++) {
+            uint32_t sum = 0;
+            for (int32_t i = -r; i <= r; i++) sum += up[(size_t)y * ow + soft_clamp((int32_t)x + i, ow)];
+            hs[(size_t)y * ow + x] = sum;
+        }
+    const uint32_t den = dd * k * k;
+    for (uint32_t y = 0; y < oh; y++)
+        for (uint32_t x = 0; x < ow; x++) {
+            uint32_t sum = 0;
+            for (int32_t i = -r; i <= r; i++) sum += hs[(size_t)soft_clamp((int32_t)y + i, oh) * ow + x];
+            dst[(size_t)y * ow + x] = rgb[(size_t)y * ow + x] | (((sum + den / 2u) / den) << 24);
+        }
+    free(up);
+    free(hs);
+    free(rgb);
+    return 1;
+}
+
+int nk_tex_soft_shadow_digest(const uint8_t key[32], const uint32_t *rgba, uint32_t w, uint32_t h,
+                              uint8_t digest[32]) {
+    static const char k_domain[] = "soft shadow texture v1";   /* with its zero byte: 23 bytes */
+    uint8_t head[4], texels[NK_TEX_SOFT_MAX_DIM * NK_TEX_SOFT_MAX_DIM * 4];
+    if (!key || !rgba || !digest || w < 1u || h < 1u || w > NK_TEX_SOFT_MAX_DIM || h > NK_TEX_SOFT_MAX_DIM)
+        return 0;
+    head[0] = (uint8_t)w; head[1] = (uint8_t)(w >> 8);
+    head[2] = (uint8_t)h; head[3] = (uint8_t)(h >> 8);
+    const size_t n = (size_t)w * h;   /* at most 64 x 64: widened before any product */
+    for (size_t i = 0; i < n; i++) {
+        texels[i * 4u] = (uint8_t)rgba[i];
+        texels[i * 4u + 1u] = (uint8_t)(rgba[i] >> 8);
+        texels[i * 4u + 2u] = (uint8_t)(rgba[i] >> 16);
+        texels[i * 4u + 3u] = (uint8_t)(rgba[i] >> 24);
+    }
+    const uint8_t *parts[3] = { (const uint8_t *)k_domain, head, texels };
+    const size_t lens[3] = { sizeof(k_domain), sizeof(head), n * 4u };
+    sr_vfpu_hmac_sha256(key, 32u, parts, lens, 3u, digest);
+    return 1;
+}
+
+size_t nk_tex_soft_candidate_line(char *out, size_t cap, uint32_t w, uint32_t h, const uint8_t digest[32]) {
+    static const char k_hex[] = "0123456789abcdef";
+    char hex[65];
+    if (!out || !digest) return 0;
+    for (size_t i = 0; i < 32u; i++) {
+        hex[2u * i] = k_hex[digest[i] >> 4];
+        hex[2u * i + 1u] = k_hex[digest[i] & 15u];
+    }
+    hex[64] = '\0';
+    const int n = snprintf(out, cap, "SOFT_SHADOW: candidate %ux%u digest=%s", (unsigned)w, (unsigned)h, hex);
+    if (n < 0 || (size_t)n >= cap) {
+        if (cap) out[0] = '\0';
+        return 0;
+    }
+    return (size_t)n;
+}
+
+int nk_tex_soft_candidate_first(NkTexSoftCandidates *seen, const uint8_t digest[32]) {
+    if (!seen || !digest) return 0;
+    for (uint32_t i = 0; i < seen->count; i++)
+        if (memcmp(seen->digest[i], digest, 32) == 0) return 0;
+    if (seen->count >= NK_TEX_SOFT_CANDIDATES_MAX) return -1;
+    memcpy(seen->digest[seen->count++], digest, 32);
     return 1;
 }

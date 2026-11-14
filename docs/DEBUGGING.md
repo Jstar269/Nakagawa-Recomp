@@ -115,7 +115,11 @@ control. With the build flag off, the new GE timers and export calls are absent 
 
 The per-stage `estimated_ns` is `sample_ns * eligible / samples`. `samples` counts timed sparse
 events; `eligible` counts the corresponding list, draw, vertex, or triangle operations and can be
-divided by new frames for an operations-per-frame rate. `clipping_acceptance` includes cull-order
+divided by new frames for an operations-per-frame rate. For `vertex_fetch_decode`, `transform`
+and `lighting` it leaves out the uses the per-draw vertex cache served (`vertex_cache_hits`),
+which do none of that work, so it is below the vertex uses whenever the cache hits. In a draw
+whose uses hit, miss or bypass the cache, the index read comes before the cache decision,
+outside the fetch/decode sample. `clipping_acceptance` includes cull-order
 reordering and triangle acceptance; `assembly` is the accepted screen-space projection work.
 `triangle_total` overlaps those two stages, and `empty_control` measures sampling overhead; neither
 is an additional front-end stage. These timers add measurement overhead and are for attribution
@@ -461,6 +465,32 @@ non-zero:
   them, so another round would build the same thing.
 - `BRINGUP_CAPTURE_MISSING`: the run named a capture the folder does not hold.
 
+**Data withdrawn from a fixed-address image.** An image without relocation evidence (an overlay
+or an executable loaded at a fixed address) can keep data in its code section, and codegen withdraws
+the seeds whose generated bodies would hold a word that no instruction has, and takes the words
+proven non-code (every path from each runs into such a word) out of the executable spans
+([`ARCHITECTURE.md`](ARCHITECTURE.md#codegen-internals)). Codegen prints one line per such image,
+`codegen: <image>: withdrew N seeds as non-code, W words proven non-code, S executable spans left
+(no relocation evidence; first reserved word: <class> (count), ...)`, where the image is
+the module's name, `executable`, or an `--extra-elf` file's name, and each class (a reserved
+opcode, SPECIAL function or REGIMM `rt`, or a branch with a nonzero `rt`) counts the withdrawals
+whose lowest reserved word is of it. A dispatch into a module's withdrawn span stops with
+`NON_CODE_WITHDRAWN: 0x... is <module>@0x..., in a span the build withdrew as non-code`. In the
+executable the withdrawn words leave its executable spans, so a dispatch there stops as not
+executable at that address, without the module line. Either way the game called into those words, so
+the withdrawal was wrong: report it as a translator bug with the address and the image, not as a
+missing function. A build that stops with `NON_CODE_TRANSLATED` is the same kind of bug, found
+before the run: a generated body owns a word the analysis withdrew. A withdrawn address whose
+words are not proven non-code stays executable: a call there runs on the interpreter floor.
+
+Codegen time on such an image stays high when its data holds many seeds whose bodies reach one
+another by conditional branches: each such body is clean when split at the next seed, so each
+seed is kept as an entry (the rule never takes a body that could translate), and code generation
+then walks each one's unsplit body through the same shared region and stubs it. On one title's
+overlay, 2,283 entries stay stubs and the package's codegen takes about 2,000 s (one reading),
+against 5,644 stubs and 9,698 s without the withdrawal. Remembering a failed walk across entries in codegen is the open follow-up; until
+then the time is the cost of the conservative rule, not a hang.
+
 The share is a time share. It overstates the interpreter's share of instructions, because the
 interpreter is slower per instruction. The exact instruction share still needs a
 `PERF_AOT_INSTRUCTIONS=1` build with `SR_PERF=1`. Time is charged to the tier that is running. A
@@ -618,6 +648,8 @@ coverage classes, such as `unverified` and `synthetic`, are defined in [`HLE_COV
 | `SR_GPU_DEPTH_REF=PATH` | `gpu-coherence-selftest` host-depth case: a run without `depth=32` writes this reference (its depth readback hash), a `depth=32` run at the same scale checks against it (the harness's `--depth-ref`) |
 | `SR_GPU_SSAA_REF=PATH` | `gpu-coherence-selftest` ssaa-edge case: a run without supersampling writes this reference (its guest VRAM hash), a supersampled run at the same scale checks against it (the harness's `--ssaa-ref`) |
 | `SR_GPU_TWIN_REF=PATH` | `gpu-coherence-selftest` twin cases: a twin-off run writes this reference, a twin-on run at the same scale checks against it (the harness's `--twin-ref`) |
+| `SR_GPU_SOFT_SHADOW_REF=PATH` | `gpu-coherence-selftest` soft-shadow case: the run without the `shadow` key writes this reference (its stock and part-off frames' hashes), the runs with it at the same scale and xBRZ factor check against it (the harness's `--soft-ref`) |
+| `SR_ACE_SHADOW_CANDIDATES=1` | With soft shadows on (`shadow=soft`) and a declaration in force, the Vulkan GE renderer prints `SOFT_SHADOW: candidate <w>x<h> digest=<hex>` once for each distinct texture its match rule hashes, so a package author can find the `texture_digest` of a title's shadow texture; exactly `1`, any other value lists nothing. It prints sizes and keyed digests, never texels, and changes nothing the guest observes ([ENHANCEMENT_CONTRACT.md 10.23](ENHANCEMENT_CONTRACT.md#1023-soft-shadows)) |
 | `SR_GEDUMP=1` | Per-primitive `GE PRIM` lines (through and transform), bounded to the first ~40 |
 | `SR_GE_ENQUEUE_TRACE=1` | Trace GE enqueue/stall-update provenance without enabling the broader GE dump |
 | `SR_GE_ENQUEUE_TRACE_WINDOWS=a-b[,c-d]` | Restrict enqueue trace output to up to eight inclusive vblank ranges; malformed ranges fail closed |

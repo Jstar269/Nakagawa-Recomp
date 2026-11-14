@@ -331,6 +331,11 @@ typedef struct {
         int factor;                        /* of the scaled image; 0 = none allocated */
         int repl_factor;                   /* a replacement pack's image of this content is queued or held
                                             * at this factor; 0 = the copy (if any) is xBRZ's (#1880) */
+        int soft;                          /* with repl_factor: that image is a soft-shadow copy, not a pack's */
+        /* Soft shadows (tex_scale.h): whether this content is a declared shadow texture, decided once
+         * per content (serial and hash), so a texture is hashed once, never per draw. */
+        uint64_t soft_serial, soft_hash;   /* the content soft_edge was decided for; serial 0 = none yet */
+        int soft_edge;                     /* 0: not declared; else its edge width in texels */
         int retry;                         /* XS_RETRY_*: offer it again on a later hit */
         uint64_t retry_present;            /* XS_RETRY_BUDGET: the present it last tried in */
         uint64_t last_bound;               /* the present the copy was last bound or stored in */
@@ -632,6 +637,18 @@ static uint64_t s_hm_cache_clock;
  * copy machinery: it is an image `repl_factor` times the guest texture, held in the entry's xs copy. */
 static NkTexRepl *s_repl = NULL;
 static uint64_t s_cnt_repl_bound = 0, s_cnt_repl_queued = 0;
+/* Soft shadows (Ace's shadow=soft, tex_scale.h), decided once at init: 0 in an authentic run, in an
+ * Ace run without shadow=soft, and when the package declared nothing. A softened copy rides the
+ * scaled-copy machinery the way a replacement does: an image NK_TEX_SOFT_FACTOR times the texture,
+ * held in the entry's xs copy with xs.soft set. */
+static int s_soft_on = 0;
+static int s_soft_confirmed = 0;
+static uint64_t s_cnt_soft_hashed = 0, s_cnt_soft_matched = 0, s_cnt_soft_queued = 0, s_cnt_soft_bound = 0;
+/* SR_ACE_SHADOW_CANDIDATES=1 with the part on: each distinct content the matcher hashes is listed
+ * once (nk_tex_soft_candidate_line), for a package author looking for a texture's digest. */
+static int s_soft_candidates = 0, s_soft_candidates_full = 0;
+static NkTexSoftCandidates s_soft_seen;
+static uint32_t s_soft_px[(NK_TEX_SOFT_MAX_DIM * NK_TEX_SOFT_FACTOR) * (NK_TEX_SOFT_MAX_DIM * NK_TEX_SOFT_FACTOR)];
 static uint64_t s_tex_gen = 0;             /* texture cache content generations handed out (TexEnt.gen) */
 static uint64_t s_xs_serial = 0;          /* content generations handed out */
 static int s_tex_bound_scale = 1;          /* factor of the set tex_get last returned */
@@ -4533,9 +4550,14 @@ static void tex_xs_free(TexEnt *e) {
 static void tex_xs_release(TexEnt *e) {
     const uint64_t serial = e->xs.serial;
     const int repl_factor = e->xs.repl_factor;   /* a retry sizes its room by it */
+    const uint64_t soft_serial = e->xs.soft_serial, soft_hash = e->xs.soft_hash;   /* not hashed again */
+    const int soft_edge = e->xs.soft_edge;
     tex_xs_free(e);
     e->xs.serial = serial;
     e->xs.repl_factor = repl_factor;
+    e->xs.soft_serial = soft_serial;
+    e->xs.soft_hash = soft_hash;
+    e->xs.soft_edge = soft_edge;
     e->xs.retry = XS_RETRY_BUDGET;
 }
 
@@ -4587,8 +4609,9 @@ static int tex_xs_reclaim(const TexEnt *keep, uint64_t need) {
     return nk_tex_scale_budget_used() + need <= budget;
 }
 
-/* Whether any scaled image can be made at all: xBRZ is on, or a replacement pack is open. */
-static int xs_enabled(void) { return s_xs_factor || s_repl != NULL; }
+/* Whether any scaled image can be made at all: xBRZ is on, a replacement pack is open, or soft
+ * shadows are on. */
+static int xs_enabled(void) { return s_xs_factor || s_repl != NULL || s_soft_on; }
 
 /* The factor entry `e`'s copy has now: a replacement's, else the configured xBRZ factor
  * (0 when neither applies). */
@@ -5928,6 +5951,86 @@ static void tex_dump_shutdown(void) {
     s_dumpscratch = NULL;
 }
 
+/* Soft shadows (Ace's shadow=soft, contract section 10.23), read once when the renderer starts, after the
+ * replacement pack: on only in an Ace run whose line asks for shadow=soft and whose package
+ * declared its shadow textures (nk_ace_soft_shadows_declare, called by generated code at start).
+ * Otherwise the part says why it is unavailable and nothing below runs. Like a replacement, a
+ * softened copy changes the committed frame, so it is guest-visible (section 11.3.13). */
+static void tex_soft_init(void) {
+    s_soft_on = 0;
+    s_soft_confirmed = 0;
+    s_cnt_soft_hashed = s_cnt_soft_matched = s_cnt_soft_queued = s_cnt_soft_bound = 0;
+    if (!g_ace_on || ace_effective()->shadow != ACE_SHADOW_SOFT) return;
+    if (!nk_ace_soft_shadows()->count) {
+        ace_feature_unavailable(ACE_FEATURE_SHADOW, ACE_SOFT_SHADOW_NONE_DECLARED);
+        return;
+    }
+    /* The copies' VRAM is the scaled-copy budget, which a refused SR_TEX_SCALE setting leaves at 0. */
+    if (!nk_tex_scale_config()->budget_bytes) {
+        NkTexScaleConfig c = *nk_tex_scale_config();
+        c.budget_bytes = (uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20;
+        nk_tex_scale_configure(&c);
+    }
+    s_soft_on = 1;
+    fprintf(stderr, "SOFT_SHADOWS: on (declared=%u, factor=%d, budget_mb=%llu)\n",
+            (unsigned)nk_ace_soft_shadows()->count, NK_TEX_SOFT_FACTOR,
+            (unsigned long long)(nk_tex_scale_config()->budget_bytes >> 20));
+    const char *cv = getenv("SR_ACE_SHADOW_CANDIDATES");
+    s_soft_candidates = cv && cv[0] == '1' && cv[1] == '\0';
+    s_soft_candidates_full = 0;
+    s_soft_seen.count = 0;
+    if (s_soft_candidates)
+        fprintf(stderr, "SOFT_SHADOWS: listing candidates (SR_ACE_SHADOW_CANDIDATES=1): one SOFT_SHADOW line "
+                        "per distinct texture hashed\n");
+}
+
+/* One SOFT_SHADOW: candidate line for a content hashed for the first time in this run. */
+static void tex_soft_candidate(uint32_t w, uint32_t h, const uint8_t digest[32]) {
+    char line[128];
+    const int first = nk_tex_soft_candidate_first(&s_soft_seen, digest);
+    if (first < 0 && !s_soft_candidates_full) {
+        s_soft_candidates_full = 1;
+        fprintf(stderr, "SOFT_SHADOWS: candidates past %u distinct textures are not listed\n",
+                (unsigned)NK_TEX_SOFT_CANDIDATES_MAX);
+    }
+    if (first > 0 && nk_tex_soft_candidate_line(line, sizeof(line), w, h, digest))
+        fprintf(stderr, "%s\n", line);
+}
+
+static void tex_soft_shutdown(void) {
+    if (!s_soft_on) return;
+    fprintf(stderr, "SOFT_SHADOWS: exit (hashed=%llu, matched=%llu, queued=%llu, bound_draws=%llu)\n",
+            (unsigned long long)s_cnt_soft_hashed, (unsigned long long)s_cnt_soft_matched,
+            (unsigned long long)s_cnt_soft_queued, (unsigned long long)s_cnt_soft_bound);
+    s_soft_on = 0;
+}
+
+/* The edge width the package declared for entry `e`'s current content (decoded into s_texscratch,
+ * hash `hash`), or 0 when it declared none. Only a one-level texture of at most NK_TEX_SOFT_MAX_DIM
+ * on a side is hashed, and each content once: the answer is kept on the entry for its serial and
+ * hash, and a retry or a later offer of the same content reads it back. */
+static int tex_soft_match(TexEnt *e, uint64_t hash, uint32_t levels) {
+    if (!s_soft_on || levels != 1u || s_tex_noscale) return 0;
+    if (e->xs.soft_serial == e->xs.serial && e->xs.soft_hash == hash) return e->xs.soft_edge;
+    e->xs.soft_serial = e->xs.serial;
+    e->xs.soft_hash = hash;
+    e->xs.soft_edge = 0;
+    if (e->w < 1 || e->h < 1 || e->w > NK_TEX_SOFT_MAX_DIM || e->h > NK_TEX_SOFT_MAX_DIM) return 0;
+    const AceSoftShadows *d = nk_ace_soft_shadows();
+    uint8_t digest[32];
+    if (!d->count || !nk_tex_soft_shadow_digest(d->key, s_texscratch, (uint32_t)e->w, (uint32_t)e->h, digest))
+        return 0;
+    s_cnt_soft_hashed++;
+    if (s_soft_candidates) tex_soft_candidate((uint32_t)e->w, (uint32_t)e->h, digest);
+    for (uint32_t i = 0; i < d->count; i++)
+        if (memcmp(digest, d->digest[i], sizeof(digest)) == 0) {
+            e->xs.soft_edge = d->edge[i];
+            s_cnt_soft_matched++;
+            break;
+        }
+    return e->xs.soft_edge;
+}
+
 /* Offer the content just decoded into s_texscratch (level 0 of entry `e`, hash `hash`) for
  * scaling. A full queue leaves the entry unscaled and marks it to be offered again on a later
  * hit. A copy that would not fit the budget first frees idle copies (tex_xs_reclaim); if it still
@@ -5940,6 +6043,10 @@ static void tex_xs_offer(TexEnt *e, uint64_t hash, uint32_t levels) {
     NkTexReplHit hit;
     int have_hit = 0, repl_f = 0;
     if (s_repl && levels == 1u && !s_tex_noscale) have_hit = tex_repl_find(e, &hit, &repl_f);
+    /* Without a replacement, a texture the package declares as a shadow takes a softened copy,
+     * made here and queued finished, exactly as a replacement is; xBRZ scales what is left. */
+    const int soft_edge = have_hit ? 0 : tex_soft_match(e, hash, levels);
+    if (soft_edge) repl_f = NK_TEX_SOFT_FACTOR;
     if (e->xs.repl_factor != repl_f) {
         /* The content's replacement changed (or went away): the held copy is the wrong size. */
         if (e->xs.factor) {
@@ -5950,8 +6057,12 @@ static void tex_xs_offer(TexEnt *e, uint64_t hash, uint32_t levels) {
                 return;
             }
             const uint64_t serial = e->xs.serial;
+            const uint64_t soft_serial = e->xs.soft_serial, soft_hash = e->xs.soft_hash;
             tex_xs_free(e);
             e->xs.serial = serial;
+            e->xs.soft_serial = soft_serial;   /* the match just made stays made */
+            e->xs.soft_hash = soft_hash;
+            e->xs.soft_edge = soft_edge;
         }
         e->xs.repl_factor = repl_f;
     }
@@ -5971,10 +6082,20 @@ static void tex_xs_offer(TexEnt *e, uint64_t hash, uint32_t levels) {
     e->xs.clamp_u = s_ge->tex_wrap & 1;
     e->xs.clamp_v = (s_ge->tex_wrap >> 8) & 1;
     int queued;
+    e->xs.soft = 0;
     if (have_hit) {
         queued = nk_tex_scale_submit_ready(e->xs.serial, hash, hit.rgba, e->w, e->h, f);
         nk_texrepl_unpin(s_repl, &hit);
         if (queued) s_cnt_repl_queued++;
+    } else if (soft_edge) {
+        /* The texture's own filter and wrap state (e->xs above) stay the copy's sampler. */
+        queued = nk_tex_soften_alpha_edge(s_texscratch, (uint32_t)e->w, (uint32_t)e->h, (uint32_t)f,
+                                          (uint32_t)soft_edge, s_soft_px) &&
+                 nk_tex_scale_submit_ready(e->xs.serial, hash, s_soft_px, e->w, e->h, f);
+        if (queued) {
+            e->xs.soft = 1;
+            s_cnt_soft_queued++;
+        }
     } else {
         queued = nk_tex_scale_submit(e->xs.serial, hash, s_texscratch, e->w, e->h, f,
                                      e->xs.clamp_u, e->xs.clamp_v);
@@ -5984,9 +6105,10 @@ static void tex_xs_offer(TexEnt *e, uint64_t hash, uint32_t levels) {
         return;
     }
     e->xs.state = XS_QUEUED;
-    /* A replacement is finished work: store it now, so the draw that found it is the first to show
-     * it rather than the next. Scaled copies wait for their worker and arrive on a later draw. */
-    if (have_hit) tex_xs_collect();
+    /* A replacement or a softened copy is finished work: store it now, so the draw that found it is
+     * the first to show it rather than the next. Scaled copies wait for their worker and arrive on a
+     * later draw. */
+    if (have_hit || soft_edge) tex_xs_collect();
 }
 
 /* Entry `e`'s guest-resolution image now holds new content (a decode just filled it from
@@ -6355,7 +6477,15 @@ static VkDescriptorSet tex_bind_set(TexEnt *e, uint32_t levels) {
     s_tex_bound_scale = e->xs.factor;
     e->xs.last_bound = xs_now();
     s_cnt_xs_bound++;
-    if (e->xs.repl_factor) s_cnt_repl_bound++;
+    if (e->xs.repl_factor && e->xs.soft) {
+        s_cnt_soft_bound++;
+        if (!s_soft_confirmed) {
+            s_soft_confirmed = 1;
+            ace_confirm(ACE_FEATURE_SHADOW);   /* a softened copy reached a draw */
+        }
+    } else if (e->xs.repl_factor) {
+        s_cnt_repl_bound++;
+    }
     return set;
 }
 
@@ -9435,6 +9565,7 @@ int gegpu_init(void) {
         s_xs_smart2d = xs->smart2d;
     }
     tex_repl_init(g_ace_on);
+    tex_soft_init();
     {
         /* Sharp game text (glyph_recon.h): Ace runs only. Its image lives in the scaled-copy budget
          * and takes one more descriptor set per entry that has one. */
@@ -9742,9 +9873,10 @@ void gegpu_shutdown(void) {
         s_glyphs_asked = s_glyphs = 0;
     }
     tex_dump_shutdown();   /* its exit line; nothing else depends on it */
-    const int had_repl = s_repl != NULL;
+    const int had_repl = s_repl != NULL, had_soft = s_soft_on;
     tex_repl_shutdown();   /* the exit line, the pack closed; the scaled-copy machinery it used goes next */
-    if (had_repl && !s_xs_factor && !s_xs_smart2d) nk_tex_scale_shutdown();
+    tex_soft_shutdown();
+    if ((had_repl || had_soft) && !s_xs_factor && !s_xs_smart2d) nk_tex_scale_shutdown();
     if (s_xs_factor || s_xs_smart2d) {
         nk_tex_scale_shutdown();
         fprintf(stderr, "TEX_SCALE: draws (scaled_binds=%llu, onetoone_unscaled=%llu, scaled_uploads=%llu, "

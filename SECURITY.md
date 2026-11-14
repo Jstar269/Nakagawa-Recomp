@@ -108,7 +108,9 @@ Every digest the project's own code computes is classified here by what it is fo
 [issue #969](https://github.com/Jstar269/nakagawa-recomp/issues/969)). PSP-defined algorithms, Git object
 identities and format checksums are never replaced. Project-controlled integrity checks use SHA-256, the
 project default: provenance, attestation, packages, prerequisites, toolchain, SBOM, fonts, shaders and the
-VFPU tables at load all rest on it, so SHA-256 is classified as a whole and has no rows below.
+VFPU tables at load all rest on it, as does the keyed digest (HMAC-SHA-256, RFC 2104) that names an Ace soft-shadow
+texture ([`ENHANCEMENT_CONTRACT.md` 10.23](docs/ENHANCEMENT_CONTRACT.md#1023-soft-shadows)), so SHA-256 is classified
+as a whole and has no rows below.
 
 Every other use is one row. `python -m unittest tools.test_lint_docs` scans the tracked production files
 under `tools/` and `src/` (test files are oracles and are skipped) for `hashlib` calls other than SHA-256,
@@ -134,9 +136,9 @@ It fails when a file and algorithm pair is missing here or a row names a pair th
 | `src/core/nk_psp_inflate.c` | CRC-32 | gzip member trailer of a decrypted PSP payload (RFC 1952) | Keep: the format requires it |
 | `src/core/nk_zip.c` | CRC-32 | ZIP entry checksum of save backups (store-only archives, APPNOTE 4.4.7), checked for every entry before a restore writes anything | Keep: the format requires it |
 | `src/core/nk_steam_shortcuts.c` | CRC-32 | The app ID Steam derives for a non-Steam shortcut (the CRC-32 of the quoted executable path and name, top bit set); an identifier in the user's own Steam library, not a security check | Keep: Steam defines it |
-| `src/core/nk_disc_verify.c` | CRC-32 | Disc verification: a whole disc image's CRC-32 and SHA-1 (the file's own FIPS 180-4 SHA-1, which the scan above does not detect), compared with the user's Redump list | Keep: Redump lists both; they identify a dump and are not a security check |
+| `src/core/nk_disc_verify.c` | CRC-32 | Disc verification: a whole disc image's CRC-32 and SHA-1 (the file's own FIPS 180-4 SHA-1, which the scan above does not detect), compared with Redump's PSP list (the bundled one, or the user's import) | Keep: Redump lists both; they identify a dump and are not a security check |
 | `src/core/nk_disc_verify.h` | CRC-32 | The disc-verification CRC-32 interface (`nk_crc32_update`) | Keep: Redump lists it; it identifies a dump and is not a security check |
-| `tools/nk_core/disc_verify.py` | SHA-1 | Disc verification: a whole disc image's SHA-1, the key into the user's Redump list | Keep: Redump lists it; it identifies a dump and is not a security check |
+| `tools/nk_core/disc_verify.py` | SHA-1 | Disc verification: a whole disc image's SHA-1, the key into Redump's PSP list | Keep: Redump lists it; it identifies a dump and is not a security check |
 | `tools/nk_core/disc_verify.py` | CRC-32 | Disc verification: a whole disc image's CRC-32, checked with the SHA-1 match | Keep: Redump lists it; it identifies a dump and is not a security check |
 | `tools/codegen.py` | FNV-64 | Names shared units and symbols, and the digest of an overlay's leading bytes (`fnv1a64`), mirrored by `src/rt/guest_interp.c`; the staged module identity itself is SHA-256 (`file_sha256`) | Done in #1920: staged-module identity is SHA-256, `GENERATED_CODE_ABI_EPOCH` is 3, and `tools/test_package_cache.py` checks that older packages are refused. The FNV-64 that remains is not an identity check |
 | `src/rt/guest_interp.c` | FNV-64 | Digest of an overlay's leading bytes in guest memory (`sr_module_code_fnv1a64`), checked on instruction-cache invalidate; the staged file is identified by SHA-256 (`sr_module_code_sha256`) | Done in #1920: staged-module identity is SHA-256. The FNV-64 that remains says whether an overlay is present, not whose file it is |

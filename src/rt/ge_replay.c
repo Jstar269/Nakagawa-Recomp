@@ -1327,6 +1327,7 @@ int main(int argc, char **argv) {
                "through_vertex_uses=%llu transform_vertex_uses=%llu "
                "actual_decoded_vertices=%llu actual_transformed_vertices=%llu "
                "actual_through_vertices=%llu strip_cache_commands=%llu strip_cache_hits=%llu "
+               "vertex_cache_hits=%llu "
                "through_triangle_candidates=%llu transform_triangle_candidates=%llu "
                "transform_triangles_drawn=%llu transform_triangles_clipped=%llu "
                "transform_triangles_rejected=%llu non_triangle_primitives=%llu "
@@ -1346,6 +1347,7 @@ int main(int argc, char **argv) {
                (unsigned long long)ge_cpu_stats.primitive_profile_actual_through_vertices,
                (unsigned long long)ge_cpu_stats.primitive_profile_strip_cache_commands,
                (unsigned long long)ge_cpu_stats.primitive_profile_strip_cache_hits,
+               (unsigned long long)ge_cpu_stats.primitive_profile_vertex_cache_hits,
                (unsigned long long)ge_cpu_stats.primitive_profile_through_triangle_candidates,
                (unsigned long long)ge_cpu_stats.primitive_profile_transform_triangle_candidates,
                (unsigned long long)ge_cpu_stats.primitive_profile_transform_triangles_drawn,

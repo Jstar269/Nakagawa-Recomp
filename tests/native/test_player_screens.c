@@ -66,7 +66,9 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_TWIN] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_SSAA] = ENHANCED_WORDS(k_enhanced_ssaa_labels),
     [PLAYER_PART_MIPS] = ENHANCED_WORDS(k_enhanced_switch_labels),
-    [PLAYER_PART_TEXPACK] = ENHANCED_WORDS(k_enhanced_switch_labels)};
+    [PLAYER_PART_TEXPACK] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_PAD] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_SHADOW] = ENHANCED_WORDS(k_enhanced_switch_labels)};
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
 enum { ENHANCED_MAX_WORDS = 5 };
@@ -926,8 +928,10 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         fixture.compatibility_expect = k_compatibility_cases[1].expect;
         fixture.compatibility_known_issues = k_compatibility_cases[1].known_issues;
         fixture.compatibility_category = "Playable";
-        fixture.disc_check_note = "Disc check: a changed copy of a retail disc in your "
-                                  "library, such as a fan translation or a patch.";
+        fixture.disc_check_note = "Disc check: its disc ID is a retail disc's, but its "
+                                  "contents match no dump of it in the disc list. A damaged "
+                                  "dump does that as well as a changed copy; dump the disc "
+                                  "again and check it to tell which.";
         fixture.ace_shown = true;
         fixture.ace_label = enhanced ? "Play mode: Enhanced" : "Play mode: Authentic";
         fixture.ace_in_effect = enhanced;
@@ -3419,6 +3423,29 @@ static void test_settings_pages(void) {
               strstr(dump, "\"TEXTURE PACK: OFF\"") != NULL &&
               strstr(dump, "Draws the texture pack") != NULL,
           "Settings > Enhanced shows the Texture pack row after Smooth far textures");
+    /* The 17th (Late pad sampling, contract 11.3.9) follows Texture pack, at 0x4683; 1600 tall shows
+       its row. */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(16) == 0x4683u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_PAD) == 0x4683u && PLAYER_PART_COUNT >= 17,
+          "the part rows' ids: the 17th in the second range, after the 16th");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1600, dump, sizeof(dump)) &&
+              strstr(dump, "\"TEXTURE PACK: OFF\"") != NULL &&
+              strstr(dump, "\"LATE PAD SAMPLING: OFF\"") != NULL &&
+              strstr(dump, "\"TEXTURE PACK: OFF\"") < strstr(dump, "\"LATE PAD SAMPLING: OFF\"") &&
+              strstr(dump, "Ace only, with 60 FPS logic. Reads the pad") != NULL,
+          "Settings > Enhanced shows the Late pad sampling row after Texture pack");
+    /* The 18th (Soft shadows, contract 11.3.13) follows Late pad sampling, at 0x4684; 1800 tall shows
+       its row, and its description wraps after "names their". */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(17) == 0x4684u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SHADOW) == 0x4684u && PLAYER_PART_COUNT >= 18,
+          "the part rows' ids: the 18th in the second range, after the 17th");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1800, dump, sizeof(dump)) &&
+              strstr(dump, "\"LATE PAD SAMPLING: OFF\"") != NULL &&
+              strstr(dump, "\"SOFT SHADOWS: OFF\"") != NULL &&
+              strstr(dump, "\"LATE PAD SAMPLING: OFF\"") < strstr(dump, "\"SOFT SHADOWS: OFF\"") &&
+              strstr(dump, "\"Ace only, in games whose package names their") != NULL &&
+              strstr(dump, "shadows. Changes what the frame shows.\"") != NULL,
+          "Settings > Enhanced shows the Soft shadows row after Late pad sampling");
     for (unsigned i = 0u; i < PLAYER_PART_COUNT; ++i) {
         PlayerUiAction part =
             activate_flow_button(PLAYER_UI_ID_ENHANCED_PART(i), FLOW_SETTINGS_ACE);
@@ -7054,8 +7081,9 @@ static void test_disc_verify_line_badge_and_note(void) {
         title.disc_id = "TEST70021";
         title.library_status = "Ready";
         title.badge = "Unknown dump";
-        title.disc_check_note = "Disc check: not in your disc list. This means not shown to be "
-                                "retail, not modified: Redump's PSP list names no disc IDs.";
+        title.disc_check_note = "Disc check: not in the disc list. That doesn't mean it's bad: it "
+                                "is only not shown to be retail, and its disc ID isn't one the "
+                                "list names.";
         title.primary_action_label = "PLAY";
         title.primary_action = PLAYER_UI_PRIMARY_PLAY;
         title.primary_action_enabled = true;
@@ -7075,7 +7103,7 @@ static void test_disc_verify_line_badge_and_note(void) {
         }
         (void)nk_ui_dump(ui, dump, sizeof(dump));
         CHECK(strstr(dump, "\"UNKNOWN DUMP\"") != NULL &&
-                  strstr(dump, "not shown to be retail, not modified") != NULL,
+                  strstr(dump, "That doesn't mean it's bad") != NULL,
               "the title page names the tier and what it means");
         CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_PRIMARY, "PLAY keeps the default focus");
         nk_ui_destroy(ui);

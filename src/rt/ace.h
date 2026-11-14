@@ -11,18 +11,21 @@
  *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. stick, load, depth, ssaa, peak, glyphs, cull, mips and
- * texpack are the other keys a line may leave out: a missing stick, load, depth, ssaa, peak, glyphs,
- * cull, mips or texpack reads as off (section 11.2 item 2); stick has no off word, its value is the
- * game's dead zone (1..126), and a line that writes load=off, depth=off, ssaa=off, peak=off,
- * glyphs=off, cull=off, mips=off or texpack=off means the same as none; stick=<counts>, load=fast
- * and cull=on need tier=ace, and depth=32 (the 32-bit host depth buffer, #2051), ssaa=2|4
- * (supersampling, #2073), peak=limit, glyphs=on (sharp game text, #2110), mips=on and texpack=on
- * (the title's texture pack, 11.3.4) do not. Every other
+ * line without it is an Enhanced run. stick, load, depth, ssaa, peak, glyphs, cull, mips, texpack
+ * and shadow are the other keys a line may leave out: a missing stick, load, depth, ssaa, peak,
+ * glyphs, cull, mips, texpack or shadow reads as off (section 11.2 item 2); stick has no off word,
+ * its value is the game's dead zone (1..126), and a line that writes load=off, depth=off, ssaa=off,
+ * peak=off, glyphs=off, cull=off, mips=off, texpack=off or shadow=off means the same as none;
+ * stick=<counts>, load=fast, shadow=soft (soft shadows, 11.3.13) and cull=on need tier=ace, and
+ * depth=32 (the 32-bit host depth buffer, #2051), ssaa=2|4 (supersampling, #2073), peak=limit,
+ * glyphs=on (sharp game text, #2110), mips=on and texpack=on (the title's texture pack, 11.3.4) do
+ * not. Every other
  * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
  * the run and one "ACE_MODE: refused (<reason>)" line says why. Unset is off and says nothing.
+ * pad (late or off, 11.3.9) may be left out too: a missing pad or pad=off is off, pad=late needs
+ * tier=ace, and any other value refuses the line.
  *
  * Off is authentic: every Ace branch in the runtime sits behind g_ace_on, which stays 0, so the
  * Vulkan device, every sampler, the guest shaders, the presents and the observation counters
@@ -64,6 +67,7 @@
 #define ACE_HAS_SMOOTH_MATCH 0  /* smooth=match: the monitor's rate */
 #define ACE_HAS_SAS 1           /* sas=sinc: band-limited SAS voice resampling (#2054) */
 #define ACE_HAS_TESS 1          /* tess=2..4: finer Bezier and spline patches (#2053) */
+#define ACE_HAS_SHADOW 1        /* shadow=soft: soft edges on a title's declared blob shadows (11.3.13) */
 #define ACE_HAS_CULL 1          /* cull=on: widen a title's own view-culling test to the wings (11.3.6) */
 #define ACE_HAS_SSAA 1          /* ssaa=2|4: supersampling on top of render scale (#2073, 10.21) */
 #define ACE_HAS_STICK 1         /* stick=<counts>: start the host stick past the game's dead zone (11.3.11) */
@@ -74,6 +78,7 @@
 #define ACE_HAS_GLYPHS 1        /* glyphs=on: sharp game text, glyphs rebuilt at the render scale (10.13, 11.3.5) */
 #define ACE_HAS_MIPS 1          /* mips=on: host-built mip chains for single-level textures (11.3.8) */
 #define ACE_HAS_TEXPACK 1       /* texpack=on: draw the title's texture pack, SR_TEX_REPLACE (11.3.4) */
+#define ACE_HAS_PAD 1           /* pad=late: late pad sampling at a package's update boundary (11.3.9) */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
 typedef enum { ACE_SMOOTH_OFF = 0, ACE_SMOOTH_MATCH = 1, ACE_SMOOTH_X2 = 2 } AceSmooth;
@@ -85,6 +90,7 @@ static inline int ace_wide_fill_blocked_by_smooth(int wide_requested, int smooth
 /* The play mode a run is: Enhanced, or Ace (Enhanced plus the game's own package). */
 typedef enum { ACE_TIER_ENHANCED = 0, ACE_TIER_ACE = 1 } AceTier;
 typedef enum { ACE_SAS_OFF = 0, ACE_SAS_SINC = 1 } AceSas;
+typedef enum { ACE_SHADOW_OFF = 0, ACE_SHADOW_SOFT = 1 } AceShadow;
 
 typedef struct {
     int on;          /* 0: authentic (off, unset or refused); every field below is then 0 */
@@ -113,6 +119,9 @@ typedef struct {
     int mips;        /* mips=on: textures the game gives one level get a host-built mip chain (11.3.8) */
     int texpack;     /* texpack=on: the Vulkan renderer draws the pack SR_TEX_REPLACE names (guest-visible,
                         11.3.4); without it no pack is read */
+    int pad;         /* pad=late: each logic update starts closer to its VBLANK deadline and reads a
+                        fresher pad sample (guest-visible timing, 11.3.9) */
+    int shadow;      /* AceShadow: declared blob-shadow textures drawn with soft edges (guest-visible, 11.3.13) */
 } AceConfig;
 
 typedef enum {
@@ -134,6 +143,8 @@ typedef enum {
     ACE_FEATURE_GLYPHS,
     ACE_FEATURE_MIPS,
     ACE_FEATURE_TEXPACK,
+    ACE_FEATURE_PAD,
+    ACE_FEATURE_SHADOW,
     ACE_FEATURE_COUNT
 } AceFeature;
 
@@ -184,6 +195,37 @@ void ace_set_exit_report(AceFeature feature, void (*report)(void));
 void ace_confirm(AceFeature feature);
 /* Matrix uses the culling hook left alone (its table was full): the report's cull_untracked. */
 void ace_set_cull_untracked(unsigned long n);
+/* ---- soft shadows: the package's declaration (contract sections 10.23 and 11.3.13) ----------- */
+
+/* Textures one declaration may name. */
+#define ACE_SOFT_SHADOW_MAX 256u
+/* Why shadow=soft is unavailable when no declaration is in force. */
+#define ACE_SOFT_SHADOW_NONE_DECLARED \
+    "nothing declared: this build's package carries no ace_parts.soft_shadows textures"
+/* Why it is unavailable on a renderer other than the Vulkan GE one. */
+#define ACE_SOFT_SHADOW_SOFTWARE \
+    "the software renderer does not soften shadows; only the Vulkan GE renderer does"
+
+typedef struct {
+    uint8_t key[32];                          /* the package's HMAC key */
+    uint32_t count;                           /* 0: nothing declared */
+    uint8_t digest[ACE_SOFT_SHADOW_MAX][32];  /* nk_tex_soft_shadow_digest of each texture */
+    uint8_t edge[ACE_SOFT_SHADOW_MAX];        /* its edge width in texels, 1 to 4 */
+} AceSoftShadows;
+
+/* The package's soft-shadow textures (ace_parts.soft_shadows.textures), which generated code
+ * passes once at start, before the renderer starts: a 32-byte HMAC `key`, `count` digests and,
+ * for each, its edge width in source texels (1 to 4). The data is copied. A later call replaces
+ * the earlier one; count 0 declares nothing. A declaration with more than ACE_SOFT_SHADOW_MAX
+ * textures, a NULL pointer or an edge outside 1..4 is refused whole (nothing is declared) and
+ * one "ACE_MODE: soft shadow declaration refused (<reason>)" line says why. Until a declaration
+ * arrives shadow=soft reports itself unavailable. Kept apart from SR_ACE: ace_init_spec does not
+ * clear it. Returns 1 when the declaration is in force. */
+int nk_ace_soft_shadows_declare(const uint8_t key[32], const uint8_t (*digests)[32], uint32_t count,
+                                const uint8_t *edge_texels);
+/* The declaration in force (count 0 when there is none). */
+const AceSoftShadows *nk_ace_soft_shadows(void);
+
 /* peak=limit's totals for the report (driver.c reads them from the audio backend at exit): pushes
  * that carried a SAS sum past 16 bits, the frames of those that differ from the guest's saturated
  * copy, the output frames the limiter turned down, and its lowest gain (1 when it never acted). */
@@ -613,6 +655,112 @@ typedef struct {
 
 /* The renderer's latest totals, for the report and the exit line. */
 void ace_smooth_aux_report(const AceSmoothAuxStats *s);
+
+/* ---- late pad sampling (pad=late, contract 11.3.9) ------------------------------------------ */
+
+/* A 60 FPS game logic package names the instruction where each logic update begins (section 9.5).
+ * A title that reads its pad at the top of the update and then waits for the VBLANK after its
+ * draw hands the display a picture built from a pad sample that is almost a whole period old by
+ * the time that VBLANK comes. With pad=late the update's thread is held at the boundary until
+ * shortly before the next VBLANK deadline, and the newest pad sample, which the guest has not
+ * read yet, is refreshed from the host's input when the hold ends. The update computes what it
+ * would have computed with that input, and the VBLANK schedule is unchanged: the hold only moves
+ * the update's start later inside its own period. A hold whose update then overruns its
+ * deadline lets the next VBLANK's sample in first (the next read returns one sample more) and
+ * costs that update's frame (the contract's Timing item). The refreshed sample is built as a
+ * VBLANK latch of the same host input would be (hle_route.c, ctrl_host_sample: buttons, stick
+ * and stick=<counts> remap). It keeps every press the sample carried (a pulse, a button down in
+ * it and up in the sample before, an unread earlier sample's press still down), so a press that
+ * sample delivered is never lost; a pulse the refresh consumed into a sample no guest call reads
+ * goes into the next sample too. Any guest read, peek or latch call that was handed the sample
+ * (hle_input.c) leaves it as it was.
+ *
+ * The plan decides how long to hold. An update's work is the time from the end of its hold to
+ * its thread's first VBLANK wait. The hold leaves room for the longest work of the last
+ * ACE_PAD_COSTS updates, a quarter of it again and ACE_PAD_MARGIN_NS, and holds only once
+ * ACE_PAD_WARM updates in a row were measured. An update whose work ends after the deadline it
+ * was held for is late: holding stops for ACE_PAD_BACKOFF_UPDATES updates and the margin grows
+ * by ACE_PAD_MARGIN_STEP_NS, the added part up to ACE_PAD_MARGIN_MAX_NS. An update whose
+ * boundary and wait have a pause or a change of speed between them is dropped (interrupted):
+ * no cost, no verdict. A boundary reached again before the
+ * previous update waited for a VBLANK (a load, a title that waits some other way) leaves that
+ * update unmeasured and starts the warm count again, so a title whose updates do not end in a
+ * VBLANK wait is never held. Callers pass the host clock in nanoseconds and one VBLANK period on
+ * it. A deadline more than one period ahead (a paced clock running ahead of the host's) is not
+ * planned against: no hold, and the warm count starts again; so every hold is shorter than one
+ * period. */
+#define ACE_PAD_COSTS 64u
+#define ACE_PAD_WARM 30u
+#define ACE_PAD_MIN_HOLD_NS 1000000ull
+#define ACE_PAD_MARGIN_NS 2000000ull
+#define ACE_PAD_BACKOFF_UPDATES 300u
+#define ACE_PAD_MARGIN_STEP_NS 1000000ull
+#define ACE_PAD_MARGIN_MAX_NS 6000000ull
+
+typedef struct {
+    uint64_t cost[ACE_PAD_COSTS];    /* the work of the last updates, ns */
+    uint32_t ncost, next;
+    uint32_t warm;                   /* measured updates in a row */
+    uint32_t backoff;                /* updates left with no hold after a late one */
+    uint64_t extra_margin_ns;        /* added after late updates */
+    int open;                        /* an update is between its boundary and its first wait */
+    int held;                        /* that update was held */
+    uint64_t release_ns;             /* when its work began */
+    uint64_t deadline_ns;            /* the VBLANK deadline it had at its boundary, 0 if none */
+    uint64_t updates;                /* boundaries seen */
+    uint64_t measured;               /* updates whose work was measured */
+    uint64_t unmeasured;             /* updates that reached the next boundary without a wait */
+    uint64_t held_updates;
+    uint64_t hold_ns_sum, hold_ns_max;
+    uint64_t late_held;              /* held updates whose work ended after their deadline */
+    uint64_t late_unheld;            /* the same for updates that were not held */
+    uint64_t refreshed;              /* pad samples refreshed at the end of a hold */
+    uint64_t far_deadlines;          /* boundaries whose deadline was more than a period ahead */
+    uint64_t interrupted;            /* updates dropped: a pause or speed change before the wait */
+} AcePadPlan;
+
+void ace_pad_plan_reset(AcePadPlan *p);
+/* At the update boundary. deadline_ns is the next VBLANK deadline on the host clock (0 when
+ * VBLANKs are not paced to it) and period_ns one VBLANK period; allow is 0 when the hold may not
+ * run (pad=off, the thread cannot wait here, or no refresh could follow), so the plan only
+ * measures. Returns how long to hold, 0 for none, always less than period_ns. */
+uint64_t ace_pad_plan_begin(AcePadPlan *p, uint64_t now_ns, uint64_t deadline_ns, uint64_t period_ns,
+                            int allow);
+/* The hold is over (or there was none): the update's work starts now. */
+void ace_pad_plan_release(AcePadPlan *p, uint64_t now_ns);
+/* The update's thread waits for a VBLANK: its work is done. Returns 1 for a miss. */
+int ace_pad_plan_wait(AcePadPlan *p, uint64_t now_ns);
+/* A pause or a change of speed came between the update's boundary and its wait: the update is
+ * closed with no cost and no verdict, and the plan's costs, back-off and margin stay as they were. */
+void ace_pad_plan_interrupt(AcePadPlan *p);
+/* The run's plan (pad=late asked for: the runtime's boundary hook drives it). */
+AcePadPlan *ace_pad_plan(void);
+
+/* Input latency, the runtime's own measure: for each presented new guest frame the guest set
+ * after a pad read (any read path, peeks and latches included) that no earlier measured frame was
+ * charged with, the host time from the input poll behind the newest sample read to the runtime's
+ * present of the frame. Every other present, a repeat of the frame already shown or a new frame
+ * set with no such read, is counted in without_read and not measured: the age of an older read is
+ * not the latency of that frame. Half-millisecond bins; the last bin holds everything above. */
+#define ACE_LAT_BIN_NS 500000ull
+#define ACE_LAT_BINS 160u
+typedef struct {
+    uint64_t count, sum_ns, max_ns;
+    uint64_t without_read;          /* presents of a repeat or with no read since the last measured */
+    uint64_t bin[ACE_LAT_BINS];
+} AceLatency;
+void ace_latency_reset(AceLatency *l);
+void ace_latency_note(AceLatency *l, uint64_t ns);
+/* The upper edge of the bin that holds the pct-th percentile, in ns (0 with no samples). */
+uint64_t ace_latency_percentile_ns(const AceLatency *l, unsigned pct);
+/* One presented frame's latency into the run's measure, or a present that is not measured: a
+ * repeated frame, or a new one with no pad read since the last measured frame. Both count only
+ * while the run's line asks for pad=late, so a run without it reports neither. */
+void ace_note_input_latency(uint64_t ns);
+void ace_note_frame_without_read(void);
+/* 1 when Ace is on and the run's line asks for pad=late (whether or not the part later proves
+ * unavailable): only then does the runtime plan, hold, refresh or measure anything for it. */
+int ace_pad_requested(void);
 
 /* ---- the per-run report -------------------------------------------------------------------- */
 

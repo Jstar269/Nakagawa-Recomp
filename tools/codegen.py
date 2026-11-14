@@ -23,6 +23,7 @@ import struct
 import re
 import os
 import sys
+from collections import Counter
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any
 
@@ -40,7 +41,7 @@ from analyze import (
     canonical_cfg_gate, canonical_cfg_json, canonical_cfg_report,
     check_code_overlay, code_overlay_elf, code_overlay_layout, data_section_words,
     is_code_overlay, is_fixed_overlay, static_coverage, branch_kind, BRANCH_UNCOND,
-    seeds_in_analysis, _gpr_writes,
+    is_cond_branch, seeds_in_analysis, spans_without, _gpr_writes,
 )
 from codegen_hst_stubs import HST_CUSTOM_STUBS
 from host_stubs import HST_SIMPLE_STUBS
@@ -210,6 +211,12 @@ ENHANCEMENT_LAUNCH_SITES: list[dict] = []
 # site declares stock_value_digests: the run-time check digests each stored value with it.
 # It is derived from the user's own executable and lives only in their generated build.
 ENHANCEMENT_STORE_KEY: bytes | None = None
+# The package's Ace soft-shadow textures (ace_parts.soft_shadows, contract sections 9.8 and 10.23):
+# (texture_digest, edge_texels, id) in declared order, and the executable's stock-digest key the
+# runtime hashes each candidate texture under (the same key as ENHANCEMENT_STORE_KEY). Empty, and
+# None, without the part, which keeps the output byte-identical.
+ENHANCEMENT_SOFT_SHADOWS: list[tuple[str, int, str]] = []
+ENHANCEMENT_SOFT_SHADOW_KEY: bytes | None = None
 # Callable entries whose body loads $sp (guest_owns_entry_sp): no exit restores their entry
 # $sp, so the stack census leaves them unwrapped, as it leaves resume bodies.
 GUEST_SP_ENTRIES: set[int] = set()
@@ -1127,6 +1134,39 @@ def _enhancement_data_lines() -> list[str]:
         ]
     out += ["}", ""]
     return out
+
+
+def _enhancement_soft_shadow_lines() -> list[str]:
+    """The tables of the package's soft-shadow declaration (contract sections 9.8 and 10.23), which
+    sr_register_all hands to the runtime once, before the guest runs. Nothing without the part."""
+    if not ENHANCEMENT_SOFT_SHADOWS:
+        return []
+    if ENHANCEMENT_SOFT_SHADOW_KEY is None:
+        raise ValueError("soft_shadows textures need the executable's digest key")
+    return [
+        "/* Ace soft shadows (ace_parts.soft_shadows): the executable's stock-digest key, each declared",
+        " * texture's keyed digest (nk_tex_soft_shadow_digest) and its edge width in source texels. */",
+        f"static const uint8_t nk_ace_shadow_key[32] = {{{_c_bytes(ENHANCEMENT_SOFT_SHADOW_KEY)}}};",
+        "static const uint8_t nk_ace_shadow_digest[][32] = {",
+        *(f"    {{{_c_bytes(bytes.fromhex(digest))}}},  /* {tid} */"
+          for digest, _edge, tid in ENHANCEMENT_SOFT_SHADOWS),
+        "};",
+        "static const uint8_t nk_ace_shadow_edge[] = {"
+        + ", ".join(f"{edge}u" for _digest, edge, _tid in ENHANCEMENT_SOFT_SHADOWS) + "};",
+        "/* src/rt/ace.h */",
+        "int nk_ace_soft_shadows_declare(const uint8_t key[32], const uint8_t (*digests)[32], uint32_t count,",
+        "                                const uint8_t *edge_texels);",
+        "",
+    ]
+
+
+def _enhancement_soft_shadow_call() -> list[str]:
+    """The one declaration call sr_register_all makes; nothing without the part. Never gated by
+    SR_EXPERIMENTAL_60HZ: the part has its own SR_ACE key, read by the runtime."""
+    if not ENHANCEMENT_SOFT_SHADOWS:
+        return []
+    return [f"    (void)nk_ace_soft_shadows_declare(nk_ace_shadow_key, nk_ace_shadow_digest, "
+            f"{len(ENHANCEMENT_SOFT_SHADOWS)}u, nk_ace_shadow_edge);"]
 
 
 def _enhancement_store_lines() -> list[str]:
@@ -3691,22 +3731,6 @@ def fpu_effect(addr, w, options=None):
     if fmt == 0x14 and funct(w) == 0x20: return f"{F(fdv)} = sr_fpu_cvt_s_w(sr_u32_as_s32(s->fi[{fs}]), s->fcr31);", None, 0  # cvt.s.w
     raise Unsupported(f"COP1 fmt 0x{fmt:02x} funct 0x{funct(w):02x} at 0x{addr:08x}")
 
-def is_cond_branch(w):
-    op = w >> 26
-    if op in (4, 5, 20, 21):
-        return True
-    if op in (6, 7, 22, 23):
-        return rt(w) == 0
-    if op == 1:
-        # REGIMM trap-immediates (tgei..tnei) are not branches. BLTZALL/BGEZALL
-        # (rt 0x12/0x13) are left out too: no codegen semantics test pins their link
-        # and nullify behaviour, so they reach effect() and are refused there, as on
-        # origin/main.
-        return rt(w) in (0, 1, 2, 3, 0x10, 0x11)
-    if op in (0x11, 0x12) and rs(w) == 8:
-        return True
-    return False
-
 def cond_expr(w):
     op = w >> 26
     if op == 4: return f"({R(rs(w))} == {R(rt(w))})"          # beq
@@ -4122,7 +4146,10 @@ def normal_line(addr, w, lle_cpu=None, delay_branch_pc=None, options=None):
         # update (contract 11.3.10); the call changes nothing unless the run's load=fast is on.
         if ENHANCEMENT_ACE_SITES:
             line = f"    nk_ace_load_update();\n{line}"
-        line = f"    if (nk_enhancement_on()) {{ nk_enhancement_updates++; }}\n{line}"
+        # Late pad sampling's hook (pad=late, docs/ENHANCEMENT_CONTRACT.md section 11.3.9) runs inside
+        # the same toggle; it returns at once unless the run's line asks for pad=late.
+        line = (f"    if (nk_enhancement_on()) {{ nk_enhancement_updates++; sr_enhancement_update_begin(); }}\n"
+                f"{line}")
     rw = _enhancement_rewrite(addr) if w is not None else None
     if rw is None:
         return line
@@ -5544,6 +5571,12 @@ class RuntimeModuleTranslation:
     shared: bool = False
     # imports.variable_imports of the module at base 0: its sites are link addresses.
     var_imports: tuple = ()
+    # An image without relocation evidence: the seeds its analysis withdrew as non-code,
+    # ((address, first reserved word, why), ...), and the (start, end) link ranges only they
+    # reached, which are outside `spans` (analyze, "Non-code in an image without relocation
+    # evidence"). Empty for every other image; the descriptor then carries no record.
+    non_code: tuple = ()
+    non_code_spans: tuple = ()
 
     @property
     def base_symbol(self):
@@ -5667,6 +5700,40 @@ def word_runs(addresses):
     return [(lo, hi) for lo, hi in runs]
 
 
+def _non_code_disjoint(image, owned, non_code_words):
+    """True when no word code generation walked or entered (``owned``: every entry, and the
+    body walk of every function it emitted, translated or not) lies in the words the analysis
+    withdrew as non-code. Otherwise the two disagree about what is code, a translator bug:
+    say so and refuse, since the withdrawn words leave the interpreter's spans and that code
+    could not run there."""
+    clash = set(owned) & set(non_code_words)
+    if clash:
+        sys.stderr.write(
+            f"codegen: {image}: NON_CODE_TRANSLATED: {len(clash)} words code generation owns "
+            f"lie in what the analysis withdrew as non-code (first 0x{min(clash):08x}); "
+            "the analysis and the generator disagree about what is code\n")
+    return not clash
+
+
+def _reserved_class(why):
+    """The class of analyze.reserved_encoding's reason, its field values left out."""
+    return why.split(" 0x")[0] if why.startswith("reserved ") else "branch with a nonzero rt"
+
+
+def _non_code_summary(image, non_code, non_code_words, spans):
+    """The one line an image whose analysis withdrew seeds as non-code gets: how many, the
+    words proven non-code (every path from each runs into a reserved word; they leave the
+    executable spans), the spans left, and the withdrawals by the class of the lowest reserved
+    word each body holds."""
+    classes = Counter(_reserved_class(why) for _, why in non_code.values())
+    evidence = ", ".join(f"{name} ({count})" for name, count in
+                         sorted(classes.items(), key=lambda item: (-item[1], item[0])))
+    sys.stderr.write(
+        f"codegen: {image}: withdrew {len(non_code)} seeds as non-code, "
+        f"{len(non_code_words)} words proven non-code, {len(spans)} executable spans left "
+        f"(no relocation evidence; first reserved word: {evidence})\n")
+
+
 def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, shared=False,
                              entry_hints=None, data=None, name=None, entries=None,
                              options=None):
@@ -5730,7 +5797,9 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
     ranges = exec_ranges(elf)
     discovery = {}
     try:
-        # A code overlay's entry points are held by the executable (entry_hints).
+        # A code overlay's entry points are held by the executable (entry_hints). In an image
+        # without relocation evidence the analysis withdraws the seeds that run into data
+        # (discovery["non_code"]); their addresses stay dispatch boundaries below.
         analyzed, _ = analyze(elf, cfg_gate=cfg_gate,
                               entry_hints=entry_hints if overlay else None,
                               mixed_code_data=fixed_overlay, report=discovery, entries=entries)
@@ -5738,6 +5807,14 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
         sys.stderr.write(f"codegen: {format_boundary(exc, module_path)}\n")
         return 1
     known = {a for a in analyzed if in_ranges(a, ranges)}
+    non_code = discovery.get("non_code", {})
+    non_code_words = discovery.get("non_code_words", frozenset())
+    # A withdrawn address stays a boundary (a transfer there dispatches), as the analysis
+    # judged every body with it one.
+    boundaries = set(non_code) or None
+    if non_code:
+        module.non_code = tuple((a, *non_code[a]) for a in sorted(non_code))
+        module.non_code_spans = tuple(word_runs(non_code_words))
     if cfg_gate:
         report = canonical_cfg_report(elf, ranges=ranges, entries=sorted(known))
         findings = canonical_cfg_gate(report)
@@ -5770,6 +5847,7 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
                          relocations=relocations, patched=var_sites)
     spans = span_index(ranges)
     translated_words = set()
+    walked_words = set()  # the body walk of every function, translated or not
     previous_space = ADDRESS_SPACE
     ADDRESS_SPACE = space
     try:
@@ -5786,8 +5864,11 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
             else:
                 try:
                     # One walk serves the body and its translated-word count.
-                    flow = function_flow(elf, a, spans, known, options=options)
+                    flow = function_flow(elf, a, spans, known, dispatch_boundaries=boundaries,
+                                         options=options)
+                    walked_words.update(flow[0])
                     text = "\n".join(emit_function(elf, a, spans, known, profile=profile,
+                                                   dispatch_boundaries=boundaries,
                                                    flow=flow, options=options))
                     nwords = len(head_run_words(elf, a, flow[0]))
                     translated_words.update(flow[0])
@@ -5802,7 +5883,11 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
             module.functions.append((a, nwords))
     finally:
         ADDRESS_SPACE = previous_space
+    if non_code_words and not _non_code_disjoint(name, walked_words | known, non_code_words):
+        return 1
     module.spans = sorted(set((lo, hi) for lo, hi in ranges if hi > lo))
+    if non_code_words:
+        module.spans = spans_without(module.spans, non_code_words)
     if fixed_overlay:
         # Its file mixes code and data in one segment, so no leading run of bytes is code
         # only. The identity is every word a translation was emitted for, in address order,
@@ -5814,7 +5899,7 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
         module.overlay_check_len = len(words)
         module.overlay_check_fnv1a64 = fnv1a64(words)
         code = {a for a in set(discovery.get("covered", ())) | translated_words | known
-                if in_ranges(a, ranges)}
+                if in_ranges(a, ranges) and a not in non_code_words}
         module.spans = word_runs(code)
         # An address its traced code materializes but never calls or jumps to may be data
         # (analyze._seed_materialized_code): it has no executable authority and is not part
@@ -5826,6 +5911,8 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
                              "evidence it is code; outside the spans\n")
         if not words:
             module.unsupported_reason = "code overlay has no translated code to identify it"
+    if non_code:
+        _non_code_summary(name, non_code, non_code_words, module.spans)
     module_stubbed = {a for a, _ in module.stubbed}
     module.coverage = static_coverage(
         elf, ranges, known,
@@ -6248,6 +6335,21 @@ def runtime_module_descriptor_lines(module):
                      for lo, hi in module.overlay_check_spans)
         lines.append("};")
     reason = c_string(module.unsupported_reason) if module.unsupported_reason else "NULL"
+    non_code = []
+    if module.non_code:
+        # Only a module with withdrawals carries the record (and sr_register_all registers it),
+        # so every other descriptor is unchanged.
+        non_code.append(f"static const SrModuleSpan sr_m{k}_non_code_spans[] = {{")
+        non_code.extend(f"    {{ 0x{lo:08x}u, 0x{hi:08x}u }}," for lo, hi in module.non_code_spans)
+        non_code += [
+            "};",
+            f"static const SrModuleNonCode sr_m{k}_non_code = {{",
+            f"    &sr_m{k}_code, sr_m{k}_non_code_spans, {len(module.non_code_spans)}u, "
+            f"{len(module.non_code)}u, "
+            f"{sum(hi - lo for lo, hi in module.non_code_spans) // 4}u,",
+            "};",
+            "",
+        ]
     lines += [
         f"static const SrModuleCode sr_m{k}_code = {{",
         f"    {c_string(module.name)}, 0x{module.file_size:08x}u, \"{module.file_sha256}\",",
@@ -6260,7 +6362,7 @@ def runtime_module_descriptor_lines(module):
         f"{check_spans}, {len(module.overlay_check_spans)}u",
         "};",
         "",
-    ]
+    ] + non_code
     return lines
 
 
@@ -6755,7 +6857,8 @@ def _load_code_hook_package(elf, known, symbols, code_hook_pkg_path, symbol_map_
                 "which a code-hook package beside an enhancement package cannot carry (fail-closed refusal)")
     first_ids = {site["id"] for site in enhancement_pkg.get("sites", ())}
     for part in enhancement_pkg.get("ace_parts", {}).values():
-        first_ids.update(site["id"] for site in part["sites"])
+        for list_key in ("sites", "textures"):
+            first_ids.update(entry["id"] for entry in part.get(list_key, ()))
     for site in pkg["sites"]:
         if site["id"] in first_ids:
             raise enhancement_package.EnhancementPackageError(
@@ -6799,10 +6902,12 @@ def _reset_enhancement_tables() -> None:
     process (an in-process caller of ``main``, then ``emit_function`` and the like).
     """
     global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY, ENHANCEMENT_STORE_KEY
-    global ENHANCEMENT_ACE_SITES, ENHANCEMENT_HOOK_META
+    global ENHANCEMENT_ACE_SITES, ENHANCEMENT_HOOK_META, ENHANCEMENT_SOFT_SHADOW_KEY
     ENHANCEMENT_SITES = {}
     ENHANCEMENT_ACE_SITES = {}
     ENHANCEMENT_STORE_KEY = None
+    ENHANCEMENT_SOFT_SHADOW_KEY = None
+    ENHANCEMENT_SOFT_SHADOWS.clear()
     ENHANCEMENT_PKG_META = None
     ENHANCEMENT_HOOK_META = None
     ENHANCEMENT_UPDATE_BOUNDARY = None
@@ -6823,7 +6928,7 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
     verification refuses the run (fail closed).
     """
     global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY, ENHANCEMENT_STORE_KEY
-    global ENHANCEMENT_ACE_SITES, ENHANCEMENT_HOOK_META
+    global ENHANCEMENT_ACE_SITES, ENHANCEMENT_HOOK_META, ENHANCEMENT_SOFT_SHADOW_KEY
     _reset_enhancement_tables()
     if enhancement_pkg_path is not None:
         import hashlib
@@ -6873,6 +6978,12 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                 ENHANCEMENT_UPDATE_BOUNDARY = boundary["site_addr"]
             ENHANCEMENT_ACE_SITES = _verified_ace_part_sites(elf, pkg_validated, sym_map, _read_words, known,
                                                              boundary)
+            # Soft-shadow textures are matched at run time, by a digest keyed by this executable.
+            for texture in enhancement_package.soft_shadow_textures(pkg_validated):
+                ENHANCEMENT_SOFT_SHADOWS.append(
+                    (texture["texture_digest"], int(texture["edge_texels"]), texture["id"]))
+            if ENHANCEMENT_SOFT_SHADOWS:
+                ENHANCEMENT_SOFT_SHADOW_KEY = enhancement_package.published_digest_key(elf.data)
 
             for patch in enhancement_package.verify_and_resolve_data_sites(
                 pkg_validated, symbol_to_addr=sym_map, read_data_fn=_read_loaded_data,
@@ -7045,6 +7156,7 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
         main_out += _enhancement_launch_lines()
         main_out += _enhancement_store_lines()
         main_out += _enhancement_data_lines()
+        main_out += _enhancement_soft_shadow_lines()
     census_entries = sorted({a for a in emitted if a not in resume_owners})
     if stack_census:
         census_values = census_entries or [0]
@@ -7109,6 +7221,8 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
     main_out.append("    sr_exec_span_reset();")
     for module in module_translations:
         main_out.append(f"    sr_module_code_register(&sr_m{module.index}_code);")
+        if module.non_code:
+            main_out.append(f"    sr_module_code_non_code_register(&sr_m{module.index}_non_code);")
     for lo, hi in exec_spans:
         main_out.append(
             f"    if (!sr_exec_span_register(0x{lo:08x}u, 0x{hi:08x}u)) {{"
@@ -7152,6 +7266,7 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
     )
     if ENHANCEMENT_PKG_META is not None:
         main_out.append("    if (nk_enhancement_on()) nk_enhancement_apply_data();")
+        main_out += _enhancement_soft_shadow_call()
         if ENHANCEMENT_STORE_SITES:
             main_out.append("    nk_enh_sites_start();")
     main_out.append(f'    fprintf(stderr, "sr_register_all: starting {len(emitted)} registrations\\n");')
@@ -7357,7 +7472,9 @@ def _translate(argv):
     extra_spans = resolve_extra_spans(extra_span_arg)
     # Seeds from a run's dispatch misses (tools/miss_seeds.py, #1848) are extra entries for the
     # primary image only. Without --miss-seeds the analysis call is exactly the one it always was.
-    seed_args = {}
+    # The analysis report carries the seeds withdrawn as non-code in an image without
+    # relocation evidence (analyze, "Non-code in an image without relocation evidence").
+    seed_args = {"report": {}}
     if cli.miss_seeds is not None:
         try:
             seed_args = {"seeds": set(miss_seeds.read_seed_file(cli.miss_seeds).seeds),
@@ -7366,22 +7483,31 @@ def _translate(argv):
             sys.stderr.write(f"codegen: {exc}\n")
             return 2
     try:
-        if seed_args:
+        if "seeds" in seed_args:
             seed_args["seed_check"] = emitter_seed_check(elf, profile, frozenset(omit_aot.addrs),
                                                          stack_census, options=options)
         analyzed, ranges = analyze(elf, extra_spans=extra_spans, cfg_gate=cfg_gate, **seed_args)
     except ImportTableError as exc:
         sys.stderr.write(f"codegen: {format_boundary(exc)}\n")
         return 1
-    miss_seed_outcome = seed_args["report"]["miss_seeds"] if seed_args else None
+    miss_seed_outcome = seed_args["report"]["miss_seeds"] if "seeds" in seed_args else None
+    # A withdrawn seed is no entry, and stays a boundary no body runs through.
+    main_non_code = {a: hit for a, hit in seed_args["report"].get("non_code", {}).items()
+                     if a not in analyzed}
     if miss_seed_outcome is not None:
         miss_seeds.report_outcome(miss_seed_outcome, prefix="CODEGEN_MISS_SEEDS")
     cfg_report = _cfg_report_and_gate(elf, analyzed, ranges, extra_spans, cfg_report_path, cfg_gate,
                                       miss_seed_outcome)
-    owned_exec_ranges = list(ranges)
+    # The words only withdrawn seeds reached are no code: the interpreter may not run them.
+    main_non_code_words = (frozenset(seed_args["report"].get("non_code_words", ()))
+                           if main_non_code else frozenset())
+    owned_exec_ranges = (spans_without(list(ranges), main_non_code_words) if main_non_code_words
+                         else list(ranges))
+    if main_non_code:
+        _non_code_summary("executable", main_non_code, main_non_code_words, owned_exec_ranges)
     catalog = build_entry_catalog(analyzed, ranges, profile=profile, elf=elf)
     omitted = omit_aot.apply(catalog, elf.entry)
-    dispatch_boundaries = set(omit_aot.addrs)
+    dispatch_boundaries = set(omit_aot.addrs) | set(main_non_code)
     if omitted:
         for addr in sorted(omit_aot.addrs):
             sys.stderr.write(f"CODEGEN_OMIT_AOT 0x{addr:08x} dispatch-fallback\n")
@@ -7496,6 +7622,18 @@ def _translate(argv):
             stubbed.append((a, reason))
             sys.stderr.write(f"skip 0x{a:08x}: {e}\n")
 
+    if main_non_code_words:
+        owned = set(analyzed)
+        for a in emitted:
+            if not is_stub(a) and a not in SIMPLE_STUBS and not (hst_profile and a in HST_CUSTOM_STUBS):
+                try:
+                    owned.update(function_flow(elf, a, ranges, known, resume_owners=resume_owners,
+                                               dispatch_boundaries=dispatch_boundaries,
+                                               options=options)[0])
+                except Unsupported:
+                    pass  # left to the interpreter: its entry is in `owned` already
+        if not _non_code_disjoint("executable", owned, main_non_code_words):
+            return 1
     primary_emitted = tuple(sorted(set(emitted)))
     primary_stubbed = {a for a, _ in stubbed}
     coverage_images = [{
@@ -7533,14 +7671,29 @@ def _translate(argv):
                             f"0x{old_lo:08x},0x{old_hi:08x}\n"
                         )
                         return 2
-        owned_exec_ranges.extend(extra_ranges)
+        extra_report = {}
         try:
-            extra_analyzed, _ = analyze(extra_elf, cfg_gate=cfg_gate)
+            extra_analyzed, _ = analyze(extra_elf, cfg_gate=cfg_gate, report=extra_report)
         except ImportTableError as exc:
             sys.stderr.write(f"codegen: {format_boundary(exc, extra_elf_path)}\n")
             return 1
         extra_known = set(extra_analyzed)
         extra_known = set(a for a in extra_known if in_ranges(a, extra_ranges))
+        # Withdrawn seeds of an image without relocation evidence, as for the executable: no
+        # entry, a dispatch boundary, and the words proven non-code out of the spans.
+        extra_non_code = {a: hit for a, hit in extra_report.get("non_code", {}).items()
+                          if a not in extra_analyzed}
+        extra_non_code_words = (frozenset(extra_report.get("non_code_words", ()))
+                                if extra_non_code else frozenset())
+        extra_owned = (spans_without(list(extra_ranges), extra_non_code_words)
+                       if extra_non_code_words else list(extra_ranges))
+        owned_exec_ranges.extend(extra_owned)
+        if extra_non_code:
+            _non_code_summary(os.path.basename(extra_elf_path), extra_non_code,
+                              extra_non_code_words, extra_owned)
+        extra_boundaries = set(extra_non_code) or None
+        # Passed only when there is a withdrawal, so every other image's call is unchanged.
+        extra_boundary_args = {"dispatch_boundaries": extra_boundaries} if extra_boundaries else {}
         if cfg_gate:
             extra_report = canonical_cfg_report(
                 extra_elf, ranges=extra_ranges, entries=sorted(extra_known)
@@ -7588,6 +7741,7 @@ def _translate(argv):
         # A module at a fixed base reads its own variable-import sites from memory.
         main_space = ADDRESS_SPACE
         ADDRESS_SPACE = AddressSpace(patched=extra_var_sites)
+        extra_walked = set(extra_known)
         for a in sorted(extra_known):
             if is_extra_stub(a):
                 lib_nid = extra_impmap.get(a)
@@ -7601,11 +7755,18 @@ def _translate(argv):
                 func_texts.append(text)
                 emitted.append(a)
                 continue
+            if extra_non_code_words:
+                try:
+                    extra_walked.update(function_flow(
+                        extra_elf, a, extra_ranges, extra_known,
+                        dispatch_boundaries=extra_boundaries, options=options)[0])
+                except Unsupported:
+                    pass  # left to the interpreter: its entry is in `extra_walked` already
             try:
                 func_texts.append(llvm_body("\n".join(emit_function(
                     extra_elf, a, extra_ranges, extra_known, profile=profile,
-                    stack_census=stack_census, options=options)), extra_elf, a,
-                    extra_ranges, extra_known))
+                    stack_census=stack_census, options=options, **extra_boundary_args)),
+                    extra_elf, a, extra_ranges, extra_known, **extra_boundary_args))
                 emitted.append(a)
             except Unsupported as e:
                 reason = str(e).replace('"', "'")
@@ -7617,6 +7778,9 @@ def _translate(argv):
                 stubbed.append((a, reason))
                 sys.stderr.write(f"skip 0x{a:08x}: {e}\n")
         ADDRESS_SPACE = main_space
+        if extra_non_code_words and not _non_code_disjoint(
+                os.path.basename(extra_elf_path), extra_walked, extra_non_code_words):
+            return 1
         extra_stubbed = {a for a, _ in stubbed} & extra_known
         coverage_images.append({
             "image": os.path.basename(extra_elf_path),

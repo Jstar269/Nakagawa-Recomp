@@ -397,7 +397,7 @@ any other image of its disc ID not hashed yet. None starts while a game starts o
 one runs, the heading row carries a `CAPTION` `muted` line, "Checking disc image: 40%" ("Checking disc images: 40%,
 2 more" with more waiting), and a small CANCEL that stops it and the ones waiting (it stays while the check stops);
 the games stay, unchecked. A check that could not finish leaves a `warning` line ("A disc image could not be
-checked", "Your disc list could not be read", or "Some disc images were not checked" when too many wait) with HIDE,
+checked", "The disc list could not be read", or "Some disc images were not checked" when too many wait) with HIDE,
 and the reason goes to the developer log. The line stays until HIDE; a later check shows its progress meanwhile.
 Neither button is ever the default focus. The progress is a number, not an animation, and it is on that line
 only: the card's badge, YOUR DISC until then, changes once, to VERIFIED RETAIL, MODIFIED DISC or UNKNOWN DUMP (a
@@ -412,8 +412,8 @@ missing, starting, running), never the primary action: while its game runs, a re
 Stop the game to rebuild or change settings." The input note about decrypted files shows only while the package
 still needs them. Main column: eyebrow LIBRARY › TITLE, the name in `TITLE_XL`, the disc ID in `DATA`, the status
 pill and tag (YOUR DISC, BETA / UNOFFICIAL or the disc check's word, as on the card), then for a checked disc
-one `BODY_S` `muted` sentence on what the check found (for UNKNOWN DUMP: not shown to be retail, not modified,
-since Redump's PSP list names no disc IDs), then a PICTURE card when the last run of this game fell back to a
+one `BODY_S` `muted` sentence on what the check found (for UNKNOWN DUMP: not in the disc list, which doesn't
+mean bad, only not shown to be retail, and its disc ID isn't one the list names), then a PICTURE card when the last run of this game fell back to a
 slower drawing path (#2151): a DRAWN IN SOFTWARE pill in the brand blue, as a fact and not a warning, one `BODY_S`
 `paper` paragraph naming the renderer that did not start and what that costs (Internal resolution has no effect, the
 game may run slower, a graphics driver update may help), and a small Hide button, never the default focus, that hides
@@ -593,7 +593,8 @@ default (AUTHENTIC: OPTIONS or ENHANCED: OPTIONS; Authentic for a new library), 
 dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from the player's part table (TEXTURE
 FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; WIDESCREEN; SMOOTH MOTION; CLEAN
 PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; FULL 32-BIT COLOUR;
-SUPERSAMPLING; SMOOTH FAR TEXTURES; TEXTURE PACK; a
+SUPERSAMPLING; SMOOTH FAR TEXTURES; TEXTURE PACK; LATE PAD SAMPLING; SOFT SHADOWS, Ace only, which draws the shadows a game's package
+names with soft edges and changes the frame the game reads, docs/ENHANCEMENT_CONTRACT.md section 11.3.13; a
 new library has 16x filtering, crisp text and the badge on and the rest off, and a graphics preset sets SHARPER
 ENLARGING, CRISP SYSTEM TEXT and, under ULTRA, FULL 32-BIT COLOUR in Enhanced and Ace, below), each beside a
 sentence that says what it does and what it costs. A new part is a new row with no change to the page. While the
@@ -646,7 +647,7 @@ on (#2280), which changes only the picture the window shows; the other presets l
 second draw of each render op and its GPU memory stay off unless asked for. Where the GPU renderer cannot run FSR
 1, the normal scaling filter stays, as for the part. `fsr1-selftest` reports the pass's cost at each of these sizes
 (`docs/SETUP.md`). No preset sets frame pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN
-PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, the SPEED READOUT or
+PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, LATE PAD SAMPLING, SOFT SHADOWS, the SPEED READOUT or
 the GAME BADGE: they change timing, framing, input, guest-visible output or the HUD, or have no measured cost on
 low-end GPUs, so they stay the library's and each game's. FULL 32-BIT COLOUR stays out of every preset but ULTRA for
 the same reason: its cost (a second draw of each render op and the twin's GPU memory) is not measured on any GPU, so

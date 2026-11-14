@@ -143,6 +143,11 @@ static int set_env(const char *name, const char *value) {
  * In the sharp game text build (SR_GPU_GLYPH_SELFTEST), `--glyphs on|off|absent` picks the Ace line's
  * glyphs key (on by default; absent writes no key), and `--scene-hash` draws one scene and prints its
  * hash instead of running the cells; `--authentic` (no Ace line) implies it.
+ * `--soft-shadow on|off|undeclared` turns Ace Mode on as an Ace run, with shadow=soft for on and
+ * undeclared, and makes the soft-shadow case's declaration (none for undeclared) before the
+ * renderer starts; `--soft-ref PATH` sets SR_GPU_SOFT_SHADOW_REF, the file the off run writes its
+ * stock frames' hashes to and the others compare against; `--shadow-candidates V` sets
+ * SR_ACE_SHADOW_CANDIDATES.
  * Recipes pass arguments, not a `VAR=value` prefix, which cmd.exe does not accept. */
 int main(int argc, char **argv) {
     int twin_arg = 0, twin_key = 0, twin_key_on = 0, authentic = 0, repl_only = 0, pcache_arg = 0, depth_arg = 0;
@@ -150,7 +155,16 @@ int main(int argc, char **argv) {
     unsigned long long ssaa_budget_mb = 0;
     unsigned ssaa_dim = 0;
     const char *glyphs_key = "on";
+    const char *soft_mode = NULL;
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--soft-shadow") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "gpu coherence selftest: --soft-shadow takes on, off or undeclared\n");
+                return 2;
+            }
+            soft_mode = argv[++i];
+            continue;
+        }
         if (strcmp(argv[i], "--authentic") == 0) { authentic = 1; continue; }
         if (strcmp(argv[i], "--scene-hash") == 0) { scene_hash = 1; continue; }
         if (strcmp(argv[i], "--glyphs") == 0) {
@@ -212,6 +226,8 @@ int main(int argc, char **argv) {
                          : strcmp(argv[i], "--gpu-timestamps") == 0 ? "SR_GPU_TIMESTAMPS"
                          : strcmp(argv[i], "--twin") == 0 ? "SR_GPU_TWIN_COLOR"
                          : strcmp(argv[i], "--twin-ref") == 0 ? "SR_GPU_TWIN_REF"
+                         : strcmp(argv[i], "--soft-ref") == 0 ? "SR_GPU_SOFT_SHADOW_REF"
+                         : strcmp(argv[i], "--shadow-candidates") == 0 ? "SR_ACE_SHADOW_CANDIDATES"
                          : strcmp(argv[i], "--depth-ref") == 0 ? "SR_GPU_DEPTH_REF"
                          : strcmp(argv[i], "--ssaa-ref") == 0 ? "SR_GPU_SSAA_REF"
                          : strcmp(argv[i], "--dst-read") == 0 ? "SR_GPU_DST_READ"
@@ -225,6 +241,7 @@ int main(int argc, char **argv) {
     (void)repl_only;   /* read only in the texture scaling build */
     (void)scene_hash;  /* read only in the sharp game text build */
     (void)glyphs_key;
+    (void)soft_mode;   /* read only in the coherence build, not the mips or Ace filtering build */
     if (!host_mem_type_selection_ok()) return 1;
     uint8_t *arena = (uint8_t *)calloc(0x0c000000u, 1);
     if (!arena) return 2;
@@ -250,7 +267,20 @@ int main(int argc, char **argv) {
         return 1;
     }
 #else
-    {
+    if (soft_mode) {
+        /* An Ace run (shadow=soft needs tier=ace) with or without the key, and the declaration. */
+        const int key = strcmp(soft_mode, "off") != 0;
+        if (!ace_init_spec(key ? "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;"
+                                 "tess=off;twin=off;shadow=soft"
+                               : "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;"
+                                 "tess=off;twin=off", NULL) ||
+            !gegpu_soft_shadow_prepare(soft_mode)) {
+            fprintf(stderr, "gpu coherence selftest: FAIL --soft-shadow %s: the Ace line or the declaration was refused\n",
+                    soft_mode);
+            free(arena);
+            return 1;
+        }
+    } else {
         char spec[192];
         snprintf(spec, sizeof spec, "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=%s%s%s",
                  twin_key && twin_key_on ? "on" : "off", depth_arg ? ";depth=32" : "",
