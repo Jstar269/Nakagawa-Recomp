@@ -402,7 +402,14 @@ static inline int sr_vfs_dir_is_contained(const char *dir_utf8, const wchar_t *c
  * link swapped in at the leaf is acted on as the link object inside the root,
  * never followed. A junction swapped in above the leaf between the folder check
  * and the open is the same residual window sr_vfs_mkdirs_contained documents; the
- * final-path check below still refuses that handle. */
+ * final-path check below still refuses that handle (an empty file the racing open
+ * created outside stays there; nothing outside is emptied).
+ *
+ * A hard link has no link object to detect by path: its final path is the name
+ * inside the root. So an open that can change file data refuses a file with more
+ * than one link, and a truncating disposition (CREATE_ALWAYS, TRUNCATE_EXISTING) is
+ * opened without truncation and cut through the handle only once that handle has
+ * passed every check. Reading a file with more than one link still works. */
 static inline int sr_vfs_create_target_is_contained(wchar_t *wpath, const wchar_t *canonical_root) {
     wchar_t *sep = wcsrchr(wpath, L'\\');
     if (!sep || sep == wpath || sep[1] == L'\0') return 0;
@@ -412,6 +419,65 @@ static inline int sr_vfs_create_target_is_contained(wchar_t *wpath, const wchar_
     if (!parent_ok) return 0;
     DWORD attrs = GetFileAttributesW(wpath);
     return attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+}
+
+#define SR_VFS_WRITE_DATA_ACCESS (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA)
+
+/* The checked open shared by the Memory Stick VFS and savedata. Returns the verified
+ * handle, or INVALID_HANDLE_VALUE with *err set: the open's own Win32 error, or
+ * ERROR_ACCESS_DENIED for a handle refused by the rules above. */
+static inline HANDLE sr_vfs_open_verified_wide(wchar_t *wpath, DWORD desired_access, DWORD share,
+                                              DWORD flags, DWORD disposition,
+                                              const wchar_t *canonical_root, DWORD *err) {
+    const int mutating = disposition != OPEN_EXISTING;
+    const int writes_data = (desired_access & SR_VFS_WRITE_DATA_ACCESS) != 0;
+    DWORD open_disposition = disposition;
+    int truncate_after = 0;
+    *err = ERROR_ACCESS_DENIED;
+    if (disposition == CREATE_ALWAYS) {
+        open_disposition = OPEN_ALWAYS;
+        truncate_after = 1;
+    } else if (disposition == TRUNCATE_EXISTING) {
+        open_disposition = OPEN_EXISTING;
+        truncate_after = 1;
+    }
+    if (mutating) {
+        if (!sr_vfs_create_target_is_contained(wpath, canonical_root)) return INVALID_HANDLE_VALUE;
+        flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+    }
+    HANDLE h = CreateFileW(wpath, desired_access, share, NULL, open_disposition, flags, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        *err = GetLastError();
+        return INVALID_HANDLE_VALUE;
+    }
+    if (!sr_vfs_handle_is_contained(h, canonical_root)) {
+        CloseHandle(h);
+        return INVALID_HANDLE_VALUE;
+    }
+    if (mutating || writes_data) {
+        /* A link that appeared at the leaf after the check was opened as itself, and a
+         * hard link reaches a file outside the root under a name inside it: refuse both
+         * rather than hand them to a writer. */
+        BY_HANDLE_FILE_INFORMATION info;
+        if (!GetFileInformationByHandle(h, &info) ||
+            (mutating && (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) ||
+            (writes_data && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+             info.nNumberOfLinks != 1)) {
+            CloseHandle(h);
+            return INVALID_HANDLE_VALUE;
+        }
+    }
+    if (truncate_after) {
+        LARGE_INTEGER zero;
+        zero.QuadPart = 0;
+        if (!SetFilePointerEx(h, zero, NULL, FILE_BEGIN) || !SetEndOfFile(h)) {
+            *err = GetLastError();
+            CloseHandle(h);
+            return INVALID_HANDLE_VALUE;
+        }
+    }
+    *err = ERROR_SUCCESS;
+    return h;
 }
 
 static inline int sr_vfs_open_contained_utf8(const char *path_utf8, DWORD desired_access,
@@ -426,33 +492,12 @@ static inline int sr_vfs_open_contained_utf8(const char *path_utf8, DWORD desire
     MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path_utf8, -1, wpath, need);
     for (wchar_t *p = wpath; *p; p++) if (*p == L'/') *p = L'\\';
 
-    const int mutating = disposition != OPEN_EXISTING;
-    if (mutating) {
-        if (!sr_vfs_create_target_is_contained(wpath, canonical_root)) {
-            free(wpath);
-            return 0;
-        }
-        flags |= FILE_FLAG_OPEN_REPARSE_POINT;
-    }
-    HANDLE h = CreateFileW(wpath, desired_access,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, disposition, flags, NULL);
+    DWORD err;
+    HANDLE h = sr_vfs_open_verified_wide(wpath, desired_access,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                         flags, disposition, canonical_root, &err);
     free(wpath);
     if (h == INVALID_HANDLE_VALUE) return 0;
-    if (!sr_vfs_handle_is_contained(h, canonical_root)) {
-        CloseHandle(h);
-        return 0;
-    }
-    if (mutating) {
-        /* A link that appeared at the leaf after the check was opened as itself;
-         * refuse it rather than hand a link object to a reader or writer. */
-        BY_HANDLE_FILE_INFORMATION info;
-        if (!GetFileInformationByHandle(h, &info) ||
-            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-            CloseHandle(h);
-            return 0;
-        }
-    }
     *out = h;
     return 1;
 }

@@ -6543,6 +6543,11 @@ static void test_ms0_unified_namespace(void) {
             cpu.r[5] = 1u;
             const uint32_t read_refusal = sr_hle_test_io_open(&cpu);
             expect(read_refusal >= 0x80000000u, "a read through the folder link is refused");
+#ifdef _WIN32
+            expect(read_refusal == 0x80010002u, "Windows refuses a read through the link as not found");
+#else
+            expect(read_refusal == 0x80010016u, "POSIX refuses a read through the link as EINVAL");
+#endif
             for (size_t i = 0; i < sizeof(opens) / sizeof(opens[0]); ++i) {
                 fd_guest_copy(PATH_ADDR, opens[i].guest, strlen(opens[i].guest) + 1u);
                 fd_set_path(&cpu, PATH_ADDR, opens[i].guest);
@@ -6588,6 +6593,112 @@ static void test_ms0_unified_namespace(void) {
         nk_remove_utf8(victim);
         nk_remove_utf8(fresh_out);
         rmdir(outside);
+    }
+
+    /* --- a hard link inside the Memory Stick to a file outside it: its name is inside, so
+     * only the link count gives it away. Every sceIoOpen that could change the file is
+     * refused and the outside file keeps its bytes; reading it still works. --- */
+    {
+        char victim[512], hard[512];
+        const char sep = nk_platform_path_separator();
+        snprintf(victim, sizeof victim, "%s%c..%cms0_hard_victim.bin", ms_root, sep, sep);
+        snprintf(hard, sizeof hard, "%s%cHARD.BIN", ms_root, sep);
+        FILE *vf = fopen(victim, "wb");
+        if (vf) { fwrite(payload, 1, sizeof(payload) - 1u, vf); fclose(vf); }
+        nk_remove_utf8(hard);
+#ifdef _WIN32
+        int linked = CreateHardLinkA(hard, victim, NULL) != 0;
+#else
+        int linked = link(victim, hard) == 0;
+#endif
+        expect(linked, "a hard link planted inside the Memory Stick");
+        if (linked) {
+            static const uint32_t writes[] = {0x0602u, 0x0402u, 0x0302u, 0x0003u, 0x0002u, 0x0102u};
+            for (size_t i = 0; i < sizeof(writes) / sizeof(writes[0]); ++i) {
+                fd_guest_copy(PATH_ADDR, "ms0:/HARD.BIN", sizeof("ms0:/HARD.BIN"));
+                fd_set_path(&cpu, PATH_ADDR, "ms0:/HARD.BIN");
+                cpu.r[5] = writes[i];
+                cpu.r[6] = 0777u;
+                uint32_t rc = sr_hle_test_io_open(&cpu);
+                if (rc < 0x80000000u)
+                    fprintf(stderr, "  flags 0x%04x through a hard link answered 0x%08x\n",
+                            (unsigned)writes[i], (unsigned)rc);
+                expect(rc >= 0x80000000u, "a write open through a hard link is refused");
+                if (rc < 64u) {
+                    memset(&cpu, 0, sizeof cpu);
+                    cpu.r[4] = rc;
+                    sr_hle_test_io_close(&cpu);
+                }
+                expect(nk_platform_get_file_size(victim) == (int64_t)(sizeof(payload) - 1u),
+                       "an outside file keeps its bytes when opened through a hard link");
+            }
+            fd_guest_copy(PATH_ADDR, "ms0:/HARD.BIN", sizeof("ms0:/HARD.BIN"));
+            fd_set_path(&cpu, PATH_ADDR, "ms0:/HARD.BIN");
+            cpu.r[5] = 1u;
+            uint32_t rd = sr_hle_test_io_open(&cpu);
+            expect(rd < 64u, "a file with two links still opens for reading");
+            if (rd < 64u) {
+                memset(&cpu, 0, sizeof cpu);
+                cpu.r[4] = rd;
+                sr_hle_test_io_close(&cpu);
+            }
+            nk_remove_utf8(hard);
+        }
+        nk_remove_utf8(victim);
+    }
+
+    /* --- savedata's lock file planted as a link to a file outside the Memory Stick: the lock
+     * open (create-or-open, delete on close) must not reach the outside file. Windows takes a
+     * lock file, so the SAVE is refused there; POSIX locks the folder itself and the link is
+     * just a stray name. Either way the outside file survives with its bytes. --- */
+    {
+        static const char game[] = "NAKAGAWALNK";
+        static const char save[] = "LOCK";
+        static const char data[] = "LOCK_TEST\n";
+        char victim[512], lock_link[600], sd_root[512];
+        const char sep = nk_platform_path_separator();
+        snprintf(victim, sizeof victim, "%s%c..%cms0_lock_victim.bin", ms_root, sep, sep);
+        snprintf(sd_root, sizeof sd_root, "%s%cPSP%cSAVEDATA", ms_root, sep, sep);
+        snprintf(lock_link, sizeof lock_link, "%s%c.nakagawa-savedata-lock", sd_root, sep);
+        expect(nk_platform_mkdir_p(sd_root), "the save data folder exists for the lock fixture");
+        FILE *vf = fopen(victim, "wb");
+        if (vf) { fwrite(payload, 1, sizeof(payload) - 1u, vf); fclose(vf); }
+        nk_remove_utf8(lock_link);
+#ifdef _WIN32
+        /* A file symlink keeps a relative target relative to its own folder: name the victim
+         * by its full path so the link really reaches it. */
+        char lcmd[1400], victim_full[MAX_PATH];
+        DWORD full = GetFullPathNameA(victim, MAX_PATH, victim_full, NULL);
+        snprintf(lcmd, sizeof lcmd, "cmd /c mklink \"%s\" \"%s\" >nul 2>&1", lock_link,
+                 full > 0 && full < MAX_PATH ? victim_full : victim);
+        int made = system(lcmd) == 0 &&
+#else
+        int made = symlink("../../../ms0_lock_victim.bin", lock_link) == 0 &&
+#endif
+                   !nk_platform_path_missing(lock_link);
+        if (made) {
+            memset(g_mem_base + PARAM_ADDR, 0, 0x600);
+            fd_guest_copy(PARAM_ADDR + 0x3c, game, sizeof(game));
+            fd_guest_copy(PARAM_ADDR + 0x4c, save, sizeof(save));
+            fd_guest_copy(PARAM_ADDR + 0x64, "DATA.BIN", sizeof("DATA.BIN"));
+            fd_guest_copy(DATA_ADDR, data, sizeof(data) - 1u);
+            MEM_W32(PARAM_ADDR + 0x30, 3u); /* SD_SAVE */
+            MEM_W32(PARAM_ADDR + 0x74, DATA_ADDR);
+            MEM_W32(PARAM_ADDR + 0x78, (uint32_t)(sizeof(data) - 1u));
+            MEM_W32(PARAM_ADDR + 0x7c, (uint32_t)(sizeof(data) - 1u));
+            uint32_t sd_rc = sr_savedata_execute(PARAM_ADDR);
+#ifdef _WIN32
+            expect(sd_rc != 0u, "a SAVE whose lock file is a link outside is refused");
+#else
+            (void)sd_rc;
+#endif
+            expect(nk_platform_get_file_size(victim) == (int64_t)(sizeof(payload) - 1u),
+                   "the save data lock never opens, empties or deletes a file outside");
+            nk_remove_utf8(lock_link);
+        } else {
+            fprintf(stderr, "SKIP: the lock-link fixture needs mklink (Win32) or symlink\n");
+        }
+        nk_remove_utf8(victim);
     }
 
     /* cleanup */

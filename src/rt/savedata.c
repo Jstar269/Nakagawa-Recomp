@@ -730,30 +730,14 @@ static int sd_win_open(const SavedataDir *d, const char *name, DWORD access, DWO
     if (!wpath) return 0;
     MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wpath, need);
     for (wchar_t *p = wpath; *p; p++) if (*p == L'/') *p = L'\\';
-    /* A create or truncate acts before the handle exists: check where it lands first, and never
-     * follow a link at the leaf (sr_vfs_open_contained_utf8 has the full rule). */
-    const int mutating = disposition != OPEN_EXISTING;
-    if (mutating) {
-        if (!sr_vfs_create_target_is_contained(wpath, d->canonical_root)) {
-            free(wpath);
-            if (err) *err = ERROR_ACCESS_DENIED;
-            return 0;
-        }
-        flags |= FILE_FLAG_OPEN_REPARSE_POINT;
-    }
-    HANDLE h = CreateFileW(wpath, access, share, NULL, disposition, flags, NULL);
-    DWORD open_err = h == INVALID_HANDLE_VALUE ? GetLastError() : 0;
+    /* A create or truncate acts before the handle exists: check where it lands first, never
+     * follow a link at the leaf, and never write through a hard link (vfs_path.h has the rule). */
+    DWORD open_err;
+    HANDLE h = sr_vfs_open_verified_wide(wpath, access, share, flags, disposition,
+                                         d->canonical_root, &open_err);
     free(wpath);
     if (h == INVALID_HANDLE_VALUE) {
         if (err) *err = open_err;
-        return 0;
-    }
-    BY_HANDLE_FILE_INFORMATION info;
-    if (!sr_vfs_handle_is_contained(h, d->canonical_root) ||
-        (mutating && (!GetFileInformationByHandle(h, &info) ||
-                      (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0))) {
-        CloseHandle(h);
-        if (err) *err = ERROR_ACCESS_DENIED;
         return 0;
     }
     *out = h;
@@ -1463,8 +1447,12 @@ static int savedata_lock(int create) {
     DWORD err = 0;
     if (!sd_win_open(&d, SAVEDATA_LOCK_NAME, GENERIC_READ | GENERIC_WRITE | DELETE,
                      FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_DELETE_ON_CLOSE, OPEN_ALWAYS, 0, &h, &err)) {
-        fprintf(stderr, "savedata: the Memory Stick's save data is in use by another savedata "
-                "operation (%s, error %lu)\n", path, (unsigned long)err);
+        if (err == ERROR_SHARING_VIOLATION)
+            fprintf(stderr, "savedata: the Memory Stick's save data is in use by another savedata "
+                    "operation (%s)\n", path);
+        else
+            fprintf(stderr, "savedata: cannot take the save data lock %s (error %lu; a link "
+                    "there, or one above it, is refused)\n", path, (unsigned long)err);
         return SD_LOCK_BUSY;
     }
     s_sd_lock = h;

@@ -458,6 +458,40 @@ int main(void) {
                 RemoveDirectoryA(junction);
             }
 
+            /* Test 21b: a hard link inside the root to the outside file. Its final path
+             * is the name inside the root, so only the link count gives it away: every
+             * open that can change data is refused before anything is truncated, and the
+             * outside file keeps its bytes. Reading through it still works. */
+            {
+                static const DWORD dispositions[] = {CREATE_ALWAYS, TRUNCATE_EXISTING,
+                                                     OPEN_ALWAYS, OPEN_EXISTING};
+                char hard[700];
+                HANDLE h = NULL;
+                snprintf(hard, sizeof(hard), "%s\\hard.txt", test_root);
+                int linked = CreateHardLinkA(hard, outside_file, NULL) != 0;
+                ASSERT_INT_EQ(linked, 1);
+                if (linked) {
+                    for (size_t m = 0; m < sizeof(dispositions) / sizeof(dispositions[0]); ++m) {
+                        h = NULL;
+                        ASSERT_INT_EQ(sr_vfs_open_contained_utf8(hard, GENERIC_READ | GENERIC_WRITE, 0,
+                                                                 dispositions[m], canonical, &h), 0);
+                        if (h) CloseHandle(h);
+                        h = NULL;
+                        ASSERT_INT_EQ(sr_vfs_open_contained_utf8(hard, FILE_APPEND_DATA, 0,
+                                                                 dispositions[m], canonical, &h), 0);
+                        if (h) CloseHandle(h);
+                        WIN32_FILE_ATTRIBUTE_DATA kept;
+                        ASSERT_INT_EQ(GetFileAttributesExA(outside_file, GetFileExInfoStandard, &kept) &&
+                                      kept.nFileSizeLow == 7u && kept.nFileSizeHigh == 0u, 1);
+                    }
+                    h = NULL;
+                    ASSERT_INT_EQ(sr_vfs_open_contained_utf8(hard, GENERIC_READ, 0, OPEN_EXISTING,
+                                                             canonical, &h), 1);
+                    if (h) CloseHandle(h);
+                    DeleteFileA(hard);
+                }
+            }
+
             /* Test 22: ordered creation happy path -- every level created and
              * verified under a fresh root; nothing above the root appears. */
             {

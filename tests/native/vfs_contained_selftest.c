@@ -1077,6 +1077,55 @@ static void case_posix_guest_file_operations(void) {
     CHECK_ST(parent_delete, SR_CD_NOT_CONTAINED);
     CHECK(sr_cd_psp_error(parent_delete) == 0x80010016u,
           "removing below an outside directory link returns PSP EINVAL");
+    {
+        /* Every mode that writes, creates or truncates, through a symlink at the leaf and
+         * through a symlinked folder, then through a hard link to the outside file: refused,
+         * the outside file keeps its bytes and nothing new appears outside. A hard link has
+         * no link object for O_NOFOLLOW to see; a file with more than one link opens for
+         * reading only. */
+        static const sr_cd_file_mode writing_modes[] = {
+            SR_CD_FILE_WRITE_TRUNCATE, SR_CD_FILE_READ_WRITE, SR_CD_FILE_READ_WRITE_TRUNCATE,
+            SR_CD_FILE_READ_WRITE_APPEND, SR_CD_FILE_READ_WRITE_EXISTING_TRUNCATE,
+            SR_CD_FILE_READ_WRITE_EXISTING_APPEND, SR_CD_FILE_READ_WRITE_NEW,
+            SR_CD_FILE_READ_WRITE_NEW_APPEND,
+        };
+        char hard_path[1400], fresh_outside[1400];
+        fp(hard_path, sizeof(hard_path), "%s/PSP/SAVEDATA/HARD.BIN", root);
+        fp(fresh_outside, sizeof(fresh_outside), "%s/FRESH.BIN", outside);
+        CHECK(link(outside_file, hard_path) == 0, "plant a hard link to the outside file");
+        for (size_t m = 0; m < sizeof(writing_modes) / sizeof(writing_modes[0]); m++) {
+            stream = NULL;
+            CHECK(sr_cd_open_file(&r, "PSP/SAVEDATA", "OUTSIDE-FILE", writing_modes[m],
+                                  &stream) != SR_CD_OK && stream == NULL,
+                  "mode %d through a leaf symlink is refused", (int)writing_modes[m]);
+            if (stream) fclose(stream);
+            stream = NULL;
+            CHECK(sr_cd_open_file(&r, "PSP/SAVEDATA/OUTSIDE-DIR", "FRESH.BIN", writing_modes[m],
+                                  &stream) != SR_CD_OK && stream == NULL,
+                  "mode %d through a folder symlink is refused", (int)writing_modes[m]);
+            if (stream) fclose(stream);
+            CHECK(!exists(fresh_outside), "mode %d creates nothing outside", (int)writing_modes[m]);
+            stream = NULL;
+            sr_cd_status hard = sr_cd_open_file(&r, "PSP/SAVEDATA", "HARD.BIN", writing_modes[m],
+                                                &stream);
+            if (stream) fclose(stream);
+            if (writing_modes[m] == SR_CD_FILE_READ_WRITE_NEW ||
+                writing_modes[m] == SR_CD_FILE_READ_WRITE_NEW_APPEND) {
+                CHECK_ST(hard, SR_CD_ALREADY_EXISTS);
+            } else {
+                CHECK_ST(hard, SR_CD_NOT_CONTAINED);
+                CHECK(sr_cd_psp_error(hard) == 0x80010016u,
+                      "mode %d through a hard link returns PSP EINVAL", (int)writing_modes[m]);
+            }
+            CHECK(read_file_equals(outside_file, "outside must survive"),
+                  "mode %d leaves the outside file's bytes alone", (int)writing_modes[m]);
+        }
+        stream = NULL;
+        CHECK_ST(sr_cd_open_file(&r, "PSP/SAVEDATA", "HARD.BIN", SR_CD_FILE_READ, &stream),
+                 SR_CD_OK);
+        if (stream) fclose(stream);
+        unlink(hard_path);
+    }
     FILE *outside_stream = fopen(outside_file, "rb");
     CHECK(outside_stream != NULL, "outside target remains readable");
     if (outside_stream) {
