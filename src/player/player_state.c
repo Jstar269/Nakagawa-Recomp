@@ -219,6 +219,17 @@ void player_app_set_runtime_root(PlayerApp *app, const char *root) {
     player_app_runtime_package_cache_invalidate(app);
 }
 
+void player_app_set_install_root(PlayerApp *app, const char *root) {
+    if (!app) return;
+    snprintf(app->install_root, sizeof(app->install_root), "%s", root ? root : "");
+    /* player_app_init has already synchronized the library with no install root, so a title
+       whose only package is a shipped one was read as having none unless NK_INSTALL_ROOT or
+       the working directory named the source tree. Which package a title launches can change
+       here, so the cached package results go too, as in a library synchronization. */
+    player_app_refresh_title_enhancements(app);
+    player_app_runtime_package_cache_invalidate(app);
+}
+
 void player_app_runtime_package_cache_invalidate(PlayerApp *app) {
     if (!app) return;
     memset(app->runtime_package_cache, 0,
@@ -1205,6 +1216,7 @@ static const char *const k_part_ssaa_labels[] = {"2x", "4x", "Off"};
 static const char *const k_part_ssaa_words[] = {"2", "4", "off"};
 static const char *const k_part_pad_words[] = {"late", "off"};
 static const char *const k_part_shadow_words[] = {"soft", "off"};
+static const char *const k_part_peak_words[] = {"limit", "off"};
 static const char *const k_part_upscale_labels[] = {"FSR 1", "Off"};
 static const char *const k_part_upscale_words[] = {"fsr1", "off"};
 static const int k_part_texscale_values[] = {2, 3, 4, 5, 6, 0};
@@ -1291,6 +1303,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"shadow", "Soft shadows",
      "Ace only, in games whose package names their shadows. Changes what the frame shows.",
      2, k_part_switch_values, k_part_switch_labels, k_part_shadow_words, 0},
+    /* Host sound only (contract 10.22, #2137): the guest's SAS buffer keeps the PSP's saturated
+       bytes. Off by default and in every preset; the limiter's output is 71 frames (1.6 ms) late. */
+    {"peak", "Unclipped sound",
+     "Softens loud sound that the PSP clips. Changes only what you hear; sound plays 1.6 ms later.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_peak_words, 0},
     /* Guest-visible items (contract 10.10 and 11.3.3): every present commits the frame, scaled copies
        and nearest 2D draws included, to guest VRAM. Off by default and in no preset until their
        "nothing worse" runs exist (11.2 item 4), each with its own off switch in the library and each
@@ -2508,14 +2525,15 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    badge, Finer patches (which changes GE timing, section 11.3.7), Short loads (which changes
    guest timing, section 11.3.10), a texture pack (the title's own, 11.3.4), Soft shadows
    (the title's own declared shadows, 11.3.13), Texture scaling or the Smart 2D filter (both
-   reach the guest and stay off by default, 11.3.3): those stay the library's and each game's own.
+   reach the guest and stay off by default, 11.3.3): those stay the library's and each game's own
+   (sound covers Clean pitched sound and Unclipped sound, 10.22).
    docs/PLAYER_UI_DESIGN.md lists the same values, and test_graphics_presets checks that every
    other part is -1, so a new part needs a choice. */
 #define PRESET_PART_LIST(X, text, upscale, twin)                                          \
     X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
     X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1)    \
     X(TWIN, (twin)) X(SSAA, -1) X(MIPS, -1) X(TEXPACK, -1)                                \
-    X(PAD, -1) X(SHADOW, -1) X(TEXSCALE, -1) X(SMART2D, -1)
+    X(PAD, -1) X(SHADOW, -1) X(PEAK, -1) X(TEXSCALE, -1) X(SMART2D, -1)
 #define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
 #define PRESET_PART_ONE(part, value) + 1
 #define PRESET_PARTS(text, upscale, twin) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale, twin)}
@@ -3411,12 +3429,14 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
         /* The upscaler travels as SR_PRESENT_UPSCALE (player_play_present_upscale), which the
            launcher exports for every session; the runtime's SR_ACE line has no such key. Stick,
-           load, ssaa, texpack, pad, shadow, texscale, smart2d and cull come last, in the Ace line's
-           own order (src/rt/ace.c), whatever the enum's. */
+           load, ssaa, peak, texpack, pad, shadow, texscale, smart2d and cull come last, in the Ace
+           line's own order (src/rt/ace.c), whatever the enum's. */
         if (p == PLAYER_PART_UPSCALE || p == PLAYER_PART_STICK || p == PLAYER_PART_LOAD ||
             p == PLAYER_PART_SSAA || p == PLAYER_PART_TEXPACK || p == PLAYER_PART_SHADOW ||
             p == PLAYER_PART_TEXSCALE || p == PLAYER_PART_SMART2D ||
             p == PLAYER_PART_CULL) continue;
+        /* Unclipped sound comes after ssaa, before texpack, below. */
+        if (p == PLAYER_PART_PEAK) continue;
         /* A missing mips is off (contract 11.3.8): the key is written only when the part is on,
            right after twin. */
         if (p == PLAYER_PART_MIPS && play->part[p] != 1) continue;
@@ -3446,6 +3466,15 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     if (play->part[PLAYER_PART_SSAA] == 2 || play->part[PLAYER_PART_SSAA] == 4) {
         n = snprintf(out + used, cap - used, ";%s=%d", k_enhanced_parts[PLAYER_PART_SSAA].key,
                      play->part[PLAYER_PART_SSAA]);
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
+    }
+    /* Unclipped sound is an Enhanced part (contract 10.22): a missing peak is off, so either tier
+       carries peak=limit only when the part is on, after ssaa and before texpack, as ace_format
+       writes it. */
+    if (play->part[PLAYER_PART_PEAK] == 1) {
+        n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_PEAK].key,
+                     enhanced_part_word(PLAYER_PART_PEAK, 1));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
     }

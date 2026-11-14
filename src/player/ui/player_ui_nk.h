@@ -653,7 +653,7 @@ typedef enum {
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
    PlayerEnhancedPart), in that order. */
-#define PLAYER_UI_ENHANCED_ROWS 20
+#define PLAYER_UI_ENHANCED_ROWS 21
 typedef struct {
     const char *name;           /* "Texture filtering" */
     const char *value;          /* "16x", "Off", "Library (On)" on a title's page */
@@ -835,7 +835,8 @@ typedef enum {
     PLAYER_UI_CONTROLLER_PAGE_MAPPING = 0,
     PLAYER_UI_CONTROLLER_PAGE_CALIBRATE_REST,      /* step 1: leave the stick alone */
     PLAYER_UI_CONTROLLER_PAGE_CALIBRATE_EXTREMES,  /* step 2: move it to its limits */
-    PLAYER_UI_CONTROLLER_PAGE_CALIBRATE_RESULT     /* step 3: accept or cancel */
+    PLAYER_UI_CONTROLLER_PAGE_CALIBRATE_RESULT,    /* step 3: accept or cancel */
+    PLAYER_UI_CONTROLLER_PAGE_AIM                  /* the mouse aiming settings (#1791) */
 } PlayerUiControllerPage;
 
 /* What a controller settings control asks for (PLAYER_UI_ACTION_CONTROLLER).
@@ -857,7 +858,18 @@ typedef enum {
     PLAYER_UI_CONTROLLER_CALIBRATION_ACCEPT,
     PLAYER_UI_CONTROLLER_CALIBRATION_CANCEL,
     PLAYER_UI_CONTROLLER_SHOW_CONTROLLER,    /* show and edit the controller buttons */
-    PLAYER_UI_CONTROLLER_SHOW_KEYBOARD       /* show and edit the keyboard keys (#1299) */
+    PLAYER_UI_CONTROLLER_SHOW_KEYBOARD,      /* show and edit the keyboard keys (#1299) */
+    /* Mouse aiming (#1791): with the keyboard keys shown, the button beside Back opens its
+       settings, which replace the cards until Done. */
+    PLAYER_UI_CONTROLLER_AIM_OPEN,
+    PLAYER_UI_CONTROLLER_AIM_DONE,           /* back to the keyboard keys */
+    PLAYER_UI_CONTROLLER_AIM_TOGGLE,         /* mouse movement drives the PSP stick, or not */
+    PLAYER_UI_CONTROLLER_AIM_SPEED_DOWN,
+    PLAYER_UI_CONTROLLER_AIM_SPEED_UP,
+    PLAYER_UI_CONTROLLER_AIM_SMOOTHING_DOWN,
+    PLAYER_UI_CONTROLLER_AIM_SMOOTHING_UP,
+    PLAYER_UI_CONTROLLER_AIM_INVERT_X,       /* left and right swap */
+    PLAYER_UI_CONTROLLER_AIM_INVERT_Y        /* up and down swap */
 } PlayerUiControllerOp;
 
 #define PLAYER_UI_CONTROLLER_BUTTONS 14u   /* INPUT_CONTROL_DIGITAL_COUNT */
@@ -901,6 +913,14 @@ typedef struct {
     bool status_error;              /* status is something to fix */
     const char *deadzone;           /* "Dead zone 9%" */
     const char *trigger;            /* "Trigger point 49%" */
+    /* Mouse aiming (#1791): the keyboard keys' button that opens its settings, and on the
+       aiming page each setting */
+    const char *aim;                /* "Mouse aim: Off" */
+    bool aim_on;                    /* mouse movement drives the PSP stick */
+    const char *aim_speed;          /* "Speed 100%" */
+    const char *aim_smoothing;      /* "Smoothing 0%" */
+    bool aim_invert_x;              /* left and right are swapped */
+    bool aim_invert_y;              /* up and down are swapped */
     /* The live input, and on a calibration page its numbers */
     const char *live[PLAYER_UI_CONTROLLER_LIVE_LINES];
     size_t live_count;
@@ -1191,6 +1211,15 @@ enum {
     PLAYER_UI_ID_CONTROLLER_CALIBRATION_CANCEL = 0x462Bu,
     PLAYER_UI_ID_CONTROLLER_SHOW_PAD = 0x462Cu,
     PLAYER_UI_ID_CONTROLLER_SHOW_KEYBOARD = 0x462Du,
+    PLAYER_UI_ID_CONTROLLER_AIM_OPEN = 0x462Eu,      /* the keyboard keys' MOUSE AIM button (#1791) */
+    PLAYER_UI_ID_CONTROLLER_AIM_TOGGLE = 0x462Fu,    /* the aiming page's controls, 0x462F to 0x4636 */
+    PLAYER_UI_ID_CONTROLLER_AIM_SPEED_DOWN = 0x4630u,
+    PLAYER_UI_ID_CONTROLLER_AIM_SPEED_UP = 0x4631u,
+    PLAYER_UI_ID_CONTROLLER_AIM_SMOOTHING_DOWN = 0x4632u,
+    PLAYER_UI_ID_CONTROLLER_AIM_SMOOTHING_UP = 0x4633u,
+    PLAYER_UI_ID_CONTROLLER_AIM_INVERT_X = 0x4634u,
+    PLAYER_UI_ID_CONTROLLER_AIM_INVERT_Y = 0x4635u,
+    PLAYER_UI_ID_CONTROLLER_AIM_DONE = 0x4636u,
     PLAYER_UI_ID_CONTROLLER_GLYPH_BASE = 0x4640u,    /* + the control, 0-18; not focusable */
     PLAYER_UI_ID_DEVELOPER_LOG_COPY = 0x4701u,
     PLAYER_UI_ID_DEVELOPER_LOG_SAVE = 0x4702u,

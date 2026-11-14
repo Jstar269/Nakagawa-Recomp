@@ -3486,6 +3486,135 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(self.keys_of(self.saved_profile(reset))["start"], "return",
                          "the reset is saved too")
 
+    # Mouse aiming (#1791): the keyboard keys' button and the settings it opens.
+    AIM_FOCUS = {
+        "open": str(0x462E), "toggle": str(0x462F), "speed_down": str(0x4630),
+        "speed_up": str(0x4631), "smoothing_down": str(0x4632), "smoothing_up": str(0x4633),
+        "invert_x": str(0x4634), "invert_y": str(0x4635), "done": str(0x4636),
+        "stick_right": str(0x4612),
+    }
+
+    @staticmethod
+    def aim_trail(run: dict[str, object]) -> list[tuple[str, str, str]]:
+        """(view, aim_open, aim_mouse) as the frames show them, with repeats collapsed."""
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        trail: list[tuple[str, str, str]] = []
+        for frame in frames:
+            state = (frame["view"], frame["aim_open"], frame["aim_mouse"])
+            if not trail or trail[-1] != state:
+                trail.append(state)
+        return trail
+
+    def test_next_ui_mouse_aim_settings_with_keyboard_and_controller(self) -> None:
+        """#1791: mouse aiming is turned on from the player. With KEYBOARD shown, a MOUSE
+        AIM button sits under the stick card, beside Back; it opens the mouse aiming settings, where
+        the switch, the speed and smoothing steps and each direction's inversion change the
+        mapping and are written to the input profile at once, the file a launched game is
+        handed. The arrow keys and Enter, and a controller's d-pad, A and B, both work them;
+        Done, Esc and B return to the keys, on the button that opened the settings."""
+        aim = self.AIM_FOCUS
+        # Up from the first binding is KEYBOARD; from Select, Right twice is the stick's Up
+        # key and three Downs its Right key. One more Down reaches the pair under the card,
+        # MOUSE AIM and Back: Right then Left ends on MOUSE AIM from either of them.
+        to_button = ("WAIT_MS=100", "KEY_UP", "KEY_RETURN", "WAIT_MS=100", "KEY_DOWN",
+                     "KEY_RIGHT", "KEY_RIGHT", "KEY_DOWN", "KEY_DOWN", "KEY_DOWN", "KEY_DOWN",
+                     "KEY_RIGHT", "KEY_LEFT", "WAIT_MS=100")
+        fresh = self.next_ui_run("controller", to_button)
+        frames = fresh["frames"]
+        assert isinstance(frames, list)
+        trail = self.focus_trail(fresh)
+        self.assertIn(aim["stick_right"], trail, "the stick's Right key is on the way")
+        self.assertEqual(trail[-1], aim["open"], "the button is under the stick card")
+        self.assertEqual((frames[-1]["aim_open"], frames[-1]["aim_mouse"], frames[-1]["aim_speed"],
+                          frames[-1]["aim_smoothing"], frames[-1]["aim_invert"]),
+                         ("0", "0", "100", "0", "00"), "a new profile has mouse aiming off")
+
+        # The keyboard: open, switch on, one speed step up, one smoothing step up, invert
+        # left and right, then Done. Right puts the focus on a stepper's plus whichever of
+        # its two steps Down reached.
+        keys = self.next_ui_run(
+            "controller",
+            to_button + ("KEY_RETURN", "WAIT_MS=100", "KEY_RETURN", "KEY_DOWN", "KEY_RIGHT",
+                         "KEY_RETURN", "KEY_DOWN", "KEY_RIGHT", "KEY_RETURN", "KEY_DOWN",
+                         "KEY_RETURN", "KEY_DOWN", "KEY_DOWN", "WAIT_MS=100", "KEY_RETURN",
+                         "WAIT_MS=100"),
+        )
+        frames = keys["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(self.aim_trail(keys),
+                         [("controller", "0", "0"), ("controller", "1", "0"),
+                          ("controller", "1", "1"), ("controller", "0", "1")],
+                         "the settings open, the switch turns aiming on, and Done closes them")
+        trail = self.focus_trail(keys)
+        opened = trail.index(aim["toggle"])
+        self.assertEqual(trail[opened - 1], aim["open"], "the settings open on their switch")
+        self.assertEqual([step for step in trail[opened:] if step in
+                          (aim["speed_up"], aim["smoothing_up"], aim["invert_x"], aim["invert_y"],
+                           aim["done"])],
+                         [aim["speed_up"], aim["smoothing_up"], aim["invert_x"], aim["invert_y"],
+                          aim["done"]],
+                         "Down goes through the rows to Done")
+        self.assertEqual(trail[-1], aim["open"],
+                         "Done returns to the keys, on the button that opened the settings")
+        self.assertEqual((frames[-1]["aim_speed"], frames[-1]["aim_smoothing"],
+                          frames[-1]["aim_invert"], frames[-1]["input_device"]),
+                         ("110", "5", "10", "keyboard"))
+        self.assertEqual(self.saved_profile(keys)["aim"],
+                         {"mouse": True, "sensitivity": 110, "invert_x": True, "invert_y": False,
+                          "smoothing": 5},
+                         "every change is in the input profile, with no Save step")
+
+        # Esc on the settings goes back to the keys, not out of Controls.
+        escaped = self.next_ui_run(
+            "controller",
+            to_button + ("KEY_RETURN", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100", "KEY_ESCAPE",
+                         "WAIT_MS=100"),
+        )
+        self.assertEqual(self.aim_trail(escaped)[-2:],
+                         [("controller", "1", "1"), ("controller", "0", "1")],
+                         "Esc closes the settings and keeps the Controls page")
+        self.assertEqual(self.focus_trail(escaped)[-1], aim["open"])
+        self.assertIs(self.saved_profile(escaped)["aim"]["mouse"], True)  # type: ignore[index]
+
+        # A controller alone: the d-pad moves, A opens and switches, minus slows the aim, B
+        # returns to the keys, and B again leaves Controls.
+        pad_to_button = ("WAIT_MS=100", "PAD_DPAD_UP", "PAD_SOUTH", "WAIT_MS=100",
+                         "PAD_DPAD_DOWN", "PAD_DPAD_RIGHT", "PAD_DPAD_RIGHT", "PAD_DPAD_DOWN",
+                         "PAD_DPAD_DOWN", "PAD_DPAD_DOWN", "PAD_DPAD_DOWN", "PAD_DPAD_RIGHT",
+                         "PAD_DPAD_LEFT", "WAIT_MS=100")
+        pad = self.next_ui_run(
+            "controller",
+            pad_to_button + ("PAD_SOUTH", "WAIT_MS=100", "PAD_SOUTH", "PAD_DPAD_DOWN",
+                             "PAD_DPAD_LEFT", "PAD_SOUTH", "WAIT_MS=100", "PAD_EAST",
+                             "WAIT_MS=100", "PAD_EAST", "WAIT_MS=100"),
+        )
+        self.assertEqual(self.aim_trail(pad),
+                         [("controller", "0", "0"), ("controller", "1", "0"),
+                          ("controller", "1", "1"), ("controller", "0", "1"),
+                          ("settings", "0", "1")],
+                         "B closes the settings first, then leaves Controls")
+        trail = self.focus_trail(pad)
+        self.assertIn(aim["speed_down"], trail, "Left reaches the speed's minus")
+        self.assertEqual(self.saved_profile(pad)["aim"],
+                         {"mouse": True, "sensitivity": 90, "invert_x": False, "invert_y": False,
+                          "smoothing": 0})
+
+        # At 150% text in the smallest window the settings still take every press: the rows
+        # are on screen and in reach (they ran off this window on the stick card).
+        large = self.next_ui_run(
+            "controller",
+            to_button + ("KEY_RETURN", "WAIT_MS=100", "KEY_RETURN", "KEY_DOWN", "KEY_DOWN",
+                         "KEY_DOWN", "KEY_DOWN", "KEY_RETURN", "KEY_DOWN", "WAIT_MS=100",
+                         "KEY_RETURN", "WAIT_MS=100"),
+            settings={"text_size": 150}, width=960, height=540,
+        )
+        self.assertEqual(self.aim_trail(large)[-1], ("controller", "0", "1"))
+        self.assertEqual(self.saved_profile(large)["aim"],
+                         {"mouse": True, "sensitivity": 100, "invert_x": False, "invert_y": True,
+                          "smoothing": 0},
+                         "the switch and the last row's switch both answer at 150% text")
+
     def test_next_ui_settings_opens_controls_and_esc_returns(self) -> None:
         """Settings > Controls opens the next UI's controller page; Esc comes back.
 

@@ -621,11 +621,12 @@ line may leave out: a missing `mips`, `stick`, `load`, `depth`, `ssaa`, `peak`, 
 `ssaa=2|4`, `peak=limit`, `glyphs=on`, `texpack=on`, `texscale=2..6` and `smart2d=on` do not), the launcher writes
 `;mips=on` for an Enhanced or Ace
 launch with that part on, `;load=fast`, `;shadow=soft` and `;cull=on` only for an Ace launch with that part on,
-`;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with supersampling on, `;texpack=on` for an Enhanced or Ace
+`;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with supersampling on, `;peak=limit` for an Enhanced or Ace
+launch with the Unclipped sound part on, `;texpack=on` for an Enhanced or Ace
 launch with the Texture pack part on for a title that has a pack, and `;texscale=<factor>` and `;smart2d=on` for an
 Enhanced or Ace launch with the Texture scaling or the Smart 2D filter part on, and no launcher writes `depth`
-(section 11.3.12),
-`peak` (section 10.22) or `glyphs` (section 11.3.5) yet: a line that carries one is written by hand. A line writes
+(section 11.3.12)
+or `glyphs` (section 11.3.5) yet: a line that carries one is written by hand. A line writes
 them only when on, in that order, `mips` right after `twin`, `shadow` after `texpack` (and after `pad`, below),
 `texscale` and then `smart2d` after `shadow`, and `cull` last, so a line with
 them off is the line without them, byte for byte. No environment variable switches a part the line carries:
@@ -2208,7 +2209,11 @@ host's output.
   past 16 bits leaves no sample past the ceiling and a true peak (read at 16x) under full scale, a gain that falls
   before the overflow arrives, the
   passage before it bit-exact and the one after it at the input's level within 0.1 dB.
-- **Not yet.** The player has no part for it yet: a launch line names it by hand. The Hot Shots Tennis title-logo
+- **The player's part.** Settings > Enhanced offers it as **Unclipped sound** (On or Off), for the library or for
+  one game; settings.json keeps it as `"peak": "limit"` or `"off"`, and an Enhanced or Ace launch with the part on
+  carries `;peak=limit` (section 10.1). `test_player_state` checks that the line the player writes is the one the
+  runtime's parser takes and writes back.
+- **Not yet.** The Hot Shots Tennis title-logo
   check (no full-scale sample, and the non-clipping music at the PSP's -15.6 dBFS) waits for the #2135 console read.
 - **Tier:** Enhanced. **Default:** off, and in no graphics preset.
 

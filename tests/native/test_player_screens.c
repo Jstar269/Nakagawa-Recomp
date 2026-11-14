@@ -70,6 +70,7 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_TEXPACK] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_PAD] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_SHADOW] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_PEAK] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_TEXSCALE] = ENHANCED_WORDS(k_enhanced_texscale_labels),
     [PLAYER_PART_SMART2D] = ENHANCED_WORDS(k_enhanced_switch_labels)};
 #undef ENHANCED_WORDS
@@ -297,7 +298,11 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_TITLE_LONGEST_AUTHENTIC, FLOW_PAGE_TITLE_LONGEST_ENHANCED,
                FLOW_PAGE_TITLE_LONGEST_ACE,
                FLOW_CONSENT_FULL, FLOW_NICKNAME_FIRST, FLOW_NICKNAME_FULL,
-               FLOW_NICKNAME_REFUSED, FLOW_COUNT } FlowCase;
+               FLOW_NICKNAME_REFUSED,
+               /* Mouse aiming (#1791): its settings off and at their defaults, on with the
+                  widest value every row can show, and the keyboard keys with aiming on. */
+               FLOW_CONTROLLER_AIM, FLOW_CONTROLLER_AIM_ON, FLOW_CONTROLLER_KEYS_AIM_ON,
+               FLOW_COUNT } FlowCase;
 
 /* The window size the game-found and Settings cases lay out for. */
 static float g_flow_width = 1280.0f;
@@ -633,33 +638,40 @@ static const PlayerUiBindingGlyph k_stick_key_glyphs[PLAYER_UI_CONTROLLER_STICK_
 
 static PlayerUiAction draw_controller_case(NkUi *ui, FlowCase which) {
     PlayerUiControllerModel pad;
+    /* The keyboard keys: a game's own with Start waiting, or the global ones with aiming on. */
+    bool keys = which == FLOW_CONTROLLER_KEYS || which == FLOW_CONTROLLER_KEYS_AIM_ON;
+    bool aim_page = which == FLOW_CONTROLLER_AIM || which == FLOW_CONTROLLER_AIM_ON;
     memset(&pad, 0, sizeof(pad));
     pad.page = which == FLOW_CALIBRATE_REST ? PLAYER_UI_CONTROLLER_PAGE_CALIBRATE_REST
         : which == FLOW_CALIBRATE_EXTREMES ? PLAYER_UI_CONTROLLER_PAGE_CALIBRATE_EXTREMES
         : which == FLOW_CALIBRATE_RESULT ? PLAYER_UI_CONTROLLER_PAGE_CALIBRATE_RESULT
+        : aim_page ? PLAYER_UI_CONTROLLER_PAGE_AIM
         : PLAYER_UI_CONTROLLER_PAGE_MAPPING;
     for (size_t i = 0u; i < PLAYER_UI_CONTROLLER_BUTTONS; ++i) {
         pad.names[i] = k_pad_names[i];
-        pad.bindings[i] = which == FLOW_CONTROLLER_KEYS ? k_key_bindings[i] : k_pad_bindings[i];
-        pad.glyphs[i] = which == FLOW_CONTROLLER_KEYS ? k_key_glyphs[i] : k_pad_glyphs[i];
+        pad.bindings[i] = keys ? k_key_bindings[i] : k_pad_bindings[i];
+        pad.glyphs[i] = keys ? k_key_glyphs[i] : k_pad_glyphs[i];
     }
     for (size_t i = 0u; i < PLAYER_UI_CONTROLLER_STICK_KEYS; ++i) {
         pad.names[PLAYER_UI_CONTROLLER_STICK_KEY + i] = k_stick_key_names[i];
-        if (which == FLOW_CONTROLLER_KEYS) {
+        if (keys) {
             pad.bindings[PLAYER_UI_CONTROLLER_STICK_KEY + i] = k_stick_key_bindings[i];
             pad.glyphs[PLAYER_UI_CONTROLLER_STICK_KEY + i] = k_stick_key_glyphs[i];
         }
     }
     pad.noted = -1;
-    pad.glyph_style = which == FLOW_CONTROLLER_KEYS ? NK_UI_PROMPT_KEYCAPS
-                                                    : NK_UI_PROMPT_LETTERS_A_SOUTH;
-    if (k_pad_bindings_override != NULL && which != FLOW_CONTROLLER_KEYS) {
+    pad.glyph_style = keys ? NK_UI_PROMPT_KEYCAPS : NK_UI_PROMPT_LETTERS_A_SOUTH;
+    if (k_pad_bindings_override != NULL && !keys) {
         pad.bindings[0] = k_pad_bindings_override;
     }
     pad.capturing = -1;
     pad.scope = "global mapping";
     pad.deadzone = "Dead zone 24%";
     pad.trigger = "Triggers at 49%";
+    /* Mouse aiming (#1791) as a new profile has it: off, at the default speed. */
+    pad.aim = "Mouse aim: Off";
+    pad.aim_speed = "Speed 100%";
+    pad.aim_smoothing = "Smoothing 0%";
     pad.live[0] = "Stick  -32768,  32767";
     pad.live[1] = "PSP      0, 255  moving";
     pad.live[2] = "Triggers L 32767  R 0";
@@ -683,6 +695,25 @@ static PlayerUiAction draw_controller_case(NkUi *ui, FlowCase which) {
         pad.offer_scope = true;
         pad.capturing = 1;
         pad.status = "Press the key for Start. 5 s left; Esc stops.";
+    } else if (which == FLOW_CONTROLLER_KEYS_AIM_ON) {
+        pad.keyboard = true;
+        pad.aim = "Mouse aim: On";
+        pad.aim_on = true;
+        pad.status = "Choose a control, then press its key. Changes save as you make them.";
+    } else if (which == FLOW_CONTROLLER_AIM_ON) {
+        /* A game's own mapping with every row at its widest: the top speed and smoothing
+           (NK_AIM_SENSITIVITY_MAX, NK_AIM_SMOOTHING_MAX) and both directions inverted. */
+        pad.keyboard = true;
+        pad.scope = "TEST00005 only";
+        pad.scope_title = true;
+        pad.aim = "Mouse aim: On";
+        pad.aim_on = true;
+        pad.aim_speed = "Speed 1000%";
+        pad.aim_smoothing = "Smoothing 95%";
+        pad.aim_invert_x = true;
+        pad.aim_invert_y = true;
+    } else if (which == FLOW_CONTROLLER_AIM) {
+        pad.keyboard = true;
     } else if (which == FLOW_CALIBRATE_REST) {
         pad.calibration_fraction = 0.4f;
         pad.live_count = 2u;
@@ -1267,6 +1298,10 @@ static PlayerUiAction draw_flow_case(NkUi *ui, FlowCase which) {
         error.logical_width = g_flow_width;
         error.logical_height = g_flow_height;
         return player_ui_screen_error(ui, &error);
+    }
+    if (which == FLOW_CONTROLLER_AIM || which == FLOW_CONTROLLER_AIM_ON ||
+        which == FLOW_CONTROLLER_KEYS_AIM_ON) {
+        return draw_controller_case(ui, which);
     }
     if (which >= FLOW_PAGE_LIBRARY) return draw_page_case(ui, which);
     if (which >= FLOW_DEVLOG) return draw_developer_log_case(ui, which);
@@ -3449,24 +3484,37 @@ static void test_settings_pages(void) {
               strstr(dump, "\"Ace only, in games whose package names their") != NULL &&
               strstr(dump, "shadows. Changes what the frame shows.\"") != NULL,
           "Settings > Enhanced shows the Soft shadows row after Late pad sampling");
-    /* The 19th and 20th (Texture scaling and the Smart 2D filter, contract 11.3.3) follow Soft shadows,
-       at 0x4685 and 0x4686; 2200 tall shows both rows and what each costs. */
-    CHECK(PLAYER_UI_ID_ENHANCED_PART(18) == 0x4685u &&
-              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_TEXSCALE) == 0x4685u &&
-              PLAYER_UI_ID_ENHANCED_PART(19) == 0x4686u &&
-              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SMART2D) == 0x4686u && PLAYER_PART_COUNT >= 20,
-          "the part rows' ids: the 19th and 20th in the second range, after the 18th");
-    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 2200, dump, sizeof(dump)) &&
+    /* Unclipped sound (#2137, contract 10.22) has the id after Soft shadows', 0x4685, and its row
+       follows that one; 2000 tall shows it with its whole description. */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_PEAK) ==
+                  PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SHADOW) + 1u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_PEAK) == 0x4685u,
+          "the Unclipped sound row's id follows the Soft shadows row's");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 2000, dump, sizeof(dump)) &&
               strstr(dump, "\"SOFT SHADOWS: OFF\"") != NULL &&
+              strstr(dump, "\"UNCLIPPED SOUND: OFF\"") != NULL &&
+              strstr(dump, "\"SOFT SHADOWS: OFF\"") < strstr(dump, "\"UNCLIPPED SOUND: OFF\"") &&
+              strstr(dump, "Softens loud sound that the PSP clips.") != NULL &&
+              strstr(dump, "1.6 ms later.\"") != NULL,
+          "Settings > Enhanced shows the Unclipped sound row after Soft shadows");
+    /* The 20th and 21st (Texture scaling and the Smart 2D filter, contract 11.3.3) follow Unclipped
+       sound, at 0x4686 and 0x4687; 2400 tall shows both rows and what each costs. */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(19) == 0x4686u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_TEXSCALE) == 0x4686u &&
+              PLAYER_UI_ID_ENHANCED_PART(20) == 0x4687u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SMART2D) == 0x4687u && PLAYER_PART_COUNT >= 21,
+          "the part rows' ids: the 20th and 21st in the second range, after the 19th");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 2400, dump, sizeof(dump)) &&
+              strstr(dump, "\"UNCLIPPED SOUND: OFF\"") != NULL &&
               strstr(dump, "\"TEXTURE SCALING: OFF\"") != NULL &&
               strstr(dump, "\"SMART 2D FILTER: OFF\"") != NULL &&
-              strstr(dump, "\"SOFT SHADOWS: OFF\"") < strstr(dump, "\"TEXTURE SCALING: OFF\"") &&
+              strstr(dump, "\"UNCLIPPED SOUND: OFF\"") < strstr(dump, "\"TEXTURE SCALING: OFF\"") &&
               strstr(dump, "\"TEXTURE SCALING: OFF\"") < strstr(dump, "\"SMART 2D FILTER: OFF\"") &&
               strstr(dump, "Redraws textures with xBRZ.") != NULL &&
               strstr(dump, "Sharp HUD art above 1x, but blocky soft") != NULL &&
               strstr(dump, "game receives changed pictures.\"") != NULL &&
               strstr(dump, "\xE2\x80\xA6\"") == NULL,
-          "Settings > Enhanced shows the Texture scaling and Smart 2D filter rows after Soft shadows");
+          "Settings > Enhanced shows the Texture scaling and Smart 2D filter rows after Unclipped sound");
     for (unsigned i = 0u; i < PLAYER_PART_COUNT; ++i) {
         PlayerUiAction part =
             activate_flow_button(PLAYER_UI_ID_ENHANCED_PART(i), FLOW_SETTINGS_ACE);
@@ -3967,6 +4015,259 @@ static void test_controller_keyboard_page(void) {
           "every key, the device choice and Reset to defaults are on screen at 960 x 540");
     CHECK(flow_case_fits(FLOW_CONTROLLER_KEYS, 1280, 800, dump, sizeof(dump)),
           "the keyboard keys fit 1280 x 800");
+}
+
+static bool hint_bar_whole(FlowCase which, int width, int height);
+
+/* The control that has the focus after `count` moves from `from` on a flow case in a
+   1280 x 800 launcher: two frames place the page, then each move takes a frame, as a
+   keyboard's arrow keys and a controller's d-pad both arrive (NK_UI_EV_NAV). */
+static NkUiId flow_focus_after_moves(FlowCase which, NkUiId from, const NkUiNavDir *moves,
+                                     size_t count) {
+    NkUiConfig config;
+    NkUi *ui;
+    NkUiId focused;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    ui = screen_ui_create(&config);
+    if (ui == NULL) return 0u;
+    set_test_viewport(ui, 1280, 800);
+    nk_ui_focus(ui, from);
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)draw_flow_case(ui, which);
+        (void)nk_ui_end(ui);
+    }
+    for (size_t i = 0u; i < count; ++i) {
+        push_nav(ui, moves[i]);
+        nk_ui_begin(ui, 0.0);
+        (void)draw_flow_case(ui, which);
+        (void)nk_ui_end(ui);
+    }
+    focused = nk_ui_focused(ui);
+    nk_ui_destroy(ui);
+    return focused;
+}
+
+/* #1791: mouse aiming on the Controls page. With the keyboard keys shown, a button under
+   the stick card says whether it is on and opens its settings, which replace the cards: the
+   switch, the speed and the
+   smoothing in steps, each direction's inversion, and Done. Every control returns the op
+   main.c runs through input_settings, a move reaches every control, and each page shows
+   every word whole in every launcher window at every text size. */
+static void test_controller_mouse_aim(void) {
+    static char dump[CASE_DUMP_CAP];
+    static const struct { NkUiId id; PlayerUiControllerOp op; const char *what; } controls[] = {
+        {PLAYER_UI_ID_CONTROLLER_AIM_TOGGLE, PLAYER_UI_CONTROLLER_AIM_TOGGLE,
+         "the switch turns mouse aiming on or off"},
+        {PLAYER_UI_ID_CONTROLLER_AIM_SPEED_DOWN, PLAYER_UI_CONTROLLER_AIM_SPEED_DOWN,
+         "minus slows the aim"},
+        {PLAYER_UI_ID_CONTROLLER_AIM_SPEED_UP, PLAYER_UI_CONTROLLER_AIM_SPEED_UP,
+         "plus speeds the aim up"},
+        {PLAYER_UI_ID_CONTROLLER_AIM_SMOOTHING_DOWN, PLAYER_UI_CONTROLLER_AIM_SMOOTHING_DOWN,
+         "minus smooths the aim less"},
+        {PLAYER_UI_ID_CONTROLLER_AIM_SMOOTHING_UP, PLAYER_UI_CONTROLLER_AIM_SMOOTHING_UP,
+         "plus smooths the aim more"},
+        {PLAYER_UI_ID_CONTROLLER_AIM_INVERT_X, PLAYER_UI_CONTROLLER_AIM_INVERT_X,
+         "the left and right switch inverts that direction"},
+        {PLAYER_UI_ID_CONTROLLER_AIM_INVERT_Y, PLAYER_UI_CONTROLLER_AIM_INVERT_Y,
+         "the up and down switch inverts that direction"},
+        {PLAYER_UI_ID_CONTROLLER_AIM_DONE, PLAYER_UI_CONTROLLER_AIM_DONE,
+         "Done returns to the keyboard keys"}
+    };
+    static const FlowCase aim_pages[] = {FLOW_CONTROLLER_AIM, FLOW_CONTROLLER_AIM_ON};
+    static const struct { int w; int h; } sizes[] = {
+        {1280, 720}, {960, 540}, {1366, 705}, {853, 480}, {1920, 1080}
+    };
+    static const int text_sizes[] = {100, 125, 150};
+    static const NkUiNavDir down[] = {NK_UI_DIR_DOWN, NK_UI_DIR_DOWN, NK_UI_DIR_DOWN,
+                                      NK_UI_DIR_DOWN, NK_UI_DIR_DOWN};
+    static const NkUiNavDir up[] = {NK_UI_DIR_UP, NK_UI_DIR_UP, NK_UI_DIR_UP, NK_UI_DIR_UP,
+                                    NK_UI_DIR_UP};
+    static const NkUiNavDir right[] = {NK_UI_DIR_RIGHT};
+    static const NkUiNavDir left[] = {NK_UI_DIR_LEFT};
+    int saved_text_size_pct = g_flow_text_size_pct;
+    NkUiId at;
+
+    /* The keyboard keys: the button names the state and opens the settings; the controller
+       buttons, which the mouse does not belong to, have no such button. */
+    CHECK(controller_op_is(activate_flow_button(PLAYER_UI_ID_CONTROLLER_AIM_OPEN,
+                                                FLOW_CONTROLLER_KEYS),
+                           PLAYER_UI_CONTROLLER_AIM_OPEN, 0u) &&
+              controller_op_is(activate_flow_button(PLAYER_UI_ID_CONTROLLER_AIM_OPEN,
+                                                    FLOW_CONTROLLER_KEYS_AIM_ON),
+                               PLAYER_UI_CONTROLLER_AIM_OPEN, 0u),
+          "the keyboard keys' mouse aim button opens the mouse aiming settings");
+    CHECK(activate_flow_button(PLAYER_UI_ID_CONTROLLER_AIM_OPEN, FLOW_CONTROLLER).kind ==
+                  PLAYER_UI_ACTION_NONE &&
+              activate_flow_button(PLAYER_UI_ID_CONTROLLER_AIM_OPEN, FLOW_CONTROLLER_GAME).kind ==
+                  PLAYER_UI_ACTION_NONE,
+          "the controller buttons have no mouse aim button");
+    CHECK(dump_flow_case(FLOW_CONTROLLER_KEYS, dump, sizeof(dump)) &&
+              dump_has_element(dump, PLAYER_UI_ID_CONTROLLER_AIM_OPEN, "TEXT", "MOUSE AIM: OFF",
+                               NULL, NULL) &&
+              strstr(dump, "\"MOUSE AIM: ON\"") == NULL,
+          "with aiming off the button says so");
+    CHECK(dump_flow_case(FLOW_CONTROLLER_KEYS_AIM_ON, dump, sizeof(dump)) &&
+              dump_has_element(dump, PLAYER_UI_ID_CONTROLLER_AIM_OPEN, "TEXT", "MOUSE AIM: ON",
+                               NULL, NULL) &&
+              strstr(dump, "\"MOUSE AIM: OFF\"") == NULL &&
+              strstr(dump, "\"KEYS \xC2\xB7 GLOBAL MAPPING\"") != NULL,
+          "with aiming on the button says so");
+    CHECK(dump_flow_case(FLOW_CONTROLLER, dump, sizeof(dump)) &&
+              strstr(dump, "MOUSE AIM") == NULL,
+          "the controller buttons do not mention mouse aiming");
+
+    /* The settings: every control's op, from either state. */
+    for (size_t p = 0u; p < sizeof(aim_pages) / sizeof(aim_pages[0]); ++p) {
+        for (size_t i = 0u; i < sizeof(controls) / sizeof(controls[0]); ++i) {
+            CHECK(controller_op_is(activate_flow_button(controls[i].id, aim_pages[p]),
+                                   controls[i].op, 0u),
+                  controls[i].what);
+        }
+        /* The cards are not under the settings: none of their controls answers. */
+        CHECK(activate_flow_button(PLAYER_UI_ID_CONTROLLER_BUTTON(0u), aim_pages[p]).kind ==
+                      PLAYER_UI_ACTION_NONE &&
+                  activate_flow_button(PLAYER_UI_ID_CONTROLLER_AIM_OPEN, aim_pages[p]).kind ==
+                      PLAYER_UI_ACTION_NONE &&
+                  activate_flow_button(PLAYER_UI_ID_CONTROLLER_RESET, aim_pages[p]).kind ==
+                      PLAYER_UI_ACTION_NONE &&
+                  activate_flow_button(PLAYER_UI_ID_CONTROLLER_SHOW_PAD, aim_pages[p]).kind ==
+                      PLAYER_UI_ACTION_NONE,
+              "the mouse aiming settings replace the cards and their controls");
+        CHECK(activate_flow_button(PLAYER_UI_ID_TAB_LIBRARY, aim_pages[p]).kind ==
+                  PLAYER_UI_ACTION_OPEN_LIBRARY,
+              "the LIBRARY tab on the mouse aiming settings opens the library");
+    }
+    CHECK(dump_flow_case(FLOW_CONTROLLER_AIM, dump, sizeof(dump)) &&
+              strstr(dump, "MOUSE AIMING \xC2\xB7 GLOBAL MAPPING") != NULL &&
+              strstr(dump, "\"Aim with the mouse\"") != NULL &&
+              strstr(dump, "\"Mouse aim\"") != NULL && strstr(dump, "\"Speed 100%\"") != NULL &&
+              strstr(dump, "\"Smoothing 0%\"") != NULL &&
+              strstr(dump, "\"Invert left and right\"") != NULL &&
+              strstr(dump, "\"Invert up and down\"") != NULL &&
+              dump_has_element(dump, PLAYER_UI_ID_CONTROLLER_AIM_TOGGLE, "TEXT", "OFF", NULL,
+                               NULL) &&
+              dump_has_element(dump, PLAYER_UI_ID_CONTROLLER_AIM_INVERT_X, "TEXT", "OFF", NULL,
+                               NULL) &&
+              dump_has_element(dump, PLAYER_UI_ID_CONTROLLER_AIM_INVERT_Y, "TEXT", "OFF", NULL,
+                               NULL) &&
+              dump_has_element(dump, PLAYER_UI_ID_CONTROLLER_AIM_DONE, "TEXT", "DONE", NULL,
+                               NULL) &&
+              strstr(dump, "starts.\"") != NULL && strstr(dump, "\"ON\"") == NULL &&
+              strstr(dump, "\"BACK TO THE KEYS\"") != NULL,
+          "the settings name the mapping and show each setting off, at its default");
+    CHECK(dump_flow_case(FLOW_CONTROLLER_AIM_ON, dump, sizeof(dump)) &&
+              strstr(dump, "MOUSE AIMING \xC2\xB7 TEST00005 ONLY") != NULL &&
+              strstr(dump, "\"Speed 1000%\"") != NULL &&
+              strstr(dump, "\"Smoothing 95%\"") != NULL &&
+              dump_has_element(dump, PLAYER_UI_ID_CONTROLLER_AIM_TOGGLE, "TEXT", "ON", NULL,
+                               NULL) &&
+              dump_has_element(dump, PLAYER_UI_ID_CONTROLLER_AIM_INVERT_X, "TEXT", "ON", NULL,
+                               NULL) &&
+              dump_has_element(dump, PLAYER_UI_ID_CONTROLLER_AIM_INVERT_Y, "TEXT", "ON", NULL,
+                               NULL) &&
+              strstr(dump, "\"OFF\"") == NULL,
+          "a game's own mapping is named, with each setting on and at its largest value");
+
+    /* Moves, as the arrow keys and the d-pad make them. The settings: Down from the switch
+       goes row by row to Done and Up comes back; Left and Right stay in a stepper's row. */
+    at = flow_focus_after_moves(FLOW_CONTROLLER_AIM, PLAYER_UI_ID_CONTROLLER_AIM_TOGGLE, down, 1u);
+    CHECK(at == PLAYER_UI_ID_CONTROLLER_AIM_SPEED_DOWN || at == PLAYER_UI_ID_CONTROLLER_AIM_SPEED_UP,
+          "Down from the switch reaches the speed's steps");
+    at = flow_focus_after_moves(FLOW_CONTROLLER_AIM, PLAYER_UI_ID_CONTROLLER_AIM_TOGGLE, down, 2u);
+    CHECK(at == PLAYER_UI_ID_CONTROLLER_AIM_SMOOTHING_DOWN ||
+              at == PLAYER_UI_ID_CONTROLLER_AIM_SMOOTHING_UP,
+          "Down again reaches the smoothing's steps");
+    CHECK(flow_focus_after_moves(FLOW_CONTROLLER_AIM, PLAYER_UI_ID_CONTROLLER_AIM_TOGGLE, down,
+                                 3u) == PLAYER_UI_ID_CONTROLLER_AIM_INVERT_X &&
+              flow_focus_after_moves(FLOW_CONTROLLER_AIM, PLAYER_UI_ID_CONTROLLER_AIM_TOGGLE, down,
+                                     4u) == PLAYER_UI_ID_CONTROLLER_AIM_INVERT_Y &&
+              flow_focus_after_moves(FLOW_CONTROLLER_AIM, PLAYER_UI_ID_CONTROLLER_AIM_TOGGLE, down,
+                                     5u) == PLAYER_UI_ID_CONTROLLER_AIM_DONE,
+          "Down goes on through both inversion switches to Done");
+    at = flow_focus_after_moves(FLOW_CONTROLLER_AIM, PLAYER_UI_ID_CONTROLLER_AIM_DONE, up, 1u);
+    CHECK(at == PLAYER_UI_ID_CONTROLLER_AIM_INVERT_Y, "Up from Done reaches the last switch");
+    at = flow_focus_after_moves(FLOW_CONTROLLER_AIM, PLAYER_UI_ID_CONTROLLER_AIM_DONE, up, 5u);
+    CHECK(at == PLAYER_UI_ID_CONTROLLER_AIM_TOGGLE, "Up five times from Done reaches the switch");
+    CHECK(flow_focus_after_moves(FLOW_CONTROLLER_AIM, PLAYER_UI_ID_CONTROLLER_AIM_SPEED_DOWN,
+                                 right, 1u) == PLAYER_UI_ID_CONTROLLER_AIM_SPEED_UP &&
+              flow_focus_after_moves(FLOW_CONTROLLER_AIM, PLAYER_UI_ID_CONTROLLER_AIM_SPEED_UP,
+                                     left, 1u) == PLAYER_UI_ID_CONTROLLER_AIM_SPEED_DOWN &&
+              flow_focus_after_moves(FLOW_CONTROLLER_AIM,
+                                     PLAYER_UI_ID_CONTROLLER_AIM_SMOOTHING_DOWN, right, 1u) ==
+                  PLAYER_UI_ID_CONTROLLER_AIM_SMOOTHING_UP &&
+              flow_focus_after_moves(FLOW_CONTROLLER_AIM, PLAYER_UI_ID_CONTROLLER_AIM_SMOOTHING_UP,
+                                     left, 1u) == PLAYER_UI_ID_CONTROLLER_AIM_SMOOTHING_DOWN,
+          "Left and Right move between a stepper's minus and plus");
+    /* The keyboard keys: the button is under the stick card, beside Back. Down from the
+       stick's last key reaches that pair, Left and Right move between the two, and Up from
+       the button goes back to the stick's keys. */
+    at = flow_focus_after_moves(FLOW_CONTROLLER_KEYS_AIM_ON,
+                                PLAYER_UI_ID_CONTROLLER_BUTTON(PLAYER_UI_CONTROLLER_STICK_KEY + 3u),
+                                down, 1u);
+    CHECK(at == PLAYER_UI_ID_CONTROLLER_AIM_OPEN || at == PLAYER_UI_ID_CONTROLLER_BACK,
+          "Down from the stick's Right key reaches the mouse aim button or Back beside it");
+    CHECK(flow_focus_after_moves(FLOW_CONTROLLER_KEYS_AIM_ON, PLAYER_UI_ID_CONTROLLER_AIM_OPEN,
+                                 right, 1u) == PLAYER_UI_ID_CONTROLLER_BACK &&
+              flow_focus_after_moves(FLOW_CONTROLLER_KEYS_AIM_ON, PLAYER_UI_ID_CONTROLLER_BACK,
+                                     left, 1u) == PLAYER_UI_ID_CONTROLLER_AIM_OPEN,
+          "the mouse aim button is beside Back: Left and Right move between them");
+    at = flow_focus_after_moves(FLOW_CONTROLLER_KEYS_AIM_ON, PLAYER_UI_ID_CONTROLLER_AIM_OPEN, up,
+                                1u);
+    CHECK(at >= PLAYER_UI_ID_CONTROLLER_BUTTON(PLAYER_UI_CONTROLLER_STICK_KEY) &&
+              at < PLAYER_UI_ID_CONTROLLER_BUTTON(PLAYER_UI_CONTROLLER_STICK_KEY +
+                                                  PLAYER_UI_CONTROLLER_STICK_KEYS),
+          "Up from the mouse aim button reaches the stick's keys above it");
+
+    /* Every launcher window at every text size, 150% included. Nothing is off the window or
+       painted over, the prompt bar is whole, and every word of every row shows uncut. */
+    for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+        g_flow_text_size_pct = text_sizes[t];
+        for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+            int w = sizes[s].w;
+            int h = sizes[s].h;
+            char message[200];
+            for (size_t p = 0u; p < sizeof(aim_pages) / sizeof(aim_pages[0]); ++p) {
+                bool on = aim_pages[p] == FLOW_CONTROLLER_AIM_ON;
+                const char *const words[] = {
+                    /* "starts." ends the lead: its three lines are not cut short. */
+                    "Aim with the mouse", "In a game, the mouse", "starts.", "Mouse aim",
+                    on ? "Speed 1000%" : "Speed 100%", on ? "Smoothing 95%" : "Smoothing 0%",
+                    "Invert left and right", "Invert up and down", "DONE",
+                    on ? "TEST00005 ONLY" : "GLOBAL MAPPING"
+                };
+                (void)snprintf(message, sizeof(message),
+                               "the mouse aiming settings (%s) fit a %d x %d window at %d%% text "
+                               "with the prompt bar whole", on ? "on" : "off", w, h,
+                               text_sizes[t]);
+                CHECK(flow_case_fits(aim_pages[p], w, h, dump, sizeof(dump)) &&
+                          hint_bar_whole(aim_pages[p], w, h),
+                      message);
+                for (size_t i = 0u; i < sizeof(words) / sizeof(words[0]); ++i) {
+                    (void)snprintf(message, sizeof(message),
+                                   "the mouse aiming settings (%s) show \"%s\" at %d x %d, %d%% "
+                                   "text", on ? "on" : "off", words[i], w, h, text_sizes[t]);
+                    CHECK(flow_case_shows(aim_pages[p], w, h, words[i]), message);
+                }
+            }
+            (void)snprintf(message, sizeof(message),
+                           "the keyboard keys fit a %d x %d window at %d%% text with the mouse "
+                           "aim button and Back whole", w, h, text_sizes[t]);
+            CHECK(flow_case_fits(FLOW_CONTROLLER_KEYS, w, h, dump, sizeof(dump)) &&
+                      dump_has_element(dump, PLAYER_UI_ID_CONTROLLER_AIM_OPEN, "TEXT",
+                                       "MOUSE AIM: OFF", NULL, NULL) &&
+                      dump_has_element(dump, PLAYER_UI_ID_CONTROLLER_BACK, "TEXT", "BACK", NULL,
+                                       NULL) &&
+                      flow_case_fits(FLOW_CONTROLLER_KEYS_AIM_ON, w, h, dump, sizeof(dump)) &&
+                      dump_has_element(dump, PLAYER_UI_ID_CONTROLLER_AIM_OPEN, "TEXT",
+                                       "MOUSE AIM: ON", NULL, NULL) &&
+                      hint_bar_whole(FLOW_CONTROLLER_KEYS, w, h) &&
+                      hint_bar_whole(FLOW_CONTROLLER_KEYS_AIM_ON, w, h),
+                  message);
+        }
+    }
+    g_flow_text_size_pct = saved_text_size_pct;
 }
 
 /* Every screen fits the default 1280 x 720 window and the 960 x 540 minimum
@@ -7647,6 +7948,7 @@ int main(int argc, char **argv) {
     test_accessibility_settings_reach_the_design_system();
     test_controller_and_developer_log_pages();
     test_controller_keyboard_page();
+    test_controller_mouse_aim();
     test_controller_binding_glyphs();
     test_version_line();
     test_design_system_layout();

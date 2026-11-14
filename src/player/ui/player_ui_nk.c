@@ -192,6 +192,9 @@ struct PlayerUiNk {
     char pad_status[400];
     char pad_deadzone[48];
     char pad_trigger[48];
+    char pad_aim[32];            /* "Mouse aim: Off" (#1791) */
+    char pad_aim_speed[32];      /* "Speed 100%" */
+    char pad_aim_smoothing[32];  /* "Smoothing 0%" */
     char pad_live[PLAYER_UI_CONTROLLER_LIVE_LINES][96];
     PlayerView last_view;   /* the view drawn last, for the focus a Settings page returns to */
     unsigned press_screen;  /* the screen a pointer press can still finish on */
@@ -1445,6 +1448,25 @@ static PlayerUiAction player_ui_render_controller(PlayerUiNk *player, PlayerApp 
              player_ui_axis_percent(input->profile.trigger_threshold));
     model.deadzone = player->pad_deadzone;
     model.trigger = player->pad_trigger;
+    /* Mouse aiming (#1791), from the mapping being edited. */
+    model.aim_on = input->profile.aim.mouse;
+    model.aim_invert_x = input->profile.aim.invert_x;
+    model.aim_invert_y = input->profile.aim.invert_y;
+    snprintf(player->pad_aim, sizeof(player->pad_aim), "Mouse aim: %s",
+             model.aim_on ? "On" : "Off");
+    snprintf(player->pad_aim_speed, sizeof(player->pad_aim_speed), "Speed %d%%",
+             (int)input->profile.aim.sensitivity);
+    snprintf(player->pad_aim_smoothing, sizeof(player->pad_aim_smoothing), "Smoothing %d%%",
+             (int)input->profile.aim.smoothing);
+    model.aim = player->pad_aim;
+    model.aim_speed = player->pad_aim_speed;
+    model.aim_smoothing = player->pad_aim_smoothing;
+    if (!input_settings_is_calibrating(input) && input_settings_aim_is_open(input)) {
+        model.page = PLAYER_UI_CONTROLLER_PAGE_AIM;
+        model.logical_width = scale.logical_w;
+        model.logical_height = scale.logical_h;
+        return player_ui_screen_controller(player->ui, &model);
+    }
     switch (input_settings_is_calibrating(input) ? input_settings_get_calibration_stage(input)
                                                  : CALIBRATION_STAGE_INACTIVE) {
         case CALIBRATION_STAGE_REST: {
@@ -1822,6 +1844,12 @@ static PlayerUiAction player_ui_render_flow(PlayerUiNk *player, PlayerApp *app,
 /* The flow screen the app is on: its view, plus the sub-screen some views
    step through (the wizard's step and copy, a finished build, a calibration
    step, an update step). 0 off the flow views. */
+/* The Controls page's screens after the mapping (0): the calibration steps 1 to 3
+   (GuidedCalibrationStage), then the mouse aiming settings (#1791). */
+#define PLAYER_UI_CONTROLLER_AIM_SCREEN 4u
+typedef char player_ui_aim_screen_follows_the_calibration_steps[
+    PLAYER_UI_CONTROLLER_AIM_SCREEN > (unsigned)CALIBRATION_STAGE_RESULT ? 1 : -1];
+
 static unsigned player_ui_flow_screen(const PlayerApp *app) {
     unsigned screen;
     if (!player_ui_nk_flow_view(app->active_view)) return 0u;
@@ -1834,9 +1862,13 @@ static unsigned player_ui_flow_screen(const PlayerApp *app) {
             if (app->build_session.is_complete && !app->build_session.is_failed) screen += 1u;
             break;
         case VIEW_CONTROLLER_SETTINGS:
-            screen += (unsigned)(input_settings_is_calibrating(&app->input_settings)
-                                     ? input_settings_get_calibration_stage(&app->input_settings)
-                                     : CALIBRATION_STAGE_INACTIVE);
+            /* The calibration steps are 1 to 3; the mouse aiming settings (#1791) are the
+               screen after them. */
+            screen += input_settings_is_calibrating(&app->input_settings)
+                ? (unsigned)input_settings_get_calibration_stage(&app->input_settings)
+                : input_settings_aim_is_open(&app->input_settings)
+                    ? PLAYER_UI_CONTROLLER_AIM_SCREEN
+                    : (unsigned)CALIBRATION_STAGE_INACTIVE;
             break;
         case VIEW_UPDATES: screen += (unsigned)app->update.phase; break;
         case VIEW_PROBLEM_REPORT: screen += (unsigned)app->report.phase; break;
@@ -1892,15 +1924,23 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
                 break;
             case VIEW_CONTROLLER_SETTINGS: {
                 /* Each calibration step is a screen of its own; the mapping
-                   opens on the first button, or on Calibrate after a step. */
+                   opens on the first button, or on Calibrate after a step. The
+                   mouse aiming settings (#1791) open on their switch, and the
+                   mapping after them on the button that opened them. */
                 GuidedCalibrationStage stage =
                     input_settings_is_calibrating(&app->input_settings)
                         ? input_settings_get_calibration_stage(&app->input_settings)
                         : CALIBRATION_STAGE_INACTIVE;
+                bool aiming = stage == CALIBRATION_STAGE_INACTIVE &&
+                              input_settings_aim_is_open(&app->input_settings);
                 focus = stage == CALIBRATION_STAGE_REST ? PLAYER_UI_ID_CONTROLLER_CALIBRATION_CANCEL
                     : stage != CALIBRATION_STAGE_INACTIVE
                         ? PLAYER_UI_ID_CONTROLLER_CALIBRATION_PRIMARY
-                    : player->flow_screen > screen && player->flow_screen < screen + 4u
+                    : aiming ? PLAYER_UI_ID_CONTROLLER_AIM_TOGGLE
+                    : player->flow_screen == screen + PLAYER_UI_CONTROLLER_AIM_SCREEN
+                        ? PLAYER_UI_ID_CONTROLLER_AIM_OPEN
+                    : player->flow_screen > screen &&
+                            player->flow_screen < screen + PLAYER_UI_CONTROLLER_AIM_SCREEN
                         ? PLAYER_UI_ID_CONTROLLER_CALIBRATE
                         : PLAYER_UI_ID_CONTROLLER_BUTTON(0u);
                 break;

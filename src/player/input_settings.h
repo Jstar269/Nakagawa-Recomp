@@ -155,6 +155,9 @@ typedef struct {
     /* Back was pressed once with the mapping unsaved: the page stayed to say so,
      * and the next Back leaves without saving. Any change or write clears it. */
     bool leave_unsaved;
+    /* The Controls page shows the mouse aiming settings in place of the keyboard keys
+     * (#1791): input_settings_open_aim to input_settings_close_aim. */
+    bool aim_open;
 
     /* Guided calibration state (#357) */
     GuidedCalibrationState calib;
@@ -451,8 +454,8 @@ bool input_settings_feed_capture_key(InputSettingsState *state, int key);
 
 /**
  * @brief Reset the bindings of the device being edited to defaults, keeping the
- * other device's: the keyboard keys (buttons and stick), or the controller
- * mapping and calibration.
+ * other device's: the keyboard keys (buttons and stick) and the mouse aiming
+ * settings, or the controller mapping and calibration.
  */
 void input_settings_reset_device_to_defaults(InputSettingsState *state);
 
@@ -532,6 +535,49 @@ bool input_settings_toggle_aim_invert(InputSettingsState *state, int axis_idx);
  * [0, NK_AIM_SMOOTHING_MAX]; `delta` may be negative.
  */
 bool input_settings_adjust_aim_smoothing(InputSettingsState *state, int32_t delta);
+
+/* The Controls page's steps for the aim speed (percent): every 10 from 10 to 200, then every
+ * 50 to NK_AIM_SENSITIVITY_MAX. */
+#define INPUT_AIM_SPEED_FINE_STEP 10
+#define INPUT_AIM_SPEED_COARSE_STEP 50
+#define INPUT_AIM_SPEED_COARSE_FROM 200
+/* and for the smoothing (percent): every 5 from 0 to NK_AIM_SMOOTHING_MAX. */
+#define INPUT_AIM_SMOOTHING_STEP 5
+
+/**
+ * @brief Move the aim speed to the page's next step up (`direction` > 0) or down.
+ *
+ * A value between two steps, as a hand-edited profile may hold, moves to the nearest step
+ * in that direction, so the steps never drift off their grid. Nothing changes at the top
+ * step, at the lowest step, or going down from a value under the lowest step.
+ *
+ * @return true when the speed changed.
+ */
+bool input_settings_step_aim_sensitivity(InputSettingsState *state, int direction);
+
+/**
+ * @brief Move the aim smoothing to the page's next step up (`direction` > 0) or down, the
+ * same way.
+ *
+ * @return true when the smoothing changed.
+ */
+bool input_settings_step_aim_smoothing(InputSettingsState *state, int direction);
+
+/**
+ * @brief Show the mouse aiming settings on the Controls page (#1791). A wait for a key
+ * stops. Choosing a device and input_settings_flush (leaving the page) close them again.
+ */
+void input_settings_open_aim(InputSettingsState *state);
+
+/**
+ * @brief Return from the mouse aiming settings to the keyboard keys.
+ */
+void input_settings_close_aim(InputSettingsState *state);
+
+/**
+ * @brief True while the Controls page shows the mouse aiming settings.
+ */
+bool input_settings_aim_is_open(const InputSettingsState *state);
 
 /**
  * @brief Start guided calibration workflow for analog stick and triggers (#357).

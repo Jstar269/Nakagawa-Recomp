@@ -594,7 +594,8 @@ dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from 
 FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; WIDESCREEN; SMOOTH MOTION; CLEAN
 PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; FULL 32-BIT COLOUR;
 SUPERSAMPLING; SMOOTH FAR TEXTURES; TEXTURE PACK; LATE PAD SAMPLING; SOFT SHADOWS, Ace only, which draws the shadows a game's package
-names with soft edges and changes the frame the game reads, docs/ENHANCEMENT_CONTRACT.md section 11.3.13;
+names with soft edges and changes the frame the game reads, docs/ENHANCEMENT_CONTRACT.md section 11.3.13; UNCLIPPED
+SOUND, which plays the peaks the PSP would clip through a limiter and changes only what is heard, section 10.22;
 TEXTURE SCALING 2x to 6x, Off, and SMART 2D FILTER, which both change the frame the game reads, section 11.3.3; a
 new library has 16x filtering, crisp text and the badge on and the rest off, and a graphics preset sets SHARPER
 ENLARGING, CRISP SYSTEM TEXT and, under ULTRA, FULL 32-BIT COLOUR in Enhanced and Ace, below), each beside a
@@ -648,9 +649,9 @@ on (#2280), which changes only the picture the window shows; the other presets l
 second draw of each render op and its GPU memory stay off unless asked for. Where the GPU renderer cannot run FSR
 1, the normal scaling filter stays, as for the part. `fsr1-selftest` reports the pass's cost at each of these sizes
 (`docs/SETUP.md`). No preset sets frame pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN
-PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, LATE PAD SAMPLING, SOFT SHADOWS, TEXTURE
-SCALING, the SMART 2D FILTER, the SPEED READOUT or
-the GAME BADGE: they change timing, framing, input, guest-visible output or the HUD, or have no measured cost on
+PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, LATE PAD SAMPLING, SOFT SHADOWS, UNCLIPPED
+SOUND, TEXTURE SCALING, the SMART 2D FILTER, the SPEED READOUT or
+the GAME BADGE: they change timing, framing, input, sound, guest-visible output or the HUD, or have no measured cost on
 low-end GPUs, so they stay the library's and each game's. FULL 32-BIT COLOUR stays out of every preset but ULTRA for
 the same reason: its cost (a second draw of each render op and the twin's GPU memory) is not measured on any GPU, so
 only ULTRA, the preset for GPUs with headroom, turns it on, and under the others it stays the library's and each
@@ -719,7 +720,19 @@ the waiting control shows `Press a key…`, and the next key pressed is its key;
 wait. A key another control uses moves as a controller input does; a key that cannot be bound (Esc and the function
 keys, which the runtime keeps) is refused and the status line says why in `error`. The stick card is ANALOG STICK:
 the stick's four keys (UP, DOWN, LEFT, RIGHT; I, K, J and L by default) as rows like the buttons', where a held key
-pushes that axis to its edge in game, then the keys Nakagawa keeps.
+pushes that axis to its edge in game, then the keys Nakagawa keeps. Under the card, beside BACK, MOUSE AIM: OFF or
+MOUSE AIM: ON says whether the mouse moves that stick too; the card has no room for it at the largest text size.
+
+MOUSE AIM (#1791) opens the mouse aiming settings, which replace the cards with a 720 px dialog card as a calibration
+step does: the mapping they belong to in the eyebrow (`MOUSE AIMING · GLOBAL MAPPING`), a lead that says the mouse
+pushes the PSP stick in a game, that the game keeps the pointer until it is paused, and that a change applies when
+a game next starts, then five rows in a box, each with its control on the left as a Settings row has it: MOUSE AIM (ON or OFF, the button filled while on), SPEED and
+SMOOTHING with - and + (the speed in steps of 10% up to 200% and of 50% from there to 1000%, the smoothing in steps of
+5% up to 95%; a value a hand-edited profile holds between two steps moves to the next step), INVERT LEFT AND RIGHT and
+INVERT UP AND DOWN. Each change is written to the input profile as it is made. DONE, Esc or East returns to the keys,
+on MOUSE AIM. The settings are the keyboard and mouse's: RESET TO DEFAULTS with KEYBOARD shown turns aiming off at
+100%, and with CONTROLLER shown leaves it as set. Every row shows whole in every launcher window at every text size
+(`test_controller_mouse_aim`).
 
 A host input is named by the label a pad prints on it, with its other common name in brackets (`A (Cross)`,
 `LB (L1)`, `RT (R2)`), and a key pair of one modifier reads as the modifier alone (`Shift` for Left and Right Shift), so
@@ -733,7 +746,7 @@ written to the input profile as it is made, and a write that fails says so in th
 first binding.
 Calibration replaces the cards with a 720 px dialog card per step: rest (a progress bar, CANCEL only), range
 (FINISH) and result (ACCEPT), each with its live numbers. Esc or East cancels a step and returns to CALIBRATE STICK.
-Every page fits 960 x 540.
+Every page, the mouse aiming settings included, fits 960 x 540.
 
 ### Developer log (built)
 

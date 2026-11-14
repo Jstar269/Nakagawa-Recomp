@@ -798,6 +798,9 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
                     input_settings_cancel_capture(&app->input_settings);
                 } else if (input_settings_is_calibrating(&app->input_settings)) {
                     input_settings_cancel_calibration(&app->input_settings);
+                } else if (input_settings_aim_is_open(&app->input_settings)) {
+                    /* The mouse aiming settings (#1791) go back to the keys they opened from. */
+                    input_settings_close_aim(&app->input_settings);
                 } else {
                     player_app_set_view(app, VIEW_SETTINGS);
                 }
@@ -906,6 +909,8 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
             } else if (app->active_view == VIEW_CONTROLLER_SETTINGS) {
                 if (input_settings_is_calibrating(&app->input_settings)) {
                     input_settings_cancel_calibration(&app->input_settings);
+                } else if (input_settings_aim_is_open(&app->input_settings)) {
+                    input_settings_close_aim(&app->input_settings);
                 } else {
                     player_app_set_view(app, VIEW_SETTINGS);
                 }
@@ -1885,6 +1890,30 @@ static void player_ui_controller_apply(PlayerApp *app, PlayerUiControllerOp op,
             break;
         case PLAYER_UI_CONTROLLER_SHOW_KEYBOARD:
             input_settings_set_device(input, INPUT_DEVICE_KEYBOARD);
+            break;
+        /* Mouse aiming (#1791): each change is written with the mapping, as a binding is. */
+        case PLAYER_UI_CONTROLLER_AIM_OPEN: input_settings_open_aim(input); break;
+        case PLAYER_UI_CONTROLLER_AIM_DONE: input_settings_close_aim(input); break;
+        case PLAYER_UI_CONTROLLER_AIM_TOGGLE:
+            (void)input_settings_set_aim_mouse(input, !input->profile.aim.mouse);
+            break;
+        case PLAYER_UI_CONTROLLER_AIM_SPEED_DOWN:
+            (void)input_settings_step_aim_sensitivity(input, -1);
+            break;
+        case PLAYER_UI_CONTROLLER_AIM_SPEED_UP:
+            (void)input_settings_step_aim_sensitivity(input, 1);
+            break;
+        case PLAYER_UI_CONTROLLER_AIM_SMOOTHING_DOWN:
+            (void)input_settings_step_aim_smoothing(input, -1);
+            break;
+        case PLAYER_UI_CONTROLLER_AIM_SMOOTHING_UP:
+            (void)input_settings_step_aim_smoothing(input, 1);
+            break;
+        case PLAYER_UI_CONTROLLER_AIM_INVERT_X:
+            (void)input_settings_toggle_aim_invert(input, NK_PSP_AXIS_ANALOG_X);
+            break;
+        case PLAYER_UI_CONTROLLER_AIM_INVERT_Y:
+            (void)input_settings_toggle_aim_invert(input, NK_PSP_AXIS_ANALOG_Y);
             break;
         case PLAYER_UI_CONTROLLER_BACK:
         case PLAYER_UI_CONTROLLER_CLOSE:
@@ -4140,7 +4169,7 @@ static int player_load_library(PlayerRun *run) {
     }
     {
         const char *base = SDL_GetBasePath();
-        if (base) snprintf(app->install_root, sizeof(app->install_root), "%s", base);
+        if (base) player_app_set_install_root(app, base);
     }
     if (run->stage_only && !run->initial_iso_path) {
         fprintf(stderr, "[PLAYER] --stage-only requires --iso=<path>.\n");

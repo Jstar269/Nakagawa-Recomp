@@ -282,9 +282,14 @@ typedef enum {
                                   shadows get soft edges; Ace only, and a title whose package declares
                                   none ignores it. Appended after pad; the Ace line writes shadow after
                                   pad, before cull */
+    PLAYER_PART_PEAK,          /* unclipped sound (#2137, section 10.22): 0 off, 1 limit. The host plays
+                                  SAS mixes unsaturated, through a true-peak limiter; the guest's SAS
+                                  bytes are the PSP's. Enhanced and Ace; off in a fresh file and in
+                                  every preset. Appended; the Ace line writes peak after ssaa, before
+                                  texpack */
     PLAYER_PART_TEXSCALE,      /* texture scaling, xBRZ (#1273, sections 10.10 and 11.3.3): 0 off, or the
                                   factor 2 to 6. Guest-visible; off in a fresh file and in every preset.
-                                  Appended after shadow; the line carries texscale=<factor> after shadow,
+                                  Appended; the line carries texscale=<factor> after shadow,
                                   before cull, in either tier, only when on */
     PLAYER_PART_SMART2D,       /* the smart 2D filter (#1273, sections 10.10 and 11.3.3): 0 off, 1 on.
                                   Guest-visible; off in a fresh file and in every preset. Appended; the
@@ -1515,6 +1520,11 @@ bool player_module_qualified_name(const char *rel_path, const char *disc_name,
                             char *out, size_t out_size);
 bool player_game_is_showcase(const GameRecord *game);
 void player_app_set_runtime_root(PlayerApp *app, const char *root);
+/* Records the folder the player's executable is in (install_root; NULL or "" when unknown).
+ * The library is loaded, and each title's package files read, before that folder is known, and
+ * the packages the source tree ships are found through it (player_app_shipped_enhancements_root).
+ * So this reads every title's package files again and re-selects what each title launches. */
+void player_app_set_install_root(PlayerApp *app, const char *root);
 bool player_app_title_profile_refusal_for_disc(
     const PlayerApp *app,
     const char *disc_id,
@@ -1847,6 +1857,8 @@ void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
  * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
  * ";ssaa=2" or ";ssaa=4" follows with the Supersampling part on, in either tier.
+ * ";peak=limit" follows ssaa, before texpack, with the Unclipped sound part on, in either tier;
+ * a missing peak is off.
  * ";texpack=on" follows only with the Texture pack part on for a title that has a pack, in
  * either tier; a missing texpack is off.
  * ";pad=late" follows texpack, before cull, only for Ace with the Late pad sampling part on; a
