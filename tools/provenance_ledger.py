@@ -1310,7 +1310,9 @@ def _class_for(path: str, record: dict | None) -> tuple[str, dict]:
             return "project_authored_attested", {**evidence, "authorship": "independent implementation record",
                                                    "upstream_attribution": record.get("upstream")}
 
-    if path.startswith(("tests/fixtures/",)) or "/test_" in path or path.startswith("tools/test_"):
+    # The root ``fixtures/`` prefix stays while a trusted base can still carry the tree there:
+    # a refresh classes the base's entries with this rule too.
+    if path.startswith(("fixtures/", "tests/fixtures/")) or "/test_" in path or path.startswith("tools/test_"):
         return "synthetic_fixture", {"source": "path-reviewed fixture/test census",
                                       "statement": "fixture or test data is synthetic and contains no retail bytes"}
     if path.startswith("docs/") or path.endswith(DOCUMENTATION_SUFFIXES) or path in DOCUMENTATION_NAMES:

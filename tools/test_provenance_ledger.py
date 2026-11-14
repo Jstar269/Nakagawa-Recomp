@@ -410,11 +410,12 @@ class ProvenanceFailClosedTest(unittest.TestCase):
             "db/schema.prisma": "reviewed_configuration",
             # The fixture tree under tests/ has the fixture class, whatever the suffix rules
             # below would say (documentation, configuration) or not say. The root fixtures/
-            # folder, where the tree used to live, is classed by those rules alone.
+            # folder, where the tree used to live, keeps the class too: a refresh classes the
+            # entries of its trusted base with the same rule, and a base can still carry them.
             "tests/fixtures/psp_oracle/probe.c": "synthetic_fixture",
-            "fixtures/psp_oracle/probe.c": "unresolved",
-            "fixtures/psp_oracle/mutex_imports.S": "unresolved",
-            "fixtures/psp_oracle/README.md": "reviewed_documentation",
+            "fixtures/psp_oracle/probe.c": "synthetic_fixture",
+            "fixtures/psp_oracle/mutex_imports.S": "synthetic_fixture",
+            "fixtures/psp_oracle/README.md": "synthetic_fixture",
             "tests/fixtures/psp_oracle/README.md": "synthetic_fixture",
             "tests/fixtures/psp_oracle/ge_corpus.json": "synthetic_fixture",
             "tests/fixtures/psp_oracle/mutex_imports.S": "synthetic_fixture",
