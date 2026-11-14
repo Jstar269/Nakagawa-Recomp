@@ -189,7 +189,11 @@ Why the project's security requirements are met, in brief:
   bounds-checked by every later parser.
 - **Common weaknesses countered.** Memory errors (CWE-119/787/125): bounds-checked parsers with hostile-input tests
   ([`docs/PARSER_SAFETY_INVENTORY.json`](docs/PARSER_SAFETY_INVENTORY.json)), ASan/UBSan fuzzing (ClusterFuzzLite)
-  and CodeQL on every change. Path traversal (CWE-22): the VFS and extraction tools refuse paths outside their roots.
-  Integer overflow (CWE-190): checked size arithmetic before forming host pointers. Supply chain: hash-pinned Python
+  and CodeQL on every change. Path traversal (CWE-22): the VFS and extraction tools refuse paths outside their roots;
+  the emulated Memory Stick checks where a file it is asked to create or truncate would land, through any junction or
+  link, before it touches the file system, and the prerequisite installer refuses archive member names Windows would
+  not store as written (a drive or stream colon, a trailing dot or space, a device name). Uncontrolled DLL search path
+  (CWE-427): the player and every title executable load run-time libraries only from their own folder and System32,
+  never from the current folder or `PATH`. Integer overflow (CWE-190): checked size arithmetic before forming host pointers. Supply chain: hash-pinned Python
   dependencies, pinned toolchain downloads verified by SHA-256, Dependabot, dependency review, OSV-Scanner and
   OpenSSF Scorecard. Leaked secrets: secret scanning and a publication audit on every push.
