@@ -534,7 +534,9 @@ enhancement package id a build records, not its declaration.
 
 Only the maintainer releases a package the project ships in `assets/enhancements/` (section 5.1), by a decision
 recorded in an entry for that package under this section, with what was measured and the limits known when it was
-released (the entries below). The player honours `"experimental": false` only in a
+released (the entries below). A shipped package that is not released has an entry too. Its Status says
+Experimental, and the entry releases nothing: it records what was measured and the limits known for the version
+shipped. The player honours `"experimental": false` only in a
 package it finds in the source tree's `assets/enhancements/` (section 5.1), never in one from the user's data
 folder: a package there, which comes first, still loads and plays but is always shown as experimental, whatever it
 declares.
@@ -570,19 +572,103 @@ declares.
   makes it `INCOMPLETE`, and 73 generator steps are unresolved, which makes it exit 1 (`FAIL`). It ran on an
   earlier build of the package that held all eight `gate_30hz_store` sites, not on 15.0.0-pre1; on that private
   route the function of the four sites not shipped never ran.
-- **Known limits.**
-  1. Further sites belong in the next package update: the four `gate_30hz_store` sites of #2360 that 15.0.0-pre1
-     does not carry (S0332, a step toward a target, which runs twice as fast at 60 Hz until then; no private route
-     reaches the screen that uses it, so its game time is not measured), and five triage rows still open (#2362).
-  2. At 60 Hz the step from the main menu into single player takes 3.94 s longer than in the authentic game (288
-     vertical blanks against 52). A 60 Hz run with an earlier package shows the same, so it is older than
-     14.0.0-pre1. Its cause is not traced yet (#1732).
+- **Known limits.** Further sites belong in the next package update: the four `gate_30hz_store` sites of #2360
+  that 15.0.0-pre1 does not carry (S0332, a step toward a target, which runs twice as fast at 60 Hz until then; no
+  private route reaches the screen that uses it, so its game time is not measured), and five triage rows still
+  open (#2362). Also recorded in #2362: when two bounces come 33 ms apart or less, the bounce-effect sites free
+  their emitters up to two 60 Hz updates early.
+- **Not a limit: the step from the main menu into single player.** This entry used to list it as taking 3.94 s
+  longer at 60 Hz than in the authentic game. Measured on 2026-11-14 with 15.0.0-pre1 (recorded in #1732), that
+  is an artifact of the private test route, not of the package: the route as it was reproduces it (52 vertical
+  blanks in the authentic game, 288 to 292 at 60 Hz), and the same route with a 12-vertical-blank delay after its
+  menu checkpoint takes 0.88 s in the authentic game and 0.82 s at 60 Hz.
+- **Not run.** A run on a fully idle host; a side-by-side check of 15.0.0-pre1 itself; and a measurement of
+  whether 15.0.0-pre1 costs more per update than 13.0.0-pre1.
 
-  Also recorded in #2362: when two bounces come 33 ms apart or less, the bounce-effect sites free their emitters
-  up to two 60 Hz updates early.
-- **Not run.** A run on a fully idle host; a side-by-side check of 15.0.0-pre1 itself; the step into single
-  player (limit 2) with 15.0.0-pre1; and a measurement of whether 15.0.0-pre1 costs more per update than
-  13.0.0-pre1.
+#### 9.10.2. *LittleBigPlanet* (UCUS98744): `lbp.timing.native_60hz`
+
+- **Status.** Experimental: not released. By the owner's decision of 2026-11-14 (#1931) the project ships it
+  without the run on an idle host it was held for, with the limits below. It declares no `"experimental"` field,
+  so its switch is tagged EXPERIMENTAL. It is for disc version 2.00 only: build-package refuses disc version 1.00
+  by name (`other_revision`, section 5.1). The version shipped is package 0.5.0-pre10.
+- **What it covers.** 80 sites and 3 data sites, every one a transform of section 9.2: the frame pacing (one
+  VBLANK for each pass of the main loop) and the game clock (1/60 s for each update); timers counted in updates;
+  the intro movies, held at their stock rate; in the physics, damping, the contact and joint gains and the
+  rotation step; Sackboy's stick and walk smoothing and the jump's hold boost and launch
+  (`velocity_source_x_kappa`, `launch_from_rest_60hz`); the jetpack's pose blends; the glow of fire, gas and
+  electricity and the ash of a burning object; the emitter gadget's frame counts; the stick's pan and zoom in
+  create mode, the popit cursor and the viewfinder; and a cap on the length of the speech sound. Package
+  0.5.0-pre10 adds twelve sites to 0.5.0-pre9 and changes no other: the clock that drives sound modulation
+  (S001), the ramp of the screen overlay at the end of each pass (X001, X002), a camera zone's viewfinder pitch,
+  yaw and zoom (Q001 to Q003), the camera zoom in create mode and the grid editor's cursor (Q004, Q005), the fade
+  of the line from Sackboy to the popit cursor (Q006 to Q008) and the grid editor's tap window (Q009).
+- **Measured, 0.5.0-pre9** (recorded in #1931). On 2026-11-14, on a private route to the start of the first
+  story level (the maintainer's copy): three 60 Hz runs and one run of the authentic game, 175 s each. The host
+  was not clean: background services kept it 16 to 18 % busy. In the level, about 51 s of each run:
+  - a median of 60 logic updates and 60 frames a second in all three runs; update interval 16.7 ms at the median
+    and the 95th percentile, 33.4 ms at the 99th;
+  - 47, 34 and 39 of about 2,700 updates took two VBLANKs (1.77 %, 1.24 % and 1.44 %; the authentic game: none),
+    and they sit in the same two stretches of the game clock in every run (limit 1);
+  - host work per frame 12.1, 11.6 and 11.6 ms, against 12.6 ms for the authentic game, so the package adds no
+    cost per frame; what it needs is each frame inside 16.7 ms instead of 33.4 ms;
+  - game time per update 1/60 s; the jump's apex and air time equal the authentic game's (four jumps in each
+    run); no compatibility patch fired, and no line said a site was not applied or kept its stock form;
+  - `ENHANCEMENT_LOGIC_SLOWED` (section 9.5, item 4) in two of the three runs, at a load inside the level that
+    the authentic game has too, and once at 56 updates a second before the level;
+  - the side-by-side check of section 9.7 compared one event, the changes of Sackboy's state word (11 in each
+    run, `PASS`), and by the tool's own rules is not a pass: its one phase includes the boot and the loads, under
+    57 updates a second, and the shorter run covers 87 % of the longer one's game time, under `--min-coverage`
+    (0.9), each of which makes it `INCOMPLETE`.
+
+  Earlier runs, also recorded in #1931: on 2026-11-04, with an earlier version of 42 sites on a host running
+  nothing else, a median of 60 updates a second over 500 s, the intro movies as long as the authentic game's to
+  the VBLANK, walk distances within 0.7 %, a timed level element at 1.000000 of game time over 378 s, and each
+  jump's sound keyed within one VBLANK of the jump; on 2026-11-11, with 0.5.0-pre9, the glow's phase step for
+  each update exactly half the authentic game's.
+- **Measured, 0.5.0-pre10.** On 2026-11-14, on `6941967fe`, the package was built from the shipped file with
+  `build-package UCUS98744 --experimental-60hz` and started through the player: one 60 Hz run and one run of the
+  authentic game on the same route, 175 s each. The host was loaded, 51 to 57 % busy with other builds, so this
+  run does not show the rate:
+  - game time per update 1/60 s; the jump's apex and air time equal the authentic game's (four jumps in each
+    run); no compatibility patch fired, and no line said a site was not applied or kept its stock form;
+  - S001: the clock that drives sound modulation advanced 16.666 ms for each pass, 1000.0 ms a game second (the
+    authentic game: 33.36 ms for each pass, 1000.9 ms a game second, counted outside the load); without the
+    site it would advance 2000 ms a game second;
+  - the main loop ran a median of 60 passes a second over the whole run, but in the level the logic ran at a
+    median of 37 updates a second (`ENHANCEMENT_LOGIC_SLOWED`): host work took 18.6 ms a frame there, and the
+    authentic game's took 16.6 ms on the same host, against 12.1 and 12.6 ms in the runs above;
+  - the other eleven sites it adds were not reached: the screen overlay never ramped on this route, and the
+    route does not open the popit, enter create mode or meet a camera zone.
+- **Known limits.**
+  1. Two scenes of the first story level do not fit in 16.7 ms on the measuring host: in each, 13 to 23 updates
+     take two VBLANKs, so for 0.4 to 0.8 s the game plays at half speed there (section 9.5, item 4).
+     They come at the same game time in every run, 26 game seconds apart, so they are the scenes and not the
+     host's other work; frames there take 17 to 22 ms of host work against a typical 12 ms. Whether they fit on a
+     clean host is not shown.
+  2. Gadgets and mechanisms other than the emitter are not surveyed: the rocket, the motor, wobble and sprung
+     bolts, the piston, the winch, the elastic, switches, explosives, checkpoints and the rest. One that steps
+     or counts once for each update, without the frame time, runs up to twice as fast with the switch on. The
+     rocket is expected to push twice as hard (its impulse is applied once for each update); the private route
+     meets none of them.
+  3. The gameplay camera's follow is expected to lag about 12 % more than in the authentic game at a steady
+     walk (worked out from the code, not measured): its gain is built from the frame time at run time, and
+     no transform of section 9.2 maps such a gain.
+  4. The music's fade when a track stops is expected to take half the authentic game's time (about 0.85 s
+     for 1.7 s; from the code, not measured): its step is a negative constant added to a value read in the
+     same pass, a form no transform of section 9.2 takes.
+  5. Sites checked against the executable only, because no private route reaches them: the emitter gadget's
+     eight, the jetpack's seven, the ash of a burning object, and eleven of the twelve that 0.5.0-pre10 adds
+     (all but S001). For each of them the stock instruction, its digest and a defined rewrite are proven;
+     its game time is not measured.
+  6. Not surveyed either: the score counter and the tally at the end of a level, the state machines behind
+     saving, the profile and the network prompts, and create mode beyond the popit and the controls named
+     above.
+  7. With the launch's 60 Hz arc a jump can land one 60 Hz update (1/60 s) before the authentic game's (section
+     9.2, "Landing is not moved to the stock update").
+- **Not run.** A run on a clean host; a run of 0.5.0-pre10 that holds 60 updates a second in the level; a
+  side-by-side check that passes by the tool's rules, with more events than one; any route past the start of
+  the first story level, through create mode, or to an emitter, a jetpack or a burning object; disc version
+  1.00, which the package refuses.
 
 ## 10. Play Modes: Authentic, Enhanced and Ace
 
@@ -856,7 +942,8 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   a package built after #2320 landed: a pooled phase of 0.019 and a mean weight of 0.085. (A run before #2320
   measured a phase of 0.03, with 92.5% of the moving pixels shown as the old frame.) For such a scene the feature
   adds presents, not motion, and the readout says so.
-- **Which titles use what.** A title with a 60 FPS game logic package (section 9; *Hot Shots Tennis* has one)
+- **Which titles use what.** A title with a 60 FPS game logic package (section 9; *Hot Shots Tennis* and
+  *LittleBigPlanet* have one, section 9.10)
   gets every frame from the game itself. That is its path to 60, and the player turns smooth motion off for that
   launch (section 10.5). A 30 FPS title without a package has only smooth motion, with the limit above.
   In-betweens drawn from the game's own draws with interpolated positions, which would follow figures and small
