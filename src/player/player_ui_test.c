@@ -724,6 +724,7 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            "select_binding=%d start_binding=%d circle_binding=%d profile_save_notice=%d "
            "input_scope=%s input_titles=%d input_notice=%d "
            "input_device=%s start_key=%d key_note=%d "
+           "aim_open=%d aim_mouse=%d aim_speed=%d aim_smoothing=%d aim_invert=%d%d "
            "selected_experimental=%d selected_prepared=%d selected_staged=%d "
            "selected_runtime=%d selected_package_status=%d "
            "selected_package_check_failed=%d games=%d "
@@ -774,6 +775,12 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            app->input_settings.device == INPUT_DEVICE_KEYBOARD ? "keyboard" : "controller",
            app->input_settings.profile.psp_keys[INPUT_CONTROL_BTN_START].primary,
            app->input_settings.note[0] ? 1 : 0,
+           input_settings_aim_is_open(&app->input_settings) ? 1 : 0,
+           app->input_settings.profile.aim.mouse ? 1 : 0,
+           (int)app->input_settings.profile.aim.sensitivity,
+           (int)app->input_settings.profile.aim.smoothing,
+           app->input_settings.profile.aim.invert_x ? 1 : 0,
+           app->input_settings.profile.aim.invert_y ? 1 : 0,
            selected && selected->is_experimental ? 1 : 0,
            selected && selected->is_prepared ? 1 : 0,
            selected && selected->assets_staged ? 1 : 0,

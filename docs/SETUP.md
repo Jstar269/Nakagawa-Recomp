@@ -171,6 +171,14 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   declared and draws as before. The launch line carries `shadow=soft`. It changes the frames the game can read back
   ([section 11.3.13](ENHANCEMENT_CONTRACT.md#11313-soft-shadows-shadowsoft-not-yet-admitted)); the rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1023-soft-shadows).
+- **Unclipped sound.** A part of Enhanced and Ace, off by default and in no graphics preset: Settings > Enhanced
+  offers it as **Unclipped sound** (On or Off), for the library or for one game, and the launch line carries it as
+  `peak=limit`. Some games add up more sound than the PSP's 16-bit mix can hold, and the PSP cuts the peaks off;
+  with the part on you hear the same mix with those peaks turned down smoothly by a limiter instead, and everything
+  below them at the PSP's own level. Only the sound you hear changes: the game's own sound data is the PSP's, and a
+  recording keeps the game's copy. The sound plays 1.6 ms later, and the limiter runs on every sound the game
+  plays. The rules are in
+  [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1022-unclipped-sas-mixes-through-a-true-peak-limiter-peaklimit).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release

@@ -87,7 +87,7 @@ file such as this one loads with the default keyboard keys, stick included.
 Schema 5 adds an optional `aim` member to each mapping (mouse movement as the analog stick,
 [#1791](https://github.com/Jstar269/nakagawa-recomp/issues/1791)); a file without it loads with aiming off. The host scales the movement by the time between polls, so the same hand speed
 gives the same stick at any frame rate; there is no mouse dead zone (one count at 100% is about 7 of 127 stick units);
-and aiming is off under `SR_PADSCRIPT`, where a script drives the pad.
+and aiming is off under `SR_PADSCRIPT`, where a script drives the pad. In the player, Settings > Controls > Keyboard > Mouse aim sets the member.
 Schema 6 lets `keyboard_bindings` name the mouse buttons (`mouse:left`, `mouse:middle`,
 `mouse:right`, `mouse:x1` and `mouse:x2`) like keys, for buttons and stick directions alike; no
 default binds one, and a schema 1 to 5 file cannot name one.
