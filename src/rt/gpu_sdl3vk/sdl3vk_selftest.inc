@@ -1405,6 +1405,46 @@ static void *test_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int ou
     return (void *)s_test_fsr_out;
 }
 
+/* A UI pass as gui.c registers one for the render notice and Ace Mode's UI (#2151): it paints
+ * the whole swapchain image after the frame blit, which no capture or guest byte may see. */
+static int s_test_ui_calls;
+
+static void test_ui_pass(const Sdl3VkUiPass *p) {
+    VkCommandBuffer cmd = (VkCommandBuffer)p->cmd;
+    VkImage image = (VkImage)p->images[p->image_index];
+    VkImageMemoryBarrier b = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.oldLayout = b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = image;
+    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    b.subresourceRange.levelCount = 1;
+    b.subresourceRange.layerCount = 1;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, NULL, 0, NULL, 1, &b);
+    VkClearColorValue magenta = {{1.0f, 0.0f, 1.0f, 1.0f}};
+    vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &magenta, 1,
+                         &b.subresourceRange);
+    s_test_ui_calls++;
+}
+
+/* A whole file, to compare two captures byte for byte; NULL when it cannot be read. */
+static uint8_t *test_read_file(const char *path, size_t *size) {
+    FILE *f = fopen(path, "rb");
+    uint8_t *data = NULL;
+    long n;
+    *size = 0;
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) == 0 && (n = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0 &&
+        (data = (uint8_t *)malloc((size_t)n)) != NULL) {
+        *size = fread(data, 1, (size_t)n, f);
+        if (*size != (size_t)n) { free(data); data = NULL; *size = 0; }
+    }
+    fclose(f);
+    return data;
+}
+
 #ifdef SR_VIDEOREC_SELFTEST
 /* The recording's upscaler as gui.c registers it (sdl3vk_set_record_upscale_pass), on its own
  * pass, remembering what it was asked for. */
@@ -2368,6 +2408,62 @@ static int sdl3vk_capture_selftest_body(void) {
                     "cannot run\n");
     ok = 0;
 #endif
+
+    /* ---- the UI pass (#2151): the render notice changes no captured byte ----------------
+     * With a pass that paints the whole swapchain image after the blit, the present's capture is
+     * still the guest's frame byte for byte and the frame blit is the one a present without the
+     * pass makes; the two captures are the same file. Removed, the pass does not run again. */
+    {
+        uint8_t *on = NULL, *off = NULL;
+        size_t on_size = 0, off_size = 0;
+        const int calls = s_test_ui_calls;
+        memset(&s_last_blit, 0, sizeof(s_last_blit));
+        sdl3vk_set_ui_pass(test_ui_pass);
+        if (!sr_capture_arm("selftest_ui_on.ppm") || sdl3vk_present_rgba(px) != 1) {
+            fprintf(stderr, "ui pass: the present with the pass failed\n"); ok = 0;
+        }
+        sdl3vk_set_ui_pass(NULL);
+        const int on_result = sr_capture_result();
+        const int on_sw = s_last_blit.sw, on_sh = s_last_blit.sh, on_dx = s_last_blit.dx;
+        const int on_dy = s_last_blit.dy, on_dw = s_last_blit.dw, on_dh = s_last_blit.dh;
+        const VkFilter on_filter = s_last_blit.filter;
+        memset(&s_last_blit, 0, sizeof(s_last_blit));
+        if (!sr_capture_arm("selftest_ui_off.ppm") || sdl3vk_present_rgba(px) != 1) {
+            fprintf(stderr, "ui pass: the present without the pass failed\n"); ok = 0;
+        }
+        if (s_test_ui_calls != calls + 1) {
+            fprintf(stderr, "ui pass: it ran %d times (want once with it set, never once removed)\n",
+                    s_test_ui_calls - calls);
+            ok = 0;
+        }
+        if (on_result != 1 || !cap_test_verify_ppm("selftest_ui_on.ppm", PSP_W, PSP_H)) {
+            fprintf(stderr, "ui pass: the capture with the pass is not the guest's frame\n"); ok = 0;
+        }
+        if (sr_capture_result() != 1 || !cap_test_verify_ppm("selftest_ui_off.ppm", PSP_W, PSP_H)) {
+            fprintf(stderr, "ui pass: the capture without the pass is not the guest's frame\n"); ok = 0;
+        }
+        if (s_last_blit.src == VK_NULL_HANDLE || on_sw != s_last_blit.sw || on_sh != s_last_blit.sh ||
+            on_dx != s_last_blit.dx || on_dy != s_last_blit.dy || on_dw != s_last_blit.dw ||
+            on_dh != s_last_blit.dh || on_filter != s_last_blit.filter) {
+            fprintf(stderr, "ui pass: the frame blit changed with the pass (%dx%d to %dx%d at %d,%d "
+                            "against %dx%d to %dx%d at %d,%d)\n", on_sw, on_sh, on_dw, on_dh, on_dx,
+                    on_dy, s_last_blit.sw, s_last_blit.sh, s_last_blit.dw, s_last_blit.dh,
+                    s_last_blit.dx, s_last_blit.dy);
+            ok = 0;
+        }
+        on = test_read_file("selftest_ui_on.ppm", &on_size);
+        off = test_read_file("selftest_ui_off.ppm", &off_size);
+        if (!on || !off || on_size != off_size || memcmp(on, off, on_size) != 0) {
+            fprintf(stderr, "ui pass: the captures with and without the pass differ (%zu and %zu "
+                            "bytes)\n", on_size, off_size);
+            ok = 0;
+        }
+        free(on);
+        free(off);
+        remove("selftest_ui_on.ppm");
+        remove("selftest_ui_off.ppm");
+        if (ok) printf("gpu capture selftest: UI pass present OK (capture and blit unchanged)\n");
+    }
 
     /* ---- pause overlay (#1159): shown, repeated without an upload, never captured ------ */
     {
