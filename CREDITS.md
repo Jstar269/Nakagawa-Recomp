@@ -6,7 +6,7 @@ Nakagawa has since substantially extended and modified that codebase. This repos
 
 ## Primary upstreams
 
-- **PSP Recompilation Project — sal063 / psp-recomp authors** — GPL-2.0-or-later. Immediate upstream and original basis of this repository. The upstream attribution document is preserved at [`THIRD_PARTY_LICENSES/SAL063_CREDITS.txt`](THIRD_PARTY_LICENSES/SAL063_CREDITS.txt).
+- **PSP Recompilation Project — sal063 / psp-recomp authors** — GPL-2.0-or-later. Immediate upstream and original basis of this repository. The upstream attribution document is preserved at [`third_party/licenses/SAL063_CREDITS.txt`](third_party/licenses/SAL063_CREDITS.txt).
 - **PPSSPP — Henrik Rydgård and contributors** — GPL-2.0-or-later plus its own third-party notices. A significant part of the immediate upstream itself derives from, ports, or models PPSSPP subsystems; Nakagawa also retains and extends some of that downstream lineage. The per-file lineage is in [`src/rt/PROVENANCE.md`](src/rt/PROVENANCE.md).
 
 ## Other upstreams
@@ -61,7 +61,7 @@ Nakagawa has since substantially extended and modified that codebase. This repos
   achievements ([#1316](https://github.com/Jstar269/nakagawa-recomp/issues/1316)), in
   [`third_party/rcheevos/`](third_party/rcheevos/PROVENANCE.md). Its MD5 (`src/rhash/md5.c`, `md5.h`) is
   L. Peter Deutsch's (Aladdin Enterprises), under the zlib licence.
-- **PSPSDK / PSPDEV contributors** — BSD-family notices for public ABI definitions and source-owned fixtures ([`THIRD_PARTY_LICENSES/PSPSDK.txt`](THIRD_PARTY_LICENSES/PSPSDK.txt)).
+- **PSPSDK / PSPDEV contributors** — BSD-family notices for public ABI definitions and source-owned fixtures ([`third_party/licenses/PSPSDK.txt`](third_party/licenses/PSPSDK.txt)).
 - **PSPSDK sample programs — Jesper Svennevid, Donour Sizemore, James Forshaw, John Kelley, Marcus R. Brown, Frank Buss and weltall** — BSD-3-Clause. The public homebrew corpus ([#2144](https://github.com/Jstar269/nakagawa-recomp/issues/2144)) names four PSPSDK samples, pinned to the PSPDEV release; nothing is built or copied into the repository ([`fixtures/homebrew_corpus/PROVENANCE.md`](fixtures/homebrew_corpus/PROVENANCE.md)).
 - **SDL, SDL_ttf and their dependencies** — staged beside the player with their licence texts (listed in [`NOTICE.md`](NOTICE.md)).
 - **stb_image 2.30 — Sean Barrett** — public domain (Unlicense), the alternative to MIT that upstream offers. The PNG

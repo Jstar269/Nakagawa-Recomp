@@ -242,7 +242,7 @@ class ProvenanceLedgerTest(unittest.TestCase):
             return
         tracked = set(tracked_files("src")) | set(tracked_files("tools"))
         tracked |= set(tracked_files("assets")) | set(tracked_files("font"))
-        tracked |= set(tracked_files("THIRD_PARTY_LICENSES"))
+        tracked |= set(tracked_files("third_party/licenses"))
         tracked |= set(tracked_files("fixtures"))
         # In a materialized public-safe export the profile-excluded components
         # are absent by design, so the ledger legitimately outlives them. Every

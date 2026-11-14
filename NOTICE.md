@@ -67,13 +67,13 @@ We aim to respond promptly and will remove material where appropriate.
   same revision, and it is conveyed as GPL-3.0-or-later. Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
 - **PSPSDK / PSPDEV** — permissive per-component declarations and BSD-family
   notices for public ABI definitions and source-owned fixtures. The applicable
-  notices are in `THIRD_PARTY_LICENSES/PSPSDK.txt` and `assets/upstream/`.
+  notices are in `third_party/licenses/PSPSDK.txt` and `assets/upstream/`.
 - **FFmpeg n4.4 ATRAC3 and ATRAC3+ subsets** — LGPL-2.1-or-later. The imported
   decoders and their license/provenance file are under `src/rt/atrac3p/`; the project wrapper
   remains separately identified in the ledger. Two byte-identical imports,
   `libavcodec/fft_init_table.c` and `libavcodec/fft_table.h`, also carry a MIPS
   Technologies, Inc. BSD-3-Clause notice. Its verbatim text is in
-  `THIRD_PARTY_LICENSES/FFMPEG_MIPS_FFT.txt` and is included in the generated
+  `third_party/licenses/FFMPEG_MIPS_FFT.txt` and is included in the generated
   native-package third-party notices bundle alongside the FFmpeg LGPL text.
 - **minimp3** — CC0-1.0 public-domain dedication. `src/rt/minimp3/minimp3.h` and
   its `LICENSE` are imported byte-identical from `https://github.com/lieff/minimp3`
@@ -209,7 +209,7 @@ of truth, `assets/third_party_components.json` (schema:
 `assets/third_party_components.schema.json`), records every component that can
 enter a release artifact: its SPDX identifier, its disposition, the packaging
 route that copies it, and the license texts copied verbatim into
-`third_party/licenses/` and `THIRD_PARTY_LICENSES/`. The native package, the
+`third_party/licenses/`. The native package, the
 SBOM, and the release gate all read that one file.
 
 - The native package route (`tools/package_notices.py`, invoked by the package
@@ -237,18 +237,18 @@ license text, copied verbatim from the MSYS2 UCRT64 toolchain packages
 | DLL | License | License text |
 | --- | --- | --- |
 | `SDL3.dll` | Zlib | `third_party/licenses/sdl3/LICENSE.txt` |
-| `SDL3_ttf.dll` | Zlib | `THIRD_PARTY_LICENSES/SDL3_ttf.txt` |
-| `libfreetype-6.dll` | FTL | `THIRD_PARTY_LICENSES/FreeType-FTL.txt` |
-| `libharfbuzz-0.dll` | MIT | `THIRD_PARTY_LICENSES/HarfBuzz.txt` |
-| `libgraphite2.dll` | MIT (chosen) | `THIRD_PARTY_LICENSES/Graphite2.txt` |
-| `libpng16-16.dll` | libpng-2.0 | `THIRD_PARTY_LICENSES/libpng.txt` |
-| `zlib1.dll` | Zlib | `THIRD_PARTY_LICENSES/zlib.txt` |
-| `libbz2-1.dll` | bzip2-1.0.6 | `THIRD_PARTY_LICENSES/bzip2.txt` |
-| `libbrotlidec.dll`, `libbrotlicommon.dll` | MIT | `THIRD_PARTY_LICENSES/Brotli.txt` |
-| `libglib-2.0-0.dll` | LGPL-2.1-or-later | `THIRD_PARTY_LICENSES/GLib.txt` |
-| `libintl-8.dll` | LGPL-2.1-or-later | `THIRD_PARTY_LICENSES/libintl.txt` |
-| `libiconv-2.dll` | LGPL-2.1-or-later | `THIRD_PARTY_LICENSES/libiconv.txt` |
-| `libpcre2-8-0.dll` | BSD-3-Clause WITH PCRE2-exception | `THIRD_PARTY_LICENSES/PCRE2.txt` |
+| `SDL3_ttf.dll` | Zlib | `third_party/licenses/SDL3_ttf.txt` |
+| `libfreetype-6.dll` | FTL | `third_party/licenses/FreeType-FTL.txt` |
+| `libharfbuzz-0.dll` | MIT | `third_party/licenses/HarfBuzz.txt` |
+| `libgraphite2.dll` | MIT (chosen) | `third_party/licenses/Graphite2.txt` |
+| `libpng16-16.dll` | libpng-2.0 | `third_party/licenses/libpng.txt` |
+| `zlib1.dll` | Zlib | `third_party/licenses/zlib.txt` |
+| `libbz2-1.dll` | bzip2-1.0.6 | `third_party/licenses/bzip2.txt` |
+| `libbrotlidec.dll`, `libbrotlicommon.dll` | MIT | `third_party/licenses/Brotli.txt` |
+| `libglib-2.0-0.dll` | LGPL-2.1-or-later | `third_party/licenses/GLib.txt` |
+| `libintl-8.dll` | LGPL-2.1-or-later | `third_party/licenses/libintl.txt` |
+| `libiconv-2.dll` | LGPL-2.1-or-later | `third_party/licenses/libiconv.txt` |
+| `libpcre2-8-0.dll` | BSD-3-Clause WITH PCRE2-exception | `third_party/licenses/PCRE2.txt` |
 | `libgcc_s_seh-1.dll`, `libstdc++-6.dll` | GPL-3.0-or-later WITH GCC-exception-3.1 | `third_party/licenses/gcc-libs/COPYING3.txt`, `third_party/licenses/gcc-libs/COPYING.RUNTIME.txt` |
 | `libwinpthread-1.dll` | MIT AND BSD-3-Clause | `third_party/licenses/winpthreads/COPYING.txt` |
 

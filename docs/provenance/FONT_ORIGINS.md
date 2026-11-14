@@ -325,7 +325,7 @@ and remain accepted even though the map is sparse relative to its 11,951 glyph
 pointers.
 
 RULE (licence-text hygiene): the OFL text stays alongside the generated build
-payload. It is not added under `THIRD_PARTY_LICENSES/` unless a corresponding
+payload. It is not added under `third_party/licenses/` unless a corresponding
 payload is admitted to the public source tree.
 
 ### 6.5 Per-style Latin faces, wider Japanese coverage and CJK sizes (#2005)

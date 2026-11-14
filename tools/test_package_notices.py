@@ -75,7 +75,7 @@ class TestPackageNotices(unittest.TestCase):
             component for component in inventory["native"]["linked_components"]
             if component["id"] == "ffmpeg-atrac3p"
         )
-        required_notice = "THIRD_PARTY_LICENSES/FFMPEG_MIPS_FFT.txt"
+        required_notice = "third_party/licenses/FFMPEG_MIPS_FFT.txt"
         self.assertIn(required_notice, [entry["file"] for entry in ffmpeg["license_texts"]])
 
         with tempfile.TemporaryDirectory() as fake_repo_dir:
@@ -165,7 +165,7 @@ class TestPackageNotices(unittest.TestCase):
         mips_notice = notices_dir / mips_notice_name
         self.assertEqual(
             mips_notice.read_text(encoding="utf-8").strip(),
-            (ROOT / "THIRD_PARTY_LICENSES" / "FFMPEG_MIPS_FFT.txt")
+            (ROOT / "third_party" / "licenses" / "FFMPEG_MIPS_FFT.txt")
             .read_text(encoding="utf-8").strip(),
         )
 

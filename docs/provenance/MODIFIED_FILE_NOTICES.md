@@ -49,7 +49,7 @@ remain in place; sal063 remains the immediate upstream in the attribution
 chain. Shader files keep `#version` as their first line.
 
 The exact GPLv2 text is retained at
-[`THIRD_PARTY_LICENSES/GPL-2.0.txt`](../../THIRD_PARTY_LICENSES/GPL-2.0.txt),
+[`third_party/licenses/GPL-2.0.txt`](../../third_party/licenses/GPL-2.0.txt),
 alongside the repository-level GPLv3 text, sal063 credits, and `NOTICE.md`.
 Per-file `GPL-2.0-or-later` identifiers are intentionally not rewritten to
 the repository-level GPLv3 identifier.
