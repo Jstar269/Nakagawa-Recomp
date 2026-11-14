@@ -6,8 +6,9 @@
  * blitted onto the swapchain image, through nk_ui's Vulkan backend (src/ui/backend/nk_ui_vk.c).
  *
  * Its pixels exist only on the swapchain image: no guest-visible byte, guest frame or capture
- * changes. Only an Ace run makes one (the presenter's UI pass is registered only then), so an
- * authentic run draws exactly what it drew before.
+ * changes. An Ace run makes one; an authentic run makes one only when the render notice is due
+ * (host_notice below; docs/ENHANCEMENT_CONTRACT.md, section 10.24), so an authentic run with
+ * nothing to say registers no UI pass and draws exactly what it drew before.
  *
  * It loads every Vulkan function through the instance's vkGetInstanceProcAddr and calls nothing
  * of the runtime: ace-ui-selftest links it with nk_ui, its Vulkan backend and the C library
@@ -49,6 +50,12 @@ typedef struct {
     const char *readout;                 /* "100%  30 FPS", or NULL */
     int readout_warning;                 /* PC LIMITED: in warning */
     const OskOverlay *keyboard;          /* an open keyboard, or NULL */
+    /* The render notice (gui.c, #2151), in any mode: a heading, what happened in words and how
+     * to hide it, in one chip at the bottom left that does not fade. It steps aside while the
+     * keyboard is open. NULL or empty words show nothing. */
+    const char *host_notice_head;
+    const char *host_notice;
+    const char *host_notice_hint;
 } AceUiFrame;
 
 /* The swapchain image a present draws into, in TRANSFER_DST_OPTIMAL before and after. */
@@ -102,6 +109,14 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *frame);
 #define ACE_UI_ID_KEYBOARD_HINT ACE_UI_ID(0x014u)
 #define ACE_UI_ID_KEYBOARD_GRID ACE_UI_ID(0x015u)
 #define ACE_UI_ID_KEYBOARD_ROWS ACE_UI_ID(0x020u)  /* + row */
+#define ACE_UI_ID_HOST_FILL ACE_UI_ID(0x0F0u)
+#define ACE_UI_ID_HOST_ROW ACE_UI_ID(0x0F1u)
+#define ACE_UI_ID_HOST_NOTICE ACE_UI_ID(0x0F2u)
+#define ACE_UI_ID_HOST_NOTICE_HEAD ACE_UI_ID(0x0F3u)
+#define ACE_UI_ID_HOST_NOTICE_TEXT ACE_UI_ID(0x0F4u)  /* + line, below ACE_UI_HOST_NOTICE_LINES */
+#define ACE_UI_ID_HOST_NOTICE_HINT ACE_UI_ID(0x0F8u)
+/* The render notice's words wrap to at most this many lines; more ends in an ellipsis. */
+#define ACE_UI_HOST_NOTICE_LINES 3
 #define ACE_UI_ID_KEYBOARD_KEYS ACE_UI_ID(0x100u)  /* + 2 * cell, + 1 its label */
 
 #endif /* SR_ACE_UI_H */

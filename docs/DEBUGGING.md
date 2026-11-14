@@ -2608,8 +2608,13 @@ retail title is private: keep it out of the repository and every upload.
    `src/core/nk_shared_helpers.c`, #2151). `gdi_presenter` means SDL3/Vulkan did not start and the GDI window shows a
    software-drawn picture; `software_ge` means `SR_GPU_GE` asked for the GPU renderer and `gegpu_init` failed. A path
    that was not asked for (`SR_VIDEO=gdi`, `SR_GPU_GE` unset) is `fallback=none`. The native player names a fallback
-   on the game's page, with Hide for the rest of its session. Primitives the GPU renderer hands to the software
-   rasterizer during a frame (`GEGPU_FALLBACK_*`) are not part of this line.
+   on the game's page, with Hide for the rest of its session. The game window names it too, over the picture, in
+   every play mode (the [render notice](ENHANCEMENT_CONTRACT.md#1024-the-render-notice)): a chip at the bottom left
+   that any pause hides for the rest of the run, or, in the GDI window, a band of text that F1 hides. Such a run
+   prints `RENDER_NOTICE: fallback=<name> is shown over the picture until hidden`, or says why it is not shown, and
+   `RENDER_NOTICE: hidden for the rest of this run` when the person hides it; no capture or recording holds the
+   notice. Primitives the GPU renderer hands to the software rasterizer during a frame (`GEGPU_FALLBACK_*`) are
+   not part of this line and are not named over the picture.
 5. Check what the GPU renderer hands to the software rasterizer: while the GPU GE runs, `gegpu_fallback_counts`
    counts each primitive drawn by `ge.c` instead, and each synchronous readback that took, by reason, always.
    After each accepted present `gui_present` steps the rule in `src/core/nk_shared_helpers.h`
