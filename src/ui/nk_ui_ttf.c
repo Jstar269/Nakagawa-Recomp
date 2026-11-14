@@ -505,6 +505,36 @@ static size_t nk_ui_ttf_default_paths(char out[NK_UI_TTF_DEFAULT_MAX][NK_UI_TTF_
     }
     return n;
 }
+
+/* The player and title executables limit their run-time library search to their own folder,
+   System32 and folders added with AddDllDirectory (nk_platform_harden_library_search). There
+   a DLL loaded by full path gets its own imports from those folders only, not from the folder
+   it is in, and SDL3_ttf.dll imports FreeType and HarfBuzz from beside itself. So the
+   candidate's folder is added for the length of the load. A relative candidate gets no folder
+   (AddDllDirectory takes absolute paths only); a process that never limited its search is
+   not affected by the added folder. */
+static SDL_SharedObject *nk_ui_ttf_load_object(const char *candidate) {
+    wchar_t folder[NK_UI_TTF_PATH_MAX];
+    DLL_DIRECTORY_COOKIE cookie = NULL;
+    SDL_SharedObject *library;
+    int chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, candidate, -1, folder,
+                                    (int)NK_UI_TTF_PATH_MAX);
+    if (chars > 0) {
+        wchar_t *slash = NULL;
+        wchar_t *p;
+        for (p = folder; *p != L'\0'; ++p) {
+            if (*p == L'/') *p = L'\\';
+            if (*p == L'\\') slash = p;
+        }
+        if (slash != NULL) {
+            *slash = L'\0';
+            cookie = AddDllDirectory(folder);
+        }
+    }
+    library = SDL_LoadObject(candidate);
+    if (cookie != NULL) (void)RemoveDllDirectory(cookie);
+    return library;
+}
 #endif
 
 NkUiTtf *nk_ui_ttf_create(const char *const *library_paths, size_t count) {
@@ -543,7 +573,11 @@ NkUiTtf *nk_ui_ttf_create(const char *const *library_paths, size_t count) {
         if (candidate == NULL || candidate[0] == '\0') {
             continue;
         }
+#if defined(_WIN32)
+        library = nk_ui_ttf_load_object(candidate);
+#else
         library = SDL_LoadObject(candidate);
+#endif
         if (library == NULL) {
             snprintf(reason, sizeof(reason), "cannot load %s: %s", candidate, SDL_GetError());
             continue;
