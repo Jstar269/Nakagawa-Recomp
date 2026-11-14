@@ -2782,6 +2782,37 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
                 self.assertTrue(enhancement_package.is_published_package(package))
                 self.assertEqual(path.name, f"{package['disc_id'].lower()}-60hz.json")
 
+    def test_shipped_littlebigplanet_package_is_selected_for_its_disc_only(self) -> None:
+        """The published LittleBigPlanet package (contract section 9.10.2) through build-package's own
+        selection: `--experimental-60hz` with no package in the user's data folder takes the file the
+        source tree ships for UCUS98744, disc version 2.00, under the title id every disc without a
+        title file gets, and builds its own package directory. Disc version 1.00, which the game also
+        shipped as, and any other executable are refused by name before a site is read; another
+        region's disc has no package of its name at all."""
+        shipped = self.nk_cli.SHIPPED_ENHANCEMENTS / "ucus98744-60hz.json"
+        package = json.loads(shipped.read_text("utf-8"))
+
+        def select(disc_version: str, *, disc_id: str = "UCUS98744",
+                   executable_sha256: str = package["executable_sha256"]) -> Any:
+            return self.nk_cli._select_enhancement_package(
+                self.root, disc_id, title_id=f"experimental-{disc_id.lower()}",
+                executable_sha256=executable_sha256, enhancement_package=None, experimental_60hz=True,
+                environment={}, sfo_disc_id=disc_id, disc_version=disc_version)
+
+        selected, target = select("2.00")
+        self.assertEqual(selected, shipped.resolve())
+        self.assertEqual(target, self.root / "packages" / "UCUS98744-enhanced-lbp.timing.native_60hz")
+        for code, kwargs in {
+            "other_revision": dict(disc_version="1.00"),
+            "modified_executable": dict(disc_version="2.00", executable_sha256="cd" * 32),
+        }.items():
+            with self.subTest(code):
+                with self.assertRaisesRegex(self.nk_cli.PackageBuildError, rf"refused \({code}\)") as ctx:
+                    select(**kwargs)
+                self.assertIn("Nothing was built", str(ctx.exception))
+        with self.assertRaisesRegex(self.nk_cli.PackageBuildError, "requires an enhancement package"):
+            select("2.00", disc_id="UCES99999")
+
     def test_published_package_needs_the_disc_identity(self) -> None:
         for sfo_disc_id, disc_version in ((None, "1.01"), (self.DISC, None), ("", "")):
             with self.subTest(sfo_disc_id=sfo_disc_id, disc_version=disc_version):
@@ -4770,7 +4801,6 @@ class TestPublishedPackages(_SynthTimingElfFixture):
         Status names must be the shipped package's version, so a new version must update the
         entry (what was measured and the limits known) in the same change."""
         released = {"ucus98701-60hz.json": "#### 9.10.1."}
-        contract = (ROOT / "docs" / "ENHANCEMENT_CONTRACT.md").read_text(encoding="utf-8")
         shipped = sorted((ROOT / "assets" / "enhancements").glob("*.json"))
         self.assertTrue(shipped)
         for path in shipped:
@@ -4779,16 +4809,83 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                 self.assertEqual(package.get("experimental") is False, path.name in released)
                 if path.name not in released:
                     continue
-                entry = contract[contract.index(released[path.name]):]
-                following = re.search(r"\n#{1,4} ", entry)
-                entry = entry[:following.start()] if following else entry
-                status = re.search(r"^- \*\*Status\.\*\* (.*?)(?=^- \*\*|\Z)", entry, re.M | re.S)
-                self.assertIsNotNone(status, f"{released[path.name]} has a Status item")
-                assert status is not None
-                versions = re.findall(r"\bpackage (\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?)",
-                                      " ".join(status.group(1).split()))
+                status = self._contract_entry_status(released[path.name])
+                self.assertFalse(status.startswith("Experimental"), status)
+                versions = self._PACKAGE_VERSION.findall(status)
                 self.assertTrue(versions, f"{released[path.name]} Status names a package version")
                 self.assertEqual(versions[-1], package["version"])
+
+    _PACKAGE_VERSION = re.compile(r"\bpackage (\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?)")
+
+    def _contract_entry_status(self, heading: str) -> str:
+        """The Status item of the section 9.10 entry whose heading starts with `heading`, on one line."""
+        contract = (ROOT / "docs" / "ENHANCEMENT_CONTRACT.md").read_text(encoding="utf-8")
+        self.assertTrue(heading in contract, f"docs/ENHANCEMENT_CONTRACT.md has no entry {heading}")
+        entry = contract[contract.index(heading):]
+        following = re.search(r"\n#{1,4} ", entry)
+        entry = entry[:following.start()] if following else entry
+        status = re.search(r"^- \*\*Status\.\*\* (.*?)(?=^- \*\*|\Z)", entry, re.M | re.S)
+        self.assertIsNotNone(status, f"{heading} has a Status item")
+        assert status is not None
+        return " ".join(status.group(1).split())
+
+    def test_shipped_experimental_packages_have_an_entry_for_the_version_shipped(self) -> None:
+        """Section 9.10: a package the project ships without releasing it has an entry too. Its Status
+        begins with the word Experimental and the last package version it names is the shipped
+        package's, so a new version must update what the entry says was measured and which limits are
+        known, in the same change. A shipped package with neither a release nor such an entry fails."""
+        described = {"ucus98744-60hz.json": "#### 9.10.2."}
+        shipped = sorted((ROOT / "assets" / "enhancements").glob("*.json"))
+        self.assertTrue(shipped)
+        for path in shipped:
+            package = json.loads(path.read_text("utf-8"))
+            if package.get("experimental") is False:
+                continue
+            with self.subTest(package=path.name):
+                self.assertIn(path.name, described, "a shipped experimental package needs a section 9.10 entry")
+                status = self._contract_entry_status(described[path.name])
+                self.assertTrue(status.startswith("Experimental"), status)
+                versions = self._PACKAGE_VERSION.findall(status)
+                self.assertTrue(versions, f"{described[path.name]} Status names a package version")
+                self.assertEqual(versions[-1], package["version"])
+        for name in described:
+            self.assertTrue((ROOT / "assets" / "enhancements" / name).is_file(), name)
+
+    def test_shipped_littlebigplanet_package_is_the_one_section_9_10_2_describes(self) -> None:
+        """Pins the LittleBigPlanet package section 9.10.2 describes: its id, the one disc and disc
+        version it applies to, the title id a disc without a title file gets, that it does not release
+        itself, and its sites by transform. The twelve sites 0.5.0-pre10 added to 0.5.0-pre9 are pinned
+        by id and transform, because the entry says which of them were measured. The validator and the
+        publication check run on it in test_shipped_packages_validate_and_pass_the_publication_check;
+        what each transform does is proven on fixtures, and the game time of the sites by the private
+        runs the entry records."""
+        package = json.loads((ROOT / "assets" / "enhancements" / "ucus98744-60hz.json").read_text("utf-8"))
+        self.assertEqual(
+            {key: package.get(key) for key in ("id", "disc_id", "disc_version", "game_version",
+                                                "target_title_id", "category", "experimental")},
+            {"id": "lbp.timing.native_60hz", "disc_id": "UCUS98744", "disc_version": "2.00",
+             "game_version": "2.00", "target_title_id": "experimental-ucus98744",
+             "category": "timing_frame_presentation", "experimental": None})
+        self.assertEqual(package["rng_policy"]["mode"], "rescale_probability")
+        self.assertEqual(package["update_boundary"]["insn_offset"], 0)
+        by_transform: dict[str, int] = {}
+        for site in package["sites"]:
+            by_transform[site["transform"]] = by_transform.get(site["transform"], 0) + 1
+        self.assertEqual(by_transform, {
+            "step_x0.5": 33, "count_x2": 21, "decay_k_to_1-sqrt(1-k)": 11, "gate_30hz": 4,
+            "retention_m_to_sqrt(m)": 3, "value_reference": 3, "gate_30hz_phase": 2,
+            "velocity_source_x_kappa": 2, "launch_from_rest_60hz": 1})
+        self.assertEqual(sum(by_transform.values()), 80)
+        self.assertEqual(sorted((site["id"], site["transform"]) for site in package["data_sites"]), [
+            ("W001", "decay_k_to_1-sqrt(1-k)"), ("W002", "decay_k_to_1-sqrt(1-k)"),
+            ("W003", "decay_k_to_1-sqrt(1-k)")])
+        added = sorted((site["id"], site["transform"]) for site in package["sites"]
+                       if site["id"][0] in "QSX")
+        self.assertEqual(added, [
+            ("Q001", "step_x0.5"), ("Q002", "step_x0.5"), ("Q003", "step_x0.5"), ("Q004", "step_x0.5"),
+            ("Q005", "step_x0.5"), ("Q006", "retention_m_to_sqrt(m)"), ("Q007", "decay_k_to_1-sqrt(1-k)"),
+            ("Q008", "retention_m_to_sqrt(m)"), ("Q009", "gate_30hz"),
+            ("S001", "step_x0.5"), ("X001", "step_x0.5"), ("X002", "step_x0.5")])
 
     def test_validator_refuses_malformed_published_packages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
