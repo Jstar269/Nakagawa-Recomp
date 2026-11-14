@@ -964,9 +964,11 @@ def run(
     if offscreen and (failure := offscreen_present_evidence_failure(combined)):
         sys.stderr.write(combined)
         raise RuntimeError(f"offscreen presenter evidence {failure}")
-    if texdump_refused and ("TEX_DUMP: refused (" not in combined or "TEX_DUMP: on" in combined):
+    # The renderer's reason, checked before any folder is resolved (a refused start makes none).
+    texdump_reason = "TEX_DUMP: refused (a texture dump needs Enhanced or Ace and the Vulkan renderer)"
+    if texdump_refused and (texdump_reason not in combined or "TEX_DUMP: on" in combined):
         sys.stderr.write(combined)
-        raise RuntimeError("SR_TEX_DUMP=1 without the Vulkan GE was not refused with a TEX_DUMP line")
+        raise RuntimeError("SR_TEX_DUMP=1 without the Vulkan GE was not refused with the renderer's reason")
     print(
         f"DISPLAY_SMOKE_RUN status=PASS mode={mode} "
         f"frames={frames} framebuffer=0x{FRAMEBUFFER:08x} value=0x{expected:08x}"

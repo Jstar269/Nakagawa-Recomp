@@ -249,6 +249,7 @@ static void route_fail(const char *fmt, ...) {
         hle_exit_close_audio_dump();
         ge_scene_dump_finish();
         sr_compat_report();
+        sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
         (void)sr_videorec_finish_status("a route check failed", ROUTE_FAIL_EXIT);
         sr_perf_shutdown();
         sr_profile_dump_final();
@@ -1710,6 +1711,7 @@ static FILE *s_sample_out;
 
 static void hle_state_sample_refuse(const char *path, int line, const char *why) {
     fprintf(stderr, "SR_SAMPLE_SPEC: %s line %d: %s; the run stops here\n", path, line, why);
+    sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
     (void)sr_videorec_finish_status("SR_SAMPLE_SPEC was refused", 2);
     sr_perf_shutdown();
     sr_profile_dump_final();

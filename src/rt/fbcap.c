@@ -122,7 +122,11 @@ static int cap_path_is_png(const char *path) {
 /* The PNG CRC-32 table (polynomial 0xEDB88320), constant: the texture dump's workers encode on
  * two threads at once, so it is never built at run time. The compiler works out each entry from
  * the definition (eight steps of the reflected polynomial per byte, ISO 3309 / PNG annex D);
- * fbcap-selftest checks every entry against the bit-by-bit definition and the check value. */
+ * fbcap-selftest checks every entry against the bit-by-bit definition and the check value. A step
+ * names its argument twice and cannot be a function in a constant expression, so the table expands
+ * to about 5 MB before the compiler folds it: about 0.4 s more per compile of this file at -O2
+ * (GCC 16 on Windows, GCC 13 on Linux, 2026-11-13), the price of a table built before any thread
+ * runs with no 32-bit literals in the source. */
 #define PNG_CRC_STEP(c) (((c) >> 1) ^ (0xEDB88320u & (0u - ((c) & 1u))))
 #define PNG_CRC_STEP4(c) PNG_CRC_STEP(PNG_CRC_STEP(PNG_CRC_STEP(PNG_CRC_STEP(c))))
 #define PNG_CRC_ENTRY(n) PNG_CRC_STEP4(PNG_CRC_STEP4((uint32_t)(n)))

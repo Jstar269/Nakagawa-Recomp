@@ -142,6 +142,7 @@
 #include "../fbcap.h"    /* sr_png_encode_rgba, sr_file_publish_new: the texture dump's files */
 
 #include <vulkan/vulkan.h>
+#include <SDL3/SDL_thread.h>
 #include <SDL3/SDL_timer.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -5378,6 +5379,7 @@ static void tex_repl_shutdown(void) {
  * presents (a font cache that has finished typing, a streaming slot that settled). A texture
  * skipped as a movie picture or for its changing address is looked at again once that ends. */
 #define TEX_DUMP_DEFAULT_BUDGET_MB 4096u
+#define TEX_DUMP_EXIT_WAIT_MS 10000u   /* the end of a run waits this long for the files being written */
 #define TEX_DUMP_DEFAULT_MAX_FILES 20000u
 #define TEX_DUMP_MAX_FILES_LIMIT 1000000u
 #define TEX_DUMP_CHURN_RUN 30u
@@ -5433,6 +5435,7 @@ typedef struct {
     TexDumpStop stop;
     unsigned long tag;             /* the last job's tag */
     unsigned inflight;             /* jobs in flight[] */
+    SDL_ThreadID owner;            /* the thread that draws (tex_dump_note): the one that may wait */
     TexDumpJob *flight[NK_TEX_SCALE_QUEUE];
     TexDumpChurn churn[TEX_DUMP_CHURN_SLOTS];
 } TexDump;
@@ -5550,13 +5553,18 @@ static void tex_dump_redact(char *text, size_t cap, const char *dir) {
 
 static void tex_dump_shutdown(void);
 
+const char *gegpu_texdump_unavailable(void) {
+    return s_ready && g_ace_on ? NULL : "a texture dump needs Enhanced or Ace and the Vulkan renderer";
+}
+
 int gegpu_texdump_start(const char *dir, char *err, size_t err_cap) {
     char ebuf[200];
     if (!err || !err_cap) { err = ebuf; err_cap = sizeof(ebuf); }
     err[0] = '\0';
     if (s_dump.on) return 1;
-    if (!s_ready || !g_ace_on) {
-        snprintf(err, err_cap, "a texture dump needs Enhanced or Ace and the Vulkan renderer");
+    const char *unavailable = gegpu_texdump_unavailable();
+    if (unavailable) {
+        snprintf(err, err_cap, "%s", unavailable);
         return 0;
     }
     /* Checked as a texture pack folder is: strict UTF-8, a full path, shorter than a pack folder
@@ -5747,6 +5755,7 @@ static int tex_dump_churning(uint32_t addr) {
  * write each of its `levels` levels that the folder does not hold yet. */
 static void tex_dump_note(TexEnt *e, uint32_t levels) {
     if (!s_dump.on) return;
+    s_dump.owner = SDL_GetCurrentThreadID();
     tex_dump_collect();
     const int relook = e->dump_serial == s_dump.serial && e->dump_hash == e->hash;   /* counted once already */
     if (relook) {
@@ -5876,20 +5885,44 @@ static void tex_dump_note(TexEnt *e, uint32_t levels) {
     }
 }
 
+/* How long the end of a run waits for the files the workers are writing, and what the last end
+ * could not wait for (a test shortens the one and reads the other). */
+static uint32_t s_dump_exit_wait_ms = TEX_DUMP_EXIT_WAIT_MS;
+static unsigned s_dump_exit_dropped;
+
 static void tex_dump_shutdown(void) {
-    /* Every file handed to the workers lands (or fails) and is counted before the exit line: a
-     * test's hold is let go, and the guest thread waits here only because the run is ending. The
-     * wait is for the jobs already queued, which the workers run to the end; nothing new is
-     * queued once the guest thread is here. Reached from gegpu_shutdown, or from the exit at
-     * SR_EXIT_AT_VBLANK through sr_texdump_exit_finish; whichever comes second finds nothing. */
+    /* The end of the run: gegpu_shutdown, or a stop that ends it with _Exit (which skips atexit)
+     * through sr_texdump_exit_finish, which every such stop calls beside the recorder's finish;
+     * whichever comes second finds nothing. Every file handed to the workers lands (or fails) and
+     * is counted before the exit line: a test's hold is let go, and nothing new is queued once
+     * the run is ending. The wait is bounded, so a worker that never finishes cannot hold the
+     * exit: what is still being written then is said and counted in writing=, and a temp file
+     * may be left beside it. A stop reached on a worker thread (none is: a job only encodes and
+     * writes) or on a thread other than the one that draws must not wait for the workers or
+     * touch the dump's state, so it says what it leaves and prints the line as it stands. The
+     * stops come from HLE and display code, never from inside tex_scale.c, so none holds the
+     * queue's lock here. */
     sr_texdump_exit_hook(NULL);
+    if (s_dump.inflight && (nk_tex_scale_on_worker() || (s_dump.owner && s_dump.owner != SDL_GetCurrentThreadID()))) {
+        s_dump_exit_dropped = s_dump.inflight;
+        fprintf(stderr, "TEX_DUMP: note: the run ended on another thread; %u files being written are not "
+                        "waited for\n", s_dump.inflight);
+        if (s_dump.starts) tex_dump_line("exit");
+        return;
+    }
     if (s_dump.inflight) {
         nk_tex_scale_set_hold(0);
-        nk_tex_scale_wait_idle();
+        if (!nk_tex_scale_wait_work(tex_dump_job_run, s_dump_exit_wait_ms))
+            fprintf(stderr, "TEX_DUMP: note: the texture workers did not finish within %u ms of the end; the "
+                            "files still being written are not waited for (writing= counts them)\n",
+                    (unsigned)s_dump_exit_wait_ms);
         tex_dump_collect();
     }
+    s_dump_exit_dropped = s_dump.inflight;
     gegpu_texdump_stop();
     if (s_dump.starts) tex_dump_line("exit");
+    /* A job a worker still holds keeps its own memory (it is not freed here), so clearing the
+     * dump's state cannot pull anything from under a worker. */
     memset(&s_dump, 0, sizeof(s_dump));
     free(s_dumpscratch);
     s_dumpscratch = NULL;

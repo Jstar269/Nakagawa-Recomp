@@ -1946,6 +1946,79 @@ done:
     return 1;
 }
 
+/* A run's end whose workers never finish: two jobs that block hold both workers, so the levels
+ * the dump queues behind them cannot start. The end (sr_texdump_exit_finish) must not wait for
+ * ever: it gives up after its bounded wait, says so, counts the levels it could not wait for and
+ * clears the dump. The levels then run once the blockers let go (the files land late), and the
+ * cell takes every job back so the pool is clean. */
+#define XST_STUCK_LEVELS 4
+static SDL_AtomicInt s_xst_block_go, s_xst_block_started;
+static void xst_dump_blocker(void *ctx) {
+    (void)ctx;
+    SDL_AddAtomicInt(&s_xst_block_started, 1);
+    while (!SDL_GetAtomicInt(&s_xst_block_go)) SDL_Delay(1);
+}
+
+static int xst_cell_dump_stuck(int f) {
+    (void)f;
+    uint32_t t[XST_W * XST_H];
+    char dir[400];
+    xst_dump_folder(dir, sizeof(dir), "texdump_gpu_stuck");
+    xst_reset();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(0);
+    nk_tex_scale_set_hold(0);
+    SDL_SetAtomicInt(&s_xst_block_go, 0);
+    SDL_SetAtomicInt(&s_xst_block_started, 0);
+    const char *why = NULL;
+    uint64_t spent = 0;
+    unsigned dropped = 0;
+    int blockers = 0;
+    for (int i = 0; i < 2; i++) blockers += nk_tex_scale_submit_work(xst_dump_blocker, NULL, 64u);
+    const uint64_t t0 = SDL_GetTicks();
+    while (SDL_GetAtomicInt(&s_xst_block_started) < 2 && SDL_GetTicks() - t0 < 5000u) SDL_Delay(1);
+    if (blockers != 2 || SDL_GetAtomicInt(&s_xst_block_started) != 2) { why = "the blockers did not hold both workers"; goto done; }
+    if (!xst_dump_start(dir)) { why = "the dump did not start"; goto done; }
+    for (int i = 0; i < XST_STUCK_LEVELS; i++) {
+        xst_pattern(t, 701u + 2u * (uint32_t)i);
+        xst_upload(t);
+        xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+        if (!xst_dump_draw()) { why = "a draw failed"; goto done; }
+    }
+    if (s_dump.inflight != XST_STUCK_LEVELS) { why = "the levels were not all queued behind the blockers"; goto done; }
+    s_dump_exit_wait_ms = 200u;
+    const uint64_t e0 = SDL_GetTicks();
+    sr_texdump_exit_finish();
+    spent = SDL_GetTicks() - e0;
+    dropped = s_dump_exit_dropped;
+    if (spent < 190u || spent > 3000u || dropped != XST_STUCK_LEVELS || s_dump.on || s_dump.inflight || s_dump.starts)
+        why = "the end did not give up after its bounded wait, or did not count what it left";
+
+done:
+    s_dump_exit_wait_ms = TEX_DUMP_EXIT_WAIT_MS;
+    SDL_SetAtomicInt(&s_xst_block_go, 1);
+    nk_tex_scale_wait_idle();
+    void *ctx = NULL;
+    while (nk_tex_scale_take_work(xst_dump_blocker, &ctx)) {}
+    while (nk_tex_scale_take_work(tex_dump_job_run, &ctx)) {
+        TexDumpJob *j = (TexDumpJob *)ctx;
+        free(j->rgba);
+        free(j);
+    }
+    gegpu_texdump_stop();
+    tex_dump_collect();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(1);
+    if (why) {
+        fprintf(stderr, "gpu texscale selftest: FAIL dump-stuck: %s (%llu ms, %u of %d counted as left)\n", why,
+                (unsigned long long)spent, dropped, XST_STUCK_LEVELS);
+        return 0;
+    }
+    printf("gpu texscale selftest: PASS %-12s an end whose workers never finish gives up after %llu ms and "
+           "counts the %u levels it left\n", "dump-stuck", (unsigned long long)spent, dropped);
+    return 1;
+}
+
 int gegpu_texrepl_only_prepare(const char *build_root) {
     char dir[400], path[480];
     snprintf(dir, sizeof(dir), "%s/texrepl_gpu_only_pack", build_root);
@@ -2129,11 +2202,11 @@ int gegpu_texscale_selftest(void) {
                                          xst_cell_not_ready, xst_cell_rewrite, xst_cell_clut, xst_cell_replace,
                                          xst_cell_replace_palette, xst_cell_dump, xst_cell_dump_xxh,
                                          xst_cell_dump_palette, xst_cell_dump_mip, xst_cell_dump_async,
-                                         xst_cell_dump_exit, xst_cell_budget,
+                                         xst_cell_dump_exit, xst_cell_dump_stuck, xst_cell_budget,
                                          xst_cell_rtt, xst_cell_color_test, xst_cell_onetoone };
     static const char *const names[] = { "scaled-draw", "large", "upload-cap", "not-ready", "rewrite", "clut",
                                          "replace", "replace-pal", "dump", "dump-xxh",
-                                         "dump-pal", "dump-mip", "dump-async", "dump-exit", "budget", "rtt", "color-test",
+                                         "dump-pal", "dump-mip", "dump-async", "dump-exit", "dump-stuck", "budget", "rtt", "color-test",
                                          "onetoone" };
     /* The cells before onetoone check copies through 1:1 sprites, so they run with the 1:1 rule
      * off; onetoone turns it back on. */

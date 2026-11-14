@@ -482,6 +482,31 @@ int nk_tex_scale_work_pending(NkTexScaleWorkFn run) {
     return n;
 }
 
+int nk_tex_scale_wait_work(NkTexScaleWorkFn run, uint32_t timeout_ms) {
+    if (!s_started || !run) return 1;
+    const uint64_t end = SDL_GetTicks() + timeout_ms;
+    SDL_LockMutex(s_mx);
+    for (;;) {
+        int busy = 0;
+        for (int i = 0; i < NK_TEX_SCALE_QUEUE && !busy; i++)
+            busy = s_jobs[i].run == run && (s_jobs[i].state == JOB_QUEUED || s_jobs[i].state == JOB_RUNNING);
+        const uint64_t now = SDL_GetTicks();
+        if (!busy || now >= end) {
+            SDL_UnlockMutex(s_mx);
+            return !busy;
+        }
+        (void)SDL_WaitConditionTimeout(s_idle_cv, s_mx, (Sint32)(end - now));
+    }
+}
+
+int nk_tex_scale_on_worker(void) {
+    if (!s_started) return 0;
+    const SDL_ThreadID me = SDL_GetCurrentThreadID();
+    for (int i = 0; i < WORKERS; i++)
+        if (s_threads[i] && SDL_GetThreadID(s_threads[i]) == me) return 1;
+    return 0;
+}
+
 int nk_tex_scale_take(NkTexScaleResult *out) {
     memset(out, 0, sizeof(*out));
     if (!s_started) return 0;

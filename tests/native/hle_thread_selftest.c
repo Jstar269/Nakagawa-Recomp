@@ -55188,6 +55188,90 @@ static int run_atrac_zero_frame_child(const char *route) {
     }
     return sr_hle_test_unmodelled_stops() > stops ? 0 : 1;
 }
+/* ---- A stop that ends the run finishes a texture dump (#1880, #2364 S6) ------------------------
+ * Every stop that ends the run with _Exit (which skips atexit) calls sr_texdump_exit_finish before
+ * it finishes a recording, and that call runs what the Vulkan GE's dump registered at its start
+ * (ge_gpu.c's tex_dump_shutdown: the files land, the exit line prints; gpu-texscale-selftest's
+ * dump-exit cell checks that part). Here two real stops run in a child process with a probe
+ * registered in the dump's place: an unregistered NID (a fail-closed stop, status 7) and
+ * SR_WATCHDOG_EXIT (status 1). The probe writes a file, so the parent sees that the stop reached
+ * the dump's finish before the process ended. */
+#define TEXDUMP_STOP_CHILD "--texdump-stop-child="
+
+/* The child changes directory as it starts, so its files are named from the parent's scratch root,
+ * passed down in HLE_TEXDUMP_STOP_ROOT (as the adhocctl child gets SR_FLIGHT_OUTPUT). */
+static int texdump_stop_paths(char *probe, char *log, size_t capacity, const char *route) {
+    const char *root = getenv("HLE_TEXDUMP_STOP_ROOT");
+    if (!root || !root[0]) return 0;
+    const int a = snprintf(probe, capacity, "%s/texdump_stop_%s.probe", root, route);
+    const int b = snprintf(log, capacity, "%s/texdump_stop_%s.stderr", root, route);
+    return a > 0 && (size_t)a < capacity && b > 0 && (size_t)b < capacity;
+}
+
+static char s_texdump_probe[MAX_PATH];
+static void texdump_stop_probe(void) {
+    FILE *f = fopen(s_texdump_probe, "wb");
+    if (!f) return;
+    fputs("the dump's finish ran\n", f);
+    fclose(f);
+}
+
+static int run_texdump_stop_child(const char *route) {
+    char log[MAX_PATH];
+    if (!texdump_stop_paths(s_texdump_probe, log, sizeof(log), route) || !freopen(log, "w", stderr)) return 96;
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    sr_texdump_exit_hook(texdump_stop_probe);
+    sr_sched_on = 1;
+    if (strcmp(route, "nid") == 0) {
+        (void)sr_syscall(s_cpu, 0x0badd00du);   /* registered nowhere: the run stops (status 7) */
+    } else if (strcmp(route, "watchdog") == 0) {
+        hle_test_setenv("SR_WATCHDOG_EXIT", "600");   /* no new frame for 600 vblanks: status 1 */
+        for (unsigned i = 0; i < 1300u; i++) { sr_display_advance_vcount(1u); sr_vblank_tick(); }
+    }
+    return 98;   /* the stop did not end the run */
+}
+
+static void test_texdump_finished_by_run_stops(const char *self) {
+    static const struct { const char *route, *line; int status; } stops[] = {
+        { "nid", "HLE: unimplemented nid 0x0badd00d", 7 },
+        { "watchdog", "WATCHDOG: aborting after 600 vblanks", 1 },
+    };
+    char root[MAX_PATH];
+    if (!hle_scratch_root(root, sizeof(root)) || !hle_test_setenv("HLE_TEXDUMP_STOP_ROOT", root)) {
+        expect(0, "texture dump stops: the selftest knows its scratch root");
+        return;
+    }
+    for (size_t i = 0; i < sizeof(stops) / sizeof(stops[0]); i++) {
+        char probe[MAX_PATH], log[MAX_PATH], mode[96], msg[240];
+        if (!self || !texdump_stop_paths(probe, log, sizeof(probe), stops[i].route)) {
+            expect(0, "texture dump stops: the selftest knows its own path and its scratch root");
+            return;
+        }
+        remove(probe);
+        remove(log);
+        snprintf(mode, sizeof(mode), "%s%s", TEXDUMP_STOP_CHILD, stops[i].route);
+        const int status = aot_spawn_self(self, mode);
+        static char text[65536];
+        FILE *f = fopen(log, "rb");
+        size_t n = f ? fread(text, 1, sizeof(text) - 1u, f) : 0u;
+        if (f) fclose(f);
+        text[n] = '\0';
+        FILE *pf = fopen(probe, "rb");
+        if (pf) fclose(pf);
+        snprintf(msg, sizeof(msg), "the %s stop ends the run with status %d (got %d) after printing its own "
+                                   "line", stops[i].route, stops[i].status, status);
+        expect(status == stops[i].status && strstr(text, stops[i].line) != NULL, msg);
+        snprintf(msg, sizeof(msg), "the %s stop finishes the texture dump before the process ends "
+                                   "(sr_texdump_exit_finish)", stops[i].route);
+        expect(pf != NULL, msg);
+    }
+    hle_test_setenv("HLE_TEXDUMP_STOP_ROOT", NULL);
+}
+
 static void test_atrac_zero_frame_routes_322(const char *self) {
     static const char *const routes[] = { "no-data", "no-data-state", "add-stream",
                                           "add-stream-decode", "add-stream-reset" };
@@ -55234,6 +55318,12 @@ static int hle_selftest_main(int argc, char **argv) {
     expect(s_sched_coro != NULL, "scheduler coroutine was adopted");
     expect(sr_coro_current() == s_sched_coro,
            "the adopted scheduler coroutine is the one currently running");
+
+    if (argc > 1 && strncmp(argv[1], TEXDUMP_STOP_CHILD, strlen(TEXDUMP_STOP_CHILD)) == 0) {
+        int rc = run_texdump_stop_child(argv[1] + strlen(TEXDUMP_STOP_CHILD));
+        free(g_mem_base);
+        return rc;
+    }
 
     if (argc > 1 && strncmp(argv[1], ATRAC_ZERO_FRAME_CHILD, strlen(ATRAC_ZERO_FRAME_CHILD)) == 0) {
         int rc = run_atrac_zero_frame_child(argv[1] + strlen(ATRAC_ZERO_FRAME_CHILD));
@@ -55688,6 +55778,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_atrac_context_state_write_322();
     test_atrac_context_zero_frame_322();
     test_atrac_zero_frame_routes_322(argc > 0 ? argv[0] : NULL);
+    test_texdump_finished_by_run_stops(argc > 0 ? argv[0] : NULL);
     test_td24d_hle_batch();
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();

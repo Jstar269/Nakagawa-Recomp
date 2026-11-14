@@ -324,6 +324,10 @@ void gegpu_wide_counts(unsigned long *drawn, unsigned long *dropped);
  * while on but stopped (the run's budget or file limit, or a write that failed), why (else NULL).
  * A refusal names the dump folder by its last component only, never the full path. */
 int gegpu_texdump_start(const char *dir, char *err, size_t err_cap);
+/* Why no dump can start in this run (no Enhanced or Ace, or the Vulkan renderer is not running),
+ * or NULL when one can: asked before anything else, so a refused start resolves and makes no
+ * folder. */
+const char *gegpu_texdump_unavailable(void);
 void gegpu_texdump_stop(void);
 int gegpu_texdump_row(void);
 void gegpu_texdump_status(unsigned long long *saved, unsigned long long *changing, const char **stopped);

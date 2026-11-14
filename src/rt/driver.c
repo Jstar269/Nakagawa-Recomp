@@ -81,6 +81,7 @@ static int driver_stop_requested(void) {
 /* An end of main once the guest has run: a recording (#1273) names it and the exit status
  * main is about to return, so record.json tells a clean end from a failed one. */
 static int driver_run_end(int status, const char *how) {
+    sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
     (void)sr_videorec_finish_status(how, status);
     return status;
 }

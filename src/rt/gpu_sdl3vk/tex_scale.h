@@ -138,6 +138,14 @@ int nk_tex_scale_can_submit_work(uint64_t host_bytes);
 int nk_tex_scale_take_work(NkTexScaleWorkFn run, void **ctx);
 /* `run`'s work jobs queued or running (not finished yet). */
 int nk_tex_scale_work_pending(NkTexScaleWorkFn run);
+/* Wait at most `timeout_ms` for `run`'s queued and running work jobs to finish: 1 when none is
+ * left, 0 when the time ran out first (a job still queued or running). A stop that ends the run
+ * waits this way, so a worker that never finishes cannot hold the exit forever. With hold on, a
+ * queued job does not start: let the hold go first. */
+int nk_tex_scale_wait_work(NkTexScaleWorkFn run, uint32_t timeout_ms);
+/* Whether the calling thread is one of the workers (a job's own code): such a caller must never
+ * wait for the workers. */
+int nk_tex_scale_on_worker(void);
 
 /* Tests and capture runs: with sync on, nk_tex_scale_submit scales on the calling thread
  * and the result is ready before it returns; with hold on, workers start no new job (a

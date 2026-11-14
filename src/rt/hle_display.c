@@ -822,6 +822,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
                 sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, 0u, 1u);
                 ge_scene_dump_finish();
                 sr_compat_report();
+                sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
                 (void)sr_videorec_finish_status("SR_FBDUMP found no trustworthy framebuffer", 1);
                 sr_perf_shutdown();
                 sr_profile_dump_final();
@@ -834,6 +835,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
                 psmf_av_final("capture_exit");
                 ge_scene_dump_finish();
                 sr_compat_report();
+                sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
                 (void)sr_videorec_finish_status("SR_FBDUMP capture exit", capture_exit_status);
                 sr_perf_shutdown();
                 sr_profile_dump_final();
@@ -1160,6 +1162,7 @@ void sr_vblank_tick(void) {
               sr_flight_hang(diff, (uint32_t)wde);
               ge_scene_dump_finish();
               sr_compat_report();
+              sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
               (void)sr_videorec_finish_status("SR_WATCHDOG_EXIT", 1);
               sr_perf_shutdown();
               sr_profile_dump_final();
@@ -1229,11 +1232,10 @@ void sr_vblank_tick(void) {
             /* _Exit skips atexit, so the SR_AUDIODUMP file is closed here whether or not
              * SR_AUDIOSTAT is set; after the stats call above it is a no-op. */
             hle_exit_close_audio_dump();
-            /* The same for a video recording: its encoder is finished and the files muxed. */
-            (void)sr_videorec_finish_status("SR_EXIT_AT_VBLANK", 0);
-            /* And the texture dump: the files its workers hold land and are counted, and its
-             * exit line is printed (ge_shared.h; nothing when no dump started). */
+            /* The same for a texture dump and a video recording: the dump's files land and its
+             * exit line prints, the recorder's encoder is finished and the files muxed. */
             sr_texdump_exit_finish();
+            (void)sr_videorec_finish_status("SR_EXIT_AT_VBLANK", 0);
             sr_dump_calls();
             fflush(stderr);
             fflush(stdout);

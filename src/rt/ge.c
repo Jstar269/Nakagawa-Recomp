@@ -1864,7 +1864,7 @@ int sr_video_frame_recent(uint32_t addr, uint32_t bytes) {
     return 0;
 }
 
-/* ---- The texture dump at SR_EXIT_AT_VBLANK (ge_shared.h, sr_texdump_exit_finish) ------------- */
+/* ---- The texture dump at a stop that ends the run (ge_shared.h, sr_texdump_exit_finish) ------- */
 static void (*s_texdump_exit)(void);
 
 void sr_texdump_exit_hook(void (*finish)(void)) { s_texdump_exit = finish; }

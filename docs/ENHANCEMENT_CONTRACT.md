@@ -1399,7 +1399,13 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   changes: each texture is decoded from guest memory, on the guest thread, into a buffer of its own, and written to
   disk, never to guest memory; files are written only inside the folder. The encode and the write run on the
   texture scaler's two worker threads as work jobs (`tex_scale.h`, `nk_tex_scale_submit_work`), so the guest thread
-  never waits for either; a finished file is counted when the guest thread takes it back (at the next texture it
+  never waits for either. The dump still costs frame time: each new level is hashed, decoded, copied and looked up
+  on disk on the guest thread, and the two workers share the CPU with the game, so scenes where many textures first
+  appear can run less smoothly while it is on, and turning it off returns to normal. One pair of runs on Hot Shots
+  Tennis (one run each way, a match, real speed, not profiled) measured a mean frame time of 16.69 ms off and
+  17.39 ms on, p99 17.67 ms and 32.99 ms, and about 4 % fewer frames presented, with menus unchanged; earlier pairs
+  were mixed, so this is one measurement, not a bound. A finished file is counted when the guest thread takes it
+  back (at the next texture it
   looks at, the next present, or when the row is read). A level is handed over only when the workers' queue (its
   64 slots and 128 MiB of host memory, shared with scaling) has room; when it has none, the level is not dropped: it
   is counted (`queue_full=`), said once a stretch in a `TEX_DUMP: note:` line, and the texture is looked at again
@@ -1418,16 +1424,23 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   saved, and an authentic run has no row; `SR_TEX_DUMP=1` starts it with the run (`gui.c`), so a dump also holds
   what the game shows before the first pause and a script can take one unattended, and a run without the Vulkan
   renderer (it failed to start, the GDI window, the offscreen presenter) refuses it with a `TEX_DUMP: refused`
-  line. The launcher always exports `SR_TEX_DUMP` empty (`nk_launch.c`), so the variable works only for a runtime
-  started by hand: a value left in the environment never makes the games the library starts write their
+  line that names the renderer, before any folder is looked up, so a refused start makes no folder. The launcher
+  always exports `SR_TEX_DUMP` empty (`nk_launch.c`), so the variable works only for a runtime started by hand: a value left in the environment never makes the games the library starts write their
   textures. Stamps:
   `TEX_DUMP: on (hash=, budget_mb=, max_files=; ...)` when started, `TEX_DUMP: refused (<reason>)` (the row shows
   the reason too; a reason that names the folder names only its last component, never a full path), and
   `TEX_DUMP: off` and, at exit, `TEX_DUMP: exit (written=, already_there=, skipped=, changing=, failed=,
-  queue_full=, writing=, mb=)`; the run waits at exit for every file handed to the workers, so `writing=` is 0 there.
-  That holds for the exit at `SR_EXIT_AT_VBLANK` too, which skips `atexit`: it finishes the dump through
-  `sr_texdump_exit_finish` before it ends the process. The PNG encoder's CRC table is constant, so the two
-  workers share no state while they encode.
+  queue_full=, writing=, mb=)`. At the end of a run the dump waits, for at most 10 seconds, for every file handed to
+  the workers, so `writing=` is 0 there unless a worker did not finish in that time; then a `TEX_DUMP: note:` line
+  says so, `writing=` counts the files left, and a temp file can be left beside one. That end runs at a normal exit
+  (`atexit`), at `sceKernelExitGame`, and at every stop that ends the run with `_Exit`, which skips `atexit`: each
+  calls `sr_texdump_exit_finish` beside its video recording's finish (`SR_EXIT_AT_VBLANK`, `SR_WATCHDOG_EXIT`, the
+  `SR_FBDUMP` capture exit and its no-framebuffer stop, an unsupported import, an unregistered NID, a guest fault,
+  a failed route check, a refused `SR_SAMPLE_SPEC`, the libfont start-up stop, an enhancement data mismatch, and a
+  failed guest exit; `tools/test_dispatch_fatal_policy.py` requires it of every such stop). An end reached on a
+  thread other than the one that draws does not wait and says what it leaves. A crash, or an `abort()`, finishes
+  nothing: what was queued is lost and a temp file can be left. The PNG encoder's CRC table is constant, so the
+  two workers share no state while they encode.
   The project ships no texture and no upscaler: the images are the game's copyrighted images, from the player's own
   copy of the game, and stay on their PC.
 - **Tests.** `texrepl-selftest` checks the hashes against values taken from PPSSPP's own code and published xxHash
@@ -1521,16 +1534,21 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   on each draw; once the workers run, the first file lands and is counted when taken back, and the refused texture
   is written on its next draw. Its `dump-exit` cell holds 20 levels with the workers and calls what the exit at
   `SR_EXIT_AT_VBLANK` calls: every level is written whole by both workers at once, each file's CRCs right, and no
-  temp file is left. `tex-scale-selftest` checks the work jobs themselves: each runs once, on a worker
-  thread, never the submitter's; held jobs stay queued with nobody waiting; the 64 slots and the host-memory cap
-  refuse the next job; scale and work results are taken apart; a sync submit runs before it returns.
+  temp file is left. Its `dump-stuck` cell holds both workers with jobs that do not finish: the end gives up after
+  its bounded wait and counts the levels it left. `hle-thread-selftest` runs two real stops in a child process, an
+  unregistered NID (status 7) and `SR_WATCHDOG_EXIT` (status 1), with a probe in the dump's place, and requires
+  that each reaches `sr_texdump_exit_finish` before the process ends. `tex-scale-selftest` checks the work jobs
+  themselves: each runs once, on a worker thread, never the submitter's, and knows it is on one; held jobs stay
+  queued with nobody waiting; the bounded wait gives up on a held job after its time; the 64 slots and the
+  host-memory cap refuse the next job; scale and work results are taken apart; a sync submit runs before it
+  returns.
   `fbcap-selftest` checks the folder name, the folder check (ill-formed UTF-8 of each kind, a relative and, on
   Windows, a drive-relative path, 511 bytes taken and 512 refused, device and extended paths), the PNG encoder
   against the project's own inflater (`nk_psp_inflate.c`) and within `sr_png_encode_bound` (noise of 9-bit literals
   included), its CRC table against the bit-by-bit definition, and the no-replace publish, tagged and untagged, and
   a screenshot into a non-ASCII folder; `test_overlay_screens` checks the row; `test_launch_resolution` checks that
   the launcher masks an inherited `SR_TEX_DUMP=1`; and `display-smoke-run`'s offscreen run asks for a dump with
-  no Vulkan renderer and requires the `TEX_DUMP: refused` line.
+  no Vulkan renderer and requires the `TEX_DUMP: refused` line with the renderer's reason.
 
 ### 10.13. Sharp Game Text
 

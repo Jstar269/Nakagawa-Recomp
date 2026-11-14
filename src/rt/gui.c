@@ -2084,7 +2084,12 @@ static void gui_pause_texdump(int on) {
         return;
     }
     char dir[900], err[200];
-    if (!sr_texdump_folder_for_run(dir, sizeof dir)) {
+    /* The renderer first: a run that cannot dump says so, and resolves (and so makes) no user data
+     * folder on the way. */
+    const char *unavailable = gegpu_texdump_unavailable();
+    if (unavailable) {
+        snprintf(err, sizeof err, "%s", unavailable);
+    } else if (!sr_texdump_folder_for_run(dir, sizeof dir)) {
         snprintf(err, sizeof err, "this run has no user data folder or disc ID");
     } else if (gegpu_texdump_start(dir, err, sizeof err)) {
         return;
