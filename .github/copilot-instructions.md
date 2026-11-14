@@ -6,4 +6,4 @@ hard limits and what a good pull request looks like. The numbered sections are t
 and the "Maintainer process" section applies only to the maintainer's own agents.
 
 Use [`docs/README.md`](../docs/README.md) to choose maintained technical guidance and
-[`REVIEW.md`](../REVIEW.md) for review-specific checks.
+[`REVIEW.md`](REVIEW.md) for review-specific checks.

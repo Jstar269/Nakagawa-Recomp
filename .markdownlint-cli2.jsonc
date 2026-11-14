@@ -13,7 +13,11 @@
     ".claude/worktrees/**",
     "**/.gemini/**",
     "docs/archive/**",
-    ".github/**"
+    // Templates and tool instruction files under .github/ keep their own shape. The project
+    // documents there (REVIEW.md, SUPPORT.md) are linted like the root documents.
+    ".github/PULL_REQUEST_TEMPLATE.md",
+    ".github/copilot-instructions.md",
+    ".github/instructions/**"
   ],
   "config": {
     "default": true,
