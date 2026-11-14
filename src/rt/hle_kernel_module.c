@@ -991,6 +991,7 @@ static uint32_t hle_libfont_startup_stop(const char *reason) {
         sr_trace_close();
         ge_scene_dump_finish();
         sr_compat_report();
+        sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
         (void)sr_videorec_finish_status("the libfont start-up stop", HLE_LIBFONT_STARTUP_STOP_EXIT);
         sr_perf_shutdown();
         sr_profile_dump_final();
@@ -1477,6 +1478,7 @@ static uint32_t h_ExitGame(CpuState *s) {
     fputc('\n', stderr);
     fflush(stderr);
     sr_flight_exit(0u);
+    sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
     (void)sr_videorec_finish_status("the game exited (sceKernelExitGame)", code);
 
     /* Terminal on hardware in every context.  Do not park the calling thread to keep the

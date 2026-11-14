@@ -11,6 +11,7 @@
 #include "nk_overlay.h"
 #include "nk_ui_widgets.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #define QUICK_ID(offset) NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, (offset))
@@ -23,9 +24,12 @@
 
 #define QUICK_ROW_HEIGHT 64.0f
 /* Under QUICK_COMPACT_BELOW logical pixels high (the Controls page's split rule), every row
-   fits: rows are 48 px with a one-line description, on a wider card so the line holds. */
+   fits: rows are 48 px with a one-line description, on a wider card so the line holds, and
+   QUICK_ROW_GAP_COMPACT apart, so all six rows of an Enhanced run fit a 960x600 window above the
+   prompt bar (test_overlay_screens checks it). */
 #define QUICK_COMPACT_BELOW 720.0f
 #define QUICK_ROW_HEIGHT_COMPACT 48.0f
+#define QUICK_ROW_GAP_COMPACT 2.0f
 #define QUICK_CARD_WIDTH 640.0f
 #define QUICK_CARD_WIDTH_COMPACT 880.0f
 #define QUICK_SEGMENT_HEIGHT 30.0f
@@ -241,7 +245,8 @@ NkOverlayAction nk_overlay_page_settings(NkUi *ui, NkOverlayState *state,
     nk_ui_text_role(ui, QUICK_ID_TITLE, "Settings", NK_UI_TYPE_TITLE, theme->paper);
     {
         NkUiLayout rows = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_grow(),
-                                            nk_overlay_fit(), NK_UI_SPACE_1);
+                                            nk_overlay_fit(),
+                                            compact ? QUICK_ROW_GAP_COMPACT : NK_UI_SPACE_1);
         if (nk_ui_begin_container(ui, QUICK_ID_ROWS, &rows, NULL)) {
             /* The rows' part ids (the second argument) keep the numbers the first three rows
                had before fullscreen and frame pacing joined, so a page without the new rows
@@ -275,6 +280,35 @@ NkOverlayAction nk_overlay_page_settings(NkUi *ui, NkOverlayState *state,
                            "The game's speed and frame rate in a corner, from Enhanced. "
                            "Hidden while the HUD shows.", inner - 180.0f, compact,
                            model->ace_readout == 2, NK_OVERLAY_ACT_SET_READOUT, &result);
+            }
+            /* The texture dump (ge_gpu.h), in an Enhanced or Ace run on the Vulkan renderer: a
+               refused start says why; while on, the files saved, and why it stopped if it did. */
+            if (model->texdump > 0) {
+                char status[200];
+                const char *description = "Saves the textures the game draws to your user data folder, "
+                                          "to make a texture pack.";
+                if (model->texdump_note != NULL && model->texdump_note[0] != '\0') {
+                    description = model->texdump_note;
+                } else if (model->texdump == 2) {
+                    const unsigned long long saved = model->texdump_saved;
+                    const char *files = saved == 1u ? "file" : "files";
+                    if (model->texdump_stopped != NULL && model->texdump_stopped[0] != '\0') {
+                        snprintf(status, sizeof(status), "Stopped: %s. %llu %s saved.",
+                                 model->texdump_stopped, saved, files);
+                    } else if (model->texdump_changing > 0u) {
+                        snprintf(status, sizeof(status),
+                                 "%llu %s saved. Stopped for %llu %s that change every frame.", saved,
+                                 files, model->texdump_changing,
+                                 model->texdump_changing == 1u ? "texture" : "textures");
+                    } else {
+                        snprintf(status, sizeof(status), "On: %llu %s saved to your user data folder.",
+                                 saved, files);
+                    }
+                    description = status;
+                }
+                toggle_row(ui, NK_OVERLAY_ID_TEXDUMP, 5u, "Dump textures", description,
+                           inner - 180.0f, compact, model->texdump == 2,
+                           NK_OVERLAY_ACT_SET_TEXDUMP, &result);
             }
             nk_ui_end_container(ui);
         }

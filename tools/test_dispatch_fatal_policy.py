@@ -26,7 +26,9 @@ Verifies:
 6. Every fatal stop in the HLE files that ends the process with _Exit or _exit, which skip
    atexit, finishes a video recording first with its exit status
    (sr_videorec_finish_status, #1273), so record.json never stays INCOMPLETE after a stop the
-   runtime chose, and its exit_status is the code the stop exits with.
+   runtime chose, and its exit_status is the code the stop exits with. Each also finishes a
+   texture dump first (sr_texdump_exit_finish, #1880), so the files the dump's workers hold land
+   and its exit line prints.
 """
 
 from __future__ import annotations
@@ -192,6 +194,7 @@ class TestDispatchFatalPolicySource(unittest.TestCase):
 FATAL_EXIT_RE = re.compile(r"\b_[Ee]xit\(")
 EXIT_ARG_RE = re.compile(r"\b_[Ee]xit\(\s*([^()]*?)\s*\)")
 FINISH_STATUS_RE = re.compile(r"\bsr_videorec_finish_status\(\s*\"[^\"]*\"\s*,\s*([^()]*?)\s*\)")
+TEXDUMP_FINISH_RE = re.compile(r"\bsr_texdump_exit_finish\s*\(\s*\)\s*;")
 
 
 def _without_comments(source: str) -> str:
@@ -261,12 +264,21 @@ class TestFatalStopsFinishRecording(unittest.TestCase):
                     self.assertIsNotNone(exit_arg)
                     self.assertEqual(finishes[-1], exit_arg.group(1),
                                      "the recorded exit status is not the code the stop exits with")
+                    dump = TEXDUMP_FINISH_RE.search(block)
+                    self.assertIsNotNone(dump, "the stop exits without finishing a texture dump "
+                                               "(sr_texdump_exit_finish)")
+                    self.assertLess(dump.start(), block.rindex("sr_videorec_finish_status"),
+                                    "the texture dump is finished before the recording")
         # The stops this covers today; a new one is checked the same way.
         self.assertGreaterEqual(len(stops), 11, stops)
 
     def test_exit_at_vblank_records_a_clean_end(self):
         """SR_EXIT_AT_VBLANK is the documented end of a showcase recording: exit status 0."""
         self.assertIn('sr_videorec_finish_status("SR_EXIT_AT_VBLANK", 0)', hle_sources.text())
+
+    def test_texdump_finish_pattern(self):
+        code = _without_comments("{ /* sr_texdump_exit_finish(); */ sr_texdump_exit_finish (); _Exit(1); }")
+        self.assertEqual(len(TEXDUMP_FINISH_RE.findall(code)), 1)
 
     def test_finish_status_pattern(self):
         code = _without_comments('{ sr_videorec_finish_status("a, b", ROUTE_FAIL_EXIT); _Exit(ROUTE_FAIL_EXIT); }')

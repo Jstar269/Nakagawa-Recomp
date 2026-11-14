@@ -141,11 +141,13 @@ native-core-tests: ge-texture-ref-selftest fbcap-selftest
 # driven through its public API with synthetic frames: exact P6 header, size, channel order
 # and pixels for host-served and read-back captures (one frame publishes identical bytes
 # either way), skipped-present cancel, refused re-arm, failed publication resolving as
-# failed, and the parent-directory contract. Strict C99; no GPU, window or game input.
+# failed, and the parent-directory contract; the texture dump's PNG encoder against the in-tree
+# inflater, and its no-replace publish into a non-ASCII folder. Strict C99; no GPU, window or game input.
 fbcap-selftest:
-	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
+	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt -Isrc/core -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		-o $(BUILD_DIR)/fbcap_selftest.exe \
-		tests/native/fbcap_selftest.c src/rt/fbcap.c src/rt/fbcap_policy.c
+		tests/native/fbcap_selftest.c src/rt/fbcap.c src/rt/fbcap_policy.c src/core/nk_psp_inflate.c \
+		src/core/nk_shared_helpers.c $(PLAYER_PLATFORM_SRC) $(PLAYER_PLATFORM_LIBS)
 	$(BUILD_DIR)/fbcap_selftest.exe $(BUILD_DIR)/fbcap_selftest
 
 # videorec-selftest - the run recorder (src/rt/videorec.c, #1273) driven with synthetic pictures,
@@ -1016,7 +1018,8 @@ asset-index-selftest:
 # off`, which writes its stock and part-off frames' hashes to a reference file), with two synthetic
 # discs declared, CLUT4 and 4444 (`on`: soft edges, stock interiors, an undeclared disc as with the
 # part off, guest VRAM untouched, a freed copy made again without a second hash, the copy's size
-# change when the guest rewrites a texture, a replacement pack before a soft copy) and with the key
+# change when the guest rewrites a texture, a replacement pack before a soft copy, a texture dump
+# writing the stock texture beside a soft copy and a pack) and with the key
 # but nothing declared (`undeclared`: the part unavailable); both later runs draw the off run's
 # frames. It runs again with xBRZ on (`--tex-scale`) at every factor the scaler takes, off and on
 # at scale 1 (undeclared too at 2) and at factor 4 at scale 4: a declared disc stays the soft frame

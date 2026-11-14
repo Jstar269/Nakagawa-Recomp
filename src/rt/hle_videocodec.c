@@ -899,6 +899,7 @@ static uint32_t vc_csc(const char *call, uint32_t dest, uint32_t buffer_width, u
         }
     }
     free(out);
+    sr_video_frame_note(span.first, span.total_bytes);   /* the texture dump skips a movie picture */
     return 0u;
 }
 

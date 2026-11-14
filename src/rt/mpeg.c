@@ -552,6 +552,8 @@ static int64_t au_read_pts(uint32_t auAddr) {
  * memory at [first, first + bytes) with this 90 kHz presentation time. */
 void sr_psmf_av_note_video_delivery(uint32_t first, uint32_t bytes, int64_t pts, int pts_valid);
 int sr_psmf_av_active(void);   /* SR_MPEGAV: the picture hashes below are kept only for it */
+/* A movie picture now sits at [first, first + bytes) (ge_shared.h): the texture dump skips it. */
+void sr_video_frame_note(uint32_t first, uint32_t bytes);
 
 static uint32_t h264_demux_error(Mpeg *ctx, uint32_t auAddr) {
     if (ctx && !ctx->h264DemuxErrorReported) {
@@ -1185,6 +1187,7 @@ uint32_t mpeg_avc_decode(uint32_t mpegAddr, uint32_t auAddr, uint32_t frameWidth
     if (gotFrame > 0) {
         int64_t auPts = au_read_pts(auAddr);
         sr_psmf_av_note_video_delivery(buffer, bytes, auPts, auPts >= 0);
+        sr_video_frame_note(buffer, bytes);
     }
     if (getenv("SR_MPEGLOG")) {
         static int n = 0;
@@ -1977,6 +1980,7 @@ uint32_t mpeg_avc_csc(uint32_t mpegAddr, uint32_t buf, uint32_t rangeAddr, uint3
     const int64_t pts = !sr_psmf_av_active() ? -1
         : ycbcr_picture_pts(mpegAddr, mode2 ? csc_slot->hash : ycbcr_planes_hash(l.width, l.height));
     sr_psmf_av_note_video_delivery(span.first, span.total_bytes, pts, pts >= 0);
+    sr_video_frame_note(span.first, span.total_bytes);
     return 0;
 }
 

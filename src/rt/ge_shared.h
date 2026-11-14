@@ -564,6 +564,20 @@ void      ge_pow_selftest_mul(const uint32_t a[2], const uint32_t b[2], uint32_t
 /* Post-write notification for CPU-side writes that may alias GPU-cached framebuffers
  * (movie decode, DMA memcpy). No-op when no GPU backend is registered. */
 void      sr_gpu_vram_dirty(uint32_t addr, uint32_t bytes);
+/* Movie frames (#1880): a movie decoder that writes a picture into guest memory
+ * (sceMpegAvcDecode, sceMpegAvcCsc, sceMpegBaseCscAvc, the PSMF player) notes its span, and
+ * sr_video_frame_recent says whether a texture's bytes overlap a span written in the last
+ * 120 VBLANKs. The Vulkan GE's texture dump skips such a texture: a movie is a new picture
+ * every frame, not a texture to replace. The last 8 distinct spans are kept. */
+void      sr_video_frame_note(uint32_t addr, uint32_t bytes);
+int       sr_video_frame_recent(uint32_t addr, uint32_t bytes);
+/* A stop that ends the run with _Exit skips atexit, so every stop that finishes a video recording
+ * (sr_videorec_finish_status) calls sr_texdump_exit_finish first (tools/test_dispatch_fatal_policy.py
+ * checks each one). It runs what the Vulkan GE's texture dump registered when it started: the
+ * files handed to its workers land, within a bounded wait, and are counted, and the exit line is
+ * printed. A run whose dump never started registers nothing, and the call does nothing. */
+void      sr_texdump_exit_hook(void (*finish)(void));
+void      sr_texdump_exit_finish(void);
 /* Movie provenance (#2111): which guest pixels hold a decoded movie picture, for the movie
  * upscaler (SR_MOVIE_UPSCALE) on the GE renderer. Host-side metadata only: nothing here reads
  * or writes guest-visible state beyond hashing the picture's own bytes, and with tracking off

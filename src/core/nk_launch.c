@@ -1655,6 +1655,11 @@ NkResult nk_launch_start(NkLaunchSession *session) {
         snprintf(env_texpack, sizeof(env_texpack), "SR_TEX_REPLACE=%s",
                  ace_on && strstr(ace, ";texpack=on") ? session->config.texpack_dir : "");
         envp[env_count++] = env_texpack;
+        /* The texture dump (#1880) is started by the player, from the pause menu, in the run it
+           is for: always exported empty, so an SR_TEX_DUMP=1 left in the environment never makes
+           every game the library starts write its textures. A runtime started by hand still
+           reads it (a developer's or a script's switch). */
+        envp[env_count++] = "SR_TEX_DUMP=";
     }
     if (session->config.headless_accept_presented_frames > 0u) {
         snprintf(env_headless_accept_frames, sizeof(env_headless_accept_frames),

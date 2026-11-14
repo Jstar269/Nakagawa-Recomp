@@ -86,6 +86,18 @@ void sr_screenshot_clear(void);
 int sr_screenshot_name(const char *disc_id, int year, int month, int day, int hour, int minute,
                        int second, int seq, char *out, size_t outsz);
 
+/* Folder of the texture dump (ge_gpu.h, gegpu_texdump_start): "<user_root>/texdump/<disc>", the
+ * disc ID kept to A-Z, a-z, 0-9, '-' and '_' and at most 32 of them, as a screenshot's name keeps
+ * it. Returns 1 when it fits in outsz, else 0 with out empty; an empty user_root, or a disc ID
+ * with no kept character, also returns 0: the dumps of different games never share a folder.
+ * A root in Windows' extended form (\\?\ and a drive, or \\?\UNC\server\share\...) is written in its
+ * plain form, where the '/' the dump joins with is a separator. */
+int sr_texdump_folder(const char *user_root, const char *disc_id, char *out, size_t outsz);
+/* The texture dump folder of this run: the user data folder the screenshot key uses and the disc
+ * ID the launcher exports (SR_DISC_ID), through sr_texdump_folder. Lives in hle_display.c, beside
+ * the screenshot key, where the user data folder is known. */
+int sr_texdump_folder_for_run(char *out, size_t outsz);
+
 #ifdef __cplusplus
 }
 #endif

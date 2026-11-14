@@ -2510,6 +2510,7 @@ uint32_t h_io_open_path(const char *path, uint32_t flags, int forced_slot) {
         fprintf(stderr, "ENHANCEMENT_DATA_MISMATCH: the run stops here\n");
         sr_trace_close();
         ge_scene_dump_finish();
+        sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
         (void)sr_videorec_finish_status("ENHANCEMENT_DATA_MISMATCH", 1);
         sr_perf_shutdown();
         sr_profile_dump_final();

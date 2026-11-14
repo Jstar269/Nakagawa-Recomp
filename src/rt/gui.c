@@ -30,6 +30,7 @@
 #include "../core/nk_shared_helpers.h"
 #include "gpu_sdl3vk/sdl3vk.h"
 #include "fbcap.h"
+#include "fbcap_policy.h"     /* the texture dump's folder (sr_texdump_folder_for_run) */
 #include "videorec.h"         /* video recording: the CPU presenters hand over their frame */
 #include "osk_overlay.h"        /* the in-window keyboard: keys in, the frame drawn over */
 #include "osk_overlay_paint.h"
@@ -1113,6 +1114,10 @@ static void gui_report_render_path(bool vulkan_asked, bool vulkan_started, bool 
 }
 #endif
 
+#if defined(SR_SDL3VK) && !defined(SR_GUI_PRESENT_SELFTEST)
+static void gui_texdump_at_start(void);   /* the texture dump, started with the run */
+#endif
+
 void gui_init(const char *title) {
     (void)title;
 #if defined(SR_SDL3VK) || defined(_WIN32)
@@ -1160,6 +1165,9 @@ void gui_init(const char *title) {
         s_offscreen_frames = 0;
         s_last_ns = SDL_GetTicksNS();
         s_on = 1;
+#ifdef SR_SDL3VK
+        gui_texdump_at_start();   /* no Vulkan GE here: an asked-for dump is refused and said */
+#endif
         /* window_ready is the established boot-gate name for the host-presenter
          * initialization milestone. The backend field makes the no-window case
          * explicit; this event does not claim that an OS window exists. */
@@ -1226,6 +1234,9 @@ void gui_init(const char *title) {
                     /* Soft shadows (shadow=soft) are made only by the Vulkan GE renderer. */
                     if (!gpu_ge_started && g_ace_on && ace_effective()->shadow)
                         ace_feature_unavailable(ACE_FEATURE_SHADOW, ACE_SOFT_SHADOW_SOFTWARE);
+                    /* Asked for with SR_TEX_DUMP=1: started, or refused with a TEX_DUMP line when the
+                       Vulkan GE did not start (a dump reads its texture cache). */
+                    gui_texdump_at_start();
                 }
                 sr_gui_request_launcher_foreground(true, NULL,
                                                    sr_gui_raise_sdl_window,
@@ -1302,6 +1313,9 @@ void gui_init(const char *title) {
         sr_gui_raise_gdi_window, "gdi");
     /* Here when SR_VIDEO=gdi asked for this window, or when Vulkan did not start. */
     gui_report_render_path(vulkan_asked, false, gpu_ge_asked, false);
+#ifdef SR_SDL3VK
+    gui_texdump_at_start();   /* no Vulkan GE in the GDI window: an asked-for dump is refused and said */
+#endif
     sr_gui_boot_event("BOOT_EVENT phase=window_ready backend=gdi");
 #else /* !_WIN32: no GDI presenter on this host */
     /* No Win32/GDI window exists here, so there is no fallback to take. The
@@ -1312,6 +1326,9 @@ void gui_init(const char *title) {
             "gui_init: SDL3/Vulkan init failed and no Win32/GDI presenter exists on "
             "this host; running without a window (framebuffer capture still works)\n");
     s_on = 0;
+#ifdef SR_SDL3VK
+    gui_texdump_at_start();   /* nor without a window: an asked-for dump is refused and said */
+#endif
     sr_gui_boot_event("BOOT_EVENT phase=window_unavailable backend=none");
 #endif /* _WIN32 */
 }
@@ -2073,6 +2090,40 @@ static void gui_pause_describe_profile(void) {
                    : "The counters start now. Resume the game, then pause again.";
 }
 
+/* The Settings page's Dump textures row (ge_gpu.h, gegpu_texdump_start): on writes the textures
+ * the game draws from now on into <user data>/texdump/<disc ID>; a refused start says why on the
+ * row and in the log. */
+static char s_pause_texdump_note[240];
+
+static void gui_pause_texdump(int on) {
+    s_pause_texdump_note[0] = '\0';
+    if (!on) {
+        gegpu_texdump_stop();
+        return;
+    }
+    char dir[900], err[200];
+    /* The renderer first: a run that cannot dump says so, and resolves (and so makes) no user data
+     * folder on the way. */
+    const char *unavailable = gegpu_texdump_unavailable();
+    if (unavailable) {
+        snprintf(err, sizeof err, "%s", unavailable);
+    } else if (!sr_texdump_folder_for_run(dir, sizeof dir)) {
+        snprintf(err, sizeof err, "this run has no user data folder or disc ID");
+    } else if (gegpu_texdump_start(dir, err, sizeof err)) {
+        return;
+    }
+    snprintf(s_pause_texdump_note, sizeof s_pause_texdump_note, "Not started: %s.", err);
+    fprintf(stderr, "TEX_DUMP: refused (%s)\n", err);
+}
+
+/* SR_TEX_DUMP=1 starts the dump with the run, as the row does once the game is paused, so the
+ * dump also holds what the game shows before the first pause and a script can take one unattended.
+ * Any other value, or none, leaves it off. The row turns it off like a dump started there. */
+static void gui_texdump_at_start(void) {
+    const char *v = getenv("SR_TEX_DUMP");
+    if (v && strcmp(v, "1") == 0) gui_pause_texdump(1);
+}
+
 /* Carries out what the person chose on a page. */
 static void gui_pause_act(NkOverlayAction action) {
     switch (action.kind) {
@@ -2110,6 +2161,10 @@ static void gui_pause_act(NkOverlayAction action) {
         break;
     case NK_OVERLAY_ACT_VRAM_VIEW:
         if (sdl3vk_developer_mode()) gui_pause_decode_vram();
+        s_pause_dirty = 1;
+        break;
+    case NK_OVERLAY_ACT_SET_TEXDUMP:
+        gui_pause_texdump(action.value != 0);
         s_pause_dirty = 1;
         break;
     default:
@@ -2168,6 +2223,9 @@ static int gui_pause_compose(int w, int h, int rgba) {
          * Frame pacing choices. */
         model.fullscreen = pause_fullscreen_row(sdl3vk_fullscreen());
         model.pacing = pause_pacing_row(present_cap());
+        model.texdump = gegpu_texdump_row();
+        model.texdump_note = s_pause_texdump_note;
+        gegpu_texdump_status(&model.texdump_saved, &model.texdump_changing, &model.texdump_stopped);
         model.saving = sr_savedata_pause_busy() != 0;
         model.controls = s_pause_controls.rows;
         model.control_count = s_pause_controls.count;

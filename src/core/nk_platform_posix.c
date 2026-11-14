@@ -36,6 +36,11 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>   /* SYS_renameat2: nk_rename_noreplace_utf8 */
+#endif
+/* renameat2's flag (linux/fs.h), named here so no kernel header is needed. */
+#define NK_RENAME_NOREPLACE 1u
 #if defined(__ANDROID__)
 #include <android/log.h>
 #include <dlfcn.h>
@@ -89,6 +94,22 @@ int nk_remove_utf8(const char *path) {
 int nk_rename_utf8(const char *from, const char *to) {
     if (!from || !*from || !to || !*to) return -1;
     return rename(from, to);
+}
+
+int nk_rename_noreplace_utf8(const char *from, const char *to) {
+    if (!from || !*from || !to || !*to) return -1;
+    if (link(from, to) == 0) {
+        /* `to` is published; a `from` left behind is a stray temporary name, not a failure. */
+        (void)unlink(from);
+        return 0;
+    }
+    if (errno == EEXIST) return 1;
+#if defined(__linux__) && defined(SYS_renameat2)
+    /* A file system without hard links (FAT, some network shares): the kernel's no-replace rename. */
+    if (syscall(SYS_renameat2, AT_FDCWD, from, AT_FDCWD, to, NK_RENAME_NOREPLACE) == 0) return 0;
+    if (errno == EEXIST) return 1;
+#endif
+    return -1;
 }
 
 bool nk_platform_file_exists(const char *path) {

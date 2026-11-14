@@ -12,7 +12,14 @@
 //   - a failed publication or present resolves as failed (-1), never as success;
 //   - the publisher creates the parent directory it needs;
 //   - SR_FBSNAP_WINDOWS alone selects the FBSNAP slot with every present captured
-//     (fbcap_policy.c), while an explicit SR_FBSNAP keeps its meaning.
+//     (fbcap_policy.c), while an explicit SR_FBSNAP keeps its meaning;
+//   - the texture dump's PNG encoder (fixed-Huffman deflate) inflates, through the project's
+//     own inflater (nk_psp_inflate.c), to exactly the image, and shrinks a flat one;
+//   - sr_file_publish_new never replaces a file that is already there, leaves no temp file,
+//     and, like a capture, writes into a folder whose name is not ASCII; its tagged form (the
+//     dump's workers) does the same with the caller's temp names;
+//   - sr_png_encode_bound is never passed, and the dump folder check refuses what a texture pack
+//     folder check refuses (ill-formed UTF-8, a relative path, 512 bytes or more, a device path).
 // No game data, no GPU, no window: exit 0 = every check passed.
 
 #ifndef _POSIX_C_SOURCE
@@ -32,6 +39,8 @@
 
 #include "fbcap.h"
 #include "fbcap_policy.h" /* declares sr_fbcap_path with size_t: after <stdio.h> */
+#include "nk_platform.h"    /* wide-path (UTF-8) file calls for the non-ASCII folder */
+#include "nk_psp_inflate.h" /* the in-tree inflater the encoder is checked against */
 
 /* Scratch root for the files this test writes: the checkout's build/ by default, or
  * the BUILD_ROOT the Makefile passes as -DSR_SELFTEST_BUILD_ROOT, so a scratch run never
@@ -751,6 +760,25 @@ static uint32_t ref_crc32(const unsigned char *p, size_t n) {
     return c ^ 0xFFFFFFFFu;
 }
 
+/* The encoder's constant CRC table, every entry against the bit-by-bit definition (the table is
+ * constant so the texture dump's two workers share no state while they encode), and the check
+ * value of "123456789" through ref_crc32 and the table alike. */
+static void test_png_crc_table(void) {
+    const uint32_t *t = sr_png_crc_table();
+    int bad = 0;
+    for (uint32_t i = 0; i < 256u; i++) {
+        uint32_t c = i;
+        for (int k = 0; k < 8; k++) c = (c & 1u) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+        if (t[i] != c) bad++;
+    }
+    CHECK(bad == 0, "png crc table: every entry is the polynomial's");
+    const unsigned char check[] = "123456789";
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < 9u; i++) c = t[(c ^ check[i]) & 0xFFu] ^ (c >> 8);
+    CHECK((c ^ 0xFFFFFFFFu) == 0xCBF43926u && ref_crc32(check, 9u) == 0xCBF43926u,
+          "png crc table: the CRC-32 check value");
+}
+
 /* Parse a published PNG: the signature; IHDR (w x h, 8-bit RGB, no interlace); one IDAT whose
  * zlib stream is stored deflate blocks with a correct Adler-32; IEND last with nothing after it;
  * every chunk CRC right. Each decoded row must start with filter 0 and equal rgb. */
@@ -892,6 +920,94 @@ static void test_screenshot_name(void) {
           "name: a buffer too small is refused, not truncated");
 }
 
+/* The texture dump's folder: under the user data folder, one per disc ID, never shared. */
+static void test_texdump_folder(void) {
+    char out[64];
+    CHECK(sr_texdump_folder("C:/data", "ULUS10000", out, sizeof out) == 1 &&
+              strcmp(out, "C:/data/texdump/ULUS10000") == 0,
+          "dump folder: user data, texdump, disc ID");
+    CHECK(sr_texdump_folder("/d", "../a b\\c:d", out, sizeof out) == 1 &&
+              strcmp(out, "/d/texdump/abcd") == 0,
+          "dump folder: separators and other characters dropped from the disc ID");
+    CHECK(sr_texdump_folder("/d", "/:.", out, sizeof out) == 0 && out[0] == '\0',
+          "dump folder: a disc ID with no kept character is refused, not shared");
+    CHECK(sr_texdump_folder("/d", NULL, out, sizeof out) == 0, "dump folder: no disc ID refused");
+    CHECK(sr_texdump_folder("", "ULUS10000", out, sizeof out) == 0 && out[0] == '\0',
+          "dump folder: no user data folder refused");
+    CHECK(sr_texdump_folder("/d", "ULUS10000", out, 12u) == 0 && out[0] == '\0',
+          "dump folder: a buffer too small is refused, not truncated");
+    /* The runtime holds the user data root in Windows' extended form, where '/' does not separate. */
+    CHECK(sr_texdump_folder("\\\\?\\C:\\data", "ULUS10000", out, sizeof out) == 1 &&
+              strcmp(out, "C:\\data/texdump/ULUS10000") == 0,
+          "dump folder: an extended drive root is written plain");
+    CHECK(sr_texdump_folder("\\\\?\\UNC\\srv\\share\\d", "ULUS10000", out, sizeof out) == 1 &&
+              strcmp(out, "\\\\srv\\share\\d/texdump/ULUS10000") == 0,
+          "dump folder: an extended UNC root is written plain");
+    CHECK(sr_texdump_folder("\\\\?\\", "ULUS10000", out, sizeof out) == 0 && out[0] == '\0',
+          "dump folder: an extended prefix with no folder is refused");
+}
+
+/* The dump folder is checked as a texture pack folder is before anything is made or written in
+ * it (sr_texdump_folder_problem): strict UTF-8, a full path on this host, shorter than a pack
+ * folder may be, no device namespace; each refusal says why without naming the path. */
+static void test_texdump_folder_problem(void) {
+#ifdef _WIN32
+#define DUMP_ABS "C:/data/texdump/"
+#else
+#define DUMP_ABS "/data/texdump/"
+#endif
+    char out[700];
+    CHECK(sr_texdump_folder_problem(DUMP_ABS "ULUS10000") == NULL, "dump folder check: a full path is taken");
+    CHECK(sr_texdump_folder_problem(DUMP_ABS "\xC3\xA9\xE6\x97\xA5 \xF0\x9F\x8E\xAE") == NULL,
+          "dump folder check: a full path with 2-, 3- and 4-byte UTF-8 is taken");
+    CHECK(sr_texdump_folder_problem(NULL) != NULL && sr_texdump_folder_problem("") != NULL,
+          "dump folder check: no folder is refused");
+    const char *why = sr_texdump_folder_problem("texdump/ULUS10000");
+    CHECK(why && strstr(why, "full path") && !strstr(why, "texdump/"),
+          "dump folder check: a relative path is refused, and the reason names no path");
+#ifdef _WIN32
+    CHECK(sr_texdump_folder_problem("C:texdump") != NULL, "dump folder check: a drive-relative path is refused");
+    CHECK(sr_texdump_folder_problem("\\texdump") != NULL, "dump folder check: a path from the drive's root alone is refused");
+    CHECK(sr_texdump_folder_problem("\\\\srv\\share\\texdump/X") == NULL, "dump folder check: a UNC path is taken");
+#endif
+    static const char *const bad_utf8[] = {
+        DUMP_ABS "\xC0\xAF",           /* overlong '/' */
+        DUMP_ABS "\xE0\x80\xAF",       /* overlong, three bytes */
+        DUMP_ABS "\xED\xA0\x80",       /* a surrogate */
+        DUMP_ABS "\xF4\x90\x80\x80",   /* past U+10FFFF */
+        DUMP_ABS "\xE6\x97",           /* cut */
+        DUMP_ABS "\x80",               /* a lone continuation byte */
+        DUMP_ABS "\xFF",
+    };
+    for (size_t i = 0; i < sizeof bad_utf8 / sizeof bad_utf8[0]; i++) {
+        why = sr_texdump_folder_problem(bad_utf8[i]);
+        CHECK(why && strstr(why, "UTF-8"), "dump folder check: ill-formed UTF-8 is refused as such");
+    }
+    static const char *const devices[] = { "\\\\.\\COM1", "\\\\?\\C:\\data", "//./COM1", "//?/C:/data", "\\\\.\\C:\\data" };
+    for (size_t i = 0; i < sizeof devices / sizeof devices[0]; i++) {
+        why = sr_texdump_folder_problem(devices[i]);
+#ifdef _WIN32
+        CHECK(why && strstr(why, "device"), "dump folder check: a device or extended path is refused");
+#else
+        CHECK(why != NULL, "dump folder check: a device or extended path is refused");
+#endif
+    }
+    /* Length: SR_TEXDUMP_DIR_MAX - 1 bytes is taken, SR_TEXDUMP_DIR_MAX refused. */
+    const size_t base = strlen(DUMP_ABS);
+    memcpy(out, DUMP_ABS, base);
+    memset(out + base, 'a', SR_TEXDUMP_DIR_MAX - 1u - base);
+    out[SR_TEXDUMP_DIR_MAX - 1u] = '\0';
+    CHECK(sr_texdump_folder_problem(out) == NULL, "dump folder check: a path one byte under the limit is taken");
+    out[SR_TEXDUMP_DIR_MAX - 1u] = 'a';
+    out[SR_TEXDUMP_DIR_MAX] = '\0';
+    why = sr_texdump_folder_problem(out);
+    CHECK(why && strstr(why, "512"), "dump folder check: a path at the limit is refused");
+    /* What sr_texdump_folder makes from a full root passes. */
+    CHECK(sr_texdump_folder(DUMP_ABS "u", "ULUS10000", out, sizeof out) == 1 && sr_texdump_folder_problem(out) == NULL,
+          "dump folder check: the folder made from a full root is taken");
+#undef DUMP_ABS
+}
+
 static void test_screenshot_request(void) {
     sr_screenshot_clear();
     CHECK(!sr_screenshot_pending(), "request: none pending at start");
@@ -900,6 +1016,242 @@ static void test_screenshot_request(void) {
     CHECK(sr_screenshot_pending(), "request: pending after the key");
     sr_screenshot_clear();
     CHECK(!sr_screenshot_pending(), "request: taken once cleared");
+}
+
+/* ---- the texture dump's PNG encoder and its no-replace publish -------------------------------- */
+
+static uint32_t enc_rand(uint32_t *state) {
+    *state = *state * 1664525u + 1013904223u;
+    return *state;
+}
+
+/* Encode `px` and read the PNG back: signature, IHDR (w x h, 8-bit RGBA), one IDAT holding one
+ * fixed-Huffman block, IEND last, every CRC right; the IDAT's zlib stream inflated by
+ * nk_psp_inflate (which checks the Adler-32) is exactly the filter-0 rows. *png_len is the size. */
+static int encode_round_trips(const uint32_t *px, uint32_t w, uint32_t h, size_t *png_len) {
+    static const unsigned char sig[8] = {0x89u, 'P', 'N', 'G', 0x0Du, 0x0Au, 0x1Au, 0x0Au};
+    uint8_t *png = NULL;
+    size_t len = 0;
+    *png_len = 0;
+    if (!sr_png_encode_rgba(px, w, h, &png, &len) || !png) return 0;
+    *png_len = len;
+    const size_t raw_len = (size_t)h * (1u + 4u * (size_t)w);
+    int ok = len >= 8u + 25u + 12u + 12u && memcmp(png, sig, 8u) == 0;
+    size_t pos = 8u;
+    int seen_ihdr = 0, seen_idat = 0, seen_iend = 0;
+    while (ok && !seen_iend) {
+        if (pos + 12u > len) { ok = 0; break; }
+        const uint32_t clen = rd_be32(png + pos);
+        if (clen > len - pos - 12u) { ok = 0; break; }
+        const unsigned char *type = png + pos + 4u;
+        const unsigned char *data = png + pos + 8u;
+        if (ref_crc32(type, (size_t)clen + 4u) != rd_be32(data + clen)) { ok = 0; break; }
+        if (memcmp(type, "IHDR", 4u) == 0) {
+            ok = !seen_ihdr && clen == 13u && rd_be32(data) == w && rd_be32(data + 4) == h &&
+                 data[8] == 8u && data[9] == 6u && data[10] == 0u && data[11] == 0u && data[12] == 0u;
+            seen_ihdr = 1;
+        } else if (memcmp(type, "IDAT", 4u) == 0) {
+            ok = seen_ihdr && !seen_idat && clen >= 7u && data[0] == 0x78u &&
+                 (((uint32_t)data[0] << 8) | data[1]) % 31u == 0u &&
+                 (data[2] & 1u) == 1u && ((data[2] >> 1) & 3u) == 1u;   /* BFINAL, BTYPE 01 */
+            uint8_t *raw = NULL;
+            size_t got = 0;
+            char err[160];
+            ok = ok && nk_psp_inflate(data, clen, &raw, &got, raw_len, raw_len + 1u, err, sizeof err) == 0;
+            ok = ok && got == raw_len;
+            for (uint32_t y = 0; ok && y < h; y++) {
+                const uint8_t *row = raw + (size_t)y * (1u + 4u * (size_t)w);
+                ok = row[0] == 0u;
+                for (uint32_t x = 0; ok && x < w; x++) {
+                    const uint32_t c = px[(size_t)y * w + x];
+                    ok = row[1 + x * 4u] == (uint8_t)c && row[2 + x * 4u] == (uint8_t)(c >> 8) &&
+                         row[3 + x * 4u] == (uint8_t)(c >> 16) && row[4 + x * 4u] == (uint8_t)(c >> 24);
+                }
+            }
+            free(raw);
+            seen_idat = 1;
+        } else if (memcmp(type, "IEND", 4u) == 0) {
+            ok = seen_idat && clen == 0u && pos + 12u == len;
+            seen_iend = 1;
+        } else {
+            ok = 0;
+        }
+        pos += (size_t)clen + 12u;
+    }
+    free(png);
+    return ok && seen_iend;
+}
+
+static void test_png_encode(void) {
+    enum { FW = 64, FH = 64, NW = 37, NH = 23, LW = 300, LH = 9 };
+    static uint32_t flat[FW * FH], noise[NW * NH], longrow[LW * LH];
+    uint32_t seed = 12345u;
+    for (int y = 0; y < FH; y++)
+        for (int x = 0; x < FW; x++)
+            flat[(size_t)y * FW + x] = (x / 8 + y / 8) % 2 ? 0xFF2040E0u : 0x80C0A060u;
+    for (int i = 0; i < NW * NH; i++) noise[i] = enc_rand(&seed);
+    /* Rows that repeat a 7-texel run (matches of 258 bytes and short distances), and a row that
+     * repeats one 1200 bytes back (a distance past 258 with extra bits). */
+    for (int y = 0; y < LH; y++)
+        for (int x = 0; x < LW; x++)
+            longrow[(size_t)y * LW + x] = y % 3 == 2 ? longrow[(size_t)(y - 1) * LW + x] : 0xFF000000u | (uint32_t)(x % 7) * 0x111111u;
+    size_t n = 0;
+    const uint32_t one = 0x7F102030u;
+    CHECK(encode_round_trips(flat, FW, FH, &n), "png encode: a flat texture inflates to exactly its rows");
+    CHECK(n > 0 && n < (size_t)FH * (1u + 4u * (size_t)FW) / 8u, "png encode: a flat texture is compressed to under an eighth");
+    CHECK(encode_round_trips(noise, NW, NH, &n), "png encode: noise (no matches) inflates exactly");
+    CHECK(encode_round_trips(longrow, LW, LH, &n), "png encode: long and distant matches inflate exactly");
+    CHECK(encode_round_trips(&one, 1u, 1u, &n), "png encode: a 1x1 image inflates exactly");
+    /* Past the 32 KiB window and the encoder's first output buffer: 512x512 noise (1 MiB of
+     * filtered rows, no matches, so the output grows several times and every window slot is
+     * reused); noise that repeats exactly 32768 bytes back (one 16384-texel row whose second half
+     * is its first: the longest distance deflate has), and noise that repeats 32769 bytes back
+     * (two equal 8192-texel rows of 1 + 32768 bytes: one past the window, so no match); and runs
+     * of one texel longer than a 258-byte match after a change. */
+    enum { BW = 512, BH = 512, PW = 256, PH = 256, DW = 16384, HALF = DW / 2 };
+    static uint32_t big[BW * BH], far_px[DW], runs[PW * PH];
+    for (int i = 0; i < BW * BH; i++) big[i] = enc_rand(&seed);
+    CHECK(encode_round_trips(big, BW, BH, &n) && n > (size_t)BH * (1u + 4u * (size_t)BW),
+          "png encode: 512x512 noise (output growth, window reuse) inflates exactly");
+    for (int x = 0; x < DW; x++) far_px[x] = x < HALF ? enc_rand(&seed) : far_px[x - HALF];
+    CHECK(encode_round_trips(far_px, DW, 1u, &n), "png encode: a repeat exactly 32768 bytes back inflates exactly");
+    CHECK(n < (1u + 4u * (size_t)DW) * 5u / 8u, "png encode: a repeat exactly 32768 bytes back is matched");
+    CHECK(encode_round_trips(far_px, HALF, 2u, &n), "png encode: a repeat 32769 bytes back inflates exactly");
+    CHECK(n > 2u * (1u + 4u * (size_t)HALF), "png encode: a repeat 32769 bytes back, past the window, is not matched");
+    for (int y = 0; y < PH; y++)
+        for (int x = 0; x < PW; x++)
+            runs[(size_t)y * PW + x] = x < 3 ? enc_rand(&seed) : (x < 200 ? 0xFF336699u : 0xFF996633u);
+    CHECK(encode_round_trips(runs, PW, PH, &n), "png encode: runs past 258 bytes after a change inflate exactly");
+    /* Transparent texels (bytes equal to the one before: matches one byte back) between noise. */
+    for (int i = 0; i < PW * PH; i++) runs[i] = (i / 37) % 2 ? 0u : enc_rand(&seed);
+    CHECK(encode_round_trips(runs, PW, PH, &n), "png encode: runs of one byte value inflate exactly");
+    /* sr_png_encode_bound, the budget the texture dump holds for a file still being encoded: never
+     * passed, even near its worst case, noise whose every byte is a 9-bit literal (144 and up), and
+     * within a sixteenth of it there (only the filter bytes and the few chance matches cost less). */
+    for (int i = 0; i < BW * BH; i++) big[i] = enc_rand(&seed) | 0x90909090u;
+    CHECK(encode_round_trips(big, BW, BH, &n) && n <= sr_png_encode_bound(BW, BH) &&
+              sr_png_encode_bound(BW, BH) - n <= sr_png_encode_bound(BW, BH) / 16u,
+          "png encode: 9-bit-literal noise stays within the bound, and the bound is tight there");
+    CHECK(encode_round_trips(flat, FW, FH, &n) && n <= sr_png_encode_bound(FW, FH), "png encode: the bound holds for a flat texture");
+    CHECK(encode_round_trips(noise, NW, NH, &n) && n <= sr_png_encode_bound(NW, NH), "png encode: the bound holds for noise");
+    CHECK(encode_round_trips(&one, 1u, 1u, &n) && n <= sr_png_encode_bound(1u, 1u) && sr_png_encode_bound(1u, 1u) == 70u,
+          "png encode: a 1x1 image's bound is 63 + (9 * 5 + 17) / 8 = 70, and holds");
+    CHECK(sr_png_encode_bound(0u, 4u) == 0u && sr_png_encode_bound(65536u, 65536u) == 0u,
+          "png encode: no bound for a size the encoder refuses");
+    uint8_t *out = (uint8_t *)1;
+    size_t out_len = 1;
+    CHECK(sr_png_encode_rgba(flat, 0u, 4u, &out, &out_len) == 0 && out == NULL && out_len == 0u,
+          "png encode: an empty image is refused");
+    CHECK(sr_png_encode_rgba(flat, 65536u, 65536u, &out, &out_len) == 0 && out == NULL,
+          "png encode: an image past 4 GiB is refused");
+}
+
+static int read_back(const char *path, char *buf, size_t cap) {
+    FILE *f = nk_fopen_utf8(path, "rb");
+    if (!f) return -1;
+    const size_t got = fread(buf, 1, cap - 1u, f);
+    fclose(f);
+    buf[got] = '\0';
+    return (int)got;
+}
+
+static bool count_file(const char *name, void *ctx) {
+    (void)name;
+    ++*(int *)ctx;
+    return true;
+}
+
+/* A user name with an accent or in Japanese puts the user data folder on such a path: the
+ * texture dump's publish and a screenshot both write there, and a file that is already there is
+ * never replaced. */
+static void test_publish_new_unicode(void) {
+    char dir[600], sub[700], path[800], shot[800], buf[64];
+    /* "dump", e acute (U+00E9) and a CJK ideograph (U+65E5), in UTF-8 */
+    snprintf(dir, sizeof dir, "%s/dump \xC3\xA9\xE6\x97\xA5", s_dir);
+    snprintf(sub, sizeof sub, "%s/shots \xE6\x97\xA5", dir);
+    snprintf(path, sizeof path, "%s/0000000000000000deadbeef.png", dir);
+    snprintf(shot, sizeof shot, "%s/shot.png", sub);
+    nk_remove_utf8(path);
+    nk_remove_utf8(shot);
+    CHECK(nk_platform_mkdir_p(dir), "publish: the non-ASCII folder is made");
+    CHECK(sr_file_publish_new(path, "first", 5u) == SR_PUBLISH_WRITTEN,
+          "publish: a new file is written in a non-ASCII folder");
+    CHECK(nk_platform_file_exists(path) && read_back(path, buf, sizeof buf) == 5 && strcmp(buf, "first") == 0,
+          "publish: the file holds its bytes");
+    CHECK(sr_file_publish_new(path, "second!", 7u) == SR_PUBLISH_EXISTS,
+          "publish: a file already there is reported, not replaced");
+    CHECK(read_back(path, buf, sizeof buf) == 5 && strcmp(buf, "first") == 0,
+          "publish: the file already there keeps its own bytes");
+    int files = 0;
+    CHECK(nk_platform_list_files(dir, count_file, &files) && files == 1,
+          "publish: no temp file is left beside it");
+    CHECK(sr_file_publish_new("", "x", 1u) == SR_PUBLISH_FAILED, "publish: an empty path is refused");
+    /* Files already at temp names (another run's temp file, a name left behind) are never written
+     * through: decoys at the old "<path>.tmp<n>" form and at this process's "<path>.tmp<pid>.<n>"
+     * names keep their bytes, and the publish still lands. */
+    {
+        char second[800], decoy[900];
+        snprintf(second, sizeof second, "%s/1111111111111111cafef00d.png", dir);
+        nk_remove_utf8(second);
+        enum { DECOYS = 12 };
+        for (int k = 1; k <= DECOYS; k++) {
+            for (int form = 0; form < 2; form++) {
+                if (form) snprintf(decoy, sizeof decoy, "%s.tmp%lu.%d", second, nk_platform_process_id(), k);
+                else snprintf(decoy, sizeof decoy, "%s.tmp%d", second, k);
+                FILE *d = nk_fopen_utf8(decoy, "wb");
+                if (d) { fputs("decoy", d); fclose(d); }
+            }
+        }
+        CHECK(sr_file_publish_new(second, "third", 5u) == SR_PUBLISH_WRITTEN &&
+                  read_back(second, buf, sizeof buf) == 5 && strcmp(buf, "third") == 0,
+              "publish: a file is published past files already at temp names");
+        int intact = 0;
+        for (int k = 1; k <= DECOYS; k++) {
+            for (int form = 0; form < 2; form++) {
+                if (form) snprintf(decoy, sizeof decoy, "%s.tmp%lu.%d", second, nk_platform_process_id(), k);
+                else snprintf(decoy, sizeof decoy, "%s.tmp%d", second, k);
+                if (read_back(decoy, buf, sizeof buf) == 5 && strcmp(buf, "decoy") == 0) intact++;
+                nk_remove_utf8(decoy);
+            }
+        }
+        CHECK(intact == 2 * DECOYS, "publish: a file already at a temp name is never written through");
+        nk_remove_utf8(second);
+    }
+    /* The tagged publish the dump's workers use: its temp names come from the caller's tag, so it
+     * shares no counter between threads; decoys at those names are never written through either,
+     * and a file already there is kept. */
+    {
+        char tagged[800], decoy[900];
+        snprintf(tagged, sizeof tagged, "%s/2222222222222222feedf00d.png", dir);
+        nk_remove_utf8(tagged);
+        enum { DECOYS = 12 };
+        const unsigned long tag = 4242ul;
+        for (int k = 0; k < DECOYS; k++) {
+            snprintf(decoy, sizeof decoy, "%s.tmp%lu.t%lu.%d", tagged, nk_platform_process_id(), tag, k);
+            FILE *d = nk_fopen_utf8(decoy, "wb");
+            if (d) { fputs("decoy", d); fclose(d); }
+        }
+        CHECK(sr_file_publish_new_tagged(tagged, "fourth", 6u, tag) == SR_PUBLISH_WRITTEN &&
+                  read_back(tagged, buf, sizeof buf) == 6 && strcmp(buf, "fourth") == 0,
+              "publish tagged: a file is published past files already at its temp names");
+        CHECK(sr_file_publish_new_tagged(tagged, "fifth!", 6u, tag + 1u) == SR_PUBLISH_EXISTS &&
+                  read_back(tagged, buf, sizeof buf) == 6 && strcmp(buf, "fourth") == 0,
+              "publish tagged: a file already there is kept");
+        int intact = 0;
+        for (int k = 0; k < DECOYS; k++) {
+            snprintf(decoy, sizeof decoy, "%s.tmp%lu.t%lu.%d", tagged, nk_platform_process_id(), tag, k);
+            if (read_back(decoy, buf, sizeof buf) == 5 && strcmp(buf, "decoy") == 0) intact++;
+            nk_remove_utf8(decoy);
+        }
+        CHECK(intact == DECOYS, "publish tagged: a file already at a temp name is never written through");
+        nk_remove_utf8(tagged);
+        CHECK(sr_file_publish_new_tagged("", "x", 1u, tag) == SR_PUBLISH_FAILED, "publish tagged: an empty path is refused");
+    }
+    /* A screenshot (cap_write_file) into a non-ASCII folder it has to make. */
+    CHECK(sr_capture_arm(shot) == 1, "publish: screenshot arm accepted");
+    CHECK(sr_capture_serve_host(s_frame, PSP_W, PSP_H, PSP_W * 4u, SR_CAP_ORDER_BGRX) == 1 &&
+              sr_capture_result() == 1 && nk_platform_file_exists(shot),
+          "publish: a screenshot is written into a non-ASCII folder");
 }
 
 int main(int argc, char **argv) {
@@ -922,9 +1274,14 @@ int main(int argc, char **argv) {
     test_probe_result_pinned();
     test_deferred_probe();
     test_watch_deferred_matches_synchronous();
+    test_png_crc_table();
     test_png_capture();
     test_screenshot_name();
+    test_texdump_folder();
+    test_texdump_folder_problem();
     test_screenshot_request();
+    test_png_encode();
+    test_publish_new_unicode();
     if (s_failures) {
         fprintf(stderr, "fbcap_selftest: %d check(s) failed\n", s_failures);
         return 1;
