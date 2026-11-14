@@ -55199,9 +55199,8 @@ static int run_atrac_zero_frame_child(const char *route) {
 #define TEXDUMP_STOP_CHILD "--texdump-stop-child="
 
 /* The child changes directory as it starts, so its files are named from the parent's scratch root,
- * passed down in HLE_TEXDUMP_STOP_ROOT (as the adhocctl child gets SR_FLIGHT_OUTPUT). */
-static int texdump_stop_paths(char *probe, char *log, size_t capacity, const char *route) {
-    const char *root = getenv("HLE_TEXDUMP_STOP_ROOT");
+ * passed down in its argument after the route: --texdump-stop-child=<route>:<root>. */
+static int texdump_stop_paths(char *probe, char *log, size_t capacity, const char *root, const char *route) {
     if (!root || !root[0]) return 0;
     const int a = snprintf(probe, capacity, "%s/texdump_stop_%s.probe", root, route);
     const int b = snprintf(log, capacity, "%s/texdump_stop_%s.stderr", root, route);
@@ -55216,9 +55215,14 @@ static void texdump_stop_probe(void) {
     fclose(f);
 }
 
-static int run_texdump_stop_child(const char *route) {
-    char log[MAX_PATH];
-    if (!texdump_stop_paths(s_texdump_probe, log, sizeof(log), route) || !freopen(log, "w", stderr)) return 96;
+static int run_texdump_stop_child(const char *arg) {
+    char route[16], log[MAX_PATH];
+    const char *colon = strchr(arg, ':');
+    if (!colon || (size_t)(colon - arg) >= sizeof(route)) return 96;
+    memcpy(route, arg, (size_t)(colon - arg));
+    route[colon - arg] = '\0';
+    if (!texdump_stop_paths(s_texdump_probe, log, sizeof(log), colon + 1, route) || !freopen(log, "w", stderr))
+        return 96;
     extern void sr_hle_test_partition_reset(void);
     reset_fixture();
     s_fixture_loaded_end = 0x08a00000u;
@@ -55241,19 +55245,20 @@ static void test_texdump_finished_by_run_stops(const char *self) {
         { "watchdog", "WATCHDOG: aborting after 600 vblanks", 1 },
     };
     char root[MAX_PATH];
-    if (!hle_scratch_root(root, sizeof(root)) || !hle_test_setenv("HLE_TEXDUMP_STOP_ROOT", root)) {
+    if (!hle_scratch_root(root, sizeof(root))) {
         expect(0, "texture dump stops: the selftest knows its scratch root");
         return;
     }
     for (size_t i = 0; i < sizeof(stops) / sizeof(stops[0]); i++) {
-        char probe[MAX_PATH], log[MAX_PATH], mode[96], msg[240];
-        if (!self || !texdump_stop_paths(probe, log, sizeof(probe), stops[i].route)) {
+        char probe[MAX_PATH], log[MAX_PATH], mode[MAX_PATH + 64], msg[240];
+        const int m = snprintf(mode, sizeof(mode), "%s%s:%s", TEXDUMP_STOP_CHILD, stops[i].route, root);
+        if (!self || m <= 0 || (size_t)m >= sizeof(mode) ||
+            !texdump_stop_paths(probe, log, sizeof(probe), root, stops[i].route)) {
             expect(0, "texture dump stops: the selftest knows its own path and its scratch root");
             return;
         }
         remove(probe);
         remove(log);
-        snprintf(mode, sizeof(mode), "%s%s", TEXDUMP_STOP_CHILD, stops[i].route);
         const int status = aot_spawn_self(self, mode);
         static char text[65536];
         FILE *f = fopen(log, "rb");
@@ -55269,7 +55274,6 @@ static void test_texdump_finished_by_run_stops(const char *self) {
                                    "(sr_texdump_exit_finish)", stops[i].route);
         expect(pf != NULL, msg);
     }
-    hle_test_setenv("HLE_TEXDUMP_STOP_ROOT", NULL);
 }
 
 static void test_atrac_zero_frame_routes_322(const char *self) {
