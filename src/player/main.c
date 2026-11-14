@@ -5664,9 +5664,8 @@ static int player_shutdown(PlayerRun *run) {
 }
 
 int main(int argc, char *argv[]) {
-    /* Windows: run-time DLL loads (SDL's vulkan-1.dll, the SDL3_ttf fallback) search only this
-       program's folder and System32, never the current folder or PATH. First, before anything
-       can load a library; reported once the streams below exist. */
+    /* Windows: a library loaded by name from here on is looked for only in this program's folder
+       and System32, not the current folder or PATH. First; reported once the streams exist. */
     const bool library_search_hardened = nk_platform_harden_library_search();
     /* Windows: UTF-8 console output and argv rebuilt from the UTF-16 command line. */
     (void)nk_platform_init_utf8_main(&argc, &argv);
