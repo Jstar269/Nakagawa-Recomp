@@ -91,9 +91,11 @@ class ModifiedFileNoticeAuditTests(unittest.TestCase):
         )
         finding = "third_party/licenses/GPL-2.0.txt does not contain GPLv2 text markers"
         self.assertNotIn(finding, audit(root, manifest, tracked_only=False)[0])
-        # Each marker is required: the title alone, or the version line alone, is not the text.
+        # Each of the three markers is required; every sample lacks exactly one of them: the
+        # version line (a GPLv3 text), the scope sentence, the title.
         for text in (
-            "GNU GENERAL PUBLIC LICENSE\nVersion 3, 29 June 2007\n",
+            "GNU GENERAL PUBLIC LICENSE\nVersion 3, 29 June 2007\n"
+            "This License applies to any program or other work\n",
             "GNU GENERAL PUBLIC LICENSE\nVersion 2, June 1991\n",
             "Version 2, June 1991\nThis License applies to any program or other work\n",
         ):

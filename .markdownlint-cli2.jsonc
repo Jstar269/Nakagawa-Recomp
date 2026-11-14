@@ -14,9 +14,10 @@
     "**/.gemini/**",
     "docs/archive/**",
     // The pull request template and the tool instruction files under .github/ keep their own
-    // shape and are named one by one. Everything else there is linted like the root
-    // documents: the project documents (REVIEW.md, SUPPORT.md) and any Markdown file added
-    // later, an issue template included (today's issue templates are YAML forms).
+    // shape: two files by name and the .github/instructions/ folder. Everything else there is
+    // linted like the root documents: the project documents (REVIEW.md, SUPPORT.md) and any
+    // Markdown file added later, an issue template included (today's issue templates are YAML
+    // forms).
     ".github/PULL_REQUEST_TEMPLATE.md",
     ".github/copilot-instructions.md",
     ".github/instructions/**"

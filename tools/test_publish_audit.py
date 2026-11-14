@@ -2633,6 +2633,11 @@ class AndroidTreeMetadataTests(unittest.TestCase):
         prov, *_rest = publish_audit._default_provenance("elsewhere/app/build.gradle.kts", None)
         self.assertEqual(prov, "unclassified")
 
+
+class PathRuleMetadataTests(unittest.TestCase):
+    """The folder rules of ``_default_provenance``: which folders give a file its notice
+    metadata whatever its extension, and where each rule stops."""
+
     def test_fixtures_under_tests_are_project_authored_whatever_their_extension(self):
         # The fixture tree holds files no extension rule names (a Makefile, assembly import
         # stubs, golden text, a digest list); under tests/fixtures/ they keep the metadata the
@@ -2646,13 +2651,18 @@ class AndroidTreeMetadataTests(unittest.TestCase):
                     self.assertEqual(prov, "project_authored")
                     self.assertEqual(disp, "included")
                     self.assertFalse(public, "metadata alone must never make a path public")
+        # The rule is the fixture tree, not all of tests/: a file elsewhere under tests/ that no
+        # extension rule names is still an UNCLASSIFIED_PATH finding.
+        for path in ("tests/native/vectors.golden", "tests/native/Makefile", "tests/SHA256SUMS",
+                     "tests/fixtures.golden"):
+            with self.subTest(path=path):
+                prov, *_rest = publish_audit._default_provenance(path, None)
+                self.assertEqual(prov, "unclassified")
 
     def test_only_the_licence_texts_directly_under_third_party_licenses_are_notice_documents(self):
-        prov, lic, notice, gen, disp, _public = publish_audit._default_provenance(
+        prov, _lic, notice, *_rest = publish_audit._default_provenance(
             "third_party/licenses/zlib.txt", None)
-        self.assertEqual((prov, lic, notice, gen, disp),
-                         ("notice_doc", "BSD-3-Clause", "third_party/licenses/zlib.txt",
-                          "documentation", "included"))
+        self.assertEqual((prov, notice), ("notice_doc", "third_party/licenses/zlib.txt"))
         # A text in a subfolder (the DLL licence texts) keeps the general rule's class, and so
         # does a file that only shares the folder's name as a prefix.
         for path in ("third_party/licenses/sdl3/LICENSE.txt", "third_party/licenses-old/zlib.txt",

@@ -1951,15 +1951,22 @@ class HookCheckTest(unittest.TestCase):
         self.assertTrue(hooks["trailing-whitespace"].search("tests/fixtures/fonts/gudea/OFL.txt"))
         self.assertFalse(hooks["trailing-whitespace"].search("tests/fixtures/fonts/gudea/PIN.json"))
 
-    def test_no_hook_exclusion_names_a_path_the_top_level_exclusion_already_removes(self) -> None:
-        """An alternative behind the top-level ``exclude`` can never match, and reads as a rule that is not one."""
+    def test_no_rewriting_hook_exclusion_names_a_path_the_top_level_exclusion_already_removes(self) -> None:
+        """An alternative behind the top-level ``exclude`` can never match, and reads as a rule that is not one.
+
+        Covers the exclusions of the byte-rewriting hooks (``REWRITING_HOOKS``), the ones this
+        module reads. Each is one ``^(a|b|...)$`` list; another shape fails here instead of
+        passing unread.
+        """
         config = (ROOT / admit_paths.PRE_COMMIT_CONFIG).read_text(encoding="utf-8")
         top, hooks = admit_paths.rewriting_hook_exclusions(config)
         assert top is not None
         for hook, pattern in sorted(hooks.items()):
-            body = re.fullmatch(r"\^\((.*)\)\$", pattern.pattern)
-            if body is None:
+            if pattern is admit_paths._NO_EXCLUSION:
                 continue
+            body = re.fullmatch(r"\^\((.*)\)\$", pattern.pattern)
+            self.assertIsNotNone(body, f"{hook}: this test reads only exclusions of the form ^(a|b)$")
+            assert body is not None
             for alternative in body.group(1).split("|"):
                 sample = alternative.replace(".*", "x").replace("\\", "")
                 with self.subTest(hook=hook, alternative=alternative):
