@@ -319,6 +319,8 @@ int gegpu_texrepl_only_selftest(void); /* --repl-only: SR_TEX_REPLACE with no te
 int gegpu_glyph_selftest(void);         /* sharp game text (glyph_recon.h) */
 int gegpu_glyph_scene_selftest(void);   /* --scene-hash, --authentic: the scene and a hash of the picture */
 int gegpu_mips_selftest(void);          /* host-built mip chains (tex_mips.h) */
+/* --soft-shadow on|off|undeclared: the soft-shadow case's declaration, before gegpu_init. */
+int gegpu_soft_shadow_prepare(const char *mode);
 
 void gegpu_shutdown(void);
 

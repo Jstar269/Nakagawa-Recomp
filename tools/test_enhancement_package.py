@@ -6673,10 +6673,10 @@ _ACE_OTHER_NID = 0x7A000001   # a synthetic NID no transform knows
 _ACE_SLOT_WORD = 0x24840007   # addiu a0, a0, 7: a delay slot whose every run shows in $a0
 
 
-class TestAcePartsLoad(unittest.TestCase):
-    """ace_parts.load and its vblank_wait_skip transform (ENHANCEMENT_CONTRACT.md sections 9.8 and
-    11.3.10). Every fixture is synthetic: tools/import_fixtures.build_text_stub_run_elf with two
-    import stubs (sceDisplayWaitVblankStart and a synthetic NID) and a plain callee.
+class _AcePartsFixture(unittest.TestCase):
+    """The fixture of the ace_parts tests (ENHANCEMENT_CONTRACT.md section 9.8). Every fixture is
+    synthetic: tools/import_fixtures.build_text_stub_run_elf with two import stubs
+    (sceDisplayWaitVblankStart and a synthetic NID) and a plain callee.
     """
 
     def setUp(self) -> None:
@@ -6763,9 +6763,22 @@ class TestAcePartsLoad(unittest.TestCase):
         files = {p.name: p.read_text(encoding="utf-8") for p in sorted(out_dir.glob("out*")) if p.is_file()}
         return rc, out.getvalue() + err.getvalue(), files if rc == 0 else {}
 
-    def _codegen_with_hook(self, tmp: Path, offset: int, site_id: str) -> tuple[int, str, dict[str, str]]:
-        """Codegen with the load package and a code-hook package whose clip_x_widen site is the jal at
-        synth_loader+offset (contract section 9.9)."""
+    def _readers(self):
+        from analyze import Elf
+
+        return enhancement_package.elf_readers(Elf(self.elf, base=_ACE_BASE))
+
+    def _publish(self, pkg: dict[str, Any]) -> dict[str, Any]:
+        read_words, read_data = self._readers()
+        published: dict[str, Any] = enhancement_package.publish_package(
+            pkg, {k: int(v, 16) for k, v in self.symbols().items()}, executable=self.elf,
+            disc_id="ULUS99998", disc_version="1.00", read_words_fn=read_words, read_data_fn=read_data)
+        return published
+
+    def _codegen_with_hook(self, tmp: Path, offset: int, site_id: str,
+                           pkg: dict[str, Any] | None = None) -> tuple[int, str, dict[str, str]]:
+        """Codegen with the load package (or `pkg`) and a code-hook package whose clip_x_widen site is
+        the jal at synth_loader+offset (contract section 9.9)."""
         hook = {
             "schema_version": 1, "id": "synth.widen.clip", "display_name": "Synthetic clip widen",
             "version": "1.0.0", "category": "guest_memory_code_hook", "target_title_id": "synthetic-allegrex-v1",
@@ -6778,8 +6791,13 @@ class TestAcePartsLoad(unittest.TestCase):
         hook_path = tmp / "hook.json"
         hook_path.write_text(json.dumps(hook), encoding="utf-8")
         hook_path.with_suffix(".symbols.json").write_text(json.dumps(self.symbols()), encoding="utf-8")
-        return self._codegen(tmp, "stacked", self.package(), self.symbols(),
+        return self._codegen(tmp, "stacked", pkg if pkg is not None else self.package(), self.symbols(),
                              extra=(f"--code-hook-package={hook_path}",))
+
+
+class TestAcePartsLoad(_AcePartsFixture):
+    """ace_parts.load and its vblank_wait_skip transform (ENHANCEMENT_CONTRACT.md sections 9.8 and
+    11.3.10)."""
 
     def test_a_code_hook_site_on_an_ace_part_site_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -6826,8 +6844,8 @@ class TestAcePartsLoad(unittest.TestCase):
         validate_package(explicit)
         # The two transform sets are disjoint, so neither kind of site takes the other's transforms.
         self.assertFalse(enhancement_package.ACE_PART_TRANSFORMS & SITE_TRANSFORMS)
-        self.assertEqual(enhancement_package.ACE_PART_TRANSFORMS, {"vblank_wait_skip"})
-        self.assertEqual(enhancement_package.ACE_PART_NAMES, {"load"})
+        self.assertEqual(enhancement_package.ACE_PART_TRANSFORMS, {"vblank_wait_skip", "alpha_edge_soften"})
+        self.assertEqual(enhancement_package.ACE_PART_NAMES, {"load", "soft_shadows"})
 
     def test_validator_refusals(self) -> None:
         def ace(pkg: dict[str, Any]) -> dict[str, Any]:
@@ -6947,7 +6965,7 @@ class TestAcePartsLoad(unittest.TestCase):
         site = parts["properties"]["load"]["properties"]["sites"]["items"]
         self.assertFalse(site["additionalProperties"])
         self.assertEqual(set(site["properties"]), enhancement_package.ACE_PART_SITE_KEYS)
-        self.assertEqual(set(site["properties"]["transform"]["enum"]), enhancement_package.ACE_PART_TRANSFORMS)
+        self.assertEqual(set(site["properties"]["transform"]["enum"]), {"vblank_wait_skip"})
         self.assertEqual(site["properties"]["word_count"]["const"], 1)
 
     def test_digest_and_cache_key_cover_ace_parts(self) -> None:
@@ -6967,18 +6985,6 @@ class TestAcePartsLoad(unittest.TestCase):
             self.assertEqual(len(set(keys)), 3)
 
     # ---- the published form ---------------------------------------------------------------------
-
-    def _readers(self):
-        from analyze import Elf
-
-        return enhancement_package.elf_readers(Elf(self.elf, base=_ACE_BASE))
-
-    def _publish(self, pkg: dict[str, Any]) -> dict[str, Any]:
-        read_words, read_data = self._readers()
-        published: dict[str, Any] = enhancement_package.publish_package(
-            pkg, {k: int(v, 16) for k, v in self.symbols().items()}, executable=self.elf,
-            disc_id="ULUS99998", disc_version="1.00", read_words_fn=read_words, read_data_fn=read_data)
-        return published
 
     def test_published_form_covers_ace_parts_sites(self) -> None:
         published = self._publish(self.package())
@@ -7240,6 +7246,319 @@ class TestAcePartsLoad(unittest.TestCase):
                     self.assertEqual(files, {})
             self.assertIn(f"NID 0x{_ACE_OTHER_NID:08x}", self._codegen(tmp, "nid", self.package(offset=16),
                                                                          self.symbols())[1])
+
+
+def _synthetic_texture_digest(label: str) -> str:
+    """A stand-in for a keyed texture digest: 64 lowercase hex digits no texture produced."""
+    return hashlib.sha256(b"synthetic soft-shadow texture " + label.encode("ascii")).hexdigest()
+
+
+class TestAcePartsSoftShadows(_AcePartsFixture):
+    """ace_parts.soft_shadows and its alpha_edge_soften transform (ENHANCEMENT_CONTRACT.md sections
+    9.8, 10.23 and 11.3.13): a list of keyed texture digests that generated code declares to the
+    runtime once at start. The digests are synthetic."""
+
+    def _texture(self, idx: int = 0, *, edge: int = 2, label: str | None = None) -> dict[str, Any]:
+        return {"id": f"SYNTH_SHADOW_{idx}", "texture_digest": _synthetic_texture_digest(label or str(idx)),
+                "transform": "alpha_edge_soften", "edge_texels": edge}
+
+    def shadow_package(self, textures: list[dict[str, Any]] | None = None, *, load: bool = True) -> dict[str, Any]:
+        pkg = self.package(ace=load)
+        pkg.setdefault("ace_parts", {})["soft_shadows"] = {
+            "textures": textures if textures is not None else [self._texture(0), self._texture(1, edge=4)]}
+        return pkg
+
+    # ---- the validator ------------------------------------------------------------------------
+
+    def test_validator_accepts_soft_shadows(self) -> None:
+        validated = validate_package(self.shadow_package())
+        textures = enhancement_package.soft_shadow_textures(validated)
+        self.assertEqual(textures, [self._texture(0), self._texture(1, edge=4)])
+        self.assertEqual(validated["ace_parts"]["load"]["sites"][0]["transform"], "vblank_wait_skip")
+        # The part stands on its own, without a load part, and every edge width 1 to 4 is taken.
+        alone = validate_package(self.shadow_package([self._texture(i, edge=i) for i in range(1, 5)], load=False))
+        self.assertEqual(set(alone["ace_parts"]), {"soft_shadows"})
+        self.assertEqual(enhancement_package.ace_part_sites(alone), [])
+        self.assertEqual(enhancement_package.soft_shadow_textures(validate_package(self.package())), [])
+        validate_package(self.shadow_package([self._texture(i) for i in range(256)]))
+
+    def test_validator_refusals(self) -> None:
+        def tex(pkg: dict[str, Any]) -> dict[str, Any]:
+            texture: dict[str, Any] = pkg["ace_parts"]["soft_shadows"]["textures"][0]
+            return texture
+
+        cases: list[tuple[str, Any, str]] = []
+
+        def case(name: str, why: str):
+            def wrap(fn):
+                cases.append((name, fn, why))
+                return fn
+            return wrap
+
+        @case("alpha_edge_soften in load.sites",
+              "ace part transform 'alpha_edge_soften' is valid only in ace_parts.soft_shadows.textures")
+        def _(p):
+            p["ace_parts"]["load"]["sites"][0]["transform"] = "alpha_edge_soften"
+
+        @case("vblank_wait_skip in soft_shadows.textures",
+              "ace part transform 'vblank_wait_skip' is valid only in ace_parts.load.sites")
+        def _(p):
+            tex(p)["transform"] = "vblank_wait_skip"
+
+        @case("alpha_edge_soften in sites", "Unknown site transform: 'alpha_edge_soften'")
+        def _(p):
+            p["sites"][0]["transform"] = "alpha_edge_soften"
+
+        @case("an unknown transform", "Unknown ace part transform: 'blur'")
+        def _(p):
+            tex(p)["transform"] = "blur"
+
+        for name, digest in (("uppercase", _synthetic_texture_digest("0").upper()),
+                             ("63 digits", _synthetic_texture_digest("0")[:63]),
+                             ("65 digits", _synthetic_texture_digest("0") + "0"),
+                             ("not hex", "g" * 64),
+                             ("a number", 7)):
+            @case(f"a digest: {name}", "texture_digest must be 64 lowercase hex digits")
+            def _(p, digest=digest):
+                tex(p)["texture_digest"] = digest
+
+        for edge in (0, 5, -1, True, 2.0, "2"):
+            @case(f"edge_texels {edge!r}", "edge_texels must be an integer from 1 to 4")
+            def _(p, edge=edge):
+                tex(p)["edge_texels"] = edge
+
+        @case("no edge_texels", "Missing required property 'edge_texels' in soft shadow texture")
+        def _(p):
+            del tex(p)["edge_texels"]
+
+        @case("no texture_digest", "Missing required property 'texture_digest' in soft shadow texture")
+        def _(p):
+            del tex(p)["texture_digest"]
+
+        @case("a site field", "Unknown properties forbidden in soft shadow texture: ['stock_digest']")
+        def _(p):
+            tex(p)["stock_digest"] = p["sites"][0]["stock_digest"]
+
+        @case("sites in soft_shadows", "Unknown properties forbidden in ace part: ['sites']")
+        def _(p):
+            p["ace_parts"]["soft_shadows"]["sites"] = p["ace_parts"]["load"]["sites"]
+
+        @case("textures in load", "Unknown properties forbidden in ace part: ['textures']")
+        def _(p):
+            p["ace_parts"]["load"]["textures"] = p["ace_parts"]["soft_shadows"]["textures"]
+
+        @case("an empty list", "soft_shadows.textures must be a non-empty array")
+        def _(p):
+            p["ace_parts"]["soft_shadows"]["textures"] = []
+
+        @case("257 textures", "soft_shadows declares 257 textures; the runtime takes at most 256")
+        def _(p):
+            p["ace_parts"]["soft_shadows"]["textures"] = [self._texture(i) for i in range(257)]
+
+        @case("the same digest twice", "a texture_digest is declared twice")
+        def _(p):
+            p["ace_parts"]["soft_shadows"]["textures"][1]["texture_digest"] = tex(p)["texture_digest"]
+
+        @case("an id a 60 Hz site uses", "duplicate site id 'SYNTH_COUNT'")
+        def _(p):
+            tex(p)["id"] = "SYNTH_COUNT"
+
+        @case("an id a load site uses", "duplicate site id 'SYNTH_LOAD_WAIT'")
+        def _(p):
+            tex(p)["id"] = "SYNTH_LOAD_WAIT"
+
+        @case("an id used twice", "duplicate site id 'SYNTH_SHADOW_0'")
+        def _(p):
+            p["ace_parts"]["soft_shadows"]["textures"][1]["id"] = "SYNTH_SHADOW_0"
+
+        @case("an address for an id", "Address-literal site id rejected")
+        def _(p):
+            tex(p)["id"] = "0x08804000"
+
+        @case("requires naming a texture", "requires names 'SYNTH_SHADOW_0', an ace_parts site")
+        def _(p):
+            p["sites"][0]["requires"] = ["SYNTH_SHADOW_0"]
+
+        for name, change, why in cases:
+            with self.subTest(name):
+                pkg = self.shadow_package()
+                change(pkg)
+                with self.assertRaises(EnhancementPackageError) as ctx:
+                    validate_package(pkg)
+                self.assertIn(why, str(ctx.exception))
+
+    def test_schema_describes_soft_shadows(self) -> None:
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        part = schema["properties"]["ace_parts"]["properties"]["soft_shadows"]
+        self.assertFalse(part["additionalProperties"])
+        self.assertEqual(set(part["properties"]), enhancement_package.ACE_SOFT_SHADOW_PART_KEYS)
+        textures = part["properties"]["textures"]
+        self.assertEqual((textures["minItems"], textures["maxItems"]),
+                         (1, enhancement_package.ACE_SOFT_SHADOW_TEXTURES_MAX))
+        item = textures["items"]
+        self.assertFalse(item["additionalProperties"])
+        self.assertEqual(set(item["properties"]), enhancement_package.ACE_SOFT_SHADOW_TEXTURE_KEYS)
+        self.assertEqual(set(item["required"]), enhancement_package.ACE_SOFT_SHADOW_TEXTURE_KEYS)
+        self.assertEqual(item["properties"]["transform"]["enum"], ["alpha_edge_soften"])
+        self.assertEqual(item["properties"]["texture_digest"]["pattern"], "^[0-9a-f]{64}$")
+        self.assertEqual((item["properties"]["edge_texels"]["minimum"], item["properties"]["edge_texels"]["maximum"]),
+                         (enhancement_package.ACE_SOFT_SHADOW_EDGE_MIN, enhancement_package.ACE_SOFT_SHADOW_EDGE_MAX))
+
+    def test_digest_and_cache_key_cover_soft_shadows(self) -> None:
+        variants = (
+            self.package(),
+            self.shadow_package([self._texture(0)]),
+            self.shadow_package([self._texture(0, edge=3)]),
+            self.shadow_package([self._texture(0, label="other")]),
+            self.shadow_package([self._texture(0), self._texture(1)]),
+        )
+        digests = {enhancement_package.compute_package_digest(validate_package(copy.deepcopy(p))) for p in variants}
+        self.assertEqual(len(digests), len(variants))
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            keys = []
+            for idx, pkg in enumerate(variants):
+                path = Path(tmp_dir) / f"p{idx}.json"
+                path.write_text(json.dumps(pkg), encoding="utf-8")
+                keys.append(package_cache.enhancement_package_options({"ENHANCEMENT_PACKAGE": str(path)})
+                            ["enhancement_package_sha256"])
+            self.assertEqual(len(set(keys)), len(variants))
+
+    # ---- the published form ---------------------------------------------------------------------
+
+    def test_published_form_passes_the_texture_digest(self) -> None:
+        pkg = self.shadow_package()
+        published = self._publish(pkg)
+        self.assertEqual(enhancement_package.published_package_findings(published), [])
+        # Already keyed: the published form carries the declared digest as it is.
+        self.assertEqual(published["ace_parts"]["soft_shadows"], pkg["ace_parts"]["soft_shadows"])
+        # Only the digest slot is passed: every other string of a texture is still checked.
+        bad = copy.deepcopy(published)
+        bad["ace_parts"]["soft_shadows"]["textures"][0]["id"] = "shadow_0123456789"
+        self.assertIn("$.ace_parts.soft_shadows.textures[0].id contains a run of more than 8 hex digits",
+                      enhancement_package.published_package_findings(bad))
+        read_words, read_data = self._readers()
+        declaration, _symbols = enhancement_package.resolve_published_package(
+            published, executable=self.elf, read_words_fn=read_words, read_data_fn=read_data)
+        self.assertEqual(declaration["ace_parts"]["soft_shadows"], pkg["ace_parts"]["soft_shadows"])
+
+    # ---- codegen ---------------------------------------------------------------------------------
+
+    def test_codegen_declares_the_textures_once_at_start(self) -> None:
+        textures = [self._texture(0), self._texture(1, edge=4)]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            rc, output, files = self._codegen(tmp, "shadow", self.shadow_package(textures), self.symbols())
+            self.assertEqual(rc, 0, output)
+            rc0, output0, files0 = self._codegen(tmp, "plain", self.package(), self.symbols())
+            self.assertEqual(rc0, 0, output0)
+        call = ("    (void)nk_ace_soft_shadows_declare(nk_ace_shadow_key, nk_ace_shadow_digest, 2u, "
+                "nk_ace_shadow_edge);")
+        main = files["out.c"]
+        self.assertEqual(main.count("nk_ace_soft_shadows_declare("), 2, "the prototype and the one call")
+        lines = main.split("\n")
+        at = lines.index(call)
+        start = lines.index("void sr_register_all(void) {")
+        guest = next(i for i, line in enumerate(lines) if "sr_register_all: starting" in line)
+        self.assertTrue(start < at < guest, "declared in sr_register_all, before the guest's code registers")
+        self.assertEqual(lines[at - 1], "    if (nk_enhancement_on()) nk_enhancement_apply_data();")
+        # The key is the executable's stock-digest key, the digests and widths are the package's.
+        key = enhancement_package.published_digest_key(self.elf)
+        self.assertIn("static const uint8_t nk_ace_shadow_key[32] = {"
+                      + ", ".join(f"0x{b:02x}" for b in key) + "};", lines)
+        for texture in textures:
+            row = ("    {" + ", ".join(f"0x{b:02x}" for b in bytes.fromhex(texture["texture_digest"]))
+                   + f"}},  /* {texture['id']} */")
+            self.assertIn(row, lines)
+        self.assertIn("static const uint8_t nk_ace_shadow_edge[] = {2u, 4u};", lines)
+        # Nothing else changes: the build without the part differs only by these lines and the
+        # declaration digest of the epoch stamp, and has no trace of the part.
+        self.assertNotIn("nk_ace_sh", "\n".join(files0.values()))
+        self.assertEqual(set(files), set(files0))
+        for name in files:
+            if name != "out.c":
+                self.assertEqual(files[name], files0[name], name)
+        delta = [d for d in difflib.ndiff(files0["out.c"].split("\n"), main.split("\n"))
+                 if d[:1] in "+-" and d[:2] != "? "]
+        removed = [d for d in delta if d.startswith("- ")]
+        self.assertEqual(len(removed), 1)
+        self.assertIn("AOT Enhancement Epoch", removed[0])
+        added = [d[2:] for d in delta if d.startswith("+ ")]
+        self.assertIn(call, added)
+        self.assertTrue(all("AOT Enhancement Epoch" in a or "nk_ace_sh" in a or "nk_ace_soft_shadows_declare" in a
+                            or a.startswith(("    {0x", "/* Ace soft shadows", " * texture's keyed digest",
+                                             "/* src/rt/ace.h */", "                                const uint8_t",
+                                             "};"))
+                            or a == "" for a in added), added)
+
+    @unittest.skipUnless(GCC, "needs a host C compiler")
+    def test_codegen_declaration_compiles_against_ace_h_and_declares(self) -> None:
+        """Compile the emitted tables, prototype and call in one unit with src/rt/ace.h, link
+        src/rt/ace.c and run it: a prototype that drifts from ace.h fails to compile (checked
+        below with a changed copy), and the runtime holds the package's key, digests and edges."""
+        textures = [self._texture(0), self._texture(1, edge=4)]
+        key = enhancement_package.published_digest_key(self.elf)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            rc, output, files = self._codegen(tmp, "shadow", self.shadow_package(textures), self.symbols())
+            self.assertEqual(rc, 0, output)
+            lines = files["out.c"].split("\n")
+            first = lines.index("/* Ace soft shadows (ace_parts.soft_shadows): the executable's stock-digest key, each "
+                                "declared")
+            proto = lines.index("/* src/rt/ace.h */", first)
+            block = "\n".join(lines[first:proto + 3])
+            call = next(line for line in lines if "nk_ace_soft_shadows_declare(nk_ace_shadow_key" in line)
+            main = (
+                "int main(void) {\n"
+                f"{call}\n"
+                "    const AceSoftShadows *d = nk_ace_soft_shadows();\n"
+                "    printf(\"%u\\n\", (unsigned)d->count);\n"
+                "    for (int i = 0; i < 32; i++) printf(\"%02x\", d->key[i]);\n"
+                "    printf(\"\\n\");\n"
+                "    for (uint32_t t = 0; t < d->count; t++) {\n"
+                "        for (int i = 0; i < 32; i++) printf(\"%02x\", d->digest[t][i]);\n"
+                "        printf(\" %u\\n\", (unsigned)d->edge[t]);\n"
+                "    }\n"
+                "    return 0;\n"
+                "}\n"
+            )
+            assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
+
+            def build(name: str, text: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+                harness, exe = tmp / f"{name}.c", tmp / f"{name}.exe"
+                harness.write_text("#include <stdio.h>\n#include \"ace.h\"\n" + text + "\n" + main, encoding="utf-8")
+                return (subprocess.run([GCC, "-std=c99", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
+                                        f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness),
+                                        str(ROOT / "src" / "rt" / "ace.c")], capture_output=True, text=True), exe)
+
+            built, exe = build("declare", block)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+            # The negative control: the same unit with the emitted prototype's count widened.
+            self.assertEqual(block.count("uint32_t count,"), 1)
+            drifted, _exe = build("drift", block.replace("uint32_t count,", "uint64_t count,"))
+        self.assertNotEqual(drifted.returncode, 0, "a prototype that differs from ace.h compiled")
+        self.assertIn("nk_ace_soft_shadows_declare", drifted.stderr)
+        self.assertEqual(run.stdout.split("\n"), [
+            "2", key.hex(),
+            *(f"{texture['texture_digest']} {texture['edge_texels']}" for texture in textures), ""])
+
+    def test_a_code_hook_site_id_a_shadow_texture_uses_is_refused(self) -> None:
+        # Texture ids are in the one id namespace across both packages (contract sections 9.8, 9.9).
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rc, out, files = self._codegen_with_hook(Path(tmp_dir), 24, "SYNTH_SHADOW_0", self.shadow_package())
+        self.assertEqual(rc, 1, out)
+        self.assertIn("code-hook site SYNTH_SHADOW_0: the enhancement package has a site with that id", out)
+        self.assertEqual(files, {})
+
+    def test_a_code_hook_site_beside_soft_shadows_builds(self) -> None:
+        # A soft_shadows part has textures, not sites: a code-hook package beside it still builds.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rc, out, files = self._codegen_with_hook(Path(tmp_dir), 24, "SYNTH_WIDEN",
+                                                     self.shadow_package(load=False))
+        self.assertEqual(rc, 0, out)
+        text = "\n".join(files.values())
+        self.assertEqual(text.count("sr_enhancement_widen_clip_x(s->r[2], _nk_clip_off, 1u);"), 1)
+        self.assertEqual(text.count("(void)nk_ace_soft_shadows_declare("), 1)
 
 
 if __name__ == "__main__":

@@ -27,15 +27,16 @@ static int value_on_off(const char *v, int *out) {
 
 /* The line's keys. Each says whether a line must carry it, so the order of the table decides
    nothing for the parser: the rows that are not required (tier, stick, load, depth, ssaa, peak,
-   glyphs, cull, mips, texpack and pad) are the keys a line may leave out. Each also names the longest value
-   ace_format writes for it, so ace_longest_line builds the longest line from this table alone. */
+   glyphs, cull, mips, texpack, pad and shadow) are the keys a line may leave out. Each also names the
+   longest value ace_format writes for it, so ace_longest_line builds the longest line from this table
+   alone. */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
     ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TWIN, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_DEPTH,
     ACE_KEY_SSAA,
     ACE_KEY_CULL, ACE_KEY_PEAK, ACE_KEY_GLYPHS,
     ACE_KEY_MIPS, ACE_KEY_TEXPACK,
-    ACE_KEY_PAD
+    ACE_KEY_PAD, ACE_KEY_SHADOW
 } AceKey;
 
 static const struct {
@@ -64,6 +65,7 @@ static const struct {
     {"mips", ACE_KEY_MIPS, 0, "on"},
     {"texpack", ACE_KEY_TEXPACK, 0, "on"},
     {"pad", ACE_KEY_PAD, 0, "late"},
+    {"shadow", ACE_KEY_SHADOW, 0, "soft"},
 };
 
 size_t ace_longest_line(char *out, size_t cap) {
@@ -143,6 +145,13 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                 else if (strcmp(v, "fill") == 0) { c.wide = ACE_WIDE_FILL; ok = 1; }
                 if (ok && c.wide && !ACE_HAS_WIDE) {
                     why_set(why, why_cap, "wide is not part of this build"); return 0;
+                }
+                break;
+            case ACE_KEY_SHADOW:
+                if (strcmp(v, "off") == 0) { c.shadow = ACE_SHADOW_OFF; ok = 1; }
+                else if (strcmp(v, "soft") == 0) { c.shadow = ACE_SHADOW_SOFT; ok = 1; }
+                if (ok && c.shadow && !ACE_HAS_SHADOW) {
+                    why_set(why, why_cap, "shadow is not part of this build"); return 0;
                 }
                 break;
             case ACE_KEY_CULL:
@@ -256,6 +265,8 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
     if (c.load && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "load needs tier=ace"); return 0; }
     /* Late pad sampling acts at a title package's update boundary (contract 11.3.9): Ace only. */
     if (c.pad && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "pad needs tier=ace"); return 0; }
+    /* An Ace item (contract 11.3.13): it needs the title's own package to declare its shadows. */
+    if (c.shadow && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "shadow needs tier=ace"); return 0; }
     c.on = 1;
     if (out) *out = c;
     why_set(why, why_cap, "");
@@ -270,6 +281,7 @@ static const char *smooth_word(int v) {
 static const char *tier_word(int v) { return v == ACE_TIER_ACE ? "ace" : "enhanced"; }
 static const char *sas_word(int v) { return v == ACE_SAS_SINC ? "sinc" : "off"; }
 static const char *tess_word(int v) { return v == 2 ? "2" : v == 3 ? "3" : v == 4 ? "4" : "off"; }
+static const char *shadow_word(int v) { return v == ACE_SHADOW_SOFT ? "soft" : "off"; }
 
 int ace_format(const AceConfig *c, char *out, size_t cap) {
     int n;
@@ -330,6 +342,11 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
         const int m = snprintf(out + n, cap - (size_t)n, ";pad=late");
         n = m < 0 ? -1 : n + m;
     }
+    /* Likewise shadow, after pad, before cull: a missing shadow is off (contract 11.3.13). */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->shadow) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";shadow=%s", shadow_word(c->shadow));
+        n = m < 0 ? -1 : n + m;
+    }
     /* The same for cull, which stays last: written only when on. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->cull) {
         const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
@@ -354,6 +371,7 @@ static int s_confirmed[ACE_FEATURE_COUNT];
 static void (*s_exit_report[ACE_FEATURE_COUNT])(void);
 static uint64_t s_af_failures;
 static unsigned long s_cull_untracked;
+static AceSoftShadows s_soft;    /* the package's declaration; not part of SR_ACE, never reset by it */
 static unsigned long long s_stick_samples;   /* samples off rest the stick remap passed through */
 static int s_stick_host;                     /* the host dead zone it used last, in centred counts */
 static unsigned long long s_load_skipped;
@@ -369,7 +387,7 @@ static AceLatency s_latency;
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
     "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull",
     "depth", "twin", "ssaa", "peak", "glyphs", "mips", "texpack",
-    "pad"
+    "pad", "shadow"
 };
 
 /* The run's observation state. */
@@ -484,6 +502,9 @@ int ace_init_spec(const char *spec, const char *report_path) {
     if (s_req.glyphs)
         fprintf(stderr, "ACE_MODE: glyphs on (small text sprites draw from glyphs rebuilt at the render "
                         "scale; the frames the game keeps in VRAM change where they do)\n");
+    if (s_req.shadow)
+        fprintf(stderr, "ACE_MODE: shadow soft (declared shadow textures are drawn with soft edges; "
+                        "the committed frame changes)\n");
     if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
     if (s_req.texpack)
         fprintf(stderr, "ACE_MODE: texpack on (the title's texture pack replaces the textures it lists)\n");
@@ -537,6 +558,7 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_SMOOTH: s_eff.smooth = 0; break;
     case ACE_FEATURE_STICK: s_eff.stick = 0; break;
     case ACE_FEATURE_MIPS: s_eff.mips = 0; break;
+    case ACE_FEATURE_SHADOW: s_eff.shadow = 0; break;
     case ACE_FEATURE_SAS: s_eff.sas = 0; break;
     case ACE_FEATURE_TESS: s_eff.tess = 0; break;
     case ACE_FEATURE_LOAD: s_eff.load = 0; break;
@@ -552,6 +574,30 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     }
     fprintf(stderr, "ACE_MODE: %s unavailable (%s)\n", k_feature_key[feature], s_unavailable[feature]);
 }
+
+int nk_ace_soft_shadows_declare(const uint8_t key[32], const uint8_t (*digests)[32], uint32_t count,
+                                const uint8_t *edge_texels) {
+    const char *why = NULL;
+    if (!key) why = "no key";
+    else if (count > ACE_SOFT_SHADOW_MAX) why = "more than 256 textures";
+    else if (count && (!digests || !edge_texels)) why = "no digests or edge widths";
+    for (uint32_t i = 0; !why && i < count; i++)
+        if (edge_texels[i] < 1u || edge_texels[i] > 4u) why = "an edge width outside 1 to 4 texels";
+    memset(&s_soft, 0, sizeof(s_soft));
+    if (why) {
+        fprintf(stderr, "ACE_MODE: soft shadow declaration refused (%s)\n", why);
+        return 0;
+    }
+    memcpy(s_soft.key, key, sizeof(s_soft.key));
+    if (count) {
+        memcpy(s_soft.digest, digests, (size_t)count * sizeof(s_soft.digest[0]));
+        memcpy(s_soft.edge, edge_texels, count);
+    }
+    s_soft.count = count;
+    return 1;
+}
+
+const AceSoftShadows *nk_ace_soft_shadows(void) { return &s_soft; }
 
 void ace_set_cull_untracked(unsigned long n) {
     if (g_ace_on) s_cull_untracked = n;
@@ -721,6 +767,7 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.pad) used = words_add(out, cap, used, "late pad sampling");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
     if (s_eff.texpack) used = words_add(out, cap, used, "texture pack");
+    if (s_eff.shadow) used = words_add(out, cap, used, "soft shadows");
     if (s_eff.depth) used = words_add(out, cap, used, "32-bit depth");
     if (s_eff.ssaa) used = words_add(out, cap, used, s_eff.ssaa == 4 ? "4x supersampling" : "2x supersampling");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
@@ -1470,6 +1517,8 @@ size_t ace_report_json(char *out, size_t cap) {
     if (s_ssaa_limited) ACE_PUT("  \"ssaa_requested\": %d,\n", s_req.ssaa);
     if (s_req.glyphs) ACE_PUT("  \"glyphs\": %s,\n", s_eff.glyphs ? "true" : "false");
     if (s_req.mips) ACE_PUT("  \"mips\": %s,\n", s_eff.mips ? "true" : "false");
+    if (s_req.shadow) ACE_PUT("  \"shadow\": \"%s\",\n  \"shadow_declared\": %u,\n",
+                              shadow_word(s_eff.shadow), (unsigned)s_soft.count);
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
     if (s_req.texpack) ACE_PUT("  \"texpack\": %s,\n", s_eff.texpack ? "true" : "false");
@@ -1605,12 +1654,12 @@ void ace_finish(void) {
                                                 ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL,
                                                 ACE_HAS_DEPTH, 1, ACE_HAS_SSAA, ACE_HAS_PEAK, ACE_HAS_GLYPHS,
                                                 ACE_HAS_MIPS, ACE_HAS_TEXPACK,
-                                                ACE_HAS_PAD };
+                                                ACE_HAS_PAD, ACE_HAS_SHADOW };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
                                         s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
                                         s_eff.load, s_eff.cull, s_eff.depth, s_eff.twin, s_eff.ssaa,
                                         s_eff.peak, s_eff.glyphs, s_eff.mips, s_eff.texpack,
-                                        s_eff.pad };
+                                        s_eff.pad, s_eff.shadow };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
@@ -1624,6 +1673,9 @@ void ace_finish(void) {
                 : f == ACE_FEATURE_TEXPACK ? "did not run: only the Vulkan renderer draws texture packs"
                 : f == ACE_FEATURE_PAD
                 ? "did not run: no update boundary ran (no 60 FPS game logic package, or it is off)"
+                : f == ACE_FEATURE_SHADOW
+                ? (s_soft.count ? "did not run: no declared shadow texture was drawn by the Vulkan GE renderer"
+                                : ACE_SOFT_SHADOW_NONE_DECLARED)
                 : "did not run: its renderer or presenter did not start");
     }
     size_t len = ace_report_json(json, sizeof(json));

@@ -67,7 +67,8 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_SSAA] = ENHANCED_WORDS(k_enhanced_ssaa_labels),
     [PLAYER_PART_MIPS] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_TEXPACK] = ENHANCED_WORDS(k_enhanced_switch_labels),
-    [PLAYER_PART_PAD] = ENHANCED_WORDS(k_enhanced_switch_labels)};
+    [PLAYER_PART_PAD] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_SHADOW] = ENHANCED_WORDS(k_enhanced_switch_labels)};
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
 enum { ENHANCED_MAX_WORDS = 5 };
@@ -3433,6 +3434,18 @@ static void test_settings_pages(void) {
               strstr(dump, "\"TEXTURE PACK: OFF\"") < strstr(dump, "\"LATE PAD SAMPLING: OFF\"") &&
               strstr(dump, "Ace only, with 60 FPS logic. Reads the pad") != NULL,
           "Settings > Enhanced shows the Late pad sampling row after Texture pack");
+    /* The 18th (Soft shadows, contract 11.3.13) follows Late pad sampling, at 0x4684; 1800 tall shows
+       its row, and its description wraps after "names their". */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(17) == 0x4684u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SHADOW) == 0x4684u && PLAYER_PART_COUNT >= 18,
+          "the part rows' ids: the 18th in the second range, after the 17th");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1800, dump, sizeof(dump)) &&
+              strstr(dump, "\"LATE PAD SAMPLING: OFF\"") != NULL &&
+              strstr(dump, "\"SOFT SHADOWS: OFF\"") != NULL &&
+              strstr(dump, "\"LATE PAD SAMPLING: OFF\"") < strstr(dump, "\"SOFT SHADOWS: OFF\"") &&
+              strstr(dump, "\"Ace only, in games whose package names their") != NULL &&
+              strstr(dump, "shadows. Changes what the frame shows.\"") != NULL,
+          "Settings > Enhanced shows the Soft shadows row after Late pad sampling");
     for (unsigned i = 0u; i < PLAYER_PART_COUNT; ++i) {
         PlayerUiAction part =
             activate_flow_button(PLAYER_UI_ID_ENHANCED_PART(i), FLOW_SETTINGS_ACE);

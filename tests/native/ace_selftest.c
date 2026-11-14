@@ -441,6 +441,50 @@ static void cell_parse(void) {
               "texpack, pad and cull format in that order, cull last (%s)", out);
     }
     }
+    /* shadow (contract 11.3.13): optional like cull; shadow=off and a missing key are off, shadow=soft
+       needs an Ace line, any other value is refused, and a line without it formats as before. */
+    {
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.shadow == ACE_SHADOW_OFF, "a missing shadow is off");
+        snprintf(spec, sizeof(spec), "%s;tier=ace;shadow=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.shadow == ACE_SHADOW_OFF, "shadow=off is off");
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "shadow") == NULL, "off writes no shadow key (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;shadow=soft;tier=ace", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.shadow == ACE_SHADOW_SOFT,
+              "shadow=soft in an Ace line, in any order (%s)", why);
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 12, ";shadow=soft") == 0,
+              "an Ace line with shadow=soft formats with the key last (%s)", out);
+        c.cull = 1;
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 20, ";shadow=soft;cull=on") == 0,
+              "shadow comes just before cull, which stays last (%s)", out);
+        c.cull = 0;
+        snprintf(spec, sizeof(spec), "%s;shadow=soft", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "shadow needs tier=ace") == 0 &&
+              c.on == 0 && c.shadow == 0, "shadow=soft without tier=ace is refused (%s)", why);
+        snprintf(spec, sizeof(spec), "%s;tier=enhanced;shadow=soft", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "shadow needs tier=ace") == 0,
+              "shadow=soft with tier=enhanced is refused (%s)", why);
+        static const char *const bad[] = { "on", "hard", "1", "Soft", "soft " };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            snprintf(spec, sizeof(spec), "%s;tier=ace;shadow=%s", base, bad[i]);
+            CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "bad value") == 0,
+                  "shadow=%s is a bad value (%s)", bad[i], why);
+        }
+        snprintf(spec, sizeof(spec), "%s;tier=ace;shadow=soft;shadow=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate shadow");
+        /* The project's one key order: texpack, pad, shadow, cull last, whatever order a line uses. */
+        snprintf(spec, sizeof(spec), "%s;cull=on;shadow=soft;pad=late;tier=ace;texpack=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.shadow == ACE_SHADOW_SOFT && c.texpack == 1 &&
+              c.pad == 1 && c.cull == 1 && ace_format(&c, out, sizeof(out)) &&
+              strcmp(out + strlen(out) - 40, ";texpack=on;pad=late;shadow=soft;cull=on") == 0,
+              "texpack, pad, shadow and cull format in that order, cull last (%s)", out);
+        {
+            AceConfig back;
+            CHECK(ace_parse(out, &back, why, sizeof(why)) == 1 && memcmp(&back, &c, sizeof(c)) == 0,
+                  "the line with shadow, texpack and cull round-trips (%s)", out);
+        }
+    }
     /* Every key but tier is required, whatever its place: leaving out any one of them refuses
        the line, leaving out tier does not (src/rt/ace.c names the required keys one by one). */
     {
@@ -528,7 +572,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");
@@ -582,7 +626,7 @@ static void cell_parse(void) {
                               .smooth = ACE_SMOOTH_MATCH, .tier = ACE_TIER_ENHANCED,
                               .sas = ACE_SAS_SINC, .cull = 1, .stick = ACE_STICK_COUNTS_MAX,
                               .load = 1, .depth = 32, .ssaa = 4, .peak = 1, .glyphs = 1, .mips = 1,
-                              .texpack = 1, .pad = 1 };
+                              .texpack = 1, .pad = 1, .shadow = ACE_SHADOW_SOFT };
         char longest[512];
         const size_t longest_len = ace_longest_line(longest, sizeof(longest));
         char edge[ACE_SPEC_MAX + 1];
@@ -1098,6 +1142,67 @@ static void cell_switch(void) {
     CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->pad == 0 &&
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"pad\"") == NULL &&
           strstr(json, "input_latency") == NULL, "an Enhanced run without either says nothing of them");
+    /* shadow=soft (contract 11.3.13): named in the words and the report; a declaration is kept apart
+       from the line and checked whole; with nothing declared, or nothing drawn, ace_finish reports it
+       unavailable with the reason; a renderer that does not soften names its own. */
+    {
+        static const char shadow_line[] =
+            "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;"
+            "shadow=soft";
+        uint8_t key[32], digests[2][32], edges[2] = { 2, 4 };
+        for (int i = 0; i < 32; i++) { key[i] = (uint8_t)(0xA0 + i); digests[0][i] = (uint8_t)i; digests[1][i] = (uint8_t)(255 - i); }
+        CHECK(nk_ace_soft_shadows_declare(key, NULL, 0, NULL) == 1 && nk_ace_soft_shadows()->count == 0,
+              "count 0 declares nothing");
+        CHECK(ace_init_spec(shadow_line, "") == 1 && ace_effective()->shadow == ACE_SHADOW_SOFT,
+              "shadow=soft with tier=ace turns it on");
+        CHECK(ace_feature_words(words, sizeof(words)) > 0 && strcmp(words, "soft shadows") == 0,
+              "shadow feature words: '%s'", words);
+        CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"shadow\": \"soft\"") != NULL &&
+              strstr(json, "\"shadow_declared\": 0") != NULL, "the report names shadow=soft:\n%s", json);
+        ace_finish();
+        CHECK(ace_effective()->shadow == ACE_SHADOW_OFF && ace_report_json(json, sizeof(json)) > 0 &&
+              strstr(json, "\"shadow\": \"off\"") != NULL && strstr(json, ACE_SOFT_SHADOW_NONE_DECLARED) != NULL,
+              "with nothing declared shadow=soft is unavailable and says so:\n%s", json);
+        /* A declaration is refused whole: an edge outside 1..4, too many textures, a NULL. */
+        uint8_t bad_edges[2] = { 2, 5 };
+        CHECK(nk_ace_soft_shadows_declare(key, (const uint8_t (*)[32])digests, 2, bad_edges) == 0 &&
+              nk_ace_soft_shadows()->count == 0, "an edge of 5 refuses the declaration");
+        bad_edges[1] = 0;
+        CHECK(nk_ace_soft_shadows_declare(key, (const uint8_t (*)[32])digests, 2, bad_edges) == 0,
+              "an edge of 0 refuses the declaration");
+        CHECK(nk_ace_soft_shadows_declare(key, (const uint8_t (*)[32])digests, ACE_SOFT_SHADOW_MAX + 1u, edges) == 0,
+              "more than ACE_SOFT_SHADOW_MAX textures refuse the declaration");
+        CHECK(nk_ace_soft_shadows_declare(NULL, (const uint8_t (*)[32])digests, 2, edges) == 0 &&
+              nk_ace_soft_shadows_declare(key, NULL, 2, edges) == 0, "a NULL key or digest list is refused");
+        CHECK(nk_ace_soft_shadows_declare(key, (const uint8_t (*)[32])digests, 2, edges) == 1, "a good declaration");
+        const AceSoftShadows *d = nk_ace_soft_shadows();
+        CHECK(d->count == 2 && memcmp(d->key, key, 32) == 0 && memcmp(d->digest[1], digests[1], 32) == 0 &&
+              d->edge[0] == 2 && d->edge[1] == 4, "the declaration is copied as given");
+        key[0] = 0; digests[1][0] = 0;
+        CHECK(d->key[0] == 0xA0 && d->digest[1][0] == 255, "the declaration is a copy, not the caller's arrays");
+        /* ace_init_spec keeps it: generated code declares at start, whatever the order. */
+        CHECK(ace_init_spec(shadow_line, "") == 1 && nk_ace_soft_shadows()->count == 2 &&
+              ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"shadow_declared\": 2") != NULL,
+              "the declaration survives a new launch line:\n%s", json);
+        ace_finish();   /* declared, but no softened copy was drawn: never confirmed */
+        CHECK(ace_effective()->shadow == ACE_SHADOW_OFF && ace_report_json(json, sizeof(json)) > 0 &&
+              strstr(json, "no declared shadow texture was drawn") != NULL,
+              "a declared run that drew none is reported unavailable:\n%s", json);
+        CHECK(ace_init_spec(shadow_line, "") == 1, "shadow=soft again");
+        ace_confirm(ACE_FEATURE_SHADOW);
+        ace_finish();
+        CHECK(ace_effective()->shadow == ACE_SHADOW_SOFT && ace_report_json(json, sizeof(json)) > 0 &&
+              strstr(json, "\"shadow\": \"soft\"") != NULL, "a confirmed shadow=soft stays on:\n%s", json);
+        CHECK(ace_init_spec(shadow_line, "") == 1, "shadow=soft once more");
+        ace_feature_unavailable(ACE_FEATURE_SHADOW, ACE_SOFT_SHADOW_SOFTWARE);
+        CHECK(ace_effective()->shadow == ACE_SHADOW_OFF && ace_requested()->shadow == ACE_SHADOW_SOFT &&
+              ace_report_json(json, sizeof(json)) > 0 && strstr(json, "software renderer does not soften") != NULL,
+              "the software renderer's reason is reported:\n%s", json);
+        CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->shadow == ACE_SHADOW_OFF &&
+              ace_report_json(json, sizeof(json)) > 0 && strstr(json, "shadow") == NULL,
+              "a line without shadow is off and the report does not name it");
+        (void)nk_ace_soft_shadows_declare(key, NULL, 0, NULL);
+    }
 
     /* tess=4 (#2053): named in the words, the stamp's line and the report; off with its feature;
        off in the canonical line and in an authentic run. */

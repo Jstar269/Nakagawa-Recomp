@@ -211,6 +211,12 @@ ENHANCEMENT_LAUNCH_SITES: list[dict] = []
 # site declares stock_value_digests: the run-time check digests each stored value with it.
 # It is derived from the user's own executable and lives only in their generated build.
 ENHANCEMENT_STORE_KEY: bytes | None = None
+# The package's Ace soft-shadow textures (ace_parts.soft_shadows, contract sections 9.8 and 10.23):
+# (texture_digest, edge_texels, id) in declared order, and the executable's stock-digest key the
+# runtime hashes each candidate texture under (the same key as ENHANCEMENT_STORE_KEY). Empty, and
+# None, without the part, which keeps the output byte-identical.
+ENHANCEMENT_SOFT_SHADOWS: list[tuple[str, int, str]] = []
+ENHANCEMENT_SOFT_SHADOW_KEY: bytes | None = None
 # Callable entries whose body loads $sp (guest_owns_entry_sp): no exit restores their entry
 # $sp, so the stack census leaves them unwrapped, as it leaves resume bodies.
 GUEST_SP_ENTRIES: set[int] = set()
@@ -1128,6 +1134,39 @@ def _enhancement_data_lines() -> list[str]:
         ]
     out += ["}", ""]
     return out
+
+
+def _enhancement_soft_shadow_lines() -> list[str]:
+    """The tables of the package's soft-shadow declaration (contract sections 9.8 and 10.23), which
+    sr_register_all hands to the runtime once, before the guest runs. Nothing without the part."""
+    if not ENHANCEMENT_SOFT_SHADOWS:
+        return []
+    if ENHANCEMENT_SOFT_SHADOW_KEY is None:
+        raise ValueError("soft_shadows textures need the executable's digest key")
+    return [
+        "/* Ace soft shadows (ace_parts.soft_shadows): the executable's stock-digest key, each declared",
+        " * texture's keyed digest (nk_tex_soft_shadow_digest) and its edge width in source texels. */",
+        f"static const uint8_t nk_ace_shadow_key[32] = {{{_c_bytes(ENHANCEMENT_SOFT_SHADOW_KEY)}}};",
+        "static const uint8_t nk_ace_shadow_digest[][32] = {",
+        *(f"    {{{_c_bytes(bytes.fromhex(digest))}}},  /* {tid} */"
+          for digest, _edge, tid in ENHANCEMENT_SOFT_SHADOWS),
+        "};",
+        "static const uint8_t nk_ace_shadow_edge[] = {"
+        + ", ".join(f"{edge}u" for _digest, edge, _tid in ENHANCEMENT_SOFT_SHADOWS) + "};",
+        "/* src/rt/ace.h */",
+        "int nk_ace_soft_shadows_declare(const uint8_t key[32], const uint8_t (*digests)[32], uint32_t count,",
+        "                                const uint8_t *edge_texels);",
+        "",
+    ]
+
+
+def _enhancement_soft_shadow_call() -> list[str]:
+    """The one declaration call sr_register_all makes; nothing without the part. Never gated by
+    SR_EXPERIMENTAL_60HZ: the part has its own SR_ACE key, read by the runtime."""
+    if not ENHANCEMENT_SOFT_SHADOWS:
+        return []
+    return [f"    (void)nk_ace_soft_shadows_declare(nk_ace_shadow_key, nk_ace_shadow_digest, "
+            f"{len(ENHANCEMENT_SOFT_SHADOWS)}u, nk_ace_shadow_edge);"]
 
 
 def _enhancement_store_lines() -> list[str]:
@@ -6818,7 +6857,8 @@ def _load_code_hook_package(elf, known, symbols, code_hook_pkg_path, symbol_map_
                 "which a code-hook package beside an enhancement package cannot carry (fail-closed refusal)")
     first_ids = {site["id"] for site in enhancement_pkg.get("sites", ())}
     for part in enhancement_pkg.get("ace_parts", {}).values():
-        first_ids.update(site["id"] for site in part["sites"])
+        for list_key in ("sites", "textures"):
+            first_ids.update(entry["id"] for entry in part.get(list_key, ()))
     for site in pkg["sites"]:
         if site["id"] in first_ids:
             raise enhancement_package.EnhancementPackageError(
@@ -6862,10 +6902,12 @@ def _reset_enhancement_tables() -> None:
     process (an in-process caller of ``main``, then ``emit_function`` and the like).
     """
     global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY, ENHANCEMENT_STORE_KEY
-    global ENHANCEMENT_ACE_SITES, ENHANCEMENT_HOOK_META
+    global ENHANCEMENT_ACE_SITES, ENHANCEMENT_HOOK_META, ENHANCEMENT_SOFT_SHADOW_KEY
     ENHANCEMENT_SITES = {}
     ENHANCEMENT_ACE_SITES = {}
     ENHANCEMENT_STORE_KEY = None
+    ENHANCEMENT_SOFT_SHADOW_KEY = None
+    ENHANCEMENT_SOFT_SHADOWS.clear()
     ENHANCEMENT_PKG_META = None
     ENHANCEMENT_HOOK_META = None
     ENHANCEMENT_UPDATE_BOUNDARY = None
@@ -6886,7 +6928,7 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
     verification refuses the run (fail closed).
     """
     global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY, ENHANCEMENT_STORE_KEY
-    global ENHANCEMENT_ACE_SITES, ENHANCEMENT_HOOK_META
+    global ENHANCEMENT_ACE_SITES, ENHANCEMENT_HOOK_META, ENHANCEMENT_SOFT_SHADOW_KEY
     _reset_enhancement_tables()
     if enhancement_pkg_path is not None:
         import hashlib
@@ -6936,6 +6978,12 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                 ENHANCEMENT_UPDATE_BOUNDARY = boundary["site_addr"]
             ENHANCEMENT_ACE_SITES = _verified_ace_part_sites(elf, pkg_validated, sym_map, _read_words, known,
                                                              boundary)
+            # Soft-shadow textures are matched at run time, by a digest keyed by this executable.
+            for texture in enhancement_package.soft_shadow_textures(pkg_validated):
+                ENHANCEMENT_SOFT_SHADOWS.append(
+                    (texture["texture_digest"], int(texture["edge_texels"]), texture["id"]))
+            if ENHANCEMENT_SOFT_SHADOWS:
+                ENHANCEMENT_SOFT_SHADOW_KEY = enhancement_package.published_digest_key(elf.data)
 
             for patch in enhancement_package.verify_and_resolve_data_sites(
                 pkg_validated, symbol_to_addr=sym_map, read_data_fn=_read_loaded_data,
@@ -7108,6 +7156,7 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
         main_out += _enhancement_launch_lines()
         main_out += _enhancement_store_lines()
         main_out += _enhancement_data_lines()
+        main_out += _enhancement_soft_shadow_lines()
     census_entries = sorted({a for a in emitted if a not in resume_owners})
     if stack_census:
         census_values = census_entries or [0]
@@ -7217,6 +7266,7 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
     )
     if ENHANCEMENT_PKG_META is not None:
         main_out.append("    if (nk_enhancement_on()) nk_enhancement_apply_data();")
+        main_out += _enhancement_soft_shadow_call()
         if ENHANCEMENT_STORE_SITES:
             main_out.append("    nk_enh_sites_start();")
     main_out.append(f'    fprintf(stderr, "sr_register_all: starting {len(emitted)} registrations\\n");')

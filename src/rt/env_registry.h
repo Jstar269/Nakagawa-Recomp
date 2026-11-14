@@ -34,6 +34,7 @@
     X("SDL_VIDEO_DRIVER", "system", "unset", "gui.c", "Alias of SDL_VIDEODRIVER; a value of offscreen makes headless acceptance fail because a real presenter is required.") \
     X("SR_ACE", "string", "off", "ace.c", "Spec string that turns on the optional enhancements (filtering, text, readout, notice, wide, smooth, band-limited SAS resampling, full 32-bit colour).") \
     X("SR_ACE_REPORT", "path", "unset (no report written)", "ace.c", "Output path for the per-run Enhanced or Ace JSON report.") \
+    X("SR_ACE_SHADOW_CANDIDATES", "string", "off (nothing listed)", "gpu_sdl3vk/ge_gpu.c", "Exactly 1, with shadow=soft declared, prints a SOFT_SHADOW: candidate line (size, keyed digest) per distinct texture hashed.") \
     X("SR_ACE_SMOOTH_DEPTH", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the GE's depth for its in-betweens.") \
     X("SR_ACE_SMOOTH_HUD", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the HUD mask of through-mode draws for its in-betweens.") \
     X("SR_ALLOC_GUARD", "flag-nonzero", "on (guard enabled when unset)", "hle.c", "Allocator guard stays on unless set with a value starting with 0, which disables it.") \
@@ -128,6 +129,7 @@
     X("SR_GPU_PRESENT_DBG", "flag-presence", "off (first 3 early exits still logged)", "gpu_sdl3vk/ge_gpu.c", "Logs every GPU present call and every early-exit decline to stderr.") \
     X("SR_GPU_READBACK_FULL", "flag-nonzero", "off (only the rows guest memory keeps are copied)", "gpu_sdl3vk/ge_gpu.c", "When enabled, a readback to guest memory copies the whole scaled target, the reference path for the narrowed copy.") \
     X("SR_GPU_SCALE", "number", "1 (falls back to SR_RESOLUTION_SCALE)", "gpu_sdl3vk/ge_gpu.c", "Internal render scale multiplier for the GPU GE renderer.") \
+    X("SR_GPU_SOFT_SHADOW_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test's soft-shadow case: the run without the key writes it, the runs with it at the same scale and xBRZ factor check it.") \
     X("SR_GPU_SSAA_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test ssaa-edge case: a run without supersampling writes it, a supersampled run at that scale checks it.") \
     X("SR_GPU_STATS", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c,gui.c", "Enables statistics output in the Vulkan GE backend, with a line for each accepted present that handed primitives to the software rasterizer.") \
     X("SR_GPU_SUBMIT_BATCH", "number", "SUBMIT_BATCH_MAX", "gpu_sdl3vk/ge_gpu.c", "Number of GPU ops per submit batch; values outside 1 to the maximum are ignored.") \

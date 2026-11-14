@@ -1204,6 +1204,7 @@ static const int k_part_ssaa_values[] = {2, 4, 0};
 static const char *const k_part_ssaa_labels[] = {"2x", "4x", "Off"};
 static const char *const k_part_ssaa_words[] = {"2", "4", "off"};
 static const char *const k_part_pad_words[] = {"late", "off"};
+static const char *const k_part_shadow_words[] = {"soft", "off"};
 static const char *const k_part_upscale_labels[] = {"FSR 1", "Off"};
 static const char *const k_part_upscale_words[] = {"fsr1", "off"};
 
@@ -1281,6 +1282,12 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"pad", "Late pad sampling",
      "Ace only, with 60 FPS logic. Reads the pad later in each frame; the game's timing changes.",
      2, k_part_switch_values, k_part_switch_labels, k_part_pad_words, 0},
+    /* A guest-visible item (contract 11.3.13): off by default and in no preset; it matters only for a
+       title whose own package declares its shadow textures, and only in Ace. The softened shadows
+       reach the frame the game reads. */
+    {"shadow", "Soft shadows",
+     "Ace only, in games whose package names their shadows. Changes what the frame shows.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_shadow_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -2484,15 +2491,15 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    section 10.11, #2280) is on in Ultra and left to the library in every other preset. No row
    sets frame pacing, Smooth motion, Widescreen, texture filtering, sound, the readout, the
    badge, Finer patches (which changes GE timing, section 11.3.7), Short loads (which changes
-   guest timing, section 11.3.10) or a texture pack (the title's own, 11.3.4): those stay the
-   library's and each game's own.
+   guest timing, section 11.3.10), a texture pack (the title's own, 11.3.4) or Soft shadows
+   (the title's own declared shadows, 11.3.13): those stay the library's and each game's own.
    docs/PLAYER_UI_DESIGN.md lists the same values, and test_graphics_presets checks that every
    other part is -1, so a new part needs a choice. */
 #define PRESET_PART_LIST(X, text, upscale, twin)                                          \
     X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
     X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1)    \
     X(TWIN, (twin)) X(SSAA, -1) X(MIPS, -1) X(TEXPACK, -1)                                \
-    X(PAD, -1)
+    X(PAD, -1) X(SHADOW, -1)
 #define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
 #define PRESET_PART_ONE(part, value) + 1
 #define PRESET_PARTS(text, upscale, twin) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale, twin)}
@@ -3388,10 +3395,11 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
         /* The upscaler travels as SR_PRESENT_UPSCALE (player_play_present_upscale), which the
            launcher exports for every session; the runtime's SR_ACE line has no such key. Stick,
-           load, ssaa, texpack and cull come last, in the Ace line's own order (src/rt/ace.c),
-           whatever the enum's. */
+           load, ssaa, texpack, pad, shadow and cull come last, in the Ace line's own order
+           (src/rt/ace.c), whatever the enum's. */
         if (p == PLAYER_PART_UPSCALE || p == PLAYER_PART_STICK || p == PLAYER_PART_LOAD ||
-            p == PLAYER_PART_SSAA || p == PLAYER_PART_TEXPACK || p == PLAYER_PART_CULL) continue;
+            p == PLAYER_PART_SSAA || p == PLAYER_PART_TEXPACK || p == PLAYER_PART_SHADOW ||
+            p == PLAYER_PART_CULL) continue;
         /* A missing mips is off (contract 11.3.8): the key is written only when the part is on,
            right after twin. */
         if (p == PLAYER_PART_MIPS && play->part[p] != 1) continue;
@@ -3402,7 +3410,7 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
     }
-    /* A missing stick, load or cull is off (contract 11.2 item 2): the line carries each key only
+    /* A missing stick, load, shadow or cull is off (contract 11.2 item 2): the line carries each key only
        when it is on in an Ace launch. Stick also needs the title's declared dead zone: its value is
        that count, not the part's word. */
     if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_STICK] == 1 && play->stick_counts >= 1 &&
@@ -3438,6 +3446,13 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_PAD] == 1) {
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_PAD].key,
                      enhanced_part_word(PLAYER_PART_PAD, 1));
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
+    }
+    /* Soft shadows are an Ace item (contract 11.3.13): shadow=soft after pad, before cull. */
+    if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_SHADOW] == 1) {
+        n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_SHADOW].key,
+                     enhanced_part_word(PLAYER_PART_SHADOW, 1));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
     }

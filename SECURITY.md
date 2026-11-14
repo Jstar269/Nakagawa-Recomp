@@ -108,7 +108,9 @@ Every digest the project's own code computes is classified here by what it is fo
 [issue #969](https://github.com/Jstar269/nakagawa-recomp/issues/969)). PSP-defined algorithms, Git object
 identities and format checksums are never replaced. Project-controlled integrity checks use SHA-256, the
 project default: provenance, attestation, packages, prerequisites, toolchain, SBOM, fonts, shaders and the
-VFPU tables at load all rest on it, so SHA-256 is classified as a whole and has no rows below.
+VFPU tables at load all rest on it, as does the keyed digest (HMAC-SHA-256, RFC 2104) that names an Ace soft-shadow
+texture ([`ENHANCEMENT_CONTRACT.md` 10.23](docs/ENHANCEMENT_CONTRACT.md#1023-soft-shadows)), so SHA-256 is classified
+as a whole and has no rows below.
 
 Every other use is one row. `python -m unittest tools.test_lint_docs` scans the tracked production files
 under `tools/` and `src/` (test files are oracles and are skipped) for `hashlib` calls other than SHA-256,

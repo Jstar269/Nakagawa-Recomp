@@ -101,8 +101,13 @@ CODE_HOOK_TRANSFORMS = frozenset({
 # beside its 60 Hz sites. Each part is gated at run time by its own SR_ACE key, never by
 # SR_EXPERIMENTAL_60HZ. Their transforms are a set of their own, disjoint from SITE_TRANSFORMS,
 # so a 60 Hz transform in ace_parts, or an ace_parts transform in sites, refuses by construction.
-ACE_PART_NAMES = frozenset({"load"})
-ACE_PART_TRANSFORMS = frozenset({"vblank_wait_skip"})
+ACE_PART_NAMES = frozenset({"load", "soft_shadows"})
+ACE_PART_TRANSFORMS = frozenset({"vblank_wait_skip", "alpha_edge_soften"})
+# Where each part transform may be written: one transform, one part and one list.
+ACE_PART_TRANSFORM_PLACE = {
+    "vblank_wait_skip": "load.sites",
+    "alpha_edge_soften": "soft_shadows.textures",
+}
 ACE_PART_KEYS = frozenset({"sites"})
 ACE_PART_SITE_KEYS = frozenset({
     "id",
@@ -112,6 +117,15 @@ ACE_PART_SITE_KEYS = frozenset({
     "word_count",
     "transform",
 })
+# ace_parts.soft_shadows (contract sections 9.8 and 10.23): textures, not instruction sites. A
+# texture_digest is always keyed by the executable (published_digest_key), as the runtime's match
+# rule computes it (nk_tex_soft_shadow_digest), so a private and a published package carry the same
+# value and it names a texture without revealing its size, palette or texels.
+ACE_SOFT_SHADOW_PART_KEYS = frozenset({"textures"})
+ACE_SOFT_SHADOW_TEXTURE_KEYS = frozenset({"id", "texture_digest", "transform", "edge_texels"})
+ACE_SOFT_SHADOW_TEXTURES_MAX = 256     # ACE_SOFT_SHADOW_MAX in src/rt/ace.h
+ACE_SOFT_SHADOW_EDGE_MIN = 1           # NK_TEX_SOFT_EDGE_MIN..MAX in src/rt/gpu_sdl3vk/tex_scale.h
+ACE_SOFT_SHADOW_EDGE_MAX = 4
 # The one import a vblank_wait_skip site may call: codegen checks the jal's target stub.
 VBLANK_WAIT_SKIP_NID = 0x984C27E7
 VBLANK_WAIT_SKIP_IMPORT = "sceDisplayWaitVblankStart"
@@ -780,7 +794,8 @@ def validate_package(data: Any) -> dict[str, Any]:
 
 
 def _validate_ace_parts(data: Mapping[str, Any], site_ids: set[str]) -> None:
-    """``ace_parts`` (contract section 9.8): named parts, each a list of one-word sites.
+    """``ace_parts`` (contract section 9.8): named parts, each a list of one-word sites, except
+    ``soft_shadows``, a list of textures (:func:`_validate_soft_shadows`).
 
     Site ids and instruction words share one namespace with ``sites`` and the
     ``update_boundary``: an ace_parts site may not reuse an id or cover a word either
@@ -789,6 +804,7 @@ def _validate_ace_parts(data: Mapping[str, Any], site_ids: set[str]) -> None:
     function. Here words and functions are compared by name; a published package's are
     compared again by site-map address (:func:`_check_ace_part_namespace`), and codegen
     compares the resolved addresses.
+    A texture's id is in the same id namespace. Each part transform is valid in one part only.
     """
     parts = data["ace_parts"]
     if not isinstance(parts, dict) or not parts:
@@ -804,6 +820,9 @@ def _validate_ace_parts(data: Mapping[str, Any], site_ids: set[str]) -> None:
     for name in sorted(parts):
         part_path = f"ace_parts.{name}"
         part = parts[name]
+        if name == "soft_shadows":
+            _validate_soft_shadows(part, part_path, site_ids)
+            continue
         _check_keys(part, part_path, ACE_PART_KEYS, ("sites",), "ace part")
         sites = part["sites"]
         if not isinstance(sites, list) or not sites:
@@ -825,9 +844,7 @@ def _validate_ace_parts(data: Mapping[str, Any], site_ids: set[str]) -> None:
             else:
                 site["word_count"] = 1
             transform = site["transform"]
-            if not isinstance(transform, str) or transform not in ACE_PART_TRANSFORMS:
-                fail(f"{path}.transform", f"Unknown ace part transform: {transform!r}; must be one of "
-                                          f"{sorted(ACE_PART_TRANSFORMS)}")
+            _check_ace_part_transform(transform, f"{path}.transform", f"{name}.sites")
     _check_ace_part_namespace(data, lambda fn: fn, "by name")
 
 
@@ -867,15 +884,62 @@ def _check_ace_part_namespace(data: Mapping[str, Any], fn_key: Any, how: str) ->
                        f"logic updates unpaced")
 
 
+def _check_ace_part_transform(transform: Any, path: str, place: str) -> None:
+    """A part transform is known, and written in the one part list it belongs to."""
+    if not isinstance(transform, str) or transform not in ACE_PART_TRANSFORMS:
+        fail(path, f"Unknown ace part transform: {transform!r}; must be one of {sorted(ACE_PART_TRANSFORMS)}")
+    if ACE_PART_TRANSFORM_PLACE[transform] != place:
+        fail(path, f"ace part transform {transform!r} is valid only in "
+                   f"ace_parts.{ACE_PART_TRANSFORM_PLACE[transform]}, not in ace_parts.{place}")
+
+
+def _validate_soft_shadows(part: Any, part_path: str, site_ids: set[str]) -> None:
+    """``ace_parts.soft_shadows`` (contract sections 9.8 and 10.23): 1 to 256 textures, each a keyed
+    texture digest with its edge width. Ids share the namespace of ``sites`` and the other parts."""
+    _check_keys(part, part_path, ACE_SOFT_SHADOW_PART_KEYS, ("textures",), "ace part")
+    textures = part["textures"]
+    if not isinstance(textures, list) or not textures:
+        fail(f"{part_path}.textures", "soft_shadows.textures must be a non-empty array")
+    if len(textures) > ACE_SOFT_SHADOW_TEXTURES_MAX:
+        fail(f"{part_path}.textures", f"soft_shadows declares {len(textures)} textures; the runtime "
+                                      f"takes at most {ACE_SOFT_SHADOW_TEXTURES_MAX}")
+    digests: set[str] = set()
+    for idx, texture in enumerate(textures):
+        path = f"{part_path}.textures[{idx}]"
+        _check_keys(texture, path, ACE_SOFT_SHADOW_TEXTURE_KEYS,
+                    ("id", "texture_digest", "transform", "edge_texels"), "soft shadow texture")
+        _check_id(texture["id"], f"{path}.id", site_ids, "site")
+        digest = texture["texture_digest"]
+        if not isinstance(digest, str) or not SHA256_HEX_RE.match(digest):
+            fail(f"{path}.texture_digest", "texture_digest must be 64 lowercase hex digits: the keyed "
+                                           f"digest of the texture (section 10.23), got {digest!r}")
+        if digest in digests:
+            fail(f"{path}.texture_digest", "a texture_digest is declared twice")
+        digests.add(digest)
+        _check_ace_part_transform(texture["transform"], f"{path}.transform", "soft_shadows.textures")
+        edge = texture["edge_texels"]
+        if (not isinstance(edge, int) or isinstance(edge, bool)
+                or not ACE_SOFT_SHADOW_EDGE_MIN <= edge <= ACE_SOFT_SHADOW_EDGE_MAX):
+            fail(f"{path}.edge_texels", f"edge_texels must be an integer from {ACE_SOFT_SHADOW_EDGE_MIN} "
+                                        f"to {ACE_SOFT_SHADOW_EDGE_MAX}, got {edge!r}")
+
+
+def soft_shadow_textures(data: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The ``ace_parts.soft_shadows`` textures of a validated declaration, in declared order."""
+    part = data.get("ace_parts", {}).get("soft_shadows")
+    return list(part["textures"]) if part else []
+
+
 def _ace_part_ids(data: Mapping[str, Any]) -> set[str]:
-    """The site ids an ``ace_parts`` section declares, read before it is validated."""
+    """The ids an ``ace_parts`` section declares (sites and textures), read before it is validated."""
     ids: set[str] = set()
     parts = data.get("ace_parts")
     if isinstance(parts, dict):
         for part in parts.values():
-            sites = part.get("sites") if isinstance(part, dict) else None
-            if isinstance(sites, list):
-                ids.update(s["id"] for s in sites if isinstance(s, dict) and isinstance(s.get("id"), str))
+            for list_key in ("sites", "textures"):
+                entries = part.get(list_key) if isinstance(part, dict) else None
+                if isinstance(entries, list):
+                    ids.update(s["id"] for s in entries if isinstance(s, dict) and isinstance(s.get("id"), str))
     return ids
 
 
@@ -1314,7 +1378,8 @@ PUBLISHED_REFUSALS = ("other_disc", "other_revision", "modified_executable", "si
 # No string in a published package carries words, bytes or addresses: every string and every
 # object key is checked, except the digest slots below and the site map's address values. A
 # run of more than 8 hex digits is longer than one 32-bit word or address.
-_PUBLISHED_DIGEST_SLOTS = frozenset({"executable_sha256", "stock_digest", "low_stock_digest", "sha256"})
+_PUBLISHED_DIGEST_SLOTS = frozenset({"executable_sha256", "stock_digest", "low_stock_digest", "sha256",
+                                     "texture_digest"})
 _PUBLISHED_DIGEST_LISTS = frozenset({"stock_value_digests"})
 _PUBLISHED_TEXT_REFUSED = (
     (re.compile(r"0[xX][0-9a-fA-F]{5,}"), "an address literal"),
@@ -1367,7 +1432,7 @@ def ace_part_sites(data: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]
     """Every ``ace_parts`` site of a validated declaration, with its path, in part-name order."""
     out: list[tuple[str, Mapping[str, Any]]] = []
     for name in sorted(data.get("ace_parts", {})):
-        for idx, site in enumerate(data["ace_parts"][name]["sites"]):
+        for idx, site in enumerate(data["ace_parts"][name].get("sites", ())):
             out.append((f"ace_parts.{name}.sites[{idx}]({site['id']})", site))
     return out
 
@@ -3170,7 +3235,7 @@ def verify_and_resolve_ace_parts(
     cache: dict[str, int] = {}
     resolved: dict[int, dict[str, Any]] = {}
     for name in sorted(validated.get("ace_parts", {})):
-        for idx, site in enumerate(validated["ace_parts"][name]["sites"]):
+        for idx, site in enumerate(validated["ace_parts"][name].get("sites", ())):
             path = f"ace_parts.{name}.sites[{idx}]({site['id']})"
             fn_addr = _resolve_function_address(
                 validated, site["function"], path, symbol_to_addr, read_words_fn, known_functions, cache,

@@ -211,9 +211,11 @@ HLE_INCLUDES := -Isrc/rt/atrac3p -Isrc/rt/atrac3p/libavcodec -Isrc/rt/atrac3p/li
 # and the xBRZ scaler it runs (third_party/xbrz, GPL-3.0, see its PROVENANCE.md), and texture
 # replacement (texrepl.c, #1880, which reads ZIP packs through nk_zip.c and its inflater), and sharp
 # game text (glyph_recon.c, #2110). Every build that compiles ge_gpu.c takes all of them.
+# tex_scale.c names soft-shadow textures by an HMAC over the runtime's SHA-256 (vfpu_tables.c),
+# which the runtime's own RT_SRCS already carry.
 GEGPU_SRCS := src/rt/gpu_sdl3vk/ge_gpu.c src/rt/gpu_sdl3vk/ace_hud.c src/rt/gpu_sdl3vk/tex_scale.c \
               src/rt/gpu_sdl3vk/glyph_recon.c third_party/xbrz/xbrz.c src/rt/texrepl.c \
-              src/core/nk_zip.c src/core/nk_psp_inflate.c
+              src/core/nk_zip.c src/core/nk_psp_inflate.c src/rt/vfpu_tables.c
 
 # Everything needed to LINK src/rt/gpu_sdl3vk/sdl3vk.c, in one place. sdl3vk.c
 # calls the framebuffer-capture policy (sr_fbcap_owner / sr_fbcap_path /

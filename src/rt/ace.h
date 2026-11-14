@@ -11,14 +11,15 @@
  *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. stick, load, depth, ssaa, peak, glyphs, cull, mips and
- * texpack are the other keys a line may leave out: a missing stick, load, depth, ssaa, peak, glyphs,
- * cull, mips or texpack reads as off (section 11.2 item 2); stick has no off word, its value is the
- * game's dead zone (1..126), and a line that writes load=off, depth=off, ssaa=off, peak=off,
- * glyphs=off, cull=off, mips=off or texpack=off means the same as none; stick=<counts>, load=fast
- * and cull=on need tier=ace, and depth=32 (the 32-bit host depth buffer, #2051), ssaa=2|4
- * (supersampling, #2073), peak=limit, glyphs=on (sharp game text, #2110), mips=on and texpack=on
- * (the title's texture pack, 11.3.4) do not. Every other
+ * line without it is an Enhanced run. stick, load, depth, ssaa, peak, glyphs, cull, mips, texpack
+ * and shadow are the other keys a line may leave out: a missing stick, load, depth, ssaa, peak,
+ * glyphs, cull, mips, texpack or shadow reads as off (section 11.2 item 2); stick has no off word,
+ * its value is the game's dead zone (1..126), and a line that writes load=off, depth=off, ssaa=off,
+ * peak=off, glyphs=off, cull=off, mips=off, texpack=off or shadow=off means the same as none;
+ * stick=<counts>, load=fast, shadow=soft (soft shadows, 11.3.13) and cull=on need tier=ace, and
+ * depth=32 (the 32-bit host depth buffer, #2051), ssaa=2|4 (supersampling, #2073), peak=limit,
+ * glyphs=on (sharp game text, #2110), mips=on and texpack=on (the title's texture pack, 11.3.4) do
+ * not. Every other
  * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
@@ -66,6 +67,7 @@
 #define ACE_HAS_SMOOTH_MATCH 0  /* smooth=match: the monitor's rate */
 #define ACE_HAS_SAS 1           /* sas=sinc: band-limited SAS voice resampling (#2054) */
 #define ACE_HAS_TESS 1          /* tess=2..4: finer Bezier and spline patches (#2053) */
+#define ACE_HAS_SHADOW 1        /* shadow=soft: soft edges on a title's declared blob shadows (11.3.13) */
 #define ACE_HAS_CULL 1          /* cull=on: widen a title's own view-culling test to the wings (11.3.6) */
 #define ACE_HAS_SSAA 1          /* ssaa=2|4: supersampling on top of render scale (#2073, 10.21) */
 #define ACE_HAS_STICK 1         /* stick=<counts>: start the host stick past the game's dead zone (11.3.11) */
@@ -88,6 +90,7 @@ static inline int ace_wide_fill_blocked_by_smooth(int wide_requested, int smooth
 /* The play mode a run is: Enhanced, or Ace (Enhanced plus the game's own package). */
 typedef enum { ACE_TIER_ENHANCED = 0, ACE_TIER_ACE = 1 } AceTier;
 typedef enum { ACE_SAS_OFF = 0, ACE_SAS_SINC = 1 } AceSas;
+typedef enum { ACE_SHADOW_OFF = 0, ACE_SHADOW_SOFT = 1 } AceShadow;
 
 typedef struct {
     int on;          /* 0: authentic (off, unset or refused); every field below is then 0 */
@@ -118,6 +121,7 @@ typedef struct {
                         11.3.4); without it no pack is read */
     int pad;         /* pad=late: each logic update starts closer to its VBLANK deadline and reads a
                         fresher pad sample (guest-visible timing, 11.3.9) */
+    int shadow;      /* AceShadow: declared blob-shadow textures drawn with soft edges (guest-visible, 11.3.13) */
 } AceConfig;
 
 typedef enum {
@@ -140,6 +144,7 @@ typedef enum {
     ACE_FEATURE_MIPS,
     ACE_FEATURE_TEXPACK,
     ACE_FEATURE_PAD,
+    ACE_FEATURE_SHADOW,
     ACE_FEATURE_COUNT
 } AceFeature;
 
@@ -190,6 +195,37 @@ void ace_set_exit_report(AceFeature feature, void (*report)(void));
 void ace_confirm(AceFeature feature);
 /* Matrix uses the culling hook left alone (its table was full): the report's cull_untracked. */
 void ace_set_cull_untracked(unsigned long n);
+/* ---- soft shadows: the package's declaration (contract sections 10.23 and 11.3.13) ----------- */
+
+/* Textures one declaration may name. */
+#define ACE_SOFT_SHADOW_MAX 256u
+/* Why shadow=soft is unavailable when no declaration is in force. */
+#define ACE_SOFT_SHADOW_NONE_DECLARED \
+    "nothing declared: this build's package carries no ace_parts.soft_shadows textures"
+/* Why it is unavailable on a renderer other than the Vulkan GE one. */
+#define ACE_SOFT_SHADOW_SOFTWARE \
+    "the software renderer does not soften shadows; only the Vulkan GE renderer does"
+
+typedef struct {
+    uint8_t key[32];                          /* the package's HMAC key */
+    uint32_t count;                           /* 0: nothing declared */
+    uint8_t digest[ACE_SOFT_SHADOW_MAX][32];  /* nk_tex_soft_shadow_digest of each texture */
+    uint8_t edge[ACE_SOFT_SHADOW_MAX];        /* its edge width in texels, 1 to 4 */
+} AceSoftShadows;
+
+/* The package's soft-shadow textures (ace_parts.soft_shadows.textures), which generated code
+ * passes once at start, before the renderer starts: a 32-byte HMAC `key`, `count` digests and,
+ * for each, its edge width in source texels (1 to 4). The data is copied. A later call replaces
+ * the earlier one; count 0 declares nothing. A declaration with more than ACE_SOFT_SHADOW_MAX
+ * textures, a NULL pointer or an edge outside 1..4 is refused whole (nothing is declared) and
+ * one "ACE_MODE: soft shadow declaration refused (<reason>)" line says why. Until a declaration
+ * arrives shadow=soft reports itself unavailable. Kept apart from SR_ACE: ace_init_spec does not
+ * clear it. Returns 1 when the declaration is in force. */
+int nk_ace_soft_shadows_declare(const uint8_t key[32], const uint8_t (*digests)[32], uint32_t count,
+                                const uint8_t *edge_texels);
+/* The declaration in force (count 0 when there is none). */
+const AceSoftShadows *nk_ace_soft_shadows(void);
+
 /* peak=limit's totals for the report (driver.c reads them from the audio backend at exit): pushes
  * that carried a SAS sum past 16 bits, the frames of those that differ from the guest's saturated
  * copy, the output frames the limiter turned down, and its lowest gain (1 when it never acted). */

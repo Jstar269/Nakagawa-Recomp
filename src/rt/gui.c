@@ -1223,6 +1223,9 @@ void gui_init(const char *title) {
                      * CPU, which the movie upscaler takes without them. */
                     if (!gpu_ge_started) sr_movie_set_tracking(0);
                     gui_report_render_path(true, true, gpu_ge_asked, gpu_ge_started);
+                    /* Soft shadows (shadow=soft) are made only by the Vulkan GE renderer. */
+                    if (!gpu_ge_started && g_ace_on && ace_effective()->shadow)
+                        ace_feature_unavailable(ACE_FEATURE_SHADOW, ACE_SOFT_SHADOW_SOFTWARE);
                 }
                 sr_gui_request_launcher_foreground(true, NULL,
                                                    sr_gui_raise_sdl_window,

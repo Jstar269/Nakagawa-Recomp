@@ -18,10 +18,21 @@
  *     magnified, offset, rotated and perspective draws are not, nor a wide draw whose map
  *     drifts past the tolerance over its span, at the edge of that tolerance, nor a draw whose
  *     pixel centres fall just below the texel lattice; every draw it accepts reads one texel per
- *     pixel under both of psp.frag's filter rules at 1x.
+ *     pixel under both of psp.frag's filter rules at 1x;
+ *   - soft shadows (Ace's shadow=soft): the softened copy of a synthetic 12x12 disc equals a
+ *     direct, non-separable integer reference texel for texel and a pinned centre row; on a 40x40
+ *     disc at every factor (2-4) and edge (1-4) the flat interior and outside keep their alpha
+ *     exactly, the alpha mass stays within the stated rounding bound, the centre row is a monotone
+ *     ramp with more levels and a smaller largest step than the hard edge's own row, and two runs
+ *     agree byte for byte; a factor, edge or
+ *     size out of bounds is refused with the output untouched;
+ *   - the texture digest: HMAC-SHA-256 equals RFC 4231 test cases 1, 2 and 6 (whole and split
+ *     messages), and the match rule's message (domain, u16 sizes, R, G, B, A texels) equals a
+ *     digest pinned from an independent implementation; another size, key or texel changes it.
  */
 #include "tex_scale.h"
 #include "../../../third_party/xbrz/xbrz.h"
+#include "../vfpu_tables.h"   /* sr_vfpu_hmac_sha256 */
 
 #include <math.h>
 #include <stdio.h>
@@ -606,7 +617,278 @@ static void test_smart2d(void) {
                         off_lattice, below);
 }
 
+/* ---- soft shadows ------------------------------------------------------------------------ */
+
+/* Texel (x, y) of a row-major image `w` texels wide, as a size_t: widened before the product. */
+static size_t soft_at(int y, int w, int x) { return (size_t)y * (size_t)w + (size_t)x; }
+
+/* A synthetic hard-edged disc of side n (centre between the middle texels): alpha 255 inside
+ * radius r0, a rim of 200 to r1, a last ring of 48 to r2 and 0 outside, radii in texels times two
+ * (q = (2x - n + 1)^2 + (2y - n + 1)^2 is four times the squared distance). The levels are the
+ * test's own. R, G and B vary over the texture so the colour upscale is checked too. */
+static void soft_disc(uint32_t *t, int n, int r0, int r1, int r2) {
+    for (int y = 0; y < n; y++)
+        for (int x = 0; x < n; x++) {
+            const int dx = 2 * x - n + 1, dy = 2 * y - n + 1, q = dx * dx + dy * dy;
+            const uint32_t a = q < r0 * r0 ? 255u : q < r1 * r1 ? 200u : q < r2 * r2 ? 48u : 0u;
+            t[soft_at(y, n, x)] = (a << 24) | (0x40u << 16) | ((uint32_t)(9 * y) << 8) | (uint32_t)(19 * x);
+        }
+}
+
+/* The reference, written apart from tex_scale.c: each output texel's blur window summed directly
+ * in two dimensions, each bilinear tap found by an offset division, one rounding at the end. */
+static int ref_tap(int i, int f, int n, int *b, int *wb) {
+    const int d = 2 * f, t = 2 * i + 1 - f + 64 * d;   /* shifted to stay non-negative */
+    int a = t / d - 64;
+    *wb = t % d;
+    *b = a + 1;
+    if (*b > n - 1) *b = n - 1;
+    if (*b < 0) *b = 0;
+    if (a < 0) a = 0;
+    if (a > n - 1) a = n - 1;
+    return a;
+}
+
+static uint32_t ref_bilinear(const uint32_t *t, int w, int h, int f, int x, int y, int ch) {
+    int xb, wx, yb, wy;
+    const int xa = ref_tap(x, f, w, &xb, &wx), ya = ref_tap(y, f, h, &yb, &wy), d = 2 * f;
+    const int sh = 8 * ch;
+    const uint32_t c00 = (t[soft_at(ya, w, xa)] >> sh) & 0xFFu, c01 = (t[soft_at(ya, w, xb)] >> sh) & 0xFFu;
+    const uint32_t c10 = (t[soft_at(yb, w, xa)] >> sh) & 0xFFu, c11 = (t[soft_at(yb, w, xb)] >> sh) & 0xFFu;
+    return (uint32_t)((d - wy) * (d - wx)) * c00 + (uint32_t)((d - wy) * wx) * c01 +
+           (uint32_t)(wy * (d - wx)) * c10 + (uint32_t)(wy * wx) * c11;
+}
+
+static uint32_t ref_soft_texel(const uint32_t *t, int w, int h, int f, int e, int x, int y) {
+    const int ow = w * f, oh = h * f, r = e * f, k = 2 * r + 1, dd = 4 * f * f;
+    uint32_t out = 0;
+    for (int ch = 0; ch < 3; ch++)
+        out |= ((ref_bilinear(t, w, h, f, x, y, ch) + (uint32_t)dd / 2u) / (uint32_t)dd) << (8 * ch);
+    uint64_t sum = 0;
+    for (int j = y - r; j <= y + r; j++)
+        for (int i = x - r; i <= x + r; i++)
+            sum += ref_bilinear(t, w, h, f, i < 0 ? 0 : i >= ow ? ow - 1 : i, j < 0 ? 0 : j >= oh ? oh - 1 : j, 3);
+    const uint64_t den = (uint64_t)dd * (uint64_t)k * (uint64_t)k;
+    return out | (uint32_t)((sum + den / 2u) / den) << 24;
+}
+
+/* Alpha of output row `row`, from the centre (column `c0`) outward to the left edge: non-increasing
+ * when the edge is a ramp, and the number of distinct values and the largest step. */
+static int soft_row_ramp(const uint32_t *o, int ow, int row, int c0, int *levels, int *jump) {
+    int prev = 256, mono = 1, seen[256] = {0};
+    *levels = 0;
+    *jump = 0;
+    for (int x = c0; x >= 0; x--) {
+        const int a = (int)(o[soft_at(row, ow, x)] >> 24);
+        if (a > prev) mono = 0;
+        if (prev != 256 && prev - a > *jump) *jump = prev - a;
+        if (!seen[a]++) (*levels)++;
+        prev = a;
+    }
+    return mono;
+}
+
+static void test_soften(void) {
+    enum { SN = 12, BN = 40 };
+    static uint32_t small[SN * SN], big[BN * BN];
+    static uint32_t out[(BN * 4) * (BN * 4)], again[(BN * 4) * (BN * 4)];
+    soft_disc(small, SN, 6, 8, 9);
+    soft_disc(big, BN, 22, 25, 27);
+
+    /* Bounds: refused, and the output untouched. */
+    {
+        static const struct { uint32_t w, h, f, e; } bad[] = {
+            {SN, SN, 1, 1}, {SN, SN, 5, 1}, {SN, SN, 4, 0}, {SN, SN, 4, 5},
+            {0, SN, 4, 1}, {SN, 0, 4, 1}, {65, 1, 4, 1}, {1, 65, 4, 1},
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            for (int j = 0; j < 16; j++) out[j] = 0xDEADBEEFu;
+            CHECK(nk_tex_soften_alpha_edge(small, bad[i].w, bad[i].h, bad[i].f, bad[i].e, out) == 0 &&
+                  out[0] == 0xDEADBEEFu && out[15] == 0xDEADBEEFu,
+                  "soften: %ux%u factor %u edge %u is not refused, or the output was written",
+                  bad[i].w, bad[i].h, bad[i].f, bad[i].e);
+        }
+        CHECK(nk_tex_soften_alpha_edge(NULL, SN, SN, 4, 1, out) == 0, "soften: a NULL source is not refused");
+        /* The largest texture has buffers of its own size: 64x64 in, 256x256 out. */
+        static uint32_t max_src[64 * 64], max_out[(64 * 4) * (64 * 4)];
+        soft_disc(max_src, 64, 36, 40, 42);
+        CHECK(nk_tex_soften_alpha_edge(max_src, 64, 64, 4, 4, max_out) == 1 &&
+              nk_tex_soften_alpha_edge(big, 1, 1, 2, 1, out) == 1,
+              "soften: 64x64 at factor 4 edge 4, or 1x1 at factor 2 edge 1, is refused");
+    }
+
+    /* Exact texels of the 12x12 disc at factor 4, edge 1: every texel equals the reference, and
+     * the alpha of output row 23 (through the centre) is pinned. */
+    {
+        static const uint8_t k_row23[48] = {
+            0, 0, 3, 11, 25, 44, 67, 92, 118, 146, 174, 199, 219, 234, 243, 248,
+            252, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 254, 252,
+            248, 243, 234, 219, 199, 174, 146, 118, 92, 67, 44, 25, 11, 3, 0, 0,
+        };
+        int bad = 0, bx = 0, by = 0;
+        CHECK(nk_tex_soften_alpha_edge(small, SN, SN, 4, 1, out) == 1, "soften: the 12x12 disc is refused");
+        for (int y = 0; y < SN * 4; y++)
+            for (int x = 0; x < SN * 4; x++)
+                if (out[soft_at(y, SN * 4, x)] != ref_soft_texel(small, SN, SN, 4, 1, x, y) && !bad++) { bx = x; by = y; }
+        CHECK(bad == 0, "soften: %d texels of the 12x12 disc differ from the reference; first (%d, %d) %08x, want %08x",
+              bad, bx, by, out[soft_at(by, SN * 4, bx)], ref_soft_texel(small, SN, SN, 4, 1, bx, by));
+        int row_ok = 1;
+        for (int x = 0; x < SN * 4; x++) row_ok &= (out[soft_at(23, SN * 4, x)] >> 24) == k_row23[x];
+        if (!row_ok) {
+            fprintf(stderr, "soften: row 23 alpha:");
+            for (int x = 0; x < SN * 4; x++) fprintf(stderr, "%s%u", x ? ", " : " ", out[soft_at(23, SN * 4, x)] >> 24);
+            fputc('\n', stderr);
+        }
+        CHECK(row_ok, "soften: row 23 of the 12x12 disc is not the pinned row");
+        printf("tex scale selftest: soft row 23 (12x12 disc, factor 4, edge 1), alpha:");
+        for (int x = 0; x < SN * 4; x++) printf("%s%u", x ? "," : " ", out[soft_at(23, SN * 4, x)] >> 24);
+        printf("\n");
+    }
+
+    /* The 40x40 disc at every factor and edge: interior, mass, ramp and determinism. The ramp is
+     * measured against the hard edge's own centre row. */
+    int checked_in = 0, checked_out = 0, hard_levels = 0, hard_jump = 0;
+    CHECK(soft_row_ramp(big, BN, BN / 2, BN / 2 - 1, &hard_levels, &hard_jump) && hard_levels == 4,
+          "soften: the hard disc's centre row is not a 4-level step (%d levels)", hard_levels);
+    for (uint32_t f = NK_TEX_SOFT_FACTOR_MIN; f <= NK_TEX_SOFT_FACTOR_MAX; f++)
+        for (uint32_t e = NK_TEX_SOFT_EDGE_MIN; e <= NK_TEX_SOFT_EDGE_MAX; e++) {
+            const int ow = BN * (int)f, oh = ow, reach = (int)e + 1;
+            CHECK(nk_tex_soften_alpha_edge(big, BN, BN, f, e, out) == 1, "soften: factor %u edge %u is refused", f, e);
+            CHECK(nk_tex_soften_alpha_edge(big, BN, BN, f, e, again) == 1 &&
+                  memcmp(out, again, sizeof(uint32_t) * (size_t)ow * (size_t)oh) == 0,
+                  "soften: factor %u edge %u differs between two runs", f, e);
+            int interior_bad = 0;
+            for (int y = 0; y < oh; y++)
+                for (int x = 0; x < ow; x++) {
+                    const int sx = x / (int)f, sy = y / (int)f;
+                    const uint32_t a = big[soft_at(sy, BN, sx)] >> 24;
+                    int flat = 1;
+                    for (int j = sy - reach; j <= sy + reach && flat; j++)
+                        for (int i = sx - reach; i <= sx + reach && flat; i++) {
+                            const int cj = j < 0 ? 0 : j >= BN ? BN - 1 : j, ci = i < 0 ? 0 : i >= BN ? BN - 1 : i;
+                            flat = (big[soft_at(cj, BN, ci)] >> 24) == a;
+                        }
+                    if (!flat) continue;
+                    if (a == 255u) checked_in++; else checked_out++;
+                    if ((out[soft_at(y, ow, x)] >> 24) != a) interior_bad++;
+                }
+            CHECK(interior_bad == 0, "soften: factor %u edge %u: %d flat texels lost their alpha", f, e, interior_bad);
+            uint64_t src_mass = 0, out_mass = 0;
+            for (int i = 0; i < BN * BN; i++) src_mass += big[i] >> 24;
+            for (int i = 0; i < ow * oh; i++) out_mass += out[i] >> 24;
+            const int64_t diff = (int64_t)out_mass - (int64_t)(src_mass * f * f);
+            CHECK((diff < 0 ? -diff : diff) * 2 <= (int64_t)ow * oh,
+                  "soften: factor %u edge %u: alpha mass %llu, want %llu within %d", f, e,
+                  (unsigned long long)out_mass, (unsigned long long)(src_mass * f * f), ow * oh / 2);
+            int levels = 0, jump = 0;
+            const int mono = soft_row_ramp(out, ow, oh / 2, ow / 2 - 1, &levels, &jump);
+            CHECK(mono && levels > hard_levels && jump < hard_jump, "soften: factor %u edge %u: the centre row is "
+                  "not a ramp (monotone %d, %d levels, largest step %d; the hard edge has %d levels and a step of %d)",
+                  f, e, mono, levels, jump, hard_levels, hard_jump);
+            if (f == NK_TEX_SOFT_FACTOR && e == 2u)
+                printf("tex scale selftest: soft 40x40 disc factor 4 edge 2: mass %llu vs %llu (bound %d), "
+                       "centre row %d levels, largest step %d (hard edge %d, %d)\n", (unsigned long long)out_mass,
+                       (unsigned long long)(src_mass * f * f), ow * oh / 2, levels, jump, hard_levels, hard_jump);
+        }
+    CHECK(checked_in > 0 && checked_out > 0, "soften: the interior rule checked %d inside and %d outside texels",
+          checked_in, checked_out);
+    if (!s_fail)
+        printf("tex scale selftest: PASS soften exact 12x12 disc, interior (%d inside, %d outside texels), mass, "
+               "ramp, determinism, bounds\n", checked_in, checked_out);
+}
+
+static int hex_eq(const uint8_t d[32], const char *hex) {
+    for (int i = 0; i < 32; i++) {
+        unsigned v = 0;
+        if (sscanf(hex + 2 * i, "%2x", &v) != 1 || v != d[i]) return 0;
+    }
+    return 1;
+}
+
+static void test_soft_digest(void) {
+    uint8_t mac[32], other[32], key[131];
+    /* RFC 4231 test cases 1, 2 and 6. */
+    {
+        memset(key, 0x0b, 20);
+        const uint8_t *part[1] = { (const uint8_t *)"Hi There" };
+        const size_t len[1] = { 8 };
+        sr_vfpu_hmac_sha256(key, 20, part, len, 1, mac);
+        CHECK(hex_eq(mac, "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"), "hmac: RFC 4231 case 1");
+    }
+    {
+        const uint8_t *part[3] = { (const uint8_t *)"what do ya", (const uint8_t *)" want for ",
+                                   (const uint8_t *)"nothing?" };
+        const size_t len[3] = { 10, 10, 8 };   /* the message in three pieces */
+        sr_vfpu_hmac_sha256((const uint8_t *)"Jefe", 4, part, len, 3, mac);
+        CHECK(hex_eq(mac, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"), "hmac: RFC 4231 case 2, split");
+    }
+    {
+        memset(key, 0xaa, sizeof(key));
+        const char *m = "Test Using Larger Than Block-Size Key - Hash Key First";
+        const uint8_t *part[1] = { (const uint8_t *)m };
+        const size_t len[1] = { strlen(m) };
+        sr_vfpu_hmac_sha256(key, sizeof(key), part, len, 1, mac);
+        CHECK(hex_eq(mac, "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"), "hmac: RFC 4231 case 6");
+    }
+    /* The match rule: key 00 01 .. 1f, a 2x1 texture of 0x44332211 and 0xFF000000. The digest is
+     * pinned from Python's hmac over b"soft shadow texture v1\0" + u16le(2) + u16le(1) +
+     * 11 22 33 44 00 00 00 ff. */
+    uint8_t k32[32];
+    for (int i = 0; i < 32; i++) k32[i] = (uint8_t)i;
+    const uint32_t tex[2] = { 0x44332211u, 0xFF000000u };
+    CHECK(nk_tex_soft_shadow_digest(k32, tex, 2, 1, mac) == 1 &&
+          hex_eq(mac, "6259af8807b016b8212bfd7ed918982b72303aa2a138fec1deb09815437ac7cb"),
+          "soft digest: the 2x1 synthetic texture's digest is not the pinned one");
+    CHECK(nk_tex_soft_shadow_digest(k32, tex, 1, 2, other) == 1 && memcmp(mac, other, 32) != 0,
+          "soft digest: the same texels as 1x2 give the same digest (the size is not in the message)");
+    k32[0] ^= 1u;
+    CHECK(nk_tex_soft_shadow_digest(k32, tex, 2, 1, other) == 1 && memcmp(mac, other, 32) != 0,
+          "soft digest: another key gives the same digest");
+    k32[0] ^= 1u;
+    const uint32_t tex2[2] = { 0x44332211u, 0xFE000000u };
+    CHECK(nk_tex_soft_shadow_digest(k32, tex2, 2, 1, other) == 1 && memcmp(mac, other, 32) != 0,
+          "soft digest: another alpha gives the same digest");
+    memset(other, 0x5a, sizeof(other));
+    static uint32_t wide[65];
+    CHECK(nk_tex_soft_shadow_digest(k32, wide, 65, 1, other) == 0 && other[0] == 0x5a &&
+          nk_tex_soft_shadow_digest(k32, wide, 0, 1, other) == 0,
+          "soft digest: a texture wider than 64 or of width 0 is hashed");
+    if (!s_fail) printf("tex scale selftest: PASS soft-digest RFC 4231 cases 1, 2 (split), 6; match rule pinned\n");
+}
+
+/* SR_ACE_SHADOW_CANDIDATES's line and its once-per-content table. */
+static void test_soft_candidates(void) {
+    uint8_t k32[32], mac[32], other[32];
+    char line[128];
+    for (int i = 0; i < 32; i++) k32[i] = (uint8_t)i;
+    const uint32_t tex[2] = { 0x44332211u, 0xFF000000u };
+    CHECK(nk_tex_soft_shadow_digest(k32, tex, 2, 1, mac) == 1, "candidates: the pinned texture is not hashed");
+    static const char want[] =
+        "SOFT_SHADOW: candidate 2x1 digest=6259af8807b016b8212bfd7ed918982b72303aa2a138fec1deb09815437ac7cb";
+    CHECK(nk_tex_soft_candidate_line(line, sizeof(line), 2, 1, mac) == strlen(want) && strcmp(line, want) == 0,
+          "candidates: the line is '%s'", line);
+    CHECK(nk_tex_soft_candidate_line(line, strlen(want), 2, 1, mac) == 0 && line[0] == '\0',
+          "candidates: a line one byte too long for its buffer is written");
+    CHECK(nk_tex_soft_candidate_line(line, sizeof(line), 64, 64, mac) > 0 &&
+          strncmp(line, "SOFT_SHADOW: candidate 64x64 digest=", 36) == 0, "candidates: 64x64 reads '%s'", line);
+    static NkTexSoftCandidates seen;
+    seen.count = 0;
+    memcpy(other, mac, 32);
+    other[31] ^= 1u;
+    CHECK(nk_tex_soft_candidate_first(&seen, mac) == 1 && nk_tex_soft_candidate_first(&seen, mac) == 0 &&
+          nk_tex_soft_candidate_first(&seen, other) == 1 && seen.count == 2,
+          "candidates: a content is not listed exactly once");
+    seen.count = NK_TEX_SOFT_CANDIDATES_MAX;
+    other[0] ^= 1u;
+    CHECK(nk_tex_soft_candidate_first(&seen, other) == -1 && seen.count == NK_TEX_SOFT_CANDIDATES_MAX &&
+          nk_tex_soft_candidate_first(&seen, mac) == 0, "candidates: a full table records a new digest");
+    if (!s_fail) printf("tex scale selftest: PASS soft-shadow candidate line and once-per-content table\n");
+}
+
 int main(void) {
+    test_soften();
+    test_soft_digest();
+    test_soft_candidates();
     test_golden();
     test_wrap_clamp();
     test_jobs();
