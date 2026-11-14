@@ -523,6 +523,59 @@ class TestPrerequisiteFetcher(unittest.TestCase):
         install_root = self.root / "prerequisites"
         self.assertTrue((install_root / records["python-test"]["notices"][0]).is_file())
 
+    # A member name Windows would not store as written: a colon makes "a/D:evil.dll"
+    # drive-relative (outside the install folder) or names a data stream, a trailing dot or
+    # space is dropped, a device name opens the device. Each is refused in both archive kinds
+    # before anything is installed.
+    UNSAFE_MEMBER_NAMES = (
+        "bin/D:evil.dll", "D:evil.dll", "bin/evil.dll:stream", "bin/NUL", "bin/com1.txt",
+        "bin/Aux .h", "bin/LPT¹", "bin/name.", "bin/name ", "bin/a|b", "bin/a?b",
+        "bin/a<b", "bin/tab\there",
+    )
+
+    def assert_unsafe_member_refused(self, fmt: str, name: str, case: int) -> None:
+        root = self.root / f"case-{fmt}-{case}"
+        good = "bin/good.dll"
+        if fmt == "zip":
+            stream = io.BytesIO()
+            with zipfile.ZipFile(stream, "w") as archive:
+                archive.writestr(good, b"good\n")
+                archive.writestr(name, b"planted\n")
+            body = stream.getvalue()
+        else:
+            body = self._tar({good: b"good\n", name: b"planted\n"}, "w:gz")
+        item = self.item(payload=body)
+        _PayloadHandler.payload = body
+        item.update({"archive_format": fmt, "install_subdir": "msys64",
+                     "filename": "payload.zip" if fmt == "zip" else "payload.tar.gz"})
+        with self.assertRaisesRegex(PrerequisiteFetchError, "ARCHIVE_PATH_REJECTED"):
+            install_items({"artifacts": [item]}, root, allow_http=True)
+        installed = root / "prerequisites" / "msys64"
+        self.assertEqual([p for p in installed.rglob("*") if p.is_file()] if installed.exists() else [], [])
+
+    def test_zip_member_names_windows_cannot_store_are_refused(self) -> None:
+        for case, name in enumerate(self.UNSAFE_MEMBER_NAMES):
+            with self.subTest(name=name):
+                self.assert_unsafe_member_refused("zip", name, case)
+
+    def test_tar_member_names_windows_cannot_store_are_refused(self) -> None:
+        for case, name in enumerate(self.UNSAFE_MEMBER_NAMES):
+            with self.subTest(name=name):
+                self.assert_unsafe_member_refused("tar.gz", name, case)
+
+    def test_ordinary_member_names_beside_the_refused_ones_still_install(self) -> None:
+        # Names close to the refused ones that Windows stores as written.
+        names = ("bin/console.dll", "bin/nuls/x", "bin/com10.txt", "bin/.hidden", "bin/a.b.c",
+                 "share/licenses/x/COPYING", "bin/con-x.h", "bin/libstdc++-6.dll")
+        body = self._tar({name: b"x\n" for name in names}, "w:gz")
+        _PayloadHandler.payload = body
+        item = self.item(payload=body)
+        item.update({"archive_format": "tar.gz", "install_subdir": "msys64", "filename": "payload.tar.gz"})
+        install_items({"artifacts": [item]}, self.root, allow_http=True)
+        installed = self.root / "prerequisites" / "msys64"
+        for name in names:
+            self.assertTrue((installed / name).is_file(), name)
+
     # ---- Release bundle (#1285) ----------------------------------------------
 
     def bundle_manifest(self, *, msys_members: dict[str, bytes] | None = None,
