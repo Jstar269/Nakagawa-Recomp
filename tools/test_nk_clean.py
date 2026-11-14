@@ -106,6 +106,14 @@ class DryRunTests(unittest.TestCase):
             self.assertTrue(nk_clean._confirm_requested(True))
 
 
+class NeverPruneTests(unittest.TestCase):
+    def test_the_fixture_tree_is_never_pruned_where_it_lives(self) -> None:
+        """Deleting the oracle build output must not prune the tracked fixture tree above it."""
+        self.assertIn("tests/fixtures", nk_clean.NEVER_PRUNE)
+        self.assertIn("tests/fixtures/psp_oracle/build", nk_clean.NEVER_PRUNE)
+        self.assertNotIn("fixtures", nk_clean.NEVER_PRUNE, "the root folder the tree moved from")
+
+
 class SelectionTests(unittest.TestCase):
     def test_confirmed_delete_removes_exactly_the_previewed_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -150,7 +150,7 @@ NEVER_PRUNE: frozenset[str] = (
     | frozenset(
         {
             "logs",
-            "fixtures",
+            "tests/fixtures",
         }
     )
 )
