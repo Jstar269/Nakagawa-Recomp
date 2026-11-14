@@ -630,7 +630,9 @@ them only when on, in that order, `mips` right after `twin`, `shadow` after `tex
 `texscale` and then `smart2d` after `shadow`, and `cull` last, so a line with
 them off is the line without them, byte for byte. No environment variable switches a part the line carries:
 `SR_GLYPHS`, `SR_TEX_SCALE` and `SR_SMART_2D`, which once did, are retired, and a run started with one of them set to
-anything stops at once with a line that names the key (sections 10.10 and 10.13). With `texpack=on` the launcher also exports `SR_TEX_REPLACE`, the
+anything stops at once with a line that names the key (sections 10.10 and 10.13). The launcher exports all three
+empty, as it does `SR_TEX_DUMP`, so a game started from the player never inherits one and only a runtime started by
+hand is stopped (`test_launch_resolution`). With `texpack=on` the launcher also exports `SR_TEX_REPLACE`, the
 title's pack folder; it always exports that variable, empty for any other line, so an inherited folder never reaches
 a run. `pad` (`late` or `off`, section 11.3.9) may be left out too: a missing `pad` or `pad=off` is off, `pad=late`
 needs `tier=ace`, and the launcher writes `;pad=late` only for an Ace launch with that part on, after `texpack` and

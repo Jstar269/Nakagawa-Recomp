@@ -95,8 +95,9 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   *LittleBigPlanet* do, so leave it off for them). The launch line carries `texscale=<factor>` and `smart2d=on`.
   Both change the frames the game can read back; they are admitted as Enhanced items and stay off by default
   ([section 11.3.3](ENHANCEMENT_CONTRACT.md#1133-texture-scaling-and-the-smart-2d-filter-texscale-smart2d)).
-  The `SR_TEX_SCALE` and `SR_SMART_2D` environment variables no longer switch them: a game started with either
-  one set stops at once and names the setting to use.
+  The `SR_TEX_SCALE` and `SR_SMART_2D` environment variables no longer switch them. A game started from the
+  player ignores them (the player hands the game an empty value for each, and for `SR_GLYPHS`, so the settings are
+  what count); a game's program started by hand with one set stops at once and names the setting to use.
   Each texture a game uploads is scaled once on two worker threads, off the game's thread: on the development PC (`-O2`, one thread) a 256x256 texture took about 2.0 ms at 2x, 2.8 ms at 4x
   and 4.6 ms at 6x, so a scene change that uploads many textures shows some of them unscaled for a moment. Each
   copy costs factor x factor times the texture's GPU memory (a 256x256 texture at 4x is 4 MB), up to a budget of

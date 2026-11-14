@@ -556,7 +556,9 @@ int ace_init_spec(const char *spec, const char *report_path) {
 }
 
 /* The variables a launch-line key replaced: what each switched, the key that does it now, an
-   example of the key on a line, and the contract section that describes it. */
+   example of the key on a line, and the contract section that describes it. The launcher exports
+   each of them empty for a game it starts (src/core/nk_launch.c), so only a runtime started by
+   hand can be stopped by one; a name added here is added there. */
 static const struct {
     const char *name, *what, *key, *example, *section;
 } k_ace_retired_env[] = {
