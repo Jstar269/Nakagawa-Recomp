@@ -52,11 +52,11 @@
       "role": "repository-level GPL-3.0-or-later declaration"
     },
     {
-      "path": "THIRD_PARTY_LICENSES/GPL-2.0.txt",
+      "path": "third_party/licenses/GPL-2.0.txt",
       "role": "verbatim GPLv2 license text for inherited GPL-2.0-or-later files"
     },
     {
-      "path": "THIRD_PARTY_LICENSES/SAL063_CREDITS.txt",
+      "path": "third_party/licenses/SAL063_CREDITS.txt",
       "role": "immediate upstream and third-party attribution"
     },
     {

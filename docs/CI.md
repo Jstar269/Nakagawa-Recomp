@@ -955,7 +955,7 @@ digest, which are recomputed at verification, so admitting a path leaves it
 byte-identical and two path-adding pull requests do not conflict on it. Regenerating
 them in the working tree is not enough — they have to be **staged and committed**
 with the change they describe (a refresh after merging `main` is its own commit; see
-`REVIEW.md`), or the commit ships a new path without the evidence for it and fails
+`.github/REVIEW.md`), or the commit ships a new path without the evidence for it and fails
 with `POLICY_UNCLASSIFIED`, `UNRESOLVED_PUBLIC` and `PROVENANCE_MISSING` together.
 
 `make readiness` re-runs the export generator at the end and fails if that

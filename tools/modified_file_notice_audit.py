@@ -85,10 +85,10 @@ def audit(root: Path, manifest_relative: Path, tracked_only: bool) -> tuple[list
         text = _text(content)
         if path == "LICENSE" and not all(marker in text for marker in GPL3_MARKERS):
             _add(findings, "LICENSE does not contain the repository GPL-3.0 text markers")
-        if path.endswith("THIRD_PARTY_LICENSES/GPL-2.0.txt") and not all(
+        if path.endswith("third_party/licenses/GPL-2.0.txt") and not all(
             marker in text for marker in GPL2_MARKERS
         ):
-            _add(findings, "THIRD_PARTY_LICENSES/GPL-2.0.txt does not contain GPLv2 text markers")
+            _add(findings, "third_party/licenses/GPL-2.0.txt does not contain GPLv2 text markers")
 
     records = manifest.get("files")
     if not isinstance(records, list):

@@ -154,7 +154,7 @@ Bugs go in [issues](https://github.com/Jstar269/Nakagawa-Recomp/issues), and
 on code. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the rules and the checks to run. To carry the project on in a
 fork of your own, start with [`docs/FORKING.md`](docs/FORKING.md).
 
-[All documentation](docs/README.md) · [Accessibility](ACCESSIBILITY.md) · [Getting help](SUPPORT.md) ·
+[All documentation](docs/README.md) · [Accessibility](ACCESSIBILITY.md) · [Getting help](.github/SUPPORT.md) ·
 [Security](SECURITY.md) · [Code of conduct](CODE_OF_CONDUCT.md) · [AI use](docs/AI_USAGE.md)
 
 ## Project health

@@ -75,7 +75,7 @@ your machine; the cited section has the full rule.
 - The submitter confirms in the template the right to submit under GPL-3.0-or-later. A DCO sign-off
   is optional and only the person adds it ([DCO policy](docs/DCO_POLICY.md)); the agent never does.
 - It says where every new file came from (next section) and meets the
-  [professional-finish checks](REVIEW.md#professional-finish).
+  [professional-finish checks](.github/REVIEW.md#professional-finish).
 
 ### New files: what to put in the pull request
 
@@ -278,7 +278,7 @@ run on the landing batch that carries it, or on the pull request itself when it 
 a Ready pull request runs the full checks on each push. Either way the focused local gates are the
 first evidence for a Python, native or Windows change: run them before the push.
 
-Before the first push, check [Findings to pre-empt](REVIEW.md#findings-to-pre-empt), and build native
+Before the first push, check [Findings to pre-empt](.github/REVIEW.md#findings-to-pre-empt), and build native
 code in a Linux shell such as WSL (hosted Linux builds it with and without SDL3).
 
 ## 10. PR and integration authorization

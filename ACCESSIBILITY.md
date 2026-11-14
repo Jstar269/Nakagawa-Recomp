@@ -191,7 +191,7 @@ say so on the issue and add it to the table above.
 ## Ownership
 
 The maintainer ([@Jstar269](https://github.com/Jstar269)) owns this statement, triages reports, and keeps it current
-with the code. Other questions go through [`SUPPORT.md`](SUPPORT.md).
+with the code. Other questions go through [`SUPPORT.md`](.github/SUPPORT.md).
 
 ## Feedback on this page
 

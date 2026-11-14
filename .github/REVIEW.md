@@ -2,7 +2,7 @@
 
 Nakagawa Recomp is an experimental PSP static recompiler: generated C plus a native C
 runtime, an interpreter floor, and HLE, moving toward low-level emulation.
-[`AGENTS.md`](AGENTS.md) is the operating contract; this file adds review priorities.
+[`AGENTS.md`](../AGENTS.md) is the operating contract; this file adds review priorities.
 
 ## Priorities
 
@@ -113,7 +113,7 @@ Authors, human or agent, check these before requesting review; reviewers flag th
   only when a change routes Python.
 - **New public paths.** The private admission and policy delta are on the private authority repository's `main`
   before the hosted attestation runs
-  ([step by step](docs/PUBLICATION_READINESS.md#step-by-step-a-pull-request-that-adds-a-public-path)).
+  ([step by step](../docs/PUBLICATION_READINESS.md#step-by-step-a-pull-request-that-adds-a-public-path)).
 
 ### Professional finish
 

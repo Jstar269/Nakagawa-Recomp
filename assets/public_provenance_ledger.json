@@ -152,6 +152,22 @@
       }
     },
     {
+      "path": ".github/REVIEW.md",
+      "classification": "reviewed_documentation",
+      "evidence": {
+        "source": "public documentation review",
+        "statement": "generic/public documentation; no private operational evidence"
+      }
+    },
+    {
+      "path": ".github/SUPPORT.md",
+      "classification": "reviewed_documentation",
+      "evidence": {
+        "source": "public documentation review",
+        "statement": "generic/public documentation; no private operational evidence"
+      }
+    },
+    {
       "path": ".github/codecov.yml",
       "classification": "reviewed_configuration",
       "evidence": {
@@ -443,211 +459,11 @@
       }
     },
     {
-      "path": "REVIEW.md",
-      "classification": "reviewed_documentation",
-      "evidence": {
-        "source": "public documentation review",
-        "statement": "generic/public documentation; no private operational evidence"
-      }
-    },
-    {
       "path": "SECURITY.md",
       "classification": "reviewed_documentation",
       "evidence": {
         "source": "public documentation review",
         "statement": "generic/public documentation; no private operational evidence"
-      }
-    },
-    {
-      "path": "SUPPORT.md",
-      "classification": "reviewed_documentation",
-      "evidence": {
-        "source": "public documentation review",
-        "statement": "generic/public documentation; no private operational evidence"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/Brotli.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "dependency-brotli-notice",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "MIT",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/FFMPEG_MIPS_FFT.txt",
-      "classification": "reviewed_documentation",
-      "evidence": {
-        "source": "public documentation review",
-        "statement": "generic/public documentation; no private operational evidence"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/FreeType-FTL.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "dependency-freetype-ftl-notice",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "FTL",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/GLib.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "dependency-glib-notice",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "LGPL-2.1-or-later",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/GPL-2.0.txt",
-      "classification": "reviewed_documentation",
-      "evidence": {
-        "source": "public documentation review",
-        "statement": "generic/public documentation; no private operational evidence"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/Graphite2.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "dependency-graphite2-notice",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "MIT OR LGPL-2.1-or-later OR MPL-2.0 OR GPL-2.0-or-later",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/HarfBuzz.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "dependency-harfbuzz-notice",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "MIT",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/PCRE2.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "dependency-pcre2-notice",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "BSD-3-Clause WITH PCRE2-exception",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/PSPSDK.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "dependency-pspsdk-notice",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "BSD-3-Clause and per-component",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/SAL063_CREDITS.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "upstream-sal063-notice",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "GPL-2.0-or-later",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/SDL3_ttf.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "dependency-sdl3_ttf-notice",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "Zlib",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/bzip2.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "dependency-bzip2-notice",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "bzip2-1.0.6",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/libiconv.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "dependency-libiconv-notice",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "LGPL-2.1-or-later",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/libintl.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "dependency-libintl-notice",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "LGPL-2.1-or-later",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/libpng.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "dependency-libpng-notice",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "libpng-2.0",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "THIRD_PARTY_LICENSES/zlib.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "dependency-zlib-notice",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "Zlib",
-        "modification_status": "modified_or_translated; see trusted record"
       }
     },
     {
@@ -15980,6 +15796,142 @@
       }
     },
     {
+      "path": "third_party/licenses/Brotli.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-brotli-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/licenses/FFMPEG_MIPS_FFT.txt",
+      "classification": "reviewed_documentation",
+      "evidence": {
+        "source": "public documentation review",
+        "statement": "generic/public documentation; no private operational evidence"
+      }
+    },
+    {
+      "path": "third_party/licenses/FreeType-FTL.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-freetype-ftl-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "FTL",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/licenses/GLib.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-glib-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "LGPL-2.1-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/licenses/GPL-2.0.txt",
+      "classification": "reviewed_documentation",
+      "evidence": {
+        "source": "public documentation review",
+        "statement": "generic/public documentation; no private operational evidence"
+      }
+    },
+    {
+      "path": "third_party/licenses/Graphite2.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-graphite2-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT OR LGPL-2.1-or-later OR MPL-2.0 OR GPL-2.0-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/licenses/HarfBuzz.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-harfbuzz-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/licenses/PCRE2.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-pcre2-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "BSD-3-Clause WITH PCRE2-exception",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/licenses/PSPSDK.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-pspsdk-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "BSD-3-Clause and per-component",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/licenses/SAL063_CREDITS.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "upstream-sal063-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "GPL-2.0-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/licenses/SDL3_ttf.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-sdl3_ttf-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "Zlib",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/licenses/bzip2.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-bzip2-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "bzip2-1.0.6",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
       "path": "third_party/licenses/gcc-libs/COPYING.RUNTIME.txt",
       "classification": "upstream_derived",
       "evidence": {
@@ -16000,6 +15952,42 @@
         "evidence_tier": "S",
         "upstream": "documented upstream family",
         "license": "GPL-3.0-or-later WITH GCC-exception-3.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/licenses/libiconv.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-libiconv-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "LGPL-2.1-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/licenses/libintl.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-libintl-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "LGPL-2.1-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/licenses/libpng.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-libpng-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "libpng-2.0",
         "modification_status": "modified_or_translated; see trusted record"
       }
     },
@@ -16036,6 +16024,18 @@
         "evidence_tier": "S",
         "upstream": "documented upstream family",
         "license": "MIT AND BSD-3-Clause",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/licenses/zlib.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-zlib-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "Zlib",
         "modification_status": "modified_or_translated; see trusted record"
       }
     },

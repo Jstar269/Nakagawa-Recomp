@@ -477,7 +477,7 @@ package it. Use the user library that exports the same NIDs (for example
 ## Bounded follow-up probes
 
 Their hardware status is in the
-[measured index](../../docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize):
+[measured index](../../docs/HARDWARE_ORACLE.md#measured-to-date-index--exact-cells-only-do-not-generalize):
 `ge-nan` and `audio-query` ran on a PSP-3000 on 2026-10-10 (`f6ccfb33`) and again on
 2026-10-15 (`f2d6c91a`).
 
@@ -595,7 +595,7 @@ The cases below are synthetic probes. A case's hardware status is `NOT_RUN` unti
 complete and well formed. It does not decide which PSP return values or
 ordering semantics are correct. `llsc-link`, `vfpu-compare` and `fpu-cc` were measured on a
 PSP-3000 on 2026-10-15 (build `e45e667b`); the
-[measured index](../../docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize)
+[measured index](../../docs/HARDWARE_ORACLE.md#measured-to-date-index--exact-cells-only-do-not-generalize)
 publishes their words.
 
 | Case | Test id | Measurements |

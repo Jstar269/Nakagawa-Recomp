@@ -19,16 +19,16 @@ question. Please don't share game files, decrypted files, private paths or perso
 
 | You want to | Go to |
 | --- | --- |
-| Set the player up or build it | [`docs/SETUP.md`](docs/SETUP.md) and [`docs/YOUR_OWN_GAMES.md`](docs/YOUR_OWN_GAMES.md), then [Help](https://github.com/Jstar269/nakagawa-recomp/discussions/categories/help) if you're still stuck |
-| Know whether a game works | [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) and [Compatibility reports](https://github.com/Jstar269/nakagawa-recomp/discussions/categories/compatibility-reports) |
-| Fix a Windows build problem | [Windows host pitfalls](docs/SETUP.md#windows-host-pitfalls) |
-| Find a barrier, or say something is hard to use | [Accessibility barrier form](https://github.com/Jstar269/nakagawa-recomp/issues/new?template=accessibility.yml), and [`ACCESSIBILITY.md`](ACCESSIBILITY.md) |
+| Set the player up or build it | [`docs/SETUP.md`](../docs/SETUP.md) and [`docs/YOUR_OWN_GAMES.md`](../docs/YOUR_OWN_GAMES.md), then [Help](https://github.com/Jstar269/nakagawa-recomp/discussions/categories/help) if you're still stuck |
+| Know whether a game works | [`docs/COMPATIBILITY.md`](../docs/COMPATIBILITY.md) and [Compatibility reports](https://github.com/Jstar269/nakagawa-recomp/discussions/categories/compatibility-reports) |
+| Fix a Windows build problem | [Windows host pitfalls](../docs/SETUP.md#windows-host-pitfalls) |
+| Find a barrier, or say something is hard to use | [Accessibility barrier form](https://github.com/Jstar269/nakagawa-recomp/issues/new?template=accessibility.yml), and [`ACCESSIBILITY.md`](../ACCESSIBILITY.md) |
 | Report a bug | [Bug report form](https://github.com/Jstar269/nakagawa-recomp/issues/new?template=bug_report.yml), after searching [open issues](https://github.com/Jstar269/nakagawa-recomp/issues) |
 | Suggest a feature | [Ideas](https://github.com/Jstar269/nakagawa-recomp/discussions/categories/ideas) to talk it over, or the [Feature request form](https://github.com/Jstar269/nakagawa-recomp/issues/new?template=feature_request.yml) for a worked-out proposal |
 | Report that you ran the release smoke test | [Smoke test report form](https://github.com/Jstar269/nakagawa-recomp/issues/new?template=smoke_test_report.yml) |
-| Contribute a change | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
-| Report a security vulnerability, or a rights-holder concern | [`SECURITY.md`](SECURITY.md): privately, never in a public issue or discussion |
-| Report a conduct problem | [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) |
+| Contribute a change | [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
+| Report a security vulnerability, or a rights-holder concern | [`SECURITY.md`](../SECURITY.md): privately, never in a public issue or discussion |
+| Report a conduct problem | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) |
 
 There's no chat server, support email or paid support. The maintainer answers when time allows, and other people in
 Discussions often can too, so please search the documentation, Discussions and existing issues first. If a page in

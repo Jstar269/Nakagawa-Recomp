@@ -2245,7 +2245,7 @@ def _default_provenance(
     if rel_path in REQUIRED_PATHS or rel_path in ("NOTICE.md", "LICENSE", "README.md", "AGENTS.md", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "DEDICATION.md", "SECURITY.md", "TODO.md"):
         return "notice_doc", "GPL-3.0-or-later", rel_path if rel_path in ("LICENSE", "NOTICE.md") else "NOTICE.md", "documentation", "included", policy_public
 
-    if rel_path.startswith("THIRD_PARTY_LICENSES/"):
+    if rel_path.startswith("third_party/licenses/") and rel_path.count("/") == 2:
         return "notice_doc", "BSD-3-Clause", rel_path, "documentation", "included", policy_public
 
     if rel_path.startswith("assets/vfpu/"):
