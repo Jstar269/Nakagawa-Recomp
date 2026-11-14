@@ -4140,7 +4140,7 @@ static int player_load_library(PlayerRun *run) {
     }
     {
         const char *base = SDL_GetBasePath();
-        if (base) snprintf(app->install_root, sizeof(app->install_root), "%s", base);
+        if (base) player_app_set_install_root(app, base);
     }
     if (run->stage_only && !run->initial_iso_path) {
         fprintf(stderr, "[PLAYER] --stage-only requires --iso=<path>.\n");

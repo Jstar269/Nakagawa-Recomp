@@ -1508,6 +1508,11 @@ bool player_module_qualified_name(const char *rel_path, const char *disc_name,
                             char *out, size_t out_size);
 bool player_game_is_showcase(const GameRecord *game);
 void player_app_set_runtime_root(PlayerApp *app, const char *root);
+/* Records the folder the player's executable is in (install_root; NULL or "" when unknown).
+ * The library is loaded, and each title's package files read, before that folder is known, and
+ * the packages the source tree ships are found through it (player_app_shipped_enhancements_root).
+ * So this reads every title's package files again and re-selects what each title launches. */
+void player_app_set_install_root(PlayerApp *app, const char *root);
 bool player_app_title_profile_refusal_for_disc(
     const PlayerApp *app,
     const char *disc_id,
