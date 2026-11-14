@@ -386,6 +386,13 @@ def _extract_tar(item: dict, archive: Path, target: Path, notices_root: Path,
                 link = PurePosixPath(link_value)
                 if link.is_absolute() or "\\" in link_value:
                     raise PrerequisiteFetchError("ARCHIVE_LINK_REJECTED: package link is absolute or malformed.")
+                # The target is joined onto the install folder exactly like a member name, so it
+                # follows the same Windows name rule (a ``D:`` part would leave the folder).
+                if any(_windows_unsafe_part(part) for part in link.parts if part not in {".", ".."}):
+                    raise PrerequisiteFetchError(
+                        "ARCHIVE_LINK_REJECTED: package link target is not a plain Windows file name "
+                        "(drive or stream colon, reserved character, trailing dot or space, or device name)."
+                    )
                 combined = relative.parent.joinpath(link) if member.issym() else link
                 if any(part == ".." for part in combined.parts):
                     raise PrerequisiteFetchError("ARCHIVE_LINK_REJECTED: package link escapes its install directory.")

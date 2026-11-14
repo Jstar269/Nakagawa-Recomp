@@ -526,10 +526,12 @@ class TestPrerequisiteFetcher(unittest.TestCase):
     # A member name Windows would not store as written: a colon makes "a/D:evil.dll"
     # drive-relative (outside the install folder) or names a data stream, a trailing dot or
     # space is dropped, a device name opens the device. Each is refused in both archive kinds
-    # before anything is installed.
+    # before anything is installed. The drive letter is the temp folder's own, so a regression
+    # run on Windows writes inside the test folder rather than into another drive.
+    TEMP_DRIVE = Path(tempfile.gettempdir()).drive.rstrip(":") or "D"
     UNSAFE_MEMBER_NAMES = (
-        "bin/D:evil.dll", "D:evil.dll", "bin/evil.dll:stream", "bin/NUL", "bin/com1.txt",
-        "bin/Aux .h", "bin/LPT¹", "bin/name.", "bin/name ", "bin/a|b", "bin/a?b",
+        f"bin/{TEMP_DRIVE}:evil.dll", f"{TEMP_DRIVE}:evil.dll", "bin/evil.dll:stream", "bin/NUL",
+        "bin/com1.txt", "bin/Aux .h", "bin/LPT¹", "bin/name.", "bin/name ", "bin/a|b", "bin/a?b",
         "bin/a<b", "bin/tab\there",
     )
 
@@ -562,6 +564,56 @@ class TestPrerequisiteFetcher(unittest.TestCase):
         for case, name in enumerate(self.UNSAFE_MEMBER_NAMES):
             with self.subTest(name=name):
                 self.assert_unsafe_member_refused("tar.gz", name, case)
+
+    def test_tar_link_targets_windows_cannot_store_are_refused(self) -> None:
+        # A link target is joined onto the install folder like a member name: "D:x" as a
+        # hard-link source names a file on another drive (copied in when linking fails), and
+        # as a symlink target it made os.path.relpath raise instead of a named refusal.
+        targets = (f"{self.TEMP_DRIVE}:evil.dll", f"bin/{self.TEMP_DRIVE}:evil.dll", "bin/NUL",
+                   "bin/good.dll:stream", "bin/good.dll.")
+        case = 0
+        for link_type in (tarfile.LNKTYPE, tarfile.SYMTYPE):
+            for link_target in targets:
+                case += 1
+                with self.subTest(link_type=link_type, target=link_target):
+                    stream = io.BytesIO()
+                    with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+                        info = tarfile.TarInfo("bin/good.dll")
+                        info.size = 5
+                        archive.addfile(info, io.BytesIO(b"good\n"))
+                        link = tarfile.TarInfo("bin/link.dll")
+                        link.type = link_type
+                        link.linkname = link_target
+                        archive.addfile(link)
+                    body = stream.getvalue()
+                    _PayloadHandler.payload = body
+                    item = self.item(payload=body)
+                    item.update({"archive_format": "tar.gz", "install_subdir": "msys64",
+                                 "filename": "payload.tar.gz"})
+                    root = self.root / f"link-case-{case}"
+                    with self.assertRaisesRegex(PrerequisiteFetchError, "ARCHIVE_LINK_REJECTED"):
+                        install_items({"artifacts": [item]}, root, allow_http=True)
+                    installed = root / "prerequisites" / "msys64"
+                    self.assertEqual(list(installed.rglob("*")) if installed.exists() else [], [])
+
+    def test_tar_hard_links_inside_the_package_still_install(self) -> None:
+        # The pinned MSYS2 packages carry hundreds of hard links (tzdata, binutils, gcc).
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+            info = tarfile.TarInfo("ucrt64/share/zoneinfo/Etc/UCT")
+            info.size = 4
+            archive.addfile(info, io.BytesIO(b"utc\n"))
+            link = tarfile.TarInfo("ucrt64/share/zoneinfo/Zulu")
+            link.type = tarfile.LNKTYPE
+            link.linkname = "ucrt64/share/zoneinfo/Etc/UCT"
+            archive.addfile(link)
+        body = stream.getvalue()
+        _PayloadHandler.payload = body
+        item = self.item(payload=body)
+        item.update({"archive_format": "tar.gz", "install_subdir": "msys64", "filename": "payload.tar.gz"})
+        install_items({"artifacts": [item]}, self.root, allow_http=True)
+        zulu = self.root / "prerequisites" / "msys64" / "ucrt64" / "share" / "zoneinfo" / "Zulu"
+        self.assertEqual(zulu.read_bytes(), b"utc\n")
 
     def test_ordinary_member_names_beside_the_refused_ones_still_install(self) -> None:
         # Names close to the refused ones that Windows stores as written.
