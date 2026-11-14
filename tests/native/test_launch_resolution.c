@@ -274,6 +274,9 @@ static int write_launch_environment_probe(void) {
     const char *ace_report = getenv("SR_ACE_REPORT");
     const char *texpack = getenv("SR_TEX_REPLACE");
     const char *texdump = getenv("SR_TEX_DUMP");
+    const char *retired_glyphs = getenv("SR_GLYPHS");
+    const char *retired_tex_scale = getenv("SR_TEX_SCALE");
+    const char *retired_smart_2d = getenv("SR_SMART_2D");
     const char *host_time_zone = getenv("SR_HOST_TIME_ZONE");
     const char *code_capture = getenv("SR_CODE_CAPTURE");
     const char *boot_path = getenv("SR_BOOT_PATH");
@@ -305,6 +308,9 @@ static int write_launch_environment_probe(void) {
                      "SR_ACE_REPORT=%s\n"
                      "SR_TEX_REPLACE=%s\n"
                      "SR_TEX_DUMP=%s\n"
+                     "SR_GLYPHS=%s\n"
+                     "SR_TEX_SCALE=%s\n"
+                     "SR_SMART_2D=%s\n"
                      "SR_HOST_TIME_ZONE=%s\n"
                      "SR_CODE_CAPTURE=%s\n"
                      "SR_BOOT_PATH=%s\n"
@@ -334,6 +340,9 @@ static int write_launch_environment_probe(void) {
                      ace_report ? ace_report : "<unset>",
                      texpack ? texpack : "<unset>",
                      texdump ? texdump : "<unset>",
+                     retired_glyphs ? retired_glyphs : "<unset>",
+                     retired_tex_scale ? retired_tex_scale : "<unset>",
+                     retired_smart_2d ? retired_smart_2d : "<unset>",
                      host_time_zone ? host_time_zone : "<unset>",
                      code_capture ? code_capture : "<unset>",
                      boot_path ? boot_path : "<unset>",
@@ -543,6 +552,15 @@ static void test_no_iso_child_environment(const char *test_executable,
     bool had_texdump;
     char *old_texdump = capture_environment_value("SR_TEX_DUMP", &had_texdump);
     set_environment_value("SR_TEX_DUMP", "1");
+    /* Nor a variable a launch-line key retired: the runtime refuses to start while one is set
+       (src/rt/ace.c), so one left in the player's environment would stop every game it starts. */
+    bool had_glyphs, had_tex_scale, had_smart_2d;
+    char *old_glyphs = capture_environment_value("SR_GLYPHS", &had_glyphs);
+    set_environment_value("SR_GLYPHS", "on");
+    char *old_tex_scale = capture_environment_value("SR_TEX_SCALE", &had_tex_scale);
+    set_environment_value("SR_TEX_SCALE", "4");
+    char *old_smart_2d = capture_environment_value("SR_SMART_2D", &had_smart_2d);
+    set_environment_value("SR_SMART_2D", "on");
     bool had_host_zone;
     char *old_host_zone = capture_environment_value("SR_HOST_TIME_ZONE", &had_host_zone);
     set_environment_value("SR_HOST_TIME_ZONE", "poisoned-parent-zone");
@@ -759,6 +777,11 @@ static void test_no_iso_child_environment(const char *test_executable,
         assert(strstr(observed, expected_zone) != NULL);
         assert(strstr(observed, "poisoned-parent-zone") == NULL);
     }
+    /* An Authentic session's child inherits none of the retired switches the parent has set:
+       each reaches it empty, which the runtime reads as unset. */
+    assert(strstr(observed, "SR_GLYPHS=\n") != NULL);
+    assert(strstr(observed, "SR_TEX_SCALE=\n") != NULL);
+    assert(strstr(observed, "SR_SMART_2D=\n") != NULL);
     /* The title's code-capture folder (#1933) under the per-user data directory, beside its
        bring-up cache, where `nk_cli.py bringup` reads the captures on its next build. The runtime
        does not create the folder, so the launcher has. */
@@ -912,6 +935,32 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "poisoned-parent-pack") == NULL);
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
     session.config.texpack_dir[0] = '\0';
+
+    /* A line with texscale and smart2d reaches the runtime whole (contract section 10.10): the
+       launcher exports the session's line as SR_ACE, and the line alone switches the two parts.
+       The retired SR_TEX_SCALE=4, SR_SMART_2D=on and SR_GLYPHS=on the parent has set reach the
+       child empty, so the runtime does not refuse the run for them. */
+    snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
+             "v1;tier=enhanced;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off;"
+             "texscale=4;smart2d=on");
+    assert(nk_launch_start(&session) == NK_OK);
+    child_exit = nk_launch_wait(&session, -1);
+    nk_launch_stop(&session);
+    assert(child_exit == 0);
+    report = fopen(report_path, "rb");
+    assert(report != NULL);
+    observed_size = fread(observed, 1, sizeof(observed) - 1, report);
+    observed[observed_size] = '\0';
+    assert(!ferror(report));
+    assert(fclose(report) == 0);
+    assert(strstr(observed, "SR_ACE=v1;tier=enhanced;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;"
+                            "sas=off;tess=off;twin=off;texscale=4;smart2d=on\n") != NULL);
+    assert(strstr(observed, "SR_TEX_REPLACE=\n") != NULL);   /* no pack rides along */
+    assert(strstr(observed, "SR_TEX_SCALE=\n") != NULL && strstr(observed, "SR_SMART_2D=\n") != NULL &&
+           strstr(observed, "SR_GLYPHS=\n") != NULL);
+    assert(strstr(observed, "SR_TEX_SCALE=4") == NULL && strstr(observed, "SR_SMART_2D=on") == NULL &&
+           strstr(observed, "SR_GLYPHS=on") == NULL);
+    snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
 
     /* #2143: an imported homebrew program runs from its Memory Stick folder. The import's
        copy of the folder it was picked from sits beside its disc image ("<image>.ms0",
@@ -1263,6 +1312,12 @@ static void test_no_iso_child_environment(const char *test_executable,
     free(old_texpack);
     restore_environment_value("SR_TEX_DUMP", old_texdump, had_texdump);
     free(old_texdump);
+    restore_environment_value("SR_GLYPHS", old_glyphs, had_glyphs);
+    free(old_glyphs);
+    restore_environment_value("SR_TEX_SCALE", old_tex_scale, had_tex_scale);
+    free(old_tex_scale);
+    restore_environment_value("SR_SMART_2D", old_smart_2d, had_smart_2d);
+    free(old_smart_2d);
     restore_environment_value("SR_PRESENT_UPSCALE", old_upscale, had_upscale);
     free(old_upscale);
     restore_environment_value("SR_MOVIE_UPSCALE", old_movie, had_movie);
