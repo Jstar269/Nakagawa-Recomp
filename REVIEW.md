@@ -103,7 +103,7 @@ Authors, human or agent, check these before requesting review; reviewers flag th
 - **Native test order.** A binary added to `native-core-tests` joins `EXPECTED_RUNS` in
   `tools/test_native_core_build.py` at the position the target runs it.
 - **Markdown tables.** A blank line before and after, and one column style in every row, such as `| a | b |` over
-  `| --- | --- |` (markdownlint MD058 and MD060; `npx --yes markdownlint-cli2@0.24.0 <file>`).
+  `| --- | --- |` (markdownlint MD058 and MD060; `npx --yes markdownlint-cli2@0.24.1 <file>`).
 - **Local-path words.** `tools/publish_audit.py` reports `LOCAL_PATH` for user-profile and temporary-directory
   paths and for the cloud-folder product name anywhere in tracked text, docstrings and comments included. Describe
   them in words, or split the literal the way `publish_audit.py` does.
