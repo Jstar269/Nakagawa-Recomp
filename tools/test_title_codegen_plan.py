@@ -123,18 +123,51 @@ class TitleCodegenPlanTests(unittest.TestCase):
         self.assertEqual(chosen, 6)
         self.assertIn("ignored NK_PACKAGE_JOBS='many'", reason)
 
-    def test_object_key_workers_follow_cpus_not_memory(self) -> None:
+    def test_object_key_workers_follow_cpus_within_the_memory_budget(self) -> None:
         workers = title_codegen_plan.object_key_workers
-        # No fixed ceiling: a 64-CPU host keys on 64 workers, not 16.
+        gib = 1024**3
+        reserve = title_codegen_plan.PACKAGE_BUILD_RESERVED_BYTES
+        # No fixed ceiling: with the memory for them, a 64-CPU host keys on 64 workers, not 16.
         self.assertFalse(hasattr(title_codegen_plan, "OBJECT_KEY_MAX_WORKERS"))
-        self.assertEqual(workers(4), 4)
-        self.assertEqual(workers(6), 6)
-        self.assertEqual(workers(24), 24)
-        self.assertEqual(workers(64), 64)
-        self.assertEqual(workers(256), 256)
-        self.assertEqual(workers(1), 1)
+        for cpus in (1, 4, 6, 24, 64, 256):
+            with self.subTest(cpus=cpus):
+                self.assertEqual(workers(cpus, available_bytes=reserve + 256 * gib), cpus)
         self.assertEqual(workers(None), 1)
         self.assertEqual(workers(0), 1)
+
+    def test_object_key_workers_keep_the_memory_budget(self) -> None:
+        workers = title_codegen_plan.object_key_workers
+        gib = 1024**3
+        reserve = title_codegen_plan.PACKAGE_BUILD_RESERVED_BYTES
+        per_worker = title_codegen_plan.OBJECT_KEY_WORKER_BYTES
+        # Many CPUs, little free memory: the memory bounds the workers.
+        self.assertEqual(workers(64, available_bytes=reserve + 10 * per_worker), 10)
+        self.assertEqual(workers(64, available_bytes=reserve + gib), gib // per_worker)
+        self.assertEqual(workers(256, available_bytes=reserve + 3 * per_worker + 1), 3)
+        # Not even one worker fits beside the reserve, or memory is below it: still one.
+        self.assertEqual(workers(64, available_bytes=reserve), 1)
+        self.assertEqual(workers(64, available_bytes=gib), 1)
+        # Never more workers than CPUs, whatever the memory.
+        self.assertEqual(workers(4, available_bytes=reserve + 100 * gib), 4)
+        # No memory reading: the fixed two the job count falls back to.
+        self.assertEqual(workers(64, available_bytes=None), 2)
+        self.assertEqual(workers(1, available_bytes=None), 1)
+
+    def test_object_key_workers_respect_the_build_speed(self) -> None:
+        workers = title_codegen_plan.object_key_workers
+        gib = 1024**3
+        plenty = title_codegen_plan.PACKAGE_BUILD_RESERVED_BYTES + 256 * gib
+        background = title_codegen_plan.PACKAGE_BUILD_BACKGROUND_JOBS
+        # Background keeps to its job count however many CPUs and however much memory.
+        self.assertEqual(workers(64, available_bytes=plenty, speed="background", jobs=background),
+                         background)
+        self.assertEqual(workers(64, available_bytes=plenty, speed="background"), background)
+        self.assertEqual(workers(64, available_bytes=plenty, speed="background", jobs=1), 1)
+        self.assertEqual(workers(1, available_bytes=plenty, speed="background", jobs=2), 1)
+        # Balanced and Fastest key on every CPU the memory allows, past their job counts.
+        for speed in ("balanced", "fastest", None):
+            with self.subTest(speed=speed):
+                self.assertEqual(workers(64, available_bytes=plenty, speed=speed, jobs=8), 64)
 
     def test_package_job_bytes_follow_the_chunk_target(self) -> None:
         job_bytes = title_codegen_plan.package_job_bytes
