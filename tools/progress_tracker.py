@@ -597,8 +597,9 @@ def _check_watchdog_abort(*, last_log: str | None) -> str:
 
 
 # Run-log records behind P2.5 (#1376), as src/rt writes them: SR_CBLOG for the UMD
-# callback's registration and notification, SR_WAKELOG for sceKernelWakeupThread's caller,
-# and the unconditional DEBUG_SLEEP/DEBUG_WAKEUP lines of sched.c.
+# callback's registration and notification, and SR_WAKELOG for sceKernelWakeupThread's caller
+# and the DEBUG_SLEEP/DEBUG_WAKEUP lines of sched.c: the P2.5 chain needs a log taken with
+# SR_WAKELOG set (Diagnostics sets it) and stays 'pending' without one.
 _UMD_CB_REGISTERED_RE = re.compile(r"CBLOG: UMD callback registered uid=(0x[0-9a-fA-F]+)")
 _CB_NOTIFY_RE = re.compile(
     r"CBLOG: NotifyCallback uid=(0x[0-9a-fA-F]+) count=\d+ arg=(0x[0-9a-fA-F]+) owner=(0x[0-9a-fA-F]+)")

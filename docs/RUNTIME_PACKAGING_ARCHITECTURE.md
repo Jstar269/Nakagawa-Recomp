@@ -372,10 +372,12 @@ compile writes the object's dependency file as Make would, so a later header cha
 still rebuilds it. An object that is compiled is stored only when its key, taken
 again after the build, has not changed. The headers the build generates
 (`make compile-inputs`) are written before any key is taken, and a key that still
-cannot be taken is a miss, never a guess. Keys are taken on up to one worker per logical
-CPU (at most 16), not on the Make job count: a key only preprocesses its source, which
+cannot be taken is a miss, never a guess. Keys are taken on one worker per logical
+CPU, with no fixed ceiling, not on the Make job count: a key only preprocesses its source, which
 needs a small fraction of the memory a compile of that source needs, so a build that
-memory limits to one compile job still keys its objects in parallel. No compile carries
+memory limits to one compile job still keys its objects in parallel. The worker count keeps the
+memory budget too: the free memory after the reserve, at 128 MiB a worker, bounds it, and
+Background keeps to its own job count. No compile carries
 the build folder: the runtime finds its own folder at run time for its exit
 diagnostics. The runtime
 therefore compiles once and serves every game, and a rebuild of an unchanged game

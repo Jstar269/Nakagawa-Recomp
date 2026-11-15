@@ -103,9 +103,11 @@ PACKAGE_BUILD_RESERVED_BYTES = 2 * 1024**3
 PACKAGE_BUILD_JOBS_ENV = "NK_PACKAGE_JOBS"
 #: Object-cache keys are taken by preprocessing each object's source, which peaked at
 #: about 80 MB for the largest generated Hot Shots Tennis chunk: keying is bounded by
-#: CPUs, not by the compile memory that limits Make jobs, and never runs more workers
-#: than this.
-OBJECT_KEY_MAX_WORKERS = 16
+#: CPUs (one worker per logical CPU, no fixed ceiling), not by the compile memory that
+#: limits Make jobs, and by the free memory at this much per worker.
+#: A worker holds that one preprocessor process and the captured preprocessed text; it is
+#: budgeted at 128 MiB (1.6 times the 80 MB peak).
+OBJECT_KEY_WORKER_BYTES = 128 * 1024**2
 #: When set, the package build appends ``{"completed": N, "total": M}`` lines to this
 #: file while it compiles, one line each time another object finishes.
 COMPILE_PROGRESS_FILE_ENV = "NK_COMPILE_PROGRESS_FILE"
@@ -340,15 +342,35 @@ def package_build_jobs(
     return plan.jobs, plan.reason
 
 
-def object_key_workers(cpu_count: int | None) -> int:
-    """Workers that take object-cache keys: one per logical CPU, up to OBJECT_KEY_MAX_WORKERS.
+def object_key_workers(
+    cpu_count: int | None,
+    *,
+    available_bytes: int | None = None,
+    speed: str | None = None,
+    jobs: int | None = None,
+) -> int:
+    """Workers that take object-cache keys: one per logical CPU, within the memory budget.
 
     A key preprocesses one source file, which needs a small fraction of the memory a
     compile of that file needs, so a build that memory limits to one Make job still keys
-    its objects on every CPU.
+    its objects on several CPUs. The count is still bounded the way the Make jobs are:
+    by the free memory after ``PACKAGE_BUILD_RESERVED_BYTES``, at
+    ``OBJECT_KEY_WORKER_BYTES`` a worker, never below one; without a memory reading, by
+    the fixed two the job count falls back to. Background keeps to its ``jobs`` (at most
+    ``PACKAGE_BUILD_BACKGROUND_JOBS``), so it does not take every CPU. No other fixed
+    ceiling applies.
     """
     cpus = cpu_count if cpu_count and cpu_count > 0 else 1
-    return max(1, min(cpus, OBJECT_KEY_MAX_WORKERS))
+    if available_bytes is None:
+        workers = min(cpus, 2)
+    else:
+        workers = min(cpus, max(1, (available_bytes - PACKAGE_BUILD_RESERVED_BYTES)
+                                // OBJECT_KEY_WORKER_BYTES))
+    if speed is not None and speed.strip() == "background":
+        workers = min(workers, max(1, min(jobs if jobs is not None
+                                          else PACKAGE_BUILD_BACKGROUND_JOBS,
+                                          PACKAGE_BUILD_BACKGROUND_JOBS)))
+    return max(1, workers)
 
 
 def _host_package_build_plan(chunk_target_bytes: str | None = None,
@@ -722,7 +744,12 @@ def _run_compile_phase(
         reuse = CompiledObjectReuse.from_dry_run(
             object_cache, listing, cwd=cwd, env=env, build_dir=build_dir, jobs=jobs,
             library_cache=library_cache,
-            key_workers=object_key_workers(os.process_cpu_count()),
+            key_workers=object_key_workers(
+                os.process_cpu_count(),
+                available_bytes=available_physical_memory(),
+                speed=plan.speed if plan is not None
+                else os.environ.get(PACKAGE_BUILD_SPEED_ENV),
+                jobs=jobs),
         )
         reused = set(reuse.fetch())
         print(f"OBJECT_CACHE: reused {len(reused)} of {len(objects)} objects", flush=True)

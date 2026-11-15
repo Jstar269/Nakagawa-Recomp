@@ -1418,6 +1418,7 @@ static void guest_lane_spin_body(CpuState *s) {
 }
 static int guest_lane_spin_stop(void) { return g_glc_ran_on; }
 
+static void non_cb_sleep_test_body(CpuState *s);
 static int guest_lane_child(const char *mode) {
     if (strcmp(mode, "switch") == 0) {
         reset_sched();
@@ -1447,6 +1448,24 @@ static int guest_lane_child(const char *mode) {
         sched_destroy_thread_coro(&s_tcb[lane]);
         sr_guest_lane_hold.held = 0;
         fprintf(stderr, "guest lane child: the lane's thread was destroyed and the run went on\n");
+        return 0;
+    }
+    if (strcmp(mode, "sleepwake") == 0) {
+        /* One guest sleep and its wakeup, for test_sleep_and_wakeup_log_only_under_wakelog. */
+        reset_sched();
+        s_test_uid_next = 0x400u;
+        const uint32_t tid = sched_create_thread(0x3000u, 16, 0x10000u);
+        TCB *t = tcb_by_uid(tid);
+        if (!t) return 2;
+        sched_start_thread(tid, 0, 0);
+        g_test_body = non_cb_sleep_test_body;
+        const int idx = index_of_uid(tid);
+        run_one_slice(idx);
+        if (t->state != TH_WAIT_OBJ) return 3;
+        sched_thread_wakeup(tid);
+        run_one_slice(idx);
+        if (t->state != TH_DORMANT) return 4;
+        sched_terminate_thread(tid);
         return 0;
     }
     fprintf(stderr, "guest lane child: unknown mode %s\n", mode);
@@ -1507,6 +1526,29 @@ static void test_guest_lane_stops_by_name(void) {
                strstr(log, "SR_COSIM_FATAL: the lane's thread was destroyed inside the COSIM "
                            "guest lane"),
            "guest lane: destroying the held lane's thread stops the run by name");
+}
+
+/* A guest can sleep and wake threads every frame, so sched_thread_sleep and sched_thread_wakeup
+ * write their DEBUG_SLEEP and DEBUG_WAKEUP lines only under SR_WAKELOG, as the sibling
+ * sceKernelSleepThread logging does (hle_wakelog_on) and as sched_thread_sleep_cb already did.
+ * Each run is a fresh child because the switch is read once per process.
+ *
+ * MUTANT: drop the sched_wakelog_on() test around either fprintf in sched.c -- the quiet run's
+ *   stderr then holds the line. */
+static void test_sleep_and_wakeup_log_only_under_wakelog(void) {
+    char log[8192];
+    pause_test_set_env("SR_WAKELOG", NULL);
+    int code = run_guest_lane_child("sleepwake", log, sizeof log);
+    expect(code == 0, "sleep and wake log: the child's sleep and wakeup complete");
+    expect(strstr(log, "DEBUG_SLEEP") == NULL && strstr(log, "DEBUG_WAKEUP") == NULL,
+           "sleep and wake log: no DEBUG_SLEEP or DEBUG_WAKEUP line without SR_WAKELOG");
+    pause_test_set_env("SR_WAKELOG", "1");
+    code = run_guest_lane_child("sleepwake", log, sizeof log);
+    pause_test_set_env("SR_WAKELOG", NULL);
+    expect(code == 0, "sleep and wake log: the child's sleep and wakeup complete under SR_WAKELOG");
+    expect(strstr(log, "DEBUG_SLEEP: thread=0x") != NULL &&
+               strstr(log, "DEBUG_WAKEUP: target=0x") != NULL,
+           "sleep and wake log: SR_WAKELOG prints the DEBUG_SLEEP and DEBUG_WAKEUP lines");
 }
 
 /* Turbo guest time is a function of what the guest did, never of the host clock (#2037): two
@@ -6675,6 +6717,7 @@ int main(int argc, char **argv) {
     test_stop_request_returns_a_lone_runner_to_the_scheduler();
     test_guest_lane_hold_defers_switches_and_interrupts();
     test_guest_lane_stops_by_name();
+    test_sleep_and_wakeup_log_only_under_wakelog();
     test_turbo_timeline_does_not_depend_on_the_host_clock();
     test_deterministic_clock_charges_the_work_not_the_host();
     test_deterministic_clock_does_not_jump_to_a_sleepers_deadline();
