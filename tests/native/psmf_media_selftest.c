@@ -3179,12 +3179,32 @@ static void test_mpeg_avc_decode_clear_in_vram_mirrors(void) {
  * time it is consulted.  The feature-test macro above exposes the platform putenv prototype
  * on POSIX; the Windows CRT name (_putenv) comes from <stdlib.h>. */
 static char s_av_mpeglog_env[] = "SR_MPEGLOG=1";
-static void av_latch_mpeglog(void) {
+static char s_av_mpeglog_unset_env[] = "SR_MPEGLOG=";
+static void av_set_mpeglog(int enabled) {
 #ifdef _WIN32
-    _putenv(s_av_mpeglog_env);
+    _putenv(enabled ? s_av_mpeglog_env : s_av_mpeglog_unset_env);
 #else
-    putenv(s_av_mpeglog_env);
+    if (enabled) setenv("SR_MPEGLOG", "1", 1);
+    else unsetenv("SR_MPEGLOG");
 #endif
+}
+
+static void av_latch_mpeglog(void) { av_set_mpeglog(1); }
+
+static void test_mpeg_log_switch_is_cached(void) {
+    extern void sr_mpeg_test_log_switch_reset(void);
+    extern int sr_mpeg_test_log_switch(void);
+    av_set_mpeglog(0);
+    sr_mpeg_test_log_switch_reset();
+    CHECK(!sr_mpeg_test_log_switch(), "MPEG logger starts off");
+    av_set_mpeglog(1);
+    CHECK(!sr_mpeg_test_log_switch(), "MPEG logger keeps its first value");
+    sr_mpeg_test_log_switch_reset();
+    CHECK(sr_mpeg_test_log_switch(), "MPEG logger latches an enabled value");
+    av_set_mpeglog(0);
+    CHECK(sr_mpeg_test_log_switch(), "MPEG logger stays enabled for the process");
+    sr_mpeg_test_log_switch_reset();
+    av_set_mpeglog(0);
 }
 
 static void test_psmf_log_tick_instance_isolation(void) {
@@ -6322,6 +6342,8 @@ int main(int argc, char **argv) {
     memset(arena, 0, sizeof(arena));
     if (argc == 4 && strcmp(argv[1], "--videorec-audio") == 0)
         return videorec_audio_hooks(argv[2], argv[3]);
+
+    test_mpeg_log_switch_is_cached();
 
 #if defined(SR_H264_FFMPEG)
     CHECK(sr_h264_select_backend("ffmpeg"),

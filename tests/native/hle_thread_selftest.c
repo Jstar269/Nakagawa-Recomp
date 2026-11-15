@@ -18261,6 +18261,52 @@ static void hle_archive_route_set_env(const char *name, const char *value) {
     hle_test_setenv(name, value);
 }
 
+static void test_hle_hot_log_switches_are_cached(void) {
+    extern void sr_hle_test_ge_log_reset(void);
+    extern int sr_hle_test_ge_unset_log_switch(void);
+    extern void sr_hle_test_io_statlog_switch_reset(void);
+    extern int sr_hle_test_io_statlog_switch(void);
+    char *old_ge = hle_archive_route_env_copy(getenv("SR_GELOG"));
+    char *old_gedump = hle_archive_route_env_copy(getenv("SR_GEDUMP"));
+    char *old_debug = hle_archive_route_env_copy(getenv("SR_DEBUG"));
+    char *old_statlog = hle_archive_route_env_copy(getenv("SR_STATLOG"));
+
+    hle_archive_route_set_env("SR_GELOG", NULL);
+    hle_archive_route_set_env("SR_GEDUMP", NULL);
+    hle_archive_route_set_env("SR_DEBUG", NULL);
+    sr_hle_test_ge_log_reset();
+    expect(!sr_hle_test_ge_unset_log_switch(), "GE unset-callback logger starts off");
+    hle_archive_route_set_env("SR_GELOG", "1");
+    expect(!sr_hle_test_ge_unset_log_switch(), "GE unset-callback logger keeps its first value");
+    sr_hle_test_ge_log_reset();
+    expect(sr_hle_test_ge_unset_log_switch(), "GE unset-callback logger latches an enabled value");
+    hle_archive_route_set_env("SR_GELOG", NULL);
+    expect(sr_hle_test_ge_unset_log_switch(), "GE unset-callback logger stays enabled for the process");
+    sr_hle_test_ge_log_reset();
+
+    hle_archive_route_set_env("SR_STATLOG", NULL);
+    sr_hle_test_io_statlog_switch_reset();
+    expect(!sr_hle_test_io_statlog_switch(), "Getstat logger starts off");
+    hle_archive_route_set_env("SR_STATLOG", "1");
+    expect(!sr_hle_test_io_statlog_switch(), "Getstat logger keeps its first value");
+    sr_hle_test_io_statlog_switch_reset();
+    expect(sr_hle_test_io_statlog_switch(), "Getstat logger latches an enabled value");
+    hle_archive_route_set_env("SR_STATLOG", NULL);
+    expect(sr_hle_test_io_statlog_switch(), "Getstat logger stays enabled for the process");
+    sr_hle_test_io_statlog_switch_reset();
+
+    hle_archive_route_set_env("SR_GELOG", old_ge);
+    hle_archive_route_set_env("SR_GEDUMP", old_gedump);
+    hle_archive_route_set_env("SR_DEBUG", old_debug);
+    hle_archive_route_set_env("SR_STATLOG", old_statlog);
+    free(old_ge);
+    free(old_gedump);
+    free(old_debug);
+    free(old_statlog);
+    sr_hle_test_ge_log_reset();
+    sr_hle_test_io_statlog_switch_reset();
+}
+
 static uint32_t hle_archive_route_open_result(const char *path) {
     CpuState cpu;
     uint32_t fd = disc_route_open(&cpu, path);
@@ -56813,6 +56859,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_nested_frame_under_psp_callback_dispatch();
     test_nested_frame_handle_hygiene();
     test_ge_guest_sentinel();
+    test_hle_hot_log_switches_are_cached();
     test_ge_consumed_list_ignores_late_stall_address();
     test_ge_stall_alias_across_call_return();
     test_ge_stall_alias_linear_from_uncached_list();

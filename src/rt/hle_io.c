@@ -19,8 +19,16 @@ typedef struct HleDevctlRefusal {
     char device[];
 } HleDevctlRefusal;
 static HleDevctlRefusal *s_hle_devctl_refusals;
+static int s_io_statlog_enabled = -1;
+
+static int io_statlog_on(void) {
+    return hle_env_switch(&s_io_statlog_enabled, "SR_STATLOG");
+}
+
 #ifdef SR_HLE_THREAD_SELFTEST
 static atomic_uint s_hle_devctl_refusal_log_count;
+int sr_hle_test_io_statlog_switch(void) { return io_statlog_on(); }
+void sr_hle_test_io_statlog_switch_reset(void) { s_io_statlog_enabled = -1; }
 #endif
 
 static int hle_devctl_refusal_first(const char *device, uint32_t command) {
@@ -2282,7 +2290,7 @@ static uint32_t h_IoGetstat(CpuState *s) {
                     int is_dir = (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
                     uint64_t fsize = ((uint64_t)fad.nFileSizeHigh << 32) |
                                      (uint64_t)fad.nFileSizeLow;
-                    if (getenv("SR_STATLOG"))
+                    if (io_statlog_on())
                         fprintf(stderr, "Getstat(%s) -> ms0 host size=0x%llx dir=%d\n",
                                 path, (unsigned long long)fsize, is_dir);
                     /* Memory Stick FAT shape, PSPAutotests tests/io/stat/stat.expected (recorded on a PSP): file mode
@@ -2308,7 +2316,7 @@ static uint32_t h_IoGetstat(CpuState *s) {
                 free(hp);
                 int is_dir = S_ISDIR(fad.st_mode);
                 uint64_t fsize = (uint64_t)S_ISREG(fad.st_mode) ? (uint64_t)fad.st_size : 0u;
-                if (getenv("SR_STATLOG"))
+                if (io_statlog_on())
                     fprintf(stderr, "Getstat(%s) -> ms0 host size=0x%llx dir=%d\n",
                             path, (unsigned long long)fsize, is_dir);
                 /* Memory Stick FAT shape, PSPAutotests tests/io/stat/stat.expected (recorded on a PSP): file mode
@@ -2359,7 +2367,7 @@ static uint32_t h_IoGetstat(CpuState *s) {
                 return 0x80010002;
             }
             fclose(probe);
-            if (getenv("SR_STATLOG"))
+            if (io_statlog_on())
                 fprintf(stderr, "Getstat(%s) -> data-root %s size=0x%x\n", path,
                         entry->host, (unsigned)actual_size);
             for (int i = 0; i < 0x58; i++) MEM_W8(st + (uint32_t)i, 0);
@@ -2382,10 +2390,10 @@ static uint32_t h_IoGetstat(CpuState *s) {
                 free(key);
             }
         }
-        if (getenv("SR_STATLOG")) fprintf(stderr, "Getstat(%s) -> NOT FOUND\n", path);
+        if (io_statlog_on()) fprintf(stderr, "Getstat(%s) -> NOT FOUND\n", path);
         return 0x80010002;
     }
-    if (getenv("SR_STATLOG")) fprintf(stderr, "Getstat(%s) -> lba=0x%x size=0x%x\n", path, lba, size);
+    if (io_statlog_on()) fprintf(stderr, "Getstat(%s) -> lba=0x%x size=0x%x\n", path, lba, size);
     for (int i = 0; i < 0x58; i++) MEM_W8(st + (uint32_t)i, 0);
     MEM_W32(st + 0, 0x2000 | 0x0124);          /* mode: regular file, r-x */
     MEM_W32(st + 4, 0x0004 | 0x0001);          /* attr: file */

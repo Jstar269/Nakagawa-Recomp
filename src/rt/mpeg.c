@@ -65,6 +65,18 @@
 #define MPEG_DATA_ES_SIZE 0xA0000
 #define MPEG_DATA_OUTPUT_SIZE 0xA0000
 
+static int s_mpeglog_enabled = -1;
+
+static int mpeg_log_on(void) {
+    if (s_mpeglog_enabled < 0) s_mpeglog_enabled = getenv("SR_MPEGLOG") != NULL;
+    return s_mpeglog_enabled;
+}
+
+#ifdef SR_MPEG_MEDIA_SELFTEST
+void sr_mpeg_test_log_switch_reset(void) { s_mpeglog_enabled = -1; }
+int sr_mpeg_test_log_switch(void) { return mpeg_log_on(); }
+#endif
+
 /* Public MPEG constants and return families are recorded in PSPSDK's src/mpeg/pspmpeg.h.  The
  * mode-1 YCbCr buffer is measured (the YCbCr section below); the other modes remain a #302
  * physical-PSP hardware-oracle gap. */
@@ -900,7 +912,7 @@ uint32_t mpeg_ringbuffer_put(CpuState *s, uint32_t ring, uint32_t numPackets, ui
     } else if (ctx && addedTotal) {
         ctx->feedShort = 0;
     }
-    if (getenv("SR_MPEGLOG")) {
+    if (mpeg_log_on()) {
         static int n = 0;
         if (n++ < 32 || addedTotal != addWanted)
             fprintf(stderr, "MpegRingbufferPut ring=0x%" PRIx32 " want=%" PRIu32 "/%" PRIu32 " cb=0x%" PRIx32 " -> %" PRIu32 " avail=%" PRIu32 "/%" PRIu32 "\n",
@@ -1019,7 +1031,7 @@ uint32_t mpeg_get_avc_au(uint32_t mpegAddr, uint32_t sid, uint32_t auAddr, uint3
     uint32_t avail = rb_get(ring, RB_packetsAvail);
     rb_set(ring, RB_packetsAvail, avail > release ? avail - release : 0u);
     if (attrAddr) MEM_W32(attrAddr, 1);
-    if (getenv("SR_MPEGLOG")) {
+    if (mpeg_log_on()) {
         static int n = 0;
         if (n++ < 32 || (n & 0xFF) == 0)
             fprintf(stderr, "MpegGetAvcAu #%d pts=%lld avail=%" PRIu32 " end=%d\n",
@@ -1090,7 +1102,7 @@ uint32_t mpeg_get_atrac_au(uint32_t mpegAddr, uint32_t sid, uint32_t auAddr, uin
     au_write_pts(auAddr, 8, pts);
     MEM_W32(auAddr + 20, MPEG_ATRAC_ES_SIZE);
     if (attrAddr) MEM_W32(attrAddr, 0);
-    if (getenv("SR_MPEGLOG")) {
+    if (mpeg_log_on()) {
         static int n = 0;
         if (n++ < 16 || (n & 0xFF) == 0)
             fprintf(stderr, "MpegGetAtracAu #%d pts=%lld frame=%" PRIu32 " queued=%" PRIu32 "\n",
@@ -1189,7 +1201,7 @@ uint32_t mpeg_avc_decode(uint32_t mpegAddr, uint32_t auAddr, uint32_t frameWidth
         sr_psmf_av_note_video_delivery(buffer, bytes, auPts, auPts >= 0);
         sr_video_frame_note(buffer, bytes);
     }
-    if (getenv("SR_MPEGLOG")) {
+    if (mpeg_log_on()) {
         static int n = 0;
         if (n++ < 32 || (n & 0xFF) == 0)
             fprintf(stderr, "MpegAvcDecode #%d buf=0x%" PRIx32 " fw=%" PRIu32 " pts=%lld dec=%d frames=%d\n",
@@ -1496,7 +1508,7 @@ uint32_t mpeg_avc_init_ycbcr(uint32_t mpegAddr, uint32_t mode, uint32_t width, u
                              uint32_t buf) {
     Mpeg *ctx = mpeg_find(mpegAddr);
     if (!ctx) return (uint32_t)-1;
-    if (getenv("SR_MPEGLOG"))
+    if (mpeg_log_on())
         fprintf(stderr, "MpegAvcInitYCbCr mode=%" PRIu32 " %" PRIu32 "x%" PRIu32 " buf=0x%" PRIx32 "\n",
                 mode, width, height, buf);
     if (mode == 2u || mode == 3u) {
@@ -1722,7 +1734,7 @@ uint32_t mpeg_avc_decode_ycbcr(uint32_t mpegAddr, uint32_t auAddr, uint32_t bufP
     ctx->picDelivered++;
     ycbcr_picture_set(mpegAddr, bytes, pts);
     MEM_W32(initAddr, 1u);
-    if (getenv("SR_MPEGLOG")) {
+    if (mpeg_log_on()) {
         static int n = 0;
         if (n++ < 32 || (n & 0xFF) == 0)
             fprintf(stderr, "MpegAvcDecodeYCbCr #%d au=0x%" PRIx32 " ycbcr=0x%" PRIx32 " dec=%d frames=%d pts=%lld\n",
@@ -1835,7 +1847,7 @@ uint32_t mpeg_avc_copy_ycbcr(uint32_t mpegAddr, uint32_t dst, uint32_t src) {
     ycbcr_planes_out(&to, w, h);
     MEM_W32(dst, h / 16u);
     MEM_W32(dst + 4u, w / 16u);
-    if (getenv("SR_MPEGLOG")) {
+    if (mpeg_log_on()) {
         static int n = 0;
         if (n++ < 32 || (n & 0xFF) == 0)
             fprintf(stderr, "MpegAvcCopyYCbCr #%d dst=0x%" PRIx32 " src=0x%" PRIx32 " %ux%u\n", n, dst, src,
@@ -1971,7 +1983,7 @@ uint32_t mpeg_avc_csc(uint32_t mpegAddr, uint32_t buf, uint32_t rangeAddr, uint3
      * framebuffer shows whole, so they are not noted. */
     if (ctx->pixelMode == 3 && !mode2)
         sr_movie_note_picture(ctx->guestAddr, span.first, frameWidth, 3u, (uint32_t)w, (uint32_t)h);
-    if (getenv("SR_MPEGLOG")) {
+    if (mpeg_log_on()) {
         static int n = 0;
         if (n++ < 32 || (n & 0xFF) == 0)
             fprintf(stderr, "MpegAvcCsc #%d ycbcr=0x%" PRIx32 " dest=0x%" PRIx32 " fw=%" PRIu32 " range=%d,%d %dx%d\n",
@@ -2098,7 +2110,7 @@ uint32_t mpeg_atrac_decode(uint32_t mpegAddr, uint32_t auAddr, uint32_t bufferAd
     sr_psmf_av_note_audio_delivery(bufferAddr, MPEG_ATRAC_ES_OUTPUT_SIZE, pts, 1);
     ctx->audioPts += audioTimestampStep;
     ctx->audioDecoded++;
-    if (getenv("SR_MPEGLOG")) {
+    if (mpeg_log_on()) {
         static int n = 0;
         if (n++ < 16 || (n & 0xFF) == 0)
             fprintf(stderr, "MpegAtracDecode #%d pts=%lld audioPts=%lld decoded=%llu\n", n,
