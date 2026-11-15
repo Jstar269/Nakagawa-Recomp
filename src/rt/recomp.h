@@ -2415,7 +2415,7 @@ int      gui_stop_requested(void);
  * back after that (a LoadExec from the guest's exit callback) is not continued. */
 int      gui_quit_requested(void);
 /* Releases the presenter, the SR_PERF summary first; idempotent. The driver calls it once the
- * scheduler returns, and gui_init registers it with atexit for a run that ends otherwise. */
+ * scheduler returns; orderly terminal exits call it explicitly. Fatal exits bypass it. */
 void     gui_shutdown(void);
 /* 1 once SR_GE_CAPTURE_EXIT's capture was written (ge.c). After
  * ge_capture_exit_set_deferred(1) (the driver, for a scheduler run that polls it) the run stops

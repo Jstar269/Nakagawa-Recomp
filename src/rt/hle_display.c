@@ -1285,6 +1285,9 @@ void sr_vblank_tick(void) {
             hle_state_sample_close();
             /* Ace Mode's exit stamp and report are an atexit hook too (a no-op when off). */
             ace_finish();
+            /* This successful stop uses _Exit, so release the renderer explicitly before the
+             * process terminates. Fatal named stops intentionally skip this cache save. */
+            gui_shutdown();
             _Exit(0);
         }
     }

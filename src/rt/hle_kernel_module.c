@@ -1524,6 +1524,9 @@ static uint32_t h_ExitGame(CpuState *s) {
     free(sr_dump_path);
     free(sr_flag_path);
 
+    /* sceKernelExitGame is an orderly guest exit. Shut down the renderer here rather than from
+     * a process-wide atexit hook, which would also save a cache on fatal exit(1) paths. */
+    gui_shutdown();
     fflush(NULL);
     if (cur == 0) {
         /* Interrupt context (PSP kernel callback chain). Hard-stop the host process: this
