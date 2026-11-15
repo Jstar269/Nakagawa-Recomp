@@ -9,6 +9,7 @@
    the golden moved. */
 
 #include "nk_overlay.h"
+#include "../../src/rt/ace.h" /* every part on, for the pause caption; ace.c is included at the end */
 #include "nk_ui_draw.h"
 #include "nk_ui_text.h"
 #include "nk_ui_theme.h"
@@ -836,6 +837,163 @@ static void test_menu_height_sweep(void) {
     }
 }
 
+/* The pause caption of a run with every part on (ace_every_part_line, so a part added to ace.c's
+   key table is in it), worded as gui.c words it; false when this build takes no such run. */
+static bool every_part_caption(char *out, size_t cap) {
+    char line[ACE_SPEC_MAX];
+    char words[ACE_WORDS_MAX];
+    size_t length = 0u;
+    out[0] = '\0';
+    if (ace_every_part_line(line, sizeof(line)) != 0u && ace_init_spec(line, NULL) == 1) {
+        length = ace_feature_words(words, sizeof(words));
+        if (length != 0u) (void)snprintf(out, cap, "%s: %s", ace_tier_name(), words);
+    }
+    (void)ace_init_spec("off", NULL);
+    return length != 0u;
+}
+
+/* Whether `shown` is the list `all` shortened by the caption's rule: its first items, each
+   whole, then "and N more" for the N it leaves out. */
+static bool list_ends_counted(const char *shown, const char *all) {
+    static const char join[] = " \xC2\xB7 ";
+    const size_t join_length = sizeof(join) - 1u;
+    const char *tail = NULL;
+    size_t kept;
+    int more = 0;
+    int used = 0;
+    int kept_items = 0;
+    int items = 1;
+    for (const char *s = shown; (s = strstr(s, "and ")) != NULL; ++s) tail = s;
+    if (tail == NULL || sscanf(tail, "and %d more%n", &more, &used) != 1 || used == 0 ||
+        tail[used] != '\0' || more < 1) {
+        return false;
+    }
+    kept = (size_t)(tail - shown);
+    if (kept != 0u) {
+        if (kept < join_length || strncmp(tail - join_length, join, join_length) != 0) return false;
+        kept -= join_length;
+        if (strncmp(shown, all, kept) != 0 || strncmp(all + kept, join, join_length) != 0) return false;
+        kept_items = 1;
+    }
+    for (const char *s = all; (s = strstr(s, join)) != NULL; s += join_length) {
+        ++items;
+        if (s < all + kept) ++kept_items;
+    }
+    return kept_items + more == items;
+}
+
+/* The caption's lines as the card draws them (MENU_ID_ACE_LINE + line), joined by single spaces
+   with a no-break space read as a space; -1 when a line is cut by the card's clip or lies outside
+   top..bottom, else how many lines there are. */
+static int caption_lines(const NkUiDrawList *list, int top, int bottom, char *joined, size_t cap) {
+    const NkUiId first = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x001040u); /* MENU_ID_ACE_LINE */
+    size_t used = 0u;
+    int lines = 0;
+    joined[0] = '\0';
+    for (uint32_t i = 0u; list != NULL && i < list->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &list->cmd[i];
+        const NkUiTextRun *run;
+        if (cmd->kind != NK_UI_DRAW_TEXT || cmd->element_id < first || cmd->element_id >= first + 32u) {
+            continue;
+        }
+        if (cmd->clip[0] != cmd->bounds[0] || cmd->clip[1] != cmd->bounds[1] ||
+            cmd->clip[2] != cmd->bounds[2] || cmd->clip[3] != cmd->bounds[3] ||
+            cmd->bounds[1] < top || cmd->bounds[3] > bottom) {
+            return -1;
+        }
+        run = (const NkUiTextRun *)cmd->custom;
+        if (lines != 0 && used + 1u < cap) joined[used++] = ' ';
+        for (size_t k = 0u; k < run->length && used + 1u < cap; ++k) {
+            if ((unsigned char)run->text[k] == 0xC2u && k + 1u < run->length &&
+                (unsigned char)run->text[k + 1u] == 0xA0u) {
+                joined[used++] = ' ';
+                ++k;
+            } else {
+                joined[used++] = run->text[k];
+            }
+        }
+        joined[used] = '\0';
+        ++lines;
+    }
+    return lines;
+}
+
+/* The pause menu's caption with every part on. It used to be one line that ended in an
+   ellipsis after the first few parts. At the capture sizes, the default game window, 720p and
+   1080p it lists every part, whole items on each line, inside the card; at every game-window
+   height from 272 to 800 it lists every part or, in a card too short, its first parts and
+   "and N more", and the game's name and RESUME stay whole with RESUME focused. */
+static void test_ace_caption_every_part(void) {
+    static const struct { int w; int h; float scale; } sizes[] = {
+        {960, 600, 1.0f}, {1280, 800, 1.0f}, {1920, 1200, 1.5f}, {960, 544, 1.0f}, {960, 540, 1.0f},
+        {1280, 720, 1.0f}, {1280, 720, 1.25f}, {1920, 1080, 1.0f}, {1920, 1080, 1.5f}
+    };
+    static char caption[ACE_WORDS_MAX + 40];
+    static char joined[2 * sizeof(caption)];
+    const NkUiId title_id = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x001002u); /* MENU_ID_TITLE */
+    const NkUiTheme *theme = nk_ui_theme_n1();
+    int counted = 0;
+    CHECK(every_part_caption(caption, sizeof(caption)), "every part on is a run with words");
+    if (caption[0] == '\0') return;
+    for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]) + (800u - 272u) / 8u + 1u; ++s) {
+        const bool sweep = s >= sizeof(sizes) / sizeof(sizes[0]);
+        const int w = sweep ? 960 : sizes[s].w;
+        const int h = sweep ? 272 + 8 * (int)(s - sizeof(sizes) / sizeof(sizes[0])) : sizes[s].h;
+        const float scale = sweep ? 1.0f : sizes[s].scale;
+        for (int developer = 0; developer < 2; ++developer) {
+            NkUi *ui = overlay_ui(w, h, scale);
+            NkOverlayModel model = base_model((float)w / scale, (float)h / scale);
+            NkOverlayState state;
+            const NkUiDrawList *list;
+            int bar_top = h - (int)(NK_UI_PROMPT_BAR_HEIGHT * scale);
+            int card_top = -1;
+            int card_bottom = -1;
+            int lines;
+            bool inside = true;
+            bool whole;
+            if (ui == NULL) continue;
+            model.title_name = "Synthetic Showcase Scene: A Rather Long Name for the Pause Card";
+            model.ace_caption = caption;
+            model.developer = developer != 0;
+            nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
+            (void)settle(ui, &state, &model);
+            nk_ui_begin(ui, 0.0);
+            (void)nk_overlay_frame(ui, &state, &model);
+            list = nk_ui_end(ui);
+            for (uint32_t i = 0u; list != NULL && i < list->ncmd; ++i) {
+                const NkUiDrawCmd *cmd = &list->cmd[i];
+                if (cmd->kind == NK_UI_DRAW_SCISSOR_START || cmd->kind == NK_UI_DRAW_SCISSOR_END) continue;
+                if (cmd->clip[0] < 0 || cmd->clip[1] < 0 || cmd->clip[2] > w || cmd->clip[3] > h) {
+                    inside = false;
+                }
+                if (cmd->kind == NK_UI_DRAW_BORDER && cmd->rgba_pm == theme->line_strong &&
+                    cmd->bounds[2] - cmd->bounds[0] > (int)(240.0f * scale)) {
+                    if (card_top < 0 || cmd->clip[1] < card_top) card_top = cmd->clip[1];
+                    if (cmd->clip[3] > card_bottom) card_bottom = cmd->clip[3];
+                }
+            }
+            lines = caption_lines(list, card_top, card_bottom, joined, sizeof(joined));
+            whole = strcmp(joined, caption) == 0;
+            if (!whole) ++counted;
+            if (list == NULL || !inside || card_top < (int)NK_UI_SAFE_AREA_MIN || card_bottom > bar_top ||
+                !list_shows_whole(list, title_id, card_top, card_bottom) ||
+                nk_ui_focused(ui) != NK_OVERLAY_ID_RESUME ||
+                !list_shows_whole(list, NK_OVERLAY_ID_RESUME, card_top, card_bottom) || lines < 1 ||
+                strstr(joined, "\xE2\x80\xA6") != NULL ||
+                !(whole || list_ends_counted(joined, caption)) || (!whole && !sweep) ||
+                (!whole && h >= 544)) {
+                fprintf(stderr, "  every part on at %dx%d@%.2f%s: card %d..%d, bar %d, %d line(s): \"%s\"\n",
+                        w, h, (double)scale, developer ? " (developer)" : "", card_top, card_bottom,
+                        bar_top, lines, joined);
+                CHECK(false, "the pause caption lists every part, or counts the rest, with the game's "
+                             "name and RESUME whole");
+            }
+            nk_ui_destroy(ui);
+        }
+    }
+    CHECK(counted > 0, "no window was too short for every part, so the count was never drawn");
+}
+
 /* Every page at the design's three capture sizes: nothing drawn outside the window,
    nothing under the prompt bar but the bar, and the card clear of the edges. */
 static void test_fits_every_window(void) {
@@ -1619,7 +1777,8 @@ static void compare_golden(const char *path, const char *actual, size_t actual_s
 /* Every overlay page at the design's three capture sizes, drawn by the
    SDL_Renderer backend with the bundled fonts and the Kenney glyphs, over a
    dark frame standing in for the game, saved as
-   <directory>/overlay-<page>-<w>x<h>.bmp for review by eye. */
+   <directory>/overlay-<page>-<w>x<h>.bmp for review by eye; then the pause menu
+   of a run with every part on (overlay-menu-every-part-<w>x<h>.bmp). */
 static int capture_overlay(const char *directory) {
     static const char *const names[NK_OVERLAY_SCREEN_COUNT] = {
         "menu", "settings", "controls", "quit", "pad-lost", "vram", "profile"
@@ -1628,6 +1787,7 @@ static int capture_overlay(const char *directory) {
         {960, 600, 1.0f}, {1280, 800, 1.0f}, {1920, 1200, 1.5f}
     };
     static NkUiPromptImages prompt_images;
+    static char every_part[ACE_WORDS_MAX + 40];
     NkUiTtf *ttf = NULL;
     NkUiTextBackend text;
     bool ok = false;
@@ -1659,6 +1819,7 @@ static int capture_overlay(const char *directory) {
     }
     text = nk_ui_ttf_backend(ttf);
     if (nk_ui_prompt_images_load(&prompt_images) == 0u) goto done;
+    if (!every_part_caption(every_part, sizeof(every_part))) goto done;
     for (size_t s = 0; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
         SDL_Surface *surface = SDL_CreateSurface(sizes[s].w, sizes[s].h, SDL_PIXELFORMAT_RGBA32);
         SDL_Renderer *renderer = surface != NULL ? SDL_CreateSoftwareRenderer(surface) : NULL;
@@ -1685,15 +1846,19 @@ static int capture_overlay(const char *directory) {
             nk_ui_set_prompt_images(ui, &prompt_images);
             nk_ui_sdlr_set_scale(backend, nk_ui_scale_for_viewport(&viewport).density);
         }
-        model.developer = true;
-        for (int screen = 0; size_ok && screen < NK_OVERLAY_SCREEN_COUNT; ++screen) {
+        /* One capture past the pages: the menu as a player sees it with every part on. */
+        for (int screen = 0; size_ok && screen <= NK_OVERLAY_SCREEN_COUNT; ++screen) {
+            const bool every = screen == NK_OVERLAY_SCREEN_COUNT;
             NkOverlayState state;
             const NkUiDrawList *list = NULL;
             char path[4096];
             int written = snprintf(path, sizeof(path), "%s%coverlay-%s-%dx%d.bmp", directory,
-                                   separator, names[screen], sizes[s].w, sizes[s].h);
+                                   separator, every ? "menu-every-part" : names[screen],
+                                   sizes[s].w, sizes[s].h);
+            model.developer = !every;
+            model.ace_caption = every ? every_part : NULL;
             nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
-            state.screen = (NkOverlayScreen)screen;
+            state.screen = every ? NK_OVERLAY_SCREEN_MENU : (NkOverlayScreen)screen;
             /* Twice: the focus graph places what the first frame laid out. */
             for (int frame = 0; frame < 2; ++frame) {
                 nk_ui_begin(ui, 37.0);
@@ -1754,6 +1919,7 @@ int main(int argc, char **argv) {
     test_fits_every_window();
     test_menu_fits_small_windows();
     test_menu_height_sweep();
+    test_ace_caption_every_part();
     test_developer_gate();
     test_vram_page();
     test_vram_captures();
@@ -1777,3 +1943,11 @@ int main(int argc, char **argv) {
     printf("overlay screens: PASS\n");
     return 0;
 }
+
+/* Ace Mode's launch line and words (pure C), for test_ace_caption_every_part: included last so
+   nothing it brings in reaches the tests above. On Windows it includes <windows.h>, kept lean:
+   the socket headers declare a bind() of their own. */
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include "../../src/rt/ace.c"

@@ -2005,6 +2005,73 @@ static int test_display_text_rules(void) {
     return 1;
 }
 
+/* A list joined by middle dots, line by line (nk_ui_list_line): whole items on
+   each line with the dot kept at its end, every space a no-break space, the
+   items a last line leaves out counted and never cut, and one item too wide for
+   the line shortened. The fixed backend measures 6.5 px a character at 13 px. */
+static int test_list_lines(void) {
+#define DOT "\xC2\xB7"
+#define NB "\xC2\xA0"
+    static const char list[] = "aa " DOT " bb cc " DOT " dd " DOT " ee";
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiTextStyle style = nk_ui_type(NK_UI_TYPE_CAPTION, 0xFFFFFFFFu);
+    NkUiConfig config;
+    NkUi *ui;
+    const char *rest;
+    const char *line;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_OVERLAY;
+    config.text = &fixed;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create context for list lines");
+    nk_ui_begin(ui, 0.0);
+    CHECK(style.size_px == 13 && nk_ui_text_width(ui, "aaaa", &style) == 26.0f,
+          "the fixed backend measures a caption 6.5 px a character");
+    /* 20 characters, 130 px: one line, the run it is drawn as. */
+    rest = list;
+    line = nk_ui_list_line(ui, &rest, &style, 130.0f, false);
+    CHECK(strcmp(line, "aa" NB DOT NB "bb" NB "cc" NB DOT NB "dd" NB DOT NB "ee") == 0 && rest[0] == '\0',
+          "a list that fits is one run with no-break spaces");
+    CHECK(nk_ui_list_line_count(ui, list, &style, 130.0f) == 1, "a list that fits counts one line");
+    rest = list;
+    line = nk_ui_list_line(ui, &rest, &style, 130.0f, true);
+    CHECK(strcmp(line, "aa" NB DOT NB "bb" NB "cc" NB DOT NB "dd" NB DOT NB "ee") == 0 && rest[0] == '\0',
+          "a last line that holds the whole list counts nothing");
+    /* At 80 px: "aa . bb cc ." is 78 px, and a third item would make 110.5. */
+    rest = list;
+    line = nk_ui_list_line(ui, &rest, &style, 80.0f, false);
+    CHECK(strcmp(line, "aa" NB DOT NB "bb" NB "cc" NB DOT) == 0 && strcmp(rest, "dd " DOT " ee") == 0,
+          "a line takes the whole items that fit and keeps the dot after the last");
+    line = nk_ui_list_line(ui, &rest, &style, 80.0f, false);
+    CHECK(strcmp(line, "dd" NB DOT NB "ee") == 0 && rest[0] == '\0', "the next line takes the rest");
+    CHECK(nk_ui_list_line_count(ui, list, &style, 80.0f) == 2, "the list counts two lines at 80 px");
+    /* A last line gives up its own items until the count fits: "aa . and 3 more" is 97.5 px. */
+    rest = list;
+    line = nk_ui_list_line(ui, &rest, &style, 100.0f, true);
+    CHECK(strcmp(line, "aa" NB DOT NB "and" NB "3" NB "more") == 0 && rest[0] == '\0',
+          "a last line with items left over counts every item it leaves out");
+    rest = list;
+    line = nk_ui_list_line(ui, &rest, &style, 80.0f, true);
+    CHECK(strcmp(line, "and" NB "4" NB "more") == 0 && rest[0] == '\0',
+          "a last line too narrow for an item and the count keeps the count");
+    /* One item wider than the line ("aa ." is 26 px) is shortened; the list goes on after it. */
+    rest = list;
+    line = nk_ui_list_line(ui, &rest, &style, 20.0f, false);
+    CHECK(strstr(line, "\xE2\x80\xA6") != NULL && strstr(line, "bb") == NULL &&
+              strcmp(rest, "bb cc " DOT " dd " DOT " ee") == 0,
+          "an item wider than the line ends in an ellipsis and the next line starts at the next item");
+    CHECK(nk_ui_list_line_count(ui, list, &style, 20.0f) == 4, "four items too wide count four lines");
+    rest = "";
+    CHECK(nk_ui_list_line(ui, &rest, &style, 80.0f, true)[0] == '\0' && rest[0] == '\0' &&
+              nk_ui_list_line_count(ui, "", &style, 80.0f) == 0,
+          "an empty list has no line");
+    CHECK(nk_ui_end(ui) != NULL, "complete the list lines frame");
+    nk_ui_destroy(ui);
+#undef DOT
+#undef NB
+    return 1;
+}
+
 static bool clip_is(const NkUiDrawList *list, uint32_t index, int x0, int y0, int x1, int y1) {
     const int *clip = list->cmd[index].clip;
     return clip[0] == x0 && clip[1] == y0 && clip[2] == x1 && clip[3] == y1;
@@ -2239,7 +2306,7 @@ int main(int argc, char **argv) {
         !test_click_needs_press_and_release_on_one_control() ||
         !test_control_owns_horizontal() || !test_wave_caps() ||
         !test_image_decode() || !test_image_command() || !test_app_icon() ||
-        !test_display_text_rules() || !test_layout_error_kinds() ||
+        !test_display_text_rules() || !test_list_lines() || !test_layout_error_kinds() ||
         !test_layout_errors_reported() || !test_pointer_hover_and_press() ||
         !test_pointer_respects_clip() || !test_scroll_container() ||
         !test_draw_clips_nest() || !test_modal_card_floats() || !test_focus_ring_floats() ||

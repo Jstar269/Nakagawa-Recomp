@@ -2395,40 +2395,6 @@ static void cell_report_worst(void) {
     printf("ace-selftest: the worst-case report needs %zu of %u bytes\n", worst + 1u, ACE_REPORT_MAX);
 }
 
-/* Every part on, from the key table alone: the longest line (ace_longest_line) made one this build
- * parses (smooth=match only where the build has it, tier=ace for the Ace-only keys), then each key
- * at the first of these values the parser takes in its place. It is the line cell_switch builds
- * for the words check, so a new key is turned on here with no edit either. */
-static int every_part_on_line(char *out, size_t cap) {
-    static const char *const k_on[] = {"on", "fill", "x2", "sinc", "16", "4", "ace"};
-    char longest[2 * ACE_SPEC_MAX], trial[2 * ACE_SPEC_MAX];
-    AceConfig c;
-    const size_t n = ace_longest_line(longest, sizeof(longest));
-    const char *match = strstr(longest, ";smooth=match");
-    char *tier;
-    if (n == 0 || match == NULL) return 0;
-    snprintf(out, cap, "%.*s;smooth=%s%s", (int)(match - longest), longest,
-             ACE_HAS_SMOOTH_MATCH ? "match" : "off", match + strlen(";smooth=match"));
-    tier = strstr(out, ";tier=enhanced");
-    if (tier == NULL) return 0;
-    memmove(tier + strlen(";tier=ace"), tier + strlen(";tier=enhanced"), strlen(tier + strlen(";tier=enhanced")) + 1u);
-    memcpy(tier + strlen(";tier="), "ace", 3u);
-    if (ace_parse(out, &c, NULL, 0) != 1) return 0;
-    for (char *key = strchr(out, ';'); key != NULL; key = strchr(key + 1, ';')) {
-        char *eq = strchr(key, '=');
-        if (eq == NULL) return 0;
-        const char *rest = strchr(eq, ';');
-        for (size_t v = 0; v < sizeof(k_on) / sizeof(k_on[0]); v++) {
-            snprintf(trial, sizeof(trial), "%.*s%s%s", (int)(eq + 1 - out), out, k_on[v], rest ? rest : "");
-            if (strlen(trial) < cap && ace_parse(trial, &c, NULL, 0) == 1) {
-                snprintf(out, cap, "%s", trial);
-                break;
-            }
-        }
-    }
-    return 1;
-}
-
 /* Room for later parts: the launch line and the badge words each hold the longest case the key
  * table makes plus eight more keys or words of its average length, so the next parts do not each
  * need a widening first. Past a limit the line is refused by name and the words drop whole, never
@@ -2445,7 +2411,8 @@ static void cell_room(void) {
     CHECK(n + 8u * avg < ACE_SPEC_MAX,
           "the longest line (%zu characters, %zu keys) and eight more keys of %zu fit ACE_SPEC_MAX %d",
           n, keys, avg, ACE_SPEC_MAX);
-    CHECK(every_part_on_line(every, sizeof(every)), "every part on is a line this build takes (%s)", every);
+    /* Every part on (ace_every_part_line): the line cell_switch builds for the words check. */
+    CHECK(ace_every_part_line(every, sizeof(every)) > 0u, "every part on is a line this build takes (%s)", every);
     /* Every part on and eight synthetic keys of that average length: the length check takes it, and
        the key table refuses the first unknown key by name. One byte more is refused for its length
        ("line too long", cell_parse's edge check). */

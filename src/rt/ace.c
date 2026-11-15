@@ -88,6 +88,42 @@ size_t ace_longest_line(char *out, size_t cap) {
     return used;
 }
 
+size_t ace_every_part_line(char *out, size_t cap) {
+    static const char *const k_on[] = {"on", "fill", "x2", "sinc", "16", "4", "ace"};
+    char longest[2 * ACE_SPEC_MAX], trial[2 * ACE_SPEC_MAX];
+    AceConfig c;
+    const char *match;
+    char *tier;
+    if (!out || !cap) return 0;
+    out[0] = '\0';
+    if (!ace_longest_line(longest, sizeof(longest))) return 0;
+    match = strstr(longest, ";smooth=match");
+    if (!match || strlen(longest) >= cap) return 0;
+    snprintf(out, cap, "%.*s;smooth=%s%s", (int)(match - longest), longest,
+             ACE_HAS_SMOOTH_MATCH ? "match" : "off", match + strlen(";smooth=match"));
+    tier = strstr(out, ";tier=enhanced");
+    if (tier) {
+        memmove(tier + strlen(";tier=ace"), tier + strlen(";tier=enhanced"),
+                strlen(tier + strlen(";tier=enhanced")) + 1u);
+        memcpy(tier + strlen(";tier="), "ace", 3u);
+    }
+    if (!tier || ace_parse(out, &c, NULL, 0) != 1) { out[0] = '\0'; return 0; }
+    for (char *key = strchr(out, ';'); key != NULL; key = strchr(key + 1, ';')) {
+        char *eq = strchr(key, '=');
+        const char *rest;
+        if (!eq) { out[0] = '\0'; return 0; }
+        rest = strchr(eq, ';');
+        for (size_t v = 0; v < sizeof(k_on) / sizeof(k_on[0]); v++) {
+            snprintf(trial, sizeof(trial), "%.*s%s%s", (int)(eq + 1 - out), out, k_on[v], rest ? rest : "");
+            if (strlen(trial) < cap && ace_parse(trial, &c, NULL, 0) == 1) {
+                snprintf(out, cap, "%s", trial);
+                break;
+            }
+        }
+    }
+    return strlen(out);
+}
+
 /* stick=<counts>: a decimal 1..ACE_STICK_COUNTS_MAX with no sign and no leading zero, so the
    line's text is the one ace_format writes. */
 static int value_stick_counts(const char *v, int *out) {

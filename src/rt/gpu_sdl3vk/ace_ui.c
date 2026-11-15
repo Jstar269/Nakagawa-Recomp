@@ -384,6 +384,7 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *f) {
 
     int show_readout = f->readout && f->readout[0];
     int show_notice = f->notice && f->notice[0] && f->notice_alpha > 0.0f;
+    const int keyboard_open = f->keyboard && f->keyboard->status == OSK_OVERLAY_OPEN;
     NkUiLayout top = layout(NK_UI_LAYOUT_ROW, sizing(NK_UI_SIZE_GROW, 0.0f),
                             sizing(NK_UI_SIZE_FIT, 0.0f), NK_UI_SPACE_3);
     top.align_y = NK_UI_ALIGN_START;
@@ -423,15 +424,21 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *f) {
                 words.wrap = false;
                 nk_ui_text(ui, ACE_UI_ID_NOTICE_HEAD,
                            one_line(ui, f->notice_head ? f->notice_head : "Enhanced"), &head);
-                nk_ui_text(ui, ACE_UI_ID_NOTICE_TEXT,
-                           one_line(ui, nk_ui_text_clamp(ui, f->notice, &words, room * 0.5f, 1)),
-                           &words);
+                /* The words are a list: it wraps between its items onto as many lines as it
+                 * needs, and past the lines the chip may take it counts the rest ("and N more")
+                 * instead of cutting them. The keyboard leaves the chips one line's room. */
+                const int lines = keyboard_open ? 1 : ACE_UI_NOTICE_LINES;
+                const char *rest = f->notice;
+                for (int line = 0; line < lines && rest[0]; line++)
+                    nk_ui_text(ui, ACE_UI_ID_NOTICE_TEXT + (NkUiId)line,
+                               nk_ui_list_line(ui, &rest, &words, room * 0.5f, line + 1 == lines),
+                               &words);
                 nk_ui_end_container(ui);
             }
         }
         nk_ui_end_container(ui);
     }
-    if (f->keyboard && f->keyboard->status == OSK_OVERLAY_OPEN) {
+    if (keyboard_open) {
         NkUiLayout fill = layout(NK_UI_LAYOUT_ROW, sizing(NK_UI_SIZE_GROW, 0.0f),
                                  sizing(NK_UI_SIZE_GROW, 0.0f), 0.0f);
         if (nk_ui_begin_container(ui, ACE_UI_ID_FILL, &fill, NULL)) nk_ui_end_container(ui);

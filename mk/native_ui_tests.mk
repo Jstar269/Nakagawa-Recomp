@@ -444,10 +444,17 @@ anime4k-selftest: shader-verify
 # ace-ui-selftest - Ace Mode's in-game UI (src/rt/gpu_sdl3vk/ace_ui.c): the readout, the launch
 # notice and the crisp keyboard laid out at the overlay's sizes and two ultrawide windows (inside
 # the 16 px safe area, apart from each other), then drawn on a headless Vulkan device over a
-# cleared image, which keeps every pixel outside them; the image is written for review. Linked
-# from the UI pass, the keyboard model and nk_ui alone (invariant S1). With SDL3_ttf the picture
-# uses the launcher's fonts. No Vulkan headers, loader or device: SKIP (exit 77), visible in
-# the log; NK_UI_VK_REQUIRE=1 makes a skip fail.
+# cleared image, which keeps every pixel outside them; the image is written for review. It is
+# linked twice. First with ACE_UI_SELFTEST_S1 from the UI pass, the keyboard model and nk_ui alone
+# (invariant S1: a reference from the UI pass to the runtime fails this link). Then, for the
+# binary that runs, with src/rt/ace.c as well, whose key table gives the launch notice's longest
+# list: every part on, laid out at every window and display scale and drawn once. With SDL3_ttf
+# the pictures and that layout use the launcher's fonts. No Vulkan headers, loader or device: SKIP
+# (exit 77), visible in the log; NK_UI_VK_REQUIRE=1 makes a skip fail.
+ACE_UI_SELFTEST_BUILD = $(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/ui -Isrc/rt -Isrc/rt/gpu_sdl3vk -Ithird_party/clay \
+	$(VULKAN_INC_FLAGS) $(SDL3_INC_FLAGS) -DNK_UI_WITH_VULKAN $$ttf_defs \
+	$(NK_UI_CORE_SRCS) src/ui/backend/nk_ui_vk.c $$ttf_srcs src/rt/osk_overlay.c \
+	src/rt/gpu_sdl3vk/ace_ui.c src/rt/gpu_sdl3vk/ace_ui_selftest.c
 native-core-tests: ace-ui-selftest
 .PHONY: ace-ui-selftest
 ace-ui-selftest:
@@ -461,10 +468,9 @@ ace-ui-selftest:
 	if printf '%s\n' '#include <SDL3/SDL.h>' '#include <SDL3_ttf/SDL_ttf.h>' '#include <SDL3_ttf/SDL_textengine.h>' | $(CC) -E -x c $(SDL3_INC_FLAGS) - >/dev/null 2>&1; then \
 		ttf_defs="-DNK_UI_WITH_SDL -DNK_UI_WITH_SDL_TTF"; ttf_srcs="src/ui/nk_ui_ttf.c"; ttf_libs="$(LDFLAGS) -lSDL3"; \
 	fi; \
-	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/ui -Isrc/rt -Isrc/rt/gpu_sdl3vk -Ithird_party/clay \
-		$(VULKAN_INC_FLAGS) $(SDL3_INC_FLAGS) -DNK_UI_WITH_VULKAN $$ttf_defs \
-		$(NK_UI_CORE_SRCS) src/ui/backend/nk_ui_vk.c $$ttf_srcs src/rt/osk_overlay.c \
-		src/rt/gpu_sdl3vk/ace_ui.c src/rt/gpu_sdl3vk/ace_ui_selftest.c \
+	$(ACE_UI_SELFTEST_BUILD) -DACE_UI_SELFTEST_S1 \
+		$$ttf_libs -lm $(NK_UI_VK_SELFTEST_LIBS) -o $(BUILD_ROOT)/ace_ui_selftest_s1$(EXE_EXT) || exit 1; \
+	$(ACE_UI_SELFTEST_BUILD) src/rt/ace.c \
 		$$ttf_libs -lm $(NK_UI_VK_SELFTEST_LIBS) -o $(BUILD_ROOT)/ace_ui_selftest$(EXE_EXT) || exit 1; \
 	rc=0; $(BUILD_ROOT_RUN)/ace_ui_selftest$(EXE_EXT) $(BUILD_ROOT) --fonts . || rc=$$?; \
 	if [ $$rc -eq 77 ] && [ "$(NK_UI_VK_REQUIRE)" = 1 ]; then \
