@@ -265,8 +265,9 @@ typedef enum {
     PLAYER_PART_TWIN,          /* full 32-bit colour, the host twin (#2050, section 10.11): 0 off, 1 on.
                                   Appended; the Ace line writes twin after tess */
     PLAYER_PART_SSAA,          /* supersampling (#2073, section 10.21): 0 off, or the factor 2 or 4 per
-                                  axis on top of the render scale. Host presentation only; off in a
-                                  fresh file and in every preset */
+                                  axis on top of the render scale, or PLAYER_SSAA_4_ANYWAY. Host
+                                  presentation only; off in a fresh file and in every preset. 4 runs
+                                  at 2 at a render scale of 3x or 4x (player_ssaa_factor) */
     PLAYER_PART_MIPS,          /* host-built mip chains (section 11.3.8): 0 off, 1 on. Appended; the
                                   SR_ACE line carries mips=on, right after twin, only when on; off in
                                   a fresh file */
@@ -353,7 +354,18 @@ typedef struct {
     bool logic_60;             /* Ace with its 60 FPS game logic on (the package may be gone) */
     int stick_counts;          /* the square stick dead zone the title's catalog entry declares
                                   (NkTitleEntry.analog_dead_zone_counts), 0 when none */
+    int render_scale;          /* the render scale the session runs at, when on
+                                  (player_settings_enhanced_render_scale) */
+    bool ssaa_lowered;         /* Supersampling 4x was chosen, without 4x anyway, at a render scale
+                                  of 3x or 4x: part[PLAYER_PART_SSAA] is 2 (player_ssaa_factor) */
 } PlayerPlayResolved;
+
+/* Supersampling's "4x anyway" (owner, 2026-11-15): 4x kept at a render scale of 3x or 4x, where
+   plain 4x runs at 2x. A value no factor has; settings.json writes it "4-anyway". */
+#define PLAYER_SSAA_4_ANYWAY 0x104
+/* The render scales from which plain 4x runs at 2x: 3x and 4x make the twin 9 to 16 times the
+   pixels of 1x before supersampling multiplies them by 16 (contract section 10.21, Cost). */
+#define PLAYER_SSAA_GUARD_SCALE 3
 
 typedef struct {
     int resolution_scale; /* 1 = Native 480x272, 2 = 2x Vita, 3 = 3x 720p, 4 = 4x 1080p */
@@ -1839,9 +1851,27 @@ const PlayerTitlePlay *player_settings_title_play(const PlayerSettings *settings
 /* What a disc launches with. The title's mode, else the library's default, decides the mode;
  * Authentic turns everything off. Enhanced and Ace take each part from the title where it has
  * a value, else from the library; Ace adds the title's 60 FPS game logic unless that part is
- * off for it. A part value the build does not know reads as off. */
+ * off for it. A part value the build does not know reads as off. Supersampling resolves to the
+ * factor the launch uses (player_ssaa_factor at the session's render scale), so the launch line,
+ * the pages and the log agree. */
 void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
                          PlayerPlayResolved *out);
+/* The render scale an Enhanced or Ace session runs at: the graphics preset's where one is chosen,
+ * else the Resolution row's (player_session_apply_graphics_preset). */
+int player_settings_enhanced_render_scale(const PlayerSettings *settings);
+/* The supersampling factor a launch uses for the part's value `value` at `render_scale`: 0, 2 or
+ * 4. Plain 4x at a render scale of PLAYER_SSAA_GUARD_SCALE or more is 2 (about 16 times the
+ * graphics work of the render scale alone; on an RTX 3080 at 4x it stuttered); PLAYER_SSAA_4_ANYWAY
+ * is 4 at any scale. Applied once, in player_play_resolve; the runtime is unchanged. */
+int player_ssaa_factor(int value, int render_scale);
+/* The Supersampling row's sentence for the value a page shows and the session's render scale: the
+ * part's own sentence, or at PLAYER_SSAA_GUARD_SCALE and above the warning for 4x
+ * (PLAYER_SSAA_WARNING) or the cost line for 4x anyway (PLAYER_SSAA_ANYWAY_SENTENCE). */
+const char *player_ssaa_sentence(int value, int render_scale);
+#define PLAYER_SSAA_WARNING \
+    "About 16 times the graphics work at this resolution; may stutter. Runs at 2x; pick 4x anyway."
+#define PLAYER_SSAA_ANYWAY_SENTENCE \
+    "About 16 times the graphics work at this resolution; may stutter. You chose 4x anyway."
 /* A title that launches its enhanced 60 FPS build (GameRecord.enhancement_package_id set) calls
  * this with logic_60 true. An Enhanced or Ace launch then runs as Ace with its 60 FPS game logic
  * (the session flag on a title on Enhanced included), and smooth motion is off for it whatever
@@ -1856,7 +1886,8 @@ void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
  * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
  * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
- * ";ssaa=2" or ";ssaa=4" follows with the Supersampling part on, in either tier.
+ * ";ssaa=2" or ";ssaa=4" follows with the Supersampling part on, in either tier: the resolved
+ * factor, so plain 4x at a render scale of 3x or 4x writes ";ssaa=2" (player_ssaa_factor).
  * ";peak=limit" follows ssaa, before texpack, with the Unclipped sound part on, in either tier;
  * a missing peak is off.
  * ";texpack=on" follows only with the Texture pack part on for a title that has a pack, in

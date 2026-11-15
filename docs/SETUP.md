@@ -131,8 +131,12 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   that counts the draws the vertex cap lowered. The rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1014-finer-bezier-and-spline-patches).
 - **Supersampling.** A part of Enhanced and Ace, off by default and in no graphics preset: Settings > Enhanced
-  offers it as **Supersampling** (2x, 4x or Off), for the library or for one game, and the launch line carries it as
-  `ssaa=`. It draws every frame at 2 or 4 times the render scale on each axis and shows each pixel as the average of
+  offers it as **Supersampling** (2x, 4x, 4x anyway or Off), for the library or for one game, and the launch line
+  carries it as `ssaa=`. At a render scale of 3x or 4x (the Resolution row's, or the graphics preset's), 4x runs at
+  2x and the row says why: "About 16 times the graphics work at this resolution; may stutter. Runs at 2x; pick 4x
+  anyway." **4x anyway** keeps 4x at any render scale. A settings file from before this choice existed that has 4x
+  runs at 2x at those render scales until 4x anyway is picked. It draws every frame at 2 or 4 times the render scale
+  on each axis and shows each pixel as the average of
   its samples, which smooths jagged edges; the frames the game can read back do not change. It costs the GPU 4
   times (2x) or 16 times (4x) the drawing work of the render scale alone, on top of it, and GPU memory for the
   larger images: by the renderer's estimate about 17 MB (2x) or 64 MB (4x) at render scale 1, 68 or 255 MB at 2,

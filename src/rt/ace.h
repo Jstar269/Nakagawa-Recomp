@@ -384,6 +384,8 @@ typedef struct {
     uint64_t wall_ns;          /* the window's length */
     uint32_t new_frames;       /* F's numerator */
     uint64_t idle_ns;          /* host time in the scheduler's two waits */
+    uint64_t gpu_wait_ns;      /* host time the scheduler's thread was blocked on the GPU's fences
+                                * (ace_note_gpu_wait) */
     uint32_t skipped_slots;    /* VBLANK deadlines vblank_pace had to skip */
     AceRate stable;            /* the detector's class at the window's end */
     int ever_stable;
@@ -404,7 +406,9 @@ typedef struct {
 typedef struct {
     double fps;                /* F: new frames per second */
     double idle_share;         /* I: host idle time over wall time */
-    int pc_limited;
+    int pc_limited;            /* the host could not keep up: PC LIMITED or GPU LIMITED (both in
+                                * the warning colour) */
+    int gpu_limited;           /* of those, the GPU was the limit: the text says GPU LIMITED */
     int have_target;           /* a percentage can be shown */
     double target_fps;         /* T = 59.94 / k */
     int speed_pct;             /* F / T while PC limited, else 100 */
@@ -416,8 +420,11 @@ typedef struct {
 } AceReadoutView;
 
 void ace_readout_reset(AceReadoutState *s);
-/* Judges one window; PC limited when a slot was skipped, or when the host idled under 2% while
- * frames came slower than the class allows. The target keeps the class stable when the stretch
+/* Judges one window; limited when a slot was skipped, or when the host idled under 2% while
+ * frames came slower than the class allows. A limited window is GPU LIMITED when the scheduler's
+ * thread waited on the GPU for at least as long as the window fell behind (ace_readout_behind_ns),
+ * so without those waits the game would have kept up; else it is PC LIMITED (the CPU, or anything
+ * else on the host). The target keeps the class stable when the stretch
  * began, so a steady slowdown does not redefine it. With Smooth motion on, the text ends with
  * "SMOOTH n" or, in a window it showed no in-between in (the game was not at a steady 30 FPS),
  * "SMOOTH OFF": it is never off without saying so. n counts what moved, not what was presented:
@@ -425,6 +432,10 @@ void ace_readout_reset(AceReadoutState *s);
  * motion weight. An in-between that repeats the old frame adds nothing, so a scene the
  * in-betweens cannot follow reads SMOOTH 30 however many presents there were. */
 void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *out);
+/* How far a window fell behind, in host nanoseconds: the larger of its skipped VBLANK slots
+ * (each 1001/60 ms) and, against a class of k VBLANKs a frame, the window's length less the time
+ * its new frames should have taken (k VBLANKs each). 0 for a window that kept up. */
+uint64_t ace_readout_behind_ns(const AceWindow *w, int k);
 
 /* ---- observation feed (Ace on only; callers check g_ace_on) ---------------------------------- */
 
@@ -437,6 +448,10 @@ void ace_note_vram_write(uint32_t off, uint32_t bytes);
 /* Host time the scheduler spent waiting (vblank_pace, sleep_until_us), and slots it skipped. */
 void ace_note_host_wait(uint64_t ns);
 void ace_note_skipped_slots(uint32_t slots);
+/* Host time the scheduler's thread was blocked on a GPU fence: the GE renderer's submissions
+ * (a slot reused, a drain at a CPU-visible boundary, a readback) and the presenter's frame. Read
+ * only by the readout's verdict and the report; nothing guest-visible depends on it. */
+void ace_note_gpu_wait(uint64_t ns);
 /* Fast forward started (1) or stopped (0) (sched.c; recomp.h, sched_fast_forward_on). The
  * readout's window is a second of wall time, so time at the fast-forward speed is never judged:
  * the readout hides, skipped slots are not counted, no window counts towards the report, and the
@@ -453,7 +468,7 @@ int ace_readout_view(AceReadoutView *out);
 AceRate ace_rate_stable(void);
 /* Observation counters (presenter cell A3: all zero with Ace off). */
 typedef struct {
-    uint64_t draws, flips, new_frames, host_wait_ns, skipped_slots, windows;
+    uint64_t draws, flips, new_frames, host_wait_ns, skipped_slots, windows, gpu_wait_ns;
 } AceCounters;
 void ace_counters(AceCounters *out);
 

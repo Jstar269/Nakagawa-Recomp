@@ -593,7 +593,9 @@ default (AUTHENTIC: OPTIONS or ENHANCED: OPTIONS; Authentic for a new library), 
 dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from the player's part table (TEXTURE
 FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; WIDESCREEN; SMOOTH MOTION; CLEAN
 PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; FULL 32-BIT COLOUR;
-SUPERSAMPLING; SMOOTH FAR TEXTURES; TEXTURE PACK; LATE PAD SAMPLING; SOFT SHADOWS, Ace only, which draws the shadows a game's package
+SUPERSAMPLING 2x, 4x, 4x anyway, Off, whose sentence at a render scale of 3x or 4x warns where 4x is picked ("About
+16 times the graphics work at this resolution; may stutter. Runs at 2x; pick 4x anyway.") because the game then runs
+at 2x until 4x anyway is picked, docs/ENHANCEMENT_CONTRACT.md section 10.21; SMOOTH FAR TEXTURES; TEXTURE PACK; LATE PAD SAMPLING; SOFT SHADOWS, Ace only, which draws the shadows a game's package
 names with soft edges and changes the frame the game reads, docs/ENHANCEMENT_CONTRACT.md section 11.3.13; UNCLIPPED
 SOUND, which plays the peaks the PSP would clip through a limiter and changes only what is heard, section 10.22;
 TEXTURE SCALING 2x to 6x, Off, and SMART 2D FILTER, which both change the frame the game reads, section 11.3.3; a
@@ -611,7 +613,9 @@ on: the page body scrolls, so the card grows instead of ending either one in an 
 art's top right. In game, the pause menu's caption names the mode and its parts and its Settings page has a live
 SPEED READOUT row; the launch notice (ENHANCED or ACE, top right, 3 s, a cut with Reduce motion) and the readout
 (top left) are chips on the 16 px safe area. When 60 FPS logic falls behind with the HUD off, its red
-`60 FPS logic: <n>/s - SLOWED` warning is a chip under the readout, never in the readout's corner. The notice and the caption list the parts that are on, joined by
+`60 FPS logic: <n>/s - SLOWED` warning is a chip under the readout, never in the readout's corner. A second the
+host could not keep up with ends the readout in GPU LIMITED or PC LIMITED, in `warning` (the rule is
+docs/ENHANCEMENT_CONTRACT.md section 10.3). The notice and the caption list the parts that are on, joined by
 middle dots. A list too long for one line wraps between its parts, never inside one, and never ends in an
 ellipsis: the notice takes up to eleven lines, each at most half the window wide (one line while the on-screen
 keyboard is open), and the caption takes the lines its card has room for above RESUME. Where a list is longer

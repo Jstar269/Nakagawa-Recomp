@@ -3121,6 +3121,39 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertNotIn("(Ultra)", page["af"], "texture filtering is the library's own")
         self.assertNotIn("(Ultra)", page["smooth"])
 
+    # Settings > Enhanced's Supersampling sentences at a render scale of 3x or 4x
+    # (player_state.h PLAYER_SSAA_WARNING and PLAYER_SSAA_ANYWAY_SENTENCE).
+    SSAA_WARNING = ("About 16 times the graphics work at this resolution; may stutter. "
+                    "Runs at 2x; pick 4x anyway.")
+    SSAA_ANYWAY = ("About 16 times the graphics work at this resolution; may stutter. "
+                   "You chose 4x anyway.")
+
+    def test_next_ui_enhanced_page_warns_for_supersampling_4x_at_4x(self) -> None:
+        """Owner, 2026-11-15: a settings file from before the guard, with Supersampling 4x and
+        the Resolution row at 4x, opens Settings > Enhanced with the row on 4x and its sentence
+        saying what that costs and that games run at 2x. One step on the row picks 4x anyway,
+        whose sentence names the cost, and the library saves it as "4-anyway"."""
+        run = self.next_ui_run(
+            "settings",
+            ("WAIT_MS=100",) + ("KEY_DOWN",) * 5 + ("KEY_RETURN", "WAIT_MS=150")
+            + ("KEY_DOWN",) * 14 + ("KEY_RETURN", "WAIT_MS=150", "KEY_ESCAPE", "WAIT_MS=100"),
+            settings={"resolution_scale": 4,
+                      "enhanced": {"default": "enhanced", "af": "16", "text": "on",
+                                   "readout": "off", "notice": "on", "smooth": "off",
+                                   "ssaa": "4"}},
+        )
+        pages = [page for page in self.enhanced_pages(run) if page.get("title") == "library"]
+        self.assertTrue(pages, run["stdout"])
+        self.assertEqual(pages[0]["ssaa"], "4x", pages[0])
+        self.assertEqual(pages[0]["ssaa_sentence"], self.SSAA_WARNING, pages[0])
+        self.assertEqual(pages[-1]["ssaa"], "4x anyway", pages[-1])
+        self.assertEqual(pages[-1]["ssaa_sentence"], self.SSAA_ANYWAY, pages[-1])
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        enhanced = settings.get("enhanced")
+        assert isinstance(enhanced, dict), settings
+        self.assertEqual(enhanced.get("ssaa"), "4-anyway", "the confirmation is saved for the library")
+
     def test_a_dedicated_data_root_keeps_everything_out_of_the_default_profile(self) -> None:
         """--user-data-root=<folder> opens the player on a second profile, for example a
         whole collection under test: a settings change lands in <folder>/config, and
