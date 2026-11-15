@@ -1131,7 +1131,8 @@ The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture
 - **Never stale.** A scaled copy records the cache entry's upload and the content hash it was made from, and is
   bound only while both still match. A texture the guest rewrites, or a CLUT texture drawn with another palette (a
   different cache key), is drawn unscaled until its own copy is ready, and never with the old one.
-- **Never waited on.** Two worker threads scale; the renderer only queues the decoded texels and stores finished
+- **Never waited on.** Worker threads scale, one for each logical CPU but two, at least 2 and at most 8
+  (`nk_tex_scale_worker_count`); the count changes only how soon a copy arrives, never its texels. The renderer only queues the decoded texels and stores finished
   copies at a later lookup. The jobs, waiting, running or finished, are at most 64 and hold at most 128 MiB of host
   memory together (one job is always accepted, so the largest copy, 16 MiB, can be made). Storing a copy is an upload
   on the renderer thread, so at most 8 MiB of copies are stored per present, the first copy of a present always;
@@ -1168,9 +1169,8 @@ The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture
 - **Stamps.** `TEX_SCALE: on (xbrz=<factor>, smart2d=on|off, budget_mb=<n>)` at start; at exit,
   `TEX_SCALE: draws (scaled_binds=, onetoone_unscaled=, scaled_uploads=, stale=, smart2d=, reclaimed=,
   budget_short=, upload_capped=)` and
-  `TEX_SCALE: exit (scaled=, queue_full=, discarded=, budget_peak_mb=, worker_ms=, workers=)`. The copies are
-  made on worker threads, one for each logical CPU but two, at least 2 and at most 8
-  (`nk_tex_scale_worker_count`); the count changes only how soon a copy arrives, never its texels.
+  `TEX_SCALE: exit (scaled=, queue_full=, discarded=, budget_peak_mb=, worker_ms=, workers=)`, also on the
+  `SR_EXIT_AT_VBLANK` end.
   A run with either feature on also prints, at start, the line section 11.3.3 describes.
   Section 10.4 applies: the run is an Ace run.
 - **A title it breaks.** A title whose fonts or pixel art suffer gets its off switch in its own package, never as
