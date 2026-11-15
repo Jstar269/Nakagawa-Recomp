@@ -8,9 +8,14 @@
  *     (ColorFormat::argbUnbuffered), and a 2x corner equals upstream's pixels one by one;
  *   - wrap and clamp: a repeating texture's copy is the middle of a 3x3 tiling's copy (no seam),
  *     a clamped one the middle of an edge-extended copy, and the R/B channel order is upstream's;
+ *   - workers: the worker count rule's cells, the pool starting that many for this host and
+ *     running that many jobs at once, and each of a full table of distinct textures getting its
+ *     own scale back;
  *   - jobs: a queued job returns the same pixels with its serial and hash; a held queue keeps a
  *     job queued and a full one refuses the next; nothing waits for a worker; the host-memory cap
  *     refuses the job that would pass it, and can_submit always gives submit's answer;
+ *   - host peak: a job counts the scratch its scale makes as well as its source and result, so
+ *     the jobs taken stay under the cap even if all of them run at once, and none that fits is refused;
  *   - work jobs (the texture dump's): each runs once on a worker thread, held ones stay queued
  *     without the submitter waiting, a full queue and the host-memory cap refuse the next, scale
  *     and work results are taken apart, and a sync submit runs its job before returning;
@@ -37,6 +42,8 @@
 #include "../../../third_party/xbrz/xbrz.h"
 #include "../vfpu_tables.h"   /* sr_vfpu_hmac_sha256 */
 
+#include <SDL3/SDL_cpuinfo.h>  /* the workers test's CPU count */
+#include <SDL3/SDL_mutex.h>    /* the workers test's overlapping jobs */
 #include <SDL3/SDL_thread.h>   /* the work test checks which thread a job ran on */
 #include <SDL3/SDL_timer.h>    /* the bounded wait is timed */
 
@@ -299,15 +306,23 @@ static void test_jobs(void) {
     if (!s_fail) printf("tex scale selftest: PASS jobs queued=%d held, full, ordered, sync\n", queued);
 }
 
-/* The host-memory cap. With the jobs held, 512x512 textures at 2x (5 MiB of host memory each,
- * source and result) are taken until the next would pass NK_TEX_SCALE_HOST_MB, well before the
- * table is full. can_submit gives submit's answer at every step: a caller told there is room is
- * never refused (the renderer would otherwise decode again on every hit). A small job that still
- * fits under the cap is taken; a large one is not. */
+/* The host bytes a running w x h scale by f holds at its peak, worked out here from what
+ * nk_tex_scale_image and the worker allocate rather than taken from tex_scale.c: the w x h source
+ * copy, the result, the source padded by two texels on every side, and xBRZ's result of that. */
+static uint64_t peak_bytes(int w, int h, int f) {
+    const uint64_t texels = (uint64_t)w * (uint64_t)h, padded = (uint64_t)(w + 4) * (uint64_t)(h + 4);
+    return 4u * (texels + texels * (uint64_t)(f * f) + padded + padded * (uint64_t)(f * f));
+}
+
+/* The host-memory cap. With the jobs held, 512x512 textures at 2x (about 10 MiB of host memory
+ * each with the scratch a running scale makes) are taken until the next would pass
+ * NK_TEX_SCALE_HOST_MB, well before the table is full. can_submit gives submit's answer at every
+ * step: a caller told there is room is never refused (the renderer would otherwise decode again on
+ * every hit). A small job that still fits under the cap is taken; a large one is not. */
 static uint32_t s_big[512 * 512];
 static void test_host_cap(void) {
     enum { BW = 512, BH = 512, BF = 2, SW = 20, SH = 12 };
-    const uint64_t each = (uint64_t)BW * BH * 4u * (1u + BF * BF), cap = (uint64_t)NK_TEX_SCALE_HOST_MB << 20;
+    const uint64_t each = peak_bytes(BW, BH, BF), cap = (uint64_t)NK_TEX_SCALE_HOST_MB << 20;
     const int fit = (int)(cap / each);
     for (int i = 0; i < BW * BH; i++) s_big[i] = 0xFF000000u | (uint32_t)i;
     nk_tex_scale_set_hold(1);
@@ -323,7 +338,7 @@ static void test_host_cap(void) {
           "host cap: took %d jobs of %llu bytes (want %d, under %u MiB with the table's %d slots not full); "
           "can_submit and submit disagreed %d times", taken, (unsigned long long)each, fit, NK_TEX_SCALE_HOST_MB,
           NK_TEX_SCALE_QUEUE, disagree);
-    const uint64_t small = (uint64_t)SW * SH * 4u * 5u;
+    const uint64_t small = peak_bytes(SW, SH, 2);
     CHECK((uint64_t)fit * each + small <= cap && nk_tex_scale_can_submit(SW, SH, 2) &&
           nk_tex_scale_submit(600u, 1u, s_big, SW, SH, 2, 1, 1), "host cap: a small job that fits under the cap was refused");
     CHECK(!nk_tex_scale_can_submit(BW, BH, BF) && !nk_tex_scale_submit(601u, 1u, s_big, BW, BH, BF, 1, 1),
@@ -339,6 +354,39 @@ static void test_host_cap(void) {
     nk_tex_scale_shutdown();
     if (!s_fail) printf("tex scale selftest: PASS host-cap %d jobs of %llu MiB, can_submit equals submit\n", taken,
                         (unsigned long long)(each >> 20));
+}
+
+/* The cap bounds the peak, scratch included. With the jobs held, each size is submitted until it is
+ * refused: had every job taken run at once (one per worker, up to NK_TEX_SCALE_WORKERS_MAX), the
+ * buffers they hold would still fit under NK_TEX_SCALE_HOST_MB, and the next job would not (or the
+ * table is full), so the cap is not met by refusing jobs that fit. nk_tex_scale_job_bytes agrees with
+ * peak_bytes. Counting only the source and result let twice the cap's memory run at once. */
+static void test_host_peak(void) {
+    static const struct { int w, h, f; } cell[] = {
+        {512, 512, 4}, {256, 256, 4}, {340, 340, 6}, {128, 128, 3}, {64, 64, 6},
+    };
+    const uint64_t cap = (uint64_t)NK_TEX_SCALE_HOST_MB << 20;
+    for (size_t c = 0; c < sizeof cell / sizeof cell[0]; c++) {
+        const int w = cell[c].w, h = cell[c].h, f = cell[c].f;
+        const uint64_t ref = peak_bytes(w, h, f);
+        CHECK(nk_tex_scale_job_bytes(w, h, f) == ref, "host peak: %dx%d at %dx counts %llu bytes, peak_bytes %llu", w,
+              h, f, (unsigned long long)nk_tex_scale_job_bytes(w, h, f), (unsigned long long)ref);
+        nk_tex_scale_set_hold(1);
+        int taken = 0;
+        while (taken < NK_TEX_SCALE_QUEUE && nk_tex_scale_can_submit(w, h, f) &&
+               nk_tex_scale_submit(700u + (uint64_t)taken, 1u, s_big, w, h, f, 1, 1))
+            taken++;
+        const uint64_t peak = (uint64_t)taken * ref;
+        CHECK(taken >= 1 && peak <= cap,
+              "host peak: %d jobs of %dx%d at %dx hold %llu bytes at once, past the %u MiB cap", taken, w, h, f,
+              (unsigned long long)peak, NK_TEX_SCALE_HOST_MB);
+        CHECK(taken == NK_TEX_SCALE_QUEUE || peak + ref > cap,
+              "host peak: %dx%d at %dx refused after %d jobs, with room for another under the cap", w, h, f, taken);
+        nk_tex_scale_shutdown();   /* the held jobs are dropped unrun */
+    }
+    CHECK(nk_tex_scale_job_bytes(16, 16, 1) == 0 && nk_tex_scale_job_bytes(0, 16, 2) == 0 &&
+          nk_tex_scale_job_bytes(16, 16, NK_TEX_SCALE_MAX + 1) == 0, "host peak: a size submit refuses was counted");
+    if (!s_fail) printf("tex scale selftest: PASS host-peak the cap bounds sources, results and scratch together\n");
 }
 
 /* Work jobs (the texture dump's encode and write): run once each, on a worker thread, never on
@@ -1047,7 +1095,88 @@ static void test_soft_candidates(void) {
     if (!s_fail) printf("tex scale selftest: PASS soft-shadow candidate line and once-per-content table\n");
 }
 
+/* The worker pool: the count rule's cells (every CPU but two, between the minimum and the maximum,
+ * the minimum for an unknown count), the pool starting that many for this host, that many jobs
+ * running at once, and every job's copy equal to its own scale on the calling thread whatever
+ * worker made it. */
+typedef struct {
+    SDL_Mutex *mx;
+    SDL_Condition *cv;
+    int inside, peak, want;
+} Overlap;
+static void work_overlap(void *ctx) {
+    Overlap *o = (Overlap *)ctx;
+    SDL_LockMutex(o->mx);
+    if (++o->inside > o->peak) o->peak = o->inside;
+    SDL_BroadcastCondition(o->cv);
+    /* Each job stays until `want` are inside together (or 5 s pass, which the check then fails). */
+    const uint64_t end = SDL_GetTicks() + 5000u;
+    while (o->peak < o->want && SDL_GetTicks() < end)
+        (void)SDL_WaitConditionTimeout(o->cv, o->mx, 50);
+    o->inside--;
+    SDL_UnlockMutex(o->mx);
+}
+
+static void test_workers(void) {
+    static const struct { int cpus, want; } cells[] = {
+        {-1, NK_TEX_SCALE_WORKERS_MIN}, {0, NK_TEX_SCALE_WORKERS_MIN}, {1, NK_TEX_SCALE_WORKERS_MIN},
+        {2, NK_TEX_SCALE_WORKERS_MIN}, {4, 2}, {5, 3}, {8, 6}, {10, NK_TEX_SCALE_WORKERS_MAX},
+        {11, NK_TEX_SCALE_WORKERS_MAX}, {24, NK_TEX_SCALE_WORKERS_MAX}, {256, NK_TEX_SCALE_WORKERS_MAX},
+    };
+    for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); i++)
+        CHECK(nk_tex_scale_worker_count(cells[i].cpus) == cells[i].want, "workers: %d CPUs give %d workers, not %d",
+              cells[i].cpus, nk_tex_scale_worker_count(cells[i].cpus), cells[i].want);
+
+    const int cpus = SDL_GetNumLogicalCPUCores(), want = nk_tex_scale_worker_count(cpus);
+    CHECK(nk_tex_scale_workers() == 0, "workers: %d before the first job", nk_tex_scale_workers());
+    Overlap o = {SDL_CreateMutex(), SDL_CreateCondition(), 0, 0, want};
+    CHECK(o.mx && o.cv, "workers: no mutex or condition");
+    nk_tex_scale_set_hold(1);
+    int queued = 0;
+    for (int i = 0; i < want; i++) queued += nk_tex_scale_submit_work(work_overlap, &o, 0);
+    CHECK(queued == want && nk_tex_scale_workers() == want, "workers: %d of %d jobs queued on %d workers (%d CPUs)",
+          queued, want, nk_tex_scale_workers(), cpus);
+    nk_tex_scale_set_hold(0);
+    CHECK(nk_tex_scale_wait_work(work_overlap, 10000u), "workers: the overlapping jobs did not finish");
+    void *ctx;
+    int taken = 0;
+    while (nk_tex_scale_take_work(work_overlap, &ctx)) taken++;
+    CHECK(taken == want && o.peak == want, "workers: took %d jobs, %d ran at once, want %d", taken, o.peak, want);
+    SDL_DestroyCondition(o.cv);
+    SDL_DestroyMutex(o.mx);
+
+    /* Every slot a distinct texture, released at once onto the pool: each copy is its own source's. */
+    enum { W = 20, H = 12, F = 3 };
+    static uint32_t src[NK_TEX_SCALE_QUEUE][W * H], want_px[W * H * F * F];
+    uint32_t s = 99u;
+    for (int j = 0; j < NK_TEX_SCALE_QUEUE; j++)
+        for (int i = 0; i < W * H; i++) src[j][i] = 0xFF000000u | (lcg(&s) & 0x00F0F0F0u);
+    nk_tex_scale_set_hold(1);
+    queued = 0;
+    for (int j = 0; j < NK_TEX_SCALE_QUEUE; j++) queued += nk_tex_scale_submit((uint64_t)j, 0u, src[j], W, H, F, j & 1, 0);
+    nk_tex_scale_set_hold(0);
+    nk_tex_scale_wait_idle();
+    NkTexScaleResult r;
+    int same = 0;
+    taken = 0;
+    while (nk_tex_scale_take(&r)) {
+        taken++;
+        if (r.serial < NK_TEX_SCALE_QUEUE) {
+            nk_tex_scale_image(src[r.serial], W, H, F, (int)(r.serial & 1u), 0, want_px);
+            same += memcmp(r.rgba, want_px, sizeof(want_px)) == 0;
+        }
+        nk_tex_scale_release(&r);
+    }
+    CHECK(queued == NK_TEX_SCALE_QUEUE && taken == queued && same == queued,
+          "workers: %d queued, %d taken, %d equal to their own scale", queued, taken, same);
+    nk_tex_scale_shutdown();
+    CHECK(nk_tex_scale_workers() == 0, "workers: %d after shutdown", nk_tex_scale_workers());
+    if (!s_fail) printf("tex scale selftest: PASS workers %d on %d CPUs ran at once, %d copies their own\n", want,
+                        cpus, same);
+}
+
 int main(void) {
+    test_workers();
     test_soften();
     test_soft_digest();
     test_soft_candidates();
@@ -1055,6 +1184,7 @@ int main(void) {
     test_wrap_clamp();
     test_jobs();
     test_host_cap();
+    test_host_peak();
     test_work();
     test_settings();
     test_smart2d();

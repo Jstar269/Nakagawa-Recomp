@@ -4,9 +4,9 @@
  * tex_scale.c - see tex_scale.h.
  *
  * Jobs live in a fixed table of NK_TEX_SCALE_QUEUE slots, each FREE, QUEUED, RUNNING or DONE,
- * with a sequence number that keeps them first in, first out. Two worker threads take QUEUED
- * slots; the renderer thread submits and takes. Nothing here waits for a worker except
- * nk_tex_scale_wait_idle and shutdown. A slot holds a scale or a work job (the texture dump's
+ * with a sequence number that keeps them first in, first out. The worker threads
+ * (nk_tex_scale_worker_count) take QUEUED slots; the renderer thread submits and takes. Nothing
+ * here waits for a worker except nk_tex_scale_wait_idle and shutdown. A slot holds a scale or a work job (the texture dump's
  * encode and write); each kind is taken only by its own take call.
  */
 #include "tex_scale.h"
@@ -14,6 +14,7 @@
 #include "../../../third_party/xbrz/xbrz.h"
 #include "../vfpu_tables.h"   /* sr_vfpu_hmac_sha256: the soft-shadow texture digest */
 
+#include <SDL3/SDL_cpuinfo.h>
 #include <SDL3/SDL_mutex.h>
 #include <SDL3/SDL_thread.h>
 #include <SDL3/SDL_timer.h>
@@ -210,20 +211,30 @@ typedef struct {
     void *ctx;
 } Job;
 
-#define WORKERS 2
-
 static Job s_jobs[NK_TEX_SCALE_QUEUE];
 static uint64_t s_seq;
 static SDL_Mutex *s_mx;
 static SDL_Condition *s_work_cv, *s_idle_cv;
-static SDL_Thread *s_threads[WORKERS];
+static SDL_Thread *s_threads[NK_TEX_SCALE_WORKERS_MAX];
+static int s_workers;          /* threads in s_threads that started */
+static int s_report_workers;   /* the most that started in this process, for the exit line */
 static int s_started, s_quit, s_hold, s_sync;
 static NkTexScaleStats s_stats;
-/* Host bytes the jobs not FREE hold or will hold (source plus result), under s_mx. */
+/* Host bytes the jobs not FREE hold or will hold, under s_mx (nk_tex_scale_job_bytes for a scale). */
 static uint64_t s_host_bytes;
 
+/* A finished image's: the w x h source copy it is counted as (a scale's own figure, less the scratch
+ * it never makes) and its result. */
 static uint64_t job_host_bytes(int w, int h, int factor) {
     return (uint64_t)w * (uint64_t)h * 4u * (1u + (uint64_t)factor * (uint64_t)factor);
+}
+
+uint64_t nk_tex_scale_job_bytes(int w, int h, int factor) {
+    if (factor < 2 || factor > NK_TEX_SCALE_MAX || w <= 0 || h <= 0) return 0;
+    /* nk_tex_scale_image's padded source and xBRZ's padded result, live while the job runs */
+    const uint64_t padded = (uint64_t)(w + 2 * PAD) * (uint64_t)(h + 2 * PAD) * 4u *
+                            (1u + (uint64_t)factor * (uint64_t)factor);
+    return job_host_bytes(w, h, factor) + padded;
 }
 
 static void run_job(Job *j) {
@@ -292,6 +303,14 @@ static int worker(void *arg) {
     return 0;
 }
 
+int nk_tex_scale_worker_count(int logical_cpus) {
+    const int spare = logical_cpus - 2;
+    if (spare < NK_TEX_SCALE_WORKERS_MIN) return NK_TEX_SCALE_WORKERS_MIN;
+    return spare > NK_TEX_SCALE_WORKERS_MAX ? NK_TEX_SCALE_WORKERS_MAX : spare;
+}
+
+int nk_tex_scale_workers(void) { return s_started ? s_workers : 0; }
+
 static int ensure_started(void) {
     if (s_started) return 1;
     s_mx = SDL_CreateMutex();
@@ -300,23 +319,30 @@ static int ensure_started(void) {
     if (!s_mx || !s_work_cv || !s_idle_cv) return 0;
     s_started = 1;
     s_quit = 0;
-    for (int i = 0; i < WORKERS; i++) {
+    s_workers = 0;
+    const int want = nk_tex_scale_worker_count(SDL_GetNumLogicalCPUCores());
+    for (int i = 0; i < want; i++) {
         s_threads[i] = SDL_CreateThread(worker, "nk-texscale", NULL);
         if (!s_threads[i]) {
-            /* Without workers a queued job would never run: scale on the caller instead. */
-            fprintf(stderr, "TEX_SCALE: worker thread unavailable (%s); scaling on the renderer thread\n",
-                    SDL_GetError());
-            s_sync = 1;
+            /* The workers that started run every job; with none a queued job would never run, so
+             * the caller scales instead. */
+            fprintf(stderr, "TEX_SCALE: worker thread %d of %d unavailable (%s)%s\n", i + 1, want, SDL_GetError(),
+                    i ? "" : "; scaling on the renderer thread");
+            if (!i) s_sync = 1;
             break;
         }
+        s_workers++;
     }
+    if (s_workers > s_report_workers) s_report_workers = s_workers;
     return 1;
 }
 
 /* Room for a job holding `host` bytes, under s_mx: a free slot, and the jobs' host memory stays
  * within NK_TEX_SCALE_HOST_MB (one job is always accepted, so the largest copy can be made). The
  * one test for nk_tex_scale_can_submit and nk_tex_scale_submit, so a caller told there is room is
- * never refused (a refused retry would decode again on every hit). */
+ * never refused (a refused retry would decode again on every hit). A scale is counted with the
+ * scratch it makes while it runs (nk_tex_scale_job_bytes), so the cap bounds the memory however
+ * many workers run at once. */
 static Job *room_for(uint64_t host) {
     Job *j = oldest(JOB_FREE);
     if (!j || (s_host_bytes && s_host_bytes + host > ((uint64_t)NK_TEX_SCALE_HOST_MB << 20))) return NULL;
@@ -327,7 +353,8 @@ int nk_tex_scale_can_submit(int w, int h, int factor) {
     if (factor < 2 || factor > NK_TEX_SCALE_MAX || w <= 0 || h <= 0) return 0;
     if (!ensure_started()) return 0;
     SDL_LockMutex(s_mx);
-    const int room = room_for(job_host_bytes(w, h, factor)) != NULL;
+    /* A scale's figure, at least a finished image's: told yes, either submit is taken. */
+    const int room = room_for(nk_tex_scale_job_bytes(w, h, factor)) != NULL;
     SDL_UnlockMutex(s_mx);
     return room;
 }
@@ -337,7 +364,7 @@ int nk_tex_scale_submit(uint64_t serial, uint64_t hash, const uint32_t *rgba, in
     if (factor < 2 || factor > NK_TEX_SCALE_MAX || w <= 0 || h <= 0) return 0;
     if (!ensure_started()) return 0;
     SDL_LockMutex(s_mx);
-    const uint64_t host = job_host_bytes(w, h, factor);
+    const uint64_t host = nk_tex_scale_job_bytes(w, h, factor);
     Job *j = room_for(host);
     if (!j) {
         s_stats.refused_full++;
@@ -498,7 +525,7 @@ int nk_tex_scale_wait_work(NkTexScaleWorkFn run, uint32_t timeout_ms) {
 int nk_tex_scale_on_worker(void) {
     if (!s_started) return 0;
     const SDL_ThreadID me = SDL_GetCurrentThreadID();
-    for (int i = 0; i < WORKERS; i++)
+    for (int i = 0; i < s_workers; i++)
         if (s_threads[i] && SDL_GetThreadID(s_threads[i]) == me) return 1;
     return 0;
 }
@@ -559,10 +586,11 @@ void nk_tex_scale_shutdown(void) {
     s_quit = 1;
     SDL_BroadcastCondition(s_work_cv);
     SDL_UnlockMutex(s_mx);
-    for (int i = 0; i < WORKERS; i++) {
+    for (int i = 0; i < s_workers; i++) {
         if (s_threads[i]) SDL_WaitThread(s_threads[i], NULL);
         s_threads[i] = NULL;
     }
+    s_workers = 0;
     /* A work job's context is its owner's, which takes every one before this (the texture dump
      * does); one left here is said, never dropped in silence. */
     int untaken = 0;
@@ -597,10 +625,10 @@ void nk_tex_scale_report(void) {
     NkTexScaleStats st;
     nk_tex_scale_stats(&st);
     fprintf(stderr, "TEX_SCALE: exit (scaled=%llu, queue_full=%llu, discarded=%llu, budget_peak_mb=%llu, "
-                    "worker_ms=%llu)\n",
+                    "worker_ms=%llu, workers=%d)\n",
             (unsigned long long)st.scaled, (unsigned long long)st.refused_full,
             (unsigned long long)st.discarded, (unsigned long long)(st.budget_peak >> 20),
-            (unsigned long long)(st.scale_ns / 1000000ull));
+            (unsigned long long)(st.scale_ns / 1000000ull), s_report_workers);
 }
 
 /* ---- smart 2D filter ------------------------------------------------------------------- */

@@ -1885,8 +1885,8 @@ static bool xst_dump_count_tmp(const char *name, void *ctx) {
 }
 
 /* The exit at SR_EXIT_AT_VBLANK (hle_display.c) skips atexit and calls sr_texdump_exit_finish
- * before _Exit: with every level still held by the workers, that call must let both workers write
- * them all, count them and leave no temp file. The files are written by the two workers at once,
+ * before _Exit: with every level still held by the workers, that call must let the workers write
+ * them all, count them and leave no temp file. The files are written by the workers at once,
  * each through the encoder, so every one's CRCs are checked too. */
 #define XST_EXIT_LEVELS 20
 static int xst_cell_dump_exit(int f) {
@@ -1946,8 +1946,8 @@ done:
     return 1;
 }
 
-/* A run's end whose workers never finish: two jobs that block hold both workers, so the levels
- * the dump queues behind them cannot start. The end (sr_texdump_exit_finish) must not wait for
+/* A run's end whose workers never finish: one blocking job for each worker holds them all, so
+ * the levels the dump queues behind them cannot start. The end (sr_texdump_exit_finish) must not wait for
  * ever: it gives up after its bounded wait, says so, counts the levels it could not wait for and
  * clears the dump. The levels then run once the blockers let go (the files land late), and the
  * cell takes every job back so the pool is clean. */
@@ -1974,10 +1974,16 @@ static int xst_cell_dump_stuck(int f) {
     uint64_t spent = 0;
     unsigned dropped = 0;
     int blockers = 0;
-    for (int i = 0; i < 2; i++) blockers += nk_tex_scale_submit_work(xst_dump_blocker, NULL, 64u);
+    /* The first submit starts the pool, which tells how many workers there are to hold. */
+    blockers += nk_tex_scale_submit_work(xst_dump_blocker, NULL, 64u);
+    const int workers = nk_tex_scale_workers();
+    for (int i = 1; i < workers; i++) blockers += nk_tex_scale_submit_work(xst_dump_blocker, NULL, 64u);
     const uint64_t t0 = SDL_GetTicks();
-    while (SDL_GetAtomicInt(&s_xst_block_started) < 2 && SDL_GetTicks() - t0 < 5000u) SDL_Delay(1);
-    if (blockers != 2 || SDL_GetAtomicInt(&s_xst_block_started) != 2) { why = "the blockers did not hold both workers"; goto done; }
+    while (SDL_GetAtomicInt(&s_xst_block_started) < workers && SDL_GetTicks() - t0 < 5000u) SDL_Delay(1);
+    if (workers < 1 || blockers != workers || SDL_GetAtomicInt(&s_xst_block_started) != workers) {
+        why = "the blockers did not hold every worker";
+        goto done;
+    }
     if (!xst_dump_start(dir)) { why = "the dump did not start"; goto done; }
     for (int i = 0; i < XST_STUCK_LEVELS; i++) {
         xst_pattern(t, 701u + 2u * (uint32_t)i);
