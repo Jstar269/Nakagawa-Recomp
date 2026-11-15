@@ -1479,6 +1479,7 @@ static int cmd_wait_slot(SubmitSlot *slot, GeGpuReplayBoundaryKind boundary) {
     uint64_t wait_started = SDL_GetTicksNS();
     VKC(vkWaitForFences(s_dev, 1, &slot->fence, VK_TRUE, UINT64_MAX));
     uint64_t waited = SDL_GetTicksNS() - wait_started;
+    if (g_ace_on) ace_note_gpu_wait(waited);   /* the speed readout's GPU LIMITED verdict */
     ts_collect(slot);
     replay_note_wait(boundary, waited);
     if (perf_started) {
@@ -1524,6 +1525,7 @@ static int cmd_drain(GeGpuReplayBoundaryKind boundary) {
     uint64_t wait_started = SDL_GetTicksNS();
     VKC(vkWaitForFences(s_dev, count, fences, VK_TRUE, UINT64_MAX));
     uint64_t waited = SDL_GetTicksNS() - wait_started;
+    if (g_ace_on) ace_note_gpu_wait(waited);   /* the speed readout's GPU LIMITED verdict */
     replay_note_wait(boundary, waited);
     if (perf_started) {
         sr_perf_vulkan_wait(perf_started, wait_reason == SR_PERF_GE_DEPTH_READBACK ||
@@ -1861,8 +1863,10 @@ static int write_guest_fb(const uint32_t *src, uint32_t fba, uint32_t stride, ui
 static int readback_finish(ReadbackSlot *r, int wait, int allow_commit) {
     if (!r->pending) return 1;
     uint64_t wait_started = wait ? sr_perf_now_ns() : 0;
+    const uint64_t ace_from = wait && g_ace_on ? SDL_GetTicksNS() : 0u;
     VkResult vr = wait ? vkWaitForFences(s_dev, 1, &r->fence, VK_TRUE, UINT64_MAX)
                        : vkGetFenceStatus(s_dev, r->fence);
+    if (wait && g_ace_on) ace_note_gpu_wait(SDL_GetTicksNS() - ace_from);
     if (wait && wait_started) {
         sr_perf_vulkan_wait(wait_started, 1);
         sr_perf_ge_wait(wait_started, SR_PERF_GE_TARGET_READBACK_TRANSITION);

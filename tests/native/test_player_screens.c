@@ -48,7 +48,7 @@ typedef struct {
     const char *const *labels;
     int count;
 } EnhancedWords;
-static const char *const k_enhanced_ssaa_labels[] = {"2x", "4x", "Off"};
+static const char *const k_enhanced_ssaa_labels[] = {"2x", "4x", "4x anyway", "Off"};
 static const char *const k_enhanced_texscale_labels[] = {"2x", "3x", "4x", "5x", "6x", "Off"};
 #define ENHANCED_WORDS(words) {(words), (int)(sizeof(words) / sizeof((words)[0]))}
 static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
@@ -84,6 +84,8 @@ static const char *const k_enhanced_title_modes[] = {"Library (Enhanced)", "Auth
    keeps the fixture's) and the play mode (NULL keeps the case's). */
 static const char *g_enhanced_value[PLAYER_PART_COUNT];
 static const char *g_enhanced_mode;
+/* A part's sentence instead of the fixture's (NULL keeps it): Supersampling's warning. */
+static const char *g_enhanced_sentence[PLAYER_PART_COUNT];
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
@@ -463,7 +465,8 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
             settings.enhanced_rows[i].name = k_enhanced_parts[i].name;
             settings.enhanced_rows[i].value =
                 title && g_enhanced_value[i] == NULL ? followed[i] : value;
-            settings.enhanced_rows[i].sentence = k_enhanced_parts[i].sentence;
+            settings.enhanced_rows[i].sentence = g_enhanced_sentence[i] != NULL
+                ? g_enhanced_sentence[i] : k_enhanced_parts[i].sentence;
             settings.enhanced_rows[i].on = strcmp(value, "Off") != 0;
             CHECK(k_enhanced_words[i].count > 0,
                   "every Settings > Enhanced part has its words in this test");
@@ -5056,6 +5059,60 @@ static void test_texture_scaling_rows(void) {
     g_enhanced_mode = NULL;
 }
 
+/* Supersampling's guard (owner, 2026-11-15): at a render scale of 3x or 4x the row with 4x picked
+   says what it costs and that games use 2x (PLAYER_SSAA_WARNING), and with 4x anyway the cost line
+   (PLAYER_SSAA_ANYWAY_SENTENCE). On Settings > Enhanced and on a game's own page, at 960 x 540,
+   960 x 544 and 1280 x 720 and every text size up to Larger (150%), each is drawn whole, never cut
+   to an ellipsis, and the row names its value. */
+static void test_ssaa_warning_rows(void) {
+    static char dump[CASE_DUMP_CAP];
+    static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_TITLE};
+    static const struct { int w; int h; } sizes[] = {{960, 540}, {960, 544}, {1280, 720}};
+    static const int text_sizes[] = {100, 125, 150};
+    static const struct {
+        const char *value;
+        const char *sentence;
+        const char *needle;
+    } cases[] = {
+        {"4x", PLAYER_SSAA_WARNING, "\"SUPERSAMPLING: 4X\""},
+        {"4x anyway", PLAYER_SSAA_ANYWAY_SENTENCE, "\"SUPERSAMPLING: 4X ANYWAY\""},
+    };
+    /* Words from the start, the middle and the end of both sentences: a cut sentence loses one. */
+    static const char *const ends[] = {"About", "graphics", "stutter.", "anyway."};
+    int saved = g_flow_text_size_pct;
+    memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+    memset(g_enhanced_sentence, 0, sizeof(g_enhanced_sentence));
+    g_enhanced_mode = NULL;
+    for (size_t k = 0u; k < sizeof(cases) / sizeof(cases[0]); ++k) {
+        g_enhanced_value[PLAYER_PART_SSAA] = cases[k].value;
+        g_enhanced_sentence[PLAYER_PART_SSAA] = cases[k].sentence;
+        for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
+            char message[200];
+            (void)snprintf(message, sizeof(message), "page %d: the Supersampling row reads %s", (int)g,
+                           cases[k].value);
+            CHECK(dump_flow_case_sized(pages[g], 1600, 3200, dump, sizeof(dump)) &&
+                      strstr(dump, cases[k].needle) != NULL,
+                  message);
+            for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+                g_flow_text_size_pct = text_sizes[t];
+                for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+                    (void)snprintf(message, sizeof(message),
+                                   "page %d with Supersampling %s draws its sentence whole at %d x %d, "
+                                   "%d%% text",
+                                   (int)g, cases[k].value, sizes[s].w, sizes[s].h, text_sizes[t]);
+                    CHECK(flow_case_text_whole(pages[g], sizes[s].w, sizes[s].h, FLOW_ID_CARD, ends,
+                                               sizeof(ends) / sizeof(ends[0])),
+                          message);
+                }
+            }
+            g_flow_text_size_pct = saved;
+        }
+    }
+    g_flow_text_size_pct = saved;
+    memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+    memset(g_enhanced_sentence, 0, sizeof(g_enhanced_sentence));
+}
+
 static void test_refresh_advice_classifier(void) {
     static const double silent[] = {60.0, 120.0, 180.0, 240.0, 59.94, 119.88, 179.82,
                                     60000.0 / 1001.0, 59.9401, 0.0, -1.0};
@@ -7978,6 +8035,7 @@ int main(int argc, char **argv) {
     test_library_find_filter_and_cap();
     test_nickname_keyboard();
     test_texture_scaling_rows();
+    test_ssaa_warning_rows();
     CHECK(build_library_golden(library, sizeof(library), &library_size),
           "build Library screen dumps");
     CHECK(build_title_golden(title, sizeof(title), &title_size),

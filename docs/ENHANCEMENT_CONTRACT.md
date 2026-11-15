@@ -708,7 +708,8 @@ line may leave out: a missing `mips`, `stick`, `load`, `depth`, `ssaa`, `peak`, 
 `ssaa=2|4`, `peak=limit`, `glyphs=on`, `texpack=on`, `texscale=2..6` and `smart2d=on` do not), the launcher writes
 `;mips=on` for an Enhanced or Ace
 launch with that part on, `;load=fast`, `;shadow=soft` and `;cull=on` only for an Ace launch with that part on,
-`;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with supersampling on, `;peak=limit` for an Enhanced or Ace
+`;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with supersampling on (the factor after section 10.21's 4x
+guard), `;peak=limit` for an Enhanced or Ace
 launch with the Unclipped sound part on, `;texpack=on` for an Enhanced or Ace
 launch with the Texture pack part on for a title that has a pack, and `;texscale=<factor>` and `;smart2d=on` for an
 Enhanced or Ace launch with the Texture scaling or the Smart 2D filter part on, and no launcher writes `depth`
@@ -773,6 +774,18 @@ the device is created with no feature outside Ace.
   11.1 names as already guest-visible; the other items are host-only unless section 11 admits them.
 - **Host work:** the detector and the readout count flips, draws and host waits; their cost runs on the scheduler
   thread like any renderer cost.
+- **PC LIMITED and GPU LIMITED (#2623).** The speed readout judges each second of wall time. A second is limited when a
+  VBLANK slot was skipped, or when the scheduler idled under 2 % of it while frames came slower than the frame-rate
+  class allows (`ace_readout_judge` in `src/rt/ace.c`). A limited second reads GPU LIMITED when the scheduler's
+  thread spent at least as long blocked on GPU fences as the second fell behind, so that without those waits the
+  game would have kept up; any other limited second reads PC LIMITED (the CPU, or anything else on the host). How far
+  a second fell behind is the larger of its skipped slots (1001/60 ms each) and, against a class of k VBLANKs a frame,
+  the second's length less k VBLANKs for each new frame (`ace_readout_behind_ns`). The GPU waits are measured on the
+  scheduler's thread, which also replays the GE and presents: the GE renderer's fence waits (a submission slot
+  reused, a drain at a CPU-visible boundary, a readback) and the presenter's wait for its frame's fence
+  (`ace_note_gpu_wait`). They are read only by the readout and the report, never by the guest. Both verdicts use
+  the warning colour, and the report's `pc_limited_seconds` counts both, with `gpu_limited_seconds` the GPU LIMITED
+  ones. `ace-selftest` pins the rule with synthetic windows and through the feed.
 - **Pixels:** texture filtering (anisotropic, for transformed draws with linear minification) changes framebuffer
   pixels, and every present commits the frame to guest VRAM, so a game that copies its screen (a save picture) keeps
   the filtered picture: the same class as a render scale above 1x, and the launcher says so. The launch notice, the
@@ -2191,10 +2204,25 @@ presentation-only change (section 2.2), in the render-scale class: it changes th
 what the guest draws into, reads or waits for. The code is the comment at `s_ssaa` in
 `src/rt/gpu_sdl3vk/ge_gpu.c`.
 
-- **Setting.** Settings > Enhanced offers **Supersampling** (2x, 4x or Off), for the library or for one game
-  (section 10.5), and the launch line carries it as `ssaa=2` or `ssaa=4` for an Enhanced or Ace launch with it
+- **Setting.** Settings > Enhanced offers **Supersampling** (2x, 4x, 4x anyway or Off), for the library or for one
+  game (section 10.5), and the launch line carries it as `ssaa=2` or `ssaa=4` for an Enhanced or Ace launch with it
   on (section 10.1); a missing key or `ssaa=off` is off. It needs no `tier=ace`. It is off in a fresh settings
   file and in no graphics preset, because of its cost (below): a preset leaves it as it is. It has no other switch.
+- **The 4x guard.** 4x at a render scale of 3x or 4x makes the twin 6144 x 3264 or 8192 x 4352. On an RTX 3080 at
+  render scale 4x it took about 9.4 ms of GPU time a frame in Hot Shots Tennis, and 9.6 % of frames took over
+  20 ms (1.5 % without supersampling). So the player launches plain 4x at those render scales as 2x, unless the
+  player picked **4x anyway** (owner decision, 2026-11-15, #2623). The render scale is the session's: the graphics
+  preset's where one is chosen, else the Resolution row's. The rule is applied once, where the player resolves a
+  title's parts (`player_play_resolve` and `player_ssaa_factor` in `src/player/player_state.c`), so the launch line,
+  the pages and the player's log agree; the runtime is unchanged and runs whatever factor the line names. The row
+  steps 2x, 4x, 4x anyway, Off, and `settings.json` keeps 4x anyway as `"4-anyway"`, for the library and for each
+  game. Where plain 4x is shown at those render scales the row's sentence warns: "About 16 times the graphics work
+  at this resolution; may stutter. Runs at 2x; pick 4x anyway."; with 4x anyway it reads "About 16 times the
+  graphics work at this resolution; may stutter. You chose 4x anyway." A settings file from before the guard keeps
+  its `"4"`, which is plain 4x: it launches as 2x at render scale 3x or 4x and the row warns until 4x anyway is
+  picked. A launch it lowers prints `[PLAYER] Supersampling 4x runs at 2x at render scale <n>x: 4x anyway is not
+  chosen`. `test_ssaa_guard` (`test_player_state`), `test_ssaa_warning_rows` (`test_player_screens`) and
+  `test_next_ui_enhanced_page_warns_for_supersampling_4x_at_4x` (`test_player_ui.py`) pin it.
 - **How.** It runs the host twin (section 10.11) at the render scale times the factor; the twin keeps the authentic
   colour unless full colour was asked for. At each present the twin is averaged down to the render scale by
   halving blits with linear filtering: one at 2x, two at 4x. Each halving step weighs four samples equally and
@@ -2245,7 +2273,7 @@ what the guest draws into, reads or waits for. The code is the comment at `s_ssa
   and 2 and at 2x and 4x against it, twin-scene, ssaa-sprite at 2x and 4x (render scale 1) and at 4x (render
   scale 2), the whole suite at 2x and at 4x, twin-gate with it on, and ssaa-limit with a forced memory budget and
   a forced largest side. `ace-selftest` checks the key's parsing,
-  order, report and words; `test_player_state` the setting, its presets and its launch line.
+  order, report and words; `test_player_state` the setting, its presets, its launch line and the 4x guard.
 
 ### 10.22. Unclipped SAS Mixes Through a True-Peak Limiter (`peak=limit`)
 

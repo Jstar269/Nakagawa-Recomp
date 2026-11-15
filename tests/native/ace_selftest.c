@@ -2031,6 +2031,121 @@ static void cell_readout(void) {
           strcmp(v.text, "\xE2\x96\xB2 \xE2\x80\x94  20 FPS  PC LIMITED") == 0, "limited, no class: '%s'", v.text);
 }
 
+/* GPU LIMITED (ace.h, ace_readout_judge): a limited window whose GPU waits are at least as long as
+ * it fell behind names the GPU; shorter waits leave it PC LIMITED, and waits alone never mark a
+ * window that kept up. Synthetic timing: a second at 26 of 30 FPS with 4 skipped slots fell
+ * behind by 1 s - 26 * 2 VBLANKs = 132.5 ms, more than its 66.7 ms of skipped slots.
+ *
+ * MUTANT: gpu_limited ignores the wait (always 0) -- the 300 ms case reads PC LIMITED.
+ * MUTANT: compares the wait with the skipped slots only -- the 100 ms case reads GPU LIMITED.
+ * MUTANT: drop "&& v.pc_limited" -- the on-time window with 600 ms of waits is marked. */
+static void cell_readout_gpu_limited(void) {
+    AceReadoutState s;
+    AceReadoutView v;
+    AceWindow w;
+    const double vblank_ns = 1e9 * 1001.0 / 60000.0;
+
+    w = window(26, 0.0, 4, ACE_RATE_K2, 1, ACE_RATE_K2);
+    uint64_t behind = ace_readout_behind_ns(&w, 2);
+    uint64_t want = (uint64_t)(1e9 - 26.0 * 2.0 * vblank_ns);
+    CHECK(behind + 1u >= want && behind <= want + 1u, "26 of 30 FPS fell %llu ns behind, not %llu",
+          (unsigned long long)behind, (unsigned long long)want);
+    CHECK(ace_readout_behind_ns(&w, 0) == (uint64_t)(4.0 * vblank_ns),
+          "without a class only the 4 skipped slots count: %llu", (unsigned long long)ace_readout_behind_ns(&w, 0));
+
+    ace_readout_reset(&s);
+    w.gpu_wait_ns = 300000000ull;
+    ace_readout_judge(&s, &w, &v);
+    CHECK(v.pc_limited && v.gpu_limited && v.speed_pct == 86 &&
+          strcmp(v.text, "\xE2\x96\xB2 86%  26 FPS  GPU LIMITED") == 0, "300 ms of GPU waits: '%s'", v.text);
+
+    ace_readout_reset(&s);
+    w.gpu_wait_ns = 100000000ull;
+    ace_readout_judge(&s, &w, &v);
+    CHECK(v.pc_limited && !v.gpu_limited &&
+          strcmp(v.text, "\xE2\x96\xB2 86%  26 FPS  PC LIMITED") == 0, "100 ms of GPU waits: '%s'", v.text);
+
+    /* The boundary: waits exactly as long as the window fell behind name the GPU; 1 ns less does not. */
+    ace_readout_reset(&s);
+    w.gpu_wait_ns = behind;
+    ace_readout_judge(&s, &w, &v);
+    CHECK(v.gpu_limited, "waits equal to the shortfall: '%s'", v.text);
+    ace_readout_reset(&s);
+    w.gpu_wait_ns = behind - 1u;
+    ace_readout_judge(&s, &w, &v);
+    CHECK(v.pc_limited && !v.gpu_limited, "1 ns short of the shortfall: '%s'", v.text);
+
+    /* A window on time is never limited, however long it waited on the GPU. */
+    ace_readout_reset(&s);
+    w = window(30, 0.0, 0, ACE_RATE_K2, 1, ACE_RATE_K2);
+    w.gpu_wait_ns = 600000000ull;
+    ace_readout_judge(&s, &w, &v);
+    CHECK(!v.pc_limited && !v.gpu_limited && strcmp(v.text, "100%  30 FPS") == 0,
+          "on time with GPU waits: '%s'", v.text);
+
+    /* Before any class: 3 skipped slots are 50 ms behind; 60 ms of waits name the GPU. */
+    ace_readout_reset(&s);
+    w = window(20, 0.0, 3, ACE_RATE_NONE, 0, ACE_RATE_NONE);
+    w.gpu_wait_ns = 60000000ull;
+    ace_readout_judge(&s, &w, &v);
+    CHECK(v.gpu_limited && strcmp(v.text, "\xE2\x96\xB2 \xE2\x80\x94  20 FPS  GPU LIMITED") == 0,
+          "GPU limited, no class: '%s'", v.text);
+}
+
+/* The feed: ace_note_gpu_wait reaches the window ace_flip judges, and the report counts the second
+ * among both gpu_limited_seconds and pc_limited_seconds. With Enhanced off it counts nothing.
+ *
+ * MUTANT: ace_note_gpu_wait adds nothing -- the slow second reads PC LIMITED and the report 0.
+ * MUTANT: the window keeps its GPU waits after it is judged -- the on-time second after it,
+ *   with no waits of its own, still carries 300 ms and the counter grows on. */
+static void cell_readout_gpu_feed(void) {
+    AceReadoutView v;
+    AceCounters c;
+    char json[ACE_REPORT_MAX];
+    (void)ace_init_spec(k_good, NULL);
+    uint64_t ns = 0;
+    uint32_t vc = 1;
+    for (; vc <= 300; vc++) {             /* five seconds at 30 FPS: the class settles at 30 Hz */
+        if (vc % 2 == 0) ace_note_target_draw(0x0u);
+        ns += 16683333u;
+        ace_note_host_wait(8000000u);
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+    }
+    CHECK(ace_readout_view(&v) && strcmp(v.text, "100%  30 FPS") == 0, "before: '%s'", v.text);
+    /* A second where every new frame waits 20 ms on the GPU and comes a VBLANK late: 20 FPS,
+     * a skipped slot each frame, no idle. */
+    uint64_t end_ns = ns + 1100000000ull;
+    while (ns < end_ns) {
+        ace_note_target_draw(0x0u);
+        ace_note_gpu_wait(20000000u);
+        ace_note_skipped_slots(1u);
+        vc += 3u;
+        ns += 3u * 16683333u;
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+    }
+    CHECK(ace_readout_view(&v) && v.gpu_limited && strstr(v.text, "GPU LIMITED") != NULL,
+          "a second waiting on the GPU: '%s'", v.text);
+    ace_counters(&c);
+    CHECK(c.gpu_wait_ns >= 20000000ull * 20u, "the counter holds the waits: %llu",
+          (unsigned long long)c.gpu_wait_ns);
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"gpu_limited_seconds\": 0,") == NULL &&
+              strstr(json, "\"pc_limited_seconds\": 0\n") == NULL,
+          "the report counts the GPU LIMITED second in both:\n%s", json);
+    for (uint32_t end = vc + 150; vc < end; vc++) {    /* back on time, no waits */
+        if (vc % 2 == 0) ace_note_target_draw(0x0u);
+        ns += 16683333u;
+        ace_note_host_wait(8000000u);
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+    }
+    CHECK(ace_readout_view(&v) && !v.pc_limited && !v.gpu_limited, "on time again: '%s'", v.text);
+
+    /* Enhanced off: nothing is counted. */
+    (void)ace_init_spec("off", NULL);
+    ace_note_gpu_wait(5000000u);
+    ace_counters(&c);
+    CHECK(c.gpu_wait_ns == 0, "with Enhanced off the wait is not counted: %llu", (unsigned long long)c.gpu_wait_ns);
+}
+
 /* ---- the per-run report --------------------------------------------------------------------- */
 
 /* Fast forward (ENHANCEMENT_CONTRACT.md section 10.15): a second of wall time at 3x holds three
@@ -2887,6 +3002,8 @@ int main(int argc, char **argv) {
     cell_detector();
     cell_feed();
     cell_readout();
+    cell_readout_gpu_limited();
+    cell_readout_gpu_feed();
     cell_readout_smooth();
     cell_motion();
     cell_fast_forward();

@@ -1055,6 +1055,13 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
                 row->on = false;
             }
         }
+        /* Supersampling at a render scale of 3x or 4x (owner, 2026-11-15): where 4x is picked,
+           the row says what it costs and that games use 2x until 4x anyway is picked. */
+        if (p == PLAYER_PART_SSAA) {
+            int own = title >= 0 ? player_app_title_part(app, title, p) : -1;
+            row->sentence = player_ssaa_sentence(own >= 0 ? own : library,
+                                                 player_settings_enhanced_render_scale(settings));
+        }
         if (model->enhanced_on) {
             const char *unavailable =
                 player_enhanced_part_unavailable_label(p, row->on, smooth_on);
@@ -1075,6 +1082,11 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
                         (size_t)used < sizeof(line); p++) {
             used += snprintf(line + used, sizeof(line) - (size_t)used, "|%s=%s",
                              player_enhanced_part(p)->key, model->enhanced_rows[p].value);
+        }
+        /* Supersampling's sentence, which warns at a render scale of 3x or 4x. */
+        if (used > 0 && (size_t)used < sizeof(line) && model->enhanced_row_count > PLAYER_PART_SSAA) {
+            used += snprintf(line + used, sizeof(line) - (size_t)used, "|ssaa_sentence=%s",
+                             model->enhanced_rows[PLAYER_PART_SSAA].sentence);
         }
         if (strcmp(line, player->enhanced_reported) != 0) {
             snprintf(player->enhanced_reported, sizeof(player->enhanced_reported), "%s", line);

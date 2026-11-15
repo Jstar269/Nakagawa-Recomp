@@ -1211,9 +1211,11 @@ static const char *const k_part_tess_labels[] = {"2x", "3x", "4x", "Off"};
 static const char *const k_part_tess_words[] = {"2", "3", "4", "off"};
 static const char *const k_part_wide_words[] = {"fill", "off"};
 static const char *const k_part_load_words[] = {"fast", "off"};
-static const int k_part_ssaa_values[] = {2, 4, 0};
-static const char *const k_part_ssaa_labels[] = {"2x", "4x", "Off"};
-static const char *const k_part_ssaa_words[] = {"2", "4", "off"};
+/* 4x anyway follows 4x, so a row that steps to 4x and shows the warning steps next to the choice
+   that keeps it (player_ssaa_factor). A file with "4" and no "4-anyway" is plain 4x. */
+static const int k_part_ssaa_values[] = {2, 4, PLAYER_SSAA_4_ANYWAY, 0};
+static const char *const k_part_ssaa_labels[] = {"2x", "4x", "4x anyway", "Off"};
+static const char *const k_part_ssaa_words[] = {"2", "4", "4-anyway", "off"};
 static const char *const k_part_pad_words[] = {"late", "off"};
 static const char *const k_part_shadow_words[] = {"soft", "off"};
 static const char *const k_part_peak_words[] = {"limit", "off"};
@@ -1277,10 +1279,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
      "Shows 16-bit games in full colour, without dither. Uses more memory.",
      2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
     /* Host presentation only (contract 10.21): the picture the window shows, never guest memory.
-       Off by default and in every preset: it multiplies the GPU's work by 4 or 16. */
+       Off by default and in every preset: it multiplies the GPU's work by 4 or 16. At a render
+       scale of 3x or 4x the row warns and plain 4x runs at 2x (player_ssaa_sentence). */
     {"ssaa", "Supersampling",
      "Smooths jagged edges. 2x takes 4 times the GPU work, 4x 16 times.",
-     3, k_part_ssaa_values, k_part_ssaa_labels, k_part_ssaa_words, 0},
+     4, k_part_ssaa_values, k_part_ssaa_labels, k_part_ssaa_words, 0},
     /* A guest-visible item (contract 11.3.8): every present commits the smoothed frame to guest VRAM,
        as texture filtering does. Off by default until its "nothing worse" runs exist (11.2 item 4),
        with its own off switch in the library and each title (item 2). */
@@ -3368,6 +3371,25 @@ const PlayerTitlePlay *player_settings_title_play(const PlayerSettings *settings
     return index >= 0 ? &settings->title_play[index] : NULL;
 }
 
+int player_settings_enhanced_render_scale(const PlayerSettings *settings) {
+    if (!settings) return 1;
+    const PlayerGraphicsPresetRow *row = player_graphics_preset_row(settings->graphics_preset);
+    return row ? row->resolution_scale : settings->resolution_scale;
+}
+
+int player_ssaa_factor(int value, int render_scale) {
+    if (value == PLAYER_SSAA_4_ANYWAY) return 4;
+    if (value == 4) return render_scale >= PLAYER_SSAA_GUARD_SCALE ? 2 : 4;
+    return value == 2 ? 2 : 0;
+}
+
+const char *player_ssaa_sentence(int value, int render_scale) {
+    if (render_scale >= PLAYER_SSAA_GUARD_SCALE && value == 4) return PLAYER_SSAA_WARNING;
+    if (render_scale >= PLAYER_SSAA_GUARD_SCALE && value == PLAYER_SSAA_4_ANYWAY)
+        return PLAYER_SSAA_ANYWAY_SENTENCE;
+    return k_enhanced_parts[PLAYER_PART_SSAA].sentence;
+}
+
 void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
                          PlayerPlayResolved *out) {
     if (!out) return;
@@ -3389,6 +3411,14 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
         int value = title && title->part[p] >= 0 ? title->part[p]
                                                  : player_settings_library_part(settings, p);
         out->part[p] = enhanced_part_value_index(p, value) >= 0 ? value : 0;
+    }
+    /* Supersampling's guard (owner, 2026-11-15): the factor the launch uses at the render scale
+       the session runs at. Here, once, so the launch line, the pages and the log agree. */
+    out->render_scale = player_settings_enhanced_render_scale(settings);
+    {
+        const int chosen = out->part[PLAYER_PART_SSAA];
+        out->part[PLAYER_PART_SSAA] = player_ssaa_factor(chosen, out->render_scale);
+        out->ssaa_lowered = chosen == 4 && out->part[PLAYER_PART_SSAA] == 2;
     }
     /* A texture pack is the title's own: the part does nothing for a title with none. */
     if (!player_settings_title_pack(settings, disc_id)) out->part[PLAYER_PART_TEXPACK] = 0;
@@ -5960,6 +5990,10 @@ void player_launch_work_run(PlayerLaunchWork *work) {
                                    work->headless_accept_presented_frames > 0u, &session->config,
                                    &ace);
         work->play_mode = ace.on ? ace.mode : PLAYER_PLAY_AUTHENTIC;
+        if (ace.on && ace.ssaa_lowered) {
+            printf("[PLAYER] Supersampling 4x runs at 2x at render scale %dx: 4x anyway is not "
+                   "chosen\n", ace.render_scale);
+        }
         /* The graphics preset (#2150) overlays the display rows for Enhanced and Ace only:
            an Authentic run keeps the user's own rows, since a render scale above 1x reaches
            guest VRAM (docs/ENHANCEMENT_CONTRACT.md 10.3). */

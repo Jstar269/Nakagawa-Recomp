@@ -10023,12 +10023,13 @@ static void test_play_mode_ssaa_settings(void) {
     player_app_settings_init_default(&app->settings);
     const PlayerEnhancedPartInfo *info = player_enhanced_part(PLAYER_PART_SSAA);
     assert(app->settings.enhanced.part[PLAYER_PART_SSAA] == 0);
-    assert(info->fresh == 0 && info->value_count == 3);
+    assert(info->fresh == 0 && info->value_count == 4);
     assert(strcmp(info->key, "ssaa") == 0);
     assert(strcmp(info->name, "Supersampling") == 0);
     assert(strstr(info->sentence, "GPU work") != NULL);
     assert(strcmp(player_enhanced_part_label(PLAYER_PART_SSAA, 2), "2x") == 0);
     assert(strcmp(player_enhanced_part_label(PLAYER_PART_SSAA, 4), "4x") == 0);
+    assert(strcmp(player_enhanced_part_label(PLAYER_PART_SSAA, PLAYER_SSAA_4_ANYWAY), "4x anyway") == 0);
     assert(strcmp(player_enhanced_part_label(PLAYER_PART_SSAA, 0), "Off") == 0);
     app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
     for (int preset = PLAYER_PRESET_LOW; preset < PLAYER_PRESET_COUNT; preset++) {
@@ -10102,6 +10103,146 @@ static void test_play_mode_ssaa_settings(void) {
     free(app);
     printf("PASS: supersampling is off by default and in every preset, read and saved at both levels, "
            "and Enhanced and Ace launches carry it\n");
+}
+
+/* Supersampling's guard (owner, 2026-11-15; contract 10.21): 4x at a render scale of 3x or 4x makes
+ * the twin 6144 x 3264 or 8192 x 4352, about 16 times the graphics work of the render scale alone,
+ * and stuttered on an RTX 3080. Plain 4x there launches ssaa=2; "4x anyway", a value of its own kept
+ * for the library and for each title, launches ssaa=4 at any scale. The render scale is the session's:
+ * a graphics preset's where one is chosen, else the Resolution row's. A file from before the guard
+ * with "4" is plain 4x. The row's sentence warns where plain 4x is picked at those scales.
+ *
+ * Fails before: there is no PLAYER_SSAA_4_ANYWAY or player_ssaa_factor, and a library "4" at render
+ * scale 4 launches ";ssaa=4". */
+static void test_ssaa_guard(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800], why[64];
+    PlayerPlayResolved r;
+    AceConfig c;
+    const PlayerEnhancedPartInfo *info = player_enhanced_part(PLAYER_PART_SSAA);
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cssaa_guard_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    NkRuntimeConfig *config = (NkRuntimeConfig *)calloc(1, sizeof(NkRuntimeConfig));
+    assert(app && back && config && info);
+
+    /* The rule, at every render scale. */
+    for (int scale = 1; scale <= 4; scale++) {
+        assert(player_ssaa_factor(0, scale) == 0);
+        assert(player_ssaa_factor(2, scale) == 2);
+        assert(player_ssaa_factor(4, scale) == (scale >= 3 ? 2 : 4));
+        assert(player_ssaa_factor(PLAYER_SSAA_4_ANYWAY, scale) == 4);
+        /* The row warns only where plain 4x is lowered, and names the cost where 4x anyway keeps it. */
+        assert(strcmp(player_ssaa_sentence(4, scale), scale >= 3 ? PLAYER_SSAA_WARNING : info->sentence) == 0);
+        assert(strcmp(player_ssaa_sentence(PLAYER_SSAA_4_ANYWAY, scale),
+                      scale >= 3 ? PLAYER_SSAA_ANYWAY_SENTENCE : info->sentence) == 0);
+        assert(strcmp(player_ssaa_sentence(2, scale), info->sentence) == 0);
+        assert(strcmp(player_ssaa_sentence(0, scale), info->sentence) == 0);
+    }
+    assert(strcmp(PLAYER_SSAA_WARNING, "About 16 times the graphics work at this resolution; may stutter. "
+                                       "Runs at 2x; pick 4x anyway.") == 0);
+    /* As long as the longest sentence a row has (Finer patches'), so it keeps to two lines. */
+    assert(strlen(PLAYER_SSAA_WARNING) <= strlen(player_enhanced_part(PLAYER_PART_TESS)->sentence));
+    assert(strlen(PLAYER_SSAA_ANYWAY_SENTENCE) <= strlen(player_enhanced_part(PLAYER_PART_TESS)->sentence));
+
+    /* A file from before the guard: the library at 4x, the Resolution row at 4x. One title has 4x
+       anyway, one its own plain 4x, one is Ace, one Authentic; TEST96100 follows the library. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"resolution_scale\": 4,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"ssaa\": \"4\"},"
+        " \"title_play\": {\"TEST96101\": {\"ssaa\": \"4-anyway\"},"
+        " \"TEST96102\": {\"ssaa\": \"4\"},"
+        " \"TEST96103\": {\"mode\": \"ace\"},"
+        " \"TEST96104\": {\"mode\": \"authentic\", \"ssaa\": \"4-anyway\"}}}");
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.resolution_scale == 4 && app->settings.enhanced.part[PLAYER_PART_SSAA] == 4);
+    assert(player_settings_enhanced_render_scale(&app->settings) == 4);
+    /* The launch (player_launch_work_run's call): the library's plain 4x runs at 2x. */
+    player_play_config_session(&app->settings, "TEST96100", false, false, config, &r);
+    assert(r.on && r.render_scale == 4 && r.part[PLAYER_PART_SSAA] == 2 && r.ssaa_lowered);
+    assert(strcmp(config->ace_spec + strlen(config->ace_spec) - 7, ";ssaa=2") == 0);
+    assert(ace_parse(config->ace_spec, &c, why, sizeof(why)) == 1 && c.on && c.ssaa == 2);
+    /* 4x anyway keeps 4x. */
+    player_play_config_session(&app->settings, "TEST96101", false, false, config, &r);
+    assert(r.on && r.part[PLAYER_PART_SSAA] == 4 && !r.ssaa_lowered);
+    assert(ace_parse(config->ace_spec, &c, why, sizeof(why)) == 1 && c.ssaa == 4);
+    /* A title's own plain 4x is lowered too, and Ace is lowered as Enhanced is. */
+    player_play_config_session(&app->settings, "TEST96102", false, false, config, &r);
+    assert(r.on && r.part[PLAYER_PART_SSAA] == 2 && r.ssaa_lowered);
+    player_play_config_session(&app->settings, "TEST96103", true, false, config, &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_SSAA] == 2 &&
+           strstr(config->ace_spec, "tier=ace;") != NULL &&
+           ace_parse(config->ace_spec, &c, why, sizeof(why)) == 1 && c.ssaa == 2);
+    /* Authentic carries no line, 4x anyway or not. */
+    player_play_config_session(&app->settings, "TEST96104", false, false, config, &r);
+    assert(!r.on && strcmp(config->ace_spec, "off") == 0);
+
+    /* The scale decides: 3x lowers, 2x and 1x keep 4x. */
+    app->settings.resolution_scale = 3;
+    player_play_resolve(&app->settings, "TEST96100", &r);
+    assert(r.part[PLAYER_PART_SSAA] == 2 && r.ssaa_lowered);
+    app->settings.resolution_scale = 2;
+    player_play_resolve(&app->settings, "TEST96100", &r);
+    assert(r.part[PLAYER_PART_SSAA] == 4 && !r.ssaa_lowered);
+    app->settings.resolution_scale = 1;
+    player_play_resolve(&app->settings, "TEST96100", &r);
+    assert(r.part[PLAYER_PART_SSAA] == 4 && !r.ssaa_lowered);
+    /* A preset's scale is the session's: High (4x) over a 1x row lowers; Medium (2x) over a 4x row keeps. */
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_HIGH);
+    assert(player_settings_enhanced_render_scale(&app->settings) == 4);
+    player_play_resolve(&app->settings, "TEST96100", &r);
+    assert(r.part[PLAYER_PART_SSAA] == 2 && r.ssaa_lowered);
+    app->settings.resolution_scale = 4;
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_MEDIUM);
+    player_play_resolve(&app->settings, "TEST96100", &r);
+    assert(r.render_scale == 2 && r.part[PLAYER_PART_SSAA] == 4 && !r.ssaa_lowered);
+    app->settings.graphics_preset = PLAYER_PRESET_CUSTOM;
+
+    /* Saved at both levels and read back: the library's "4", the title's "4-anyway". */
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"twin\": \"off\", \"ssaa\": \"4\", \"mips\"") != NULL);
+        assert(strstr(saved, "\"TEST96101\": {\"mode\": \"library\", \"ssaa\": \"4-anyway\"}") != NULL);
+        free(saved);
+    }
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_SSAA] == 4);
+    player_play_resolve(&back->settings, "TEST96101", &r);
+    assert(r.part[PLAYER_PART_SSAA] == 4 && !r.ssaa_lowered);
+    player_play_resolve(&back->settings, "TEST96100", &r);
+    assert(r.part[PLAYER_PART_SSAA] == 2 && r.ssaa_lowered);
+
+    /* The library's row steps 2x, 4x, 4x anyway, Off; 4x anyway follows the 4x that warns. */
+    player_app_cycle_enhanced_part(app, PLAYER_PART_SSAA);
+    assert(app->settings.enhanced.part[PLAYER_PART_SSAA] == PLAYER_SSAA_4_ANYWAY);
+    player_play_resolve(&app->settings, "TEST96100", &r);
+    assert(r.part[PLAYER_PART_SSAA] == 4 && !r.ssaa_lowered);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_SSAA);
+    assert(app->settings.enhanced.part[PLAYER_PART_SSAA] == 0);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_SSAA);
+    assert(app->settings.enhanced.part[PLAYER_PART_SSAA] == 2);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_SSAA);
+    assert(app->settings.enhanced.part[PLAYER_PART_SSAA] == 4);
+    /* A title's row: Library, 2x, 4x, 4x anyway, Off, Library. */
+    app->game_count = 1;
+    snprintf(app->games[0].disc_id, sizeof(app->games[0].disc_id), "TEST96105");
+    static const int title_steps[] = {2, 4, PLAYER_SSAA_4_ANYWAY, 0, -1};
+    for (size_t i = 0; i < sizeof(title_steps) / sizeof(title_steps[0]); i++) {
+        player_app_cycle_title_part(app, 0, PLAYER_PART_SSAA);
+        assert(player_app_title_part(app, 0, PLAYER_PART_SSAA) == title_steps[i]);
+    }
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(config);
+    free(back);
+    free(app);
+    printf("PASS: supersampling 4x at render scale 3x or 4x launches 2x unless 4x anyway is chosen, "
+           "for the library and per title, and its row warns\n");
 }
 
 /* Smooth far textures (contract 10.16, 11.3.8): off in a fresh file and in every preset; a
@@ -12821,6 +12962,7 @@ int main(int argc, char **argv) {
     test_play_mode_stick_settings();
     test_play_mode_load_settings();
     test_play_mode_ssaa_settings();
+    test_ssaa_guard();
     test_play_mode_mips_settings();
     test_play_mode_pad_settings();
     test_play_mode_tess_settings();
