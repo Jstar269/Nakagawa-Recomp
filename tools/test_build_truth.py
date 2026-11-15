@@ -9,7 +9,6 @@ import ast
 import json
 import os
 from pathlib import Path
-import posixpath
 import re
 import shlex
 import shutil
@@ -3066,22 +3065,39 @@ class MachinePortabilityTests(unittest.TestCase):
             "tools/test_provenance_ledger.py",
             "tools/test_build_truth.py",
         })
-        # A relative climb is qualified when it lands on the tree from where the file is
-        # (tests/native/x.c may say ../fixtures/).
-        climb = re.compile(r"((?:\.\./)+)$")
+        # A climb such as ../fixtures/ from tests/native/ is NOT accepted, though it lands on the
+        # tree in place: the mutation corpus compiles a copy of the HLE-thread harness elsewhere
+        # (see the next test), and a mention that names tests/fixtures/ works from both.
         offenders = []
         for entry, text in self._tracked_texts(allowed):
             for match in mention.finditer(text):
-                window = text[max(0, match.start() - 32):match.start()]
-                if qualified.search(window):
-                    continue
-                up = climb.search(window)
-                if up and posixpath.normpath(
-                        posixpath.join(posixpath.dirname(entry), up.group(1), "fixtures")) == "tests/fixtures":
-                    continue
-                offenders.append(f"{entry}:{text.count(chr(10), 0, match.start()) + 1}")
-                break
+                if not qualified.search(text[max(0, match.start() - 32):match.start()]):
+                    offenders.append(f"{entry}:{text.count(chr(10), 0, match.start()) + 1}")
+                    break
         self.assertEqual(offenders, [], "these tracked files still name a fixture folder at the repository root")
+
+    def test_the_hle_thread_harness_includes_resolve_when_the_file_is_copied(self) -> None:
+        """The scheduler mutant builds a COPY of tests/native/hle_thread_selftest.c from a scratch folder.
+
+        `tests/fixtures/cosim/mutate.py` copies the harness beside the mutated sched.c and passes it
+        as HLE_THREAD_SELFTEST_SOURCE, so a quoted include cannot rely on the harness's own folder:
+        one that climbs has to resolve through the include directory every build of it passes
+        (src/rt), and none may name a header that exists only beside the harness. An include that
+        works only in place builds everywhere except in that mutant, whose verdict then is no-run.
+        """
+        harness = ROOT / "tests" / "native" / "hle_thread_selftest.c"
+        includes = sorted(set(re.findall(
+            r'(?m)^\s*#\s*include\s+"([^"]+)"', harness.read_text(encoding="utf-8", errors="replace"))))
+        self.assertIn("../../tests/fixtures/mp3_tone/mp3_tone.h", includes)
+        for include in includes:
+            with self.subTest(include=include):
+                if include.startswith("../"):
+                    self.assertTrue((ROOT / "src" / "rt" / include).resolve().is_file(),
+                                    "a climbing include must resolve from src/rt")
+                else:
+                    self.assertFalse(
+                        (harness.parent / include).is_file() and not (ROOT / "src" / "rt" / include).is_file(),
+                        "a header that exists only beside the harness is lost when the harness is copied")
 
     def test_windows_package_build_uses_builtin_windows_powershell(self) -> None:
         """A consumer build must not need a separately installed PowerShell 7."""

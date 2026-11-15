@@ -55412,8 +55412,12 @@ static void test_aot_null_thread_entry(const char *self) {
  * tone fixture (tests/fixtures/mp3_tone/generate.py: MPEG-1 Layer III frames written straight from
  * the bitstream syntax, no encoder and no recorded audio), fed the way a game feeds it:
  * sceMp3GetInfoToAddStreamData says where and how much, the test copies that much of the file
- * into guest memory and calls sceMp3NotifyAddStreamData. HOST_TESTED, not PSP_HARDWARE evidence. */
-#include "../fixtures/mp3_tone/mp3_tone.h"
+ * into guest memory and calls sceMp3NotifyAddStreamData. HOST_TESTED, not PSP_HARDWARE evidence.
+ *
+ * The include climbs to the repository root, like sas_resample.h above: the cosimulation mutation
+ * corpus compiles a COPY of this file from a scratch folder (HLE_THREAD_SELFTEST_SOURCE), where a
+ * path relative to tests/native/ finds nothing and the compiler resolves it through -Isrc/rt. */
+#include "../../tests/fixtures/mp3_tone/mp3_tone.h"
 
 extern void sr_hle_test_mp3_reset(void);
 extern void sr_hle_test_set_compiled_sdk_version(uint32_t version);
