@@ -287,7 +287,8 @@ Two known limits:
 ## Install, update and uninstall (Windows)
 
 Nakagawa is a portable ZIP ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)), and a release can also
-carry a per-user installer, [`Setup.exe`](#windows-installer-setupexe). The unpacked folder, or the installed
+carry a per-user installer, [`Setup.exe`](#windows-installer-setupexe); v0.0.3 is the ZIP only, and the installer
+is planned for v0.1.0. The unpacked folder, or the installed
 program, holds nothing you create, so installing and removing it never touches your games or saves.
 
 **Install.** Unpack `nakagawa-recomp-<version>-windows-x64.zip` into a folder of your choice (a read-only folder
@@ -771,7 +772,7 @@ Similarly, `python tools/nk_cli.py build-package` searches `assets/titles` first
 
 A release can also carry `nakagawa-recomp-<version>-windows-x64-setup.exe`
 ([#2208](https://github.com/Jstar269/nakagawa-recomp/issues/2208)), a per-user installer with the same files as the
-ZIP. It needs no administrator and installs to `%LOCALAPPDATA%\Programs\Nakagawa Recomp` (you can choose another
+ZIP. v0.0.3 does not carry it: the installer is planned for v0.1.0. It needs no administrator and installs to `%LOCALAPPDATA%\Programs\Nakagawa Recomp` (you can choose another
 folder). It adds a Start-menu entry and, if you tick it, a Desktop one, both with the player's taskbar identity, and
 an entry under Apps & features. It makes no network call.
 

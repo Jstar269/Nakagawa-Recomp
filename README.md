@@ -10,7 +10,7 @@
 
 **Play PSP games you own as native Windows programs.**
 
-**[Download](https://github.com/Jstar269/Nakagawa-Recomp/releases/tag/v0.0.2) · [Website](https://jstar269.github.io/Nakagawa-Recomp/) · [Compatibility](docs/COMPATIBILITY.md) · [Discussions](https://github.com/Jstar269/Nakagawa-Recomp/discussions)**
+**[Download](https://github.com/Jstar269/Nakagawa-Recomp/releases/tag/v0.0.3) · [Website](https://jstar269.github.io/Nakagawa-Recomp/) · [Compatibility](docs/COMPATIBILITY.md) · [Discussions](https://github.com/Jstar269/Nakagawa-Recomp/discussions)**
 
 [![CI](https://github.com/Jstar269/Nakagawa-Recomp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jstar269/Nakagawa-Recomp/actions/workflows/ci.yml)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-2F6FD0.svg)](LICENSE)
@@ -22,12 +22,14 @@ Nakagawa Recomp is a static recompiler for the PlayStation Portable. It translat
 before you play, and compiles it into a native Windows program. It isn't an emulator. You supply the game from your
 own disc: Nakagawa includes no games, game data, firmware or system fonts.
 
-**What works today:** v0.0.2 is an experimental pre-release. *Hot Shots Tennis: Get a Grip* is playable, with full
+**What works today:** v0.0.3 is an experimental pre-release. *Hot Shots Tennis: Get a Grip* is playable, with full
 matches and Story Mode. It runs in **Authentic** mode, as released, or in **Enhanced** mode, which adds options such
-as texture filtering, Smooth motion and Widescreen. *PAC-MAN Championship Edition* plays a stage, about a dozen more
+as texture filtering, Smooth motion and Widescreen. **Ace** mode is Enhanced plus a game's own 60 FPS game logic: it
+ships for Hot Shots Tennis, and as an Experimental package for *LittleBigPlanet* (disc version 2.00 only).
+*PAC-MAN Championship Edition* plays a stage, about a dozen more
 games start and get part of the way in, and most others stop early and name what is missing.
 
-**Try it:** [download v0.0.2](#download), extract the ZIP, start `bin\nakagawa_player.exe`, drag in your game's
+**Try it:** [download v0.0.3](#download), extract the ZIP, start `bin\nakagawa_player.exe`, drag in your game's
 `.iso`, then press **BUILD PACKAGE** and **PLAY**. Without a game of your own, the library's **TEST THIS PC** row has
 two demos the project wrote, which need no game files.
 
@@ -41,8 +43,8 @@ screenshots of Enhanced mode.
 
 ## Download
 
-[Download v0.0.2](https://github.com/Jstar269/Nakagawa-Recomp/releases/tag/v0.0.2), the latest release: one 260 MB
-ZIP for Windows 11, 64-bit. It includes the build tools, so there is nothing else to install.
+[Download v0.0.3](https://github.com/Jstar269/Nakagawa-Recomp/releases/tag/v0.0.3), the latest release: one ZIP for
+Windows 11, 64-bit. It includes the build tools, so there is nothing else to install.
 
 1. Extract the ZIP and start `bin\nakagawa_player.exe`.
 2. Drag your game's `.iso` into the player window, or choose **START SETUP WIZARD**. Nakagawa decrypts your own disc
@@ -50,11 +52,11 @@ ZIP for Windows 11, 64-bit. It includes the build tools, so there is nothing els
 3. Press **BUILD PACKAGE**, then **PLAY**. A first build takes several minutes.
 
 The ZIP isn't code-signed, so Windows may warn you the first time. The
-[release notes](docs/RELEASE_NOTES_v0.0.2.md) say what works, what doesn't, and
-[how to check the download](docs/RELEASE_NOTES_v0.0.2.md#checking-your-download).
+[release notes](docs/RELEASE_NOTES_v0.0.3.md) say what works, what doesn't, and
+[how to check the download](docs/RELEASE_NOTES_v0.0.3.md#checking-your-download).
 
-**Updating from v0.0.1:** extract v0.0.2 into a new folder. It finds your library, saves and settings, and
-**Rebuild all** in the library rebuilds the games v0.0.1 built. Settings > **CHECK FOR UPDATES** asks GitHub for a
+**Updating from v0.0.2 or v0.0.1:** extract v0.0.3 into a new folder. It finds your library, saves and settings, and
+**Rebuild all** in the library rebuilds the games an older version built. Settings > **CHECK FOR UPDATES** asks GitHub for a
 newer version when you select it and links to its release page.
 
 You need:

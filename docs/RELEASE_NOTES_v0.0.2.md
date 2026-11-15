@@ -1,7 +1,7 @@
 # Nakagawa Recomp v0.0.2 Release Notes
 
-Status: CURRENT. These are the notes of the v0.0.2 release, **v0.0.2 - Return Ace!**; its release page names the
-exact commit.
+Status: HISTORICAL. These are the notes of the v0.0.2 release, **v0.0.2 - Return Ace!**, kept as released; its
+release page names the exact commit. The current release is v0.0.3 ([notes](RELEASE_NOTES_v0.0.3.md)).
 Release scope: the [v0.0.2 milestone](https://github.com/Jstar269/nakagawa-recomp/milestone/2).
 Audience: players and contributors updating from v0.0.1 or trying Nakagawa for the first time.
 

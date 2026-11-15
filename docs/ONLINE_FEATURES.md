@@ -73,7 +73,7 @@ Hosts, the exact request and the failure cards are in [`SETUP.md`](SETUP.md#netw
 
 ## Discord status
 
-Built for v0.1.0 (#2259; maintainer decision 2026-11-08): Discord Rich Presence, as PPSSPP offers it,
+Built for v0.0.3 (#2259; maintainer decision 2026-11-08): Discord Rich Presence, as PPSSPP offers it,
 opt-in and off by default.
 
 - **Settings > Online and developer** has a **Discord status** switch, off by default

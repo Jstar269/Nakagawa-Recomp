@@ -48,7 +48,7 @@ typedef enum {
 /* The player's version: the one place it is written. The About page shows
    "v" NK_PLAYER_VERSION " (MM-DD-YYYY)"; nothing else (tags, releases, the
    tools' package version) reads it. */
-#define NK_PLAYER_VERSION "0.1.0-dev"
+#define NK_PLAYER_VERSION "0.0.3"
 
 typedef enum {
     PLAYER_UI_PRIMARY_NONE = 0,
@@ -372,7 +372,7 @@ typedef struct {
     float logical_width;
     const char *page_label;
     float logical_height;   /* 0 selects 800 */
-    /* "Version 0.0.2 is out" after the opt-in check at start, or NULL. Its button
+    /* "Version 0.0.4 is out" after the opt-in check at start, or NULL. Its button
        opens Settings > Updates (PLAYER_UI_ACTION_SETTINGS). */
     const char *update_notice;
     /* The grid of the user's games, in order: title indices, none a demo. NULL
@@ -767,8 +767,8 @@ typedef struct {
        turn it on (it has a Discord application ID). */
     bool discord_presence;
     bool discord_available;
-    const char *current_version;    /* "0.0.2" */
-    const char *update_version;     /* "0.0.2", once checked */
+    const char *current_version;    /* "0.0.3" */
+    const char *update_version;     /* "0.0.4", once checked */
     bool update_prerelease;
     const char *update_published;   /* "2026-11-04", or "" */
     const char *update_notes;
@@ -1150,7 +1150,7 @@ enum {
     PLAYER_UI_ID_UPDATE_INSTALL = 0x4525u,
     PLAYER_UI_ID_UPDATE_FOLDER = 0x4526u,
     PLAYER_UI_ID_UPDATE_PAGE = 0x4527u,
-    PLAYER_UI_ID_LIBRARY_UPDATE_NOTICE = 0x4528u,     /* "Version 0.0.2 is out" on the library */
+    PLAYER_UI_ID_LIBRARY_UPDATE_NOTICE = 0x4528u,     /* "Version 0.0.4 is out" on the library */
     PLAYER_UI_ID_LIBRARY_REBUILD_ALL = 0x4530u,       /* the older-build banner's Rebuild all */
     PLAYER_UI_ID_LIBRARY_REBUILD_HIDE = 0x4531u,      /* the older-build banner's Hide */
     PLAYER_UI_ID_REBUILD_PRIMARY = 0x4532u,           /* Rebuild all / Rebuild now */
