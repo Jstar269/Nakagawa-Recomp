@@ -1,11 +1,13 @@
 # Release candidate scope and qualification guide
 
-Status: CURRENT. The maintained release candidate specification. The current release scope is the [v0.0.2 milestone](https://github.com/Jstar269/nakagawa-recomp/milestone/2). This document does not create a Git tag, GitHub Release or release asset (AGENTS.md § 3).
+Status: CURRENT. The maintained release candidate specification. The current release is v0.0.3; its [release notes](RELEASE_NOTES_v0.0.3.md) say what it holds. This document does not create a Git tag, GitHub Release or release asset (AGENTS.md § 3).
 
 ## Release version
 
-`v0.0.2` is the second experimental release. Like `v0.0.1`, the first, published on 2026-10-28, it is built from
-an exact, reproducible, publication-clean commit on `main`, whose release manifest and player version read `0.0.2`.
+`v0.0.3` is the third experimental release. Like `v0.0.1`, published on 2026-10-28, and `v0.0.2`, published on
+2026-11-08, it is built from an exact, reproducible, publication-clean commit on `main`, whose release manifest and
+player version read `0.0.3`. `v0.0.3` is published as the portable ZIP only: the Windows installer this guide
+describes is not built or attached for it, and is planned for v0.1.0.
 Each release follows the procedure below. An older proposal for a `0.1.0-preview.1` version is withdrawn.
 
 Agents never create, move, push or delete Git tags, edit GitHub Releases, upload release assets or change a
@@ -140,7 +142,7 @@ The packaged player binaries and runtime closure are copied byte-for-byte from t
 At candidate freeze, the maintainer-selected trust anchor is the detailed `IMPLEMENTATION_PROVENANCE.json` from the external authority repository, never a candidate-committed public ledger. Verify the frozen main commit's admissions, commit and push truthful authority changes, then copy the ledger from that exact authority commit to an external immutable file. Record the full candidate SHA, authority commit SHA, and copied ledger SHA-256 together in #278. Set `NAKAGAWA_TRUSTED_PUBLIC_LEDGER` to that detailed copy and do not edit or regenerate it. Different source bytes require a fresh freeze and binding. The export audit consumes a hashed public `entries` projection; the commands below independently generate and verify that projection from the selected detailed authority instead of trusting the candidate's copy, which carries claims only.
 
 ```powershell
-$Version = '0.0.2'
+$Version = '0.0.3'
 $CandidateSha = $env:NAKAGAWA_CANDIDATE_SHA
 $FrozenCandidateSha = (git rev-parse HEAD).Trim()
 if ($CandidateSha -notmatch '^[0-9a-f]{40}$' -or $FrozenCandidateSha -ne $CandidateSha) {
@@ -214,7 +216,7 @@ foreach ($Required in @('nakagawa_player.exe', 'production_smoke.exe', 'SDL3.dll
 Copy-Item -LiteralPath $ToolchainIdentity -Destination (Join-Path $Stage 'toolchain.json')
 Copy-Item LICENSE, NOTICE.md (Join-Path $Stage '.')
 Copy-Item README.md (Join-Path $Stage '.')
-Copy-Item docs\PREVIEW_RELEASE.md, docs\SETUP.md, docs\SMOKE_TEST.md, docs\RELEASE_NOTES_v0.0.2.md $PackageDocs
+Copy-Item docs\PREVIEW_RELEASE.md, docs\SETUP.md, docs\SMOKE_TEST.md, docs\RELEASE_NOTES_v0.0.3.md $PackageDocs
 # The pictures the root README shows, at the same relative paths, so the packaged README displays them.
 $ReadmeImages = Select-String -LiteralPath README.md -Pattern 'docs/(?:images|media)/[A-Za-z0-9._/-]+' -AllMatches |
     ForEach-Object { $_.Matches.Value } | Sort-Object -Unique
@@ -228,7 +230,7 @@ foreach ($Image in $ReadmeImages) {
     "Nakagawa Recomp $Version",
     '',
     'To start: open the bin folder and run nakagawa_player.exe.',
-    'To check the download first, see docs\RELEASE_NOTES_v0.0.2.md, "Checking your download".',
+    'To check the download first, see docs\RELEASE_NOTES_v0.0.3.md, "Checking your download".',
     'You need your own copy of a PSP game; nothing in this folder contains game data.'
 ) | Set-Content -LiteralPath (Join-Path $Stage 'START HERE.txt') -Encoding utf8NoBOM
 Copy-Item (Join-Path $Bin 'THIRD_PARTY_NOTICES') $Stage -Recurse
@@ -556,7 +558,7 @@ Steps:
 4. Check the download and extract it:
 
    ```powershell
-   $Zip = Join-Path $env:USERPROFILE 'Acceptance\nakagawa-recomp-0.0.2-windows-x64.zip'
+   $Zip = Join-Path $env:USERPROFILE 'Acceptance\nakagawa-recomp-0.0.3-windows-x64.zip'
    $Expected = (Get-Content -LiteralPath "$Zip.sha256" -Raw).Split(' ')[0]
    if ((Get-FileHash -LiteralPath $Zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Expected) { throw 'ZIP hash mismatch' }
    Expand-Archive -LiteralPath $Zip -DestinationPath (Join-Path $env:USERPROFILE 'Nakagawa')

@@ -114,7 +114,7 @@ Roadmap items decided with the table:
   state homes. A Linux or macOS install from before
   [#324](https://github.com/Jstar269/nakagawa-recomp/issues/324) keeps its `nakagawa-recomp` or
   `NakagawaRecomp` folders while they exist; no move is offered.
-* **Code signing:** v0.0.1 and v0.0.2 ship unsigned. Until a build is signed, each
+* **Code signing:** v0.0.1, v0.0.2 and v0.0.3 ship unsigned. Until a build is signed, each
   release publishes the ZIP's SHA-256 and GitHub build attestations for every binary, and the release notes
   explain the SmartScreen prompt. The signing procedure is prepared
   ([`RELEASE_SIGNING.md`](RELEASE_SIGNING.md#sign-the-windows-binaries-authenticode)) and waits for the

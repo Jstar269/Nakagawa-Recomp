@@ -13,7 +13,7 @@ Start here if you want to play or try the project rather than change it:
 - [`../README.md`](../README.md): what the project is, the download and the quick start.
 - [`YOUR_OWN_GAMES.md`](YOUR_OWN_GAMES.md): playing a game you own.
 - [`COMPATIBILITY.md`](COMPATIBILITY.md): which games work.
-- [`RELEASE_NOTES_v0.0.2.md`](RELEASE_NOTES_v0.0.2.md): what the current release does, and how to check the download.
+- [`RELEASE_NOTES_v0.0.3.md`](RELEASE_NOTES_v0.0.3.md): what the current release does, and how to check the download.
 - [`SETUP.md`](SETUP.md#windows-host-pitfalls): troubleshooting on Windows.
 - [`SHOWCASE.md`](SHOWCASE.md): the two demo programs.
 - [`../ACCESSIBILITY.md`](../ACCESSIBILITY.md): what the player supports for accessibility, and how to report a barrier.
@@ -130,8 +130,10 @@ a target and what isn't built yet.
 - [`PREVIEW_RELEASE.md`](PREVIEW_RELEASE.md) — scope, packaging and qualification
   guide for each release. Creating a tag or release is a
   maintainer-only action (`AGENTS.md` section 3), and no agent may perform it.
+- [`RELEASE_NOTES_v0.0.3.md`](RELEASE_NOTES_v0.0.3.md) — the notes of the
+  v0.0.3 release.
 - [`RELEASE_NOTES_v0.0.2.md`](RELEASE_NOTES_v0.0.2.md) — the notes of the
-  v0.0.2 release.
+  v0.0.2 release, kept as released.
 - [`RELEASE_NOTES_v0.0.1.md`](RELEASE_NOTES_v0.0.1.md) — the notes of the
   v0.0.1 release, kept as released.
 - [`RELEASE_SIGNING.md`](RELEASE_SIGNING.md) — the owner's update-signing key and
@@ -257,7 +259,8 @@ Every substantial document carries one status.
 | `NATIVE_UI_REGRESSION_MATRIX.md` | CURRENT | Authoritative capability disposition table plus the native slice functional checklist |
 | `NATIVE_PLAYER_IMPLEMENTATION_PROGRESS.md` | CURRENT | Native player implementation narrative and launch-path evidence; per-capability status is maintained in `NATIVE_UI_REGRESSION_MATRIX.md` |
 | `PREVIEW_RELEASE.md` | CURRENT | Release scope and qualification guide; tags and releases are maintainer-only |
-| `RELEASE_NOTES_v0.0.2.md` | CURRENT | Notes of the v0.0.2 release |
+| `RELEASE_NOTES_v0.0.3.md` | CURRENT | Notes of the v0.0.3 release |
+| `RELEASE_NOTES_v0.0.2.md` | HISTORICAL | Notes of the v0.0.2 release, kept as released |
 | `RELEASE_NOTES_v0.0.1.md` | HISTORICAL | Notes of the v0.0.1 release, kept as released |
 | `RELEASE_SIGNING.md` | CURRENT | Update-signing key procedure (minisign, offline) and what the player checks before an update download |
 | `NATIVE_PLAYER_ARCHITECTURE.md` | CURRENT | Maintained native-shell architecture; the wizard's bounded ISO/XB staging exists and the player decrypts the user's own disc locally and checks it against Redump's PSP list, while one-click play without compiling on the user's PC is not built and is marked inline |

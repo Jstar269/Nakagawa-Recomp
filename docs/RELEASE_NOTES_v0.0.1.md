@@ -1,6 +1,6 @@
 # Nakagawa Recomp v0.0.1 Release Notes
 
-Status: HISTORICAL. These are the notes of the v0.0.1 release, kept as released; its release page names the exact commit. The current release is v0.0.2 ([notes](RELEASE_NOTES_v0.0.2.md)).
+Status: HISTORICAL. These are the notes of the v0.0.1 release, kept as released; its release page names the exact commit. The current release is v0.0.3 ([notes](RELEASE_NOTES_v0.0.3.md)).
 Release qualification authority: [issue #278](https://github.com/Jstar269/nakagawa-recomp/issues/278).
 Audience: players and contributors trying the first public build.
 

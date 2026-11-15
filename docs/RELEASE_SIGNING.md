@@ -122,7 +122,7 @@ The public key is compiled into each player, so a player trusts exactly the key 
 
 This is a second, separate signature. The minisign signature above protects the player's update download.
 An Authenticode signature is what Windows reads: it names the publisher in the file's Properties and in
-SmartScreen. v0.0.1 and v0.0.2 ship without one; the release notes explain the SmartScreen prompt. The procedure below
+SmartScreen. v0.0.1, v0.0.2 and v0.0.3 ship without one; the release notes explain the SmartScreen prompt. The procedure below
 applies once the maintainer has a code-signing certificate. It signs on the maintainer's machine:
 no certificate, key or password is in the repository, CI or a script argument.
 
