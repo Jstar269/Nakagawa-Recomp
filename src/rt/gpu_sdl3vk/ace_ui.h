@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 /*
- * ace_ui.h - Ace Mode's in-game UI (src/rt/ace.h): the launch notice, the speed readout and the
- * crisp on-screen keyboard, drawn at the window's resolution over the frame the presenter
+ * ace_ui.h - Ace Mode's in-game UI (src/rt/ace.h): the launch notice, the speed readout (with the
+ * slowed-logic warning under it) and the crisp on-screen keyboard, drawn at the window's resolution over the frame the presenter
  * blitted onto the swapchain image, through nk_ui's Vulkan backend (src/ui/backend/nk_ui_vk.c).
  *
  * Its pixels exist only on the swapchain image: no guest-visible byte, guest frame or capture
@@ -53,6 +53,11 @@ typedef struct {
     float notice_alpha;                  /* 0 to 1 */
     const char *readout;                 /* "100%  30 FPS", or NULL */
     int readout_warning;                 /* PC LIMITED: in warning */
+    /* The slowed 60 FPS logic warning ("60 FPS logic: 52/s - SLOWED", sdl3vk_logic_notice_text),
+     * or NULL: a chip in the error colour at the top left, under the readout when it shows. The
+     * presenter hands it to the pass with the HUD off, instead of copying its own box to the
+     * same corner. */
+    const char *logic_notice;
     const OskOverlay *keyboard;          /* an open keyboard, or NULL */
     /* The render notice (gui.c, #2151), in any mode: a heading, what happened in words and how
      * to hide it, in one chip at the bottom left that does not fade. It steps aside while the
@@ -104,6 +109,9 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *frame);
 #define ACE_UI_ID_SPACER ACE_UI_ID(0x005u)
 #define ACE_UI_ID_NOTICE ACE_UI_ID(0x006u)
 #define ACE_UI_ID_NOTICE_HEAD ACE_UI_ID(0x007u)
+#define ACE_UI_ID_TOP_LEFT ACE_UI_ID(0x008u)     /* the readout, and under it the logic warning */
+#define ACE_UI_ID_LOGIC ACE_UI_ID(0x0E0u)
+#define ACE_UI_ID_LOGIC_TEXT ACE_UI_ID(0x0E1u)
 #define ACE_UI_ID_NOTICE_TEXT ACE_UI_ID(0x040u)  /* + line, below ACE_UI_NOTICE_LINES */
 #define ACE_UI_ID_FILL ACE_UI_ID(0x009u)
 #define ACE_UI_ID_KEYBOARD ACE_UI_ID(0x010u)

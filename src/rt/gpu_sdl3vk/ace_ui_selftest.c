@@ -13,11 +13,16 @@
  *           key table is in it): at every window and display scale every word of every part
  *           is drawn, whole items on each line, inside the chip and the safe area, with no
  *           ellipsis; the keyboard or a list past the chip's lines ends in "and N more".
+ *           The slowed-logic warning at every one of those windows and scales: under the
+ *           readout, left-aligned with it and apart from it (it once sat under the readout's
+ *           chip), its words whole, clear of the launch notice, the keyboard and the render
+ *           notice; alone, in the top-left corner.
  *   gpu     on a headless Vulkan device: the pass loads an image cleared to one colour, draws
  *           the chips and the keyboard over it, and leaves every other pixel as it was. The
  *           image is written to <dir>/ace_ui_selftest.ppm for review. Then the render notice
  *           alone, as an authentic run draws it: its chip at the bottom left and every other
- *           pixel the frame's (<dir>/ace_ui_selftest_notice.ppm). Then the launch notice with
+ *           pixel the frame's (<dir>/ace_ui_selftest_notice.ppm). Then the readout with the
+ *           slowed-logic warning under it (<dir>/ace_ui_selftest_logic.ppm). Then the launch notice with
  *           every part on (<dir>/ace_ui_selftest_every_part.ppm). Exit 77 without Vulkan.
  *
  * Built twice. With ACE_UI_SELFTEST_S1 it is linked from ace_ui.c, osk_overlay.c, nk_ui and its
@@ -395,6 +400,131 @@ static void cell_layout(void) {
     CHECK(!ace_ui_frame_wants(&empty), "an empty render notice is wanted");
     empty.host_notice = k_host_words;
     CHECK(ace_ui_frame_wants(&empty), "the render notice alone is not wanted");
+    nk_ui_destroy(ui);
+}
+
+/* ---- the slowed-logic warning under the readout ------------------------------------------------ */
+
+static const char k_logic[] = "60 FPS logic: 52/s - SLOWED";
+
+static int rects_meet(const int a[4], const int b[4]) {
+    return a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+}
+
+/* One frame's warning: its chip at the top left inside the safe area, under the readout when one
+ * shows and left-aligned with it, its words whole inside it, and clear of every other element. */
+static void logic_check(const NkUiDrawList *list, const AceUiFrame *f, float density, const char *what) {
+    const int w = f->pixel_w, h = f->pixel_h;
+    const double scale = (double)f->display_scale;
+    const int safe = (int)(16.0f * density) - 1;
+    int logic[4], words[4], other[4];
+    CHECK(element_bounds(list, ACE_UI_ID_LOGIC, logic) && element_bounds(list, ACE_UI_ID_LOGIC_TEXT, words),
+          "%s %dx%d@%.2f: no slowed-logic warning", what, w, h, scale);
+    if (!element_bounds(list, ACE_UI_ID_LOGIC, logic) || !element_bounds(list, ACE_UI_ID_LOGIC_TEXT, words))
+        return;
+    CHECK(logic[0] >= safe && logic[1] >= safe && logic[2] <= w - safe && logic[3] <= h - safe &&
+          logic[0] < w / 2, "%s %dx%d@%.2f: the warning (%d,%d)-(%d,%d) is not at the left inside the safe area",
+          what, w, h, scale, logic[0], logic[1], logic[2], logic[3]);
+    CHECK(words[0] >= logic[0] && words[1] >= logic[1] && words[2] <= logic[2] && words[3] <= logic[3],
+          "%s %dx%d@%.2f: the warning's words leave its chip", what, w, h, scale);
+    int runs = 0;
+    for (uint32_t i = 0; i < list->ncmd; i++) {
+        const NkUiDrawCmd *c = &list->cmd[i];
+        if (c->kind != NK_UI_DRAW_TEXT || c->element_id != ACE_UI_ID_LOGIC_TEXT) continue;
+        const NkUiTextRun *run = (const NkUiTextRun *)c->custom;
+        char read[sizeof(k_logic) + 16];
+        size_t used = 0;
+        for (size_t k = 0; k < run->length && used + 1u < sizeof(read); k++) {
+            const int nbsp = (unsigned char)run->text[k] == 0xC2u && k + 1u < run->length &&
+                             (unsigned char)run->text[k + 1u] == 0xA0u;
+            read[used++] = nbsp ? ' ' : run->text[k];
+            k += (size_t)nbsp;
+        }
+        read[used] = '\0';
+        CHECK(strcmp(read, k_logic) == 0, "%s %dx%d@%.2f: the warning reads \"%s\"", what, w, h, scale, read);
+        runs++;
+    }
+    CHECK(runs == 1, "%s %dx%d@%.2f: the warning is %d runs", what, w, h, scale, runs);
+    if (f->readout) {
+        /* The bug: the warning drawn where the readout is, under its chip. */
+        CHECK(element_bounds(list, ACE_UI_ID_READOUT, other) && !rects_meet(logic, other) &&
+              logic[1] >= other[3] && logic[0] == other[0],
+              "%s %dx%d@%.2f: the warning (%d,%d)-(%d,%d) is not under the readout (%d,%d)-(%d,%d)", what, w, h,
+              scale, logic[0], logic[1], logic[2], logic[3], other[0], other[1], other[2], other[3]);
+    } else {
+        CHECK(logic[0] <= safe + 2 && logic[1] <= safe + 2, "%s %dx%d@%.2f: alone, the warning (%d,%d) is not "
+              "in the top-left corner", what, w, h, scale, logic[0], logic[1]);
+    }
+    static const NkUiId others[] = { ACE_UI_ID_NOTICE, ACE_UI_ID_KEYBOARD, ACE_UI_ID_HOST_NOTICE };
+    static const char *const names[] = { "launch notice", "keyboard", "render notice" };
+    for (size_t o = 0; o < sizeof(others) / sizeof(others[0]); o++)
+        if (element_bounds(list, others[o], other))
+            CHECK(!rects_meet(logic, other), "%s %dx%d@%.2f: the warning (%d,%d)-(%d,%d) meets the %s "
+                  "(%d,%d)-(%d,%d)", what, w, h, scale, logic[0], logic[1], logic[2], logic[3], names[o],
+                  other[0], other[1], other[2], other[3]);
+    if (element_bounds(list, ACE_UI_ID_KEYBOARD, other))
+        CHECK(other[1] >= logic[3], "%s %dx%d@%.2f: the keyboard covers the warning", what, w, h, scale);
+    if (element_bounds(list, ACE_UI_ID_HOST_NOTICE, other))
+        CHECK(other[1] >= logic[3], "%s %dx%d@%.2f: the render notice covers the warning", what, w, h, scale);
+    for (uint32_t i = 0; i < list->ncmd; i++) {
+        const NkUiDrawCmd *c = &list->cmd[i];
+        if (c->kind == NK_UI_DRAW_SCISSOR_START || c->kind == NK_UI_DRAW_SCISSOR_END) continue;
+        CHECK(c->bounds[0] >= 0 && c->bounds[1] >= 0 && c->bounds[2] <= w && c->bounds[3] <= h,
+              "%s %dx%d@%.2f: command %u outside the window", what, w, h, scale, i);
+    }
+}
+
+/* Every window and display scale the cells here use, each with the warning beside the readout
+ * and the launch notice, over the keyboard, over the render notice, and alone. */
+static void cell_logic_notice(void) {
+    static const struct { int w, h; float scale; } sizes[] = {
+        {960, 600, 1.0f}, {1280, 800, 1.0f}, {1920, 1200, 1.5f}, {480, 272, 1.0f}, {960, 544, 1.0f},
+        {1280, 720, 1.0f}, {2560, 1080, 1.0f}, {5120, 1440, 2.0f}, {480, 272, 2.0f}, {720, 408, 1.5f},
+        {320, 180, 1.0f}, {640, 1136, 1.0f}, {3840, 2160, 2.0f},
+        {960, 540, 1.0f}, {960, 540, 1.25f}, {960, 540, 1.5f}, {960, 540, 2.0f},
+        {1280, 720, 1.25f}, {1280, 720, 1.5f}, {1280, 720, 2.0f},
+        {1920, 1080, 1.0f}, {1920, 1080, 1.25f}, {1920, 1080, 1.5f}, {1920, 1080, 2.0f},
+    };
+    static const char *const variants[] = { "with the keyboard", "over the render notice", "with the chips",
+                                            "alone" };
+    NkUiConfig config;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_OVERLAY;
+    config.text = &k_shaped;
+    NkUi *ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "nk_ui_create (warning)");
+    if (!ui) return;
+    keyboard_open();
+    for (size_t s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s++) {
+        for (size_t v = 0; v < sizeof(variants) / sizeof(variants[0]); v++) {
+            AceUiFrame f = frame_full(sizes[s].w, sizes[s].h, sizes[s].scale);
+            f.logic_notice = k_logic;
+            if (v != 0) f.keyboard = NULL;
+            if (v == 1) {
+                f.host_notice_head = k_host_head;
+                f.host_notice = k_host_words;
+                f.host_notice_hint = k_host_hint;
+            }
+            if (v == 3) {
+                f.readout = NULL;
+                f.notice = NULL;
+            }
+            float density = 1.0f;
+            const NkUiDrawList *list = build(ui, &f, &density);
+            CHECK(list != NULL, "warning %s %dx%d: the frame was dropped", variants[v], f.pixel_w, f.pixel_h);
+            if (list) logic_check(list, &f, density, variants[v]);
+        }
+    }
+    AceUiFrame alone;
+    memset(&alone, 0, sizeof(alone));
+    alone.pixel_w = 960;
+    alone.pixel_h = 544;
+    alone.display_scale = 1.0f;
+    alone.logic_notice = k_logic;
+    CHECK(ace_ui_frame_wants(&alone), "the warning alone is not wanted");
+    alone.logic_notice = "";
+    CHECK(!ace_ui_frame_wants(&alone), "an empty warning is wanted");
+    osk_overlay_reset(&s_keyboard);
     nk_ui_destroy(ui);
 }
 
@@ -997,6 +1127,38 @@ static int cell_gpu(const char *dir, const char *fonts_root) {
         host.host_notice = NULL;
         CHECK(present(ui, &host, w, h, 0) == 0, "a hidden render notice drew");
         CHECK(pixel(w, 24, h - 24) == frame_colour, "a hidden render notice left its chip");
+        /* The slowed-logic warning under the readout: two chips, one under the other, with the
+         * frame showing in the gap between them and beside the warning. */
+        {
+            AceUiFrame lf = frame_full(w, h, 1.0f);
+            lf.keyboard = NULL;
+            lf.logic_notice = k_logic;
+            NkUiConfig config;
+            memset(&config, 0, sizeof(config));
+            config.host = NK_UI_HOST_OVERLAY;
+            config.text = text;
+            NkUi *probe = nk_ui_create(&config);
+            float density = 1.0f;
+            const NkUiDrawList *list = probe ? build(probe, &lf, &density) : NULL;
+            int readout[4], logic[4];
+            CHECK(list && element_bounds(list, ACE_UI_ID_READOUT, readout) &&
+                  element_bounds(list, ACE_UI_ID_LOGIC, logic), "the warning frame did not lay out");
+            if (list && element_bounds(list, ACE_UI_ID_READOUT, readout) &&
+                element_bounds(list, ACE_UI_ID_LOGIC, logic)) {
+                CHECK(present(ui, &lf, w, h, 0) == 1, "the warning frame did not draw");
+                const int x = readout[0] + 4, gap_y = (readout[3] + logic[1]) / 2;
+                CHECK(logic[1] > readout[3] + 1, "the warning is not apart from the readout");
+                CHECK(pixel(w, x, (readout[1] + readout[3]) / 2) != frame_colour &&
+                      pixel(w, x, (logic[1] + logic[3]) / 2) != frame_colour,
+                      "no readout and warning chips at the top left");
+                CHECK(pixel(w, x, gap_y) == frame_colour && pixel(w, logic[2] + 4, (logic[1] + logic[3]) / 2) ==
+                      frame_colour, "the frame does not show between and beside the two chips");
+                snprintf(path, sizeof(path), "%s%sace_ui_selftest_logic.ppm", dir ? dir : "", dir ? "/" : "");
+                write_ppm(path, w, h);
+                printf("ace-ui-selftest: the warning under the readout written to %s\n", path);
+            }
+            nk_ui_destroy(probe);
+        }
 #if !defined(ACE_UI_SELFTEST_S1)
         /* The launch notice with every part on: its chip grows down from the top right, and the
          * frame beside it, under it and in the safe area stays the game's. */
@@ -1028,6 +1190,7 @@ int main(int argc, char **argv) {
         else dir = argv[i];
     }
     cell_layout();
+    cell_logic_notice();
 #if !defined(ACE_UI_SELFTEST_S1)
     cell_notice_every_part(fonts);
 #endif
