@@ -25,8 +25,9 @@
 #define MENU_ID_HEAD MENU_ID(0x001005u)
 #define MENU_ID_ACE MENU_ID(0x001006u)      /* Ace Mode's caption */
 #define MENU_ID_ACE_LINE MENU_ID(0x001040u) /* + line, below MENU_ACE_LINES: a caption on more than one */
-/* The most lines the caption takes, in a window with room for them. */
-#define MENU_ACE_LINES 32
+#define MENU_ID_ACE_LINE_SPAN 0x20u
+/* The most lines the caption takes, in a window with room for them: one id each. */
+#define MENU_ACE_LINES ((int)MENU_ID_ACE_LINE_SPAN)
 
 #define CONTROLS_ID(offset) NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, (offset))
 #define CONTROLS_ID_EYEBROW CONTROLS_ID(0x003001u)
