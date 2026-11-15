@@ -797,6 +797,8 @@ def _prepare_admission(
                 + ("a re-key reuses the recorded claim binding, so admit the path again without --rekey"
                    if rekey else "omit the claim binding or pass --binding bytes"),
             )
+    if approval_basis is None:
+        raise AdmitError("ADMISSION_BASIS_REQUIRED", "approval_basis must state the human decision")
     candidate_policy, delta_record, authority_bytes, admission_bytes = build_records(
         base_policy=base_policy, paths=paths, digests=digests,
         statements=statements, approval_basis=approval_basis, records=records,
@@ -1046,7 +1048,7 @@ def _batch_entries(document: object, *, resume: bool = False) -> list[dict]:
 
 
 def admit_batch(
-    *, batch: list[dict], private_repo: Path, base: str | None = None, date: str | None = None,
+    *, batch: object, private_repo: Path, base: str | None = None, date: str | None = None,
     assisted_by: str | None = None, push: bool = False, scratch_root: Path | None = None,
     resume: bool = False,
 ) -> dict:
