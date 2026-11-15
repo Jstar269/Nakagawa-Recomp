@@ -15471,12 +15471,66 @@ static int coherence_run_movie_target(void) {
     return ok;
 }
 
+static int coherence_run_batch_state_elision(void) {
+    BatchCommandState state = {0};
+    VkDescriptorSet descriptor = VK_NULL_HANDLE;
+    VkRect2D scissor = { { 3, 7 }, { 11u, 13u } };
+    float blend[4] = { 0.125f, 0.25f, 0.5f, 1.0f };
+    int descriptor_emits = 0, scissor_emits = 0, blend_emits = 0;
+    for (int i = 0; i < 5; i++) {
+        BatchCommandEmit emit = batch_command_state_update(&state, descriptor, &scissor, blend);
+        descriptor_emits += emit.descriptor;
+        scissor_emits += emit.scissor;
+        blend_emits += emit.blend;
+    }
+    if (descriptor_emits != 1 || scissor_emits != 1 || blend_emits != 1) {
+        fprintf(stderr, "gpu coherence selftest [batch-state]: five identical batches emitted descriptor=%d scissor=%d blend=%d (want 1 each)\n",
+                descriptor_emits, scissor_emits, blend_emits);
+        return 0;
+    }
+    BatchCommandEmit emit = batch_command_state_update(&state, descriptor, &scissor, blend);
+    if (emit.descriptor || emit.scissor || emit.blend) {
+        fprintf(stderr, "gpu coherence selftest [batch-state]: an identical batch emitted state again\n");
+        return 0;
+    }
+    VkRect2D other_scissor = scissor;
+    other_scissor.offset.x++;
+    emit = batch_command_state_update(&state, descriptor, &other_scissor, blend);
+    if (emit.descriptor || !emit.scissor || emit.blend) {
+        fprintf(stderr, "gpu coherence selftest [batch-state]: scissor change emitted the wrong state\n");
+        return 0;
+    }
+    float other_blend[4];
+    memcpy(other_blend, blend, sizeof(other_blend));
+    other_blend[0] = 0.75f;
+    emit = batch_command_state_update(&state, descriptor, &other_scissor, other_blend);
+    if (emit.descriptor || emit.scissor || !emit.blend) {
+        fprintf(stderr, "gpu coherence selftest [batch-state]: blend change emitted the wrong state\n");
+        return 0;
+    }
+    VkDescriptorSet other_descriptor = (VkDescriptorSet)(uintptr_t)1u;
+    emit = batch_command_state_update(&state, other_descriptor, &other_scissor, other_blend);
+    if (!emit.descriptor || emit.scissor || emit.blend) {
+        fprintf(stderr, "gpu coherence selftest [batch-state]: descriptor change emitted the wrong state\n");
+        return 0;
+    }
+    BatchCommandState next_pass = {0};
+    emit = batch_command_state_update(&next_pass, other_descriptor, &other_scissor, other_blend);
+    if (!emit.descriptor || !emit.scissor || !emit.blend) {
+        fprintf(stderr, "gpu coherence selftest [batch-state]: a new render pass did not start unknown\n");
+        return 0;
+    }
+    puts("gpu coherence selftest: PASS batch-state five identical batches emit one bind/scissor/blend each");
+    return 1;
+}
+
 static int coherence_selftest_cases(void) {
     /* SR_GPU_COHERENCE_CASE=scaled-upload (the harness's --case) runs that case alone, as the
      * recipe does at render scales 2 and 4: the other fixtures expect 1x pixels (a filtered sample
      * lands on other device pixels at a higher scale). Any other value fails. */
     const char *only = getenv("SR_GPU_COHERENCE_CASE");
     if (only && *only) {
+        if (strcmp(only, "batch-state-elision") == 0) return coherence_run_batch_state_elision();
         if (strcmp(only, "scaled-upload") == 0) return coherence_run_scaled_upload();
         if (strcmp(only, "mip-lod") == 0) return coherence_run_mip_lod();
         if (strcmp(only, "mip-clut") == 0) return coherence_run_mip_clut();
@@ -15551,6 +15605,7 @@ static int coherence_selftest_cases(void) {
         { "alias-vram", 3, 512, (72u * 512u + 92u) * 4u, 8, 0, 0, 1 },
     };
     int ok = 1;
+    if (!coherence_run_batch_state_elision()) ok = 0;
     for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
         if (!coherence_run_case(&cases[i])) ok = 0;
     if (!coherence_run_clean_case("clean-aligned", 3, 512, (50u * 512u + 20u) * 4u, 16)) ok = 0;
