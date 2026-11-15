@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "recomp.h"
+#include "debug.h"
 #include "perf.h"
 
 #include <inttypes.h>
@@ -14,6 +15,9 @@
 
 static int s_checks;
 static int s_failures;
+
+/* This focused binary links recomp.c without debug.c; profiling's debug gate is off here. */
+uint32_t g_sr_debug = 0;
 
 #define CHECK(cond, ...) do {                                                   \
     s_checks++;                                                                 \
@@ -926,6 +930,38 @@ int main(void) {
         remove(s_csv_path);
     }
     sr_profile_test_reset();
+
+    /* Disabled profiling must leave the table untouched and must not insert blocks. */
+    const uint32_t disabled_pc = 0x1234u;
+    uint32_t saved_debug = g_sr_debug;
+    g_sr_debug = 0;
+    g_prof_enabled = 1;
+    sr_profile_block(disabled_pc);
+    CHECK(sr_profile_test_block_count(disabled_pc) == 1,
+          "enabled profiler records a block before the disabled checks");
+    g_prof_enabled = 0;
+    sr_profile_block(disabled_pc);
+    CHECK(sr_profile_test_block_count(disabled_pc) == 0,
+          "disabled profiler test reader does not inspect the table");
+    g_prof_enabled = 1;
+    CHECK(sr_profile_test_block_count(disabled_pc) == 1,
+          "disabled sr_profile_block does not add a table entry");
+
+    sr_profile_test_reset();
+    g_prof_enabled = 1;
+    sr_profile_block(disabled_pc);
+    set_env("SR_PROFILE", "0");
+    sr_profile_init();
+    CHECK(g_prof_enabled == 0, "SR_PROFILE=0 disables profiling for the init check");
+    CHECK(sr_profile_test_block_count(disabled_pc) == 0,
+          "disabled init test reader does not inspect the table");
+    g_prof_enabled = 1;
+    CHECK(sr_profile_test_block_count(disabled_pc) == 1,
+          "disabled sr_profile_init leaves the existing table untouched");
+    sr_profile_test_reset();
+    set_env("SR_PROFILE", NULL);
+    g_sr_debug = saved_debug;
+    g_prof_enabled = 1;
 
     /* HST and other zero-based PSP images can legitimately execute PC zero. It must be a
      * normal key, not the profiler table's empty-slot sentinel. */
