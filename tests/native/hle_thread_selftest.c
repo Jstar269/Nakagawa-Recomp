@@ -1786,6 +1786,28 @@ static void test_synthetic_libfont_startup(const char *name, const char *guest_p
                s_synth_libfont_start_calls == starts_before + 1u,
            "SR_REAL_MODULE_START=1 runs the translated libfont module_start");
 
+    /* Phase 3b: the PSP's file systems ignore case, so a title that loads its libfont as
+     * MODULE/LIBFONT.PRX (Gran Turismo does) takes the libfont gate under the shipped
+     * default, as the lower-case spelling does in phase 1; a look-alike in upper case
+     * still does not (phase 6 for the lower-case one). */
+    hle_test_setenv("SR_REAL_MODULE_START", NULL);
+    sr_hle_test_module_reset();
+    uint32_t uid_upper = sr_hle_test_register_module("disc0:/PSP_GAME/USRDIR/MODULE/LIBFONT.PRX",
+                                                     base + 0x70u, 0u);
+    starts_before = s_synth_libfont_start_calls;
+    expect(uid_upper != 0u, "libfont gate: an upper-case LIBFONT.PRX handle is registered");
+    expect(libfont_start_call(&cpu, uid_upper) == 0u &&
+               s_synth_libfont_start_calls == starts_before + 1u,
+           "an upper-case LIBFONT.PRX runs the translated libfont module_start by default");
+    sr_hle_test_module_reset();
+    uint32_t uid_upper_lookalike =
+        sr_hle_test_register_module("disc0:/PSP_GAME/USRDIR/MYLIBFONT.PRX", base + 0x70u, 0u);
+    starts_before = s_synth_libfont_start_calls;
+    expect(uid_upper_lookalike != 0u &&
+               libfont_start_call(&cpu, uid_upper_lookalike) == 0u &&
+               s_synth_libfont_start_calls == starts_before,
+           "an upper-case name that only ends in LIBFONT.PRX does not take the libfont gate");
+
     /* Phase 4: SR_REAL_MODULE_START=0 is the environmental kill switch. It has to cover
      * libfont too: no entry runs, readiness remains guest-owned, and the run stops by name
      * (the harness counts the stop and returns the refusal). Phase 5 repeats it for an
@@ -2512,6 +2534,79 @@ static void test_runtime_placed_guest_owned_mpeg(void) {
     remove(owned_path);
 }
 
+/* libfont is the title's own code too (#1645), and a title may spell its file in upper case,
+ * as the PSP's file systems allow: Gran Turismo loads disc0:/PSP_GAME/USRDIR/MODULE/LIBFONT.PRX,
+ * a start-less module placed at run time whose sceLibFont exports host HLE also implements.
+ * Under the shipped default its start links those exports, so the game's calls run the
+ * translated libfont, not the host handlers (a host handler it lacks, such as
+ * sceFontGetCharGlyphImage_Clip, stopped the run). The shadowed NID is
+ * sceFontGetCharGlyphImage: the host handler answers a NULL glyph image with
+ * SR_FONT_ERROR_INVALID_ARG, the guest body with RT_OWNED_MARK. */
+#define RT_LIBFONT_NID 0x980F4895u        /* sceFontGetCharGlyphImage */
+#define RT_LIBFONT_HOST 0x80460003u       /* SR_FONT_ERROR_INVALID_ARG */
+static uint32_t s_rt_libfont_base;
+static SrModuleCode s_rt_libfont_code = {
+    "LIBFONT.PRX", 0u, 0u, 0u, RT_MEM_SPAN, 0x40u, 1u, NULL, &s_rt_libfont_base,
+    s_rt_owned_funcs, 2u, s_rt_alpha_spans, 1u, 0u, 0u,
+};
+
+static uint32_t rt_libfont_import(void) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    return sr_syscall(&cpu, RT_LIBFONT_NID);
+}
+
+static void test_runtime_placed_upper_case_libfont(void) {
+    extern void sr_hle_test_partition_reset(void);
+    static const char libfont_guest[] = "disc0:/PSP_GAME/USRDIR/MODULE/LIBFONT.PRX";
+    char libfont_path[1024];
+    const char *out;
+    uint32_t base = 0;
+    expect(sr_hle_test_is_registered(RT_LIBFONT_NID) &&
+               sr_hle_resolve_late_import(RT_LIBFONT_NID) == SR_HLE_LATE_BUILTIN &&
+               rt_libfont_import() == RT_LIBFONT_HOST,
+           "upper-case libfont: host HLE serves sceFontGetCharGlyphImage before any module");
+    runtime_module_path(libfont_path, sizeof(libfont_path), "LIBFONT.PRX");
+    expect(write_runtime_module_prx_lib(libfont_path, 6u, 0, RT_LIBFONT_NID, "rtfont", 0u,
+                                        "sceLibFont") &&
+               runtime_module_identity(libfont_path, &s_rt_libfont_code),
+           "upper-case libfont: the start-less sceLibFont module fixture is written");
+
+    sr_hle_test_module_reset();
+    sr_hle_test_partition_reset();
+    sr_module_code_reset();
+    sr_module_code_register(&s_rt_libfont_code);
+    hle_test_setenv("SR_REAL_MODULE_START", NULL);
+    unsigned stops = s_rt_stop_calls;
+    uint32_t uid = rt_load(libfont_guest, 0u);
+    expect(uid != 0u && (uid & 0x80000000u) == 0u &&
+               sr_module_code_is_bound(&s_rt_libfont_code, &base) &&
+               sr_hle_resolve_late_import(RT_LIBFONT_NID) == base + RT_QUERY &&
+               rt_libfont_import() == RT_LIBFONT_HOST,
+           "upper-case libfont: before start the import reaches host HLE");
+    rt_capture_begin();
+    uint32_t started = rt_lifecycle(sr_hle_test_start_module, uid, 0u, 0u, 0u);
+    uint32_t answer = rt_libfont_import();
+    out = rt_capture_end();
+    expect(started == 0u && strstr(out, "host HLE serves") == NULL &&
+               strstr(out, "module declares no start routine; exports linked") != NULL &&
+               sr_hle_test_started_export(RT_LIBFONT_NID) == base + RT_QUERY &&
+               answer == RT_OWNED_MARK,
+           "upper-case libfont: by default LIBFONT.PRX starts and its export runs instead of "
+           "the host handler");
+    expect(rt_lifecycle(sr_hle_test_stop_module, uid, 0u, 0u, 0u) == 0u &&
+               s_rt_stop_calls == stops + 1u &&
+               rt_lifecycle(sr_hle_test_unload_module, uid, 0u, 0u, 0u) == 0u &&
+               sr_hle_resolve_late_import(RT_LIBFONT_NID) == SR_HLE_LATE_BUILTIN &&
+               rt_libfont_import() == RT_LIBFONT_HOST,
+           "upper-case libfont: unload hands the NID back to host HLE");
+
+    sr_hle_test_module_reset();
+    sr_hle_test_partition_reset();
+    sr_module_code_reset();
+    remove(libfont_path);
+}
+
 static TCB *fixture_thread(uint32_t uid, int state, int priority);
 static int write_runtime_module_bytes(const char *path, const uint8_t *bytes, size_t size) {
     FILE *f = fopen(path, "wb");
@@ -3167,6 +3262,7 @@ static void test_runtime_placed_modules(void) {
     test_runtime_placed_hle_shadow(alpha_guest, alpha_path);
     test_runtime_placed_guest_owned_library();
     test_runtime_placed_guest_owned_mpeg();
+    test_runtime_placed_upper_case_libfont();
 
     sr_hle_test_module_reset();
     sr_hle_test_partition_reset();

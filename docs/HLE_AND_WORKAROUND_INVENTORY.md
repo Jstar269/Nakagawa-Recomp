@@ -1635,7 +1635,9 @@ own translated code, and the HLE handler only serves NIDs that no started module
 rule that decides this is in `src/rt/hle_kernel_module.c`. A staged, translated module is
 *host-served* (its `module_start` is skipped and the host handlers keep its NIDs) when host HLE
 implements any of its exports. Two exceptions run the module instead: a library listed in
-`guest_module_owns_library()` (`scePsmfPlayer` and `sceMpeg`), and `libfont.prx` (#1645).
+`guest_module_owns_library()` (`scePsmfPlayer` and `sceMpeg`), and `libfont.prx` (#1645). The
+file name is matched without regard to case, as the PSP's file systems match it: Gran Turismo
+loads `MODULE/LIBFONT.PRX`, which is the same translated libfont.
 
 The inventory below comes from a survey the standing LLE lane made in November 2026 of every
 title in the maintainer's library that builds. The survey counted 795 titles. The counts are
