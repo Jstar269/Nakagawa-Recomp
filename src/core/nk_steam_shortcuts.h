@@ -11,7 +11,9 @@
  * ends with 0x08 0x08: the end of "shortcuts" and the end of the root.
  *
  * Everything here works on the user's own machine and makes no network call. Nothing is
- * downloaded: the entry carries no icon or grid image beyond what the executable has.
+ * stored locally: `ICON0.PNG` and `PIC1.PNG` from the game go into `config/grid` for its
+ * shortcut app ID (no network calls, nothing uploaded; portrait capsule `<appid>p.png` and logo
+ * `<appid>_logo.png` have no matching widescreen PSP art and are left empty).
  *
  * Rules (each has a test in tests/native/test_steam_shortcuts.c):
  *   - A shortcut is its executable and its launch options together: the player is one
@@ -51,9 +53,9 @@ extern "C" {
 typedef enum {
     NK_STEAM_OK = 0,
     NK_STEAM_ERR_ARGUMENT,       /* a missing, empty, too long or control-character field */
-    NK_STEAM_ERR_CORRUPT,        /* shortcuts.vdf is not a file this code understands */
-    NK_STEAM_ERR_EXISTS,         /* an entry for this executable is already there */
-    NK_STEAM_ERR_TOO_LARGE,      /* the file is over NK_STEAM_VDF_MAX_BYTES */
+    NK_STEAM_ERR_CORRUPT,        /* shortcuts.vdf or a supplied artwork PNG is not valid */
+    NK_STEAM_ERR_EXISTS,         /* an entry or existing artwork file is already there */
+    NK_STEAM_ERR_TOO_LARGE,      /* the file or artwork PNG is over its size cap */
     NK_STEAM_ERR_STEAM_RUNNING,  /* close Steam first */
     NK_STEAM_ERR_NOT_FOUND,      /* no Steam, no such account, or no account at all */
     NK_STEAM_ERR_BACKUP,         /* the backup could not be made and verified */
@@ -157,6 +159,86 @@ NkSteamStatus nk_steam_add_for_account(const char *root, const char *account_id,
                                        const NkSteamShortcut *shortcut, NkSteamRunningFn running,
                                        const char *stamp, char *backup_path, size_t backup_cap,
                                        NkSteamChange *change);
+
+/* ---- Steam shortcut grid artwork (#2571) -------------------------------------------------- */
+
+/* Maximum accepted byte length for one local ICON0.PNG / PIC1.PNG artwork picture. */
+#define NK_STEAM_GRID_MAX_BYTES (1u * 1024u * 1024u)
+
+/* Maximum byte cap accepted when backing up an existing user-customized grid file before an
+ * explicit overwrite. */
+#define NK_STEAM_GRID_EXISTING_BACKUP_MAX_BYTES (16u * 1024u * 1024u)
+
+/* Slots populated in `<Steam>/userdata/<account_id>/config/grid/`:
+ *   - ICON (<appid>_icon.png): game's ICON0.PNG (144x80 PSP icon)
+ *   - WIDE (<appid>.png):      game's ICON0.PNG (or PIC1.PNG if ICON0.PNG is absent)
+ *   - HERO (<appid>_hero.png): game's PIC1.PNG (480x272 PSP background picture)
+ * Steam's vertical portrait capsule (`<appid>p.png`, 2:3) and logo (`<appid>_logo.png`) have
+ * no fitting PSP source image and are left empty rather than cropping, stretching or inventing
+ * artwork. */
+typedef enum {
+    NK_STEAM_GRID_SLOT_ICON = 1u << 0,
+    NK_STEAM_GRID_SLOT_WIDE = 1u << 1,
+    NK_STEAM_GRID_SLOT_HERO = 1u << 2
+} NkSteamGridSlot;
+
+typedef enum {
+    NK_STEAM_GRID_KEEP_EXISTING = 0,  /* write missing slots only; keep existing files untouched */
+    NK_STEAM_GRID_FAIL_IF_EXISTS = 1, /* refuse before writing any file if a target exists */
+    NK_STEAM_GRID_OVERWRITE = 2       /* replace existing slot files (rollback on failure) */
+} NkSteamGridOverwrite;
+
+typedef struct {
+    const uint8_t *icon0_png;
+    size_t icon0_size;
+    const uint8_t *pic1_png;
+    size_t pic1_size;
+} NkSteamGridArt;
+
+typedef struct {
+    uint32_t app_id;                  /* 32-bit shortcut appid used for grid filenames */
+    unsigned written_mask;            /* NkSteamGridSlot bits written and read-back verified */
+    unsigned kept_mask;               /* NkSteamGridSlot bits left untouched (already existed) */
+    unsigned absent_mask;             /* NkSteamGridSlot bits omitted (no source picture) */
+    char grid_dir[NK_MAX_PATH];       /* `<Steam>/userdata/<id>/config/grid`, or "" */
+    char failed_path[NK_MAX_PATH];    /* full path of the failing file, if any */
+    char detail[256];                 /* plain-English kept-file list or failure reason */
+} NkSteamGridResult;
+
+/* Formats `<grid_dir>/<app_id>_icon.png`, `<grid_dir>/<app_id>.png`, or
+ * `<grid_dir>/<app_id>_hero.png`. Returns false on invalid arguments or overflow. */
+bool nk_steam_grid_slot_path(const char *grid_dir, uint32_t app_id, NkSteamGridSlot slot,
+                             char *out, size_t out_cap);
+
+/* Returns the filename suffix for `slot` (`"_icon.png"`, `".png"`, `"_hero.png"`), or NULL. */
+const char *nk_steam_grid_slot_suffix(NkSteamGridSlot slot);
+
+/* Looks up the `"appid"` of an existing shortcut entry in `shortcuts.vdf` whose `"exe"` matches
+ * `exe`. Returns true and writes `*out_app_id` if found with a non-zero id. */
+bool nk_steam_vdf_find_app_id(const uint8_t *in, size_t in_len, const char *exe,
+                              uint32_t *out_app_id);
+
+/* Writes `art` into `grid_dir` for `app_id`. Validates PNG signatures and chunks before writing,
+ * refuses while `steam_running` is true, honours `overwrite` without silently overwriting an
+ * existing picture, verifies every write by reading it back, and on failure names the failing
+ * path while rolling back any writes performed during this call. */
+NkSteamStatus nk_steam_write_grid_art(const char *grid_dir, uint32_t app_id,
+                                      const NkSteamGridArt *art, bool steam_running,
+                                      NkSteamGridOverwrite overwrite,
+                                      NkSteamGridResult *result);
+
+/* Combines `nk_steam_add_for_account` with writing `art` into the account's `config/grid`
+ * folder (using the shortcut's persisted `"appid"` when updated, or `nk_steam_shortcut_app_id`
+ * when added). If writing artwork fails after `shortcuts.vdf` was modified, `shortcuts.vdf` is
+ * rolled back so Steam's files stay as they were. `art` may be NULL to skip grid artwork. */
+NkSteamStatus nk_steam_add_for_account_with_art(const char *root, const char *account_id,
+                                                const NkSteamShortcut *shortcut,
+                                                NkSteamRunningFn running, const char *stamp,
+                                                char *backup_path, size_t backup_cap,
+                                                NkSteamChange *change,
+                                                const NkSteamGridArt *art,
+                                                NkSteamGridOverwrite overwrite,
+                                                NkSteamGridResult *grid_result);
 
 #ifdef __cplusplus
 }

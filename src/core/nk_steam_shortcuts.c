@@ -915,3 +915,788 @@ NkSteamStatus nk_steam_add_for_account(const char *root, const char *account_id,
     }
     return NK_STEAM_ERR_NOT_FOUND;
 }
+
+/* ---- Steam shortcut grid artwork (#2571) -------------------------------------------------- */
+
+static void grid_set_text(char *dst, size_t cap, const char *src) {
+    size_t len;
+    if (dst == NULL || cap == 0u) return;
+    if (src == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+    len = strlen(src);
+    if (len >= cap) len = cap - 1u;
+    if (len > 0u) memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
+static bool grid_append_text(char *dst, size_t cap, const char *piece) {
+    size_t cur, add;
+    if (dst == NULL || cap == 0u || piece == NULL) return false;
+    cur = strlen(dst);
+    add = strlen(piece);
+    if (cur + add >= cap) return false;
+    memcpy(dst + cur, piece, add);
+    dst[cur + add] = '\0';
+    return true;
+}
+
+static bool grid_join_suffix(char *out, size_t cap, const char *base, const char *suffix) {
+    size_t blen, slen;
+    if (out == NULL || cap == 0u || base == NULL || suffix == NULL) return false;
+    blen = strlen(base);
+    slen = strlen(suffix);
+    if (blen + slen >= cap) return false;
+    memcpy(out, base, blen);
+    memcpy(out + blen, suffix, slen);
+    out[blen + slen] = '\0';
+    return true;
+}
+
+static bool grid_parent_dir(const char *path, char *out, size_t cap) {
+    size_t len;
+    const char *slash = NULL;
+    if (path == NULL || out == NULL || cap == 0u) return false;
+    for (const char *p = path; *p != '\0'; ++p) {
+        if (*p == '/' || *p == '\\') slash = p;
+    }
+    if (slash == NULL) return false;
+    len = (size_t)(slash - path);
+    if (len == 0u) len = 1u;
+    if (len >= cap) return false;
+    memcpy(out, path, len);
+    out[len] = '\0';
+    return true;
+}
+
+static uint32_t grid_read_be32(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) |
+           (uint32_t)p[3];
+}
+
+static uint32_t grid_read_le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static int grid_stricmp_ascii(const char *a, const char *b) {
+    while (*a != '\0' && *b != '\0') {
+        unsigned char ca = (unsigned char)*a++;
+        unsigned char cb = (unsigned char)*b++;
+        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb + ('a' - 'A'));
+        if (ca != cb) return (int)ca - (int)cb;
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+static bool grid_read_bounded_file(const char *path, size_t max_bytes, uint8_t **out_data,
+                                   size_t *out_len) {
+    FILE *f;
+    uint8_t *buf = NULL;
+    size_t cap = 4096u;
+    size_t len = 0u;
+    if (out_data == NULL || out_len == NULL || path == NULL) return false;
+    *out_data = NULL;
+    *out_len = 0u;
+    f = nk_fopen_utf8(path, "rb");
+    if (f == NULL) return false;
+    if (max_bytes < cap) cap = max_bytes > 0u ? max_bytes + 1u : 1u;
+    buf = (uint8_t *)malloc(cap);
+    if (buf == NULL) {
+        fclose(f);
+        return false;
+    }
+    for (;;) {
+        size_t avail = cap - len;
+        size_t got;
+        if (avail == 0u) {
+            size_t next_cap = cap * 2u;
+            uint8_t *next_buf;
+            if (next_cap < cap || cap > max_bytes + 1u) {
+                free(buf);
+                fclose(f);
+                return false;
+            }
+            if (next_cap > max_bytes + 1u) next_cap = max_bytes + 1u;
+            next_buf = (uint8_t *)realloc(buf, next_cap);
+            if (next_buf == NULL) {
+                free(buf);
+                fclose(f);
+                return false;
+            }
+            buf = next_buf;
+            cap = next_cap;
+            avail = cap - len;
+        }
+        got = fread(buf + len, 1u, avail, f);
+        len += got;
+        if (len > max_bytes) {
+            free(buf);
+            fclose(f);
+            return false;
+        }
+        if (got < avail) {
+            if (ferror(f)) {
+                free(buf);
+                fclose(f);
+                return false;
+            }
+            break;
+        }
+    }
+    if (fclose(f) != 0) {
+        free(buf);
+        return false;
+    }
+    *out_data = buf;
+    *out_len = len;
+    return true;
+}
+
+static bool grid_file_equals(const char *path, const uint8_t *want, size_t want_len) {
+    uint8_t *got = NULL;
+    size_t got_len = 0u;
+    bool ok;
+    if (!grid_read_bounded_file(path, want_len, &got, &got_len)) return false;
+    ok = (got_len == want_len) && (want_len == 0u || memcmp(got, want, want_len) == 0);
+    free(got);
+    return ok;
+}
+
+static bool grid_files_equal(const char *a_path, const char *b_path, size_t max_bytes) {
+    FILE *fa, *fb;
+    uint8_t ba[4096], bb[4096];
+    size_t total = 0u;
+    bool eq = true;
+    fa = nk_fopen_utf8(a_path, "rb");
+    fb = nk_fopen_utf8(b_path, "rb");
+    if (fa == NULL || fb == NULL) {
+        if (fa != NULL) fclose(fa);
+        if (fb != NULL) fclose(fb);
+        return false;
+    }
+    for (;;) {
+        size_t ra = fread(ba, 1u, sizeof(ba), fa);
+        size_t rb = fread(bb, 1u, sizeof(bb), fb);
+        if (ra != rb || (ra > 0u && memcmp(ba, bb, ra) != 0) || ferror(fa) || ferror(fb)) {
+            eq = false;
+            break;
+        }
+        if (total + ra > max_bytes) {
+            eq = false;
+            break;
+        }
+        total += ra;
+        if (ra < sizeof(ba)) break;
+    }
+    if (fclose(fa) != 0) eq = false;
+    if (fclose(fb) != 0) eq = false;
+    return eq;
+}
+
+static bool grid_copy_file_verified(const char *src, const char *dst, size_t max_bytes) {
+    uint8_t *data = NULL;
+    size_t len = 0u;
+    bool ok;
+    if (!grid_read_bounded_file(src, max_bytes, &data, &len)) return false;
+    ok = write_file_synced(dst, data, len) && grid_file_equals(dst, data, len);
+    free(data);
+    return ok;
+}
+
+static NkSteamStatus grid_validate_png(const uint8_t *data, size_t size, const char *label,
+                                       char *detail, size_t detail_cap) {
+    static const uint8_t k_png_sig[8] = {0x89u, 0x50u, 0x4eu, 0x47u,
+                                         0x0du, 0x0au, 0x1au, 0x0au};
+    size_t off;
+    bool seen_ihdr = false;
+    bool seen_iend = false;
+    if (data == NULL && size == 0u) return NK_STEAM_OK;
+    if ((data == NULL) != (size == 0u)) {
+        snprintf(detail, detail_cap, "%s PNG pointer and size do not match", label);
+        return NK_STEAM_ERR_ARGUMENT;
+    }
+    if (size > NK_STEAM_GRID_MAX_BYTES) {
+        snprintf(detail, detail_cap, "%s PNG exceeds %u bytes", label,
+                 (unsigned)NK_STEAM_GRID_MAX_BYTES);
+        return NK_STEAM_ERR_TOO_LARGE;
+    }
+    if (size < 45u || memcmp(data, k_png_sig, sizeof(k_png_sig)) != 0) {
+        snprintf(detail, detail_cap, "%s is not a valid PNG file", label);
+        return NK_STEAM_ERR_CORRUPT;
+    }
+    off = 8u;
+    while (off < size) {
+        uint32_t clen;
+        const uint8_t *ctype;
+        const uint8_t *cpayload;
+        if (size - off < 12u) {
+            snprintf(detail, detail_cap, "%s PNG chunk is truncated", label);
+            return NK_STEAM_ERR_CORRUPT;
+        }
+        clen = grid_read_be32(data + off);
+        ctype = data + off + 4u;
+        if ((size_t)clen > size - off - 12u) {
+            snprintf(detail, detail_cap, "%s PNG chunk length goes past the file end", label);
+            return NK_STEAM_ERR_CORRUPT;
+        }
+        cpayload = data + off + 8u;
+        if (!seen_ihdr) {
+            uint32_t w, h;
+            uint8_t depth, ctype_byte;
+            if (memcmp(ctype, "IHDR", 4u) != 0 || clen != 13u) {
+                snprintf(detail, detail_cap, "%s PNG does not begin with IHDR", label);
+                return NK_STEAM_ERR_CORRUPT;
+            }
+            w = grid_read_be32(cpayload + 0u);
+            h = grid_read_be32(cpayload + 4u);
+            depth = cpayload[8];
+            ctype_byte = cpayload[9];
+            if (w == 0u || h == 0u || w > 4096u || h > 4096u ||
+                (depth != 1u && depth != 2u && depth != 4u && depth != 8u && depth != 16u) ||
+                (ctype_byte != 0u && ctype_byte != 2u && ctype_byte != 3u &&
+                 ctype_byte != 4u && ctype_byte != 6u) ||
+                cpayload[10] != 0u || cpayload[11] != 0u || cpayload[12] > 1u) {
+                snprintf(detail, detail_cap, "%s PNG has an invalid IHDR header", label);
+                return NK_STEAM_ERR_CORRUPT;
+            }
+            seen_ihdr = true;
+        } else if (memcmp(ctype, "IEND", 4u) == 0) {
+            if (clen != 0u) {
+                snprintf(detail, detail_cap, "%s PNG IEND chunk is non-empty", label);
+                return NK_STEAM_ERR_CORRUPT;
+            }
+            off += 12u;
+            seen_iend = true;
+            break;
+        }
+        off += 12u + (size_t)clen;
+    }
+    if (!seen_ihdr || !seen_iend || off != size) {
+        snprintf(detail, detail_cap, "%s PNG is missing IEND or has trailing bytes", label);
+        return NK_STEAM_ERR_CORRUPT;
+    }
+    return NK_STEAM_OK;
+}
+
+const char *nk_steam_grid_slot_suffix(NkSteamGridSlot slot) {
+    switch (slot) {
+        case NK_STEAM_GRID_SLOT_ICON: return "_icon.png";
+        case NK_STEAM_GRID_SLOT_WIDE: return ".png";
+        case NK_STEAM_GRID_SLOT_HERO: return "_hero.png";
+    }
+    return NULL;
+}
+
+bool nk_steam_grid_slot_path(const char *grid_dir, uint32_t app_id, NkSteamGridSlot slot,
+                             char *out, size_t out_cap) {
+    const char *suffix = nk_steam_grid_slot_suffix(slot);
+    size_t dlen, flen;
+    char fname[64];
+    if (grid_dir == NULL || grid_dir[0] == '\0' || app_id == 0u || suffix == NULL ||
+        out == NULL || out_cap == 0u) {
+        return false;
+    }
+    dlen = strlen(grid_dir);
+    while (dlen > 1u && (grid_dir[dlen - 1u] == '/' || grid_dir[dlen - 1u] == '\\')) {
+        dlen--;
+    }
+    {
+        int n = snprintf(fname, sizeof(fname), "%lu%s", (unsigned long)app_id, suffix);
+        if (n <= 0 || (size_t)n >= sizeof(fname)) return false;
+        flen = (size_t)n;
+    }
+    if (dlen + 1u + flen >= out_cap) return false;
+    memcpy(out, grid_dir, dlen);
+    out[dlen] = nk_platform_path_separator();
+    memcpy(out + dlen + 1u, fname, flen);
+    out[dlen + 1u + flen] = '\0';
+    return true;
+}
+
+static bool vdf_read_cstr(const uint8_t *in, size_t len, size_t *pos, const char **out_str) {
+    const uint8_t *nul;
+    if (*pos >= len) return false;
+    nul = (const uint8_t *)memchr(in + *pos, '\0', len - *pos);
+    if (nul == NULL) return false;
+    *out_str = (const char *)(in + *pos);
+    *pos = (size_t)(nul - in) + 1u;
+    return true;
+}
+
+static bool vdf_skip_value(const uint8_t *in, size_t len, uint8_t type, size_t *pos, int depth) {
+    const char *unused;
+    if (depth > 8) return false;
+    if (type == 0x00u) {
+        while (*pos < len && in[*pos] != 0x08u) {
+            uint8_t sub_type = in[(*pos)++];
+            if (!vdf_read_cstr(in, len, pos, &unused)) return false;
+            if (!vdf_skip_value(in, len, sub_type, pos, depth + 1)) return false;
+        }
+        if (*pos >= len || in[*pos] != 0x08u) return false;
+        (*pos)++;
+        return true;
+    }
+    if (type == 0x01u) return vdf_read_cstr(in, len, pos, &unused);
+    if (type == 0x02u || type == 0x03u) {
+        if (len - *pos < 4u) return false;
+        *pos += 4u;
+        return true;
+    }
+    if (type == 0x07u || type == 0x0au) {
+        if (len - *pos < 8u) return false;
+        *pos += 8u;
+        return true;
+    }
+    return false;
+}
+
+static bool vdf_exe_matches(const char *raw_exe, const char *target_exe) {
+    size_t rlen, tlen;
+    if (raw_exe == NULL || target_exe == NULL) return false;
+    rlen = strlen(raw_exe);
+    tlen = strlen(target_exe);
+    if (rlen >= 2u && raw_exe[0] == '"' && raw_exe[rlen - 1u] == '"') {
+        raw_exe++;
+        rlen -= 2u;
+    }
+    return rlen == tlen && memcmp(raw_exe, target_exe, tlen) == 0;
+}
+
+bool nk_steam_vdf_find_app_id(const uint8_t *in, size_t in_len, const char *exe,
+                              uint32_t *out_app_id) {
+    size_t pos = 0u;
+    const char *root_key = NULL;
+    if (in == NULL || in_len < 4u || exe == NULL || exe[0] == '\0' || out_app_id == NULL) {
+        return false;
+    }
+    *out_app_id = 0u;
+    if (in[pos++] != 0x00u) return false;
+    if (!vdf_read_cstr(in, in_len, &pos, &root_key)) return false;
+    if (grid_stricmp_ascii(root_key, "shortcuts") != 0) return false;
+    while (pos < in_len && in[pos] != 0x08u) {
+        uint8_t entry_type = in[pos++];
+        const char *entry_key = NULL;
+        bool has_id = false;
+        bool matched_exe = false;
+        uint32_t id = 0u;
+        if (!vdf_read_cstr(in, in_len, &pos, &entry_key)) return false;
+        if (entry_type != 0x00u) {
+            if (!vdf_skip_value(in, in_len, entry_type, &pos, 1)) return false;
+            continue;
+        }
+        while (pos < in_len && in[pos] != 0x08u) {
+            uint8_t ftype = in[pos++];
+            const char *fkey = NULL;
+            if (!vdf_read_cstr(in, in_len, &pos, &fkey)) return false;
+            if (ftype == 0x02u && grid_stricmp_ascii(fkey, "appid") == 0) {
+                if (in_len - pos < 4u) return false;
+                id = grid_read_le32(in + pos);
+                pos += 4u;
+                has_id = true;
+            } else if (ftype == 0x01u && grid_stricmp_ascii(fkey, "exe") == 0) {
+                const char *val = NULL;
+                if (!vdf_read_cstr(in, in_len, &pos, &val)) return false;
+                if (vdf_exe_matches(val, exe)) matched_exe = true;
+            } else {
+                if (!vdf_skip_value(in, in_len, ftype, &pos, 2)) return false;
+            }
+        }
+        if (pos >= in_len || in[pos] != 0x08u) return false;
+        pos++;
+        if (matched_exe && has_id && id != 0u) {
+            *out_app_id = id;
+            return true;
+        }
+    }
+    return false;
+}
+
+typedef struct {
+    NkSteamGridSlot slot;
+    const uint8_t *data;
+    size_t size;
+    char dst[NK_MAX_PATH];
+    char tmp[NK_MAX_PATH + 32u];
+    char orig[NK_MAX_PATH + 32u];
+    bool write;
+    bool existed;
+    bool has_orig;
+    bool promoted;
+} GridSlotPlan;
+
+static void grid_format_kept_detail(uint32_t app_id, unsigned kept_mask, char *detail,
+                                    size_t cap) {
+    static const NkSteamGridSlot k_slots[3] = {
+        NK_STEAM_GRID_SLOT_ICON,
+        NK_STEAM_GRID_SLOT_WIDE,
+        NK_STEAM_GRID_SLOT_HERO
+    };
+    bool first = true;
+    char name[64];
+    if (kept_mask == 0u || detail == NULL || cap == 0u) return;
+    grid_set_text(detail, cap, "Kept existing Steam artwork: ");
+    for (size_t i = 0u; i < 3u; ++i) {
+        if ((kept_mask & (unsigned)k_slots[i]) == 0u) continue;
+        if (!first && !grid_append_text(detail, cap, ", ")) break;
+        snprintf(name, sizeof(name), "%lu%s", (unsigned long)app_id,
+                 nk_steam_grid_slot_suffix(k_slots[i]));
+        if (!grid_append_text(detail, cap, name)) break;
+        first = false;
+    }
+}
+
+NkSteamStatus nk_steam_write_grid_art(const char *grid_dir, uint32_t app_id,
+                                      const NkSteamGridArt *art, bool steam_running,
+                                      NkSteamGridOverwrite overwrite,
+                                      NkSteamGridResult *result) {
+    NkSteamGridResult local_res;
+    GridSlotPlan plans[3];
+    NkSteamGridSlot slot_order[3] = {
+        NK_STEAM_GRID_SLOT_ICON,
+        NK_STEAM_GRID_SLOT_WIDE,
+        NK_STEAM_GRID_SLOT_HERO
+    };
+    bool any_write = false;
+    NkSteamStatus fail_status = NK_STEAM_OK;
+    if (result == NULL) result = &local_res;
+    memset(result, 0, sizeof(*result));
+    result->app_id = app_id;
+
+    if (grid_dir == NULL || grid_dir[0] == '\0' || strlen(grid_dir) >= sizeof(result->grid_dir) ||
+        app_id == 0u ||
+        (overwrite != NK_STEAM_GRID_KEEP_EXISTING &&
+         overwrite != NK_STEAM_GRID_FAIL_IF_EXISTS &&
+         overwrite != NK_STEAM_GRID_OVERWRITE)) {
+        grid_set_text(result->detail, sizeof(result->detail),
+                      "Steam artwork folder or app ID is invalid");
+        return NK_STEAM_ERR_ARGUMENT;
+    }
+    grid_set_text(result->grid_dir, sizeof(result->grid_dir), grid_dir);
+
+    if (steam_running) {
+        grid_set_text(result->detail, sizeof(result->detail),
+                      "Steam is running; artwork was left unchanged");
+        return NK_STEAM_ERR_STEAM_RUNNING;
+    }
+
+    if (art == NULL) return NK_STEAM_OK;
+
+    fail_status = grid_validate_png(art->icon0_png, art->icon0_size, "ICON0.PNG",
+                                    result->detail, sizeof(result->detail));
+    if (fail_status != NK_STEAM_OK) return fail_status;
+    fail_status = grid_validate_png(art->pic1_png, art->pic1_size, "PIC1.PNG",
+                                    result->detail, sizeof(result->detail));
+    if (fail_status != NK_STEAM_OK) return fail_status;
+
+    memset(plans, 0, sizeof(plans));
+    plans[0].slot = slot_order[0];
+    plans[0].data = art->icon0_png;
+    plans[0].size = art->icon0_size;
+    plans[1].slot = slot_order[1];
+    if (art->icon0_png != NULL && art->icon0_size > 0u) {
+        plans[1].data = art->icon0_png;
+        plans[1].size = art->icon0_size;
+    } else {
+        plans[1].data = art->pic1_png;
+        plans[1].size = art->pic1_size;
+    }
+    plans[2].slot = slot_order[2];
+    plans[2].data = art->pic1_png;
+    plans[2].size = art->pic1_size;
+
+    for (size_t i = 0u; i < 3u; ++i) {
+        bool exists;
+        if (plans[i].data == NULL || plans[i].size == 0u) {
+            result->absent_mask |= (unsigned)plans[i].slot;
+            continue;
+        }
+        if (!nk_steam_grid_slot_path(grid_dir, app_id, plans[i].slot, plans[i].dst,
+                                     sizeof(plans[i].dst)) ||
+            !grid_join_suffix(plans[i].tmp, sizeof(plans[i].tmp), plans[i].dst, ".nakagawa-tmp") ||
+            !grid_join_suffix(plans[i].orig, sizeof(plans[i].orig), plans[i].dst,
+                              ".nakagawa-orig")) {
+            grid_set_text(result->failed_path, sizeof(result->failed_path), grid_dir);
+            grid_set_text(result->detail, sizeof(result->detail),
+                          "Steam grid artwork path is too long");
+            return NK_STEAM_ERR_ARGUMENT;
+        }
+        if (nk_platform_dir_exists(plans[i].dst)) {
+            grid_set_text(result->failed_path, sizeof(result->failed_path), plans[i].dst);
+            grid_set_text(result->detail, sizeof(result->detail),
+                          "A folder is in the way of Steam's artwork file");
+            return NK_STEAM_ERR_WRITE;
+        }
+        exists = nk_platform_file_exists(plans[i].dst);
+        if (exists && overwrite == NK_STEAM_GRID_FAIL_IF_EXISTS) {
+            grid_set_text(result->failed_path, sizeof(result->failed_path), plans[i].dst);
+            grid_set_text(result->detail, sizeof(result->detail),
+                          "Existing Steam artwork would be overwritten");
+            return NK_STEAM_ERR_EXISTS;
+        }
+        if (exists && overwrite == NK_STEAM_GRID_KEEP_EXISTING) {
+            result->kept_mask |= (unsigned)plans[i].slot;
+            continue;
+        }
+        plans[i].write = true;
+        plans[i].existed = exists;
+        any_write = true;
+    }
+
+    if (!any_write) {
+        grid_format_kept_detail(app_id, result->kept_mask, result->detail,
+                                sizeof(result->detail));
+        return NK_STEAM_OK;
+    }
+
+    if (nk_platform_file_exists(grid_dir) && !nk_platform_dir_exists(grid_dir)) {
+        grid_set_text(result->failed_path, sizeof(result->failed_path), grid_dir);
+        grid_set_text(result->detail, sizeof(result->detail),
+                      "A file is in the way of Steam's grid folder");
+        return NK_STEAM_ERR_WRITE;
+    }
+    if (!nk_platform_mkdir_p(grid_dir)) {
+        grid_set_text(result->failed_path, sizeof(result->failed_path), grid_dir);
+        grid_set_text(result->detail, sizeof(result->detail),
+                      "Could not create Steam's config/grid folder");
+        return NK_STEAM_ERR_WRITE;
+    }
+
+    fail_status = NK_STEAM_ERR_WRITE;
+    for (size_t i = 0u; i < 3u; ++i) {
+        if (!plans[i].write) continue;
+        if (nk_platform_dir_exists(plans[i].tmp) ||
+            !write_file_synced(plans[i].tmp, plans[i].data, plans[i].size) ||
+            !grid_file_equals(plans[i].tmp, plans[i].data, plans[i].size)) {
+            grid_set_text(result->failed_path, sizeof(result->failed_path), plans[i].tmp);
+            grid_set_text(result->detail, sizeof(result->detail),
+                          "Could not stage and verify temporary Steam artwork");
+            goto rollback;
+        }
+        if (overwrite == NK_STEAM_GRID_OVERWRITE && plans[i].existed) {
+            if (nk_platform_dir_exists(plans[i].orig) ||
+                !grid_copy_file_verified(plans[i].dst, plans[i].orig,
+                                         NK_STEAM_GRID_EXISTING_BACKUP_MAX_BYTES) ||
+                !grid_files_equal(plans[i].dst, plans[i].orig,
+                                  NK_STEAM_GRID_EXISTING_BACKUP_MAX_BYTES)) {
+                grid_set_text(result->failed_path, sizeof(result->failed_path), plans[i].orig);
+                grid_set_text(result->detail, sizeof(result->detail),
+                              "Could not save a rollback copy of existing Steam artwork");
+                fail_status = NK_STEAM_ERR_BACKUP;
+                goto rollback;
+            }
+            plans[i].has_orig = true;
+        }
+    }
+
+    for (size_t i = 0u; i < 3u; ++i) {
+        int rc;
+        if (!plans[i].write) continue;
+        if (overwrite != NK_STEAM_GRID_OVERWRITE) {
+            rc = nk_rename_noreplace_utf8(plans[i].tmp, plans[i].dst);
+            if (rc == 1) {
+                (void)nk_remove_utf8(plans[i].tmp);
+                if (overwrite == NK_STEAM_GRID_KEEP_EXISTING) {
+                    result->kept_mask |= (unsigned)plans[i].slot;
+                    continue;
+                }
+                grid_set_text(result->failed_path, sizeof(result->failed_path), plans[i].dst);
+                grid_set_text(result->detail, sizeof(result->detail),
+                              "Existing Steam artwork appeared before write");
+                fail_status = NK_STEAM_ERR_EXISTS;
+                goto rollback;
+            }
+            if (rc != 0) {
+                grid_set_text(result->failed_path, sizeof(result->failed_path), plans[i].dst);
+                grid_set_text(result->detail, sizeof(result->detail),
+                              "Could not place Steam artwork file");
+                fail_status = NK_STEAM_ERR_WRITE;
+                goto rollback;
+            }
+        } else {
+            if (nk_rename_utf8(plans[i].tmp, plans[i].dst) != 0) {
+                grid_set_text(result->failed_path, sizeof(result->failed_path), plans[i].dst);
+                grid_set_text(result->detail, sizeof(result->detail),
+                              "Could not replace Steam artwork file");
+                fail_status = NK_STEAM_ERR_WRITE;
+                goto rollback;
+            }
+        }
+        plans[i].promoted = true;
+        if (!grid_file_equals(plans[i].dst, plans[i].data, plans[i].size)) {
+            grid_set_text(result->failed_path, sizeof(result->failed_path), plans[i].dst);
+            grid_set_text(result->detail, sizeof(result->detail),
+                          "Written Steam artwork failed read-back verification");
+            fail_status = NK_STEAM_ERR_WRITE;
+            goto rollback;
+        }
+        result->written_mask |= (unsigned)plans[i].slot;
+    }
+
+    (void)nk_platform_sync_dir(grid_dir);
+    for (size_t i = 0u; i < 3u; ++i) {
+        if (plans[i].has_orig) (void)nk_remove_utf8(plans[i].orig);
+    }
+    grid_format_kept_detail(app_id, result->kept_mask, result->detail, sizeof(result->detail));
+    return NK_STEAM_OK;
+
+rollback:
+    for (size_t i = 0u; i < 3u; ++i) {
+        if (plans[i].tmp[0] != '\0') (void)nk_remove_utf8(plans[i].tmp);
+        if (plans[i].promoted) {
+            if (plans[i].has_orig) {
+                (void)nk_rename_utf8(plans[i].orig, plans[i].dst);
+                plans[i].has_orig = false;
+            } else {
+                (void)nk_remove_utf8(plans[i].dst);
+            }
+        }
+        if (plans[i].has_orig) (void)nk_remove_utf8(plans[i].orig);
+    }
+    (void)nk_platform_sync_dir(grid_dir);
+    result->written_mask = 0u;
+    return fail_status;
+}
+
+static bool steam_build_grid_dir(const char *shortcuts_path, char *grid_dir, size_t cap) {
+    char cfg_dir[NK_MAX_PATH];
+    size_t clen;
+    if (!grid_parent_dir(shortcuts_path, cfg_dir, sizeof(cfg_dir))) return false;
+    clen = strlen(cfg_dir);
+    if (clen + 5u >= cap) return false;
+    memcpy(grid_dir, cfg_dir, clen);
+    grid_dir[clen] = nk_platform_path_separator();
+    memcpy(grid_dir + clen + 1u, "grid", 5u);
+    return true;
+}
+
+static uint32_t steam_resolve_written_app_id(const char *shortcuts_path,
+                                             const NkSteamShortcut *shortcut) {
+    uint8_t *vdf = NULL;
+    size_t vdf_len = 0u;
+    uint32_t id = 0u;
+    if (grid_read_bounded_file(shortcuts_path, NK_STEAM_VDF_MAX_BYTES, &vdf, &vdf_len)) {
+        if (!nk_steam_vdf_find_app_id(vdf, vdf_len, shortcut->exe, &id)) id = 0u;
+        free(vdf);
+    }
+    if (id == 0u) id = nk_steam_shortcut_app_id(shortcut->exe, shortcut->app_name);
+    return id;
+}
+
+NkSteamStatus nk_steam_add_for_account_with_art(const char *root, const char *account_id,
+                                                const NkSteamShortcut *shortcut,
+                                                NkSteamRunningFn running, const char *stamp,
+                                                char *backup_path, size_t backup_cap,
+                                                NkSteamChange *change,
+                                                const NkSteamGridArt *art,
+                                                NkSteamGridOverwrite overwrite,
+                                                NkSteamGridResult *grid_result) {
+    NkSteamGridResult local_grid;
+    NkSteamAccount accounts[NK_STEAM_ACCOUNT_CAP];
+    size_t count = 0u;
+    const char *shortcuts_path = NULL;
+    uint8_t *prior_vdf = NULL;
+    size_t prior_len = 0u;
+    bool prior_existed = false;
+    char grid_dir[NK_MAX_PATH];
+    NkSteamStatus st;
+    NkSteamChange local_change = NK_STEAM_CHANGE_NONE;
+
+    if (grid_result == NULL) grid_result = &local_grid;
+    memset(grid_result, 0, sizeof(*grid_result));
+
+    if (backup_path != NULL && backup_cap > 0u) backup_path[0] = '\0';
+    if (change != NULL) *change = NK_STEAM_CHANGE_NONE;
+    if (root == NULL || account_id == NULL || shortcut == NULL) {
+        return NK_STEAM_ERR_ARGUMENT;
+    }
+    if ((running != NULL && running()) || (running == NULL && nk_steam_client_running())) {
+        grid_set_text(grid_result->detail, sizeof(grid_result->detail),
+                      "Steam is running; nothing was written");
+        return NK_STEAM_ERR_STEAM_RUNNING;
+    }
+    if (art != NULL) {
+        st = grid_validate_png(art->icon0_png, art->icon0_size, "ICON0.PNG",
+                               grid_result->detail, sizeof(grid_result->detail));
+        if (st != NK_STEAM_OK) return st;
+        st = grid_validate_png(art->pic1_png, art->pic1_size, "PIC1.PNG",
+                               grid_result->detail, sizeof(grid_result->detail));
+        if (st != NK_STEAM_OK) return st;
+    }
+
+    st = nk_steam_list_accounts(root, accounts, NK_STEAM_ACCOUNT_CAP, &count);
+    if (st != NK_STEAM_OK) return st;
+    for (size_t i = 0u; i < count; ++i) {
+        if (strcmp(accounts[i].id, account_id) == 0) {
+            shortcuts_path = accounts[i].shortcuts_path;
+            break;
+        }
+    }
+    if (shortcuts_path == NULL) return NK_STEAM_ERR_NOT_FOUND;
+
+    if (art != NULL) {
+        if (!steam_build_grid_dir(shortcuts_path, grid_dir, sizeof(grid_dir))) {
+            grid_set_text(grid_result->detail, sizeof(grid_result->detail),
+                          "Steam grid path is too long");
+            return NK_STEAM_ERR_ARGUMENT;
+        }
+        prior_existed = nk_platform_file_exists(shortcuts_path);
+        if (prior_existed &&
+            !grid_read_bounded_file(shortcuts_path, NK_STEAM_VDF_MAX_BYTES, &prior_vdf,
+                                    &prior_len)) {
+            free(prior_vdf);
+            prior_vdf = NULL;
+            prior_len = 0u;
+        }
+    }
+
+    NkSteamStatus vdf_status;
+    vdf_status = nk_steam_add_for_account(root, account_id, shortcut, running, stamp, backup_path,
+                                          backup_cap, &local_change);
+    if (vdf_status != NK_STEAM_OK && vdf_status != NK_STEAM_ERR_EXISTS) {
+        free(prior_vdf);
+        return vdf_status;
+    }
+    if (change != NULL) *change = local_change;
+    if (art == NULL) {
+        free(prior_vdf);
+        return vdf_status;
+    }
+
+    {
+        uint32_t app_id = steam_resolve_written_app_id(shortcuts_path, shortcut);
+        st = nk_steam_write_grid_art(grid_dir, app_id, art, false, overwrite, grid_result);
+        if (st != NK_STEAM_OK) {
+            if (local_change != NK_STEAM_CHANGE_NONE) {
+                char cfg_dir[NK_MAX_PATH];
+                char restore_tmp[NK_MAX_PATH + 32u];
+                bool has_cfg = grid_parent_dir(shortcuts_path, cfg_dir, sizeof(cfg_dir));
+                if (!prior_existed) {
+                    (void)nk_remove_utf8(shortcuts_path);
+                    if (has_cfg) (void)nk_platform_sync_dir(cfg_dir);
+                } else if (prior_vdf != NULL &&
+                           grid_join_suffix(restore_tmp, sizeof(restore_tmp), shortcuts_path,
+                                            ".nakagawa-restore") &&
+                           write_file_synced(restore_tmp, prior_vdf, prior_len) &&
+                           grid_file_equals(restore_tmp, prior_vdf, prior_len) &&
+                           nk_rename_utf8(restore_tmp, shortcuts_path) == 0 &&
+                           grid_file_equals(shortcuts_path, prior_vdf, prior_len)) {
+                    if (has_cfg) (void)nk_platform_sync_dir(cfg_dir);
+                } else if (prior_vdf != NULL) {
+                    (void)nk_remove_utf8(restore_tmp);
+                }
+                if (backup_path != NULL && backup_path[0] != '\0') {
+                    (void)nk_remove_utf8(backup_path);
+                    backup_path[0] = '\0';
+                }
+                if (change != NULL) *change = NK_STEAM_CHANGE_NONE;
+            }
+            free(prior_vdf);
+            return st;
+        }
+    }
+    free(prior_vdf);
+    return vdf_status;
+}

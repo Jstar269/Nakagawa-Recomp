@@ -323,8 +323,16 @@ nothing is written: exit Steam first (Nakagawa never closes it). Entries Nakagaw
 byte, and a file it cannot read is left untouched. Choosing **Add to Steam** again for a game already there changes
 nothing. After an update, which unpacks into a new folder, or after moving a portable copy, choosing it again updates
 that game's shortcut to the new folder instead of adding a second one: only its program and start-in folder change,
-and its play time and collections stay. The shortcut has no picture of its own (the player keeps disc art in memory
-only), so Steam shows the player's icon until you set one in Steam.
+and its play time and collections stay. When **Add to Steam** writes a shortcut cleanly, it also copies the game's own
+local `ICON0.PNG` and `PIC1.PNG` (from the disc or prepared game folder; nothing is uploaded or fetched online) into
+that account's `userdata\<account id>\config\grid\` folder under the 32-bit shortcut ID Steam uses (`<appid>_icon.png`
+and wide capsule `<appid>.png` from `ICON0.PNG`, falling back to `PIC1.PNG` for the wide capsule if `ICON0.PNG` is
+absent; and hero banner `<appid>_hero.png` from `PIC1.PNG`). Both PSP images are landscape (`144x80` and `480x272`) and
+do not fit Steam's 2:3 vertical portrait capsule (`<appid>p.png`), so the portrait capsule is left empty rather than
+cropping, stretching, or inventing art; you can set portrait cover art manually in Steam. As with `shortcuts.vdf`,
+nothing is written while Steam runs, existing pictures for that app ID are kept rather than silently overwritten unless
+explicitly replaced, every written picture is read back to verify, and a failure names what failed while leaving Steam's
+files as they were.
 
 **Update.** A copy `Setup.exe` installed updates by running the next release's Setup (see [below](#windows-installer-setupexe)). For a ZIP copy, Check for updates unpacks the new version into a new folder next to the running one and leaves the old
 one. Your data is in the per-user folders below, so the new version finds it. Delete the old folder when you

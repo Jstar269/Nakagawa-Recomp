@@ -775,6 +775,488 @@ static void test_account_names(void) {
     CHECK(strcmp(name, "Ana \"Q\" Player") == 0, "read from the file");
 }
 
+static uint32_t png_test_crc32(const uint8_t *data, size_t len) {
+    uint32_t crc = 0xffffffffu;
+    for (size_t i = 0u; i < len; ++i) {
+        crc ^= (uint32_t)data[i];
+        for (int b = 0; b < 8; ++b) {
+            crc = (crc >> 1) ^ ((crc & 1u) ? 0xedb88320u : 0u);
+        }
+    }
+    return crc ^ 0xffffffffu;
+}
+
+static void png_test_be32(uint8_t *dst, uint32_t v) {
+    dst[0] = (uint8_t)((v >> 24) & 0xffu);
+    dst[1] = (uint8_t)((v >> 16) & 0xffu);
+    dst[2] = (uint8_t)((v >> 8) & 0xffu);
+    dst[3] = (uint8_t)(v & 0xffu);
+}
+
+static bool png_test_chunk(uint8_t *out, size_t *pos, size_t cap, const char type[4],
+                           const uint8_t *payload, size_t len) {
+    if (*pos + 12u + len > cap) return false;
+    png_test_be32(out + *pos, (uint32_t)len);
+    memcpy(out + *pos + 4u, type, 4u);
+    if (len > 0u && payload != NULL) memcpy(out + *pos + 8u, payload, len);
+    png_test_be32(out + *pos + 8u + len, png_test_crc32(out + *pos + 4u, 4u + len));
+    *pos += 12u + len;
+    return true;
+}
+
+static size_t make_synthetic_png(uint32_t w, uint32_t h, uint8_t r, uint8_t g, uint8_t b,
+                                 uint8_t a, uint8_t *out, size_t cap) {
+    static const uint8_t k_sig[8] = {0x89u, 0x50u, 0x4eu, 0x47u, 0x0du, 0x0au, 0x1au, 0x0au};
+    size_t row_bytes = 1u + (size_t)w * 4u;
+    size_t raw_len = (size_t)h * row_bytes;
+    uint8_t *raw = (uint8_t *)malloc(raw_len);
+    uint8_t *zlib = (uint8_t *)malloc(raw_len + 64u);
+    uint8_t ihdr[13];
+    size_t pos = 0u, zpos = 0u;
+    uint32_t s1 = 1u, s2 = 0u;
+    if (raw == NULL || zlib == NULL || cap < 64u || raw_len > 65535u) {
+        free(raw);
+        free(zlib);
+        return 0u;
+    }
+    for (uint32_t y = 0u; y < h; ++y) {
+        uint8_t *row = raw + (size_t)y * row_bytes;
+        row[0] = 0u;
+        for (uint32_t x = 0u; x < w; ++x) {
+            row[1u + (size_t)x * 4u + 0u] = r;
+            row[1u + (size_t)x * 4u + 1u] = g;
+            row[1u + (size_t)x * 4u + 2u] = b;
+            row[1u + (size_t)x * 4u + 3u] = a;
+        }
+    }
+    for (size_t i = 0u; i < raw_len; ++i) {
+        s1 = (s1 + raw[i]) % 65521u;
+        s2 = (s2 + s1) % 65521u;
+    }
+    zlib[zpos++] = 0x78u;
+    zlib[zpos++] = 0x01u;
+    zlib[zpos++] = 0x01u;
+    zlib[zpos++] = (uint8_t)(raw_len & 0xffu);
+    zlib[zpos++] = (uint8_t)((raw_len >> 8) & 0xffu);
+    zlib[zpos++] = (uint8_t)((~raw_len) & 0xffu);
+    zlib[zpos++] = (uint8_t)(((~raw_len) >> 8) & 0xffu);
+    memcpy(zlib + zpos, raw, raw_len);
+    zpos += raw_len;
+    png_test_be32(zlib + zpos, (s2 << 16) | s1);
+    zpos += 4u;
+
+    memcpy(out, k_sig, 8u);
+    pos = 8u;
+    png_test_be32(ihdr + 0u, w);
+    png_test_be32(ihdr + 4u, h);
+    ihdr[8] = 8u;
+    ihdr[9] = 6u;
+    ihdr[10] = 0u;
+    ihdr[11] = 0u;
+    ihdr[12] = 0u;
+    if (!png_test_chunk(out, &pos, cap, "IHDR", ihdr, sizeof(ihdr)) ||
+        !png_test_chunk(out, &pos, cap, "IDAT", zlib, zpos) ||
+        !png_test_chunk(out, &pos, cap, "IEND", NULL, 0u)) {
+        pos = 0u;
+    }
+    free(raw);
+    free(zlib);
+    return pos;
+}
+
+static void join_rel_path(char *out, size_t cap, const char *base, const char *rel) {
+    int n = snprintf(out, cap, "%s/%s", base, rel);
+    if (n <= 0 || (size_t)n >= cap) out[0] = '\0';
+}
+
+static void grid_file_in(char *out, size_t cap, const char *grid_dir, uint32_t app_id,
+                         const char *suffix) {
+    int n = snprintf(out, cap, "%s/%lu%s", grid_dir, (unsigned long)app_id, suffix);
+    if (n <= 0 || (size_t)n >= cap) out[0] = '\0';
+}
+
+static bool path_matches(const char *a, const char *b) {
+    if (a == NULL || b == NULL) return false;
+    while (*a != '\0' && *b != '\0') {
+        char ca = (*a == '\\') ? '/' : *a;
+        char cb = (*b == '\\') ? '/' : *b;
+        if (ca != cb) return false;
+        ++a;
+        ++b;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static void test_grid_slot_paths_and_suffixes(void) {
+    char out[NK_MAX_PATH];
+    uint32_t app_id = nk_steam_shortcut_app_id(kGameA.exe, kGameA.app_name);
+    char expect_tail[64];
+
+    CHECK(strcmp(nk_steam_grid_slot_suffix(NK_STEAM_GRID_SLOT_ICON), "_icon.png") == 0,
+          "icon suffix");
+    CHECK(strcmp(nk_steam_grid_slot_suffix(NK_STEAM_GRID_SLOT_WIDE), ".png") == 0,
+          "wide capsule suffix");
+    CHECK(strcmp(nk_steam_grid_slot_suffix(NK_STEAM_GRID_SLOT_HERO), "_hero.png") == 0,
+          "hero suffix");
+    CHECK(nk_steam_grid_slot_suffix((NkSteamGridSlot)99) == NULL, "invalid suffix returns NULL");
+
+    CHECK(nk_steam_grid_slot_path("/steam/userdata/100/config/grid/", app_id,
+                                  NK_STEAM_GRID_SLOT_WIDE, out, sizeof(out)),
+          "wide slot path trims trailing slash");
+    snprintf(expect_tail, sizeof(expect_tail), "%c%lu.png", nk_platform_path_separator(),
+             (unsigned long)app_id);
+    CHECK(strstr(out, expect_tail) != NULL, "wide slot path ends with <appid>.png");
+
+    CHECK(nk_steam_grid_slot_path("/grid", app_id, NK_STEAM_GRID_SLOT_ICON, out, sizeof(out)),
+          "icon slot path formats");
+    snprintf(expect_tail, sizeof(expect_tail), "%lu_icon.png", (unsigned long)app_id);
+    CHECK(strstr(out, expect_tail) != NULL, "icon slot contains <appid>_icon.png");
+
+    CHECK(nk_steam_grid_slot_path("/grid", app_id, NK_STEAM_GRID_SLOT_HERO, out, sizeof(out)),
+          "hero slot path formats");
+    snprintf(expect_tail, sizeof(expect_tail), "%lu_hero.png", (unsigned long)app_id);
+    CHECK(strstr(out, expect_tail) != NULL, "hero slot contains <appid>_hero.png");
+
+    CHECK(!nk_steam_grid_slot_path(NULL, app_id, NK_STEAM_GRID_SLOT_WIDE, out, sizeof(out)),
+          "NULL dir refused");
+    CHECK(!nk_steam_grid_slot_path("/grid", 0u, NK_STEAM_GRID_SLOT_WIDE, out, sizeof(out)),
+          "zero app_id refused");
+    CHECK(!nk_steam_grid_slot_path("/grid", app_id, NK_STEAM_GRID_SLOT_WIDE, out, 8u),
+          "small buffer refused");
+}
+
+static void test_grid_writes_and_reads_back(void) {
+    char grid_dir[NK_MAX_PATH];
+    char p_icon[NK_MAX_PATH * 2], p_wide[NK_MAX_PATH * 2], p_hero[NK_MAX_PATH * 2];
+    char p_port[NK_MAX_PATH * 2], p_logo[NK_MAX_PATH * 2], p_tmp[NK_MAX_PATH * 2];
+    uint8_t icon0[2048], pic1[2048];
+    size_t icon0_len = make_synthetic_png(16u, 9u, 0x10u, 0x80u, 0xd0u, 0xffu, icon0, sizeof(icon0));
+    size_t pic1_len = make_synthetic_png(24u, 14u, 0xe0u, 0x50u, 0x30u, 0xffu, pic1, sizeof(pic1));
+    uint32_t app_id = nk_steam_shortcut_app_id(kGameA.exe, kGameA.app_name);
+    NkSteamGridArt art;
+    NkSteamGridResult res;
+
+    CHECK(icon0_len > 0u && pic1_len > 0u, "synthetic PNG generation");
+    path_in(grid_dir, sizeof(grid_dir), "grid_basic/config/grid");
+    grid_file_in(p_icon, sizeof(p_icon), grid_dir, app_id, "_icon.png");
+    grid_file_in(p_wide, sizeof(p_wide), grid_dir, app_id, ".png");
+    grid_file_in(p_hero, sizeof(p_hero), grid_dir, app_id, "_hero.png");
+    grid_file_in(p_port, sizeof(p_port), grid_dir, app_id, "p.png");
+    grid_file_in(p_logo, sizeof(p_logo), grid_dir, app_id, "_logo.png");
+    grid_file_in(p_tmp, sizeof(p_tmp), grid_dir, app_id, "_icon.png.nakagawa-tmp");
+
+    art.icon0_png = icon0;
+    art.icon0_size = icon0_len;
+    art.pic1_png = pic1;
+    art.pic1_size = pic1_len;
+    CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                         NK_STEAM_GRID_KEEP_EXISTING, &res),
+                 NK_STEAM_OK, "both ICON0 and PIC1 write cleanly");
+    CHECK(res.written_mask ==
+              (NK_STEAM_GRID_SLOT_ICON | NK_STEAM_GRID_SLOT_WIDE | NK_STEAM_GRID_SLOT_HERO),
+          "all three landscape slots marked written");
+    CHECK(res.kept_mask == 0u && res.absent_mask == 0u, "none kept or absent");
+    CHECK(file_is(p_icon, icon0, icon0_len), "icon slot gets ICON0.PNG");
+    CHECK(file_is(p_wide, icon0, icon0_len), "wide capsule slot gets ICON0.PNG");
+    CHECK(file_is(p_hero, pic1, pic1_len), "hero slot gets PIC1.PNG");
+    CHECK(nk_platform_path_missing(p_port), "portrait capsule left empty");
+    CHECK(nk_platform_path_missing(p_logo), "logo slot left empty");
+    CHECK(nk_platform_path_missing(p_tmp), "temp file cleaned up");
+
+    /* PIC1-only fallback for wide capsule; ICON0 stays empty. */
+    path_in(grid_dir, sizeof(grid_dir), "grid_pic_only");
+    grid_file_in(p_icon, sizeof(p_icon), grid_dir, app_id, "_icon.png");
+    grid_file_in(p_wide, sizeof(p_wide), grid_dir, app_id, ".png");
+    grid_file_in(p_hero, sizeof(p_hero), grid_dir, app_id, "_hero.png");
+    art.icon0_png = NULL;
+    art.icon0_size = 0u;
+    art.pic1_png = pic1;
+    art.pic1_size = pic1_len;
+    CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                         NK_STEAM_GRID_KEEP_EXISTING, &res),
+                 NK_STEAM_OK, "PIC1-only writes wide capsule fallback and hero");
+    CHECK(res.written_mask == (NK_STEAM_GRID_SLOT_WIDE | NK_STEAM_GRID_SLOT_HERO) &&
+              res.absent_mask == NK_STEAM_GRID_SLOT_ICON,
+          "PIC1-only masks match");
+    CHECK(nk_platform_path_missing(p_icon), "absent ICON0 writes no _icon.png");
+    CHECK(file_is(p_wide, pic1, pic1_len), "wide capsule falls back to PIC1 when ICON0 absent");
+    CHECK(file_is(p_hero, pic1, pic1_len), "hero gets PIC1");
+
+    /* ICON0-only leaves hero absent. */
+    path_in(grid_dir, sizeof(grid_dir), "grid_icon_only");
+    grid_file_in(p_icon, sizeof(p_icon), grid_dir, app_id, "_icon.png");
+    grid_file_in(p_wide, sizeof(p_wide), grid_dir, app_id, ".png");
+    grid_file_in(p_hero, sizeof(p_hero), grid_dir, app_id, "_hero.png");
+    art.icon0_png = icon0;
+    art.icon0_size = icon0_len;
+    art.pic1_png = NULL;
+    art.pic1_size = 0u;
+    CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                         NK_STEAM_GRID_KEEP_EXISTING, &res),
+                 NK_STEAM_OK, "ICON0-only writes icon and wide capsule");
+    CHECK(res.written_mask == (NK_STEAM_GRID_SLOT_ICON | NK_STEAM_GRID_SLOT_WIDE) &&
+              res.absent_mask == NK_STEAM_GRID_SLOT_HERO,
+          "ICON0-only masks match");
+    CHECK(file_is(p_icon, icon0, icon0_len) && file_is(p_wide, icon0, icon0_len),
+          "ICON0 files match");
+    CHECK(nk_platform_path_missing(p_hero), "absent PIC1 writes no _hero.png");
+}
+
+static void test_grid_steam_running_and_overwrite_guards(void) {
+    char grid_dir[NK_MAX_PATH], never_dir[NK_MAX_PATH];
+    char p_icon[NK_MAX_PATH * 2], p_wide[NK_MAX_PATH * 2], p_hero[NK_MAX_PATH * 2];
+    char p_orig[NK_MAX_PATH * 2];
+    uint8_t icon0[2048], pic1[2048], custom_png[2048];
+    size_t icon0_len = make_synthetic_png(10u, 6u, 1u, 2u, 3u, 255u, icon0, sizeof(icon0));
+    size_t pic1_len = make_synthetic_png(12u, 7u, 4u, 5u, 6u, 255u, pic1, sizeof(pic1));
+    size_t custom_len = make_synthetic_png(8u, 8u, 9u, 9u, 9u, 255u, custom_png, sizeof(custom_png));
+    uint32_t app_id = nk_steam_shortcut_app_id(kGameB.exe, kGameB.app_name);
+    NkSteamGridArt art = {icon0, icon0_len, pic1, pic1_len};
+    NkSteamGridResult res;
+
+    /* Running Steam creates nothing and refuses cleanly. */
+    path_in(never_dir, sizeof(never_dir), "grid_while_running/userdata/100/config/grid");
+    CHECK_STATUS(nk_steam_write_grid_art(never_dir, app_id, &art, true,
+                                         NK_STEAM_GRID_KEEP_EXISTING, &res),
+                 NK_STEAM_ERR_STEAM_RUNNING, "running Steam refuses grid write");
+    CHECK(nk_platform_path_missing(never_dir) && res.written_mask == 0u &&
+              strstr(res.detail, "running") != NULL,
+          "running Steam creates no folder and explains refusal");
+
+    /* Pre-existing custom hero must never be overwritten silently. */
+    path_in(grid_dir, sizeof(grid_dir), "grid_overwrite");
+    nk_platform_mkdir_p(grid_dir);
+    grid_file_in(p_icon, sizeof(p_icon), grid_dir, app_id, "_icon.png");
+    grid_file_in(p_wide, sizeof(p_wide), grid_dir, app_id, ".png");
+    grid_file_in(p_hero, sizeof(p_hero), grid_dir, app_id, "_hero.png");
+    grid_file_in(p_orig, sizeof(p_orig), grid_dir, app_id, "_hero.png.nakagawa-orig");
+    CHECK(write_bytes(p_hero, custom_png, custom_len), "seed custom hero");
+
+    /* Mode FAIL_IF_EXISTS leaves the whole grid folder untouched. */
+    CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                         NK_STEAM_GRID_FAIL_IF_EXISTS, &res),
+                 NK_STEAM_ERR_EXISTS, "FAIL_IF_EXISTS refuses pre-existing hero");
+    CHECK(path_matches(res.failed_path, p_hero) && nk_platform_path_missing(p_icon) &&
+              nk_platform_path_missing(p_wide) && file_is(p_hero, custom_png, custom_len),
+          "FAIL_IF_EXISTS names existing file and leaves everything untouched");
+
+    /* Mode KEEP_EXISTING writes missing slots, preserves existing hero, and reports it. */
+    CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                         NK_STEAM_GRID_KEEP_EXISTING, &res),
+                 NK_STEAM_OK, "KEEP_EXISTING succeeds while preserving custom hero");
+    CHECK(res.written_mask == (NK_STEAM_GRID_SLOT_ICON | NK_STEAM_GRID_SLOT_WIDE) &&
+              res.kept_mask == NK_STEAM_GRID_SLOT_HERO &&
+              file_is(p_icon, icon0, icon0_len) && file_is(p_wide, icon0, icon0_len) &&
+              file_is(p_hero, custom_png, custom_len) &&
+              strstr(res.detail, "_hero.png") != NULL,
+          "KEEP_EXISTING wrote missing slots, left custom hero intact, and named kept file");
+
+    /* Mode OVERWRITE explicitly replaces the pre-existing file cleanly. */
+    CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                         NK_STEAM_GRID_OVERWRITE, &res),
+                 NK_STEAM_OK, "OVERWRITE replaces all slots cleanly");
+    CHECK(res.written_mask ==
+              (NK_STEAM_GRID_SLOT_ICON | NK_STEAM_GRID_SLOT_WIDE | NK_STEAM_GRID_SLOT_HERO) &&
+              res.kept_mask == 0u && file_is(p_hero, pic1, pic1_len) &&
+              nk_platform_path_missing(p_orig),
+          "OVERWRITE replaced hero and cleaned rollback copy");
+}
+
+static void test_grid_invalid_pngs_and_rollback(void) {
+    char grid_dir[NK_MAX_PATH];
+    char p_icon[NK_MAX_PATH * 2], p_wide[NK_MAX_PATH * 2], p_hero[NK_MAX_PATH * 2];
+    char p_tmp_block[NK_MAX_PATH * 2], p_icon_tmp[NK_MAX_PATH * 2], p_orig[NK_MAX_PATH * 2];
+    uint8_t good[2048], old_hero[2048], bad_sig[64];
+    uint8_t *oversized;
+    size_t good_len = make_synthetic_png(8u, 8u, 7u, 8u, 9u, 255u, good, sizeof(good));
+    size_t old_len = make_synthetic_png(6u, 6u, 20u, 30u, 40u, 255u, old_hero, sizeof(old_hero));
+    uint32_t app_id = nk_steam_shortcut_app_id(kPlayer.exe, kPlayer.app_name);
+    NkSteamGridArt art;
+    NkSteamGridResult res;
+
+    path_in(grid_dir, sizeof(grid_dir), "grid_invalid");
+    nk_platform_mkdir_p(grid_dir);
+    grid_file_in(p_hero, sizeof(p_hero), grid_dir, app_id, "_hero.png");
+    CHECK(write_bytes(p_hero, old_hero, old_len), "seed existing hero before negative checks");
+
+    /* Corrupt non-PNG bytes */
+    memset(bad_sig, 'X', sizeof(bad_sig));
+    art.icon0_png = bad_sig;
+    art.icon0_size = sizeof(bad_sig);
+    art.pic1_png = NULL;
+    art.pic1_size = 0u;
+    CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                         NK_STEAM_GRID_OVERWRITE, &res),
+                 NK_STEAM_ERR_CORRUPT, "non-PNG bytes refused");
+    CHECK(file_is(p_hero, old_hero, old_len) && strstr(res.detail, "ICON0.PNG") != NULL,
+          "existing hero untouched and corrupt slot named");
+
+    /* Zero-width IHDR PNG refused */
+    {
+        uint8_t zero_w[2048];
+        memcpy(zero_w, good, good_len);
+        png_test_be32(zero_w + 16u, 0u);
+        art.icon0_png = zero_w;
+        art.icon0_size = good_len;
+        CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                             NK_STEAM_GRID_OVERWRITE, &res),
+                     NK_STEAM_ERR_CORRUPT, "zero-width IHDR refused");
+    }
+
+    /* Trailing bytes after IEND refused */
+    {
+        uint8_t trailing[2048];
+        memcpy(trailing, good, good_len);
+        trailing[good_len] = 0x42u;
+        art.icon0_png = trailing;
+        art.icon0_size = good_len + 1u;
+        CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                             NK_STEAM_GRID_OVERWRITE, &res),
+                     NK_STEAM_ERR_CORRUPT, "trailing garbage after IEND refused");
+    }
+
+    /* Oversized PNG (> NK_STEAM_GRID_MAX_BYTES) refused */
+    oversized = (uint8_t *)calloc(1u, NK_STEAM_GRID_MAX_BYTES + 1u);
+    CHECK(oversized != NULL, "allocate oversized buffer");
+    memcpy(oversized, good, good_len);
+    art.icon0_png = oversized;
+    art.icon0_size = NK_STEAM_GRID_MAX_BYTES + 1u;
+    CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                         NK_STEAM_GRID_OVERWRITE, &res),
+                 NK_STEAM_ERR_TOO_LARGE, "oversized PNG refused");
+    free(oversized);
+
+    /* Failure mid-batch (blocking dir at wide tmp path): rolls back every file and leaves
+       pre-existing hero intact while naming the failing path. */
+    path_in(grid_dir, sizeof(grid_dir), "grid_rollback");
+    nk_platform_mkdir_p(grid_dir);
+    grid_file_in(p_icon, sizeof(p_icon), grid_dir, app_id, "_icon.png");
+    grid_file_in(p_wide, sizeof(p_wide), grid_dir, app_id, ".png");
+    grid_file_in(p_hero, sizeof(p_hero), grid_dir, app_id, "_hero.png");
+    grid_file_in(p_tmp_block, sizeof(p_tmp_block), grid_dir, app_id, ".png.nakagawa-tmp");
+    grid_file_in(p_icon_tmp, sizeof(p_icon_tmp), grid_dir, app_id, "_icon.png.nakagawa-tmp");
+    grid_file_in(p_orig, sizeof(p_orig), grid_dir, app_id, "_hero.png.nakagawa-orig");
+    CHECK(write_bytes(p_hero, old_hero, old_len), "seed prior hero");
+    CHECK(nk_platform_mkdir_p(p_tmp_block), "plant blocking temp dir");
+
+    art.icon0_png = good;
+    art.icon0_size = good_len;
+    art.pic1_png = good;
+    art.pic1_size = good_len;
+    CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                         NK_STEAM_GRID_OVERWRITE, &res),
+                 NK_STEAM_ERR_WRITE, "mid-batch blocker fails closed");
+    CHECK(path_matches(res.failed_path, p_tmp_block) && res.written_mask == 0u &&
+              nk_platform_path_missing(p_icon) && nk_platform_path_missing(p_icon_tmp) &&
+              nk_platform_path_missing(p_wide) && nk_platform_path_missing(p_orig) &&
+              file_is(p_hero, old_hero, old_len),
+          "mid-batch failure names blocker, cleans temps, and keeps prior hero");
+}
+
+static void test_add_for_account_with_art_and_rollback(void) {
+    char steam[NK_MAX_PATH], cfg[NK_MAX_PATH * 2], grid_dir[NK_MAX_PATH * 2];
+    char vdf[NK_MAX_PATH * 2], backup[NK_MAX_PATH];
+    char p_icon[NK_MAX_PATH * 2], p_wide[NK_MAX_PATH * 2], p_hero[NK_MAX_PATH * 2];
+    uint8_t icon0[2048], pic1[2048], custom_png[2048];
+    size_t icon0_len = make_synthetic_png(12u, 6u, 0x11u, 0x22u, 0x33u, 255u, icon0, sizeof(icon0));
+    size_t pic1_len = make_synthetic_png(16u, 9u, 0x44u, 0x55u, 0x66u, 255u, pic1, sizeof(pic1));
+    size_t custom_len = make_synthetic_png(8u, 4u, 0x77u, 0x88u, 0x99u, 255u, custom_png, sizeof(custom_png));
+    NkSteamGridArt art = {icon0, icon0_len, pic1, pic1_len};
+    NkSteamGridResult res;
+    NkSteamChange ch = NK_STEAM_CHANGE_NONE;
+
+    /* 1. Fresh account: adds shortcut + artwork under shortcut's app_id. */
+    path_in(steam, sizeof(steam), "steam_acct_art");
+    join_rel_path(cfg, sizeof(cfg), steam, "userdata/30001/config");
+    nk_platform_mkdir_p(cfg);
+    CHECK_STATUS(nk_steam_add_for_account_with_art(steam, "30001", &kGameA, is_running_yes,
+                                                   "20261115-100000", backup, sizeof(backup), &ch,
+                                                   &art, NK_STEAM_GRID_KEEP_EXISTING, &res),
+                 NK_STEAM_ERR_STEAM_RUNNING, "running Steam blocks combined add+art");
+    join_rel_path(vdf, sizeof(vdf), cfg, "shortcuts.vdf");
+    join_rel_path(grid_dir, sizeof(grid_dir), cfg, "grid");
+    CHECK(nk_platform_path_missing(vdf) && nk_platform_path_missing(grid_dir),
+          "running Steam created neither shortcuts.vdf nor grid");
+
+    CHECK_STATUS(nk_steam_add_for_account_with_art(steam, "30001", &kGameA, is_running_no,
+                                                   "20261115-100001", backup, sizeof(backup), &ch,
+                                                   &art, NK_STEAM_GRID_KEEP_EXISTING, &res),
+                 NK_STEAM_OK, "combined add+art succeeds");
+    CHECK(ch == NK_STEAM_CHANGE_ADDED &&
+              res.app_id == nk_steam_shortcut_app_id(kGameA.exe, kGameA.app_name) &&
+              res.written_mask ==
+                  (NK_STEAM_GRID_SLOT_ICON | NK_STEAM_GRID_SLOT_WIDE | NK_STEAM_GRID_SLOT_HERO),
+          "combined add+art derives app_id and writes all 3 slots");
+    grid_file_in(p_icon, sizeof(p_icon), grid_dir, res.app_id, "_icon.png");
+    grid_file_in(p_wide, sizeof(p_wide), grid_dir, res.app_id, ".png");
+    grid_file_in(p_hero, sizeof(p_hero), grid_dir, res.app_id, "_hero.png");
+    CHECK(file_is(p_icon, icon0, icon0_len) && file_is(p_wide, icon0, icon0_len) &&
+              file_is(p_hero, pic1, pic1_len),
+          "combined add+art wrote expected bytes");
+
+    /* 2. Moved-folder update preserves the shortcut's existing app_id in shortcuts.vdf. */
+    {
+        NkSteamShortcut moved = kGameA;
+        moved.exe = "C:/Games/Nakagawa-v2/bin/nakagawa_player.exe";
+        moved.start_dir = "C:/Games/Nakagawa-v2/bin";
+        uint8_t custom_pic[2048];
+        size_t custom_pic_len =
+            make_synthetic_png(14u, 8u, 0xaa, 0xbb, 0xcc, 255u, custom_pic, sizeof(custom_pic));
+        NkSteamGridArt art2 = {custom_pic, custom_pic_len, pic1, pic1_len};
+        CHECK(write_bytes(p_hero, custom_png, custom_len), "customize existing hero");
+        CHECK_STATUS(nk_steam_add_for_account_with_art(steam, "30001", &moved, is_running_no,
+                                                       "20261115-100002", backup, sizeof(backup),
+                                                       &ch, &art2, NK_STEAM_GRID_KEEP_EXISTING,
+                                                       &res),
+                     NK_STEAM_OK, "moved update preserves existing app_id and custom art");
+        CHECK(ch == NK_STEAM_CHANGE_UPDATED &&
+                  res.app_id == nk_steam_shortcut_app_id(kGameA.exe, kGameA.app_name) &&
+                  res.kept_mask == (NK_STEAM_GRID_SLOT_ICON | NK_STEAM_GRID_SLOT_WIDE |
+                                    NK_STEAM_GRID_SLOT_HERO) &&
+                  res.written_mask == 0u && file_is(p_hero, custom_png, custom_len),
+              "moved update kept original app_id and untouched existing artwork");
+    }
+
+    /* 3. Grid failure after shortcuts.vdf mutation rolls back shortcuts.vdf cleanly. */
+    path_in(steam, sizeof(steam), "steam_acct_art_rollback_new");
+    join_rel_path(cfg, sizeof(cfg), steam, "userdata/30002/config");
+    nk_platform_mkdir_p(cfg);
+    join_rel_path(vdf, sizeof(vdf), cfg, "shortcuts.vdf");
+    join_rel_path(grid_dir, sizeof(grid_dir), cfg, "grid");
+    CHECK(write_bytes(grid_dir, (const uint8_t *)"blocker", 7u), "block config/grid with file");
+    CHECK_STATUS(nk_steam_add_for_account_with_art(steam, "30002", &kGameA, is_running_no,
+                                                   "20261115-100003", backup, sizeof(backup), &ch,
+                                                   &art, NK_STEAM_GRID_KEEP_EXISTING, &res),
+                 NK_STEAM_ERR_WRITE, "file blocking grid dir fails closed");
+    CHECK(path_matches(res.failed_path, grid_dir) && ch == NK_STEAM_CHANGE_NONE &&
+              backup[0] == '\0' && nk_platform_path_missing(vdf),
+          "new shortcuts.vdf is removed when grid creation fails");
+
+    /* 4. Existing shortcuts.vdf rollback: pre-existing VDF bytes are restored on grid failure. */
+    path_in(steam, sizeof(steam), "steam_acct_art_rollback_existing");
+    join_rel_path(cfg, sizeof(cfg), steam, "userdata/30003/config");
+    nk_platform_mkdir_p(cfg);
+    join_rel_path(vdf, sizeof(vdf), cfg, "shortcuts.vdf");
+    join_rel_path(grid_dir, sizeof(grid_dir), cfg, "grid");
+    {
+        Raw existing;
+        uint32_t app_id_b = nk_steam_shortcut_app_id(kGameB.exe, kGameB.app_name);
+        char slot_blocker[NK_MAX_PATH * 2];
+        two_entries(&existing);
+        CHECK(write_bytes(vdf, existing.data, existing.size), "seed existing shortcuts.vdf");
+        grid_file_in(slot_blocker, sizeof(slot_blocker), grid_dir, app_id_b, ".png");
+        CHECK(nk_platform_mkdir_p(slot_blocker), "block Game B wide slot with directory");
+        CHECK_STATUS(nk_steam_add_for_account_with_art(steam, "30003", &kGameB, is_running_no,
+                                                       "20261115-100004", backup, sizeof(backup),
+                                                       &ch, &art, NK_STEAM_GRID_KEEP_EXISTING,
+                                                       &res),
+                     NK_STEAM_ERR_WRITE, "slot dir blocker fails closed after existing VDF");
+        CHECK(path_matches(res.failed_path, slot_blocker) && ch == NK_STEAM_CHANGE_NONE &&
+                  backup[0] == '\0' && file_is(vdf, existing.data, existing.size),
+              "existing shortcuts.vdf restored byte-for-byte on grid failure");
+    }
+}
+
 int main(void) {
     native_test_create_root("steam_shortcuts");
     snprintf(g_root, sizeof(g_root), "%s", native_test_get_root());
@@ -797,6 +1279,11 @@ int main(void) {
     test_a_moved_folder_updates_its_own_entry();
     test_file_update_is_backed_up();
     test_account_names();
+    test_grid_slot_paths_and_suffixes();
+    test_grid_writes_and_reads_back();
+    test_grid_steam_running_and_overwrite_guards();
+    test_grid_invalid_pngs_and_rollback();
+    test_add_for_account_with_art_and_rollback();
     if (g_failures) {
         fprintf(stderr, "test_steam_shortcuts: %d of %d checks failed\n", g_failures, g_checks);
         return 1;
