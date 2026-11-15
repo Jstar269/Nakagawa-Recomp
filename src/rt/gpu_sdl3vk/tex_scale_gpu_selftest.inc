@@ -14,8 +14,9 @@
  *   clut             a CLUT texture is scaled after the palette lookup and again for a new
  *                    palette;
  *   budget           with room for two copies, a third texture stays unscaled while both are
- *                    in use; once they are idle it frees them and its copy lands, and a freed
- *                    texture's copy comes back on a later draw;
+ *                    in use; once they are idle it frees them, without waiting for a recording
+ *                    still in flight, and they are destroyed once the GPU is past it (#2623); its
+ *                    copy lands, and a freed texture's copy comes back on a later draw;
  *   rtt              a render target sampled as a texture, bound directly or read back through
  *                    the cache, is never scaled, and its draws are byte-identical with
  *                    scaling on and off;
@@ -188,6 +189,7 @@ static void xst_reset(void) {
     coherence_reset_targets();
     (void)submit_pending();
     (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+    tex_xs_retire_collect();                /* the GPU is idle: retired copies go too */
     while (s_tex_n) {                       /* the whole cache, as tex_evict_lru frees an entry */
         TexEnt *e = &s_tex[--s_tex_n];
         tex_shadow_release(e);
@@ -682,8 +684,47 @@ static int xst_cell_budget(int f) {
                 (unsigned long long)short1, (unsigned long long)reclaimed1);
         ok = 0;
     }
-    /* A and B go idle; C's next draw frees both and offers C, whose copy the draw after shows. */
+    /* A and B go idle. Freeing them for C never waits for the GPU (#2623): with a recording in flight
+     * that no fence wait has seen, reclaim leaves it in flight and drains nothing (before, it drained
+     * the GE, which after a scene load at a high render scale took 100 to 200 ms). */
     s_cnt_present_cpu += XS_IDLE_PRESENTS;
+    TexEnt *ec = NULL;
+    for (int i = 0; i < s_tex_n; i++)
+        if (s_tex[i].addr == XST_TEX_C) ec = &s_tex[i];
+    SubmitSlot *flying = NULL;
+    if (ok && (!ec || !cmd_begin())) {
+        fprintf(stderr, "gpu texscale selftest: FAIL budget: C has no cache entry, or no recording could start\n");
+        ok = 0;
+    }
+    if (ok) {
+        flying = s_cmd_slot;   /* an empty recording, submitted and not waited on */
+        ok = cmd_finish_submit(SR_PERF_GE_RENDER_BATCH, 1);
+    }
+    const uint64_t lifetime0 = s_replay_stats.boundary[GEGPU_BOUNDARY_LIFETIME].waits;
+    const int fits = ok && tex_xs_reclaim(ec, copy);
+    const uint64_t lifetime1 = s_replay_stats.boundary[GEGPU_BOUNDARY_LIFETIME].waits - lifetime0;
+    if (ok && (!fits || !flying->in_flight || lifetime1 != 0u)) {
+        fprintf(stderr, "gpu texscale selftest: FAIL budget: reclaim waited for the GPU (fits %d, the recording "
+                        "still in flight %d, GE drains %llu, want 1, 1, 0)\n",
+                fits, flying->in_flight, (unsigned long long)lifetime1);
+        ok = 0;
+    }
+    /* The freed copies retire behind that recording, and go once the GPU is past it. */
+    if (ok && (s_xs_retired_n != 2 || s_xs_retired_bytes != 2u * copy || s_xs_retired[0].after < flying->serial ||
+               s_xs_retired[1].after < flying->serial)) {
+        fprintf(stderr, "gpu texscale selftest: FAIL budget: %d copies, %llu bytes retired (want 2, %llu), not "
+                        "all behind the recording in flight\n", s_xs_retired_n,
+                (unsigned long long)s_xs_retired_bytes, (unsigned long long)(2u * copy));
+        ok = 0;
+    }
+    ok = ok && cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+    tex_xs_retire_collect();
+    if (ok && (s_xs_retired_n != 0 || s_xs_retired_bytes != 0u)) {
+        fprintf(stderr, "gpu texscale selftest: FAIL budget: %d retired copies (%llu bytes) kept after the GPU "
+                        "finished every recording\n", s_xs_retired_n, (unsigned long long)s_xs_retired_bytes);
+        ok = 0;
+    }
+    /* C's next draw offers C, whose copy the draw after shows. */
     ok = ok && xst_budget_draw(XST_TEX_C, tc, 180.0f, 0, "C is not drawn unscaled while its copy is made") &&
          xst_budget_draw(XST_TEX_C, tc, 220.0f, f, "C's copy did not land once the idle copies were freed");
     const uint64_t reclaimed2 = s_cnt_xs_reclaimed - reclaimed0;
@@ -703,7 +744,8 @@ static int xst_cell_budget(int f) {
     }
     nk_tex_scale_configure(&saved);
     if (!ok) return 0;
-    printf("gpu texscale selftest: PASS %-12s in-use copies kept, idle ones freed (%llu), a freed copy rescaled\n",
+    printf("gpu texscale selftest: PASS %-12s in-use copies kept, idle ones freed (%llu) without a GPU wait, a "
+           "freed copy rescaled\n",
            "budget", (unsigned long long)reclaimed2);
     return 1;
 }

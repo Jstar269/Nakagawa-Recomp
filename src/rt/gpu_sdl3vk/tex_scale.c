@@ -77,6 +77,20 @@ size_t nk_tex_scale_guest_visible_line(const NkTexScaleConfig *cfg, char *out, s
     return n < 0 ? 0 : ((size_t)n < cap ? (size_t)n : cap - 1);
 }
 
+uint64_t nk_tex_scale_budget_for_vram(uint64_t device_local_bytes) {
+    if (!device_local_bytes) return (uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20;
+    uint64_t mb = (device_local_bytes / 8u) >> 20;
+    if (mb < NK_TEX_SCALE_VRAM_BUDGET_MIN_MB) mb = NK_TEX_SCALE_VRAM_BUDGET_MIN_MB;
+    if (mb > NK_TEX_SCALE_VRAM_BUDGET_MAX_MB) mb = NK_TEX_SCALE_VRAM_BUDGET_MAX_MB;
+    return mb << 20;
+}
+
+static uint64_t s_device_vram;   /* the renderer device's largest device-local heap; 0 = unknown */
+
+void nk_tex_scale_set_device_vram(uint64_t device_local_bytes) { s_device_vram = device_local_bytes; }
+
+uint64_t nk_tex_scale_default_budget_bytes(void) { return nk_tex_scale_budget_for_vram(s_device_vram); }
+
 static char s_start_line[384];   /* what the last nk_tex_scale_init printed */
 
 static void start_line(const char *text) {
@@ -110,6 +124,7 @@ const NkTexScaleConfig *nk_tex_scale_init(int enhanced, int factor, int smart2d,
         set_why(refused, refused_cap, why);
         return &s_cfg;
     }
+    if (!budget || !budget[0]) c.budget_bytes = nk_tex_scale_default_budget_bytes();
     s_cfg = c;
     if (c.factor || c.smart2d) {
         char f[8];
