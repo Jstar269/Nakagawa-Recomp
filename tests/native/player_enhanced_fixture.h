@@ -53,6 +53,10 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
                             "shows."},
     {"Unclipped sound", "Off", "Softens loud sound that the PSP clips. Changes only what you hear; sound "
                                "plays 1.6 ms later."},
+    {"Texture scaling", "Off",
+     "Redraws textures with xBRZ. Uses GPU memory; the game receives changed pictures."},
+    {"Smart 2D filter", "Off",
+     "Sharp HUD art above 1x, but blocky soft text. The game receives changed pictures."},
 };
 typedef char player_enhanced_fixture_matches_parts[
     sizeof(k_enhanced_parts) / sizeof(k_enhanced_parts[0]) == PLAYER_PART_COUNT ? 1 : -1];

@@ -12604,8 +12604,7 @@ static int coherence_run_soft_shadow(void) {
     const size_t fbytes = (size_t)SSH_STRIDE * FB_H * 4u, fb_off = SSH_BASE & 0x00FFFFFFu;
     const int asked = ace_requested()->shadow == ACE_SHADOW_SOFT, declared = nk_ace_soft_shadows()->count > 0;
     const int want_on = g_ace_on && asked && declared, xs = s_xs_factor;
-    const char *xs_env = getenv("SR_TEX_SCALE");
-    const int xs_want = xs_env && xs_env[0] >= '2' && xs_env[0] <= '9' && !xs_env[1] ? xs_env[0] - '0' : 0;
+    const int xs_want = g_ace_on ? ace_requested()->texscale : 0;   /* the line's texscale key (--tex-scale) */
     uint32_t *fr = (uint32_t *)malloc(fbytes * F_COUNT);
     uint8_t *vram0 = (uint8_t *)malloc(SSH_VRAM);
     int ok = fr && vram0;

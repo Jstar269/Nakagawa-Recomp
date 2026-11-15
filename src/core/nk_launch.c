@@ -1660,6 +1660,14 @@ NkResult nk_launch_start(NkLaunchSession *session) {
            every game the library starts write its textures. A runtime started by hand still
            reads it (a developer's or a script's switch). */
         envp[env_count++] = "SR_TEX_DUMP=";
+        /* The variables a launch-line key replaced (src/rt/ace.c, k_ace_retired_env): a runtime
+           refuses to start while one is set. That is right for a run started by hand; for a game
+           the library starts, one left in the player's environment would stop every title,
+           Authentic ones too, and the settings are what count there. Always exported empty, so
+           the child never inherits one. A name added to the runtime's list is added here. */
+        envp[env_count++] = "SR_GLYPHS=";
+        envp[env_count++] = "SR_TEX_SCALE=";
+        envp[env_count++] = "SR_SMART_2D=";
     }
     if (session->config.headless_accept_presented_frames > 0u) {
         snprintf(env_headless_accept_frames, sizeof(env_headless_accept_frames),

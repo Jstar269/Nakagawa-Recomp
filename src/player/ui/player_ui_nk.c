@@ -295,7 +295,10 @@ struct PlayerUiNk {
     bool icon_reported[PLAYER_UI_TITLE_CAP];
     char status_reported[PLAYER_UI_TITLE_CAP][32]; /* the status word last printed */
     char play_reported[PLAYER_UI_TITLE_CAP][16];   /* the play mode badge last printed */
-    char enhanced_reported[512];                    /* Settings > Enhanced as last printed */
+    /* Settings > Enhanced as last printed: the title, mode and sentence, then "|key=value" for each
+       part, whose value is at most enhanced_values' 48 bytes. Sized by the part count, so one more
+       part cannot cut the line short. */
+    char enhanced_reported[PLAYER_PART_COUNT * 64 + 256];
     char ace_line_reported[PLAYER_PART_COUNT * 64 + 192]; /* the play line last printed */
     char enhancement_tag_reported[PLAYER_UI_TITLE_CAP][16]; /* the ENHANCEMENTS tag printed */
     char preset_note_reported[200];                /* the main Settings page's preset note */
@@ -2844,7 +2847,11 @@ static void player_ui_title_ace(PlayerUiNk *player, const PlayerApp *app, int in
             } else {
                 snprintf(part, sizeof(part), "%s", info->name);
             }
-            for (char *c = part; *c; c++) *c = (char)tolower((unsigned char)*c);
+            /* Lower case, but for a "2D": the Smart 2D filter reads "smart 2D filter". */
+            for (char *c = part; *c; c++) {
+                if (*c == 'D' && c > part && c[-1] >= '0' && c[-1] <= '9') continue;
+                *c = (char)tolower((unsigned char)*c);
+            }
             int n = snprintf(words + used, sizeof(words) - used, "%s%s", count ? ", " : "", part);
             if (n < 0 || used + (size_t)n >= sizeof(words)) break;
             used += (size_t)n;

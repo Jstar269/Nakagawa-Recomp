@@ -26,6 +26,9 @@
  * the run and one "ACE_MODE: refused (<reason>)" line says why. Unset is off and says nothing.
  * pad (late or off, 11.3.9) may be left out too: a missing pad or pad=off is off, pad=late needs
  * tier=ace, and any other value refuses the line.
+ * texscale (off, or the xBRZ factor 2 to 6) and smart2d (on or off) may be left out as well (10.10,
+ * 11.3.3): a missing one, or texscale=off or smart2d=off, is off; neither needs tier=ace, and any
+ * other value (texscale=1, texscale=7, smart2d=yes) refuses the line.
  *
  * Off is authentic: every Ace branch in the runtime sits behind g_ace_on, which stays 0, so the
  * Vulkan device, every sampler, the guest shaders, the presents and the observation counters
@@ -36,7 +39,8 @@
  * guest timing of a title's declared loading waits; with depth=32, which surface wins where two
  * lie within one 16-bit depth step; with peak=limit, only the host's sound: the guest's SAS bytes
  * stay the PSP's; with glyphs=on at a render scale of 2 to 4, the pixels of small text sprites in
- * the frames the guest keeps), and
+ * the frames the guest keeps; with texscale=2..6 or smart2d=on, the pixels of textured draws in
+ * those frames), and
  * the run says so ("ACE_MODE: on (...)" at start, an exit line, and the flight recorder's
  * runtime.enhancements block).
  *
@@ -79,6 +83,9 @@
 #define ACE_HAS_MIPS 1          /* mips=on: host-built mip chains for single-level textures (11.3.8) */
 #define ACE_HAS_TEXPACK 1       /* texpack=on: draw the title's texture pack, SR_TEX_REPLACE (11.3.4) */
 #define ACE_HAS_PAD 1           /* pad=late: late pad sampling at a package's update boundary (11.3.9) */
+#define ACE_HAS_TEXSCALE 1      /* texscale=2..6: xBRZ copies of the textures a game draws (10.10, 11.3.3) */
+#define ACE_TEXSCALE_MAX 6      /* texscale's largest factor (tex_scale.h NK_TEX_SCALE_MAX) */
+#define ACE_HAS_SMART2D 1       /* smart2d=on: nearest sampling for 1:1 2D draws above 1x (10.10, 11.3.3) */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
 typedef enum { ACE_SMOOTH_OFF = 0, ACE_SMOOTH_MATCH = 1, ACE_SMOOTH_X2 = 2 } AceSmooth;
@@ -122,6 +129,10 @@ typedef struct {
     int pad;         /* pad=late: each logic update starts closer to its VBLANK deadline and reads a
                         fresher pad sample (guest-visible timing, 11.3.9) */
     int shadow;      /* AceShadow: declared blob-shadow textures drawn with soft edges (guest-visible, 11.3.13) */
+    int texscale;    /* texscale=2..6: 0 off, else the xBRZ factor the Vulkan renderer scales its copies of
+                        guest textures by (guest-visible, 10.10 and 11.3.3) */
+    int smart2d;     /* smart2d=on: a textured draw that maps one texel to one pixel samples nearest at a
+                        render scale above 1x (guest-visible, 10.10 and 11.3.3) */
 } AceConfig;
 
 typedef enum {
@@ -145,6 +156,8 @@ typedef enum {
     ACE_FEATURE_TEXPACK,
     ACE_FEATURE_PAD,
     ACE_FEATURE_SHADOW,
+    ACE_FEATURE_TEXSCALE,
+    ACE_FEATURE_SMART2D,
     ACE_FEATURE_COUNT
 } AceFeature;
 
@@ -172,6 +185,14 @@ int ace_init_from_env(void);
 /* SR_GLYPHS (its value, NULL or "" for unset) once switched sharp game text; the launch line's glyphs
  * key replaced it. Returns 1 and writes the line that names the key to `why` when it is set, else 0. */
 int ace_retired_env(const char *glyphs, char *why, size_t why_cap);
+/* The same for every retired variable, by name: SR_GLYPHS, and SR_TEX_SCALE and SR_SMART_2D, which
+ * once switched texture scaling and the smart 2D filter and which the line's texscale and smart2d
+ * keys replaced. `value` is the variable's value (NULL or "" for unset). Returns 1 and writes the
+ * line that names the key when `name` is a retired variable that is set, else 0 with `why` empty. */
+int ace_retired_env_named(const char *name, const char *value, char *why, size_t why_cap);
+/* How many variables are retired, and the name of the i-th (NULL past the end). */
+size_t ace_retired_env_count(void);
+const char *ace_retired_env_name(size_t i);
 int ace_init_spec(const char *spec, const char *report_path);
 /* The requested line, and what this host gave (a feature it cannot provide is off here). A host twin
  * that SR_GPU_TWIN_COLOR turned on counts as given (ace_set_twin_running). */

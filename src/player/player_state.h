@@ -287,6 +287,13 @@ typedef enum {
                                   bytes are the PSP's. Enhanced and Ace; off in a fresh file and in
                                   every preset. Appended; the Ace line writes peak after ssaa, before
                                   texpack */
+    PLAYER_PART_TEXSCALE,      /* texture scaling, xBRZ (#1273, sections 10.10 and 11.3.3): 0 off, or the
+                                  factor 2 to 6. Guest-visible; off in a fresh file and in every preset.
+                                  Appended; the line carries texscale=<factor> after shadow,
+                                  before cull, in either tier, only when on */
+    PLAYER_PART_SMART2D,       /* the smart 2D filter (#1273, sections 10.10 and 11.3.3): 0 off, 1 on.
+                                  Guest-visible; off in a fresh file and in every preset. Appended; the
+                                  line carries smart2d=on after texscale, before cull, only when on */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -1858,6 +1865,8 @@ void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
  * missing pad is off.
  * ";shadow=soft" follows pad, before cull, only for Ace with the Soft shadows part on; a
  * missing shadow is off.
+ * ";texscale=<factor>" (2 to 6) and ";smart2d=on" follow shadow, before cull, with the Texture
+ * scaling or the Smart 2D filter part on, in either tier; a missing one is off.
  * ";cull=on" follows, last, only for Ace with the Wider culling part on; a missing cull is off.
  * Returns false when it does not fit. */
 bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap);
