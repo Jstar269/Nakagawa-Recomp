@@ -1257,6 +1257,253 @@ static void test_add_for_account_with_art_and_rollback(void) {
     }
 }
 
+/* One Steam account folder for the tests below: `<root>/<leaf>/userdata/<id>/config`. */
+static void art_account(const char *leaf, const char *id, char *steam, size_t steam_cap,
+                        char *vdf, size_t vdf_cap) {
+    char cfg[NK_MAX_PATH * 2];
+    char rel[64];
+    path_in(steam, steam_cap, leaf);
+    snprintf(rel, sizeof(rel), "userdata/%s/config", id);
+    join_rel_path(cfg, sizeof(cfg), steam, rel);
+    CHECK(nk_platform_mkdir_p(cfg), "account config folder");
+    join_rel_path(vdf, vdf_cap, cfg, "shortcuts.vdf");
+}
+
+/* Every Nakagawa shortcut runs the same player; only its launch options name the game. Each
+ * game added in turn gets artwork under its own app ID (#2630 review, finding 1). */
+static void test_grid_each_title_gets_its_own_app_id(void) {
+    static const NkSteamShortcut kGameC = {"Game C", "C:/Games/Nakagawa/bin/nakagawa_player.exe",
+                                           "C:/Games/Nakagawa/bin", "--launch-title=ULUS10003"};
+    const NkSteamShortcut *games[3] = {&kGameA, &kGameB, &kGameC};
+    char steam[NK_MAX_PATH], vdf[NK_MAX_PATH * 2], backup[NK_MAX_PATH];
+    char p_icon[NK_MAX_PATH * 2], p_hero[NK_MAX_PATH * 2];
+    uint8_t icon0[3][2048], pic1[3][2048];
+    size_t icon0_len[3], pic1_len[3];
+    uint32_t ids[3];
+    NkSteamGridResult res;
+    NkSteamChange ch = NK_STEAM_CHANGE_NONE;
+
+    art_account("steam_art_three_titles", "30010", steam, sizeof(steam), vdf, sizeof(vdf));
+    for (size_t i = 0u; i < 3u; ++i) {
+        NkSteamGridArt art;
+        char stamp[32];
+        icon0_len[i] = make_synthetic_png(10u + (uint32_t)i, 6u, (uint8_t)(0x10u * i), 0x20u,
+                                          0x30u, 255u, icon0[i], sizeof(icon0[i]));
+        pic1_len[i] = make_synthetic_png(12u + (uint32_t)i, 7u, 0x40u, (uint8_t)(0x10u * i),
+                                         0x50u, 255u, pic1[i], sizeof(pic1[i]));
+        art.icon0_png = icon0[i];
+        art.icon0_size = icon0_len[i];
+        art.pic1_png = pic1[i];
+        art.pic1_size = pic1_len[i];
+        ids[i] = nk_steam_shortcut_app_id(games[i]->exe, games[i]->app_name);
+        snprintf(stamp, sizeof(stamp), "20261115-11000%u", (unsigned)i);
+        CHECK_STATUS(nk_steam_add_for_account_with_art(steam, "30010", games[i], is_running_no,
+                                                       stamp, backup, sizeof(backup), &ch, &art,
+                                                       NK_STEAM_GRID_KEEP_EXISTING, &res),
+                     NK_STEAM_OK, "each title is added with its artwork");
+        CHECK(ch == NK_STEAM_CHANGE_ADDED, "each title is a shortcut of its own");
+        CHECK(res.app_id == ids[i], "artwork goes under this title's own app ID");
+        CHECK(res.written_mask == (NK_STEAM_GRID_SLOT_ICON | NK_STEAM_GRID_SLOT_WIDE |
+                                   NK_STEAM_GRID_SLOT_HERO) && res.kept_mask == 0u,
+              "every slot of a new title is written, none kept from another title");
+    }
+    CHECK(ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2], "three distinct app IDs");
+    {
+        size_t size = 0u;
+        uint8_t *bytes = read_bytes(vdf, &size);
+        uint32_t found = 0u;
+        NkSteamShortcut other = kGameB;
+        CHECK(bytes != NULL && nk_steam_vdf_find_app_id(bytes, size, &kGameB, &found) &&
+                  found == ids[1],
+              "the lookup finds game B's own entry, not game A's");
+        other.launch_options = "--launch-title=ULUS19999";
+        CHECK(bytes != NULL && !nk_steam_vdf_find_app_id(bytes, size, &other, &found) &&
+                  found == 0u,
+              "the same player with another game's options is not found");
+        free(bytes);
+    }
+    for (size_t i = 0u; i < 3u; ++i) {
+        {
+            char grid_dir[NK_MAX_PATH * 2];
+            join_rel_path(grid_dir, sizeof(grid_dir), steam, "userdata/30010/config/grid");
+            grid_file_in(p_icon, sizeof(p_icon), grid_dir, ids[i], "_icon.png");
+            grid_file_in(p_hero, sizeof(p_hero), grid_dir, ids[i], "_hero.png");
+        }
+        CHECK(file_is(p_icon, icon0[i], icon0_len[i]) && file_is(p_hero, pic1[i], pic1_len[i]),
+              "each title's own ICON0 and PIC1 sit under its own app ID");
+    }
+}
+
+/* A failed grid write after shortcuts.vdf changed, when the list cannot be put back: the
+ * verified backup is the user's only copy and stays, named (#2630 review, finding 2). */
+static void test_grid_failed_restore_keeps_the_backup(void) {
+    char steam[NK_MAX_PATH], vdf[NK_MAX_PATH * 2], backup[NK_MAX_PATH];
+    char grid_dir[NK_MAX_PATH * 2], slot_blocker[NK_MAX_PATH * 2];
+    char restore_blocker[NK_MAX_PATH * 3];
+    uint8_t icon0[2048];
+    size_t icon0_len = make_synthetic_png(9u, 5u, 1u, 2u, 3u, 255u, icon0, sizeof(icon0));
+    NkSteamGridArt art = {icon0, icon0_len, NULL, 0u};
+    NkSteamGridResult res;
+    NkSteamChange ch = NK_STEAM_CHANGE_NONE;
+    Raw existing;
+
+    art_account("steam_art_restore_fails", "30011", steam, sizeof(steam), vdf, sizeof(vdf));
+    join_rel_path(grid_dir, sizeof(grid_dir), steam, "userdata/30011/config/grid");
+    two_entries(&existing);
+    CHECK(write_bytes(vdf, existing.data, existing.size), "seed shortcuts.vdf");
+    grid_file_in(slot_blocker, sizeof(slot_blocker), grid_dir,
+                 nk_steam_shortcut_app_id(kGameB.exe, kGameB.app_name), ".png");
+    CHECK(nk_platform_mkdir_p(slot_blocker), "a folder blocks the wide capsule");
+    snprintf(restore_blocker, sizeof(restore_blocker), "%s.nakagawa-restore", vdf);
+    CHECK(nk_platform_mkdir_p(restore_blocker), "a folder blocks putting the list back");
+    CHECK_STATUS(nk_steam_add_for_account_with_art(steam, "30011", &kGameB, is_running_no,
+                                                   "20261115-110100", backup, sizeof(backup), &ch,
+                                                   &art, NK_STEAM_GRID_KEEP_EXISTING, &res),
+                 NK_STEAM_ERR_WRITE, "the artwork write fails");
+    CHECK(backup[0] != '\0', "the backup is still named");
+    CHECK(backup[0] != '\0' && file_is(backup, existing.data, existing.size),
+          "the backup of the list from before is kept, byte for byte");
+    CHECK(ch == NK_STEAM_CHANGE_ADDED && res.restore_failed,
+          "the list still holds the new shortcut, and says so");
+}
+
+/* The game's pictures are optional: one that is malformed, too large, empty or missing never
+ * stops the shortcut; it is skipped and the rest is used (#2630 review, finding 3). */
+static void test_grid_bad_art_never_blocks_the_shortcut(void) {
+    char steam[NK_MAX_PATH], vdf[NK_MAX_PATH * 2], backup[NK_MAX_PATH];
+    char grid_dir[NK_MAX_PATH * 2], p_icon[NK_MAX_PATH * 2], p_hero[NK_MAX_PATH * 2];
+    uint8_t good[2048], trailing[2048];
+    size_t good_len = make_synthetic_png(8u, 8u, 7u, 8u, 9u, 255u, good, sizeof(good));
+    uint8_t *oversized = (uint8_t *)calloc(1u, NK_STEAM_GRID_MAX_BYTES + 1u);
+    static const uint8_t not_png[] = "NOTAPNG";
+    NkSteamGridResult res;
+    NkSteamChange ch = NK_STEAM_CHANGE_NONE;
+    struct {
+        const char *what;
+        const uint8_t *icon0;
+        size_t icon0_size;
+    } cases[4];
+    size_t n = 0u;
+    uint8_t *vdf_bytes;
+    size_t vdf_size = 0u;
+
+    CHECK(oversized != NULL, "allocate oversized buffer");
+    if (oversized == NULL) return;
+    memcpy(oversized, good, good_len);
+    memcpy(trailing, good, good_len);
+    trailing[good_len] = 0x42u;
+    cases[n].what = "not a PNG";
+    cases[n].icon0 = not_png;
+    cases[n++].icon0_size = sizeof(not_png) - 1u;
+    cases[n].what = "bytes after IEND";
+    cases[n].icon0 = trailing;
+    cases[n++].icon0_size = good_len + 1u;
+    cases[n].what = "over the size cap";
+    cases[n].icon0 = oversized;
+    cases[n++].icon0_size = NK_STEAM_GRID_MAX_BYTES + 1u;
+    cases[n].what = "under the smallest PNG";
+    cases[n].icon0 = good;
+    cases[n++].icon0_size = 30u;
+
+    for (size_t i = 0u; i < n; ++i) {
+        char leaf[64];
+        char id[16];
+        NkSteamGridArt art = {cases[i].icon0, cases[i].icon0_size, good, good_len};
+        uint32_t app_id = nk_steam_shortcut_app_id(kGameA.exe, kGameA.app_name);
+        snprintf(leaf, sizeof(leaf), "steam_art_bad_icon_%u", (unsigned)i);
+        snprintf(id, sizeof(id), "3002%u", (unsigned)i);
+        art_account(leaf, id, steam, sizeof(steam), vdf, sizeof(vdf));
+        CHECK_STATUS(nk_steam_add_for_account_with_art(steam, id, &kGameA, is_running_no,
+                                                       "20261115-110200", backup, sizeof(backup),
+                                                       &ch, &art, NK_STEAM_GRID_KEEP_EXISTING,
+                                                       &res),
+                     NK_STEAM_OK, cases[i].what);
+        vdf_bytes = read_bytes(vdf, &vdf_size);
+        CHECK(ch == NK_STEAM_CHANGE_ADDED && vdf_bytes != NULL &&
+                  count_bytes(vdf_bytes, vdf_size, kGameA.launch_options) == 1u,
+              "the shortcut is added even though ICON0.PNG is unusable");
+        free(vdf_bytes);
+        join_rel_path(grid_dir, sizeof(grid_dir), steam, "userdata/");
+        snprintf(grid_dir + strlen(grid_dir), sizeof(grid_dir) - strlen(grid_dir),
+                 "%s/config/grid", id);
+        grid_file_in(p_icon, sizeof(p_icon), grid_dir, app_id, "_icon.png");
+        grid_file_in(p_hero, sizeof(p_hero), grid_dir, app_id, "_hero.png");
+        CHECK(nk_platform_path_missing(p_icon) && file_is(p_hero, good, good_len),
+              "the bad ICON0 is skipped and the good PIC1 is still used");
+        CHECK(strstr(res.skipped, "ICON0.PNG") != NULL && strstr(res.skipped, "PIC1") == NULL,
+              "the skipped picture is named, and only that one");
+    }
+
+    /* Neither picture usable: the shortcut alone, no grid folder at all. */
+    {
+        NkSteamGridArt art = {not_png, sizeof(not_png) - 1u, oversized,
+                              NK_STEAM_GRID_MAX_BYTES + 1u};
+        art_account("steam_art_bad_both", "30029", steam, sizeof(steam), vdf, sizeof(vdf));
+        CHECK_STATUS(nk_steam_add_for_account_with_art(steam, "30029", &kGameA, is_running_no,
+                                                       "20261115-110201", backup, sizeof(backup),
+                                                       &ch, &art, NK_STEAM_GRID_KEEP_EXISTING,
+                                                       &res),
+                     NK_STEAM_OK, "two unusable pictures still add the shortcut");
+        join_rel_path(grid_dir, sizeof(grid_dir), steam, "userdata/30029/config/grid");
+        CHECK(ch == NK_STEAM_CHANGE_ADDED && res.written_mask == 0u &&
+                  nk_platform_path_missing(grid_dir),
+              "no picture is written and no grid folder is made");
+        CHECK(strstr(res.skipped, "ICON0.PNG") != NULL && strstr(res.skipped, "PIC1.PNG") != NULL,
+              "both skipped pictures are named");
+    }
+    free(oversized);
+}
+
+/* Steam takes a non-Steam shortcut's icon from the entry's "icon" field, so a new entry
+ * names the copied icon there, and leaves it empty without one (#2630 review, finding 4). */
+static void test_grid_icon_is_named_in_the_shortcut(void) {
+    char steam[NK_MAX_PATH], vdf[NK_MAX_PATH * 2], backup[NK_MAX_PATH];
+    char icon_path[NK_MAX_PATH * 2];
+    uint8_t icon0[2048], pic1[2048];
+    size_t icon0_len = make_synthetic_png(9u, 5u, 4u, 5u, 6u, 255u, icon0, sizeof(icon0));
+    size_t pic1_len = make_synthetic_png(12u, 7u, 7u, 8u, 9u, 255u, pic1, sizeof(pic1));
+    NkSteamGridResult res;
+    NkSteamChange ch = NK_STEAM_CHANGE_NONE;
+    uint8_t *bytes;
+    size_t size = 0u;
+    uint8_t want[NK_MAX_PATH * 2 + 8];
+    size_t want_len;
+
+    {
+        NkSteamGridArt art = {icon0, icon0_len, pic1, pic1_len};
+        art_account("steam_art_icon_field", "30030", steam, sizeof(steam), vdf, sizeof(vdf));
+        CHECK_STATUS(nk_steam_add_for_account_with_art(steam, "30030", &kGameA, is_running_no,
+                                                       "20261115-110300", backup, sizeof(backup),
+                                                       &ch, &art, NK_STEAM_GRID_KEEP_EXISTING,
+                                                       &res),
+                     NK_STEAM_OK, "add with an icon");
+        CHECK(nk_steam_grid_slot_path(res.grid_dir, res.app_id, NK_STEAM_GRID_SLOT_ICON,
+                                      icon_path, sizeof(icon_path)),
+              "icon path");
+        CHECK(file_is(icon_path, icon0, icon0_len), "the icon file is there");
+        memcpy(want, "icon\0", 5u);
+        want_len = 5u + strlen(icon_path) + 1u;
+        memcpy(want + 5u, icon_path, strlen(icon_path) + 1u);
+        bytes = read_bytes(vdf, &size);
+        CHECK(bytes != NULL && find_bytes(bytes, size, want, want_len) != NULL,
+              "the shortcut's icon field names the copied icon");
+        free(bytes);
+    }
+    {
+        NkSteamGridArt art = {NULL, 0u, pic1, pic1_len};
+        art_account("steam_art_no_icon_field", "30031", steam, sizeof(steam), vdf, sizeof(vdf));
+        CHECK_STATUS(nk_steam_add_for_account_with_art(steam, "30031", &kGameA, is_running_no,
+                                                       "20261115-110301", backup, sizeof(backup),
+                                                       &ch, &art, NK_STEAM_GRID_KEEP_EXISTING,
+                                                       &res),
+                     NK_STEAM_OK, "add without an icon");
+        bytes = read_bytes(vdf, &size);
+        CHECK(bytes != NULL && find_bytes(bytes, size, "\x01icon\0\0", 7u) != NULL,
+              "without ICON0.PNG the icon field stays empty");
+        free(bytes);
+    }
+}
+
 int main(void) {
     native_test_create_root("steam_shortcuts");
     snprintf(g_root, sizeof(g_root), "%s", native_test_get_root());
@@ -1284,6 +1531,10 @@ int main(void) {
     test_grid_steam_running_and_overwrite_guards();
     test_grid_invalid_pngs_and_rollback();
     test_add_for_account_with_art_and_rollback();
+    test_grid_each_title_gets_its_own_app_id();
+    test_grid_failed_restore_keeps_the_backup();
+    test_grid_bad_art_never_blocks_the_shortcut();
+    test_grid_icon_is_named_in_the_shortcut();
     if (g_failures) {
         fprintf(stderr, "test_steam_shortcuts: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

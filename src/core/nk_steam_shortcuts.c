@@ -81,6 +81,7 @@ typedef struct {
      * another folder). */
     const NkSteamShortcut *want;
     bool same_found;
+    uint32_t same_app_id;     /* the first own entry's "appid", or 0 */
     bool moved_found;
     size_t moved_exe_at, moved_exe_end;   /* the stored exe value, its NUL included */
     size_t moved_dir_at, moved_dir_end;   /* the stored StartDir value, its NUL included */
@@ -88,6 +89,7 @@ typedef struct {
     const char *cur_exe;
     size_t cur_exe_at, cur_exe_end;
     const char *cur_options;
+    uint32_t cur_app_id;
     bool cur_has_dir;
     size_t cur_dir_at, cur_dir_end;
     bool have_shortcuts;
@@ -165,6 +167,7 @@ static void judge_entry(Scan *s) {
     const char *want_options = s->want->launch_options ? s->want->launch_options : "";
     if (strcmp(options, want_options) != 0) return;
     if (exe_matches(s->cur_exe, s->want->exe)) {
+        if (!s->same_found) s->same_app_id = s->cur_app_id;
         s->same_found = true;
         return;
     }
@@ -215,6 +218,7 @@ static bool scan_map(Scan *s, size_t *pos, int depth, int level) {
                     }
                     s->cur_exe = NULL;
                     s->cur_options = NULL;
+                    s->cur_app_id = 0u;
                     s->cur_has_dir = false;
                 }
                 if (!scan_map(s, pos, depth + 1, child_level)) return false;
@@ -251,6 +255,11 @@ static bool scan_map(Scan *s, size_t *pos, int depth, int level) {
             case VDF_PTR:
             case VDF_COLOR:
                 if (s->size - *pos < 4u) return false;
+                if (type == VDF_INT32 && level == 2 && ieq(key, "appid")) {
+                    const uint8_t *le = s->data + *pos;
+                    s->cur_app_id = (uint32_t)le[0] | ((uint32_t)le[1] << 8) |
+                                    ((uint32_t)le[2] << 16) | ((uint32_t)le[3] << 24);
+                }
                 *pos += 4u;
                 break;
             case VDF_UINT64:
@@ -357,7 +366,8 @@ static void put_quoted(Buf *b, const char *key, const char *path) {
     buf_put(b, "\"\0", 2u);
 }
 
-static void put_entry(Buf *b, uint32_t index, const NkSteamShortcut *sc) {
+/* `icon` is the picture Steam shows for the entry (#2571), or NULL for none. */
+static void put_entry(Buf *b, uint32_t index, const NkSteamShortcut *sc, const char *icon) {
     char key[16];
     snprintf(key, sizeof(key), "%u", (unsigned)index);
     buf_byte(b, VDF_MAP);
@@ -366,7 +376,7 @@ static void put_entry(Buf *b, uint32_t index, const NkSteamShortcut *sc) {
     buf_string_entry(b, "appname", sc->app_name);
     put_quoted(b, "exe", sc->exe);
     put_quoted(b, "StartDir", sc->start_dir);
-    buf_string_entry(b, "icon", "");
+    buf_string_entry(b, "icon", icon ? icon : "");
     buf_string_entry(b, "ShortcutPath", "");
     buf_string_entry(b, "LaunchOptions", sc->launch_options ? sc->launch_options : "");
     buf_int_entry(b, "IsHidden", 0u);
@@ -407,15 +417,19 @@ static void put_moved(Buf *b, const uint8_t *in, size_t in_len, const Scan *scan
     buf_put(b, in + second_end, in_len - second_end);
 }
 
-NkSteamStatus nk_steam_vdf_add(const uint8_t *in, size_t in_len, const NkSteamShortcut *shortcut,
-                               uint8_t **out, size_t *out_len, NkSteamChange *change) {
+/* nk_steam_vdf_add, with the icon a new entry names (NULL for none). An entry that is already
+ * there, or that moves, keeps its own icon field. */
+static NkSteamStatus vdf_add(const uint8_t *in, size_t in_len, const NkSteamShortcut *shortcut,
+                             const char *icon, uint8_t **out, size_t *out_len,
+                             NkSteamChange *change) {
     if (out) *out = NULL;
     if (out_len) *out_len = 0;
     if (change) *change = NK_STEAM_CHANGE_NONE;
     if (!shortcut || !out || !out_len || (!in && in_len)) return NK_STEAM_ERR_ARGUMENT;
     if (!field_ok(shortcut->app_name, false) || !field_ok(shortcut->exe, false) ||
         shortcut->exe[0] == '"' || !field_ok(shortcut->start_dir, false) || shortcut->start_dir[0] == '"' ||
-        (shortcut->launch_options && !field_ok(shortcut->launch_options, true))) {
+        (shortcut->launch_options && !field_ok(shortcut->launch_options, true)) ||
+        (icon && !field_ok(icon, true))) {
         return NK_STEAM_ERR_ARGUMENT;
     }
     Scan scan;
@@ -432,20 +446,20 @@ NkSteamStatus nk_steam_vdf_add(const uint8_t *in, size_t in_len, const NkSteamSh
             made = NK_STEAM_CHANGE_UPDATED;
         } else if (scan.have_shortcuts) {
             buf_put(&b, in, scan.shortcuts_end);
-            put_entry(&b, index, shortcut);
+            put_entry(&b, index, shortcut, icon);
             buf_put(&b, in + scan.shortcuts_end, in_len - scan.shortcuts_end);
         } else {
             buf_put(&b, in, scan.root_end);
             buf_byte(&b, VDF_MAP);
             buf_cstr(&b, "shortcuts");
-            put_entry(&b, index, shortcut);
+            put_entry(&b, index, shortcut, icon);
             buf_byte(&b, VDF_END);
             buf_put(&b, in + scan.root_end, in_len - scan.root_end);
         }
     } else {
         buf_byte(&b, VDF_MAP);
         buf_cstr(&b, "shortcuts");
-        put_entry(&b, 0u, shortcut);
+        put_entry(&b, 0u, shortcut, icon);
         buf_byte(&b, VDF_END);
         buf_byte(&b, VDF_END);
     }
@@ -463,6 +477,26 @@ NkSteamStatus nk_steam_vdf_add(const uint8_t *in, size_t in_len, const NkSteamSh
     *out_len = b.size;
     if (change) *change = made;
     return NK_STEAM_OK;
+}
+
+NkSteamStatus nk_steam_vdf_add(const uint8_t *in, size_t in_len, const NkSteamShortcut *shortcut,
+                               uint8_t **out, size_t *out_len, NkSteamChange *change) {
+    return vdf_add(in, in_len, shortcut, NULL, out, out_len, change);
+}
+
+bool nk_steam_vdf_find_app_id(const uint8_t *in, size_t in_len, const NkSteamShortcut *shortcut,
+                              uint32_t *out_app_id) {
+    Scan scan;
+    if (out_app_id) *out_app_id = 0u;
+    if (!in || !in_len || !shortcut || !shortcut->exe || !shortcut->exe[0] || !out_app_id) {
+        return false;
+    }
+    if (scan_file(&scan, in, in_len, NULL, shortcut) != NK_STEAM_OK || !scan.same_found ||
+        scan.same_app_id == 0u) {
+        return false;
+    }
+    *out_app_id = scan.same_app_id;
+    return true;
 }
 
 /* ---- Files ---- */
@@ -551,9 +585,9 @@ static bool parent_dir(const char *path, char *dir, size_t cap) {
     return true;
 }
 
-NkSteamStatus nk_steam_add_to_file(const char *vdf_path, const NkSteamShortcut *shortcut,
-                                   bool steam_running, const char *stamp,
-                                   char *backup_path, size_t backup_cap, NkSteamChange *change) {
+static NkSteamStatus add_to_file(const char *vdf_path, const NkSteamShortcut *shortcut,
+                                 const char *icon, bool steam_running, const char *stamp,
+                                 char *backup_path, size_t backup_cap, NkSteamChange *change) {
     if (backup_path && backup_cap) backup_path[0] = '\0';
     if (change) *change = NK_STEAM_CHANGE_NONE;
     if (!vdf_path || !vdf_path[0] || !shortcut || !stamp_ok(stamp)) return NK_STEAM_ERR_ARGUMENT;
@@ -568,7 +602,7 @@ NkSteamStatus nk_steam_add_to_file(const char *vdf_path, const NkSteamShortcut *
     uint8_t *next = NULL;
     size_t next_size = 0;
     NkSteamChange made = NK_STEAM_CHANGE_NONE;
-    status = nk_steam_vdf_add(current, current_size, shortcut, &next, &next_size, &made);
+    status = vdf_add(current, current_size, shortcut, icon, &next, &next_size, &made);
     if (status != NK_STEAM_OK) {
         free(current);
         return status;
@@ -621,6 +655,13 @@ done:
     free(current);
     free(next);
     return status;
+}
+
+NkSteamStatus nk_steam_add_to_file(const char *vdf_path, const NkSteamShortcut *shortcut,
+                                   bool steam_running, const char *stamp,
+                                   char *backup_path, size_t backup_cap, NkSteamChange *change) {
+    return add_to_file(vdf_path, shortcut, NULL, steam_running, stamp, backup_path, backup_cap,
+                       change);
 }
 
 /* ---- Finding Steam ---- */
@@ -888,10 +929,11 @@ bool nk_steam_client_running(void) { return false; }
 
 #endif
 
-NkSteamStatus nk_steam_add_for_account(const char *root, const char *account_id,
-                                       const NkSteamShortcut *shortcut, NkSteamRunningFn running,
-                                       const char *stamp, char *backup_path, size_t backup_cap,
-                                       NkSteamChange *change) {
+static NkSteamStatus add_for_account(const char *root, const char *account_id,
+                                     const NkSteamShortcut *shortcut, const char *icon,
+                                     NkSteamRunningFn running, const char *stamp,
+                                     char *backup_path, size_t backup_cap,
+                                     NkSteamChange *change) {
     if (backup_path && backup_cap) backup_path[0] = '\0';
     if (change) *change = NK_STEAM_CHANGE_NONE;
     if (!root || !root[0] || !account_id || !all_digits(account_id) ||
@@ -910,10 +952,18 @@ NkSteamStatus nk_steam_add_for_account(const char *root, const char *account_id,
     for (size_t i = 0; i < count; i++) {
         if (strcmp(accounts[i].id, account_id) != 0) continue;
         bool is_running = (running ? running : nk_steam_client_running)();
-        return nk_steam_add_to_file(accounts[i].shortcuts_path, shortcut, is_running, stamp,
-                                    backup_path, backup_cap, change);
+        return add_to_file(accounts[i].shortcuts_path, shortcut, icon, is_running, stamp,
+                           backup_path, backup_cap, change);
     }
     return NK_STEAM_ERR_NOT_FOUND;
+}
+
+NkSteamStatus nk_steam_add_for_account(const char *root, const char *account_id,
+                                       const NkSteamShortcut *shortcut, NkSteamRunningFn running,
+                                       const char *stamp, char *backup_path, size_t backup_cap,
+                                       NkSteamChange *change) {
+    return add_for_account(root, account_id, shortcut, NULL, running, stamp, backup_path,
+                           backup_cap, change);
 }
 
 /* ---- Steam shortcut grid artwork (#2571) -------------------------------------------------- */
@@ -973,22 +1023,6 @@ static bool grid_parent_dir(const char *path, char *out, size_t cap) {
 static uint32_t grid_read_be32(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) |
            (uint32_t)p[3];
-}
-
-static uint32_t grid_read_le32(const uint8_t *p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[3] << 24);
-}
-
-static int grid_stricmp_ascii(const char *a, const char *b) {
-    while (*a != '\0' && *b != '\0') {
-        unsigned char ca = (unsigned char)*a++;
-        unsigned char cb = (unsigned char)*b++;
-        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca + ('a' - 'A'));
-        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb + ('a' - 'A'));
-        if (ca != cb) return (int)ca - (int)cb;
-    }
-    return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
 static bool grid_read_bounded_file(const char *path, size_t max_bytes, uint8_t **out_data,
@@ -1214,104 +1248,6 @@ bool nk_steam_grid_slot_path(const char *grid_dir, uint32_t app_id, NkSteamGridS
     memcpy(out + dlen + 1u, fname, flen);
     out[dlen + 1u + flen] = '\0';
     return true;
-}
-
-static bool vdf_read_cstr(const uint8_t *in, size_t len, size_t *pos, const char **out_str) {
-    const uint8_t *nul;
-    if (*pos >= len) return false;
-    nul = (const uint8_t *)memchr(in + *pos, '\0', len - *pos);
-    if (nul == NULL) return false;
-    *out_str = (const char *)(in + *pos);
-    *pos = (size_t)(nul - in) + 1u;
-    return true;
-}
-
-static bool vdf_skip_value(const uint8_t *in, size_t len, uint8_t type, size_t *pos, int depth) {
-    const char *unused;
-    if (depth > 8) return false;
-    if (type == 0x00u) {
-        while (*pos < len && in[*pos] != 0x08u) {
-            uint8_t sub_type = in[(*pos)++];
-            if (!vdf_read_cstr(in, len, pos, &unused)) return false;
-            if (!vdf_skip_value(in, len, sub_type, pos, depth + 1)) return false;
-        }
-        if (*pos >= len || in[*pos] != 0x08u) return false;
-        (*pos)++;
-        return true;
-    }
-    if (type == 0x01u) return vdf_read_cstr(in, len, pos, &unused);
-    if (type == 0x02u || type == 0x03u) {
-        if (len - *pos < 4u) return false;
-        *pos += 4u;
-        return true;
-    }
-    if (type == 0x07u || type == 0x0au) {
-        if (len - *pos < 8u) return false;
-        *pos += 8u;
-        return true;
-    }
-    return false;
-}
-
-static bool vdf_exe_matches(const char *raw_exe, const char *target_exe) {
-    size_t rlen, tlen;
-    if (raw_exe == NULL || target_exe == NULL) return false;
-    rlen = strlen(raw_exe);
-    tlen = strlen(target_exe);
-    if (rlen >= 2u && raw_exe[0] == '"' && raw_exe[rlen - 1u] == '"') {
-        raw_exe++;
-        rlen -= 2u;
-    }
-    return rlen == tlen && memcmp(raw_exe, target_exe, tlen) == 0;
-}
-
-bool nk_steam_vdf_find_app_id(const uint8_t *in, size_t in_len, const char *exe,
-                              uint32_t *out_app_id) {
-    size_t pos = 0u;
-    const char *root_key = NULL;
-    if (in == NULL || in_len < 4u || exe == NULL || exe[0] == '\0' || out_app_id == NULL) {
-        return false;
-    }
-    *out_app_id = 0u;
-    if (in[pos++] != 0x00u) return false;
-    if (!vdf_read_cstr(in, in_len, &pos, &root_key)) return false;
-    if (grid_stricmp_ascii(root_key, "shortcuts") != 0) return false;
-    while (pos < in_len && in[pos] != 0x08u) {
-        uint8_t entry_type = in[pos++];
-        const char *entry_key = NULL;
-        bool has_id = false;
-        bool matched_exe = false;
-        uint32_t id = 0u;
-        if (!vdf_read_cstr(in, in_len, &pos, &entry_key)) return false;
-        if (entry_type != 0x00u) {
-            if (!vdf_skip_value(in, in_len, entry_type, &pos, 1)) return false;
-            continue;
-        }
-        while (pos < in_len && in[pos] != 0x08u) {
-            uint8_t ftype = in[pos++];
-            const char *fkey = NULL;
-            if (!vdf_read_cstr(in, in_len, &pos, &fkey)) return false;
-            if (ftype == 0x02u && grid_stricmp_ascii(fkey, "appid") == 0) {
-                if (in_len - pos < 4u) return false;
-                id = grid_read_le32(in + pos);
-                pos += 4u;
-                has_id = true;
-            } else if (ftype == 0x01u && grid_stricmp_ascii(fkey, "exe") == 0) {
-                const char *val = NULL;
-                if (!vdf_read_cstr(in, in_len, &pos, &val)) return false;
-                if (vdf_exe_matches(val, exe)) matched_exe = true;
-            } else {
-                if (!vdf_skip_value(in, in_len, ftype, &pos, 2)) return false;
-            }
-        }
-        if (pos >= in_len || in[pos] != 0x08u) return false;
-        pos++;
-        if (matched_exe && has_id && id != 0u) {
-            *out_app_id = id;
-            return true;
-        }
-    }
-    return false;
 }
 
 typedef struct {
@@ -1572,17 +1508,63 @@ static bool steam_build_grid_dir(const char *shortcuts_path, char *grid_dir, siz
     return true;
 }
 
+/* The app ID of this shortcut's own entry, matched the way Add to Steam matches it: the same
+ * executable and the same launch options. Every Nakagawa shortcut runs the same player, so the
+ * executable alone would name another game's entry. Falls back to the ID a new entry gets. */
 static uint32_t steam_resolve_written_app_id(const char *shortcuts_path,
                                              const NkSteamShortcut *shortcut) {
     uint8_t *vdf = NULL;
     size_t vdf_len = 0u;
     uint32_t id = 0u;
     if (grid_read_bounded_file(shortcuts_path, NK_STEAM_VDF_MAX_BYTES, &vdf, &vdf_len)) {
-        if (!nk_steam_vdf_find_app_id(vdf, vdf_len, shortcut->exe, &id)) id = 0u;
+        if (!nk_steam_vdf_find_app_id(vdf, vdf_len, shortcut, &id)) id = 0u;
         free(vdf);
     }
     if (id == 0u) id = nk_steam_shortcut_app_id(shortcut->exe, shortcut->app_name);
     return id;
+}
+
+/* Keeps one of the game's pictures only when it is a PNG this code accepts; otherwise the
+ * picture is left out and the reason added to `skipped`. A picture is optional: leaving one
+ * out never stops the shortcut. */
+static void grid_keep_usable(const uint8_t **data, size_t *size, const char *label,
+                             char *skipped, size_t skipped_cap) {
+    char why[160];
+    if (*data == NULL && *size == 0u) return;
+    why[0] = '\0';
+    if (grid_validate_png(*data, *size, label, why, sizeof(why)) == NK_STEAM_OK) return;
+    *data = NULL;
+    *size = 0u;
+    if (skipped[0] != '\0') (void)grid_append_text(skipped, skipped_cap, "; ");
+    (void)grid_append_text(skipped, skipped_cap, why[0] != '\0' ? why : label);
+}
+
+/* Puts shortcuts.vdf back as it was before this add. True only when the file reads back as
+ * exactly `prior` (or, when there was no file, when it is gone again). */
+static bool steam_restore_vdf(const char *shortcuts_path, bool prior_existed,
+                              const uint8_t *prior, size_t prior_len) {
+    char cfg_dir[NK_MAX_PATH];
+    char restore_tmp[NK_MAX_PATH + 32u];
+    bool has_cfg = grid_parent_dir(shortcuts_path, cfg_dir, sizeof(cfg_dir));
+    bool restored;
+    if (!prior_existed) {
+        (void)nk_remove_utf8(shortcuts_path);
+        restored = nk_platform_path_missing(shortcuts_path);
+    } else {
+        restored = false;
+        if (prior != NULL &&
+            grid_join_suffix(restore_tmp, sizeof(restore_tmp), shortcuts_path,
+                             ".nakagawa-restore") &&
+            !nk_platform_dir_exists(restore_tmp)) {
+            restored = write_file_synced(restore_tmp, prior, prior_len) &&
+                       grid_file_equals(restore_tmp, prior, prior_len) &&
+                       nk_rename_utf8(restore_tmp, shortcuts_path) == 0 &&
+                       grid_file_equals(shortcuts_path, prior, prior_len);
+            if (!restored) (void)nk_remove_utf8(restore_tmp);
+        }
+    }
+    if (restored && has_cfg) (void)nk_platform_sync_dir(cfg_dir);
+    return restored;
 }
 
 NkSteamStatus nk_steam_add_for_account_with_art(const char *root, const char *account_id,
@@ -1595,17 +1577,25 @@ NkSteamStatus nk_steam_add_for_account_with_art(const char *root, const char *ac
                                                 NkSteamGridResult *grid_result) {
     NkSteamGridResult local_grid;
     NkSteamAccount accounts[NK_STEAM_ACCOUNT_CAP];
+    NkSteamGridArt usable;
     size_t count = 0u;
     const char *shortcuts_path = NULL;
     uint8_t *prior_vdf = NULL;
     size_t prior_len = 0u;
     bool prior_existed = false;
+    bool any_art;
     char grid_dir[NK_MAX_PATH];
+    char icon_path[NK_MAX_PATH];
+    char skipped[sizeof(local_grid.skipped)];
     NkSteamStatus st;
+    NkSteamStatus vdf_status;
     NkSteamChange local_change = NK_STEAM_CHANGE_NONE;
 
     if (grid_result == NULL) grid_result = &local_grid;
     memset(grid_result, 0, sizeof(*grid_result));
+    memset(&usable, 0, sizeof(usable));
+    skipped[0] = '\0';
+    icon_path[0] = '\0';
 
     if (backup_path != NULL && backup_cap > 0u) backup_path[0] = '\0';
     if (change != NULL) *change = NK_STEAM_CHANGE_NONE;
@@ -1618,13 +1608,13 @@ NkSteamStatus nk_steam_add_for_account_with_art(const char *root, const char *ac
         return NK_STEAM_ERR_STEAM_RUNNING;
     }
     if (art != NULL) {
-        st = grid_validate_png(art->icon0_png, art->icon0_size, "ICON0.PNG",
-                               grid_result->detail, sizeof(grid_result->detail));
-        if (st != NK_STEAM_OK) return st;
-        st = grid_validate_png(art->pic1_png, art->pic1_size, "PIC1.PNG",
-                               grid_result->detail, sizeof(grid_result->detail));
-        if (st != NK_STEAM_OK) return st;
+        usable = *art;
+        grid_keep_usable(&usable.icon0_png, &usable.icon0_size, "ICON0.PNG", skipped,
+                         sizeof(skipped));
+        grid_keep_usable(&usable.pic1_png, &usable.pic1_size, "PIC1.PNG", skipped,
+                         sizeof(skipped));
     }
+    any_art = usable.icon0_size > 0u || usable.pic1_size > 0u;
 
     st = nk_steam_list_accounts(root, accounts, NK_STEAM_ACCOUNT_CAP, &count);
     if (st != NK_STEAM_OK) return st;
@@ -1636,7 +1626,7 @@ NkSteamStatus nk_steam_add_for_account_with_art(const char *root, const char *ac
     }
     if (shortcuts_path == NULL) return NK_STEAM_ERR_NOT_FOUND;
 
-    if (art != NULL) {
+    if (any_art) {
         if (!steam_build_grid_dir(shortcuts_path, grid_dir, sizeof(grid_dir))) {
             grid_set_text(grid_result->detail, sizeof(grid_result->detail),
                           "Steam grid path is too long");
@@ -1646,57 +1636,61 @@ NkSteamStatus nk_steam_add_for_account_with_art(const char *root, const char *ac
         if (prior_existed &&
             !grid_read_bounded_file(shortcuts_path, NK_STEAM_VDF_MAX_BYTES, &prior_vdf,
                                     &prior_len)) {
-            free(prior_vdf);
             prior_vdf = NULL;
             prior_len = 0u;
         }
+        /* Steam shows a non-Steam shortcut's icon from the entry's "icon" field, so a new
+         * entry names the icon copied below. */
+        if (usable.icon0_size > 0u &&
+            !nk_steam_grid_slot_path(grid_dir, nk_steam_shortcut_app_id(shortcut->exe,
+                                                                        shortcut->app_name),
+                                     NK_STEAM_GRID_SLOT_ICON, icon_path, sizeof(icon_path))) {
+            icon_path[0] = '\0';
+        }
     }
 
-    NkSteamStatus vdf_status;
-    vdf_status = nk_steam_add_for_account(root, account_id, shortcut, running, stamp, backup_path,
-                                          backup_cap, &local_change);
+    vdf_status = add_for_account(root, account_id, shortcut, icon_path[0] ? icon_path : NULL,
+                                 running, stamp, backup_path, backup_cap, &local_change);
     if (vdf_status != NK_STEAM_OK && vdf_status != NK_STEAM_ERR_EXISTS) {
         free(prior_vdf);
         return vdf_status;
     }
     if (change != NULL) *change = local_change;
-    if (art == NULL) {
+    if (!any_art) {
         free(prior_vdf);
+        grid_set_text(grid_result->skipped, sizeof(grid_result->skipped), skipped);
         return vdf_status;
     }
 
-    {
-        uint32_t app_id = steam_resolve_written_app_id(shortcuts_path, shortcut);
-        st = nk_steam_write_grid_art(grid_dir, app_id, art, false, overwrite, grid_result);
-        if (st != NK_STEAM_OK) {
-            if (local_change != NK_STEAM_CHANGE_NONE) {
-                char cfg_dir[NK_MAX_PATH];
-                char restore_tmp[NK_MAX_PATH + 32u];
-                bool has_cfg = grid_parent_dir(shortcuts_path, cfg_dir, sizeof(cfg_dir));
-                if (!prior_existed) {
-                    (void)nk_remove_utf8(shortcuts_path);
-                    if (has_cfg) (void)nk_platform_sync_dir(cfg_dir);
-                } else if (prior_vdf != NULL &&
-                           grid_join_suffix(restore_tmp, sizeof(restore_tmp), shortcuts_path,
-                                            ".nakagawa-restore") &&
-                           write_file_synced(restore_tmp, prior_vdf, prior_len) &&
-                           grid_file_equals(restore_tmp, prior_vdf, prior_len) &&
-                           nk_rename_utf8(restore_tmp, shortcuts_path) == 0 &&
-                           grid_file_equals(shortcuts_path, prior_vdf, prior_len)) {
-                    if (has_cfg) (void)nk_platform_sync_dir(cfg_dir);
-                } else if (prior_vdf != NULL) {
-                    (void)nk_remove_utf8(restore_tmp);
-                }
-                if (backup_path != NULL && backup_path[0] != '\0') {
-                    (void)nk_remove_utf8(backup_path);
-                    backup_path[0] = '\0';
-                }
-                if (change != NULL) *change = NK_STEAM_CHANGE_NONE;
-            }
-            free(prior_vdf);
-            return st;
+    st = nk_steam_write_grid_art(grid_dir, steam_resolve_written_app_id(shortcuts_path, shortcut),
+                                 &usable, false, overwrite, grid_result);
+    grid_set_text(grid_result->skipped, sizeof(grid_result->skipped), skipped);
+    if (st != NK_STEAM_OK && local_change != NK_STEAM_CHANGE_NONE) {
+        /* The artwork failed after the list changed: put the list back. The backup is the
+         * user's copy of the list from before, so it goes only once the list reads back as
+         * it was; otherwise it stays, named, and the change is reported. */
+        uint8_t *from_backup = NULL;
+        size_t from_backup_len = 0u;
+        const uint8_t *prior = prior_vdf;
+        size_t restore_len = prior_len;
+        bool has_backup = backup_path != NULL && backup_path[0] != '\0';
+        if (prior_existed && prior == NULL && has_backup &&
+            grid_read_bounded_file(backup_path, NK_STEAM_VDF_MAX_BYTES, &from_backup,
+                                   &from_backup_len)) {
+            prior = from_backup;
+            restore_len = from_backup_len;
         }
+        if (steam_restore_vdf(shortcuts_path, prior_existed, prior, restore_len)) {
+            if (has_backup && grid_file_equals(backup_path, prior, restore_len)) {
+                (void)nk_remove_utf8(backup_path);
+                backup_path[0] = '\0';
+            }
+            if (change != NULL) *change = NK_STEAM_CHANGE_NONE;
+        } else {
+            grid_result->restore_failed = true;
+        }
+        free(from_backup);
     }
     free(prior_vdf);
-    return vdf_status;
+    return st != NK_STEAM_OK ? st : vdf_status;
 }

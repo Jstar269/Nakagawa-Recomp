@@ -12829,73 +12829,66 @@ static bool player_steam_join_rel(char *out, size_t cap, const char *root, const
     return true;
 }
 
-/* Reads up to NK_STEAM_GRID_MAX_BYTES from a local PNG path. Returns true when absent or
- * read cleanly into *out_data and *out_size; returns false on I/O, directory or size-cap errors
- * while writing details to plan->grid. */
-static bool player_steam_try_read_png_dir(const char *root, const char *const *rels,
-                                          size_t rel_count, uint8_t **out_data,
-                                          size_t *out_size, NkSteamGridResult *err) {
+/* Adds one plain-English reason to the note of the game's pictures that were left out. */
+static void player_steam_note_skip(char *note, size_t cap, const char *label, const char *why) {
+    size_t used = strlen(note);
+    if (used >= cap) return;
+    (void)snprintf(note + used, cap - used, "%s%s%s%s", used > 0u ? "; " : "", label,
+                   label[0] != '\0' ? " " : "", why);
+}
+
+/* Reads up to NK_STEAM_GRID_MAX_BYTES from the first local PNG under `root` that exists. The
+ * picture is optional: a folder in the way, a failed read, an empty file or one over the cap
+ * leaves it out and adds the reason to `note`; it never stops the shortcut. */
+static void player_steam_try_read_png_dir(const char *root, const char *const *rels,
+                                          size_t rel_count, const char *label,
+                                          uint8_t **out_data, size_t *out_size, char *note,
+                                          size_t note_cap) {
     char path[NK_MAX_PATH];
-    if (*out_data != NULL || root == NULL || root[0] == '\0') return true;
+    if (*out_data != NULL || root == NULL || root[0] == '\0') return;
     for (size_t i = 0u; i < rel_count; ++i) {
         FILE *f;
         uint8_t *buf;
         size_t len;
+        bool read_error;
         if (!player_steam_join_rel(path, sizeof(path), root, rels[i])) continue;
         if (nk_platform_path_missing(path)) continue;
         if (nk_platform_dir_exists(path)) {
-            snprintf(err->failed_path, sizeof(err->failed_path), "%s", path);
-            snprintf(err->detail, sizeof(err->detail),
-                     "A folder is in the way of the game's artwork file");
-            return false;
+            player_steam_note_skip(note, note_cap, label, "is a folder, not a picture");
+            return;
         }
         f = nk_fopen_utf8(path, "rb");
         if (f == NULL) {
-            snprintf(err->failed_path, sizeof(err->failed_path), "%s", path);
-            snprintf(err->detail, sizeof(err->detail),
-                     "Could not read the game's artwork file");
-            return false;
+            player_steam_note_skip(note, note_cap, label, "could not be read");
+            return;
         }
         buf = (uint8_t *)malloc(NK_STEAM_GRID_MAX_BYTES + 1u);
         if (buf == NULL) {
             fclose(f);
-            snprintf(err->failed_path, sizeof(err->failed_path), "%s", path);
-            snprintf(err->detail, sizeof(err->detail), "Out of memory reading artwork");
-            return false;
+            player_steam_note_skip(note, note_cap, label, "could not be read (out of memory)");
+            return;
         }
         len = fread(buf, 1u, NK_STEAM_GRID_MAX_BYTES + 1u, f);
-        if (ferror(f)) {
-            free(buf);
-            fclose(f);
-            snprintf(err->failed_path, sizeof(err->failed_path), "%s", path);
-            snprintf(err->detail, sizeof(err->detail),
-                     "Could not read the game's artwork file");
-            return false;
-        }
+        read_error = ferror(f) != 0;
         fclose(f);
-        if (len > NK_STEAM_GRID_MAX_BYTES) {
+        if (read_error || len == 0u || len > NK_STEAM_GRID_MAX_BYTES) {
             free(buf);
-            snprintf(err->failed_path, sizeof(err->failed_path), "%s", path);
-            snprintf(err->detail, sizeof(err->detail), "Game artwork file exceeds 1 MiB");
-            return false;
-        }
-        if (len == 0u) {
-            free(buf);
-            snprintf(err->failed_path, sizeof(err->failed_path), "%s", path);
-            snprintf(err->detail, sizeof(err->detail), "Game artwork file is empty");
-            return false;
+            player_steam_note_skip(note, note_cap, label,
+                                   read_error ? "could not be read"
+                                   : len == 0u ? "is empty"
+                                               : "is over 1 MiB");
+            return;
         }
         *out_data = buf;
         *out_size = len;
-        return true;
+        return;
     }
-    return true;
 }
 
-static bool player_steam_collect_art(const PlayerSteamPlan *plan, NkIsoImageData *iso_icon,
+static void player_steam_collect_art(const PlayerSteamPlan *plan, NkIsoImageData *iso_icon,
                                      NkIsoImageData *iso_pic, uint8_t **local_icon,
                                      size_t *local_icon_size, uint8_t **local_pic,
-                                     size_t *local_pic_size, NkSteamGridResult *err) {
+                                     size_t *local_pic_size, char *note, size_t note_cap) {
     static const char *const k_icon_rels[] = {"PSP_GAME/ICON0.PNG", "ICON0.PNG",
                                               "disc/PSP_GAME/ICON0.PNG"};
     static const char *const k_pic_rels[] = {"PSP_GAME/PIC1.PNG", "PIC1.PNG",
@@ -12904,31 +12897,26 @@ static bool player_steam_collect_art(const PlayerSteamPlan *plan, NkIsoImageData
     if (plan->iso_path[0] != '\0') {
         nk_iso_read_game_art(plan->iso_path, wanted, iso_icon, iso_pic);
         if (nk_platform_dir_exists(plan->iso_path)) {
-            if (iso_icon->data == NULL &&
-                !player_steam_try_read_png_dir(plan->iso_path, k_icon_rels, 2u, local_icon,
-                                               local_icon_size, err)) {
-                return false;
+            if (iso_icon->data == NULL) {
+                player_steam_try_read_png_dir(plan->iso_path, k_icon_rels, 2u, "ICON0.PNG",
+                                              local_icon, local_icon_size, note, note_cap);
             }
-            if (iso_pic->data == NULL &&
-                !player_steam_try_read_png_dir(plan->iso_path, k_pic_rels, 2u, local_pic,
-                                               local_pic_size, err)) {
-                return false;
+            if (iso_pic->data == NULL) {
+                player_steam_try_read_png_dir(plan->iso_path, k_pic_rels, 2u, "PIC1.PNG",
+                                              local_pic, local_pic_size, note, note_cap);
             }
         }
     }
     if (plan->prepared_root[0] != '\0') {
-        if (iso_icon->data == NULL &&
-            !player_steam_try_read_png_dir(plan->prepared_root, k_icon_rels, 3u, local_icon,
-                                           local_icon_size, err)) {
-            return false;
+        if (iso_icon->data == NULL) {
+            player_steam_try_read_png_dir(plan->prepared_root, k_icon_rels, 3u, "ICON0.PNG",
+                                          local_icon, local_icon_size, note, note_cap);
         }
-        if (iso_pic->data == NULL &&
-            !player_steam_try_read_png_dir(plan->prepared_root, k_pic_rels, 3u, local_pic,
-                                           local_pic_size, err)) {
-            return false;
+        if (iso_pic->data == NULL) {
+            player_steam_try_read_png_dir(plan->prepared_root, k_pic_rels, 3u, "PIC1.PNG",
+                                          local_pic, local_pic_size, note, note_cap);
         }
     }
-    return true;
 }
 
 PlayerSteamOutcome player_steam_add(PlayerSteamPlan *plan, size_t account,
@@ -12945,23 +12933,18 @@ PlayerSteamOutcome player_steam_add(PlayerSteamPlan *plan, size_t account,
     NkIsoImageData iso_icon, iso_pic;
     uint8_t *local_icon = NULL, *local_pic = NULL;
     size_t local_icon_size = 0u, local_pic_size = 0u;
+    char read_note[sizeof(plan->grid.skipped)];
     memset(&iso_icon, 0, sizeof(iso_icon));
     memset(&iso_pic, 0, sizeof(iso_pic));
     memset(&plan->grid, 0, sizeof(plan->grid));
+    read_note[0] = '\0';
     shortcut.app_name = plan->app_name;
     shortcut.exe = plan->exe;
     shortcut.start_dir = plan->start_dir;
     shortcut.launch_options = plan->launch_options;
     if (!(running != NULL ? running() : nk_steam_client_running())) {
-        if (!player_steam_collect_art(plan, &iso_icon, &iso_pic, &local_icon, &local_icon_size,
-                                      &local_pic, &local_pic_size, &plan->grid)) {
-            free(iso_icon.data);
-            free(iso_pic.data);
-            free(local_icon);
-            free(local_pic);
-            plan->outcome = PLAYER_STEAM_UNREADABLE;
-            return plan->outcome;
-        }
+        player_steam_collect_art(plan, &iso_icon, &iso_pic, &local_icon, &local_icon_size,
+                                 &local_pic, &local_pic_size, read_note, sizeof(read_note));
     }
     NkSteamGridArt art;
     art.icon0_png = iso_icon.data != NULL ? iso_icon.data : local_icon;
@@ -12978,6 +12961,17 @@ PlayerSteamOutcome player_steam_add(PlayerSteamPlan *plan, size_t account,
     free(iso_pic.data);
     free(local_icon);
     free(local_pic);
+    if (read_note[0] != '\0') {
+        /* The pictures that could not even be read come first, then any the check refused. */
+        char merged[sizeof(plan->grid.skipped)];
+        size_t used = strlen(read_note);
+        memcpy(merged, read_note, used + 1u);
+        if (plan->grid.skipped[0] != '\0') {
+            player_steam_note_skip(merged, sizeof(merged), "", plan->grid.skipped);
+            used = strlen(merged);
+        }
+        memcpy(plan->grid.skipped, merged, used + 1u);
+    }
     switch (status) {
         case NK_STEAM_OK:
             plan->outcome = change == NK_STEAM_CHANGE_UPDATED ? PLAYER_STEAM_UPDATED
@@ -13007,6 +13001,7 @@ size_t player_steam_outcome_text(const PlayerSteamPlan *plan, char *out, size_t 
     char failed[MAX_PATH_LEN];
     char kept[MAX_PATH_LEN + 96];
     char art_note[512];
+    char skip_note[384];
     const char *name;
     int n = 0;
     if (out == NULL || out_size == 0u) return 0u;
@@ -13017,6 +13012,12 @@ size_t player_steam_outcome_text(const PlayerSteamPlan *plan, char *out, size_t 
     failed[0] = '\0';
     kept[0] = '\0';
     art_note[0] = '\0';
+    skip_note[0] = '\0';
+    if (plan->grid.skipped[0] != '\0') {
+        (void)snprintf(skip_note, sizeof(skip_note),
+                       " Left out a picture of the game (%s); the shortcut works without it.",
+                       plan->grid.skipped);
+    }
     if (plan->backup_path[0] != '\0') {
         (void)player_display_text(plan->backup_path, backup, sizeof(backup));
         (void)snprintf(kept, sizeof(kept), " Steam's list from before is saved as %s.", backup);
@@ -13032,6 +13033,20 @@ size_t player_steam_outcome_text(const PlayerSteamPlan *plan, char *out, size_t 
     } else if (plan->grid.detail[0] != '\0') {
         (void)snprintf(art_note, sizeof(art_note), " %s.", plan->grid.detail);
     }
+    if (plan->grid.restore_failed && !player_steam_outcome_ok(plan->outcome)) {
+        /* The artwork failed after Steam's list changed, and the list could not be put back:
+         * say so, and name the copy from before, which was kept. */
+        n = snprintf(out, out_size,
+                     "Steam artwork could not be written (%s%s%s), and Nakagawa could not put "
+                     "Steam's list of non-Steam games back as it was, so %s is in Steam without "
+                     "this artwork.%s",
+                     plan->grid.detail[0] != '\0' ? plan->grid.detail : "write failed",
+                     failed[0] != '\0' ? ": " : "", failed, name,
+                     kept[0] != '\0' ? kept
+                                     : " Steam had no list of non-Steam games before, so there "
+                                       "was nothing to back up.");
+        return n > 0 ? strlen(out) : 0u;
+    }
     switch (plan->outcome) {
         case PLAYER_STEAM_READY:
             n = snprintf(out, out_size, "%s", "");
@@ -13039,29 +13054,30 @@ size_t player_steam_outcome_text(const PlayerSteamPlan *plan, char *out, size_t 
         case PLAYER_STEAM_ADDED:
             n = snprintf(out, out_size,
                          "Added %s to Steam. Start Steam to find it in your library; no restart "
-                         "is needed.%s%s",
+                         "is needed.%s%s%s",
                          name, kept[0] != '\0'
                                    ? kept
                                    : " Steam had no list of non-Steam games yet, so there was "
                                      "nothing to back up.",
-                         art_note);
+                         art_note, skip_note);
             break;
         case PLAYER_STEAM_UPDATED:
             n = snprintf(out, out_size,
                          "Updated %s in Steam: its shortcut now starts this Nakagawa folder. Its "
                          "play time and collections stay. Start Steam to use it; no restart is "
-                         "needed.%s%s",
-                         name, kept, art_note);
+                         "needed.%s%s%s",
+                         name, kept, art_note, skip_note);
             break;
         case PLAYER_STEAM_ALREADY:
             if (plan->grid.written_mask != 0u) {
                 n = snprintf(out, out_size,
-                             "%s is already in this Steam library.%s", name, art_note);
+                             "%s is already in this Steam library.%s%s", name, art_note,
+                             skip_note);
             } else {
                 n = snprintf(out, out_size,
                              "%s is already in this Steam library with this shortcut. Nothing was "
-                             "changed.%s",
-                             name, art_note);
+                             "changed.%s%s",
+                             name, art_note, skip_note);
             }
             break;
         case PLAYER_STEAM_NOT_A_GAME:
@@ -13091,17 +13107,11 @@ size_t player_steam_outcome_text(const PlayerSteamPlan *plan, char *out, size_t 
                          "after that: Steam reads the shortcut when it starts.");
             break;
         case PLAYER_STEAM_UNREADABLE:
-            if (failed[0] != '\0' || plan->grid.detail[0] != '\0') {
-                n = snprintf(out, out_size,
-                             "Steam artwork could not be used (%s%s%s), so Steam's files were "
-                             "left as they were. Nothing was changed.",
-                             plan->grid.detail[0] != '\0' ? plan->grid.detail : "invalid PNG",
-                             failed[0] != '\0' ? ": " : "", failed);
-            } else {
-                n = snprintf(out, out_size, "%s",
-                             "Steam's list of non-Steam games could not be read, so it was left "
-                             "as it was. Nothing was changed.");
-            }
+            /* Only Steam's own list can be unreadable: the game's pictures are optional and
+             * an unusable one is left out instead. */
+            n = snprintf(out, out_size, "%s",
+                         "Steam's list of non-Steam games could not be read, so it was left as "
+                         "it was. Nothing was changed.");
             break;
         case PLAYER_STEAM_BACKUP_FAILED:
             if (failed[0] != '\0' || plan->grid.detail[0] != '\0') {

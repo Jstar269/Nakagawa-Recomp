@@ -170,7 +170,8 @@ NkSteamStatus nk_steam_add_for_account(const char *root, const char *account_id,
 #define NK_STEAM_GRID_EXISTING_BACKUP_MAX_BYTES (16u * 1024u * 1024u)
 
 /* Slots populated in `<Steam>/userdata/<account_id>/config/grid/`:
- *   - ICON (<appid>_icon.png): game's ICON0.PNG (144x80 PSP icon)
+ *   - ICON (<appid>_icon.png): game's ICON0.PNG (144x80 PSP icon); Steam reads a shortcut's
+ *     icon only from its "icon" field, which a new entry sets to this file's full path
  *   - WIDE (<appid>.png):      game's ICON0.PNG (or PIC1.PNG if ICON0.PNG is absent)
  *   - HERO (<appid>_hero.png): game's PIC1.PNG (480x272 PSP background picture)
  * Steam's vertical portrait capsule (`<appid>p.png`, 2:3) and logo (`<appid>_logo.png`) have
@@ -203,6 +204,9 @@ typedef struct {
     char grid_dir[NK_MAX_PATH];       /* `<Steam>/userdata/<id>/config/grid`, or "" */
     char failed_path[NK_MAX_PATH];    /* full path of the failing file, if any */
     char detail[256];                 /* plain-English kept-file list or failure reason */
+    char skipped[256];                /* the game's pictures left out and why, or "" */
+    bool restore_failed;              /* the artwork failed after shortcuts.vdf changed and the
+                                         list could not be put back: the backup is kept */
 } NkSteamGridResult;
 
 /* Formats `<grid_dir>/<app_id>_icon.png`, `<grid_dir>/<app_id>.png`, or
@@ -213,9 +217,11 @@ bool nk_steam_grid_slot_path(const char *grid_dir, uint32_t app_id, NkSteamGridS
 /* Returns the filename suffix for `slot` (`"_icon.png"`, `".png"`, `"_hero.png"`), or NULL. */
 const char *nk_steam_grid_slot_suffix(NkSteamGridSlot slot);
 
-/* Looks up the `"appid"` of an existing shortcut entry in `shortcuts.vdf` whose `"exe"` matches
- * `exe`. Returns true and writes `*out_app_id` if found with a non-zero id. */
-bool nk_steam_vdf_find_app_id(const uint8_t *in, size_t in_len, const char *exe,
+/* Looks up the `"appid"` of this shortcut's own entry in `shortcuts.vdf`: the same executable
+ * and the same launch options, as Add to Steam matches it (every Nakagawa shortcut runs the same
+ * player, so the executable alone names another game's entry). Returns true and writes
+ * `*out_app_id` if found with a non-zero id. */
+bool nk_steam_vdf_find_app_id(const uint8_t *in, size_t in_len, const NkSteamShortcut *shortcut,
                               uint32_t *out_app_id);
 
 /* Writes `art` into `grid_dir` for `app_id`. Validates PNG signatures and chunks before writing,
@@ -229,8 +235,13 @@ NkSteamStatus nk_steam_write_grid_art(const char *grid_dir, uint32_t app_id,
 
 /* Combines `nk_steam_add_for_account` with writing `art` into the account's `config/grid`
  * folder (using the shortcut's persisted `"appid"` when updated, or `nk_steam_shortcut_app_id`
- * when added). If writing artwork fails after `shortcuts.vdf` was modified, `shortcuts.vdf` is
- * rolled back so Steam's files stay as they were. `art` may be NULL to skip grid artwork. */
+ * when added). The pictures are optional: one that is not a PNG this code accepts (malformed,
+ * over NK_STEAM_GRID_MAX_BYTES, bytes after IEND) is left out, named in `skipped`, and the
+ * shortcut is still added. A new entry's `"icon"` field names the copied icon (empty without
+ * one); an entry already there, or moved, keeps its own. If writing artwork fails after
+ * `shortcuts.vdf` was modified, `shortcuts.vdf` is put back; the backup is deleted only once the
+ * list reads back as it was. Otherwise the backup stays in `backup_path`, `*change` still says
+ * what changed, and `restore_failed` is set. `art` may be NULL to skip grid artwork. */
 NkSteamStatus nk_steam_add_for_account_with_art(const char *root, const char *account_id,
                                                 const NkSteamShortcut *shortcut,
                                                 NkSteamRunningFn running, const char *stamp,
