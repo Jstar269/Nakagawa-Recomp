@@ -125,8 +125,13 @@ class TitleCodegenPlanTests(unittest.TestCase):
 
     def test_object_key_workers_follow_cpus_not_memory(self) -> None:
         workers = title_codegen_plan.object_key_workers
-        self.assertEqual(workers(24), title_codegen_plan.OBJECT_KEY_MAX_WORKERS)
+        # No fixed ceiling: a 64-CPU host keys on 64 workers, not 16.
+        self.assertFalse(hasattr(title_codegen_plan, "OBJECT_KEY_MAX_WORKERS"))
+        self.assertEqual(workers(4), 4)
         self.assertEqual(workers(6), 6)
+        self.assertEqual(workers(24), 24)
+        self.assertEqual(workers(64), 64)
+        self.assertEqual(workers(256), 256)
         self.assertEqual(workers(1), 1)
         self.assertEqual(workers(None), 1)
         self.assertEqual(workers(0), 1)

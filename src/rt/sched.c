@@ -4233,6 +4233,14 @@ static int sched_delaylog_on(void) {
     return sched_env_switch(&enabled, "SR_DELAYLOG");
 }
 
+/* Thread sleep and wakeup lines (DEBUG_SLEEP, DEBUG_SLEEP_CB, DEBUG_WAKEUP): a guest can make
+ * those calls every frame, so they report under SR_WAKELOG like the HLE sleep and wakeup calls
+ * (hle_wakelog_on). */
+static int sched_wakelog_on(void) {
+    static int enabled = -1;
+    return sched_env_switch(&enabled, "SR_WAKELOG");
+}
+
 static int sched_blocklog_on(void) {
     static int enabled = -1;
     return sched_env_switch(&enabled, "SR_BLOCKLOG");
@@ -4847,7 +4855,9 @@ void sched_wake_callbacks(uint32_t thread_uid) {
 void sched_thread_sleep(void) {
     if (s_cur < 0) return;
     TCB *t = &s_tcb[s_cur];
-    fprintf(stderr, "DEBUG_SLEEP: thread=0x%x wakeups=%d state=%d\n", t->uid, t->wakeups, t->state);
+    if (sched_wakelog_on()) {
+        fprintf(stderr, "DEBUG_SLEEP: thread=0x%x wakeups=%d state=%d\n", t->uid, t->wakeups, t->state);
+    }
     if (t->wakeups > 0) { t->wakeups--; return; }   /* pending wakeup: don't block */
     t->sleeping = 1;
     memcpy(&t->saved, s_cpu, sizeof(CpuState));
@@ -4861,8 +4871,7 @@ void sched_thread_sleep(void) {
 void sched_thread_sleep_cb(void) {
     if (s_cur < 0) return;
     TCB *t = &s_tcb[s_cur];
-    static int wakelog = -1;
-    if (sched_env_switch(&wakelog, "SR_WAKELOG")) {
+    if (sched_wakelog_on()) {
         fprintf(stderr, "DEBUG_SLEEP_CB: thread=0x%x wakeups=%d state=%d\n", t->uid, t->wakeups, t->state);
     }
     if (t->wakeups > 0) {
@@ -4907,8 +4916,10 @@ uint32_t sched_thread_wakeup(uint32_t uid) {
      * target answers DORMANT (0x800201A2), it does not bank a wakeup. */
     if (t->state == TH_DORMANT) return SCE_KERNEL_ERROR_DORMANT;
     {
-        fprintf(stderr, "DEBUG_WAKEUP: target=0x%x sleeping=%d state=%d wait_obj=0x%x wakeups=%d\n",
-                uid, t->sleeping, t->state, t->wait_obj, t->wakeups);
+        if (sched_wakelog_on()) {
+            fprintf(stderr, "DEBUG_WAKEUP: target=0x%x sleeping=%d state=%d wait_obj=0x%x wakeups=%d\n",
+                    uid, t->sleeping, t->state, t->wait_obj, t->wakeups);
+        }
 #ifdef SR_SCHED_LIVENESS_TEST
         int readied = 0;
 #endif

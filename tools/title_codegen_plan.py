@@ -103,9 +103,8 @@ PACKAGE_BUILD_RESERVED_BYTES = 2 * 1024**3
 PACKAGE_BUILD_JOBS_ENV = "NK_PACKAGE_JOBS"
 #: Object-cache keys are taken by preprocessing each object's source, which peaked at
 #: about 80 MB for the largest generated Hot Shots Tennis chunk: keying is bounded by
-#: CPUs, not by the compile memory that limits Make jobs, and never runs more workers
-#: than this.
-OBJECT_KEY_MAX_WORKERS = 16
+#: CPUs (one worker per logical CPU, no fixed ceiling), not by the compile memory that
+#: limits Make jobs.
 #: When set, the package build appends ``{"completed": N, "total": M}`` lines to this
 #: file while it compiles, one line each time another object finishes.
 COMPILE_PROGRESS_FILE_ENV = "NK_COMPILE_PROGRESS_FILE"
@@ -341,14 +340,14 @@ def package_build_jobs(
 
 
 def object_key_workers(cpu_count: int | None) -> int:
-    """Workers that take object-cache keys: one per logical CPU, up to OBJECT_KEY_MAX_WORKERS.
+    """Workers that take object-cache keys: one per logical CPU.
 
     A key preprocesses one source file, which needs a small fraction of the memory a
     compile of that file needs, so a build that memory limits to one Make job still keys
     its objects on every CPU.
     """
     cpus = cpu_count if cpu_count and cpu_count > 0 else 1
-    return max(1, min(cpus, OBJECT_KEY_MAX_WORKERS))
+    return max(1, cpus)
 
 
 def _host_package_build_plan(chunk_target_bytes: str | None = None,
