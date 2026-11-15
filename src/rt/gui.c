@@ -863,10 +863,11 @@ static int s_ace_keyboard_now;                    /* this present's keyboard is 
 static uint64_t s_ace_first_frame_ns;             /* the first accepted present: the notice starts */
 static char s_ace_words[ACE_WORDS_MAX];
 
-static void gui_ace_ui_pass(const Sdl3VkUiPass *p) {
+static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     const AceConfig *ace = ace_effective();
     AceUiFrame f;
     AceReadoutView view;
+    char logic[64];
     uint64_t now = SDL_GetTicksNS();
     memset(&f, 0, sizeof(f));
     f.pixel_w = (int)p->width;
@@ -887,6 +888,10 @@ static void gui_ace_ui_pass(const Sdl3VkUiPass *p) {
         f.readout = view.text;
         f.readout_warning = view.pc_limited;
     }
+    /* Slowed 60 FPS logic, which the presenter hands over with the HUD off: under the readout,
+     * not in the presenter's box in the readout's corner. */
+    if (p->logic_slowed)
+        f.logic_notice = sdl3vk_logic_notice_text(logic, sizeof(logic), p->logic_rate);
     if (s_ace_ui_ready && ace->notice && s_ace_first_frame_ns &&
         now - s_ace_first_frame_ns < ACE_NOTICE_NS) {
         double left = (double)(ACE_NOTICE_NS - (now - s_ace_first_frame_ns)) / 1e9;
@@ -905,7 +910,7 @@ static void gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     if (render_notice_shows(&s_render_notice, sr_osk_overlay_active()))
         (void)render_notice_words(s_render_notice.fallback, &f.host_notice_head, &f.host_notice,
                                   &f.host_notice_hint);
-    if (!ace_ui_frame_wants(&f)) return;
+    if (!ace_ui_frame_wants(&f)) return 0;
     AceUiTarget t;
     memset(&t, 0, sizeof(t));
     t.cmd = (VkCommandBuffer)p->cmd;
@@ -917,7 +922,7 @@ static void gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     t.image_count = p->image_count;
     t.image_index = p->image_index;
     t.swapchain_gen = p->swapchain_gen;
-    (void)ace_ui_record(s_ace_ui, &t, &f);
+    return ace_ui_record(s_ace_ui, &t, &f);
 }
 
 static void gui_ace_ui_off(const char *why) {
