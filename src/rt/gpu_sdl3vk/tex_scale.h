@@ -52,6 +52,9 @@ extern "C" {
 /* Host memory those jobs may hold, sources and results together (a 512x512 texture at 4x holds
  * 17 MiB). A submit past it is refused like a full queue, except that one job is always taken. */
 #define NK_TEX_SCALE_HOST_MB 128u
+/* Worker threads the jobs run on (nk_tex_scale_worker_count). */
+#define NK_TEX_SCALE_WORKERS_MIN 2
+#define NK_TEX_SCALE_WORKERS_MAX 8
 
 typedef struct NkTexScaleConfig {
     int factor;            /* 0 off, 2..6 */
@@ -93,6 +96,14 @@ void nk_tex_scale_budget_give(uint64_t bytes);
 uint64_t nk_tex_scale_budget_used(void);
 
 /* ---- jobs ----------------------------------------------------------------------------- */
+/* How many workers a host with `logical_cpus` logical CPUs starts: every CPU but two (one for the
+ * guest's thread, which also records the GE's work, one for audio and the graphics driver), at least
+ * NK_TEX_SCALE_WORKERS_MIN and at most NK_TEX_SCALE_WORKERS_MAX; a count of 0 or less (unknown)
+ * gives the minimum. The count changes only how fast copies arrive, never what a job makes, and the
+ * memory the jobs hold stays under NK_TEX_SCALE_HOST_MB whatever it is. Pure. */
+int nk_tex_scale_worker_count(int logical_cpus);
+/* The workers started for the jobs now (0 before the first job and after nk_tex_scale_shutdown). */
+int nk_tex_scale_workers(void);
 /* Queue a scale of `rgba` (w x h, R in the low byte, as ge.c's decoder writes) by `factor`.
  * `clamp_u`/`clamp_v` say how the texture is sampled past its edges (1 clamp, 0 repeat), so the
  * scaled edges continue the way the GPU will read them. The pixels are copied before the call

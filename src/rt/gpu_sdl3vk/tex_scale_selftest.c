@@ -8,6 +8,9 @@
  *     (ColorFormat::argbUnbuffered), and a 2x corner equals upstream's pixels one by one;
  *   - wrap and clamp: a repeating texture's copy is the middle of a 3x3 tiling's copy (no seam),
  *     a clamped one the middle of an edge-extended copy, and the R/B channel order is upstream's;
+ *   - workers: the worker count rule's cells, the pool starting that many for this host and
+ *     running that many jobs at once, and each of a full table of distinct textures getting its
+ *     own scale back;
  *   - jobs: a queued job returns the same pixels with its serial and hash; a held queue keeps a
  *     job queued and a full one refuses the next; nothing waits for a worker; the host-memory cap
  *     refuses the job that would pass it, and can_submit always gives submit's answer;
@@ -37,6 +40,8 @@
 #include "../../../third_party/xbrz/xbrz.h"
 #include "../vfpu_tables.h"   /* sr_vfpu_hmac_sha256 */
 
+#include <SDL3/SDL_cpuinfo.h>  /* the workers test's CPU count */
+#include <SDL3/SDL_mutex.h>    /* the workers test's overlapping jobs */
 #include <SDL3/SDL_thread.h>   /* the work test checks which thread a job ran on */
 #include <SDL3/SDL_timer.h>    /* the bounded wait is timed */
 
@@ -1047,7 +1052,88 @@ static void test_soft_candidates(void) {
     if (!s_fail) printf("tex scale selftest: PASS soft-shadow candidate line and once-per-content table\n");
 }
 
+/* The worker pool: the count rule's cells (every CPU but two, between the minimum and the maximum,
+ * the minimum for an unknown count), the pool starting that many for this host, that many jobs
+ * running at once, and every job's copy equal to its own scale on the calling thread whatever
+ * worker made it. */
+typedef struct {
+    SDL_Mutex *mx;
+    SDL_Condition *cv;
+    int inside, peak, want;
+} Overlap;
+static void work_overlap(void *ctx) {
+    Overlap *o = (Overlap *)ctx;
+    SDL_LockMutex(o->mx);
+    if (++o->inside > o->peak) o->peak = o->inside;
+    SDL_BroadcastCondition(o->cv);
+    /* Each job stays until `want` are inside together (or 5 s pass, which the check then fails). */
+    const uint64_t end = SDL_GetTicks() + 5000u;
+    while (o->peak < o->want && SDL_GetTicks() < end)
+        (void)SDL_WaitConditionTimeout(o->cv, o->mx, 50);
+    o->inside--;
+    SDL_UnlockMutex(o->mx);
+}
+
+static void test_workers(void) {
+    static const struct { int cpus, want; } cells[] = {
+        {-1, NK_TEX_SCALE_WORKERS_MIN}, {0, NK_TEX_SCALE_WORKERS_MIN}, {1, NK_TEX_SCALE_WORKERS_MIN},
+        {2, NK_TEX_SCALE_WORKERS_MIN}, {4, 2}, {5, 3}, {8, 6}, {10, NK_TEX_SCALE_WORKERS_MAX},
+        {11, NK_TEX_SCALE_WORKERS_MAX}, {24, NK_TEX_SCALE_WORKERS_MAX}, {256, NK_TEX_SCALE_WORKERS_MAX},
+    };
+    for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); i++)
+        CHECK(nk_tex_scale_worker_count(cells[i].cpus) == cells[i].want, "workers: %d CPUs give %d workers, not %d",
+              cells[i].cpus, nk_tex_scale_worker_count(cells[i].cpus), cells[i].want);
+
+    const int cpus = SDL_GetNumLogicalCPUCores(), want = nk_tex_scale_worker_count(cpus);
+    CHECK(nk_tex_scale_workers() == 0, "workers: %d before the first job", nk_tex_scale_workers());
+    Overlap o = {SDL_CreateMutex(), SDL_CreateCondition(), 0, 0, want};
+    CHECK(o.mx && o.cv, "workers: no mutex or condition");
+    nk_tex_scale_set_hold(1);
+    int queued = 0;
+    for (int i = 0; i < want; i++) queued += nk_tex_scale_submit_work(work_overlap, &o, 0);
+    CHECK(queued == want && nk_tex_scale_workers() == want, "workers: %d of %d jobs queued on %d workers (%d CPUs)",
+          queued, want, nk_tex_scale_workers(), cpus);
+    nk_tex_scale_set_hold(0);
+    CHECK(nk_tex_scale_wait_work(work_overlap, 10000u), "workers: the overlapping jobs did not finish");
+    void *ctx;
+    int taken = 0;
+    while (nk_tex_scale_take_work(work_overlap, &ctx)) taken++;
+    CHECK(taken == want && o.peak == want, "workers: took %d jobs, %d ran at once, want %d", taken, o.peak, want);
+    SDL_DestroyCondition(o.cv);
+    SDL_DestroyMutex(o.mx);
+
+    /* Every slot a distinct texture, released at once onto the pool: each copy is its own source's. */
+    enum { W = 20, H = 12, F = 3 };
+    static uint32_t src[NK_TEX_SCALE_QUEUE][W * H], want_px[W * H * F * F];
+    uint32_t s = 99u;
+    for (int j = 0; j < NK_TEX_SCALE_QUEUE; j++)
+        for (int i = 0; i < W * H; i++) src[j][i] = 0xFF000000u | (lcg(&s) & 0x00F0F0F0u);
+    nk_tex_scale_set_hold(1);
+    queued = 0;
+    for (int j = 0; j < NK_TEX_SCALE_QUEUE; j++) queued += nk_tex_scale_submit((uint64_t)j, 0u, src[j], W, H, F, j & 1, 0);
+    nk_tex_scale_set_hold(0);
+    nk_tex_scale_wait_idle();
+    NkTexScaleResult r;
+    int same = 0;
+    taken = 0;
+    while (nk_tex_scale_take(&r)) {
+        taken++;
+        if (r.serial < NK_TEX_SCALE_QUEUE) {
+            nk_tex_scale_image(src[r.serial], W, H, F, (int)(r.serial & 1u), 0, want_px);
+            same += memcmp(r.rgba, want_px, sizeof(want_px)) == 0;
+        }
+        nk_tex_scale_release(&r);
+    }
+    CHECK(queued == NK_TEX_SCALE_QUEUE && taken == queued && same == queued,
+          "workers: %d queued, %d taken, %d equal to their own scale", queued, taken, same);
+    nk_tex_scale_shutdown();
+    CHECK(nk_tex_scale_workers() == 0, "workers: %d after shutdown", nk_tex_scale_workers());
+    if (!s_fail) printf("tex scale selftest: PASS workers %d on %d CPUs ran at once, %d copies their own\n", want,
+                        cpus, same);
+}
+
 int main(void) {
+    test_workers();
     test_soften();
     test_soft_digest();
     test_soft_candidates();

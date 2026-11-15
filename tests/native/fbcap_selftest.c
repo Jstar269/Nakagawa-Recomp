@@ -761,7 +761,7 @@ static uint32_t ref_crc32(const unsigned char *p, size_t n) {
 }
 
 /* The encoder's constant CRC table, every entry against the bit-by-bit definition (the table is
- * constant so the texture dump's two workers share no state while they encode), and the check
+ * constant so the texture dump's workers share no state while they encode), and the check
  * value of "123456789" through ref_crc32 and the table alike. */
 static void test_png_crc_table(void) {
     const uint32_t *t = sr_png_crc_table();

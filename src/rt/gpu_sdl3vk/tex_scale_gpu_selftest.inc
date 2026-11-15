@@ -1885,8 +1885,8 @@ static bool xst_dump_count_tmp(const char *name, void *ctx) {
 }
 
 /* The exit at SR_EXIT_AT_VBLANK (hle_display.c) skips atexit and calls sr_texdump_exit_finish
- * before _Exit: with every level still held by the workers, that call must let both workers write
- * them all, count them and leave no temp file. The files are written by the two workers at once,
+ * before _Exit: with every level still held by the workers, that call must let the workers write
+ * them all, count them and leave no temp file. The files are written by the workers at once,
  * each through the encoder, so every one's CRCs are checked too. */
 #define XST_EXIT_LEVELS 20
 static int xst_cell_dump_exit(int f) {

@@ -1168,7 +1168,9 @@ The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture
 - **Stamps.** `TEX_SCALE: on (xbrz=<factor>, smart2d=on|off, budget_mb=<n>)` at start; at exit,
   `TEX_SCALE: draws (scaled_binds=, onetoone_unscaled=, scaled_uploads=, stale=, smart2d=, reclaimed=,
   budget_short=, upload_capped=)` and
-  `TEX_SCALE: exit (scaled=, queue_full=, discarded=, budget_peak_mb=, worker_ms=)`.
+  `TEX_SCALE: exit (scaled=, queue_full=, discarded=, budget_peak_mb=, worker_ms=, workers=)`. The copies are
+  made on worker threads, one for each logical CPU but two, at least 2 and at most 8
+  (`nk_tex_scale_worker_count`); the count changes only how soon a copy arrives, never its texels.
   A run with either feature on also prints, at start, the line section 11.3.3 describes.
   Section 10.4 applies: the run is an Ace run.
 - **A title it breaks.** A title whose fonts or pixel art suffer gets its off switch in its own package, never as
@@ -1549,9 +1551,9 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   wide-path one, so a user data folder under a user name that is not ASCII works. Nothing the guest can observe
   changes: each texture is decoded from guest memory, on the guest thread, into a buffer of its own, and written to
   disk, never to guest memory; files are written only inside the folder. The encode and the write run on the
-  texture scaler's two worker threads as work jobs (`tex_scale.h`, `nk_tex_scale_submit_work`), so the guest thread
+  texture scaler's worker threads as work jobs (`tex_scale.h`, `nk_tex_scale_submit_work`), so the guest thread
   never waits for either. The dump still costs frame time: each new level is hashed, decoded, copied and looked up
-  on disk on the guest thread, and the two workers share the CPU with the game, so scenes where many textures first
+  on disk on the guest thread, and the workers share the CPU with the game, so scenes where many textures first
   appear can run less smoothly while it is on, and turning it off returns to normal. One pair of runs on Hot Shots
   Tennis (one run each way, a match, real speed, not profiled) measured a mean frame time of 16.69 ms off and
   17.39 ms on, p99 17.67 ms and 32.99 ms, and about 4 % fewer frames presented, with menus unchanged; earlier pairs
@@ -1591,7 +1593,7 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   failed guest exit; `tools/test_dispatch_fatal_policy.py` requires it of every such stop). An end reached on a
   thread other than the one that draws does not wait and says what it leaves. A crash, or an `abort()`, finishes
   nothing: what was queued is lost and a temp file can be left. The PNG encoder's CRC table is constant, so the
-  two workers share no state while they encode.
+  workers share no state while they encode.
   The project ships no texture and no upscaler: the images are the game's copyrighted images, from the player's own
   copy of the game, and stay on their PC.
 - **Tests.** `texrepl-selftest` checks the hashes against values taken from PPSSPP's own code and published xxHash
