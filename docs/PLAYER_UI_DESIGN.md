@@ -610,7 +610,13 @@ on and, as its own `BODY_S` `muted` paragraph, the last session. Both sentences 
 on: the page body scrolls, so the card grows instead of ending either one in an ellipsis. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
 art's top right. In game, the pause menu's caption names the mode and its parts and its Settings page has a live
 SPEED READOUT row; the launch notice (ENHANCED or ACE, top right, 3 s, a cut with Reduce motion) and the readout
-(top left) are chips on the 16 px safe area.
+(top left) are chips on the 16 px safe area. The notice and the caption list the parts that are on, joined by
+middle dots. A list too long for one line wraps between its parts, never inside one, and never ends in an
+ellipsis: the notice takes up to eleven lines, each at most half the window wide (one line while the on-screen
+keyboard is open), and the caption takes the lines its card has room for above RESUME. Where a list is longer
+than that, its last line counts the parts it leaves out ("and 9 more"). With every part on, the notice shows
+them all in every window, and the caption shows them all in the default 960 x 544 game window and any taller
+one (`ace-ui-selftest`, `nk-ui-overlay-screens-selftest`).
 GRAPHICS PRESET is the GAME card's last row (#2150). It steps through LOW, MEDIUM, HIGH, ULTRA and HANDHELD.
 A preset is used only by Enhanced and Ace sessions, where its values take the place of the RESOLUTION, SCALING,
 VSYNC and GAME FULLSCREEN rows and of up to three Enhanced parts' library values: CRISP SYSTEM TEXT, SHARPER

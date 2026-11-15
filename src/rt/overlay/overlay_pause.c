@@ -24,6 +24,10 @@
 #define MENU_ID_ACTIONS MENU_ID(0x001004u)
 #define MENU_ID_HEAD MENU_ID(0x001005u)
 #define MENU_ID_ACE MENU_ID(0x001006u)      /* Ace Mode's caption */
+#define MENU_ID_ACE_LINE MENU_ID(0x001040u) /* + line, below MENU_ACE_LINES: a caption on more than one */
+#define MENU_ID_ACE_LINE_SPAN 0x20u
+/* The most lines the caption takes, in a window with room for them: one id each. */
+#define MENU_ACE_LINES ((int)MENU_ID_ACE_LINE_SPAN)
 
 #define CONTROLS_ID(offset) NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, (offset))
 #define CONTROLS_ID_EYEBROW CONTROLS_ID(0x003001u)
@@ -45,9 +49,23 @@ static const char *nonempty(const char *text) {
 #define MENU_CARD_PAD_Y (26.0f + 22.0f)
 #define MENU_CARD_GAP 14.0f
 
+/* How many lines Ace Mode's caption takes at `inner`: one when it fits there as
+   it is, else its words as a list wrapped between its items (nk_ui_list_line). */
+static int menu_ace_lines(NkUi *ui, const NkOverlayModel *model, float inner) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    NkUiTextStyle caption = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
+    const char *words = nonempty(model->ace_caption);
+    int lines;
+    if (words == NULL) return 0;
+    if (nk_ui_text_width(ui, words, &caption) <= inner) return 1;
+    lines = nk_ui_list_line_count(ui, words, &caption, inner);
+    return lines > MENU_ACE_LINES ? MENU_ACE_LINES : lines;
+}
+
 /* How tall the menu card lays out at its full spacing: the heading (with the
-   game's name on as many lines as it takes, two at most) over the entries. */
-static float menu_full_height(NkUi *ui, const NkOverlayModel *model, float inner) {
+   game's name on as many lines as it takes, two at most, and the caption on
+   `ace_lines`) over the entries. */
+static float menu_full_height(NkUi *ui, const NkOverlayModel *model, float inner, int ace_lines) {
     const NkUiTheme *theme = nk_ui_theme(ui);
     NkUiTextStyle eyebrow = nk_ui_type(NK_UI_TYPE_EYEBROW, theme->muted);
     NkUiTextStyle title = nk_ui_type(NK_UI_TYPE_TITLE, theme->paper);
@@ -59,11 +77,29 @@ static float menu_full_height(NkUi *ui, const NkOverlayModel *model, float inner
                  title_lines * nk_ui_line_height(ui, &title);
     float entries = model->developer ? 5.0f : 3.0f; /* those under RESUME */
     if (nonempty(model->disc_id) != NULL) head += NK_UI_SPACE_1 + nk_ui_line_height(ui, &data);
-    if (nonempty(model->ace_caption) != NULL) {
-        head += NK_UI_SPACE_1 + nk_ui_line_height(ui, &caption);
+    if (ace_lines > 0) {
+        head += NK_UI_SPACE_1 + (float)ace_lines * nk_ui_line_height(ui, &caption);
     }
     return MENU_CARD_PAD_Y + head + MENU_CARD_GAP + NK_UI_SPACE_2 +
            NK_UI_CONTROL_HEIGHT_LARGE + entries * (NK_UI_SPACE_3 + NK_UI_CONTROL_HEIGHT);
+}
+
+/* How many of the caption's lines a compact card has room for with the game's
+   name and RESUME in view under them: the rest of the card may scroll, those two
+   and the caption do not. At least one. */
+static int menu_compact_ace_lines(NkUi *ui, const NkOverlayModel *model, float room) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    NkUiTextStyle eyebrow = nk_ui_type(NK_UI_TYPE_EYEBROW, theme->muted);
+    NkUiTextStyle title = nk_ui_type(NK_UI_TYPE_TITLE, theme->paper);
+    NkUiTextStyle data = nk_ui_type(NK_UI_TYPE_DATA, theme->muted);
+    NkUiTextStyle caption = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
+    float line = nk_ui_line_height(ui, &caption);
+    float rest = MENU_CARD_PAD_Y + nk_ui_line_height(ui, &eyebrow) + nk_ui_line_height(ui, &title) +
+                 MENU_CARD_GAP + NK_UI_CONTROL_HEIGHT;
+    int lines;
+    if (nonempty(model->disc_id) != NULL) rest += nk_ui_line_height(ui, &data);
+    lines = line > 0.0f && room > rest ? (int)((room - rest) / line) : 0;
+    return lines > 1 ? lines : 1;
 }
 
 NkOverlayAction nk_overlay_page_menu(NkUi *ui, NkOverlayState *state, const NkOverlayModel *model) {
@@ -77,8 +113,14 @@ NkOverlayAction nk_overlay_page_menu(NkUi *ui, NkOverlayState *state, const NkOv
     float inner = nk_overlay_page_begin(ui, model, 480.0f);
     bool compact;
     uint32_t entry_size;
+    int ace_lines;
     if (inner <= 0.0f) return result;
-    compact = menu_full_height(ui, model, inner) > nk_overlay_card_room(model);
+    ace_lines = menu_ace_lines(ui, model, inner);
+    compact = menu_full_height(ui, model, inner, ace_lines) > nk_overlay_card_room(model);
+    if (compact) {
+        int room = menu_compact_ace_lines(ui, model, nk_overlay_card_room(model));
+        if (ace_lines > room) ace_lines = room;
+    }
     entry_size = compact ? NK_UI_BUTTON_SMALL : 0u;
     {
         NkUiLayout head = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_grow(),
@@ -98,11 +140,26 @@ NkOverlayAction nk_overlay_page_menu(NkUi *ui, NkOverlayState *state, const NkOv
             if (nonempty(model->disc_id) != NULL) {
                 nk_ui_text_role(ui, MENU_ID_DISC, model->disc_id, NK_UI_TYPE_DATA, theme->muted);
             }
-            /* Enhanced or Ace is on for this run: its name and what it does. Nothing when Authentic. */
+            /* Enhanced or Ace is on for this run: its name and what it does. Nothing when Authentic.
+               Words too long for one line are a list on as many lines as it takes; a card
+               short of room for them counts the rest on its last line ("and N more"). */
             if (nonempty(model->ace_caption) != NULL) {
                 NkUiTextStyle caption = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
-                nk_ui_text(ui, MENU_ID_ACE,
-                           nk_ui_text_clamp(ui, model->ace_caption, &caption, inner, 1), &caption);
+                NkUiLayout lines = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_grow(),
+                                                     nk_overlay_fit(), 0.0f);
+                if (nk_ui_text_width(ui, model->ace_caption, &caption) <= inner) {
+                    nk_ui_text(ui, MENU_ID_ACE,
+                               nk_ui_text_clamp(ui, model->ace_caption, &caption, inner, 1), &caption);
+                } else if (nk_ui_begin_container(ui, MENU_ID_ACE, &lines, NULL)) {
+                    const char *rest = model->ace_caption;
+                    caption.wrap = false;
+                    for (int line = 0; line < ace_lines && rest[0] != '\0'; ++line) {
+                        nk_ui_text(ui, MENU_ID_ACE_LINE + (NkUiId)line,
+                                   nk_ui_list_line(ui, &rest, &caption, inner, line + 1 == ace_lines),
+                                   &caption);
+                    }
+                    nk_ui_end_container(ui);
+                }
             }
             nk_ui_end_container(ui);
         }

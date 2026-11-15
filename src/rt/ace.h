@@ -173,6 +173,13 @@ int ace_format(const AceConfig *c, char *out, size_t cap);
    order, and returns its length (0 when it does not fit). ace_format writes the same length
    for the config it parses to: the longest line there is, whatever keys later parts add. */
 size_t ace_longest_line(char *out, size_t cap);
+/* Writes a line with every part on, from the parser's table alone, and returns its length (0
+   when it does not fit or this build takes no such line): the longest line made one this build
+   parses (smooth=match only where the build has it, tier=ace for the Ace-only keys), then each
+   key at the first of on, fill, x2, sinc, 16, 4 and ace the parser takes in its place. A run of
+   it has the longest ace_feature_words there is, so the tests that size what a run shows turn a
+   new part on with no edit. */
+size_t ace_every_part_line(char *out, size_t cap);
 
 /* ---- the run's switch ----------------------------------------------------------------------- */
 

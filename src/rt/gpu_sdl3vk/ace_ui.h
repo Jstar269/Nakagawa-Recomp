@@ -11,8 +11,8 @@
  * nothing to say registers no UI pass and draws exactly what it drew before.
  *
  * It loads every Vulkan function through the instance's vkGetInstanceProcAddr and calls nothing
- * of the runtime: ace-ui-selftest links it with nk_ui, its Vulkan backend and the C library
- * alone (invariant S1).
+ * of the runtime: ace-ui-selftest's first link has it with nk_ui, its Vulkan backend and the C
+ * library alone (invariant S1).
  */
 #ifndef SR_ACE_UI_H
 #define SR_ACE_UI_H
@@ -45,7 +45,11 @@ typedef struct {
     int reduce_motion;                   /* the player's choice: the notice cuts */
     int high_contrast;                   /* paper on surface_high with a strong edge */
     const char *notice_head;             /* the mode: "Enhanced" or "Ace" (#2055); NULL is Enhanced */
-    const char *notice;                  /* the active features in words, or NULL */
+    /* The active features in words, a list joined by " \xC2\xB7 " (ace.h ace_feature_words), or
+     * NULL. A list too long for one line wraps between its items onto at most
+     * ACE_UI_NOTICE_LINES lines, or stays on one while the keyboard is open; items past that are
+     * counted on the last line ("and N more"), never cut, and the pause menu lists them all. */
+    const char *notice;
     float notice_alpha;                  /* 0 to 1 */
     const char *readout;                 /* "100%  30 FPS", or NULL */
     int readout_warning;                 /* PC LIMITED: in warning */
@@ -100,7 +104,7 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *frame);
 #define ACE_UI_ID_SPACER ACE_UI_ID(0x005u)
 #define ACE_UI_ID_NOTICE ACE_UI_ID(0x006u)
 #define ACE_UI_ID_NOTICE_HEAD ACE_UI_ID(0x007u)
-#define ACE_UI_ID_NOTICE_TEXT ACE_UI_ID(0x008u)
+#define ACE_UI_ID_NOTICE_TEXT ACE_UI_ID(0x040u)  /* + line, below ACE_UI_NOTICE_LINES */
 #define ACE_UI_ID_FILL ACE_UI_ID(0x009u)
 #define ACE_UI_ID_KEYBOARD ACE_UI_ID(0x010u)
 #define ACE_UI_ID_KEYBOARD_DESC ACE_UI_ID(0x011u)
@@ -117,6 +121,9 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *frame);
 #define ACE_UI_ID_HOST_NOTICE_HINT ACE_UI_ID(0x0F8u)
 /* The render notice's words wrap to at most this many lines; more ends in an ellipsis. */
 #define ACE_UI_HOST_NOTICE_LINES 3
+/* The launch notice's list wraps to at most this many lines: room for every part's words at the
+ * smallest layout (ace-ui-selftest), and for the render notice under them. */
+#define ACE_UI_NOTICE_LINES 11
 #define ACE_UI_ID_KEYBOARD_KEYS ACE_UI_ID(0x100u)  /* + 2 * cell, + 1 its label */
 
 #endif /* SR_ACE_UI_H */

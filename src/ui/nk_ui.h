@@ -411,6 +411,19 @@ const char *nk_ui_frame_text(NkUi *ui, const char *text);
    most ten containers per layout, so long names are shortened, not clipped. */
 const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *style,
                              float max_width, int max_lines);
+/* One line of a list from *rest: text whose items are joined by " \xC2\xB7 "
+   ("16x filtering \xC2\xB7 crisp keyboard"). The line is the whole items that
+   fit max_width, each space a no-break space, so it is one run that is measured
+   and drawn alike and never wraps; the dot after its last item stays on it while
+   items follow. It always takes one item: an item wider than the line ends in an
+   ellipsis. With `last` set and items left over, the line ends "and N more" for
+   the N items it leaves out, after as many items as still fit. Moves *rest past
+   what the line took (to "" after a last line). Returns frame storage. */
+const char *nk_ui_list_line(NkUi *ui, const char **rest, const NkUiTextStyle *style,
+                            float max_width, bool last);
+/* How many such lines the whole list takes at max_width; 0 for an empty list. */
+int nk_ui_list_line_count(const NkUi *ui, const char *list, const NkUiTextStyle *style,
+                          float max_width);
 /* The text size the viewport set (1.0 at 100 %). Layout units are unchanged by
    it: only type grows, so a screen that reserves room for a run of text in
    logical px reserves it from the text's own measurements, not a constant. */

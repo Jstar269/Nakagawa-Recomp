@@ -223,9 +223,11 @@ typedef struct {
     bool developer;              /* developer mode: the VRAM and Profile pages are offered */
     const NkOverlayVram *vram;   /* NULL: the VRAM page says there is nothing to show */
     const NkOverlayProfile *profile;
-    /* Ace Mode (src/rt/ace.h): the menu's caption ("Ace Mode on: 16x filtering"), NULL or ""
-       in an authentic run, and the Settings page's Speed readout row: 0 (a zeroed model) has
-       no row (Ace Mode off, or its in-game UI unavailable), 1 shows it off, 2 on. */
+    /* Ace Mode (src/rt/ace.h): the menu's caption ("Ace: 16x filtering \xC2\xB7 crisp keyboard",
+       the mode and its parts joined by middle dots), NULL or "" in an authentic run. Too long
+       for one line, it wraps between its parts onto the lines the card has room for, and counts
+       the parts past them ("and N more"). And the Settings page's Speed readout row: 0 (a zeroed
+       model) has no row (Ace Mode off, or its in-game UI unavailable), 1 shows it off, 2 on. */
     const char *ace_caption;
     int ace_readout;
     /* The display rows, with the readout's convention: 0 (a zeroed model) has no row, 1 shows

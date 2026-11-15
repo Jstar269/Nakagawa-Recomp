@@ -9,18 +9,28 @@
  *           The render notice (#2151) at those sizes and at small and scaled windows: at the
  *           bottom left, inside the safe area, its words inside it, under the top chips, and
  *           out of the keyboard's way; alone in an authentic run's frame it is wanted.
+ *           The launch notice with every part on (ace_every_part_line, so a part added to the
+ *           key table is in it): at every window and display scale every word of every part
+ *           is drawn, whole items on each line, inside the chip and the safe area, with no
+ *           ellipsis; the keyboard or a list past the chip's lines ends in "and N more".
  *   gpu     on a headless Vulkan device: the pass loads an image cleared to one colour, draws
  *           the chips and the keyboard over it, and leaves every other pixel as it was. The
  *           image is written to <dir>/ace_ui_selftest.ppm for review. Then the render notice
  *           alone, as an authentic run draws it: its chip at the bottom left and every other
- *           pixel the frame's (<dir>/ace_ui_selftest_notice.ppm). Exit 77 without Vulkan.
+ *           pixel the frame's (<dir>/ace_ui_selftest_notice.ppm). Then the launch notice with
+ *           every part on (<dir>/ace_ui_selftest_every_part.ppm). Exit 77 without Vulkan.
  *
- * Linked from ace_ui.c, osk_overlay.c, nk_ui and its Vulkan backend alone: a reference from the
- * UI pass to anything of the runtime fails the link (invariant S1). With --fonts <player
- * folder> and SDL3_ttf the GPU frame uses the launcher's fonts instead of block glyphs.
+ * Built twice. With ACE_UI_SELFTEST_S1 it is linked from ace_ui.c, osk_overlay.c, nk_ui and its
+ * Vulkan backend alone: a reference from the UI pass to anything of the runtime fails that link
+ * (invariant S1). The build that runs adds ace.c, which only this test's every-part cells read.
+ * With --fonts <player folder> and SDL3_ttf the GPU frames and the every-part layout use the
+ * launcher's fonts as well as block glyphs.
  */
 #define VK_NO_PROTOTYPES 1
 #include "ace_ui.h"
+#if !defined(ACE_UI_SELFTEST_S1)
+#include "../ace.h"
+#endif
 
 #include "nk_ui_draw.h"
 #include "nk_ui_theme.h"
@@ -160,22 +170,26 @@ static const NkUiDrawList *build(NkUi *ui, const AceUiFrame *f, float *density) 
     return nk_ui_end(ui);
 }
 
-/* The render notice's words as the list draws them: the union of their lines' bounds, the lines
- * joined by single spaces (a no-break space read as a space), and how many lines there are.
- * Every line must be a run no wider, measured whole, than the box it is clipped to. */
-static int host_words(const NkUiDrawList *list, int bounds[4], char *joined, size_t cap, int w, int h) {
+/* A chip's words as the list draws them, from the `count` line ids at `first`: the union of
+ * their lines' bounds, the lines joined by single spaces (a no-break space read as a space), and
+ * how many lines there are. Every line must be a run no wider, measured whole by `text`, than the
+ * box it is clipped to, under the line before it. */
+static int chip_words(const NkUiDrawList *list, NkUiId first, int count, const char *what,
+                      const NkUiTextBackend *text, int bounds[4], char *joined, size_t cap, int w, int h) {
     int lines = 0;
     size_t used = 0;
     joined[0] = '\0';
     for (uint32_t i = 0; i < list->ncmd; i++) {
         const NkUiDrawCmd *c = &list->cmd[i];
-        if (c->kind != NK_UI_DRAW_TEXT || c->element_id < ACE_UI_ID_HOST_NOTICE_TEXT ||
-            c->element_id >= ACE_UI_ID_HOST_NOTICE_TEXT + ACE_UI_HOST_NOTICE_LINES) continue;
+        if (c->kind != NK_UI_DRAW_TEXT || c->element_id < first || c->element_id >= first + (NkUiId)count)
+            continue;
         const NkUiTextRun *run = (const NkUiTextRun *)c->custom;
-        const float whole = text_measure_shaped(NULL, run->font, run->size_px, run->text, run->length).width;
+        const float whole = text->measure(text->user, run->font, run->size_px, run->text, run->length).width;
         CHECK(whole <= (float)(c->bounds[2] - c->bounds[0]) + 1.0f,
-              "%dx%d: line %d of the render notice is %.1f px shaped whole in a %d px box: its end "
-              "would be clipped", w, h, lines, (double)whole, c->bounds[2] - c->bounds[0]);
+              "%dx%d: line %d of the %s is %.1f px shaped whole in a %d px box: its end "
+              "would be clipped", w, h, lines, what, (double)whole, c->bounds[2] - c->bounds[0]);
+        CHECK(!lines || c->bounds[1] >= bounds[3], "%dx%d: line %d of the %s overlaps the line above",
+              w, h, lines, what);
         if (!lines) memcpy(bounds, c->bounds, sizeof(int) * 4u);
         if (c->bounds[0] < bounds[0]) bounds[0] = c->bounds[0];
         if (c->bounds[1] < bounds[1]) bounds[1] = c->bounds[1];
@@ -195,6 +209,11 @@ static int host_words(const NkUiDrawList *list, int bounds[4], char *joined, siz
         lines++;
     }
     return lines;
+}
+
+static int host_words(const NkUiDrawList *list, int bounds[4], char *joined, size_t cap, int w, int h) {
+    return chip_words(list, ACE_UI_ID_HOST_NOTICE_TEXT, ACE_UI_HOST_NOTICE_LINES, "render notice",
+                      &k_shaped, bounds, joined, cap, w, h);
 }
 
 /* ---- layout ---------------------------------------------------------------------------------- */
@@ -648,6 +667,244 @@ static NkUiTtf *fonts_open(const char *root) {
 }
 #endif
 
+#if !defined(ACE_UI_SELFTEST_S1)
+/* ---- the launch notice with every part on ---------------------------------------------------- */
+
+static const char k_join[] = " \xC2\xB7 ";
+
+/* What a run shows with every part on, from the parser's key table (ace_every_part_line): the
+ * longest list of parts this build can put in the notice. */
+static char s_every[ACE_WORDS_MAX];
+
+static int every_part_words(void) {
+    char line[ACE_SPEC_MAX];
+    size_t n = 0;
+    if (ace_every_part_line(line, sizeof(line)) && ace_init_spec(line, NULL) == 1)
+        n = ace_feature_words(s_every, sizeof(s_every));
+    (void)ace_init_spec("off", NULL);
+    return n > 0;
+}
+
+/* The items in the first `length` bytes of a list. */
+static int list_items(const char *list, size_t length) {
+    int items = length ? 1 : 0;
+    for (const char *s = list; (s = strstr(s, k_join)) != NULL && s < list + length; s += strlen(k_join))
+        items++;
+    return items;
+}
+
+/* Whether `shown` is `all` shortened by the rule: its first items, each whole, then "and N more"
+ * for the N it leaves out. */
+static int ends_counted(const char *shown, const char *all) {
+    const char *tail = NULL;
+    int more = 0, used = 0;
+    for (const char *s = shown; (s = strstr(s, "and ")) != NULL; s++) tail = s;
+    if (!tail || sscanf(tail, "and %d more%n", &more, &used) != 1 || !used || tail[used] != '\0' || more < 1)
+        return 0;
+    size_t kept = (size_t)(tail - shown);
+    if (kept) {
+        if (kept < strlen(k_join) || strncmp(tail - strlen(k_join), k_join, strlen(k_join)) != 0) return 0;
+        kept -= strlen(k_join);
+        if (strncmp(shown, all, kept) != 0 || strncmp(all + kept, k_join, strlen(k_join)) != 0) return 0;
+    }
+    return list_items(all, kept) + more == list_items(all, strlen(all));
+}
+
+/* Block glyphs measured as a font measures a list: by the character, half the type size each,
+ * so a no-break space or a dot is as wide as one letter and not two (k_shaped counts bytes, which
+ * makes a list of short items half as wide again as the launcher's fonts make it), and a run
+ * shaped whole is wider than its items measured one by one, as above. */
+static NkUiTextSize text_measure_chars(void *user, int font, int px, const char *s, size_t n) {
+    NkUiTextSize size = text_measure(user, font, px, s, n);
+    size_t chars = 0;
+    for (size_t i = 0; i < n; i++) chars += ((unsigned char)s[i] & 0xC0u) != 0x80u;
+    size.width = (float)chars * (float)px * 0.5f + (float)(chars / 8u) * (float)px / 12.0f;
+    return size;
+}
+
+static const NkUiTextBackend k_chars = {NULL, text_measure_chars, text_shape, text_raster};
+
+static AceUiFrame frame_notice(int w, int h, float scale, const char *words) {
+    AceUiFrame f = frame_full(w, h, scale);
+    f.notice_head = "Ace";
+    f.notice = words;
+    f.readout = "100%  60 FPS";
+    f.readout_warning = 0;
+    f.keyboard = NULL;
+    return f;
+}
+
+/* One frame's launch notice: its chip inside the safe area and clear of the readout, the render
+ * notice and the keyboard; every line inside the chip and unclipped, whole items on each (a line
+ * never starts with the dot, and ends with it while lines follow), nothing ending in an ellipsis,
+ * nothing outside the window. Returns the lines and what they read. */
+static int notice_lines(NkUi *ui, const NkUiTextBackend *text, const AceUiFrame *f, const char *what,
+                        char *joined, size_t cap) {
+    float density = 1.0f;
+    const NkUiDrawList *list = build(ui, f, &density);
+    const int w = f->pixel_w, h = f->pixel_h;
+    const double scale = (double)f->display_scale;
+    joined[0] = '\0';
+    CHECK(list != NULL, "%s %dx%d@%.2f: the frame was dropped", what, w, h, scale);
+    if (!list) return 0;
+    int notice[4] = {0, 0, 0, 0}, words[4] = {0, 0, 0, 0}, other[4];
+    const int safe = (int)(16.0f * density) - 1;
+    const int lines = chip_words(list, ACE_UI_ID_NOTICE_TEXT, ACE_UI_NOTICE_LINES, "launch notice", text,
+                                 words, joined, cap, w, h);
+    CHECK(element_bounds(list, ACE_UI_ID_NOTICE, notice) && lines >= 1, "%s %dx%d@%.2f: no launch notice",
+          what, w, h, scale);
+    CHECK(notice[0] >= safe && notice[1] >= safe && notice[2] <= w - safe && notice[3] <= h - safe,
+          "%s %dx%d@%.2f: the launch notice (%d,%d)-(%d,%d) leaves the safe area", what, w, h, scale,
+          notice[0], notice[1], notice[2], notice[3]);
+    CHECK(words[0] >= notice[0] && words[1] >= notice[1] && words[2] <= notice[2] && words[3] <= notice[3],
+          "%s %dx%d@%.2f: the words (%d,%d)-(%d,%d) leave the launch notice (%d,%d)-(%d,%d)", what, w, h,
+          scale, words[0], words[1], words[2], words[3], notice[0], notice[1], notice[2], notice[3]);
+    CHECK(strstr(joined, "\xE2\x80\xA6") == NULL, "%s %dx%d@%.2f: the launch notice ends in an ellipsis: \"%s\"",
+          what, w, h, scale, joined);
+    int line = 0;
+    for (uint32_t i = 0; i < list->ncmd; i++) {
+        const NkUiDrawCmd *c = &list->cmd[i];
+        if (c->kind == NK_UI_DRAW_SCISSOR_START || c->kind == NK_UI_DRAW_SCISSOR_END) continue;
+        CHECK(c->bounds[0] >= 0 && c->bounds[1] >= 0 && c->bounds[2] <= w && c->bounds[3] <= h,
+              "%s %dx%d@%.2f: command %u outside the window", what, w, h, scale, i);
+        if (c->kind != NK_UI_DRAW_TEXT || c->element_id < ACE_UI_ID_NOTICE_TEXT ||
+            c->element_id >= ACE_UI_ID_NOTICE_TEXT + ACE_UI_NOTICE_LINES) continue;
+        const NkUiTextRun *run = (const NkUiTextRun *)c->custom;
+        const int dot_first = run->length >= 2u && memcmp(run->text, "\xC2\xB7", 2u) == 0;
+        const int dot_last = run->length >= 2u && memcmp(run->text + run->length - 2u, "\xC2\xB7", 2u) == 0;
+        line++;
+        CHECK(c->clip[0] <= c->bounds[0] && c->clip[1] <= c->bounds[1] && c->clip[2] >= c->bounds[2] &&
+              c->clip[3] >= c->bounds[3], "%s %dx%d@%.2f: line %d of the launch notice is clipped", what, w,
+              h, scale, line);
+        CHECK(!dot_first && dot_last == (line < lines),
+              "%s %dx%d@%.2f: line %d of %d of the launch notice splits an item: \"%.*s\"", what, w, h, scale,
+              line, lines, (int)run->length, run->text);
+    }
+    if (f->readout)
+        CHECK(element_bounds(list, ACE_UI_ID_READOUT, other) && other[2] < notice[0] && other[0] >= safe,
+              "%s %dx%d@%.2f: the launch notice and the readout overlap", what, w, h, scale);
+    if (f->host_notice)
+        CHECK(element_bounds(list, ACE_UI_ID_HOST_NOTICE, other) && other[1] >= notice[3] &&
+              other[3] <= h - safe, "%s %dx%d@%.2f: the launch notice (to y %d) and the render notice "
+              "(%d to %d) do not both fit", what, w, h, scale, notice[3], other[1], other[3]);
+    if (f->keyboard)
+        CHECK(element_bounds(list, ACE_UI_ID_KEYBOARD, other) && other[1] >= notice[3] &&
+              other[3] <= h - safe, "%s %dx%d@%.2f: the launch notice (to y %d) and the keyboard (%d to "
+              "%d) do not both fit", what, w, h, scale, notice[3], other[1], other[3]);
+    return lines;
+}
+
+/* The launch notice with the longest list this build can show, with `text` for its fonts. */
+static void notice_every_part(const NkUiTextBackend *text, const char *fonts) {
+    static const struct { int w, h; float scale; } sizes[] = {
+        /* the default window, 720p and 1080p at each display scale the chip follows */
+        {960, 540, 1.0f}, {960, 540, 1.25f}, {960, 540, 1.5f}, {960, 540, 2.0f},
+        {1280, 720, 1.0f}, {1280, 720, 1.25f}, {1280, 720, 1.5f}, {1280, 720, 2.0f},
+        {1920, 1080, 1.0f}, {1920, 1080, 1.25f}, {1920, 1080, 1.5f}, {1920, 1080, 2.0f},
+        /* and the windows the other cells use, the smallest and the widest among them */
+        {960, 600, 1.0f}, {1280, 800, 1.0f}, {1920, 1200, 1.5f}, {480, 272, 1.0f}, {960, 544, 1.0f},
+        {2560, 1080, 1.0f}, {5120, 1440, 2.0f}, {480, 272, 2.0f}, {720, 408, 1.5f}, {320, 180, 1.0f},
+        {640, 1136, 1.0f}, {3840, 2160, 2.0f},
+    };
+    /* More items than the chip's lines hold in any but the widest windows. */
+    static char many[1024];
+    size_t used = 0;
+    for (int i = 1; i <= 90 && used + 16u < sizeof(many); i++)
+        used += (size_t)snprintf(many + used, sizeof(many) - used, "%spart %02d", i > 1 ? k_join : "", i);
+    NkUiConfig config;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_OVERLAY;
+    config.text = text;
+    NkUi *ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "nk_ui_create (%s)", fonts);
+    if (!ui) return;
+    keyboard_open();
+    int most = 0, counted = 0;
+    static char joined[2 * ACE_WORDS_MAX + sizeof(many)];
+    for (size_t s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s++) {
+        const int w = sizes[s].w, h = sizes[s].h;
+        const double scale = (double)sizes[s].scale;
+        /* Every word of every part, beside the readout: nothing cut, counted or left out. */
+        AceUiFrame f = frame_notice(w, h, sizes[s].scale, s_every);
+        int lines = notice_lines(ui, text, &f, fonts, joined, sizeof(joined));
+        CHECK(lines <= ACE_UI_NOTICE_LINES && strcmp(joined, s_every) == 0,
+              "%s %dx%d@%.2f: every part on reads, on %d line(s), \"%s\"; the parts are \"%s\"", fonts, w, h,
+              scale, lines, joined, s_every);
+        if (lines > most) most = lines;
+        /* The same over the render notice (#2151): both whole, one under the other. */
+        f.host_notice_head = k_host_head;
+        f.host_notice = k_host_words;
+        f.host_notice_hint = k_host_hint;
+        (void)notice_lines(ui, text, &f, fonts, joined, sizeof(joined));
+        CHECK(strcmp(joined, s_every) == 0, "%s %dx%d@%.2f: over the render notice every part on reads \"%s\"",
+              fonts, w, h, scale, joined);
+        /* The keyboard leaves one line: the list fits it, or its first items and the count. */
+        f = frame_notice(w, h, sizes[s].scale, s_every);
+        f.keyboard = &s_keyboard;
+        lines = notice_lines(ui, text, &f, fonts, joined, sizeof(joined));
+        CHECK(lines == 1 && (strcmp(joined, s_every) == 0 || ends_counted(joined, s_every)),
+              "%s %dx%d@%.2f: beside the keyboard every part on reads, on %d line(s), \"%s\"", fonts, w, h,
+              scale, lines, joined);
+        /* A list past the chip's lines keeps them all and counts what it leaves out; a chip
+         * that tall still leaves the render notice its place. */
+        f = frame_notice(w, h, sizes[s].scale, many);
+        f.host_notice_head = k_host_head;
+        f.host_notice = k_host_words;
+        f.host_notice_hint = k_host_hint;
+        lines = notice_lines(ui, text, &f, fonts, joined, sizeof(joined));
+        const int cut = strcmp(joined, many) != 0;
+        CHECK(lines <= ACE_UI_NOTICE_LINES &&
+              (!cut || (lines == ACE_UI_NOTICE_LINES && ends_counted(joined, many))),
+              "%s %dx%d@%.2f: 90 parts read, on %d line(s), \"%s\"", fonts, w, h, scale, lines, joined);
+        counted += cut;
+    }
+    CHECK(counted > 0, "%s: no window was too small for 90 parts, so the count was never drawn", fonts);
+    /* A list that fits one line is the one run it always was. */
+    static const char k_one[] = "16x\xC2\xA0" "filtering\xC2\xA0\xC2\xB7\xC2\xA0" "crisp\xC2\xA0keyboard"
+                                "\xC2\xA0\xC2\xB7\xC2\xA0speed\xC2\xA0readout";
+    AceUiFrame f = frame_full(1280, 720, 1.0f);
+    f.keyboard = NULL;
+    float density = 1.0f;
+    const NkUiDrawList *list = build(ui, &f, &density);
+    int runs = 0;
+    for (uint32_t i = 0; list && i < list->ncmd; i++) {
+        const NkUiDrawCmd *c = &list->cmd[i];
+        if (c->kind != NK_UI_DRAW_TEXT || c->element_id < ACE_UI_ID_NOTICE_TEXT ||
+            c->element_id >= ACE_UI_ID_NOTICE_TEXT + ACE_UI_NOTICE_LINES) continue;
+        const NkUiTextRun *run = (const NkUiTextRun *)c->custom;
+        runs++;
+        CHECK(c->element_id == ACE_UI_ID_NOTICE_TEXT && run->length == strlen(k_one) &&
+              memcmp(run->text, k_one, run->length) == 0, "%s: a short list reads \"%.*s\"", fonts,
+              (int)run->length, run->text);
+    }
+    CHECK(runs == 1, "%s: a short list is %d runs, not one", fonts, runs);
+    printf("ace-ui-selftest: every part on (%d parts, %zu bytes) takes at most %d of %d lines with %s\n",
+           list_items(s_every, strlen(s_every)), strlen(s_every) + 1u, most, ACE_UI_NOTICE_LINES, fonts);
+    nk_ui_destroy(ui);
+}
+
+static void cell_notice_every_part(const char *fonts_root) {
+    CHECK(every_part_words(), "every part on is not a run this build takes");
+    if (!s_every[0]) return;
+    notice_every_part(&k_chars, "block glyphs");
+#if defined(NK_UI_WITH_SDL_TTF)
+    if (fonts_root) {
+        NkUiTtf *ttf = fonts_open(fonts_root);
+        if (ttf) {
+            NkUiTextBackend ttf_text = nk_ui_ttf_backend(ttf);
+            notice_every_part(&ttf_text, "the launcher's fonts");
+            nk_ui_ttf_destroy(ttf);
+        } else {
+            printf("ace-ui-selftest: the fonts under %s could not be loaded; every part on was laid out "
+                   "with block glyphs only\n", fonts_root);
+        }
+    }
+#else
+    (void)fonts_root;
+#endif
+}
+#endif /* !ACE_UI_SELFTEST_S1 */
+
 static int cell_gpu(const char *dir, const char *fonts_root) {
     const int w = 1280, h = 720;
     char why[128] = "";
@@ -740,6 +997,21 @@ static int cell_gpu(const char *dir, const char *fonts_root) {
         host.host_notice = NULL;
         CHECK(present(ui, &host, w, h, 0) == 0, "a hidden render notice drew");
         CHECK(pixel(w, 24, h - 24) == frame_colour, "a hidden render notice left its chip");
+#if !defined(ACE_UI_SELFTEST_S1)
+        /* The launch notice with every part on: its chip grows down from the top right, and the
+         * frame beside it, under it and in the safe area stays the game's. */
+        if (s_every[0]) {
+            AceUiFrame every = frame_notice(w, h, 1.0f, s_every);
+            CHECK(present(ui, &every, w, h, 0) == 1, "the launch notice with every part on did not draw");
+            CHECK(pixel(w, w - 22, 22) != frame_colour, "every part on: no notice chip at the top right");
+            CHECK(pixel(w, w / 2 - 40, 40) == frame_colour && pixel(w, w - 22, h / 2) == frame_colour &&
+                  pixel(w, w - 8, 8) == frame_colour && pixel(w, 8, h - 8) == frame_colour,
+                  "every part on: the notice changed the frame outside its chip");
+            snprintf(path, sizeof(path), "%s%sace_ui_selftest_every_part.ppm", dir ? dir : "", dir ? "/" : "");
+            write_ppm(path, w, h);
+            printf("ace-ui-selftest: every part on written to %s\n", path);
+        }
+#endif
         ace_ui_destroy(ui);
     }
 #if defined(NK_UI_WITH_SDL_TTF)
@@ -756,6 +1028,9 @@ int main(int argc, char **argv) {
         else dir = argv[i];
     }
     cell_layout();
+#if !defined(ACE_UI_SELFTEST_S1)
+    cell_notice_every_part(fonts);
+#endif
     int gpu = cell_gpu(dir, fonts);
     if (s_fail) {
         fprintf(stderr, "ace-ui-selftest: %d check(s) FAILED\n", s_fail);

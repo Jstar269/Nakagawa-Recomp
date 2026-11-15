@@ -959,6 +959,163 @@ const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *st
     return nk_ui_frame_text(ui, out);
 }
 
+/* A list's items are joined by a middle dot between two spaces. */
+static const char nk_ui_list_join[] = " \xC2\xB7 ";
+#define NK_UI_LIST_RUN_BYTES 2048u /* one line as a run; a line that would be longer wraps */
+
+/* Where the item at list[from] ends as the last of its line: after its dot when
+   an item follows it, else at the end of the list. *next is where that item
+   starts. */
+static size_t nk_ui_list_item_end(const char *list, size_t from, size_t *next) {
+    const char *join = strstr(list + from, nk_ui_list_join);
+    if (join == NULL) {
+        *next = from + strlen(list + from);
+        return *next;
+    }
+    *next = (size_t)(join - list) + sizeof(nk_ui_list_join) - 1u;
+    return *next - 1u;
+}
+
+/* The first `items` items of the list as a line, in bytes; *next as above. */
+static size_t nk_ui_list_take(const char *list, int items, size_t *next) {
+    size_t end = 0u;
+    *next = 0u;
+    while (items-- > 0 && list[*next] != '\0') {
+        end = nk_ui_list_item_end(list, *next, next);
+    }
+    return end;
+}
+
+static int nk_ui_list_items(const char *list) {
+    size_t next = 0u;
+    int items = 0;
+    while (list[next] != '\0') {
+        (void)nk_ui_list_item_end(list, next, &next);
+        ++items;
+    }
+    return items;
+}
+
+/* `length` bytes of `text` with each space a no-break space, then `tail`. False
+   when out[cap] cannot hold it; out then holds the part that fit. */
+static bool nk_ui_list_run(const char *text, size_t length, const char *tail, char *out,
+                           size_t cap) {
+    size_t tail_length = strlen(tail);
+    size_t used = 0u;
+    size_t i;
+    for (i = 0u; i < length; ++i) {
+        if (used + 2u >= cap) {
+            out[used] = '\0';
+            return false;
+        }
+        if (text[i] == ' ') {
+            out[used++] = (char)0xC2;
+            out[used++] = (char)0xA0;
+        } else {
+            out[used++] = text[i];
+        }
+    }
+    out[used] = '\0';
+    if (tail_length >= cap - used) {
+        return false;
+    }
+    memcpy(out + used, tail, tail_length + 1u);
+    return true;
+}
+
+/* The most whole items from the start of the list whose run is no wider than
+   max_width: their bytes as a line (0 when not even the first fits), their
+   count, and *next where the rest starts. */
+static size_t nk_ui_list_fit(const NkUi *ui, const char *list, const NkUiTextStyle *style,
+                             float max_width, int *items, size_t *next) {
+    char run[NK_UI_LIST_RUN_BYTES];
+    size_t fit = 0u;
+    size_t from = 0u;
+    *items = 0;
+    *next = 0u;
+    while (list[from] != '\0') {
+        size_t after;
+        size_t end = nk_ui_list_item_end(list, from, &after);
+        if (!nk_ui_list_run(list, end, "", run, sizeof(run)) ||
+            nk_ui_text_width(ui, run, style) > max_width) {
+            break;
+        }
+        fit = end;
+        from = *next = after;
+        ++*items;
+    }
+    return fit;
+}
+
+const char *nk_ui_list_line(NkUi *ui, const char **rest, const NkUiTextStyle *style,
+                            float max_width, bool last) {
+    char run[NK_UI_LIST_RUN_BYTES];
+    const char *list;
+    size_t next;
+    size_t fit;
+    int items;
+    if (ui == NULL || rest == NULL || *rest == NULL || style == NULL || !(max_width > 0.0f)) {
+        return "";
+    }
+    list = *rest;
+    fit = nk_ui_list_fit(ui, list, style, max_width, &items, &next);
+    if (last && list[next] != '\0') {
+        /* Items are left over: the line gives up its own from the end until
+           the count of all it leaves out fits after the rest. */
+        int left = nk_ui_list_items(list + next);
+        bool fits = false;
+        *rest = "";
+        for (;;) {
+            char more[48] = "\xC2\xA0" "and\xC2\xA0";
+            char digits[12];
+            size_t used = strlen(more);
+            int n = 0;
+            int value = left;
+            do {
+                digits[n++] = (char)('0' + value % 10);
+                value /= 10;
+            } while (value > 0 && n < (int)sizeof(digits));
+            while (n > 0) more[used++] = digits[--n];
+            memcpy(more + used, "\xC2\xA0" "more", sizeof("\xC2\xA0" "more"));
+            fits = nk_ui_list_run(list, fit, items > 0 ? more : more + 2, run, sizeof(run)) &&
+                   nk_ui_text_width(ui, run, style) <= max_width;
+            if (fits || items == 0) break;
+            --items;
+            ++left;
+            fit = nk_ui_list_take(list, items, &next);
+        }
+        return nk_ui_frame_text(ui, fits ? run : nk_ui_text_clamp(ui, run, style, max_width, 1));
+    }
+    if (fit == 0u) {
+        /* One item wider than the line: it is shortened, as any run too wide is. */
+        fit = nk_ui_list_item_end(list, 0u, &next);
+        (void)nk_ui_list_run(list, fit, "", run, sizeof(run));
+        *rest = list + next;
+        return nk_ui_frame_text(ui, nk_ui_text_clamp(ui, run, style, max_width, 1));
+    }
+    (void)nk_ui_list_run(list, fit, "", run, sizeof(run));
+    *rest = list + next;
+    return nk_ui_frame_text(ui, run);
+}
+
+int nk_ui_list_line_count(const NkUi *ui, const char *list, const NkUiTextStyle *style,
+                          float max_width) {
+    int lines = 0;
+    if (ui == NULL || list == NULL || style == NULL || !(max_width > 0.0f)) {
+        return 0;
+    }
+    while (list[0] != '\0') {
+        size_t next;
+        int items;
+        if (nk_ui_list_fit(ui, list, style, max_width, &items, &next) == 0u) {
+            (void)nk_ui_list_item_end(list, 0u, &next);
+        }
+        list += next;
+        ++lines;
+    }
+    return lines;
+}
+
 void nk_ui_text(NkUi *ui, NkUiId id, const char *text, const NkUiTextStyle *style) {
     NkUiTextStyle resolved;
     const char *stored;
