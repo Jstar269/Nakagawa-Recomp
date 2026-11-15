@@ -367,7 +367,10 @@ static uint32_t find_mem_type(uint32_t bits, VkMemoryPropertyFlags want) {
 static int wait_present_frame(PresentFrame *f) {
     if (!f->submitted) return 1;
     uint64_t wait_started = sr_perf_now_ns();
+    const uint64_t ace_from = g_ace_on ? SDL_GetTicksNS() : 0u;
     VkResult r = PSTEP_VK(PSTEP_FRAME_WAIT, vkWaitForFences(s_dev, 1, &f->fence, VK_TRUE, UINT64_MAX));
+    /* The speed readout's GPU LIMITED verdict (ace.h, ace_note_gpu_wait). */
+    if (g_ace_on) ace_note_gpu_wait(SDL_GetTicksNS() - ace_from);
     if (wait_started) {
         sr_perf_vulkan_wait(wait_started, 0);
         sr_perf_present_wait(wait_started);
