@@ -9319,6 +9319,21 @@ static void twin_release(void) {
     s_ssmid_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
+/* The two TEX_SCALE exit lines, once a run: from the renderer's shutdown, or from ace_finish on the
+   SR_EXIT_AT_VBLANK path, which ends with _Exit and never reaches the shutdown (as tex_hm_report). */
+static int s_xs_reported;
+static void tex_xs_report(void) {
+    if ((!s_xs_factor && !s_xs_smart2d) || s_xs_reported) return;
+    s_xs_reported = 1;
+    fprintf(stderr, "TEX_SCALE: draws (scaled_binds=%llu, onetoone_unscaled=%llu, scaled_uploads=%llu, "
+                    "stale=%llu, smart2d=%llu, reclaimed=%llu, budget_short=%llu, upload_capped=%llu)\n",
+            (unsigned long long)s_cnt_xs_bound, (unsigned long long)s_cnt_xs_plain,
+            (unsigned long long)s_cnt_xs_uploads, (unsigned long long)s_cnt_xs_stale,
+            (unsigned long long)s_cnt_smart2d, (unsigned long long)s_cnt_xs_reclaimed,
+            (unsigned long long)s_cnt_xs_budget_short, (unsigned long long)s_cnt_xs_upload_capped);
+    nk_tex_scale_report();
+}
+
 int gegpu_init(void) {
     Sdl3VkInfo vi;
     sr_perf_set_gpu_replay_source(gpu_replay_snapshot);
@@ -9576,6 +9591,8 @@ int gegpu_init(void) {
         if (refused[0] && want_smart2d) ace_feature_unavailable(ACE_FEATURE_SMART2D, refused);
         if (s_xs_factor) ace_confirm(ACE_FEATURE_TEXSCALE);
         if (s_xs_smart2d) ace_confirm(ACE_FEATURE_SMART2D);
+        s_xs_reported = 0;
+        if (s_xs_factor || s_xs_smart2d) ace_set_exit_report(ACE_FEATURE_TEXSCALE, tex_xs_report);
     }
     tex_repl_init(g_ace_on);
     tex_soft_init();
@@ -9892,13 +9909,8 @@ void gegpu_shutdown(void) {
     if ((had_repl || had_soft) && !s_xs_factor && !s_xs_smart2d) nk_tex_scale_shutdown();
     if (s_xs_factor || s_xs_smart2d) {
         nk_tex_scale_shutdown();
-        fprintf(stderr, "TEX_SCALE: draws (scaled_binds=%llu, onetoone_unscaled=%llu, scaled_uploads=%llu, "
-                        "stale=%llu, smart2d=%llu, reclaimed=%llu, budget_short=%llu, upload_capped=%llu)\n",
-                (unsigned long long)s_cnt_xs_bound, (unsigned long long)s_cnt_xs_plain,
-                (unsigned long long)s_cnt_xs_uploads, (unsigned long long)s_cnt_xs_stale,
-                (unsigned long long)s_cnt_smart2d, (unsigned long long)s_cnt_xs_reclaimed,
-                (unsigned long long)s_cnt_xs_budget_short, (unsigned long long)s_cnt_xs_upload_capped);
-        nk_tex_scale_report();
+        tex_xs_report();
+        ace_set_exit_report(ACE_FEATURE_TEXSCALE, NULL);
         s_xs_factor = s_xs_smart2d = 0;
     }
     nk_tex_scale_shutdown();   /* the workers a texture dump alone started (a no-op once stopped above) */
