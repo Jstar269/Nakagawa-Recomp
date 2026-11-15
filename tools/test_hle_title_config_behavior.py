@@ -422,6 +422,8 @@ class HleTitleConfigBehaviorTests(unittest.TestCase):
                 runtime("rt-delta.prx", "disc0:/PSP_GAME/USRDIR/rt-delta.prx"),
                 runtime("rt-fixed.prx", "disc0:/PSP_GAME/USRDIR/rt-fixed.prx"),
                 runtime("rt-nostart.prx", "disc0:/PSP_GAME/USRDIR/rt-nostart.prx"),
+                # An upper-case libfont file name, as Gran Turismo spells it.
+                runtime("LIBFONT.PRX", "disc0:/PSP_GAME/USRDIR/MODULE/LIBFONT.PRX"),
                 *configured.get("modules", []),
             ]
             manifest.write_text(json.dumps(configured), encoding="utf-8")
@@ -461,6 +463,8 @@ class HleTitleConfigBehaviorTests(unittest.TestCase):
                 "GUEST_MODULE_LOAD_NO_MEMORY: rt-alpha.prx",
                 # A started module takes over a host-served NID (#286).
                 "PRX link: scePsmfPlayerGetAudioOutSize (0x3ea82a4b) -> guest 0x",
+                # An upper-case LIBFONT.PRX is libfont: its export runs, not the host handler.
+                "PRX link: sceFontGetCharGlyphImage (0x980f4895) -> guest 0x",
             ):
                 self.assertIn(marker, output)
 

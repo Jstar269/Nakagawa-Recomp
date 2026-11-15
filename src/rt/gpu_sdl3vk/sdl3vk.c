@@ -261,7 +261,12 @@ void sdl3vk_set_logic_slowed_cb(int (*cb)(unsigned *rate)) {
     s_logic_slowed_cb = cb;
 }
 
-static void (*s_ui_pass)(const Sdl3VkUiPass *frame);
+const char *sdl3vk_logic_notice_text(char *out, size_t cap, unsigned rate) {
+    if (out && cap) snprintf(out, cap, "60 FPS logic: %u/s - SLOWED", rate);
+    return out;
+}
+
+static int (*s_ui_pass)(const Sdl3VkUiPass *frame);
 static Sdl3VkShowPass s_show_pass;
 static Sdl3VkShowDone s_show_done;
 static uint64_t s_present_submitted;  /* present submissions made, the newest one's serial */
@@ -315,7 +320,7 @@ void sdl3vk_set_record_upscale_pass(Sdl3VkUpscalePass pass) {
     s_rec_upscale_pass = pass;
 }
 
-void sdl3vk_set_ui_pass(void (*pass)(const Sdl3VkUiPass *frame)) {
+void sdl3vk_set_ui_pass(int (*pass)(const Sdl3VkUiPass *frame)) {
     s_ui_pass = pass;
 }
 
@@ -2427,12 +2432,11 @@ static void draw_profile_hud(SDL_Renderer *ren, int w, int h, double game_fps, d
     }
 }
 
-static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_img, int swap_w, int swap_h) {
+/* The HUD, or with the HUD off the slowed-logic notice alone in a box of its own (`slowed`,
+ * at `slow_rate` updates/s), copied at the top left. */
+static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_img, int swap_w, int swap_h,
+                             int slowed, unsigned slow_rate) {
     /* The profile HUD needs a window it fits in; a smaller one shows the performance HUD. */
-    /* 60 FPS logic that has fallen behind plays slower than the original game; say so even
-     * with the HUD off (section 9.5 of docs/ENHANCEMENT_CONTRACT.md). */
-    unsigned slow_rate = 0;
-    int slowed = s_logic_slowed_cb && s_logic_slowed_cb(&slow_rate);
     int notice_only = !s_hud_enabled;
     int profile = s_hud_enabled == SDL3VK_HUD_PROFILE && swap_w >= PROFILE_HUD_W &&
                   swap_h >= PROFILE_HUD_H + LOGIC_NOTICE_H;
@@ -2502,7 +2506,7 @@ static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_i
     }
     if (slowed) {
         char notice[64];
-        snprintf(notice, sizeof(notice), "60 FPS logic: %u/s - SLOWED", slow_rate);
+        sdl3vk_logic_notice_text(notice, sizeof(notice), slow_rate);
         SDL_SetRenderDrawColor(s_hud_ren, 255, 90, 80, 255);
         SDL_RenderDebugText(s_hud_ren, 12, (float)(hud_h - LOGIC_NOTICE_H + 6), notice);
     }
@@ -2728,8 +2732,16 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
                            1, &blt, plan.nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
         }
 
-        if ((s_hud_enabled || s_logic_slowed_cb) && f->hud_staging_map) {
-            draw_hud_overlay(cmd, f, s_swap_img[idx], dw, dh);
+        /* 60 FPS logic that has fallen behind plays slower than the original game; say so even
+         * with the HUD off (section 9.5 of docs/ENHANCEMENT_CONTRACT.md): in the HUD while it
+         * shows, else in the UI pass's layout, under its readout, else in the presenter's own
+         * box. That box sits where the readout does, so it is copied only when no pass drew. */
+        const int hud_on = s_hud_enabled != SDL3VK_HUD_OFF;
+        unsigned slow_rate = 0;
+        const int slowed = s_logic_slowed_cb && s_logic_slowed_cb(&slow_rate);
+        int slowed_shown = 0;
+        if (hud_on && f->hud_staging_map) {
+            draw_hud_overlay(cmd, f, s_swap_img[idx], dw, dh, slowed, slow_rate);
         }
         if (s_ui_pass) {
             Sdl3VkUiPass ui;
@@ -2743,7 +2755,12 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
             ui.image_count = s_swap_n;
             ui.image_index = idx;
             ui.swapchain_gen = s_swapchain_gen;
-            s_ui_pass(&ui);
+            ui.logic_slowed = slowed && !hud_on;
+            ui.logic_rate = slow_rate;
+            slowed_shown = s_ui_pass(&ui) && ui.logic_slowed;
+        }
+        if (slowed && !hud_on && !slowed_shown && f->hud_staging_map) {
+            draw_hud_overlay(cmd, f, s_swap_img[idx], dw, dh, slowed, slow_rate);
         }
 
         barrier(cmd, s_swap_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,

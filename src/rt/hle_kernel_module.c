@@ -178,15 +178,22 @@ static ModuleStartPolicy module_start_policy(void) {
 
 /* A module-name test, not a substring test: the match has to be a whole path
  * element, so a path such as mylibfont.prx.bak cannot take a module's behavioural
- * path. */
+ * path. The element is compared without regard to ASCII case, as the PSP's file
+ * systems compare names: a title that loads disc0:/.../MODULE/LIBFONT.PRX loads the
+ * same libfont as one that spells it libfont.prx. `name` is lower case. */
 static int module_path_is(const char *path, const char *name) {
     size_t span;
-    const char *hit;
     if (!path || !name) return 0;
     span = strlen(name);
-    for (hit = strstr(path, name); hit; hit = strstr(hit + 1, name)) {
-        if ((hit == path || hit[-1] == '/' || hit[-1] == '\\') &&
-            (hit[span] == '\0' || hit[span] == '/' || hit[span] == '\\')) return 1;
+    for (const char *hit = path; *hit; hit++) {
+        size_t i;
+        if (hit != path && hit[-1] != '/' && hit[-1] != '\\') continue;
+        for (i = 0; i < span; i++) {
+            char c = hit[i];
+            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            if (c != name[i]) break;
+        }
+        if (i == span && (hit[span] == '\0' || hit[span] == '/' || hit[span] == '\\')) return 1;
     }
     return 0;
 }

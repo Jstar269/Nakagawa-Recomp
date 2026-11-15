@@ -1409,7 +1409,7 @@ static void *test_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int ou
  * the whole swapchain image after the frame blit, which no capture or guest byte may see. */
 static int s_test_ui_calls;
 
-static void test_ui_pass(const Sdl3VkUiPass *p) {
+static int test_ui_pass(const Sdl3VkUiPass *p) {
     VkCommandBuffer cmd = (VkCommandBuffer)p->cmd;
     VkImage image = (VkImage)p->images[p->image_index];
     VkImageMemoryBarrier b = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
@@ -1427,6 +1427,24 @@ static void test_ui_pass(const Sdl3VkUiPass *p) {
     vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &magenta, 1,
                          &b.subresourceRange);
     s_test_ui_calls++;
+    return 1;
+}
+
+/* The slowed-logic notice's route: a pass that records nothing, answers `s_test_logic_drew`, and
+ * keeps what the presenter asked of it. */
+static int s_test_logic_drew, s_test_logic_asked, s_test_logic_calls;
+static unsigned s_test_logic_rate_seen;
+
+static int test_logic_pass(const Sdl3VkUiPass *p) {
+    s_test_logic_calls++;
+    s_test_logic_asked = p->logic_slowed;
+    s_test_logic_rate_seen = p->logic_rate;
+    return s_test_logic_drew;
+}
+
+static int test_logic_slowed(unsigned *rate) {
+    if (rate) *rate = 52u;
+    return 1;
 }
 
 /* A whole file, to compare two captures byte for byte; NULL when it cannot be read. */
@@ -2094,6 +2112,59 @@ static int sdl3vk_capture_selftest_body(void) {
             }
         }
         s_developer = saved_developer;
+        hud_set_mode(saved_mode);
+    }
+
+    /* ---- the slowed-logic notice never shares the readout's corner -----------------------
+     * With the HUD off, slowed 60 FPS logic goes to the UI pass, which shows it under its
+     * readout; the presenter's own box, copied to the same top-left corner, would sit under the
+     * readout's chip. So the box is copied only with no pass, or when the pass drew nothing; with
+     * the HUD on the HUD carries the line and the pass is not asked. */
+    {
+        int (*saved_cb)(unsigned *) = s_logic_slowed_cb;
+        const int saved_mode = s_hud_enabled;
+        char words[64];
+        s_logic_slowed_cb = test_logic_slowed;
+        hud_set_mode(SDL3VK_HUD_OFF);
+        static const struct { int pass, drew, hud; unsigned copies; int asked; const char *what; } cases[] = {
+            { 0, 0, 0, 1u, 0, "no UI pass: the presenter's box" },
+            { 1, 1, 0, 0u, 1, "a pass that drew it: no box in its corner" },
+            { 1, 0, 0, 1u, 1, "a pass that drew nothing: the presenter's box" },
+            { 1, 1, 1, 1u, 0, "the HUD on: in the HUD, the pass not asked" },
+        };
+        for (size_t c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+            const unsigned before = s_hud_last.copies;
+            const int calls = s_test_logic_calls;
+            s_test_logic_drew = cases[c].drew;
+            s_test_logic_asked = -1;
+            s_test_logic_rate_seen = 0u;
+            hud_set_mode(cases[c].hud ? SDL3VK_HUD_PERF : SDL3VK_HUD_OFF);
+            sdl3vk_set_ui_pass(cases[c].pass ? test_logic_pass : NULL);
+            if (sdl3vk_present_rgba(px) != 1) {
+                fprintf(stderr, "logic notice: %s: the present failed\n", cases[c].what); ok = 0;
+            }
+            sdl3vk_set_ui_pass(NULL);
+            const int want_h = cases[c].hud ? HUD_H + LOGIC_NOTICE_H : LOGIC_NOTICE_H;
+            if (s_hud_last.copies - before != cases[c].copies ||
+                (cases[c].copies && (s_hud_last.h != want_h || s_hud_last.w != HUD_W))) {
+                fprintf(stderr, "logic notice: %s: %u box copies (want %u), last %dx%d (want %dx%d)\n",
+                        cases[c].what, s_hud_last.copies - before, cases[c].copies, s_hud_last.w,
+                        s_hud_last.h, HUD_W, want_h);
+                ok = 0;
+            }
+            if (cases[c].pass && (s_test_logic_calls != calls + 1 || s_test_logic_asked != cases[c].asked ||
+                                  (cases[c].asked && s_test_logic_rate_seen != 52u))) {
+                fprintf(stderr, "logic notice: %s: the pass ran %d time(s), asked %d (want %d) at %u/s\n",
+                        cases[c].what, s_test_logic_calls - calls, s_test_logic_asked, cases[c].asked,
+                        s_test_logic_rate_seen);
+                ok = 0;
+            }
+        }
+        if (strcmp(sdl3vk_logic_notice_text(words, sizeof(words), 52u), "60 FPS logic: 52/s - SLOWED") != 0) {
+            fprintf(stderr, "logic notice: the words read \"%s\"\n", words);
+            ok = 0;
+        }
+        s_logic_slowed_cb = saved_cb;
         hud_set_mode(saved_mode);
     }
 
