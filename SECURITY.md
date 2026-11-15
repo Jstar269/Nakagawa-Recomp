@@ -7,7 +7,7 @@ PSP and game inputs as untrusted. Parser and guest-span hardening is tracked in 
 
 | Version | Supported | Status / Support Policy |
 | :--- | :--- | :--- |
-| `main` | :white_check_mark: | Active development line. Fixes for all security reports land here. |
+| `main` | :white_check_mark: | Active development line, toward v0.1.0; its builds call themselves `0.1.0-dev`. Fixes for all security reports land here. |
 | `v0.0.3` | :white_check_mark: | Third experimental release ([release notes](docs/RELEASE_NOTES_v0.0.3.md)). Fixes land on `main` and ship in the next release; no backported point releases. |
 | `v0.0.2` | :x: | Second experimental release ([release notes](docs/RELEASE_NOTES_v0.0.2.md)). Superseded by `v0.0.3`; it receives no fixes. |
 | `v0.0.1` | :x: | First experimental release ([#278](https://github.com/Jstar269/nakagawa-recomp/issues/278)). Superseded by `v0.0.2`; it receives no fixes. |
