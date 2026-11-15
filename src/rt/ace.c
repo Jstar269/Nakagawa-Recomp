@@ -467,10 +467,12 @@ static int s_win_started;
 static uint32_t s_win_frames, s_win_skipped, s_win_betweens, s_win_shown, s_win_motion_milli;
 static uint64_t s_shown_seq;   /* AcePace.frame_seq of the newest real frame that reached the screen */
 static uint64_t s_win_idle_ns;
+static uint64_t s_win_gpu_wait_ns;   /* ace_note_gpu_wait in the window */
 static uint32_t s_last_flip_vcount, s_last_flip_fb;
 static int s_have_flip;
 static uint64_t s_rate_vblanks[ACE_RATE_COUNT];
-static uint64_t s_limited_windows;
+static uint64_t s_limited_windows;       /* PC LIMITED or GPU LIMITED */
+static uint64_t s_gpu_limited_windows;   /* of those, GPU LIMITED */
 static int s_ff_running;   /* ace_note_fast_forward: set by the scheduler, not by a run reset */
 static AcePace s_pace;
 static AcePaceStats s_pace_stats;
@@ -492,12 +494,13 @@ static void observation_reset(void) {
     memset(&s_counters, 0, sizeof(s_counters));
     s_win_start_ns = 0; s_win_started = 0;
     s_win_frames = s_win_skipped = s_win_betweens = s_win_shown = 0; s_win_idle_ns = 0;
-    s_win_motion_milli = 0;
+    s_win_motion_milli = 0; s_win_gpu_wait_ns = 0;
     memset(&s_motion, 0, sizeof(s_motion));
     s_shown_seq = 0;
     s_last_flip_vcount = s_last_flip_fb = 0; s_have_flip = 0;
     memset(s_rate_vblanks, 0, sizeof(s_rate_vblanks));
     s_limited_windows = 0;
+    s_gpu_limited_windows = 0;
     ace_pace_reset(&s_pace);
     memset(&s_pace_stats, 0, sizeof(s_pace_stats));
     s_pace_vcount = 0;
@@ -1016,6 +1019,18 @@ static int rate_k(AceRate r) {
     return r >= ACE_RATE_K1 && r <= ACE_RATE_K4 ? (int)r : 0;
 }
 
+uint64_t ace_readout_behind_ns(const AceWindow *w, int k) {
+    if (!w) return 0;
+    const double vblank_ns = 1e9 / ACE_VBLANK_HZ;
+    double behind = (double)w->skipped_slots * vblank_ns;
+    if (k > 0) {
+        double due = (double)w->new_frames * (double)k * vblank_ns;
+        double short_ns = (double)w->wall_ns - due;
+        if (short_ns > behind) behind = short_ns;
+    }
+    return behind > 0.0 ? (uint64_t)behind : 0u;
+}
+
 void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *out) {
     AceReadoutView v;
     memset(&v, 0, sizeof(v));
@@ -1030,6 +1045,11 @@ void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *o
     int k_ref = s->in_stretch && s->stretch_k ? s->stretch_k : k_now;
     int slow = k_ref && v.fps < (ACE_VBLANK_HZ / (double)k_ref) * 0.97;
     v.pc_limited = w->skipped_slots > 0 || (v.idle_share < 0.02 && slow);
+    /* Which part of the host: the GPU when the scheduler's thread waited on it for at least as
+     * long as the window fell behind, so without those waits the game would have kept up. */
+    v.gpu_limited = v.pc_limited && w->gpu_wait_ns > 0 &&
+                    w->gpu_wait_ns >= ace_readout_behind_ns(w, k_ref);
+    const char *limit = v.gpu_limited ? "GPU LIMITED" : "PC LIMITED";
     if (v.pc_limited && !s->in_stretch) {
         s->in_stretch = 1;
         s->stretch_k = w->ever_stable ? k_now : 0;
@@ -1041,14 +1061,14 @@ void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *o
     if (!w->ever_stable || (v.pc_limited && !s->stretch_k)) {
         v.have_target = 0;
         v.speed_pct = 100;
-        if (v.pc_limited) snprintf(v.text, sizeof(v.text), "\xE2\x96\xB2 \xE2\x80\x94  %d FPS  PC LIMITED", fps_shown);
+        if (v.pc_limited) snprintf(v.text, sizeof(v.text), "\xE2\x96\xB2 \xE2\x80\x94  %d FPS  %s", fps_shown, limit);
         else snprintf(v.text, sizeof(v.text), "\xE2\x80\x94 %d FPS", fps_shown);
     } else if (v.pc_limited) {
         v.have_target = 1;
         v.target_fps = ACE_VBLANK_HZ / (double)s->stretch_k;
         double pct = 100.0 * v.fps / v.target_fps;
         v.speed_pct = pct >= 100.0 ? 100 : (int)pct;
-        snprintf(v.text, sizeof(v.text), "\xE2\x96\xB2 %d%%  %d FPS  PC LIMITED", v.speed_pct, fps_shown);
+        snprintf(v.text, sizeof(v.text), "\xE2\x96\xB2 %d%%  %d FPS  %s", v.speed_pct, fps_shown, limit);
     } else {
         v.have_target = 1;
         v.target_fps = k_now ? ACE_VBLANK_HZ / (double)k_now : 0.0;
@@ -1125,6 +1145,12 @@ void ace_note_host_wait(uint64_t ns) {
     s_counters.host_wait_ns += ns;
 }
 
+void ace_note_gpu_wait(uint64_t ns) {
+    if (!g_ace_on) return;
+    s_win_gpu_wait_ns += ns;
+    s_counters.gpu_wait_ns += ns;
+}
+
 void ace_note_fast_forward(int on) {
     if (!g_ace_on) return;
     s_ff_running = on != 0;
@@ -1173,12 +1199,13 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
         s_win_started = 1;
         s_win_start_ns = now_ns;
         s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
-        s_win_motion_milli = 0;
+        s_win_motion_milli = 0; s_win_gpu_wait_ns = 0;
     } else if (now_ns - s_win_start_ns >= 1000000000ull) {
         AceWindow w;
         w.wall_ns = now_ns - s_win_start_ns;
         w.new_frames = s_win_frames;
         w.idle_ns = s_win_idle_ns;
+        w.gpu_wait_ns = s_win_gpu_wait_ns;
         w.skipped_slots = s_win_skipped;
         w.stable = s_det.stable;
         w.ever_stable = s_det.ever_stable;
@@ -1191,9 +1218,10 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
         s_have_view = 1;
         s_counters.windows++;
         if (s_view.pc_limited) s_limited_windows++;
+        if (s_view.gpu_limited) s_gpu_limited_windows++;
         s_win_start_ns = now_ns;
         s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
-        s_win_motion_milli = 0;
+        s_win_motion_milli = 0; s_win_gpu_wait_ns = 0;
     }
     return new_frame;
 }
@@ -1747,6 +1775,8 @@ size_t ace_report_json(char *out, size_t cap) {
             ACE_PUT("%s%llu", i ? ", " : "", (unsigned long long)ps->interval[i]);
         ACE_PUT("]},\n");
     }
+    /* pc_limited_seconds counts every second the readout marked, GPU LIMITED ones included. */
+    ACE_PUT("  \"gpu_limited_seconds\": %llu,\n", (unsigned long long)s_gpu_limited_windows);
     ACE_PUT("  \"pc_limited_seconds\": %llu\n}\n", (unsigned long long)s_limited_windows);
 #undef ACE_PUT
     return used;

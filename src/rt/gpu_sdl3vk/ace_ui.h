@@ -52,7 +52,7 @@ typedef struct {
     const char *notice;
     float notice_alpha;                  /* 0 to 1 */
     const char *readout;                 /* "100%  30 FPS", or NULL */
-    int readout_warning;                 /* PC LIMITED: in warning */
+    int readout_warning;                 /* PC LIMITED or GPU LIMITED: in warning */
     /* The slowed 60 FPS logic warning ("60 FPS logic: 52/s - SLOWED", sdl3vk_logic_notice_text),
      * or NULL: a chip in the error colour at the top left, under the readout when it shows. The
      * presenter hands it to the pass with the HUD off, instead of copying its own box to the
