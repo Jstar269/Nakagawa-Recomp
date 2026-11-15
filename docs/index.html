@@ -10,7 +10,8 @@
   Layout: one calm column under a deep-blue top bar. The opening section carries the monospaced "MIPS → C → x86-64"
   line that the share card also shows, and a Download button that jumps to the download table. Sections are
   separated by space and hairlines. New releases go in as the first row of the download table, with the "Latest"
-  badge; the first row's button is filled and older rows' buttons are outlined. A row gives its date and size
+  badge; the first row's button is filled and older rows' buttons are outlined. Under the table, "What's new"
+  is a short list for the newest release: it says nothing the release notes do not, with the same caveats. A row gives its date and size
   twice: in their own cells, and in the version cell's meta line, which replaces those two columns on a phone.
 
   Theme: every colour is a custom property on :root. The light set is the default; the dark set applies under
@@ -19,7 +20,7 @@
   they stay blue in both themes. tools/test_site_mobile.py renders the page headless at phone and desktop widths in
   every theme and checks it.
 
-  Keep the status text in step with docs/COMPATIBILITY.md, README.md and docs/RELEASE_NOTES_v0.0.2.md.
+  Keep the status text in step with docs/COMPATIBILITY.md, README.md and docs/RELEASE_NOTES_v0.0.3.md.
 -->
 <html lang="en">
 <head>
@@ -35,7 +36,7 @@
     })();
   </script>
   <title>Nakagawa Recomp: play your PSP games as native PC programs</title>
-  <meta name="description" content="Nakagawa Recomp translates a PSP game you own into a Windows program, once, before you play. It isn't an emulator. Version 0.0.2 is an experimental pre-release for Windows 11. Hot Shots Tennis is playable, and most other games stop early.">
+  <meta name="description" content="Nakagawa Recomp translates a PSP game you own into a Windows program, once, before you play. It isn't an emulator. Version 0.0.3 is an experimental pre-release for Windows 11. Hot Shots Tennis is playable, and most other games stop early.">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#1c3d6e" media="(prefers-color-scheme: light)" data-scheme="light">
   <meta name="theme-color" content="#152c50" media="(prefers-color-scheme: dark)" data-scheme="dark">
@@ -43,7 +44,7 @@
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='14 14 212 212'%3E%3Crect x='14' y='14' width='212' height='212' rx='40' fill='%23102F57'/%3E%3Cpath fill='%238FB8F2' d='M34 34h46v62.8H34zM34 104h46v29.2H34zM34 140.4h46v29.2H34zM34 176.8h46v29.2H34z'/%3E%3Cpath fill='%23F5F7FA' d='M34 34h54l118 161.1V206h-46zM160 34h46v172h-46z'/%3E%3C/svg%3E">
   <meta property="og:type" content="website">
   <meta property="og:title" content="Nakagawa Recomp">
-  <meta property="og:description" content="Play your PSP games as native PC programs. Version 0.0.2, an experimental pre-release, is out for Windows 11. You supply your own game.">
+  <meta property="og:description" content="Play your PSP games as native PC programs. Version 0.0.3, an experimental pre-release, is out for Windows 11. You supply your own game.">
   <meta property="og:url" content="https://jstar269.github.io/Nakagawa-Recomp/">
   <meta property="og:image" content="https://jstar269.github.io/Nakagawa-Recomp/images/brand/og-card.png">
   <meta property="og:image:width" content="1200">
@@ -172,6 +173,10 @@
     .small { font-size: 14px; color: var(--muted); margin: 12px 0 0; }
     .small + .small { margin-top: 6px; }
 
+    /* What's new: a short list, in the same measure as a paragraph. */
+    ul.new { margin: 0; padding-left: 1.25em; max-width: 64ch; display: grid; gap: 10px; }
+    ul.new li { text-wrap: pretty; }
+
     /* How it works: three numbered steps. */
     ol.steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 20px; counter-reset: s; }
     ol.steps li { counter-increment: s; display: grid; grid-template-columns: 36px 1fr; gap: 12px; align-items: start; }
@@ -226,10 +231,10 @@
         <h1 id="intro-h">Play your PSP games as native PC programs.</h1>
         <p class="intro">Nakagawa Recomp takes a PSP game you own and translates its code into a Windows program, once,
           before you play. It isn't an emulator, and it includes no games: you play your own copy.</p>
-        <p class="status">Version 0.0.2 is an experimental pre-release. Hot Shots Tennis is playable, in Authentic or
-          Enhanced mode, and most other games stop early.</p>
+        <p class="status">v0.0.3 - Service Ace! is an experimental pre-release. Hot Shots Tennis is playable, in
+          Authentic, Enhanced or Ace mode, and most other games stop early.</p>
         <div class="cta">
-          <a class="btn" href="#download">Download v0.0.2</a>
+          <a class="btn" href="#download">Download v0.0.3</a>
           <a class="btn ghost" href="https://github.com/Jstar269/Nakagawa-Recomp/blob/main/docs/COMPATIBILITY.md">See what works</a>
         </div>
       </div>
@@ -242,7 +247,12 @@
           <table class="dl">
             <thead><tr><th scope="col">Version</th><th scope="col" class="rel">Released</th><th scope="col" class="size">Size</th><th scope="col"><span class="visually-hidden">Download</span></th></tr></thead>
             <tbody><tr>
-              <td class="ver">v0.0.2 <span class="latest">Latest</span><span class="plat">Windows 11, 64-bit</span><span class="meta"><time datetime="2026-11-08">Nov 8, 2026</time> · 260 MB</span></td>
+              <td class="ver">v0.0.3 <span class="latest">Latest</span><span class="plat">Windows 11, 64-bit</span><span class="meta"><time datetime="2026-11-15">Nov 15, 2026</time> · 277 MB</span></td>
+              <td class="rel"><time datetime="2026-11-15">Nov 15, 2026</time></td>
+              <td class="size">277 MB</td>
+              <td><a class="btn" href="https://github.com/Jstar269/Nakagawa-Recomp/releases/tag/v0.0.3">Download</a></td>
+            </tr><tr>
+              <td class="ver">v0.0.2<span class="plat">Windows 11, 64-bit</span><span class="meta"><time datetime="2026-11-08">Nov 8, 2026</time> · 260 MB</span></td>
               <td class="rel"><time datetime="2026-11-08">Nov 8, 2026</time></td>
               <td class="size">260 MB</td>
               <td><a class="btn" href="https://github.com/Jstar269/Nakagawa-Recomp/releases/tag/v0.0.2">Download</a></td>
@@ -256,8 +266,41 @@
         </div>
         <p class="small">You need Windows 11, a Vulkan graphics card, 8 GB of memory, 5 GB of free space, and a PSP game
           you own. The download includes the build tools, and no games or game data.</p>
+        <p class="small">v0.0.3 is a pre-release with one download, the portable ZIP
+          <code>nakagawa-recomp-0.0.3-windows-x64.zip</code>. It has no installer; one is planned for v0.1.0.</p>
+        <p class="small">Updating from v0.0.2: extract v0.0.3 into a new folder. It finds your library, saves and
+          settings, and <b>Rebuild all</b> in the library rebuilds the games an older version built.</p>
         <p class="small">The download isn't code-signed, so Windows may warn you the first time.
-          <a href="https://github.com/Jstar269/Nakagawa-Recomp/blob/v0.0.2/docs/RELEASE_NOTES_v0.0.2.md#checking-your-download">How to check your download</a>.</p>
+          <a href="https://github.com/Jstar269/Nakagawa-Recomp/blob/v0.0.3/docs/RELEASE_NOTES_v0.0.3.md#checking-your-download">How to check your download</a>.</p>
+      </div>
+    </section>
+
+    <section aria-labelledby="new-h">
+      <div class="in">
+        <h2 id="new-h">What's new in v0.0.3</h2>
+        <ul class="new">
+          <li><b>Ace mode for Hot Shots Tennis.</b> Ace is Enhanced plus the game's 60 FPS game logic: the game itself
+            updates 60 times a second instead of 30. It is short of a steady 60: an earlier version of its package
+            measured 57 to 60 updates a second on a busy PC, with short dips.</li>
+          <li><b>LittleBigPlanet at 60, Experimental.</b> A 60 FPS game logic package for disc version 2.00 only. The
+            previous version of the package measured a median of 60 updates a second on a busy PC, with two scenes
+            that run long. The game itself is rated Experimental: nothing past the start of its first level has been
+            checked.</li>
+          <li><b>More Enhanced options</b>, each off until you turn it on: supersampling, full 32-bit colour, texture
+            packs you supply, texture scaling, finer curved surfaces and unclipped sound.</li>
+          <li><b>In the player:</b> a build queue and a build speed setting, screenshots with <code>F12</code>, fast
+            forward in Enhanced and Ace, Add to Steam, a disc check that needs no import, mouse aiming, and a notice
+            when a game is drawn in software.</li>
+          <li><b>Reported games.</b> Fixes follow three reports: a black screen in Sonic Rivals, a stop at start in
+            PaRappa the Rapper, and stutter in Warship Gunner 2 Portable. How far each gets now has not been fully
+            checked.</li>
+          <li><b>Hardening</b> of how the player unpacks its build tools, creates Memory Stick files and loads
+            DLLs.</li>
+        </ul>
+        <p class="small"><a href="https://github.com/Jstar269/Nakagawa-Recomp/blob/v0.0.3/docs/RELEASE_NOTES_v0.0.3.md">Read the release notes</a>
+          for what was measured, what is Experimental and what is known not to work.</p>
+        <p class="small">v0.1.0 is next. Its planned work is on the
+          <a href="https://github.com/Jstar269/Nakagawa-Recomp/milestone/3">v0.1.0 milestone</a>.</p>
       </div>
     </section>
 
@@ -270,8 +313,8 @@
           <li><div><h3>Build it</h3><p>Press <b>BUILD PACKAGE</b>. The player translates the game's code into C and compiles
             it into a Windows program. It takes a few minutes and needs no internet.</p></div></li>
           <li><div><h3>Play</h3><p>Press <b>PLAY</b> to start the game, as released in Authentic mode, or in Enhanced mode
-            with options such as Smooth motion and Widescreen. If it needs something Nakagawa can't do yet, it stops and tells
-            you what's missing.</p></div></li>
+            with options such as Smooth motion and Widescreen. A game that has an enhancement package also offers Ace mode. If
+            it needs something Nakagawa can't do yet, it stops and tells you what's missing.</p></div></li>
         </ol>
       </div>
     </section>

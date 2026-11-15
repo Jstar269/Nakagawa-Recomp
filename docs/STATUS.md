@@ -12,6 +12,13 @@ describes work areas and records what past closures established. It deliberately
 carries no frozen counts: verify current state on the
 linked live issue, and read counts from the generator cited beside each area.
 
+## Releases and the development version
+
+The latest release is v0.0.3, a pre-release ([notes](RELEASE_NOTES_v0.0.3.md)). `main` is the development line
+toward v0.1.0, and its builds call themselves `0.1.0-dev`. The
+[v0.1.0 milestone](https://github.com/Jstar269/nakagawa-recomp/milestone/3) lists the work planned for it; this
+summary names none of it.
+
 ## Live work areas
 
 - Public-source safeguards: exact-tree, provenance, history, security, and

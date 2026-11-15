@@ -15,9 +15,9 @@ your own, with its own provenance authority, see [docs/FORKING.md](docs/FORKING.
    it). Issues labelled `needs-psp-hardware` need a physical PSP run, and `needs-owner-decision` waits on a
    maintainer. Search existing issues before you open a new one. Title an issue `Area: summary`, for example
    `VFPU: expand verified semantic coverage for second-title instruction forms`. Every issue carries at least one label and a
-   milestone: `v0.0.1` (the release's own steps), `v0.0.2` (bugs, HLE and accuracy fixes, tooling), `v0.1.0` (a
-   second title, the flight recorder, the hardware oracle), `v0.2.0` (product and distribution) or `v0.3.0`
-   (enhancements, diagnostic views, performance, new platforms). If GitHub won't let you set them, say in the
+   milestone: `v0.1.0`, the release in development (a second title, the flight recorder, the hardware
+   oracle), `v0.2.0` (product and distribution) or `v0.3.0` (enhancements, diagnostic views, performance, new
+   platforms). The `v0.0.1`, `v0.0.2` and `v0.0.3` milestones are closed. If GitHub won't let you set them, say in the
    issue which fit and a maintainer sets them.
 3. **Agree the approach.** For anything bigger than a small fix, comment on the issue first.
 4. **Make your change.** Fork the repository to your personal account and create a branch. One pull request

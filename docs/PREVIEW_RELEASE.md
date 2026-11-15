@@ -1,13 +1,14 @@
 # Release candidate scope and qualification guide
 
-Status: CURRENT. The maintained release candidate specification. The current release is v0.0.3; its [release notes](RELEASE_NOTES_v0.0.3.md) say what it holds. This document does not create a Git tag, GitHub Release or release asset (AGENTS.md § 3).
+Status: CURRENT. The maintained release candidate specification. The current release is v0.0.3; its [release notes](RELEASE_NOTES_v0.0.3.md) say what it holds. The release in development is v0.1.0 ([milestone](https://github.com/Jstar269/nakagawa-recomp/milestone/3)). This document does not create a Git tag, GitHub Release or release asset (AGENTS.md § 3).
 
 ## Release version
 
-`v0.0.3` is the third experimental release. Like `v0.0.1`, published on 2026-10-28, and `v0.0.2`, published on
+`v0.0.3`, published on 2026-11-15, is the third experimental release. Like `v0.0.1`, published on 2026-10-28, and `v0.0.2`, published on
 2026-11-08, it is built from an exact, reproducible, publication-clean commit on `main`, whose release manifest and
 player version read `0.0.3`. `v0.0.3` is published as the portable ZIP only: the Windows installer this guide
 describes is not built or attached for it, and is planned for v0.1.0.
+`main` now builds `0.1.0-dev`, and the next release, v0.1.0, follows the same procedure.
 Each release follows the procedure below. An older proposal for a `0.1.0-preview.1` version is withdrawn.
 
 Agents never create, move, push or delete Git tags, edit GitHub Releases, upload release assets or change a

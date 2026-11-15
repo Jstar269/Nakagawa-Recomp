@@ -521,20 +521,20 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     if (which == FLOW_SETTINGS_BUILD_CACHE) {
         settings.notice = "Shared library cache cleared. The next build compiles its libraries again.";
     }
-    settings.current_version = "0.0.3";
+    settings.current_version = "0.1.0-dev";
     if (which == FLOW_SETTINGS_UPDATES || which == FLOW_SETTINGS_UPDATE_NO_KEY ||
         which == FLOW_SETTINGS_UPDATE_REFUSED) {
         /* A newer pre-release with its Windows ZIP, as the check found it. */
         settings.update_step = PLAYER_UI_UPDATE_AVAILABLE;
-        settings.update_version = "0.0.4";
+        settings.update_version = "0.1.0";
         settings.update_prerelease = true;
         settings.update_published = "2026-11-04";
         settings.update_notes = "Second preview. Faster builds and fewer black screens.";
         settings.update_page_url =
-            "https://github.com/Jstar269/nakagawa-recomp/releases/tag/v0.0.4";
+            "https://github.com/Jstar269/nakagawa-recomp/releases/tag/v0.1.0";
         settings.update_has_zip = true;
         settings.update_can_download = true;
-        settings.update_zip_name = "nakagawa-recomp-0.0.4-windows-x64.zip";
+        settings.update_zip_name = "nakagawa-recomp-0.1.0-windows-x64.zip";
         settings.update_zip_bytes = 284758051ull;
     }
     if (which == FLOW_SETTINGS_REPORT) {
@@ -888,7 +888,7 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         library.title_count = sizeof(k_titles) / sizeof(k_titles[0]);
         library.page_label = "Page 1 of 2";
         /* The fullest heading: the update notice, the longest sort and the pager. */
-        library.update_notice = "Version 0.0.4 is out";
+        library.update_notice = "Version 0.1.0 is out";
         library.sort_label = "Recently played";
         if (which == FLOW_PAGE_LIBRARY_FIND) {
             /* The find box open on a long query, with every game a match, and the
@@ -3686,9 +3686,9 @@ static void test_settings_pages(void) {
               strstr(dump, "\"CHECK FOR UPDATES\"") != NULL,
           "Settings has CHECK FOR UPDATES at 960 x 540");
     CHECK(flow_case_fits(FLOW_SETTINGS_UPDATES, 960, 540, dump, sizeof(dump)) &&
-              strstr(dump, "Version 0.0.4 is out.") != NULL &&
-              strstr(dump, "0.0.4 (pre-release, 2026-11-04)") != NULL &&
-              strstr(dump, "releases/tag/v0.0.4") != NULL &&
+              strstr(dump, "Version 0.1.0 is out.") != NULL &&
+              strstr(dump, "0.1.0 (pre-release, 2026-11-04)") != NULL &&
+              strstr(dump, "releases/tag/v0.1.0") != NULL &&
               strstr(dump, "Second preview.") != NULL &&
               strstr(dump, "271.6 MB") != NULL &&
               strstr(dump, "\"CHECK AT START: OFF\"") != NULL &&
