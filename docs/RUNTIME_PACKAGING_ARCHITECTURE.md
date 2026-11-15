@@ -564,7 +564,7 @@ The folders are the per-user ones of [`SETUP.md`](SETUP.md) (on Windows
 Logs, the update download (kept only when its SHA-256 matches) and the
 content-addressed package cache (section 6) hold no state a user could lose.
 
-`fixtures/user_data/` holds each of these files as an earlier player's own writer
+`tests/fixtures/user_data/` holds each of these files as an earlier player's own writer
 wrote it, and `tests/native/test_player_state.c`,
 `tests/native/test_input_profile.c` and `tools/test_nk_core.py` load, migrate and
 round-trip them, and prove that a newer file is kept.

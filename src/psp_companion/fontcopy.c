@@ -6,7 +6,7 @@
  * USB storage mode (docs/SETUP.md, "System fonts"). It is the first piece of the PSP companion
  * app (#737) and needs a PSP that runs homebrew.
  *
- * The copy is fixtures/psp_oracle/font_files.h, the read-only copy the hardware oracle's
+ * The copy is tests/fixtures/psp_oracle/font_files.h, the read-only copy the hardware oracle's
  * font-files case uses, with the settings in fontcopy_config.h: flash0:/font is only listed and
  * opened read-only, only .pgf files are copied, and every write goes to <ms0: or ef0:>/NAKAGAWA/
  * fonts. Each copy is checked with SHA-256 against a read-back and a second flash0 read. No key,

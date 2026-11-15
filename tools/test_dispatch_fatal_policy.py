@@ -21,7 +21,7 @@ Verifies:
    injects none into the runtime.
 4. A synthetic unregistered dispatch fails closed with no environment variable
    set and regardless of any hostile continuation flag.
-5. The production runner (nk_manager.ps1) sets no dispatch control and reports
+5. The production runner (tools/nk_manager.ps1) sets no dispatch control and reports
    the retired SR_UNSAFE_CONTINUE_ON_DISPATCH_MISS escape as inert.
 6. Every fatal stop in the HLE files that ends the process with _Exit or _exit, which skip
    atexit, finishes a video recording first with its exit status
@@ -55,7 +55,7 @@ RT = ROOT / "src" / "rt"
 CORE = ROOT / "src" / "core"
 RECOMP_C = ROOT / "src" / "rt" / "recomp.c"
 LAUNCH_C = ROOT / "src" / "core" / "nk_launch.c"
-MGR = ROOT / "nk_manager.ps1"
+MGR = ROOT / "tools" / "nk_manager.ps1"
 CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
 
 

@@ -391,7 +391,7 @@ class NoOtherReaderTests(unittest.TestCase):
 
     def test_no_tool_names_an_hle_source(self) -> None:
         found: dict[str, list[tuple[int, str]]] = {}
-        for path in sorted([*(ROOT / "tools").rglob("*.py"), *(ROOT / "fixtures").rglob("*.py")]):
+        for path in sorted([*(ROOT / "tools").rglob("*.py"), *(ROOT / "tests" / "fixtures").rglob("*.py")]):
             relative = path.relative_to(ROOT).as_posix()
             hits = hle_sources.hle_source_path_constants(path.read_text(encoding="utf-8"), relative)
             if hits:

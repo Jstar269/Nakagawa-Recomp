@@ -92,7 +92,7 @@ The following sources are deliberately kept separate by evidence class.
 | [JPCSP `ThreadManForUser`](https://github.com/jpcsp/jpcsp/blob/master/src/jpcsp/HLE/modules/ThreadManForUser.java) | Independent open implementation comparator. | `OPEN_FIRMWARE_IMPLEMENTATION`; source behavior is not a hardware oracle. |
 | [Nakagawa `src/rt/hle.c`](../../src/rt/hle.c) (live file; supersedes the `d8b0d4f` review-base snapshot, which is not in public history) | Guest ABI extraction and HLE route ownership. | `SOURCE_VERIFIED_NAKAGAWA`. |
 | [Nakagawa `src/rt/sched.c`](../../src/rt/sched.c) (live file; supersedes the `d8b0d4f` review-base snapshot) | Current scheduler model and lifecycle implementation. | `SOURCE_VERIFIED_NAKAGAWA`; not a claim of firmware equivalence. |
-| [Nakagawa PSP oracle fixture boundary](../../fixtures/psp_oracle/README.md) | Public-safe fixture protocol, scalar evidence rules, and existing bounded status notes. | Source-owned method and recorded evidence remain distinct from planned work. |
+| [Nakagawa PSP oracle fixture boundary](../../tests/fixtures/psp_oracle/README.md) | Public-safe fixture protocol, scalar evidence rules, and existing bounded status notes. | Source-owned method and recorded evidence remain distinct from planned work. |
 
 ## CreateThread
 

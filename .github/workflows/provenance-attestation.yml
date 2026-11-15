@@ -816,7 +816,7 @@ jobs:
         run: |
           set -euo pipefail
           NK_SHOWCASE_BUILD_ROOT="$RUNNER_TEMP/showcase" \
-            python fixtures/showcase/showcase.py build-prx --out-dir "$RUNNER_TEMP/showcase-prx"
+            python tests/fixtures/showcase/showcase.py build-prx --out-dir "$RUNNER_TEMP/showcase-prx"
           test -s "$RUNNER_TEMP/showcase-prx/showcase_scene_app.prx"
           test -s "$RUNNER_TEMP/showcase-prx/showcase_breakout_app.prx"
           test -s "$RUNNER_TEMP/showcase-prx/PSPSDK-LICENSE.txt"
@@ -1030,7 +1030,7 @@ jobs:
           export PATH
           NK_SHOWCASE_DEMO_ROOT=dist/bin/demos \
           NK_SHOWCASE_BUILD_ROOT="$(cygpath -m "$RUNNER_TEMP/showcase")" \
-            "$PYTHON" fixtures/showcase/showcase.py build \
+            "$PYTHON" tests/fixtures/showcase/showcase.py build \
             --prebuilt-prx-dir "$(cygpath -m "$RUNNER_TEMP/showcase-prx")"
           for disc in TEST00007 TEST00008; do
             test -s "dist/bin/demos/images/$disc.iso"

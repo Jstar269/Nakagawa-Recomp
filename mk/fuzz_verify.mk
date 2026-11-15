@@ -70,13 +70,13 @@ vfpu_fuzz_build: $(VFPU_FUZZ_H) $(VFPU_FUZZ_VALIDATE) $(BUILD_DIR)/vfpu_fuzz.o $
 # psp-oracle-vfpu -- Nakagawa side of the VFPU transcendental hardware oracle
 # (Loop A of docs/HARDWARE_ORACLE.md).  Deliberately game-independent: it drives the
 # production sr_vfpu_* implementations in recomp.c over the shared input vector in
-# fixtures/vfpu_oracle/vfpu_oracle_cases.h and emits the same record shape the PSP
+# tests/fixtures/vfpu_oracle/vfpu_oracle_cases.h and emits the same record shape the PSP
 # probe emits.  No GAME_ELF and no generated chunks are required; assets/vfpu/ is the
 # only data input (override the directory with PSP_VFPU_TABLES).
 PSP_VFPU_ORACLE_EXE := $(BUILD_DIR)/vfpu_oracle_host.exe
 
-$(PSP_VFPU_ORACLE_EXE): src/rt/vfpu_oracle_host.c fixtures/vfpu_oracle/vfpu_oracle_cases.h $(RT_OBJS) $(RT_GE_O) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o
-	$(CC) $(CFLAGS) -Isrc/rt -Ifixtures/vfpu_oracle $(LDFLAGS) -o $@ 		src/rt/vfpu_oracle_host.c 		$(RT_GE_O) 		$(filter-out $(BUILD_DIR)/driver.o,$(RT_OBJS)) 		$(ATRAC3P_OBJS) 		$(BUILD_DIR)/atrac3p_bridge.o 		$(LIBS)
+$(PSP_VFPU_ORACLE_EXE): src/rt/vfpu_oracle_host.c tests/fixtures/vfpu_oracle/vfpu_oracle_cases.h $(RT_OBJS) $(RT_GE_O) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o
+	$(CC) $(CFLAGS) -Isrc/rt -Itests/fixtures/vfpu_oracle $(LDFLAGS) -o $@ 		src/rt/vfpu_oracle_host.c 		$(RT_GE_O) 		$(filter-out $(BUILD_DIR)/driver.o,$(RT_OBJS)) 		$(ATRAC3P_OBJS) 		$(BUILD_DIR)/atrac3p_bridge.o 		$(LIBS)
 
 psp-oracle-vfpu-build: $(PSP_VFPU_ORACLE_EXE)
 

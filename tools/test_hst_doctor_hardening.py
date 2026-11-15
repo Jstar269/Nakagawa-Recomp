@@ -254,7 +254,7 @@ This remains subject to legal review.
 
 class ManagerExitPropagationHardeningTests(unittest.TestCase):
     def test_parameterized_manager_actions_fail_closed(self) -> None:
-        manager = (ROOT / "nk_manager.ps1").read_text(encoding="utf-8-sig")
+        manager = (ROOT / "tools" / "nk_manager.ps1").read_text(encoding="utf-8-sig")
         # Each failing action records a nonzero termination code and breaks out of the
         # switch; the single `exit` after the finally block applies it, so the caller
         # sees a nonzero status AND the caller's location is restored first.

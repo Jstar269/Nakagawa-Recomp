@@ -935,8 +935,8 @@ For a validated local title manifest, use the manager so every title-derived val
 comes from that manifest:
 
 ```powershell
-.\nk_manager.ps1 -Action BuildFull -TitleManifest C:\path\to\manifest.json -GameName game
-.\nk_manager.ps1 -Action BuildFast -TitleManifest C:\path\to\manifest.json -GameName game
+.\tools\nk_manager.ps1 -Action BuildFull -TitleManifest C:\path\to\manifest.json -GameName game
+.\tools\nk_manager.ps1 -Action BuildFast -TitleManifest C:\path\to\manifest.json -GameName game
 ```
 
 If `-GameName` is omitted, the manager uses the manifest's `game_name` or a portable
@@ -1019,7 +1019,7 @@ that build left behind.
 
 ## 4. Run and test
 
-Run `pwsh -NoProfile -File nk_manager.ps1` without an action for usage (exit code 0).
+Run `pwsh -NoProfile -File tools\nk_manager.ps1` without an action for usage (exit code 0).
 The canonical manager accepts these actions:
 
 | Action | Description |
@@ -1037,20 +1037,20 @@ The canonical manager accepts these actions:
 | `VisualOracle` | Replay a route and archive visual regression captures. |
 
 ```powershell
-.\nk_manager.ps1 -Action Test
+.\tools\nk_manager.ps1 -Action Test
 mingw32-make --no-print-directory display-smoke-gui
-.\nk_manager.ps1 -TitleManifest C:\path\to\manifest.json -GameName game -Action Run
-.\nk_manager.ps1 -TitleManifest C:\path\to\manifest.json -GameName game -Action Run -SoftwareRender
-.\nk_manager.ps1 -TitleManifest C:\path\to\manifest.json -GameName game -Action Run -NoGui -Duration 30
+.\tools\nk_manager.ps1 -TitleManifest C:\path\to\manifest.json -GameName game -Action Run
+.\tools\nk_manager.ps1 -TitleManifest C:\path\to\manifest.json -GameName game -Action Run -SoftwareRender
+.\tools\nk_manager.ps1 -TitleManifest C:\path\to\manifest.json -GameName game -Action Run -NoGui -Duration 30
 ```
 
 The manager examples require a local validated manifest and its declared inputs. For
 normal Vulkan runs, an explicit profile can isolate the intended task:
 
 ```powershell
-.\nk_manager.ps1 -TitleManifest C:\path\to\manifest.json -GameName game -Action Run -Profile Performance # log-free smoke test
-.\nk_manager.ps1 -TitleManifest C:\path\to\manifest.json -GameName game -Action Run -Profile Benchmark   # 1 Hz telemetry + logs/perf.csv
-.\nk_manager.ps1 -TitleManifest C:\path\to\manifest.json -GameName game -Action Run -Profile Benchmark -GuestProfile # plus guest-PC hotspot summary
+.\tools\nk_manager.ps1 -TitleManifest C:\path\to\manifest.json -GameName game -Action Run -Profile Performance # log-free smoke test
+.\tools\nk_manager.ps1 -TitleManifest C:\path\to\manifest.json -GameName game -Action Run -Profile Benchmark   # 1 Hz telemetry + logs/perf.csv
+.\tools\nk_manager.ps1 -TitleManifest C:\path\to\manifest.json -GameName game -Action Run -Profile Benchmark -GuestProfile # plus guest-PC hotspot summary
 ```
 
 `Performance` redirects the runtime's stdout and stderr to the null device; it is not a
@@ -1148,7 +1148,7 @@ input. Run them from a shell whose `PATH` includes the MSYS2 UCRT64 tools: a
 UCRT64 terminal, or PowerShell after `$env:Path = "C:\msys64\ucrt64\bin;$env:Path"`.
 
 ```powershell
-.\nk_manager.ps1 -Action Test            # selftest gate (make selftest)
+.\tools\nk_manager.ps1 -Action Test            # selftest gate (make selftest)
 mingw32-make player                      # build/nakagawa_player.exe, the native player
 mingw32-make production-smoke            # complete two-phase pipeline smoke test
 mingw32-make platform-ladder             # relocations, scheduler, scalar FPU, filesystem
@@ -1359,7 +1359,7 @@ The build system provides scoped and explicit cleanup targets:
 - `mingw32-make tidy` (or `distclean`): removes intermediate object files (`.o`, `.d`, profile manifests) and ephemeral build logs while preserving linked binaries (`.exe`, `.pdb`) for debugging.
 - `mingw32-make clean-all`: comprehensively removes all subdirectories under `build/` and ephemeral build logs under `logs/`.
 
-These targets strictly operate within `build/` and transient log paths, never deleting protected directories (`place_game_here/`, `memstick/`, `keys/`, `oracle/`, `assets/`, `fixtures/`, `docs/`, `src/`, `tools/`).
+These targets strictly operate within `build/` and transient log paths, never deleting protected directories (`place_game_here/`, `memstick/`, `keys/`, `oracle/`, `assets/`, `tests/fixtures/`, `docs/`, `src/`, `tools/`).
 
 Two variables relocate everything these targets touch. `BUILD_ROOT` (default `build`) holds the
 default per-title `BUILD_DIR` (`$(BUILD_ROOT)/$(GAME_NAME)`), the shared fixture trees
@@ -1497,7 +1497,7 @@ its redistributable host dependencies, and user-supplied game input.
 
 ### Optional local symbol reference (never track it)
 
-`nk_manager.ps1 -Action FindSymbol` can search an optional local `functions.csv` when a
+`tools/nk_manager.ps1 -Action FindSymbol` can search an optional local `functions.csv` when a
 contributor keeps that reference data locally. This is an optional reverse-engineering aid; it is
 not required to build or run Nakagawa Recomp. The manager checks these locations in order:
 
@@ -1518,8 +1518,8 @@ git check-ignore -v functions.csv
 Then run a lookup from the repository root:
 
 ```powershell
-.\nk_manager.ps1 -Action FindSymbol -FindName Camera_Update
-.\nk_manager.ps1 -Action FindSymbol -FindName 47054
+.\tools\nk_manager.ps1 -Action FindSymbol -FindName Camera_Update
+.\tools\nk_manager.ps1 -Action FindSymbol -FindName 47054
 ```
 
 The command performs a text search and prints at most 20 matching CSV rows. It does not download,

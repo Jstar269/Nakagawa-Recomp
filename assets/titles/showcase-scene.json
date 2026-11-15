@@ -39,13 +39,13 @@
     "schema_version": 1,
     "runnable": false,
     "source_program": {
-      "source_files": ["fixtures/showcase/ge_scene/main.c", "fixtures/showcase/common/tone.h"],
+      "source_files": ["tests/fixtures/showcase/ge_scene/main.c", "tests/fixtures/showcase/common/tone.h"],
       "entry_symbol": "main",
       "ownership": "project-authored-public"
     },
     "build": {
-      "makefile": "fixtures/showcase/Makefile",
-      "working_directory": "fixtures/showcase",
+      "makefile": "tests/fixtures/showcase/Makefile",
+      "working_directory": "tests/fixtures/showcase",
       "target": "showcase_scene_app.prx",
       "toolchain": "PSPDEV/PSPSDK (locally installed)"
     },

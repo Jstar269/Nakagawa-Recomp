@@ -1211,7 +1211,7 @@ static uint32_t atrac_decode_data(CpuState *s) {
     }
     if (st == 0 && a->codecType == ATRAC_CODEC_AT3 &&
         atrac_streamed_state(a) && a->size < a->fileSize) {
-        /* MEASURED on a PSP-3000 (#1096; fixtures/psp_oracle/README.md
+        /* MEASURED on a PSP-3000 (#1096; tests/fixtures/psp_oracle/README.md
          * `at3-decode`): once the buffered frames of a streamed AT3 track are
          * used up and file data remains to be added, DecodeData returns
          * 0x80630023 with 0 samples and end flag 0, and leaves the remaining-frames

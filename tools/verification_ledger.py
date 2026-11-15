@@ -190,7 +190,7 @@ VFPU_REFUSED_DISPOSITIONS = frozenset({"supported-opcode-form-unmodeled", "unsup
 
 #: Evidence citations in hle_registry_meta that name an executable project-built test.
 SYNTHETIC_EVIDENCE_RE = re.compile(
-    r"^(?:src/rt/\w*selftest\w*\.c|tools/test_\w+\.py|Makefile|fixtures/(?:display_smoke|production_smoke)/[\w./]+)"
+    r"^(?:src/rt/\w*selftest\w*\.c|tools/test_\w+\.py|Makefile|tests/fixtures/(?:display_smoke|production_smoke)/[\w./]+)"
     r"(?=$|[:\s])"
 )
 #: Evidence citations that describe a hardware run in prose or point at the oracle docs.

@@ -453,7 +453,7 @@ try {
 
 # --- Full-process CWD hermeticity -------------------------------------------------
 # Run the REAL manager from an unrelated CWD against a copy of itself in a fake
-# workspace; it must anchor to the fake workspace (its own script location) and leave
+# workspace; it must anchor to the fake workspace (the parent of its own tools/ folder) and leave
 # the caller's CWD untouched.
 $cwdTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("hst_cwd_test_" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $cwdTestRoot -Force | Out-Null
@@ -464,8 +464,8 @@ try {
     New-Item -ItemType Directory -Path $fakeTools -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $unrelated "logs") -Force | Out-Null
     $managerSrc = Join-Path $PSScriptRoot ".."
-    $targetMgr = "nk_manager.ps1"
-    Copy-Item -LiteralPath (Join-Path $managerSrc $targetMgr) -Destination $fakeRepo -Force
+    $targetMgr = "tools\nk_manager.ps1"
+    Copy-Item -LiteralPath (Join-Path $managerSrc $targetMgr) -Destination $fakeTools -Force
     $safetyHelpers = @("nk_safety.ps1", "vulkan_sdk.ps1", "gpu_selftest_status.ps1")
     foreach ($helper in $safetyHelpers) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $helper) -Destination $fakeTools -Force
@@ -509,7 +509,7 @@ try {
     Test-Case "manager fails closed when copied into an anchor-less tree" {
         $bare = Join-Path $cwdTestRoot "bare"
         New-Item -ItemType Directory -Path (Join-Path $bare "tools") -Force | Out-Null
-        Copy-Item -LiteralPath (Join-Path $managerSrc $targetMgr) -Destination $bare -Force
+        Copy-Item -LiteralPath (Join-Path $managerSrc $targetMgr) -Destination (Join-Path $bare "tools") -Force
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot "nk_safety.ps1") -Destination (Join-Path $bare "tools") -Force
         $pwshExe = (Get-Process -Id $PID).Path
         $out = & $pwshExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $bare $targetMgr) `

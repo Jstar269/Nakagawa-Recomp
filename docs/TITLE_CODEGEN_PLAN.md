@@ -8,7 +8,7 @@ two-phase Make build and writes a local `package.json` plus `build-report.json`;
 it keeps executable, module, and PSP-header paths as CLI bindings.
 
 With `--manager-plan`, the same validated configuration produces a bounded,
-versioned manager/build contract. `nk_manager.ps1` consumes that contract from
+versioned manager/build contract. `tools/nk_manager.ps1` consumes that contract from
 `-TitleManifest`, defaulting to `assets/titles/synthetic.json` when omitted.
 The manager contract contains title semantics, a protected-contract digest, and
 private-binding requirements, not absolute private paths or command strings.
@@ -28,7 +28,7 @@ The planner is the only place a manifest becomes build configuration on the
 manager path. PowerShell
 adapts that plan to a process invocation and re-derives nothing of its own: it
 checks that each build-facing projection (`make.*`, `environment.*`) follows from
-the plan's own semantic fields, then pins the selected title `nk_manager.ps1`
+the plan's own semantic fields, then pins the selected title `tools/nk_manager.ps1`
 orchestrates. Make consumes explicit values and contributes no title-specific
 defaults.
 A manifest-less direct Make invocation bypasses the planner and its protected
@@ -118,7 +118,7 @@ The two public synthetic manifests also carry `profile_zero`, which points to th
 shared source-owned PSPDEV/PSPSDK fixture and a portable Make build path. Every
 implemented acceptance case names `profile-zero-e2e`, which loads the fixture
 built from the fixture source and byte-checked against the committed
-`fixtures/profile_zero/prebuilt/SHA256SUMS` (by the profile-zero steps of CI's `public_export` job, or
+`tests/fixtures/profile_zero/prebuilt/SHA256SUMS` (by the profile-zero steps of CI's `public_export` job, or
 locally whenever PSPDEV is installed), validates
 ProgramImage and AOT package outputs, launches the headless production runtime,
 and asserts the seven declared source-shape, dispatch, and helper cases. The
@@ -144,7 +144,7 @@ route.
 
 `assets/titles/pspdev-phase5.json` is one of three materially different
 source-owned fixtures (with `synthetic.json` and `synthetic-title2.json`;
-PSPDEV/PSPSDK sources in `fixtures/pspdev_phase5`) driven through the same
+PSPDEV/PSPSDK sources in `tests/fixtures/pspdev_phase5`) driven through the same
 planner; see `tools/test_title_pspdev_phase5.py`. The adapter's own contract is
 covered by `tools/test_title_manager_adapter.py` and the digest by
 `tools/test_title_protected_digest.py`, all using public manifests only.
@@ -383,7 +383,7 @@ role global or accessor directly.
 ### HST
 
 HST's real values live only in `assets/titles/hst-ucus98701.json` (see the
-titles README) and reach the build through `nk_manager.ps1 -TitleManifest` (or `TITLE_MANIFEST=` on a
+titles README) and reach the build through `tools/nk_manager.ps1 -TitleManifest` (or `TITLE_MANIFEST=` on a
 direct Make line). They are deliberately not encoded in the `Makefile`, in `src/rt`, or
 in any other checked-in manifest.
 

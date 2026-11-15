@@ -27,7 +27,7 @@ written design system, [`docs/PLAYER_UI_DESIGN.md`](docs/PLAYER_UI_DESIGN.md). I
 - **Plain words.** Messages say what happened and what to do, and the player names what it cannot do instead of
   pretending.
 
-These numbers come from the design record and the layout checks in `fixtures/nk_ui/`. We have not run an
+These numbers come from the design record and the layout checks in `tests/fixtures/nk_ui/`. We have not run an
 independent audit, and we do not claim conformance with WCAG or any other standard. WCAG is written for web content,
 so we use its contrast and target-size values as a guide for the launcher only.
 

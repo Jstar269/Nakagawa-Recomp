@@ -150,7 +150,7 @@ def _long_path_candidates(
     for label, relative in (
         ("screenshot output root", Path("docs/ui-baseline")),
         ("oracle evidence root", Path("oracle")),
-        ("oracle fixture output root", Path("fixtures/psp_oracle/build")),
+        ("oracle fixture output root", Path("tests/fixtures/psp_oracle/build")),
         ("compile database output", Path("compile_commands.json")),
         ("tool scratch output root", Path("scratch")),
         ("temporary test output root", Path("tmp")),

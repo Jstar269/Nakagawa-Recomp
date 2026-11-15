@@ -4550,7 +4550,7 @@ static void player_apply_test_view(PlayerApp *app, const char *test_view) {
                 snprintf(staged.disc_version, sizeof(staged.disc_version), "1.00");
                 snprintf(staged.title_id, sizeof(staged.title_id), "display-smoke-v1");
                 snprintf(staged.iso_path, sizeof(staged.iso_path),
-                         "fixtures/display_smoke/generate.py");
+                         "tests/fixtures/display_smoke/generate.py");
                 snprintf(staged.prepared_root, sizeof(staged.prepared_root),
                          "build/display-smoke-v1/staged");
                 staged.status = NK_STATUS_SUPPORTED_PREPARATION;
@@ -4627,7 +4627,7 @@ static void player_apply_test_view(PlayerApp *app, const char *test_view) {
             snprintf(app->inspecting_game.title_name, sizeof(app->inspecting_game.title_name),
                      "Nakagawa Synthetic Staging Fixture");
             snprintf(app->inspecting_game.iso_path, sizeof(app->inspecting_game.iso_path),
-                     "fixtures/synthetic_staging.iso");
+                     "tests/fixtures/synthetic_staging.iso");
             app->inspecting_game.status = NK_STATUS_VERIFIED;
             app->wizard.iso_selected = true;
             app->wizard.step = WIZARD_STEP_INSPECT_VERIFY;

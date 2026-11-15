@@ -43,7 +43,7 @@
 //
 // The final check count is printed by the executable. No game inputs or private
 // data required. Run via `make vfpu-interp-selftest` (also wired into
-// nk_manager.ps1 -Action Verify and the Linux native CI gate, where the
+// tools/nk_manager.ps1 -Action Verify and the Linux native CI gate, where the
 // ASan/UBSan build runs as the uninitialized-read/overflow gate).
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -1074,7 +1074,7 @@ static int check_vscmp_hle_issues_cells(void) {
     /* PSP-HLE-ISSUES-001 (PSP-3000, 6.61, 2026-10-24, probe case hle-issues-batch, PR #1269;
      * captured from da97b2c0 without a runner envelope, so not acceptance-eligible): the
      * probe's own vscmp.s/.p/.t/.q C200, C000, C100 and vscmp.q C200, C000, C000 words over
-     * its six operand sets (fixtures/psp_oracle/probe_hle_issues.c). docs/HARDWARE_ORACLE.md
+     * its six operand sets (tests/fixtures/psp_oracle/probe_hle_issues.c). docs/HARDWARE_ORACLE.md
      * states the result of all 30 cells, identical on both passes: per lane, -1, 0 or +1 in
      * sign-magnitude integer order of the bit patterns, with denormals flushed to zero,
      * +0 equal to -0 and NaNs above infinity by bit pattern, at every width, and VFPU_CC not

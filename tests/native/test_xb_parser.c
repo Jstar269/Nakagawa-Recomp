@@ -1930,7 +1930,7 @@ static void test_title_staging_transaction(void) {
     missing.disc_id = "TEST90004";
     missing.loose_content_roots = NULL;
     missing.loose_content_root_count = 0;
-    missing.data_root = "fixtures/synthetic";
+    missing.data_root = "tests/fixtures/synthetic";
     title_stage_paths(user_data_root, missing.disc_id, &missing_paths);
     assert(run_title_stage(&missing, NULL, &summary, &outcome, prepared_root,
                            sizeof(prepared_root), message, sizeof(message)) == NK_OK);

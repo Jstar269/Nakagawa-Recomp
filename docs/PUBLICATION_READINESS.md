@@ -163,7 +163,7 @@ is refused (`PROVENANCE_CONTENT_UNHASHED`), never skipped;
 * a bare audit (no flag) reports `PROVENANCE_UNVERIFIED` and fails instead of
 passing on the candidate's own bytes;
 * `--provenance-self-consistency` is the explicitly non-attesting developer
-tripwire scope (pre-commit and `nk_manager.ps1 -Action Verify`): coverage,
+tripwire scope (pre-commit and `tools/nk_manager.ps1 -Action Verify`): coverage,
 resolution and claims are enforced against the audited ledger itself, but no
 attestation claim is made or cleared. A claims-only ledger binds no bytes, so
 this scope makes no content check on it (a hash in any of its entries is
@@ -217,7 +217,7 @@ new human approval for every implementation edit.
 | --- | --- | --- |
 | `project_authored_attested`, `upstream_derived`, `generated_from_public_source` | yes | no; automated content binding and CI apply |
 | `reviewed_documentation`, `reviewed_configuration`, `public_factual_metadata`, `reviewed_other` | no, deterministic | no |
-| `synthetic_fixture` (non-executable data under `fixtures/`, synthetic tests that are pure data) | no, deterministic | no |
+| `synthetic_fixture` (non-executable data under `tests/fixtures/`, synthetic tests that are pure data) | no, deterministic | no |
 | `unresolved` | cannot be published | — |
 
 Deterministic classes describe what a file *is* by its path shape, so they can

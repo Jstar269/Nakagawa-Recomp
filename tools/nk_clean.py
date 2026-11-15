@@ -117,7 +117,7 @@ class Preview:
 
 TREE_RULES: tuple[AllowRule, ...] = (
     AllowRule("build", "build outputs", "tree"),
-    AllowRule("fixtures/psp_oracle/build", "build outputs", "tree"),
+    AllowRule("tests/fixtures/psp_oracle/build", "build outputs", "tree"),
     AllowRule("tmp", "tool scratch", "tree"),
     AllowRule(".tmp", "tool scratch", "tree"),
     AllowRule("scratch", "tool scratch", "tree"),
@@ -150,7 +150,7 @@ NEVER_PRUNE: frozenset[str] = (
     | frozenset(
         {
             "logs",
-            "fixtures",
+            "tests/fixtures",
         }
     )
 )

@@ -50,7 +50,7 @@ class TitleManagerPlanTests(unittest.TestCase):
     def synthetic_plan(self, manifest=None, **overrides):
         values = {
             "game_name": "synthetic",
-            "game_elf": Path("fixtures/synthetic.elf"),
+            "game_elf": Path("tests/fixtures/synthetic.elf"),
             "build_dir": Path("build/synthetic"),
             "module_dir": None,
             "psp_header": None,
@@ -135,7 +135,7 @@ class TitleManagerPlanTests(unittest.TestCase):
             str(ROOT / "assets" / "titles" / "synthetic.json"),
             "--manager-plan",
             "--game-name=synthetic",
-            "--game-elf=fixtures/synthetic.elf",
+            "--game-elf=tests/fixtures/synthetic.elf",
             "--build-dir=build/synthetic",
         ]
         first = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)

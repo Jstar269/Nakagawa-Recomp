@@ -55,8 +55,8 @@ static int g_failures = 0;
         } \
     } while (0)
 
-#define GUDEA_PATH "fixtures/fonts/gudea/Gudea-Regular.ttf"
-#define MPLUS_PATH "fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf"
+#define GUDEA_PATH "tests/fixtures/fonts/gudea/Gudea-Regular.ttf"
+#define MPLUS_PATH "tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf"
 
 /* Hosts the same two faces nk_ui labels will use: font 0 is the Latin body face
    with the Japanese face as its per-glyph fallback, font 1 is the Japanese face. */

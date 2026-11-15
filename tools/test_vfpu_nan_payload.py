@@ -20,9 +20,9 @@ import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-CASES = ROOT / "fixtures" / "vfpu_nan_payload" / "vfpu_nan_cases.h"
-PROBE = ROOT / "fixtures" / "vfpu_nan_payload" / "vfpu_nan_probe.c"
-MAKEFILE = ROOT / "fixtures" / "vfpu_nan_payload" / "Makefile"
+CASES = ROOT / "tests" / "fixtures" / "vfpu_nan_payload" / "vfpu_nan_cases.h"
+PROBE = ROOT / "tests" / "fixtures" / "vfpu_nan_payload" / "vfpu_nan_probe.c"
+MAKEFILE = ROOT / "tests" / "fixtures" / "vfpu_nan_payload" / "Makefile"
 
 
 class SharedInputVectorTests(unittest.TestCase):

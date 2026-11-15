@@ -492,7 +492,7 @@ class BuildScopeGameElfTests(unittest.TestCase):
             "display_name": "Nakagawa Synthetic Allegrex Fixture",
             "kind": "synthetic",
             "game_name": "synthetic",
-            "filesystem": {"data_root": "fixtures/profile_zero"},
+            "filesystem": {"data_root": "tests/fixtures/profile_zero"},
             "executable": {"bss_metadata_source": "none"},
             "modules": [],
         }
@@ -536,7 +536,7 @@ class BuildScopeGameElfTests(unittest.TestCase):
         self.assertIn("--scope inputs", result.summary)
 
     def test_declared_synthetic_fixture_path_still_fails_at_build_scope(self) -> None:
-        for path in ("build/fixtures/alternate.elf", "fixtures/alternate.elf"):
+        for path in ("build/fixtures/alternate.elf", "tests/fixtures/alternate.elf"):
             with self.subTest(path=path), tempfile.TemporaryDirectory() as tmp:
                 manifest = self.synthetic_manifest()
                 manifest["executable"] = {"path": path, "bss_metadata_source": "none"}
@@ -773,7 +773,7 @@ class CliTests(unittest.TestCase):
                 "display_name": "Widget",
                 "kind": "synthetic",
                 "game_name": "widget",
-                "filesystem": {"data_root": "fixtures/widget/data"},
+                "filesystem": {"data_root": "tests/fixtures/widget/data"},
                 "executable": {"bss_metadata_source": "none"},
                 "modules": [],
             }
@@ -792,7 +792,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("INPUT_PRX_LIBFONT_PRX", failed_codes)
             self.assertNotIn("INPUT_ISO", failed_codes)
             data_result = next(result for result in report.results if result.code == "INPUT_XB_DATA")
-            self.assertEqual(data_result.path, "fixtures/widget/data")
+            self.assertEqual(data_result.path, "tests/fixtures/widget/data")
 
 
 class EnvironmentContractTests(unittest.TestCase):
@@ -880,7 +880,7 @@ class EnvironmentContractTests(unittest.TestCase):
                 f"{doc.relative_to(ROOT)} does not document the PowerShell {floor}+ floor",
             )
         for script in sorted((ROOT / name for name in (
-            "tools/copy_build_assets.ps1", "nk.ps1", "nk_manager.ps1", "tools/nk_safety.ps1",
+            "tools/copy_build_assets.ps1", "nk.ps1", "tools/nk_manager.ps1", "tools/nk_safety.ps1",
             "tools/test_manager_safety.ps1", "tools/test_visual_oracle.ps1",
             "tools/title_manager_plan.ps1", "tools/vulkan_sdk.ps1",
         ))):
@@ -974,13 +974,13 @@ class EnvironmentContractTests(unittest.TestCase):
 class SimpleFrontEndTests(unittest.TestCase):
     def setUp(self) -> None:
         self.frontend = (ROOT / "nk.ps1").read_text(encoding="utf-8-sig")
-        self.manager = (ROOT / "nk_manager.ps1").read_text(encoding="utf-8-sig")
+        self.manager = (ROOT / "tools" / "nk_manager.ps1").read_text(encoding="utf-8-sig")
         self.makefile = read_makefile(ROOT)
 
     def test_frontend_exposes_small_supported_surface(self) -> None:
         for script in (
             ROOT / "nk.ps1",
-            ROOT / "nk_manager.ps1",
+            ROOT / "tools" / "nk_manager.ps1",
             ROOT / "tools" / "copy_build_assets.ps1",
             ROOT / "tools" / "gpu_selftest_status.ps1",
             ROOT / "tools" / "nk_safety.ps1",
@@ -1033,7 +1033,7 @@ class SimpleFrontEndTests(unittest.TestCase):
             ROOT / "tools" / "copy_build_assets.ps1",
             ROOT / "tools" / "gpu_selftest_status.ps1",
             ROOT / "nk.ps1",
-            ROOT / "nk_manager.ps1",
+            ROOT / "tools" / "nk_manager.ps1",
             ROOT / "tools" / "nk_safety.ps1",
             ROOT / "tools" / "sign_release_binaries.ps1",
             ROOT / "tools" / "test_manager_safety.ps1",

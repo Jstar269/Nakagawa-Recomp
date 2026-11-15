@@ -126,9 +126,9 @@ class NkCliProgressTests(unittest.TestCase):
             runtime_dir.mkdir(parents=True)
             other_cwd.mkdir()
             game_dir.mkdir()
-            # The synthetic title declares fixtures/profile_zero as its data
+            # The synthetic title declares tests/fixtures/profile_zero as its data
             # root; a game that declares data must find it (#731).
-            (cli_root / "fixtures" / "profile_zero").mkdir(parents=True)
+            (cli_root / "tests" / "fixtures" / "profile_zero").mkdir(parents=True)
 
             executable = runtime_dir / "synthetic.exe"
             executable.write_bytes(b"synthetic runtime fixture")

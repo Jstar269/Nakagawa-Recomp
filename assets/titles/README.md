@@ -53,13 +53,13 @@ names the key to add.
 
 - `synthetic.json` is a source-owned public fixture for schema and tool testing.
   It also carries the Wave-1 `psp-core-v1` / `profile-zero-v1` contract,
-  and points its source/build binding at `fixtures/profile_zero`. All seven
+  and points its source/build binding at `tests/fixtures/profile_zero`. All seven
   acceptance cases are implemented with the proving gate named as
   `profile-zero-e2e`; the manifest is runnable after the route passed for both
   source-owned fixtures. Broader title intake is tracked by
   [#308](https://github.com/Jstar269/nakagawa-recomp/issues/308).
 - `pspdev-phase5.json` is a second wholly source-owned fixture whose sources live
-  in `fixtures/pspdev_phase5` (a standard PSPDEV/PSPSDK `BUILD_PRX=1` module). It
+  in `tests/fixtures/pspdev_phase5` (a standard PSPDEV/PSPSDK `BUILD_PRX=1` module). It
   is deliberately configured *differently* from `synthetic.json` — the canonical
   user-module load base `0x08804000` rather than the user-memory region start, no
   guest PRX of any kind, and an HLE-dependent feature set — so the manifest-driven
@@ -107,7 +107,7 @@ Titles that omit the key are unaffected.
   runtime is *built* under the layout `src/core/nk_launch.c` resolves
   (`build/<title_id>/<title_id>`), which is what makes it the one public title
   the native player can launch. Its guest is emitted by
-  `fixtures/display_smoke/generate.py` as hand-assembled MIPS -- no PSPDEV
+  `tests/fixtures/display_smoke/generate.py` as hand-assembled MIPS -- no PSPDEV
   toolchain -- and it fills the PSP framebuffer and flips it through
   `sceDisplaySetFrameBuf` once per frame, so it is also the only public fixture
   that exercises the display/vblank/present path at all. Its address family
@@ -115,7 +115,7 @@ Titles that omit the key are unaffected.
   Publication-safe and deterministic.
 - `showcase-scene.json` (TEST00007) and `showcase-breakout.json` (TEST00008) are
   the source-owned showcase demos: a lit, textured 3D scene and Breakout, built
-  from `fixtures/showcase/` with PSPDEV and packaged by `fixtures/showcase/showcase.py`
+  from `tests/fixtures/showcase/` with PSPDEV and packaged by `tests/fixtures/showcase/showcase.py`
   (see [`docs/SHOWCASE.md`](../../docs/SHOWCASE.md)). Their acceptance profiles are
   `scaffold`: no public evidence matrix exists for them. Publication-safe and deterministic.
 
@@ -130,7 +130,7 @@ addresses, the profiles and the runtime bindings, all as addresses: no game
 bytes, no disc image name and no host path. The player uses it to recognize
 UCUS98701 as the built-in `hst` title. Its `executable`, `module_dir` and
 `psp_header` entries name the standard `place_game_here/` layout that
-`nk_manager.ps1 -TitleManifest assets/titles/hst-ucus98701.json -GameName hst`
+`tools/nk_manager.ps1 -TitleManifest assets/titles/hst-ucus98701.json -GameName hst`
 reads. Shipping it does not make the runtime generic or prove portability or
 correctness for another title.
 

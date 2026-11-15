@@ -48,7 +48,7 @@ VFPU_INTERP_C = ROOT / "src" / "rt" / "vfpu_interp.c"
 COMPATIBILITY_MD = ROOT / "docs" / "COMPATIBILITY.md"
 HARDWARE_ORACLE_MD = ROOT / "docs" / "HARDWARE_ORACLE.md"
 VFPU_INTERP_SELFTEST_C = ROOT / "tests" / "native" / "vfpu_interp_selftest.c"
-VFPU_PROBE_C = ROOT / "fixtures" / "vfpu_oracle" / "vfpu_probe.c"
+VFPU_PROBE_C = ROOT / "tests" / "fixtures" / "vfpu_oracle" / "vfpu_probe.c"
 
 #: `|x| = 1.0` in raw bits: the documented end of the arc-sine domain.
 DOMAIN_LIMIT_WORD = 0x3F800000
@@ -202,7 +202,7 @@ class NamedBoundaryTests(unittest.TestCase):
         self.assertEqual(
             [w.upper() for w in table_inputs], [w.upper() for w in probe_inputs],
             "the documented inputs must be the probe's VASIN_DOMAIN_INPUTS, in order")
-        self.assertIn("fixtures/vfpu_oracle/vfpu_probe.c", cell)
+        self.assertIn("tests/fixtures/vfpu_oracle/vfpu_probe.c", cell)
         self.assertIn("nakagawa-vfpu-oracle-v1", cell)
         self.assertIn("vfpu-vasin-domain-arg00", cell)
         self.assertIn("vfpu-vasin-domain-arg13", cell)

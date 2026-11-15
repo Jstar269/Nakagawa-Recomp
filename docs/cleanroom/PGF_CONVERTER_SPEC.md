@@ -425,7 +425,7 @@ Generated PGFs are fixtures, never an authenticity claim.
   project-owned specification, expression written for this project. The
   authoritative attestation is the maintainer's trusted ledger entry, not
   this paragraph; publication admission of the new paths is maintainer-side.
-- **Pinned fixture.** `fixtures/fonts/gudea/` carries `Gudea-Regular.ttf`
+- **Pinned fixture.** `tests/fixtures/fonts/gudea/` carries `Gudea-Regular.ttf`
   (SHA-256 `a4b5410090a821ea17021627312babdf3d8db0271217fd8c4d9f629ef0a2d90b`,
   22,932 bytes), its `OFL.txt` (SHA-256
   `315a576cbc7ab61c9e347b5725893bc8498fdcb8fc10831793c6864bc2cefba8`), and

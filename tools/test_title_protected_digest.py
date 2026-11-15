@@ -91,7 +91,7 @@ class ProtectedDigestCanonicalizationTests(unittest.TestCase):
             ("module-address", lambda value: value["modules"][0].update(load_address=0x09000000)),
             ("module-role", lambda value: value["modules"][0].update(role="guest-prx", required=True)),
             ("module-removed", lambda value: value.update(modules=[])),
-            ("data-root", lambda value: value["filesystem"].update(data_root="fixtures/other")),
+            ("data-root", lambda value: value["filesystem"].update(data_root="tests/fixtures/other")),
             ("device-prefix", lambda value: value["filesystem"]["device_prefixes"].append("flash0:")),
             ("hle-profile", lambda value: value.update(hle_profile="synthetic-extended")),
             ("codegen-profile", lambda value: value.update(codegen_profile="hst")),

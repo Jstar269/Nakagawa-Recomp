@@ -861,8 +861,8 @@ class ExecutableNonCodeTest(unittest.TestCase):
 
 
 def fixture_generator(name):
-    """fixtures/<name>/generate.py, the recipe of a public, source-owned guest."""
-    path = pathlib.Path(__file__).resolve().parent.parent / "fixtures" / name / "generate.py"
+    """tests/fixtures/<name>/generate.py, the recipe of a public, source-owned guest."""
+    path = pathlib.Path(__file__).resolve().parent.parent / "tests" / "fixtures" / name / "generate.py"
     spec = importlib.util.spec_from_file_location(f"non_code_fixture_{name}", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -1170,7 +1170,7 @@ class VoidProofTest(unittest.TestCase):
 
 
 class PublicFixtureTest(unittest.TestCase):
-    """The withdrawal on the code of the public, source-owned guests (fixtures/*/generate.py)."""
+    """The withdrawal on the code of the public, source-owned guests (tests/fixtures/*/generate.py)."""
 
     GUESTS = ("cosim", "display_smoke", "production_smoke", "snapshot")
     LOAD = 0x08804000

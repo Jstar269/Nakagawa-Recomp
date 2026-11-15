@@ -1943,13 +1943,17 @@ class HookCheckTest(unittest.TestCase):
     def test_the_gudea_licence_keeps_its_recorded_whitespace_under_tests(self) -> None:
         """The Gudea OFL text is an upstream copy with trailing whitespace on record.
 
-        An admission reads the trusted base's exclusions, so the base has to name the text at
-        ``tests/fixtures/`` before the pull request that moves it there can be admitted.
+        The exclusion names the text where it lives, under ``tests/fixtures/``, and no longer
+        at the root ``fixtures/`` folder it moved from.
         """
         config = (ROOT / admit_paths.PRE_COMMIT_CONFIG).read_text(encoding="utf-8")
         _top, hooks = admit_paths.rewriting_hook_exclusions(config)
         self.assertTrue(hooks["trailing-whitespace"].search("tests/fixtures/fonts/gudea/OFL.txt"))
         self.assertFalse(hooks["trailing-whitespace"].search("tests/fixtures/fonts/gudea/PIN.json"))
+        self.assertFalse(hooks["trailing-whitespace"].search("fixtures/fonts/gudea/OFL.txt"))
+        data = (ROOT / "tests" / "fixtures" / "fonts" / "gudea" / "OFL.txt").read_bytes()
+        self.assertIn("trailing-whitespace", admit_paths.rewriting_hook_findings(data),
+                      "the exclusion is only needed while the text has trailing whitespace")
 
     def test_no_rewriting_hook_exclusion_names_a_path_the_top_level_exclusion_already_removes(self) -> None:
         """An alternative behind the top-level ``exclude`` can never match, and reads as a rule that is not one.

@@ -748,7 +748,7 @@ audio-selftest:
 # selects the optimisation level for both sides of a comparison.
 audio-resampler-bench:
 	$(CC) $(CFLAGS) -Isrc/rt -o $(BUILD_DIR)/audio_resampler_bench$(EXE_EXT) \
-		fixtures/audio_resampler_bench/audio_resampler_bench.c src/rt/audio_resample.c src/rt/perf.c -lm
+		tests/fixtures/audio_resampler_bench/audio_resampler_bench.c src/rt/audio_resample.c src/rt/perf.c -lm
 	$(BUILD_DIR)/audio_resampler_bench$(EXE_EXT)
 
 # -Wno-unused-function: unused static helpers, mostly src/rt/hle.c; 75 warnings without it (#735 item 9).
@@ -813,7 +813,7 @@ psp-oracle-nakagawa: hle-thread-selftest-build
 psp-oracle: psp-oracle-nakagawa
 
 # Production generated-code smoke stream.  The PSP-side ELF must be built from
-# fixtures/psp_oracle with CASE=smoke first; this target then runs the normal
+# tests/fixtures/psp_oracle with CASE=smoke first; this target then runs the normal
 # codegen on that exact ELF and links the generated guest body into the existing
 # production-HLE selftest executable.  No host-side sum implementation is used.
 psp-oracle-nakagawa-smoke-generate: $(PSP_ORACLE_SMOKE_STAMP)

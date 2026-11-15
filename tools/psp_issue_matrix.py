@@ -487,7 +487,7 @@ def _issue_row(
             else ("private" if state == "LOCAL_PRIVATE_ROUTE_READY" else "source-owned or canonical issue fixture")
         )
         required_fixture = (
-            "fixtures/psp_oracle" if needs_psp else "source/tests/private route named by the canonical issue"
+            "tests/fixtures/psp_oracle" if needs_psp else "source/tests/private route named by the canonical issue"
         )
         independent_reference = (
             "PPSSPP/PSPAutotests may corroborate but cannot replace PSP evidence."

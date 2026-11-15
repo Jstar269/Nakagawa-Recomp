@@ -60,7 +60,7 @@ CANARY_RE = re.compile(r"^0x[0-9a-fA-F]{8}$")
 CANARY_EXPECTED = "0xa5a5a5a5"
 ATTEMPT_RE = re.compile(r"^0x[0-9a-fA-F]{1,8}$")
 
-MATRIX_PATH = pathlib.Path(__file__).resolve().parents[2] / "fixtures" / "psp_threading_oracle" / "matrix.json"
+MATRIX_PATH = pathlib.Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "psp_threading_oracle" / "matrix.json"
 
 def load_matrix(path: pathlib.Path | None = None) -> dict[str, Any]:
     p = path or MATRIX_PATH

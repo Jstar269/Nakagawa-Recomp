@@ -31,7 +31,7 @@
       "properties": {
         "test_id": {"enum": ["PSP-GE-RASTER-001", "PSP-GE-WEIGHT-001", "PSP-GE-RTT-001"]},
         "probe_case": {"enum": ["ge-raster", "ge-weight", "ge-rtt"]},
-        "fixture": {"const": "fixtures/psp_oracle/probe_ge_sample.c"},
+        "fixture": {"const": "tests/fixtures/psp_oracle/probe_ge_sample.c"},
         "source_tier": {"const": "PSP_HARDWARE"},
         "evidence_envelope": {"$ref": "#/$defs/evidence_envelope"},
         "cells": {

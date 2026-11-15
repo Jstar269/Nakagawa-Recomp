@@ -8,7 +8,7 @@ Two layers:
 * the behavioral half runs ``tools/test_manager_safety.ps1``, which exercises the real
   safety primitives against temporary directories, junctions and mocked process
   identities (Windows only -- skipped elsewhere);
-* the static half pins the fail-closed contracts in ``nk_manager.ps1`` that the
+* the static half pins the fail-closed contracts in ``tools/nk_manager.ps1`` that the
   behavioral tests cannot reach without a real game build: repository-root anchoring,
   OracleName grammar, unknown-exit build truth, and time-input validation.
 """
@@ -28,7 +28,7 @@ from makefile_text import read_makefile  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MANAGER = ROOT / "nk_manager.ps1"
+MANAGER = ROOT / "tools" / "nk_manager.ps1"
 SAFETY = ROOT / "tools" / "nk_safety.ps1"
 PS_TESTS = ROOT / "tools" / "test_manager_safety.ps1"
 
@@ -74,9 +74,9 @@ class ManagerHelpTests(unittest.TestCase):
         entries = re.findall(r"^  (\w+) - (.+)$", proc.stdout, re.MULTILINE)
         self.assertCountEqual([name for name, _ in entries], self.actions)
         self.assertIn("Makefile selftest target (C++ reference-runtime selftest)", dict(entries)["Test"])
-        self.assertIn("Usage: pwsh -NoProfile -File nk_manager.ps1 -Action <action>", proc.stdout)
-        self.assertIn("pwsh -NoProfile -File nk_manager.ps1 -Action BuildFast", proc.stdout)
-        self.assertIn("pwsh -NoProfile -File nk_manager.ps1 -Action Run", proc.stdout)
+        self.assertIn("Usage: pwsh -NoProfile -File tools\\nk_manager.ps1 -Action <action>", proc.stdout)
+        self.assertIn("pwsh -NoProfile -File tools\\nk_manager.ps1 -Action BuildFast", proc.stdout)
+        self.assertIn("pwsh -NoProfile -File tools\\nk_manager.ps1 -Action Run", proc.stdout)
         self.assertNotIn("[FATAL SCRIPT ERROR]", proc.stdout)
         self.assertIn("$MyInvocation.MyCommand.Parameters['Action'].Attributes", self.source)
         self.assertIn("[System.Management.Automation.ValidateSetAttribute]", self.source)
@@ -200,9 +200,12 @@ class ManagerSafetyContractTests(unittest.TestCase):
         self.support = SAFETY.read_text(encoding="utf-8-sig")
 
     def test_manager_anchors_to_its_own_script_location(self) -> None:
-        # The canonical root is $PSScriptRoot, never the caller's CWD.
+        # The canonical root is the parent of the manager's own folder, never the caller's CWD.
         # Phase 3: nk_manager uses Assert-NkWorkspaceRoot and nk_safety.ps1.
-        self.assertIn("Assert-NkWorkspaceRoot -Root $PSScriptRoot", self.manager)
+        self.assertIn("$ManagerRoot = Split-Path -Parent $PSScriptRoot", self.manager)
+        self.assertIn("Assert-NkWorkspaceRoot -Root $ManagerRoot", self.manager)
+        self.assertNotIn("Join-Path $PSScriptRoot", self.manager,
+                         "every helper is found from the workspace root, not from tools/")
         self.assertIn("Set-Location -LiteralPath $script:RepoRoot", self.manager)
         self.assertIn("nk_safety.ps1", self.manager)
         # Managed paths derive from the canonical root.

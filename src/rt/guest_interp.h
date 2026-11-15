@@ -74,7 +74,7 @@ int dispatch_call_continue(CpuState *s, uint32_t target, const SrGuestInterpCall
  *
  * IMPLEMENTED INSTRUCTION SET
  * ---------------------------
- * Every form below exists because a cell in fixtures/cosim executes it and its
+ * Every form below exists because a cell in tests/fixtures/cosim executes it and its
  * result is compared against real codegen output; nothing here was added to
  * inflate coverage, and tools/test_cosim_fixture.py enforces that in both
  * directions. Anything else -- including every control-transfer form not listed

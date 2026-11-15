@@ -7,8 +7,8 @@ them.
 
 ## Source and generated art
 
-Each demo's source lives in `fixtures/showcase/<demo>/`; the shared PSPDEV makefile and the host-side ISO and art
-builder live in `fixtures/showcase/`. The builder writes its working files under `build/showcase/` and the finished,
+Each demo's source lives in `tests/fixtures/showcase/<demo>/`; the shared PSPDEV makefile and the host-side ISO and art
+builder live in `tests/fixtures/showcase/`. The builder writes its working files under `build/showcase/` and the finished,
 copyable set under `build/demos/`: each `ICON0.PNG`, ISO image, ELF, native package, smoke log and captured frame.
 No binary icon or game image is committed. Each icon is a 144×80 PNG drawn the same way every time from a small pixel
 pattern in the source, using only the Python standard library.

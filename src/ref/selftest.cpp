@@ -464,7 +464,7 @@ uint32_t CFC1(uint32_t rt, uint32_t fs) { return (0x11u << 26) | (0x02u << 21) |
 // PSP-FPU-CC-001 (PSP-3000 / 6.61, 2026-10-15): the PSP FPU has FCC0 only. A ctc1 of
 // 0xFE800000 reads back 0x00800000, c.eq.s with condition code 1..7 writes FCC0, and
 // bc1t with condition code 1..7 tests FCC0. The encodings are the probe's own
-// (fixtures/psp_oracle/probe.c, run_fpu_cc): c.eq.s 0x460D6032 | (cc << 8) and bc1t
+// (tests/fixtures/psp_oracle/probe.c, run_fpu_cc): c.eq.s 0x460D6032 | (cc << 8) and bc1t
 // 0x45010002 | (cc << 18).
 void TestFpuConditionCodesMeasured() {
 	const uint32_t base = 0x08900000;
@@ -492,7 +492,7 @@ void TestFpuConditionCodesMeasured() {
 }
 
 // PSP-LLSC-001 (PSP-3000 / 6.61, 2026-10-15): the probe's three ll/sc link windows with its
-// values (fixtures/psp_oracle/probe.c, run_llsc_link). On the console a plain ll/sc pair
+// values (tests/fixtures/psp_oracle/probe.c, run_llsc_link). On the console a plain ll/sc pair
 // stores and reports 1, a second sc with no new ll stores and reports 1 again, and an sc to
 // another address than ll's stores there and reports 1. Rows are 16 bytes, A at +0, B at +4.
 void TestLlScMeasuredWindows() {

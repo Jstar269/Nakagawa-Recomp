@@ -108,7 +108,7 @@ class HstTitleManifestTests(unittest.TestCase):
 
     def test_zero_base_and_entry_match_manager_contract(self) -> None:
         # The manager hands Make the planner's values, never a literal of its own.
-        manager = (ROOT / "nk_manager.ps1").read_text(encoding="utf-8")
+        manager = (ROOT / "tools" / "nk_manager.ps1").read_text(encoding="utf-8")
         self.assertIn('"GAME_BASE=$($script:TitleManagerPlan.make.game_base)"', manager)
         self.assertIn('"GAME_ENTRY=$($script:TitleManagerPlan.make.game_entry)"', manager)
         planner = subprocess.run(

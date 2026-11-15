@@ -178,11 +178,11 @@ outside them:
 
 | Root | Category | Contents and handling |
 | --- | --- | --- |
-| `build/`, `fixtures/psp_oracle/build/` | build and fixture outputs | generated objects, images, runtime products, and the PSP oracle fixture build. The cleaner allowlists these roots; it does not select other `fixtures/` content. |
+| `build/`, `tests/fixtures/psp_oracle/build/` | build and fixture outputs | generated objects, images, runtime products, and the PSP oracle fixture build. The cleaner allowlists these roots; it does not select other `tests/fixtures/` content. |
 | `logs/build_out_recomp.log`, `logs/build_err_recomp.log`, `logs/recomp_err.log`, `logs/obj_err.log`, `logs/link_err.log`, `logs/stdout_run.log`, `logs/stderr_run.log`, `link_err.log` | logs | named ephemeral build and run logs. Other log files, including oracle logs, are preserved. |
 | `docs/ui-baseline/*.png`, `docs/ui-baseline/*.bmp`, `oracle/`, `*.trace`, `*.ppm` | screenshots and oracle evidence | local runtime screenshots and private oracle captures. Preserve them as evidence; the cleaner does not select them. |
 | `tmp/`, `.tmp/`, `scratch/`, `.pytest_cache/`, `.ruff_cache/`, `.mypy_cache/`, `.cache/`, `htmlcov/`, `.coverage`, `.eslintcache` | tool and test scratch | disposable caches and indexes. Many Python tests instead use OS temporary directories and clean up their own fixtures on success; these are outside the repository cleaner. |
-| `compile_commands.json` | compile database | refreshed by `nk_manager.ps1`. `python tools/compdb_relocate.py compile_commands.json --root <checkout>` rewrites checkout paths to root-relative form and sets the checkout-specific absolute `directory`; rerun it after moving the checkout. |
+| `compile_commands.json` | compile database | refreshed by `tools/nk_manager.ps1`. `python tools/compdb_relocate.py compile_commands.json --root <checkout>` rewrites checkout paths to root-relative form and sets the checkout-specific absolute `directory`; rerun it after moving the checkout. |
 | `.claude/`, `.codex/`, `.codex-remote-attachments/`, `.cursor/`, `.gemini/`, `.jules/`, `.kilo/`, `.kilocode/`, `.opencode/`, `.windsurf/`, `.freebuff/` | agent state | ignored local databases, settings, and attachments. Preserve them; the cleaner does not select them. Git's linked-worktree metadata is managed by Git outside the checkout and is only inventoried by Doctor. |
 
 `BUILD_ROOT`, `BUILD_DIR`, and `LOG_DIR` can redirect build and log outputs. Doctor includes those
@@ -197,7 +197,7 @@ deletion set. A scan or containment failure fails closed with a nonzero exit and
 deletion.
 
 The cleaner does not select every ignored or temporary path. Fixture builds belong under `build/`
-or the specifically listed `fixtures/psp_oracle/build/`; other fixture source and outputs are not
+or the specifically listed `tests/fixtures/psp_oracle/build/`; other fixture source and outputs are not
 implicitly disposable. Agent state directories and Git's linked-worktree administration are outside
 the cleaner's deletion scope. Doctor reports worktree registrations and build accumulation without
 removing them.
@@ -375,7 +375,7 @@ The state of each build and workspace ergonomics item:
    expands to shell syntax;
 2. [DONE - #368] remove hardcoded machine paths from VS Code, `mem_debug`, and tool discovery:
    toolchain lookup honors an explicit `MSYS_PATH` (never `MSYSTEM_PREFIX`, which Git Bash points at its
-   own MinGW), with documented defaults in `nk.ps1`, `nk_manager.ps1`, `tools/nk_doctor.py`, and
+   own MinGW), with documented defaults in `nk.ps1`, `tools/nk_manager.ps1`, `tools/nk_doctor.py`, and
    `tools/nk_doctor_checks.py`. `tools/nk_cli.py`, `tools/copy_build_assets.ps1`,
    `tools/format_portability_check.py`, `tools/package_notices.py`, `tools/record_toolchain.py`, and
    `tools/stage_runtime_dlls.py` use the same override where they discover UCRT. `tools/mem_debug.py`

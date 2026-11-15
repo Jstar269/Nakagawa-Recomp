@@ -13169,7 +13169,7 @@ static int coherence_run_rtt_depth_alias(void) {
 }
 
 /* ==== GE raster cells (PSP-GE-RASTER-001, #343) ====
- * This block is carried byte for byte by fixtures/psp_oracle/probe_ge_sample.c (the PSP
+ * This block is carried byte for byte by tests/fixtures/psp_oracle/probe_ge_sample.c (the PSP
  * side, CASE=ge-raster), tests/native/hle_thread_selftest.c (the software GE side) and
  * src/rt/gpu_sdl3vk/ge_gpu_selftest.inc (the Vulkan side); tools/test_psp_oracle.py pins
  * the copies. Each cell is one display list of project-written

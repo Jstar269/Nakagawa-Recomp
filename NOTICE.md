@@ -160,7 +160,7 @@ We aim to respond promptly and will remove material where appropriate.
 - **Gudea font fixture (issue #313)** — SIL Open Font License 1.1,
   Copyright (c) 2011, Agustina Mingote, with Reserved Font Name "Gudea". The
   exact upstream bytes, the licence text, and the `font-pin/v1` provenance
-  record are pinned in `fixtures/fonts/gudea/`; they are input to the
+  record are pinned in `tests/fixtures/fonts/gudea/`; they are input to the
   deterministic converter `tools/ttf2pgf.py` for test fixtures only. The font
   is not packaged, generated PGFs stay in temporary or `build/` paths, and the
   output name is project-owned so the Reserved Font Name is never claimed.
@@ -168,9 +168,9 @@ We aim to respond promptly and will remove material where appropriate.
   Liberation Sans and Liberation Serif 2.1.5 (Digitized data copyright (c) 2010
   Google Corporation, with Reserved Font Names Arimo, Tinos and Cousine; Copyright
   (c) 2012 Red Hat, Inc., with Reserved Font Name Liberation) in
-  `fixtures/fonts/liberation/`; Gowun Dodum (Copyright 2021 The Gowun Dodum Project
-  Authors) in `fixtures/fonts/gowundodum/`; and M+ 1p (Copyright 2016 The M+ Project
-  Authors) in `fixtures/fonts/mplus1p/`. Each is pinned with its licence text and a
+  `tests/fixtures/fonts/liberation/`; Gowun Dodum (Copyright 2021 The Gowun Dodum Project
+  Authors) in `tests/fixtures/fonts/gowundodum/`; and M+ 1p (Copyright 2016 The M+ Project
+  Authors) in `tests/fixtures/fonts/mplus1p/`. Each is pinned with its licence text and a
   `font-pin/v1` record. Unlike Gudea, these are build inputs: `tools/ttf2pgf.py`
   converts them into the stand-in PSP fonts that a build puts in its `font/` folder
   and the release ships (`font/README.md`). Liberation makes the Latin `nkltn*.pgf`
@@ -363,5 +363,5 @@ files; only whitespace normalization was applied, with all license wording retai
 upstream revisions, file hashes, static weights, and license hashes are recorded in
 docs/provenance/FONT_ORIGINS.md and assets/fonts/ui/manifest.json. These are project UI
 assets, not game data. The build also converts the Noto Sans JP file into the Japanese
-stand-in PSP font `nkjpn.pgf` (#2005); `fixtures/fonts/notosansjp/PIN.json` pins it for
+stand-in PSP font `nkjpn.pgf` (#2005); `tests/fixtures/fonts/notosansjp/PIN.json` pins it for
 the converter, and its Reserved Font Name `Source` is not used.

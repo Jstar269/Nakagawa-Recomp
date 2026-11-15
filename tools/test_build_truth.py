@@ -307,7 +307,7 @@ class BuildTruthTests(unittest.TestCase):
 
     def test_repository_rules_do_not_keep_manager_object_lists(self) -> None:
         makefile = read_makefile(ROOT)
-        manager = (ROOT / "nk_manager.ps1").read_text(encoding="utf-8")
+        manager = (ROOT / "tools" / "nk_manager.ps1").read_text(encoding="utf-8")
         self.assertIn("$(DEPFLAGS) -c", makefile)
         self.assertIn("$(RUNTIME_PROFILE_STAMP)", makefile)
         self.assertIn("$(RECOMP_PROFILE_STAMP)", makefile)
@@ -1289,7 +1289,7 @@ class OptimizationProfileContractTests(unittest.TestCase):
 
     def test_private_hst_profile_values_are_supplied_by_the_manifest_adapter(self) -> None:
         adapter = (ROOT / "tools" / "title_manager_plan.ps1").read_text(encoding="utf-8")
-        manager = (ROOT / "nk_manager.ps1").read_text(encoding="utf-8-sig")
+        manager = (ROOT / "tools" / "nk_manager.ps1").read_text(encoding="utf-8-sig")
         self.assertIn('"RUNTIME_OPT=-O2"', adapter)
         self.assertIn('"RECOMP_OPT=-O1"', adapter)
         self.assertNotIn("HST_EXTRA_SPANS", adapter)
@@ -1402,7 +1402,7 @@ class CodegenProfileTransportTests(unittest.TestCase):
             [cast(str, self.make), "--no-print-directory", "GAME_NAME=probe",
              f"BUILD_ROOT={Path(self.temp.name).as_posix()}",
             f"BUILD_DIR={Path(self.temp.name).as_posix()}",
-             "GAME_EXTRA_ELFS=fixtures/a.prx@runtime fixtures/b.prx@0x08900000",
+             "GAME_EXTRA_ELFS=tests/fixtures/a.prx@runtime tests/fixtures/b.prx@0x08900000",
              "CHUNK_TARGET_BYTES=65536",
              "--eval", f"nkprobe: ; @echo NEW=$(CODEGEN_PROFILE_HASH) OLD={former}",
              "nkprobe"],
@@ -2691,7 +2691,7 @@ class BuildArtifactLifecycleTests(unittest.TestCase):
     def test_clean_targets_never_delete_protected_paths(self) -> None:
         protected_dirs = [
             ROOT / "assets",
-            ROOT / "fixtures",
+            ROOT / "tests" / "fixtures",
             ROOT / "src",
             ROOT / "tools",
             ROOT / "docs",
@@ -2918,17 +2918,17 @@ class MachinePortabilityTests(unittest.TestCase):
         self.assertEqual(flagged, {"tools/copy_build_assets.ps1", "unlisted.ps1"})
 
     def test_the_manager_keeps_its_powershell_debt_ceiling_under_tools(self) -> None:
-        """The audit of a tree that has moved nk_manager.ps1 into tools/ applies the same ceiling.
+        """The manager's SilentlyContinue ceiling belongs to tools/nk_manager.ps1 and to no other path.
 
-        The trusted audit of a pull request is the default branch's copy, so the new path has to
-        be known before the move lands; a tree that holds the script at both paths is over the
-        total.
+        A copy left at the repository root, where the script used to live, has no allowance.
         """
         import tempfile
 
         import publish_audit
 
-        ceiling = publish_audit.POWERSHELL_SILENTLY_CONTINUE_INVENTORY["nk_manager.ps1"]
+        self.assertNotIn("nk_manager.ps1", publish_audit.POWERSHELL_SILENTLY_CONTINUE_INVENTORY)
+        self.assertEqual(publish_audit.POWERSHELL_SILENTLY_CONTINUE_MOVES, {}, "no script is moving")
+        ceiling = publish_audit.POWERSHELL_SILENTLY_CONTINUE_INVENTORY["tools/nk_manager.ps1"]
         line = "Get-Item x -ErrorAction SilentlyContinue\n"
 
         def flagged(files: dict[str, int]) -> set[str]:
@@ -2943,11 +2943,8 @@ class MachinePortabilityTests(unittest.TestCase):
         self.assertEqual(flagged({"tools/nk_manager.ps1": ceiling}), set())
         self.assertEqual(flagged({"tools/nk_manager.ps1": ceiling + 1}), {"tools/nk_manager.ps1"})
         self.assertEqual(flagged({"tools/other_manager.ps1": 1}), {"tools/other_manager.ps1"})
-        both = dict(publish_audit.POWERSHELL_SILENTLY_CONTINUE_INVENTORY)
-        self.assertEqual(flagged(both), set())
-        both["tools/nk_manager.ps1"] = ceiling
-        self.assertTrue(flagged(both),
-                        "the total ceiling must hold a tree that keeps the script at both paths")
+        self.assertEqual(flagged({"nk_manager.ps1": 1}), {"nk_manager.ps1"})
+        self.assertEqual(flagged(dict(publish_audit.POWERSHELL_SILENTLY_CONTINUE_INVENTORY)), set())
 
     def test_no_tracked_file_names_the_root_level_copy_build_assets_path(self) -> None:
         """A relocation is complete only when nothing still names the old path.
@@ -2992,6 +2989,115 @@ class MachinePortabilityTests(unittest.TestCase):
             offenders, [],
             "these tracked files still name the root-level copy_build_assets.ps1 path",
         )
+
+    #: Records that keep the paths of their day: the generated inventories (the admission
+    #: rewrites them), the reviewed history audit, and archived documents.
+    _RELOCATION_RECORDS = frozenset({
+        "assets/public_provenance_ledger.json",
+        "PUBLIC_EXPORT.json",
+        "assets/history_audit_reviewed.json",
+    })
+
+    def _tracked_texts(self, allowed: frozenset[str]) -> list[tuple[str, str]]:
+        if shutil.which("git") is None:
+            self.skipTest("git is required to enumerate the tracked tree")
+        listing = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z"],
+            capture_output=True, text=True, check=True).stdout
+        texts = []
+        for entry in sorted(filter(None, listing.split("\0"))):
+            if entry in allowed or entry in self._RELOCATION_RECORDS or entry.startswith("docs/archive/"):
+                continue
+            try:
+                texts.append((entry, (ROOT / entry).read_text(encoding="utf-8")))
+            except (OSError, UnicodeDecodeError):
+                continue
+        return texts
+
+    def test_no_tracked_file_names_the_root_level_manager_path(self) -> None:
+        """nk_manager.ps1 lives in tools/; nk.ps1 at the root is the entry point that calls it.
+
+        Every tracked mention carries the `tools` directory, as for copy_build_assets.ps1
+        above, so a command copied from a document runs and every tool resolves the same file.
+        """
+        self.assertTrue((ROOT / "tools" / "nk_manager.ps1").is_file())
+        self.assertFalse((ROOT / "nk_manager.ps1").exists(), "a copy at the root would shadow the move")
+        self.assertIn('$Manager = Join-Path $RepoRoot "tools\\nk_manager.ps1"',
+                      (ROOT / "nk.ps1").read_text(encoding="utf-8-sig"))
+        mention = re.compile(r"nk_manager\.ps1")
+        # Qualified: `tools/...`, `tools\...`, `ROOT / "tools" / "..."`, or a line of a
+        # directory tree, which names a file by its position.
+        qualified = re.compile(r"(?:tools[\"'\\ /]*|[└├]── )$")
+        # These name the bare file on purpose: a file-name comparison, a scratch file in a
+        # temporary folder, and the assertions that the root path has no rule left.
+        allowed = frozenset({
+            "tools/portability_inventory.py",
+            "tools/test_progress_evidence.py",
+            "tools/test_publish_audit.py",
+            "tools/test_build_truth.py",
+        })
+        offenders = []
+        for entry, text in self._tracked_texts(allowed):
+            for match in mention.finditer(text):
+                if not qualified.search(text[max(0, match.start() - 32):match.start()]):
+                    offenders.append(f"{entry}:{text.count(chr(10), 0, match.start()) + 1}")
+                    break
+        self.assertEqual(offenders, [], "these tracked files still name the root-level nk_manager.ps1 path")
+
+    def test_no_tracked_file_names_the_root_level_fixtures_folder(self) -> None:
+        """The fixture tree lives in tests/fixtures/; nothing names one of its folders at the root.
+
+        The folder names come from the tree itself, so a new fixture folder is covered without
+        an edit here. `build/fixtures/` is a build output folder and is not the tree.
+        """
+        tree = ROOT / "tests" / "fixtures"
+        self.assertFalse((ROOT / "fixtures").exists(), "the root fixtures/ folder came back")
+        folders = sorted(child.name for child in tree.iterdir() if child.is_dir())
+        self.assertGreaterEqual(len(folders), 20, "the fixture tree is missing")
+        names = "|".join(re.escape(name) for name in folders)
+        # fixtures/<folder>, fixtures\<folder>, the pathlib form "fixtures" / "<folder>" and the
+        # module form fixtures.<folder>.
+        mention = re.compile(rf"""fixtures(?:[/\\]+|["']\s*/\s*["']|\.)(?:{names})\b""")
+        qualified = re.compile(r"""(?:tests(?:[/\\]+|["']\s*/\s*["'])|build[/\\]+|["']build["']\s*/\s*["']|[\w.-])$""")
+        # These name the old folder on purpose, to assert that it has no rule left.
+        allowed = frozenset({
+            "tools/test_admit_paths.py",
+            "tools/test_provenance_ledger.py",
+            "tools/test_build_truth.py",
+        })
+        # A climb such as ../fixtures/ from tests/native/ is NOT accepted, though it lands on the
+        # tree in place: the mutation corpus compiles a copy of the HLE-thread harness elsewhere
+        # (see the next test), and a mention that names tests/fixtures/ works from both.
+        offenders = []
+        for entry, text in self._tracked_texts(allowed):
+            for match in mention.finditer(text):
+                if not qualified.search(text[max(0, match.start() - 32):match.start()]):
+                    offenders.append(f"{entry}:{text.count(chr(10), 0, match.start()) + 1}")
+                    break
+        self.assertEqual(offenders, [], "these tracked files still name a fixture folder at the repository root")
+
+    def test_the_hle_thread_harness_includes_resolve_when_the_file_is_copied(self) -> None:
+        """The scheduler mutant builds a COPY of tests/native/hle_thread_selftest.c from a scratch folder.
+
+        `tests/fixtures/cosim/mutate.py` copies the harness beside the mutated sched.c and passes it
+        as HLE_THREAD_SELFTEST_SOURCE, so a quoted include cannot rely on the harness's own folder:
+        one that climbs has to resolve through the include directory every build of it passes
+        (src/rt), and none may name a header that exists only beside the harness. An include that
+        works only in place builds everywhere except in that mutant, whose verdict then is no-run.
+        """
+        harness = ROOT / "tests" / "native" / "hle_thread_selftest.c"
+        includes = sorted(set(re.findall(
+            r'(?m)^\s*#\s*include\s+"([^"]+)"', harness.read_text(encoding="utf-8", errors="replace"))))
+        self.assertIn("../../tests/fixtures/mp3_tone/mp3_tone.h", includes)
+        for include in includes:
+            with self.subTest(include=include):
+                if include.startswith("../"):
+                    self.assertTrue((ROOT / "src" / "rt" / include).resolve().is_file(),
+                                    "a climbing include must resolve from src/rt")
+                else:
+                    self.assertFalse(
+                        (harness.parent / include).is_file() and not (ROOT / "src" / "rt" / include).is_file(),
+                        "a header that exists only beside the harness is lost when the harness is copied")
 
     def test_windows_package_build_uses_builtin_windows_powershell(self) -> None:
         """A consumer build must not need a separately installed PowerShell 7."""
@@ -3925,7 +4031,7 @@ def _makefile_literal_build_paths(text: str, label: str) -> list[str]:
     Every output a recipe or variable makes must derive from BUILD_ROOT, so a default
     run writes beneath build/ and an overridden run writes beneath the caller's root.
     Comments, help text and the error messages that describe the default are not
-    recipes and are skipped; `fixtures/.../build/` is a source fixture, not an output.
+    recipes and are skipped; `tests/fixtures/.../build/` is a source fixture, not an output.
     """
     findings: list[str] = []
     for number, line in enumerate(text.splitlines(), 1):
@@ -4049,7 +4155,7 @@ class CheckoutDeletionGuardTests(unittest.TestCase):
         makefile = textwrap.dedent('''\
             BUILD_ROOT ?= build
             PLAYER_EXE ?= build/nakagawa_player$(EXE_EXT)
-            ASSET := fixtures/psp_oracle/build/nakagawa_psp_oracle.elf
+            ASSET := tests/fixtures/psp_oracle/build/nakagawa_psp_oracle.elf
             OUT := $(BUILD_ROOT)/x
             # build/comment is documentation
             $(error the checkout's build/ tree is refused)
@@ -4185,7 +4291,7 @@ class CheckoutDeletionGuardTests(unittest.TestCase):
                     scratch = Path(tempfile.mkdtemp())
                     subprocess.run([self.make, "player", f"BUILD_ROOT={scratch}"], cwd=ROOT)
                     subprocess.run([self.make, "player", f"BUILD_ROOT={scratch}", "PLAYER_EXE=build/x.exe"], cwd=ROOT)
-                    subprocess.run([self.make, "-C", str(ROOT / "fixtures"), "all"], cwd=ROOT)
+                    subprocess.run([self.make, "-C", str(ROOT / "tests" / "fixtures"), "all"], cwd=ROOT)
                     subprocess.run([self.make, "all"], cwd=scratch)
                     argv = [self.make, "--no-print-directory", "gpu-selftest-status"]
                     self.assertEqual(argv, [self.make, "all"])

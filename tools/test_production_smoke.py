@@ -26,8 +26,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
-GENERATOR_PATH = ROOT / "fixtures" / "production_smoke" / "generate.py"
-DISPLAY_GENERATOR_PATH = ROOT / "fixtures" / "display_smoke" / "generate.py"
+GENERATOR_PATH = ROOT / "tests" / "fixtures" / "production_smoke" / "generate.py"
+DISPLAY_GENERATOR_PATH = ROOT / "tests" / "fixtures" / "display_smoke" / "generate.py"
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
@@ -697,7 +697,7 @@ class TestProductionSmokePackage(unittest.TestCase):
             },
             "modules": [],
             "filesystem": {
-                "data_root": "fixtures/production_smoke/data",
+                "data_root": "tests/fixtures/production_smoke/data",
                 "memory_stick_root": "build/production_smoke/memstick",
                 "device_prefixes": ["host0:", "ms0:"],
             },

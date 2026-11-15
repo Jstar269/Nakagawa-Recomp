@@ -49,7 +49,7 @@ class TitleCodegenPlanTests(unittest.TestCase):
     def plan(self, manifest=None, **overrides):
         values = {
             "game_name": "synthetic",
-            "game_elf": Path("fixtures/synthetic.elf"),
+            "game_elf": Path("tests/fixtures/synthetic.elf"),
             "build_dir": Path("build/synthetic"),
             "module_dir": None,
             "psp_header": None,
@@ -614,7 +614,7 @@ class TitleCodegenPlanTests(unittest.TestCase):
             "--extra-elf=modules/level01.prx@runtime",
         ])
         manager = title_codegen_plan.build_manager_plan(
-            manifest, game_name="synthetic", game_elf=Path("fixtures/synthetic.elf"),
+            manifest, game_name="synthetic", game_elf=Path("tests/fixtures/synthetic.elf"),
             build_dir=Path("build/synthetic"), module_dir=Path("modules"))
         self.assertEqual(manager["required_guest_modules"], [
             {"name": "fixed.prx", "load_address": 0x08C00000},
@@ -880,7 +880,7 @@ class TitleCodegenPlanTests(unittest.TestCase):
         plan = title_codegen_plan.build_plan(
             self.synthetic,
             game_name="synthetic",
-            game_elf=Path("fixtures/synthetic.elf"),
+            game_elf=Path("tests/fixtures/synthetic.elf"),
             build_dir=Path("build/synthetic"),
             module_dir=None,
             psp_header=None,
@@ -896,7 +896,7 @@ class TitleCodegenPlanTests(unittest.TestCase):
             proc = subprocess.run([
                 sys.executable, str(ROOT / "tools" / "title_codegen_plan.py"),
                 str(self.synthetic_path), "--game-name=synthetic",
-                "--game-elf=fixtures/synthetic.elf", "--build-dir=build/synthetic",
+                "--game-elf=tests/fixtures/synthetic.elf", "--build-dir=build/synthetic",
                 "--profile=none",
             ], cwd=ROOT, capture_output=True, text=True, check=False)
             self.assertEqual(proc.returncode, 0, proc.stderr)

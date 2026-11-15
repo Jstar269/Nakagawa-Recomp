@@ -39,7 +39,7 @@ runtime, an interpreter floor, and HLE, moving toward low-level emulation.
 - **Warning:** missing span/pointer validation; a flag honored in only one execution tier;
   transfer state not restored on every exit; an unmeasured PSP value presented as fact;
   a test that cannot fail; or a doc claim that contradicts the Makefile,
-  `nk_manager.ps1`, workflow, or source.
+  `tools/nk_manager.ps1`, workflow, or source.
 - **Suggestion:** naming, comment accuracy, and smaller refactors.
 
 ## Do not flag

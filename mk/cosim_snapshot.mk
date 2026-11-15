@@ -24,8 +24,8 @@
 COSIM_DIR        := $(BUILD_ROOT)/cosim
 COSIM_FIXTURE    := $(COSIM_DIR)/fixture
 COSIM_TRACES     := $(COSIM_FIXTURE)/traces
-COSIM_GENERATOR  := fixtures/cosim/generate.py
-COSIM_HARNESS    := fixtures/cosim/cosim_selftest.c
+COSIM_GENERATOR  := tests/fixtures/cosim/generate.py
+COSIM_HARNESS    := tests/fixtures/cosim/cosim_selftest.c
 COSIM_BASE_ADDR  := 0x08900000
 # Overridable so the mutation campaign can build the harness against a mutated
 # copy of the interpreter without touching the tree. A pre-included mutated
@@ -34,7 +34,7 @@ COSIM_BASE_ADDR  := 0x08900000
 COSIM_INTERP_SRC ?= src/rt/guest_interp.c
 COSIM_FP_CONVERT_PRELUDE ?=
 COSIM_FP_CONVERT_PRELUDE_FLAG = $(if $(strip $(COSIM_FP_CONVERT_PRELUDE)),-include "$(COSIM_FP_CONVERT_PRELUDE)",)
-COSIM_FPU_REFERENCE_SRC ?= fixtures/cosim/fpu_reference.c
+COSIM_FPU_REFERENCE_SRC ?= tests/fixtures/cosim/fpu_reference.c
 COSIM_CODEGEN_ARGS ?= --stack-census
 COSIM_LDFLAGS ?= $(filter -fuse-ld=lld,$(LDFLAGS))
 # Extra defines for the harness alone; the resume lane sets COSIM_STATE_RESUME.
@@ -44,7 +44,7 @@ COSIM_HARNESS_DEFS ?=
 # This guest deliberately imports nothing, and tools/imports.py fails closed on an
 # empty stub table -- correctly, for a title. Manufacturing an unused import stub
 # just to satisfy that gate would put a fiction in the fixture; the import path is
-# already covered end to end by fixtures/production_smoke.
+# already covered end to end by tests/fixtures/production_smoke.
 cosim-selftest:
 	"$(PYTHON)" $(COSIM_GENERATOR) generate --out-dir $(COSIM_FIXTURE)
 	$(MAKE) $(COSIM_DIR)/cosim_image.bin $(COSIM_DIR)/cosim_recomp.c \
@@ -93,7 +93,7 @@ cosim-selftest-llvm:
 # missing state writes, a late-latched computed target and a wrong call resume, each a
 # defect in tools/codegen_llvm.py that the cosimulation must report.
 cosim-mutants-llvm:
-	"$(PYTHON)" fixtures/cosim/mutate.py --backend=llvm --build-dir $(BUILD_ROOT)/cosim-llvm-mutants
+	"$(PYTHON)" tests/fixtures/cosim/mutate.py --backend=llvm --build-dir $(BUILD_ROOT)/cosim-llvm-mutants
 # The cosimulation corpus with local guest-register promotion (#284): the same cells,
 # translated with codegen.py --promote-registers into their own build folder. The
 # trace build mirrors every promoted write (SR_PROMO_SYNC), so every channel compares.
@@ -132,7 +132,7 @@ cosim-selftest-run: $(GENERIC_TITLE_CONFIG_HEADER) $(CHUNK_OBJS) $(LIBRARY_OBJS)
 # interpreter, FPU helper or generator that must make the gate FAIL. A mutant
 # that only breaks the build is not a kill and the driver rejects it.
 cosim-mutants:
-	"$(PYTHON)" fixtures/cosim/mutate.py --build-dir $(COSIM_DIR)
+	"$(PYTHON)" tests/fixtures/cosim/mutate.py --build-dir $(COSIM_DIR)
 
 cosim-selftest-clean:
 	$(MAKE) BUILD_DIR=$(COSIM_DIR) clean
@@ -142,8 +142,8 @@ cosim-selftest-clean:
 # src/rt/snapshot_runner.c runs one translated function from a snapshot (tools/nksnap.py,
 # src/rt/nksnap.c) and the reference interpreter in src/ref from the same state, and
 # prints MATCH, MISMATCH or NOT_CHECKED. This gate builds it against a source-owned
-# synthetic module (fixtures/snapshot/generate.py), checks every case's verdict and the
-# loader's refusals (fixtures/snapshot/selftest.py), then builds a second runner whose
+# synthetic module (tests/fixtures/snapshot/generate.py), checks every case's verdict and the
+# loader's refusals (tests/fixtures/snapshot/selftest.py), then builds a second runner whose
 # generated C has one changed immediate and requires the MISMATCH that change causes.
 #
 # The runner links recomp.c with SR_GATE_BUILD, which leaves sr_raw_syscall to the
@@ -154,8 +154,8 @@ cosim-selftest-clean:
 # its copy of recomp.c reads SDL_GetTicksNS under a name the runner defines.
 SNAPSHOT_DIR      := $(BUILD_ROOT)/snapshot
 SNAPSHOT_FIXTURE   := $(SNAPSHOT_DIR)/fixture
-SNAPSHOT_GENERATOR := fixtures/snapshot/generate.py
-SNAPSHOT_DRIVER    := fixtures/snapshot/selftest.py
+SNAPSHOT_GENERATOR := tests/fixtures/snapshot/generate.py
+SNAPSHOT_DRIVER    := tests/fixtures/snapshot/selftest.py
 SNAPSHOT_BASE_ADDR := 0x08A00000
 SNAPSHOT_REF_FLAGS := -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions -Dsr_bitrev=sr_ref_bitrev
 SNAPSHOT_RUNNER_SRCS := src/rt/snapshot_runner.c src/rt/nksnap.c src/rt/guest_interp.c \
@@ -287,9 +287,9 @@ form-sweep-deep:
 # src/rt/verify.c is compiled only into a verify build (-DSR_VERIFY, off by default): at
 # sampled call entries it runs the reference interpreter (src/ref) over a copy of guest RAM,
 # lets the real translated call run and compares the two end states. This gate builds
-# src/rt/verify_harness.c against a synthetic module (fixtures/verify/generate.py: the
+# src/rt/verify_harness.c against a synthetic module (tests/fixtures/verify/generate.py: the
 # snapshot module plus a counted-loop caller and a yielding loop), drives it through the
-# sampler, rate, range, skip and mismatch cases (fixtures/verify/selftest.py), then builds a
+# sampler, rate, range, skip and mismatch cases (tests/fixtures/verify/selftest.py), then builds a
 # harness and a snapshot runner whose generated C has one changed immediate, requires the
 # MISMATCH and replays its capture to the same verdict. Last it preprocesses the default
 # runtime sources and requires that no verify hook is present in them.
@@ -300,8 +300,8 @@ form-sweep-deep:
 # as the snapshot gate (see above for SR_GATE_BUILD, sr_bitrev and SDL_GetTicksNS).
 VERIFY_DIR       := $(BUILD_ROOT)/verify
 VERIFY_FIXTURE   := $(VERIFY_DIR)/fixture
-VERIFY_GENERATOR := fixtures/verify/generate.py
-VERIFY_DRIVER    := fixtures/verify/selftest.py
+VERIFY_GENERATOR := tests/fixtures/verify/generate.py
+VERIFY_DRIVER    := tests/fixtures/verify/selftest.py
 VERIFY_CORE_SRCS := $(filter-out src/rt/snapshot_runner.c,$(SNAPSHOT_RUNNER_SRCS)) src/rt/verify.c
 # Preprocess one hooked runtime unit as the default build compiles it: no -DSR_VERIFY.
 VERIFY_PREPROCESS = $(CC) $(CFLAGS) -I$(GENERIC_TITLE_CONFIG_DIR) -I$(BUILD_DIR) $(HLE_INCLUDES) -E -P src/rt/$(1).c -o $(BUILD_DIR)/default_$(1).i

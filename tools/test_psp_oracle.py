@@ -487,7 +487,7 @@ class NewProbeResultParserTests(unittest.TestCase):
             )
 
     def test_invalid_tail_tier_b_spans_fit_source_owned_scratch(self) -> None:
-        probe = (Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle" /
+        probe = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" /
                  "probe.c").read_text(encoding="utf-8")
         flattened = re.sub(r"\\\r?\n\s*", " ", probe)
         constant_names = (
@@ -881,7 +881,7 @@ class GeCorpusGateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
         self.corpus = json.loads(
-            (self.root / "fixtures" / "psp_oracle" / "ge_corpus.json").read_text(encoding="utf-8")
+            (self.root / "tests" / "fixtures" / "psp_oracle" / "ge_corpus.json").read_text(encoding="utf-8")
         )
 
     def _run_gate(self, document: dict | None = None,
@@ -889,7 +889,7 @@ class GeCorpusGateTests(unittest.TestCase):
         command = [sys.executable, str(self.root / "tools" / "psp_oracle" / "run_psplink.py"), "--ge-corpus-gate"]
         if document is None:
             return subprocess.run(command, capture_output=True, text=True, check=False)
-        fixture_dir = self.root / "fixtures" / "psp_oracle"
+        fixture_dir = self.root / "tests" / "fixtures" / "psp_oracle"
         with tempfile.TemporaryDirectory(prefix="ge-corpus-gate-", dir=fixture_dir) as scratch:
             results_dir = Path(scratch) / "results"
             results_dir.mkdir()
@@ -1489,7 +1489,7 @@ class PspOracleAcceptanceGateTests(unittest.TestCase):
     def test_probe_emits_ppsspp_source_only_under_emulation(self) -> None:
         """The probe must label emulator output distinctly at the source."""
 
-        probe = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle" / "probe.c"
+        probe = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" / "probe.c"
         source = probe.read_text(encoding="utf-8")
         self.assertIn('emulated ? "ppsspp" : "psp"', source)
         # The emulator sink is the PPSSPP devctl, not printf; both must be present.
@@ -1497,7 +1497,7 @@ class PspOracleAcceptanceGateTests(unittest.TestCase):
         self.assertIn("EMULATOR_DEVCTL_IS_EMULATOR", source)
 
     def test_checked_in_fixture_metadata_is_reported_as_placeholder(self) -> None:
-        probe = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle" / "probe.c"
+        probe = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" / "probe.c"
         source = probe.read_text(encoding="utf-8")
         self.assertIn("model=unknown firmware=unknown", source)
         issues = provenance_issues(
@@ -1511,7 +1511,7 @@ class PspOracleAcceptanceGateTests(unittest.TestCase):
         self.assertEqual(len(issues), 4)
 
     def test_priority_experiment_requires_a_started_peer_and_high_thread(self) -> None:
-        probe = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle" / "probe.c"
+        probe = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" / "probe.c"
         source = probe.read_text(encoding="utf-8")
         start = source.index("static void dwp_run")
         end = source.index("static void run_display_wait_priority", start)
@@ -1623,7 +1623,7 @@ class PspOracleDeviceIdentityTests(unittest.TestCase):
 
     def test_makefile_rejects_unbound_or_dirty_probe_builds(self) -> None:
         makefile = (
-            Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle" / "Makefile"
+            Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" / "Makefile"
         ).read_text(encoding="utf-8")
         self.assertIn("git rev-parse --verify HEAD", makefile)
         self.assertIn("git status --porcelain --untracked-files=normal", makefile)
@@ -1633,7 +1633,7 @@ class PspOracleDeviceIdentityTests(unittest.TestCase):
         if make is None:
             self.skipTest("GNU Make is unavailable")
         makefile_path = (
-            Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+            Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         )
         missing = subprocess.run(
             [make, "-C", str(makefile_path), "PROBE_BUILD_COMMIT_FULL="],
@@ -1663,7 +1663,7 @@ class PspOracleDeviceIdentityTests(unittest.TestCase):
 
     def test_probe_emits_build_commit_macro_not_a_zero_placeholder(self) -> None:
         probe = (
-            Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle" / "probe.c"
+            Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" / "probe.c"
         ).read_text(encoding="utf-8")
         self.assertIn('"source_commit=" PROBE_BUILD_COMMIT', probe)
         self.assertIn("#error \"PROBE_BUILD_COMMIT must be the full git object id", probe)
@@ -1752,7 +1752,7 @@ class PspOracleRunnerTests(unittest.TestCase):
     def test_capture_uses_selected_scratch_results_directory(self) -> None:
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(
-            prefix="run-psplink-", dir=root / "fixtures" / "psp_oracle"
+            prefix="run-psplink-", dir=root / "tests" / "fixtures" / "psp_oracle"
         ) as scratch_name:
             scratch = Path(scratch_name)
             results = scratch / "results"
@@ -2354,7 +2354,7 @@ class PspLinkTeardownSnapshotTests(unittest.TestCase):
         self.assertFalse(report["recovery_eligible"])
 
     def test_emulated_probe_teardown_marks_skipped_host0_stage_not_run(self) -> None:
-        probe = (Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle" /
+        probe = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" /
                  "probe.c").read_text(encoding="utf-8")
         host0 = probe.split("static int probe_teardown_host0(", 1)[1].split("\n}", 1)[0]
         teardown = probe.split("static void probe_teardown(", 1)[1].split("\n}", 1)[0]
@@ -2367,7 +2367,7 @@ class PspLinkTeardownSnapshotTests(unittest.TestCase):
 
     def test_interrupt_resume_failure_and_child_termination_reach_teardown_verdict(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        probe = (root / "fixtures" / "psp_oracle" /
+        probe = (root / "tests" / "fixtures" / "psp_oracle" /
                  "probe.c").read_text(encoding="utf-8")
         resume = probe.split("int probe_resume_intr(", 1)[1].split("\n}", 1)[0]
         self.assertIn("sceKernelCpuResumeIntr(token)", resume)
@@ -2443,7 +2443,7 @@ int main(void) {
     return 0;
 }
 '''
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         with scratch_dir.TemporaryDirectory(prefix="interrupt-resume-host-", dir=fixture) as scratch:
             source_path = Path(scratch) / "interrupt_resume_host.c"
             binary_path = Path(scratch) / "interrupt_resume_host.exe"
@@ -2479,7 +2479,7 @@ int main(void) {
         if compiler is None:
             self.skipTest("gcc is unavailable for the child teardown harness")
 
-        probe = (root / "fixtures" / "psp_oracle" / "probe.c").read_text(
+        probe = (root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(
             encoding="utf-8"
         )
         helper_start = probe.index(
@@ -2579,7 +2579,7 @@ int main(void) {
     return 0;
 }
 '''
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         with scratch_dir.TemporaryDirectory(prefix="child-teardown-host-", dir=fixture) as scratch:
             source_path = Path(scratch) / "child_teardown_host.c"
             binary_path = Path(scratch) / "child_teardown_host.exe"
@@ -2598,7 +2598,7 @@ int main(void) {
             self.assertEqual(executed.returncode, 0, executed.stderr)
 
     def test_probe_teardown_is_ordered_and_main_never_self_deletes(self) -> None:
-        probe = (Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle" / "probe.c").read_text(
+        probe = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(
             encoding="utf-8"
         )
         teardown = probe.split("static void probe_teardown(", 1)[1].split("\n}\n", 1)[0]
@@ -2624,7 +2624,7 @@ int main(void) {
         fixed records. Both emission paths must now advance the counter.
         """
 
-        probe = (Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle" /
+        probe = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" /
                  "probe.c").read_text(encoding="utf-8")
         emit = probe.split("static void emit_registry_record(", 1)[1].split("\n}\n", 1)[0]
         short_path = emit.split("size_t capacity = 512u;", 1)[0]
@@ -2646,7 +2646,7 @@ int main(void) {
         runtime de-initialisation without deleting itself.
         """
 
-        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         probe = (fixture / "probe.c").read_text(encoding="utf-8")
 
         def body(signature: str) -> str:
@@ -2707,10 +2707,10 @@ class PspOracleBuildRouteTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
-        self.makefile = (self.root / "fixtures" / "psp_oracle" / "Makefile").read_text(
+        self.makefile = (self.root / "tests" / "fixtures" / "psp_oracle" / "Makefile").read_text(
             encoding="utf-8"
         )
-        self.fixture = self.root / "fixtures" / "psp_oracle"
+        self.fixture = self.root / "tests" / "fixtures" / "psp_oracle"
 
     def test_alarm_oracle_case_is_buildable_and_has_a_campaign_parser(self) -> None:
         self.assertRegex(
@@ -2768,7 +2768,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
     def test_mpeg_ycbcr_modes_2_and_3_cells_follow_the_mode_1_cells(self) -> None:
         # #302: each mode starts from a fresh ringbuffer, MPEG context and registered stream after
         # mode 1 is stopped and torn down; refused calls still keep their records.
-        probe = (self.root / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
+        probe = (self.root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
         start = probe.index("static void run_mpeg_ycbcr(int emulated)")
         run = probe[start:probe.index("#endif\n", start)]
         order = [run.index(marker) for marker in (
@@ -2798,7 +2798,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         # #302: on boot 145 the second sceMpegAvcDecodeYCbCr of mode 3 never returned. Each mode 2 and 3
         # decode runs in a helper thread with a deadline; a call still running is recorded and no later
         # MPEG call is made (no stop, CSC, teardown, finish or module unload).
-        probe = (self.root / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
+        probe = (self.root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
         helper = probe[probe.index("static int mpy_decode_thread("):probe.index("static void mpy_ycbcr_mode(")]
         for text in ("sceKernelWaitThreadEnd(thid, &timeout)", "MPY_DECODE_DEADLINE_US", "s_mpy_blocked = 1",
                      "return MPY_WAIT_TIMEOUT"):
@@ -2820,10 +2820,10 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         # fails to link (#1296).
         block = re.search(r"(?ms)^ifeq \(\$\(CASE\),sas-adsr\)\n(.*?)^endif$", self.makefile)
         if block is None:
-            self.fail("fixtures/psp_oracle/Makefile has no sas-adsr LIBS block")
+            self.fail("tests/fixtures/psp_oracle/Makefile has no sas-adsr LIBS block")
         self.assertIn("-lpspsascore", block.group(1))
         self.assertIn("-lpsputility", block.group(1))
-        probe = (self.root / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
+        probe = (self.root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
         self.assertIn("#define PSP_ORACLE_CASE_SAS_ADSR 152", probe)
         start = probe.index("#if PSP_ORACLE_CASE == PSP_ORACLE_CASE_SAS_ADSR\n#include <pspsascore.h>")
         section = probe[start:probe.index("#endif\n", probe.index("static void run_sas_adsr", start))]
@@ -2881,10 +2881,10 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         # The case's own LIBS block links the SAS and utility stubs (#2135, #2054).
         block = re.search(r"(?ms)^ifeq \(\$\(CASE\),sas-mix\)\n(.*?)^endif$", self.makefile)
         if block is None:
-            self.fail("fixtures/psp_oracle/Makefile has no sas-mix LIBS block")
+            self.fail("tests/fixtures/psp_oracle/Makefile has no sas-mix LIBS block")
         self.assertIn("-lpspsascore", block.group(1))
         self.assertIn("-lpsputility", block.group(1))
-        probe = (self.root / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
+        probe = (self.root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
         self.assertIn("#define PSP_ORACLE_CASE_SAS_MIX 155", probe)
         self.assertIn('#define PROBE_HOST0_LOG "host0:/sas_mix_log.txt"', probe)
         start = probe.index("#if PSP_ORACLE_CASE == PSP_ORACLE_CASE_SAS_MIX\n#include <pspsascore.h>")
@@ -2933,9 +2933,9 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         # probe.c, pinned at link time to exactly the calls it makes.
         block = re.search(r"(?ms)^ifeq \(\$\(CASE\),vcodec-words\)\n(.*?)^endif$", self.makefile)
         if block is None:
-            self.fail("fixtures/psp_oracle/Makefile has no vcodec-words block")
+            self.fail("tests/fixtures/psp_oracle/Makefile has no vcodec-words block")
         self.assertIn("-lpsputility", block.group(1))
-        probe = (self.root / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
+        probe = (self.root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
         self.assertIn("#define PSP_ORACLE_CASE_VCODEC_WORDS 160", probe)
         self.assertIn('#define PROBE_HOST0_LOG "host0:/vcodec_words_log.txt"', probe)
         start = probe.index("#if PSP_ORACLE_CASE == PSP_ORACLE_CASE_VCODEC_WORDS\n#include")
@@ -3126,7 +3126,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
             re.MULTILINE,
         ))
         self.assertEqual(routes.get("fpu-cc"), "70")
-        probe = (Path(__file__).resolve().parent.parent / "fixtures" / "psp_oracle"
+        probe = (Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "psp_oracle"
                  / "probe.c").read_text(encoding="utf-8")
         self.assertIn("#define PSP_ORACLE_CASE_FPU_CC 70", probe)
 
@@ -3251,10 +3251,10 @@ class PspOracleBuildRouteTests(unittest.TestCase):
 class PspDmacProbeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
-        self.probe = (self.root / "fixtures" / "psp_oracle" / "probe.c").read_text(
+        self.probe = (self.root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(
             encoding="utf-8"
         )
-        self.makefile = (self.root / "fixtures" / "psp_oracle" / "Makefile").read_text(
+        self.makefile = (self.root / "tests" / "fixtures" / "psp_oracle" / "Makefile").read_text(
             encoding="utf-8"
         )
 
@@ -3858,7 +3858,7 @@ class PspDmacProbeTests(unittest.TestCase):
             if item["id"] == "PSP-EXCEPTION-001"
         )
         self.assertEqual(entry["hardware_evidence"], "MEASURED")
-        makefile = (self.root / "fixtures" / "psp_oracle" / "Makefile").read_text(
+        makefile = (self.root / "tests" / "fixtures" / "psp_oracle" / "Makefile").read_text(
             encoding="utf-8"
         )
         for case_id in entry["case_ids"]:
@@ -3972,7 +3972,7 @@ class PspMailboxCleanupTests(unittest.TestCase):
         if compiler is None:
             self.skipTest("gcc is unavailable for the synthetic mailbox cleanup harness")
 
-        probe = (root / "fixtures" / "psp_oracle" / "probe.c").read_text(
+        probe = (root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(
             encoding="utf-8"
         )
         start = probe.rindex(
@@ -4177,7 +4177,7 @@ int main(void) {
 }
 '''.replace("/* MAILBOX PROBE SNIPPET */", mailbox_probe)
 
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         with scratch_dir.TemporaryDirectory(prefix="mbx-cleanup-host-", dir=fixture) as scratch:
             source_path = Path(scratch) / "mbx_cleanup_host.c"
             binary_path = Path(scratch) / "mbx_cleanup_host.exe"
@@ -4198,13 +4198,13 @@ int main(void) {
 class PspMutexProbeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
-        self.probe = (self.root / "fixtures" / "psp_oracle" / "probe.c").read_text(
+        self.probe = (self.root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(
             encoding="utf-8"
         )
-        self.makefile = (self.root / "fixtures" / "psp_oracle" / "Makefile").read_text(
+        self.makefile = (self.root / "tests" / "fixtures" / "psp_oracle" / "Makefile").read_text(
             encoding="utf-8"
         )
-        self.imports = (self.root / "fixtures" / "psp_oracle" / "mutex_imports.S").read_text(
+        self.imports = (self.root / "tests" / "fixtures" / "psp_oracle" / "mutex_imports.S").read_text(
             encoding="utf-8"
         )
 
@@ -4259,7 +4259,7 @@ class PspMutexProbeTests(unittest.TestCase):
 
     def test_phaseb_makefile_fails_on_fixup_imports_warning(self) -> None:
         phaseb_makefile = (
-            self.root / "fixtures" / "psp_phaseb" / "Makefile"
+            self.root / "tests" / "fixtures" / "psp_phaseb" / "Makefile"
         ).read_text(encoding="utf-8")
         self.assertIn("FIXUP =", phaseb_makefile)
         self.assertIn("psp-fixup-imports", phaseb_makefile)
@@ -4297,7 +4297,7 @@ class UserModeImportGateTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
-        self.fixture = self.root / "fixtures" / "psp_oracle"
+        self.fixture = self.root / "tests" / "fixtures" / "psp_oracle"
         self.makefile = (self.fixture / "Makefile").read_text(encoding="utf-8")
 
     def _run_main(self, data: bytes) -> tuple[int, str, str]:
@@ -4410,7 +4410,7 @@ class UserModeImportGateTests(unittest.TestCase):
         fixup = next(line for line in self.makefile.splitlines() if line.startswith("FIXUP = "))
         self.assertLess(fixup.index("psp-fixup-imports"), fixup.index("$(USER_MODE_IMPORT_GATE)"))
         self.assertIn(
-            "USER_MODE_IMPORT_GATE = $(FIXTURE_DIR)../../tools/psp_oracle/user_mode_imports.py",
+            "USER_MODE_IMPORT_GATE = $(FIXTURE_DIR)../../../tools/psp_oracle/user_mode_imports.py",
             self.makefile,
         )
         self.assertTrue((self.root / "tools" / "psp_oracle" / "user_mode_imports.py").is_file())
@@ -4435,7 +4435,7 @@ class ProbeProgressAndBoundedWaitTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
-        self.fixture = self.root / "fixtures" / "psp_oracle"
+        self.fixture = self.root / "tests" / "fixtures" / "psp_oracle"
         self.probe = (self.fixture / "probe.c").read_text(encoding="utf-8")
 
     def _case_block(self, macro: str) -> str:
@@ -4748,7 +4748,7 @@ class GuTeardownContractTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
-        self.fixture = self.root / "fixtures" / "psp_oracle"
+        self.fixture = self.root / "tests" / "fixtures" / "psp_oracle"
         self.probe = (self.fixture / "probe.c").read_text(encoding="utf-8")
 
     def test_every_gu_init_and_ge_callback_is_torn_down_on_every_path(self) -> None:
@@ -4831,7 +4831,7 @@ class GeTimingContractTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
-        self.probe = (self.root / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
+        self.probe = (self.root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
         self.spec, self.counts = CAMPAIGN_PROBE_CASES["ge-timing"]
 
     def test_contract_is_strict_and_counts_the_records(self) -> None:
@@ -4913,8 +4913,8 @@ class CampaignHost0LogTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
-        self.probe = (self.root / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
-        self.makefile = (self.root / "fixtures" / "psp_oracle" / "Makefile").read_text(
+        self.probe = (self.root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
+        self.makefile = (self.root / "tests" / "fixtures" / "psp_oracle" / "Makefile").read_text(
             encoding="utf-8")
 
     def _probe_logs_by_case(self) -> dict[str, str]:
@@ -5033,7 +5033,7 @@ class VfpuCompareProbeTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
-        self.fixture = self.root / "fixtures" / "psp_oracle"
+        self.fixture = self.root / "tests" / "fixtures" / "psp_oracle"
         self.probe = (self.fixture / "probe.c").read_text(encoding="utf-8")
         self.makefile = (self.fixture / "Makefile").read_text(encoding="utf-8")
 
@@ -5239,7 +5239,7 @@ class VfpuTranscendentalParserFormatTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
-        self.fixture = self.root / "fixtures" / "psp_oracle"
+        self.fixture = self.root / "tests" / "fixtures" / "psp_oracle"
         self.probe = (self.fixture / "probe.c").read_text(encoding="utf-8")
         self.makefile = (self.fixture / "Makefile").read_text(encoding="utf-8")
         self.interpreter = (self.root / "src" / "rt" / "vfpu_interp.c").read_text(
@@ -5358,7 +5358,7 @@ class VfpuTranscendentalParserFormatTests(unittest.TestCase):
             domains[name] = words(_matched(match).group(1))
             self.assertEqual(len(domains[name]), 43, name)
 
-        old_probe = (self.root / "fixtures" / "vfpu_oracle" / "vfpu_probe.c").read_text(
+        old_probe = (self.root / "tests" / "fixtures" / "vfpu_oracle" / "vfpu_probe.c").read_text(
             encoding="utf-8")
         old_match = re.search(r"VASIN_DOMAIN_INPUTS\[\]\s*=\s*\{([^}]*)\}", old_probe)
         self.assertIsNotNone(old_match)
@@ -5911,7 +5911,7 @@ class HleMeasureProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.root = Path(__file__).resolve().parents[1]
-        cls.fixture = cls.root / "fixtures" / "psp_oracle"
+        cls.fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
         cls.makefile = (cls.fixture / "Makefile").read_text(encoding="utf-8")
         cls.probe = (cls.fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
         cls.threadman = (cls.fixture / "threadman_user_imports.S").read_text(encoding="utf-8")
@@ -6463,7 +6463,7 @@ class HleMeasureProbeTests(unittest.TestCase):
                               entry["measurement_note"])
                 self.assertIn("acceptance-eligible", entry["measurement_note"])
                 self.assertEqual(entry["status"], "implemented")
-                self.assertEqual(entry["source"], "fixtures/psp_oracle/probe_hle_measure.c")
+                self.assertEqual(entry["source"], "tests/fixtures/psp_oracle/probe_hle_measure.c")
                 self.assertEqual(entry["prx"], f"{stem}.prx")
                 self.assertEqual(entry["case_ids"], list(spec.ordered_cases))
                 self.assertEqual(entry["diagnostic_case_ids"], [case])
@@ -7092,7 +7092,7 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
                     else:
                         self.assertIn("No hardware capture exists",
                                       row["evidence_note"])
-                self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_measure.c")
+                self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_measure.c")
                 self.assertEqual(row["prx"], f"{stem}.prx")
                 self.assertEqual(row["case_ids"], list(spec.ordered_cases))
                 self.assertEqual(row["diagnostic_case_ids"], [case])
@@ -7347,11 +7347,11 @@ class KernelEntryNullcodeProbeTests(unittest.TestCase):
 
     def test_build_routes_use_the_reserved_case_id_and_existing_probe_source(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        makefile = (root / "fixtures" / "psp_oracle" / "Makefile").read_text(encoding="utf-8")
-        probe = (root / "fixtures" / "psp_oracle" / "probe_hle_issues.c").read_text(
+        makefile = (root / "tests" / "fixtures" / "psp_oracle" / "Makefile").read_text(encoding="utf-8")
+        probe = (root / "tests" / "fixtures" / "psp_oracle" / "probe_hle_issues.c").read_text(
             encoding="utf-8"
         )
-        threadman = (root / "fixtures" / "psp_oracle" / "threadman_user_imports.S").read_text(
+        threadman = (root / "tests" / "fixtures" / "psp_oracle" / "threadman_user_imports.S").read_text(
             encoding="utf-8"
         )
         self.assertIn(
@@ -7379,7 +7379,7 @@ class KernelEntryNullcodeProbeTests(unittest.TestCase):
         self.assertIn('"sw $28, 8($12)\\n\\t"', probe)
         self.assertIn('"sw $4, 12($12)\\n\\t"', probe)
         self.assertIn('"sw $11, 40($12)\\n\\t"', probe)
-        exception_probe = (root / "fixtures" / "psp_oracle" / "probe_exception_a3.c").read_text(
+        exception_probe = (root / "tests" / "fixtures" / "psp_oracle" / "probe_exception_a3.c").read_text(
             encoding="utf-8"
         )
         for case, case_id, a3_case, target in (
@@ -7399,7 +7399,7 @@ class KernelEntryNullcodeProbeTests(unittest.TestCase):
         self.assertIn("NAKAGAWA_PSP_STEP schema=1", exception_probe)
 
     def test_interrupt_and_ge_null_handlers_are_registered_but_never_enabled_or_queued(self) -> None:
-        probe = (Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        probe = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
                  / "probe_hle_issues.c").read_text(encoding="utf-8")
         start = probe.index("static int ke_null_code_registration(void)\n{")
         end = probe.index("#endif /* HLE_CASE_NULL_CODE_REGISTRATION */", start)
@@ -7549,7 +7549,7 @@ class HleIssuesProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.root = Path(__file__).resolve().parents[1]
-        cls.fixture = cls.root / "fixtures" / "psp_oracle"
+        cls.fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (cls.fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.measure = (cls.fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
         cls.makefile = (cls.fixture / "Makefile").read_text(encoding="utf-8")
@@ -7971,7 +7971,7 @@ class HleIssuesProbeTests(unittest.TestCase):
                     self.assertEqual(row["evidence_cases"], row["case_ids"][:-1])
                     hle_manifest.measured_evidence_section(row)
                 self.assertIn("not in the campaign queue", row["evidence_note"])
-                self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+                self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
                 self.assertEqual(row["prx"], f"{stem}.prx")
                 self.assertEqual(row["diagnostic_case_ids"], [case])
                 self.assertEqual(row["reset"], "one PRX launch; PSPLink soft reset before the next launch")
@@ -8606,10 +8606,10 @@ class VramMirrorParserTests(unittest.TestCase):
 
     def test_probe_case_is_in_the_build_and_runner_registry(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        makefile = (root / "fixtures" / "psp_oracle" / "Makefile").read_text(
+        makefile = (root / "tests" / "fixtures" / "psp_oracle" / "Makefile").read_text(
             encoding="utf-8"
         )
-        probe = (root / "fixtures" / "psp_oracle" / "probe.c").read_text(
+        probe = (root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(
             encoding="utf-8"
         )
         self.assertIn("else ifeq ($(CASE),vram-mirror)\nCASE_ID = 76\n", makefile)
@@ -8627,7 +8627,7 @@ class VramMirrorParserTests(unittest.TestCase):
 
     def test_probe_case_ids_are_registered_in_the_strict_protocol_table(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        probe = (root / "fixtures" / "psp_oracle" / "probe.c").read_text(
+        probe = (root / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(
             encoding="utf-8"
         )
         self.assertEqual(probe.count('"vram-ge-depth-row%u-%02u"'), 2)
@@ -8678,7 +8678,7 @@ class VramMirrorParserTests(unittest.TestCase):
         self.assertEqual(set(row["evidence_cases"]), set(row["apis"]) | set(row["case_ids"]))
         self.assertIn("acceptance-eligible", row["evidence_note"])
         self.assertIn("acceptance-eligible", row["measurement_note"])
-        readme = (root / "fixtures" / "psp_oracle" / "README.md").read_text(
+        readme = (root / "tests" / "fixtures" / "psp_oracle" / "README.md").read_text(
             encoding="utf-8"
         )
         doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
@@ -8695,7 +8695,7 @@ class VramMirrorParserTests(unittest.TestCase):
         self.assertIn("Sub-word address bits were not independently measured", readme)
 
     def test_probe_snapshots_and_verifies_full_edram_restore(self) -> None:
-        probe = (Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        probe = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
                  / "probe.c").read_text(encoding="utf-8")
         self.assertIn("malloc(VRAM_MIRROR_SIZE)", probe)
         self.assertIn("memcpy((void *)(uintptr_t)0x44000000u, backup, VRAM_MIRROR_SIZE)", probe)
@@ -8728,7 +8728,7 @@ class VfpuFormsProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -8806,7 +8806,7 @@ class VfpuFormsProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_forms.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-forms"])
         self.assertEqual(row["issues"], [326])
 
@@ -8828,7 +8828,7 @@ class IntrCauseProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -8931,7 +8931,7 @@ class IntrCauseProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "intr_cause.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["intr-cause"])
         self.assertEqual(row["issues"], [325])
         self.assertEqual(row["case_ids"][-1], "intr-cause-done")
@@ -9011,7 +9011,7 @@ class VfpuFunnelProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -9112,7 +9112,7 @@ class VfpuFunnelProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_funnel.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-funnel"])
         self.assertEqual(row["issues"], [326])
         # The 2026-10-29 acceptance-eligible PSP-3000 run of 8d0f75ad cites every cell.
@@ -9133,7 +9133,7 @@ class VfpuSortProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -9229,7 +9229,7 @@ class VfpuSortProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_sort.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-sort"])
         self.assertEqual(row["issues"], [326])
         # The 2026-10-29 acceptance-eligible PSP-3000 run of 9171f055 cites every cell.
@@ -9252,7 +9252,7 @@ class VfpuUnmodeledProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -9371,7 +9371,7 @@ class VfpuUnmodeledProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_unmodeled.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-unmodeled"])
         self.assertEqual(row["issues"], [326])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
@@ -9394,7 +9394,7 @@ class VfpuQuadWbProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -9508,7 +9508,7 @@ class VfpuQuadWbProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_quad_wb.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-quad-wb"])
         self.assertEqual(row["issues"], [326])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
@@ -9540,7 +9540,7 @@ class VfpuConvertProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -9693,7 +9693,7 @@ class VfpuConvertProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_convert.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-convert"])
         self.assertEqual(row["issues"], [326])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
@@ -9725,7 +9725,7 @@ class VfpuVus2iProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -9857,7 +9857,7 @@ class VfpuVus2iProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_vus2i.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-vus2i"])
         self.assertEqual(row["issues"], [326])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
@@ -9881,7 +9881,7 @@ class VfpuBasicArithProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -10026,7 +10026,7 @@ class VfpuBasicArithProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_basic_arith.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-basic-arith"])
         self.assertEqual(row["issues"], [326])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
@@ -10050,7 +10050,7 @@ class VfpuWideDotProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -10186,7 +10186,7 @@ class VfpuWideDotProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_wide_dot_matrix.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-wide-dot-matrix"])
         self.assertEqual(row["issues"], [326])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
@@ -10224,7 +10224,7 @@ class VfpuMfvMtvProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -10283,7 +10283,7 @@ class VfpuMfvMtvProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_mfv_mtv.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-mfv-mtv"])
         self.assertEqual(row["issues"], [326])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
@@ -10357,7 +10357,7 @@ class VfpuConstantsProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -10416,7 +10416,7 @@ class VfpuConstantsProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_constants.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-constants"])
         self.assertEqual(row["issues"], [326])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
@@ -10460,7 +10460,7 @@ class VfpuConstantsProbeTests(unittest.TestCase):
     def test_sentinel_background_reserved_last_and_steps(self) -> None:
         bodies = _c_function_bodies(self.section)
         self.assertIn("s_vc_in[i] = TN_SENTINEL;", bodies["vc_exec"])
-        header = (Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        header = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
                   / "hle_vfpu_cells.h").read_text(encoding="utf-8")
         self.assertIn("#define TN_SENTINEL 0x7a5a5a5au", header)
         for group in ("vc_core", "vc_reserved"):
@@ -10506,7 +10506,7 @@ class VfpuRoundSepProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -10632,7 +10632,7 @@ class VfpuRoundSepProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_round_sep.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-round-sep"])
         self.assertEqual(row["issues"], [326])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
@@ -10677,7 +10677,7 @@ class VfpuPrefixStateProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -10841,7 +10841,7 @@ class VfpuPrefixStateProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_prefix_state.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-prefix-state"])
         self.assertEqual(row["issues"], [326])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
@@ -10886,7 +10886,7 @@ class VfpuWiderOpsProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -10990,7 +10990,7 @@ class VfpuWiderOpsProbeTests(unittest.TestCase):
         basic = self.probe[self.probe.index("static const uint32_t s_ba_ops[BA_OPERANDS] = {"):]
         basic = basic[:basic.index("};")]
         self.assertEqual(ow, [int(w, 16) for w in re.findall(r"0x([0-9a-f]{8})u", basic)])
-        probe_c = (Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle" / "probe.c").read_text(
+        probe_c = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" / "probe.c").read_text(
             encoding="utf-8")
         corpus = probe_c[probe_c.index("s_vfpu_trans_specials[VFPU_TRANS_SPECIAL_COUNT] = {"):]
         corpus = corpus[:corpus.index("};")]
@@ -11047,7 +11047,7 @@ class VfpuWiderOpsProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_wider_ops.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-wider-ops"])
         self.assertEqual(row["issues"], [326])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
@@ -11088,7 +11088,7 @@ class VfpuReservedWidthsProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -11176,7 +11176,7 @@ class VfpuReservedWidthsProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_reserved_widths.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-reserved-widths"])
         self.assertEqual(row["issues"], [326])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
@@ -11225,7 +11225,7 @@ class VfpuCcCmovProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -11346,7 +11346,7 @@ class VfpuCcCmovProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_cc_cmov.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-cc-cmov"])
         self.assertEqual(row["issues"], [326])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
@@ -11368,7 +11368,7 @@ class VfpuForms2ProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
@@ -11516,7 +11516,7 @@ class VfpuForms2ProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_forms2.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-forms2"])
         self.assertEqual(row["issues"], [326])
         # The 2026-10-29 acceptance-eligible PSP-3000 run of 97827132 cites every cell.
@@ -11542,7 +11542,7 @@ class GeSignalProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -11691,7 +11691,7 @@ class GeSignalProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "nakagawa_psp_oracle.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe.c")
         self.assertEqual(row["diagnostic_case_ids"], ["ge-signal"])
         self.assertEqual(row["hardware_evidence"], "CAPTURED")
         self.assertNotIn("evidence_cases", row)
@@ -11736,7 +11736,7 @@ class GeSampleProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
         cls.issues = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
@@ -11820,7 +11820,7 @@ class DmaTimingProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_dmac_timing.c").read_text(encoding="utf-8")
         cls.issues = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
@@ -11920,7 +11920,7 @@ class DmaTimingProbeTests(unittest.TestCase):
         rows = [row for row in self.manifest["tests"] if row.get("id") == "PSP-DMAC-002"]
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_dmac_timing.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_dmac_timing.c")
         self.assertEqual(row["prx"], "dma_timing.prx")
         self.assertEqual(row["diagnostic_case_ids"], ["dma-timing"])
         self.assertEqual(row["issues"], [303])
@@ -11942,7 +11942,7 @@ class MemoryEdgeProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.header = (fixture / "mem_edge.h").read_text(encoding="utf-8")
         cls.probe = (fixture / "probe_memory_edge.c").read_text(encoding="utf-8")
         cls.issues = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
@@ -12090,7 +12090,7 @@ class MemoryEdgeProbeTests(unittest.TestCase):
         rows = [row for row in manifest["tests"] if row.get("id") == "PSP-MEMEDGE-001"]
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_memory_edge.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_memory_edge.c")
         self.assertEqual(row["prx"], "memory_edge.prx")
         self.assertEqual(row["diagnostic_case_ids"], ["memory-edge"])
         self.assertEqual(row["issues"], [303, 1380])
@@ -12115,7 +12115,7 @@ class GeThroughZProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -12217,7 +12217,7 @@ class GeThroughZProbeTests(unittest.TestCase):
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "ge_through_z.prx")
-        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_ge_sample.c")
+        self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_ge_sample.c")
         self.assertEqual(row["diagnostic_case_ids"], ["ge-through-z"])
         self.assertEqual(row["hardware_evidence"], "MEASURED")
         self.assertEqual(row["evidence_cases"], row["case_ids"])
@@ -12267,7 +12267,7 @@ class GeRasterProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.selftest = (root / "tests" / "native" / "hle_thread_selftest.c").read_text(encoding="utf-8")
@@ -12419,7 +12419,7 @@ class _GeNewCaseMixin:
     @classmethod
     def _load(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -12466,7 +12466,7 @@ class _GeNewCaseMixin:
                      "pspdev/psplinkusb 7a0035d9", "XMB context", "05aafe975", "unattended",
                      "acceptance-eligible with 0 blockers", "COMPLETE PASS"):
             test.assertIn(term, note)
-        test.assertEqual(self.row["source"], "fixtures/psp_oracle/probe_ge_sample.c")
+        test.assertEqual(self.row["source"], "tests/fixtures/psp_oracle/probe_ge_sample.c")
         test.assertEqual(self.row["prx"], f"{stem}.prx")
         test.assertEqual(self.row["diagnostic_case_ids"], [case])
 
@@ -13089,7 +13089,7 @@ class KernelSemanticsProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_kernel_semantics.c").read_text(encoding="utf-8")
         cls.issues = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
@@ -13402,7 +13402,7 @@ class HleIoSeekMemoryStickSetupAndCleanupTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
 
     def _body(self, function: str) -> str:
@@ -13455,7 +13455,7 @@ class HleUtilityNoneProbeTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
@@ -13516,7 +13516,7 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
@@ -13670,7 +13670,7 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
         parser = parser[parser.index("# hle-utility-netconf-sharing (166"):
                         parser.index("# hle-io-seek (162")]
         hardware = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
-        readme = (root / "fixtures" / "psp_oracle" / "README.md").read_text(encoding="utf-8")
+        readme = (root / "tests" / "fixtures" / "psp_oracle" / "README.md").read_text(encoding="utf-8")
         texts = {"header": header, "parser": parser,
                  "docs": next(line for line in hardware.splitlines()
                               if line.startswith("| `hle-utility-netconf-sharing` |")),
@@ -13712,7 +13712,7 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
             with self.subTest(term=term):
                 self.assertIn(term, note)
         hardware = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
-        readme = (root / "fixtures" / "psp_oracle" / "README.md").read_text(encoding="utf-8")
+        readme = (root / "tests" / "fixtures" / "psp_oracle" / "README.md").read_text(encoding="utf-8")
         docs_row = next(line for line in hardware.splitlines()
                         if line.startswith("| `hle-utility-netconf-sharing` |"))
         readme_row = next(line for line in readme.splitlines()
@@ -13752,7 +13752,7 @@ class HleUtilityDialogsProbeTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
@@ -13927,7 +13927,7 @@ class HleNicknameLimitProbeTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_NICKNAME_LIMIT\n\n")
@@ -14023,7 +14023,7 @@ class HleSavedataNodataProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
@@ -14241,7 +14241,7 @@ class GeMipProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.selftest = (root / "tests" / "native" / "hle_thread_selftest.c").read_text(encoding="utf-8")
@@ -14322,7 +14322,7 @@ class GeLightProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_LIGHT\n\n")
@@ -14406,7 +14406,7 @@ class GeOverlapProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_OVERLAP\n\n")
@@ -14568,7 +14568,7 @@ class GeWeightProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_WEIGHT\n\n")
@@ -14682,7 +14682,7 @@ class GeRttProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_RTT\n\n")
@@ -14863,7 +14863,7 @@ class GeClutMipProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_CLUT_MIP\n\n")
@@ -14987,7 +14987,7 @@ class ModuleStartProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_module_start.c").read_text(encoding="utf-8")
         cls.issues = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
@@ -15130,7 +15130,7 @@ class RegistryProbeNeverWritesTests(unittest.TestCase):
     source-level rules that keep the probe from issuing such an implicit write.
     """
 
-    PROBE = Path(__file__).resolve().parent.parent / "fixtures" / "psp_oracle" / "probe.c"
+    PROBE = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "psp_oracle" / "probe.c"
     WRITE_APIS = ("sceRegSetKeyValue", "sceRegCreateKey", "sceRegRemoveCategory",
                   "sceRegRemoveRegistry", "sceRegFlushRegistry", "sceRegFlushCategory")
 
@@ -15219,7 +15219,7 @@ class RegistryFontWalkHostTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.root = Path(__file__).resolve().parents[1]
-        cls.fixture = cls.root / "fixtures" / "psp_oracle"
+        cls.fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
         cls.tmp = tempfile.mkdtemp(prefix="registry_walk_host_")
         cls.exe = str(Path(cls.tmp) / "registry_walk_host.exe")
         result = subprocess.run(
@@ -15527,7 +15527,7 @@ class RegistryFontSourceTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
-        self.fixture = self.root / "fixtures" / "psp_oracle"
+        self.fixture = self.root / "tests" / "fixtures" / "psp_oracle"
         self.walk = (self.fixture / "registry_walk.h").read_text(encoding="utf-8")
         self.probe = (self.fixture / "probe.c").read_text(encoding="utf-8")
         self.makefile = (self.fixture / "Makefile").read_text(encoding="utf-8")
@@ -15654,7 +15654,7 @@ class IoCasesHostTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.root = Path(__file__).resolve().parents[1]
-        cls.fixture = cls.root / "fixtures" / "psp_oracle"
+        cls.fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
         cls.tmp = tempfile.mkdtemp(prefix="io_cases_host_")
         cls.exe = str(Path(cls.tmp) / "io_cases_host.exe")
         result = subprocess.run(
@@ -16128,7 +16128,7 @@ class IoCasesSourceTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
-        self.fixture = self.root / "fixtures" / "psp_oracle"
+        self.fixture = self.root / "tests" / "fixtures" / "psp_oracle"
         self.fonts = (self.fixture / "font_files.h").read_text(encoding="utf-8")
         self.umd = (self.fixture / "umd_io.h").read_text(encoding="utf-8")
         self.probe = (self.fixture / "probe.c").read_text(encoding="utf-8")
@@ -16503,7 +16503,7 @@ class FontListHostTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.root = Path(__file__).resolve().parents[1]
-        cls.fixture = cls.root / "fixtures" / "psp_oracle"
+        cls.fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
         cls.tmp = tempfile.mkdtemp(prefix="font_list_host_")
         cls.exe = str(Path(cls.tmp) / "io_cases_host.exe")
         result = subprocess.run(
@@ -16688,7 +16688,7 @@ class FontListImportGateTests(unittest.TestCase):
 
     def test_makefile_pins_the_font_list_imports_and_forbids_the_registry(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         # The leading newline skips the `else ifeq` line of the case-id table.
         block = makefile.split("\nifeq ($(CASE),font-list)\n", 1)[1].split("endif", 1)[0]
@@ -16710,7 +16710,7 @@ class FontListImportGateTests(unittest.TestCase):
 
     def test_makefile_pins_the_font_userpgf_imports_to_thirteen_calls(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        fixture = root / "fixtures" / "psp_oracle"
+        fixture = root / "tests" / "fixtures" / "psp_oracle"
         makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         block = makefile.split("\nifeq ($(CASE),font-userpgf)\n", 1)[1].split("endif", 1)[0]
         self.assertIn("OBJS += $(BUILD_DIR)/libfont_imports.o", block)
@@ -16729,7 +16729,7 @@ class FontListImportGateTests(unittest.TestCase):
 
     def test_font_list_header_makes_no_registry_or_file_call(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        header = (root / "fixtures" / "psp_oracle" / "font_list.h").read_text(encoding="utf-8")
+        header = (root / "tests" / "fixtures" / "psp_oracle" / "font_list.h").read_text(encoding="utf-8")
         code = "\n".join(line for line in header.splitlines()
                          if not line.lstrip().startswith(("*", "/*", "//")))
         self.assertNotRegex(code, r"\bsceReg\w*\s*\(")
@@ -16767,7 +16767,7 @@ class LlscLinkProbeTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
-        self.fixture = self.root / "fixtures" / "psp_oracle"
+        self.fixture = self.root / "tests" / "fixtures" / "psp_oracle"
         self.probe = (self.fixture / "probe.c").read_text(encoding="utf-8")
         self.makefile = (self.fixture / "Makefile").read_text(encoding="utf-8")
 
@@ -17011,7 +17011,7 @@ class Record20261015Tests(unittest.TestCase):
             (self.root / "tools" / "psp_oracle" / "manifest.json").read_text(encoding="utf-8"))
         self.rows = {test["id"]: test for test in self.manifest["tests"]}
         self.doc = (self.root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
-        self.readme = (self.root / "fixtures" / "psp_oracle" / "README.md").read_text(
+        self.readme = (self.root / "tests" / "fixtures" / "psp_oracle" / "README.md").read_text(
             encoding="utf-8")
 
     def _entry(self, heading: str) -> str:

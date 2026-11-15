@@ -243,7 +243,7 @@ class ProvenanceLedgerTest(unittest.TestCase):
         tracked = set(tracked_files("src")) | set(tracked_files("tools"))
         tracked |= set(tracked_files("assets")) | set(tracked_files("font"))
         tracked |= set(tracked_files("third_party/licenses"))
-        tracked |= set(tracked_files("fixtures"))
+        tracked |= set(tracked_files("tests/fixtures"))
         # In a materialized public-safe export the profile-excluded components
         # are absent by design, so the ledger legitimately outlives them. Every
         # other ledger path is still required to be tracked.
@@ -408,10 +408,14 @@ class ProvenanceFailClosedTest(unittest.TestCase):
             "pyproject.toml": "reviewed_configuration",
             "assets/example-lock.json": "reviewed_configuration",
             "db/schema.prisma": "reviewed_configuration",
-            "fixtures/psp_oracle/probe.c": "synthetic_fixture",
-            # The fixture tree under tests/ keeps the class the root folder gave it, whatever
-            # the suffix rules below would say (documentation, configuration) or not say.
+            # The fixture tree under tests/ has the fixture class, whatever the suffix rules
+            # below would say (documentation, configuration) or not say. The root fixtures/
+            # folder, where the tree used to live, keeps the class too: a refresh classes the
+            # entries of its trusted base with the same rule, and a base can still carry them.
             "tests/fixtures/psp_oracle/probe.c": "synthetic_fixture",
+            "fixtures/psp_oracle/probe.c": "synthetic_fixture",
+            "fixtures/psp_oracle/mutex_imports.S": "synthetic_fixture",
+            "fixtures/psp_oracle/README.md": "synthetic_fixture",
             "tests/fixtures/psp_oracle/README.md": "synthetic_fixture",
             "tests/fixtures/psp_oracle/ge_corpus.json": "synthetic_fixture",
             "tests/fixtures/psp_oracle/mutex_imports.S": "synthetic_fixture",
@@ -444,7 +448,7 @@ class ProvenanceFailClosedTest(unittest.TestCase):
         self.assertEqual(evidence["record_id"], "PROV-UPSTREAM")
 
     def test_is_implementation_path(self) -> None:
-        for impl in ("src/rt/x.c", "tools/x.py", "nk.ps1", "nk_manager.ps1",
+        for impl in ("src/rt/x.c", "tools/x.py", "nk.ps1", "tools/nk_manager.ps1",
                      "src/lib/x.ts", "tools/scripts/run.mjs"):
             with self.subTest(impl=impl):
                 self.assertTrue(provenance_ledger.is_implementation_path(impl), impl)
@@ -1495,10 +1499,10 @@ class TrustedAdmissionTests(unittest.TestCase):
         self.assertIn(second, paths)
 
     def test_new_synthetic_data_fixture_is_admitted_deterministically(self) -> None:
-        """Non-executable synthetic data under ``fixtures/`` may use the
+        """Non-executable synthetic data under ``tests/fixtures/`` may use the
         deterministic fixture class from an independent path+hash review."""
         fixture = _RefreshFixture(self)
-        new_fixture = "fixtures/admission/sample.json"
+        new_fixture = "tests/fixtures/admission/sample.json"
         content = '{"synthetic": true}\n'
         digest = fixture.add_new_path(new_fixture, content)
         authority = fixture.admission_authority({
@@ -1546,7 +1550,7 @@ class TrustedAdmissionTests(unittest.TestCase):
             ("mk/hardened.mk", "synthetic: ;\n"),
             ("scripts/run.cmd", "@echo off\n"),
             ("docs/run_me.py", "# executable smuggled under docs\n"),
-            ("fixtures/gen.sh", "#!/bin/sh\n"),
+            ("tests/fixtures/gen.sh", "#!/bin/sh\n"),
         ):
             with self.subTest(path=new_path):
                 fixture = _RefreshFixture(self)

@@ -12,7 +12,7 @@ compared with the analyzer without ever changing what it decided.
 (codegen ``--cfg-report``, ``analysis_ir.py build``, ``analysis_ir.py verify``) on every
 single-image module of the source-owned platform ladder, which carry imports, relocations, data
 pointers, scheduler and FPU code and a filesystem workload, on the AOT/interpreter cosimulation
-guest (``fixtures/cosim``), and on the two PSPSDK showcase titles (``fixtures/showcase``, built
+guest (``tests/fixtures/cosim``), and on the two PSPSDK showcase titles (``tests/fixtures/showcase``, built
 when PSPDEV is present), and it checks that a wrong IR still fails ``verify``. It also runs
 codegen on each module without ``--cfg-report`` and checks that every file codegen writes is
 byte-identical to the run that wrote the report and built and verified the IR, so the analysis
@@ -39,15 +39,15 @@ sys.path.insert(0, str(TOOLS))
 
 import analysis_ir  # noqa: E402
 
-LADDER = ROOT / "fixtures" / "platform_ladder"
+LADDER = ROOT / "tests" / "fixtures" / "platform_ladder"
 sys.path.insert(0, str(LADDER))
 import generate as ladder  # noqa: E402
 
-SHOWCASE = ROOT / "fixtures" / "showcase"
+SHOWCASE = ROOT / "tests" / "fixtures" / "showcase"
 sys.path.insert(0, str(SHOWCASE))
 import showcase  # noqa: E402
 
-COSIM_GENERATOR = ROOT / "fixtures" / "cosim" / "generate.py"
+COSIM_GENERATOR = ROOT / "tests" / "fixtures" / "cosim" / "generate.py"
 # mk/cosim_snapshot.mk: COSIM_BASE_ADDR, FUNCS_PER_CHUNK=1 and COSIM_CODEGEN_ARGS.
 COSIM_BASE = 0x08900000
 COSIM_CODEGEN_ARGS = ("--funcs-per-chunk=1", "--stack-census")

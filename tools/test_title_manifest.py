@@ -659,7 +659,7 @@ class TitleManifestTests(unittest.TestCase):
         self.assertEqual(contract["unknown_capability_policy"], "fail-closed")
         self.assertEqual(contract["profile_id"], "profile-zero-v1")
         self.assertFalse(normalized["profile_zero"]["acceptance"]["private_inputs_allowed"])
-        self.assertEqual(normalized["profile_zero"]["build"]["makefile"], "fixtures/profile_zero/Makefile")
+        self.assertEqual(normalized["profile_zero"]["build"]["makefile"], "tests/fixtures/profile_zero/Makefile")
         self.assertEqual(
             normalized["profile_zero"]["acceptance"]["cases"][0]["gate"],
             "profile-zero-e2e",

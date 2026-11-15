@@ -21,7 +21,7 @@ italic and serif bold italic.
 
 Each font comes with its licence text (`nkjpn-OFL.txt` and so on) and a manifest (`nkjpn.json` and so on) that names
 its exact source file and the converter settings. The source fonts are pinned in
-[`fixtures/fonts/`](../fixtures/fonts/): each pin file gives the file's SHA-256 and where it came from. Generated
+[`tests/fixtures/fonts/`](../tests/fixtures/fonts/): each pin file gives the file's SHA-256 and where it came from. Generated
 fonts are never committed.
 
 These fonts are stand-ins. They let a game draw its text when you have not imported your PSP's fonts, but they look

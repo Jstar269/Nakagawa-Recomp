@@ -8,7 +8,7 @@
 #   - the player (launcher) as libmain.so, from the repository's own CMakeLists.txt;
 #   - one runtime library per bundled title, libnk_title_<id>.so, from a package's generated C
 #     (nk_add_title_runtime in the top-level CMakeLists.txt). Packages are built on a PC by the
-#     ordinary route (fixtures/showcase/showcase.py for the showcase demos) and named by
+#     ordinary route (tests/fixtures/showcase/showcase.py for the showcase demos) and named by
 #     NK_ANDROID_TITLES; no game data and no generated C is part of the repository.
 # The dependency sources are fetched once into NK_ANDROID_DEPS_DIR (default build/android-deps,
 # ignored) and checked against the pinned commits (deps.cmake).

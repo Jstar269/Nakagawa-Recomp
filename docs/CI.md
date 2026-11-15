@@ -101,7 +101,7 @@ The jobs:
   carried by the job's `BUILD_PROFILE_ZERO`), and upload the same `profile-zero-fixture`
   artifact. Their `python3` is now the job's CPython 3.15.2 rather than the runner image's.
   Under the same condition, the job then builds the two homebrew fixtures
-  (`fixtures/pspdev_phase5`, `fixtures/homebrew_view`) and uploads them as `homebrew-fixtures`
+  (`tests/fixtures/pspdev_phase5`, `tests/fixtures/homebrew_view`) and uploads them as `homebrew-fixtures`
   for the Windows `smoke` part (#2143). `BUILD_PROFILE_ZERO` also holds for `run_installer`:
   an installer-only change (`assets/installer/**`, say) starts the Windows job with
   `run_python` and `run_windows` both false, and its `smoke` and `routes` parts download
@@ -561,7 +561,7 @@ those guest bytes to enter the fail-closed interpreter; the gate then requires a
 region-B handoff, real HLE call, and final `0x00001235` production-driver assertion.
 
 The Windows job also runs a headless staging smoke after it links the player (#308). Because the
-runner has no PSPDEV, `python fixtures/showcase/showcase.py stage-iso` wraps the source-owned
+runner has no PSPDEV, `python tests/fixtures/showcase/showcase.py stage-iso` wraps the source-owned
 display guest in the showcase's synthetic TEST00007 identity. The built `nakagawa_player.exe
 --stage-only` must then report `STAGING_RESULT status=PASS` within 60 seconds. LOCALAPPDATA,
 APPDATA and USERPROFILE point under the runner temporary directory. The Linux `native_tools` job
@@ -585,12 +585,12 @@ ordered guest writes, the guest memory window, or the architectural state vector
 rebuilds that comparator against deliberately mutated copies of the interpreter and requires each
 defect class to fail the gate; a mutant that only breaks the build is rejected as `INVALID`, not
 counted as a kill. Both are source-owned and need no game input. See
-[`fixtures/cosim/README.md`](../fixtures/cosim/README.md) for the comparison contract and the
+[`tests/fixtures/cosim/README.md`](../tests/fixtures/cosim/README.md) for the comparison contract and the
 limits of the evidence.
 
 Both hosts run `snapshot-selftest` (#1842): the Windows job in its `selftests` part and the Linux
 `native_tools` job in its `translation` part. It builds `src/rt/snapshot_runner.c` against a
-source-owned synthetic module (`fixtures/snapshot/`), runs each case's translated function and
+source-owned synthetic module (`tests/fixtures/snapshot/`), runs each case's translated function and
 the reference interpreter in `src/ref` from the same snapshot, and requires the exact verdict
 for every case, a named refusal for every malformed snapshot file, and `MISMATCH r11` from a
 runner built with one immediate changed in the generated C. The verdicts are described in
@@ -598,7 +598,7 @@ runner built with one immediate changed in the generated C. The verdicts are des
 
 Both hosts run `verify-selftest` (#1843) in the same two jobs and parts. It builds the verify
 harness (`src/rt/verify_harness.c`, `src/rt/verify.c`, `-DSR_VERIFY`) against a source-owned
-synthetic module (`fixtures/verify/`), drives the samplers, the rate budget, the range filter
+synthetic module (`tests/fixtures/verify/`), drives the samplers, the rate budget, the range filter
 and the skip classes, and requires a report with the expected counts for each. It then builds a
 harness and a snapshot runner whose generated C has one changed immediate and requires the
 `MISMATCH`, a capture, and the same first difference from the replay. It also requires that
@@ -1102,7 +1102,7 @@ No hosted job runs the Windows-only cases in `tools/test_asset_index_c.py`,
 `tools/test_scratch_dir.py`, `tools/test_player_package_route.py`,
 `tools/test_manager_safety.py`, `tools/test_visual_oracle.py`, `tools/test_library_sweep.py`
 and `tools/test_stage_install.py`. A change under `tools/`, `src/core/`, `src/player/`, the
-`Makefile` or any `.ps1` file (including the root `nk_manager.ps1`) runs those modules locally
+`Makefile` or any `.ps1` file (including the root `nk.ps1`) runs those modules locally
 on Windows. The full local suite builds the native fixtures and takes over an hour on
 Windows. Make-based tests need a POSIX `sh` on `PATH` (MSYS2 `usr/bin` or Git for Windows
 `bin`).
@@ -1160,7 +1160,7 @@ whenever their jobs run; neither can change a gate's result.
   covered. A mutant that links a shared, unmutated object still adds its run to that object's
   counts: the GPU coherence and first-bad-draw mutants link `ge.o`, so their runs count in
   `src/rt/ge.c`. `-r` keeps system headers out, and reports for the tests' own sources (`tests/`,
-  `fixtures/`, `*selftest.c`, `*selftest.cpp`, `*selftest.inc`, `src/player/player_ui_test.c`) and for C
+  `tests/fixtures/`, `*selftest.c`, `*selftest.cpp`, `*selftest.inc`, `src/player/player_ui_test.c`) and for C
   generated into `build/` are dropped, as `tools/test_*.py` is for Python. Everything is
   uploaded once, under `flags: c`. A failure in any earlier step skips the upload, so a
   partial run uploads nothing and the `c` flag carries the last complete report forward.
@@ -2177,7 +2177,7 @@ developer runs locally, without private inputs:
   `routes` group (25 minutes) of the `windows_runtime` job, and took about 123 seconds locally for both package
   builds and runtime launches. The guest bytes are built from the fixture's own
   `main.c` and `Makefile` by the profile-zero steps of the `public_export` job (pinned PSPDEV, checked
-  against the committed `fixtures/profile_zero/prebuilt/SHA256SUMS`) and downloaded
+  against the committed `tests/fixtures/profile_zero/prebuilt/SHA256SUMS`) and downloaded
   as an artifact, so the repository stores no generated executable (#1100) and the
   Windows runner still executes the whole route; where PSPDEV is installed, the
   gate rebuilds the fixture itself and fails if any byte differs from `SHA256SUMS`.
@@ -2194,9 +2194,9 @@ developer runs locally, without private inputs:
   player's library uses when a user picks a homebrew `EBOOT.PBP`
   (`player_psn_package_inspect` and `player_psn_package_convert`) and its launch
   (`--launch-index`, `nk_launch_start`):
-  - `test_homebrew_eboot_imports_and_builds_as_experimental`: `fixtures/pspdev_phase5`
+  - `test_homebrew_eboot_imports_and_builds_as_experimental`: `tests/fixtures/pspdev_phase5`
     imports and builds a package as an Experimental title.
-  - `test_homebrew_finds_its_own_files_in_its_memory_stick_folder`: `fixtures/homebrew_view`,
+  - `test_homebrew_finds_its_own_files_in_its_memory_stick_folder`: `tests/fixtures/homebrew_view`,
     imported from a folder that also holds `DATA.TXT`, builds, launches and runs. The test
     checks what the program writes on its Memory Stick: `NAKAGAWA_TEST/HOMEBREW_VIEW.TXT` must
     say it was started as `ms0:/PSP/GAME/NKHBVIEW/EBOOT.PBP`, read `DATA.TXT` beside itself and

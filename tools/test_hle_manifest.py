@@ -2488,11 +2488,11 @@ class CensusTests(unittest.TestCase):
         # route to unreviewed handlers; that gate is open work under #341.
         production_nid = cast(
             int,
-            self._fixture_constant(ROOT / "fixtures" / "production_smoke" / "generate.py", "NID"),
+            self._fixture_constant(ROOT / "tests" / "fixtures" / "production_smoke" / "generate.py", "NID"),
         )
         display_nids = cast(
             tuple[int, ...],
-            self._fixture_constant(ROOT / "fixtures" / "display_smoke" / "generate.py", "NIDS"),
+            self._fixture_constant(ROOT / "tests" / "fixtures" / "display_smoke" / "generate.py", "NIDS"),
         )
         route_nids = {production_nid, *display_nids}
         registrations = {
@@ -2542,7 +2542,7 @@ class CensusTests(unittest.TestCase):
 
     def test_evidence_anchor_must_exist_in_the_cited_file(self) -> None:
         for bogus in ("Makefile:display-smoke-run-renamed",
-                      "fixtures/display_smoke/generate.py:verify_renamed",
+                      "tests/fixtures/display_smoke/generate.py:verify_renamed",
                       "tools/test_sched_invariants.py:test_no_such_test_341"):
             with self.subTest(evidence=bogus):
                 with mock.patch.dict(meta.HANDLER_EVIDENCE, {"h_DisplaySetFrameBuf": [bogus]}):
@@ -2589,7 +2589,7 @@ class CensusTests(unittest.TestCase):
     def test_partial_with_nonexistent_evidence_file_is_rejected(self) -> None:
         with mock.patch.dict(
             meta.HANDLER_EVIDENCE,
-            {"h_DisplaySetFrameBuf": ["fixtures/test_nonexistent_341.py"]},
+            {"h_DisplaySetFrameBuf": ["tests/fixtures/test_nonexistent_341.py"]},
         ):
             with self.assertRaises(ManifestError) as ctx:
                 hle_manifest.validate_meta(self.raw_regs)

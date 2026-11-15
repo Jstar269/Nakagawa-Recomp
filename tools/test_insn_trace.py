@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from psp_oracle import insn_trace, parse_golden  # noqa: E402
 import tracediff  # noqa: E402
 
-FIXTURE_DIR = ROOT / "fixtures" / "psp_oracle"
+FIXTURE_DIR = ROOT / "tests" / "fixtures" / "psp_oracle"
 
 # SHA-256 of the step records (no header) of each fixture's PSP_HARDWARE trace, measured on a
 # PSP-3000 / 6.6.1 (docs/HARDWARE_ORACLE.md, PSP-TRACE-001). The raw trace stays private; a

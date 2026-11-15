@@ -2026,7 +2026,7 @@ def vreg_indices(reg, size):
     # 14 selected wide encodings, including the two that discriminate between
     # candidate rules: triple width selects its row from bit 6 alone, and
     # transpose wraps as (row + lane) & 3 rather than saturating. See
-    # fixtures/vfpu_addressing/hardware_vfpu_addr_001.json.
+    # tests/fixtures/vfpu_addressing/hardware_vfpu_addr_001.json.
     #
     # Boundary: 14 of 512 wide encodings were observed. The rest are covered
     # only by the derived cross-implementation tests in

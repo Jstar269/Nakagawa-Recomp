@@ -117,7 +117,7 @@ Every fixture was built under a different directory and stem, so that probe neve
 matched anything and the entire resolution path was unreachable. The spawn was
 unit-tested; the thing it was meant to spawn had no discoverable location.
 
-`fixtures/display_smoke/generate.py` emits a source-owned PSP guest that fills
+`tests/fixtures/display_smoke/generate.py` emits a source-owned PSP guest that fills
 the framebuffer and flips it through `sceDisplaySetFrameBuf` once per frame, and
 `mingw32-make display-smoke` builds it **under its own title id** so the existing
 probe resolves it. `assets/titles/display-smoke.json` gives it a catalog entry

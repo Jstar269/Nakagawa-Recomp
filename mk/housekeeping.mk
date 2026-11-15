@@ -65,7 +65,7 @@ endef
 # on (#1300, docs/cleanroom/PGF_CONVERTER_SPEC.md section 3, rule 13). Each face then has its own spacing,
 # chosen so that its lines are as long as the console face's of the same index; the sans-serif faces also
 # get the console's digit width.
-LIBERATION := fixtures/fonts/liberation
+LIBERATION := tests/fixtures/fonts/liberation
 PROJECT_LATIN_STRIKE_ARGS := --ppem 20 --snap-overshoot 3 --embolden-x 4 --embolden-advance 4 --nominal-size 648 --resolution 8192 --header-ascender 863 --header-descender -196
 PROJECT_LATIN_SMALL_STRIKE_ARGS := --ppem 13 --snap-overshoot 3 --embolden-x 2 --embolden-advance 2 --nominal-size 448 --resolution 8192 --header-ascender 576 --header-descender -131
 # Per index: source face, PGF style, then that face's spacing (--tracking, eighths of a pixel), where
@@ -135,11 +135,11 @@ PROJECT_JAPANESE_FONT_ARGS := --ppem 18 --nominal-size 648 --resolution 8192 --h
 PROJECT_KOREAN_FONT_ARGS := --ppem 20 --tracking 1 --nominal-size 648 --resolution 8192 --header-ascender 1000 --header-descender -250
 NOTO_SANS_JP := assets/fonts/ui/noto-sans-jp
 project-japanese-font: $(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf
-$(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf: $(NOTO_SANS_JP)/NotoSansJP-Regular.ttf fixtures/fonts/notosansjp/PIN.json $(NOTO_SANS_JP)/OFL.txt fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf fixtures/fonts/mplus1p/PIN.json fixtures/fonts/mplus1p/OFL.txt tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md
+$(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf: $(NOTO_SANS_JP)/NotoSansJP-Regular.ttf tests/fixtures/fonts/notosansjp/PIN.json $(NOTO_SANS_JP)/OFL.txt tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf tests/fixtures/fonts/mplus1p/PIN.json tests/fixtures/fonts/mplus1p/OFL.txt tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(PROJECT_FONT_GENERATED_DIR_PY)').mkdir(parents=True, exist_ok=True)"
-	"$(PYTHON)" tools/ttf2pgf.py "$@" "$(NOTO_SANS_JP)/NotoSansJP-Regular.ttf" --pin fixtures/fonts/notosansjp/PIN.json --fallback fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf --fallback-pin fixtures/fonts/mplus1p/PIN.json --japanese-text $(PROJECT_JAPANESE_FONT_ARGS) --font-name "Nakagawa Open Japanese" --font-type "Regular" --manifest "$(PROJECT_FONT_GENERATED_DIR_PY)/nkjpn.json"
-	"$(PYTHON)" -c "from pathlib import Path; parts = [Path(p).read_text(encoding='utf-8') for p in ('$(NOTO_SANS_JP)/OFL.txt', 'fixtures/fonts/mplus1p/OFL.txt')]; Path('$(PROJECT_FONT_GENERATED_DIR_PY)/nkjpn-OFL.txt').write_text('Noto Sans JP:\n\n' + parts[0] + '\n\nM PLUS 1p (U+2252 only):\n\n' + parts[1], encoding='utf-8')"
-$(eval $(call PROJECT_FONT_RULE,korean,nkkr.pgf,fixtures/fonts/gowundodum/GowunDodum-Regular.ttf,fixtures/fonts/gowundodum/PIN.json,fixtures/fonts/gowundodum/OFL.txt,--ks-x-1001-korean,Nakagawa Open Korean,$(PROJECT_KOREAN_FONT_ARGS),Regular))
+	"$(PYTHON)" tools/ttf2pgf.py "$@" "$(NOTO_SANS_JP)/NotoSansJP-Regular.ttf" --pin tests/fixtures/fonts/notosansjp/PIN.json --fallback tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf --fallback-pin tests/fixtures/fonts/mplus1p/PIN.json --japanese-text $(PROJECT_JAPANESE_FONT_ARGS) --font-name "Nakagawa Open Japanese" --font-type "Regular" --manifest "$(PROJECT_FONT_GENERATED_DIR_PY)/nkjpn.json"
+	"$(PYTHON)" -c "from pathlib import Path; parts = [Path(p).read_text(encoding='utf-8') for p in ('$(NOTO_SANS_JP)/OFL.txt', 'tests/fixtures/fonts/mplus1p/OFL.txt')]; Path('$(PROJECT_FONT_GENERATED_DIR_PY)/nkjpn-OFL.txt').write_text('Noto Sans JP:\n\n' + parts[0] + '\n\nM PLUS 1p (U+2252 only):\n\n' + parts[1], encoding='utf-8')"
+$(eval $(call PROJECT_FONT_RULE,korean,nkkr.pgf,tests/fixtures/fonts/gowundodum/GowunDodum-Regular.ttf,tests/fixtures/fonts/gowundodum/PIN.json,tests/fixtures/fonts/gowundodum/OFL.txt,--ks-x-1001-korean,Nakagawa Open Korean,$(PROJECT_KOREAN_FONT_ARGS),Regular))
 
 project-fonts: $(PROJECT_FONT_SLOT_TARGETS)
 
@@ -170,7 +170,7 @@ CLEAN_FIXTURE_DIRS := $(PRODUCTION_SMOKE_DIR) $(PRODUCTION_SMOKE_GAP_DIR) $(COSI
 	$(addprefix $(BUILD_ROOT)/,nakagawa_psp_oracle vfpu_oracle portable-core verify link)
 
 # The ephemeral build and run logs distclean and clean-all remove from LOG_DIR (the set
-# nk_manager.ps1 writes there). Every other file under LOG_DIR is preserved.
+# tools/nk_manager.ps1 writes there). Every other file under LOG_DIR is preserved.
 EPHEMERAL_LOG_NAMES := build_out_recomp.log build_err_recomp.log recomp_err.log obj_err.log \
 	link_err.log stdout_run.log stderr_run.log
 REMOVE_EPHEMERAL_LOGS = "$(PYTHON)" -c "import sys; from pathlib import Path; [Path(sys.argv[1], name).unlink(missing_ok=True) for name in sys.argv[2:]]" "$(LOG_DIR)" $(EPHEMERAL_LOG_NAMES)

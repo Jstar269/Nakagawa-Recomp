@@ -9,7 +9,7 @@ code used to read the register after emitting the slot, which silently redirecte
 `jr $t9` tail-call idiom preceded by a slot that reloads $t9.
 
 The defect was found by the AOT/interpreter cosimulation gate
-(``fixtures/cosim``, cell ``jrslot``), which executed the same source-owned guest
+(``tests/fixtures/cosim``, cell ``jrslot``), which executed the same source-owned guest
 bytes both ways and reported the two lanes entering different callees.  These
 tests pin the emission order so it cannot regress without an executable gate run.
 """

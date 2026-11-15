@@ -383,11 +383,11 @@ class RunEntryIsPlanOwned(unittest.TestCase):
 
 
 class ManagerHoldsNoRunEntryCopy(unittest.TestCase):
-    """Source-shape guard on nk_manager.ps1. Tier 4, and it does not pretend
+    """Source-shape guard on tools/nk_manager.ps1. Tier 4, and it does not pretend
     otherwise -- it asserts where the value comes from, not that a run works."""
 
     def setUp(self) -> None:
-        self.manager = (ROOT / "nk_manager.ps1").read_text(encoding="utf-8")
+        self.manager = (ROOT / "tools" / "nk_manager.ps1").read_text(encoding="utf-8")
 
     def test_the_run_and_difffunc_call_sites_take_it_from_the_plan(self) -> None:
         sites = [line for line in self.manager.splitlines() if '"--image", $imagePath' in line]
@@ -397,7 +397,7 @@ class ManagerHoldsNoRunEntryCopy(unittest.TestCase):
             self.assertNotIn("0x0029a060", line)
 
     def test_canonical_manager_holds_zero_guest_literals(self) -> None:
-        """Phase 2 milestone: nk_manager.ps1 has zero hardcoded guest entry literals."""
+        """Phase 2 milestone: tools/nk_manager.ps1 has zero hardcoded guest entry literals."""
         self.assertEqual(self.manager.count("0x0029a060"), 0)
 
     def test_the_plan_supplied_entry_wins_when_a_manifest_is_bound(self) -> None:

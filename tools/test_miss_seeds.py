@@ -355,7 +355,7 @@ codegen.variable_import_sites = lambda elf: ((), {{{site}: "word32"}})
 sys.exit(tool.main(sys.argv[1:]))
 """
 
-# The harness mirrors the cosimulation gate's (fixtures/cosim/cosim_selftest.c): it includes the
+# The harness mirrors the cosimulation gate's (tests/fixtures/cosim/cosim_selftest.c): it includes the
 # production dispatch core, supplies the few host symbols a build without the scheduler and GE
 # lacks, and enters the module through dispatch_from_host. Every other runtime file is real.
 HARNESS = r'''

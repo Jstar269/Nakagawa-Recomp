@@ -2155,1496 +2155,6 @@
       }
     },
     {
-      "path": "fixtures/audio_resampler_bench/audio_resampler_bench.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "audio-resampler-bench-fixture-pr1051",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/cosim/README.md",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/cosim/cosim_selftest.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-cosim",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/cosim/fpu_reference.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "independent-fpu-reference-351",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/cosim/fpu_reference.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "independent-fpu-reference-351",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/cosim/generate.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-cosim",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/cosim/mutate.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-cosim",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/display_smoke/generate.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "display-smoke-generator-20260911",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/fonts/README.md",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/fonts/gowundodum/GowunDodum-Regular.ttf",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "gowundodum-project-korean-font",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "SIL Open Font License 1.1",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "fixtures/fonts/gowundodum/OFL.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "gowundodum-project-korean-font",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "SIL Open Font License 1.1",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "fixtures/fonts/gowundodum/PIN.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "gowundodum-font-pin-record",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/fonts/gudea/Gudea-Regular.ttf",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/fonts/gudea/OFL.txt",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/fonts/gudea/PIN.json",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSans-Bold.pin.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-font-pin-records-2005",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSans-Bold.ttf",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-fonts-latin-2005",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "SIL Open Font License 1.1",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSans-BoldItalic.pin.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-font-pin-records-2005",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSans-BoldItalic.ttf",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-fonts-latin-2005",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "SIL Open Font License 1.1",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSans-Italic.pin.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-font-pin-records-2005",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSans-Italic.ttf",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-fonts-latin-2005",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "SIL Open Font License 1.1",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSans-Regular.pin.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-font-pin-records-2005",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSans-Regular.ttf",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-fonts-latin-2005",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "SIL Open Font License 1.1",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSerif-Bold.pin.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-font-pin-records-2005",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSerif-Bold.ttf",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-fonts-latin-2005",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "SIL Open Font License 1.1",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSerif-BoldItalic.pin.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-font-pin-records-2005",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSerif-BoldItalic.ttf",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-fonts-latin-2005",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "SIL Open Font License 1.1",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSerif-Italic.pin.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-font-pin-records-2005",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSerif-Italic.ttf",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-fonts-latin-2005",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "SIL Open Font License 1.1",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSerif-Regular.pin.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-font-pin-records-2005",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/LiberationSerif-Regular.ttf",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-fonts-latin-2005",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "SIL Open Font License 1.1",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "fixtures/fonts/liberation/OFL.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "liberation-fonts-latin-2005",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "SIL Open Font License 1.1",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "mplus1p-project-japanese-font",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "SIL Open Font License 1.1",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "fixtures/fonts/mplus1p/OFL.txt",
-      "classification": "upstream_derived",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "mplus1p-project-japanese-font",
-        "evidence_tier": "S",
-        "upstream": "documented upstream family",
-        "license": "SIL Open Font License 1.1",
-        "modification_status": "modified_or_translated; see trusted record"
-      }
-    },
-    {
-      "path": "fixtures/fonts/mplus1p/PIN.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "mplus1p-font-pin-record",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/fonts/notosansjp/PIN.json",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/homebrew_corpus/PROVENANCE.md",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "homebrew_corpus_2144_20261108",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/homebrew_corpus/corpus.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "homebrew_corpus_2144_20261108",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/homebrew_view/Makefile",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "homebrew_view_fixture_20261111",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/homebrew_view/main.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "homebrew_view_fixture_20261111",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/mp3_tone/generate.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "mp3-tone-fixture-20261024",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/mp3_tone/mp3_tone.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "mp3-tone-fixture-20261024",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/nakagawa_minimal_v4/Makefile",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-minimal",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/nakagawa_minimal_v4/main.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-minimal",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/nk_ui/core_synthetic.golden",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/nk_ui/library.golden",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/nk_ui/overlay.golden",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/nk_ui/title.golden",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/platform_ladder/README.md",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/platform_ladder/generate.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "platform-ladder-generator-20260827",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/production_smoke/README.md",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/production_smoke/generate.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "production-smoke-fixture-generator",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/profile_zero/Makefile",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "profile-zero-e2e",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/profile_zero/README.md",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "profile-zero-fixture-readme",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/profile_zero/main.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "profile-zero-e2e",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/profile_zero/prebuilt/SHA256SUMS",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "profile-zero-fixture-prebuilt",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/Makefile",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-psp-oracle",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/README.md",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/display_user_imports.S",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "oracle-user-mode-display-imports",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/font_files.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-font-files-umd-io",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/font_list.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-font-list",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/ge_corpus.json",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/hle_ctrl_imports.S",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-hle-measure-import-blocks",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/hle_ge_imports.S",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-hle-measure-import-blocks",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/hle_hprm_imports.S",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-hle-measure-import-blocks",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/hle_power_imports.S",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-hle-measure-import-blocks",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/hle_utility_imports.S",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-hle-measure-import-blocks",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/hle_vfpu_cells.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-issues-20261024-probe-fixtures",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/insn_trace_fixtures.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "insn-trace-differential-20261029",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/insn_trace_tramp.S",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "insn-trace-differential-20261029",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/io_cases_host.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-font-files-umd-io",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/libfont_imports.S",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-font-list",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/mem_edge.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "memory-edge-303",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/mutex_imports.S",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/probe.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-psp-oracle",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/probe_dmac_timing.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "dma-timing-probe-20261029",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/probe_exception_a1.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-hw-20260917-probe-fixtures",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/probe_exception_a2.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-hw-20260917-probe-fixtures",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/probe_exception_a3.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-hw-20260917-probe-fixtures",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/probe_ge_sample.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "ge-sample-probe-20261028",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/probe_hle_issues.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-issues-20261024-probe-fixtures",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/probe_hle_measure.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-hle-measure-probe",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/probe_hle_self_stop_helper.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp_oracle_self_stop_helper_20261108",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/probe_insn_trace.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "insn-trace-differential-20261029",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/probe_kernel_semantics.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "kernel-semantics-probe-20261031",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/probe_memory_edge.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "memory-edge-303",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/probe_module_start.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "module-start-probe-20261029",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/psp_b1.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-hw-20260917-probe-fixtures",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/psp_b2.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-hw-20260917-probe-fixtures",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/psp_b3.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-hw-20260917-probe-fixtures",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/registry_walk.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-font-registry-walk",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/registry_walk_host.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-font-registry-walk",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/threadman_user_imports.S",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle/umd_io.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-font-files-umd-io",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle_captures/display_wait_late.20261008-run5.txt",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "oracle-console-capture-fixtures-20261008",
-        "evidence_tier": "H",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle_captures/ge_break_continue.20261008-manual-partial.txt",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "oracle-console-capture-fixtures-20261008",
-        "evidence_tier": "H",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle_captures/kernel_alarm.20261008-manual.txt",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "oracle-console-capture-fixtures-20261008",
-        "evidence_tier": "H",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle_captures/kernel_alarm.20261008-run3.txt",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "oracle-console-capture-fixtures-20261008",
-        "evidence_tier": "H",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle_captures/mutex_interrupt_context.20261008-run5.txt",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "oracle-console-capture-fixtures-20261008",
-        "evidence_tier": "H",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle_captures/refer_status_size.20261008-manual.txt",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "oracle-console-capture-fixtures-20261008",
-        "evidence_tier": "H",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle_captures/registry_readonly.20261008-manual-partial.txt",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "oracle-console-capture-fixtures-20261008",
-        "evidence_tier": "H",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle_captures/thread_scheduler.20261008-manual.txt",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "oracle-console-capture-fixtures-20261008",
-        "evidence_tier": "H",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_oracle_captures/transport_write.20261008-run3.txt",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "oracle-console-capture-fixtures-20261008",
-        "evidence_tier": "H",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_phaseb/Makefile",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-campaign-20260921",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_phaseb/mutex_imports.S",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/psp_phaseb/phaseb.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-campaign-20260921",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_runner/Makefile",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-campaign-20260921",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_runner/runner.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-campaign-20260921",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_threading_oracle/Makefile",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-campaign-20260921",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_threading_oracle/README.md",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/psp_threading_oracle/matrix.json",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/psp_threading_oracle/thread_oracle.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-campaign-20260921",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/psp_threading_oracle/thread_shim.S",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/psp_threading_oracle/thread_shim.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "psp-oracle-campaign-20260921",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/pspdev_phase5/Makefile",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-pspdev-phase5",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/pspdev_phase5/main.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-pspdev-phase5",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/showcase/Makefile",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "showcase-demos-309",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/showcase/breakout/main.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "showcase-demos-309",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/showcase/common/tone.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "showcase-demos-309",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/showcase/ge_scene/main.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "showcase-demos-309",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/showcase/showcase.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "showcase-tooling-309",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/snapshot/generate.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "snapshot-exec-1842",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/snapshot/selftest.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "snapshot-exec-1842",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/update_check/github_releases_20261028.json",
-      "classification": "synthetic_fixture",
-      "evidence": {
-        "source": "path-reviewed fixture/test census",
-        "statement": "fixture or test data is synthetic and contains no retail bytes"
-      }
-    },
-    {
-      "path": "fixtures/user_data/README.md",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "user_data_schema_20261029",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/user_data/input_profile_v1.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "user_data_schema_20261029",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/user_data/input_profile_v2.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "user_data_schema_20261029",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/user_data/settings_v1.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "user_data_schema_20261029",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/user_data/v0.0.1/input_profile.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "user_data_schema_20261029",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/user_data/v0.0.1/library.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "user_data_schema_20261029",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/user_data/v0.0.1/settings.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "user_data_schema_20261029",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/verify/generate.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "sampled-verify-1843",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/verify/selftest.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "sampled-verify-1843",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/vfpu_addressing/hardware_vfpu_addr_001.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "vfpu-addressing-evidence",
-        "evidence_tier": "H",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/vfpu_nan_payload/Makefile",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-vfpu-nan",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/vfpu_nan_payload/vfpu_nan_cases.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-vfpu-nan",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/vfpu_nan_payload/vfpu_nan_probe.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-vfpu-nan",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/vfpu_oracle/Makefile",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-vfpu-oracle",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/vfpu_oracle/vfpu_oracle_cases.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-vfpu-oracle",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "fixtures/vfpu_oracle/vfpu_probe.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "c-gap-fixture-vfpu-oracle",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
       "path": "font/README.md",
       "classification": "reviewed_documentation",
       "evidence": {
@@ -3808,17 +2318,6 @@
     },
     {
       "path": "nk.ps1",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "doctor-and-host-preflight-20260909",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "nk_manager.ps1",
       "classification": "project_authored_attested",
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
@@ -12506,6 +11005,1496 @@
       }
     },
     {
+      "path": "tests/fixtures/audio_resampler_bench/audio_resampler_bench.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "audio-resampler-bench-fixture-pr1051",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/cosim/README.md",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/cosim/cosim_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-cosim",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/cosim/fpu_reference.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "independent-fpu-reference-351",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/cosim/fpu_reference.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "independent-fpu-reference-351",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/cosim/generate.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-cosim",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/cosim/mutate.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-cosim",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/display_smoke/generate.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "display-smoke-generator-20260911",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/README.md",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/gowundodum/GowunDodum-Regular.ttf",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "gowundodum-project-korean-font",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/gowundodum/OFL.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "gowundodum-project-korean-font",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/gowundodum/PIN.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "gowundodum-font-pin-record",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/gudea/Gudea-Regular.ttf",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/gudea/OFL.txt",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/gudea/PIN.json",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSans-Bold.pin.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-font-pin-records-2005",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSans-Bold.ttf",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-fonts-latin-2005",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSans-BoldItalic.pin.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-font-pin-records-2005",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSans-BoldItalic.ttf",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-fonts-latin-2005",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSans-Italic.pin.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-font-pin-records-2005",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSans-Italic.ttf",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-fonts-latin-2005",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSans-Regular.pin.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-font-pin-records-2005",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSans-Regular.ttf",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-fonts-latin-2005",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSerif-Bold.pin.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-font-pin-records-2005",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSerif-Bold.ttf",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-fonts-latin-2005",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSerif-BoldItalic.pin.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-font-pin-records-2005",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSerif-BoldItalic.ttf",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-fonts-latin-2005",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSerif-Italic.pin.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-font-pin-records-2005",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSerif-Italic.ttf",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-fonts-latin-2005",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSerif-Regular.pin.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-font-pin-records-2005",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/LiberationSerif-Regular.ttf",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-fonts-latin-2005",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/liberation/OFL.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "liberation-fonts-latin-2005",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "mplus1p-project-japanese-font",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/mplus1p/OFL.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "mplus1p-project-japanese-font",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/mplus1p/PIN.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "mplus1p-font-pin-record",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/notosansjp/PIN.json",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/homebrew_corpus/PROVENANCE.md",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "homebrew_corpus_2144_20261108",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/homebrew_corpus/corpus.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "homebrew_corpus_2144_20261108",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/homebrew_view/Makefile",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "homebrew_view_fixture_20261111",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/homebrew_view/main.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "homebrew_view_fixture_20261111",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/mp3_tone/generate.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "mp3-tone-fixture-20261024",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/mp3_tone/mp3_tone.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "mp3-tone-fixture-20261024",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/nakagawa_minimal_v4/Makefile",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-minimal",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/nakagawa_minimal_v4/main.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-minimal",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/nk_ui/core_synthetic.golden",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/nk_ui/library.golden",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/nk_ui/overlay.golden",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/nk_ui/title.golden",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/platform_ladder/README.md",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/platform_ladder/generate.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "platform-ladder-generator-20260827",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/production_smoke/README.md",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/production_smoke/generate.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "production-smoke-fixture-generator",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/profile_zero/Makefile",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "profile-zero-e2e",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/profile_zero/README.md",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "profile-zero-fixture-readme",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/profile_zero/main.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "profile-zero-e2e",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/profile_zero/prebuilt/SHA256SUMS",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "profile-zero-fixture-prebuilt",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/Makefile",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-psp-oracle",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/README.md",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/display_user_imports.S",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "oracle-user-mode-display-imports",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/font_files.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-font-files-umd-io",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/font_list.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-font-list",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/ge_corpus.json",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/hle_ctrl_imports.S",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-hle-measure-import-blocks",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/hle_ge_imports.S",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-hle-measure-import-blocks",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/hle_hprm_imports.S",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-hle-measure-import-blocks",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/hle_power_imports.S",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-hle-measure-import-blocks",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/hle_utility_imports.S",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-hle-measure-import-blocks",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/hle_vfpu_cells.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-issues-20261024-probe-fixtures",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/insn_trace_fixtures.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "insn-trace-differential-20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/insn_trace_tramp.S",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "insn-trace-differential-20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/io_cases_host.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-font-files-umd-io",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/libfont_imports.S",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-font-list",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/mem_edge.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "memory-edge-303",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/mutex_imports.S",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/probe.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-psp-oracle",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/probe_dmac_timing.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dma-timing-probe-20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/probe_exception_a1.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-hw-20260917-probe-fixtures",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/probe_exception_a2.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-hw-20260917-probe-fixtures",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/probe_exception_a3.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-hw-20260917-probe-fixtures",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/probe_ge_sample.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ge-sample-probe-20261028",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/probe_hle_issues.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-issues-20261024-probe-fixtures",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/probe_hle_measure.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-hle-measure-probe",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/probe_hle_self_stop_helper.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp_oracle_self_stop_helper_20261108",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/probe_insn_trace.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "insn-trace-differential-20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/probe_kernel_semantics.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "kernel-semantics-probe-20261031",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/probe_memory_edge.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "memory-edge-303",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/probe_module_start.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "module-start-probe-20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/psp_b1.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-hw-20260917-probe-fixtures",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/psp_b2.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-hw-20260917-probe-fixtures",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/psp_b3.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-hw-20260917-probe-fixtures",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/registry_walk.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-font-registry-walk",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/registry_walk_host.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-font-registry-walk",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/threadman_user_imports.S",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle/umd_io.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-font-files-umd-io",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle_captures/display_wait_late.20261008-run5.txt",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "oracle-console-capture-fixtures-20261008",
+        "evidence_tier": "H",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle_captures/ge_break_continue.20261008-manual-partial.txt",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "oracle-console-capture-fixtures-20261008",
+        "evidence_tier": "H",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle_captures/kernel_alarm.20261008-manual.txt",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "oracle-console-capture-fixtures-20261008",
+        "evidence_tier": "H",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle_captures/kernel_alarm.20261008-run3.txt",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "oracle-console-capture-fixtures-20261008",
+        "evidence_tier": "H",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle_captures/mutex_interrupt_context.20261008-run5.txt",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "oracle-console-capture-fixtures-20261008",
+        "evidence_tier": "H",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle_captures/refer_status_size.20261008-manual.txt",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "oracle-console-capture-fixtures-20261008",
+        "evidence_tier": "H",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle_captures/registry_readonly.20261008-manual-partial.txt",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "oracle-console-capture-fixtures-20261008",
+        "evidence_tier": "H",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle_captures/thread_scheduler.20261008-manual.txt",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "oracle-console-capture-fixtures-20261008",
+        "evidence_tier": "H",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_oracle_captures/transport_write.20261008-run3.txt",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "oracle-console-capture-fixtures-20261008",
+        "evidence_tier": "H",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_phaseb/Makefile",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-campaign-20260921",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_phaseb/mutex_imports.S",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_phaseb/phaseb.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-campaign-20260921",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_runner/Makefile",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-campaign-20260921",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_runner/runner.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-campaign-20260921",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_threading_oracle/Makefile",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-campaign-20260921",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_threading_oracle/README.md",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_threading_oracle/matrix.json",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_threading_oracle/thread_oracle.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-campaign-20260921",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_threading_oracle/thread_shim.S",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/psp_threading_oracle/thread_shim.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp-oracle-campaign-20260921",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/pspdev_phase5/Makefile",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-pspdev-phase5",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/pspdev_phase5/main.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-pspdev-phase5",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/showcase/Makefile",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "showcase-demos-309",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/showcase/breakout/main.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "showcase-demos-309",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/showcase/common/tone.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "showcase-demos-309",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/showcase/ge_scene/main.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "showcase-demos-309",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/showcase/showcase.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "showcase-tooling-309",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/snapshot/generate.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "snapshot-exec-1842",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/snapshot/selftest.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "snapshot-exec-1842",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/update_check/github_releases_20261028.json",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "tests/fixtures/user_data/README.md",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "user_data_schema_20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/user_data/input_profile_v1.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "user_data_schema_20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/user_data/input_profile_v2.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "user_data_schema_20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/user_data/settings_v1.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "user_data_schema_20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/user_data/v0.0.1/input_profile.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "user_data_schema_20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/user_data/v0.0.1/library.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "user_data_schema_20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/user_data/v0.0.1/settings.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "user_data_schema_20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/verify/generate.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "sampled-verify-1843",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/verify/selftest.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "sampled-verify-1843",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/vfpu_addressing/hardware_vfpu_addr_001.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "vfpu-addressing-evidence",
+        "evidence_tier": "H",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/vfpu_nan_payload/Makefile",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-vfpu-nan",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/vfpu_nan_payload/vfpu_nan_cases.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-vfpu-nan",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/vfpu_nan_payload/vfpu_nan_probe.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-vfpu-nan",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/vfpu_oracle/Makefile",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-vfpu-oracle",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/vfpu_oracle/vfpu_oracle_cases.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-vfpu-oracle",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/vfpu_oracle/vfpu_probe.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "c-gap-fixture-vfpu-oracle",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/fuzzers/test_nk_json_fuzzer.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -18212,6 +18201,17 @@
     },
     {
       "path": "tools/nk_doctor_core.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "doctor-and-host-preflight-20260909",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/nk_manager.ps1",
       "classification": "project_authored_attested",
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",

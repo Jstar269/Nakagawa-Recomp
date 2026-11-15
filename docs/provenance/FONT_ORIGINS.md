@@ -345,7 +345,7 @@ are written into `tools/test_ttf2pgf.py`.
 (tag commit `4b0192046158094654e865245832c66d2104219e`), from its TTF tarball
 <https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz>,
 SHA-256 `7191c669bf38899f73a2094ed00f7b800553364f90e2637010a69c0e268f25d0`.
-The eight files in `fixtures/fonts/liberation/` are byte-identical to the
+The eight files in `tests/fixtures/fonts/liberation/` are byte-identical to the
 tarball's members of the same name; each has its own pin:
 
 | Input | Size (bytes) | SHA-256 | Pin |
@@ -367,7 +367,7 @@ Reserved Font Names `Arimo`, `Tinos`, `Cousine` and `Liberation`; the PGFs are
 named `Nakagawa Open Latin`, and the converter refuses any output name that
 uses a recorded Reserved Font Name. The tarball's `LICENSE` has SHA-256
 `93fed46019c38bbe566b479d22148e2e8a1e85ada614accb0211c37b2c61c19b`; the local
-`fixtures/fonts/liberation/OFL.txt` (`a0c060f758d33ee59a674cd7b45914a560d0a5935968af5e87b0c6981fd89ddc`)
+`tests/fixtures/fonts/liberation/OFL.txt` (`a0c060f758d33ee59a674cd7b45914a560d0a5935968af5e87b0c6981fd89ddc`)
 removes trailing spaces on lines 29, 86 and 90 and one extra final newline,
 without changing any wording.
 
@@ -416,7 +416,7 @@ stand-in and requires a result within 2 % of the recorded number. The measured v
 the project UI font `assets/fonts/ui/noto-sans-jp/NotoSansJP-Regular.ttf`
 (section 8; 5,766,828 bytes, SHA-256
 `a66655d7b24ac6f793f73914c60ad44522b9fbd9e5f9b3706220b66c44fdaad2`), pinned for
-the converter by `fixtures/fonts/notosansjp/PIN.json`, which points at that
+the converter by `tests/fixtures/fonts/notosansjp/PIN.json`, which points at that
 file and its `OFL.txt` instead of carrying a second copy. Its Reserved Font
 Name `Source` is not used; the PGF is named `Nakagawa Open Japanese`. The
 built-in `--japanese-text` set is the first set (section 6.1) widened to all of

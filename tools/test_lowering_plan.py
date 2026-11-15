@@ -125,7 +125,7 @@ class DriftGuardTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            subprocess.run([sys.executable, str(ROOT / "fixtures" / "cosim" / "generate.py"),
+            subprocess.run([sys.executable, str(ROOT / "tests" / "fixtures" / "cosim" / "generate.py"),
                             "generate", "--out-dir", str(root / "fx")], check=True,
                            capture_output=True)
             codegen_llvm.lower = recording

@@ -21,7 +21,7 @@
 *.[iI][sS][oO]
 *.[pP][rR][xX]
 *.[pP][bB][pP]
-# Source-owned profile-zero fixture (#557): only fixtures/profile_zero/prebuilt/SHA256SUMS
+# Source-owned profile-zero fixture (#557): only tests/fixtures/profile_zero/prebuilt/SHA256SUMS
 # is committed. The PSPDEV build output itself is generated (by the profile-zero steps of
 # CI's public_export job or a local PSPDEV rebuild) and stays ignored by the *.prx / *.pbp rules above (#1100).
 *.[cC][sS][oO]
@@ -47,7 +47,7 @@
 /place_game_here/
 /.hst/
 /oracle/
-/fixtures/psp_oracle/build/
+/tests/fixtures/psp_oracle/build/
 /src/psp_companion/build/
 *.trace
 /tools/reference_hashes.json
@@ -153,7 +153,7 @@ venv/
 Thumbs.db
 Desktop.ini
 
-# Generated, machine-specific Clang compilation database (absolute paths; refreshed by nk_manager.ps1)
+# Generated, machine-specific Clang compilation database (absolute paths; refreshed by tools/nk_manager.ps1)
 /compile_commands.json
 
 # AI tool local/personal state. AGENTS.md is the only tracked agent authority;

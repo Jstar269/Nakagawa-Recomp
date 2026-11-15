@@ -89,7 +89,7 @@ For the HST title, the manager path is (it needs your own game inputs in
 `place_game_here/`):
 
 ```powershell
-.\nk_manager.ps1 -Action BuildFull -GameName hst `
+.\tools\nk_manager.ps1 -Action BuildFull -GameName hst `
   -TitleManifest assets/titles/hst-ucus98701.json
 ```
 
@@ -101,12 +101,12 @@ building half of each contract. `-VulkanSdk`, `-RuntimeOpt`, `-RecompOpt`, and
 `-FuncsPerChunk` remain operational overrides. An explicit override wins only where
 the contract permits it. The planner default is the single authority for the
 chunk-size default; the matching Make, manager, and codegen fallbacks must agree
-with it rather than define it. Without `-TitleManifest`, `nk_manager.ps1` selects
+with it rather than define it. Without `-TitleManifest`, `tools/nk_manager.ps1` selects
 `assets/titles/synthetic.json`.
 
 `assets/titles/pspdev-phase5.json` is one of four materially different
 source-owned fixtures (with `synthetic.json`, `synthetic-title2.json`, and `display-smoke.json`)
-(`fixtures/pspdev_phase5`, a standard PSPDEV/PSPSDK `BUILD_PRX=1` module).
+(`tests/fixtures/pspdev_phase5`, a standard PSPDEV/PSPSDK `BUILD_PRX=1` module).
 It proves the planner is genuinely multi-title: a different load base, no guest
 modules, and a different feature surface flow through the same manifest → plan →
 codegen path.
@@ -199,7 +199,7 @@ or for High placement. These are not supported.
 mingw32-make GAME_NAME=mygame GAME_ELF=place_game_here/EBOOT.elf GAME_BASE=0x08804000 GAME_ENTRY=0x08804000
 ```
 
-Use `nk_manager.ps1 -TitleManifest` with the title's validated manifest and
+Use `tools/nk_manager.ps1 -TitleManifest` with the title's validated manifest and
 explicit private bindings. The canonical manager supports generic title planning;
 this does not prove runtime portability or correctness for another title. Direct
 Make without a manifest remains an explicit non-canonical escape hatch: it bypasses
@@ -287,7 +287,7 @@ source guard in `tools/test_compat_manifest.py` rejects their HST addresses in g
 runtime and dispatch source.
 The inventory is *not* an executable proof of unsupported-interpreter fail-closed; that
 property is proven by the production interpreter floor (`src/rt/guest_interp.c`) through
-`fixtures/cosim/cosim_selftest.c` (fail-closed negative corpus, control sweep, jalr link
+`tests/fixtures/cosim/cosim_selftest.c` (fail-closed negative corpus, control sweep, jalr link
 shape, form census) and `tests/native/dispatch_isolation_selftest.c`. Retirement work was
 tracked by [issue #98](https://github.com/Jstar269/nakagawa-recomp/issues/98), now closed. (This
 previously cited #20, which is a merged pull request about `sceSasCore` routing and has
@@ -315,7 +315,7 @@ is bound to a local or assigned into a `CpuState` register first, so the extract
 direct-literal regex matched none of them. The gate now also recognizes those indirect
 shapes (`bound_local`, `cpu_state_register`); its grammar and its explicit limits are
 documented in `tools/test_compat_manifest.py` (static inventory — see executable
-fail-closed coverage in `fixtures/cosim/` and `tests/native/dispatch_isolation_selftest.c`).
+fail-closed coverage in `tests/fixtures/cosim/` and `tests/native/dispatch_isolation_selftest.c`).
 Historical diagnostic census (now retired):
 
 | Group | Bucket | Addresses | Sites |

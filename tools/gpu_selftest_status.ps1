@@ -4,7 +4,7 @@
 
 <#
 .SYNOPSIS
-    GPU selftest status parsing and gate-outcome mapping for nk_manager.ps1.
+    GPU selftest status parsing and gate-outcome mapping for tools/nk_manager.ps1.
 .DESCRIPTION
     `make gpu-selftest-status` runs each GPU selftest binary and prints one
     structured line per binary:

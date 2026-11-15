@@ -96,7 +96,7 @@ def _categorize(prereq: str, build_dir: str, game: str) -> str:
         return "other_header"
     if prereq.startswith("src/") and prereq.endswith(".c"):
         return "runtime_source"
-    if prereq.startswith("fixtures/") or prereq.startswith("assets/"):
+    if prereq.startswith("tests/fixtures/") or prereq.startswith("assets/"):
         return "data_or_fixture"
     if prereq.endswith("_profile-") or "-profile-" in prereq:
         return "profile_stamp"

@@ -173,13 +173,13 @@ class TestVerifySbomFailsClosed(ReleaseManifestFixture):
         self.assertEqual(verify_sbom.verify_release_locks.last_validated_py_lock, PY_LOCK.resolve())
 
     def test_malformed_python_lock_fails_verification(self):
-        manifest, _lock = self.write_manifest("fixtures/bad-requirements.txt", "not a requirement\n")
+        manifest, _lock = self.write_manifest("tests/fixtures/bad-requirements.txt", "not a requirement\n")
         errors = verify_sbom.verify_release_locks(manifest)
         self.assertTrue(any("exact name==version pin" in error for error in errors), str(errors))
         self.assertIsNone(verify_sbom.verify_release_locks.last_validated_py_lock)
 
     def test_missing_python_lock_fails_verification(self):
-        manifest, _lock = self.write_manifest("fixtures/absent-requirements.txt", None)
+        manifest, _lock = self.write_manifest("tests/fixtures/absent-requirements.txt", None)
         errors = verify_sbom.verify_release_locks(manifest)
         self.assertTrue(any("declared Python lockfile" in error for error in errors), str(errors))
 
@@ -192,7 +192,7 @@ class TestVerifySbomFailsClosed(ReleaseManifestFixture):
         self.assertTrue(any("must declare only Python" in error for error in errors), str(errors))
 
     def test_verify_sbom_matches_reports_python_parser_failure(self):
-        manifest, lock = self.write_manifest("fixtures/bad-requirements.txt", "not a requirement\n")
+        manifest, lock = self.write_manifest("tests/fixtures/bad-requirements.txt", "not a requirement\n")
         spdx = write(self.root, "sbom.json", json.dumps({"packages": []}))
         errors, _digests = verify_sbom.verify_sbom_matches(spdx, manifest, lock)
         self.assertTrue(any("exact name==version pin" in error for error in errors), str(errors))
@@ -211,7 +211,7 @@ class TestVerifySbomFailsClosed(ReleaseManifestFixture):
                             and "missing or under-represented" in error for error in errors), str(errors))
 
     def test_verify_main_fails_on_malformed_declared_lock(self):
-        manifest, _lock = self.write_manifest("fixtures/bad-requirements.txt", "not a requirement\n")
+        manifest, _lock = self.write_manifest("tests/fixtures/bad-requirements.txt", "not a requirement\n")
         self.assertEqual(verify_sbom.main(["--manifest", str(manifest)]), 1)
 
     def test_verify_main_succeeds_on_repository_lock(self):

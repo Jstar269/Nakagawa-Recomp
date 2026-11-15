@@ -545,7 +545,7 @@ def synthetic_ready_package(
     }
     write_json(package / "completion-manifest.json", completion)
     if data_root_present:
-        (runtime_root / "fixtures" / "display_smoke").mkdir(parents=True, exist_ok=True)
+        (runtime_root / "tests" / "fixtures" / "display_smoke").mkdir(parents=True, exist_ok=True)
 
 
 def synthetic_experimental_profile(
@@ -1232,7 +1232,7 @@ class NativePlayerUiTests(unittest.TestCase):
                         },
                         "modules": [],
                         "filesystem": {
-                            "data_root": "fixtures/profile_zero",
+                            "data_root": "tests/fixtures/profile_zero",
                             "memory_stick_root": "savedata",
                             "device_prefixes": ["disc0:", "ms0:"],
                         },
@@ -1438,7 +1438,7 @@ class NativePlayerUiTests(unittest.TestCase):
                 (package / "display-smoke-v1.exe").write_bytes(b"")
                 (package / "display-smoke-v1").write_bytes(b"")
                 (package / "display-smoke-v1_image.bin").write_bytes(b"")
-                (runtime_root / "fixtures" / "display_smoke").mkdir(parents=True, exist_ok=True)
+                (runtime_root / "tests" / "fixtures" / "display_smoke").mkdir(parents=True, exist_ok=True)
             args.append(f"--runtime-root={runtime_root}")
             dedicated = scratch / "dedicated-data-root"
             if dedicated_data_root:

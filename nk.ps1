@@ -10,7 +10,7 @@
     Runs one action, chosen with -Action (the first positional argument). Most actions run the
     workspace doctor (tools\nk_doctor.py) before and after the step they wrap, stop at the first
     failure and exit 1. The build, run and verify steps are carried out by the expert console,
-    nk_manager.ps1, which this script calls with the matching manager action.
+    tools\nk_manager.ps1, which this script calls with the matching manager action.
 
     Actions:
       Doctor   (default) Run the workspace doctor for -Scope and print its report.
@@ -21,7 +21,7 @@
       Verify   Doctor (repo), then the manager's Verify action.
       Clean    Run tools\nk_clean.py: it lists the build output it would remove and deletes
                nothing unless -Yes is given.
-      Manager  Open the interactive expert/developer console (nk_manager.ps1).
+      Manager  Open the interactive expert/developer console (tools\nk_manager.ps1).
 .PARAMETER Action
     Doctor, Build, Rebuild, Play, Verify, Clean or Manager. Defaults to Doctor.
 .PARAMETER Scope
@@ -68,7 +68,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = $PSScriptRoot
-$Manager = Join-Path $RepoRoot "nk_manager.ps1"
+$Manager = Join-Path $RepoRoot "tools\nk_manager.ps1"
 $Doctor = Join-Path $RepoRoot "tools\nk_doctor.py"
 $OriginalLocation = Get-Location
 

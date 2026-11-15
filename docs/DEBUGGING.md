@@ -2,7 +2,7 @@
 
 Maintained guide to the runtime's primary debug categories, commonly used environment variables,
 and supported diagnostic workflows. It is not an exhaustive inventory of every specialized
-`SR_*` switch: the implementing source and `nk_manager.ps1` are authoritative for diagnostic
+`SR_*` switch: the implementing source and `tools/nk_manager.ps1` are authoritative for diagnostic
 switches that are added for a focused investigation and have not yet been promoted into this guide.
 
 ## Quick Start
@@ -20,7 +20,7 @@ $env:SR_DEBUG = "0x03"
 .\build\hst\hst.exe --image build\hst\hst_image.bin 0 0 none none --gui
 ```
 
-Prefer the profiles in `nk_manager.ps1`, which clear stale diagnostics before launching. Most
+Prefer the profiles in `tools/nk_manager.ps1`, which clear stale diagnostics before launching. Most
 legacy Boolean `SR_*` switches are presence-based: assigning the string `"0"` can still enable
 them. Disable such a switch with `Remove-Item Env:NAME -ErrorAction SilentlyContinue` (or
 `$env:NAME = $null` in `pwsh`), not `NAME=0`. Numeric settings such as
@@ -244,7 +244,7 @@ Method. The workload is `production-smoke-gap` (public synthetic guest, `aot-gap
 rounds, 150 runs, no failures. The arms are `P0-off` and `P0-on` (default build), and `P1-off` and
 `P1-on` (`PERF_AOT_INSTRUCTIONS=1`). `N-off` is the recorder-absent build used in the flight
 recorder section below. Each run is timed two ways. The harness metric is the wall time of
-`fixtures/production_smoke/generate.py run`, which includes Python start-up and the fixture's
+`tests/fixtures/production_smoke/generate.py run`, which includes Python start-up and the fixture's
 checks. The direct metric is the same executable, with the same arguments and mode environment as
 that fixture passes, and no Python wrapper. A difference is reported as a percentage only when it
 exceeds the larger arm's interquartile range and a two-sided permutation test on the medians gives
@@ -273,7 +273,7 @@ What this does not show. The smoke guest executes 34 AOT and 7 interpreter instr
 inspected its counted guest region was about 5 to 6 ms, and the runtime's own `wall_ns` was 10 to 13 ms
 inside a 178 ms harness run. Its GE, Vulkan and texture counters are all zero. A null result here bounds
 the counter cost only for a workload this small. The platform-ladder fixtures delete every ambient `SR_*`
-variable (the "SR_* namespace rule" in `fixtures/platform_ladder/generate.py`), so their `SR_PERF=1` runs
+variable (the "SR_* namespace rule" in `tests/fixtures/platform_ladder/generate.py`), so their `SR_PERF=1` runs
 stay counter-off. Of 60 such runs, none printed `PERF enabled`. The benchmark runner
 (`tools/run_perf_benchmarks.py`) therefore times the three ladder workloads without expecting a summary,
 and records a `note` saying so, instead of failing them. `cosim-selftest` builds with `TRACE=1`, which measures a
@@ -729,7 +729,7 @@ Rebuild the package with the trap, play to the corruption, and read the first `N
 #    carried into the codegen and recompiler profile hashes, so this regenerates
 #    instead of reusing untrapped objects.
 $env:NAN_TRAP = "1"
-.\nk_manager.ps1 -Action BuildFull
+.\tools\nk_manager.ps1 -Action BuildFull
 
 # 2. Play by hand to the corrupted model, capturing stderr. From another shell:
 Get-Content -Wait logs\nan_trap.txt | Select-String '^NAN_TRAP '
@@ -739,7 +739,7 @@ $env:SR_NAN_TRAP_LIMIT = "200"
 
 # 4. Back to an ordinary build afterwards.
 Remove-Item Env:NAN_TRAP -ErrorAction SilentlyContinue
-.\nk_manager.ps1 -Action BuildFull
+.\tools\nk_manager.ps1 -Action BuildFull
 ```
 
 Driving the player directly works the same way — `NAN_TRAP` is an ordinary Make input:
@@ -819,12 +819,12 @@ To turn a recorded run into a replay:
 
 ```powershell
 $env:SR_INLOG = "1"
-.\nk_manager.ps1 -TitleManifest assets/titles/hst-ucus98701.json -GameName hst -Action Run -Profile Standard
+.\tools\nk_manager.ps1 -TitleManifest assets/titles/hst-ucus98701.json -GameName hst -Action Run -Profile Standard
 python tools/padscript_from_log.py logs/stderr_run.log `
   --minimum-width 8 --output logs/route.pad
 $env:SR_PADSCRIPT = (Resolve-Path logs/route.pad).Path
 $env:SR_NOINPUT = "1"
-.\nk_manager.ps1 -TitleManifest assets/titles/hst-ucus98701.json -GameName hst -Action Run -Profile Standard
+.\tools\nk_manager.ps1 -TitleManifest assets/titles/hst-ucus98701.json -GameName hst -Action Run -Profile Standard
 ```
 
 The converter expands shorter presses so a replay holds each press for as many
@@ -1041,7 +1041,7 @@ Authoring a checkpoint takes one learning run:
 
 ```powershell
 $env:SR_ROUTE_LEARN = "1"
-.\nk_manager.ps1 -TitleManifest assets/titles/hst-ucus98701.json -GameName hst -Action VisualOracle -Route logs/route_legacy.pad -ExitAtVblank 9500 `
+.\tools\nk_manager.ps1 -TitleManifest assets/titles/hst-ucus98701.json -GameName hst -Action VisualOracle -Route logs/route_legacy.pad -ExitAtVblank 9500 `
     -SnapEvery 60 -SnapWindows "7800-9200" -SaveBase logs/oracle_savebase -OracleName learn
 ```
 
@@ -1236,7 +1236,7 @@ unbounded `build/snapshots` PNG, so a long route spends hundreds of megabytes of
 nobody looks at.
 
 ```powershell
-.\nk_manager.ps1 -TitleManifest assets/titles/hst-ucus98701.json -GameName hst -Action VisualOracle -Route logs/route_X.pad `
+.\tools\nk_manager.ps1 -TitleManifest assets/titles/hst-ucus98701.json -GameName hst -Action VisualOracle -Route logs/route_X.pad `
     -ExitAtVblank 41400 -SnapEvery 60 -SnapAfter 39000 -OracleName deep_return_run1
 ```
 
@@ -1271,7 +1271,7 @@ because the first run's save cleared a first-time tutorial popup — the second 
 popup, took a different branch, and ended in a new match instead of at the club.
 
 ```powershell
-.\nk_manager.ps1 -TitleManifest assets/titles/hst-ucus98701.json -GameName hst -Action VisualOracle ... -SaveBase logs/oracle_savebase
+.\tools\nk_manager.ps1 -TitleManifest assets/titles/hst-ucus98701.json -GameName hst -Action VisualOracle ... -SaveBase logs/oracle_savebase
 ```
 
 First use captures the current save as the baseline; every later run restores it, so all runs
@@ -1314,7 +1314,7 @@ the **same run**. The club backdrop varies with host wall-clock time, so a captu
 earlier session is not a valid reference and a difference against it proves nothing.
 
 ```powershell
-.\nk_manager.ps1 -TitleManifest assets/titles/hst-ucus98701.json -GameName hst -Action VisualOracle -Route logs/route_E_deep_return_20260725.pad `
+.\tools\nk_manager.ps1 -TitleManifest assets/titles/hst-ucus98701.json -GameName hst -Action VisualOracle -Route logs/route_E_deep_return_20260725.pad `
     -ExitAtVblank 44000 -SnapEvery 60 -SnapWindows '8300-9200,35500-44000' `
     -OracleName deep_return_run1
 ```
@@ -2171,7 +2171,7 @@ silent match. A callee without a translated body runs on the interpreter floor t
 production dispatch, as it does in a title build.
 
 `mingw32-make --no-print-directory snapshot-selftest` (`make CC=gcc snapshot-selftest` on
-Linux) builds the runner against a synthetic module (`fixtures/snapshot/`), checks every case
+Linux) builds the runner against a synthetic module (`tests/fixtures/snapshot/`), checks every case
 and every refusal, and builds a second runner with one immediate changed in the generated C,
 which must report `MISMATCH r11`. On a title, build the runner the same way against that
 title's generated code. Snapshots contain guest memory: they stay private like traces and
@@ -2217,7 +2217,7 @@ reference's syscall at the stub; the import NID is not tied to the stub. Capture
 memory and stay private, like reports from a title run.
 
 `mingw32-make --no-print-directory verify-selftest` (`make CC=gcc verify-selftest` on Linux)
-runs this on a synthetic module (`fixtures/verify/`): the samplers check exactly the expected
+runs this on a synthetic module (`tests/fixtures/verify/`): the samplers check exactly the expected
 call numbers, every comparable case reports a match, the skip classes are counted, a generated-C
 mutant is reported as a `MISMATCH` with a capture the snapshot runner replays to the same
 verdict, and the default `recomp.c` carries no verify hook.

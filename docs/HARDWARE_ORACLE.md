@@ -7,14 +7,14 @@ same sense as
 [DECOMPME_INTEGRATION.md](DECOMPME_INTEGRATION.md), not a record of completed work.
 
 > **A narrower subset of this plan is now implemented.**
-> The [source-owned scalar-probe runbook](../fixtures/psp_oracle/README.md), its
+> The [source-owned scalar-probe runbook](../tests/fixtures/psp_oracle/README.md), its
 > [strict result protocol](../tools/psp_oracle/protocol.py), and the shipped
 > [`tools/psp_readiness.py`](../tools/psp_readiness.py) cover the implemented subset. Read those
 > first. In particular, the `tools/hw_doctor.py` proposed in §7 is superseded by the readiness tool
 > — extend that tool rather than adding a second precondition checker.
 > The PSP-side v2 instruction-trace producer now exists for source-owned microprograms: the
-> `insn-trace` probe (`PSP-TRACE-001`, `fixtures/psp_oracle/probe_insn_trace.c`) single-steps the
-> fixtures of `fixtures/psp_oracle/insn_trace_fixtures.h` on the PSP, and
+> `insn-trace` probe (`PSP-TRACE-001`, `tests/fixtures/psp_oracle/probe_insn_trace.c`) single-steps the
+> fixtures of `tests/fixtures/psp_oracle/insn_trace_fixtures.h` on the PSP, and
 > `tools/psp_oracle/insn_trace.py` writes the `PSP_HARDWARE` and `LOCAL_COSIM` traces that
 > `verify_gates.py` and `tracediff.py --strict-hardware` compare (#312). The resident producer
 > for arbitrary code described below remains a proposal.
@@ -22,7 +22,7 @@ same sense as
 ## GE raster pixel corpus (#343)
 
 `assets/ge_corpus.schema.json` defines version 2 of the source-owned GE corpus,
-`fixtures/psp_oracle/ge_corpus.json`. It has two parts.
+`tests/fixtures/psp_oracle/ge_corpus.json`. It has two parts.
 
 `probe_runs` holds the measured results of the three #343 probes in `probe_ge_sample.c`, one
 acceptance-eligible PSP-3000 run each (see the measured index below): `ge-raster`
@@ -139,7 +139,7 @@ proposals. Each claim covers only the exact fixture named:
   case `vfpu-wide-dot-matrix`, which returned 0x7f800001 and +0 for them.
 - **Out-of-domain transcendental arguments** (issue #69): `HARDWARE_MEASURED`
   for these 14 exact raw words on the authorized PSP-3000-series / 6.61 /
-  ARK-5.1.0 route (2026-09-30). Fixture: `fixtures/vfpu_oracle/vfpu_probe.c`
+  ARK-5.1.0 route (2026-09-30). Fixture: `tests/fixtures/vfpu_oracle/vfpu_probe.c`
   (`FIXTURE_BUILD_ID nakagawa-vfpu-oracle-v1`), whose source-owned
   `VASIN_DOMAIN_INPUTS` list fed the console; each word produced one record,
   `vfpu-vasin-domain-arg00` through `vfpu-vasin-domain-arg13`, in the table's
@@ -148,7 +148,7 @@ proposals. Each claim covers only the exact fixture named:
   byte-identical records, and the raw captures and the PRX digest stay
   private. `FIXTURE_BUILD_ID` names the source fixture, not the built PRX: this
   probe's `NAKAGAWA_PSP_META` record still carries the all-zero binary and
-  commit placeholders (unlike `fixtures/psp_oracle/probe.c`, which refuses to
+  commit placeholders (unlike `tests/fixtures/psp_oracle/probe.c`, which refuses to
   build without a commit), so this is a documented-run measurement of these
   exact words, not a device-bound capture, and the PSP oracle runner would
   classify it `IDENTITY_NOT_BOUND` / not acceptance-eligible. The project's shared runtime `vasin` helper (`sr_vfpu_asin`)
@@ -189,7 +189,7 @@ proposals. Each claim covers only the exact fixture named:
 - **CPU exception entry** (runs PSP-A1-01, PSP-A2-01, PSP-A3-01; campaign
   `psp-hw-20260917`, 2026-09-17, PSP-3000 / 6.61 / ARK-5.1.0, user-mode PRX
   probes loaded through PSPLink; fixtures `exception-a1`..`exception-a3` in
-  [`fixtures/psp_oracle/`](../fixtures/psp_oracle/README.md)):
+  [`tests/fixtures/psp_oracle/`](../tests/fixtures/psp_oracle/README.md)):
   - A user-mode `break` reports EPC = the `break` address (not +4) and Cause
     `0x10000024` (ExcCode 9, BD 0). The frame's Status is `0x00088613` (EXL 1,
     user mode, IE 1, IM `0x86`), and the loaded argument and temporary
@@ -667,7 +667,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, teardown check
   `PASS`, every record `PASS`. Device identity is `PARTIAL` (an operator-recorded model label,
   no serial or MAC) and the PRX digest is the host-side `PLACEHOLDER` binding described under
-  "Device build identity" in the [fixture runbook](../fixtures/psp_oracle/README.md). Raw
+  "Device build identity" in the [fixture runbook](../tests/fixtures/psp_oracle/README.md). Raw
   envelopes stay in the private campaign directory. The records hold only probe-defined words,
   so those words are published here. Each row cites exactly the cells it names.
 
@@ -788,7 +788,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 - **PSP-3000 single-case run of `hle-io-trunc` (2026-11-02 UTC)**: at 21:40 UTC on boot 107, game context
   (standalone PSPLink: 19 threads, 52 modules), after the `transport-write` preflight (PSP-TRANSPORT-001 is not
   re-cited). Firmware recorded as 6.6.1 (system software 6.61; custom firmware ARK-5 5.1.0 at that time,
-  operator-declared). Case 105, `fixtures/psp_oracle/probe_hle_measure.c`, built from `08934592f`, a local
+  operator-declared). Case 105, `tests/fixtures/psp_oracle/probe_hle_measure.c`, built from `08934592f`, a local
   commit that is not in public history (not an ancestor of this tree). The case's own source is identical to
   this tree's: at both commits the SHA-256 of its section of `probe_hle_measure.c` (from
   `#if PSP_ORACLE_CASE == HLE_CASE_IO_TRUNC` to its `#endif`, 295 lines) is
@@ -925,7 +925,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 - **PSP-3000 single-case run of the `kernel-semantics` probe on commit `0c3cf0da` (2026-10-31)**: firmware 6.6.1
   (ARK-5.1.0), PSPLink 3.2.1 through Nakagawa Link, operator-declared model PSP-3000, boot 84 (standalone PSPLink,
   game context). `0c3cf0da` is the commit the PRX was built from (case 126 at that commit, now 127,
-  `fixtures/psp_oracle/probe_kernel_semantics.c`). The case was one runner invocation after the `transport-write`
+  `tests/fixtures/psp_oracle/probe_kernel_semantics.c`). The case was one runner invocation after the `transport-write`
   preflight, which passed (PSP-TRANSPORT-001 is not re-cited). The case envelope is acceptance-eligible with 0
   blockers: evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, a strict
   golden sequence of 29 records and the done record, all PASS. The probe wrote only inside `ms0:/NKKSEM00`, which
@@ -961,7 +961,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 - **PSP-3000 single-case run of the `io-seek-eof` probe on commit `f484ef58` (2026-11-02)**: system software 6.61,
   ARK-5.1.0 (owner); PSPLink `pspver` 6.6.1, PSPLink 3.2.1 through Nakagawa Link, operator-declared model
   PSP-3000, boot 100. `f484ef58` is the commit that adds the case (case 136, the `KS_CASE_IO_EOF` section of
-  `fixtures/psp_oracle/probe_kernel_semantics.c`). The case was one runner invocation after the `transport-write`
+  `tests/fixtures/psp_oracle/probe_kernel_semantics.c`). The case was one runner invocation after the `transport-write`
   preflight, which passed (PSP-TRANSPORT-001 is not re-cited). The case envelope is acceptance-eligible with 0
   blockers: evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, a strict
   golden sequence of 9 records and the done record, all PASS. The probe wrote only inside `ms0:/NKKSEM01`, which
@@ -992,8 +992,8 @@ One console is one data point; see §11. Nothing here closes issue #70
   (2026-11-04)**: system software 6.61, ARK-5.1.0 (owner); PSPLink `pspver` 6.6.0 through Nakagawa Link, in the
   XMB context, operator-declared model PSP-3000, a game disc in the drive. `hle-utility-none` ran on boot 115 and
   `io-umd-eof` on boot 116, one launch per boot, each boot a cold reset to the XMB. `999f3ce3` carries both cases
-  (case 137, the `KS_CASE_IO_UMD_EOF` section of `fixtures/psp_oracle/probe_kernel_semantics.c`, and case 140,
-  the `HLE_CASE_UTILITY_NONE` section of `fixtures/psp_oracle/probe_hle_measure.c`). Each case was one runner
+  (case 137, the `KS_CASE_IO_UMD_EOF` section of `tests/fixtures/psp_oracle/probe_kernel_semantics.c`, and case 140,
+  the `HLE_CASE_UTILITY_NONE` section of `tests/fixtures/psp_oracle/probe_hle_measure.c`). Each case was one runner
   invocation after the `transport-write` preflight, which passed (PSP-TRANSPORT-001 is not re-cited). Both case
   envelopes are acceptance-eligible with 0 blockers: evidence class `PSP_HARDWARE`, source commit binding
   `MATCH` on a clean committed tree, and a strict golden sequence, all PASS (`io-umd-eof`: 15 records and the
@@ -1036,7 +1036,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 
 - **PSP-3000 single-case run of the `module-start` probe on commit `fd2a75fd` (2026-10-29)**: firmware 6.6.1,
   PSPLink 3.2.1, operator-declared model PSP-3000. `fd2a75fd` is the commit that adds the probe (case 124,
-  `fixtures/psp_oracle/probe_module_start.c`). The case was one runner invocation after the `transport-write`
+  `tests/fixtures/psp_oracle/probe_module_start.c`). The case was one runner invocation after the `transport-write`
   preflight, which passed (PSP-TRANSPORT-001 is not re-cited). The case envelope is acceptance-eligible with 0
   blockers: evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, a strict
   golden sequence of 8 records and the done record, all PASS. The row cites only the records named in it. The raw
@@ -1058,7 +1058,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 
 - **PSP-3000 single-case run of the `vfpu-forms2` probe on commit `97827132` (2026-10-29)**: firmware 6.6.1,
   PSPLink 3.2.1, operator-declared model PSP-3000. `97827132` is the commit that adds the probe (case 121 in
-  `fixtures/psp_oracle/probe_hle_issues.c`). The case was one runner invocation after the `transport-write`
+  `tests/fixtures/psp_oracle/probe_hle_issues.c`). The case was one runner invocation after the `transport-write`
   preflight, which passed (PSP-TRANSPORT-001 is not re-cited). The case envelope is acceptance-eligible with 0
   blockers: evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, a strict
   golden sequence of 636 records and the done record, all PASS. Both passes in the launch returned the same words.
@@ -1086,7 +1086,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 
 - **PSP-3000 single-case run of the `vfpu-sort` probe on commit `9171f055` (2026-10-29)**: firmware 6.6.1,
   PSPLink 3.2.1, operator-declared model PSP-3000. `9171f055` is the commit that adds the probe (case 125 in
-  `fixtures/psp_oracle/probe_hle_issues.c`; built as case 120 at the measured commit, renumbered because
+  `tests/fixtures/psp_oracle/probe_hle_issues.c`; built as case 120 at the measured commit, renumbered because
   `intr-cause` took 120). The case was one runner invocation after the `transport-write`
   preflight, which passed (PSP-TRANSPORT-001 is not re-cited). The case envelope is acceptance-eligible with 0
   blockers: evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, a strict
@@ -1112,7 +1112,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 
 - **PSP-3000 single-case run of the `vfpu-funnel` probe on commit `8d0f75ad` (2026-10-29)**: firmware 6.6.1,
   PSPLink 3.2.1, operator-declared model PSP-3000. `8d0f75ad` is the commit that adds the probe (case 122 in
-  `fixtures/psp_oracle/probe_hle_issues.c`; built as case 118 at the measured commit, renumbered because
+  `tests/fixtures/psp_oracle/probe_hle_issues.c`; built as case 118 at the measured commit, renumbered because
   `dma-timing` took 118). The case was one runner invocation after the `transport-write`
   preflight, which passed (PSP-TRANSPORT-001 is not re-cited). The case envelope is acceptance-eligible with 0
   blockers: evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, a strict
@@ -1143,7 +1143,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 
 - **PSP-3000 single-case run of the `vfpu-forms` probe on commit `781ccd34` (2026-10-28)**: firmware 6.6.1,
   PSPLink 3.2.1, operator-declared model PSP-3000. `781ccd34` is the commit that adds the probe (case 108 in
-  `fixtures/psp_oracle/probe_hle_issues.c`). The case was one runner invocation after the `transport-write`
+  `tests/fixtures/psp_oracle/probe_hle_issues.c`). The case was one runner invocation after the `transport-write`
   preflight, which passed (PSP-TRANSPORT-001 is not re-cited). The case envelope is acceptance-eligible with 0
   blockers: evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, a strict
   golden sequence of 950 records and the done record, all PASS. Both passes in the launch returned the same words.
@@ -1197,7 +1197,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 
 - **PSP-3000 single-case run of the `ge-sample` probe on commit `86e55611` (2026-10-28)**: firmware 6.6.1,
   PSPLink 3.2.1, operator-declared model PSP-3000. `86e55611` is the commit that adds the probe (case 109 in
-  `fixtures/psp_oracle/probe_ge_sample.c`). The case was one runner invocation after the `transport-write`
+  `tests/fixtures/psp_oracle/probe_ge_sample.c`). The case was one runner invocation after the `transport-write`
   preflight, which passed (PSP-TRANSPORT-001 is not re-cited). The case envelope is acceptance-eligible with 0
   blockers: evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, a strict
   golden sequence of 816 records and the done record (out0 816), all PASS; every one of the 48 draws reached GE
@@ -1237,7 +1237,7 @@ One console is one data point; see §11. Nothing here closes issue #70
     exact. This rule reproduces every pixel of all 48 draws.
 
 - **PSP-3000 single-case runs of the `dma-timing` probe (2026-10-29)**: firmware 6.6.1, PSPLink 3.2.1,
-  operator-declared model PSP-3000, case 118 in `fixtures/psp_oracle/probe_dmac_timing.c`. Three launches, each
+  operator-declared model PSP-3000, case 118 in `tests/fixtures/psp_oracle/probe_dmac_timing.c`. Three launches, each
   on its own boot after a PSPLink soft reset and each after the `transport-write` preflight (PSP-TRANSPORT-001 is
   not re-cited): `0e40e7d3` (boot 61, 151 records), `281a21a4` (boot 62, 186 records) and `1310e632` (boot 63,
   202 records). Every envelope is acceptance-eligible with 0 blockers: evidence class `PSP_HARDWARE`, source
@@ -1277,7 +1277,7 @@ One console is one data point; see §11. Nothing here closes issue #70
     (within -142 to +31 us of its return; 0x10000 to 0x100000 bytes).
 
 - **PSP-3000 single-case runs of the `ge-raster` probe (2026-10-29)**: firmware 6.6.1, PSPLink 3.2.1,
-  operator-declared model PSP-3000, case 123 in `fixtures/psp_oracle/probe_ge_sample.c` (built as case 118 at the measured commits; renumbered because other probes took 118 and 120), each launch after the
+  operator-declared model PSP-3000, case 123 in `tests/fixtures/psp_oracle/probe_ge_sample.c` (built as case 118 at the measured commits; renumbered because other probes took 118 and 120), each launch after the
   `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). The cited run is boot 71 on commit `990748ec`:
   acceptance-eligible with 0 blockers, evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean
   committed tree, a strict golden sequence of 945 records and the done record (out0 945), all PASS; every one of
@@ -1347,8 +1347,8 @@ One console is one data point; see §11. Nothing here closes issue #70
   system software 6.61, ARK-5.1.0 (owner); `pspver` 6.6.0. PSPLink 3.2.1, operator-declared model PSP-3000,
   boot 86. PSPLink `pspver` read 6.6.0 (`0x06060010`) at the cited launch, and that is the firmware declared to
   the runner; it read 6.6.1 (`0x06060110`) at an earlier launch on the same boot. The device's own
-  `sceKernelDevkitVersion` answer changed between them, and the runner records what `pspver` prints. One launch of case 126 in `fixtures/psp_oracle/probe_ge_sample.c` (`ge-mip`) and case 78 in
-  `fixtures/psp_oracle/probe.c` (`ge-sync-ids`) after the `transport-write` preflight (PSP-TRANSPORT-001 is not
+  `sceKernelDevkitVersion` answer changed between them, and the runner records what `pspver` prints. One launch of case 126 in `tests/fixtures/psp_oracle/probe_ge_sample.c` (`ge-mip`) and case 78 in
+  `tests/fixtures/psp_oracle/probe.c` (`ge-sync-ids`) after the `transport-write` preflight (PSP-TRANSPORT-001 is not
   re-cited). Both envelopes are acceptance-eligible with 0 blockers: evidence class `PSP_HARDWARE`, source
   commit binding `MATCH` on a clean committed tree, strict golden sequences of 285 `ge-mip` records and 17
   `ge-sync-ids` cells, each with its done record, all PASS; every `ge-mip` list reached GE idle. The earlier
@@ -1395,7 +1395,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 - **PSP-3000 single-case run of the `ge-overlap` probe on commit `fd9a23b5` (2026-11-06)**: system
   software 6.61, ARK-5.1.0 (owner); `pspver` 6.6.1 (`0x06060110`), the firmware declared to the runner. PSPLink
   3.2.1, operator-declared model PSP-3000, boot 130, game context (standalone PSPLink after one soft reset from
-  the XMB). One launch of case 153 in `fixtures/psp_oracle/probe_ge_sample.c` (`ge-overlap`) after the
+  the XMB). One launch of case 153 in `tests/fixtures/psp_oracle/probe_ge_sample.c` (`ge-overlap`) after the
   `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). Both envelopes are acceptance-eligible with 0
   blockers: evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, a strict
   golden sequence of 150 records and the done record (out0 150), all PASS; every one of the 30 lists reached GE
@@ -1427,7 +1427,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 - **PSP-3000 single-case runs of the `ge-light` and `ge-clut-mip` probes (2026-11-06)**: system software
   6.61, ARK-5.1.0 (owner); `pspver` 6.6.0, the firmware declared to the runner. PSPLink 3.2.1, operator-declared
   model PSP-3000, XMB context. `ge-light` (case 139) of `b55f6cd3` on boot 133 and `ge-clut-mip` (case 154) of
-  `2795f150` on boot 134, each in `fixtures/psp_oracle/probe_ge_sample.c` and each after the `transport-write`
+  `2795f150` on boot 134, each in `tests/fixtures/psp_oracle/probe_ge_sample.c` and each after the `transport-write`
   preflight (PSP-TRANSPORT-001 is not re-cited). All four envelopes are acceptance-eligible with 0 blockers:
   evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, a strict golden
   sequence (`ge-light` 700 records and the done record, `ge-clut-mip` 94 and the done record), all PASS; every
@@ -1473,7 +1473,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   in the XMB context on this boot, which the runner records as 6.6.0; custom firmware ARK-5 with cIPL, version 5.2.0
   (operator-declared, updated from 5.1.0 on 2026-11-10, not read by a tool); PSPLink v3.2.1 built from
   `pspdev/psplinkusb` `7a0035d9` on the host and the console. `hle-io-seek-edges` (case 186,
-  `fixtures/psp_oracle/probe_hle_measure.c`) at `1a5157e37`, 23 records and the done record. The envelope is
+  `tests/fixtures/psp_oracle/probe_hle_measure.c`) at `1a5157e37`, 23 records and the done record. The envelope is
   acceptance-eligible with 0 blockers (evidence class `PSP_HARDWARE`), every record is PASS, the stream ends
   COMPLETE PASS, and the PSP stayed qualified on boot 192 afterwards. The probe created its own `ms0:/NKIOSK02`
   and removed it (the check after removal opened nothing, `0x80010002`). The raw envelope and host0 log stay in
@@ -1508,7 +1508,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   2026-11-10); PSPLink `pspver` printed `0x06060110` ("6.6.1") in the game context on this boot, which the runner
   records as 6.6.1; custom firmware ARK-5 with cIPL, version 5.2.0 (operator-declared, not read by a tool); PSPLink
   v3.2.1 built from `pspdev/psplinkusb` `7a0035d9`. `sas-mix` (case 155, `run_sas_mix` in
-  `fixtures/psp_oracle/probe.c`) at `3872796c`, 204 cells and the done record (out0 `0xcc`). The envelope is
+  `tests/fixtures/psp_oracle/probe.c`) at `3872796c`, 204 cells and the done record (out0 `0xcc`). The envelope is
   acceptance-eligible with 0 blockers (evidence class `PSP_HARDWARE`, source commit binding on a clean committed
   tree), every record is PASS, and the stream ends COMPLETE PASS. After the done record the case unloaded SASCORE,
   then AVCODEC (the first run of that unload), and the teardown found the module set the launch started from; the
@@ -1528,7 +1528,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   system software 6.61 (operator-declared); PSPLink `pspver` printed `0x06060110` ("6.6.1") in the game context on
   this boot (`0x06060010` in the XMB context before and after), which the runner records as 6.6.1; custom firmware
   ARK-5 with cIPL, version 5.2.0 (operator-declared, not read by a tool); PSPLink v3.2.1 built from
-  `pspdev/psplinkusb` `7a0035d9`. `sas-adsr` (case 152, `fixtures/psp_oracle/probe.c`) at `06a6c942c`, 696 records
+  `pspdev/psplinkusb` `7a0035d9`. `sas-adsr` (case 152, `tests/fixtures/psp_oracle/probe.c`) at `06a6c942c`, 696 records
   and the done record (out0 `0x2b7`). The envelope is acceptance-eligible with 0 blockers (evidence class
   `PSP_HARDWARE`, source commit binding on a clean committed tree), every record is PASS, and the stream ends COMPLETE
   PASS. After the done record the case unloaded SASCORE, then AVCODEC, and the teardown found the module set the
@@ -1540,7 +1540,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   | --- | --- | --- | --- |
   | `PSP-SAS-002` | `sas-adsr-*` (boot 208) | other envelope settings, grains and voices; the XMB context; unloading SASCORE while a SAS core is initialised as a separate claim | MEASURED: 696 records and the done record, all PASS |
 
-  The values are listed in the `sas-adsr` row of `fixtures/psp_oracle/README.md` and under
+  The values are listed in the `sas-adsr` row of `tests/fixtures/psp_oracle/README.md` and under
   [PSP-SAS-002 capture 2026-11-10](#psp-sas-002-capture-2026-11-10).
 
 - **PSP-3000 single-case run of `hle-std-handles` in the game context (2026-11-12 UTC)**: one PSP-3000, game
@@ -1549,7 +1549,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   Firmware identity as for the `sas-mix` run above: system software 6.61 (operator-declared); PSPLink `pspver`
   printed `0x06060110` ("6.6.1") in the game context on this boot; custom firmware ARK-5 with cIPL, version 5.2.0
   (operator-declared, not read by a tool); PSPLink v3.2.1 built from `pspdev/psplinkusb` `7a0035d9`.
-  `hle-std-handles` (case 156, `fixtures/psp_oracle/probe_hle_measure.c`) at `3872796c`: 4 records and the done
+  `hle-std-handles` (case 156, `tests/fixtures/psp_oracle/probe_hle_measure.c`) at `3872796c`: 4 records and the done
   record (out0 4), all PASS, COMPLETE PASS, acceptance-eligible with 0 blockers (evidence class `PSP_HARDWARE`,
   source commit binding on a clean committed tree). The raw envelope and host0 log stay in the private campaign
   directory.
@@ -1622,7 +1622,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   is not re-cited). Firmware identity: console PSP-3000; system software 6.61 (`flash0:/vsh/etc/version.txt`:
   `release:6.61:`, `system:58401@release_661,0x06060110:`); PSPLink `pspver` printed `0x06060010` ("6.6.0") in
   the XMB context on these boots, which the runner records as 6.6.0; custom firmware ARK-5 with cIPL, version
-  5.1.0 (the version was not read by a tool). All three are in `fixtures/psp_oracle/probe_hle_issues.c`:
+  5.1.0 (the version was not read by a tool). All three are in `tests/fixtures/psp_oracle/probe_hle_issues.c`:
   `vfpu-prefix-state` (case 182) on boot 175 at `48cea955`, 199 records; `vfpu-wider-ops` (case 183) on boot 176
   at `9426722a`, 223 records; `vfpu-constants` (case 175) on boot 178 at `9426722a`, 9 records. Each launch
   commit is an ancestor of this tree, and its case section, case number and test id in `probe_hle_issues.c` and
@@ -1722,7 +1722,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   PSP-3000; system software 6.61 (`flash0:/vsh/etc/version.txt`: `release:6.61:`,
   `system:58401@release_661,0x06060110:`); PSPLink `pspver` printed `0x06060010` ("6.6.0") in the XMB context on
   this boot, which the runner records as 6.6.0; custom firmware ARK-5 with cIPL, version 5.1.0 (operator-declared,
-  not read by a tool). `ge-through-z` (case 185, `fixtures/psp_oracle/probe_ge_sample.c`) on boot 180 at
+  not read by a tool). `ge-through-z` (case 185, `tests/fixtures/psp_oracle/probe_ge_sample.c`) on boot 180 at
   `e4e6a3a2`, 23 records. The launch commit is an ancestor of this tree, and its case section, case number and
   test id in `probe_ge_sample.c` and its Makefile CASE lines are identical to this tree's. The envelope is
   acceptance-eligible with 0 blockers (evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean
@@ -1752,7 +1752,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   context, one launch per boot (boots 214 and 215), an unattended run with nobody at the console. Firmware identity:
   console PSP-3000; system software 6.61 (operator-declared); custom firmware ARK-5 with cIPL, version 5.2.0
   (operator-declared, not read by a tool); PSPLink built from `pspdev/psplinkusb` `7a0035d9`. Both cases (cases 187
-  and 188, `fixtures/psp_oracle/probe_ge_sample.c`) were built from `05aafe975`, the head of the pull request that
+  and 188, `tests/fixtures/psp_oracle/probe_ge_sample.c`) were built from `05aafe975`, the head of the pull request that
   added them; it is not an ancestor of this tree, and its `probe_ge_sample.c` and its Makefile CASE lines for these
   cases are identical to this tree's. Each envelope is acceptance-eligible with 0 blockers (evidence class
   `PSP_HARDWARE`, source commit binding on a clean committed tree), every record is PASS, each stream ends COMPLETE
@@ -1784,7 +1784,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   (`flash0:/vsh/etc/version.txt`: `release:6.61:`, `system:58401@release_661,0x06060110:`); PSPLink `pspver`
   printed `0x06060010` ("6.6.0") in the XMB context on this boot, which the runner records as 6.6.0; custom
   firmware ARK-5 with cIPL, version 5.1.0 (operator-declared, not read by a tool). `vfpu-reserved-widths` (case
-  184, `fixtures/psp_oracle/probe_hle_issues.c`) on boot 182 at `c6abab53`, 9 records; an earlier attempt on boot
+  184, `tests/fixtures/psp_oracle/probe_hle_issues.c`) on boot 182 at `c6abab53`, 9 records; an earlier attempt on boot
   181 was refused by the PC-side controller before any module started, and nothing ran. The launch commit is an
   ancestor of this tree, and its case section, case number and test id in `probe_hle_issues.c` and its Makefile
   CASE lines are identical to this tree's. The envelope is acceptance-eligible with 0 blockers (evidence class
@@ -1810,8 +1810,8 @@ One console is one data point; see §11. Nothing here closes issue #70
 - **PSP-3000 single-case run of `hle-self-stop-unload` (2026-11-08)**: system software 6.6.0 as reported by
   `pspver`, operator-declared model PSP-3000, XMB context, one launch on its own boot (boot 165) at `935f225d`,
   harness verdict ok, 6 records, all PASS, no exception, no hang. Case 167 is in
-  `fixtures/psp_oracle/probe_hle_measure.c` and loads the helper PRX of case 172
-  (`fixtures/psp_oracle/probe_hle_self_stop_helper.c`; the helper was case 168 when this run was made). The raw
+  `tests/fixtures/psp_oracle/probe_hle_measure.c` and loads the helper PRX of case 172
+  (`tests/fixtures/psp_oracle/probe_hle_self_stop_helper.c`; the helper was case 168 when this run was made). The raw
   envelope and host0 log stay in the private campaign directory.
 
   | Evidence id | Cells cited | Not cited | Outcome (2026-11-08) |
@@ -1831,7 +1831,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 
 - **PSP-3000 single-case runs of `vfpu-basic-arith` and `vfpu-vus2i` (2026-11-08)**: system software 6.6.0 as
   reported by `pspver`, operator-declared model PSP-3000, XMB context, one launch per case on its own boot, harness
-  verdict ok, all PASS, no exception, no hang, both in `fixtures/psp_oracle/probe_hle_issues.c`. `vfpu-basic-arith`
+  verdict ok, all PASS, no exception, no hang, both in `tests/fixtures/psp_oracle/probe_hle_issues.c`. `vfpu-basic-arith`
   (case 168) on boot 166 at `187681f0`, 359 records; `vfpu-vus2i` (case 171) on boot 164 at `3cf15b8c`, 120 records.
   The raw envelopes, host0 logs and decoded tables stay in the private campaign directory.
 
@@ -1873,7 +1873,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   launch per case on its own boot after a mailbox reset, each after the `transport-write` preflight
   (PSP-TRANSPORT-001 is not re-cited), harness verdict ok, all PASS, acceptance-eligible with 0 blockers, no
   exception, no hang; passes 0 and 1 agree in every case. All three are in
-  `fixtures/psp_oracle/probe_hle_issues.c`: `vfpu-mfv-mtv` (case 174) on boot 167 at `1301371e`, 5 records;
+  `tests/fixtures/psp_oracle/probe_hle_issues.c`: `vfpu-mfv-mtv` (case 174) on boot 167 at `1301371e`, 5 records;
   `vfpu-wide-dot-matrix` (case 173) on boot 168 at `b2271c93`, 367 records; `vfpu-round-sep` (case 176) on
   boot 169 at `f50333e8`, 15 records. Each launch commit is a pre-publication commit of the same case; its case
   section, case number and test id in `probe_hle_issues.c` and its Makefile CASE lines are identical to this
@@ -1939,8 +1939,8 @@ One console is one data point; see §11. Nothing here closes issue #70
   30 records), `vfpu-unmodeled` (case 163, boot 157, `d1d8558a`, 115 records), `hle-nickname-limit` (case 164, boot 155,
   `07e58170`, 16 records), `vfpu-quad-wb` (case 165, boot 159, `ecc203af`, 19 records), `vfpu-convert` (case 170,
   boot 160, `266552d0`, 229 records) and `vfpu-cc-cmov` (case 169: boot 159, `750c5fb1`, 217 records, and the
-  vcmp re-run on boot 161, `831d54f0`, 153 records). The cases are in `fixtures/psp_oracle/probe_hle_measure.c`
-  (162, 164) and `fixtures/psp_oracle/probe_hle_issues.c` (the rest). The raw envelopes, host0 logs and decoded
+  vcmp re-run on boot 161, `831d54f0`, 153 records). The cases are in `tests/fixtures/psp_oracle/probe_hle_measure.c`
+  (162, 164) and `tests/fixtures/psp_oracle/probe_hle_issues.c` (the rest). The raw envelopes, host0 logs and decoded
   tables stay in the private campaign directory.
 
   | Evidence id | Cells cited | Not cited | Outcome (2026-11-08) |
@@ -2006,7 +2006,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 
 - **PSP-3000 single-case run of the `hle-audio-rest` probe on commit `8db3ec9d` (2026-11-06)**: system software
   6.61, ARK-5.1.0 (owner); `pspver` 6.6.0, the firmware declared to the runner. PSPLink 3.2.1, operator-declared
-  model PSP-3000, XMB context. `hle-audio-rest` (case 159, `fixtures/psp_oracle/probe_hle_measure.c`) on boot 138,
+  model PSP-3000, XMB context. `hle-audio-rest` (case 159, `tests/fixtures/psp_oracle/probe_hle_measure.c`) on boot 138,
   after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). Both envelopes are acceptance-eligible
   with 0 blockers: evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, a strict
   golden sequence (102 records and the done record), all PASS. The raw envelopes and host0 logs stay in the private
@@ -2029,7 +2029,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 
 - **PSP-3000 single-case run of the `ge-rtt` probe on commit `cb3702cf` (2026-11-06)**: system software 6.61,
   ARK-5.1.0 (owner); `pspver` 6.6.0, the firmware declared to the runner. PSPLink 3.2.1, operator-declared model
-  PSP-3000, XMB context. `ge-rtt` (case 158, `fixtures/psp_oracle/probe_ge_sample.c`) on boot 137, after the
+  PSP-3000, XMB context. `ge-rtt` (case 158, `tests/fixtures/psp_oracle/probe_ge_sample.c`) on boot 137, after the
   `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). Both envelopes are acceptance-eligible with 0
   blockers: evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, a strict golden
   sequence (126 records and the done record), all PASS; every list reached GE idle. The raw envelopes and host0
@@ -2053,8 +2053,8 @@ One console is one data point; see §11. Nothing here closes issue #70
 - **PSP-3000 single-case runs of the `hle-std-handles` and `ge-weight` probes on commit `d5fed0ba`
   (2026-11-06)**: system software 6.61, ARK-5.1.0 (owner); `pspver` 6.6.0, the firmware declared to the runner.
   PSPLink 3.2.1, operator-declared model PSP-3000, XMB context. `hle-std-handles` (case 156,
-  `fixtures/psp_oracle/probe_hle_measure.c`) on boot 135 and `ge-weight` (case 157,
-  `fixtures/psp_oracle/probe_ge_sample.c`) on boot 136, each after the `transport-write` preflight
+  `tests/fixtures/psp_oracle/probe_hle_measure.c`) on boot 135 and `ge-weight` (case 157,
+  `tests/fixtures/psp_oracle/probe_ge_sample.c`) on boot 136, each after the `transport-write` preflight
   (PSP-TRANSPORT-001 is not re-cited). All four envelopes are acceptance-eligible with 0 blockers: evidence class
   `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, a strict golden sequence
   (`hle-std-handles` 4 records and the done record, `ge-weight` 288 and the done record), all PASS; every
@@ -2080,7 +2080,7 @@ One console is one data point; see §11. Nothing here closes issue #70
     4, for three and five u8 weights and three u16 weights.
 
 - **PSP-3000 single-case run of the `insn-trace` probe on commit `84568280` (2026-10-29)**: firmware 6.6.1,
-  PSPLink 3.2.1, operator-declared model PSP-3000, case 119 in `fixtures/psp_oracle/probe_insn_trace.c` with
+  PSPLink 3.2.1, operator-declared model PSP-3000, case 119 in `tests/fixtures/psp_oracle/probe_insn_trace.c` with
   `insn_trace_tramp.S` and `insn_trace_fixtures.h`. One launch on its own boot after the `transport-write`
   preflight (PSP-TRANSPORT-001 is not re-cited). The case envelope is acceptance-eligible with 0 blockers:
   evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, a strict golden
@@ -2125,7 +2125,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   PSPLink 3.2.1, operator-declared model PSP-3000, standalone PSPLink. Two launches, each on its own boot after
   a PSPLink soft reset and the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited): boot 66 ran
   `hle-intr-cells` (case 107) built from `77a1a5e3`, and boot 67 ran `intr-cause` (case 120, added by
-  `2c199df8`), both from `fixtures/psp_oracle/probe_hle_issues.c`. Both case envelopes are
+  `2c199df8`), both from `tests/fixtures/psp_oracle/probe_hle_issues.c`. Both case envelopes are
   acceptance-eligible with 0 blockers: evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a
   clean committed tree, strict golden sequences of 43 and 58 records plus the done record, all PASS. The
   `hle-intr-cells` run promotes the 2026-10-24 observations above to MEASURED. The raw logs stay in the
@@ -2181,7 +2181,7 @@ One console is one data point; see §11. Nothing here closes issue #70
 - **Captured only, not acceptance-eligible (2026-10-15, `22b027f6`)**: these establish nothing about PSP behaviour.
   - `PSP-HLE-AUDIO-SRC-001`, case `hle-audio-src`: the stream was complete, with 16 records PASS and 2 SKIP (`src-final-cleanup` and `out2-final-cleanup`). Both SKIP records were the probe's own gate for "nothing left to release", a pass-rule flaw that `7fc1641e` fixed, and a SKIP record makes the envelope ineligible. The 16 other records carry the same words as the eligible re-run above.
 
-- **PSP-3000 requalification of the 32-case campaign queue on public commit `f2d6c91a` (2026-10-15)**: firmware 6.6.1, PSPLink 3.2.1, operator-declared model PSP-3000. Each case was one runner invocation with the `transport-write` preflight, which was acceptance-eligible on all 32 launches. All 32 cases launched and exited, the teardown check passed on all 32, every envelope binds the source commit (`MATCH`, clean committed tree), and 26 case envelopes are acceptance-eligible. Device identity is `PARTIAL` (an operator-declared model label) and the PRX digest is the host-side `PLACEHOLDER` binding described under "Device build identity" in the [fixture runbook](../fixtures/psp_oracle/README.md). This entry is a newer acceptance citation for the campaign cases below. It cites no new cell, and each row keeps the cells it already names. A record is "identical" when its status and every word match the 2026-10-10 run (`f6ccfb33`); in the cases whose probe did not change, the other records are time-stamped or carry UIDs, and their statuses agree. Raw envelopes and host0 logs stay in the private campaign directory.
+- **PSP-3000 requalification of the 32-case campaign queue on public commit `f2d6c91a` (2026-10-15)**: firmware 6.6.1, PSPLink 3.2.1, operator-declared model PSP-3000. Each case was one runner invocation with the `transport-write` preflight, which was acceptance-eligible on all 32 launches. All 32 cases launched and exited, the teardown check passed on all 32, every envelope binds the source commit (`MATCH`, clean committed tree), and 26 case envelopes are acceptance-eligible. Device identity is `PARTIAL` (an operator-declared model label) and the PRX digest is the host-side `PLACEHOLDER` binding described under "Device build identity" in the [fixture runbook](../tests/fixtures/psp_oracle/README.md). This entry is a newer acceptance citation for the campaign cases below. It cites no new cell, and each row keeps the cells it already names. A record is "identical" when its status and every word match the 2026-10-10 run (`f6ccfb33`); in the cases whose probe did not change, the other records are time-stamped or carry UIDs, and their statuses agree. Raw envelopes and host0 logs stay in the private campaign directory.
 
   | Campaign case | Evidence id | Outcome (2026-10-15, acceptance-eligible) |
   | --- | --- | --- |
@@ -3055,7 +3055,7 @@ Method. Times are microseconds from just before `sceGeListEnQueue` on the 1 us s
 clocks (clk) is the time multiplied by the bus clock in MHz (111 or 166). For a cell family, clk/unit is the
 least-squares slope of the median finish time over the family's three sizes in the 222/111 MHz pass, so it
 excludes the fixed per-list cost. The probe's cell names and units are described in
-[`fixtures/psp_oracle/README.md`](../fixtures/psp_oracle/README.md).
+[`tests/fixtures/psp_oracle/README.md`](../tests/fixtures/psp_oracle/README.md).
 
 | Item | Game (boot 46) | VSH (boot 45) |
 | --- | --- | --- |
@@ -3993,7 +3993,7 @@ not expected PSP values.
 
 ### PSP-HLE-UTILITY-DIALOG-001 captures 2026-11-12
 
-`hle-utility-dialogs` (case 161, `fixtures/psp_oracle/probe_hle_measure.c`) ran twice on 2026-11-12 (UTC) on the
+`hle-utility-dialogs` (case 161, `tests/fixtures/psp_oracle/probe_hle_measure.c`) ran twice on 2026-11-12 (UTC) on the
 PSP-3000 at `3872796c`, each in the game context (entered from the XMB by one
 `nkctl --owner-present game-context` soft reset, the owner at the console and pressing nothing), each after a `transport-write` preflight. Firmware: system software 6.61
 (operator-declared); PSPLink `pspver` 0x06060110, recorded as 6.6.1; custom firmware ARK-5 with cIPL, version 5.2.0
@@ -4035,10 +4035,10 @@ stay UNMEASURED. An acceptance-eligible run is needed before any of it is a meas
 
 ### PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13
 
-`hle-utility-netconf-sharing` (case 166, `fixtures/psp_oracle/probe_hle_measure.c`) ran once on 2026-11-13 (UTC) on
+`hle-utility-netconf-sharing` (case 166, `tests/fixtures/psp_oracle/probe_hle_measure.c`) ran once on 2026-11-13 (UTC) on
 the PSP-3000, boot 211, in the game context (entered from the XMB by one `nkctl --owner-present game-context` soft
 reset, the owner at the console), built from `e8b9b0cd5`, a descendant of this tree's base whose
-`fixtures/psp_oracle` sources and `tools/psp_oracle/parse_golden.py` are identical to this tree's. Firmware: system
+`tests/fixtures/psp_oracle` sources and `tools/psp_oracle/parse_golden.py` are identical to this tree's. Firmware: system
 software 6.61 (operator-declared); PSPLink `pspver` 0x06060110, recorded as 6.6.1 in the game context; custom
 firmware ARK-5 with cIPL, version 5.2.0 (operator-declared, not read by a tool); PSPLink built from
 `pspdev/psplinkusb` `7a0035d9`. The envelope is not acceptance-eligible: the loaded module was not proven unloaded
@@ -4059,7 +4059,7 @@ the netconf dialog.
 
 ### PSP-HLE-SAVEDATA-NODATA-001 capture 2026-11-10
 
-`hle-savedata-nodata` (case 180, `fixtures/psp_oracle/probe_hle_measure.c`) ran once on 2026-11-10 (UTC) on the
+`hle-savedata-nodata` (case 180, `tests/fixtures/psp_oracle/probe_hle_measure.c`) ran once on 2026-11-10 (UTC) on the
 PSP-3000, boot 183, in the game context (standalone PSPLink), at `dbb47db4`, an ancestor of this tree. Its
 `probe_hle_measure.c` differs from this tree's in one place only: the synthetic 16-byte key is a byte array there
 and the text `NKPROBE01KEY0001` here (`f7607bce`), so the bytes the probe passes at +0x5dc are the same; its
@@ -4118,7 +4118,7 @@ the utility cannot read (the probe does not construct one); any of this in the X
 
 ### PSP-SAS-002 capture 2026-11-10
 
-`sas-adsr` (case 152, `fixtures/psp_oracle/probe.c`) ran once on 2026-11-10 (UTC) on the PSP-3000, boot 185, in the
+`sas-adsr` (case 152, `tests/fixtures/psp_oracle/probe.c`) ran once on 2026-11-10 (UTC) on the PSP-3000, boot 185, in the
 game context (standalone PSPLink), at `74acbe42`, an ancestor of this tree whose `sas-adsr` section of `probe.c` and
 Makefile CASE and LIBS lines are identical to this tree's, apart from the two AV-module unloads after the done record
 added on 2026-11-11, which run after every record. Firmware: system software 6.61 (`flash0:/vsh/etc/version.txt`:
@@ -4132,7 +4132,7 @@ log and decode stay in the private campaign directory.
 
 It is the first run of the current status encoding, which writes `PASS` or `ERROR` where the 2026-11-05 run of the
 earlier source revision wrote `RC`. The two streams have the same 696 case ids, and every record has the same result
-and out words in both. The values described in `fixtures/psp_oracle/README.md` are therefore what both runs show. The
+and out words in both. The values described in `tests/fixtures/psp_oracle/README.md` are therefore what both runs show. The
 case used to keep AVCODEC and SASCORE loaded (as `sas-init` does), so the module set after it always differed from
 the one before the launch. Since 2026-11-11 it unloads SASCORE, then AVCODEC, after its done record. The 2026-11-13
 (UTC) rerun on boot 208 at `06a6c942c` passed the runner's teardown check and is acceptance-eligible; its 696 records
@@ -4140,7 +4140,7 @@ equal this capture's, so it measures the values above (see the `sas-adsr` run in
 
 ### PSP-SAS-003 capture 2026-11-07
 
-`sas-mix` (case 155, `run_sas_mix` in `fixtures/psp_oracle/probe.c`) ran once on 2026-11-07 on the PSP-3000, boot
+`sas-mix` (case 155, `run_sas_mix` in `tests/fixtures/psp_oracle/probe.c`) ran once on 2026-11-07 on the PSP-3000, boot
 146, in the game context, at `979de58f`, a pre-publication commit whose `sas_mix` functions, tables and constants in
 `probe.c` and whose Makefile CASE and LIBS lines are identical to this tree's, apart from the two AV-module unloads
 after the done record added on 2026-11-11, which run after every record. Firmware: system software 6.61
@@ -4191,7 +4191,7 @@ The voice is a flat VAG of sample `0x0700`, whose full-scale output is `0x06fe`.
 
 ### PSP-GE-SIGNAL-001 capture 2026-11-10
 
-`ge-signal` (case 181, `run_ge_signal` in `fixtures/psp_oracle/probe.c`) ran once on 2026-11-10 (UTC) on the
+`ge-signal` (case 181, `run_ge_signal` in `tests/fixtures/psp_oracle/probe.c`) ran once on 2026-11-10 (UTC) on the
 PSP-3000, boot 179, in the XMB context, at `80e7c9eb`, an ancestor of this tree whose `ge-signal` section in
 `probe.c` and whose Makefile CASE line are identical to this tree's. Firmware: system software 6.61
 (`flash0:/vsh/etc/version.txt`: `release:6.61:`, `system:58401@release_661,0x06060110:`); PSPLink `pspver`
@@ -4266,8 +4266,8 @@ context.
 
 ### PSP-MEMEDGE-001 capture 2026-11-02
 
-`memory-edge` (CASE 138, `fixtures/psp_oracle/probe_memory_edge.c`) uses the placement helper
-`fixtures/psp_oracle/mem_edge.h`, which any probe source can include. It measures where
+`memory-edge` (CASE 138, `tests/fixtures/psp_oracle/probe_memory_edge.c`) uses the placement helper
+`tests/fixtures/psp_oracle/mem_edge.h`, which any probe source can include. It measures where
 user-visible memory ends, puts a probe-owned buffer so that its last (or first) 0x100 bytes sit at
 a measured edge, and records every call's outcome as data. A record exists only if the call
 returned. Word layout of a call cell: return code, whether it returned, N, length, buffer bytes
@@ -4494,7 +4494,7 @@ the next frame. On boot 49 `cpu-timing-framebuffer` reports that the probe displ
 
 Method. The measurements run at 333/166 MHz and the boot clocks are restored afterwards. A `result` is
 hundredths of a CPU cycle per counted instruction or per API call, after subtracting a matched control loop,
-over the median of seven trials on the 1 us system timer ([`fixtures/psp_oracle/README.md`](../fixtures/psp_oracle/README.md)
+over the median of seven trials on the 1 us system timer ([`tests/fixtures/psp_oracle/README.md`](../tests/fixtures/psp_oracle/README.md)
 describes the bodies). The tables give `result / 100`.
 
 CPU cycles per counted instruction, unrolled bodies of eight:
@@ -4753,7 +4753,7 @@ the runtime models (`language`, `button_assign`, date/time format, `timezone`,
 The resulting registry and console-specific files remain in the private
 campaign output directory.
 
-The font-registry probe (`registry-font`, `fixtures/psp_oracle/registry_walk.h`)
+The font-registry probe (`registry-font`, `tests/fixtures/psp_oracle/registry_walk.h`)
 opens no category by a literal path. On PSP-3000 6.6.1 opening a missing
 category creates it, so the probe lists the root through the registry handle
 itself and opens a category only after its open parent listed it as a
@@ -4766,7 +4766,7 @@ there. The build pins the probe's `sceReg` imports to the eight read calls. On t
 2026-11-10 PSP-3000 launch (XMB context, captured only) `sceRegGetKeysNum` on the
 registry handle returned `0x8008272E`, so the probe opened nothing below the root.
 
-The `font-files` case (`PSP-FONTFILES-001`, `fixtures/psp_oracle/font_files.h`)
+The `font-files` case (`PSP-FONTFILES-001`, `tests/fixtures/psp_oracle/font_files.h`)
 is not in the campaign queue; it runs only when the maintainer asks for it. It
 lists `flash0:/font`, opens each regular file read-only, and copies it to
 `host0:/fonts/` for the maintainer's private use, verifying each copy with
@@ -5106,7 +5106,7 @@ loop; route those to the batch path.
 1. `tools/TRACE_FORMAT.md` — strict v2 tier and identity envelope implemented; PSP-side trace
    production remains unbuilt.
 2. `tools/hwtest_gate.py` — **new**, result-vector comparison.
-3. `fixtures/psp_runner/` — PSPSDK sources for the resident runner, excluded from the native
+3. `tests/fixtures/psp_runner/` — PSPSDK sources for the resident runner, excluded from the native
    build. Tracked; the `hw-verify` target and `tools/hwtest_gate.py` below are still unbuilt.
 4. ~~`tools/hw_doctor.py` — **new**, the machine-checkable precondition check.~~ Superseded by the
    shipped `tools/psp_readiness.py`; add the live `host0:` round-trip check there.

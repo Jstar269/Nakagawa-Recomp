@@ -165,7 +165,7 @@ POLICY_DELTA_RULE_SCHEMA_VERSION = 2
 #: ``is_implementation_path`` already covers
 #: ``src/``/``tools/`` and source/script suffixes; these rules close the
 #: remaining classifier escapes (executable scripts under ``docs/`` or
-#: ``fixtures/``, CI workflow/action YAML, Make/CMake/build fragments,
+#: ``tests/fixtures/``, CI workflow/action YAML, Make/CMake/build fragments,
 #: pre-commit surfaces, Windows batch files).
 HARDENED_ADMISSION_PREFIXES = (".github/workflows/", ".github/actions/", ".pre-commit/")
 HARDENED_ADMISSION_NAMES = frozenset({
@@ -1310,6 +1310,8 @@ def _class_for(path: str, record: dict | None) -> tuple[str, dict]:
             return "project_authored_attested", {**evidence, "authorship": "independent implementation record",
                                                    "upstream_attribution": record.get("upstream")}
 
+    # The root ``fixtures/`` prefix stays while a trusted base can still carry the tree there:
+    # a refresh classes the base's entries with this rule too.
     if path.startswith(("fixtures/", "tests/fixtures/")) or "/test_" in path or path.startswith("tools/test_"):
         return "synthetic_fixture", {"source": "path-reviewed fixture/test census",
                                       "statement": "fixture or test data is synthetic and contains no retail bytes"}

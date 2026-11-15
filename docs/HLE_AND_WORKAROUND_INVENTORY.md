@@ -37,7 +37,7 @@ or labelled historical/capture-time. The evidence-tier view
 The public profile-zero guest may not import a dedicated `unreviewed` handler silently
 ([#341](https://github.com/Jstar269/nakagawa-recomp/issues/341)). The hosted
 `public_export` job's profile-zero fixture build runs
-`python3 tools/hle_manifest.py --imports fixtures/profile_zero/prebuilt/profile_zero_guest.prx --check-profile-zero-imports`
+`python3 tools/hle_manifest.py --imports tests/fixtures/profile_zero/prebuilt/profile_zero_guest.prx --check-profile-zero-imports`
 on the digest-checked guest. It fails when an imported NID routes to an `unreviewed`
 handler that `PROFILE_ZERO_UNREVIEWED_IMPORTS` in `tools/hle_registry_meta.py` does not
 list, and when an entry there is no longer imported or no longer `unreviewed`. That list
@@ -103,12 +103,12 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: hardware oracle / issue #80 display-clock measurement (59.9400599f in $f0)
 - **`h_GeEdramGetAddr`** (`sceGe`): `sceGeEdramGetAddr` (0xe47e40e4)
   - Evidence: tools/psp_oracle/manifest.json:PSP-HLE-GE-EDRAM-001
-  - Evidence: fixtures/psp_oracle/probe_hle_measure.c:hle_run
+  - Evidence: tests/fixtures/psp_oracle/probe_hle_measure.c:hle_run
   - Evidence: src/rt/hle_ge.c:h_GeEdramGetAddr
   - Evidence: PSP-HLE-GE-EDRAM-001 cell: edram-addr = 0x04000000
 - **`h_GeEdramGetSize`** (`sceGe`): `sceGeEdramGetSize` (0x1f6752ad)
   - Evidence: tools/psp_oracle/manifest.json:PSP-HLE-GE-EDRAM-001
-  - Evidence: fixtures/psp_oracle/probe_hle_measure.c:hle_run
+  - Evidence: tests/fixtures/psp_oracle/probe_hle_measure.c:hle_run
   - Evidence: src/rt/hle_ge.c:h_GeEdramGetSize
   - Evidence: PSP-HLE-GE-EDRAM-001 cell: edram-size = 0x00200000
 - **`h_IoMkdir`** (`sceIo`): `sceIoMkdir` (0x06a70004)
@@ -165,46 +165,46 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 - **`h_AudioChRelease`** (`sceAudio`): `sceAudioChRelease` (0x6fc46853)
   - Limitation: the cells release channel 0 after the two valid blocking-output calls and query it after release; unreserved, out-of-range, and other channel-state release results are unmeasured (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
-  - Evidence: fixtures/psp_oracle/probe.c:run_audio_query
+  - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-ch-release, audio-ch-query-released
 - **`h_AudioChReserve`** (`sceAudio`): `sceAudioChReserve` (0x5ec81c55)
   - Limitation: audio-ch-reserve measures a successful reservation of channel 0 for 1024 stereo samples; automatic channel selection, invalid size or format, duplicate reservation, and exhaustion/error precedence are unmeasured (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
-  - Evidence: fixtures/psp_oracle/probe.c:run_audio_query
+  - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cell: audio-ch-reserve
 - **`h_AudioOutput2Blocking`** (`sceAudio`): `sceAudioOutput2OutputBlocking` (0x2d53f36e)
   - Limitation: audio-out2-output-blocking measures one valid silent 1024-sample block at volume 0x8000 and makes no acoustic claim; volumes above 0xFFFFF are refused with 0x8026000b following PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp, unmeasured; not-reserved, buffer-error and audio_output error-propagation behavior are not covered (the handler discards audio_output's return) (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
-  - Evidence: fixtures/psp_oracle/probe.c:run_audio_query
+  - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cell: audio-out2-output-blocking
 - **`h_AudioOutput2Release`** (`sceAudio`): `sceAudioOutput2Release` (0x43196845)
   - Limitation: audio-out2-release measures success after the queue drains; the documented #311 cell measures 0x80268002 while samples remain queued and preserves the reservation; releasing when not reserved is not measured (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
-  - Evidence: fixtures/psp_oracle/probe.c:run_audio_query
+  - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cell: audio-out2-release
   - Evidence: docs/HARDWARE_ORACLE.md
 - **`h_AudioOutput2Reserve`** (`sceAudio`): `sceAudioOutput2Reserve` (0x01562ba3)
   - Limitation: audio-out2-reserve measures a valid 1024-sample reservation; duplicate Output2 reservation behavior and invalid size bounds are unmeasured (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
-  - Evidence: fixtures/psp_oracle/probe.c:run_audio_query
+  - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cell: audio-out2-reserve
 - **`h_AudioOutput2Rest`** (`sceAudio`): `sceAudioOutput2GetRestSample` (0x647cef33)
   - Limitation: the cells query rest samples on one valid 1024-sample Output2 reservation before and after one blocking output; the not-reserved code and other queue states are unmeasured (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
-  - Evidence: fixtures/psp_oracle/probe.c:run_audio_query
+  - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-out2-query-before, audio-out2-query-after
 - **`h_AudioOutputBlocking`** (`sceAudio`): `sceAudioOutputBlocking` (0x136caf51)
   - Limitation: the cells exercise two maximum-volume outputs with a valid silent stereo buffer and record timing and rest-length values, not audible output; mono, other volumes, invalid buffers/channels, and error precedence are unmeasured (#341)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
-  - Evidence: fixtures/psp_oracle/probe.c:run_audio_query
+  - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-ch-output-blocking-0, audio-ch-output-blocking-1
 - **`h_AudioRestLen`** (`sceAudio`): `sceAudioGetChannelRestLength` (0xb011922f), `sceAudioGetChannelRestLen` (0xe9d97901)
   - Limitation: serves sceAudioGetChannelRestLength and sceAudioGetChannelRestLen; the PSP-AUDIO-001 cells query both on channel 0 before and after blocking output and just after release, and PSP-HLE-AUDIO-REST-001 finds them equal (F or F - 64) after each blocking output on stereo channels of 1024, 2048 and 4096 frames, which is evidence that the two calls give one answer, not that this handler gives the console's: the runtime's blocking output returns with up to two blocks queued (#67), so both calls can read up to 2F there where the console held one block (#279, open); invalid-channel error behavior and other queue states are unmeasured for both calls (#341, #2361)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
-  - Evidence: fixtures/psp_oracle/probe.c:run_audio_query
+  - Evidence: tests/fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-ch-query-before, audio-ch-query-after, audio-ch-query-released
   - Evidence: tools/psp_oracle/manifest.json:PSP-HLE-AUDIO-REST-001
-  - Evidence: fixtures/psp_oracle/probe_hle_measure.c:hle_arest_size
+  - Evidence: tests/fixtures/psp_oracle/probe_hle_measure.c:hle_arest_size
 - **`h_AudioSRCChRelease`** (`sceAudio`): `sceAudioSRCChRelease` (0x5c37c0ae)
   - Limitation: release after a blocking output (0) and release with nothing reserved (0x80260008) are measured (PSP-HLE-AUDIO-SRC-001); whether a release succeeds while samples are still queued, as the Output2 busy rule does, and releasing a reservation made through the other API (refused here as not reserved) are unmeasured (#339)
 - **`h_AudioSRCChReserve`** (`sceAudio`): `sceAudioSRCChReserve` (0x38553111)
@@ -304,8 +304,8 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 - **`h_DisplaySetFrameBuf`** (`sceDisplay`): `sceDisplaySetFrameBuf` (0x289d82fe)
   - Limitation: display-smoke covers only a sync=1 8888 flip with stride 512; other format, address, stride, and error-precedence cases remain outside this route (#341)
   - Evidence: Makefile:display-smoke-run
-  - Evidence: fixtures/display_smoke/generate.py:verify
-  - Evidence: fixtures/display_smoke/generate.py:run
+  - Evidence: tests/fixtures/display_smoke/generate.py:verify
+  - Evidence: tests/fixtures/display_smoke/generate.py:run
 - **`h_DisplaySetMode`** (`sceDisplay`): `sceDisplaySetMode` (0x0e20f177)
   - Limitation: only the argument results are modelled: the PSP blocks until a vblank ('Vblank after set: 1'), the runtime returns at once, and sceDisplayGetMode reports the fixed mode 0 at 480x272 (#341)
   - Evidence: PSPAutotests tests/display/setmode.expected (1a9e6c31, recorded on a PSP): mode 0 at 480x272 returns 0, any other mode 0x80000107, mode 0 at another size 0x80000104, mode checked first
@@ -321,7 +321,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 - **`h_DisplayWaitVblankStart`** (`sceDisplay`): `sceDisplayWaitVblankStart` (0x984c27e7)
   - Limitation: display-smoke covers ordinary guest-thread waits; interrupt-context behavior and callback wait variants remain outside this route (#341)
   - Evidence: Makefile:display-smoke-run
-  - Evidence: fixtures/display_smoke/generate.py:run
+  - Evidence: tests/fixtures/display_smoke/generate.py:run
   - Evidence: tools/test_sched_invariants.py:test_the_two_display_nids_have_separate_handlers
 - **`h_DisplayWaitVblankStartCB`** (`sceDisplay`): `sceDisplayWaitVblankStartCB` (0x46f186c3)
   - Limitation: returns 0 after one delivered VBLANK with callbacks serviced; the guest VCOUNT step is not asserted, and a call from interrupt context is not modelled (#341)
@@ -391,7 +391,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 - **`h_GeListEnQueue`** (`sceGe`): `sceGeListEnQueue` (0xab49e76a)
   - Limitation: display-smoke covers one unstalled synchronous list; a list enqueued behind an active one waits its turn and runs in enqueue order once the head completes, slots come from a FIFO of free slots and ids name slots (uofw src/kd/ge/ge.c; the queued peek 1 and the 64-list 0x80000022 refusal are unmeasured), and argument and priority validation and asynchronous execution timing remain outside this route (#341)
   - Evidence: Makefile:display-smoke-run
-  - Evidence: fixtures/display_smoke/generate.py:flight_smoke
+  - Evidence: tests/fixtures/display_smoke/generate.py:flight_smoke
   - Evidence: tests/native/hle_thread_selftest.c:test_flight_recorder_ge_present_events
   - Evidence: tests/native/hle_thread_selftest.c:test_ge_queued_lists_run_in_order
 - **`h_GeListEnQueueHead`** (`sceGe`): `sceGeListEnQueueHead` (0x1c0d95a6)

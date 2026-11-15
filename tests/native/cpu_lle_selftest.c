@@ -222,7 +222,7 @@ static void test_exception_ce_badvaddr(void) {
 
 /* Hardware-measured exception-entry cells (PSP-3000 / 6.61,
  * user-mode PRX probes via PSPLink; fixtures
- * fixtures/psp_oracle/probe_exception_a1.c..a3.c, cells in
+ * tests/fixtures/psp_oracle/probe_exception_a1.c..a3.c, cells in
  * docs/HARDWARE_ORACLE.md "CPU exception entry"). These checks pin the
  * measured fields only: EPC, Cause.BD/ExcCode for Bp/AdEL, BadVAddr, and the
  * preserved general registers. Cause.CE is a single-console observation for
@@ -2711,7 +2711,7 @@ static void test_llsc_lle_misaligned(void) {
 }
 
 /* PSP-LLSC-001 (PSP-3000 / 6.61, 2026-10-15, probe build e45e667b): the three link
- * windows fixtures/psp_oracle/probe.c ran on the console, with its values. On the PSP:
+ * windows tests/fixtures/psp_oracle/probe.c ran on the console, with its values. On the PSP:
  *   llsc-control        ll A; sc A        -> ll loads A, sc stores and reports 1;
  *   llsc-second-sc      ll A; sc A; sc A  -> the second sc, with no new ll, also stores
  *                                            and reports 1 (sc does not clear the link);

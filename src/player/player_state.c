@@ -5638,8 +5638,8 @@ void player_app_populate_sample_games(PlayerApp *app) {
     snprintf(p5.disc_id, sizeof(p5.disc_id), "TEST00005");
     snprintf(p5.title_name, sizeof(p5.title_name), "Nakagawa Test Program");
     snprintf(p5.disc_version, sizeof(p5.disc_version), "1.00");
-    snprintf(p5.iso_path, sizeof(p5.iso_path), "fixtures/pspdev_phase5/disc/game.iso");
-    snprintf(p5.prepared_root, sizeof(p5.prepared_root), "fixtures/pspdev_phase5");
+    snprintf(p5.iso_path, sizeof(p5.iso_path), "tests/fixtures/pspdev_phase5/disc/game.iso");
+    snprintf(p5.prepared_root, sizeof(p5.prepared_root), "tests/fixtures/pspdev_phase5");
     snprintf(p5.title_id, sizeof(p5.title_id), "pspdev-phase5-v1");
     p5.iso_size_bytes = 2097152ULL;
     p5.status = NK_STATUS_IDENTIFIED;
@@ -5664,8 +5664,8 @@ void player_app_populate_sample_games(PlayerApp *app) {
     snprintf(disp.disc_id, sizeof(disp.disc_id), "TEST00006");
     snprintf(disp.title_name, sizeof(disp.title_name), "Nakagawa Display Smoke Fixture");
     snprintf(disp.disc_version, sizeof(disp.disc_version), "1.00");
-    snprintf(disp.iso_path, sizeof(disp.iso_path), "fixtures/display_smoke/generate.py");
-    snprintf(disp.prepared_root, sizeof(disp.prepared_root), "fixtures/display_smoke");
+    snprintf(disp.iso_path, sizeof(disp.iso_path), "tests/fixtures/display_smoke/generate.py");
+    snprintf(disp.prepared_root, sizeof(disp.prepared_root), "tests/fixtures/display_smoke");
     snprintf(disp.title_id, sizeof(disp.title_id), "display-smoke-v1");
     disp.iso_size_bytes = 0ULL;
     disp.is_prepared = player_app_game_has_runtime(app, &disp);

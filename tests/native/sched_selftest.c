@@ -4677,7 +4677,7 @@ static void test_flight_recorder_thread_snapshot(void) {
 /* ---- PSP display-wait semantics -----------------------------------------------------
  *
  * Every assertion below is pinned to a hardware record measured on
- * PSP-3001/6.61-ARK by fixtures/psp_oracle/probe.c:
+ * PSP-3001/6.61-ARK by tests/fixtures/psp_oracle/probe.c:
  *
  *   PSP-DISPLAY-002 `display-wait-late`      -- late-call behaviour, both NIDs
  *   PSP-DISPLAY-003 `display-wait-priority`  -- readiness dependence, strict priority

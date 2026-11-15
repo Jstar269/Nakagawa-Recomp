@@ -60,7 +60,7 @@ device tests; a release build keeps that activity private.
    ```bash
    NK_SHOWCASE_BUILD_ROOT=<scratch>/showcase-build \
    NK_SHOWCASE_DEMO_ROOT=<scratch>/showcase-demo \
-   python fixtures/showcase/showcase.py build
+   python tests/fixtures/showcase/showcase.py build
    ```
 
 2. Build the APK with those packages bundled:
