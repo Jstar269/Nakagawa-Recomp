@@ -584,7 +584,34 @@ static void test_settings(void) {
     CHECK(a->factor == 2 && a->budget_bytes == (64ull << 20) && refused[0] == '\0' &&
           strstr(nk_tex_scale_start_lines(), "TEX_SCALE: on (xbrz=2, smart2d=off, budget_mb=64)\n"),
           "settings: a budget of 64 with texscale=2: \"%s\"", nk_tex_scale_start_lines());
+    /* The default budget follows the device (#2623): an eighth of its largest device-local heap,
+     * 512 to 2048 MiB, and 512 when the heap is unknown. SR_TEX_SCALE_BUDGET_MB still wins. */
+    static const struct { uint64_t heap_mb, want_mb; } vram[] = {
+        { 0u, 512u }, { 1024u, 512u }, { 4096u, 512u }, { 6144u, 768u }, { 8192u, 1024u },
+        { 10240u, 1280u }, { 12288u, 1536u }, { 16384u, 2048u }, { 24576u, 2048u }, { 81920u, 2048u },
+    };
+    for (size_t i = 0; i < sizeof(vram) / sizeof(vram[0]); i++)
+        CHECK(nk_tex_scale_budget_for_vram(vram[i].heap_mb << 20) == vram[i].want_mb << 20,
+              "budget: a %llu MiB heap gives %llu MiB, want %llu", (unsigned long long)vram[i].heap_mb,
+              (unsigned long long)(nk_tex_scale_budget_for_vram(vram[i].heap_mb << 20) >> 20),
+              (unsigned long long)vram[i].want_mb);
+    CHECK(nk_tex_scale_budget_for_vram((10240ull << 20) + 12345u) == (1280ull << 20),
+          "budget: a heap not a whole MiB gives a budget not a whole MiB");
+    nk_tex_scale_set_device_vram(10240ull << 20);
+    a = nk_tex_scale_init(1, 2, 0, refused, sizeof(refused));
+    CHECK(a->factor == 2 && a->budget_bytes == (64ull << 20) &&
+          strstr(nk_tex_scale_start_lines(), "TEX_SCALE: on (xbrz=2, smart2d=off, budget_mb=64)\n"),
+          "budget: SR_TEX_SCALE_BUDGET_MB=64 on a 10 GiB device did not win: \"%s\"", nk_tex_scale_start_lines());
     set_env("SR_TEX_SCALE_BUDGET_MB", NULL);
+    a = nk_tex_scale_init(1, 4, 0, refused, sizeof(refused));
+    CHECK(a->factor == 4 && a->budget_bytes == (1280ull << 20) && nk_tex_scale_default_budget_bytes() == (1280ull << 20) &&
+          strstr(nk_tex_scale_start_lines(), "TEX_SCALE: on (xbrz=4, smart2d=off, budget_mb=1280)\n"),
+          "budget: a 10 GiB device without SR_TEX_SCALE_BUDGET_MB: \"%s\"", nk_tex_scale_start_lines());
+    nk_tex_scale_set_device_vram(0u);
+    a = nk_tex_scale_init(1, 4, 0, refused, sizeof(refused));
+    CHECK(a->budget_bytes == ((uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20),
+          "budget: an unknown device does not get the 512 MiB default (%llu MiB)",
+          (unsigned long long)(a->budget_bytes >> 20));
     /* Nothing asked for, nothing at all is printed, in either mode. */
     a = nk_tex_scale_init(0, 0, 0, refused, sizeof(refused));
     CHECK(a->factor == 0 && a->smart2d == 0 && nk_tex_scale_start_lines()[0] == '\0',

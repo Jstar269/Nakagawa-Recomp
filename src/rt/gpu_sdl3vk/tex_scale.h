@@ -20,7 +20,8 @@
  * Settings, taken once when the renderer starts (nk_tex_scale_init):
  *   texscale=off | 2 | 3 | 4 | 5 | 6   the launch line's xBRZ factor (ace.h); a missing key is off
  *   smart2d=off | on                   the launch line's nearest filtering for pixel-mapped 2D draws
- *   SR_TEX_SCALE_BUDGET_MB  1..8192    VRAM for scaled copies (default 512)
+ *   SR_TEX_SCALE_BUDGET_MB  1..8192    VRAM for scaled copies (default: an eighth of the device's
+ *                                      largest device-local heap, 512 to 2048; 512 when unknown)
  * Any other value refuses the request: both stay off and one TEX_SCALE line names the reason. No
  * environment variable turns either feature on: SR_TEX_SCALE and SR_SMART_2D are retired, and a
  * run that has one set stops at start (ace.h, ace_retired_env_named).
@@ -43,6 +44,10 @@ extern "C" {
 
 #define NK_TEX_SCALE_MAX 6
 #define NK_TEX_SCALE_DEFAULT_BUDGET_MB 512u
+/* The default budget a device gets (nk_tex_scale_budget_for_vram): an eighth of its largest
+ * device-local heap, within these bounds. */
+#define NK_TEX_SCALE_VRAM_BUDGET_MIN_MB NK_TEX_SCALE_DEFAULT_BUDGET_MB
+#define NK_TEX_SCALE_VRAM_BUDGET_MAX_MB 2048u
 /* A scaled copy is at most this many texels on a side; a larger texture takes the largest
  * factor that fits, and none below 2. */
 #define NK_TEX_SCALE_MAX_DIM 2048
@@ -69,9 +74,21 @@ typedef struct NkTexScaleConfig {
 int nk_tex_scale_parse(int factor, int smart2d, const char *budget_mb,
                        NkTexScaleConfig *out, char *why, size_t why_cap);
 
+/* The default scaled-copy budget for a device whose largest device-local heap holds
+ * `device_local_bytes`: an eighth of it in whole MiB, at least NK_TEX_SCALE_VRAM_BUDGET_MIN_MB and
+ * at most NK_TEX_SCALE_VRAM_BUDGET_MAX_MB; 0 (unknown) gives NK_TEX_SCALE_DEFAULT_BUDGET_MB. A
+ * 10 GiB card gets 1280 MiB. Pure. */
+uint64_t nk_tex_scale_budget_for_vram(uint64_t device_local_bytes);
+/* The renderer's device: its largest device-local heap, in bytes (0 = unknown, the state at
+ * start). Set before nk_tex_scale_init; the default budget is derived from it from then on. */
+void nk_tex_scale_set_device_vram(uint64_t device_local_bytes);
+/* The budget a feature that shares the scaled-copy budget takes when SR_TEX_SCALE_BUDGET_MB set
+ * none: nk_tex_scale_budget_for_vram of the device set above. */
+uint64_t nk_tex_scale_default_budget_bytes(void);
+
 /* Make the launch line's request (`factor` and `smart2d`, from ace_effective()) the run's
  * configuration, only when `enhanced` is nonzero (an Enhanced or Ace run); SR_TEX_SCALE_BUDGET_MB
- * is read then. Prints the TEX_SCALE lines when either feature is on or the request was refused;
+ * is read then, and without it the budget is nk_tex_scale_default_budget_bytes(). Prints the TEX_SCALE lines when either feature is on or the request was refused;
  * a refusal also writes its reason to `refused` (when given; "" otherwise), and leaves both off.
  * Returns the configuration in force. */
 const NkTexScaleConfig *nk_tex_scale_init(int enhanced, int factor, int smart2d, char *refused,

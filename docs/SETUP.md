@@ -102,7 +102,8 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   the game's thread: on the development PC (`-O2`, one thread) a 256x256 texture took about 2.0 ms at 2x, 2.8 ms at 4x
   and 4.6 ms at 6x, so a scene change that uploads many textures shows some of them unscaled for a moment. Each
   copy costs factor x factor times the texture's GPU memory (a 256x256 texture at 4x is 4 MB), up to a budget of
-  512 MB by default (`SR_TEX_SCALE_BUDGET_MB`); past it, copies idle for about a second are freed, and when the
+  an eighth of the graphics card's memory by default, 512 MB to 2 GB (about 1.2 GB on a 10 GB card;
+  `SR_TEX_SCALE_BUDGET_MB` sets another); past it, copies idle for about a second are freed, and when the
   copies in use fill it, new textures are drawn unscaled. Storing copies costs the game's thread up to 8 MB of
   uploads per frame, which can make a busy game drop frames. The scaler builds no lookup table, so it adds no fixed
   memory cost. The rules are in
@@ -115,7 +116,7 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   render scale of 2 to 4, a small sprite that maps one texel to one pixel over a page of anti-aliased text is redrawn from a version of just
   that rectangle rebuilt at the render scale, checked against the game's own bytes. A page with a rebuilt rectangle
   costs the page's GPU memory times the render scale squared (a 256x256 page at 4x is 4 MB), taken from the
-  same 512 MB budget as texture scaling (`SR_TEX_SCALE_BUDGET_MB`). At most 48 rectangles are checked or rebuilt per
+  same budget as texture scaling (`SR_TEX_SCALE_BUDGET_MB`). At most 48 rectangles are checked or rebuilt per
   frame, on the game's thread. Text drawn as triangles, or from a page in VRAM, is drawn as the game made it. The
   rules are in [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1013-sharp-game-text).
 - **Finer Bezier and spline patches (Finer patches).** A part of Enhanced and Ace, off by default and in no graphics

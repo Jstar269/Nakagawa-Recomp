@@ -592,6 +592,7 @@ typedef struct {
     VkDescriptorSet tset;
     uint32_t tused, pused;
     int in_flight;
+    uint64_t serial;   /* this recording's place in submission order (s_submit_serial at its submit) */
     /* SR_GPU_TIMESTAMPS: timestamps written into this recording (its start, one after each
      * recorded op, its end; 0 when none), and the submit reason of the work between query i and
      * query i + 1. */
@@ -677,6 +678,11 @@ static VkCommandPool s_pool;
 static VkCommandBuffer s_cmd;
 static SubmitSlot s_submit[SUBMIT_FRAMES];
 static SubmitSlot *s_cmd_slot;
+/* Submission order of the slots' recordings: s_submit_serial numbers the latest vkQueueSubmit,
+ * and every recording numbered up to s_submit_done has finished on the GPU. All of them go to one
+ * queue, where a fence's signal covers every earlier submission, so one finished recording proves
+ * every lower number finished. Scaled copies retire behind these numbers (tex_xs_retire). */
+static uint64_t s_submit_serial, s_submit_done;
 static uint32_t s_submit_cursor;
 static int s_async_submit;
 static uint32_t s_submit_batch_ops;
@@ -1495,6 +1501,7 @@ static int cmd_wait_slot(SubmitSlot *slot, GeGpuReplayBoundaryKind boundary) {
         s_replay_stats.snapshot_wait_ns += waited;
     }
     VKC(vkResetFences(s_dev, 1, &slot->fence));
+    if (slot->serial > s_submit_done) s_submit_done = slot->serial;
     slot->in_flight = 0;
     slot->reason_mask = 0;
     slot->recorded_ops = 0;
@@ -1546,6 +1553,7 @@ static int cmd_drain(GeGpuReplayBoundaryKind boundary) {
     for (uint32_t i = 0; i < count; i++) {
         SubmitSlot *slot = &s_submit[slots[i]];
         ts_collect(slot);
+        if (slot->serial > s_submit_done) s_submit_done = slot->serial;
         slot->in_flight = 0;
         slot->reason_mask = 0;
         slot->recorded_ops = 0;
@@ -1554,6 +1562,16 @@ static int cmd_drain(GeGpuReplayBoundaryKind boundary) {
         slot->xfer_used = 0;
     }
     return 1;
+}
+
+/* Note, without waiting, the recordings whose fences have signalled (s_submit_done). The slots
+ * stay as they are: cmd_wait_slot and cmd_drain still reset them. */
+static void submit_poll_done(void) {
+    for (int i = 0; i < SUBMIT_FRAMES; i++) {
+        const SubmitSlot *slot = &s_submit[i];
+        if (slot->in_flight && slot->serial > s_submit_done && vkGetFenceStatus(s_dev, slot->fence) == VK_SUCCESS)
+            s_submit_done = slot->serial;
+    }
 }
 
 /* Start a fresh scoped command buffer. The selected slot cannot be reset until its fence
@@ -1594,6 +1612,7 @@ static int cmd_finish_submit(SrPerfGeReason reason, int defer) {
     if (sr_perf_enabled) sr_perf_ge_submit(reason);
     slot->reason = reason;
     slot->in_flight = 1;
+    slot->serial = ++s_submit_serial;
     if (reason == SR_PERF_GE_RENDER_BATCH) s_replay_stats.render_submits++;
     else if (reason == SR_PERF_GE_SNAPSHOT_COPY) s_replay_stats.snapshot_submits++;
     else if (reason == SR_PERF_GE_MIXED_DRAIN) s_replay_stats.mixed_submits++;
@@ -4552,19 +4571,93 @@ static void tex_xs_free(TexEnt *e) {
     memset(&e->xs, 0, sizeof(e->xs));
 }
 
-/* Free entry `e`'s idle copy but keep its content generation; a later hit offers it again. */
-static void tex_xs_release(TexEnt *e) {
+/* Retired scaled copies (#2623): a copy reclaim takes from its entry, whose Vulkan objects a
+ * recording already submitted, or the one still open, may sample. They are destroyed once every
+ * recording up to `after` has finished (s_submit_done), which the renderer notes at its own fence
+ * waits and polls at each present, so reclaiming never waits for the GPU. The budget is given back
+ * when a copy retires: the budget counts the copies entries hold, and the retired ones' memory
+ * (s_xs_retired_bytes) is gone a few submissions later. */
+typedef struct {
+    uint64_t after, bytes;
+    VkImage img; VkDeviceMemory mem; VkImageView view;
+    VkSampler smp, smp_af;
+    VkDescriptorSet set, set_af;
+} XsRetired;
+/* At most one retired copy per cache entry at a time in practice: a copy retires only after 60
+ * idle presents, and a retired one is gone a few submissions later. The texture descriptor pool
+ * holds sets for this many besides the entries' own (gegpu_init). */
+#define XS_RETIRE_MAX MAX_TEX
+static XsRetired s_xs_retired[XS_RETIRE_MAX];
+static int s_xs_retired_n;
+static uint64_t s_xs_retired_bytes, s_xs_retired_peak, s_cnt_xs_retire_waits;
+
+static void xs_retired_destroy(const XsRetired *r) {
+    if (r->set_af) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &r->set_af);
+    if (r->smp_af) vkDestroySampler(s_dev, r->smp_af, NULL);
+    if (r->set) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &r->set);
+    if (r->smp) vkDestroySampler(s_dev, r->smp, NULL);
+    if (r->view) vkDestroyImageView(s_dev, r->view, NULL);
+    if (r->img) vkDestroyImage(s_dev, r->img, NULL);
+    if (r->mem) vkFreeMemory(s_dev, r->mem, NULL);
+}
+
+/* Destroy the retired copies no recording can still sample. Nothing waits. */
+static void tex_xs_retire_collect(void) {
+    if (!s_xs_retired_n) return;
+    submit_poll_done();
+    int kept = 0;
+    for (int i = 0; i < s_xs_retired_n; i++) {
+        const XsRetired *r = &s_xs_retired[i];
+        if (r->after <= s_submit_done) {
+            xs_retired_destroy(r);
+            s_xs_retired_bytes -= r->bytes;
+        } else {
+            s_xs_retired[kept++] = *r;
+        }
+    }
+    s_xs_retired_n = kept;
+}
+
+/* Take entry `e`'s scaled copy off it and retire it behind every recording submitted or open now,
+ * giving its budget back. Batches not yet recorded never sample it: tex_xs_reclaim submits them
+ * first. With every retire slot taken by copies still in use on the GPU, the GE is drained once
+ * (counted in retire_waits) so the oldest go. Returns 0, with `e` unchanged, only when that drain
+ * fails. */
+static int tex_xs_retire(TexEnt *e) {
+    if (s_xs_retired_n == XS_RETIRE_MAX) tex_xs_retire_collect();
+    if (s_xs_retired_n == XS_RETIRE_MAX) {
+        if (!cmd_drain(GEGPU_BOUNDARY_LIFETIME)) return 0;
+        s_cnt_xs_retire_waits++;
+        tex_xs_retire_collect();
+    }
+    XsRetired *r = &s_xs_retired[s_xs_retired_n++];
+    r->after = s_submit_serial + (s_cmd_slot ? 1u : 0u);   /* the open recording is submitted next */
+    r->bytes = e->xs.bytes;
+    r->img = e->xs.img; r->mem = e->xs.mem; r->view = e->xs.view;
+    r->smp = e->xs.smp; r->smp_af = e->xs.smp_af;
+    r->set = e->xs.set; r->set_af = e->xs.set_af;
+    s_xs_retired_bytes += r->bytes;
+    if (s_xs_retired_bytes > s_xs_retired_peak) s_xs_retired_peak = s_xs_retired_bytes;
+    if (e->xs.bytes) nk_tex_scale_budget_give(e->xs.bytes);
+    memset(&e->xs, 0, sizeof(e->xs));
+    return 1;
+}
+
+/* Retire entry `e`'s idle copy but keep its content generation; a later hit offers it again.
+ * Returns 0, with `e` unchanged, when the copy could not be retired (tex_xs_retire). */
+static int tex_xs_release(TexEnt *e) {
     const uint64_t serial = e->xs.serial;
     const int repl_factor = e->xs.repl_factor;   /* a retry sizes its room by it */
     const uint64_t soft_serial = e->xs.soft_serial, soft_hash = e->xs.soft_hash;   /* not hashed again */
     const int soft_edge = e->xs.soft_edge;
-    tex_xs_free(e);
+    if (!tex_xs_retire(e)) return 0;
     e->xs.serial = serial;
     e->xs.repl_factor = repl_factor;
     e->xs.soft_serial = soft_serial;
     e->xs.soft_hash = soft_hash;
     e->xs.soft_edge = soft_edge;
     e->xs.retry = XS_RETRY_BUDGET;
+    return 1;
 }
 
 static int tex_xs_idle(const TexEnt *e, uint64_t now) {
@@ -4585,11 +4678,12 @@ static uint64_t tex_xs_idle_bytes(uint64_t now) {
 }
 
 /* The budget is short of `need` bytes for entry `keep`'s copy: free idle copies, the longest
- * idle first, until it fits with a quarter of the budget spare, so a change of scene pays one
- * drain for many copies. A copy bound in the last XS_IDLE_PRESENTS presents is never freed: when
- * the copies in use fill the budget, the new texture stays unscaled. Runs only inside tex_get,
- * where the state template is being rebuilt, and drains the GE first, as tex_evict_lru does.
- * Returns 1 when `need` fits. */
+ * idle first, until it fits with a quarter of the budget spare, so a change of scene frees many
+ * copies at once. A copy bound in the last XS_IDLE_PRESENTS presents is never freed: when the
+ * copies in use fill the budget, the new texture stays unscaled. Runs only inside tex_get, where
+ * the state template is being rebuilt. It submits the batches recorded so far and retires each
+ * freed copy behind them (tex_xs_retire): it never waits for the GPU, which before #2623 cost a
+ * drain of 100 to 200 ms after a scene load at a high render scale. Returns 1 when `need` fits. */
 static int tex_xs_reclaim(const TexEnt *keep, uint64_t need) {
     const uint64_t budget = nk_tex_scale_config()->budget_bytes;
     if (nk_tex_scale_budget_used() + need <= budget) return 1;
@@ -4599,7 +4693,7 @@ static int tex_xs_reclaim(const TexEnt *keep, uint64_t need) {
     for (int i = 0; i < s_tex_n; i++)
         if (&s_tex[i] != keep && tex_xs_idle(&s_tex[i], now)) idle += s_tex[i].xs.bytes;
     if (nk_tex_scale_budget_used() + need > budget + idle) return 0;
-    if (!submit_pending() || !cmd_drain(GEGPU_BOUNDARY_LIFETIME)) return 0;
+    if (!submit_pending()) return 0;
     const uint64_t spare = budget / 4u, goal = budget - spare > need ? budget - spare - need : 0;
     while (nk_tex_scale_budget_used() > goal) {
         TexEnt *v = NULL;
@@ -4607,8 +4701,7 @@ static int tex_xs_reclaim(const TexEnt *keep, uint64_t need) {
             TexEnt *e = &s_tex[i];
             if (e != keep && tex_xs_idle(e, now) && (!v || e->xs.last_bound < v->xs.last_bound)) v = e;
         }
-        if (!v) break;
-        tex_xs_release(v);
+        if (!v || !tex_xs_release(v)) break;
         s_cnt_xs_reclaimed++;
     }
     s_xs_idle_present = UINT64_MAX;
@@ -5339,7 +5432,7 @@ static void tex_repl_init(int enhanced) {
     /* The copies' VRAM is the scaled-copy budget, which a refused texture-scaling request leaves at 0. */
     if (!nk_tex_scale_config()->budget_bytes) {
         NkTexScaleConfig c = *nk_tex_scale_config();
-        c.budget_bytes = (uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20;
+        c.budget_bytes = nk_tex_scale_default_budget_bytes();
         nk_tex_scale_configure(&c);
     }
     static const char *const kind[] = { "quick", "xxh32", "xxh64" };
@@ -5974,7 +6067,7 @@ static void tex_soft_init(void) {
     /* The copies' VRAM is the scaled-copy budget, which a refused texture-scaling request leaves at 0. */
     if (!nk_tex_scale_config()->budget_bytes) {
         NkTexScaleConfig c = *nk_tex_scale_config();
-        c.budget_bytes = (uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20;
+        c.budget_bytes = nk_tex_scale_default_budget_bytes();
         nk_tex_scale_configure(&c);
     }
     s_soft_on = 1;
@@ -9015,6 +9108,7 @@ int gegpu_present(uint32_t fbaddr, int fmt, uint32_t stride) {
     if (!s_ready) return GEGPU_PRESENT_NOT_RESIDENT;
     readback_poll();
     tex_dump_collect();   /* the texture dump's finished files, counted (no wait; nothing when none is out) */
+    tex_xs_retire_collect();   /* retired scaled copies the GPU is done with (no wait; nothing when none) */
     /* Fill keeps a canvas for each of the last two display buffers (no effect while it is off). */
     ge_wide_note_display(fbaddr);
     /* Display buffers in main RAM (movie frames, CPU-composed screens) are never
@@ -9229,17 +9323,20 @@ static int ssaa_choose(int want, int scale, uint32_t max_dim, uint64_t budget, u
     return 1;
 }
 
-/* The size check's GPU memory budget: half the largest device-local heap (the rest stays for
- * textures, the authentic chain and the presenter). */
-static uint64_t ssaa_budget(void) {
+/* The device's largest device-local heap, in bytes (0 when it reports none). */
+static uint64_t device_local_heap(void) {
     VkPhysicalDeviceMemoryProperties mp;
     vkGetPhysicalDeviceMemoryProperties(s_pdev, &mp);
     uint64_t best = 0;
     for (uint32_t i = 0; i < mp.memoryHeapCount; i++)
         if ((mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && mp.memoryHeaps[i].size > best)
             best = mp.memoryHeaps[i].size;
-    return best / 2u;
+    return best;
 }
+
+/* The size check's GPU memory budget: half the largest device-local heap (the rest stays for
+ * textures, the authentic chain and the presenter). */
+static uint64_t ssaa_budget(void) { return device_local_heap() / 2u; }
 
 #ifdef SR_GPU_COHERENCE_SELFTEST
 #include "ge_gpu_selftest.inc"
@@ -9330,11 +9427,13 @@ static void tex_xs_report(void) {
     if ((!s_xs_factor && !s_xs_smart2d) || s_xs_reported) return;
     s_xs_reported = 1;
     fprintf(stderr, "TEX_SCALE: draws (scaled_binds=%llu, onetoone_unscaled=%llu, scaled_uploads=%llu, "
-                    "stale=%llu, smart2d=%llu, reclaimed=%llu, budget_short=%llu, upload_capped=%llu)\n",
+                    "stale=%llu, smart2d=%llu, reclaimed=%llu, budget_short=%llu, upload_capped=%llu, "
+                    "retired_peak_mb=%llu, retire_waits=%llu)\n",
             (unsigned long long)s_cnt_xs_bound, (unsigned long long)s_cnt_xs_plain,
             (unsigned long long)s_cnt_xs_uploads, (unsigned long long)s_cnt_xs_stale,
             (unsigned long long)s_cnt_smart2d, (unsigned long long)s_cnt_xs_reclaimed,
-            (unsigned long long)s_cnt_xs_budget_short, (unsigned long long)s_cnt_xs_upload_capped);
+            (unsigned long long)s_cnt_xs_budget_short, (unsigned long long)s_cnt_xs_upload_capped,
+            (unsigned long long)(s_xs_retired_peak >> 20), (unsigned long long)s_cnt_xs_retire_waits);
     nk_tex_scale_report();
 }
 
@@ -9587,6 +9686,7 @@ int gegpu_init(void) {
         const int want_factor = g_ace_on ? ace_effective()->texscale : 0;
         const int want_smart2d = g_ace_on ? ace_effective()->smart2d : 0;
         char refused[96];
+        nk_tex_scale_set_device_vram(device_local_heap());   /* the default budget follows the device */
         const NkTexScaleConfig *xs = nk_tex_scale_init(g_ace_on, want_factor, want_smart2d, refused,
                                                        sizeof(refused));
         s_xs_factor = xs->factor;
@@ -9620,16 +9720,17 @@ int gegpu_init(void) {
         if (s_glyphs) ace_confirm(ACE_FEATURE_GLYPHS);   /* the renderer that rebuilds is up */
         if (s_glyphs && !nk_tex_scale_config()->budget_bytes) {
             NkTexScaleConfig c = *nk_tex_scale_config();
-            c.budget_bytes = (uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20;
+            c.budget_bytes = nk_tex_scale_default_budget_bytes();
             nk_tex_scale_configure(&c);
         }
     }
     tex_hm_init();
     /* Per entry: its set (and the anisotropic one), a scaled copy's set (and its anisotropic one), a glyph
-     * image's, and a host chain's. */
+     * image's, and a host chain's; with scaled copies, also the sets of the retired ones the GPU may
+     * still read (tex_xs_retire). */
     const uint32_t per_entry = (s_ace_af ? 2u : 1u) + (xs_enabled() ? (s_ace_af ? 2u : 1u) : 0u) + (s_glyphs ? 1u : 0u) +
                                (s_hm ? 1u : 0u);
-    const uint32_t tex_sets = MAX_TEX * per_entry;
+    const uint32_t tex_sets = MAX_TEX * per_entry + (xs_enabled() ? XS_RETIRE_MAX * (s_ace_af ? 2u : 1u) : 0u);
     s_tex_pool_sets = tex_sets;
     if (s_ace_af) ace_confirm(ACE_FEATURE_AF);   /* the renderer that filters is up */
     if (s_depth32) ace_confirm(ACE_FEATURE_DEPTH);   /* ... and the one that tests at 32 bits */
@@ -9901,6 +10002,8 @@ void gegpu_shutdown(void) {
         tex_gl_free(e);
     }
     s_tex_n = 0;
+    s_submit_done = s_submit_serial;   /* the device is idle: every retired copy can go */
+    tex_xs_retire_collect();
     tex_hm_shutdown();
     if (s_glyphs_asked) {
         glyph_report();
