@@ -701,6 +701,8 @@ const SrTitleRuntimeConfig *sr_title_config(void) {
 void sr_compat_fired(const char *collection, uint32_t anchor, const char *name) {
     (void)collection; (void)anchor; (void)name;
 }
+/* sched.c's display wait calls late pad sampling's hook (hle_route.c); no enhancement runs here. */
+void sr_enhancement_update_waits(void) {}
 
 '''
 
