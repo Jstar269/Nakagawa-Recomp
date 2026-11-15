@@ -109,6 +109,9 @@ for the PSP's system software, graphics and sound. The player is written in C wi
 You need Windows 11 x64 with a Vulkan GPU, PowerShell 7.6+, MSYS2 UCRT64, CPython 3.15, the Vulkan SDK and Git.
 [`docs/SETUP.md`](docs/SETUP.md#prerequisites) lists the exact packages and the setup steps.
 
+A checkout of `main` is the development version: its player calls itself `0.1.0-dev`, the version in development
+after v0.0.3. To build the released version, check out the `v0.0.3` tag.
+
 1. Build the player from a checkout: `mingw32-make player`.
 2. Start `build\nakagawa_player.exe`, then drag a game's `.iso` into the window or choose **START SETUP WIZARD**.
    Later games go in through the **Add a disc image you own** tile in the library.

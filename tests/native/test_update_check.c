@@ -984,7 +984,7 @@ static void test_interrupted_install_staging(void) {
     char half[NATIVE_TEST_PATH_MAX + 96];
     char theirs[NATIVE_TEST_PATH_MAX + 96];
     NkUpdateError error;
-    snprintf(staging, sizeof(staging), "%s%cnakagawa-recomp-0.0.4-windows-x64.partial",
+    snprintf(staging, sizeof(staging), "%s%cnakagawa-recomp-0.1.0-windows-x64.partial",
              native_test_get_root(), sep);
     snprintf(mark, sizeof(mark), "%s%c%s", staging, sep, NK_UPDATE_STAGING_MARK);
     snprintf(half, sizeof(half), "%s%cbin%cSDL3.dll", staging, sep, sep);
@@ -1103,7 +1103,7 @@ static void test_interrupted_install_staging(void) {
     {
         char target[NATIVE_TEST_PATH_MAX + 40];
         char log_path[NATIVE_TEST_PATH_MAX + 24];
-        snprintf(target, sizeof(target), "%s%cnakagawa-recomp-0.0.4-windows-x64",
+        snprintf(target, sizeof(target), "%s%cnakagawa-recomp-0.1.0-windows-x64",
                  native_test_get_root(), sep);
         snprintf(log_path, sizeof(log_path), "%s%cinstall-retry.log", native_test_get_root(), sep);
         assert(nk_update_claim_staging(staging, &error));

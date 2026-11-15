@@ -131,7 +131,7 @@ a target and what isn't built yet.
   guide for each release. Creating a tag or release is a
   maintainer-only action (`AGENTS.md` section 3), and no agent may perform it.
 - [`RELEASE_NOTES_v0.0.3.md`](RELEASE_NOTES_v0.0.3.md) — the notes of the
-  v0.0.3 release.
+  v0.0.3 release, the latest. `main` is the development version, `0.1.0-dev`, toward v0.1.0.
 - [`RELEASE_NOTES_v0.0.2.md`](RELEASE_NOTES_v0.0.2.md) — the notes of the
   v0.0.2 release, kept as released.
 - [`RELEASE_NOTES_v0.0.1.md`](RELEASE_NOTES_v0.0.1.md) — the notes of the
