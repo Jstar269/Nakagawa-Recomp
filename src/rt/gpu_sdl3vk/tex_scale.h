@@ -49,8 +49,9 @@ extern "C" {
 /* Scaling jobs waiting, running or finished at once; a texture that finds the queue full is
  * drawn unscaled and offered again on a later draw. */
 #define NK_TEX_SCALE_QUEUE 64
-/* Host memory those jobs may hold, sources and results together (a 512x512 texture at 4x holds
- * 17 MiB). A submit past it is refused like a full queue, except that one job is always taken. */
+/* Host memory those jobs may hold together: sources, results and the scratch a running scale makes
+ * (nk_tex_scale_job_bytes; a 512x512 texture at 4x counts about 34 MiB). A submit past it is refused
+ * like a full queue, except that one job is always taken. */
 #define NK_TEX_SCALE_HOST_MB 128u
 /* Worker threads the jobs run on (nk_tex_scale_worker_count). */
 #define NK_TEX_SCALE_WORKERS_MIN 2
@@ -100,8 +101,14 @@ uint64_t nk_tex_scale_budget_used(void);
  * guest's thread, which also records the GE's work, one for audio and the graphics driver), at least
  * NK_TEX_SCALE_WORKERS_MIN and at most NK_TEX_SCALE_WORKERS_MAX; a count of 0 or less (unknown)
  * gives the minimum. The count changes only how fast copies arrive, never what a job makes, and the
- * memory the jobs hold stays under NK_TEX_SCALE_HOST_MB whatever it is. Pure. */
+ * memory the jobs hold stays under NK_TEX_SCALE_HOST_MB whatever it is: a job is admitted with every
+ * buffer it makes while it runs (nk_tex_scale_job_bytes), so jobs running at once never pass the cap
+ * (the one exception is a lone job larger than the cap, which no PSP texture's is). Pure. */
 int nk_tex_scale_worker_count(int logical_cpus);
+/* The host bytes a scale of a w x h texture by `factor` is counted as from submit until its result
+ * is released: the source copy, the result, and the padded source and padded result
+ * nk_tex_scale_image makes while it runs. 0 for a factor or size submit refuses. Pure. */
+uint64_t nk_tex_scale_job_bytes(int w, int h, int factor);
 /* The workers started for the jobs now (0 before the first job and after nk_tex_scale_shutdown). */
 int nk_tex_scale_workers(void);
 /* Queue a scale of `rgba` (w x h, R in the low byte, as ge.c's decoder writes) by `factor`.

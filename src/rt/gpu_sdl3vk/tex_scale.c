@@ -220,11 +220,21 @@ static int s_workers;          /* threads in s_threads that started */
 static int s_report_workers;   /* the most that started in this process, for the exit line */
 static int s_started, s_quit, s_hold, s_sync;
 static NkTexScaleStats s_stats;
-/* Host bytes the jobs not FREE hold or will hold (source plus result), under s_mx. */
+/* Host bytes the jobs not FREE hold or will hold, under s_mx (nk_tex_scale_job_bytes for a scale). */
 static uint64_t s_host_bytes;
 
+/* A finished image's: the w x h source copy it is counted as (a scale's own figure, less the scratch
+ * it never makes) and its result. */
 static uint64_t job_host_bytes(int w, int h, int factor) {
     return (uint64_t)w * (uint64_t)h * 4u * (1u + (uint64_t)factor * (uint64_t)factor);
+}
+
+uint64_t nk_tex_scale_job_bytes(int w, int h, int factor) {
+    if (factor < 2 || factor > NK_TEX_SCALE_MAX || w <= 0 || h <= 0) return 0;
+    /* nk_tex_scale_image's padded source and xBRZ's padded result, live while the job runs */
+    const uint64_t padded = (uint64_t)(w + 2 * PAD) * (uint64_t)(h + 2 * PAD) * 4u *
+                            (1u + (uint64_t)factor * (uint64_t)factor);
+    return job_host_bytes(w, h, factor) + padded;
 }
 
 static void run_job(Job *j) {
@@ -330,7 +340,9 @@ static int ensure_started(void) {
 /* Room for a job holding `host` bytes, under s_mx: a free slot, and the jobs' host memory stays
  * within NK_TEX_SCALE_HOST_MB (one job is always accepted, so the largest copy can be made). The
  * one test for nk_tex_scale_can_submit and nk_tex_scale_submit, so a caller told there is room is
- * never refused (a refused retry would decode again on every hit). */
+ * never refused (a refused retry would decode again on every hit). A scale is counted with the
+ * scratch it makes while it runs (nk_tex_scale_job_bytes), so the cap bounds the memory however
+ * many workers run at once. */
 static Job *room_for(uint64_t host) {
     Job *j = oldest(JOB_FREE);
     if (!j || (s_host_bytes && s_host_bytes + host > ((uint64_t)NK_TEX_SCALE_HOST_MB << 20))) return NULL;
@@ -341,7 +353,8 @@ int nk_tex_scale_can_submit(int w, int h, int factor) {
     if (factor < 2 || factor > NK_TEX_SCALE_MAX || w <= 0 || h <= 0) return 0;
     if (!ensure_started()) return 0;
     SDL_LockMutex(s_mx);
-    const int room = room_for(job_host_bytes(w, h, factor)) != NULL;
+    /* A scale's figure, at least a finished image's: told yes, either submit is taken. */
+    const int room = room_for(nk_tex_scale_job_bytes(w, h, factor)) != NULL;
     SDL_UnlockMutex(s_mx);
     return room;
 }
@@ -351,7 +364,7 @@ int nk_tex_scale_submit(uint64_t serial, uint64_t hash, const uint32_t *rgba, in
     if (factor < 2 || factor > NK_TEX_SCALE_MAX || w <= 0 || h <= 0) return 0;
     if (!ensure_started()) return 0;
     SDL_LockMutex(s_mx);
-    const uint64_t host = job_host_bytes(w, h, factor);
+    const uint64_t host = nk_tex_scale_job_bytes(w, h, factor);
     Job *j = room_for(host);
     if (!j) {
         s_stats.refused_full++;

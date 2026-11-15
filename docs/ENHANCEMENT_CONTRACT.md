@@ -1132,9 +1132,11 @@ The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture
   bound only while both still match. A texture the guest rewrites, or a CLUT texture drawn with another palette (a
   different cache key), is drawn unscaled until its own copy is ready, and never with the old one.
 - **Never waited on.** Worker threads scale, one for each logical CPU but two, at least 2 and at most 8
-  (`nk_tex_scale_worker_count`); the count changes only how soon a copy arrives, never its texels. The renderer only queues the decoded texels and stores finished
-  copies at a later lookup. The jobs, waiting, running or finished, are at most 64 and hold at most 128 MiB of host
-  memory together (one job is always accepted, so the largest copy, 16 MiB, can be made). Storing a copy is an upload
+  (`nk_tex_scale_worker_count`); the count changes only how soon a copy arrives, never its texels. The renderer only
+  queues the decoded texels and stores finished copies at a later lookup. The jobs, waiting, running or finished, are
+  at most 64 and hold at most 128 MiB of host memory together, whatever the worker count: a job is counted with its
+  source, its result and the padded buffers its scale makes while it runs (`nk_tex_scale_job_bytes`; about 34 MiB for
+  the largest copy, 16 MiB), and one job is always accepted, so that copy can be made. Storing a copy is an upload
   on the renderer thread, so at most 8 MiB of copies are stored per present, the first copy of a present always;
   the rest wait in the job table for the next present. Until its copy is stored, or with the job table full, a
   texture is drawn unscaled. Nothing is hidden or skipped.

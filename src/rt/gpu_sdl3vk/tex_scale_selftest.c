@@ -14,6 +14,8 @@
  *   - jobs: a queued job returns the same pixels with its serial and hash; a held queue keeps a
  *     job queued and a full one refuses the next; nothing waits for a worker; the host-memory cap
  *     refuses the job that would pass it, and can_submit always gives submit's answer;
+ *   - host peak: a job counts the scratch its scale makes as well as its source and result, so
+ *     the jobs taken stay under the cap even if all of them run at once, and none that fits is refused;
  *   - work jobs (the texture dump's): each runs once on a worker thread, held ones stay queued
  *     without the submitter waiting, a full queue and the host-memory cap refuse the next, scale
  *     and work results are taken apart, and a sync submit runs its job before returning;
@@ -304,15 +306,23 @@ static void test_jobs(void) {
     if (!s_fail) printf("tex scale selftest: PASS jobs queued=%d held, full, ordered, sync\n", queued);
 }
 
-/* The host-memory cap. With the jobs held, 512x512 textures at 2x (5 MiB of host memory each,
- * source and result) are taken until the next would pass NK_TEX_SCALE_HOST_MB, well before the
- * table is full. can_submit gives submit's answer at every step: a caller told there is room is
- * never refused (the renderer would otherwise decode again on every hit). A small job that still
- * fits under the cap is taken; a large one is not. */
+/* The host bytes a running w x h scale by f holds at its peak, worked out here from what
+ * nk_tex_scale_image and the worker allocate rather than taken from tex_scale.c: the w x h source
+ * copy, the result, the source padded by two texels on every side, and xBRZ's result of that. */
+static uint64_t peak_bytes(int w, int h, int f) {
+    const uint64_t texels = (uint64_t)w * (uint64_t)h, padded = (uint64_t)(w + 4) * (uint64_t)(h + 4);
+    return 4u * (texels + texels * (uint64_t)(f * f) + padded + padded * (uint64_t)(f * f));
+}
+
+/* The host-memory cap. With the jobs held, 512x512 textures at 2x (about 10 MiB of host memory
+ * each with the scratch a running scale makes) are taken until the next would pass
+ * NK_TEX_SCALE_HOST_MB, well before the table is full. can_submit gives submit's answer at every
+ * step: a caller told there is room is never refused (the renderer would otherwise decode again on
+ * every hit). A small job that still fits under the cap is taken; a large one is not. */
 static uint32_t s_big[512 * 512];
 static void test_host_cap(void) {
     enum { BW = 512, BH = 512, BF = 2, SW = 20, SH = 12 };
-    const uint64_t each = (uint64_t)BW * BH * 4u * (1u + BF * BF), cap = (uint64_t)NK_TEX_SCALE_HOST_MB << 20;
+    const uint64_t each = peak_bytes(BW, BH, BF), cap = (uint64_t)NK_TEX_SCALE_HOST_MB << 20;
     const int fit = (int)(cap / each);
     for (int i = 0; i < BW * BH; i++) s_big[i] = 0xFF000000u | (uint32_t)i;
     nk_tex_scale_set_hold(1);
@@ -328,7 +338,7 @@ static void test_host_cap(void) {
           "host cap: took %d jobs of %llu bytes (want %d, under %u MiB with the table's %d slots not full); "
           "can_submit and submit disagreed %d times", taken, (unsigned long long)each, fit, NK_TEX_SCALE_HOST_MB,
           NK_TEX_SCALE_QUEUE, disagree);
-    const uint64_t small = (uint64_t)SW * SH * 4u * 5u;
+    const uint64_t small = peak_bytes(SW, SH, 2);
     CHECK((uint64_t)fit * each + small <= cap && nk_tex_scale_can_submit(SW, SH, 2) &&
           nk_tex_scale_submit(600u, 1u, s_big, SW, SH, 2, 1, 1), "host cap: a small job that fits under the cap was refused");
     CHECK(!nk_tex_scale_can_submit(BW, BH, BF) && !nk_tex_scale_submit(601u, 1u, s_big, BW, BH, BF, 1, 1),
@@ -344,6 +354,39 @@ static void test_host_cap(void) {
     nk_tex_scale_shutdown();
     if (!s_fail) printf("tex scale selftest: PASS host-cap %d jobs of %llu MiB, can_submit equals submit\n", taken,
                         (unsigned long long)(each >> 20));
+}
+
+/* The cap bounds the peak, scratch included. With the jobs held, each size is submitted until it is
+ * refused: had every job taken run at once (one per worker, up to NK_TEX_SCALE_WORKERS_MAX), the
+ * buffers they hold would still fit under NK_TEX_SCALE_HOST_MB, and the next job would not (or the
+ * table is full), so the cap is not met by refusing jobs that fit. nk_tex_scale_job_bytes agrees with
+ * peak_bytes. Counting only the source and result let twice the cap's memory run at once. */
+static void test_host_peak(void) {
+    static const struct { int w, h, f; } cell[] = {
+        {512, 512, 4}, {256, 256, 4}, {340, 340, 6}, {128, 128, 3}, {64, 64, 6},
+    };
+    const uint64_t cap = (uint64_t)NK_TEX_SCALE_HOST_MB << 20;
+    for (size_t c = 0; c < sizeof cell / sizeof cell[0]; c++) {
+        const int w = cell[c].w, h = cell[c].h, f = cell[c].f;
+        const uint64_t ref = peak_bytes(w, h, f);
+        CHECK(nk_tex_scale_job_bytes(w, h, f) == ref, "host peak: %dx%d at %dx counts %llu bytes, peak_bytes %llu", w,
+              h, f, (unsigned long long)nk_tex_scale_job_bytes(w, h, f), (unsigned long long)ref);
+        nk_tex_scale_set_hold(1);
+        int taken = 0;
+        while (taken < NK_TEX_SCALE_QUEUE && nk_tex_scale_can_submit(w, h, f) &&
+               nk_tex_scale_submit(700u + (uint64_t)taken, 1u, s_big, w, h, f, 1, 1))
+            taken++;
+        const uint64_t peak = (uint64_t)taken * ref;
+        CHECK(taken >= 1 && peak <= cap,
+              "host peak: %d jobs of %dx%d at %dx hold %llu bytes at once, past the %u MiB cap", taken, w, h, f,
+              (unsigned long long)peak, NK_TEX_SCALE_HOST_MB);
+        CHECK(taken == NK_TEX_SCALE_QUEUE || peak + ref > cap,
+              "host peak: %dx%d at %dx refused after %d jobs, with room for another under the cap", w, h, f, taken);
+        nk_tex_scale_shutdown();   /* the held jobs are dropped unrun */
+    }
+    CHECK(nk_tex_scale_job_bytes(16, 16, 1) == 0 && nk_tex_scale_job_bytes(0, 16, 2) == 0 &&
+          nk_tex_scale_job_bytes(16, 16, NK_TEX_SCALE_MAX + 1) == 0, "host peak: a size submit refuses was counted");
+    if (!s_fail) printf("tex scale selftest: PASS host-peak the cap bounds sources, results and scratch together\n");
 }
 
 /* Work jobs (the texture dump's encode and write): run once each, on a worker thread, never on
@@ -1141,6 +1184,7 @@ int main(void) {
     test_wrap_clamp();
     test_jobs();
     test_host_cap();
+    test_host_peak();
     test_work();
     test_settings();
     test_smart2d();
