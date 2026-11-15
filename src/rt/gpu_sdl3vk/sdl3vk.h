@@ -135,15 +135,22 @@ int  sdl3vk_hud_next_mode(int mode, int developer);
 void sdl3vk_set_audio_active_cb(int (*cb)(void));
 /* Whether an enhancement build's 60 FPS logic has fallen behind, and its rate in updates/s
  * (sr_enhancement_logic_slowed in the runtime). With a query that answers yes the presenter
- * shows a notice whether or not the HUD is on. */
+ * shows a notice whether or not the HUD is on: in the HUD while it shows, else through the UI
+ * pass (below), else in a box of its own at the top left. */
 void sdl3vk_set_logic_slowed_cb(int (*cb)(unsigned *rate));
+/* That notice's words for a rate in updates/s ("60 FPS logic: 52/s - SLOWED"), as the HUD and
+ * the UI pass show them; returns `out`. */
+const char *sdl3vk_logic_notice_text(char *out, size_t cap, unsigned rate);
 
 /* Ace Mode's in-game UI pass (src/rt/gpu_sdl3vk/ace_ui.h). Called on every present, after the
  * frame blit and the HUD, with the swapchain image in TRANSFER_DST_OPTIMAL; it may record into
  * the command buffer and must leave the image in that layout. The frame the capture reads is
  * never touched. Registered in an Ace run, or for the render notice when one is due (gui.c,
  * #2151), so an authentic present with nothing to say records what it did before; NULL removes
- * it. Handles are Vulkan's, passed as void pointers. */
+ * it. Handles are Vulkan's, passed as void pointers. It returns 1 when it drew, 0 when it drew
+ * nothing. With logic_slowed set it shows the slowed-logic notice in its own layout (under the
+ * readout) whenever it draws; when it returns 0 the presenter copies its own notice box after
+ * it, so the notice is never lost and never shares the corner with the pass's readout. */
 typedef struct {
     void *cmd;                    /* VkCommandBuffer */
     uint32_t frame_slot;          /* its fence already waited */
@@ -154,8 +161,10 @@ typedef struct {
     uint32_t image_count;
     uint32_t image_index;
     uint64_t swapchain_gen;
+    int logic_slowed;             /* the HUD is off and the logic has fallen behind: show it */
+    unsigned logic_rate;          /* its rate in updates/s */
 } Sdl3VkUiPass;
-void sdl3vk_set_ui_pass(void (*pass)(const Sdl3VkUiPass *frame));
+void sdl3vk_set_ui_pass(int (*pass)(const Sdl3VkUiPass *frame));
 
 /* Ace Mode's smooth motion (src/rt/gpu_sdl3vk/ace_smooth.h). Called on every present, before the
  * frame blit, with `src` in TRANSFER_SRC_OPTIMAL, or VK_NULL_HANDLE when the present is

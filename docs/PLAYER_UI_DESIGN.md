@@ -610,7 +610,8 @@ on and, as its own `BODY_S` `muted` paragraph, the last session. Both sentences 
 on: the page body scrolls, so the card grows instead of ending either one in an ellipsis. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
 art's top right. In game, the pause menu's caption names the mode and its parts and its Settings page has a live
 SPEED READOUT row; the launch notice (ENHANCED or ACE, top right, 3 s, a cut with Reduce motion) and the readout
-(top left) are chips on the 16 px safe area. The notice and the caption list the parts that are on, joined by
+(top left) are chips on the 16 px safe area. When 60 FPS logic falls behind with the HUD off, its red
+`60 FPS logic: <n>/s - SLOWED` warning is a chip under the readout, never in the readout's corner. The notice and the caption list the parts that are on, joined by
 middle dots. A list too long for one line wraps between its parts, never inside one, and never ends in an
 ellipsis: the notice takes up to eleven lines, each at most half the window wide (one line while the on-screen
 keyboard is open), and the caption takes the lines its card has room for above RESUME. Where a list is longer

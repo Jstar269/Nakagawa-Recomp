@@ -383,20 +383,28 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *f) {
     if (!nk_ui_begin_container(ui, ACE_UI_ID_ROOT, &root, NULL)) return;
 
     int show_readout = f->readout && f->readout[0];
+    int show_logic = f->logic_notice && f->logic_notice[0];
     int show_notice = f->notice && f->notice[0] && f->notice_alpha > 0.0f;
     const int keyboard_open = f->keyboard && f->keyboard->status == OSK_OVERLAY_OPEN;
     NkUiLayout top = layout(NK_UI_LAYOUT_ROW, sizing(NK_UI_SIZE_GROW, 0.0f),
                             sizing(NK_UI_SIZE_FIT, 0.0f), NK_UI_SPACE_3);
     top.align_y = NK_UI_ALIGN_START;
-    if ((show_readout || show_notice) && nk_ui_begin_container(ui, ACE_UI_ID_TOP, &top, NULL)) {
+    if ((show_readout || show_logic || show_notice) &&
+        nk_ui_begin_container(ui, ACE_UI_ID_TOP, &top, NULL)) {
         float room = scale.logical_w - 2.0f * NK_UI_SPACE_4;
-        if (show_readout) {
+        /* The top left is one column: the readout, then the slowed-logic warning under it, so
+         * the two never share the corner (the presenter used to copy its own warning box there,
+         * where the readout's chip, drawn after it, hid it). */
+        NkUiLayout left = layout(NK_UI_LAYOUT_COLUMN, sizing(NK_UI_SIZE_FIT, 0.0f),
+                                 sizing(NK_UI_SIZE_FIT, 0.0f), NK_UI_SPACE_2);
+        left.align_x = NK_UI_ALIGN_START;
+        if ((show_readout || show_logic) && nk_ui_begin_container(ui, ACE_UI_ID_TOP_LEFT, &left, NULL)) {
             NkUiLayout chip = layout(NK_UI_LAYOUT_ROW, sizing(NK_UI_SIZE_FIT, 0.0f),
                                      sizing(NK_UI_SIZE_FIT, 0.0f), 0.0f);
             chip.padding_left = chip.padding_right = NK_UI_SPACE_2 + 2.0f;
             chip.padding_top = chip.padding_bottom = NK_UI_SPACE_1 + 2.0f;
             NkUiStyle style = chip_style(theme, f->high_contrast, 1.0f);
-            if (nk_ui_begin_container(ui, ACE_UI_ID_READOUT, &chip, &style)) {
+            if (show_readout && nk_ui_begin_container(ui, ACE_UI_ID_READOUT, &chip, &style)) {
                 NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_DATA,
                                                 f->readout_warning ? theme->warning : theme->paper);
                 text.wrap = false;
@@ -405,6 +413,15 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *f) {
                            &text);
                 nk_ui_end_container(ui);
             }
+            if (show_logic && nk_ui_begin_container(ui, ACE_UI_ID_LOGIC, &chip, &style)) {
+                NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_DATA, theme->error);
+                text.wrap = false;
+                nk_ui_text(ui, ACE_UI_ID_LOGIC_TEXT,
+                           one_line(ui, nk_ui_text_clamp(ui, f->logic_notice, &text, room * 0.5f, 1)),
+                           &text);
+                nk_ui_end_container(ui);
+            }
+            nk_ui_end_container(ui);
         }
         NkUiLayout spacer = layout(NK_UI_LAYOUT_ROW, sizing(NK_UI_SIZE_GROW, 0.0f),
                                    sizing(NK_UI_SIZE_FIXED, 1.0f), 0.0f);
@@ -452,6 +469,7 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *f) {
 int ace_ui_frame_wants(const AceUiFrame *f) {
     if (!f || f->pixel_w <= 0 || f->pixel_h <= 0) return 0;
     return (f->readout && f->readout[0]) ||
+           (f->logic_notice && f->logic_notice[0]) ||
            (f->notice && f->notice[0] && f->notice_alpha > 0.0f) ||
            (f->keyboard && f->keyboard->status == OSK_OVERLAY_OPEN) ||
            (f->host_notice && f->host_notice[0]);
