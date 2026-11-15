@@ -1306,10 +1306,10 @@ static void gui_ace_ui_release(void) {
 
 #endif
 
-/* Releases what gui_init set up: called by the driver once the scheduler has returned, and
- * explicitly by orderly terminal exits. Fatal exits bypass it so the cache is not written from
- * an incomplete run. The SR_PERF summary is written first, while the GPU GE it samples still
- * exists; each step clears what it released, so a second call does nothing (#1072, #1377). */
+/* Releases what gui_init set up: called by the driver once the scheduler has returned, and at
+ * process exit for a run that ends any other way (sceKernelExitGame's exit()). The SR_PERF
+ * summary is written first, while the GPU GE it samples still exists; each step clears what it
+ * released, so a second call does nothing (#1072, #1377). */
 void gui_shutdown(void) {
 #if defined(SR_SDL3VK) || defined(_WIN32)
     sr_perf_shutdown();
@@ -1357,6 +1357,10 @@ static void gui_texdump_at_start(void);   /* the texture dump, started with the 
 
 void gui_init(const char *title) {
     (void)title;
+#if defined(SR_SDL3VK) || defined(_WIN32)
+    static int cleanup_registered;
+    if (!cleanup_registered && atexit(gui_shutdown) == 0) cleanup_registered = 1;
+#endif
     gui_headless_acceptance_parse();
     /* An Ace Mode run (ace.h) says so in the structured boot events too, so a log whose stderr
      * was silenced (SR_QUIET) still tells tools/boot_gate.py it is not authentic evidence. */

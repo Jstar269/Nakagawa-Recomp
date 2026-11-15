@@ -1366,23 +1366,32 @@ def run_vramdump(build_dir: Path) -> int:
             return output
 
         cold_output = cache_exit_run("pipeline-cache-cold-exit")
-        if not re.search(r"gegpu: pipeline cache: none yet \(", cold_output):
-            raise RuntimeError("display-smoke pipeline-cache cold run did not start empty: " + cold_output)
-        if not re.search(r"gegpu: pipeline cache: exit \(started empty, saved \d+ bytes;", cold_output):
-            raise RuntimeError(
-                "display-smoke SR_EXIT_AT_VBLANK did not save its pipeline cache: " + cold_output
-            )
-        cache_folder = cache_root / "cache" / "gegpu"
-        cache_files = list(cache_folder.iterdir()) if cache_folder.is_dir() else []
-        if len(cache_files) != 1 or not cache_files[0].is_file() or cache_files[0].stat().st_size == 0:
-            raise RuntimeError("display-smoke SR_EXIT_AT_VBLANK did not leave one cache file")
+        # With no Vulkan device or window (hosted CI's display-smoke-run legs have none) the
+        # presenter never comes up and there is no cache to save: say SKIP, never a silent pass.
+        # A presenter that did come up but wrote no cache still fails below.
+        if ("gui_init: SDL3/Vulkan init failed" in cold_output
+                or "BOOT_EVENT phase=window_ready backend=vulkan" not in cold_output):
+            pipeline_cache_exit = "SKIP"
+            print("DISPLAY_SMOKE_PIPELINE_CACHE status=SKIP reason=no_vulkan_device_or_window")
+        else:
+            pipeline_cache_exit = "PASS"
+            if not re.search(r"gegpu: pipeline cache: none yet \(", cold_output):
+                raise RuntimeError("display-smoke pipeline-cache cold run did not start empty: " + cold_output)
+            if not re.search(r"gegpu: pipeline cache: exit \(started empty, saved \d+ bytes;", cold_output):
+                raise RuntimeError(
+                    "display-smoke SR_EXIT_AT_VBLANK did not save its pipeline cache: " + cold_output
+                )
+            cache_folder = cache_root / "cache" / "gegpu"
+            cache_files = list(cache_folder.iterdir()) if cache_folder.is_dir() else []
+            if len(cache_files) != 1 or not cache_files[0].is_file() or cache_files[0].stat().st_size == 0:
+                raise RuntimeError("display-smoke SR_EXIT_AT_VBLANK did not leave one cache file")
 
-        warm_output = cache_exit_run("pipeline-cache-warm-exit")
-        if not re.search(r"gegpu: pipeline cache: loaded \d+ bytes \(", warm_output):
-            raise RuntimeError("display-smoke second orderly exit did not load the saved cache: " + warm_output)
+            warm_output = cache_exit_run("pipeline-cache-warm-exit")
+            if not re.search(r"gegpu: pipeline cache: loaded \d+ bytes \(", warm_output):
+                raise RuntimeError("display-smoke second orderly exit did not load the saved cache: " + warm_output)
 
     print("DISPLAY_SMOKE_VRAMDUMP status=PASS bounded_sidecars=1..8 "
-          "present_bytes=IDENTICAL png_pixels=IDENTICAL pipeline_cache_exit=PASS")
+          f"present_bytes=IDENTICAL png_pixels=IDENTICAL pipeline_cache_exit={pipeline_cache_exit}")
 
 
 FLIGHT_KIND_PRESENT_SET_FRAMEBUF = 28

@@ -1279,15 +1279,15 @@ void sr_vblank_tick(void) {
             psmf_av_final("exit_at_vblank");
             ge_scene_dump_finish();
             sr_compat_report();
+            /* _Exit skips atexit, so release the renderer (and save its pipeline cache) here; it writes
+             * the SR_PERF summary first, so the call below is then a no-op. */
+            gui_shutdown();
             sr_perf_shutdown();
             sr_profile_dump_final();
             SR_VERIFY_REPORT_NOW();
             hle_state_sample_close();
             /* Ace Mode's exit stamp and report are an atexit hook too (a no-op when off). */
             ace_finish();
-            /* This successful stop uses _Exit, so release the renderer explicitly before the
-             * process terminates. Fatal named stops intentionally skip this cache save. */
-            gui_shutdown();
             _Exit(0);
         }
     }
