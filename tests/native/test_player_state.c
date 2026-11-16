@@ -16556,12 +16556,19 @@ int main(int argc, char **argv) {
             player_app_refresh_cover_art_cache_size(s_app2);
             assert(s_app2->cover_art_cache_bytes == sizeof(png));
             assert(strcmp(s_app2->cover_art_cache_size_label, "1 KB") == 0);
+            /* A disc remembered as having no art this session is requested again
+               only after Refresh forgets it. */
+            assert(nk_cover_art_misses_add(&s_app2->cover_art_misses,
+                                           "1111111111111111111111111111111111111111"));
             player_app_refresh_cover_art_cache(s_app2);
             assert(s_app2->cover_art_cache_bytes == 0u);
             assert(strcmp(s_app2->cover_art_cache_size_label, "0 KB") == 0);
             assert(s_app2->cover_art_generation == 1u);
+            assert(!nk_cover_art_misses_contains(&s_app2->cover_art_misses,
+                                                 "1111111111111111111111111111111111111111"));
             assert(strcmp(s_app2->settings_notice,
-                          "Cover art cache cleared. Covers will download again when viewed.") == 0);
+                          "Cover art cache cleared. Covers for every verified disc download "
+                          "again now.") == 0);
         }
 
         remove(test_settings_path);

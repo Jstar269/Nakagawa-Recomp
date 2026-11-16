@@ -3445,7 +3445,7 @@ class NativePlayerUiTests(unittest.TestCase):
             )
             clear_stdout = str(clear_run["stdout"])
             self.assertIn(
-                "[PLAYER_UI_TEST] next_ui_cover_cache size=0 KB|notice=Cover art cache cleared. Covers will download again when viewed.",
+                "[PLAYER_UI_TEST] next_ui_cover_cache size=0 KB|notice=Cover art cache cleared. Covers for every verified disc download again now.",
                 clear_stdout,
             )
             self.assertFalse(any(p.startswith("cache/cover-art/")

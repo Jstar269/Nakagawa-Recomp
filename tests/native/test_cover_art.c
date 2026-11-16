@@ -32,6 +32,8 @@ typedef struct {
     bool has_content_length;
     uint64_t declared_length;
     bool fail_read;
+    const char *final_url;   /* NULL: the request URL (no redirect) */
+    bool no_final_url;       /* a transport that reports no final URL */
 } FakeAnswer;
 
 typedef struct {
@@ -78,7 +80,8 @@ static bool fake_open(void *context, const char *url, const char *allowed_hosts,
         net->open = answer;
         net->offset = 0u;
         memset(response, 0, sizeof(*response));
-        response->final_url = answer->url;
+        response->final_url = answer->no_final_url ? NULL
+                              : answer->final_url ? answer->final_url : answer->url;
         response->has_content_length = answer->has_content_length;
         response->content_length = answer->declared_length;
         response->context = net;
@@ -243,7 +246,7 @@ static void test_png_validation_and_fetch(void) {
     assert(nk_cover_art_fetch_for_disc(
                fake_open, &net, &dat, data_root, "ULUS99999",
                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "deadbeef",
-               NULL, NULL, NULL, &source) == NK_COVER_ART_NO_MATCH);
+               NULL, NULL, NULL, NULL, &source) == NK_COVER_ART_NO_MATCH);
     assert(net.request_count == 0u);
     assert(source == NK_COVER_ART_SOURCE_NONE);
 
@@ -251,7 +254,7 @@ static void test_png_validation_and_fetch(void) {
     assert(nk_cover_art_fetch_for_disc(
                fake_open, &net, &dat, data_root, "UCUS98618",
                "0123456789ABCDEF0123456789ABCDEF01234567", "AABBCCDD",
-               NULL, NULL, NULL, &source) == NK_COVER_ART_OK);
+               NULL, NULL, NULL, NULL, &source) == NK_COVER_ART_OK);
     assert(source == NK_COVER_ART_SOURCE_LIBRETRO);
     assert(net.request_count == 1u);
     assert(strcmp(net.requested[0], expected_url) == 0);
@@ -271,34 +274,34 @@ static void test_png_validation_and_fetch(void) {
     assert(nk_cover_art_fetch_for_disc(
                fake_open, &net, &dat, data_root, "ULUS99998",
                "1111111111111111111111111111111111111111", "11223344",
-               NULL, NULL, NULL, &source) == NK_COVER_ART_NOT_FOUND);
+               NULL, NULL, NULL, NULL, &source) == NK_COVER_ART_NOT_FOUND);
     assert(!file_exists(bad_file));
 
     memset(&net, 0, sizeof(net));
     add_answer(&net, "https://thumbnails.libretro.com/Sony%20-%20PlayStation%20Portable/Named_Boxarts/NonPng.png",
                kNotPng, sizeof(kNotPng));
     assert(nk_cover_art_fetch_url(fake_open, &net, net.answers[0].url, "thumbnails.libretro.com",
-                                  bad_file, NULL, NULL) == NK_COVER_ART_INVALID_PNG);
+                                  bad_file, NULL, NULL, NULL) == NK_COVER_ART_INVALID_PNG);
     assert(!file_exists(bad_file));
 
     memset(&net, 0, sizeof(net));
     add_answer(&net, "https://thumbnails.libretro.com/Sony%20-%20PlayStation%20Portable/Named_Boxarts/Huge.png",
                kHugePng, sizeof(kHugePng));
     assert(nk_cover_art_fetch_url(fake_open, &net, net.answers[0].url, "thumbnails.libretro.com",
-                                  bad_file, NULL, NULL) == NK_COVER_ART_INVALID_PNG);
+                                  bad_file, NULL, NULL, NULL) == NK_COVER_ART_INVALID_PNG);
 
     memset(&net, 0, sizeof(net));
     add_answer(&net, "https://thumbnails.libretro.com/Sony%20-%20PlayStation%20Portable/Named_Boxarts/Big.png",
                kValidPng, sizeof(kValidPng));
     net.answers[0].declared_length = NK_COVER_ART_MAX_BYTES + 1u;
     assert(nk_cover_art_fetch_url(fake_open, &net, net.answers[0].url, "thumbnails.libretro.com",
-                                  bad_file, NULL, NULL) == NK_COVER_ART_TOO_LARGE);
+                                  bad_file, NULL, NULL, NULL) == NK_COVER_ART_TOO_LARGE);
 
     memset(&net, 0, sizeof(net));
     add_answer(&net, expected_url, kValidPng, sizeof(kValidPng));
     net.cancel_after_reads = 1;
     assert(nk_cover_art_fetch_url(fake_open, &net, expected_url, "thumbnails.libretro.com",
-                                  bad_file, cancel_after_first_read, &net) == NK_COVER_ART_CANCELLED);
+                                  bad_file, cancel_after_first_read, &net, NULL) == NK_COVER_ART_CANCELLED);
 
     /* RetroAchievements fallback seam: invoked when primary libretro has no match. */
     FakeFallbackState ra;
@@ -311,7 +314,7 @@ static void test_png_validation_and_fetch(void) {
     assert(nk_cover_art_fetch_for_disc(
                fake_open, &net, &dat, data_root, "ULUS99998",
                "1111111111111111111111111111111111111111", "11223344",
-               &providers, NULL, NULL, &source) == NK_COVER_ART_NOT_FOUND);
+               &providers, NULL, NULL, NULL, &source) == NK_COVER_ART_NOT_FOUND);
     assert(ra.called);
     assert(strcmp(ra.disc_id, "ULUS99998") == 0);
     assert(net.request_count == 1u); /* Primary libretro tried once; HTTP fallback refused. */
@@ -323,7 +326,7 @@ static void test_png_validation_and_fetch(void) {
     assert(nk_cover_art_fetch_for_disc(
                fake_open, &net, &dat, data_root, "ULUS99998",
                "1111111111111111111111111111111111111111", "11223344",
-               &providers, NULL, NULL, &source) == NK_COVER_ART_OK);
+               &providers, NULL, NULL, NULL, &source) == NK_COVER_ART_OK);
     assert(source == NK_COVER_ART_SOURCE_RETROACHIEVEMENTS);
     assert(file_exists(bad_file));
 
@@ -339,6 +342,184 @@ static void test_png_validation_and_fetch(void) {
     printf("[COVER_ART_TEST] png_validation_and_fetch: PASS\n");
 }
 
+/* A cache lock that records how it is used; cancel_on_lock stands for a deleter
+   that cancelled the fetch while the fetch waited for the lock. */
+typedef struct {
+    int locks;
+    int unlocks;
+    bool held;
+    bool cancel_on_lock;
+    bool cancelled;
+    int checks_while_held;
+} FakeCacheLock;
+
+static void fake_cache_lock(void *context) {
+    FakeCacheLock *lock = (FakeCacheLock *)context;
+    assert(!lock->held);
+    lock->locks++;
+    lock->held = true;
+    if (lock->cancel_on_lock) lock->cancelled = true;
+}
+
+static void fake_cache_unlock(void *context) {
+    FakeCacheLock *lock = (FakeCacheLock *)context;
+    assert(lock->held);
+    lock->unlocks++;
+    lock->held = false;
+}
+
+static bool fake_lock_cancelled(void *context) {
+    FakeCacheLock *lock = (FakeCacheLock *)context;
+    if (lock->held) lock->checks_while_held++;
+    return lock->cancelled;
+}
+
+static const uint8_t kTinyPng[33] = {
+    0x89u, 'P', 'N', 'G', 0x0Du, 0x0Au, 0x1Au, 0x0Au,
+    0u, 0u, 0u, 13u, 'I', 'H', 'D', 'R',
+    0u, 0u, 0u, 2u, 0u, 0u, 0u, 2u,
+    8u, 6u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
+};
+
+#define TEST_BOXART_URL \
+    "https://thumbnails.libretro.com/Sony%20-%20PlayStation%20Portable/Named_Boxarts/Tiny.png"
+
+/* The response's final URL (after redirects) must be on the allowlist too. */
+static void test_redirect_refused(void) {
+    char data_root[NK_MAX_PATH];
+    char dest[NK_MAX_PATH];
+    FakeNet net;
+    assert(nk_platform_resolve_path(NK_PATH_DATA, data_root, sizeof(data_root)));
+    assert(nk_cover_art_cache_path(data_root, "2222222222222222222222222222222222222222",
+                                   dest, sizeof(dest)));
+
+    memset(&net, 0, sizeof(net));
+    add_answer(&net, TEST_BOXART_URL, kTinyPng, sizeof(kTinyPng));
+    net.answers[0].final_url = "https://evil.example.com/Tiny.png";
+    assert(nk_cover_art_fetch_url(fake_open, &net, TEST_BOXART_URL, NK_COVER_ART_HOST,
+                                  dest, NULL, NULL, NULL) == NK_COVER_ART_REDIRECT_REFUSED);
+    assert(net.reads == 0 && net.closes == 1);
+    assert(!file_exists(dest));
+
+    /* A look-alike host and an http:// final URL are refused the same way. */
+    memset(&net, 0, sizeof(net));
+    add_answer(&net, TEST_BOXART_URL, kTinyPng, sizeof(kTinyPng));
+    net.answers[0].final_url = "https://thumbnails.libretro.com.example.com/Tiny.png";
+    assert(nk_cover_art_fetch_url(fake_open, &net, TEST_BOXART_URL, NK_COVER_ART_HOST,
+                                  dest, NULL, NULL, NULL) == NK_COVER_ART_REDIRECT_REFUSED);
+    net.answers[0].final_url = "http://thumbnails.libretro.com/Tiny.png";
+    assert(nk_cover_art_fetch_url(fake_open, &net, TEST_BOXART_URL, NK_COVER_ART_HOST,
+                                  dest, NULL, NULL, NULL) == NK_COVER_ART_REDIRECT_REFUSED);
+    assert(!file_exists(dest));
+
+    /* No final URL at all is refused, not assumed to be the request URL. */
+    memset(&net, 0, sizeof(net));
+    add_answer(&net, TEST_BOXART_URL, kTinyPng, sizeof(kTinyPng));
+    net.answers[0].no_final_url = true;
+    assert(nk_cover_art_fetch_url(fake_open, &net, TEST_BOXART_URL, NK_COVER_ART_HOST,
+                                  dest, NULL, NULL, NULL) == NK_COVER_ART_REDIRECT_REFUSED);
+    assert(net.closes == 1);
+    assert(!file_exists(dest));
+
+    /* A redirect that stays on the allowed host (any case) is accepted. */
+    memset(&net, 0, sizeof(net));
+    add_answer(&net, TEST_BOXART_URL, kTinyPng, sizeof(kTinyPng));
+    net.answers[0].final_url = "https://THUMBNAILS.libretro.com/mirror/Tiny.png";
+    assert(nk_cover_art_fetch_url(fake_open, &net, TEST_BOXART_URL, NK_COVER_ART_HOST,
+                                  dest, NULL, NULL, NULL) == NK_COVER_ART_OK);
+    assert(file_exists(dest));
+    assert(strcmp(nk_cover_art_status_name(NK_COVER_ART_REDIRECT_REFUSED),
+                  "REDIRECT_REFUSED") == 0);
+    assert(nk_remove_utf8(dest) == 0);
+    printf("[COVER_ART_TEST] redirect_refused: PASS\n");
+}
+
+/* A fetch writes only while it holds the cache lock and checks its cancel flag
+   again under it, so a deleter that cancels and then takes the lock never sees
+   a late write (the player's Refresh, setting off and factory reset). */
+static void test_cache_lock_and_late_cancel(void) {
+    char data_root[NK_MAX_PATH];
+    char dest[NK_MAX_PATH];
+    FakeNet net;
+    FakeCacheLock state;
+    NkCoverArtCacheLock lock = {fake_cache_lock, fake_cache_unlock, &state};
+    assert(nk_platform_resolve_path(NK_PATH_DATA, data_root, sizeof(data_root)));
+    assert(nk_cover_art_cache_path(data_root, "3333333333333333333333333333333333333333",
+                                   dest, sizeof(dest)));
+
+    /* Cancelled while it waited for the lock: nothing is written, lock balanced. */
+    memset(&net, 0, sizeof(net));
+    memset(&state, 0, sizeof(state));
+    state.cancel_on_lock = true;
+    add_answer(&net, TEST_BOXART_URL, kTinyPng, sizeof(kTinyPng));
+    assert(nk_cover_art_fetch_url(fake_open, &net, TEST_BOXART_URL, NK_COVER_ART_HOST, dest,
+                                  fake_lock_cancelled, &state, &lock) == NK_COVER_ART_CANCELLED);
+    assert(state.locks == 1 && state.unlocks == 1 && !state.held);
+    assert(state.checks_while_held == 1);
+    assert(!file_exists(dest));
+
+    /* Not cancelled: written under the lock, which is released afterwards. */
+    memset(&net, 0, sizeof(net));
+    memset(&state, 0, sizeof(state));
+    add_answer(&net, TEST_BOXART_URL, kTinyPng, sizeof(kTinyPng));
+    assert(nk_cover_art_fetch_url(fake_open, &net, TEST_BOXART_URL, NK_COVER_ART_HOST, dest,
+                                  fake_lock_cancelled, &state, &lock) == NK_COVER_ART_OK);
+    assert(state.locks == 1 && state.unlocks == 1 && !state.held);
+    assert(state.checks_while_held == 1);
+    assert(file_exists(dest));
+
+    /* A refused response never takes the lock. */
+    memset(&net, 0, sizeof(net));
+    memset(&state, 0, sizeof(state));
+    add_answer(&net, TEST_BOXART_URL, "nope", 4u);
+    assert(nk_cover_art_fetch_url(fake_open, &net, TEST_BOXART_URL, NK_COVER_ART_HOST, dest,
+                                  fake_lock_cancelled, &state, &lock) == NK_COVER_ART_INVALID_PNG);
+    assert(state.locks == 0 && state.unlocks == 0);
+
+    char err_code[48];
+    char err_msg[256];
+    assert(nk_cover_art_clear_cache(data_root, err_code, sizeof(err_code),
+                                    err_msg, sizeof(err_msg)));
+    assert(!file_exists(dest));
+    printf("[COVER_ART_TEST] cache_lock_and_late_cancel: PASS\n");
+}
+
+/* Discs with no cover art this session are remembered by SHA-1 (any case). */
+static void test_session_misses(void) {
+    NkCoverArtMisses *misses = (NkCoverArtMisses *)calloc(1u, sizeof(*misses));
+    char sha1[41];
+    assert(misses);
+    assert(!nk_cover_art_misses_contains(misses, "4444444444444444444444444444444444444444"));
+    assert(nk_cover_art_misses_add(misses, "ABCDEF0123456789ABCDEF0123456789ABCDEF01"));
+    assert(nk_cover_art_misses_contains(misses, "abcdef0123456789abcdef0123456789abcdef01"));
+    assert(nk_cover_art_misses_add(misses, "abcdef0123456789abcdef0123456789abcdef01"));
+    assert(misses->count == 1u);
+    assert(!nk_cover_art_misses_add(misses, "not-a-sha1"));
+    assert(!nk_cover_art_misses_add(misses, NULL));
+    assert(!nk_cover_art_misses_add(NULL, "abcdef0123456789abcdef0123456789abcdef01"));
+    assert(!nk_cover_art_misses_contains(misses, "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
+
+    /* Full: the oldest miss is forgotten first, every newer one is kept. */
+    nk_cover_art_misses_clear(misses);
+    assert(misses->count == 0u);
+    for (size_t i = 0u; i <= NK_COVER_ART_MISS_SLOTS; i++) {
+        snprintf(sha1, sizeof(sha1), "%040llx", (unsigned long long)i);
+        assert(nk_cover_art_misses_add(misses, sha1));
+    }
+    assert(misses->count == NK_COVER_ART_MISS_SLOTS);
+    snprintf(sha1, sizeof(sha1), "%040llx", 0ull);
+    assert(!nk_cover_art_misses_contains(misses, sha1));
+    snprintf(sha1, sizeof(sha1), "%040llx", 1ull);
+    assert(nk_cover_art_misses_contains(misses, sha1));
+    snprintf(sha1, sizeof(sha1), "%040llx", (unsigned long long)NK_COVER_ART_MISS_SLOTS);
+    assert(nk_cover_art_misses_contains(misses, sha1));
+
+    nk_cover_art_misses_clear(misses);
+    assert(!nk_cover_art_misses_contains(misses, sha1));
+    free(misses);
+    printf("[COVER_ART_TEST] session_misses: PASS\n");
+}
+
 int main(void) {
     native_test_create_root("test_cover_art");
     native_test_capture_real_config_probe();
@@ -348,6 +529,9 @@ int main(void) {
 
     test_sanitization_and_urls();
     test_png_validation_and_fetch();
+    test_redirect_refused();
+    test_cache_lock_and_late_cancel();
+    test_session_misses();
 
     native_test_assert_real_config_untouched();
     printf("[COVER_ART_TEST] ALL COVER ART TESTS PASSED!\n");

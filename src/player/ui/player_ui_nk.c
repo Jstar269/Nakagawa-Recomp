@@ -589,6 +589,10 @@ void player_ui_nk_invalidate_cover_art(PlayerUiNk *player) {
 #endif
 }
 
+bool player_ui_nk_cover_art_reading(const PlayerUiNk *player) {
+    return player != NULL && player_ui_art_reading_cover(player->art);
+}
+
 static bool player_ui_disc_view(PlayerView view) {
     return view == VIEW_INSPECTING || view == VIEW_SUPPORTED_TITLE ||
            view == VIEW_EXPERIMENTAL_TITLE || view == VIEW_UNSUPPORTED_TITLE;

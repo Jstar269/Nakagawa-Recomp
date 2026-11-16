@@ -1507,6 +1507,8 @@ bool player_ui_nk_built_with_launcher(void);
 void player_ui_nk_destroy(PlayerUiNk *player);
 /* Clear decoded cached box art thumbnails when Refresh cover art empties the cache. */
 void player_ui_nk_invalidate_cover_art(PlayerUiNk *player);
+/* True while the disc-art worker may still hold a cached cover file open. */
+bool player_ui_nk_cover_art_reading(const PlayerUiNk *player);
 bool player_ui_nk_view_active(const PlayerUiNk *player, const PlayerApp *app);
 /* How long the host's loop may wait for input, at most idle_ms, before it
    draws the next frame (nk_ui_wait_s): one 60 Hz frame while something on

@@ -3257,11 +3257,35 @@ typedef struct PlayerCoverArtJob {
     uint64_t generation;
     PackageHttpOpen transport;
     void *transport_context;
+    NkCoverArtCacheLock cache_lock;
+    struct PlayerCoverArtJob *next_retired;
     char data_root[NK_MAX_PATH];
     char bundled_dat[NK_MAX_PATH];
     size_t count;
     PlayerCoverArtWorkItem items[PLAYER_COVER_ART_BATCH_MAX];
 } PlayerCoverArtJob;
+
+/* The UI thread never joins a batch that may still be inside the transport: a
+   request can sit in WinHTTP for its full timeouts on a dead network. Turning the
+   setting off, Refresh and factory reset cancel the batch and move it to
+   `retired`; a later frame joins it once it has finished, and only shutdown
+   waits for one still running. A cancelled batch checks its cancel flag again
+   while it holds `cache_mutex`, just before it writes, so once the UI thread has
+   cancelled it and then taken the mutex, that batch never writes into the cache.
+   Its results are never applied. */
+typedef struct {
+    PlayerCoverArtJob *job;
+    PlayerCoverArtJob *retired;
+    SDL_Mutex *cache_mutex;
+} PlayerCoverArt;
+
+static void cover_art_cache_lock(void *context) {
+    SDL_LockMutex((SDL_Mutex *)context);
+}
+
+static void cover_art_cache_unlock(void *context) {
+    SDL_UnlockMutex((SDL_Mutex *)context);
+}
 
 static void cover_art_push_event(PlayerCoverArtJob *job) {
     SDL_Event event;
@@ -3301,7 +3325,7 @@ static int SDLCALL cover_art_thread_main(void *userdata) {
         job->items[i].status = nk_cover_art_fetch_for_disc(
             job->transport, job->transport_context, &dat, job->data_root,
             job->items[i].disc_id, job->items[i].sha1, job->items[i].crc32,
-            NULL, cover_art_cancelled, job, &art_source);
+            NULL, cover_art_cancelled, job, &job->cache_lock, &art_source);
     }
     if (loaded) nk_disc_dat_free(&dat);
     SDL_SetAtomicInt(&job->done, 1);
@@ -3309,23 +3333,71 @@ static int SDLCALL cover_art_thread_main(void *userdata) {
     return 0;
 }
 
-static void destroy_cover_art_job(PlayerCoverArtJob **job_slot) {
-    if (!job_slot || !*job_slot) return;
-    PlayerCoverArtJob *job = *job_slot;
+/* Cancels the running batch and hands it to `retired` without waiting for it. */
+static void player_cover_art_retire(PlayerCoverArt *cover_art) {
+    PlayerCoverArtJob *job;
+    if (!cover_art || !cover_art->job) return;
+    job = cover_art->job;
+    cover_art->job = NULL;
     SDL_SetAtomicInt(&job->cancel, 1);
-    if (job->thread) {
-        SDL_WaitThread(job->thread, NULL);
-        job->thread = NULL;
-    }
-    free(job);
-    *job_slot = NULL;
+    job->next_retired = cover_art->retired;
+    cover_art->retired = job;
 }
 
-static void player_cover_art_tick(PlayerApp *app, PlayerCoverArtJob **job_slot) {
-    if (!app || !job_slot) return;
+/* Joins the retired batches whose worker has finished; the rest stay for a later
+   frame. A finished worker has only its return left, so the join is immediate. */
+static void player_cover_art_reap(PlayerCoverArt *cover_art) {
+    PlayerCoverArtJob **link;
+    if (!cover_art) return;
+    link = &cover_art->retired;
+    while (*link) {
+        PlayerCoverArtJob *job = *link;
+        if (SDL_GetAtomicInt(&job->done) == 0) {
+            link = &job->next_retired;
+            continue;
+        }
+        *link = job->next_retired;
+        if (job->thread) SDL_WaitThread(job->thread, NULL);
+        free(job);
+    }
+}
+
+/* Shutdown: cancels and joins every batch, each bounded by the transport's own
+   timeouts (s_player_closing already makes each one stop at its next check). */
+static void player_cover_art_shutdown(PlayerCoverArt *cover_art) {
+    if (!cover_art) return;
+    player_cover_art_retire(cover_art);
+    while (cover_art->retired) {
+        PlayerCoverArtJob *job = cover_art->retired;
+        cover_art->retired = job->next_retired;
+        if (job->thread) SDL_WaitThread(job->thread, NULL);
+        free(job);
+    }
+    if (cover_art->cache_mutex) {
+        SDL_DestroyMutex(cover_art->cache_mutex);
+        cover_art->cache_mutex = NULL;
+    }
+}
+
+/* Without blocking: true when the cache may be deleted now, with the cache
+   mutex held until player_cover_art_unlock_cache. Every batch has to be retired
+   (cancelled) first; false means a cancelled batch is still writing its last
+   PNG, and the caller tries again on a later frame. */
+static bool player_cover_art_try_lock_cache(PlayerCoverArt *cover_art) {
+    if (!cover_art || cover_art->job) return false;
+    return !cover_art->cache_mutex || SDL_TryLockMutex(cover_art->cache_mutex);
+}
+
+static void player_cover_art_unlock_cache(PlayerCoverArt *cover_art) {
+    if (cover_art && cover_art->cache_mutex) SDL_UnlockMutex(cover_art->cache_mutex);
+}
+
+static void player_cover_art_tick(PlayerApp *app, PlayerCoverArt *cover_art) {
+    if (!app || !cover_art) return;
+    player_cover_art_reap(cover_art);
     if (!app->settings.download_cover_art) {
-        if (*job_slot) {
-            destroy_cover_art_job(job_slot);
+        if (cover_art->job) {
+            player_cover_art_retire(cover_art);
             for (int g = 0; g < app->game_count; g++) {
                 if (app->cover_art_state[g] == PLAYER_COVER_FETCHING) {
                     app->cover_art_state[g] = PLAYER_COVER_UNCHECKED;
@@ -3335,8 +3407,8 @@ static void player_cover_art_tick(PlayerApp *app, PlayerCoverArtJob **job_slot) 
         return;
     }
 
-    if (*job_slot && SDL_GetAtomicInt(&(*job_slot)->done) != 0) {
-        PlayerCoverArtJob *job = *job_slot;
+    if (cover_art->job && SDL_GetAtomicInt(&cover_art->job->done) != 0) {
+        PlayerCoverArtJob *job = cover_art->job;
         bool downloaded_any = false;
         if (job->thread) {
             SDL_WaitThread(job->thread, NULL);
@@ -3345,7 +3417,13 @@ static void player_cover_art_tick(PlayerApp *app, PlayerCoverArtJob **job_slot) 
         if (job->generation == app->cover_art_generation) {
             for (size_t i = 0u; i < job->count; i++) {
                 const PlayerCoverArtWorkItem *item = &job->items[i];
-                if (item->status == NK_COVER_ART_OK) downloaded_any = true;
+                if (item->status == NK_COVER_ART_OK) {
+                    downloaded_any = true;
+                } else if (item->status != NK_COVER_ART_CANCELLED) {
+                    /* Not requested again this session (a library sync resets
+                       cover_art_state); Refresh forgets it. */
+                    (void)nk_cover_art_misses_add(&app->cover_art_misses, item->sha1);
+                }
                 for (int g = 0; g < app->game_count; g++) {
                     if (strcmp(app->games[g].content_sha1, item->sha1) != 0) continue;
                     if (item->status == NK_COVER_ART_OK) {
@@ -3365,14 +3443,42 @@ static void player_cover_art_tick(PlayerApp *app, PlayerCoverArtJob **job_slot) 
             }
         }
         free(job);
-        *job_slot = NULL;
+        cover_art->job = NULL;
     }
 
-    if (*job_slot) return;
+    if (cover_art->job) return;
 
-    /* Check local cache lazily once per disc and gather missing verified discs. */
+    /* No file system work unless a verified disc is still unchecked: a disc
+       already known to have no art this session settles without a request. */
+    bool any_unchecked = false;
+    for (int g = 0; g < app->game_count; g++) {
+        const GameRecord *game = &app->games[g];
+        if (game->disc_verification != NK_DISC_TIER_VERIFIED_RETAIL ||
+            game->content_sha1[0] == '\0' ||
+            app->cover_art_state[g] != PLAYER_COVER_UNCHECKED) {
+            continue;
+        }
+        if (nk_cover_art_misses_contains(&app->cover_art_misses, game->content_sha1)) {
+            app->cover_art_state[g] = PLAYER_COVER_UNAVAILABLE;
+            continue;
+        }
+        any_unchecked = true;
+    }
+    if (!any_unchecked) return;
+
+    /* Check the local cache once per disc and gather missing verified discs. */
     char data_root[NK_MAX_PATH];
-    if (!nk_platform_get_app_data_dir(data_root, sizeof(data_root))) return;
+    if (!nk_platform_get_app_data_dir(data_root, sizeof(data_root))) {
+        /* No cache folder: settle these discs until the next library sync rather
+           than retrying every frame. */
+        for (int g = 0; g < app->game_count; g++) {
+            if (app->games[g].disc_verification == NK_DISC_TIER_VERIFIED_RETAIL &&
+                app->cover_art_state[g] == PLAYER_COVER_UNCHECKED) {
+                app->cover_art_state[g] = PLAYER_COVER_UNAVAILABLE;
+            }
+        }
+        return;
+    }
 
     PlayerCoverArtJob *batch = NULL;
     for (int g = 0; g < app->game_count; g++) {
@@ -3424,8 +3530,15 @@ static void player_cover_art_tick(PlayerApp *app, PlayerCoverArtJob **job_slot) 
         free(batch);
         return;
     }
-    batch->thread = SDL_CreateThread(cover_art_thread_main, "nakagawa-cover-art", batch);
+    if (!cover_art->cache_mutex) cover_art->cache_mutex = SDL_CreateMutex();
+    if (cover_art->cache_mutex) {
+        batch->cache_lock.lock = cover_art_cache_lock;
+        batch->cache_lock.unlock = cover_art_cache_unlock;
+        batch->cache_lock.context = cover_art->cache_mutex;
+        batch->thread = SDL_CreateThread(cover_art_thread_main, "nakagawa-cover-art", batch);
+    }
     if (!batch->thread) {
+        /* No mutex or no thread: settle these discs until the next library sync. */
         for (int g = 0; g < app->game_count; g++) {
             if (app->cover_art_state[g] == PLAYER_COVER_FETCHING) {
                 app->cover_art_state[g] = PLAYER_COVER_UNAVAILABLE;
@@ -3434,7 +3547,7 @@ static void player_cover_art_tick(PlayerApp *app, PlayerCoverArtJob **job_slot) 
         free(batch);
         return;
     }
-    *job_slot = batch;
+    cover_art->job = batch;
 }
 
 static void destroy_staging_job(PlayerStagingJob **job_slot) {
@@ -4134,7 +4247,7 @@ typedef struct PlayerRun {
     PlayerStagingJob *staging_job;
     PlayerPsnJob *psn_job;
     PlayerDiscCheckJob *disc_check_job;
-    PlayerCoverArtJob *cover_art_job;
+    PlayerCoverArt cover_art;
     PlayerPackageStatusJob *package_status_job;
     PlayerOutdatedScanJob *outdated_scan_job;
     bool package_status_requested[MAX_LIBRARY_GAMES];
@@ -5527,12 +5640,25 @@ static void player_frame_requests(PlayerRun *run) {
     start_disc_check_job(app, &run->disc_check_job);
 
     if (app->request_cover_art_refresh) {
-        app->request_cover_art_refresh = false;
-        destroy_cover_art_job(&run->cover_art_job);
-        player_app_refresh_cover_art_cache(app);
+        /* Refresh never waits on this thread: it cancels the running batch,
+           hides cached covers, and deletes the cache on the first frame where
+           neither a cancelled batch is writing a PNG nor the disc-art worker
+           has a cover file open (Windows refuses to delete an open file). */
+        player_cover_art_retire(&run->cover_art);
+        memset(app->cover_art_state, 0, sizeof(app->cover_art_state));
         player_ui_nk_invalidate_cover_art(run->next_ui);
+        if (!player_ui_nk_cover_art_reading(run->next_ui) &&
+            player_cover_art_try_lock_cache(&run->cover_art)) {
+            app->request_cover_art_refresh = false;
+            player_app_refresh_cover_art_cache(app);
+            player_cover_art_unlock_cache(&run->cover_art);
+        }
     }
-    player_cover_art_tick(app, &run->cover_art_job);
+    if (!app->request_cover_art_refresh) {
+        player_cover_art_tick(app, &run->cover_art);
+    } else {
+        player_cover_art_reap(&run->cover_art);
+    }
 
     if (app->selected_game_index != run->last_package_selection) {
         run->last_package_selection = app->selected_game_index;
@@ -5778,9 +5904,14 @@ static void player_frame_render(PlayerRun *run) {
     }
     if (app->request_factory_reset) {
         app->request_factory_reset = false;
-        destroy_cover_art_job(&run->cover_art_job);
+        /* Cancelled, never joined here; a batch still writing its last PNG
+           holds the cache mutex, and the reset waits for it like any worker. */
+        player_cover_art_retire(&run->cover_art);
+        bool cover_art_writing = !player_cover_art_try_lock_cache(&run->cover_art);
+        if (!cover_art_writing) player_cover_art_unlock_cache(&run->cover_art);
         /* A finished staging or PSN job stays allocated until the next one. */
-        if (run->launch_job || run->package_status_job || s_update_job || run->disc_check_job ||
+        if (cover_art_writing ||
+            run->launch_job || run->package_status_job || s_update_job || run->disc_check_job ||
             (run->staging_job && !run->staging_job->completion_handled) ||
             (run->psn_job && !run->psn_job->completion_handled)) {
             /* A worker may still have a file in the user data open. */
@@ -5873,7 +6004,7 @@ static int player_shutdown(PlayerRun *run) {
     destroy_staging_job(&run->staging_job);
     destroy_psn_job(&run->psn_job);
     destroy_disc_check_job(&run->disc_check_job);
-    destroy_cover_art_job(&run->cover_art_job);
+    player_cover_art_shutdown(&run->cover_art);
     if (run->package_status_job) {
         if (run->package_status_job->thread) {
             SDL_WaitThread(run->package_status_job->thread, NULL);

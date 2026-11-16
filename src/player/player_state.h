@@ -1083,6 +1083,9 @@ struct PlayerApp {
        Settings > Build tools and cache without stat'ing every frame. */
     uint8_t cover_art_state[MAX_LIBRARY_GAMES];
     uint64_t cover_art_generation;
+    /* Discs with no cover art found this session: a library sync resets
+       cover_art_state, so these are not requested again until Refresh. */
+    NkCoverArtMisses cover_art_misses;
     uint64_t cover_art_cache_bytes;
     char cover_art_cache_size_label[32];
     bool cover_art_cache_size_known;

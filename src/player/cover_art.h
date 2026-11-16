@@ -16,6 +16,7 @@
 #define NK_COVER_ART_H
 
 #include "nk_disc_verify.h"
+#include "nk_types.h"
 #include "package_builder.h"
 
 #include <stdbool.h>
@@ -47,7 +48,8 @@ typedef enum {
     NK_COVER_ART_TOO_LARGE,
     NK_COVER_ART_CANCELLED,
     NK_COVER_ART_UNSUPPORTED,
-    NK_COVER_ART_IO_ERROR
+    NK_COVER_ART_IO_ERROR,
+    NK_COVER_ART_REDIRECT_REFUSED   /* the response came from a host outside the allowlist */
 } NkCoverArtStatus;
 
 typedef enum {
@@ -73,6 +75,31 @@ typedef struct {
 } NkCoverArtProviders;
 
 typedef bool (*NkCoverArtCancelFn)(void *context);
+
+/* Serializes cache writes with whoever deletes the cache. A fetch takes the lock
+   around writing its PNG and checks its cancel callback again while it holds it,
+   so a deleter that cancels the fetch first and then takes the lock knows that
+   fetch never writes afterwards. NULL (or a NULL lock or unlock) writes without it. */
+typedef struct {
+    void (*lock)(void *context);
+    void (*unlock)(void *context);
+    void *context;
+} NkCoverArtCacheLock;
+
+/* Discs whose cover art was not found this session, by content SHA-1, so a library
+   sync does not request them again; Refresh clears it. It holds a library's worth
+   of discs; past that the oldest miss is forgotten and requested once more. */
+#define NK_COVER_ART_MISS_SLOTS NK_MAX_GAMES
+typedef struct {
+    char sha1[NK_COVER_ART_MISS_SLOTS][41];
+    size_t count;
+    size_t next;   /* the slot the next miss overwrites once every slot is used */
+} NkCoverArtMisses;
+
+void nk_cover_art_misses_clear(NkCoverArtMisses *misses);
+/* False only for a NULL set or a malformed SHA-1. */
+bool nk_cover_art_misses_add(NkCoverArtMisses *misses, const char *sha1_hex);
+bool nk_cover_art_misses_contains(const NkCoverArtMisses *misses, const char *sha1_hex);
 
 /* Replace every character in `& * / : < > ? \ | "` with `_` per libretro's
    thumbnail naming specification. Fails on NULL, empty input, ASCII control
@@ -104,11 +131,15 @@ bool nk_cover_art_validate_png_header(const uint8_t *bytes, size_t size,
                                       uint32_t *out_width, uint32_t *out_height);
 
 /* Fetch a PNG from an HTTPS URL allowed by `allowed_hosts` and atomically write
-   it to `dest_path`. Pass transport == NULL for the platform native transport. */
+   it to `dest_path`. Pass transport == NULL for the platform native transport. A
+   response whose final URL (after redirects) is not on `allowed_hosts` is refused
+   with NK_COVER_ART_REDIRECT_REFUSED before any byte is read. `cache_lock` may be
+   NULL. */
 NkCoverArtStatus nk_cover_art_fetch_url(PackageHttpOpen transport, void *transport_context,
                                         const char *url, const char *allowed_hosts,
                                         const char *dest_path,
-                                        NkCoverArtCancelFn should_cancel, void *cancel_ctx);
+                                        NkCoverArtCancelFn should_cancel, void *cancel_ctx,
+                                        const NkCoverArtCacheLock *cache_lock);
 
 /* Resolve a Redump-verified disc by sha1/crc32 in `dat`, fetch its box art from
    thumbnails.libretro.com (or `providers->fallback` when absent), validate and
@@ -121,6 +152,7 @@ NkCoverArtStatus nk_cover_art_fetch_for_disc(PackageHttpOpen transport, void *tr
                                              const char *crc32_hex,
                                              const NkCoverArtProviders *providers,
                                              NkCoverArtCancelFn should_cancel, void *cancel_ctx,
+                                             const NkCoverArtCacheLock *cache_lock,
                                              NkCoverArtSource *out_source);
 
 const char *nk_cover_art_status_name(NkCoverArtStatus status);

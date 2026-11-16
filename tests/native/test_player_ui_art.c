@@ -221,6 +221,16 @@ static int test_cover_art_decodes_and_invalidates(void) {
     CHECK(settle(art), "cover reloads when re-enabled");
     player_ui_art_get_title(art, "good", cover_file, false, &icon, NULL, &cover);
     CHECK(cover != NULL, "re-enabled cover decodes again");
+
+    /* Refresh waits for a cover read in flight before it deletes the cache
+       (Windows refuses to delete an open file), and no longer once it ends. */
+    CHECK(!player_ui_art_reading_cover(NULL), "no loader reads no cover");
+    CHECK(!player_ui_art_reading_cover(art), "no cover read while idle");
+    player_ui_art_get_title(art, "slow", cover_file, false, &icon, NULL, &cover);
+    player_ui_art_pump(art);
+    CHECK(player_ui_art_reading_cover(art), "a cover read in flight is reported");
+    CHECK(settle(art), "the slow cover read finishes");
+    CHECK(!player_ui_art_reading_cover(art), "a finished cover read releases the file");
     (void)remove(cover_file);
     player_ui_art_invalidate_covers(art);
     player_ui_art_get_title(art, "good", cover_file, false, &icon, NULL, &cover);

@@ -333,6 +333,12 @@ void player_ui_art_invalidate_covers(PlayerUiArt *art) {
     }
 }
 
+bool player_ui_art_reading_cover(const PlayerUiArt *art) {
+    return art != NULL && art->job != NULL &&
+           (art->job->wanted & PLAYER_UI_ART_COVER) != 0u &&
+           SDL_GetAtomicInt(&art->job->done) == 0;
+}
+
 bool player_ui_art_busy(const PlayerUiArt *art) {
     size_t i;
     if (art == NULL) {

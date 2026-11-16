@@ -64,8 +64,37 @@ const char *nk_cover_art_status_name(NkCoverArtStatus status) {
         case NK_COVER_ART_CANCELLED: return "CANCELLED";
         case NK_COVER_ART_UNSUPPORTED: return "UNSUPPORTED";
         case NK_COVER_ART_IO_ERROR: return "IO_ERROR";
+        case NK_COVER_ART_REDIRECT_REFUSED: return "REDIRECT_REFUSED";
         default: return "UNKNOWN";
     }
+}
+
+void nk_cover_art_misses_clear(NkCoverArtMisses *misses) {
+    if (!misses) return;
+    misses->count = 0u;
+    misses->next = 0u;
+}
+
+bool nk_cover_art_misses_contains(const NkCoverArtMisses *misses, const char *sha1_hex) {
+    char lower[41];
+    if (!misses || !normalize_sha1_lower(sha1_hex, lower)) return false;
+    for (size_t i = 0u; i < misses->count; i++) {
+        if (memcmp(misses->sha1[i], lower, sizeof(lower)) == 0) return true;
+    }
+    return false;
+}
+
+bool nk_cover_art_misses_add(NkCoverArtMisses *misses, const char *sha1_hex) {
+    char lower[41];
+    if (!misses || !normalize_sha1_lower(sha1_hex, lower)) return false;
+    if (nk_cover_art_misses_contains(misses, lower)) return true;
+    if (misses->count < NK_COVER_ART_MISS_SLOTS) {
+        memcpy(misses->sha1[misses->count++], lower, sizeof(lower));
+        return true;
+    }
+    memcpy(misses->sha1[misses->next], lower, sizeof(lower));
+    misses->next = (misses->next + 1u) % NK_COVER_ART_MISS_SLOTS;
+    return true;
 }
 
 bool nk_cover_art_sanitize_name(const char *redump_name, char *out, size_t out_size) {
@@ -266,7 +295,8 @@ static bool write_file_atomic(const char *dest_path, const uint8_t *bytes, size_
 NkCoverArtStatus nk_cover_art_fetch_url(PackageHttpOpen transport, void *transport_context,
                                         const char *url, const char *allowed_hosts,
                                         const char *dest_path,
-                                        NkCoverArtCancelFn should_cancel, void *cancel_ctx) {
+                                        NkCoverArtCancelFn should_cancel, void *cancel_ctx,
+                                        const NkCoverArtCacheLock *cache_lock) {
     PackageHttpResponse response;
     uint8_t *buffer = NULL;
     size_t used = 0u;
@@ -285,6 +315,12 @@ NkCoverArtStatus nk_cover_art_fetch_url(PackageHttpOpen transport, void *transpo
     memset(&response, 0, sizeof(response));
     if (!transport(transport_context, url, allowed_hosts, &response)) {
         return NK_COVER_ART_NOT_FOUND;
+    }
+    /* A transport that followed redirects reports where the bytes come from; a
+       host outside the allowlist is refused here, whatever the transport did. */
+    if (!response.final_url || !package_builder_url_allowed(response.final_url, allowed_hosts)) {
+        if (response.close) response.close(response.context);
+        return NK_COVER_ART_REDIRECT_REFUSED;
     }
     if (response.has_content_length && response.content_length > NK_COVER_ART_MAX_BYTES) {
         if (response.close) response.close(response.context);
@@ -342,11 +378,19 @@ NkCoverArtStatus nk_cover_art_fetch_url(PackageHttpOpen transport, void *transpo
         status = NK_COVER_ART_INVALID_PNG;
         goto cleanup;
     }
-    if (!write_file_atomic(dest_path, buffer, used)) {
-        status = NK_COVER_ART_IO_ERROR;
-        goto cleanup;
+    {
+        const bool locked = cache_lock && cache_lock->lock && cache_lock->unlock;
+        if (locked) cache_lock->lock(cache_lock->context);
+        /* Checked again under the lock: a deleter cancels before it takes the lock. */
+        if (should_cancel && should_cancel(cancel_ctx)) {
+            status = NK_COVER_ART_CANCELLED;
+        } else if (!write_file_atomic(dest_path, buffer, used)) {
+            status = NK_COVER_ART_IO_ERROR;
+        } else {
+            status = NK_COVER_ART_OK;
+        }
+        if (locked) cache_lock->unlock(cache_lock->context);
     }
-    status = NK_COVER_ART_OK;
 
 cleanup:
     if (response.close) response.close(response.context);
@@ -362,6 +406,7 @@ NkCoverArtStatus nk_cover_art_fetch_for_disc(PackageHttpOpen transport, void *tr
                                              const char *crc32_hex,
                                              const NkCoverArtProviders *providers,
                                              NkCoverArtCancelFn should_cancel, void *cancel_ctx,
+                                             const NkCoverArtCacheLock *cache_lock,
                                              NkCoverArtSource *out_source) {
     char dest_path[NK_MAX_PATH];
     char url[NK_COVER_ART_URL_MAX];
@@ -380,7 +425,7 @@ NkCoverArtStatus nk_cover_art_fetch_for_disc(PackageHttpOpen transport, void *tr
     if (redump_name && nk_cover_art_boxart_url(redump_name, url, sizeof(url))) {
         primary_status = nk_cover_art_fetch_url(transport, transport_context, url,
                                                 NK_COVER_ART_HOST, dest_path,
-                                                should_cancel, cancel_ctx);
+                                                should_cancel, cancel_ctx, cache_lock);
         if (primary_status == NK_COVER_ART_OK) {
             if (out_source) *out_source = NK_COVER_ART_SOURCE_LIBRETRO;
             return NK_COVER_ART_OK;
@@ -409,7 +454,7 @@ NkCoverArtStatus nk_cover_art_fetch_for_disc(PackageHttpOpen transport, void *tr
             strncmp(fb_url, "https://", 8u) == 0 && fb_hosts[0] != '\0') {
             NkCoverArtStatus fb_status = nk_cover_art_fetch_url(
                 transport, transport_context, fb_url, fb_hosts, dest_path,
-                should_cancel, cancel_ctx);
+                should_cancel, cancel_ctx, cache_lock);
             if (fb_status == NK_COVER_ART_OK) {
                 if (out_source) *out_source = NK_COVER_ART_SOURCE_RETROACHIEVEMENTS;
                 return NK_COVER_ART_OK;

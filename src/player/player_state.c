@@ -8342,6 +8342,7 @@ void player_app_refresh_cover_art_cache(PlayerApp *app) {
         return;
     }
     memset(app->cover_art_state, 0, sizeof(app->cover_art_state));
+    nk_cover_art_misses_clear(&app->cover_art_misses);
     app->cover_art_generation++;
     app->cover_art_cache_bytes = 0u;
     nk_cover_art_format_size(0u, app->cover_art_cache_size_label,
@@ -8349,7 +8350,7 @@ void player_app_refresh_cover_art_cache(PlayerApp *app) {
     app->cover_art_cache_size_known = true;
     snprintf(app->settings_notice, sizeof(app->settings_notice), "%s",
              app->settings.download_cover_art
-                 ? "Cover art cache cleared. Covers will download again when viewed."
+                 ? "Cover art cache cleared. Covers for every verified disc download again now."
                  : "Cover art cache cleared.");
     player_dev_log_add(app, "settings", "cover art cache cleared");
 }

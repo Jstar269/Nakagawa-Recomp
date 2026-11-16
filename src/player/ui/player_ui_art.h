@@ -77,6 +77,10 @@ void player_ui_art_get_title(PlayerUiArt *art, const char *iso_path, const char 
    the cache folder (used when Refresh cover art clears the cache). */
 void player_ui_art_invalidate_covers(PlayerUiArt *art);
 
+/* True while the worker may still have a cached cover file open: a cache delete
+   waits for it to finish (Windows refuses to delete an open file). */
+bool player_ui_art_reading_cover(const PlayerUiArt *art);
+
 /* True while a read runs or one is waiting to start (tests wait on it). */
 bool player_ui_art_busy(const PlayerUiArt *art);
 
