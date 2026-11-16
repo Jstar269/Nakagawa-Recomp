@@ -51,7 +51,7 @@ the cited section has the full rule.
   Section 3 (Section 5).
 - **No firmware** and no firmware decryption; decrypting the user's own game locally is allowed (Section 5).
 - **No hidden failures or deliberate crashes** (loop caps, sleeps, forced returns, fake success, a host crash to
-  signal a gap); a modeled PSP error returned to the guest is not one. **No hand edits to generated code**
+  signal a gap); a modeled PSP error returned to the guest and reported visibly is not one. **No hand edits to generated code**
   (Section 6).
 - **No network use** in the player or runtime outside a documented opt-in feature, and none in tests (Section 5).
 - **No invented identity or origin**: no agent-written `Signed-off-by:`, false authorship or hidden origin
@@ -199,8 +199,8 @@ swaps, cables) are the person's, never simulated or assumed, and the device writ
   instead of writing a new HLE handler. HLE stays for the OS: kernel and hardware boundary, firmware modules,
   syscalls, device access.
 - Unknown NIDs and unowned dispatches stop visibly by name; no switch makes a miss permissive. A modeled PSP error
-  may return to the guest for a known operation; that is not fake success and does not by itself stop the whole
-  run. An operation that cannot safely return a known result stays a named stop. Do not deliberately crash the
+  may return to the guest for a known operation and is reported visibly (a named note or log); that is not fake
+  success and does not by itself stop the whole run. An operation that cannot safely return a known result stays a named stop. Do not deliberately crash the
   player to signal missing behavior. Correctness evidence asserts PSP-visible results, state, and wakes.
 - Validate complete guest spans and checked size arithmetic before forming bulk host pointers.
 - Never hand-edit generated `build/<game>/<game>_recomp_*.c`; change the generator, analysis or runtime and
@@ -247,7 +247,7 @@ Re-check live source before changing these; PR numbers are navigation, not evide
 - Never write repository-local Git identity (a checkout `[user]` block); use the host's identity or stop and
   report.
 - Push only when the task includes a pull request: a contributor to their fork, the maintainer's agents to topic
-  branches on `origin`. Nobody pushes to `main`.
+  branches on `origin`, which they may push before the pull request opens. Nobody pushes to `main`.
 
 ## 9. Validation and gate routing
 

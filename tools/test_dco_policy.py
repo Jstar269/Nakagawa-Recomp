@@ -343,6 +343,8 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             "unknown nids and unowned dispatches stop visibly",
             "a modeled psp error may return to the guest",
             "do not deliberately crash the player",
+            "reported visibly",
+            "stays a named stop",
         ):
             with self.subTest(section=6, required=required):
                 self.assertIn(required, section_6)
@@ -354,6 +356,8 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             "a psp measurement for the same scope supersedes it",
             "no public reference",
             "save-data and flash writes",
+            "never fills an unknown nid",
+            "production-path regression",
         ):
             with self.subTest(section=7, required=required):
                 self.assertIn(required, section_7)
@@ -382,7 +386,10 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
         section_10 = _blocks(_section(content, 10))
         self.assertRuleStated(section_10, ("**Integration**", "full required hosted CI is green", "goes back to its author"),
                               "the public integration boundary")
-        self.assertRuleStated(section_10, ("nobody bypasses", "required checks"), "the merge boundary")
+        self.assertRuleStated(section_10, ("maintainer authorizes", "merges a PR", "nobody bypasses", "required checks"),
+                              "the merge boundary")
+        self.assertRuleStated(_blocks(_section(content, 8)), ("before the pull request opens", "Nobody pushes to `main`"),
+                              "the early push of a planned topic branch")
 
     def test_agents_scopes_opt_in_network_approval(self):
         content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
@@ -393,7 +400,8 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             "does not authorize an unlisted host",
             "each feature's public issue must name its hosts, payload, consent and data boundaries",
             "before it ships",
-            "docs/setup.md",
+            "off by default",
+            "listed in `docs/setup.md` network use",
             "tools/test_prereq_fetcher.py",
             "no setting makes a nid miss permissive",
         ):
