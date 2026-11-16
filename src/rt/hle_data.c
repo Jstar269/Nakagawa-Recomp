@@ -2665,13 +2665,14 @@ uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence,
  * command whatever the offset or buffer size. That rule covers each command's measured call
  * form: the seek with its 16-byte input, a zero reserved word and SEEK_SET; a query with no input
  * and an output that holds the answer. Other forms of these commands (another whence, a short
- * buffer, an input for a query), none measured, stop at a named boundary; other commands, and
- * every sceIoIoctlAsync (no asynchronous cell is measured), keep the plain-file switch as
- * before. */
+ * buffer, an input for a query), none measured, stop at a named boundary; other commands keep
+ * the plain-file switch. sceIoIoctlAsync hands the same command to the same driver, so its
+ * completion takes the same rule; no asynchronous cell is measured, and the refusal is the only
+ * answer the evidence supports. */
 enum { IO_MS_IOCTL_OTHER, IO_MS_IOCTL_REFUSED, IO_MS_IOCTL_BOUNDARY };
 static int io_ms0_file_ioctl_rule(const Fd *f, uint32_t cmd, uint32_t in, uint32_t inlen,
-                                  uint32_t out, uint32_t outlen, int asynchronous) {
-    if (asynchronous || !f || !f->host || sr_vfs_strnicmp(f->guest_path, "ms0:", 4u) != 0)
+                                  uint32_t out, uint32_t outlen) {
+    if (!f || !f->host || sr_vfs_strnicmp(f->guest_path, "ms0:", 4u) != 0)
         return IO_MS_IOCTL_OTHER;
     uint32_t answer = 0u;
     switch (cmd) {
@@ -2699,12 +2700,13 @@ static int io_ms0_file_ioctl_rule(const Fd *f, uint32_t cmd, uint32_t in, uint32
     return IO_MS_IOCTL_REFUSED;
 }
 
-static uint32_t io_ms0_file_ioctl_boundary(uint32_t cmd) {
+static uint32_t io_ms0_file_ioctl_boundary(uint32_t cmd, int asynchronous) {
     static atomic_flag reported = ATOMIC_FLAG_INIT;
     if (!atomic_flag_test_and_set_explicit(&reported, memory_order_acq_rel))
         fprintf(stderr,
-                "SEMANTIC_BOUNDARY: IO_MS_FILE_IOCTL: sceIoIoctl(0x%08x) on a Memory Stick file, "
-                "in a form no PSP cell measures, is not supported yet (0x80010086)\n", cmd);
+                "SEMANTIC_BOUNDARY: IO_MS_FILE_IOCTL: %s(0x%08x) on a Memory Stick file, in a "
+                "form no PSP cell measures, is not supported yet (0x80010086)\n",
+                asynchronous ? "sceIoIoctlAsync" : "sceIoIoctl", cmd);
     return 0x80010086u;
 }
 
@@ -2726,8 +2728,7 @@ uint32_t h_io_ioctl_args(uint32_t fd, uint32_t cmd, uint32_t in,
     return io_ioctl_args_mode(fd, cmd, in, inlen, out, outlen, 0);
 }
 
-/* sceIoIoctlAsync's completion: as sceIoIoctl, but no Memory Stick file command is measured
- * asynchronously, so they keep the plain-file switch they had before the sceIoIoctl rule. */
+/* sceIoIoctlAsync's completion: sceIoIoctl's rules, with the boundary naming the async call. */
 uint32_t io_ioctl_async_complete(uint32_t fd, uint32_t cmd, uint32_t in,
                                  uint32_t inlen, uint32_t out, uint32_t outlen) {
     return io_ioctl_args_mode(fd, cmd, in, inlen, out, outlen, 1);
@@ -2743,9 +2744,9 @@ static uint32_t io_ioctl_args_mode(uint32_t fd, uint32_t cmd, uint32_t in, uint3
     if (!hle_fd_is_file(fd)) return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     Fd *f = &s_fds[fd];
     if (f->async.state == IO_ASYNC_PENDING) return SCE_ERROR_KERNEL_ASYNC_BUSY;
-    int ms_rule = io_ms0_file_ioctl_rule(f, cmd, in, inlen, out, outlen, asynchronous);
+    int ms_rule = io_ms0_file_ioctl_rule(f, cmd, in, inlen, out, outlen);
     if (ms_rule == IO_MS_IOCTL_REFUSED) return 0x80020325u;
-    if (ms_rule == IO_MS_IOCTL_BOUNDARY) return io_ms0_file_ioctl_boundary(cmd);
+    if (ms_rule == IO_MS_IOCTL_BOUNDARY) return io_ms0_file_ioctl_boundary(cmd, asynchronous);
     if (getenv("SR_IOLOG"))
         fprintf(stderr, "Ioctl fd=%u cmd=0x%08x in=0x%08x/%u out=0x%08x/%u\n",
                 fd, cmd, in, inlen, out, outlen);

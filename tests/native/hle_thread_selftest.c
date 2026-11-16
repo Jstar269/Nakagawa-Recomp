@@ -4014,10 +4014,23 @@ static void test_io_async_and_path_imports(void) {
     cpu.r[5] = 2u; cpu.r[6] = 0u;
     expect(sr_hle_test_io_lseek32(&cpu) == 2u, "restore position for ioctl");
 
+    /* The deferred-ioctl case runs on a disc0: file, where the position ioctl answers 0 and writes
+     * the low out word (PSP-HLE-IO-SEEK-001, io-seek-umd-*). A Memory Stick file refuses that
+     * command (0x80020325, io-seek-ms-ioctl-*), asynchronously too. */
+    s_umd_io_synthetic_enabled = 1;
+    fd_set_path(&cpu, PATH_ADDR, "disc0:/UMD_DATA.BIN");
+    cpu.r[5] = 1u; /* PSP_O_RDONLY */
+    const uint32_t ioctl_fd = sr_hle_test_io_open(&cpu);
+    expect(ioctl_fd >= 3u && ioctl_fd < 64u && ioctl_fd != fd,
+           "the async ioctl fixture opens a disc0: file");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ioctl_fd; cpu.r[5] = 2u; cpu.r[6] = 0u;
+    expect(sr_hle_test_io_lseek32(&cpu) == 2u, "the disc0: ioctl fixture starts at position 2");
+
     MEM_W32(IOCTL_OUT_ADDR, 0xaaaaaaaau);
     MEM_W32(RESULT_ADDR, 0xfeedfaceu);
     memset(&cpu, 0, sizeof(cpu));
-    cpu.r[4] = fd;
+    cpu.r[4] = ioctl_fd;
     cpu.r[5] = 0x01020004u; /* get current byte offset */
     cpu.r[29] = STACK_ADDR;
     cpu.r[8] = IOCTL_OUT_ADDR;
@@ -4027,7 +4040,7 @@ static void test_io_async_and_path_imports(void) {
            "sceIoIoctlAsync defers ioctl output until request completion");
     sr_hle_test_io_async_import_boundary();
     memset(&cpu, 0, sizeof(cpu));
-    cpu.r[4] = fd;
+    cpu.r[4] = ioctl_fd;
     cpu.r[5] = RESULT_ADDR;
     expect(sr_hle_test_io_poll_async(&cpu) == 1u &&
                MEM_R32(IOCTL_OUT_ADDR) == 0xaaaaaaaau &&
@@ -4035,17 +4048,21 @@ static void test_io_async_and_path_imports(void) {
            "pending sceIoIoctlAsync leaves the output span unchanged");
     sr_hle_test_io_async_import_boundary();
     memset(&cpu, 0, sizeof(cpu));
-    cpu.r[4] = fd;
+    cpu.r[4] = ioctl_fd;
     cpu.r[5] = RESULT_ADDR;
     expect(sr_hle_test_io_poll_async(&cpu) == 0u &&
                MEM_R32(RESULT_ADDR) == 0u && MEM_R32(IOCTL_OUT_ADDR) == 2u,
            "sceIoIoctlAsync stores both its result and get-offset output");
     memset(&cpu, 0, sizeof(cpu));
-    cpu.r[4] = fd;
+    cpu.r[4] = ioctl_fd;
     cpu.r[5] = 1u;
     cpu.r[6] = RESULT_ADDR;
     expect(sr_hle_test_io_get_async_stat(&cpu) == 0u && MEM_R32(RESULT_ADDR) == 0u,
            "sceIoGetAsyncStat returns a completed request without waiting");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ioctl_fd;
+    expect(sr_hle_test_io_close(&cpu) == 0u, "the disc0: ioctl fixture closes");
+    s_umd_io_synthetic_enabled = 0;
 
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = fd;
@@ -4508,10 +4525,28 @@ static void test_io_memory_stick_cells_through_syscall(void) {
             fd, 0x01020004u, 0u, 0u, MS_CELL_IOCTL_OUT, 8u);
         uint32_t ioctl_async_wait = ms_cell_wait_async(fd, MS_CELL_STAT);
         expect(ioctl_async_submit == 0u && ioctl_async_wait == 0u &&
-                   MEM_R32(MS_CELL_STAT) == 0u && MEM_R32(MS_CELL_STAT + 4u) == 0u &&
-                   MEM_R32(MS_CELL_IOCTL_OUT) == 8u &&
+                   MEM_R32(MS_CELL_STAT) == MS_IOCTL_INVALID &&
+                   MEM_R32(MS_CELL_STAT + 4u) == 0xffffffffu &&
+                   MEM_R32(MS_CELL_IOCTL_OUT) == 0xa5a5a5a5u &&
+                   MEM_R32(MS_CELL_IOCTL_OUT + 4u) == 0xa5a5a5a5u &&
                    ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
-               "sceIoIoctlAsync, unmeasured on a Memory Stick file, keeps the plain-file answer");
+               "sceIoIoctlAsync of a measured Memory Stick file command completes with 0x80020325");
+        MEM_W32(MS_CELL_IOCTL_IN, 0u);
+        MEM_W32(MS_CELL_IOCTL_IN + 4u, 0u);
+        MEM_W32(MS_CELL_IOCTL_IN + 8u, 0u);
+        MEM_W32(MS_CELL_IOCTL_IN + 12u, 0u);  /* SEEK_SET 0 */
+        ioctl_async_submit = ms_cell_ioctl_async(fd, 0x01010005u, MS_CELL_IOCTL_IN, 16u, 0u, 0u);
+        ioctl_async_wait = ms_cell_wait_async(fd, MS_CELL_STAT);
+        expect(ioctl_async_submit == 0u && ioctl_async_wait == 0u &&
+                   MEM_R32(MS_CELL_STAT) == MS_IOCTL_INVALID &&
+                   ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
+               "an async Memory Stick file ioctl seek completes with 0x80020325 without moving");
+        ioctl_async_submit = ms_cell_ioctl_async(fd, 0x01020004u, 0u, 0u, MS_CELL_IOCTL_OUT, 2u);
+        ioctl_async_wait = ms_cell_wait_async(fd, MS_CELL_STAT);
+        expect(ioctl_async_submit == 0u && ioctl_async_wait == 0u &&
+                   MEM_R32(MS_CELL_STAT) == 0x80010086u &&
+                   MEM_R32(MS_CELL_IOCTL_OUT) == 0xa5a5a5a5u,
+               "an async Memory Stick file ioctl in an unmeasured form completes at the named boundary");
         expect(ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u,
                "the ioctl test closes the probe file");
     }
