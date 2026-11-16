@@ -4210,8 +4210,10 @@ enum {
     MS_CELL_OPEN = 0x109f50bcu, MS_CELL_CLOSE = 0x810c4bc3u, MS_CELL_READ = 0x6a638d83u,
     MS_CELL_WRITE = 0x42ec03acu, MS_CELL_LSEEK = 0x27eb27b8u, MS_CELL_LSEEK32 = 0x68963324u,
     MS_CELL_GETSTAT = 0xace946e8u, MS_CELL_REMOVE = 0xf27a9c51u,
+    MS_CELL_IOCTL = 0x63632449u, MS_CELL_WRITE_ASYNC = 0x0facab19u,
     MS_CELL_PATH = 0x09017000u, MS_CELL_DATA = 0x09017100u, MS_CELL_STAT = 0x09017200u,
-    MS_CELL_BACK = 0x09017300u,
+    MS_CELL_BACK = 0x09017300u, MS_CELL_IOCTL_IN = 0x09017400u,
+    MS_CELL_IOCTL_OUT = 0x09017420u,
 };
 
 static uint32_t ms_cell_path_call(uint32_t nid, const char *guest, uint32_t flags) {
@@ -4245,6 +4247,15 @@ static uint32_t ms_cell_seek64(uint32_t fd, int64_t offset, uint32_t whence, uin
     return low;
 }
 
+static uint32_t ms_cell_ioctl(uint32_t fd, uint32_t cmd, uint32_t in, uint32_t inlen,
+                              uint32_t out, uint32_t outlen) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = fd; cpu.r[5] = cmd; cpu.r[6] = in; cpu.r[7] = inlen;
+    cpu.r[8] = out; cpu.r[9] = outlen;
+    return sr_syscall(&cpu, MS_CELL_IOCTL);
+}
+
 /* An open that should be refused; a descriptor it returns anyway is closed again. */
 static uint32_t ms_cell_refused_open(const char *guest, uint32_t flags) {
     uint32_t rc = ms_cell_path_call(MS_CELL_OPEN, guest, flags);
@@ -4260,19 +4271,22 @@ static int ms_cell_host_exists(const char *guest) {
     return f != NULL;
 }
 
-/* The Memory Stick open, write and seek cells #1380 measured, each through sr_syscall: an
+/* The Memory Stick open, write, seek, ioctl and async-write cells #1380 measured, each through sr_syscall: an
  * open without PSP_O_CREAT (PSP-IO-EOF-001 io-eof-missing), PSP_O_RDONLY | PSP_O_CREAT on a
  * missing file and a write through a PSP_O_RDONLY descriptor (PSP-HLE-IO-SEEK-001
  * io-seek-ms-write-rdonly-creat and io-seek-ms-write-rdonly), an exclusive create of an
- * existing file (PSP-KERNEL-SEM-001 io-excl-existing), seeks before the start, a write after a
- * seek past the end and a read past it (PSP-IO-EOF-001 io-eof-seek-negative,
+ * existing file (PSP-KERNEL-SEM-001 io-excl-existing), MS0 ioctl results (PSP-HLE-IO-SEEK-001),
+ * read-only create flag edges and async write (PSP-HLE-IO-SEEK-002), seeks before the start, a
+ * write after a seek past the end and a read past it (PSP-IO-EOF-001 io-eof-seek-negative,
  * io-eof-seek-negative-rdonly, io-eof-write-past, io-eof-read-past), and the 32-bit position
  * (PSP-KERNEL-SEM-001 io-seek64). All measured on a PSP-3000 6.61. */
 static void test_io_memory_stick_cells_through_syscall(void) {
     static const char file_guest[] = "ms0:/NAKAGAWA_IO_1380.BIN";
     static const char missing_guest[] = "ms0:/NAKAGAWA_IO_1380_MISSING.BIN";
     enum { MS_EINVAL = 0x80010016u, MS_ENOENT = 0x80010002u, MS_EEXIST = 0x80010011u,
-           MS_BADF = 0x80020323u, MS_SIZE = 16u };
+           MS_BADF = 0x80020323u, MS_IOCTL_INVALID = 0x80020325u, MS_SIZE = 16u };
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
     uint8_t pattern[MS_SIZE];
     for (uint32_t i = 0; i < MS_SIZE; i++) pattern[i] = (uint8_t)(0x40u + i);
     char host[512];
@@ -4316,17 +4330,78 @@ static void test_io_memory_stick_cells_through_syscall(void) {
                fd_host_bytes_equal(host, pattern, MS_SIZE),
            "an exclusive create of an existing file is 0x80010011 and leaves it unchanged");
 
-    /* Read-only creates no cell measured stop at the named boundary with nothing opened,
-     * created or cut: on an existing file, with PSP_O_TRUNC, and with PSP_O_EXCL. */
-    expect(ms_cell_refused_open(file_guest, 0x0201u) == 0x80010086u &&
-               ms_cell_refused_open(file_guest, 0x0601u) == 0x80010086u &&
+    fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0801u);  /* RDONLY|EXCL, no CREAT */
+    expect(fd >= 3u && fd < 64u && ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u &&
                fd_host_bytes_equal(host, pattern, MS_SIZE),
-           "PSP_O_RDONLY | PSP_O_CREAT on an existing file stops at the boundary, file unchanged");
-    expect(ms_cell_refused_open(missing_guest, 0x0A01u) == 0x80010086u &&
+           "PSP_O_EXCL without PSP_O_CREAT opens an existing Memory Stick file");
+
+    fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0003u);  /* RDWR */
+    expect(fd >= 3u && fd < 64u, "the ioctl test opens the probe file read-write");
+    if (fd >= 3u && fd < 64u) {
+        static const uint64_t ioctl_seek_offsets[] = {UINT64_MAX, 8u, 16u, 32u};
+        for (size_t i = 0; i < sizeof(ioctl_seek_offsets) / sizeof(ioctl_seek_offsets[0]); i++) {
+            MEM_W32(MS_CELL_IOCTL_IN, (uint32_t)ioctl_seek_offsets[i]);
+            MEM_W32(MS_CELL_IOCTL_IN + 4u, (uint32_t)(ioctl_seek_offsets[i] >> 32));
+            MEM_W32(MS_CELL_IOCTL_IN + 8u, 0u);
+            MEM_W32(MS_CELL_IOCTL_IN + 12u, 0u);  /* SEEK_SET */
+            expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 0u) == 0u &&
+                       ms_cell_ioctl(fd, 0x01010005u, MS_CELL_IOCTL_IN, 16u, 0u, 0u) ==
+                           MS_IOCTL_INVALID &&
+                       ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0u,
+                   "a measured Memory Stick file ioctl seek returns 0x80020325 without moving");
+        }
+
+        static const struct {
+            uint32_t cmd;
+            uint32_t outlen;
+            uint32_t start;
+            uint32_t pos;
+            const char *name;
+        } ioctl_queries[] = {
+            {0x01020004u, 8u, 8u, 8u, "get position"},
+            {0x01020003u, 8u, 8u, 8u, "sector size"},
+            {0x01020006u, 8u, 8u, 8u, "start sector"},
+            {0x01020007u, 8u, 8u, 8u, "file size"},
+            {0x01030008u, 4u, 0u, 0u, "read four bytes"},
+        };
+        for (size_t i = 0; i < sizeof(ioctl_queries) / sizeof(ioctl_queries[0]); i++) {
+            MEM_W32(MS_CELL_IOCTL_OUT, 0xa5a5a5a5u);
+            MEM_W32(MS_CELL_IOCTL_OUT + 4u, 0xa5a5a5a5u);
+            expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, ioctl_queries[i].start, 0u) ==
+                       ioctl_queries[i].start &&
+                       ms_cell_ioctl(fd, ioctl_queries[i].cmd, 0u, 0u, MS_CELL_IOCTL_OUT,
+                                     ioctl_queries[i].outlen) == MS_IOCTL_INVALID &&
+                       MEM_R32(MS_CELL_IOCTL_OUT) == 0xa5a5a5a5u &&
+                       MEM_R32(MS_CELL_IOCTL_OUT + 4u) == 0xa5a5a5a5u &&
+                       ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == ioctl_queries[i].pos,
+                   "a measured Memory Stick file ioctl query returns 0x80020325 without changes");
+        }
+        expect(fd_host_bytes_equal(host, pattern, MS_SIZE),
+               "measured Memory Stick file ioctls leave the file bytes unchanged");
+        expect(ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u,
+               "the ioctl test closes the probe file");
+    }
+
+    /* PSP-HLE-IO-SEEK-002: plain RDONLY|CREAT opens an existing file, but a write still refuses. */
+    fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0201u);
+    expect(fd >= 3u && fd < 64u, "PSP_O_RDONLY | PSP_O_CREAT opens an existing Memory Stick file");
+    if (fd >= 3u && fd < 64u) {
+        expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_BACK, 4u) == MS_BADF &&
+                   ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u &&
+                   fd_host_bytes_equal(host, pattern, MS_SIZE),
+               "the read-only create stays read-only and leaves the file unchanged");
+    }
+    expect(ms_cell_refused_open(file_guest, 0x0601u) == MS_EINVAL &&
+               fd_host_bytes_equal(host, pattern, MS_SIZE),
+           "PSP_O_RDONLY | PSP_O_CREAT | PSP_O_TRUNC is 0x80010016 without truncating");
+    expect(ms_cell_refused_open(file_guest, 0x0A01u) == 0x80010086u &&
+               fd_host_bytes_equal(host, pattern, MS_SIZE),
+           "PSP_O_RDONLY | PSP_O_CREAT | PSP_O_EXCL on an existing file remains unmeasured");
+    expect(ms_cell_refused_open(missing_guest, 0x0A01u) == MS_EINVAL &&
                ms_cell_refused_open(missing_guest, 0x0301u) == 0x80010086u &&
+               ms_cell_refused_open(missing_guest, 0x0601u) == 0x80010086u &&
                !ms_cell_host_exists(missing_guest),
-           "PSP_O_RDONLY | PSP_O_CREAT with PSP_O_EXCL or PSP_O_APPEND stops at the boundary "
-           "and creates nothing");
+           "read-only create EXCL on a missing file is 0x80010016; APPEND and TRUNC stay bounded");
 
     /* io-seek-ms-write-rdonly: a write through a PSP_O_RDONLY descriptor. */
     fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0001u);
@@ -4340,6 +4415,8 @@ static void test_io_memory_stick_cells_through_syscall(void) {
     expect(ms_cell_seek64(fd, -1, 0u, &high) == MS_EINVAL && high == 0xffffffffu &&
                ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0u,
            "a read-only Memory Stick seek to -1 is 0x80010016 and keeps the position");
+    expect(ms_cell_fd_call(MS_CELL_WRITE_ASYNC, fd, MS_CELL_BACK, 4u) == MS_BADF,
+           "sceIoWriteAsync on a read-only Memory Stick descriptor returns 0x80020323 synchronously");
     expect(ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u &&
                fd_host_bytes_equal(host, pattern, MS_SIZE),
            "the refused write left the file unchanged");
@@ -53901,6 +53978,64 @@ static void test_flash0_font_device(void) {
             snprintf(msg, sizeof(msg), "flash0 sceIoLseekAsync %s leaves the position at 8",
                      async_refused[i].name);
             expect(f0t_seek32(fd, 0, 1u) == 8u, msg);
+        }
+    }
+    /* PSP-HLE-IO-SEEK-002: these out-of-range flash0: seeks are through the production NID
+     * dispatch (sceIoLseek and sceIoLseek32), from position 8 on the measured ltn0.pgf. */
+    {
+        sr_hle_test_register_iofilemgr();
+        const uint32_t syscall_fd = ms_cell_path_call(
+            MS_CELL_OPEN, "flash0:/font/ltn0.pgf", 0x0001u);
+        expect(syscall_fd >= 3u && syscall_fd < 64u,
+               "the measured flash0 font opens through sceIoOpen dispatch");
+        if (syscall_fd >= 3u && syscall_fd < 64u) {
+            const int64_t size = (int64_t)served_latin_size;
+            static const struct {
+                const char *name;
+                uint32_t whence;
+                int kind;
+                int64_t literal;
+                uint32_t high;
+            } refused[] = {
+                {"SEEK_CUR -9", 1u, 0, -9, 0xffffffffu},
+                {"SEEK_CUR to size + 16", 1u, 1, 0, 0xffffffffu},
+                {"SEEK_CUR to 0xFFFFFFFF", 1u, 2, 0, 0u},
+                {"SEEK_CUR to 0x100000000", 1u, 3, 0, 0u},
+                {"SEEK_SET 0x100000001", 0u, 0, 0x100000001ll, 0u},
+                {"SEEK_SET 0x200000000", 0u, 0, 0x200000000ll, 0u},
+                {"SEEK_SET INT64_MAX", 0u, 0, INT64_MAX, 0u},
+                {"SEEK_SET 0x7FFFFFFF", 0u, 0, 0x7fffffffll, 0xffffffffu},
+                {"SEEK_SET 0x80000000", 0u, 0, 0x80000000ll, 0u},
+                {"SEEK_SET 0xFFFFFFFE", 0u, 0, 0xfffffffeull, 0u},
+                {"SEEK_END 0xFFFFFFFF", 2u, 0, 0xffffffffll, 0u},
+                {"SEEK_END 0x100000000", 2u, 0, 0x100000000ll, 0u},
+            };
+            for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+                int64_t offset = refused[i].kind == 1 ? size + 8
+                               : refused[i].kind == 2 ? 0xffffffffll - 8
+                               : refused[i].kind == 3 ? 0x100000000ll - 8
+                               : refused[i].literal;
+                expect(ms_cell_fd_call(MS_CELL_LSEEK32, syscall_fd, 8u, 0u) == 8u,
+                       "the syscall flash0 seek starts at position 8");
+                uint32_t high = 0;
+                uint32_t result = ms_cell_seek64(syscall_fd, offset, refused[i].whence, &high);
+                expect(result == 0x80010016u && high == refused[i].high &&
+                           ms_cell_fd_call(MS_CELL_LSEEK32, syscall_fd, 0u, 1u) == 8u,
+                       "the measured flash0 64-bit seek returns EINVAL, the measured high word, "
+                       "and keeps position 8");
+            }
+            expect(ms_cell_fd_call(MS_CELL_LSEEK32, syscall_fd, 8u, 0u) == 8u &&
+                       ms_cell_fd_call(MS_CELL_LSEEK32, syscall_fd, (uint32_t)-9, 1u) ==
+                           0x80010016u &&
+                       ms_cell_fd_call(MS_CELL_LSEEK32, syscall_fd, 0u, 1u) == 8u,
+                   "the measured flash0 32-bit SEEK_CUR before zero refuses and keeps position");
+            expect(ms_cell_fd_call(MS_CELL_LSEEK32, syscall_fd, 8u, 0u) == 8u &&
+                       ms_cell_fd_call(MS_CELL_LSEEK32, syscall_fd, (uint32_t)(size + 8), 1u) ==
+                           0x80010016u &&
+                       ms_cell_fd_call(MS_CELL_LSEEK32, syscall_fd, 0u, 1u) == 8u,
+                   "the measured flash0 32-bit SEEK_CUR past EOF refuses and keeps position");
+            expect(ms_cell_fd_call(MS_CELL_CLOSE, syscall_fd, 0u, 0u) == 0u,
+                   "the syscall flash0 descriptor closes");
         }
     }
     expect(f0t_close(fd) == 0u && sr_hle_test_fd_kind(fd) == 0,
