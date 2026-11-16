@@ -178,6 +178,17 @@ class CompilerCompareTests(unittest.TestCase):
         self.assertEqual(compiler_compare._first_error(linker), linker.splitlines()[0])
         self.assertEqual(compiler_compare._first_error(smoke), smoke.splitlines()[0])
 
+    def test_first_error_ignores_clay_error_fixture_output(self) -> None:
+        output = (
+            "Clay error 1\n"
+            "ld.lld: error: undefined symbol: sr_ge_vram_read_prepare\n"
+            "mingw32-make: *** [mk/selftests.mk:73: profiler-selftest] Error 1\n"
+        )
+        self.assertEqual(
+            compiler_compare._first_error(output),
+            "ld.lld: error: undefined symbol: sr_ge_vram_read_prepare",
+        )
+
     def test_fast_math_and_reassociation_are_rejected(self) -> None:
         for flag in compiler_compare.FORBIDDEN_FP_FLAGS:
             with self.subTest(flag=flag), self.assertRaises(compiler_compare.CompareError):
@@ -594,12 +605,121 @@ class CompilerCompareTests(unittest.TestCase):
         )
         self.assertEqual(first, second)
 
+    def test_semantic_hash_normalizes_relative_windows_backslash_build_roots(self) -> None:
+        first_root = compiler_compare.ROOT / "build" / "cc317" / "trial-1"
+        second_root = compiler_compare.ROOT / "build" / "cc317" / "trial-2"
+        first = compiler_compare._semantic_digest(
+            [("production-smoke", r"build\cc317\trial-1\project-font\nkjpn.pgf 12 bytes" + "\n")],
+            first_root,
+        )
+        second = compiler_compare._semantic_digest(
+            [("production-smoke", r"build\cc317\trial-2\project-font\nkjpn.pgf 12 bytes" + "\n")],
+            second_root,
+        )
+        self.assertEqual(first, second)
+
     def test_semantic_hash_ignores_host_addresses_and_timing_fields(self) -> None:
         first = "SR_HOST=0x00000277B35C4040 -> calling fn 00007FF763502801 aot_ms=111.519 encoder_write_ms=4242 status=PASS"
         second = "SR_HOST=0x000001A2B1B57040 -> calling fn 00007FF6BA002801 aot_ms=144.635 encoder_write_ms=4218 status=PASS"
         a = compiler_compare._semantic_digest([("production-smoke", first)], compiler_compare.ROOT / "build" / "a")
         b = compiler_compare._semantic_digest([("production-smoke", second)], compiler_compare.ROOT / "build" / "b")
         self.assertEqual(a, b)
+
+    def _make_trial(self, root: Path, outputs: list[tuple[str, str]]) -> dict[str, Any]:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "fixture.o").write_bytes(b"o" * 11)
+        (root / "fixture.exe").write_bytes(b"e" * 17)
+        events = [
+            {
+                "category": "compile", "generated_c": True, "duration_s": 0.25,
+                "peak_working_set_bytes": 12345, "compiler": "gcc",
+                "argv": ["-O0", "-c", "fixture_recomp_0.c"],
+            },
+            {
+                "category": "link", "generated_c": False, "duration_s": 0.10,
+                "peak_working_set_bytes": 23456, "compiler": "gcc",
+                "argv": ["-O0", "-o", "fixture.exe", "fixture.o"],
+            },
+        ]
+        return compiler_compare._trial_summary(events, root, outputs)
+
+    def test_unstable_semantic_repeats_retain_raw_outputs_and_name_divergent_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            raw_1 = "PASS header\nPERF host_time_ms=10.0 frame_us=16683 crc=0x1111\n"
+            raw_2 = "PASS header\nPERF host_time_ms=14.2 frame_us=16699 crc=0x1111\n"
+            trials = [
+                self._make_trial(base / "trial-1", [("cosim-selftest", "PASS\n"), ("display-smoke-run", raw_1)]),
+                self._make_trial(base / "trial-2", [("cosim-selftest", "PASS\n"), ("display-smoke-run", raw_2)]),
+                self._make_trial(base / "trial-3", [("cosim-selftest", "PASS\n"), ("display-smoke-run", raw_1)]),
+            ]
+            raw_file = base / "trial-2" / "semantic_outputs" / "display-smoke-run.raw.txt"
+            self.assertTrue(raw_file.is_file(), f"missing retained raw output {raw_file}")
+            self.assertEqual(raw_file.read_text(encoding="utf-8"), raw_2)
+
+            summary = compiler_compare._measurement_summary(trials)
+            self.assertFalse(summary["semantic_hash_stable"])
+            self.assertIsNone(summary["semantic_sha256"])
+            for trial in trials:
+                self.assertNotIn("_semantic_outputs", trial)
+
+            diff = summary.get("semantic_diff")
+            assert isinstance(diff, dict)
+            self.assertEqual(diff["target"], "display-smoke-run")
+            self.assertEqual(diff["baseline_trial"], 1)
+            self.assertEqual(diff["divergent_trial"], 2)
+            self.assertEqual(diff["line_number"], 2)
+            self.assertEqual(diff["fields"], ["frame_us"])
+            self.assertIn("host_time_ms=10.0", diff["baseline_line"])
+            self.assertIn("frame_us=16699", diff["divergent_line"])
+            self.assertTrue(diff["unified_diff"])
+
+            toolchains: list[dict[str, Any]] = [{
+                "name": "gcc/default",
+                "compiler": "gcc",
+                "linker_selection": "default",
+                "status": compiler_compare.STATUS_MEASURED,
+                "veto": {
+                    "status": compiler_compare.GATE_PASS,
+                    "failed_gate": None,
+                    "gates": [{"name": g, "status": compiler_compare.GATE_PASS} for g in compiler_compare.GATE_ORDER],
+                },
+                "measurements": {
+                    "repeats": 3,
+                    "trials": trials,
+                    "summary": summary,
+                    "workloads_status": compiler_compare.GATE_PASS,
+                    "workloads_detail": "ok",
+                    "workloads": [],
+                },
+            }]
+            report: dict[str, Any] = {
+                "schema": compiler_compare.SCHEMA,
+                "issue": compiler_compare.ISSUE,
+                "generated_at_utc": "2026-11-15T00:00:00Z",
+                "toolchains": toolchains,
+            }
+            report["semantic_hash_comparison"] = compiler_compare._semantic_hash_comparison(toolchains)
+            markdown = compiler_compare.render_markdown(report)
+            self.assertIn("display-smoke-run", markdown)
+            self.assertIn("line 2", markdown)
+            self.assertIn("frame_us", markdown)
+            self.assertIn("host_time_ms=<HOST_TIME>", markdown)
+            self.assertNotIn("host_time_ms=10.0", markdown)
+            diff_text = compiler_compare._format_semantic_diff_text(diff)
+            self.assertIn("fields: frame_us", diff_text)
+            self.assertIn("frame_us=16699", diff_text)
+
+    def test_stable_semantic_repeats_have_no_semantic_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            trials = [
+                self._make_trial(base / f"trial-{i}", [("cosim-selftest", "PASS val=42\n")])
+                for i in (1, 2, 3)
+            ]
+            summary = compiler_compare._measurement_summary(trials)
+            self.assertTrue(summary["semantic_hash_stable"])
+            self.assertIsNone(summary.get("semantic_diff"))
 
 
 class RuntimeWorkloadRunnerTests(unittest.TestCase):

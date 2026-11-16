@@ -21,6 +21,7 @@ import argparse
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
+import difflib
 import hashlib
 import json
 import os
@@ -100,10 +101,8 @@ def _diagnostic_excerpt(output: str) -> str:
 
 def _first_error(output: str) -> str | None:
     patterns = re.compile(
-        r"(?:fatal error:|error:|undefined reference to|cannot find\b|status=FAIL\b|"
-        r"make(?:\.exe)?: \*\*\*|"
-        r"Error \d+)",
-        re.IGNORECASE,
+        r"(?i:fatal error:|error:|undefined reference to|cannot find\b|status=FAIL\b|"
+        r"make(?:\.exe)?: \*\*\*)|\b(?<!Clay )Error \d+\b",
     )
     for line in output.splitlines():
         if patterns.search(line):
@@ -433,12 +432,20 @@ def _normalise_semantic_output(text: str, build_root: Path) -> str:
     resolved_build_root = build_root.resolve()
     result = text.replace(str(resolved_build_root), "<BUILD_ROOT>")
     result = result.replace(resolved_build_root.as_posix(), "<BUILD_ROOT>")
+    relative_variants: tuple[str, ...]
     try:
-        relative_build_root = resolved_build_root.relative_to(ROOT.resolve()).as_posix()
+        relative_path = resolved_build_root.relative_to(ROOT.resolve())
+        relative_posix = relative_path.as_posix()
+        relative_variants = (
+            str(relative_path),
+            relative_posix,
+            relative_posix.replace("/", "\\"),
+        )
     except ValueError:
-        relative_build_root = ""
-    if relative_build_root:
-        result = result.replace(relative_build_root, "<BUILD_ROOT>")
+        relative_variants = ()
+    for variant in dict.fromkeys(relative_variants):
+        if variant and variant != ".":
+            result = result.replace(variant, "<BUILD_ROOT>")
     result = result.replace(str(ROOT), "<REPO_ROOT>")
     result = result.replace(ROOT.as_posix(), "<REPO_ROOT>")
     result = re.sub(r"SR_HOST=0x[0-9a-fA-F]+", "SR_HOST=<HOST_ADDR>", result)
@@ -456,13 +463,136 @@ def _normalise_semantic_output(text: str, build_root: Path) -> str:
     return result.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _semantic_digest(outputs: list[tuple[str, str]], build_root: Path) -> str:
-    canonical = [
-        {"target": name, "output": _normalise_semantic_output(output, build_root)}
-        for name, output in outputs
-    ]
+def _digest_normalised_outputs(records: list[dict[str, str]]) -> str:
+    canonical = [{"target": item["target"], "output": item["normalized"]} for item in records]
     payload = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _semantic_digest(outputs: list[tuple[str, str]], build_root: Path) -> str:
+    records = [
+        {"target": name, "normalized": _normalise_semantic_output(output, build_root)}
+        for name, output in outputs
+    ]
+    return _digest_normalised_outputs(records)
+
+
+def _safe_target_filename(target: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", target).strip("_")
+    return slug or "target"
+
+
+def _persist_semantic_outputs(trial_root: Path, outputs: list[tuple[str, str]]) -> list[dict[str, str]]:
+    """Save raw and normalised outputs per target under trial_root/semantic_outputs."""
+    out_dir = trial_root / "semantic_outputs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    records: list[dict[str, str]] = []
+    for name, raw_output in outputs:
+        normalised = _normalise_semantic_output(raw_output, trial_root)
+        slug = _safe_target_filename(name)
+        (out_dir / f"{slug}.raw.txt").write_text(raw_output, encoding="utf-8")
+        (out_dir / f"{slug}.normalized.txt").write_text(normalised, encoding="utf-8")
+        records.append({"target": name, "raw": raw_output, "normalized": normalised})
+    (out_dir / "semantic_outputs.json").write_text(
+        json.dumps(records, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return records
+
+
+def _extract_line_fields(line: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for match in re.finditer(r'(?<![A-Za-z0-9_.-])([A-Za-z_][A-Za-z0-9_.-]*)=("[^"]*"|\S+)', line):
+        fields[match.group(1)] = match.group(2)
+    if fields:
+        return fields
+    for match in re.finditer(r'"?([A-Za-z_][A-Za-z0-9_.-]*)"?\s*:\s*("[^"]*"|[^,\s}\]]+)', line):
+        fields[match.group(1)] = match.group(2)
+    return fields
+
+
+def _divergent_fields_on_line(line_a: str, line_b: str) -> list[str]:
+    fields_a = _extract_line_fields(line_a)
+    fields_b = _extract_line_fields(line_b)
+    if not fields_a and not fields_b:
+        return []
+    ordered_keys = list(dict.fromkeys([*fields_a.keys(), *fields_b.keys()]))
+    return [key for key in ordered_keys if fields_a.get(key) != fields_b.get(key)]
+
+
+def _first_semantic_divergence(trial_outputs: list[list[dict[str, str]]], hashes: list[str]) -> dict[str, Any] | None:
+    """Return the first normalised target/line/field divergence against repeat 1."""
+    if len(trial_outputs) < 2:
+        return None
+    baseline_idx = 0
+    divergent_idx = next((idx for idx, h in enumerate(hashes) if h != hashes[baseline_idx]), None)
+    if divergent_idx is None:
+        return None
+    base_records = trial_outputs[baseline_idx]
+    other_records = trial_outputs[divergent_idx]
+    base_by_target = {item["target"]: item for item in base_records}
+    other_by_target = {item["target"]: item for item in other_records}
+    ordered_targets = list(dict.fromkeys([*(item["target"] for item in base_records), *(item["target"] for item in other_records)]))
+    divergent_targets = [
+        target for target in ordered_targets
+        if base_by_target.get(target, {}).get("normalized") != other_by_target.get(target, {}).get("normalized")
+    ]
+    if not divergent_targets:
+        return None
+    target = divergent_targets[0]
+    base_item = base_by_target.get(target, {"raw": "", "normalized": ""})
+    other_item = other_by_target.get(target, {"raw": "", "normalized": ""})
+    norm_a_lines = base_item["normalized"].splitlines()
+    norm_b_lines = other_item["normalized"].splitlines()
+    raw_a_lines = base_item["raw"].splitlines()
+    raw_b_lines = other_item["raw"].splitlines()
+    first_idx = next(
+        (idx for idx in range(max(len(norm_a_lines), len(norm_b_lines)))
+         if (norm_a_lines[idx] if idx < len(norm_a_lines) else None)
+         != (norm_b_lines[idx] if idx < len(norm_b_lines) else None)),
+        0,
+    )
+    norm_a_line = norm_a_lines[first_idx] if first_idx < len(norm_a_lines) else ""
+    norm_b_line = norm_b_lines[first_idx] if first_idx < len(norm_b_lines) else ""
+    raw_a_line = raw_a_lines[first_idx] if first_idx < len(raw_a_lines) else norm_a_line
+    raw_b_line = raw_b_lines[first_idx] if first_idx < len(raw_b_lines) else norm_b_line
+    unified = list(difflib.unified_diff(
+        norm_a_lines,
+        norm_b_lines,
+        fromfile=f"{target} (trial {baseline_idx + 1})",
+        tofile=f"{target} (trial {divergent_idx + 1})",
+        lineterm="",
+    ))[:60]
+    return {
+        "target": target,
+        "baseline_trial": baseline_idx + 1,
+        "divergent_trial": divergent_idx + 1,
+        "line_number": first_idx + 1,
+        "fields": _divergent_fields_on_line(norm_a_line, norm_b_line),
+        "baseline_line": raw_a_line,
+        "divergent_line": raw_b_line,
+        "baseline_normalised_line": norm_a_line,
+        "divergent_normalised_line": norm_b_line,
+        "divergent_targets": divergent_targets,
+        "unified_diff": unified,
+    }
+
+
+def _format_semantic_diff_text(diff: dict[str, Any]) -> str:
+    fields = ", ".join(diff["fields"]) if diff.get("fields") else "(none detected)"
+    lines = [
+        f"target: {diff['target']}",
+        f"trials: {diff['baseline_trial']} vs {diff['divergent_trial']}",
+        f"line: {diff['line_number']}",
+        f"fields: {fields}",
+        f"baseline raw:  {diff['baseline_line']}",
+        f"divergent raw: {diff['divergent_line']}",
+        f"baseline norm:  {diff['baseline_normalised_line']}",
+        f"divergent norm: {diff['divergent_normalised_line']}",
+        "",
+        *diff.get("unified_diff", []),
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def _read_events(path: Path) -> list[dict[str, Any]]:
@@ -521,13 +651,15 @@ def _trial_summary(events: list[dict[str, Any]], trial_root: Path,
     executable_bytes = _byte_total(trial_root, ".exe")
     if executable_bytes <= 0:
         raise CompareError(f"measurement targets produced no executable in {trial_root}")
+    persisted_outputs = _persist_semantic_outputs(trial_root, semantic_outputs)
     return {
         "generated_c_compile_wall_seconds": sum(float(event["duration_s"]) for event in generated),
         "peak_working_set_bytes": max(memory_values),
         "link_wall_seconds": sum(float(event["duration_s"]) for event in links),
         "object_bytes": object_bytes,
         "executable_bytes": executable_bytes,
-        "semantic_sha256": _semantic_digest(semantic_outputs, trial_root),
+        "semantic_sha256": _digest_normalised_outputs(persisted_outputs),
+        "_semantic_outputs": persisted_outputs,
         "compiler_commands": [
             {
                 "compiler": event.get("compiler"),
@@ -616,6 +748,7 @@ def _min_median(values: list[int | float]) -> dict[str, int | float]:
 def _measurement_summary(trials: list[dict[str, Any]]) -> dict[str, Any]:
     if len(trials) < MIN_REPEATS:
         raise CompareError(f"measurements require at least {MIN_REPEATS} repetitions")
+    trial_outputs = [trial.pop("_semantic_outputs", None) for trial in trials]
     summary: dict[str, Any] = {
         key: _min_median([trial[key] for trial in trials]) for key in MEASUREMENT_NAMES
     }
@@ -623,6 +756,13 @@ def _measurement_summary(trials: list[dict[str, Any]]) -> dict[str, Any]:
     summary["semantic_sha256"] = hashes[0] if len(set(hashes)) == 1 else None
     summary["semantic_hashes"] = hashes
     summary["semantic_hash_stable"] = len(set(hashes)) == 1
+    if not summary["semantic_hash_stable"] and all(isinstance(item, list) for item in trial_outputs):
+        summary["semantic_diff"] = _first_semantic_divergence(
+            [item for item in trial_outputs if isinstance(item, list)],
+            hashes,
+        )
+    else:
+        summary["semantic_diff"] = None
     return summary
 
 
@@ -773,6 +913,13 @@ def _measure_pair(name: str, compiler_name: str, compiler_path: str, linker: str
             compiler_path, make, python, settings, build_root / "measurements", repeats, env=env,
         )
         summary = _measurement_summary(trials)
+        if isinstance(summary.get("semantic_diff"), dict):
+            diff_dir = build_root / "measurements"
+            diff_dir.mkdir(parents=True, exist_ok=True)
+            (diff_dir / "semantic_diff.txt").write_text(
+                _format_semantic_diff_text(summary["semantic_diff"]),
+                encoding="utf-8",
+            )
         workloads = _workload_measurements(
             compiler_path, make, python, settings,
             build_root / "perf", build_root / "perf-build", env=env,
@@ -948,6 +1095,22 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"Semantic hash comparison across toolchains: {comparison.get('status', 'NOT_RECORDED')}.",
         "",
     ])
+    for entry in report["toolchains"]:
+        measurements = entry.get("measurements")
+        if not isinstance(measurements, dict):
+            continue
+        diff = (measurements.get("summary") or {}).get("semantic_diff")
+        if not isinstance(diff, dict):
+            continue
+        fields = f", unstable field(s): {', '.join(diff['fields'])}" if diff.get("fields") else ""
+        lines.extend([
+            f"- `{entry['name']}` repeat divergence: target `{diff['target']}`, "
+            f"line {diff['line_number']}, trial {diff['baseline_trial']} vs "
+            f"{diff['divergent_trial']}{fields}.",
+            # Normalised lines only: raw lines can carry local paths and host addresses.
+            f"  - trial {diff['baseline_trial']}: `{diff['baseline_normalised_line']}`",
+            f"  - trial {diff['divergent_trial']}: `{diff['divergent_normalised_line']}`",
+        ])
     lines.append("")
     return "\n".join(lines)
 
