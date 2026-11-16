@@ -266,7 +266,9 @@ Re-check live source before changing these; PR numbers are navigation, not evide
 - Never write repository-local Git identity (a checkout `[user]` block); use the host's identity or
   stop and report.
 - Push only when the task includes a pull request: a contributor to their fork, the maintainer's
-  agents to topic branches on `origin`. Nobody pushes to `main`.
+  agents to topic branches on `origin`. The maintainer's agents may push a topic branch whose pull
+  request is planned early, to keep the work safe when a run may stop (a usage limit, a crash), and
+  give the reason in the commit message or the pull request. Nobody pushes to `main`.
 
 ## 9. Validation and gate routing
 
@@ -335,11 +337,12 @@ PRIVATE_ACCEPTANCE:
 HARDWARE:
 UNRESOLVED:
 DISCOVERED_FOLLOWUPS:
+NOT_PERFORMED:
 READY_QUALITY: YES/NO
 ```
 
-Say whether any tag, release, asset, version, hardware, or private-input operation was intentionally
-not performed.
+`NOT_PERFORMED` names each tag, release, asset, version, hardware or private-input operation
+intentionally not performed, or says `none`.
 
 ## Maintainer process
 
@@ -372,6 +375,8 @@ This section applies only to agents the maintainer runs.
 
 ### Landing pull requests
 
+- Landing speed comes first: a red, deferred or conflicting PR is fixed before new work in its lane,
+  but speed never skips a review, a required gate or an owner approval.
 - **Integration has two stages.** Preparation: the integrator merges `main` into a handed-off PR,
   resolves generated-content conflicts, refreshes controls and pushes a head hosted CI can test; it
   lands nothing. Landing: merging the head that carries the PR's exact content, a landing batch's head

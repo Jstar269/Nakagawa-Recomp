@@ -333,7 +333,7 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             [
                 "LANE", "MISSION", "BASE_SHA", "HEAD_SHA", "PR", "STATUS", "RESULT", "ROOT_CAUSE",
                 "CHANGED_FILES", "NEW_PATH_PROVENANCE", "FAILING_BEFORE", "TESTS", "PRIVATE_ACCEPTANCE",
-                "HARDWARE", "UNRESOLVED", "DISCOVERED_FOLLOWUPS", "READY_QUALITY",
+                "HARDWARE", "UNRESOLVED", "DISCOVERED_FOLLOWUPS", "NOT_PERFORMED", "READY_QUALITY",
             ],
             "the section 11 report template must keep its fields",
         )
@@ -372,6 +372,20 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
         for required in ("modeled psp error", "whole-run stop", "host crash"):
             with self.subTest(surface=".github/REVIEW.md", required=required):
                 self.assertIn(required, review)
+
+    def test_agents_states_safekeeping_push_and_landing_priority(self):
+        content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertRuleStated(
+            _blocks(_section(content, 8)),
+            ("maintainer's agents", "planned", "early", "safe", "reason", "Nobody pushes to `main`"),
+            "the maintainer's safekeeping push of a topic branch",
+        )
+        maintainer = _blocks(content[content.index("## Maintainer process"):])
+        self.assertRuleStated(
+            maintainer,
+            ("Landing speed comes first", "never skips a review", "required gate"),
+            "the maintainer landing priority",
+        )
 
     def test_agents_scopes_opt_in_network_approval(self):
         content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
