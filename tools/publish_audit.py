@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from typing import overload
 import unicodedata
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1621,8 +1622,8 @@ def _spdx_provenance_findings(path: str, record: dict, raw_bytes: bytes) -> list
         )
         if not identifiers and byte_exact_import and path not in SPDX_BYTE_EXACT_IMPORT_HEADER_PATHS:
             return []
-        evidence = record.get("evidence") if isinstance(record.get("evidence"), dict) else {}
-        expected = evidence.get("license")
+        evidence = record.get("evidence")
+        expected = evidence.get("license") if isinstance(evidence, dict) else None
         if not isinstance(expected, str) or not expected or expected == "see NOTICE.md":
             return [Finding("SPDX_UPSTREAM_LICENSE_UNKNOWN", path, "upstream provenance does not name an SPDX license")]
         if expected not in identifiers:
@@ -1870,10 +1871,10 @@ def _debt_budget_findings(repo_root: Path = ROOT, paths: list[str] | None = None
         full_path = repo_root / rel
         if not full_path.is_file():
             continue
-        text = _text(full_path)
-        if text is None:
+        file_text = _text(full_path)
+        if file_text is None:
             continue
-        for line in text.splitlines():
+        for line in file_text.splitlines():
             if marker_pat.search(line):
                 todo_count += 1
     ceiling = DEBT_BUDGETS["first_party_todos"]
@@ -1892,10 +1893,10 @@ def _debt_budget_findings(repo_root: Path = ROOT, paths: list[str] | None = None
         full_path = repo_root / rel
         if not full_path.is_file():
             continue
-        text = _text(full_path)
-        if text is None:
+        script_text = _text(full_path)
+        if script_text is None:
             continue
-        script_count = len(ps_pat.findall(text))
+        script_count = len(ps_pat.findall(script_text))
         ps_count += script_count
         script_ceiling = POWERSHELL_SILENTLY_CONTINUE_INVENTORY.get(
             POWERSHELL_SILENTLY_CONTINUE_MOVES.get(rel, rel), 0)
@@ -2548,17 +2549,17 @@ def _provenance_ledger_findings(
             continue
         if record.get("classification") == "unresolved":
             findings.append(Finding("PROVENANCE_UNRESOLVED", path, "trusted provenance record is explicitly unresolved"))
-        raw, error = _source_control_bytes(path, entries, content_map, content_source, repo_root)
+        raw, read_error = _source_control_bytes(path, entries, content_map, content_source, repo_root)
         expected = record.get("sha256")
         content_checked = anchor_binds_content and path not in (PROVENANCE_LEDGER_REL, "PUBLIC_EXPORT.json")
-        if path not in (PROVENANCE_LEDGER_REL, "PUBLIC_EXPORT.json") and (raw is None or error):
-            findings.append(Finding("PROVENANCE_CONTENT_UNREADABLE", path, error or "missing audited bytes"))
+        if path not in (PROVENANCE_LEDGER_REL, "PUBLIC_EXPORT.json") and (raw is None or read_error):
+            findings.append(Finding("PROVENANCE_CONTENT_UNREADABLE", path, read_error or "missing audited bytes"))
         elif content_checked and not expected:
             findings.append(Finding(
                 "PROVENANCE_CONTENT_UNHASHED", path,
                 f"the {record_phrase} is in the hashed form but carries no hash for this path",
             ))
-        elif content_checked and hashlib.sha256(raw).hexdigest() != expected:
+        elif content_checked and raw is not None and hashlib.sha256(raw).hexdigest() != expected:
             findings.append(Finding(
                 "PROVENANCE_CONTENT_MISMATCH", path,
                 f"audited bytes differ from the hash in the {record_phrase}",
@@ -2600,9 +2601,9 @@ def _trusted_control_match_findings(
         trusted = trusted_path.read_bytes()
     except OSError as error:
         return [Finding("CONTROL_TRUST_UNREADABLE", str(trusted_path), str(error))]
-    actual, error = _source_control_bytes(rel_path, entries, content_map, content_source, repo_root)
-    if actual is None or error:
-        return [Finding("CONTROL_MISSING", rel_path, error or "control file is missing from audited source")]
+    actual, read_error = _source_control_bytes(rel_path, entries, content_map, content_source, repo_root)
+    if actual is None or read_error:
+        return [Finding("CONTROL_MISSING", rel_path, read_error or "control file is missing from audited source")]
     if actual != trusted:
         return [Finding(code, rel_path, "audited control bytes differ from the externally trusted release control")]
     return []
@@ -3367,6 +3368,28 @@ def generate_manifest_report(
     }
 
 
+@overload
+def export_csv_manifest_report(
+    entries_or_semantics: list[GitEntry],
+    findings_or_output: list[Finding],
+    output_path_or_none: Path,
+    repo_root: Path = ...,
+    is_candidate_root: bool = ...,
+    content_source: str = ...,
+) -> None: ...
+
+
+@overload
+def export_csv_manifest_report(
+    entries_or_semantics: list[FileSemantics],
+    findings_or_output: Path,
+    output_path_or_none: None = None,
+    repo_root: Path = ...,
+    is_candidate_root: bool = ...,
+    content_source: str = ...,
+) -> None: ...
+
+
 def export_csv_manifest_report(
     entries_or_semantics: list[GitEntry] | list[FileSemantics],
     findings_or_output: list[Finding] | Path,
@@ -3380,7 +3403,11 @@ def export_csv_manifest_report(
 
     if isinstance(output_path_or_none, Path):
         # Called with (entries, findings, output_path)
-        entries = entries_or_semantics  # type: ignore
+        entries: list[GitEntry] = []
+        for item in entries_or_semantics:
+            if not isinstance(item, GitEntry):
+                raise TypeError(f"expected GitEntry in entries list, got {type(item).__name__}")
+            entries.append(item)
         output_path = output_path_or_none
         _, semantics = audit_entries_with_semantics(
             entries,
@@ -3390,8 +3417,13 @@ def export_csv_manifest_report(
         )
     else:
         # Called with (semantics, output_path)
-        semantics = entries_or_semantics  # type: ignore
-        output_path = findings_or_output  # type: ignore
+        if not isinstance(findings_or_output, Path):
+            raise TypeError(f"expected output Path, got {type(findings_or_output).__name__}")
+        for item in entries_or_semantics:
+            if not isinstance(item, FileSemantics):
+                raise TypeError(f"expected FileSemantics in semantics list, got {type(item).__name__}")
+            semantics.append(item)
+        output_path = findings_or_output
 
     fieldnames = [
         "path",

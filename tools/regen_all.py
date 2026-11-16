@@ -329,6 +329,8 @@ def run(check: bool, base: str | None) -> int:
             tmp = Path(scratch) / step.name.replace(" ", "_")
             tmp.mkdir()
             try:
+                if step.render is None:
+                    raise StepError(f"{step.name} has no renderer")
                 expected = step.render(tmp)
             except (StepError, OSError, UnicodeError) as error:
                 print(f"FAIL  {step.name}: {error}")
