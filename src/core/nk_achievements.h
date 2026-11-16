@@ -77,8 +77,10 @@ typedef enum NkAchEventKind {
     NK_ACH_EVENT_SERVER_ERROR,     /* message: the server's error, not retried */
     NK_ACH_EVENT_DISCONNECTED,     /* an unlock is waiting to be sent */
     NK_ACH_EVENT_RECONNECTED,      /* every waiting unlock was sent */
-    NK_ACH_EVENT_DISABLED          /* id: an achievement rc_client turned off because guest memory
+    NK_ACH_EVENT_DISABLED,         /* id: an achievement rc_client turned off because guest memory
                                     * it reads could not be read; message: rc_client's note */
+    NK_ACH_EVENT_QUEUE_FULL,       /* a real unlock could not fit the bounded offline queue */
+    NK_ACH_EVENT_QUEUE_CHANGED     /* the persisted pending queue gained or lost a record */
 } NkAchEventKind;
 
 typedef struct NkAchEvent {
@@ -91,6 +93,23 @@ typedef struct NkAchEvent {
 } NkAchEvent;
 
 #define NK_ACH_EVENT_QUEUE 32u
+#define NK_ACH_PENDING_UNLOCKS_MAX 4096u
+
+/* Token-free, owner-persistable record for an offline unlock. */
+typedef struct NkAchPendingUnlock {
+    char game_hash[33];
+    uint32_t achievement_id;
+    uint64_t unlocked_at_utc;
+} NkAchPendingUnlock;
+
+#define NK_ACH_DISPLAY_TITLE_MAX 128u
+#define NK_ACH_DISPLAY_DESCRIPTION_MAX 192u
+typedef struct NkAchAchievement {
+    char title[NK_ACH_DISPLAY_TITLE_MAX];
+    char description[NK_ACH_DISPLAY_DESCRIPTION_MAX];
+    uint32_t points;
+    bool unlocked_softcore;
+} NkAchAchievement;
 
 typedef struct NkAch NkAch;
 
@@ -150,6 +169,17 @@ size_t nk_ach_copy_rich_presence(const NkAch *ach, char *out, size_t out_size);
  * them. */
 size_t nk_ach_take_events(NkAch *ach, NkAchEvent *out, size_t max);
 uint32_t nk_ach_events_dropped(const NkAch *ach);
+
+/* The player persists these token-free records in an owner-only file. Restored records are
+ * replayed with rcheevos' request builder through the same opt-in transport after sign-in. */
+size_t nk_ach_pending_unlock_count(const NkAch *ach);
+size_t nk_ach_copy_pending_unlocks(const NkAch *ach, NkAchPendingUnlock *out, size_t max);
+bool nk_ach_restore_pending_unlock(NkAch *ach, const NkAchPendingUnlock *unlock);
+void nk_ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms);
+/* Copies only the official/core achievement set. `total` receives the full count even when
+ * `out` is smaller; the caller owns all copied strings. */
+size_t nk_ach_copy_achievement_list(const NkAch *ach, NkAchAchievement *out, size_t max,
+                                    size_t *total);
 
 /* The rc_client behind ach, for the bridge's own tests: they point it at another host to prove
  * that the request gate refuses it. Nothing else needs it. */

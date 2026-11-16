@@ -137,6 +137,7 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *frame);
 #define ACE_UI_ID_HOST_TOAST_TEXT ACE_UI_ID(0x0FCu)
 /* The render notice's words wrap to at most this many lines; more ends in an ellipsis. */
 #define ACE_UI_HOST_NOTICE_LINES 3
+#define ACE_UI_HOST_TOAST_LINES 2
 /* The launch notice's list wraps to at most this many lines: room for every part's words at the
  * smallest layout (ace-ui-selftest), and for the render notice under them. */
 #define ACE_UI_NOTICE_LINES 11

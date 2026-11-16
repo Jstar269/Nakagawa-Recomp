@@ -9,9 +9,9 @@
 #include "nk_achievements.h"
 #include "nk_iso.h"
 
-#include "rc_client.h"
-#include "rc_consoles.h"
-#include "rhash/md5.h"
+#include "../../third_party/rcheevos/include/rc_client.h"
+#include "../../third_party/rcheevos/include/rc_consoles.h"
+#include "../../third_party/rcheevos/src/rhash/md5.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -384,6 +384,17 @@ static void test_login_load_unlock(uint8_t *ram) {
               "game 1234 with two achievements, counted apart from points (id %u, count %u, "
               "points %u)", ev[loaded].id, ev[loaded].count, ev[loaded].points);
     CHECK(nk_ach_game_loaded(ach), "game loaded");
+    NkAchAchievement list[4];
+    size_t achievement_total = 0u;
+    const size_t achievement_count = nk_ach_copy_achievement_list(
+        ach, list, sizeof list / sizeof list[0], &achievement_total);
+    CHECK(achievement_count == 2u && achievement_total == 2u,
+          "the player can copy the core achievement list (%u copied, %u total)",
+          (unsigned)achievement_count, (unsigned)achievement_total);
+    bool found_five = false;
+    for (size_t i = 0u; i < achievement_count; i++)
+        if (strcmp(list[i].title, "Five") == 0 && list[i].points == 5u) found_five = true;
+    CHECK(found_five, "the core list includes the synthetic achievement title and points");
     /* 5502 reads kernel RAM, outside the span. rc_client reads every address once when it
      * activates the set, turns 5502 off, and the user is told, before GAME_LOADED. */
     const int disabled = has_event(ev, n, NK_ACH_EVENT_DISABLED);
@@ -443,35 +454,38 @@ static void test_award_offline_is_pending(uint8_t *ram) {
     CHECK(has_event(ev, n, NK_ACH_EVENT_DISCONNECTED) >= 0, "the award is pending");
     CHECK(has_event(ev, n, NK_ACH_EVENT_SERVER_ERROR) < 0, "a retry is not a server error");
 
-    const size_t progress_size = rc_client_progress_size(nk_ach_rc_client(ach));
-    uint8_t *progress = progress_size ? (uint8_t *)malloc(progress_size) : NULL;
-    CHECK(progress != NULL, "allocate serialized progress (%u bytes)",
-          (unsigned)progress_size);
-    if (progress) {
-        CHECK(rc_client_serialize_progress_sized(nk_ach_rc_client(ach), progress,
-                                                  progress_size) == RC_OK,
-              "serialize the offline runtime progress");
-    }
+    NkAchPendingUnlock queued;
+    memset(&queued, 0, sizeof queued);
+    CHECK(nk_ach_pending_unlock_count(ach) == 1u, "the unlock is in the token-free queue");
+    CHECK(nk_ach_copy_pending_unlocks(ach, &queued, 1u) == 1u,
+          "copy the owner-persistable unlock record");
+    CHECK(queued.achievement_id == 5501u && strcmp(queued.game_hash, HASH) == 0,
+          "the queue holds the game hash and achievement id, not a request body");
     nk_ach_destroy(ach);
 
-    if (progress) {
-        Fake online;
-        memset(&online, 0, sizeof online);
-        online.award_status = 200;
-        NkAch *restored = nk_ach_create(&mem, fake_transport, &online);
-        CHECK(restored != NULL, "create the restored client");
-        if (restored) {
-            CHECK(nk_ach_begin_login(restored, "Player", "TOKEN"), "restored login starts");
-            CHECK(nk_ach_begin_load_game(restored, HASH), "restored game load starts");
-            CHECK(rc_client_deserialize_progress_sized(nk_ach_rc_client(restored), progress,
-                                                        progress_size) == RC_OK,
-                  "restore the offline runtime progress");
-            nk_ach_frame(restored);
-            CHECK(find_request(&online, "r=awardachievement&") >= 0,
-                  "the restored offline unlock is submitted when online");
-            nk_ach_destroy(restored);
-        }
-        free(progress);
+    Fake online;
+    memset(&online, 0, sizeof online);
+    online.award_status = 200;
+    NkAch *restored = nk_ach_create(&mem, fake_transport, &online);
+    CHECK(restored != NULL, "create the restored client");
+    if (restored) {
+        CHECK(nk_ach_restore_pending_unlock(restored, &queued),
+              "restore the owner-persisted unlock record");
+        CHECK(nk_ach_begin_login(restored, "Player", "TOKEN"), "restored login starts");
+        nk_ach_replay_pending_unlocks(restored, 1000u);
+        CHECK(find_request(&online, "r=awardachievement&") >= 0,
+              "the restored unlock is submitted through rcheevos' request builder");
+        const int award = find_request(&online, "r=awardachievement&");
+        CHECK(award >= 0 && strstr(online.log[award], "t=TOKEN") &&
+                  strstr(online.log[award], "a=5501") && strstr(online.log[award], "m=" HASH),
+              "the replay uses the current OS token and the original game hash");
+        CHECK(nk_ach_pending_unlock_count(restored) == 0u,
+              "a successful replay removes the stored record");
+        NkAchEvent restored_events[NK_ACH_EVENT_QUEUE];
+        const size_t restored_count = take(restored, restored_events, NK_ACH_EVENT_QUEUE);
+        CHECK(has_event(restored_events, restored_count, NK_ACH_EVENT_RECONNECTED) >= 0,
+              "the player is told when the persisted queue is synchronized");
+        nk_ach_destroy(restored);
     }
 }
 

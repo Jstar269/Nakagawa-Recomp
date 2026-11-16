@@ -16509,7 +16509,7 @@ int main(int argc, char **argv) {
 
         /* RetroAchievements is independent of network_mode, off unless true is stored, and the
            credential token never enters settings.json. */
-        player_app_init(s_app2);
+        player_app_settings_init_default(&s_app2->settings);
         assert(!s_app2->settings.achievements_enabled);
         assert(s_app2->settings.network_mode == NK_NETWORK_MODE_OFFLINE);
         assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
@@ -16521,15 +16521,16 @@ int main(int argc, char **argv) {
         }
         write_text_file(test_settings_path,
                         "{\"schema_version\": 2, \"achievements_enabled\": \"yes\"}");
-        player_app_init(s_app2);
+        player_app_settings_init_default(&s_app2->settings);
         assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
         assert(!s_app2->settings.achievements_enabled);
         write_text_file(test_settings_path,
                         "{\"schema_version\": 2, \"achievements_enabled\": true}");
-        player_app_init(s_app2);
+        player_app_settings_init_default(&s_app2->settings);
         assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
         assert(s_app2->settings.achievements_enabled);
         if (!s_app2->achievements_store_available) {
+            player_app_settings_init_default(&s_app2->settings);
             player_app_set_achievements_enabled(s_app2, true);
             assert(!s_app2->settings.achievements_enabled);
             assert(strstr(s_app2->achievements_status, "Credential Manager") != NULL);

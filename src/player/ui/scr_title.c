@@ -50,6 +50,12 @@
 #define TITLE_ID_START_NAME TITLE_ID(0x00003Au)
 #define TITLE_ID_START_TEXT TITLE_ID(0x00003Bu)
 #define TITLE_ID_START_BAR TITLE_ID(0x00003Cu)
+#define TITLE_ID_ACHIEVEMENTS TITLE_ID(0x000080u)
+#define TITLE_ID_ACHIEVEMENTS_HEAD TITLE_ID(0x000081u)
+#define TITLE_ID_ACHIEVEMENTS_STATUS TITLE_ID(0x000082u)
+#define TITLE_ID_ACHIEVEMENTS_LINE TITLE_ID(0x000090u)  /* + list row */
+#define TITLE_ID_ACHIEVEMENTS_LINE_SPAN 64u
+#define TITLE_ID_ACHIEVEMENTS_MORE TITLE_ID(0x0000D0u)
 #define TITLE_ID_COMPAT TITLE_ID(0x000005u)
 #define TITLE_ID_COMPAT_HEAD TITLE_ID(0x00002Cu)
 #define TITLE_ID_COMPAT_EYEBROW TITLE_ID(0x000006u)
@@ -497,6 +503,29 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                                    title->compatibility_category);
                     nk_ui_text_role(ui, TITLE_ID_COMPAT_CATEGORY, nk_ui_frame_text(ui, line),
                                     NK_UI_TYPE_FOOTNOTE, theme->dim);
+                }
+                nk_ui_end_container(ui);
+            }
+            if (model->achievements_status &&
+                nk_ui_card_begin(ui, TITLE_ID_ACHIEVEMENTS, sizing_grow(), sizing_fit(),
+                                 NK_UI_SPACE_3)) {
+                nk_ui_eyebrow(ui, TITLE_ID_ACHIEVEMENTS_HEAD,
+                              "RetroAchievements \xC2\xB7 Softcore");
+                nk_ui_text_role(ui, TITLE_ID_ACHIEVEMENTS_STATUS,
+                                model->achievements_status, NK_UI_TYPE_BODY_S, theme->muted);
+                for (size_t i = 0; i < model->achievement_count; i++) {
+                    if (model->achievement_lines[i] && model->achievement_lines[i][0])
+                        nk_ui_text_role(ui, TITLE_ID_ACHIEVEMENTS_LINE + (NkUiId)i,
+                                        model->achievement_lines[i], NK_UI_TYPE_BODY_S,
+                                        theme->paper);
+                }
+                if (model->achievement_total > model->achievement_count) {
+                    char more[96];
+                    (void)snprintf(more, sizeof more,
+                                   "Showing %zu of %zu achievements.",
+                                   model->achievement_count, model->achievement_total);
+                    nk_ui_text_role(ui, TITLE_ID_ACHIEVEMENTS_MORE,
+                                    more, NK_UI_TYPE_FOOTNOTE, theme->dim);
                 }
                 nk_ui_end_container(ui);
             }

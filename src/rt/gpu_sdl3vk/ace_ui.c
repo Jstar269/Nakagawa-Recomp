@@ -358,6 +358,41 @@ static void host_notice_layout(NkUi *ui, const NkUiTheme *theme, const AceUiFram
     nk_ui_end_container(ui);
 }
 
+static void host_toast_layout(NkUi *ui, const NkUiTheme *theme, const AceUiFrame *f,
+                              float logical_w) {
+    float chip_w = logical_w - 2.0f * NK_UI_SPACE_4;
+    if (chip_w > 440.0f) chip_w = 440.0f;
+    const float inner = chip_w - 2.0f * NK_UI_SPACE_3;
+    NkUiLayout row = layout(NK_UI_LAYOUT_ROW, sizing(NK_UI_SIZE_GROW, 0.0f),
+                            sizing(NK_UI_SIZE_FIT, 0.0f), 0.0f);
+    row.align_x = NK_UI_ALIGN_END;
+    if (!nk_ui_begin_container(ui, ACE_UI_ID_HOST_TOAST_ROW, &row, NULL)) return;
+    NkUiLayout chip = layout(NK_UI_LAYOUT_COLUMN, sizing(NK_UI_SIZE_FIXED, chip_w),
+                             sizing(NK_UI_SIZE_FIT, 0.0f), 2.0f);
+    chip.padding_left = chip.padding_right = NK_UI_SPACE_3;
+    chip.padding_top = chip.padding_bottom = NK_UI_SPACE_2;
+    NkUiStyle style = chip_style(theme, f->high_contrast, f->host_toast_alpha);
+    if (nk_ui_begin_container(ui, ACE_UI_ID_HOST_TOAST, &chip, &style)) {
+        NkUiTextStyle head = nk_ui_type(NK_UI_TYPE_LABEL_S,
+                                        faded(theme->accent_dark, f->host_toast_alpha));
+        NkUiTextStyle words = nk_ui_type(NK_UI_TYPE_BODY_S,
+                                         faded(theme->paper, f->host_toast_alpha));
+        head.wrap = false;
+        words.wrap = false;
+        if (f->host_toast_head && f->host_toast_head[0])
+            nk_ui_text(ui, ACE_UI_ID_HOST_TOAST_HEAD,
+                       one_line(ui, nk_ui_text_clamp(ui, f->host_toast_head, &head, inner, 1)),
+                       &head);
+        const char *rest = f->host_toast;
+        for (int line = 0; line < ACE_UI_HOST_TOAST_LINES && rest && rest[0]; line++)
+            nk_ui_text(ui, ACE_UI_ID_HOST_TOAST_TEXT + (NkUiId)line,
+                       words_line(ui, &rest, &words, inner,
+                                  line + 1 == ACE_UI_HOST_TOAST_LINES), &words);
+        nk_ui_end_container(ui);
+    }
+    nk_ui_end_container(ui);
+}
+
 void ace_ui_viewport(const AceUiFrame *f, NkUiViewport *vp) {
     memset(vp, 0, sizeof(*vp));
     if (!f) return;
@@ -385,11 +420,12 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *f) {
     int show_readout = f->readout && f->readout[0];
     int show_logic = f->logic_notice && f->logic_notice[0];
     int show_notice = f->notice && f->notice[0] && f->notice_alpha > 0.0f;
+    int show_toast = f->host_toast && f->host_toast[0] && f->host_toast_alpha > 0.0f;
     const int keyboard_open = f->keyboard && f->keyboard->status == OSK_OVERLAY_OPEN;
     NkUiLayout top = layout(NK_UI_LAYOUT_ROW, sizing(NK_UI_SIZE_GROW, 0.0f),
                             sizing(NK_UI_SIZE_FIT, 0.0f), NK_UI_SPACE_3);
     top.align_y = NK_UI_ALIGN_START;
-    if ((show_readout || show_logic || show_notice) &&
+    if ((show_readout || show_logic || show_notice || show_toast) &&
         nk_ui_begin_container(ui, ACE_UI_ID_TOP, &top, NULL)) {
         float room = scale.logical_w - 2.0f * NK_UI_SPACE_4;
         /* The top left is one column: the readout, then the slowed-logic warning under it, so
@@ -426,7 +462,9 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *f) {
         NkUiLayout spacer = layout(NK_UI_LAYOUT_ROW, sizing(NK_UI_SIZE_GROW, 0.0f),
                                    sizing(NK_UI_SIZE_FIXED, 1.0f), 0.0f);
         if (nk_ui_begin_container(ui, ACE_UI_ID_SPACER, &spacer, NULL)) nk_ui_end_container(ui);
-        if (show_notice) {
+        if (show_toast) {
+            host_toast_layout(ui, theme, f, scale.logical_w);
+        } else if (show_notice) {
             NkUiLayout chip = layout(NK_UI_LAYOUT_COLUMN, sizing(NK_UI_SIZE_FIT, 0.0f),
                                      sizing(NK_UI_SIZE_FIT, 0.0f), 2.0f);
             chip.padding_left = chip.padding_right = NK_UI_SPACE_3;
@@ -471,6 +509,7 @@ int ace_ui_frame_wants(const AceUiFrame *f) {
     return (f->readout && f->readout[0]) ||
            (f->logic_notice && f->logic_notice[0]) ||
            (f->notice && f->notice[0] && f->notice_alpha > 0.0f) ||
+           (f->host_toast && f->host_toast[0] && f->host_toast_alpha > 0.0f) ||
            (f->keyboard && f->keyboard->status == OSK_OVERLAY_OPEN) ||
            (f->host_notice && f->host_notice[0]);
 }

@@ -1002,7 +1002,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                 discord_sentence};
             }
             rows[row_count++] = (WizardRow){
-                "RetroAchievements",
+                "Achievements",
                 model->achievements_enabled ? "On" : model->achievements_available ? "Off" : "Unavailable",
                 model->achievements_available
                     ? "Softcore only. Sends only to retroachievements.org after consent."
@@ -1035,21 +1035,21 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DISCORD);
             }
             if ((model->achievements_available || model->achievements_enabled) &&
-                scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xB6u,
-                                  "RetroAchievements",
+                scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xB8u,
+                                  "Achievements",
                                   "Softcore only. Agree to the host and data disclosure before signing in.",
                                   model->achievements_enabled, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS);
             } else {
                 (void)scr_wizard_value_state(
-                    ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xB6u,
-                    "RetroAchievements", "Unavailable",
+                    ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xB8u,
+                    "Achievements", "Unavailable",
                     "Sign-in needs Windows Credential Manager, which this platform does not provide.",
                     false, true, inner - 32.0f, &column);
             }
             if (model->achievements_enabled &&
                 scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS_ACCOUNT,
-                                 SET_ID_TEXT + 0xB8u, "RA account",
+                                 SET_ID_TEXT + 0xBCu, "RA account",
                                  model->achievements_signed_in
                                      ? safe_text(model->achievements_account, "Signed in")
                                      : "Sign in",

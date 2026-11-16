@@ -3838,6 +3838,23 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             memset(&model, 0, sizeof(model));
             model.title = &player->titles[index];
             model.title_index = (size_t)index;
+            if (app->settings.achievements_enabled) {
+                if (app->achievements_list_loaded &&
+                    strcmp(app->achievements_list_disc_id, game->disc_id) == 0) {
+                    model.achievements_status = app->achievements_status[0]
+                        ? app->achievements_status : "Softcore achievement set loaded.";
+                    model.achievement_count = app->achievements_list_count <
+                            PLAYER_ACHIEVEMENTS_LIST_MAX
+                        ? app->achievements_list_count : PLAYER_ACHIEVEMENTS_LIST_MAX;
+                    model.achievement_total = app->achievements_list_total;
+                    for (size_t i = 0; i < model.achievement_count; i++)
+                        model.achievement_lines[i] = app->achievements_list_lines[i];
+                } else if (!app->achievements_signed_in) {
+                    model.achievements_status = "Sign in in Settings > Online to load this game's softcore set.";
+                } else {
+                    model.achievements_status = "Play this game to load its softcore achievement set.";
+                }
+            }
             /* The build check's refusal is on the page only while the build
                waits for it; so are the files it waits for (#308). */
             player_ui_input_guide(&model.input_guide,

@@ -830,6 +830,15 @@ if(BUILD_PLAYER)
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rcheevos/src
     )
     target_compile_definitions(nakagawa_player PRIVATE NK_UI_WITH_SDL NK_UI_WITH_SDL3)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # rcheevos' pinned POSIX build uses strcasecmp (strings.h) and strdup (the
+        # default feature set) under this project's strict -std=c99 mode. Keep the
+        # vendor files byte-identical and expose those libc declarations at compile time.
+        set_source_files_properties(${NK_RCHEEVOS_PLAYER_SOURCES}
+            PROPERTIES
+                COMPILE_DEFINITIONS "_DEFAULT_SOURCE"
+                COMPILE_OPTIONS "-include;strings.h")
+    endif()
     # The About page's build date: SOURCE_DATE_EPOCH when set, else the source
     # commit's time (the Makefile does the same; see NK_PLAYER_BUILD_EPOCH).
     set(NK_PLAYER_BUILD_EPOCH "$ENV{SOURCE_DATE_EPOCH}")

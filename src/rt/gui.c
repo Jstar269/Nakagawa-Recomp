@@ -855,6 +855,7 @@ static void gui_release_presenter(void);
  * presenter's UI pass. Without SDL3_ttf, the UI fonts or the Vulkan backend the three features
  * are off for the run, said once, and the keyboard keeps today's path. */
 #define ACE_NOTICE_NS 3000000000ull              /* the launch notice stays 3 s */
+#define HOST_TOAST_NS 3000000000ull              /* a local host message stays 3 s */
 static NkOverlayFonts *s_ace_fonts;
 static AceUi *s_ace_ui;
 static int s_ui_ready;                            /* the UI exists and its pass is registered */
@@ -862,6 +863,8 @@ static int s_ace_ui_ready;                        /* ... and it is Ace Mode's: i
 static int s_ace_keyboard_now;                    /* this present's keyboard is the UI pass's */
 static uint64_t s_ace_first_frame_ns;             /* the first accepted present: the notice starts */
 static char s_ace_words[ACE_WORDS_MAX];
+static char s_host_toast_text[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+static uint64_t s_host_toast_until_ns;
 
 static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     const AceConfig *ace = ace_effective();
@@ -910,6 +913,22 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     if (render_notice_shows(&s_render_notice, sr_osk_overlay_active()))
         (void)render_notice_words(s_render_notice.fallback, &f.host_notice_head, &f.host_notice,
                                   &f.host_notice_hint);
+    char notification[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+    if (sr_host_notification(notification, sizeof notification)) {
+        snprintf(s_host_toast_text, sizeof s_host_toast_text, "%s", notification);
+        s_host_toast_until_ns = now <= UINT64_MAX - HOST_TOAST_NS
+                                    ? now + HOST_TOAST_NS : UINT64_MAX;
+    }
+    if (s_host_toast_text[0] && now < s_host_toast_until_ns) {
+        f.host_toast_head = "Host notification";
+        f.host_toast = s_host_toast_text;
+        f.host_toast_alpha = 1.0f;
+        if (!f.reduce_motion && s_host_toast_until_ns - now < 300000000ull)
+            f.host_toast_alpha = (float)(s_host_toast_until_ns - now) / 300000000.0f;
+    } else {
+        s_host_toast_text[0] = '\0';
+        s_host_toast_until_ns = 0u;
+    }
     if (!ace_ui_frame_wants(&f)) return 0;
     AceUiTarget t;
     memset(&t, 0, sizeof(t));
@@ -965,6 +984,15 @@ static int gui_ui_create(char *error, size_t error_size) {
     sdl3vk_set_ui_pass(gui_ace_ui_pass);
     s_ui_ready = 1;
     return 1;
+}
+
+static void gui_host_toast_init(void) {
+    const char *channel = getenv("SR_GUEST_MEMORY_CHANNEL");
+    if (!channel || !channel[0] || s_ui_ready) return;
+    char error[256] = "";
+    if (!gui_ui_create(error, sizeof error))
+        fprintf(stderr, "HOST_NOTIFICATION: the in-game message UI is unavailable (%s)\n",
+                error[0] ? error : "unknown");
 }
 
 static void gui_ace_ui_init(void) {
@@ -1450,6 +1478,7 @@ void gui_init(const char *title) {
                 sr_osk_overlay_set_host(osk_overlay_paint_available());
 #ifndef SR_GUI_PRESENT_SELFTEST
                 gui_ace_ui_init();
+                gui_host_toast_init();
                 gui_ace_smooth_init();
                 gui_wide_init();   /* after smooth motion, which it steps aside for */
                 gui_upscale_init();

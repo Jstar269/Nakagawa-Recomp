@@ -67,7 +67,6 @@ static void player_achievements_stop_channel(PlayerRun *run);
 
 static const char k_invalid_disc_message[] = "This file isn't a PSP disc image.";
 static const char k_ach_credential_target[] = "NakagawaRecomp/RetroAchievements";
-static const char k_ach_user_agent[] = "NakagawaRecomp/" NK_PLAYER_VERSION;
 #define PLAYER_ACH_HTTP_BODY_MAX (4u * 1024u * 1024u)
 enum {
     PLAYER_ACH_HTTP_EVENT_CODE = 0x5241,
@@ -3966,10 +3965,12 @@ typedef struct PlayerRun {
     SDL_AtomicInt guest_memory_stop_requested;
     PlayerAchHttpJob *ach_http_job;
     char achievements_game_hash[33];
+    char achievements_disc_id[MAX_DISC_ID_LEN];
     bool guest_memory_channel_active;
     bool achievements_shutting_down;
     bool achievements_login_pending;
     bool achievements_signout_pending;
+    bool achievements_queue_load_checked;
     /* The frame loop. */
     PlayerLaunchJob *launch_job;
     PlayerStagingJob *staging_job;
@@ -4045,14 +4046,45 @@ static bool player_ach_response_append(PlayerAchHttpJob *job, const unsigned cha
     return true;
 }
 
+static bool player_ach_build_user_agent(char *out, size_t out_size) {
+    const char *version = NK_PLAYER_VERSION;
+    size_t numeric_size = 0u;
+    unsigned components = 1u;
+    bool need_digit = true;
+    if (!out || out_size == 0u) return false;
+    out[0] = '\0';
+    while (version[numeric_size]) {
+        const unsigned char c = (unsigned char)version[numeric_size];
+        if (c >= '0' && c <= '9') {
+            numeric_size++;
+            need_digit = false;
+        } else if (c == '.' && !need_digit && components < 3u) {
+            numeric_size++;
+            components++;
+            need_digit = true;
+        } else {
+            break;
+        }
+    }
+    if (components != 3u || need_digit || numeric_size == 0u) return false;
+    const int written = snprintf(out, out_size, "NakagawaRecomp/%.*s",
+                                 (int)numeric_size, version);
+    return written > 0 && (size_t)written < out_size;
+}
+
 static int SDLCALL player_ach_http_thread_main(void *userdata) {
     PlayerAchHttpJob *job = (PlayerAchHttpJob *)userdata;
-    PackageHttpOptions options = {k_ach_user_agent};
+    char user_agent[64];
+    PackageHttpOptions options = {user_agent};
     PackageHttpResponse response;
     memset(&response, 0, sizeof response);
     const char *method = job->post_data ? "POST" : "GET";
     size_t capacity = 0u;
     bool body_ok = true;
+    if (!player_ach_build_user_agent(user_agent, sizeof user_agent)) {
+        job->response_status = NK_ACH_HTTP_CLIENT_ERROR;
+        goto finished;
+    }
     if (!package_builder_native_transport_request(
             &options, job->url, NK_ACH_HOST, method,
             job->content_type[0] ? job->content_type : NULL,
@@ -4176,6 +4208,195 @@ static void player_ach_http_poll(PlayerRun *run) {
     free(job);
 }
 
+#define PLAYER_ACH_QUEUE_HEADER_SIZE 16u
+#define PLAYER_ACH_QUEUE_RECORD_SIZE 44u
+#define PLAYER_ACH_QUEUE_FILE_MAX \
+    (PLAYER_ACH_QUEUE_HEADER_SIZE + NK_ACH_PENDING_UNLOCKS_MAX * PLAYER_ACH_QUEUE_RECORD_SIZE)
+
+static void player_ach_queue_put_u32(uint8_t *out, uint32_t value) {
+    out[0] = (uint8_t)value;
+    out[1] = (uint8_t)(value >> 8);
+    out[2] = (uint8_t)(value >> 16);
+    out[3] = (uint8_t)(value >> 24);
+}
+
+static void player_ach_queue_put_u64(uint8_t *out, uint64_t value) {
+    for (unsigned i = 0u; i < 8u; i++) out[i] = (uint8_t)(value >> (i * 8u));
+}
+
+static uint32_t player_ach_queue_get_u32(const uint8_t *bytes) {
+    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
+           ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+}
+
+static uint64_t player_ach_queue_get_u64(const uint8_t *bytes) {
+    uint64_t value = 0u;
+    for (unsigned i = 0u; i < 8u; i++) value |= (uint64_t)bytes[i] << (i * 8u);
+    return value;
+}
+
+static bool player_ach_hash_valid(const char hash[33]) {
+    if (!hash || hash[32] != '\0') return false;
+    for (size_t i = 0u; i < 32u; i++) {
+        if (!((hash[i] >= '0' && hash[i] <= '9') ||
+              (hash[i] >= 'a' && hash[i] <= 'f'))) return false;
+    }
+    return true;
+}
+
+static bool player_ach_queue_path(char *path, size_t path_size, char *tmp_path,
+                                  size_t tmp_path_size) {
+    char data_root[NK_MAX_PATH];
+    char directory[NK_MAX_PATH];
+    const char separator = nk_platform_path_separator();
+    if (!path || path_size == 0u || !tmp_path || tmp_path_size == 0u ||
+        !nk_platform_get_app_data_dir(data_root, sizeof data_root)) return false;
+    int n = snprintf(directory, sizeof directory, "%s%cachievements", data_root, separator);
+    if (n <= 0 || (size_t)n >= sizeof directory ||
+        !nk_platform_mkdir_p_private(directory)) return false;
+    n = snprintf(path, path_size, "%s%cunlock-queue.bin", directory, separator);
+    if (n <= 0 || (size_t)n >= path_size) return false;
+    n = snprintf(tmp_path, tmp_path_size, "%s.tmp", path);
+    return n > 0 && (size_t)n < tmp_path_size;
+}
+
+static bool player_achievements_save_queue(PlayerRun *run) {
+    if (!run || !run->achievements) return false;
+    const size_t count = nk_ach_pending_unlock_count(run->achievements);
+    if (count > NK_ACH_PENDING_UNLOCKS_MAX) return false;
+    NkAchPendingUnlock *entries = (NkAchPendingUnlock *)calloc(
+        count ? count : 1u, sizeof(*entries));
+    if (!entries) return false;
+    const size_t copied = nk_ach_copy_pending_unlocks(run->achievements, entries, count);
+    if (copied != count) {
+        free(entries);
+        return false;
+    }
+
+    char path[NK_MAX_PATH];
+    char tmp_path[NK_MAX_PATH];
+    if (!player_ach_queue_path(path, sizeof path, tmp_path, sizeof tmp_path)) {
+        free(entries);
+        return false;
+    }
+    FILE *file = nk_platform_fopen_private(tmp_path, "wb");
+    if (!file) {
+        free(entries);
+        return false;
+    }
+    static const uint8_t magic[8] = {'N', 'K', 'R', 'A', 'Q', '0', '0', '1'};
+    uint8_t header[PLAYER_ACH_QUEUE_HEADER_SIZE];
+    memcpy(header, magic, sizeof magic);
+    player_ach_queue_put_u32(header + 8u, 1u);
+    player_ach_queue_put_u32(header + 12u, (uint32_t)count);
+    bool ok = fwrite(header, 1u, sizeof header, file) == sizeof header;
+    uint8_t record[PLAYER_ACH_QUEUE_RECORD_SIZE];
+    for (size_t i = 0u; ok && i < count; i++) {
+        if (!player_ach_hash_valid(entries[i].game_hash) || entries[i].achievement_id == 0u) {
+            ok = false;
+            break;
+        }
+        memcpy(record, entries[i].game_hash, 32u);
+        player_ach_queue_put_u32(record + 32u, entries[i].achievement_id);
+        player_ach_queue_put_u64(record + 36u, entries[i].unlocked_at_utc);
+        ok = fwrite(record, 1u, sizeof record, file) == sizeof record;
+    }
+    if (fflush(file) != 0) ok = false;
+    if (fclose(file) != 0) ok = false;
+    if (ok && nk_rename_utf8(tmp_path, path) != 0) ok = false;
+    free(entries);
+    return ok;
+}
+
+static bool player_achievements_load_queue(PlayerRun *run) {
+    if (!run || !run->achievements) return false;
+    char path[NK_MAX_PATH];
+    char tmp_path[NK_MAX_PATH];
+    if (!player_ach_queue_path(path, sizeof path, tmp_path, sizeof tmp_path)) return false;
+    if (!nk_platform_file_exists(path)) return true;
+    const int64_t raw_size = nk_platform_get_file_size(path);
+    if (raw_size < (int64_t)PLAYER_ACH_QUEUE_HEADER_SIZE ||
+        (uint64_t)raw_size > PLAYER_ACH_QUEUE_FILE_MAX) return false;
+    FILE *file = nk_fopen_utf8(path, "rb");
+    if (!file) return false;
+
+    uint8_t header[PLAYER_ACH_QUEUE_HEADER_SIZE];
+    static const uint8_t magic[8] = {'N', 'K', 'R', 'A', 'Q', '0', '0', '1'};
+    bool ok = fread(header, 1u, sizeof header, file) == sizeof header &&
+              memcmp(header, magic, sizeof magic) == 0 &&
+              player_ach_queue_get_u32(header + 8u) == 1u;
+    const uint32_t count = ok ? player_ach_queue_get_u32(header + 12u) : 0u;
+    const uint64_t expected = (uint64_t)PLAYER_ACH_QUEUE_HEADER_SIZE +
+                              (uint64_t)count * PLAYER_ACH_QUEUE_RECORD_SIZE;
+    if (count > NK_ACH_PENDING_UNLOCKS_MAX || expected != (uint64_t)raw_size) ok = false;
+    NkAchPendingUnlock *entries = ok
+        ? (NkAchPendingUnlock *)calloc(count ? count : 1u, sizeof(*entries)) : NULL;
+    if (ok && !entries) ok = false;
+    uint8_t record[PLAYER_ACH_QUEUE_RECORD_SIZE];
+    for (uint32_t i = 0u; ok && i < count; i++) {
+        if (fread(record, 1u, sizeof record, file) != sizeof record) {
+            ok = false;
+            break;
+        }
+        memcpy(entries[i].game_hash, record, 32u);
+        entries[i].game_hash[32] = '\0';
+        entries[i].achievement_id = player_ach_queue_get_u32(record + 32u);
+        entries[i].unlocked_at_utc = player_ach_queue_get_u64(record + 36u);
+        if (!player_ach_hash_valid(entries[i].game_hash) || entries[i].achievement_id == 0u)
+            ok = false;
+    }
+    if (ok && fgetc(file) != EOF) ok = false;
+    fclose(file);
+    if (ok) {
+        for (uint32_t i = 0u; i < count; i++) {
+            if (!nk_ach_restore_pending_unlock(run->achievements, &entries[i])) {
+                ok = false;
+                break;
+            }
+        }
+    }
+    free(entries);
+    return ok;
+}
+
+static void player_achievements_refresh_list(PlayerRun *run) {
+    if (!run || !run->achievements) return;
+    PlayerApp *app = &run->app;
+    NkAchAchievement entries[PLAYER_ACHIEVEMENTS_LIST_MAX];
+    size_t total = 0u;
+    const size_t count = nk_ach_copy_achievement_list(
+        run->achievements, entries, PLAYER_ACHIEVEMENTS_LIST_MAX, &total);
+    app->achievements_list_count = count;
+    app->achievements_list_total = total;
+    app->achievements_list_loaded = true;
+    snprintf(app->achievements_list_disc_id, sizeof app->achievements_list_disc_id,
+             "%s", run->achievements_disc_id);
+    for (size_t i = 0u; i < count; i++) {
+        snprintf(app->achievements_list_lines[i], sizeof app->achievements_list_lines[i],
+                 "%s \xC2\xB7 %u points \xC2\xB7 %.128s",
+                 entries[i].unlocked_softcore ? "Unlocked (softcore)" : "Locked",
+                 entries[i].points, entries[i].title);
+    }
+    for (size_t i = count; i < PLAYER_ACHIEVEMENTS_LIST_MAX; i++)
+        app->achievements_list_lines[i][0] = '\0';
+}
+
+static void player_achievements_clear_list(PlayerRun *run) {
+    if (!run) return;
+    run->app.achievements_list_loaded = false;
+    run->app.achievements_list_disc_id[0] = '\0';
+    run->app.achievements_list_count = 0u;
+    run->app.achievements_list_total = 0u;
+    memset(run->app.achievements_list_lines, 0,
+           sizeof run->app.achievements_list_lines);
+}
+
+static void player_achievements_save_queue_or_report(PlayerRun *run) {
+    if (!run || !run->achievements || player_achievements_save_queue(run)) return;
+    snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+             "The offline unlock queue could not be saved to this PC.");
+}
+
 static void player_achievements_collect_events(PlayerRun *run) {
     if (!run || !run->achievements) return;
     PlayerApp *app = &run->app;
@@ -4229,6 +4450,7 @@ static void player_achievements_collect_events(PlayerRun *run) {
                              app->is_game_running && !run->guest_memory_channel_active
                                  ? "Signed in. Restart this game to start softcore tracking."
                                  : "Signed in. Softcore only.");
+                    nk_ach_replay_pending_unlocks(run->achievements, SDL_GetTicks());
                 }
                 player_secure_clear(username, sizeof username);
                 break;
@@ -4248,10 +4470,12 @@ static void player_achievements_collect_events(PlayerRun *run) {
                 app->achievements_account[0] = '\0';
                 break;
             case NK_ACH_EVENT_GAME_LOADED:
+                player_achievements_refresh_list(run);
                 snprintf(app->achievements_status, sizeof app->achievements_status,
                          "Softcore · %u achievements available.", event->count);
                 break;
             case NK_ACH_EVENT_GAME_FAILED:
+                player_achievements_clear_list(run);
                 snprintf(app->achievements_status, sizeof app->achievements_status,
                          "No achievement set was available for this game.");
                 break;
@@ -4264,15 +4488,27 @@ static void player_achievements_collect_events(PlayerRun *run) {
                 }
                 snprintf(app->achievements_status, sizeof app->achievements_status,
                          "Unlocked: %.150s · Softcore", event->title);
+                player_achievements_refresh_list(run);
+                player_achievements_save_queue_or_report(run);
                 break;
             }
             case NK_ACH_EVENT_DISCONNECTED:
+                player_achievements_save_queue_or_report(run);
                 snprintf(app->achievements_status, sizeof app->achievements_status,
                          "Offline. Unlocks are waiting to sync.");
                 break;
             case NK_ACH_EVENT_RECONNECTED:
+                player_achievements_save_queue_or_report(run);
                 snprintf(app->achievements_status, sizeof app->achievements_status,
                          "Connected. Pending unlocks synced.");
+                break;
+            case NK_ACH_EVENT_QUEUE_CHANGED:
+                player_achievements_save_queue_or_report(run);
+                break;
+            case NK_ACH_EVENT_QUEUE_FULL:
+                player_achievements_save_queue_or_report(run);
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "The offline unlock queue is full; this unlock may not sync.");
                 break;
             case NK_ACH_EVENT_DISABLED:
                 snprintf(app->achievements_status, sizeof app->achievements_status,
@@ -4305,6 +4541,12 @@ static void player_achievements_start(PlayerRun *run) {
                      "RetroAchievements could not initialize.");
             return;
         }
+    }
+    if (!run->achievements_queue_load_checked) {
+        run->achievements_queue_load_checked = true;
+        if (!player_achievements_load_queue(run))
+            snprintf(app->achievements_status, sizeof app->achievements_status,
+                     "A saved offline unlock queue could not be read; sign-in can continue.");
     }
     char username[256] = "";
     char token[1024] = "";
@@ -4491,6 +4733,7 @@ static void player_achievements_shutdown(PlayerRun *run) {
         player_ach_http_poll(run);
     }
     if (run->achievements) {
+        (void)player_achievements_save_queue(run);
         nk_ach_destroy(run->achievements);
         run->achievements = NULL;
     }
@@ -4499,6 +4742,9 @@ static void player_achievements_shutdown(PlayerRun *run) {
 static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork *work) {
     if (!run || !work) return;
     work->guest_memory_channel[0] = '\0';
+    player_achievements_clear_list(run);
+    snprintf(run->achievements_disc_id, sizeof run->achievements_disc_id, "%s",
+             work->game.disc_id);
     if (run->guest_memory_channel_active || run->guest_memory_channel.view) {
         player_achievements_stop_channel(run);
     }
@@ -4566,6 +4812,7 @@ static void player_achievements_sign_out(PlayerRun *run) {
         nk_ach_logout(run->achievements);
     }
     player_achievements_stop_channel(run);
+    player_achievements_clear_list(run);
     run->app.achievements_signed_in = false;
     run->app.achievements_account[0] = '\0';
     snprintf(run->app.achievements_status, sizeof run->app.achievements_status, "%s",
@@ -4588,6 +4835,7 @@ static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettings
             if (run->achievements_login_pending) run->achievements_signout_pending = false;
             if (run->achievements) nk_ach_logout(run->achievements);
             player_achievements_stop_channel(run);
+            player_achievements_clear_list(run);
             app->achievements_signed_in = false;
             app->achievements_account[0] = '\0';
             snprintf(app->achievements_status, sizeof app->achievements_status,
@@ -5788,6 +6036,8 @@ static void player_frame_begin(PlayerRun *run) {
     if (run->achievements && app->settings.achievements_enabled) {
         nk_ach_idle(run->achievements);
         player_achievements_collect_events(run);
+        if (app->achievements_signed_in)
+            nk_ach_replay_pending_unlocks(run->achievements, SDL_GetTicks());
     }
     if (SDL_GetAtomicInt(&run->guest_memory_sync_failed)) {
         SDL_SetAtomicInt(&run->guest_memory_sync_failed, 0);

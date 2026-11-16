@@ -400,6 +400,25 @@ static void cell_layout(void) {
     CHECK(!ace_ui_frame_wants(&empty), "an empty render notice is wanted");
     empty.host_notice = k_host_words;
     CHECK(ace_ui_frame_wants(&empty), "the render notice alone is not wanted");
+    empty.host_notice = NULL;
+    empty.host_toast_head = "Host notification";
+    empty.host_toast = "Achievement unlocked: Five";
+    empty.host_toast_alpha = 1.0f;
+    CHECK(ace_ui_frame_wants(&empty), "a host notification toast is not wanted");
+    AceUiFrame toast = frame_full(960, 544, 1.0f);
+    toast.readout = NULL;
+    toast.notice = NULL;
+    toast.keyboard = NULL;
+    toast.host_toast_head = "Host notification";
+    toast.host_toast = "Achievement unlocked: Five";
+    toast.host_toast_alpha = 1.0f;
+    float toast_density = 1.0f;
+    const NkUiDrawList *toast_list = build(ui, &toast, &toast_density);
+    int toast_bounds[4];
+    CHECK(toast_list && element_bounds(toast_list, ACE_UI_ID_HOST_TOAST, toast_bounds) &&
+              toast_bounds[0] >= 0 && toast_bounds[2] <= toast.pixel_w &&
+              toast_bounds[1] >= 0 && toast_bounds[3] <= toast.pixel_h,
+          "a host notification toast is drawn within the game window");
     nk_ui_destroy(ui);
 }
 

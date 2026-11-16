@@ -1028,6 +1028,10 @@ typedef struct {
 typedef struct {
     const PlayerUiTitle *title;
     size_t title_index;
+    const char *achievements_status; /* the signed-in game's softcore status, or NULL */
+    const char *achievement_lines[64];
+    size_t achievement_count;
+    size_t achievement_total;
     bool stalled_game_notice_visible;
     /* The notice is for frames that show nothing, not for frames that stopped. */
     bool stalled_game_dark_picture;
