@@ -2116,16 +2116,33 @@ int io_restore_truncated_gap(Fd *f) {
  * -1 if the path is not in the extracted set (caller should fall through to the
  * real opener). The returned entry is owned by the immutable cache. */
 /* sceIoOpen with PSP_O_CREAT and without write access on the Memory Stick, where no hardware
- * cell says what the PSP answers (#1380): the file exists on fatms0:, PSP_O_APPEND is set, or an
- * unmeasured PSP_O_TRUNC/PSP_O_EXCL combination is used. Nothing is opened, created or cut. */
+ * cell says what the PSP answers (#1380): an existing file on fatms0:, PSP_O_APPEND, any other
+ * extra flag, and on either device PSP_O_TRUNC on a missing file or PSP_O_EXCL on an existing
+ * file or under a missing directory (on fatms0: PSP_O_TRUNC and PSP_O_EXCL always). Nothing is
+ * opened, created or cut. */
 static uint32_t io_open_read_only_create_boundary(const char *path) {
     static atomic_flag reported = ATOMIC_FLAG_INIT;
     if (!atomic_flag_test_and_set_explicit(&reported, memory_order_acq_rel))
         fprintf(stderr,
                 "SEMANTIC_BOUNDARY: IO_OPEN_READ_ONLY_CREATE: sceIoOpen(%s) with PSP_O_CREAT and "
-                "without write access on an existing file, or with PSP_O_APPEND, PSP_O_TRUNC or "
-                "PSP_O_EXCL, is not supported yet (0x80010086)\n", path);
+                "without write access, in a case no PSP cell measures (an existing fatms0: file, "
+                "PSP_O_APPEND, PSP_O_TRUNC on a missing file, PSP_O_EXCL on an existing file or "
+                "under a missing directory), is not supported yet (0x80010086)\n", path);
     return 0x80010086u;
+}
+
+/* Whether the directory that would hold host file hp exists. */
+static int io_host_parent_dir_exists(const char *hp) {
+    char parent[1024];
+    size_t len = strlen(hp);
+    if (len >= sizeof(parent)) return 0;
+    memcpy(parent, hp, len + 1u);
+    char *cut = NULL;
+    for (char *p = parent; *p; p++)
+        if (*p == '/' || *p == '\\') cut = p;
+    if (!cut || cut == parent) return 0;
+    *cut = '\0';
+    return nk_platform_dir_exists(parent);
 }
 
 static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int forced_slot) {
@@ -2186,13 +2203,14 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
     int writing = (flags & 0x0002) != 0;        /* WRONLY or RDWR */
     int creating = (flags & 0x0200) != 0;
     int exclusive = creating && (flags & 0x0800) != 0;  /* CREAT | EXCL */
-    /* PSP_O_CREAT without write access on the Memory Stick (ms0: or fatms0:). Measured:
-     * PSP_O_RDONLY | PSP_O_CREAT on a missing file answers 0x80010016 and creates nothing on
-     * ms0: and fatms0: (PSP-HLE-IO-SEEK-001); on ms0:, the same flags open an existing file,
-     * PSP_O_TRUNC on an existing file answers 0x80010016 without truncating, and PSP_O_EXCL on a
-     * missing file answers 0x80010016 without creating it (PSP-HLE-IO-SEEK-002). The read-only
-     * create variants on fatms0:, PSP_O_APPEND, TRUNC on a missing path, and EXCL on an existing
-     * path remain at the named boundary. */
+    /* PSP_O_CREAT without write access on the Memory Stick (ms0: or fatms0:). Measured on ms0:
+     * only: PSP_O_RDONLY | PSP_O_CREAT on a missing file answers 0x80010016 and creates nothing
+     * (PSP-HLE-IO-SEEK-001; fatms0: follows it, unmeasured); the same flags open an existing
+     * file, PSP_O_TRUNC on an existing file answers 0x80010016 without truncating, and
+     * PSP_O_EXCL on a missing name in an existing directory answers 0x80010016 without creating
+     * it (PSP-HLE-IO-SEEK-002). Every other read-only create (the fatms0: variants,
+     * PSP_O_APPEND, PSP_O_TRUNC on a missing file, PSP_O_EXCL on an existing file or under a
+     * missing directory) stops at the named boundary. */
     const int read_only_create = creating && !writing && strchr(path, ':') &&
                                  sr_ms0_classify(path, NULL) == SR_MS0_OWNED;
     const int read_only_create_ms0 = read_only_create &&
@@ -2220,7 +2238,12 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
     sr_cd_status open_status = SR_CD_NOT_FOUND;
 #endif
     uint32_t lba, size;
-    int in_iso = (iso_lookup(path, &lba, &size) == 0);
+    /* The ISO lookup drops the device prefix, so an ms0: name that is also on the disc would
+     * open the disc file. The read-only PSP_O_TRUNC and PSP_O_EXCL creates are Memory Stick
+     * opens whose answer depends on the Memory Stick file alone (PSP-HLE-IO-SEEK-002); they never
+     * consult the disc. */
+    int in_iso = !read_only_create_trunc_ms0 && !read_only_create_exclusive_ms0 &&
+                 iso_lookup(path, &lba, &size) == 0;
 
     if (writing || creating || !in_iso) {
         /* Host-backed file (writable storage). Without CREAT the file must already exist,
@@ -2259,12 +2282,16 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
             open_status == SR_CD_NOT_FOUND && hp && ms0_try_legacy_flat_import(path, hp))
             fp = ms0_fopen_guest_utf8(path, mode, existence, &open_status);
 #endif
+        /* io-edge-ms-rdonly-creat-excl measured a missing name in an existing directory only; a
+         * missing parent directory is not that cell and keeps the named boundary. */
         int read_only_create_exclusive_missing = 0;
         if (!fp && read_only_create_exclusive_ms0) {
 #ifdef _WIN32
-            read_only_create_exclusive_missing = hp && nk_platform_path_missing(hp);
+            read_only_create_exclusive_missing = hp && nk_platform_path_missing(hp) &&
+                                                 io_host_parent_dir_exists(hp);
 #else
-            read_only_create_exclusive_missing = open_status == SR_CD_NOT_FOUND;
+            read_only_create_exclusive_missing = open_status == SR_CD_NOT_FOUND && hp &&
+                                                 io_host_parent_dir_exists(hp);
 #endif
         }
         free(hp);
@@ -2631,36 +2658,58 @@ uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence,
     return 0x80010086u;
 }
 
-/* The PSP-HLE-IO-SEEK-001 MS0 ioctl cells are refusals on a regular Memory Stick file. Match the
- * measured commands and argument shapes only; other commands and malformed calls keep their
- * existing behavior until a PSP probe settles them. */
-static int io_ms0_measured_ioctl_cell(const Fd *f, uint32_t cmd, uint32_t in,
-                                      uint32_t inlen, uint32_t out, uint32_t outlen) {
-    if (!f || !f->host || sr_vfs_strnicmp(f->guest_path, "ms0:", 4u) != 0) return 0;
+/* sceIoIoctl file commands on a regular ms0: Memory Stick file (PSP-HLE-IO-SEEK-001
+ * io-seek-ms-ioctl-*): the PSP answered 0x80020325 and changed nothing for the seek 0x01010005
+ * (SEEK_SET to before the start, inside, at the size and past the end alike) and for the queries
+ * 0x01020003, 0x01020004, 0x01020006, 0x01020007 and 0x01030008, so the device refuses the
+ * command whatever the offset or buffer size. That rule covers each command's measured call
+ * form: the seek with its 16-byte input, a zero reserved word and SEEK_SET; a query with no input
+ * and an output that holds the answer. Other forms of these commands (another whence, a short
+ * buffer, an input for a query), none measured, stop at a named boundary; other commands, and
+ * every sceIoIoctlAsync (no asynchronous cell is measured), keep the plain-file switch as
+ * before. */
+enum { IO_MS_IOCTL_OTHER, IO_MS_IOCTL_REFUSED, IO_MS_IOCTL_BOUNDARY };
+static int io_ms0_file_ioctl_rule(const Fd *f, uint32_t cmd, uint32_t in, uint32_t inlen,
+                                  uint32_t out, uint32_t outlen, int asynchronous) {
+    if (asynchronous || !f || !f->host || sr_vfs_strnicmp(f->guest_path, "ms0:", 4u) != 0)
+        return IO_MS_IOCTL_OTHER;
+    uint32_t answer = 0u;
     switch (cmd) {
-    case 0x01010005: {  /* SEEK_SET offsets -1, 8, 16, and 32 */
+    case 0x01010005:  /* seek: { u64 offset; u32 reserved; u32 whence } */
         if (!in || inlen != 16u || out != 0u || outlen != 0u ||
             !sr_guest_span_readable(in, 16u))
-            return 0;
-        uint64_t offset = ((uint64_t)MEM_R32(in + 4u) << 32) | MEM_R32(in);
-        uint32_t unknown = MEM_R32(in + 8u);
-        uint32_t whence = MEM_R32(in + 12u);
-        return unknown == 0u && whence == 0u &&
-               (offset == UINT64_MAX || offset == 8u || offset == 16u || offset == 32u);
-    }
+            return IO_MS_IOCTL_BOUNDARY;
+        return MEM_R32(in + 8u) == 0u && MEM_R32(in + 12u) == 0u ? IO_MS_IOCTL_REFUSED
+                                                                   : IO_MS_IOCTL_BOUNDARY;
     case 0x01020003:  /* sector size */
     case 0x01020004:  /* current position */
     case 0x01020006:  /* start sector */
-    case 0x01020007:  /* file size */
-        return in == 0u && inlen == 0u && out != 0u && outlen == 8u &&
-               sr_guest_span_writable(out, 8u);
-    case 0x01030008:  /* read four bytes with no input buffer */
-        return in == 0u && inlen == 0u && out != 0u && outlen == 4u &&
-               sr_guest_span_writable(out, 4u);
+    case 0x01030008:  /* read four bytes, no input buffer */
+        answer = 4u;
+        break;
+    case 0x01020007:  /* file size, 64-bit */
+        answer = 8u;
+        break;
     default:
-        return 0;
+        return IO_MS_IOCTL_OTHER;
     }
+    if (in != 0u || inlen != 0u || out == 0u || outlen < answer ||
+        !sr_guest_span_writable(out, answer))
+        return IO_MS_IOCTL_BOUNDARY;
+    return IO_MS_IOCTL_REFUSED;
 }
+
+static uint32_t io_ms0_file_ioctl_boundary(uint32_t cmd) {
+    static atomic_flag reported = ATOMIC_FLAG_INIT;
+    if (!atomic_flag_test_and_set_explicit(&reported, memory_order_acq_rel))
+        fprintf(stderr,
+                "SEMANTIC_BOUNDARY: IO_MS_FILE_IOCTL: sceIoIoctl(0x%08x) on a Memory Stick file, "
+                "in a form no PSP cell measures, is not supported yet (0x80010086)\n", cmd);
+    return 0x80010086u;
+}
+
+static uint32_t io_ioctl_args_mode(uint32_t fd, uint32_t cmd, uint32_t in, uint32_t inlen,
+                                   uint32_t out, uint32_t outlen, int asynchronous);
 
 /* sceIoIoctl (NID 0x63632449): device control on an open fd. First hit live
  * 2026-07-18, right after the first real savegame started existing (boot now
@@ -2674,6 +2723,18 @@ static int io_ms0_measured_ioctl_cell(const Fd *f, uint32_t cmd, uint32_t in,
  * (0x80010086) exactly like the reference fallback. */
 uint32_t h_io_ioctl_args(uint32_t fd, uint32_t cmd, uint32_t in,
                                 uint32_t inlen, uint32_t out, uint32_t outlen) {
+    return io_ioctl_args_mode(fd, cmd, in, inlen, out, outlen, 0);
+}
+
+/* sceIoIoctlAsync's completion: as sceIoIoctl, but no Memory Stick file command is measured
+ * asynchronously, so they keep the plain-file switch they had before the sceIoIoctl rule. */
+uint32_t io_ioctl_async_complete(uint32_t fd, uint32_t cmd, uint32_t in,
+                                 uint32_t inlen, uint32_t out, uint32_t outlen) {
+    return io_ioctl_args_mode(fd, cmd, in, inlen, out, outlen, 1);
+}
+
+static uint32_t io_ioctl_args_mode(uint32_t fd, uint32_t cmd, uint32_t in, uint32_t inlen,
+                                   uint32_t out, uint32_t outlen, int asynchronous) {
     if (fd < 3 && s_fds[fd].used && s_fds[fd].kind == FD_KIND_STD)
         return 0x80010009; /* baseline behavior preserved for standard streams */
     uint32_t raw_error = hle_io_raw_fd_boundary(fd, IO_RAW_BOUNDARY_IOCTL,
@@ -2682,7 +2743,9 @@ uint32_t h_io_ioctl_args(uint32_t fd, uint32_t cmd, uint32_t in,
     if (!hle_fd_is_file(fd)) return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     Fd *f = &s_fds[fd];
     if (f->async.state == IO_ASYNC_PENDING) return SCE_ERROR_KERNEL_ASYNC_BUSY;
-    if (io_ms0_measured_ioctl_cell(f, cmd, in, inlen, out, outlen)) return 0x80020325u;
+    int ms_rule = io_ms0_file_ioctl_rule(f, cmd, in, inlen, out, outlen, asynchronous);
+    if (ms_rule == IO_MS_IOCTL_REFUSED) return 0x80020325u;
+    if (ms_rule == IO_MS_IOCTL_BOUNDARY) return io_ms0_file_ioctl_boundary(cmd);
     if (getenv("SR_IOLOG"))
         fprintf(stderr, "Ioctl fd=%u cmd=0x%08x in=0x%08x/%u out=0x%08x/%u\n",
                 fd, cmd, in, inlen, out, outlen);
@@ -2884,7 +2947,7 @@ uint32_t io_async_complete_fd(uint32_t fd) {
         } else if (request.op == IO_ASYNC_LSEEK32) {
             cpu.r[5] = request.a1;
             cpu.r[6] = request.a2;
-            result = io_async_result_u32(h_IoLseek32(&cpu));
+            result = io_async_result_u32(io_lseek32_async_complete(&cpu));
         } else if (request.op == IO_ASYNC_LSEEK64 && hle_fd_is_raw_umd(fd)) {
             int64_t offset = (int64_t)(((uint64_t)request.a2 << 32) | request.a1);
             uint32_t position = 0;
@@ -2909,9 +2972,9 @@ uint32_t io_async_complete_fd(uint32_t fd) {
                 }
             }
         } else if (request.op == IO_ASYNC_IOCTL) {
-            result = (int64_t)(int32_t)h_io_ioctl_args(fd, request.a1, request.a2,
-                                                       request.a3, request.stack0,
-                                                       request.stack1);
+            result = (int64_t)(int32_t)io_ioctl_async_complete(fd, request.a1, request.a2,
+                                                               request.a3, request.stack0,
+                                                               request.stack1);
         } else if (request.op == IO_ASYNC_OPEN) {
             /* The host open ran at submission; its result is the descriptor. */
             result = (int64_t)fd;

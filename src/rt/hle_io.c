@@ -335,8 +335,9 @@ uint32_t h_IoWrite(CpuState *s) {
     if (!f->host) return 0x80010013;                 /* read-only (ISO) fd: not writable */
     /* A write through a Memory Stick (ms0: or fatms0:) descriptor opened without write access
      * answers the manager's bad-descriptor error and leaves the file unchanged
-     * (PSP-HLE-IO-SEEK-001 io-seek-ms-write-rdonly, measured on a PSP-3000; sceIoWriteAsync
-     * shares it, unmeasured). */
+     * (PSP-HLE-IO-SEEK-001 io-seek-ms-write-rdonly, measured on a PSP-3000). sceIoWriteAsync on
+     * an idle ms0: descriptor refuses at submission (PSP-HLE-IO-SEEK-002); on fatms0: it queues
+     * and its completion runs this check, unmeasured. */
     if (!f->writable && strchr(f->guest_path, ':') &&
         sr_ms0_classify(f->guest_path, NULL) == SR_MS0_OWNED)
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
@@ -686,7 +687,8 @@ uint32_t h_IoRead(CpuState *s) {
     return result;
 }
 /* PSP-HLE-IO-SEEK-002 measured synchronous seeks only on flash0:/font/ltn0.pgf. Other flash0
- * fonts and the async completion path keep io_seek_destination until their cells are measured. */
+ * fonts and both async completions (sceIoLseekAsync, sceIoLseek32Async) keep
+ * io_seek_destination until their cells are measured. */
 static uint32_t io_sync_seek_destination(const Fd *f, int64_t offset, uint32_t whence,
                                          const char *api, uint32_t *position,
                                          uint32_t *error_high) {
@@ -708,7 +710,10 @@ static uint32_t io_sync_seek_destination(const Fd *f, int64_t offset, uint32_t w
     return 0x80010016u;
 }
 
-uint32_t h_IoLseek32(CpuState *s) {
+/* sceIoLseek32 and sceIoLseek32Async's completion. Only the synchronous call takes the measured
+ * flash0 rule (PSP-HLE-IO-SEEK-002); no asynchronous seek cell is measured, so the completion
+ * keeps io_seek_destination, as sceIoLseekAsync's does. */
+static uint32_t io_lseek32(CpuState *s, int synchronous) {
     /* a0=fd, a1=offset, a2=whence. Returns new position (32-bit). */
     uint32_t fd = A0; int32_t off = (int32_t)A1; uint32_t whence = A2;
     if (fd < 3 && s_fds[fd].used && s_fds[fd].kind == FD_KIND_STD)
@@ -727,11 +732,15 @@ uint32_t h_IoLseek32(CpuState *s) {
     Fd *f = &s_fds[fd];
     if (f->async.state == IO_ASYNC_PENDING) return SCE_ERROR_KERNEL_ASYNC_BUSY;
     uint32_t position = 0;
-    uint32_t refused = io_sync_seek_destination(f, off, whence, "sceIoLseek32", &position, NULL);
+    uint32_t refused = synchronous
+        ? io_sync_seek_destination(f, off, whence, "sceIoLseek32", &position, NULL)
+        : io_seek_destination(f, off, whence, "sceIoLseek32Async", &position, NULL);
     if (refused != 0u) return refused;
     f->off = position;
     return f->off;
 }
+uint32_t h_IoLseek32(CpuState *s) { return io_lseek32(s, 1); }
+uint32_t io_lseek32_async_complete(CpuState *s) { return io_lseek32(s, 0); }
 static uint32_t h_IoLseek(CpuState *s) {
     /* a0=fd, a2/a3=aligned 64-bit offset (a1 is skipped), t0=whence.
      * Returns the 64-bit position in v0:v1. */
@@ -1706,7 +1715,11 @@ static uint32_t h_IoWriteAsync(CpuState *s) {
     uint32_t raw_error = hle_io_raw_fd_boundary(
         fd, IO_RAW_BOUNDARY_WRITE_ASYNC, "sceIoWriteAsync");
     if (raw_error != 0u) return raw_error;
+    /* PSP-HLE-IO-SEEK-002 io-edge-ms-write-async: on an idle PSP_O_RDONLY ms0: descriptor the
+     * PSP returns 0x80020323 at once and queues nothing. With a request pending (unmeasured) the
+     * busy answer below comes first, as for sceIoWrite. */
     if (s_fds[fd].kind == FD_KIND_FILE && !s_fds[fd].writable &&
+        s_fds[fd].async.state != IO_ASYNC_PENDING &&
         sr_vfs_strnicmp(s_fds[fd].guest_path, "ms0:", 4u) == 0)
         return 0x80020323u;
     if (A2 != 0u && !sr_guest_span_readable(A1, A2)) return 0x80010016u;
