@@ -331,6 +331,7 @@ static uint32_t vblank_delivered(uint32_t no, uint32_t *arg) {
 #define NID_SCE_KERNEL_FREE_MEMORY_BLOCK 0x50f61d8au
 #define NID_SCE_KERNEL_GET_MEMORY_BLOCK_ADDR 0xdb83a952u
 #define NID_SCE_KERNEL_ALLOC_MEMORY_BLOCK 0xfe707fdfu
+#define NID_SCE_KERNEL_GET_MODULE_ID_LIST 0x644395e2u
 #define NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370 0x342061e5u
 #define NID_SCE_GE_LIST_ENQUEUE_HEAD 0x1c0d95a6u
 #define NID_SCE_GE_CONTINUE 0x4c06e472u
@@ -41367,7 +41368,7 @@ static void test_imports_20261102_measured_contracts(void) {
            "a latched request for framebuffer 0 leaves it foreground until the vblank");
 
     /* idlist.expected: byte size, whole entries, count is the module total, the caller's module is in it. */
-    const uint32_t NID_ID_LIST = 0x644395e2u, NID_GET_ID_BY_ADDR = 0xd8b73127u;
+    const uint32_t NID_ID_LIST = NID_SCE_KERNEL_GET_MODULE_ID_LIST, NID_GET_ID_BY_ADDR = 0xd8b73127u;
     const uint32_t BUF = 0x00200600u, CNT = 0x00200680u;
     const uint32_t A_BASE = 0x08a10000u, B_BASE = 0x08a20000u, SPAN = 0x10000u;
     s_fixture_loaded_base = 0x08804000u;
@@ -41413,10 +41414,38 @@ static void test_imports_20261102_measured_contracts(void) {
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 32u; cpu.r[6] = CNT;
     (void)sr_syscall(&cpu, NID_ID_LIST);
     expect(MEM_R32(CNT) == 2u, "an unloaded module leaves the list");
+    /* idlist.expected lines 14-16 at pspautotests 774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a
+     * third-party recording made on a PSP: a NULL count, a count pointer in the kernel segment
+     * (0x88000000) and a buffer there are each 0x800200d3, and the count-pointer refusal leaves
+     * the buffer untouched. 0x88000000 names physical 0x08000000 here, so that word must stay as
+     * it was too. Before #2640 the NULL count stopped the run by name and the kernel-segment
+     * pointers were written through. */
+    const uint32_t KSEG = 0x88000000u, KSEG_PHYS = 0x08000000u;
     stops = sr_hle_test_unmodelled_stops();
-    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 8u;
+    for (uint32_t w = 0; w < 8u; w++) MEM_W32(BUF + 4u * w, 0xdeadbeefu);
+    MEM_W32(KSEG_PHYS, 0x12345678u);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 32u;
+    expect(sr_syscall(&cpu, NID_ID_LIST) == 0x800200d3u && MEM_R32(BUF) == 0xdeadbeefu,
+           "a NULL count pointer is 0x800200d3 and writes nothing");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 32u; cpu.r[6] = KSEG;
+    expect(sr_syscall(&cpu, NID_ID_LIST) == 0x800200d3u && MEM_R32(BUF) == 0xdeadbeefu &&
+               MEM_R32(KSEG_PHYS) == 0x12345678u,
+           "a kernel-segment count pointer is 0x800200d3 and leaves the buffer untouched");
+    MEM_W32(CNT, 0xffffffffu);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = KSEG; cpu.r[5] = 4u; cpu.r[6] = CNT;
+    expect(sr_syscall(&cpu, NID_ID_LIST) == 0x800200d3u && MEM_R32(KSEG_PHYS) == 0x12345678u,
+           "a kernel-segment buffer is 0x800200d3 and is not written");
+    expect(sr_hle_test_unmodelled_stops() == stops, "the recorded pointer refusals stop nothing");
+    /* A pointer outside guest memory that is not in the kernel segment has no recorded cell: it
+     * still stops by name, before anything is written. */
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 32u; cpu.r[6] = 0x0c000000u;
     (void)sr_syscall(&cpu, NID_ID_LIST);
-    expect(sr_hle_test_unmodelled_stops() == stops + 1u, "a NULL count pointer stops by name");
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u && MEM_R32(BUF) == 0xdeadbeefu,
+           "a count pointer outside guest memory stops by name and writes nothing");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = 0x0c000000u; cpu.r[5] = 4u; cpu.r[6] = CNT;
+    (void)sr_syscall(&cpu, NID_ID_LIST);
+    expect(sr_hle_test_unmodelled_stops() == stops + 2u && MEM_R32(CNT) == 0xffffffffu,
+           "a buffer outside guest memory stops by name and leaves count untouched");
     sr_hle_test_module_reset();
     s_fixture_loaded_base = UINT32_MAX;
     s_fixture_loaded_end = 0x00400000u;
