@@ -323,8 +323,20 @@ nothing is written: exit Steam first (Nakagawa never closes it). Entries Nakagaw
 byte, and a file it cannot read is left untouched. Choosing **Add to Steam** again for a game already there changes
 nothing. After an update, which unpacks into a new folder, or after moving a portable copy, choosing it again updates
 that game's shortcut to the new folder instead of adding a second one: only its program and start-in folder change,
-and its play time and collections stay. The shortcut has no picture of its own (the player keeps disc art in memory
-only), so Steam shows the player's icon until you set one in Steam.
+and its play time and collections stay. When **Add to Steam** writes a shortcut cleanly, it also copies the game's own
+local `ICON0.PNG` and `PIC1.PNG` (from the disc or prepared game folder; nothing is uploaded or fetched online) into
+that account's `userdata\<account id>\config\grid\` folder under that game's own shortcut ID (`<appid>_icon.png`
+and wide capsule `<appid>.png` from `ICON0.PNG`, falling back to `PIC1.PNG` for the wide capsule if `ICON0.PNG` is
+absent; and hero banner `<appid>_hero.png` from `PIC1.PNG`). Steam takes a shortcut's icon only from the shortcut
+itself, so a new shortcut names `<appid>_icon.png` as its icon; a shortcut that was already there keeps its own icon
+setting. Both PSP images are landscape (`144x80` and `480x272`) and
+do not fit Steam's 2:3 vertical portrait capsule (`<appid>p.png`), so the portrait capsule is left empty rather than
+cropping, stretching, or inventing art; you can set portrait cover art manually in Steam. The pictures are optional: one
+that cannot be read, is empty, is over 1 MiB or is not a well-formed PNG is left out and named, and the shortcut is
+still added. As with `shortcuts.vdf`, nothing is written while Steam runs, existing pictures for that app ID are kept
+rather than silently overwritten unless explicitly replaced, and every written picture is read back to verify. If a
+picture cannot be written after the list changed, the list is put back and the failure is named; if the list cannot be
+put back, its saved copy is kept and named. Nakagawa never removes a shortcut or the pictures it copied.
 
 **Update.** A copy `Setup.exe` installed updates by running the next release's Setup (see [below](#windows-installer-setupexe)). For a ZIP copy, Check for updates unpacks the new version into a new folder next to the running one and leaves the old
 one. Your data is in the per-user folders below, so the new version finds it. Delete the old folder when you
@@ -962,7 +974,7 @@ This extracts the plaintext executable (or automatically uses `EBOOT.elf` and gu
 
 The built package ships its required guest modules inside `<package>/modules/` (copied under their manifest names), and the launcher sets `SR_MODULE_DIR` to `<package>/modules` so launches are self-contained without external dependencies. A run begins at the title's resolved run entry (`run_entry`: a declared `runtime_bindings.fallback_entry`, else `executable.entry`), ensuring that titles requiring a fallback entry point start there across both the native player and CLI launchers. Re-adding an already imported disc in the library preserves its completed staging and extraction state (`player_merge_readded_game`) when the disc ID, version, and image size match. `build-package` always builds with the public runtime backends; PGD-protected game data remains unavailable at run time ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)). The private-backend mode (`PUBLIC_SAFE=0`) was retired on 2026-10-25, and `make` refuses it.
 
-Package work is content-addressed below `<user data>/cache/packages/<DISC_ID>/`; the cache key covers executable bytes, analyzer/codegen semantics, codegen options, generated-code/runtime ABI epochs, compiler identity/target, and native flags. An unchanged key reuses the published package, an ABI-compatible runtime or compiler change recompiles native objects while retaining generated C, and any other semantic change regenerates AOT. The builder writes and verifies `completion-manifest.json` before an atomic directory promotion; interrupted or corrupt entries are refused by the player and launcher. The full contract and rebuild-component names are in [`RUNTIME_PACKAGING_ARCHITECTURE.md`](RUNTIME_PACKAGING_ARCHITECTURE.md#6-private-content-addressed-cache-contract-316).
+Package work is content-addressed below `<user data>/cache/packages/<DISC_ID>/`; the cache key covers executable bytes, analyzer/codegen semantics, codegen options, generated-code/runtime ABI epochs, compiler identity/target, and native flags. An unchanged key reuses the validated runtime package. A compatible native/runtime change reuses generated C from the separate AOT-stage cache, while compiled objects remain in the bounded object-key cache. New package schema v3 installs omit compiler intermediates but still validate every retained file through `completion-manifest.json`; the player continues to check v2 packages with their original generated-object list. The builder writes and verifies the manifest before an atomic directory promotion; same-volume installs share package files with their cache entry by hard link. Damage to a hard-linked installed artifact also invalidates that cache copy, so the next build verifies the AOT stage and rebuilds from the current inputs. The full contract and rebuild-component names are in [`RUNTIME_PACKAGING_ARCHITECTURE.md`](RUNTIME_PACKAGING_ARCHITECTURE.md#6-private-content-addressed-cache-contract-316).
 
 To inspect a private package cache with Doctor, pass the user-data root and disc ID:
 
@@ -972,7 +984,7 @@ python tools/nk_doctor.py --scope products `
   --disc-id <disc_id>
 ```
 
-Doctor reports a missing, incomplete, or stale cache entry and names the changed key component when a current key is available. Cache cleanup is bounded per title; set `NK_AOT_CACHE_MAX_ENTRIES` to a positive limit when the default of eight is unsuitable.
+Doctor reports a missing, incomplete, or stale cache entry and names the changed key component when a current key is available. Cache cleanup protects entries used by installed package variants and retains at most one previous entry and AOT stage per disc.
 
 Builds also share compiled objects. The runtime compiles once for every game, an unchanged rebuild compiles nothing, and the system libraries a disc carries are compiled once for every game that carries the same library. These objects stay in `<user data>/cache/objects/` and `<user data>/cache/shared-libraries/` and are never uploaded or shared. Settings > BUILD TOOLS AND CACHE turns library sharing off and clears its folder. [`RUNTIME_PACKAGING_ARCHITECTURE.md`](RUNTIME_PACKAGING_ARCHITECTURE.md#shared-compiled-objects-1306) has the keys and limits.
 
@@ -996,7 +1008,7 @@ exist there, and optional modules are included only when named with
 `bss_metadata_source: "psp-header"`. `--public-safe` is available for synthetic fixture builds.
 The output directory must be untracked and dedicated. The package schema and explicit unsupported
 semantic-boundary records are defined in
-[`RUNTIME_PACKAGING_ARCHITECTURE.md`](RUNTIME_PACKAGING_ARCHITECTURE.md#5-local-aot-package-contract-v2).
+[`RUNTIME_PACKAGING_ARCHITECTURE.md`](RUNTIME_PACKAGING_ARCHITECTURE.md#5-local-aot-package-contract-v3).
 Inputs whose paths contain spaces or shell-sensitive characters (common under a Windows profile
 directory) are copied into `<output-dir>/staged-inputs/` so the Make recipes can use them. When the
 output directory contains spaces, the route builds in a Make-safe workspace—resolved from
@@ -1285,14 +1297,15 @@ required.
 ### Network use
 
 Nakagawa works offline. The player and the runtime make no network connection unless you
-agree to one, and the game itself never reaches the network. There are two
-connections, listed below, and each is opt-in.
+agree to one, and the game itself never reaches the network. Every connection the player can
+make is listed below, and each is opt-in.
 
 | What | Host | When | Controlled by |
 | --- | --- | --- | --- |
 | Build-tool download | `www.python.org`, `repo.msys2.org` (HTTPS) | Only after you select **DOWNLOAD** on the BUILD PACKAGE consent card | That consent card, per build |
 | Check for updates | `api.github.com` (HTTPS) | When you select **CHECK FOR UPDATES** (Settings > Updates), or once at start if you turn on **Check at start** (off by default) | That button, and that switch |
 | Update download | `github.com`, which redirects to `release-assets.githubusercontent.com` (HTTPS) | Only after a check finds a newer version and you select **DOWNLOAD** | That button, per download |
+| Download cover art | `thumbnails.libretro.com` (HTTPS) | When **Download cover art** is on (Settings > Online and developer, off by default), once per verified Redump disc not yet cached | That switch, and **Refresh cover art** (Settings > Build tools and cache) |
 
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).

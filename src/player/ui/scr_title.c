@@ -194,10 +194,18 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                              NK_UI_SPACE_4);
         if (nk_ui_begin_container(ui, TITLE_ID_ASIDE, &layout, NULL)) {
             bool demo = title->art_kind != NK_UI_ART_NONE;
-            nk_ui_hero(ui, TITLE_ID_HERO, (NkUiArtKind)title->art_kind, title->disc_id,
-                       title->icon, title->picture, aside,
-                       demo ? "Picture made by the project" : "Your disc",
-                       "480 \xC3\x97 272");
+            if (title->cover != NULL) {
+                char cover_size[32];
+                (void)snprintf(cover_size, sizeof(cover_size), "%u \xC3\x97 %u",
+                               (unsigned)title->cover->width, (unsigned)title->cover->height);
+                nk_ui_hero(ui, TITLE_ID_HERO, NK_UI_ART_NONE, title->disc_id,
+                           title->cover, NULL, aside, "Box art", cover_size);
+            } else {
+                nk_ui_hero(ui, TITLE_ID_HERO, (NkUiArtKind)title->art_kind, title->disc_id,
+                           title->icon, title->picture, aside,
+                           demo ? "Picture made by the project" : "Your disc",
+                           "480 \xC3\x97 272");
+            }
             if (nk_ui_card_begin(ui, TITLE_ID_STATUS_CARD, sizing_grow(), sizing_fit(),
                                  NK_UI_SPACE_3)) {
                 NkUiLayout head = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),

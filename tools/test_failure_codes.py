@@ -148,6 +148,10 @@ PLAYER_NOT_CODES = {
     "INVALIDATE_PACKAGE_CACHE",
     # an environment variable the package builder reads to find the MSYS2 UCRT64 bin
     "MSYS_PATH",
+    # cover art: fetch status names (nk_cover_art_status_name, used by tests only) and the cache-clear
+    # error code, which the Refresh notice replaces with its own text; neither reaches the problem report
+    "COVER_ART_CLEAR_FAILED", "INVALID_PNG", "IO_ERROR", "NOT_FOUND", "NO_MATCH", "REDIRECT_REFUSED",
+    "TOO_LARGE",
 }
 #: Environment variable names.
 PLAYER_NOT_CODE_PREFIXES = ("NK_", "SR_", "XDG_", "NAKAGAWA_", "PLAYER_UI_TEST_")

@@ -80,7 +80,6 @@ static int s_carry_filter[VR_CARRY_MAX];
 static int s_carry_head, s_carry_n;
 static uint64_t s_filter_frames[SR_VIDEOREC_FILTER_COUNT]; /* written frames, by filter */
 static int s_out;
-static uint8_t *s_cur;
 static uint32_t s_w, s_h;
 static int s_have_frame;
 static int s_cur_new;
@@ -719,16 +718,15 @@ static int (*s_clock_deterministic)(void);
 
 void sr_videorec_set_clock(int (*deterministic)(void)) { s_clock_deterministic = deterministic; }
 
-#ifdef SR_VIDEOREC_SELFTEST
 static int vr_clock_deterministic(void) {
+    if (s_clock_deterministic) return s_clock_deterministic();
+#ifdef SR_VIDEOREC_SELFTEST
     const char *det = getenv("SR_DETERMINISTIC_CLOCK");
     return det && strcmp(det, "1") == 0;
-}
 #else
-static int vr_clock_deterministic(void) {
-    return s_clock_deterministic ? s_clock_deterministic() : 0;
-}
+    return 0;
 #endif
+}
 
 /* Start a recording into dir, or refuse with the reason in record.json and on stderr.
  * need_det_clock: the runtime records only on the deterministic clock (videorec.h). */
@@ -948,7 +946,6 @@ void sr_videorec_frame_filtered(const void *px, uint32_t w, uint32_t h, uint32_t
     else s_buf_filter[slot] = filter;
     s_have_frame = 1;
     if (!carry) {
-        s_cur = dst;
         s_cur_new = 1;
         s_cur_keep = 0;
     }
@@ -990,7 +987,6 @@ static void vr_take_carry(void) {
     s_carry_filter[h] = bf;
     s_carry_head = (h + 1) % VR_CARRY_MAX;
     s_carry_n--;
-    s_cur = s_buf[next];
     s_cur_new = 1;
     s_cur_keep = 1;
     s_carried_frames++;
@@ -1439,7 +1435,6 @@ void sr_videorec_test_reset(void) {
     s_test_audio_write_fails = 0;
     s_test_clear_fail_at = NULL;
     s_test_plant_after_clear = NULL;
-    s_cur = NULL;
     s_ring = NULL;
     s_wav = s_csv = s_raw = s_srt = NULL;
     s_flips_pending = s_guest_flips = s_block_flips = 0;
@@ -1450,6 +1445,7 @@ void sr_videorec_test_reset(void) {
     s_cur_keep = s_pending_keep = 0;
     s_carried_frames = s_replaced_frames = 0;
     s_resolver = NULL;
+    s_clock_deterministic = NULL;
     s_vcount0 = s_last_vcount = 0;
     s_start_vcount = s_seen_vcount = 0;
     s_seen_any = 0;
