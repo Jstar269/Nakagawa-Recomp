@@ -691,6 +691,8 @@ void gui_pump(void) {
     if (s_test_gui_pump_polls) s_test_gui_poll_ns = sched_host_now_ns();
 }
 int gui_headless_acceptance_complete(void) { return 0; }
+/* sr_vblank_tick releases the presenter before its SR_EXIT_AT_VBLANK _Exit; this harness has none. */
+void gui_shutdown(void) {}
 uint32_t gui_buttons(void) { return s_test_gui_buttons | s_test_gui_pulse; }
 uint32_t gui_consume_button_pulses(void) {
     const uint32_t pulses = s_test_gui_pulse;
