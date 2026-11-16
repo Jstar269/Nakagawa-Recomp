@@ -3178,8 +3178,10 @@ static void test_mpeg_avc_decode_clear_in_vram_mirrors(void) {
 /* Latch SR_MPEGLOG before the player's first produce call: hle.c caches the flag the first
  * time it is consulted.  The feature-test macro above exposes the platform putenv prototype
  * on POSIX; the Windows CRT name (_putenv) comes from <stdlib.h>. */
+#ifdef _WIN32
 static char s_av_mpeglog_env[] = "SR_MPEGLOG=1";
 static char s_av_mpeglog_unset_env[] = "SR_MPEGLOG=";
+#endif
 static void av_set_mpeglog(int enabled) {
 #ifdef _WIN32
     _putenv(enabled ? s_av_mpeglog_env : s_av_mpeglog_unset_env);
