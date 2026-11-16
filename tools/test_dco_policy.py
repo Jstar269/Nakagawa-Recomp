@@ -361,6 +361,22 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             with self.subTest(section=7, required=required):
                 self.assertIn(required, section_7)
 
+    def test_agents_scopes_opt_in_network_approval(self):
+        content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        section_5 = " ".join(_blocks(_section(content, 5))).lower()
+        for required in (
+            "offline by default",
+            "approves opt-in network features in principle",
+            "does not authorize an unlisted host",
+            "each feature's public issue must name its hosts, payload, consent and data boundaries",
+            "before it ships",
+            "docs/setup.md",
+            "tools/test_prereq_fetcher.py",
+            "no setting makes a nid miss permissive",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, section_5)
+
     def test_release_safety_rule_is_present_and_not_contradicted(self):
         policy_text = "\n".join(
             (ROOT / rel).read_text(encoding="utf-8")
