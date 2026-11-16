@@ -13750,6 +13750,19 @@ int main(int argc, char **argv) {
         assert(cfg.fullscreen == true);
         assert(cfg.master_volume == 55);
         assert(cfg.developer_mode == true);   /* the runtime's developer pages follow it (#314) */
+        assert(cfg.online_play == false);
+        assert(cfg.online_play_server[0] == '\0');
+        applied.online_play = true;
+        snprintf(applied.online_play_server, sizeof(applied.online_play_server), "%s", "socom.cc");
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(cfg.online_play == true);
+        assert(strcmp(cfg.online_play_server, "socom.cc") == 0);
+        snprintf(applied.online_play_server, sizeof(applied.online_play_server), "%s", "bad host!!");
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(cfg.online_play == false);
+        assert(cfg.online_play_server[0] == '\0');
+        applied.online_play = false;
+        snprintf(applied.online_play_server, sizeof(applied.online_play_server), "%s", "socom.cc");
         /* The pause overlay eases or cuts as the launcher does (SR_REDUCE_MOTION). */
         assert(cfg.reduce_motion == NK_REDUCE_MOTION_ON);
         applied.reduce_motion_choice = PLAYER_SYSTEM_CHOICE_OFF;
@@ -16411,6 +16424,33 @@ int main(int argc, char **argv) {
         player_app_init(s_app2);
         assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
         assert(!s_app2->settings.online_mode && !s_app2->settings.developer_mode);
+        assert(s_app2->settings.network_mode == NK_NETWORK_MODE_OFFLINE);
+
+        /* Ad hoc online play (#1139): off by default on socom.cc, validates server specs,
+           cycles presets, persists through settings.json, and fails closed on invalid JSON. */
+        player_app_init(s_app2);
+        assert(!s_app2->settings.online_play);
+        assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
+        player_app_cycle_online_play_preset(s_app2);
+        assert(strcmp(s_app2->settings.online_play_server, "psp.mgn.pub") == 0);
+        assert(!player_app_set_online_play_server(s_app2, "bad server!!"));
+        assert(strcmp(s_app2->settings.online_play_server, "psp.mgn.pub") == 0);
+        assert(player_app_set_online_play_server(s_app2, "127.0.0.1:27312,27313"));
+        player_app_set_online_play(s_app2, true);
+        assert(s_app2->settings.online_play);
+        assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(s_app2->settings.online_play);
+        assert(strcmp(s_app2->settings.online_play_server, "127.0.0.1:27312,27313") == 0);
+        assert(s_app2->settings.network_mode == NK_NETWORK_MODE_OFFLINE);
+        write_text_file(test_settings_path,
+                        "{\"schema_version\": 2, \"network_mode\": \"online\", "
+                        "\"online_play\": true, \"online_play_server\": \"not a host\"}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.online_play);
+        assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
         assert(s_app2->settings.network_mode == NK_NETWORK_MODE_OFFLINE);
 
         /* Check for updates at start (AGENTS.md section 5): off by default and

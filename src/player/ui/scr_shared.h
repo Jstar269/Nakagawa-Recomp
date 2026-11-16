@@ -163,6 +163,19 @@ typedef struct {
 /* The developer switch, in the wizard and in Settings. */
 #define WIZARD_DEVELOPER_SENTENCE \
     "Show a developer log on screen to help track down problems. Stays on this PC."
+/* Opt-in ad hoc online play (#1139) on Settings > Online and its own subpage. */
+#define SCR_ONLINE_PLAY_ROW_SENTENCE \
+    "Connect PSP ad hoc multiplayer games through a community relay server over plain TCP. Off by default."
+#define SCR_ONLINE_PLAY_LEAD \
+    "Lets PSP ad hoc multiplayer games join players on a community relay server over plain TCP " \
+    "(no encryption and no account sign-in; anyone on the network path can read it). Sends only " \
+    "the disc ID, your nickname, the console profile's random MAC address, group name, and game packets."
+#define SCR_ONLINE_PLAY_TOGGLE_SENTENCE \
+    "Off by default. PSP ad hoc services stay closed until you turn this on."
+#define SCR_ONLINE_PLAY_PRESET_SENTENCE \
+    "Step through PPSSPP / aemu_postoffice community servers, or enter your own host below."
+#define SCR_ONLINE_PLAY_SERVER_SENTENCE \
+    "Server address to join (host, host:lobby_port, or host:lobby_port,data_port)."
 
 /* Frame and box helpers (scr_flow.c). */
 float scr_flow_begin(NkUi *ui, float width, float height, float card_width);

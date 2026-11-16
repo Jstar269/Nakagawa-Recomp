@@ -274,6 +274,7 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_DISC_CHECKING, FLOW_DISC_SUPPORTED,
                FLOW_DISC_UNTESTED, FLOW_DISC_FONTS, FLOW_DISC_BLOCKED, FLOW_DISC_UNSUPPORTED,
                FLOW_DISC_GUIDED, FLOW_SETTINGS, FLOW_SETTINGS_ONLINE, FLOW_SETTINGS_ONLINE_ON,
+               FLOW_SETTINGS_ONLINE_PLAY,
                FLOW_SETTINGS_ONLINE_DISCORD_ON, FLOW_SETTINGS_ONLINE_NO_DISCORD,
                FLOW_SETTINGS_NOTICES,
                FLOW_SETTINGS_REMOVE, FLOW_SETTINGS_BUILD_CACHE, FLOW_SETTINGS_FONTS,
@@ -426,6 +427,7 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
                     which == FLOW_SETTINGS_ONLINE_DISCORD_ON ||
                     which == FLOW_SETTINGS_ONLINE_NO_DISCORD
         ? PLAYER_UI_SETTINGS_PAGE_ONLINE
+        : which == FLOW_SETTINGS_ONLINE_PLAY ? PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY
         : which == FLOW_SETTINGS_NOTICES ? PLAYER_UI_SETTINGS_PAGE_NOTICES
         : which == FLOW_SETTINGS_REMOVE ? PLAYER_UI_SETTINGS_PAGE_REMOVE_TOOLS
         : which == FLOW_SETTINGS_BUILD_CACHE ? PLAYER_UI_SETTINGS_PAGE_BUILD_CACHE
@@ -508,6 +510,12 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.discord_available = which == FLOW_SETTINGS_ONLINE;
     settings.discord_presence = which == FLOW_SETTINGS_ONLINE_DISCORD_ON;
     settings.developer_mode = true;
+    settings.online_play = false;
+    settings.online_play_row_value = "Off";
+    settings.online_play_preset_label = "socom.cc (PPSSPP default)";
+    settings.online_play_server = "socom.cc";
+    settings.online_play_status =
+        "Status: Off - PSP ad hoc services stay closed (0x80010086). Target: socom.cc.";
     settings.share_system_libraries = true;
     settings.build_speed = "Background";
     settings.build_speed_sentence = "Up to two parts at a time at low priority, so a game you play "
@@ -3343,6 +3351,16 @@ static void test_settings_pages(void) {
          "Back returns to Settings"},
         {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_DISCORD, PLAYER_UI_SETTINGS_TOGGLE_DISCORD,
          "the Discord status switch toggles it"},
+        {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
+         PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY, "Online play opens its page"},
+        {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE,
+         PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY, "Online play switch toggles it"},
+        {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET,
+         PLAYER_UI_SETTINGS_CYCLE_ONLINE_PLAY_PRESET, "Server preset steps community servers"},
+        {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
+         PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER, "Server address opens the custom editor"},
+        {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
+         "Back returns to Online and developer"},
         {FLOW_SETTINGS_NOTICES, PLAYER_UI_ID_SETTINGS_LICENSE_TEXTS,
          PLAYER_UI_SETTINGS_OPEN_LICENSE_TEXTS, "Open licence texts opens the folder"},
         {FLOW_SETTINGS_NOTICES, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
@@ -3566,9 +3584,14 @@ static void test_settings_pages(void) {
               strstr(dump, "Online features aren't built yet") != NULL &&
               strstr(dump, "ONLINE MODE") == NULL && strstr(dump, "NEWS:") == NULL &&
               strstr(dump, "REPORTS:") == NULL && strstr(dump, "\"DEVELOPER MODE: ") != NULL &&
+              strstr(dump, "\"ONLINE PLAY: ") != NULL &&
               activate_flow_button(PLAYER_UI_ID_SETTINGS_ONLINE_MODE, FLOW_SETTINGS_ONLINE).kind ==
                   PLAYER_UI_ACTION_NONE,
           "Online and developer shows one plain line instead of an inert online switch");
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_PLAY, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "plain TCP") != NULL && strstr(dump, "socom.cc") != NULL &&
+              player_ui_server_accepts(':', NULL) && !player_ui_server_accepts(' ', NULL),
+          "Online play page discloses plain TCP, shows server preset/address, and filters server chars");
     /* Discord status (#2259): off, with what it does, in a build that can show it; no row in
        a build that cannot; and a stored On there keeps its row so it can be turned off. */
     CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE, 960, 540, dump, sizeof(dump)) &&
@@ -4965,6 +4988,7 @@ static void test_game_page_text_is_never_cut(void) {
         {FLOW_SETTINGS_ACCESSIBILITY, NULL, 0u, "Settings > Accessibility", 125},
         {FLOW_SETTINGS_BUILD_CACHE, NULL, 0u, "Settings > Build tools", 125},
         {FLOW_SETTINGS_ONLINE, NULL, 0u, "Settings > Online", 125},
+        {FLOW_SETTINGS_ONLINE_PLAY, NULL, 0u, "Settings > Online play", 125},
         {FLOW_SETTINGS_ONLINE_ON, NULL, 0u, "Settings > Online with Online mode on", 125},
         {FLOW_SETTINGS_ONLINE_DISCORD_ON, NULL, 0u, "Settings > Online with Discord status on",
          125},
@@ -5864,6 +5888,8 @@ static int capture_screens(const char *directory) {
             {FLOW_DISC_UNSUPPORTED, "disc-unsupported", PLAYER_UI_ID_DISC_PRIMARY},
             {FLOW_SETTINGS, "settings", PLAYER_UI_ID_SETTINGS_RESOLUTION},
             {FLOW_SETTINGS_ONLINE, "settings-online", PLAYER_UI_ID_SETTINGS_DEVELOPER},
+            {FLOW_SETTINGS_ONLINE_PLAY, "settings-online-play",
+             PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE},
             {FLOW_SETTINGS_NOTICES, "settings-notices", PLAYER_UI_ID_SETTINGS_BACK},
             {FLOW_SETTINGS_REMOVE, "settings-remove-tools", PLAYER_UI_ID_SETTINGS_BACK},
             {FLOW_SETTINGS_BUILD_CACHE, "settings-build-cache",

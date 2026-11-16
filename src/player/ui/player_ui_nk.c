@@ -8,6 +8,7 @@
 #include "player_ui_music.h"
 #include "player_ui_sound.h"
 #include "iso_reader.h"
+#include "nk_adhoc_relay.h"
 #include "nk_platform.h"
 #include "nk_shared_helpers.h"
 #include "nk_portable.h"
@@ -129,10 +130,11 @@ struct PlayerUiNk {
        control focus returns to after it. */
     bool nickname_open;
     bool nickname_first_launch;
+    bool nickname_is_server;
     bool nickname_refused;
     NkUiId nickname_focus;
     NkUiId nickname_return_focus;
-    char nickname_text[NK_NICKNAME_MAX_BYTES + 1u];
+    char nickname_text[NK_ADHOC_SERVER_MAX_LEN + 1u];
     UiKeyboard nickname_keyboard;
     char status_text[PLAYER_UI_TITLE_CAP][256];
     char library_page_label[64];
@@ -155,6 +157,9 @@ struct PlayerUiNk {
     char input_summary[128];
     char title_input_summary[128];
     char settings_controller[160];
+    char settings_online_play_row[160];
+    char settings_online_play_preset[160];
+    char settings_online_play_status[320];
     /* The graphics preset's note on the main Settings page (#2150). */
     char settings_preset_note[192];
     char settings_interface_size[16];
@@ -577,8 +582,9 @@ static bool player_ui_disc_view(PlayerView view) {
 
 static bool player_ui_settings_view(PlayerView view) {
     return view == VIEW_SETTINGS || view == VIEW_ONLINE_SETTINGS ||
-           view == VIEW_PREREQ_ABOUT || view == VIEW_CONFIRM_REMOVE_TOOLS ||
-           view == VIEW_BUILD_CACHE || view == VIEW_PSP_FONTS || view == VIEW_UPDATES ||
+           view == VIEW_ONLINE_PLAY_SETTINGS || view == VIEW_PREREQ_ABOUT ||
+           view == VIEW_CONFIRM_REMOVE_TOOLS || view == VIEW_BUILD_CACHE ||
+           view == VIEW_PSP_FONTS || view == VIEW_UPDATES ||
            view == VIEW_CONFIRM_FACTORY_RESET || view == VIEW_ACCESSIBILITY_SETTINGS ||
            view == VIEW_ACE_SETTINGS || view == VIEW_PROBLEM_REPORT;
 }
@@ -1103,6 +1109,7 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     memset(&model, 0, sizeof(model));
     switch (app->active_view) {
         case VIEW_ONLINE_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE; break;
+        case VIEW_ONLINE_PLAY_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY; break;
         case VIEW_ACCESSIBILITY_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ACCESSIBILITY; break;
         case VIEW_ACE_SETTINGS: model.page = PLAYER_UI_SETTINGS_PAGE_ACE; break;
         case VIEW_PREREQ_ABOUT: model.page = PLAYER_UI_SETTINGS_PAGE_NOTICES; break;
@@ -1207,6 +1214,56 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.online_news = app->settings.online_news;
     model.online_reports = app->settings.online_reports;
     model.developer_mode = app->settings.developer_mode;
+    {
+        char host[NK_ADHOC_SERVER_MAX_LEN + 1u];
+        uint16_t lp = 0u, dp = 0u;
+        const char *srv = app->settings.online_play_server[0] ? app->settings.online_play_server
+                                                              : NK_ADHOC_DEFAULT_SERVER;
+        bool valid_srv = nk_adhoc_relay_parse_server(srv, host, sizeof(host), &lp, &dp);
+        const char *preset_label = NULL;
+        for (size_t i = 0u; i < nk_adhoc_server_preset_count(); ++i) {
+            const NkAdhocServerPreset *p = nk_adhoc_server_preset(i);
+            if (p && p->host && strcmp(srv, p->host) == 0) {
+                preset_label = p->label;
+                break;
+            }
+        }
+        model.online_play = app->settings.online_play && valid_srv;
+        model.online_play_server = srv;
+        if (preset_label != NULL) {
+            snprintf(player->settings_online_play_preset,
+                     sizeof(player->settings_online_play_preset), "%s", preset_label);
+        } else {
+            snprintf(player->settings_online_play_preset,
+                     sizeof(player->settings_online_play_preset), "Custom (%s)", srv);
+        }
+        model.online_play_preset_label = player->settings_online_play_preset;
+        if (model.online_play) {
+            snprintf(player->settings_online_play_row, sizeof(player->settings_online_play_row),
+                     "On: %s", srv);
+            snprintf(player->settings_online_play_status,
+                     sizeof(player->settings_online_play_status),
+                     "Status: On (applies next game launch) - Relay target %s (lobby TCP %u, data "
+                     "TCP %u; unencrypted plain TCP).",
+                     host, (unsigned)lp, (unsigned)dp);
+        } else {
+            snprintf(player->settings_online_play_row, sizeof(player->settings_online_play_row),
+                     "Off");
+            if (valid_srv) {
+                snprintf(player->settings_online_play_status,
+                         sizeof(player->settings_online_play_status),
+                         "Status: Off - PSP ad hoc services stay closed (0x80010086). Configured "
+                         "target: %s (lobby TCP %u, data TCP %u).",
+                         host, (unsigned)lp, (unsigned)dp);
+            } else {
+                snprintf(player->settings_online_play_status,
+                         sizeof(player->settings_online_play_status),
+                         "Status: Off - PSP ad hoc services stay closed (0x80010086).");
+            }
+        }
+        model.online_play_row_value = player->settings_online_play_row;
+        model.online_play_status = player->settings_online_play_status;
+    }
     model.share_system_libraries = app->settings.share_system_libraries;
     /* The build tools and cache page says what its clear button did. */
     if (model.page == PLAYER_UI_SETTINGS_PAGE_BUILD_CACHE && app->settings_notice[0] != '\0') {
@@ -1985,7 +2042,13 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
                 focus = app->report.phase == PLAYER_REPORT_PREVIEWED
                     ? PLAYER_UI_ID_REPORT_CREATE : PLAYER_UI_ID_SETTINGS_BACK;
                 break;
-            case VIEW_ONLINE_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_ONLINE_MODE; break;
+            case VIEW_ONLINE_SETTINGS:
+                focus = player->last_view == VIEW_ONLINE_PLAY_SETTINGS
+                    ? PLAYER_UI_ID_SETTINGS_ONLINE_PLAY : PLAYER_UI_ID_SETTINGS_ONLINE_MODE;
+                break;
+            case VIEW_ONLINE_PLAY_SETTINGS:
+                focus = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE;
+                break;
             case VIEW_ACCESSIBILITY_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE; break;
             case VIEW_ACE_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_ACE_MODE; break;
             case VIEW_PREREQ_ABOUT:
@@ -2457,14 +2520,16 @@ static void player_ui_find_delete(PlayerUiNk *player) {
 /* The nickname editor starts empty, showing the nickname in use until
    something is typed, and opens on its keyboard's first letter. Its keyboard
    takes only what nk_nickname_valid would, up to NK_NICKNAME_MAX_BYTES. */
-static void player_ui_nickname_open(PlayerUiNk *player, bool first_launch) {
+static void player_ui_nickname_open(PlayerUiNk *player, bool first_launch, bool server_mode) {
     player->nickname_open = true;
-    player->nickname_first_launch = first_launch;
+    player->nickname_first_launch = first_launch && !server_mode;
+    player->nickname_is_server = server_mode;
     player->nickname_refused = false;
     player->nickname_focus = PLAYER_UI_ID_NICKNAME_KEY_BASE + UI_KEYBOARD_KEY_DEFAULT;
     player->nickname_text[0] = '\0';
     ui_keyboard_init(&player->nickname_keyboard, player->nickname_text,
-                     NK_NICKNAME_MAX_BYTES, player_ui_nickname_accepts, NULL);
+                     server_mode ? NK_ADHOC_SERVER_MAX_LEN : NK_NICKNAME_MAX_BYTES,
+                     server_mode ? player_ui_server_accepts : player_ui_nickname_accepts, NULL);
 }
 
 /* What Done saves: the typed text without the spaces (U+0020) before and after
@@ -2482,6 +2547,7 @@ static const char *player_ui_nickname_trimmed(const char *text, char *out, size_
 
 static void player_ui_nickname_close(PlayerUiNk *player) {
     player->nickname_open = false;
+    player->nickname_is_server = false;
     player->nickname_refused = false;
     player->nickname_text[0] = '\0';
 }
@@ -3539,7 +3605,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
        first-launch prompt until it is answered, or Settings > Nickname. */
     if (!player->nickname_open && player_app_nickname_prompt_visible(app)) {
         player->nickname_return_focus = nk_ui_focused(player->ui);
-        player_ui_nickname_open(player, true);
+        player_ui_nickname_open(player, true, false);
     } else if (!player->nickname_open && player->nickname_return_focus != 0u) {
         nk_ui_focus(player->ui, player->nickname_return_focus);
         player->nickname_return_focus = 0u;
@@ -3552,8 +3618,10 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             player->nickname_focus = 0u;
         }
         model.first_launch = player->nickname_first_launch;
+        model.server_mode = player->nickname_is_server;
         model.keyboard = &player->nickname_keyboard;
-        model.current = app->settings.nickname;
+        model.current = player->nickname_is_server ? app->settings.online_play_server
+                                                   : app->settings.nickname;
         model.refused = player->nickname_refused;
         model.logical_width = scale.logical_w;
         model.logical_height = scale.logical_h;
@@ -3563,15 +3631,17 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             player->nickname_refused = false;
             action.kind = PLAYER_UI_ACTION_NONE;
         } else if (action.kind == PLAYER_UI_ACTION_NICKNAME) {
-            /* Skip keeps the nickname; a Save the rule refuses keeps the editor
-               open, with the old nickname, and says why. */
-            char trimmed[NK_NICKNAME_MAX_BYTES + 1u];
+            /* Skip keeps the value; a Save the rule refuses keeps the editor open, with the old
+               value, and says why. */
+            char trimmed[NK_ADHOC_SERVER_MAX_LEN + 1u];
             bool save = (unsigned)action.primary == PLAYER_UI_NICKNAME_SAVE;
             const char *chosen = player_ui_nickname_trimmed(player->nickname_text, trimmed,
                                                             sizeof(trimmed));
-            bool done = player->nickname_first_launch
-                ? player_app_nickname_prompt_answer(app, save ? chosen : NULL)
-                : !save || player_app_set_nickname(app, chosen);
+            bool done = player->nickname_is_server
+                ? !save || player_app_set_online_play_server(app, chosen)
+                : player->nickname_first_launch
+                    ? player_app_nickname_prompt_answer(app, save ? chosen : NULL)
+                    : !save || player_app_set_nickname(app, chosen);
             if (done) {
                 player_ui_nickname_close(player);
             } else {
@@ -3584,7 +3654,12 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         if (action.kind == PLAYER_UI_ACTION_SETTINGS &&
             (unsigned)action.primary == PLAYER_UI_SETTINGS_EDIT_NICKNAME) {
             player->nickname_return_focus = PLAYER_UI_ID_SETTINGS_NICKNAME;
-            player_ui_nickname_open(player, false);
+            player_ui_nickname_open(player, false, false);
+            action.kind = PLAYER_UI_ACTION_NONE;
+        } else if (action.kind == PLAYER_UI_ACTION_SETTINGS &&
+                   (unsigned)action.primary == PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER) {
+            player->nickname_return_focus = PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER;
+            player_ui_nickname_open(player, false, true);
             action.kind = PLAYER_UI_ACTION_NONE;
         }
         if ((player_ui_settings_view(app->active_view) ||

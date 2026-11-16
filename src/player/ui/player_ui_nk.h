@@ -194,8 +194,9 @@ typedef enum {
    physical keyboard types into the same text (player_ui_nk.c). */
 typedef struct {
     bool first_launch;
+    bool server_mode;       /* false: console nickname; true: custom ad hoc relay host[:port] */
     UiKeyboard *keyboard;   /* what is typed, its cap and filter, and the letter case */
-    const char *current;    /* the nickname in use, shown while nothing is typed */
+    const char *current;    /* the nickname or server in use, shown while nothing is typed */
     bool refused;           /* the last Done was refused */
     float logical_width;
     float logical_height;
@@ -571,6 +572,7 @@ typedef struct {
 typedef enum {
     PLAYER_UI_SETTINGS_PAGE_MAIN = 0,
     PLAYER_UI_SETTINGS_PAGE_ONLINE,
+    PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY,  /* VIEW_ONLINE_PLAY_SETTINGS: ad hoc relay (#1139) */
     PLAYER_UI_SETTINGS_PAGE_NOTICES,
     PLAYER_UI_SETTINGS_PAGE_REMOVE_TOOLS,
     PLAYER_UI_SETTINGS_PAGE_BUILD_CACHE,
@@ -648,7 +650,11 @@ typedef enum {
     PLAYER_UI_SETTINGS_TOGGLE_DISCORD,       /* Settings > Online and developer (#2259) */
     PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC, /* launcher background music (#2207) */
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN,
-    PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP
+    PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP,
+    PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY,         /* opens Settings > Online play (#1139) */
+    PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY,       /* opt-in ad hoc online play switch */
+    PLAYER_UI_SETTINGS_CYCLE_ONLINE_PLAY_PRESET, /* cycles curated ad hoc relay presets */
+    PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER   /* opens host[:port] server editor */
 } PlayerUiSettingsOp;
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
@@ -796,6 +802,12 @@ typedef struct {
     bool online_news;
     bool online_reports;
     bool developer_mode;
+    /* Ad hoc online play (#1139): off by default; opens its own settings page. */
+    bool online_play;
+    const char *online_play_row_value;    /* "Off" or "On: socom.cc" */
+    const char *online_play_preset_label; /* curated server label or "Custom" */
+    const char *online_play_server;       /* current host[:port] */
+    const char *online_play_status;       /* current status and validated target ports */
     /* Third-party notices: "name version · licence" per downloaded tool */
     const char *tools[PLAYER_UI_SETTINGS_TOOLS];
     size_t tool_count;
@@ -1193,6 +1205,10 @@ enum {
     PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP = 0x4559u,
     PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE = 0x455Au,   /* a title's Enhanced page: Texture pack folder */
     PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE = 0x455Bu,   /* a title's Enhanced page: Remove texture pack */
+    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY = 0x455Cu,      /* Settings > Online: opens Online play */
+    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE = 0x455Du, /* Online play: On / Off switch */
+    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET = 0x455Eu, /* Online play: server preset selector */
+    PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER = 0x455Fu, /* Online play: custom host[:port] */
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
     PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */
@@ -1449,6 +1465,9 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
    nk_nickname_valid takes inside a nickname, so no control character is ever
    typed. A space is typed; a nickname of spaces alone is refused on Done. */
 bool player_ui_nickname_accepts(uint32_t codepoint, void *user);
+/* The server editor's character filter (UiKeyboardFilter): characters allowed
+   in host[:lobby_port[,data_port]] strings. */
+bool player_ui_server_accepts(uint32_t codepoint, void *user);
 /* The find box's character filter (UiKeyboardFilter): any character a title name or
    a disc ID can hold, so nothing but control characters is refused. */
 bool player_ui_find_accepts(uint32_t codepoint, void *user);

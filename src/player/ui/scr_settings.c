@@ -985,7 +985,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             /* One button column for every row the page shows, so a sentence of any of them
                that would be cut makes them all stack. The Nickname button's value is clamped
                to half the column, so only its name counts for the column's width. */
-            WizardRow rows[4];
+            WizardRow rows[5];
             size_t row_count = 0u;
             if (model->online_mode) {
                 rows[row_count++] = (WizardRow){"Online mode", "On",
@@ -1000,6 +1000,9 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                 discord_sentence};
             }
             rows[row_count++] = (WizardRow){"Nickname", "", SCR_NICKNAME_SENTENCE};
+            rows[row_count++] = (WizardRow){"Online play",
+                                            safe_text(model->online_play_row_value, "Off"),
+                                            SCR_ONLINE_PLAY_ROW_SENTENCE};
             WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, false);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
@@ -1032,6 +1035,13 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                     *result = settings_op(PLAYER_UI_SETTINGS_EDIT_NICKNAME);
                 }
             }
+            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY, SET_ID_TEXT + 0xB8u,
+                                 "Online play",
+                                 safe_text(model->online_play_row_value, "Off"),
+                                 SCR_ONLINE_PLAY_ROW_SENTENCE,
+                                 model->online_play, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY);
+            }
             nk_ui_end_container(ui);
         }
         {
@@ -1046,6 +1056,66 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                     nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_DEVELOPER_LOG,
                                  "Open developer log (F12)", 0u)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_OPEN_DEVELOPER_LOG);
+                }
+                nk_ui_end_container(ui);
+            }
+        }
+        break;
+    case PLAYER_UI_SETTINGS_PAGE_ONLINE_PLAY:
+        scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
+        nk_ui_text_role(ui, FLOW_ID_TITLE, "Online play", NK_UI_TYPE_TITLE, theme->paper);
+        nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_PLAY_LEAD, NK_UI_TYPE_BODY_S, theme->muted);
+        if (scr_wizard_box_begin(ui, 0u)) {
+            WizardRow rows[3] = {
+                {"Ad hoc online play", model->online_play ? "On" : "Off",
+                 SCR_ONLINE_PLAY_TOGGLE_SENTENCE},
+                {"Server preset", safe_text(model->online_play_preset_label, "Custom"),
+                 SCR_ONLINE_PLAY_PRESET_SENTENCE},
+                {"Server address", safe_text(model->online_play_server, "socom.cc"),
+                 SCR_ONLINE_PLAY_SERVER_SENTENCE}
+            };
+            WizardColumn column = scr_wizard_column(ui, rows, 3u, inner - 32.0f, false);
+            NkUiTextStyle value_style = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
+            if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_TOGGLE,
+                                  SET_ID_TEXT + 0x600u, "Ad hoc online play",
+                                  SCR_ONLINE_PLAY_TOGGLE_SENTENCE, model->online_play,
+                                  inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY);
+            }
+            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_PRESET,
+                                 SET_ID_TEXT + 0x604u, "Server preset",
+                                 nk_ui_text_clamp(ui,
+                                                  safe_text(model->online_play_preset_label,
+                                                            "Custom"),
+                                                  &value_style, column.cell * 0.8f, 1),
+                                 SCR_ONLINE_PLAY_PRESET_SENTENCE, false,
+                                 inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_ONLINE_PLAY_PRESET);
+            }
+            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ONLINE_PLAY_SERVER,
+                                 SET_ID_TEXT + 0x608u, "Server address",
+                                 nk_ui_text_clamp(ui,
+                                                  safe_text(model->online_play_server,
+                                                            "socom.cc"),
+                                                  &value_style, column.cell * 0.8f, 1),
+                                 SCR_ONLINE_PLAY_SERVER_SENTENCE, model->online_play,
+                                 inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER);
+            }
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x60Cu,
+                            safe_text(model->online_play_status,
+                                      "Status: Off (PSP ad hoc services stay closed)."),
+                            NK_UI_TYPE_BODY_S,
+                            model->online_play ? theme->ready : theme->muted);
+            nk_ui_end_container(ui);
+        }
+        {
+            NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
+                                         NK_UI_SPACE_3);
+            row.padding_top = NK_UI_SPACE_1;
+            if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
+                if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back", NK_UI_BUTTON_PRIMARY)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_BACK);
                 }
                 nk_ui_end_container(ui);
             }

@@ -43,6 +43,8 @@ static bool player_ui_test_parse_views(char *names, uint32_t *mask) {
         { "confirm_remove_tools", VIEW_CONFIRM_REMOVE_TOOLS },
         { "build_cache", VIEW_BUILD_CACHE },
         { "psp_fonts", VIEW_PSP_FONTS }, { "updates", VIEW_UPDATES },
+        { "online_settings", VIEW_ONLINE_SETTINGS },
+        { "online_play_settings", VIEW_ONLINE_PLAY_SETTINGS },
         { "confirm_factory_reset", VIEW_CONFIRM_FACTORY_RESET },
         { "accessibility_settings", VIEW_ACCESSIBILITY_SETTINGS },
         { "ace_settings", VIEW_ACE_SETTINGS }, { "problem_report", VIEW_PROBLEM_REPORT }
@@ -560,6 +562,7 @@ const char *player_ui_test_view_name(PlayerView view) {
     case VIEW_BUILD_CACHE: return "build_cache";
     case VIEW_PSP_FONTS: return "psp_fonts";
     case VIEW_ONLINE_SETTINGS: return "online_settings";
+    case VIEW_ONLINE_PLAY_SETTINGS: return "online_play_settings";
     case VIEW_UPDATES: return "updates";
     case VIEW_CONFIRM_FACTORY_RESET: return "confirm_factory_reset";
     case VIEW_ACCESSIBILITY_SETTINGS: return "accessibility_settings";
@@ -732,7 +735,8 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            "titles_pending=%d titles_failed=%d titles_unclaimed=%d "
            "prereq_items=%zu prereq_bytes=%llu game_running=%d build_stage=%d "
            "running=%d pixels=%016llx "
-           "render_ns=%llu package_validations=%llu online_mode=%d developer_mode=%d "
+           "render_ns=%llu package_validations=%llu "
+           "online_mode=%d developer_mode=%d online_play=%d online_play_server=%s "
            "dev_log_lines=%zu next_primary=%d next_primary_label=%s next_detail=%s "
            "next_preflight=%s next_preflight_code=%s next_preflight_detail=%s "
            "next_preflight_action=%s next_build_built=%d "
@@ -799,6 +803,8 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            (unsigned long long)render_elapsed_ns,
            (unsigned long long)validation_calls,
            app->settings.online_mode ? 1 : 0, app->settings.developer_mode ? 1 : 0,
+           app->settings.online_play ? 1 : 0,
+           app->settings.online_play_server[0] ? app->settings.online_play_server : "none",
            player_dev_log_count(app), next_primary, next_primary_label, next_detail,
            next_preflight, next_preflight_code, next_preflight_detail,
            next_preflight_action,

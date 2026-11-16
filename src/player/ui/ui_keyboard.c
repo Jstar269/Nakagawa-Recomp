@@ -151,6 +151,7 @@ uint32_t ui_keyboard_key_char(unsigned place, bool shifted) {
     if (place >= UI_KEYBOARD_CHAR_KEYS) return 0u;
     c = k_rows[place / UI_KEYBOARD_KEYS_PER_ROW][place % UI_KEYBOARD_KEYS_PER_ROW];
     if (shifted && c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+    else if (shifted && c == '\'') c = ':';
     return (uint32_t)(unsigned char)c;
 }
 

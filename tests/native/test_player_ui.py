@@ -2330,6 +2330,8 @@ class NativePlayerUiTests(unittest.TestCase):
     SETTINGS_FOCUS = {
         "resolution": str(0x4501), "pacing": str(0x4502), "done": str(0x450C),
         "online": str(0x450D), "notices": str(0x450E), "remove_tools": str(0x450F),
+        "online_play": str(0x455C), "online_play_toggle": str(0x455D),
+        "online_play_preset": str(0x455E), "online_play_server": str(0x455F),
         "build_cache": str(0x451A), "share_libraries": str(0x451B),
         "build_speed": str(0x4555),
         "developer": str(0x4515), "back": str(0x4517), "confirm_remove": str(0x4519),
@@ -2417,6 +2419,53 @@ class NativePlayerUiTests(unittest.TestCase):
         saved = capped["settings"]
         assert isinstance(saved, dict)
         self.assertEqual(saved.get("nickname"), "x" * 32, "the editor keeps the first 32 bytes")
+
+    def test_next_ui_online_play_settings(self) -> None:
+        """#1139: Settings > Online and developer > Online play stays off by default, opens
+        its subpage, toggles online play, steps presets, edits custom host[:port] via
+        ui_keyboard, refuses invalid port specs, and keeps network_mode offline."""
+        focus = self.SETTINGS_FOCUS
+        nav = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "KEY_DOWN", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100",
+             "KEY_ESCAPE", "WAIT_MS=100"),
+            settings={"nickname": "Player", "nickname_asked": True},
+        )
+        self.assertEqual(
+            [view for view, _ in self.screens(nav)],
+            ["online_settings", "online_play_settings", "online_settings"],
+        )
+        frames = nav["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[0]["online_play"], "0", "online_play defaults to off")
+        self.assertEqual(frames[0]["online_play_server"], "socom.cc")
+        self.assertIn(focus["online_play_toggle"], self.focus_trail(nav))
+
+        run = self.next_ui_run(
+            "online-play-settings",
+            ("WAIT_MS=100",
+             "KEY_RETURN", "WAIT_MS=50",
+             "KEY_DOWN", "KEY_RETURN", "WAIT_MS=50",
+             "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100",
+             "TEXT=127.0.0.1:27312,27313", "KEY_RETURN", "WAIT_MS=100",
+             "KEY_RETURN", "WAIT_MS=100",
+             "TEXT=bad.host:99999", "KEY_RETURN", "WAIT_MS=100",
+             "KEY_ESCAPE", "WAIT_MS=100"),
+            settings={"nickname": "Player", "nickname_asked": True},
+        )
+        run_frames = run["frames"]
+        assert isinstance(run_frames, list)
+        self.assertEqual(run_frames[-1]["view"], "online_play_settings")
+        self.assertEqual(run_frames[-1]["online_play"], "1")
+        self.assertEqual(run_frames[-1]["online_play_server"], "127.0.0.1:27312,27313")
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertIs(settings.get("online_play"), True)
+        self.assertEqual(settings.get("online_play_server"), "127.0.0.1:27312,27313")
+        self.assertEqual(settings.get("network_mode"), "offline")
+        trail = self.focus_trail(run)
+        self.assertEqual(trail[-1], focus["online_play_server"],
+                         "closing the custom server editor returns focus to Server address")
 
     # The nickname editor's on-screen keyboard (#2197): its first letter, q, is where it opens.
     NICKNAME_KEY_BASE = 0x4570

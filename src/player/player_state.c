@@ -1422,6 +1422,9 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->picker_folder[0] = '\0';
     settings->rebuild_prompt_version[0] = '\0';
     settings->developer_mode = false;
+    settings->online_play = false;
+    snprintf(settings->online_play_server, sizeof(settings->online_play_server), "%s",
+             NK_ADHOC_DEFAULT_SERVER);
     snprintf(settings->nickname, sizeof(settings->nickname), "%s", NK_NICKNAME_DEFAULT);
     settings->nickname_asked = false;
     /* Authentic until the player chooses Enhanced; the parts keep their values while it
@@ -2124,6 +2127,29 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.discord_presence = discord_val;
     }
 
+    /* Ad hoc online play (#1139): off unless explicitly true with a valid server. Missing or
+       malformed fields fail closed without inheriting network_mode. */
+    {
+        NkJsonNode *adhoc_node = nk_json_obj_get(root, "online_play");
+        bool adhoc_val = false;
+        if (adhoc_node && nk_json_get_bool(adhoc_node, &adhoc_val)) {
+            app->settings.online_play = adhoc_val;
+        }
+        NkJsonNode *srv_node = nk_json_obj_get(root, "online_play_server");
+        if (srv_node != NULL) {
+            const char *srv = nk_json_get_string(srv_node);
+            if (srv && strlen(srv) < sizeof(app->settings.online_play_server) &&
+                nk_adhoc_relay_parse_server(srv, NULL, 0u, NULL, NULL)) {
+                snprintf(app->settings.online_play_server,
+                         sizeof(app->settings.online_play_server), "%s", srv);
+            } else {
+                app->settings.online_play = false;
+                snprintf(app->settings.online_play_server,
+                         sizeof(app->settings.online_play_server), "%s", NK_ADHOC_DEFAULT_SERVER);
+            }
+        }
+    }
+
     /* A folder that no longer fits is dropped, not cut short. */
     const char *picker_folder = nk_json_get_string(nk_json_obj_get(root, "picker_folder"));
     if (picker_folder && strlen(picker_folder) < sizeof(app->settings.picker_folder)) {
@@ -2375,6 +2401,8 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
     fprintf(f, "  \"online_news\": %s,\n", app->settings.online_news ? "true" : "false");
     fprintf(f, "  \"online_reports\": %s,\n", app->settings.online_reports ? "true" : "false");
     fprintf(f, "  \"developer_mode\": %s,\n", app->settings.developer_mode ? "true" : "false");
+    fprintf(f, "  \"online_play\": %s,\n", app->settings.online_play ? "true" : "false");
+    player_settings_write_string(f, "online_play_server", app->settings.online_play_server);
     play_settings_write(f, &app->settings);
     fprintf(f, "  \"reduce_motion\": %s,\n",
             app->settings.reduce_motion_choice == PLAYER_SYSTEM_CHOICE_ON ? "true" : "false");
@@ -4060,6 +4088,57 @@ void player_app_toggle_online_feature(PlayerApp *app, int feature) {
     if (!field) return;
     *field = !*field;
     maybe_persist_settings(app);
+}
+
+void player_app_set_online_play(PlayerApp *app, bool on) {
+    if (!app) return;
+    if (on && !nk_adhoc_relay_parse_server(app->settings.online_play_server,
+                                           NULL, 0u, NULL, NULL)) {
+        return;
+    }
+    app->settings.online_play = on;
+    player_dev_log_add(app, "settings", "online play %s (%s)",
+                       on ? "on" : "off", app->settings.online_play_server);
+    maybe_persist_settings(app);
+}
+
+void player_app_cycle_online_play_preset(PlayerApp *app) {
+    size_t count;
+    size_t next = 0u;
+    const NkAdhocServerPreset *preset;
+    if (!app) return;
+    count = nk_adhoc_server_preset_count();
+    if (count == 0u) return;
+    for (size_t i = 0u; i < count; ++i) {
+        const NkAdhocServerPreset *p = nk_adhoc_server_preset(i);
+        if (p && p->host && strcmp(app->settings.online_play_server, p->host) == 0) {
+            next = (i + 1u) % count;
+            break;
+        }
+    }
+    preset = nk_adhoc_server_preset(next);
+    if (!preset || !preset->host) return;
+    snprintf(app->settings.online_play_server, sizeof(app->settings.online_play_server),
+             "%s", preset->host);
+    player_dev_log_add(app, "settings", "online play server preset: %s",
+                       app->settings.online_play_server);
+    maybe_persist_settings(app);
+}
+
+bool player_app_set_online_play_server(PlayerApp *app, const char *server) {
+    if (!app || !server) return false;
+    if (strlen(server) >= sizeof(app->settings.online_play_server) ||
+        !nk_adhoc_relay_parse_server(server, NULL, 0u, NULL, NULL)) {
+        player_dev_log_add(app, "settings",
+                           "rejected invalid ad hoc server specification");
+        return false;
+    }
+    snprintf(app->settings.online_play_server, sizeof(app->settings.online_play_server),
+             "%s", server);
+    player_dev_log_add(app, "settings", "online play server set to %s",
+                       app->settings.online_play_server);
+    maybe_persist_settings(app);
+    return true;
 }
 
 void player_app_set_developer_mode(PlayerApp *app, bool on) {
@@ -6368,6 +6447,14 @@ void player_app_apply_settings_to_session(const PlayerSettings *settings,
     config->fullscreen = settings->fullscreen;
     config->master_volume = settings->master_volume;
     config->developer_mode = settings->developer_mode;
+    config->online_play = settings->online_play &&
+        nk_adhoc_relay_parse_server(settings->online_play_server, NULL, 0u, NULL, NULL);
+    if (config->online_play) {
+        snprintf(config->online_play_server, sizeof(config->online_play_server), "%s",
+                 settings->online_play_server);
+    } else {
+        config->online_play_server[0] = '\0';
+    }
     snprintf(config->nickname, sizeof(config->nickname), "%s", settings->nickname);
     config->reduce_motion = settings->reduce_motion_choice == PLAYER_SYSTEM_CHOICE_ON
         ? NK_REDUCE_MOTION_ON

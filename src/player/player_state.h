@@ -14,6 +14,7 @@
 #include "nk_steam_shortcuts.h"
 #include "nk_font.h"
 #include "nk_nickname.h"
+#include "nk_adhoc_relay.h"
 #include "nk_shared_helpers.h"
 #include "input_settings.h"
 #include "package_builder.h"
@@ -57,6 +58,7 @@ typedef enum {
     VIEW_PREREQ_ABOUT,
     VIEW_CONFIRM_REMOVE_TOOLS,
     VIEW_ONLINE_SETTINGS,   /* Settings > Online and developer options */
+    VIEW_ONLINE_PLAY_SETTINGS, /* Settings > Online play: community ad hoc relay (#1139) */
     VIEW_BUILD_CACHE,       /* Settings > Build tools and cache (#1306) */
     VIEW_DEVELOPER_LOG,     /* the developer log panel (developer mode, F12) */
     VIEW_PSP_FONTS,         /* Settings > PSP fonts: import your PSP's own fonts */
@@ -408,6 +410,11 @@ typedef struct {
     bool online_news;      /* the news strip, when online mode ships */
     bool online_reports;   /* user-sent reports, when online mode ships */
     bool developer_mode;   /* shows the developer log panel (F12, Select + R) */
+    /* Opt-in ad hoc online play (#1139): off by default, never enabled by
+       network_mode or inherited environment. Stores a validated community relay
+       server (preset or host[:port]). */
+    bool online_play;
+    char online_play_server[NK_ADHOC_SERVER_MAX_LEN + 1u];
     /* The play modes (#2055): "enhanced" and the sparse "title_play" in settings.json,
        additions to schema version 2 as text_size is. A file without them is read from the
        development builds' "ace", "ace_titles" and "enhancement_60hz_discs"
@@ -2514,6 +2521,10 @@ void player_app_discord_tick(PlayerApp *app, uint64_t now_ms);
 /* Clear Discord status and close the connection, as the player exits. */
 void player_app_discord_shutdown(PlayerApp *app);
 void player_app_set_developer_mode(PlayerApp *app, bool on);
+/* Ad hoc online play (#1139): opt-in per-launch relay switch and validated server. */
+void player_app_set_online_play(PlayerApp *app, bool on);
+void player_app_cycle_online_play_preset(PlayerApp *app);
+bool player_app_set_online_play_server(PlayerApp *app, const char *server);
 /* The wizard's options step: skipping keeps both switches off. */
 void player_app_wizard_skip_options(PlayerApp *app);
 

@@ -809,6 +809,8 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
                 player_app_prereq_cancel(app);
             } else if (app->active_view == VIEW_CONFIRM_REMOVE_TOOLS) {
                 player_app_set_view(app, VIEW_BUILD_CACHE);
+            } else if (app->active_view == VIEW_ONLINE_PLAY_SETTINGS) {
+                player_app_set_view(app, VIEW_ONLINE_SETTINGS);
             } else if (app->active_view == VIEW_PREREQ_ABOUT ||
                        app->active_view == VIEW_BUILD_CACHE ||
                        app->active_view == VIEW_PSP_FONTS ||
@@ -919,6 +921,8 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
                 player_app_prereq_cancel(app);
             } else if (app->active_view == VIEW_CONFIRM_REMOVE_TOOLS) {
                 player_app_set_view(app, VIEW_BUILD_CACHE);
+            } else if (app->active_view == VIEW_ONLINE_PLAY_SETTINGS) {
+                player_app_set_view(app, VIEW_ONLINE_SETTINGS);
             } else if (app->active_view == VIEW_PREREQ_ABOUT ||
                        app->active_view == VIEW_BUILD_CACHE ||
                        app->active_view == VIEW_PSP_FONTS ||
@@ -1804,7 +1808,18 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
             break;
         case PLAYER_UI_SETTINGS_BACK:
             if (app->active_view == VIEW_ACE_SETTINGS) player_app_close_enhanced_page(app);
-            else player_app_set_view(app, VIEW_SETTINGS);
+            else if (app->active_view == VIEW_ONLINE_PLAY_SETTINGS) {
+                player_app_set_view(app, VIEW_ONLINE_SETTINGS);
+            } else player_app_set_view(app, VIEW_SETTINGS);
+            break;
+        case PLAYER_UI_SETTINGS_OPEN_ONLINE_PLAY:
+            player_app_set_view(app, VIEW_ONLINE_PLAY_SETTINGS);
+            break;
+        case PLAYER_UI_SETTINGS_TOGGLE_ONLINE_PLAY:
+            player_app_set_online_play(app, !app->settings.online_play);
+            break;
+        case PLAYER_UI_SETTINGS_CYCLE_ONLINE_PLAY_PRESET:
+            player_app_cycle_online_play_preset(app);
             break;
         case PLAYER_UI_SETTINGS_TOGGLE_ONLINE:
             player_app_set_online_mode(app, !app->settings.online_mode);
@@ -4648,6 +4663,8 @@ static void player_apply_test_view(PlayerApp *app, const char *test_view) {
             app->wizard.step = WIZARD_STEP_ONLINE_OPTIONS;
         } else if (strcmp(test_view, "online-settings") == 0) {
             player_app_set_view(app, VIEW_ONLINE_SETTINGS);
+        } else if (strcmp(test_view, "online-play-settings") == 0) {
+            player_app_set_view(app, VIEW_ONLINE_PLAY_SETTINGS);
         } else if (strcmp(test_view, "accessibility-settings") == 0) {
             player_app_set_view(app, VIEW_ACCESSIBILITY_SETTINGS);
         } else if (strcmp(test_view, "ace-settings") == 0) {
