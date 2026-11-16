@@ -1297,17 +1297,30 @@ required.
 ### Network use
 
 Nakagawa works offline. The player and the runtime make no network connection unless you
-agree to one, and the game itself never reaches the network. There are two
-connections, listed below, and each is opt-in.
+agree to one, and ordinary single-player play reaches no host. The opt-in
+connections are listed below, and each is off by default.
 
 | What | Host | When | Controlled by |
 | --- | --- | --- | --- |
 | Build-tool download | `www.python.org`, `repo.msys2.org` (HTTPS) | Only after you select **DOWNLOAD** on the BUILD PACKAGE consent card | That consent card, per build |
 | Check for updates | `api.github.com` (HTTPS) | When you select **CHECK FOR UPDATES** (Settings > Updates), or once at start if you turn on **Check at start** (off by default) | That button, and that switch |
 | Update download | `github.com`, which redirects to `release-assets.githubusercontent.com` (HTTPS) | Only after a check finds a newer version and you select **DOWNLOAD** | That button, per download |
+| Online play (ad hoc relay) | Shipped default `socom.cc`, presets `psp.mgn.pub`, `relay.arenaanywhere.site`, `relay-usa.arenaanywhere.site`, or a user-entered host (`27312` lobby, `27313` data, plain TCP) | Only when you turn **Ad hoc online play** on and launch a game that starts PSP ad hoc networking | **Settings > Online and developer > Online play** (`online_play` in `settings.json`, off by default) |
 
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).
+
+**Online play** (Settings > Online and developer > Online play, off by default;
+[#1139](https://github.com/Jstar269/nakagawa-recomp/issues/1139)) carries PSP local wireless ad hoc
+multiplayer over the internet through an aemu_postoffice / PPSSPP community relay server
+(`src/core/nk_adhoc_relay_client.c`, runtime opt-in `SR_ADHOC_ENABLED` and `SR_ADHOC_SERVER`).
+Its two connections are **unencrypted plain TCP** with no sign-in: lobby port `27312` and data
+relay port `27313` by default, so anyone on the network path or operating the server can read the
+traffic. Only the game's disc ID, your profile's nickname and generated per-profile MAC address,
+the ad hoc group name, and the game's PDP/PTP packets are sent (`ONLINE_FEATURES.md` details the
+exact protocol); no game assets, saves, host paths, or PC identifiers are sent. Custom server
+entries stay local in `settings.json`. When Online play is off, no host socket opens and
+strictly-online ad hoc imports stay fail-closed.
 
 The disc check needs no connection either: Redump's PSP list ships beside the player
 (`assets/redump/`), and a newer list is one you download yourself and import
@@ -1356,8 +1369,9 @@ project.
 
 There is no telemetry or crash upload. The `network_mode` entry in
 `settings.json` is reserved and always reads `"offline"`; a build treats any other value as
-offline. `tools/test_prereq_fetcher.py` fails if shipped code outside the two
-prerequisite downloaders uses a network API, if a pinned download or the update check names a host not
+offline. `tools/test_prereq_fetcher.py` fails if shipped code outside the allowlisted modules
+(`package_builder.c`, `prereq_fetcher.py`, and opt-in `nk_adhoc_relay_client.c`) uses a network
+API, if a pinned download, update check, or shipped relay preset names a host or port not
 listed in this section, or if new code calls the native download transport.
 
 Release packaging is a maintainer step, not part of the player:

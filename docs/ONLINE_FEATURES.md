@@ -149,22 +149,24 @@ The plan below is the later in-player report, once online mode ships.
 
 ## Online play
 
-Status: design approved by the owner on 2026-11-06
-([#1139](https://github.com/Jstar269/nakagawa-recomp/issues/1139)). The relay's wire format is built
-(`src/core/nk_adhoc_relay.c`, tested by `relay-codec-selftest`), and so are the transport seam and its in-process
-medium (`src/core/nk_adhoc_net.c`, tested by `adhoc-net-selftest`). Nothing connects yet: the PSP ad hoc services
-are still named refusals.
+Status: opt-in v0.1.0 implementation ([#1139](https://github.com/Jstar269/nakagawa-recomp/issues/1139)),
+off by default (`online_play: false` in `settings.json`, `SR_ADHOC_ENABLED=0` in runtime). When off,
+zero host sockets open; lone-console `sceNetAdhocctl` follows PSP measurements and strictly online
+ad hoc imports stay named refusals (`0x80010086`).
 
-A separate switch, **Online play**, lets games use the PSP's ad hoc multiplayer over the internet. It is not part of
-online mode: online mode lets the launcher talk to one host, while online play lets game code reach other consoles,
-so it is its own explicit choice with its own sentence in Settings. It is off by default.
+A separate switch, **Online play** (**Settings > Online and developer > Online play**), lets games use
+the PSP's ad hoc multiplayer over the internet. It is not part of legacy online mode: **Ad hoc
+online play** lets opted-in games reach peers through a community relay server, carries a plain-TCP
+privacy notice, and is off by default.
 
 - **Ad hoc multiplayer through a relay.** Most PSP multiplayer is local wireless ad hoc play. Nakagawa carries it
   through an ad hoc relay server, the way PPSSPP does. Nakagawa speaks the protocol of
   [aemu_postoffice](https://github.com/Kethen/aemu_postoffice) at commit `02abf18f`, the version PPSSPP pins, so
   Nakagawa players can play with PPSSPP players, and with PSPs running the aemu plugin, on the same servers.
-- **Servers.** The player ships one server, `socom.cc`, which is PPSSPP's default. The user may enter their own
-  instead. A server the user enters is used only on their PC and never ships.
+- **Servers.** The player ships `socom.cc` as its default server alongside curated presets
+  (`psp.mgn.pub`, `relay.arenaanywhere.site`, `relay-usa.arenaanywhere.site`), and lets the user
+  type a custom `host[:lobby_port[,data_port]]` address via the on-screen keyboard. A user-entered
+  server stays only in the local `settings.json`.
 - **Two connections, both unencrypted.** The protocol is plain TCP. It has no encryption and no sign-in.
   - **Lobby** (port 27312): log in, find groups, join one, and learn who is in it.
   - **Data relay** (port 27313): one connection per ad hoc socket, carrying the game's own packets.
@@ -180,27 +182,34 @@ so it is its own explicit choice with its own sentence in Settings. It is off by
   protocol allows is never sent.
 - **Where it lives.**
   - **PSP services:** `sceNetAdhoc`, `sceNetAdhocctl` and `sceNetAdhocMatching` are firmware modules, so they are
-    HLE (`AGENTS.md`, section 6). They become real state machines in `src/rt/hle_network.c`. Their PSP-visible
-    results come from the public PSP recordings in pspautotests (`tests/net/adhoc`) and from measurements on the
-    project's PSP. A call stays a named refusal until its sequence is measured.
-  - **Transport:** the services talk to their peers through one small transport interface
-    (`src/core/nk_adhoc_net.h`): the lobby and PDP sockets now, PTP streams later. Its first implementation is an
-    in-process medium whose lobby is translated from PPSSPP's ad hoc server, which speaks the same lobby protocol.
-    One console alone on it is a PSP with no peers in range, the default with Online play off. Two to four consoles
-    on it are a simulation for tests, labelled as such. The relay is the second implementation.
-  - **The relay client** is one module in the game process (`src/core/nk_adhoc_relay*`), because a game's
-    datagrams cannot wait for a trip through the launcher. The player starts a game with the server only when the
-    user turned Online play on. That module is the only runtime file the egress allowlist test lets use the network.
-- **Where the code comes from** (`src/core/PROVENANCE.md` has the details).
+    HLE (`AGENTS.md`, section 6) in `src/rt/hle_network.c`. Lone-console `sceNetAdhocctl`, `sceWlan`, and
+    `sceNetInit`/`sceNetTerm` follow PSP measurements; the online tier (`Join`, `GetAddrByName`, `GetNameByAddr`,
+    `sceNetAdhoc` PDP/PTP/`PollSocket`/`SocketAlert`, `sceNetAdhocMatching`) is labelled **PPSSPP-derived, not
+    PSP-measured** (classified `derived-translated` from PPSSPP rev `3bc60270`) and logs once when first activated.
+    Unimplemented services (`sceNetAdhocGameMode*`, `sceNetAdhocDiscover*`, `sceNetApctl*`, `sceHttp*`, `sceSsl*`)
+    stay named refusals (`0x80010086`).
+  - **Transport:** the services talk to peers through `src/core/nk_adhoc_net.h` (`NkAdhocTransportOps`: lobby,
+    PDP sockets, PTP listeners/streams). `src/core/nk_adhoc_net.c` provides the in-process medium (`NkAdhocLoopNet`)
+    for deterministic two-console selftests, and `src/core/nk_adhoc_relay_client.c/.h` implements the non-blocking
+    plain-TCP `aemu_postoffice` / PPSSPP relay client (`relay-client-selftest`).
+  - **Config seam & tests:** the player only sets `SR_ADHOC_ENABLED=1` and `SR_ADHOC_SERVER` (with `+10000`
+    `SR_ADHOC_PORT_OFFSET`) when **Ad hoc online play** is on. Offline selftests (`hle_thread_selftest --adhocctl`)
+    and local `127.0.0.1` loopback tests (`relay-client-selftest`, `test_adhoc_online_real_tcp_loopback_e2e`) cover
+    the full stack without touching the internet.
+- **Where the code comes from** (`src/core/PROVENANCE.md` and `src/rt/PROVENANCE.md` have the details).
   - The relay codec (`src/core/nk_adhoc_relay.c/.h`) encodes and decodes the protocol's packets; no
     aemu_postoffice code is copied. The packet layouts and limits come from aemu_postoffice's headers. Its login
-    checks (PPSSPP's `login_user_data`) and port offset are translated from PPSSPP, so `nk_adhoc_relay.c` is
-    labelled derived-translated.
+    checks (PPSSPP's `login_user_data`), port offset, and curated community preset list come from PPSSPP, so
+    `nk_adhoc_relay.c` is labelled derived-translated.
+  - The TCP relay client (`src/core/nk_adhoc_relay_client.c/.h`) is project-authored C99 written against
+    `nk_adhoc_relay.h` and `nk_adhoc_net.h`; its eager PTP listener backlog (`max_backlog`) and refused-connect
+    state follow PPSSPP's `Core/HLE/AdhocTransportRelay.cpp` design at rev `3bc60270`.
   - The in-process medium's lobby (`src/core/nk_adhoc_net.c`) is translated from PPSSPP's ad hoc server
-    (`Core/HLE/proAdhocServer.cpp`, GPL-2.0-or-later) and labelled derived-translated. Its PDP half is this
-    project's own.
-  - Importing aemu_postoffice's client code later under `AGENTS.md` section 4 is approved by the owner. That code is
-    marked GPL-3.0-only, and its `PROVENANCE.md` entry would record that.
+    (`Core/HLE/proAdhocServer.cpp`, GPL-2.0-or-later) and labelled derived-translated. Its PDP half and PTP stream
+    simulation are this project's own.
+  - The online ad hoc HLE state machines (`src/rt/hle_network.c`) are adapted (`derived-translated`, PPSSPP rev
+    `3bc60270`, `Core/HLE/{proAdhoc,sceNetAdhoc,sceNetAdhocMatching,AdhocTransportRelay,ErrorCodes}`) and marked
+    PPSSPP-derived, not PSP-measured until confirmed by two-console PSP hardware probes.
 - **Infrastructure revivals, per title, later.** A game whose official servers are gone can be revived only by
   rebuilding that game's own server protocol, one title at a time, from interoperability study of the game itself.
 - **Never:** anything that needs the console vendor's online-account sign-in or DNAS authentication. Those depend on
