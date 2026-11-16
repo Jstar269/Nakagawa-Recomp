@@ -1521,7 +1521,7 @@ static void write_runtime_package_fixture_variant(
     }
 
     int package_length = snprintf(package_json, sizeof(package_json),
-        "{\"format\":\"nakagawa-aot-package\",\"schema_version\":2,\"cache\":%s,"
+        "{\"format\":\"nakagawa-aot-package\",\"schema_version\":3,\"cache\":%s,"
         "\"title\":{\"id\":\"%s\",\"display_name\":\"Synthetic fixture\","
         "\"kind\":\"retail\",\"manifest_sha256\":\"%064d\","
         "\"protected_digest\":\"%064d\"},"
@@ -4819,14 +4819,14 @@ static void test_package_build_lifecycle(const char *self_executable) {
        check its newer layout would fail, and the player leaves it as it is. */
     {
         static const char current_format[] =
-            "\"format\":\"nakagawa-aot-package\",\"schema_version\":2,";
+            "\"format\":\"nakagawa-aot-package\",\"schema_version\":3,";
         char line[256];
         snprintf(package_path, sizeof(package_path), "%s%cpackages%c%s%cpackage.json",
                  user_root, sep, sep, rebuild_app->games[0].disc_id, sep);
         char *package_text = read_text_file(package_path);
         char *at = strstr(package_text, current_format);
         assert(at != NULL);
-        at[strlen(current_format) - 2u] = '3';
+        at[strlen(current_format) - 2u] = '4';
         write_text_file(package_path, package_text);
         player_app_runtime_package_cache_invalidate(rebuild_app);
         assert(player_app_validate_runtime_package(
@@ -4834,7 +4834,7 @@ static void test_package_build_lifecycle(const char *self_executable) {
                    incompatible_reason, sizeof(incompatible_reason)) ==
                NK_RUNTIME_PACKAGE_INCOMPATIBLE);
         assert(strstr(incompatible_reason,
-                      "built by a newer Nakagawa (package format 3; this player reads 2)") !=
+                      "built by a newer Nakagawa (package format 4; this player reads 3)") !=
                NULL);
         assert(player_incompatible_reason_line(incompatible_reason, line, sizeof(line)) > 0);
         static const char card_line[] = "No longer fits this player: built by a newer Nakagawa";

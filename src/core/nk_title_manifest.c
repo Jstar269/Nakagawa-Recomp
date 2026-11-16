@@ -4280,9 +4280,12 @@ static bool package_validate_contract(const JsonNode *package,
         return false;
     }
     if (!package_check_object(package, "$", root_keys, root_keys, error, error_size)) return false;
+    const JsonNode *package_schema = obj_get(package, "schema_version");
+    bool package_v2 = package_number(package_schema, 2);
+    bool package_v3 = package_number(package_schema, 3);
     if (!package_string(obj_get(package, "format"), &value) || strcmp(value, "nakagawa-aot-package") != 0 ||
-        !package_number(obj_get(package, "schema_version"), NK_AOT_PACKAGE_SCHEMA_VERSION)) {
-        snprintf(error, error_size, "package format or schema_version is not v2");
+        (!package_v2 && !package_v3)) {
+        snprintf(error, error_size, "package format or schema_version is not v2 or v3");
         return false;
     }
 
@@ -4416,6 +4419,10 @@ static bool package_validate_contract(const JsonNode *package,
     const JsonNode *objects = obj_get(package, "generated_objects");
     if (!objects || objects->type != JSON_ARRAY) {
         snprintf(error, error_size, "$.generated_objects must be an array");
+        return false;
+    }
+    if (package_v3 && objects->u.arr.count != 0) {
+        snprintf(error, error_size, "v3 runtime packages must not declare generated objects");
         return false;
     }
     for (size_t i = 0; i < objects->u.arr.count; i++) {
