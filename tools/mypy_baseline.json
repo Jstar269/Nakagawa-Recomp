@@ -14,18 +14,10 @@
     "tools"
   ],
   "errors_by_module": {
-    "tools/admit_paths.py": 2,
-    "tools/ci_paths.py": 9,
-    "tools/ci_trust_verdict.py": 3,
     "tools/ge_replay_metrics.py": 1,
     "tools/nk_cli.py": 16,
     "tools/nk_core/decrypt_tool.py": 1,
     "tools/nk_core/iso_inspect.py": 1,
-    "tools/provenance_attest_verify.py": 3,
-    "tools/provenance_ledger.py": 11,
-    "tools/provenance_record_gap.py": 2,
-    "tools/publish_audit.py": 7,
-    "tools/regen_all.py": 1,
     "tools/test_admit_paths.py": 4,
     "tools/test_audit_public_issue_links.py": 3,
     "tools/test_build_system_parity.py": 1,
@@ -53,7 +45,7 @@
     "tools/test_llvm_ir.py": 1,
     "tools/test_lowering_plan.py": 1,
     "tools/test_matrix_report.py": 4,
-    "tools/test_nk_core.py": 4,
+    "tools/test_nk_core.py": 3,
     "tools/test_pgf_validate_parity.py": 1,
     "tools/test_player_package_determinism.py": 2,
     "tools/test_prereq_fetcher.py": 5,
@@ -75,5 +67,5 @@
   "platform": "linux",
   "python_version": "3.15",
   "schema_version": 1,
-  "total_errors": 172
+  "total_errors": 133
 }

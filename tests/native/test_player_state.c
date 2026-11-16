@@ -12831,6 +12831,388 @@ static void test_play_mode_line_room(void) {
            sizeof(line) - 1u, (sizeof(line) - 1u - n) / avg, avg);
 }
 
+static uint32_t steam_art_test_crc32(const uint8_t *data, size_t len) {
+    uint32_t crc = 0xffffffffu;
+    for (size_t i = 0u; i < len; ++i) {
+        crc ^= (uint32_t)data[i];
+        for (int b = 0; b < 8; ++b) {
+            crc = (crc >> 1) ^ ((crc & 1u) ? 0xedb88320u : 0u);
+        }
+    }
+    return crc ^ 0xffffffffu;
+}
+
+static void steam_art_test_put_be32(uint8_t *dst, uint32_t v) {
+    dst[0] = (uint8_t)((v >> 24) & 0xffu);
+    dst[1] = (uint8_t)((v >> 16) & 0xffu);
+    dst[2] = (uint8_t)((v >> 8) & 0xffu);
+    dst[3] = (uint8_t)(v & 0xffu);
+}
+
+static bool steam_art_test_append_chunk(uint8_t *out, size_t *pos, size_t cap,
+                                        const char type[4], const uint8_t *payload,
+                                        size_t len) {
+    if (*pos + 12u + len > cap) return false;
+    steam_art_test_put_be32(out + *pos, (uint32_t)len);
+    memcpy(out + *pos + 4u, type, 4u);
+    if (len > 0u && payload != NULL) memcpy(out + *pos + 8u, payload, len);
+    uint32_t crc = steam_art_test_crc32(out + *pos + 4u, 4u + len);
+    steam_art_test_put_be32(out + *pos + 8u + len, crc);
+    *pos += 12u + len;
+    return true;
+}
+
+static size_t steam_art_test_make_png(uint32_t w, uint32_t h, uint8_t r, uint8_t g,
+                                      uint8_t b, uint8_t a, uint8_t *out, size_t cap) {
+    static const uint8_t k_sig[8] = {0x89u, 0x50u, 0x4eu, 0x47u, 0x0du, 0x0au, 0x1au, 0x0au};
+    size_t row_bytes = 1u + (size_t)w * 4u;
+    size_t raw_len = (size_t)h * row_bytes;
+    size_t pos = 0u;
+    uint8_t ihdr[13];
+    uint8_t *raw = (uint8_t *)malloc(raw_len);
+    uint8_t *zlib = (uint8_t *)malloc(raw_len + 64u);
+    assert(raw != NULL && zlib != NULL && cap >= 64u);
+    for (uint32_t y = 0u; y < h; ++y) {
+        uint8_t *row = raw + (size_t)y * row_bytes;
+        row[0] = 0u;
+        for (uint32_t x = 0u; x < w; ++x) {
+            row[1u + (size_t)x * 4u + 0u] = r;
+            row[1u + (size_t)x * 4u + 1u] = g;
+            row[1u + (size_t)x * 4u + 2u] = b;
+            row[1u + (size_t)x * 4u + 3u] = a;
+        }
+    }
+    uint32_t s1 = 1u, s2 = 0u;
+    for (size_t i = 0u; i < raw_len; ++i) {
+        s1 = (s1 + raw[i]) % 65521u;
+        s2 = (s2 + s1) % 65521u;
+    }
+    size_t zpos = 0u;
+    zlib[zpos++] = 0x78u;
+    zlib[zpos++] = 0x01u;
+    zlib[zpos++] = 0x01u;
+    zlib[zpos++] = (uint8_t)(raw_len & 0xffu);
+    zlib[zpos++] = (uint8_t)((raw_len >> 8) & 0xffu);
+    zlib[zpos++] = (uint8_t)((~raw_len) & 0xffu);
+    zlib[zpos++] = (uint8_t)(((~raw_len) >> 8) & 0xffu);
+    memcpy(zlib + zpos, raw, raw_len);
+    zpos += raw_len;
+    steam_art_test_put_be32(zlib + zpos, (s2 << 16) | s1);
+    zpos += 4u;
+
+    memcpy(out, k_sig, 8u);
+    pos = 8u;
+    steam_art_test_put_be32(ihdr + 0u, w);
+    steam_art_test_put_be32(ihdr + 4u, h);
+    ihdr[8] = 8u;
+    ihdr[9] = 6u;
+    ihdr[10] = 0u;
+    ihdr[11] = 0u;
+    ihdr[12] = 0u;
+    assert(steam_art_test_append_chunk(out, &pos, cap, "IHDR", ihdr, sizeof(ihdr)));
+    assert(steam_art_test_append_chunk(out, &pos, cap, "IDAT", zlib, zpos));
+    assert(steam_art_test_append_chunk(out, &pos, cap, "IEND", NULL, 0u));
+    free(raw);
+    free(zlib);
+    return pos;
+}
+
+static bool steam_art_test_file_equals(const char *path, const uint8_t *want, size_t want_len) {
+    FILE *f = nk_fopen_utf8(path, "rb");
+    uint8_t buf[4096];
+    size_t got;
+    if (f == NULL || want_len > sizeof(buf)) {
+        if (f != NULL) fclose(f);
+        return false;
+    }
+    got = fread(buf, 1u, sizeof(buf), f);
+    fclose(f);
+    return got == want_len && memcmp(buf, want, want_len) == 0;
+}
+
+static void steam_art_test_write_iso(const char *path, const uint8_t *icon0, size_t icon0_len,
+                                     const uint8_t *pic1, size_t pic1_len) {
+    enum { SECTOR = 2048, SECTORS = 26, ROOT_LBA = 17, GAME_LBA = 18,
+           SYSDIR_LBA = 19, USRDIR_LBA = 20, SFO_LBA = 21, EBOOT_LBA = 22,
+           ICON0_LBA = 23, PIC1_LBA = 24 };
+    static const uint8_t dot[] = {0};
+    static const uint8_t dotdot[] = {1};
+    static const uint8_t game_name[] = "PSP_GAME";
+    static const uint8_t sysdir_name[] = "SYSDIR";
+    static const uint8_t usrdir_name[] = "USRDIR";
+    static const uint8_t sfo_name[] = "PARAM.SFO;1";
+    static const uint8_t eboot_name[] = "EBOOT.BIN;1";
+    static const uint8_t icon0_name[] = "ICON0.PNG;1";
+    static const uint8_t pic1_name[] = "PIC1.PNG;1";
+    uint8_t *image = (uint8_t *)calloc(SECTORS, SECTOR);
+    uint8_t sfo[256];
+    uint8_t eboot[0x100];
+    size_t sfo_size = build_player_test_param_sfo(sfo, sizeof(sfo), "ULUS10001", "Synthetic Game One");
+    assert(image != NULL && icon0_len <= SECTOR && pic1_len <= SECTOR);
+    uint8_t *pvd = image + 16u * SECTOR;
+    pvd[0] = 1;
+    memcpy(pvd + 1, "CD001", 5);
+    pvd[6] = 1;
+    put_iso_both32(pvd + 80, SECTORS);
+    put_iso_both32(pvd + 158, ROOT_LBA);
+    put_iso_both32(pvd + 166, SECTOR);
+    uint8_t *root = image + ROOT_LBA * SECTOR;
+    write_iso_record(root, 0, dot, sizeof(dot), ROOT_LBA, SECTOR, true);
+    write_iso_record(root, 34, dotdot, sizeof(dotdot), ROOT_LBA, SECTOR, true);
+    write_iso_record(root, 68, game_name, sizeof(game_name) - 1u, GAME_LBA, SECTOR, true);
+    uint8_t *game = image + GAME_LBA * SECTOR;
+    write_iso_record(game, 0, dot, sizeof(dot), GAME_LBA, SECTOR, true);
+    write_iso_record(game, 34, dotdot, sizeof(dotdot), ROOT_LBA, SECTOR, true);
+    write_iso_record(game, 68, sfo_name, sizeof(sfo_name) - 1u, SFO_LBA, (uint32_t)sfo_size, false);
+    write_iso_record(game, 112, sysdir_name, sizeof(sysdir_name) - 1u, SYSDIR_LBA, SECTOR, true);
+    write_iso_record(game, 152, usrdir_name, sizeof(usrdir_name) - 1u, USRDIR_LBA, SECTOR, true);
+    size_t goff = 192u;
+    if (icon0 != NULL && icon0_len > 0u) {
+        write_iso_record(game, goff, icon0_name, sizeof(icon0_name) - 1u, ICON0_LBA, (uint32_t)icon0_len, false);
+        goff += 44u;
+        memcpy(image + ICON0_LBA * SECTOR, icon0, icon0_len);
+    }
+    if (pic1 != NULL && pic1_len > 0u) {
+        write_iso_record(game, goff, pic1_name, sizeof(pic1_name) - 1u, PIC1_LBA, (uint32_t)pic1_len, false);
+        memcpy(image + PIC1_LBA * SECTOR, pic1, pic1_len);
+    }
+    uint8_t *sysdir = image + SYSDIR_LBA * SECTOR;
+    write_iso_record(sysdir, 0, dot, sizeof(dot), SYSDIR_LBA, SECTOR, true);
+    write_iso_record(sysdir, 34, dotdot, sizeof(dotdot), GAME_LBA, SECTOR, true);
+    build_synthetic_mips_elf(eboot);
+    write_iso_record(sysdir, 68, eboot_name, sizeof(eboot_name) - 1u, EBOOT_LBA, 88u, false);
+    uint8_t *usrdir = image + USRDIR_LBA * SECTOR;
+    write_iso_record(usrdir, 0, dot, sizeof(dot), USRDIR_LBA, SECTOR, true);
+    write_iso_record(usrdir, 34, dotdot, sizeof(dotdot), GAME_LBA, SECTOR, true);
+    memcpy(image + SFO_LBA * SECTOR, sfo, sfo_size);
+    memcpy(image + EBOOT_LBA * SECTOR, eboot, 88u);
+    write_binary_file(path, image, (size_t)SECTORS * SECTOR);
+    free(image);
+}
+
+static void test_add_to_steam_writes_grid_artwork(void) {
+    PlayerApp *app = steam_test_app();
+    PlayerSteamPlan plan;
+    char steam[NK_MAX_PATH], exe[NK_MAX_PATH], iso[NK_MAX_PATH];
+    char cfg[NK_MAX_PATH * 2], path[NK_MAX_PATH * 2];
+    char grid_icon[NK_MAX_PATH * 2], grid_wide[NK_MAX_PATH * 2], grid_hero[NK_MAX_PATH * 2];
+    char grid_portrait[NK_MAX_PATH * 2];
+    uint8_t icon0[2048], pic1[2048];
+    size_t icon0_len = steam_art_test_make_png(16u, 9u, 0x10u, 0x60u, 0xb0u, 0xffu, icon0, sizeof(icon0));
+    size_t pic1_len = steam_art_test_make_png(20u, 11u, 0xc0u, 0x40u, 0x20u, 0xffu, pic1, sizeof(pic1));
+
+    snprintf(steam, sizeof(steam), "%s/steam2571", native_test_get_root());
+    snprintf(exe, sizeof(exe), "%s/Nakagawa2571/bin/nakagawa_player.exe", native_test_get_root());
+    snprintf(iso, sizeof(iso), "%s/steam2571_disc.iso", native_test_get_root());
+    steam_art_test_write_iso(iso, icon0, icon0_len, pic1, pic1_len);
+    snprintf(app->games[0].iso_path, sizeof(app->games[0].iso_path), "%s", iso);
+
+    snprintf(cfg, sizeof(cfg), "%s/userdata/20002/config", steam);
+    assert(nk_platform_mkdir_p(cfg));
+    snprintf(cfg, sizeof(cfg), "%s/config", steam);
+    assert(nk_platform_mkdir_p(cfg));
+    snprintf(path, sizeof(path), "%s/config/loginusers.vdf", steam);
+    write_text_file(path, "\"users\" { \"76561197960285730\" { \"PersonaName\" \"Player One\" } }");
+
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_READY);
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261115-090000") ==
+           PLAYER_STEAM_ADDED);
+
+    uint32_t app_id = nk_steam_shortcut_app_id(plan.exe, plan.app_name);
+    snprintf(grid_icon, sizeof(grid_icon), "%s/userdata/20002/config/grid/%lu_icon.png",
+             steam, (unsigned long)app_id);
+    snprintf(grid_wide, sizeof(grid_wide), "%s/userdata/20002/config/grid/%lu.png",
+             steam, (unsigned long)app_id);
+    snprintf(grid_hero, sizeof(grid_hero), "%s/userdata/20002/config/grid/%lu_hero.png",
+             steam, (unsigned long)app_id);
+    snprintf(grid_portrait, sizeof(grid_portrait), "%s/userdata/20002/config/grid/%lup.png",
+             steam, (unsigned long)app_id);
+    assert(steam_art_test_file_equals(grid_icon, icon0, icon0_len));
+    assert(steam_art_test_file_equals(grid_wide, icon0, icon0_len));
+    assert(steam_art_test_file_equals(grid_hero, pic1, pic1_len));
+    assert(nk_platform_path_missing(grid_portrait));
+
+    /* A title whose ICON0.PNG and PIC1.PNG are already extracted under prepared_root
+       also writes them when no disc ISO is kept. */
+    char staged_dir[256], staged_psp[NK_MAX_PATH], staged_icon[NK_MAX_PATH * 2];
+    char staged_pic[NK_MAX_PATH * 2], exe2[NK_MAX_PATH];
+    snprintf(staged_dir, sizeof(staged_dir), "%s/steam2571_staged", native_test_get_root());
+    snprintf(staged_psp, sizeof(staged_psp), "%s/PSP_GAME", staged_dir);
+    assert(nk_platform_mkdir_p(staged_psp));
+    snprintf(staged_icon, sizeof(staged_icon), "%s/ICON0.PNG", staged_psp);
+    snprintf(staged_pic, sizeof(staged_pic), "%s/PIC1.PNG", staged_psp);
+    write_binary_file(staged_icon, icon0, icon0_len);
+    write_binary_file(staged_pic, pic1, pic1_len);
+    app->games[2].iso_path[0] = '\0';
+    assert(strlen(staged_dir) < sizeof(app->games[2].prepared_root));
+    memcpy(app->games[2].prepared_root, staged_dir, strlen(staged_dir) + 1u);
+    snprintf(exe2, sizeof(exe2), "%s/Nakagawa2571_b/bin/nakagawa_player.exe", native_test_get_root());
+    assert(player_app_plan_steam_shortcut(app, 2, steam, exe2, &plan) == PLAYER_STEAM_READY);
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261115-090001") ==
+           PLAYER_STEAM_ADDED);
+    uint32_t app_id2 = nk_steam_shortcut_app_id(plan.exe, plan.app_name);
+    snprintf(grid_icon, sizeof(grid_icon), "%s/userdata/20002/config/grid/%lu_icon.png",
+             steam, (unsigned long)app_id2);
+    snprintf(grid_wide, sizeof(grid_wide), "%s/userdata/20002/config/grid/%lu.png",
+             steam, (unsigned long)app_id2);
+    snprintf(grid_hero, sizeof(grid_hero), "%s/userdata/20002/config/grid/%lu_hero.png",
+             steam, (unsigned long)app_id2);
+    assert(steam_art_test_file_equals(grid_icon, icon0, icon0_len));
+    assert(steam_art_test_file_equals(grid_wide, icon0, icon0_len));
+    assert(steam_art_test_file_equals(grid_hero, pic1, pic1_len));
+
+    /* Running Steam blocks artwork updates and leaves existing grid files untouched. */
+    uint8_t alt_icon[2048], alt_pic[2048];
+    size_t alt_icon_len = steam_art_test_make_png(16u, 9u, 0x01u, 0x02u, 0x03u, 0xffu, alt_icon, sizeof(alt_icon));
+    size_t alt_pic_len = steam_art_test_make_png(20u, 11u, 0x04u, 0x05u, 0x06u, 0xffu, alt_pic, sizeof(alt_pic));
+    write_binary_file(staged_icon, alt_icon, alt_icon_len);
+    write_binary_file(staged_pic, alt_pic, alt_pic_len);
+    assert(player_app_plan_steam_shortcut(app, 2, steam, exe2, &plan) == PLAYER_STEAM_READY);
+    assert(player_steam_add(&plan, 0u, steam_test_running_yes, "20261115-090002") ==
+           PLAYER_STEAM_RUNNING);
+    assert(steam_art_test_file_equals(grid_icon, icon0, icon0_len) &&
+           steam_art_test_file_equals(grid_hero, pic1, pic1_len));
+
+    /* Without overwrite_artwork, existing pictures are preserved and named in outcome text;
+       with overwrite_artwork = true, they are replaced cleanly. */
+    char outcome_text[NK_MAX_PATH * 3];
+    plan.overwrite_artwork = false;
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261115-090003") ==
+           PLAYER_STEAM_ALREADY);
+    assert(plan.grid.kept_mask ==
+           (NK_STEAM_GRID_SLOT_ICON | NK_STEAM_GRID_SLOT_WIDE | NK_STEAM_GRID_SLOT_HERO));
+    assert(steam_art_test_file_equals(grid_icon, icon0, icon0_len) &&
+           steam_art_test_file_equals(grid_hero, pic1, pic1_len));
+    assert(player_steam_outcome_text(&plan, outcome_text, sizeof(outcome_text)) > 0u &&
+           strstr(outcome_text, "Kept existing Steam artwork") != NULL);
+
+    plan.overwrite_artwork = true;
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261115-090004") ==
+           PLAYER_STEAM_ALREADY);
+    assert(plan.grid.written_mask ==
+           (NK_STEAM_GRID_SLOT_ICON | NK_STEAM_GRID_SLOT_WIDE | NK_STEAM_GRID_SLOT_HERO));
+    assert(steam_art_test_file_equals(grid_icon, alt_icon, alt_icon_len) &&
+           steam_art_test_file_equals(grid_hero, alt_pic, alt_pic_len));
+    assert(player_steam_outcome_text(&plan, outcome_text, sizeof(outcome_text)) > 0u &&
+           strstr(outcome_text, "Wrote Steam artwork") != NULL);
+
+    /* An unusable ICON0.PNG is left out and named; it never stops Add to Steam, and the
+       pictures already there stay. */
+    char corrupt_dir[256], corrupt_psp[NK_MAX_PATH], bad_icon_path[NK_MAX_PATH * 2];
+    snprintf(corrupt_dir, sizeof(corrupt_dir), "%s/steam2571_bad", native_test_get_root());
+    snprintf(corrupt_psp, sizeof(corrupt_psp), "%s/PSP_GAME", corrupt_dir);
+    assert(nk_platform_mkdir_p(corrupt_psp));
+    snprintf(bad_icon_path, sizeof(bad_icon_path), "%s/ICON0.PNG", corrupt_psp);
+    write_binary_file(bad_icon_path, (const uint8_t *)"NOTAPNG", 7u);
+    app->games[2].iso_path[0] = '\0';
+    assert(strlen(corrupt_dir) < sizeof(app->games[2].prepared_root));
+    memcpy(app->games[2].prepared_root, corrupt_dir, strlen(corrupt_dir) + 1u);
+    plan.overwrite_artwork = true;
+    snprintf(plan.prepared_root, sizeof(plan.prepared_root), "%s", corrupt_dir);
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261115-090005") ==
+           PLAYER_STEAM_ALREADY);
+    assert(steam_art_test_file_equals(grid_icon, alt_icon, alt_icon_len) &&
+           steam_art_test_file_equals(grid_hero, alt_pic, alt_pic_len));
+    assert(player_steam_outcome_text(&plan, outcome_text, sizeof(outcome_text)) > 0u &&
+           strstr(outcome_text, "ICON0.PNG") != NULL);
+
+    free(app);
+}
+
+/* Every game's shortcut runs the same player and differs only in its launch options: each
+ * game added in turn gets its own pictures under its own app ID, and an unusable picture never
+ * stops the add (#2630 review, findings 1 and 3). */
+static void test_add_to_steam_artwork_per_title(void) {
+    PlayerApp *app = steam_test_app();
+    PlayerSteamPlan plan;
+    char steam[NK_MAX_PATH], exe[NK_MAX_PATH], path[NK_MAX_PATH * 2];
+    char grid_icon[NK_MAX_PATH * 2], grid_hero[NK_MAX_PATH * 2];
+    char outcome_text[NK_MAX_PATH * 3];
+    char first_exe[NK_MAX_PATH];
+    uint8_t icon0[3][2048], pic1[3][2048];
+    size_t icon0_len[3], pic1_len[3];
+    uint32_t ids[3];
+
+    snprintf(steam, sizeof(steam), "%s/steam2630", native_test_get_root());
+    snprintf(exe, sizeof(exe), "%s/Nakagawa2630/bin/nakagawa_player.exe", native_test_get_root());
+    snprintf(path, sizeof(path), "%s/userdata/20002/config", steam);
+    assert(nk_platform_mkdir_p(path));
+    snprintf(path, sizeof(path), "%s/config", steam);
+    assert(nk_platform_mkdir_p(path));
+    snprintf(path, sizeof(path), "%s/config/loginusers.vdf", steam);
+    write_text_file(path, "\"users\" { \"76561197960285730\" { \"PersonaName\" \"Player One\" } }");
+
+    for (int g = 0; g < 3; ++g) {
+        char iso[NK_MAX_PATH];
+        icon0_len[g] = steam_art_test_make_png(16u + (uint32_t)g, 9u, (uint8_t)(0x20 * g), 0x11u,
+                                               0x22u, 0xffu, icon0[g], sizeof(icon0[g]));
+        pic1_len[g] = steam_art_test_make_png(20u + (uint32_t)g, 11u, 0x33u, (uint8_t)(0x20 * g),
+                                              0x44u, 0xffu, pic1[g], sizeof(pic1[g]));
+        snprintf(iso, sizeof(iso), "%s/steam2630_disc%d.iso", native_test_get_root(), g);
+        steam_art_test_write_iso(iso, icon0[g], icon0_len[g], pic1[g], pic1_len[g]);
+        snprintf(app->games[g].iso_path, sizeof(app->games[g].iso_path), "%s", iso);
+        app->games[g].prepared_root[0] = '\0';
+        assert(player_app_plan_steam_shortcut(app, g, steam, exe, &plan) == PLAYER_STEAM_READY);
+        if (g == 0) snprintf(first_exe, sizeof(first_exe), "%s", plan.exe);
+        assert(strcmp(plan.exe, first_exe) == 0); /* one player for every game */
+        assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261115-120000") ==
+               PLAYER_STEAM_ADDED);
+        ids[g] = nk_steam_shortcut_app_id(plan.exe, plan.app_name);
+        assert(plan.grid.app_id == ids[g]);
+        assert(plan.grid.kept_mask == 0u);
+    }
+    assert(ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2]);
+    for (int g = 0; g < 3; ++g) {
+        snprintf(grid_icon, sizeof(grid_icon), "%s/userdata/20002/config/grid/%lu_icon.png",
+                 steam, (unsigned long)ids[g]);
+        snprintf(grid_hero, sizeof(grid_hero), "%s/userdata/20002/config/grid/%lu_hero.png",
+                 steam, (unsigned long)ids[g]);
+        assert(steam_art_test_file_equals(grid_icon, icon0[g], icon0_len[g]));
+        assert(steam_art_test_file_equals(grid_hero, pic1[g], pic1_len[g]));
+    }
+
+    /* A game whose ICON0.PNG is an empty file is still added, with its PIC1.PNG. */
+    {
+        char staged_dir[256], staged_psp[NK_MAX_PATH], staged_file[NK_MAX_PATH * 2];
+        uint32_t id;
+        snprintf(staged_dir, sizeof(staged_dir), "%s/steam2630_empty_icon", native_test_get_root());
+        snprintf(staged_psp, sizeof(staged_psp), "%s/PSP_GAME", staged_dir);
+        assert(nk_platform_mkdir_p(staged_psp));
+        snprintf(staged_file, sizeof(staged_file), "%s/ICON0.PNG", staged_psp);
+        write_binary_file(staged_file, (const uint8_t *)"", 0u);
+        snprintf(staged_file, sizeof(staged_file), "%s/PIC1.PNG", staged_psp);
+        write_binary_file(staged_file, pic1[0], pic1_len[0]);
+        app->games[3].iso_path[0] = '\0';
+        app->games[3].is_sample = false;
+        assert(strlen(staged_dir) < sizeof(app->games[3].prepared_root));
+        memcpy(app->games[3].prepared_root, staged_dir, strlen(staged_dir) + 1u);
+        assert(player_app_plan_steam_shortcut(app, 3, steam, exe, &plan) == PLAYER_STEAM_READY);
+        assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261115-120001") ==
+               PLAYER_STEAM_ADDED);
+        id = nk_steam_shortcut_app_id(plan.exe, plan.app_name);
+        snprintf(grid_icon, sizeof(grid_icon), "%s/userdata/20002/config/grid/%lu_icon.png",
+                 steam, (unsigned long)id);
+        snprintf(grid_hero, sizeof(grid_hero), "%s/userdata/20002/config/grid/%lu_hero.png",
+                 steam, (unsigned long)id);
+        assert(nk_platform_path_missing(grid_icon));
+        assert(steam_art_test_file_equals(grid_hero, pic1[0], pic1_len[0]));
+        assert(player_steam_outcome_text(&plan, outcome_text, sizeof(outcome_text)) > 0u &&
+               strstr(outcome_text, "Added") != NULL && strstr(outcome_text, "ICON0.PNG") != NULL);
+    }
+
+    /* When the artwork failed and Steam's list could not be put back, the text says so and
+       names the kept copy of the list (#2630 review, finding 2). */
+    plan.outcome = PLAYER_STEAM_WRITE_FAILED;
+    plan.grid.restore_failed = true;
+    snprintf(plan.grid.detail, sizeof(plan.grid.detail), "%s", "Could not place Steam artwork file");
+    snprintf(plan.backup_path, sizeof(plan.backup_path), "%s", "shortcuts.vdf.nakagawa-backup-x");
+    assert(player_steam_outcome_text(&plan, outcome_text, sizeof(outcome_text)) > 0u &&
+           strstr(outcome_text, "could not put Steam's list") != NULL &&
+           strstr(outcome_text, "shortcuts.vdf.nakagawa-backup-x") != NULL &&
+           strstr(outcome_text, "left as they were") == NULL);
+    free(app);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
@@ -12929,6 +13311,8 @@ int main(int argc, char **argv) {
     test_saves_back_up_restore_and_add();
     test_launch_title_names_one_game();
     test_add_to_steam_outcomes();
+    test_add_to_steam_writes_grid_artwork();
+    test_add_to_steam_artwork_per_title();
     test_saves_backup_refuses_what_it_cannot_hold();
 #if defined(NK_SAVES_TEST_SEAMS)
     test_saves_change_nothing_without_a_whole_backup();
