@@ -40756,6 +40756,92 @@ static void test_kernel_import_sweep_memory_blocks_and_sdk_alias(void) {
            "sceKernelSetCompiledSdkVersion370 updates shared SDK-version state");
 }
 
+/* sceKernelAllocMemoryBlock type 1 (High) in a partition based below the runtime stacks, the layout
+ * of this fixture's default image, where the call stopped the run by name (#2640). pspautotests
+ * tests/sysmem/memblock.expected at 774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party
+ * recording made on a PSP: line 9 "Type 1: OK", and lines 25-33 a second type-1 block lying its
+ * size rounded up to 0x100 below a 0x100-byte one just placed (delta 100 for sizes 1 to 0x11, 200
+ * for 0x101, 1100 for 0x1001, 10100 for 0x10001). The blocks come from the top of user RAM, where
+ * this layout's thread stacks come from too; its bump region, which the free sizes measure, ends
+ * below the runtime stacks, so neither shortens it. */
+static void test_memory_block_high_in_low_based_partition(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_hle_test_partition_bump_top(void);
+    const uint32_t addr_out = 0x00280004u;
+    const uint32_t name = 0x00280010u;
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    title_hle_write_cstr(name, "test");
+    expect(sr_hle_test_partition_bump_top() == SR_VBLANK_STACK_BASE,
+           "memblock high: the default image's partition ends at the runtime stacks");
+
+    static const struct { uint32_t size, delta; } deltas[] = {
+        {1u, 0x100u}, {2u, 0x100u}, {3u, 0x100u}, {4u, 0x100u}, {5u, 0x100u}, {0x11u, 0x100u},
+        {0x101u, 0x200u}, {0x1001u, 0x1100u}, {0x10001u, 0x10100u},
+    };
+    enum { NDELTAS = sizeof(deltas) / sizeof(deltas[0]) };
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    uint32_t uids[2 * NDELTAS];
+    size_t nuids = 0;
+    int deltas_ok = 1, placed_ok = 1;
+    uint32_t next_top = SR_STACK_ARENA_CEIL;
+    for (size_t i = 0; i < NDELTAS; i++) {
+        uint32_t u1 = memblock_alloc(name, 1u, 0x100u, 0u);
+        uint32_t u2 = memblock_alloc(name, 1u, deltas[i].size, 0u);
+        if (u1 != 0u && u1 < 0x80000000u) uids[nuids++] = u1;
+        if (u2 != 0u && u2 < 0x80000000u) uids[nuids++] = u2;
+        if (u1 == 0u || u1 >= 0x80000000u || u2 == 0u || u2 >= 0x80000000u) {
+            deltas_ok = 0;
+            continue;
+        }
+        uint32_t a1 = memblock_addr(u1, addr_out), a2 = memblock_addr(u2, addr_out);
+        if (a1 - a2 != deltas[i].delta) deltas_ok = 0;
+        if (a1 + 0x100u != next_top || (a2 & 0xffu) != 0u) placed_ok = 0;
+        next_top = a2;
+    }
+    expect(deltas_ok && sr_hle_test_unmodelled_stops() == stops,
+           "memblock high: type 1 allocates with the recorded deltas (sizes 1..0x10001) and "
+           "stops nothing");
+    expect(placed_ok, "memblock high: the blocks stack downward from the top of user RAM");
+
+    uint32_t low = memblock_alloc(name, 0u, 0x100u, 0u);
+    uint32_t low_addr = low != 0u && low < 0x80000000u ? memblock_addr(low, addr_out) : 0u;
+    expect(low_addr != 0u && low_addr + 0x100u <= SR_VBLANK_STACK_BASE &&
+               sr_hle_test_partition_bump_top() == SR_VBLANK_STACK_BASE,
+           "memblock high: a Low block still comes from the bump region, which the High blocks "
+           "leave whole");
+    int freed_ok = low_addr != 0u && memblock_free(low) == 0u;
+    for (size_t i = 0; i < nuids; i++)
+        if (memblock_free(uids[i]) != 0u) freed_ok = 0;
+    uint32_t again = memblock_alloc(name, 1u, 0x100u, 0u);
+    expect(freed_ok && nuids == 2u * NDELTAS && again != 0u && again < 0x80000000u &&
+               memblock_addr(again, addr_out) + 0x100u == SR_STACK_ARENA_CEIL &&
+               memblock_free(again) == 0u,
+           "memblock high: freed blocks go back, and the next one lands at the top again");
+
+    /* The arena's own rule, as in the user-RAM layout: a live thread stack holds the top, and the
+     * High block goes directly below it. */
+    uint32_t thread = sched_create_thread(0x2000u, 32, 0x8000u);
+    uint32_t floor = sched_guest_stack_floor();
+    uint32_t under = memblock_alloc(name, 1u, 0x100u, 0u);
+    expect(thread != 0u && floor == SR_STACK_ARENA_CEIL - 0x8000u && under != 0u &&
+               under < 0x80000000u && memblock_addr(under, addr_out) + 0x100u == floor &&
+               memblock_free(under) == 0u,
+           "memblock high: a High block lies directly below a live thread stack");
+
+    /* The refusals memblock.expected records (lines 10, 24 and 2) hold in this layout, and a block
+     * the top of user RAM cannot hold fails with the allocation code instead of stopping. */
+    expect(memblock_alloc(name, 2u, 0x100u, 0u) == 0x800200d8u &&
+               memblock_alloc(name, 1u, 0u, 0u) == 0x800200d9u &&
+               memblock_alloc(0u, 1u, 0x100u, 0u) == 0x80020001u &&
+               memblock_alloc(name, 1u, 0xffffff00u, 0u) == 0x800200d9u &&
+               sr_hle_test_unmodelled_stops() == stops,
+           "memblock high: type 2, size 0 and a NULL name keep their recorded codes, and an "
+           "oversized block is 0x800200D9");
+    sr_hle_test_partition_reset();
+}
+
 static void test_td28_partition_free_reuse(void) {
     extern void sr_hle_test_partition_reset(void);
     extern int sr_hle_test_partition_free_block_count(void);
@@ -57506,6 +57592,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_msgpipe_cancel_skips_paused_callback_wait();
     test_td23_guest_pointer_validation();
     test_kernel_import_sweep_memory_blocks_and_sdk_alias();
+    test_memory_block_high_in_low_based_partition();
     test_td28_partition_free_reuse();
     test_alloc_block_at_fixed_address();
     test_partition_ends_at_lowest_live_stack();

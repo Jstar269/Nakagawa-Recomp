@@ -210,8 +210,10 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_kernel_import_sweep_memory_blocks_and_sdk_alias",
             "PSPAutotests tests/sysmem/memblock.expected (2ed7c9c5, recorded on a PSP): names, types, sizes, option sizes and type-1 placement deltas",
             "uOFW src/kd/sysmem/memblock.c (MIT): validation order and the AllocPartitionMemory call",
+            "tests/native/hle_thread_selftest.c:test_memory_block_high_in_low_based_partition",
+            "PSPAutotests tests/sysmem/memblock.expected lines 9 and 25 to 33 (774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP): type 1 allocates, and a second type-1 block lies its size rounded up to 0x100 below the first",
         ],
-        "limitation": "types 0 (Low, the partition's bump and free-list path) and 1 (High, from the top of the arena thread stacks share, 0x100 granularity) allocate, and the type, size, option-size and NULL-name codes are pspautotests-recorded; the code for an unmapped name or option pointer is uOFW's 0x800200D3, not measured; memory-block UIDs are separate from partition-block UIDs here, while the PSP shares them (memblock.expected Partition usage)",
+        "limitation": "types 0 (Low, the partition's bump and free-list path) and 1 (High, from the top of the arena thread stacks share, 0x100 granularity) allocate, and the type, size, option-size and NULL-name codes are pspautotests-recorded; in a partition based below the runtime stacks a High block lies above the bump region, so the free sizes, which measure that region, do not count it (#2640); the code for an unmapped name or option pointer is uOFW's 0x800200D3, not measured; memory-block UIDs are separate from partition-block UIDs here, while the PSP shares them (memblock.expected Partition usage)",
     },
     "h_GetMemoryBlockAddr": {
         "status": "partial",

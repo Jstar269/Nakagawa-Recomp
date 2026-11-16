@@ -178,8 +178,12 @@ static HleMemoryBlock *memory_block_find(uint32_t uid) {
  * (MIT) gives the same order: the name and option pointers, then the option size, then the type,
  * then sceKernelAllocPartitionMemory(2, name, type, size, 0), whose type 0 is Low and 1 is High.
  * Type 0 is the partition's Low path; type 1 (High) comes from the top of the arena the thread
- * stacks share (alloc_block_high). Which code an unmapped name or option pointer returns is not
- * measured; the pointer check returns uOFW's 0x800200D3. */
+ * stacks share (alloc_block_high), in a partition based below the runtime stacks too (#2640): what
+ * the recording fixes for type 1, that it allocates and that each further block lies its rounded
+ * size below the last (memblock.expected lines 9 and 25-33 at
+ * 774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP), holds in both
+ * layouts. Which code an unmapped name or option pointer returns is not measured; the pointer
+ * check returns uOFW's 0x800200D3. */
 static uint32_t h_AllocMemoryBlock(CpuState *s) {
     (void)s;
     uint32_t kind = A1;
@@ -194,29 +198,12 @@ static uint32_t h_AllocMemoryBlock(CpuState *s) {
     if (!A0) return HLE_KERNEL_ERROR_ERROR;
     if (size == 0u || size > UINT32_MAX - 0xffu)
         return HLE_KERNEL_ERROR_MEMBLOCK_ALLOC_FAILED;
-    if (kind == 1u) {
-        if (!partition_high_modelled())
-            return hle_unmodelled_stop("sceKernelAllocMemoryBlock",
-                                       "type 1 in a partition based below the runtime stacks is not modelled");
-        int high_slot = -1;
-        for (int i = 0; i < HLE_MAX_MEMORY_BLOCKS; i++) {
-            if (s_memory_blocks[i].uid == 0u) { high_slot = i; break; }
-        }
-        if (high_slot < 0) return HLE_KERNEL_ERROR_NO_MEMORY;
-        uint32_t high_backing = alloc_block_high(size);
-        if (high_backing == 0xffffffffu) return HLE_KERNEL_ERROR_MEMBLOCK_ALLOC_FAILED;
-        uint32_t high_uid = sr_alloc_uid();
-        s_memory_blocks[high_slot].uid = high_uid;
-        s_memory_blocks[high_slot].backing_uid = high_backing;
-        return high_uid;
-    }
-
     int slot = -1;
     for (int i = 0; i < HLE_MAX_MEMORY_BLOCKS; i++) {
         if (s_memory_blocks[i].uid == 0u) { slot = i; break; }
     }
     if (slot < 0) return HLE_KERNEL_ERROR_NO_MEMORY;
-    uint32_t backing_uid = alloc_block(size);
+    uint32_t backing_uid = kind == 1u ? alloc_block_high(size) : alloc_block(size);
     if (backing_uid == 0xffffffffu) return HLE_KERNEL_ERROR_MEMBLOCK_ALLOC_FAILED;
     uint32_t uid = sr_alloc_uid();
     s_memory_blocks[slot].uid = uid;
