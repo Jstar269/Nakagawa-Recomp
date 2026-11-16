@@ -338,6 +338,29 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             "the section 11 report template must keep its fields",
         )
 
+    def test_agents_marks_upstream_behavior_as_a_bounded_evidence_tier(self):
+        content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        section_6 = " ".join(_blocks(_section(content, 6))).lower()
+        section_7 = " ".join(_blocks(_section(content, 7))).lower()
+        for required in (
+            "unknown nids and unowned dispatches stop visibly",
+            "a modeled psp error may return to the guest",
+            "do not deliberately crash the player",
+        ):
+            with self.subTest(section=6, required=required):
+                self.assertIn(required, section_6)
+        for required in (
+            "ppsspp-derived, not psp-measured",
+            "jpcsp-derived, not psp-measured",
+            "exact upstream revision and symbol",
+            "log first use once per run",
+            "a psp measurement for the same scope supersedes it",
+            "no public reference",
+            "save-data and flash writes",
+        ):
+            with self.subTest(section=7, required=required):
+                self.assertIn(required, section_7)
+
     def test_release_safety_rule_is_present_and_not_contradicted(self):
         policy_text = "\n".join(
             (ROOT / rel).read_text(encoding="utf-8")

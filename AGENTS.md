@@ -170,8 +170,9 @@ maintainer's PSP; a contributor's agent uses a PSP only as its user directs.
   zlib, CC0) may be vendored or adapted without a per-import decision: pinned to an exact upstream
   revision, listed in a `PROVENANCE.md` manifest as byte-identical or LOCAL DELTA, notices kept
   (adapted files add a modification note), credited in `CREDITS.md`, and admitted. Emulator-derived
-  units are `derived-translated`, never "independent". Behaviour claims still need tests, and PSP
-  evidence for hardware semantics. Incompatible licences stay out.
+  units are `derived-translated`, never "independent". Behaviour claims need tests and an honest
+  evidence label; emulator-derived behavior is not PSP measurement or independent evidence. Claims
+  of PSP hardware semantics still need applicable PSP evidence. Incompatible licences stay out.
 - Do not rewrite working inherited code only to make it original. Say "clean-room" or "independent"
   only when its trusted record supports it ([independence model](docs/provenance/INDEPENDENCE_MODEL.md));
   prefer "project-authored".
@@ -217,8 +218,11 @@ maintainer's PSP; a contributor's agent uses a PSP only as its user directs.
 - **LLE first.** When a function's guest code exists (a module the game ships) and needs no firmware,
   run it instead of writing a new HLE handler. HLE stays for the OS: kernel and hardware boundary,
   firmware modules, syscalls, device access.
-- Unknown NIDs and dispatch misses stay visible; no switch makes a miss permissive, and every
-  rejection terminates the run. Correctness evidence asserts PSP-visible results, state, and wakes.
+- Unknown NIDs and unowned dispatches stop visibly by name; no switch makes a miss permissive. A
+  modeled PSP error may return to the guest for a known operation; that is not fake success and does
+  not by itself stop the whole run. An operation that cannot safely return a known result stays a
+  named stop. Do not deliberately crash the player to signal missing behavior. Correctness evidence
+  asserts PSP-visible results, state, and wakes.
 - Validate complete guest spans and checked size arithmetic before forming bulk host pointers.
 - Never hand-edit generated `build/<game>/<game>_recomp_*.c`; change the generator, analysis or
   runtime and regenerate.
@@ -238,13 +242,23 @@ Re-check live source before changing these; PR numbers are navigation, not evide
 - **PR #126:** a `jr`/`jalr` target is latched at transfer, before link writes and the delay slot.
 - **PR #127:** `dispatch_call` carries `target` and `resume_pc`; CALL and TAIL differ; live `$ra` is not a resume descriptor.
 - **PR #128:** cosimulation compares AOT/interpreter state, CALL/TAIL cells included; its negative corpus fails closed; a build-only mutant is not a valid semantic kill.
-- **PR #2451:** resume at a PC is native re-entry and opt-in (`codegen.py --state-resume`; default output stays byte-identical): a parked thread is a frame list (body entry, resume point and kind, entry `$sp`) read from its return-boundary records, never from live `$ra` or host frames; anything not exactly describable or resumable is refused by name, and it does not extend the interpreter floor.
+- **Issue #2172:** resume at a PC is native re-entry and opt-in (`codegen.py --state-resume`; default output stays byte-identical; see [the architecture contract](docs/ARCHITECTURE.md#resume-at-a-pc-direct-save-states)): a parked thread is a frame list (body entry, resume point and kind, entry `$sp`) read from its return-boundary records, never from live `$ra` or host frames; anything not exactly describable or resumable is refused by name, and it does not extend the interpreter floor.
 - Nested interpreted calls outside that floor are unproven; broader claims need a new contract and test.
 - `src/rt/recomp.h` is a load-bearing ABI: `$ra` is `r[31]`; `CpuState` is versioned by `SR_CPUSTATE_ABI_VERSION`.
 - Chunk count is dynamic; `FUNCS_PER_CHUNK` is not a fixed ABI.
 - LLE CPU and import seam are opt-in (`--lle-cpu`, `--lle-import-seam`; the seam implies `--lle-cpu`); default
   output stays byte-identical.
-- Unmeasured hardware values stay fail-closed and labelled synthetic until measured on a PSP.
+- An unmeasured cell normally stops by name. A second, clearly limited evidence tier may use a
+  public PPSSPP or JPCSP implementation for a known, named cell when its exact behavior is supported
+  by that public reference and the issue does not prohibit emulator-derived work. Record the source
+  repository, exact upstream revision and symbol; classify translated or adapted code as
+  `derived-translated`; label it in code `PPSSPP-derived, not PSP-measured` or
+  `JPCSP-derived, not PSP-measured`; add a production-path regression; and log first use once per
+  run. A PSP measurement for the same scope supersedes it. Emulator-derived behavior does not prove
+  PSP behavior or independence. This tier never fills an unknown NID or unowned dispatch, enables
+  save-data and flash writes whose behavior is unmeasured, or supplies behavior with no public
+  reference; each remains a named fail-closed boundary. Device firmware, flash, NAND and idStorage
+  writes remain prohibited as in Section 3.
 - HLE arguments 1-4 are `A0`-`A3`, 5-8 `t0`-`t3` (`stack_arg`), 9+ the stack; never read past the public signature.
 
 ## 8. Workspace, branch, and worktree lifecycle
