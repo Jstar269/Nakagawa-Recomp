@@ -23,6 +23,7 @@ typedef char nk_ach_retry_matches_rcheevos
 struct NkAch {
     rc_client_t *client;
     NkAchMemory mem;
+    char game_hash[33];
     NkAchTransport transport;
     void *transport_ctx;
     NkAchEvent events[NK_ACH_EVENT_QUEUE];
@@ -269,6 +270,12 @@ void nk_ach_destroy(NkAch *ach) {
     free(ach);
 }
 
+void nk_ach_set_memory(NkAch *ach, const NkAchMemory *mem) {
+    if (!ach) return;
+    if (mem) ach->mem = *mem;
+    else memset(&ach->mem, 0, sizeof ach->mem);
+}
+
 static void RC_CCONV ach_login_done(int result, const char *error_message,
                                     rc_client_t *client, void *userdata) {
     (void)userdata;
@@ -290,6 +297,41 @@ bool nk_ach_begin_login(NkAch *ach, const char *username, const char *token) {
      * arrives as an event. */
     (void)rc_client_begin_login_with_token(ach->client, username, token, ach_login_done, NULL);
     return true;
+}
+
+bool nk_ach_begin_login_with_password(NkAch *ach, const char *username, const char *password) {
+    if (!ach || !username || !*username || !password || !*password) return false;
+    (void)rc_client_begin_login_with_password(ach->client, username, password,
+                                              ach_login_done, NULL);
+    return true;
+}
+
+bool nk_ach_copy_user_token(const NkAch *ach, char *out, size_t out_size) {
+    if (!out || out_size == 0u) return false;
+    out[0] = '\0';
+    if (!ach) return false;
+    const rc_client_user_t *user = rc_client_get_user_info(ach->client);
+    if (!user || !user->token) return false;
+    const size_t length = strlen(user->token);
+    if (length == 0u || length >= out_size) return false;
+    memcpy(out, user->token, length + 1u);
+    return true;
+}
+
+bool nk_ach_copy_user_name(const NkAch *ach, char *out, size_t out_size) {
+    if (!out || out_size == 0u) return false;
+    out[0] = '\0';
+    if (!ach) return false;
+    const rc_client_user_t *user = rc_client_get_user_info(ach->client);
+    if (!user || !user->username) return false;
+    const size_t length = strlen(user->username);
+    if (length == 0u || length >= out_size) return false;
+    memcpy(out, user->username, length + 1u);
+    return true;
+}
+
+void nk_ach_logout(NkAch *ach) {
+    if (ach) rc_client_logout(ach->client);
 }
 
 static void RC_CCONV ach_load_done(int result, const char *error_message,
@@ -321,6 +363,7 @@ static bool ach_hash_ok(const char *hash) {
 
 bool nk_ach_begin_load_game(NkAch *ach, const char *hash) {
     if (!ach || !ach_hash_ok(hash)) return false;
+    snprintf(ach->game_hash, sizeof ach->game_hash, "%s", hash);
     (void)rc_client_begin_load_game(ach->client, hash, ach_load_done, NULL);
     return true;
 }
@@ -343,6 +386,13 @@ bool nk_ach_game_loaded(const NkAch *ach) {
 
 bool nk_ach_hardcore(const NkAch *ach) {
     return ach && rc_client_get_hardcore_enabled(ach->client) != 0;
+}
+
+size_t nk_ach_copy_rich_presence(const NkAch *ach, char *out, size_t out_size) {
+    if (!out || out_size == 0u) return 0u;
+    out[0] = '\0';
+    if (!ach) return 0u;
+    return rc_client_get_rich_presence_message(ach->client, out, out_size);
 }
 
 size_t nk_ach_take_events(NkAch *ach, NkAchEvent *out, size_t max) {

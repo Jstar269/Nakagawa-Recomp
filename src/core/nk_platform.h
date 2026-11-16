@@ -122,6 +122,55 @@ bool nk_platform_mkdir_p(const char *dir_path);
 bool nk_platform_mkdir_p_private(const char *dir_path);
 FILE *nk_platform_fopen_private(const char *path, const char *mode);
 
+/* Per-user OS credential storage. Secrets are never written to a settings or other plain file.
+ * Unsupported platforms return false and do not provide a file fallback. */
+bool nk_platform_credential_store_available(void);
+bool nk_platform_credential_read(const char *target, char *username, size_t username_size,
+                                char *secret, size_t secret_size);
+bool nk_platform_credential_write(const char *target, const char *username, const char *secret);
+bool nk_platform_credential_delete(const char *target);
+
+/* A local, per-launch view of the runtime's generic guest arena. The parent player creates it;
+ * the runtime opens the named view and synchronizes once at its vblank boundary. Unsupported
+ * platforms return false, leaving ordinary runtime memory allocation in use. */
+#define NK_GUEST_MEMORY_CHANNEL_NAME_MAX 192u
+#define NK_GUEST_MEMORY_CHANNEL_CONTROL_BYTES 4096u
+#define NK_GUEST_MEMORY_NOTIFICATION_MAX 192u
+typedef struct {
+    volatile uint32_t owner_pid;
+    volatile uint32_t notification_sequence;
+    char notification[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+} NkGuestMemoryChannelControl;
+typedef struct {
+    void *mapping_handle;
+    void *view;
+    void *owner_process;
+    NkGuestMemoryChannelControl *control;
+    uint8_t *arena;
+    size_t arena_size;
+    void *frame_event;
+    void *ack_event;
+    void *stop_event;
+    bool owner;
+    char name[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
+} NkGuestMemoryChannel;
+bool nk_platform_guest_memory_channel_create(NkGuestMemoryChannel *channel,
+                                             const char *name, size_t arena_size);
+bool nk_platform_guest_memory_channel_open(NkGuestMemoryChannel *channel,
+                                           const char *name, size_t arena_size);
+/* Parent: 1 for one guest vblank, 0 when stopped, -1 on an OS error. */
+int nk_platform_guest_memory_channel_wait_frame(NkGuestMemoryChannel *channel);
+/* Parent: releases the runtime after evaluating one vblank. */
+bool nk_platform_guest_memory_channel_ack_frame(NkGuestMemoryChannel *channel);
+/* Runtime: publishes one vblank and waits until the player acknowledges it or stops. */
+bool nk_platform_guest_memory_channel_sync_vblank(NkGuestMemoryChannel *channel);
+void nk_platform_guest_memory_channel_stop(NkGuestMemoryChannel *channel);
+void nk_platform_guest_memory_channel_close(NkGuestMemoryChannel *channel);
+bool nk_platform_guest_memory_channel_notify(NkGuestMemoryChannel *channel, const char *text);
+bool nk_platform_guest_memory_channel_read_notification(NkGuestMemoryChannel *channel,
+                                                        uint32_t *seen_sequence,
+                                                        char *text, size_t text_size);
+
 /* An exclusive lock on a file that other programs lock too: Win32 locks byte 0
    with LockFileEx, which excludes Python's msvcrt.locking on it; POSIX uses
    flock, which excludes Python's fcntl.flock. The file is created when missing

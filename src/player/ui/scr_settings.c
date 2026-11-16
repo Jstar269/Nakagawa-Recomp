@@ -972,9 +972,11 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
         nk_ui_text_role(ui, FLOW_ID_TITLE, "Online and developer options", NK_UI_TYPE_TITLE,
                         theme->paper);
-        /* Online mode has nothing to switch yet: one plain line says so rather
-           than a switch that does nothing (#2007). The stored setting stays. */
-        nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_NOT_BUILT_LINE, NK_UI_TYPE_BODY_S,
+        /* RetroAchievements is its own opt-in; the news/reports online mode remains unbuilt. */
+        const char *online_line = model->achievements_available || model->achievements_enabled
+            ? "RetroAchievements is separate from Online mode and stays off until you agree."
+            : SCR_ONLINE_NOT_BUILT_LINE;
+        nk_ui_text_role(ui, FLOW_ID_LEAD, online_line, NK_UI_TYPE_BODY_S,
                         theme->warning);
         if (scr_wizard_box_begin(ui, 0u)) {
             /* Discord status shows when this build can show it, or while it is stored On
@@ -985,7 +987,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             /* One button column for every row the page shows, so a sentence of any of them
                that would be cut makes them all stack. The Nickname button's value is clamped
                to half the column, so only its name counts for the column's width. */
-            WizardRow rows[4];
+            WizardRow rows[6];
             size_t row_count = 0u;
             if (model->online_mode) {
                 rows[row_count++] = (WizardRow){"Online mode", "On",
@@ -998,6 +1000,20 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 rows[row_count++] = (WizardRow){"Discord status",
                                                 model->discord_presence ? "On" : "Off",
                                                 discord_sentence};
+            }
+            rows[row_count++] = (WizardRow){
+                "RetroAchievements",
+                model->achievements_enabled ? "On" : model->achievements_available ? "Off" : "Unavailable",
+                model->achievements_available
+                    ? "Softcore only. Sends only to retroachievements.org after consent."
+                    : "Sign-in requires Windows Credential Manager; this platform is unsupported."};
+            if (model->achievements_enabled) {
+                rows[row_count++] = (WizardRow){"RA account",
+                                                model->achievements_signed_in
+                                                    ? safe_text(model->achievements_account, "Signed in")
+                                                    : "Sign in",
+                                                safe_text(model->achievements_status,
+                                                          "Softcore only. Hardcore is unavailable.")};
             }
             rows[row_count++] = (WizardRow){"Nickname", "", SCR_NICKNAME_SENTENCE};
             WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, false);
@@ -1017,6 +1033,32 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                   "Discord status", discord_sentence, model->discord_presence,
                                   inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DISCORD);
+            }
+            if ((model->achievements_available || model->achievements_enabled) &&
+                scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xB6u,
+                                  "RetroAchievements",
+                                  "Softcore only. Agree to the host and data disclosure before signing in.",
+                                  model->achievements_enabled, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS);
+            } else {
+                (void)scr_wizard_value_state(
+                    ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xB6u,
+                    "RetroAchievements", "Unavailable",
+                    "Sign-in needs Windows Credential Manager, which this platform does not provide.",
+                    false, true, inner - 32.0f, &column);
+            }
+            if (model->achievements_enabled &&
+                scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS_ACCOUNT,
+                                 SET_ID_TEXT + 0xB8u, "RA account",
+                                 model->achievements_signed_in
+                                     ? safe_text(model->achievements_account, "Signed in")
+                                     : "Sign in",
+                                 safe_text(model->achievements_status,
+                                           "Softcore only. Hardcore is unavailable."),
+                                 model->achievements_signed_in, inner - 32.0f, &column)) {
+                *result = settings_op(model->achievements_signed_in
+                                          ? PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS
+                                          : PLAYER_UI_SETTINGS_SIGN_IN_ACHIEVEMENTS);
             }
             {
                 /* The console nickname games read (#2197); its button opens the nickname

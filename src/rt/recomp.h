@@ -1083,6 +1083,10 @@ static inline void sr_native_memset_checked(uint32_t dest, uint8_t val, uint32_t
 
 void  sr_mem_init(void);
 void  sr_mem_reset(void);              /* LoadExec: zero guest RAM and retire executable spans */
+/* The optional local player channel pauses guest dispatch at each delivered VBLANK until the
+ * parent acknowledges that frame; this runtime hook opens no network connection. */
+void  sr_guest_memory_vblank(void);
+bool  sr_host_notification(char *out, size_t out_size);
 void  sr_load_segment(uint32_t vaddr, const void *data, uint32_t len);
 uint32_t sr_loaded_end(void);   /* highest guest address the loader wrote (module end incl. BSS) */
 uint32_t sr_loaded_base(void);  /* lowest guest address the loader wrote; UINT32_MAX when none */

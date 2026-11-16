@@ -40,6 +40,11 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <wincred.h>
+#endif
+
 #include "setup_staging.h"
 #include "player_ui_test.h"
 #include "nk_platform.h"
@@ -48,8 +53,27 @@
 #include "nk_portable.h"
 #include "nk_json.h"
 #include "player_host.h"
+#include "nk_achievements.h"
+
+#ifdef _WIN32
+#include <wincred.h>
+#endif
+
+typedef struct PlayerRun PlayerRun;
+typedef struct PlayerAchHttpJob PlayerAchHttpJob;
+static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettingsOp op);
+static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork *work);
+static void player_achievements_stop_channel(PlayerRun *run);
 
 static const char k_invalid_disc_message[] = "This file isn't a PSP disc image.";
+static const char k_ach_credential_target[] = "NakagawaRecomp/RetroAchievements";
+static const char k_ach_user_agent[] = "NakagawaRecomp/" NK_PLAYER_VERSION;
+#define PLAYER_ACH_HTTP_BODY_MAX (4u * 1024u * 1024u)
+enum {
+    PLAYER_ACH_HTTP_EVENT_CODE = 0x5241,
+    PLAYER_ACH_FRAME_EVENT_CODE = 0x5242,
+    PLAYER_ACH_CHANNEL_STOP_EVENT_CODE = 0x5243
+};
 
 static bool player_view_is_library(PlayerView view) {
     return view == VIEW_LIBRARY || view == PLAYER_VIEW_READY_LIBRARY;
@@ -1978,7 +2002,7 @@ static void player_ui_developer_log_apply(PlayerApp *app, PlayerUiDeveloperLogOp
     }
 }
 
-static void player_ui_nk_apply_action(PlayerApp *app,
+static void player_ui_nk_apply_action(PlayerRun *run, PlayerApp *app,
                                      const PlayerUiAction *action) {
     int index;
     /* Most frames carry no action, and its title_index is 0: selecting that
@@ -1993,7 +2017,14 @@ static void player_ui_nk_apply_action(PlayerApp *app,
         return;
     }
     if (action->kind == PLAYER_UI_ACTION_SETTINGS) {
-        player_ui_settings_apply(app, (PlayerUiSettingsOp)action->primary, action->title_index);
+        const PlayerUiSettingsOp op = (PlayerUiSettingsOp)action->primary;
+        if (op == PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS ||
+            op == PLAYER_UI_SETTINGS_SIGN_IN_ACHIEVEMENTS ||
+            op == PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS) {
+            player_achievements_settings_action(run, op);
+        } else {
+            player_ui_settings_apply(app, op, action->title_index);
+        }
         return;
     }
     if (action->kind == PLAYER_UI_ACTION_CONTROLLER) {
@@ -2220,12 +2251,12 @@ static void player_ui_nk_apply_action(PlayerApp *app,
 }
 
 /* nk_ui draws the frame at the window's real size, from the output's pixels. */
-static void player_render_active_ui(PlayerUiNk *next_ui, PlayerApp *app,
+static void player_render_active_ui(PlayerRun *run, PlayerUiNk *next_ui, PlayerApp *app,
                                     SDL_Renderer *renderer, SDL_Window *window) {
     PlayerUiAction action;
     if (player_ui_nk_view_active(next_ui, app) &&
         player_ui_nk_render(next_ui, app, renderer, window, &action)) {
-        player_ui_nk_apply_action(app, &action);
+        player_ui_nk_apply_action(run, app, &action);
     } else {
         /* The launcher draws every view (player_ui_nk_draws_view); a frame it
            could not draw is cleared. */
@@ -3455,7 +3486,7 @@ static void player_launch_job_spawn(PlayerLaunchJob *job, bool launcher_audio_cl
    waits, launch_pending, while the music fades out, and player_launch_job_poll
    starts the worker once the music has let go of the device. */
 static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index,
-                                                bool launcher_audio_closed) {
+                                                bool launcher_audio_closed, PlayerRun *run) {
     if (!app || app->launch_pending || app->is_game_running ||
         game_index < 0 || game_index >= app->game_count) {
         return NULL;
@@ -3469,6 +3500,7 @@ static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index,
         free(job);
         return NULL;
     }
+    player_achievements_prepare_launch(run, &job->work);
     {
         const char *slow = player_ui_test_slow_start_text();
         uint32_t slow_ms = 0u;
@@ -3492,7 +3524,8 @@ static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index,
  * waiting for the launcher music starts its worker once `launcher_audio_closed`;
  * at shutdown it is dropped, since no game's process has started for it. */
 static PlayerLaunchJob *player_launch_job_poll(PlayerApp *app, PlayerLaunchJob *job,
-                                               bool wait, bool launcher_audio_closed) {
+                                               bool wait, bool launcher_audio_closed,
+                                               PlayerRun *run) {
     if (!job) return NULL;
     if (job->awaiting_audio) {
         if (wait) {
@@ -3500,6 +3533,7 @@ static PlayerLaunchJob *player_launch_job_poll(PlayerApp *app, PlayerLaunchJob *
                             "game started.\n", job->work.game.disc_id);
             app->launch_pending = false;
             app->launch_pending_disc_id[0] = '\0';
+            player_achievements_stop_channel(run);
             free(job);
             return NULL;
         }
@@ -3510,7 +3544,8 @@ static PlayerLaunchJob *player_launch_job_poll(PlayerApp *app, PlayerLaunchJob *
     if (job->thread) SDL_WaitThread(job->thread, NULL);
     app->launch_pending = false;
     app->launch_pending_disc_id[0] = '\0';
-    (void)player_app_launch_finish(app, &job->work);
+    bool started = player_app_launch_finish(app, &job->work);
+    if (!started) player_achievements_stop_channel(run);
     free(job);
     return NULL;
 }
@@ -3923,6 +3958,18 @@ typedef struct PlayerRun {
     bool applied_launcher_fullscreen;
     bool launcher_handoff_attempted;
     SDL_Gamepad *gamepad;
+    NkAch *achievements;
+    NkGuestMemoryChannel guest_memory_channel;
+    SDL_Thread *guest_memory_thread;
+    SDL_AtomicInt guest_memory_thread_done;
+    SDL_AtomicInt guest_memory_sync_failed;
+    SDL_AtomicInt guest_memory_stop_requested;
+    PlayerAchHttpJob *ach_http_job;
+    char achievements_game_hash[33];
+    bool guest_memory_channel_active;
+    bool achievements_shutting_down;
+    bool achievements_login_pending;
+    bool achievements_signout_pending;
     /* The frame loop. */
     PlayerLaunchJob *launch_job;
     PlayerStagingJob *staging_job;
@@ -3945,9 +3992,631 @@ typedef struct PlayerRun {
     NkSingleInstance instance;
 } PlayerRun;
 
+struct PlayerAchHttpJob {
+    SDL_Thread *thread;
+    SDL_AtomicInt done;
+    PlayerRun *run;
+    NkAchDone done_callback;
+    void *done_context;
+    char url[2048];
+    char content_type[128];
+    char *post_data;
+    size_t post_data_size;
+    char *response_body;
+    size_t response_body_size;
+    int response_status;
+};
+
 /* What the startup and window steps return when the run goes on; any other value is
    the process's exit code. */
 #define PLAYER_RUN_CONTINUE INT_MIN
+
+static void player_secure_clear(void *data, size_t size) {
+    volatile unsigned char *bytes = (volatile unsigned char *)data;
+    while (bytes && size > 0u) {
+        *bytes++ = 0u;
+        size--;
+    }
+}
+
+static bool player_ach_response_append(PlayerAchHttpJob *job, const unsigned char *data,
+                                       size_t size, size_t *capacity) {
+    if (!job || !data || !capacity || job->response_body_size > PLAYER_ACH_HTTP_BODY_MAX ||
+        size > PLAYER_ACH_HTTP_BODY_MAX - job->response_body_size)
+        return false;
+    const size_t needed = job->response_body_size + size + 1u;
+    if (needed > *capacity) {
+        size_t next = *capacity ? *capacity : 16384u;
+        while (next < needed) {
+            if (next > (PLAYER_ACH_HTTP_BODY_MAX + 1u) / 2u) {
+                next = PLAYER_ACH_HTTP_BODY_MAX + 1u;
+                break;
+            }
+            next *= 2u;
+        }
+        char *grown = (char *)realloc(job->response_body, next);
+        if (!grown) return false;
+        job->response_body = grown;
+        *capacity = next;
+    }
+    memcpy(job->response_body + job->response_body_size, data, size);
+    job->response_body_size += size;
+    job->response_body[job->response_body_size] = '\0';
+    return true;
+}
+
+static int SDLCALL player_ach_http_thread_main(void *userdata) {
+    PlayerAchHttpJob *job = (PlayerAchHttpJob *)userdata;
+    PackageHttpOptions options = {k_ach_user_agent};
+    PackageHttpResponse response;
+    memset(&response, 0, sizeof response);
+    const char *method = job->post_data ? "POST" : "GET";
+    size_t capacity = 0u;
+    bool body_ok = true;
+    if (!package_builder_native_transport_request(
+            &options, job->url, NK_ACH_HOST, method,
+            job->content_type[0] ? job->content_type : NULL,
+            job->post_data, job->post_data_size, &response)) {
+        job->response_status = NK_ACH_HTTP_RETRY;
+        goto finished;
+    }
+    if (!response.final_url || !nk_ach_url_allowed(response.final_url) || !response.read ||
+        !response.close ||
+        (response.has_content_length && response.content_length > PLAYER_ACH_HTTP_BODY_MAX)) {
+        job->response_status = NK_ACH_HTTP_CLIENT_ERROR;
+        if (response.close) response.close(response.context);
+        goto finished;
+    }
+    job->response_status = response.http_status;
+    for (;;) {
+        unsigned char chunk[16384];
+        size_t received = 0u;
+        if (!response.read(response.context, chunk, sizeof chunk, &received)) {
+            body_ok = false;
+            break;
+        }
+        if (received == 0u) break;
+        if (!player_ach_response_append(job, chunk, received, &capacity)) {
+            body_ok = false;
+            break;
+        }
+    }
+    response.close(response.context);
+    if (!body_ok) job->response_status = NK_ACH_HTTP_RETRY;
+    if (!job->response_body) {
+        job->response_body = (char *)calloc(1u, 1u);
+        if (!job->response_body) job->response_status = NK_ACH_HTTP_CLIENT_ERROR;
+    }
+
+finished:
+    if (!job->response_body) {
+        job->response_body = (char *)calloc(1u, 1u);
+        if (!job->response_body) job->response_status = NK_ACH_HTTP_CLIENT_ERROR;
+    }
+    SDL_SetAtomicInt(&job->done, 1);
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = SDL_EVENT_USER;
+    event.user.code = PLAYER_ACH_HTTP_EVENT_CODE;
+    event.user.data1 = job->run;
+    (void)SDL_PushEvent(&event);
+    return 0;
+}
+
+static void player_ach_transport(void *context, const NkAchRequest *request,
+                                 NkAchDone done, void *done_context) {
+    PlayerRun *run = (PlayerRun *)context;
+    NkAchResponse refusal = {NULL, 0u, NK_ACH_HTTP_CLIENT_ERROR};
+    if (!done) return;
+    if (!run || !request || !request->url || run->achievements_shutting_down ||
+        !run->app.settings.achievements_enabled || !run->app.achievements_store_available) {
+        done(&refusal, done_context);
+        return;
+    }
+    if (run->ach_http_job) {
+        refusal.http_status = NK_ACH_HTTP_RETRY;
+        done(&refusal, done_context);
+        return;
+    }
+    const size_t url_size = strlen(request->url);
+    const size_t post_size = request->post_data ? strlen(request->post_data) : 0u;
+    const size_t content_type_size = request->content_type ? strlen(request->content_type) : 0u;
+    if (url_size >= 2048u || post_size > PLAYER_ACH_HTTP_BODY_MAX ||
+        content_type_size >= sizeof(((PlayerAchHttpJob *)0)->content_type)) {
+        done(&refusal, done_context);
+        return;
+    }
+    PlayerAchHttpJob *job = (PlayerAchHttpJob *)calloc(1u, sizeof(*job));
+    if (!job) {
+        refusal.http_status = NK_ACH_HTTP_RETRY;
+        done(&refusal, done_context);
+        return;
+    }
+    job->run = run;
+    job->done_callback = done;
+    job->done_context = done_context;
+    snprintf(job->url, sizeof job->url, "%s", request->url);
+    if (content_type_size) snprintf(job->content_type, sizeof job->content_type, "%s",
+                                    request->content_type);
+    if (request->post_data) {
+        job->post_data = (char *)malloc(post_size + 1u);
+        if (!job->post_data) {
+            free(job);
+            refusal.http_status = NK_ACH_HTTP_RETRY;
+            done(&refusal, done_context);
+            return;
+        }
+        memcpy(job->post_data, request->post_data, post_size + 1u);
+        job->post_data_size = post_size;
+    }
+    run->ach_http_job = job;
+    job->thread = SDL_CreateThread(player_ach_http_thread_main, "ra-http", job);
+    if (!job->thread) {
+        run->ach_http_job = NULL;
+        player_secure_clear(job->post_data, job->post_data_size);
+        free(job->post_data);
+        free(job);
+        refusal.http_status = NK_ACH_HTTP_RETRY;
+        done(&refusal, done_context);
+    }
+}
+
+static void player_ach_http_poll(PlayerRun *run) {
+    PlayerAchHttpJob *job = run ? run->ach_http_job : NULL;
+    if (!job || !SDL_GetAtomicInt(&job->done)) return;
+    if (job->thread) SDL_WaitThread(job->thread, NULL);
+    run->ach_http_job = NULL;
+    NkAchResponse response = {job->response_body, job->response_body_size,
+                              job->response_status};
+    if (job->done_callback) job->done_callback(&response, job->done_context);
+    player_secure_clear(job->post_data, job->post_data_size);
+    player_secure_clear(job->response_body, job->response_body_size);
+    free(job->post_data);
+    free(job->response_body);
+    free(job);
+}
+
+static void player_achievements_collect_events(PlayerRun *run) {
+    if (!run || !run->achievements) return;
+    PlayerApp *app = &run->app;
+    NkAchEvent events[NK_ACH_EVENT_QUEUE];
+    size_t count;
+    while ((count = nk_ach_take_events(run->achievements, events,
+                                       NK_ACH_EVENT_QUEUE)) != 0u) {
+        for (size_t i = 0u; i < count; i++) {
+            const NkAchEvent *event = &events[i];
+            switch (event->kind) {
+            case NK_ACH_EVENT_LOGIN_OK: {
+                run->achievements_login_pending = false;
+                if (run->achievements_signout_pending) {
+                    (void)nk_platform_credential_delete(k_ach_credential_target);
+                    nk_ach_logout(run->achievements);
+                    run->achievements_signout_pending = false;
+                    app->achievements_signed_in = false;
+                    app->achievements_account[0] = '\0';
+                    snprintf(app->achievements_status, sizeof app->achievements_status,
+                             "Signed out.");
+                    break;
+                }
+                if (!app->settings.achievements_enabled) {
+                    nk_ach_logout(run->achievements);
+                    app->achievements_signed_in = false;
+                    app->achievements_account[0] = '\0';
+                    snprintf(app->achievements_status, sizeof app->achievements_status,
+                             "RetroAchievements is off.");
+                    break;
+                }
+                char username[256] = "";
+                char token[1024] = "";
+                const bool have_user = nk_ach_copy_user_name(run->achievements, username,
+                                                              sizeof username);
+                const bool have_token = nk_ach_copy_user_token(run->achievements, token,
+                                                                sizeof token);
+                const bool stored = have_user && have_token &&
+                    nk_platform_credential_write(k_ach_credential_target, username, token);
+                player_secure_clear(token, sizeof token);
+                if (!stored) {
+                    nk_ach_logout(run->achievements);
+                    app->achievements_signed_in = false;
+                    app->achievements_account[0] = '\0';
+                    snprintf(app->achievements_status, sizeof app->achievements_status,
+                             "Windows Credential Manager could not store the RA token.");
+                } else {
+                    app->achievements_signed_in = true;
+                    snprintf(app->achievements_account, sizeof app->achievements_account,
+                             "%.*s", (int)sizeof(app->achievements_account) - 1, username);
+                    snprintf(app->achievements_status, sizeof app->achievements_status,
+                             app->is_game_running && !run->guest_memory_channel_active
+                                 ? "Signed in. Restart this game to start softcore tracking."
+                                 : "Signed in. Softcore only.");
+                }
+                player_secure_clear(username, sizeof username);
+                break;
+            }
+            case NK_ACH_EVENT_LOGIN_FAILED:
+                run->achievements_login_pending = false;
+                if (run->achievements_signout_pending) {
+                    (void)nk_platform_credential_delete(k_ach_credential_target);
+                    run->achievements_signout_pending = false;
+                    snprintf(app->achievements_status, sizeof app->achievements_status,
+                             "Signed out.");
+                } else {
+                    snprintf(app->achievements_status, sizeof app->achievements_status,
+                             "Sign-in failed. Check the account or connection.");
+                }
+                app->achievements_signed_in = false;
+                app->achievements_account[0] = '\0';
+                break;
+            case NK_ACH_EVENT_GAME_LOADED:
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "Softcore · %u achievements available.", event->count);
+                break;
+            case NK_ACH_EVENT_GAME_FAILED:
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "No achievement set was available for this game.");
+                break;
+            case NK_ACH_EVENT_UNLOCKED: {
+                char toast[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+                snprintf(toast, sizeof toast, "Achievement unlocked: %.150s", event->title);
+                if (run->guest_memory_channel_active) {
+                    (void)nk_platform_guest_memory_channel_notify(&run->guest_memory_channel,
+                                                                  toast);
+                }
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "Unlocked: %.150s · Softcore", event->title);
+                break;
+            }
+            case NK_ACH_EVENT_DISCONNECTED:
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "Offline. Unlocks are waiting to sync.");
+                break;
+            case NK_ACH_EVENT_RECONNECTED:
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "Connected. Pending unlocks synced.");
+                break;
+            case NK_ACH_EVENT_DISABLED:
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "An achievement was disabled because its memory range is unavailable.");
+                break;
+            case NK_ACH_EVENT_SERVER_ERROR:
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "RetroAchievements returned an error; pending progress is kept.");
+                break;
+            default:
+                break;
+            }
+        }
+    }
+}
+
+static void player_achievements_start(PlayerRun *run) {
+    if (!run) return;
+    PlayerApp *app = &run->app;
+    if (!app->settings.achievements_enabled) return;
+    if (!app->achievements_store_available) {
+        snprintf(app->achievements_status, sizeof app->achievements_status,
+                 "Sign-in requires Windows Credential Manager; this platform is unsupported.");
+        return;
+    }
+    if (!run->achievements) {
+        run->achievements = nk_ach_create(NULL, player_ach_transport, run);
+        if (!run->achievements) {
+            snprintf(app->achievements_status, sizeof app->achievements_status,
+                     "RetroAchievements could not initialize.");
+            return;
+        }
+    }
+    char username[256] = "";
+    char token[1024] = "";
+    if (!nk_platform_credential_read(k_ach_credential_target, username, sizeof username,
+                                     token, sizeof token)) {
+        app->achievements_signed_in = false;
+        snprintf(app->achievements_status, sizeof app->achievements_status,
+                 "Sign in to connect. Softcore only.");
+        return;
+    }
+    snprintf(app->achievements_account, sizeof app->achievements_account,
+             "%.*s", (int)sizeof(app->achievements_account) - 1, username);
+    app->achievements_signed_in = false;
+    run->achievements_login_pending =
+        nk_ach_begin_login(run->achievements, username, token);
+    player_secure_clear(token, sizeof token);
+    player_secure_clear(username, sizeof username);
+    snprintf(app->achievements_status, sizeof app->achievements_status,
+             run->achievements_login_pending ? "Signing in. Softcore only."
+                                             : "Sign-in could not start.");
+}
+
+static bool player_achievements_consent(PlayerRun *run) {
+    static const SDL_MessageBoxButtonData buttons[] = {
+        {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Cancel"},
+        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Agree and continue"},
+    };
+    static const char message[] =
+        "RetroAchievements is hosted at https://retroachievements.org.\n\n"
+        "If you agree, Nakagawa Recomp sends your RetroAchievements username and API token, "
+        "the game hash, achievement unlocks, Rich Presence text, and leaderboard entries. "
+        "During sign-in your password is sent once to obtain a token and is never saved. "
+        "Game files, saves, and guest memory stay on this PC.\n\n"
+        "This feature is softcore only. Hardcore is not available.";
+    SDL_MessageBoxData data;
+    int selected = 0;
+    if (!run || !run->window) return false;
+    memset(&data, 0, sizeof data);
+    data.flags = SDL_MESSAGEBOX_INFORMATION;
+    data.window = run->window;
+    data.title = "RetroAchievements consent";
+    data.message = message;
+    data.numbuttons = (int)(sizeof buttons / sizeof buttons[0]);
+    data.buttons = buttons;
+    return SDL_ShowMessageBox(&data, &selected) && selected == 1;
+}
+
+static bool player_achievements_prompt_sign_in(PlayerRun *run) {
+    if (!run || !run->app.settings.achievements_enabled ||
+        !run->app.achievements_store_available) {
+        if (run) snprintf(run->app.achievements_status,
+                          sizeof run->app.achievements_status,
+                          "Enable RetroAchievements first; this platform needs Windows Credential Manager.");
+        return false;
+    }
+    if (run->achievements_login_pending) {
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "Sign-in is already in progress.");
+        return false;
+    }
+    if (!run->achievements) {
+        run->achievements = nk_ach_create(NULL, player_ach_transport, run);
+        if (!run->achievements) return false;
+    }
+#if defined(_WIN32)
+    WCHAR username_w[CREDUI_MAX_USERNAME_LENGTH + 1u];
+    WCHAR password_w[CREDUI_MAX_PASSWORD_LENGTH + 1u];
+    char username[256] = "";
+    char password[1024] = "";
+    CREDUI_INFOW info;
+    memset(&info, 0, sizeof info);
+    info.cbSize = sizeof info;
+    info.pszMessageText = L"Enter your RetroAchievements.org username and password. "
+                          L"The password is used once to obtain a token and is not stored.";
+    info.pszCaptionText = L"Sign in to RetroAchievements";
+    BOOL save = FALSE;
+    SecureZeroMemory(username_w, sizeof username_w);
+    SecureZeroMemory(password_w, sizeof password_w);
+    const DWORD prompt = CredUIPromptForCredentialsW(
+        &info, L"retroachievements.org", NULL, 0u,
+        username_w, CREDUI_MAX_USERNAME_LENGTH + 1u,
+        password_w, CREDUI_MAX_PASSWORD_LENGTH + 1u,
+        &save, CREDUI_FLAGS_GENERIC_CREDENTIALS | CREDUI_FLAGS_DO_NOT_PERSIST |
+                   CREDUI_FLAGS_ALWAYS_SHOW_UI);
+    if (prompt != ERROR_SUCCESS) {
+        SecureZeroMemory(username_w, sizeof username_w);
+        SecureZeroMemory(password_w, sizeof password_w);
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 prompt == ERROR_CANCELLED ? "Sign-in cancelled." : "Credential prompt failed.");
+        return false;
+    }
+    const int username_bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, username_w,
+                                                    -1, username, sizeof username,
+                                                    NULL, NULL);
+    const int password_bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, password_w,
+                                                    -1, password, sizeof password,
+                                                    NULL, NULL);
+    SecureZeroMemory(username_w, sizeof username_w);
+    SecureZeroMemory(password_w, sizeof password_w);
+    if (username_bytes <= 1 || password_bytes <= 1 ||
+        !nk_ach_begin_login_with_password(run->achievements, username, password)) {
+        player_secure_clear(password, sizeof password);
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "Sign-in could not start.");
+        return false;
+    }
+    player_secure_clear(password, sizeof password);
+    run->achievements_login_pending = true;
+    run->achievements_signout_pending = false;
+    snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+             "Signing in. Softcore only.");
+    return true;
+#else
+    snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+             "Sign-in requires Windows Credential Manager; this platform is unsupported.");
+    return false;
+#endif
+}
+
+static int SDLCALL player_ach_guest_memory_thread_main(void *userdata) {
+    PlayerRun *run = (PlayerRun *)userdata;
+    if (!run) return 0;
+    for (;;) {
+        const int result = nk_platform_guest_memory_channel_wait_frame(
+            &run->guest_memory_channel);
+        if (result <= 0) {
+            if (result < 0 || !SDL_GetAtomicInt(&run->guest_memory_stop_requested))
+                SDL_SetAtomicInt(&run->guest_memory_sync_failed, 1);
+            break;
+        }
+        SDL_Event event;
+        SDL_zero(event);
+        event.type = SDL_EVENT_USER;
+        event.user.code = PLAYER_ACH_FRAME_EVENT_CODE;
+        event.user.data1 = run;
+        if (!SDL_PushEvent(&event)) {
+            SDL_SetAtomicInt(&run->guest_memory_sync_failed, 1);
+            (void)nk_platform_guest_memory_channel_ack_frame(&run->guest_memory_channel);
+            nk_platform_guest_memory_channel_stop(&run->guest_memory_channel);
+            break;
+        }
+    }
+    SDL_SetAtomicInt(&run->guest_memory_thread_done, 1);
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = SDL_EVENT_USER;
+    event.user.code = PLAYER_ACH_CHANNEL_STOP_EVENT_CODE;
+    event.user.data1 = run;
+    (void)SDL_PushEvent(&event);
+    return 0;
+}
+
+static void player_achievements_stop_channel(PlayerRun *run) {
+    if (!run) return;
+    SDL_SetAtomicInt(&run->guest_memory_stop_requested, 1);
+    if (run->guest_memory_channel.view) {
+        nk_platform_guest_memory_channel_stop(&run->guest_memory_channel);
+    }
+    if (run->guest_memory_thread) {
+        SDL_WaitThread(run->guest_memory_thread, NULL);
+        run->guest_memory_thread = NULL;
+    }
+    if (run->achievements) nk_ach_set_memory(run->achievements, NULL);
+    if (run->guest_memory_channel.view) {
+        nk_platform_guest_memory_channel_close(&run->guest_memory_channel);
+    }
+    run->guest_memory_channel_active = false;
+    run->achievements_game_hash[0] = '\0';
+    SDL_SetAtomicInt(&run->guest_memory_sync_failed, 0);
+    SDL_SetAtomicInt(&run->guest_memory_stop_requested, 0);
+}
+
+static void player_achievements_shutdown(PlayerRun *run) {
+    if (!run) return;
+    run->achievements_shutting_down = true;
+    player_achievements_stop_channel(run);
+    PlayerAchHttpJob *job = run->ach_http_job;
+    if (job) {
+        if (job->thread) {
+            SDL_WaitThread(job->thread, NULL);
+            job->thread = NULL;
+        }
+        SDL_SetAtomicInt(&job->done, 1);
+        player_ach_http_poll(run);
+    }
+    if (run->achievements) {
+        nk_ach_destroy(run->achievements);
+        run->achievements = NULL;
+    }
+}
+
+static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork *work) {
+    if (!run || !work) return;
+    work->guest_memory_channel[0] = '\0';
+    if (run->guest_memory_channel_active || run->guest_memory_channel.view) {
+        player_achievements_stop_channel(run);
+    }
+    if (!run->app.settings.achievements_enabled || !run->app.achievements_signed_in ||
+        !run->app.achievements_store_available || !run->achievements ||
+        player_ui_test_active(&run->ui_test)) return;
+
+    char hash[33] = "";
+    if (!work->game.iso_path[0] || !nk_ach_psp_hash_iso(work->game.iso_path, hash)) {
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "RA game identification needs a readable ISO containing PARAM.SFO and EBOOT.BIN.");
+        return;
+    }
+    char channel_name[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
+    static uint32_t sequence;
+    const uint64_t nonce = SDL_GetTicksNS() ^ ((uint64_t)++sequence << 32);
+    const int written = snprintf(channel_name, sizeof channel_name,
+                                 "Local\\NakagawaRecomp.GuestMemory.%u.%016llx",
+                                 (unsigned)nk_platform_process_id(),
+                                 (unsigned long long)nonce);
+    if (written <= 0 || (size_t)written >= sizeof channel_name ||
+        !nk_platform_guest_memory_channel_create(&run->guest_memory_channel, channel_name,
+                                                  0x0c000000u)) {
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "The local guest-memory channel is unavailable; achievements are off for this run.");
+        return;
+    }
+    NkAchMemory memory = {
+        run->guest_memory_channel.arena + NK_ACH_PSP_USER_RAM_START,
+        NK_ACH_PSP_USER_RAM_START,
+        NK_ACH_PSP_USER_RAM_SIZE,
+    };
+    nk_ach_set_memory(run->achievements, &memory);
+    if (!nk_ach_begin_load_game(run->achievements, hash)) {
+        player_achievements_stop_channel(run);
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "RA refused the game hash; achievements are off for this run.");
+        return;
+    }
+    snprintf(work->guest_memory_channel, sizeof work->guest_memory_channel, "%s", channel_name);
+    snprintf(run->achievements_game_hash, sizeof run->achievements_game_hash, "%s", hash);
+    SDL_SetAtomicInt(&run->guest_memory_thread_done, 0);
+    SDL_SetAtomicInt(&run->guest_memory_sync_failed, 0);
+    SDL_SetAtomicInt(&run->guest_memory_stop_requested, 0);
+    run->guest_memory_channel_active = true;
+    run->guest_memory_thread = SDL_CreateThread(player_ach_guest_memory_thread_main,
+                                                 "ra-frame-sync", run);
+    if (!run->guest_memory_thread) {
+        player_achievements_stop_channel(run);
+        work->guest_memory_channel[0] = '\0';
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "The local guest-memory thread could not start; achievements are off for this run.");
+        return;
+    }
+    snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+             "Loading the game's softcore achievement set.");
+}
+
+static void player_achievements_sign_out(PlayerRun *run) {
+    if (!run) return;
+    bool removed = nk_platform_credential_delete(k_ach_credential_target);
+    if (run->achievements_login_pending) {
+        run->achievements_signout_pending = true;
+    } else if (run->achievements) {
+        nk_ach_logout(run->achievements);
+    }
+    player_achievements_stop_channel(run);
+    run->app.achievements_signed_in = false;
+    run->app.achievements_account[0] = '\0';
+    snprintf(run->app.achievements_status, sizeof run->app.achievements_status, "%s",
+             removed ? "Signed out."
+                     : "Sign-out could not remove the token from Credential Manager.");
+}
+
+static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettingsOp op) {
+    if (!run) return;
+    PlayerApp *app = &run->app;
+    if (app->launch_pending) {
+        snprintf(app->achievements_status, sizeof app->achievements_status,
+                 "Wait for the current launch before changing RetroAchievements.");
+        return;
+    }
+    switch (op) {
+    case PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS:
+        if (app->settings.achievements_enabled) {
+            player_app_set_achievements_enabled(app, false);
+            if (run->achievements_login_pending) run->achievements_signout_pending = false;
+            if (run->achievements) nk_ach_logout(run->achievements);
+            player_achievements_stop_channel(run);
+            app->achievements_signed_in = false;
+            app->achievements_account[0] = '\0';
+            snprintf(app->achievements_status, sizeof app->achievements_status,
+                     "RetroAchievements is off.");
+            return;
+        }
+        if (!app->achievements_store_available) {
+            snprintf(app->achievements_status, sizeof app->achievements_status,
+                     "Sign-in requires Windows Credential Manager; this platform is unsupported.");
+            return;
+        }
+        if (!player_achievements_consent(run)) {
+            snprintf(app->achievements_status, sizeof app->achievements_status,
+                     "RetroAchievements was not enabled.");
+            return;
+        }
+        player_app_set_achievements_enabled(app, true);
+        player_achievements_start(run);
+        break;
+    case PLAYER_UI_SETTINGS_SIGN_IN_ACHIEVEMENTS:
+        (void)player_achievements_prompt_sign_in(run);
+        break;
+    case PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS:
+        player_achievements_sign_out(run);
+        break;
+    default:
+        break;
+    }
+}
 
 /* A Linux or macOS install uses its earlier folders while the new one exists too (#324,
    nk_data_migrate.h): the library and the log name both. Nothing is moved, and the start goes on. */
@@ -5008,7 +5677,7 @@ static int player_capture_screenshot(PlayerRun *run) {
             SDL_SetRenderTarget(run->renderer, target);
         }
         player_ui_test_delay_screenshot();
-        player_render_active_ui(run->next_ui, app, run->renderer, run->window);
+        player_render_active_ui(run, run->next_ui, app, run->renderer, run->window);
         if (player_host_save_screenshot(run->renderer, run->screenshot_path)) {
             printf("[PLAYER] Screenshot saved to %s (%dx%d pixels, %dx%d layout)\n", run->screenshot_path,
                    run->capture_pixel_width, run->capture_pixel_height,
@@ -5103,7 +5772,7 @@ static void player_loop_start(PlayerRun *run) {
        already shows its state; a game the player was started with keeps it
        stopped. */
     player_ui_nk_update_music(run->next_ui, app);
-    player_render_active_ui(run->next_ui, app, run->renderer, run->window);
+    player_render_active_ui(run, run->next_ui, app, run->renderer, run->window);
     if (run->interactive_window && run->have_usable_bounds && !run->window_frame_measured) {
         run->window_frame_measured = player_refit_to_actual_frame(
             run->window, run->requested_window, run->usable_bounds,
@@ -5115,6 +5784,17 @@ static void player_loop_start(PlayerRun *run) {
 /* The start of a frame: update state, the UI-test script step, and the tick. */
 static void player_frame_begin(PlayerRun *run) {
     PlayerApp *app = &run->app;
+    player_ach_http_poll(run);
+    if (run->achievements && app->settings.achievements_enabled) {
+        nk_ach_idle(run->achievements);
+        player_achievements_collect_events(run);
+    }
+    if (SDL_GetAtomicInt(&run->guest_memory_sync_failed)) {
+        SDL_SetAtomicInt(&run->guest_memory_sync_failed, 0);
+        snprintf(app->achievements_status, sizeof app->achievements_status,
+                 "The local guest-memory channel stopped; achievements are off for this run.");
+        player_achievements_stop_channel(run);
+    }
     player_update_poll(app);
     player_report_poll(app);
     player_ui_test_report_update_phase(&run->ui_test, app);
@@ -5188,7 +5868,30 @@ static void player_frame_events(PlayerRun *run) {
                                           &event)) {
                 switch (event.type) {
                 case SDL_EVENT_USER:
-                    if (run->package_status_job &&
+                    if (event.user.code == PLAYER_ACH_HTTP_EVENT_CODE &&
+                        event.user.data1 == run) {
+                        player_ach_http_poll(run);
+                        if (run->achievements && app->settings.achievements_enabled)
+                            nk_ach_idle(run->achievements);
+                        player_achievements_collect_events(run);
+                    } else if (event.user.code == PLAYER_ACH_FRAME_EVENT_CODE &&
+                               event.user.data1 == run) {
+                        player_ach_http_poll(run);
+                        if (run->achievements && app->settings.achievements_enabled &&
+                            app->achievements_signed_in) {
+                            nk_ach_frame(run->achievements);
+                        } else if (run->achievements) {
+                            nk_ach_idle(run->achievements);
+                        }
+                        player_achievements_collect_events(run);
+                        if (run->guest_memory_channel_active)
+                            (void)nk_platform_guest_memory_channel_ack_frame(
+                                &run->guest_memory_channel);
+                    } else if (event.user.code == PLAYER_ACH_CHANNEL_STOP_EVENT_CODE &&
+                               event.user.data1 == run) {
+                        /* The frame waiter stopped; player_frame_begin reports an OS failure
+                           separately when the channel was not deliberately stopped. */
+                    } else if (run->package_status_job &&
                         event.user.data1 == run->package_status_job &&
                         event.user.code == PLAYER_PACKAGE_STATUS_EVENT_CODE) {
                         player_package_status_finish(
@@ -5448,7 +6151,8 @@ static void player_frame_game_session(PlayerRun *run) {
     player_ui_nk_update_music(run->next_ui, app);
     /* A launch the worker finished becomes the running game, or its card. */
     run->launch_job = player_launch_job_poll(app, run->launch_job, false,
-                                             player_ui_nk_launcher_audio_closed(run->next_ui));
+                                             player_ui_nk_launcher_audio_closed(run->next_ui),
+                                             run);
 
     /* Monitor running game process */
     bool child_exited = false;
@@ -5456,6 +6160,9 @@ static void player_frame_game_session(PlayerRun *run) {
             child_exited = player_app_monitor_game_session(app, SDL_GetTicks());
     }
     (void)child_exited;
+    if (!app->is_game_running && !app->launch_pending && run->guest_memory_channel_active) {
+        player_achievements_stop_channel(run);
+    }
     /* Discord status (#2259), when the user turned it on: shows the running game and
        clears it once the game has exited. Never waits; quiet when Discord is not running. */
     player_app_discord_tick(app, SDL_GetTicks());
@@ -5544,7 +6251,7 @@ static void player_frame_game_session(PlayerRun *run) {
 static void player_frame_render(PlayerRun *run) {
     PlayerApp *app = &run->app;
     player_ui_test_begin_frame(&run->ui_test);
-    player_render_active_ui(run->next_ui, app, run->renderer, run->window);
+    player_render_active_ui(run, run->next_ui, app, run->renderer, run->window);
     /* Consume renderer requests in the same frame that created them. A
        later event batch may change the selected title before the next
        loop iteration, which must not redirect this retry. */
@@ -5554,7 +6261,7 @@ static void player_frame_render(PlayerRun *run) {
             player_note_launcher_display(app, run->window);
             run->launch_job = player_launch_job_start(
                 app, app->request_launch_index,
-                player_ui_nk_launcher_audio_closed(run->next_ui));
+                player_ui_nk_launcher_audio_closed(run->next_ui), run);
         }
         /* A request dropped here (a launch already running, or one refused before
            player_app_launch_begin) must not leave its "Play without the pack" for a later launch;
@@ -5614,10 +6321,12 @@ static int player_shutdown(PlayerRun *run) {
 
     /* A launch still on its worker finishes first, so its game is stopped. */
     run->launch_job = player_launch_job_poll(app, run->launch_job, true,
-                                             player_ui_nk_launcher_audio_closed(run->next_ui));
+                                             player_ui_nk_launcher_audio_closed(run->next_ui),
+                                             run);
     if (app->is_game_running) {
         player_app_stop_game(app);
     }
+    player_achievements_shutdown(run);
 
     /* After a factory reset nothing is saved: the settings would bring the
        config folder back. */
@@ -5744,6 +6453,13 @@ int main(int argc, char *argv[]) {
     if (code != PLAYER_RUN_CONTINUE) {
         nk_platform_single_instance_release(&run.instance);
         return code;
+    }
+
+    /* Native UI regressions and named screenshot views stay offline. In an ordinary interactive
+       run, only the persisted, user-approved switch may start the RA client. */
+    if (run.interactive_window && run.screenshot_path == NULL && run.test_view == NULL &&
+        !player_ui_test_active(&run.ui_test)) {
+        player_achievements_start(&run);
     }
 
     player_loop_start(&run);

@@ -335,6 +335,7 @@ typedef struct {
     bool (*read)(void *context, unsigned char *buffer, size_t capacity,
                  size_t *bytes_read);
     void (*close)(void *context);
+    int http_status;          /* 0 when no HTTP response arrived */
 } PackageHttpResponse;
 
 typedef bool (*PackageHttpOpen)(void *context, const char *url,
@@ -351,6 +352,14 @@ typedef struct {
 /* The native HTTPS transport (WinHTTP, redirects followed only within the allowed
  * hosts), or NULL where there is none. Its context is NULL or a PackageHttpOptions. */
 PackageHttpOpen package_builder_native_transport(void);
+
+/* One HTTPS request through the same native WinHTTP implementation used by the download
+ * transport. The caller supplies an exact allowed-host set; redirects are refused, and
+ * non-200 HTTP responses are returned for the caller to parse. */
+bool package_builder_native_transport_request(
+    void *options, const char *url, const char *allowed_hosts,
+    const char *method, const char *content_type,
+    const void *body, size_t body_size, PackageHttpResponse *response);
 
 /* Download one manifest item to a .part file, check exact byte count and SHA-256,
  * then atomically promote it. A NULL transport selects native WinHTTP. */

@@ -1260,6 +1260,13 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         model.check_updates_at_start = app->settings.check_updates_at_start;
         model.discord_presence = app->settings.discord_presence;
         model.discord_available = nk_discord_available();
+        model.achievements_enabled = app->settings.achievements_enabled;
+        model.achievements_available = app->achievements_store_available;
+        model.achievements_signed_in = app->achievements_signed_in;
+        model.achievements_account = app->achievements_account[0]
+            ? app->achievements_account : NULL;
+        model.achievements_status = app->achievements_status[0]
+            ? app->achievements_status : NULL;
         model.current_version = NK_PLAYER_VERSION;
         if (checked) {
             model.update_version = newest->version;

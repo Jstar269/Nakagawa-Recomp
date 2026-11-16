@@ -646,6 +646,9 @@ typedef enum {
     PLAYER_UI_SETTINGS_REMOVE_TEXPACK,       /* a title's Enhanced page: forget its pack */
     PLAYER_UI_SETTINGS_EDIT_NICKNAME,        /* the nickname editor (#2197) */
     PLAYER_UI_SETTINGS_TOGGLE_DISCORD,       /* Settings > Online and developer (#2259) */
+    PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS,  /* RetroAchievements opt-in (#1316) */
+    PLAYER_UI_SETTINGS_SIGN_IN_ACHIEVEMENTS,
+    PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS,
     PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC, /* launcher background music (#2207) */
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN,
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP
@@ -767,6 +770,13 @@ typedef struct {
        turn it on (it has a Discord application ID). */
     bool discord_presence;
     bool discord_available;
+    /* RetroAchievements: disabled unless the platform has a credential store and the user
+       accepts the named data/host consent screen. The service is always softcore only. */
+    bool achievements_enabled;
+    bool achievements_available;
+    bool achievements_signed_in;
+    const char *achievements_account;
+    const char *achievements_status;
     const char *current_version;    /* "0.0.3" */
     const char *update_version;     /* "0.0.4", once checked */
     bool update_prerelease;
@@ -1193,6 +1203,8 @@ enum {
     PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP = 0x4559u,
     PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE = 0x455Au,   /* a title's Enhanced page: Texture pack folder */
     PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE = 0x455Bu,   /* a title's Enhanced page: Remove texture pack */
+    PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS = 0x455Cu,    /* Settings > Online: RA opt-in */
+    PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS_ACCOUNT = 0x455Du,
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
     PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */

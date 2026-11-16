@@ -425,6 +425,84 @@ FILE *nk_platform_fopen_private(const char *path, const char *mode) {
     return file;
 }
 
+bool nk_platform_credential_store_available(void) {
+    return false;
+}
+
+bool nk_platform_credential_read(const char *target, char *username, size_t username_size,
+                                char *secret, size_t secret_size) {
+    (void)target;
+    if (username && username_size) username[0] = '\0';
+    if (secret && secret_size) secret[0] = '\0';
+    return false;
+}
+
+bool nk_platform_credential_write(const char *target, const char *username, const char *secret) {
+    (void)target;
+    (void)username;
+    (void)secret;
+    return false;
+}
+
+bool nk_platform_credential_delete(const char *target) {
+    (void)target;
+    return false;
+}
+
+bool nk_platform_guest_memory_channel_create(NkGuestMemoryChannel *channel,
+                                             const char *name, size_t arena_size) {
+    (void)name;
+    (void)arena_size;
+    if (channel) memset(channel, 0, sizeof(*channel));
+    return false;
+}
+
+bool nk_platform_guest_memory_channel_open(NkGuestMemoryChannel *channel,
+                                           const char *name, size_t arena_size) {
+    (void)name;
+    (void)arena_size;
+    if (channel) memset(channel, 0, sizeof(*channel));
+    return false;
+}
+
+int nk_platform_guest_memory_channel_wait_frame(NkGuestMemoryChannel *channel) {
+    (void)channel;
+    return -1;
+}
+
+bool nk_platform_guest_memory_channel_ack_frame(NkGuestMemoryChannel *channel) {
+    (void)channel;
+    return false;
+}
+
+bool nk_platform_guest_memory_channel_sync_vblank(NkGuestMemoryChannel *channel) {
+    (void)channel;
+    return false;
+}
+
+void nk_platform_guest_memory_channel_stop(NkGuestMemoryChannel *channel) {
+    (void)channel;
+}
+
+void nk_platform_guest_memory_channel_close(NkGuestMemoryChannel *channel) {
+    if (channel) memset(channel, 0, sizeof(*channel));
+}
+
+bool nk_platform_guest_memory_channel_notify(NkGuestMemoryChannel *channel, const char *text) {
+    (void)channel;
+    (void)text;
+    return false;
+}
+
+bool nk_platform_guest_memory_channel_read_notification(NkGuestMemoryChannel *channel,
+                                                        uint32_t *seen_sequence,
+                                                        char *text, size_t text_size) {
+    (void)channel;
+    if (seen_sequence) *seen_sequence = 0u;
+    if (text && text_size) text[0] = '\0';
+    return false;
+}
+
 bool nk_platform_file_lock_acquire(NkFileLock *lock, const char *path, unsigned timeout_ms) {
     if (!lock) return false;
     memset(lock, 0, sizeof(*lock));

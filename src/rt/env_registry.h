@@ -96,6 +96,7 @@
     X("SR_GESCENE_DIR", "path", "unset (scene dump refused)", "ge.c", "Output directory for the SR_GESCENE dump, gescene_f<frame>.bin.") \
     X("SR_GESIGNALLOG", "flag-presence", "off", "ge.c", "Logs the first few GE signal command occurrences per behavior to stderr.") \
     X("SR_GESTAT", "flag-presence", "off", "ge.c", "Prints per-frame GE statistics once per 60-vblank window to diagnose culled or rejected geometry.") \
+    X("SR_GUEST_MEMORY_CHANNEL", "string", "unset", "recomp.c,sched.c", "Optional local shared guest-memory channel set by the player for a vblank-synchronized host read callback.") \
     X("SR_GEUNK", "flag-nonzero", "on", "ge.c", "Unhandled GE commands are reported once each unless this is set to 0.") \
     X("SR_GEWATCH", "flag-presence", "off", "debug.h,ge.c,hle_display.c", "Logs GE primitive details and interleaves present lines with GE list lines to expose draw order.") \
     X("SR_GEWATCH_AFTER", "number", "0", "ge.c,hle_display.c", "Frame number from which SR_GEWATCH GE and present watch output starts.") \

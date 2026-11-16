@@ -1492,7 +1492,7 @@ UPDATE_CHECK_HOSTS = frozenset({
 # reaches the RetroAchievements servers only. The bridge (src/core/nk_achievements.c) holds no
 # network code: it passes rc_client's requests to a caller's transport only for this host, and
 # nk_achievements.h names it. Neither the bridge nor the vendored rcheevos may use a network API;
-# the transport that carries them is a new egress and gets its own line above when it ships.
+# the transport that carries them is the existing package_builder WinHTTP implementation.
 ACHIEVEMENTS_HOST = "retroachievements.org"
 ACHIEVEMENTS_NO_NETWORK_PATHS = ("src/core/nk_achievements.c", "src/core/nk_achievements.h")
 ACHIEVEMENTS_VENDORED_TREE = "third_party/rcheevos"
@@ -1503,10 +1503,10 @@ ACHIEVEMENTS_VENDORED_TREE = "third_party/rcheevos"
 # that pipe and must stay outside the allowlist above.
 DISCORD_PRESENCE_PATHS = ("src/player/discord_presence.c", "src/player/discord_presence.h")
 DISCORD_PIPE_PREFIX = "discord-ipc-"
-# The only shipped callers of the native transport: the prerequisite bootstrap (in
-# package_builder.c itself) and the update check. Another caller is a new egress.
+# The shipped callers of the native transport: the prerequisite bootstrap, update check and
+# the opt-in RetroAchievements request runner. Another caller is a new egress.
 NATIVE_TRANSPORT_CALLERS = frozenset({
-    "src/player/package_builder.c", "src/player/update_check.c",
+    "src/player/package_builder.c", "src/player/update_check.c", "src/player/main.c",
 })
 
 # Shipped code: everything under src/ and the Python the player runs. Maintainer
@@ -1612,6 +1612,13 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
                 if match:
                     offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()}: {match.group(0)}")
         self.assertEqual(offenders, [], "the achievements bridge and rcheevos open no connection")
+
+    def test_achievements_use_the_player_native_transport(self) -> None:
+        # rc_client's only egress is the player's already allowlisted WinHTTP facility.
+        source = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        self.assertIn("package_builder_native_transport_request", source)
+        self.assertIn("NK_ACH_HOST", source)
+        self.assertIn("NK_PLAYER_VERSION", source)
 
     def test_discord_status_is_local_ipc_only(self) -> None:
         for rel in DISCORD_PRESENCE_PATHS:

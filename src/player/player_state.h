@@ -401,9 +401,9 @@ typedef struct {
     char controller_name[64];
     bool controller_connected;
     NkNetworkMode network_mode; /* reserved master switch; offline is the only mode today */
-    /* Online and developer options (docs/ONLINE_FEATURES.md). These are the
-       user's choices only: this build has no network feature, so online_mode
-       changes nothing yet and network_mode stays offline whatever it says. */
+    /* Online and developer options (docs/ONLINE_FEATURES.md). online_mode covers the
+       separate news/report features; RetroAchievements has its own opt-in below, and the
+       reserved network_mode remains offline in either case. */
     bool online_mode;      /* off by default; asked by the setup wizard */
     bool online_news;      /* the news strip, when online mode ships */
     bool online_reports;   /* user-sent reports, when online mode ships */
@@ -434,6 +434,8 @@ typedef struct {
        play mode and elapsed time. Off by default (owner decision 2026-11-08); it cannot be
        turned on while the build has no Discord application ID (nk_discord_available). */
     bool discord_presence;
+    /* RetroAchievements (#1316) is opt-in, off by default, and independent of network_mode. */
+    bool achievements_enabled;
     /* The folder the last file picker picked from (Add disc, PSP fonts), where
        the next one opens. Empty on a first run: the pickers then open at the
        Desktop (player_app_picker_start_folder). */
@@ -944,6 +946,12 @@ struct PlayerApp {
     char requested_open_path[NK_MAX_PATH];
     PlayerUpdateState update;
     PlayerReportState report;
+    /* Live RetroAchievements status; credentials and the rc_client stay in PlayerRun, never in
+       settings.json or PlayerApp's persisted state. */
+    bool achievements_store_available;
+    bool achievements_signed_in;
+    char achievements_account[64];
+    char achievements_status[192];
 
     /* Native core state */
     NkLibrary library;
@@ -2082,6 +2090,7 @@ typedef struct {
     uint32_t headless_accept_presented_frames;
     char boot_event_file_path[MAX_PATH_LEN];
     char input_profile_path[NK_MAX_PATH];
+    char guest_memory_channel[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
     char ui_root[MAX_PATH_LEN];
     int launcher_display_bounds[4];
     /* Results, written by player_launch_work_run. */
@@ -2504,6 +2513,8 @@ void player_app_toggle_online_feature(PlayerApp *app, int feature); /* 0 news, 1
 void player_app_toggle_update_check_at_start(PlayerApp *app);
 /* Discord status (#2259). The switch stays off while nk_discord_available() is false. */
 void player_app_toggle_discord_presence(PlayerApp *app);
+/* RetroAchievements is a separate opt-in, not the reserved network_mode setting. */
+void player_app_set_achievements_enabled(PlayerApp *app, bool enabled);
 /* What Discord shows now: the running game's title, play mode and start time. False when no
    game runs or nothing can be shown. It ignores the setting; player_app_discord_tick checks
    that. */

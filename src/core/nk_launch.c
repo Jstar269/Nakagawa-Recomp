@@ -1505,7 +1505,15 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     char env_ui_root[NK_MAX_PATH + 16];
     char env_launcher_display[96];
     char env_nickname[sizeof(session->config.nickname) + 16];
+    char env_guest_memory_channel[NK_GUEST_MEMORY_CHANNEL_NAME_MAX + 32u];
     char sep = nk_platform_path_separator();
+
+    if (!memchr(session->config.guest_memory_channel, '\0',
+                sizeof session->config.guest_memory_channel)) {
+        snprintf(session->last_error, sizeof(session->last_error),
+                 "The local guest-memory channel name is not terminated.");
+        return NK_ERROR_GENERIC;
+    }
 
     if (session->config.fps_cap == -1) {
         snprintf(env_fps, sizeof(env_fps), "SR_FPS_CAP=native");
@@ -1711,6 +1719,9 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     /* The console nickname (#2197), always exported so an inherited value cannot name it. */
     snprintf(env_nickname, sizeof(env_nickname), "SR_NICKNAME=%s", session->config.nickname);
     envp[env_count++] = env_nickname;
+    snprintf(env_guest_memory_channel, sizeof env_guest_memory_channel,
+             "SR_GUEST_MEMORY_CHANNEL=%s", session->config.guest_memory_channel);
+    envp[env_count++] = env_guest_memory_channel;
     /* What the pause overlay shows and draws with, beside the game's name (SR_GAME_TITLE
      * below): the disc ID and the player's folder for the UI fonts. Always exported, so an
      * empty value masks an inherited one instead of naming another game. */

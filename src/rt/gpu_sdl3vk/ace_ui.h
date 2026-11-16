@@ -65,6 +65,10 @@ typedef struct {
     const char *host_notice_head;
     const char *host_notice;
     const char *host_notice_hint;
+    /* A short-lived message from the local player process, in a top-right chip. */
+    const char *host_toast_head;
+    const char *host_toast;
+    float host_toast_alpha;
 } AceUiFrame;
 
 /* The swapchain image a present draws into, in TRANSFER_DST_OPTIMAL before and after. */
@@ -127,6 +131,10 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *frame);
 #define ACE_UI_ID_HOST_NOTICE_HEAD ACE_UI_ID(0x0F3u)
 #define ACE_UI_ID_HOST_NOTICE_TEXT ACE_UI_ID(0x0F4u)  /* + line, below ACE_UI_HOST_NOTICE_LINES */
 #define ACE_UI_ID_HOST_NOTICE_HINT ACE_UI_ID(0x0F8u)
+#define ACE_UI_ID_HOST_TOAST_ROW ACE_UI_ID(0x0F9u)
+#define ACE_UI_ID_HOST_TOAST ACE_UI_ID(0x0FAu)
+#define ACE_UI_ID_HOST_TOAST_HEAD ACE_UI_ID(0x0FBu)
+#define ACE_UI_ID_HOST_TOAST_TEXT ACE_UI_ID(0x0FCu)
 /* The render notice's words wrap to at most this many lines; more ends in an ellipsis. */
 #define ACE_UI_HOST_NOTICE_LINES 3
 /* The launch notice's list wraps to at most this many lines: room for every part's words at the

@@ -28,8 +28,8 @@ static int g_failures;
         }                                                                                    \
     } while (0)
 
-#define USER_RAM 0x08800000u
-#define USER_RAM_SIZE 0x01800000u /* 24 MB */
+#define USER_RAM NK_ACH_PSP_USER_RAM_START
+#define USER_RAM_SIZE NK_ACH_PSP_USER_RAM_SIZE
 #define HASH "0123456789abcdef0123456789abcdef"
 #define ACH_ADDR 0x00100u           /* user RAM offset the synthetic achievement watches */
 
@@ -442,7 +442,37 @@ static void test_award_offline_is_pending(uint8_t *ram) {
     CHECK(has_event(ev, n, NK_ACH_EVENT_UNLOCKED) >= 0, "the unlock is still shown");
     CHECK(has_event(ev, n, NK_ACH_EVENT_DISCONNECTED) >= 0, "the award is pending");
     CHECK(has_event(ev, n, NK_ACH_EVENT_SERVER_ERROR) < 0, "a retry is not a server error");
+
+    const size_t progress_size = rc_client_progress_size(nk_ach_rc_client(ach));
+    uint8_t *progress = progress_size ? (uint8_t *)malloc(progress_size) : NULL;
+    CHECK(progress != NULL, "allocate serialized progress (%u bytes)",
+          (unsigned)progress_size);
+    if (progress) {
+        CHECK(rc_client_serialize_progress_sized(nk_ach_rc_client(ach), progress,
+                                                  progress_size) == RC_OK,
+              "serialize the offline runtime progress");
+    }
     nk_ach_destroy(ach);
+
+    if (progress) {
+        Fake online;
+        memset(&online, 0, sizeof online);
+        online.award_status = 200;
+        NkAch *restored = nk_ach_create(&mem, fake_transport, &online);
+        CHECK(restored != NULL, "create the restored client");
+        if (restored) {
+            CHECK(nk_ach_begin_login(restored, "Player", "TOKEN"), "restored login starts");
+            CHECK(nk_ach_begin_load_game(restored, HASH), "restored game load starts");
+            CHECK(rc_client_deserialize_progress_sized(nk_ach_rc_client(restored), progress,
+                                                        progress_size) == RC_OK,
+                  "restore the offline runtime progress");
+            nk_ach_frame(restored);
+            CHECK(find_request(&online, "r=awardachievement&") >= 0,
+                  "the restored offline unlock is submitted when online");
+            nk_ach_destroy(restored);
+        }
+        free(progress);
+    }
 }
 
 int main(void) {

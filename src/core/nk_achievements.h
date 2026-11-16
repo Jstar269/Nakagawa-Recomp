@@ -34,6 +34,8 @@ extern "C" {
  * (src/rcheevos/consoleinfo.c) puts RA address 0 at guest 0x08000000: kernel RAM, user RAM
  * from 0x08800000, and extended RAM from 0x0A000000, up to RA address 0x03FFFFFF. */
 #define NK_ACH_CONSOLE_PSP 41u
+#define NK_ACH_PSP_USER_RAM_START 0x08800000u
+#define NK_ACH_PSP_USER_RAM_SIZE 0x01800000u
 
 /* Guest memory as the bridge may read it: the guest bytes [guest_start, guest_start + size)
  * live at host address base. A read outside that span reads nothing. */
@@ -114,10 +116,19 @@ uint32_t nk_ach_read_memory(const NkAchMemory *mem, uint32_t ra_address, uint8_t
 NkAch *nk_ach_create(const NkAchMemory *mem, NkAchTransport transport, void *transport_ctx);
 void nk_ach_destroy(NkAch *ach);
 
+/* The player updates this bounded guest-memory span when a runtime channel is opened. */
+void nk_ach_set_memory(NkAch *ach, const NkAchMemory *mem);
+
 /* Signs in with an RA API token (never a password: the token comes from the user's own
  * sign-in, kept in the OS credential store by the player). False only for a missing name or
  * token; otherwise the outcome arrives as a LOGIN_OK or LOGIN_FAILED event. */
 bool nk_ach_begin_login(NkAch *ach, const char *username, const char *token);
+/* Exchanges the password once for the RA token. The bridge retains no password after rcheevos
+ * has constructed its request; the player must clear its input buffers and store only the token. */
+bool nk_ach_begin_login_with_password(NkAch *ach, const char *username, const char *password);
+bool nk_ach_copy_user_token(const NkAch *ach, char *out, size_t out_size);
+bool nk_ach_copy_user_name(const NkAch *ach, char *out, size_t out_size);
+void nk_ach_logout(NkAch *ach);
 /* Loads the achievement set for the disc whose RA hash (32 lowercase hex digits, the MD5 RA's
  * PSP rule takes of PARAM.SFO then EBOOT.BIN) is hash. False only for a malformed hash;
  * otherwise the outcome is a GAME_LOADED or GAME_FAILED event. */
@@ -132,6 +143,7 @@ bool nk_ach_logged_in(const NkAch *ach);
 bool nk_ach_game_loaded(const NkAch *ach);
 /* Always false: see the softcore note at the top. */
 bool nk_ach_hardcore(const NkAch *ach);
+size_t nk_ach_copy_rich_presence(const NkAch *ach, char *out, size_t out_size);
 
 /* Moves up to max queued events, oldest first, into out; returns how many. When more than
  * NK_ACH_EVENT_QUEUE are waiting, the oldest are dropped and nk_ach_events_dropped counts

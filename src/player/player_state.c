@@ -189,6 +189,11 @@ void player_app_init(PlayerApp *app) {
     /* Initialize settings from disk or defaults */
     player_app_settings_init_default(&app->settings);
     player_app_load_settings(app, NULL);
+    app->achievements_store_available = nk_platform_credential_store_available();
+    snprintf(app->achievements_status, sizeof(app->achievements_status), "%s",
+             app->achievements_store_available
+                 ? "Softcore only. Sign in to connect."
+                 : "Sign-in requires Windows Credential Manager; this platform is unsupported.");
 
     /* Default preparation state */
     app->prep_state.stage = STAGE_IDLE;
@@ -1419,6 +1424,7 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->build_speed = PACKAGE_BUILD_SPEED_BALANCED;
     settings->check_updates_at_start = false;
     settings->discord_presence = false;
+    settings->achievements_enabled = false;
     settings->picker_folder[0] = '\0';
     settings->rebuild_prompt_version[0] = '\0';
     settings->developer_mode = false;
@@ -2124,6 +2130,14 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.discord_presence = discord_val;
     }
 
+    /* RetroAchievements is independent of the reserved network_mode switch and is off unless
+       the file explicitly stores true. */
+    NkJsonNode *achievements_node = nk_json_obj_get(root, "achievements_enabled");
+    bool achievements_val = false;
+    if (achievements_node && nk_json_get_bool(achievements_node, &achievements_val)) {
+        app->settings.achievements_enabled = achievements_val;
+    }
+
     /* A folder that no longer fits is dropped, not cut short. */
     const char *picker_folder = nk_json_get_string(nk_json_obj_get(root, "picker_folder"));
     if (picker_folder && strlen(picker_folder) < sizeof(app->settings.picker_folder)) {
@@ -2402,6 +2416,8 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
             app->settings.check_updates_at_start ? "true" : "false");
     fprintf(f, "  \"discord_presence\": %s,\n",
             app->settings.discord_presence ? "true" : "false");
+    fprintf(f, "  \"achievements_enabled\": %s,\n",
+            app->settings.achievements_enabled ? "true" : "false");
     player_settings_write_string(f, "picker_folder", app->settings.picker_folder);
     player_settings_write_string(f, "rebuild_prompt_version",
                                  app->settings.rebuild_prompt_version);
@@ -3996,6 +4012,22 @@ void player_app_toggle_discord_presence(PlayerApp *app) {
     app->settings.discord_presence = !app->settings.discord_presence;
     player_dev_log_add(app, "settings", "Discord status %s",
                        app->settings.discord_presence ? "on" : "off");
+    maybe_persist_settings(app);
+}
+
+void player_app_set_achievements_enabled(PlayerApp *app, bool enabled) {
+    if (!app) return;
+    if (enabled && !app->achievements_store_available) {
+        snprintf(app->achievements_status, sizeof(app->achievements_status),
+                 "Sign-in requires Windows Credential Manager; this platform is unsupported.");
+        return;
+    }
+    if (app->settings.achievements_enabled == enabled) return;
+    app->settings.achievements_enabled = enabled;
+    snprintf(app->achievements_status, sizeof(app->achievements_status), "%s",
+             enabled ? "Softcore only. Sign in to connect."
+                     : "RetroAchievements is off.");
+    player_dev_log_add(app, "settings", "RetroAchievements %s", enabled ? "on" : "off");
     maybe_persist_settings(app);
 }
 
@@ -5970,6 +6002,15 @@ void player_launch_work_run(PlayerLaunchWork *work) {
         work->failed_step = PLAYER_LAUNCH_STEP_PREPARE;
         return;
     }
+    if (!memchr(work->guest_memory_channel, '\0', sizeof work->guest_memory_channel)) {
+        snprintf(session->last_error, sizeof(session->last_error),
+                 "The guest-memory channel name is not terminated.");
+        work->failed_step = PLAYER_LAUNCH_STEP_PREPARE;
+        work->result = NK_ERROR_GENERIC;
+        return;
+    }
+    snprintf(session->config.guest_memory_channel,
+             sizeof session->config.guest_memory_channel, "%s", work->guest_memory_channel);
 
     /* Apply user settings via typed runtime configuration */
     player_app_apply_settings_to_session(&work->settings, &session->config);

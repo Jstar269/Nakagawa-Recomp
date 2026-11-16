@@ -2199,6 +2199,9 @@ static void deliver_vblank(void) {
      * pad sample. Check the pause script after that work so a same-VBLANK press
      * can be deferred until the guest reads it and queues its audio stimulus. */
     sr_vblank_tick();
+    /* The optional player-side reader consumes the shared arena while guest execution is paused
+       on this delivered VBLANK. The runtime hook is local IPC only. */
+    sr_guest_memory_vblank();
     sched_pause_script_maybe_request();
 }
 
