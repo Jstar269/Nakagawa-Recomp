@@ -774,13 +774,13 @@ class CompilerCompareTests(unittest.TestCase):
             "ptr=0x00007FF6BA002801 addr=0x7ffe99990000 bare=000001A2B1B57040 "
             "guest=0x08804000 crc=0x1111 status=FAIL\n"
         )
-        # Host-path-only and pointer-only variation across repeats normalises to the same digest.
+        # Build-root, SR_HOST, and timing variation across repeats normalises to the same digest.
         digest_a = compiler_compare._semantic_digest(
-            [("display-smoke-run", f"wrote {win_temp_1} ptr=0x00007FF763502801\n")],
+            [("display-smoke-run", "build/a/out SR_HOST=0x00007FF763502801 host_time_ms=10.0\n")],
             compiler_compare.ROOT / "build" / "a",
         )
         digest_b = compiler_compare._semantic_digest(
-            [("display-smoke-run", f"wrote {win_temp_2} ptr=0x00007FF6BA002801\n")],
+            [("display-smoke-run", "build/b/out SR_HOST=0x00007FF6BA002801 host_time_ms=14.2\n")],
             compiler_compare.ROOT / "build" / "b",
         )
         self.assertEqual(digest_a, digest_b)
@@ -805,7 +805,11 @@ class CompilerCompareTests(unittest.TestCase):
         self.assertIn("<HOST_ADDR>", markdown)
         self.assertIn("guest=0x08804000", markdown)
         self.assertIn("crc=0x1111", markdown)
-        self.assertIn("unstable field(s): status", markdown)
+        diff = summary["semantic_diff"]
+        assert isinstance(diff, dict)
+        self.assertIn("status", diff["fields"])
+        self.assertIn("unstable field(s):", markdown)
+        self.assertIn("status", markdown)
 
         # Defense in depth: render_markdown itself redacts even if given an unredacted report.
         spaced_user = "C:\\" + "Users\\" + "Alice Smith\\AppData\\Local\\" + "Temp\\nk_3333.csv"
@@ -968,6 +972,108 @@ class CompilerCompareTests(unittest.TestCase):
             veto_report = self.compare()
             self.assertEqual(veto_report["toolchains"][0]["status"], compiler_compare.STATUS_FAILED_VETO)
             self.assertFalse(diff_file.exists())
+
+    def test_semantic_hash_preserves_64bit_values_guest_paths_and_previous_normalisation(self) -> None:
+        build_root = compiler_compare.ROOT / "build" / "a"
+        distinct_pairs = (
+            ("acc=0x00000001ff76c43b\n", "acc=0x00000001ff76c43c\n"),
+            ("mult hi_lo=0x0000000a00000003\n", "mult hi_lo=0x0000000a00000004\n"),
+            ("ticks=0000000004000010\n", "ticks=0000000004000020\n"),
+            ("open /PSP_GAME/USRDIR/a.bin ok\n", "open /PSP_GAME/USRDIR/b.bin ok\n"),
+            ("file=/PSP_GAME/SYSDIR/EBOOT.BIN n=1\n", "file=/PSP_GAME/SYSDIR/BOOT.BIN n=1\n"),
+            ("mount /usr/data1\n", "mount /usr/data2\n"),
+        )
+        for text_a, text_b in distinct_pairs:
+            with self.subTest(pair=(text_a.strip(), text_b.strip())):
+                norm_a = compiler_compare._normalise_semantic_output(text_a, build_root)
+                norm_b = compiler_compare._normalise_semantic_output(text_b, build_root)
+                self.assertEqual(norm_a, text_a)
+                self.assertEqual(norm_b, text_b)
+                digest_a = compiler_compare._semantic_digest([("cosim-selftest", text_a)], build_root)
+                digest_b = compiler_compare._semantic_digest([("cosim-selftest", text_b)], build_root)
+                self.assertNotEqual(digest_a, digest_b)
+
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            trials = [
+                self._make_trial(base / "trial-1", [("cosim-selftest", "acc=0x00000001ff76c43b\n")]),
+                self._make_trial(base / "trial-2", [("cosim-selftest", "acc=0x00000001ff76c43c\n")]),
+                self._make_trial(base / "trial-3", [("cosim-selftest", "acc=0x00000001ff76c43b\n")]),
+            ]
+            summary = compiler_compare._measurement_summary(trials)
+            self.assertFalse(summary["semantic_hash_stable"])
+            diff = summary["semantic_diff"]
+            assert isinstance(diff, dict)
+            diff_text = compiler_compare._format_semantic_diff_text(diff)
+            self.assertIn("acc=0x00000001ff76c43b", diff_text)
+            self.assertIn("acc=0x00000001ff76c43c", diff_text)
+
+    def test_align_first_divergence_bounds_pairing_work_on_many_differing_lines(self) -> None:
+        count = 300
+        lines_a = [
+            f"STEP idx={i:04d} a=1 b=2 c=3 d=4 e=5 f=6 g=7 h=8 payload=xxxxxxxx"
+            for i in range(count)
+        ]
+        lines_b = [
+            f"STEP idx={i:04d} a=1 b=9 c=3 d=4 e=5 f=6 g=7 h=8 payload=xxxxxxxx"
+            for i in range(count)
+        ]
+        trial_outputs = [
+            [{"target": "cosim-selftest", "raw": "\n".join(lines_a) + "\n", "normalized": "\n".join(lines_a) + "\n"}],
+            [{"target": "cosim-selftest", "raw": "\n".join(lines_b) + "\n", "normalized": "\n".join(lines_b) + "\n"}],
+        ]
+        with mock.patch.object(
+            compiler_compare, "_extract_line_fields", wraps=compiler_compare._extract_line_fields,
+        ) as extract_spy, mock.patch.object(
+            compiler_compare.difflib, "SequenceMatcher", wraps=compiler_compare.difflib.SequenceMatcher,
+        ) as sm_spy:
+            diff = compiler_compare._first_semantic_divergence(trial_outputs, ["h1", "h2"])
+
+        assert isinstance(diff, dict)
+        self.assertEqual(diff["kind"], "changed")
+        self.assertEqual(diff["line_number"], 1)
+        self.assertEqual(diff["fields"], ["b"])
+        self.assertLessEqual(extract_spy.call_count, 200)
+        self.assertLessEqual(sm_spy.call_count, 1500)
+
+        # Also verify bounded work when an unmatched line is inserted ahead of many differing lines.
+        inserted_b = ["WARN x=3", *lines_b]
+        inserted_outputs = [
+            [{"target": "cosim-selftest", "raw": "\n".join(lines_a) + "\n", "normalized": "\n".join(lines_a) + "\n"}],
+            [{"target": "cosim-selftest", "raw": "\n".join(inserted_b) + "\n", "normalized": "\n".join(inserted_b) + "\n"}],
+        ]
+        with mock.patch.object(
+            compiler_compare, "_extract_line_fields", wraps=compiler_compare._extract_line_fields,
+        ) as extract_spy2:
+            diff_ins = compiler_compare._first_semantic_divergence(inserted_outputs, ["h1", "h2"])
+        assert isinstance(diff_ins, dict)
+        self.assertLessEqual(extract_spy2.call_count, 200)
+
+    def test_divergent_fields_extract_keys_after_colon_slash_semicolon_and_angle(self) -> None:
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line("PERF:frames=3", "PERF:frames=4"),
+            ["frames"],
+        )
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line("PERF:frames=3 x=1", "PERF:frames=4 x=1"),
+            ["frames"],
+        )
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line("<BUILD_ROOT>/x.bin:size=3", "<BUILD_ROOT>/x.bin:size=4"),
+            ["size"],
+        )
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line("S a=1;b=2", "S a=1;b=9"),
+            ["b"],
+        )
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line("/dir/k=1", "/dir/k=2"),
+            ["k"],
+        )
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line("if a==1", "if a==2"),
+            [],
+        )
 
 
 class RuntimeWorkloadRunnerTests(unittest.TestCase):

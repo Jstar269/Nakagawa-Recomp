@@ -18,11 +18,13 @@ trees under build/platform-ladder and remain shared across toolchain rows.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
 import difflib
 import hashlib
+import itertools
 import json
 import os
 from pathlib import Path
@@ -486,7 +488,7 @@ _WIN_BARE_PTR_RE = re.compile(r"(?<![A-Za-z0-9_])0000(?=[0-9a-fA-F]{12}\b)(?!0{1
 _TIMING_FIELD_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_]*_ms|fps)=\d+(?:\.\d+)?", re.IGNORECASE)
 
 _EQ_FIELD_RE = re.compile(
-    r'(?<![A-Za-z0-9_.-=])([A-Za-z_][A-Za-z0-9_.-]*)='
+    r'(?<![A-Za-z0-9_.\-=])([A-Za-z_][A-Za-z0-9_.-]*)='
     r'(?!=)("[^"]*"|(?:[^\s,;]|,(?!\s*(?:$|[)\]}]|[A-Za-z_][A-Za-z0-9_.-]*=)))*)',
 )
 _QUOTED_EQ_VALUE_RE = re.compile(r'="[^"]*"')
@@ -511,7 +513,7 @@ def _path_variants(path: Path) -> tuple[str, ...]:
             if len(text) >= 2 and text[1] == ":":
                 variants.append(text[0].lower() + text[1:])
                 variants.append(text[0].upper() + text[1:])
-    return tuple(dict.fromkeys(variants))
+    return tuple(sorted(dict.fromkeys(variants), key=len, reverse=True))
 
 
 def _host_path_roots() -> tuple[str, ...]:
@@ -591,7 +593,8 @@ def _normalise_semantic_output(text: str, build_root: Path) -> str:
             result = result.replace(variant, "<BUILD_ROOT>")
     for variant in _path_variants(ROOT):
         result = result.replace(variant, "<REPO_ROOT>")
-    result = _redact_host_details(result)
+    result = re.sub(r"SR_HOST=0x[0-9a-fA-F]+", "SR_HOST=<HOST_ADDR>", result)
+    result = _CALL_ADDR_RE.sub(r"\1<HOST_ADDR>", result)
     result = _TIMING_FIELD_RE.sub(r"\1=<HOST_TIME>", result)
     return result.replace("\r\n", "\n").replace("\r", "\n")
 
@@ -659,15 +662,36 @@ def _divergent_fields_on_line(line_a: str, line_b: str) -> list[str]:
     return [key for key in ordered_keys if fields_a.get(key) != fields_b.get(key)]
 
 
-def _line_match_score(line_a: str, line_b: str) -> tuple[int, float]:
-    fields_a = _extract_line_fields(line_a)
-    fields_b = _extract_line_fields(line_b)
-    shared_keys = len(set(fields_a) & set(fields_b))
-    head_a = line_a.split(None, 1)[0] if line_a.split(None, 1) else ""
-    head_b = line_b.split(None, 1)[0] if line_b.split(None, 1) else ""
-    same_head = 1 if (head_a and head_a == head_b and "=" not in head_a and ":" not in head_a) else 0
-    ratio = difflib.SequenceMatcher(None, line_a, line_b, autojunk=False).ratio()
-    return (shared_keys + same_head, ratio)
+_MAX_ALIGN_PAIR_LINES = 32
+_MAX_ALIGN_LINE_CHARS = 1024
+
+
+def _line_signature(line: str) -> tuple[frozenset[str], str]:
+    keys = frozenset(_extract_line_fields(line))
+    head_parts = line.split(None, 1)
+    head = head_parts[0] if head_parts else ""
+    if "=" in head or ":" in head:
+        head = ""
+    return keys, head
+
+
+def _score_line_pair(
+    sig_a: tuple[frozenset[str], str],
+    sig_b: tuple[frozenset[str], str],
+    matcher: difflib.SequenceMatcher[str],
+) -> tuple[int, float] | None:
+    keys_a, head_a = sig_a
+    keys_b, head_b = sig_b
+    shared_keys = len(keys_a & keys_b)
+    same_head = 1 if (head_a and head_a == head_b) else 0
+    overlap_head = shared_keys + same_head
+    threshold = 0.45 if overlap_head >= 1 else 0.65
+    if matcher.quick_ratio() < threshold:
+        return None
+    ratio = matcher.ratio()
+    if ratio < threshold:
+        return None
+    return (overlap_head, ratio)
 
 
 def _align_first_divergence(
@@ -681,16 +705,15 @@ def _align_first_divergence(
     a_entries = [(i, norm_a_lines[i]) for _t, ai1, ai2, _bj1, _bj2 in diff_opcodes for i in range(ai1, ai2)]
     b_entries = [(j, norm_b_lines[j]) for _t, _ai1, _ai2, bj1, bj2 in diff_opcodes for j in range(bj1, bj2)]
 
-    b_buckets: dict[str, list[int]] = {}
+    b_buckets: dict[str, deque[int]] = {}
     for pos, (_j, line) in enumerate(b_entries):
-        b_buckets.setdefault(line, []).append(pos)
+        b_buckets.setdefault(line, deque()).append(pos)
     used_b: set[int] = set()
     rem_a: list[tuple[int, str]] = []
     for i, line in a_entries:
         bucket = b_buckets.get(line)
-        matched_pos = next((pos for pos in bucket if pos not in used_b), None) if bucket else None
-        if matched_pos is not None:
-            used_b.add(matched_pos)
+        if bucket:
+            used_b.add(bucket.popleft())
         else:
             rem_a.append((i, line))
     rem_b = [entry for pos, entry in enumerate(b_entries) if pos not in used_b]
@@ -712,18 +735,31 @@ def _align_first_divergence(
         first_tag == "replace"
         and (i2 - i1) == 1
         and (j2 - j1) == 1
-        and (i1, norm_a_lines[i1]) in rem_a
-        and (j1, norm_b_lines[j1]) in rem_b
+        and rem_a
+        and rem_b
+        and rem_a[0][0] == i1
+        and rem_b[0][0] == j1
     ):
         return ("changed", i1 + 1, i1, j1, norm_a_lines[i1], norm_b_lines[j1])
 
+    # Bound pairing work to the earliest differing window so large diffs stay linear-ish;
+    # the earliest divergence always involves the leading unmatched lines.
+    cand_a = rem_a[:_MAX_ALIGN_PAIR_LINES]
+    cand_b = rem_b[:_MAX_ALIGN_PAIR_LINES]
+    sigs_a = [_line_signature(line) for _idx, line in cand_a]
+    sigs_b = [_line_signature(line) for _idx, line in cand_b]
+
     candidates: list[tuple[tuple[int, float], int, int]] = []
-    for pos_a, (_ia, line_a) in enumerate(rem_a):
-        for pos_b, (_jb, line_b) in enumerate(rem_b):
-            overlap_head, ratio = _line_match_score(line_a, line_b)
-            if (overlap_head >= 1 and ratio >= 0.45) or ratio >= 0.65:
-                candidates.append(((overlap_head, ratio), pos_a, pos_b))
-    candidates.sort(key=lambda item: item[0], reverse=True)
+    matcher = difflib.SequenceMatcher(None, "", "", autojunk=False)
+    for pos_b, (_jb, line_b) in enumerate(cand_b):
+        sig_b = sigs_b[pos_b]
+        matcher.set_seq2(line_b[:_MAX_ALIGN_LINE_CHARS])
+        for pos_a, (_ia, line_a) in enumerate(cand_a):
+            matcher.set_seq1(line_a[:_MAX_ALIGN_LINE_CHARS])
+            score = _score_line_pair(sigs_a[pos_a], sig_b, matcher)
+            if score is not None:
+                candidates.append((score, pos_a, pos_b))
+    candidates.sort(key=lambda item: (-item[0][0], -item[0][1], abs(item[1] - item[2]), item[1], item[2]))
 
     paired_a: set[int] = set()
     paired_b: set[int] = set()
@@ -733,13 +769,13 @@ def _align_first_divergence(
             continue
         paired_a.add(pos_a)
         paired_b.add(pos_b)
-        idx_a, line_a = rem_a[pos_a]
-        idx_b, line_b = rem_b[pos_b]
+        idx_a, line_a = cand_a[pos_a]
+        idx_b, line_b = cand_b[pos_b]
         items.append(((min(idx_a, idx_b), 0), "changed", idx_a + 1, idx_a, idx_b, line_a, line_b))
-    for pos_a, (idx_a, line_a) in enumerate(rem_a):
+    for pos_a, (idx_a, line_a) in enumerate(cand_a):
         if pos_a not in paired_a:
             items.append(((idx_a, 1), "deleted", idx_a + 1, idx_a, None, line_a, ""))
-    for pos_b, (idx_b, line_b) in enumerate(rem_b):
+    for pos_b, (idx_b, line_b) in enumerate(cand_b):
         if pos_b not in paired_b:
             items.append(((idx_b, 2), "inserted", idx_b + 1, None, idx_b, "", line_b))
 
@@ -780,13 +816,13 @@ def _first_semantic_divergence(trial_outputs: list[list[dict[str, str]]], hashes
     if norm_a_lines == norm_b_lines:
         trailing_diff = base_norm.endswith("\n") != other_norm.endswith("\n")
         kind = "trailing_newline" if trailing_diff else "non_line_difference"
-        unified = list(difflib.unified_diff(
+        unified = list(itertools.islice(difflib.unified_diff(
             base_norm.splitlines(keepends=True),
             other_norm.splitlines(keepends=True),
             fromfile=f"{target} (trial {baseline_idx + 1})",
             tofile=f"{target} (trial {divergent_idx + 1})",
             lineterm="",
-        ))[:60]
+        ), 60))
         return {
             "target": target,
             "baseline_trial": baseline_idx + 1,
@@ -808,13 +844,13 @@ def _first_semantic_divergence(trial_outputs: list[list[dict[str, str]]], hashes
     raw_a_line = raw_a_lines[idx_a] if idx_a is not None and idx_a < len(raw_a_lines) else norm_a_line
     raw_b_line = raw_b_lines[idx_b] if idx_b is not None and idx_b < len(raw_b_lines) else norm_b_line
     fields = [] if kind == "reordered" else _divergent_fields_on_line(norm_a_line, norm_b_line)
-    unified = list(difflib.unified_diff(
+    unified = list(itertools.islice(difflib.unified_diff(
         norm_a_lines,
         norm_b_lines,
         fromfile=f"{target} (trial {baseline_idx + 1})",
         tofile=f"{target} (trial {divergent_idx + 1})",
         lineterm="",
-    ))[:60]
+    ), 60))
     return {
         "target": target,
         "baseline_trial": baseline_idx + 1,
@@ -1347,8 +1383,10 @@ def render_markdown(report: dict[str, Any]) -> str:
             if entry["status"] == STATUS_WORKLOAD_FAILED:
                 failure = f"runtime workload matrix {workload_status}"
             else:
-                failure = (veto.get("failed_gate") or entry.get("measurement_error")
-                           or entry.get("reason", "N/A"))
+                failure = _redact_host_details(str(
+                    veto.get("failed_gate") or entry.get("measurement_error")
+                    or entry.get("reason", "N/A")
+                ))
             lines.append(
                 f"| {entry['compiler']} | {entry['linker_selection']} | {entry['status']} "
                 f"({failure}) | {workload_status} | — | — | — | — | — | — |"
@@ -1466,7 +1504,7 @@ def compare(compilers: list[str], linkers: list[str], *, make: str, python: str,
             "peak_memory": f"sampled aggregate process-tree working set; {int(SAMPLE_INTERVAL_SECONDS * 1000)} ms interval",
             "link_wall_time": "sum of serial compiler-driver wall times for link invocations under each isolated trial root",
             "runtime_workloads": "existing #282 run_perf_benchmarks matrix after the complete veto, with a row-specific BUILD_ROOT where honored, sequential fixed-tree platform-ladder workloads, and the row's compiler/linker flags",
-            "semantic_hash": "SHA-256 of combined stdout/stderr from repeated fixture targets after normalizing build roots, host paths, host addresses and host timing fields",
+            "semantic_hash": "SHA-256 of combined stdout/stderr from repeated fixture targets after normalizing build roots, host addresses and host timing fields",
             "inputs": "clears ambient game, title, codegen, SR and NK overrides; uses only pinned source-owned fixtures and toolchain paths",
         },
         "toolchains": records,
