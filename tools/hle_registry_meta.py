@@ -850,12 +850,13 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: io-seek64, io-seek64-rdwr)",
             "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001: io-eof-seek-negative, io-eof-seek-negative-rdonly, io-eof-write-past, io-eof-read-past)",
             "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-flash-*)",
+            "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-002: io-edge-flash-*)",
             "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-002: umd-eof-raw-seek-past)",
             "tests/native/hle_thread_selftest.c:test_flash0_font_device",
             "tests/native/hle_thread_selftest.c:test_umd_block_device_sectors",
             "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
         ],
-        "limitation": "PSP-IO-001 measures 64-bit SEEK_SET 32, SEEK_CUR -16, SEEK_END 0 and the end position after a 32-byte append on one host0 file; PSP-IO-EOF-001 measures a Memory Stick seek before the start as EINVAL with the position unchanged (pspautotests revision f573fe8c9122a8ff5db4f030d74557bed644b4e0 records -1 there, kept for other devices), a seek and write past the end extending the file, and a read past the end returning 0; PSP-KERNEL-SEM-001 measures a Memory Stick position as 32 bits wide (0xFFFFFFFF accepted, beyond it EINVAL with the position unchanged); other devices keep IO_LSEEK_OUT_OF_RANGE there (#1380); PSP-HLE-IO-SEEK-001 measures a read-only flash0: file refusing SEEK_SET and SEEK_END destinations before the start or past the end with 0x80010016 and the position unchanged (high word 0xFFFFFFFF at -1 and size + 16, 0 at 0xFFFFFFFF and 0x100000000 from SEEK_SET), measured on ltn0.pgf; on flash0: SEEK_CUR, the async calls, the 0xFFFFFFFF and 0x100000000 band from SEEK_END, where the high word changes between size + 16 and 0xFFFFFFFF, destinations past 0x100000000 and files other than ltn0.pgf are unmeasured; invalid whence and error precedence remain unmeasured (#341). UMD block-device seeks follow PSP-UMDRAW-001's captured but not acceptance-qualified cells (sector positions, SEEK_END at the last sector, 0x8001b003 for a negative or far-past-the-disc position; the negative refusal rests on them alone) and PSP-IO-EOF-002's measured edge: one and two sectors past the last sector, SEEK_END +1 and SEEK_SET 0x100000000 answer 0x8001b003 with the high word 0xFFFFFFFF and the position unchanged",
+        "limitation": "PSP-IO-001 measures 64-bit SEEK_SET 32, SEEK_CUR -16, SEEK_END 0 and the end position after a 32-byte append on one host0 file; PSP-IO-EOF-001 measures a Memory Stick seek before the start as EINVAL with the position unchanged (pspautotests revision f573fe8c9122a8ff5db4f030d74557bed644b4e0 records -1 there, kept for other devices), a seek and write past the end extending the file, and a read past the end returning 0; PSP-KERNEL-SEM-001 measures a Memory Stick position as 32 bits wide (0xFFFFFFFF accepted, beyond it EINVAL with the position unchanged); other devices keep IO_LSEEK_OUT_OF_RANGE there (#1380); PSP-HLE-IO-SEEK-001 measures a read-only flash0: file refusing SEEK_SET and SEEK_END destinations before the start or past the end with 0x80010016 and the position unchanged (high word 0xFFFFFFFF at -1 and size + 16, 0 at 0xFFFFFFFF and 0x100000000 from SEEK_SET), measured on ltn0.pgf; PSP-HLE-IO-SEEK-002 adds, on flash0:/font/ltn0.pgf, SEEK_CUR before the start and past the end, SEEK_SET past 0x100000000 and SEEK_END to 0xFFFFFFFF and 0x100000000, all 0x80010016 with the position unchanged and the high word 0 exactly when the destination is at or above 0x80000000; the synchronous calls follow that rule on that file only; the async calls, which keep the earlier rule, and other flash0 files are unmeasured; invalid whence and error precedence remain unmeasured (#341). UMD block-device seeks follow PSP-UMDRAW-001's captured but not acceptance-qualified cells (sector positions, SEEK_END at the last sector, 0x8001b003 for a negative or far-past-the-disc position; the negative refusal rests on them alone) and PSP-IO-EOF-002's measured edge: one and two sectors past the last sector, SEEK_END +1 and SEEK_SET 0x100000000 answer 0x8001b003 with the high word 0xFFFFFFFF and the position unchanged",
     },
     "h_IoMkdir": {
         "status": "complete",
@@ -872,10 +873,11 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: io-missing-parent, io-excl-new, io-excl-existing)",
             "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001: io-eof-missing)",
             "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*)",
+            "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-002: io-edge-ms-*)",
             "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
             "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
         ],
-        "limitation": "measured coverage is one host0 file's create/write/read/append/missing-file path, PSP-UMDIO-001's fixed open paths and flags, PSP-KERNEL-SEM-001's Memory Stick exclusive create and PSP-IO-EOF-001's missing-file opens; an open without PSP_O_CREAT never creates a file (write-only, read-write, read-only and write-only with PSP_O_TRUNC each answer 0x80010002), a create under a missing directory is 0x80010002, PSP_O_CREAT|PSP_O_EXCL on an existing file is EEXIST with the file unchanged, and PSP_O_RDONLY|PSP_O_CREAT on a missing Memory Stick file is 0x80010016 and creates nothing (#1380); the same open of an existing file, or with PSP_O_APPEND, PSP_O_TRUNC or PSP_O_EXCL, is unmeasured and stops at IO_OPEN_READ_ONLY_CREATE (0x80010086, nothing opened or changed), on ms0: and fatms0: alike; other flag combinations and general error precedence remain unmeasured (#341). UMD block-device reads and seeks are covered under sceIoRead and sceIoLseek",
+        "limitation": "measured coverage is one host0 file's create/write/read/append/missing-file path, PSP-UMDIO-001's fixed open paths and flags, PSP-KERNEL-SEM-001's Memory Stick exclusive create and PSP-IO-EOF-001's missing-file opens; an open without PSP_O_CREAT never creates a file (write-only, read-write, read-only and write-only with PSP_O_TRUNC each answer 0x80010002), a create under a missing directory is 0x80010002, PSP_O_CREAT|PSP_O_EXCL on an existing file is EEXIST with the file unchanged, and PSP_O_RDONLY|PSP_O_CREAT on a missing Memory Stick file is 0x80010016 and creates nothing (#1380, measured on ms0:, followed on fatms0:); PSP-HLE-IO-SEEK-002 measures on ms0: that PSP_O_RDONLY|PSP_O_CREAT opens an existing file read-only, that adding PSP_O_TRUNC on an existing file is 0x80010016 with the file not cut, and that adding PSP_O_EXCL on a missing name in an existing directory is 0x80010016 with nothing created; only the PSP_O_TRUNC (0x0601) and PSP_O_EXCL (0x0A01) opens never consult the disc; a read-only 0x0201 ms0: open whose name also exists on the disc opens the disc file, even when the Memory Stick holds that file, as every read-only ms0: open does (unchanged, unmeasured); every other read-only create (an existing fatms0: file, PSP_O_TRUNC or PSP_O_EXCL on fatms0:, PSP_O_APPEND, PSP_O_TRUNC on a missing ms0: file, PSP_O_EXCL on an existing ms0: file or under a missing parent directory) is unmeasured and stops at IO_OPEN_READ_ONLY_CREATE (0x80010086, nothing opened or changed); other flag combinations and general error precedence remain unmeasured (#341). UMD block-device reads and seeks are covered under sceIoRead and sceIoLseek",
     },
     "h_IoRead": {
         "status": "partial",
@@ -899,10 +901,11 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "docs/HARDWARE_ORACLE.md (PSP-IO-001: io-write and io-append)",
             "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*)",
+            "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-002: io-edge-ms-*)",
             "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
             "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
         ],
-        "limitation": "PSP-IO-001 measures a 64-byte write that returns 64 on a created host0 file and a 32-byte write through an append-mode descriptor that returns 32; PSP-HLE-IO-SEEK-001 measures a write through a PSP_O_RDONLY Memory Stick descriptor as 0x80020323 with the file unchanged (#1380), which sceIoWriteAsync shares unmeasured; read-only descriptors on other devices, short writes, zero-length writes, unreadable source buffers, raw devices and standard-stream writes remain unmeasured (#341); a write that would carry the 32-bit position past its range fails closed with IO_WRITE_OUT_OF_RANGE (#1380)",
+        "limitation": "PSP-IO-001 measures a 64-byte write that returns 64 on a created host0 file and a 32-byte write through an append-mode descriptor that returns 32; PSP-HLE-IO-SEEK-001 measures a write through a PSP_O_RDONLY Memory Stick descriptor as 0x80020323 with the file unchanged (#1380); PSP-HLE-IO-SEEK-002 measures sceIoWriteAsync on an idle PSP_O_RDONLY ms0: descriptor returning 0x80020323 at once with nothing queued; with a request pending both calls answer the busy error first (unmeasured), and a fatms0: sceIoWriteAsync queues and completes with this write's refusal (unmeasured); read-only descriptors on other devices, short writes, zero-length writes, unreadable source buffers, raw devices and standard-stream writes remain unmeasured (#341); a write that would carry the 32-bit position past its range fails closed with IO_WRITE_OUT_OF_RANGE (#1380)",
     },
     # Async IoFileMgr requests retain per-fd results and callbacks. Their
     # deterministic import-boundary service interval is synthetic timing, not
@@ -922,8 +925,12 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     },
     "h_IoWriteAsync": {
         "status": "partial",
-        "evidence": ["tests/native/hle_thread_selftest.c:test_io_async_and_path_imports"],
-        "limitation": "request completion uses a deterministic synthetic import-boundary scheduler; PSP timing and callback ordering remain unmeasured",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-002: io-edge-ms-*)",
+            "tests/native/hle_thread_selftest.c:test_io_async_and_path_imports",
+            "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
+        ],
+        "limitation": "request completion uses a deterministic synthetic import-boundary scheduler; PSP timing and callback ordering remain unmeasured; PSP-HLE-IO-SEEK-002 measures an idle PSP_O_RDONLY ms0: descriptor refusing at once with 0x80020323 and queueing nothing; with a request pending the busy error comes first (unmeasured, as sceIoWrite), and fatms0: and other devices queue the write and complete with sceIoWrite's answer (unmeasured)",
     },
     "h_IoLseekAsync": {
         "status": "partial",
@@ -935,13 +942,19 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     },
     "h_IoLseek32Async": {
         "status": "partial",
-        "evidence": ["tests/native/hle_thread_selftest.c:test_io_async_and_path_imports"],
-        "limitation": "request completion uses a deterministic synthetic import-boundary scheduler; PSP timing and callback ordering remain unmeasured",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_io_async_and_path_imports",
+            "tests/native/hle_thread_selftest.c:test_flash0_font_device",
+        ],
+        "limitation": "request completion uses a deterministic synthetic import-boundary scheduler; PSP timing and callback ordering remain unmeasured; no asynchronous seek is measured, so a flash0: destination follows sceIoLseekAsync's rule, not sceIoLseek32's PSP-HLE-IO-SEEK-002 rule",
     },
     "h_IoIoctlAsync": {
         "status": "partial",
-        "evidence": ["tests/native/hle_thread_selftest.c:test_io_async_and_path_imports"],
-        "limitation": "request completion uses a deterministic synthetic import-boundary scheduler; PSP ioctl timing and callback ordering remain unmeasured",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_io_async_and_path_imports",
+            "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
+        ],
+        "limitation": "request completion uses a deterministic synthetic import-boundary scheduler; PSP ioctl timing and callback ordering remain unmeasured; the Memory Stick file commands PSP-HLE-IO-SEEK-001 measured through sceIoIoctl (0x01010005, 0x01020003, 0x01020004, 0x01020006, 0x01020007, 0x01030008) are not measured asynchronously; the request reaches the same driver, so its completion follows sceIoIoctl's rule: the measured form completes with 0x80020325 and changes nothing, and other forms of those commands complete at IO_MS_FILE_IOCTL (0x80010086)",
     },
     "h_IoCloseAsync": {
         "status": "partial",
@@ -2702,10 +2715,11 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "PSPAutotests tests/io/file/file.expected (sceIoLseek32(fd, -10, SEEK_END) 26 on a 36-byte file)",
             "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001 and PSP-IO-EOF-002: a Memory Stick seek before the start answers 0x80010016 and a disc0: seek outside the file 0x80010005, position unchanged)",
             "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-flash-*)",
+            "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-002: io-edge-flash-*)",
             "tests/native/hle_thread_selftest.c:test_fd_namespace",
             "tests/native/hle_thread_selftest.c:test_flash0_font_device",
         ],
-        "limitation": "the Memory Stick, disc0: and flash0: (SEEK_SET and SEEK_END, PSP-HLE-IO-SEEK-001, on ltn0.pgf) rules are measured; a flash0: SEEK_CUR and a seek before the start on other devices are not (#341)",
+        "limitation": "the Memory Stick, disc0: and flash0: (SEEK_SET and SEEK_END, PSP-HLE-IO-SEEK-001, on ltn0.pgf) rules are measured, and PSP-HLE-IO-SEEK-002 adds flash0:/font/ltn0.pgf SEEK_CUR before the start and past the end (0x80010016, position unchanged); sceIoLseek32Async keeps the earlier rule (no async seek is measured), other flash0 files are unmeasured, and a seek before the start on other devices is not measured (#341)",
     },
     # #341 fixes (2026-11-06): handlers changed to match their pspautotests cells, with a
     # production-dispatch test that fails on the old code.

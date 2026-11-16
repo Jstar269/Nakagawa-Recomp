@@ -1373,12 +1373,14 @@ uint32_t hle_io_umd_read_us(uint64_t bytes);   /* how long the UMD drive takes t
 void hle_io_release_thread(uint32_t thread_uid);   /* a thread ended: abandon the disc fetch it waited for */
 uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence, const char *api, uint32_t *position, uint32_t *error_high);
 uint32_t h_IoLseek32(CpuState *s);
+uint32_t io_lseek32_async_complete(CpuState *s);   /* sceIoLseek32Async's completion */
 /* The volatile-memory lock handlers (hle_kernel_memory.c); hle_power.c registers their scePower
  * aliases. */
 uint32_t h_VolatileMemLock(CpuState *s);
 uint32_t h_VolatileMemTryLock(CpuState *s);
 uint32_t h_VolatileMemUnlock(CpuState *s);
 uint32_t h_io_ioctl_args(uint32_t fd, uint32_t cmd, uint32_t in, uint32_t inlen, uint32_t out, uint32_t outlen);
+uint32_t io_ioctl_async_complete(uint32_t fd, uint32_t cmd, uint32_t in, uint32_t inlen, uint32_t out, uint32_t outlen);
 int io_memstick_capacity(uint32_t info[5]);
 uint32_t io_async_complete_fd(uint32_t fd);
 void io_async_dispatch_tick(void);
