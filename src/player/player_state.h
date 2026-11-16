@@ -1958,6 +1958,9 @@ void player_app_cycle_title_play_mode(PlayerApp *app, int game_index);
 PlayerPlayMode player_app_title_play_mode(const PlayerApp *app, int game_index);
 /* A title's part: Library default, then each of the part's values, then Library default. */
 void player_app_cycle_title_part(PlayerApp *app, int game_index, int part);
+/* Sets the library part to `value_index`, or a title part to its index; -1 clears a title's
+ * override and follows the library. Values use player_enhanced_part(part)->values. */
+void player_app_enhanced_page_set_part(PlayerApp *app, int part, int value_index);
 /* The title's own value for a part: -1 follows the library. */
 int player_app_title_part(const PlayerApp *app, int game_index, int part);
 /* The title's "Last session" line from the report under the user data folder; false, with
@@ -1977,6 +1980,9 @@ void player_app_close_enhanced_page_if_title_gone(PlayerApp *app);
 /* Settings > Enhanced's play mode row: the title's choice on a title's page, else the
  * library's default. On a title's page whose game is gone, it closes the page instead. */
 void player_app_enhanced_page_cycle_mode(PlayerApp *app);
+/* Selects Library, Authentic, Enhanced or Ace by its visible row index; the library has only
+ * Authentic and Enhanced. */
+void player_app_enhanced_page_set_mode(PlayerApp *app, int choice_index);
 /* Settings > Enhanced's row for `part`: the title's value on a title's page, else the
  * library's. On a title's page whose game is gone, it closes the page instead. */
 void player_app_enhanced_page_cycle_part(PlayerApp *app, int part);

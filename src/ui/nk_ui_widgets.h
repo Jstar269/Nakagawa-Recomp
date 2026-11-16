@@ -186,6 +186,10 @@ typedef struct {
    one), or -1. */
 int nk_ui_top_bar(NkUi *ui, NkUiId id, const NkUiSection *sections, size_t count,
                   const char *input_label, bool input_active);
+/* A horizontal set of focusable tabs with the top bar's active underline and
+   shoulder-button navigation. `height` is the tab strip's logical height. */
+int nk_ui_section_tabs(NkUi *ui, NkUiId id, const NkUiSection *sections, size_t count,
+                       float height);
 
 typedef struct {
     NkUiPromptAction action;

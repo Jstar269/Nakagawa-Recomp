@@ -1682,7 +1682,8 @@ static void player_report_shutdown(void) {
 }
 
 /* The Settings controls. Each change is saved as it is made. */
-static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size_t arg) {
+static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size_t arg,
+                                     int choice_index) {
     switch (op) {
         case PLAYER_UI_SETTINGS_CHECK_UPDATES:
             player_app_set_view(app, VIEW_UPDATES);
@@ -1764,7 +1765,12 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_TOGGLE_VSYNC: player_app_toggle_vsync(app); break;
         case PLAYER_UI_SETTINGS_TOGGLE_FULLSCREEN: player_app_toggle_fullscreen(app); break;
         case PLAYER_UI_SETTINGS_CYCLE_SCALING: player_app_cycle_present_scaling(app, 1); break;
-        case PLAYER_UI_SETTINGS_CYCLE_PRESET: player_app_cycle_graphics_preset(app, 1); break;
+        case PLAYER_UI_SETTINGS_CYCLE_PRESET:
+            player_app_cycle_graphics_preset(app, choice_index < 0 ? -1 : 1);
+            break;
+        case PLAYER_UI_SETTINGS_SET_PRESET:
+            if (choice_index > 0) player_app_apply_graphics_preset(app, choice_index);
+            break;
         case PLAYER_UI_SETTINGS_VOLUME_DOWN: player_app_adjust_volume(app, -5); break;
         case PLAYER_UI_SETTINGS_VOLUME_UP: player_app_adjust_volume(app, 5); break;
         case PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS: player_app_toggle_ui_sounds(app); break;
@@ -1782,9 +1788,14 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_CYCLE_TEXT_SIZE: player_app_cycle_text_size(app); break;
         case PLAYER_UI_SETTINGS_OPEN_ACE: player_app_set_view(app, VIEW_ACE_SETTINGS); break;
         case PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE: player_app_enhanced_page_cycle_mode(app); break;
-        case PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART:
-            if (arg < (size_t)PLAYER_PART_COUNT) player_app_enhanced_page_cycle_part(app, (int)arg);
+        case PLAYER_UI_SETTINGS_SET_PLAY_MODE:
+            player_app_enhanced_page_set_mode(app, choice_index);
             break;
+        case PLAYER_UI_SETTINGS_SET_ENHANCED_PART:
+            if (arg < (size_t)PLAYER_PART_COUNT)
+                player_app_enhanced_page_set_part(app, (int)arg, choice_index);
+            break;
+        case PLAYER_UI_SETTINGS_SELECT_ENHANCED_TAB: break; /* consumed by PlayerUiNk */
         case PLAYER_UI_SETTINGS_CYCLE_HIGH_CONTRAST: player_app_cycle_high_contrast_focus(app); break;
         case PLAYER_UI_SETTINGS_CYCLE_REDUCE_MOTION: player_app_cycle_reduce_motion(app); break;
         case PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_FULLSCREEN:
@@ -1993,7 +2004,8 @@ static void player_ui_nk_apply_action(PlayerApp *app,
         return;
     }
     if (action->kind == PLAYER_UI_ACTION_SETTINGS) {
-        player_ui_settings_apply(app, (PlayerUiSettingsOp)action->primary, action->title_index);
+        player_ui_settings_apply(app, (PlayerUiSettingsOp)action->primary, action->title_index,
+                                 action->choice_index);
         return;
     }
     if (action->kind == PLAYER_UI_ACTION_CONTROLLER) {

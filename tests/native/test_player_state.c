@@ -12006,6 +12006,12 @@ static void test_play_mode_title_page(void) {
     assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
     player_app_enhanced_page_cycle_part(app, PLAYER_PART_TEXT);
     assert(app->settings.enhanced.part[PLAYER_PART_TEXT] == 0);
+    player_app_enhanced_page_set_mode(app, 1);
+    assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, 1);
+    assert(app->settings.enhanced.part[PLAYER_PART_FILTERING] == 8);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, 0);
+    assert(app->settings.enhanced.part[PLAYER_PART_FILTERING] == 16);
     player_app_close_enhanced_page(app);
     assert(app->active_view == VIEW_SETTINGS);
 
@@ -12014,6 +12020,12 @@ static void test_play_mode_title_page(void) {
     player_app_enhanced_page_cycle_mode(app);                     /* the title's choice */
     assert(player_app_title_play_mode(app, 1) == PLAYER_PLAY_AUTHENTIC);
     assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
+    player_app_enhanced_page_set_mode(app, 2);
+    assert(player_app_title_play_mode(app, 1) == PLAYER_PLAY_ENHANCED);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, 0);
+    assert(player_app_title_part(app, 1, PLAYER_PART_TEXT) == 1);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, -1);
+    assert(player_app_title_part(app, 1, PLAYER_PART_TEXT) == -1);
     player_app_enhanced_page_cycle_part(app, PLAYER_PART_TEXT);   /* library -> on */
     assert(player_app_title_part(app, 1, PLAYER_PART_TEXT) == 1);
     assert(app->settings.enhanced.part[PLAYER_PART_TEXT] == 0);

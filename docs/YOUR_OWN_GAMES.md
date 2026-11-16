@@ -244,12 +244,23 @@ finds the same title the player does.
 
 ## Graphics presets
 
-**Settings > Graphics preset** picks a set of display settings and up to three Enhanced options in one choice. A
+**Settings > Enhanced > Graphics preset** picks a set of display settings and up to three Enhanced options in one choice. A
 preset is used only when a game plays in Enhanced or Ace. In Authentic, a game always runs with your own **Resolution**,
 **Scaling**, **VSync** and **Game fullscreen** settings, whatever the preset, because a larger render scale also
 changes what the game can copy from its own screen, such as a save picture. Choosing a preset doesn't change those
 settings. Changing **Resolution**, **Scaling** or **VSync** yourself, or **Game fullscreen** under Handheld (the one
 preset that sets it), sets the preset back to **Custom**, which uses your settings everywhere.
+
+The Graphics preset and Play mode stay above six tabs on Settings > Enhanced and on a game's **Enhanced options**
+page: **Picture** (Texture filtering, Widescreen, Sharper enlarging, Texture pack, Full 32-bit colour, Supersampling,
+Smooth far textures, Texture scaling, Smart 2D filter and Crisp system text), **Motion** (Smooth motion and Frame
+pacing), **Sound** (Clean pitched sound and Unclipped sound), **Controls** (Stick dead zone), **On-screen** (Speed
+readout and Game badge), and **Advanced** (Finer patches, Wider culling, Short loads, Late pad sampling and Soft
+shadows). A right-side panel gives the focused option's description and caveats. On a game's page, inherited values
+are shown as `Library (value)` in muted text and an override is highlighted. Ace-only options carry a tag; options
+unavailable in the current play mode stay visible but dimmed, with the reason in the detail panel. A title's **Texture
+pack folder** and **Remove texture pack** actions appear beside Texture pack in Picture. All changes keep the same
+settings keys and values as before.
 
 | Preset | Resolution | Scaling | VSync | Game fullscreen | Crisp system text | Sharper enlarging | Full 32-bit colour |
 | --- | --- | --- | --- | --- | --- | --- | --- |

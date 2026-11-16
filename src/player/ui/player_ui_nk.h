@@ -253,6 +253,7 @@ typedef struct {
     PlayerUiActionKind kind;
     PlayerUiPrimaryAction primary;
     size_t title_index;
+    int choice_index;       /* selected value for setting actions; -1 when not used */
 } PlayerUiAction;
 
 /* The files a disc still needs before Nakagawa can use it (#308): decrypted
@@ -635,7 +636,10 @@ typedef enum {
     PLAYER_UI_SETTINGS_CYCLE_PRESET,         /* the next graphics preset (#2150) */
     PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE,      /* that page's play mode: the library's default,
                                                 or the title's choice on a title's page */
-    PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART,  /* the part in the action's title_index */
+    PLAYER_UI_SETTINGS_SET_PRESET,            /* choice_index is a graphics preset */
+    PLAYER_UI_SETTINGS_SET_PLAY_MODE,         /* choice_index is this page's mode list index */
+    PLAYER_UI_SETTINGS_SET_ENHANCED_PART,     /* title_index is the part; choice_index is its value */
+    PLAYER_UI_SETTINGS_SELECT_ENHANCED_TAB,   /* title_index is the session tab index */
     PLAYER_UI_SETTINGS_OPEN_PROBLEM_REPORT,  /* Settings > Problem report: lists the files */
     PLAYER_UI_SETTINGS_CREATE_REPORT,        /* write the bundle on this PC */
     PLAYER_UI_SETTINGS_OPEN_REPORT_FOLDER,
@@ -651,14 +655,54 @@ typedef enum {
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP
 } PlayerUiSettingsOp;
 
-/* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
-   PlayerEnhancedPart), in that order. */
+/* Settings > Enhanced: every PlayerEnhancedPart belongs to one visual group. The macro is the
+   single row-to-group table used by the page and its native screen fixture. Its length is checked
+   against PLAYER_PART_COUNT in both translation units that build it. */
 #define PLAYER_UI_ENHANCED_ROWS 21
+typedef enum {
+    PLAYER_UI_ENHANCED_GROUP_PICTURE = 0,
+    PLAYER_UI_ENHANCED_GROUP_MOTION,
+    PLAYER_UI_ENHANCED_GROUP_SOUND,
+    PLAYER_UI_ENHANCED_GROUP_CONTROLS,
+    PLAYER_UI_ENHANCED_GROUP_ON_SCREEN,
+    PLAYER_UI_ENHANCED_GROUP_ADVANCED,
+    PLAYER_UI_ENHANCED_GROUP_COUNT
+} PlayerUiEnhancedGroup;
+#define PLAYER_UI_ENHANCED_LAYOUT(X) \
+    X(PLAYER_PART_FILTERING, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_WIDE, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_UPSCALE, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_TEXPACK, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_TWIN, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_SSAA, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_MIPS, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_TEXSCALE, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_SMART2D, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_TEXT, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
+    X(PLAYER_PART_SMOOTH, PLAYER_UI_ENHANCED_GROUP_MOTION) \
+    X(PLAYER_PART_SAS, PLAYER_UI_ENHANCED_GROUP_SOUND) \
+    X(PLAYER_PART_PEAK, PLAYER_UI_ENHANCED_GROUP_SOUND) \
+    X(PLAYER_PART_STICK, PLAYER_UI_ENHANCED_GROUP_CONTROLS) \
+    X(PLAYER_PART_READOUT, PLAYER_UI_ENHANCED_GROUP_ON_SCREEN) \
+    X(PLAYER_PART_NOTICE, PLAYER_UI_ENHANCED_GROUP_ON_SCREEN) \
+    X(PLAYER_PART_TESS, PLAYER_UI_ENHANCED_GROUP_ADVANCED) \
+    X(PLAYER_PART_CULL, PLAYER_UI_ENHANCED_GROUP_ADVANCED) \
+    X(PLAYER_PART_LOAD, PLAYER_UI_ENHANCED_GROUP_ADVANCED) \
+    X(PLAYER_PART_PAD, PLAYER_UI_ENHANCED_GROUP_ADVANCED) \
+    X(PLAYER_PART_SHADOW, PLAYER_UI_ENHANCED_GROUP_ADVANCED)
 typedef struct {
+    int part;                   /* PlayerEnhancedPart; rows are in visual, not enum, order */
+    PlayerUiEnhancedGroup group;
+    int stored_value;           /* effective library/title choice before availability labels */
+    int selected_index;         /* choice index; title row zero is Library default */
     const char *name;           /* "Texture filtering" */
     const char *value;          /* "16x", "Off", "Library (On)" on a title's page */
     const char *sentence;
     bool on;                    /* in effect for the page: lit */
+    bool inherited;             /* this title follows the library value */
+    bool disabled;              /* shown but unavailable in this play mode */
+    const char *disabled_reason;
+    const char *tag;            /* a condition tag, or NULL */
     /* Every other value the row can show on this page: the part's own words ("16x" ... "Off")
        and, on a title's page, the library's ("Library (16x)"). The page sizes its button
        column from the widest of them, so changing a setting never reflows the rows. */
@@ -705,6 +749,7 @@ typedef struct {
     /* Main page: the current value of each control, in words */
     const char *resolution;         /* "2x (960x544)" */
     const char *pacing;             /* "PSP timing" */
+    const char *pacing_sentence;    /* what the player's cap setting changes */
     const char *scaling;            /* "Sharp" */
     const char *preset;             /* "Medium", or "Custom" (#2150) */
     bool vsync;
@@ -729,9 +774,8 @@ typedef struct {
     int system_scale_pct;               /* the display's scale */
     bool system_high_contrast;
     bool system_reduced_motion;
-    /* Settings > Enhanced (VIEW_ACE_SETTINGS, #2055) and the GAME card's row. The page is the
-       library's, or one title's when enhanced_title is set. Its first row is the play mode;
-       then one row per Enhanced part, so a new part needs no change to the page. */
+    /* Settings > Enhanced (VIEW_ACE_SETTINGS, #2055). Preset and play mode stay above its
+       session tab; the selected tab shows compact choices and one details panel. */
     bool enhanced_library_on;       /* the library's default is Enhanced */
     const char *enhanced_title;     /* the game's name on its own page; NULL for the library */
     const char *enhanced_mode;      /* "Enhanced", "Ace", "Library (Authentic)" */
@@ -742,6 +786,7 @@ typedef struct {
     bool enhanced_on;               /* Enhanced or Ace in effect: the part rows can change */
     int enhanced_row_count;
     PlayerUiEnhancedRow enhanced_rows[PLAYER_UI_ENHANCED_ROWS];
+    int enhanced_tab;                /* session UI state, not a saved settings value */
     /* A title's page only (texpack_row): the Texture pack folder row, its pack's name and texture
        count or "None", and, with a pack chosen, a Remove row. */
     bool texpack_row;
@@ -752,8 +797,8 @@ typedef struct {
     const char *saves_folder;
     const char *notice;             /* a settings notice (a failed save), or NULL */
     const char *nickname;           /* the console nickname games read (#2197) */
-    /* The main page's graphics preset note (#2150): where the preset applies, or NULL for
-       Custom. Drawn, in the muted colour, when there is no notice. */
+    /* The global graphics preset note (#2150): where the preset applies, or NULL for Custom.
+       Drawn in the row on Enhanced and as a page note on Settings. */
     const char *preset_notice;
     /* Build tools and cache: builds share compiled system libraries (#1306) */
     bool share_system_libraries;
@@ -1127,7 +1172,7 @@ enum {
     PLAYER_UI_ID_SETTINGS_ONLINE = 0x450Du,
     PLAYER_UI_ID_SETTINGS_NOTICES = 0x450Eu,
     PLAYER_UI_ID_SETTINGS_REMOVE_TOOLS = 0x450Fu,
-    PLAYER_UI_ID_SETTINGS_PRESET = 0x4510u,           /* the GAME card's graphics preset */
+    PLAYER_UI_ID_SETTINGS_PRESET = 0x4510u,           /* Enhanced's first row: global preset */
     PLAYER_UI_ID_SETTINGS_ONLINE_MODE = 0x4511u,
     PLAYER_UI_ID_SETTINGS_NEWS = 0x4513u,
     PLAYER_UI_ID_SETTINGS_REPORTS = 0x4514u,
@@ -1175,10 +1220,10 @@ enum {
     PLAYER_UI_ID_SETTINGS_ACE = 0x4540u,              /* retired: the GAME card's old switch */
     PLAYER_UI_ID_SETTINGS_ACE_OPEN = 0x4541u,         /* the GAME card's row that opens Enhanced */
     PLAYER_UI_ID_SETTINGS_ACE_MODE = 0x4542u,         /* the Enhanced page's play mode */
-    /* The part rows (PlayerEnhancedPart), PLAYER_UI_ENHANCED_ROWS of them, take their ids from
-       PLAYER_UI_ID_ENHANCED_PART(part): parts 0 to 12 at 0x4543 to 0x454F (the range ends before
-       0x4550), parts 13 and on at 0x4680 to 0x469F (room for PLAYER_UI_ENHANCED_MORE_IDS, 32
-       parts), so adding a part moves no other part's id */
+    /* The part rows (PlayerEnhancedPart), PLAYER_UI_ENHANCED_ROWS of them, keep ids from
+       PLAYER_UI_ID_ENHANCED_PART(part) even though display order is grouped: parts 0 to 12 at
+       0x4543 to 0x454F (the range ends before 0x4550), parts 13 and on at 0x4680 to 0x469F
+       (room for PLAYER_UI_ENHANCED_MORE_IDS, 32 parts), so adding a part moves no other part's id. */
     PLAYER_UI_ID_SETTINGS_ENHANCED_PART = 0x4543u,
     PLAYER_UI_ID_SETTINGS_ENHANCED_PART_MORE = 0x4680u,
     PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT = 0x4550u,   /* Settings: opens the Problem report page */
@@ -1193,6 +1238,7 @@ enum {
     PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP = 0x4559u,
     PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE = 0x455Au,   /* a title's Enhanced page: Texture pack folder */
     PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE = 0x455Bu,   /* a title's Enhanced page: Remove texture pack */
+    PLAYER_UI_ID_SETTINGS_ENHANCED_ADVANCED = 0x455Cu, /* the Advanced disclosure row */
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
     PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */

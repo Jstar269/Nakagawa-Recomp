@@ -8,6 +8,7 @@
    saved as it is made. */
 
 #include "player_ui_nk.h"
+#include "player_state.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
@@ -37,32 +38,8 @@ static PlayerUiAction settings_op(PlayerUiSettingsOp op) {
     result.kind = PLAYER_UI_ACTION_SETTINGS;
     result.primary = (PlayerUiPrimaryAction)op;
     result.title_index = 0u;
+    result.choice_index = -1;
     return result;
-}
-
-/* Of a row's value now, its other values, its library value and the value another setting
-   can give it (any may be NULL), the one whose button, "name: value", is widest. */
-static const char *settings_widest_value(NkUi *ui, const char *name, const char *value,
-                                         const char *const *others, int other_count,
-                                         const char *library_value, const char *other_value) {
-    const char *widest = value;
-    float widest_width = -1.0f;
-    char label[96];
-    for (int i = -3; i < other_count; i++) {
-        const char *candidate = i == -3 ? value
-                                : i == -2 ? library_value
-                                : i == -1 ? other_value
-                                          : others[i];
-        float width;
-        if (candidate == NULL || (i >= 0 && others == NULL)) continue;
-        (void)snprintf(label, sizeof(label), "%s: %s", name, candidate);
-        width = nk_ui_button_width(ui, label, 0u);
-        if (width > widest_width) {
-            widest = candidate;
-            widest_width = width;
-        }
-    }
-    return widest;
 }
 
 static const char *settings_on_off(bool on) {
@@ -235,10 +212,6 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
                              safe_text(model->resolution, "2x"), false, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_RESOLUTION);
             }
-            if (settings_row(ui, 1u, PLAYER_UI_ID_SETTINGS_PACING, "Frame pacing",
-                             safe_text(model->pacing, "PSP timing"), false, name_width)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_PACING);
-            }
             if (settings_row(ui, 2u, PLAYER_UI_ID_SETTINGS_VSYNC, "VSync",
                              settings_on_off(model->vsync), model->vsync, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_VSYNC);
@@ -259,14 +232,6 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
                                                         : "Authentic: options",
                              model->enhanced_library_on, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_OPEN_ACE);
-            }
-            /* A graphics preset (#2150) stands in for the display rows above it in Enhanced
-               and Ace sessions; Authentic keeps those rows, and editing one makes the preset
-               Custom. Last on the card, so the rows above keep their places beside the
-               LAUNCHER AND SOUND rows. */
-            if (settings_row(ui, 13u, PLAYER_UI_ID_SETTINGS_PRESET, "Graphics preset",
-                             safe_text(model->preset, "Custom"), false, name_width)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PRESET);
             }
             nk_ui_end_container(ui);
         }
@@ -842,127 +807,589 @@ static void settings_accessibility(NkUi *ui, const PlayerUiSettingsModel *model,
     (0x404u + 4u * (PLAYER_UI_ENHANCED_FIRST_IDS + PLAYER_UI_ENHANCED_MORE_IDS))
 typedef char settings_texpack_text_after_parts[SET_ID_ENHANCED_TEXT_END <= 0x500u ? 1 : -1];
 
-/* Settings > Enhanced (#2055; src/rt/ace.h): the play mode, then one row per Enhanced part, with a
-   sentence beside each that says what it does and what it costs. The library's page sets the
-   default; a title's page (opened from its Enhanced options) sets that game's choice, where a
-   part on Library default follows the library. While the mode is Authentic the part rows are
-   dim and cannot be focused; their values are kept. */
+/* Settings > Enhanced (#2055; src/rt/ace.h): the global preset, play mode, and every part grouped
+   by what it changes. The library's page sets the default; a title's page sets that game's
+   choice, where a part on Library default follows the library. While the mode is Authentic the
+   part rows are dim and cannot be focused; their values are kept. */
+#define SET_ID_ENHANCED_PRESET SET_ID(0x000300u)
+#define SET_ID_ENHANCED_MODE SET_ID(0x000304u)
+#define SET_ID_ENHANCED_TABS SET_ID(0x000520u)
+#define SET_ID_ENHANCED_TABS_SPAN 0x10u
+#define SET_ID_ENHANCED_TABS_SPAN 0x10u
+#define SET_ID_ENHANCED_CHOICES(part, choice) \
+    SET_ID(0x000600u + (uint32_t)(part) * 0x20u + (uint32_t)(choice) * 4u)
+#define SET_ID_ENHANCED_PACK_CHOOSE SET_ID(0x000A40u)
+#define SET_ID_ENHANCED_PACK_REMOVE SET_ID(0x000A44u)
+#define SET_ID_ENHANCED_DETAIL SET_ID(0x000B00u)
+#define SET_ID_ENHANCED_DETAIL_TEXT SET_ID_TEXT + 0x700u
+
+static bool settings_enhanced_step_row(NkUi *ui, NkUiId id, const char *name,
+                                       const char *value, bool enabled,
+                                       PlayerUiSettingsOp op, int current, int count,
+                                       bool preset, PlayerUiAction *result) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    bool focused = nk_ui_button_focused(ui, id);
+    NkUiNavDir direction = NK_UI_DIR_NONE;
+    NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fixed(38.0f),
+                                 NK_UI_SPACE_4);
+    NkUiLayout choice = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(320.0f), sizing_fixed(32.0f),
+                                    0.0f);
+    NkUiStyle row_style;
+    NkUiStyle value_style;
+    NkUiTextStyle name_style = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
+    NkUiTextStyle value_text = nk_ui_type(NK_UI_TYPE_LABEL, theme->paper);
+    memset(&row_style, 0, sizeof(row_style));
+    memset(&value_style, 0, sizeof(value_style));
+    row.align_y = NK_UI_ALIGN_CENTER;
+    row.padding_left = row.padding_right = NK_UI_SPACE_2;
+    row_style.corner_radius = NK_UI_RADIUS_CONTROL;
+    if (focused || nk_ui_hovered(ui, id)) row_style.fill_rgba = theme->surface_high;
+    if (!enabled) name_style.rgba = theme->muted;
+    nk_ui_register_button(ui, id, enabled ? NK_UI_BUTTON_OWNS_HORIZONTAL :
+                                               NK_UI_BUTTON_DISABLED | NK_UI_BUTTON_OWNS_HORIZONTAL);
+    if (!nk_ui_begin_container(ui, id, &row, &row_style)) return false;
+    if (focused) nk_ui_focus_ring(ui, id, NK_UI_RADIUS_CONTROL);
+    {
+        NkUiLayout label = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), 0.0f);
+        if (nk_ui_begin_container(ui, nk_ui_child_id(id, 1u), &label, NULL)) {
+            nk_ui_text(ui, nk_ui_child_id(id, 2u), name, &name_style);
+            nk_ui_end_container(ui);
+        }
+    }
+    choice.align_y = NK_UI_ALIGN_CENTER;
+    choice.gap = NK_UI_SPACE_2;
+    choice.padding_left = choice.padding_right = NK_UI_SPACE_2;
+    value_style.fill_rgba = theme->surface;
+    value_style.border_rgba = focused ? theme->accent_dark : theme->line;
+    value_style.border_width = NK_UI_BORDER_HAIRLINE;
+    value_style.corner_radius = NK_UI_RADIUS_CONTROL;
+    if (nk_ui_begin_container(ui, nk_ui_child_id(id, 3u), &choice, &value_style)) {
+        NkUiTextStyle chevron = nk_ui_type(NK_UI_TYPE_LABEL_S, enabled ? theme->muted : theme->dim);
+        NkUiLayout glyph = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(18.0f), sizing_fit(), 0.0f);
+        NkUiLayout value_cell = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), 0.0f);
+        glyph.align_x = NK_UI_ALIGN_CENTER;
+        if (nk_ui_begin_container(ui, nk_ui_child_id(id, 4u), &glyph, NULL)) {
+            nk_ui_text(ui, nk_ui_child_id(id, 7u), "<", &chevron);
+            nk_ui_end_container(ui);
+        }
+        if (nk_ui_begin_container(ui, nk_ui_child_id(id, 5u), &value_cell, NULL)) {
+            nk_ui_text(ui, nk_ui_child_id(id, 8u),
+                       nk_ui_text_clamp(ui, safe_text(value, ""), &value_text, 245.0f, 1),
+                       &value_text);
+            nk_ui_end_container(ui);
+        }
+        if (nk_ui_begin_container(ui, nk_ui_child_id(id, 6u), &glyph, NULL)) {
+            nk_ui_text(ui, nk_ui_child_id(id, 9u), ">", &chevron);
+            nk_ui_end_container(ui);
+        }
+        nk_ui_end_container(ui);
+    }
+    nk_ui_end_container(ui);
+    if (!enabled || count <= 0) return focused;
+    if (focused && nk_ui_take_event(ui, NK_UI_EV_NAV, &direction)) {
+        int step = direction == NK_UI_DIR_LEFT ? -1 : direction == NK_UI_DIR_RIGHT ? 1 : 0;
+        if (step != 0) {
+            if (preset) {
+                *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PRESET);
+                result->choice_index = step;
+            } else {
+                int next = (current + step + count) % count;
+                *result = settings_op(op);
+                result->choice_index = next;
+            }
+        }
+    } else if (nk_ui_take_activation(ui, id)) {
+        if (preset) {
+            *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PRESET);
+            result->choice_index = 1;
+        } else {
+            *result = settings_op(op);
+            result->choice_index = (current + 1) % count;
+        }
+    }
+    return focused;
+}
+
+static bool settings_enhanced_choice(NkUi *ui, NkUiId id, const char *label,
+                                     bool selected, bool inherited, bool disabled) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    bool focused = nk_ui_button_focused(ui, id);
+    NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_LABEL_S,
+                                     disabled ? theme->dim :
+                                     inherited ? theme->muted :
+                                     selected ? theme->paper : theme->muted);
+    float text_width = nk_ui_text_width(ui, label, &text);
+    float chip_width = text_width + 28.0f;
+    if (chip_width < 44.0f) chip_width = 44.0f;
+    NkUiLayout layout = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(chip_width),
+                                    sizing_fixed(31.0f), 0.0f);
+    NkUiStyle style;
+    memset(&style, 0, sizeof(style));
+    layout.align_x = NK_UI_ALIGN_CENTER;
+    layout.align_y = NK_UI_ALIGN_CENTER;
+    layout.padding_left = layout.padding_right = 7.0f;
+    style.corner_radius = NK_UI_RADIUS_CONTROL;
+    style.fill_rgba = disabled ? theme->surface :
+                      selected && !inherited ? theme->accent_dark : theme->surface;
+    style.border_rgba = focused ? theme->accent_dark :
+                        selected && !inherited ? theme->accent_dark : theme->line;
+    style.border_width = selected || focused ? 1.5f : NK_UI_BORDER_HAIRLINE;
+    nk_ui_register_button(ui, id, (disabled ? NK_UI_BUTTON_DISABLED : 0u) |
+                                  NK_UI_BUTTON_OWNS_HORIZONTAL | NK_UI_BUTTON_ROW);
+    if (!nk_ui_begin_container(ui, id, &layout, &style)) return false;
+    if (focused) nk_ui_focus_ring(ui, id, NK_UI_RADIUS_CONTROL);
+    nk_ui_text(ui, nk_ui_child_id(id, 1u),
+               nk_ui_text_clamp(ui, label, &text, chip_width - 14.0f, 1), &text);
+    nk_ui_end_container(ui);
+    return !disabled && nk_ui_take_activation(ui, id);
+}
+
+static void settings_enhanced_choice_action(PlayerUiAction *result, int part,
+                                            bool title, int choice) {
+    *result = settings_op(PLAYER_UI_SETTINGS_SET_ENHANCED_PART);
+    result->title_index = (size_t)part;
+    result->choice_index = title ? (choice == 0 ? -1 : choice - 1) : choice;
+}
+
+static bool settings_enhanced_part_row(NkUi *ui, const PlayerUiSettingsModel *model,
+                                       const PlayerUiEnhancedRow *row, float width,
+                                       PlayerUiAction *result) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    bool title = model->enhanced_title != NULL;
+    int choice_count = row->label_count + (title ? 1 : 0);
+    int selected_index = row->selected_index;
+    bool focused_row = false;
+    bool activated = false;
+    bool compact_choices = false;
+    NkUiId id = SET_ID(0x000C00u + (uint32_t)row->part * 4u);
+    NkUiLayout layout = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fixed(38.0f),
+                                    NK_UI_SPACE_2);
+    NkUiLayout icon = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(24.0f), sizing_fixed(24.0f), 0.0f);
+    NkUiStyle icon_style;
+    NkUiTextStyle icon_text = nk_ui_type(NK_UI_TYPE_DATA, theme->muted);
+    NkUiTextStyle name_style = nk_ui_type(NK_UI_TYPE_BODY_S,
+                                           row->disabled ? theme->muted : theme->paper);
+    NkUiTextStyle choice_text = nk_ui_type(NK_UI_TYPE_LABEL_S, theme->muted);
+    float choices_width = 0.0f;
+    float name_limit;
+    NkUiNavDir direction = NK_UI_DIR_NONE;
+    layout.align_y = NK_UI_ALIGN_CENTER;
+    for (int choice = 0; choice < choice_count; ++choice) {
+        bool inherited = title && choice == 0;
+        const char *label = inherited ? safe_text(row->library_value, "Library")
+                                      : row->labels[choice - (title ? 1 : 0)];
+        choices_width += nk_ui_text_width(ui, label, &choice_text) + 28.0f;
+    }
+    if (choice_count > 1) choices_width += 3.0f * (float)(choice_count - 1);
+    compact_choices = choices_width + (row->tag != NULL ? 64.0f : 0.0f) + 112.0f > width;
+    name_limit = width - choices_width - (row->tag != NULL ? 72.0f : 0.0f) - 56.0f;
+    if (compact_choices) name_limit = width - 124.0f - (row->tag != NULL ? 72.0f : 0.0f);
+    if (name_limit < 36.0f) name_limit = 36.0f;
+    memset(&icon_style, 0, sizeof(icon_style));
+    icon_style.fill_rgba = theme->surface;
+    icon_style.border_rgba = theme->line;
+    icon_style.border_width = NK_UI_BORDER_HAIRLINE;
+    icon_style.corner_radius = 6.0f;
+    if (!nk_ui_begin_container(ui, id, &layout, NULL)) return false;
+    if (nk_ui_begin_container(ui, nk_ui_child_id(id, 1u), &icon, &icon_style)) {
+        char initial[2] = {row->name != NULL && row->name[0] != '\0' ? row->name[0] : '?', '\0'};
+        nk_ui_text(ui, nk_ui_child_id(id, 2u), initial, &icon_text);
+        nk_ui_end_container(ui);
+    }
+    {
+        NkUiLayout name = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), 0.0f);
+        if (nk_ui_begin_container(ui, nk_ui_child_id(id, 3u), &name, NULL)) {
+            nk_ui_text(ui, nk_ui_child_id(id, 4u),
+                       nk_ui_text_clamp(ui, safe_text(row->name, "Option"), &name_style,
+                                        name_limit, 1), &name_style);
+            nk_ui_end_container(ui);
+        }
+    }
+    if (row->tag != NULL) nk_ui_tag(ui, nk_ui_child_id(id, 5u), row->tag);
+    {
+        NkUiLayout choices = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), 3.0f);
+        if (nk_ui_begin_container(ui, nk_ui_child_id(id, 6u), &choices, NULL)) {
+            if (compact_choices) {
+                int choice = selected_index < 0 || selected_index >= choice_count ? 0 : selected_index;
+                bool inherited = title && choice == 0;
+                const char *label = inherited ? safe_text(row->library_value, "Library")
+                                              : row->labels[choice - (title ? 1 : 0)];
+                char compact_label[96];
+                NkUiId choice_id = SET_ID_ENHANCED_CHOICES(row->part, 0);
+                (void)snprintf(compact_label, sizeof(compact_label), "< %s >", label);
+                if (settings_enhanced_choice(ui, choice_id, compact_label, true, inherited,
+                                              row->disabled)) {
+                    settings_enhanced_choice_action(result, row->part, title,
+                                                    (choice + 1) % choice_count);
+                    activated = true;
+                }
+                if (!row->disabled && nk_ui_button_focused(ui, choice_id)) {
+                    focused_row = true;
+                    if (nk_ui_take_event(ui, NK_UI_EV_NAV, &direction)) {
+                        int step = direction == NK_UI_DIR_LEFT ? -1 :
+                                   direction == NK_UI_DIR_RIGHT ? 1 : 0;
+                        if (step != 0) {
+                            int next = (choice + step + choice_count) % choice_count;
+                            settings_enhanced_choice_action(result, row->part, title, next);
+                            activated = true;
+                        }
+                    }
+                }
+            } else for (int choice = 0; choice < choice_count; ++choice) {
+                bool inherited = title && choice == 0;
+                const char *label = inherited ? safe_text(row->library_value, "Library")
+                                              : row->labels[choice - (title ? 1 : 0)];
+                NkUiId choice_id = SET_ID_ENHANCED_CHOICES(row->part, choice);
+                bool selected = choice == selected_index;
+                if (settings_enhanced_choice(ui, choice_id, safe_text(label, "Off"), selected,
+                                              inherited, row->disabled)) {
+                    settings_enhanced_choice_action(result, row->part, title, choice);
+                    activated = true;
+                }
+                if (!row->disabled && nk_ui_button_focused(ui, choice_id)) {
+                    focused_row = true;
+                    if (nk_ui_take_event(ui, NK_UI_EV_NAV, &direction)) {
+                        int step = direction == NK_UI_DIR_LEFT ? -1 :
+                                   direction == NK_UI_DIR_RIGHT ? 1 : 0;
+                        if (step != 0) {
+                            int next = choice + step;
+                            if (next < 0) next = choice_count - 1;
+                            if (next >= choice_count) next = 0;
+                            settings_enhanced_choice_action(result, row->part, title, next);
+                            nk_ui_focus(ui, SET_ID_ENHANCED_CHOICES(row->part, next));
+                            activated = true;
+                        }
+                    }
+                }
+            }
+            nk_ui_end_container(ui);
+        }
+    }
+    nk_ui_end_container(ui);
+    return focused_row || activated;
+}
+
+static bool settings_enhanced_action_row(NkUi *ui, NkUiId id, const char *name,
+                                         const char *value, const char *action,
+                                         float width, PlayerUiAction *result,
+                                         PlayerUiSettingsOp op) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    bool focused = nk_ui_button_focused(ui, id);
+    NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fixed(38.0f),
+                                 NK_UI_SPACE_3);
+    NkUiStyle style;
+    NkUiTextStyle name_text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->paper);
+    NkUiTextStyle value_text = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
+    NkUiTextStyle action_text = nk_ui_type(NK_UI_TYPE_LABEL_S, theme->paper);
+    float name_width = width - 210.0f;
+    if (name_width < 80.0f) name_width = 80.0f;
+    memset(&style, 0, sizeof(style));
+    style.corner_radius = NK_UI_RADIUS_CONTROL;
+    if (focused || nk_ui_hovered(ui, id)) style.fill_rgba = theme->surface_high;
+    nk_ui_register_button(ui, id, 0u);
+    if (!nk_ui_begin_container(ui, id, &row, &style)) return false;
+    if (focused) nk_ui_focus_ring(ui, id, NK_UI_RADIUS_CONTROL);
+    {
+        NkUiLayout name_cell = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), 0.0f);
+        if (nk_ui_begin_container(ui, nk_ui_child_id(id, 1u), &name_cell, NULL)) {
+            nk_ui_text(ui, nk_ui_child_id(id, 4u),
+                       nk_ui_text_clamp(ui, name, &name_text, name_width, 1), &name_text);
+            nk_ui_end_container(ui);
+        }
+    }
+    {
+        NkUiLayout value_cell = layout_make(NK_UI_LAYOUT_ROW, sizing_fixed(105.0f), sizing_fit(), 0.0f);
+        if (nk_ui_begin_container(ui, nk_ui_child_id(id, 2u), &value_cell, NULL)) {
+            nk_ui_text(ui, nk_ui_child_id(id, 5u),
+                       nk_ui_text_clamp(ui, safe_text(value, "None"), &value_text, 101.0f, 1),
+                       &value_text);
+            nk_ui_end_container(ui);
+        }
+    }
+    {
+        NkUiLayout button = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fixed(30.0f), 0.0f);
+        NkUiStyle button_style;
+        memset(&button_style, 0, sizeof(button_style));
+        button.align_x = NK_UI_ALIGN_CENTER;
+        button.align_y = NK_UI_ALIGN_CENTER;
+        button.padding_left = button.padding_right = 8.0f;
+        button_style.fill_rgba = theme->surface;
+        button_style.border_rgba = focused ? theme->accent_dark : theme->line;
+        button_style.border_width = NK_UI_BORDER_HAIRLINE;
+        button_style.corner_radius = NK_UI_RADIUS_CONTROL;
+        NkUiId button_id = nk_ui_child_id(id, 3u);
+        if (nk_ui_begin_container(ui, button_id, &button, &button_style)) {
+            nk_ui_text(ui, nk_ui_child_id(button_id, 1u), action, &action_text);
+            nk_ui_end_container(ui);
+        }
+    }
+    nk_ui_end_container(ui);
+    if (!nk_ui_take_activation(ui, id)) return false;
+    *result = settings_op(op);
+    return true;
+}
+
+static void settings_enhanced_details(NkUi *ui, const char *name, const char *value,
+                                      const char *description, const char *tag,
+                                      const char *reason, bool inherited, bool title,
+                                      float width, float height) {
+    const NkUiTheme *theme = nk_ui_theme(ui);
+    NkUiLayout detail = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fixed(height),
+                                    NK_UI_SPACE_4);
+    NkUiStyle style = scr_flow_box_style(theme, theme->surface);
+    NkUiTextStyle title_text = nk_ui_type(NK_UI_TYPE_TILE_TITLE, theme->paper);
+    NkUiTextStyle value_text = nk_ui_type(NK_UI_TYPE_BODY, inherited ? theme->muted : theme->paper);
+    NkUiTextStyle description_text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->muted);
+    NkUiTextStyle reason_text = nk_ui_type(NK_UI_TYPE_CAPTION, theme->muted);
+    detail.padding_left = detail.padding_right = 16.0f;
+    detail.padding_top = detail.padding_bottom = 15.0f;
+    if (!nk_ui_begin_container(ui, SET_ID_ENHANCED_DETAIL, &detail, &style)) return;
+    nk_ui_eyebrow(ui, SET_ID_ENHANCED_DETAIL_TEXT + 1u, "Focused option");
+    nk_ui_text(ui, SET_ID_ENHANCED_DETAIL_TEXT + 2u,
+               nk_ui_text_clamp(ui, safe_text(name, "Enhanced"), &title_text, width - 36.0f, 2),
+               &title_text);
+    nk_ui_text(ui, SET_ID_ENHANCED_DETAIL_TEXT + 3u,
+               nk_ui_text_clamp(ui, safe_text(value, ""), &value_text, width - 36.0f, 1),
+               &value_text);
+    if (tag != NULL) nk_ui_tag(ui, SET_ID_ENHANCED_DETAIL_TEXT + 4u, tag);
+    if (title) nk_ui_tag(ui, SET_ID_ENHANCED_DETAIL_TEXT + 5u,
+                         inherited ? "Library default" : "This game");
+    description_text.wrap = true;
+    nk_ui_text(ui, SET_ID_ENHANCED_DETAIL_TEXT + 6u,
+               nk_ui_text_clamp(ui, safe_text(description, ""), &description_text,
+                                width - 36.0f, 12), &description_text);
+    if (reason != NULL && reason[0] != '\0') {
+        nk_ui_text(ui, SET_ID_ENHANCED_DETAIL_TEXT + 7u,
+                   nk_ui_text_clamp(ui, reason, &reason_text, width - 36.0f, 3), &reason_text);
+    }
+    nk_ui_end_container(ui);
+}
+
 static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inner,
                          PlayerUiAction *result) {
+    static const NkUiSection tabs[PLAYER_UI_ENHANCED_GROUP_COUNT] = {
+        {"Picture", true, SET_ID(0x000500u)}, {"Motion", false, SET_ID(0x000504u)},
+        {"Sound", false, SET_ID(0x000508u)}, {"Controls", false, SET_ID(0x00050Cu)},
+        {"On-screen", false, SET_ID(0x000510u)}, {"Advanced", false, SET_ID(0x000514u)}
+    };
+    static const char *const preset_labels[] = {
+        "Custom", "Low", "Medium", "High", "Ultra", "Handheld"
+    };
     const NkUiTheme *theme = nk_ui_theme(ui);
-    const bool off = !model->enhanced_on;
-    char lead[320];
-    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, model->enhanced_title != NULL ? "Game" : "Settings",
-                     theme->accent_dark);
+    NkUiSection active_tabs[PLAYER_UI_ENHANCED_GROUP_COUNT];
+    int preset_index = 0;
+    int mode_index = 0;
+    int row_count = 0;
+    int active_group = model->enhanced_tab;
+    float detail_width = inner * 0.28f;
+    float list_width = inner - detail_width - NK_UI_SPACE_4;
+    float detail_height = 260.0f;
+    const char *detail_name = "Graphics preset";
+    const char *detail_value = safe_text(model->preset, "Custom");
+    const char *detail_sentence =
+        "Library-wide for Enhanced and Ace; Authentic ignores it, and each game's part choices win.";
+    const char *detail_tag = NULL;
+    const char *detail_reason = NULL;
+    bool detail_inherited = false;
+    bool detail_title = false;
+    const PlayerUiEnhancedRow *detail_row = NULL;
+    bool detail_pacing = false;
+    bool detail_pack = false;
+    bool detail_remove = false;
+    NkUiLayout main;
+    char preset_current[48];
+    if (active_group < 0 || active_group >= PLAYER_UI_ENHANCED_GROUP_COUNT)
+        active_group = PLAYER_UI_ENHANCED_GROUP_PICTURE;
+    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND,
+                     model->enhanced_title != NULL ? "Game" : "Settings", theme->accent_dark);
     nk_ui_text_role(ui, FLOW_ID_TITLE, "Enhanced", NK_UI_TYPE_TITLE, theme->paper);
     if (model->enhanced_title != NULL) {
-        (void)snprintf(lead, sizeof(lead),
-                       "For %s alone. Library follows Settings > Enhanced.",
+        char lead[256];
+        (void)snprintf(lead, sizeof(lead), "For %s alone. Library follows Settings > Enhanced.",
                        model->enhanced_title);
+        nk_ui_text_role(ui, FLOW_ID_LEAD, nk_ui_frame_text(ui, lead), NK_UI_TYPE_BODY_S,
+                        theme->muted);
     } else {
-        (void)snprintf(lead, sizeof(lead), "%s",
-                       "Enhanced adds modern touches that work for every game, such as sharper "
-                       "textures and crisp system text. The games themselves run as released.");
+        nk_ui_text_role(ui, FLOW_ID_LEAD,
+                        "Enhanced adds modern touches that work for every game, such as sharper "
+                        "textures and crisp system text. The games themselves run as released.",
+                        NK_UI_TYPE_BODY_S, theme->muted);
     }
-    nk_ui_text_role(ui, FLOW_ID_LEAD, nk_ui_frame_text(ui, lead), NK_UI_TYPE_BODY_S,
-                    theme->muted);
+    if (model->preset != NULL) {
+        for (int i = 0; i < (int)(sizeof(preset_labels) / sizeof(preset_labels[0])); ++i)
+            if (strcmp(model->preset, preset_labels[i]) == 0) preset_index = i;
+    }
+    for (int i = 0; i < model->enhanced_mode_count; ++i) {
+        if (strcmp(safe_text(model->enhanced_mode, ""),
+                   safe_text(model->enhanced_modes[i], "")) == 0) mode_index = i;
+    }
+    (void)snprintf(preset_current, sizeof(preset_current), "%s", preset_labels[preset_index]);
     if (scr_wizard_box_begin(ui, 0u)) {
-        WizardRow rows[1 + PLAYER_UI_ENHANCED_ROWS + 2];
-        size_t measured;
-        int count = model->enhanced_row_count < PLAYER_UI_ENHANCED_ROWS
-            ? model->enhanced_row_count : PLAYER_UI_ENHANCED_ROWS;
-        if (count < 0) count = 0;
-        rows[0].name = "Play mode";
-        rows[0].value = safe_text(model->enhanced_mode, "Authentic");
-        rows[0].sentence = safe_text(model->enhanced_mode_sentence, "");
-        for (int i = 0; i < count; i++) {
-            rows[i + 1].name = safe_text(model->enhanced_rows[i].name, "");
-            rows[i + 1].value = safe_text(model->enhanced_rows[i].value, "Off");
-            rows[i + 1].sentence = safe_text(model->enhanced_rows[i].sentence, "");
+        bool focus_preset = settings_enhanced_step_row(
+            ui, SET_ID_ENHANCED_PRESET, "Graphics preset", preset_current, true,
+            PLAYER_UI_SETTINGS_SET_PRESET, preset_index,
+            (int)(sizeof(preset_labels) / sizeof(preset_labels[0])), true, result);
+        bool focus_mode = settings_enhanced_step_row(
+            ui, SET_ID_ENHANCED_MODE, "Play mode", safe_text(model->enhanced_mode, "Authentic"),
+            true, PLAYER_UI_SETTINGS_SET_PLAY_MODE, mode_index, model->enhanced_mode_count,
+            false, result);
+        for (int i = 0; i < PLAYER_UI_ENHANCED_GROUP_COUNT; ++i) {
+            active_tabs[i] = tabs[i];
+            active_tabs[i].active = i == active_group;
         }
-        measured = (size_t)count + 1u;
-        if (model->texpack_row) {
-            rows[measured].name = "Texture pack folder";
-            rows[measured].value = safe_text(model->texpack_value, "None");
-            rows[measured].sentence = safe_text(model->texpack_sentence, "");
-            measured++;
-            if (model->texpack_chosen) {
-                rows[measured].name = "Remove texture pack";
-                rows[measured].value = "Remove";
-                rows[measured].sentence =
-                    "Forgets the folder for this game. The folder is not deleted.";
-                measured++;
+        {
+            int chosen = nk_ui_section_tabs(ui, SET_ID_ENHANCED_TABS, active_tabs,
+                                            PLAYER_UI_ENHANCED_GROUP_COUNT, 48.0f);
+            nk_ui_divider(ui, SET_ID_ENHANCED_TABS + 1u, true);
+            if (chosen >= 0 && chosen < PLAYER_UI_ENHANCED_GROUP_COUNT) {
+                *result = settings_op(PLAYER_UI_SETTINGS_SELECT_ENHANCED_TAB);
+                result->title_index = (size_t)chosen;
+                nk_ui_focus(ui, active_tabs[chosen].id);
             }
         }
-        /* The column is sized from the widest value each row can show on this page, not
-           the one it shows now, so stepping a setting (Smooth motion turning Widescreen
-           off, say) never moves or restacks the rows. The texture pack rows change only when
-           a pack is chosen or removed, never when a setting steps, so they are measured as
-           they are. */
-        WizardRow widest[1 + PLAYER_UI_ENHANCED_ROWS + 2];
-        memcpy(widest, rows, sizeof(rows[0]) * measured);
-        widest[0].value = settings_widest_value(ui, rows[0].name, rows[0].value,
-                                                model->enhanced_modes,
-                                                model->enhanced_mode_count, NULL, NULL);
-        for (int i = 0; i < count; i++) {
-            const PlayerUiEnhancedRow *row = &model->enhanced_rows[i];
-            widest[i + 1].value = settings_widest_value(ui, rows[i + 1].name, rows[i + 1].value,
-                                                        row->labels, row->label_count,
-                                                        row->library_value,
-                                                        row->other_value);
-        }
-        WizardColumn column = scr_wizard_column(ui, widest, measured, inner - 32.0f, true);
-        if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACE_MODE, SET_ID_TEXT + 0x400u, rows[0].name,
-                             rows[0].value, rows[0].sentence, model->enhanced_on, inner - 32.0f,
-                             &column)) {
-            *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE);
-        }
-        for (int i = 0; i < count; i++) {
-            if (scr_wizard_value_state(ui, PLAYER_UI_ID_ENHANCED_PART(i),
-                                       SET_ID_TEXT + 0x404u + 4u * (NkUiId)i, rows[i + 1].name,
-                                       rows[i + 1].value, rows[i + 1].sentence,
-                                       model->enhanced_rows[i].on, off, inner - 32.0f, &column)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART);
-                result->title_index = (size_t)i;
+        main = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_4);
+        main.align_y = NK_UI_ALIGN_START;
+        if (nk_ui_begin_container(ui, SET_ID(0x000560u), &main, NULL)) {
+            NkUiLayout list = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(list_width), sizing_fit(), 0.0f);
+            NkUiStyle list_style;
+            memset(&list_style, 0, sizeof(list_style));
+            for (int i = 0; i < model->enhanced_row_count && i < PLAYER_UI_ENHANCED_ROWS; ++i) {
+                const PlayerUiEnhancedRow *row = &model->enhanced_rows[i];
+                if ((int)row->group == active_group) ++row_count;
             }
+            detail_height = (float)(row_count + (active_group == PLAYER_UI_ENHANCED_GROUP_PICTURE &&
+                                                  model->texpack_row ? 1 + model->texpack_chosen : 0)) *
+                            41.0f;
+            if (detail_height < 260.0f) detail_height = 260.0f;
+            if (active_group == PLAYER_UI_ENHANCED_GROUP_MOTION) detail_height += 40.0f;
+            list_style.fill_rgba = 0u;
+            if (nk_ui_begin_container(ui, SET_ID(0x000564u), &list, &list_style)) {
+                for (int i = 0; i < model->enhanced_row_count && i < PLAYER_UI_ENHANCED_ROWS; ++i) {
+                    const PlayerUiEnhancedRow *row = &model->enhanced_rows[i];
+                    if ((int)row->group != active_group) continue;
+                    bool focused = settings_enhanced_part_row(ui, model, row, list_width, result);
+                    if (focused) detail_row = row;
+                    nk_ui_divider(ui, SET_ID(0x000D00u + (uint32_t)row->part * 4u), true);
+                }
+                if (active_group == PLAYER_UI_ENHANCED_GROUP_MOTION) {
+                    static const char *const pacing_values[] = {"PSP timing", "No extra cap"};
+                    int pacing_index = strcmp(safe_text(model->pacing, "PSP timing"),
+                                              pacing_values[1]) == 0 ? 1 : 0;
+                    detail_pacing = settings_enhanced_step_row(
+                        ui, SET_ID(0x000A00u), "Frame pacing", pacing_values[pacing_index],
+                        true, PLAYER_UI_SETTINGS_TOGGLE_PACING, pacing_index, 2, false, result);
+                    nk_ui_divider(ui, SET_ID(0x000A84u), true);
+                }
+                if (active_group == PLAYER_UI_ENHANCED_GROUP_PICTURE && model->texpack_row) {
+                    if (settings_enhanced_action_row(ui, SET_ID_ENHANCED_PACK_CHOOSE,
+                                                     "Texture pack folder", model->texpack_value,
+                                                     "Choose", list_width, result,
+                                                     PLAYER_UI_SETTINGS_CHOOSE_TEXPACK)) {
+                        detail_pack = true;
+                    }
+                    nk_ui_divider(ui, SET_ID(0x000A48u), true);
+                    if (model->texpack_chosen &&
+                        settings_enhanced_action_row(ui, SET_ID_ENHANCED_PACK_REMOVE,
+                                                     "Texture pack", model->texpack_value,
+                                                     "Remove", list_width, result,
+                                                     PLAYER_UI_SETTINGS_REMOVE_TEXPACK)) {
+                        detail_remove = true;
+                    }
+                }
+                nk_ui_end_container(ui);
+            }
+            if (focus_preset) {
+                detail_name = "Graphics preset";
+                detail_value = preset_current;
+                detail_sentence = "Library-wide for Enhanced and Ace; Authentic ignores it, and "
+                                  "each game's part choices win.";
+                detail_row = NULL;
+                detail_pacing = detail_pack = detail_remove = false;
+            } else if (focus_mode) {
+                detail_name = "Play mode";
+                detail_value = safe_text(model->enhanced_mode, "Authentic");
+                detail_sentence = safe_text(model->enhanced_mode_sentence, "");
+                detail_row = NULL;
+                detail_pacing = detail_pack = detail_remove = false;
+            } else if (detail_row != NULL) {
+                detail_name = detail_row->name;
+                detail_value = detail_row->value;
+                detail_sentence = detail_row->sentence;
+                detail_tag = detail_row->tag;
+                detail_reason = detail_row->disabled_reason;
+                detail_inherited = detail_row->inherited;
+                detail_title = model->enhanced_title != NULL;
+            } else if (detail_pacing) {
+                detail_name = "Frame pacing";
+                detail_value = model->pacing;
+                detail_sentence = safe_text(model->pacing_sentence, "");
+                detail_tag = NULL;
+                detail_reason = NULL;
+                detail_inherited = false;
+                detail_title = false;
+            } else if (detail_remove) {
+                detail_name = "Texture pack";
+                detail_value = "Remove";
+                detail_sentence = "Forgets the folder for this game. The folder is not deleted.";
+                detail_tag = NULL;
+                detail_reason = NULL;
+                detail_inherited = false;
+                detail_title = true;
+            } else if (detail_pack) {
+                detail_name = "Texture pack folder";
+                detail_value = safe_text(model->texpack_value, "None");
+                detail_sentence = safe_text(model->texpack_sentence, "");
+                detail_tag = NULL;
+                detail_reason = NULL;
+                detail_inherited = false;
+                detail_title = true;
+            } else {
+                for (int i = 0; i < model->enhanced_row_count && i < PLAYER_UI_ENHANCED_ROWS; ++i) {
+                    if ((int)model->enhanced_rows[i].group == active_group) {
+                        detail_row = &model->enhanced_rows[i];
+                        detail_name = detail_row->name;
+                        detail_value = detail_row->value;
+                        detail_sentence = detail_row->sentence;
+                        detail_tag = detail_row->tag;
+                        detail_reason = detail_row->disabled_reason;
+                        detail_inherited = detail_row->inherited;
+                        detail_title = model->enhanced_title != NULL;
+                        break;
+                    }
+                }
+            }
+            settings_enhanced_details(ui, detail_name, detail_value, detail_sentence,
+                                      detail_tag, detail_reason, detail_inherited, detail_title,
+                                      detail_width, detail_height);
+            nk_ui_end_container(ui);
         }
-        /* A title's page: its texture pack's folder, which can be chosen in any play mode. Its
-           rows' text ids sit past every part row's (SET_ID_ENHANCED_TEXT_END), so a later part
-           takes the next part id and moves no other row's text. */
-        if (model->texpack_row) {
-            const size_t at = (size_t)count + 1u;
-            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE, SET_ID_TEXT + 0x500u,
-                                 rows[at].name, rows[at].value, rows[at].sentence,
-                                 model->texpack_chosen, inner - 32.0f, &column)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_CHOOSE_TEXPACK);
-            }
-            if (model->texpack_chosen &&
-                scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE, SET_ID_TEXT + 0x504u,
-                                 rows[at + 1u].name, rows[at + 1u].value, rows[at + 1u].sentence,
-                                 false, inner - 32.0f, &column)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_REMOVE_TEXPACK);
-            }
+        if (model->notice != NULL && model->notice[0] != '\0') {
+            nk_ui_text_role(ui, SET_ID_TEXT + 0x710u, model->notice, NK_UI_TYPE_CAPTION,
+                            theme->warning);
         }
         nk_ui_end_container(ui);
     }
     {
-        NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
-        row.padding_top = NK_UI_SPACE_1;
-        if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-            if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Done", NK_UI_BUTTON_PRIMARY)) {
+        NkUiLayout actions = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
+        actions.padding_top = NK_UI_SPACE_1;
+        if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &actions, NULL)) {
+            if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_BACK, "Back", NK_UI_BUTTON_PRIMARY))
                 *result = settings_op(PLAYER_UI_SETTINGS_BACK);
-            }
             nk_ui_end_container(ui);
         }
     }
 }
 
-/* The Settings pages that are a dialog card over the flow frame. */
 static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float width,
                             float height, PlayerUiAction *result) {
     static const NkUiPromptItem prompts[] = {
         {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
         {NK_UI_PROMPT_ACT_BACK, "Back to settings"}
+    };
+    static const NkUiPromptItem enhanced_prompts[] = {
+        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_TAB_PREV, "Prev tab"},
+        {NK_UI_PROMPT_ACT_TAB_NEXT, "Next tab"},
+        {NK_UI_PROMPT_ACT_CONFIRM, "Change value"}, {NK_UI_PROMPT_ACT_BACK, "Back"}
     };
     const NkUiTheme *theme = nk_ui_theme(ui);
     float inner = scr_flow_begin(ui, width, height, 760.0f);
@@ -1336,7 +1763,12 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         }
         break;
     }
-    scr_flow_end(ui, "", prompts, 3u);
+    if (model->page == PLAYER_UI_SETTINGS_PAGE_ACE) {
+        scr_flow_end(ui, "", enhanced_prompts,
+                     sizeof(enhanced_prompts) / sizeof(enhanced_prompts[0]));
+    } else {
+        scr_flow_end(ui, "", prompts, sizeof(prompts) / sizeof(prompts[0]));
+    }
 }
 
 PlayerUiAction player_ui_screen_settings(NkUi *ui, const PlayerUiSettingsModel *model) {

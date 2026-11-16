@@ -102,6 +102,7 @@ struct PlayerUiNk {
     NkUiRouter *router;
     NkUiViewport viewport;
     size_t library_page;
+    int enhanced_tab;       /* session UI state; never serialized with player settings */
     /* The art rest: the card focus rests on and since when, and the game whose
        picture is behind the library (SIZE_MAX: none) and when it stopped being
        shown, so it is kept while it fades out. */
@@ -299,9 +300,10 @@ struct PlayerUiNk {
        part, whose value is at most enhanced_values' 48 bytes. Sized by the part count, so one more
        part cannot cut the line short. */
     char enhanced_reported[PLAYER_PART_COUNT * 64 + 256];
+    char enhanced_layout_reported[1024];
     char ace_line_reported[PLAYER_PART_COUNT * 64 + 192]; /* the play line last printed */
     char enhancement_tag_reported[PLAYER_UI_TITLE_CAP][16]; /* the ENHANCEMENTS tag printed */
-    char preset_note_reported[200];                /* the main Settings page's preset note */
+    char preset_note_reported[200];                /* the global preset's page note */
     int disc_reported_view;  /* the game-found card whose rows were printed, or -1 */
 #endif
     bool ready;
@@ -480,6 +482,7 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
                             "The next UI could not allocate its renderer state.");
         return NULL;
     }
+    player->enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
     player->window = window;
     /* A launcher that opens behind another window gets no focus event: the music
        waits for focus (SDL_EVENT_WINDOW_FOCUS_GAINED) rather than assuming it. */
@@ -918,6 +921,19 @@ static double player_ui_display_refresh_hz(SDL_Window *window) {
 }
 
 typedef char player_ui_enhanced_rows_fit[PLAYER_PART_COUNT <= PLAYER_UI_ENHANCED_ROWS ? 1 : -1];
+typedef struct {
+    int part;
+    PlayerUiEnhancedGroup group;
+} PlayerUiEnhancedLayout;
+#define PLAYER_UI_ENHANCED_LAYOUT_ENTRY(part, group) {part, group},
+static const PlayerUiEnhancedLayout k_player_ui_enhanced_layout[] = {
+    PLAYER_UI_ENHANCED_LAYOUT(PLAYER_UI_ENHANCED_LAYOUT_ENTRY)
+};
+#undef PLAYER_UI_ENHANCED_LAYOUT_ENTRY
+typedef char player_ui_enhanced_layout_covers_every_part[
+    sizeof(k_player_ui_enhanced_layout) / sizeof(k_player_ui_enhanced_layout[0]) ==
+            PLAYER_PART_COUNT
+        ? 1 : -1];
 /* The part rows' element ids (PLAYER_UI_ID_ENHANCED_PART): each range ends before the next id in
    use, and the two hold every row. */
 typedef char player_ui_enhanced_row_ids_fit[
@@ -933,9 +949,41 @@ typedef char player_ui_enhanced_more_row_ids_fit[
 /* Why a title offers no Ace: it has no usable package of its own (#2055). */
 #define PLAYER_UI_ACE_NEEDS_PACKAGE "Ace needs a package made for this game."
 
+static const char *player_ui_enhanced_group_name(PlayerUiEnhancedGroup group) {
+    switch (group) {
+    case PLAYER_UI_ENHANCED_GROUP_PICTURE: return "Picture";
+    case PLAYER_UI_ENHANCED_GROUP_MOTION: return "Motion and timing";
+    case PLAYER_UI_ENHANCED_GROUP_SOUND: return "Sound";
+    case PLAYER_UI_ENHANCED_GROUP_CONTROLS: return "Controls";
+    case PLAYER_UI_ENHANCED_GROUP_ON_SCREEN: return "On-screen information";
+    case PLAYER_UI_ENHANCED_GROUP_ADVANCED: return "Advanced";
+    default: return "";
+    }
+}
+
+static int player_ui_enhanced_value_index(int part, int value) {
+    const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
+    for (int i = 0; info && i < info->value_count; ++i) {
+        if (info->values[i] == value) return i;
+    }
+    return 0;
+}
+
+static const char *player_ui_enhanced_tag(int part) {
+    switch (part) {
+    case PLAYER_PART_CULL:
+    case PLAYER_PART_STICK:
+    case PLAYER_PART_LOAD:
+    case PLAYER_PART_PAD:
+    case PLAYER_PART_SHADOW:
+        return "Ace only";
+    default:
+        return NULL;
+    }
+}
+
 /* Settings > Enhanced (#2055): the library's page, or one title's
-   (player_app_open_title_enhanced). One row per part from player_enhanced_part(), so a new
-   part needs no change here. */
+   (player_app_open_title_enhanced). The explicit layout table gives every part its visual group. */
 static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
                                     PlayerUiSettingsModel *model) {
     const PlayerSettings *settings = &app->settings;
@@ -1006,8 +1054,12 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         model->texpack_value = player->texpack_value;
         model->texpack_sentence = player->texpack_sentence;
     }
+    model->enhanced_tab = player->enhanced_tab;
     model->enhanced_row_count = 0;
-    for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+    for (size_t layout_index = 0;
+         layout_index < sizeof(k_player_ui_enhanced_layout) / sizeof(k_player_ui_enhanced_layout[0]);
+         layout_index++) {
+        const int p = k_player_ui_enhanced_layout[layout_index].part;
         const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
         PlayerUiEnhancedRow *row = &model->enhanced_rows[model->enhanced_row_count++];
         /* The library's value as a session uses it: the graphics preset's where it sets the
@@ -1015,6 +1067,9 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         int library = player_settings_library_part(settings, p);
         const PlayerGraphicsPresetRow *preset =
             player_graphics_preset_row(player_app_graphics_preset(app));
+        row->part = p;
+        row->group = k_player_ui_enhanced_layout[layout_index].group;
+        row->stored_value = library;
         row->name = info->name;
         row->sentence = info->sentence;
         row->labels = info->labels;
@@ -1022,6 +1077,11 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         row->library_value = NULL;
         row->other_value = title >= 0 && p == PLAYER_PART_SMOOTH ? ENHANCED_SMOOTH_AT_60_VALUE
                                                                   : NULL;
+        row->selected_index = player_ui_enhanced_value_index(p, library);
+        row->inherited = false;
+        row->disabled = false;
+        row->disabled_reason = NULL;
+        row->tag = player_ui_enhanced_tag(p);
         row->value = player_enhanced_part_label(p, library);
         row->on = library != 0;
         if (title < 0 && preset && preset->part[p] >= 0) {
@@ -1031,6 +1091,10 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         }
         if (title >= 0) {
             int own = player_app_title_part(app, title, p);
+            row->stored_value = own < 0 ? library : own;
+            row->inherited = own < 0;
+            row->selected_index = own < 0 ? 0 :
+                player_ui_enhanced_value_index(p, own) + 1;
             snprintf(player->enhanced_library_values[p], sizeof(player->enhanced_library_values[p]),
                      "Library (%s)", player_enhanced_part_label(p, library));
             row->library_value = player->enhanced_library_values[p];
@@ -1066,9 +1130,25 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
             const char *unavailable =
                 player_enhanced_part_unavailable_label(p, row->on, smooth_on);
             if (unavailable) {
-                row->value = unavailable;
+                row->disabled = true;
+                row->disabled_reason = p == PLAYER_PART_WIDE
+                    ? "Smooth motion disables Widescreen."
+                    : "This option is unavailable in the current play mode.";
                 row->on = false;
             }
+        }
+        if (!model->enhanced_on) {
+            row->disabled = true;
+            row->disabled_reason = "Play mode is Authentic.";
+        } else if (title >= 0 && row->tag != NULL &&
+                   strcmp(model->enhanced_mode, "Ace") != 0) {
+            row->disabled = true;
+            row->disabled_reason = app->title_enhancements[title].available
+                ? "Available only in Ace."
+                : PLAYER_UI_ACE_NEEDS_PACKAGE;
+        } else if (p == PLAYER_PART_SMOOTH && title >= 0 && logic_60) {
+            row->disabled = true;
+            row->disabled_reason = "This game's 60 FPS game logic is on.";
         }
     }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
@@ -1081,16 +1161,57 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         for (int p = 0; p < (int)model->enhanced_row_count && used > 0 &&
                         (size_t)used < sizeof(line); p++) {
             used += snprintf(line + used, sizeof(line) - (size_t)used, "|%s=%s",
-                             player_enhanced_part(p)->key, model->enhanced_rows[p].value);
+                             player_enhanced_part(model->enhanced_rows[p].part)->key,
+                             model->enhanced_rows[p].value);
         }
         /* Supersampling's sentence, which warns at a render scale of 3x or 4x. */
-        if (used > 0 && (size_t)used < sizeof(line) && model->enhanced_row_count > PLAYER_PART_SSAA) {
-            used += snprintf(line + used, sizeof(line) - (size_t)used, "|ssaa_sentence=%s",
-                             model->enhanced_rows[PLAYER_PART_SSAA].sentence);
+        for (int p = 0; p < (int)model->enhanced_row_count; p++) {
+            if (model->enhanced_rows[p].part == PLAYER_PART_SSAA && used > 0 &&
+                (size_t)used < sizeof(line)) {
+                used += snprintf(line + used, sizeof(line) - (size_t)used,
+                                 "|ssaa_sentence=%s", model->enhanced_rows[p].sentence);
+                break;
+            }
         }
         if (strcmp(line, player->enhanced_reported) != 0) {
             snprintf(player->enhanced_reported, sizeof(player->enhanced_reported), "%s", line);
             printf("[PLAYER_UI_TEST] next_ui_enhanced_page %s\n", line);
+        }
+    }
+    {
+        char groups[768] = "";
+        char line[sizeof(player->enhanced_layout_reported)];
+        size_t used = 0u;
+        PlayerUiEnhancedGroup previous = PLAYER_UI_ENHANCED_GROUP_COUNT;
+        for (int i = 0; i < model->enhanced_row_count && used < sizeof(groups); i++) {
+            const PlayerUiEnhancedRow *row = &model->enhanced_rows[i];
+            if (row->group != previous) {
+                int n = snprintf(groups + used, sizeof(groups) - used, "%s%s:",
+                                 used == 0u ? "" : ";",
+                                 player_ui_enhanced_group_name(row->group));
+                if (n < 0 || (size_t)n >= sizeof(groups) - used) break;
+                used += (size_t)n;
+                previous = row->group;
+            } else {
+                int n = snprintf(groups + used, sizeof(groups) - used, ",");
+                if (n < 0 || (size_t)n >= sizeof(groups) - used) break;
+                used += (size_t)n;
+            }
+            {
+                const char *key = player_enhanced_part(row->part)->key;
+                int n = snprintf(groups + used, sizeof(groups) - used, "%s", key);
+                if (n < 0 || (size_t)n >= sizeof(groups) - used) break;
+                used += (size_t)n;
+            }
+        }
+        snprintf(line, sizeof(line), "title=%s|preset=%s|groups=%s|tab=%d",
+                 title >= 0 ? app->games[title].disc_id : "library",
+                 model->preset != NULL ? model->preset : "Custom", groups,
+                 model->enhanced_tab);
+        if (strcmp(line, player->enhanced_layout_reported) != 0) {
+            snprintf(player->enhanced_layout_reported, sizeof(player->enhanced_layout_reported),
+                     "%s", line);
+            printf("[PLAYER_UI_TEST] next_ui_enhanced_layout %s\n", line);
         }
     }
 #endif
@@ -1144,6 +1265,7 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     }
     model.resolution = player_ui_resolution_word(app->settings.resolution_scale);
     model.pacing = app->settings.fps_cap < 0 ? "PSP timing" : "No extra cap";
+    model.pacing_sentence = "Sets whether this player follows PSP timing or adds no frame cap.";
     model.scaling = player_present_scaling_label(app->settings.present_scaling);
     model.preset = player_app_graphics_preset_label(app);
     model.vsync = app->settings.vsync;
@@ -1217,17 +1339,16 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     if (app->settings_newer_schema && app->settings_notice[0] != '\0') {
         model.notice = app->settings_notice;
     }
-    /* The graphics preset (#2150) says on the main page, where its row is, that it is used
-       in Enhanced and Ace only and what it could not set. It is derived from the choice, so
-       it goes with Custom and is back after a restart. */
-    if (model.page == PLAYER_UI_SETTINGS_PAGE_MAIN &&
+    /* The graphics preset (#2150) explains where it applies on Settings and Enhanced pages.
+       It is derived from the choice, so it goes with Custom and is back after a restart. */
+    if ((model.page == PLAYER_UI_SETTINGS_PAGE_MAIN || model.page == PLAYER_UI_SETTINGS_PAGE_ACE) &&
         player_app_graphics_preset_note(app, player->settings_preset_note,
                                         sizeof(player->settings_preset_note))) {
         model.preset_notice = player->settings_preset_note;
     }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
-    if (model.page == PLAYER_UI_SETTINGS_PAGE_MAIN) {
-        /* The preset row and note the main page draws; printed on change. */
+    if (model.page == PLAYER_UI_SETTINGS_PAGE_ACE) {
+        /* The Enhanced page's first row shows the global preset; printed on change. */
         char line[sizeof(player->preset_note_reported)];
         snprintf(line, sizeof(line), "value=%s|note=%s", model.preset,
                  model.preset_notice != NULL ? model.preset_notice : "");
@@ -1323,7 +1444,16 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     }
     model.logical_width = scale.logical_w;
     model.logical_height = scale.logical_h;
-    return player_ui_screen_settings(player->ui, &model);
+    {
+        PlayerUiAction action = player_ui_screen_settings(player->ui, &model);
+        if (action.kind == PLAYER_UI_ACTION_SETTINGS &&
+            action.primary == (PlayerUiPrimaryAction)PLAYER_UI_SETTINGS_SELECT_ENHANCED_TAB) {
+            if (action.title_index < PLAYER_UI_ENHANCED_GROUP_COUNT)
+                player->enhanced_tab = (int)action.title_index;
+            action.kind = PLAYER_UI_ACTION_NONE;
+        }
+        return action;
+    }
 }
 
 /* A share of the full axis range, as a whole percent. */
@@ -1723,7 +1853,7 @@ static PlayerUiAction player_ui_render_queue(PlayerUiNk *player, const PlayerApp
 
 static PlayerUiAction player_ui_render_flow(PlayerUiNk *player, PlayerApp *app,
                                             NkUiScale scale, double now_s) {
-    PlayerUiAction none = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
+    PlayerUiAction none = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
     if (app->active_view == VIEW_SETUP_WIZARD) {
         return player_ui_render_wizard(player, app, scale);
     }
@@ -1987,7 +2117,9 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
                 break;
             case VIEW_ONLINE_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_ONLINE_MODE; break;
             case VIEW_ACCESSIBILITY_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE; break;
-            case VIEW_ACE_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_ACE_MODE; break;
+            case VIEW_ACE_SETTINGS:
+                focus = NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000300u);
+                break;
             case VIEW_PREREQ_ABOUT:
             case VIEW_CONFIRM_REMOVE_TOOLS:
             /* The safe answer, Keep everything, has the focus. */
@@ -3414,8 +3546,8 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     NkUiEvent repeats[8];
     size_t repeat_count;
     const NkUiDrawList *draw_list;
-    PlayerUiAction action = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
-    PlayerUiAction rebuild_answer = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
+    PlayerUiAction action = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
+    PlayerUiAction rebuild_answer = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
     PlayerUiRoute route;
     if (out_action != NULL) {
         out_action->kind = PLAYER_UI_ACTION_NONE;

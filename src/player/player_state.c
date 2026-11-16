@@ -3879,6 +3879,39 @@ void player_app_cycle_title_part(PlayerApp *app, int game_index, int part) {
     if (part == PLAYER_PART_CULL) player_app_title_play_changed(app, game_index);
 }
 
+static bool player_app_enhanced_page_is_title(const PlayerApp *app);
+
+void player_app_enhanced_page_set_part(PlayerApp *app, int part, int value_index) {
+    const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
+    int title = player_app_enhanced_page_title(app);
+    if (!app || !info || value_index < -1 || value_index >= info->value_count) return;
+    if (title >= 0) {
+        PlayerTitlePlay entry;
+        int value = value_index < 0 ? -1 : info->values[value_index];
+        if (!title_play_entry(app, title, &entry) || entry.part[part] == value) return;
+        entry.part[part] = value;
+        title_play_store(&app->settings, &entry);
+        player_dev_log_add(app, "settings", "Enhanced %s for %s: %s", info->key, entry.key,
+                           value_index < 0 ? "library default" : info->words[value_index]);
+        maybe_persist_settings(app);
+        if (part == PLAYER_PART_CULL) player_app_title_play_changed(app, title);
+    } else if (player_app_enhanced_page_is_title(app)) {
+        player_app_close_enhanced_page(app);
+    } else {
+        const PlayerGraphicsPresetRow *preset =
+            player_graphics_preset_row(app->settings.graphics_preset);
+        if (value_index < 0) return;
+        int value = info->values[value_index];
+        if (app->settings.enhanced.part[part] == value) return;
+        if (preset && preset->part[part] >= 0) graphics_preset_row_edited(app);
+        app->settings.enhanced.part[part] = value;
+        player_dev_log_add(app, "settings", "Enhanced %s for the library: %s", info->key,
+                           info->words[value_index]);
+        maybe_persist_settings(app);
+        if (part == PLAYER_PART_CULL) player_app_select_package_variants(app);
+    }
+}
+
 void player_app_open_title_enhanced(PlayerApp *app, int game_index) {
     if (!app || game_index < 0 || game_index >= app->game_count) return;
     /* The page holds the game by its disc, not by its place in the list. */
@@ -3927,6 +3960,36 @@ void player_app_enhanced_page_cycle_mode(PlayerApp *app) {
     if (title >= 0) player_app_cycle_title_play_mode(app, title);
     else if (player_app_enhanced_page_is_title(app)) player_app_close_enhanced_page(app);
     else player_app_toggle_library_play_mode(app);
+}
+
+void player_app_enhanced_page_set_mode(PlayerApp *app, int choice_index) {
+    int title = player_app_enhanced_page_title(app);
+    if (!app) return;
+    if (title >= 0) {
+        static const PlayerPlayMode modes[] = {
+            PLAYER_PLAY_LIBRARY, PLAYER_PLAY_AUTHENTIC, PLAYER_PLAY_ENHANCED, PLAYER_PLAY_ACE
+        };
+        PlayerTitlePlay entry;
+        if (choice_index < 0 || choice_index >= (int)(sizeof(modes) / sizeof(modes[0])) ||
+            (modes[choice_index] == PLAYER_PLAY_ACE &&
+             !app->title_enhancements[title].available) ||
+            !title_play_entry(app, title, &entry) || entry.mode == modes[choice_index]) return;
+        entry.mode = modes[choice_index];
+        title_play_store(&app->settings, &entry);
+        player_dev_log_add(app, "settings", "play mode for %s: %s", entry.key,
+                           player_play_mode_name(entry.mode));
+        maybe_persist_settings(app);
+        player_app_title_play_changed(app, title);
+    } else if (player_app_enhanced_page_is_title(app)) {
+        player_app_close_enhanced_page(app);
+    } else if (choice_index == 0 || choice_index == 1) {
+        PlayerPlayMode mode = choice_index == 0 ? PLAYER_PLAY_AUTHENTIC : PLAYER_PLAY_ENHANCED;
+        if (app->settings.enhanced.library == mode) return;
+        app->settings.enhanced.library = mode;
+        player_dev_log_add(app, "settings", "library default: %s", player_play_mode_name(mode));
+        maybe_persist_settings(app);
+        player_app_select_package_variants(app);
+    }
 }
 
 bool player_app_set_enhanced_page_pack(PlayerApp *app, const char *path) {
