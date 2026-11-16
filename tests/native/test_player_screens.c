@@ -5022,7 +5022,7 @@ static void test_ssaa_warning_rows(void) {
         {"4x", PLAYER_SSAA_WARNING},
         {"4x anyway", PLAYER_SSAA_ANYWAY_SENTENCE},
     };
-    static const char *const ends[] = {"About", "may stutter.", "anyway."};
+    static const char *const ends[] = {"About 16", "graphics", "anyway."};
     int saved_text = g_flow_text_size_pct;
     int saved_tab = g_enhanced_tab;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;

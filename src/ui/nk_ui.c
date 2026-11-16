@@ -13,7 +13,6 @@
 
 #include <limits.h>
 #include <math.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -235,19 +234,10 @@ static void nk_ui_update_focus_from_events(NkUi *ui) {
         if (event->type == NK_UI_EV_NAV &&
             (event->dir == NK_UI_DIR_LEFT || event->dir == NK_UI_DIR_RIGHT) &&
             nk_ui_focus_owns_horizontal(ui->focus_graph)) {
-            if (getenv("NK_UI_TEST_DEBUG_NAV") != NULL)
-                fprintf(stderr, "HORIZONTAL_OWNED focus=%08X dir=%d\n",
-                        (unsigned)nk_ui_focus_current(ui->focus_graph), (int)event->dir);
             /* Left and right belong to the focused control; the screen takes them
                with nk_ui_take_event(NK_UI_EV_NAV). */
             ++i;
         } else if (event->type == NK_UI_EV_NAV) {
-            NkUiId before = nk_ui_focus_current(ui->focus_graph);
-            bool horizontal_before = nk_ui_focus_owns_horizontal(ui->focus_graph);
-            if (getenv("NK_UI_TEST_DEBUG_NAV") != NULL)
-                fprintf(stderr, "HORIZONTAL_MOVED before=%08X after=%08X dir=%d owns=%d\n",
-                        (unsigned)before, (unsigned)nk_ui_focus_current(ui->focus_graph),
-                        (int)event->dir, horizontal_before ? 1 : 0);
             focused = nk_ui_focus_move(ui->focus_graph, event->dir);
             if (focused != 0u) {
                 ui->focused = focused;

@@ -815,7 +815,6 @@ typedef char settings_texpack_text_after_parts[SET_ID_ENHANCED_TEXT_END <= 0x500
 #define SET_ID_ENHANCED_MODE SET_ID(0x000304u)
 #define SET_ID_ENHANCED_TABS SET_ID(0x000520u)
 #define SET_ID_ENHANCED_TABS_SPAN 0x10u
-#define SET_ID_ENHANCED_TABS_SPAN 0x10u
 #define SET_ID_ENHANCED_CHOICES(part, choice) \
     SET_ID(0x000600u + (uint32_t)(part) * 0x20u + (uint32_t)(choice) * 4u)
 #define SET_ID_ENHANCED_PACK_CHOOSE SET_ID(0x000A40u)
@@ -1151,9 +1150,15 @@ static void settings_enhanced_details(NkUi *ui, const char *name, const char *va
     nk_ui_text(ui, SET_ID_ENHANCED_DETAIL_TEXT + 3u,
                nk_ui_text_clamp(ui, safe_text(value, ""), &value_text, width - 36.0f, 1),
                &value_text);
-    if (tag != NULL) nk_ui_tag(ui, SET_ID_ENHANCED_DETAIL_TEXT + 4u, tag);
-    if (title) nk_ui_tag(ui, SET_ID_ENHANCED_DETAIL_TEXT + 5u,
-                         inherited ? "Library default" : "This game");
+    if (tag != NULL || title) {
+        NkUiLayout tags = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_2);
+        if (nk_ui_begin_container(ui, SET_ID_ENHANCED_DETAIL_TEXT + 8u, &tags, NULL)) {
+            if (tag != NULL) nk_ui_tag(ui, SET_ID_ENHANCED_DETAIL_TEXT + 4u, tag);
+            if (title) nk_ui_tag(ui, SET_ID_ENHANCED_DETAIL_TEXT + 5u,
+                                 inherited ? "Library default" : "This game");
+            nk_ui_end_container(ui);
+        }
+    }
     description_text.wrap = true;
     nk_ui_text(ui, SET_ID_ENHANCED_DETAIL_TEXT + 6u,
                nk_ui_text_clamp(ui, safe_text(description, ""), &description_text,
@@ -1179,11 +1184,10 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
     NkUiSection active_tabs[PLAYER_UI_ENHANCED_GROUP_COUNT];
     int preset_index = 0;
     int mode_index = 0;
-    int row_count = 0;
     int active_group = model->enhanced_tab;
-    float detail_width = inner * 0.28f;
+    float detail_width = inner * 0.32f;
     float list_width = inner - detail_width - NK_UI_SPACE_4;
-    float detail_height = 260.0f;
+    float detail_height = 280.0f;
     const char *detail_name = "Graphics preset";
     const char *detail_value = safe_text(model->preset, "Custom");
     const char *detail_sentence =
@@ -1253,15 +1257,6 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
             NkUiLayout list = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(list_width), sizing_fit(), 0.0f);
             NkUiStyle list_style;
             memset(&list_style, 0, sizeof(list_style));
-            for (int i = 0; i < model->enhanced_row_count && i < PLAYER_UI_ENHANCED_ROWS; ++i) {
-                const PlayerUiEnhancedRow *row = &model->enhanced_rows[i];
-                if ((int)row->group == active_group) ++row_count;
-            }
-            detail_height = (float)(row_count + (active_group == PLAYER_UI_ENHANCED_GROUP_PICTURE &&
-                                                  model->texpack_row ? 1 + model->texpack_chosen : 0)) *
-                            41.0f;
-            if (detail_height < 260.0f) detail_height = 260.0f;
-            if (active_group == PLAYER_UI_ENHANCED_GROUP_MOTION) detail_height += 40.0f;
             list_style.fill_rgba = 0u;
             if (nk_ui_begin_container(ui, SET_ID(0x000564u), &list, &list_style)) {
                 for (int i = 0; i < model->enhanced_row_count && i < PLAYER_UI_ENHANCED_ROWS; ++i) {
@@ -1392,7 +1387,8 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         {NK_UI_PROMPT_ACT_CONFIRM, "Change value"}, {NK_UI_PROMPT_ACT_BACK, "Back"}
     };
     const NkUiTheme *theme = nk_ui_theme(ui);
-    float inner = scr_flow_begin(ui, width, height, 760.0f);
+    float inner = scr_flow_begin(ui, width, height,
+                                 model->page == PLAYER_UI_SETTINGS_PAGE_ACE ? 1120.0f : 760.0f);
     if (inner <= 0.0f) return;
     switch (model->page) {
     case PLAYER_UI_SETTINGS_PAGE_ONLINE:

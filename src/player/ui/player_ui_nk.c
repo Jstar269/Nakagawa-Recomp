@@ -949,6 +949,7 @@ typedef char player_ui_enhanced_more_row_ids_fit[
 /* Why a title offers no Ace: it has no usable package of its own (#2055). */
 #define PLAYER_UI_ACE_NEEDS_PACKAGE "Ace needs a package made for this game."
 
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
 static const char *player_ui_enhanced_group_name(PlayerUiEnhancedGroup group) {
     switch (group) {
     case PLAYER_UI_ENHANCED_GROUP_PICTURE: return "Picture";
@@ -960,6 +961,7 @@ static const char *player_ui_enhanced_group_name(PlayerUiEnhancedGroup group) {
     default: return "";
     }
 }
+#endif
 
 static int player_ui_enhanced_value_index(int part, int value) {
     const PlayerEnhancedPartInfo *info = player_enhanced_part(part);

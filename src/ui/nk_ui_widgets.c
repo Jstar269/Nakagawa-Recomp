@@ -768,11 +768,12 @@ int nk_ui_section_tabs(NkUi *ui, NkUiId id, const NkUiSection *sections, size_t 
                        float height) {
     const NkUiTheme *theme = nk_ui_theme(ui);
     NkUiLayout layout = nk_ui_row(nk_ui_grow(), nk_ui_fixed(height), NK_UI_SPACE_1);
+    NkUiId sections_id = nk_ui_child_id(id, 4u);
     size_t i;
     int chosen = -1;
     int active = -1;
     layout.align_y = NK_UI_ALIGN_START;
-    if (!nk_ui_begin_container(ui, id, &layout, NULL)) return -1;
+    if (!nk_ui_begin_container(ui, sections_id, &layout, NULL)) return -1;
     for (i = 0u; sections != NULL && i < count; ++i) {
         NkUiLayout tab = nk_ui_column(nk_ui_fit(), nk_ui_grow(), 0.0f);
         NkUiId tab_id = nk_ui_child_id(id, 16u + (uint32_t)i * 4u);
@@ -862,9 +863,7 @@ int nk_ui_top_bar(NkUi *ui, NkUiId id, const NkUiSection *sections, size_t count
     const NkUiTheme *theme = nk_ui_theme(ui);
     NkUiLayout layout = nk_ui_row(nk_ui_grow(), nk_ui_fixed(NK_UI_TOP_BAR_HEIGHT - 1.0f),
                                   NK_UI_SPACE_6);
-    size_t i;
     int chosen = -1;
-    int active = -1;
     nk_ui_pad(&layout, 0.0f, NK_UI_GUTTER, 0.0f, NK_UI_GUTTER);
     if (!nk_ui_begin_container(ui, id, &layout, NULL)) {
         return -1;
@@ -878,79 +877,8 @@ int nk_ui_top_bar(NkUi *ui, NkUiId id, const NkUiSection *sections, size_t count
                         theme->paper);
         nk_ui_end_container(ui);
     }
-    /* Sections: full-height tabs; the active one carries a 3 px accent rule. */
-    layout = nk_ui_row(nk_ui_grow(), nk_ui_grow(), NK_UI_SPACE_1);
-    layout.align_y = NK_UI_ALIGN_START;
-    if (nk_ui_begin_container(ui, nk_ui_child_id(id, 4u), &layout, NULL)) {
-        for (i = 0; sections != NULL && i < count; ++i) {
-            NkUiLayout tab = nk_ui_column(nk_ui_fit(), nk_ui_grow(), 0.0f);
-            NkUiId tab_id = nk_ui_child_id(id, 16u + (uint32_t)i * 4u);
-            /* A focusable tab takes focus on its label pill, so the ring stays
-               inside the bar instead of running off the window's top edge. */
-            NkUiId label_id = sections[i].id != 0u ? sections[i].id : nk_ui_child_id(tab_id, 2u);
-            NkUiStyle label_style;
-            bool focused = false;
-            bool hovered = false;
-            tab.align_x = NK_UI_ALIGN_CENTER;
-            if (sections[i].active) active = (int)i;
-            memset(&label_style, 0, sizeof(label_style));
-            label_style.corner_radius = NK_UI_RADIUS_CONTROL;
-            if (sections[i].id != 0u) {
-                nk_ui_register_button(ui, label_id, NK_UI_BUTTON_NOT_DEFAULT);
-                focused = nk_ui_button_focused(ui, label_id);
-                hovered = nk_ui_hovered(ui, label_id);
-                label_style.fill_rgba = nk_ui_pressed(ui, label_id) ? theme->pressed :
-                                        focused || hovered ? theme->surface_high : 0u;
-                nk_ui_ease_fills(&label_style);
-            }
-            if (!nk_ui_begin_container(ui, tab_id, &tab, NULL)) {
-                continue;
-            }
-            nk_ui_spacer(ui, nk_ui_child_id(tab_id, 1u), nk_ui_fixed(1.0f), nk_ui_grow());
-            {
-                NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_LABEL,
-                                                sections[i].active || focused || hovered
-                                                    ? theme->paper : theme->muted);
-                NkUiLayout label = nk_ui_row(nk_ui_fit(),
-                                             nk_ui_fixed(nk_ui_line_box(ui, 34.0f, &text)), 0.0f);
-                nk_ui_pad(&label, 0.0f, NK_UI_SPACE_3, 0.0f, NK_UI_SPACE_3);
-                label.align_y = NK_UI_ALIGN_CENTER;
-                text.letter_spacing = 1.2f;
-                if (nk_ui_begin_container(ui, label_id, &label, &label_style)) {
-                    if (focused) {
-                        nk_ui_focus_ring(ui, label_id, NK_UI_RADIUS_CONTROL);
-                    }
-                    if (sections[i].id != 0u && nk_ui_take_activation(ui, label_id)) {
-                        chosen = (int)i;
-                    }
-                    nk_ui_text(ui, nk_ui_child_id(tab_id, 3u),
-                               nk_ui_caps(ui, sections[i].label), &text);
-                    nk_ui_end_container(ui);
-                }
-            }
-            nk_ui_spacer(ui, nk_ui_child_id(tab_id, 4u), nk_ui_fixed(1.0f), nk_ui_grow());
-            {
-                /* Every tab keeps a slot for the 3 px rule; the rule itself is
-                   one element in the active tab's slot, so when the active tab
-                   changes it slides across instead of jumping. */
-                NkUiLayout rule = nk_ui_row(nk_ui_grow(), nk_ui_fixed(3.0f), 0.0f);
-                if (nk_ui_begin_container(ui, nk_ui_child_id(tab_id, 5u), &rule, NULL)) {
-                    if (sections[i].active) {
-                        NkUiLayout bar = nk_ui_row(nk_ui_grow(), nk_ui_grow(), 0.0f);
-                        NkUiStyle fill = nk_ui_fill(theme->accent_dark, 0u, 0.0f);
-                        fill.transition = NK_UI_TRANSITION_BOX;
-                        fill.transition_s = (float)NK_UI_MOTION_BASE;
-                        if (nk_ui_begin_container(ui, nk_ui_child_id(id, 9u), &bar, &fill)) {
-                            nk_ui_end_container(ui);
-                        }
-                    }
-                    nk_ui_end_container(ui);
-                }
-            }
-            nk_ui_end_container(ui);
-        }
-        nk_ui_end_container(ui);
-    }
+    /* Reuse the shared tab strip; the top bar adds its own input chip. */
+    chosen = nk_ui_section_tabs(ui, id, sections, count, NK_UI_TOP_BAR_HEIGHT - 1.0f);
     /* Input chip. */
     if (input_label != NULL && input_label[0] != '\0') {
         float chip_h = nk_ui_chip_height(ui, 30.0f, NK_UI_TYPE_LABEL_S);
@@ -970,16 +898,6 @@ int nk_ui_top_bar(NkUi *ui, NkUiId id, const NkUiSection *sections, size_t count
     }
     nk_ui_end_container(ui);
     nk_ui_divider(ui, nk_ui_child_id(id, 8u), true);
-    /* L / R (Q / E) step through the focusable sections from the active one. */
-    {
-        NkUiNavDir dir = NK_UI_DIR_NONE;
-        if (chosen < 0 && active >= 0 && nk_ui_take_event(ui, NK_UI_EV_TAB, &dir)) {
-            int step = dir == NK_UI_DIR_LEFT ? -1 : 1;
-            int next = active + step;
-            while (next >= 0 && next < (int)count && sections[next].id == 0u) next += step;
-            if (next >= 0 && next < (int)count) chosen = next;
-        }
-    }
     return chosen;
 }
 

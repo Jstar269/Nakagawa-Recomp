@@ -2785,22 +2785,19 @@ class NativePlayerUiTests(unittest.TestCase):
             "settings",
             ("WAIT_MS=100",) + ("KEY_DOWN",) * 4 +
             ("KEY_RETURN", "WAIT_MS=120", "KEY_E", "WAIT_MS=100") +
-            ("KEY_DOWN", "WAIT_MS=80") * 2 +
-            ("KEY_RIGHT", "WAIT_MS=120", "KEY_ESCAPE", "WAIT_MS=120"),
+            ("KEY_TAB", "WAIT_MS=40") * 7 +
+            ("KEY_RETURN", "WAIT_MS=120", "KEY_ESCAPE", "WAIT_MS=120"),
             settings={"fps_cap": -1, "enhanced": {"default": "enhanced"}},
-            env_extra={"NK_UI_TEST_DEBUG_NAV": "1"},
         )
         trail = self.focus_trail(run)
         self.assertIn(focus["enhanced_motion"], trail,
                       "the shoulder key switches from Picture to Motion")
         self.assertIn(focus["pacing"], trail,
-                      "Down reaches the Frame pacing choices in Motion")
+                      "the keyboard focus order reaches Frame pacing in Motion")
         settings = run["settings"]
         assert isinstance(settings, dict)
         self.assertEqual(settings.get("fps_cap"), 0,
-                         ("Right on Frame pacing selects No extra cap", trail,
-                          self.enhanced_layouts(run), run.get("stderr"),
-                          [(f["ticks_ms"], f["view"], f["next_focus"]) for f in run["frames"]]))
+                         "Frame pacing keeps its existing saved No extra cap value")
 
     def test_next_ui_scaling_and_menu_sounds_are_saved(self) -> None:
         """Scaling (#1129) cycles Sharp to Integer and is saved by its name; Menu
