@@ -2,8 +2,8 @@
 
 Status: step 1 of the implementation order is built (the switches, the wizard step and the developer log panel).
 The update check is built too, as its own opt-in feature outside online mode (see
-[Update check](#update-check)), and so is [Discord status](#discord-status), which makes no
-network connection; news and reports are not. The player is offline unless the user asks
+[Update check](#update-check)), as are [Discord status](#discord-status) and
+[RetroAchievements](#retroachievements), each with its own opt-in; news and reports are not. The player is offline unless the user asks
 ([`SETUP.md`](SETUP.md#network-use)). This page is the contract the implementation follows. The launcher gets an update check, a reporting system and a news feed, all behind an
 **online mode** that the setup wizard asks about, and a **developer mode** that shows a developer log for
 diagnosing new issues.
@@ -100,6 +100,31 @@ opt-in and off by default.
   setting is On still shows the row, saying the build can't show it, so it can be turned off.
 - **Tests** (`tests/native/test_discord_presence.c`) drive the client against a fake transport and,
   on Windows, a fake pipe server with a test-only name; they never reach Discord.
+
+## RetroAchievements
+
+Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed rcheevos client.
+
+- **Settings > Online and developer options** has an **Achievements** switch, off by default. Turning it on shows a consent
+  screen that names `retroachievements.org` and lists every data field. The player contacts only that
+  host over HTTPS for achievement sets, unlocks, Rich Presence and leaderboard requests. It uses the
+  existing player HTTPS transport and a stable `NakagawaRecomp/<numeric version>` user agent.
+- **Sign-in.** The player sends the RetroAchievements user name and password once to exchange them for a
+  token, clears the password from its temporary buffers, and stores only the token in Windows Credential
+  Manager. Sign-out removes that credential. Other platforms without the Windows credential store refuse
+  sign-in rather than saving a token in a plain file.
+- **What is sent:** the user name and token, the RetroAchievements game hash, achievement unlocks, Rich
+  Presence text and leaderboard entries. The hash follows RetroAchievements' PSP method: raw bytes from
+  `PSP_GAME/PARAM.SFO`, then `PSP_GAME/SYSDIR/EBOOT.BIN`, with no new decryption. No game file, save,
+  package, guest memory, telemetry or capture is sent.
+- **Offline unlocks** are stored as owner-only, token-free records in the player's data folder. After the
+  next sign-in, the player submits each pending unlock through rcheevos' award request builder and the
+  same transport. The game's title page shows its core achievements and unlock toasts appear in-game.
+- **Hardcore is unavailable.** The client starts softcore sessions only; the UI and requests do not claim
+  hardcore eligibility.
+- **Tests** use rcheevos' server callback with canned responses and never touch the internet. The
+  egress allowlist permits the player's existing transport as the caller, while the bridge and vendored
+  rcheevos library hold no network implementation of their own.
 
 ## News
 

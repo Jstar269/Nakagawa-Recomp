@@ -1297,14 +1297,26 @@ required.
 ### Network use
 
 Nakagawa works offline. The player and the runtime make no network connection unless you
-agree to one, and the game itself never reaches the network. There are two
-connections, listed below, and each is opt-in.
+agree to one, and the game itself never reaches the network. Each connection below is opt-in.
 
 | What | Host | When | Controlled by |
 | --- | --- | --- | --- |
 | Build-tool download | `www.python.org`, `repo.msys2.org` (HTTPS) | Only after you select **DOWNLOAD** on the BUILD PACKAGE consent card | That consent card, per build |
 | Check for updates | `api.github.com` (HTTPS) | When you select **CHECK FOR UPDATES** (Settings > Updates), or once at start if you turn on **Check at start** (off by default) | That button, and that switch |
 | Update download | `github.com`, which redirects to `release-assets.githubusercontent.com` (HTTPS) | Only after a check finds a newer version and you select **DOWNLOAD** | That button, per download |
+| RetroAchievements | `retroachievements.org` (HTTPS) | Only after you enable **Achievements** in Settings > Online and developer options and accept the consent screen; achievement-set, Rich Presence and leaderboard requests follow while it is enabled | The Achievements switch and its consent screen |
+
+**RetroAchievements** is off by default. Its consent screen names `retroachievements.org` and the data sent:
+your RetroAchievements user name and API token, the game hash, achievement unlocks, Rich Presence text and
+leaderboard entries. During sign-in, your user name and password are sent once to obtain the token; the
+password is not saved. The token is kept in Windows Credential Manager. Other platforms without that
+credential store refuse sign-in. Nakagawa identifies a game by hashing the raw `PSP_GAME/PARAM.SFO` and
+`PSP_GAME/SYSDIR/EBOOT.BIN` bytes from your readable disc image, in that order; it does not decrypt them for
+this check. Game files, saves and guest memory stay on this PC. Offline unlocks wait in an owner-only file
+under the player data folder until they can be submitted. The feature is softcore only; hardcore unlocks
+are not available. Its requests identify themselves with the stable user agent `NakagawaRecomp/<version>`.
+To turn it on, open **Settings > Online and developer options**, switch on **Achievements**, read and accept the consent screen,
+then choose **Sign in**. The game's page lists the core achievements after the set loads.
 
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).
@@ -1356,9 +1368,9 @@ project.
 
 There is no telemetry or crash upload. The `network_mode` entry in
 `settings.json` is reserved and always reads `"offline"`; a build treats any other value as
-offline. `tools/test_prereq_fetcher.py` fails if shipped code outside the two
-prerequisite downloaders uses a network API, if a pinned download or the update check names a host not
-listed in this section, or if new code calls the native download transport.
+offline. `tools/test_prereq_fetcher.py` fails if shipped code outside the explicit egress allowlist
+uses a network API, if a pinned download or an opt-in feature names a host not listed in this section,
+or if new code calls the native download transport without adding its own documented opt-in.
 
 Release packaging is a maintainer step, not part of the player:
 `python -m tools.nk_core.prereq_fetcher` with `--bundle-dest` or `--source-archive` downloads

@@ -1619,6 +1619,61 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         self.assertIn("package_builder_native_transport_request", source)
         self.assertIn("NK_ACH_HOST", source)
         self.assertIn("NK_PLAYER_VERSION", source)
+        self.assertIn('"NakagawaRecomp/%.*s"', source)
+        self.assertIn("components != 3u", source)
+
+    def test_achievement_token_storage_uses_no_plain_file_fallback(self) -> None:
+        win32 = (REPO_ROOT / "src" / "core" / "nk_platform_win32.c").read_text(encoding="utf-8")
+        posix = (REPO_ROOT / "src" / "core" / "nk_platform_posix.c").read_text(encoding="utf-8")
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+
+        def credential_section(source: str) -> str:
+            start = source.index("bool nk_platform_credential_store_available(void)")
+            end = source.index("bool nk_platform_guest_memory_channel_create", start)
+            return source[start:end]
+
+        windows_store = credential_section(win32)
+        other_platform = credential_section(posix)
+        self.assertIn("CredReadW(", windows_store)
+        self.assertIn("CredWriteW(", windows_store)
+        self.assertIn("CRED_PERSIST_LOCAL_MACHINE", windows_store)
+        self.assertIn("CredDeleteW(", windows_store)
+        self.assertNotRegex(windows_store, r"\b(?:fopen|_wfopen|CreateFileW|WriteFile)\s*\(")
+        self.assertIn("return false;", other_platform)
+        self.assertNotRegex(other_platform, r"\b(?:fopen|_wfopen|open|write)\s*\(")
+        self.assertIn("nk_platform_credential_write(k_ach_credential_target", main)
+        self.assertIn("nk_platform_credential_read(k_ach_credential_target", main)
+        self.assertIn("nk_platform_credential_delete(k_ach_credential_target", main)
+        self.assertNotIn("achievements_token", main)
+
+    def test_offline_achievement_queue_is_private_and_token_free(self) -> None:
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        header = (REPO_ROOT / "src" / "core" / "nk_achievements.h").read_text(encoding="utf-8")
+        start = main.index("#define PLAYER_ACH_QUEUE_HEADER_SIZE")
+        end = main.index("static void player_achievements_collect_events", start)
+        queue_code = main[start:end]
+        record = header.split("typedef struct NkAchPendingUnlock {", 1)[1].split("}", 1)[0]
+        for field in ("char game_hash[33]", "uint32_t achievement_id", "uint64_t unlocked_at_utc"):
+            self.assertIn(field, record)
+        self.assertNotRegex(record, r"\b(?:username|password|token|secret)\b")
+        for required in ("nk_platform_get_app_data_dir", "nk_platform_mkdir_p_private",
+                         "nk_platform_fopen_private", "nk_rename_utf8",
+                         "entries[i].game_hash", "entries[i].achievement_id",
+                         "entries[i].unlocked_at_utc"):
+            self.assertIn(required, queue_code)
+        self.assertRegex(queue_code, r"\{'N', 'K', 'R', 'A', 'Q', '0', '0', '1'\}")
+
+    def test_runtime_host_toast_has_no_retroachievements_identity(self) -> None:
+        runtime = REPO_ROOT / "src" / "rt"
+        shipped = [path for path in runtime.rglob("*")
+                   if path.is_file() and path.suffix in {".c", ".h"}]
+        texts = {path.relative_to(REPO_ROOT).as_posix(): path.read_text(
+            encoding="utf-8", errors="replace") for path in shipped}
+        self.assertIn("sr_host_notification", texts["src/rt/gui.c"])
+        for rel, source in texts.items():
+            with self.subTest(path=rel):
+                self.assertNotIn("retroachievements.org", source.lower())
+                self.assertNotIn("rc_client", source)
 
     def test_discord_status_is_local_ipc_only(self) -> None:
         for rel in DISCORD_PRESENCE_PATHS:
