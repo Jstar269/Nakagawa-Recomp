@@ -4,6 +4,7 @@
 #include "player_ui_nk.h"
 
 #include "player_state.h"
+#include "cover_art.h"
 #include "player_ui_art.h"
 #include "player_ui_music.h"
 #include "player_ui_sound.h"
@@ -291,8 +292,11 @@ struct PlayerUiNk {
     /* The titles this frame shows (player_ui_nk_shown_titles). */
     int shown_titles[PLAYER_UI_SHOWN_TITLES_MAX];
     size_t shown_count;
+    char cover_data_root[NK_MAX_PATH];
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     bool icon_reported[PLAYER_UI_TITLE_CAP];
+    bool cover_reported[PLAYER_UI_TITLE_CAP];
+    char cover_cache_reported[256];
     char status_reported[PLAYER_UI_TITLE_CAP][32]; /* the status word last printed */
     char play_reported[PLAYER_UI_TITLE_CAP][16];   /* the play mode badge last printed */
     /* Settings > Enhanced as last printed: the title, mode and sentence, then "|key=value" for each
@@ -533,6 +537,10 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
     (void)nk_ui_prompt_images_load(&player->prompt_images);
     nk_ui_set_prompt_images(player->ui, &player->prompt_images);
     player->art = player_ui_art_create(player_ui_read_disc_art);
+    if (!nk_platform_resolve_path(NK_PATH_DATA, player->cover_data_root,
+                                  sizeof(player->cover_data_root))) {
+        player->cover_data_root[0] = '\0';
+    }
     player->sounds = player_ui_sounds_create();
     player->music = player_ui_music_create_beside(base_path);
     player->music_reported = PLAYER_UI_MUSIC_OFF;
@@ -568,6 +576,17 @@ void player_ui_nk_destroy(PlayerUiNk *player) {
     nk_ui_ttf_destroy(player->ttf);
     nk_ui_router_destroy(player->router);
     free(player);
+}
+
+void player_ui_nk_invalidate_cover_art(PlayerUiNk *player) {
+    if (player == NULL) return;
+    player_ui_art_invalidate_covers(player->art);
+    for (size_t i = 0u; i < PLAYER_UI_TITLE_CAP; ++i) {
+        player->titles[i].cover = NULL;
+    }
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    memset(player->cover_reported, 0, sizeof(player->cover_reported));
+#endif
 }
 
 static bool player_ui_disc_view(PlayerView view) {
@@ -1207,6 +1226,8 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.online_news = app->settings.online_news;
     model.online_reports = app->settings.online_reports;
     model.developer_mode = app->settings.developer_mode;
+    model.download_cover_art = app->settings.download_cover_art;
+    model.cover_art_cache_size = app->cover_art_cache_size_label;
     model.share_system_libraries = app->settings.share_system_libraries;
     /* The build tools and cache page says what its clear button did. */
     if (model.page == PLAYER_UI_SETTINGS_PAGE_BUILD_CACHE && app->settings_notice[0] != '\0') {
@@ -1235,6 +1256,17 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
             snprintf(player->preset_note_reported, sizeof(player->preset_note_reported), "%s",
                      line);
             printf("[PLAYER_UI_TEST] next_ui_settings_preset %s\n", line);
+        }
+    }
+    if (model.page == PLAYER_UI_SETTINGS_PAGE_BUILD_CACHE) {
+        char line[sizeof(player->cover_cache_reported)];
+        snprintf(line, sizeof(line), "size=%s|notice=%s",
+                 model.cover_art_cache_size != NULL ? model.cover_art_cache_size : "",
+                 model.notice != NULL ? model.notice : "");
+        if (strcmp(line, player->cover_cache_reported) != 0) {
+            snprintf(player->cover_cache_reported, sizeof(player->cover_cache_reported), "%s",
+                     line);
+            printf("[PLAYER_UI_TEST] next_ui_cover_cache %s\n", line);
         }
     }
 #endif
@@ -3201,15 +3233,34 @@ static void player_ui_note_shown(PlayerUiNk *player, size_t index) {
 static void player_ui_title_art(PlayerUiNk *player, const PlayerApp *app, size_t index,
                                 bool want_picture) {
     PlayerUiTitle *title = &player->titles[index];
+    char cover_path[NK_MAX_PATH];
+    const char *cover_arg = NULL;
     player_ui_note_shown(player, index);
     if (title->art_kind != NK_UI_ART_NONE) return;
-    player_ui_art_get(player->art, app->games[index].iso_path, want_picture,
-                      &title->icon, want_picture ? &title->picture : NULL);
+    if (app->settings.download_cover_art &&
+        app->cover_art_state[index] == PLAYER_COVER_CACHED &&
+        player->cover_data_root[0] != '\0' &&
+        nk_cover_art_cache_path(player->cover_data_root, app->games[index].content_sha1,
+                                cover_path, sizeof(cover_path))) {
+        cover_arg = cover_path;
+    }
+    player_ui_art_get_title(player->art, app->games[index].iso_path, cover_arg, want_picture,
+                            &title->icon, want_picture ? &title->picture : NULL,
+                            &title->cover);
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     if (title->icon != NULL && !player->icon_reported[index]) {
         player->icon_reported[index] = true;
         printf("[PLAYER_UI_TEST] next_ui_disc_icon index=%zu width=%u height=%u\n", index,
                (unsigned)title->icon->width, (unsigned)title->icon->height);
+    }
+    if (title->cover != NULL) {
+        if (!player->cover_reported[index]) {
+            player->cover_reported[index] = true;
+            printf("[PLAYER_UI_TEST] next_ui_cover_art index=%zu width=%u height=%u\n", index,
+                   (unsigned)title->cover->width, (unsigned)title->cover->height);
+        }
+    } else {
+        player->cover_reported[index] = false;
     }
 #endif
 }

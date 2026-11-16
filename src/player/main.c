@@ -23,6 +23,7 @@
  */
 
 #include "player_state.h"
+#include "cover_art.h"
 #include "package_builder.h"
 #include "iso_reader.h"
 #include "ui/player_ui_nk.h"
@@ -1720,6 +1721,12 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_TOGGLE_DISCORD:
             player_app_toggle_discord_presence(app);
             break;
+        case PLAYER_UI_SETTINGS_TOGGLE_COVER_ART:
+            player_app_toggle_download_cover_art(app);
+            break;
+        case PLAYER_UI_SETTINGS_REFRESH_COVER_ART:
+            app->request_cover_art_refresh = true;
+            break;
         case PLAYER_UI_SETTINGS_DOWNLOAD_UPDATE:
             if (app->update.phase == PLAYER_UPDATE_AVAILABLE) {
                 player_update_start(app, PLAYER_UPDATE_JOB_DOWNLOAD);
@@ -3231,6 +3238,205 @@ static void destroy_disc_check_job(PlayerDiscCheckJob **job_slot) {
     *job_slot = NULL;
 }
 
+/* ---- Opt-in cover art worker (cover_art.h, #2632) --------------------------
+   Fetches missing Redump-matched box art off the UI thread so network latency
+   or failures never stall the launcher or disc ICON0/PIC1 reads. */
+#define PLAYER_COVER_ART_BATCH_MAX 16u
+
+typedef struct {
+    char disc_id[MAX_DISC_ID_LEN];
+    char sha1[41];
+    char crc32[9];
+    NkCoverArtStatus status;
+} PlayerCoverArtWorkItem;
+
+typedef struct PlayerCoverArtJob {
+    SDL_Thread *thread;
+    SDL_AtomicInt done;
+    SDL_AtomicInt cancel;
+    uint64_t generation;
+    PackageHttpOpen transport;
+    void *transport_context;
+    char data_root[NK_MAX_PATH];
+    char bundled_dat[NK_MAX_PATH];
+    size_t count;
+    PlayerCoverArtWorkItem items[PLAYER_COVER_ART_BATCH_MAX];
+} PlayerCoverArtJob;
+
+static void cover_art_push_event(PlayerCoverArtJob *job) {
+    SDL_Event event;
+    memset(&event, 0, sizeof(event));
+    event.type = SDL_EVENT_USER;
+    event.user.data1 = job;
+    SDL_PushEvent(&event);
+}
+
+static bool cover_art_cancelled(void *userdata) {
+    PlayerCoverArtJob *job = (PlayerCoverArtJob *)userdata;
+    return !job || SDL_GetAtomicInt(&job->cancel) != 0 ||
+           SDL_GetAtomicInt(&s_player_closing) != 0;
+}
+
+static int SDLCALL cover_art_thread_main(void *userdata) {
+    PlayerCoverArtJob *job = (PlayerCoverArtJob *)userdata;
+    NkDiscDat dat;
+    NkDiscListSource source = NK_DISC_LIST_NONE;
+    NkDiscExpandStatus dat_status;
+    bool loaded;
+    if (!job) return 1;
+    memset(&dat, 0, sizeof(dat));
+    loaded = nk_disc_dat_load_active(job->data_root,
+                                     job->bundled_dat[0] ? job->bundled_dat : NULL,
+                                     &dat, &source, &dat_status);
+    for (size_t i = 0u; i < job->count; i++) {
+        if (cover_art_cancelled(job)) {
+            job->items[i].status = NK_COVER_ART_CANCELLED;
+            continue;
+        }
+        if (!loaded) {
+            job->items[i].status = NK_COVER_ART_NO_MATCH;
+            continue;
+        }
+        NkCoverArtSource art_source = NK_COVER_ART_SOURCE_NONE;
+        job->items[i].status = nk_cover_art_fetch_for_disc(
+            job->transport, job->transport_context, &dat, job->data_root,
+            job->items[i].disc_id, job->items[i].sha1, job->items[i].crc32,
+            NULL, cover_art_cancelled, job, &art_source);
+    }
+    if (loaded) nk_disc_dat_free(&dat);
+    SDL_SetAtomicInt(&job->done, 1);
+    cover_art_push_event(job);
+    return 0;
+}
+
+static void destroy_cover_art_job(PlayerCoverArtJob **job_slot) {
+    if (!job_slot || !*job_slot) return;
+    PlayerCoverArtJob *job = *job_slot;
+    SDL_SetAtomicInt(&job->cancel, 1);
+    if (job->thread) {
+        SDL_WaitThread(job->thread, NULL);
+        job->thread = NULL;
+    }
+    free(job);
+    *job_slot = NULL;
+}
+
+static void player_cover_art_tick(PlayerApp *app, PlayerCoverArtJob **job_slot) {
+    if (!app || !job_slot) return;
+    if (!app->settings.download_cover_art) {
+        if (*job_slot) {
+            destroy_cover_art_job(job_slot);
+            for (int g = 0; g < app->game_count; g++) {
+                if (app->cover_art_state[g] == PLAYER_COVER_FETCHING) {
+                    app->cover_art_state[g] = PLAYER_COVER_UNCHECKED;
+                }
+            }
+        }
+        return;
+    }
+
+    if (*job_slot && SDL_GetAtomicInt(&(*job_slot)->done) != 0) {
+        PlayerCoverArtJob *job = *job_slot;
+        bool downloaded_any = false;
+        if (job->thread) {
+            SDL_WaitThread(job->thread, NULL);
+            job->thread = NULL;
+        }
+        if (job->generation == app->cover_art_generation) {
+            for (size_t i = 0u; i < job->count; i++) {
+                const PlayerCoverArtWorkItem *item = &job->items[i];
+                if (item->status == NK_COVER_ART_OK) downloaded_any = true;
+                for (int g = 0; g < app->game_count; g++) {
+                    if (strcmp(app->games[g].content_sha1, item->sha1) != 0) continue;
+                    if (item->status == NK_COVER_ART_OK) {
+                        app->cover_art_state[g] = PLAYER_COVER_CACHED;
+                    } else if (item->status == NK_COVER_ART_CANCELLED) {
+                        if (app->cover_art_state[g] == PLAYER_COVER_FETCHING) {
+                            app->cover_art_state[g] = PLAYER_COVER_UNCHECKED;
+                        }
+                    } else if (app->cover_art_state[g] == PLAYER_COVER_FETCHING) {
+                        app->cover_art_state[g] = PLAYER_COVER_UNAVAILABLE;
+                    }
+                }
+            }
+            if (downloaded_any &&
+                (app->active_view == VIEW_BUILD_CACHE || app->cover_art_cache_size_known)) {
+                player_app_refresh_cover_art_cache_size(app);
+            }
+        }
+        free(job);
+        *job_slot = NULL;
+    }
+
+    if (*job_slot) return;
+
+    /* Check local cache lazily once per disc and gather missing verified discs. */
+    char data_root[NK_MAX_PATH];
+    if (!nk_platform_get_app_data_dir(data_root, sizeof(data_root))) return;
+
+    PlayerCoverArtJob *batch = NULL;
+    for (int g = 0; g < app->game_count; g++) {
+        const GameRecord *game = &app->games[g];
+        if (game->disc_verification != NK_DISC_TIER_VERIFIED_RETAIL ||
+            game->content_sha1[0] == '\0') {
+            continue;
+        }
+        if (app->cover_art_state[g] != PLAYER_COVER_UNCHECKED) continue;
+        char cache_path[NK_MAX_PATH];
+        if (nk_cover_art_cache_path(data_root, game->content_sha1,
+                                    cache_path, sizeof(cache_path)) &&
+            nk_platform_file_exists(cache_path)) {
+            app->cover_art_state[g] = PLAYER_COVER_CACHED;
+            continue;
+        }
+        if (!batch) {
+            batch = (PlayerCoverArtJob *)calloc(1u, sizeof(*batch));
+            if (!batch) return;
+            batch->generation = app->cover_art_generation;
+            batch->transport = player_ui_test_cover_art_transport();
+            snprintf(batch->data_root, sizeof(batch->data_root), "%s", data_root);
+            const char *base = SDL_GetBasePath();
+            if (!base || !nk_disc_bundled_dat_path(base, batch->bundled_dat,
+                                                   sizeof(batch->bundled_dat))) {
+                batch->bundled_dat[0] = '\0';
+            }
+        }
+        bool seen = false;
+        for (size_t k = 0u; k < batch->count; k++) {
+            if (strcmp(batch->items[k].sha1, game->content_sha1) == 0) {
+                seen = true;
+                break;
+            }
+        }
+        app->cover_art_state[g] = PLAYER_COVER_FETCHING;
+        if (!seen && batch->count < PLAYER_COVER_ART_BATCH_MAX) {
+            PlayerCoverArtWorkItem *slot = &batch->items[batch->count++];
+            snprintf(slot->disc_id, sizeof(slot->disc_id), "%s", game->disc_id);
+            snprintf(slot->sha1, sizeof(slot->sha1), "%s", game->content_sha1);
+            snprintf(slot->crc32, sizeof(slot->crc32), "%s", game->content_crc32);
+        } else if (!seen) {
+            app->cover_art_state[g] = PLAYER_COVER_UNCHECKED;
+        }
+    }
+
+    if (!batch) return;
+    if (batch->count == 0u) {
+        free(batch);
+        return;
+    }
+    batch->thread = SDL_CreateThread(cover_art_thread_main, "nakagawa-cover-art", batch);
+    if (!batch->thread) {
+        for (int g = 0; g < app->game_count; g++) {
+            if (app->cover_art_state[g] == PLAYER_COVER_FETCHING) {
+                app->cover_art_state[g] = PLAYER_COVER_UNAVAILABLE;
+            }
+        }
+        free(batch);
+        return;
+    }
+    *job_slot = batch;
+}
+
 static void destroy_staging_job(PlayerStagingJob **job_slot) {
     if (!job_slot || !*job_slot) return;
     PlayerStagingJob *job = *job_slot;
@@ -3928,6 +4134,7 @@ typedef struct PlayerRun {
     PlayerStagingJob *staging_job;
     PlayerPsnJob *psn_job;
     PlayerDiscCheckJob *disc_check_job;
+    PlayerCoverArtJob *cover_art_job;
     PlayerPackageStatusJob *package_status_job;
     PlayerOutdatedScanJob *outdated_scan_job;
     bool package_status_requested[MAX_LIBRARY_GAMES];
@@ -5319,6 +5526,14 @@ static void player_frame_requests(PlayerRun *run) {
     finish_disc_check_job(app, &run->disc_check_job);
     start_disc_check_job(app, &run->disc_check_job);
 
+    if (app->request_cover_art_refresh) {
+        app->request_cover_art_refresh = false;
+        destroy_cover_art_job(&run->cover_art_job);
+        player_app_refresh_cover_art_cache(app);
+        player_ui_nk_invalidate_cover_art(run->next_ui);
+    }
+    player_cover_art_tick(app, &run->cover_art_job);
+
     if (app->selected_game_index != run->last_package_selection) {
         run->last_package_selection = app->selected_game_index;
         player_package_status_queue_game(
@@ -5563,6 +5778,7 @@ static void player_frame_render(PlayerRun *run) {
     }
     if (app->request_factory_reset) {
         app->request_factory_reset = false;
+        destroy_cover_art_job(&run->cover_art_job);
         /* A finished staging or PSN job stays allocated until the next one. */
         if (run->launch_job || run->package_status_job || s_update_job || run->disc_check_job ||
             (run->staging_job && !run->staging_job->completion_handled) ||
@@ -5657,6 +5873,7 @@ static int player_shutdown(PlayerRun *run) {
     destroy_staging_job(&run->staging_job);
     destroy_psn_job(&run->psn_job);
     destroy_disc_check_job(&run->disc_check_job);
+    destroy_cover_art_job(&run->cover_art_job);
     if (run->package_status_job) {
         if (run->package_status_job->thread) {
             SDL_WaitThread(run->package_status_job->thread, NULL);

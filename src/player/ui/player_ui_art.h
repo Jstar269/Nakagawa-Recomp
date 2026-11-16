@@ -28,12 +28,17 @@ extern "C" {
 #define PLAYER_UI_ART_ICON_MAX_SIDE 512u
 #define PLAYER_UI_ART_PICTURE_MAX_SIDE 1024u
 #define PLAYER_UI_ART_MAX_BYTES (1024u * 1024u)
+/* Downloaded box cover art (thumbnails.libretro.com PSP scans ~512 x 885 up
+   to several MB) uses separate bounds from disc ICON0/PIC1 art. */
+#define PLAYER_UI_ART_COVER_MAX_SIDE 2048u
+#define PLAYER_UI_ART_COVER_MAX_BYTES (8u * 1024u * 1024u)
 /* Discs whose art is kept; the least recently shown goes first. */
 #define PLAYER_UI_ART_SLOTS 64u
 
 enum {
     PLAYER_UI_ART_ICON = 1u << 0,
-    PLAYER_UI_ART_PICTURE = 1u << 1
+    PLAYER_UI_ART_PICTURE = 1u << 1,
+    PLAYER_UI_ART_COVER = 1u << 2
 };
 
 /* Reads the wanted images' PNG bytes from a disc image (bit set in `wanted`),
@@ -61,6 +66,16 @@ void player_ui_art_pump(PlayerUiArt *art);
    NULL until its image is decoded, and for good when there is none. */
 void player_ui_art_get(PlayerUiArt *art, const char *iso_path, bool want_picture,
                        const NkUiImage **icon, const NkUiImage **picture);
+
+/* Same as player_ui_art_get, optionally decoding a cached cover PNG at
+   `cover_path` (NULL or "" omits cover art and frees any stale cover). */
+void player_ui_art_get_title(PlayerUiArt *art, const char *iso_path, const char *cover_path,
+                             bool want_picture, const NkUiImage **icon,
+                             const NkUiImage **picture, const NkUiImage **cover);
+
+/* Clear all decoded cover art thumbnails so subsequent requests reload from
+   the cache folder (used when Refresh cover art clears the cache). */
+void player_ui_art_invalidate_covers(PlayerUiArt *art);
 
 /* True while a read runs or one is waiting to start (tests wait on it). */
 bool player_ui_art_busy(const PlayerUiArt *art);

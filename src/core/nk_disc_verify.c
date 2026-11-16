@@ -387,7 +387,133 @@ void nk_disc_dat_free(NkDiscDat *dat) {
     if (!dat) return;
     free(dat->roms);
     free(dat->serials);
+    free(dat->names);
     memset(dat, 0, sizeof(*dat));
+}
+
+static bool dat_push_name(NkDiscDat *dat, size_t *capacity, const char *name,
+                          uint32_t *out_offset) {
+    size_t len;
+    if (!name || !name[0]) {
+        *out_offset = 0u;
+        return true;
+    }
+    len = strlen(name) + 1u;
+    if (!dat->names) {
+        size_t initial = len + 1u > 4096u ? len + 1u : 4096u;
+        char *buf = (char *)malloc(initial);
+        if (!buf) return false;
+        buf[0] = '\0';
+        dat->names = buf;
+        dat->names_size = 1u;
+        *capacity = initial;
+    }
+    if (dat->names_size > (size_t)UINT32_MAX - len) return false;
+    if (dat->names_size + len > *capacity) {
+        size_t grown = *capacity ? *capacity : 4096u;
+        while (grown < dat->names_size + len) {
+            if (grown > SIZE_MAX / 2u) return false;
+            grown *= 2u;
+        }
+        char *buf = (char *)realloc(dat->names, grown);
+        if (!buf) return false;
+        dat->names = buf;
+        *capacity = grown;
+    }
+    *out_offset = (uint32_t)dat->names_size;
+    memcpy(dat->names + dat->names_size, name, len);
+    dat->names_size += len;
+    return true;
+}
+
+static bool decode_game_name_attr(const char *p, const char *end,
+                                  char out[NK_DISC_DAT_MAX_GAME_NAME + 1]) {
+    static const struct { const char *name; char c; } named[] = {
+        {"&amp;", '&'}, {"&lt;", '<'}, {"&gt;", '>'}, {"&quot;", '"'}, {"&apos;", '\''},
+    };
+    size_t used = 0u;
+    out[0] = '\0';
+    while (p < end) {
+        if (*p != '&') {
+            if (used >= NK_DISC_DAT_MAX_GAME_NAME) {
+                out[0] = '\0';
+                return false;
+            }
+            out[used++] = *p++;
+            continue;
+        }
+        bool matched = false;
+        for (size_t e = 0u; e < sizeof(named) / sizeof(named[0]); e++) {
+            size_t n = strlen(named[e].name);
+            if ((size_t)(end - p) >= n && memcmp(p, named[e].name, n) == 0) {
+                if (used >= NK_DISC_DAT_MAX_GAME_NAME) {
+                    out[0] = '\0';
+                    return false;
+                }
+                out[used++] = named[e].c;
+                p += n;
+                matched = true;
+                break;
+            }
+        }
+        if (matched) continue;
+        if (end - p >= 3 && p[1] == '#') {
+            const char *q = p + 2;
+            bool hex = *q == 'x';
+            uint32_t cp = 0u;
+            size_t digits = 0u;
+            if (hex) q++;
+            while (q < end && digits < (hex ? 6u : 7u) &&
+                   (hex ? is_hex_digit(*q) : (*q >= '0' && *q <= '9'))) {
+                unsigned d = hex ? (unsigned)(*q >= '0' && *q <= '9'
+                                                  ? *q - '0'
+                                                  : ((*q | 32) - 'a' + 10))
+                                 : (unsigned)(*q - '0');
+                cp = cp * (hex ? 16u : 10u) + d;
+                q++;
+                digits++;
+            }
+            if (digits > 0u && q < end && *q == ';' && cp != 0u &&
+                !(cp >= 0xD800u && cp <= 0xDFFFu) && cp <= 0x10FFFFu) {
+                char utf8[4];
+                size_t utf8_len = 0u;
+                if (cp < 0x80u) {
+                    utf8[0] = (char)cp;
+                    utf8_len = 1u;
+                } else if (cp < 0x800u) {
+                    utf8[0] = (char)(0xC0u | (cp >> 6));
+                    utf8[1] = (char)(0x80u | (cp & 0x3Fu));
+                    utf8_len = 2u;
+                } else if (cp < 0x10000u) {
+                    utf8[0] = (char)(0xE0u | (cp >> 12));
+                    utf8[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+                    utf8[2] = (char)(0x80u | (cp & 0x3Fu));
+                    utf8_len = 3u;
+                } else {
+                    utf8[0] = (char)(0xF0u | (cp >> 18));
+                    utf8[1] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+                    utf8[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+                    utf8[3] = (char)(0x80u | (cp & 0x3Fu));
+                    utf8_len = 4u;
+                }
+                if (used + utf8_len > NK_DISC_DAT_MAX_GAME_NAME) {
+                    out[0] = '\0';
+                    return false;
+                }
+                memcpy(out + used, utf8, utf8_len);
+                used += utf8_len;
+                p = q + 1;
+                continue;
+            }
+        }
+        if (used >= NK_DISC_DAT_MAX_GAME_NAME) {
+            out[0] = '\0';
+            return false;
+        }
+        out[used++] = *p++;
+    }
+    out[used] = '\0';
+    return used > 0u;
 }
 
 static bool dat_push_rom(NkDiscDat *dat, size_t *capacity, const NkDiscDatRom *rom) {
@@ -563,7 +689,10 @@ static bool dat_scan(DatScan *s, NkDiscDat *out, NkDiscExpandStatus *status) {
     bool game_serial = false;
     char ids[NK_DISC_DAT_MAX_GAME_SERIALS + 1u][10];
     size_t id_count = 0;
-    size_t rom_capacity = 0, serial_capacity = 0;
+    size_t rom_capacity = 0, serial_capacity = 0, names_capacity = 0;
+    char current_game_name[NK_DISC_DAT_MAX_GAME_NAME + 1] = "";
+    uint32_t current_game_offset = 0u;
+    bool current_game_pushed = false;
     const char *field_start = s->text;
     const char *pos = s->text;
     for (;;) {
@@ -657,10 +786,13 @@ static bool dat_scan(DatScan *s, NkDiscDat *out, NkDiscExpandStatus *status) {
             if (name_end == name) return scan_fail_at(status, NK_DISC_DAT_NOT_DATAFILE, k_malformed_tag, s, lt);
             size_t name_length = (size_t)(name_end - name);
             bool is_rom = span_is(name, name_length, "rom");
-            /* A <rom>'s first sha1, crc, size and name (rule 8). */
+            bool is_game = span_is(name, name_length, "game");
+            /* A <rom>'s first sha1, crc, size and name (rule 8), or <game>'s first name. */
             static const char *const wanted_names[4] = {"sha1", "crc", "size", "name"};
             Span wanted[4] = {{NULL, NULL}, {NULL, NULL}, {NULL, NULL}, {NULL, NULL}};
             bool found[4] = {false, false, false, false};
+            Span game_name_attr = {NULL, NULL};
+            bool found_game_name = false;
             const char *p = name_end;
             for (;;) {
                 /* One attribute: whitespace, a name, '=', a value in double quotes. */
@@ -685,6 +817,11 @@ static bool dat_scan(DatScan *s, NkDiscDat *out, NkDiscExpandStatus *status) {
                         wanted[k].end = close;
                         found[k] = true;
                     }
+                }
+                if (is_game && !found_game_name && span_is(attribute, attribute_length, "name")) {
+                    game_name_attr.p = value;
+                    game_name_attr.end = close;
+                    found_game_name = true;
                 }
                 p = close + 1;
             }
@@ -723,11 +860,19 @@ static bool dat_scan(DatScan *s, NkDiscDat *out, NkDiscExpandStatus *status) {
                 }
                 kind = KIND_HEADER;
                 header_seen = true;
-            } else if (parent == KIND_DATAFILE && span_is(name, name_length, "game")) {
+            } else if (parent == KIND_DATAFILE && is_game) {
                 kind = KIND_GAME;
                 game_seen = true;
                 game_serial = false;
                 id_count = 0;
+                current_game_name[0] = '\0';
+                current_game_offset = 0u;
+                current_game_pushed = false;
+                if (found_game_name) {
+                    s->examined += (uint64_t)(game_name_attr.end - game_name_attr.p);
+                    (void)decode_game_name_attr(game_name_attr.p, game_name_attr.end,
+                                                current_game_name);
+                }
             } else if (parent == KIND_HEADER && (span_is(name, name_length, "name") ||
                                                  span_is(name, name_length, "version") ||
                                                  span_is(name, name_length, "date"))) {
@@ -759,6 +904,14 @@ static bool dat_scan(DatScan *s, NkDiscDat *out, NkDiscExpandStatus *status) {
                     }
                     entry.crc32 = ((uint32_t)crc_bytes[0] << 24) | ((uint32_t)crc_bytes[1] << 16) |
                                   ((uint32_t)crc_bytes[2] << 8) | (uint32_t)crc_bytes[3];
+                    if (current_game_name[0] != '\0' && !current_game_pushed) {
+                        if (!dat_push_name(out, &names_capacity, current_game_name,
+                                           &current_game_offset)) {
+                            return no_memory(status);
+                        }
+                        current_game_pushed = true;
+                    }
+                    entry.name_offset = current_game_offset;
                     entry.listed = (uint32_t)out->rom_count;
                     if (!dat_push_rom(out, &rom_capacity, &entry)) return no_memory(status);
                 } else {
@@ -810,6 +963,9 @@ static bool dat_scan(DatScan *s, NkDiscDat *out, NkDiscExpandStatus *status) {
             }
         } else if (kind == KIND_GAME) {
             out->games++;
+            current_game_name[0] = '\0';
+            current_game_offset = 0u;
+            current_game_pushed = false;
             if (out->serial_count + id_count > NK_DISC_DAT_MAX_SERIALS) {
                 return verify_fail(status, NK_DISC_DAT_TOO_LARGE,
                                    "The datafile names more than %u disc IDs.",
@@ -1313,6 +1469,29 @@ NkDiscTier nk_disc_classify(const NkDiscDat *dat, const char *disc_id,
         return NK_DISC_TIER_MODIFIED;
     }
     return NK_DISC_TIER_UNKNOWN;
+}
+
+const char *nk_disc_dat_find_game_name(const NkDiscDat *dat, const char *sha1_hex,
+                                       const char *crc32_hex, uint64_t size_bytes) {
+    if (!dat || !dat->roms || !dat->names || !sha1_hex || !sha1_hex[0]) return NULL;
+    NkDiscDatRom key;
+    memset(&key, 0, sizeof(key));
+    Span sha1 = {sha1_hex, sha1_hex + strlen(sha1_hex)};
+    if (!parse_hex_bytes(&sha1, key.sha1, 20u)) return NULL;
+    const NkDiscDatRom *rom = (const NkDiscDatRom *)bsearch(
+        &key, dat->roms, dat->rom_count, sizeof(dat->roms[0]), rom_compare);
+    if (!rom) return NULL;
+    if (crc32_hex && crc32_hex[0]) {
+        Span crc = {crc32_hex, crc32_hex + strlen(crc32_hex)};
+        uint8_t crc_bytes[4];
+        if (!parse_hex_bytes(&crc, crc_bytes, 4u)) return NULL;
+        uint32_t crc32 = ((uint32_t)crc_bytes[0] << 24) | ((uint32_t)crc_bytes[1] << 16) |
+                         ((uint32_t)crc_bytes[2] << 8) | (uint32_t)crc_bytes[3];
+        if (rom->crc32 != crc32) return NULL;
+    }
+    if (size_bytes != 0u && rom->size_bytes != size_bytes) return NULL;
+    if (rom->name_offset == 0u || (size_t)rom->name_offset >= dat->names_size) return NULL;
+    return &dat->names[rom->name_offset];
 }
 
 /* ---- one call for an add worker ----------------------------------------- */

@@ -19,6 +19,7 @@
 #include "package_builder.h"
 #include "update_check.h"
 #include "discord_presence.h"
+#include "cover_art.h"
 #include "setup_staging.h"
 #include "nk_title_manifest.h"
 #include "generated/nk_title_catalog.h"
@@ -434,6 +435,9 @@ typedef struct {
        play mode and elapsed time. Off by default (owner decision 2026-11-08); it cannot be
        turned on while the build has no Discord application ID (nk_discord_available). */
     bool discord_presence;
+    /* Opt-in cover art (#2632): fetch Redump-matched PSP box art from thumbnails.libretro.com
+       to the local cache folder. Off by default. */
+    bool download_cover_art;
     /* The folder the last file picker picked from (Add disc, PSP fonts), where
        the next one opens. Empty on a first run: the pickers then open at the
        Desktop (player_app_picker_start_folder). */
@@ -910,6 +914,13 @@ typedef struct {
 typedef struct PlayerApp PlayerApp;
 #endif
 
+typedef enum {
+    PLAYER_COVER_UNCHECKED = 0,
+    PLAYER_COVER_CACHED,
+    PLAYER_COVER_FETCHING,
+    PLAYER_COVER_UNAVAILABLE
+} PlayerCoverArtState;
+
 struct PlayerApp {
     PlayerView active_view;
     GameRecord games[MAX_LIBRARY_GAMES];
@@ -1067,6 +1078,15 @@ struct PlayerApp {
        no longer lists the game closes the page. */
     char enhanced_page_disc[PLAYER_DISC_ID_KEY_LEN];
     char settings_notice[128];
+    /* Cover art cache state (#2632): generation bumps on cache refresh/clear so UI
+       thumbnails invalidate and missing covers re-check once; size_label backs
+       Settings > Build tools and cache without stat'ing every frame. */
+    uint8_t cover_art_state[MAX_LIBRARY_GAMES];
+    uint64_t cover_art_generation;
+    uint64_t cover_art_cache_bytes;
+    char cover_art_cache_size_label[32];
+    bool cover_art_cache_size_known;
+    bool request_cover_art_refresh;
     /* The operating system's display preferences, as player_app_read_system_preferences
        last read them: what an AUTO accessibility choice follows. */
     bool system_reduced_motion;
@@ -2489,6 +2509,11 @@ size_t player_app_factory_reset_folders(const PlayerApp *app, char out[][NK_MAX_
 bool player_app_factory_reset(PlayerApp *app, const char *stamp);
 /* Settings > Build tools and cache: delete the shared library cache and say so. */
 void player_app_clear_shared_library_cache(PlayerApp *app);
+/* Settings > Build tools and cache (#2632): measure/refresh cover art cache size
+   and clear cached box art so covers can download again when viewed. */
+void player_app_refresh_cover_art_cache_size(PlayerApp *app);
+void player_app_refresh_cover_art_cache(PlayerApp *app);
+void player_app_toggle_download_cover_art(PlayerApp *app);
 void player_app_set_build_error(
     PlayerApp *app,
     const char *failed_stage,
