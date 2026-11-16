@@ -96,6 +96,12 @@ typedef struct NkAch NkAch;
  * scheme). */
 bool nk_ach_url_allowed(const char *url);
 
+/* Hash the contents of PSP_GAME/PARAM.SFO followed by
+ * PSP_GAME/SYSDIR/EBOOT.BIN from the user's ISO, as lowercase MD5. The disc is read
+ * as supplied; this does not decrypt or modify it. False means either file or a
+ * complete extent could not be read. */
+bool nk_ach_psp_hash_iso(const char *iso_path, char out_hash[33]);
+
 /* Reads up to n bytes at RA address ra_address through the PSP memory map. Returns the bytes
  * read: 0 when the address is outside the map or outside mem's span, fewer than n when the
  * span or the map ends first. The PSP's three regions are one run of guest memory, so a read may

@@ -219,13 +219,14 @@ ACHIEVEMENTS_SELFTEST_SRCS := src/core/nk_achievements.c $(wildcard third_party/
 	$(wildcard third_party/rcheevos/src/rapi/*.c) $(wildcard third_party/rcheevos/src/rcheevos/*.c) \
 	third_party/rcheevos/src/rhash/md5.c tests/native/test_nk_achievements.c
 define ACHIEVEMENTS_SELFTEST_CMD
-	$(CC) -std=gnu99 -Wall -Wextra -Isrc/core -Ithird_party/rcheevos/include $(ACHIEVEMENTS_SELFTEST_SRCS) \
-		-lm -o $(BUILD_ROOT)/test_nk_achievements$(EXE_EXT)
+	$(CC) $(NC_CFLAGS_CORE) -Isrc/core -Ithird_party/rcheevos/include -Ithird_party/rcheevos/src \
+		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(ACHIEVEMENTS_SELFTEST_SRCS) $(NC_OBJS_CORE) \
+		-lm $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_nk_achievements$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_nk_achievements$(EXE_EXT)
 endef
 
 .PHONY: achievements-selftest
-achievements-selftest:
+achievements-selftest: native-core-objects-core
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(call ACHIEVEMENTS_SELFTEST_CMD)
 

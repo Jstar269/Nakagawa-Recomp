@@ -7,9 +7,11 @@
  * src/rapi/rc_api_runtime.c); the game, achievement and user are synthetic. */
 
 #include "nk_achievements.h"
+#include "nk_iso.h"
 
 #include "rc_client.h"
 #include "rc_consoles.h"
+#include "rhash/md5.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +32,114 @@ static int g_failures;
 #define USER_RAM_SIZE 0x01800000u /* 24 MB */
 #define HASH "0123456789abcdef0123456789abcdef"
 #define ACH_ADDR 0x00100u           /* user RAM offset the synthetic achievement watches */
+
+#ifndef SR_SELFTEST_BUILD_ROOT
+#define SR_SELFTEST_BUILD_ROOT "build"
+#endif
+
+static void iso_put_both16(uint8_t *out, uint16_t value) {
+    out[0] = (uint8_t)value;
+    out[1] = (uint8_t)(value >> 8);
+    out[2] = (uint8_t)(value >> 8);
+    out[3] = (uint8_t)value;
+}
+
+static void iso_put_both32(uint8_t *out, uint32_t value) {
+    out[0] = (uint8_t)value;
+    out[1] = (uint8_t)(value >> 8);
+    out[2] = (uint8_t)(value >> 16);
+    out[3] = (uint8_t)(value >> 24);
+    out[4] = (uint8_t)(value >> 24);
+    out[5] = (uint8_t)(value >> 16);
+    out[6] = (uint8_t)(value >> 8);
+    out[7] = (uint8_t)value;
+}
+
+static size_t iso_add_record(uint8_t *directory, size_t offset, const uint8_t *name,
+                             uint8_t name_size, uint32_t lba, uint32_t size, bool is_dir) {
+    uint8_t *record = directory + offset;
+    const size_t record_size = 33u + name_size + (name_size % 2u == 0u ? 1u : 0u);
+    memset(record, 0, record_size);
+    record[0] = (uint8_t)record_size;
+    iso_put_both32(record + 2u, lba);
+    iso_put_both32(record + 10u, size);
+    record[18] = 126u;
+    record[19] = 1u;
+    record[20] = 1u;
+    record[25] = is_dir ? 2u : 0u;
+    iso_put_both16(record + 28u, 1u);
+    record[32] = name_size;
+    memcpy(record + 33u, name, name_size);
+    return offset + record_size;
+}
+
+static size_t iso_add_special_record(uint8_t *directory, size_t offset, uint8_t name,
+                                    uint32_t lba) {
+    return iso_add_record(directory, offset, &name, 1u, lba, 2048u, true);
+}
+
+static bool write_synthetic_psp_iso(char *path, size_t path_capacity,
+                                    const uint8_t *sfo, size_t sfo_size,
+                                    const uint8_t *eboot, size_t eboot_size) {
+    enum { SECTOR = 2048, ISO_SECTORS = 25, ROOT_LBA = 20, PSP_LBA = 21,
+           SYSDIR_LBA = 22, SFO_LBA = 23, EBOOT_LBA = 24 };
+    static const uint8_t dot = 0u;
+    static const uint8_t dotdot = 1u;
+    static const uint8_t root_name[] = "PSP_GAME";
+    static const uint8_t sfo_name[] = "PARAM.SFO;1";
+    static const uint8_t sysdir_name[] = "SYSDIR";
+    static const uint8_t eboot_name[] = "EBOOT.BIN;1";
+    uint8_t disc[ISO_SECTORS * SECTOR];
+    memset(disc, 0, sizeof disc);
+    if (sfo_size == 0u || sfo_size > UINT32_MAX || eboot_size == 0u || eboot_size > UINT32_MAX)
+        return false;
+
+    uint8_t *pvd = disc + 16u * SECTOR;
+    pvd[0] = 1u;
+    memcpy(pvd + 1u, "CD001", 5u);
+    pvd[6] = 1u;
+    size_t pvd_record = iso_add_record(pvd, 156u, &dot, 1u, ROOT_LBA, SECTOR, true);
+    CHECK(pvd_record == 190u, "PVD root record length %u", (unsigned)pvd_record);
+
+    uint8_t *root = disc + ROOT_LBA * SECTOR;
+    size_t at = 0u;
+    at = iso_add_special_record(root, at, dot, ROOT_LBA);
+    at = iso_add_special_record(root, at, dotdot, ROOT_LBA);
+    at = iso_add_record(root, at, root_name, (uint8_t)(sizeof root_name - 1u),
+                        PSP_LBA, SECTOR, true);
+
+    uint8_t *psp = disc + PSP_LBA * SECTOR;
+    at = 0u;
+    at = iso_add_special_record(psp, at, dot, PSP_LBA);
+    at = iso_add_special_record(psp, at, dotdot, ROOT_LBA);
+    at = iso_add_record(psp, at, sfo_name, (uint8_t)(sizeof sfo_name - 1u),
+                        SFO_LBA, (uint32_t)sfo_size, false);
+    at = iso_add_record(psp, at, sysdir_name, (uint8_t)(sizeof sysdir_name - 1u),
+                        SYSDIR_LBA, SECTOR, true);
+
+    uint8_t *sysdir = disc + SYSDIR_LBA * SECTOR;
+    at = 0u;
+    at = iso_add_special_record(sysdir, at, dot, SYSDIR_LBA);
+    at = iso_add_special_record(sysdir, at, dotdot, PSP_LBA);
+    at = iso_add_record(sysdir, at, eboot_name, (uint8_t)(sizeof eboot_name - 1u),
+                        EBOOT_LBA, (uint32_t)eboot_size, false);
+
+    memcpy(disc + SFO_LBA * SECTOR, sfo, sfo_size);
+    memcpy(disc + EBOOT_LBA * SECTOR, eboot, eboot_size);
+#ifdef _WIN32
+    const char separator = '\\';
+#else
+    const char separator = '/';
+#endif
+    const int path_size = snprintf(path, path_capacity, "%s%c%s", SR_SELFTEST_BUILD_ROOT,
+                                   separator, "ra-hash-selftest.iso");
+    if (path_size < 0 || (size_t)path_size >= path_capacity) return false;
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    const bool wrote = fwrite(disc, 1u, sizeof disc, file) == sizeof disc;
+    const bool closed = fclose(file) == 0;
+    return wrote && closed;
+}
 
 /* ---- the fake server ------------------------------------------------------------------ */
 
@@ -115,6 +225,32 @@ static void test_url_gate(void) {
     for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++)
         CHECK(!nk_ach_url_allowed(refused[i]), "refuses %s", refused[i]);
     CHECK(!nk_ach_url_allowed(NULL), "refuses NULL");
+}
+
+static void test_psp_disc_hash(void) {
+    static const uint8_t sfo[] = "synthetic PARAM.SFO bytes";
+    static const uint8_t eboot[] = "synthetic EBOOT.BIN bytes";
+    char path[512] = "";
+    char actual[33] = "";
+    md5_state_t md5;
+    md5_byte_t digest[16];
+    static const char hex[] = "0123456789abcdef";
+    char expected[33];
+    CHECK(write_synthetic_psp_iso(path, sizeof path, sfo, sizeof sfo - 1u,
+                                  eboot, sizeof eboot - 1u),
+          "write the synthetic PSP ISO fixture");
+    if (!path[0]) return;
+    md5_init(&md5);
+    md5_append(&md5, sfo, (int)(sizeof sfo - 1u));
+    md5_append(&md5, eboot, (int)(sizeof eboot - 1u));
+    md5_finish(&md5, digest);
+    for (size_t i = 0; i < sizeof digest; i++) {
+        expected[i * 2u] = hex[digest[i] >> 4];
+        expected[i * 2u + 1u] = hex[digest[i] & 15u];
+    }
+    expected[32] = '\0';
+    CHECK(nk_ach_psp_hash_iso(path, actual), "hash the synthetic PSP disc");
+    CHECK(strcmp(actual, expected) == 0, "PSP hash order and MD5 (%s != %s)", actual, expected);
 }
 
 static void test_memory_map(uint8_t *ram) {
@@ -316,6 +452,7 @@ int main(void) {
         return 2;
     }
     test_url_gate();
+    test_psp_disc_hash();
     test_memory_map(ram);
     test_other_host_is_refused(ram);
     test_no_transport_sends_nothing(ram);

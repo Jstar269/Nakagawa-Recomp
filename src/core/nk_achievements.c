@@ -5,8 +5,10 @@
 
 #include "nk_achievements.h"
 
+#include "nk_iso.h"
 #include "rc_client.h"
 #include "rc_consoles.h"
+#include "rhash/md5.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +36,58 @@ bool nk_ach_url_allowed(const char *url) {
     /* The prefix ends in the '/' after the host, so "retroachievements.org.example/",
      * "retroachievements.org:8080/" and "user@..." forms cannot match. */
     return url != NULL && strncmp(url, prefix, sizeof prefix - 1u) == 0;
+}
+
+bool nk_ach_psp_hash_iso(const char *iso_path, char out_hash[33]) {
+    static const char *const paths[] = {
+        "PSP_GAME/PARAM.SFO",
+        "PSP_GAME/SYSDIR/EBOOT.BIN",
+    };
+    static const char hex[] = "0123456789abcdef";
+    enum { CHUNK_BYTES = 64 * 1024 };
+    if (out_hash) out_hash[0] = '\0';
+    if (!iso_path || !iso_path[0] || !out_hash) return false;
+
+    NkIsoReader *reader = nk_iso_reader_open(iso_path);
+    if (!reader) return false;
+    md5_state_t md5;
+    md5_byte_t digest[16];
+    uint8_t buffer[CHUNK_BYTES];
+    bool ok = true;
+    md5_init(&md5);
+    for (size_t file_index = 0u; file_index < sizeof paths / sizeof paths[0] && ok;
+         file_index++) {
+        uint32_t lba = 0u;
+        uint32_t size = 0u;
+        bool is_directory = false;
+        if (nk_iso_reader_lookup(reader, paths[file_index], &lba, &size, &is_directory) != 0 ||
+            is_directory || size == 0u) {
+            ok = false;
+            break;
+        }
+        uint64_t offset = 0u;
+        while (offset < (uint64_t)size) {
+            const uint64_t remaining = (uint64_t)size - offset;
+            const size_t count = remaining < sizeof buffer ? (size_t)remaining : sizeof buffer;
+            const int received = nk_iso_reader_read(reader, lba, offset, buffer, (uint32_t)count);
+            if (received < 0 || (size_t)received != count) {
+                ok = false;
+                break;
+            }
+            md5_append(&md5, buffer, (int)count);
+            offset += (uint64_t)count;
+        }
+    }
+    nk_iso_reader_close(reader);
+    if (!ok) return false;
+
+    md5_finish(&md5, digest);
+    for (size_t i = 0u; i < sizeof digest; i++) {
+        out_hash[i * 2u] = hex[digest[i] >> 4];
+        out_hash[i * 2u + 1u] = hex[digest[i] & 15u];
+    }
+    out_hash[32] = '\0';
+    return true;
 }
 
 uint32_t nk_ach_read_memory(const NkAchMemory *mem, uint32_t ra_address, uint8_t *out,
