@@ -1998,6 +1998,11 @@ def _refresh_document(
                     f"trusted detailed ledger has no exact record for {path}",
                 )
         if requires_exact_record:
+            if detailed_records is None:
+                raise RefreshError(
+                    "TRUSTED_RECORD_REQUIRED",
+                    f"changed executable or implementation path requires the trusted detailed ledger: {path}",
+                )
             classification, _ = _refresh_class_for(path, detailed_records[path])
             if classification not in REFRESHABLE_CLASSES:
                 raise RefreshError(
@@ -2256,6 +2261,11 @@ def refresh_reviewed(
             candidate_policy = _load_publication_policy(blessed_policy_path)
         except Exception as error:
             raise RefreshError("CANDIDATE_POLICY_INVALID", "blessed candidate policy is invalid") from error
+        if policy_delta_authority is None:
+            raise RefreshError(
+                "POLICY_DELTA_ARGUMENT_REQUIRED",
+                "--trusted-candidate-policy needs --policy-delta-authority",
+            )
         allowed_delta = _read_policy_delta_authority(
             policy_delta_authority,
             candidate_root=controlled_root,
@@ -2362,6 +2372,11 @@ def refresh_reviewed(
         ) if path is not None
     ]
     if policy_delta is not None:
+        if policy_delta_authority is None:
+            raise RefreshError(
+                "POLICY_DELTA_ARGUMENT_REQUIRED",
+                "a policy delta requires --policy-delta-authority",
+            )
         trusted_inputs.append(_external_input(
             policy_delta_authority, candidate_root=controlled_root, label="policy delta authority"))
         if trusted_candidate_policy is not None:
@@ -2375,8 +2390,8 @@ def refresh_reviewed(
         trusted_root = trusted.worktree_root.resolve()
         if _path_is_within(output, trusted_root, resolve=True) or _path_is_within(export_output, trusted_root, resolve=True):
             raise RefreshError("REFRESH_OUTPUT_INVALID", "outputs must not overwrite the trusted tree")
-    for path in (output, export_output):
-        if any(path == trusted_input.resolve() for trusted_input in trusted_inputs):
+    for output_path in (output, export_output):
+        if any(output_path == trusted_input.resolve() for trusted_input in trusted_inputs):
             raise RefreshError("REFRESH_OUTPUT_INVALID", "output would overwrite a trusted input")
     if candidate.worktree_root is not None:
         standard_output = _control_path(
@@ -2388,9 +2403,9 @@ def refresh_reviewed(
         if output != standard_output or export_output != standard_export:
             raise RefreshError("REFRESH_OUTPUT_INVALID", "worktree outputs must be the canonical public ledger and export")
     else:
-        for path in (output, export_output):
-            if _path_is_within(path, candidate.repo_root, resolve=True):
-                relative = path.relative_to(candidate.repo_root.resolve()).as_posix()
+        for output_path in (output, export_output):
+            if _path_is_within(output_path, candidate.repo_root, resolve=True):
+                relative = output_path.relative_to(candidate.repo_root.resolve()).as_posix()
                 if relative in candidate.blobs and relative not in ("assets/public_provenance_ledger.json", "PUBLIC_EXPORT.json"):
                     raise RefreshError("REFRESH_OUTPUT_INVALID", "output would overwrite a candidate source path")
 
@@ -2505,23 +2520,23 @@ def _read_admission_authority(
     for statement in statements:
         if not isinstance(statement, dict):
             raise RefreshError("ADMISSION_AUTHORITY_INVALID", "admission statement is malformed")
-        path = _exact_path(statement.get("path"), code="ADMISSION_AUTHORITY_INVALID")
+        entry_path = _exact_path(statement.get("path"), code="ADMISSION_AUTHORITY_INVALID")
         digest = statement.get("sha256")
         if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             raise RefreshError(
-                "ADMISSION_AUTHORITY_INVALID", f"admission statement for {path} has no lowercase sha256"
+                "ADMISSION_AUTHORITY_INVALID", f"admission statement for {entry_path} has no lowercase sha256"
             )
         classification = statement.get("classification")
         if classification not in ALLOWED_CLASSES or classification == "unresolved":
             raise RefreshError(
                 "ADMISSION_AUTHORITY_INVALID",
-                f"admission statement for {path} names unsupported classification {classification!r}",
+                f"admission statement for {entry_path} names unsupported classification {classification!r}",
             )
-        if path in result:
+        if entry_path in result:
             raise RefreshError(
-                "ADMISSION_AUTHORITY_INVALID", f"admission authority names {path} more than once"
+                "ADMISSION_AUTHORITY_INVALID", f"admission authority names {entry_path} more than once"
             )
-        result[path] = {
+        result[entry_path] = {
             "sha256": digest,
             "classification": classification,
             "origin_kind": statement.get("origin_kind"),
@@ -3172,8 +3187,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     errors = validate_ledger(document, require_resolved=True)
     if errors:
-        for error in errors:
-            print(f"provenance ledger: {error}", file=sys.stderr)
+        for message in errors:
+            print(f"provenance ledger: {message}", file=sys.stderr)
         return 1
     print(f"provenance ledger: {'checked' if args.check else 'generated'} {len(document['entries'])} explicit entries")
     if args.check and not args.implementation_ledger.is_file():
