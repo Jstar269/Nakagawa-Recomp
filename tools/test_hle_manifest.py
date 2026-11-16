@@ -954,6 +954,7 @@ class LiveManifestTests(unittest.TestCase):
                     "docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: io-seek64, io-seek64-rdwr)",
                     "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001: io-eof-seek-negative, io-eof-seek-negative-rdonly, io-eof-write-past, io-eof-read-past)",
                     "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-flash-*)",
+                    "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-002: io-edge-flash-*)",
                     "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-002: umd-eof-raw-seek-past)",
                     "tests/native/hle_thread_selftest.c:test_flash0_font_device",
                     "tests/native/hle_thread_selftest.c:test_umd_block_device_sectors",
@@ -968,6 +969,7 @@ class LiveManifestTests(unittest.TestCase):
                     "docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: io-missing-parent, io-excl-new, io-excl-existing)",
                     "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001: io-eof-missing)",
                     "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*)",
+                    "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-002: io-edge-ms-*)",
                     "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
                     "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
                 ],
@@ -1023,6 +1025,7 @@ class LiveManifestTests(unittest.TestCase):
                 [
                     "docs/HARDWARE_ORACLE.md (PSP-IO-001: io-write and io-append)",
                     "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*)",
+                    "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-002: io-edge-ms-*)",
                     "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
                     "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
                 ],
@@ -2770,6 +2773,30 @@ class CensusTests(unittest.TestCase):
             elif status in ("partial", "compatibility"):
                 lim = meta.HANDLER_LIMITATIONS.get(handler, "")
                 self.assertTrue(isinstance(lim, str) and lim.strip(), f"{handler} must have limitation")
+
+    def test_issue_1380_io_seek_002_limits_are_recorded(self) -> None:
+        open_lim = meta.HANDLER_LIMITATIONS["h_IoOpen"]
+        self.assertIn("PSP-HLE-IO-SEEK-002", open_lim)
+        self.assertIn("ms0:", open_lim)
+        self.assertIn("fatms0:", open_lim)
+        self.assertIn("missing parent", open_lim.lower())
+
+        write_lim = meta.HANDLER_LIMITATIONS["h_IoWrite"]
+        self.assertIn("PSP-HLE-IO-SEEK-002", write_lim)
+        self.assertIn("pending", write_lim.lower())
+        self.assertIn("fatms0:", write_lim)
+
+        async_write_lim = meta.HANDLER_LIMITATIONS["h_IoWriteAsync"]
+        self.assertIn("PSP-HLE-IO-SEEK-002", async_write_lim)
+        self.assertIn("pending", async_write_lim.lower())
+        self.assertIn("fatms0:", async_write_lim)
+
+        for handler in ("h_IoLseek", "h_IoLseek32"):
+            with self.subTest(handler=handler):
+                limitation = meta.HANDLER_LIMITATIONS[handler]
+                self.assertIn("PSP-HLE-IO-SEEK-002", limitation)
+                self.assertIn("flash0:/font/ltn0.pgf", limitation)
+                self.assertIn("async", limitation.lower())
 
 
 if __name__ == "__main__":
