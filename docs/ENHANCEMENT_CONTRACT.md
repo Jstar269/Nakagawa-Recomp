@@ -1125,8 +1125,8 @@ The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture
   "Smart 2D filter" (`"smart2d"`: `on` or `off`) on the library's Settings > Enhanced page and on each game's own
   page (section 10.9), off in a fresh settings file and set by no graphics preset; the launch line carries
   `;texscale=<factor>` and `;smart2d=on` only for an Enhanced or Ace launch with that part on, after `shadow` and
-  before `cull`. `SR_TEX_SCALE_BUDGET_MB` (1 to 8192, default 512: the GPU memory the scaled copies may hold) is
-  read when the renderer starts, for an Enhanced or Ace run only. Both features take effect only in an Enhanced or
+  before `cull`. `SR_TEX_SCALE_BUDGET_MB` (1 to 8192: the GPU memory the scaled copies may hold; without it, an eighth of the
+  GPU's largest device-local memory heap, 512 to 2048, and 512 when the device reports none) is read when the renderer starts, for an Enhanced or Ace run only. Both features take effect only in an Enhanced or
   Ace run: an authentic run has no line to carry a key, and a renderer started without Ace Mode but handed a request
   prints one `TEX_SCALE: off (texture scaling and the smart 2D filter need Enhanced or Ace)` line and obeys nothing.
   A budget outside its range prints `TEX_SCALE: refused (<reason>)`, leaves both off and reports each requested
@@ -1155,7 +1155,8 @@ The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture
   texture is drawn unscaled. Nothing is hidden or skipped.
 - **Budget.** The copies hold at most `SR_TEX_SCALE_BUDGET_MB` of GPU memory. A copy that would not fit first frees
   copies that no draw has bound for 60 presents (one to two seconds), the longest idle first, until a quarter of the
-  budget is spare besides the new copy; that drains the GE once, as a cache eviction does. A copy bound in those 60
+  budget is spare besides the new copy. Freeing waits for nothing: a freed copy's GPU memory goes once the GPU has
+  finished the work already submitted that may sample it (#2623). A copy bound in those 60
   presents is never freed, so when the copies in use fill the budget, the new texture is drawn unscaled. It is
   offered again on a later draw, at most once per present and only when it could fit, and so is a texture whose
   copy was freed.
@@ -1183,7 +1184,8 @@ The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture
   features guest-visible: section 11.3.3 is their entry, and this section covers only their presentation.
 - **Stamps.** `TEX_SCALE: on (xbrz=<factor>, smart2d=on|off, budget_mb=<n>)` at start; at exit,
   `TEX_SCALE: draws (scaled_binds=, onetoone_unscaled=, scaled_uploads=, stale=, smart2d=, reclaimed=,
-  budget_short=, upload_capped=)` and
+  budget_short=, upload_capped=, retired_peak_mb=, retire_waits=)` (the last two: the most memory freed copies held
+  while the GPU could still read them, and the GE drains made because 1,024 such copies were waiting) and
   `TEX_SCALE: exit (scaled=, queue_full=, discarded=, budget_peak_mb=, worker_ms=, workers=)`, also on the
   `SR_EXIT_AT_VBLANK` end.
   A run with either feature on also prints, at start, the line section 11.3.3 describes.
@@ -1463,7 +1465,7 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   was evicted and decoded again. Two images taking turns in a budget for one thus cost about 2 log2 n decodes
   over n lookups, not n. Each file is held once, however many keys or mip levels name it. While every held image
   is in use, an image whose size is known and does not fit is not read again until one is released; one larger
-  than the whole budget is never read again. The copies share the GPU budget of `SR_TEX_SCALE_BUDGET_MB` (512 MiB by default) and its
+  than the whole budget is never read again. The copies share the GPU budget of `SR_TEX_SCALE_BUDGET_MB` (by default an eighth of the GPU's memory, 512 MiB to 2 GiB) and its
   reclamation (section 10.10).
 - **Guest memory and files.** Texture bytes are read through the same host view the cache's content hash reads;
   nothing is written to guest memory, the CLUT or a texture source. Files are read only from inside the pack's root,
@@ -1811,7 +1813,7 @@ and not yet admitted under section 11.2: section 11.3.5 is its entry, and this s
   is drawn as the game made it), transparent, and each tile goes to its own place in it. A page whose rectangles are
   all refused makes no image, takes no descriptor set and does no synchronous clear; it keeps a table of
   tiles (about 28 KiB of host memory) recording its refusals. The texture descriptor pool has a set for the image (one more per entry when glyphs are on). It shares the
-  GPU budget of `SR_TEX_SCALE_BUDGET_MB` (512 MiB by default); a page that does not fit is counted (`budget_short`) and drawn as
+  GPU budget of `SR_TEX_SCALE_BUDGET_MB` (by default an eighth of the GPU's memory, 512 MiB to 2 GiB); a page that does not fit is counted (`budget_short`) and drawn as
   made. The draw binds that image with the scaled-copy flag, so the shader samples it on its own texel lattice
   (section 10.10, "Sampling"): at render scale `f` one rebuilt texel lies under each device pixel centre. The draw
   samples nearest, whatever filter the game set: each pixel centre is a texel centre, and the shader's linear weight
@@ -2380,7 +2382,7 @@ filter `nk_tex_soften_alpha_edge` and the digest `nk_tex_soft_shadow_digest` in 
   A listing names sizes and keyed digests, never texels.
 - **Softened copy.** A match takes a 4x copy in place of any xBRZ copy (xBRZ scales only the textures no pack image
   and no declaration claims), through the scaled-copy machinery of section 10.10: its VRAM budget
-  (512 MiB when `SR_TEX_SCALE_BUDGET_MB` sets none), its reclaim, retry and stale rules, and the texture's own filter and wrap
+  (an eighth of the GPU's memory, 512 MiB to 2 GiB, when `SR_TEX_SCALE_BUDGET_MB` sets none), its reclaim, retry and stale rules, and the texture's own filter and wrap
   state as the copy's sampler. The copy is made on the renderer thread and stored at once, as a replacement image is,
   so the draw that found it is normally the first to show it (a draw that finds the upload budget of that present
   spent, or earlier finished copies waiting, shows it on a later draw). It is made in integer arithmetic: colour and alpha are each

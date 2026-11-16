@@ -102,7 +102,8 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   the game's thread: on the development PC (`-O2`, one thread) a 256x256 texture took about 2.0 ms at 2x, 2.8 ms at 4x
   and 4.6 ms at 6x, so a scene change that uploads many textures shows some of them unscaled for a moment. Each
   copy costs factor x factor times the texture's GPU memory (a 256x256 texture at 4x is 4 MB), up to a budget of
-  512 MB by default (`SR_TEX_SCALE_BUDGET_MB`); past it, copies idle for about a second are freed, and when the
+  an eighth of the graphics card's memory by default, 512 MB to 2 GB (about 1.2 GB on a 10 GB card;
+  `SR_TEX_SCALE_BUDGET_MB` sets another); past it, copies idle for about a second are freed, and when the
   copies in use fill it, new textures are drawn unscaled. Storing copies costs the game's thread up to 8 MB of
   uploads per frame, which can make a busy game drop frames. The scaler builds no lookup table, so it adds no fixed
   memory cost. The rules are in
@@ -115,7 +116,7 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   render scale of 2 to 4, a small sprite that maps one texel to one pixel over a page of anti-aliased text is redrawn from a version of just
   that rectangle rebuilt at the render scale, checked against the game's own bytes. A page with a rebuilt rectangle
   costs the page's GPU memory times the render scale squared (a 256x256 page at 4x is 4 MB), taken from the
-  same 512 MB budget as texture scaling (`SR_TEX_SCALE_BUDGET_MB`). At most 48 rectangles are checked or rebuilt per
+  same budget as texture scaling (`SR_TEX_SCALE_BUDGET_MB`). At most 48 rectangles are checked or rebuilt per
   frame, on the game's thread. Text drawn as triangles, or from a page in VRAM, is drawn as the game made it. The
   rules are in [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1013-sharp-game-text).
 - **Finer Bezier and spline patches (Finer patches).** A part of Enhanced and Ace, off by default and in no graphics
@@ -322,8 +323,20 @@ nothing is written: exit Steam first (Nakagawa never closes it). Entries Nakagaw
 byte, and a file it cannot read is left untouched. Choosing **Add to Steam** again for a game already there changes
 nothing. After an update, which unpacks into a new folder, or after moving a portable copy, choosing it again updates
 that game's shortcut to the new folder instead of adding a second one: only its program and start-in folder change,
-and its play time and collections stay. The shortcut has no picture of its own (the player keeps disc art in memory
-only), so Steam shows the player's icon until you set one in Steam.
+and its play time and collections stay. When **Add to Steam** writes a shortcut cleanly, it also copies the game's own
+local `ICON0.PNG` and `PIC1.PNG` (from the disc or prepared game folder; nothing is uploaded or fetched online) into
+that account's `userdata\<account id>\config\grid\` folder under that game's own shortcut ID (`<appid>_icon.png`
+and wide capsule `<appid>.png` from `ICON0.PNG`, falling back to `PIC1.PNG` for the wide capsule if `ICON0.PNG` is
+absent; and hero banner `<appid>_hero.png` from `PIC1.PNG`). Steam takes a shortcut's icon only from the shortcut
+itself, so a new shortcut names `<appid>_icon.png` as its icon; a shortcut that was already there keeps its own icon
+setting. Both PSP images are landscape (`144x80` and `480x272`) and
+do not fit Steam's 2:3 vertical portrait capsule (`<appid>p.png`), so the portrait capsule is left empty rather than
+cropping, stretching, or inventing art; you can set portrait cover art manually in Steam. The pictures are optional: one
+that cannot be read, is empty, is over 1 MiB or is not a well-formed PNG is left out and named, and the shortcut is
+still added. As with `shortcuts.vdf`, nothing is written while Steam runs, existing pictures for that app ID are kept
+rather than silently overwritten unless explicitly replaced, and every written picture is read back to verify. If a
+picture cannot be written after the list changed, the list is put back and the failure is named; if the list cannot be
+put back, its saved copy is kept and named. Nakagawa never removes a shortcut or the pictures it copied.
 
 **Update.** A copy `Setup.exe` installed updates by running the next release's Setup (see [below](#windows-installer-setupexe)). For a ZIP copy, Check for updates unpacks the new version into a new folder next to the running one and leaves the old
 one. Your data is in the per-user folders below, so the new version finds it. Delete the old folder when you

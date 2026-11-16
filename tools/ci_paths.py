@@ -31,8 +31,11 @@ import re
 import subprocess
 import sys
 import time
-from typing import Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Iterable, Literal, Mapping, Sequence, TypedDict
 import urllib.request
+
+if TYPE_CHECKING:
+    from .publication_policy import Policy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -152,7 +155,7 @@ def _is_security_publication(path: str) -> bool:
 
 
 @lru_cache(maxsize=1)
-def _public_policy() -> object | None:
+def _public_policy() -> Policy | None:
     """Load the publication policy once, or ``None`` when it is unreadable.
 
     Imported lazily so that importing this module never depends on the policy
@@ -163,7 +166,7 @@ def _public_policy() -> object | None:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import publication_policy
 
-        returned: object | None = publication_policy.load_policy(ROOT / "assets" / "public_source_profile.json")
+        returned: Policy | None = publication_policy.load_policy(ROOT / "assets" / "public_source_profile.json")
         return returned
     except Exception:
         return None
@@ -324,7 +327,14 @@ def _opens_define(words: Sequence[str]) -> bool:
     return index < len(words) and words[index] == "define"
 
 
-def _makefile_line_kinds(text: str) -> tuple[list[tuple[object, ...]], frozenset[str]]:
+_RecipeLineKind = tuple[Literal["recipe"], tuple[str, ...], bool]
+_SimpleLineKind = tuple[Literal["blank", "comment"]]
+_OtherLineKind = tuple[Literal["other"], str]
+_RuleHeaderLineKind = tuple[Literal["other"], Literal["rule-header"], tuple[str, ...], str]
+_MakefileLineKind = _RecipeLineKind | _SimpleLineKind | _OtherLineKind | _RuleHeaderLineKind
+
+
+def _makefile_line_kinds(text: str) -> tuple[list[_MakefileLineKind], frozenset[str]]:
     """Return one kind tuple per physical line, and the literal ``.PHONY`` names.
 
     Kinds are ``("blank",)``, ``("comment",)``, ``("recipe", targets, explicit)``
@@ -333,7 +343,7 @@ def _makefile_line_kinds(text: str) -> tuple[list[tuple[object, ...]], frozenset
     """
 
     lines = text.split("\n")
-    kinds: list[tuple[object, ...]] = []
+    kinds: list[_MakefileLineKind] = []
     context: tuple[tuple[str, ...], bool] | None = None
     phony_words: list[str] = []
     simple_values: dict[str, list[str]] = {}
@@ -467,12 +477,14 @@ def makefile_recipe_only_targets(old_text: str, new_text: str) -> tuple[str, ...
     if old_phony != new_phony:
         return None
 
-    def narrow(kind: tuple[object, ...], phony: frozenset[str]) -> bool:
+    def narrow(kind: _MakefileLineKind, phony: frozenset[str]) -> bool:
         if kind[0] in {"blank", "comment"}:
             return True
-        if kind[0] != "recipe" or not kind[2]:
+        if kind[0] != "recipe":
             return False
-        return all(target in phony for target in kind[1])  # type: ignore[union-attr]
+        if not kind[2]:
+            return False
+        return all(target in phony for target in kind[1])
 
     old_lines = old_text.split("\n")
     new_lines = new_text.split("\n")
@@ -491,7 +503,7 @@ def makefile_recipe_only_targets(old_text: str, new_text: str) -> tuple[str, ...
                 if not narrow(kind, phony):
                     return None
                 if kind[0] == "recipe":
-                    targets.update(kind[1])  # type: ignore[arg-type]
+                    targets.update(kind[1])
     return tuple(sorted(targets))
 
 
@@ -1081,6 +1093,14 @@ def codeql_trusted_target(
             and actor.get("login") == owner
         )
     return False
+
+
+class _RunnerPoolKwargs(TypedDict):
+    repository: str
+    ref: str
+    switch: str
+    heartbeat: str
+    now: float
 
 
 def codeql_runner(
@@ -1679,7 +1699,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     event = _read_event(args.event_path)
-    pool = {
+    pool: _RunnerPoolKwargs = {
         "repository": os.environ.get("GITHUB_REPOSITORY", ""),
         "ref": os.environ.get("GITHUB_REF", ""),
         "switch": os.environ.get("NK_SELF_HOSTED_LINUX", ""),
