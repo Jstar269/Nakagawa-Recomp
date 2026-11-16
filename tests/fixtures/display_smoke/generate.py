@@ -1330,8 +1330,68 @@ def run_vramdump(build_dir: Path) -> int:
                         f"decoded display pixel mismatch at ({x},{y}): "
                         f"PNG={rgba.hex()} PPM={ppm_rgba.hex()}"
                     )
+
+        # SR_EXIT_AT_VBLANK is an orderly headless stop, but _Exit skips atexit. Run the
+        # Vulkan presenter in a hidden window and require its first run to write the cache
+        # and its second run to load it, just like a run that returns to the driver.
+        cache_root = root / "pipeline-cache-data"
+        cache_root.mkdir()
+
+        def cache_exit_run(name: str) -> str:
+            work_dir = root / name
+            work_dir.mkdir()
+            env = os.environ.copy()
+            for key in ("SR_EXIT_AT_VBLANK", "SR_VIDEO", "SR_WINDOW_HIDDEN", "SR_GPU_GE",
+                        "SR_GPU_PIPELINE_CACHE", "SR_USER_DATA_ROOT", "SDL_VIDEO_DRIVER",
+                        "SDL_VIDEODRIVER", "SR_HEADLESS_ACCEPT_PRESENTED_FRAMES", "SR_FBDUMP",
+                        "SR_FIRST_FRAME_DUMP", "SR_VRAMDUMP", "SR_VRAMDUMP_DIR",
+                        "SR_GE_CAPTURE_FRAME"):
+                env.pop(key, None)
+            env.update({
+                "SDL_AUDIO_DRIVER": "dummy", "SDL_AUDIODRIVER": "dummy",
+                "SR_WINDOW_HIDDEN": "1", "SR_GPU_GE": "1", "SR_GPU_PIPELINE_CACHE": "on",
+                "SR_USER_DATA_ROOT": str(cache_root), "SR_EXIT_AT_VBLANK": "2",
+            })
+            completed = subprocess.run(
+                command, cwd=work_dir, env=env, capture_output=True, text=True,
+                timeout=30, check=False,
+            )
+            output = completed.stdout + completed.stderr
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"display-smoke {name} exited {completed.returncode}: {output}"
+                )
+            if "BOOT_EVENT phase=exit_at_vblank" not in output:
+                raise RuntimeError(f"display-smoke {name} did not reach SR_EXIT_AT_VBLANK: {output}")
+            return output
+
+        cold_output = cache_exit_run("pipeline-cache-cold-exit")
+        # With no Vulkan device or window (hosted CI's display-smoke-run legs have none) the
+        # presenter never comes up and there is no cache to save: say SKIP, never a silent pass.
+        # A presenter that did come up but wrote no cache still fails below.
+        if ("gui_init: SDL3/Vulkan init failed" in cold_output
+                or "BOOT_EVENT phase=window_ready backend=vulkan" not in cold_output):
+            pipeline_cache_exit = "SKIP"
+            print("DISPLAY_SMOKE_PIPELINE_CACHE status=SKIP reason=no_vulkan_device_or_window")
+        else:
+            pipeline_cache_exit = "PASS"
+            if not re.search(r"gegpu: pipeline cache: none yet \(", cold_output):
+                raise RuntimeError("display-smoke pipeline-cache cold run did not start empty: " + cold_output)
+            if not re.search(r"gegpu: pipeline cache: exit \(started empty, saved \d+ bytes;", cold_output):
+                raise RuntimeError(
+                    "display-smoke SR_EXIT_AT_VBLANK did not save its pipeline cache: " + cold_output
+                )
+            cache_folder = cache_root / "cache" / "gegpu"
+            cache_files = list(cache_folder.iterdir()) if cache_folder.is_dir() else []
+            if len(cache_files) != 1 or not cache_files[0].is_file() or cache_files[0].stat().st_size == 0:
+                raise RuntimeError("display-smoke SR_EXIT_AT_VBLANK did not leave one cache file")
+
+            warm_output = cache_exit_run("pipeline-cache-warm-exit")
+            if not re.search(r"gegpu: pipeline cache: loaded \d+ bytes \(", warm_output):
+                raise RuntimeError("display-smoke second orderly exit did not load the saved cache: " + warm_output)
+
     print("DISPLAY_SMOKE_VRAMDUMP status=PASS bounded_sidecars=1..8 "
-          "present_bytes=IDENTICAL png_pixels=IDENTICAL")
+          f"present_bytes=IDENTICAL png_pixels=IDENTICAL pipeline_cache_exit={pipeline_cache_exit}")
 
 
 FLIGHT_KIND_PRESENT_SET_FRAMEBUF = 28

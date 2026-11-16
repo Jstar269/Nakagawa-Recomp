@@ -2609,6 +2609,10 @@ typedef struct {
     bool portable;                      /* moving the folder needs Add to Steam again */
     PlayerSteamOutcome outcome;
     char backup_path[NK_MAX_PATH];      /* the last add's backup, or "" */
+    char iso_path[NK_MAX_PATH];         /* the game's local disc image (ICON0 / PIC1), or "" */
+    char prepared_root[NK_MAX_PATH];    /* the game's staged root (fallback for local PNGs) */
+    bool overwrite_artwork;             /* false keeps existing grid art; true replaces it */
+    NkSteamGridResult grid;             /* last artwork write result, counts and failure detail */
 } PlayerSteamPlan;
 
 /* Fills plan for the game: its shortcut, Steam's folder and the accounts, and returns
