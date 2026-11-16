@@ -59,7 +59,8 @@ your machine; the cited section has the full rule.
 - **No hidden failures or deliberate crashes** (loop caps, sleeps, forced returns, fake success, a host
   crash to signal a gap); a modeled PSP error returned to the guest is not one. **No hand edits to
   generated code** (Section 6).
-- **No network use** in the player, runtime or tests without a maintainer decision (Section 5).
+- **No network use** in the player or runtime outside a documented opt-in feature, and none in tests
+  (Section 5).
 - **No invented identity or origin**: no agent-written `Signed-off-by:`, false authorship or hidden
   origin (Section 3).
 - **No tags, releases, repository settings or rewritten history** (Section 3).
@@ -203,9 +204,13 @@ maintainer's PSP; a contributor's agent uses a PSP only as its user directs.
   are `NOT_RUN`, `BLOCKED`, or `SKIP`, never silent passes. A source/configuration mission runs title or
   hardware routes only when required. Remote host work stays reversible and non-overlapping.
 - **Offline by default.** The player and runtime connect only through a documented opt-in feature
-  ([Network use](docs/SETUP.md#network-use)). A new egress needs a maintainer decision, a Network use
-  entry, and an update to the allowlist test in `tools/test_prereq_fetcher.py`. The reserved
-  `network_mode` setting accepts only `"offline"`.
+  ([Network use](docs/SETUP.md#network-use)). The maintainer approves opt-in network features in
+  principle (for example #1139, #1316, #2632); that does not authorize an unlisted host, an upload, or
+  a connection that is on by default or automatic, which each need their own maintainer decision.
+  Each feature's public issue must name its hosts, payload, consent and data boundaries, and before it
+  ships the feature is off until the user turns it on, has its entry in `docs/SETUP.md` Network use,
+  and is added to the allowlist test in `tools/test_prereq_fetcher.py`. The reserved `network_mode`
+  setting accepts only `"offline"`; it is not a switch for these features.
 - A user-started transfer may move their own packages and saves directly to their own devices, never
   through a server. Nothing uploads game code or data, decrypted modules, packages, saves or guest
   memory, or shares anything built from a user's game. No telemetry. Tests never touch the internet.
