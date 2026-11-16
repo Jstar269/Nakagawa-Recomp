@@ -170,11 +170,19 @@ class FpMutationVerdictTests(unittest.TestCase):
     kills; the real mutant tests below supply the compiler-side evidence.
     """
 
-    def _staged(self, **kwargs) -> StagedRun:
-        fields = dict(build_rc=0, build_output="", run_rc=1,
-                      run_output="FAIL: guest rounding wrong\n")
-        fields.update(kwargs)
-        return StagedRun(**fields)
+    def _staged(
+        self,
+        *,
+        build_rc: int | None = 0,
+        build_output: str = "",
+        run_rc: int | None = 1,
+        run_output: str = "FAIL: guest rounding wrong\n",
+        build_timed_out: bool = False,
+        run_timed_out: bool = False,
+    ) -> StagedRun:
+        return StagedRun(
+            build_rc, build_output, run_rc, run_output, build_timed_out, run_timed_out
+        )
 
     def test_build_failure_is_never_a_semantic_kill(self):
         staged = self._staged(build_rc=1, build_output="error: 'sr_rm_to' undeclared",
@@ -446,6 +454,8 @@ int main(void) {
     return 0;
 }
 """
+
+        assert CC is not None
 
         def build_and_run(header_text: str, tag: str):
             with scratch_dir.TemporaryDirectory(prefix=f"fp_scalar_m13_{tag}_") as tmp:

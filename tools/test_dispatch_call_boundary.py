@@ -1574,12 +1574,14 @@ class DispatchCallBoundaryMutationTests(unittest.TestCase):
         original_interp = GUEST_INTERP.read_text(encoding="utf-8")
         if recomp_old is not None:
             self.assertIsNotNone(recomp_new)
+            assert recomp_new is not None
             self.assertIn(recomp_old, original_recomp, f"{name}: recomp mutation anchor drifted")
             mutated_recomp = original_recomp.replace(recomp_old, recomp_new, 1)
         else:
             mutated_recomp = None
         if interp_old is not None:
             self.assertIsNotNone(interp_new)
+            assert interp_new is not None
             self.assertIn(interp_old, original_interp, f"{name}: interpreter mutation anchor drifted")
             mutated_interp = original_interp.replace(interp_old, interp_new, 1)
         else:

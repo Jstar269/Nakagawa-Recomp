@@ -35,7 +35,7 @@ from nk_core.fonts import (  # noqa: E402
     validate_pgf_data,
     validate_pgf_file,
 )
-from pgf_writer import Glyph, build_pgf  # noqa: E402
+from tools.pgf_writer import Glyph, build_pgf  # noqa: E402
 
 SLOT_FILE = {"japanese": "nkjpn.pgf", "latin": "nkltn.pgf", "korean": "nkkr.pgf"}
 

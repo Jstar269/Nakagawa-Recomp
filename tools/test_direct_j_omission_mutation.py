@@ -168,6 +168,7 @@ int main(void) {{
 
 
 def _generate_compile_run(codegen_path: Path, work: Path, target: int, owner: int) -> tuple[int, str, int, str]:
+    assert CC is not None, "gcc is required for the compiled mutation proof"
     elf = work / "direct_j.elf"
     generated = work / "direct_j.c"
     elf.write_bytes(_synthetic_elf({

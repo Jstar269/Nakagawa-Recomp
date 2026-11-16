@@ -49,7 +49,7 @@ from typing import Any
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-import title_codegen_plan  # noqa: E402
+from tools import title_codegen_plan  # noqa: E402
 import title_manifest  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
 
@@ -147,7 +147,7 @@ class GenericTitleProofFixtures(unittest.TestCase):
 
 
 class GenericPlannerAcceptsSyntheticTitle2(unittest.TestCase):
-    def _plan(self, manifest_path: pathlib.Path, game_name: str, build_dir: pathlib.Path) -> dict:
+    def _plan(self, manifest_path: pathlib.Path, game_name: str, build_dir: pathlib.Path) -> dict[str, Any]:
         manifest = _load(manifest_path)
         return title_codegen_plan.build_manager_plan(
             manifest,
@@ -259,6 +259,7 @@ class HstProfileIsolation(unittest.TestCase):
         self.shell = shutil.which("pwsh")
         if self.shell is None:
             self.skipTest("pwsh required for adapter isolation checks")
+        assert self.shell is not None
 
     def _run_adapter_reject(self, plan: dict, expected_fragment: str) -> None:
         import json as _json
@@ -278,7 +279,9 @@ class HstProfileIsolation(unittest.TestCase):
                 "  exit 3",
                 "}",
             ])
-            proc = subprocess.run([self.shell, "-NoProfile", "-NonInteractive", "-Command", script],
+            shell = self.shell
+            assert shell is not None
+            proc = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", script],
                                   cwd=ROOT, capture_output=True, text=True)
             self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
             self.assertIn(expected_fragment, proc.stdout)

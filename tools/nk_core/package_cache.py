@@ -15,7 +15,18 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, TypedDict
+
+
+class _CacheKeyComponents(TypedDict):
+    digest: str
+    components: dict[str, str | int | None]
+
+
+class PackageCacheKey(TypedDict):
+    schema_version: int
+    aot: _CacheKeyComponents
+    native: _CacheKeyComponents
 
 CACHE_FORMAT = "nakagawa-aot-cache"
 COMPLETION_FORMAT = "nakagawa-aot-cache-completion"
@@ -1342,7 +1353,7 @@ def build_cache_key(
     analyzer_codegen_epoch: str = ANALYZER_CODEGEN_SEMANTICS_EPOCH,
     generated_code_abi_epoch: int = GENERATED_CODE_ABI_EPOCH,
     runtime_abi_epoch: int = RUNTIME_ABI_EPOCH,
-) -> dict[str, Any]:
+) -> PackageCacheKey:
     if not isinstance(input_hashes, Mapping):
         raise PackageCacheError("package input hashes must be an object")
     executable_sha256 = _input_sha(input_hashes.get("executable"), "executable")
@@ -1361,7 +1372,7 @@ def build_cache_key(
     )):
         raise PackageCacheError("cache identity components must be non-empty strings")
     options = json.loads(canonical_json(codegen_options))
-    aot_components = {
+    aot_components: dict[str, str | int | None] = {
         "executable_sha256": executable_sha256,
         "manifest_sha256": manifest_sha256,
         "modules_sha256": _digest(modules),
@@ -1374,10 +1385,10 @@ def build_cache_key(
         "generated_code_abi_epoch": int(generated_code_abi_epoch),
         "runtime_abi_epoch": int(runtime_abi_epoch),
     }
-    generated_components = dict(aot_components)
+    generated_components: dict[str, str | int | None] = dict(aot_components)
     generated_components.pop("runtime_abi_epoch")
     generated_code_digest = _digest(generated_components)
-    native_components = {
+    native_components: dict[str, str | int | None] = {
         "generated_code_digest": generated_code_digest,
         "compiler_identity": compiler,
         "compiler_target": target,

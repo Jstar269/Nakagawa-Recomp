@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+from importlib.abc import Loader
+from importlib.machinery import ModuleSpec
 import importlib.util
 import io
 import re
@@ -37,6 +39,7 @@ import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
+from typing import cast
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -46,12 +49,16 @@ import prx_reloc_model
 import analyze as analyzer
 from analyze import Elf, analyze, exec_ranges, in_ranges
 
-_SPEC = importlib.util.spec_from_file_location(
-    "platform_ladder_generator_runtime_modules",
-    ROOT / "tests" / "fixtures" / "platform_ladder" / "generate.py",
-)
+_SPEC = cast(
+    ModuleSpec,
+    importlib.util.spec_from_file_location(
+        "platform_ladder_generator_runtime_modules",
+        ROOT / "tests" / "fixtures" / "platform_ladder" / "generate.py",
+    ),
+)  # Fixed .py fixture.
 ladder = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(ladder)
+_loader = cast(Loader, _SPEC.loader)  # The fixed .py fixture has a source loader.
+_loader.exec_module(ladder)
 
 
 def run_codegen(argv):

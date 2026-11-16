@@ -448,6 +448,7 @@ class TestAuditPublicIssueLinks(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=[resp1, resp2]):
             issues_map = fetch_public_issues_map()
         self.assertIsNotNone(issues_map)
+        assert issues_map is not None
         self.assertEqual(len(issues_map), 101)
         self.assertIn(101, issues_map)
 
@@ -471,6 +472,7 @@ class TestAuditPublicIssueLinks(unittest.TestCase):
 
         with patch("urllib.request.urlopen", side_effect=[first, last]) as opener:
             issues_map = fetch_public_issues_map()
+        assert issues_map is not None
         self.assertEqual(len(issues_map), 101)
         self.assertEqual(opener.call_args_list[1].args[0].full_url, cursor)
 

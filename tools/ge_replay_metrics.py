@@ -4,6 +4,14 @@
 
 """Strict parsers for aggregate GE replay CPU-profile summaries."""
 
+from typing import Literal, TypedDict
+
+
+class GeCpuProfileValidation(TypedDict):
+    status: Literal["PASS", "FAIL"]
+    failed: list[str]
+
+
 CPU_PHASES = (
     "state_prep", "state_key", "pipeline_lookup", "pipeline_create",
     "descriptor_alloc", "descriptor_update", "bind_record", "object_lookup",
@@ -116,7 +124,7 @@ def parse_wall_profile(text: str) -> dict[str, dict[str, int | str]]:
     return phases
 
 
-def parse_ge_cpu_validation(text: str) -> dict[str, object] | None:
+def parse_ge_cpu_validation(text: str) -> GeCpuProfileValidation | None:
     """Parse the replay's GE CPU profile verdict, or None when the output has none."""
     lines = [line for line in text.splitlines() if line.startswith("GE_REPLAY_GE_CPU_VALIDATION ")]
     if not lines:
@@ -130,7 +138,8 @@ def parse_ge_cpu_validation(text: str) -> dict[str, object] | None:
     if (fields["status"] not in ("PASS", "FAIL") or (fields["status"] == "PASS") != (not failed)
             or len(set(failed)) != len(failed) or not set(failed) <= set(GE_PROFILE_CHECKS)):
         raise ValueError(f"malformed GE CPU profile validation: {lines[0]}")
-    return {"status": fields["status"], "failed": failed}
+    status: Literal["PASS", "FAIL"] = "PASS" if fields["status"] == "PASS" else "FAIL"
+    return {"status": status, "failed": failed}
 
 
 def _require_consistent_ge_cpu_profile(text: str) -> None:

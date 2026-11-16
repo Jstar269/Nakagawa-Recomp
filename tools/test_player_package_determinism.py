@@ -81,7 +81,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from typing import Any
+from typing import Any, Protocol, cast
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -102,6 +102,21 @@ from test_player_package_route import (  # noqa: E402
     create_test_iso_with_executables,
     synthetic_manifest,
 )
+
+
+class _WindowsFunction(Protocol):
+    argtypes: object
+    restype: object
+
+    def __call__(self, path: str, buffer: object, size: int) -> int: ...
+
+
+class _WindowsKernel32(Protocol):
+    GetShortPathNameW: _WindowsFunction
+
+
+class _WindowsLibraryLoader(Protocol):
+    def __call__(self, name: str, *, use_last_error: bool = False) -> _WindowsKernel32: ...
 
 # The artifact stem the source-owned display smoke guest is built under.
 GAME = "display_smoke"
@@ -266,7 +281,10 @@ def _short_path(path: str) -> str:
     if os.name != "nt":
         return path
     try:
-        get_short = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+        # WinDLL is present in the Windows runtime but omitted by Linux typeshed.
+        loader_name = "WinDLL"
+        loader = cast(_WindowsLibraryLoader, getattr(ctypes, loader_name))
+        get_short = loader("kernel32", use_last_error=True).GetShortPathNameW
     except (AttributeError, OSError):
         return path
     get_short.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
@@ -988,7 +1006,9 @@ def _make_reference(text: str, start: int) -> str:
 
 def _make_arguments(reference: str) -> list[str]:
     """``$(name a,b,...)`` split at its top-level commas: ``["name a", "b", ...]``."""
-    arguments, current, depth = [], [], 0
+    arguments: list[str] = []
+    current: list[str] = []
+    depth = 0
     for char in reference[2:-1]:
         if char == "," and depth == 0:
             arguments.append("".join(current))

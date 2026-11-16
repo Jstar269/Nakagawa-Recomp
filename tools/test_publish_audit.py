@@ -11,6 +11,7 @@ import hashlib
 import os
 import random
 import unittest
+from typing import Protocol, cast
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -26,6 +27,21 @@ NUL = bytes([0])
 BOM = bytes([0xEF, 0xBB, 0xBF])
 UTF16LE = bytes([0xFF, 0xFE])
 UTF16BE = bytes([0xFE, 0xFF])
+
+
+class _ShortPathFunction(Protocol):
+    argtypes: object
+    restype: object
+
+    def __call__(self, path: str, buffer: object, size: int) -> int: ...
+
+
+class _Kernel32(Protocol):
+    GetShortPathNameW: _ShortPathFunction
+
+
+class _WindowsDLL(Protocol):
+    kernel32: _Kernel32
 
 
 
@@ -1214,7 +1230,10 @@ class TestPublishAudit(unittest.TestCase):
             return None
         import ctypes
 
-        get_short = ctypes.windll.kernel32.GetShortPathNameW
+        # Windows supplies windll here; the Linux typeshed surface omits it.
+        dll_attribute = "windll"
+        windows_dll = cast(_WindowsDLL, getattr(ctypes, dll_attribute))
+        get_short = windows_dll.kernel32.GetShortPathNameW
         get_short.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
         get_short.restype = ctypes.c_uint
         buffer = ctypes.create_unicode_buffer(1024)

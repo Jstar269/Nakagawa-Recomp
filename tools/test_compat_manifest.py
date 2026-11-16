@@ -174,7 +174,7 @@ def _runtime_title_diagnostic_inventory() -> dict[str, set[int]]:
         *hle_sources.RUNTIME_HLE_SOURCES, "src/rt/sched.c", "src/rt/recomp.c",
         "src/rt/debug.c", "src/rt/recomp.h", "src/rt/intr_conformance.h",
     }
-    result = {path: set() for path in runtime_paths}
+    result: dict[str, set[int]] = {path: set() for path in runtime_paths}
     for group in (compat_overrides.RETIRED_HLE_DIAGNOSTIC_GROUPS +
                   compat_overrides.RETIRED_DIAGNOSTIC_GROUPS):
         addresses = {int(address) for address in group["addresses"]}

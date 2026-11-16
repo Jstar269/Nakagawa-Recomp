@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from typing import BinaryIO, cast
 from unittest import mock
 
 TOOLS = Path(__file__).resolve().parent
@@ -435,6 +436,34 @@ class LibraryBuildTests(unittest.TestCase):
                           ("EBOOT.elf", 0, None)])
         self.assertIn("DUPLICATE_DISC_MODULE_BASENAME", rows[0]["message"])
         self.assertTrue(target.is_file())
+
+    def test_disappeared_disc_member_is_a_named_refusal(self) -> None:
+        encrypted = self.discs / "disappeared.iso"
+        create_test_iso_with_executables(
+            encrypted, b"~PSP" + b"\0" * 60, disc_id="TEST70063"
+        )
+        from nk_core import iso_inspect
+
+        original_lookup = iso_inspect._lookup_iso_file
+        first_lookup = True
+
+        def disappear_after_discovery(
+            stream: BinaryIO, file_size: int, members: tuple[str, ...]
+        ) -> tuple[int, int] | None:
+            nonlocal first_lookup
+            if first_lookup:
+                first_lookup = False
+                return cast(
+                    tuple[int, int] | None,
+                    original_lookup(stream, file_size, members),
+                )  # The ISO inspector declares the extent as an optional integer pair.
+            return None
+
+        with mock.patch.object(iso_inspect, "list_disc_module_candidates", return_value=[]), \
+                mock.patch.object(iso_inspect, "_lookup_iso_file", side_effect=disappear_after_discovery):
+            with self.assertRaises(iso_inspect.IsoInspectionError) as caught:
+                decrypt_tool.decrypt_disc(encrypted, self.data, "TEST70063", runner=lambda _src, _dst: (0, "ok"))
+        self.assertEqual(caught.exception.boundary_code, "DISC_DECRYPT_MEMBER_MISSING")
 
     def test_the_manifest_names_where_each_first_launch_stopped(self) -> None:
         stages = {stage: {"status": "PASS", "duration_ms": 1} for stage in library_build.STAGES}

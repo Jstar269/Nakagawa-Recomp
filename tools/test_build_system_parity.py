@@ -228,6 +228,7 @@ class BuildSystemParityTests(unittest.TestCase):
             self.makefile_text,
         )
         self.assertIsNotNone(catalog, "Makefile must define the public target catalog")
+        assert catalog is not None
         targets = re.findall(
             r"(?m)^\s*([A-Za-z0-9_.%/+?-]+)\s*\\?$",
             catalog.group(1),

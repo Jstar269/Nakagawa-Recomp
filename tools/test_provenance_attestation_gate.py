@@ -43,6 +43,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from typing import cast
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
@@ -147,8 +148,8 @@ class _AttestationRepo:
         return hashlib.sha256((self.repo / rel).read_bytes()).hexdigest()
 
     def _git(self, *argv: str) -> str:
-        return run_git(argv, cwd=self.repo, check=True,
-                       capture_output=True, text=True).stdout.strip()
+        stdout = run_git(argv, cwd=self.repo, check=True, capture_output=True, text=True).stdout
+        return cast(str, stdout).strip()  # text=True makes run_git return decoded stdout.
 
     def _stage(self, extra_files: dict[str, str] | None = None) -> None:
         """Write (optional) new files, update the policy + ledger + export to a
@@ -267,10 +268,11 @@ class _AttestationRepo:
 
     def baseline_ledger_bytes(self) -> bytes:
         assert self._baseline_commit is not None
-        return run_git(
+        stdout = run_git(
             ["show", f"{self._baseline_commit}:assets/public_provenance_ledger.json"],
             cwd=self.repo, check=True, capture_output=True,
         ).stdout
+        return cast(bytes, stdout)  # Binary-mode run_git leaves stdout as exact blob bytes.
 
     def trusted_ledger_path(self) -> Path:
         trusted = self.tmp / "trusted-ledger.json"

@@ -17,7 +17,7 @@ from unittest import mock
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import compiler_compare  # noqa: E402
+from tools import compiler_compare  # noqa: E402
 
 
 class FakeToolchain:
@@ -678,9 +678,9 @@ class RuntimeWorkloadRunnerTests(unittest.TestCase):
 class TimingOnlyWorkloadTests(unittest.TestCase):
     """The platform ladder clears SR_*, so its benchmark runs are timed, not failed."""
 
-    def _run(self, name: str) -> dict:
+    def _run(self, name: str) -> dict[str, Any]:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        import run_perf_benchmarks
+        from tools import run_perf_benchmarks
         done = subprocess.CompletedProcess(args=[], returncode=0, stdout="built and ran\n")
         with tempfile.TemporaryDirectory() as temp, \
                 mock.patch.object(run_perf_benchmarks.subprocess, "run", return_value=done):
@@ -702,14 +702,14 @@ class TimingOnlyWorkloadTests(unittest.TestCase):
 
     def test_every_timing_only_workload_is_a_real_ladder_workload(self) -> None:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        import run_perf_benchmarks
+        from tools import run_perf_benchmarks
         names = {name for name, _targets in run_perf_benchmarks.WORKLOADS}
         self.assertTrue(run_perf_benchmarks.TIMING_ONLY <= names)
         self.assertTrue(all(name.startswith("platform-ladder-") for name in run_perf_benchmarks.TIMING_ONLY))
 
     def test_runtime_runner_passes_explicit_compiler_and_linker_to_make(self) -> None:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        import run_perf_benchmarks
+        from tools import run_perf_benchmarks
         captured: list[list[str]] = []
         done = subprocess.CompletedProcess(args=[], returncode=0, stdout="built and ran\n")
 
@@ -729,7 +729,7 @@ class TimingOnlyWorkloadTests(unittest.TestCase):
 
     def test_runtime_runner_cli_forwards_make_assignments(self) -> None:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        import run_perf_benchmarks
+        from tools import run_perf_benchmarks
         captured: list[tuple[str, ...]] = []
 
         def fake_run_one(*_args, make_assignments=(), **_kwargs):

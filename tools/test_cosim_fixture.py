@@ -8,12 +8,15 @@ properties the comparison silently DEPENDS on, each of which has already been
 observed to fail in practice or would make a cell pass vacuously.
 """
 
+from importlib.abc import Loader
+from importlib.machinery import ModuleSpec
 import importlib.util
 import shutil
 import struct
 import subprocess
 import unittest
 from pathlib import Path
+from typing import cast
 
 try:
     import scratch_dir
@@ -25,9 +28,10 @@ ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = ROOT / "tests" / "fixtures" / "cosim" / "generate.py"
 FPU_REFERENCE = ROOT / "tests" / "fixtures" / "cosim" / "fpu_reference.c"
 
-_spec = importlib.util.spec_from_file_location("cosim_generate", GENERATOR)
+_spec = cast(ModuleSpec, importlib.util.spec_from_file_location("cosim_generate", GENERATOR))  # Fixed .py fixture.
 cosim = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cosim)
+_loader = cast(Loader, _spec.loader)  # The fixed .py fixture has a source loader.
+_loader.exec_module(cosim)
 
 
 JR_RA = 0x03E00008

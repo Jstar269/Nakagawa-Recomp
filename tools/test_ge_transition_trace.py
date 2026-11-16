@@ -245,6 +245,9 @@ def fnv1a_draw_id(vtype: int, vbase: int, prim: int, count: int) -> str:
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
 class TestTransitionTraceC(unittest.TestCase):
+    tmp: Path
+    exe: Path
+
     @classmethod
     def setUpClass(cls):
         assert CC is not None

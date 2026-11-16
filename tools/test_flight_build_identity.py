@@ -901,6 +901,7 @@ class MakeIdentityResolutionTests(unittest.TestCase):
         """
         make = shutil.which("mingw32-make") or shutil.which("make")
         self.assertTrue(make, "GNU Make is required for the build-identity check")
+        assert make is not None
         environment = dict(os.environ)
         environment.update(env or {})
         # A scratch BUILD_ROOT: even a dry run parses the Makefile, and that writes the

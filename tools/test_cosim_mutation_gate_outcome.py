@@ -16,6 +16,8 @@ compiler, no guest binary, and no repository mutation.
 from __future__ import annotations
 
 import contextlib
+from importlib.abc import Loader
+from importlib.machinery import ModuleSpec
 import importlib.util
 import io
 import os
@@ -28,14 +30,38 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from typing import Protocol, cast
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 MUTATE = ROOT / "tests" / "fixtures" / "cosim" / "mutate.py"
 
 _spec = importlib.util.spec_from_file_location("cosim_mutate", MUTATE)
+_spec = cast(ModuleSpec, _spec)  # Fixed .py fixture.
 mutate = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(mutate)
+_loader = cast(Loader, _spec.loader)  # The fixed .py fixture has a source loader.
+_loader.exec_module(mutate)
+
+
+class _WindowsFunction(Protocol):
+    argtypes: object
+    restype: object
+
+    def __call__(self, *args: object) -> object: ...
+
+
+class _Kernel32(Protocol):
+    OpenProcess: _WindowsFunction
+    WaitForSingleObject: _WindowsFunction
+    CloseHandle: _WindowsFunction
+
+
+class _WindowsLibraryLoader(Protocol):
+    def __call__(self, name: str, *, use_last_error: bool = False) -> _Kernel32: ...
+
+
+class _GetLastError(Protocol):
+    def __call__(self) -> int: ...
 
 
 # A surviving grandchild must still be alive when the liveness probe gives up, so
@@ -114,7 +140,10 @@ def _pid_alive(pid: int) -> bool:
         import ctypes
         from ctypes import wintypes
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # WinDLL and get_last_error are Windows runtime APIs omitted by Linux typeshed.
+        loader_name = "WinDLL"
+        loader = cast(_WindowsLibraryLoader, getattr(ctypes, loader_name))
+        kernel32 = loader("kernel32", use_last_error=True)
         kernel32.OpenProcess.restype = wintypes.HANDLE
         kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         kernel32.WaitForSingleObject.restype = wintypes.DWORD
@@ -124,7 +153,9 @@ def _pid_alive(pid: int) -> bool:
         error_invalid_parameter = 87
         handle = kernel32.OpenProcess(synchronize, False, pid)
         if not handle:
-            error = ctypes.get_last_error()
+            last_error_name = "get_last_error"
+            get_last_error = cast(_GetLastError, getattr(ctypes, last_error_name))
+            error = get_last_error()
             if error == error_invalid_parameter:
                 return False
             raise OSError(error, f"OpenProcess({pid}) failed")
@@ -190,12 +221,8 @@ class GateOutcomeBindingTests(unittest.TestCase):
         self.source.write_text("/* synthetic mutant source */\n", encoding="utf-8")
 
     def run_with(self, code: str, timeout_s: int | None = None):
-        original = mutate.make_command
-        mutate.make_command = lambda source, target: _child(code)
-        try:
+        with mock.patch.object(mutate, "make_command", new=lambda source, target: _child(code)):
             return mutate.run_gate(self.source, timeout_s=timeout_s)
-        finally:
-            mutate.make_command = original
 
     def test_zero_exit_with_ok_marker_passes(self):
         verdict, detail = self.run_with(

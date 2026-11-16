@@ -75,29 +75,39 @@ def _assigned(tree: ast.Module, names: set[str], keys: set[str], calls: dict[str
                 if isinstance(key, ast.Constant) and key.value in keys:
                     found |= _values(value)
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            assigned_value = node.value
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
                 if isinstance(target, ast.Name) and target.id in names:
-                    found |= _values(node.value)
+                    found |= _values(assigned_value)
                 elif isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant) \
                         and target.slice.value in keys:
-                    found |= _values(node.value)
+                    found |= _values(assigned_value)
                 elif isinstance(target, ast.Tuple):
                     for index, element in enumerate(target.elts):
                         if isinstance(element, ast.Name) and element.id in names:
-                            value = node.value
-                            found |= _values(value.elts[index] if isinstance(value, ast.Tuple)
-                                             else value)
+                            found |= _values(
+                                assigned_value.elts[index]
+                                if isinstance(assigned_value, ast.Tuple)
+                                else assigned_value
+                            )
     return found
 
 
 def _module_dict(tree: ast.Module, name: str) -> ast.Dict:
     for node in tree.body:
-        targets = node.targets if isinstance(node, ast.Assign) else \
-            [node.target] if isinstance(node, ast.AnnAssign) else []
+        value: ast.expr | None
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
         if any(isinstance(target, ast.Name) and target.id == name for target in targets):
-            assert isinstance(node.value, ast.Dict), name
-            return node.value
+            assert isinstance(value, ast.Dict), name
+            return value
     raise AssertionError(f"{name} is not a module-level dict")
 
 

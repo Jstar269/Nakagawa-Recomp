@@ -14,7 +14,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import psp_issue_matrix
+from tools import psp_issue_matrix
 
 
 class PspIssueMatrixTests(unittest.TestCase):

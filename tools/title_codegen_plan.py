@@ -47,7 +47,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 # The Windows embeddable Python runtime uses a fixed ``._pth`` search path and
 # may omit the directory containing this script. Keep sibling tool imports
@@ -55,6 +55,9 @@ from typing import Any
 _TOOLS_DIRECTORY = str(Path(__file__).resolve().parent)
 if _TOOLS_DIRECTORY not in sys.path:
     sys.path.insert(0, _TOOLS_DIRECTORY)
+
+if TYPE_CHECKING:
+    from .nk_core.package_cache import PackageCacheKey
 
 import title_manifest
 
@@ -149,6 +152,22 @@ class _MemoryStatusEx(ctypes.Structure):
     ]
 
 
+class _WindowsKernel32(Protocol):
+    def GlobalMemoryStatusEx(self, lp_buffer: object) -> int: ...
+    GetShortPathNameW: "_ShortPathNameFunction"
+
+
+class _ShortPathNameFunction(Protocol):
+    argtypes: object
+    restype: object
+
+    def __call__(self, path: str, buffer: object, size: int) -> int: ...
+
+
+class _WindowsDLL(Protocol):
+    kernel32: _WindowsKernel32
+
+
 def available_physical_memory() -> int | None:
     """Return the physical memory available to a new process in bytes, or None if unknown.
 
@@ -159,7 +178,10 @@ def available_physical_memory() -> int | None:
         status = _MemoryStatusEx()
         status.dwLength = ctypes.sizeof(_MemoryStatusEx)
         try:
-            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            # Windows supplies windll here; the Linux typeshed surface omits it.
+            dll_attribute = "windll"
+            windows_dll = cast(_WindowsDLL, getattr(ctypes, dll_attribute))
+            if windows_dll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
                 return int(status.ullAvailPhys)
         except (AttributeError, OSError):
             pass
@@ -602,7 +624,10 @@ class CompiledObjectReuse:
         return match.group(1) if match else Path(command.source).name
 
     def _key(self, command: Any) -> str | None:
-        from nk_core import package_cache
+        if TYPE_CHECKING:
+            from .nk_core import package_cache
+        else:
+            from nk_core import package_cache
 
         identity = self._identities.get(command.argv[0])
         if identity is None:
@@ -1218,7 +1243,10 @@ def _windows_short_path(path: Path) -> Path | None:
         import ctypes
         from ctypes import wintypes
 
-        GetShortPathNameW = ctypes.windll.kernel32.GetShortPathNameW
+        # Windows supplies windll here; the Linux typeshed surface omits it.
+        dll_attribute = "windll"
+        windows_dll = cast(_WindowsDLL, getattr(ctypes, dll_attribute))
+        GetShortPathNameW = windows_dll.kernel32.GetShortPathNameW
         GetShortPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
         GetShortPathNameW.restype = wintypes.DWORD
 
@@ -1588,21 +1616,21 @@ def _read_unit_fallbacks(opt_makefile: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     levels: dict[str, str] = {}
     for line in text.splitlines():
-        row = _UNIT_FALLBACK_ROW.fullmatch(line)
-        level = _UNIT_FALLBACK_LEVEL.fullmatch(line)
-        if row:
-            rows.append({"unit": row.group(1), "body": row.group(2), "bytes": int(row.group(3))})
-        elif level:
-            if level.group(1) in levels:
-                raise refuse(f"{level.group(1)} has two levels")
-            levels[level.group(1)] = level.group(2)
+        row_match = _UNIT_FALLBACK_ROW.fullmatch(line)
+        level_match = _UNIT_FALLBACK_LEVEL.fullmatch(line)
+        if row_match:
+            rows.append({"unit": row_match.group(1), "body": row_match.group(2), "bytes": int(row_match.group(3))})
+        elif level_match:
+            if level_match.group(1) in levels:
+                raise refuse(f"{level_match.group(1)} has two levels")
+            levels[level_match.group(1)] = level_match.group(2)
         elif not line.startswith("# "):
             raise refuse(f"unexpected line {line[:80]!r}")
     units = [row["unit"] for row in rows]
     if len(set(units)) != len(units) or set(units) != set(levels):
         raise refuse("every unit row needs exactly one level line, and every level a row")
-    for row in rows:
-        row["level"] = levels[row["unit"]]
+    for unit_row in rows:
+        unit_row["level"] = levels[unit_row["unit"]]
     return rows
 
 
@@ -1966,7 +1994,7 @@ def _copy_verified_aot_stage(
 
 def _accept_aot_stage(
     stage_dir: Path,
-    cache_key: dict[str, Any],
+    cache_key: PackageCacheKey,
     destination: Path,
     game_name: str,
 ):
@@ -2003,7 +2031,7 @@ def _record_aot_stage(
     build_workspace: Path,
     output_dir: Path,
     game_name: str,
-    cache_key: dict[str, Any],
+    cache_key: PackageCacheKey,
     title_input_identity: dict[str, Any],
 ) -> dict[str, Any]:
     """Record a finished generation phase as a reusable generated-code stage.
@@ -2056,9 +2084,12 @@ def _cache_key_for_build(
     compiler_name: str,
     enhancement_package_path: Path | None = None,
     code_hook_package_path: Path | None = None,
-) -> dict[str, Any]:
+) -> PackageCacheKey:
     # Imported lazily: planning (--manager-plan) must not depend on the package cache.
-    from nk_core import package_cache
+    if TYPE_CHECKING:
+        from .nk_core import package_cache
+    else:
+        from nk_core import package_cache
 
     options = _cache_codegen_options(
         plan,

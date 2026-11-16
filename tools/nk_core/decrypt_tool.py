@@ -176,7 +176,13 @@ def decrypt_disc(iso_path: Union[Path, str], user_data_root: Union[Path, str], d
                              "message": "kept the decrypted copy already there"})
                 continue
             with iso.open("rb") as stream:
-                lba, count = ii._lookup_iso_file(stream, size, members)
+                extent = ii._lookup_iso_file(stream, size, members)
+                if extent is None:
+                    raise ii.IsoInspectionError(
+                        "encrypted disc member disappeared after discovery",
+                        boundary_code="DISC_DECRYPT_MEMBER_MISSING",
+                    )
+                lba, count = extent
                 blob = ii._read_iso_extent(stream, size, lba, count, 0, count)
             encrypted = Path(staging) / (name + ".enc")
             encrypted.write_bytes(blob)

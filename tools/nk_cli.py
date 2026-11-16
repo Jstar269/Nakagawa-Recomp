@@ -27,7 +27,7 @@ import tempfile
 import threading
 import traceback
 import time
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
 import zlib
 
 
@@ -62,7 +62,10 @@ from nk_core import (  # noqa: E402
     RuntimeLauncher,
     inspect_iso,
 )
-from nk_core import package_cache  # noqa: E402
+if TYPE_CHECKING:
+    from .nk_core import package_cache
+else:
+    from nk_core import package_cache  # noqa: E402
 from nk_core.prep_engine import (  # noqa: E402
     NativeTitleStager,
     SUPPORTED_ARCHIVE_FORMATS,
@@ -110,6 +113,13 @@ from nk_core.iso_inspect import (  # noqa: E402
 import title_manifest  # noqa: E402
 from psp_import_table import MODULE_ATTR_KERNEL as PSP_MODULE_ATTR_KERNEL  # noqa: E402
 from analyze import check_code_overlay, is_code_overlay  # noqa: E402
+
+
+class _WindowsMsvcrt(Protocol):
+    LK_NBLCK: int
+    LK_UNLCK: int
+
+    def locking(self, fd: int, mode: int, nbytes: int) -> None: ...
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1044,10 +1054,10 @@ def _declare_experimental_disc_modules(
             "; ".join(lines), lines=tuple(lines),
         )
     if unready:
-        lines = tuple(_unready_module_lines(unready))
+        unready_lines = tuple(_unready_module_lines(unready))
         raise ExperimentalModuleIntakeError(
-            "GUEST_MODULE_FORMAT_UNSUPPORTED", "; ".join(lines),
-            lines=lines, log_lines=lines,
+            "GUEST_MODULE_FORMAT_UNSUPPORTED", "; ".join(unready_lines),
+            lines=unready_lines, log_lines=unready_lines,
         )
     if not module_sources:
         return [], kernel_left_out, None
@@ -1844,7 +1854,7 @@ def _current_package_cache_key(
     instruction_trace: bool = False,
     enhancement_package_path: Path | None = None,
     code_hook_package_path: Path | None = None,
-) -> dict:
+) -> package_cache.PackageCacheKey:
     import title_codegen_plan
 
     selected_modules = [
@@ -2138,7 +2148,7 @@ class _BuildProgressReporter:
         self.current_stage = stage
         if status == "FAIL":
             self._failed = True
-        payload = {"stage": stage, "status": status, "message": message}
+        payload: dict[str, str | int] = {"stage": stage, "status": status, "message": message}
         if detail:
             payload["detail"] = detail
         if completed is not None and total is not None:
@@ -2472,8 +2482,9 @@ def _package_build_lock(user_root: Path, disc_id: str):
             if os.name == "nt":
                 import msvcrt
 
+                windows_msvcrt = cast(_WindowsMsvcrt, msvcrt)  # Windows' runtime exposes APIs omitted by Linux typeshed.
                 handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                windows_msvcrt.locking(handle.fileno(), windows_msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
 
@@ -2487,9 +2498,10 @@ def _package_build_lock(user_root: Path, disc_id: str):
             if os.name == "nt":
                 import msvcrt
 
+                windows_msvcrt = cast(_WindowsMsvcrt, msvcrt)  # Windows' runtime exposes APIs omitted by Linux typeshed.
                 handle.seek(0)
                 with contextlib.suppress(OSError):
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    windows_msvcrt.locking(handle.fileno(), windows_msvcrt.LK_UNLCK, 1)
             else:
                 import fcntl
 
@@ -4552,8 +4564,9 @@ def _library_lock(user_root: Path, timeout_seconds: float = LIBRARY_LOCK_TIMEOUT
                 if os.name == "nt":
                     import msvcrt
 
+                    windows_msvcrt = cast(_WindowsMsvcrt, msvcrt)  # Windows' runtime exposes APIs omitted by Linux typeshed.
                     handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    windows_msvcrt.locking(handle.fileno(), windows_msvcrt.LK_NBLCK, 1)
                 else:
                     import fcntl
 
@@ -4572,9 +4585,10 @@ def _library_lock(user_root: Path, timeout_seconds: float = LIBRARY_LOCK_TIMEOUT
             if os.name == "nt":
                 import msvcrt
 
+                windows_msvcrt = cast(_WindowsMsvcrt, msvcrt)  # Windows' runtime exposes APIs omitted by Linux typeshed.
                 handle.seek(0)
                 with contextlib.suppress(OSError):
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    windows_msvcrt.locking(handle.fileno(), windows_msvcrt.LK_UNLCK, 1)
             else:
                 import fcntl
 
@@ -4610,15 +4624,14 @@ def _library_record_to_replace(games: list, disc_id: str, digest: disc_verify.Di
     """
     same_id = [index for index, game in enumerate(games) if isinstance(game, dict)
                and str(game.get("disc_id", "")).upper() == disc_id]
-    sha1 = digest.sha1 if digest is not None else ""
-    if sha1:
+    if digest is not None and digest.sha1:
         for index in same_id:
-            if _library_content_sha1(games[index]) == sha1:
+            if _library_content_sha1(games[index]) == digest.sha1:
                 return index
     for index in same_id:
         if _library_same_path(games[index], iso_path):
             return index
-    if not sha1:
+    if digest is None or not digest.sha1:
         if len(same_id) == 1 and not _library_content_sha1(games[same_id[0]]):
             return same_id[0]
         return None
@@ -4632,7 +4645,7 @@ def _library_record_to_replace(games: list, disc_id: str, digest: disc_verify.Di
             other_digest = disc_verify.hash_image(other)
         except (OSError, disc_verify.DiscVerifyError):
             continue
-        if other_digest.sha1 == sha1:
+        if other_digest.sha1 == digest.sha1:
             return index
         # Another image: the record is kept, and now carries its own hashes and tier.
         game.update({"content_sha1": other_digest.sha1, "content_crc32": other_digest.crc32})
@@ -5161,7 +5174,7 @@ def _count_unsupported_opcodes(codegen_report: Path, sources: list[dict]) -> dic
     if not codegen_report.is_file():
         return {}
     _regions, instructions = title_codegen_plan._read_codegen_fallbacks(codegen_report, sources)
-    counts = Counter()
+    counts: Counter[str] = Counter()
     for row in instructions:
         if row.get("word") is None:
             continue
