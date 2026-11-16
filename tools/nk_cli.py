@@ -2969,6 +2969,11 @@ class _PackageBuild:
     selected: Any = None
     target_dir: Any = None
     target_valid: Any = None
+    target_schema: Any = None
+    cache_stage_dir: Any = None
+    cache_stage_reusable: bool = False
+    reuse_cache_stage: bool = False
+    cache_stage_planner_accepted: bool = False
     title_input_identity: Any = None
     user_root: Any = None
     uses_decrypted_eboot: Any = None
@@ -3360,7 +3365,9 @@ def _package_cache_check(st):
         package_cache.package_manifest_schema_version(target_dir)
         if target_valid else None
     )
-    if target_valid and target_schema == 3 and decision.action == "reuse":
+    # A valid schema 2 package (an older build, or an older planner's output) still
+    # launches and is reused as it is; the next build its cache key forces writes v3.
+    if target_valid and target_schema in {2, 3} and decision.action == "reuse":
         _prune_package_cache(cache_dir)
         if not reporter.is_json_stdout:
             print(f"PACKAGE_REUSED: {target_dir}")
@@ -3389,7 +3396,7 @@ def _package_cache_check(st):
             expected_key=cache_key,
         )
         entry_schema = package_cache.package_manifest_schema_version(entry_package)
-        if entry_valid and entry_schema == 3:
+        if entry_valid and entry_schema in {2, 3}:
             _promote_cache_entry(entry_package, target_dir, cache_dir, cache_key, user_root, disc_id)
             _prune_package_cache(cache_dir, entry_root)
             if not reporter.is_json_stdout:
@@ -3404,9 +3411,6 @@ def _package_cache_check(st):
             _report_reused_package_stages(stage_observer)
             reporter.close()
             return 0
-        # A v2 cache entry still launches, but it carries build outputs in the
-        # package tree. Rebuild it once as v3; the AOT stage below becomes the
-        # reusable generated-code source for later native rebuilds.
         if entry_package.is_symlink():
             raise PackageBuildError("Package cache entry is a symlink; refusing to replace it.")
     elif entry_package.exists():
@@ -3428,13 +3432,15 @@ def _package_cache_check(st):
         cache_key,
         required_paths=_aot_required_outputs(game_name),
     )
-    if stage_decision.accepted:
-        args.aot_stage_reusable = True
-    else:
-        if aot_stage_dir.exists():
-            shutil.rmtree(aot_stage_dir)
-        args.aot_stage_reusable = False
-    args.aot_stage_dir = aot_stage_dir
+    if not stage_decision.accepted and aot_stage_dir.exists():
+        # A refused stage is regenerated from source, never compiled.
+        shutil.rmtree(aot_stage_dir)
+    # The per-user generated-code stage cache. It never replaces a caller's own
+    # codegen stage (args.aot_stage_dir, bring-up's codegen-stage/): that caller asked
+    # for a generation run it can read.
+    st.cache_stage_dir = aot_stage_dir
+    st.cache_stage_reusable = stage_decision.accepted
+    st.target_schema = target_schema
     st.cache_key = cache_key
     st.decision = decision
     st.enhancement_package_path = enhancement_package_path
@@ -3467,7 +3473,13 @@ def _package_codegen(st):
     aot_stage_dir = getattr(args, "aot_stage_dir", None)
     reuse_source = None
     native_only = False
-    if aot_stage_dir is None and target_valid and decision.generated_c_reusable:
+    reuse_cache_stage = False
+    if aot_stage_dir is None and st.cache_stage_reusable:
+        # Schema 3 packages carry no generated C; the validated stage cache does.
+        # The planner repeats the stage check before it copies anything.
+        reuse_cache_stage = True
+    elif target_valid and decision.generated_c_reusable and st.target_schema == 2:
+        # Only a schema 2 package still holds the generated C a rebuild can reuse.
         reuse_source = target_dir
         native_only = decision.action == "native-recompile"
     entry_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -3522,21 +3534,17 @@ def _package_codegen(st):
         command.extend(("--reuse-aot-from", str(reuse_source)))
     if native_only:
         command.append("--native-only")
-    if aot_stage_dir is not None and getattr(args, "aot_stage_reusable", False):
-        # Generated C lives in the validated AOT-stage cache, not the installed
-        # runtime package. The planner repeats the stage check before copying.
-        _record_aot_stage_result(args, "REUSED", "NONE")
+    if reuse_cache_stage:
+        command.extend(("--reuse-aot-stage", str(st.cache_stage_dir)))
+    elif aot_stage_dir is not None and reuse_source is not None:
+        # The previous package's validated generated C is compiled; nothing is generated.
+        _record_aot_stage_result(args, "NOT_RUN", "PACKAGE_CACHE_REUSED")
         if stage_observer is not None:
             stage_observer("codegen", "PASS", 0)
-        command.extend(("--reuse-aot-stage", str(aot_stage_dir)))
     elif aot_stage_dir is not None:
         # The codegen stage: the generation phase alone, through the same planner,
         # inputs and environment as the package build below. The package build then
         # compiles this output only if it passes the native-only reuse checks.
-        if aot_stage_dir.exists():
-            raise PackageBuildError(
-                "Generated-code stage cache must be empty before code generation."
-            )
         reporter.report("compile", "START", "Translating the game's code")
         if stage_observer is not None:
             stage_observer("codegen", "START", 0)
@@ -3577,6 +3585,7 @@ def _package_codegen(st):
             stage_observer("codegen", "PASS", stage_ms)
         command.extend(("--reuse-aot-stage", str(aot_stage_dir)))
     st.aot_stage_dir = aot_stage_dir
+    st.reuse_cache_stage = reuse_cache_stage
     st.build_dir = build_dir
     st.build_environment = build_environment
     st.command = command
@@ -3635,6 +3644,14 @@ def _package_compile(st):
             sys.stdout.write(completed.stdout)
     if aot_stage_dir is not None and reuse_source is None:
         _record_aot_stage_decision(args, completed.stdout)
+    if st.reuse_cache_stage:
+        # Whether the planner compiled the cached stage or refused it and generated
+        # the code again; a refused stage is replaced after the build, never re-signed.
+        match = _AOT_STAGE_DECISION_RE.search(completed.stdout or "")
+        st.cache_stage_planner_accepted = (
+            match is not None and match.group(1) == "ACCEPTED"
+            and match.group(2) == package_cache.AOT_STAGE_ACCEPTED
+        )
     if completed.returncode != 0:
         if stage_observer is not None:
             stage_observer(
@@ -3693,61 +3710,66 @@ _PACKAGE_PROFILE_FILES = frozenset({
 _PACKAGE_COMPILER_SUFFIXES = frozenset({".c", ".o", ".d", ".map", ".rsp", ".mk", ".rc"})
 
 
+def _package_build_output_paths(root: Path) -> frozenset[str]:
+    """The files the package build wrote, as paths relative to its output folder.
+
+    Taken when the planner returns, before the runtime assets and guest modules are
+    staged, so the runtime-only cleanup can never remove a file the build did not
+    write (a guest PRX may carry any disc file name, ``STAGE.MAP`` included).
+    """
+    outputs: set[str] = set()
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise PackageBuildError("Package build output contains a symlink; refusing to clean it.")
+        if path.is_file():
+            outputs.add(path.relative_to(root).as_posix())
+    return frozenset(outputs)
+
+
 def _remove_package_build_outputs(
     root: Path,
     game_name: str,
-    *,
-    aot_stage: bool = False,
+    build_outputs: frozenset[str],
 ) -> tuple[int, int]:
-    """Drop build-only outputs while keeping the AOT files a stage must compile."""
+    """Drop the build-only files among ``build_outputs``; nothing else is touched."""
     removed = 0
     removed_bytes = 0
-    for path in list(root.rglob("*")):
+    for relative in sorted(build_outputs):
+        path = root / relative
         if path.is_symlink():
             raise PackageBuildError("Package build output contains a symlink; refusing to clean it.")
         if not path.is_file():
             continue
-        relative = path.relative_to(root).as_posix()
         name = path.name
-        suffix = path.suffix.lower()
-        profile_stamp = package_cache._PROFILE_STAMP_HASH_RE.search(name) is not None
-        profile_file = name in _PACKAGE_PROFILE_FILES
-        generated_report = name == f"{game_name}_recomp_coverage.json"
-        generated_support = name in {
-            ".game-inputs", ".codegen-profile-entries",
-            ".runtime-profile-entries", ".runtime-invalidate.lst",
-        }
-        generated_imports = name == f"{game_name}_imports.toml"
-        if aot_stage:
-            # The stage keeps every generated C chunk and the helpers named by
-            # _aot_required_outputs(); it does not need compiler outputs or the
-            # profile/stamp files that only make a completed build incremental.
-            discard = (
-                suffix in {".o", ".d", ".map", ".rsp", ".rc"}
-                or profile_stamp or profile_file or generated_report or generated_support
-                or relative.startswith("staged-inputs/")
-            )
-        else:
-            discard = (
-                suffix in _PACKAGE_COMPILER_SUFFIXES
-                or profile_stamp or profile_file or generated_report or generated_support
-                or generated_imports
-                or name == f"{game_name}_recomp_funcs.h"
-                or name == "sr_title_config.h"
-                or relative.startswith("staged-inputs/")
-            )
+        discard = (
+            path.suffix.lower() in _PACKAGE_COMPILER_SUFFIXES
+            or package_cache._PROFILE_STAMP_HASH_RE.search(name) is not None
+            or name in _PACKAGE_PROFILE_FILES
+            or name in {
+                ".game-inputs", ".codegen-profile-entries",
+                ".runtime-profile-entries", ".runtime-invalidate.lst",
+                f"{game_name}_recomp_coverage.json",
+                f"{game_name}_imports.toml",
+                f"{game_name}_recomp_funcs.h",
+                "sr_title_config.h",
+            }
+            or relative.startswith("staged-inputs/")
+        )
         if discard:
             removed_bytes += path.stat().st_size
             path.unlink()
             removed += 1
     staged_inputs = root / "staged-inputs"
-    if staged_inputs.is_symlink():
-        raise PackageBuildError("Package staged-input directory is a symlink; refusing to clean it.")
-    if staged_inputs.is_dir():
-        for path in staged_inputs.rglob("*"):
-            if path.is_symlink():
-                raise PackageBuildError("Package staged inputs contain a symlink; refusing to clean them.")
-        shutil.rmtree(staged_inputs)
+    if staged_inputs.is_dir() and not staged_inputs.is_symlink():
+        # Only folders the cleanup emptied go; anything left was not the build's.
+        for folder in sorted(
+            (p for p in staged_inputs.rglob("*") if p.is_dir() and not p.is_symlink()),
+            key=lambda p: len(p.parts), reverse=True,
+        ):
+            if not any(folder.iterdir()):
+                folder.rmdir()
+        if not any(staged_inputs.iterdir()):
+            staged_inputs.rmdir()
     return removed, removed_bytes
 
 
@@ -3760,6 +3782,8 @@ def _link_aot_runtime_artifact(package_dir: Path, aot_stage_dir: Path, name: str
         or not source.is_file() or not destination.is_file()
     ):
         return False
+    if source.samefile(destination):
+        return True
     if package_cache.sha256_file(source) != package_cache.sha256_file(destination):
         return False
     handle, temporary_name = tempfile.mkstemp(
@@ -3777,49 +3801,103 @@ def _link_aot_runtime_artifact(package_dir: Path, aot_stage_dir: Path, name: str
     return True
 
 
-def _trim_aot_stage(
+def _cache_aot_stage(
+    build_dir: Path,
+    build_outputs: frozenset[str],
     stage_dir: Path,
     cache_key: dict,
     title_input_identity: dict,
     game_name: str,
-) -> None:
-    if stage_dir.is_symlink() or not stage_dir.is_dir():
-        raise PackageBuildError("Generated-code stage cache is not a safe directory.")
-    _remove_package_build_outputs(stage_dir, game_name, aot_stage=True)
-    package_cache.write_completion_manifest(
-        stage_dir,
-        cache_key,
-        title_input_identity=title_input_identity,
-    )
-    from title_codegen_plan import _aot_required_outputs
+    *,
+    planner_accepted: bool,
+) -> Path | None:
+    """Keep this build's generated code in the per-user stage cache for later rebuilds.
 
-    decision = package_cache.evaluate_aot_stage(
-        stage_dir,
-        cache_key,
-        required_paths=_aot_required_outputs(game_name),
+    An existing stage is kept only when the planner compiled it (``AOT_STAGE_REUSE:
+    ACCEPTED``) and it still passes its own record; it is never re-signed. Otherwise it
+    is replaced by the generated code this build just compiled, recorded once, as the
+    planner records a stage. Returns the stage, or None when there is none to keep (the
+    build still succeeds; a later rebuild generates the code again).
+    """
+    from title_codegen_plan import _aot_required_outputs, _is_aot_output
+
+    required = _aot_required_outputs(game_name)
+    stage_root = stage_dir.parent
+    if stage_root.is_symlink() or stage_dir.is_symlink():
+        raise PackageBuildError("AOT stage cache entry is not a safe directory.")
+    if stage_dir.exists():
+        if planner_accepted and package_cache.evaluate_aot_stage(
+            stage_dir, cache_key, required_paths=required,
+        ).accepted:
+            return stage_dir
+        shutil.rmtree(stage_dir)
+    names = sorted(
+        relative for relative in build_outputs
+        if "/" not in relative and _is_aot_output(relative, game_name)
     )
-    if not decision.accepted:
-        raise PackageBuildError(f"Trimmed generated-code stage failed validation ({decision.detail}).")
+    if not required.issubset(names):
+        print("AOT_STAGE_NOT_CACHED: the build did not write every generated-code output")
+        return None
+    stage_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{stage_dir.name}.new-", dir=stage_root))
+    try:
+        for name in names:
+            source = build_dir / name
+            if source.is_symlink() or not source.is_file():
+                raise PackageBuildError(f"Generated-code output disappeared before caching: {name}")
+            _hardlink_or_copy(str(source), str(temporary / name))
+        package_cache.write_completion_manifest(
+            temporary, cache_key, title_input_identity=title_input_identity,
+        )
+        decision = package_cache.evaluate_aot_stage(
+            temporary, cache_key, required_paths=required,
+        )
+        if not decision.accepted:
+            raise PackageBuildError(
+                f"Generated-code stage failed its own check ({decision.detail})."
+            )
+        os.replace(temporary, stage_dir)
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    return stage_dir
 
 
 def _trim_runtime_package(
     package_dir: Path,
     game_name: str,
     aot_stage_dir: Path | None,
+    build_outputs: frozenset[str],
 ) -> tuple[int, int]:
-    removed, removed_bytes = _remove_package_build_outputs(package_dir, game_name)
+    removed, removed_bytes = _remove_package_build_outputs(package_dir, game_name, build_outputs)
     if aot_stage_dir is not None:
         for name in (f"{game_name}_image.bin", f"{game_name}_recomp_stubs.txt"):
             _link_aot_runtime_artifact(package_dir, aot_stage_dir, name)
     return removed, removed_bytes
 
 
+def _require_packaged_modules(package_dir: Path, package_json: dict) -> None:
+    """Fail when a guest module the package was built against is not in modules/."""
+    inputs = package_json.get("inputs")
+    modules = inputs.get("modules") if isinstance(inputs, dict) else None
+    if not isinstance(modules, list):
+        raise PackageBuildError("Generated package lists no guest module inputs.")
+    for module in modules:
+        name = module.get("name") if isinstance(module, dict) else None
+        if not isinstance(name, str):
+            raise PackageBuildError("Generated package lists an invalid guest module.")
+        path = package_dir / "modules" / name
+        if path.is_symlink() or not path.is_file():
+            raise PackageBuildError(f"Package guest module is missing: modules/{name}")
+        if package_cache.sha256_file(path) != module.get("sha256"):
+            raise PackageBuildError(f"Package guest module differs from its input: modules/{name}")
+
+
 def _package_validate(st):
     """Stage runtime assets, write the completion manifest and validate the build."""
-    (actual_hash, aot_stage_dir, build_dir, cache_key, entry, manifest, module_dir,
+    (actual_hash, build_dir, cache_key, entry, manifest, module_dir,
      reporter, stage_observer, title_input_identity) = (
         st.actual_hash,
-        st.aot_stage_dir,
         st.build_dir,
         st.cache_key,
         st.entry,
@@ -3834,6 +3912,9 @@ def _package_validate(st):
     if stage_observer is not None:
         stage_observer("build_package", "START", 0)
     package_started = time.perf_counter()
+    # What the build wrote, before anything else is staged beside it: the runtime-only
+    # cleanup below removes build-only files from this set and nothing else.
+    build_outputs = _package_build_output_paths(build_dir)
     _stage_runtime_assets(build_dir)
     if module_dir is not None:
         # The runtime loads each guest PRX's data at run time from SR_MODULE_DIR,
@@ -3862,30 +3943,33 @@ def _package_validate(st):
         package_json = package_cache.read_bounded_json(build_dir / "package.json")
     except (OSError, ValueError) as exc:
         raise PackageBuildError(f"Generated package metadata is unreadable before cleanup: {exc}") from exc
-    if not isinstance(package_json, dict) or package_json.get("schema_version") != 3:
-        raise PackageBuildError("Runtime package cleanup requires package schema v3.")
-    if package_json.get("generated_objects") != []:
-        raise PackageBuildError("Runtime package schema v3 must not declare generated objects.")
-    executable = package_json.get("executable")
-    executable_path = executable.get("path") if isinstance(executable, dict) else None
-    if not isinstance(executable_path, str):
-        raise PackageBuildError("Generated package executable path is missing before cleanup.")
-    from title_codegen_plan import _package_game_name
+    if not isinstance(package_json, dict):
+        raise PackageBuildError("Generated package metadata is not an object.")
+    if package_json.get("schema_version") == 3:
+        # Schema 3 is the runtime-only package. Any other schema (an older planner's
+        # schema 2 output) keeps its build outputs and the generated objects it
+        # declares; validate_package_cache below decides whether it is a package.
+        if package_json.get("generated_objects") != []:
+            raise PackageBuildError("Runtime package schema v3 must not declare generated objects.")
+        from title_codegen_plan import _package_game_name
 
-    game_name = _package_game_name(manifest, None)
-    aot_stage_root = st.cache_dir / "aot-stages"
-    uses_cache_stage = (
-        aot_stage_dir is not None
-        and not aot_stage_root.is_symlink()
-        and aot_stage_dir.resolve(strict=False).is_relative_to(aot_stage_root.resolve(strict=False))
-    )
-    if uses_cache_stage and aot_stage_dir is not None:
-        _trim_aot_stage(aot_stage_dir, cache_key, title_input_identity, game_name)
-    removed_files, removed_bytes = _trim_runtime_package(
-        build_dir, game_name, aot_stage_dir if uses_cache_stage else None,
-    )
-    if removed_files:
-        print(f"PACKAGE_RUNTIME_ONLY: removed {removed_files} build outputs ({removed_bytes} bytes)")
+        game_name = _package_game_name(manifest, None)
+        stage_dir = _cache_aot_stage(
+            build_dir,
+            build_outputs,
+            st.cache_stage_dir,
+            cache_key,
+            title_input_identity,
+            game_name,
+            planner_accepted=bool(st.reuse_cache_stage and st.cache_stage_planner_accepted),
+        ) if st.cache_stage_dir is not None else None
+        removed_files, removed_bytes = _trim_runtime_package(
+            build_dir, game_name, stage_dir, build_outputs,
+        )
+        if removed_files:
+            print(f"PACKAGE_RUNTIME_ONLY: removed {removed_files} build outputs ({removed_bytes} bytes)")
+    if module_dir is not None:
+        _require_packaged_modules(build_dir, package_json)
     package_cache.write_completion_manifest(
         build_dir,
         cache_key,
@@ -3972,11 +4056,15 @@ def _package_promote(st: Any) -> int:
         stage_result = getattr(args, "aot_stage_result", None) or {}
         if native_only:
             print("CACHE: generated C reused; native objects recompiled")
-        elif stage_result.get("status") == "REUSED":
+        elif stage_result.get("status") == "REUSED" or (
+            st.reuse_cache_stage and st.cache_stage_planner_accepted
+        ):
             print("CACHE: generated C from the codegen stage compiled")
         elif stage_result.get("status") == "REGENERATED":
             print("CACHE: codegen stage refused (" + str(stage_result.get("reason")) +
                   "); AOT regenerated")
+        elif st.reuse_cache_stage:
+            print("CACHE: codegen stage refused; AOT regenerated")
         else:
             print("CACHE: AOT regenerated for changed cache key")
     reporter.log(f"PACKAGE: {target_dir}")

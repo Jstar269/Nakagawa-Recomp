@@ -1185,6 +1185,15 @@ class TestProductionSmokePackage(unittest.TestCase):
         )
         completion_paths = {record["path"] for record in completion["artifacts"]}
         self.assertTrue(any(path.endswith(".o") for path in completion_paths))
+        # Schema 3 packages keep no objects, but the build report records every object
+        # the build compiled (test_profile_zero_e2e reads it as the proof of AOT code).
+        compiled = report["artifacts"]["compiled_objects"]
+        self.assertTrue(compiled)
+        for record in compiled:
+            self.assertEqual(
+                hashlib.sha256((self.build_dir / record["path"]).read_bytes()).hexdigest(),
+                record["sha256"],
+            )
         self.assertTrue(package["required_local_assets"])
 
         self.assertEqual(report["format"], "nakagawa-build-report")

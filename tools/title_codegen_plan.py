@@ -2647,8 +2647,20 @@ def build_package(
         unsupported_regions, unsupported_instructions = _read_codegen_fallbacks(stub_report, sources)
         # Runtime package schema 3 carries no compiler objects. The package
         # completion manifest still hashes every file that remains in the
-        # package; the player's separate object cache owns rebuild reuse.
+        # package; the player's separate object cache owns rebuild reuse. The
+        # build report still records every object this build compiled, as the
+        # evidence that AOT code was generated and linked.
         generated_objects: list[dict[str, str]] = []
+        compiled_objects = [
+            {
+                "path": path.relative_to(build_workspace).as_posix(),
+                "sha256": _sha256_file(path),
+            }
+            for path in sorted(
+                (path for path in build_workspace.rglob("*.o") if path.is_file()),
+                key=lambda path: path.relative_to(build_workspace).as_posix(),
+            )
+        ]
         executable_sha256 = _sha256_file(compiled_executable)
         module_hashes = {row["name"]: row["sha256"] for row in input_hashes["modules"]}
         required_assets = _required_local_assets(
@@ -2722,6 +2734,8 @@ def build_package(
             "artifacts": {
                 "executable": executable_name,
                 "link_map": link_map.name,
+                # Compiled and linked, not kept in the package (schema 3).
+                "compiled_objects": compiled_objects,
             },
         }
         package = {

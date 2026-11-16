@@ -123,8 +123,9 @@ Roadmap items decided with the table:
 ## 5. Local AOT package contract (v3)
 
 The player accepts both package schema v2 and v3. Existing v2 packages keep
-their generated-object list and completion manifest unchanged; new player builds
-write v3 runtime packages.
+their generated-object list and completion manifest unchanged, and a valid v2
+package with an unchanged cache key is reused as it is; new player builds write
+v3 runtime packages.
 
 The planner can run the existing analyzer, code generator, and two-phase Make
 pipeline for a plaintext executable ELF. Run it from the repository root with the
@@ -219,8 +220,15 @@ title: its executable, runtime DLLs, generated guest image, declared guest
 modules, runtime data/assets, notices, package/build reports, completion
 manifest, and the small stub report used by the CLI diagnostics. Compiler
 outputs, staged input copies, profile stamps/reports, and generated import/header
-files are removed after a successful build. A v3 completion manifest is then
-written over the retained file set and validated before promotion. This does not
+files are removed after a successful build, chosen only from the files the build
+itself wrote: guest modules and assets staged beside them are never candidates,
+whatever their names. The generated code is first kept in the AOT-stage cache,
+recorded once when it is written; a stage the planner refused or that no longer
+matches its record is replaced, never re-signed. The build report's
+`artifacts.compiled_objects` still lists every object the build compiled and
+linked. A v3 completion manifest is then written over the retained file set,
+every guest module the package was built against must be present, and the
+package is validated before promotion. This does not
 weaken artifact checking: every retained file is still covered by the manifest
 and hashed by the player. V2 packages continue to be checked with their original
 manifest and generated-object rules.

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1659,59 +1660,64 @@ class PackageCacheTests(unittest.TestCase):
 
         self.assertTrue(valid, reason)
 
-    def test_runtime_package_cleanup_keeps_manifested_runtime_files_and_aot_stage(self) -> None:
-        package_dir, key, cache = self._new_package_dir("runtime-cleanup")
+    def _runtime_v3_package(self, name: str) -> tuple[Path, dict, dict]:
+        package_dir, key, cache = self._new_package_dir(name)
         package_path = package_dir / "package.json"
         package = json.loads(package_path.read_text(encoding="utf-8"))
         package["schema_version"] = 3
         package["generated_objects"] = []
         package_path.write_text(package_cache.canonical_json(package), encoding="utf-8")
-        (package_dir / "synthetic_recomp.c").write_text("generated C", encoding="utf-8")
-        (package_dir / "synthetic_recomp.d").write_text("dependency", encoding="utf-8")
-        (package_dir / "synthetic.map").write_text("link map", encoding="utf-8")
-        (package_dir / "link-objects.rsp").write_text("response", encoding="utf-8")
-        (package_dir / "synthetic_recomp.mk").write_text("make rules", encoding="utf-8")
-        (package_dir / "synthetic_recomp_funcs.h").write_text("generated header", encoding="utf-8")
-        (package_dir / "synthetic_imports.toml").write_text("imports", encoding="utf-8")
-        (package_dir / "synthetic_recomp_coverage.json").write_text("{}", encoding="utf-8")
-        (package_dir / "codegen_profile.json").write_text("{}", encoding="utf-8")
-        (package_dir / "runtime_profile.json").write_text("{}", encoding="utf-8")
-        (package_dir / ".codegen-profile-12345678").write_text("stamp", encoding="utf-8")
+        (package_dir / "build-report.json").write_text(
+            _aot_gap_report(cache, 0), encoding="utf-8"
+        )
+        return package_dir, key, cache
+
+    def _write_build_outputs(self, package_dir: Path) -> None:
+        for name, text in {
+            "synthetic_recomp.c": "generated C",
+            "synthetic_recomp_1.c": "generated C chunk",
+            "synthetic_recomp.d": "dependency",
+            "synthetic.map": "link map",
+            "link-objects.rsp": "response",
+            "synthetic_recomp_opt.mk": "make rules",
+            "synthetic_recomp_funcs.h": "generated header",
+            "synthetic_imports.toml": "imports",
+            "synthetic_recomp_coverage.json": '{"total": {"functions": 3}}',
+            "synthetic_recomp_stubs.txt": "stub report",
+            "codegen_profile.json": "{}",
+            "runtime_profile.json": "{}",
+            ".codegen-profile-12345678": "stamp",
+        }.items():
+            (package_dir / name).write_text(text, encoding="utf-8")
         staged_inputs = package_dir / "staged-inputs"
         staged_inputs.mkdir()
         (staged_inputs / "selected.elf").write_bytes(b"staged input")
+
+    def _stage_runtime_files(self, package_dir: Path) -> None:
+        """What nk_cli stages after the build: runtime files and guest modules whose
+        disc names carry build-output suffixes."""
         (package_dir / "SDL3.dll").write_bytes(b"runtime dll")
-        (package_dir / "synthetic_recomp_stubs.txt").write_text("stub report", encoding="utf-8")
         modules = package_dir / "modules"
         modules.mkdir()
-        (modules / "guest.prx").write_bytes(b"guest module")
-        data = package_dir / "data"
-        data.mkdir()
-        (data / "title.dat").write_bytes(b"runtime data")
+        for name in ("guest.prx", "STAGE.MAP", "overlay.d", "boot.o", "title.rc", "menu.c"):
+            (modules / name).write_bytes(b"guest module " + name.encode())
+        assets = package_dir / "assets"
+        assets.mkdir()
+        (assets / "font.rsp").write_bytes(b"runtime asset")
 
-        stage_dir = self.root / "aot-stage"
-        stage_dir.mkdir()
-        required = title_codegen_plan._aot_required_outputs("synthetic")
-        for relative in required:
-            path = stage_dir / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if relative == "synthetic_image.bin":
-                path.write_bytes((package_dir / relative).read_bytes())
-            elif relative == "synthetic_recomp_stubs.txt":
-                path.write_bytes((package_dir / relative).read_bytes())
-            else:
-                path.write_text("aot output", encoding="utf-8")
-        (stage_dir / "runtime_profile.json").write_text("{}", encoding="utf-8")
-        (stage_dir / ".recomp-profile-abcdef12").write_text("stamp", encoding="utf-8")
-        (stage_dir / "synthetic_recomp.d").write_text("dependency", encoding="utf-8")
-        package_cache.write_completion_manifest(stage_dir, key, title_input_identity=self.identity)
+    def test_runtime_package_cleanup_removes_only_what_the_build_wrote(self) -> None:
+        package_dir, key, _cache = self._runtime_v3_package("runtime-cleanup")
+        self._write_build_outputs(package_dir)
+        build_outputs = nk_cli._package_build_output_paths(package_dir)
+        self._stage_runtime_files(package_dir)
 
-        nk_cli._trim_aot_stage(stage_dir, key, self.identity, "synthetic")
-        removed, _removed_bytes = nk_cli._trim_runtime_package(
-            package_dir, "synthetic", stage_dir
+        stage_dir = package_cache.aot_stage_root(self.root / "cache", key)
+        stage = nk_cli._cache_aot_stage(
+            package_dir, build_outputs, stage_dir, key, self.identity, "synthetic",
+            planner_accepted=False,
         )
-        (package_dir / "build-report.json").write_text(
-            _aot_gap_report(cache, 0), encoding="utf-8"
+        removed, _removed_bytes = nk_cli._trim_runtime_package(
+            package_dir, "synthetic", stage, build_outputs
         )
         package_cache.write_completion_manifest(
             package_dir, key, title_input_identity=self.identity
@@ -1720,30 +1726,147 @@ class PackageCacheTests(unittest.TestCase):
 
         self.assertGreater(removed, 0)
         self.assertTrue(valid, reason)
-        self.assertTrue((package_dir / "synthetic.exe").is_file())
-        self.assertTrue((package_dir / "synthetic_image.bin").is_file())
-        self.assertTrue((package_dir / "synthetic_recomp_stubs.txt").is_file())
-        self.assertTrue((package_dir / "SDL3.dll").is_file())
-        self.assertTrue((package_dir / "modules" / "guest.prx").is_file())
-        self.assertTrue((package_dir / "data" / "title.dat").is_file())
-        self.assertTrue((package_dir / "synthetic_image.bin").samefile(stage_dir / "synthetic_image.bin"))
-        self.assertTrue((package_dir / "synthetic_recomp_stubs.txt").samefile(
-            stage_dir / "synthetic_recomp_stubs.txt"
-        ))
+        for name in ("guest.prx", "STAGE.MAP", "overlay.d", "boot.o", "title.rc", "menu.c"):
+            self.assertTrue((package_dir / "modules" / name).is_file(),
+                            f"guest module {name} was removed as a build output")
+        self.assertTrue((package_dir / "assets" / "font.rsp").is_file())
+        for name in ("synthetic.exe", "synthetic_image.bin", "synthetic_recomp_stubs.txt",
+                     "SDL3.dll"):
+            self.assertTrue((package_dir / name).is_file(), name)
         for name in (
-            "synthetic_recomp.o", "synthetic_recomp.c", "synthetic_recomp.d",
-            "synthetic.map", "link-objects.rsp", "synthetic_recomp.mk",
-            "synthetic_recomp_funcs.h", "synthetic_imports.toml",
+            "synthetic_recomp.o", "synthetic_recomp.c", "synthetic_recomp_1.c",
+            "synthetic_recomp.d", "synthetic.map", "link-objects.rsp",
+            "synthetic_recomp_opt.mk", "synthetic_recomp_funcs.h", "synthetic_imports.toml",
             "synthetic_recomp_coverage.json", "codegen_profile.json",
             "runtime_profile.json", ".codegen-profile-12345678",
         ):
             self.assertFalse((package_dir / name).exists(), name)
-        self.assertFalse(staged_inputs.exists())
-        self.assertTrue((stage_dir / "synthetic_recomp.c").is_file())
-        self.assertTrue((stage_dir / "synthetic_recomp_opt.mk").is_file())
-        self.assertFalse((stage_dir / "runtime_profile.json").exists())
-        self.assertFalse((stage_dir / ".recomp-profile-abcdef12").exists())
-        self.assertFalse((stage_dir / "synthetic_recomp.d").exists())
+        self.assertFalse((package_dir / "staged-inputs").exists())
+
+        # The stage holds the generated code, coverage report included, recorded once.
+        self.assertEqual(stage, stage_dir)
+        for name in ("synthetic_recomp.c", "synthetic_recomp_1.c", "synthetic_recomp_opt.mk",
+                     "synthetic_recomp_coverage.json"):
+            self.assertTrue((stage_dir / name).is_file(), name)
+        for name in ("runtime_profile.json", ".codegen-profile-12345678",
+                     "synthetic_recomp.d", "synthetic_recomp.o"):
+            self.assertFalse((stage_dir / name).exists(), name)
+        self.assertTrue((package_dir / "synthetic_image.bin").samefile(
+            stage_dir / "synthetic_image.bin"))
+        decision = package_cache.evaluate_aot_stage(
+            stage_dir, key,
+            required_paths=title_codegen_plan._aot_required_outputs("synthetic"),
+        )
+        self.assertTrue(decision.accepted, decision.detail)
+
+    def test_reused_stage_keeps_the_static_coverage_report(self) -> None:
+        package_dir, key, _cache = self._runtime_v3_package("coverage-source")
+        self._write_build_outputs(package_dir)
+        stage_dir = package_cache.aot_stage_root(self.root / "cache", key)
+        nk_cli._cache_aot_stage(
+            package_dir, nk_cli._package_build_output_paths(package_dir), stage_dir,
+            key, self.identity, "synthetic", planner_accepted=False,
+        )
+        rebuild = self.root / "rebuild"
+        decision = title_codegen_plan._accept_aot_stage(stage_dir, key, rebuild, "synthetic")
+        self.assertTrue(decision.accepted, decision.detail)
+        self.assertEqual(
+            title_codegen_plan._read_static_coverage(rebuild / "synthetic_recomp_coverage.json"),
+            {"functions": 3},
+        )
+
+    def test_damaged_or_refused_stage_is_replaced_never_re_signed(self) -> None:
+        for planner_accepted in (True, False):
+            with self.subTest(planner_accepted=planner_accepted):
+                package_dir, key, _cache = self._runtime_v3_package(
+                    f"damaged-{planner_accepted}")
+                self._write_build_outputs(package_dir)
+                build_outputs = nk_cli._package_build_output_paths(package_dir)
+                stage_dir = package_cache.aot_stage_root(
+                    self.root / f"cache-{planner_accepted}", key)
+                nk_cli._cache_aot_stage(
+                    package_dir, build_outputs, stage_dir, key, self.identity,
+                    "synthetic", planner_accepted=False,
+                )
+                # Damage after the record: one chunk rewritten, one deleted.
+                (stage_dir / "synthetic_recomp.c").unlink()
+                (stage_dir / "synthetic_recomp.c").write_text("tampered", encoding="utf-8")
+                (stage_dir / "synthetic_recomp_1.c").unlink()
+                before = package_cache.evaluate_aot_stage(
+                    stage_dir, key,
+                    required_paths=title_codegen_plan._aot_required_outputs("synthetic"),
+                )
+                self.assertFalse(before.accepted)
+
+                nk_cli._cache_aot_stage(
+                    package_dir, build_outputs, stage_dir, key, self.identity,
+                    "synthetic", planner_accepted=planner_accepted,
+                )
+
+                self.assertEqual((stage_dir / "synthetic_recomp.c").read_text(encoding="utf-8"),
+                                 "generated C")
+                self.assertTrue((stage_dir / "synthetic_recomp_1.c").is_file())
+                after = package_cache.evaluate_aot_stage(
+                    stage_dir, key,
+                    required_paths=title_codegen_plan._aot_required_outputs("synthetic"),
+                )
+                self.assertTrue(after.accepted, after.detail)
+
+    def test_intact_stage_the_planner_accepted_is_not_rewritten(self) -> None:
+        package_dir, key, _cache = self._runtime_v3_package("intact")
+        self._write_build_outputs(package_dir)
+        build_outputs = nk_cli._package_build_output_paths(package_dir)
+        stage_dir = package_cache.aot_stage_root(self.root / "cache", key)
+        nk_cli._cache_aot_stage(
+            package_dir, build_outputs, stage_dir, key, self.identity, "synthetic",
+            planner_accepted=False,
+        )
+        record = (stage_dir / package_cache.COMPLETION_MANIFEST).read_bytes()
+        with mock.patch.object(nk_cli.package_cache, "write_completion_manifest") as write:
+            nk_cli._cache_aot_stage(
+                package_dir, build_outputs, stage_dir, key, self.identity, "synthetic",
+                planner_accepted=True,
+            )
+        write.assert_not_called()
+        self.assertEqual((stage_dir / package_cache.COMPLETION_MANIFEST).read_bytes(), record)
+
+    def test_runtime_package_validation_requires_every_shipped_guest_module(self) -> None:
+        module_bytes = b"guest module"
+        module = {"name": "STAGE.MAP", "load_address": "0x08900000",
+                  "sha256": hashlib.sha256(module_bytes).hexdigest()}
+        self.inputs["modules"] = [module]
+        self.identity = package_cache.build_title_input_identity(
+            manifest={"id": "synthetic-cache-test", "schema_version": 1},
+            executable_name="EBOOT.BIN",
+            executable_sha256="2" * 64,
+            modules=[{"name": module["name"], "sha256": module["sha256"]}],
+            disc_id="TEST00001",
+            region="TEST",
+            disc_version="1.00",
+            param_sfo={"DISC_ID": "TEST00001", "DISC_VERSION": "1.00"},
+            container=dict(self.identity["container"]),
+        )
+        package_dir, key, _cache = self._runtime_v3_package("modules")
+        modules = package_dir / "modules"
+        modules.mkdir()
+        (modules / "STAGE.MAP").write_bytes(module_bytes)
+        package = json.loads((package_dir / "package.json").read_text(encoding="utf-8"))
+        package_cache.write_completion_manifest(
+            package_dir, key, title_input_identity=self.identity
+        )
+        valid, reason = package_cache.validate_package_cache(package_dir, expected_key=key)
+        self.assertTrue(valid, reason)
+        nk_cli._require_packaged_modules(package_dir, package)
+
+        (modules / "STAGE.MAP").unlink()
+        package_cache.write_completion_manifest(
+            package_dir, key, title_input_identity=self.identity
+        )
+        valid, reason = package_cache.validate_package_cache(package_dir, expected_key=key)
+        self.assertFalse(valid)
+        self.assertIn("modules/STAGE.MAP", reason)
+        with self.assertRaisesRegex(nk_cli.PackageBuildError, "modules/STAGE.MAP"):
+            nk_cli._require_packaged_modules(package_dir, package)
 
     def test_aot_stage_cache_key_is_shared_across_native_rebuilds(self) -> None:
         cache_root = package_cache.cache_root(self.root / "user-data", "TEST00001")

@@ -1959,6 +1959,24 @@ def validate_package_cache(
     if package_schema == 3 and objects:
         return False, "runtime-only package schema must not declare generated objects"
     required = {"package.json", "build-report.json", executable_path, image_path}
+    modules_dir = package_dir / "modules"
+    if package_schema == 3 and (modules_dir.is_dir() or modules_dir.is_symlink()):
+        # A package that ships its guest modules ships every one it was built against;
+        # a missing module would only show when the game loads it.
+        for name, digest in package_modules.items():
+            if not isinstance(name, str):
+                return False, "package module input metadata is invalid"
+            module_path = f"modules/{name}"
+            try:
+                module_file = _resolve_within(package_dir, module_path)
+            except PackageCacheError as exc:
+                return False, str(exc)
+            if (
+                module_file.is_symlink() or not module_file.is_file()
+                or _digest_once(module_file, file_digests) != digest
+            ):
+                return False, f"package guest module is missing or stale: {module_path}"
+            required.add(module_path)
     for item in objects:
         if not isinstance(item, dict) or not isinstance(item.get("path"), str):
             return False, "package generated object record is invalid"
