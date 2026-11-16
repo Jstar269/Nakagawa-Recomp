@@ -16,7 +16,9 @@ runtime, an interpreter floor, and HLE, moving toward low-level emulation.
   `--lle-import-seam` must leave generated output byte-identical without the flag and
   keep unsupported behavior fail-closed.
 - **Visible failure:** invalid guest pointers, unknown opcodes, unowned targets, missing
-  inputs, and unavailable backends must be reported, not guessed or synthesized.
+  inputs, and unavailable backends must be reported, not guessed or synthesized. A known
+  operation may return its modeled PSP error to the guest (`AGENTS.md` section 6); flag a change
+  that turns such an error into a whole-run stop or a host crash, or hides a miss behind success.
 - **Generic implementation:** no title-specific branches, title-keyed overrides or private guest
   addresses in `src/rt/` or generic `tools/` code; a game's name or disc ID in a comment, test or
   document is fine. Evidence-backed title behavior belongs in a manifest/config with

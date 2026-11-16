@@ -56,7 +56,8 @@ your machine; the cited section has the full rule.
   elsewhere only under Section 3 (Section 5).
 - **No firmware** and no firmware decryption; decrypting the user's own game locally is allowed
   (Section 5).
-- **No hidden failures** (loop caps, sleeps, forced returns, fake success) and **no hand edits to
+- **No hidden failures or deliberate crashes** (loop caps, sleeps, forced returns, fake success, a host
+  crash to signal a gap); a modeled PSP error returned to the guest is not one. **No hand edits to
   generated code** (Section 6).
 - **No network use** in the player, runtime or tests without a maintainer decision (Section 5).
 - **No invented identity or origin**: no agent-written `Signed-off-by:`, false authorship or hidden

@@ -361,6 +361,18 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             with self.subTest(section=7, required=required):
                 self.assertIn(required, section_7)
 
+    def test_hard_limits_and_review_separate_guest_errors_from_hidden_failures(self):
+        content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        start = content.index("### Hard limits")
+        hard_limits = " ".join(_blocks(content[start:content.index("\n### ", start + 1)])).lower()
+        for required in ("no hidden failures", "fake success", "deliberate crashes", "a modeled psp error"):
+            with self.subTest(surface="AGENTS.md hard limits", required=required):
+                self.assertIn(required, hard_limits)
+        review = " ".join((ROOT / ".github/REVIEW.md").read_text(encoding="utf-8").lower().split())
+        for required in ("modeled psp error", "whole-run stop", "host crash"):
+            with self.subTest(surface=".github/REVIEW.md", required=required):
+                self.assertIn(required, review)
+
     def test_agents_scopes_opt_in_network_approval(self):
         content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         section_5 = " ".join(_blocks(_section(content, 5))).lower()
