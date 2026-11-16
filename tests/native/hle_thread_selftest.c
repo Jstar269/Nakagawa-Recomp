@@ -2851,8 +2851,8 @@ static void test_runtime_placed_modules(void) {
     MEM_W32(RT_OPTION_ADDR + 4u, 2u);
     MEM_W8(RT_OPTION_ADDR + 16u, 1u);
     /* Position 1 is High (uOFW modulemgr.c). This fixture's partition is based low, below the
-     * runtime stacks, where no High region is modelled, so it fails closed by name; the High
-     * allocator itself is covered by the memory-block test. */
+     * runtime stacks, where a module image placed High is not modelled, so it fails closed by
+     * name; the High allocator itself is covered by the memory-block and TLS-pool tests. */
     rt_capture_begin();
     refused = rt_load(alpha_guest, RT_OPTION_ADDR);
     out = rt_capture_end();
@@ -42672,10 +42672,10 @@ static void test_wb_tlspl_vpl_cells(void) {
     uint32_t p6 = wb_tlspl_create("tls", 6u, 0u, 0x100u, 4u, 0xdeadbeefu);
     expect(p6 != 0u && p6 < 0x80000000u, "wb tlspl: partition 6 succeeds");
     if (p6 < 0x80000000u) (void)selftest_tlspl_simple(p6, NID_TLSPL_DELETE);
-    static const uint32_t good_attr[] = {0x1u, 0x100u}; /* 0x4000 needs the High region, which this fixture partition does not model */
+    static const uint32_t good_attr[] = {0x1u, 0x100u, 0x4000u};
     for (size_t i = 0; i < sizeof good_attr / sizeof good_attr[0]; ++i) {
         uint32_t u = wb_tlspl_create("tls", 2u, good_attr[i], 0x100u, 4u, 0xdeadbeefu);
-        expect(u != 0u && u < 0x80000000u, "wb tlspl: attrs 1 and 0x100 succeed");
+        expect(u != 0u && u < 0x80000000u, "wb tlspl: attrs 1, 0x100 and 0x4000 succeed");
         if (u < 0x80000000u) {
             expect(selftest_tlspl_refer(u, TLSPL_INFO) == 0u && MEM_R32(TLSPL_INFO + 36u) == good_attr[i],
                    "wb tlspl: the attr is reported as given");
@@ -42801,6 +42801,120 @@ static void test_wb_tlspl_vpl_cells(void) {
                "wb vpl: AllocateCB of 0, more than the pool, or -1 bytes is 0x800201B7");
     }
     (void)selftest_vpl_delete(vpl);
+}
+
+/* sceKernelCreateTlspl attr 0x4000 (PSP_TLSPL_ATTR_HIGHMEM), #2640, in both partition layouts: the
+ * fixture's default image, linked below the runtime stacks, where the create stopped the run by
+ * name, and an image in user RAM, as a game's is. pspautotests tests/threads/tls/create.expected
+ * at 774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP, fixes what
+ * the caller sees. Line 29: a pool whose status reads attr=00004000, blockSize 0x100 and four free
+ * blocks of four, 1024 bytes taken from the partition's free total and given back by the delete
+ * (no LEAK line). Lines 28 and 30: 0x80020191 for attr 0x2000 and 0x8000. Where the pool lies is
+ * not in the recording: the top of the partition is PPSSPP-derived, not PSP-measured
+ * (h_CreateTlspl), and the handler says so once per run.
+ *
+ * The free total carries a 0x100 tail for every partition block slot ever used
+ * (h_TotalFreeMemSize), so the slots the case uses are opened first; the recorded cell also runs
+ * after other pools came and went. In the low-based layout the free total measures the bump
+ * region, which ends below the runtime stacks and so below these pools: there only the leak is
+ * checked. */
+static uint32_t tlspl_total_free(void) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    return sr_syscall(&cpu, 0xf919f628u);   /* sceKernelTotalFreeMemSize */
+}
+
+static int tlspl_created(uint32_t uid) { return uid != 0u && uid < 0x80000000u; }
+
+static void test_tlspl_highmem_pool(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_hle_test_partition_bump_top(void);
+    extern void sr_hle_test_tlspl_highmem_note_reset(void);
+    static const char note[] = "PPSSPP-derived, not PSP-measured: sceKernelCreateTlspl";
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    for (int user_ram = 0; user_ram < 2; ++user_ram) {
+        reset_fixture();
+        s_fixture_loaded_end = user_ram ? 0x08a00000u : loaded_end;
+        sr_hle_test_partition_reset();
+        sr_hle_init();
+        sr_hle_test_tlspl_highmem_note_reset();
+        TCB *thread = fixture_thread(0x33b1u, TH_RUNNING, 32);
+        expect(thread != NULL &&
+                   (sr_hle_test_partition_bump_top() == SR_VBLANK_STACK_BASE) == !user_ram,
+               "tlspl highmem: only the default image's partition ends at the runtime stacks");
+        if (!thread) break;
+        s_cur = (int)(thread - s_tcb);
+
+        uint32_t low = wb_tlspl_create("low", 2u, 0u, 0x100u, 4u, 0xdeadbeefu);
+        uint32_t gone1 = wb_tlspl_create("tls", 2u, 0x1u, 0x100u, 4u, 0xdeadbeefu);
+        uint32_t gone2 = wb_tlspl_create("tls", 2u, 0x100u, 0x100u, 4u, 0xdeadbeefu);
+        expect(tlspl_created(low) && tlspl_created(gone1) && tlspl_created(gone2) &&
+                   selftest_tlspl_simple(gone1, NID_TLSPL_DELETE) == 0u &&
+                   selftest_tlspl_simple(gone2, NID_TLSPL_DELETE) == 0u,
+               "tlspl highmem: an attr 0 pool stays, and attr 1 and 0x100 pools come and go");
+        const uint32_t before = tlspl_total_free();
+        const uint32_t stops = sr_hle_test_unmodelled_stops();
+        rt_capture_begin();
+        uint32_t high = wb_tlspl_create("tls", 2u, 0x4000u, 0x100u, 4u, 0xdeadbeefu);
+        const uint32_t taken = before - tlspl_total_free();
+        uint32_t second = wb_tlspl_create("tls", 2u, 0x4000u, 0x100u, 4u, 0xdeadbeefu);
+        const char *out = rt_capture_end();
+        expect(tlspl_created(high) && tlspl_created(second) &&
+                   sr_hle_test_unmodelled_stops() == stops,
+               "tlspl highmem: attr 0x4000 creates a pool and stops nothing");
+        int notes = 0;
+        for (const char *p = out; (p = strstr(p, note)) != NULL; p += sizeof(note) - 1u) ++notes;
+        expect(notes == 1, "tlspl highmem: the PPSSPP-derived placement is logged once for two pools");
+        if (tlspl_created(high) && tlspl_created(second)) {
+            MEM_W32(TLSPL_INFO, 60u);
+            expect(selftest_tlspl_refer(high, TLSPL_INFO) == 0u && MEM_R32(TLSPL_INFO) == 60u &&
+                       MEM_R8(TLSPL_INFO + 4u) == (uint8_t)'t' &&
+                       MEM_R32(TLSPL_INFO + 36u) == 0x4000u && MEM_R32(TLSPL_INFO + 44u) == 0x100u &&
+                       MEM_R32(TLSPL_INFO + 48u) == 4u && MEM_R32(TLSPL_INFO + 52u) == 4u &&
+                       MEM_R32(TLSPL_INFO + 56u) == 0u,
+                   "tlspl highmem: the status reads attr 0x4000, block size 0x100 and 4 free blocks of 4");
+            if (user_ram)
+                expect(taken == 0x400u,
+                       "tlspl highmem: the pool takes its 1024 bytes from the free total");
+            const uint32_t a_low = selftest_tlspl_get_addr(low);
+            const uint32_t a_high = selftest_tlspl_get_addr(high);
+            const uint32_t a_second = selftest_tlspl_get_addr(second);
+            expect(a_low != 0u && a_high == SR_STACK_ARENA_CEIL - 0x400u &&
+                       a_second == a_high - 0x400u && a_low < a_second &&
+                       (user_ram || a_low < SR_VBLANK_STACK_BASE),
+                   "tlspl highmem: the pools sit at the top of user RAM, the second below the "
+                   "first, and the attr 0 pool below both");
+            expect(selftest_tlspl_simple(high, NID_TLSPL_FREE) == 0u &&
+                       selftest_tlspl_simple(second, NID_TLSPL_FREE) == 0u &&
+                       selftest_tlspl_simple(high, NID_TLSPL_DELETE) == 0u &&
+                       selftest_tlspl_simple(second, NID_TLSPL_DELETE) == 0u &&
+                       tlspl_total_free() == before,
+                   "tlspl highmem: deleting the pools gives every byte back");
+            uint32_t again = wb_tlspl_create("tls", 2u, 0x4000u, 0x100u, 4u, 0xdeadbeefu);
+            expect(tlspl_created(again) &&
+                       selftest_tlspl_get_addr(again) == SR_STACK_ARENA_CEIL - 0x400u &&
+                       selftest_tlspl_simple(again, NID_TLSPL_FREE) == 0u &&
+                       selftest_tlspl_simple(again, NID_TLSPL_DELETE) == 0u,
+                   "tlspl highmem: the next attr 0x4000 pool lands at the top again");
+        } else {
+            if (tlspl_created(high)) (void)selftest_tlspl_simple(high, NID_TLSPL_DELETE);
+            if (tlspl_created(second)) (void)selftest_tlspl_simple(second, NID_TLSPL_DELETE);
+        }
+        expect(wb_tlspl_create("tls", 2u, 0x2000u, 0x100u, 4u, 0xdeadbeefu) == 0x80020191u &&
+                   wb_tlspl_create("tls", 2u, 0x8000u, 0x100u, 4u, 0xdeadbeefu) == 0x80020191u,
+               "tlspl highmem: attr 0x2000 and 0x8000 stay 0x80020191");
+        /* memory.expected line 7 records 0x80020190 for an attr 0 pool of four 0x01000000-byte
+         * blocks; an attr 0x4000 pool the top of user RAM cannot hold takes the same exit. */
+        expect(wb_tlspl_create("tls", 2u, 0x4000u, 0x01000000u, 4u, 0xdeadbeefu) == 0x80020190u &&
+                   sr_hle_test_unmodelled_stops() == stops,
+               "tlspl highmem: a pool the partition cannot hold is 0x80020190, not a stop");
+        if (tlspl_created(low)) {
+            (void)selftest_tlspl_simple(low, NID_TLSPL_FREE);
+            (void)selftest_tlspl_simple(low, NID_TLSPL_DELETE);
+        }
+    }
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
 }
 
 static void test_fpl_blocking_waits(void) {
@@ -57380,6 +57494,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_vpl_block_count_bounded_by_pool_size();
     test_tlspl_lifecycle_and_thread_isolation();
     test_wb_tlspl_vpl_cells();
+    test_tlspl_highmem_pool();
     test_vpl_blocking_waits();
     test_std_handles_measured();
     test_kernel_pool_bounds_measured();

@@ -968,6 +968,10 @@ static uint32_t h_ReferVplStatus(CpuState *s) {
 #define TLSPL_MAX_ALIGNMENT 256u
 
 TlsplPool s_tlspls[TLSPL_MAX];
+static int s_tlspl_highmem_noted;   /* the attr 0x4000 placement note has been logged this run */
+#ifdef SR_HLE_THREAD_SELFTEST
+void sr_hle_test_tlspl_highmem_note_reset(void) { s_tlspl_highmem_noted = 0; }
+#endif
 
 static TlsplPool *tlspl_find(uint32_t uid) {
     for (int i = 0; i < TLSPL_MAX; ++i)
@@ -998,7 +1002,10 @@ static uint32_t h_CreateTlspl(CpuState *s) {
      * succeed (other bits 0x80020191); a block size or count of 0 or -1 is 0x800201B7; the options
      * size word is ignored; alignments 0 and the powers of two to 0x10000 succeed and anything else
      * is 0x800200D2; the 17th live pool is 0x800201D1. Partitions 5 and 11+, and alignments above
-     * 0x10000, are not measured and keep the old refusal. */
+     * 0x10000, are not measured and keep the old refusal. The attr 0x4000 cell (line 29 at
+     * 774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP) fixes that
+     * the pool is created, reports the attribute and takes its 1024 bytes from the partition; it
+     * does not show where the pool lies (see the allocation below). */
     if (!A0) return TLSPL_NO_MEMORY;
     if (!guest_cstr(A0, name, sizeof(name))) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     int32_t partition = (int32_t)A1;
@@ -1042,10 +1049,17 @@ static uint32_t h_CreateTlspl(CpuState *s) {
     if (total64 + slack > UINT32_MAX - 0xffu) return TLSPL_ILLEGAL_SIZE;
     uint32_t block_uid;
     if (A2 & TLSPL_ATTR_MEM_BOTTOM) {
-        /* attr 0x4000: the pool comes from the top of the partition (alloc_block_high). */
-        if (!partition_high_modelled())
-            return hle_unmodelled_stop("sceKernelCreateTlspl",
-                                       "attr 0x4000 in a partition based below the runtime stacks is not modelled");
+        /* attr 0x4000 (PSP_TLSPL_ATTR_HIGHMEM in pspautotests tests/threads/tls/shared.h): the
+         * pool comes from the top of the partition (alloc_block_high), in either partition layout
+         * (#2640). PPSSPP-derived, not PSP-measured: hrydgard/ppsspp
+         * 65181eea1deb7361beb3be6062ea98e8427f2786, Core/HLE/sceKernelMemory.cpp,
+         * sceKernelCreateTlspl, asks its block allocator for the top when the attribute is set;
+         * jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414, SceKernelTls, agrees. */
+        if (!s_tlspl_highmem_noted) {
+            s_tlspl_highmem_noted = 1;
+            fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceKernelCreateTlspl "
+                            "(NID 0x8daff657) places an attr 0x4000 pool at the top of the partition\n");
+        }
         block_uid = alloc_block_high((uint32_t)(total64 + slack));
     } else {
         block_uid = alloc_block((uint32_t)(total64 + slack));

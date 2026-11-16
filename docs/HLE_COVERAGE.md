@@ -24,9 +24,9 @@ Classes are listed strongest first. A path takes the first class whose source na
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
 | `hardware-measured` | 64 | 73 |
-| `ppsspp-derived` | 126 | 88 |
+| `ppsspp-derived` | 127 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 375 | 183 |
+| `synthetic` | 374 | 183 |
 | `unverified` | 146 | 22 |
 | total | 711 | 366 |
 
@@ -473,7 +473,7 @@ a title that translates none has generated code unchanged.
 | `0x8bea2b3e` | `sceNetAdhocPtpRecv` | network | `unverified` | no recorded evidence |
 | `0x8c1e027d` | `sceMpegGetPcmAu` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x8c943191` | `sceImposeGetBatteryIconStatus` | utility | `unverified` | no recorded evidence |
-| `0x8daff657` | `sceKernelCreateTlspl` | kernel_memory | `synthetic` | HLE selftest dispatch |
+| `0x8daff657` | `sceKernelCreateTlspl` | kernel_memory | `ppsspp-derived` | handler comment names PPSSPP; registry notes name PPSSPP |
 | `0x8db83fdc` | `sceNetAdhocctlGetPeerInfo` | network | `synthetic` | HLE selftest dispatch |
 | `0x8eb9ec49` | `sceDisplayWaitVblankCB` | display | `synthetic` | HLE selftest dispatch |
 | `0x8ef08fce` | `sceUmdWaitDriveStat` | umd | `synthetic` | conformance cells and HLE selftest dispatch |
