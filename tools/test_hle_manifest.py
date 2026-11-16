@@ -1321,14 +1321,16 @@ citations (PSP-B1-01, no-colon forms) need their own check.
         for name in ADHOC_ONLINE_EXTRA:
             nid = f"0x{nid_name_proof.nid_of(name):08x}"
             with self.subTest(nid=nid, name=name):
+                extra_reg: dict[str, Any] | None
                 if name == "sceNetAdhocMatchingStart2":
-                    reg = next((r for r in self.regs.values() if r["name"] == name), None)
+                    extra_reg = next((r for r in self.regs.values() if r["name"] == name), None)
                 else:
-                    reg = cast(dict[str, Any], self.regs.get(int(nid, 16)))
-                self.assertIsNotNone(reg, f"{name} missing from production manifest")
-                assert reg is not None
+                    extra_reg = self.regs.get(int(nid, 16))
+                self.assertIsNotNone(extra_reg, f"{name} missing from production manifest")
+                assert extra_reg is not None
                 self.assertEqual(
-                    (reg["name"], reg["handler"], reg["classification"], reg["owner_file"]),
+                    (extra_reg["name"], extra_reg["handler"], extra_reg["classification"],
+                     extra_reg["owner_file"]),
                     (name, _adhoc_handler_name(name), "dedicated", "src/rt/hle_network.c"),
                 )
 
