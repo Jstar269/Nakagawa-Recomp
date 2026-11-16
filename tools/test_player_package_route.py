@@ -721,8 +721,9 @@ class TestPackageDiskSpace(unittest.TestCase):
             with patch.object(
                 nk_cli.shutil, "disk_usage", return_value=SimpleNamespace(free=7)
             ):
-                with self.assertRaises(nk_cli.PackageBuildError) as raised:
-                    nk_cli._require_package_staging_space(package, destination)
+                with patch.object(nk_cli, "_same_volume", return_value=False):
+                    with self.assertRaises(nk_cli.PackageBuildError) as raised:
+                        nk_cli._require_package_staging_space(package, destination)
 
             self.assertEqual(
                 str(raised.exception),
@@ -740,26 +741,43 @@ class TestPackageDiskSpace(unittest.TestCase):
             destination.mkdir()
             staging = destination / ".TEST00001.staging"
 
-            def copy_partial(_source, target):
-                target_path = Path(target)
-                target_path.mkdir()
-                (target_path / "game.bin").write_bytes(b"12")
+            def copy_partial(source, target):
+                Path(target).write_bytes(Path(source).read_bytes()[:2])
                 raise OSError(28, "No space left on device")
 
-            with patch.object(nk_cli.shutil, "copytree", side_effect=copy_partial):
-                with patch.object(
-                    nk_cli.shutil, "disk_usage", return_value=SimpleNamespace(free=3)
-                ):
-                    with self.assertRaises(nk_cli.PackageBuildError) as raised:
-                        nk_cli._copy_package_tree_with_space_diagnostics(
-                            package, staging, destination, needed_bytes=5
-                        )
+            with patch.object(nk_cli.os, "link", side_effect=OSError(18, "cross-device")):
+                with patch.object(nk_cli.shutil, "copy2", side_effect=copy_partial):
+                    with patch.object(
+                        nk_cli.shutil, "disk_usage", return_value=SimpleNamespace(free=3)
+                    ):
+                        with self.assertRaises(nk_cli.PackageBuildError) as raised:
+                            nk_cli._copy_package_tree_with_space_diagnostics(
+                                package, staging, destination, needed_bytes=5
+                            )
 
             self.assertEqual(
                 str(raised.exception),
                 "PACKAGE_DISK_FULL: At least 3 more bytes of package files remain to copy; "
                 "3 bytes are free.",
             )
+
+    def test_package_tree_copy_uses_same_volume_hardlinks(self):
+        with tempfile.TemporaryDirectory(prefix="nk-package-hardlink-") as temporary:
+            root = Path(temporary)
+            package = root / "cache-entry" / "package"
+            package.mkdir(parents=True)
+            source = package / "game.bin"
+            source.write_bytes(b"runtime image")
+            destination = root / "packages"
+            destination.mkdir()
+            staging = destination / ".TEST00001.staging"
+
+            nk_cli._copy_package_tree_with_space_diagnostics(
+                package, staging, destination, needed_bytes=source.stat().st_size
+            )
+
+            installed = staging / "game.bin"
+            self.assertTrue(installed.samefile(source))
 
 
 #: Lines of ``logs/build_<id>.log`` a failed package build adds to the test's failure message.
@@ -1558,8 +1576,31 @@ class TestPlayerPackageRoute(unittest.TestCase):
         package_dir = user_root / "packages" / DISC_ID
         package = json.loads((package_dir / "package.json").read_text(encoding="utf-8"))
         self.assertEqual(package.get("format"), "nakagawa-aot-package")
-        self.assertTrue(package.get("generated_objects"), "no AOT code was generated")
+        self.assertEqual(package.get("schema_version"), 3)
+        self.assertEqual(package.get("generated_objects"), [])
         self.assertTrue((package_dir / package["executable"]["path"]).is_file())
+        cache_root = package_cache.cache_root(user_root, DISC_ID)
+        cache_key = package["cache"]["key"]
+        entry_package = package_cache.cache_entry_root(cache_root, cache_key) / "package"
+        aot_stage = package_cache.aot_stage_root(cache_root, cache_key)
+        self.assertTrue(aot_stage.is_dir())
+        self.assertTrue((aot_stage / f"{Path(package['executable']['path']).stem}_recomp.c").is_file())
+        self.assertTrue((package_dir / package["executable"]["path"]).samefile(
+            entry_package / package["executable"]["path"]
+        ))
+        completion = json.loads((package_dir / "completion-manifest.json").read_text(encoding="utf-8"))
+        artifact_paths = {record["path"] for record in completion["artifacts"]}
+        self.assertIn(package["executable"]["path"], artifact_paths)
+        for path in package_dir.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(path.suffix.lower(), {".c", ".o", ".d", ".map", ".rsp", ".mk", ".rc"})
+        for name in (".codegen-profile-entries", ".runtime-profile-entries",
+                     ".runtime-invalidate.lst", ".game-inputs",
+                     "codegen_profile.json", "runtime_profile.json",
+                     "recomp_profile.json", "sr_title_config.h"):
+            self.assertFalse((package_dir / name).exists(), name)
+        self.assertFalse((package_dir / f"{Path(package['executable']['path']).stem}_imports.toml").exists())
+        self.assertFalse((package_dir / f"{Path(package['executable']['path']).stem}_recomp_funcs.h").exists())
         identity = package_cache.read_local_title_input_identity(user_root, DISC_ID)
         self.assertIsNotNone(identity)
         assert identity is not None
@@ -1573,6 +1614,13 @@ class TestPlayerPackageRoute(unittest.TestCase):
         )
         self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
         self.assertIn("PACKAGE_STATUS=OK", validated.stdout)
+
+        rebuilt = self.run_build_action(user_root, env=build_environment)
+        self.assertEqual(rebuilt.returncode, 0, self.build_failure_message(rebuilt, user_root))
+        self.assertIn("Package reused:", rebuilt.stdout)
+        self.assertTrue((package_dir / package["executable"]["path"]).samefile(
+            entry_package / package["executable"]["path"]
+        ))
 
         # 5. PLAY, headless, through the player's own launch session. The runtime
         #    reports acceptance once it counted FRAMES presents. SR_FBSNAP=1 makes it
@@ -2216,8 +2264,9 @@ class TestPlayerPackageRoute(unittest.TestCase):
                 self.assertIn("PACKAGE_REUSED:", log)
 
         # A damaged promoted package reads as stale, the state is the same one
-        # for which the Library offers REBUILD PACKAGE. The cached, verified
-        # synthetic output restores it without another package failure.
+        # for which the Library offers REBUILD PACKAGE. Its hard-linked cache
+        # artifact is stale too, so the verified AOT stage and object cache feed
+        # a fresh package build rather than promoting the damaged bytes.
         executable.write_bytes(executable.read_bytes() + b"reliability mutation")
         stale = self.run_validator()
         self.assertEqual(stale.returncode, 0, stale.stdout + stale.stderr)
@@ -2228,7 +2277,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertIn("PACKAGE_BUILD_ROUTE status=PASS", rebuild_output)
         self.assertIn("complete=1 failed=0", rebuild_output)
         self.assertNotIn("PACKAGE_BUILD_ROUTE status=FAIL", rebuild_output)
-        self.assertIn("CACHE: content-addressed entry reused",
+        self.assertIn("CACHE: generated C from the codegen stage compiled",
                       log_path.read_text(encoding="utf-8", errors="replace"))
 
         reused = self.run_build_action(self.user_root)

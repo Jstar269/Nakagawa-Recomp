@@ -65,6 +65,7 @@ class BuildSystemParityTests(unittest.TestCase):
             "src/player/package_builder.c",
             "src/player/update_check.c",
             "src/player/discord_presence.c",
+            "src/player/cover_art.c",
         ]
         for src in expected_player:
             self.assertIn(src, self.makefile_text, f"Missing {src} in Makefile")

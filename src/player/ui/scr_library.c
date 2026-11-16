@@ -950,8 +950,9 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                                 ? "Showcase demo" : title->badge;
                             /* Enhanced or Ace is in effect for the title (#2055). */
                             tile.badge_right = title->play_badge;
-                            tile.art = (NkUiArtKind)title->art_kind;
-                            tile.icon = title->icon;
+                            tile.art = title->cover != NULL ? NK_UI_ART_NONE
+                                                            : (NkUiArtKind)title->art_kind;
+                            tile.icon = title->cover != NULL ? title->cover : title->icon;
                             tile.width = tile_width;
                             if (nk_ui_tile(ui, PLAYER_UI_ID_LIBRARY_ITEM(index), &tile)) {
                                 result = action(PLAYER_UI_ACTION_OPEN_TITLE, index);

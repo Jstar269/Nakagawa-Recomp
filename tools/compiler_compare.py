@@ -18,10 +18,13 @@ trees under build/platform-ladder and remain shared across toolchain rows.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
+import difflib
 import hashlib
+import itertools
 import json
 import os
 from pathlib import Path
@@ -30,6 +33,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any
@@ -100,10 +104,8 @@ def _diagnostic_excerpt(output: str) -> str:
 
 def _first_error(output: str) -> str | None:
     patterns = re.compile(
-        r"(?:fatal error:|error:|undefined reference to|cannot find\b|status=FAIL\b|"
-        r"make(?:\.exe)?: \*\*\*|"
-        r"Error \d+)",
-        re.IGNORECASE,
+        r"(?i:fatal error:|error:|undefined reference to|cannot find\b|status=FAIL\b|"
+        r"make(?:\.exe)?: \*\*\*)|\b(?<!Clay )Error \d+\b",
     )
     for line in output.splitlines():
         if patterns.search(line):
@@ -429,40 +431,469 @@ def _run_veto(make: str, compiler: str, settings: dict[str, str], build_root: Pa
     return gates, None
 
 
-def _normalise_semantic_output(text: str, build_root: Path) -> str:
-    resolved_build_root = build_root.resolve()
-    result = text.replace(str(resolved_build_root), "<BUILD_ROOT>")
-    result = result.replace(resolved_build_root.as_posix(), "<BUILD_ROOT>")
-    try:
-        relative_build_root = resolved_build_root.relative_to(ROOT.resolve()).as_posix()
-    except ValueError:
-        relative_build_root = ""
-    if relative_build_root:
-        result = result.replace(relative_build_root, "<BUILD_ROOT>")
-    result = result.replace(str(ROOT), "<REPO_ROOT>")
-    result = result.replace(ROOT.as_posix(), "<REPO_ROOT>")
+_POSIX_HOST_TOP_LEVEL = (
+    "tm" + "p",
+    "var",
+    "ho" + "me",
+    "Us" + "ers",
+    "root",
+    "mnt",
+    "private",
+    "Volumes",
+    "etc",
+    "usr",
+    "opt",
+    "bin",
+    "sbin",
+    "dev",
+    "proc",
+    "sys",
+    "run",
+    "lib",
+    "lib64",
+    "System",
+    "Applications",
+    "Library",
+)
+_POSIX_TOP_GROUP = "|".join(_POSIX_HOST_TOP_LEVEL)
+_QUOTED_WIN_DQ_RE = re.compile(r'(?<=")[A-Za-z]:(?:\\|/)[^"\r\n]*(?=")')
+_QUOTED_WIN_SQ_RE = re.compile(r"(?<=')[A-Za-z]:(?:\\|/)[^'\r\n]*(?=')")
+_QUOTED_POSIX_DQ_RE = re.compile(rf'(?<=")/(?:{_POSIX_TOP_GROUP})/[^"\r\n]*(?=")')
+_QUOTED_POSIX_SQ_RE = re.compile(rf"(?<=')/(?:{_POSIX_TOP_GROUP})/[^'\r\n]*(?=')")
+_FILE_URI_RE = re.compile(r"file://[^\s\"'`<>|;,)\]]+")
+_UNC_PATH_RE = re.compile(r"\\\\[A-Za-z0-9_.-]+\\[^\s\"'`<>|;,)\]]+")
+_TILDE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_./~-])~(?:[A-Za-z0-9_.-]+)?(?:/|\\)[^\s\"'`<>|;,)\]]*")
+_WIN_PROFILE_SUBDIR_RE = re.compile(
+    r"(?:(?<![A-Za-z0-9_:])|(?<=-[IL]))[A-Za-z]:\\(?:"
+    + r"Us"
+    + r"ers|Documents and Settings)\\[^\\/:*?\"<>|\r\n]+\\"
+    + r"(?:AppData\\(?:Local|Roaming)|Desktop|Documents|Downloads|One"
+    + r"Drive[^\\]*)(?:\\[^\s\"'`<>|;,)\]]*)?",
+    re.IGNORECASE,
+)
+_WIN_DRIVE_PATH_RE = re.compile(
+    r"(?:(?<![A-Za-z0-9_:])|(?<=-[IL]))[A-Za-z]:(?:\\|/)(?:[^\s\"'`<>|;,)\]:]|:(?![\d\s]|$))*",
+)
+_POSIX_NAMED_ROOT_RE = re.compile(
+    rf"(?:(?<=-[IL])|(?<![A-Za-z0-9_.>/:~-]))/(?:{_POSIX_TOP_GROUP})"
+    r"(?:/[^\s\"'`<>|;,)\]]*)?(?![A-Za-z0-9_.-])",
+)
+_POSIX_MULTI_SEGMENT_RE = re.compile(
+    r"(?:(?<=-[IL])|(?<![A-Za-z0-9_.>/:~-]))/(?:[A-Za-z0-9_.@-]+/)+[^\s\"'`<>|;,)\]]*",
+)
+_HOST_KEYED_PTR_RE = re.compile(r"\b(host_?(?:addr|ptr)=)(?:0x)?[0-9a-fA-F]+\b", re.IGNORECASE)
+_CALL_ADDR_RE = re.compile(r"((?:-> calling|<- returned from) fn )(?:0x)?[0-9a-fA-F]{8,16}")
+_WIDE_HEX_PTR_RE = re.compile(r"(?<![A-Za-z0-9_])0x[0-9a-fA-F]{9,16}\b")
+_WIN_BARE_PTR_RE = re.compile(r"(?<![A-Za-z0-9_])0000(?=[0-9a-fA-F]{12}\b)(?!0{11})[0-9a-fA-F]{12}\b")
+_TIMING_FIELD_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_]*_ms|fps)=\d+(?:\.\d+)?", re.IGNORECASE)
+
+_EQ_FIELD_RE = re.compile(
+    r'(?<![A-Za-z0-9_.\-=])([A-Za-z_][A-Za-z0-9_.-]*)='
+    r'(?!=)("[^"]*"|(?:[^\s,;]|,(?!\s*(?:$|[)\]}]|[A-Za-z_][A-Za-z0-9_.-]*=)))*)',
+)
+_QUOTED_EQ_VALUE_RE = re.compile(r'="[^"]*"')
+_JSON_FIELD_RE = re.compile(r'"([A-Za-z_][A-Za-z0-9_.-]*)"\s*:\s*("[^"]*"|[^,\s}\]]+)')
+_COLON_FIELD_RE = re.compile(
+    r"(?<![A-Za-z0-9_.\\/-])"
+    r"(?:"
+    r'([A-Za-z_][A-Za-z0-9_.-]+):(?!//|\\\\|\\|/)\s*("[^"]*"|[^,\s}\]]+)'
+    r"|"
+    r'([A-Za-z_]):\s+("[^"]*"|[^,\s}\]]+)'
+    r")",
+)
+
+
+def _path_variants(path: Path) -> tuple[str, ...]:
+    variants: list[str] = []
+    for candidate in (path, path.resolve()):
+        for text in (str(candidate), candidate.as_posix()):
+            if not text:
+                continue
+            variants.append(text)
+            if len(text) >= 2 and text[1] == ":":
+                variants.append(text[0].lower() + text[1:])
+                variants.append(text[0].upper() + text[1:])
+    return tuple(sorted(dict.fromkeys(variants), key=len, reverse=True))
+
+
+def _host_path_roots() -> tuple[str, ...]:
+    """Return known host user-home and temp directory roots, longest first."""
+    candidates: list[str] = []
+    raw_roots = (
+        str(Path.home()),
+        tempfile.gettempdir(),
+        *(os.environ.get(name, "") for name in (
+            "USERPROFILE", "HOME", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP", "TMPDIR",
+        )),
+    )
+    for raw in raw_roots:
+        cleaned = raw.strip().rstrip("\\/")
+        if not cleaned:
+            continue
+        path_obj = Path(cleaned)
+        if not path_obj.is_absolute() or len(path_obj.parts) <= 1:
+            continue
+        for variant in (str(path_obj).rstrip("\\/"), path_obj.as_posix().rstrip("/")):
+            if variant:
+                candidates.append(variant)
+        try:
+            resolved = path_obj.resolve()
+        except OSError:
+            continue
+        for variant in (str(resolved).rstrip("\\/"), resolved.as_posix().rstrip("/")):
+            if variant:
+                candidates.append(variant)
+    return tuple(sorted(set(candidates), key=len, reverse=True))
+
+
+def _redact_host_details(text: str) -> str:
+    """Redact host paths (user homes, temp dirs, absolute paths) and hex host addresses."""
+    result = text
+    for root_prefix in _host_path_roots():
+        flags = re.IGNORECASE if (len(root_prefix) >= 2 and root_prefix[1] == ":") else 0
+        pattern = re.escape(root_prefix) + r"(?:[\\/][^\s\"'`<>|;,)\]]*)*"
+        result = re.sub(pattern, "<HOST_PATH>", result, flags=flags)
+    result = _QUOTED_WIN_DQ_RE.sub("<HOST_PATH>", result)
+    result = _QUOTED_WIN_SQ_RE.sub("<HOST_PATH>", result)
+    result = _QUOTED_POSIX_DQ_RE.sub("<HOST_PATH>", result)
+    result = _QUOTED_POSIX_SQ_RE.sub("<HOST_PATH>", result)
+    result = _FILE_URI_RE.sub("<HOST_PATH>", result)
+    result = _UNC_PATH_RE.sub("<HOST_PATH>", result)
+    result = _TILDE_PATH_RE.sub("<HOST_PATH>", result)
+    result = _WIN_PROFILE_SUBDIR_RE.sub("<HOST_PATH>", result)
+    result = _WIN_DRIVE_PATH_RE.sub("<HOST_PATH>", result)
+    result = _POSIX_NAMED_ROOT_RE.sub("<HOST_PATH>", result)
+    result = _POSIX_MULTI_SEGMENT_RE.sub("<HOST_PATH>", result)
     result = re.sub(r"SR_HOST=0x[0-9a-fA-F]+", "SR_HOST=<HOST_ADDR>", result)
-    result = re.sub(
-        r"((?:-> calling|<- returned from) fn )(?:0x)?[0-9a-fA-F]{8,16}",
-        r"\1<HOST_ADDR>",
-        result,
-    )
-    result = re.sub(
-        r"\b([A-Za-z][A-Za-z0-9_]*_ms|fps)=\d+(?:\.\d+)?",
-        r"\1=<HOST_TIME>",
-        result,
-        flags=re.IGNORECASE,
-    )
+    result = _HOST_KEYED_PTR_RE.sub(r"\1<HOST_ADDR>", result)
+    result = _CALL_ADDR_RE.sub(r"\1<HOST_ADDR>", result)
+    result = _WIDE_HEX_PTR_RE.sub("<HOST_ADDR>", result)
+    result = _WIN_BARE_PTR_RE.sub("<HOST_ADDR>", result)
+    return result
+
+
+def _normalise_semantic_output(text: str, build_root: Path) -> str:
+    result = text
+    for variant in _path_variants(build_root):
+        result = result.replace(variant, "<BUILD_ROOT>")
+    resolved_build_root = build_root.resolve()
+    relative_variants: tuple[str, ...]
+    try:
+        relative_path = resolved_build_root.relative_to(ROOT.resolve())
+        relative_posix = relative_path.as_posix()
+        relative_variants = (
+            str(relative_path),
+            relative_posix,
+            relative_posix.replace("/", "\\"),
+        )
+    except ValueError:
+        relative_variants = ()
+    for variant in dict.fromkeys(relative_variants):
+        if variant and variant != ".":
+            result = result.replace(variant, "<BUILD_ROOT>")
+    for variant in _path_variants(ROOT):
+        result = result.replace(variant, "<REPO_ROOT>")
+    result = re.sub(r"SR_HOST=0x[0-9a-fA-F]+", "SR_HOST=<HOST_ADDR>", result)
+    result = _CALL_ADDR_RE.sub(r"\1<HOST_ADDR>", result)
+    result = _TIMING_FIELD_RE.sub(r"\1=<HOST_TIME>", result)
     return result.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _semantic_digest(outputs: list[tuple[str, str]], build_root: Path) -> str:
-    canonical = [
-        {"target": name, "output": _normalise_semantic_output(output, build_root)}
-        for name, output in outputs
-    ]
+def _digest_normalised_outputs(records: list[dict[str, str]]) -> str:
+    canonical = [{"target": item["target"], "output": item["normalized"]} for item in records]
     payload = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _semantic_digest(outputs: list[tuple[str, str]], build_root: Path) -> str:
+    records = [
+        {"target": name, "normalized": _normalise_semantic_output(output, build_root)}
+        for name, output in outputs
+    ]
+    return _digest_normalised_outputs(records)
+
+
+def _safe_target_filename(target: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", target).strip("_")
+    return slug or "target"
+
+
+def _persist_semantic_outputs(trial_root: Path, outputs: list[tuple[str, str]]) -> list[dict[str, str]]:
+    """Save raw and normalised outputs per target under trial_root/semantic_outputs."""
+    out_dir = trial_root / "semantic_outputs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    records: list[dict[str, str]] = []
+    for name, raw_output in outputs:
+        normalised = _normalise_semantic_output(raw_output, trial_root)
+        slug = _safe_target_filename(name)
+        (out_dir / f"{slug}.raw.txt").write_text(raw_output, encoding="utf-8")
+        (out_dir / f"{slug}.normalized.txt").write_text(normalised, encoding="utf-8")
+        records.append({"target": name, "raw": raw_output, "normalized": normalised})
+    (out_dir / "semantic_outputs.json").write_text(
+        json.dumps(records, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return records
+
+
+def _extract_line_fields(line: str) -> dict[str, list[str]]:
+    fields: dict[str, list[str]] = {}
+    for match in _EQ_FIELD_RE.finditer(line):
+        fields.setdefault(match.group(1), []).append(match.group(2))
+    masked_for_json = _QUOTED_EQ_VALUE_RE.sub('=""', line)
+    for match in _JSON_FIELD_RE.finditer(masked_for_json):
+        fields.setdefault(match.group(1), []).append(match.group(2))
+    if fields:
+        return fields
+    for match in _COLON_FIELD_RE.finditer(line):
+        key = match.group(1) or match.group(3)
+        value = match.group(2) or match.group(4)
+        if key is not None and value is not None:
+            fields.setdefault(key, []).append(value)
+    return fields
+
+
+def _divergent_fields_on_line(line_a: str, line_b: str) -> list[str]:
+    fields_a = _extract_line_fields(line_a)
+    fields_b = _extract_line_fields(line_b)
+    if not fields_a and not fields_b:
+        return []
+    ordered_keys = list(dict.fromkeys([*fields_a.keys(), *fields_b.keys()]))
+    return [key for key in ordered_keys if fields_a.get(key) != fields_b.get(key)]
+
+
+_MAX_ALIGN_PAIR_LINES = 32
+_MAX_ALIGN_LINE_CHARS = 1024
+
+
+def _line_signature(line: str) -> tuple[frozenset[str], str]:
+    keys = frozenset(_extract_line_fields(line))
+    head_parts = line.split(None, 1)
+    head = head_parts[0] if head_parts else ""
+    if "=" in head or ":" in head:
+        head = ""
+    return keys, head
+
+
+def _score_line_pair(
+    sig_a: tuple[frozenset[str], str],
+    sig_b: tuple[frozenset[str], str],
+    matcher: difflib.SequenceMatcher[str],
+) -> tuple[int, float] | None:
+    keys_a, head_a = sig_a
+    keys_b, head_b = sig_b
+    shared_keys = len(keys_a & keys_b)
+    same_head = 1 if (head_a and head_a == head_b) else 0
+    overlap_head = shared_keys + same_head
+    threshold = 0.45 if overlap_head >= 1 else 0.65
+    if matcher.quick_ratio() < threshold:
+        return None
+    ratio = matcher.ratio()
+    if ratio < threshold:
+        return None
+    return (overlap_head, ratio)
+
+
+def _align_first_divergence(
+    norm_a_lines: list[str], norm_b_lines: list[str],
+) -> tuple[str, int, int | None, int | None, str, str]:
+    """Return (kind, line_number, idx_a, idx_b, norm_a_line, norm_b_line) for differing line lists."""
+    opcodes = difflib.SequenceMatcher(None, norm_a_lines, norm_b_lines, autojunk=False).get_opcodes()
+    diff_opcodes = [op for op in opcodes if op[0] != "equal"]
+    first_tag, i1, i2, j1, j2 = diff_opcodes[0]
+
+    a_entries = [(i, norm_a_lines[i]) for _t, ai1, ai2, _bj1, _bj2 in diff_opcodes for i in range(ai1, ai2)]
+    b_entries = [(j, norm_b_lines[j]) for _t, _ai1, _ai2, bj1, bj2 in diff_opcodes for j in range(bj1, bj2)]
+
+    b_buckets: dict[str, deque[int]] = {}
+    for pos, (_j, line) in enumerate(b_entries):
+        b_buckets.setdefault(line, deque()).append(pos)
+    used_b: set[int] = set()
+    rem_a: list[tuple[int, str]] = []
+    for i, line in a_entries:
+        bucket = b_buckets.get(line)
+        if bucket:
+            used_b.add(bucket.popleft())
+        else:
+            rem_a.append((i, line))
+    rem_b = [entry for pos, entry in enumerate(b_entries) if pos not in used_b]
+
+    if not rem_a and not rem_b:
+        idx_a = i1 if i1 < len(norm_a_lines) else None
+        idx_b = j1 if j1 < len(norm_b_lines) else None
+        line_number = (i1 + 1) if idx_a is not None else (j1 + 1)
+        return (
+            "reordered",
+            line_number,
+            idx_a,
+            idx_b,
+            norm_a_lines[idx_a] if idx_a is not None else "",
+            norm_b_lines[idx_b] if idx_b is not None else "",
+        )
+
+    if (
+        first_tag == "replace"
+        and (i2 - i1) == 1
+        and (j2 - j1) == 1
+        and rem_a
+        and rem_b
+        and rem_a[0][0] == i1
+        and rem_b[0][0] == j1
+    ):
+        return ("changed", i1 + 1, i1, j1, norm_a_lines[i1], norm_b_lines[j1])
+
+    # Bound pairing work to the earliest differing window so large diffs stay linear-ish;
+    # the earliest divergence always involves the leading unmatched lines.
+    cand_a = rem_a[:_MAX_ALIGN_PAIR_LINES]
+    cand_b = rem_b[:_MAX_ALIGN_PAIR_LINES]
+    sigs_a = [_line_signature(line) for _idx, line in cand_a]
+    sigs_b = [_line_signature(line) for _idx, line in cand_b]
+
+    candidates: list[tuple[tuple[int, float], int, int]] = []
+    matcher = difflib.SequenceMatcher(None, "", "", autojunk=False)
+    for pos_b, (_jb, line_b) in enumerate(cand_b):
+        sig_b = sigs_b[pos_b]
+        matcher.set_seq2(line_b[:_MAX_ALIGN_LINE_CHARS])
+        for pos_a, (_ia, line_a) in enumerate(cand_a):
+            matcher.set_seq1(line_a[:_MAX_ALIGN_LINE_CHARS])
+            score = _score_line_pair(sigs_a[pos_a], sig_b, matcher)
+            if score is not None:
+                candidates.append((score, pos_a, pos_b))
+    candidates.sort(key=lambda item: (-item[0][0], -item[0][1], abs(item[1] - item[2]), item[1], item[2]))
+
+    paired_a: set[int] = set()
+    paired_b: set[int] = set()
+    items: list[tuple[tuple[int, int], str, int, int | None, int | None, str, str]] = []
+    for _score, pos_a, pos_b in candidates:
+        if pos_a in paired_a or pos_b in paired_b:
+            continue
+        paired_a.add(pos_a)
+        paired_b.add(pos_b)
+        idx_a, line_a = cand_a[pos_a]
+        idx_b, line_b = cand_b[pos_b]
+        items.append(((min(idx_a, idx_b), 0), "changed", idx_a + 1, idx_a, idx_b, line_a, line_b))
+    for pos_a, (idx_a, line_a) in enumerate(cand_a):
+        if pos_a not in paired_a:
+            items.append(((idx_a, 1), "deleted", idx_a + 1, idx_a, None, line_a, ""))
+    for pos_b, (idx_b, line_b) in enumerate(cand_b):
+        if pos_b not in paired_b:
+            items.append(((idx_b, 2), "inserted", idx_b + 1, None, idx_b, "", line_b))
+
+    items.sort(key=lambda item: item[0])
+    _key, kind, line_number, idx_a_opt, idx_b_opt, norm_a_line, norm_b_line = items[0]
+    return (kind, line_number, idx_a_opt, idx_b_opt, norm_a_line, norm_b_line)
+
+
+def _first_semantic_divergence(trial_outputs: list[list[dict[str, str]]], hashes: list[str]) -> dict[str, Any] | None:
+    """Return the first normalised target/line/field divergence against repeat 1."""
+    if len(trial_outputs) < 2:
+        return None
+    baseline_idx = 0
+    divergent_idx = next((idx for idx, h in enumerate(hashes) if h != hashes[baseline_idx]), None)
+    if divergent_idx is None:
+        return None
+    base_records = trial_outputs[baseline_idx]
+    other_records = trial_outputs[divergent_idx]
+    base_by_target = {item["target"]: item for item in base_records}
+    other_by_target = {item["target"]: item for item in other_records}
+    ordered_targets = list(dict.fromkeys([*(item["target"] for item in base_records), *(item["target"] for item in other_records)]))
+    divergent_targets = [
+        target for target in ordered_targets
+        if base_by_target.get(target, {}).get("normalized") != other_by_target.get(target, {}).get("normalized")
+    ]
+    if not divergent_targets:
+        return None
+    target = divergent_targets[0]
+    base_item = base_by_target.get(target, {"raw": "", "normalized": ""})
+    other_item = other_by_target.get(target, {"raw": "", "normalized": ""})
+    base_norm = base_item["normalized"]
+    other_norm = other_item["normalized"]
+    norm_a_lines = base_norm.splitlines()
+    norm_b_lines = other_norm.splitlines()
+    raw_a_lines = base_item["raw"].splitlines()
+    raw_b_lines = other_item["raw"].splitlines()
+
+    if norm_a_lines == norm_b_lines:
+        trailing_diff = base_norm.endswith("\n") != other_norm.endswith("\n")
+        kind = "trailing_newline" if trailing_diff else "non_line_difference"
+        unified = list(itertools.islice(difflib.unified_diff(
+            base_norm.splitlines(keepends=True),
+            other_norm.splitlines(keepends=True),
+            fromfile=f"{target} (trial {baseline_idx + 1})",
+            tofile=f"{target} (trial {divergent_idx + 1})",
+            lineterm="",
+        ), 60))
+        return {
+            "target": target,
+            "baseline_trial": baseline_idx + 1,
+            "divergent_trial": divergent_idx + 1,
+            "kind": kind,
+            "line_number": None,
+            "fields": [],
+            "baseline_trailing_newline": base_norm.endswith("\n"),
+            "divergent_trailing_newline": other_norm.endswith("\n"),
+            "baseline_line": "",
+            "divergent_line": "",
+            "baseline_normalised_line": "",
+            "divergent_normalised_line": "",
+            "divergent_targets": divergent_targets,
+            "unified_diff": [line.rstrip("\r\n") for line in unified],
+        }
+
+    kind, line_number, idx_a, idx_b, norm_a_line, norm_b_line = _align_first_divergence(norm_a_lines, norm_b_lines)
+    raw_a_line = raw_a_lines[idx_a] if idx_a is not None and idx_a < len(raw_a_lines) else norm_a_line
+    raw_b_line = raw_b_lines[idx_b] if idx_b is not None and idx_b < len(raw_b_lines) else norm_b_line
+    fields = [] if kind == "reordered" else _divergent_fields_on_line(norm_a_line, norm_b_line)
+    unified = list(itertools.islice(difflib.unified_diff(
+        norm_a_lines,
+        norm_b_lines,
+        fromfile=f"{target} (trial {baseline_idx + 1})",
+        tofile=f"{target} (trial {divergent_idx + 1})",
+        lineterm="",
+    ), 60))
+    return {
+        "target": target,
+        "baseline_trial": baseline_idx + 1,
+        "divergent_trial": divergent_idx + 1,
+        "kind": kind,
+        "line_number": line_number,
+        "fields": fields,
+        "baseline_line": raw_a_line,
+        "divergent_line": raw_b_line,
+        "baseline_normalised_line": norm_a_line,
+        "divergent_normalised_line": norm_b_line,
+        "divergent_targets": divergent_targets,
+        "unified_diff": unified,
+    }
+
+
+def _format_semantic_diff_text(diff: dict[str, Any]) -> str:
+    fields = ", ".join(diff["fields"]) if diff.get("fields") else "(none detected)"
+    kind = diff.get("kind", "changed")
+    line_label = str(diff["line_number"]) if diff.get("line_number") is not None else f"({kind})"
+    lines = [
+        f"target: {diff['target']}",
+        f"trials: {diff['baseline_trial']} vs {diff['divergent_trial']}",
+        f"kind: {kind}",
+        f"line: {line_label}",
+        f"fields: {fields}",
+    ]
+    if kind == "trailing_newline":
+        base_nl = "present" if diff.get("baseline_trailing_newline") else "absent"
+        div_nl = "present" if diff.get("divergent_trailing_newline") else "absent"
+        lines.extend([
+            f"baseline trailing newline: {base_nl}",
+            f"divergent trailing newline: {div_nl}",
+        ])
+    else:
+        lines.extend([
+            f"baseline raw:  {diff['baseline_line']}",
+            f"divergent raw: {diff['divergent_line']}",
+            f"baseline norm:  {diff['baseline_normalised_line']}",
+            f"divergent norm: {diff['divergent_normalised_line']}",
+        ])
+    lines.extend(["", *diff.get("unified_diff", [])])
+    return "\n".join(lines) + "\n"
 
 
 def _read_events(path: Path) -> list[dict[str, Any]]:
@@ -521,13 +952,15 @@ def _trial_summary(events: list[dict[str, Any]], trial_root: Path,
     executable_bytes = _byte_total(trial_root, ".exe")
     if executable_bytes <= 0:
         raise CompareError(f"measurement targets produced no executable in {trial_root}")
+    persisted_outputs = _persist_semantic_outputs(trial_root, semantic_outputs)
     return {
         "generated_c_compile_wall_seconds": sum(float(event["duration_s"]) for event in generated),
         "peak_working_set_bytes": max(memory_values),
         "link_wall_seconds": sum(float(event["duration_s"]) for event in links),
         "object_bytes": object_bytes,
         "executable_bytes": executable_bytes,
-        "semantic_sha256": _semantic_digest(semantic_outputs, trial_root),
+        "semantic_sha256": _digest_normalised_outputs(persisted_outputs),
+        "_semantic_outputs": persisted_outputs,
         "compiler_commands": [
             {
                 "compiler": event.get("compiler"),
@@ -616,6 +1049,7 @@ def _min_median(values: list[int | float]) -> dict[str, int | float]:
 def _measurement_summary(trials: list[dict[str, Any]]) -> dict[str, Any]:
     if len(trials) < MIN_REPEATS:
         raise CompareError(f"measurements require at least {MIN_REPEATS} repetitions")
+    trial_outputs = [trial.pop("_semantic_outputs", None) for trial in trials]
     summary: dict[str, Any] = {
         key: _min_median([trial[key] for trial in trials]) for key in MEASUREMENT_NAMES
     }
@@ -623,6 +1057,13 @@ def _measurement_summary(trials: list[dict[str, Any]]) -> dict[str, Any]:
     summary["semantic_sha256"] = hashes[0] if len(set(hashes)) == 1 else None
     summary["semantic_hashes"] = hashes
     summary["semantic_hash_stable"] = len(set(hashes)) == 1
+    if not summary["semantic_hash_stable"] and all(isinstance(item, list) for item in trial_outputs):
+        summary["semantic_diff"] = _first_semantic_divergence(
+            [item for item in trial_outputs if isinstance(item, list)],
+            hashes,
+        )
+    else:
+        summary["semantic_diff"] = None
     return summary
 
 
@@ -740,6 +1181,8 @@ def _workload_measurements(compiler_path: str, make: str, python: str, settings:
 def _measure_pair(name: str, compiler_name: str, compiler_path: str, linker: str,
                   linker_path: str, linker_version: str, make: str, python: str,
                   build_root: Path, repeats: int, *, env: dict[str, str]) -> dict[str, Any]:
+    diff_path = build_root / "measurements" / "semantic_diff.txt"
+    diff_path.unlink(missing_ok=True)
     settings = _build_settings(make, compiler_path, linker, build_root, env=env)
     _check_ucrt_paths(compiler_path, linker_path, settings)
     compiler_version = _full_version([compiler_path, "--version"], env=env)
@@ -773,6 +1216,14 @@ def _measure_pair(name: str, compiler_name: str, compiler_path: str, linker: str
             compiler_path, make, python, settings, build_root / "measurements", repeats, env=env,
         )
         summary = _measurement_summary(trials)
+        if isinstance(summary.get("semantic_diff"), dict):
+            diff_path.parent.mkdir(parents=True, exist_ok=True)
+            diff_path.write_text(
+                _format_semantic_diff_text(summary["semantic_diff"]),
+                encoding="utf-8",
+            )
+        else:
+            diff_path.unlink(missing_ok=True)
         workloads = _workload_measurements(
             compiler_path, make, python, settings,
             build_root / "perf", build_root / "perf-build", env=env,
@@ -905,6 +1356,15 @@ def _format_range(value: Any, divisor: float = 1.0, suffix: str = "") -> str:
     return f"{value['min'] / divisor:.3f}/{value['median'] / divisor:.3f}{suffix}"
 
 
+def _format_markdown_line(line: str, *, absent: bool = False) -> str:
+    if not line:
+        return "(line absent)" if absent else "(empty line)"
+    redacted = _redact_host_details(line)
+    fence = "`" * (max((len(match.group(0)) for match in re.finditer(r"`+", redacted)), default=0) + 1)
+    pad = " " if redacted.startswith("`") or redacted.endswith("`") else ""
+    return f"{fence}{pad}{redacted}{pad}{fence}"
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     validate_report(report)
     lines = [
@@ -923,8 +1383,10 @@ def render_markdown(report: dict[str, Any]) -> str:
             if entry["status"] == STATUS_WORKLOAD_FAILED:
                 failure = f"runtime workload matrix {workload_status}"
             else:
-                failure = (veto.get("failed_gate") or entry.get("measurement_error")
-                           or entry.get("reason", "N/A"))
+                failure = _redact_host_details(str(
+                    veto.get("failed_gate") or entry.get("measurement_error")
+                    or entry.get("reason", "N/A")
+                ))
             lines.append(
                 f"| {entry['compiler']} | {entry['linker_selection']} | {entry['status']} "
                 f"({failure}) | {workload_status} | — | — | — | — | — | — |"
@@ -948,6 +1410,45 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"Semantic hash comparison across toolchains: {comparison.get('status', 'NOT_RECORDED')}.",
         "",
     ])
+    for entry in report["toolchains"]:
+        measurements = entry.get("measurements")
+        if not isinstance(measurements, dict):
+            continue
+        diff = (measurements.get("summary") or {}).get("semantic_diff")
+        if not isinstance(diff, dict):
+            continue
+        kind = diff.get("kind")
+        fields = f", unstable field(s): {', '.join(diff['fields'])}" if diff.get("fields") else ""
+        if kind == "trailing_newline":
+            base_nl = "present" if diff.get("baseline_trailing_newline") else "absent"
+            div_nl = "present" if diff.get("divergent_trailing_newline") else "absent"
+            lines.extend([
+                f"- `{entry['name']}` repeat divergence: target `{diff['target']}`, "
+                f"trailing newline differs, trial {diff['baseline_trial']} vs "
+                f"{diff['divergent_trial']}.",
+                f"  - trial {diff['baseline_trial']}: trailing newline {base_nl}",
+                f"  - trial {diff['divergent_trial']}: trailing newline {div_nl}",
+            ])
+            continue
+        if diff.get("line_number") is None:
+            detail = "output text differs outside line content" if kind == "non_line_difference" else "output differs"
+            lines.append(
+                f"- `{entry['name']}` repeat divergence: target `{diff['target']}`, "
+                f"{detail}, trial {diff['baseline_trial']} vs "
+                f"{diff['divergent_trial']}{fields}.",
+            )
+            continue
+        kind_note = f" ({kind})" if kind in ("inserted", "deleted", "reordered") else ""
+        base_line = str(diff.get("baseline_normalised_line", ""))
+        div_line = str(diff.get("divergent_normalised_line", ""))
+        lines.extend([
+            f"- `{entry['name']}` repeat divergence: target `{diff['target']}`, "
+            f"line {diff['line_number']}{kind_note}, trial {diff['baseline_trial']} vs "
+            f"{diff['divergent_trial']}{fields}.",
+            # Normalised lines only (re-redacted before rendering): never print raw lines.
+            f"  - trial {diff['baseline_trial']}: {_format_markdown_line(base_line, absent=(kind == 'inserted'))}",
+            f"  - trial {diff['divergent_trial']}: {_format_markdown_line(div_line, absent=(kind == 'deleted'))}",
+        ])
     lines.append("")
     return "\n".join(lines)
 

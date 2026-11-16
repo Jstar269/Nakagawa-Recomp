@@ -34,7 +34,8 @@ extern "C" {
 #endif
 #define NK_MANIFEST_LIMIT_CLASS "PRODUCT_SECURITY_POLICY"
 #define NK_MANIFEST_MAX_JSON_DEPTH 16
-#define NK_AOT_PACKAGE_SCHEMA_VERSION 2
+/* Highest schema emitted; v2 packages remain readable for existing installs. */
+#define NK_AOT_PACKAGE_SCHEMA_VERSION 3
 #define NK_AOT_CACHE_SCHEMA_VERSION 2
 #define NK_AOT_COMPLETION_SCHEMA_VERSION 2
 /* Keep equal to tools/nk_core/package_cache.py GENERATED_CODE_ABI_EPOCH and RUNTIME_ABI_EPOCH;

@@ -12,48 +12,18 @@ a demo, plus the manifest variant issue #508 asks for.
 inputs into two independent per-user output roots, through the same real route
 (the player's own build action -> ``tools/nk_cli.py build-package`` -> real
 analysis, real AOT codegen, a real ``gcc``/``mingw32-make`` link). The promoted
-package is then compared file by file. Every project-authored generated source is
-required to be byte-identical with no normalization at all. The remaining files
-are compared after the documented rule set in :class:`PackageNormalizer`, and a
-difference that no rule explains fails the test, so the rule set cannot quietly
-grow into "everything matches".
-
-The rules exist because three things legitimately vary with *where* and *when* a
-build ran, and the toolchain copies them into its own output:
-
-``workspace-path``
-    The absolute per-user output root, in its long spelling and in the Windows 8.3
-    short spelling Make and ``gcc`` echo into dependency files and the link map.
-``scratch-name``
-    The ``tempfile.mkdtemp`` scratch workspace ``tools/title_codegen_plan.py``
-    creates when the output path is not Make-safe (it has a space, or on Windows it
-    leaves less than 85 characters of the 260-character path limit). Its random
-    suffix is part of those same path echoes, so it is normalized as a path
-    component, never alone. It fires exactly when the planner takes that route,
-    which the test works out from the package's own cache entry.
-``build-profile-hash``
-    The content hash ``tools/build_profile.py`` derives from ``CFLAGS`` -- which
-    contains that path -- and the ``.runtime-profile-<hash>`` stamp named from it.
-``input-stamp-mtime``
-    The guest input's modification time in the ``.game-inputs`` freshness stamp.
-    That mtime *is* the freshness mechanism, so it is normalized, not removed.
-``transitive-digest``
-    A ``sha256`` the package's own JSON records for a file that differs only by
-    the rules above. A recorded digest is a consequence, not a new difference.
+runtime package and its shared AOT stage are compared file by file. Schema v3
+removes path-stamped compiler intermediates before promotion, so identical inputs
+must produce identical package and stage bytes with no normalization rule firing.
+The runtime package's completion manifest still hashes every retained file; the
+AOT-stage manifest hashes the generated-code files that compatible rebuilds reuse.
 
 No rule touches the title executable. The PE link is timestamp-free
 (``-Wl,--no-insert-timestamp``) and the executable records no build path, so two
 builds in two roots, and two builds bound to two manifests, link byte-identical
-executables, and the test requires exactly that.
-
-Three toolchain files, the link's response file, the runtime profile-entries file and
-the list of runtime objects the profile stamp invalidates, also record the cache entry
-the objects are written into. Across two manifests they differ in that entry and
-nothing else, which ``PATH_ECHOES`` checks on its own. Make writes all three with
-``$(file >...)``, and every file it writes that way into the build directory must be
-classified here. The build class needs the Windows toolchain and every hosted runner
-skips it, so ``TestMakeWrittenFilesAreClassified`` checks that inventory from the
-makefiles themselves, on every host.
+executables, and the test requires exactly that. The old path-echo and profile
+normalizers remain narrow helpers, but schema v3 removes those build-only files
+before package promotion, so this route expects no such difference.
 
 **Public-export exclusion.** The route writes nothing the public export or
 ``git status`` could pick up, and the public scope refuses the output root even
@@ -112,16 +82,6 @@ FIXTURE_GENERATOR = ROOT / "tests" / "fixtures" / "display_smoke" / "generate.py
 # The committed, publication-admitted source-owned title manifest for that guest.
 SOURCE_OWNED_TITLE = ROOT / "assets" / "titles" / "display-smoke.json"
 
-# The documented rules. Order matters only in that a longer path spelling must be
-# consumed before a prefix of it (see _root_spellings).
-RULE_NAMES = (
-    "workspace-path",
-    "scratch-name",
-    "build-profile-hash",
-    "input-stamp-mtime",
-    "transitive-digest",
-)
-
 _STAMP_RE = re.compile(rb"\.(runtime-profile|codegen-profile|recomp-profile"
                        rb"|title-config)-[0-9a-f]{4,}")
 _STAMP_NAME_RE = re.compile(r"\.(runtime-profile|codegen-profile|recomp-profile"
@@ -133,18 +93,10 @@ _PROFILE_HASH_RE = re.compile(rb'"profile_hash": "[0-9a-f]{16,}"')
 _SCRATCH_RE = re.compile(rb"\.build-[A-Za-z0-9._-]+-[A-Za-z0-9_]{8}(?=[/\\\x00])")
 _MTIME_RE = re.compile(rb"(?<= )[0-9]{16,20}(?= )")
 
-# Artifacts this project authors for a title. None is written by the compiler or
-# the Make recipes, so none may vary between two builds of the same inputs.
+# Project-authored files retained in a runtime package.
 PROJECT_AUTHORED = (
-    f"{GAME}_recomp.c",
-    f"{GAME}_recomp_funcs.h",
     f"{GAME}_recomp_stubs.txt",
-    f"{GAME}_recomp_coverage.json",
     f"{GAME}_image.bin",
-    f"{GAME}_imports.toml",
-    "sr_title_config.h",
-    "codegen_profile.json",
-    "recomp_profile.json",
     "build-report.json",
     "RELINK.md",
     "SOURCE.txt",
@@ -157,20 +109,9 @@ GUEST_DERIVED_SUFFIXES = (".c", ".h", ".bin", ".toml")
 # The package files that record the manifest's own identity. Two routes that bind
 # the same guest to two different manifests must differ in exactly these.
 MANIFEST_IDENTIFIED = ("build-report.json", "package.json", "completion-manifest.json")
-# Toolchain files that record where the objects were written rather than what was
-# compiled: the response file the title link reads (#724), the profile-entries file
-# the runtime stamp is hashed from, and the list of
-# runtime objects the stamp's recipe hands tools/build_profile.py to invalidate (#783).
-# Each names the content-addressed cache entry, so two manifests differ in them exactly
-# where they differ in the compiled artifacts, and two roots differ in them by the root
-# alone.
-#
-# They are package files because the package is the whole build directory: the planner
-# promotes it with one copytree and the completion manifest records every file in it.
-# The invalidation list is the same kind of file as the link's response file, an
-# argument list Make writes to a file because inline it overran the command line under
-# a long BUILD_DIR, so it is compared the same way rather than dropped on its own.
-PATH_ECHOES = ("link-objects.rsp", ".runtime-profile-entries", ".runtime-invalidate.lst")
+# Compiler path echoes and profile-entry files are build-only and are omitted from
+# the v3 runtime package.
+PATH_ECHOES: tuple[str, ...] = ()
 # A cache entry directory, the short key tools/nk_core/package_cache.py derives from the
 # AOT and native digests (cache_entry_key, CACHE_ENTRY_KEY_CHARS hex characters), in its
 # long spelling or in the Windows 8.3 spelling the planner's workspace path is echoed
@@ -192,19 +133,16 @@ _CACHE_ENTRY_RE = re.compile(rb"/entries/(?:[0-9a-f]{%d}|[0-9A-F]{6}~[0-9]+)/"
 # left out of the byte comparison, because a route may legitimately name a
 # different title; the generated-manifest test then states which of them must still
 # agree, since the stem is a property of the guest.
-TITLE_IDENTIFIED = MANIFEST_IDENTIFIED + ("THIRD_PARTY_NOTICES.txt", "SOURCE.txt",
-                                          "codegen_profile.json", "recomp_profile.json")
-# The other files the Makefile writes into BUILD_DIR with ``$(file >...)``. The codegen
-# profile's entries name the artifact stem, the guest's base, the codegen options, the
-# profile argument and any extra modules. This fixture has no extra module and no
-# profile, so the file names no path and two routes must write it byte for byte. The
-# PSMF media selftests' response files and the cosim gate's link response file
-# (cosim_link_objs.rsp, mk/cosim_snapshot.mk) are written only by those selftests' and
-# that gate's links, which no package build runs. With the path echoes above, these are
-# every such write, which TestMakeWrittenFilesAreClassified checks on every host.
-MAKE_WRITTEN_IDENTICAL = (".codegen-profile-entries",)
-MAKE_WRITTEN_UNPACKAGED = ("psmf_media_selftest.rsp", "psmf_media_focused_selftest.rsp",
-                            "cosim_link_objs.rsp")
+TITLE_IDENTIFIED = MANIFEST_IDENTIFIED + ("THIRD_PARTY_NOTICES.txt", "SOURCE.txt")
+# Every Makefile $(file >...) output is build-only and omitted from the runtime
+# package. The two selftest response files and cosim response file are not produced
+# by a package build, but stay classified as unpackaged for the inventory check.
+MAKE_WRITTEN_IDENTICAL: tuple[str, ...] = ()
+MAKE_WRITTEN_UNPACKAGED = (
+    "link-objects.rsp", ".runtime-profile-entries", ".runtime-invalidate.lst",
+    ".codegen-profile-entries", "psmf_media_selftest.rsp",
+    "psmf_media_focused_selftest.rsp", "cosim_link_objs.rsp",
+)
 
 
 def path_echo_content(rules: "PackageNormalizer", name: str, data: bytes) -> bytes:
@@ -716,32 +654,27 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
                              right_package["cache"]["key"][side]["digest"],
                              f"the {side} cache key is not reproducible from the same inputs")
 
+        left_cache = package_cache.cache_root(self.roots["a"], DISC_ID)
+        right_cache = package_cache.cache_root(self.roots["b"], DISC_ID)
+        left_stage = package_cache.aot_stage_root(left_cache, left_package["cache"]["key"])
+        right_stage = package_cache.aot_stage_root(right_cache, right_package["cache"]["key"])
+        self.assertEqual(read_tree(left_stage), read_tree(right_stage),
+                         "the shared AOT stages differ for identical inputs")
+
         # (3) The linked title executable: byte-identical, with no rule applied. The
         #     link is timestamp-free and the executable records no build path.
         self.assertIn(EXECUTABLE, pair.identical,
                       f"{EXECUTABLE} is not byte-identical between two builds of the same "
                       "inputs in two output roots")
 
-        # (4) Everything else must be explained, rule by documented rule.
+        # (4) Schema v3 removes build-path and profile artifacts before promotion,
+        # so no normalization rule should fire on the runtime package.
         self.assertEqual(
             pair.unattributed, [],
-            "these differences are explained by no documented rule:\n"
+            "these runtime package differences are explained by no documented rule:\n"
             + "\n".join(pair.unattributed))
-        # A rule that never fires no longer documents anything, and a rule set that
-        # explains everything only means something while it is this tight. The scratch
-        # rule describes a route the planner takes only for some output paths, so it
-        # must fire exactly when this build took that route.
-        scratch = {self.builds_in_scratch("a"), self.builds_in_scratch("b")}
-        self.assertEqual(len(scratch), 1, "one of two builds of the same inputs ran in a "
-                         "scratch workspace and the other did not")
-        expected = set(RULE_NAMES) - (set() if scratch.pop() else {"scratch-name"})
-        self.assertEqual(
-            sorted(expected - pair.rules), [],
-            "these documented rules never fired, so they no longer describe a real "
-            "difference between two builds of the same inputs")
-        self.assertEqual(
-            sorted(pair.rules - expected), [],
-            "these rules fired although the route they describe was not taken")
+        self.assertEqual(pair.rules, set(),
+                         "a runtime package unexpectedly needs an output normalization rule")
 
     def test_unchanged_inputs_reuse_the_package_the_route_already_built(self):
         """A second BUILD PACKAGE on unchanged inputs reproduces the same package.
@@ -757,8 +690,10 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
         )
         self.assertEqual(rebuilt.returncode, 0,
                          rebuilt.stdout[-4000:] + rebuilt.stderr[-4000:])
-        self.assertIn("PACKAGE_REUSED", rebuilt.stdout,
-                      "an unchanged input set did not reuse its verified package")
+        self.assertTrue(
+            "PACKAGE_REUSED:" in rebuilt.stdout or "Package reused:" in rebuilt.stdout,
+            "an unchanged input set did not reuse its verified package",
+        )
         validated = self.validate("a")
         self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
         self.assertIn("PACKAGE_STATUS=OK", validated.stdout)
@@ -869,20 +804,17 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
         # The linked executable is the compiled result, and it records neither a build
         # path nor a link time (the flight recorder no longer stamps the compile clock,
         # #532; the PE link is timestamp-free). So the two routes must link the same
-        # executable byte for byte, with no rule applied. Each route links its own: the
-        # link map names the objects in that route's own cache entry, so it differs.
-        self.assertIn(f"{GAME}.map", pair.differing,
-                      "the two manifest routes have the same link map, so the second "
-                      "route did not link its executable from its own cache entry")
+        # executable byte for byte, with no rule applied. Link maps are build-only
+        # outputs and are absent from both runtime packages.
+        self.assertNotIn(f"{GAME}.map", pair.left_names | pair.right_names)
         self.assertIn(EXECUTABLE, pair.identical,
                       f"{EXECUTABLE} differs between the hand-written and the "
                       "analyzer-generated manifest build, so the route that bound the "
                       "guest's addresses changed what the compiler produced")
 
-        # The only artifacts allowed to differ, by name, are the ones that record a
-        # manifest's own identity, the compiled artifacts, and the path echoes checked
-        # next. Everything the toolchain derives from the *guest* must match byte for
-        # byte, with no rule applied.
+        # The only runtime-package artifacts allowed to differ are the ones that
+        # record the manifest's own identity. Build-only compiler outputs are not
+        # in the runtime package.
         self.assertEqual(
             sorted(name for name in pair.differing
                    if not name.endswith((".d", ".o", ".map"))
@@ -891,9 +823,27 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
             sorted(MANIFEST_IDENTIFIED),
             "these artifacts differ between the two manifest routes, and the difference "
             "is neither the manifest's own recorded identity nor a compiled artifact")
-        # A path echo may differ between the routes only where its cache entry does. With
-        # the workspace root, the scratch name and the cache-entry key read as one,
-        # it must then be byte-identical: a difference in its content is not explained.
+        # AOT outputs remain available in the stage cache for rebuilds. The two
+        # manifest routes name different stage keys, but their guest-derived code
+        # bytes must still agree.
+        left_key = json.loads((self.packages["a"] / "package.json").read_text(
+            encoding="utf-8"))["cache"]["key"]
+        right_key = json.loads((self.packages["c"] / "package.json").read_text(
+            encoding="utf-8"))["cache"]["key"]
+        left_stage = package_cache.aot_stage_root(
+            package_cache.cache_root(self.roots["a"], DISC_ID), left_key
+        )
+        right_stage = package_cache.aot_stage_root(
+            package_cache.cache_root(self.roots["c"], DISC_ID), right_key
+        )
+        for name in (
+            f"{GAME}_recomp.c", f"{GAME}_recomp_funcs.h",
+            f"{GAME}_recomp_stubs.txt", f"{GAME}_image.bin",
+            f"{GAME}_imports.toml", f"{GAME}_recomp_opt.mk",
+        ):
+            self.assertEqual((left_stage / name).read_bytes(),
+                             (right_stage / name).read_bytes(),
+                             f"AOT stage artifact {name} differs between manifest routes")
         for name in PATH_ECHOES:
             self.assertIn(name, pair.identity, f"the package no longer contains {name}")
             self.assertEqual(
@@ -901,9 +851,7 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
                 path_echo_content(pair.right_rules, name, pair.right_by_name[name]),
                 f"{name} differs between the two manifest routes by more than the "
                 "workspace root and its cache entry")
-        # The other files Make writes with $(file >...) are held to what the inventory
-        # declares: a strict one is in both packages and byte-identical with no rule, and
-        # one that is not a package file is in neither.
+        # Make-written files are classified as unpackaged build outputs.
         for name in MAKE_WRITTEN_IDENTICAL:
             self.assertIn(name, pair.identical,
                           f"{name} is missing from a package or differs between the two "
@@ -912,10 +860,8 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
             self.assertNotIn(name, pair.left_names | pair.right_names,
                              f"{name} is in a package, so it needs a comparison rule")
 
-        # The other compiled artifacts do differ, because the two manifests carry
-        # different content-addressed cache keys, and every one of them is a file two
-        # builds of *identical* inputs also had to differ in. A new one appearing here
-        # would mean the analyzer-derived addresses changed what the compiler produced.
+        # No compiler intermediates are promoted, so only a compiled executable
+        # could contribute to this set. The two routes link the same guest.
         identical = self.package_pair("a", "b")
 
         def compiled(names) -> set[str]:
@@ -927,13 +873,14 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
                          "builds of identical inputs did not, so the guest itself is not "
                          "what the two routes agree on")
 
-        # The staged notices, the codegen profile and the artifact names carry the
-        # guest's own stem and title, so the two routes must agree on all of them.
-        for name in ("THIRD_PARTY_NOTICES.txt", "THIRD_PARTY_NOTICES/index.json",
-                     "codegen_profile.json"):
+        # The staged notices and artifact names carry the guest's own stem and
+        # title, so the two routes must agree on all retained files.
+        for name in ("THIRD_PARTY_NOTICES.txt", "THIRD_PARTY_NOTICES/index.json"):
             self.assertIn(name, pair.identical,
                           f"{name} names the title, and a title is not what this "
                           "comparison varies")
+        self.assertNotIn("codegen_profile.json", pair.left_names | pair.right_names)
+        self.assertNotIn("recomp_profile.json", pair.left_names | pair.right_names)
 
         # And the launch is the same guest-visible run on both routes.
         self.assert_launched("a")
@@ -1071,11 +1018,9 @@ def make_file_writes(makefile: str) -> dict[str, str]:
 class TestMakeWrittenFilesAreClassified(unittest.TestCase):
     """Every file Make writes into the build directory with ``$(file >...)`` is classified.
 
-    A package is the whole build directory, so each such file is a package file the
-    determinism contract must know how to compare. The build class above compares them,
-    but it needs the Windows toolchain and every hosted runner skips it, which is how
-    #783's runtime invalidation list reached main unclassified. This inventory reads the
-    Makefile and the in-tree makefiles it includes, and runs on every host.
+    The runtime package omits these build-only control files. This inventory reads the
+    Makefile and the in-tree makefiles it includes so every Make write remains explicitly
+    classified as unpackaged; it runs on every host.
     """
 
     def test_every_make_written_build_file_has_a_comparison(self):
@@ -1087,7 +1032,7 @@ class TestMakeWrittenFilesAreClassified(unittest.TestCase):
         self.assertEqual(
             {name: line for name, line in written.items() if name not in classified}, {},
             "the Makefile writes these files into BUILD_DIR, and the package determinism "
-            "contract does not say how to compare them: add each to PATH_ECHOES, "
+            "contract does not classify them: add each to PATH_ECHOES, "
             "MAKE_WRITTEN_IDENTICAL or MAKE_WRITTEN_UNPACKAGED with its reason")
         self.assertEqual(
             sorted({*MAKE_WRITTEN_IDENTICAL, *MAKE_WRITTEN_UNPACKAGED} - set(written)), [],

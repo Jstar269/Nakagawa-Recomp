@@ -84,6 +84,7 @@ extern "C" {
 #define NK_DISC_DAT_MAX_GAME_SERIALS 16u
 /* A header <name>, <version> or <date>, in printable ASCII. */
 #define NK_DISC_DAT_MAX_HEADER_FIELD 63u
+#define NK_DISC_DAT_MAX_GAME_NAME 255u
 
 #define NK_DISC_SHA1_HEX_CHARS 40u
 #define NK_DISC_CRC32_HEX_CHARS 8u
@@ -164,6 +165,7 @@ bool nk_disc_hash_file(const char *path, const NkDiscExpandCallbacks *callbacks,
 typedef struct {
     uint8_t sha1[20];
     uint32_t crc32;
+    uint32_t name_offset; /* offset in NkDiscDat.names (0 means unnamed / "") */
     uint64_t size_bytes;
     uint32_t listed; /* its place in the datafile, so a repeated SHA-1 keeps the first */
 } NkDiscDatRom;
@@ -176,6 +178,8 @@ typedef struct {
     size_t rom_count;
     char (*serials)[10];
     size_t serial_count;
+    char *names;
+    size_t names_size;
     size_t games;
     size_t rejected_roms;
     char name[128];
@@ -248,6 +252,12 @@ bool nk_disc_dat_has_serial(const NkDiscDat *dat, const char *disc_id);
    library carries this disc ID. */
 NkDiscTier nk_disc_classify(const NkDiscDat *dat, const char *disc_id,
                             const NkDiscDigest *digest, bool disc_id_verified_elsewhere);
+
+/* Returns the Redump <game name="..."> for a verified disc in `dat` matching
+   sha1_hex, crc32_hex (when non-NULL/non-empty), and size_bytes (when non-zero).
+   Borrows from `dat` until nk_disc_dat_free; NULL when missing or unnamed. */
+const char *nk_disc_dat_find_game_name(const NkDiscDat *dat, const char *sha1_hex,
+                                       const char *crc32_hex, uint64_t size_bytes);
 
 /* Disc IDs in a <serial> value ("TEST-71002, TEST-71002GA") as PARAM.SFO
    spells them: up to max_ids nine-character IDs, without repeats. Returns how

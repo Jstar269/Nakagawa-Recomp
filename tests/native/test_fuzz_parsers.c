@@ -1574,7 +1574,8 @@ static void test_fuzz_package(unsigned iters) {
     const char *root = SR_SELFTEST_BUILD_ROOT "/fuzz_package_root";
     char package_dir[512], package_path[640], report_path[640];
     char executable_path[768], image_path[768], absolute_root[1024];
-    char package_json[8192], report_json[8192], cache_json[4096], cache_key_json[3072];
+    char package_json[8192], package_v3_json[8192], report_json[8192];
+    char cache_json[4096], cache_key_json[3072];
     char aot_components_json[1024], generated_components_json[1024], native_components_json[512];
     char aot_digest[65], generated_code_digest[65], native_digest[65];
     char completion_json[4096], completion_path[768];
@@ -1719,6 +1720,42 @@ static void test_fuzz_package(unsigned iters) {
     }
     assert(initial_status == NK_RUNTIME_PACKAGE_OK);
     assert(info.package_root[0] != '\0');
+
+    /* Schema v3 keeps the same completion checks while allowing a runtime-only
+       package with no generated compiler objects. The legacy v2 seed above must
+       remain launchable. */
+    const char *schema_marker = "\"schema_version\":2,\"cache\":";
+    const char *schema_at = strstr(package_json, schema_marker);
+    assert(schema_at != NULL);
+    size_t schema_prefix = (size_t)(schema_at - package_json);
+    size_t schema_length = strlen("\"schema_version\":2");
+    memcpy(package_v3_json, package_json, schema_prefix);
+    int v3_suffix = snprintf(package_v3_json + schema_prefix,
+                             sizeof(package_v3_json) - schema_prefix,
+                             "\"schema_version\":3%s", schema_at + schema_length);
+    assert(v3_suffix > 0 &&
+           (size_t)v3_suffix < sizeof(package_v3_json) - schema_prefix);
+    size_t package_v3_length = schema_prefix + (size_t)v3_suffix;
+    write_file_bytes(package_path, package_v3_json, package_v3_length);
+    completion_length = fuzz_package_completion(
+        completion_json, sizeof(completion_json), package_path, report_path, cache_key_json,
+        identity_json, executable_name, fixture_sha);
+    write_file_bytes(completion_path, completion_json, (size_t)completion_length);
+    NkRuntimePackageStatus v3_status = nk_title_manifest_validate_aot_package(
+        absolute_root, disc_id, NULL, title_id, false, "EBOOT.BIN", NULL, NULL, 2,
+        &info, reason, sizeof(reason));
+    if (v3_status != NK_RUNTIME_PACKAGE_OK) {
+        fprintf(stderr, "[FUZZ] package v3 seed rejected (%d): %s\n",
+                (int)v3_status, reason);
+    }
+    assert(v3_status == NK_RUNTIME_PACKAGE_OK);
+    printf("[FUZZ] Runtime-only package v3 seed accepted; legacy v2 remains valid\n");
+
+    write_file_bytes(package_path, package_json, (size_t)package_length);
+    completion_length = fuzz_package_completion(
+        completion_json, sizeof(completion_json), package_path, report_path, cache_key_json,
+        identity_json, executable_name, fixture_sha);
+    write_file_bytes(completion_path, completion_json, (size_t)completion_length);
 
     /* Each input changes the package, the build report or the completion manifest; the
      * other two stay valid, and the manifest's artifact digests are re-recorded for the
