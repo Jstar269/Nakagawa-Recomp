@@ -1,14 +1,11 @@
 # AGENTS.md — Nakagawa Recomp
 
 This file is the authoritative repository policy for AI agents and human contributors. Scoped
-instruction files may add guidance for their scope but never weaken a rule here: today `CLAUDE.md`
-and `.github/copilot-instructions.md`, which only point here, and
-`.github/instructions/c-generated.instructions.md` (Section 6 for generated C); there is no nested
-`AGENTS.md` ([how tools read this file](docs/AI_USAGE.md#how-each-tool-reads-these-rules)). Personal
-instruction files and tool settings stay untracked.
-
-**Where to start** covers most tasks; sections 1 to 11 are the full contract; **Maintainer process**
-applies only to agents the maintainer runs.
+instruction files (`CLAUDE.md` and `.github/copilot-instructions.md`, which only point here, and
+`.github/instructions/c-generated.instructions.md` for generated C) may add guidance but never weaken
+a rule here; there is no nested `AGENTS.md` ([how tools read this file](docs/AI_USAGE.md#how-each-tool-reads-these-rules)).
+Personal instruction files and tool settings stay untracked. **Where to start** covers most tasks;
+sections 1 to 11 are the full contract; **Maintainer process** applies only to the maintainer's agents.
 
 ## Where to start
 
@@ -32,16 +29,13 @@ other external change.
 
 ### Build and test
 
-**Windows 11** is the supported desktop platform. Set up per [`docs/SETUP.md`](docs/SETUP.md) (mind the
-[`PATH` order](docs/SETUP.md#path-order)); with MSYS2 UCRT64's `bin` on `PATH`, run
-`python -m pip install .` once, `python tools/nk_doctor.py --scope build` to check the toolchain, and
-`mingw32-make contrib-check`. On **Linux** (Ubuntu 24.04 or WSL 2;
-[`docs/LINUX_DEVELOPMENT.md`](docs/LINUX_DEVELOPMENT.md)): `make CC=gcc native-core-tests`, then
-`make contrib-check`. Run one Python module with
-`python -m unittest tools.test_<name>`; hosted CI runs the whole suite before the change lands.
-`contrib-check` runs the gates
-your changes need; it is not hosted CI, and `SKIP` is not a pass
-([results](CONTRIBUTING.md#the-fast-path-one-command)).
+**Windows 11** is the supported desktop platform ([`docs/SETUP.md`](docs/SETUP.md); mind the
+[`PATH` order](docs/SETUP.md#path-order)); **Linux** is Ubuntu 24.04 or WSL 2
+([`docs/LINUX_DEVELOPMENT.md`](docs/LINUX_DEVELOPMENT.md)). Once: `python -m pip install .` and
+`python tools/nk_doctor.py --scope build`. Then `mingw32-make contrib-check` (Linux:
+`make CC=gcc native-core-tests`, then `make contrib-check`) and `python -m unittest tools.test_<name>`
+for each module you touch; hosted CI runs the whole suite. `contrib-check` runs the gates your changes
+need; it is not hosted CI, and `SKIP` is not a pass ([results](CONTRIBUTING.md#the-fast-path-one-command)).
 
 ### Hard limits
 
@@ -69,13 +63,13 @@ your machine; the cited section has the full rule.
 
 - It comes from a branch on the contributor's fork, with **Allow edits by maintainers** on, or from a
   maintainer agent's topic branch on `origin` (Section 8).
-- It links the issue (`Tracks #123`), says what was wrong and what each change does, and gives the
-  exact base and head SHAs, scope, uncertainty, private-input and hardware status, and blockers.
-- It lists the exact commands run with results, and the checks not run. "CI is green" is not a
-  result; a local pass is not hosted CI.
-- Every AI-assisted commit ends with its `Assisted-by:` line (Section 4).
-- The submitter confirms in the template the right to submit under GPL-3.0-or-later. A DCO sign-off
-  is optional and only the person adds it ([DCO policy](docs/DCO_POLICY.md)); the agent never does.
+- Its [template](.github/PULL_REQUEST_TEMPLATE.md) is filled in: the issue (`Tracks #123`), what was
+  wrong and what each change does, the exact base and head SHAs, scope, uncertainty, private-input and
+  hardware status, blockers, and the exact commands run with results and the checks not run. "CI is
+  green" is not a result; a local pass is not hosted CI.
+- Every AI-assisted commit ends with its `Assisted-by:` line (Section 4). The submitter confirms in the
+  template the right to submit under GPL-3.0-or-later. A DCO sign-off is optional and only the person
+  adds it ([DCO policy](docs/DCO_POLICY.md)); the agent never does.
 - It says where every new file came from (next section) and meets the
   [professional-finish checks](.github/REVIEW.md#professional-finish).
 
@@ -107,7 +101,7 @@ until admission; that is expected. Edits to existing files: [`contrib-refresh`](
 - One branch per pull request, named for its topic (`docs/...`, `fix/...`, `lle/...`, `oracle/...`)
   with a date or issue suffix. Leave other people's unmerged work alone.
 - By default, stop and report after a bounded implementation, its tests, or its pull request.
-- Only the maintainer's agents integrate, in two stages (Section 10): preparation, which may merge
+- Only the maintainer's agents integrate, in two stages ([Landing pull requests](#landing-pull-requests)): preparation, which may merge
   `main` to produce a head hosted CI can test, and landing. An explicit maintainer mission may
   authorize autonomous landing only when the exact head that merges (a landing batch's head, or a
   pull request's own head) has the full required hosted CI green, no open review/change request
@@ -205,12 +199,11 @@ maintainer's PSP; a contributor's agent uses a PSP only as its user directs.
   hardware routes only when required. Remote host work stays reversible and non-overlapping.
 - **Offline by default.** The player and runtime connect only through a documented opt-in feature
   ([Network use](docs/SETUP.md#network-use)). The maintainer approves opt-in network features in
-  principle (for example #1139, #1316, #2632); that does not authorize an unlisted host, an upload, or
-  a connection that is on by default or automatic, which each need their own maintainer decision.
-  Each feature's public issue must name its hosts, payload, consent and data boundaries, and before it
-  ships the feature is off until the user turns it on, has its entry in `docs/SETUP.md` Network use,
-  and is added to the allowlist test in `tools/test_prereq_fetcher.py`. The reserved `network_mode`
-  setting accepts only `"offline"`; it is not a switch for these features.
+  principle (#1139, #1316, #2632); that does not authorize an unlisted host, an upload, or an
+  on-by-default or automatic connection, each of which needs its own maintainer decision. Each
+  feature's public issue must name its hosts, payload, consent and data boundaries; before it ships it
+  is off by default, listed in `docs/SETUP.md` Network use and in the allowlist test
+  `tools/test_prereq_fetcher.py`. The reserved `network_mode` setting accepts only `"offline"`.
 - A user-started transfer may move their own packages and saves directly to their own devices, never
   through a server. Nothing uploads game code or data, decrypted modules, packages, saves or guest
   memory, or shares anything built from a user's game. No telemetry. Tests never touch the internet.
@@ -254,17 +247,15 @@ Re-check live source before changing these; PR numbers are navigation, not evide
 - Chunk count is dynamic; `FUNCS_PER_CHUNK` is not a fixed ABI.
 - LLE CPU and import seam are opt-in (`--lle-cpu`, `--lle-import-seam`; the seam implies `--lle-cpu`); default
   output stays byte-identical.
-- An unmeasured cell normally stops by name. A second, clearly limited evidence tier may use a
-  public PPSSPP or JPCSP implementation for a known, named cell when its exact behavior is supported
-  by that public reference and the issue does not prohibit emulator-derived work. Record the source
-  repository, exact upstream revision and symbol; classify translated or adapted code as
-  `derived-translated`; label it in code `PPSSPP-derived, not PSP-measured` or
-  `JPCSP-derived, not PSP-measured`; add a production-path regression; and log first use once per
-  run. A PSP measurement for the same scope supersedes it. Emulator-derived behavior does not prove
-  PSP behavior or independence. This tier never fills an unknown NID or unowned dispatch, enables
-  save-data and flash writes whose behavior is unmeasured, or supplies behavior with no public
-  reference; each remains a named fail-closed boundary. Device firmware, flash, NAND and idStorage
-  writes remain prohibited as in Section 3.
+- An unmeasured cell normally stops by name. A limited second tier may use a public PPSSPP or JPCSP
+  implementation for a known, named cell whose exact behavior it supports, unless the issue prohibits
+  emulator-derived work: record the repository, exact upstream revision and symbol; classify adapted
+  code `derived-translated`; label it in code `PPSSPP-derived, not PSP-measured` or
+  `JPCSP-derived, not PSP-measured`; add a production-path regression; log first use once per run.
+  A PSP measurement for the same scope supersedes it, and it proves neither PSP behavior nor
+  independence. It never fills an unknown NID or unowned dispatch, enables save-data and flash writes
+  whose behavior is unmeasured, or supplies behavior with no public reference; those stay named
+  fail-closed boundaries, and Section 3 still bars device writes.
 - HLE arguments 1-4 are `A0`-`A3`, 5-8 `t0`-`t3` (`stack_arg`), 9+ the stack; never read past the public signature.
 
 ## 8. Workspace, branch, and worktree lifecycle
@@ -289,14 +280,10 @@ and again without `--worktree`), and `tools/modified_file_notice_audit.py`. A wo
 configuration change runs `tools/test_ci_paths.py`, pre-commit, and the full applicable hosted matrix
 on its own head; while `NK_CI_TIERS` is `on`, its reviewer adds the `ci-full-matrix` label for that.
 
-Hosted CI has two tiers ([Quick and full checks](docs/CI.md#quick-and-full-checks)), switched by the
-repository variable `NK_CI_TIERS`. A Draft always runs the quick checks, which include the
-generated-file check, the documentation lints and the tools mypy baseline. While `NK_CI_TIERS` is
-`on`, every push to a pull request from a branch of this repository runs them too, and the full checks
-run on the landing batch that carries it, or on the pull request itself when it carries the
-`ci-full-matrix` label, which a maintainer adds. Otherwise, and always for a pull request from a fork,
-a Ready pull request runs the full checks on each push. Either way the focused local gates are the
-first evidence for a Python, native or Windows change: run them before the push.
+Hosted CI runs the quick checks on a Draft and the full checks before a head lands; which run covers
+which head, the `NK_CI_TIERS` switch and the `ci-full-matrix` label are in
+[Quick and full checks](docs/CI.md#quick-and-full-checks). The focused local gates are the first
+evidence for a Python, native or Windows change: run them before the push.
 
 Before the first push, check [Findings to pre-empt](.github/REVIEW.md#findings-to-pre-empt), and build native
 code in a Linux shell such as WSL (hosted Linux builds it with and without SDL3).
@@ -304,12 +291,10 @@ code in a Linux shell such as WSL (hosted Linux builds it with and without SDL3)
 ## 10. PR and integration authorization
 
 - With a pull request in scope, open a Draft after the first valid commit and mark it Ready once
-  finished (tests and checks run, template filled); a finished PR never stays a Draft. Hosted CI runs
-  only the quick checks on a Draft, and a Draft is never batched. While `NK_CI_TIERS` is `on`, a Ready
-  PR from a branch of this repository runs the quick checks too and gets the full checks when it is
-  batched for landing; otherwise it runs the full checks on each push
-  ([Quick and full checks](docs/CI.md#quick-and-full-checks)). A
-  contributor's agent leaves Ready to its person.
+  finished (tests and checks run, template filled); a finished PR never stays a Draft, and a Draft is
+  never batched. What runs on a Draft and on a Ready PR:
+  [Quick and full checks](docs/CI.md#quick-and-full-checks). A contributor's agent leaves Ready to its
+  person.
 - Ready means finished, not approved. A substantive correction after Ready, including resolving a
   real conflict in content that is not generated, returns the PR to Draft for fresh exact-head
   validation. A clean merge of `main`, or one whose conflicts are only generated
@@ -317,22 +302,14 @@ code in a Linux shell such as WSL (hosted Linux builds it with and without SDL3)
 - Group related work in one PR, unrelated changes in separate PRs; never stack PRs.
 - An author merges `main` only for a real conflict in content that is not generated, or when the
   maintainer or the integrator asks; not for GitHub's `BEHIND` state, a `CI_DEFINITION_BEHIND`
-  verdict, or a conflict confined to generated content: `PUBLIC_EXPORT.json`,
-  `assets/public_provenance_ledger.json`, `assets/public_source_profile.json`, and what
-  `python tools/regen_all.py` rebuilds (censuses and `<!-- BEGIN GENERATED ... -->` blocks included;
-  outputs `--list` marks skipped, such as shaders and profile-zero digests, stay the author's). A
+  verdict, or a conflict confined to generated content: the three provenance controls
+  (`PUBLIC_EXPORT.json`, `assets/public_provenance_ledger.json`, `assets/public_source_profile.json`)
+  and what `python tools/regen_all.py --list` names (outputs it marks skipped stay the author's). A
   merge preserves newer-main behavior, regenerates only the controls it requires, reruns the affected
   gates and freezes the exact head. Every merge of `main` and every control refresh forces new hosted
   CI and review. Never rebase or force-push a pushed branch.
-- **Integration has two stages.** Preparation: the integrator merges `main` into a handed-off PR,
-  resolves generated-content conflicts, refreshes controls and pushes a head hosted CI can test; it
-  lands nothing. Landing: merging the head that carries the PR's exact content, a landing batch's head
-  or the PR's own, only once the full required hosted CI is green on that head, under Section 2. To
-  join a batch, a PR's own head needs its hosted CI green for its tier (`LIGHT_CI_GREEN` after the
-  quick checks, `success` after the full checks); the batch's run is its full validation.
-  GitHub runs no CI on a conflicting PR, so until the preparation head runs, the evidence is the
-  author's local gates. If the preparation head's CI or the batch's run shows a semantic conflict or a
-  failure in the PR's change, the integrator hands the PR back instead of fixing the author's code.
+- **Integration** by the maintainer's agents has two stages, preparation and landing, with a hand-back
+  to the author for a failure in the PR's change: [Landing pull requests](#landing-pull-requests).
 - Never merge a PR, enable auto-merge, close other PRs, or bypass required checks unless Section 2's
   autonomous-landing conditions hold. Answer every review thread, an advisory bot's included.
 
@@ -390,9 +367,20 @@ This section applies only to agents the maintainer runs.
   authority, plus an exact trusted record for a new implementation path, both on the private
   authority repository's `main` first
   ([step by step](docs/PUBLICATION_READINESS.md#step-by-step-a-pull-request-that-adds-a-public-path)).
+  An implementation path needs its exact record in the private ledger before `tools/admit_paths.py`
+  runs.
 
 ### Landing pull requests
 
+- **Integration has two stages.** Preparation: the integrator merges `main` into a handed-off PR,
+  resolves generated-content conflicts, refreshes controls and pushes a head hosted CI can test; it
+  lands nothing. Landing: merging the head that carries the PR's exact content, a landing batch's head
+  or the PR's own, only once the full required hosted CI is green on that head, under Section 2. To
+  join a batch, a PR's own head needs its hosted CI green for its tier (`LIGHT_CI_GREEN` after the
+  quick checks, `success` after the full checks); the batch's run is its full validation.
+  GitHub runs no CI on a conflicting PR, so until the preparation head runs, the evidence is the
+  author's local gates. If the preparation head's CI or the batch's run shows a semantic conflict or a
+  failure in the PR's change, the integrator hands the PR back instead of fixing the author's code.
 - Hand a PR to integration only when its exact head is pushed, its hosted CI is green for its tier
   (`LIGHT_CI_GREEN` after the quick checks, `success` after the full checks) and every review thread
   is answered and resolved. Until landing or explicit hand-back, its branch and worktree
