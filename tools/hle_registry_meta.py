@@ -365,9 +365,10 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "tests/native/hle_thread_selftest.c:test_net_core_without_network",
+            "tests/native/hle_thread_selftest.c:test_adhoc_online_real_tcp_loopback_e2e",
             "PSPAutotests tests/net (70e72391, recorded on a PSP): before sceNetAdhocctlInit, GetState, AddHandler and Create return NOT_INITIALIZED 0x80410b08 (net/adhoc/adhocctl \"Before init\")",
         ],
-        "limitation": "always NOT_INITIALIZED (0x80410b08), writing nothing, because sceNetAdhocctlInit stays refused with no network; GetParameter's own pre-init code is UNMEASURED and follows the measured calls; with the WLAN switch off PPSSPP answers DISCONNECTED (0x80410b09) instead (UNMEASURED)",
+        "limitation": "offline before sceNetAdhocctlInit it returns NOT_INITIALIZED (0x80410b08) matching the measured calls; when initialized locally or online (#1139), writes channel, product ID, group name, BSSID, and nickname from console/group state (with the online active state PPSSPP-derived, not PSP-measured; pre-init code and WLAN-off 0x80410b09 remain UNMEASURED)",
     },
     "h_MsgDialogAbort": {
         "status": "partial",
@@ -2931,6 +2932,63 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "limitation": "as sceKernelAllocateVpl, with callbacks serviced while waiting (#341)",
     },
 }
+
+# Opt-in online ad hoc handlers (#1139): PPSSPP-derived, not PSP-measured; fail closed with
+# 0x80010086 unless SR_ADHOC_ENABLED=1.
+_ADHOC_ONLINE_HANDLERS = (
+    "h_NetAdhocctlJoin",
+    "h_NetAdhocctlGetAddrByName",
+    "h_NetAdhocctlGetNameByAddr",
+    "h_NetAdhocInit",
+    "h_NetAdhocTerm",
+    "h_NetAdhocPdpCreate",
+    "h_NetAdhocPdpDelete",
+    "h_NetAdhocPdpSend",
+    "h_NetAdhocPdpRecv",
+    "h_NetAdhocGetPdpStat",
+    "h_NetAdhocPtpOpen",
+    "h_NetAdhocPtpConnect",
+    "h_NetAdhocPtpListen",
+    "h_NetAdhocPtpAccept",
+    "h_NetAdhocPtpSend",
+    "h_NetAdhocPtpRecv",
+    "h_NetAdhocPtpFlush",
+    "h_NetAdhocPtpClose",
+    "h_NetAdhocGetPtpStat",
+    "h_NetAdhocPollSocket",
+    "h_NetAdhocSetSocketAlert",
+    "h_NetAdhocGetSocketAlert",
+    "h_NetAdhocMatchingInit",
+    "h_NetAdhocMatchingTerm",
+    "h_NetAdhocMatchingCreate",
+    "h_NetAdhocMatchingDelete",
+    "h_NetAdhocMatchingStart",
+    "h_NetAdhocMatchingStart2",
+    "h_NetAdhocMatchingStop",
+    "h_NetAdhocMatchingSelectTarget",
+    "h_NetAdhocMatchingCancelTarget",
+    "h_NetAdhocMatchingCancelTargetWithOpt",
+    "h_NetAdhocMatchingSetHelloOpt",
+    "h_NetAdhocMatchingGetHelloOpt",
+    "h_NetAdhocMatchingGetMembers",
+    "h_NetAdhocMatchingSendData",
+    "h_NetAdhocMatchingAbortSendData",
+    "h_NetAdhocMatchingGetPoolMaxAlloc",
+    "h_NetAdhocMatchingGetPoolStat",
+)
+for _adhoc_handler in _ADHOC_ONLINE_HANDLERS:
+    HANDLER_METADATA[_adhoc_handler] = {
+        "status": "partial",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed",
+            "tests/native/hle_thread_selftest.c:test_adhoc_online_real_tcp_loopback_e2e",
+        ],
+        "limitation": (
+            "PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev "
+            "3bc60270eae3069f13dfbfdb7292a7e1375de6f6); stays fail-closed (0x80010086) "
+            "unless SR_ADHOC_ENABLED=1 (#1139)"
+        ),
+    }
 
 # handler name -> status mapping. Preserved for direct consumers and gate checks.
 HANDLER_STATUS: dict[str, str] = {h: meta["status"] for h, meta in HANDLER_METADATA.items()}

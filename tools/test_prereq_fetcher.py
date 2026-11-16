@@ -1463,10 +1463,24 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # the same pinned hosts; the player never passes those options, and a release
 # that carries prereqs/ makes no download at all. A new egress needs a
 # maintainer decision, a "Network use" entry in docs/SETUP.md, and a line here.
+# nk_adhoc_relay_client.c (#1139) implements opt-in plain-TCP ad hoc relay play,
+# active only when the user enables Online play in Settings (off by default).
 NETWORK_EGRESS_ALLOWLIST = frozenset({
+    "src/core/nk_adhoc_relay_client.c",
     "src/player/package_builder.c",
     "tools/nk_core/prereq_fetcher.py",
 })
+
+# Opt-in ad hoc relay defaults (#1139): shipped server presets and plain-TCP ports
+# documented in docs/SETUP.md ("Network use") and docs/ONLINE_FEATURES.md.
+ADHOC_RELAY_DEFAULT_SERVER = "socom.cc"
+ADHOC_RELAY_PRESETS = (
+    "socom.cc",
+    "psp.mgn.pub",
+    "relay.arenaanywhere.site",
+    "relay-usa.arenaanywhere.site",
+)
+ADHOC_RELAY_PORTS = (27312, 27313)
 
 # The only hosts the player's consented download reaches: the "Network use" table in
 # docs/SETUP.md. Every artifact pin stays on them.
@@ -1583,6 +1597,29 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         setup = (REPO_ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
         for host in sorted(UPDATE_CHECK_HOSTS):
             self.assertIn(f"`{host}`", setup)
+
+    def test_adhoc_relay_defaults_stay_opt_in_and_documented(self) -> None:
+        header = (REPO_ROOT / "src" / "core" / "nk_adhoc_relay.h").read_text(encoding="utf-8")
+        self.assertIn(f'#define NK_ADHOC_DEFAULT_SERVER "{ADHOC_RELAY_DEFAULT_SERVER}"', header)
+        for port in ADHOC_RELAY_PORTS:
+            self.assertRegex(header, rf"#define NK_RELAY_(?:LOBBY|DATA)_PORT\s+{port}u\b")
+        relay_src = (REPO_ROOT / "src" / "core" / "nk_adhoc_relay.c").read_text(encoding="utf-8")
+        block = re.search(
+            r"static const NkAdhocServerPreset s_server_presets\[\]\s*=\s*\{(.*?)\};",
+            relay_src,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(block)
+        assert block is not None
+        found_hosts = tuple(re.findall(r'\{\s*"([^"]+)"\s*,', block.group(1)))
+        self.assertEqual(found_hosts, ADHOC_RELAY_PRESETS)
+        setup = (REPO_ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
+        for host in ADHOC_RELAY_PRESETS:
+            self.assertIn(f"`{host}`", setup)
+        for port in ADHOC_RELAY_PORTS:
+            self.assertIn(f"`{port}`", setup)
+        pstate = (REPO_ROOT / "src" / "player" / "player_state.c").read_text(encoding="utf-8")
+        self.assertIn("s->online_play = false;", pstate)
 
     def test_achievements_name_only_the_retroachievements_server(self) -> None:
         header = (REPO_ROOT / "src" / "core" / "nk_achievements.h").read_text(encoding="utf-8")

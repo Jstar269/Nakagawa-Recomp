@@ -646,6 +646,7 @@ class IsoParityTests(unittest.TestCase):
         ]
         if has_launch:
             core_srcs.append(ROOT / "src" / "core" / "nk_launch.c")
+            core_srcs.append(ROOT / "src" / "core" / "nk_adhoc_relay.c")
             # nk_launch.c starts a homebrew program from its Memory Stick folder
             # (nk_pbp_homebrew.c), whose package reader reports through the PSP crypto
             # engine (nk_psp_fail), which reads the key store.

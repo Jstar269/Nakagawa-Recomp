@@ -47,6 +47,8 @@ CONDITIONAL = re.compile(r"^\s*#\s*(?:if|ifdef|ifndef|elif|elifdef|elifndef)\b")
 # path -> (host conditionals it may hold, why they stay). Keep the reason honest:
 # "not yet moved" is a fine reason, with the issue that will move it.
 ALLOWLIST: Mapping[str, tuple[int, str]] = {
+    "src/core/nk_adhoc_relay_client.c": (
+        12, "ad hoc relay TCP client (#1139): non-blocking Winsock2 / POSIX socket seam"),
     "src/core/nk_platform.h": (
         1, "declares the Win32-only data-base selector its unit test calls"),
     "src/core/nk_disc_expand.c": (
