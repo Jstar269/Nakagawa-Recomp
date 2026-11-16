@@ -12,6 +12,7 @@
  */
 
 #include "nk_launch.h"
+#include "nk_adhoc_relay.h"
 #include "nk_pbp_homebrew.h"
 #include "nk_shared_helpers.h"
 #include "nk_font_slots.h"
@@ -1505,6 +1506,9 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     char env_ui_root[NK_MAX_PATH + 16];
     char env_launcher_display[96];
     char env_nickname[sizeof(session->config.nickname) + 16];
+    char env_adhoc_enabled[32];
+    char env_adhoc_server[sizeof(session->config.online_play_server) + 24];
+    char env_adhoc_offset[32];
     char sep = nk_platform_path_separator();
 
     if (session->config.fps_cap == -1) {
@@ -1526,7 +1530,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     snprintf(env_memstick, sizeof(env_memstick), "SR_MEMSTICK=%s", session->memstick_root);
     snprintf(env_tables, sizeof(env_tables), "PSP_VFPU_TABLES=assets%cvfpu", sep);
 
-    const char *envp[48];
+    const char *envp[64];
     int env_count = 0;
     /* An empty value masks an inherited ISO for staged sessions with no ISO. */
     snprintf(env_iso, sizeof(env_iso), "PSP_ISO=%s", session->iso_path);
@@ -1629,6 +1633,22 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     /* Likewise developer mode (#314): the game's developer HUD and pause pages follow the
        launcher's setting, never an inherited value. */
     envp[env_count++] = session->config.developer_mode ? "SR_DEVELOPER_MODE=1" : "SR_DEVELOPER_MODE=0";
+    /* Online ad hoc play (#1139): off unless opted in with a syntactically valid server spec,
+       always exported so an inherited value can never opt a launch in. */
+    {
+        bool adhoc_ok = session->config.online_play &&
+                        nk_adhoc_relay_parse_server(session->config.online_play_server,
+                                                    NULL, 0u, NULL, NULL);
+        snprintf(env_adhoc_enabled, sizeof(env_adhoc_enabled), "SR_ADHOC_ENABLED=%s",
+                 adhoc_ok ? "1" : "0");
+        snprintf(env_adhoc_server, sizeof(env_adhoc_server), "SR_ADHOC_SERVER=%s",
+                 adhoc_ok ? session->config.online_play_server : "");
+        snprintf(env_adhoc_offset, sizeof(env_adhoc_offset), "SR_ADHOC_PORT_OFFSET=%s",
+                 adhoc_ok ? "10000" : "");
+        envp[env_count++] = env_adhoc_enabled;
+        envp[env_count++] = env_adhoc_server;
+        envp[env_count++] = env_adhoc_offset;
+    }
     /* And Reduce motion: the pause overlay eases or cuts as the launcher does. */
     envp[env_count++] = session->config.reduce_motion == NK_REDUCE_MOTION_ON ? "SR_REDUCE_MOTION=on"
         : session->config.reduce_motion == NK_REDUCE_MOTION_OFF ? "SR_REDUCE_MOTION=off"

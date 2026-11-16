@@ -327,7 +327,7 @@ LINK_MAP_ARG = $(if $(strip $(LINK_MAP)),$(LINK_MAP_VALUE),)
 # than unified to one.
 ifeq ($(NK_TARGET_OS),windows)
 VULKAN_LIB_NAME := -lvulkan-1
-WIN_ONLY_LIBS   := -lmfplat -lgdi32 -lole32 -lshell32 -luuid -lwinmm
+WIN_ONLY_LIBS   := -lmfplat -lgdi32 -lole32 -lshell32 -luuid -lwinmm -lws2_32
 # -Wl,--no-insert-timestamp keeps the PE image byte-reproducible on the
 # MinGW/COFF linker. GNU ld publishes no such option -- an ELF link is already
 # timestamp-free -- so the flag is Windows-only and the Linux link line carries

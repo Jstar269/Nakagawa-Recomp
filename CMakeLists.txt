@@ -51,6 +51,7 @@ set(CORE_SOURCES
     src/core/nk_zip.c
     src/core/nk_steam_shortcuts.c
     src/core/nk_data_migrate.c
+    src/core/nk_adhoc_relay.c
     src/core/generated/nk_title_catalog.c
 )
 
@@ -1001,6 +1002,9 @@ set(NK_RUNTIME_SOURCES
     src/rt/flash0_font.c
     src/rt/mp3_bridge.c
     src/core/nk_xb.c
+    src/core/nk_adhoc_relay.c
+    src/core/nk_adhoc_net.c
+    src/core/nk_adhoc_relay_client.c
     src/rt/prx_loader.c
     src/rt/sched.c
     src/rt/sr_coro.c
@@ -1220,6 +1224,9 @@ function(nk_add_title_runtime target package_dir title_id)
         $<TARGET_OBJECTS:${target}_atrac> $<TARGET_OBJECTS:${target}_h264>
         $<TARGET_OBJECTS:${target}_gen>)
     target_link_libraries(${target} PRIVATE SDL3::SDL3 vulkan m)
+    if(WIN32)
+        target_link_libraries(${target} PRIVATE ws2_32)
+    endif()
     if(ANDROID)
         target_link_libraries(${target} PRIVATE log android)
     endif()

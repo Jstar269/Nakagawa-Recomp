@@ -351,6 +351,31 @@ static void test_check_boundaries(void) {
     }
 }
 
+static void test_server_parsing_and_presets(void) {
+    char host[NK_ADHOC_SERVER_MAX_LEN + 1u];
+    uint16_t lp = 0u, dp = 0u;
+    CHECK(nk_adhoc_server_preset_count() >= 2u, "presets provide at least two servers");
+    const NkAdhocServerPreset *p0 = nk_adhoc_server_preset(0u);
+    CHECK(p0 && strcmp(p0->host, NK_ADHOC_DEFAULT_SERVER) == 0, "default preset is socom.cc");
+    CHECK(nk_adhoc_relay_parse_server("socom.cc", host, sizeof host, &lp, &dp) &&
+              strcmp(host, "socom.cc") == 0 && lp == NK_RELAY_LOBBY_PORT &&
+              dp == NK_RELAY_DATA_PORT,
+          "bare host selects default ports");
+    CHECK(nk_adhoc_relay_parse_server("127.0.0.1:41001", host, sizeof host, &lp, &dp) &&
+              strcmp(host, "127.0.0.1") == 0 && lp == 41001u && dp == NK_RELAY_DATA_PORT,
+          "host:port overrides lobby port");
+    CHECK(nk_adhoc_relay_parse_server("127.0.0.1:41001,41002", host, sizeof host, &lp, &dp) &&
+              strcmp(host, "127.0.0.1") == 0 && lp == 41001u && dp == 41002u,
+          "host:lobby,data overrides both ports");
+    static const char *const bad[] = {"", " ", "socom.cc/path", "socom..cc", "-bad.cc",
+                                      "socom.cc:0", "socom.cc:70000", "socom.cc:1234,0",
+                                      "user@socom.cc", NULL};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        CHECK(!nk_adhoc_relay_parse_server(bad[i], host, sizeof host, &lp, &dp),
+              "invalid server spec %zu refused", i);
+    }
+}
+
 int main(void) {
     test_sizes();
     test_login();
@@ -363,6 +388,7 @@ int main(void) {
     test_size_fields_are_32_bits();
     test_hostile_connect();
     test_check_boundaries();
+    test_server_parsing_and_presets();
     if (g_failures) {
         fprintf(stderr, "test_nk_adhoc_relay: %d failure(s)\n", g_failures);
         return 1;

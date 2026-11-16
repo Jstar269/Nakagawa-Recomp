@@ -267,3 +267,81 @@ uint16_t nk_relay_port_in(uint16_t port, uint16_t offset) {
     if (port == 0u) return 0u; /* port 0 went out as 0; this project's addition */
     return (uint16_t)(port - offset);
 }
+
+static const NkAdhocServerPreset s_server_presets[] = {
+    {"socom.cc", "socom.cc (EU / PPSSPP default)"},
+    {"psp.mgn.pub", "psp.mgn.pub (US)"},
+    {"relay.arenaanywhere.site", "relay.arenaanywhere.site (EU)"},
+    {"relay-usa.arenaanywhere.site", "relay-usa.arenaanywhere.site (US)"},
+};
+
+size_t nk_adhoc_server_preset_count(void) {
+    return sizeof(s_server_presets) / sizeof(s_server_presets[0]);
+}
+
+const NkAdhocServerPreset *nk_adhoc_server_preset(size_t index) {
+    if (index >= nk_adhoc_server_preset_count()) return NULL;
+    return &s_server_presets[index];
+}
+
+static bool parse_u16_port(const char *s, const char *end, uint16_t *out) {
+    if (!s || s >= end) return false;
+    uint32_t v = 0u;
+    for (const char *p = s; p < end; p++) {
+        if (*p < '0' || *p > '9') return false;
+        v = v * 10u + (uint32_t)(*p - '0');
+        if (v > 65535u) return false;
+    }
+    if (v == 0u) return false;
+    if (out) *out = (uint16_t)v;
+    return true;
+}
+
+static bool host_char_ok(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '-' || c == '.';
+}
+
+bool nk_adhoc_relay_parse_server(const char *spec, char *host_out, size_t host_cap,
+                                 uint16_t *lobby_port, uint16_t *data_port) {
+    if (host_out && host_cap > 0u) host_out[0] = '\0';
+    if (!spec) return false;
+    const size_t total = strlen(spec);
+    if (total == 0u || total > NK_ADHOC_SERVER_MAX_LEN) return false;
+
+    const char *colon = strchr(spec, ':');
+    const size_t host_len = colon ? (size_t)(colon - spec) : total;
+    if (host_len == 0u || (host_out && host_len >= host_cap)) return false;
+    if (spec[0] == '.' || spec[0] == '-' || spec[host_len - 1u] == '.' || spec[host_len - 1u] == '-')
+        return false;
+    bool prev_dot = false;
+    for (size_t i = 0u; i < host_len; i++) {
+        const unsigned char c = (unsigned char)spec[i];
+        if (!host_char_ok(c)) return false;
+        if (c == '.' && prev_dot) return false;
+        prev_dot = (c == '.');
+    }
+
+    uint16_t lport = NK_RELAY_LOBBY_PORT;
+    uint16_t dport = NK_RELAY_DATA_PORT;
+    if (colon) {
+        const char *pstr = colon + 1;
+        const char *comma = strchr(pstr, ',');
+        const char *end = spec + total;
+        if (comma) {
+            if (!parse_u16_port(pstr, comma, &lport) ||
+                !parse_u16_port(comma + 1, end, &dport))
+                return false;
+        } else {
+            if (!parse_u16_port(pstr, end, &lport)) return false;
+        }
+    }
+
+    if (host_out && host_cap > 0u) {
+        memcpy(host_out, spec, host_len);
+        host_out[host_len] = '\0';
+    }
+    if (lobby_port) *lobby_port = lport;
+    if (data_port) *data_port = dport;
+    return true;
+}

@@ -705,6 +705,54 @@ static void test_bssid_skip_above_32_bits(void) {
     nk_loopnet_destroy(net);
 }
 
+static void test_ptp_loopback(void) {
+    NkAdhocLoopNet *net = nk_loopnet_create();
+    NkAdhocTransport *a = nk_loopnet_console(net, A), *b = nk_loopnet_console(net, B);
+    NkLobbyEvent ev[8];
+    login(a, k_a, "Alpha", k_game);
+    login(b, k_b, "Bravo", k_game);
+    a->ops->connect(a, k_g1);
+    b->ops->connect(b, k_g1);
+    (void)take(a, ev, 8);
+    (void)take(b, ev, 8);
+
+    const int ls = a->ops->ptp_listen(a, 0x3000u, 2);
+    CHECK(ls >= 0, "ptp_listen succeeds");
+    CHECK(a->ops->ptp_listen(a, 0x3000u, 1) == NK_NET_PORT_IN_USE, "duplicate ptp listen refused");
+
+    /* Connecting to a closed port refuses immediately. */
+    CHECK(b->ops->ptp_open(b, 0x4000u, k_a, 0x3999u) == NK_NET_CONNECTION_REFUSED,
+          "ptp_open to non-listening port refused");
+
+    const int cli = b->ops->ptp_open(b, 0x4001u, k_a, 0x3000u);
+    CHECK(cli >= 0 && b->ops->ptp_connect_poll(b, cli) == 1, "ptp_open connects to listener");
+
+    uint8_t peer_mac[6];
+    uint16_t peer_port = 0u;
+    const int srv = a->ops->ptp_accept(a, ls, peer_mac, &peer_port);
+    CHECK(srv >= 0 && memcmp(peer_mac, k_b, 6) == 0 && peer_port == 0x4001u,
+          "ptp_accept yields connected peer MAC and port");
+
+    uint32_t sent = 0u, got = 0u;
+    uint8_t buf[32];
+    CHECK(b->ops->ptp_send(b, cli, "hello-ptp", 9u, &sent) == NK_NET_OK && sent == 9u,
+          "ptp_send writes 9 bytes");
+    CHECK(a->ops->ptp_peek(a, srv) == 9u, "ptp_peek shows 9 buffered bytes");
+    CHECK(a->ops->ptp_recv(a, srv, buf, 5u, &got) == NK_NET_OK && got == 5u &&
+              memcmp(buf, "hello", 5) == 0,
+          "ptp_recv streams first slice");
+    b->ops->ptp_close(b, cli);
+    CHECK(a->ops->ptp_is_dead(a, srv), "ptp_is_dead reports peer close");
+    CHECK(a->ops->ptp_recv(a, srv, buf, sizeof buf, &got) == NK_NET_OK && got == 4u &&
+              memcmp(buf, "-ptp", 4) == 0,
+          "unread bytes still drain after peer close");
+    CHECK(a->ops->ptp_recv(a, srv, buf, sizeof buf, &got) == NK_NET_DEAD,
+          "after draining, ptp_recv reports NK_NET_DEAD");
+    a->ops->ptp_close(a, srv);
+    a->ops->ptp_close(a, ls);
+    nk_loopnet_destroy(net);
+}
+
 int main(void) {
     test_alone();
     test_login_rules();
@@ -722,6 +770,7 @@ int main(void) {
     test_drop_counts_reset_at_login();
     test_group_numbers_past_32_bits();
     test_bssid_skip_above_32_bits();
+    test_ptp_loopback();
     if (g_failures) {
         fprintf(stderr, "test_nk_adhoc_net: %d failure(s)\n", g_failures);
         return 1;

@@ -51,6 +51,7 @@ CORE_SOURCES = [
     "src/core/nk_title_manifest.c",
     "src/core/nk_xb.c",
     "src/core/nk_json.c",
+    "src/core/nk_adhoc_relay.c",
     "src/core/nk_font.c",
     "src/core/nk_input_profile.c",
     "src/core/nk_psp_crypto.c",

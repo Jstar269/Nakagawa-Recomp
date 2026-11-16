@@ -37,6 +37,9 @@
     X("SR_ACE_SHADOW_CANDIDATES", "string", "off (nothing listed)", "gpu_sdl3vk/ge_gpu.c", "Exactly 1, with shadow=soft declared, prints a SOFT_SHADOW: candidate line (size, keyed digest) per distinct texture hashed.") \
     X("SR_ACE_SMOOTH_DEPTH", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the GE's depth for its in-betweens.") \
     X("SR_ACE_SMOOTH_HUD", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the HUD mask of through-mode draws for its in-betweens.") \
+    X("SR_ADHOC_ENABLED", "flag-nonzero", "0 (off)", "hle_network.c", "Enables opt-in online ad hoc play when set to 1; off keeps all host network sockets closed and online APIs refused.") \
+    X("SR_ADHOC_PORT_OFFSET", "number", "10000", "hle_network.c", "Optional port offset added to relay data ports for PPSSPP and community server compatibility (default 10000).") \
+    X("SR_ADHOC_SERVER", "string", "unset (off)", "hle_network.c", "Community ad hoc server address (host, host:lobby, or host:lobby,data) used when SR_ADHOC_ENABLED is on.") \
     X("SR_ALLOC_GUARD", "flag-nonzero", "on (guard enabled when unset)", "hle.c", "Allocator guard stays on unless set with a value starting with 0, which disables it.") \
     X("SR_ALLOC_MAX", "number", "0xFFFFFFFF (no extra cap)", "hle.c", "Hexadecimal optional stricter cap on the size of a user-partition allocation request.") \
     X("SR_ALLOC_TRACE", "flag-presence", "off", "hle.c,recomp.c", "When set, prints a trace line for guest memory allocations and partition frees to stderr.") \

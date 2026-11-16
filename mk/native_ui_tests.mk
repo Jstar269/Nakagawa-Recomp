@@ -188,6 +188,16 @@ define ADHOC_NET_SELFTEST_CMD
 	$(BUILD_ROOT_RUN)/test_nk_adhoc_net$(EXE_EXT)
 endef
 
+# The ad hoc TCP relay client (src/core/nk_adhoc_relay_client.c, #1139): non-blocking framed
+# TCP client against an in-process 127.0.0.1 loopback relay server (no internet).
+RELAY_CLIENT_SELFTEST_SRCS := src/core/nk_adhoc_relay_client.c src/core/nk_adhoc_net.c src/core/nk_adhoc_relay.c tests/native/test_nk_adhoc_relay_client.c
+RELAY_CLIENT_SELFTEST_LIBS := $(if $(filter windows,$(NK_TARGET_OS)),-lws2_32,)
+define RELAY_CLIENT_SELFTEST_CMD
+	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/core $(RELAY_CLIENT_SELFTEST_SRCS) \
+		$(RELAY_CLIENT_SELFTEST_LIBS) -o $(BUILD_ROOT)/test_nk_adhoc_relay_client$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_nk_adhoc_relay_client$(EXE_EXT)
+endef
+
 .PHONY: adhoc-net-selftest
 adhoc-net-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
@@ -197,6 +207,11 @@ adhoc-net-selftest:
 relay-codec-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(call RELAY_CODEC_SELFTEST_CMD)
+
+.PHONY: relay-client-selftest
+relay-client-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(call RELAY_CLIENT_SELFTEST_CMD)
 # The console nickname rule (#2197, src/core/nk_nickname.h) that the player's Nickname setting
 # and the runtime's SR_NICKNAME share: the default, the 32-byte cap and the refused values.
 define NK_NICKNAME_SELFTEST_CMD
@@ -568,6 +583,7 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 	$(call ED25519_VERIFY_SELFTEST_CMD)
 	$(call RELAY_CODEC_SELFTEST_CMD)
 	$(call ADHOC_NET_SELFTEST_CMD)
+	$(call RELAY_CLIENT_SELFTEST_CMD)
 	$(call ACHIEVEMENTS_SELFTEST_CMD)
 	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_portable_mode.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_portable_mode$(EXE_EXT)

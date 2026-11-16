@@ -2481,6 +2481,23 @@ static uint32_t h_ControlledUnsupported(CpuState *s) {
     (void)s;
     return 0x80010086u; /* SCE_KERNEL_ERROR_ERRNO_FUNCTION_NOT_SUPPORTED */
 }
+
+/* Runtime controlled refusal for features disabled by policy/setting (such as online ad hoc
+ * play when SR_ADHOC_ENABLED is off): emits the same diagnostic and flight record as a static
+ * refusal entry without permanently pinning the HLE table row across self-test toggles. */
+uint32_t hle_controlled_refusal(CpuState *s, uint32_t error) {
+    HleEntry *e = hle_find(sr_last_nid);
+    if (e) {
+        atomic_store_explicit(&e->unimplemented_error, error, memory_order_release);
+        if (!atomic_exchange_explicit(&e->unsupported_state, 1u, memory_order_acq_rel)) {
+            hle_register_unsupported_summary();
+            fprintf(stderr, "HLE: controlled refusal: %s (NID 0x%08x) returned 0x%08x; in the works (#341)\n",
+                    e->name, e->nid, error);
+        }
+        sr_flight_unsupported(e->nid, error, sched_current_uid(), s ? s->pc : 0u);
+    }
+    return error;
+}
 FILE *sr_fopen_utf8(const char *path, const wchar_t *mode);
 extern CallbackEntry *s_callbacks;
 extern size_t s_callbacks_len;

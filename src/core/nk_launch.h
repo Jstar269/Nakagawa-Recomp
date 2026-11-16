@@ -108,6 +108,10 @@ typedef struct {
        SR_NICKNAME so an inherited value cannot name the console. The runtime re-validates it
        and serves NK_NICKNAME_DEFAULT, with a log line, for an empty or invalid value. */
     char nickname[NK_NICKNAME_MAX_BYTES + 1u];
+    /* Opt-in ad hoc online play (#1139): off by default. Always exported as SR_ADHOC_ENABLED and
+       SR_ADHOC_SERVER (0 and empty when off) so inherited values never enable online play. */
+    bool online_play;
+    char online_play_server[128]; /* NK_ADHOC_SERVER_MAX_LEN + 1 */
 } NkRuntimeConfig;
 
 typedef struct {

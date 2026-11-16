@@ -179,6 +179,26 @@ bool nk_relay_parse_ptp_data_header(const uint8_t in[NK_RELAY_PTP_DATA_HEADER_SI
 uint16_t nk_relay_port_out(uint16_t port, uint16_t offset);
 uint16_t nk_relay_port_in(uint16_t port, uint16_t offset);
 
+/* ---- server address & presets ------------------------------------------------------------- */
+
+#define NK_ADHOC_SERVER_MAX_LEN 127u
+#define NK_ADHOC_DEFAULT_SERVER "socom.cc"
+
+typedef struct NkAdhocServerPreset {
+    const char *host;
+    const char *label;
+} NkAdhocServerPreset;
+
+size_t nk_adhoc_server_preset_count(void);
+const NkAdhocServerPreset *nk_adhoc_server_preset(size_t index);
+
+/* Parses a user server string in the form "host", "host:lobby_port", or
+ * "host:lobby_port,data_port". Missing ports default to NK_RELAY_LOBBY_PORT (27312) and
+ * NK_RELAY_DATA_PORT (27313). Returns true if the host and ports are valid; otherwise writes an
+ * empty string to host_out (when non-NULL with host_cap > 0) and returns false. */
+bool nk_adhoc_relay_parse_server(const char *spec, char *host_out, size_t host_cap,
+                                 uint16_t *lobby_port, uint16_t *data_port);
+
 #ifdef __cplusplus
 }
 #endif
