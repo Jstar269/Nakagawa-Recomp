@@ -897,6 +897,7 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
 #include "nk_platform.h"
 #include "nk_title_manifest.h"
 #include "update_check.h"
+#include "cover_art.h"
 
 /* The cache-epoch build regression deliberately defers the automatic rescan
    for one invalidation so an old post-build latch cannot be completed by a
@@ -1909,6 +1910,83 @@ static bool player_update_test_open(void *context, const char *url, const char *
 
 PackageHttpOpen player_ui_test_update_transport(void) {
     return player_update_test_open;
+}
+
+static bool test_hex_value(char c, unsigned *out) {
+    if (c >= '0' && c <= '9') {
+        *out = (unsigned)(c - '0');
+        return true;
+    }
+    if (c >= 'a' && c <= 'f') {
+        *out = (unsigned)(c - 'a' + 10);
+        return true;
+    }
+    if (c >= 'A' && c <= 'F') {
+        *out = (unsigned)(c - 'A' + 10);
+        return true;
+    }
+    return false;
+}
+
+static bool player_cover_art_test_decode_name(const char *encoded, char *out, size_t out_size) {
+    size_t used = 0u;
+    if (!encoded || !encoded[0] || !out || out_size == 0u) return false;
+    for (const char *p = encoded; *p != '\0'; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '%') {
+            unsigned hi = 0u, lo = 0u;
+            if (!test_hex_value(p[1], &hi) || !test_hex_value(p[2], &lo)) return false;
+            c = (unsigned char)((hi << 4) | lo);
+            p += 2;
+        }
+        if (c == 0u || c == '/' || c == '\\' || used + 1u >= out_size) return false;
+        out[used++] = (char)c;
+    }
+    out[used] = '\0';
+    return strcmp(out, ".") != 0 && strcmp(out, "..") != 0 && strstr(out, "..") == NULL;
+}
+
+static bool player_cover_art_test_open(void *context, const char *url, const char *allowed_hosts,
+                                       PackageHttpResponse *out) {
+    static const char kPrefix[] = NK_COVER_ART_BOXARTS_URL_PREFIX;
+    const char *dir = getenv("NK_UI_TEST_COVER_ART_DIR");
+    char decoded_name[512];
+    char path[NK_MAX_PATH];
+    PlayerUpdateTestResponse *response;
+    int64_t size;
+    (void)context;
+    if (!url || strncmp(url, kPrefix, sizeof(kPrefix) - 1u) != 0) return false;
+    if (!allowed_hosts || strcmp(allowed_hosts, NK_COVER_ART_HOST) != 0) return false;
+    printf("[PLAYER_UI_TEST] cover_art_request=%s\n", url);
+    fflush(stdout);
+    if (!dir || !dir[0]) return false;
+    if (!player_cover_art_test_decode_name(url + (sizeof(kPrefix) - 1u),
+                                           decoded_name, sizeof(decoded_name))) {
+        return false;
+    }
+    if (snprintf(path, sizeof(path), "%s%c%s", dir, nk_platform_path_separator(),
+                 decoded_name) >= (int)sizeof(path)) {
+        return false;
+    }
+    size = nk_platform_get_file_size(path);
+    response = (PlayerUpdateTestResponse *)calloc(1u, sizeof(*response));
+    if (!response || size < 0 || !(response->file = nk_fopen_utf8(path, "rb"))) {
+        free(response);
+        return false;
+    }
+    snprintf(response->final_url, sizeof(response->final_url), "%s", url);
+    memset(out, 0, sizeof(*out));
+    out->final_url = response->final_url;
+    out->has_content_length = true;
+    out->content_length = (uint64_t)size;
+    out->context = response;
+    out->read = player_update_test_read;
+    out->close = player_update_test_close;
+    return true;
+}
+
+PackageHttpOpen player_ui_test_cover_art_transport(void) {
+    return player_cover_art_test_open;
 }
 
 /* The key update signatures are checked with: a TEST-ONLY key from

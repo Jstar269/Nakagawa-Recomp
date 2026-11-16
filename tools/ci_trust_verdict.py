@@ -175,6 +175,7 @@ from __future__ import annotations
 from typing import Any
 
 import argparse
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
@@ -1125,9 +1126,19 @@ class GitHub:
         url: str | None = path + ("&" if "?" in path else "?") + "per_page=100"
         while url:
             payload, headers = self._request("GET", url)
-            if key and total is None and isinstance(payload, dict) and isinstance(payload.get("total_count"), int):
-                total = payload["total_count"]
-            items.extend(payload[key] if key else payload)
+            if key:
+                if not isinstance(payload, dict):
+                    raise TypeError(f"expected object payload for {url}, got {type(payload).__name__}")
+                if total is None and isinstance(payload.get("total_count"), int):
+                    total = payload["total_count"]
+                page = payload[key]
+                if not isinstance(page, Iterable):
+                    raise TypeError(f"expected iterable at {key!r} for {url}, got {type(page).__name__}")
+                items.extend(page)
+            else:
+                if not isinstance(payload, Iterable):
+                    raise TypeError(f"expected iterable payload for {url}, got {type(payload).__name__}")
+                items.extend(payload)
             match = re.search(r'<([^>]+)>;\s*rel="next"', headers.get("Link", ""))
             url = match.group(1) if match else None
         return items, total
@@ -1407,7 +1418,7 @@ def collect(
         if actor:
             try:
                 answer = gh.get(f"collaborators/{urllib.parse.quote(actor)}/permission")
-                raw["label_actor_permission"] = (answer or {}).get("permission")  # type: ignore[union-attr]
+                raw["label_actor_permission"] = answer.get("permission") if isinstance(answer, dict) else None
             except urllib.error.HTTPError:
                 raw["label_actor_permission"] = None
     # The rules read jobs only from each producer's newest live run at this head (``_check_producer``), so only

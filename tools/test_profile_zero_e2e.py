@@ -549,7 +549,11 @@ def _run_package(manifest_path: Path, guest: Path, package_dir: Path,
         or package.get("cache", {}).get("codegen_options", {}).get("profile") != "none"
     ):
         raise AssertionError(f"{manifest['id']} selected an HST codegen profile")
-    if not package.get("generated_objects"):
+    # Package schema 3 keeps no compiler objects; the build report records the
+    # objects the build compiled and linked.
+    if package.get("generated_objects") != []:
+        raise AssertionError(f"runtime package declares compiler objects for {manifest['id']}")
+    if not report.get("artifacts", {}).get("compiled_objects"):
         raise AssertionError(f"AOT code was not generated for {manifest['id']}")
 
     executable = package_dir / package["executable"]["path"]

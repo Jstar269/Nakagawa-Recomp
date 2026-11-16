@@ -118,7 +118,7 @@ a title that translates none has generated code unchanged.
 | `0x0e3c2e9d` | `sceMpegAvcDecode` | mpeg | `ppsspp-derived` | handler comment names PPSSPP; sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x0ed48fe2` | `sceKernelDeleteNotifyCallback` | kernel_thread | `unverified` | no recorded evidence |
 | `0x0f6c18d7` | `sceMpegAvcDecodeDetail` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
-| `0x0facab19` | `sceIoWriteAsync` | io | `synthetic` | HLE selftest dispatch |
+| `0x0facab19` | `sceIoWriteAsync` | io | `synthetic` | HLE selftest dispatch; note |
 | `0x0fae370e` | `sceAtracSetHalfwayBufferAndGetID` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0x1078c008` | `scePsmfPlayerStop` | mpeg | `synthetic` | HLE selftest dispatch |
 | `0x109f50bc` | `sceIoOpen` | io | `hardware-measured` | PSP oracle PSP-IO-001 |

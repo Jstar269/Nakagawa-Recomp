@@ -177,7 +177,7 @@ try:
     from .public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS
     from .public_export import build_control_document as _build_control_document
     from .public_export import build_document as _build_export_document
-    from .publication_policy import PolicyError, load_policy
+    from .publication_policy import Policy, PolicyError, load_policy
 except ImportError:
     from nk_core.git_isolation import isolated_git_env  # type: ignore[no-redef]
     from provenance_ledger import (  # type: ignore[no-redef]
@@ -191,7 +191,7 @@ except ImportError:
     from public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS  # type: ignore[no-redef]
     from public_export import build_control_document as _build_control_document  # type: ignore[no-redef]
     from public_export import build_document as _build_export_document  # type: ignore[no-redef]
-    from publication_policy import PolicyError, load_policy  # type: ignore[no-redef]
+    from publication_policy import Policy, PolicyError, load_policy  # type: ignore[no-redef]
 
 #: The policy digest and the two ``tree_derived_fields`` lists a committed
 #: control may record, derived as ``public_export`` derives them (its
@@ -1300,7 +1300,7 @@ def _export_field_findings(declared: dict, generated: dict, *, label: str) -> li
     return findings
 
 
-def _excluded_by_both(path: str, trusted_policy, candidate_policy) -> bool:
+def _excluded_by_both(path: str, trusted_policy: Policy, candidate_policy: Policy) -> bool:
     """True when the trusted and the candidate policy both keep ``path`` out of scope."""
     return (
         trusted_policy.resolve(path).disposition == "excluded"
@@ -1886,8 +1886,8 @@ def generate_ephemeral_controls(
     trusted_raw = trusted_ledger.read_bytes()
     exact_records, record_patterns, record_ids = load_trusted_records(trusted_raw)
     approvals = load_trusted_approvals(trusted_raw) if require_exact_blob_approvals else {}
-    for (approved_path, _digest), approval in approvals.items():
-        if approval["record_id"] not in record_ids:
+    for (approved_path, _digest), reviewed_approval in approvals.items():
+        if reviewed_approval["record_id"] not in record_ids:
             raise VerifyError(
                 "TRUSTED_LEDGER_INVALID",
                 f"a blob approval for {approved_path} cites a record that does not exist",
@@ -1929,6 +1929,11 @@ def generate_ephemeral_controls(
         candidate_document = strict_json(
             delta_policy_bytes, code="CANDIDATE_POLICY_INVALID", label="blessed candidate policy",
         )
+        if policy_delta_authority_file is None:
+            raise VerifyError(
+                "POLICY_DELTA_ARGUMENT_REQUIRED",
+                "--trusted-candidate-policy needs --policy-delta-authority",
+            )
         try:
             allowed_delta = _read_policy_delta_authority(
                 policy_delta_authority_file,
@@ -2597,8 +2602,8 @@ def verify(
     trusted_raw = trusted_ledger.read_bytes()
     exact_records, record_patterns, record_ids = load_trusted_records(trusted_raw)
     approvals = load_trusted_approvals(trusted_raw) if require_exact_blob_approvals else {}
-    for (approved_path, _digest), approval in approvals.items():
-        if approval["record_id"] not in record_ids:
+    for (approved_path, _digest), reviewed_approval in approvals.items():
+        if reviewed_approval["record_id"] not in record_ids:
             raise VerifyError(
                 "TRUSTED_LEDGER_INVALID",
                 f"a blob approval for {approved_path} cites a record that does not exist",

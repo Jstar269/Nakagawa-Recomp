@@ -19,7 +19,8 @@ never decrypted or run.
 
 - Host replacements of game-shipped libraries shrink over time instead of growing; each one carries an issue to
   move it to LLE.
-- Hardware behaviour below the boundary is measured on a real PSP and labelled synthetic until it is.
+- Hardware behaviour below the boundary is measured on a real PSP and labelled synthetic until it is, or carries
+  the emulator-derived label of `AGENTS.md` section 7 (`PPSSPP-derived, not PSP-measured`).
 - Work that only adds HLE coverage ranks below work that makes more guest code run.
 
 ## Links

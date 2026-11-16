@@ -510,7 +510,7 @@ ADD TO STEAM on the title page opens a flow card, 640 px wide, over it (#2152). 
 this PC when it opens and writes nothing until ADD TO STEAM is chosen. The eyebrow is ADD TO STEAM with an
 `accent_dark` diamond, then the game's name in `TITLE` and one `BODY_S` `muted` line: "Adds a shortcut to your
 Steam library that starts this game directly, for Steam Input and Big Picture. Nakagawa changes only Steam's list
-of non-Steam games on this PC, after saving a copy of it, and downloads nothing." A box follows: STARTS in
+of non-Steam games and shortcut artwork on this PC, after saving a copy of it, and downloads nothing." A box follows: STARTS in
 `LABEL_S` `muted` over the command in `DATA` (the program's file name and its launch options, such as
 `nakagawa_player.exe --launch-title=ULUS10041`), and, for a single account, STEAM ACCOUNT over its name. With
 several accounts, WHICH STEAM ACCOUNT? in `LABEL_S` `muted` heads a row of small buttons, one per account, named
