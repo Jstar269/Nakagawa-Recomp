@@ -1615,6 +1615,198 @@ class PackageCacheTests(unittest.TestCase):
         with self.assertRaises(package_cache.PackageCacheError):
             package_cache.cache_entry_limit({package_cache.CACHE_LIMIT_ENV: "0"})
 
+    def test_cache_cleanup_preserves_all_package_entries_and_one_previous(self) -> None:
+        cache_root = package_cache.cache_root(self.root / "user-data", "TEST00001")
+        entries_root = cache_root / "entries"
+        entries = []
+        for index in range(6):
+            entry = entries_root / f"{index + 1:016x}"
+            (entry / "package").mkdir(parents=True)
+            os.utime(entry, (index + 1, index + 1))
+            entries.append(entry)
+
+        active = (entries[0], entries[2], entries[4])
+        removed, remaining = package_cache.prune_cache(
+            cache_root,
+            max_entries=len(active) + 1,
+            protected_entries=active,
+        )
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(remaining, len(active) + 1)
+        for entry in active:
+            self.assertTrue(entry.is_dir(), entry)
+        self.assertTrue(entries[5].is_dir(), "the newest unreferenced entry is the one previous build kept")
+        self.assertFalse(entries[1].exists())
+        self.assertFalse(entries[3].exists())
+
+    def test_runtime_package_v3_validates_without_generated_objects(self) -> None:
+        package_dir, key, cache = self._new_package_dir("runtime-v3")
+        package_path = package_dir / "package.json"
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+        package["schema_version"] = 3
+        package["generated_objects"] = []
+        package_path.write_text(package_cache.canonical_json(package), encoding="utf-8")
+        (package_dir / "synthetic_recomp.o").unlink()
+        (package_dir / "build-report.json").write_text(
+            _aot_gap_report(cache, 0), encoding="utf-8"
+        )
+        package_cache.write_completion_manifest(
+            package_dir, key, title_input_identity=self.identity,
+        )
+
+        valid, reason = package_cache.validate_package_cache(package_dir, expected_key=key)
+
+        self.assertTrue(valid, reason)
+
+    def test_runtime_package_cleanup_keeps_manifested_runtime_files_and_aot_stage(self) -> None:
+        package_dir, key, cache = self._new_package_dir("runtime-cleanup")
+        package_path = package_dir / "package.json"
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+        package["schema_version"] = 3
+        package["generated_objects"] = []
+        package_path.write_text(package_cache.canonical_json(package), encoding="utf-8")
+        (package_dir / "synthetic_recomp.c").write_text("generated C", encoding="utf-8")
+        (package_dir / "synthetic_recomp.d").write_text("dependency", encoding="utf-8")
+        (package_dir / "synthetic.map").write_text("link map", encoding="utf-8")
+        (package_dir / "link-objects.rsp").write_text("response", encoding="utf-8")
+        (package_dir / "synthetic_recomp.mk").write_text("make rules", encoding="utf-8")
+        (package_dir / "synthetic_recomp_funcs.h").write_text("generated header", encoding="utf-8")
+        (package_dir / "synthetic_imports.toml").write_text("imports", encoding="utf-8")
+        (package_dir / "synthetic_recomp_coverage.json").write_text("{}", encoding="utf-8")
+        (package_dir / "codegen_profile.json").write_text("{}", encoding="utf-8")
+        (package_dir / "runtime_profile.json").write_text("{}", encoding="utf-8")
+        (package_dir / ".codegen-profile-12345678").write_text("stamp", encoding="utf-8")
+        staged_inputs = package_dir / "staged-inputs"
+        staged_inputs.mkdir()
+        (staged_inputs / "selected.elf").write_bytes(b"staged input")
+        (package_dir / "SDL3.dll").write_bytes(b"runtime dll")
+        (package_dir / "synthetic_recomp_stubs.txt").write_text("stub report", encoding="utf-8")
+        modules = package_dir / "modules"
+        modules.mkdir()
+        (modules / "guest.prx").write_bytes(b"guest module")
+        data = package_dir / "data"
+        data.mkdir()
+        (data / "title.dat").write_bytes(b"runtime data")
+
+        stage_dir = self.root / "aot-stage"
+        stage_dir.mkdir()
+        required = title_codegen_plan._aot_required_outputs("synthetic")
+        for relative in required:
+            path = stage_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if relative == "synthetic_image.bin":
+                path.write_bytes((package_dir / relative).read_bytes())
+            elif relative == "synthetic_recomp_stubs.txt":
+                path.write_bytes((package_dir / relative).read_bytes())
+            else:
+                path.write_text("aot output", encoding="utf-8")
+        (stage_dir / "runtime_profile.json").write_text("{}", encoding="utf-8")
+        (stage_dir / ".recomp-profile-abcdef12").write_text("stamp", encoding="utf-8")
+        (stage_dir / "synthetic_recomp.d").write_text("dependency", encoding="utf-8")
+        package_cache.write_completion_manifest(stage_dir, key, title_input_identity=self.identity)
+
+        nk_cli._trim_aot_stage(stage_dir, key, self.identity, "synthetic")
+        removed, _removed_bytes = nk_cli._trim_runtime_package(
+            package_dir, "synthetic", stage_dir
+        )
+        (package_dir / "build-report.json").write_text(
+            _aot_gap_report(cache, 0), encoding="utf-8"
+        )
+        package_cache.write_completion_manifest(
+            package_dir, key, title_input_identity=self.identity
+        )
+        valid, reason = package_cache.validate_package_cache(package_dir, expected_key=key)
+
+        self.assertGreater(removed, 0)
+        self.assertTrue(valid, reason)
+        self.assertTrue((package_dir / "synthetic.exe").is_file())
+        self.assertTrue((package_dir / "synthetic_image.bin").is_file())
+        self.assertTrue((package_dir / "synthetic_recomp_stubs.txt").is_file())
+        self.assertTrue((package_dir / "SDL3.dll").is_file())
+        self.assertTrue((package_dir / "modules" / "guest.prx").is_file())
+        self.assertTrue((package_dir / "data" / "title.dat").is_file())
+        self.assertTrue((package_dir / "synthetic_image.bin").samefile(stage_dir / "synthetic_image.bin"))
+        self.assertTrue((package_dir / "synthetic_recomp_stubs.txt").samefile(
+            stage_dir / "synthetic_recomp_stubs.txt"
+        ))
+        for name in (
+            "synthetic_recomp.o", "synthetic_recomp.c", "synthetic_recomp.d",
+            "synthetic.map", "link-objects.rsp", "synthetic_recomp.mk",
+            "synthetic_recomp_funcs.h", "synthetic_imports.toml",
+            "synthetic_recomp_coverage.json", "codegen_profile.json",
+            "runtime_profile.json", ".codegen-profile-12345678",
+        ):
+            self.assertFalse((package_dir / name).exists(), name)
+        self.assertFalse(staged_inputs.exists())
+        self.assertTrue((stage_dir / "synthetic_recomp.c").is_file())
+        self.assertTrue((stage_dir / "synthetic_recomp_opt.mk").is_file())
+        self.assertFalse((stage_dir / "runtime_profile.json").exists())
+        self.assertFalse((stage_dir / ".recomp-profile-abcdef12").exists())
+        self.assertFalse((stage_dir / "synthetic_recomp.d").exists())
+
+    def test_aot_stage_cache_key_is_shared_across_native_rebuilds(self) -> None:
+        cache_root = package_cache.cache_root(self.root / "user-data", "TEST00001")
+        first = self.key()
+        second = self.key(compiler="gcc:updated")
+        self.assertNotEqual(first["native"]["digest"], second["native"]["digest"])
+        self.assertEqual(
+            package_cache.aot_stage_root(cache_root, first),
+            package_cache.aot_stage_root(cache_root, second),
+        )
+
+    def test_player_cache_pruning_keeps_all_installed_package_entries(self) -> None:
+        user_root = self.root / "user-data"
+        cache_root = package_cache.cache_root(user_root, "TEST00001")
+        packages_root = user_root / "packages"
+        packages_root.mkdir(parents=True)
+        keys = [self.key(compiler=f"gcc:installed-{index}") for index in range(2)]
+        installed_entries = []
+        for index, key in enumerate(keys):
+            entry = package_cache.cache_entry_root(cache_root, key)
+            (entry / "package").mkdir(parents=True)
+            os.utime(entry, (index + 1, index + 1))
+            installed_entries.append(entry)
+            package_dir = packages_root / (
+                "TEST00001" if index == 0 else "TEST00001-enhanced-variant"
+            )
+            package_dir.mkdir()
+            (package_dir / "package.json").write_text(
+                package_cache.canonical_json({
+                    "format": "nakagawa-aot-package",
+                    "schema_version": 3,
+                    "cache": {"key": key},
+                }),
+                encoding="utf-8",
+            )
+            stage = package_cache.aot_stage_root(cache_root, key)
+            stage.mkdir(parents=True, exist_ok=True)
+
+        stage_root = cache_root / "aot-stages"
+        previous_stages = []
+        for index in range(5):
+            stage = stage_root / f"{index + 40:016x}"
+            stage.mkdir(parents=True)
+            os.utime(stage, (index + 40, index + 40))
+            previous_stages.append(stage)
+
+        for index in range(10):
+            entry = cache_root / "entries" / f"{index + 20:016x}"
+            (entry / "package").mkdir(parents=True)
+            os.utime(entry, (index + 20, index + 20))
+
+        nk_cli._prune_package_cache(cache_root)
+
+        for entry in installed_entries:
+            self.assertTrue(entry.is_dir(), entry)
+        remaining = [entry for entry in (cache_root / "entries").iterdir() if entry.is_dir()]
+        self.assertEqual(len(remaining), len(installed_entries) + 1)
+        active_stage = package_cache.aot_stage_root(cache_root, keys[0])
+        remaining_stages = [entry for entry in stage_root.iterdir() if entry.is_dir()]
+        self.assertTrue(active_stage.is_dir())
+        self.assertEqual(len(remaining_stages), 2)
+        self.assertTrue(previous_stages[-1].is_dir())
+
     def test_cache_root_is_private_and_public_scope_rejects_tracked_cache(self) -> None:
         user_root = self.root / "user-data"
         cache = package_cache.cache_root(user_root, "test00001")

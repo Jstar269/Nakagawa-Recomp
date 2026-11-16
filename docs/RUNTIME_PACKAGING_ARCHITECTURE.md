@@ -120,7 +120,11 @@ Roadmap items decided with the table:
   ([`RELEASE_SIGNING.md`](RELEASE_SIGNING.md#sign-the-windows-binaries-authenticode)) and waits for the
   maintainer's certificate, which stays a maintainer decision.
 
-## 5. Local AOT package contract (v2)
+## 5. Local AOT package contract (v3)
+
+The player accepts both package schema v2 and v3. Existing v2 packages keep
+their generated-object list and completion manifest unchanged; new player builds
+write v3 runtime packages.
 
 The planner can run the existing analyzer, code generator, and two-phase Make
 pipeline for a plaintext executable ELF. Run it from the repository root with the
@@ -198,17 +202,28 @@ directory, so it does not apply to the data root.
 
 | Field | Meaning |
 | --- | --- |
-| `format`, `schema_version` | `nakagawa-aot-package`, version `2`. |
+| `format`, `schema_version` | `nakagawa-aot-package`, version `3` for new packages; the player continues to accept v2. |
 | `title` | Manifest `id`, display name, kind, raw manifest SHA-256, and protected-semantics digest. |
 | `inputs` | SHA-256 for the manifest, executable ELF, selected PRXs with load addresses, and optional PSP header. Absolute input paths are omitted. |
 | `title_input_identity` | Versioned exact local inputs: manifest/profile and schema, DISC_ID/region/DISC_VERSION, selected PARAM.SFO facts, ISO container facts (format, volume ID, size, PVD sector and sector size; the other keys `inspect_iso` reports, such as the `format_warnings` notes and the `source_format` of a compressed image, are not part of the record), decrypted main executable name/hash, required guest PRX names/hashes, raw selected executable and required module hashes from their ISO members, and optional PSP-header hash/magic. Retail hashes remain only in per-user package data. |
 | `runtime` | `CpuState` ABI version and header hash, resolved guest run entry, runtime contract, bindings, and required bindings. |
 | `executable` | Relative native executable path and hash plus the guest ELF entry address. |
-| `generated_objects` | Sorted relative object paths and SHA-256 hashes. |
+| `generated_objects` | Empty in v3 runtime packages. V2 packages retain their sorted object paths and hashes. Compiled objects stay in the bounded object cache; generated C stays in the AOT-stage cache for compatible rebuilds. |
 | `required_local_assets` | Manifest title-data/resource roots, selected or optional guest PRXs, and host SDL3/SDL3_ttf/Vulkan runtime requirements. These are references; title assets are not copied into the package. |
 | `build_report` | Relative path `build-report.json`. |
 | `cache` | Versioned AOT/native cache key, codegen options, and runtime ABI compatibility decision. |
-| `completion-manifest.json` | Completion marker containing the cache key, the exact title input identity, and SHA-256 for every published artifact; written last. |
+| `completion-manifest.json` | Completion marker containing the cache key, the exact title input identity, and SHA-256 for every file retained in the package; written last. |
+
+The v3 player package contains the files needed to launch and validate the
+title: its executable, runtime DLLs, generated guest image, declared guest
+modules, runtime data/assets, notices, package/build reports, completion
+manifest, and the small stub report used by the CLI diagnostics. Compiler
+outputs, staged input copies, profile stamps/reports, and generated import/header
+files are removed after a successful build. A v3 completion manifest is then
+written over the retained file set and validated before promotion. This does not
+weaken artifact checking: every retained file is still covered by the manifest
+and hashed by the player. V2 packages continue to be checked with their original
+manifest and generated-object rules.
 
 The cache key includes the canonical `title_input_identity` digest. The same
 record is stored under `<user data>/title-input-identities/<DISC_ID>/` and the
@@ -345,16 +360,23 @@ changed component (`aot:executable_sha256`, `native:compiler_identity`, and so
 on) for the CLI, player preflight, and Doctor.
 
 The private cache root is `<user data>/cache/packages/<DISC_ID>/`, never the
-repository. Builds are written to a content-addressed entry below that root,
-assembled in a staging directory, and promoted with a directory rename. The
-completion manifest is written last as `completion-manifest.json`; it contains
-the canonical cache key and a SHA-256 record for every published file. Missing,
-incomplete, symlinked, or digest-mismatched completion entries are not valid
-packages and cannot be launched. The player and launcher report the failed
-component and the `build-package <DISC_ID>` action instead of falling back to a
-possibly stale executable. Completed cache entries are bounded to eight by
-default; set `NK_AOT_CACHE_MAX_ENTRIES` to a positive per-title limit. Cleanup
-never follows entry symlinks and preserves the entry used by the current build.
+repository. Runtime packages are written to a content-addressed entry below that
+root, assembled in a staging directory, and promoted with a directory rename.
+On the same volume, the installed package hard-links its files to the cache
+entry; a cross-volume promotion copies them. Cleanup protects every cache entry
+named by an installed package variant and retains at most one unreferenced
+previous entry per disc. AOT-stage directories share generated C by its
+generated-code digest and keep the active stages plus at most one previous
+stage. Cleanup never follows symlinks. The completion manifest contains the
+canonical cache key and a SHA-256 record for every retained package file.
+Because hard-linked package and cache files share bytes, damage to an installed
+artifact also invalidates its cache copy. The next build verifies the AOT stage
+and rebuilds from the current title inputs/object cache; it never promotes the
+damaged entry.
+Missing, incomplete, symlinked, or digest-mismatched completion entries are not
+valid packages and cannot be launched. The player and launcher report the
+failed component and the `build-package <DISC_ID>` action instead of falling
+back to a possibly stale executable.
 
 The cache contains private title-derived bytes and is intentionally outside the
 public export and provenance tree. Publication policy remains default-deny for

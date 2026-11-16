@@ -1786,14 +1786,102 @@ def _stage_runtime_assets(package_dir: Path) -> None:
                   "The player will use its bitmap fallback font.", file=sys.stderr)
 
 
+def _installed_package_cache_references(
+    cache_dir: Path,
+) -> tuple[set[Path], set[str]] | None:
+    """Return installed package entries/stages that pruning must leave intact.
+
+    An unreadable v2/v3 package manifest makes the references ambiguous. In that
+    case pruning is skipped instead of risking an entry the installed package
+    still needs for repair.
+    """
+    if cache_dir.is_symlink():
+        return None
+    cache_dir = cache_dir.resolve(strict=False)
+    disc_id = cache_dir.name.upper()
+    try:
+        user_root = cache_dir.parents[2]
+    except IndexError:
+        return None
+    packages_root = user_root / "packages"
+    if packages_root.is_symlink():
+        return None
+    if not packages_root.is_dir():
+        return set(), set()
+    try:
+        package_dirs = list(packages_root.iterdir())
+    except OSError:
+        return None
+
+    protected_entries: set[Path] = set()
+    protected_stages: set[str] = set()
+    for package_dir in package_dirs:
+        if not (
+            package_dir.name.upper() == disc_id
+            or package_dir.name.upper().startswith(disc_id + "-")
+        ):
+            continue
+        if package_dir.is_symlink():
+            return None
+        if not package_dir.is_dir():
+            continue
+        package_path = package_dir / "package.json"
+        if package_path.is_symlink():
+            return None
+        if not package_path.is_file():
+            continue
+        try:
+            document = package_cache.read_bounded_json(package_path)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(document, dict):
+            return None
+        schema = document.get("schema_version")
+        if type(schema) is not int:
+            return None
+        if schema < 2:
+            continue
+        if schema not in {2, 3}:
+            return None
+        cache_key = package_cache.package_cache_key(package_dir)
+        if cache_key is None:
+            return None
+        entry = package_cache.cache_entry_root(cache_dir, cache_key)
+        if entry.is_dir() and not entry.is_symlink():
+            protected_entries.add(entry)
+        try:
+            protected_stages.add(package_cache.aot_stage_cache_key(cache_key))
+        except package_cache.PackageCacheError:
+            return None
+    return protected_entries, protected_stages
+
+
 def _prune_package_cache(cache_dir: Path, protected_entry: Path | None = None) -> None:
+    references = _installed_package_cache_references(cache_dir)
+    if references is None:
+        print("CACHE_PRUNE_SKIPPED: installed package identity is unreadable; cache entries retained")
+        return
+    protected_entries, protected_stages = references
+    if protected_entry is not None:
+        protected_entry = protected_entry.resolve(strict=False)
+        if protected_entry.is_dir() and not protected_entry.is_symlink():
+            protected_entries.add(protected_entry)
+    previous_limit = package_cache.cache_entry_limit()
     removed, remaining = package_cache.prune_cache(
         cache_dir,
-        max_entries=package_cache.cache_entry_limit(),
-        protected_entry=protected_entry,
+        max_entries=len(protected_entries) + previous_limit,
+        protected_entries=protected_entries,
     )
-    if removed:
-        print(f"CACHE_PRUNED: removed {removed} old entries; retained {remaining}")
+    removed_stages, remaining_stages = package_cache.prune_aot_stages(
+        cache_dir,
+        protected_stage_keys=protected_stages,
+        max_previous=previous_limit,
+    )
+    if removed or removed_stages:
+        print(
+            f"CACHE_PRUNED: removed {removed} package entries and {removed_stages} AOT stages; "
+            f"retained {remaining} entries and {remaining_stages} AOT stages"
+        )
 
 
 def _package_codegen_options(manifest: dict, environment: dict[str, str]) -> dict:
@@ -2030,28 +2118,93 @@ def _package_disk_space_message(needed_bytes: int, free_bytes: int, *, remaining
 
 
 def _is_disk_full_error(exc: OSError) -> bool:
-    return exc.errno == errno.ENOSPC or getattr(exc, "winerror", None) in {39, 112}
+    if exc.errno == errno.ENOSPC or getattr(exc, "winerror", None) in {39, 112}:
+        return True
+    if isinstance(exc, shutil.Error) and exc.args and isinstance(exc.args[0], list):
+        return any(
+            isinstance(item, tuple) and len(item) >= 3
+            and isinstance(item[2], OSError) and _is_disk_full_error(item[2])
+            for item in exc.args[0]
+        )
+    return False
 
 
 def _require_package_staging_space(package_dir: Path, destination_dir: Path) -> int:
     """Fail before package promotion when known file data exceeds destination free space."""
     needed_bytes = _package_tree_file_bytes(package_dir)
     free_bytes = shutil.disk_usage(destination_dir).free
-    if needed_bytes > free_bytes:
+    if not _same_volume(package_dir, destination_dir) and needed_bytes > free_bytes:
         raise PackageBuildError(_package_disk_space_message(needed_bytes, free_bytes))
     return needed_bytes
+
+
+def _same_volume(left: Path, right: Path) -> bool:
+    try:
+        return os.stat(left).st_dev == os.stat(right).st_dev
+    except OSError:
+        return False
+
+
+def _link_fallback_allowed(exc: OSError) -> bool:
+    return (
+        exc.errno in {errno.EACCES, errno.EPERM, errno.EXDEV}
+        or exc.errno in {getattr(errno, "ENOTSUP", -1), getattr(errno, "EOPNOTSUPP", -1)}
+        or getattr(exc, "winerror", None) in {1, 5, 17, 50, 1314}
+    )
+
+
+def _hardlink_or_copy(
+    source: str, destination: str, copy_stats: dict[str, int] | None = None
+) -> str:
+    """Share immutable package files on one volume; copy when linking is unavailable."""
+    try:
+        os.link(source, destination)
+    except OSError as exc:
+        if not _link_fallback_allowed(exc):
+            raise
+        size = os.stat(source).st_size
+        if copy_stats is not None:
+            copy_stats["fallback_bytes"] += size
+        try:
+            shutil.copy2(source, destination)
+        except OSError:
+            if copy_stats is not None and Path(destination).is_file():
+                copy_stats["copied_bytes"] += min(
+                    size, Path(destination).stat().st_size
+                )
+            raise
+        if copy_stats is not None:
+            copy_stats["copied_bytes"] += size
+    return destination
 
 
 def _copy_package_tree_with_space_diagnostics(
     package_dir: Path, staging_dir: Path, destination_dir: Path, needed_bytes: int
 ) -> None:
+    copy_stats = {"fallback_bytes": 0, "copied_bytes": 0}
+    directories: list[tuple[Path, Path]] = []
     try:
-        shutil.copytree(package_dir, staging_dir)
+        staging_dir.mkdir(parents=True)
+        directories.append((package_dir, staging_dir))
+        for source in sorted(package_dir.rglob("*")):
+            if source.is_symlink():
+                raise PackageBuildError("Package copy source contains a symlink.")
+            relative = source.relative_to(package_dir)
+            destination = staging_dir / relative
+            if source.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+                directories.append((source, destination))
+            elif source.is_file():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                _hardlink_or_copy(str(source), str(destination), copy_stats)
+        for source, destination in reversed(directories):
+            shutil.copystat(source, destination)
     except OSError as exc:
         if not _is_disk_full_error(exc):
             raise
-        copied_bytes = _package_tree_file_bytes(staging_dir) if staging_dir.exists() else 0
-        remaining_bytes = max(0, needed_bytes - copied_bytes)
+        remaining_bytes = max(
+            0, copy_stats["fallback_bytes"] - copy_stats["copied_bytes"]
+        )
         free_bytes = shutil.disk_usage(destination_dir).free
         raise PackageBuildError(
             _package_disk_space_message(remaining_bytes, free_bytes, remaining=True)
@@ -3203,7 +3356,11 @@ def _package_cache_check(st):
             target_dir,
             expected_key=cache_key,
         )
-    if target_valid and decision.action == "reuse":
+    target_schema = (
+        package_cache.package_manifest_schema_version(target_dir)
+        if target_valid else None
+    )
+    if target_valid and target_schema == 3 and decision.action == "reuse":
         _prune_package_cache(cache_dir)
         if not reporter.is_json_stdout:
             print(f"PACKAGE_REUSED: {target_dir}")
@@ -3227,11 +3384,12 @@ def _package_cache_check(st):
     if entry_root.is_symlink():
         raise PackageBuildError("Package cache entry is a symlink; refusing to reuse it.")
     if entry_package.is_dir() and not entry_package.is_symlink():
-        entry_valid, entry_reason = package_cache.validate_package_cache(
+        entry_valid, _entry_reason = package_cache.validate_package_cache(
             entry_package,
             expected_key=cache_key,
         )
-        if entry_valid:
+        entry_schema = package_cache.package_manifest_schema_version(entry_package)
+        if entry_valid and entry_schema == 3:
             _promote_cache_entry(entry_package, target_dir, cache_dir, cache_key, user_root, disc_id)
             _prune_package_cache(cache_dir, entry_root)
             if not reporter.is_json_stdout:
@@ -3246,11 +3404,37 @@ def _package_cache_check(st):
             _report_reused_package_stages(stage_observer)
             reporter.close()
             return 0
+        # A v2 cache entry still launches, but it carries build outputs in the
+        # package tree. Rebuild it once as v3; the AOT stage below becomes the
+        # reusable generated-code source for later native rebuilds.
         if entry_package.is_symlink():
             raise PackageBuildError("Package cache entry is a symlink; refusing to replace it.")
-        shutil.rmtree(entry_package)
     elif entry_package.exists():
         raise PackageBuildError("Package cache entry is not a directory; refusing to replace it.")
+
+    from title_codegen_plan import _aot_required_outputs, _package_game_name
+
+    game_name = _package_game_name(manifest, None)
+    aot_stage_dir = package_cache.aot_stage_root(cache_dir, cache_key)
+    aot_stage_root = aot_stage_dir.parent
+    if aot_stage_root.is_symlink():
+        raise PackageBuildError("AOT stage cache root is a symlink; refusing to write outside per-user data.")
+    aot_stage_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _require_child(user_root, aot_stage_dir, "AOT stage cache")
+    if aot_stage_dir.is_symlink() or (aot_stage_dir.exists() and not aot_stage_dir.is_dir()):
+        raise PackageBuildError("AOT stage cache entry is not a safe directory.")
+    stage_decision = package_cache.evaluate_aot_stage(
+        aot_stage_dir,
+        cache_key,
+        required_paths=_aot_required_outputs(game_name),
+    )
+    if stage_decision.accepted:
+        args.aot_stage_reusable = True
+    else:
+        if aot_stage_dir.exists():
+            shutil.rmtree(aot_stage_dir)
+        args.aot_stage_reusable = False
+    args.aot_stage_dir = aot_stage_dir
     st.cache_key = cache_key
     st.decision = decision
     st.enhancement_package_path = enhancement_package_path
@@ -3280,9 +3464,10 @@ def _package_codegen(st):
         st.target_dir,
         st.target_valid,
     )
+    aot_stage_dir = getattr(args, "aot_stage_dir", None)
     reuse_source = None
     native_only = False
-    if target_valid and decision.generated_c_reusable:
+    if aot_stage_dir is None and target_valid and decision.generated_c_reusable:
         reuse_source = target_dir
         native_only = decision.action == "native-recompile"
     entry_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -3337,16 +3522,21 @@ def _package_codegen(st):
         command.extend(("--reuse-aot-from", str(reuse_source)))
     if native_only:
         command.append("--native-only")
-    aot_stage_dir = getattr(args, "aot_stage_dir", None)
-    if aot_stage_dir is not None and reuse_source is not None:
-        # The previous package's validated generated C is compiled; nothing is generated.
-        _record_aot_stage_result(args, "NOT_RUN", "PACKAGE_CACHE_REUSED")
+    if aot_stage_dir is not None and getattr(args, "aot_stage_reusable", False):
+        # Generated C lives in the validated AOT-stage cache, not the installed
+        # runtime package. The planner repeats the stage check before copying.
+        _record_aot_stage_result(args, "REUSED", "NONE")
         if stage_observer is not None:
             stage_observer("codegen", "PASS", 0)
+        command.extend(("--reuse-aot-stage", str(aot_stage_dir)))
     elif aot_stage_dir is not None:
         # The codegen stage: the generation phase alone, through the same planner,
         # inputs and environment as the package build below. The package build then
         # compiles this output only if it passes the native-only reuse checks.
+        if aot_stage_dir.exists():
+            raise PackageBuildError(
+                "Generated-code stage cache must be empty before code generation."
+            )
         reporter.report("compile", "START", "Translating the game's code")
         if stage_observer is not None:
             stage_observer("codegen", "START", 0)
@@ -3497,13 +3687,143 @@ def _package_compile(st):
         )
 
 
+_PACKAGE_PROFILE_FILES = frozenset({
+    "codegen_profile.json", "runtime_profile.json", "recomp_profile.json",
+})
+_PACKAGE_COMPILER_SUFFIXES = frozenset({".c", ".o", ".d", ".map", ".rsp", ".mk", ".rc"})
+
+
+def _remove_package_build_outputs(
+    root: Path,
+    game_name: str,
+    *,
+    aot_stage: bool = False,
+) -> tuple[int, int]:
+    """Drop build-only outputs while keeping the AOT files a stage must compile."""
+    removed = 0
+    removed_bytes = 0
+    for path in list(root.rglob("*")):
+        if path.is_symlink():
+            raise PackageBuildError("Package build output contains a symlink; refusing to clean it.")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        name = path.name
+        suffix = path.suffix.lower()
+        profile_stamp = package_cache._PROFILE_STAMP_HASH_RE.search(name) is not None
+        profile_file = name in _PACKAGE_PROFILE_FILES
+        generated_report = name == f"{game_name}_recomp_coverage.json"
+        generated_support = name in {
+            ".game-inputs", ".codegen-profile-entries",
+            ".runtime-profile-entries", ".runtime-invalidate.lst",
+        }
+        generated_imports = name == f"{game_name}_imports.toml"
+        if aot_stage:
+            # The stage keeps every generated C chunk and the helpers named by
+            # _aot_required_outputs(); it does not need compiler outputs or the
+            # profile/stamp files that only make a completed build incremental.
+            discard = (
+                suffix in {".o", ".d", ".map", ".rsp", ".rc"}
+                or profile_stamp or profile_file or generated_report or generated_support
+                or relative.startswith("staged-inputs/")
+            )
+        else:
+            discard = (
+                suffix in _PACKAGE_COMPILER_SUFFIXES
+                or profile_stamp or profile_file or generated_report or generated_support
+                or generated_imports
+                or name == f"{game_name}_recomp_funcs.h"
+                or name == "sr_title_config.h"
+                or relative.startswith("staged-inputs/")
+            )
+        if discard:
+            removed_bytes += path.stat().st_size
+            path.unlink()
+            removed += 1
+    staged_inputs = root / "staged-inputs"
+    if staged_inputs.is_symlink():
+        raise PackageBuildError("Package staged-input directory is a symlink; refusing to clean it.")
+    if staged_inputs.is_dir():
+        for path in staged_inputs.rglob("*"):
+            if path.is_symlink():
+                raise PackageBuildError("Package staged inputs contain a symlink; refusing to clean them.")
+        shutil.rmtree(staged_inputs)
+    return removed, removed_bytes
+
+
+def _link_aot_runtime_artifact(package_dir: Path, aot_stage_dir: Path, name: str) -> bool:
+    """Link an identical runtime artifact to its cache-stage copy when possible."""
+    source = aot_stage_dir / name
+    destination = package_dir / name
+    if (
+        source.is_symlink() or destination.is_symlink()
+        or not source.is_file() or not destination.is_file()
+    ):
+        return False
+    if package_cache.sha256_file(source) != package_cache.sha256_file(destination):
+        return False
+    handle, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.link-", dir=destination.parent
+    )
+    os.close(handle)
+    temporary = Path(temporary_name)
+    temporary.unlink()
+    try:
+        os.link(source, temporary)
+        os.replace(temporary, destination)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        return False
+    return True
+
+
+def _trim_aot_stage(
+    stage_dir: Path,
+    cache_key: dict,
+    title_input_identity: dict,
+    game_name: str,
+) -> None:
+    if stage_dir.is_symlink() or not stage_dir.is_dir():
+        raise PackageBuildError("Generated-code stage cache is not a safe directory.")
+    _remove_package_build_outputs(stage_dir, game_name, aot_stage=True)
+    package_cache.write_completion_manifest(
+        stage_dir,
+        cache_key,
+        title_input_identity=title_input_identity,
+    )
+    from title_codegen_plan import _aot_required_outputs
+
+    decision = package_cache.evaluate_aot_stage(
+        stage_dir,
+        cache_key,
+        required_paths=_aot_required_outputs(game_name),
+    )
+    if not decision.accepted:
+        raise PackageBuildError(f"Trimmed generated-code stage failed validation ({decision.detail}).")
+
+
+def _trim_runtime_package(
+    package_dir: Path,
+    game_name: str,
+    aot_stage_dir: Path | None,
+) -> tuple[int, int]:
+    removed, removed_bytes = _remove_package_build_outputs(package_dir, game_name)
+    if aot_stage_dir is not None:
+        for name in (f"{game_name}_image.bin", f"{game_name}_recomp_stubs.txt"):
+            _link_aot_runtime_artifact(package_dir, aot_stage_dir, name)
+    return removed, removed_bytes
+
+
 def _package_validate(st):
     """Stage runtime assets, write the completion manifest and validate the build."""
-    (actual_hash, build_dir, cache_key, entry, module_dir, reporter, stage_observer, title_input_identity) = (
+    (actual_hash, aot_stage_dir, build_dir, cache_key, entry, manifest, module_dir,
+     reporter, stage_observer, title_input_identity) = (
         st.actual_hash,
+        st.aot_stage_dir,
         st.build_dir,
         st.cache_key,
         st.entry,
+        st.manifest,
         st.module_dir,
         st.reporter,
         st.stage_observer,
@@ -3538,6 +3858,34 @@ def _package_validate(st):
         "Fonts: import your own PSP fonts; the public PGF reader is available for supported inputs.",
         "PGD-protected data: unavailable; broader ISO-to-Play support is in the works.",
     ]
+    try:
+        package_json = package_cache.read_bounded_json(build_dir / "package.json")
+    except (OSError, ValueError) as exc:
+        raise PackageBuildError(f"Generated package metadata is unreadable before cleanup: {exc}") from exc
+    if not isinstance(package_json, dict) or package_json.get("schema_version") != 3:
+        raise PackageBuildError("Runtime package cleanup requires package schema v3.")
+    if package_json.get("generated_objects") != []:
+        raise PackageBuildError("Runtime package schema v3 must not declare generated objects.")
+    executable = package_json.get("executable")
+    executable_path = executable.get("path") if isinstance(executable, dict) else None
+    if not isinstance(executable_path, str):
+        raise PackageBuildError("Generated package executable path is missing before cleanup.")
+    from title_codegen_plan import _package_game_name
+
+    game_name = _package_game_name(manifest, None)
+    aot_stage_root = st.cache_dir / "aot-stages"
+    uses_cache_stage = (
+        aot_stage_dir is not None
+        and not aot_stage_root.is_symlink()
+        and aot_stage_dir.resolve(strict=False).is_relative_to(aot_stage_root.resolve(strict=False))
+    )
+    if uses_cache_stage and aot_stage_dir is not None:
+        _trim_aot_stage(aot_stage_dir, cache_key, title_input_identity, game_name)
+    removed_files, removed_bytes = _trim_runtime_package(
+        build_dir, game_name, aot_stage_dir if uses_cache_stage else None,
+    )
+    if removed_files:
+        print(f"PACKAGE_RUNTIME_ONLY: removed {removed_files} build outputs ({removed_bytes} bytes)")
     package_cache.write_completion_manifest(
         build_dir,
         cache_key,
@@ -3552,7 +3900,6 @@ def _package_validate(st):
     if not valid_package:
         raise PackageBuildError(f"Generated package failed cache verification: {package_reason}")
 
-    package_json = json.loads((build_dir / "package.json").read_text(encoding="utf-8"))
     if package_json.get("title", {}).get("id") != entry["title_id"] or \
             package_json.get("inputs", {}).get("executable", {}).get("sha256") != actual_hash:
         raise PackageBuildError("Generated package identity or input hash differs from the library entry.")
