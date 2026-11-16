@@ -298,16 +298,13 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             with self.subTest(hard_stop=rule):
                 self.assertRuleStated(hard_stop_bullets, terms, f"the hard stop: {rule}")
 
-        standing = [block for block in section_3_blocks if block.startswith("**Standing hardware authorization.**")]
-        self.assertEqual(len(standing), 1, "section 3 needs one standing hardware authorization paragraph")
-        for terms in (
-            ("non-destructive", "per-turn authorization", "hardware-lock protocol", "one holder at a time"),
-            ("revoke", "return to per-turn authorization"),
-            ("never covers", "destructive writes", "tags", "releases", "credentials", "disclosure of private inputs"),
-            ("requested from the maintainer", "never simulated"),
-        ):
-            with self.subTest(standing_authorization=terms):
-                self.assertRuleStated(standing, terms, "the bounds of the standing hardware authorization")
+        hardware = [block for block in section_3_blocks if block.startswith("**PSP hardware.**")]
+        self.assertEqual(len(hardware), 1, "section 3 needs one PSP hardware paragraph")
+        self.assertRuleStated(
+            hardware,
+            ("only as its user directs", "physical steps", "never simulated", "device writes", "forbidden"),
+            "the bounds of a contributor's PSP use",
+        )
 
         execution_contracts = (
             (118, ("fail-closed", "analyzer-owned", "fail closed", "not an all-Allegrex interpreter")),
@@ -373,19 +370,19 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             with self.subTest(surface=".github/REVIEW.md", required=required):
                 self.assertIn(required, review)
 
-    def test_agents_states_safekeeping_push_and_landing_priority(self):
+    def test_agents_keeps_the_maintainer_workspace_process_out_of_the_public_contract(self):
+        # The maintainer's own workspace, hardware and landing procedure lives outside the
+        # repository; the public file says so, states that it can only add rules, and keeps
+        # the integration and merge boundaries every contributor relies on.
         content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertRuleStated(
-            _blocks(_section(content, 8)),
-            ("maintainer's agents", "planned", "early", "safe", "reason", "Nobody pushes to `main`"),
-            "the maintainer's safekeeping push of a topic branch",
-        )
-        maintainer = _blocks(content[content.index("## Maintainer process"):])
-        self.assertRuleStated(
-            maintainer,
-            ("Landing speed comes first", "never skips a review", "required gate"),
-            "the maintainer landing priority",
-        )
+        self.assertNotRegex(content, r"(?m)^## Maintainer process")
+        self.assertNotIn("Standing hardware authorization", content)
+        intro = " ".join(_blocks(content[: content.index("## Where to start")]))
+        self.assertRuleStated([intro], ("outside this repository", "only add", "never relax"), "the split")
+        section_10 = _blocks(_section(content, 10))
+        self.assertRuleStated(section_10, ("**Integration**", "full required hosted CI is green", "goes back to its author"),
+                              "the public integration boundary")
+        self.assertRuleStated(section_10, ("nobody bypasses", "required checks"), "the merge boundary")
 
     def test_agents_scopes_opt_in_network_approval(self):
         content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
