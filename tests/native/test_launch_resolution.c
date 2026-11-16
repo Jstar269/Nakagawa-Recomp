@@ -280,6 +280,9 @@ static int write_launch_environment_probe(void) {
     const char *host_time_zone = getenv("SR_HOST_TIME_ZONE");
     const char *code_capture = getenv("SR_CODE_CAPTURE");
     const char *boot_path = getenv("SR_BOOT_PATH");
+    const char *adhoc_enabled = getenv("SR_ADHOC_ENABLED");
+    const char *adhoc_server = getenv("SR_ADHOC_SERVER");
+    const char *adhoc_offset = getenv("SR_ADHOC_PORT_OFFSET");
     char nickname_utf8[512];
     const char *nickname = probe_env_utf8("SR_NICKNAME", nickname_utf8, sizeof(nickname_utf8));
     int ok = fprintf(f,
@@ -314,7 +317,10 @@ static int write_launch_environment_probe(void) {
                      "SR_HOST_TIME_ZONE=%s\n"
                      "SR_CODE_CAPTURE=%s\n"
                      "SR_BOOT_PATH=%s\n"
-                     "SR_NICKNAME=%s\n",
+                     "SR_NICKNAME=%s\n"
+                     "SR_ADHOC_ENABLED=%s\n"
+                     "SR_ADHOC_SERVER=%s\n"
+                     "SR_ADHOC_PORT_OFFSET=%s\n",
                      iso ? iso : "<unset>",
                      unrelated ? unrelated : "<unset>",
                      fps ? fps : "<unset>",
@@ -346,7 +352,10 @@ static int write_launch_environment_probe(void) {
                      host_time_zone ? host_time_zone : "<unset>",
                      code_capture ? code_capture : "<unset>",
                      boot_path ? boot_path : "<unset>",
-                     nickname ? nickname : "<unset>") >= 0;
+                     nickname ? nickname : "<unset>",
+                     adhoc_enabled ? adhoc_enabled : "<unset>",
+                     adhoc_server ? adhoc_server : "<unset>",
+                     adhoc_offset ? adhoc_offset : "<unset>") >= 0;
     if (fclose(f) != 0) ok = 0;
     /* Subtest 21 sets NK_LAUNCH_TEST_HOLD so the probe stays alive long
      * enough for nk_launch_stop to have a running child to stop. */
@@ -574,6 +583,14 @@ static void test_no_iso_child_environment(const char *test_executable,
     bool had_code_capture;
     char *old_code_capture = capture_environment_value("SR_CODE_CAPTURE", &had_code_capture);
     restore_environment_value("SR_CODE_CAPTURE", NULL, false);
+    /* Nor inherited opt-in ad hoc online play (#1139): offline stays forced to 0/empty. */
+    bool had_adhoc_en, had_adhoc_srv, had_adhoc_off;
+    char *old_adhoc_en = capture_environment_value("SR_ADHOC_ENABLED", &had_adhoc_en);
+    char *old_adhoc_srv = capture_environment_value("SR_ADHOC_SERVER", &had_adhoc_srv);
+    char *old_adhoc_off = capture_environment_value("SR_ADHOC_PORT_OFFSET", &had_adhoc_off);
+    set_environment_value("SR_ADHOC_ENABLED", "1");
+    set_environment_value("SR_ADHOC_SERVER", "poisoned.adhoc.example:27312");
+    set_environment_value("SR_ADHOC_PORT_OFFSET", "9999");
 
     /* The enhanced build launches or nothing does (docs/ENHANCEMENT_CONTRACT.md
        section 9): with no packages/<disc>-enhanced-<id>, neither the developer
@@ -757,6 +774,11 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strcmp(session.config.nickname, NK_NICKNAME_DEFAULT) == 0);
     assert(strstr(observed, "SR_NICKNAME=Player\n") != NULL);
     assert(strstr(observed, "poisoned-parent-nickname") == NULL);
+    assert(strstr(observed, "SR_ADHOC_ENABLED=0\n") != NULL);
+    assert(strstr(observed, "SR_ADHOC_SERVER=\n") != NULL);
+    assert(strstr(observed, "poisoned.adhoc.example") == NULL);
+    assert(strstr(observed, "SR_ADHOC_PORT_OFFSET=\n") != NULL);
+    assert(strstr(observed, "9999") == NULL);
     assert(strcmp(session.config.ace_spec, "off") == 0);   /* prepare_session's default */
     assert(strstr(observed, "SR_ACE=off\n") != NULL);
     assert(strstr(observed, "SR_ACE_REPORT=\n") != NULL);   /* the parent's path is masked */
@@ -807,6 +829,10 @@ static void test_no_iso_child_environment(const char *test_executable,
     /* The nickname the player chose reaches the child as SR_NICKNAME (#2197). */
     snprintf(session.config.nickname, sizeof(session.config.nickname), "%s",
              "Kaz \xE3\x83\x8A");
+    /* Opt-in online play reaches the child only when explicitly enabled with a valid server (#1139). */
+    session.config.online_play = true;
+    snprintf(session.config.online_play_server, sizeof(session.config.online_play_server),
+             "%s", "socom.cc");
     /* An Ace Mode session exports its line and, with it, the report path. */
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
              "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off");
@@ -837,6 +863,9 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_DEVELOPER_MODE=1\n") != NULL);
     assert(strstr(observed, "SR_REDUCE_MOTION=off\n") != NULL);
     assert(strstr(observed, "SR_NICKNAME=Kaz \xE3\x83\x8A\n") != NULL);
+    assert(strstr(observed, "SR_ADHOC_ENABLED=1\n") != NULL);
+    assert(strstr(observed, "SR_ADHOC_SERVER=socom.cc\n") != NULL);
+    assert(strstr(observed, "SR_ADHOC_PORT_OFFSET=10000\n") != NULL);
     assert(strstr(observed, "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off\n") != NULL);
     assert(strstr(observed, "SR_TEX_REPLACE=\n") != NULL);
     assert(strstr(observed, "fixture-pack-folder") == NULL);
@@ -855,6 +884,8 @@ static void test_no_iso_child_environment(const char *test_executable,
     restore_environment_value("SR_CODE_CAPTURE", old_code_capture, had_code_capture);
     free(old_code_capture);
     session.enhancement_package_id[0] = '\0';
+    session.config.online_play = false;
+    session.config.online_play_server[0] = '\0';
     session.config.developer_mode = false;
     session.config.reduce_motion = NK_REDUCE_MOTION_SYSTEM;
     /* The acceptance checkpoint is evidence: an Enhanced or Ace line refuses to launch it. */
@@ -1331,6 +1362,12 @@ static void test_no_iso_child_environment(const char *test_executable,
     restore_environment_value("SR_DEVELOPER_MODE", old_developer, had_developer);
     restore_environment_value("SR_NICKNAME", old_nickname, had_nickname);
     free(old_nickname);
+    restore_environment_value("SR_ADHOC_ENABLED", old_adhoc_en, had_adhoc_en);
+    free(old_adhoc_en);
+    restore_environment_value("SR_ADHOC_SERVER", old_adhoc_srv, had_adhoc_srv);
+    free(old_adhoc_srv);
+    restore_environment_value("SR_ADHOC_PORT_OFFSET", old_adhoc_off, had_adhoc_off);
+    free(old_adhoc_off);
     free(old_developer);
     restore_environment_value("SR_LAUNCHER_DISPLAY_BOUNDS", old_launcher_display,
                               had_launcher_display);

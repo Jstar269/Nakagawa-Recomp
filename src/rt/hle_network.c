@@ -8,7 +8,11 @@
 // Copyright (c) 2012- PPSSPP Project and contributors
 
 /* Networking: sceNet, sceHttp, sceSsl, sceWlan, and opt-in ad hoc networking (#1139).
- * Ad hoc semantics derived-translated from PPSSPP rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6.
+ * Lone-console sceWlan, sceNetInit/Term, and offline sceNetAdhocctl stay PSP-measured (see below).
+ * Online ad hoc tier: PPSSPP-derived, not PSP-measured (classified derived-translated from
+ * https://github.com/hrydgard/ppsspp rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6:
+ * Core/HLE/{proAdhoc.h,proAdhoc.cpp,sceNetAdhoc.cpp,sceNetAdhocMatching.cpp,ErrorCodes.h},
+ * Common/Net/NetAdhocCommon.h, Core/Net/AdhocTransportRelay.cpp).
  * Extracted from hle.c on 2026-10-31 (#307). */
 
 #include "hle_internal.h"
@@ -649,7 +653,17 @@ static void adhocctl_teardown(void) {
     if (uid) sched_service_kick(uid);
 }
 
+static int s_adhoc_tier_logged;
+
+static void adhoc_log_ppsspp_tier_once(void) {
+    if (s_adhoc_tier_logged) return;
+    s_adhoc_tier_logged = 1;
+    fprintf(stderr, "HLE: online ad hoc stack active (PPSSPP-derived, not PSP-measured; rev 3bc60270)\n");
+}
+
+/* PPSSPP-derived, not PSP-measured: attach NkAdhocTransport and log in using profile MAC/nick. */
 static int adhocctl_attach_online_transport(const uint8_t id13[13]) {
+    adhoc_log_ppsspp_tier_once();
     if (!console_profile_identity()) return 0;
     uint8_t nick_bytes[128];
     adhoc_fill_nickname(nick_bytes);
@@ -1024,6 +1038,9 @@ static uint32_t h_NetAdhocctlGetParameter(CpuState *s) {
     return 0u;
 }
 
+/* Online ad hocctl peer/scan/lookup extensions (#1139):
+ * PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270
+ * Core/HLE/proAdhoc.h & sceNetAdhoc.cpp SceNetAdhocctlScanInfoEmu / SceNetAdhocctlPeerInfoEmu). */
 static void write_peer_info_emu(uint32_t addr, uint32_t next_addr, const uint8_t mac[6],
                                 const uint8_t nick[128], uint64_t last_recv) {
     MEM_W32(addr, next_addr);
@@ -1220,7 +1237,9 @@ static uint32_t h_NetGetLocalEtherAddr(CpuState *s) {
     return 0u;
 }
 
-/* ---- sceNetAdhoc (PDP / PTP / PollSocket / SocketAlert) ----------------------------------- */
+/* ---- sceNetAdhoc (PDP / PTP / PollSocket / SocketAlert) -----------------------------------
+ * PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270
+ * Core/HLE/{proAdhoc.cpp,proAdhoc.h,sceNetAdhoc.cpp} and Common/Net/NetAdhocCommon.h). */
 
 #define ADHOC_MAX_SOCKETS 255
 #define ADHOC_SOCK_PDP 1
@@ -1460,6 +1479,7 @@ static uint32_t adhoc_pdp_recv_raw(int id, uint8_t src_mac[6], uint16_t *sport, 
 
 static uint32_t h_NetAdhocInit(CpuState *s) {
     if (!adhoc_online_mode()) return hle_adhoc_refuse_offline(s);
+    adhoc_log_ppsspp_tier_once();
     if (s_adhoc.inited) return SCE_NET_ADHOC_ERROR_ALREADY_INITIALIZED;
     s_adhoc.inited = 1;
     s_adhoc.gen++;
@@ -2147,7 +2167,9 @@ static uint32_t h_NetAdhocPollSocket(CpuState *s) {
     }
 }
 
-/* ---- sceNetAdhocMatching (over PDP socket, PPSSPP/PSP wire compatible) -------------------- */
+/* ---- sceNetAdhocMatching (over PDP socket, PPSSPP/PSP wire compatible) --------------------
+ * PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270
+ * Core/HLE/{sceNetAdhocMatching.cpp,sceNetAdhocMatching.h,proAdhoc.h}). */
 
 #define MATCH_MAX_CONTEXTS 15
 #define MATCH_MAX_PEERS 16
@@ -2674,6 +2696,7 @@ static void adhoc_close_sockets_and_matching(void) {
 
 static uint32_t h_NetAdhocMatchingInit(CpuState *s) {
     if (!adhoc_online_mode()) return hle_adhoc_refuse_offline(s);
+    adhoc_log_ppsspp_tier_once();
     if (s_matching.inited) return SCE_NET_ADHOC_MATCHING_ERROR_ALREADY_INIT;
     s_matching.pool_size = A0;
     s_matching.inited = 1;

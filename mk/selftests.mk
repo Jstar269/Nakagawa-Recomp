@@ -714,7 +714,8 @@ HLE_MEDIA_FOCUS_SRCS := src/rt/hle_mpeg.c src/rt/hle_display.c src/rt/hle_audio.
 # NC_OBJ_DIR is set here because the prerequisite list below is read before the Native Product Core
 # Tests block that used to define it.
 NC_OBJ_DIR := $(BUILD_ROOT)/native-core
-PSMF_MEDIA_FOCUSED_CORE_RT := $(addprefix $(BUILD_DIR)/,$(notdir $(patsubst %.c,%.o,$(filter src/core/%,$(RT_SRCS)))))
+PSMF_MEDIA_FOCUSED_SHARED_SRCS := $(filter $(PLAYER_CORE_SOURCES) $(PLAYER_PLAT_SOURCES),$(filter src/core/%,$(RT_SRCS)))
+PSMF_MEDIA_FOCUSED_CORE_RT := $(addprefix $(BUILD_DIR)/,$(notdir $(patsubst %.c,%.o,$(PSMF_MEDIA_FOCUSED_SHARED_SRCS))))
 PSMF_MEDIA_FOCUSED_RT_OBJS := $(filter-out $(PSMF_MEDIA_FOCUSED_CORE_RT),$(PSMF_MEDIA_RUNTIME_OBJS))
 PSMF_MEDIA_FOCUSED_OBJS := $(PSMF_MEDIA_FOCUSED_RT_OBJS) \
                            $(patsubst $(BUILD_DIR)/%,$(NC_OBJ_DIR)/core/%,$(PSMF_MEDIA_FOCUSED_CORE_RT))

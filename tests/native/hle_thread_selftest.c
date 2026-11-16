@@ -9636,11 +9636,13 @@ static void test_adhoc_offline_refusal_stays_closed(void) {
         {0x2a2a1e07u, "sceNetAdhocMatchingInit"},
         {0xca5eda6fu, "sceNetAdhocMatchingCreate"},
         {0x5e7f79c9u, "sceNetAdhocctlJoin"},
+        {0x8916c003u, "sceNetAdhocctlGetNameByAddr"},
+        {0x99560abeu, "sceNetAdhocctlGetAddrByName"},
+    };
+    static const struct { uint32_t nid; const char *name; } ctl_preinit_nids[] = {
         {0xe162cb14u, "sceNetAdhocctlGetPeerList"},
         {0x81aee1beu, "sceNetAdhocctlGetScanInfo"},
         {0x8db83fdcu, "sceNetAdhocctlGetPeerInfo"},
-        {0x8916c003u, "sceNetAdhocctlGetNameByAddr"},
-        {0x99560abeu, "sceNetAdhocctlGetAddrByName"},
     };
     const uint32_t loaded_end = adh_fixture_begin();
     hle_test_setenv("SR_ADHOC_ENABLED", NULL);
@@ -9666,6 +9668,17 @@ static void test_adhoc_offline_refusal_stays_closed(void) {
             snprintf(msg, sizeof(msg), "adhoc offline (pass %d): %s refuses with 0x80010086 (got 0x%08x)",
                      pass, offline_nids[i].name, rc);
             expect(rc == 0x80010086u, msg);
+        }
+        /* Lone-console adhocctl getters keep their PSP-measured pre-Init contract (0x80410b08)
+         * even when SR_ADHOC_SERVER is set without SR_ADHOC_ENABLED=1. */
+        for (size_t i = 0; i < sizeof(ctl_preinit_nids) / sizeof(ctl_preinit_nids[0]); i++) {
+            char msg[160];
+            memset(&cpu, 0, sizeof(cpu));
+            uint32_t rc = sr_syscall(&cpu, ctl_preinit_nids[i].nid);
+            snprintf(msg, sizeof(msg),
+                     "adhoc offline (pass %d): %s keeps pre-Init 0x80410b08 (got 0x%08x)",
+                     pass, ctl_preinit_nids[i].name, rc);
+            expect(rc == 0x80410b08u, msg);
         }
         hle_net_reset();
     }
@@ -9788,34 +9801,35 @@ static void adh_p2_loop_main_fn(CpuState *cpu) {
     expect(ADH_AT(0).event == 3 && ADH_AT(0).error == 0u, "adhoc loopnet: SCAN_COMPLETE fired");
     MEM_W32(ADH_P2_LEN, 256u);
     expect(adh(0x81aee1beu /* GetScanInfo */, ADH_P2_LEN, ADH_P2_BUF, 0u) == 0u &&
-           MEM_R32(ADH_P2_LEN) == 24u,
-           "adhoc loopnet: GetScanInfo returns one 24-byte entry");
+           MEM_R32(ADH_P2_LEN) == 28u,
+           "adhoc loopnet: GetScanInfo returns one 28-byte entry");
     char got_grp[9] = {0};
     for (int i = 0; i < 8; i++) got_grp[i] = (char)MEM_R8(ADH_P2_BUF + 8u + (uint32_t)i);
     expect(strcmp(got_grp, "NKLOOP01") == 0, "adhoc loopnet: GetScanInfo reports NKLOOP01");
 
-    /* Join NKLOOP01 and verify peer list / MAC matching / name resolution. */
-    expect(adh(0x5e7f79c9u /* Join */, adh_name(0, "NKLOOP01"), 0u, 0u) == 0u,
+    /* Join NKLOOP01 (passing the SceNetAdhocctlScanInfo struct returned by GetScanInfo)
+     * and verify peer list / MAC matching / name resolution (PeerInfoEmu = 152 bytes). */
+    expect(adh(0x5e7f79c9u /* Join */, ADH_P2_BUF, 0u, 0u) == 0u,
            "adhoc loopnet: Join starts");
     adh_p2_wait_state(cpu, 1u, 2u);
     expect(adh_state() == 1u && ADH_AT(1).event == 1, "adhoc loopnet: Join reaches CONNECTED");
     MEM_W32(ADH_P2_LEN, 512u);
     expect(adh(0xe162cb14u /* GetPeerList */, ADH_P2_LEN, ADH_P2_BUF, 0u) == 0u &&
-           MEM_R32(ADH_P2_LEN) == 144u,
-           "adhoc loopnet: GetPeerList returns 1 peer (144 bytes)");
+           MEM_R32(ADH_P2_LEN) == 152u,
+           "adhoc loopnet: GetPeerList returns 1 peer (152 bytes)");
     for (uint32_t i = 0u; i < 6u; i++) {
         MEM_W8(ADH_P2_PEER_MAC + i, p0_mac[i]);
         MEM_W8(ADH_P2_FLIP_MAC + i, i == 0u ? (uint8_t)(p0_mac[i] ^ 0x02u) : p0_mac[i]);
     }
-    expect(adh(0x8db83fdcu /* GetPeerInfo */, ADH_P2_FLIP_MAC, 144u, ADH_P2_STAT) == 0u,
+    expect(adh(0x8db83fdcu /* GetPeerInfo */, ADH_P2_FLIP_MAC, 152u, ADH_P2_STAT) == 0u,
            "adhoc loopnet: GetPeerInfo matches peer ignoring MAC byte 0");
     expect(adh(0x8916c003u /* GetNameByAddr */, ADH_P2_PEER_MAC, ADH_P2_NICK, 0u) == 0u &&
            MEM_R8(ADH_P2_NICK) == 'P',
            "adhoc loopnet: GetNameByAddr returns PeerZero");
-    MEM_W32(ADH_P2_LEN, 144u);
+    MEM_W32(ADH_P2_LEN, 152u);
     expect(adh(0x99560abeu /* GetAddrByName */, ADH_P2_NICK, ADH_P2_LEN, ADH_P2_BUF) == 0u &&
-           MEM_R32(ADH_P2_LEN) == 144u,
-           "adhoc loopnet: GetAddrByName returns 144-byte peer info");
+           MEM_R32(ADH_P2_LEN) == 152u,
+           "adhoc loopnet: GetAddrByName returns 152-byte peer info");
 
     /* sceNetAdhocInit + PDP send/recv/stat/delete. */
     expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u,
@@ -9838,7 +9852,7 @@ static void adh_p2_loop_main_fn(CpuState *cpu) {
     MEM_W32(ADH_P2_SDS, (uint32_t)pdp_id);
     MEM_W32(ADH_P2_SDS + 4u, 0x0002u /* ADHOC_EV_RECV */);
     MEM_W32(ADH_P2_SDS + 8u, 0u);
-    expect(adh(0x7a662d6bu /* PollSocket */, ADH_P2_SDS, 1u, 0u) == 1u &&
+    expect(adh(0x7a662d6bu /* PollSocket */, ADH_P2_SDS, 1u, 500000u) == 1u &&
            (MEM_R32(ADH_P2_SDS + 8u) & 0x0002u) != 0u,
            "adhoc loopnet: PollSocket reports PDP RECV");
     MEM_W32(ADH_P2_LEN, 64u);
@@ -9850,16 +9864,17 @@ static void adh_p2_loop_main_fn(CpuState *cpu) {
            "adhoc loopnet: PdpDelete succeeds");
 
     /* PTP listen/PollSocket(ACCEPT)/Accept/Send/Recv + PtpOpen/Connect. */
-    const int32_t ptp_srv = (int32_t)adh_call5(0xe08bdac1u /* PtpListen */, ADH_P2_SELF_MAC, 0x4001u,
-                                               0x1000u, 4u, 0u);
+    const int32_t ptp_srv = (int32_t)adh_call_full(0xe08bdac1u /* PtpListen */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0x4001u, 0x1000u,
+                                                   100000u, 3u, 4u /* backlog */, 0u, 0u);
     expect(ptp_srv > 0, "adhoc loopnet: PtpListen succeeds");
     int p0_cli = t0->ops->ptp_open(t0, 0x4009u, self_mac, 0x4001u);
     expect(p0_cli >= 0, "adhoc loopnet: Peer 0 connects to guest PTP listener");
     MEM_W32(ADH_P2_SDS, (uint32_t)ptp_srv);
-    MEM_W32(ADH_P2_SDS + 4u, 0x0004u /* ADHOC_EV_ACCEPT */);
+    MEM_W32(ADH_P2_SDS + 4u, 0x0008u /* ADHOC_EV_ACCEPT */);
     MEM_W32(ADH_P2_SDS + 8u, 0u);
-    expect(adh(0x7a662d6bu /* PollSocket */, ADH_P2_SDS, 1u, 0u) == 1u &&
-           (MEM_R32(ADH_P2_SDS + 8u) & 0x0004u) != 0u,
+    expect(adh(0x7a662d6bu /* PollSocket */, ADH_P2_SDS, 1u, 500000u) == 1u &&
+           (MEM_R32(ADH_P2_SDS + 8u) & 0x0008u) != 0u,
            "adhoc loopnet: PollSocket reports PTP ADHOC_EV_ACCEPT");
     const int32_t ptp_child = (int32_t)adh_call5(0x9df81198u /* PtpAccept */, (uint32_t)ptp_srv,
                                                  ADH_P2_BUF + 64u, ADH_P2_PORT, 0u, 1u);
@@ -9891,7 +9906,7 @@ static void adh_p2_loop_main_fn(CpuState *cpu) {
     expect(p0_lsn >= 0, "adhoc loopnet: Peer 0 PTP listener opens");
     const int32_t ptp_out = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29],
                                                    ADH_P2_SELF_MAC, 0u, ADH_P2_PEER_MAC, 0x4002u,
-                                                   0x1000u, 100000u, 3u, 500000u);
+                                                   0x1000u, 100000u, 3u, 0u);
     expect(ptp_out > 0 && adh(0xfc6fc07bu /* PtpConnect */, (uint32_t)ptp_out, 0u, 1u) == 0u,
            "adhoc loopnet: PtpOpen + PtpConnect connect synchronously over loopback");
     expect(adh(0x157e6225u /* PtpClose */, (uint32_t)ptp_out, 0u, 0u) == 0u,
@@ -9914,7 +9929,7 @@ static void adh_p2_loop_main_fn(CpuState *cpu) {
     expect(mid > 0, "adhoc loopnet: MatchingCreate returns valid context");
     for (uint32_t i = 0u; i < 5u; i++) MEM_W8(ADH_P2_OPT + i, (uint8_t)"HELLO"[i]);
     expect(adh_call_full(0x93ef3843u /* MatchingStart */, cpu->r[29], (uint32_t)mid,
-                         0x2000u, 0x30u, 0x2000u, 0x30u, 5u, ADH_P2_OPT, 0u) == 0u,
+                         0x30u, 0x2000u, 0x30u, 0x2000u, 5u, ADH_P2_OPT, 0u) == 0u,
            "adhoc loopnet: MatchingStart succeeds");
     /* Peer 0 sends JOIN with 2-byte opt, then DATA, then BYE. */
     const uint8_t join_pkt[7] = {2u, 2u, 0u, 0u, 0u, 'H', 'I'};
@@ -10104,12 +10119,12 @@ static void adh_p2_tcp_main_fn(CpuState *cpu) {
     for (int w = 0; w < 40; w++) {
         MEM_W32(ADH_P2_LEN, 256u);
         if (adh(0xe162cb14u /* GetPeerList */, ADH_P2_LEN, ADH_P2_BUF, 0u) == 0u &&
-            MEM_R32(ADH_P2_LEN) >= 144u)
+            MEM_R32(ADH_P2_LEN) >= 152u)
             break;
         cpu->r[4] = 25000u;
         (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
     }
-    expect(MEM_R32(ADH_P2_LEN) == 144u, "adhoc tcp loopback: GetPeerList sees LoopPeer");
+    expect(MEM_R32(ADH_P2_LEN) == 152u, "adhoc tcp loopback: GetPeerList sees LoopPeer");
     for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, peer_mac[i]);
     expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u,
            "adhoc tcp loopback: AdhocInit succeeds");
@@ -10185,13 +10200,12 @@ static void test_adhoc_online_real_tcp_loopback_e2e(void) {
     hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
     adh_fixture_end(loaded_end);
     srv.stop = 1;
+    adh_p2_close_sock(lsn);
 #ifdef _WIN32
     if (th) { WaitForSingleObject((HANDLE)th, 3000u); CloseHandle((HANDLE)th); }
-    adh_p2_close_sock(lsn);
     WSACleanup();
 #else
     if (pt_ok) pthread_join(th, NULL);
-    adh_p2_close_sock(lsn);
 #endif
 }
 
