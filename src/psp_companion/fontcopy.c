@@ -33,14 +33,6 @@ PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 
 #define FONTCOPY_PROGRESS_ROW 12
 
-/* What the copy reported, read from its records as they arrive. */
-typedef struct FontCopyView {
-    uint32_t done;
-    uint32_t failed;
-    uint32_t first_error;  /* the first failing copy's result; 0 when none */
-    uint32_t list_error;   /* the font folder listing's result when it failed; 0 otherwise */
-} FontCopyView;
-
 static FontFiles s_files;
 static FontCopyTarget s_target;
 static FontCopyView s_view;
@@ -70,12 +62,6 @@ static void fontcopy_start_exit_callback(void) {
     if (thread >= 0) sceKernelStartThread(thread, 0, NULL);
 }
 
-/* The word after " <key>=" in a record line; 0 when the key is absent. */
-static uint32_t fontcopy_field(const char *line, const char *key) {
-    const char *at = strstr(line, key);
-    return at != NULL ? (uint32_t)strtoul(at + strlen(key), NULL, 0) : 0u;
-}
-
 /* The file name after " detail=", up to the next space. */
 static void fontcopy_detail(const char *line, char *out, size_t size) {
     const char *at = strstr(line, " detail=");
@@ -94,24 +80,13 @@ static void fontcopy_detail(const char *line, char *out, size_t size) {
 static void fontcopy_emit(void *ctx, const char *line, size_t length) {
     FontCopyView *view = (FontCopyView *)ctx;
     (void)length;
-    if (strstr(line, " case_id=font-copy-") != NULL) {
+    if (fontcopy_view_record(view, line)) {
         char name[FONTFILES_NAME_MAX + 1u];
         fontcopy_detail(line, name, sizeof(name));
-        if (strstr(line, " status=PASS ") != NULL) {
-            view->done++;
-        } else {
-            view->failed++;
-            if (view->first_error == 0u) view->first_error = fontcopy_field(line, " result=");
-        }
         pspDebugScreenSetXY(0, FONTCOPY_PROGRESS_ROW);
         pspDebugScreenPrintf("Copying font %lu of %lu: %-40s",
                              (unsigned long)(view->done + view->failed),
                              (unsigned long)s_files.candidates, name);
-    } else if (strstr(line, " case_id=font-dir-open ") != NULL &&
-               strstr(line, " status=FAIL ") != NULL) {
-        view->list_error = fontcopy_field(line, " result=");
-    } else if (strstr(line, " case_id=font-dest ") != NULL) {
-        view->first_error = fontcopy_field(line, " result=");
     }
 }
 
@@ -162,8 +137,11 @@ static int fontcopy_run(void) {
     pspDebugScreenPrintf(" Reading your PSP's fonts...\n");
     fontfiles_run(&s_files);
 
+    uint32_t code = 0u;
+    const FontCopyOutcome outcome = fontcopy_outcome(&s_files, &s_view, &code);
     fontcopy_title();
-    if (s_files.candidates > 0u && s_files.copied == s_files.candidates) {
+    switch (outcome) {
+    case FONTCOPY_ALL_COPIED:
         pspDebugScreenPrintf(" Done: all %lu fonts were copied and checked.\n",
                              (unsigned long)s_files.copied);
         pspDebugScreenPrintf(" They are in %s\n\n", s_target.folder);
@@ -174,23 +152,30 @@ static int fontcopy_run(void) {
         pspDebugScreenPrintf("  4. In Nakagawa Recomp, choose \"Get fonts from my PSP\".\n\n");
         pspDebugScreenPrintf(" Press X to leave.\n");
         return 1;
-    }
-    if (s_files.candidates == 0u) {
+    case FONTCOPY_NONE_FOUND:
         pspDebugScreenPrintf(" No font could be read from this PSP, so nothing was copied.\n");
         pspDebugScreenPrintf(" (Reading the font folder gave error 0x%08lX.)\n\n",
-                             (unsigned long)(s_view.first_error != 0u ? s_view.first_error
-                                                                      : s_view.list_error));
-    } else if (s_files.copied == 0u) {
+                             (unsigned long)code);
+        break;
+    case FONTCOPY_LISTING_CUT:
+        pspDebugScreenPrintf(" Reading the font folder stopped early (error 0x%08lX), so\n",
+                             (unsigned long)code);
+        pspDebugScreenPrintf(" fonts may be missing: %lu of the %lu fonts found were copied.\n\n",
+                             (unsigned long)s_files.copied, (unsigned long)s_files.candidates);
+        break;
+    case FONTCOPY_NONE_WRITTEN:
         pspDebugScreenPrintf(" The fonts could not be written to %s\n", s_target.folder);
         pspDebugScreenPrintf(" (error 0x%08lX). Check that the Memory Stick is in, is not\n",
-                             (unsigned long)s_view.first_error);
+                             (unsigned long)code);
         pspDebugScreenPrintf(" locked and has free space, then try again.\n\n");
-    } else {
+        break;
+    case FONTCOPY_SOME_COPIED:
         pspDebugScreenPrintf(" %lu of %lu fonts were copied; %lu could not be copied\n",
                              (unsigned long)s_files.copied, (unsigned long)s_files.candidates,
                              (unsigned long)(s_files.candidates - s_files.copied));
         pspDebugScreenPrintf(" (first error 0x%08lX). Check the Memory Stick and try again.\n\n",
-                             (unsigned long)s_view.first_error);
+                             (unsigned long)code);
+        break;
     }
     pspDebugScreenPrintf(" Press X to try again, or O to leave.\n");
     return 0;

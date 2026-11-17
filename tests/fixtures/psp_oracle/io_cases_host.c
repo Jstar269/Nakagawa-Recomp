@@ -52,7 +52,8 @@
  * Unlisted device paths answer 0x80010002. Numbers accept 0x prefixes; names are literal.
  * A flash0 font file answers sceIoLseek(SEEK_END) with its generated size.
  * Output: CALL, EMIT, STEP and HOST0 (one per stored destination copy) lines, then a SUMMARY
- * line; mode fontcopy prints a TARGET line first. */
+ * line; mode fontcopy prints a TARGET line first and, after the run, an OUTCOME line: the
+ * app's fontcopy_outcome verdict on the records and the error code it shows. */
 
 #include <stdint.h>
 #include <stdio.h>
@@ -643,9 +644,14 @@ int sceUmdGetDriveStat(void) {
     return s_umd_drive;
 }
 
+/* Mode fontcopy: the app's own view of the records (fontcopy_config.h), reported as OUTCOME. */
+static FontCopyView s_fontcopy_view;
+static int s_fontcopy_mode;
+
 static void harness_emit(void *ctx, const char *line, size_t length) {
     (void)ctx;
     printf("EMIT %.*s", (int)length, line);
+    if (s_fontcopy_mode) (void)fontcopy_view_record(&s_fontcopy_view, line);
 }
 
 static void harness_step(void *ctx, const char *step) {
@@ -794,9 +800,17 @@ int main(int argc, char **argv) {
             s_dest_dir = fonts.dest_dir;
             s_dest_parent = fonts.dest_parent;
             printf("TARGET parent=%s folder=%s\n", s_dest_parent, s_dest_dir);
+            s_fontcopy_mode = 1;
         }
         (void)snprintf(s_dest_prefix, sizeof(s_dest_prefix), "%s/", s_dest_dir);
         fontfiles_run(&fonts);
+        if (s_fontcopy_mode) {
+            static const char *const kinds[] = {"all-copied", "none-found", "listing-cut",
+                                                "none-written", "some-copied"};
+            uint32_t code = 0u;
+            const FontCopyOutcome kind = fontcopy_outcome(&fonts, &s_fontcopy_view, &code);
+            printf("OUTCOME kind=%s code=0x%08x\n", kinds[kind], (unsigned int)code);
+        }
     } else if (strcmp(argv[1], "umd") == 0) {
         static UmdIo umd;
         memset(&umd, 0, sizeof(umd));
