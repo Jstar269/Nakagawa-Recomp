@@ -13728,8 +13728,13 @@ class SafeScalarProbeTests(unittest.TestCase):
         self.assertEqual(self._define("SS_THREAD_WAIT_US"), 1000000)
         self.assertIn("SceUInt timeout = SS_THREAD_WAIT_US;", second)
         self.assertIn("sceKernelWaitThreadEnd(thid, &timeout)", second)
-        self.assertIn("(void)sceKernelDeleteThread(thid);", second)
         self.assertIn("(void)sceKernelTerminateDeleteThread(thid);", second)
+        # A thread that did not start is dormant: it is deleted, not terminated. One that
+        # ended in time is deleted after its words are read.
+        not_started = second[second.index("if (started < 0) {"):second.index("} else if (waited >= 0) {")]
+        self.assertIn("(void)sceKernelDeleteThread(thid);", not_started)
+        self.assertEqual(second.count("(void)sceKernelDeleteThread(thid);"), 2)
+        self.assertEqual(second.count("sceKernelTerminateDeleteThread("), 1)
 
 
 class HleIoSeekMemoryStickSetupAndCleanupTests(unittest.TestCase):

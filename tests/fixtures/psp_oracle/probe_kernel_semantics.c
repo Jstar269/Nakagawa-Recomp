@@ -1512,8 +1512,9 @@ static int ss_tls_thread(SceSize args, void *argp)
 }
 
 /* Result: sceKernelStartThread. Words: whether the thread was created, the bounded wait for
-   its end, its address in each of the two pools minus the main thread's, and its two frees.
-   Each pool has four blocks and two threads ask, so no request can wait for a block. */
+   its end (the start's own error when it did not start), its address in each of the two pools
+   minus the main thread's, and its two frees. Each pool has four blocks and two threads ask,
+   so no request can wait for a block. */
 static void ss_tls_second_thread(SceUID normal, SceUID high, uint32_t addr_normal,
                                  uint32_t addr_high)
 {
@@ -1541,7 +1542,10 @@ static void ss_tls_second_thread(SceUID normal, SceUID high, uint32_t addr_norma
     SceUInt timeout = SS_THREAD_WAIT_US;
     const int waited = started >= 0 ? sceKernelWaitThreadEnd(thid, &timeout) : started;
     w[1] = (uint32_t)waited;
-    if (waited >= 0) {
+    if (started < 0) {
+        /* Never started: the thread is dormant and is deleted as it is. */
+        (void)sceKernelDeleteThread(thid);
+    } else if (waited >= 0) {
         if (s_ss_t_addr[0] != 0u && addr_normal != 0u) {
             w[2] = s_ss_t_addr[0] - addr_normal;
         }

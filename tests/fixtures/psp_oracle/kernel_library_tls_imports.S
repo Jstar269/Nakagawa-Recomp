@@ -14,11 +14,13 @@
    sceKernelUnlockLwMutex, and the Makefile's import gate pins the library to
    exactly these three.
 
-   The version word 0x00010000 is the one the SDK's own Kernel_Library block
-   carries (a user-mode library, linked by direct jump, not by syscall). The
-   two lightweight-mutex NIDs were read from the PSPSDK libpspuser.a
-   `.rodata.sceNid` members; all three match src/rt/nid_names.h, and
-   sceKernelGetTlsAddr's is the first four bytes of the SHA-1 of its name. */
+   The version word 0x00010000 is the one the Kernel_Library entry carries in
+   the `.lib.stub` section of a probe linked against the PSPSDK's own stubs
+   with the toolchain these probes are built with (a user-mode library, linked
+   by direct jump, not by syscall). The two lightweight-mutex NIDs were read
+   from the PSPSDK libpspuser.a `.rodata.sceNid` members; all three match
+   src/rt/nid_names.h, and sceKernelGetTlsAddr's is the first four bytes of
+   the SHA-1 of its name. */
 
 #include "pspimport.s"
 
