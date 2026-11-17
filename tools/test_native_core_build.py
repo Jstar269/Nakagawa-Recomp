@@ -53,6 +53,7 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/mygame/osk_text_entry_selftest",
     "build/mygame/ace_selftest build/mygame",
     "build/mygame/motion_match_selftest",
+    "build/mygame/motion_tap_selftest",
     "build/mygame/fsr3_host_selftest tests/native/fsr3_host_oracle.txt",
     "build/mygame/fsr3_fg_host_selftest tests/native/fsr3_fg_host_oracle.txt",
     "build/mygame/fsr3_fg_state_selftest",
