@@ -384,6 +384,7 @@ static bool test_child_exited(int pid, unsigned timeout_ms) {
 }
 
 static void write_valid_elf(const char *path, uint32_t base, uint32_t entry);
+static void write_bytes(const char *path, const void *data, size_t size);
 static bool ends_with(const char *s, const char *suffix);
 static void make_game(NkGameEntry *game, const char *iso_path);
 
@@ -896,6 +897,31 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(nk_launch_start(&session) != NK_OK);
     assert(strstr(session.last_error, "Cheats are on") != NULL);
     session.config.headless_accept_presented_frames = 0u;
+    /* Nor does a package whose runtime was built before cheats existed (review of #2652): it
+       would start, apply nothing and show no marker. The launcher asks the executable whether
+       it reads the switch; this one, put in the package's place, does not. */
+    {
+        char kept[NK_MAX_PATH + 8];
+        char block[70000];
+        assert(nk_launch_runtime_reads_cheats(session.executable_path));
+        assert(snprintf(kept, sizeof(kept), "%s.kept", session.executable_path) < (int)sizeof(kept));
+        assert(rename(session.executable_path, kept) == 0);
+        write_file(session.executable_path, "an older runtime: it names SR_CHEATS_FIL and SR_CHEATS, never the file's variable");
+        assert(!nk_launch_runtime_reads_cheats(session.executable_path));
+        assert(nk_launch_start(&session) != NK_OK);
+        assert(strstr(session.last_error, "built before cheats existed") != NULL &&
+               strstr(session.last_error, "Rebuild the package to use cheats, or turn cheats off") != NULL);
+        /* The name is found wherever it lies, across the reader's block boundary too. */
+        memset(block, 'x', sizeof(block));
+        memcpy(block + 65536 - 5, "SR_CHEATS_" "FILE", 14u);
+        write_bytes(session.executable_path, block, sizeof(block));
+        assert(nk_launch_runtime_reads_cheats(session.executable_path));
+        memcpy(block + 65536 - 5, "SR_CHEATS_" "FILX", 14u);
+        write_bytes(session.executable_path, block, sizeof(block));
+        assert(!nk_launch_runtime_reads_cheats(session.executable_path));
+        assert(nk_launch_runtime_reads_cheats("no-such-package-executable"));
+        assert(remove(session.executable_path) == 0 && rename(kept, session.executable_path) == 0);
+    }
     /* A file the session names (the player's --cheats-file) is the one exported, while cheats
        are on; with them off it names nothing. */
     snprintf(session.config.cheats_file, sizeof(session.config.cheats_file), "named-cheats.ini");

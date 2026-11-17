@@ -65,6 +65,47 @@ static bool launch_join_path(const char *base, const char *relative,
                                    NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
 }
 
+/* Whether the runtime in a package's executable knows the cheats switch (#2639). A package is
+   linked with the runtime of the Nakagawa that built it, and one built before cheats existed
+   ignores SR_CHEATS without a word: no marker in its window and no line in its log. The
+   package's build identity (NkPackageBuildIdentity) says only that another Nakagawa built it,
+   not which one came first, and nothing else a package records names its runtime's features.
+   So the launcher asks the executable: a runtime that reads the switch holds the name of the
+   variable its file comes from in its data. An executable that cannot be read (or no memory
+   to read it with) answers true, so the launch itself reports what is wrong with it. */
+bool nk_launch_runtime_reads_cheats(const char *executable_path) {
+    static const char marker[] = "SR_CHEATS_" "FILE";
+    const size_t marker_len = sizeof(marker) - 1u;
+    const size_t block_size = 65536u;
+    unsigned char *block;
+    size_t kept = 0u;
+    bool found = false;
+    FILE *f;
+    if (!executable_path || !executable_path[0]) return true;
+    f = nk_fopen_utf8(executable_path, "rb");
+    if (!f) return true;
+    block = (unsigned char *)malloc(block_size);
+    if (!block) {
+        fclose(f);
+        return true;
+    }
+    for (;;) {
+        size_t got = fread(block + kept, 1u, block_size - kept, f);
+        size_t have = kept + got;
+        if (got == 0u) break;
+        for (size_t i = 0u; i + marker_len <= have && !found; i++) {
+            if (block[i] == (unsigned char)marker[0] && memcmp(block + i, marker, marker_len) == 0) found = true;
+        }
+        if (found) break;
+        /* Keep the tail a marker could start in. */
+        kept = have < marker_len - 1u ? have : marker_len - 1u;
+        memmove(block, block + have - kept, kept);
+    }
+    free(block);
+    fclose(f);
+    return found;
+}
+
 /* The cheat file a launch with cheats on names (#2639): the one the session names, else
    <user_data_root>/cheats/<DISC>.ini with the disc ID as the package folders spell it
    (ULUS12345). False, with `out_path` empty, when the session names none and has no per-user
@@ -1750,6 +1791,14 @@ NkResult nk_launch_start(NkLaunchSession *session) {
             if (session->config.headless_accept_presented_frames > 0u) {
                 snprintf(session->last_error, sizeof(session->last_error),
                          "Cheats are on; the acceptance checkpoint needs a run without them.");
+                return NK_ERROR_GENERIC;
+            }
+            /* A package built before cheats existed would start, apply nothing and say
+               nothing. It is not started that way. */
+            if (!nk_launch_runtime_reads_cheats(session->executable_path)) {
+                snprintf(session->last_error, sizeof(session->last_error),
+                         "Cheats are on, but this game's package was built before cheats existed "
+                         "and would ignore them. Rebuild the package to use cheats, or turn cheats off.");
                 return NK_ERROR_GENERIC;
             }
             (void)launch_cheats_file(session, cheats_file, sizeof(cheats_file));

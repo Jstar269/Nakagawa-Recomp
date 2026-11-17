@@ -287,6 +287,11 @@ NkResult nk_launch_prepare_session(
     const char *repo_or_install_root
 );
 
+/* Whether the runtime in a package's executable reads the cheats switch (#2639): false for a
+ * package built before cheats existed, which nk_launch_start refuses to start with cheats on
+ * instead of letting it ignore them silently. True when the file cannot be read. */
+bool nk_launch_runtime_reads_cheats(const char *executable_path);
+
 /* Start the prepared session, launching the native runtime as a child process.
  * Immediately before spawn the session identity and the resolved executable
  * path are re-checked against each other: a session whose executable or title
