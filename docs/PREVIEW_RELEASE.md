@@ -382,7 +382,9 @@ Each run's `$Zip`, `$SourceZip` and `$ZipRecord` are the first and second values
 
 ```powershell
 python tools/package_repro_check.py $ZipFirst $ZipSecond
+if ($LASTEXITCODE -ne 0) { throw 'The portable ZIPs differ.' }
 python tools/package_repro_check.py $SourceZipFirst $SourceZipSecond
+if ($LASTEXITCODE -ne 0) { throw 'The prerequisite-source ZIPs differ.' }
 # The two records must be byte-identical: same ZIP SHA-256, same source commit, same zlib.
 if ((Get-FileHash -LiteralPath $ZipRecordFirst).Hash -ne (Get-FileHash -LiteralPath $ZipRecordSecond).Hash) {
     throw 'The ZIP records differ.'
@@ -422,7 +424,7 @@ Before a maintainer treats the zip as publishable, inspect it with:
 $files = Get-ChildItem -LiteralPath $Stage -Recurse -File -Force
 $forbidden = @($files | Where-Object {
     $relative = [System.IO.Path]::GetRelativePath($Stage, $_.FullName).Replace('\', '/')
-    $_.Extension -match '^\.(iso|prx|elf|eboot|sav|key|pgf|pgd)$' -and
+    $_.Extension -match '^\.(iso|prx|elf|pbp|cso|sfo|bin|edat|pmf|at3|vag|gim|psar|chd|dax|sav|key|pgf|pgd)$' -and
         $relative -notmatch '^bin/font/nk[^/]*\.pgf$' -and
         $relative -notlike 'bin/demos/*'
 })
