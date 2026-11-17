@@ -3169,6 +3169,28 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertNotIn("(Ultra)", page["af"], "texture filtering is the library's own")
         self.assertNotIn("(Ultra)", page["smooth"])
 
+    def test_next_ui_enhanced_preset_edit_uses_the_displayed_value(self) -> None:
+        """Review #2644 D1: editing a part whose visible value comes from a preset makes it Custom."""
+        open_page = ("WAIT_MS=100",) + ("KEY_DOWN",) * 4 + ("KEY_RETURN", "WAIT_MS=150")
+        run = self.next_ui_run(
+            "settings",
+            open_page + ("KEY_TAB", "WAIT_MS=35") * 15 +
+            ("KEY_RIGHT", "WAIT_MS=150", "KEY_ESCAPE", "WAIT_MS=120"),
+            settings={"fps_cap": -1, "graphics_preset": "medium",
+                      "enhanced": {"default": "enhanced"}},
+        )
+        trail = self.focus_trail(run)
+        self.assertIn(self.enhanced_choice_focus(9, 0), trail,
+                      "the walk reaches Sharper enlarging's Off choice under Medium")
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        enhanced = settings.get("enhanced")
+        assert isinstance(enhanced, dict), settings
+        self.assertEqual(settings.get("graphics_preset"), "custom",
+                         "changing the effective preset value makes the preset Custom")
+        self.assertEqual(enhanced.get("upscale"), "off",
+                         "the displayed preset value can be changed to Off")
+
     ENHANCED_GROUPS = (
         ("Picture", (0, 4, 9, 15, 12, 13, 14, 19, 20, 1)),
         ("Motion and timing", (5,)),

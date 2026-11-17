@@ -3914,7 +3914,8 @@ void player_app_enhanced_page_set_part(PlayerApp *app, int part, int value_index
             player_graphics_preset_row(app->settings.graphics_preset);
         if (value_index < 0) return;
         int value = info->values[value_index];
-        if (app->settings.enhanced.part[part] == value) return;
+        int effective_value = player_settings_library_part(&app->settings, part);
+        if (effective_value == value) return;
         if (preset && preset->part[part] >= 0) graphics_preset_row_edited(app);
         app->settings.enhanced.part[part] = value;
         player_dev_log_add(app, "settings", "Enhanced %s for the library: %s", info->key,
