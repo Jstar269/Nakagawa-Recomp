@@ -10282,6 +10282,15 @@ typedef SOCKET adh_p2_sock_t;
 typedef int adh_p2_sock_t;
 #define ADH_P2_BAD_SOCK (-1)
 #define adh_p2_close_sock close
+/* usleep left POSIX in 2008, the edition this file asks for (_POSIX_C_SOURCE above), so <unistd.h>
+ * does not declare it and a call is an implicit declaration: a warning in GCC 13, an error from
+ * GCC 14 on. nanosleep is its replacement. */
+static void adh_p2_usleep(unsigned long us) {
+    struct timespec ts;
+    ts.tv_sec = (time_t)(us / 1000000ul);
+    ts.tv_nsec = (long)(us % 1000000ul) * 1000L;
+    (void)nanosleep(&ts, NULL);
+}
 #endif
 
 static int adh_p2_recv_exact(adh_p2_sock_t s, void *buf, size_t n) {
@@ -11081,7 +11090,7 @@ static int32_t d1_open_connected_ptp(CpuState *cpu, uint16_t lport, uint16_t dpo
 #ifdef _WIN32
         Sleep(2u);
 #else
-        usleep(2000);
+        adh_p2_usleep(2000);
 #endif
         cpu->r[4] = 2000u;
         (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
@@ -11695,7 +11704,7 @@ static void d4_main_fn(CpuState *cpu) {
 #ifdef _WIN32
             Sleep(1u);
 #else
-            usleep(1000);
+            adh_p2_usleep(1000);
 #endif
         }
     }
@@ -11714,7 +11723,7 @@ static void d4_main_fn(CpuState *cpu) {
 #ifdef _WIN32
         Sleep(1u);
 #else
-        usleep(1000);
+        adh_p2_usleep(1000);
 #endif
     }
 
@@ -11739,7 +11748,7 @@ static void d4_main_fn(CpuState *cpu) {
 #ifdef _WIN32
         Sleep(1u);
 #else
-        usleep(1000);
+        adh_p2_usleep(1000);
 #endif
     }
     snprintf(msg, sizeof(msg),
@@ -11800,7 +11809,7 @@ static void d3_step(CpuState *cpu) {
 #ifdef _WIN32
     Sleep(1u);
 #else
-    usleep(1000);
+    adh_p2_usleep(1000);
 #endif
     cpu->r[4] = 5000u;
     (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
@@ -11824,7 +11833,7 @@ static void d3_main_fn(CpuState *cpu) {
 #ifdef _WIN32
         Sleep(1u);
 #else
-        usleep(1000);
+        adh_p2_usleep(1000);
 #endif
         cpu->r[4] = 5000u;
         (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
@@ -11856,7 +11865,7 @@ static void d3_main_fn(CpuState *cpu) {
 #ifdef _WIN32
         Sleep(1u);
 #else
-        usleep(1000);
+        adh_p2_usleep(1000);
 #endif
         cpu->r[4] = 5000u;
         (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
@@ -11895,7 +11904,7 @@ static void d3_main_fn(CpuState *cpu) {
 #ifdef _WIN32
         Sleep(1u);
 #else
-        usleep(1000);
+        adh_p2_usleep(1000);
 #endif
         cpu->r[4] = 5000u;
         (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
@@ -12060,7 +12069,7 @@ static bool d9_slow_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ct
 #ifdef _WIN32
     Sleep(150u);
 #else
-    usleep(150000);
+    adh_p2_usleep(150000);
 #endif
     out_ipv4[0] = 127u; out_ipv4[1] = 0u; out_ipv4[2] = 0u; out_ipv4[3] = 1u;
     return true;
@@ -12090,7 +12099,7 @@ static void d89_main_fn(CpuState *cpu) {
 #ifdef _WIN32
             Sleep(2u);
 #else
-            usleep(2000);
+            adh_p2_usleep(2000);
 #endif
             cpu->r[4] = 5000u;
             (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
@@ -12121,7 +12130,7 @@ static void d89_main_fn(CpuState *cpu) {
 #ifdef _WIN32
             Sleep(2u);
 #else
-            usleep(2000);
+            adh_p2_usleep(2000);
 #endif
             cpu->r[4] = 5000u;
             (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
@@ -12159,7 +12168,7 @@ static void d89_main_fn(CpuState *cpu) {
 #ifdef _WIN32
         Sleep(5u);
 #else
-        usleep(5000);
+        adh_p2_usleep(5000);
 #endif
         cpu->r[4] = 5000u;
         (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
@@ -12179,7 +12188,7 @@ static void d89_main_fn(CpuState *cpu) {
 #ifdef _WIN32
         Sleep(2u);
 #else
-        usleep(2000);
+        adh_p2_usleep(2000);
 #endif
         cpu->r[4] = 5000u;
         (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
@@ -12239,7 +12248,7 @@ static void d7_step(CpuState *cpu, unsigned sleep_ms, uint32_t delay_us) {
 #ifdef _WIN32
         Sleep((DWORD)sleep_ms);
 #else
-        usleep((useconds_t)(sleep_ms * 1000u));
+        adh_p2_usleep((unsigned long)sleep_ms * 1000ul);
 #endif
     }
     if (s_d7_peer) s_d7_peer->ops->pump(s_d7_peer);
