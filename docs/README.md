@@ -306,7 +306,8 @@ preferring removal when the duplicate adds no value:
 
 - issue open/closed state: link the live issue, never restate its state
   (`STATUS.md` carries no state labels; `audit_public_issue_links.py`
-  enforces the At-a-glance rule where that section exists);
+  fails a Live work areas clause that says work remains but cites a closed
+  item, and a `STATUS.md` without that section);
 - HLE address/site/bucket and compatibility-override counts: cite
   `tools/test_compat_manifest.py` over `tools/compat_overrides.py`;
 - HLE registration-class and semantic-status counts (dedicated, fake-success,
