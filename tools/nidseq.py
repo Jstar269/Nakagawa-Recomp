@@ -73,6 +73,23 @@ def load_imports(path):
     return m, s0, s1
 
 
+def _stub_runs(imp):
+    """Contiguous stub runs from `imp`, bridging small gaps (<= 64 bytes) inside one stub table."""
+    if not imp:
+        return ()
+    ordered = sorted(imp)
+    runs = []
+    lo = hi = ordered[0]
+    for s in ordered[1:]:
+        if s - hi <= 64:
+            hi = s
+        else:
+            runs.append((lo, hi + 8))
+            lo = hi = s
+    runs.append((lo, hi + 8))
+    return tuple(runs)
+
+
 def nid_seq(trace, imp, s0, s1, limit=None):
     """Return the ordered [(stub_pc, (lib, nid)), ...] import-stub jr sequence.
 
@@ -80,30 +97,35 @@ def nid_seq(trace, imp, s0, s1, limit=None):
     or malformed lines are hard errors so truncation/corruption can never silently
     shrink the observed import sequence (issue #354).
     """
+    runs = _stub_runs(imp) if imp else ((s0, s1),)
     seq = []
-    with open(trace) as fh:
-        for lineno, line in enumerate(fh, 1):
-            if line[:1] == "#":
-                continue
-            p = line.split()
-            if len(p) < 3 or not p[1].startswith("pc=0x") or not p[2].startswith("op=0x"):
-                raise NidseqError(
-                    f"{trace}:{lineno}: malformed trace record (expected "
-                    f"'<step> pc=0x... op=0x... ...'): {line!r}"
-                )
-            try:
-                pc = int(p[1][3:], 16)
-            except ValueError:
-                raise NidseqError(f"{trace}:{lineno}: malformed pc field {p[1]!r}: {line!r}") from None
-            if s0 <= pc < s1 and p[2] == "op=0x03e00008":  # the stub's jr $ra line
-                # Unmapped stubs are keyed by PC so distinct unresolved stubs stay distinct.
-                seq.append((pc, imp.get(pc, ("?", pc))))
-                if limit is not None and len(seq) >= limit:
-                    break
+    lineno = 0
+    try:
+        with open(trace, encoding="ascii", errors="strict") as fh:
+            for lineno, line in enumerate(fh, 1):
+                if line[:1] == "#":
+                    continue
+                p = line.split(maxsplit=3)
+                if len(p) < 3 or not p[1].startswith("pc=0x") or not p[2].startswith("op=0x"):
+                    raise NidseqError(
+                        f"{trace}:{lineno}: malformed trace record (expected "
+                        f"'<step> pc=0x... op=0x... ...'): {line!r}"
+                    )
+                try:
+                    pc = int(p[1][3:], 16)
+                except ValueError:
+                    raise NidseqError(f"{trace}:{lineno}: malformed pc field {p[1]!r}: {line!r}") from None
+                if p[2] == "op=0x03e00008" and any(lo <= pc < hi for lo, hi in runs):  # the stub's jr $ra line
+                    # Unmapped stubs are keyed by PC so distinct unresolved stubs stay distinct.
+                    seq.append((pc, imp.get(pc, ("?", pc))))
+                    if limit is not None and len(seq) >= limit:
+                        break
+    except UnicodeDecodeError as e:
+        raise NidseqError(f"{trace}:{lineno or 1}: malformed trace record (undecodable bytes: {e})") from None
     return seq
 
 
-def verify_sequences(mine, orac, imp, allow_prefix):
+def verify_sequences(mine, orac, allow_prefix=False):
     """Exact-equality verification by default; --allow-prefix permits strict prefixes.
 
     Returns the process exit code. Fail-closed: zero compared imports, length mismatch,
@@ -181,15 +203,21 @@ def main(argv):
     print(f"stub range: 0x{s0:08x}..0x{s1:08x} ({len(imp)} imports)")
 
     informational = len(args) == 2
+    limit = DEFAULT_IMPORT_SCAN_LIMIT if informational else None
     try:
-        mine = nid_seq(args[1], imp, s0, s1, limit=DEFAULT_IMPORT_SCAN_LIMIT if informational else None)
+        mine = nid_seq(args[1], imp, s0, s1, limit=limit + 1 if limit is not None else None)
     except OSError as e:
         print(f"ERROR: cannot read trace {args[1]}: {e}", file=sys.stderr)
         return 2
     except NidseqError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
+    truncated = limit is not None and len(mine) > limit
+    if truncated:
+        mine = mine[:limit]
     print(f"{args[1]}: {len(mine)} imports")
+    if truncated:
+        print(f"TRUNCATED: stopped at {limit} imports (limit); remaining trace not scanned")
     for i, (_pc, (lib, nid)) in enumerate(mine[:40]):
         print(f"  {i:3} {lib}.0x{nid:08x}")
 
@@ -206,7 +234,7 @@ def main(argv):
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
     print(f"{args[2]}: {len(orac)} imports (oracle)")
-    return verify_sequences(mine, orac, imp, allow_prefix)
+    return verify_sequences(mine, orac, allow_prefix)
 
 
 if __name__ == "__main__":

@@ -106,6 +106,10 @@ class VariableImportTable:
     vstub_table: int
 
 
+def _rebase(v, base):
+    return v + base if v and base != 0 and v < base else v
+
+
 def _mapped_span(elf, addr, size):
     """True when [addr, addr + size) lies wholly inside one mapped span of ``elf``."""
     if size < 0 or addr < 0 or addr + size > 0x100000000:
@@ -272,16 +276,13 @@ def function_exports(elf, stubs):
 def variable_imports(elf):
     """Return every declared variable import with its reference sites, in table order.
 
-    The analyzer still refuses an image that declares variable imports (parse_imports):
-    this is the model the linking work reads. A reference of another type, a list that
+    parse_imports accepts variable imports; this function gives codegen the reference
+    sites, and the runtime linker patches them. A reference of another type, a list that
     leaves mapped input or runs past MAX_VARIABLE_REFERENCES, and a site outside the
     image are named boundaries.
     """
     try:
         _windows, tables, base = _walk_import_windows(elf)
-
-        def rebase(v):
-            return v + base if v and base != 0 and v < base else v
 
         result = []
         for table in tables:
@@ -294,7 +295,7 @@ def variable_imports(elf):
                         f"0x{table.vstub_table + 8 * index:08x} leaves mapped input",
                     )
                 refs_ptr, nid = struct.unpack("<II", pair)
-                refs_ptr = rebase(refs_ptr)
+                refs_ptr = _rebase(refs_ptr, base)
                 references = []
                 for slot in range(MAX_VARIABLE_REFERENCES + 1):
                     raw = _read_mapped(elf, refs_ptr + 4 * slot, 4) if refs_ptr else None
@@ -320,7 +321,7 @@ def variable_imports(elf):
                             f"{table.library} variable 0x{nid:08x}: reference type "
                             f"{word >> 26} is not a 32-bit, HI16 or LO16 relocation",
                         )
-                    site = rebase((refs_ptr & 0xF0000000) | ((word & 0x03FFFFFF) << 2))
+                    site = _rebase((refs_ptr & 0xF0000000) | ((word & 0x03FFFFFF) << 2), base)
                     target = _read_mapped(elf, site, 4)
                     if target is None:
                         raise ImportTableError(
@@ -432,8 +433,7 @@ def function_import_model(
 ) -> "tuple[dict[int, tuple[str, int]], list[str], tuple[VariableImportTable, ...]]":
     """Return (stubs, findings, variable_tables): parse_imports plus the windows that
     declare variables (variable_imports models those)."""
-    returned: tuple[dict[int, tuple[str, int]], list[str], tuple[VariableImportTable, ...]] = _function_import_model(elf)
-    return returned
+    return _function_import_model(elf)
 
 
 def function_import_windows(
@@ -466,10 +466,7 @@ def _walk_import_windows(elf):
             libstub += base
             libstubend += base
 
-    def rebase(v):
-        if v and base != 0 and v < base:
-            return v + base
-        return v
+    rebase = lambda v: _rebase(v, base)  # noqa: E731
 
     # Pass 1: walk the PspLibStubEntry window table (libstub..libstubend).
     if libstub > libstubend or not _mapped_span(elf, libstub, libstubend - libstub):
@@ -545,13 +542,10 @@ def _function_import_model(elf):
 
     # Passes 2-4: the shared layout model (psp_import_table.layout_import_windows)
     # pairs stub slots with NIDs for the audit parser and the analyzer alike.
-    def sec_base(s):
-        return s["addr"] + base if (base != 0 and s["addr"] < base) else s["addr"]
-
     st = elf.sec(".sceStub.text")
     nidsec = elf.sec(".rodata.sceNid")
-    stub_section = (sec_base(st), st["size"]) if st is not None else None
-    nid_section = (sec_base(nidsec), nidsec["size"]) if nidsec is not None else None
+    stub_section = (_rebase(st["addr"], base), st["size"]) if st is not None else None
+    nid_section = (_rebase(nidsec["addr"], base), nidsec["size"]) if nidsec is not None else None
 
     def read_nids(address, count):
         blob = _read_mapped(elf, address, count * 4)
@@ -587,8 +581,29 @@ def parse_imports(elf):
 
 
 def main(argv):
-    args = [a for a in argv[1:] if not a.startswith("--")]
-    opts = [a for a in argv[1:] if a.startswith("--")]
+    args = []
+    opts = []
+    out = None
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--toml":
+            if i + 1 >= len(argv):
+                sys.stderr.write("imports: --toml requires an output path\n")
+                return 2
+            out = argv[i + 1]
+            opts.append(a)
+            i += 2
+        elif a.startswith("--toml="):
+            out = a.split("=", 1)[1]
+            opts.append(a)
+            i += 1
+        elif a.startswith("--"):
+            opts.append(a)
+            i += 1
+        else:
+            args.append(a)
+            i += 1
 
     use_env_elf = "--env-elf" in opts
     expected = 1 if use_env_elf else 2
@@ -637,10 +652,6 @@ def main(argv):
     for finding in findings:
         print(f"note: {finding}")
 
-    out = None
-    for a in argv[1:]:
-        if a.startswith("--toml"):
-            out = a.split("=", 1)[1] if "=" in a else argv[argv.index(a) + 1]
     if out:
         lines = ["# Import map emitted by tools/imports.py: stub address -> (library, NID).", ""]
         for addr in sorted(stubs):

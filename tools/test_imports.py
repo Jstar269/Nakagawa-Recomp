@@ -133,6 +133,22 @@ class CodegenImportCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(list(stubs.values()), [("SynthAlpha", nid)])
 
+    def test_cli_env_elf_with_space_separated_toml_and_missing_toml_value(self) -> None:
+        blob = build_interleaved_import_elf(INTERLEAVED_SHAPE, INTERLEAVED_NIDS)
+        with tempfile.TemporaryDirectory(prefix="imports-cli-") as tmp:
+            elf_path = Path(tmp) / "fixture.elf"
+            toml_path = Path(tmp) / "out.toml"
+            elf_path.write_bytes(blob)
+            import os
+            with unittest.mock.patch.dict(os.environ, {"GAME_ELF": str(elf_path)}):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    rc = imports.main(["imports.py", "--env-elf", "0x0", "--toml", str(toml_path)])
+                self.assertEqual(rc, 0)
+                self.assertTrue(toml_path.exists())
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    rc_missing = imports.main(["imports.py", "--env-elf", "0x0", "--toml"])
+                self.assertEqual(rc_missing, 2)
+
 
 class RetailImportLayoutTests(unittest.TestCase):
     """Real PSP import-table layouts the analyzer models (synthetic bytes)."""

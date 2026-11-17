@@ -47,11 +47,12 @@ MAX_PROGRAM_IMAGE_STRING_BYTES = 1024
 _TYPE_A_SUPPORTED_TYPES = frozenset(
     (R_MIPS_16, R_MIPS_32, R_MIPS_26, R_MIPS_HI16, R_MIPS_LO16)
 )
-_TYPE_A_NOOP_TYPES = frozenset((R_MIPS_NONE, R_MIPS_GPREL16))
+_TYPE_A_NOOP_TYPES = frozenset((R_MIPS_NONE,))
 _TYPE_A_SPECIAL_TYPES = frozenset((R_MIPS_LITERAL,))
 # R_MIPS_REL32 is part of the MIPS relocation vocabulary and has a distinct
 # packed-stream handler, but the Type-A PSP section path does not support it.
-_TYPE_A_KNOWN_UNSUPPORTED_TYPES = frozenset((R_MIPS_REL32,))
+# R_MIPS_GPREL16 (kind 7) is refused per PRX_LOADER_SPEC.md section 3.6.
+_TYPE_A_KNOWN_UNSUPPORTED_TYPES = frozenset((R_MIPS_REL32, R_MIPS_GPREL16))
 _TYPE_A_RECOGNIZED_TYPES = (
     _TYPE_A_SUPPORTED_TYPES
     | _TYPE_A_NOOP_TYPES
@@ -740,19 +741,20 @@ def _program_image_validate_packed_relocation(data, envelope, loads, section, la
     trust the image. The probe reuses the established decoder while making reads
     checked against the validated segments and making writes no-ops.
     """
-    segment_index = next(
-        (
-            program["idx"]
-            for program in envelope["phdrs"]
-            if program["type"] == 1
-            and program["off"] <= section["off"] < program["off"] + program["filesz"]
-        ),
-        None,
-    )
+    segment_index = section.get("seg_idx")
+    if segment_index is None:
+        segment_index = next(
+            (
+                program["idx"]
+                for program in envelope["phdrs"]
+                if program["off"] <= section["off"] < program["off"] + program["filesz"]
+            ),
+            None,
+        )
     if segment_index is None:
         findings.append(ProgramImageFinding(
             "relocation-packed-invalid", "error", label,
-            "packed relocation section is not associated with a load segment",
+            "packed relocation section is not associated with a program segment",
         ))
         return
 
@@ -787,12 +789,27 @@ def _program_image_validate_relocations(data, envelope, loads, base, findings):
     """Validate relocation records and retain them without applying them."""
     records = []
     load_starts = [segment["guest_start"] for segment in loads]
-    for section in envelope["shdrs"]:
+    reloc_sources = list(envelope["shdrs"])
+    if not reloc_sources:
+        reloc_sources = [
+            {
+                "idx": program["idx"],
+                "typ": program["type"],
+                "off": program["off"],
+                "size": program["filesz"],
+                "entsz": 0,
+                "seg_idx": program["idx"],
+                "label": f"phdr[{program['idx']}]",
+            }
+            for program in envelope["phdrs"]
+            if program["type"] in (SHT_PRX_RELOC, SHT_PRX_RELOC_PACKED)
+        ]
+    for section in reloc_sources:
         section_type = section["typ"]
         if section_type not in (4, 9, SHT_PRX_RELOC, SHT_PRX_RELOC_PACKED):
             continue
         size = section["size"]
-        label = f"section[{section['idx']}]"
+        label = section.get("label") or f"section[{section['idx']}]"
         if size > MAX_PROGRAM_IMAGE_TABLE_BYTES:
             findings.append(ProgramImageFinding(
                 "relocation-table-too-large", "error", label,
@@ -1575,6 +1592,11 @@ class Prx:
             addr_seg = (info >> 16) & 0xFF
             if ofs_seg >= nseg or addr_seg >= nseg:
                 raise ValueError("type-A relocation segment index is out of range")
+            if rtype == R_MIPS_GPREL16:
+                raise ValueError(
+                    f"format A kind 7 (GPREL16) refused at offset 0x{offset:08x} "
+                    f"(offset segment {ofs_seg}, target segment {addr_seg})"
+                )
             if rtype in _TYPE_A_KNOWN_UNSUPPORTED_TYPES or rtype not in _TYPE_A_RECOGNIZED_TYPES:
                 raise ValueError(
                     f"unsupported Type-A relocation type 0x{rtype:x} "

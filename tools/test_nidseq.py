@@ -352,11 +352,65 @@ class TestNidseqUnit(unittest.TestCase):
         imp = {STUBS[0]: ("l", 1), STUBS[1]: ("l", 2)}
         mine = [(STUBS[0], imp[STUBS[0]]), (STUBS[1], imp[STUBS[1]])]
         orac = [(STUBS[0], imp[STUBS[0]]), (STUBS[1], imp[STUBS[1]])]
-        self.assertEqual(self.m.verify_sequences(mine, orac, imp, allow_prefix=False), 0)
-        self.assertEqual(self.m.verify_sequences(mine[:1], orac, imp, allow_prefix=False), 1)
-        self.assertEqual(self.m.verify_sequences(mine, orac[:1], imp, allow_prefix=False), 1)
-        self.assertEqual(self.m.verify_sequences(mine[:1], orac, imp, allow_prefix=True), 0)
-        self.assertEqual(self.m.verify_sequences([], [], imp, allow_prefix=False), 1)
+        self.assertEqual(self.m.verify_sequences(mine, orac, allow_prefix=False), 0)
+        self.assertEqual(self.m.verify_sequences(mine[:1], orac, allow_prefix=False), 1)
+        self.assertEqual(self.m.verify_sequences(mine, orac[:1], allow_prefix=False), 1)
+        self.assertEqual(self.m.verify_sequences(mine[:1], orac, allow_prefix=True), 0)
+        self.assertEqual(self.m.verify_sequences([], [], allow_prefix=False), 1)
+
+    def test_detached_stub_runs_do_not_capture_intervening_function_returns(self):
+        # Two detached stub runs: 0x08801000..0x08801010 and 0x08a00000..0x08a00010.
+        # An ordinary function return (op=0x03e00008) at 0x08900000 in between must be ignored.
+        p = self.write(
+            "[[import]]\nstub = 0x08801000\nlib = \"sceUtility\"\nnid = 0x111\n"
+            "[[import]]\nstub = 0x08801008\nlib = \"sceUtility\"\nnid = 0x222\n"
+            "[[import]]\nstub = 0x08a00000\nlib = \"sceUtility\"\nnid = 0x333\n"
+            "[[import]]\nstub = 0x08a00008\nlib = \"sceUtility\"\nnid = 0x444\n"
+        )
+        imp, s0, s1 = self.m.load_imports(p)
+        tp = os.path.join(self.d, "detached.trace")
+        with open(tp, "w", newline="\n") as f:
+            f.write("0 pc=0x08801000 op=0x03e00008 r2=0x0\n")
+            f.write("1 pc=0x08900000 op=0x03e00008 r2=0x0\n")
+            f.write("2 pc=0x08a00000 op=0x03e00008 r2=0x0\n")
+        seq = self.m.nid_seq(tp, imp, s0, s1)
+        self.assertEqual([pc for pc, _ in seq], [0x08801000, 0x08A00000])
+
+    def test_informational_limit_is_reported_when_truncated(self):
+        toml = self.write(
+            "".join(
+                f"[[import]]\nstub = 0x{s:08x}\nlib = \"sceUtility\"\nnid = 0x{n:08x}\n"
+                for s, n in zip(STUBS[:3], NIDS[:3], strict=True)
+            )
+        )
+        tp = os.path.join(self.d, "three.trace")
+        with open(tp, "w", newline="\n") as f:
+            for i, s in enumerate(STUBS[:3]):
+                f.write(f"{i} pc=0x{s:08x} op=0x03e00008 r2=0x0\n")
+        old_limit = self.m.DEFAULT_IMPORT_SCAN_LIMIT
+        self.m.DEFAULT_IMPORT_SCAN_LIMIT = 2
+        try:
+            import contextlib
+            import io
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = self.m.main(["nidseq.py", toml, tp])
+            self.assertEqual(rc, 0)
+            self.assertIn("TRUNCATED", out.getvalue())
+        finally:
+            self.m.DEFAULT_IMPORT_SCAN_LIMIT = old_limit
+
+    def test_non_ascii_trace_bytes_fail_with_named_error_not_traceback(self):
+        toml = self.write(
+            f"[[import]]\nstub = 0x{STUBS[0]:08x}\nlib = \"sceUtility\"\nnid = 0x{NIDS[0]:08x}\n"
+        )
+        tp = os.path.join(self.d, "corrupt.trace")
+        with open(tp, "wb") as f:
+            f.write(b"0 pc=0x08a00000 op=0x03e00008 \x81\xff\n")
+        rc, out = run_tool([toml, tp])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("ERROR:", out)
+        self.assertNotIn("Traceback", out)
 
 
 if __name__ == "__main__":

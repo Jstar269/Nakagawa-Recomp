@@ -67,13 +67,17 @@ class Hi16Lo16PairingTests(unittest.TestCase):
 
     def test_known_noop_relocation_types_remain_nonfatal(self):
         # These values are recognized Type-A categories, not unknown types:
-        # NONE/GPREL16 are deliberate loader no-ops and LITERAL is firmware's
-        # diagnostic-only relocation category.
-        for rtype in (R_MIPS_NONE, R_MIPS_GPREL16, R_MIPS_LITERAL):
+        # NONE is a deliberate loader no-op and LITERAL is firmware's
+        # diagnostic-only relocation category. GPREL16 (kind 7) is refused per
+        # PRX_LOADER_SPEC.md section 3.6.
+        for rtype in (R_MIPS_NONE, R_MIPS_LITERAL):
             with self.subTest(rtype=rtype):
                 prx = make_prx([0xDEADBEEF], seg_vaddr=[0])
                 prx._apply([(0, info(rtype))])
                 self.assertEqual(prx.r32(0), 0xDEADBEEF)
+        prx_gp = make_prx([0xDEADBEEF], seg_vaddr=[0])
+        with self.assertRaisesRegex(ValueError, r"format A kind 7 \(GPREL16\) refused"):
+            prx_gp._apply([(0, info(R_MIPS_GPREL16))])
 
     def test_known_but_unsupported_type_a_relocation_fails_loudly(self):
         # R_MIPS_REL32 is a known MIPS/PSP relocation vocabulary value, but it
