@@ -215,8 +215,9 @@ end to end by source-owned tests:
 - `scePsmfPlayer` is a guest-owned library: a title that ships and translates
   `libpsmfplayer.prx` runs it as guest code through `guest_module_owns_library` in
   `src/rt/hle_kernel_module.c` (#1782). The host `scePsmfPlayer*` handlers remain only for
-  titles whose module is packed or otherwise host-served (#1933); there they own the guest
-  control block and the output contract, and drive that producer plus the host codecs (Media
+  titles that do not stage and translate the module and for the public synthetic fixtures
+  (#286); there they own the guest control block and the output contract, and drive that
+  producer plus the host codecs (Media
   Foundation H.264 for pictures, the project's ATRAC3plus decoder import for audio). A getter
   returns success only for output a decoder actually produced; a compressed access unit is never
   presented as a decoded frame or PCM block, and a track that runs dry reports `NO_MORE_DATA`

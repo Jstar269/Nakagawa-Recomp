@@ -48,7 +48,7 @@ Nakagawa Program + User's Game ISO → Play
 > each disc against Redump's PSP list. What this option still needs is a
 > precompiled release that runs without a compiler on the user's machine.
 
-In this model, a package ships the generic runtime plus, for a supported manifest, a title-independent recompiled core. The verified title executable itself is never compiled into a distributed package: C generated from a retail game is C generated from a retail game, and `AGENTS.md` Section 5 and its Hard limits forbid committing or publishing it or sharing anything built from a user's game. A per-title precompiled package would need an explicit maintainer policy change before it could be considered.
+In this model, a package ships the generic runtime plus, for a supported manifest, a title-independent recompiled core. The verified title executable itself is never compiled into a distributed package: a package compiled from it would contain C generated from a retail game, which `AGENTS.md` Section 5 and its Hard limits forbid committing, publishing or sharing, as they forbid sharing anything built from a user's game. A per-title precompiled package would need an explicit maintainer policy change before it could be considered.
 
 * **How It Works:**
   1. The distributed binary contains the title-independent recompiled core, not code generated from a specific retail executable, and no proprietary game assets, textures, sounds, or movies.

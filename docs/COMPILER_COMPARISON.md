@@ -55,7 +55,8 @@ remains GCC.
 | Clang/lld | FAILED_VETO | production-smoke, production-smoke-gap | `display-smoke`: `src/rt/videorec.c:83:17: error: variable 's_cur' set but not used [-Werror,-Wunused-but-set-global]` |
 
 **GCC/lld.** The tool's own `first_error` field for this gate reads `Clay error 1`: its pattern
-matched an unrelated line of the gate output (a follow-up for the extractor). The first failing
+matched an unrelated line of the gate output (#2633 later fixed the extractor; this snapshot
+predates that fix). The first failing
 reason below is taken from the gate output itself. The failing recipe is `profiler-selftest`
 (`mk/selftests.mk:72`), reached by `native-core-tests`. The HLE harness link that #2381 fixed now
 passes. Besides the test driver, the profiler selftest links an explicit source list (`recomp.c`,
@@ -127,7 +128,8 @@ from the earlier snapshot and was not re-verified in this run.)
    it differs and whether it can be normalised or fixed at its source. Until the hash is stable no
    cross-toolchain semantic comparison is possible.
 2. GCC/lld: `profiler-selftest` links under lld since #2633; re-run to reach the gates after
-   `native-core-tests`. Also fix the extractor's `first_error` (`Clay error 1` above).
+   `native-core-tests`. The extractor's `first_error` no longer reads `Clay error 1` (fixed by
+   #2633).
 3. Clang: #2633 removed the unused `s_cur` and made `s_clock_deterministic` read; re-run to reach
    the later gates.
 4. Repeat on a quiet machine for clean compile and link times.
