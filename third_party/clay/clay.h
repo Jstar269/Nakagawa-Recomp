@@ -1,4 +1,6 @@
 // VERSION: 0.14
+// Modified by Nakagawa Recomp contributors, 2026-10-29 and 2026-11-17: imported from nicbarker/clay main
+// e6cc36941ab2 (99 commits after v0.14) with the LOCAL DELTA changes listed in third_party/clay/PROVENANCE.md.
 
 /*
     NOTE: In order to use this library you must define
@@ -1163,6 +1165,7 @@ typedef struct {
     bool maxTextMeasureCacheExceeded;
     bool textMeasurementFunctionNotSet;
     bool hashMapCapacityExceeded;
+    bool dynamicStringDataExceeded;
 } Clay_BooleanWarnings;
 
 typedef struct {
@@ -1301,6 +1304,13 @@ typedef struct {
     uint32_t id;
     int32_t nextIndex;
     uint32_t generation;
+    // LOCAL DELTA (Nakagawa Recomp): the full key, beside the 32-bit id; see Clay__MeasureTextCached.
+    uint64_t contentKey;
+    int32_t textLength;
+    bool staticContent;
+    uint16_t fontId;
+    uint16_t fontSize;
+    uint16_t letterSpacing;
 } Clay__MeasureTextCacheItem;
 
 CLAY__ARRAY_DEFINE(Clay__MeasureTextCacheItem, Clay__MeasureTextCacheItemArray)
@@ -1591,9 +1601,11 @@ uint64_t Clay__HashData(const uint8_t* data, size_t length) {
 }
 #endif
 
-uint32_t Clay__HashStringContentsWithConfig(Clay_String *text, Clay_TextElementConfig *config) {
+// LOCAL DELTA (Nakagawa Recomp): also gives the content key: the address of static text, else its 64-bit hash.
+uint32_t Clay__HashStringContentsWithConfig(Clay_String *text, Clay_TextElementConfig *config, uint64_t *contentKey) {
     uint32_t hash = 0;
     if (text->isStaticallyAllocated) {
+        *contentKey = (uint64_t)(uintptr_t)text->chars;
         hash += (uintptr_t)text->chars;
         hash += (hash << 10);
         hash ^= (hash >> 6);
@@ -1601,7 +1613,8 @@ uint32_t Clay__HashStringContentsWithConfig(Clay_String *text, Clay_TextElementC
         hash += (hash << 10);
         hash ^= (hash >> 6);
     } else {
-        hash = Clay__HashData((const uint8_t *)text->chars, text->length) % UINT32_MAX;
+        *contentKey = Clay__HashData((const uint8_t *)text->chars, text->length);
+        hash = *contentKey % UINT32_MAX;
     }
 
     hash += config->fontId;
@@ -1636,6 +1649,37 @@ Clay__MeasuredWord *Clay__AddMeasuredWord(Clay__MeasuredWord word, Clay__Measure
     }
 }
 
+/* LOCAL DELTA (Nakagawa Recomp): the word cache has room for the words on its free list as well as the slots it
+ * has never used. Upstream checks the slot array's length alone, and that array never shrinks: once it has
+ * peaked, every new text fails though eviction has freed the words of the texts that are gone. Upstream also
+ * checks only once a character, though a newline adds two words and the text's last word one more after the
+ * loop, so a text ending at the limit can link a word to an index past the array. */
+int32_t Clay__MeasuredWordSlotsLeft(Clay_Context *context) {
+    return context->measuredWordsFreeList.length + (context->measuredWords.capacity - context->measuredWords.length);
+}
+
+/* LOCAL DELTA (Nakagawa Recomp): a text that does not fit the word cache gives back the words it took and its
+ * cache item. Upstream leaves the item out of every bucket, never to be evicted, and its words unreachable, so
+ * each failure shrinks the cache for good. */
+Clay__MeasureTextCacheItem *Clay__MeasureTextOutOfWords(Clay_Context *context, int32_t firstWordIndex, int32_t itemIndex) {
+    if (!context->booleanWarnings.maxTextMeasureCacheExceeded) {
+        context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
+            .errorType = CLAY_ERROR_TYPE_TEXT_MEASUREMENT_CAPACITY_EXCEEDED,
+            .errorText = CLAY_STRING("Clay has run out of space in it's internal text measurement cache. Try using Clay_SetMaxMeasureTextCacheWordCount() (default 16384, with 1 unit storing 1 measured word)."),
+            .userData = context->errorHandler.userData });
+        context->booleanWarnings.maxTextMeasureCacheExceeded = true;
+    }
+    int32_t wordIndex = firstWordIndex;
+    while (wordIndex != -1) {
+        Clay__MeasuredWord *word = Clay__MeasuredWordArray_Get(&context->measuredWords, wordIndex);
+        Clay__int32_tArray_Add(&context->measuredWordsFreeList, wordIndex);
+        wordIndex = word->next;
+    }
+    Clay__MeasureTextCacheItemArray_Set(&context->measureTextHashMapInternal, itemIndex, CLAY__INIT(Clay__MeasureTextCacheItem) { .measuredWordsStartIndex = -1 });
+    Clay__int32_tArray_Add(&context->measureTextHashMapInternalFreeList, itemIndex);
+    return &Clay__MeasureTextCacheItem_DEFAULT;
+}
+
 Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_TextElementConfig *config) {
     Clay_Context* context = Clay_GetCurrentContext();
     #ifndef CLAY_WASM
@@ -1650,13 +1694,20 @@ Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_Text
         return &Clay__MeasureTextCacheItem_DEFAULT;
     }
     #endif
-    uint32_t id = Clay__HashStringContentsWithConfig(text, config);
+    uint64_t contentKey = 0;
+    uint32_t id = Clay__HashStringContentsWithConfig(text, config, &contentKey);
     uint32_t hashBucket = id % (context->maxMeasureTextCacheWordCount / 32);
     int32_t elementIndexPrevious = 0;
     int32_t elementIndex = context->measureTextHashMap.internalArray[hashBucket];
     while (elementIndex != 0) {
         Clay__MeasureTextCacheItem *hashEntry = Clay__MeasureTextCacheItemArray_Get(&context->measureTextHashMapInternal, elementIndex);
-        if (hashEntry->id == id) {
+        /* LOCAL DELTA (Nakagawa Recomp): an entry is this text's only when its whole key matches. Upstream
+         * matches the 32-bit id alone, so two texts whose ids collide share one entry: the second is laid out
+         * with the first one's widths, and its wrapped lines are cut at the first one's word offsets, which can
+         * run past the end of the second text. */
+        if (hashEntry->id == id && hashEntry->contentKey == contentKey && hashEntry->textLength == text->length &&
+            hashEntry->staticContent == text->isStaticallyAllocated && hashEntry->fontId == config->fontId &&
+            hashEntry->fontSize == config->fontSize && hashEntry->letterSpacing == config->letterSpacing) {
             hashEntry->generation = context->generation;
             return hashEntry;
         }
@@ -1687,7 +1738,9 @@ Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_Text
     }
 
     int32_t newItemIndex = 0;
-    Clay__MeasureTextCacheItem newCacheItem = { .measuredWordsStartIndex = -1, .id = id, .generation = context->generation };
+    Clay__MeasureTextCacheItem newCacheItem = { .measuredWordsStartIndex = -1, .id = id, .generation = context->generation,
+        .contentKey = contentKey, .textLength = text->length, .staticContent = text->isStaticallyAllocated,
+        .fontId = config->fontId, .fontSize = config->fontSize, .letterSpacing = config->letterSpacing };
     Clay__MeasureTextCacheItem *measured = NULL;
     if (context->measureTextHashMapInternalFreeList.length > 0) {
         newItemIndex = Clay__int32_tArray_GetValue(&context->measureTextHashMapInternalFreeList, context->measureTextHashMapInternalFreeList.length - 1);
@@ -1718,15 +1771,9 @@ Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_Text
     Clay__MeasuredWord tempWord = { .next = -1 };
     Clay__MeasuredWord *previousWord = &tempWord;
     while (end < text->length) {
-        if (context->measuredWords.length == context->measuredWords.capacity - 1) {
-            if (!context->booleanWarnings.maxTextMeasureCacheExceeded) {
-                context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
-                    .errorType = CLAY_ERROR_TYPE_TEXT_MEASUREMENT_CAPACITY_EXCEEDED,
-                    .errorText = CLAY_STRING("Clay has run out of space in it's internal text measurement cache. Try using Clay_SetMaxMeasureTextCacheWordCount() (default 16384, with 1 unit storing 1 measured word)."),
-                    .userData = context->errorHandler.userData });
-                context->booleanWarnings.maxTextMeasureCacheExceeded = true;
-            }
-            return &Clay__MeasureTextCacheItem_DEFAULT;
+        // LOCAL DELTA (Nakagawa Recomp): see Clay__MeasuredWordSlotsLeft. One character adds at most two words.
+        if (Clay__MeasuredWordSlotsLeft(context) < 2) {
+            return Clay__MeasureTextOutOfWords(context, tempWord.next, newItemIndex);
         }
         char current = text->chars[end];
         if (current == ' ' || current == '\n') {
@@ -1757,6 +1804,10 @@ Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_Text
         end++;
     }
     if (end - start > 0) {
+        // LOCAL DELTA (Nakagawa Recomp): see Clay__MeasuredWordSlotsLeft.
+        if (Clay__MeasuredWordSlotsLeft(context) < 1) {
+            return Clay__MeasureTextOutOfWords(context, tempWord.next, newItemIndex);
+        }
         Clay_Dimensions dimensions = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) { .length = end - start, .chars = &text->chars[start], .baseChars = text->chars }, config, context->measureTextUserData);
         Clay__AddMeasuredWord(CLAY__INIT(Clay__MeasuredWord) { .startOffset = start, .length = end - start, .width = dimensions.width, .next = -1 }, previousWord);
         lineWidth += dimensions.width;
@@ -2521,6 +2572,20 @@ Clay_String Clay__IntToString(int32_t integer) {
         return CLAY__INIT(Clay_String) { .length = 1, .chars = "0" };
     }
     Clay_Context* context = Clay_GetCurrentContext();
+    /* LOCAL DELTA (Nakagawa Recomp): the digits go to dynamicStringData, which holds one char per element, and
+     * an int32_t takes at most 11 chars. Upstream writes them without checking the space left, so a debug view
+     * that lists more ids than fit writes past the end of the arena. When they do not fit, the error is
+     * reported once a layout and the number shows as "?". */
+    if (context->dynamicStringData.capacity - context->dynamicStringData.length < 11) {
+        if (!context->booleanWarnings.dynamicStringDataExceeded) {
+            context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
+                .errorType = CLAY_ERROR_TYPE_ARENA_CAPACITY_EXCEEDED,
+                .errorText = CLAY_STRING("Clay ran out of space for the numbers it prints in the debug view. Try using Clay_SetMaxElementCount() with a higher value."),
+                .userData = context->errorHandler.userData });
+            context->booleanWarnings.dynamicStringDataExceeded = true;
+        }
+        return CLAY__INIT(Clay_String) { .length = 1, .chars = "?" };
+    }
     char *chars = (char *)(context->dynamicStringData.internalArray + context->dynamicStringData.length);
     int32_t length = 0;
     int32_t sign = integer;
@@ -2585,6 +2650,11 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
     Clay__SizeContainersAlongAxis(true, deltaTime, &textElements, &aspectRatioElements);
 
     // Wrap text
+    /* LOCAL DELTA (Nakagawa Recomp): each pass wraps every text element again, so it starts the wrapped-line
+     * pool afresh. Upstream never resets the pool between the two passes of a layout with transitions, so the
+     * second pass appends after the first and gets half the pool. A line is also counted in its text's slice
+     * only when the pool took it: upstream counts it anyway, so a full pool leaves slices that read past it. */
+    context->wrappedTextLines.length = 0;
     for (int32_t textElementIndex = 0; textElementIndex < textElements.length; ++textElementIndex) {
         Clay_LayoutElement *element = Clay_LayoutElementArray_Get(&context->layoutElements, Clay__int32_tArray_GetValue(&textElements, textElementIndex));
         Clay__TextElementData *textElementData = &element->textElementData;
@@ -2596,12 +2666,18 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
         int32_t lineLengthChars = 0;
         int32_t lineStartOffset = 0;
         if (!measureTextCacheItem->containsNewlines && textElementData->preferredDimensions.width <= containerElement->dimensions.width) {
-            Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { containerElement->dimensions,  textElementData->text });
-            textElementData->wrappedLines.length++;
+            if (Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { containerElement->dimensions,  textElementData->text }) != &Clay__WrappedTextLine_DEFAULT) {
+                textElementData->wrappedLines.length++;
+            }
             continue;
         }
         float spaceWidth = Clay__MeasureText(CLAY__INIT(Clay_StringSlice) { .length = 1, .chars = CLAY__SPACECHAR.chars, .baseChars = CLAY__SPACECHAR.chars }, &containerElement->textConfig, context->measureTextUserData).width;
         int32_t wordIndex = measureTextCacheItem->measuredWordsStartIndex;
+        /* LOCAL DELTA (Nakagawa Recomp): a newline right after a word too wide for its line ends that word's
+         * line. Upstream adds another line for it, an empty one, or one of length -1 when the long word ends in
+         * a space, since the trailing-space trim then reads the char before an empty line. The trim is now made
+         * only on a line that has chars. */
+        bool lineEndedByOverlongWord = false;
         while (wordIndex != -1) {
             if (context->wrappedTextLines.length > context->wrappedTextLines.capacity - 1) {
                 break;
@@ -2609,17 +2685,26 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
             Clay__MeasuredWord *measuredWord = Clay__MeasuredWordArray_Get(&context->measuredWords, wordIndex);
             // Only word on the line is too large, just render it anyway
             if (lineLengthChars == 0 && lineWidth + measuredWord->width > containerElement->dimensions.width) {
-                Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { measuredWord->width, lineHeight }, { .length = measuredWord->length, .chars = &textElementData->text.chars[measuredWord->startOffset] } });
-                textElementData->wrappedLines.length++;
+                if (Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { measuredWord->width, lineHeight }, { .length = measuredWord->length, .chars = &textElementData->text.chars[measuredWord->startOffset] } }) != &Clay__WrappedTextLine_DEFAULT) {
+                    textElementData->wrappedLines.length++;
+                }
                 wordIndex = measuredWord->next;
                 lineStartOffset = measuredWord->startOffset + measuredWord->length;
+                lineEndedByOverlongWord = true;
+            }
+            else if (measuredWord->length == 0 && lineLengthChars == 0 && lineEndedByOverlongWord) {
+                wordIndex = measuredWord->next;
+                lineStartOffset = measuredWord->startOffset;
+                lineEndedByOverlongWord = false;
             }
             // measuredWord->length == 0 means a newline character
             else if (measuredWord->length == 0 || lineWidth + measuredWord->width > containerElement->dimensions.width) {
                 // Wrapped text lines list has overflowed, just render out the line
-                bool finalCharIsSpace = textElementData->text.chars[CLAY__MAX(lineStartOffset + lineLengthChars - 1, 0)] == ' ';
-                Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { lineWidth + (finalCharIsSpace ? -spaceWidth : 0), lineHeight }, { .length = lineLengthChars + (finalCharIsSpace ? -1 : 0), .chars = &textElementData->text.chars[lineStartOffset] } });
-                textElementData->wrappedLines.length++;
+                bool finalCharIsSpace = lineLengthChars > 0 && textElementData->text.chars[lineStartOffset + lineLengthChars - 1] == ' ';
+                lineEndedByOverlongWord = false;
+                if (Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { lineWidth + (finalCharIsSpace ? -spaceWidth : 0), lineHeight }, { .length = lineLengthChars + (finalCharIsSpace ? -1 : 0), .chars = &textElementData->text.chars[lineStartOffset] } }) != &Clay__WrappedTextLine_DEFAULT) {
+                    textElementData->wrappedLines.length++;
+                }
                 if (lineLengthChars == 0 || measuredWord->length == 0) {
                     wordIndex = measuredWord->next;
                 }
@@ -2630,11 +2715,13 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                 lineWidth += measuredWord->width + containerElement->textConfig.letterSpacing;
                 lineLengthChars += measuredWord->length;
                 wordIndex = measuredWord->next;
+                lineEndedByOverlongWord = false;
             }
         }
         if (lineLengthChars > 0) {
-            Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { lineWidth - containerElement->textConfig.letterSpacing, lineHeight }, {.length = lineLengthChars, .chars = &textElementData->text.chars[lineStartOffset] } });
-            textElementData->wrappedLines.length++;
+            if (Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) { { lineWidth - containerElement->textConfig.letterSpacing, lineHeight }, {.length = lineLengthChars, .chars = &textElementData->text.chars[lineStartOffset] } }) != &Clay__WrappedTextLine_DEFAULT) {
+                textElementData->wrappedLines.length++;
+            }
         }
         containerElement->dimensions.height = lineHeight * (float)textElementData->wrappedLines.length;
         /* LOCAL DELTA (Nakagawa Recomp): the minimum height was taken before wrapping, as one line. Keep the
@@ -4277,8 +4364,12 @@ void Clay_UpdateScrollContainers(bool enableDragScrolling, Clay_Vector2 scrollDe
     Clay__ScrollContainerDataInternal *highestPriorityScrollData = CLAY__NULL;
     for (int32_t i = 0; i < context->scrollContainerDatas.length; i++) {
         Clay__ScrollContainerDataInternal *scrollData = Clay__ScrollContainerDataInternalArray_Get(&context->scrollContainerDatas, i);
+        /* LOCAL DELTA (Nakagawa Recomp): a removal swaps the last container into slot i, so the loop visits slot
+         * i again. Upstream moves on, and the container swapped in misses that update: its momentum, its
+         * open-this-frame reset and the wheel or drag over it. */
         if (!scrollData->openThisFrame) {
             Clay__ScrollContainerDataInternalArray_RemoveSwapback(&context->scrollContainerDatas, i);
+            i--;
             continue;
         }
         scrollData->openThisFrame = false;
@@ -4286,6 +4377,7 @@ void Clay_UpdateScrollContainers(bool enableDragScrolling, Clay_Vector2 scrollDe
         // Element isn't rendered this frame but scroll offset has been retained
         if (!hashMapItem) {
             Clay__ScrollContainerDataInternalArray_RemoveSwapback(&context->scrollContainerDatas, i);
+            i--;
             continue;
         }
 
