@@ -10,6 +10,9 @@
 
 **Play PSP games you own as native Windows programs: add your disc image, build it, play.**
 
+Not an emulator: each game becomes a native program. Opt-in extras include Widescreen for any game, which shows more
+of the 3D scene on an ultrawide screen, and 60 FPS game logic for each game that has an Ace package.
+
 Experimental pre-release: one game is playable so far. [See what works](docs/COMPATIBILITY.md).
 
 **[Download](https://github.com/Jstar269/Nakagawa-Recomp/releases/tag/v0.0.3) · [Website](https://jstar269.github.io/Nakagawa-Recomp/) · [Compatibility](docs/COMPATIBILITY.md) · [Discussions](https://github.com/Jstar269/Nakagawa-Recomp/discussions)**
@@ -20,9 +23,24 @@ Experimental pre-release: one game is playable so far. [See what works](docs/COM
 
 </div>
 
-Nakagawa Recomp is a static recompiler for the PlayStation Portable. It translates a game's MIPS code into C once,
-before you play, and compiles it into a native Windows program. It isn't an emulator. You supply the game from your
-own disc: Nakagawa includes no games, game data, firmware or system fonts.
+## Start here
+
+**Try it without a game:** [download v0.0.3](#download) for Windows 11, extract the ZIP and start
+`bin\nakagawa_player.exe`. The library's **TEST THIS PC** row has two demos the project wrote, a rotating 3D cube
+and a small Breakout game, which need no game files.
+
+**To play a game you own:** drag its `.iso` into the player window, then press **BUILD PACKAGE** and **PLAY**. A
+first build takes several minutes.
+
+**To help:** try a game you own and
+[report how far it gets](https://github.com/Jstar269/Nakagawa-Recomp/discussions/categories/compatibility-reports).
+For code, most work needs no game, no disc and no PSP, because the repository tests itself with fixtures it
+generates. Set up on [Windows](docs/SETUP.md) or [Linux](docs/LINUX_DEVELOPMENT.md), run
+`mingw32-make contrib-check` (on Linux, `make contrib-check`), then follow
+[Contributing without a game disc](CONTRIBUTING.md#contributing-without-a-game-disc) or pick an issue labelled
+[`no-disc-needed`](https://github.com/Jstar269/Nakagawa-Recomp/labels/no-disc-needed).
+
+<!-- A hero clip goes on one line directly below this comment. -->
 
 [![A rally in Hot Shots Tennis: Get a Grip, running natively in Nakagawa Recomp; play the clip](docs/media/hst-rally-poster.png)](https://jstar269.github.io/Nakagawa-Recomp/media/hst-rally.mp4)
 
@@ -32,7 +50,36 @@ screenshots of Enhanced mode.
 
 <div align="center"><sub>Hot Shots Tennis: Get a Grip belongs to its publisher. This repository contains no game data: you need your own copy of the game, and nothing here downloads one.</sub></div>
 
+## What works today
+
+v0.0.3 is an experimental pre-release. *Hot Shots Tennis: Get a Grip* is playable, with full matches and Story Mode.
+It runs in **Authentic** mode, as released, or in **Enhanced** mode, which adds options such as texture filtering,
+Smooth motion and Widescreen. **Ace** mode is Enhanced plus a game's own 60 FPS game logic: it ships for Hot Shots
+Tennis, and as an Experimental package for *LittleBigPlanet* (disc version 2.00 only). Ace is off until you choose
+it, and Authentic and Enhanced are unchanged by it. *PAC-MAN Championship Edition* plays a stage, *Super Stardust
+Portable* reaches its menus, and fifteen more games have been seen to start or run. Other games are untested, or have
+had only a first launch with no input: in the maintainer's whole-library build of 2026-10-31, before v0.0.2 and
+v0.0.3, 326 of the 692 verified retail disc images drew at least one frame that way
+([how they were counted](docs/COMPATIBILITY.md#whole-library)). When a game needs something Nakagawa doesn't support,
+it stops and names what is missing.
+
+**LittleBigPlanet** is Experimental, with no tier: on disc version 2.00, a private route reaches the first tutorial
+level, and nothing past the start of that level has been checked. Its Ace package is off by default, and the version
+that ships hasn't been measured at 60 updates a second ([what is known](docs/COMPATIBILITY.md#title-compatibility)).
+
+**Linux and Steam Deck** aren't supported: the only player release is for Windows. On Linux, hosted CI builds the
+runtime and the player and smoke-tests them without a display, but interactive play isn't supported
+([#306](https://github.com/Jstar269/Nakagawa-Recomp/issues/306)). Wine and Proton aren't supported platforms either
+([details](docs/SETUP.md#wine-and-proton)).
+
+**Next:** `main` is the development line toward v0.1.0, and the
+[v0.1.0 milestone](https://github.com/Jstar269/Nakagawa-Recomp/milestone/3) lists the work planned for it.
+
 ## How it differs
+
+Nakagawa Recomp is a static recompiler for the PlayStation Portable. It translates a game's MIPS code into C once,
+before you play, and compiles it into a native Windows program. It isn't an emulator. You supply the game from your
+own disc: Nakagawa includes no games, game data, firmware or system fonts.
 
 | Approach | How the game runs | Which games | What you get |
 | :--- | :--- | :--- | :--- |
@@ -43,30 +90,6 @@ screenshots of Enhanced mode.
 If you only want to play PSP games today, an emulator such as [PPSSPP](https://github.com/hrydgard/ppsspp) runs far
 more of them, and Nakagawa adapts some of its code ([credits](CREDITS.md)). Nakagawa is for running a game you own as
 a native program.
-
-## Start here
-
-**What works today:** v0.0.3 is an experimental pre-release. *Hot Shots Tennis: Get a Grip* is playable, with full
-matches and Story Mode. It runs in **Authentic** mode, as released, or in **Enhanced** mode, which adds options such
-as texture filtering, Smooth motion and Widescreen. **Ace** mode is Enhanced plus a game's own 60 FPS game logic: it
-ships for Hot Shots Tennis, and as an Experimental package for *LittleBigPlanet* (disc version 2.00 only).
-*PAC-MAN Championship Edition* plays a stage, *Super Stardust Portable* reaches its menus, and fifteen more games
-have been seen to start or run. Other games are untested, or have had only a first launch with no input: in the
-maintainer's whole-library build of 2026-10-31, before v0.0.2 and v0.0.3, 326 of the 692 verified retail disc images
-drew at least one frame that way ([how they were counted](docs/COMPATIBILITY.md#whole-library)). When a game needs
-something Nakagawa doesn't support, it stops and names what is missing.
-
-**To play:** [download v0.0.3](#download) for Windows 11, extract the ZIP, start `bin\nakagawa_player.exe`, drag in
-your game's `.iso`, then press **BUILD PACKAGE** and **PLAY**. Without a game of your own, the library's
-**TEST THIS PC** row has two demos the project wrote, which need no game files.
-
-**To help:** try a game you own and
-[report how far it gets](https://github.com/Jstar269/Nakagawa-Recomp/discussions/categories/compatibility-reports).
-For code, most work needs no game, no disc and no PSP, because the repository tests itself with fixtures it
-generates. Set up on [Windows](docs/SETUP.md) or [Linux](docs/LINUX_DEVELOPMENT.md), run
-`mingw32-make contrib-check` (on Linux, `make contrib-check`), then follow
-[Contributing without a game disc](CONTRIBUTING.md#contributing-without-a-game-disc) or pick an issue labelled
-[`no-disc-needed`](https://github.com/Jstar269/Nakagawa-Recomp/labels/no-disc-needed).
 
 ## Download
 
