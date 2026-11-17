@@ -429,7 +429,9 @@ int g_ace_on;
 static AceConfig s_req, s_eff;
 static char s_spec[ACE_SPEC_MAX] = "off";
 static char s_report_path[1024];
-static char s_unavailable[ACE_FEATURE_COUNT][96];
+static char s_unavailable[ACE_FEATURE_COUNT][ACE_UNAVAILABLE_REASON_CAP];
+/* The partial cull reason must fit its buffer whole (a C99 check: ace_selftest builds with -Wpedantic). */
+typedef char ace_cull_reason_fits[sizeof(ACE_CULL_PARTIAL_REASON) <= ACE_UNAVAILABLE_REASON_CAP ? 1 : -1];
 static int s_af_device;          /* the device's level when lower than the request, else 0 */
 static int s_ssaa_limited;       /* the factor the renderer gave when lower than the request, else 0 */
 static char s_ssaa_why[128];     /* ...and why */
@@ -1700,7 +1702,7 @@ size_t ace_report_json(char *out, size_t cap) {
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (!s_unavailable[f][0]) continue;
         /* Reasons are runtime-authored words; quotes and backslashes are dropped. */
-        char clean[96];
+        char clean[ACE_UNAVAILABLE_REASON_CAP];
         size_t j = 0;
         for (size_t i = 0; s_unavailable[f][i] && j + 1 < sizeof(clean); i++) {
             char ch = s_unavailable[f][i];
