@@ -564,8 +564,17 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
             adhoc_record_scan(&ev[i]);
             break;
         case NK_LOBBY_SCAN_COMPLETE:
+            if (s_adhocctl.request != ADHOCCTL_REQ_SCAN) {
+                static int unsolicited_scan_logged;
+                if (!unsolicited_scan_logged) {
+                    unsolicited_scan_logged = 1;
+                    fprintf(stderr, "HLE: adhocctl ignored unsolicited SCAN_COMPLETE (state=%d)\n",
+                            s_adhocctl.state);
+                }
+                break;
+            }
             s_adhocctl.state = 0;
-            if (s_adhocctl.request == ADHOCCTL_REQ_SCAN) s_adhocctl.request = ADHOCCTL_REQ_NONE;
+            s_adhocctl.request = ADHOCCTL_REQ_NONE;
             adhocctl_call_handlers(s, gen, sp, gp, ADHOCCTL_EVENT_SCAN, 0u);
             break;
         case NK_LOBBY_CONNECT_BSSID:
@@ -834,6 +843,7 @@ static uint32_t h_NetAdhocctlGetState(CpuState *s) {
 static int adhocctl_check_group(const char *name, uint32_t addr, uint8_t out[8]) {
     memset(out, 0, 8u);
     if (!addr) return 0;
+    const int online = s_adhocctl.online_active || adhoc_online_mode();
     uint32_t len = 0u;
     for (; len < 8u; len++) {
         if (!sr_guest_span_readable(addr + len, 1u)) {
@@ -843,13 +853,28 @@ static int adhocctl_check_group(const char *name, uint32_t addr, uint8_t out[8])
         const uint8_t c = MEM_R8(addr + len);
         if (c == 0u) break;
         if (c == '-' || c == ' ' || c == '_') return 1;
-        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) {
+        const int is_upper_digit = (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        const int is_lower = (c >= 'a' && c <= 'z');
+        if (online) {
+            /* PPSSPP validNetworkName (Core/HLE/proAdhoc.cpp:2401): A-Z, a-z, 0-9 are valid;
+             * reject any other remote/local byte with INVALID_ARG instead of ending the run. */
+            if (!is_upper_digit && !is_lower) {
+                static int online_bad_group_logged;
+                if (!online_bad_group_logged) {
+                    online_bad_group_logged = 1;
+                    fprintf(stderr, "HLE: %s refused invalid online group-name byte 0x%02x\n",
+                            name, c);
+                }
+                return 1;
+            }
+        } else if (!is_upper_digit) {
             hle_unmodelled_stop(name, "with group-name byte 0x%02x (UNMEASURED)", c);
             return -1;
         }
         out[len] = c;
     }
     if (len == 0u) {
+        if (online) return 1;
         hle_unmodelled_stop(name, "with an empty group name (UNMEASURED)");
         return -1;
     }
@@ -1244,14 +1269,14 @@ static uint32_t h_NetGetLocalEtherAddr(CpuState *s) {
 #define ADHOC_MAX_SOCKETS 255
 #define ADHOC_SOCK_PDP 1
 #define ADHOC_SOCK_PTP 2
-#define ADHOC_LOCAL_LOOP_QUEUE 32
+#define ADHOC_PDP_QUEUE_SLOTS 64
 
-typedef struct LocalDgram {
+typedef struct AdhocDgram {
     uint8_t src_mac[6];
     uint16_t sport;
     uint32_t len;
     uint8_t *data;
-} LocalDgram;
+} AdhocDgram;
 
 typedef struct AdhocSockSlot {
     int used;
@@ -1268,9 +1293,10 @@ typedef struct AdhocSockSlot {
     uint16_t pport;
     int is_client;
     int ptp_connected_once;
-    LocalDgram local_q[ADHOC_LOCAL_LOOP_QUEUE];
-    unsigned local_head;
-    unsigned local_count;
+    AdhocDgram rx_q[ADHOC_PDP_QUEUE_SLOTS];
+    unsigned rx_head;
+    unsigned rx_count;
+    uint32_t queued_bytes;
 } AdhocSockSlot;
 
 static struct {
@@ -1281,14 +1307,79 @@ static struct {
     uint16_t next_ephemeral_port;
 } s_adhoc;
 
-static void adhoc_free_local_q(AdhocSockSlot *sk) {
-    for (unsigned i = 0u; i < sk->local_count; i++) {
-        LocalDgram *d = &sk->local_q[(sk->local_head + i) % ADHOC_LOCAL_LOOP_QUEUE];
+static void adhoc_free_rx_q(AdhocSockSlot *sk) {
+    for (unsigned i = 0u; i < sk->rx_count; i++) {
+        AdhocDgram *d = &sk->rx_q[(sk->rx_head + i) % ADHOC_PDP_QUEUE_SLOTS];
         free(d->data);
         d->data = NULL;
     }
-    sk->local_head = 0u;
-    sk->local_count = 0u;
+    sk->rx_head = 0u;
+    sk->rx_count = 0u;
+    sk->queued_bytes = 0u;
+}
+
+static void adhoc_pdp_queue_datagram(AdhocSockSlot *sk, const uint8_t mac[6], uint16_t port,
+                                     const void *data, uint32_t len) {
+    /* PPSSPP pdpQueueDatagram (Core/HLE/sceNetAdhoc.cpp:951-961): drop datagrams that do not
+     * fit in the socket's receive buffer rather than stalling the queue or transport. */
+    if (!sk || sk->type != ADHOC_SOCK_PDP) return;
+    if ((uint64_t)sk->queued_bytes + (uint64_t)len > (uint64_t)sk->bufsize ||
+        sk->rx_count >= ADHOC_PDP_QUEUE_SLOTS) {
+        static int pdp_drop_logged;
+        if (!pdp_drop_logged) {
+            pdp_drop_logged = 1;
+            fprintf(stderr,
+                    "HLE: PDP socket port %u dropped %u-byte datagram (queued=%u bufsize=%u)\n",
+                    (unsigned)sk->lport, len, sk->queued_bytes, sk->bufsize);
+        }
+        return;
+    }
+    uint8_t *copy = len ? malloc(len) : NULL;
+    if (len && !copy) return;
+    if (len) memcpy(copy, data, len);
+    AdhocDgram *d = &sk->rx_q[(sk->rx_head + sk->rx_count) % ADHOC_PDP_QUEUE_SLOTS];
+    memcpy(d->src_mac, mac, 6u);
+    d->sport = port;
+    d->len = len;
+    d->data = copy;
+    sk->rx_count++;
+    sk->queued_bytes += len;
+}
+
+static void adhoc_pdp_fill_queue(AdhocSockSlot *sk) {
+    if (!sk || !sk->used || sk->type != ADHOC_SOCK_PDP || sk->transport_handle < 0) return;
+    NkAdhocTransport *t = s_adhoc_active_transport;
+    if (!t || !t->ops || !t->ops->pdp_recv) return;
+    for (;;) {
+        uint8_t sbuf[2048];
+        uint8_t *heap_buf = NULL;
+        uint8_t *dst = sbuf;
+        uint32_t cap = (uint32_t)sizeof(sbuf);
+        const uint32_t peek = t->ops->pdp_peek ? t->ops->pdp_peek(t, sk->transport_handle) : 0u;
+        if (peek > cap && peek <= PSP_ADHOC_PDP_MTU) {
+            heap_buf = malloc(peek);
+            if (!heap_buf) break;
+            dst = heap_buf;
+            cap = peek;
+        }
+        uint8_t smac[6];
+        uint16_t sport = 0u;
+        uint32_t got = 0u;
+        int rc = t->ops->pdp_recv(t, sk->transport_handle, smac, &sport, dst, cap, &got);
+        if (rc == NK_NET_SHORT_BUFFER && got > cap && got <= PSP_ADHOC_PDP_MTU) {
+            free(heap_buf);
+            heap_buf = malloc(got);
+            if (!heap_buf) break;
+            rc = t->ops->pdp_recv(t, sk->transport_handle, smac, &sport, heap_buf, got, &got);
+            dst = heap_buf;
+        }
+        if (rc != NK_NET_OK) {
+            free(heap_buf);
+            break;
+        }
+        adhoc_pdp_queue_datagram(sk, smac, sport, dst, got);
+        free(heap_buf);
+    }
 }
 
 static AdhocSockSlot *adhoc_sock_get(int id) {
@@ -1342,7 +1433,7 @@ static void adhoc_close_slot_internal(int id) {
             (void)t->ops->ptp_close(t, sk->transport_handle);
         }
     }
-    adhoc_free_local_q(sk);
+    adhoc_free_rx_q(sk);
     memset(sk, 0, sizeof(*sk));
     sk->transport_handle = -1;
 }
@@ -1353,7 +1444,12 @@ static void adhoc_pump_all(void) {
     if (t->ops->pump) t->ops->pump(t);
     for (int i = 0; i < ADHOC_MAX_SOCKETS; i++) {
         AdhocSockSlot *sk = &s_adhoc.slots[i];
-        if (!sk->used || sk->type != ADHOC_SOCK_PTP || sk->transport_handle < 0) continue;
+        if (!sk->used) continue;
+        if (sk->type == ADHOC_SOCK_PDP) {
+            adhoc_pdp_fill_queue(sk);
+            continue;
+        }
+        if (sk->type != ADHOC_SOCK_PTP || sk->transport_handle < 0) continue;
         if (sk->state == ADHOC_PTP_STATE_SYN_SENT && t->ops->ptp_connect_poll) {
             const int poll = t->ops->ptp_connect_poll(t, sk->transport_handle);
             if (poll == 1) {
@@ -1398,16 +1494,7 @@ static uint32_t adhoc_pdp_deliver_local(uint16_t sport, uint16_t dport, const vo
     for (int i = 0; i < ADHOC_MAX_SOCKETS; i++) {
         AdhocSockSlot *dst = &s_adhoc.slots[i];
         if (!dst->used || dst->type != ADHOC_SOCK_PDP || dst->lport != dport) continue;
-        if (dst->local_count >= ADHOC_LOCAL_LOOP_QUEUE) return 0u;
-        uint8_t *copy = len ? malloc(len) : NULL;
-        if (len && !copy) return 0u;
-        if (len) memcpy(copy, data, len);
-        LocalDgram *d = &dst->local_q[(dst->local_head + dst->local_count) % ADHOC_LOCAL_LOOP_QUEUE];
-        memcpy(d->src_mac, self_mac, 6u);
-        d->sport = sport;
-        d->len = len;
-        d->data = copy;
-        dst->local_count++;
+        adhoc_pdp_queue_datagram(dst, self_mac, sport, data, len);
         return 0u;
     }
     return 0u;
@@ -1450,31 +1537,20 @@ static uint32_t adhoc_pdp_recv_raw(int id, uint8_t src_mac[6], uint16_t *sport, 
                                    uint32_t cap, uint32_t *out_len) {
     AdhocSockSlot *sk = adhoc_sock_get(id);
     if (!sk || sk->type != ADHOC_SOCK_PDP) return SCE_NET_ADHOC_ERROR_INVALID_SOCKET_ID;
-    if (sk->local_count > 0u) {
-        LocalDgram *d = &sk->local_q[sk->local_head];
-        *out_len = d->len;
-        if (d->len > cap) return SCE_NET_ADHOC_ERROR_NOT_ENOUGH_SPACE;
-        if (src_mac) memcpy(src_mac, d->src_mac, 6u);
-        if (sport) *sport = d->sport;
-        if (d->len && buf) memcpy(buf, d->data, d->len);
-        free(d->data);
-        d->data = NULL;
-        sk->local_head = (sk->local_head + 1u) % ADHOC_LOCAL_LOOP_QUEUE;
-        sk->local_count--;
-        return 0u;
-    }
-    NkAdhocTransport *t = s_adhoc_active_transport;
-    if (!t || !t->ops || !t->ops->pdp_recv) return SCE_NET_ADHOC_ERROR_WOULD_BLOCK;
-    uint8_t tmp_mac[6];
-    uint16_t tmp_port = 0u;
-    const int rc = t->ops->pdp_recv(t, sk->transport_handle, tmp_mac, &tmp_port, buf, cap, out_len);
-    if (rc == NK_NET_OK) {
-        if (src_mac) memcpy(src_mac, tmp_mac, 6u);
-        if (sport) *sport = tmp_port;
-        return 0u;
-    }
-    if (rc == NK_NET_SHORT_BUFFER) return SCE_NET_ADHOC_ERROR_NOT_ENOUGH_SPACE;
-    return SCE_NET_ADHOC_ERROR_WOULD_BLOCK;
+    adhoc_pdp_fill_queue(sk);
+    if (sk->rx_count == 0u) return SCE_NET_ADHOC_ERROR_WOULD_BLOCK;
+    AdhocDgram *d = &sk->rx_q[sk->rx_head];
+    *out_len = d->len;
+    if (d->len > cap) return SCE_NET_ADHOC_ERROR_NOT_ENOUGH_SPACE;
+    if (src_mac) memcpy(src_mac, d->src_mac, 6u);
+    if (sport) *sport = d->sport;
+    if (d->len && buf) memcpy(buf, d->data, d->len);
+    sk->queued_bytes = sk->queued_bytes >= d->len ? sk->queued_bytes - d->len : 0u;
+    free(d->data);
+    d->data = NULL;
+    sk->rx_head = (sk->rx_head + 1u) % ADHOC_PDP_QUEUE_SLOTS;
+    sk->rx_count--;
+    return 0u;
 }
 
 static uint32_t h_NetAdhocInit(CpuState *s) {
@@ -1642,13 +1718,11 @@ static uint32_t h_NetAdhocGetPdpStat(CpuState *s) {
     if (max_n > total) max_n = total;
     if (max_n > 0 && !sr_guest_span_writable(A1, (uint32_t)max_n * 20u))
         return hle_unmodelled_stop("sceNetAdhocGetPdpStat", "with unwritable buf 0x%08x", A1);
-    NkAdhocTransport *t = s_adhoc_active_transport;
     int written = 0;
     for (int i = 0; i < ADHOC_MAX_SOCKETS && written < max_n; i++) {
         const AdhocSockSlot *sk = &s_adhoc.slots[i];
         if (!sk->used || sk->type != ADHOC_SOCK_PDP) continue;
-        uint32_t rx_cc = (t && t->ops && t->ops->pdp_peek) ? t->ops->pdp_peek(t, sk->transport_handle) : 0u;
-        if (sk->local_count > 0u) rx_cc += sk->local_q[sk->local_head].len;
+        const uint32_t rx_cc = sk->queued_bytes;
         const uint32_t addr = A1 + (uint32_t)written * 20u;
         MEM_W32(addr, (written + 1 < max_n) ? addr + 20u : 0u);
         MEM_W32(addr + 4u, (uint32_t)(i + 1));
@@ -2092,10 +2166,8 @@ static int adhoc_poll_once(uint32_t sds_ptr, int count, uint32_t *alert_or_exc) 
         }
         uint32_t rev = 0u;
         if (sk->type == ADHOC_SOCK_PDP) {
-            const uint32_t peek = ((t && t->ops && t->ops->pdp_peek) ? t->ops->pdp_peek(t, sk->transport_handle) : 0u) +
-                                  (sk->local_count ? sk->local_q[sk->local_head].len : 0u);
             if ((ev & ADHOC_EV_SEND)) rev |= ADHOC_EV_SEND;
-            if ((ev & ADHOC_EV_RECV) && peek > 0u) rev |= ADHOC_EV_RECV;
+            if ((ev & ADHOC_EV_RECV) && sk->rx_count > 0u) rev |= ADHOC_EV_RECV;
         } else {
             if (sk->state == ADHOC_PTP_STATE_LISTEN) {
                 const bool can_acc = (t && t->ops && t->ops->ptp_accept_pending)
@@ -2175,6 +2247,7 @@ static uint32_t h_NetAdhocPollSocket(CpuState *s) {
 #define MATCH_MAX_PEERS 16
 #define MATCH_MAX_EVENTS 64
 #define MATCH_SCRATCH_BYTES 4096u
+#define MATCH_MAX_RXBUFLEN (1024u * 1024u)
 #define MATCH_PKT_PING   0
 #define MATCH_PKT_HELLO  1
 #define MATCH_PKT_JOIN   2
@@ -2193,6 +2266,7 @@ static uint32_t h_NetAdhocPollSocket(CpuState *s) {
 #define MATCH_EV_ACCEPT      6
 #define MATCH_EV_ESTABLISHED 7
 #define MATCH_EV_TIMEOUT     8
+#define MATCH_EV_ERROR       9
 #define MATCH_EV_BYE         10
 #define MATCH_EV_DATA        11
 #define MATCH_EV_DATA_ACK    12
@@ -2263,6 +2337,7 @@ static struct {
     int inited;
     uint32_t pool_size;
     uint32_t gen;
+    uint32_t next_ctx_gen;
     MatchContext ctx[MATCH_MAX_CONTEXTS];
 } s_matching;
 
@@ -2567,25 +2642,52 @@ static void match_handle_packet(MatchContext *ctx, const uint8_t sender[6], uint
 static void match_deliver_event(CpuState *s, MatchContext *ctx, uint32_t sp, uint32_t gp,
                                 const MatchEvent *ev) {
     if (!ctx->callback || !ctx->cb_guest_addr) return;
-    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ctx->cb_guest_addr + i, ev->mac[i]);
-    uint32_t optlen = (uint32_t)(ev->optlen > 0 ? ev->optlen : 0);
-    if (optlen > MATCH_SCRATCH_BYTES - 8u) optlen = MATCH_SCRATCH_BYTES - 8u;
-    for (uint32_t i = 0u; i < optlen; i++) MEM_W8(ctx->cb_guest_addr + 8u + i, ev->opt[i]);
+    const uint32_t optlen = (uint32_t)(ev->optlen > 0 ? ev->optlen : 0);
+    if (optlen > UINT32_MAX - 8u) return;
+    const uint32_t need = 8u + optlen;
+    uint32_t tmp_uid = 0u;
+    uint32_t dst_addr = ctx->cb_guest_addr;
+    int opcode = ev->opcode;
+    uint32_t deliver_optlen = optlen;
+    /* PPSSPP notifyMatchingHandler (Core/HLE/sceNetAdhocMatching.cpp:85-109): allocate an
+     * exact guest block for payloads larger than the reusable scratch block, and surface OOM
+     * as PSP_ADHOC_MATCHING_EVENT_ERROR rather than truncating payload bytes. */
+    if (need > MATCH_SCRATCH_BYTES) {
+        tmp_uid = alloc_block(need);
+        if (tmp_uid == NET_POOL_NONE) {
+            static int match_oom_logged;
+            if (!match_oom_logged) {
+                match_oom_logged = 1;
+                fprintf(stderr, "HLE: sceNetAdhocMatching failed to allocate %u-byte event buffer; "
+                                "delivering EVENT_ERROR\n", need);
+            }
+            tmp_uid = 0u;
+            opcode = MATCH_EV_ERROR;
+            deliver_optlen = 0u;
+        } else {
+            dst_addr = block_addr(tmp_uid);
+        }
+    }
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(dst_addr + i, ev->mac[i]);
+    for (uint32_t i = 0u; i < deliver_optlen; i++) MEM_W8(dst_addr + 8u + i, ev->opt[i]);
     s->r[4] = (uint32_t)ctx->id;
-    s->r[5] = (uint32_t)ev->opcode;
-    s->r[6] = ctx->cb_guest_addr;
-    s->r[7] = optlen;
-    s->r[8] = optlen ? (ctx->cb_guest_addr + 8u) : 0u;
+    s->r[5] = (uint32_t)opcode;
+    s->r[6] = dst_addr;
+    s->r[7] = deliver_optlen;
+    s->r[8] = deliver_optlen ? (dst_addr + 8u) : 0u;
     s->r[28] = gp;
     s->r[29] = sp;
     s->r[31] = SR_HOST_RETURN_PC;
     s->pc = ctx->callback;
     uint32_t fatal_target = 0u;
-    if (hle_dispatch_guest_scoped(s, ctx->callback, "sceNetAdhocMatching handler", &fatal_target)) {
+    const int faulted = hle_dispatch_guest_scoped(s, ctx->callback, "sceNetAdhocMatching handler",
+                                                  &fatal_target);
+    if (tmp_uid) (void)free_block(tmp_uid);
+    if (faulted) {
         fprintf(stderr, "SEMANTIC_BOUNDARY: matching-handler-fault; callback 0x%08x (id %d, event %d) "
                         "faulted at 0x%08x\n",
-                ctx->callback, ctx->id, ev->opcode, fatal_target);
-        sr_flight_fatal(SR_FLIGHT_KIND_FATAL_DISPATCH, ctx->callback, fatal_target, (uint32_t)ev->opcode);
+                ctx->callback, ctx->id, opcode, fatal_target);
+        sr_flight_fatal(SR_FLIGHT_KIND_FATAL_DISPATCH, ctx->callback, fatal_target, (uint32_t)opcode);
         fflush(stderr);
         exit(1);
     }
@@ -2732,6 +2834,15 @@ static uint32_t h_NetAdhocMatchingCreate(CpuState *s) {
     const uint32_t cb = stack_arg(s, 4);
     if (maxnum <= 1 || maxnum > 16) return SCE_NET_ADHOC_MATCHING_ERROR_INVALID_MAXNUM;
     if (rxbuflen < 6 * maxnum + 4) return SCE_NET_ADHOC_MATCHING_ERROR_RXBUF_TOO_SHORT;
+    if ((uint32_t)rxbuflen > MATCH_MAX_RXBUFLEN) {
+        static int match_rxbuf_limit_logged;
+        if (!match_rxbuf_limit_logged) {
+            match_rxbuf_limit_logged = 1;
+            fprintf(stderr, "HLE: sceNetAdhocMatchingCreate refused rxbuflen=%d (limit %u)\n",
+                    rxbuflen, MATCH_MAX_RXBUFLEN);
+        }
+        return SCE_NET_ADHOC_MATCHING_ERROR_NO_SPACE;
+    }
     if (mode < 1 || mode > 3) return SCE_NET_ADHOC_MATCHING_ERROR_INVALID_MODE;
     if (((mode == 1 || mode == 3) && (hello_int == 0 || keep_int == 0)) || init_cnt < 0 || rexmt_int == 0)
         return SCE_NET_ADHOC_MATCHING_ERROR_INVALID_ARG;
@@ -2796,12 +2907,12 @@ static uint32_t matching_start_impl(int id, int evth_pri, int evth_stack, int in
     }
     if (!s_adhoc.inited || !adhoc_local_mac(ctx->self_mac))
         return SCE_NET_ADHOC_MATCHING_ERROR_NO_SPACE;
-    ctx->pdp_id = adhoc_pdp_open_internal(ctx->port, PSP_ADHOC_PDP_MFS);
+    ctx->pdp_id = adhoc_pdp_open_internal(ctx->port, (uint32_t)ctx->rxbuflen);
     if (ctx->pdp_id < 0) return SCE_NET_ADHOC_MATCHING_ERROR_PORT_IN_USE;
     memset(ctx->peers, 0, sizeof(ctx->peers));
     (void)match_add_peer(ctx, ctx->self_mac, MATCH_PEER_SELF);
     ctx->running = 1;
-    ctx->ctx_gen++;
+    ctx->ctx_gen = ++s_matching.next_ctx_gen;
     ctx->last_hello = 0u;
     ctx->last_ping = sched_vtime_us();
     const uint64_t packed = ((uint64_t)(ctx - s_matching.ctx) << 32) | (uint64_t)ctx->ctx_gen;
