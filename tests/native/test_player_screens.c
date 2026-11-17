@@ -3628,10 +3628,10 @@ static void test_settings_pages(void) {
             PLAYER_UI_ID_SETTINGS_NICKNAME,
             PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
             PLAYER_UI_ID_SETTINGS_COVER_ART,
-            PLAYER_UI_ID_SETTINGS_BACK
+            PLAYER_UI_ID_SETTINGS_DEVELOPER_LOG
         };
         NkUi *ui = NULL;
-        (void)flow_case_layout(FLOW_SETTINGS_ONLINE, 960, 540, &ui);
+        (void)flow_case_layout(FLOW_SETTINGS_ONLINE, 1280, 800, &ui);
         CHECK(ui != NULL && nk_ui_focused(ui) == expected_order[0],
               "Online and developer starts focus on Developer mode");
         for (size_t step = 1u;
@@ -3641,9 +3641,17 @@ static void test_settings_pages(void) {
             (void)draw_flow_case(ui, FLOW_SETTINGS_ONLINE);
             (void)nk_ui_end(ui);
             CHECK(nk_ui_focused(ui) == expected_order[step],
-                  "Down steps sequentially through Developer, Discord, Nickname, Online play, Cover art, and Back");
+                  "Down steps sequentially through Developer, Discord, Nickname, Online play, Cover art, and Developer log");
         }
-        if (ui != NULL) nk_ui_destroy(ui);
+        if (ui != NULL) {
+            push_nav(ui, NK_UI_DIR_LEFT);
+            nk_ui_begin(ui, 0.0);
+            (void)draw_flow_case(ui, FLOW_SETTINGS_ONLINE);
+            (void)nk_ui_end(ui);
+            CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_SETTINGS_BACK,
+                  "Left from Developer log reaches Back on Online and developer");
+            nk_ui_destroy(ui);
+        }
     }
     {
         /* All six optional/standard rows active together (Online mode, Developer mode,
@@ -3660,7 +3668,7 @@ static void test_settings_pages(void) {
             PLAYER_UI_ID_SETTINGS_NICKNAME,
             PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
             PLAYER_UI_ID_SETTINGS_COVER_ART,
-            PLAYER_UI_ID_SETTINGS_BACK
+            PLAYER_UI_ID_SETTINGS_DEVELOPER_LOG
         };
         memset(&config, 0, sizeof(config));
         config.host = NK_UI_HOST_LAUNCHER;
@@ -3668,7 +3676,7 @@ static void test_settings_pages(void) {
         NkUi *ui = screen_ui_create(&config);
         CHECK(ui != NULL, "create UI for 6-row Online and developer regression");
         if (ui != NULL) {
-            set_test_viewport(ui, 960, 540);
+            set_test_viewport(ui, 1280, 800);
             memset(&six, 0, sizeof(six));
             six.page = PLAYER_UI_SETTINGS_PAGE_ONLINE;
             six.online_mode = true;
@@ -3679,11 +3687,13 @@ static void test_settings_pages(void) {
             six.online_play = true;
             six.online_play_row_value = "On: socom.cc";
             six.download_cover_art = true;
-            six.logical_width = 960.0f;
-            six.logical_height = 540.0f;
-            nk_ui_begin(ui, 0.0);
-            (void)player_ui_screen_settings(ui, &six);
-            draw = nk_ui_end(ui);
+            six.logical_width = 1280.0f;
+            six.logical_height = 800.0f;
+            for (int frame = 0; frame < 2; ++frame) {
+                nk_ui_begin(ui, 0.0);
+                (void)player_ui_screen_settings(ui, &six);
+                draw = nk_ui_end(ui);
+            }
             CHECK(draw != NULL && nk_ui_dump(ui, dump, sizeof(dump)) > 0u &&
                       strstr(dump, "\"ONLINE MODE: ON\"") != NULL &&
                       strstr(dump, "\"ONLINE PLAY: ON: SOCOM.CC\"") != NULL &&
@@ -3699,6 +3709,12 @@ static void test_settings_pages(void) {
                     (void)nk_ui_end(ui);
                 }
             }
+            push_nav(ui, NK_UI_DIR_LEFT);
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_settings(ui, &six);
+            (void)nk_ui_end(ui);
+            CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_SETTINGS_BACK,
+                  "Left from Developer log reaches Back in 6-row Online and developer layout");
             nk_ui_destroy(ui);
         }
     }

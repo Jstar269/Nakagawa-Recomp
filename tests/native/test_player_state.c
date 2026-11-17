@@ -16431,6 +16431,7 @@ int main(int argc, char **argv) {
         player_app_init(s_app2);
         assert(!s_app2->settings.online_play);
         assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
+        s_app2->settings_path[0] = '\0';
         player_app_cycle_online_play_preset(s_app2);
         assert(strcmp(s_app2->settings.online_play_server, "psp.mgn.pub") == 0);
         assert(!player_app_set_online_play_server(s_app2, "bad server!!"));
@@ -16616,6 +16617,7 @@ int main(int argc, char **argv) {
         player_app_init(s_app2);
         assert(!s_app2->settings.online_play && !s_app2->settings.download_cover_art);
         assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
+        s_app2->settings_path[0] = '\0';
         player_app_set_online_play(s_app2, true);
         player_app_toggle_download_cover_art(s_app2);
         assert(s_app2->settings.online_play && s_app2->settings.download_cover_art);
