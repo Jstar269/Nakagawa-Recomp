@@ -11,7 +11,8 @@
 **Play PSP games you own as native Windows programs: add your disc image, build it, play.**
 
 Not an emulator: each game becomes a native program. Opt-in extras include Widescreen for any game, which shows more
-of the 3D scene on an ultrawide screen, and 60 FPS game logic for each game that has an Ace package.
+of the 3D scene on an ultrawide screen, and 60 FPS game logic (Ace) for Hot Shots Tennis, with an Experimental Ace
+package for LittleBigPlanet.
 
 Experimental pre-release: one game is playable so far. [See what works](docs/COMPATIBILITY.md).
 
@@ -39,8 +40,6 @@ generates. Set up on [Windows](docs/SETUP.md) or [Linux](docs/LINUX_DEVELOPMENT.
 `mingw32-make contrib-check` (on Linux, `make contrib-check`), then follow
 [Contributing without a game disc](CONTRIBUTING.md#contributing-without-a-game-disc) or pick an issue labelled
 [`no-disc-needed`](https://github.com/Jstar269/Nakagawa-Recomp/labels/no-disc-needed).
-
-<!-- A hero clip goes on one line directly below this comment. -->
 
 [![A rally in Hot Shots Tennis: Get a Grip, running natively in Nakagawa Recomp; play the clip](docs/media/hst-rally-poster.png)](https://jstar269.github.io/Nakagawa-Recomp/media/hst-rally.mp4)
 
