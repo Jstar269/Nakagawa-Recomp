@@ -6221,6 +6221,21 @@ class NativePlayerUiTests(unittest.TestCase):
                          "with its package, Ace follows Enhanced and the badge says Ace")
         self.assertEqual(self.title_play(packaged), {}, "back to the library: nothing is kept")
 
+    def test_next_ui_enhanced_page_mode_cycles_without_unavailable_ace(self) -> None:
+        """Review #2644 D3: Settings > Enhanced skips Ace for a title without its own package."""
+        events = (
+            *self.OPEN_FIRST, *self.DOWN_TO_PLAY_MODE, *self.TO_PLAY_OPTIONS,
+            "KEY_RETURN", "WAIT_MS=250", "KEY_DOWN", "WAIT_MS=80",
+            *(('KEY_RETURN', 'WAIT_MS=120') * 4), "KEY_ESCAPE", "WAIT_MS=150",
+        )
+        run = self.next_ui_run("library", events, wait_background=True,
+                               settings=self.LIBRARY_ENHANCED)
+        pages = [page for page in self.enhanced_pages(run) if page.get("title") == "TEST00005"]
+        self.assertTrue(pages, run["stdout"])
+        self.assertEqual(pages[-1].get("mode"), "Authentic")
+        self.assertEqual(self.title_play(run).get("TEST00005"), {"mode": "authentic"},
+                         "the fourth press continues around the three available modes")
+
     def test_next_ui_title_enhanced_options_are_that_games_and_back_returns(self) -> None:
         """#2055: Enhanced options opens Settings > Enhanced for that game: its rows show the
         game's own values and change only them, and Escape returns to its title page with

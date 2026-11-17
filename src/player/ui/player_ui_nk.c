@@ -1049,7 +1049,7 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         player->enhanced_modes[1] = player_play_mode_name(PLAYER_PLAY_AUTHENTIC);
         player->enhanced_modes[2] = player_play_mode_name(PLAYER_PLAY_ENHANCED);
         player->enhanced_modes[3] = player_play_mode_name(PLAYER_PLAY_ACE);
-        model->enhanced_mode_count = 4;
+        model->enhanced_mode_count = app->title_enhancements[title].available ? 4 : 3;
         model->enhanced_mode_sentence = app->title_enhancements[title].available
             ? "Ace is Enhanced plus this game's own 60 FPS game logic."
             : "Enhanced adds the parts below. " PLAYER_UI_ACE_NEEDS_PACKAGE;
