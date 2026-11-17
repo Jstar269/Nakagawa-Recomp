@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import hashlib
 import json
@@ -16,7 +17,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from typing import Any
+from unittest import mock
+from typing import Any, Iterator
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -848,6 +850,44 @@ class ProfileZeroManifestTests(unittest.TestCase):
             _check_cross_host_digests(title_id, dict(pinned, result_txt="0" * 64))
         _check_cross_host_digests(title_id, pinned)
 
+    def test_required_route_fails_a_skip_raised_inside_a_manifest_subtest(self) -> None:
+        """NK_PROFILE_ZERO_REQUIRED=1 turns a per-manifest SKIP into a failure.
+
+        The fixture-absent SKIP is raised inside each manifest's subTest, which records it
+        as a skipped subtest instead of re-raising it to the route's outer guard.
+        """
+        route = ProfileZeroManifestTests.test_package_and_runtime_route_assert_all_profile_zero_cases
+        # Undo the nightly-tier skip wrapper so the real route body runs here.
+        route = getattr(route, "__wrapped__", route)
+
+        class Probe(ProfileZeroManifestTests):
+            def runTest(self) -> None:
+                route(self)
+
+        module = sys.modules[__name__]
+
+        def run_probe(required: bool) -> unittest.TestResult:
+            result = unittest.TestResult()
+            with mock.patch.dict(os.environ),                     mock.patch.object(module, "_pspdev_backend", return_value=None),                     mock.patch.object(module, "_runtime_build_environment",
+                                      return_value=({}, "make")),                     mock.patch.object(module, "_fixture_bytes_present", return_value=False):
+                os.environ.pop(PROFILE_ZERO_REQUIRED, None)
+                if required:
+                    os.environ[PROFILE_ZERO_REQUIRED] = "1"
+                Probe().run(result)
+            return result
+
+        required = run_probe(required=True)
+        self.assertEqual(required.skipped, [])
+        self.assertEqual(len(required.failures), len(MANIFEST_PATHS))
+        for _case, trace in required.failures:
+            self.assertIn(f"{PROFILE_ZERO_REQUIRED}=1, but the route did not run", trace)
+            self.assertIn("the profile-zero fixture bytes are absent", trace)
+
+        optional = run_probe(required=False)
+        self.assertEqual(optional.failures, [])
+        self.assertEqual(optional.errors, [])
+        self.assertEqual(len(optional.skipped), len(MANIFEST_PATHS))
+
     def test_repository_stores_only_the_fixture_digests(self) -> None:
         """No generated executable is committed (#1100, OpenSSF OSPS-QA-05.01)."""
         if not (ROOT / ".git").exists():
@@ -895,8 +935,19 @@ class ProfileZeroManifestTests(unittest.TestCase):
 
     @nightly_tier
     def test_package_and_runtime_route_assert_all_profile_zero_cases(self) -> None:
-        try:
+        with self._required_route():
             self._run_package_and_runtime_route()
+
+    @contextlib.contextmanager
+    def _required_route(self) -> Iterator[None]:
+        """Turn a SKIP into a failure where the hosted step requires the route.
+
+        Each manifest runs in its own subTest, and a subTest records a SkipTest raised in
+        its body as a skipped subtest without re-raising it, so the guard must also wrap
+        every subTest body, not only the whole route.
+        """
+        try:
+            yield
         except unittest.SkipTest as skipped:
             if os.environ.get(PROFILE_ZERO_REQUIRED) == "1":
                 self.fail(f"{PROFILE_ZERO_REQUIRED}=1, but the route did not run: {skipped}")
@@ -926,7 +977,7 @@ class ProfileZeroManifestTests(unittest.TestCase):
         with scratch_dir.TemporaryDirectory(prefix="nk-profile-zero-e2e-") as temporary:
             root = Path(temporary)
             for manifest_path in MANIFEST_PATHS:
-                with self.subTest(manifest=manifest_path.name):
+                with self.subTest(manifest=manifest_path.name), self._required_route():
                     manifest = _manifest(manifest_path)
                     if backend is not None:
                         rebuild_dir = root / manifest["id"] / "psp-rebuild"
