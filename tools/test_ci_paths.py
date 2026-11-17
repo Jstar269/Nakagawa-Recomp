@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -47,13 +48,56 @@ class CiPathClassificationTests(unittest.TestCase):
     def test_docs_only_keeps_expensive_jobs_off(self) -> None:
         # Safe because publication integrity is not path-gated: the ungated
         # hygiene job audits the generated public metadata on every event.
-        # PublicationCoverageInvariantTests pins that.
-        result = classify(["docs/CI.md", "README.md"])
+        # PublicationCoverageInvariantTests pins that. The documents are ones no tools
+        # module names: one a Python test reads routes that suite (the test below).
+        paths = ["docs/unnamed-by-any-tool.md", "UNNAMED_BY_ANY_TOOL.md"]
+        for path in paths:
+            self.assertFalse(ci_paths_module._is_test_read_doc(path), path)
+        result = classify(paths)
         self.assertEqual(result["docs_only"], "true")
         self.assertEqual(result["run_markdown"], "true")
         self.assertEqual(result["run_python"], "false")
         self.assertEqual(result["run_native"], "false")
         self.assertEqual(result["run_windows"], "false")
+
+    def test_a_document_a_python_test_reads_runs_the_python_suite(self) -> None:
+        """A docs-only edit to a document a Python test pins runs the whole Python suite.
+
+        Failing before: docs/SETUP.md routed the docs gate only, so a change dropping a host
+        from its Network use list skipped test_prereq_fetcher, the AGENTS.md Section 5
+        allowlist test that pins every host there, and the PR landed green."""
+
+        prereq_test = (ROOT / "tools" / "test_prereq_fetcher.py").read_text(encoding="utf-8")
+        self.assertIn('"SETUP.md"', prereq_test)
+        for paths in (["docs/SETUP.md"], ["docs/CI.md"], ["README.md"],
+                      ["docs/SETUP.md", "docs/unnamed-by-any-tool.md"]):
+            with self.subTest(paths=paths):
+                result = classify(paths)
+                self.assertEqual(result["docs_only"], "true")
+                self.assertEqual(result["run_python"], "true")
+                self.assertEqual(result["python_scope"], "all")
+                # Only the Python suite: the native and Windows jobs stay off.
+                self.assertEqual(result["run_native"], "false")
+                self.assertEqual(result["run_windows"], "false")
+
+    def test_a_document_is_named_by_its_whole_file_name(self) -> None:
+        names = ci_paths_module._names_file
+        self.assertTrue(names('ROOT / "docs" / "CI.md"', "CI.md"))
+        self.assertTrue(names("see docs/CI.md.", "CI.md"))
+        self.assertTrue(names("CI.md", "CI.md"))
+        self.assertFalse(names("docs/PUBLIC_CI.md", "CI.md"))
+        self.assertFalse(names("docs/NEW-CI.md", "CI.md"))
+        self.assertFalse(names("docs/CI.mdx", "CI.md"))
+        self.assertFalse(names("docs/CI.md_old", "CI.md"))
+        self.assertTrue(names("PUBLIC_CI.md and CI.md", "CI.md"))
+
+    def test_an_unreadable_tools_tree_routes_every_document_to_python(self) -> None:
+        ci_paths_module._is_test_read_doc.cache_clear()
+        try:
+            with patch.object(ci_paths_module, "_docs_reader_sources", return_value=None):
+                self.assertEqual(classify(["docs/unnamed-by-any-tool.md"])["run_python"], "true")
+        finally:
+            ci_paths_module._is_test_read_doc.cache_clear()
 
     def test_tools_readme_runs_the_python_gate_that_guards_it(self) -> None:
         """tools/README.md is Markdown, but tools/test_lint_docs.py compares its module
@@ -66,8 +110,8 @@ class CiPathClassificationTests(unittest.TestCase):
         self.assertEqual(result["docs_only"], "true")
         # Narrow, not a blanket Markdown routing: ordinary documentation keeps skipping
         # the Python matrix, including the other Markdown file under tools/.
-        self.assertEqual(classify(["docs/CI.md"])["run_python"], "false")
-        self.assertEqual(classify(["tools/TRACE_FORMAT.md"])["run_python"], "false")
+        self.assertEqual(classify(["docs/unnamed-by-any-tool.md"])["run_python"], "false")
+        self.assertEqual(classify(["tools/UNNAMED_BY_ANY_TOOL.md"])["run_python"], "false")
 
     def test_generated_public_metadata_is_recognised_and_preserves_docs_only(self) -> None:
         """Finding 13 (O-13): generated public metadata must not trigger force_full."""
@@ -587,25 +631,26 @@ class CiPathAdversarialTests(unittest.TestCase):
         self.assertEqual(result["build_system"], "false")
 
     def test_c_harness_tests_use_their_logical_native_subject(self) -> None:
-        for path in (
-            "tools/test_dispatch_c.py",
-            "tools/test_evf_c.py",
-            "tools/test_guestmem_c.py",
-            "tools/test_pgd_c.py",
-            "tools/test_sdkver_c.py",
-            "tools/test_vfs_c.py",
-            "tools/test_native_driver_hardening.py",
-            "tools/test_ref_run_elf_hardening.py",
-            "tools/test_savedata_spans.py",
-            "tools/test_sched_invariants.py",
+        # The subject is a native tool: the test routes the native and Windows jobs exactly
+        # when a gate descriptor or tool script names the module. The routes are literals, not
+        # _is_unexecuted_test's own answer, so a misrouted module fails here; a gate that
+        # starts or stops naming one of these modules updates its row.
+        for path, expected in (
+            ("tools/test_dispatch_c.py", "false"),
+            ("tools/test_evf_c.py", "false"),
+            ("tools/test_guestmem_c.py", "false"),
+            ("tools/test_pgd_c.py", "false"),
+            ("tools/test_sdkver_c.py", "true"),
+            ("tools/test_vfs_c.py", "true"),
+            ("tools/test_native_driver_hardening.py", "false"),
+            ("tools/test_ref_run_elf_hardening.py", "false"),
+            ("tools/test_savedata_spans.py", "true"),
+            ("tools/test_sched_invariants.py", "true"),
         ):
             with self.subTest(path=path):
                 result = classify([path])
                 self.assertEqual(result["run_python"], "true")
                 self.assertEqual(result["native_runtime"], "false")
-                # The subject is a native tool: the test routes the native and Windows jobs
-                # exactly when a gate descriptor or tool script names the module.
-                expected = "false" if ci_paths_module._is_unexecuted_test(path) else "true"
                 self.assertEqual(result["run_native"], expected)
                 self.assertEqual(result["run_windows"], expected)
 
@@ -662,16 +707,34 @@ class CiPathAdversarialTests(unittest.TestCase):
                 self.assertFalse(ci_paths_module._is_unexecuted_test(path))
 
     def test_every_windows_gate_named_test_is_routed(self) -> None:
-        """Each test module ci.yml or the Makefile names stays routed through a native gate."""
+        """Each test module ci.yml or the Makefile names stays routed through a native gate.
+
+        The check is what ``classify`` routes, not ``_is_unexecuted_test``, whose own last
+        clause is the name check: a gate-named module with a native subject runs the native
+        and Windows jobs. One whose subject is a Python tool routes Python only, as an edit to
+        that tool does (``test_python_only_test_keeps_native_gates_off``)."""
 
         sources = ci_paths_module._native_gate_sources()
         assert sources is not None
         tools_root = Path(__file__).resolve().parent
+        checked: set[str] = set()
         for test_path in sorted(tools_root.glob("test_*.py")):
             relative = test_path.relative_to(tools_root.parent).as_posix()
-            if ci_paths_module._names_module(sources, test_path.stem):
-                with self.subTest(path=relative):
-                    self.assertFalse(ci_paths_module._is_unexecuted_test(relative))
+            if not ci_paths_module._names_module(sources, test_path.stem):
+                continue
+            logical = ci_paths_module._logical_tool_path(relative)
+            assert logical is not None
+            if not (ci_paths_module._is_native_tool(logical) or ci_paths_module._is_build_system(logical)
+                    or ci_paths_module._is_title_manifest(logical) or ci_paths_module._is_workflow_ci(logical)):
+                continue
+            checked.add(test_path.stem)
+            with self.subTest(path=relative):
+                result = classify([relative])
+                self.assertEqual(result["run_native"], "true")
+                self.assertEqual(result["run_windows"], "true")
+        # Not vacuous: the C harness tests the native gates name are among the modules checked.
+        self.assertLessEqual({"test_sdkver_c", "test_vfs_c", "test_savedata_spans", "test_sched_invariants"},
+                             checked)
 
     def test_a_test_module_imported_by_a_gate_run_driver_stays_routed(self) -> None:
         """tests/native/test_player_ui.py imports tools/test_player_package_route."""
@@ -1248,6 +1311,13 @@ class TierLabelReadTests(unittest.TestCase):
             environment = {"GITHUB_REF": "refs/pull/7/merge", "GITHUB_REPOSITORY": THIS_REPOSITORY_NAME,
                            "NK_CI_TIERS": "on", ci_paths_module.LABEL_TOKEN_VARIABLE: "job-token"}
             arguments = ["--event-name", "pull_request", "--event-path", str(event_path), "--files", *self.CODE]
+            # main() takes --github-output's default from GITHUB_OUTPUT, which every hosted step
+            # sets: without an explicit scratch file each run appended the classifier outputs
+            # to the output file of the step running these tests.
+            github_output = Path(scratch) / "github_output"
+            arguments += ["--github-output", str(github_output)]
+            hosted_output = Path(scratch) / "hosted_step_output"
+            environment["GITHUB_OUTPUT"] = str(hosted_output)
             for urlopen, expected in (
                 (self._github([{"name": self.LABEL}]), f"labels={self.LABEL} (read from GitHub)"),
                 (mock.Mock(side_effect=OSError()), "labels= (event payload; the read from GitHub failed)"),
@@ -1258,6 +1328,8 @@ class TierLabelReadTests(unittest.TestCase):
                 printed = "".join(call.args[0] for call in stdout.write.call_args_list)
                 self.assertIn(expected, printed)
                 self.assertNotIn("job-token", printed)
+            self.assertFalse(hosted_output.exists(), "the test wrote to the hosted step's GITHUB_OUTPUT")
+            self.assertIn("run_python=", github_output.read_text(encoding="utf-8"))
 
 
 class PublicSurfaceRoutingRegressionTests(unittest.TestCase):
@@ -1546,10 +1618,15 @@ class MakefileRecipeOnlyRoutingTests(unittest.TestCase):
     def test_main_reads_both_makefile_revisions_from_git(self) -> None:
         """Production path: the workflow's classify step diffs real revisions."""
 
+        # The scratch repository ignores the user's and the system's Git configuration: a
+        # global commit.gpgsign=true or core.hooksPath would otherwise fail its commits.
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+
         def git(*args: str) -> str:
             return subprocess.run(
-                ["git", "-c", "user.name=ci-paths-test", "-c", "user.email=ci-paths-test@invalid", *args],
-                cwd=repo, check=True, capture_output=True, text=True,
+                ["git", "-c", "user.name=ci-paths-test", "-c", "user.email=ci-paths-test@invalid",
+                 "-c", "commit.gpgsign=false", *args],
+                cwd=repo, env=env, check=True, capture_output=True, text=True, encoding="utf-8",
             ).stdout.strip()
 
         with tempfile.TemporaryDirectory() as scratch:
@@ -1738,75 +1815,105 @@ class CodeqlWorkflowCategoryTests(unittest.TestCase):
                 found = re.findall(writer, content)
                 self.assertEqual(found, ["/"], f"category writer {writer!r} must end in '/'")
 
+    @staticmethod
+    def _upload_script() -> str:
+        """The ``script: |`` body of codeql.yml's upload step, as github-script runs it."""
+        lines = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "codeql.yml").read_text(
+            encoding="utf-8").splitlines()
+        step = next(index for index, line in enumerate(lines)
+                    if line.strip() == "- name: Upload exact-head CodeQL results")
+        script = next(index for index in range(step, len(lines)) if lines[index].strip() == "script: |")
+        indent = len(lines[script]) - len(lines[script].lstrip())
+        body: list[str] = []
+        for line in lines[script + 1:]:
+            if line.strip() and len(line) - len(line.lstrip()) <= indent:
+                break
+            body.append(line)
+        return textwrap.dedent("\n".join(body))
+
     def test_sarif_category_uniqueness_enforcement(self) -> None:
-        """Simulate combining multiple SARIF runs and assert duplicate categories are rejected."""
-        def combine_sarif_runs(runs_by_file: dict[str, list[dict]]) -> tuple[dict, set[str]]:
-            expected_languages = ["actions", "c-cpp", "python"]
-            self.assertEqual(sorted(runs_by_file.keys()), [f"{lang}.sarif" for lang in expected_languages])
+        """The workflow's own upload script refuses mislabelled and duplicate categories.
 
-            categories: set[str] = set()
-            combined_runs: list[dict] = []
-            for filename, runs in sorted(runs_by_file.items()):
-                lang = filename.replace(".sarif", "")
-                for run in runs:
-                    self.assertEqual(run.get("tool", {}).get("driver", {}).get("name"), "CodeQL")
-                    run_id = run.get("automationDetails", {}).get("id") or f"/language:{lang}/"
-                    run.setdefault("automationDetails", {})["id"] = run_id
-                    cut = run_id.rfind("/")
-                    cat = run_id[:cut] if cut > 0 else ""
-                    if cat != f"/language:{lang}":
-                        raise ValueError(f"would be stored under SARIF category {cat!r}")
-                    if cat in categories:
-                        raise ValueError(f"duplicate SARIF analysis category: {cat}")
-                    categories.add(cat)
-                    combined_runs.append(run)
+        It runs under node with a stubbed ``core``, ``github`` and ``context``. A refusal must
+        fail the step and make no API call; a valid set goes on to the first API call. Failing
+        before: the test checked a Python copy of the logic, so deleting a ``return;`` after a
+        ``core.setFailed`` in codeql.yml, which lets the loop go on to upload, still passed."""
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        driver = textwrap.dedent("""
+            const failures = [];
+            const calls = [];
+            const core = {
+              setFailed: (message) => failures.push(message),
+              warning: () => {},
+              summary: new Proxy({}, { get: () => () => core.summary }),
+            };
+            const api = (route) => new Proxy(() => {}, {
+              get: (_, key) => api(`${route}.${String(key)}`),
+              apply: () => { calls.push(route); const error = new Error("stub"); error.status = 404; throw error; },
+            });
+            const github = api("github");
+            const context = { repo: { owner: "owner", repo: "repo" }, eventName: "workflow_run" };
+            (async (github, context, core) => {
+            %SCRIPT%
+            })(github, context, core).catch(() => {}).then(() => {
+              console.log(JSON.stringify({ failures, calls }));
+            });
+        """).replace("%SCRIPT%", self._upload_script())
 
-            if len(categories) != len(expected_languages):
-                raise ValueError(f"expected {len(expected_languages)} distinct categories, found {len(categories)}")
-            return {"runs": combined_runs}, categories
+        def run(runs_by_file: dict[str, list[dict]]) -> dict[str, list[str]]:
+            with tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                (root / "codeql-sarif").mkdir()
+                for name, runs in runs_by_file.items():
+                    document = {"version": "2.1.0", "$schema": "https://example.invalid/sarif", "runs": runs}
+                    (root / "codeql-sarif" / name).write_text(json.dumps(document), encoding="utf-8")
+                (root / "upload.js").write_text(driver, encoding="utf-8")
+                environment = {**os.environ, "TARGET_KIND": "pull-request", "TARGET_SHA": "a" * 40,
+                               "TARGET_REF": "refs/pull/7/merge", "PR_NUMBER": "7", "BASE_SHA": "b" * 40,
+                               "HEAD_SHA": "c" * 40, "SCAN": "true"}
+                done = subprocess.run([node, "upload.js"], cwd=root, env=environment, capture_output=True,
+                                      text=True, encoding="utf-8", timeout=60, check=False)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            result: dict[str, list[str]] = json.loads(done.stdout)
+            return result
 
-        # Positive case: 3 distinct categories
-        valid_input = {
-            "actions.sarif": [{"tool": {"driver": {"name": "CodeQL"}}, "automationDetails": {"id": "/language:actions/"}}],
-            "c-cpp.sarif": [{"tool": {"driver": {"name": "CodeQL"}}, "automationDetails": {"id": "/language:c-cpp/"}}],
-            "python.sarif": [{"tool": {"driver": {"name": "CodeQL"}}, "automationDetails": {"id": "/language:python/"}}],
-        }
-        sarif, cats = combine_sarif_runs(valid_input)
-        self.assertEqual(len(sarif["runs"]), 3)
-        self.assertEqual(cats, {"/language:actions", "/language:c-cpp", "/language:python"})
+        def sarif_run(category: str) -> dict:
+            return {"tool": {"driver": {"name": "CodeQL"}}, "automationDetails": {"id": category}, "results": []}
 
-        # Negative case: a run labelled with another language's category
-        mislabelled_input = {
-            "actions.sarif": [{"tool": {"driver": {"name": "CodeQL"}}, "automationDetails": {"id": "/language:python/"}}],
-            "c-cpp.sarif": [{"tool": {"driver": {"name": "CodeQL"}}, "automationDetails": {"id": "/language:c-cpp/"}}],
-            "python.sarif": [{"tool": {"driver": {"name": "CodeQL"}}, "automationDetails": {"id": "/language:python/"}}],
-        }
-        with self.assertRaises(ValueError) as cm:
-            combine_sarif_runs(mislabelled_input)
-        self.assertIn("would be stored under SARIF category", str(cm.exception))
+        def refused(result: dict[str, list[str]], message: str) -> None:
+            self.assertEqual(len(result["failures"]), 1, result)
+            self.assertIn(message, result["failures"][0])
+            self.assertEqual(result["calls"], [], "a refused upload still reached the API")
 
-        # Negative case: two runs of one language share a category
-        duplicate_input = {
-            "actions.sarif": [{"tool": {"driver": {"name": "CodeQL"}}, "automationDetails": {"id": "/language:actions/"}}],
-            "c-cpp.sarif": [{"tool": {"driver": {"name": "CodeQL"}}, "automationDetails": {"id": "/language:c-cpp/"}}],
-            "python.sarif": [
-                {"tool": {"driver": {"name": "CodeQL"}}, "automationDetails": {"id": "/language:python/"}},
-                {"tool": {"driver": {"name": "CodeQL"}}, "automationDetails": {"id": "/language:python/"}},
-            ],
-        }
-        with self.assertRaises(ValueError) as cm:
-            combine_sarif_runs(duplicate_input)
-        self.assertIn("duplicate SARIF analysis category", str(cm.exception))
+        # Positive case: three distinct categories pass every check and reach the API.
+        valid = run({f"{language}.sarif": [sarif_run(f"/language:{language}/")]
+                     for language in ("actions", "c-cpp", "python")})
+        self.assertEqual(valid["failures"], [])
+        self.assertEqual(valid["calls"], ["github.rest.pulls.get"])
+
+        # A run labelled with another language's category.
+        refused(run({"actions.sarif": [sarif_run("/language:python/")],
+                     "c-cpp.sarif": [sarif_run("/language:c-cpp/")],
+                     "python.sarif": [sarif_run("/language:python/")]}),
+                'actions.sarif would be stored under SARIF category "/language:python"')
+
+        # Two runs of one language share a category.
+        refused(run({"actions.sarif": [sarif_run("/language:actions/")],
+                     "c-cpp.sarif": [sarif_run("/language:c-cpp/")],
+                     "python.sarif": [sarif_run("/language:python/"), sarif_run("/language:python/")]}),
+                "duplicate SARIF analysis category: /language:python")
 
         # The pre-fix shape: no trailing slash, so every run lands in the empty category.
-        slashless_input = {
-            "actions.sarif": [{"tool": {"driver": {"name": "CodeQL"}}, "automationDetails": {"id": "/language:actions"}}],
-            "c-cpp.sarif": [{"tool": {"driver": {"name": "CodeQL"}}, "automationDetails": {"id": "/language:c-cpp"}}],
-            "python.sarif": [{"tool": {"driver": {"name": "CodeQL"}}, "automationDetails": {"id": "/language:python"}}],
-        }
-        with self.assertRaises(ValueError) as cm:
-            combine_sarif_runs(slashless_input)
-        self.assertIn("would be stored under SARIF category ''", str(cm.exception))
+        refused(run({f"{language}.sarif": [sarif_run(f"/language:{language}")]
+                     for language in ("actions", "c-cpp", "python")}),
+                'would be stored under SARIF category ""')
+
+        # A missing language is refused before any category is read.
+        refused(run({"actions.sarif": [sarif_run("/language:actions/")],
+                     "python.sarif": [sarif_run("/language:python/")]}),
+                "expected SARIF for actions, c-cpp, python")
 
     def test_codeql_starts_from_the_wake_workflow_and_not_from_ci(self) -> None:
         """The trusted analysis starts at push time (codeql-wake.yml), not after all of CI."""

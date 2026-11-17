@@ -63,7 +63,9 @@ def parse_policy_spec(spec: str) -> list[tuple[str, tuple[int, ...]]]:
     for part in parts:
         if not part:
             raise ValueError("empty constraint in range specification")
-        m = re.match(r"^([<>!=]=?|[<>])\s*(\d+(?:\.\d+)*)$", part)
+        # Only the six operators compare_version evaluates: a bare "=" or "!" would parse here
+        # and then constrain nothing.
+        m = re.match(r"^(>=|<=|==|!=|>|<)\s*(\d+(?:\.\d+)*)$", part)
         if not m:
             raise ValueError(f"invalid constraint syntax: {part!r}")
         op = m.group(1)
@@ -109,10 +111,14 @@ def compare_version(v_obs: tuple[int, ...], op: str, v_target: tuple[int, ...]) 
 
 def satisfies_policy(obs_version_str: str, constraints: list[tuple[str, tuple[int, ...]]]) -> bool:
     """Check whether observed version string satisfies all policy constraints."""
-    m = re.search(r"(\d+(?:\.\d+)*)", obs_version_str)
-    if not m:
-        raise ValueError(f"cannot extract version numbers from {obs_version_str!r}")
-    obs_ver = tuple(int(x) for x in m.group(1).split("."))
+    # A dotted version that starts a token: the "2" of "MSYS2" or "Rev2" is not a version.
+    # A string with none, or with two different ones, cannot be checked.
+    found = sorted(set(re.findall(r"(?<![\w.])(\d+(?:\.\d+)+)", obs_version_str)))
+    if not found:
+        raise ValueError(f"cannot extract a dotted version from {obs_version_str!r}")
+    if len(found) > 1:
+        raise ValueError(f"ambiguous version in {obs_version_str!r}: {', '.join(found)}")
+    obs_ver = tuple(int(x) for x in found[0].split("."))
     for op, target in constraints:
         if not compare_version(obs_ver, op, target):
             return False
@@ -262,8 +268,13 @@ def verify_release_locks(
                                         f"observed toolchain component '{comp}' version '{obs_ver}' "
                                         f"does not satisfy policy '{spec}'"
                                     )
-                            except ValueError:
-                                pass
+                            except ValueError as exc:
+                                # An observation the policy cannot be evaluated against is
+                                # not a pass: the gate names the component instead.
+                                errors.append(
+                                    f"observed toolchain component '{comp}' version {obs_ver!r} "
+                                    f"cannot be checked against policy {spec!r}: {exc}"
+                                )
     except Exception as exc:
         errors.append(f"Failed to parse release manifest {manifest_path}: {exc}")
 

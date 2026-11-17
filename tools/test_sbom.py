@@ -780,6 +780,75 @@ class TestToolchainPolicyVerification(unittest.TestCase):
             str(errors),
         )
 
+    VALID_OBSERVED = {
+        "compiler": "16.1.0",
+        "make": "4.4.1",
+        "python": "3.15.1",
+        "sdl3": "3.4.12",
+        "vulkan_sdk": "1.4.363.0",
+    }
+
+    def test_observed_version_the_policy_cannot_evaluate_fails(self):
+        # Failing before: satisfies_policy raised ValueError for these and the verifier
+        # swallowed it, so the component counted as inside its policy. The recorder writes
+        # the raw --version line when it finds no dotted version (record_toolchain.py).
+        for comp, observed in (
+            ("vulkan_sdk", "not found"),
+            ("compiler", "gcc (GCC) unknown"),
+            ("make", "GNU Make"),
+        ):
+            with self.subTest(comp=comp, observed=observed):
+                errors = verify_sbom.verify_release_locks(
+                    self.MANIFEST_PATH, observed_toolchain=dict(self.VALID_OBSERVED, **{comp: observed}))
+                self.assertTrue(
+                    any(f"observed toolchain component '{comp}' version {observed!r} cannot be checked "
+                        "against policy" in e for e in errors),
+                    str(errors),
+                )
+
+    def test_bare_equals_and_bang_operators_are_invalid_syntax(self):
+        # Failing before: "=" and "!" parsed as operators, compare_version then raised
+        # "unsupported operator" for them, and the swallow made any observation pass.
+        for spec in ("=4.9.0", "!1.0", ">=4.0,=5.0"):
+            with self.subTest(spec=spec):
+                with self.assertRaisesRegex(ValueError, "invalid constraint syntax"):
+                    verify_sbom.parse_policy_spec(spec)
+                policy = {
+                    "compiler": spec,
+                    "make": ">=4.0 (rolling-msys2)",
+                    "python": ">=3.15,<3.16",
+                    "sdl3": ">=3.0.0 (rolling-msys2)",
+                    "vulkan_sdk": ">=1.1.0",
+                }
+                path = self._manifest_with_policy(policy)
+                try:
+                    errors = verify_sbom.verify_release_locks(path)
+                    self.assertTrue(
+                        any("toolchain_policy component 'compiler' has invalid range syntax" in e for e in errors),
+                        str(errors),
+                    )
+                finally:
+                    path.unlink(missing_ok=True)
+        for spec, parsed in ((">=4.9.0", [(">=", (4, 9, 0))]), ("==1.2", [("==", (1, 2))]),
+                             ("!=1.0", [("!=", (1, 0))]), ("<3.16", [("<", (3, 16))])):
+            with self.subTest(spec=spec):
+                self.assertEqual(verify_sbom.parse_policy_spec(spec), parsed)
+
+    def test_observed_version_is_the_dotted_token_not_the_first_digit(self):
+        # Failing before: the first digit run was the version, so the "2" of "MSYS2" read
+        # as 2 and a current compiler failed ">=4.9.0".
+        for observed in ("MSYS2 gcc 14.2.0", "gcc.exe (Rev2, Built by MSYS2 project) 14.2.0"):
+            with self.subTest(observed=observed):
+                errors = verify_sbom.verify_release_locks(
+                    self.MANIFEST_PATH, observed_toolchain=dict(self.VALID_OBSERVED, compiler=observed))
+                self.assertEqual(errors, [])
+        self.assertTrue(verify_sbom.satisfies_policy("MSYS2 gcc 14.2.0", [("<", (15,))]))
+        self.assertFalse(verify_sbom.satisfies_policy("MSYS2 gcc 14.2.0", [("<", (14,))]))
+        with self.assertRaisesRegex(ValueError, "ambiguous version"):
+            verify_sbom.satisfies_policy("gcc 14.2.0 (built with 13.1.0)", [(">=", (4, 9, 0))])
+        with self.assertRaisesRegex(ValueError, "cannot extract a dotted version"):
+            verify_sbom.satisfies_policy("MSYS2 gcc", [(">=", (4, 9, 0))])
+
     def test_in_policy_observation_passes(self):
         valid_observed = {
             "compiler": "16.1.0",
