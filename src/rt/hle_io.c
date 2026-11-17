@@ -20,15 +20,21 @@ typedef struct HleDevctlRefusal {
 } HleDevctlRefusal;
 static HleDevctlRefusal *s_hle_devctl_refusals;
 static int s_io_statlog_enabled = -1;
+#ifdef SR_HLE_THREAD_SELFTEST
+static unsigned s_io_statlog_env_reads; /* times io_statlog_on() consulted the environment */
+#endif
 
 static int io_statlog_on(void) {
+#ifdef SR_HLE_THREAD_SELFTEST
+    if (s_io_statlog_enabled < 0) s_io_statlog_env_reads++;
+#endif
     return hle_env_switch(&s_io_statlog_enabled, "SR_STATLOG");
 }
 
 #ifdef SR_HLE_THREAD_SELFTEST
 static atomic_uint s_hle_devctl_refusal_log_count;
-int sr_hle_test_io_statlog_switch(void) { return io_statlog_on(); }
-void sr_hle_test_io_statlog_switch_reset(void) { s_io_statlog_enabled = -1; }
+void sr_hle_test_io_statlog_switch_reset(void) { s_io_statlog_enabled = -1; s_io_statlog_env_reads = 0; }
+unsigned sr_hle_test_io_statlog_env_reads(void) { return s_io_statlog_env_reads; }
 #endif
 
 static int hle_devctl_refusal_first(const char *device, uint32_t command) {

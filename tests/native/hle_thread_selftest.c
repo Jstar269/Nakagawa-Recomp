@@ -18263,10 +18263,9 @@ static void hle_archive_route_set_env(const char *name, const char *value) {
 
 static void test_hle_hot_log_switches_are_cached(void) {
     extern void sr_hle_test_ge_log_reset(void);
-    extern unsigned sr_hle_test_ge_log_env_reads(unsigned index);
+    extern unsigned sr_hle_test_ge_log_env_reads(void);
     extern void sr_hle_test_io_statlog_switch_reset(void);
-    extern unsigned sr_hle_test_statlog_env_reads(void);
-    extern void sr_hle_test_statlog_env_reads_reset(void);
+    extern unsigned sr_hle_test_io_statlog_env_reads(void);
     enum { GE_UNSET_NID = 0x05db22ceu, IO_GETSTAT_NID = 0xace946e8u,
            PATH_ADDR = 0x0903e000u, STAT_ADDR = 0x0903e100u };
     static const char ms_root[] = HLE_BUILD_ROOT "/hle_log_switch";
@@ -18295,8 +18294,12 @@ static void test_hle_hot_log_switches_are_cached(void) {
     hle_archive_route_set_env("SR_GELOG", NULL);
     hle_archive_route_set_env("SR_GEDUMP", NULL);
     hle_archive_route_set_env("SR_DEBUG", NULL);
-    sr_hle_test_ge_log_reset();
+    /* The handlers below are the registered production ones, reached through sr_syscall. The
+     * counters sit inside the cached switches, so a call site that asks the environment itself
+     * (as both did before #2642) leaves its counter at zero and prints after the switch is set. */
     sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    sr_hle_test_ge_log_reset();
     for (unsigned i = 0; i < 4u; i++) {
         CpuState cpu;
         memset(&cpu, 0, sizeof(cpu));
@@ -18304,14 +18307,11 @@ static void test_hle_hot_log_switches_are_cached(void) {
                "sceGeUnsetCallback production handler returns through sr_syscall");
         if (i == 0u) hle_archive_route_set_env("SR_GELOG", "1");
     }
-    expect(sr_hle_test_ge_log_env_reads(0u) == 1u &&
-               sr_hle_test_ge_log_env_reads(1u) == 1u &&
-               sr_hle_test_ge_log_env_reads(2u) == 1u,
-           "sceGeUnsetCallback production path reads each cached GE switch once across repeated syscalls");
+    expect(sr_hle_test_ge_log_env_reads() == 1u,
+           "sceGeUnsetCallback production path reads the cached GE log switch once across repeated syscalls");
 
     hle_archive_route_set_env("SR_STATLOG", NULL);
     sr_hle_test_io_statlog_switch_reset();
-    sr_hle_test_statlog_env_reads_reset();
     for (unsigned i = 0; i < 4u; i++) {
         CpuState cpu;
         memset(&cpu, 0, sizeof(cpu));
@@ -18322,10 +18322,9 @@ static void test_hle_hot_log_switches_are_cached(void) {
                "sceIoGetstat production handler runs through sr_syscall on a host-backed file");
         if (i == 0u) hle_archive_route_set_env("SR_STATLOG", "1");
     }
-    expect(sr_hle_test_statlog_env_reads() == 1u,
+    expect(sr_hle_test_io_statlog_env_reads() == 1u,
            "sceIoGetstat production path reads SR_STATLOG once across repeated syscalls");
     sr_hle_test_io_statlog_switch_reset();
-    sr_hle_test_statlog_env_reads_reset();
 
     hle_archive_route_set_env("SR_GELOG", old_ge);
     hle_archive_route_set_env("SR_GEDUMP", old_gedump);
@@ -18339,7 +18338,6 @@ static void test_hle_hot_log_switches_are_cached(void) {
     free(old_memstick);
     sr_hle_test_ge_log_reset();
     sr_hle_test_io_statlog_switch_reset();
-    sr_hle_test_statlog_env_reads_reset();
     (void)remove(host_file);
     (void)rmdir(ms_root);
 }

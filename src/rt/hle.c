@@ -153,43 +153,22 @@ int hle_wakelog_on(void) {
  * public SR_DEBUG GE bit (0x08) remains an equivalent opt-in. */
 static int s_ge_log_enabled = -1;
 #ifdef SR_HLE_THREAD_SELFTEST
-static unsigned s_ge_log_env_reads[3]; /* SR_DEBUG, SR_GEDUMP, SR_GELOG */
-static unsigned s_statlog_env_reads;
-void sr_hle_test_note_env_switch_read(const char *name) {
-    if (name && strcmp(name, "SR_STATLOG") == 0) s_statlog_env_reads++;
-}
-unsigned sr_hle_test_statlog_env_reads(void) { return s_statlog_env_reads; }
-void sr_hle_test_statlog_env_reads_reset(void) { s_statlog_env_reads = 0; }
+static unsigned s_ge_log_env_reads; /* times ge_log_on() consulted the environment */
 #endif
 int ge_log_on(void) {
     if (s_ge_log_enabled < 0) {
 #ifdef SR_HLE_THREAD_SELFTEST
-        s_ge_log_env_reads[0]++;
+        s_ge_log_env_reads++;
 #endif
         const char *debug = getenv("SR_DEBUG");
-#ifdef SR_HLE_THREAD_SELFTEST
-        s_ge_log_env_reads[1]++;
-        const char *gedump = getenv("SR_GEDUMP");
-        s_ge_log_env_reads[2]++;
-        const char *gelog = getenv("SR_GELOG");
-        s_ge_log_enabled = gedump != NULL || gelog != NULL ||
-                           (debug != NULL && (strtoul(debug, NULL, 0) & 0x08u) != 0u);
-#else
         s_ge_log_enabled = getenv("SR_GEDUMP") != NULL || getenv("SR_GELOG") != NULL ||
                            (debug != NULL && (strtoul(debug, NULL, 0) & 0x08u) != 0u);
-#endif
     }
     return s_ge_log_enabled;
 }
 #ifdef SR_HLE_THREAD_SELFTEST
-void sr_hle_test_ge_log_reset(void) {
-    s_ge_log_enabled = -1;
-    memset(s_ge_log_env_reads, 0, sizeof(s_ge_log_env_reads));
-}
-unsigned sr_hle_test_ge_log_env_reads(unsigned index) {
-    return index < sizeof(s_ge_log_env_reads) / sizeof(s_ge_log_env_reads[0])
-        ? s_ge_log_env_reads[index] : 0u;
-}
+void sr_hle_test_ge_log_reset(void) { s_ge_log_enabled = -1; s_ge_log_env_reads = 0; }
+unsigned sr_hle_test_ge_log_env_reads(void) { return s_ge_log_env_reads; }
 #endif
 
 void hle_lock(void) {

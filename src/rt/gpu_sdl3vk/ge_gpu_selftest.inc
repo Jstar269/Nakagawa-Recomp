@@ -15494,7 +15494,7 @@ static uint32_t coherence_batch_state_list(uint32_t fba, int blend_pair) {
     sb_emit(&l, 0x12, (7u << 2) | (3u << 7) | (1u << 23)); /* 8888 colour, float position */
     if (blend_pair) {
         sb_emit(&l, 0x21, 1u);
-        sb_emit(&l, 0xDF, 10u); /* FIXA * src + ZERO * dst: native blend, visible bconst */
+        sb_emit(&l, 0xDF, 10u); /* FIXA * src + SRC * dst over a zero target: the constant is the pixel */
         sb_emit(&l, 0xE0, 0x204060u);
         sb_sprite(&l, 0, 24.0f, 36.0f, 0.0f, 0.0f, 24.0f, 0xFFFFFFFFu);
         sb_emit(&l, 0xE0, 0xD0A050u);

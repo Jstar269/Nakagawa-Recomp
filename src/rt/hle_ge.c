@@ -635,10 +635,6 @@ static int ge_unset_log_on(void) {
     return ge_log_on();
 }
 
-#ifdef SR_HLE_THREAD_SELFTEST
-int sr_hle_test_ge_unset_log_switch(void) { return ge_unset_log_on(); }
-#endif
-
 static uint32_t h_GeUnsetCallback(CpuState *s) {
     uint32_t cbid = A0;
     if (cbid < (uint32_t)(sizeof(s_ge_cb) / sizeof(s_ge_cb[0]))) {

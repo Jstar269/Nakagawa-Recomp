@@ -82,7 +82,6 @@ static int mpeg_log_on(void) {
 
 #ifdef SR_MPEG_MEDIA_SELFTEST
 void sr_mpeg_test_log_switch_reset(void) { s_mpeglog_enabled = -1; s_mpeglog_env_reads = 0; }
-int sr_mpeg_test_log_switch(void) { return mpeg_log_on(); }
 unsigned sr_mpeg_test_log_env_reads(void) { return s_mpeglog_env_reads; }
 #endif
 
