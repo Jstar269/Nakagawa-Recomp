@@ -32,6 +32,9 @@ bool nk_relay_client_lobby_connected(const NkAdhocRelayClient *client);
 bool nk_relay_client_lobby_dead(const NkAdhocRelayClient *client);
 const char *nk_relay_client_last_error(const NkAdhocRelayClient *client);
 
+typedef bool (*NkRelayTestResolveFn)(const char *host, uint8_t out_ipv4[4], void *ctx);
+void nk_relay_client_set_resolve_hook_for_test(NkRelayTestResolveFn fn, void *ctx);
+
 #ifdef __cplusplus
 }
 #endif

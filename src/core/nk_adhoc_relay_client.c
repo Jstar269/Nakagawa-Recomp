@@ -23,6 +23,24 @@
 typedef SOCKET NkSockFd;
 #  define NK_INVALID_SOCK INVALID_SOCKET
 #  define NK_SEND_FLAGS 0
+typedef CRITICAL_SECTION RelayLock;
+#  define relay_lock_init(m) InitializeCriticalSection(m)
+#  define relay_lock_destroy(m) DeleteCriticalSection(m)
+#  define relay_lock_enter(m) EnterCriticalSection(m)
+#  define relay_lock_leave(m) LeaveCriticalSection(m)
+typedef HANDLE RelayThread;
+#  define RELAY_THREAD_FN(name, arg) static DWORD WINAPI name(LPVOID arg)
+#  define RELAY_THREAD_RETURN return 0u
+static bool relay_thread_spawn(RelayThread *out, LPTHREAD_START_ROUTINE fn, void *arg) {
+    HANDLE h = CreateThread(NULL, 0u, fn, arg, 0u, NULL);
+    if (!h) return false;
+    *out = h;
+    return true;
+}
+static void relay_thread_finish(RelayThread t, bool wait) {
+    if (wait) (void)WaitForSingleObject(t, INFINITE);
+    CloseHandle(t);
+}
 #else
 #  include <errno.h>
 #  include <fcntl.h>
@@ -30,6 +48,7 @@ typedef SOCKET NkSockFd;
 #  include <netinet/in.h>
 #  include <netinet/tcp.h>
 #  include <poll.h>
+#  include <pthread.h>
 #  include <sys/socket.h>
 #  include <sys/types.h>
 #  include <time.h>
@@ -41,6 +60,21 @@ typedef int NkSockFd;
 #  else
 #    define NK_SEND_FLAGS 0
 #  endif
+typedef pthread_mutex_t RelayLock;
+#  define relay_lock_init(m) (void)pthread_mutex_init((m), NULL)
+#  define relay_lock_destroy(m) (void)pthread_mutex_destroy(m)
+#  define relay_lock_enter(m) (void)pthread_mutex_lock(m)
+#  define relay_lock_leave(m) (void)pthread_mutex_unlock(m)
+typedef pthread_t RelayThread;
+#  define RELAY_THREAD_FN(name, arg) static void *name(void *arg)
+#  define RELAY_THREAD_RETURN return NULL
+static bool relay_thread_spawn(RelayThread *out, void *(*fn)(void *), void *arg) {
+    return pthread_create(out, NULL, fn, arg) == 0;
+}
+static void relay_thread_finish(RelayThread t, bool wait) {
+    if (wait) (void)pthread_join(t, NULL);
+    else (void)pthread_detach(t);
+}
 #endif
 
 #define NK_RELAY_CHAN_MAX_BUF (512u * 1024u)
@@ -116,6 +150,7 @@ struct NkAdhocRelayClient {
     struct sockaddr_storage data_addr;
     socklen_t data_addr_len;
     int resolved;
+    struct RelayResolveJob *resolve_job;
 
     int logged_in;
     int in_group;
@@ -219,8 +254,7 @@ static void chan_close(TcpChan *ch) {
     ch->rx_cap = 0u;
 }
 
-static bool chan_open_nonblock(TcpChan *ch, const struct sockaddr *addr, socklen_t len) {
-    chan_close(ch);
+static bool chan_connect_existing_tx(TcpChan *ch, const struct sockaddr *addr, socklen_t len) {
     NkSockFd fd = socket(addr->sa_family, SOCK_STREAM, 0);
     if (fd == NK_INVALID_SOCK) {
         ch->dead = 1;
@@ -246,6 +280,11 @@ static bool chan_open_nonblock(TcpChan *ch, const struct sockaddr *addr, socklen
     sock_close_fd(fd);
     ch->dead = 1;
     return false;
+}
+
+static bool chan_open_nonblock(TcpChan *ch, const struct sockaddr *addr, socklen_t len) {
+    chan_close(ch);
+    return chan_connect_existing_tx(ch, addr, len);
 }
 
 static bool buf_append(uint8_t **buf, size_t *len, size_t *cap, const uint8_t *data, size_t n,
@@ -365,22 +404,71 @@ static void chan_consume_rx(TcpChan *ch, size_t n) {
     ch->rx_len -= n;
 }
 
-static bool resolve_host_port(const char *host, uint16_t port, struct sockaddr_storage *out,
-                              socklen_t *out_len) {
+static NkRelayTestResolveFn s_test_resolve_fn;
+static void *s_test_resolve_ctx;
+
+void nk_relay_client_set_resolve_hook_for_test(NkRelayTestResolveFn fn, void *ctx) {
+    s_test_resolve_fn = fn;
+    s_test_resolve_ctx = ctx;
+}
+
+static void assign_sockaddr_ports(const struct sockaddr *src, socklen_t src_len,
+                                  uint16_t lobby_port, uint16_t data_port,
+                                  struct sockaddr_storage *lobby_out, socklen_t *lobby_len,
+                                  struct sockaddr_storage *data_out, socklen_t *data_len) {
+    if (src->sa_family == AF_INET) {
+        struct sockaddr_in sin;
+        memcpy(&sin, src, sizeof(sin));
+        sin.sin_port = htons(lobby_port);
+        memcpy(lobby_out, &sin, sizeof(sin));
+        *lobby_len = (socklen_t)sizeof(sin);
+        sin.sin_port = htons(data_port);
+        memcpy(data_out, &sin, sizeof(sin));
+        *data_len = (socklen_t)sizeof(sin);
+    } else {
+        struct sockaddr_in6 sin6;
+        memcpy(&sin6, src, sizeof(sin6));
+        sin6.sin6_port = htons(lobby_port);
+        memcpy(lobby_out, &sin6, sizeof(sin6));
+        *lobby_len = (socklen_t)sizeof(sin6);
+        sin6.sin6_port = htons(data_port);
+        memcpy(data_out, &sin6, sizeof(sin6));
+        *data_len = (socklen_t)sizeof(sin6);
+    }
+    (void)src_len;
+}
+
+static bool resolve_host_pair(const char *host, uint16_t lobby_port, uint16_t data_port,
+                              int extra_flags, NkRelayTestResolveFn hook_fn, void *hook_ctx,
+                              struct sockaddr_storage *lobby_out, socklen_t *lobby_len,
+                              struct sockaddr_storage *data_out, socklen_t *data_len) {
+    if (hook_fn) {
+        uint8_t ip4[4] = {0};
+        if (!hook_fn(host, ip4, hook_ctx)) return false;
+        struct sockaddr_in sin;
+        memset(&sin, 0, sizeof(sin));
+        sin.sin_family = AF_INET;
+        memcpy(&sin.sin_addr, ip4, 4u);
+        assign_sockaddr_ports((const struct sockaddr *)&sin, (socklen_t)sizeof(sin),
+                              lobby_port, data_port, lobby_out, lobby_len, data_out, data_len);
+        return true;
+    }
     struct addrinfo hints;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = extra_flags;
     char port_str[16];
-    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned)lobby_port);
     struct addrinfo *res = NULL;
     if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) return false;
     bool ok = false;
     for (struct addrinfo *it = res; it; it = it->ai_next) {
-        if (it->ai_family == AF_INET || it->ai_family == AF_INET6) {
-            if (it->ai_addrlen <= sizeof(*out)) {
-                memcpy(out, it->ai_addr, it->ai_addrlen);
-                *out_len = (socklen_t)it->ai_addrlen;
+        if ((it->ai_family == AF_INET && it->ai_addrlen >= sizeof(struct sockaddr_in)) ||
+            (it->ai_family == AF_INET6 && it->ai_addrlen >= sizeof(struct sockaddr_in6))) {
+            if (it->ai_addrlen <= sizeof(*lobby_out) && it->ai_addrlen <= sizeof(*data_out)) {
+                assign_sockaddr_ports(it->ai_addr, (socklen_t)it->ai_addrlen, lobby_port, data_port,
+                                      lobby_out, lobby_len, data_out, data_len);
                 ok = true;
                 break;
             }
@@ -388,6 +476,100 @@ static bool resolve_host_port(const char *host, uint16_t port, struct sockaddr_s
     }
     freeaddrinfo(res);
     return ok;
+}
+
+typedef struct RelayResolveJob {
+    RelayLock lock;
+    RelayThread thread;
+    int thread_valid;
+    int refs;
+    int done;
+    int ok;
+    char host[NK_ADHOC_SERVER_MAX_LEN + 1u];
+    uint16_t lobby_port;
+    uint16_t data_port;
+    NkRelayTestResolveFn hook_fn;
+    void *hook_ctx;
+    struct sockaddr_storage lobby_addr;
+    socklen_t lobby_addr_len;
+    struct sockaddr_storage data_addr;
+    socklen_t data_addr_len;
+} RelayResolveJob;
+
+RELAY_THREAD_FN(resolve_worker_fn, raw) {
+    RelayResolveJob *job = (RelayResolveJob *)raw;
+    struct sockaddr_storage la;
+    struct sockaddr_storage da;
+    socklen_t llen = 0;
+    socklen_t dlen = 0;
+    memset(&la, 0, sizeof(la));
+    memset(&da, 0, sizeof(da));
+    const bool ok = resolve_host_pair(job->host, job->lobby_port, job->data_port, 0, job->hook_fn,
+                                      job->hook_ctx, &la, &llen, &da, &dlen);
+    relay_lock_enter(&job->lock);
+    if (ok) {
+        job->lobby_addr = la;
+        job->lobby_addr_len = llen;
+        job->data_addr = da;
+        job->data_addr_len = dlen;
+        job->ok = 1;
+    }
+    job->done = 1;
+    job->refs--;
+    const int drop = (job->refs == 0);
+    relay_lock_leave(&job->lock);
+    if (drop) {
+        relay_lock_destroy(&job->lock);
+        free(job);
+    }
+    RELAY_THREAD_RETURN;
+}
+
+static RelayResolveJob *start_resolve_job(const char *host, uint16_t lobby_port, uint16_t data_port,
+                                          NkRelayTestResolveFn hook_fn, void *hook_ctx) {
+    RelayResolveJob *job = calloc(1, sizeof *job);
+    if (!job) return NULL;
+    relay_lock_init(&job->lock);
+    job->refs = 2;
+    snprintf(job->host, sizeof(job->host), "%s", host);
+    job->lobby_port = lobby_port;
+    job->data_port = data_port;
+    job->hook_fn = hook_fn;
+    job->hook_ctx = hook_ctx;
+    if (!relay_thread_spawn(&job->thread, resolve_worker_fn, job)) {
+        relay_lock_destroy(&job->lock);
+        free(job);
+        return NULL;
+    }
+    job->thread_valid = 1;
+    return job;
+}
+
+static void release_resolve_job(RelayResolveJob **slot) {
+    RelayResolveJob *job = *slot;
+    if (!job) return;
+    *slot = NULL;
+    relay_lock_enter(&job->lock);
+    const int done = job->done;
+    const int has_hook = (job->hook_fn != NULL);
+    const int tv = job->thread_valid;
+    const RelayThread th = job->thread;
+    job->thread_valid = 0;
+    if (done || has_hook) {
+        relay_lock_leave(&job->lock);
+        if (tv) relay_thread_finish(th, true);
+        relay_lock_destroy(&job->lock);
+        free(job);
+        return;
+    }
+    job->refs--;
+    const int drop = (job->refs == 0);
+    relay_lock_leave(&job->lock);
+    if (tv) relay_thread_finish(th, false);
+    if (drop) {
+        relay_lock_destroy(&job->lock);
+        free(job);
+    }
 }
 
 static void queue_lobby_event(NkAdhocRelayClient *c, const NkLobbyEvent *ev) {
@@ -475,8 +657,54 @@ static uint16_t pick_ptp_port(NkAdhocRelayClient *c) {
     return 0u;
 }
 
+static bool ensure_data_chan_connected(NkAdhocRelayClient *c, TcpChan *ch) {
+    if (!c->resolved) {
+        if (c->lobby.dead) ch->dead = 1;
+        return false;
+    }
+    if (ch->fd == NK_INVALID_SOCK && !ch->dead && !ch->remote_eof) {
+        if (!chan_connect_existing_tx(ch, (const struct sockaddr *)&c->data_addr,
+                                      c->data_addr_len)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void pump_lobby(NkAdhocRelayClient *c) {
     if (!c->logged_in || c->lobby.dead) return;
+    if (!c->resolved) {
+        RelayResolveJob *job = c->resolve_job;
+        if (!job) {
+            c->lobby.dead = 1;
+            set_error(c, "could not resolve ad hoc server");
+            return;
+        }
+        relay_lock_enter(&job->lock);
+        const int done = job->done;
+        const int ok = job->ok;
+        if (done && ok) {
+            c->lobby_addr = job->lobby_addr;
+            c->lobby_addr_len = job->lobby_addr_len;
+            c->data_addr = job->data_addr;
+            c->data_addr_len = job->data_addr_len;
+        }
+        relay_lock_leave(&job->lock);
+        if (!done) return;
+        release_resolve_job(&c->resolve_job);
+        if (!ok) {
+            c->lobby.dead = 1;
+            set_error(c, "could not resolve ad hoc server");
+            return;
+        }
+        c->resolved = 1;
+        if (!chan_connect_existing_tx(&c->lobby, (const struct sockaddr *)&c->lobby_addr,
+                                      c->lobby_addr_len)) {
+            set_error(c, "could not connect to lobby server");
+            return;
+        }
+        c->last_lobby_tx_ms = monotonic_ms();
+    }
     const uint64_t now = monotonic_ms();
     if (c->lobby.connected && now - c->last_lobby_tx_ms >= NK_RELAY_PING_INTERVAL_MS &&
         c->lobby.tx_len == 0u) {
@@ -512,26 +740,37 @@ static void pump_lobby(NkAdhocRelayClient *c) {
 
 static bool open_data_chan(NkAdhocRelayClient *c, TcpChan *ch, NkRelayInit type, uint16_t sport,
                            const uint8_t *dst_mac, uint16_t dport) {
-    if (!c->resolved) return false;
     uint8_t init[NK_RELAY_INIT_SIZE];
     const uint16_t wire_sport = nk_relay_port_out(sport, c->port_offset);
     const uint16_t wire_dport = nk_relay_port_out(dport, c->port_offset);
     if (nk_relay_init(init, type, c->mac, wire_sport, dst_mac, wire_dport) != NK_RELAY_INIT_SIZE)
         return false;
-    if (!chan_open_nonblock(ch, (const struct sockaddr *)&c->data_addr, c->data_addr_len))
-        return false;
+    chan_close(ch);
     if (!buf_append(&ch->tx, &ch->tx_len, &ch->tx_cap, init, sizeof(init), NK_RELAY_CHAN_MAX_BUF)) {
         chan_close(ch);
         ch->dead = 1;
         return false;
     }
-    chan_flush_tx(ch);
-    return !ch->dead;
+    if (c->resolved) {
+        if (!chan_connect_existing_tx(ch, (const struct sockaddr *)&c->data_addr,
+                                      c->data_addr_len)) {
+            chan_close(ch);
+            ch->dead = 1;
+            return false;
+        }
+        chan_flush_tx(ch);
+        return !ch->dead;
+    }
+    if (c->resolve_job && !c->lobby.dead) return true;
+    chan_close(ch);
+    ch->dead = 1;
+    return false;
 }
 
 static void pump_pdp_socket(NkAdhocRelayClient *c, RelayPdpSocket *s) {
     if (!s->used) return;
     if (s->chan.dead || s->chan.remote_eof) return;
+    if (!ensure_data_chan_connected(c, &s->chan)) return;
     chan_flush_tx(&s->chan);
     chan_pump_rx(&s->chan);
     while (s->chan.rx_len >= NK_RELAY_PDP_HEADER_SIZE) {
@@ -576,6 +815,9 @@ static unsigned count_accepting_for(const NkAdhocRelayClient *c, int listen_hand
 static void pump_ptp_socket(NkAdhocRelayClient *c, int idx) {
     RelayPtpSocket *ps = &c->ptp[idx];
     if (!ps->used || ps->state == PTP_STATE_UNUSED || ps->state == PTP_STATE_REFUSED) return;
+    if (!ps->chan.dead && !ps->chan.remote_eof && !ensure_data_chan_connected(c, &ps->chan) &&
+        !c->resolved)
+        return;
 
     chan_flush_tx(&ps->chan);
     chan_pump_rx(&ps->chan);
@@ -668,29 +910,41 @@ static int rc_login(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], co
     if (nk_lobby_login(frame, mac, nickname, product) != NK_LOBBY_LOGIN_SIZE) return NK_NET_BAD_ARG;
 
     if (c->logged_in) {
+        release_resolve_job(&c->resolve_job);
         close_all_sockets(c);
         chan_close(&c->lobby);
         c->logged_in = 0;
         c->in_group = 0;
         c->scanning = 0;
+        c->resolved = 0;
     }
 
     c->last_error[0] = '\0';
-    if (!c->resolved) {
-        if (!resolve_host_port(c->host, c->lobby_port, &c->lobby_addr, &c->lobby_addr_len) ||
-            !resolve_host_port(c->host, c->data_port, &c->data_addr, &c->data_addr_len)) {
+    chan_close(&c->lobby);
+    release_resolve_job(&c->resolve_job);
+    c->resolved = 0;
+    if (!s_test_resolve_fn &&
+        resolve_host_pair(c->host, c->lobby_port, c->data_port, AI_NUMERICHOST, NULL, NULL,
+                          &c->lobby_addr, &c->lobby_addr_len, &c->data_addr,
+                          &c->data_addr_len)) {
+        c->resolved = 1;
+    } else {
+        c->resolve_job = start_resolve_job(c->host, c->lobby_port, c->data_port,
+                                           s_test_resolve_fn, s_test_resolve_ctx);
+        if (!c->resolve_job) {
             set_error(c, "could not resolve ad hoc server");
             return NK_NET_DEAD;
         }
-        c->resolved = 1;
     }
 
-    if (!chan_open_nonblock(&c->lobby, (const struct sockaddr *)&c->lobby_addr, c->lobby_addr_len)) {
+    if (c->resolved &&
+        !chan_open_nonblock(&c->lobby, (const struct sockaddr *)&c->lobby_addr, c->lobby_addr_len)) {
         set_error(c, "could not connect to lobby server");
         return NK_NET_DEAD;
     }
     if (!buf_append(&c->lobby.tx, &c->lobby.tx_len, &c->lobby.tx_cap, frame, sizeof(frame),
                     NK_RELAY_CHAN_MAX_BUF)) {
+        release_resolve_job(&c->resolve_job);
         chan_close(&c->lobby);
         set_error(c, "lobby send buffer full");
         return NK_NET_DEAD;
@@ -732,11 +986,13 @@ static int rc_logout(NkAdhocTransport *t) {
             chan_flush_tx(&c->lobby);
         }
     }
+    release_resolve_job(&c->resolve_job);
     close_all_sockets(c);
     chan_close(&c->lobby);
     c->logged_in = 0;
     c->in_group = 0;
     c->scanning = 0;
+    c->resolved = 0;
     return NK_NET_OK;
 }
 
@@ -1083,6 +1339,7 @@ NkAdhocRelayClient *nk_relay_client_create(const NkAdhocRelayConfig *cfg) {
 void nk_relay_client_destroy(NkAdhocRelayClient *client) {
     if (!client) return;
     if (client->logged_in) (void)rc_logout(&client->base);
+    release_resolve_job(&client->resolve_job);
     close_all_sockets(client);
     chan_close(&client->lobby);
 #ifdef _WIN32

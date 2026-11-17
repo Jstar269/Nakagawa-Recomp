@@ -1133,6 +1133,7 @@ cannot observe it ([#1159](https://github.com/Jstar269/nakagawa-recomp/issues/11
 
 | Host work | Where it runs | What reaches the guest, and when |
 | --- | --- | --- |
+| Ad hoc relay hostname lookup (`src/core/nk_adhoc_relay_client.c`, [#1139](https://github.com/Jstar269/nakagawa-recomp/issues/1139)) | A one-shot native worker thread per non-numeric relay login | It calls `getaddrinfo` once for the configured ad hoc relay hostname and writes the resolved `sockaddr_storage` endpoints into a private job struct under a mutex, reading and writing zero guest memory. The guest thread polls the job only from its own `hle_network.c` tick when it pumps `NkAdhocRelayClient`, so a paused guest observes nothing. |
 | On-screen keyboard text entry (`src/rt/osk_text_entry.c`) | A native worker thread, Windows input-box route only | It publishes an answer and writes no guest memory. The guest takes the answer only from its own `sceUtilityOsk*` update calls, so a paused guest takes nothing. The pause is also refused while the in-window keyboard is open. |
 | Diagnostic stream drain (`src/rt/debug.c`, [#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)) | A native thread, Windows only, started when stdout or stderr is redirected | Every 50 ms it writes the C runtime's buffered stdout and stderr text to the log. It reads no guest memory and writes nothing the guest reads, so a paused guest observes nothing. |
 | Android output pump (`src/core/nk_platform_posix.c`, [#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)) | A native thread, Android only, started by `nk_platform_host_startup` | An app process's stdout and stderr go nowhere on Android, so it copies their text, line by line, to the system log and to the run log. It reads no guest memory and writes nothing the guest reads, so a paused guest observes nothing. |
@@ -1147,7 +1148,7 @@ cannot observe it ([#1159](https://github.com/Jstar269/nakagawa-recomp/issues/11
 | GE rendering and readback (`src/rt/gpu_sdl3vk/ge_gpu.c`) | The host GPU | Results reach guest memory only through the read barrier the runtime thread takes before a guest read or a present. Its timing changes when bytes are copied, never what the guest reads. |
 
 Two source guards in `tools/test_sched_invariants.py` keep this table complete. One fails when a
-native thread creator appears outside the keyboard, diagnostic-stream, Android output-pump, texture-scaling and scheduler files, or a third one in the scheduler's (it has the preemption timer and the host worker). The other fails when a host callback
+native thread creator appears outside the ad hoc relay DNS resolver, keyboard, diagnostic-stream, Android output-pump, texture-scaling and scheduler files, or a third one in the scheduler's (it has the preemption timer and the host worker). The other fails when a host callback
 entry appears that is not listed above: SDL audio, timer, event-watch and dialog callbacks, OS
 thread pools, waits, timers, completion routines, and Media Foundation work queues. Before new
 host work is added, its row must say how a paused guest is kept from observing it.

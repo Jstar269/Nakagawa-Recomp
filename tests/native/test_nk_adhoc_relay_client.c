@@ -23,9 +23,12 @@
 #  endif
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
+#  include <windows.h>
 typedef SOCKET TSock;
 #  define T_INV INVALID_SOCKET
 #  define TSND 0
+static void test_sleep_ms(unsigned ms) { Sleep((DWORD)ms); }
+static uint64_t test_now_ms(void) { return (uint64_t)GetTickCount64(); }
 #else
 #  include <arpa/inet.h>
 #  include <errno.h>
@@ -34,6 +37,7 @@ typedef SOCKET TSock;
 #  include <netinet/tcp.h>
 #  include <sys/select.h>
 #  include <sys/socket.h>
+#  include <time.h>
 #  include <unistd.h>
 typedef int TSock;
 #  define T_INV (-1)
@@ -42,6 +46,17 @@ typedef int TSock;
 #  else
 #    define TSND 0
 #  endif
+static void test_sleep_ms(unsigned ms) {
+    struct timespec ts;
+    ts.tv_sec = (time_t)(ms / 1000u);
+    ts.tv_nsec = (long)((ms % 1000u) * 1000000u);
+    (void)nanosleep(&ts, NULL);
+}
+static uint64_t test_now_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0u;
+    return (uint64_t)ts.tv_sec * UINT64_C(1000) + (uint64_t)(ts.tv_nsec / 1000000L);
+}
 #endif
 
 static int g_failures;
@@ -795,6 +810,105 @@ static void test_posix_high_fd_above_fd_setsize(void) {
 #endif
 }
 
+typedef struct AsyncDnsHookCtx {
+    int calls;
+    unsigned delay_ms;
+    bool succeed;
+    char last_host[NK_ADHOC_SERVER_MAX_LEN + 1u];
+} AsyncDnsHookCtx;
+
+static bool async_dns_test_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
+    AsyncDnsHookCtx *h = (AsyncDnsHookCtx *)ctx;
+    h->calls++;
+    snprintf(h->last_host, sizeof(h->last_host), "%s", host ? host : "");
+    if (h->delay_ms) test_sleep_ms(h->delay_ms);
+    if (!h->succeed) return false;
+    out_ipv4[0] = 127u;
+    out_ipv4[1] = 0u;
+    out_ipv4[2] = 0u;
+    out_ipv4[3] = 1u;
+    return true;
+}
+
+static void test_async_dns_resolve_nonblocking_and_failure(void) {
+    TestServer srv;
+    srv_init(&srv);
+
+    AsyncDnsHookCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.delay_ms = 120u;
+    ctx.succeed = true;
+    nk_relay_client_set_resolve_hook_for_test(async_dns_test_hook, &ctx);
+
+    NkAdhocRelayConfig cfg = {"slow.example.invalid", srv.lobby_port, srv.data_port,
+                              NK_RELAY_PORT_OFFSET};
+    NkAdhocRelayClient *c = nk_relay_client_create(&cfg);
+    CHECK(c != NULL, "async-dns: client created");
+    NkAdhocTransport *t = nk_relay_client_transport(c);
+    static const uint8_t mac[6] = {0x02, 0x10, 0x20, 0x30, 0x40, 0x51};
+    static const uint8_t grp[8] = {'D', '9', 'T', 'E', 'S', 'T', '0', '1'};
+
+    const uint64_t t0 = test_now_ms();
+    const int lrc = t->ops->login(t, mac, "DnsSlow", "ULUS10009");
+    const uint64_t elapsed = test_now_ms() - t0;
+    CHECK(lrc == NK_NET_OK, "async-dns: login returns immediately");
+    CHECK(elapsed < 50u, "async-dns: login did not block on 120ms DNS (%llu ms)",
+          (unsigned long long)elapsed);
+    CHECK(!nk_relay_client_lobby_dead(c), "async-dns: lobby stays alive while resolving");
+    CHECK(t->ops->connect(t, grp) == NK_NET_OK,
+          "async-dns: connect queued cleanly before resolve finishes");
+    const int pdp = t->ops->pdp_open(t, 0x3000u);
+    CHECK(pdp >= 0, "async-dns: pdp_open queued cleanly before resolve finishes");
+
+    int joined = 0;
+    for (int i = 0; i < 80 && !joined; i++) {
+        test_sleep_ms(5u);
+        srv_pump(&srv);
+        t->ops->pump(t);
+        NkLobbyEvent evs[4];
+        size_t n = t->ops->take_events(t, evs, 4u);
+        for (size_t k = 0; k < n; k++) {
+            if (evs[k].kind == NK_LOBBY_CONNECT_BSSID) joined = 1;
+        }
+    }
+    CHECK(joined == 1, "async-dns: resolved and processed queued CONNECT_BSSID");
+    CHECK(ctx.calls == 1, "async-dns: single resolution per login (calls=%d)", ctx.calls);
+    CHECK(strcmp(ctx.last_host, "slow.example.invalid") == 0, "async-dns: resolved configured host");
+    t->ops->logout(t);
+    nk_relay_client_destroy(c);
+
+    /* Failure surfaces lobby dead + named error asynchronously. */
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.delay_ms = 20u;
+    ctx.succeed = false;
+    c = nk_relay_client_create(&cfg);
+    CHECK(c != NULL, "async-dns-fail: client created");
+    t = nk_relay_client_transport(c);
+    CHECK(t->ops->login(t, mac, "DnsFail", "ULUS10009") == NK_NET_OK,
+          "async-dns-fail: login queued cleanly");
+    for (int i = 0; i < 60 && !nk_relay_client_lobby_dead(c); i++) {
+        test_sleep_ms(5u);
+        t->ops->pump(t);
+    }
+    CHECK(nk_relay_client_lobby_dead(c), "async-dns-fail: dead flag set after failed resolve");
+    CHECK(strstr(nk_relay_client_last_error(c), "resolve") != NULL,
+          "async-dns-fail: last_error mentions resolve (%s)", nk_relay_client_last_error(c));
+    nk_relay_client_destroy(c);
+
+    /* Destroy while resolve is in flight must not crash, leak or touch freed state. */
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.delay_ms = 80u;
+    ctx.succeed = true;
+    c = nk_relay_client_create(&cfg);
+    CHECK(c != NULL, "async-dns-cancel: client created");
+    t = nk_relay_client_transport(c);
+    CHECK(t->ops->login(t, mac, "DnsCancel", "ULUS10009") == NK_NET_OK,
+          "async-dns-cancel: login started");
+    nk_relay_client_destroy(c);
+    nk_relay_client_set_resolve_hook_for_test(NULL, NULL);
+    srv_destroy(&srv);
+}
+
 int main(void) {
 #ifdef _WIN32
     WSADATA wsa;
@@ -807,6 +921,7 @@ int main(void) {
     test_bad_server_frames_fail_closed();
     test_ptp_accept_waits_for_free_slot();
     test_posix_high_fd_above_fd_setsize();
+    test_async_dns_resolve_nonblocking_and_failure();
 #ifdef _WIN32
     WSACleanup();
 #endif

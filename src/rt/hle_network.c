@@ -721,15 +721,23 @@ static void adhoc_log_ppsspp_tier_once(void) {
 }
 
 /* PPSSPP-derived, not PSP-measured: attach NkAdhocTransport and log in using profile MAC/nick. */
-static int adhocctl_attach_online_transport(const uint8_t id13[13]) {
+static int adhocctl_attach_online_transport(const uint8_t id13[13], uint32_t *out_err) {
     adhoc_log_ppsspp_tier_once();
-    if (!console_profile_identity()) return 0;
+    if (out_err) *out_err = SCE_NET_ERROR_INTERNAL;
+    if (!console_profile_identity()) {
+        fprintf(stderr, "HLE: online ad hocctl refused: console WLAN MAC identity unavailable\n");
+        return 0;
+    }
     uint8_t nick_bytes[128];
     adhoc_fill_nickname(nick_bytes);
     char nick[129];
     memcpy(nick, nick_bytes, 128u);
     nick[128] = '\0';
-    if (!nk_relay_nickname_ok(nick)) snprintf(nick, sizeof(nick), "Player");
+    if (!nk_relay_nickname_ok(nick)) {
+        fprintf(stderr, "HLE: online ad hocctl refused empty /CONFIG/SYSTEM/owner_name nickname\n");
+        if (out_err) *out_err = ADHOCCTL_ERROR_INVALID_ARG;
+        return 0;
+    }
 
     char product[10];
     for (int i = 0; i < 9; i++) {
@@ -738,18 +746,32 @@ static int adhocctl_attach_online_transport(const uint8_t id13[13]) {
         product[i] = (char)ch;
     }
     product[9] = '\0';
-    if (!nk_relay_product_ok(product)) snprintf(product, sizeof(product), "TEST00000");
+    if (!nk_relay_product_ok(product)) {
+        fprintf(stderr,
+                "HLE: online ad hocctl refused invalid product code (expected 9 A-Z/0-9 chars)\n");
+        if (out_err) *out_err = ADHOCCTL_ERROR_INVALID_ARG;
+        return 0;
+    }
 
     NkAdhocTransport *t = s_adhoc_test_transport;
     if (!t) {
         char host[NK_ADHOC_SERVER_MAX_LEN + 1u];
         uint16_t lp = 0u, dp = 0u, off = NK_RELAY_PORT_OFFSET;
-        if (!nk_adhoc_relay_parse_server(getenv("SR_ADHOC_SERVER"), host, sizeof(host), &lp, &dp))
+        if (!nk_adhoc_relay_parse_server(getenv("SR_ADHOC_SERVER"), host, sizeof(host), &lp, &dp)) {
+            fprintf(stderr, "HLE: online ad hocctl refused invalid SR_ADHOC_SERVER\n");
             return 0;
-        if (!adhoc_parse_port_offset(&off)) return 0;
+        }
+        if (!adhoc_parse_port_offset(&off)) {
+            fprintf(stderr, "HLE: online ad hocctl refused invalid SR_ADHOC_PORT_OFFSET\n");
+            return 0;
+        }
         NkAdhocRelayConfig cfg = {host, lp, dp, off};
         s_adhoc_relay_client = nk_relay_client_create(&cfg);
-        if (!s_adhoc_relay_client) return 0;
+        if (!s_adhoc_relay_client) {
+            fprintf(stderr, "HLE: online ad hocctl failed to initialize relay client\n");
+            if (out_err) *out_err = SCE_NET_ERROR_NO_SPACE;
+            return 0;
+        }
         if (!s_adhoc_exit_hooked) {
             s_adhoc_exit_hooked = 1;
             (void)atexit(adhoc_process_exit);
@@ -758,6 +780,11 @@ static int adhocctl_attach_online_transport(const uint8_t id13[13]) {
     }
     s_adhoc_active_transport = t;
     if (t->ops->login(t, s_console.mac, nick, product) != NK_NET_OK) {
+        const char *err = (s_adhoc_relay_client && t == nk_relay_client_transport(s_adhoc_relay_client))
+                              ? nk_relay_client_last_error(s_adhoc_relay_client)
+                              : NULL;
+        fprintf(stderr, "HLE: online ad hocctl login failed: %s\n",
+                (err && err[0]) ? err : "login refused");
         adhoc_release_transport();
         return 0;
     }
@@ -799,7 +826,8 @@ static uint32_t h_NetAdhocctlInit(CpuState *s) {
     const int online = adhoc_online_mode();
     uint8_t id_bytes[13];
     for (uint32_t i = 0; i < 13u; i++) id_bytes[i] = MEM_R8(id + i);
-    if (online && !adhocctl_attach_online_transport(id_bytes)) return SCE_NET_ERROR_INTERNAL;
+    uint32_t attach_err = SCE_NET_ERROR_INTERNAL;
+    if (online && !adhocctl_attach_online_transport(id_bytes, &attach_err)) return attach_err;
 
     /* The product is not checked: an upper-case and a lower-case first letter are both accepted
      * (adhocctl.expected:13, 18); other spellings are UNMEASURED and accepted the same way. */

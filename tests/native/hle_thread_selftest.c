@@ -11873,6 +11873,189 @@ static void test_adhoc_d3_dead_and_silent_lobby(void) {
 #endif
 }
 
+extern uint64_t sr_host_monotonic_ms(void);
+
+static bool d9_fast_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
+    (void)host; (void)ctx;
+    out_ipv4[0] = 127u; out_ipv4[1] = 0u; out_ipv4[2] = 0u; out_ipv4[3] = 1u;
+    return true;
+}
+
+static bool d9_slow_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
+    (void)host;
+    int *calls = (int *)ctx;
+    if (calls) (*calls)++;
+#ifdef _WIN32
+    Sleep(150u);
+#else
+    usleep(150000);
+#endif
+    out_ipv4[0] = 127u; out_ipv4[1] = 0u; out_ipv4[2] = 0u; out_ipv4[3] = 1u;
+    return true;
+}
+
+static bool d9_fail_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
+    (void)host; (void)out_ipv4; (void)ctx;
+    return false;
+}
+
+static AdhP2MiniRelay *s_d89_srv;
+static int s_d89_done;
+
+static void d89_main_fn(CpuState *cpu) {
+    char msg[160];
+    s_adh_events = 0u;
+    nk_relay_client_set_resolve_hook_for_test(d9_fast_resolve_hook, NULL);
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u, "d89: sceNetInit");
+
+    /* D8.1: invalid short product code must refuse at Init instead of sending TEST00000. */
+    for (uint32_t i = 0u; i < 13u; i++) MEM_W8(ADH_ID + i, 0u);
+    MEM_W8(ADH_ID + 4u, 'h');
+    MEM_W8(ADH_ID + 5u, 'b');
+    const uint32_t bad_prod_rc = adh_init(0x2000u, 0x30u, ADH_ID);
+    if (bad_prod_rc == 0u) {
+        for (int w = 0; w < 20 && !s_d89_srv->last_login_ok; w++) {
+#ifdef _WIN32
+            Sleep(2u);
+#else
+            usleep(2000);
+#endif
+            cpu->r[4] = 5000u;
+            (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+        }
+    }
+    snprintf(msg, sizeof(msg),
+             "d8.1: invalid product code refuses Init (rc=0x%08x sent=%d game=%s)",
+             bad_prod_rc, s_d89_srv->last_login_ok, s_d89_srv->last_login_game);
+    expect(bad_prod_rc == 0x80410b04u && s_d89_srv->last_login_ok == 0, msg);
+    if (bad_prod_rc == 0u) (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+
+    /* D8.2: empty owner_name in sysreg refuses Init instead of inventing "Player". */
+    s_d89_srv->last_login_ok = 0;
+    s_d89_srv->last_login_nick[0] = '\0';
+    static const char empty_nick_overlay[] =
+        "{\"schema\": \"nakagawa.psp-system-registry-overlay\", \"schema_version\": 1, \"categories\": [],"
+        " \"keys\": [{\"category\": \"/CONFIG/SYSTEM\", \"name\": \"owner_name\", \"type\": \"str\","
+        " \"value_hex\": \"00\"}]}";
+    expect(sysreg_write_file(SYSREG_SCRATCH_FILE, empty_nick_overlay, sizeof(empty_nick_overlay) - 1u),
+           "d8.2: wrote empty owner_name overlay");
+    sysreg_restart();
+    const char good_prod[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '8'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)good_prod[i]);
+    const uint32_t bad_nick_rc = adh_init(0x2000u, 0x30u, ADH_ID);
+    if (bad_nick_rc == 0u) {
+        for (int w = 0; w < 20 && !s_d89_srv->last_login_ok; w++) {
+#ifdef _WIN32
+            Sleep(2u);
+#else
+            usleep(2000);
+#endif
+            cpu->r[4] = 5000u;
+            (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+        }
+    }
+    snprintf(msg, sizeof(msg),
+             "d8.2: empty nickname refuses Init (rc=0x%08x sent=%d nick=%s)",
+             bad_nick_rc, s_d89_srv->last_login_ok, s_d89_srv->last_login_nick);
+    expect(bad_nick_rc == 0x80410b04u && s_d89_srv->last_login_ok == 0, msg);
+    if (bad_nick_rc == 0u) (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+
+    /* Restore default profile for D9 tests. */
+    static const char d9_nick_overlay[] =
+        "{\"schema\": \"nakagawa.psp-system-registry-overlay\", \"schema_version\": 1, \"categories\": [],"
+        " \"keys\": [{\"category\": \"/CONFIG/SYSTEM\", \"name\": \"owner_name\", \"type\": \"str\","
+        " \"value_hex\": \"4439504c4159455200\"}]}";
+    expect(sysreg_write_file(SYSREG_SCRATCH_FILE, d9_nick_overlay, sizeof(d9_nick_overlay) - 1u),
+           "d9: wrote D9PLAYER overlay");
+    sysreg_restart();
+
+    /* D9: 150ms slow DNS must not block sceNetAdhocctlInit on the guest thread. */
+    int resolve_calls = 0;
+    nk_relay_client_set_resolve_hook_for_test(d9_slow_resolve_hook, &resolve_calls);
+    const uint64_t t0 = sr_host_monotonic_ms();
+    const uint32_t d9_init_rc = adh_init(0x2000u, 0x30u, ADH_ID);
+    const uint64_t elapsed = sr_host_monotonic_ms() - t0;
+    snprintf(msg, sizeof(msg),
+             "d9: sceNetAdhocctlInit does not block on slow DNS (rc=0x%08x elapsed=%llu ms calls=%d)",
+             d9_init_rc, (unsigned long long)elapsed, resolve_calls);
+    expect(d9_init_rc == 0u && elapsed < 50u, msg);
+    expect(adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_CREATE, adh_name(0, "D9GRP01"), 0u, 0u) == 0u,
+           "d9: Create queues while DNS resolves");
+    for (int w = 0; w < 120 && (adh_state() != 1u || s_adh_events == 0u); w++) {
+#ifdef _WIN32
+        Sleep(5u);
+#else
+        usleep(5000);
+#endif
+        cpu->r[4] = 5000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    expect(adh_state() == 1u && s_adh_events == 1u && resolve_calls == 1,
+           "d9: async DNS resolved once and Create connected cleanly");
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d9: Term");
+
+    /* D8.3 + D9: failing async DNS ends lobby with DISCONNECT and logs nk_relay_client_last_error(). */
+    s_adh_events = 0u;
+    nk_relay_client_set_resolve_hook_for_test(d9_fail_resolve_hook, NULL);
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_CREATE, adh_name(0, "D9FAIL1"), 0u, 0u) == 0u,
+           "d8.3/d9: Init+Create starts before async DNS failure");
+    for (int w = 0; w < 80 && s_adh_events == 0u; w++) {
+#ifdef _WIN32
+        Sleep(2u);
+#else
+        usleep(2000);
+#endif
+        cpu->r[4] = 5000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    snprintf(msg, sizeof(msg),
+             "d8.3/d9: failed DNS surfaces DISCONNECT event and clears state (events=%u ev=%d err=0x%08x)",
+             s_adh_events, s_adh_events ? ADH_AT(0).event : -1, s_adh_events ? ADH_AT(0).error : 0u);
+    expect(s_adh_events == 1u && ADH_AT(0).event == 2 && ADH_AT(0).error == 0x80410b09u, msg);
+    nk_relay_client_set_resolve_hook_for_test(NULL, NULL);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d89: cleanup");
+    s_d89_done = 1;
+}
+
+static void test_adhoc_d8_d9_regressions(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "d89: WSAStartup");
+#endif
+    AdhP2MiniRelay srv;
+    expect(mr_start(&srv), "d89: mini relay started");
+    if (srv.running) {
+        s_d89_srv = &srv;
+        char srv_spec[64];
+        snprintf(srv_spec, sizeof(srv_spec), "slow-dns.test:%u,%u",
+                 (unsigned)srv.lobby_port, (unsigned)srv.data_port);
+        s_d89_done = 0;
+        const uint32_t loaded_end = adh_fixture_begin();
+        hle_test_setenv("SR_ADHOC_ENABLED", "1");
+        hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+        hle_net_reset();
+        adh_run(ADH_P2_MAIN, d89_main_fn);
+        expect(s_d89_done == 1, "d89: D8/D9 regressions finished");
+        hle_net_reset();
+        nk_relay_client_set_resolve_hook_for_test(NULL, NULL);
+        hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+        hle_test_setenv("SR_ADHOC_SERVER", NULL);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+        adh_fixture_end(loaded_end);
+        mr_stop(&srv);
+        s_d89_srv = NULL;
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
 extern void sr_hle_test_volatile_mem_reset(void);
 static TCB *fixture_thread(uint32_t uid, int state, int priority);
 
@@ -59187,6 +59370,7 @@ static int hle_selftest_main(int argc, char **argv) {
         test_adhoc_d1_lifetime_across_term();
         test_adhoc_d4_ptp_open_connect_regression();
         test_adhoc_d3_dead_and_silent_lobby();
+        test_adhoc_d8_d9_regressions();
         fprintf(stderr, "adhocctl: %d checks, %d failures\n", s_checks, s_failures);
         free(g_mem_base);
         return s_failures ? 1 : 0;
@@ -59344,6 +59528,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_adhoc_d1_lifetime_across_term();
     test_adhoc_d4_ptp_open_connect_regression();
     test_adhoc_d3_dead_and_silent_lobby();
+    test_adhoc_d8_d9_regressions();
     test_unregistered_batch_profiler_refer_null();
     test_kernel_import_sweep_ge_head();
     test_ge_blocking_sync_waits_for_stalled_list();

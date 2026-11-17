@@ -196,7 +196,7 @@ endef
 # The ad hoc TCP relay client (src/core/nk_adhoc_relay_client.c, #1139): non-blocking framed
 # TCP client against an in-process 127.0.0.1 loopback relay server (no internet).
 RELAY_CLIENT_SELFTEST_SRCS := src/core/nk_adhoc_relay_client.c src/core/nk_adhoc_net.c src/core/nk_adhoc_relay.c tests/native/test_nk_adhoc_relay_client.c
-RELAY_CLIENT_SELFTEST_LIBS := $(if $(filter windows,$(NK_TARGET_OS)),-lws2_32,)
+RELAY_CLIENT_SELFTEST_LIBS := $(if $(filter windows,$(NK_TARGET_OS)),-lws2_32,$(if $(filter android,$(NK_TARGET_OS)),,-pthread))
 define RELAY_CLIENT_SELFTEST_CMD
 	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/core $(RELAY_CLIENT_SELFTEST_SRCS) \
 		$(RELAY_CLIENT_SELFTEST_LIBS) -o $(BUILD_ROOT)/test_nk_adhoc_relay_client$(EXE_EXT)
