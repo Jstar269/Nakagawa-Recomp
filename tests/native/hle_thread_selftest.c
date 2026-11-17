@@ -9911,11 +9911,10 @@ static void test_adhoc_offline_refusal_stays_closed(void) {
     hle_test_setenv("SR_ADHOC_ENABLED", NULL);
     hle_test_setenv("SR_ADHOC_SERVER", "socom.cc");
     hle_net_reset();
-    for (int pass = 0; pass < 2; pass++) {
-        if (pass == 1) {
-            hle_test_setenv("SR_ADHOC_ENABLED", "0");
-            hle_net_reset();
-        }
+    for (int pass = 0; pass < 5; pass++) {
+        const char *en_vals[5] = {NULL, "0", "off", "false", "00"};
+        hle_test_setenv("SR_ADHOC_ENABLED", en_vals[pass]);
+        hle_net_reset();
         CpuState cpu;
         memset(&cpu, 0, sizeof(cpu));
         cpu.r[4] = 0x20000u;

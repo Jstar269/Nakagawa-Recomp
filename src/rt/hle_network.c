@@ -304,7 +304,7 @@ static int adhoc_online_mode(void) {
     if (s_adhoc_test_transport) return 1;
     const char *en = getenv("SR_ADHOC_ENABLED");
     const char *srv = getenv("SR_ADHOC_SERVER");
-    if (!en || !en[0] || strcmp(en, "0") == 0) return 0;
+    if (!en || strcmp(en, "1") != 0) return 0;
     return nk_adhoc_relay_parse_server(srv, NULL, 0u, NULL, NULL) ? 1 : 0;
 }
 
