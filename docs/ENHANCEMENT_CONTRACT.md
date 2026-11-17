@@ -3188,8 +3188,10 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   one says so in the `ACE_MODE: cull unavailable (...)` line and the report. The runtime remembers at most 4096
   widened matrices still in guest memory (see Limits below); the report's
   `cull_untracked` counts the matrix uses it left alone once that table was full, and cull is confirmed only
-  while that count is 0: a run with a nonzero count reports cull unavailable as `partial` (the matrices
-  tracked before the table filled were widened, the rest were not), never as a complete run. The count is read
+  while that count is 0: a run with a nonzero count reports cull unavailable as `partial` (each matrix use that came
+  while more than 4096 widened matrices were still in guest memory, after the call's one sweep had dropped those the
+  title overwrote, was left alone; every other use inside guest RAM was widened), never as a complete run. The count
+  is read
   again when the run ends, on every exit path that writes the report, so a table that fills in the last frame
   still reads partial.
 - **What it changes:** for the matrices at `clip_offsets`, 4 floats per listed matrix (its x output row) of guest memory
