@@ -1005,19 +1005,23 @@ static bool settings_enhanced_step_row(NkUi *ui, NkUiId id, const char *name, co
     return focused;
 }
 
-/* One value of a part, in its own box. A pointer picks it; the keys go to its row. */
+/* One value of a part, in its own box. A pointer picks it; the keys go to its row. `on` is
+   whether the row's value is other than Off: the accent marks a value that is on or chosen
+   (16x, On), and a selected Off is marked as the library's value is, by the raised box with
+   its stronger edge, and by primary text, so a tab of options that are off is not a column
+   of accent boxes. */
 static bool settings_enhanced_chip(NkUi *ui, NkUiId id, const char *label, bool selected,
-                                   bool inherited, bool dimmed) {
+                                   bool inherited, bool dimmed, bool on) {
     const NkUiTheme *theme = nk_ui_theme(ui);
     bool live = !dimmed;
     bool hovered = live && nk_ui_hovered(ui, id);
-    bool lit = selected && !inherited && !dimmed;
+    bool lit = selected && on && !inherited && !dimmed;
     NkUiLayout chip = layout_make(NK_UI_LAYOUT_ROW,
                                   sizing_fixed(settings_enhanced_chip_width(ui, label)),
                                   sizing_fixed(settings_enhanced_value_height(ui)), 0.0f);
     NkUiStyle style;
-    /* Ink on the accent fill, as a primary button; the library's value and a dimmed row's
-       value are marked by a raised box and never by the accent. */
+    /* Ink on the accent fill, as a primary button; a selected Off, the library's value and a
+       dimmed row's value are marked by a raised box and never by the accent. */
     NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_LABEL,
                                     lit ? theme->ink
                                     : selected || hovered ? theme->paper
@@ -1108,7 +1112,7 @@ static bool settings_enhanced_part_row(NkUi *ui, const PlayerUiSettingsModel *mo
             for (int choice = 0; choice < choice_count; ++choice) {
                 NkUiId chip = SET_ID_ENHANCED_CHOICES(row->part, choice);
                 if (settings_enhanced_chip(ui, chip, labels[choice], choice == selected,
-                                           title && choice == 0, row->disabled)) {
+                                           title && choice == 0, row->disabled, row->on)) {
                     picked = choice;
                 }
                 /* The keys stay with the row: a clicked value hands focus back to it. */

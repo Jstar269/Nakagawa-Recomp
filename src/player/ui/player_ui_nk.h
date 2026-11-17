@@ -714,7 +714,7 @@ typedef struct {
     const char *name;           /* "Texture filtering" */
     const char *value;          /* "16x", "Off", "Library (On)" on a title's page */
     const char *sentence;
-    bool on;                    /* in effect for the page */
+    bool on;                    /* the value that runs is other than Off: its box takes the accent */
     bool inherited;             /* this title follows the library value */
     bool disabled;              /* shown, dimmed and inert: it cannot apply as the page stands */
     const char *disabled_reason;

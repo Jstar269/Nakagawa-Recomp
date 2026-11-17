@@ -233,6 +233,179 @@ static int text_size_runs(const NkUiDrawList *list, uint32_t id) {
     return runs;
 }
 
+/* A text backend that measures as a font engine does: each character advances the pen by a
+   fraction of a pixel (a space and a narrow letter about a quarter of the size, any other
+   character about half), and a run's width is the whole pixels of the sum. */
+static NkUiTextSize whole_pixel_measure(void *user, int font, int px, const char *text,
+                                        size_t length) {
+    NkUiTextSize measured = {0.0f, 0.0f, 0.0f};
+    float pen = 0.0f;
+    (void)user;
+    (void)font;
+    if (text == NULL || px <= 0) return measured;
+    for (size_t i = 0u; i < length; ++i) {
+        unsigned char c = (unsigned char)text[i];
+        if ((c & 0xC0u) == 0x80u) continue;
+        pen += (c == ' ' ? 0.25f : c != 0u && strchr("iljtf.,;'", (int)c) != NULL ? 0.24f : 0.52f) *
+               (float)px;
+    }
+    measured.width = floorf(pen);
+    measured.height = (float)px;
+    measured.baseline = (float)px * 0.8f;
+    return measured;
+}
+
+/* One frame, laid out twice: `text` as card text in a column `width` px wide (element 7),
+   and as one line in a box that fits it (element 9). */
+static const NkUiDrawList *wrapped_lines_frame(NkUi *ui, const char *text, float width) {
+    NkUiViewport viewport;
+    NkUiLayout layout;
+    NkUiTextStyle body = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
+    NkUiTextStyle line = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
+    const NkUiDrawList *list = NULL;
+    line.wrap = false;
+    memset(&viewport, 0, sizeof(viewport));
+    viewport.pixel_w = 1600;
+    viewport.pixel_h = 400;
+    viewport.display_scale = 1.0f;
+    viewport.ui_scale_pct = 100;
+    viewport.text_size_pct = 100;
+    nk_ui_set_viewport(ui, &viewport);
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 37.0);
+        memset(&layout, 0, sizeof(layout));
+        layout.width = (NkUiSizing){NK_UI_SIZE_GROW, 0.0f, 0.0f, 0.0f};
+        layout.height = (NkUiSizing){NK_UI_SIZE_GROW, 0.0f, 0.0f, 0.0f};
+        layout.direction = NK_UI_LAYOUT_COLUMN;
+        layout.gap = 10.0f;
+        if (!nk_ui_begin_container(ui, 1u, &layout, NULL)) return NULL;
+        memset(&layout, 0, sizeof(layout));
+        layout.width = (NkUiSizing){NK_UI_SIZE_FIXED, width, 0.0f, 0.0f};
+        layout.height = (NkUiSizing){NK_UI_SIZE_FIT, 0.0f, 0.0f, 0.0f};
+        layout.direction = NK_UI_LAYOUT_COLUMN;
+        if (nk_ui_begin_container(ui, 6u, &layout, NULL)) {
+            nk_ui_text(ui, 7u, text, &body);
+            nk_ui_end_container(ui);
+        }
+        memset(&layout, 0, sizeof(layout));
+        layout.width = (NkUiSizing){NK_UI_SIZE_FIT, 0.0f, 0.0f, 0.0f};
+        layout.height = (NkUiSizing){NK_UI_SIZE_FIT, 0.0f, 0.0f, 0.0f};
+        layout.direction = NK_UI_LAYOUT_ROW;
+        if (nk_ui_begin_container(ui, 8u, &layout, NULL)) {
+            nk_ui_text(ui, 9u, text, &line);
+            nk_ui_end_container(ui);
+        }
+        nk_ui_end_container(ui);
+        list = nk_ui_end(ui);
+    }
+    return list;
+}
+
+/* Wrapped text stays inside its box, and a one-line run's box is as wide as the run (review of
+   #2644). The layout adds a run up word by word, and a backend that measures in whole pixels
+   drops a fraction with every word and every space measured alone: the sum fell short of the
+   line as drawn, by 8 px for a ten-word line of 14 px type, so a line was kept that ran past
+   its box into the padding beside it, and a one-line run got a box narrower than its glyphs.
+   Each paragraph is wrapped at every width from 150 to 420 px. No line may measure wider than
+   the column, the lines together are the paragraph, and the paragraph takes as many lines as
+   nk_ui_text_clamp, which measures each line whole, says it needs (one more is allowed where
+   a word fits a line only without the space after it, which the layout counts). The last
+   paragraph is longer than the layout measures a word in (256 bytes of its line): there each
+   128-byte step of that context may shift the sum by a pixel either way, so its lines get
+   2 px, its line count one either way, and its one-line box a pixel a step. */
+static int test_wrapped_lines_fit_their_box(void) {
+    static const char *const paragraphs[] = {
+        "The game's speed and frame rate in a corner, over its HUD.",
+        "Library-wide for Enhanced and Ace; Authentic ignores it, and each game's part choices win.",
+        "More triangles per curved patch. Slower; alters GE timing; the game receives changed "
+        "pictures.",
+        "Ultra is used in Enhanced and Ace, with crisp text, FSR 1 and full 32-bit colour on. "
+        "Authentic uses your settings. This build smooths only 30 FPS games. The choice here "
+        "applies when this game's 60 FPS game logic is off. Shows more 3D space; HUD stays "
+        "shaped. Some objects pop in. It is still the same game, if a little wider than it was.",
+    };
+    NkUiConfig config;
+    NkUiTextBackend whole = nk_ui_text_fixed();
+    NkUiTextStyle body = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
+    NkUi *ui;
+    whole.measure = whole_pixel_measure;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &whole;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create a context that measures in whole pixels");
+    for (size_t p = 0u; p < sizeof(paragraphs) / sizeof(paragraphs[0]); ++p) {
+        const size_t length = strlen(paragraphs[p]);
+        const float line_width = whole_pixel_measure(NULL, 0, body.size_px, paragraphs[p],
+                                                     length).width;
+        const bool in_context = length <= 256u;
+        const float line_slack = in_context ? 0.0f : 2.0f;
+        const float box_slack = in_context ? 0.0f : (float)(length / 128u);
+        for (int width = 150; width <= 420; ++width) {
+            const NkUiDrawList *list = wrapped_lines_frame(ui, paragraphs[p], (float)width);
+            char joined[512];
+            size_t used = 0u;
+            int lines = 0;
+            int needed = 1;
+            CHECK(list != NULL, "lay out the wrapped paragraph");
+            for (uint32_t i = 0u; i < list->ncmd; ++i) {
+                const NkUiDrawCmd *cmd = &list->cmd[i];
+                const NkUiTextRun *run = cmd->kind == NK_UI_DRAW_TEXT
+                                             ? (const NkUiTextRun *)cmd->custom : NULL;
+                float measured;
+                if (run == NULL || run->text == NULL) continue;
+                measured = whole_pixel_measure(NULL, run->font, run->size_px, run->text,
+                                               run->length).width;
+                if (cmd->element_id == 9u) {
+                    if ((float)(cmd->bounds[2] - cmd->bounds[0]) < line_width - box_slack ||
+                        (float)(cmd->bounds[2] - cmd->bounds[0]) > line_width + 1.0f + box_slack) {
+                        fprintf(stderr,
+                                "FAIL: a one-line run %.0f px wide has a box %d px wide: "
+                                "\"%s\"\n", (double)line_width,
+                                cmd->bounds[2] - cmd->bounds[0], paragraphs[p]);
+                        nk_ui_destroy(ui);
+                        return 0;
+                    }
+                    continue;
+                }
+                if (cmd->element_id != 7u) continue;
+                if (measured > (float)width + line_slack) {
+                    fprintf(stderr,
+                            "FAIL: in a %d px column the wrapped line \"%.*s\" is %.0f px "
+                            "wide\n", width, (int)run->length, run->text, (double)measured);
+                    nk_ui_destroy(ui);
+                    return 0;
+                }
+                if (used + run->length + 2u < sizeof(joined)) {
+                    if (lines > 0) joined[used++] = ' ';
+                    memcpy(joined + used, run->text, run->length);
+                    used += run->length;
+                }
+                ++lines;
+            }
+            joined[used] = '\0';
+            while (used > 0u && joined[used - 1u] == ' ') joined[--used] = '\0';
+            CHECK(strcmp(joined, paragraphs[p]) == 0,
+                  "the wrapped lines together are the paragraph");
+            while (needed < 40 &&
+                   strcmp(nk_ui_text_clamp(ui, paragraphs[p], &body, (float)width, needed),
+                          paragraphs[p]) != 0) {
+                ++needed;
+            }
+            if (lines < needed - (in_context ? 0 : 1) || lines > needed + 1) {
+                fprintf(stderr,
+                        "FAIL: in a %d px column the paragraph wraps to %d lines where "
+                        "nk_ui_text_clamp counts %d: \"%s\"\n", width, lines, needed,
+                        paragraphs[p]);
+                nk_ui_destroy(ui);
+                return 0;
+            }
+        }
+    }
+    nk_ui_destroy(ui);
+    return 1;
+}
+
 /* The text size scales type only: the glyphs, their measured width, the line
    boxes and the wrapping grow, while the density, the padding, the gaps and a
    fixed box stay. A one-line component keeps its height while its text fits
@@ -2298,6 +2471,7 @@ int main(int argc, char **argv) {
     size_t actual_size;
     if (!test_no_platform_headers() || !test_theme_tokens() || !test_scale_model() ||
         !test_text_size_scales_type_only() ||
+        !test_wrapped_lines_fit_their_box() ||
         !test_explicit_ui_scale_values() || !test_typed_prefs_and_events() ||
         !test_theme_access() || !test_overlay_rejects_waves() ||
         !test_container_return_contract() || !test_backend_declarations() ||

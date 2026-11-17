@@ -214,6 +214,14 @@ One exception is by design: at the design text size a setting's sentence beside 
 so the rows keep their side-by-side layout (Settings > Enhanced uses compact value rows and one focused-option detail panel instead). Above it, a sentence that would be cut makes the rows stack, and under
 its button the sentence wraps whole.
 
+Wrapped text stays inside its box. Clay adds a run up word by word, and a text backend measures in whole pixels, so
+words measured one at a time, each with a lone space, fell short of the line as drawn (8 px for a ten-word line of
+14 px Geist): a line was kept that ran into the padding beside it, and a one-line run's box was narrower than its
+glyphs. `nk_ui_clay_measure` therefore counts a word as the growth of its line (the line up to the word's end, less
+the line up to the end of the word before it, less the lone space Clay adds), measured from the line's start or, in a
+long line, from a word at most 256 bytes back. The words of a line add up to what `nk_ui_text_clamp` and the
+renderer measure for it.
+
 Wrapped text keeps its wrapped height when its page is overfull. Clay took a paragraph's minimum height before
 wrapping, as one line, so compressing an overfull column squeezed the paragraph back and the next block painted over
 its later lines; the vendored `clay.h` carries the wrapped height into the minimum (`third_party/clay/PROVENANCE.md`).
@@ -607,7 +615,9 @@ SHORT LOADS, LATE PAD SAMPLING and SOFT SHADOWS. On a game's page TEXTURE PACK F
 REMOVE TEXTURE PACK are the last rows of Picture.
 Each option is one sentence-case row, as high as a control (44 px), and one focus stop: its name on the left, with an
 ACE ONLY tag beside the name where it applies, and on the right every value it can take, each in its own small box
-(34 px), the current one filled. Up and Down move row by row: Down from PLAY MODE lands on the active tab, Down from
+(34 px). The current value is filled with the accent, with `ink` text, when it is on or chosen (16X, ON, FSR 1).
+A current OFF is never filled with the accent: it is marked by the raised box (`surface_high`, a `line_strong`
+edge) and `paper` text, so a tab whose options are off is not a column of accent boxes. Up and Down move row by row: Down from PLAY MODE lands on the active tab, Down from
 a tab on its first row, Down from the last row on BACK, and Up goes back the same way. The rows name those
 neighbours (`nk_ui_register_button_between`), because a full-width row and a small tab are not each other's nearest
 by position. Left and Right step the focused row's value, Confirm takes the next one, and a click picks any value; a
@@ -616,7 +626,7 @@ and FRAME PACING show their value as `< value >` in one box, as does a row whose
 name at a larger text size. Category tabs are focusable. The panel on the right shows the focused row's name, its
 value, its whole description and, for a dimmed row, the reason; with a tab or BACK focused it shows the tab's first
 option. On a game's page, a row's first value is the library's, LIBRARY (value), in a raised box with muted text,
-and a value of the game's own is filled. An option that cannot apply as the page stands stays in the walk, dimmed
+and a value of the game's own is marked as above. An option that cannot apply as the page stands stays in the walk, dimmed
 and inert, with the reason in the panel; WIDESCREEN under SMOOTH MOTION marks OFF, the value that runs, and keeps
 the choice it had for when SMOOTH MOTION is off. The list shows as many whole rows as the window leaves (four at
 1280 x 720, a whole tab at 1920 x 1080), the same number on every tab so that changing tabs moves nothing. A longer

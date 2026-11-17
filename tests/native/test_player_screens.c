@@ -10,6 +10,7 @@
 #include "scr_shared.h"
 #include "player_enhanced_fixture.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -515,7 +516,9 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
                 title && g_enhanced_value[part] == NULL ? followed[i] : value;
             settings.enhanced_rows[i].sentence = g_enhanced_sentence[part] != NULL
                 ? g_enhanced_sentence[part] : k_enhanced_parts[part].sentence;
-            settings.enhanced_rows[i].on = strcmp(value, "Off") != 0;
+            /* Smooth motion off for a game's 60 FPS game logic runs Off, whatever it reads. */
+            settings.enhanced_rows[i].on = strcmp(value, "Off") != 0 &&
+                                           strcmp(value, k_enhanced_smooth_at_60) != 0;
             settings.enhanced_rows[i].inherited = title && g_enhanced_value[part] == NULL;
             settings.enhanced_rows[i].disabled = !settings.enhanced_on;
             settings.enhanced_rows[i].disabled_reason =
@@ -4972,6 +4975,134 @@ static void test_enhanced_target_sizes(void) {
     g_flow_text_size_pct = saved_text;
 }
 
+/* WCAG 2 relative luminance of an opaque 0xRRGGBBAA colour, and the contrast of two. */
+static double enhanced_luminance(uint32_t rgba) {
+    double sum = 0.0;
+    static const double weight[3] = {0.2126, 0.7152, 0.0722};
+    for (int k = 0; k < 3; ++k) {
+        double v = (double)((rgba >> (24 - 8 * k)) & 0xFFu) / 255.0;
+        sum += weight[k] * (v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4));
+    }
+    return sum;
+}
+
+static double enhanced_contrast(uint32_t a, uint32_t b) {
+    double la = enhanced_luminance(a);
+    double lb = enhanced_luminance(b);
+    return la > lb ? (la + 0.05) / (lb + 0.05) : (lb + 0.05) / (la + 0.05);
+}
+
+/* Review of #2644: how Settings > Enhanced marks a row's value. The accent fill, with ink
+   text, is for a value that is on or chosen (16x, On, FSR 1). A selected Off is neutral: the
+   raised box with its stronger edge and primary text, never the accent, so a tab whose
+   options are off is not a column of accent boxes. On a game's page the library's value is
+   the same raised box with muted text, and a dimmed row's value likewise. An unselected value
+   is a flat box with muted (dimmed: dim) text. Every part is checked at every one of its
+   values, on the library's page and on a game's; and each text colour keeps WCAG AA (4.5:1)
+   on its box. */
+static void test_enhanced_selected_value_styles(void) {
+    static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_TITLE};
+    const NkUiTheme *theme = nk_ui_theme_n1();
+    const int saved_tab = g_enhanced_tab;
+    const NkUiId saved_focus = g_enhanced_focus_id;
+    const char *saved_mode = g_enhanced_mode;
+    CHECK(enhanced_contrast(theme->paper, theme->surface_high) >= 4.5 &&
+              enhanced_contrast(theme->ink, theme->accent_dark) >= 4.5 &&
+              enhanced_contrast(theme->muted, theme->surface_high) >= 4.5 &&
+              enhanced_contrast(theme->muted, theme->surface) >= 4.5,
+          "a value's text keeps 4.5:1 on its box: selected Off, selected on, the library's "
+          "value, and an unselected value");
+    g_enhanced_focus_id = 0u;
+    g_enhanced_mode = NULL;
+    for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
+        const bool title = pages[g] == FLOW_SETTINGS_ACE_TITLE;
+        for (int part = 0; part < PLAYER_PART_COUNT; ++part) {
+            /* -1: on a game's page, the part follows the library. */
+            for (int value = title ? -1 : 0; value < k_enhanced_words[part].count; ++value) {
+                const char *word = value >= 0 ? k_enhanced_words[part].labels[value] : NULL;
+                const int marked = value < 0 ? 0 : value + (title ? 1 : 0);
+                const int boxes = k_enhanced_words[part].count + (title ? 1 : 0);
+                const bool dimmed = title && enhanced_part_is_ace_only(part);
+                const bool off = word != NULL && strcmp(word, "Off") == 0;
+                NkUi *ui = NULL;
+                const NkUiDrawList *draw;
+                bool right = true;
+                char message[220];
+                memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+                g_enhanced_value[part] = word;
+                g_enhanced_tab = enhanced_tab_of(part);
+                draw = flow_case_layout(pages[g], 1280, 1600, &ui);
+                for (int box = 0; box < boxes; ++box) {
+                    const NkUiId id = ENHANCED_TEST_CHOICE_ID(part, box);
+                    uint32_t fill = 0u;
+                    uint32_t edge = 0u;
+                    uint32_t text = 0u;
+                    uint32_t want_fill;
+                    uint32_t want_edge;
+                    uint32_t want_text;
+                    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+                        const NkUiDrawCmd *cmd = &draw->cmd[i];
+                        if (cmd->element_id == id && cmd->kind == NK_UI_DRAW_RECTANGLE) {
+                            fill = cmd->rgba_pm;
+                        } else if (cmd->element_id == id && cmd->kind == NK_UI_DRAW_BORDER) {
+                            edge = cmd->rgba_pm;
+                        } else if (cmd->element_id == nk_ui_child_id(id, 1u) &&
+                                   cmd->kind == NK_UI_DRAW_TEXT) {
+                            text = cmd->rgba_pm;
+                        }
+                    }
+                    if (box != marked) {
+                        want_fill = theme->surface;
+                        want_edge = theme->line;
+                        want_text = dimmed ? theme->dim : theme->muted;
+                    } else if (dimmed || value < 0) {
+                        want_fill = theme->surface_high;
+                        want_edge = theme->line_strong;
+                        want_text = theme->muted;
+                    } else if (off) {
+                        want_fill = theme->surface_high;
+                        want_edge = theme->line_strong;
+                        want_text = theme->paper;
+                    } else {
+                        want_fill = theme->accent_dark;
+                        want_edge = theme->accent_dark;
+                        want_text = theme->ink;
+                    }
+                    if (fill != want_fill || edge != want_edge || text != want_text) {
+                        fprintf(stderr,
+                                "  page %d, %s at %s: box %d is fill %08X edge %08X text %08X, "
+                                "not %08X %08X %08X\n", (int)g, k_enhanced_parts[part].name,
+                                word != NULL ? word : "the library's value", box,
+                                (unsigned)fill, (unsigned)edge, (unsigned)text,
+                                (unsigned)want_fill, (unsigned)want_edge, (unsigned)want_text);
+                        right = false;
+                    }
+                    /* The rule this test is for, said on its own. */
+                    if (box == marked && (off || value < 0 || dimmed) &&
+                        (fill == theme->accent_dark || fill == theme->accent_hover ||
+                         fill == theme->accent_pressed)) {
+                        fprintf(stderr, "  page %d: %s, %s, is filled with the accent\n", (int)g,
+                                k_enhanced_parts[part].name,
+                                off ? "selected Off" : "not a value of its own that is on");
+                        right = false;
+                    }
+                }
+                if (ui != NULL) nk_ui_destroy(ui);
+                (void)snprintf(message, sizeof(message),
+                               "page %d: %s at %s marks its value as the design says (accent "
+                               "only for a value that is on; a selected Off is neutral)",
+                               (int)g, k_enhanced_parts[part].name,
+                               word != NULL ? word : "the library's value");
+                CHECK(right, message);
+            }
+        }
+    }
+    memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+    g_enhanced_tab = saved_tab;
+    g_enhanced_focus_id = saved_focus;
+    g_enhanced_mode = saved_mode;
+}
+
 /* Settings > Enhanced keeps its rows where they are. On every tab of the library's page and
    of a game's: the tab shows the parts k_enhanced_shown gives it and no other, from the top in
    that order, every row's name starts at one left edge and every row's values end at one right
@@ -8631,6 +8762,7 @@ int main(int argc, char **argv) {
     test_tall_title_page_scrolls();
     test_enhanced_rows_stay_put();
     test_enhanced_target_sizes();
+    test_enhanced_selected_value_styles();
     test_prompt_bar_stays_whole();
     test_game_page_text_is_never_cut();
     test_psp_fonts_page();
