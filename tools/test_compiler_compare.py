@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from typing import Any
+from typing import Any, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tools import compiler_compare  # noqa: E402
@@ -678,7 +678,7 @@ class RuntimeWorkloadRunnerTests(unittest.TestCase):
 class TimingOnlyWorkloadTests(unittest.TestCase):
     """The platform ladder clears SR_*, so its benchmark runs are timed, not failed."""
 
-    def _run(self, name: str) -> dict[str, Any]:
+    def _run(self, name: str) -> Mapping[str, object]:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from tools import run_perf_benchmarks
         done = subprocess.CompletedProcess(args=[], returncode=0, stdout="built and ran\n")
