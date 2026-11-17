@@ -1055,6 +1055,56 @@ def run(
 STAGING_ERROR = "PRODUCTION_SMOKE_STAGING_FAILED"
 
 
+CHANNEL_REFUSAL = "GUEST_MEMORY_CHANNEL_UNAVAILABLE"
+
+
+def refuse_channel(build_dir: Path, mode: str = "aot") -> int:
+    """A runtime told to use a guest-memory channel it cannot open ends by name.
+
+    The player sets SR_GUEST_MEMORY_CHANNEL for a launch whose guest memory it reads. A name
+    that cannot be opened must end the run before the guest starts, with the driver's exit
+    status for an unusable input (2) and the named line: not a crash, and not a run on
+    private memory the player cannot see.
+    """
+    plan = MODES.get(mode)
+    if plan is None:
+        raise RuntimeError(
+            f"unknown execution mode {mode!r}; known modes: " + ", ".join(sorted(MODES))
+        )
+    executable = (build_dir / f"{_artifact_stem(mode)}.exe").resolve()
+    image_path = (build_dir / f"{_artifact_stem(mode)}_image.bin").resolve()
+    command = [
+        str(executable),
+        "--image",
+        str(image_path),
+        f"0x{BASE:08x}",
+        f"0x{ENTRY:08x}",
+        "none",
+        "none",
+        "--sched",
+        *plan.extra_driver_args,
+    ]
+    environment = os.environ.copy()
+    for key, value in plan.env.items():
+        if value == "":
+            environment.pop(key, None)
+        else:
+            environment[key] = value
+    environment["SR_GUEST_MEMORY_CHANNEL"] = "Local\\NakagawaRecomp.GuestMemory.production-smoke.absent"
+    completed = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True, text=True)
+    combined = completed.stdout + completed.stderr
+    if (completed.returncode != 2 or CHANNEL_REFUSAL not in combined
+            or "BOOT_EVENT phase=guest_start" in combined):
+        sys.stderr.write(combined)
+        raise RuntimeError(
+            f"production smoke runtime exited {completed.returncode} for an unopenable "
+            f"guest-memory channel; expected the named stop {CHANNEL_REFUSAL} with exit "
+            "status 2 before the guest starts"
+        )
+    print(f"PRODUCTION_SMOKE_CHANNEL_REFUSAL mode={mode} status=PASS exit=2")
+    return 0
+
+
 def stage_executable(executable: Path, stage_dir: Path) -> Path:
     """Copy the built runtime and its side-by-side DLLs into ``stage_dir``.
 
@@ -1102,6 +1152,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument("--build-dir", type=Path, required=True)
         command_parser.add_argument("--mode", default="aot", choices=sorted(MODES))
+    refusal_parser = subparsers.add_parser("refuse-channel")
+    refusal_parser.add_argument("--build-dir", type=Path, required=True)
+    refusal_parser.add_argument("--mode", default="aot", choices=sorted(MODES))
     staged_parser = subparsers.add_parser("run-staged")
     staged_parser.add_argument("--build-dir", type=Path, required=True)
     staged_parser.add_argument("--mode", default="aot", choices=sorted(MODES))
@@ -1119,6 +1172,8 @@ def main(argv: list[str] | None = None) -> int:
             return verify(args.build_dir, mode=args.mode)
         if args.command == "run":
             return run(args.build_dir, mode=args.mode)
+        if args.command == "refuse-channel":
+            return refuse_channel(args.build_dir, args.mode)
         if args.command == "run-staged":
             return run_staged(args.build_dir, mode=args.mode, stage_dir=args.stage_dir)
         raise AssertionError(f"unhandled command {args.command}")

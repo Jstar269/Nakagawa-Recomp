@@ -100,28 +100,6 @@ void sr_yield(CpuState *s) {
 int sr_vfpu_interp(CpuState *s, uint32_t op) { (void)s; (void)op; return 0; }
 uint64_t SDL_GetTicksNS(void) { return 0u; }
 
-/* This synthetic cosimulation harness never opens the optional player memory channel. */
-bool nk_platform_guest_memory_channel_open(NkGuestMemoryChannel *channel,
-                                           const char *name, size_t arena_size) {
-    (void)name;
-    (void)arena_size;
-    if (channel) memset(channel, 0, sizeof(*channel));
-    return false;
-}
-bool nk_platform_guest_memory_channel_sync_vblank(NkGuestMemoryChannel *channel) {
-    (void)channel;
-    return false;
-}
-void nk_platform_guest_memory_channel_stop(NkGuestMemoryChannel *channel) { (void)channel; }
-bool nk_platform_guest_memory_channel_read_notification(NkGuestMemoryChannel *channel,
-                                                        uint32_t *seen_sequence,
-                                                        char *text, size_t text_size) {
-    (void)channel;
-    if (seen_sequence) *seen_sequence = 0u;
-    if (text && text_size) text[0] = '\0';
-    return false;
-}
-
 /* ---- ordered guest-write log --------------------------------------------------- */
 /*
  * sr_note_mem_write() is the production last-writer hook: every guest store in

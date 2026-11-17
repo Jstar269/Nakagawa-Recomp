@@ -866,6 +866,45 @@ static char s_ace_words[ACE_WORDS_MAX];
 static char s_host_toast_text[NK_GUEST_MEMORY_NOTIFICATION_MAX];
 static uint64_t s_host_toast_until_ns;
 
+/* ---- The player's local guest-memory channel -------------------------------------------------
+ * A launch for which the player wants to read guest memory each frame names a local shared
+ * arena in SR_GUEST_MEMORY_CHANNEL. driver.c calls the install below before memory is set up:
+ * the arena becomes guest memory (sr_mem_adopt_arena) and each delivered VBLANK waits for the
+ * player to say it has read that frame. This is local IPC only: no network, no achievement or
+ * title knowledge. A named channel that cannot be used is refused (0): the run must not go on
+ * with private memory the player cannot see. */
+static NkGuestMemoryChannel s_guest_channel;
+static int s_guest_channel_active;
+static uint32_t s_guest_notification_seen;
+
+static void gui_guest_memory_channel_vblank(void) {
+    if (!s_guest_channel_active) return;
+    if (!nk_platform_guest_memory_channel_sync_vblank(&s_guest_channel)) {
+        fprintf(stderr, "GUEST_MEMORY_CHANNEL_STOPPED: the player stopped reading guest memory\n");
+        nk_platform_guest_memory_channel_stop(&s_guest_channel);
+        s_guest_channel_active = 0;
+    }
+}
+
+int gui_guest_memory_channel_install(void) {
+    const char *name = getenv("SR_GUEST_MEMORY_CHANNEL");
+    if (!name || !name[0]) return 1;
+    if (!nk_platform_guest_memory_channel_open(&s_guest_channel, name, SR_GUEST_ARENA_SIZE) ||
+        !sr_mem_adopt_arena(s_guest_channel.arena, SR_GUEST_ARENA_SIZE)) return 0;
+    s_guest_channel_active = 1;
+    sched_set_vblank_host(gui_guest_memory_channel_vblank);
+    return 1;
+}
+
+/* The player's newest short message for the in-game toast, once each. */
+static bool sr_host_notification(char *out, size_t out_size) {
+    if (out && out_size) out[0] = '\0';
+    if (!s_guest_channel_active || !out || out_size == 0u) return false;
+    return nk_platform_guest_memory_channel_read_notification(&s_guest_channel,
+                                                               &s_guest_notification_seen,
+                                                               out, out_size);
+}
+
 static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     const AceConfig *ace = ace_effective();
     AceUiFrame f;

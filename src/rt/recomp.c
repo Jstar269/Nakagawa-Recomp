@@ -42,16 +42,14 @@
 #include "title_config.h"     /* generic title-binding accessors; no title identity here */
 #include "strbuf.h"
 #include "flight_recorder.h"
-#include "nk_platform.h"
 
 uint8_t *g_mem = NULL;
 int sr_hit_hle = 0;
 int g_sr_heap_watch = 0;
 extern CpuState *s_cpu;
 
-static NkGuestMemoryChannel s_guest_memory_channel;
-static bool s_guest_memory_channel_active;
-static uint32_t s_guest_notification_seen;
+/* An arena the shipped runtime handed over before the first sr_mem_init (sr_mem_adopt_arena). */
+static uint8_t *s_adopted_arena;
 
 #include <time.h>
 extern uint64_t SDL_GetTicksNS(void);
@@ -225,7 +223,6 @@ void sr_oor(uint32_t a, uint32_t v, int store) {
 
 #define SR_VRAM_LOW  0x04000000u  /* guest VRAM/eDRAM base, below user RAM */
 #define SR_RAM_SIZE  0x04000000u  /* 64 MB user RAM at 0x08000000 */
-#define SR_GUEST_ARENA_SIZE 0x0c000000u /* guest physical [0, 0x0c000000) */
 
 #ifdef SR_NAN_TRAP
 /* SR_NAN_TRAP_CONTEXT=1: after each NAN_TRAP report, the registers a reader needs to find the
@@ -269,28 +266,15 @@ void sr_mem_init(void) {
     sr_nan_trap_context_hook = sr_nan_trap_dump_context;
 #endif
     if (!g_mem) {
-        const char *channel_name = getenv("SR_GUEST_MEMORY_CHANNEL");
-        if (channel_name && channel_name[0]) {
-            if (!nk_platform_guest_memory_channel_open(&s_guest_memory_channel, channel_name,
-                                                        SR_GUEST_ARENA_SIZE)) {
-                fprintf(stderr, "GUEST_MEMORY_CHANNEL_UNAVAILABLE: the local shared arena "
-                                "could not be opened\n");
-                abort();
-            }
-            /* The parent maps this same generic arena. Its RA callback reads only the PSP user
-             * span; this runtime hook carries no network or achievement-specific address logic. */
-            g_mem = s_guest_memory_channel.arena + SR_RAM_BASE;
-            s_guest_memory_channel_active = true;
-        } else {
-            /* RAM at 0x08000000, VRAM at 0x04000000. Keep g_mem at the guest RAM base so
-             * guest 0x08000000 maps to g_mem. */
-            uint8_t *arena = (uint8_t *)calloc(SR_GUEST_ARENA_SIZE, 1);
-            if (!arena) {
-                fprintf(stderr, "sr_mem_init: out of memory\n");
-                abort();
-            }
-            g_mem = arena + SR_RAM_BASE;
+        /* Arena covers guest physical [0, SR_GUEST_ARENA_SIZE). RAM at 0x08000000, VRAM at
+         * 0x04000000. g_mem is the guest RAM base (SR_RAM_BASE), so guest 0x08000000 maps to it. */
+        uint8_t *arena = s_adopted_arena ? s_adopted_arena
+                                         : (uint8_t *)calloc(SR_GUEST_ARENA_SIZE, 1);
+        if (!arena) {
+            fprintf(stderr, "sr_mem_init: out of memory\n");
+            abort();
         }
+        g_mem = arena + SR_RAM_BASE;
         g_sr_heap_watch = getenv("SR_HEAP_WATCH") ? 1 : 0;
         if (g_sr_heap_watch) {
             fprintf(stderr,
@@ -299,21 +283,10 @@ void sr_mem_init(void) {
     }
 }
 
-void sr_guest_memory_vblank(void) {
-    if (!s_guest_memory_channel_active) return;
-    if (!nk_platform_guest_memory_channel_sync_vblank(&s_guest_memory_channel)) {
-        fprintf(stderr, "GUEST_MEMORY_CHANNEL_STOPPED: the player stopped reading guest memory\n");
-        nk_platform_guest_memory_channel_stop(&s_guest_memory_channel);
-        s_guest_memory_channel_active = false;
-    }
-}
-
-bool sr_host_notification(char *out, size_t out_size) {
-    if (out && out_size) out[0] = '\0';
-    if (!s_guest_memory_channel_active || !out || out_size == 0u) return false;
-    return nk_platform_guest_memory_channel_read_notification(&s_guest_memory_channel,
-                                                               &s_guest_notification_seen,
-                                                               out, out_size);
+bool sr_mem_adopt_arena(uint8_t *arena, size_t size) {
+    if (g_mem || !arena || size != SR_GUEST_ARENA_SIZE) return false;
+    s_adopted_arena = arena;
+    return true;
 }
 
 static uint32_t g_loaded_end = 0;   /* highest guest address written by the loader */

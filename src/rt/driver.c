@@ -603,6 +603,18 @@ int main(int argc, char **argv) {
     sr_driver_boot_event("BOOT_EVENT phase=init public_safe=0");
 #endif
 
+#ifdef SR_SDL3VK
+    /* The SDL3/Vulkan runtime links gui.c, which owns the player's optional local guest-memory
+     * channel; the headless gate and this file's own harnesses build without both. It goes in
+     * before the first sr_mem_init so guest memory is the arena the player reads. A named channel
+     * that cannot be used ends the run here by name: it must not go on with private memory. */
+    if (!gui_guest_memory_channel_install()) {
+        fprintf(stderr, "GUEST_MEMORY_CHANNEL_UNAVAILABLE: the player's local guest-memory "
+                        "channel could not be opened\n");
+        exit(2);
+    }
+#endif
+
     /* Image mode: a pre-relocated flat image (e.g. a rebased PRX from tools/prxload.py) is
      * loaded at <base> and run from <entry>. Required for relocatable PRXs, which must be
      * rebased + relocated before they have concrete addresses.

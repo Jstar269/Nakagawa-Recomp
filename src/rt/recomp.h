@@ -1083,10 +1083,12 @@ static inline void sr_native_memset_checked(uint32_t dest, uint8_t val, uint32_t
 
 void  sr_mem_init(void);
 void  sr_mem_reset(void);              /* LoadExec: zero guest RAM and retire executable spans */
-/* The optional local player channel pauses guest dispatch at each delivered VBLANK until the
- * parent acknowledges that frame; this runtime hook opens no network connection. */
-void  sr_guest_memory_vblank(void);
-bool  sr_host_notification(char *out, size_t out_size);
+/* The guest arena is guest physical [0, SR_GUEST_ARENA_SIZE). Before the first sr_mem_init the
+ * program may hand over the arena to use: size zeroed bytes, size equal to SR_GUEST_ARENA_SIZE,
+ * that stay valid for the life of the process. False, and private memory as always, when memory
+ * is already set up or the arena does not fit. recomp.c neither knows nor asks where it is from. */
+#define SR_GUEST_ARENA_SIZE 0x0c000000u
+bool  sr_mem_adopt_arena(uint8_t *arena, size_t size);
 void  sr_load_segment(uint32_t vaddr, const void *data, uint32_t len);
 uint32_t sr_loaded_end(void);   /* highest guest address the loader wrote (module end incl. BSS) */
 uint32_t sr_loaded_base(void);  /* lowest guest address the loader wrote; UINT32_MAX when none */
@@ -2385,6 +2387,11 @@ static inline int sr_pick_display(const int bounds[4], const int *displays, int 
     return -1;
 }
 void     gui_init(const char *title);
+/* gui.c, the SDL3/Vulkan runtime only (SR_SDL3VK): opens the player's local guest-memory channel
+ * when SR_GUEST_MEMORY_CHANNEL names one, hands its arena to sr_mem_adopt_arena and its vblank
+ * wait to sched_set_vblank_host. Call before the first sr_mem_init. 1 when there is no channel
+ * to open or it is open; 0 when the named channel cannot be used. It opens no network connection. */
+int      gui_guest_memory_channel_install(void);
 int      gui_on(void);
 int      gui_interactive(void);                  /* 1 when a person is at a real window: not offscreen, headless or acceptance */
 uint32_t gui_buttons(void);
@@ -3009,6 +3016,9 @@ int      sched_stack_arena_free_at(uint32_t addr, uint32_t *end_out);
 /* hle.c: told after a thread stack or High block's owner gives it back to the arena (base, size). */
 typedef void (*SrSchedArenaRelease)(uint32_t base, uint32_t size);
 void     sched_set_arena_release_hook(SrSchedArenaRelease release);
+/* Called after each delivered VBLANK's sr_vblank_tick, while guest execution is paused on it.
+ * NULL: nothing is called. */
+void     sched_set_vblank_host(void (*host)(void));
 void     sched_set_current_join_target(uint32_t uid);
 void     sched_clear_current_join_target(void);
 int      sched_take_current_join_result(uint32_t uid, uint32_t *result_out);
