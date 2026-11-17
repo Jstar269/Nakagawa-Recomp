@@ -31,6 +31,7 @@ typedef SOCKET TSock;
 #  include <errno.h>
 #  include <fcntl.h>
 #  include <netinet/in.h>
+#  include <netinet/tcp.h>
 #  include <sys/socket.h>
 #  include <unistd.h>
 typedef int TSock;
@@ -82,6 +83,10 @@ static void t_nonblock(TSock s) {
     int f = fcntl(s, F_GETFL, 0);
     if (f >= 0) fcntl(s, F_SETFL, f | O_NONBLOCK);
 #endif
+    /* Disable Nagle on the in-process loopback server sockets so small sequential
+     * lobby/data frames flush immediately on POSIX without waiting for delayed ACKs. */
+    int nodelay = 1;
+    (void)setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
 }
 
 static TSock t_listen_loopback(uint16_t *out_port) {
