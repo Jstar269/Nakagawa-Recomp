@@ -3779,6 +3779,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 # The 2026-11-10 acceptance-eligible ge-through-z (boot 180, e4e6a3a2) and
                 # vfpu-reserved-widths (#326, boot 182, c6abab53) runs.
                 "PSP-GE-THROUGHZ-001", "PSP-VFPU-RESERVED-001",
+                # The 2026-11-17 (UTC) acceptance-eligible safe-scalar (#2640, boot 221, XMB context)
+                # run of 86279e852.
+                "PSP-SAFE-SCALAR-001",
             },
         )
         self.assertEqual(
@@ -13745,7 +13748,7 @@ class SafeScalarProbeTests(unittest.TestCase):
         self.assertEqual([name[len("SS_T_"):].lower().replace("_", "-") for name in indexes],
                          [row[len("tls-"):] for row in tls_rows])
         self.assertLessEqual(max(counts[row] for row in rows), self._define("SS_WORDS_MAX"))
-        self.assertEqual(self.row["hardware_evidence"], "NOT_RUN")
+        self.assertEqual(self.row["hardware_evidence"], "MEASURED")
         self.assertEqual(self.row["case_ids"], [*rows, "safe-scalar-done"])
         self.assertEqual(self.row["diagnostic_case_ids"], [self.CASE])
         self.assertEqual(self.row["prx"], "safe_scalar.prx")
@@ -13904,7 +13907,7 @@ class SafeScalarProbeTests(unittest.TestCase):
         self.assertIn("(#reading-the-safe-scalar-tls-rows)", docs)
         self.assertIn("one run", self.row["invariant"])
         self.assertIn("cross-check only", self.row["invariant"])
-        self.assertIn("49 records", self.row["evidence_note"])
+        self.assertIn("49 records", self.row["measurement_note"])
 
     def test_import_gate_pins_the_three_libraries_and_refuses_device_libraries(self) -> None:
         start = self.makefile.index("ifeq ($(CASE),safe-scalar)\nLIBS += -lpsprtc\n")
@@ -17904,7 +17907,7 @@ class Record20261015Tests(unittest.TestCase):
             ("ge-depth-round", "PSP-GE-RASTER-003", "MEASURED"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
             ("hle-io-trunc", "PSP-HLE-IO-TRUNC-001", "MEASURED"),
-            ("safe-scalar", "PSP-SAFE-SCALAR-001", "NOT_RUN"),
+            ("safe-scalar", "PSP-SAFE-SCALAR-001", "MEASURED"),
         )
         docs = {row[0]: row for row in self._table_rows(self.doc) if len(row) == 4}
         readme = {row[0]: row for row in self._table_rows(self.readme) if len(row) == 3}
@@ -17926,6 +17929,40 @@ class Record20261015Tests(unittest.TestCase):
                      "0x80020323", "0x80010016", "queues nothing"):
             self.assertIn(term, note)
         self.assertIn("- **PSP-3000 single-case run of `hle-io-seek-edges` (2026-11-11 UTC)**", self.doc)
+
+    def test_the_safe_scalar_run_is_measured_from_the_runner_envelope(self) -> None:
+        """#2640: the 2026-11-17 safe-scalar run. The host wrapper printed no verdict, so the
+        record says what it rests on: the runner's acceptance-eligible envelopes."""
+        row = self.rows["PSP-SAFE-SCALAR-001"]
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertNotIn("evidence_note", row)
+        self.assertEqual(row["evidence_ref"],
+                         "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        note = row["measurement_note"]
+        for term in ("2026-11-17", "PSP-3000", "boot 221", "XMB context", "86279e852",
+                     "ARK-5 5.2.0", "0x06060010", "acceptance-eligible with 0 blockers",
+                     "printed no verdict", "rests on the runner's report",
+                     "0xfffffffd", "0x800001fe", "0x7fffffff", "0x0008b600",
+                     "directly below the high bracket"):
+            self.assertIn(term, note)
+        start = self.doc.index("- **PSP-3000 single-case run of `safe-scalar` (2026-11-17 UTC)**")
+        entry = self.doc[start:self.doc.index("\n- **", start + 1)]
+        for term in ("printed no verdict", "acceptance-eligible with 0 blockers", "boot 221",
+                     "oracle_matrix.py` would not have named a launch `ACCEPTED`"):
+            self.assertIn(term, " ".join(entry.split()))
+        # The record table names every row once, in stream order, PASS, with the row's word
+        # count, and the done record counts the 49 rows.
+        table = [[cell.strip() for cell in line.strip().strip("|").split("|")]
+                 for line in entry.splitlines() if line.startswith("  | `")]
+        records = [cells for cells in table if len(cells) == 4 and cells[1] == "PASS"]
+        expected = [*parse_golden.SAFE_SCALAR_ROWS, ("safe-scalar-done", 1)]
+        self.assertEqual([cells[0].strip("`") for cells in records], [name for name, _ in expected])
+        for cells, (name, words) in zip(records, expected, strict=True):
+            with self.subTest(row=name):
+                self.assertRegex(cells[2], r"^`0x[0-9a-f]{8}`$")
+                self.assertEqual(len(re.findall(r"`0x[0-9a-f]{8}`", cells[3])), words)
+        self.assertEqual(records[-1][3], "`0x00000031`")
 
     def test_the_io_trunc_run_is_measured_in_game_context(self) -> None:
         """#1892: the 2026-11-02 hle-io-trunc run was built from 08934592f, which is not an
