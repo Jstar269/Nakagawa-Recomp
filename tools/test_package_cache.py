@@ -1534,6 +1534,18 @@ class PackageCacheTests(unittest.TestCase):
                                             "PACKAGE_RESTORE_UNREADABLE"):
                     nk_cli._restore_interrupted_swap(target, cache_dir)
 
+    def test_first_byte_lock_is_exclusive_until_released(self) -> None:
+        # The build and library locks share this one OS lock primitive.
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = Path(tmp) / "shared.lock"
+            with open(lock_path, "a+b") as holder, open(lock_path, "a+b") as contender:
+                nk_cli._set_first_byte_lock(holder, unlock=False)
+                with self.assertRaises(OSError):
+                    nk_cli._set_first_byte_lock(contender, unlock=False)
+                nk_cli._set_first_byte_lock(holder, unlock=True)
+                nk_cli._set_first_byte_lock(contender, unlock=False)
+                nk_cli._set_first_byte_lock(contender, unlock=True)
+
     def test_second_build_of_a_title_is_refused_while_one_runs(self) -> None:
         import argparse
         import contextlib

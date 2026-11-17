@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 from pathlib import Path
@@ -888,6 +889,10 @@ class LibrarySweepTests(unittest.TestCase):
                          {}, "UTF-8"),
             "too-deep": (b'{"a": ' * 8 + b"1" + b"}" * 8,
                          {"_SWEEP_RESUME_JSON_MAX_DEPTH": 4}, "nesting"),
+            # Every limit of a case applies, not only the first one listed.
+            "too-deep-within-size": (b'{"a": ' * 8 + b"1" + b"}" * 8,
+                                     {"_SWEEP_RESUME_JSON_MAX_BYTES": 4096,
+                                      "_SWEEP_RESUME_JSON_MAX_DEPTH": 4}, "nesting"),
         }
         for name, (payload, limits, reason) in cases.items():
             with self.subTest(name=name):
@@ -895,15 +900,9 @@ class LibrarySweepTests(unittest.TestCase):
                 shard_dir.mkdir()
                 report = shard_dir / "library-sweep.json"
                 report.write_bytes(payload)
-                if limits:
-                    limit_name, limit_value = next(iter(limits.items()))
-                    patcher = mock.patch.object(library_sweep, limit_name, limit_value)
-                else:
-                    patcher = mock.patch.object(
-                        library_sweep, "_SWEEP_RESUME_JSON_MAX_BYTES",
-                        library_sweep._SWEEP_RESUME_JSON_MAX_BYTES,
-                    )
-                with patcher:
+                with contextlib.ExitStack() as stack:
+                    for limit_name, limit_value in limits.items():
+                        stack.enter_context(mock.patch.object(library_sweep, limit_name, limit_value))
                     message = self._merge_failure_message(shard_dir)
                 self.assertIn(str(report), message)
                 self.assertIn("not a usable shard report", message)

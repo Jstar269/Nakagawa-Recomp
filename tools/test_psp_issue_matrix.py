@@ -6,15 +6,20 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 from typing import Any
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+ROOT = Path(__file__).resolve().parents[1]
+# The repository root resolves `tools.`; the tools folder resolves bare sibling imports.
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools"))
 
-from tools import psp_issue_matrix
+from tools import psp_issue_matrix  # noqa: E402
 
 
 class PspIssueMatrixTests(unittest.TestCase):
@@ -274,6 +279,18 @@ class PspIssueMatrixTests(unittest.TestCase):
         self.assertEqual(psp_issue_matrix._state(70, routes), "PSP_HARDWARE_READY")
         self.assertEqual(routes[70]["hardware_test_id"], "ORACLE-001")
         self.assertEqual(psp_issue_matrix._state(98, routes), "LOCAL_IMPLEMENTATION_READY")
+
+
+    def test_file_imports_when_run_as_a_script(self) -> None:
+        # Script mode puts only tools/ on sys.path, never the repository root or the cwd.
+        env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+        with tempfile.TemporaryDirectory() as tmp:
+            run = subprocess.run(
+                [sys.executable, "-s", str(Path(__file__).resolve()), "--help"],
+                cwd=tmp, env=env, capture_output=True, text=True, check=False, timeout=120,
+            )
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertNotIn("ModuleNotFoundError", run.stderr)
 
 
 if __name__ == "__main__":

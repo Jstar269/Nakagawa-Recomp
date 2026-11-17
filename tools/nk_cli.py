@@ -27,7 +27,7 @@ import tempfile
 import threading
 import traceback
 import time
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, NoReturn, Protocol, cast
 import zlib
 
 
@@ -2616,6 +2616,28 @@ PACKAGE_BUILD_LOCKED_MESSAGE = (
 )
 
 
+def _set_first_byte_lock(handle: BinaryIO, *, unlock: bool) -> None:
+    """Take (without waiting) or release the OS lock on the first byte of an open lock file.
+
+    Taking raises OSError while another handle holds the lock. On Windows a failed
+    release is ignored.
+    """
+    if os.name == "nt":
+        import msvcrt
+
+        windows_msvcrt = cast(_WindowsMsvcrt, msvcrt)  # Windows' runtime exposes APIs omitted by Linux typeshed.
+        handle.seek(0)
+        if unlock:
+            with contextlib.suppress(OSError):
+                windows_msvcrt.locking(handle.fileno(), windows_msvcrt.LK_UNLCK, 1)
+        else:
+            windows_msvcrt.locking(handle.fileno(), windows_msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN if unlock else fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 @contextlib.contextmanager
 def _package_build_lock(user_root: Path, disc_id: str):
     """Hold the per-title build lock; yields False when another build holds it.
@@ -2632,33 +2654,14 @@ def _package_build_lock(user_root: Path, disc_id: str):
     handle = open(lock_dir / f"build-package-{disc_id}.lock", "a+b")
     try:
         try:
-            if os.name == "nt":
-                import msvcrt
-
-                windows_msvcrt = cast(_WindowsMsvcrt, msvcrt)  # Windows' runtime exposes APIs omitted by Linux typeshed.
-                handle.seek(0)
-                windows_msvcrt.locking(handle.fileno(), windows_msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _set_first_byte_lock(handle, unlock=False)
         except OSError:
             yield False
             return
         try:
             yield True
         finally:
-            if os.name == "nt":
-                import msvcrt
-
-                windows_msvcrt = cast(_WindowsMsvcrt, msvcrt)  # Windows' runtime exposes APIs omitted by Linux typeshed.
-                handle.seek(0)
-                with contextlib.suppress(OSError):
-                    windows_msvcrt.locking(handle.fileno(), windows_msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _set_first_byte_lock(handle, unlock=True)
     finally:
         handle.close()
 
@@ -4996,16 +4999,7 @@ def _library_lock(user_root: Path, timeout_seconds: float = LIBRARY_LOCK_TIMEOUT
         deadline = time.monotonic() + timeout_seconds
         while True:
             try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    windows_msvcrt = cast(_WindowsMsvcrt, msvcrt)  # Windows' runtime exposes APIs omitted by Linux typeshed.
-                    handle.seek(0)
-                    windows_msvcrt.locking(handle.fileno(), windows_msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _set_first_byte_lock(handle, unlock=False)
                 break
             except OSError:
                 if time.monotonic() >= deadline:
@@ -5017,17 +5011,7 @@ def _library_lock(user_root: Path, timeout_seconds: float = LIBRARY_LOCK_TIMEOUT
         try:
             yield
         finally:
-            if os.name == "nt":
-                import msvcrt
-
-                windows_msvcrt = cast(_WindowsMsvcrt, msvcrt)  # Windows' runtime exposes APIs omitted by Linux typeshed.
-                handle.seek(0)
-                with contextlib.suppress(OSError):
-                    windows_msvcrt.locking(handle.fileno(), windows_msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _set_first_byte_lock(handle, unlock=True)
     finally:
         handle.close()
 

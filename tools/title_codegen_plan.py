@@ -47,7 +47,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any
 
 # The Windows embeddable Python runtime uses a fixed ``._pth`` search path and
 # may omit the directory containing this script. Keep sibling tool imports
@@ -152,36 +152,18 @@ class _MemoryStatusEx(ctypes.Structure):
     ]
 
 
-class _WindowsKernel32(Protocol):
-    def GlobalMemoryStatusEx(self, lp_buffer: object) -> int: ...
-    GetShortPathNameW: "_ShortPathNameFunction"
-
-
-class _ShortPathNameFunction(Protocol):
-    argtypes: object
-    restype: object
-
-    def __call__(self, path: str, buffer: object, size: int) -> int: ...
-
-
-class _WindowsDLL(Protocol):
-    kernel32: _WindowsKernel32
-
-
 def available_physical_memory() -> int | None:
     """Return the physical memory available to a new process in bytes, or None if unknown.
 
     Windows reports it through ``GlobalMemoryStatusEx``; Linux through ``MemAvailable``
     (which counts reclaimable cache); other POSIX systems through free pages.
     """
-    if os.name == "nt":
+    # sys.platform, not os.name: type checkers narrow on it, so ctypes.windll needs no cast.
+    if sys.platform == "win32":
         status = _MemoryStatusEx()
         status.dwLength = ctypes.sizeof(_MemoryStatusEx)
         try:
-            # Windows supplies windll here; the Linux typeshed surface omits it.
-            dll_attribute = "windll"
-            windows_dll = cast(_WindowsDLL, getattr(ctypes, dll_attribute))
-            if windows_dll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
                 return int(status.ullAvailPhys)
         except (AttributeError, OSError):
             pass
@@ -1237,16 +1219,13 @@ def _make_safe_directory(path: Path, label: str) -> Path:
 
 
 def _windows_short_path(path: Path) -> Path | None:
-    if os.name != "nt":
+    if sys.platform != "win32":
         return None
     try:
         import ctypes
         from ctypes import wintypes
 
-        # Windows supplies windll here; the Linux typeshed surface omits it.
-        dll_attribute = "windll"
-        windows_dll = cast(_WindowsDLL, getattr(ctypes, dll_attribute))
-        GetShortPathNameW = windows_dll.kernel32.GetShortPathNameW
+        GetShortPathNameW = ctypes.windll.kernel32.GetShortPathNameW
         GetShortPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
         GetShortPathNameW.restype = wintypes.DWORD
 
