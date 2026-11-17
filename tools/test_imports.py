@@ -35,10 +35,14 @@ from import_fixtures import (
     DATA_FILE_OFF,
     INTERLEAVED_NIDS,
     INTERLEAVED_SHAPE,
+    SYSLIB_EXPORT,
+    build_import_elf,
     build_import_layout_elf,
     build_interleaved_import_elf,
+    build_module_elf,
     build_stripped_module_elf,
 )
+import import_audit_gate
 
 PRIMARY = [
     ("SynthAlpha", [0x22000001, 0x22000002, 0x22000003]),
@@ -498,6 +502,24 @@ class AuditAnalyzerParityTests(unittest.TestCase):
         }
         for label, case in cases.items():
             self.assertParity(case, accepted=False, label=label)
+
+    def test_all_malformed_fixtures_are_refused_by_both(self) -> None:
+        libs = [("LibOne", [0x11111111, 0x22222222])]
+        for corrupt in import_audit_gate.MALFORMED_FIXTURES:
+            if corrupt == "sectionless_bad_paddr":
+                continue  # covered by test_module_info_scan_fallback_is_analyzer_only
+            for sectionless in (False, True):
+                blob = build_import_elf(libs, corrupt=corrupt, sectionless=sectionless)
+                self.assertParity(
+                    blob, accepted=False,
+                    label=f"malformed={corrupt}, sectionless={sectionless}",
+                )
+
+    def test_unterminated_export_library_name_raises_import_table_error(self) -> None:
+        blob = build_module_elf([SYSLIB_EXPORT, ("A" * 1100, 0x4001, [0x51000001], [])])
+        elf = Elf(blob, base=0)
+        with self.assertRaises(imports.ImportTableError):
+            imports.function_exports(elf, {})
 
     def test_variable_imports_map_the_same_functions_in_both(self) -> None:
         # The interleaved builder emits a variable-only entry (numVars 1, six words)

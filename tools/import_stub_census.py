@@ -53,6 +53,7 @@ if TOOLS_DIR not in sys.path:
 
 import analyze  # noqa: E402
 import codegen  # noqa: E402  (build_entry_catalog is the emission filter)
+import hle_manifest  # noqa: E402
 import imports  # noqa: E402
 from imports import ImportTableError  # noqa: E402
 
@@ -62,16 +63,22 @@ REASON_OVERLAP = "overlapping a function"
 REASON_OTHER = "other"
 REASONS = (REASON_OUTSIDE, REASON_LATE, REASON_OVERLAP, REASON_OTHER)
 
-HLE_REGISTRATION = re.compile(r"sr_hle_register\(\s*0x([0-9a-fA-F]+)u?")
+
+def _is_eboot(path):
+    return os.path.basename(path).lower() == "eboot.elf"
 
 
-def handled_nids(repo_root):
-    """Return the NIDs with an HLE handler: every sr_hle_register(0x...) call in src/rt."""
-    nids = set()
-    for path in glob.glob(os.path.join(repo_root, "src", "rt", "*.c")):
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            nids.update(int(m.group(1), 16) for m in HLE_REGISTRATION.finditer(handle.read()))
-    return frozenset(nids)
+def _empty_record(label, status="ok", detail=""):
+    return {
+        "image": label, "status": status, "refusal": None, "detail": detail,
+        "stubs": 0, "handled": 0, "trapped": 0,
+        "missing": [], "runtime_missing": [], "reasons": {},
+    }
+
+
+def handled_nids(repo_root=None):
+    """Return the NIDs with an HLE handler from the fail-closed manifest extraction."""
+    return hle_manifest.registered_nids()
 
 
 def default_base(path):
@@ -85,7 +92,7 @@ def default_base(path):
     census consumes staged images whose layout the title plan has already decided, and the
     staged name is the only split this route has.
     """
-    return None if os.path.basename(path).lower() == "eboot.elf" else 0
+    return None if _is_eboot(path) else 0
 
 
 def _missing(addr, library, nid, reason, detail=""):
@@ -125,11 +132,7 @@ def _window_slots(elf):
 def census_image(path, base, *, label, extra_spans=None, handled=frozenset()):
     """Census one image and return its record. Never raises for a bad image; it is recorded."""
     started = time.time()
-    rec = {
-        "image": label, "status": "ok", "refusal": None, "detail": "",
-        "stubs": 0, "handled": 0, "trapped": 0,
-        "missing": [], "runtime_missing": [], "reasons": {},
-    }
+    rec = _empty_record(label)
     try:
         elf = analyze.Elf(path, base=base)
     except Exception as exc:  # an unreadable image is a finding, not a crash
@@ -140,7 +143,7 @@ def census_image(path, base, *, label, extra_spans=None, handled=frozenset()):
 
     named = analyze.exec_ranges(elf, extra_spans=extra_spans)
     file_exec = analyze.file_backed_exec_ranges(elf)
-    is_module = os.path.basename(path).lower() != "eboot.elf"
+    is_module = not _is_eboot(path)
 
     stubs, variable_tables = {}, ()
     if analyze.has_import_table(elf):
@@ -227,19 +230,42 @@ def manifest_images(manifest_path, title_dir):
     executable = manifest.get("executable", {})
     spans = [(int(span["start"]), int(span["end"]))
              for span in executable.get("extra_executable_spans", [])] or None
-    found = {}
-    for root, _dirs, files in os.walk(title_dir):
+    found_all = {}
+    for root, dirs, files in os.walk(title_dir):
+        dirs.sort()
         for name in sorted(files):
-            found.setdefault(name.lower(), os.path.join(root, name))
+            found_all.setdefault(name.lower(), []).append(os.path.join(root, name))
+
+    def resolve_file(key):
+        paths = found_all.get(key, [])
+        if not paths:
+            return None
+        if len(paths) == 1:
+            return paths[0]
+        decrypted = [
+            p for p in paths
+            if "decrypted" in [part.lower() for part in os.path.relpath(p, title_dir).split(os.sep)]
+        ]
+        if len(decrypted) == 1:
+            return decrypted[0]
+        raise ValueError(
+            f"multiple files named {key!r} under {title_dir}: {', '.join(paths)}"
+        )
+
     images = []
-    eboot = found.get("eboot.elf")
+    eboot = resolve_file("eboot.elf")
     if eboot is None:
         raise ValueError(f"no EBOOT.elf under {title_dir}")
     images.append((eboot, f"{disc}/EBOOT.elf", executable.get("base") or None, spans))
     for module in manifest.get("modules", []):
+        role = module.get("role", "guest-prx")
+        if role == "hle-capability":
+            continue
         name = module["name"]
         placement = module.get("placement", "fixed")
-        path = found.get(name.lower())
+        path = resolve_file(name.lower())
+        if path is None and (role == "optional-guest-prx" or module.get("required") is False):
+            continue
         if placement == "fixed":
             images.append((path, f"{disc}/{name}", int(module["load_address"]), None))
         elif placement == "runtime":
@@ -260,8 +286,7 @@ def manifest_images(manifest_path, title_dir):
 
 def unlocated_record(label, detail):
     """A census record for an image the census cannot read at all: one named finding."""
-    rec = {"image": label, "status": "error", "refusal": None, "detail": detail, "stubs": 0,
-           "handled": 0, "trapped": 0, "missing": [], "runtime_missing": [], "reasons": {}}
+    rec = _empty_record(label, status="error", detail=detail)
     _image_level(rec, detail)
     return rec
 
@@ -382,10 +407,7 @@ def main(argv=None):
             try:
                 rec = census_image(path, base, label=label, extra_spans=spans, handled=handled)
             except Exception as exc:  # a census fault is a recorded finding, never a lost run
-                rec = {"image": label, "status": "error", "refusal": None,
-                       "detail": f"{type(exc).__name__}: {str(exc)}", "stubs": 0,
-                       "handled": 0, "trapped": 0, "missing": [], "runtime_missing": [],
-                       "reasons": {}}
+                rec = unlocated_record(label, f"{type(exc).__name__}: {str(exc)}")
             records.append(rec)
             if out is not None:
                 out.write(json.dumps(rec, sort_keys=True) + "\n")

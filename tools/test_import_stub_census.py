@@ -250,12 +250,12 @@ class CensusGateAndReporting(unittest.TestCase):
         self.assertEqual(len(census.check_failures([late])), 1)
 
     def test_handled_nids_are_the_sr_hle_registrations(self):
-        with tempfile.TemporaryDirectory() as root:
-            os.makedirs(os.path.join(root, "src", "rt"))
-            with open(os.path.join(root, "src", "rt", "hle_x.c"), "w", encoding="utf-8") as fh:
-                fh.write('sr_hle_register(0xf3f76017, "a", h_a);\n'
-                         'sr_hle_register(0x3dfaeba9u, "b", h_b);\n')
-            self.assertEqual(census.handled_nids(root), frozenset({0xf3f76017, 0x3dfaeba9}))
+        with mock.patch.object(census.hle_manifest, "registered_nids", return_value=frozenset({0xf3f76017, 0x3dfaeba9})) as reg_mock:
+            self.assertEqual(census.handled_nids("ignored"), frozenset({0xf3f76017, 0x3dfaeba9}))
+            reg_mock.assert_called_once()
+        # Live runtime check: controlled-unsupported registrations (e.g. sceNetAdhocInit 0xe1d621d7) are included.
+        live = census.handled_nids(os.path.dirname(census.TOOLS_DIR))
+        self.assertIn(0xE1D621D7, live)
 
     def test_corpus_discovery_takes_executables_and_modules_with_their_bases(self):
         with tempfile.TemporaryDirectory() as root:
@@ -375,6 +375,54 @@ class ManifestImages(unittest.TestCase):
                 title_dir, manifest_path = _write_title(root, {"lib.prx": entry})
                 with self.assertRaises(error):
                     census.manifest_images(manifest_path, title_dir)
+
+    def test_hle_capability_and_unstaged_optional_modules_do_not_fail_census(self):
+        with tempfile.TemporaryDirectory() as root:
+            title_dir = os.path.join(root, "title")
+            os.makedirs(title_dir)
+            eboot, _stubs = import_fixtures.build_text_stub_run_elf(2)
+            with open(os.path.join(title_dir, "EBOOT.elf"), "wb") as fh:
+                fh.write(eboot)
+            manifest_path = os.path.join(root, "title.json")
+            with open(manifest_path, "w", encoding="utf-8") as fh:
+                json.dump({
+                    "disc": {"id": "TESTDISC"},
+                    "modules": [
+                        {"name": "cap.prx", "role": "hle-capability", "load_address": 0x08900000},
+                        {"name": "opt.prx", "role": "optional-guest-prx", "load_address": 0x08A00000},
+                    ],
+                }, fh)
+            images = census.manifest_images(manifest_path, title_dir)
+        self.assertEqual([img[1] for img in images], ["TESTDISC/EBOOT.elf"])
+
+    def test_duplicate_module_filenames_in_title_dir_prefer_decrypted_or_refuse(self):
+        with tempfile.TemporaryDirectory() as root:
+            title_dir = os.path.join(root, "title")
+            os.makedirs(os.path.join(title_dir, "a_raw"))
+            os.makedirs(os.path.join(title_dir, "decrypted"))
+            eboot, _stubs = import_fixtures.build_text_stub_run_elf(2)
+            with open(os.path.join(title_dir, "decrypted", "EBOOT.elf"), "wb") as fh:
+                fh.write(eboot)
+            with open(os.path.join(title_dir, "a_raw", "lib.prx"), "wb") as fh:
+                fh.write(b"raw")
+            with open(os.path.join(title_dir, "decrypted", "lib.prx"), "wb") as fh:
+                fh.write(b"dec")
+            manifest_path = os.path.join(root, "title.json")
+            with open(manifest_path, "w", encoding="utf-8") as fh:
+                json.dump({
+                    "disc": {"id": "TESTDISC"},
+                    "modules": [{"name": "lib.prx", "load_address": 0x08900000}],
+                }, fh)
+            images = census.manifest_images(manifest_path, title_dir)
+            self.assertTrue(images[1][0].endswith(os.path.join("decrypted", "lib.prx")))
+
+            # Two ambiguous non-decrypted copies must raise ValueError instead of picking by os.walk order.
+            os.remove(os.path.join(title_dir, "decrypted", "lib.prx"))
+            os.makedirs(os.path.join(title_dir, "b_raw"))
+            with open(os.path.join(title_dir, "b_raw", "lib.prx"), "wb") as fh:
+                fh.write(b"raw2")
+            with self.assertRaisesRegex(ValueError, "multiple files named"):
+                census.manifest_images(manifest_path, title_dir)
 
 
 if __name__ == "__main__":
