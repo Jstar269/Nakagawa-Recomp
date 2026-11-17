@@ -9,6 +9,7 @@
 
 #include "nk_cheats.h"
 
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -898,6 +899,27 @@ static char *text_new(size_t cap) {
     return text;
 }
 
+/* Appends formatted text to the NUL-terminated `text` of `cap` bytes that holds `*used`
+ * characters. The new length is measured from the text, not taken from what vsnprintf says it
+ * would have written, so it never passes the buffer; text that does not fit whole fails the
+ * test. */
+static void text_addf(char *text, size_t cap, size_t *used, const char *fmt, ...) {
+    va_list args;
+    size_t room;
+    int wrote;
+    if (*used >= cap) {
+        CHECK(false, "the test's file text has room");
+        return;
+    }
+    room = cap - *used - 1u;
+    va_start(args, fmt);
+    wrote = vsnprintf(text + *used, cap - *used, fmt, args);
+    va_end(args);
+    if (wrote < 0) text[*used] = '\0';
+    if (wrote < 0 || (size_t)wrote > room) CHECK(false, "the test's file text fits its buffer");
+    *used += strlen(text + *used);
+}
+
 static void test_frame_budget_of_the_file(void) {
     const NkCheatConfig big = { .disc_id = NULL, .user_base = T_BASE, .user_end = T_BASE + 0x00800000u };
     NkCheatInfo info;
@@ -908,11 +930,11 @@ static void test_frame_budget_of_the_file(void) {
     if (!text) return;
     /* Five cheats of 4,096 one-byte writes: four use the frame's 16,384 writes exactly. */
     for (int i = 0; i < 5; i++) {
-        used += (size_t)snprintf(text + used, cap - used, "_C1 fill %d\n_L 0x80000200 0x10000001\n_L 0x00000000 0x00000000\n", i);
+        text_addf(text, cap, &used, "_C1 fill %d\n_L 0x80000200 0x10000001\n_L 0x00000000 0x00000000\n", i);
     }
-    used += (size_t)snprintf(text + used, cap - used, "_C1 one more write\n_L 0x00000100 0x00000001\n"
-                                                    "_C0 off\n_L 0x80000200 0xFFFF0001\n_L 0x00000000 0x00000000\n"
-                                                    "_C1 refused for a line of its own\n_L 0xB0000000 0x00000001\n");
+    text_addf(text, cap, &used, "_C1 one more write\n_L 0x00000100 0x00000001\n"
+                                "_C0 off\n_L 0x80000200 0xFFFF0001\n_L 0x00000000 0x00000000\n"
+                                "_C1 refused for a line of its own\n_L 0xB0000000 0x00000001\n");
     set = load_as(text, &big, NULL);
     nk_cheats_summary(set, &sum);
     CHECK(set && sum.on == 4u && sum.refused == 3u && sum.off == 1u && sum.over_frame_limit == 2u &&
@@ -934,11 +956,11 @@ static void test_frame_budget_of_the_file(void) {
     refused_at("_L 0x80005000 0x40010001\n_L 0x00000000 0x00000000\n", 2u, "more than 16384 writes");
     /* Codes: 8,192 tests each guarding a write are 16,384 codes; one more pair does not fit. */
     used = 0u;
-    used += (size_t)snprintf(text + used, cap - used, "_C1 many codes\n");
+    text_addf(text, cap, &used, "_C1 many codes\n");
     for (int i = 0; i < 8192; i++) {
-        used += (size_t)snprintf(text + used, cap - used, "_L 0xD0000100 0x00000000\n_L 0x00000101 0x00000001\n");
+        text_addf(text, cap, &used, "_L 0xD0000100 0x00000000\n_L 0x00000101 0x00000001\n");
     }
-    used += (size_t)snprintf(text + used, cap - used, "_C1 one pair more\n_L 0xD0000100 0x00000000\n_L 0x00000101 0x00000001\n");
+    text_addf(text, cap, &used, "_C1 one pair more\n_L 0xD0000100 0x00000000\n_L 0x00000101 0x00000001\n");
     set = load_as(text, &big, NULL);
     CHECK(set && nk_cheats_info(set, 0u, &info) && info.state == NK_CHEAT_ON && nk_cheats_info(set, 1u, &info) &&
               info.state == NK_CHEAT_REFUSED && info.over_frame_limit,
@@ -958,7 +980,7 @@ static void test_load_bounds(void) {
     if (!text) return;
     /* One cheat more than the reader keeps, each with a line. */
     for (unsigned i = 0u; i < NK_CHEATS_MAX_CHEATS + 2u; i++) {
-        used += (size_t)snprintf(text + used, cap - used, "_C0 %u\n_L 0x00000100 0x00000001\n_M 0x0 0x0\n", i);
+        text_addf(text, cap, &used, "_C0 %u\n_L 0x00000100 0x00000001\n_M 0x0 0x0\n", i);
     }
     set = nk_cheats_load(text, used, &k_config, &k_host, error, sizeof(error));
     nk_cheats_summary(set, &sum);
@@ -972,7 +994,7 @@ static void test_load_bounds(void) {
         memcpy(text + used, "_L 0x00000100 0x00000001\n", 25u);
         used += 25u;
     }
-    used += (size_t)snprintf(text + used, cap - used, "_C1 next\n_L 0x00000101 0x00000001\n");
+    text_addf(text, cap, &used, "_C1 next\n_L 0x00000101 0x00000001\n");
     set = nk_cheats_load(text, used, &k_config, &k_host, error, sizeof(error));
     CHECK(set && nk_cheats_count(set) == 2u && nk_cheats_info(set, 0u, &info) && info.state == NK_CHEAT_OFF &&
               !strstr(info.reason, "is past the"),
@@ -1017,7 +1039,7 @@ static void test_hold_reports_are_bounded(void) {
         size_t used = 0u;
         guest_reset();
         for (unsigned i = 0u; i < NK_CHEATS_MAX_HOLD_TOTALS + 3u; i++) {
-            used += (size_t)snprintf(text + used, sizeof(text) - used, "_C1 h%u\n_L 0x60000600 0x00000001\n_L 0x00000001 0x00000000\n", i);
+            text_addf(text, sizeof(text), &used, "_C1 h%u\n_L 0x60000600 0x00000001\n_L 0x00000001 0x00000000\n", i);
         }
         set = load(text);
         (void)nk_cheats_apply(set, &k_host);

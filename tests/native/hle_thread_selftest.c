@@ -56661,6 +56661,7 @@ static void test_callback_object_cells(void) {
  * VBLANKs through sr_vblank_tick. What it asserts is guest memory, the marker and the named
  * refusals. The disc ID and every address are made up; no game is involved. */
 #include "cheats.h"
+#include <stdarg.h>
 
 #define CHEAT_BASE 0x08800000u
 
@@ -57325,6 +57326,27 @@ static SrModuleCode s_cheat_late_code = {
     s_cheat_late_funcs, 1u, s_cheat_late_spans, 2u, 0u, 0u,
 };
 
+/* Appends formatted text to the NUL-terminated `text` of `cap` bytes that holds `*used`
+ * characters. The new length is measured from the text, not taken from what vsnprintf says it
+ * would have written, so it never passes the buffer; text that does not fit whole fails the
+ * test. */
+static void cheats_text_addf(char *text, size_t cap, size_t *used, const char *fmt, ...) {
+    va_list args;
+    size_t room;
+    int wrote;
+    if (*used >= cap) {
+        expect(0, "cheats: the test's file text has room");
+        return;
+    }
+    room = cap - *used - 1u;
+    va_start(args, fmt);
+    wrote = vsnprintf(text + *used, cap - *used, fmt, args);
+    va_end(args);
+    if (wrote < 0) text[*used] = '\0';
+    if (wrote < 0 || (size_t)wrote > room) expect(0, "cheats: the test's file text fits its buffer");
+    *used += strlen(text + *used);
+}
+
 static void test_cheats_bounds_and_late_code(void) {
     static char text[8192];
     char path[MAX_PATH];
@@ -57334,19 +57356,19 @@ static void test_cheats_bounds_and_late_code(void) {
     reset_fixture();
     /* Forty cheats refused for a line of their own, five fills of which four use the VBLANK's
      * writes, and a write over memory that becomes code later. */
-    used += (size_t)snprintf(text + used, sizeof(text) - used,
-                             "_C1 Over late code\n_L 0x00000300 0x00000011\n_L 0x800060FE 0x00040001\n"
-                             "_L 0x00000077 0x00000000\n");
+    cheats_text_addf(text, sizeof(text), &used,
+                     "_C1 Over late code\n_L 0x00000300 0x00000011\n_L 0x800060FE 0x00040001\n"
+                     "_L 0x00000077 0x00000000\n");
     for (int i = 0; i < 40; i++) {
-        used += (size_t)snprintf(text + used, sizeof(text) - used, "_C1 Bad %d\n_L 0xB0000000 0x00000001\n", i);
+        cheats_text_addf(text, sizeof(text), &used, "_C1 Bad %d\n_L 0xB0000000 0x00000001\n", i);
     }
     for (int i = 0; i < 4; i++) {
-        used += (size_t)snprintf(text + used, sizeof(text) - used,
-                                 "_C1 Fill %d\n_L 0x80010000 0x0FFE0001\n_L 0x00000000 0x00000000\n", i);
+        cheats_text_addf(text, sizeof(text), &used,
+                         "_C1 Fill %d\n_L 0x80010000 0x0FFE0001\n_L 0x00000000 0x00000000\n", i);
     }
-    used += (size_t)snprintf(text + used, sizeof(text) - used,
-                             "_C1 Fill 4\n_L 0x80010000 0x0FFE0001\n_L 0x00000000 0x00000000\n"
-                             "_C1 Fill 5\n_L 0x80010000 0x0FFE0001\n_L 0x00000000 0x00000000\n");
+    cheats_text_addf(text, sizeof(text), &used,
+                     "_C1 Fill 4\n_L 0x80010000 0x0FFE0001\n_L 0x00000000 0x00000000\n"
+                     "_C1 Fill 5\n_L 0x80010000 0x0FFE0001\n_L 0x00000000 0x00000000\n");
     expect(used < sizeof(text) && cheats_file_write(path, sizeof(path), "bounds", text),
            "cheats bounds: the cheat file is written");
     cheats_start("1", path);

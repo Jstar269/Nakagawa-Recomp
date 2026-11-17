@@ -35,6 +35,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -4345,6 +4346,23 @@ static uint32_t fuzz_ref_offset(void) {
 #define FUZZ_REF_CHEATS 4u
 #define FUZZ_REF_LINES 24u
 
+/* Appends formatted text to the NUL-terminated `text` of `cap` bytes that holds `*used`
+ * characters. The new length is measured from the text, not taken from what vsnprintf says it
+ * would have written, so it never passes the buffer; the harness sizes its buffer for every
+ * line it can make, and text that does not fit whole stops it. */
+static void fuzz_cheat_text_addf(char *text, size_t cap, size_t *used, const char *fmt, ...) {
+    va_list args;
+    size_t room;
+    int wrote;
+    assert(*used < cap);
+    room = cap - *used - 1u;
+    va_start(args, fmt);
+    wrote = vsnprintf(text + *used, cap - *used, fmt, args);
+    va_end(args);
+    assert(wrote >= 0 && (size_t)wrote <= room);
+    *used += strlen(text + *used);
+}
+
 static void test_fuzz_cheats_reference(unsigned iters) {
     static const uint32_t pointer_cells[] = { 0x100u, 0x104u, 0x108u, 0x10Cu };
     const NkCheatConfig config = { .disc_id = NULL, .user_base = FUZZ_CHEAT_BASE,
@@ -4412,10 +4430,10 @@ static void test_fuzz_cheats_reference(unsigned iters) {
                 }
             }
             counts[c] = n;
-            used += (size_t)snprintf(text + used, sizeof(text) - used, "_C1 c%u\n", c);
+            fuzz_cheat_text_addf(text, sizeof(text), &used, "_C1 c%u\n", c);
             for (size_t i = 0; i < n; i++) {
-                used += (size_t)snprintf(text + used, sizeof(text) - used, "_L 0x%08lX 0x%08lX\n",
-                                         (unsigned long)lines[c][i].a, (unsigned long)lines[c][i].b);
+                fuzz_cheat_text_addf(text, sizeof(text), &used, "_L 0x%08lX 0x%08lX\n",
+                                     (unsigned long)lines[c][i].a, (unsigned long)lines[c][i].b);
             }
         }
         guest->late_code = false;
