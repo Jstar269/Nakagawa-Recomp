@@ -194,16 +194,19 @@ privacy notice, and is off by default.
     plain-TCP `aemu_postoffice` / PPSSPP relay client (`relay-client-selftest`).
   - **Config seam & tests:** the player only sets `SR_ADHOC_ENABLED=1` and `SR_ADHOC_SERVER` (with `+10000`
     `SR_ADHOC_PORT_OFFSET`) when **Ad hoc online play** is on. Offline selftests (`hle_thread_selftest --adhocctl`)
-    and local `127.0.0.1` loopback tests (`relay-client-selftest`, `test_adhoc_online_real_tcp_loopback_e2e`) cover
-    the full stack without touching the internet.
+    and local `127.0.0.1` loopback tests (`relay-client-selftest`, `test_adhoc_online_real_tcp_loopback_e2e`,
+    `test_adhoc_online_all_39_handlers_real_tcp`) cover the full stack without touching the internet.
 - **Where the code comes from** (`src/core/PROVENANCE.md` and `src/rt/PROVENANCE.md` have the details).
   - The relay codec (`src/core/nk_adhoc_relay.c/.h`) encodes and decodes the protocol's packets; no
     aemu_postoffice code is copied. The packet layouts and limits come from aemu_postoffice's headers. Its login
     checks (PPSSPP's `login_user_data`), port offset, and curated community preset list come from PPSSPP, so
     `nk_adhoc_relay.c` is labelled derived-translated.
-  - The TCP relay client (`src/core/nk_adhoc_relay_client.c/.h`) is project-authored C99 written against
-    `nk_adhoc_relay.h` and `nk_adhoc_net.h`; its eager PTP listener backlog (`max_backlog`) and refused-connect
-    state follow PPSSPP's `Core/HLE/AdhocTransportRelay.cpp` design at rev `3bc60270`.
+  - The TCP relay client header (`src/core/nk_adhoc_relay_client.h`) is project-authored. The client
+    implementation (`src/core/nk_adhoc_relay_client.c`) is C99 over `nk_adhoc_relay.h` and `nk_adhoc_net.h` and is
+    classified `derived-translated` from PPSSPP's `Core/HLE/AdhocTransportRelay.cpp` at rev `3bc60270` for its eager
+    PTP listener backlog (`RelayBacklog`, `fillRelayBacklog`, `closeRelayBacklog`) and three-way connect polling /
+    refused-connect state (`RelayTransport::PtpConnect`, `RelayTransport::PtpConnectPoll`), without importing any
+    `aemu_postoffice` source code.
   - The in-process medium's lobby (`src/core/nk_adhoc_net.c`) is translated from PPSSPP's ad hoc server
     (`Core/HLE/proAdhocServer.cpp`, GPL-2.0-or-later) and labelled derived-translated. Its PDP half and PTP stream
     simulation are this project's own.

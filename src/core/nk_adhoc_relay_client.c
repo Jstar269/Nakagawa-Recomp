@@ -1,5 +1,24 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (c) 2012- PPSSPP Project */
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
+/*
+ * Opt-in plain-TCP ad hoc relay transport implementing NkAdhocTransportOps over
+ * nk_adhoc_relay.h (#1139). Eager listener backlog up to max_backlog (RelayBacklog,
+ * fillRelayBacklog, closeRelayBacklog) and three-way connect state polling
+ * (RelayTransport::PtpConnect, RelayTransport::PtpConnectPoll, PTP_STATE_REFUSED) are
+ * adapted (derived-translated, docs/provenance/INDEPENDENCE_MODEL.md) from PPSSPP
+ * Core/HLE/AdhocTransportRelay.cpp at revision 3bc60270eae3069f13dfbfdb7292a7e1375de6f6
+ * (GPL-2.0-or-later); conveyed as GPL-3.0-or-later. Wire formats and limits arrive via
+ * nk_adhoc_relay.h; no aemu_postoffice source code is imported or copied (aemu_postoffice
+ * client/headers are GPL-3.0-only).
+ *
+ * Modified for Nakagawa Recomp (2026-11-16; see src/core/PROVENANCE.md):
+ *   - C99 non-blocking Winsock2 / poll(2) TCP state machine with 512 KiB bounded TX/RX
+ *     channel buffers directly encoding relay frames rather than wrapping blocking
+ *     postoffice client calls.
+ *   - Dead-lobby detection, single-lookup async DNS worker thread with AI_NUMERICHOST IP
+ *     literal fast path, and PTP slot reservation before consuming connect frames.
+ */
 
 #ifndef _WIN32
 #  ifndef _POSIX_C_SOURCE

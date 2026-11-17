@@ -2,17 +2,17 @@
 // Copyright (C) 2025-2026 the psp-recomp authors
 // Copyright (C) 2026 the Nakagawa Recomp authors
 // Derived from sal063/PSP-recompilation-project (GPL-2.0-or-later)
-// Modified by Nakagawa Recomp contributors, 2026-08-11.
+// Modified by Nakagawa Recomp contributors, 2026-08-11; 2026-11-16 (opt-in online ad hoc tier adapted from PPSSPP 3bc60270; #1139).
 // See NOTICE.md for upstream lineage and modification provenance.
 // Derived from PPSSPP (https://github.com/hrydgard/ppsspp), GPL-2.0-or-later
 // Copyright (c) 2012- PPSSPP Project and contributors
+// This is a direct port of Coldbird's code from http://code.google.com/p/aemu/ - All credit goes to him!
 
 /* Networking: sceNet, sceHttp, sceSsl, sceWlan, and opt-in ad hoc networking (#1139).
  * Lone-console sceWlan, sceNetInit/Term, and offline sceNetAdhocctl stay PSP-measured (see below).
  * Online ad hoc tier: PPSSPP-derived, not PSP-measured (classified derived-translated from
  * https://github.com/hrydgard/ppsspp rev 3bc60270eae3069f13dfbfdb7292a7e1375de6f6:
- * Core/HLE/{proAdhoc.h,proAdhoc.cpp,sceNetAdhoc.cpp,sceNetAdhocMatching.cpp,ErrorCodes.h},
- * Common/Net/NetAdhocCommon.h, Core/Net/AdhocTransportRelay.cpp).
+ * Core/HLE/{proAdhoc.h,proAdhoc.cpp,NetAdhocCommon.h,sceNetAdhoc.h,sceNetAdhoc.cpp,sceNetAdhocMatching.h,sceNetAdhocMatching.cpp,AdhocTransportRelay.cpp,ErrorCodes.h}).
  * Extracted from hle.c on 2026-10-31 (#307). */
 
 #include "hle_internal.h"
@@ -1353,7 +1353,7 @@ static uint32_t h_NetGetLocalEtherAddr(CpuState *s) {
 
 /* ---- sceNetAdhoc (PDP / PTP / PollSocket / SocketAlert) -----------------------------------
  * PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev 3bc60270
- * Core/HLE/{proAdhoc.cpp,proAdhoc.h,sceNetAdhoc.cpp} and Common/Net/NetAdhocCommon.h). */
+ * Core/HLE/{proAdhoc.cpp,proAdhoc.h,sceNetAdhoc.cpp,NetAdhocCommon.h}). */
 
 #define ADHOC_MAX_SOCKETS 255
 #define ADHOC_SOCK_PDP 1
