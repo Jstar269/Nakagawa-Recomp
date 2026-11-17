@@ -998,6 +998,7 @@ static uint64_t s_write_seq = 0;
 static unsigned long s_cnt_readback = 0, s_cnt_upload = 0, s_cnt_dirty = 0;
 static unsigned long s_cnt_snap = 0, s_cnt_texup = 0, s_cnt_xferblit = 0;
 static unsigned long s_cnt_depth_commit = 0;   /* depth_readback_to_guest copies (rtt-1x-reads) */
+static unsigned long s_cnt_tex_evict_failed = 0;   /* lookups a full cache could not evict for */
 /* Movie pictures (#2111): texture uploads that were one, and presents handed to the movie
  * upscaler because a drawn (tex) or decoded-into (target) picture covered the frame. */
 static unsigned long s_cnt_movie_tex, s_cnt_movie_present_tex, s_cnt_movie_present_target;
@@ -1574,9 +1575,20 @@ static void submit_poll_done(void) {
     }
 }
 
+/* Set once a GE recording could not be ended or submitted (cmd_finish_submit). The buffer's
+ * state is then unknown (after a lost device it may even be pending), so it is never reset or
+ * recorded into again, and no new recording starts: every later GPU operation fails as a
+ * cmd_begin failure does, and its caller takes its own failure path. */
+static int s_cmd_failed = 0;
+#ifdef SR_GPU_COHERENCE_SELFTEST
+/* The coherence selftest's submit-fail cell: the next queue submit reports this result. */
+static VkResult s_selftest_submit_result = VK_SUCCESS;
+#endif
+
 /* Start a fresh scoped command buffer. The selected slot cannot be reset until its fence
  * retires, which also protects every vertex-arena range previously submitted in it. */
 static int cmd_begin_fresh(void) {
+    if (s_cmd_failed) return 0;
     SubmitSlot *slot = &s_submit[s_async_submit ? s_submit_cursor : 0];
     if (!cmd_wait_slot(slot, GEGPU_BOUNDARY_OTHER)) return 0;
     /* A synchronous boundary can retire earlier queue work without acquiring every
@@ -1597,16 +1609,36 @@ static int cmd_begin_fresh(void) {
     return 1;
 }
 
+/* A recording that could not be ended or submitted is dropped: nothing in it reaches the GPU.
+ * The open recording is closed (s_cmd_slot, s_cmd) so no caller records into it or ends it again,
+ * and s_cmd_failed stops every later recording. */
+static int cmd_abandon_recording(const char *what, VkResult vr) {
+    fprintf(stderr, "gegpu: %s failed: %d: the GE recording is dropped and no further GPU work is "
+            "recorded this run\n", what, (int)vr);
+    s_cmd_slot = NULL;
+    s_cmd = VK_NULL_HANDLE;
+    s_cmd_failed = 1;
+    return 0;
+}
+
 static int cmd_finish_submit(SrPerfGeReason reason, int defer) {
     SubmitSlot *slot = s_cmd_slot;
     if (!slot) return 0;
     ts_end(slot, reason);
-    VKC(vkEndCommandBuffer(s_cmd));
+    VkResult vr = vkEndCommandBuffer(s_cmd);
+    if (vr != VK_SUCCESS) return cmd_abandon_recording("vkEndCommandBuffer", vr);
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.commandBufferCount = 1; si.pCommandBuffers = &s_cmd;
     uint64_t submit_started = SDL_GetTicksNS();
     uint64_t perf_submit_started = sr_perf_now_ns();
-    VKC(vkQueueSubmit(s_queue, 1, &si, slot->fence));
+#ifdef SR_GPU_COHERENCE_SELFTEST
+    if (s_selftest_submit_result != VK_SUCCESS) {
+        vr = s_selftest_submit_result;
+        s_selftest_submit_result = VK_SUCCESS;
+    } else
+#endif
+    vr = vkQueueSubmit(s_queue, 1, &si, slot->fence);
+    if (vr != VK_SUCCESS) return cmd_abandon_recording("vkQueueSubmit", vr);
     if (perf_submit_started) sr_perf_vulkan_submit(perf_submit_started);
     replay_note_submit(reason, SDL_GetTicksNS() - submit_started);
     if (sr_perf_enabled) sr_perf_ge_submit(reason);
@@ -1901,6 +1933,10 @@ static int readback_finish(ReadbackSlot *r, int wait, int allow_commit) {
     if (allow_commit && r->commit && t && t->used && t->img == r->image &&
         t->gpu_valid && t->render_gen == r->gen) {
         if (write_guest_fb(r->map, r->fba, r->stride, r->fmt, r->y0, r->y1)) {
+            /* As target_readback: ge.c's cached depth surface over these rows is now stale. */
+            const uint32_t row = r->stride * (r->fmt == 3u ? 4u : 2u);
+            ge_zbuf_invalidate_guest_span(0x04000000u + r->fba + (uint32_t)r->y0 * row,
+                                          (uint32_t)(r->y1 - r->y0) * row);
             target_note_clean(t);
             if (sr_perf_enabled) sr_perf_vulkan_readback((uint32_t)readback_bytes(4u));
             s_cnt_readback++;
@@ -4027,6 +4063,16 @@ static Target *target_find_by_fba(uint32_t fba) {
     return NULL;
 }
 
+/* Queued batches may sample `t` (a render-to-texture read binds its descriptor set and image):
+ * they are recorded before it is freed. submit_pending drops them even when it fails, so no
+ * batch is left naming the freed set. */
+static void target_submit_before_destroy(Target *t) {
+    if (!s_nbatch && !s_nwbatch) return;
+    if (!submit_pending())
+        fprintf(stderr, "gegpu: the queued batches did not submit before target 0x%06x was freed: "
+                "they are dropped\n", t->fba);
+}
+
 static Target *target_slot_acquire(void) {
     for (int i = 0; i < MAX_TGT; i++)
         if (!s_tgts[i].used) return &s_tgts[i];
@@ -4041,6 +4087,7 @@ static Target *target_slot_acquire(void) {
         s_cur = NULL;
     }
     if (!old) return NULL;
+    target_submit_before_destroy(old);
     target_readback(old);
     target_destroy(old);
     return old;
@@ -4060,6 +4107,7 @@ static Target *target_color_acquire(uint32_t fba, uint32_t stride, uint32_t fmt,
     if (t && (t->stride != stride || t->fmt != fmt)) {
         target_readback(t);
         if (t == s_cur) { submit_pending(); s_cur = NULL; }
+        else target_submit_before_destroy(t);
         target_destroy(t);
         t = NULL;
     }
@@ -4808,10 +4856,21 @@ static void tex_hm_free(TexEnt *e) {
     e->hm_levels = 0u;
 }
 
-static void tex_evict_lru(void) {
+#ifdef SR_GPU_COHERENCE_SELFTEST
+/* The coherence selftest's tex-evict-fail cell: the next eviction's drain reports a failure. */
+static int s_selftest_tex_evict_drain_fail = 0;
+#endif
+
+/* Returns 0, having evicted nothing, when the GPU's work could not be retired: the entries
+ * may still be in use, so none of them can be freed. */
+static int tex_evict_lru(void) {
     /* The caller submits batches before eviction.  Texture uploads and render submits
      * use the scoped GE fence, so there is no device-wide lifetime dependency here. */
-    if (!cmd_drain(GEGPU_BOUNDARY_LIFETIME)) return;
+    int drained = cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+    if (s_selftest_tex_evict_drain_fail) { s_selftest_tex_evict_drain_fail = 0; drained = 0; }
+#endif
+    if (!drained) return 0;
     int goal = s_tex_n - MAX_TEX / 4;
     while (s_tex_n > goal) {
         int v = 0;
@@ -4831,6 +4890,7 @@ static void tex_evict_lru(void) {
         tex_gl_free(e);
         *e = s_tex[--s_tex_n];
     }
+    return 1;
 }
 
 /* Copy one decoded level into mip level `level` of `img`. `lay` tracks the image layout
@@ -6894,7 +6954,13 @@ static VkDescriptorSet tex_get(void) {
 
     if (s_tex_n >= MAX_TEX) {
         submit_pending();   /* batches reference sets about to be freed */
-        tex_evict_lru();
+        if (!tex_evict_lru() || s_tex_n >= MAX_TEX) {
+            /* No free entry: the draw samples white rather than an entry past the cache. */
+            if (!s_cnt_tex_evict_failed++)
+                fprintf(stderr, "gegpu: texture cache full (%d entries) and its eviction could not retire "
+                        "the GPU's work: textures are drawn white until it can\n", s_tex_n);
+            return s_white_set;
+        }
     }
     TexEnt *e = &s_tex[s_tex_n];
     memset(e, 0, sizeof(*e));
@@ -8823,6 +8889,11 @@ static int hook_xfer(uint32_t startdata) {
     uint32_t dy = ((s_ge->xf_dpos >> 10) & 0x3FFu) + doff / dst->stride;
     uint32_t w = (s_ge->xf_size & 0x3FFu) + 1, h = ((s_ge->xf_size >> 10) & 0x3FFu) + 1;
     if (sx + w > FB_W || dx + w > FB_W || sy + h > FB_H || dy + h > FB_H) return 0;
+    /* The transfer is the GE's next use of both targets: the CPU writes held for them come first,
+     * so the copy reads the source's newer bytes and no held span is later patched from guest VRAM
+     * over what it wrote. A failure leaves the target invalid: the CPU path copies guest VRAM. */
+    if (!target_sync_cpu_writes(src) || !src->gpu_valid) return 0;
+    if (!target_sync_cpu_writes(dst)) return 0;
     if (!dst->gpu_valid && !target_upload(dst)) return 0;   /* seed rows we don't overwrite */
     if (s_nbatch && (s_cur == src || s_cur == dst)) submit_pending();
     if (!cmd_begin()) return 0;
@@ -10175,6 +10246,7 @@ void gegpu_shutdown(void) {
 
     s_cmd = VK_NULL_HANDLE;
     s_cmd_slot = NULL;
+    s_cmd_failed = 0;   /* its command pool is gone: the next init records afresh */
     s_snap_src = NULL;
     s_snap_srcgen = 0;
     s_tsnap_src = NULL;

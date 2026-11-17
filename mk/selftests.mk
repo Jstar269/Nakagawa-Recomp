@@ -1065,7 +1065,10 @@ asset-index-selftest:
 # gpu-coherence-twin-mutants (below) proves the twin cells kill the twin's mutants. The pipeline
 # cache (#2149) runs last, as three processes over one empty data root: a cold run saves the
 # cache, a warm run must start from it and draw the same frames, and a reject run re-opens it
-# over damaged, foreign and other-driver files and with the switch off or refused.
+# over damaged, foreign and other-driver files and with the switch off or refused. Two cells then
+# run alone, each in its own process: tex-evict-fail fills the texture cache and injects a failed
+# eviction drain, and submit-fail injects a failed queue submit, after which the backend records
+# nothing more.
 GPU_COHERENCE_BIN := $(BUILD_DIR)/gpu_coherence_selftest.exe
 
 $(GPU_COHERENCE_BIN): shader-verify $(RT_GE_O)
@@ -1211,6 +1214,8 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-cold
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-warm
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-reject
+	$(GPU_COHERENCE_BIN) --case tex-evict-fail
+	$(GPU_COHERENCE_BIN) --case submit-fail
 	@$(MAKE) --no-print-directory gpu-coherence-selftest-snapbar-mutants
 	@$(MAKE) --no-print-directory gpu-coherence-pcache-mutant
 	@$(MAKE) --no-print-directory gpu-dst-read-mutants
