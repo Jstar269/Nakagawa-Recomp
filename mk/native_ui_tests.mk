@@ -215,6 +215,20 @@ nk-nickname-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(call NK_NICKNAME_SELFTEST_CMD)
 
+# Cheat files (#2639, src/core/nk_cheats.h): the CWCheat reader, the checks that refuse a cheat
+# by name before it can run, and the applier, on a synthetic guest with a stretch of translated
+# code. The runtime's side, at the VBLANK seam, is in hle-thread-selftest.
+define NK_CHEATS_SELFTEST_CMD
+	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" -Isrc/core src/core/nk_cheats.c src/core/nk_shared_helpers.c \
+		tests/native/test_nk_cheats.c -o $(BUILD_ROOT)/test_nk_cheats$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_nk_cheats$(EXE_EXT)
+endef
+
+.PHONY: nk-cheats-selftest
+nk-cheats-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(call NK_CHEATS_SELFTEST_CMD)
+
 # The RetroAchievements bridge (src/core/nk_achievements.c, #1316) on the vendored rcheevos
 # rc_client, against an in-process fake server: login, game load, a softcore unlock on synthetic
 # guest memory, the PSP memory map's bounds and the retroachievements.org-only request gate.
@@ -531,6 +545,7 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 		tests/native/native_test_isolation.c tests/native/test_launch_resolution.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_launch_resolution$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_launch_resolution$(EXE_EXT)
 	$(call NK_NICKNAME_SELFTEST_CMD)
+	$(call NK_CHEATS_SELFTEST_CMD)
 	$(call PLAYER_STATE_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_player_state$(EXE_EXT)
 	$(call INPUT_SETTINGS_TEST_BIN_CMD)

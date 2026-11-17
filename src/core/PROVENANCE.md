@@ -114,6 +114,20 @@ key-file loading, no PSAR entry name), `nk_psp_crypto.c/.h` (the error contract 
 project-authored from the format rules
 and the standards their headers cite (FIPS 197, RFC 4493, FIPS 180, RFC 1950-1952, SEC 1).
 
+## Cheat files (`nk_cheats.*`, issue #2639)
+
+`nk_cheats.c` and `nk_cheats.h` (the CWCheat reader, the load-time checks and the applier) are written in this
+project. The CWCheat format has no specification, so the meaning of each line type and code form was read from
+PPSSPP's implementation, <https://github.com/hrydgard/ppsspp> at `c437463bc5cb78a0236312ad23f9c3b56fb9ae67`
+(GPL-2.0-or-later; the file carries no notice of its own), `Core/CwCheat.cpp`: `CheatFileParser::ParseLine` (the `_S`, `_G`, `_C` and `_L` lines),
+`CWCheatEngine::GetAddress` (the `0x08800000` base), `CWCheatEngine::InterpretNextCwCheat` (the fields of each
+form) and `CWCheatEngine::ExecuteOp` (what a form does). No code was copied or translated line by line: the files
+check a whole cheat when it is loaded and compile it to their own operation list, apply a cheat whole or not at
+all with an undo record, and refuse what PPSSPP skips or widens. Their behaviour is PPSSPP-derived, not
+PSP-measured, and both files say so. The runtime's side is `src/rt/cheats.c` and `src/rt/cheats.h`
+(`src/rt/PROVENANCE.md`), and the tests are `tests/native/test_nk_cheats.c`, a harness in
+`tests/native/test_fuzz_parsers.c` and cases in `tests/native/hle_thread_selftest.c`, all on synthetic guests.
+
 ## Ad hoc transport (`nk_adhoc_*`, issue #1139)
 
 The transport seam of the PSP's ad hoc services, its in-process medium, and the codec of the ad hoc relay's wire

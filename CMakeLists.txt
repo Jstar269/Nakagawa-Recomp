@@ -31,6 +31,7 @@ set(CORE_SOURCES
     src/core/nk_xb.c
     src/core/nk_input_profile.c
     src/core/nk_json.c
+    src/core/nk_cheats.c
     src/core/nk_psp_crypto.c
     src/core/nk_psp_keystore.c
     src/core/nk_psp_builtin_keys.c
@@ -302,6 +303,11 @@ target_include_directories(test_nk_nickname PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
 )
 add_test(NAME nk_nickname_test COMMAND test_nk_nickname)
+
+# Cheat files (src/core/nk_cheats.h, #2639): the reader, the checks and the applier.
+add_executable(test_nk_cheats tests/native/test_nk_cheats.c)
+target_link_libraries(test_nk_cheats PRIVATE nakagawa_core)
+add_test(NAME nk_cheats_test COMMAND test_nk_cheats)
 
 # The nk_ui core and its C3a reserved stubs stay SDL and Vulkan free. Keep this
 # explicit source inventory in sync with mk/nk_ui.mk.

@@ -12,6 +12,7 @@
 #include "nk_title_manifest.h"
 #include "nk_library.h"
 #include "nk_input_profile.h"
+#include "nk_cheats.h"
 #include "nk_platform.h"
 #include "prx_loader.h"
 #include "pgf_api.h"
@@ -4064,6 +4065,236 @@ static void test_fuzz_archive_vfs(unsigned iters) {
     fflush(stdout);
 }
 
+/* ---- cheat files (src/core/nk_cheats.h, #2639) -------------------------------------------------
+ *
+ * The reader, the load-time checks and the applier, on a synthetic guest: 64 KiB of user memory
+ * with a stretch of "translated code" in it. The guest's callbacks are the oracle. Whatever the
+ * file says, a read or a write must lie whole inside user memory, and no write may touch the
+ * code stretch; a cheat that could do either has to be refused at load or held for the frame. */
+
+#define FUZZ_CHEAT_BASE 0x08800000u
+#define FUZZ_CHEAT_SIZE 0x10000u
+#define FUZZ_CHEAT_CODE_START 0x4000u
+#define FUZZ_CHEAT_CODE_SIZE 0x100u
+
+typedef struct {
+    uint8_t ram[FUZZ_CHEAT_SIZE];
+    uint64_t written;
+    uint32_t buttons;
+} FuzzCheatGuest;
+
+static void fuzz_cheat_span(uint32_t addr, uint32_t size) {
+    assert(size != 0u && addr >= FUZZ_CHEAT_BASE && addr - FUZZ_CHEAT_BASE < FUZZ_CHEAT_SIZE &&
+           size <= FUZZ_CHEAT_SIZE - (addr - FUZZ_CHEAT_BASE));
+}
+
+static bool fuzz_cheat_is_code(void *ctx, uint32_t addr, uint32_t size) {
+    (void)ctx;
+    const uint64_t lo = addr, hi = (uint64_t)addr + size;
+    const uint64_t code = (uint64_t)FUZZ_CHEAT_BASE + FUZZ_CHEAT_CODE_START;
+    return size != 0u && lo < code + FUZZ_CHEAT_CODE_SIZE && code < hi;
+}
+
+static void fuzz_cheat_read(void *ctx, uint32_t addr, void *out, uint32_t size) {
+    FuzzCheatGuest *guest = (FuzzCheatGuest *)ctx;
+    fuzz_cheat_span(addr, size);
+    memcpy(out, guest->ram + (addr - FUZZ_CHEAT_BASE), size);
+}
+
+static void fuzz_cheat_write(void *ctx, uint32_t addr, const void *in, uint32_t size) {
+    FuzzCheatGuest *guest = (FuzzCheatGuest *)ctx;
+    fuzz_cheat_span(addr, size);
+    assert(!fuzz_cheat_is_code(ctx, addr, size));
+    memcpy(guest->ram + (addr - FUZZ_CHEAT_BASE), in, size);
+    guest->written += size;
+}
+
+static uint32_t fuzz_cheat_buttons(void *ctx) {
+    return ((const FuzzCheatGuest *)ctx)->buttons;
+}
+
+static const char s_valid_cheat_file[] =
+    "_S TEST-00001\n"
+    "_G A made-up game\n"
+    "_C1 Writes\n"
+    "_L 0x00000100 0x000000AB\n"
+    "_L 0x10000102 0x0000BEEF\n"
+    "_L 0x20000104 0xDEADBEEF\n"
+    "_C1 Add and subtract\n"
+    "_L 0x30100005 0x00000110\n"
+    "_L 0x30400003 0x00000112\n"
+    "_L 0x30500000 0x00000114\n"
+    "_L 0x00010000 0x00000000\n"
+    "_C1 Multi-writes\n"
+    "_L 0x40000120 0x00030002\n"
+    "_L 0x00000010 0x00000001\n"
+    "_L 0x80000140 0x00040001\n"
+    "_L 0x00000020 0x00000001\n"
+    "_L 0x80000150 0x00020002\n"
+    "_L 0x10001000 0x00000100\n"
+    "_C1 Copy\n"
+    "_L 0x50000160 0x00000008\n"
+    "_L 0x00000170 0x00000000\n"
+    "_C1 Pointer\n"
+    "_L 0x60000180 0x11223344\n"
+    "_L 0x00020002 0x00000010\n"
+    "_L 0x20000004 0x00000000\n"
+    "_C1 Bits // a comment\n"
+    "_L 0x70000190 0x0000000F\n"
+    "_L 0x70000192 0x00030F0F\n"
+    "_L 0x70000194 0x000400FF # another\n"
+    "_C1 Conditions\n"
+    "_L 0xD00001A0 0x00001234\n"
+    "_L 0x000001A4 0x00000001\n"
+    "_L 0xD00001B0 0x400001B4\n"
+    "_L 0x00000001 0x00000002\n"
+    "_L 0x000001B8 0x00000001\n"
+    "_L 0xE1020034 0x000001C0\n"
+    "_L 0x000001C1 0x00000011\n"
+    "_L 0x000001C2 0x00000022\n"
+    "_L 0xD0000000 0x10004000\n"
+    "_L 0x000001D0 0x00000099\n"
+    "_C0 Off\n"
+    "_L 0x000001E0 0x00000077\n"
+    "_S TEST-00002\n"
+    "_C1 Another disc's\n"
+    "_L 0x000001E1 0x00000077\n";
+
+/* What a loaded set must say about itself, and what three frames of it must do to the guest. */
+static void fuzz_cheat_set_runs(NkCheatSet *set, FuzzCheatGuest *guest, const NkCheatHost *host) {
+    NkCheatSummary sum;
+    uint32_t on = 0u, off = 0u, refused = 0u;
+    uint8_t code[FUZZ_CHEAT_CODE_SIZE];
+    nk_cheats_summary(set, &sum);
+    for (size_t i = 0; i < nk_cheats_count(set); i++) {
+        NkCheatInfo info;
+        assert(nk_cheats_info(set, i, &info));
+        assert(info.name != NULL && info.name[0] != '\0' && strlen(info.name) < NK_CHEATS_NAME_MAX);
+        assert(info.reason != NULL && strlen(info.reason) < NK_CHEATS_REASON_MAX && info.file_line > 0u);
+        if (info.state == NK_CHEAT_ON) {
+            on++;
+            assert(info.refused_line == 0u && info.reason[0] == '\0');
+        } else if (info.state == NK_CHEAT_REFUSED) {
+            refused++;
+            assert(info.refused_line >= info.file_line && info.reason[0] != '\0');
+        } else {
+            assert(info.state == NK_CHEAT_OFF);
+            off++;
+            assert((info.refused_line == 0u) == (info.reason[0] == '\0'));
+        }
+    }
+    assert(!nk_cheats_info(set, nk_cheats_count(set), &(NkCheatInfo){0}));
+    assert(sum.on == on && sum.off == off && sum.refused == refused);
+    assert(nk_cheats_note_count(set) <= NK_CHEATS_MAX_NOTES && nk_cheats_note_count(set) <= sum.notes);
+    for (size_t i = 0; i < nk_cheats_note_count(set); i++) assert(nk_cheats_note(set, i) != NULL);
+    assert(nk_cheats_note(set, nk_cheats_note_count(set)) == NULL);
+    memcpy(code, guest->ram + FUZZ_CHEAT_CODE_START, sizeof(code));
+    for (int frame = 0; frame < 3; frame++) {
+        guest->written = 0u;
+        guest->buttons = fuzz_rand32();
+        uint32_t applied = nk_cheats_apply(set, host);
+        assert(applied <= on);
+        /* A cheat writes at most its frame limit, and a held one puts back no more than that. */
+        assert(guest->written <= (uint64_t)on * 2u * NK_CHEATS_MAX_FRAME_BYTES);
+        assert(memcmp(code, guest->ram + FUZZ_CHEAT_CODE_START, sizeof(code)) == 0);
+        if (on == 0u) assert(guest->written == 0u);
+    }
+}
+
+static void test_fuzz_cheats(unsigned iters) {
+    printf("[FUZZ] Testing cheat file reader and applier (%u iterations)...\n", iters);
+    fflush(stdout);
+
+    const char *cheat_path = SR_SELFTEST_BUILD_ROOT "/fuzz_cheats_temp.ini";
+    const size_t seed_size = strlen(s_valid_cheat_file);
+    const size_t cap = seed_size * 2u + 64u;
+    const NkCheatConfig config = { "test00001", FUZZ_CHEAT_BASE, FUZZ_CHEAT_BASE + FUZZ_CHEAT_SIZE };
+    FuzzCheatGuest *guest = (FuzzCheatGuest *)malloc(sizeof(*guest));
+    uint8_t *mutated = (uint8_t *)malloc(cap);
+    char err[160];
+    assert(guest != NULL && mutated != NULL);
+    const NkCheatHost host = { guest, fuzz_cheat_read, fuzz_cheat_write, fuzz_cheat_is_code,
+                               fuzz_cheat_buttons, NULL };
+
+    /* The seed itself: every cheat for this disc is accepted, and all of them apply. */
+    memset(guest, 0, sizeof(*guest));
+    {
+        NkCheatSummary sum;
+        NkCheatSet *set = nk_cheats_load(s_valid_cheat_file, seed_size, &config, &host, err, sizeof(err));
+        assert(set != NULL);
+        nk_cheats_summary(set, &sum);
+        assert(sum.on == 7u && sum.off == 1u && sum.refused == 0u && sum.other_game == 1u && sum.notes == 0u);
+        /* The pointer cheat's two hops: [0x180] -> 0x200, [0x204] -> 0x300, then + 0x10. */
+        guest->ram[0x181] = 0x02u; guest->ram[0x182] = 0x80u; guest->ram[0x183] = 0x08u;
+        guest->ram[0x205] = 0x03u; guest->ram[0x206] = 0x80u; guest->ram[0x207] = 0x08u;
+        assert(nk_cheats_apply(set, &host) == 7u);
+        assert(guest->ram[0x100] == 0xABu && guest->ram[0x310] == 0x44u && guest->ram[0x313] == 0x11u);
+        nk_cheats_free(set);
+    }
+
+    unsigned loaded = 0, from_file = 0, with_on = 0, with_refused = 0;
+    for (unsigned i = 0; i < iters; i++) {
+        size_t cur_size = seed_size;
+        memcpy(mutated, s_valid_cheat_file, seed_size);
+        if ((i & 1u) == 0u) {
+            /* Keep the lines well formed and change their digits, so the checks and the applier
+             * see codes and not only broken text. */
+            unsigned changes = 1u + fuzz_rand32() % 6u;
+            while (changes-- != 0u) {
+                size_t at = fuzz_rand32() % seed_size;
+                while (at < seed_size && !(mutated[at] == 'x' && at > 0u && mutated[at - 1u] == '0')) at++;
+                if (at + 9u > seed_size) continue;
+                mutated[at + 1u + fuzz_rand32() % 8u] = (uint8_t)"0123456789ABCDEFabcdef"[fuzz_rand32() % 22u];
+            }
+        } else {
+            mutate_buffer(mutated, &cur_size, cap);
+        }
+        /* The guest holds anything, pointers into and out of user memory and the code included. */
+        for (size_t b = 0; b < FUZZ_CHEAT_SIZE; b += 4u) {
+            uint32_t word = fuzz_rand32();
+            if ((word & 3u) != 0u) word = FUZZ_CHEAT_BASE + (word % (FUZZ_CHEAT_SIZE + 0x40u));
+            memcpy(guest->ram + b, &word, sizeof(word));
+        }
+        err[0] = '\0';
+        NkCheatSet *set = nk_cheats_load((const char *)mutated, cur_size, &config, &host, err, sizeof(err));
+        if (set) {
+            NkCheatSummary sum;
+            loaded++;
+            nk_cheats_summary(set, &sum);
+            with_on += sum.on != 0u;
+            with_refused += sum.refused != 0u;
+            fuzz_cheat_set_runs(set, guest, &host);
+            nk_cheats_free(set);
+        } else {
+            assert(err[0] != '\0');
+        }
+        /* Every 16th input also crosses the file boundary. */
+        if ((i % 16u) == 0u) {
+            write_file_bytes(cheat_path, mutated, cur_size);
+            set = nk_cheats_load_file(cheat_path, &config, &host, err, sizeof(err));
+            if (set) {
+                from_file++;
+                fuzz_cheat_set_runs(set, guest, &host);
+                nk_cheats_free(set);
+            }
+        }
+    }
+    /* A file that is not there, and arguments that name nothing, are errors with a reason. */
+    remove(cheat_path);
+    err[0] = '\0';
+    assert(nk_cheats_load_file(cheat_path, &config, &host, err, sizeof(err)) == NULL && err[0] != '\0');
+    assert(nk_cheats_load(NULL, 4u, &config, &host, err, sizeof(err)) == NULL);
+    assert(nk_cheats_load("", 0u, NULL, &host, err, sizeof(err)) == NULL);
+
+    free(mutated);
+    free(guest);
+    printf("[FUZZ] Cheat files completed: %u/%u loaded (%u with a cheat on, %u with one refused), %u via the "
+           "file loader, 0 crashes\n", loaded, iters, with_on, with_refused, from_file);
+    fflush(stdout);
+    /* The harness must reach both the applier and the refusals, or it proves nothing of either. */
+    if (iters >= 100u) assert(with_on > iters / 4u && with_refused > iters / 4u);
+}
+
 int main(int argc, char **argv) {
     unsigned iters = 100;
 
@@ -4090,6 +4321,7 @@ int main(int argc, char **argv) {
     test_fuzz_prx(iters);
     test_fuzz_manifest(iters);
     test_fuzz_input_profile(iters);
+    test_fuzz_cheats(iters);
     test_fuzz_package(iters > 1000 ? 1000 : iters);
     test_fuzz_library(iters > 500 ? 500 : iters);
     test_fuzz_pgf(iters > 4000 ? 4000 : iters);
