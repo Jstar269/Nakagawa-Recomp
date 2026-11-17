@@ -29,7 +29,7 @@ typedef SOCKET NkSockFd;
 #  include <netdb.h>
 #  include <netinet/in.h>
 #  include <netinet/tcp.h>
-#  include <sys/select.h>
+#  include <poll.h>
 #  include <sys/socket.h>
 #  include <sys/types.h>
 #  include <time.h>
@@ -269,18 +269,26 @@ static bool buf_append(uint8_t **buf, size_t *len, size_t *cap, const uint8_t *d
 
 static void chan_poll_connect(TcpChan *ch) {
     if (!ch->connecting || ch->fd == NK_INVALID_SOCK || ch->dead) return;
+    int ready = 0;
+#ifdef _WIN32
     fd_set wfds, efds;
     FD_ZERO(&wfds);
     FD_ZERO(&efds);
     FD_SET(ch->fd, &wfds);
     FD_SET(ch->fd, &efds);
     struct timeval tv = {0, 0};
-#ifdef _WIN32
     int rc = select(0, NULL, &wfds, &efds, &tv);
-#else
-    int rc = select(ch->fd + 1, NULL, &wfds, &efds, &tv);
-#endif
     if (rc <= 0) return;
+    ready = (FD_ISSET(ch->fd, &wfds) || FD_ISSET(ch->fd, &efds)) ? 1 : 0;
+#else
+    struct pollfd pfd;
+    pfd.fd = ch->fd;
+    pfd.events = POLLOUT;
+    pfd.revents = 0;
+    int rc = poll(&pfd, 1, 0);
+    if (rc <= 0) return;
+    ready = (pfd.revents & (POLLOUT | POLLERR | POLLHUP | POLLNVAL)) != 0 ? 1 : 0;
+#endif
     int err = 0;
     socklen_t elen = (socklen_t)sizeof(err);
     if (getsockopt(ch->fd, SOL_SOCKET, SO_ERROR, (char *)&err, &elen) != 0 || err != 0) {
@@ -288,7 +296,7 @@ static void chan_poll_connect(TcpChan *ch) {
         ch->dead = 1;
         return;
     }
-    if (FD_ISSET(ch->fd, &wfds) || FD_ISSET(ch->fd, &efds)) {
+    if (ready) {
         ch->connecting = 0;
         ch->connected = 1;
     }
@@ -578,10 +586,10 @@ static void pump_ptp_socket(NkAdhocRelayClient *c, int idx) {
             uint8_t peer_mac[NK_RELAY_MAC_LEN];
             uint16_t wire_pport = 0u;
             if (!nk_relay_parse_ptp_connect(ps->chan.rx, peer_mac, &wire_pport)) break;
-            chan_consume_rx(&ps->chan, NK_RELAY_PTP_CONNECT_SIZE);
-            const uint16_t app_pport = nk_relay_port_in(wire_pport, c->port_offset);
             const int child_idx = alloc_ptp_slot(c);
             if (child_idx < 0) break;
+            chan_consume_rx(&ps->chan, NK_RELAY_PTP_CONNECT_SIZE);
+            const uint16_t app_pport = nk_relay_port_in(wire_pport, c->port_offset);
             RelayPtpSocket *child = &c->ptp[child_idx];
             child->state = PTP_STATE_ACCEPT_WAIT_ACK;
             child->lport = ps->lport;

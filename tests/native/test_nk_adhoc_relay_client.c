@@ -32,6 +32,7 @@ typedef SOCKET TSock;
 #  include <fcntl.h>
 #  include <netinet/in.h>
 #  include <netinet/tcp.h>
+#  include <sys/select.h>
 #  include <sys/socket.h>
 #  include <unistd.h>
 typedef int TSock;
@@ -690,6 +691,110 @@ static void test_bad_server_frames_fail_closed(void) {
     nk_relay_client_destroy(c);
 }
 
+static void test_ptp_accept_waits_for_free_slot(void) {
+    TestServer srv;
+    srv_init(&srv);
+    NkAdhocRelayConfig cfg_a = {"127.0.0.1", srv.lobby_port, srv.data_port, NK_RELAY_PORT_OFFSET};
+    NkAdhocRelayConfig cfg_b = {"127.0.0.1", srv.lobby_port, srv.data_port, NK_RELAY_PORT_OFFSET};
+    NkAdhocRelayClient *ca = nk_relay_client_create(&cfg_a);
+    NkAdhocRelayClient *cb = nk_relay_client_create(&cfg_b);
+    CHECK(ca && cb, "slot-wait: clients created");
+    NkAdhocTransport *ta = nk_relay_client_transport(ca);
+    NkAdhocTransport *tb = nk_relay_client_transport(cb);
+    static const uint8_t mac_a[6] = {0x02, 0xaa, 0xbb, 0x01, 0x00, 0x01};
+    static const uint8_t mac_b[6] = {0x02, 0xaa, 0xbb, 0x01, 0x00, 0x02};
+    static const uint8_t grp[8] = {'S', 'L', 'O', 'T', 'T', 'E', 'S', 'T'};
+    CHECK(ta->ops->login(ta, mac_a, "Alpha", "ULUS10001") == NK_NET_OK &&
+          tb->ops->login(tb, mac_b, "Beta", "ULUS10001") == NK_NET_OK,
+          "slot-wait: both logged in");
+    for (int i = 0; i < 30; i++) { srv_pump(&srv); ta->ops->pump(ta); tb->ops->pump(tb); }
+    CHECK(ta->ops->connect(ta, grp) == NK_NET_OK && tb->ops->connect(tb, grp) == NK_NET_OK,
+          "slot-wait: joined group");
+    for (int i = 0; i < 30; i++) { srv_pump(&srv); ta->ops->pump(ta); tb->ops->pump(tb); }
+
+    const int main_lsn = ta->ops->ptp_listen(ta, 0x4001u, 4);
+    CHECK(main_lsn >= 0, "slot-wait: main PTP listener opened");
+    int fillers[15];
+    int nfill = 0;
+    for (int i = 0; i < 15; i++) {
+        fillers[i] = ta->ops->ptp_listen(ta, (uint16_t)(0x4100u + i), 1);
+        if (fillers[i] >= 0) nfill++;
+    }
+    CHECK(nfill == 15, "slot-wait: filled all 16 PTP slots on console A");
+    for (int i = 0; i < 20; i++) { srv_pump(&srv); ta->ops->pump(ta); }
+
+    const int cli = tb->ops->ptp_open(tb, 0x4009u, mac_a, 0x4001u);
+    CHECK(cli >= 0, "slot-wait: console B started PTP connect while A slots full");
+    for (int i = 0; i < 25; i++) { srv_pump(&srv); ta->ops->pump(ta); tb->ops->pump(tb); }
+    /* Still full: nothing consumed/lost, so accept cannot return a child yet. */
+    uint8_t pmac[6] = {0};
+    uint16_t pport = 0u;
+    CHECK(ta->ops->ptp_accept(ta, main_lsn, pmac, &pport) == NK_NET_AGAIN,
+          "slot-wait: ptp_accept waits while no free PTP slot");
+
+    /* Free one slot on A; pending connect must now be accepted cleanly. */
+    if (nfill > 0) (void)ta->ops->ptp_close(ta, fillers[--nfill]);
+    int child = NK_NET_AGAIN;
+    int poll = 0;
+    for (int i = 0; i < 60 && (child < 0 || poll == 0); i++) {
+        srv_pump(&srv);
+        ta->ops->pump(ta);
+        tb->ops->pump(tb);
+        if (child < 0) child = ta->ops->ptp_accept(ta, main_lsn, pmac, &pport);
+        poll = tb->ops->ptp_connect_poll(tb, cli);
+    }
+    CHECK(child >= 0 && pport == 0x4009u && poll == 1,
+          "slot-wait: incoming PTP connect accepted cleanly after slot freed (child=%d poll=%d)",
+          child, poll);
+
+    if (child >= 0) ta->ops->ptp_close(ta, child);
+    for (int i = 0; i < nfill; i++) ta->ops->ptp_close(ta, fillers[i]);
+    if (main_lsn >= 0) ta->ops->ptp_close(ta, main_lsn);
+    if (cli >= 0) tb->ops->ptp_close(tb, cli);
+    ta->ops->logout(ta);
+    tb->ops->logout(tb);
+    nk_relay_client_destroy(ca);
+    nk_relay_client_destroy(cb);
+    srv_destroy(&srv);
+}
+
+static void test_posix_high_fd_above_fd_setsize(void) {
+#ifndef _WIN32
+    int dummy_fds[1200];
+    int ndummy = 0;
+    while (ndummy < (int)(sizeof(dummy_fds) / sizeof(dummy_fds[0]))) {
+        int d = open("/dev/null", O_RDONLY);
+        if (d < 0) break;
+        dummy_fds[ndummy++] = d;
+        if (d >= (int)FD_SETSIZE + 32) break;
+    }
+    int high_ok = (ndummy > 0 && dummy_fds[ndummy - 1] >= (int)FD_SETSIZE);
+    CHECK(high_ok, "posix-high-fd: raised next fd past FD_SETSIZE (%d)",
+          ndummy > 0 ? dummy_fds[ndummy - 1] : -1);
+    if (high_ok) {
+        TestServer srv;
+        srv_init(&srv);
+        NkAdhocRelayConfig cfg = {"127.0.0.1", srv.lobby_port, srv.data_port, NK_RELAY_PORT_OFFSET};
+        NkAdhocRelayClient *c = nk_relay_client_create(&cfg);
+        CHECK(c != NULL, "posix-high-fd: client created");
+        NkAdhocTransport *t = nk_relay_client_transport(c);
+        static const uint8_t mac[6] = {0x02, 0x55, 0x66, 0x77, 0x88, 0x99};
+        CHECK(t->ops->login(t, mac, "HighFd", "ULUS10002") == NK_NET_OK,
+              "posix-high-fd: login queued on fd >= FD_SETSIZE");
+        for (int i = 0; i < 40 && !nk_relay_client_lobby_connected(c); i++) {
+            srv_pump(&srv);
+            t->ops->pump(t);
+        }
+        CHECK(nk_relay_client_lobby_connected(c),
+              "posix-high-fd: client connected cleanly with socket fd >= FD_SETSIZE");
+        t->ops->logout(t);
+        nk_relay_client_destroy(c);
+        srv_destroy(&srv);
+    }
+    for (int i = 0; i < ndummy; i++) close(dummy_fds[i]);
+#endif
+}
+
 int main(void) {
 #ifdef _WIN32
     WSADATA wsa;
@@ -700,6 +805,8 @@ int main(void) {
 #endif
     test_two_clients_loopback();
     test_bad_server_frames_fail_closed();
+    test_ptp_accept_waits_for_free_slot();
+    test_posix_high_fd_above_fd_setsize();
 #ifdef _WIN32
     WSACleanup();
 #endif
