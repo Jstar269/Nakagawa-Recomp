@@ -1775,9 +1775,6 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_CYCLE_PRESET:
             player_app_cycle_graphics_preset(app, choice_index < 0 ? -1 : 1);
             break;
-        case PLAYER_UI_SETTINGS_SET_PRESET:
-            if (choice_index > 0) player_app_apply_graphics_preset(app, choice_index);
-            break;
         case PLAYER_UI_SETTINGS_VOLUME_DOWN: player_app_adjust_volume(app, -5); break;
         case PLAYER_UI_SETTINGS_VOLUME_UP: player_app_adjust_volume(app, 5); break;
         case PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS: player_app_toggle_ui_sounds(app); break;
@@ -1795,6 +1792,9 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_CYCLE_TEXT_SIZE: player_app_cycle_text_size(app); break;
         case PLAYER_UI_SETTINGS_OPEN_ACE: player_app_set_view(app, VIEW_ACE_SETTINGS); break;
         case PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE: player_app_enhanced_page_cycle_mode(app); break;
+        case PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART:
+            if (arg < (size_t)PLAYER_PART_COUNT) player_app_enhanced_page_cycle_part(app, (int)arg);
+            break;
         case PLAYER_UI_SETTINGS_SET_PLAY_MODE:
             player_app_enhanced_page_set_mode(app, choice_index);
             break;

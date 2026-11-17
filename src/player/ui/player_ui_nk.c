@@ -972,20 +972,6 @@ typedef char player_ui_enhanced_more_row_ids_fit[
 /* Why a title offers no Ace: it has no usable package of its own (#2055). */
 #define PLAYER_UI_ACE_NEEDS_PACKAGE "Ace needs a package made for this game."
 
-#ifdef NK_PLAYER_UI_REGRESSION_TEST
-static const char *player_ui_enhanced_group_name(PlayerUiEnhancedGroup group) {
-    switch (group) {
-    case PLAYER_UI_ENHANCED_GROUP_PICTURE: return "Picture";
-    case PLAYER_UI_ENHANCED_GROUP_MOTION: return "Motion and timing";
-    case PLAYER_UI_ENHANCED_GROUP_SOUND: return "Sound";
-    case PLAYER_UI_ENHANCED_GROUP_CONTROLS: return "Controls";
-    case PLAYER_UI_ENHANCED_GROUP_ON_SCREEN: return "On-screen information";
-    case PLAYER_UI_ENHANCED_GROUP_ADVANCED: return "Advanced";
-    default: return "";
-    }
-}
-#endif
-
 static int player_ui_enhanced_value_index(int part, int value) {
     const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
     for (int i = 0; info && i < info->value_count; ++i) {
@@ -1094,14 +1080,11 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
             player_graphics_preset_row(player_app_graphics_preset(app));
         row->part = p;
         row->group = k_player_ui_enhanced_layout[layout_index].group;
-        row->stored_value = library;
         row->name = info->name;
         row->sentence = info->sentence;
         row->labels = info->labels;
         row->label_count = info->value_count;
         row->library_value = NULL;
-        row->other_value = title >= 0 && p == PLAYER_PART_SMOOTH ? ENHANCED_SMOOTH_AT_60_VALUE
-                                                                  : NULL;
         row->selected_index = player_ui_enhanced_value_index(p, library);
         row->inherited = false;
         row->disabled = false;
@@ -1116,7 +1099,6 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         }
         if (title >= 0) {
             int own = player_app_title_part(app, title, p);
-            row->stored_value = own < 0 ? library : own;
             row->inherited = own < 0;
             row->selected_index = own < 0 ? 0 :
                 player_ui_enhanced_value_index(p, own) + 1;
@@ -1141,6 +1123,9 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
                          "when this game's 60 FPS game logic is off.", row->value);
                 row->value = ENHANCED_SMOOTH_AT_60_VALUE;
                 row->sentence = player->enhanced_smooth_sentence;
+                /* The row marks what runs, Off; its sentence names the choice it keeps. */
+                row->selected_index = player_ui_enhanced_value_index(p, 0) + 1;
+                row->inherited = false;
                 row->on = false;
             }
         }
@@ -1155,10 +1140,15 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
             const char *unavailable =
                 player_enhanced_part_unavailable_label(p, row->on, smooth_on);
             if (unavailable) {
+                /* The row shows what runs, as its line did before the tabs: "Off" while Smooth
+                   motion is on. The choice it keeps is in the settings and comes back with
+                   Smooth motion off. Widescreen is the one part with such a value
+                   (player_enhanced_part_unavailable_label). */
                 row->disabled = true;
-                row->disabled_reason = p == PLAYER_PART_WIDE
-                    ? "Smooth motion disables Widescreen."
-                    : "This option is unavailable in the current play mode.";
+                row->disabled_reason = "Smooth motion disables Widescreen.";
+                row->value = unavailable;
+                row->selected_index = player_ui_enhanced_value_index(p, 0) + (title >= 0 ? 1 : 0);
+                row->inherited = false;
                 row->on = false;
             }
         }
@@ -1213,7 +1203,7 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
             if (row->group != previous) {
                 int n = snprintf(groups + used, sizeof(groups) - used, "%s%s:",
                                  used == 0u ? "" : ";",
-                                 player_ui_enhanced_group_name(row->group));
+                                 player_ui_enhanced_group_label(row->group));
                 if (n < 0 || (size_t)n >= sizeof(groups) - used) break;
                 used += (size_t)n;
                 previous = row->group;
@@ -1366,9 +1356,10 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     if (app->settings_newer_schema && app->settings_notice[0] != '\0') {
         model.notice = app->settings_notice;
     }
-    /* The graphics preset (#2150) explains where it applies on Settings and Enhanced pages.
-       It is derived from the choice, so it goes with Custom and is back after a restart. */
-    if ((model.page == PLAYER_UI_SETTINGS_PAGE_MAIN || model.page == PLAYER_UI_SETTINGS_PAGE_ACE) &&
+    /* The graphics preset's note (#2150) says where it applies, on the page that has its row:
+       Settings > Enhanced. It is derived from the choice, so it goes with Custom and is back
+       after a restart. */
+    if (model.page == PLAYER_UI_SETTINGS_PAGE_ACE &&
         player_app_graphics_preset_note(app, player->settings_preset_note,
                                         sizeof(player->settings_preset_note))) {
         model.preset_notice = player->settings_preset_note;

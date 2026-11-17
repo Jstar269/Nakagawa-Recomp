@@ -2352,15 +2352,16 @@ class NativePlayerUiTests(unittest.TestCase):
         "reduce_motion": str(0x4509), "text_size": str(0x452F),
         "ace": str(0x4540), "ace_open": str(0x4541),
         "ui_sounds": str(0x4508),
-        "preset": str((0x63 << 24) + 0x300),
-        "ace_mode": str((0x63 << 24) + 0x304),
+        "preset": str(0x4510),
+        "ace_mode": str(0x4542),
         "enhanced_picture": str((0x63 << 24) + 0x500),
         "enhanced_motion": str((0x63 << 24) + 0x504),
         "enhanced_sound": str((0x63 << 24) + 0x508),
         "enhanced_controls": str((0x63 << 24) + 0x50C),
         "enhanced_on_screen": str((0x63 << 24) + 0x510),
         "enhanced_advanced": str((0x63 << 24) + 0x514),
-        "pacing": str((0x63 << 24) + 0xA00),
+        "pacing": str(0x4502), "texpack_choose": str(0x455A),
+        "texpack_remove": str(0x455B),
         "launcher_music": str(0x4557), "music_volume_down": str(0x4558),
         "music_volume_up": str(0x4559),
     }
@@ -2711,20 +2712,23 @@ class NativePlayerUiTests(unittest.TestCase):
 
     def test_next_ui_graphics_preset_ultra_note_and_custom_on_edit(self) -> None:
         """#2150: Ultra's row reads Ultra and its note names the Enhanced parts it turns on,
-        High's the one it turns off; editing Crisp system text makes the preset Custom."""
+        High's the one it turns off; editing a row the preset sets (Resolution, on the main
+        Settings page) makes it Custom and the note goes. The preset's row is on Settings >
+        Enhanced now, so the run leaves that page for Resolution and opens it again to read the
+        row."""
         focus = self.SETTINGS_FOCUS
         run = self.next_ui_run(
             "settings",
             ("WAIT_MS=100",) + ("KEY_DOWN",) * 4 +
             ("KEY_RETURN", "WAIT_MS=100") + ("KEY_RETURN", "WAIT_MS=100") * 4 +
-            ("KEY_TAB", "WAIT_MS=40") * 35 +
-            ("KEY_RIGHT", "WAIT_MS=100", "KEY_ESCAPE", "WAIT_MS=100"),
-            settings={"enhanced": {"default": "enhanced", "text": "on"}},
+            ("KEY_ESCAPE", "WAIT_MS=100") + ("KEY_UP",) * 4 +
+            ("KEY_RETURN", "WAIT_MS=100") + ("KEY_DOWN",) * 4 +
+            ("KEY_RETURN", "WAIT_MS=150", "KEY_ESCAPE", "WAIT_MS=100"),
         )
         trail = self.focus_trail(run)
         self.assertIn(focus["preset"], trail)
-        self.assertIn(self.enhanced_choice_focus(1, 0), trail,
-                      "keyboard tab order reaches Crisp system text in Picture")
+        self.assertIn(focus["resolution"], trail[trail.index(focus["preset"]):],
+                      "Up returns to Resolution")
         lines = self.preset_lines(run)
         self.assertEqual([line["value"] for line in lines],
                          ["Custom", "Low", "Medium", "High", "Ultra", "Custom"],
@@ -2739,10 +2743,7 @@ class NativePlayerUiTests(unittest.TestCase):
         settings = run["settings"]
         assert isinstance(settings, dict)
         self.assertEqual(settings.get("graphics_preset"), "custom")
-        enhanced = settings.get("enhanced")
-        assert isinstance(enhanced, dict), settings
-        self.assertEqual(enhanced.get("text"), "off", "Crisp system text was changed")
-        self.assertEqual(settings.get("resolution_scale"), 1, "the display rows are unchanged")
+        self.assertEqual(settings.get("resolution_scale"), 2, "Resolution stepped from 1x to 2x")
 
     def test_next_ui_settings_changes_are_saved_and_done_returns(self) -> None:
         """#1302: Settings in the next UI runs the same handlers and saves each change."""
@@ -2785,25 +2786,28 @@ class NativePlayerUiTests(unittest.TestCase):
                          "the ABOUT tab on Settings closes it and opens About")
 
     def test_next_ui_motion_tab_changes_frame_pacing(self) -> None:
-        """Frame pacing keeps its existing fps_cap values under Enhanced > Motion."""
+        """Frame pacing keeps its fps_cap values under Enhanced > Motion: E moves from Picture
+        to the Motion tab, Down from the tab is Smooth motion and then Frame pacing, and the
+        select button, Right or Left switches it between PSP timing and no extra cap."""
         focus = self.SETTINGS_FOCUS
-        run = self.next_ui_run(
-            "settings",
-            ("WAIT_MS=100",) + ("KEY_DOWN",) * 4 +
-            ("KEY_RETURN", "WAIT_MS=120", "KEY_E", "WAIT_MS=100") +
-            ("KEY_TAB", "WAIT_MS=40") * 7 +
-            ("KEY_RETURN", "WAIT_MS=120", "KEY_ESCAPE", "WAIT_MS=120"),
-            settings={"fps_cap": -1, "enhanced": {"default": "enhanced"}},
-        )
-        trail = self.focus_trail(run)
-        self.assertIn(focus["enhanced_motion"], trail,
-                      "the shoulder key switches from Picture to Motion")
-        self.assertIn(focus["pacing"], trail,
-                      "the keyboard focus order reaches Frame pacing in Motion")
-        settings = run["settings"]
-        assert isinstance(settings, dict)
-        self.assertEqual(settings.get("fps_cap"), 0,
-                         "Frame pacing keeps its existing saved No extra cap value")
+        to_pacing = (("WAIT_MS=100",) + ("KEY_DOWN",) * 4 +
+                     ("KEY_RETURN", "WAIT_MS=120", "KEY_E", "WAIT_MS=100") +
+                     ("KEY_DOWN", "WAIT_MS=50") * 2)
+        for name, keys, saved_cap in (("select", ("KEY_RETURN",), 0), ("right", ("KEY_RIGHT",), 0),
+                                      ("left twice", ("KEY_LEFT", "WAIT_MS=80", "KEY_LEFT"), -1)):
+            with self.subTest(keys=name):
+                run = self.next_ui_run(
+                    "settings", to_pacing + keys + ("WAIT_MS=120", "KEY_ESCAPE", "WAIT_MS=120"),
+                    settings={"fps_cap": -1, "enhanced": {"default": "enhanced"}},
+                )
+                self.assertEqual(self.focus_trail(run)[-5:],
+                                 [focus["preset"], focus["enhanced_motion"],
+                                  self.enhanced_row_focus(5), focus["pacing"], focus["ace_open"]],
+                                 "the shoulder key focuses Motion; its rows are under it")
+                settings = run["settings"]
+                assert isinstance(settings, dict)
+                self.assertEqual(settings.get("fps_cap"), saved_cap,
+                                 "Frame pacing keeps its saved values: -1 and 0")
 
     def test_next_ui_scaling_and_menu_sounds_are_saved(self) -> None:
         """Scaling (#1129) cycles Sharp to Integer and is saved by its name; Menu
@@ -3169,47 +3173,79 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertNotIn("(Ultra)", page["af"], "texture filtering is the library's own")
         self.assertNotIn("(Ultra)", page["smooth"])
 
-    def test_next_ui_enhanced_preset_edit_uses_the_displayed_value(self) -> None:
-        """Review #2644 D1: editing a part whose visible value comes from a preset makes it Custom."""
-        open_page = ("WAIT_MS=100",) + ("KEY_DOWN",) * 4 + ("KEY_RETURN", "WAIT_MS=150")
-        run = self.next_ui_run(
-            "settings",
-            open_page + ("KEY_TAB", "WAIT_MS=35") * 15 +
-            ("KEY_RIGHT", "WAIT_MS=150", "KEY_ESCAPE", "WAIT_MS=120"),
-            settings={"fps_cap": -1, "graphics_preset": "medium",
-                      "enhanced": {"default": "enhanced"}},
-        )
-        trail = self.focus_trail(run)
-        self.assertIn(self.enhanced_choice_focus(9, 0), trail,
-                      "the walk reaches Sharper enlarging's Off choice under Medium")
-        settings = run["settings"]
-        assert isinstance(settings, dict)
-        enhanced = settings.get("enhanced")
-        assert isinstance(enhanced, dict), settings
-        self.assertEqual(settings.get("graphics_preset"), "custom",
-                         "changing the effective preset value makes the preset Custom")
-        self.assertEqual(enhanced.get("upscale"), "off",
-                         "the displayed preset value can be changed to Off")
-
+    # Settings > Enhanced as the page shows it: each tab's name on the strip and the parts on
+    # it from the top (PlayerEnhancedPart numbers), with each part's settings key.
     ENHANCED_GROUPS = (
         ("Picture", (0, 4, 9, 15, 12, 13, 14, 19, 20, 1)),
-        ("Motion and timing", (5,)),
+        ("Motion", (5,)),
         ("Sound", (6, 18)),
         ("Controls", (10,)),
-        ("On-screen information", (2, 3)),
+        ("On-screen", (2, 3)),
         ("Advanced", (7, 8, 11, 16, 17)),
     )
-    ENHANCED_VALUE_COUNTS = {
-        0: 5, 1: 2, 2: 2, 3: 2, 4: 2, 5: 2, 6: 2, 7: 4, 8: 2, 9: 2,
-        10: 2, 11: 2, 12: 2, 13: 4, 14: 2, 15: 2, 16: 2, 17: 2, 18: 2,
-        19: 6, 20: 2,
-    }
+    ENHANCED_TABS = ("enhanced_picture", "enhanced_motion", "enhanced_sound",
+                     "enhanced_controls", "enhanced_on_screen", "enhanced_advanced")
+    ENHANCED_PART_KEYS = ("af", "text", "readout", "notice", "wide", "smooth", "sas", "tess",
+                          "cull", "upscale", "stick", "load", "twin", "ssaa", "mips", "texpack",
+                          "pad", "shadow", "peak", "texscale", "smart2d")
+    OPEN_ENHANCED = ("WAIT_MS=100",) + ("KEY_DOWN",) * 4 + ("KEY_RETURN", "WAIT_MS=150")
+
+    def test_next_ui_enhanced_preset_edit_uses_the_displayed_value(self) -> None:
+        """Review #2644 D1: under the Medium preset the library's page shows Sharper enlarging
+        as FSR 1, the preset's value over the library's own Off. Stepping the row to Off is a
+        change: it saves Off and makes the preset Custom, by the d-pad or by a click on Off.
+        Picking the value the row already shows is none: the settings file keeps its bytes and
+        the preset stays Medium."""
+        settings = {"fps_cap": -1, "graphics_preset": "medium",
+                    "enhanced": {"default": "enhanced"}}
+        row = self.enhanced_row_focus(9)
+        leave = ("WAIT_MS=150", "KEY_ESCAPE", "WAIT_MS=120")
+        # Down from Graphics preset: Play mode, the Picture tab, then its third row.
+        to_row = ("PAD_DPAD_DOWN", "WAIT_MS=50") * 5
+        # Sharper enlarging's two values at 1280 x 720: FSR 1, then Off at the row's right end.
+        click_shown = ("MOUSE_MOVE=674,487", "MOUSE_DOWN", "MOUSE_UP")
+        click_off = ("MOUSE_MOVE=735,487", "MOUSE_DOWN", "MOUSE_UP")
+        untouched = self.next_ui_run("settings", self.OPEN_ENHANCED + leave, settings=settings)
+        for name, change in (("d-pad right", to_row + ("PAD_DPAD_RIGHT",)),
+                             ("select", to_row + ("PAD_SOUTH",)),
+                             ("click on Off", click_off)):
+            with self.subTest(change=name):
+                run = self.next_ui_run("settings", self.OPEN_ENHANCED + change + leave,
+                                       settings=settings)
+                self.assertIn(row, self.focus_trail(run), "the change is on Sharper enlarging")
+                pages = self.enhanced_pages(run)
+                self.assertEqual([page["upscale"] for page in pages], ["FSR 1 (Medium)", "Off"],
+                                 "the row showed the preset's value, then the one chosen")
+                self.assertEqual([line["value"] for line in self.preset_lines(run)],
+                                 ["Medium", "Custom"])
+                saved = run["settings"]
+                assert isinstance(saved, dict)
+                enhanced = saved.get("enhanced")
+                assert isinstance(enhanced, dict), saved
+                self.assertEqual(saved.get("graphics_preset"), "custom",
+                                 "changing the value the preset shows makes the preset Custom")
+                self.assertEqual(enhanced.get("upscale"), "off",
+                                 "the value the preset shows can be changed to Off")
+        same = self.next_ui_run("settings", self.OPEN_ENHANCED + click_shown + leave,
+                                settings=settings)
+        self.assertIn(row, self.focus_trail(same), "the click is on Sharper enlarging's row")
+        self.assertEqual([page["upscale"] for page in self.enhanced_pages(same)],
+                         ["FSR 1 (Medium)"])
+        self.assertEqual([line["value"] for line in self.preset_lines(same)], ["Medium"],
+                         "picking the value the row shows leaves the preset alone")
+        self.assertIsInstance(untouched["settings_json"], bytes)
+        self.assertEqual(same["settings_json"], untouched["settings_json"],
+                         "and writes nothing")
 
     def test_next_ui_enhanced_options_group_every_part_in_visual_order(self) -> None:
-        """The six tabs cover every part once in the chosen visual order."""
-        open_page = ("WAIT_MS=100",) + ("KEY_DOWN",) * 4 + ("KEY_RETURN", "WAIT_MS=150")
+        """Every part is on one of the six tabs, once. ENHANCED_GROUPS is the order as a person
+        sees it, written out here by hand: the page reports the name each tab draws on the strip
+        with the keys of the rows under it, and the walk through every tab
+        (test_next_ui_enhanced_focus_reaches_every_option_and_changes_left_right, and the d-pad
+        one) finds the rows on screen in the same order."""
         run = self.next_ui_run(
-            "settings", open_page, settings={"enhanced": {"default": "enhanced", "af": "16"}}
+            "settings", self.OPEN_ENHANCED,
+            settings={"enhanced": {"default": "enhanced", "af": "16"}}
         )
         layouts = self.enhanced_layouts(run)
         self.assertTrue(layouts, run["stdout"])
@@ -3218,70 +3254,148 @@ class NativePlayerUiTests(unittest.TestCase):
             layouts[-1]["groups"].split(";"),
             [
                 "Picture:af,wide,upscale,texpack,twin,ssaa,mips,texscale,smart2d,text",
-                "Motion and timing:smooth",
+                "Motion:smooth",
                 "Sound:sas,peak",
                 "Controls:stick",
-                "On-screen information:readout,notice",
+                "On-screen:readout,notice",
                 "Advanced:tess,cull,load,pad,shadow",
             ],
-            "every part appears in its headed tab in visual order",
+            "every part is under the tab that names it on the strip, in the order shown",
         )
+        self.assertEqual(
+            layouts[-1]["groups"].split(";"),
+            [name + ":" + ",".join(self.ENHANCED_PART_KEYS[part] for part in parts)
+             for name, parts in self.ENHANCED_GROUPS],
+            "the table the walks use is that order")
         flattened = [part for _, parts in self.ENHANCED_GROUPS for part in parts]
         self.assertEqual(len(flattened), len(set(flattened)), "a part is assigned once")
-        self.assertEqual(set(flattened), set(range(21)), "the table covers every part")
+        self.assertEqual(set(flattened), set(range(len(self.ENHANCED_PART_KEYS))),
+                         "the table covers every part")
         pages = self.enhanced_pages(run)
         self.assertTrue(pages, run["stdout"])
-        self.assertEqual([key for key in pages[-1] if key in {"af", "wide", "upscale", "texpack",
-                                                               "twin", "ssaa", "mips", "texscale",
-                                                               "smart2d", "text", "smooth", "sas",
-                                                               "peak", "stick", "readout", "notice",
-                                                               "tess", "cull", "load", "pad", "shadow"}],
-                         ["af", "wide", "upscale", "texpack", "twin", "ssaa", "mips",
-                          "texscale", "smart2d", "text", "smooth", "sas", "peak", "stick",
-                          "readout", "notice", "tess", "cull", "load", "pad", "shadow"],
-                         "the model still reports all choices in the layout table")
+        self.assertEqual([key for key in pages[-1] if key in self.ENHANCED_PART_KEYS],
+                         [self.ENHANCED_PART_KEYS[part] for part in flattened],
+                         "the page reports a value for every part, in the same order")
 
     def test_next_ui_enhanced_focus_reaches_every_option_and_changes_left_right(self) -> None:
-        """Each tab exposes every value control in visual order; left/right changes a value."""
-        open_page = ("WAIT_MS=100",) + ("KEY_DOWN",) * 4 + ("KEY_RETURN", "WAIT_MS=150")
+        """Each row of a tab is one stop. With the keyboard, Down from Graphics preset is Play
+        mode, then the active tab, then that tab's rows from the top, each once and in the order
+        shown; E moves to the next tab from any row. On a row, Right and Left step its value,
+        Enter takes the next one, and focus stays on the row."""
+        focus = self.SETTINGS_FOCUS
         settings = {"graphics_preset": "custom",
                     "enhanced": {"default": "enhanced", "af": "16"}}
-        for tab_index, (name, parts) in enumerate(self.ENHANCED_GROUPS):
-            events = open_page + (("KEY_E", "WAIT_MS=80") * tab_index) + (
-                "KEY_DOWN", "WAIT_MS=80") + (("KEY_TAB", "WAIT_MS=35") * 90)
-            run = self.next_ui_run("settings", events, settings=settings)
-            trail = self.focus_trail(run)
-            self.assertIn(self.SETTINGS_FOCUS[
-                ("enhanced_picture", "enhanced_motion", "enhanced_sound", "enhanced_controls",
-                 "enhanced_on_screen", "enhanced_advanced")[tab_index]], trail,
-                f"{name} becomes the focused category tab")
-            for part in parts:
-                for choice in range(self.ENHANCED_VALUE_COUNTS[part]):
-                    expected = self.enhanced_choice_focus(part, choice)
-                    self.assertIn(expected, trail,
-                                  f"{name}: part {part} value {choice} stays reachable")
-            if tab_index == 1:
-                self.assertIn(self.SETTINGS_FOCUS["pacing"], trail,
-                              "Motion also exposes Frame pacing")
+        events = self.OPEN_ENHANCED + ("KEY_DOWN", "WAIT_MS=50") * 2
+        expected = [focus["preset"], focus["ace_mode"]]
+        for tab in range(len(self.ENHANCED_GROUPS)):
+            rows = self.enhanced_tab_rows(tab, own_page=False)
+            if tab:
+                events += ("KEY_E", "WAIT_MS=80")
+            events += ("KEY_DOWN", "WAIT_MS=50") * len(rows)
+            expected += [focus[self.ENHANCED_TABS[tab]], *rows]
+        run = self.next_ui_run("settings", events, settings=settings)
+        trail = self.focus_trail(run)
+        self.assertEqual(trail[-len(expected):], expected,
+                         "every row of every tab, in the order shown, and nothing else")
+        self.assertEqual([layout["tab"] for layout in self.enhanced_layouts(run)],
+                         ["0", "1", "2", "3", "4", "5"])
 
         changed = self.next_ui_run(
             "settings",
-            open_page + (("KEY_TAB", "WAIT_MS=35") * 8) +
+            self.OPEN_ENHANCED + ("KEY_DOWN", "WAIT_MS=50") * 3 +
             ("KEY_RIGHT", "WAIT_MS=80", "KEY_RIGHT", "WAIT_MS=80", "KEY_LEFT", "WAIT_MS=100",
-             "KEY_ESCAPE", "WAIT_MS=120"),
+             "KEY_RETURN", "WAIT_MS=100", "KEY_ESCAPE", "WAIT_MS=120"),
             settings=settings,
         )
-        trail = self.focus_trail(changed)
-        self.assertIn(self.enhanced_choice_focus(0, 0), trail)
-        self.assertIn(self.enhanced_choice_focus(0, 1), trail,
-                      "focus follows the choice as the value changes")
+        self.assertEqual(self.focus_trail(changed)[-3:],
+                         [focus["enhanced_picture"], self.enhanced_row_focus(0),
+                          focus["ace_open"]],
+                         "focus stays on Texture filtering while its value changes")
+        self.assertEqual([page["af"] for page in self.enhanced_pages(changed)],
+                         ["16x", "8x", "4x", "8x", "4x"],
+                         "Right, Right, Left, then Enter for the next value")
         saved = changed["settings"]
         assert isinstance(saved, dict)
         enhanced = saved.get("enhanced")
         assert isinstance(enhanced, dict)
-        self.assertEqual(enhanced.get("af"), "8", "Right, Right, Left selects 8x")
-        page_values = [page["af"] for page in self.enhanced_pages(changed)]
-        self.assertIn("8x", page_values)
+        self.assertEqual(enhanced.get("af"), "4")
+
+    def test_next_ui_enhanced_dpad_walk_reaches_every_row_without_changing_values(self) -> None:
+        """Review #2644 D2: a controller's d-pad alone walks Settings > Enhanced, on the
+        library's page, a game's page and a game's page in Ace. On every tab, Down from Play
+        mode lands on the active tab (never on another one), then on each of its rows from the
+        top, dimmed rows included, then on Back; Up from Back is the last row, and so on back up
+        to Graphics preset. The right shoulder moves to the next tab. Moving focus changes no
+        setting."""
+        focus = self.SETTINGS_FOCUS
+        library_settings = {
+            "fps_cap": -1,
+            "graphics_preset": "custom",
+            "enhanced": {
+                "default": "enhanced", "af": "16", "wide": "off", "upscale": "off",
+                "texpack": "off", "twin": "off", "ssaa": "off", "mips": "off",
+                "texscale": "off", "smart2d": "off", "text": "off", "smooth": "off",
+                "sas": "off", "peak": "off", "stick": "off", "tess": "off",
+                "cull": "off", "load": "off", "pad": "off", "shadow": "off",
+                "readout": "off", "notice": "off",
+            },
+        }
+        title_settings = {
+            **library_settings,
+            "title_play": {"TEST00005": {"mode": "enhanced"}},
+        }
+        title_open = (*self.OPEN_FIRST, *self.DOWN_TO_PLAY_MODE, *self.TO_PLAY_OPTIONS,
+                      "KEY_RETURN", "WAIT_MS=250")
+        ace_open = (
+            "WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", *self.DOWN_TO_PLAY_MODE,
+            *(('KEY_RETURN', 'WAIT_MS=120') * 3), *self.TO_PLAY_OPTIONS,
+            "KEY_RETURN", "WAIT_MS=250",
+        )
+        walks: tuple[tuple[str, str, tuple[str, ...], dict[str, object], dict[str, object],
+                           dict[str, str]], ...] = (
+            ("library", "settings", self.OPEN_ENHANCED, library_settings, {}, {}),
+            ("title", "library", title_open, title_settings,
+             {"wait_background": True}, {"TEST00005": "enhanced"}),
+            ("Ace", "ready", ace_open, library_settings,
+             {"post_build_ready": True, "wait_background": True,
+              "enhancement_packages": {"TEST00006": "display-smoke-v1"}},
+             {"TEST00006": "ace"}),
+        )
+        down = ("PAD_DPAD_DOWN", "WAIT_MS=50")
+        up = ("PAD_DPAD_UP", "WAIT_MS=50")
+        for label, view, opening, settings, kwargs, expected_modes in walks:
+            with self.subTest(page=label):
+                events = opening
+                expected = [focus["preset"]]
+                for tab in range(len(self.ENHANCED_GROUPS)):
+                    rows = self.enhanced_tab_rows(tab, own_page=label != "library")
+                    tab_id = focus[self.ENHANCED_TABS[tab]]
+                    if tab:
+                        # The shoulder focuses the new tab; Up from it is Play mode.
+                        events += ("PAD_RIGHT_SHOULDER", "WAIT_MS=80") + up
+                        expected += [tab_id, focus["ace_mode"]]
+                    else:
+                        events += down
+                        expected += [focus["ace_mode"]]
+                    # One Down more than there are stops: Back is the last of them.
+                    events += down * (len(rows) + 3) + up * (len(rows) + 3)
+                    expected += [tab_id, *rows, focus["back"], *reversed(rows), tab_id,
+                                 focus["ace_mode"], focus["preset"]]
+                run = self.next_ui_run(view, events, settings=settings, **kwargs)
+                trail = self.focus_trail(run)
+                self.assertEqual(trail[-len(expected):], expected,
+                                 f"{label}: the d-pad walk, tab by tab")
+                saved = run["settings"]
+                assert isinstance(saved, dict), run["stdout"]
+                self.assertEqual(saved.get("fps_cap"), -1, f"{label}: frame pacing is unchanged")
+                self.assertEqual(saved.get("graphics_preset"), "custom",
+                                 f"{label}: graphics preset is unchanged")
+                self.assertEqual(saved.get("enhanced"), settings["enhanced"],
+                                 f"{label}: no Enhanced value changes during focus movement")
+                if expected_modes:
+                    self.assertEqual({disc: value["mode"]
+                                      for disc, value in self.title_play(run).items()},
+                                     expected_modes, f"{label}: title mode is unchanged")
 
     def test_next_ui_enhanced_tabs_leave_settings_bytes_unchanged(self) -> None:
         """Switching categories changes only session UI state, not settings.json bytes."""
@@ -3308,13 +3422,30 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(after_json, before_json,
                          "switching tabs and leaving the page preserve identical settings bytes")
 
+    # The pictures of Settings > Enhanced a review looks at: (name, page, tab, width, height,
+    # text size). The window sizes are the design size, the smallest supported one and 1080p.
+    ENHANCED_SCREENSHOTS = (
+        ("enhanced-library-picture", "library", 0, 1280, 720, 100),
+        ("enhanced-library-motion", "library", 1, 1280, 720, 100),
+        ("enhanced-title-sound", "title", 2, 1280, 720, 100),
+        ("enhanced-title-controls", "title", 3, 1280, 720, 100),
+        ("enhanced-ace-on-screen", "ace", 4, 1280, 720, 100),
+        ("enhanced-ace-advanced", "ace", 5, 1280, 720, 100),
+        ("enhanced-library-picture-960x540", "library", 0, 960, 540, 100),
+        ("enhanced-library-picture-150pct", "library", 0, 1280, 720, 150),
+        ("enhanced-library-picture-1920x1080", "library", 0, 1920, 1080, 100),
+    )
+
     def test_next_ui_enhanced_layout_screenshots_when_requested(self) -> None:
-        """The player UI regression can capture all six category tabs on library, title and Ace pages."""
+        """With NAKAGAWA_PLAYER_UI_ENHANCED_SCREENSHOTS naming a folder, writes the UI-test
+        player's own last frame of Settings > Enhanced there for each ENHANCED_SCREENSHOTS entry
+        (a .bmp each): the library's page, a game's page and a game's page in Ace, at three
+        window sizes and at the largest text size. Skipped, and reported as skipped, without
+        the variable."""
         screenshot_dir = os.environ.get("NAKAGAWA_PLAYER_UI_ENHANCED_SCREENSHOTS")
         if not screenshot_dir:
-            return
+            self.skipTest("NAKAGAWA_PLAYER_UI_ENHANCED_SCREENSHOTS names no folder")
         output = Path(screenshot_dir)
-        library_open = ("WAIT_MS=100",) + ("KEY_DOWN",) * 4 + ("KEY_RETURN", "WAIT_MS=150")
         title_open = (*self.OPEN_FIRST, *self.DOWN_TO_PLAY_MODE, *self.TO_PLAY_OPTIONS,
                       "KEY_RETURN", "WAIT_MS=250")
         ace_open = (
@@ -3322,47 +3453,32 @@ class NativePlayerUiTests(unittest.TestCase):
             *(('KEY_RETURN', 'WAIT_MS=120') * 3), *self.TO_PLAY_OPTIONS,
             "KEY_RETURN", "WAIT_MS=250",
         )
-        library_settings = {"enhanced": {"default": "enhanced", "af": "16"}}
-        title_settings = {"enhanced": {"default": "enhanced", "af": "16"}}
-        ace_options = {
-            "post_build_ready": True,
-            "settings": library_settings,
-            "enhancement_packages": {"TEST00006": "display-smoke-v1"},
-            "wait_background": True,
+        pages: dict[str, tuple[str, tuple[str, ...], dict[str, object], str]] = {
+            "library": ("settings", self.OPEN_ENHANCED, {}, "library"),
+            "title": ("library", title_open, {"wait_background": True}, "TEST00005"),
+            "ace": ("ready", ace_open,
+                    {"post_build_ready": True, "wait_background": True,
+                     "enhancement_packages": {"TEST00006": "display-smoke-v1"}}, "TEST00006"),
         }
-
-        captures = (
-            ("enhanced-library-picture.bmp", "settings", library_open, 0, library_settings),
-            ("enhanced-library-motion.bmp", "settings",
-             library_open + ("KEY_E", "WAIT_MS=120"), 1, library_settings),
-            ("enhanced-title-sound.bmp", "library",
-             title_open + ("KEY_E", "WAIT_MS=100") * 2, 2, title_settings),
-            ("enhanced-title-controls.bmp", "library",
-             title_open + ("KEY_E", "WAIT_MS=100") * 3, 3, title_settings),
-            ("enhanced-ace-on-screen.bmp", "ready",
-             ace_open + ("KEY_E", "WAIT_MS=100") * 4, 4, None),
-            ("enhanced-ace-advanced.bmp", "ready",
-             ace_open + ("KEY_E", "WAIT_MS=100") * 5, 5, None),
-        )
-        for filename, view, events, tab_index, page_settings in captures:
-            kwargs: dict[str, object] = {}
-            if page_settings is not None:
-                kwargs["settings"] = page_settings
-            if view == "ready":
-                kwargs.update(ace_options)
-            run = self.next_ui_run(view, events, screenshot_path=output / filename, **kwargs)
-            layouts = self.enhanced_layouts(run)
-            self.assertTrue(layouts, (filename, run["stdout"]))
-            self.assertEqual(layouts[-1]["tab"], str(tab_index), (filename, layouts[-1]))
-            if view == "library":
-                pages = self.enhanced_pages(run)
-                self.assertTrue(pages, (filename, run["stdout"]))
-                self.assertEqual(pages[-1]["title"], "TEST00005")
-            if view == "ready":
-                pages = self.enhanced_pages(run)
-                self.assertTrue(pages, (filename, run["stdout"]))
-                self.assertEqual(pages[-1]["title"], "TEST00006")
-                self.assertEqual(pages[-1]["mode"], "Ace")
+        for name, page, tab, width, height, text_size in self.ENHANCED_SCREENSHOTS:
+            with self.subTest(picture=name):
+                view, opening, kwargs, title = pages[page]
+                settings: dict[str, object] = {"enhanced": {"default": "enhanced", "af": "16"}}
+                if text_size != 100:
+                    settings["text_size"] = text_size
+                run = self.next_ui_run(
+                    view, opening + ("KEY_E", "WAIT_MS=100") * tab + ("WAIT_MS=200",),
+                    width=width, height=height, settings=settings,
+                    screenshot_path=output / (name + ".bmp"), **kwargs)
+                layouts = self.enhanced_layouts(run)
+                self.assertTrue(layouts, (name, run["stdout"]))
+                self.assertEqual(layouts[-1]["tab"], str(tab), (name, layouts[-1]))
+                shown = self.enhanced_pages(run)
+                self.assertTrue(shown, (name, run["stdout"]))
+                self.assertEqual(shown[-1]["title"], title)
+                if page == "ace":
+                    self.assertEqual(shown[-1]["mode"], "Ace")
+                self.assertTrue((output / (name + ".bmp")).is_file(), name)
 
     # Settings > Enhanced's Supersampling sentences at a render scale of 3x or 4x
     # (player_state.h PLAYER_SSAA_WARNING and PLAYER_SSAA_ANYWAY_SENTENCE).
@@ -3379,8 +3495,9 @@ class NativePlayerUiTests(unittest.TestCase):
         open_page = ("WAIT_MS=100",) + ("KEY_DOWN",) * 4 + ("KEY_RETURN", "WAIT_MS=150")
         run = self.next_ui_run(
             "settings",
-            open_page + ("KEY_TAB", "WAIT_MS=35") * 22 +
-            ("KEY_RIGHT", "WAIT_MS=120", "KEY_ESCAPE", "WAIT_MS=100"),
+            # Down from Graphics preset: Play mode, the Picture tab, then its rows to the sixth.
+            open_page + ("KEY_DOWN", "WAIT_MS=50") * 8 +
+            ("KEY_RETURN", "WAIT_MS=150", "KEY_ESCAPE", "WAIT_MS=100"),
             settings={"resolution_scale": 4,
                       "enhanced": {"default": "enhanced", "af": "16", "text": "on",
                                    "readout": "off", "notice": "on", "smooth": "off",
@@ -4046,7 +4163,9 @@ class NativePlayerUiTests(unittest.TestCase):
     def test_next_ui_settings_opens_controls_and_esc_returns(self) -> None:
         """Settings > Controls opens the next UI's controller page; Esc comes back.
 
-        Tab follows the Settings page's visual control order to Controls; Esc returns."""
+        Right from Scaling, the last GAME row, is Menu sounds beside it, and Controls is the
+        row under that: a settings row keeps Left and Right in its row (it reached the button
+        row before). Esc on the controller page focuses Controls again."""
         focus = self.SETTINGS_FOCUS
         run = self.next_ui_run(
             "settings",
@@ -4055,7 +4174,13 @@ class NativePlayerUiTests(unittest.TestCase):
         )
         self.assertEqual([view for view, _ in self.screens(run)],
                          ["settings", "controller", "settings"])
-        self.assertIn(focus["controller"], self.focus_trail(run))
+        self.assertEqual(self.focus_trail(run)[-5:],
+                         [focus["scaling"], focus["ui_sounds"], focus["controller"],
+                          self.CONTROLLER_FOCUS["select"], focus["controller"]])
+        beside = self.next_ui_run("settings", ("WAIT_MS=100", "KEY_DOWN", "KEY_RIGHT"))
+        self.assertEqual(self.focus_trail(beside)[-2:], [focus["vsync"], focus["launcher_fullscreen"]],
+                         "Right from VSync, the row that is now second, is Launcher fullscreen "
+                         "(F11) beside it, not the top bar")
         mouse = self.next_ui_run(
             "settings", ("WAIT_MS=100", "MOUSE_MOVE=1010,392", "MOUSE_DOWN", "MOUSE_UP",
                          "WAIT_MS=100"),
@@ -6137,7 +6262,7 @@ class NativePlayerUiTests(unittest.TestCase):
     # The title page's ENHANCEMENTS card (player_ui_nk.h), as the frame records print them.
     TITLE_PLAY_MODE = str(0x200A)
     TITLE_PLAY_OPTIONS = str(0x200B)
-    ENHANCED_PAGE_PART = str((0x63 << 24) + 0x600)  # Texture filtering's first value
+    ENHANCED_PAGE_PART = str(0x4543)  # Settings > Enhanced's first part row, texture filtering
     OPEN_FIRST = ("WAIT_MS=300", FIRST_TILE, "MOUSE_DOWN", "MOUSE_UP", "WAIT_MS=300")
     # From the title page's first focus, Down reaches the ENHANCEMENTS card's Play mode button;
     # Right from there is Enhanced options.
@@ -6164,9 +6289,19 @@ class NativePlayerUiTests(unittest.TestCase):
         return pages
 
     @staticmethod
-    def enhanced_choice_focus(part: int, choice: int = 0) -> str:
-        return str((0x63 << 24) + 0x600 + part * 0x20 + choice * 4)
+    def enhanced_row_focus(part: int) -> str:
+        """A part's row on Settings > Enhanced (PLAYER_UI_ID_ENHANCED_PART in player_ui_nk.h)."""
+        return str(0x4543 + part if part < 13 else 0x4680 + part - 13)
 
+    def enhanced_tab_rows(self, tab: int, own_page: bool) -> list[str]:
+        """One tab's rows as the page lists them, top to bottom: its parts, then Frame pacing
+        on Motion and, on a game's own page, the Texture pack folder row on Picture."""
+        rows = [self.enhanced_row_focus(part) for part in self.ENHANCED_GROUPS[tab][1]]
+        if tab == 1:
+            rows.append(self.SETTINGS_FOCUS["pacing"])
+        if tab == 0 and own_page:
+            rows.append(self.SETTINGS_FOCUS["texpack_choose"])
+        return rows
     @staticmethod
     def enhanced_layouts(run: dict[str, object]) -> list[dict[str, str]]:
         """Each test-only layout summary: ordered groups, preset, collapse state and count."""
@@ -6222,19 +6357,33 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(self.title_play(packaged), {}, "back to the library: nothing is kept")
 
     def test_next_ui_enhanced_page_mode_cycles_without_unavailable_ace(self) -> None:
-        """Review #2644 D3: Settings > Enhanced skips Ace for a title without its own package."""
-        events = (
-            *self.OPEN_FIRST, *self.DOWN_TO_PLAY_MODE, *self.TO_PLAY_OPTIONS,
-            "KEY_RETURN", "WAIT_MS=250", "KEY_DOWN", "WAIT_MS=80",
-            *(('KEY_RETURN', 'WAIT_MS=120') * 4), "KEY_ESCAPE", "WAIT_MS=150",
-        )
-        run = self.next_ui_run("library", events, wait_background=True,
-                               settings=self.LIBRARY_ENHANCED)
-        pages = [page for page in self.enhanced_pages(run) if page.get("title") == "TEST00005"]
-        self.assertTrue(pages, run["stdout"])
-        self.assertEqual(pages[-1].get("mode"), "Authentic")
-        self.assertEqual(self.title_play(run).get("TEST00005"), {"mode": "authentic"},
-                         "the fourth press continues around the three available modes")
+        """Review #2644 D3: on the page of a game with no package of its own, the Play mode row
+        steps Library default, Authentic and Enhanced and never stops at Ace, which that game
+        cannot use: the select button, Right and a controller's d-pad all go round the three."""
+        to_mode = (*self.OPEN_FIRST, *self.DOWN_TO_PLAY_MODE, *self.TO_PLAY_OPTIONS,
+                   "KEY_RETURN", "WAIT_MS=250", "KEY_DOWN", "WAIT_MS=80")
+        leave = ("KEY_ESCAPE", "WAIT_MS=150")
+        for name, step in (("select", "KEY_RETURN"), ("right", "KEY_RIGHT"),
+                           ("d-pad", "PAD_DPAD_RIGHT")):
+            with self.subTest(step=name):
+                run = self.next_ui_run("library", to_mode + (step, "WAIT_MS=120") * 4 + leave,
+                                       wait_background=True, settings=self.LIBRARY_ENHANCED)
+                self.assertIn(self.SETTINGS_FOCUS["ace_mode"], self.focus_trail(run),
+                              "Down from Graphics preset is the Play mode row")
+                pages = [page for page in self.enhanced_pages(run)
+                         if page.get("title") == "TEST00005"]
+                self.assertEqual([page.get("mode") for page in pages],
+                                 ["Library (Enhanced)", "Authentic", "Enhanced",
+                                  "Library (Enhanced)", "Authentic"],
+                                 "four steps go round the three modes this game has")
+                self.assertEqual(self.title_play(run).get("TEST00005"), {"mode": "authentic"},
+                                 "the fourth step is saved for that game")
+        back = self.next_ui_run("library", to_mode + ("KEY_LEFT", "WAIT_MS=120") * 2 + leave,
+                                wait_background=True, settings=self.LIBRARY_ENHANCED)
+        self.assertEqual([page.get("mode") for page in self.enhanced_pages(back)
+                          if page.get("title") == "TEST00005"],
+                         ["Library (Enhanced)", "Enhanced", "Authentic"],
+                         "Left goes round the other way, past Ace as well")
 
     def test_next_ui_title_enhanced_options_are_that_games_and_back_returns(self) -> None:
         """#2055: Enhanced options opens Settings > Enhanced for that game: its rows show the
@@ -6244,8 +6393,9 @@ class NativePlayerUiTests(unittest.TestCase):
             "library",
             (*self.OPEN_FIRST, *self.DOWN_TO_PLAY_MODE, *self.TO_PLAY_OPTIONS,
              "KEY_RETURN", "WAIT_MS=200",
-             *(('KEY_TAB', 'WAIT_MS=35') * 8),
-             "KEY_RIGHT", "WAIT_MS=120", "KEY_RIGHT", "WAIT_MS=120",
+             # Down from Graphics preset: Play mode, the Picture tab, then its first row.
+             *(("KEY_DOWN", "WAIT_MS=80") * 3),
+             "KEY_RETURN", "WAIT_MS=120", "KEY_RETURN", "WAIT_MS=120",
              "KEY_ESCAPE", "WAIT_MS=200"),
             wait_background=True, settings=self.LIBRARY_ENHANCED)
         trail = self.focus_trail(run)

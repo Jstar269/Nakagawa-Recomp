@@ -637,13 +637,19 @@ typedef enum {
     PLAYER_UI_SETTINGS_CYCLE_HIGH_CONTRAST,  /* Automatic, On, Off */
     PLAYER_UI_SETTINGS_CYCLE_TEXT_SIZE,      /* Standard, Large, Larger (100, 125, 150%) */
     PLAYER_UI_SETTINGS_OPEN_ACE,             /* Settings > Enhanced, the library's page */
-    PLAYER_UI_SETTINGS_CYCLE_PRESET,         /* the next graphics preset (#2150) */
-    PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE,      /* that page's play mode: the library's default,
-                                                or the title's choice on a title's page */
-    PLAYER_UI_SETTINGS_SET_PRESET,            /* choice_index is a graphics preset */
-    PLAYER_UI_SETTINGS_SET_PLAY_MODE,         /* choice_index is this page's mode list index */
-    PLAYER_UI_SETTINGS_SET_ENHANCED_PART,     /* title_index is the part; choice_index is its value */
-    PLAYER_UI_SETTINGS_SELECT_ENHANCED_TAB,   /* title_index is the session tab index */
+    PLAYER_UI_SETTINGS_CYCLE_PRESET,         /* the graphics preset (#2150): the next one, or
+                                                the one before for a choice_index under 0 */
+    PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE,      /* that page's play mode, to the next one (the select
+                                                button): the library's default, or the title's
+                                                choice on a title's page */
+    PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART,  /* the part in title_index, to its next value (the
+                                                select button) */
+    PLAYER_UI_SETTINGS_SET_PLAY_MODE,        /* Left and Right: choice_index is the page's mode
+                                                list index */
+    PLAYER_UI_SETTINGS_SET_ENHANCED_PART,    /* Left, Right or a clicked value: title_index is the
+                                                part; choice_index is its value, -1 the library's
+                                                on a title's page */
+    PLAYER_UI_SETTINGS_SELECT_ENHANCED_TAB,  /* title_index is the session tab index */
     PLAYER_UI_SETTINGS_OPEN_PROBLEM_REPORT,  /* Settings > Problem report: lists the files */
     PLAYER_UI_SETTINGS_CREATE_REPORT,        /* write the bundle on this PC */
     PLAYER_UI_SETTINGS_OPEN_REPORT_FOLDER,
@@ -674,6 +680,8 @@ typedef enum {
     PLAYER_UI_ENHANCED_GROUP_ADVANCED,
     PLAYER_UI_ENHANCED_GROUP_COUNT
 } PlayerUiEnhancedGroup;
+/* A group's name as its tab shows it ("Picture", "On-screen"); "" for no group. */
+const char *player_ui_enhanced_group_label(PlayerUiEnhancedGroup group);
 #define PLAYER_UI_ENHANCED_LAYOUT(X) \
     X(PLAYER_PART_FILTERING, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
     X(PLAYER_PART_WIDE, PLAYER_UI_ENHANCED_GROUP_PICTURE) \
@@ -699,26 +707,23 @@ typedef enum {
 typedef struct {
     int part;                   /* PlayerEnhancedPart; rows are in visual, not enum, order */
     PlayerUiEnhancedGroup group;
-    int stored_value;           /* effective library/title choice before availability labels */
-    int selected_index;         /* choice index; title row zero is Library default */
+    /* Which of the row's choices is marked: an index into `labels`, after the library's choice
+       (index 0) on a title's page. It is the value in `value`: a row that cannot apply marks
+       the value that runs, not the one it keeps. */
+    int selected_index;
     const char *name;           /* "Texture filtering" */
     const char *value;          /* "16x", "Off", "Library (On)" on a title's page */
     const char *sentence;
-    bool on;                    /* in effect for the page: lit */
+    bool on;                    /* in effect for the page */
     bool inherited;             /* this title follows the library value */
-    bool disabled;              /* shown but unavailable in this play mode */
+    bool disabled;              /* shown, dimmed and inert: it cannot apply as the page stands */
     const char *disabled_reason;
-    const char *tag;            /* a condition tag, or NULL */
-    /* Every other value the row can show on this page: the part's own words ("16x" ... "Off")
-       and, on a title's page, the library's ("Library (16x)"). The page sizes its button
-       column from the widest of them, so changing a setting never reflows the rows. */
+    const char *tag;            /* a condition tag ("Ace only"), or NULL */
+    /* Every value the row offers: the part's own words ("16x" ... "Off") and, on a title's
+       page, the library's ("Library (16x)") before them. */
     const char *const *labels;
     int label_count;
     const char *library_value;  /* NULL on the library's page */
-    /* A value another setting on the page can give the row, or NULL: on a game's page,
-       Smooth motion's "Off (this game runs at 60 FPS)", which stepping the play mode turns
-       on and off with the game's 60 FPS game logic. */
-    const char *other_value;
 } PlayerUiEnhancedRow;
 
 #define PLAYER_UI_REPORT_LINES 24u   /* PLAYER_REPORT_MAX_FILES */
@@ -755,7 +760,7 @@ typedef struct {
     /* Main page: the current value of each control, in words */
     const char *resolution;         /* "2x (960x544)" */
     const char *pacing;             /* "PSP timing" */
-    const char *pacing_sentence;    /* what the player's cap setting changes */
+    const char *pacing_sentence;    /* what Frame pacing changes, for Enhanced's panel */
     const char *scaling;            /* "Sharp" */
     const char *preset;             /* "Medium", or "Custom" (#2150) */
     bool vsync;
@@ -780,13 +785,14 @@ typedef struct {
     int system_scale_pct;               /* the display's scale */
     bool system_high_contrast;
     bool system_reduced_motion;
-    /* Settings > Enhanced (VIEW_ACE_SETTINGS, #2055). Preset and play mode stay above its
-       session tab; the selected tab shows compact choices and one details panel. */
+    /* Settings > Enhanced (VIEW_ACE_SETTINGS, #2055). The graphics preset and the play mode stay
+       above its tabs; the active tab lists its options, and one panel describes the focused
+       one. The page is the library's, or one title's when enhanced_title is set. */
     bool enhanced_library_on;       /* the library's default is Enhanced */
     const char *enhanced_title;     /* the game's name on its own page; NULL for the library */
     const char *enhanced_mode;      /* "Enhanced", "Ace", "Library (Authentic)" */
     const char *enhanced_mode_sentence;
-    /* Every play mode the page's first row steps through, for the column's width. */
+    /* Every play mode the play mode row steps through, in order. */
     const char *const *enhanced_modes;
     int enhanced_mode_count;
     bool enhanced_on;               /* Enhanced or Ace in effect: the part rows can change */
@@ -803,8 +809,8 @@ typedef struct {
     const char *saves_folder;
     const char *notice;             /* a settings notice (a failed save), or NULL */
     const char *nickname;           /* the console nickname games read (#2197) */
-    /* The global graphics preset note (#2150): where the preset applies, or NULL for Custom.
-       Drawn in the row on Enhanced and as a page note on Settings. */
+    /* The graphics preset's note (#2150): where the preset applies, or NULL for Custom. Settings >
+       Enhanced draws it in the panel while the Graphics preset row has focus. */
     const char *preset_notice;
     /* Build tools and cache: builds share compiled system libraries (#1306) */
     bool share_system_libraries;
@@ -1168,7 +1174,7 @@ enum {
     PLAYER_UI_ID_DISC_OPEN_FOLDER = 0x4803u,
     PLAYER_UI_ID_DISC_VERIFY_BASE = 0x4900u,         /* reserved: disc verification's controls */
     PLAYER_UI_ID_SETTINGS_RESOLUTION = 0x4501u,
-    PLAYER_UI_ID_SETTINGS_PACING = 0x4502u,
+    PLAYER_UI_ID_SETTINGS_PACING = 0x4502u,           /* Frame pacing, on Enhanced's Motion tab */
     PLAYER_UI_ID_SETTINGS_VSYNC = 0x4503u,
     PLAYER_UI_ID_SETTINGS_FULLSCREEN = 0x4504u,
     PLAYER_UI_ID_SETTINGS_SCALING = 0x4505u,
@@ -1229,11 +1235,13 @@ enum {
     PLAYER_UI_ID_SETTINGS_TEXT_SIZE = 0x452Fu,
     PLAYER_UI_ID_SETTINGS_ACE = 0x4540u,              /* retired: the GAME card's old switch */
     PLAYER_UI_ID_SETTINGS_ACE_OPEN = 0x4541u,         /* the GAME card's row that opens Enhanced */
-    PLAYER_UI_ID_SETTINGS_ACE_MODE = 0x4542u,         /* the Enhanced page's play mode */
-    /* The part rows (PlayerEnhancedPart), PLAYER_UI_ENHANCED_ROWS of them, keep ids from
-       PLAYER_UI_ID_ENHANCED_PART(part) even though display order is grouped: parts 0 to 12 at
-       0x4543 to 0x454F (the range ends before 0x4550), parts 13 and on at 0x4680 to 0x469F
-       (room for PLAYER_UI_ENHANCED_MORE_IDS, 32 parts), so adding a part moves no other part's id. */
+    PLAYER_UI_ID_SETTINGS_ACE_MODE = 0x4542u,         /* the Enhanced page's play mode row */
+    /* The part rows (PlayerEnhancedPart), PLAYER_UI_ENHANCED_ROWS of them, take their ids from
+       PLAYER_UI_ID_ENHANCED_PART(part), whichever tab shows them: parts 0 to 12 at 0x4543 to
+       0x454F (the range ends before 0x4550), parts 13 and on at 0x4680 to 0x469F (room for
+       PLAYER_UI_ENHANCED_MORE_IDS, 32 parts), so adding a part moves no other part's id. A
+       row's values are pointer targets with ids of the settings screen's own
+       (scr_settings.c). */
     PLAYER_UI_ID_SETTINGS_ENHANCED_PART = 0x4543u,
     PLAYER_UI_ID_SETTINGS_ENHANCED_PART_MORE = 0x4680u,
     PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT = 0x4550u,   /* Settings: opens the Problem report page */
@@ -1248,7 +1256,6 @@ enum {
     PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP = 0x4559u,
     PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE = 0x455Au,   /* a title's Enhanced page: Texture pack folder */
     PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE = 0x455Bu,   /* a title's Enhanced page: Remove texture pack */
-    PLAYER_UI_ID_SETTINGS_ENHANCED_ADVANCED = 0x455Cu, /* the Advanced disclosure row */
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
     PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */

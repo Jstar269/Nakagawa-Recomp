@@ -21,9 +21,15 @@
 
 #define DUMP_CAP 1048576u
 #define CASE_DUMP_CAP 131072u
+/* Settings > Enhanced's own ids (scr_settings.c): a part's value as a pointer target, a
+   category tab and a tab's scrolling list. Its rows have the shared PLAYER_UI_ID_* ids. */
 #define ENHANCED_TEST_CHOICE_ID(part, choice) \
     NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000600u + (uint32_t)(part) * 0x20u + \
              (uint32_t)(choice) * 4u)
+#define ENHANCED_TEST_TAB_ID(tab) \
+    NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000500u + (uint32_t)(tab) * 4u)
+#define ENHANCED_TEST_LIST_ID(tab) \
+    NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000550u + (uint32_t)(tab))
 
 static int failures;
 static const uint8_t k_test_glyph_pixel = 0xFFu;
@@ -101,6 +107,8 @@ static const char *g_enhanced_value[PLAYER_PART_COUNT];
 static const char *g_enhanced_mode;
 static int g_enhanced_tab;
 static NkUiId g_enhanced_focus_id;
+/* A graphics preset's note for Settings > Enhanced (NULL: Medium, with no note set). */
+static const char *g_enhanced_preset_note;
 /* A part's sentence instead of the fixture's (NULL keeps it): Supersampling's warning. */
 static const char *g_enhanced_sentence[PLAYER_PART_COUNT];
 
@@ -501,7 +509,6 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
                      k_enhanced_parts[part].value);
             settings.enhanced_rows[i].part = part;
             settings.enhanced_rows[i].group = k_enhanced_layout_fixture[i].group;
-            settings.enhanced_rows[i].stored_value = 0;
             settings.enhanced_rows[i].selected_index = 0;
             settings.enhanced_rows[i].name = k_enhanced_parts[part].name;
             settings.enhanced_rows[i].value =
@@ -522,28 +529,34 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
             settings.enhanced_rows[i].labels = k_enhanced_words[part].labels;
             settings.enhanced_rows[i].label_count = k_enhanced_words[part].count;
             settings.enhanced_rows[i].library_value = title ? followed[i] : NULL;
+            /* As player_ui_nk.c marks a row: the value among the part's words, after the
+               library's choice on a game's page; a row following the library marks that
+               choice, and Smooth motion off for a game's 60 FPS game logic marks Off. */
             if (!settings.enhanced_rows[i].inherited) {
+                const char *marked = strcmp(value, k_enhanced_smooth_at_60) == 0 ? "Off" : value;
                 for (int choice = 0; choice < k_enhanced_words[part].count; ++choice) {
-                    if (strcmp(value, k_enhanced_words[part].labels[choice]) == 0) {
-                        settings.enhanced_rows[i].selected_index = choice;
+                    if (strcmp(marked, k_enhanced_words[part].labels[choice]) == 0) {
+                        settings.enhanced_rows[i].selected_index = choice + (title ? 1 : 0);
                         break;
                     }
                 }
             }
-            if (settings.enhanced_rows[i].tag != NULL && title) {
+            /* An Ace-only part is dimmed on a game's page until that game's mode is Ace. */
+            if (settings.enhanced_rows[i].tag != NULL && title &&
+                strcmp(settings.enhanced_mode, "Ace") != 0) {
                 settings.enhanced_rows[i].disabled = true;
                 settings.enhanced_rows[i].disabled_reason = "Available only in Ace.";
             }
-            /* As player_ui_nk.c gives a game's page: the value Smooth motion shows while
-               the play mode runs the game's 60 FPS game logic. */
-            settings.enhanced_rows[i].other_value =
-                title && part == PLAYER_PART_SMOOTH ? k_enhanced_smooth_at_60 : NULL;
         }
     }
     settings.pacing = "PSP timing";
     settings.pacing_sentence = "Sets whether this player follows PSP timing or adds no frame cap.";
     settings.scaling = "Sharp";
     settings.preset = "Medium";
+    if (g_enhanced_preset_note != NULL) {
+        settings.preset = "Ultra";
+        settings.preset_notice = g_enhanced_preset_note;
+    }
     if (which == FLOW_SETTINGS_PRESET) {
         /* Ultra chosen (#2150, #2280): the notice line names the Enhanced parts it sets. The note
            is player_app_graphics_preset_note's for Ultra, the longest a preset writes. */
@@ -3302,6 +3315,223 @@ static void test_accessibility_settings_reach_the_design_system(void) {
     nk_ui_destroy(ui);
 }
 
+static bool run_ends_in_ellipsis(const NkUiTextRun *run);
+
+/* The tabs of Settings > Enhanced as a person reads them: each tab's name on the strip and its
+   parts from the top. Written out here, not taken from the page's own table
+   (PLAYER_UI_ENHANCED_LAYOUT), so that what is on screen is compared with something else. */
+static const struct {
+    const char *tab;
+    int count;
+    int parts[10];
+} k_enhanced_shown[PLAYER_UI_ENHANCED_GROUP_COUNT] = {
+    {"PICTURE", 10,
+     {PLAYER_PART_FILTERING, PLAYER_PART_WIDE, PLAYER_PART_UPSCALE, PLAYER_PART_TEXPACK,
+      PLAYER_PART_TWIN, PLAYER_PART_SSAA, PLAYER_PART_MIPS, PLAYER_PART_TEXSCALE,
+      PLAYER_PART_SMART2D, PLAYER_PART_TEXT}},
+    {"MOTION", 1, {PLAYER_PART_SMOOTH}},
+    {"SOUND", 2, {PLAYER_PART_SAS, PLAYER_PART_PEAK}},
+    {"CONTROLS", 1, {PLAYER_PART_STICK}},
+    {"ON-SCREEN", 2, {PLAYER_PART_READOUT, PLAYER_PART_NOTICE}},
+    {"ADVANCED", 5,
+     {PLAYER_PART_TESS, PLAYER_PART_CULL, PLAYER_PART_LOAD, PLAYER_PART_PAD,
+      PLAYER_PART_SHADOW}}};
+
+/* The tab a part is on, by that table; -1 for a part on none. */
+static int enhanced_tab_of(int part) {
+    for (int tab = 0; tab < PLAYER_UI_ENHANCED_GROUP_COUNT; ++tab) {
+        for (int row = 0; row < k_enhanced_shown[tab].count; ++row) {
+            if (k_enhanced_shown[tab].parts[row] == part) return tab;
+        }
+    }
+    return -1;
+}
+
+static bool enhanced_part_is_ace_only(int part) {
+    return part == PLAYER_PART_CULL || part == PLAYER_PART_STICK || part == PLAYER_PART_LOAD ||
+           part == PLAYER_PART_PAD || part == PLAYER_PART_SHADOW;
+}
+
+/* Whether the active tab's rows scroll inside their list in a window of this size. */
+static bool enhanced_list_scrolls(FlowCase which, int width, int height) {
+    NkUi *ui = NULL;
+    NkUiScrollState state;
+    const NkUiDrawList *draw = flow_case_layout(which, width, height, &ui);
+    bool scrolls = draw != NULL && ui != NULL &&
+                   nk_ui_scroll_state(ui, ENHANCED_TEST_LIST_ID(g_enhanced_tab), &state) &&
+                   state.max_offset > 0.0f;
+    if (ui != NULL) nk_ui_destroy(ui);
+    return scrolls;
+}
+
+/* Settings > Enhanced in a 1280 x 1600 window, where every row of a tab is on screen: the
+   page is laid out, then `id` is focused, one event is sent, and the action the page
+   returns for it is the result. dir is read for NK_UI_EV_NAV. */
+static PlayerUiAction enhanced_send(FlowCase which, NkUiId id, NkUiEventType type,
+                                    NkUiNavDir dir) {
+    NkUiConfig config;
+    NkUiTextBackend text = screen_test_text_backend();
+    NkUiViewport viewport = launcher_viewport(1280, 1600, 1.0f);
+    NkUiScale scale = nk_ui_scale_for_viewport(&viewport);
+    NkUiEvent event;
+    NkUi *ui;
+    PlayerUiAction result = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    if (ui == NULL) return result;
+    nk_ui_set_viewport(ui, &viewport);
+    g_flow_width = scale.logical_w;
+    g_flow_height = scale.logical_h;
+    nk_ui_begin(ui, 0.0);
+    (void)draw_flow_case(ui, which);
+    (void)nk_ui_end(ui);
+    nk_ui_focus(ui, id);
+    if (type == NK_UI_EV_NAV) {
+        /* The frame after the request is the first with `id` focused in the focus graph,
+           which is what decides whether Left and Right are the focused control's. An
+           activation is sent at once, as a pointer's press and release on a value are: a
+           value hands focus to its row as soon as it is drawn with it. */
+        nk_ui_begin(ui, 0.0);
+        (void)draw_flow_case(ui, which);
+        (void)nk_ui_end(ui);
+    }
+    memset(&event, 0, sizeof(event));
+    event.type = type;
+    event.dir = dir;
+    event.down = true;
+    nk_ui_push_event(ui, &event);
+    nk_ui_begin(ui, 0.0);
+    result = draw_flow_case(ui, which);
+    (void)nk_ui_end(ui);
+    g_flow_width = 1280.0f;
+    g_flow_height = 800.0f;
+    nk_ui_destroy(ui);
+    return result;
+}
+
+/* The lines of text an element of the page drew, top to bottom, while the card was read from
+   its top to its end. */
+typedef struct {
+    struct { int y; char text[200]; } line[24];
+    int count;
+} EnhancedLines;
+
+/* Adds the lines element `id` drew in this draw list; `scrolled` is how far, in window
+   pixels, the card had scrolled, so a line seen at two scroll positions is counted once. */
+static void enhanced_lines_add(EnhancedLines *lines, const NkUiDrawList *draw, NkUiId id,
+                               int scrolled) {
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        const NkUiTextRun *run = draw->cmd[i].kind == NK_UI_DRAW_TEXT
+                                     ? (const NkUiTextRun *)draw->cmd[i].custom : NULL;
+        size_t length;
+        int y;
+        int at = 0;
+        bool seen = false;
+        if (run == NULL || run->text == NULL || draw->cmd[i].element_id != id) continue;
+        y = draw->cmd[i].bounds[1] + scrolled;
+        for (int k = 0; k < lines->count && !seen; ++k) {
+            seen = abs(lines->line[k].y - y) <= 3;
+        }
+        if (seen || lines->count >= (int)(sizeof(lines->line) / sizeof(lines->line[0]))) continue;
+        while (at < lines->count && lines->line[at].y < y) ++at;
+        memmove(&lines->line[at + 1], &lines->line[at],
+                (size_t)(lines->count - at) * sizeof(lines->line[0]));
+        length = run->length;
+        while (length > 0u && run->text[length - 1u] == ' ') --length;
+        if (length >= sizeof(lines->line[at].text)) length = sizeof(lines->line[at].text) - 1u;
+        memcpy(lines->line[at].text, run->text, length);
+        lines->line[at].text[length] = '\0';
+        lines->line[at].y = y;
+        ++lines->count;
+    }
+}
+
+/* Those lines joined by one space each: the text as written. */
+static void enhanced_lines_join(const EnhancedLines *lines, char *out, size_t cap) {
+    size_t used = 0u;
+    out[0] = '\0';
+    for (int k = 0; k < lines->count; ++k) {
+        int wrote = snprintf(out + used, cap - used, "%s%s", k > 0 ? " " : "",
+                             lines->line[k].text);
+        if (wrote < 0 || (size_t)wrote >= cap - used) break;
+        used += (size_t)wrote;
+    }
+}
+
+/* Whether the panel beside the list reads exactly this for the control g_enhanced_focus_id
+   names, in a window of width x height at the current text size: the name, the value, the
+   whole sentence and the whole note (NULL: none drawn), word for word, with the "Focused
+   option" line when `focused`, and no text run of the page cut to an ellipsis. Where the
+   page is taller than the window (a larger text size) the card is read to its end, 120 px at
+   a time, as the player scrolls it. */
+static bool enhanced_panel_reads(FlowCase which, int width, int height, const char *name,
+                                 const char *value, const char *sentence, const char *note,
+                                 bool focused) {
+    static const struct { uint32_t offset; const char *what; } parts[] = {
+        {0x001701u, "first line"}, {0x001702u, "name"}, {0x001703u, "value"},
+        {0x001706u, "sentence"}, {0x001707u, "note"}};
+    static EnhancedLines lines[5];
+    static char got[1024];
+    const char *want[5];
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw = flow_case_layout(which, width, height, &ui);
+    NkUiViewport viewport = launcher_viewport(width, height, 1.0f);
+    NkUiScale scale;
+    NkUiScrollState state;
+    bool reads = draw != NULL && ui != NULL;
+    float offset = 0.0f;
+    viewport.text_size_pct = g_flow_text_size_pct;
+    scale = nk_ui_scale_for_viewport(&viewport);
+    memset(lines, 0, sizeof(lines));
+    want[0] = focused ? "FOCUSED OPTION" : "";
+    want[1] = name;
+    want[2] = value;
+    want[3] = sentence;
+    want[4] = note != NULL ? note : "";
+    while (reads && draw != NULL) {
+        for (size_t p = 0u; p < sizeof(parts) / sizeof(parts[0]); ++p) {
+            enhanced_lines_add(&lines[p], draw,
+                               NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, parts[p].offset),
+                               (int)(offset * scale.density + 0.5f));
+        }
+        for (uint32_t i = 0u; i < draw->ncmd; ++i) {
+            const NkUiTextRun *run = draw->cmd[i].kind == NK_UI_DRAW_TEXT
+                                         ? (const NkUiTextRun *)draw->cmd[i].custom : NULL;
+            if (run != NULL && run->text != NULL && run_ends_in_ellipsis(run)) {
+                fprintf(stderr, "  cut short at %d x %d, %d%% text: %08X \"%.*s\"\n", width,
+                        height, g_flow_text_size_pct, (unsigned)draw->cmd[i].element_id,
+                        (int)(run->length > 70u ? 70u : run->length), run->text);
+                reads = false;
+            }
+        }
+        if (!nk_ui_scroll_state(ui, FLOW_ID_CARD, &state) || offset >= state.max_offset) break;
+        offset += 120.0f;
+        if (offset > state.max_offset) offset = state.max_offset;
+        nk_ui_scroll_to(ui, FLOW_ID_CARD, offset);
+        g_flow_width = scale.logical_w;
+        g_flow_height = scale.logical_h;
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)draw_flow_case(ui, which);
+            draw = nk_ui_end(ui);
+        }
+        g_flow_width = 1280.0f;
+        g_flow_height = 800.0f;
+    }
+    for (size_t p = 0u; reads && p < sizeof(parts) / sizeof(parts[0]); ++p) {
+        enhanced_lines_join(&lines[p], got, sizeof(got));
+        if (strcmp(got, want[p]) != 0) {
+            fprintf(stderr, "  the panel's %s at %d x %d, %d%% text: \"%s\", not \"%s\"\n",
+                    parts[p].what, width, height, g_flow_text_size_pct, got, want[p]);
+            reads = false;
+        }
+    }
+    if (ui != NULL) nk_ui_destroy(ui);
+    return reads;
+}
+
 static void test_settings_pages(void) {
     static char dump[CASE_DUMP_CAP];
     static const struct { FlowCase which; NkUiId id; PlayerUiSettingsOp op; const char *what; }
@@ -3344,17 +3574,19 @@ static void test_settings_pages(void) {
          PLAYER_UI_SETTINGS_OPEN_DATA_FOLDER, "Open data folder shows the data folder"},
         {FLOW_SETTINGS, PLAYER_UI_ID_SETTINGS_OPEN_LOGS, PLAYER_UI_SETTINGS_OPEN_LOGS,
          "Open logs shows the logs folder"},
-        {FLOW_SETTINGS_ACE, NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000304u),
-         PLAYER_UI_SETTINGS_SET_PLAY_MODE, "Play mode changes through its inline choices"},
-        {FLOW_SETTINGS_ACE, NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000300u),
-         PLAYER_UI_SETTINGS_CYCLE_PRESET, "Graphics preset steps through its saved values"},
+        {FLOW_SETTINGS_ACE, PLAYER_UI_ID_SETTINGS_ACE_MODE, PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE,
+         "the page's play mode row steps it"},
+        {FLOW_SETTINGS_ACE, PLAYER_UI_ID_SETTINGS_PRESET, PLAYER_UI_SETTINGS_CYCLE_PRESET,
+         "the graphics preset row, on Settings > Enhanced now, steps the preset"},
         {FLOW_SETTINGS_ACE, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
          "Done leaves Enhanced"},
-        {FLOW_SETTINGS_ACE_OFF, NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000304u),
-         PLAYER_UI_SETTINGS_SET_PLAY_MODE, "Authentic play mode changes through its inline choices"},
-        {FLOW_SETTINGS_ACE_TITLE, NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000304u),
-         PLAYER_UI_SETTINGS_SET_PLAY_MODE, "a game's Enhanced page changes its play mode"},
-        {FLOW_SETTINGS_ACE_TITLE, NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000A40u),
+        {FLOW_SETTINGS_ACE_OFF, PLAYER_UI_ID_SETTINGS_ACE_MODE, PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE,
+         "with the library Authentic its play mode row still steps it"},
+        {FLOW_SETTINGS_ACE_OFF, PLAYER_UI_ID_SETTINGS_PRESET, PLAYER_UI_SETTINGS_CYCLE_PRESET,
+         "with the library Authentic the graphics preset row still steps the preset"},
+        {FLOW_SETTINGS_ACE_TITLE, PLAYER_UI_ID_SETTINGS_ACE_MODE,
+         PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE, "a game's Enhanced page steps its play mode"},
+        {FLOW_SETTINGS_ACE_TITLE, PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE,
          PLAYER_UI_SETTINGS_CHOOSE_TEXPACK, "Texture pack folder opens its picker"},
         {FLOW_SETTINGS_ACE_TITLE, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
          "Done leaves a game's Enhanced page"},
@@ -3448,15 +3680,51 @@ static void test_settings_pages(void) {
           "Settings on a 60 Hz display shows no refresh-rate advisory");
     CHECK(flow_case_fits(FLOW_SETTINGS_PRESET, 960, 540, dump, sizeof(dump)),
           "Settings with a graphics preset's note fits 960 x 540");
-    CHECK(strstr(dump, "Ultra is used in Enhanced and Ace, with crisp text, FSR 1 and full 32-bit "
-                       "colour on. Authentic uses your settings.") != NULL &&
-              strstr(dump, "Changes are saved as you make them") == NULL,
-          "a graphics preset's note takes the Settings notice line");
-    CHECK(strstr(dump, "\"GRAPHICS PRESET: ULTRA\"") == NULL,
-          "the main Settings page no longer duplicates Graphics preset");
+    /* The preset's row is on Settings > Enhanced, and its note is there with it (review of
+       #2644, D4): the main page keeps its own line even when the model carries a note. */
+    CHECK(strstr(dump, "is used in Enhanced and Ace") == NULL &&
+              strstr(dump, "Changes are saved as you make them") != NULL,
+          "the main Settings page shows its own line, not the note of a row it does not have");
+    CHECK(strstr(dump, "\"GRAPHICS PRESET: ULTRA\"") == NULL && strstr(dump, "\"ULTRA\"") == NULL,
+          "the main Settings page has no Graphics preset row");
     CHECK(dump_flow_case(FLOW_SETTINGS_ACE, dump, sizeof(dump)) &&
               strstr(dump, "Graphics preset") != NULL && strstr(dump, "Medium") != NULL,
           "Settings > Enhanced pins the global Graphics preset above its tabs");
+    /* With the Graphics preset row focused (the page opens there) the panel shows the row's
+       value and the preset's whole note; with another row focused the note is not drawn. */
+    g_enhanced_preset_note =
+        "Ultra is used in Enhanced and Ace, with crisp text, FSR 1 and full 32-bit colour "
+        "on. Authentic uses your settings.";
+    g_enhanced_focus_id = PLAYER_UI_ID_SETTINGS_PRESET;
+    {
+        static const struct { int w; int h; int text; } views[] = {
+            {1280, 720, 100}, {960, 540, 100}, {1280, 720, 125}, {1280, 720, 150},
+            {960, 540, 150}};
+        int saved_text = g_flow_text_size_pct;
+        for (size_t v = 0u; v < sizeof(views) / sizeof(views[0]); ++v) {
+            char message[160];
+            g_flow_text_size_pct = views[v].text;
+            (void)snprintf(message, sizeof(message),
+                           "the focused Graphics preset row shows its whole note at %d x %d, "
+                           "%d%% text", views[v].w, views[v].h, views[v].text);
+            CHECK(enhanced_panel_reads(FLOW_SETTINGS_ACE, views[v].w, views[v].h,
+                                       "Graphics preset", "Ultra",
+                                       "Library-wide for Enhanced and Ace; Authentic ignores "
+                                       "it, and each game's part choices win.",
+                                       g_enhanced_preset_note, true),
+                  message);
+        }
+        g_flow_text_size_pct = saved_text;
+    }
+    g_enhanced_focus_id = PLAYER_UI_ID_SETTINGS_ACE_MODE;
+    CHECK(enhanced_panel_reads(FLOW_SETTINGS_ACE, 1280, 720, "Play mode", "Enhanced",
+                               "The default for every game; each game's page can choose its "
+                               "own.", NULL, true) &&
+              dump_flow_case_sized(FLOW_SETTINGS_ACE, 1280, 720, dump, sizeof(dump)) &&
+              strstr(dump, "is used in Enhanced and Ace") == NULL,
+          "with Play mode focused the panel is that row's, without the preset's note");
+    g_enhanced_focus_id = 0u;
+    g_enhanced_preset_note = NULL;
     CHECK(dump_flow_case(FLOW_SETTINGS, dump, sizeof(dump)) &&
               strstr(dump, "Changes are saved as you make them") != NULL &&
               strstr(dump, "is used in Enhanced and Ace") == NULL,
@@ -3489,44 +3757,261 @@ static void test_settings_pages(void) {
               strstr(dump, "python tools/nk_cli.py report --title TEST00001") != NULL &&
               strstr(dump, "\"CREATE THE REPORT\"") == NULL,
           "without Python the Problem report page gives the command and offers no Create");
-    /* Settings > Enhanced keeps its library preset and Play mode above six category tabs.
-       The Picture list has compact values and the right panel holds the focused item's help. */
+    /* Settings > Enhanced (#2055): the graphics preset and the play mode above six category
+       tabs, the active tab's parts one row each with all of a part's values, and one panel
+       with the focused row's name, value and whole description. */
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
+    /* In the smallest window the whole page is on screen. Before the tabs the card scrolled
+       as a whole there; now the card has nothing to scroll, so the panel and Back are in
+       view, and the tab's rows scroll inside their list. */
     CHECK(flow_case_fits(FLOW_SETTINGS_ACE, 960, 540, dump, sizeof(dump)) &&
-              flow_case_has_scroll(FLOW_SETTINGS_ACE, 960, 540),
-          "Settings > Enhanced scrolls inside the 960 x 540 window");
-    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 8000, dump, sizeof(dump)) &&
+              !flow_case_has_scroll(FLOW_SETTINGS_ACE, 960, 540) &&
+              enhanced_list_scrolls(FLOW_SETTINGS_ACE, 960, 540) &&
+              flow_case_shows(FLOW_SETTINGS_ACE, 960, 540, "BACK"),
+          "Settings > Enhanced fits the 960 x 540 window: its rows scroll inside their list");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1200, dump, sizeof(dump)) &&
               strstr(dump, "Graphics preset") != NULL && strstr(dump, "Medium") != NULL &&
               strstr(dump, "Play mode") != NULL && strstr(dump, "Enhanced") != NULL &&
-              strstr(dump, "PICTURE") != NULL && strstr(dump, "MOTION") != NULL &&
-              strstr(dump, "ON-SCREEN") != NULL && strstr(dump, "ADVANCED") != NULL &&
               strstr(dump, "Texture filtering") != NULL && strstr(dump, "16x") != NULL &&
-              strstr(dump, "FOCUSED OPTION") != NULL,
-          "library Enhanced shows pinned choices, all category tabs, compact rows and details");
+              strstr(dump, "FOCUSED OPTION") != NULL &&
+              strstr(dump, "Ace Mode") == NULL && strstr(dump, "Boost") == NULL &&
+              strstr(dump, "\xE2\x80\xA6\"") == NULL,
+          "library Enhanced shows the pinned rows, the Picture rows and the panel, uncut");
     CHECK(strstr(dump, "Keeps slanted surfaces sharp.") == NULL &&
               strstr(dump, "The game's speed and frame rate") == NULL,
           "unfocused rows do not repeat their descriptions");
-    CHECK(activate_flow_button(NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000504u),
+    /* Every tab, on the library's page, with the library Authentic and on a game's page: the
+       strip names the six tabs, the tab lists its parts by name, and focusing a part's row
+       puts that part's name, value and whole sentence in the panel, word for word, at every
+       text size, with the reason under it where the row is dimmed. Nothing on the page ends
+       in an ellipsis. (Before the tabs each row carried its own sentence, and this was one
+       dump of the whole page.) */
+    {
+        static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_OFF,
+                                         FLOW_SETTINGS_ACE_TITLE};
+        static const int text_sizes[] = {100, 125, 150};
+        int saved_text = g_flow_text_size_pct;
+        for (size_t page = 0u; page < sizeof(pages) / sizeof(pages[0]); ++page) {
+            bool title = pages[page] == FLOW_SETTINGS_ACE_TITLE;
+            for (int tab = 0; tab < PLAYER_UI_ENHANCED_GROUP_COUNT; ++tab) {
+                g_enhanced_tab = tab;
+                g_enhanced_focus_id = 0u;
+                CHECK(dump_flow_case_sized(pages[page], 1600, 1200, dump, sizeof(dump)) &&
+                          strstr(dump, "\"PICTURE\"") != NULL &&
+                          strstr(dump, "\"MOTION\"") != NULL &&
+                          strstr(dump, "\"SOUND\"") != NULL &&
+                          strstr(dump, "\"CONTROLS\"") != NULL &&
+                          strstr(dump, "\"ON-SCREEN\"") != NULL &&
+                          strstr(dump, "\"ADVANCED\"") != NULL &&
+                          strstr(dump, "\xE2\x80\xA6\"") == NULL,
+                      "every tab of Settings > Enhanced names the six tabs and cuts nothing");
+                for (int row = 0; row < k_enhanced_shown[tab].count; ++row) {
+                    int part = k_enhanced_shown[tab].parts[row];
+                    char library[48];
+                    char message[200];
+                    const char *note = pages[page] == FLOW_SETTINGS_ACE_OFF
+                        ? "Play mode is Authentic."
+                        : title && enhanced_part_is_ace_only(part) ? "Available only in Ace."
+                                                                     : NULL;
+                    (void)snprintf(library, sizeof(library), "Library (%s)",
+                                   k_enhanced_parts[part].value);
+                    (void)snprintf(message, sizeof(message),
+                                   "page %d lists %s on its %s tab", (int)page,
+                                   k_enhanced_parts[part].name, k_enhanced_shown[tab].tab);
+                    CHECK(strstr(dump, k_enhanced_parts[part].name) != NULL, message);
+                    g_enhanced_focus_id = PLAYER_UI_ID_ENHANCED_PART(part);
+                    for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+                        g_flow_text_size_pct = text_sizes[t];
+                        (void)snprintf(message, sizeof(message),
+                                       "page %d: focusing %s shows its value and whole "
+                                       "description at %d%% text", (int)page,
+                                       k_enhanced_parts[part].name, text_sizes[t]);
+                        CHECK(enhanced_panel_reads(pages[page], 1280, 720,
+                                                   k_enhanced_parts[part].name,
+                                                   title ? library : k_enhanced_parts[part].value,
+                                                   k_enhanced_parts[part].sentence, note, true) &&
+                                  enhanced_panel_reads(pages[page], 960, 540,
+                                                       k_enhanced_parts[part].name,
+                                                       title ? library
+                                                             : k_enhanced_parts[part].value,
+                                                       k_enhanced_parts[part].sentence, note,
+                                                       true),
+                              message);
+                    }
+                    g_flow_text_size_pct = saved_text;
+                    g_enhanced_focus_id = 0u;
+                }
+            }
+        }
+        g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
+    }
+    /* Each part's row is one table row: it names its part, so a new part needs no new op. The
+       first 13 parts' ids are 0x4543 to 0x454F; the 14th (Supersampling) is the second range's
+       first, 0x4680, and every earlier part keeps its id. */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(0) == 0x4543u && PLAYER_UI_ID_ENHANCED_PART(12) == 0x454Fu &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_TWIN) == 0x454Fu &&
+              PLAYER_UI_ID_ENHANCED_PART(13) == 0x4680u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SSAA) == 0x4680u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_MIPS) == 0x4681u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_TEXPACK) == 0x4682u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_PAD) == 0x4683u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SHADOW) == 0x4684u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_PEAK) == 0x4685u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_TEXSCALE) == 0x4686u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SMART2D) == 0x4687u &&
+              PLAYER_PART_COUNT >= 21,
+          "the part rows' ids: 13 in the first range, the rest in the second, in part order");
+    /* Every part's row, on the tab that shows it: the select button steps the part, Left and
+       Right set the value before and after the one marked, and a click on a value sets that
+       value. On a game's page the first value is the library's (choice -1) and an Ace-only
+       part is inert until the game's mode is Ace; with the library Authentic every part's row
+       is inert, its values too. */
+    for (int i = 0; i < PLAYER_PART_COUNT; ++i) {
+        NkUiId row = PLAYER_UI_ID_ENHANCED_PART(i);
+        int words = k_enhanced_words[i].count;
+        int marked = 0;
+        PlayerUiAction part;
+        char message[160];
+        CHECK(enhanced_tab_of(i) >= 0, "every part is on a tab");
+        g_enhanced_tab = enhanced_tab_of(i);
+        for (int word = 0; word < words; ++word) {
+            if (strcmp(k_enhanced_words[i].labels[word], k_enhanced_parts[i].value) == 0) {
+                marked = word;
+            }
+        }
+        part = activate_flow_button(row, FLOW_SETTINGS_ACE);
+        CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART) &&
+                  part.title_index == (size_t)i,
+              "each part's row steps that part");
+        part = enhanced_send(FLOW_SETTINGS_ACE, row, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+        CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+                  part.title_index == (size_t)i && part.choice_index == (marked + 1) % words,
+              "Right on a part's row sets the value after the marked one");
+        part = enhanced_send(FLOW_SETTINGS_ACE, row, NK_UI_EV_NAV, NK_UI_DIR_LEFT);
+        CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+                  part.title_index == (size_t)i &&
+                  part.choice_index == (marked + words - 1) % words,
+              "Left on a part's row sets the value before the marked one");
+        for (int word = 0; word < words; ++word) {
+            part = enhanced_send(FLOW_SETTINGS_ACE, ENHANCED_TEST_CHOICE_ID(i, word),
+                                 NK_UI_EV_ACTIVATE, NK_UI_DIR_NONE);
+            (void)snprintf(message, sizeof(message),
+                           "a click on %s's %s sets that value (got op %d, part %d, value %d)",
+                           k_enhanced_parts[i].name, k_enhanced_words[i].labels[word],
+                           (int)part.primary, (int)part.title_index, part.choice_index);
+            CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+                      part.title_index == (size_t)i && part.choice_index == word,
+                  message);
+            part = enhanced_send(FLOW_SETTINGS_ACE_TITLE, ENHANCED_TEST_CHOICE_ID(i, word + 1),
+                                 NK_UI_EV_ACTIVATE, NK_UI_DIR_NONE);
+            if (enhanced_part_is_ace_only(i)) {
+                CHECK(part.kind == PLAYER_UI_ACTION_NONE,
+                      "outside Ace a click on an Ace-only part's value changes nothing");
+            } else {
+                CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+                          part.title_index == (size_t)i && part.choice_index == word,
+                      "on a game's page a click on a value sets that value for the game");
+            }
+            CHECK(enhanced_send(FLOW_SETTINGS_ACE_OFF, ENHANCED_TEST_CHOICE_ID(i, word),
+                                NK_UI_EV_ACTIVATE, NK_UI_DIR_NONE).kind == PLAYER_UI_ACTION_NONE,
+                  "with the library Authentic a click on a value changes nothing");
+        }
+        part = enhanced_send(FLOW_SETTINGS_ACE_TITLE, ENHANCED_TEST_CHOICE_ID(i, 0),
+                             NK_UI_EV_ACTIVATE, NK_UI_DIR_NONE);
+        if (enhanced_part_is_ace_only(i)) {
+            /* Before the tabs an Ace-only row could be set on a game's page in any mode; the
+               tabs dim it until the game's mode is Ace, so that check is these two. */
+            CHECK(part.kind == PLAYER_UI_ACTION_NONE &&
+                      activate_flow_button(row, FLOW_SETTINGS_ACE_TITLE).kind ==
+                          PLAYER_UI_ACTION_NONE &&
+                      enhanced_send(FLOW_SETTINGS_ACE_TITLE, row, NK_UI_EV_NAV,
+                                    NK_UI_DIR_RIGHT).kind == PLAYER_UI_ACTION_NONE,
+                  "on a game's page outside Ace an Ace-only part's row changes nothing");
+        } else {
+            CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+                      part.title_index == (size_t)i && part.choice_index == -1,
+                  "on a game's page the first value is the library's: it clears the game's own");
+            part = activate_flow_button(row, FLOW_SETTINGS_ACE_TITLE);
+            CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART) &&
+                      part.title_index == (size_t)i,
+                  "each part's row on a game's page steps that part");
+            /* The row follows the library, so the value after the marked one is the part's
+               first own value. */
+            part = enhanced_send(FLOW_SETTINGS_ACE_TITLE, row, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+            CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+                      part.title_index == (size_t)i && part.choice_index == 0,
+                  "Right on a row that follows the library sets the part's first own value");
+        }
+        g_enhanced_mode = "Ace";
+        part = activate_flow_button(row, FLOW_SETTINGS_ACE_TITLE);
+        CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART) &&
+                  part.title_index == (size_t)i,
+              "in Ace every part's row on a game's page steps that part");
+        g_enhanced_mode = NULL;
+        CHECK(activate_flow_button(row, FLOW_SETTINGS_ACE_OFF).kind == PLAYER_UI_ACTION_NONE &&
+                  enhanced_send(FLOW_SETTINGS_ACE_OFF, row, NK_UI_EV_NAV, NK_UI_DIR_RIGHT).kind ==
+                      PLAYER_UI_ACTION_NONE &&
+                  enhanced_send(FLOW_SETTINGS_ACE_OFF, row, NK_UI_EV_NAV, NK_UI_DIR_LEFT).kind ==
+                      PLAYER_UI_ACTION_NONE,
+              "with the library Authentic a part row changes nothing");
+    }
+    g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
+    /* The pinned rows: Left and Right step the preset and set the play mode by its place in
+       the page's list; Frame pacing, on Motion, switches by any of the three. */
+    {
+        PlayerUiAction step = enhanced_send(FLOW_SETTINGS_ACE, PLAYER_UI_ID_SETTINGS_PRESET,
+                                            NK_UI_EV_NAV, NK_UI_DIR_LEFT);
+        CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_CYCLE_PRESET) && step.choice_index < 0,
+              "Left on Graphics preset steps to the preset before");
+        step = enhanced_send(FLOW_SETTINGS_ACE, PLAYER_UI_ID_SETTINGS_PRESET, NK_UI_EV_NAV,
+                             NK_UI_DIR_RIGHT);
+        CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_CYCLE_PRESET) && step.choice_index > 0,
+              "Right on Graphics preset steps to the next preset");
+        step = enhanced_send(FLOW_SETTINGS_ACE, PLAYER_UI_ID_SETTINGS_ACE_MODE, NK_UI_EV_NAV,
+                             NK_UI_DIR_LEFT);
+        CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_PLAY_MODE) && step.choice_index == 0,
+              "Left on the library's Play mode (Enhanced) sets Authentic, the mode before");
+        step = enhanced_send(FLOW_SETTINGS_ACE_TITLE, PLAYER_UI_ID_SETTINGS_ACE_MODE,
+                             NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+        CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_PLAY_MODE) && step.choice_index == 1,
+              "Right on a game's Play mode (Library) sets Authentic, the mode after");
+        g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_MOTION;
+        CHECK(settings_op_is(activate_flow_button(PLAYER_UI_ID_SETTINGS_PACING,
+                                                  FLOW_SETTINGS_ACE),
+                             PLAYER_UI_SETTINGS_TOGGLE_PACING) &&
+                  settings_op_is(enhanced_send(FLOW_SETTINGS_ACE, PLAYER_UI_ID_SETTINGS_PACING,
+                                               NK_UI_EV_NAV, NK_UI_DIR_RIGHT),
+                                 PLAYER_UI_SETTINGS_TOGGLE_PACING) &&
+                  settings_op_is(enhanced_send(FLOW_SETTINGS_ACE_OFF,
+                                               PLAYER_UI_ID_SETTINGS_PACING, NK_UI_EV_NAV,
+                                               NK_UI_DIR_LEFT),
+                                 PLAYER_UI_SETTINGS_TOGGLE_PACING),
+              "Frame pacing, on the Motion tab, switches in every play mode");
+        g_enhanced_focus_id = PLAYER_UI_ID_SETTINGS_PACING;
+        CHECK(enhanced_panel_reads(FLOW_SETTINGS_ACE, 1280, 720, "Frame pacing", "PSP timing",
+                                   "Sets whether this player follows PSP timing or adds no "
+                                   "frame cap.", NULL, true),
+              "focusing Frame pacing shows its value and what it changes");
+        g_enhanced_focus_id = 0u;
+        g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
+    }
+    CHECK(activate_flow_button(ENHANCED_TEST_TAB_ID(PLAYER_UI_ENHANCED_GROUP_MOTION),
                                FLOW_SETTINGS_ACE).primary ==
               (PlayerUiPrimaryAction)PLAYER_UI_SETTINGS_SELECT_ENHANCED_TAB,
-          "a category tab is an accessible focusable control");
-    CHECK(activate_flow_button(ENHANCED_TEST_CHOICE_ID(PLAYER_PART_FILTERING, 0),
-                               FLOW_SETTINGS_ACE).primary ==
-              (PlayerUiPrimaryAction)PLAYER_UI_SETTINGS_SET_ENHANCED_PART,
-          "a compact value choice sets its part");
-    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE_TITLE, 1600, 8000, dump, sizeof(dump)) &&
+          "a category tab is a focusable control that selects its tab");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE_OFF, 1600, 1200, dump, sizeof(dump)) &&
+              strstr(dump, "Authentic") != NULL && strstr(dump, "Texture filtering") != NULL &&
+              strstr(dump, "16x") != NULL,
+          "with the library Authentic the parts keep their values");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE_TITLE, 1600, 1200, dump, sizeof(dump)) &&
               strstr(dump, "For Test Game alone.") != NULL &&
               strstr(dump, "Library (16x)") != NULL &&
-              strstr(dump, "Library (Enhanced)") != NULL,
+              strstr(dump, "Library (Enhanced)") != NULL &&
+              strstr(dump, "Texture pack folder") != NULL &&
+              strstr(dump, "\xE2\x80\xA6\"") == NULL,
           "a title page makes inherited values visible as Library values");
-    CHECK(activate_flow_button(ENHANCED_TEST_CHOICE_ID(PLAYER_PART_FILTERING, 0),
-                               FLOW_SETTINGS_ACE_TITLE).choice_index == -1,
-          "the title's Library choice clears its override");
-    CHECK(activate_flow_button(ENHANCED_TEST_CHOICE_ID(PLAYER_PART_FILTERING, 0),
-                               FLOW_SETTINGS_ACE_OFF).kind == PLAYER_UI_ACTION_NONE,
-          "an option unavailable in Authentic is shown but cannot be changed");
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_ADVANCED;
-    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE_TITLE, 1600, 8000, dump, sizeof(dump)) &&
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE_TITLE, 1600, 1200, dump, sizeof(dump)) &&
               strstr(dump, "ACE ONLY") != NULL,
           "Ace-only options carry a small condition tag");
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
@@ -3543,13 +4028,22 @@ static void test_settings_pages(void) {
           "Settings > Enhanced says what Enhanced is");
     /* A game's own page: whose it is, and each part following the library until it has its
        own value. */
-    CHECK(flow_case_fits(FLOW_SETTINGS_ACE_TITLE, 960, 540, dump, sizeof(dump)),
-          "a game's Enhanced page fits through scrolling at 960 x 540");
+    CHECK(flow_case_fits(FLOW_SETTINGS_ACE_TITLE, 960, 540, dump, sizeof(dump)) &&
+              !flow_case_has_scroll(FLOW_SETTINGS_ACE_TITLE, 960, 540) &&
+              enhanced_list_scrolls(FLOW_SETTINGS_ACE_TITLE, 960, 540),
+          "a game's Enhanced page fits 960 x 540: its rows scroll inside their list");
+    g_enhanced_focus_id = PLAYER_UI_ID_SETTINGS_ACE_MODE;
     CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE_TITLE, 1600, 1000, dump, sizeof(dump)) &&
               strstr(dump, "For Test Game alone.") != NULL &&
               strstr(dump, "Library (Enhanced)") != NULL &&
-              strstr(dump, "Library (16x)") != NULL,
-          "a game's Enhanced page says whose it is and shows inherited values");
+              strstr(dump, "Library (16x)") != NULL &&
+              strstr(dump, "\xE2\x80\xA6\"") == NULL &&
+              enhanced_panel_reads(FLOW_SETTINGS_ACE_TITLE, 1280, 720, "Play mode",
+                                   "Library (Enhanced)",
+                                   "Enhanced adds the parts below. Ace needs a package made "
+                                   "for this game.", NULL, true),
+          "a game's Enhanced page says whose it is, what each part follows and why it has no Ace");
+    g_enhanced_focus_id = 0u;
     /* #2007: "Online mode" has nothing to switch yet, so the options step and the Online and
        developer page say so in one line and offer no switch, News or Reports button. */
     CHECK(dump_flow_case(FLOW_SETTINGS_ONLINE, dump, sizeof(dump)) &&
@@ -4363,85 +4857,231 @@ static void test_tall_title_page_scrolls(void) {
           "the tallest title page fits a 1920 x 1200 window with nothing to scroll");
 }
 
-static bool enhanced_choice_drawn(const NkUiDrawList *draw, int part, int choice) {
-    NkUiId wanted = ENHANCED_TEST_CHOICE_ID(part, choice);
+/* Where Settings > Enhanced drew each row of the active tab, in window pixels: the row's name
+   (left, top) and its value box or boxes (left, right, top), -1 where a row drew none. Rows
+   0 and 1 are Graphics preset and Play mode, then a row a part, then Frame pacing. */
+enum { ENHANCED_PLACE_ROWS = 3 + PLAYER_PART_COUNT };
+typedef struct {
+    int name[ENHANCED_PLACE_ROWS][2];
+    int box[ENHANCED_PLACE_ROWS][3];
+} EnhancedRowPlaces;
+
+static NkUiId enhanced_place_row_id(int row) {
+    return row == 0 ? PLAYER_UI_ID_SETTINGS_PRESET
+           : row == 1 ? PLAYER_UI_ID_SETTINGS_ACE_MODE
+           : row == ENHANCED_PLACE_ROWS - 1 ? PLAYER_UI_ID_SETTINGS_PACING
+           : PLAYER_UI_ID_ENHANCED_PART(row - 2);
+}
+
+static EnhancedRowPlaces enhanced_row_places(FlowCase which) {
+    EnhancedRowPlaces places;
+    NkUi *ui = NULL;
+    /* As wide as the design window and tall enough that no row of a tab is scrolled away. */
+    const NkUiDrawList *draw = flow_case_layout(which, 1280, 1600, &ui);
+    memset(&places, -1, sizeof(places));
     for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
-        if (draw->cmd[i].element_id == wanted) return true;
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        for (int row = 0; row < ENHANCED_PLACE_ROWS; ++row) {
+            NkUiId id = enhanced_place_row_id(row);
+            bool value_box = cmd->element_id == nk_ui_child_id(id, 4u);
+            if (cmd->kind == NK_UI_DRAW_TEXT && cmd->element_id == nk_ui_child_id(id, 2u)) {
+                places.name[row][0] = cmd->bounds[0];
+                places.name[row][1] = cmd->bounds[1];
+            }
+            for (int choice = 0; !value_box && row >= 2 && row < ENHANCED_PLACE_ROWS - 1 &&
+                                 choice < ENHANCED_MAX_WORDS + 1; ++choice) {
+                value_box = cmd->element_id == ENHANCED_TEST_CHOICE_ID(row - 2, choice);
+            }
+            if (!value_box ||
+                (cmd->kind != NK_UI_DRAW_RECTANGLE && cmd->kind != NK_UI_DRAW_BORDER)) {
+                continue;
+            }
+            if (places.box[row][0] < 0 || cmd->bounds[0] < places.box[row][0]) {
+                places.box[row][0] = cmd->bounds[0];
+            }
+            if (cmd->bounds[2] > places.box[row][1]) places.box[row][1] = cmd->bounds[2];
+            if (places.box[row][2] < 0 || cmd->bounds[1] < places.box[row][2]) {
+                places.box[row][2] = cmd->bounds[1];
+            }
+        }
     }
-    return false;
+    if (ui != NULL) nk_ui_destroy(ui);
+    return places;
 }
 
-static int enhanced_choice_draw_order(const NkUiDrawList *draw, int part) {
-    NkUiId wanted = ENHANCED_TEST_CHOICE_ID(part, 0);
-    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
-        if (draw->cmd[i].element_id == wanted) return (int)i;
+/* Review of #2644, D5: the controls of Settings > Enhanced keep the design system's target
+   sizes. On every tab of the library's page and of a game's, at every text size, a row (the
+   focus stop) is at least NK_UI_CONTROL_HEIGHT high and each of its value boxes at least
+   NK_UI_CONTROL_HEIGHT_SMALL. The window is the design width, where a layout unit is a pixel.
+   A row draws its own box only while it has focus, so each row is measured focused. */
+static void test_enhanced_target_sizes(void) {
+    static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_TITLE};
+    static const int text_sizes[] = {100, 125, 150};
+    const int saved_tab = g_enhanced_tab;
+    const NkUiId saved_focus = g_enhanced_focus_id;
+    const int saved_text = g_flow_text_size_pct;
+    memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+    g_enhanced_mode = NULL;
+    for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
+        for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+            for (int row = 0; row < ENHANCED_PLACE_ROWS; ++row) {
+                const NkUiId id = enhanced_place_row_id(row);
+                const char *name = row == 0 ? "Graphics preset" : row == 1 ? "Play mode"
+                                   : row == ENHANCED_PLACE_ROWS - 1 ? "Frame pacing"
+                                   : k_enhanced_parts[row - 2].name;
+                NkUi *ui = NULL;
+                const NkUiDrawList *draw;
+                int row_height = -1;
+                int box_height = -1;
+                char message[200];
+                g_enhanced_tab = row < 2 ? 0
+                                 : row == ENHANCED_PLACE_ROWS - 1 ? PLAYER_UI_ENHANCED_GROUP_MOTION
+                                 : enhanced_tab_of(row - 2);
+                g_enhanced_focus_id = id;
+                g_flow_text_size_pct = text_sizes[t];
+                draw = flow_case_layout(pages[g], 1280, 1600, &ui);
+                for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+                    const NkUiDrawCmd *cmd = &draw->cmd[i];
+                    int high = cmd->bounds[3] - cmd->bounds[1];
+                    bool value_box = cmd->element_id == nk_ui_child_id(id, 4u);
+                    if (cmd->kind != NK_UI_DRAW_RECTANGLE) continue;
+                    if (cmd->element_id == id && (row_height < 0 || high < row_height)) {
+                        row_height = high;
+                    }
+                    for (int choice = 0; !value_box && row >= 2 && row < ENHANCED_PLACE_ROWS - 1 &&
+                                         choice < ENHANCED_MAX_WORDS + 1; ++choice) {
+                        value_box = cmd->element_id == ENHANCED_TEST_CHOICE_ID(row - 2, choice);
+                    }
+                    if (value_box && (box_height < 0 || high < box_height)) box_height = high;
+                }
+                if (ui != NULL) nk_ui_destroy(ui);
+                (void)snprintf(message, sizeof(message),
+                               "page %d, %d%% text: the %s row is %d px high (at least %d) and "
+                               "its smallest value box %d px (at least %d)",
+                               (int)g, text_sizes[t], name, row_height,
+                               (int)NK_UI_CONTROL_HEIGHT, box_height,
+                               (int)NK_UI_CONTROL_HEIGHT_SMALL);
+                CHECK(row_height >= (int)NK_UI_CONTROL_HEIGHT &&
+                          box_height >= (int)NK_UI_CONTROL_HEIGHT_SMALL,
+                      message);
+            }
+        }
     }
-    return -1;
+    g_enhanced_tab = saved_tab;
+    g_enhanced_focus_id = saved_focus;
+    g_flow_text_size_pct = saved_text;
 }
 
-static int enhanced_group_for_part(int part) {
-    for (int i = 0; i < PLAYER_PART_COUNT; ++i) {
-        if (k_enhanced_layout_fixture[i].part == part)
-            return (int)k_enhanced_layout_fixture[i].group;
-    }
-    return -1;
-}
-
-/* The tabs render each part once in its explicit category, keep each row's values
-   together, and keep the option order stable when the selected values change. */
+/* Settings > Enhanced keeps its rows where they are. On every tab of the library's page and
+   of a game's: the tab shows the parts k_enhanced_shown gives it and no other, from the top in
+   that order, every row's name starts at one left edge and every row's values end at one right
+   edge, and no setting moves a row: Smooth motion on with Widescreen off, Smooth motion off
+   while a game's 60 FPS game logic runs, any play mode, or any part of the tab at any of its
+   values. (Before the tabs a wider value could widen the button column and restack every row;
+   a row's values are all drawn now, so a change only moves the mark.) */
 static void test_enhanced_rows_stay_put(void) {
     static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_TITLE};
     int saved_tab = g_enhanced_tab;
     for (int part = 0; part < PLAYER_PART_COUNT; ++part) {
         CHECK(k_enhanced_words[part].count > 0 &&
                   k_enhanced_words[part].count <= ENHANCED_MAX_WORDS,
-              "every Enhanced option has its values in this test");
+              "every Settings > Enhanced part has its words in this test");
         if (k_enhanced_words[part].count <= 0 || k_enhanced_words[part].count > ENHANCED_MAX_WORDS)
             return;
     }
-    for (size_t page = 0u; page < sizeof(pages) / sizeof(pages[0]); ++page) {
-        for (int group = 0; group < PLAYER_UI_ENHANCED_GROUP_COUNT; ++group) {
-            NkUi *ui = NULL;
-            const NkUiDrawList *draw;
-            int previous_order = -1;
-            char message[144];
-            g_enhanced_tab = group;
+    for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
+        for (int tab = 0; tab < PLAYER_UI_ENHANCED_GROUP_COUNT; ++tab) {
+            EnhancedRowPlaces base;
+            int last_top = -1;
+            int left = -1;
+            int right = -1;
+            char message[200];
+            g_enhanced_tab = tab;
             memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
-            draw = flow_case_layout(pages[page], 1280, 1200, &ui);
-            CHECK(draw != NULL, "the active Enhanced category lays out");
+            g_enhanced_mode = NULL;
+            base = enhanced_row_places(pages[g]);
+            CHECK(base.box[0][0] >= 0 && base.box[0][1] > base.box[0][0] &&
+                      base.box[1][0] >= 0 && base.box[1][1] > base.box[1][0],
+                  "Graphics preset and Play mode draw their value boxes on every tab");
+            left = base.name[0][0];
+            right = base.box[0][1];
+            CHECK(base.name[1][0] == left && base.box[1][1] == right &&
+                      base.box[0][0] == base.box[1][0],
+                  "Graphics preset and Play mode line up: one left edge, one value box");
+            /* Exactly the tab's parts, from the top in the order written out above. */
             for (int part = 0; part < PLAYER_PART_COUNT; ++part) {
-                bool expected = enhanced_group_for_part(part) == group;
-                bool visible = enhanced_choice_drawn(draw, part, 0);
+                bool drawn = base.name[2 + part][0] >= 0;
                 (void)snprintf(message, sizeof(message),
-                               "page %u: %s visible=%d expected=%d group=%d active=%d",
-                               (unsigned)page, k_enhanced_parts[part].name,
-                               visible ? 1 : 0, expected ? 1 : 0,
-                               enhanced_group_for_part(part), group);
-                CHECK(visible == expected, message);
+                               "page %d: %s is %s the %s tab", (int)g,
+                               k_enhanced_parts[part].name,
+                               enhanced_tab_of(part) == tab ? "on" : "not on",
+                               k_enhanced_shown[tab].tab);
+                CHECK(drawn == (enhanced_tab_of(part) == tab), message);
             }
-            for (int row = 0; row < PLAYER_PART_COUNT; ++row) {
-                int part = k_enhanced_layout_fixture[row].part;
-                if ((int)k_enhanced_layout_fixture[row].group != group) continue;
-                int order = enhanced_choice_draw_order(draw, part);
-                CHECK(order > previous_order, "part choices follow their declared visual order");
-                previous_order = order;
-                int choice_count = k_enhanced_words[part].count + (page == 1u ? 1 : 0);
-                bool value_control = false;
-                for (int choice = 0; choice < choice_count; ++choice)
-                    if (enhanced_choice_drawn(draw, part, choice)) value_control = true;
+            for (int row = 0; row < k_enhanced_shown[tab].count; ++row) {
+                int place = 2 + k_enhanced_shown[tab].parts[row];
                 (void)snprintf(message, sizeof(message),
-                               "page %u: %s keeps a value control visible",
-                               (unsigned)page, k_enhanced_parts[part].name);
-                CHECK(value_control, message);
+                               "page %d, %s: %s is row %d from the top, lined up with the rest",
+                               (int)g, k_enhanced_shown[tab].tab,
+                               k_enhanced_parts[k_enhanced_shown[tab].parts[row]].name, row + 1);
+                CHECK(base.name[place][1] > last_top && base.name[place][0] == left &&
+                          base.box[place][0] >= 0 && base.box[place][1] == right,
+                      message);
+                last_top = base.name[place][1];
             }
-            if (group == PLAYER_UI_ENHANCED_GROUP_MOTION) {
-                bool pacing = draw_shows(draw, "Frame pacing");
-                CHECK(pacing, "Motion keeps the frame pacing value control");
+            if (tab == PLAYER_UI_ENHANCED_GROUP_MOTION) {
+                int pacing = ENHANCED_PLACE_ROWS - 1;
+                CHECK(base.name[pacing][1] > last_top && base.name[pacing][0] == left &&
+                          base.box[pacing][1] == right,
+                      "Frame pacing is Motion's last row, lined up with the rest");
+            } else {
+                CHECK(base.name[ENHANCED_PLACE_ROWS - 1][0] < 0,
+                      "Frame pacing is on the Motion tab alone");
             }
-            if (ui != NULL) nk_ui_destroy(ui);
+            /* -3: on a game's page, Smooth motion off while the play mode runs the game's 60
+               FPS game logic; -2: Smooth motion on, Widescreen off; -1 and up: the play
+               modes, then each part of the tab at each of its values. */
+            for (int step = -3; step < 4 + PLAYER_PART_COUNT * ENHANCED_MAX_WORDS; ++step) {
+                EnhancedRowPlaces moved;
+                memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+                g_enhanced_mode = NULL;
+                if (step == -3) {
+                    if (pages[g] != FLOW_SETTINGS_ACE_TITLE) continue;
+                    g_enhanced_value[PLAYER_PART_SMOOTH] = k_enhanced_smooth_at_60;
+                    (void)snprintf(message, sizeof(message),
+                                   "page %d, %s: Smooth motion off at 60 FPS moves no row",
+                                   (int)g, k_enhanced_shown[tab].tab);
+                } else if (step == -2) {
+                    g_enhanced_value[PLAYER_PART_SMOOTH] = "On";
+                    g_enhanced_value[PLAYER_PART_WIDE] = "Off";
+                    (void)snprintf(message, sizeof(message),
+                                   "page %d, %s: Smooth motion on (Widescreen off) moves no row",
+                                   (int)g, k_enhanced_shown[tab].tab);
+                } else if (step < 4) {
+                    int count = pages[g] == FLOW_SETTINGS_ACE_TITLE ? 4 : 2;
+                    if (step + 1 >= count) continue;
+                    g_enhanced_mode = pages[g] == FLOW_SETTINGS_ACE_TITLE
+                                          ? k_enhanced_title_modes[step + 1]
+                                          : k_enhanced_library_modes[step + 1];
+                    (void)snprintf(message, sizeof(message),
+                                   "page %d, %s: play mode %s moves no row", (int)g,
+                                   k_enhanced_shown[tab].tab, g_enhanced_mode);
+                } else {
+                    int part = (step - 4) / ENHANCED_MAX_WORDS;
+                    int value = (step - 4) % ENHANCED_MAX_WORDS;
+                    if (enhanced_tab_of(part) != tab || value >= k_enhanced_words[part].count) {
+                        continue;
+                    }
+                    g_enhanced_value[part] = k_enhanced_words[part].labels[value];
+                    (void)snprintf(message, sizeof(message), "page %d: %s at %s moves no row",
+                                   (int)g, k_enhanced_parts[part].name,
+                                   k_enhanced_words[part].labels[value]);
+                }
+                moved = enhanced_row_places(pages[g]);
+                CHECK(memcmp(&moved, &base, sizeof(base)) == 0, message);
+            }
         }
     }
-    g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
     g_enhanced_tab = saved_tab;
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
     g_enhanced_mode = NULL;
@@ -4874,10 +5514,6 @@ static bool flow_case_text_whole(FlowCase which, int width, int height, NkUiId s
             const NkUiTextRun *run = draw->cmd[i].kind == NK_UI_DRAW_TEXT
                                          ? (const NkUiTextRun *)draw->cmd[i].custom : NULL;
             if (run == NULL || run->text == NULL) continue;
-            if ((which == FLOW_SETTINGS_ACE || which == FLOW_SETTINGS_ACE_OFF ||
-                 which == FLOW_SETTINGS_ACE_TITLE) &&
-                draw->cmd[i].element_id !=
-                    NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x001706u)) continue;
             if (run_ends_in_ellipsis(run)) {
                 size_t shown = run->length > 70u ? 70u : run->length;
                 fprintf(stderr, "  cut short at %d x %d, %d%% text: %08X \"...%.*s\"\n", width,
@@ -4940,6 +5576,8 @@ static void test_game_page_text_is_never_cut(void) {
         {FLOW_PAGE_TITLE_LONGEST_AUTHENTIC, authentic_ends, 2u, "Authentic game page", 100},
         {FLOW_PAGE_TITLE_LONGEST_ENHANCED, enhanced_ends, 2u, "Enhanced game page", 100},
         {FLOW_PAGE_TITLE_LONGEST_ACE, ace_ends, 3u, "Ace game page", 100},
+        {FLOW_SETTINGS_ACE, NULL, 0u, "Settings > Enhanced", 100},
+        {FLOW_SETTINGS_ACE_TITLE, NULL, 0u, "a game's Settings > Enhanced", 100},
         {FLOW_SETTINGS_ACCESSIBILITY, NULL, 0u, "Settings > Accessibility", 125},
         {FLOW_SETTINGS_BUILD_CACHE, NULL, 0u, "Settings > Build tools", 125},
         {FLOW_SETTINGS_ONLINE, NULL, 0u, "Settings > Online", 125},
@@ -4973,68 +5611,99 @@ static void test_game_page_text_is_never_cut(void) {
     g_flow_text_size_pct = saved;
 }
 
-/* Texture scaling and its focused details panel at every saved factor. */
+/* Texture scaling and the Smart 2D filter (contract 11.3.3) with the parts on, on Settings >
+   Enhanced and on a game's own page: each row marks its value at every factor, and at the 960 x
+   540 minimum window, at 960 x 544 (the PSP's picture at 2x) and at 1280 x 720, at every text
+   size up to Larger (150%), focusing either row shows its value and what it costs whole in the
+   panel, with no sentence cut to an ellipsis. (Before the tabs each row carried its sentence
+   and the page scrolled to both; a row's sentence is in the panel now, so each is focused.) */
 static void test_texture_scaling_rows(void) {
     static char dump[CASE_DUMP_CAP];
     static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_TITLE};
     static const struct { int w; int h; } sizes[] = {{960, 540}, {960, 544}, {1280, 720}};
     static const int text_sizes[] = {100, 125, 150};
-    static const char *const ends[] = {"xBRZ.", "memory;", "pictures."};
-        int saved_text = g_flow_text_size_pct;
+    int saved = g_flow_text_size_pct;
     int saved_tab = g_enhanced_tab;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
-    g_enhanced_focus_id = ENHANCED_TEST_CHOICE_ID(PLAYER_PART_TEXSCALE, 0);
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
     g_enhanced_mode = NULL;
-    for (size_t page = 0u; page < sizeof(pages) / sizeof(pages[0]); ++page) {
+    for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
+        /* Every factor's word in the panel, with the smart 2D filter on beside it. */
         for (int factor = 2; factor <= 6; ++factor) {
             char value[12], message[160];
             g_enhanced_value[PLAYER_PART_TEXSCALE] = k_enhanced_texscale_labels[factor - 2];
             g_enhanced_value[PLAYER_PART_SMART2D] = "On";
             (void)snprintf(value, sizeof(value), "%dx", factor);
-            (void)snprintf(message, sizeof(message), "page %d: focused Texture scaling shows %s",
-                           (int)page, value);
-            CHECK(dump_flow_case_sized(pages[page], 1600, 3200, dump, sizeof(dump)) &&
-                      strstr(dump, "Texture scaling") != NULL && strstr(dump, value) != NULL &&
-                      strstr(dump, "Redraws") != NULL && strstr(dump, "xBRZ.") != NULL,
+            (void)snprintf(message, sizeof(message),
+                           "page %d: the Texture scaling row reads %dx and the Smart 2D filter row On",
+                           (int)g, factor);
+            g_enhanced_focus_id = PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_TEXSCALE);
+            CHECK(enhanced_panel_reads(pages[g], 1600, 1200, "Texture scaling", value,
+                                       k_enhanced_parts[PLAYER_PART_TEXSCALE].sentence, NULL,
+                                       true),
+                  message);
+            g_enhanced_focus_id = PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SMART2D);
+            CHECK(enhanced_panel_reads(pages[g], 1600, 1200, "Smart 2D filter", "On",
+                                       k_enhanced_parts[PLAYER_PART_SMART2D].sentence, NULL,
+                                       true),
                   message);
         }
-        if (pages[page] == FLOW_SETTINGS_ACE_TITLE) {
+        /* A game's page follows the library until it has its own value. */
+        if (pages[g] == FLOW_SETTINGS_ACE_TITLE) {
             g_enhanced_value[PLAYER_PART_TEXSCALE] = NULL;
             g_enhanced_value[PLAYER_PART_SMART2D] = NULL;
-            CHECK(dump_flow_case_sized(pages[page], 1600, 3200, dump, sizeof(dump)) &&
-                      strstr(dump, "Library (Off)") != NULL,
-                  "the title page shows Texture scaling's inherited value");
-            g_enhanced_value[PLAYER_PART_TEXSCALE] = "6x";
-            g_enhanced_value[PLAYER_PART_SMART2D] = "On";
+            g_enhanced_focus_id = PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_TEXSCALE);
+            CHECK(enhanced_panel_reads(pages[g], 1600, 1200, "Texture scaling", "Library (Off)",
+                                       k_enhanced_parts[PLAYER_PART_TEXSCALE].sentence, NULL,
+                                       true),
+                  "a game's page shows Texture scaling following the library");
+            g_enhanced_focus_id = PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SMART2D);
+            CHECK(enhanced_panel_reads(pages[g], 1600, 1200, "Smart 2D filter", "Library (Off)",
+                                       k_enhanced_parts[PLAYER_PART_SMART2D].sentence, NULL,
+                                       true),
+                  "a game's page shows the Smart 2D filter following the library");
         }
-        for (size_t text = 0u; text < sizeof(text_sizes) / sizeof(text_sizes[0]); ++text) {
-            g_flow_text_size_pct = text_sizes[text];
-            for (size_t size = 0u; size < sizeof(sizes) / sizeof(sizes[0]); ++size) {
-                char message[192];
+        g_enhanced_value[PLAYER_PART_TEXSCALE] = "6x";
+        g_enhanced_value[PLAYER_PART_SMART2D] = "On";
+        for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+            g_flow_text_size_pct = text_sizes[t];
+            for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+                char message[200];
                 (void)snprintf(message, sizeof(message),
-                               "page %d: focused Texture scaling details fit at %d x %d, %d%% text",
-                               (int)page, sizes[size].w, sizes[size].h, text_sizes[text]);
-                CHECK(flow_case_text_whole(pages[page], sizes[size].w, sizes[size].h,
-                                           FLOW_ID_CARD, ends, sizeof(ends) / sizeof(ends[0])),
+                               "page %d with Texture scaling 6x and Smart 2D filter on draws both rows' "
+                               "sentences whole at %d x %d, %d%% text",
+                               (int)g, sizes[s].w, sizes[s].h, text_sizes[t]);
+                g_enhanced_focus_id = PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_TEXSCALE);
+                CHECK(enhanced_panel_reads(pages[g], sizes[s].w, sizes[s].h, "Texture scaling",
+                                           "6x", k_enhanced_parts[PLAYER_PART_TEXSCALE].sentence,
+                                           NULL, true),
+                      message);
+                g_enhanced_focus_id = PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SMART2D);
+                CHECK(enhanced_panel_reads(pages[g], sizes[s].w, sizes[s].h, "Smart 2D filter",
+                                           "On", k_enhanced_parts[PLAYER_PART_SMART2D].sentence,
+                                           NULL, true),
                       message);
             }
         }
-        g_flow_text_size_pct = saved_text;
-        CHECK(flow_case_fits(pages[page], 960, 540, dump, sizeof(dump)) &&
-                  flow_case_has_scroll(pages[page], 960, 540),
-              "Enhanced options scroll inside the dialog at the minimum window size");
+        g_flow_text_size_pct = saved;
+        g_enhanced_focus_id = 0u;
+        CHECK(flow_case_fits(pages[g], 960, 540, dump, sizeof(dump)) &&
+                  enhanced_list_scrolls(pages[g], 960, 540),
+              "the page with both parts on fits the 960 x 540 window; its rows scroll in their list");
     }
-    g_flow_text_size_pct = saved_text;
+    g_flow_text_size_pct = saved;
     g_enhanced_tab = saved_tab;
     g_enhanced_focus_id = 0u;
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
     g_enhanced_mode = NULL;
 }
 
-/* Supersampling's cost note appears in the right details panel when that option has focus. */
+/* Supersampling's guard (owner, 2026-11-15): at a render scale of 3x or 4x the row with 4x picked
+   says what it costs and that games use 2x (PLAYER_SSAA_WARNING), and with 4x anyway the cost line
+   (PLAYER_SSAA_ANYWAY_SENTENCE). On Settings > Enhanced and on a game's own page, at 960 x 540,
+   960 x 544 and 1280 x 720 and every text size up to Larger (150%), the focused row's panel
+   draws each whole, never cut to an ellipsis, and names the row's value. */
 static void test_ssaa_warning_rows(void) {
-    static char dump[CASE_DUMP_CAP];
     static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_TITLE};
     static const struct { int w; int h; } sizes[] = {{960, 540}, {960, 544}, {1280, 720}};
     static const int text_sizes[] = {100, 125, 150};
@@ -5045,40 +5714,34 @@ static void test_ssaa_warning_rows(void) {
         {"4x", PLAYER_SSAA_WARNING},
         {"4x anyway", PLAYER_SSAA_ANYWAY_SENTENCE},
     };
-    static const char *const ends[] = {"About 16", "graphics", "anyway."};
-    int saved_text = g_flow_text_size_pct;
+    int saved = g_flow_text_size_pct;
     int saved_tab = g_enhanced_tab;
     g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
-    g_enhanced_focus_id = ENHANCED_TEST_CHOICE_ID(PLAYER_PART_SSAA, 0);
+    g_enhanced_focus_id = PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SSAA);
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
     memset(g_enhanced_sentence, 0, sizeof(g_enhanced_sentence));
     g_enhanced_mode = NULL;
-    for (size_t choice = 0u; choice < sizeof(cases) / sizeof(cases[0]); ++choice) {
-        g_enhanced_value[PLAYER_PART_SSAA] = cases[choice].value;
-        g_enhanced_sentence[PLAYER_PART_SSAA] = cases[choice].sentence;
-        for (size_t page = 0u; page < sizeof(pages) / sizeof(pages[0]); ++page) {
+    for (size_t k = 0u; k < sizeof(cases) / sizeof(cases[0]); ++k) {
+        g_enhanced_value[PLAYER_PART_SSAA] = cases[k].value;
+        g_enhanced_sentence[PLAYER_PART_SSAA] = cases[k].sentence;
+        for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
             char message[200];
-            (void)snprintf(message, sizeof(message), "page %d: the details panel shows %s",
-                           (int)page, cases[choice].value);
-            CHECK(dump_flow_case_sized(pages[page], 1600, 3200, dump, sizeof(dump)) &&
-                      strstr(dump, cases[choice].value) != NULL && strstr(dump, "About") != NULL &&
-                      strstr(dump, "graphics") != NULL,
-                  message);
-            for (size_t text = 0u; text < sizeof(text_sizes) / sizeof(text_sizes[0]); ++text) {
-                g_flow_text_size_pct = text_sizes[text];
-                for (size_t size = 0u; size < sizeof(sizes) / sizeof(sizes[0]); ++size) {
+            for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+                g_flow_text_size_pct = text_sizes[t];
+                for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
                     (void)snprintf(message, sizeof(message),
-                                   "page %d: the focused Supersampling sentence fits at %d x %d, %d%% text",
-                                   (int)page, sizes[size].w, sizes[size].h, text_sizes[text]);
-                    CHECK(flow_case_text_whole(pages[page], sizes[size].w, sizes[size].h,
-                                               FLOW_ID_CARD, ends,
-                                               sizeof(ends) / sizeof(ends[0])), message);
+                                   "page %d with Supersampling %s draws its sentence whole at %d x %d, "
+                                   "%d%% text",
+                                   (int)g, cases[k].value, sizes[s].w, sizes[s].h, text_sizes[t]);
+                    CHECK(enhanced_panel_reads(pages[g], sizes[s].w, sizes[s].h, "Supersampling",
+                                               cases[k].value, cases[k].sentence, NULL, true),
+                          message);
                 }
             }
-            g_flow_text_size_pct = saved_text;
+            g_flow_text_size_pct = saved;
         }
     }
-    g_flow_text_size_pct = saved_text;
+    g_flow_text_size_pct = saved;
     g_enhanced_tab = saved_tab;
     g_enhanced_focus_id = 0u;
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
@@ -7967,6 +8630,7 @@ int main(int argc, char **argv) {
     test_every_screen_fits_the_window();
     test_tall_title_page_scrolls();
     test_enhanced_rows_stay_put();
+    test_enhanced_target_sizes();
     test_prompt_bar_stays_whole();
     test_game_page_text_is_never_cut();
     test_psp_fonts_page();
