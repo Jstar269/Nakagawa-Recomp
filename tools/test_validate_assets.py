@@ -412,6 +412,20 @@ class SgdStreamTests(ValidatorCliBase):
         self.assertEqual(proc.returncode, 0, _combined(proc))
         self.assertEqual(_count(_combined(proc), "Sound link failures"), 0)
 
+    def test_a_stream_at_the_tree_root_matches_by_full_path(self) -> None:
+        # A root-level file is indexed as "root.at3", not "./root.at3", so a
+        # reference to it is a full-path match and never an "ambiguous" one.
+        archive = _clean_tree(self.tree)
+        _write_bytes(self.tree / "root.at3", b"synthetic root stream")
+        (archive / "bgm.sgd").write_bytes(b"SYNTHETIC\0root.at3\0music/ghost.at3\0")
+        _write_reference(self.ref, {})
+        proc = _run_validator(self.tree, self.ref)
+
+        self.assertEqual(proc.returncode, 1, _combined(proc))
+        out = _combined(proc)
+        self.assertIn("Missing target stream files: music/ghost.at3", out)
+        self.assertNotIn("ambiguous basename matches", out)
+
     def test_stream_link_resolution_classes(self) -> None:
         # Passing link checks print nothing at the CLI level, so the match
         # classes are asserted directly against the checker.
@@ -492,6 +506,63 @@ class GoldenHashTests(ValidatorCliBase):
         self.assertEqual(proc.returncode, 1, _combined(proc))
         self.assertIn("File missing on disk", _combined(proc))
 
+    def test_reference_entry_no_inventory_lists_any_more_fails(self) -> None:
+        # The asset leaves the disk and its inventory together, so no listed item
+        # looks it up; the reference key alone still names it.
+        archive = _clean_tree(self.tree)
+        _write_bytes(archive / "data.bin", b"synthetic data")
+        inv = json.loads((archive / "inventory_map.json").read_text(encoding="utf-8"))
+        inv["other"].append({"name": "data.bin", "path": "data.bin", "size_bytes": 14})
+        _write_json(archive / "inventory_map.json", inv)
+        ref = self.base / "bootstrapped_hashes.json"
+        self.assertEqual(_run_validator(self.tree, ref, "--bootstrap").returncode, 0)
+
+        (archive / "data.bin").unlink()
+        inv["other"] = []
+        _write_json(archive / "inventory_map.json", inv)
+        proc = _run_validator(self.tree, ref)
+
+        self.assertEqual(proc.returncode, 1, _combined(proc))
+        out = _combined(proc)
+        self.assertEqual(_count(out, "Missing from tree"), 1)
+        self.assertIn("archive_a/data.bin", out)
+        self.assertIn("Verification FAILED", out)
+        self.assertNotIn("Verification SUCCESS", out)
+
+    def test_a_whole_inventory_that_disappeared_fails(self) -> None:
+        _clean_tree(self.tree)
+        second = self.tree / "archive_b"
+        _write_bytes(second / "data.bin", b"synthetic data")
+        _write_inventory(self.tree, "archive_b", inv=_producer_inventory(
+            textures=[], sounds=[], other=[{"name": "data.bin", "path": "data.bin", "size_bytes": 14}],
+        ))
+        ref = self.base / "bootstrapped_hashes.json"
+        self.assertEqual(_run_validator(self.tree, ref, "--bootstrap").returncode, 0)
+
+        (second / "data.bin").unlink()
+        (second / "inventory_map.json").unlink()
+        second.rmdir()
+        proc = _run_validator(self.tree, ref)
+
+        self.assertEqual(proc.returncode, 1, _combined(proc))
+        out = _combined(proc)
+        self.assertEqual(_count(out, "Missing from tree"), 1)
+        self.assertIn("archive_b/data.bin", out)
+        self.assertNotIn("Verification SUCCESS", out)
+
+    def test_a_listed_asset_missing_on_disk_is_reported_once(self) -> None:
+        archive = _clean_tree(self.tree)
+        ref = self.base / "bootstrapped_hashes.json"
+        self.assertEqual(_run_validator(self.tree, ref, "--bootstrap").returncode, 0)
+        (archive / "tex.gim").unlink()
+        proc = _run_validator(self.tree, ref)
+
+        self.assertEqual(proc.returncode, 1, _combined(proc))
+        out = _combined(proc)
+        self.assertIn("File missing on disk", out)
+        # Still listed by its inventory, so it is a mismatch, not also missing from tree.
+        self.assertEqual(_count(out, "Missing from tree"), 0)
+
 
 class BootstrapIntegrityTests(ValidatorCliBase):
     def test_bootstrap_with_a_bad_inventory_fails_and_writes_no_manifest(self) -> None:
@@ -504,6 +575,21 @@ class BootstrapIntegrityTests(ValidatorCliBase):
         self.assertEqual(proc.returncode, 1, _combined(proc))
         self.assertFalse(ref.exists(), "a manifest must never be written from an incompletely examined tree")
         self.assertIn("Verification FAILED", _combined(proc))
+
+    def test_bootstrap_with_a_missing_listed_asset_keeps_the_previous_manifest(self) -> None:
+        archive = _clean_tree(self.tree)
+        ref = self.base / "bootstrapped_hashes.json"
+        self.assertEqual(_run_validator(self.tree, ref, "--bootstrap").returncode, 0)
+        previous = ref.read_bytes()
+
+        (archive / "tex.gim").unlink()
+        proc = _run_validator(self.tree, ref, "--bootstrap")
+
+        self.assertEqual(proc.returncode, 1, _combined(proc))
+        out = _combined(proc)
+        self.assertIn("Refusing to bootstrap", out)
+        self.assertIn("File missing on disk", out)
+        self.assertEqual(ref.read_bytes(), previous, "an incomplete manifest must not replace the previous one")
 
 
 # ---------------------------------------------------------------------------

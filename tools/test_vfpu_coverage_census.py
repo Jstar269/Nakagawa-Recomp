@@ -427,6 +427,22 @@ class VfpuCoverageCensusTests(unittest.TestCase):
         self.assertNotIn("PSP-A3-14", ids)
         self.assertIn("PSP-A3-14", self.census["hardware_oracle_boundary"]["context_only_not_inherited"])
 
+    def test_formal_manifest_vfpu_ids_are_the_measured_manifest_rows(self):
+        from verification_ledger import VFPU_MEASURED_SELFTESTS
+
+        manifest = json.loads((TOOLS / "psp_oracle" / "manifest.json").read_text(encoding="utf-8"))
+        expected = sorted(
+            test["id"] for test in manifest["tests"]
+            if test["id"].startswith("PSP-VFPU-") and test["hardware_evidence"] == "MEASURED"
+        )
+        boundary = self.census["hardware_oracle_boundary"]
+        self.assertTrue(expected)
+        self.assertEqual(boundary["formal_manifest_vfpu_ids"], expected)
+        # Every oracle row a measured selftest cites is one of them.
+        cited = {entry["oracle_id"] for entry in VFPU_MEASURED_SELFTESTS.values()}
+        self.assertLessEqual(cited, set(expected))
+        self.assertNotIn("has no VFPU id", boundary["rule"])
+
     def test_encounter_input_accepts_only_words_and_counts(self):
         with tempfile.TemporaryDirectory(prefix="vfpu_encounter_") as tmp:
             path = Path(tmp) / "words.json"
@@ -703,6 +719,20 @@ class VfpuRouteCensusTests(unittest.TestCase):
             report = census.build_route_report(Path("route.elf"), ["--lle-cpu"])
         self.assertEqual(seen[-1], True)
         self.assertTrue(report["classification_lle_cpu"])
+        # codegen's --lle-import-seam implies the LLE CPU, so the route it scanned
+        # was emitted with it and is classified with it.
+        seen.clear()
+        with mock.patch.object(census, "_route_words", words), \
+                mock.patch.object(census, "_classify_aot", spy):
+            report = census.build_route_report(Path("route.elf"), ["--lle-import-seam"])
+        self.assertEqual(seen, [True])
+        self.assertTrue(report["classification_lle_cpu"])
+        seen.clear()
+        with mock.patch.object(census, "_route_words", words), \
+                mock.patch.object(census, "_classify_aot", spy):
+            report = census.build_route_report(Path("route.elf"), ["--static-verify"])
+        self.assertEqual(seen, [False])
+        self.assertFalse(report["classification_lle_cpu"])
 
     def test_route_census_rejects_non_route_input(self):
         with tempfile.TemporaryDirectory(prefix="vfpu_route_bad_") as tmp:

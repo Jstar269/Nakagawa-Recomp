@@ -206,6 +206,38 @@ class VblankLedgerTest(unittest.TestCase):
         self.assertIn("presenting_s=300", out)
         self.assertIn("VBLANK_CHECK: rate PASS", out)
 
+    def test_a_mid_run_second_without_a_present_is_excluded_from_both_sides(self) -> None:
+        # 150 presenting seconds, 10 loading seconds that present nothing while
+        # VBLANK keeps running at 60 episodes each, then 150 more presenting
+        # seconds.  Counting the stall's episodes without its wall time would
+        # read as about 600 phantom episodes of over-delivery.
+        lines = perf_rows([60] * 150).splitlines()
+        total = 60 * 150
+        for _ in range(10):
+            total += 60
+            lines.append(f"{total},1000.5,0.000,0.000,59.970,0,0,0,1000.0")
+        for _ in range(150):
+            total += 60
+            lines.append(f"{total},1000.5,28.000,35.750,59.970,47.0,0.2,7.2,945.0")
+        log = stderr_log(owed=total, coalesced=0, delivered=total, dropped=0,
+                         in_flight=0, masked=0)
+        code, out = self.run_tool("\n".join(lines) + "\n", log)
+        self.assertEqual(code, 0, out)
+        self.assertIn("presenting_s=300", out)
+        self.assertIn("delivered=18000", out)
+        self.assertIn("VBLANK_CHECK: rate PASS", out)
+        cadence = vblank_ledger.measure_cadence(vblank_ledger.read_perf(self.dir / "perf.csv"))
+        assert cadence is not None
+        self.assertEqual(dict(cadence.per_second_counts), {60: 300})
+
+    def test_an_empty_perf_csv_reports_one_presenting_skip_with_its_reason(self) -> None:
+        log = stderr_log(owed=60, coalesced=0, delivered=60, dropped=0, in_flight=0, masked=0)
+        code, out = self.run_tool(PERF_HEADER, log)
+        presenting = [line for line in out.splitlines() if line.startswith("VBLANK_CHECK: presenting")]
+        self.assertEqual(len(presenting), 1, out)
+        self.assertIn("has no rows", presenting[0])
+        self.assertIn("VBLANK_CHECK: rate SKIP", out)
+
     def test_a_malformed_column_is_not_silently_zero(self) -> None:
         body = perf_rows([60] * 300)
         body = body.replace("28.000,35.750,59.970", "28.000,35.750,not-a-number", 1)

@@ -24,7 +24,8 @@ Over the whole run the quantisation averages out and the ratio is exact.
 Checks, each with a number:
 
     presenting   the window judged: seconds that presented a frame, and its wall
-                 time.  The pre-presentation index scan is excluded on both sides.
+                 time.  The pre-presentation index scan, and any later second
+                 that presented nothing, is excluded on both sides.
     identity     owed + coalesced == delivered + dropped + in_flight, from the
                  runtime's own ledger.  A mismatch is a bookkeeping bug, reported
                  as such rather than absorbed into a rate.
@@ -139,27 +140,21 @@ def measure_cadence(rows: list[dict[str, str]]) -> Cadence | None:
     window = presenting_window(rows)
     if not window:
         return None
-    first_index = window[0][0]
-    base = 0
-    if first_index > 0:
-        base = int(_number(rows[first_index - 1], "vblank_total") or 0.0)
     wall_s = 0.0
-    last = base
-    for _, row in window:
-        wall_s += (_number(row, "wall_ms") or 0.0) / 1000.0
-        last = int(_number(row, "vblank_total") or 0.0)
-    # ``vblank_total`` is cumulative, so the window delivered the last reading less
-    # whatever the interval before it had already banked.
-    delivered = last - base
-    # Per-second episode counts are the differences of the cumulative column; they
-    # are what the quantisation argument is about, so they are reported, not
-    # smoothed away.
+    delivered = 0
+    # ``vblank_total`` is cumulative, so a presenting second delivered its reading less
+    # the row before it.  Summing those per-row differences keeps delivered episodes
+    # and wall time over the same rows: a second that presented nothing (the index
+    # scan, or a loading stall mid-run while VBLANK keeps running) is left out of both.
+    # The per-second counts are what the quantisation argument is about, so they are
+    # reported, not smoothed away.
     counts: Counter = Counter()
-    previous = base
-    for row in rows[first_index:]:
-        total = int(_number(row, "vblank_total") or 0.0)
-        counts[total - previous] += 1
-        previous = total
+    for index, row in window:
+        wall_s += (_number(row, "wall_ms") or 0.0) / 1000.0
+        previous = int(_number(rows[index - 1], "vblank_total") or 0.0) if index > 0 else 0
+        count = int(_number(row, "vblank_total") or 0.0) - previous
+        delivered += count
+        counts[count] += 1
     periods = wall_s * SOURCE_HZ
     per_second = [
         (_number(row, "vblank_hz") or 0.0)
@@ -256,10 +251,12 @@ def audit(args: argparse.Namespace) -> Report:
     report = Report()
     perf: Path | None = args.perf
     rows = read_perf(perf) if perf else []
-    if perf and not rows:
-        report.add("presenting", None, f"{perf} has no rows")
     cadence = measure_cadence(rows) if rows else None
-    check_presenting(report, cadence)
+    if perf and not rows:
+        # One presenting row, with the real reason, not a second "no second presented".
+        report.add("presenting", None, f"{perf} has no rows")
+    else:
+        check_presenting(report, cadence)
     check_rate(report, cadence, args.max_ratio, args.min_ratio)
     text = args.stderr.read_text(encoding="utf-8", errors="ignore") if args.stderr else None
     check_identity(report, text)
