@@ -2293,6 +2293,289 @@ static int test_undrawn_command_is_reported(void) {
     return 1;
 }
 
+/* The developer log on a tall window: a hundred long lines, each clamped and
+   then drawn (nk_ui_text of nk_ui_text_clamp), past 16 KB of frame text. The
+   frame is drawn, nothing is reported, the first line's storage holds while
+   more text is added, and a clamp's result is drawn where it is, not copied
+   again. */
+static int test_frame_text_grows(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiTextStyle style = nk_ui_type(NK_UI_TYPE_DATA, 0xFFFFFFFFu);
+    LayoutErrorLog log;
+    NkUiConfig config;
+    NkUiViewport viewport;
+    NkUiLayout layout;
+    NkUi *ui;
+    int frame;
+    memset(&log, 0, sizeof(log));
+    log.all_have_text = true;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    config.display_text = synth_display_text;
+    config.report_error = record_layout_error;
+    config.report_user = &log;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create frame text context");
+    memset(&viewport, 0, sizeof(viewport));
+    viewport.pixel_w = 2560;
+    viewport.pixel_h = 1440;
+    viewport.display_scale = 1.0f;
+    viewport.ui_scale_pct = 100;
+    viewport.text_size_pct = 100;
+    nk_ui_set_viewport(ui, &viewport);
+    memset(&layout, 0, sizeof(layout));
+    layout.width = (NkUiSizing){NK_UI_SIZE_FIXED, 2400.0f, 0.0f, 0.0f};
+    layout.height = (NkUiSizing){NK_UI_SIZE_FIT, 0.0f, 0.0f, 0.0f};
+    layout.direction = NK_UI_LAYOUT_COLUMN;
+    for (frame = 0; frame < 2; ++frame) {
+        const char *first = NULL;
+        unsigned i;
+        nk_ui_begin(ui, 1.0 + frame);
+        CHECK(nk_ui_begin_container(ui, 1u, &layout, NULL), "open the log column");
+        for (i = 0u; i < 100u; ++i) {
+            char line[241];
+            const char *shown;
+            size_t used = (size_t)snprintf(line, sizeof(line), "%03u ", i);
+            while (used + 5u < sizeof(line)) {
+                memcpy(line + used, "word ", 5u);
+                used += 5u;
+            }
+            line[used] = '\0';
+            shown = nk_ui_text_clamp(ui, line, &style, 2400.0f, 1);
+            if (i == 0u) {
+                first = shown;
+                CHECK(nk_ui_frame_text(ui, shown) == shown,
+                      "text already in the frame is not copied again");
+            }
+            nk_ui_text(ui, (NkUiId)(1000u + i), shown, &style);
+        }
+        nk_ui_end_container(ui);
+        CHECK(first != NULL && strncmp(first, "000 word ", 9u) == 0,
+              "the first line keeps its storage while more text is added");
+        CHECK(nk_ui_end(ui) != NULL, "a frame with more than 16 KB of text is drawn");
+        CHECK(log.count == 0, "and nothing is reported");
+    }
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* An Enter pressed just before a held arrow repeats, in one frame's queue:
+   it fires the control that was focused when it was pressed, and the repeat
+   still moves focus. A click released just before an arrow fires the control
+   clicked. */
+static int test_activation_belongs_to_its_focus(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiConfig config;
+    NkUiEvent activate;
+    NkUiEvent repeat;
+    NkUi *ui;
+    int frame;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create activation order context");
+    for (frame = 0; frame < 3; ++frame) (void)draw_button_pair(ui, 10u, frame == 0 ? 10u : 0u);
+    CHECK(nk_ui_focused(ui) == 10u, "the pair opens on its first button");
+    memset(&activate, 0, sizeof(activate));
+    activate.type = NK_UI_EV_ACTIVATE;
+    activate.down = true;
+    memset(&repeat, 0, sizeof(repeat));
+    repeat.type = NK_UI_EV_NAV;
+    repeat.dir = NK_UI_DIR_RIGHT;
+    repeat.down = true;
+    repeat.repeat = true;
+    nk_ui_push_event(ui, &activate);
+    nk_ui_push_event(ui, &repeat);
+    CHECK(draw_button_pair(ui, 10u, 0u) == 10u,
+          "Enter fires the button focused when it was pressed");
+    CHECK(nk_ui_focused(ui) == 11u, "and the arrow after it still moves focus");
+    nk_ui_focus(ui, 10u);
+    (void)draw_button_pair(ui, 10u, 0u);
+    CHECK(nk_ui_focused(ui) == 10u, "focus is back on the first button");
+    push_pointer(ui, 10.0f, 10.0f, true);
+    (void)draw_button_pair(ui, 10u, 0u);
+    push_pointer(ui, 10.0f, 10.0f, false);
+    repeat.repeat = false;
+    nk_ui_push_event(ui, &repeat);
+    CHECK(draw_button_pair(ui, 10u, 0u) == 10u,
+          "a click released before an arrow fires the button clicked");
+    CHECK(nk_ui_focused(ui) == 11u, "and the arrow moves focus on");
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* nk_ui_focus(ui, 0) drops the focus for good: the frame ends on the screen's
+   default control, not on the control that had it. */
+static int test_focus_zero_returns_to_default(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiConfig config;
+    NkUi *ui;
+    int frame;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create focus reset context");
+    for (frame = 0; frame < 3; ++frame) (void)draw_button_pair(ui, 10u, 0u);
+    CHECK(nk_ui_focused(ui) == 10u, "the pair's default is its first button");
+    (void)draw_button_pair(ui, 10u, 11u);
+    (void)draw_button_pair(ui, 10u, 0u);
+    CHECK(nk_ui_focused(ui) == 11u, "focus moves to the second button");
+    nk_ui_focus(ui, 0u);
+    (void)draw_button_pair(ui, 10u, 0u);
+    CHECK(nk_ui_focused(ui) == 10u, "focus 0 returns to the default button");
+    (void)draw_button_pair(ui, 10u, 0u);
+    CHECK(nk_ui_focused(ui) == 10u, "and stays there");
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* A stalled frame under a fast mouse: a press on one button, more held moves
+   onto the other than the queue holds, and the release there. The queue drops
+   moves, never the press, so this drag clicks neither button. */
+static int test_full_queue_keeps_pointer_edges(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiConfig config;
+    NkUi *ui;
+    NkUiId activated = 0u;
+    int frame;
+    int move;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create full queue context");
+    for (frame = 0; frame < 3; ++frame) (void)draw_button_pair(ui, 10u, frame == 0 ? 10u : 0u);
+    push_pointer(ui, 100.0f, 10.0f, true);
+    push_pointer(ui, 100.0f, 10.0f, false);
+    CHECK(draw_button_pair(ui, 10u, 0u) == 11u, "a click at x 100 fires the second button");
+    push_pointer(ui, 10.0f, 10.0f, true);
+    for (move = 0; move < 80; ++move) push_pointer(ui, 100.0f, 10.0f, true);
+    push_pointer(ui, 100.0f, 10.0f, false);
+    for (frame = 0; frame < 3 && activated == 0u; ++frame) {
+        activated = draw_button_pair(ui, 10u, 0u);
+    }
+    CHECK(activated == 0u, "a drag from one button to the other clicks neither");
+    CHECK(nk_ui_focused(ui) == 10u, "the press kept its place in the queue");
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* nk_ui's own limits drop a frame and say why, through report_error, once
+   when they start: a container left open, too many scroll containers. */
+static int test_own_errors_reported(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    LayoutErrorLog log;
+    NkUiConfig config;
+    NkUiLayout layout;
+    NkUi *ui;
+    int frame;
+    memset(&log, 0, sizeof(log));
+    log.all_have_text = true;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    config.report_error = record_layout_error;
+    config.report_user = &log;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create own error context");
+    memset(&layout, 0, sizeof(layout));
+    layout.width = (NkUiSizing){NK_UI_SIZE_FIXED, 100.0f, 0.0f, 0.0f};
+    layout.height = (NkUiSizing){NK_UI_SIZE_FIXED, 100.0f, 0.0f, 0.0f};
+    for (frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 1.0 + frame);
+        CHECK(nk_ui_begin_container(ui, 1u, &layout, NULL), "open a container");
+        CHECK(nk_ui_end(ui) == NULL, "a frame left with a container open is dropped");
+    }
+    CHECK(log.count == 1 && strcmp(log.kinds, "CONTAINER_LEFT_OPEN ") == 0 &&
+          log.fatal == 1 && log.all_have_text,
+          "and reported once, as fatal, with its text");
+    layout.scroll = true;
+    nk_ui_begin(ui, 3.0);
+    {
+        unsigned i;
+        for (i = 0u; i <= NK_UI_SCROLL_MAX; ++i) {
+            if (nk_ui_begin_container(ui, (NkUiId)(10u + i), &layout, NULL)) {
+                nk_ui_end_container(ui);
+            }
+        }
+    }
+    CHECK(nk_ui_end(ui) == NULL, "a frame past the scroll containers it can hold is dropped");
+    CHECK(log.count == 2 && strstr(log.kinds, "SCROLL_CONTAINERS_EXCEEDED ") != NULL,
+          "and the limit is named");
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* A label formatted into a buffer the caller reuses before the frame ends
+   draws what it was given: the text is copied into the frame. */
+static int test_label_copies_text(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiConfig config;
+    NkUiLayout layout;
+    NkUi *ui;
+    char buffer[32];
+    char dump[4096];
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    memset(&layout, 0, sizeof(layout));
+    layout.width = (NkUiSizing){NK_UI_SIZE_FIXED, 400.0f, 0.0f, 0.0f};
+    layout.height = (NkUiSizing){NK_UI_SIZE_FIXED, 100.0f, 0.0f, 0.0f};
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create label copy context");
+    nk_ui_begin(ui, 0.0);
+    CHECK(nk_ui_begin_container(ui, 1u, &layout, NULL), "open label container");
+    strcpy(buffer, "First label");
+    nk_ui_label(ui, 2u, buffer, 0, 16);
+    strcpy(buffer, "Wrong label");
+    nk_ui_end_container(ui);
+    CHECK(nk_ui_end(ui) != NULL, "complete label frame");
+    CHECK(nk_ui_dump(ui, dump, sizeof(dump)) < sizeof(dump), "label dump fits");
+    CHECK(strstr(dump, "First label") != NULL && strstr(dump, "Wrong label") == NULL,
+          "the label draws the text it was given");
+    nk_ui_destroy(ui);
+    return 1;
+}
+
+/* A clamp's input longer than the text it measures (2043 bytes) is cut there
+   and ends with the ellipsis even when the part measured fits, and the cut
+   never splits a character. */
+static int test_clamp_cuts_long_text(void) {
+    static const char ellipsis[] = "\xE2\x80\xA6";
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiTextStyle style = nk_ui_type(NK_UI_TYPE_BODY, 0xFFFFFFFFu);
+    NkUiConfig config;
+    NkUi *ui;
+    char text[2201];
+    const char *shown;
+    size_t length;
+    size_t i;
+    for (i = 0u; i < 1100u; ++i) {
+        text[2u * i] = (char)0xC3;
+        text[2u * i + 1u] = (char)0xA9;
+    }
+    text[2200] = '\0';
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create long clamp context");
+    nk_ui_begin(ui, 0.0);
+    shown = nk_ui_text_clamp(ui, text, &style, 1.0e9f, 1);
+    length = strlen(shown);
+    CHECK(length > sizeof(ellipsis) - 1u && length < sizeof(text) - 1u &&
+          memcmp(shown + length - (sizeof(ellipsis) - 1u), ellipsis, sizeof(ellipsis) - 1u) == 0,
+          "a text past what the clamp measures is cut with an ellipsis");
+    CHECK((length - (sizeof(ellipsis) - 1u)) % 2u == 0u,
+          "the cut ends on a whole character");
+    (void)nk_ui_end(ui);
+    nk_ui_destroy(ui);
+    return 1;
+}
+
 int main(int argc, char **argv) {
     char actual[32768];
     size_t actual_size;
@@ -2314,7 +2597,10 @@ int main(int argc, char **argv) {
         !test_wait_follows_motion() || !test_art_fades_in() ||
         !test_backdrop_rests_and_fades() ||
         !test_layout_debug() || !test_pointer_state_once_a_frame() ||
-        !test_undrawn_command_is_reported()) {
+        !test_undrawn_command_is_reported() || !test_frame_text_grows() ||
+        !test_activation_belongs_to_its_focus() || !test_focus_zero_returns_to_default() ||
+        !test_full_queue_keeps_pointer_edges() || !test_own_errors_reported() ||
+        !test_label_copies_text() || !test_clamp_cuts_long_text()) {
         return 1;
     }
     if (!build_golden_output(actual, sizeof(actual))) {

@@ -13,6 +13,7 @@
 
 #include <limits.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -60,7 +61,29 @@ typedef struct {
 /* Floating layers: a modal card over the page, the focus ring over both. */
 #define NK_UI_Z_MODAL 1
 #define NK_UI_Z_RING 2
+/* Frame text is kept in blocks of at least this many bytes. Clay holds the
+   pointers until nk_ui_end, so a block never moves: when the frame's text
+   outgrows the blocks, another joins the chain. The blocks stay for the next
+   frames. */
 #define NK_UI_FRAME_TEXT_BYTES 16384u
+
+typedef struct NkUiTextBlock {
+    struct NkUiTextBlock *next;
+    size_t capacity;
+    size_t used;
+    char bytes[];
+} NkUiTextBlock;
+
+/* nk_ui's own errors, reported through NkUiConfig.report_error beside Clay's
+   (nk_ui_clay_report_own takes bits 20 to 29). */
+enum {
+    NK_UI_ERROR_FRAME_TEXT = 20,
+    NK_UI_ERROR_SCROLL_MAX,
+    NK_UI_ERROR_CUSTOM_SLOTS,
+    NK_UI_ERROR_OPEN_CONTAINER,
+    NK_UI_ERROR_DRAW,
+    NK_UI_ERROR_EVENT_QUEUE
+};
 
 struct NkUi {
     NkUiHostKind host;
@@ -139,8 +162,8 @@ struct NkUi {
     NkUiPendingWaves waves;
     NkUiCustomSlot custom[NK_UI_CUSTOM_SLOTS];
     size_t custom_count;
-    char frame_text[NK_UI_FRAME_TEXT_BYTES];
-    size_t frame_text_used;
+    NkUiTextBlock *text_blocks;    /* the chain, first block first */
+    NkUiTextBlock *text_block;     /* the block being filled this frame */
     size_t (*display_text)(const char *in, char *out, size_t out_size);
     const NkUiPromptImages *prompt_images;
 };
@@ -183,6 +206,14 @@ NkUiId nk_ui_clay_pointer_target(void *clay, bool (*accept)(void *user, NkUiId i
 bool nk_ui_clay_end(void *clay, NkUiDrawBuffer *draw, float density,
                     float delta_s, NkUiClayPaint paint, void *paint_user);
 size_t nk_ui_dump_draw_list(const NkUiDrawList *list, char *out, size_t cap);
+void nk_ui_clay_report_own(void *clay, unsigned bit, const char *kind, const char *text,
+                           bool fatal);
+
+/* A limit of nk_ui's own drops the frame, named through report_error. */
+static void nk_ui_fail(NkUi *ui, unsigned bit, const char *kind, const char *text) {
+    ui->frame_ok = false;
+    nk_ui_clay_report_own(ui->clay, bit, kind, text, true);
+}
 
 static void nk_ui_consume_event(NkUi *ui, size_t index) {
     if (ui == NULL || index >= ui->event_count) {
@@ -222,6 +253,21 @@ static void nk_ui_send_pointer(NkUi *ui) {
     ui->pointer_sent = true;
 }
 
+/* Focus is about to move to `next` at queue position `before`: an activation
+   queued ahead of that move belongs to the control focused when it was
+   pressed, not to the one the move reaches. */
+static void nk_ui_bind_activations(NkUi *ui, size_t before, NkUiId next) {
+    size_t i;
+    if (next == 0u || next == ui->focused || ui->focused == 0u) {
+        return;
+    }
+    for (i = 0u; i < before; ++i) {
+        if (ui->events[i].type == NK_UI_EV_ACTIVATE && ui->events[i].target == 0u) {
+            ui->events[i].target = ui->focused;
+        }
+    }
+}
+
 static void nk_ui_update_focus_from_events(NkUi *ui) {
     size_t i = 0;
     while (ui != NULL && i < ui->event_count) {
@@ -240,6 +286,7 @@ static void nk_ui_update_focus_from_events(NkUi *ui) {
         } else if (event->type == NK_UI_EV_NAV) {
             focused = nk_ui_focus_move(ui->focus_graph, event->dir);
             if (focused != 0u) {
+                nk_ui_bind_activations(ui, i, focused);
                 ui->focused = focused;
             }
             nk_ui_consume_event(ui, i);
@@ -247,6 +294,7 @@ static void nk_ui_update_focus_from_events(NkUi *ui) {
             focused = nk_ui_focus_cycle(ui->focus_graph,
                                         event->dir == NK_UI_DIR_LEFT);
             if (focused != 0u) {
+                nk_ui_bind_activations(ui, i, focused);
                 ui->focused = focused;
             }
             nk_ui_consume_event(ui, i);
@@ -269,16 +317,19 @@ static void nk_ui_update_focus_from_events(NkUi *ui) {
                 ui->pointer_press_id = focused;
                 ui->press_travel = 0.0f;
                 if (focused != 0u && nk_ui_focus_set(ui->focus_graph, focused)) {
+                    nk_ui_bind_activations(ui, i, focused);
                     ui->focused = focused;
                 }
                 nk_ui_consume_event(ui, i);
             } else if (release && focused != 0u && focused == ui->pointer_press_id &&
                        nk_ui_focus_set(ui->focus_graph, focused)) {
+                nk_ui_bind_activations(ui, i, focused);
                 ui->pointer_press_id = 0u;
                 ui->focused = focused;
                 event->type = NK_UI_EV_ACTIVATE;
                 event->down = true;
                 event->repeat = false;
+                event->target = focused;   /* a click is on the control it lands on */
                 ++i;
             } else {
                 /* Hover and drags stay separate from focus and activation. */
@@ -469,6 +520,11 @@ void nk_ui_destroy(NkUi *ui) {
     nk_ui_clay_destroy(ui->clay);
     nk_ui_focus_graph_destroy(ui->focus_graph);
     nk_ui_draw_buffer_destroy(&ui->draw);
+    while (ui->text_blocks != NULL) {
+        NkUiTextBlock *next = ui->text_blocks->next;
+        free(ui->text_blocks);
+        ui->text_blocks = next;
+    }
     free(ui);
 }
 
@@ -503,15 +559,45 @@ void nk_ui_cancel_press(NkUi *ui) {
 }
 
 void nk_ui_push_event(NkUi *ui, const NkUiEvent *event) {
+    bool down;
+    size_t i;
     if (ui == NULL || event == NULL) {
         return;
     }
     if (ui->event_count == sizeof(ui->events) / sizeof(ui->events[0])) {
-        memmove(ui->events, ui->events + 1,
-                (ui->event_count - 1u) * sizeof(ui->events[0]));
-        --ui->event_count;
+        /* Full (a stalled frame under a fast mouse): a pointer move with the
+           button as it was, and a later pointer event after it, goes first;
+           only its position is lost, never a press or a release. With no
+           such move, the oldest event goes, and that is reported. */
+        size_t drop = ui->event_count;
+        down = ui->pointer_down;
+        for (i = 0u; i < ui->event_count && drop == ui->event_count; ++i) {
+            if (ui->events[i].type != NK_UI_EV_POINTER) {
+                continue;
+            }
+            if (ui->events[i].down == down) {
+                size_t later;
+                bool superseded = event->type == NK_UI_EV_POINTER;
+                for (later = i + 1u; !superseded && later < ui->event_count; ++later) {
+                    superseded = ui->events[later].type == NK_UI_EV_POINTER;
+                }
+                if (superseded) {
+                    drop = i;
+                }
+            }
+            down = ui->events[i].down;
+        }
+        if (drop == ui->event_count) {
+            drop = 0u;
+            nk_ui_clay_report_own(ui->clay, NK_UI_ERROR_EVENT_QUEUE, "EVENT_QUEUE_FULL",
+                                  "The input queue was full: its oldest event was dropped.",
+                                  false);
+        }
+        nk_ui_consume_event(ui, drop);
     }
-    ui->events[ui->event_count++] = *event;
+    ui->events[ui->event_count] = *event;
+    ui->events[ui->event_count].target = 0u;   /* nk_ui's to set */
+    ++ui->event_count;
 }
 
 /* Puts held input back in front of anything that arrived since, in order. */
@@ -607,7 +693,13 @@ void nk_ui_begin(NkUi *ui, double now_s) {
     ui->frame_ok = true;
     memset(&ui->waves, 0, sizeof(ui->waves));
     ui->custom_count = 0u;
-    ui->frame_text_used = 0u;
+    {
+        NkUiTextBlock *block;
+        for (block = ui->text_blocks; block != NULL; block = block->next) {
+            block->used = 0u;
+        }
+        ui->text_block = ui->text_blocks;
+    }
     ui->frame_open = nk_ui_clay_begin(ui->clay);
     if (!ui->frame_open) {
         ui->frame_ok = false;
@@ -651,7 +743,8 @@ static bool nk_ui_open(NkUi *ui, NkUiId id, const NkUiLayout *layout, const NkUi
     ui->container_ids[ui->container_depth] = id;
     if (layout->scroll) {
         if (ui->scroll_count == NK_UI_SCROLL_MAX) {
-            ui->frame_ok = false;
+            nk_ui_fail(ui, NK_UI_ERROR_SCROLL_MAX, "SCROLL_CONTAINERS_EXCEEDED",
+                       "The frame opened more scroll containers than NK_UI_SCROLL_MAX.");
         } else {
             ui->scroll_ids[ui->scroll_count++] = id;
         }
@@ -763,14 +856,14 @@ uint32_t nk_ui_button_text_rgba(const NkUi *ui, uint32_t flags) {
 
 bool nk_ui_take_activation(NkUi *ui, NkUiId id) {
     size_t i;
-    if (ui == NULL || ui->focused != id) {
+    if (ui == NULL) {
         return false;
     }
     for (i = 0; i < ui->event_count; ++i) {
-        NkUiEvent *event = &ui->events[i];
-        if (event->type == NK_UI_EV_ACTIVATE && event->down && !event->repeat) {
-            memmove(event, event + 1, (ui->event_count - i - 1u) * sizeof(*event));
-            --ui->event_count;
+        const NkUiEvent *event = &ui->events[i];
+        if (event->type == NK_UI_EV_ACTIVATE && event->down && !event->repeat &&
+            (event->target != 0u ? event->target : ui->focused) == id) {
+            nk_ui_consume_event(ui, i);
             return true;
         }
     }
@@ -788,8 +881,7 @@ bool nk_ui_take_event(NkUi *ui, NkUiEventType type, NkUiNavDir *dir) {
             if (dir != NULL) {
                 *dir = event->dir;
             }
-            memmove(event, event + 1, (ui->event_count - i - 1u) * sizeof(*event));
-            --ui->event_count;
+            nk_ui_consume_event(ui, i);
             return true;
         }
     }
@@ -801,13 +893,60 @@ void nk_ui_label(NkUi *ui, NkUiId id, const char *text, int font, int size_px) {
     if (ui == NULL || !ui->frame_open || text == NULL || size_px <= 0) {
         return;
     }
-    if (ui->display_text != NULL) {
-        text = nk_ui_frame_text(ui, text);
-    }
+    /* Clay reads the text again when the frame ends: it is kept in the frame. */
+    text = nk_ui_frame_text(ui, text);
     length = strlen(text);
     if (!nk_ui_clay_text(ui->clay, id, text, length, font, size_px, ui->text_color)) {
         ui->frame_ok = false;
     }
+}
+
+/* Whether text lies in this frame's text storage (and so has had the display
+   rules applied already). */
+static bool nk_ui_in_frame_text(const NkUi *ui, const char *text) {
+    const NkUiTextBlock *block;
+    uintptr_t at = (uintptr_t)text;
+    for (block = ui->text_blocks; block != NULL; block = block->next) {
+        uintptr_t start = (uintptr_t)block->bytes;
+        if (at >= start && at - start < block->used) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* `need` bytes of this frame's text storage: in the block being filled, a
+   later one with room, or a new block at the end of the chain. NULL when no
+   memory is left. */
+static char *nk_ui_frame_bytes(NkUi *ui, size_t need) {
+    NkUiTextBlock *block = ui->text_block;
+    NkUiTextBlock **link = &ui->text_blocks;
+    size_t capacity;
+    char *out;
+    while (block != NULL && block->capacity - block->used < need) {
+        block = block->next;
+    }
+    if (block == NULL) {
+        capacity = need > NK_UI_FRAME_TEXT_BYTES ? need : NK_UI_FRAME_TEXT_BYTES;
+        if (capacity > SIZE_MAX - sizeof(NkUiTextBlock)) {
+            return NULL;
+        }
+        block = (NkUiTextBlock *)malloc(sizeof(NkUiTextBlock) + capacity);
+        if (block == NULL) {
+            return NULL;
+        }
+        block->next = NULL;
+        block->capacity = capacity;
+        block->used = 0u;
+        while (*link != NULL) {
+            link = &(*link)->next;
+        }
+        *link = block;
+    }
+    ui->text_block = block;
+    out = &block->bytes[block->used];
+    block->used += need;
+    return out;
 }
 
 const char *nk_ui_frame_text(NkUi *ui, const char *text) {
@@ -816,19 +955,26 @@ const char *nk_ui_frame_text(NkUi *ui, const char *text) {
     if (ui == NULL || !ui->frame_open || text == NULL) {
         return "";
     }
+    if (nk_ui_in_frame_text(ui, text)) {
+        return text;
+    }
     length = strlen(text);
-    if (length >= NK_UI_FRAME_TEXT_BYTES - ui->frame_text_used) {
-        ui->frame_ok = false;
+    out = length < SIZE_MAX ? nk_ui_frame_bytes(ui, length + 1u) : NULL;
+    if (out == NULL) {
+        nk_ui_fail(ui, NK_UI_ERROR_FRAME_TEXT, "FRAME_TEXT_FULL",
+                   "No memory was left for the frame's text.");
         return "";
     }
-    out = &ui->frame_text[ui->frame_text_used];
     if (ui->display_text != NULL) {
-        /* The rewrite never grows its input, so length + 1 bytes hold it. */
-        length = ui->display_text(text, out, length + 1u);
+        /* The rewrite never grows its input, so length + 1 bytes hold it;
+           what it leaves unused goes back to the block. */
+        size_t written = ui->display_text(text, out, length + 1u);
+        if (written < length) {
+            ui->text_block->used -= length - written;
+        }
     } else {
         memcpy(out, text, length + 1u);
     }
-    ui->frame_text_used += length + 1u;
     return out;
 }
 
@@ -908,6 +1054,7 @@ const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *st
     size_t cursor = 0u;
     size_t used = 0u;
     int line = 1;
+    bool truncated = false;
     if (ui == NULL || text == NULL || style == NULL || max_lines < 1 ||
         !(max_width > 0.0f)) {
         return text != NULL ? text : "";
@@ -919,8 +1066,13 @@ const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *st
         text = shown;
     }
     length = strlen(text);
+    /* Only what the buffer holds is measured. A longer text (or one the
+       display rules had to cut to fit `shown`) is cut there, on a character
+       boundary, and always ends with the ellipsis. */
     if (length >= sizeof(out) - sizeof(ellipsis)) {
         length = sizeof(out) - sizeof(ellipsis) - 1u;
+        while (length > 0u && ((unsigned char)text[length] & 0xC0u) == 0x80u) --length;
+        truncated = true;
     }
     /* Greedy word wrap, as Clay wraps; stop when the last allowed line fills. */
     while (cursor < length) {
@@ -936,7 +1088,7 @@ const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *st
         }
         cursor = word_end < length ? word_end + 1u : word_end;
     }
-    if (cursor >= length && (line < max_lines ||
+    if (!truncated && cursor >= length && (line < max_lines ||
         nk_ui_measure_logical(ui, style, text + line_start, length - line_start) <= max_width)) {
         return text == shown ? nk_ui_frame_text(ui, shown) : text;
     }
@@ -1127,6 +1279,8 @@ void nk_ui_text(NkUi *ui, NkUiId id, const char *text, const NkUiTextStyle *styl
     if (resolved.rgba == 0u) {
         resolved.rgba = ui->text_color;
     }
+    /* Text already in the frame (a clamp's or a list line's result) is used
+       where it is, not copied again. */
     stored = nk_ui_frame_text(ui, text);
     if (!nk_ui_clay_text_styled(ui->clay, id, stored, strlen(stored), &resolved)) {
         ui->frame_ok = false;
@@ -1213,8 +1367,14 @@ NkUiPromptStyle nk_ui_prompt_style(const NkUi *ui) {
 }
 
 static NkUiCustomSlot *nk_ui_custom_slot(NkUi *ui) {
-    if (ui == NULL || !ui->frame_open || ui->custom_count >= NK_UI_CUSTOM_SLOTS) {
+    if (ui == NULL || !ui->frame_open) {
         if (ui != NULL) ui->frame_ok = false;
+        return NULL;
+    }
+    if (ui->custom_count >= NK_UI_CUSTOM_SLOTS) {
+        nk_ui_fail(ui, NK_UI_ERROR_CUSTOM_SLOTS, "CUSTOM_SLOTS_EXCEEDED",
+                   "The frame drew more pictures, shapes and prompt glyphs than its "
+                   "custom slots hold.");
         return NULL;
     }
     memset(&ui->custom[ui->custom_count], 0, sizeof(ui->custom[0]));
@@ -1620,7 +1780,8 @@ const NkUiDrawList *nk_ui_end(NkUi *ui) {
         return NULL;
     }
     if (ui->container_depth != 0u) {
-        ui->frame_ok = false;
+        nk_ui_fail(ui, NK_UI_ERROR_OPEN_CONTAINER, "CONTAINER_LEFT_OPEN",
+                   "The frame ended with a container still open.");
         while (ui->container_depth != 0u) {
             nk_ui_clay_close_container(ui->clay);
             --ui->container_depth;
@@ -1632,11 +1793,13 @@ const NkUiDrawList *nk_ui_end(NkUi *ui) {
         NkUiPixelRect bounds = nk_ui_round_rect(ui->waves.rect, ui->scale.density);
         if (!nk_ui_draw_add_custom(&ui->draw, NK_UI_CUSTOM_WAVES,
                                    &ui->waves.command, bounds, ui->waves.id)) {
-            ui->frame_ok = false;
+            nk_ui_fail(ui, NK_UI_ERROR_DRAW, "DRAW_COMMAND_FAILED",
+                       "The draw list refused the waves.");
         }
     }
     if (ui->backdrop.asked && ui->backdrop.fade > 0.0f && !nk_ui_paint_backdrop(ui)) {
-        ui->frame_ok = false;
+        nk_ui_fail(ui, NK_UI_ERROR_DRAW, "DRAW_COMMAND_FAILED",
+                   "The draw list refused the backdrop.");
     }
     if (!ui->backdrop.asked) {
         ui->backdrop.picture = NULL;   /* a frame without it ends it */
@@ -1677,7 +1840,8 @@ const NkUiDrawList *nk_ui_end(NkUi *ui) {
     nk_ui_focus_place(ui->focus_graph, nk_ui_clay_element_rect, nk_ui_layout_scroll, ui->clay);
     if (ui->focus_pending) {
         if (ui->focus_request == 0u) {
-            ui->focused = 0u;
+            /* nk_ui_focus(ui, 0): this frame's scope is entered afresh. */
+            nk_ui_focus_clear(ui->focus_graph);
         } else if (nk_ui_focus_set(ui->focus_graph, ui->focus_request)) {
             ui->focused = ui->focus_request;
         }
@@ -1737,7 +1901,7 @@ void nk_ui_focus(NkUi *ui, NkUiId id) {
     if (ui != NULL) {
         ui->focused = id;
         ui->focus_request = id;
-        ui->focus_pending = id != 0u;
+        ui->focus_pending = true;
         if (id != 0u && nk_ui_focus_set(ui->focus_graph, id)) {
             ui->focus_pending = false;
             ui->focus_request = 0u;

@@ -295,6 +295,8 @@ bool nk_ui_clay_error_kind(int type, const char **kind) {
 /* The error bit of a render command nk_ui does not draw, beside Clay's own
    error types. */
 #define NK_UI_CLAY_UNDRAWN_BIT (1u << 31)
+/* A draw command the draw buffer refused (no memory, too many nested clips). */
+#define NK_UI_CLAY_DRAW_BIT (1u << 30)
 
 /* Records an error for this frame and reports it once a frame, and not again
    while it repeats frame after frame. */
@@ -307,6 +309,23 @@ static void nk_ui_clay_report(NkUiClay *clay, uint32_t bit, NkUiLayoutError repo
     if (!ongoing && clay->report_error != NULL) {
         clay->report_error(clay->report_user, &report);
     }
+}
+
+/* An error nk_ui raises itself (a frame storage or capacity limit), reported
+   as Clay's own are: once when it starts, not again while it repeats. bit
+   names the error: nk_ui's own use 20 to 29, above Clay's types. */
+void nk_ui_clay_report_own(void *opaque_clay, unsigned bit, const char *kind,
+                           const char *text, bool fatal) {
+    NkUiClay *clay = (NkUiClay *)opaque_clay;
+    NkUiLayoutError report;
+    if (clay == NULL || kind == NULL || text == NULL || bit < 20u || bit > 29u) {
+        return;
+    }
+    report.kind = kind;
+    report.text = text;
+    report.text_length = strlen(text);
+    report.fatal = fatal;
+    nk_ui_clay_report(clay, 1u << bit, report);
 }
 
 static void nk_ui_clay_error(Clay_ErrorData error) {
@@ -976,6 +995,13 @@ bool nk_ui_clay_end(void *opaque_clay, NkUiDrawBuffer *draw, float density,
             break;
         }
         }
+    }
+    if (!ok && !clay->failed) {
+        /* The layout was whole, but the draw list could not take a command. */
+        static const char text[] = "The draw list refused a command: out of memory or "
+                                   "clips nested too deep.";
+        NkUiLayoutError report = {"DRAW_COMMAND_FAILED", text, sizeof(text) - 1u, true};
+        nk_ui_clay_report(clay, NK_UI_CLAY_DRAW_BIT, report);
     }
     clay->start_count = 0u;
     restore = clay->previous_context;

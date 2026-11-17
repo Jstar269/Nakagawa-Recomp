@@ -111,7 +111,8 @@ typedef struct {
     bool scroll;
 } NkUiLayout;
 
-/* Scroll containers one frame may hold; a frame that opens more is dropped. */
+/* Scroll containers one frame may hold; a frame that opens more is dropped and
+   reported (SCROLL_CONTAINERS_EXCEEDED). */
 #define NK_UI_SCROLL_MAX 16u
 
 /* A scroll container's state, in logical px: where it is now, and its last layout. */
@@ -202,7 +203,11 @@ typedef struct {
    word or byte that did not fit, an internal error): those are fatal and
    nk_ui_end drops the frame. A duplicate id, a floating element without its
    parent, or a percentage over 100% still lays out a whole frame, so it is
-   drawn and the error is only reported. */
+   drawn and the error is only reported. nk_ui reports its own limits the same
+   way, all fatal: FRAME_TEXT_FULL (no memory for the frame's text),
+   SCROLL_CONTAINERS_EXCEEDED, CUSTOM_SLOTS_EXCEEDED, CONTAINER_LEFT_OPEN and
+   DRAW_COMMAND_FAILED; and one that is not, EVENT_QUEUE_FULL (an input event
+   was dropped). */
 typedef struct {
     const char *kind;   /* Clay's error type without its prefix, e.g. "DUPLICATE_ID" */
     const char *text;   /* Clay's explanation: text_length bytes, not NUL-terminated */
@@ -344,6 +349,10 @@ typedef struct {
     int device;
     NkUiPadFamily pad_family;
     uint32_t codepoint;
+    /* Set by nk_ui, never by a host: the control an NK_UI_EV_ACTIVATE belongs
+       to (the one focused when it was pressed, or clicked), when a later event
+       of its frame moved focus. 0 means the control focused when it is taken. */
+    NkUiId target;
 } NkUiEvent;
 
 enum {
@@ -398,12 +407,16 @@ void nk_ui_end_container(NkUi *ui);
    was queued; the event is consumed. It returns false otherwise, including
    when the button could not be added. */
 bool nk_ui_button(NkUi *ui, NkUiId id, const char *label, uint32_t flags);
+/* A text run in a font and size. The text is copied into the frame, so a
+   temporary buffer is fine. */
 void nk_ui_label(NkUi *ui, NkUiId id, const char *text, int font, int size_px);
 /* A text run with an explicit style. The text is copied into the frame, so a
    temporary buffer is fine. */
 void nk_ui_text(NkUi *ui, NkUiId id, const char *text, const NkUiTextStyle *style);
-/* Copies text into storage that lives until the next nk_ui_begin. Returns ""
-   when the frame arena is full or no frame is open. */
+/* Copies text into storage that lives until the next nk_ui_begin; the storage
+   grows with the frame's text. Text already in that storage is returned as it
+   is. Returns "" when no frame is open, or when the storage cannot grow: that
+   frame is then dropped and reported (FRAME_TEXT_FULL). */
 const char *nk_ui_frame_text(NkUi *ui, const char *text);
 /* Word-wraps text in `style` at max_width logical px and keeps at most
    max_lines lines, ending the last kept line with an ellipsis when text was cut.
@@ -526,6 +539,8 @@ bool nk_ui_laid_out(const NkUi *ui);
    between frames. */
 void nk_ui_set_layout_debug(NkUi *ui, bool enabled);
 NkUiId nk_ui_focused(const NkUi *ui);
+/* Focuses control id. Id 0 drops the focus, and what the active scope
+   remembers, so the frame ends on the scope's default control. */
 void nk_ui_focus(NkUi *ui, NkUiId id);
 size_t nk_ui_dump(const NkUi *ui, char *out, size_t cap);
 

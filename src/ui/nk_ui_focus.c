@@ -338,6 +338,18 @@ void nk_ui_focus_end_frame(NkUiFocusGraph *graph) {
     graph->memory[top] = graph->focused;
 }
 
+void nk_ui_focus_clear(NkUiFocusGraph *graph) {
+    int top;
+    if (graph == NULL) {
+        return;
+    }
+    top = nk_ui_focus_top_scope(graph->entries, graph->count);
+    graph->focused = 0u;
+    if (top >= 0) {
+        graph->memory[top] = 0u;
+    }
+}
+
 NkUiId nk_ui_focus_current(const NkUiFocusGraph *graph) {
     return graph != NULL ? graph->focused : 0u;
 }

@@ -91,6 +91,10 @@ void nk_ui_focus_place(NkUiFocusGraph *graph,
    was active, enters the new one (its remembered id, else a DEFAULT entry, else its
    first enabled entry), and drops focus that no longer exists or became disabled. */
 void nk_ui_focus_end_frame(NkUiFocusGraph *graph);
+/* Drops the focus and what the active scope remembers, so the next
+   nk_ui_focus_end_frame enters that scope afresh: its DEFAULT entry, else its
+   first enabled entry. */
+void nk_ui_focus_clear(NkUiFocusGraph *graph);
 
 NkUiId nk_ui_focus_current(const NkUiFocusGraph *graph);
 /* The active scope of the last completed frame, or -1 when nothing is focusable. */
