@@ -68,11 +68,21 @@
 
 extern uint64_t SDL_GetTicksNS(void);
 
+/* The GE's own 32-bit load. sr_r32 answers a CPU load of the word at 0x04084000 with the GE
+ * status value (recomp.h sr_r32_slow), a CPU-side shim; the GE reads the VRAM bytes there (a
+ * texel, a CLUT word, a framebuffer pixel), so that word is read as two halfwords, which
+ * sr_r16 serves from VRAM with the same read preparation. */
+static uint32_t ge_r32(uint32_t addr) {
+    if ((addr & 0xFFFFFFFCu) == 0x04084000u)
+        return (uint32_t)sr_r16(addr) | ((uint32_t)sr_r16(addr + 2u) << 16);
+    return sr_r32(addr);
+}
+
 /* Keep fixture tracking local to the GE implementation: generated guest code and unrelated
  * HLE memory accesses retain their normal zero-overhead accessors. */
 static uint8_t ge_capture_r8(uint32_t addr) { ge_capture_note_memory(addr, 1); return sr_r8(addr); }
 static uint16_t ge_capture_r16(uint32_t addr) { ge_capture_note_memory(addr, 2); return sr_r16(addr); }
-static uint32_t ge_capture_r32(uint32_t addr) { ge_capture_note_memory(addr, 4); return sr_r32(addr); }
+static uint32_t ge_capture_r32(uint32_t addr) { ge_capture_note_memory(addr, 4); return ge_r32(addr); }
 static void ge_capture_w16(uint32_t addr, uint16_t value) { ge_capture_note_memory(addr, 2); sr_w16(addr, value); }
 static void ge_capture_w32(uint32_t addr, uint32_t value) { ge_capture_note_memory(addr, 4); sr_w32(addr, value); }
 
@@ -109,7 +119,7 @@ static uint32_t ge_vram_cli_read32(uint32_t addr) {
 #else
 #define MEM_R8(a) (g_ge_capture_active ? ge_capture_r8((a)) : sr_r8((a)))
 #define MEM_R16(a) (g_ge_capture_active ? ge_capture_r16((a)) : sr_r16((a)))
-#define MEM_R32(a) (g_ge_capture_active ? ge_capture_r32((a)) : sr_r32((a)))
+#define MEM_R32(a) (g_ge_capture_active ? ge_capture_r32((a)) : ge_r32((a)))
 #define MEM_W16(a, v) (g_ge_capture_active ? ge_capture_w16((a), (uint16_t)(v)) : sr_w16((a), (uint16_t)(v)))
 #define MEM_W32(a, v) (g_ge_capture_active ? ge_capture_w32((a), (uint32_t)(v)) : sr_w32((a), (uint32_t)(v)))
 #endif
@@ -1200,9 +1210,12 @@ static int ge_zbuf_layout_valid(uint32_t base, uint32_t stride) {
                          "depth buffers with bit 6 set are not supported yet: the PSP wrote no depth for zbp 0x0cc040 (2026-10-21), so that placement is unresolved.");
         return 0;
     }
+    /* The surface must lie in the 2 MiB of physical VRAM through the linear 0x040 view: its
+     * accessors copy through SR_HOST_LINEAR, which does not translate the 0x042-0x046
+     * mirrors, so a span past 0x04200000 or based in a mirror would miss VRAM. */
     uint32_t first, end;
     if (!ge_zbuf_guest_span_bounds(base, stride, &first, &end) ||
-        first < SR_VRAM_CPU_BASE || end > SR_VRAM_CPU_END) {
+        first < SR_VRAM_CPU_BASE || end > SR_VRAM_CPU_BASE + 0x00200000u) {
         ge_zbuf_boundary("VRAM_DEPTH_SPAN_UNSUPPORTED",
                          "depth buffers that cross the end of VRAM are not supported yet.");
         return 0;
@@ -1366,10 +1379,13 @@ void ge_replay_restore(const GeState *state, const uint16_t *zbuf) {
     s_zbuf_guest_base = state->zbp ? SR_PHYS(state->zbp) : SR_VRAM_CPU_BASE;
     if (s_zbuf_guest_base < 0x00200000u) s_zbuf_guest_base += SR_VRAM_CPU_BASE;
     s_zbuf_guest_stride = state->zbw ? state->zbw : (state->fbw ? state->fbw : 512u);
-    s_zbuf_guest_valid = s_zbuf_guest_stride <= 512u;
-    s_zbuf_layout_accepted = 0;           /* restored without the layout check */
-    s_zbuf_guest_dirty = s_zbuf_guest_valid;
-    if (s_zbuf_guest_dirty) g_sr_vram_read_pending = 1;
+    /* The captured VRAM already holds the live depth: capture begin materializes a dirty
+     * surface into VRAM before copying it. The captured blob need not be valid or belong to
+     * this zbp and zbw, so the first depth access reloads from the captured VRAM, as the
+     * live run would, instead of trusting the blob. */
+    s_zbuf_guest_valid = 0;
+    s_zbuf_layout_accepted = 0;
+    s_zbuf_guest_dirty = 0;
     if (s_tr_enabled > 0) ge_transition_trace_sync_written();
     s_ge_inited = 1;
     s_sp = 0;
@@ -1547,7 +1563,8 @@ static const uint8_t *ge_ram_span(uint32_t addr, uint32_t bytes) {
 
 /* ge_ram_span, or else a span inside one unswizzled VRAM view (the 0x040 and 0x044 windows):
  * pending GPU writes to it are materialized once here, as sr_r32 does for each word. A span
- * holding the GE status word sr_r32 serves at 0x04084000 stays on the scalar path. */
+ * holding the word at 0x04084000 stays on the scalar path, whose ge_r32 reads it from VRAM
+ * as this one would, not as the CPU's GE status word. */
 static const uint8_t *ge_read_span(uint32_t addr, uint32_t bytes) {
     const uint8_t *ram = ge_ram_span(addr, bytes);
     if (ram) return ram;
@@ -2874,6 +2891,9 @@ void ge_decode_tex_rgba(uint32_t *out) {
                 memset(out, 0, (size_t)ge.tex_w * (size_t)ge.tex_h * 4u);
             return;
         }
+        /* The rows are read through a host pointer, so the capture is told here, as the
+         * scalar accessors tell it (ge_capture.h): the replay has only the pages it noted. */
+        if (g_ge_capture_active) ge_capture_note_memory(source.first, source.total_bytes);
         for (int v = 0; v < ge.tex_h; v++) {
             uint32_t *dst = out + (uint32_t)v * (uint32_t)ge.tex_w;
             ge_direct_row(dst, (const uint8_t *)SR_HOST(source.first + (uint32_t)v * source.row_pitch),
@@ -3448,8 +3468,10 @@ static void compose_px_rgba(int x, int y, int r, int g, int b, int src_a, int st
             r=blend_chan(r,dr,rfa,rfb,eq); g=blend_chan(g,dg,gfa,gfb,eq); b=blend_chan(b,db,bfa,bfb,eq);
         }
     }
-    /* Dither precedes clamping and logic, and applies in clear mode and RGBA8888 too. */
-    if (ge.dither_enable) {
+    /* Dither precedes clamping and logic, and applies in clear mode and RGBA8888 too. A clear
+     * that does not write colour keeps the colour it clears over, so no dither moves it
+     * (no PSP capture has a dithered colour-off clear; this keeps the rule above). */
+    if (ge.dither_enable && !(ge.clear && (ge.clear_mode & 0x100) == 0)) {
         const int dx = s_raster_mutant == GE_RASTER_MUTANT_DITHER_SHIFTED ? x + 1 : x;
         const int dy = s_raster_mutant == GE_RASTER_MUTANT_DITHER_SHIFTED ? y + 1 : y;
         int d=ge.dith[dy&3][dx&3]; r=clamp8(r+d); g=clamp8(g+d); b=clamp8(b+d);
@@ -8450,25 +8472,30 @@ static int ge_signal_fail(const char *name, uint32_t signal_pc, const char *why)
 }
 
 /* A SIGNAL and its END (`addr` is the word after the END). For JUMP, CALL and RET this
- * sets *next to where the list goes on, saving or restoring the caller, and returns 1;
- * for any other behaviour it returns 0 and the list runs on after the END. A JUMP or CALL
- * to an address that is not word-aligned or not readable, a CALL with the list's stack full
- * and a RET with it empty return -1 with the fault recorded: the GE driver reports each,
- * and stops the game on an SDK 2.00 or later title, so the list stops at the SIGNAL. */
+ * sets *next to where the list goes on, saving or restoring the caller, and returns 1.
+ * A JUMP or CALL to an address that is not word-aligned or not readable, a CALL with the
+ * list's stack full and a RET with it empty return -1 with the fault recorded: the GE
+ * driver reports each, and stops the game on an SDK 2.00 or later title, so the list stops
+ * at the SIGNAL. Every other behaviour also returns -1 with a named fault: the handler
+ * behaviours HANDLER_SUSPEND, HANDLER_CONTINUE and HANDLER_PAUSE (0x01-0x03) call the
+ * list's signal callback, and PAUSE parks the list until sceGeContinue, which is not
+ * modelled; running on would skip the callback a title may wait on. No other behaviour is
+ * modelled either (PSP-GE-SIGNAL-001, only CAPTURED, showed the undefined 0x00 and 0x04
+ * leaving the GE busy). */
 static int ge_signal_end(uint32_t signal_op, uint32_t end_data, uint32_t addr, uint32_t *next) {
     static const char *const names[] = {"JUMP", "CALL", "RET", "RJUMP", "RCALL", "OJUMP", "OCALL"};
+    static const char *const handlers[] = {"HANDLER_SUSPEND", "HANDLER_CONTINUE", "HANDLER_PAUSE"};
     const unsigned behavior = (signal_op >> 16) & 0xFFu;
+    const uint32_t signal_pc = addr - 8u;
     if (behavior < 0x10u || behavior > 0x16u) {
-        static unsigned char reported[256];
-        if (!reported[behavior]) {
-            reported[behavior] = 1;
-            fprintf(stderr, "GE: SIGNAL behaviour 0x%02x is not modelled; the list runs on "
-                    "after its END [reported once]\n", behavior);
-        }
-        return 0;
+        const int handler = behavior >= 0x01u && behavior <= 0x03u;
+        char other[24];
+        snprintf(other, sizeof other, "behaviour 0x%02x", behavior);
+        return ge_signal_fail(handler ? handlers[behavior - 1u] : other, signal_pc,
+                              handler ? "signal handler dispatch is not modelled"
+                                      : "this SIGNAL behaviour is not modelled");
     }
     const char *name = names[behavior - 0x10u];
-    const uint32_t signal_pc = addr - 8u;
     if (behavior == 0x12u) {
         if (s_sig_sp == 0) return ge_signal_fail(name, signal_pc, "stack underflow");
         const GeSignalFrame *f = &s_sig_stack[--s_sig_sp];

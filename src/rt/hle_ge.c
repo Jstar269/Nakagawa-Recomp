@@ -315,7 +315,8 @@ static int ge_list_run(int slot, uint32_t pc, int resume, uint32_t *next_pc) {
         if (ge_timing_on()) ge_timing_charge_run();
         char fault[160];
         if (ge_take_signal_fault(fault, sizeof(fault))) {
-            /* The list stopped at a SIGNAL JUMP, CALL or RET the GE driver refuses (ge.c
+            /* The list stopped at a SIGNAL JUMP, CALL or RET the GE driver refuses, or at a
+             * SIGNAL behaviour that is not modelled, such as the handler behaviours (ge.c
              * ge_signal_end): the run stops by name, and the list stays at that SIGNAL. */
             (void)hle_unmodelled_stop(hle_import_name(sr_last_nid), "%s", fault);
             *next_pc = next;

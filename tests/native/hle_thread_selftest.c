@@ -52,6 +52,7 @@ instrumentation is this test's protection against the historical RAM runaway."
 #define HLE_BUILD_ROOT SR_SELFTEST_BUILD_ROOT
 
 #include "ge_shared.h"
+#include "ge_capture.h"      /* the capture a texture decode must tell */
 #include "gpu_sdl3vk/ge_gpu.h"   /* GeGpuFbDescriptor: header-only, no Vulkan */
 #include "sce_kernel_errors.h"
 #include "sched.c" /* white-box fixture setup and observable TCB state */
@@ -30221,6 +30222,60 @@ static void test_ge_raster_cells_match_psp(void) {
     }
 }
 
+/* A clear that writes alpha (stencil) but not colour keeps the colour it clears over
+ * (compose_px_rgba), and dither must not move that kept colour: dither offsets the colour
+ * the pixel writes, and this clear writes none. Before, the kept colour was dithered and
+ * written back. The cells below use the PSP-GE-RASTER-001 list and window, but no PSP
+ * capture has a dithered colour-off clear (its clr-a cells are undithered), so this pins the
+ * software GE's own keep rule, not a PSP measurement. */
+static void test_ge_alpha_only_clear_keeps_colour_under_dither(void) {
+    static const struct gr_cell cells[2] = {
+        {"clr-a-dth565", GR_K_CLEAR, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
+         {0xd3000201u, 0x20000001u}},
+        {"clr-a-dth8888", GR_K_CLEAR, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
+         {0xd3000201u, 0x20000001u}},
+    };
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t list = 0x08900000u, vtx = 0x08904000u, clut = 0x08918000u;
+    const uint32_t fb = 0x04000000u + GR_FB_OFFSET;
+    uint32_t tex[GR_T_COUNT];
+    for (uint32_t t = 0; t < GR_T_COUNT; t++) {
+        tex[t] = 0x08910000u + t * 0x400u;
+        (void)gr_texture(t, (uint8_t *)SR_HOST(tex[t]));
+    }
+    gr_clut((uint8_t *)SR_HOST(clut));
+    for (uint32_t k = 0; k < 2u; k++) {
+        const struct gr_cell *c = &cells[k];
+        memset(SR_HOST(fb), 0, GR_STRIDE * GR_ROWS * 4u);
+        for (uint32_t i = 0; i < GR_N; i++) {
+            const uint32_t at = (GR_WY + i / GR_WW) * GR_STRIDE + GR_WX + i % GR_WW;
+            if (c->psm == 3u) MEM_W32(fb + at * 4u, gr_dst(c, i));
+            else MEM_W16(fb + at * 2u, (uint16_t)gr_dst(c, i));
+        }
+        (void)gr_vertices(c, (uint32_t *)SR_HOST(vtx));
+        (void)gr_list(c, vtx, tex, clut, (uint32_t *)SR_HOST(list));
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = list;
+        const uint32_t qid = sr_syscall(&cpu, NID_SCE_GE_LIST_ENQUEUE);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = qid;
+        int ok = (qid & 0xFF000000u) == 0x35000000u && sr_syscall(&cpu, NID_SCE_GE_LIST_SYNC) == 0u;
+        int alpha_written = c->psm != 3u;
+        for (uint32_t i = 0; i < GR_N; i++) {
+            const uint32_t at = (GR_WY + i / GR_WW) * GR_STRIDE + GR_WX + i % GR_WW;
+            const uint32_t px = c->psm == 3u ? MEM_R32(fb + at * 4u) : (uint32_t)MEM_R16(fb + at * 2u);
+            const uint32_t colour = c->psm == 3u ? 0x00ffffffu : 0xffffu;
+            if ((px & colour) != (gr_dst(c, i) & colour)) ok = 0;
+            if (c->psm == 3u && (px >> 24) != (gr_dst(c, i) >> 24)) alpha_written = 1;
+        }
+        expect(ok && alpha_written, k == 0
+            ? "a dithered alpha-only clear of a 565 target keeps every colour bit"
+            : "a dithered alpha-only clear of an 8888 target writes alpha and keeps every colour bit");
+    }
+}
+
 static void test_ge_guest_sentinel(void) {
     CpuState cpu;
     reset_fixture();
@@ -30957,13 +31012,15 @@ static void test_ge_list_stops_for_a_stronger_thread(void) {
     expect(s_gpp_peek_list == 3u && s_gpp_finishes == 0u && s_gpp_stops == 3u,
            "a peek at a list stopped on the way to a stall address reads that stall");
 
-    /* SIGNAL pairs with the END after it: no stop between them. */
+    /* SIGNAL pairs with the END after it: no stop between them. The pair is a SIGNAL JUMP
+     * to the word after its END, a behaviour the GE models; a handler behaviour (0x01 to
+     * 0x03) is a named stop (test_ge_signal_jump_call_ret). */
     sr_hle_test_ge_lists_reset();
     s_gpp_mode = GPP_STOP_EVERY;
     s_gpp_stops = s_gpp_finishes = 0u;
     MEM_W32(GPP_LIST, 0u);
-    MEM_W32(GPP_LIST + 4u, GPP_SIGNAL_OP | 0x010000u);
-    MEM_W32(GPP_LIST + 8u, GPP_END_OP);
+    MEM_W32(GPP_LIST + 4u, GPP_SIGNAL_OP | 0x100000u | ((GPP_LIST + 12u) >> 16));
+    MEM_W32(GPP_LIST + 8u, GPP_END_OP | ((GPP_LIST + 12u) & 0xffffu));
     MEM_W32(GPP_LIST + 12u, GPP_FINISH_OP);
     MEM_W32(GPP_LIST + 16u, GPP_END_OP);
     gpp_stop_again();
@@ -31657,6 +31714,35 @@ static void test_ge_signal_jump_call_ret(void) {
     (void)gsw_call(NID_SCE_GE_LIST_ENQUEUE, sub2, 0u, 0xffffffffu, 0u);
     expect(sr_hle_test_unmodelled_stops() == stops + 1u,
            "a SIGNAL RET with an empty stack stops the run by name");
+
+    /* The handler behaviours HANDLER_SUSPEND, HANDLER_CONTINUE and HANDLER_PAUSE (0x01 to
+     * 0x03) call the list's signal callback, and 0x03 pauses the list; neither is modelled,
+     * and the undefined 0x00 and 0x04 are not either. Each stops the run by name at the
+     * SIGNAL, the list unfinished. Before, the list ran on after a once-only note and the
+     * callback a title waits on never ran. */
+    static const unsigned handler_behaviours[] = {0x01u, 0x02u, 0x03u, 0x00u, 0x04u};
+    const uint32_t hl = 0x08927800u;
+    int handler_stops_ok = 1;
+    for (size_t k = 0; k < sizeof handler_behaviours / sizeof handler_behaviours[0]; k++) {
+        sr_hle_test_ge_lists_reset();
+        MEM_W32(hl, 0x0e000000u | (handler_behaviours[k] << 16) | 0x1234u);   /* SIGNAL */
+        MEM_W32(hl + 4u, 0x0c000000u);              /* END */
+        MEM_W32(hl + 8u, 0xcd0000bbu);              /* FOG1: reached only if the list runs on */
+        MEM_W32(hl + 12u, 0x0f000000u);             /* FINISH */
+        MEM_W32(hl + 16u, 0x0c000000u);             /* END */
+        MEM_W32(0x08928000u, 0xcd000000u);          /* FOG1 0 */
+        MEM_W32(0x08928004u, 0x0c000000u);
+        (void)ge_run_list(0x08928000u, 0);
+        stops = sr_hle_test_unmodelled_stops();
+        const uint32_t h = gsw_call(NID_SCE_GE_LIST_ENQUEUE, hl, 0u, 0xffffffffu, 0u);
+        if (sr_hle_test_unmodelled_stops() != stops + 1u ||
+            gsw_call(NID_SCE_GE_LIST_SYNC, h, 1u, 0u, 0u) == 0u ||
+            gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) != 0u)
+            handler_stops_ok = 0;
+    }
+    expect(handler_stops_ok,
+           "a SIGNAL handler behaviour (0x01-0x03) or an undefined one (0x00, 0x04) stops the "
+           "run by name at the SIGNAL, and the list does not run on");
     sr_hle_test_set_compiled_sdk_version(0u);
     sr_hle_test_ge_lists_reset();
 }
@@ -33856,6 +33942,120 @@ static void test_ge_block_transfer_span_atomicity(void) {
     free(scratch);
 }
 
+
+/* The software depth surface lies inside the 2 MiB of physical VRAM, seen through the linear
+ * 0x040 view. Its accessors copy it through SR_HOST_LINEAR, which does not translate the
+ * 0x042-0x046 mirrors, so a span that ends past 0x04200000, or one based in a mirror view,
+ * would land in arena bytes no CPU load or VRAM view reads. Each is refused by name
+ * (VRAM_DEPTH_SPAN_UNSUPPORTED); before, any span below 0x04800000 was accepted. */
+static void test_ge_depth_span_stays_inside_vram(void) {
+    reset_fixture();
+    sr_hle_init();
+    GeState *state = ge_state_ptr();
+    state->zbw = 512u;
+    state->zbp = 0x04088000u;                     /* ends at 0x040cc000 */
+    expect(ge_zbuf_ptr() != NULL, "a depth surface inside the 2 MiB of VRAM is accepted");
+    state->zbp = 0x041d0000u;                     /* 272 rows of 1 KiB end past 0x04210000 */
+    expect(ge_zbuf_ptr() == NULL,
+           "a depth surface that runs past the end of the 2 MiB of VRAM is refused");
+    state->zbp = 0x04288000u;                     /* the same placement through the 0x042 view */
+    expect(ge_zbuf_ptr() == NULL,
+           "a depth surface based in a swizzled VRAM mirror view is refused");
+    state->zbp = 0x04088000u;
+    expect(ge_zbuf_ptr() != NULL, "the depth surface inside VRAM is accepted again");
+}
+
+/* A replay starts from the captured VRAM, which already holds the depth the live run had:
+ * capture begin materializes a dirty software depth surface into VRAM before it copies it.
+ * The captured depth blob need not be valid or belong to the state's zbp and zbw (it is all
+ * zeros when the frame drew no depth-tested pixel yet), so a replay must load depth from
+ * the captured VRAM, as the live run does, not trust the blob. Before, restore marked the
+ * blob valid and dirty for the state's layout: the replay depth-tested against it, and the
+ * first CPU read wrote it over the captured VRAM depth. */
+static void test_ge_replay_restore_reloads_depth_from_vram(void) {
+    static uint16_t blob[GE_CAPTURE_ZBUF_WORDS];
+    reset_fixture();
+    sr_hle_init();
+    GeState state = *ge_state_ptr();
+    state.zbp = 0x04088000u;
+    state.zbw = 512u;
+    state.fbw = 512u;
+    /* Depth pixel (0, 0) of that surface: the GE XORs bits 6 and 13 of its address. */
+    const uint32_t depth00 = 0x04088000u ^ 0x2040u;
+    MEM_W16(depth00, 0x1234u);
+    memset(blob, 0, sizeof blob);
+    ge_replay_restore(&state, blob);
+    const uint16_t *z = ge_zbuf_ptr();
+    expect(z != NULL && z[0] == 0x1234u,
+           "a replay depth-tests against the depth in the captured VRAM, not the captured blob");
+    expect(MEM_R16(depth00) == 0x1234u,
+           "a CPU read after a replay restore reads the captured VRAM depth");
+}
+
+/* sr_r32 answers a CPU load of 0x04084000 with the GE status word, a CPU-side shim. The GE
+ * itself reads VRAM there: pixel (0, 264) of an 8888 surface at 0x04000000 with stride 512,
+ * a texel or a CLUT word. LOADCLUT reads a span holding that word through its scalar loads,
+ * so it is the production path that shows which value the GE reads. Before, it loaded the
+ * status word in place of the VRAM word. */
+static void test_ge_reads_vram_under_the_status_word(void) {
+    reset_fixture();
+    sr_hle_init();
+    GeState *state = ge_state_ptr();
+    static const uint8_t vram_word[4] = {0x44u, 0x33u, 0x22u, 0x11u};
+    for (uint32_t i = 0; i < 4u; i++) MEM_W8(0x04084000u + i, vram_word[i]);
+    MEM_W32(0x04084004u, 0x55667788u);
+    memset(state->clutram, 0, sizeof(state->clutram));
+    const uint32_t clut_list = 0x08942000u;
+    MEM_W32(clut_list, (0xb0u << 24) | 0x084000u);          /* CLUTADDR 0x04084000 */
+    MEM_W32(clut_list + 4u, (0xb1u << 24) | 0x040000u);
+    MEM_W32(clut_list + 8u, (0xc4u << 24) | 1u);            /* LOADCLUT: 1 block */
+    MEM_W32(clut_list + 12u, 0x0c000000u);                  /* END */
+    (void)ge_run_list(clut_list, 0);
+    uint32_t first, second;
+    memcpy(&first, &state->clutram[0], 4u);
+    memcpy(&second, &state->clutram[4], 4u);
+    expect(first == 0x11223344u && second == 0x55667788u,
+           "LOADCLUT from 0x04084000 loads the VRAM word there, not the CPU's GE status word");
+}
+
+/* A GE capture keeps every guest page the GE reads (ge_capture.h); the replay has only those.
+ * The GPU backend decodes a texture through ge_decode_tex_rgba, whose linear fast path reads
+ * rows through a host pointer, so it must tell the capture too. Before, a linear 8888 texture
+ * in main RAM decoded during a capture was missing from the fixture, and the replay sampled
+ * zeros. */
+static void test_ge_texture_decode_notes_the_capture(void) {
+    static uint16_t zbuf[GE_CAPTURE_ZBUF_WORDS];
+    static uint32_t out[16u * 4u];
+    reset_fixture();
+    sr_hle_init();
+    GeState *state = ge_state_ptr();
+    const uint32_t tex = 0x08353000u;
+    for (uint32_t i = 0; i < 16u * 4u; i++) MEM_W32(tex + i * 4u, 0xff000000u | (i * 0x010203u));
+    state->tex_addr = tex;
+    state->tex_bufw = 16u;
+    state->tex_fmt = 3u;
+    state->tex_w = 16;
+    state->tex_h = 4;
+    state->tex_swizzle = 0;
+    const char *path = HLE_BUILD_ROOT "/hle_ge_decode_capture.ngef";
+    memset(zbuf, 0, sizeof zbuf);
+    int captured = ge_capture_begin(path, 1u, 0x08942000u, state, zbuf);
+    expect(captured, "a GE capture begins");
+    if (!captured) return;
+    ge_decode_tex_rgba(out);
+    expect(out[5] == (0xff000000u | (5u * 0x010203u)), "the texture decodes during the capture");
+    expect(ge_capture_end(state), "the GE capture is written");
+    GeCaptureFixture fixture;
+    memset(&fixture, 0, sizeof fixture);
+    int noted = 0;
+    if (ge_capture_load(path, &fixture)) {
+        for (uint32_t i = 0; i < fixture.page_count; i++)
+            if (fixture.pages[i].addr == tex) noted = 1;
+        ge_capture_free(&fixture);
+    }
+    (void)remove(path);
+    expect(noted, "a texture the GPU backend decodes during a capture is in the fixture");
+}
 
 /* #1732: a store to plain RAM is inline only while no store instrumentation is armed.
  * Through every view a store must land where the full load reads it, and each armed
@@ -57973,10 +58173,15 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_stall_alias_linear_from_uncached_list();
     test_ge_linear_filter_stays_inside_region();
     test_ge_raster_cells_match_psp();
+    test_ge_alpha_only_clear_keeps_colour_under_dither();
     test_ge_mip_cells_software_contract();
     test_ge_mip_cells_match_psp();
     test_ge_clut_mip_cells_match_psp();
     test_ge_block_transfer_span_atomicity();
+    test_ge_depth_span_stays_inside_vram();
+    test_ge_replay_restore_reloads_depth_from_vram();
+    test_ge_reads_vram_under_the_status_word();
+    test_ge_texture_decode_notes_the_capture();
     test_dcache_maintenance_notifies_renderer();
     test_icache_maintenance_returns_zero_for_every_range();
     test_exit_game_ignores_argument_registers(argc > 0 ? argv[0] : NULL);
