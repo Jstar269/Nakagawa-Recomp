@@ -13,12 +13,10 @@
     "--explicit-package-bases",
     "tools"
   ],
-  "errors_by_module": {
-    "tools/test_ci_paths.py": 4
-  },
+  "errors_by_module": {},
   "mypy_version": "2.4.1",
   "platform": "linux",
   "python_version": "3.15",
   "schema_version": 1,
-  "total_errors": 4
+  "total_errors": 0
 }
