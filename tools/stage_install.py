@@ -19,8 +19,11 @@ The install uses the release layout the player already searches
                                      (the one the executables carry; never a
                                      console icon)
 
-Only a folder this tool created (it holds ``.nakagawa-install.json``) is ever
-replaced, so pointing ``--dest`` at an unrelated folder fails closed. A folder the
+Only a folder this tool created (it holds a ``.nakagawa-install.json`` that passes the
+checks ``--uninstall`` applies) is ever replaced, so pointing ``--dest`` at an unrelated
+folder fails closed. Staging again over a portable install (a ``bin/portable.txt``) moves
+``bin/portable.txt`` and ``bin/data`` into the new ``bin/``, also out of a ``bin.old`` a
+crashed update left, so an update never deletes the user's data. A folder the
 Windows installer set up (it holds ``unins000.exe``) is refused for staging and for
 ``--uninstall`` (``INSTALL_DESTINATION_INSTALLER_OWNED``), and a shortcut that starts a
 different existing copy is never replaced (``INSTALL_SHORTCUT_OTHER_COPY``, checked for
@@ -188,6 +191,10 @@ def _check_destination(dest: Path) -> None:
             f"INSTALL_DESTINATION_NOT_OWNED: {dest} already holds files this tool did not "
             "create; choose an empty or new folder"
         )
+    if dest.is_dir() and (dest / MARKER).is_file():
+        # A file of that name is not proof by itself: staging replaces bin/ and source/, so
+        # the marker must pass the checks uninstall applies before anything is renamed.
+        _read_marker(dest)
     try:
         dest.resolve().relative_to(ROOT.resolve())
     except ValueError:
@@ -195,11 +202,42 @@ def _check_destination(dest: Path) -> None:
     raise InstallError("INSTALL_DESTINATION_INVALID: the install must be outside the source tree")
 
 
-def _replace_owned(staged: Path, final: Path) -> None:
-    """Swap a freshly staged folder into place; the old copy is removed only after."""
+def _carry_entries(old: Path, final: Path, carry: tuple[str, ...]) -> None:
+    """Move each ``carry`` entry of ``old`` into ``final``. One both hold is refused untouched."""
+    for name in carry:
+        source = old / name
+        if not (source.exists() or source.is_symlink()):
+            continue
+        target = final / name
+        if target.exists() or target.is_symlink():
+            raise InstallError(
+                f"INSTALL_PORTABLE_DATA_CONFLICT: both {source} and {target} exist; a crashed update "
+                "left two copies of the portable data. Keep the one you want, move the other out of "
+                "the install, and run the install again")
+        try:
+            source.rename(target)
+        except OSError as exc:
+            raise InstallError(
+                f"INSTALL_IN_USE: {source} could not be moved into {final} ({exc}); close the player "
+                "and run the install again") from exc
+
+
+def _replace_owned(staged: Path, final: Path, carry: tuple[str, ...] = ()) -> None:
+    """Swap a freshly staged folder into place; the old copy is removed only after.
+
+    The ``carry`` entries (the portable marker and data folder in ``bin/``) belong to the user:
+    they move from the replaced copy into the new one before it is removed. A leftover ``.old``
+    copy from a crashed update hands its entries on the same way, so an update never deletes them."""
     old = final.with_name(final.name + ".old")
     if old.exists():
-        shutil.rmtree(old)
+        if carry and any((old / name).exists() or (old / name).is_symlink() for name in carry):
+            if final.exists():
+                _carry_entries(old, final, carry)
+            else:
+                # The crash came between the two renames: the leftover is the live copy.
+                old.rename(final)
+        if old.exists():
+            shutil.rmtree(old)
     if final.exists():
         try:
             final.rename(old)
@@ -210,6 +248,8 @@ def _replace_owned(staged: Path, final: Path) -> None:
             ) from exc
     staged.rename(final)
     if old.exists():
+        if carry:
+            _carry_entries(old, final, carry)
         shutil.rmtree(old)
 
 
@@ -246,11 +286,21 @@ def stage_install(dest: Path, player: Path, *, repo: Path = ROOT,
                 raise InstallError(f"INSTALL_RUNTIME_STAGE_FAILED: {exc}") from exc
             runtime_stage = "STAGED"
         else:
-            staged = []
+            # No DLL closure (the system loader resolves shared libraries), but the player
+            # still needs its UI fonts, the launcher music and the Redump list beside it,
+            # as `make player` stages them on every host.
+            try:
+                staged = [
+                    *stage_runtime_dlls.stage_ui_font_assets(bin_dir, repo_root=repo),
+                    *stage_runtime_dlls.stage_launcher_music(bin_dir, repo_root=repo),
+                    *stage_runtime_dlls.stage_redump_list(bin_dir, repo_root=repo),
+                ]
+            except stage_runtime_dlls.StageError as exc:
+                raise InstallError(f"INSTALL_RUNTIME_STAGE_FAILED: {exc}") from exc
             runtime_stage = "SKIPPED_NOT_PE"
         commit = export_source(repo, stage / "source", revision)
         (stage / "nakagawa.ico").write_bytes(app_icon())
-        _replace_owned(bin_dir, dest / "bin")
+        _replace_owned(bin_dir, dest / "bin", carry=(PORTABLE_DATA_LEAF, PORTABLE_MARKER))
         _replace_owned(stage / "source", dest / "source")
         os.replace(stage / "nakagawa.ico", dest / "nakagawa.ico")
     finally:
@@ -340,11 +390,30 @@ def write_desktop_entry(dest: Path, arguments: str = DEFAULT_ARGUMENTS) -> list[
     return [entry, icon]
 
 
-def _special_folder(name: str, code: str) -> Path:
+#: PowerShell writes redirected output in the console's OEM code page, which neither Python's
+#: ANSI page nor UTF-8 decodes: a user folder with an accented letter came back garbled.
+#: Every script here first switches its output to UTF-8, the encoding it is then read in.
+_UTF8_OUTPUT = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+
+
+def _run_powershell(script: str, code: str, env=None) -> subprocess.CompletedProcess[str]:
+    """Run one PowerShell script with UTF-8 output; its stdout and stderr come back as text.
+
+    The bytes are decoded here, not by ``subprocess``: on Windows its reader thread swallows a
+    decoding error and leaves the output ``None``. Output that is not UTF-8 raises ``code``."""
     result = subprocess.run(
-        [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command",
-         f"[Environment]::GetFolderPath('{name}')"],
-        capture_output=True, text=True, check=False)
+        [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", _UTF8_OUTPUT + script],
+        capture_output=True, env=env, check=False)
+    try:
+        stdout = result.stdout.decode("utf-8")
+        stderr = result.stderr.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise InstallError(f"{code}: PowerShell's output is not UTF-8 ({exc})") from exc
+    return subprocess.CompletedProcess(result.args, result.returncode, stdout, stderr)
+
+
+def _special_folder(name: str, code: str) -> Path:
+    result = _run_powershell(f"[Environment]::GetFolderPath('{name}')", code)
     folder = result.stdout.strip()
     if result.returncode != 0 or not folder:
         raise InstallError(f"{code}: Windows did not report a {name} folder")
@@ -451,9 +520,7 @@ def read_shortcut_app_id(shortcut: Path) -> str:
     if os.name != "nt":
         raise InstallError("INSTALL_SHORTCUT_UNSUPPORTED: shortcuts are read on Windows only")
     environment = {**os.environ, "NK_LNK": _shell_path(shortcut), "NK_APP_ID_CS": _APP_ID_CSHARP}
-    result = subprocess.run(
-        [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", _READ_APP_ID_SCRIPT],
-        capture_output=True, text=True, env=environment, check=False)
+    result = _run_powershell(_READ_APP_ID_SCRIPT, "INSTALL_SHORTCUT_UNREADABLE", environment)
     if result.returncode != 0:
         raise InstallError(
             f"INSTALL_SHORTCUT_UNREADABLE: {shortcut}: {result.stderr.strip()}")
@@ -470,9 +537,8 @@ def read_shortcut_target(shortcut: Path) -> str:
     """The program a .lnk starts, or "" when it cannot be read (Windows only)."""
     if os.name != "nt":
         raise InstallError("INSTALL_SHORTCUT_UNSUPPORTED: shortcuts are read on Windows only")
-    result = subprocess.run(
-        [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", _READ_TARGET_SCRIPT],
-        capture_output=True, text=True, env={**os.environ, "NK_LNK": _shell_path(shortcut)}, check=False)
+    result = _run_powershell(_READ_TARGET_SCRIPT, "INSTALL_SHORTCUT_UNREADABLE",
+                             {**os.environ, "NK_LNK": _shell_path(shortcut)})
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
@@ -514,9 +580,7 @@ def write_shortcut(shortcut: Path, dest: Path, arguments: str = DEFAULT_ARGUMENT
         "NK_APP_ID": APP_USER_MODEL_ID,
         "NK_APP_ID_CS": _APP_ID_CSHARP,
     })
-    result = subprocess.run(
-        [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", _SHORTCUT_SCRIPT],
-        capture_output=True, text=True, env=environment, check=False)
+    result = _run_powershell(_SHORTCUT_SCRIPT, "INSTALL_SHORTCUT_FAILED", environment)
     if result.returncode != 0 or not shortcut.is_file():
         raise InstallError(
             f"INSTALL_SHORTCUT_FAILED: {shortcut} was not written: {result.stderr.strip()}")

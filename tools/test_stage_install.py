@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -48,6 +49,22 @@ def _fixture_repo(root: Path) -> Path:
         subprocess.run(["git", "-C", str(repo), *command], check=True, env=env,
                        capture_output=True)
     return repo
+
+
+def _link_or_copy(source: str, destination: str) -> None:
+    try:
+        os.link(source, destination)
+    except OSError:  # another volume, or no hard links there
+        shutil.copy2(source, destination)
+
+
+def _add_player_assets(repo: Path) -> None:
+    """The committed assets the player needs beside itself, which the Linux install stages from ``repo``."""
+    for relative in (Path("assets") / "fonts" / "ui", Path("assets") / "redump"):
+        shutil.copytree(stage_install.ROOT / relative, repo / relative, copy_function=_link_or_copy)
+    track = repo / stage_runtime_dlls.LAUNCHER_MUSIC_TRACK
+    track.parent.mkdir(parents=True)
+    _link_or_copy(str(stage_install.ROOT / stage_runtime_dlls.LAUNCHER_MUSIC_TRACK), str(track))
 
 
 def _fake_stager(target: Path) -> list[str]:
@@ -105,6 +122,71 @@ class InstallTests(unittest.TestCase):
         self.assertFalse((dest / "bin" / "stale.txt").exists())
         self.assertEqual((dest / "bin" / "nakagawa_player.exe").read_bytes(), b"player v2")
         self.assertFalse((dest / "bin.old").exists())
+
+    @staticmethod
+    def _make_portable(bin_dir: Path) -> None:
+        (bin_dir / "data" / "saves").mkdir(parents=True)
+        (bin_dir / "data" / "saves" / "UCUS00000.sav").write_bytes(b"save")
+        (bin_dir / "portable.txt").write_text("", encoding="utf-8")
+
+    def _assert_portable_kept(self, dest: Path) -> None:
+        self.assertEqual((dest / "bin" / "data" / "saves" / "UCUS00000.sav").read_bytes(), b"save")
+        self.assertTrue((dest / "bin" / "portable.txt").is_file())
+        self.assertEqual((dest / "bin" / "nakagawa_player.exe").read_bytes(), b"player v2")
+        self.assertFalse((dest / "bin.old").exists())
+
+    def test_restaging_a_portable_install_keeps_its_data_and_marker(self):
+        """An update replaces the program in bin/, never the user's portable data beside it."""
+        dest = self.root / "install"
+        stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        self._make_portable(dest / "bin")
+        self.player.write_bytes(b"player v2")
+        stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        self._assert_portable_kept(dest)
+
+    def test_portable_data_a_crashed_update_left_in_bin_old_moves_into_the_new_bin(self):
+        for crash in ("between the renames", "after the swap"):
+            with self.subTest(crash=crash):
+                dest = self.root / crash.replace(" ", "-")
+                self.player.write_bytes(b"player")
+                stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+                self._make_portable(dest / "bin")
+                (dest / "bin").rename(dest / "bin.old")
+                if crash == "after the swap":
+                    (dest / "bin").mkdir()
+                    (dest / "bin" / "nakagawa_player.exe").write_bytes(b"half")
+                self.player.write_bytes(b"player v2")
+                stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+                self._assert_portable_kept(dest)
+
+    def test_two_copies_of_the_portable_data_are_refused_untouched(self):
+        dest = self.root / "install"
+        stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        self._make_portable(dest / "bin")
+        (dest / "bin.old" / "data").mkdir(parents=True)
+        (dest / "bin.old" / "data" / "other.sav").write_bytes(b"other")
+        with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_PORTABLE_DATA_CONFLICT"):
+            stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        self.assertEqual((dest / "bin" / "data" / "saves" / "UCUS00000.sav").read_bytes(), b"save")
+        self.assertEqual((dest / "bin.old" / "data" / "other.sav").read_bytes(), b"other")
+        self.assertEqual([p.name for p in dest.iterdir() if p.name.startswith(".staging")], [])
+
+    def test_a_marker_that_is_not_the_tools_own_is_refused_before_anything_is_replaced(self):
+        """Any folder can hold a file of the marker's name; staging checks it as uninstall does."""
+        for name, text in (("empty", ""), ("foreign", '{"app": "something else"}'),
+                           ("future", json.dumps({"schema_version": 99, "source_commit": "x",
+                                                  "platform": "windows", "player": "bin/a.exe"}))):
+            with self.subTest(marker=name):
+                dest = self.root / f"marker-{name}"
+                (dest / "bin").mkdir(parents=True)
+                (dest / "bin" / "keep.txt").write_text("keep", encoding="utf-8")
+                (dest / "source").mkdir()
+                (dest / stage_install.MARKER).write_text(text, encoding="utf-8")
+                before = sorted(str(path) for path in dest.rglob("*"))
+                with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_MARKER_INVALID"):
+                    stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+                self.assertEqual(sorted(str(path) for path in dest.rglob("*")), before)
+                self.assertEqual((dest / "bin" / "keep.txt").read_text(encoding="utf-8"), "keep")
 
     def test_refuses_a_folder_it_did_not_create(self):
         dest = self.root / "someone-elses"
@@ -223,6 +305,31 @@ class InstallTests(unittest.TestCase):
         stage_install.write_shortcut(link, second)
         self.assertEqual(Path(stage_install.read_shortcut_target(link)),
                          (second / "bin" / "nakagawa_player.exe").resolve())
+
+    @unittest.skipUnless(os.name == "nt", "Windows shortcuts")
+    def test_a_copy_in_a_folder_with_an_accented_letter_is_read_back_exactly(self):
+        """PowerShell's redirected output was decoded in the wrong code page: the target of a copy under such a
+        folder came back garbled (or as a decoding error), so the other-copy refusal was skipped."""
+        first, second = self.root / "Caf\u00e9 \u00fc\u00df", self.root / "second"
+        for dest in (first, second):
+            (dest / "bin").mkdir(parents=True)
+            (dest / "bin" / "nakagawa_player.exe").write_bytes(b"MZ")
+            (dest / "nakagawa.ico").write_bytes(b"ico")
+        link = self.root / "Nakagawa Recomp.lnk"
+        stage_install.write_shortcut(link, first)
+        self.assertEqual(stage_install.read_shortcut_target(link),
+                         str((first / "bin" / "nakagawa_player.exe").resolve()))
+        with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_SHORTCUT_OTHER_COPY"):
+            stage_install.write_shortcut(link, second)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell")
+    def test_powershell_output_is_read_as_utf8(self):
+        """The special folders (Desktop, Programs) are read through the same runner."""
+        folder = "C:\\Users\\Caf\u00e9\\Desktop"
+        result = stage_install._run_powershell(
+            "$env:NK_PROBE", "INSTALL_TEST", {**os.environ, "NK_PROBE": folder})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), folder)
 
 
 class ShortcutRefusalThroughMainTests(unittest.TestCase):
@@ -406,6 +513,7 @@ class LinuxInstallTests(unittest.TestCase):
         self.addCleanup(self._temp.cleanup)
         self.root = Path(self._temp.name)
         self.repo = _fixture_repo(self.root)
+        _add_player_assets(self.repo)
         self.player = self.root / "nakagawa_player"
         self.player.write_bytes(b"player")
         # A space in the data home exercises quoting of every path the entry holds.
@@ -447,11 +555,27 @@ class LinuxInstallTests(unittest.TestCase):
         dest = self.root / "install"
         record = stage_install.stage_install(dest, self.player, repo=self.repo)
         self.assertEqual(record["runtime_stage"], "SKIPPED_NOT_PE")
-        self.assertEqual(record["runtime_files"], [])
+        self.assertFalse([name for name in record["runtime_files"] if name.lower().endswith(".dll")])
         self.assertEqual(record["player"], "bin/nakagawa_player")
         self.assertTrue((dest / "bin" / "nakagawa_player").is_file())
-        self.assertEqual([p.name for p in (dest / "bin").iterdir()], ["nakagawa_player"])
+        self.assertEqual(sorted(p.name for p in (dest / "bin").iterdir()), ["assets", "nakagawa_player"])
         self.assertTrue((dest / "source" / "tools" / "nk_cli.py").is_file())
+
+    def test_linux_install_carries_the_launcher_fonts_music_and_redump_list(self):
+        """The player reads its UI fonts from beside itself; without them the launcher is unavailable."""
+        dest = self.root / "install"
+        record = stage_install.stage_install(dest, self.player, repo=self.repo)
+        fonts = sorted(path.relative_to(self.repo / "assets" / "fonts" / "ui").as_posix()
+                       for path in (self.repo / "assets" / "fonts" / "ui").rglob("*") if path.is_file())
+        self.assertTrue(fonts)
+        for font in fonts:
+            self.assertTrue((dest / "bin" / "assets" / "fonts" / "ui" / font).is_file(), font)
+        self.assertTrue((dest / "bin" / stage_runtime_dlls.LAUNCHER_MUSIC_TRACK).is_file())
+        self.assertTrue((dest / "bin" / "assets" / "redump" / "redump-psp.zip").is_file())
+        self.assertIn("assets/redump/redump-psp.zip", record["runtime_files"])
+        self.assertIn(stage_runtime_dlls.LAUNCHER_MUSIC_TRACK.as_posix(), record["runtime_files"])
+        # The marker it writes still passes the uninstall checks.
+        self.assertIn(dest / "bin", stage_install.plan_uninstall(dest)["remove"])
 
     def test_desktop_entry_is_a_parsable_ini_with_quoted_exec(self):
         dest = self.root / "Nakagawa Recomp"
