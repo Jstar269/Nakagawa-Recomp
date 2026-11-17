@@ -3,7 +3,8 @@
 Portable H.264 video decoder for the Nakagawa recomp runtime (PSMF movies on Linux and
 Android; Windows keeps Media Foundation). The decoder is FFmpeg's libavcodec H.264 decoder,
 imported byte-exact together with the libavcodec/libavutil framework files it needs, built
-from generic C only. A thin C API written for this project (`nk_h264_api.h`) wraps it.
+from generic C only. One imported file, `libavcodec/h264_slice.c`, carries two FFmpeg
+release/4.4 security and robustness fixes as a LOCAL DELTA (see "LOCAL DELTAs" below). A thin C API written for this project (`nk_h264_api.h`) wraps it.
 
 Decision: maintainer, 2026-10-24, on issue #283 (pinned FFmpeg H.264 subset, following the
 `src/rt/atrac3p/` pattern, as PPSSPP does).
@@ -45,8 +46,11 @@ decoder runs its C DSP paths, so output is the reference bit-exact result on eve
 Legend:
 
 - `imported byte-identical` — working-tree content hash (`git hash-object`, LF checkout) equals
-  the upstream n4.4 blob hash. There are no `imported + LOCAL DELTA` files: the build is
-  adapted by the authored files below and by compiler flags, not by editing upstream.
+  the upstream n4.4 blob hash. The build is adapted by the authored files below and by
+  compiler flags, not by editing upstream.
+- `imported + LOCAL DELTA` — the upstream n4.4 blob (its SHA is listed), modified only by the
+  upstream fixes recorded in "LOCAL DELTAs" below; each change is marked `LOCAL DELTA` in the
+  file, whose header carries a dated modification note.
 - `AUTHORED` — written for this project. `n/a` upstream counterpart: no such file exists in
   the n4.4 tree (configure- or script-generated files and the API layer).
 
@@ -123,7 +127,7 @@ Legend:
 | `libavcodec/h264_refs.c` | imported byte-identical | `dae8bd278adbe7ab14cbcb64a308ba71f12bbcc3` |
 | `libavcodec/h264_sei.c` | imported byte-identical | `ca2ca59e1f5482c59b7d302ffd6ad0b1f757d848` |
 | `libavcodec/h264_sei.h` | imported byte-identical | `14cc559361d614a4e943e9b47fa9685155c28874` |
-| `libavcodec/h264_slice.c` | imported byte-identical | `62f7a61aed9af051c78ee6202f386c999c1dbd4b` |
+| `libavcodec/h264_slice.c` | imported + LOCAL DELTA | `62f7a61aed9af051c78ee6202f386c999c1dbd4b` |
 | `libavcodec/h264addpx_template.c` | imported byte-identical | `9a1e6a2f2f603270b9b32a5c12c0108412a329d4` |
 | `libavcodec/h264chroma.c` | imported byte-identical | `c2f1f30f5a922bfdf2fa41e7bd7f97da6499653f` |
 | `libavcodec/h264chroma.h` | imported byte-identical | `5c89fd12df61bfce89d3acd481d19367669a73b7` |
@@ -278,6 +282,29 @@ Legend:
 | `libavutil/wchar_filename.h` | imported byte-identical | `142d50e7c3c91b70ba70b254fb135d22d38b037f` |
 | `LICENSE.LGPLv2.1.txt` | imported byte-identical (`COPYING.LGPLv2.1`) | `58af0d3787aec7d6f8d833535d64879156e7ec23` |
 
+## LOCAL DELTAs (imported files with local modification)
+
+### `libavcodec/h264_slice.c`
+
+Modified 2026-11-17 (maintainer-approved new bytes, audit 2026-11-17). Two commits from FFmpeg's
+`release/4.4` branch are applied verbatim to the n4.4 blob; nothing else changes, and each change
+is marked `LOCAL DELTA` in the file.
+
+- `6d574288584a81779068b032e405f74da0dd9ba1` "avcodec/h264_slice: reject slice_num >= 0xFFFF"
+  (cherry-pick of master `39e1969303a0b9ec5fb5f5eb643bf7a5b69c0a89`). `h264_slice_init` refuses
+  a picture's slice 65535 with `AVERROR_PATCHWELCOME` and an `AV_LOG_ERROR` line, so
+  `slice_num` never equals the `uint16_t` `slice_table` sentinel `0xFFFF`. Without it, that
+  collision defeats the neighbour checks in `xchg_mb_border` and `fill_decode_caches`, and
+  intra prediction writes below the `top_borders` allocation (a heap buffer overflow).
+- `bf87bdd3f65569e562341843965f0e810f7a2d1f` "avcodec/h264_slice: clear old slice POC values on
+  parsing failure". `h264_slice_header_parse` zeroes `poc_lsb`, `delta_poc_bottom` and
+  `delta_poc[0..1]` before the conditional reads, so a slice whose header fails to parse
+  cannot hand its POC fields to a next slice whose parameter sets do not code them.
+
+Regressions: `test_ffmpeg_slice_number_cap` and `test_ffmpeg_failed_slice_poc_is_not_inherited`
+in `tests/native/psmf_media_selftest.c` (`make H264_FFMPEG=1 psmf-media-selftest`) fail on the
+unmodified n4.4 blob and pass with the delta.
+
 ## Authored stand-ins
 
 - `config.h`, `libavutil/avconfig.h`, `libavutil/ffversion.h`, `libavcodec/codec_list.c`,
@@ -311,7 +338,7 @@ code is not held to the project warning set), the `nk_h264_symbols.h` force-incl
   `nk_h264_receive(picture)`, `nk_h264_close`, `nk_h264_ident`. No FFmpeg type, macro or
   header leaks out. Results are `NK_H264_OK/AGAIN/EOF/INVALID_DATA/ERROR`; a picture is
   reported as planes, strides, size, one of YUV420P, NV12 or other, range and PTS.
-- `nk_h264_api.c` — drives the unmodified decoder through `avcodec_send_packet` /
+- `nk_h264_api.c` — drives the decoder (unmodified apart from the LOCAL DELTAs above) through `avcodec_send_packet` /
   `avcodec_receive_frame` with one thread (`thread_count = 1`), `AV_CODEC_FLAG_LOW_DELAY`,
   a 1/90000 packet time base, and `AV_NOPTS_VALUE` for access units without a source PTS.
 - The seam backend that converts pictures into guest or host pixel buffers and keeps the
@@ -340,3 +367,9 @@ code is not held to the project warning set), the `nk_h264_symbols.h` force-incl
 - The subset compiles with GCC 13 (`-std=c11`) and the runtime test `make CC=gcc H264_FFMPEG=1
   psmf-media-selftest` decodes the source-authored H.264 fixture through it with no system
   FFmpeg installed.
+- 2026-11-17: `libavcodec/h264_slice.c` became `imported + LOCAL DELTA` (the two `release/4.4`
+  commits above). Its upstream n4.4 blob stays `62f7a61aed9af051c78ee6202f386c999c1dbd4b`; the
+  working-tree `git hash-object` of the modified file is
+  `7a31f986a2c0fcf1d19607126b96e3c83047912f` (SHA-256
+  `5e00ee27cb743b4d26def23f15f45cc2cb75d6de5c6bdfbef0eb384caa661f94`). The other imported files
+  are unchanged and still byte-identical to n4.4.

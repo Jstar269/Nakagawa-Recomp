@@ -13,9 +13,20 @@ cores are imported from FFmpeg; thin C APIs written for this project wrap them.
   "RELEASE_NOTES: Based on the version from 4.3"). All blob SHAs in the
   manifest below are resolved as `n4.4:<path>` against that commit's tree.
   Vintage note: the PPSSPP standalone fork era that motivated the pin is dated
-  ~2021-11-19 (pre-av_tx, classic `FFTContext`); the codec files themselves
-  received no commits between the n4.4 tag and that date, so the n4.4 tree is
-  byte-verified and self-consistent.
+  ~2021-11-19 (pre-av_tx, classic `FFTContext`). The n4.4 tree is not that
+  fork's exact vintage: FFmpeg `master` changed these codec files after the
+  n4.4 tag and before 2021-11-20 (corrected 2026-11-17, measured with
+  `git log n4.4..origin/master --until=2021-11-20`). The commits are
+  `a247ac640d` ("avcodec: Constify AVCodecs", committed 2021-04-27;
+  `atrac3.c`, `atrac3plusdec.c`), `25c8507818` ("Remove/replace some
+  unnecessary avcodec.h inclusions", 2021-07-22; `atrac.c`), `211619ad7f`
+  ("avcodec: Remove the FFT_FIXED_32 define", 2021-08-05; `fft.h`,
+  `fft_float.c`, `fft_template.c`, `fft-internal.h`, `mdct_float.c`,
+  `mdct_template.c`) and `1ea3650823` ("Replace all occurences of
+  av_mallocz_array() by av_calloc()", 2021-09-20; `atrac3.c`,
+  `atrac3plusdec.c`). None of them is imported here: every file is taken
+  from the n4.4 tree, and the byte verification below rests on the n4.4
+  blob SHAs alone.
 - License: LGPL-2.1-or-later (see `LICENSE.LGPLv2.1.txt`, imported from
   `COPYING.LGPLv2.1` at the same pin; upstream blob
   `58af0d3787aec7d6f8d833535d64879156e7ec23`)
