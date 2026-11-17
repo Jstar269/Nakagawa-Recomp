@@ -154,11 +154,19 @@ static int g_failures = 0;
 #define WATCH_AOT_PC      0x00608004u
 #define WATCH_RAM_ADDR    0x08801000u
 
-/* The SR_WATCH reports one store of `width` bytes at `addr` makes: 1 when the armed ADDR:LEN
- * range overlaps it, else 0. The watch itself is configured once from the same variable. */
-static uint64_t watch_hits(uint32_t addr, uint32_t width) {
+/* The ADDR:LEN this run asked SR_WATCH to arm, or NULL when it asked for none. */
+static const char *watch_requested(void) {
     const char *spec = getenv("SR_WATCH");
-    if (!SR_WATCH_ACTIVE() || !spec) return 0u;
+    return spec && spec[0] ? spec : NULL;
+}
+
+/* The SR_WATCH reports one store of `width` bytes at `addr` makes: 1 when the requested
+ * ADDR:LEN range overlaps it, else 0. The expectation comes from the request alone, never
+ * from the runtime's own armed flag: a watch that failed to arm must miss these counts
+ * (test_store_watch_is_armed_when_requested names that failure). */
+static uint64_t watch_hits(uint32_t addr, uint32_t width) {
+    const char *spec = watch_requested();
+    if (!spec) return 0u;
     char *end = NULL;
     const unsigned long long start = strtoull(spec, &end, 0);
     if (!end || *end != ':') return 0u;
@@ -972,6 +980,21 @@ static void test_valid_aot_miss_executes_guest_bytes(void) {
     sr_exec_span_reset();
 }
 
+/* Failing before: nothing asserted that SR_WATCH armed, and the expected hit counts were 0
+ * whenever it had not, so a watch that never armed passed every store-watch check. A run that
+ * asks for a watch must get one; a build without the flight recorder has no store watch, and
+ * a request for one there is a named failure, not a pass. */
+static void test_store_watch_is_armed_when_requested(void) {
+    const char *spec = watch_requested();
+    if (!spec) return;
+#if defined(SR_FLIGHT_RECORDER_LINKED) && !defined(SR_FLIGHT_RECORDER_STANDALONE)
+    CHECK(SR_WATCH_ACTIVE(), "SR_WATCH=%s was requested but sr_watch_configure did not arm it", spec);
+#else
+    CHECK(0, "SR_WATCH=%s was requested but this build has no store watch "
+          "(the flight recorder is not linked)", spec);
+#endif
+}
+
 /* This native body is the source-owned AOT side of the watchpoint regression:
  * codegen emits this same MEM_W32_PC helper for a translated `sw`. */
 static void synthetic_aot_watch_body(CpuState *s) {
@@ -1782,11 +1805,24 @@ static int run_dispatch_child(const char *self_path, const char *mode) {
 #endif
 }
 
+static int boot_event_file_names(const char *path, const char *needle);
+static void set_boot_event_file(const char *path);
+
+/* The status alone cannot tell this rejection from any other exit(1) in the child, so the
+ * child's boot event must name the target-not-executable boundary as well. */
 static void test_public_dispatch_wrapper_terminates_rejection(const char *self_path) {
+    char event_path[512];
+    snprintf(event_path, sizeof event_path, "%s.unregistered-events.txt", self_path);
+    remove(event_path);
+    set_boot_event_file(event_path);
     int child_status = run_dispatch_child(self_path, "--unregistered-dispatch-child");
+    set_boot_event_file("");
     CHECK(child_status == 1,
           "public dispatch wrapper did not terminate an unregistered executable attempt "
           "with status 1 (status=%d)", child_status);
+    CHECK(boot_event_file_names(event_path, "boundary=target-not-executable issue=308"),
+          "unregistered executable attempt did not stop at the target-not-executable boundary");
+    remove(event_path);
 }
 
 static void test_host_stack_exhaustion_is_a_named_boundary(const char *self_path) {
@@ -2350,10 +2386,15 @@ static void test_null_code_pointer_is_not_the_offset0_function(const char *self_
 
     /* Generated code's check: a nonzero pointer passes, and 0 ends the process. */
     SR_CODE_POINTER(&s, PROBE_RA, NULLPTR_EXEC_START);
+    remove(event_path);
+    set_boot_event_file(event_path);
     int child_status = run_dispatch_child(self_path, "--null-code-pointer-child");
+    set_boot_event_file("");
     CHECK(child_status == 1,
           "generated-code null code pointer check did not stop the run with status 1 "
           "(status=%d)", child_status);
+    CHECK(boot_event_file_names(event_path, "boundary=null-code-pointer issue=1375"),
+          "generated-code null code pointer stop did not record its boot event naming #1375");
 
     /* #363: a zero-based image's generated data access. An address past the PSP's unmapped
      * range passes, and a null base plus a field offset ends the process by name. */
@@ -2760,6 +2801,7 @@ int main(int argc, char **argv) {
 
     test_generic_build_configures_no_collection();
     test_configured_build_declares_aliases();
+    test_store_watch_is_armed_when_requested();
     test_valid_aot_miss_executes_guest_bytes();
     test_aot_store_watch_synthetic_guest();
     test_ram_store_watch_every_width();

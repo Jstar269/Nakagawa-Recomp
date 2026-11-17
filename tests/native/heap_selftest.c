@@ -104,14 +104,7 @@ static int g_failures = 0;
 static void heap_reset(void) {
     uint32_t used = s_heap_bump_ptr - SR_HEAP_BASE;
     if (used) memset(SR_HOST(SR_HEAP_BASE), 0, used);
-    s_heap_bump_ptr = SR_HEAP_BASE;
-    s_heap_free_list = 0u;
-    s_heap_fail_count = 0u;
-    memset(s_heap_header_bits, 0, sizeof s_heap_header_bits);
-    memset(s_heap_free_bits, 0, sizeof s_heap_free_bits);
-    memset(s_heap_watch_reported_bits, 0, sizeof s_heap_watch_reported_bits);
-    s_heap_full_check_credit = 0u;
-    s_heap_full_check_len = 0u;
+    sr_heap_reset();
 }
 
 /* Number of free blocks currently in the singly-linked list (bounded walk). */
@@ -990,6 +983,138 @@ static void test_guard_unlink_quarantine_rewalks_next(void) {
     guard_rebuilt_list_is_walked_next("after an unlink quarantine");
 }
 
+/* Failing before: free folded a block into a free-looking predecessor that a quarantine had
+ * taken off the list, so the freed block went with it into memory no allocation reaches, and
+ * HEAP_STATE counted that orphan as free. Both quarantine routes: a full walk before the free,
+ * and the forward unlink inside the same free. */
+static void test_free_does_not_fold_into_an_orphan(void) {
+    /* A full walk quarantines; then b is freed next to the orphaned p. */
+    heap_reset();
+    uint32_t a0 = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+    uint32_t s0 = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+    uint32_t p = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+    uint32_t b = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+    uint32_t s1 = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+    CHECK(a0 && s0 && p && b && s1, "orphan setup mallocs failed");
+    if (!(a0 && s0 && p && b && s1)) return;
+    sr_newlib_free(p, 0u);
+    sr_newlib_free(a0, 0u);                          /* list: a0 -> p */
+    MEM_W32(a0 - 8u + 4u, GUARD_BLOCK | 1u);         /* a0: allocated bit, a damaged node */
+    s_heap_full_check_credit = 0u;
+    s_heap_full_check_len = 0u;                      /* the next allocation walks the list */
+    uint32_t bump = s_heap_bump_ptr;
+    CHECK(sr_newlib_malloc(GUARD_NODE_BYTES, 0u) == bump + 8u && s_heap_free_list == 0u,
+          "orphan setup: the damaged list was not quarantined");
+    sr_newlib_free(b, 0u);
+    CHECK(s_heap_free_list == b - 8u && MEM_R32(b - 8u + 4u) == GUARD_BLOCK,
+          "free folded b into the orphaned p (head 0x%08x, b size 0x%x)",
+          s_heap_free_list, MEM_R32(b - 8u + 4u));
+    CHECK(MEM_R32(p - 8u + 4u) == GUARD_BLOCK, "the orphan grew (size 0x%x)", MEM_R32(p - 8u + 4u));
+    SrHeapStats st = sr_heap_stats();
+    CHECK(st.metadata_valid && st.free_blocks == 1u && st.free_bytes == GUARD_BLOCK &&
+          st.largest_free == GUARD_BLOCK && st.orphan_blocks == 1u && st.orphan_bytes == GUARD_BLOCK,
+          "heap stats counted the orphan as reusable (free=%u/0x%llx largest=0x%x orphaned=%u)",
+          st.free_blocks, (unsigned long long)st.free_bytes, st.largest_free, st.orphan_blocks);
+    CHECK(sr_newlib_malloc(GUARD_NODE_BYTES, 0u) == b, "the freed b was not reusable");
+
+    /* The forward unlink of w quarantines inside free(b); p was listed until that moment. */
+    heap_reset();
+    a0 = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+    s0 = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+    p = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+    b = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+    uint32_t w = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+    s1 = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+    CHECK(a0 && s0 && p && b && w && s1, "same-call orphan setup mallocs failed");
+    if (!(a0 && s0 && p && b && w && s1)) return;
+    sr_newlib_free(w, 0u);
+    sr_newlib_free(p, 0u);
+    sr_newlib_free(a0, 0u);                          /* list: a0 -> p -> w */
+    MEM_W32(a0 - 8u, a0 - 8u + 16u);                 /* a0's link into its own payload */
+    s_heap_full_check_credit = 0u;
+    s_heap_full_check_len = 0xffffffffu;             /* full walk held off */
+    sr_newlib_free(b, 0u);                           /* unlink of w meets a0 and quarantines */
+    CHECK(s_heap_free_list == b - 8u && MEM_R32(b - 8u + 0u) == 0u &&
+          MEM_R32(b - 8u + 4u) == GUARD_BLOCK,
+          "free folded b into p after its own unlink quarantined the list (head 0x%08x, b size 0x%x)",
+          s_heap_free_list, MEM_R32(b - 8u + 4u));
+    CHECK(MEM_R32(p - 8u + 4u) == GUARD_BLOCK && MEM_R32(w - 8u + 4u) == GUARD_BLOCK,
+          "a neighbour the quarantined walk never validated was absorbed");
+    CHECK(sr_newlib_malloc(GUARD_NODE_BYTES, 0u) == b, "the freed b was not reusable");
+}
+
+/* Failing before: free and realloc trusted a live block's size word. Four adjacent live blocks
+ * A, B, C, D; an overrun of A raises B's size word to 160 with the allocated bit kept, so B
+ * claims C as well. free(B) wrote its footer over C's last payload word and published B over
+ * live C, and a split of it later handed C out again; realloc(B) shrinking linked a free
+ * remainder inside C and zeroed C's header. Both must refuse by name and leave C alone. A
+ * lowered size word (B claims 48 bytes) must be refused the same way. */
+static void test_free_and_realloc_refuse_a_smashed_size_word(void) {
+    static const struct { const char *op; uint32_t smashed; } cells[] = {
+        {"free", 2u * GUARD_BLOCK | 1u},
+        {"realloc", 2u * GUARD_BLOCK | 1u},
+        {"free", 48u | 1u},
+        {"realloc", 48u | 1u},
+    };
+    for (unsigned i = 0; i < sizeof cells / sizeof cells[0]; i++) {
+        heap_reset();
+        uint32_t a = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+        uint32_t b = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+        uint32_t c = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+        uint32_t d = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+        CHECK(a && b && c && d, "smash setup mallocs failed (%s)", cells[i].op);
+        if (!(a && b && c && d)) return;
+        const uint32_t c_last = c + GUARD_BLOCK - 8u - 4u;   /* C's last payload word */
+        MEM_W32(c, 0x11111111u);
+        MEM_W32(c_last, 0x22222222u);
+        MEM_W32(b - 8u + 4u, cells[i].smashed);
+        if (cells[i].op[0] == 'f') {
+            sr_newlib_free(b, 0u);
+        } else {
+            CHECK(sr_newlib_realloc(b, 16u, 0u) == 0u,
+                  "realloc of a block with smashed size 0x%x was not refused", cells[i].smashed);
+        }
+        CHECK(MEM_R32(b - 8u + 4u) == cells[i].smashed && s_heap_free_list == 0u,
+              "%s of a block with smashed size 0x%x published it (size 0x%x, head 0x%08x)",
+              cells[i].op, cells[i].smashed, MEM_R32(b - 8u + 4u), s_heap_free_list);
+        CHECK(MEM_R32(c - 8u + 4u) == (GUARD_BLOCK | 1u) && MEM_R32(c) == 0x11111111u &&
+              MEM_R32(c_last) == 0x22222222u && sr_heap_is_header(c - 8u),
+              "%s of B with smashed size 0x%x disturbed the live C (size 0x%x last 0x%08x)",
+              cells[i].op, cells[i].smashed, MEM_R32(c - 8u + 4u), MEM_R32(c_last));
+        uint32_t got = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+        CHECK(got != c && got != b, "%s with smashed size 0x%x let a live block be handed out again",
+              cells[i].op, cells[i].smashed);
+    }
+}
+
+/* Failing before: sr_mem_reset (LoadExec) zeroed the heap arena but kept the allocator's bump
+ * pointer, free list and header bits, so the next program's first allocation met a free-list
+ * head whose header was now zero, quarantined it, and carried on from the old high-water mark.
+ * sr_mem_reset clears the whole 192 MiB physical arena, so this cell runs on one. */
+static void test_mem_reset_empties_the_heap(void) {
+    heap_reset();
+    uint8_t *saved = g_mem;
+    uint8_t *full = (uint8_t *)calloc(0x0c000000u, 1u);
+    CHECK(full != NULL, "full-arena allocation failed");
+    if (!full) return;
+    g_mem = full + 0x08000000u;
+    uint32_t a = sr_newlib_malloc(4096u, 0u);
+    uint32_t b = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+    CHECK(a && b, "reset setup mallocs failed");
+    sr_newlib_free(a, 0u);                           /* list: a */
+    sr_mem_reset();
+    CHECK(s_heap_bump_ptr == SR_HEAP_BASE && s_heap_free_list == 0u,
+          "sr_mem_reset kept the old heap (bump 0x%08x, head 0x%08x)", s_heap_bump_ptr, s_heap_free_list);
+    CHECK(!sr_heap_is_header(b - 8u), "sr_mem_reset kept a stale header bit");
+    uint32_t got = sr_newlib_malloc(GUARD_NODE_BYTES, 0u);
+    CHECK(got == SR_HEAP_BASE + 8u && s_heap_bump_ptr == SR_HEAP_BASE + GUARD_BLOCK,
+          "the first allocation after sr_mem_reset did not start the arena again (got 0x%08x)", got);
+    CHECK(sr_heap_stats().metadata_valid, "heap metadata invalid after sr_mem_reset");
+    heap_reset();
+    g_mem = saved;
+    free(full);
+}
+
 int main(void) {
     /* 64 MB host arena. g_mem maps guest 0x08000000 -> arena[0], so the heap
      * region [0x0a000008,0x0c000000) lands inside arena[0x02000008,0x04000000). */
@@ -1022,6 +1147,9 @@ int main(void) {
     test_guard_realloc_refuses_a_damaged_merge_target();
     test_guard_first_fit_quarantine_rewalks_next();
     test_guard_unlink_quarantine_rewalks_next();
+    test_free_does_not_fold_into_an_orphan();
+    test_free_and_realloc_refuse_a_smashed_size_word();
+    test_mem_reset_empties_the_heap();
 
     if (g_failures) {
         fprintf(stderr, "heap selftest: %d FAILURE(S)\n", g_failures);

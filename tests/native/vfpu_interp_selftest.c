@@ -2523,6 +2523,53 @@ static int check_vfpu_unary_arith_measured(void) {
     return bad;
 }
 
+/* Failing before: D-prefix saturation kept -0.0 under sat=1 ([0,1]); the clamp tested x < 0.0,
+ * which -0.0 is not. PPSSPP's ApplyPrefixD (vfpu_clamp, Core/MIPS/MIPSVFPUUtils.h at
+ * 94b9086a9ef30e87c6b6774ab198c2babba40d4e) gives +0.0 there and keeps -0.0 under sat=3
+ * ([-1,1]) and NaN under both; PPSSPP-derived, not PSP-measured. vmov.p through the generated
+ * code and the interpreter, which share sr_vwrite: lane 0 sat=1, lane 1 sat=3. */
+static int check_vfpu_dprefix_saturation_signed_zero(void) {
+    static const struct { uint32_t in, want0, want1; } cells[] = {
+        {0x80000000u, 0x00000000u, 0x80000000u},   /* -0.0 */
+        {0x00000000u, 0x00000000u, 0x00000000u},   /* +0.0 */
+        {0x7fc00000u, 0x7fc00000u, 0x7fc00000u},   /* NaN */
+        {0xc0000000u, 0x00000000u, 0xbf800000u},   /* -2.0 */
+        {0x40000000u, 0x3f800000u, 0x3f800000u},   /* 2.0 */
+        {0x3f000000u, 0x3f000000u, 0x3f000000u},   /* 0.5 */
+    };
+    int bad = 0;
+    const int c = find_overlap_diff_case("arith-vmov-p");
+    CHECK(c >= 0, "vmov.p word is in the overlap-diff header");
+    if (c < 0) return 1;
+    const uint32_t w = overlap_diff_cases[c].w;
+    uint8_t si[4], di[4];
+    vreg_idx((int)((w >> 8) & 0x7fu), 2, si);
+    vreg_idx((int)(w & 0x7fu), 2, di);
+    for (size_t i = 0; i < sizeof cells / sizeof cells[0]; i++) {
+        CpuState aot, interp;
+        setup_identity_compute(&aot);
+        aot.vfpuCtrl[2] = 0x1u | (0x3u << 2);   /* lane 0 sat=1, lane 1 sat=3 */
+        aot.vi[si[0]] = cells[i].in;
+        aot.vi[si[1]] = cells[i].in;
+        interp = aot;
+        overlap_diff_run_codegen(&aot, c);
+        const int kind = sr_vfpu_interp(&interp, w);
+        const int ok = kind == SR_VFPU_COMPUTE &&
+                       aot.vi[di[0]] == cells[i].want0 && aot.vi[di[1]] == cells[i].want1 &&
+                       interp.vi[di[0]] == cells[i].want0 && interp.vi[di[1]] == cells[i].want1;
+        g_checks++;
+        if (!ok) {
+            g_failures++;
+            bad = 1;
+            fprintf(stderr, "FAIL: vmov.p D-prefix saturation in=0x%08x want=0x%08x/0x%08x "
+                    "aot=0x%08x/0x%08x interp=0x%08x/0x%08x kind=%d\n",
+                    cells[i].in, cells[i].want0, cells[i].want1, aot.vi[di[0]], aot.vi[di[1]],
+                    interp.vi[di[0]], interp.vi[di[1]], kind);
+        }
+    }
+    return bad;
+}
+
 /* vmscl.q (0xf2018488): each lane is a vmul lane. PSP-VFPU-WIDEDOT-001 and PSP-VFPU-ROUNDSEP-001 (PSP-3000, 2026-11-08 and
  * 2026-11-09, issue #326, probe cases vfpu-wide-dot-matrix and vfpu-round-sep): a NaN operand or
  * 0 * Inf gives 0x7f800001 with the XOR of the operand signs, and an inexact product rounds to
@@ -3731,6 +3778,7 @@ int main(void) {
     bad |= check_vus2i_vs2i_measured_words();
     bad |= check_vfpu_basic_arith_measured();
     bad |= check_vfpu_unary_arith_measured();
+    bad |= check_vfpu_dprefix_saturation_signed_zero();
     bad |= check_vmscl_measured();
     bad |= check_vrndi_rule_cells();
     bad |= check_vfpu_forms_measured();
