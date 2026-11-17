@@ -94,7 +94,7 @@ Legend:
 | `libavutil/macros.h` | imported byte-identical | `2007ee5619871558dd07cd516ca77324dcf75940` |
 | `libavutil/mathematics.h` | AUTHORED stand-in (upstream name exists) | `54901800ba6ad22fd33d6c8595400d378c7429ca` |
 | `libavutil/mem.c` | imported byte-identical | `cfb6d8ab8ffa6c6d51f325d4d8bbe7dc0922871f` |
-| `libavutil/mem.h` | imported byte-identical | `e21a1feaaeab14d21ef93e3053e2de6b04b4097b` |
+| `libavutil/mem.h` | imported + LOCAL DELTA | `e21a1feaaeab14d21ef93e3053e2de6b04b4097b` |
 | `libavutil/mem_internal.h` | imported byte-identical | `ee2575c85f9cd04a1d9c4f483dfc02fb598f09f4` |
 | `libavutil/qsort.h` | imported byte-identical | `39b7a088520a61a87c1565474cb4b32ea6ce766a` |
 | `libavutil/reverse.c` | imported byte-identical | `105eb03dda4c30952541347c6e6f7f2feb4f2f30` |
@@ -243,6 +243,18 @@ contract:
   for the separate PGF/font and PGD/amctrl surfaces do not apply to this
   FFmpeg-derived subtree.
 
+### `libavutil/mem.h`
+
+- `av_size_mult()`: replaced upstream's glibc-inspired trick with the
+  compiler's own `__builtin_mul_overflow()` where it exists (non-Intel GCC
+  5.1 or later, or any compiler whose `__has_builtin` reports it), and with
+  the division check `b > SIZE_MAX / a` otherwise (marked `LOCAL DELTA`). The
+  trick skipped the division whenever both operands were below sqrt(SIZE_MAX)
+  and then relied on `t / a != b`; the replacement decides every operand pair
+  directly. `*r` is still written only on success, as upstream had it: the
+  built-in stores its truncated product into a local, not into `*r`.
+  Modified 2026-11-17 by the Nakagawa Recomp authors.
+
 ## Verification
 
 - Every `imported byte-identical` entry verified by comparing `git hash-object
@@ -260,3 +272,8 @@ contract:
 - The subset (16 translation units: `atrac3p_api.c` + 15 imported `.c`
   files) compiles with MinGW-w64 gcc `-std=c11 -O1 -Wall -Wextra` and the
   smoke driver passes create/garbage/decode/reset/flush/destroy checks.
+- 2026-11-17: `libavutil/mem.h` became a `LOCAL DELTA` row for its
+  `av_size_mult()` overflow check, so the current manifest has 45
+  `imported byte-identical` rows and five `LOCAL DELTA` rows. The 2026-10-20
+  note above records that run's counts (46 and four), not the current ones;
+  its byte-identical verifications still stand for the rows it covered.
