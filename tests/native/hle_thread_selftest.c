@@ -3002,6 +3002,105 @@ static void test_runtime_placed_modules(void) {
         expect(uid == 0x80020146u /* PROHIBIT_LOADMODULE_DEVICE */ &&
                    sr_hle_test_module_count() == 0u,
                "runtime placement: a disc title's LoadModule from ms0: is refused by the device");
+        /* sceKernelLoadExec while a utility dialog holds the slot (#1386): every dialog type gets the
+         * named synthetic refusal; with no dialog the call gets past that check (the next refusal in this
+         * host-only fixture is the scheduler's). */
+        {
+            extern void sr_hle_test_osk_slot_reset(void);
+            static const struct { uint32_t init_nid, size; const char *name; } dlg[] = {
+                {0x2ad8e239u, 0x2c4u, "message"},        /* sceUtilityMsgDialogInitStart */
+                {0x4db1e739u, 0x44u, "netconf"},         /* sceUtilityNetconfInitStart */
+                {0x24ac31ebu, 0x590u, "gamedata install"}, /* sceUtilityGamedataInstallInitStart */
+                {0xc492f751u, 0x50u, "game sharing"},    /* sceUtilityGameSharingInitStart */
+            };
+            const uint32_t param = 0x09034000u;
+            char log[1024], what[160];
+            CpuState lc;
+            title_hle_write_cstr(RT_PATH_ADDR, alpha_guest);
+            for (size_t i = 0; i < sizeof(dlg) / sizeof(dlg[0]); i++) {
+                sr_hle_test_osk_slot_reset();
+                for (uint32_t off = 0; off < dlg[i].size; off += 4u) MEM_W32(param + off, 0u);
+                MEM_W32(param, dlg[i].size);
+                memset(&lc, 0, sizeof(lc));
+                lc.r[4] = param;
+                snprintf(what, sizeof(what), "runtime placement: the %s dialog InitStart takes the slot", dlg[i].name);
+                expect(sr_syscall(&lc, dlg[i].init_nid) == 0u, what);
+                FILE *capture = NULL;
+                int saved_fd = -1;
+                int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+                memset(&lc, 0, sizeof(lc));
+                lc.r[4] = RT_PATH_ADDR;
+                const uint32_t rc = sr_syscall(&lc, NID_SCE_KERNEL_LOAD_EXEC);
+                log[0] = '\0';
+                if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+                snprintf(what, sizeof(what),
+                         "runtime placement: LoadExec while the %s dialog is active is the named dialog refusal", dlg[i].name);
+                expect(capturing && rc == 0x80020002u &&
+                           strstr(log, "LOAD_EXEC_DIALOG_ACTIVE_SYNTHETIC") != NULL, what);
+            }
+            /* The keyboard after use (#1386): one scripted run (SR_OSK_TEXT, no host box) from InitStart to
+             * NONE. The slot is free again, so LoadExec passes the dialog check; a stale OSK slot refused it
+             * for good. The OSK NIDs are the literals of the keyboard's syscalls (defined further down). */
+            {
+                CpuState oc;
+                uint32_t ost = 0u;
+                const uint32_t oparam = 0x09030000u, ofield = 0x09030100u;
+                sr_hle_test_osk_slot_reset();
+                for (uint32_t off = 0; off < 0x340u; off += 4u) MEM_W32(oparam + off, 0u);
+                MEM_W32(oparam, 0x40u);
+                MEM_W32(oparam + 0x30u, 1u);
+                MEM_W32(oparam + 0x34u, ofield);
+                MEM_W32(ofield + 0x24u, 16u);
+                MEM_W32(ofield + 0x28u, 0x09030300u);
+                hle_test_setenv("SR_OSK_TEXT", "x");
+                memset(&oc, 0, sizeof(oc));
+                oc.r[4] = oparam;
+                expect(sr_syscall(&oc, 0xf6269b82u) == 0u, "runtime placement: the OSK InitStart takes the slot");
+                for (int frame = 0; frame < 16; frame++) {
+                    memset(&oc, 0, sizeof(oc));
+                    ost = sr_syscall(&oc, 0xf3f76017u);
+                    sr_display_advance_vcount(1u);
+                    if (ost == 3u) break;
+                }
+                expect(ost == 3u, "runtime placement: the scripted OSK keyboard reaches QUIT");
+                memset(&oc, 0, sizeof(oc));
+                expect(sr_syscall(&oc, 0x3dfaeba9u) == 0u, "runtime placement: the OSK ShutdownStart is accepted in QUIT");
+                for (int frame = 0; frame < 4; frame++) {
+                    memset(&oc, 0, sizeof(oc));
+                    ost = sr_syscall(&oc, 0xf3f76017u);
+                    sr_display_advance_vcount(1u);
+                    if (ost == 0u) break;
+                }
+                expect(ost == 0u, "runtime placement: the OSK keyboard is back at NONE after use");
+                hle_test_setenv("SR_OSK_TEXT", NULL);
+                FILE *capture = NULL;
+                int saved_fd = -1;
+                int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+                memset(&lc, 0, sizeof(lc));
+                lc.r[4] = RT_PATH_ADDR;
+                (void)sr_syscall(&lc, NID_SCE_KERNEL_LOAD_EXEC);
+                log[0] = '\0';
+                if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+                expect(capturing && strstr(log, "LOAD_EXEC_DIALOG_ACTIVE_SYNTHETIC") == NULL &&
+                           strstr(log, "LOAD_EXEC_SCHEDULER_UNAVAILABLE") != NULL,
+                       "runtime placement: LoadExec after an OSK keyboard reached NONE passes the dialog check");
+            }
+            sr_hle_test_osk_slot_reset();
+            {
+                FILE *capture = NULL;
+                int saved_fd = -1;
+                int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+                memset(&lc, 0, sizeof(lc));
+                lc.r[4] = RT_PATH_ADDR;
+                const uint32_t rc = sr_syscall(&lc, NID_SCE_KERNEL_LOAD_EXEC);
+                log[0] = '\0';
+                if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+                expect(capturing && rc == 0x80020002u &&
+                           strstr(log, "LOAD_EXEC_DIALOG_ACTIVE_SYNTHETIC") == NULL &&
+                           strstr(log, "LOAD_EXEC_SCHEDULER_UNAVAILABLE") != NULL,
+                       "runtime placement: LoadExec with no dialog passes the dialog check");
+            }
+        }
         /* The program a LoadExec boots decides from then on: the disc title replaced by
          * its ms0: program (the manifest's required runtime module) may load from ms0:. */
         {
@@ -49981,6 +50080,24 @@ static void test_pad_late_through_the_boundary(void) {
         pad_update_resume(u, t + 12u * PAD_MS);
         expect(ace_pad_plan()->refreshed == 0u && pad_read_newest() == 0u,
                "pad: a pause that opened during the hold blocks the refresh");
+    }
+    pad_late_teardown();
+
+    /* S2b (#1732): a pause opens and closes in the hold, then another thread passes the update
+     * boundary before the held thread resumes. The held update keeps its own pause count, not the
+     * shared one the second boundary overwrote, so its refresh stays blocked. */
+    pad_late_fixture();
+    {
+        const uint64_t t = s_pad_vblank_ns;
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: held before the pause and the second boundary");
+        s_test_gui_buttons = NK_PSP_BTN_CROSS_BIT;
+        s_pause_count++;                  /* a pause opened and closed in the hold */
+        s_pad_host_ns = t + 6u * PAD_MS;
+        sr_enhancement_update_begin();    /* the test's own context: a second thread's boundary, never held */
+        pad_update_resume(u, t + 12u * PAD_MS);
+        expect(ace_pad_plan()->refreshed == 0u && pad_read_newest() == 0u,
+               "pad: a second thread's boundary after a pause in the hold does not unblock the held refresh");
     }
     pad_late_teardown();
 
