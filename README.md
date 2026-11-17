@@ -37,7 +37,7 @@ screenshots of Enhanced mode.
 | Approach | How the game runs | Which games | What you get |
 | :--- | :--- | :--- | :--- |
 | **Nakagawa Recomp** | Its code is translated into C on your PC, ahead of time, and compiled into a native program. | The same steps for every disc: import, build, and the player names anything it doesn't support. One game is playable so far. | **Authentic** play as released, **Enhanced** options for any game (higher resolution, texture packs and more), and **Ace** packages for one game at a time. |
-| A port of one game | Also translated ahead of time, by hand, as a project of its own. | One game per project. | Whatever its authors build, including deep changes to the game. |
+| A port of one game | Also translated ahead of time, in a project made for that one game. | One game per project. | Whatever its authors build, including deep changes to the game. |
 | An emulator such as PPSSPP | The game's code is translated or interpreted while it runs. | Most of the PSP library, on PCs, phones and handhelds. | Save states, online and ad hoc play, upscaling, texture packs and more. |
 
 If you only want to play PSP games today, an emulator such as [PPSSPP](https://github.com/hrydgard/ppsspp) runs far
