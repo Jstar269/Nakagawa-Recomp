@@ -36,12 +36,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 from pathlib import Path
 import re
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gen_nidnames  # noqa: E402
 import hle_registry_meta as meta  # noqa: E402
 import psp_import_table  # noqa: E402
 from psp_import_table import ImportTableError, parse_import_table  # noqa: E402
@@ -53,7 +55,17 @@ EXPECTED_MANIFEST_SCHEMA = 1
 CLASSES = ("missing", "fake_success", "dedicated", "controlled_unsupported")
 REGISTERED_CLASSES = frozenset(c for c in CLASSES if c != "missing")
 _NID_RE = re.compile(r"^0x[0-9a-f]{8}$")
+_FINDING_ADDR_RE = re.compile(r"0x[0-9a-fA-F]{8}")
 _MANIFEST_ROW_FIELDS = ("nid", "name", "handler", "origin", "classification", "status")
+
+
+@functools.lru_cache(maxsize=1)
+def _corpus_nid_names() -> dict[int, str]:
+    try:
+        corpus = json.loads(gen_nidnames.CORPUS.read_text(encoding="utf-8"))
+        return gen_nidnames.nid_names(corpus)
+    except (OSError, json.JSONDecodeError, gen_nidnames.CorpusError):
+        return {}
 
 
 class ManifestValidationError(Exception):
@@ -131,6 +143,7 @@ def classify_imports(
     in deterministic order and they pass through untouched.
     """
     regs = {int(r["nid"], 16): r for r in manifest["registrations"]}
+    corpus_names = _corpus_nid_names()
 
     rows = []
     by_nid_libs: dict[int, set[str]] = {}
@@ -140,7 +153,11 @@ def classify_imports(
         row = {
             "lib": f.library,
             "nid": f"0x{f.nid:08x}",
-            "name": reg["name"] if reg else meta.KNOWN_NID_NAMES.get(f.nid),
+            "name": (
+                reg["name"]
+                if reg
+                else (meta.KNOWN_NID_NAMES.get(f.nid) or corpus_names.get(f.nid))
+            ),
             "classification": reg["classification"] if reg else "missing",
             "handler": reg["handler"] if reg else None,
             "status": reg["status"] if reg else None,
@@ -163,6 +180,12 @@ def classify_imports(
         if len(libs) > 1
     ]
 
+    formatted_findings = (
+        list(findings)
+        if with_addresses
+        else [_FINDING_ADDR_RE.sub("<redacted>", f) for f in findings]
+    )
+
     return {
         "schema": REPORT_SCHEMA,
         "summary": {"total": len(rows), **totals, "libraries": len(lib_stats)},
@@ -171,7 +194,7 @@ def classify_imports(
         ],
         "imports": rows,
         "cross_library_duplicate_nids": duplicates,
-        "findings": list(findings),
+        "findings": formatted_findings,
     }
 
 

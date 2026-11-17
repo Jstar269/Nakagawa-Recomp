@@ -413,6 +413,24 @@ class ClassifierTests(unittest.TestCase):
         report = import_audit.classify_imports(table.funcs, SYNTH_MANIFEST, with_addresses=True)
         self.assertTrue(all("stub" in row for row in report["imports"]))
 
+    def test_findings_addresses_redacted_unless_requested(self) -> None:
+        table = parse_import_table(build_import_elf(SIMPLE_LIBS))
+        raw_findings = ["import run at 0x08901234: stub slots not covered by any library window: 1 positions [0]"]
+        redacted = import_audit.classify_imports(table.funcs, SYNTH_MANIFEST, findings=raw_findings)
+        self.assertNotIn("0x08901234", redacted["findings"][0])
+        self.assertIn("<redacted>", redacted["findings"][0])
+        unredacted = import_audit.classify_imports(
+            table.funcs, SYNTH_MANIFEST, with_addresses=True, findings=raw_findings
+        )
+        self.assertEqual(unredacted["findings"], raw_findings)
+
+    def test_missing_import_falls_back_to_nid_corpus_name(self) -> None:
+        # 0x005b5f20 is sceNpCommerce2GetProductInfoStart in tools/nid_corpus.json, not registered in SYNTH_MANIFEST.
+        table = parse_import_table(build_import_elf([("sceNpCommerce2", [0x005B5F20])]))
+        report = import_audit.classify_imports(table.funcs, SYNTH_MANIFEST)
+        self.assertEqual(report["imports"][0]["classification"], "missing")
+        self.assertEqual(report["imports"][0]["name"], "sceNpCommerce2GetProductInfoStart")
+
     def test_cross_library_duplicate_nids_reported(self) -> None:
         table = parse_import_table(build_import_elf(MIXED_FIXTURE_LIBS))
         report = import_audit.classify_imports(table.funcs, SYNTH_MANIFEST)

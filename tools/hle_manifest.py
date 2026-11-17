@@ -329,7 +329,7 @@ def _handler_bodies(active_src: str) -> dict[str, str]:
     return bodies
 
 
-def _has_observable_write(body_inner: str) -> bool:
+def _has_observable_write(body_inner: str, nos: str | None = None) -> bool:
     """True when the body writes guest memory or runtime state.
 
     Reads (`s->pc` in a log line, `s_ge_lists[i].uid == uid`, `>=`
@@ -340,7 +340,8 @@ def _has_observable_write(body_inner: str) -> bool:
     (`uint32_t uid = ...`, `char dev[64]`, `const char *path = NULL`) never
     match because their left-hand side names no such target.
     """
-    nos = _strip_string_literals(body_inner)
+    if nos is None:
+        nos = _strip_string_literals(body_inner)
     if "MEM_W" in nos:
         return True
     pats = (
@@ -371,9 +372,9 @@ def is_trivial_success_stub(body_inner: str) -> bool:
     """
     if not _MECHANICAL_RETURN_ZERO_RE.search(body_inner):
         return False
-    if _has_observable_write(body_inner):
-        return False
     nos = _strip_string_literals(body_inner)
+    if _has_observable_write(body_inner, nos):
+        return False
     for call in _MECHANICAL_CALL_RE.findall(nos):
         if call in _MECHANICAL_ALLOWED_CALLS or call in _MECHANICAL_CONTROL_WORDS:
             continue
@@ -611,6 +612,7 @@ def validate_meta(regs: list[dict]) -> None:
         raise ManifestError(
             f"FLOAT_RETURN_HANDLERS names handlers hle.c no longer registers: {stale_float_handlers}"
         )
+    hle_defs = hle_sources.definitions()
     for handler, status in meta.HANDLER_STATUS.items():
         evidence = meta.HANDLER_EVIDENCE.get(handler)
         if status == "complete":
@@ -638,7 +640,7 @@ def validate_meta(regs: list[dict]) -> None:
                     raise ManifestError(
                         f"handler {handler!r} cites non-existent evidence file {candidate_path!r}"
                     )
-                if anchor and not _evidence_anchor_present(ROOT / candidate_path, anchor):
+                if anchor and not _evidence_anchor_present(ROOT / candidate_path, anchor, hle_defs):
                     raise ManifestError(
                         f"handler {handler!r} cites evidence anchor {anchor!r} that "
                         f"{candidate_path!r} does not define"
@@ -663,7 +665,10 @@ def validate_meta(regs: list[dict]) -> None:
     validate_subsystems(regs)
 
 
-def _evidence_anchor_present(path: Path, anchor: str) -> bool:
+_EVIDENCE_FILE_CACHE: dict[Path, str] = {}
+
+
+def _evidence_anchor_present(path: Path, anchor: str, defs: dict[str, list[str]] | None = None) -> bool:
     """Whether ``path`` defines the symbol an evidence entry cites after ``:``.
 
     A Makefile anchor must be a target rule. An anchor in a runtime HLE source must
@@ -673,15 +678,23 @@ def _evidence_anchor_present(path: Path, anchor: str) -> bool:
     name (``Class.method`` or ``function``) whose every component must appear as a
     whole word, so a renamed target, test or function fails the citation.
     """
-    relative = path.resolve().relative_to(ROOT).as_posix() if path.resolve().is_relative_to(ROOT) else ""
+    resolved = path.resolve()
+    relative = resolved.relative_to(ROOT).as_posix() if resolved.is_relative_to(ROOT) else ""
     if relative in hle_sources.RUNTIME_HLE_SOURCES:
-        return relative in hle_sources.definitions().get(anchor, [])
-    text = path.read_text(encoding="utf-8", errors="replace")
+        if defs is None:
+            defs = hle_sources.definitions()
+        return relative in defs.get(anchor, [])
+    text = _EVIDENCE_FILE_CACHE.get(resolved)
+    if text is None:
+        if path.name == "Makefile":
+            text = read_makefile(path.parent, errors="replace")
+        else:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        _EVIDENCE_FILE_CACHE[resolved] = text
     if path.name == "Makefile":
-        text = read_makefile(path.parent, errors="replace")
         return re.search(rf"^{re.escape(anchor)}\s*:", text, re.MULTILINE) is not None
     return all(
-        re.search(rf"\b{re.escape(part)}\b", text) is not None
+        part in text and re.search(rf"\b{re.escape(part)}\b", text) is not None
         for part in anchor.split(".")
         if part
     )
@@ -945,11 +958,20 @@ _FUNC_HEAD_RE = re.compile(
     r"^(?:static[ \t]+)?(?:void|int|uint32_t)[ \t]+(?P<name>[A-Za-z_][A-Za-z0-9_]*)[ \t]*\([^;{]*\)[ \t]*\{",
     re.MULTILINE,
 )
-_HELPER_CALL_RE = re.compile(r"^[ \t]*(?P<name>[A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\)[ \t]*;[ \t]*$")
+_HELPER_CALL_RE = re.compile(r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\)[ \t]*;")
 
 
 def _read_optional(path: Path) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def _line_starts(source: str) -> list[int]:
+    starts = [0]
+    pos = source.find("\n")
+    while pos >= 0:
+        starts.append(pos + 1)
+        pos = source.find("\n", pos + 1)
+    return starts
 
 
 def selftest_scope_map(source: str) -> list[str]:
@@ -962,6 +984,7 @@ def selftest_scope_map(source: str) -> list[str]:
     """
     scopes: list[str] = []
     outer: list[str] = []      # scope in effect before each open conditional
+    opening: list[str] = []    # scope of the opening #if/#ifdef/#ifndef branch
     tests_macro: list[bool] = []
     current = "both"
     for line in source.split("\n"):
@@ -974,22 +997,26 @@ def selftest_scope_map(source: str) -> list[str]:
                 outer.append(current)
                 if macro and current == "both":
                     current = "production" if kind == "ifndef" or cond.lstrip().startswith("!") else "selftest"
+                opening.append(current)
             elif kind in ("else", "elif") and tests_macro:
                 if tests_macro[-1] and outer[-1] == "both":
-                    current = "production" if current == "selftest" else "selftest"
+                    current = "production" if opening[-1] == "selftest" else "selftest"
             elif kind == "endif" and tests_macro:
                 tests_macro.pop()
+                opening.pop()
                 current = outer.pop()
         scopes.append(current)
     return scopes
 
 
-def enclosing_functions(source: str) -> list[str | None]:
+def enclosing_functions(source: str, line_starts: list[int] | None = None) -> list[str | None]:
     """Per-line name of the enclosing top-level function, or ``None``."""
     lines = source.split("\n")
+    if line_starts is None:
+        line_starts = _line_starts(source)
     owner: list[str | None] = [None] * len(lines)
     for m in _FUNC_HEAD_RE.finditer(source):
-        first = source.count("\n", 0, m.start())
+        first = bisect.bisect_right(line_starts, m.start()) - 1
         depth = 0
         for i in range(first, len(lines)):
             owner[i] = m.group("name")
@@ -1014,14 +1041,14 @@ def registration_scopes(raw_source: str) -> dict[int, dict]:
     # active_source() blanks preprocessor directives, so the conditional scope
     # has to be read from the comment-stripped source, which keeps them. Both
     # views preserve every offset, so line indices agree between them.
+    line_starts = _line_starts(source)
     scopes = selftest_scope_map(_strip_comments(raw_source))
-    owners = enclosing_functions(source)
+    owners = enclosing_functions(source, line_starts)
     lines = source.split("\n")
 
     call_sites: dict[str | None, list[tuple[str | None, str]]] = {}
     for idx, line in enumerate(lines):
-        m = _HELPER_CALL_RE.match(line)
-        if m:
+        for m in _HELPER_CALL_RE.finditer(line):
             call_sites.setdefault(m.group("name"), []).append((owners[idx], scopes[idx]))
 
     def expand(scope: str) -> set[str]:
@@ -1030,15 +1057,18 @@ def registration_scopes(raw_source: str) -> dict[int, dict]:
     reach_of: dict[str | None, set[str]] = {}
 
     def reach(function: str | None, active: frozenset[str | None] = frozenset()) -> set[str]:
-        """The scopes ``function`` runs in: sr_hle_init and uncalled functions run in both."""
+        """The scopes ``function`` runs in: sr_hle_init runs in both; uncalled helpers run in neither."""
         if function in reach_of:
             return reach_of[function]
-        sites = call_sites.get(function, []) if function not in (None, "sr_hle_init") else []
-        live = [(caller, scope) for caller, scope in sites if caller not in active]
-        if not live:
+        if function in (None, "sr_hle_init"):
             found = {"production", "selftest"}
         else:
-            found = set().union(*(expand(scope) & reach(caller, active | {function}) for caller, scope in live))
+            sites = call_sites.get(function, [])
+            live = [(caller, scope) for caller, scope in sites if caller not in active]
+            if not live:
+                found = set()
+            else:
+                found = set().union(*(expand(scope) & reach(caller, active | {function}) for caller, scope in live))
         if not active:
             reach_of[function] = found
         return found
@@ -1049,7 +1079,7 @@ def registration_scopes(raw_source: str) -> dict[int, dict]:
         *_UNSUPPORTED_LITERAL_RE.finditer(source),
     ]
     for m in registration_matches:
-        idx = source.count("\n", 0, m.start())
+        idx = bisect.bisect_right(line_starts, m.start()) - 1
         owner, own_scope = owners[idx], scopes[idx]
         if own_scope != "both" or owner in (None, "sr_hle_init"):
             reachable = expand(own_scope)
@@ -1081,21 +1111,7 @@ def _blank_literals(stripped: str) -> str:
     Run on comment-free text. A name inside a string (an ``expect`` message, a log
     line) is then not a use, and a brace inside one cannot unbalance a function body.
     """
-    out = list(stripped)
-    i, n = 0, len(stripped)
-    while i < n:
-        c = stripped[i]
-        if c in ('"', "'"):
-            quote = c
-            i += 1
-            while i < n and stripped[i] != quote:
-                step = 2 if stripped[i] == "\\" else 1
-                for j in range(i, min(i + step, n)):
-                    if stripped[j] != "\n":
-                        out[j] = " "
-                i += step
-        i += 1
-    return "".join(out)
+    return hle_sources.blank_comments_and_literals(stripped)
 
 
 #: A top-level function definition: a column-0 head up to its opening brace.
@@ -1163,13 +1179,9 @@ def selftest_dispatched_nids(selftest_text: str) -> set[int]:
     comment, a string, a table) is not a dispatch and credits nothing.
     """
     nids: set[int] = set()
-    for m in _SELFTEST_NID_DEFINE_RE.finditer(selftest_text):
-        if selftest_text.count(m.group("sym")) > 1:
-            nids.add(int(m.group("nid"), 16))
-    for m in _SELFTEST_LITERAL_DISPATCH_RE.finditer(selftest_text):
+    text = hle_sources.blank_comments_and_literals(selftest_text)
+    for m in _SELFTEST_LITERAL_DISPATCH_RE.finditer(text):
         nids.add(int(m.group("nid"), 16))
-
-    text = _blank_literals(_strip_comments(selftest_text))
 
     # Function spans, so an enum or const local to one test resolves only inside it.
     spans: list[tuple[int, int, str, list[str]]] = []
@@ -1374,7 +1386,13 @@ def measured_evidence_section(test: dict) -> str:
             "nor listed in uncited_cases; a partial citation must say what it omits"
         )
     section = _cited_section(ref, test_id)
-    unnamed = sorted({case for case in cases if case not in section})
+    unnamed = sorted(
+        {
+            case
+            for case in cases
+            if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(case)}(?![A-Za-z0-9_-])", section) is None
+        }
+    )
     if unnamed:
         raise ManifestError(
             f"test {test_id!r} evidence_ref {ref!r} does not name {unnamed}; a MEASURED "
@@ -1569,6 +1587,9 @@ def derive_module(name: str) -> str:
     return "other"
 
 
+_PUBLIC_TEST_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|0x[0-9a-fA-F]+")
+
+
 def public_test_references(names: set[str], nids: set[str]) -> dict[str, list[str]]:
     """Public test files that mention each registered name or NID literal.
 
@@ -1576,6 +1597,7 @@ def public_test_references(names: set[str], nids: set[str]) -> dict[str, list[st
     attention, never to claim coverage -- the chain's exercise links are what
     carry that, and they are computed separately.
     """
+    keys = names | nids
     refs: dict[str, list[str]] = {}
     for pattern in PUBLIC_TEST_GLOBS:
         for path in sorted(ROOT.glob(pattern)):
@@ -1584,9 +1606,12 @@ def public_test_references(names: set[str], nids: set[str]) -> dict[str, list[st
             except OSError:
                 continue
             rel = path.relative_to(ROOT).as_posix()
-            for key in names | nids:
-                if key in text:
-                    refs.setdefault(key, []).append(rel)
+            tokens = {
+                f"0x{int(t, 16):08x}" if t.startswith(("0x", "0X")) else t
+                for t in _PUBLIC_TEST_TOKEN_RE.findall(text)
+            }
+            for key in keys & tokens:
+                refs.setdefault(key, []).append(rel)
     return refs
 
 
@@ -1645,10 +1670,12 @@ def build_evidence_chain(manifest: dict | None = None, imports_path: Path | None
     scopes = registration_scopes(runtime_hle_source())
     cells = conformance_cells(_read_optional(INTR_CONFORMANCE_H))
     dispatched = selftest_dispatched_nids(_read_optional(SELFTEST_C))
+    raw_oracle = _read_optional(PSP_ORACLE_MANIFEST)
     try:
-        oracle = oracle_exercised_apis(json.loads(_read_optional(PSP_ORACLE_MANIFEST) or "{}"))
-    except json.JSONDecodeError:
-        oracle = {}
+        oracle_doc = json.loads(raw_oracle) if raw_oracle else {}
+    except json.JSONDecodeError as e:
+        raise ManifestError(f"{PSP_ORACLE_MANIFEST} is not valid JSON: {e.msg} at line {e.lineno}") from e
+    oracle = oracle_exercised_apis(oracle_doc)
     imports = load_imports(imports_path)
     test_refs = public_test_references(
         {r["name"] for r in manifest["registrations"]},

@@ -1658,6 +1658,41 @@ class RegistrationScopeTests(unittest.TestCase):
             "as selftest-only would understate production reachability",
         )
 
+    def test_selftest_scope_elif_and_else_branches_do_not_toggle_back_to_selftest(self) -> None:
+        source = (
+            "void sr_hle_init(void) {\n"
+            "#ifdef SR_HLE_THREAD_SELFTEST\n"
+            '    sr_hle_register(0x00000081u, "synthSelf", h_Prod);\n'
+            "#elif defined(SR_OTHER)\n"
+            '    sr_hle_register(0x00000082u, "synthElif", h_Prod);\n'
+            "#else\n"
+            '    sr_hle_register(0x00000083u, "synthElse", h_Prod);\n'
+            "#endif\n"
+            "}\n"
+        )
+        scopes = hle_manifest.registration_scopes(source)
+        self.assertEqual(scopes[0x81]["reachable_from"], ["selftest"])
+        self.assertEqual(scopes[0x82]["reachable_from"], ["production"])
+        self.assertEqual(scopes[0x83]["reachable_from"], ["production"])
+
+    def test_uncalled_or_inline_called_registration_helper_is_not_assumed_production(self) -> None:
+        source = (
+            "static void register_inline(void) {\n"
+            '    sr_hle_register(0x00000091u, "synthInline", h_Prod);\n'
+            "}\n"
+            "static void register_dead(void) {\n"
+            '    sr_hle_register(0x00000092u, "synthDead", h_Prod);\n'
+            "}\n"
+            "void sr_hle_init(void) {\n"
+            "#ifdef SR_HLE_THREAD_SELFTEST\n"
+            "    if (1) register_inline();\n"
+            "#endif\n"
+            "}\n"
+        )
+        scopes = hle_manifest.registration_scopes(source)
+        self.assertEqual(scopes[0x91]["reachable_from"], ["selftest"])
+        self.assertEqual(scopes[0x92]["reachable_from"], [])
+
 
 class ConformanceJoinTests(unittest.TestCase):
     def test_probe_rows_group_by_dispatched_nid(self) -> None:
@@ -1682,12 +1717,21 @@ class ConformanceJoinTests(unittest.TestCase):
         self.assertEqual(hle_manifest.conformance_cells('{ "notAProbe", 0x1u, "" }'), {})
 
     def test_selftest_dispatch_needs_the_define_to_be_used(self) -> None:
-        used = "#define NID_USED 0x11111111u\n" "  x = sr_syscall(&cpu, NID_USED);\n"
+        used = "#define NID_USED 0x11111111u\n" "static void t(void) { CpuState cpu; sr_syscall(&cpu, NID_USED); }\n"
         unused = "#define NID_UNUSED 0x22222222u\n"
-        found = hle_manifest.selftest_dispatched_nids(used + unused)
+        non_dispatch_define = (
+            "#define NID_PREFIX 0x33333333u\n"
+            "#define NID_PREFIX_EX 0x44444444u\n"
+            "/* NID_PREFIX in a comment */\n"
+            "static void t2(void) { sr_hle_test_is_registered(NID_PREFIX); }\n"
+        )
+        found = hle_manifest.selftest_dispatched_nids(used + unused + non_dispatch_define)
         self.assertIn(0x11111111, found)
         self.assertNotIn(
             0x22222222, found, "an unreferenced NID define is not an exercise"
+        )
+        self.assertNotIn(
+            0x33333333, found, "a NID_* define mentioned only in comments/prefixes/is_registered is not dispatched"
         )
 
     def test_selftest_dispatch_sees_a_bare_literal(self) -> None:
@@ -1967,6 +2011,23 @@ class EvidenceTierTests(unittest.TestCase):
                     evidence_cases=["ge-mask-primary-masked-release"],
                 )],
             })
+        # Substring prefix collision: "display-ge" is a prefix of "display-ge-mask", not its own token.
+        with self.assertRaisesRegex(ManifestError, "does not name"):
+            hle_manifest.oracle_exercised_apis({
+                "tests": [self._measured_row(
+                    case_ids=["display-ge"],
+                    evidence_cases=["display-ge"],
+                )],
+            })
+
+    def test_malformed_oracle_manifest_json_fails_closed(self) -> None:
+        with mock.patch.object(hle_manifest, "_read_optional", side_effect=lambda p: "{bad json" if p == hle_manifest.PSP_ORACLE_MANIFEST else ""):
+            with self.assertRaisesRegex(ManifestError, "not valid JSON"):
+                hle_manifest.build_evidence_chain(self._entry_manifest())
+
+    @staticmethod
+    def _entry_manifest() -> dict:
+        return {"source": "synth", "registrations": [], "findings": []}
 
     def test_the_committed_manifest_only_promotes_cited_measured_rows(self) -> None:
         document = json.loads(
