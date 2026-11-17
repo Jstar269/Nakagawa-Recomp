@@ -259,6 +259,7 @@ static int test_pointer_only_and_named_neighbours(void) {
         list.scroll_y = 100.0f;
         list.content_w = 600.0f;
         list.content_h = 194.0f;
+        list.parent = 0u;
         CHECK(nk_ui_focus_register_scroller(g, &list), "register the list");
     }
     reg(g, 1u, 0.0f, 0.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 0u);
@@ -286,6 +287,120 @@ static int test_pointer_only_and_named_neighbours(void) {
     nk_ui_focus_end_frame(g);
     CHECK(nk_ui_focus_set(g, 1u), "focus the row");
     CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 21u, "a missing named neighbour falls back");
+    nk_ui_focus_graph_destroy(g);
+    return 1;
+}
+
+/* A page that scrolls (scroller 200, 300 high, 500 of content) holding a tab, a list that
+   scrolls inside it (scroller 90, 100 high, six rows of 50) and a Back button under the list,
+   as the page and the list are scrolled. `nested` tells the graph the list sits in the page. */
+static void nested_frame(NkUiFocusGraph *g, float page_scroll, float list_scroll, bool nested) {
+    NkUiFocusScroller page;
+    NkUiFocusScroller list;
+    int i;
+    nk_ui_focus_begin_frame(g);
+    page.id = 200u;
+    page.viewport = (NkUiRect){0.0f, 0.0f, 600.0f, 300.0f};
+    page.scroll_x = 0.0f;
+    page.scroll_y = page_scroll;
+    page.content_w = 600.0f;
+    page.content_h = 500.0f;
+    page.parent = 0u;
+    list.id = 90u;
+    list.viewport = (NkUiRect){0.0f, 70.0f - page_scroll, 600.0f, 100.0f};
+    list.scroll_x = 0.0f;
+    list.scroll_y = list_scroll;
+    list.content_w = 600.0f;
+    list.content_h = 300.0f;
+    list.parent = nested ? 200u : 0u;
+    if (!nk_ui_focus_register_scroller(g, &page) || !nk_ui_focus_register_scroller(g, &list)) {
+        exit(2);
+    }
+    reg(g, 11u, 0.0f, 20.0f - page_scroll, 100.0f, 40.0f, 0u, NK_UI_SCOPE_ROOT, 200u);
+    for (i = 0; i < 6; ++i) {
+        reg(g, (NkUiId)(21 + i), 0.0f, 70.0f - page_scroll + (float)(i * 50) - list_scroll,
+            600.0f, 50.0f, 0u, NK_UI_SCOPE_ROOT, 90u);
+    }
+    reg(g, 50u, 0.0f, 340.0f - page_scroll, 100.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 200u);
+    nk_ui_focus_end_frame(g);
+}
+
+/* nk_ui_focus_place callbacks: the page of nested_frame scrolled to 200, after its content
+   grew to 640 and pushed Back down to 280, its last 24 px under the page's edge. */
+static bool grown_rect(void *user, NkUiId id, NkUiRect *rect) {
+    (void)user;
+    if (id == 200u) {
+        *rect = (NkUiRect){0.0f, 0.0f, 600.0f, 300.0f};
+        return true;
+    }
+    if (id != 50u) return false;
+    *rect = (NkUiRect){0.0f, 280.0f, 100.0f, 44.0f};
+    return true;
+}
+
+static bool grown_scroll(void *user, NkUiId id, float *scroll_y, float *content_h) {
+    (void)user;
+    if (id != 200u) return false;
+    *scroll_y = 200.0f;
+    *content_h = 640.0f;
+    return true;
+}
+
+/* A list that scrolls inside a page that scrolls (Settings > Enhanced at Larger text, review
+   of #2644). A control in the list is inside the page too: it reaches a control the page has
+   out of view. Focus is brought into view through both containers. And where the layout
+   that follows a focus change moves the focused control, it is brought into view again. */
+static int test_nested_scrollers(void) {
+    NkUiFocusGraph *g = nk_ui_focus_graph_create();
+    NkUiFocusScrollRequest r;
+    CHECK(g != NULL, "create graph");
+    /* The list at its end: its last row is on screen, Back is under the page's edge. */
+    nested_frame(g, 0.0f, 200.0f, false);
+    CHECK(nk_ui_focus_set(g, 26u), "focus the last row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 0u && nk_ui_focus_current(g) == 26u,
+          "from a container that is not in the page, Back out of view is no target");
+    nested_frame(g, 0.0f, 200.0f, true);
+    CHECK(nk_ui_focus_current(g) == 26u, "focus stays on the last row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 50u,
+          "down from the last row of a list in the page reaches Back, out of view");
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroller == 200u && r.scroll_y == 84.0f,
+          "and the page scrolls Back into view");
+    CHECK(!nk_ui_focus_take_scroll(g, &r), "one scroll shows Back");
+    CHECK(nk_ui_focus_set(g, 11u), "focus the tab");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 25u,
+          "from the page, a row the list has out of view is still no target");
+    /* The page scrolled 100: the list's top 30 px, and its first row with them, are above
+       the page's edge. */
+    nested_frame(g, 100.0f, 0.0f, true);
+    CHECK(nk_ui_focus_set(g, 21u), "focus the first row");
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroller == 200u && r.scroll_y == 70.0f,
+          "a row its list shows whole is brought into view by the page");
+    CHECK(!nk_ui_focus_take_scroll(g, &r), "the list need not move");
+    /* The list scrolled too: the row needs both, its own container first. */
+    nested_frame(g, 100.0f, 100.0f, true);
+    CHECK(nk_ui_focus_set(g, 24u), "focus a row on screen");
+    CHECK(!nk_ui_focus_take_scroll(g, &r), "which needs no scroll");
+    CHECK(nk_ui_focus_set(g, 21u), "focus the first row, out of the list and of the page");
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroller == 90u && r.scroll_y == 0.0f,
+          "the list scrolls the row in");
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroller == 200u && r.scroll_y == 70.0f,
+          "then the page scrolls to where the list shows it");
+    CHECK(!nk_ui_focus_take_scroll(g, &r), "two scrolls show the row");
+    CHECK(nk_ui_focus_scroll_into_view(g, 21u, &r) && r.scroller == 90u,
+          "asked about one container, the answer is the row's own");
+    /* Back is whole when focus moves to it; the layout that follows moves it. */
+    nested_frame(g, 200.0f, 200.0f, true);
+    CHECK(nk_ui_focus_set(g, 50u), "focus Back, on screen");
+    CHECK(!nk_ui_focus_take_scroll(g, &r), "which needs no scroll");
+    nk_ui_focus_place(g, grown_rect, grown_scroll, NULL);
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroller == 200u && r.scroll_y == 224.0f,
+          "the layout after the move put Back under the edge: it is brought into view");
+    nk_ui_focus_place(g, grown_rect, grown_scroll, NULL);
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroll_y == 224.0f,
+          "and the layout after that is judged once more");
+    nk_ui_focus_place(g, grown_rect, grown_scroll, NULL);
+    CHECK(!nk_ui_focus_take_scroll(g, &r),
+          "later layouts leave the page where the user scrolls it");
     nk_ui_focus_graph_destroy(g);
     return 1;
 }
@@ -362,6 +477,7 @@ static void list_frame(NkUiFocusGraph *g, float scroll_y) {
     s.scroll_y = scroll_y;
     s.content_w = 300.0f;
     s.content_h = 1000.0f;
+    s.parent = 0u;
     if (!nk_ui_focus_register_scroller(g, &s)) {
         exit(2);
     }
@@ -1652,6 +1768,7 @@ int main(int argc, char **argv) {
     if (!test_grid() || !test_no_default_entry() || !test_owns_horizontal() ||
         !test_pointer_only_and_named_neighbours() ||
         !test_ragged_row() || !test_scroll_into_view() || !test_place_follows_the_layout() ||
+        !test_nested_scrollers() ||
         !test_dialog_trap_and_scope_memory() || !test_tab_cycle_and_repair() ||
         !test_repeat_timing() || !test_stick_hysteresis() || !test_event_construction() ||
         !test_prompt_style_follows_device() ||

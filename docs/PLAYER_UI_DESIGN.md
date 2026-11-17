@@ -122,10 +122,17 @@ Labels, chips and eyebrows are drawn in caps (`nk_ui_caps`); the words stay sent
 - A focusable control calls `nk_ui_register_button` and, when focused, `nk_ui_focus_ring(ui, id, radius)`. A focused
   secondary button also fills with `surface_high`; a focused card's edge becomes `line_strong`.
 - Arrow keys move to the nearest control in that direction. A control may name the control an Up and a Down move
-  from it land on instead (`nk_ui_register_button_between`, `nk_ui_button_between`), for a place where the nearest
-  one by position is not the next one to a person: a list of full-width rows under a strip of small tabs. A control
-  that a scroll container clips away whole is reached only from inside that container, whose rows scroll it into
-  view, never from a control outside it.
+  from it land on instead (`nk_ui_register_button_between`, `nk_ui_button_between`; a tab of `nk_ui_section_tabs`
+  names its Down neighbour in `NkUiSection.down`), for a place where the nearest one by position is not the next
+  one to a person: a list of full-width rows under a strip of small tabs. Position measures to a control's middle,
+  so under a narrow tab a small button further down can be nearer than the full-width row just below the tab, and
+  a Down move would pass the whole list. A named neighbour wins over position and is taken even when its scroll
+  container has it out of view; the move then scrolls it in.
+- A control that a scroll container clips away whole is otherwise reached only from inside that container, whose
+  rows scroll it into view, never from a control outside it. A scroll container knows the one it sits in
+  (`NkUiFocusScroller.parent`), and a control in the inner one counts as inside the outer one: the last row of a
+  list in a page that scrolls reaches the button under the list while the page has that button out of view
+  (`test_nested_scrollers` in `tests/native/test_nk_ui_focus.c`).
 - A control made of several pointer targets (a row of values) registers the row as the focus stop and each target
   with `NK_UI_BUTTON_POINTER_ONLY`: a press focuses a target and its release activates it, no move, Tab or first
   focus lands on it, and the screen hands focus back to the row.
@@ -146,8 +153,13 @@ A list longer than its room is a scroll container (`NkUiLayout.scroll`), scrolle
 (`Clay_UpdateScrollContainers`, every frame, with the time since the last one): a wheel notch over it moves it 48 px,
 three of its 16 px lines; a drag with the mouse held, or a finger, moves it with the pointer and a fling keeps going a
 moment; a drag that scrolls more than 8 px is no click on the control it started on. A control inside it that takes
-focus, by key, pad or pointer, is scrolled fully into view, by the least it takes. The launcher draws at 60 Hz while a
-list, or anything else, still moves (`player_ui_nk_wait_ms`) and waits for input again once it settles. A wheel over anything else is
+focus, by key, pad or pointer, is scrolled fully into view, by the least it takes. Where scroll containers nest (a
+list inside a page that scrolls, up to `NK_UI_FOCUS_SCROLL_DEPTH` deep) every container around the control scrolls,
+the innermost first, each to show what the one inside it shows of the control. A move is judged on the layout
+before it, and a page that describes its focused control changes height with the focus, so the two layouts after a
+focus change bring the focused control into view again where they put it (`NK_UI_FOCUS_REVEAL_FRAMES`). The
+launcher draws at 60 Hz while a list, or anything else, still moves (`player_ui_nk_wait_ms`) and waits for input
+again once it settles. A wheel over anything else is
 the screen's own: the library turns its page with it. Only the lines a long list shows are laid out, with spacers
 for the rest, so its length costs nothing (`test_scroll_container` in `tests/native/test_nk_ui_core.c`).
 
@@ -620,7 +632,12 @@ A current OFF is never filled with the accent: it is marked by the raised box (`
 edge) and `paper` text, so a tab whose options are off is not a column of accent boxes. Up and Down move row by row: Down from PLAY MODE lands on the active tab, Down from
 a tab on its first row, Down from the last row on BACK, and Up goes back the same way. The rows name those
 neighbours (`nk_ui_register_button_between`), because a full-width row and a small tab are not each other's nearest
-by position. Left and Right step the focused row's value, Confirm takes the next one, and a click picks any value; a
+by position, and every tab names the active tab's first row as its Down neighbour (`NkUiSection.down`): at Larger
+text (150%) in a 1280 x 720 or 960 x 540 window the list keeps two rows, BACK under the strip was nearer to a tab
+than the middle of the first row, and Down went from the tabs to BACK past every option. The d-pad walk is tested
+at 100, 125 and 150% text (`test_enhanced_walk_at_every_text_size` in `tests/native/test_player_screens.c`, and
+`test_next_ui_enhanced_dpad_walk_reaches_every_row_without_changing_values` in `tests/native/test_player_ui.py`).
+Left and Right step the focused row's value, Confirm takes the next one, and a click picks any value; a
 value box is a pointer target only (`NK_UI_BUTTON_POINTER_ONLY`), never a focus stop. GRAPHICS PRESET, PLAY MODE
 and FRAME PACING show their value as `< value >` in one box, as does a row whose values no longer fit beside its
 name at a larger text size. Category tabs are focusable. The panel on the right shows the focused row's name, its

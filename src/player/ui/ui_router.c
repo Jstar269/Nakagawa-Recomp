@@ -192,6 +192,8 @@ PlayerUiActionKind player_ui_top_bar(NkUi *ui, NkUiId id, PlayerUiRoute active) 
     sections[2].label = "Settings";
     sections[2].active = active == PLAYER_UI_ROUTE_SETTINGS;
     sections[2].id = PLAYER_UI_ID_TAB_SETTINGS;
+    /* Down from a top-bar tab goes to the nearest control under it. */
+    sections[0].down = sections[1].down = sections[2].down = 0u;
     chosen = nk_ui_top_bar(ui, id, sections, 3u,
                            nk_ui_input_label(nk_ui_prompt_style(ui)),
                            nk_ui_prompt_style(ui) != NK_UI_PROMPT_KEYCAPS);

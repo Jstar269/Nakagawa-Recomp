@@ -592,7 +592,7 @@ void nk_ui_begin(NkUi *ui, double now_s) {
             }
         }
         /* Focus that moved into a scroll container brings its control into view. */
-        if (nk_ui_focus_take_scroll(ui->focus_graph, &request)) {
+        while (nk_ui_focus_take_scroll(ui->focus_graph, &request)) {
             nk_ui_clay_scroll_to(ui->clay, request.scroller, request.scroll_y);
         }
         ui->scroll_count = 0u;
@@ -630,6 +630,8 @@ static void nk_ui_register_scroller(NkUi *ui, NkUiId id) {
     scroller.scroll_y = state.offset;
     scroller.content_w = scroller.viewport.w;
     scroller.content_h = state.max_offset + state.viewport;
+    /* The scroll container this one is opened in: nk_ui_open names it after this call. */
+    scroller.parent = ui->open_scroller;
     (void)nk_ui_focus_register_scroller(ui->focus_graph, &scroller);
 }
 

@@ -1571,7 +1571,8 @@ static int test_focus_ring_moves(void) {
 static int draw_tab_bar(NkUi *ui, double now_s, int active) {
     const NkUiTheme *theme = nk_ui_theme_n1();
     const NkUiSection sections[] = {
-        {"Library", false, 0u}, {"Settings", active == 1, 0u}, {"Controller", active == 2, 0u}
+        {"Library", false, 0u, 0u}, {"Settings", active == 1, 0u, 0u},
+        {"Controller", active == 2, 0u, 0u}
     };
     const NkUiDrawList *list;
     uint32_t i;

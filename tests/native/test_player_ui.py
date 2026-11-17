@@ -7,6 +7,7 @@ from __future__ import annotations
 import atexit
 import os
 import hashlib
+import itertools
 import json
 from pathlib import Path
 import re
@@ -3326,7 +3327,12 @@ class NativePlayerUiTests(unittest.TestCase):
         mode lands on the active tab (never on another one), then on each of its rows from the
         top, dimmed rows included, then on Back; Up from Back is the last row, and so on back up
         to Graphics preset. The right shoulder moves to the next tab. Moving focus changes no
-        setting."""
+        setting.
+
+        Review #2644 N1: the same walk at Large and Larger text (125 % and 150 %), and at 150 %
+        in a 960x540 window too. With two rows in the list, Back sits nearer under a tab than
+        the middle of a full-width row does, and Down from the tab went to Back past every
+        row; the rows scrolled out of the list are walked there too, down and back up."""
         focus = self.SETTINGS_FOCUS
         library_settings = {
             "fps_cap": -1,
@@ -3344,11 +3350,18 @@ class NativePlayerUiTests(unittest.TestCase):
             **library_settings,
             "title_play": {"TEST00005": {"mode": "enhanced"}},
         }
-        title_open = (*self.OPEN_FIRST, *self.DOWN_TO_PLAY_MODE, *self.TO_PLAY_OPTIONS,
+        # The way to a game's Enhanced page is by Tab, which goes by the order the page declares
+        # its controls in whatever the text size: three stops to the ENHANCEMENTS card's Play
+        # mode, one more to Enhanced options. The arrows go by position there, and at Larger
+        # text the card stacks its buttons: Down from PLAY lands on Enhanced options, past Play
+        # mode, and Right from Enhanced options on Back.
+        to_play_mode = ("KEY_TAB", "WAIT_MS=80") * 3
+        to_play_options = ("KEY_TAB", "WAIT_MS=80")
+        title_open = (*self.OPEN_FIRST, *to_play_mode, *to_play_options,
                       "KEY_RETURN", "WAIT_MS=250")
         ace_open = (
-            "WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", *self.DOWN_TO_PLAY_MODE,
-            *(('KEY_RETURN', 'WAIT_MS=120') * 3), *self.TO_PLAY_OPTIONS,
+            "WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", *to_play_mode,
+            *(('KEY_RETURN', 'WAIT_MS=120') * 3), *to_play_options,
             "KEY_RETURN", "WAIT_MS=250",
         )
         walks: tuple[tuple[str, str, tuple[str, ...], dict[str, object], dict[str, object],
@@ -3363,12 +3376,18 @@ class NativePlayerUiTests(unittest.TestCase):
         )
         down = ("PAD_DPAD_DOWN", "WAIT_MS=50")
         up = ("PAD_DPAD_UP", "WAIT_MS=50")
-        for label, view, opening, settings, kwargs, expected_modes in walks:
-            with self.subTest(page=label):
+        windows = ((1280, 720, 100), (1280, 720, 125), (1280, 720, 150), (960, 540, 150))
+        for (label, view, opening, page_settings, kwargs, expected_modes), \
+                (width, height, text_size) in itertools.product(walks, windows):
+            settings = dict(page_settings)
+            if text_size != 100:
+                settings["text_size"] = text_size
+            with self.subTest(page=label, window=f"{width}x{height}", text=text_size):
+                label = f"{label} at {width}x{height}, {text_size} % text"
                 events = opening
                 expected = [focus["preset"]]
                 for tab in range(len(self.ENHANCED_GROUPS)):
-                    rows = self.enhanced_tab_rows(tab, own_page=label != "library")
+                    rows = self.enhanced_tab_rows(tab, own_page=view != "settings")
                     tab_id = focus[self.ENHANCED_TABS[tab]]
                     if tab:
                         # The shoulder focuses the new tab; Up from it is Play mode.
@@ -3381,7 +3400,8 @@ class NativePlayerUiTests(unittest.TestCase):
                     events += down * (len(rows) + 3) + up * (len(rows) + 3)
                     expected += [tab_id, *rows, focus["back"], *reversed(rows), tab_id,
                                  focus["ace_mode"], focus["preset"]]
-                run = self.next_ui_run(view, events, settings=settings, **kwargs)
+                run = self.next_ui_run(view, events, settings=settings, width=width,
+                                       height=height, **kwargs)
                 trail = self.focus_trail(run)
                 self.assertEqual(trail[-len(expected):], expected,
                                  f"{label}: the d-pad walk, tab by tab")

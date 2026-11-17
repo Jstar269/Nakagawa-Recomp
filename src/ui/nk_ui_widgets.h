@@ -184,6 +184,9 @@ typedef struct {
     const char *label;
     bool active;
     NkUiId id;      /* nonzero: the tab is focusable and can be activated */
+    NkUiId down;    /* nonzero: the control a Down move from the tab lands on, where the
+                       nearest one below it is not the next one to a person (the first row
+                       of the list under the strip; nk_ui_register_button_between) */
 } NkUiSection;
 
 /* Top bar: brand mark and wordmark, section tabs with an accent underline on the

@@ -791,7 +791,8 @@ int nk_ui_section_tabs(NkUi *ui, NkUiId id, const NkUiSection *sections, size_t 
         memset(&label_style, 0, sizeof(label_style));
         label_style.corner_radius = NK_UI_RADIUS_CONTROL;
         if (sections[i].id != 0u) {
-            nk_ui_register_button(ui, label_id, NK_UI_BUTTON_NOT_DEFAULT);
+            nk_ui_register_button_between(ui, label_id, NK_UI_BUTTON_NOT_DEFAULT, 0u,
+                                          sections[i].down);
             focused = nk_ui_button_focused(ui, label_id);
             hovered = nk_ui_hovered(ui, label_id);
             label_style.fill_rgba = nk_ui_pressed(ui, label_id) ? theme->pressed :

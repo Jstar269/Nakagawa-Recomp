@@ -1387,6 +1387,7 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
     bool have_first = false;
     NkUiId active_tab_id;
     NkUiId list_id;
+    NkUiId first_row = 0u;
     NkUiId last_row = 0u;
     NkUiLayout page;
     if (active_group < 0 || active_group >= PLAYER_UI_ENHANCED_GROUP_COUNT) {
@@ -1438,6 +1439,18 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
     for (int i = 0; i < model->enhanced_row_count && i < PLAYER_UI_ENHANCED_ROWS; ++i) {
         int group = (int)model->enhanced_rows[i].group;
         if (group >= 0 && group < PLAYER_UI_ENHANCED_GROUP_COUNT) ++tab_rows[group];
+        if (group == active_group && first_row == 0u) {
+            first_row = PLAYER_UI_ID_ENHANCED_PART(model->enhanced_rows[i].part);
+        }
+    }
+    /* The row a Down move from the tab strip lands on: the list's first, as its parts come
+       before Frame pacing and the texture pack rows. */
+    if (first_row == 0u && active_group == PLAYER_UI_ENHANCED_GROUP_MOTION) {
+        first_row = PLAYER_UI_ID_SETTINGS_PACING;
+    }
+    if (first_row == 0u && active_group == PLAYER_UI_ENHANCED_GROUP_PICTURE &&
+        model->texpack_row) {
+        first_row = PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE;
     }
     ++tab_rows[PLAYER_UI_ENHANCED_GROUP_MOTION];
     if (model->texpack_row) {
@@ -1552,6 +1565,11 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                 active_tabs[i].label = player_ui_enhanced_group_label((PlayerUiEnhancedGroup)i);
                 active_tabs[i].active = i == active_group;
                 active_tabs[i].id = tab_ids[i];
+                /* Down from the strip enters the list at its top. By position alone a short
+                   list loses to Back: a tab sits over Back, far from the middle of a
+                   full-width row (two rows at Larger text; review of #2644, N1). A named
+                   neighbour is taken whether or not the list has it scrolled out of view. */
+                active_tabs[i].down = first_row;
             }
             {
                 /* The strip starts where the rows do. */

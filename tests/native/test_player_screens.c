@@ -4975,6 +4975,157 @@ static void test_enhanced_target_sizes(void) {
     g_flow_text_size_pct = saved_text;
 }
 
+/* Draws `frames` more frames of a page in a window whose logical size `scale` gives, a
+   quarter of a second apart on the caller's clock. */
+static const NkUiDrawList *enhanced_more_frames(NkUi *ui, FlowCase which, const NkUiScale *scale,
+                                                int frames, double *clock_s) {
+    const NkUiDrawList *draw = NULL;
+    g_flow_width = scale->logical_w;
+    g_flow_height = scale->logical_h;
+    for (int frame = 0; frame < frames; ++frame) {
+        /* Time passes, so a fill that eases in (a focused tab's) is drawn. */
+        *clock_s += 0.25;
+        nk_ui_begin(ui, *clock_s);
+        (void)draw_flow_case(ui, which);
+        draw = nk_ui_end(ui);
+    }
+    g_flow_width = 1280.0f;
+    g_flow_height = 800.0f;
+    return draw;
+}
+
+/* Whether the focused control's own box (a row, a tab and Back each fill theirs while they
+   have focus) is drawn whole: inside the window and cut by no scroll container. */
+static bool enhanced_focus_box_is_whole(const NkUiDrawList *draw, NkUiId id, int width,
+                                        int height, char *why, size_t cap) {
+    int boxes = 0;
+    (void)snprintf(why, cap, "no box drawn");
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        if (cmd->kind != NK_UI_DRAW_RECTANGLE || cmd->element_id != id) continue;
+        ++boxes;
+        if (cmd->clip[0] != cmd->bounds[0] || cmd->clip[1] != cmd->bounds[1] ||
+            cmd->clip[2] != cmd->bounds[2] || cmd->clip[3] != cmd->bounds[3] ||
+            cmd->bounds[0] < 0 || cmd->bounds[1] < 0 || cmd->bounds[2] > width ||
+            cmd->bounds[3] > height || cmd->bounds[3] <= cmd->bounds[1]) {
+            (void)snprintf(why, cap, "box %d,%d to %d,%d, drawn %d,%d to %d,%d", cmd->bounds[0],
+                           cmd->bounds[1], cmd->bounds[2], cmd->bounds[3], cmd->clip[0],
+                           cmd->clip[1], cmd->clip[2], cmd->clip[3]);
+            return false;
+        }
+    }
+    return boxes > 0;
+}
+
+/* Review of #2644, N1: Up and Down alone walk Settings > Enhanced at every text size, in a
+   1280 x 720 window and a 960 x 540 one. From the active tab, Down is the tab's first row,
+   then each row under it, then Back; Up from Back is the last row and so on back to the tab,
+   Play mode and Graphics preset. Every stop is drawn whole when focus reaches it, the rows
+   the list had scrolled away included. At Larger text (150%) the list shows two or three rows, and
+   Back, close under the first tab, scored nearer than the middle of a full-width row: Down
+   from the tab went to Back past every row. */
+static void test_enhanced_walk_at_every_text_size(void) {
+    static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_TITLE};
+    static const struct { int w; int h; int text; } windows[] = {
+        {1280, 720, 100}, {1280, 720, 125}, {1280, 720, 150}, {960, 540, 150}};
+    const int saved_tab = g_enhanced_tab;
+    const NkUiId saved_focus = g_enhanced_focus_id;
+    const int saved_text = g_flow_text_size_pct;
+    memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+    g_enhanced_mode = NULL;
+    g_enhanced_focus_id = 0u;
+    for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
+        for (size_t w = 0u; w < sizeof(windows) / sizeof(windows[0]); ++w) {
+            for (int tab = 0; tab < PLAYER_UI_ENHANCED_GROUP_COUNT; ++tab) {
+                /* The stops from the tab down to Back, then the two rows above the strip. */
+                NkUiId stops[16];
+                const char *names[16];
+                int count = 0;
+                NkUiViewport viewport = launcher_viewport(windows[w].w, windows[w].h, 1.0f);
+                NkUiScale scale;
+                NkUi *ui = NULL;
+                const NkUiDrawList *draw;
+                double clock_s = 0.0;
+                bool walked = true;
+                viewport.text_size_pct = windows[w].text;
+                scale = nk_ui_scale_for_viewport(&viewport);
+                stops[count] = ENHANCED_TEST_TAB_ID(tab);
+                names[count++] = k_enhanced_shown[tab].tab;
+                for (int row = 0; row < k_enhanced_shown[tab].count; ++row) {
+                    stops[count] = PLAYER_UI_ID_ENHANCED_PART(k_enhanced_shown[tab].parts[row]);
+                    names[count++] = k_enhanced_parts[k_enhanced_shown[tab].parts[row]].name;
+                }
+                if (tab == PLAYER_UI_ENHANCED_GROUP_MOTION) {
+                    stops[count] = PLAYER_UI_ID_SETTINGS_PACING;
+                    names[count++] = "Frame pacing";
+                }
+                if (tab == PLAYER_UI_ENHANCED_GROUP_PICTURE &&
+                    pages[g] == FLOW_SETTINGS_ACE_TITLE) {
+                    stops[count] = PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE;
+                    names[count++] = "Texture pack folder";
+                }
+                stops[count] = PLAYER_UI_ID_SETTINGS_BACK;
+                names[count++] = "Back";
+                g_enhanced_tab = tab;
+                g_flow_text_size_pct = windows[w].text;
+                draw = flow_case_layout(pages[g], windows[w].w, windows[w].h, &ui);
+                if (draw == NULL || ui == NULL) {
+                    CHECK(false, "Settings > Enhanced lays out for the walk");
+                    if (ui != NULL) nk_ui_destroy(ui);
+                    continue;
+                }
+                nk_ui_focus(ui, stops[0]);
+                draw = enhanced_more_frames(ui, pages[g], &scale, 4, &clock_s);
+                /* Down to Back, then Up to the tab, Play mode and Graphics preset. */
+                for (int step = 0; walked && step < 2 * count + 1; ++step) {
+                    const bool down = step < count - 1;
+                    const int at = down ? step + 1 : 2 * (count - 1) - step - 1;
+                    const NkUiId want = at >= 0 ? stops[at]
+                                        : at == -1 ? PLAYER_UI_ID_SETTINGS_ACE_MODE
+                                        : PLAYER_UI_ID_SETTINGS_PRESET;
+                    const char *want_name = at >= 0 ? names[at]
+                                            : at == -1 ? "Play mode" : "Graphics preset";
+                    const NkUiId from = nk_ui_focused(ui);
+                    NkUiEvent event;
+                    NkUiId got;
+                    char message[340];
+                    char why[100];
+                    memset(&event, 0, sizeof(event));
+                    event.type = NK_UI_EV_NAV;
+                    event.dir = down ? NK_UI_DIR_DOWN : NK_UI_DIR_UP;
+                    event.down = true;
+                    nk_ui_push_event(ui, &event);
+                    draw = enhanced_more_frames(ui, pages[g], &scale, 6, &clock_s);
+                    got = nk_ui_focused(ui);
+                    (void)snprintf(message, sizeof(message),
+                                   "page %d at %d x %d, %d%% text, %s: %s from %08X reaches %s "
+                                   "(%08X), not %08X",
+                                   (int)g, windows[w].w, windows[w].h, windows[w].text,
+                                   k_enhanced_shown[tab].tab, down ? "Down" : "Up",
+                                   (unsigned)from, want_name, (unsigned)want, (unsigned)got);
+                    walked = got == want;
+                    CHECK(walked, message);
+                    if (!walked) break;
+                    if (!enhanced_focus_box_is_whole(draw, want, windows[w].w, windows[w].h, why,
+                                                     sizeof(why))) {
+                        (void)snprintf(message, sizeof(message),
+                                       "page %d at %d x %d, %d%% text, %s: %s is drawn whole "
+                                       "when %s brings focus to it (%s)",
+                                       (int)g, windows[w].w, windows[w].h, windows[w].text,
+                                       k_enhanced_shown[tab].tab, want_name,
+                                       down ? "Down" : "Up", why);
+                        CHECK(false, message);
+                    }
+                }
+                nk_ui_destroy(ui);
+            }
+        }
+    }
+    g_enhanced_tab = saved_tab;
+    g_enhanced_focus_id = saved_focus;
+    g_flow_text_size_pct = saved_text;
+}
+
 /* WCAG 2 relative luminance of an opaque 0xRRGGBBAA colour, and the contrast of two. */
 static double enhanced_luminance(uint32_t rgba) {
     double sum = 0.0;
@@ -8763,6 +8914,7 @@ int main(int argc, char **argv) {
     test_enhanced_rows_stay_put();
     test_enhanced_target_sizes();
     test_enhanced_selected_value_styles();
+    test_enhanced_walk_at_every_text_size();
     test_prompt_bar_stays_whole();
     test_game_page_text_is_never_cut();
     test_psp_fonts_page();
