@@ -11,6 +11,7 @@ real indirect resume with the owner's frame already active.
 
 from __future__ import annotations
 
+import hashlib
 from io import StringIO
 import os
 from pathlib import Path
@@ -998,6 +999,66 @@ _ORDER_EXAMPLE = [
     0x03E00008, 0,                  # 8  jr ra; nop
     _beq_words(10, 6, 0, 0), 0,     # 10 Q: b S
 ]
+
+
+class StackCensusWrapperTests(unittest.TestCase):
+    def test_indexed_census_wrapping_preserves_each_generated_body(self):
+        addresses = (0xF0000100, 0xF0000200)
+        bodies = [f"void f_{addr:08x}(CpuState *s) {{\n    s->r[29] = 0u;\n}}"
+                  for addr in addresses]
+        wrapped = codegen.wrap_stack_census_functions(bodies, addresses, {})
+        for addr, text in zip(addresses, wrapped, strict=True):
+            with self.subTest(address=f"0x{addr:08x}"):
+                self.assertIn(
+                    f"static void _sr_stack_census_body_{addr:08x}(CpuState *s) {{", text)
+                self.assertEqual(text.count(f"void f_{addr:08x}(CpuState *s) {{"), 1)
+                self.assertIn("s->r[29] = 0u;", text)
+                self.assertIn(f"sr_stack_census_enter(0x{addr:08x}u);", text)
+
+    def test_runtime_module_sp_load_does_not_hide_primary_stack_census_entry(self):
+        address = 0x1000
+        words = {
+            address: (0x23 << 26) | (4 << 21) | (29 << 16),  # lw sp, 0(a0)
+            address + 4: 0x03E00008,                          # jr ra
+            address + 8: 0,
+        }
+
+        class FixedElf:
+            def read_at_vaddr(self, at, size):
+                word = words.get(at)
+                return word.to_bytes(4, "little") if size == 4 and word is not None else None
+
+        previous_space = codegen.ADDRESS_SPACE
+        previous_guest_entries = set(codegen.GUEST_SP_ENTRIES)
+        try:
+            codegen.GUEST_SP_ENTRIES.clear()
+            codegen.ADDRESS_SPACE = codegen.AddressSpace("sr_test_module_base", "m0")
+            codegen.emit_function(
+                FixedElf(), address, [(address, address + 12)], {address}, stack_census=True,
+            )
+            primary = f"void f_{address:08x}(CpuState *s) {{ return; }}"
+            codegen.ADDRESS_SPACE = codegen.AddressSpace()
+            wrapped = codegen.wrap_stack_census_functions([primary], [address], {})
+            self.assertIn(f"sr_stack_census_enter(0x{address:08x}u);", wrapped[0])
+        finally:
+            codegen.ADDRESS_SPACE = previous_space
+            codegen.GUEST_SP_ENTRIES.clear()
+            codegen.GUEST_SP_ENTRIES.update(previous_guest_entries)
+
+    def test_indexed_census_wrapper_output_stays_byte_identical(self):
+        bodies = [
+            "void f_00001000(CpuState *s) {\n    s->r[29] = 0u;\n}",
+            "void f_00002000(CpuState *s) {\n    s->r[29] = 4u;\n}",
+        ]
+        previous_guest_entries = set(codegen.GUEST_SP_ENTRIES)
+        try:
+            codegen.GUEST_SP_ENTRIES.clear()
+            wrapped = codegen.wrap_stack_census_functions(bodies, [0x1000, 0x2000], {})
+        finally:
+            codegen.GUEST_SP_ENTRIES.clear()
+            codegen.GUEST_SP_ENTRIES.update(previous_guest_entries)
+        digest = hashlib.sha256("\n".join(wrapped).encode("ascii")).hexdigest()
+        self.assertEqual(digest, "046e44e7f63eedbcf5a02aa0071e8f69475cf4ca3105e0c6723569285e7036ef")
 
 
 class SpExitWalkFanOutTests(unittest.TestCase):

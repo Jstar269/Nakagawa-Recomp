@@ -42,6 +42,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
 import codegen
+import imports as imports_module
 import prx_reloc_model
 import analyze as analyzer
 from analyze import Elf, analyze, exec_ranges, in_ranges
@@ -202,6 +203,86 @@ class RuntimeModuleTranslation(unittest.TestCase):
             self.assertFalse(
                 [value for value in literals if 0x08000000 <= int(value, 16) < 0x0C000000],
                 "a module body names no absolute user-RAM address")
+
+    def test_null_page_guard_is_emitted_and_separates_shared_unit_names(self):
+        module = codegen.translate_runtime_module(
+            0, str(self.overlays[0][1]), shared=True,
+        )
+        guarded_options = codegen.CodegenOptions(null_page_guard=True)
+        guarded_dir = Path(self.tmp.name) / "guarded"
+        plain_dir = Path(self.tmp.name) / "plain_shared"
+        guarded_dir.mkdir()
+        plain_dir.mkdir()
+
+        codegen.write_shared_library_sources(guarded_dir, [module], options=guarded_options)
+        codegen.write_shared_library_sources(plain_dir, [module], options=codegen.CodegenOptions())
+        guarded = list(guarded_dir.glob("nk_lib_*.c"))
+        plain = list(plain_dir.glob("nk_lib_*.c"))
+        self.assertEqual(len(guarded), 1)
+        self.assertEqual(len(plain), 1)
+        source = guarded[0].read_text(encoding="ascii")
+        self.assertIn('#define SR_NULL_PAGE_GUARD 1\n#include "recomp.h"', source)
+        self.assertNotEqual(guarded[0].name, plain[0].name)
+
+    def test_fixed_extra_lib_stub_without_nid_is_a_named_stop(self):
+        extra_path = self.overlays[0][1].resolve()
+        extra_base = 0x09000000
+        stub = extra_base + ladder.OVERLAY_STUB_OFF
+        real_elf = codegen.Elf
+        real_parse_imports = imports_module.parse_imports
+
+        class ExtraLibStubView:
+            def __init__(self, elf):
+                self.elf = elf
+                self.stub = elf.sec(".sceStub.text")
+                self.force_empty_import_map = True
+
+            def __getattr__(self, name):
+                return getattr(self.elf, name)
+
+            def sec(self, name):
+                if name == ".sceStub.text":
+                    return None
+                if name == ".lib.stub":
+                    return self.stub
+                return self.elf.sec(name)
+
+        def elf_factory(path, base=None):
+            elf = real_elf(path, base=base)
+            return ExtraLibStubView(elf) if Path(path).resolve() == extra_path else elf
+
+        def parse_imports(elf):
+            if getattr(elf, "force_empty_import_map", False):
+                return {}
+            return real_parse_imports(elf)
+
+        out = Path(self.tmp.name) / "extra_lib_stub" / "g_recomp.c"
+        out.parent.mkdir()
+        with unittest.mock.patch.object(codegen, "Elf", side_effect=elf_factory), \
+                unittest.mock.patch.object(imports_module, "parse_imports", side_effect=parse_imports):
+            status, _stdout, err = run_codegen([
+                str(self.main), str(out), "--base=0x08940000",
+                f"--extra-elf={extra_path}@{extra_base:x}",
+            ])
+        self.assertEqual(status, 0, err)
+        generated = "".join(path.read_text(encoding="ascii") for path in out.parent.glob("*.c"))
+        self.assertIn(
+            f'sr_unimplemented(0x{stub:08x}u, "{codegen.NO_NID_IMPORT_STUB}");', generated)
+        self.assertNotIn("sr_hle_call(s, 0u);", generated)
+
+    def test_codegen_cleanup_failure_keeps_make_targets_old_and_deletes_failed_targets(self):
+        out = Path(self.tmp.name) / "cleanup_failure" / "g_recomp.c"
+        out.parent.mkdir()
+        funcs = out.with_name("g_recomp_funcs.h")
+        out.write_text("old generated C\n", encoding="ascii")
+        funcs.write_text("old generated header\n", encoding="ascii")
+        with unittest.mock.patch.object(
+                codegen, "_remove_stale_chunks", side_effect=OSError("injected cleanup failure")):
+            with self.assertRaisesRegex(OSError, "injected cleanup failure"):
+                run_codegen([str(self.main), str(out), "--base=0x08940000"])
+        self.assertEqual(out.read_text(encoding="ascii"), "old generated C\n")
+        self.assertEqual(funcs.read_text(encoding="ascii"), "old generated header\n")
+        self.assertIn(".DELETE_ON_ERROR:", (ROOT / "mk" / "pipeline.mk").read_text(encoding="utf-8"))
 
     def test_a_module_compiles_from_the_same_file_in_any_game(self):
         # Another game (another name, at another index, beside other modules) writes
