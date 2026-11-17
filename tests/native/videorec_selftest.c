@@ -19,7 +19,8 @@
 //     is read back before it can be replaced, and without a keep the newest picture wins;
 //   - a picture of another size is refused and reported, never written;
 //   - the recorder never writes the pixels or samples it is handed;
-//   - with FFmpeg on PATH, the FFV1 encode and the mux finish with status PASS (SKIP otherwise);
+//   - with FFmpeg on PATH, the FFV1 encode and the mux finish with status PASS (SKIP otherwise,
+//     and the final line names the skip);
 //   - recording only on the deterministic clock; a named encoder, FFmpeg or codec that cannot
 //     run refuses the recording (never raw frames in its place); free space under 4 GiB
 //     refuses it and under 1 GiB stops it; a used folder keeps no earlier PASS; an output name
@@ -69,6 +70,9 @@
 #define H 36u
 
 static int s_failures;
+/* What did not run, carried into the final line: a run with a skip is never a bare PASS. */
+static int s_skips;
+static char s_skipped[128];
 #define CHECK(cond, msg)                                              \
     do {                                                              \
         if (!(cond)) {                                                \
@@ -149,6 +153,16 @@ static void test_timeline(const char *root) {
     sr_videorec_audio(0, buf, 1024, 0x8000, 0x8000, vtime(99));
     sr_videorec_vblank(99, vtime(99)); /* no picture yet: nothing starts */
 
+    /* The samples mixed into the recording below, with copies: the recorder must not write
+     * them either (an in-place volume would turn imp2's -12000 at 0x4000 into -6000). */
+    static int16_t imp[1024 * 2], imp_copy[1024 * 2];
+    imp[0] = imp[1] = 20000;
+    memcpy(imp_copy, imp, sizeof imp);
+    int16_t imp2[2] = { -12000, 12000 }, next[2] = { 7000, 7000 }, one[2] = { 100, 100 };
+    int16_t loud[2] = { 30000, -30000 };
+    const int16_t imp2_copy[2] = { -12000, 12000 }, next_copy[2] = { 7000, 7000 };
+    const int16_t one_copy[2] = { 100, 100 }, loud_copy[2] = { 30000, -30000 };
+
     uint32_t v = 100;
     uint32_t written_value[64];
     int written = 0;
@@ -172,27 +186,26 @@ static void test_timeline(const char *root) {
         if (step == 10) {
             /* A 1024-sample buffer on channel 1 at frame 10's VBLANK, an impulse at its start,
              * and a one-sample impulse 8 ms later on channel 2. */
-            static int16_t imp[1024 * 2];
-            imp[0] = imp[1] = 20000;
             sr_videorec_audio(1, imp, 1024, 0x8000, 0x8000, vtime(v));
-            int16_t imp2[2] = { -12000, 12000 };
             sr_videorec_audio(2, imp2, 1, 0x4000, 0x8000, vtime(v) + 8000u);
             /* Channel 1's next buffer, handed over while the first still plays, follows it. */
-            int16_t next[2] = { 7000, 7000 };
             sr_videorec_audio(1, next, 1, 0x8000, 0x8000, vtime(v) + 5000u);
             /* Channel 5 runs dry: its next buffer, handed over 12 ms on, starts then. */
-            int16_t one[2] = { 100, 100 };
             sr_videorec_audio(5, one, 1, 0x8000, 0x8000, vtime(v) + 1000u);
             sr_videorec_audio(5, one, 1, 0x8000, 0x8000, vtime(v) + 12000u);
         }
         if (step == 30) {
             /* Two channels summing past full scale clip. */
-            int16_t loud[2] = { 30000, -30000 };
             sr_videorec_audio(3, loud, 1, 0x8000, 0x8000, vtime(v));
             sr_videorec_audio(4, loud, 1, 0x8000, 0x8000, vtime(v));
         }
     }
-    CHECK(memcmp(buf, buf_copy, sizeof buf) == 0, "the recorder leaves the guest samples alone");
+    CHECK(memcmp(buf, buf_copy, sizeof buf) == 0,
+          "the recorder leaves the samples handed over before the recording alone");
+    CHECK(memcmp(imp, imp_copy, sizeof imp) == 0 && memcmp(imp2, imp2_copy, sizeof imp2) == 0 &&
+              memcmp(next, next_copy, sizeof next) == 0 && memcmp(one, one_copy, sizeof one) == 0 &&
+              memcmp(loud, loud_copy, sizeof loud) == 0,
+          "the recorder leaves the guest samples it mixes alone");
 
     /* A picture of another size is refused, not written. */
     static uint32_t big[W * 2 * H];
@@ -494,6 +507,8 @@ static void test_ffmpeg(const char *root) {
         CHECK(record_says(dir, "REFUSED", "is not in any absolute PATH entry"),
               "without FFmpeg an encoded recording is refused, not written raw");
         printf("videorec_selftest: SKIP ffv1 (FFmpeg is not on PATH; the recording was refused)\n");
+        s_skips++;
+        snprintf(s_skipped, sizeof s_skipped, "ffv1");
         return;
     }
     static uint32_t px[W * H];
@@ -1157,6 +1172,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "videorec_selftest: %d check(s) FAILED\n", s_failures);
         return 1;
     }
-    printf("videorec_selftest: PASS\n");
+    if (s_skips)
+        printf("videorec_selftest: PASS (%d SKIP: %s)\n", s_skips, s_skipped);
+    else
+        printf("videorec_selftest: PASS\n");
     return 0;
 }
