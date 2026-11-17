@@ -4147,6 +4147,9 @@ its words at `0xA5A5A5A5` and measures nothing.
 The runtime places a pool with attribute `0x4000` at the top of the partition, a rule it took from PPSSPP. On
 2026-11-17 row 1 was not `0`, so rows 5 decided: the pool with the attribute lies directly below the high
 bracket and the second one directly below the first, and the pool without it directly above the low bracket.
+For the pool shape the probe used (partition 2, attribute exactly `0x4000`, four `0x100`-byte blocks, no options)
+the runtime's rule is therefore PSP-measured; for every other pool with the attribute, partition 6 among them,
+it stays PPSSPP-derived and is logged as such.
 
 ### PSP-HLE-UTILITY-DIALOG-001 captures 2026-11-12
 

@@ -1353,16 +1353,20 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "tests/native/hle_thread_selftest.c:test_rtc_time_t_add_years_resolution_autotest",
             "PSPAutotests tests/rtc/convert.expected (2ed7c9c5, recorded on a PSP): checkRtcGetTime_t, 2012-09-20 07:12:15.000500 -> 1348125135",
+            "docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-time-1969, rtc-time-1601, rtc-time-2106-past, rtc-time-9999 and the seven one-field-out-of-range cells, rtc-time-month-0 to rtc-time-second-60)",
+            "tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117",
         ],
-        "limitation": "converts in-range dates from 1970 whose seconds fit 32 bits, as one 32-bit word (the measured cell); a field out of range, a date before 1970, a value past 32 bits and a NULL or unmapped pointer are not measured for this function and stop the run by name",
+        "limitation": "converts in-range dates from 1970 whose seconds fit 32 bits, as one 32-bit word; PSP-SAFE-SCALAR-001 measured eleven dates: 1601-01-01 00:00:00 and 1969-12-31 23:59:59 return 0x800001fe and write 0; 2106-02-07 06:28:16 (the first second past 32 bits) and 9999-12-31 23:59:59 return 0x800001fe and write 0x7fffffff; the runtime applies each answer to the valid dates between its two measured ends, which is its rule and not a measurement (the seconds count is monotone in the date and both ends give one answer); seven dates with one field out of range (2024-00-10, 2024-13-01, 2024-01-00, 2024-01-32, 2024-02-30, 2024-01-01 24:00:00 and 2024-01-01 00:00:60, microsecond 0) return 0 and write the measured seconds, and are answered as those exact dates only; every other date with a field out of range, a valid date before 1601 and a NULL or unmapped pointer are not measured and stop the run by name; where between 2038-01-19 03:14:08 and 2106-02-07 06:28:15 the PSP begins to refuse is not measured, and those dates still convert",
     },
     "h_RtcTickAddYears": {
         "status": "partial",
         "evidence": [
             "tests/native/hle_thread_selftest.c:test_rtc_time_t_add_years_resolution_autotest",
             "PSPAutotests tests/rtc/arithmetic.expected (2ed7c9c5, recorded on a PSP): checkRtcTickAddYears",
+            "docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-addyears-y10000-plus-0, rtc-addyears-y10000-plus-1, rtc-addyears-y10000-minus-1, rtc-addyears-y10001-minus-2)",
+            "tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117",
         ],
-        "limitation": "moves the calendar year with the leap day clamped to February 28, and a result outside years 1..9999 returns 0 with dest unwritten (pspautotests-recorded); a source tick past year 9999 and NULL or unmapped pointers are not measured and stop the run by name",
+        "limitation": "moves the calendar year with the leap day clamped to February 28, and a result outside years 1..9999 returns 0 with dest unwritten (pspautotests-recorded); PSP-SAFE-SCALAR-001 measured two source ticks past year 9999, 10000-01-01 00:00:00 and 10001-01-01 00:00:00, which follow the same rule; the runtime applies it to the source ticks between those two (the rest of year 10000), which is its rule and not a measurement; a source tick past 10001-01-01 00:00:00 and NULL or unmapped pointers are not measured and stop the run by name",
     },
     "h_RtcTickAddMicroseconds": {
         "status": "partial",
@@ -1417,16 +1421,20 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "tests/native/hle_thread_selftest.c:test_rtc_tick_add_day_of_week_check_valid_autotest",
             "PSPAutotests tests/rtc/lookup.expected (f573fe8c, recorded on a PSP): checkDayOfWeek",
+            "docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-dow-month-0, rtc-dow-month-13, rtc-dow-month-13-again, rtc-dow-month-14, rtc-dow-month-24, rtc-dow-year-0, rtc-dow-year-10000, rtc-dow-day-1000001, rtc-dow-day-max)",
+            "tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117",
         ],
-        "limitation": "Sunday is 0; months 1..12 of years 1..9999 with the day carried linearly (the measured cells); a month of 0 or above 12 answers only the seven measured triples, and any other month, year or day outside those stops the run by name",
+        "limitation": "Sunday is 0; months 1..12 of years 1..9999 with the day carried linearly up to 1000000 (the pspautotests cells); a month of 0 or above 12, a year outside 1..9999 and a day above 1000000 answer only the fifteen measured triples (seven pspautotests, eight PSP-SAFE-SCALAR-001), which fit no single calendar rule, and any other such month, year or day stops the run by name",
     },
     "h_RtcCheckValid": {
         "status": "partial",
         "evidence": [
             "tests/native/hle_thread_selftest.c:test_rtc_tick_add_day_of_week_check_valid_autotest",
             "PSPAutotests tests/rtc/lookup.expected (f573fe8c, recorded on a PSP): checkRtcCheckValid and checkMaxYear",
+            "docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-valid-day-0, rtc-valid-feb-29-2023, rtc-valid-feb-29-1900, rtc-valid-feb-30-2024, rtc-valid-feb-31-2024, rtc-valid-apr-31-2024, rtc-valid-day-0-hour-24)",
+            "tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117",
         ],
-        "limitation": "returns 0 or the first failing field as -1 year, -2 month, -3 day, -4 hour, -5 minute, -6 second, -7 microsecond (measured); a day of 0 or one from the month length to 31, and a NULL or unmapped pointer, are not measured and stop the run by name",
+        "limitation": "returns 0 or the first failing field as -1 year, -2 month, -3 day, -4 hour, -5 minute, -6 second, -7 microsecond (measured); a day of 0 or past the month's length is -3, measured by PSP-SAFE-SCALAR-001 in January, February and April and applied to the other months from the same month table; a NULL or unmapped pointer is not measured and stops the run by name",
     },
     "h_DisplayIsForeground": {
         "status": "partial",
@@ -2771,8 +2779,10 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "PSPAutotests tests/threads/threads/threadmanidlist.expected (a negative size 0x800200D3 with the count unwritten; types 1 to 14 listed, 15 and above illegal)",
             "tests/native/hle_thread_selftest.c:test_threadman_id_list_cells",
+            "docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: tmid-9-list and tmid-10-list, an empty list returns 0 with a count of 0 and no slot written)",
+            "tests/native/hle_thread_selftest.c:test_threadman_id_list",
         ],
-        "limitation": "the recorded sizes and types are reproduced; the list order for objects created in another order than uid order is not measured (#341)",
+        "limitation": "the recorded sizes and types are reproduced; the thread event handler class (type 9) answers only the measured call shape, a 16-slot buffer and a count pointer, with the measured empty list, whose precondition (no handler registered) holds for every guest because this runtime has no call that registers one; type 9 with any other buffer size, or a NULL or unmapped buffer or count pointer, is not measured and stops the run by name; the list order for objects created in another order than uid order is not measured (#341)",
     },
     "h_VolatileMemUnlock": {
         "status": "partial",
@@ -2903,8 +2913,10 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_wb_tlspl_vpl_cells",
             "PSPAutotests tests/threads/tls/create.expected line 29 (774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP): attribute 0x4000 creates a pool that reports the attribute and takes 1024 bytes from the partition's free total, returned by the delete",
             "tests/native/hle_thread_selftest.c:test_tlspl_highmem_pool",
+            "docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: tls-create-normal, tls-place-normal, tls-addr-normal, tls-create-high, tls-place-high, tls-addr-high, tls-create-high-2, tls-addr-high-2: in partition 2 a pool of four 0x100-byte blocks with NULL options lies at the low end of the free memory without attribute 0x4000 and at the high end with it, a second such pool below the first)",
+            "tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_tls_20261117",
         ],
-        "limitation": "the recorded arguments are reproduced; where an attribute 0x4000 pool lies is not recorded: the top of the partition is PPSSPP-derived, not PSP-measured (hrydgard/ppsspp 65181eea1deb7361beb3be6062ea98e8427f2786, Core/HLE/sceKernelMemory.cpp sceKernelCreateTlspl; jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414 SceKernelTls agrees) and is logged once per run; in a partition based below the runtime stacks the free sizes do not count such a pool, which lies above the bump region they measure (#2640); partitions 5 and 11 and above and alignments above 0x10000 keep a refusal the cells do not record (#341)",
+        "limitation": "the recorded arguments are reproduced; where an attribute 0x4000 pool lies is PSP-measured for one pool shape only (PSP-SAFE-SCALAR-001: partition 2, attribute exactly 0x4000, four 0x100-byte blocks, NULL options): the top of the partition; for every other attribute 0x4000 pool (another block size or count, an options block, another attribute bit beside 0x4000, partition 6) the top of the partition is PPSSPP-derived, not PSP-measured (hrydgard/ppsspp 65181eea1deb7361beb3be6062ea98e8427f2786, Core/HLE/sceKernelMemory.cpp sceKernelCreateTlspl; jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414 SceKernelTls agrees) and is logged once per run; the measured free-size words are not reproduced exactly: the free total carries a 0x100 tail per block slot, and in a partition based below the runtime stacks the free sizes do not count such a pool, which lies above the bump region they measure (#2640); partitions 5 and 11 and above and alignments above 0x10000 keep a refusal the cells do not record (#341)",
     },
     "h_DeleteTlspl": {
         "status": "partial",

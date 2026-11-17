@@ -955,7 +955,7 @@ static uint32_t h_ReferVplStatus(CpuState *s) {
 #define TLSPL_MAX_ALIGNMENT 256u
 
 TlsplPool s_tlspls[TLSPL_MAX];
-static int s_tlspl_highmem_noted;   /* the attr 0x4000 placement note has been logged this run */
+static int s_tlspl_highmem_noted;   /* the derived attr 0x4000 placement note has been logged this run */
 #ifdef SR_HLE_THREAD_SELFTEST
 void sr_hle_test_tlspl_highmem_note_reset(void) { s_tlspl_highmem_noted = 0; }
 #endif
@@ -992,7 +992,13 @@ static uint32_t h_CreateTlspl(CpuState *s) {
      * 0x10000, are not measured and keep the old refusal. The attr 0x4000 cell (line 29 at
      * 774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP) fixes that
      * the pool is created, reports the attribute and takes its 1024 bytes from the partition; it
-     * does not show where the pool lies (see the allocation below). */
+     * does not show where the pool lies (see the allocation below).
+     * PSP-measured 2026-11-17 (PSP-3000, PSP-SAFE-SCALAR-001; docs/HARDWARE_ORACLE.md), partition 2,
+     * four 0x100-byte blocks, NULL options: a pool without attr 0x4000 lies at the low end of the
+     * free memory, directly above a Low block taken before it (tls-addr-normal, tls-place-normal);
+     * its status reads size 0x3c, the attribute, the slot index, the block size and counts
+     * (tls-status-normal, tls-status-high); a thread's block is the lowest free one, the second
+     * thread's 0x100 above the first's (tls-thread). */
     if (!A0) return TLSPL_NO_MEMORY;
     if (!guest_cstr(A0, name, sizeof(name))) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     int32_t partition = (int32_t)A1;
@@ -1038,14 +1044,24 @@ static uint32_t h_CreateTlspl(CpuState *s) {
     if (A2 & TLSPL_ATTR_MEM_BOTTOM) {
         /* attr 0x4000 (PSP_TLSPL_ATTR_HIGHMEM in pspautotests tests/threads/tls/shared.h): the
          * pool comes from the top of the partition (alloc_block_high), in either partition layout
-         * (#2640). PPSSPP-derived, not PSP-measured: hrydgard/ppsspp
-         * 65181eea1deb7361beb3be6062ea98e8427f2786, Core/HLE/sceKernelMemory.cpp,
-         * sceKernelCreateTlspl, asks its block allocator for the top when the attribute is set;
-         * jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414, SceKernelTls, agrees. */
-        if (!s_tlspl_highmem_noted) {
+         * (#2640). For one pool shape that is PSP-measured 2026-11-17 (PSP-3000,
+         * PSP-SAFE-SCALAR-001; docs/HARDWARE_ORACLE.md): in partition 2, with the attribute word
+         * exactly 0x4000 and NULL options, a pool of four 0x100-byte blocks lies directly below a
+         * High block taken before it (tls-addr-high), the next such pool 0x400 below the first
+         * (tls-addr-high-2), and a later High block below the pool (tls-place-high).
+         * No other pool is in that measurement: another block size or count, an options block,
+         * another attribute bit beside 0x4000, partition 6. For those the top is PPSSPP-derived, not
+         * PSP-measured: hrydgard/ppsspp 65181eea1deb7361beb3be6062ea98e8427f2786,
+         * Core/HLE/sceKernelMemory.cpp, sceKernelCreateTlspl, asks its block allocator for the top
+         * when the attribute is set; jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414,
+         * SceKernelTls, agrees. */
+        const int measured_shape = partition == (int32_t)TLSPL_USER_PARTITION && A2 == TLSPL_ATTR_MEM_BOTTOM &&
+                                   block_size == 0x100u && num_blocks == 4u && !options;
+        if (!measured_shape && !s_tlspl_highmem_noted) {
             s_tlspl_highmem_noted = 1;
             fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceKernelCreateTlspl "
-                            "(NID 0x8daff657) places an attr 0x4000 pool at the top of the partition\n");
+                            "(NID 0x8daff657) places an attr 0x4000 pool at the top of the partition "
+                            "(PSP-measured only for partition 2, four 0x100-byte blocks, no options)\n");
         }
         block_uid = alloc_block_high((uint32_t)(total64 + slack));
     } else {
