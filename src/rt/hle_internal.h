@@ -1312,6 +1312,7 @@ extern UtilityDialog s_gamedata_dialog;
 extern UtilityDialog s_sharing_dialog;
 void utility_dialogs_reset_locked(void);
 void utility_slot_settle_locked(void);
+int utility_slot_busy(void);   /* the utility slot's holder is active (takes dialog_lock) */
 extern int s_osk_status;
 extern uint32_t s_osk_param;
 extern int s_osk_field;
