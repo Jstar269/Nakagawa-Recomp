@@ -331,6 +331,7 @@ static uint32_t vblank_delivered(uint32_t no, uint32_t *arg) {
 #define NID_SCE_KERNEL_FREE_MEMORY_BLOCK 0x50f61d8au
 #define NID_SCE_KERNEL_GET_MEMORY_BLOCK_ADDR 0xdb83a952u
 #define NID_SCE_KERNEL_ALLOC_MEMORY_BLOCK 0xfe707fdfu
+#define NID_SCE_KERNEL_GET_MODULE_ID_LIST 0x644395e2u
 #define NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370 0x342061e5u
 #define NID_SCE_GE_LIST_ENQUEUE_HEAD 0x1c0d95a6u
 #define NID_SCE_GE_CONTINUE 0x4c06e472u
@@ -2851,8 +2852,8 @@ static void test_runtime_placed_modules(void) {
     MEM_W32(RT_OPTION_ADDR + 4u, 2u);
     MEM_W8(RT_OPTION_ADDR + 16u, 1u);
     /* Position 1 is High (uOFW modulemgr.c). This fixture's partition is based low, below the
-     * runtime stacks, where no High region is modelled, so it fails closed by name; the High
-     * allocator itself is covered by the memory-block test. */
+     * runtime stacks, where a module image placed High is not modelled, so it fails closed by
+     * name; the High allocator itself is covered by the memory-block and TLS-pool tests. */
     rt_capture_begin();
     refused = rt_load(alpha_guest, RT_OPTION_ADDR);
     out = rt_capture_end();
@@ -40755,6 +40756,92 @@ static void test_kernel_import_sweep_memory_blocks_and_sdk_alias(void) {
            "sceKernelSetCompiledSdkVersion370 updates shared SDK-version state");
 }
 
+/* sceKernelAllocMemoryBlock type 1 (High) in a partition based below the runtime stacks, the layout
+ * of this fixture's default image, where the call stopped the run by name (#2640). pspautotests
+ * tests/sysmem/memblock.expected at 774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party
+ * recording made on a PSP: line 9 "Type 1: OK", and lines 25-33 a second type-1 block lying its
+ * size rounded up to 0x100 below a 0x100-byte one just placed (delta 100 for sizes 1 to 0x11, 200
+ * for 0x101, 1100 for 0x1001, 10100 for 0x10001). The blocks come from the top of user RAM, where
+ * this layout's thread stacks come from too; its bump region, which the free sizes measure, ends
+ * below the runtime stacks, so neither shortens it. */
+static void test_memory_block_high_in_low_based_partition(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_hle_test_partition_bump_top(void);
+    const uint32_t addr_out = 0x00280004u;
+    const uint32_t name = 0x00280010u;
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    title_hle_write_cstr(name, "test");
+    expect(sr_hle_test_partition_bump_top() == SR_VBLANK_STACK_BASE,
+           "memblock high: the default image's partition ends at the runtime stacks");
+
+    static const struct { uint32_t size, delta; } deltas[] = {
+        {1u, 0x100u}, {2u, 0x100u}, {3u, 0x100u}, {4u, 0x100u}, {5u, 0x100u}, {0x11u, 0x100u},
+        {0x101u, 0x200u}, {0x1001u, 0x1100u}, {0x10001u, 0x10100u},
+    };
+    enum { NDELTAS = sizeof(deltas) / sizeof(deltas[0]) };
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    uint32_t uids[2 * NDELTAS];
+    size_t nuids = 0;
+    int deltas_ok = 1, placed_ok = 1;
+    uint32_t next_top = SR_STACK_ARENA_CEIL;
+    for (size_t i = 0; i < NDELTAS; i++) {
+        uint32_t u1 = memblock_alloc(name, 1u, 0x100u, 0u);
+        uint32_t u2 = memblock_alloc(name, 1u, deltas[i].size, 0u);
+        if (u1 != 0u && u1 < 0x80000000u) uids[nuids++] = u1;
+        if (u2 != 0u && u2 < 0x80000000u) uids[nuids++] = u2;
+        if (u1 == 0u || u1 >= 0x80000000u || u2 == 0u || u2 >= 0x80000000u) {
+            deltas_ok = 0;
+            continue;
+        }
+        uint32_t a1 = memblock_addr(u1, addr_out), a2 = memblock_addr(u2, addr_out);
+        if (a1 - a2 != deltas[i].delta) deltas_ok = 0;
+        if (a1 + 0x100u != next_top || (a2 & 0xffu) != 0u) placed_ok = 0;
+        next_top = a2;
+    }
+    expect(deltas_ok && sr_hle_test_unmodelled_stops() == stops,
+           "memblock high: type 1 allocates with the recorded deltas (sizes 1..0x10001) and "
+           "stops nothing");
+    expect(placed_ok, "memblock high: the blocks stack downward from the top of user RAM");
+
+    uint32_t low = memblock_alloc(name, 0u, 0x100u, 0u);
+    uint32_t low_addr = low != 0u && low < 0x80000000u ? memblock_addr(low, addr_out) : 0u;
+    expect(low_addr != 0u && low_addr + 0x100u <= SR_VBLANK_STACK_BASE &&
+               sr_hle_test_partition_bump_top() == SR_VBLANK_STACK_BASE,
+           "memblock high: a Low block still comes from the bump region, which the High blocks "
+           "leave whole");
+    int freed_ok = low_addr != 0u && memblock_free(low) == 0u;
+    for (size_t i = 0; i < nuids; i++)
+        if (memblock_free(uids[i]) != 0u) freed_ok = 0;
+    uint32_t again = memblock_alloc(name, 1u, 0x100u, 0u);
+    expect(freed_ok && nuids == 2u * NDELTAS && again != 0u && again < 0x80000000u &&
+               memblock_addr(again, addr_out) + 0x100u == SR_STACK_ARENA_CEIL &&
+               memblock_free(again) == 0u,
+           "memblock high: freed blocks go back, and the next one lands at the top again");
+
+    /* The arena's own rule, as in the user-RAM layout: a live thread stack holds the top, and the
+     * High block goes directly below it. */
+    uint32_t thread = sched_create_thread(0x2000u, 32, 0x8000u);
+    uint32_t floor = sched_guest_stack_floor();
+    uint32_t under = memblock_alloc(name, 1u, 0x100u, 0u);
+    expect(thread != 0u && floor == SR_STACK_ARENA_CEIL - 0x8000u && under != 0u &&
+               under < 0x80000000u && memblock_addr(under, addr_out) + 0x100u == floor &&
+               memblock_free(under) == 0u,
+           "memblock high: a High block lies directly below a live thread stack");
+
+    /* The refusals memblock.expected records (lines 10, 24 and 2) hold in this layout, and a block
+     * the top of user RAM cannot hold fails with the allocation code instead of stopping. */
+    expect(memblock_alloc(name, 2u, 0x100u, 0u) == 0x800200d8u &&
+               memblock_alloc(name, 1u, 0u, 0u) == 0x800200d9u &&
+               memblock_alloc(0u, 1u, 0x100u, 0u) == 0x80020001u &&
+               memblock_alloc(name, 1u, 0xffffff00u, 0u) == 0x800200d9u &&
+               sr_hle_test_unmodelled_stops() == stops,
+           "memblock high: type 2, size 0 and a NULL name keep their recorded codes, and an "
+           "oversized block is 0x800200D9");
+    sr_hle_test_partition_reset();
+}
+
 static void test_td28_partition_free_reuse(void) {
     extern void sr_hle_test_partition_reset(void);
     extern int sr_hle_test_partition_free_block_count(void);
@@ -41367,7 +41454,7 @@ static void test_imports_20261102_measured_contracts(void) {
            "a latched request for framebuffer 0 leaves it foreground until the vblank");
 
     /* idlist.expected: byte size, whole entries, count is the module total, the caller's module is in it. */
-    const uint32_t NID_ID_LIST = 0x644395e2u, NID_GET_ID_BY_ADDR = 0xd8b73127u;
+    const uint32_t NID_ID_LIST = NID_SCE_KERNEL_GET_MODULE_ID_LIST, NID_GET_ID_BY_ADDR = 0xd8b73127u;
     const uint32_t BUF = 0x00200600u, CNT = 0x00200680u;
     const uint32_t A_BASE = 0x08a10000u, B_BASE = 0x08a20000u, SPAN = 0x10000u;
     s_fixture_loaded_base = 0x08804000u;
@@ -41413,10 +41500,38 @@ static void test_imports_20261102_measured_contracts(void) {
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 32u; cpu.r[6] = CNT;
     (void)sr_syscall(&cpu, NID_ID_LIST);
     expect(MEM_R32(CNT) == 2u, "an unloaded module leaves the list");
+    /* idlist.expected lines 14-16 at pspautotests 774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a
+     * third-party recording made on a PSP: a NULL count, a count pointer in the kernel segment
+     * (0x88000000) and a buffer there are each 0x800200d3, and the count-pointer refusal leaves
+     * the buffer untouched. 0x88000000 names physical 0x08000000 here, so that word must stay as
+     * it was too. Before #2640 the NULL count stopped the run by name and the kernel-segment
+     * pointers were written through. */
+    const uint32_t KSEG = 0x88000000u, KSEG_PHYS = 0x08000000u;
     stops = sr_hle_test_unmodelled_stops();
-    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 8u;
+    for (uint32_t w = 0; w < 8u; w++) MEM_W32(BUF + 4u * w, 0xdeadbeefu);
+    MEM_W32(KSEG_PHYS, 0x12345678u);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 32u;
+    expect(sr_syscall(&cpu, NID_ID_LIST) == 0x800200d3u && MEM_R32(BUF) == 0xdeadbeefu,
+           "a NULL count pointer is 0x800200d3 and writes nothing");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 32u; cpu.r[6] = KSEG;
+    expect(sr_syscall(&cpu, NID_ID_LIST) == 0x800200d3u && MEM_R32(BUF) == 0xdeadbeefu &&
+               MEM_R32(KSEG_PHYS) == 0x12345678u,
+           "a kernel-segment count pointer is 0x800200d3 and leaves the buffer untouched");
+    MEM_W32(CNT, 0xffffffffu);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = KSEG; cpu.r[5] = 4u; cpu.r[6] = CNT;
+    expect(sr_syscall(&cpu, NID_ID_LIST) == 0x800200d3u && MEM_R32(KSEG_PHYS) == 0x12345678u,
+           "a kernel-segment buffer is 0x800200d3 and is not written");
+    expect(sr_hle_test_unmodelled_stops() == stops, "the recorded pointer refusals stop nothing");
+    /* A pointer outside guest memory that is not in the kernel segment has no recorded cell: it
+     * still stops by name, before anything is written. */
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 32u; cpu.r[6] = 0x0c000000u;
     (void)sr_syscall(&cpu, NID_ID_LIST);
-    expect(sr_hle_test_unmodelled_stops() == stops + 1u, "a NULL count pointer stops by name");
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u && MEM_R32(BUF) == 0xdeadbeefu,
+           "a count pointer outside guest memory stops by name and writes nothing");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = 0x0c000000u; cpu.r[5] = 4u; cpu.r[6] = CNT;
+    (void)sr_syscall(&cpu, NID_ID_LIST);
+    expect(sr_hle_test_unmodelled_stops() == stops + 2u && MEM_R32(CNT) == 0xffffffffu,
+           "a buffer outside guest memory stops by name and leaves count untouched");
     sr_hle_test_module_reset();
     s_fixture_loaded_base = UINT32_MAX;
     s_fixture_loaded_end = 0x00400000u;
@@ -42672,10 +42787,10 @@ static void test_wb_tlspl_vpl_cells(void) {
     uint32_t p6 = wb_tlspl_create("tls", 6u, 0u, 0x100u, 4u, 0xdeadbeefu);
     expect(p6 != 0u && p6 < 0x80000000u, "wb tlspl: partition 6 succeeds");
     if (p6 < 0x80000000u) (void)selftest_tlspl_simple(p6, NID_TLSPL_DELETE);
-    static const uint32_t good_attr[] = {0x1u, 0x100u}; /* 0x4000 needs the High region, which this fixture partition does not model */
+    static const uint32_t good_attr[] = {0x1u, 0x100u, 0x4000u};
     for (size_t i = 0; i < sizeof good_attr / sizeof good_attr[0]; ++i) {
         uint32_t u = wb_tlspl_create("tls", 2u, good_attr[i], 0x100u, 4u, 0xdeadbeefu);
-        expect(u != 0u && u < 0x80000000u, "wb tlspl: attrs 1 and 0x100 succeed");
+        expect(u != 0u && u < 0x80000000u, "wb tlspl: attrs 1, 0x100 and 0x4000 succeed");
         if (u < 0x80000000u) {
             expect(selftest_tlspl_refer(u, TLSPL_INFO) == 0u && MEM_R32(TLSPL_INFO + 36u) == good_attr[i],
                    "wb tlspl: the attr is reported as given");
@@ -42801,6 +42916,120 @@ static void test_wb_tlspl_vpl_cells(void) {
                "wb vpl: AllocateCB of 0, more than the pool, or -1 bytes is 0x800201B7");
     }
     (void)selftest_vpl_delete(vpl);
+}
+
+/* sceKernelCreateTlspl attr 0x4000 (PSP_TLSPL_ATTR_HIGHMEM), #2640, in both partition layouts: the
+ * fixture's default image, linked below the runtime stacks, where the create stopped the run by
+ * name, and an image in user RAM, as a game's is. pspautotests tests/threads/tls/create.expected
+ * at 774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP, fixes what
+ * the caller sees. Line 29: a pool whose status reads attr=00004000, blockSize 0x100 and four free
+ * blocks of four, 1024 bytes taken from the partition's free total and given back by the delete
+ * (no LEAK line). Lines 28 and 30: 0x80020191 for attr 0x2000 and 0x8000. Where the pool lies is
+ * not in the recording: the top of the partition is PPSSPP-derived, not PSP-measured
+ * (h_CreateTlspl), and the handler says so once per run.
+ *
+ * The free total carries a 0x100 tail for every partition block slot ever used
+ * (h_TotalFreeMemSize), so the slots the case uses are opened first; the recorded cell also runs
+ * after other pools came and went. In the low-based layout the free total measures the bump
+ * region, which ends below the runtime stacks and so below these pools: there only the leak is
+ * checked. */
+static uint32_t tlspl_total_free(void) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    return sr_syscall(&cpu, 0xf919f628u);   /* sceKernelTotalFreeMemSize */
+}
+
+static int tlspl_created(uint32_t uid) { return uid != 0u && uid < 0x80000000u; }
+
+static void test_tlspl_highmem_pool(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_hle_test_partition_bump_top(void);
+    extern void sr_hle_test_tlspl_highmem_note_reset(void);
+    static const char note[] = "PPSSPP-derived, not PSP-measured: sceKernelCreateTlspl";
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    for (int user_ram = 0; user_ram < 2; ++user_ram) {
+        reset_fixture();
+        s_fixture_loaded_end = user_ram ? 0x08a00000u : loaded_end;
+        sr_hle_test_partition_reset();
+        sr_hle_init();
+        sr_hle_test_tlspl_highmem_note_reset();
+        TCB *thread = fixture_thread(0x33b1u, TH_RUNNING, 32);
+        expect(thread != NULL &&
+                   (sr_hle_test_partition_bump_top() == SR_VBLANK_STACK_BASE) == !user_ram,
+               "tlspl highmem: only the default image's partition ends at the runtime stacks");
+        if (!thread) break;
+        s_cur = (int)(thread - s_tcb);
+
+        uint32_t low = wb_tlspl_create("low", 2u, 0u, 0x100u, 4u, 0xdeadbeefu);
+        uint32_t gone1 = wb_tlspl_create("tls", 2u, 0x1u, 0x100u, 4u, 0xdeadbeefu);
+        uint32_t gone2 = wb_tlspl_create("tls", 2u, 0x100u, 0x100u, 4u, 0xdeadbeefu);
+        expect(tlspl_created(low) && tlspl_created(gone1) && tlspl_created(gone2) &&
+                   selftest_tlspl_simple(gone1, NID_TLSPL_DELETE) == 0u &&
+                   selftest_tlspl_simple(gone2, NID_TLSPL_DELETE) == 0u,
+               "tlspl highmem: an attr 0 pool stays, and attr 1 and 0x100 pools come and go");
+        const uint32_t before = tlspl_total_free();
+        const uint32_t stops = sr_hle_test_unmodelled_stops();
+        rt_capture_begin();
+        uint32_t high = wb_tlspl_create("tls", 2u, 0x4000u, 0x100u, 4u, 0xdeadbeefu);
+        const uint32_t taken = before - tlspl_total_free();
+        uint32_t second = wb_tlspl_create("tls", 2u, 0x4000u, 0x100u, 4u, 0xdeadbeefu);
+        const char *out = rt_capture_end();
+        expect(tlspl_created(high) && tlspl_created(second) &&
+                   sr_hle_test_unmodelled_stops() == stops,
+               "tlspl highmem: attr 0x4000 creates a pool and stops nothing");
+        int notes = 0;
+        for (const char *p = out; (p = strstr(p, note)) != NULL; p += sizeof(note) - 1u) ++notes;
+        expect(notes == 1, "tlspl highmem: the PPSSPP-derived placement is logged once for two pools");
+        if (tlspl_created(high) && tlspl_created(second)) {
+            MEM_W32(TLSPL_INFO, 60u);
+            expect(selftest_tlspl_refer(high, TLSPL_INFO) == 0u && MEM_R32(TLSPL_INFO) == 60u &&
+                       MEM_R8(TLSPL_INFO + 4u) == (uint8_t)'t' &&
+                       MEM_R32(TLSPL_INFO + 36u) == 0x4000u && MEM_R32(TLSPL_INFO + 44u) == 0x100u &&
+                       MEM_R32(TLSPL_INFO + 48u) == 4u && MEM_R32(TLSPL_INFO + 52u) == 4u &&
+                       MEM_R32(TLSPL_INFO + 56u) == 0u,
+                   "tlspl highmem: the status reads attr 0x4000, block size 0x100 and 4 free blocks of 4");
+            if (user_ram)
+                expect(taken == 0x400u,
+                       "tlspl highmem: the pool takes its 1024 bytes from the free total");
+            const uint32_t a_low = selftest_tlspl_get_addr(low);
+            const uint32_t a_high = selftest_tlspl_get_addr(high);
+            const uint32_t a_second = selftest_tlspl_get_addr(second);
+            expect(a_low != 0u && a_high == SR_STACK_ARENA_CEIL - 0x400u &&
+                       a_second == a_high - 0x400u && a_low < a_second &&
+                       (user_ram || a_low < SR_VBLANK_STACK_BASE),
+                   "tlspl highmem: the pools sit at the top of user RAM, the second below the "
+                   "first, and the attr 0 pool below both");
+            expect(selftest_tlspl_simple(high, NID_TLSPL_FREE) == 0u &&
+                       selftest_tlspl_simple(second, NID_TLSPL_FREE) == 0u &&
+                       selftest_tlspl_simple(high, NID_TLSPL_DELETE) == 0u &&
+                       selftest_tlspl_simple(second, NID_TLSPL_DELETE) == 0u &&
+                       tlspl_total_free() == before,
+                   "tlspl highmem: deleting the pools gives every byte back");
+            uint32_t again = wb_tlspl_create("tls", 2u, 0x4000u, 0x100u, 4u, 0xdeadbeefu);
+            expect(tlspl_created(again) &&
+                       selftest_tlspl_get_addr(again) == SR_STACK_ARENA_CEIL - 0x400u &&
+                       selftest_tlspl_simple(again, NID_TLSPL_FREE) == 0u &&
+                       selftest_tlspl_simple(again, NID_TLSPL_DELETE) == 0u,
+                   "tlspl highmem: the next attr 0x4000 pool lands at the top again");
+        } else {
+            if (tlspl_created(high)) (void)selftest_tlspl_simple(high, NID_TLSPL_DELETE);
+            if (tlspl_created(second)) (void)selftest_tlspl_simple(second, NID_TLSPL_DELETE);
+        }
+        expect(wb_tlspl_create("tls", 2u, 0x2000u, 0x100u, 4u, 0xdeadbeefu) == 0x80020191u &&
+                   wb_tlspl_create("tls", 2u, 0x8000u, 0x100u, 4u, 0xdeadbeefu) == 0x80020191u,
+               "tlspl highmem: attr 0x2000 and 0x8000 stay 0x80020191");
+        /* memory.expected line 7 records 0x80020190 for an attr 0 pool of four 0x01000000-byte
+         * blocks; an attr 0x4000 pool the top of user RAM cannot hold takes the same exit. */
+        expect(wb_tlspl_create("tls", 2u, 0x4000u, 0x01000000u, 4u, 0xdeadbeefu) == 0x80020190u &&
+                   sr_hle_test_unmodelled_stops() == stops,
+               "tlspl highmem: a pool the partition cannot hold is 0x80020190, not a stop");
+        if (tlspl_created(low)) {
+            (void)selftest_tlspl_simple(low, NID_TLSPL_FREE);
+            (void)selftest_tlspl_simple(low, NID_TLSPL_DELETE);
+        }
+    }
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
 }
 
 static void test_fpl_blocking_waits(void) {
@@ -57363,6 +57592,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_msgpipe_cancel_skips_paused_callback_wait();
     test_td23_guest_pointer_validation();
     test_kernel_import_sweep_memory_blocks_and_sdk_alias();
+    test_memory_block_high_in_low_based_partition();
     test_td28_partition_free_reuse();
     test_alloc_block_at_fixed_address();
     test_partition_ends_at_lowest_live_stack();
@@ -57380,6 +57610,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_vpl_block_count_bounded_by_pool_size();
     test_tlspl_lifecycle_and_thread_isolation();
     test_wb_tlspl_vpl_cells();
+    test_tlspl_highmem_pool();
     test_vpl_blocking_waits();
     test_std_handles_measured();
     test_kernel_pool_bounds_measured();
