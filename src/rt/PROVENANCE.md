@@ -263,6 +263,10 @@ Created in this repository. The code moved out of a sal063-lineage file, so the 
 - `rt/mp3_bridge.c` and `rt/mp3_bridge.h`: GPL-3.0-or-later, project-authored frame
   wrapper over minimp3 (CC0, byte-identical, `src/rt/minimp3/PROVENANCE.md`). They contain
   no PPSSPP code.
+- `rt/cheats.c` and `rt/cheats.h` (#2639): GPL-3.0-or-later, project-authored. They bind
+  the cheat reader and applier of `src/core/nk_cheats.c` to a run (the switch, the file,
+  guest memory, the translated code, the pad and the marker) and contain no PPSSPP code;
+  the code forms' semantics, which are PPSSPP-derived, are in `src/core/PROVENANCE.md`.
 - Tests and documents that compare behaviour against PPSSPP (for example
   `rt/hle_thread_selftest.c`, `rt/intr_conformance.h`, `rt/guest_printf.c`) cite
   it as an oracle and are GPL-3.0-or-later. They are not adaptations.

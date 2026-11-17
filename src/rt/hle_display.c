@@ -13,6 +13,7 @@
 #include "hle_internal.h"
 #include "ge_scene.h"
 #include "replay_checkpoint.h" /* SR_REPLAY_CHECKPOINTS (#2147) */
+#include "cheats.h"            /* the user's cheats at each VBLANK (#2639) */
 #include <time.h>
 
 #ifdef _WIN32
@@ -1134,6 +1135,9 @@ void sr_vblank_tick(void) {
      * rather than one frame late. */
     route_tick(s_vcount_fwd);
     sr_ctrl_sample();   /* latch one controller sample per frame (PPSSPP ring semantics) */
+    /* The user's cheats (cheats.h, #2639), after the latch so a button condition reads this
+     * VBLANK's sample. Off, it is one branch and touches nothing. */
+    sr_cheats_vblank();
     /* No-frame watchdog: vblanks keep being delivered even when every game thread is
      * blocked, so a stretch with no new sceDisplaySetFrameBuf is a NO-NEW-FLIP
      * observation. It is not by itself a hang, scheduler-stall, or scene-transition

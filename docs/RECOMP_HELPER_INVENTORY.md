@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **531** (declared in `recomp.h`: 454)
-- reach class: emitter-reached 96, production-runtime-only 394, selftest-only 0, address-only 8, none 33
-- provenance class of the home definition: declared-only 1, project_authored_attested 40, upstream_derived 490
+- helpers: **533** (declared in `recomp.h`: 456)
+- reach class: emitter-reached 96, production-runtime-only 396, selftest-only 0, address-only 8, none 33
+- provenance class of the home definition: declared-only 1, project_authored_attested 41, upstream_derived 491
 
 ## Helpers
 
@@ -299,6 +299,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_cp0_status_ptr` | `rt/recomp.h` | yes | none | `rt/recomp.h`: upstream_derived |
 | `sr_cpu_for_callbacks` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sr_cpu_link_clear` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
+| `sr_ctrl_live_buttons` | `rt/hle_input.c` | yes | production-runtime-only | `rt/hle_input.c`: upstream_derived |
 | `sr_display_advance_vcount` | `rt/hle_route.c` | yes | production-runtime-only | `rt/hle_route.c`: upstream_derived |
 | `sr_display_bounds_field` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_display_vcount` | `rt/hle_route.c` | yes | production-runtime-only | `rt/hle_route.c`: upstream_derived |
@@ -309,6 +310,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_enhancement_update_begin` | `rt/hle_route.c` | yes | emitter-reached (direct) | `rt/hle_route.c`: upstream_derived |
 | `sr_enhancement_update_waits` | `rt/hle_route.c` | yes | production-runtime-only | `rt/hle_route.c`: upstream_derived |
 | `sr_enhancement_widen_clip_x` | `rt/ge.c` | yes | emitter-reached (direct) | `rt/ge.c`: upstream_derived |
+| `sr_exec_span_overlaps` | `rt/guest_interp.c` | yes | production-runtime-only | `rt/guest_interp.c`: project_authored_attested |
 | `sr_exec_span_owns_fetch` | `rt/guest_interp.c` | yes | production-runtime-only | `rt/guest_interp.c`: project_authored_attested |
 | `sr_exec_span_register` | `rt/guest_interp.c` | yes | emitter-reached (direct) | `rt/guest_interp.c`: project_authored_attested |
 | `sr_exec_span_reset` | `rt/guest_interp.c` | yes | emitter-reached (direct) | `rt/guest_interp.c`: project_authored_attested |

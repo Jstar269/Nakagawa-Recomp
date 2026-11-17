@@ -1436,6 +1436,9 @@ static inline const char *sr_guest_symbol_format(const SrGuestSymbol *sym, uint3
 void     sr_exec_span_reset(void);
 int      sr_exec_span_register(uint32_t start, uint32_t end);
 int      sr_exec_span_owns_fetch(uint32_t pc);
+/* Whether any byte of [addr, addr + size) is translated code, a bound module's included: what a
+ * writer of guest memory asks before it writes (src/rt/cheats.h). */
+int      sr_exec_span_overlaps(uint32_t addr, uint32_t size);
 
 /* ---- Runtime-placed guest modules (issue #704) -------------------------------
  * A guest module translated with `tools/codegen.py --extra-elf=<module>@runtime` is
@@ -2757,6 +2760,9 @@ int      sr_thread_has_pending_callbacks(uint32_t thread_uid);
 int      sr_thread_dispatch_callbacks(void);
 int      sr_vblank_dispatch_registered(void);
 void     sr_vblank_tick(void);
+/* The buttons of the pad state latched at the last VBLANK, which every sample the guest reads
+ * until the next one carries (hle_input.c). */
+uint32_t sr_ctrl_live_buttons(void);
 /* The guest VBLANK count (hle.c) and the host audio backend's statistics dump. */
 uint32_t sr_audio_vbl(void);
 void     sr_audio_dump_stats(void);

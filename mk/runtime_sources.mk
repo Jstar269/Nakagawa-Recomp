@@ -133,6 +133,8 @@ RT_SRCS    := src/rt/recomp.c \
               src/rt/fbcap.c \
               src/rt/videorec.c \
               src/rt/replay_checkpoint.c \
+              src/rt/cheats.c \
+              src/core/nk_cheats.c \
               src/rt/ge_capture.c \
               src/rt/vfpu_interp.c \
               $(HLE_SRCS) src/rt/audio_resample.c src/rt/flash0_font.c \
