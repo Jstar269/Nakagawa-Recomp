@@ -150,7 +150,8 @@ static uint32_t h_NetTerm(CpuState *s) {
 #define ADHOCCTL_ERROR_INVALID_HANDLER_ID 0x80410b06u
 #define ADHOCCTL_ERROR_ALREADY_INITIALIZED 0x80410b07u
 #define SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED 0x80410b08u
-#define ADHOCCTL_ERROR_DISCONNECTED       0x80410b09u
+#define SCE_NET_ADHOCCTL_ERROR_TIMEOUT     0x80410b05u
+#define ADHOCCTL_ERROR_DISCONNECTED        0x80410b09u
 #define ADHOCCTL_ERROR_BUSY               0x80410b10u
 #define ADHOCCTL_ERROR_HANDLER_MAX        0x80410b12u
 #define ADHOCCTL_ERROR_STACK_TOO_SMALL    0x80410b13u
@@ -249,6 +250,7 @@ static uint32_t h_NetTerm(CpuState *s) {
 #define ADHOCCTL_CONNECT_US      4087045u
 #define ADHOCCTL_DISCONNECT_US   104638u
 #define ADHOCCTL_SCAN_US         991527u
+#define ADHOCCTL_ONLINE_REQUEST_TIMEOUT_US 5000000u /* PPSSPP adhocDefaultTimeout, Core/HLE/NetAdhocCommon.h:36 */
 #define ADHOCCTL_EVENT_ERROR     0
 #define ADHOCCTL_EVENT_CONNECT   1
 #define ADHOCCTL_EVENT_DISCONNECT 2
@@ -346,6 +348,7 @@ static struct {
     int group_null;          /* that name was NULL */
     uint8_t bssid[6];        /* resolved group BSSID */
     int online_active;       /* online transport attached for this Init session */
+    int lobby_lost_reported; /* logged dead-lobby warning once for this session */
     unsigned error_events;   /* ALREADY_CONNECTED events still to deliver */
     struct { int used; uint32_t fn, arg; } handlers[ADHOCCTL_HANDLERS];
 } s_adhocctl;
@@ -589,6 +592,50 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
             break;
         }
     }
+    if (s_adhocctl.gen != gen) return;
+    const int is_relay = (s_adhoc_relay_client && t == nk_relay_client_transport(s_adhoc_relay_client));
+    if (is_relay && nk_relay_client_lobby_dead(s_adhoc_relay_client)) {
+        const int had_work = (s_adhocctl.request == ADHOCCTL_REQ_CREATE ||
+                              s_adhocctl.request == ADHOCCTL_REQ_CONNECT ||
+                              s_adhocctl.request == ADHOCCTL_REQ_SCAN ||
+                              s_adhocctl.state != 0);
+        if (!s_adhocctl.lobby_lost_reported) {
+            s_adhocctl.lobby_lost_reported = 1;
+            const char *err = nk_relay_client_last_error(s_adhoc_relay_client);
+            fprintf(stderr, "HLE: online ad hoc lobby disconnected: %s\n",
+                    (err && err[0]) ? err : "connection closed");
+        }
+        if (had_work) {
+            s_adhocctl.state = 0;
+            s_adhocctl.request = ADHOCCTL_REQ_NONE;
+            s_adhocctl.request_due = 0u;
+            s_adhocctl.scan_shown = 0;
+            memset(s_adhoc_peers, 0, sizeof(s_adhoc_peers));
+            adhocctl_call_handlers(s, gen, sp, gp, ADHOCCTL_EVENT_DISCONNECT,
+                                   ADHOCCTL_ERROR_DISCONNECTED);
+        }
+        return;
+    }
+    /* Match PPSSPP __AdhocctlNotify (Core/HLE/sceNetAdhoc.cpp:678) + adhocDefaultTimeout (5s):
+     * never leave Create/Connect/Join/Scan waiting forever on a silent lobby. */
+    if ((s_adhocctl.request == ADHOCCTL_REQ_CREATE ||
+         s_adhocctl.request == ADHOCCTL_REQ_CONNECT ||
+         s_adhocctl.request == ADHOCCTL_REQ_SCAN) &&
+        sched_vtime_us() >= s_adhocctl.request_due) {
+        const int req_kind = s_adhocctl.request;
+        const char *err = is_relay ? nk_relay_client_last_error(s_adhoc_relay_client) : NULL;
+        fprintf(stderr, "HLE: online ad hocctl request (%d) timed out after %u ms%s%s%s\n",
+                req_kind, ADHOCCTL_ONLINE_REQUEST_TIMEOUT_US / 1000u,
+                (err && err[0]) ? " (" : "", (err && err[0]) ? err : "",
+                (err && err[0]) ? ")" : "");
+        s_adhocctl.state = 0;
+        s_adhocctl.request = ADHOCCTL_REQ_NONE;
+        s_adhocctl.request_due = 0u;
+        s_adhocctl.scan_shown = 0;
+        memset(s_adhoc_peers, 0, sizeof(s_adhoc_peers));
+        adhocctl_call_handlers(s, gen, sp, gp, ADHOCCTL_EVENT_ERROR,
+                               SCE_NET_ADHOCCTL_ERROR_TIMEOUT);
+    }
 }
 
 /* The library's thread: shows a scan's state, delivers each event when it is due, and otherwise
@@ -654,6 +701,7 @@ static void adhocctl_teardown(void) {
     s_adhocctl.gen++;
     s_adhocctl.inited = 0;
     s_adhocctl.online_active = 0;
+    s_adhocctl.lobby_lost_reported = 0;
     s_adhocctl.thread_uid = 0u;
     s_adhocctl.state = 0;
     s_adhocctl.request = ADHOCCTL_REQ_NONE;
@@ -767,6 +815,7 @@ static uint32_t h_NetAdhocctlInit(CpuState *s) {
     for (uint32_t i = 0; i < 13u; i++) s_adhocctl.id[i] = id_bytes[i];
     s_adhocctl.inited = 1;
     s_adhocctl.online_active = online;
+    s_adhocctl.lobby_lost_reported = 0;
     s_adhocctl.state = 0;
     s_adhocctl.request = ADHOCCTL_REQ_NONE;
     s_adhocctl.error_events = 0u;
@@ -936,9 +985,19 @@ static uint32_t adhocctl_start(const char *name, int request, uint32_t group_add
         } else {
             trc = t->ops->connect(t, s_adhocctl.group);
         }
-        if (trc != NK_NET_OK) return ADHOCCTL_ERROR_DISCONNECTED;
+        if (trc != NK_NET_OK) {
+            if (!s_adhocctl.lobby_lost_reported) {
+                s_adhocctl.lobby_lost_reported = 1;
+                const char *err = (s_adhoc_relay_client && t == nk_relay_client_transport(s_adhoc_relay_client))
+                                      ? nk_relay_client_last_error(s_adhoc_relay_client)
+                                      : NULL;
+                fprintf(stderr, "HLE: online %s failed%s%s\n", name,
+                        (err && err[0]) ? ": " : "", (err && err[0]) ? err : "");
+            }
+            return ADHOCCTL_ERROR_DISCONNECTED;
+        }
         s_adhocctl.request = request;
-        s_adhocctl.request_due = UINT64_MAX;
+        s_adhocctl.request_due = sched_vtime_us() + ADHOCCTL_ONLINE_REQUEST_TIMEOUT_US;
         s_adhocctl.scan_shown = 0;
         s_adhocctl.radio_used = 1;
         sched_service_kick(s_adhocctl.thread_uid);

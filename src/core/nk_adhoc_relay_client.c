@@ -504,7 +504,8 @@ static void pump_lobby(NkAdhocRelayClient *c) {
         if (ev.kind != NK_LOBBY_CHAT) queue_lobby_event(c, &ev);
     }
     if (c->lobby.remote_eof || c->lobby.dead) {
-        if (!c->last_error[0]) set_error(c, "lobby connection closed");
+        if (!c->last_error[0])
+            set_error(c, c->lobby.connected ? "lobby connection closed" : "lobby connection failed");
         c->lobby.dead = 1;
     }
 }
@@ -1097,6 +1098,10 @@ NkAdhocTransport *nk_relay_client_transport(NkAdhocRelayClient *client) {
 bool nk_relay_client_lobby_connected(const NkAdhocRelayClient *client) {
     return client && client->logged_in && client->lobby.connected && !client->lobby.dead &&
            !client->lobby.remote_eof;
+}
+
+bool nk_relay_client_lobby_dead(const NkAdhocRelayClient *client) {
+    return !client || client->lobby.dead || client->lobby.remote_eof;
 }
 
 const char *nk_relay_client_last_error(const NkAdhocRelayClient *client) {

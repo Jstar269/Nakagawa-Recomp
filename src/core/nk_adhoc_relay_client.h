@@ -29,6 +29,7 @@ void nk_relay_client_destroy(NkAdhocRelayClient *client);
 
 NkAdhocTransport *nk_relay_client_transport(NkAdhocRelayClient *client);
 bool nk_relay_client_lobby_connected(const NkAdhocRelayClient *client);
+bool nk_relay_client_lobby_dead(const NkAdhocRelayClient *client);
 const char *nk_relay_client_last_error(const NkAdhocRelayClient *client);
 
 #ifdef __cplusplus

@@ -11283,6 +11283,7 @@ typedef struct {
     uint8_t active_group[8], group_bssid[6];
     volatile int stop, running;
     volatile int drop_lobby_on_connect;
+    volatile int drop_lobby_mid_session;
     volatile int silent_lobby;
     volatile int stall_ptp_forward;
     volatile int closed_unmatched_ptp_connects;
@@ -11356,6 +11357,10 @@ static void mr_pump_once(AdhP2MiniRelay *r) {
     for (int i = 0; i < 6; i++) {
         MiniRelayPeer *p = &r->peers[i];
         if (!p->active) continue;
+        if (r->drop_lobby_mid_session && p->in_group) {
+            adh_p2_close_sock(p->fd); p->fd = ADH_P2_BAD_SOCK; p->active = 0;
+            continue;
+        }
         int closed = 0;
         while (p->rx_len < sizeof(p->rx)) {
             int n = recv(p->fd, (char *)(p->rx + p->rx_len), (int)(sizeof(p->rx) - p->rx_len), 0);
@@ -11724,6 +11729,144 @@ static void test_adhoc_d4_ptp_open_connect_regression(void) {
         adh_fixture_end(loaded_end);
         mr_stop(&srv);
         s_d4_srv = NULL;
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+/* ---- D3 regression: dead or silent lobby ends Create/Scan/group with event + log -------- */
+static AdhP2MiniRelay *s_d3_srv;
+static int s_d3_done;
+
+static void d3_main_fn(CpuState *cpu) {
+    char msg[160];
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '3'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+
+    /* 1. Lobby closes on Create: guest gets DISCONNECT event instead of hanging in flight. */
+    s_adh_events = 0u;
+    s_d3_srv->drop_lobby_on_connect = 1;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "d3.1: Net/Adhocctl init");
+    expect(adh(ADH_NID_CREATE, adh_name(0, "D3DROP1"), 0u, 0u) == 0u, "d3.1: Create returns 0");
+    for (int w = 0; w < 100 && s_adh_events == 0u; w++) {
+#ifdef _WIN32
+        Sleep(1u);
+#else
+        usleep(1000);
+#endif
+        cpu->r[4] = 5000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    snprintf(msg, sizeof(msg),
+             "d3.1: dead lobby ends Create with DISCONNECT (events=%u ev=%d err=0x%08x state=%u)",
+             s_adh_events, s_adh_events ? ADH_AT(0).event : -1,
+             s_adh_events ? ADH_AT(0).error : 0u, adh_state());
+    expect(s_adh_events == 1u && ADH_AT(0).event == 2 &&
+           ADH_AT(0).error == 0x80410b09u && adh_state() == 0u, msg);
+    const uint32_t after_dead = adh(ADH_NID_SCAN, 0u, 0u, 0u);
+    snprintf(msg, sizeof(msg), "d3.1: Scan after dead lobby returns DISCONNECTED, not BUSY (0x%08x)", after_dead);
+    expect(after_dead == 0x80410b09u, msg);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.1: cleanup");
+
+    /* 2. Mid-session lobby drop while in group: GetState resets to 0 + DISCONNECT event fires. */
+    s_adh_events = 0u;
+    s_d3_srv->drop_lobby_on_connect = 0;
+    s_d3_srv->drop_lobby_mid_session = 0;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_CREATE, adh_name(0, "D3MID01"), 0u, 0u) == 0u, "d3.2: Create");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    expect(adh_state() == 1u && s_adh_events == 1u, "d3.2: in group D3MID01");
+    s_d3_srv->drop_lobby_mid_session = 1;
+    for (int w = 0; w < 100 && s_adh_events < 2u; w++) {
+#ifdef _WIN32
+        Sleep(1u);
+#else
+        usleep(1000);
+#endif
+        cpu->r[4] = 5000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    s_d3_srv->drop_lobby_mid_session = 0;
+    snprintf(msg, sizeof(msg),
+             "d3.2: mid-session lobby drop resets state=0 and fires DISCONNECT (events=%u ev=%d err=0x%08x state=%u)",
+             s_adh_events, s_adh_events > 1u ? ADH_AT(1).event : -1,
+             s_adh_events > 1u ? ADH_AT(1).error : 0u, adh_state());
+    expect(s_adh_events == 2u && ADH_AT(1).event == 2 &&
+           ADH_AT(1).error == 0x80410b09u && adh_state() == 0u, msg);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.2: cleanup");
+
+    /* 3. Silent lobby (no response) times out Scan at adhocDefaultTimeout (5s) and allows retry. */
+    s_adh_events = 0u;
+    s_d3_srv->silent_lobby = 1;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u, "d3.3: Scan starts against silent lobby");
+    for (int w = 0; w < 120 && s_adh_events == 0u; w++) {
+        cpu->r[4] = 50000u; /* 120 * 50ms = 6.0s virtual time > 5.0s adhocDefaultTimeout */
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    snprintf(msg, sizeof(msg),
+             "d3.3: silent lobby times out Scan with ERROR/TIMEOUT (events=%u ev=%d err=0x%08x state=%u)",
+             s_adh_events, s_adh_events ? ADH_AT(0).event : -1,
+             s_adh_events ? ADH_AT(0).error : 0u, adh_state());
+    expect(s_adh_events == 1u && ADH_AT(0).event == 0 &&
+           ADH_AT(0).error == 0x80410b05u && adh_state() == 0u, msg);
+    s_d3_srv->silent_lobby = 0;
+    const uint32_t retry_rc = adh(ADH_NID_SCAN, 0u, 0u, 0u);
+    expect(retry_rc == 0u, "d3.3: Scan retries cleanly after timeout instead of BUSY");
+    for (int w = 0; w < 100 && s_adh_events < 2u; w++) {
+#ifdef _WIN32
+        Sleep(1u);
+#else
+        usleep(1000);
+#endif
+        cpu->r[4] = 5000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    expect(s_adh_events == 2u && ADH_AT(1).event == 3 && ADH_AT(1).error == 0u,
+           "d3.3: retried Scan completes cleanly");
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.3: cleanup");
+    s_d3_done = 1;
+}
+
+static void test_adhoc_d3_dead_and_silent_lobby(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "d3: WSAStartup");
+#endif
+    AdhP2MiniRelay srv;
+    expect(mr_start(&srv), "d3: mini relay started");
+    if (srv.running) {
+        s_d3_srv = &srv;
+        char srv_spec[64];
+        snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u",
+                 (unsigned)srv.lobby_port, (unsigned)srv.data_port);
+        s_d3_done = 0;
+        const uint32_t loaded_end = adh_fixture_begin();
+        hle_test_setenv("SR_ADHOC_ENABLED", "1");
+        hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+        hle_net_reset();
+        adh_run(ADH_P2_MAIN, d3_main_fn);
+        expect(s_d3_done == 1, "d3: dead/silent lobby regression finished");
+        hle_net_reset();
+        hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+        hle_test_setenv("SR_ADHOC_SERVER", NULL);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+        adh_fixture_end(loaded_end);
+        mr_stop(&srv);
+        s_d3_srv = NULL;
     }
 #ifdef _WIN32
     WSACleanup();
@@ -59043,6 +59186,7 @@ static int hle_selftest_main(int argc, char **argv) {
         test_adhoc_d2_d12_regressions();
         test_adhoc_d1_lifetime_across_term();
         test_adhoc_d4_ptp_open_connect_regression();
+        test_adhoc_d3_dead_and_silent_lobby();
         fprintf(stderr, "adhocctl: %d checks, %d failures\n", s_checks, s_failures);
         free(g_mem_base);
         return s_failures ? 1 : 0;
@@ -59199,6 +59343,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_adhoc_d2_d12_regressions();
     test_adhoc_d1_lifetime_across_term();
     test_adhoc_d4_ptp_open_connect_regression();
+    test_adhoc_d3_dead_and_silent_lobby();
     test_unregistered_batch_profiler_refer_null();
     test_kernel_import_sweep_ge_head();
     test_ge_blocking_sync_waits_for_stalled_list();
