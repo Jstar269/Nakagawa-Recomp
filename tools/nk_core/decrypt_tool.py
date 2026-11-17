@@ -70,6 +70,10 @@ def find_or_build_tool(root: Union[Path, str]) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     cmd = [cc, "-std=c99", "-O2", "-Wall", "-Wextra", "-I", str(root / "src" / "core")]
     cmd.extend(str(root / rel) for rel in SOURCES)
+    if os.name == "nt":
+        # CommandLineToArgvW: nk_decrypt rebuilds its arguments as UTF-8 from the wide
+        # command line, so a non-ASCII profile path reaches it intact.
+        cmd.append("-lshell32")
     cmd.extend(["-o", str(out)])
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:

@@ -828,6 +828,83 @@ class TestSyntheticEndToEnd(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertEqual(dst.read_bytes(), plain)
 
+    def test_non_ascii_in_and_out_paths_decrypt(self):
+        """A per-user folder with an accented or CJK letter still decrypts.
+
+        On Windows nk_decrypt used the narrow argv, which the C runtime builds in
+        the ANSI code page, and nk_fopen_utf8 refuses those bytes as UTF-8: every
+        run printed IO_FAILURE cannot read input file and exited 1.
+        """
+        container, entries, _ = self._seal(self.elf, compressed=False)
+        folder = self.tmp / "décodé_日本"
+        folder.mkdir(exist_ok=True)
+        src = folder / "EBOOT_é.BIN"
+        src.write_bytes(container)
+        keyfile = folder / "keys_é.json"
+        write_keyfile(keyfile, entries)
+        dst = folder / "EBOOT_日.elf"
+        out = subprocess.run(
+            [str(self.exe), "decrypt", "--key-file", str(keyfile),
+             "--in", str(src), "--out", str(dst)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(dst.read_bytes(), self.elf)
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes and resource limits")
+    def test_decrypted_output_is_owner_only(self):
+        """The decrypted module is created 0600, not under the caller's umask."""
+        container, entries, _ = self._seal(self.elf, compressed=False)
+        src = self.tmp / "EBOOT_mode.BIN"
+        src.write_bytes(container)
+        keyfile = self.tmp / "keys_mode.json"
+        write_keyfile(keyfile, entries)
+        dst = self.tmp / "EBOOT_mode.elf"
+        dst.unlink(missing_ok=True)
+        out = subprocess.run(
+            [str(self.exe), "decrypt", "--key-file", str(keyfile),
+             "--in", str(src), "--out", str(dst)],
+            capture_output=True, text=True,
+            preexec_fn=lambda: os.umask(0o022),
+        )
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(dst.stat().st_mode & 0o777, 0o600)
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes and resource limits")
+    def test_a_short_write_leaves_no_partial_output(self):
+        """A write that stops part way (a full disk) leaves nothing at --out.
+
+        The output used to be opened in place, so a short write left a truncated
+        module at --out, which decrypt_tool keeps as a finished copy on the next run.
+        A file-size limit with SIGXFSZ ignored makes the write stop the way a full
+        disk does.
+        """
+        import resource
+        import signal
+
+        container, entries, _ = self._seal(self.elf, compressed=False)
+        src = self.tmp / "EBOOT_short.BIN"
+        src.write_bytes(container)
+        keyfile = self.tmp / "keys_short.json"
+        write_keyfile(keyfile, entries)
+        dst = self.tmp / "EBOOT_short.elf"
+        dst.unlink(missing_ok=True)
+        limit = len(self.elf) // 2
+
+        def limit_file_size():
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+        out = subprocess.run(
+            [str(self.exe), "decrypt", "--key-file", str(keyfile),
+             "--in", str(src), "--out", str(dst)],
+            capture_output=True, text=True, preexec_fn=limit_file_size,
+        )
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("IO_FAILURE", out.stdout)
+        self.assertFalse(dst.exists())
+        self.assertFalse(Path(str(dst) + ".tmp").exists())
+
     def test_probe_reports_needed_entries_without_keyfile(self):
         container, _, _ = self._seal(self.elf, compressed=False)
         src = self.tmp / "EBOOT_probe.BIN"

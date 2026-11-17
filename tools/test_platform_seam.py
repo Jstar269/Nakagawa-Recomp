@@ -49,6 +49,9 @@ CONDITIONAL = re.compile(r"^\s*#\s*(?:if|ifdef|ifndef|elif|elifdef|elifndef)\b")
 ALLOWLIST: Mapping[str, tuple[int, str]] = {
     "src/core/nk_platform.h": (
         1, "declares the Win32-only data-base selector its unit test calls"),
+    "src/core/nk_decrypt_main.c": (
+        3, "the decrypt tool links no platform layer: its own UTF-16 argv and the private "
+           "temp-file write of the decrypted output"),
     "src/core/nk_disc_expand.c": (
         3, "its own wide-character file calls and POSIX feature macros"),
     "src/core/nk_disc_expand_main.c": (
