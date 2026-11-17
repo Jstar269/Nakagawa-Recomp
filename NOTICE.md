@@ -64,7 +64,16 @@ We aim to respond promptly and will remove material where appropriate.
   check included, are translated from `login_user_data` in PPSSPP's
   `proAdhocServer.cpp`, and its port offset from
   PPSSPP's `Core/HLE/sceNetAdhoc.cpp` (Copyright (c) 2013- PPSSPP Project) at the
-  same revision, and it is conveyed as GPL-3.0-or-later. Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
+  same revision, and it is conveyed as GPL-3.0-or-later. The opt-in TCP relay
+  client (`src/core/nk_adhoc_relay_client.c`) adapts its listener backlog and
+  connect states from PPSSPP's `Core/HLE/AdhocTransportRelay.cpp` (Copyright (c)
+  2012- PPSSPP Project, GPL-2.0-or-later), and the opt-in online ad hoc tier of
+  `src/rt/hle_network.c` is adapted from PPSSPP's `Core/HLE` ad hoc files
+  (`proAdhoc`, `sceNetAdhoc`, `sceNetAdhocMatching`; Copyright (c) 2013- and
+  (c) 2025- PPSSPP Project, with Coldbird's aemu notice kept in the file), all at the same
+  revision and conveyed as GPL-3.0-or-later; both are PPSSPP-derived, not
+  PSP-measured. Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md),
+  [`src/rt/PROVENANCE.md`](src/rt/PROVENANCE.md).
 - **PSPSDK / PSPDEV** — permissive per-component declarations and BSD-family
   notices for public ABI definitions and source-owned fixtures. The applicable
   notices are in `third_party/licenses/PSPSDK.txt` and `assets/upstream/`.

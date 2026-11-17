@@ -12,6 +12,10 @@
  * nk_adhoc_relay.h; no aemu_postoffice source code is imported or copied (aemu_postoffice
  * client/headers are GPL-3.0-only).
  *
+ * Evidence label: PPSSPP-derived, not PSP-measured. No PSP was measured for what this file does;
+ * it runs only when the user turns Online play on (SR_ADHOC_ENABLED=1), and src/rt/hle_network.c
+ * logs the tier's first use once per run.
+ *
  * Modified for Nakagawa Recomp (2026-11-16; see src/core/PROVENANCE.md):
  *   - C99 non-blocking Winsock2 / poll(2) TCP state machine with 512 KiB bounded TX/RX
  *     channel buffers directly encoding relay frames rather than wrapping blocking
