@@ -132,13 +132,10 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   private temporary file and a rename. Integers are little-endian: the 8 bytes `NKRAQ001`, a 32-bit
   format version (2), a 32-bit record count, the owner's 32-character tag (thirty-two `0` when the queue is
   empty), then 44-byte records: 32 characters of game hash, a 32-bit achievement ID and a 64-bit unlock
-  time in seconds since 1970 UTC. Version 1, written by the first builds of this feature, had no owner. A
-  version 1 record is loaded only when it was unlocked after the stored credential was last written:
-  every sign-in writes the credential and a record is only made in a signed-in session, so, unless the
-  system clock went back in between, that account earned it. The others are reported and dropped. A file
-  the player cannot read (damaged, cut short, from a later version) is renamed beside itself with the
-  ending `.unreadable`, never loaded and never written over; when it cannot even be renamed, nothing is
-  saved over it in that run, which the **RA account** line says.
+  time in seconds since 1970 UTC. A file the player cannot read (damaged, cut short, from another
+  version) is renamed beside itself with the ending `.unreadable`, never loaded and never written over;
+  when it cannot even be renamed, nothing is saved over it in that run, which the **RA account** line
+  says.
 - **Sign-in at start** uses the stored token. When the server gives no answer (no connection, a 5xx, 408 or
   429), the token was not refused: the player tries it again after 30 seconds, then after twice as long
   each time, up to ten minutes, with no password asked. A refusal by the server ends that, as do the

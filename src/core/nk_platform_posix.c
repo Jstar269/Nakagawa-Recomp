@@ -449,12 +449,6 @@ bool nk_platform_credential_delete(const char *target) {
     return false;
 }
 
-bool nk_platform_credential_written_utc(const char *target, uint64_t *out_utc) {
-    (void)target;
-    if (out_utc) *out_utc = 0u;
-    return false;
-}
-
 int nk_platform_credential_prompt(const char *caption, const char *message, const char *target,
                                   char *username, size_t username_size,
                                   char *password, size_t password_size) {

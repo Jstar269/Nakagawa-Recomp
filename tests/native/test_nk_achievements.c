@@ -795,7 +795,7 @@ static void put_le(uint8_t *out, uint64_t value, unsigned bytes) {
     for (unsigned i = 0u; i < bytes; i++) out[i] = (uint8_t)(value >> (8u * i));
 }
 
-/* A version 1 file, as the first builds of this feature wrote it: no owner. */
+/* A version 1 file, as the first, unreleased builds of this feature wrote it: no owner. */
 static size_t old_queue_file(uint8_t *out, const NkAchPendingUnlock *records, uint32_t count) {
     memcpy(out, "NKRAQ001", 8u);
     put_le(out + 8u, 1u, 4u);
@@ -807,6 +807,21 @@ static size_t old_queue_file(uint8_t *out, const NkAchPendingUnlock *records, ui
         put_le(record + 36u, records[i].unlocked_at_utc, 8u);
     }
     return 16u + (size_t)count * 44u;
+}
+
+/* A version 2 file of Player's, in the format nk_achievements.h gives. */
+static size_t queue_file(uint8_t *out, const NkAchPendingUnlock *records, uint32_t count) {
+    memcpy(out, "NKRAQ001", 8u);
+    put_le(out + 8u, 2u, 4u);
+    put_le(out + 12u, count, 4u);
+    memcpy(out + 16u, player_tag(), 32u);
+    for (uint32_t i = 0u; i < count; i++) {
+        uint8_t *record = out + 48u + i * 44u;
+        memcpy(record, records[i].game_hash, 32u);
+        put_le(record + 32u, records[i].achievement_id, 4u);
+        put_le(record + 36u, records[i].unlocked_at_utc, 8u);
+    }
+    return 48u + (size_t)count * 44u;
 }
 
 static void remove_queue_files(const char *path) {
@@ -837,8 +852,8 @@ static void test_queue_file_names_its_account(uint8_t *ram) {
     NkAch *writer = nk_ach_create(&mem, fake_transport, &fake);
     CHECK(writer != NULL, "create");
     if (!writer) return;
-    CHECK(nk_ach_load_queue_file(writer, path, NULL, &report) && report.loaded == 0u &&
-              !report.unreadable && !report.legacy, "no file is an empty queue, not an error");
+    CHECK(nk_ach_load_queue_file(writer, path, &report) && report.loaded == 0u &&
+              !report.unreadable, "no file is an empty queue, not an error");
     CHECK(nk_ach_save_queue_file(writer, path), "save an empty queue");
     CHECK(read_bytes(path, bytes, sizeof bytes) == 48u && bytes[8] == 2u && bytes[12] == 0u &&
               memcmp(bytes + 16u, "00000000000000000000000000000000", 32u) == 0,
@@ -859,12 +874,12 @@ static void test_queue_file_names_its_account(uint8_t *ram) {
     CHECK(reader != NULL, "create");
     if (!reader) return;
     char owner[NK_ACH_ACCOUNT_TAG_SIZE];
-    CHECK(nk_ach_load_queue_file(reader, path, NULL, &report) && report.loaded == 1u &&
-              report.unproven == 0u && !report.legacy && !report.unreadable &&
+    CHECK(nk_ach_load_queue_file(reader, path, &report) && report.loaded == 1u &&
+              !report.unreadable &&
               !report.save_blocked, "the next session loads it");
     CHECK(nk_ach_copy_pending_owner(reader, owner) && strcmp(owner, player_tag()) == 0,
           "with its owner");
-    CHECK(!nk_ach_load_queue_file(reader, path, NULL, &report) && report.save_blocked,
+    CHECK(!nk_ach_load_queue_file(reader, path, &report) && report.save_blocked,
           "a second load into a queue that holds records is refused");
     CHECK(!nk_ach_save_queue_file(reader, path), "and the file is then left as it is");
     nk_ach_destroy(reader);
@@ -875,7 +890,7 @@ static void test_queue_file_names_its_account(uint8_t *ram) {
     if (!stranger) return;
     fake.login_user = "Other";
     NkAchEvent ev[NK_ACH_EVENT_QUEUE];
-    CHECK(nk_ach_load_queue_file(stranger, path, NULL, &report) && report.loaded == 1u, "load");
+    CHECK(nk_ach_load_queue_file(stranger, path, &report) && report.loaded == 1u, "load");
     CHECK(nk_ach_begin_login(stranger, "Other", "TOKEN2"), "Other signs in");
     nk_ach_replay_pending_unlocks(stranger, 1000u);
     size_t n = take(stranger, ev, NK_ACH_EVENT_QUEUE);
@@ -888,66 +903,30 @@ static void test_queue_file_names_its_account(uint8_t *ram) {
     remove_queue_files(path);
 }
 
-/* A file from before files named their account: a record is kept only when it was unlocked
- * after the stored credential was last written, which ties it to that account. */
-static void test_old_queue_file_keeps_what_is_proven(uint8_t *ram) {
-    char path[NK_MAX_PATH];
+/* A file in the format of this feature's first, unreleased builds (version 1, no owner) is not a
+ * queue this version reads: it is set aside whole, and none of its records is loaded. */
+static void test_old_queue_file_is_set_aside(uint8_t *ram) {
+    char path[256], aside[NK_MAX_PATH];
     queue_path(path, sizeof path, "ra-queue-old-selftest.bin");
+    snprintf(aside, sizeof aside, "%s.unreadable", path);
     remove_queue_files(path);
     Fake fake;
     memset(&fake, 0, sizeof fake);
-    fake.award_status = 200;
     const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
-    NkAchPendingUnlock records[3];
-    records[0] = saved_unlock(5501u); /* 1700000000: before the credential was written */
-    records[1] = saved_unlock(5502u);
-    records[1].unlocked_at_utc = 1700000500u; /* the second it was written: not after it */
-    records[2] = saved_unlock(5503u);
-    records[2].unlocked_at_utc = 1700000501u; /* after it */
-    uint8_t bytes[256];
-    const size_t size = old_queue_file(bytes, records, 3u);
-    const NkAchQueueLegacy stored = {"Player", 1700000500u};
+    const NkAchPendingUnlock saved = saved_unlock(5501u);
+    uint8_t bytes[256], read_back[256];
+    const size_t size = old_queue_file(bytes, &saved, 1u);
     NkAchQueueLoad report;
-    NkAchPendingUnlock kept;
-
     NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
-    CHECK(ach != NULL && write_bytes(path, bytes, size), "an old queue file");
+    CHECK(ach != NULL && write_bytes(path, bytes, size), "a version 1 queue file");
     if (!ach) return;
-    CHECK(nk_ach_load_queue_file(ach, path, &stored, &report), "the old file is read");
-    CHECK(report.legacy && report.loaded == 1u && report.unproven == 2u && !report.unreadable,
-          "one record is the stored account's, two cannot be tied to it (%u loaded, %u not)",
-          (unsigned)report.loaded, (unsigned)report.unproven);
-    CHECK(nk_ach_copy_pending_unlocks(ach, &kept, 1u) == 1u && kept.achievement_id == 5503u &&
-              kept.unlocked_at_utc == 1700000501u, "the proven record is kept whole");
-    char owner[NK_ACH_ACCOUNT_TAG_SIZE];
-    CHECK(nk_ach_copy_pending_owner(ach, owner) && strcmp(owner, player_tag()) == 0,
-          "and belongs to the stored account");
-    CHECK(nk_ach_save_queue_file(ach, path) && read_bytes(path, bytes, sizeof bytes) == 92u &&
-              bytes[8] == 2u && memcmp(bytes + 16u, player_tag(), 32u) == 0,
-          "saved again, the file names its owner");
-    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN"), "the account signs in");
-    nk_ach_replay_pending_unlocks(ach, 1000u);
-    CHECK(count_requests(&fake, "r=awardachievement&") == 1 &&
-              find_request(&fake, "r=awardachievement&") >= 0 &&
-              strstr(fake.log[find_request(&fake, "r=awardachievement&")], "a=5503&") != NULL,
-          "only the proven unlock is sent");
+    CHECK(!nk_ach_load_queue_file(ach, path, &report) && report.unreadable &&
+              report.kept_aside && !report.save_blocked && report.loaded == 0u &&
+              nk_ach_pending_unlock_count(ach) == 0u,
+          "it is not loaded, and is set aside");
+    CHECK(!nk_platform_file_exists(path) && read_bytes(aside, read_back, sizeof read_back) == size &&
+              memcmp(read_back, bytes, size) == 0, "its bytes are kept under .unreadable");
     nk_ach_destroy(ach);
-
-    /* With no stored credential, or no time for it, nothing can be proven. */
-    const NkAchQueueLegacy no_time = {"Player", 0u};
-    const NkAchQueueLegacy no_name = {NULL, 1700000000u};
-    const NkAchQueueLegacy *cases[3] = {NULL, &no_time, &no_name};
-    for (size_t i = 0u; i < 3u; i++) {
-        NkAch *unproven = nk_ach_create(&mem, fake_transport, &fake);
-        const size_t old_size = old_queue_file(bytes, records, 3u);
-        CHECK(unproven != NULL && write_bytes(path, bytes, old_size), "an old queue file");
-        if (!unproven) return;
-        CHECK(nk_ach_load_queue_file(unproven, path, cases[i], &report) && report.legacy &&
-                  report.loaded == 0u && report.unproven == 3u &&
-                  nk_ach_pending_unlock_count(unproven) == 0u,
-              "case %u: no record is loaded on a guess", (unsigned)i);
-        nk_ach_destroy(unproven);
-    }
     remove_queue_files(path);
 }
 
@@ -965,12 +944,12 @@ static void test_unreadable_queue_file_is_kept(uint8_t *ram) {
     uint8_t bytes[256], read_back[256];
     const NkAchPendingUnlock saved = saved_unlock(5501u);
 
-    /* Cut short: a whole version 1 record is missing its last byte. */
-    size_t size = old_queue_file(bytes, &saved, 1u) - 1u;
+    /* Cut short: a whole record is missing its last byte. */
+    size_t size = queue_file(bytes, &saved, 1u) - 1u;
     NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
     CHECK(ach != NULL && write_bytes(path, bytes, size), "a damaged queue file");
     if (!ach) return;
-    CHECK(!nk_ach_load_queue_file(ach, path, NULL, &report) && report.unreadable &&
+    CHECK(!nk_ach_load_queue_file(ach, path, &report) && report.unreadable &&
               report.kept_aside && !report.save_blocked && report.loaded == 0u,
           "a damaged file is not loaded, and is set aside");
     CHECK(!nk_platform_file_exists(path) && read_bytes(aside, read_back, sizeof read_back) == size &&
@@ -989,7 +968,7 @@ static void test_unreadable_queue_file_is_kept(uint8_t *ram) {
     ach = nk_ach_create(&mem, fake_transport, &fake);
     CHECK(ach != NULL && write_bytes(path, later, sizeof later), "a later version's file");
     if (!ach) return;
-    CHECK(!nk_ach_load_queue_file(ach, path, NULL, &report) && report.unreadable &&
+    CHECK(!nk_ach_load_queue_file(ach, path, &report) && report.unreadable &&
               report.kept_aside, "a later version is not read as this one");
     CHECK(read_bytes(aside2, read_back, sizeof read_back) == sizeof later &&
               memcmp(read_back, later, sizeof later) == 0 &&
@@ -1006,7 +985,7 @@ static void test_unreadable_queue_file_is_kept(uint8_t *ram) {
     ach = nk_ach_create(&mem, fake_transport, &fake);
     CHECK(ach != NULL && write_bytes(path, bytes, size), "a damaged queue file");
     if (!ach) return;
-    CHECK(!nk_ach_load_queue_file(ach, path, NULL, &report) && report.unreadable &&
+    CHECK(!nk_ach_load_queue_file(ach, path, &report) && report.unreadable &&
               !report.kept_aside && report.save_blocked, "it could not be set aside");
     CHECK(nk_ach_restore_pending_unlock(ach, &saved, player_tag()), "a record to save");
     CHECK(!nk_ach_save_queue_file(ach, path), "saving is refused for this run");
@@ -1133,7 +1112,7 @@ static void test_every_entry_takes_the_lock(uint8_t *ram) {
     } while (0)
     ENTERS(nk_ach_set_memory(ach, &mem), "nk_ach_set_memory");
     ENTERS((void)nk_ach_save_queue_file(ach, path), "nk_ach_save_queue_file");
-    ENTERS((void)nk_ach_load_queue_file(ach, path, NULL, &report), "nk_ach_load_queue_file");
+    ENTERS((void)nk_ach_load_queue_file(ach, path, &report), "nk_ach_load_queue_file");
     ENTERS((void)nk_ach_begin_login(ach, "Player", "TOKEN"), "nk_ach_begin_login");
     ENTERS((void)nk_ach_token_login_due(ach, 1u), "nk_ach_token_login_due");
     ENTERS((void)nk_ach_copy_user_name(ach, text, sizeof text), "nk_ach_copy_user_name");
@@ -1222,6 +1201,188 @@ static void test_last_achievement_answered_as_the_game_ends(uint8_t *ram) {
         (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
         nk_ach_destroy(ach);
     }
+}
+
+/* ---- rc_client's own retries ------------------------------------------------------------ */
+
+#define HASH2 "fedcba9876543210fedcba9876543210"
+
+/* rc_client schedules a retry by its clock; the tests turn it by hand. */
+static rc_clock_t g_clock_ms;
+
+static rc_clock_t RC_CCONV fake_clock(const rc_client_t *client) {
+    (void)client;
+    return g_clock_ms;
+}
+
+static void use_fake_clock(NkAch *ach) {
+    rc_client_set_get_time_millisecs_function(nk_ach_rc_client(ach), fake_clock);
+}
+
+static void idle_for(NkAch *ach, rc_clock_t ms) {
+    const rc_clock_t end = g_clock_ms + ms;
+    while (g_clock_ms < end) {
+        g_clock_ms += 500u;
+        nk_ach_idle(ach);
+    }
+}
+
+/* Signs in, loads the synthetic game and earns 5501; the fake answers the award, or keeps its
+ * done when defer_award. */
+static void earn_five(NkAch *ach, Fake *fake, uint8_t *ram, const char *user, const char *token,
+                      const char *hash, bool defer_award) {
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    memset(ram, 0, USER_RAM_SIZE);
+    CHECK(nk_ach_begin_login(ach, user, token) && nk_ach_begin_load_game(ach, hash),
+          "%s signs in and loads the game", user);
+    for (int i = 0; i < 4; i++) nk_ach_frame(ach);
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    fake->defer = defer_award;
+    ram[ACH_ADDR] = 5;
+    nk_ach_frame(ach);
+    fake->defer = false;
+}
+
+static int awards_sent_as(const Fake *f, const char *user_field) {
+    int count = 0;
+    for (int i = 0; i < f->requests && i < 16; i++)
+        if (starts_with(f->log[i], "r=awardachievement&") && strstr(f->log[i], user_field))
+            count++;
+    return count;
+}
+
+/* An award rc_client could not send waits on its scheduler and is rebuilt, when it fires, from
+ * whoever is signed in then. Once its account has ended (Sign out, or the switch turned off and
+ * another account signing in), it must never go out under the next account. */
+static void test_award_retries_end_with_their_account(uint8_t *ram) {
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    for (int route = 0; route < 2; route++) {
+        Fake fake;
+        memset(&fake, 0, sizeof fake);
+        fake.award_status = NK_ACH_HTTP_RETRY;
+        NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+        CHECK(ach != NULL, "create");
+        if (!ach) return;
+        g_clock_ms = 1000000u;
+        use_fake_clock(ach);
+        earn_five(ach, &fake, ram, "Player", "TOKEN", HASH, false);
+        CHECK(awards_sent_as(&fake, "u=Player&") == 2,
+              "route %d: the award and rc_client's first retry found no server (%d)", route,
+              awards_sent_as(&fake, "u=Player&"));
+        if (route == 0) (void)nk_ach_sign_out(ach);
+        else nk_ach_logout(ach);
+        fake.award_status = 200;
+        fake.login_user = "Other";
+        use_fake_clock(ach);
+        CHECK(nk_ach_begin_login(ach, "Other", "TOKEN2") && nk_ach_logged_in(ach),
+              "route %d: another account signs in", route);
+        idle_for(ach, 130000u);
+        CHECK(awards_sent_as(&fake, "u=Other&") == 0,
+              "route %d: Player's unlock is never sent as Other's (%d award requests as Other)",
+              route, awards_sent_as(&fake, "u=Other&"));
+        nk_ach_destroy(ach);
+    }
+}
+
+/* A retry outlives its game: when it is answered after another game started, its own record
+ * leaves the queue. */
+static void test_award_retry_keeps_its_game(uint8_t *ram) {
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = NK_ACH_HTTP_RETRY;
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    g_clock_ms = 1000000u;
+    use_fake_clock(ach);
+    earn_five(ach, &fake, ram, "Player", "TOKEN", HASH, false);
+    NkAchPendingUnlock queued;
+    CHECK(nk_ach_copy_pending_unlocks(ach, &queued, 1u) == 1u &&
+              strcmp(queued.game_hash, HASH) == 0, "the unsent unlock is queued for its game");
+    fake.award_status = 200;
+    CHECK(nk_ach_begin_load_game(ach, HASH2), "another game starts");
+    idle_for(ach, 5000u);
+    const int award = fake.requests - 1;
+    CHECK(count_requests(&fake, "r=awardachievement&") == 3 && award >= 0 && award < 16 &&
+              starts_with(fake.log[award], "r=awardachievement&") &&
+              strstr(fake.log[award], "m=" HASH) != NULL,
+          "rc_client's retry is sent for the first game (%d award requests)",
+          count_requests(&fake, "r=awardachievement&"));
+    CHECK(nk_ach_pending_unlock_count(ach) == 0u,
+          "the answered retry's record left the queue (%u left)",
+          (unsigned)nk_ach_pending_unlock_count(ach));
+    nk_ach_destroy(ach);
+}
+
+/* The server refuses a live award by its own error: rc_client gives it up, so its record leaves
+ * the queue now, reported, instead of being saved and refused again next session. */
+static void test_refused_live_award_leaves_the_queue(uint8_t *ram) {
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = 200;
+    fake.refuse_award = "a=5501&";
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    earn_five(ach, &fake, ram, "Player", "TOKEN", HASH, true);
+    CHECK(fake.deferred_done != NULL && nk_ach_pending_unlock_count(ach) == 1u,
+          "the award is on its way, its record queued");
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    const NkAchResponse refused = {k_refused, sizeof k_refused - 1u, 200};
+    if (fake.deferred_done) fake.deferred_done(&refused, fake.deferred_ctx);
+    CHECK(nk_ach_pending_unlock_count(ach) == 0u, "the refused unlock left the queue (%u left)",
+          (unsigned)nk_ach_pending_unlock_count(ach));
+    const size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    const int told = has_event(ev, n, NK_ACH_EVENT_UNLOCK_REFUSED);
+    CHECK(told >= 0 && ev[told].id == 5501u && has_event(ev, n, NK_ACH_EVENT_QUEUE_CHANGED) >= 0,
+          "the refusal is reported and the queue file rewritten");
+    nk_ach_destroy(ach);
+
+    /* Answered before rc_client raised the unlock: no record is made for it. */
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = 200;
+    fake.refuse_award = "a=5501&";
+    ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    earn_five(ach, &fake, ram, "Player", "TOKEN", HASH, false);
+    CHECK(count_requests(&fake, "r=awardachievement&") == 1 &&
+              nk_ach_pending_unlock_count(ach) == 0u,
+          "a refusal answered at once leaves no record (%u queued)",
+          (unsigned)nk_ach_pending_unlock_count(ach));
+    nk_ach_destroy(ach);
+}
+
+/* An award answered after its account signed out does not change what the next account's
+ * unlocks do: one it cannot send is still queued. */
+static void test_late_answer_after_sign_out_keeps_the_next_unlock(uint8_t *ram) {
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = 200;
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    earn_five(ach, &fake, ram, "Player", "TOKEN", HASH, true);
+    NkAchDone done = fake.deferred_done;
+    void *done_ctx = fake.deferred_ctx;
+    fake.deferred_done = NULL;
+    CHECK(done != NULL, "Player's award is on its way");
+    CHECK(nk_ach_sign_out(ach) == 1u, "Player signs out");
+    const NkAchResponse answer = {k_award, sizeof k_award - 1u, 200};
+    if (done) done(&answer, done_ctx);
+    CHECK(nk_ach_pending_unlock_count(ach) == 0u, "the late answer adds nothing");
+
+    fake.login_user = "Other";
+    fake.award_status = NK_ACH_HTTP_RETRY;
+    earn_five(ach, &fake, ram, "Other", "TOKEN2", HASH, false);
+    CHECK(nk_ach_pending_unlock_count(ach) == 1u,
+          "Other's unlock, which found no server, is queued (%u queued)",
+          (unsigned)nk_ach_pending_unlock_count(ach));
+    nk_ach_destroy(ach);
 }
 
 /* ---- frames while the player's own loop stands still -------------------------------------- */
@@ -1399,11 +1560,15 @@ int main(int argc, char **argv) {
     RUN_RAM(test_saved_unlock_waits_for_the_server_and_the_account);
     RUN_RAM(test_saved_unlocks_go_only_to_their_account);
     RUN_RAM(test_queue_file_names_its_account);
-    RUN_RAM(test_old_queue_file_keeps_what_is_proven);
+    RUN_RAM(test_old_queue_file_is_set_aside);
     RUN_RAM(test_unreadable_queue_file_is_kept);
     RUN_RAM(test_token_sign_in_is_tried_again_when_the_server_returns);
     RUN_RAM(test_every_entry_takes_the_lock);
     RUN_RAM(test_last_achievement_answered_as_the_game_ends);
+    RUN_RAM(test_award_retries_end_with_their_account);
+    RUN_RAM(test_award_retry_keeps_its_game);
+    RUN_RAM(test_refused_live_award_leaves_the_queue);
+    RUN_RAM(test_late_answer_after_sign_out_keeps_the_next_unlock);
     RUN(test_frames_are_served_while_the_event_loop_is_stalled);
     free(ram);
     if (g_failures) {

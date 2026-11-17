@@ -1692,7 +1692,7 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         player_queue = main[start:end]
         for required in ("nk_platform_get_app_data_dir", "nk_platform_mkdir_p_private",
                          "nk_ach_save_queue_file(run->achievements, path)",
-                         "nk_ach_load_queue_file(run->achievements, path, &stored, &report)"):
+                         "nk_ach_load_queue_file(run->achievements, path, &report)"):
             self.assertIn(required, player_queue)
         self.assertNotRegex(player_queue, r"\b(?:fopen|nk_fopen_utf8|fwrite|fread)\s*\(")
         # The bridge reads and writes it (achievements-selftest runs that code on real files):

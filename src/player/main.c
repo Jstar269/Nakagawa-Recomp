@@ -4588,37 +4588,16 @@ static void player_achievements_load_queue(PlayerRun *run) {
         fprintf(stderr, "[PLAYER] RetroAchievements: %s\n", notice);
         return;
     }
-    /* A queue file from before files named their account is tied to the stored account by the
-       time that account's credential was last written; this runs before the sign-in below
-       writes it again. */
-    char username[256] = "";
-    char token[1024] = "";
-    NkAchQueueLegacy stored = {NULL, 0u};
-    if (nk_platform_credential_read(k_ach_credential_target, username, sizeof username,
-                                    token, sizeof token) &&
-        nk_platform_credential_written_utc(k_ach_credential_target,
-                                           &stored.credential_written_utc)) {
-        stored.username = username;
-    }
-    player_secure_clear(token, sizeof token);
     NkAchQueueLoad report;
-    const bool loaded = nk_ach_load_queue_file(run->achievements, path, &stored, &report);
-    player_secure_clear(username, sizeof username);
+    const bool loaded = nk_ach_load_queue_file(run->achievements, path, &report);
     if (report.unreadable && report.kept_aside) {
         snprintf(notice, notice_size, "A saved offline unlock queue could not be read; it "
                                       "was kept as unlock-queue.bin.unreadable.");
     } else if (!loaded) {
         snprintf(notice, notice_size, "A saved offline unlock queue could not be read; it is "
                                       "left untouched and nothing is saved over it now.");
-    } else if (report.unproven) {
-        snprintf(notice, notice_size, "%u saved unlock%s from an earlier version could not be "
-                                      "tied to this account and %s discarded.",
-                 (unsigned)report.unproven, report.unproven == 1u ? "" : "s",
-                 report.unproven == 1u ? "was" : "were");
     }
     if (notice[0]) fprintf(stderr, "[PLAYER] RetroAchievements: %s\n", notice);
-    /* An earlier version's file is written again at once, so the next start reads its owner. */
-    if (loaded && report.legacy) player_achievements_save_queue_or_report(run);
 }
 
 /* A status the sign-in comes to rest on, followed once by what the queue's load had to say. */

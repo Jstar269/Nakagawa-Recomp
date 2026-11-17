@@ -55,6 +55,8 @@ struct NkAch {
     uint64_t pending_replay_now_ms;
     uint64_t pending_replay_after_ms;
     bool pending_replay_blocked; /* the server refused the account: wait for the next sign-in */
+    /* An award answered for good (awarded or refused) inside the transport call that sent it,
+     * before rc_client raised its trigger: that trigger makes no record. */
     bool confirmed_unlock_unseen;
     uint32_t confirmed_unlock_id;
     char confirmed_unlock_hash[33];
@@ -66,6 +68,11 @@ struct NkAch {
     bool token_retry_armed;
     uint64_t token_retry_wait_ms;
     uint64_t token_retry_after_ms; /* 0: the next nk_ach_token_login_due starts the wait */
+    /* rc_client lives as long as one account (ach_client_replace). */
+    uint32_t client_generation;      /* counts the rc_clients replaced */
+    bool client_replace_due;         /* a replacement failed: no sign-in until one is made */
+    char session_owner[NK_ACH_ACCOUNT_TAG_SIZE]; /* the account this rc_client signed in, or "" */
+    const void *sending_call;        /* the AchCall inside ach->transport, or NULL */
 };
 
 static void ach_enter(const NkAch *ach) {
@@ -78,8 +85,17 @@ static void ach_leave(const NkAch *ach) {
 
 static const char k_account_tag_label[] = "Nakagawa Recomp unlock queue owner\n";
 
-bool nk_ach_account_tag(const char *username, char out[NK_ACH_ACCOUNT_TAG_SIZE]) {
+/* A digest as 32 lowercase hex digits. */
+static void ach_md5_hex(const md5_byte_t digest[16], char out[33]) {
     static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0u; i < 16u; i++) {
+        out[i * 2u] = hex[digest[i] >> 4];
+        out[i * 2u + 1u] = hex[digest[i] & 15u];
+    }
+    out[32] = '\0';
+}
+
+bool nk_ach_account_tag(const char *username, char out[NK_ACH_ACCOUNT_TAG_SIZE]) {
     if (out) out[0] = '\0';
     if (!username || !username[0] || !out) return false;
     md5_state_t md5;
@@ -94,11 +110,7 @@ bool nk_ach_account_tag(const char *username, char out[NK_ACH_ACCOUNT_TAG_SIZE])
         md5_append(&md5, &c, 1);
     }
     md5_finish(&md5, digest);
-    for (size_t i = 0u; i < sizeof digest; i++) {
-        out[i * 2u] = hex[digest[i] >> 4];
-        out[i * 2u + 1u] = hex[digest[i] & 15u];
-    }
-    out[32] = '\0';
+    ach_md5_hex(digest, out);
     return true;
 }
 
@@ -119,7 +131,6 @@ bool nk_ach_psp_hash_iso(const char *iso_path, char out_hash[33]) {
         "PSP_GAME/PARAM.SFO",
         "PSP_GAME/SYSDIR/EBOOT.BIN",
     };
-    static const char hex[] = "0123456789abcdef";
     enum { CHUNK_BYTES = 64 * 1024 };
     if (out_hash) out_hash[0] = '\0';
     if (!iso_path || !iso_path[0] || !out_hash) return false;
@@ -158,11 +169,7 @@ bool nk_ach_psp_hash_iso(const char *iso_path, char out_hash[33]) {
     if (!ok) return false;
 
     md5_finish(&md5, digest);
-    for (size_t i = 0u; i < sizeof digest; i++) {
-        out_hash[i * 2u] = hex[digest[i] >> 4];
-        out_hash[i * 2u + 1u] = hex[digest[i] & 15u];
-    }
-    out_hash[32] = '\0';
+    ach_md5_hex(digest, out_hash);
     return true;
 }
 
@@ -291,20 +298,71 @@ static uint32_t ach_request_award_id(const char *post_data) {
     return (uint32_t)value;
 }
 
-static bool ach_award_response_success(const NkAchResponse *response, uint32_t id) {
-    if (!response || response->http_status < 200 || response->http_status >= 300 ||
-        !response->body) return false;
+/* The game an award request names (its m= field, 32 lowercase hex digits): a retry rc_client
+ * sends after another game started still names the game the unlock was earned in. */
+static bool ach_request_award_hash(const char *post_data, char out[33]) {
+    out[0] = '\0';
+    const char *field = post_data ? strstr(post_data, "&m=") : NULL;
+    if (!field) return false;
+    field += 3;
+    if (strcspn(field, "&") != 32u) return false;
+    memcpy(out, field, 32u);
+    out[32] = '\0';
+    if (ach_hash_ok(out)) return true;
+    out[0] = '\0';
+    return false;
+}
+
+/* A saved unlock with no definite answer waits this long before it is sent again. */
+#define ACH_REPLAY_RETRY_MS 30000u
+
+static uint64_t ach_replay_retry_after(uint64_t now_ms) {
+    return now_ms <= UINT64_MAX - ACH_REPLAY_RETRY_MS ? now_ms + ACH_REPLAY_RETRY_MS : UINT64_MAX;
+}
+
+/* What the answer to an award request means for its record. */
+typedef enum AchReplayOutcome {
+    ACH_REPLAY_AWARDED, /* the server has the unlock: the record leaves the queue */
+    ACH_REPLAY_RETRY,   /* no definite answer (no connection, a busy server): the record waits */
+    ACH_REPLAY_SIGN_IN, /* the server refused the account: every record waits for a sign-in */
+    ACH_REPLAY_REFUSED  /* the server refused this unlock: the record leaves the queue, reported */
+} AchReplayOutcome;
+
+/* rc_client gives up an award the server answered with an error of its own and retries the rest
+ * (rc_client_award_achievement_callback). A saved record follows the same rule, with two
+ * differences that keep records: every 5xx, 408 and 429 waits, and a refused account (401, 403
+ * or rcheevos' credential results) stops the replay until the next sign-in instead of dropping
+ * each record in turn. */
+static AchReplayOutcome ach_replay_outcome(const NkAchResponse *response, uint32_t id,
+                                           char *message, size_t message_size) {
+    if (message && message_size) message[0] = '\0';
+    if (!response || !response->body || response->http_status < 200) return ACH_REPLAY_RETRY;
+    const int status = response->http_status;
+    if (status >= 500 || status == 408 || status == 429) return ACH_REPLAY_RETRY;
+
     rc_api_server_response_t server;
     memset(&server, 0, sizeof server);
     server.body = response->body;
     server.body_length = response->body_length;
-    server.http_status_code = response->http_status;
-    rc_api_award_achievement_response_t result;
-    int rc = rc_api_process_award_achievement_server_response(&result, &server);
-    bool succeeded = rc == RC_OK && result.response.succeeded &&
-        (result.awarded_achievement_id == id || result.response.error_message != NULL);
-    rc_api_destroy_award_achievement_response(&result);
-    return succeeded;
+    server.http_status_code = status;
+    rc_api_award_achievement_response_t parsed;
+    const int result = rc_api_process_award_achievement_server_response(&parsed, &server);
+    AchReplayOutcome outcome = ACH_REPLAY_RETRY;
+    if (status < 300 && result == RC_OK && parsed.response.succeeded &&
+        (parsed.awarded_achievement_id == id || parsed.response.error_message != NULL)) {
+        outcome = ACH_REPLAY_AWARDED;
+    } else if (status == 401 || status == 403 || result == RC_INVALID_CREDENTIALS ||
+               result == RC_EXPIRED_TOKEN || result == RC_ACCESS_DENIED) {
+        outcome = ACH_REPLAY_SIGN_IN;
+    } else if (result == RC_OK && !parsed.response.succeeded &&
+               parsed.response.error_message != NULL) {
+        outcome = ACH_REPLAY_REFUSED;
+    }
+    if (outcome != ACH_REPLAY_AWARDED && message && message_size &&
+        parsed.response.error_message)
+        snprintf(message, message_size, "%s", parsed.response.error_message);
+    rc_api_destroy_award_achievement_response(&parsed);
+    return outcome;
 }
 
 static uint32_t RC_CCONV ach_read(uint32_t address, uint8_t *buffer, uint32_t num_bytes,
@@ -319,7 +377,8 @@ typedef struct AchCall {
     rc_client_server_callback_t callback;
     void *callback_data;
     uint32_t award_id;
-    char game_hash[33];
+    char game_hash[33];         /* the game the award request names */
+    uint32_t client_generation; /* the rc_client that made the request */
 } AchCall;
 
 /* rcheevos 12.5.0 marks the set complete when an award answer says no achievement remains, and
@@ -367,6 +426,15 @@ static void ach_done(const NkAchResponse *response, void *done_ctx) {
     AchCall *call = (AchCall *)done_ctx;
     NkAch *ach = call->ach;
     ach_enter(ach);
+    if (call->client_generation != ach->client_generation) {
+        /* The answer is for an rc_client that ended with its account (ach_client_replace): it
+         * reaches neither that client, which is gone, nor the queue, which is the next account's. */
+        free(call);
+        ach_leave(ach);
+        return;
+    }
+    /* Answered inside the transport call that sent it: rc_client has not raised the trigger. */
+    const bool synchronous = ach->sending_call == call;
     rc_api_server_response_t server;
     memset(&server, 0, sizeof server);
     if (response) {
@@ -387,18 +455,28 @@ static void ach_done(const NkAchResponse *response, void *done_ctx) {
     ach->response_unreachable = ach_response_unreachable(response);
     call->callback(&server, call->callback_data);
     ach->response_unreachable = outer_unreachable;
-    if (call->award_id && ach_award_response_success(response, call->award_id)) {
+    char message[sizeof(((NkAchEvent *)0)->message)];
+    const AchReplayOutcome outcome =
+        call->award_id ? ach_replay_outcome(response, call->award_id, message, sizeof message)
+                       : ACH_REPLAY_RETRY;
+    /* An award the server has, or refused by its own error (which rc_client then gives up),
+     * leaves the queue; any other answer leaves the record for rc_client's retry or the next
+     * session. */
+    if (outcome == ACH_REPLAY_AWARDED || outcome == ACH_REPLAY_REFUSED) {
         bool restored = false;
-        if (!ach_pending_remove(call->ach, call->game_hash, call->award_id, &restored)) {
+        if (ach_pending_remove(ach, call->game_hash, call->award_id, &restored)) {
+            if (outcome == ACH_REPLAY_REFUSED)
+                ach_push(ach, NK_ACH_EVENT_UNLOCK_REFUSED, call->award_id, 0u, 0u, NULL,
+                         message);
+            ach_push(ach, NK_ACH_EVENT_QUEUE_CHANGED, call->award_id, 0u, 0u, NULL, NULL);
+            if (restored && ach->pending_unlock_count == 0u)
+                ach_push(ach, NK_ACH_EVENT_RECONNECTED, 0u, 0u, 0u, NULL, NULL);
+        } else if (synchronous) {
             /* A transport may finish synchronously before rc_client raises the trigger event. */
-            call->ach->confirmed_unlock_unseen = true;
-            call->ach->confirmed_unlock_id = call->award_id;
-            snprintf(call->ach->confirmed_unlock_hash,
-                     sizeof call->ach->confirmed_unlock_hash, "%s", call->game_hash);
-        } else {
-            ach_push(call->ach, NK_ACH_EVENT_QUEUE_CHANGED, call->award_id, 0u, 0u, NULL, NULL);
-            if (restored && call->ach->pending_unlock_count == 0u)
-                ach_push(call->ach, NK_ACH_EVENT_RECONNECTED, 0u, 0u, 0u, NULL, NULL);
+            ach->confirmed_unlock_unseen = true;
+            ach->confirmed_unlock_id = call->award_id;
+            snprintf(ach->confirmed_unlock_hash, sizeof ach->confirmed_unlock_hash, "%s",
+                     call->game_hash);
         }
     }
     free(call);
@@ -436,9 +514,14 @@ static void RC_CCONV ach_server_call(const rc_api_request_t *request,
     call->callback_data = callback_data;
     call->ach = ach;
     call->award_id = ach_request_award_id(request->post_data);
-    snprintf(call->game_hash, sizeof call->game_hash, "%s", ach->game_hash);
+    call->game_hash[0] = '\0';
+    if (call->award_id) (void)ach_request_award_hash(request->post_data, call->game_hash);
+    call->client_generation = ach->client_generation;
     NkAchRequest out = {request->url, request->post_data, request->content_type};
+    const void *outer_call = ach->sending_call;
+    ach->sending_call = call;
     ach->transport(ach->transport_ctx, &out, ach_done, call);
+    ach->sending_call = outer_call; /* call may be freed by now: only its address is compared */
 }
 
 static void RC_CCONV ach_event(const rc_client_event_t *event, rc_client_t *client) {
@@ -490,23 +573,64 @@ static void RC_CCONV ach_log(const char *message, const rc_client_t *client) {
     ach_push(ach, NK_ACH_EVENT_DISABLED, id, 0u, 0u, NULL, message);
 }
 
+static rc_client_t *ach_client_new(NkAch *ach) {
+    rc_client_t *client = rc_client_create(ach_read, ach_server_call);
+    if (!client) return NULL;
+    rc_client_set_userdata(client, ach);
+    rc_client_set_event_handler(client, ach_event);
+    rc_client_enable_logging(client, RC_CLIENT_LOG_LEVEL_WARN, ach_log);
+    rc_client_set_hardcore_enabled(client, 0);
+    rc_client_set_encore_mode_enabled(client, 0);
+    rc_client_set_unofficial_enabled(client, 0);
+    return client;
+}
+
+/* rc_client keeps an award or leaderboard entry it could not send on its own scheduler, through
+ * a logout, and builds each retry from whoever is signed in when it fires (rc_client.c,
+ * rc_client_award_achievement_server_call). So an rc_client lives as long as one account: when
+ * the account ends, a fresh client with nothing scheduled takes its place, and answers still on
+ * their way to the old one are dropped (ach_done). The game, which the logout that ended the
+ * account unloaded, is loaded again by the caller. What the old client still held for its retries
+ * and its requests in flight stays allocated: rc_client_destroy does not free its scheduled
+ * callbacks, and an answer cannot be handed to a client that is gone. False when no fresh client
+ * can be made; until one is, no account signs in. */
+static bool ach_client_replace(NkAch *ach) {
+    rc_client_t *fresh = ach_client_new(ach);
+    if (!fresh) {
+        ach->client_replace_due = true;
+        return false;
+    }
+    rc_client_t *old = ach->client;
+    ach->client = fresh;
+    ach->client_generation++;
+    ach->client_replace_due = false;
+    memset(ach->session_owner, 0, sizeof ach->session_owner);
+    rc_client_destroy(old);
+    return true;
+}
+
+/* Before a sign-in: a client that signed another account in, or one a failed replacement left,
+ * is replaced first. False when it cannot be. */
+static bool ach_client_ready_for(NkAch *ach, const char *username) {
+    char tag[NK_ACH_ACCOUNT_TAG_SIZE];
+    if (!nk_ach_account_tag(username, tag)) return false;
+    if (ach->client_replace_due ||
+        (ach->session_owner[0] && strcmp(ach->session_owner, tag) != 0))
+        return ach_client_replace(ach);
+    return true;
+}
+
 NkAch *nk_ach_create(const NkAchMemory *mem, NkAchTransport transport, void *transport_ctx) {
     NkAch *ach = (NkAch *)calloc(1u, sizeof *ach);
     if (!ach) return NULL;
     if (mem) ach->mem = *mem;
     ach->transport = transport;
     ach->transport_ctx = transport_ctx;
-    ach->client = rc_client_create(ach_read, ach_server_call);
+    ach->client = ach_client_new(ach);
     if (!ach->client) {
         free(ach);
         return NULL;
     }
-    rc_client_set_userdata(ach->client, ach);
-    rc_client_set_event_handler(ach->client, ach_event);
-    rc_client_enable_logging(ach->client, RC_CLIENT_LOG_LEVEL_WARN, ach_log);
-    rc_client_set_hardcore_enabled(ach->client, 0);
-    rc_client_set_encore_mode_enabled(ach->client, 0);
-    rc_client_set_unofficial_enabled(ach->client, 0);
     return ach;
 }
 
@@ -552,6 +676,9 @@ static void RC_CCONV ach_login_done(int result, const char *error_message,
         const rc_client_user_t *user = rc_client_get_user_info(client);
         ach->pending_replay_blocked = false;
         ach->pending_replay_after_ms = 0u;
+        ach->confirmed_unlock_unseen = false;
+        if (!ach_user_tag(ach, ach->session_owner))
+            memset(ach->session_owner, 0, sizeof ach->session_owner);
         ach_token_retry_end(ach);
         ach_push(ach, NK_ACH_EVENT_LOGIN_OK, 0u, user ? user->score_softcore : 0u, 0u,
                  user ? user->display_name : NULL, NULL);
@@ -577,12 +704,14 @@ static void RC_CCONV ach_login_done(int result, const char *error_message,
 bool nk_ach_begin_login(NkAch *ach, const char *username, const char *token) {
     if (!ach || !username || !*username || !token || !*token) return false;
     ach_enter(ach);
+    const bool ready = ach_client_ready_for(ach, username);
     /* rc_client returns no handle for a call it finished at once; either way the outcome
      * arrives as an event. */
-    (void)rc_client_begin_login_with_token(ach->client, username, token, ach_login_done,
-                                           (void *)&k_token_login);
+    if (ready)
+        (void)rc_client_begin_login_with_token(ach->client, username, token, ach_login_done,
+                                               (void *)&k_token_login);
     ach_leave(ach);
-    return true;
+    return ready;
 }
 
 bool nk_ach_token_login_due(NkAch *ach, uint64_t now_ms) {
@@ -608,10 +737,12 @@ bool nk_ach_begin_login_with_password(NkAch *ach, const char *username, const ch
     if (!ach || !username || !*username || !password || !*password) return false;
     ach_enter(ach);
     ach_token_retry_end(ach);
-    (void)rc_client_begin_login_with_password(ach->client, username, password,
-                                              ach_login_done, NULL);
+    const bool ready = ach_client_ready_for(ach, username);
+    if (ready)
+        (void)rc_client_begin_login_with_password(ach->client, username, password,
+                                                  ach_login_done, NULL);
     ach_leave(ach);
-    return true;
+    return ready;
 }
 
 bool nk_ach_copy_user_token(const NkAch *ach, char *out, size_t out_size) {
@@ -663,6 +794,9 @@ size_t nk_ach_sign_out(NkAch *ach) {
     ach_enter(ach);
     ach_token_retry_end(ach);
     rc_client_logout(ach->client);
+    /* Nor in rc_client: its retries of this account's awards end with it (ach_client_replace;
+     * when no fresh client can be made, no account signs in until one is). */
+    (void)ach_client_replace(ach);
     /* The queue is the signed-out account's: nothing of that account stays behind, and the
      * next account to sign in starts with an empty queue of its own. */
     const size_t discarded = ach->pending_unlock_count;
@@ -821,51 +955,6 @@ bool nk_ach_restore_pending_unlock(NkAch *ach, const NkAchPendingUnlock *unlock,
     return restored;
 }
 
-/* What the answer to a saved unlock's award request means for its record. */
-typedef enum AchReplayOutcome {
-    ACH_REPLAY_AWARDED, /* the server has the unlock: the record leaves the queue */
-    ACH_REPLAY_RETRY,   /* no definite answer (no connection, a busy server): the record waits */
-    ACH_REPLAY_SIGN_IN, /* the server refused the account: every record waits for a sign-in */
-    ACH_REPLAY_REFUSED  /* the server refused this unlock: the record leaves the queue, reported */
-} AchReplayOutcome;
-
-/* rc_client gives up an award the server answered with an error of its own and retries the rest
- * (rc_client_award_achievement_callback). A saved record follows the same rule, with two
- * differences that keep records: every 5xx, 408 and 429 waits, and a refused account (401, 403
- * or rcheevos' credential results) stops the replay until the next sign-in instead of dropping
- * each record in turn. */
-static AchReplayOutcome ach_replay_outcome(const NkAchResponse *response, uint32_t id,
-                                           char *message, size_t message_size) {
-    if (message && message_size) message[0] = '\0';
-    if (!response || !response->body || response->http_status < 200) return ACH_REPLAY_RETRY;
-    const int status = response->http_status;
-    if (status >= 500 || status == 408 || status == 429) return ACH_REPLAY_RETRY;
-
-    rc_api_server_response_t server;
-    memset(&server, 0, sizeof server);
-    server.body = response->body;
-    server.body_length = response->body_length;
-    server.http_status_code = status;
-    rc_api_award_achievement_response_t parsed;
-    const int result = rc_api_process_award_achievement_server_response(&parsed, &server);
-    AchReplayOutcome outcome = ACH_REPLAY_RETRY;
-    if (status < 300 && result == RC_OK && parsed.response.succeeded &&
-        (parsed.awarded_achievement_id == id || parsed.response.error_message != NULL)) {
-        outcome = ACH_REPLAY_AWARDED;
-    } else if (status == 401 || status == 403 || result == RC_INVALID_CREDENTIALS ||
-               result == RC_EXPIRED_TOKEN || result == RC_ACCESS_DENIED) {
-        outcome = ACH_REPLAY_SIGN_IN;
-    } else if (result == RC_OK && !parsed.response.succeeded &&
-               parsed.response.error_message != NULL) {
-        outcome = ACH_REPLAY_REFUSED;
-    }
-    if (outcome != ACH_REPLAY_AWARDED && message && message_size &&
-        parsed.response.error_message)
-        snprintf(message, message_size, "%s", parsed.response.error_message);
-    rc_api_destroy_award_achievement_response(&parsed);
-    return outcome;
-}
-
 static void RC_CCONV ach_pending_replay_done(const NkAchResponse *response, void *done_ctx) {
     AchPendingReplay *replay = (AchPendingReplay *)done_ctx;
     NkAch *ach = replay->ach;
@@ -898,8 +987,7 @@ static void RC_CCONV ach_pending_replay_done(const NkAchResponse *response, void
         break;
     case ACH_REPLAY_RETRY:
     default:
-        ach->pending_replay_after_ms = ach->pending_replay_now_ms <= UINT64_MAX - 30000u
-                                           ? ach->pending_replay_now_ms + 30000u : UINT64_MAX;
+        ach->pending_replay_after_ms = ach_replay_retry_after(ach->pending_replay_now_ms);
         break;
     }
     ach->pending_replay_inflight = false;
@@ -945,8 +1033,7 @@ static void ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms) {
     if (!replay) {
         ach_push(ach, NK_ACH_EVENT_SERVER_ERROR, unlock.achievement_id, 0u, 0u, NULL,
                  "The saved unlock could not be prepared for retry.");
-        ach->pending_replay_after_ms = now_ms <= UINT64_MAX - 30000u
-                                           ? now_ms + 30000u : UINT64_MAX;
+        ach->pending_replay_after_ms = ach_replay_retry_after(now_ms);
         return;
     }
     if (rc_api_init_award_achievement_request(&replay->request, &params) != RC_OK ||
@@ -956,8 +1043,7 @@ static void ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms) {
         free(replay);
         ach_push(ach, NK_ACH_EVENT_SERVER_ERROR, unlock.achievement_id, 0u, 0u, NULL,
                  "The saved unlock request was refused.");
-        ach->pending_replay_after_ms = now_ms <= UINT64_MAX - 30000u
-                                           ? now_ms + 30000u : UINT64_MAX;
+        ach->pending_replay_after_ms = ach_replay_retry_after(now_ms);
         return;
     }
 
@@ -1046,7 +1132,6 @@ uint32_t nk_ach_events_dropped(const NkAch *ach) {
 /* ---- the queue file (nk_achievements.h has the format) ---------------------------------- */
 
 #define ACH_QUEUE_RECORD_SIZE 44u
-#define ACH_QUEUE_HEADER_V1_SIZE 16u
 #define ACH_QUEUE_HEADER_SIZE 48u
 #define ACH_QUEUE_VERSION 2u
 #define ACH_QUEUE_FILE_MAX \
@@ -1105,33 +1190,28 @@ static uint8_t *ach_queue_encode(const NkAch *ach, size_t *out_size) {
 }
 
 typedef struct AchQueueFile {
-    uint32_t version;
     uint32_t count;
-    char owner[NK_ACH_ACCOUNT_TAG_SIZE]; /* version 2 */
+    char owner[NK_ACH_ACCOUNT_TAG_SIZE];
     NkAchPendingUnlock *entries;
 } AchQueueFile;
 
-/* False for anything but a whole, well-formed version 1 or 2 file. */
+/* False for anything but a whole, well-formed file of this version. */
 static bool ach_queue_decode(const uint8_t *bytes, size_t size, AchQueueFile *file) {
     memset(file, 0, sizeof *file);
-    if (!bytes || size < ACH_QUEUE_HEADER_V1_SIZE ||
+    if (!bytes || size < ACH_QUEUE_HEADER_SIZE ||
         memcmp(bytes, k_queue_magic, sizeof k_queue_magic) != 0) return false;
     const uint32_t version = ach_queue_get_u32(bytes + 8u);
     const uint32_t count = ach_queue_get_u32(bytes + 12u);
-    if ((version != 1u && version != ACH_QUEUE_VERSION) || count > NK_ACH_PENDING_UNLOCKS_MAX)
-        return false;
-    const size_t header = version == 1u ? ACH_QUEUE_HEADER_V1_SIZE : ACH_QUEUE_HEADER_SIZE;
-    if (size != header + (size_t)count * ACH_QUEUE_RECORD_SIZE) return false;
-    if (version == ACH_QUEUE_VERSION) {
-        memcpy(file->owner, bytes + 16u, 32u);
-        file->owner[32] = '\0';
-        if (!ach_hash_ok(file->owner)) return false;
-    }
+    if (version != ACH_QUEUE_VERSION || count > NK_ACH_PENDING_UNLOCKS_MAX) return false;
+    if (size != ACH_QUEUE_HEADER_SIZE + (size_t)count * ACH_QUEUE_RECORD_SIZE) return false;
+    memcpy(file->owner, bytes + 16u, 32u);
+    file->owner[32] = '\0';
+    if (!ach_hash_ok(file->owner)) return false;
     NkAchPendingUnlock *entries =
         (NkAchPendingUnlock *)calloc(count ? count : 1u, sizeof *entries);
     if (!entries) return false;
     for (uint32_t i = 0u; i < count; i++) {
-        const uint8_t *record = bytes + header + (size_t)i * ACH_QUEUE_RECORD_SIZE;
+        const uint8_t *record = bytes + ACH_QUEUE_HEADER_SIZE + (size_t)i * ACH_QUEUE_RECORD_SIZE;
         memcpy(entries[i].game_hash, record, 32u);
         entries[i].game_hash[32] = '\0';
         entries[i].achievement_id = ach_queue_get_u32(record + 32u);
@@ -1141,7 +1221,6 @@ static bool ach_queue_decode(const uint8_t *bytes, size_t size, AchQueueFile *fi
             return false;
         }
     }
-    file->version = version;
     file->count = count;
     file->entries = entries;
     return true;
@@ -1179,8 +1258,7 @@ static bool ach_queue_set_aside(const char *path) {
     return false;
 }
 
-bool nk_ach_load_queue_file(NkAch *ach, const char *path, const NkAchQueueLegacy *legacy,
-                            NkAchQueueLoad *out) {
+bool nk_ach_load_queue_file(NkAch *ach, const char *path, NkAchQueueLoad *out) {
     NkAchQueueLoad report;
     memset(&report, 0, sizeof report);
     if (out) *out = report;
@@ -1203,25 +1281,11 @@ bool nk_ach_load_queue_file(NkAch *ach, const char *path, const NkAchQueueLegacy
             report.save_blocked = true;
         }
     } else {
-        char legacy_tag[NK_ACH_ACCOUNT_TAG_SIZE] = "";
-        const bool legacy_known = file.version == 1u && legacy &&
-                                  legacy->credential_written_utc != 0u &&
-                                  nk_ach_account_tag(legacy->username, legacy_tag);
-        report.legacy = file.version == 1u;
         ach_enter(ach);
         /* The file is read into an empty queue: records already waiting are not mixed with it. */
         if (ach->pending_unlock_count != 0u) ok = false;
         for (uint32_t i = 0u; ok && i < file.count; i++) {
-            const char *owner = file.owner;
-            if (file.version == 1u) {
-                if (!legacy_known ||
-                    file.entries[i].unlocked_at_utc <= legacy->credential_written_utc) {
-                    report.unproven++;
-                    continue;
-                }
-                owner = legacy_tag;
-            }
-            if (ach_restore(ach, &file.entries[i], owner)) report.loaded++;
+            if (ach_restore(ach, &file.entries[i], file.owner)) report.loaded++;
             else ok = false;
         }
         if (ok) {

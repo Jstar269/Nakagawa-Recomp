@@ -556,23 +556,6 @@ bool nk_platform_credential_read(const char *target, char *username, size_t user
     return ok;
 }
 
-bool nk_platform_credential_written_utc(const char *target, uint64_t *out_utc) {
-    if (out_utc) *out_utc = 0u;
-    if (!target || !out_utc) return false;
-    WCHAR wtarget[512];
-    if (!utf8_to_wide(target, wtarget, sizeof(wtarget) / sizeof(wtarget[0]))) return false;
-    PCREDENTIALW credential = NULL;
-    if (!CredReadW(wtarget, CRED_TYPE_GENERIC, 0u, &credential) || !credential) return false;
-    /* FILETIME counts 100 ns from 1601-01-01; 11644473600 s separate that from 1970-01-01. */
-    const uint64_t ticks = ((uint64_t)credential->LastWritten.dwHighDateTime << 32) |
-                           (uint64_t)credential->LastWritten.dwLowDateTime;
-    CredFree(credential);
-    const uint64_t seconds = ticks / 10000000u;
-    if (seconds <= 11644473600u) return false;
-    *out_utc = seconds - 11644473600u;
-    return true;
-}
-
 bool nk_platform_credential_write(const char *target, const char *username, const char *secret) {
     if (!target || !username || !username[0] || !secret || !secret[0]) return false;
     const size_t secret_size = strlen(secret);

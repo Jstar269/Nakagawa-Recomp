@@ -165,8 +165,11 @@ void nk_ach_destroy(NkAch *ach);
 void nk_ach_set_memory(NkAch *ach, const NkAchMemory *mem);
 
 /* Signs in with an RA API token (never a password: the token comes from the user's own
- * sign-in, kept in the OS credential store by the player). False only for a missing name or
- * token; otherwise the outcome arrives as a LOGIN_OK, LOGIN_FAILED or LOGIN_UNREACHABLE event. */
+ * sign-in, kept in the OS credential store by the player). False for a missing name or token,
+ * or when another account was signed in last and no fresh rc_client can be made for this one
+ * (rcheevos' retries of an award are rebuilt with whoever is signed in, so an rc_client serves
+ * one account; nk_ach_sign_out ends one too). Otherwise the outcome arrives as a LOGIN_OK,
+ * LOGIN_FAILED or LOGIN_UNREACHABLE event. */
 bool nk_ach_begin_login(NkAch *ach, const char *username, const char *token);
 /* After LOGIN_UNREACHABLE: true once when the token sign-in is due again, 30 seconds after the
  * first call that follows the failure, then twice as long after each further one, up to ten
@@ -175,7 +178,8 @@ bool nk_ach_begin_login(NkAch *ach, const char *username, const char *token);
  * nk_ach_sign_out end the retries. */
 bool nk_ach_token_login_due(NkAch *ach, uint64_t now_ms);
 /* Exchanges the password once for the RA token. The bridge retains no password after rcheevos
- * has constructed its request; the player must clear its input buffers and store only the token. */
+ * has constructed its request; the player must clear its input buffers and store only the token.
+ * False as nk_ach_begin_login is. */
 bool nk_ach_begin_login_with_password(NkAch *ach, const char *username, const char *password);
 bool nk_ach_copy_user_token(const NkAch *ach, char *out, size_t out_size);
 bool nk_ach_copy_user_name(const NkAch *ach, char *out, size_t out_size);
@@ -183,7 +187,8 @@ bool nk_ach_copy_user_name(const NkAch *ach, char *out, size_t out_size);
  * stays (the Achievements switch turned off). */
 void nk_ach_logout(NkAch *ach);
 /* The user's Sign out: ends the session and discards every pending unlock, returning how many.
- * The queue is the signed-out account's, and nothing of that account stays on this PC. */
+ * The queue is the signed-out account's, and nothing of that account stays on this PC: rcheevos'
+ * own retries of its awards end too, and answers still on their way are dropped. */
 size_t nk_ach_sign_out(NkAch *ach);
 /* Loads the achievement set for the disc whose RA hash (32 lowercase hex digits, the MD5 RA's
  * PSP rule takes of PARAM.SFO then EBOOT.BIN) is hash. False only for a malformed hash;
@@ -235,37 +240,23 @@ void nk_ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms);
  *   16  32 bytes the owner's account tag, lowercase hex; thirty-two '0' when count is 0
  *   48  count records of 44 bytes: 32 bytes game hash (lowercase hex), u32 achievement ID,
  *       u64 unlock time (seconds since 1970 UTC)
- * Version 1 had no owner: its header ends after the count and its records start at 16.
  *
  * nk_ach_save_queue_file writes the file through a private temporary file and a rename. It
  * refuses, and leaves the file as it is, after a load that could neither read the file nor set
  * it aside.
  *
  * nk_ach_load_queue_file reads it into an empty queue, once, before sign-in. No file is not an
- * error. A file this version cannot read (damaged, cut short, from a later version, or not
+ * error. A file this version cannot read (damaged, cut short, from another version, or not
  * readable at all) is never loaded and never overwritten: it is renamed beside itself with the
  * ending ".unreadable" (".unreadable.2" and so on when that exists), and when even that fails
- * saving is refused for this run.
- *
- * A version 1 record is loaded only when it can be tied to the account whose credential is
- * stored: it was unlocked after that credential was last written. Every sign-in writes the
- * credential and a record is only made in a signed-in session, so, with a system clock that did
- * not go back in between, such a record was earned by that account. The others are counted in
- * unproven and not loaded; the caller reports them and saves, which drops them. */
-typedef struct NkAchQueueLegacy {
-    const char *username;            /* the stored credential's account, or NULL */
-    uint64_t credential_written_utc; /* when it was last written; 0 when not known */
-} NkAchQueueLegacy;
+ * saving is refused for this run. */
 typedef struct NkAchQueueLoad {
     size_t loaded;      /* records now waiting */
-    size_t unproven;    /* version 1 records not tied to the stored account: not loaded */
-    bool legacy;        /* the file was version 1: save now, so the next start reads an owner */
     bool unreadable;    /* the file is not a queue this version reads */
     bool kept_aside;    /* ... and it was renamed with the ".unreadable" ending */
     bool save_blocked;  /* nk_ach_save_queue_file refuses for the rest of this run */
 } NkAchQueueLoad;
-bool nk_ach_load_queue_file(NkAch *ach, const char *path, const NkAchQueueLegacy *legacy,
-                            NkAchQueueLoad *out);
+bool nk_ach_load_queue_file(NkAch *ach, const char *path, NkAchQueueLoad *out);
 bool nk_ach_save_queue_file(NkAch *ach, const char *path);
 /* Copies only the official/core achievement set. `total` receives the full count even when
  * `out` is smaller; the caller owns all copied strings. */
