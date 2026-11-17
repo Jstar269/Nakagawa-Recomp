@@ -1422,6 +1422,7 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->check_updates_at_start = false;
     settings->discord_presence = false;
     settings->download_cover_art = false;
+    settings->cheats = false;
     settings->picker_folder[0] = '\0';
     settings->rebuild_prompt_version[0] = '\0';
     settings->developer_mode = false;
@@ -2134,6 +2135,13 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.download_cover_art = cover_art_val;
     }
 
+    /* Cheats (#2639): off unless the file says true. */
+    NkJsonNode *cheats_node = nk_json_obj_get(root, "cheats");
+    bool cheats_val = false;
+    if (cheats_node && nk_json_get_bool(cheats_node, &cheats_val)) {
+        app->settings.cheats = cheats_val;
+    }
+
     /* A folder that no longer fits is dropped, not cut short. */
     const char *picker_folder = nk_json_get_string(nk_json_obj_get(root, "picker_folder"));
     if (picker_folder && strlen(picker_folder) < sizeof(app->settings.picker_folder)) {
@@ -2414,6 +2422,7 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
             app->settings.discord_presence ? "true" : "false");
     fprintf(f, "  \"download_cover_art\": %s,\n",
             app->settings.download_cover_art ? "true" : "false");
+    fprintf(f, "  \"cheats\": %s,\n", app->settings.cheats ? "true" : "false");
     player_settings_write_string(f, "picker_folder", app->settings.picker_folder);
     player_settings_write_string(f, "rebuild_prompt_version",
                                  app->settings.rebuild_prompt_version);
@@ -3362,6 +3371,18 @@ void player_app_set_title_60hz(PlayerApp *app, int game_index, bool on) {
                        on ? "on" : "off");
     maybe_persist_settings(app);
     player_app_title_play_changed(app, game_index);
+}
+
+bool player_app_set_cheats_session(PlayerApp *app, const char *file) {
+    char absolute[MAX_PATH_LEN] = "";
+    if (!app) return false;
+    if (file && file[0] && !nk_platform_absolute_path(file, absolute, sizeof(absolute))) return false;
+    app->cheats_session = true;
+    snprintf(app->cheats_session_file, sizeof(app->cheats_session_file), "%s", absolute);
+    player_dev_log_add(app, "settings", "cheats on for this session, from %s",
+                       absolute[0] ? "the file named on the command line"
+                                   : "each game's file in the cheats folder");
+    return true;
 }
 
 void player_app_set_experimental_60hz_session(PlayerApp *app, bool on) {
@@ -5901,6 +5922,8 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
     }
     work->launch_headless = app->launch_headless;
     work->headless_accept_presented_frames = app->headless_accept_presented_frames;
+    work->cheats_session = app->cheats_session;
+    snprintf(work->cheats_file, sizeof(work->cheats_file), "%s", app->cheats_session_file);
     /* The runtime's pause overlay draws with the UI fonts in the player's folder. */
     snprintf(work->ui_root, sizeof(work->ui_root), "%s", app->install_root);
     memcpy(work->launcher_display_bounds, app->launcher_display_bounds,
@@ -5993,6 +6016,20 @@ void player_launch_work_run(PlayerLaunchWork *work) {
     }
     session->config.headless_accept_presented_frames =
         work->headless_accept_presented_frames;
+    /* Cheats (#2639): the stored switch, or this session's --cheats, with the file
+       --cheats-file named. The acceptance checkpoint is evidence of the game as it is, so it
+       runs without them, and says so. */
+    if (work->cheats_session) {
+        session->config.cheats = true;
+        snprintf(session->config.cheats_file, sizeof(session->config.cheats_file), "%s",
+                 work->cheats_file);
+    }
+    if (session->config.cheats && work->headless_accept_presented_frames > 0u) {
+        printf("[PLAYER] Cheats are off for this launch: the acceptance checkpoint needs a run "
+               "without them\n");
+        session->config.cheats = false;
+        session->config.cheats_file[0] = '\0';
+    }
     /* The play mode (#2055, src/rt/ace.h): this title's SR_ACE line, and in Enhanced or Ace the
        folder of the runtime's per-run report. The acceptance checkpoint is evidence, so it runs
        authentic. */
@@ -6381,6 +6418,7 @@ void player_app_apply_settings_to_session(const PlayerSettings *settings,
     config->fullscreen = settings->fullscreen;
     config->master_volume = settings->master_volume;
     config->developer_mode = settings->developer_mode;
+    config->cheats = settings->cheats;
     snprintf(config->nickname, sizeof(config->nickname), "%s", settings->nickname);
     config->reduce_motion = settings->reduce_motion_choice == PLAYER_SYSTEM_CHOICE_ON
         ? NK_REDUCE_MOTION_ON
@@ -8302,6 +8340,13 @@ void player_app_clear_shared_library_cache(PlayerApp *app) {
         snprintf(app->settings_notice, sizeof(app->settings_notice),
                  "Shared library cache cleared. The next build compiles its libraries again.");
     }
+}
+
+void player_app_toggle_cheats(PlayerApp *app) {
+    if (!app) return;
+    app->settings.cheats = !app->settings.cheats;
+    player_dev_log_add(app, "settings", "cheats %s", app->settings.cheats ? "on" : "off");
+    maybe_persist_settings(app);
 }
 
 void player_app_toggle_download_cover_art(PlayerApp *app) {

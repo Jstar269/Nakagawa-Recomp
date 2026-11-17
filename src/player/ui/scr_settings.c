@@ -988,7 +988,11 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             static const char k_cover_art_sentence[] =
                 "Fetch Redump-matched box art from thumbnails.libretro.com to cache; "
                 "unmatched discs keep disc art.";
-            WizardRow rows[5];
+            /* Cheats (#2639): the user's own CWCheat file; the game marks a run that applies one. */
+            static const char k_cheats_sentence[] =
+                "Apply your CWCheat file, cheats/<disc ID>.ini in the data folder. "
+                "The game shows a marker while any cheat is on.";
+            WizardRow rows[6];
             size_t row_count = 0u;
             if (model->online_mode) {
                 rows[row_count++] = (WizardRow){"Online mode", "On",
@@ -1006,6 +1010,8 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             rows[row_count++] = (WizardRow){"Download cover art",
                                             settings_on_off(model->download_cover_art),
                                             k_cover_art_sentence};
+            rows[row_count++] = (WizardRow){"Cheats", settings_on_off(model->cheats),
+                                            k_cheats_sentence};
             WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, false);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
@@ -1042,6 +1048,11 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                   "Download cover art", k_cover_art_sentence,
                                   model->download_cover_art, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_COVER_ART);
+            }
+            if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_CHEATS, SET_ID_TEXT + 0xBCu,
+                                  "Cheats", k_cheats_sentence, model->cheats, inner - 32.0f,
+                                  &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_CHEATS);
             }
             nk_ui_end_container(ui);
         }

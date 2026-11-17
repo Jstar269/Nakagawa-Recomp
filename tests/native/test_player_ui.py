@@ -3463,6 +3463,24 @@ class NativePlayerUiTests(unittest.TestCase):
             self.assertNotIn("next_ui_cover_art ", unmatched_out)
             self.assertIn("next_ui_disc_icon index=2 width=1 height=1", unmatched_out)
 
+    def test_next_ui_cheats_switch_is_off_until_turned_on(self) -> None:
+        """The Cheats switch (#2639) on Settings > Online and developer options: a run that
+        does not touch it leaves "cheats" false, and turning it on saves true."""
+        untouched = self.next_ui_run(
+            "online-settings", ("WAIT_MS=100", "KEY_ESCAPE", "WAIT_MS=100"),
+        )
+        if isinstance(untouched["settings"], dict):
+            self.assertIsNot(untouched["settings"].get("cheats"), True)
+        turned_on = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "KEY_DOWN", "KEY_DOWN", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=200",
+             "KEY_ESCAPE", "WAIT_MS=100"),
+        )
+        saved = turned_on["settings"]
+        assert isinstance(saved, dict)
+        self.assertIs(saved.get("cheats"), True)
+        self.assertIs(saved.get("download_cover_art"), False)
+
     # The next UI's controller page (player_ui_nk.h), as the frame line prints it.
     CONTROLLER_FOCUS = {
         "select": str(0x4600), "start": str(0x4601), "rtrigger": str(0x4607),

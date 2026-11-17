@@ -65,6 +65,34 @@ static bool launch_join_path(const char *base, const char *relative,
                                    NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
 }
 
+/* The cheat file a launch with cheats on names (#2639): the one the session names, else
+   <user_data_root>/cheats/<DISC>.ini with the disc ID as the package folders spell it
+   (ULUS12345). False, with `out_path` empty, when the session names none and has no per-user
+   data directory or no PSP disc ID, or the path does not fit; the runtime then says that no
+   file is named and applies nothing. */
+static bool launch_cheats_file(const NkLaunchSession *session, char *out_path, size_t out_size) {
+    int written;
+    if (!out_path || out_size == 0u) return false;
+    out_path[0] = '\0';
+    if (session->config.cheats_file[0]) {
+        written = snprintf(out_path, out_size, "%s", session->config.cheats_file);
+    } else {
+        char disc[NK_MAX_DISC_ID_LEN + 8];
+        char sep = nk_platform_path_separator();
+        if (!session->user_data_root[0] ||
+            !nk_title_manifest_package_dir_name(session->disc_id, NULL, disc, sizeof(disc))) {
+            return false;
+        }
+        written = snprintf(out_path, out_size, "%s%ccheats%c%s.ini", session->user_data_root, sep,
+                           sep, disc);
+    }
+    if (written < 0 || (size_t)written >= out_size) {
+        out_path[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
 /* The title's code-capture folder (#1933), <user_data_root>/cache/bringup/<DISC>/captures, the
    folder `nk_cli.py bringup` reads (bringup_capture_dir). False, with `out_path` empty, when the
    session has no per-user data directory or no PSP disc ID, or the path does not fit. */
@@ -1505,6 +1533,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     char env_ui_root[NK_MAX_PATH + 16];
     char env_launcher_display[96];
     char env_nickname[sizeof(session->config.nickname) + 16];
+    char env_cheats_file[NK_MAX_PATH + 24];
     char sep = nk_platform_path_separator();
 
     if (session->config.fps_cap == -1) {
@@ -1526,7 +1555,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     snprintf(env_memstick, sizeof(env_memstick), "SR_MEMSTICK=%s", session->memstick_root);
     snprintf(env_tables, sizeof(env_tables), "PSP_VFPU_TABLES=assets%cvfpu", sep);
 
-    const char *envp[48];
+    const char *envp[52];
     int env_count = 0;
     /* An empty value masks an inherited ISO for staged sessions with no ISO. */
     snprintf(env_iso, sizeof(env_iso), "PSP_ISO=%s", session->iso_path);
@@ -1711,6 +1740,24 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     /* The console nickname (#2197), always exported so an inherited value cannot name it. */
     snprintf(env_nickname, sizeof(env_nickname), "SR_NICKNAME=%s", session->config.nickname);
     envp[env_count++] = env_nickname;
+    /* Cheats (#2639, src/rt/cheats.h): the switch and the file, both always exported so an
+       inherited value cannot turn them on or name a file. The acceptance checkpoint is evidence
+       of the game as it is, so a session with one refuses to launch with cheats on. */
+    {
+        char cheats_file[NK_MAX_PATH];
+        cheats_file[0] = '\0';
+        if (session->config.cheats) {
+            if (session->config.headless_accept_presented_frames > 0u) {
+                snprintf(session->last_error, sizeof(session->last_error),
+                         "Cheats are on; the acceptance checkpoint needs a run without them.");
+                return NK_ERROR_GENERIC;
+            }
+            (void)launch_cheats_file(session, cheats_file, sizeof(cheats_file));
+        }
+        envp[env_count++] = session->config.cheats ? "SR_CHEATS=1" : "SR_CHEATS=0";
+        snprintf(env_cheats_file, sizeof(env_cheats_file), "SR_CHEATS_FILE=%s", cheats_file);
+        envp[env_count++] = env_cheats_file;
+    }
     /* What the pause overlay shows and draws with, beside the game's name (SR_GAME_TITLE
      * below): the disc ID and the player's folder for the UI fonts. Always exported, so an
      * empty value masks an inherited one instead of naming another game. */

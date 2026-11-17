@@ -521,6 +521,7 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.discord_available = which == FLOW_SETTINGS_ONLINE;
     settings.discord_presence = which == FLOW_SETTINGS_ONLINE_DISCORD_ON;
     settings.download_cover_art = false;
+    settings.cheats = false;
     settings.cover_art_cache_size = "1.4 MB";
     settings.developer_mode = true;
     settings.share_system_libraries = true;
@@ -3360,6 +3361,8 @@ static void test_settings_pages(void) {
          "the Discord status switch toggles it"},
         {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_COVER_ART, PLAYER_UI_SETTINGS_TOGGLE_COVER_ART,
          "the Download cover art switch toggles it"},
+        {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_CHEATS, PLAYER_UI_SETTINGS_TOGGLE_CHEATS,
+         "the Cheats switch toggles it"},
         {FLOW_SETTINGS_BUILD_CACHE, PLAYER_UI_ID_SETTINGS_REFRESH_COVER_ART,
          PLAYER_UI_SETTINGS_REFRESH_COVER_ART, "Refresh cover art clears the cover cache"},
         {FLOW_SETTINGS_NOTICES, PLAYER_UI_ID_SETTINGS_LICENSE_TEXTS,

@@ -108,6 +108,14 @@ typedef struct {
        SR_NICKNAME so an inherited value cannot name the console. The runtime re-validates it
        and serves NK_NICKNAME_DEFAULT, with a log line, for an empty or invalid value. */
     char nickname[NK_NICKNAME_MAX_BYTES + 1u];
+    /* Cheats (#2639, src/rt/cheats.h): off as prepare_session leaves it. SR_CHEATS and
+       SR_CHEATS_FILE are always exported, 0 and empty while this is off, so an inherited value
+       cannot opt a launch in. On, the file is cheats_file when that names one (the player's
+       --cheats-file), else cheats/<DISC-ID>.ini under the per-user data directory; the launcher
+       does not create, read or check it. A session with an acceptance checkpoint refuses to
+       launch with cheats on. */
+    bool cheats;
+    char cheats_file[NK_MAX_PATH];
 } NkRuntimeConfig;
 
 typedef struct {
