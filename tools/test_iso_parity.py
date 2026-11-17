@@ -2903,6 +2903,13 @@ int main(int argc, char **argv) {{
                     self.assertIn("TEST_STOP_AFTER_MODULE_INTAKE", stderr)
                     self.assertEqual(len(environments), 1)
                     self.assertEqual("--aot-stage" in command, staged)
+                    if staged:
+                        # A caller's codegen stage (bring-up's codegen-stage/) is where the
+                        # code is generated; the per-user stage cache never replaces it.
+                        self.assertEqual(
+                            command[command.index("--output-dir") + 1],
+                            str(extra["aot_stage_dir"]),
+                        )
                     self.assertEqual(environments[0].get(speed_env), speed or "balanced")
 
     def test_experimental_build_declares_usrdir_prx_as_runtime_placed_module(self) -> None:

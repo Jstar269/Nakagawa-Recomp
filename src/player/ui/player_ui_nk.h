@@ -361,6 +361,10 @@ typedef struct {
        docs/ENHANCEMENT_CONTRACT.md section 9.10): the ENHANCEMENTS card's tag reads
        OPTIONAL, else EXPERIMENTAL. Last, after the queue's fields, for the same reason. */
     bool enhancement_released;
+    /* Opt-in Redump-matched box cover art decoded from the user cache; NULL when
+       the setting is off, the disc is unmatched, or no box art is cached yet. Last,
+       so positional fixture lists stay explicit without shifting fields. */
+    const struct NkUiImage *cover;
 } PlayerUiTitle;
 
 typedef struct {
@@ -648,6 +652,8 @@ typedef enum {
     PLAYER_UI_SETTINGS_REMOVE_TEXPACK,       /* a title's Enhanced page: forget its pack */
     PLAYER_UI_SETTINGS_EDIT_NICKNAME,        /* the nickname editor (#2197) */
     PLAYER_UI_SETTINGS_TOGGLE_DISCORD,       /* Settings > Online and developer (#2259) */
+    PLAYER_UI_SETTINGS_TOGGLE_COVER_ART,     /* Settings > Online and developer (#2632) */
+    PLAYER_UI_SETTINGS_REFRESH_COVER_ART,    /* Settings > Build tools and cache (#2632) */
     PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC, /* launcher background music (#2207) */
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN,
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP,
@@ -773,6 +779,10 @@ typedef struct {
        turn it on (it has a Discord application ID). */
     bool discord_presence;
     bool discord_available;
+    /* Opt-in cover art (#2632): off by default, plus formatted cache size shown
+       under Settings > Build tools and cache. */
+    bool download_cover_art;
+    const char *cover_art_cache_size;
     const char *current_version;    /* "0.0.3" */
     const char *update_version;     /* "0.0.4", once checked */
     bool update_prerelease;
@@ -1212,6 +1222,8 @@ enum {
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
     PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */
+    PLAYER_UI_ID_SETTINGS_COVER_ART = 0x4563u,        /* Settings > Online: Download cover art */
+    PLAYER_UI_ID_SETTINGS_REFRESH_COVER_ART = 0x4564u,/* Settings > Build cache: Refresh cover art */
     PLAYER_UI_ID_NICKNAME_KEY_BASE = 0x4570u,         /* + its keyboard key's place */
     PLAYER_UI_ID_CONTROLLER_BUTTON_BASE = 0x4600u,   /* + the control, 0-18 */
     PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN = 0x4621u,
@@ -1512,6 +1524,10 @@ PlayerUiNk *player_ui_nk_create(struct SDL_Renderer *renderer,
    support player_ui_nk_create needs, so it can never succeed here. */
 bool player_ui_nk_built_with_launcher(void);
 void player_ui_nk_destroy(PlayerUiNk *player);
+/* Clear decoded cached box art thumbnails when Refresh cover art empties the cache. */
+void player_ui_nk_invalidate_cover_art(PlayerUiNk *player);
+/* True while the disc-art worker may still hold a cached cover file open. */
+bool player_ui_nk_cover_art_reading(const PlayerUiNk *player);
 bool player_ui_nk_view_active(const PlayerUiNk *player, const PlayerApp *app);
 /* How long the host's loop may wait for input, at most idle_ms, before it
    draws the next frame (nk_ui_wait_s): one 60 Hz frame while something on

@@ -974,7 +974,7 @@ This extracts the plaintext executable (or automatically uses `EBOOT.elf` and gu
 
 The built package ships its required guest modules inside `<package>/modules/` (copied under their manifest names), and the launcher sets `SR_MODULE_DIR` to `<package>/modules` so launches are self-contained without external dependencies. A run begins at the title's resolved run entry (`run_entry`: a declared `runtime_bindings.fallback_entry`, else `executable.entry`), ensuring that titles requiring a fallback entry point start there across both the native player and CLI launchers. Re-adding an already imported disc in the library preserves its completed staging and extraction state (`player_merge_readded_game`) when the disc ID, version, and image size match. `build-package` always builds with the public runtime backends; PGD-protected game data remains unavailable at run time ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)). The private-backend mode (`PUBLIC_SAFE=0`) was retired on 2026-10-25, and `make` refuses it.
 
-Package work is content-addressed below `<user data>/cache/packages/<DISC_ID>/`; the cache key covers executable bytes, analyzer/codegen semantics, codegen options, generated-code/runtime ABI epochs, compiler identity/target, and native flags. An unchanged key reuses the published package, an ABI-compatible runtime or compiler change recompiles native objects while retaining generated C, and any other semantic change regenerates AOT. The builder writes and verifies `completion-manifest.json` before an atomic directory promotion; interrupted or corrupt entries are refused by the player and launcher. The full contract and rebuild-component names are in [`RUNTIME_PACKAGING_ARCHITECTURE.md`](RUNTIME_PACKAGING_ARCHITECTURE.md#6-private-content-addressed-cache-contract-316).
+Package work is content-addressed below `<user data>/cache/packages/<DISC_ID>/`; the cache key covers executable bytes, analyzer/codegen semantics, codegen options, generated-code/runtime ABI epochs, compiler identity/target, and native flags. An unchanged key reuses the validated runtime package. A compatible native/runtime change reuses generated C from the separate AOT-stage cache, while compiled objects remain in the bounded object-key cache. New package schema v3 installs omit compiler intermediates but still validate every retained file through `completion-manifest.json`; the player continues to check v2 packages with their original generated-object list. The builder writes and verifies the manifest before an atomic directory promotion; same-volume installs share package files with their cache entry by hard link. Damage to a hard-linked installed artifact also invalidates that cache copy, so the next build verifies the AOT stage and rebuilds from the current inputs. The full contract and rebuild-component names are in [`RUNTIME_PACKAGING_ARCHITECTURE.md`](RUNTIME_PACKAGING_ARCHITECTURE.md#6-private-content-addressed-cache-contract-316).
 
 To inspect a private package cache with Doctor, pass the user-data root and disc ID:
 
@@ -984,7 +984,7 @@ python tools/nk_doctor.py --scope products `
   --disc-id <disc_id>
 ```
 
-Doctor reports a missing, incomplete, or stale cache entry and names the changed key component when a current key is available. Cache cleanup is bounded per title; set `NK_AOT_CACHE_MAX_ENTRIES` to a positive limit when the default of eight is unsuitable.
+Doctor reports a missing, incomplete, or stale cache entry and names the changed key component when a current key is available. Cache cleanup protects entries used by installed package variants and retains at most one previous entry and AOT stage per disc.
 
 Builds also share compiled objects. The runtime compiles once for every game, an unchanged rebuild compiles nothing, and the system libraries a disc carries are compiled once for every game that carries the same library. These objects stay in `<user data>/cache/objects/` and `<user data>/cache/shared-libraries/` and are never uploaded or shared. Settings > BUILD TOOLS AND CACHE turns library sharing off and clears its folder. [`RUNTIME_PACKAGING_ARCHITECTURE.md`](RUNTIME_PACKAGING_ARCHITECTURE.md#shared-compiled-objects-1306) has the keys and limits.
 
@@ -1008,7 +1008,7 @@ exist there, and optional modules are included only when named with
 `bss_metadata_source: "psp-header"`. `--public-safe` is available for synthetic fixture builds.
 The output directory must be untracked and dedicated. The package schema and explicit unsupported
 semantic-boundary records are defined in
-[`RUNTIME_PACKAGING_ARCHITECTURE.md`](RUNTIME_PACKAGING_ARCHITECTURE.md#5-local-aot-package-contract-v2).
+[`RUNTIME_PACKAGING_ARCHITECTURE.md`](RUNTIME_PACKAGING_ARCHITECTURE.md#5-local-aot-package-contract-v3).
 Inputs whose paths contain spaces or shell-sensitive characters (common under a Windows profile
 directory) are copied into `<output-dir>/staged-inputs/` so the Make recipes can use them. When the
 output directory contains spaces, the route builds in a Make-safe workspace—resolved from
@@ -1297,18 +1297,29 @@ required.
 ### Network use
 
 Nakagawa works offline. The player and the runtime make no network connection unless you
-agree to one, and ordinary single-player play reaches no host. The opt-in
-connections are listed below, and each is off by default.
+agree to one, and ordinary single-player play reaches no host. Every connection the player or
+runtime can make is listed below, and each is opt-in and off by default.
 
 | What | Host | When | Controlled by |
 | --- | --- | --- | --- |
 | Build-tool download | `www.python.org`, `repo.msys2.org` (HTTPS) | Only after you select **DOWNLOAD** on the BUILD PACKAGE consent card | That consent card, per build |
 | Check for updates | `api.github.com` (HTTPS) | When you select **CHECK FOR UPDATES** (Settings > Updates), or once at start if you turn on **Check at start** (off by default) | That button, and that switch |
 | Update download | `github.com`, which redirects to `release-assets.githubusercontent.com` (HTTPS) | Only after a check finds a newer version and you select **DOWNLOAD** | That button, per download |
+| Download cover art | `thumbnails.libretro.com` (HTTPS) | When **Download cover art** is on (Settings > Online and developer, off by default), once per verified Redump disc not yet cached | That switch, and **Refresh cover art** (Settings > Build tools and cache) |
 | Online play (ad hoc relay) | Shipped default `socom.cc`, presets `psp.mgn.pub`, `relay.arenaanywhere.site`, `relay-usa.arenaanywhere.site`, or a user-entered host (`27312` lobby, `27313` data, plain TCP) | Only when you turn **Ad hoc online play** on and launch a game that starts PSP ad hoc networking | **Settings > Online and developer > Online play** (`online_play` in `settings.json`, off by default) |
 
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).
+
+**Download cover art** (Settings > Online and developer, off by default;
+[#2632](https://github.com/Jstar269/nakagawa-recomp/issues/2632)) fetches box art PNGs over HTTPS
+from `thumbnails.libretro.com` using the player's shared WinHTTP transport
+(`src/player/cover_art.c`, user agent `NakagawaRecomp/CoverArt`). Only discs verified against the
+Redump PSP list are looked up, by exact sanitized Redump `<game name>` under
+`Sony - PlayStation Portable/Named_Boxarts/` (no unverified disc names, file paths, saves, or PC
+identifiers are sent, redirects outside `thumbnails.libretro.com` are refused, and cached PNGs stay
+local under `cache/cover-art/` until **Refresh cover art** clears them). When off, no connection is
+made and discs keep their own `ICON0.PNG` / `PIC1.PNG`.
 
 **Online play** (Settings > Online and developer > Online play, off by default;
 [#1139](https://github.com/Jstar269/nakagawa-recomp/issues/1139)) carries PSP local wireless ad hoc
@@ -1371,8 +1382,8 @@ There is no telemetry or crash upload. The `network_mode` entry in
 `settings.json` is reserved and always reads `"offline"`; a build treats any other value as
 offline. `tools/test_prereq_fetcher.py` fails if shipped code outside the allowlisted modules
 (`package_builder.c`, `prereq_fetcher.py`, and opt-in `nk_adhoc_relay_client.c`) uses a network
-API, if a pinned download, update check, or shipped relay preset names a host or port not
-listed in this section, or if new code calls the native download transport.
+API, if a pinned download, update check, cover art host, or shipped relay preset names a host or
+port not listed in this section, or if new code calls the native download transport.
 
 Release packaging is a maintainer step, not part of the player:
 `python -m tools.nk_core.prereq_fetcher` with `--bundle-dest` or `--source-archive` downloads

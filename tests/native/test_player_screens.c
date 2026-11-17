@@ -154,44 +154,51 @@ static const PlayerUiTitle k_titles[] = {
      "", "", "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false,
+     NULL},
     {"Synthetic Showcase Breakout", "TEST00008", "Needs setup", "",
      "Showcase profile-zero acceptance remains open.", "", NULL, "",
      "", "", "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PLAYABLE, false, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false,
+     NULL},
     {"Synthetic Experimental Fixture", "TEST00006", "Experimental", "",
      "Source-owned compatibility fixture.", "", NULL, "", "", "",
      "RETRY PACKAGE CHECK", "◆", 0xC29AF4FFu,
      PLAYER_UI_PRIMARY_RETRY_PACKAGE_CHECK, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_NONE, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false,
+     NULL},
     {"Synthetic Untested Fixture", "TEST00005", "Untested", "",
      "No compatibility record exists.", "", NULL, "", "", "",
      "BUILD PACKAGE", "?", 0xC29AF4FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_NONE, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false,
+     NULL},
     {"Synthetic Phase Five", "TEST00004", "Needs setup", "",
      "Player launch stops at the package boundary.", "", NULL, "",
      "", "", "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_WONT_BOOT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false,
+     NULL},
     {"Synthetic Title Two", "TEST00002", "Needs setup", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false,
+     NULL},
     {"Synthetic Profile", "TEST00001", "Ready", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false,
+     NULL}
 };
 
 /* A library with the demos that come with Nakagawa among the user's games, in
@@ -202,25 +209,29 @@ static const PlayerUiTitle k_demo_titles[] = {
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false,
+     NULL},
     {"Synthetic Title Two", "TEST00002", "Needs setup", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false,
+     NULL},
     {"Synthetic Scene Demo", "TEST00007", "Ready", "",
      "Shows a synthetic cube with sound.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false,
+     NULL},
     {"Synthetic Profile", "TEST00001", "Ready", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false,
+     NULL}
 };
 
 /* The demos alone: a first start with nothing added yet. */
@@ -230,13 +241,15 @@ static const PlayerUiTitle k_demo_only_titles[] = {
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false,
+     NULL},
     {"Synthetic Scene Demo", "TEST00007", "Ready", "",
      "Shows a synthetic cube with sound.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false, false,
+     NULL}
 };
 
 /* What-to-expect cards: a player tier with plain words, with known issues, the
@@ -509,6 +522,8 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
        build that cannot, with both settings Off, shows only Developer mode and Nickname. */
     settings.discord_available = which == FLOW_SETTINGS_ONLINE;
     settings.discord_presence = which == FLOW_SETTINGS_ONLINE_DISCORD_ON;
+    settings.download_cover_art = false;
+    settings.cover_art_cache_size = "1.4 MB";
     settings.developer_mode = true;
     settings.online_play = false;
     settings.online_play_row_value = "Off";
@@ -3361,6 +3376,10 @@ static void test_settings_pages(void) {
          PLAYER_UI_SETTINGS_EDIT_ONLINE_PLAY_SERVER, "Server address opens the custom editor"},
         {FLOW_SETTINGS_ONLINE_PLAY, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
          "Back returns to Online and developer"},
+        {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_COVER_ART, PLAYER_UI_SETTINGS_TOGGLE_COVER_ART,
+         "the Download cover art switch toggles it"},
+        {FLOW_SETTINGS_BUILD_CACHE, PLAYER_UI_ID_SETTINGS_REFRESH_COVER_ART,
+         PLAYER_UI_SETTINGS_REFRESH_COVER_ART, "Refresh cover art clears the cover cache"},
         {FLOW_SETTINGS_NOTICES, PLAYER_UI_ID_SETTINGS_LICENSE_TEXTS,
          PLAYER_UI_SETTINGS_OPEN_LICENSE_TEXTS, "Open licence texts opens the folder"},
         {FLOW_SETTINGS_NOTICES, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
@@ -3596,8 +3615,93 @@ static void test_settings_pages(void) {
        a build that cannot; and a stored On there keeps its row so it can be turned off. */
     CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE, 960, 540, dump, sizeof(dump)) &&
               strstr(dump, "\"DISCORD STATUS: OFF\"") != NULL &&
-              strstr(dump, "through the Discord app on this") != NULL,
-          "Online and developer offers Discord status, off, and says how it works");
+              strstr(dump, "through the Discord app on this") != NULL &&
+              strstr(dump, "\"DOWNLOAD COVER ART: OFF\"") != NULL &&
+              strstr(dump, "thumbnails.libretro.com") != NULL,
+          "Online and developer offers Discord status and opt-in cover art, off by default");
+    {
+        /* Focus steps cleanly through every row on Online and developer, reaching both
+           Online play and Download cover art without duplicate widget IDs. */
+        static const NkUiId expected_order[] = {
+            PLAYER_UI_ID_SETTINGS_DEVELOPER,
+            PLAYER_UI_ID_SETTINGS_DISCORD,
+            PLAYER_UI_ID_SETTINGS_NICKNAME,
+            PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
+            PLAYER_UI_ID_SETTINGS_COVER_ART,
+            PLAYER_UI_ID_SETTINGS_BACK
+        };
+        NkUi *ui = NULL;
+        (void)flow_case_layout(FLOW_SETTINGS_ONLINE, 960, 540, &ui);
+        CHECK(ui != NULL && nk_ui_focused(ui) == expected_order[0],
+              "Online and developer starts focus on Developer mode");
+        for (size_t step = 1u;
+             ui != NULL && step < sizeof(expected_order) / sizeof(expected_order[0]); ++step) {
+            push_nav(ui, NK_UI_DIR_DOWN);
+            nk_ui_begin(ui, 0.0);
+            (void)draw_flow_case(ui, FLOW_SETTINGS_ONLINE);
+            (void)nk_ui_end(ui);
+            CHECK(nk_ui_focused(ui) == expected_order[step],
+                  "Down steps sequentially through Developer, Discord, Nickname, Online play, Cover art, and Back");
+        }
+        if (ui != NULL) nk_ui_destroy(ui);
+    }
+    {
+        /* All six optional/standard rows active together (Online mode, Developer mode,
+           Discord status, Nickname, Online play, Download cover art) stay within the row
+           table and keep distinct focusable controls. */
+        NkUiConfig config;
+        NkUiTextBackend text = screen_test_text_backend();
+        PlayerUiSettingsModel six;
+        const NkUiDrawList *draw = NULL;
+        static const NkUiId six_order[] = {
+            PLAYER_UI_ID_SETTINGS_ONLINE_MODE,
+            PLAYER_UI_ID_SETTINGS_DEVELOPER,
+            PLAYER_UI_ID_SETTINGS_DISCORD,
+            PLAYER_UI_ID_SETTINGS_NICKNAME,
+            PLAYER_UI_ID_SETTINGS_ONLINE_PLAY,
+            PLAYER_UI_ID_SETTINGS_COVER_ART,
+            PLAYER_UI_ID_SETTINGS_BACK
+        };
+        memset(&config, 0, sizeof(config));
+        config.host = NK_UI_HOST_LAUNCHER;
+        config.text = &text;
+        NkUi *ui = screen_ui_create(&config);
+        CHECK(ui != NULL, "create UI for 6-row Online and developer regression");
+        if (ui != NULL) {
+            set_test_viewport(ui, 960, 540);
+            memset(&six, 0, sizeof(six));
+            six.page = PLAYER_UI_SETTINGS_PAGE_ONLINE;
+            six.online_mode = true;
+            six.developer_mode = true;
+            six.discord_available = true;
+            six.discord_presence = true;
+            six.nickname = "Player";
+            six.online_play = true;
+            six.online_play_row_value = "On: socom.cc";
+            six.download_cover_art = true;
+            six.logical_width = 960.0f;
+            six.logical_height = 540.0f;
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_settings(ui, &six);
+            draw = nk_ui_end(ui);
+            CHECK(draw != NULL && nk_ui_dump(ui, dump, sizeof(dump)) > 0u &&
+                      strstr(dump, "\"ONLINE MODE: ON\"") != NULL &&
+                      strstr(dump, "\"ONLINE PLAY: ON: SOCOM.CC\"") != NULL &&
+                      strstr(dump, "\"DOWNLOAD COVER ART: ON\"") != NULL,
+                  "all 6 rows on Online and developer render together cleanly");
+            for (size_t step = 0u; step < sizeof(six_order) / sizeof(six_order[0]); ++step) {
+                CHECK(nk_ui_focused(ui) == six_order[step],
+                      "6-row Online and developer focus visits every control in order");
+                if (step + 1u < sizeof(six_order) / sizeof(six_order[0])) {
+                    push_nav(ui, NK_UI_DIR_DOWN);
+                    nk_ui_begin(ui, 0.0);
+                    (void)player_ui_screen_settings(ui, &six);
+                    (void)nk_ui_end(ui);
+                }
+            }
+            nk_ui_destroy(ui);
+        }
+    }
     CHECK(dump_flow_case(FLOW_SETTINGS_ONLINE_ON, dump, sizeof(dump)) &&
               strstr(dump, "DISCORD STATUS") == NULL &&
               activate_flow_button(PLAYER_UI_ID_SETTINGS_DISCORD, FLOW_SETTINGS_ONLINE_ON).kind ==
@@ -3695,8 +3799,10 @@ static void test_settings_pages(void) {
     CHECK(flow_case_fits(FLOW_SETTINGS_BUILD_CACHE, 960, 540, dump, sizeof(dump)) &&
               strstr(dump, "\"SHARE LIBRARIES: ON\"") != NULL &&
               strstr(dump, "\"REMOVE BUILD TOOLS\"") != NULL &&
+              strstr(dump, "Cover art cache: 1.4 MB") != NULL &&
+              strstr(dump, "\"REFRESH COVER ART\"") != NULL &&
               strstr(dump, "Shared library cache cleared.") != NULL,
-          "build tools and cache shows the switch, tool removal and the clear notice");
+          "build tools and cache shows the switch, tool removal, cover cache size, refresh, and clear notice");
     CHECK(flow_case_fits(FLOW_SETTINGS_BUILD_CACHE, 960, 540, dump, sizeof(dump)) &&
               strstr(dump, "\"BUILD SPEED: BACKGROUND\"") != NULL,
           "build tools and cache shows the build speed at 960 x 540");
@@ -5837,6 +5943,8 @@ static int capture_screens(const char *directory) {
         if (!capture_one(&rig, "title-disc-art", NULL, &art_title)) goto done;
         with_art.picture = NULL;
         if (!capture_one(&rig, "title-disc-icon-only", NULL, &art_title)) goto done;
+        with_art.cover = &picture_art;
+        if (!capture_one(&rig, "title-cover-art", NULL, &art_title)) goto done;
     }
     title.title = &setup_fixture;
     title.title_index = 4u;

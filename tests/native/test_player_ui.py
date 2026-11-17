@@ -1165,6 +1165,7 @@ class NativePlayerUiTests(unittest.TestCase):
         enhancement_packages: dict[str, str] | None = None,
         enhancement_package_fields: dict[str, object] | None = None,
         culling_packages: dict[str, dict[str, object]] | None = None,
+        cover_cache: dict[str, bytes] | None = None,
         expect_failure: bool = False,
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
@@ -1185,6 +1186,10 @@ class NativePlayerUiTests(unittest.TestCase):
                 (data_folder / "verification").mkdir(parents=True)
                 (data_folder / "verification" / "redump.dat").write_text(disc_list,
                                                                         encoding="utf-8")
+            if cover_cache is not None:
+                (data_folder / "cache" / "cover-art").mkdir(parents=True, exist_ok=True)
+                for cache_name, cache_bytes in cover_cache.items():
+                    (data_folder / "cache" / "cover-art" / cache_name).write_bytes(cache_bytes)
             profile = scratch / "controller-profile.json"
             if invalid_profile:
                 profile.write_text("{ definitely not a valid controller profile", encoding="utf-8")
@@ -1511,6 +1516,7 @@ class NativePlayerUiTests(unittest.TestCase):
                 "settings": persisted_settings,
                 "library": persisted_library,
                 "default_profile_files": files_under(localappdata / "Nakagawa"),
+                "data_folder_files": files_under(data_folder),
                 "dedicated_files": files_under(dedicated),
                 "downloaded_tool_marker_exists": (
                     tool_marker.is_file() if tool_marker is not None else None
@@ -2332,6 +2338,7 @@ class NativePlayerUiTests(unittest.TestCase):
         "online": str(0x450D), "notices": str(0x450E), "remove_tools": str(0x450F),
         "online_play": str(0x455C), "online_play_toggle": str(0x455D),
         "online_play_preset": str(0x455E), "online_play_server": str(0x455F),
+        "cover_art": str(0x4563), "refresh_cover_art": str(0x4564),
         "build_cache": str(0x451A), "share_libraries": str(0x451B),
         "build_speed": str(0x4555),
         "developer": str(0x4515), "back": str(0x4517), "confirm_remove": str(0x4519),
@@ -2466,6 +2473,19 @@ class NativePlayerUiTests(unittest.TestCase):
         trail = self.focus_trail(run)
         self.assertEqual(trail[-1], focus["online_play_server"],
                          "closing the custom server editor returns focus to Server address")
+
+        # Verify focus moves cleanly from Developer -> Nickname -> Online play -> Download cover art -> Back.
+        order = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "KEY_DOWN", "WAIT_MS=50", "KEY_DOWN", "WAIT_MS=50",
+             "KEY_DOWN", "WAIT_MS=50", "KEY_DOWN", "WAIT_MS=100"),
+            settings={"nickname": "Player", "nickname_asked": True},
+        )
+        self.assertEqual(
+            self.focus_trail(order),
+            [focus["developer"], self.SETTINGS_NICKNAME, focus["online_play"],
+             focus["cover_art"], focus["back"]],
+        )
 
     # The nickname editor's on-screen keyboard (#2197): its first letter, q, is where it opens.
     NICKNAME_KEY_BASE = 0x4570
@@ -3354,6 +3374,160 @@ class NativePlayerUiTests(unittest.TestCase):
         assert isinstance(settings, dict)
         self.assertIs(settings.get("share_system_libraries"), False,
                       "the switch turns library sharing off and saves it")
+
+    def test_next_ui_cover_art_opt_in_and_refresh(self) -> None:
+        """#2632: cover art download is off by default, opt-in via Settings > Online and
+        developer (naming thumbnails.libretro.com), matched by exact Redump name with
+        &*/:<>?\\|\" -> _ filename mapping, cached under the data folder, and refreshed
+        under Build tools and cache."""
+        with tempfile.TemporaryDirectory(prefix=".cover-art-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            iso_path = scratch / "verified-art.iso"
+            create_test_iso_with_executables(
+                iso_path, build_plain_mips_elf(), disc_id="TEST00043",
+                title="Synthetic Cover Disc",
+            )
+            icon = png_pixel(50, 190, 120)
+            sector_size = 2048
+            iso_bytes = bytearray(iso_path.read_bytes())
+
+            def _both32(val: int) -> bytes:
+                return struct.pack("<I", val) + struct.pack(">I", val)
+
+            def _iso_rec(name: bytes, lba: int, size: int, is_dir: bool) -> bytes:
+                rec = bytearray(33 + len(name) + ((33 + len(name)) & 1))
+                rec[0] = len(rec)
+                rec[2:10] = _both32(lba)
+                rec[10:18] = _both32(size)
+                rec[25] = 2 if is_dir else 0
+                rec[28] = 1
+                rec[31] = 1
+                rec[32] = len(name)
+                rec[33 : 33 + len(name)] = name
+                return bytes(rec)
+
+            # Append ICON0.PNG to PSP_GAME directory (LBA 34) using free sector 40.
+            game_off = 34 * sector_size
+            used = 0
+            while used < sector_size and iso_bytes[game_off + used] != 0:
+                used += iso_bytes[game_off + used]
+            icon_rec = _iso_rec(b"ICON0.PNG;1", 40, len(icon), False)
+            iso_bytes[game_off + used : game_off + used + len(icon_rec)] = icon_rec
+            iso_bytes[40 * sector_size : 40 * sector_size + len(icon)] = icon
+            iso = bytes(iso_bytes)
+
+            sha1 = hashlib.sha1(iso).hexdigest()
+            crc = f"{zlib.crc32(iso):08x}"
+            cover_png = (
+                b"\x89PNG\r\n\x1a\n"
+                + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0))
+                + png_chunk(b"IDAT", zlib.compress((b"\x00" + bytes((12, 34, 56, 255)) * 2) * 2))
+                + png_chunk(b"IEND", b"")
+            )
+            cover_dir = scratch / "libretro-server"
+            cover_dir.mkdir()
+            (cover_dir / "Synthetic _ Cover_ _ Title_ (USA).png").write_bytes(cover_png)
+
+            disc_list = (
+                "<?xml version=\"1.0\"?>\n<datafile>\n"
+                "<header><name>Synthetic</name><version>1</version></header>\n"
+                "<game name=\"Synthetic &amp; Cover: / Title? (USA)\">\n"
+                "<serial>TEST-00043</serial>\n"
+                f"<rom name=\"verified.iso\" size=\"{len(iso)}\" crc=\"{crc}\" sha1=\"{sha1}\"/>\n"
+                "</game>\n</datafile>\n"
+            )
+
+            # 1. Off by default: toggling nothing keeps download_cover_art == False and fetches nothing.
+            add_events = ("WAIT_VIEW=experimental|unsupported|supported|error,15000",
+                          "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=1500")
+            off_run = self.next_ui_run(
+                "library", add_events, drop_bytes=("source-owned.iso", iso),
+                disc_list=disc_list, env_extra={"NK_UI_TEST_COVER_ART_DIR": str(cover_dir)},
+            )
+            off_settings = off_run["settings"]
+            self.assertNotIn("cover_art_request=", str(off_run["stdout"]))
+            self.assertNotIn("next_ui_cover_art", str(off_run["stdout"]))
+            self.assertIn("[PLAYER_UI_TEST] next_ui_disc_icon index=2 width=1 height=1",
+                          str(off_run["stdout"]))
+            self.assertFalse(any(p.startswith("cache/cover-art/")
+                                 for p in off_run["data_folder_files"]))
+            if isinstance(off_settings, dict):
+                self.assertIs(off_settings.get("download_cover_art"), False)
+
+            # 2. Opt-in switch on Online and developer persists download_cover_art == True
+            #    (Developer -> Nickname -> Online play -> Download cover art).
+            opt_in = self.next_ui_run(
+                "online-settings",
+                ("WAIT_MS=100", "KEY_DOWN", "KEY_DOWN", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=200",
+                 "KEY_ESCAPE", "WAIT_MS=100"),
+            )
+            self.assertIn(self.SETTINGS_FOCUS["cover_art"], self.focus_trail(opt_in))
+            saved = opt_in["settings"]
+            assert isinstance(saved, dict)
+            self.assertIs(saved.get("download_cover_art"), True)
+            self.assertIs(saved.get("online_play"), False)
+
+            # 3. With opt-in ON, verified disc requests sanitized libretro PNG, caches & renders it.
+            on_run = self.next_ui_run(
+                "library", add_events + ("KEY_RETURN", "WAIT_MS=800"),
+                drop_bytes=("source-owned.iso", iso), disc_list=disc_list,
+                settings={"download_cover_art": True},
+                env_extra={"NK_UI_TEST_COVER_ART_DIR": str(cover_dir)},
+            )
+            on_frames = on_run["frames"]
+            assert isinstance(on_frames, list)
+            self.assertEqual(on_frames[-1]["next_route"], "2")
+            on_stdout = str(on_run["stdout"])
+            expected_url = (
+                "https://thumbnails.libretro.com/Sony%20-%20PlayStation%20Portable/"
+                "Named_Boxarts/Synthetic%20_%20Cover_%20_%20Title_%20%28USA%29.png"
+            )
+            self.assertIn(f"[PLAYER_UI_TEST] cover_art_request={expected_url}", on_stdout)
+            self.assertIn("[PLAYER_UI_TEST] next_ui_cover_art index=2 width=2 height=2", on_stdout)
+            self.assertIn(
+                f"cache/cover-art/{sha1}.png",
+                on_run["data_folder_files"],
+                on_run["data_folder_files"],
+            )
+
+            # 4. Cached cover art loads from disk without a second download, and Build tools
+            #    and cache shows non-zero size + Refresh cover art clears it.
+            offline_hit = self.next_ui_run(
+                "library", add_events, drop_bytes=("source-owned.iso", iso),
+                disc_list=disc_list, settings={"download_cover_art": True},
+                cover_cache={f"{sha1}.png": cover_png},
+                env_extra={"NK_UI_TEST_COVER_ART_DIR": str(scratch / "empty-server")},
+            )
+            self.assertNotIn("cover_art_request=", str(offline_hit["stdout"]))
+            self.assertIn("[PLAYER_UI_TEST] next_ui_cover_art index=2 width=2 height=2",
+                          str(offline_hit["stdout"]))
+
+            clear_run = self.next_ui_run(
+                "build-cache",
+                ("WAIT_MS=100", "KEY_TAB", "KEY_TAB", "KEY_TAB", "KEY_TAB", "KEY_RETURN",
+                 "WAIT_MS=200"),
+                settings={"download_cover_art": True},
+                cover_cache={f"{sha1}.png": cover_png},
+            )
+            clear_stdout = str(clear_run["stdout"])
+            self.assertIn(
+                "[PLAYER_UI_TEST] next_ui_cover_cache size=0 KB|notice=Cover art cache cleared. Covers for every verified disc download again now.",
+                clear_stdout,
+            )
+            self.assertFalse(any(p.startswith("cache/cover-art/")
+                                 for p in clear_run["data_folder_files"]))
+
+            # 5. Unmatched / unverified disc keeps ICON0 even with Download cover art on.
+            other_iso = iso[:-1] + bytes([iso[-1] ^ 1])
+            unmatched_run = self.next_ui_run(
+                "library", add_events, drop_bytes=("source-owned-unverified.iso", other_iso),
+                disc_list=disc_list, settings={"download_cover_art": True},
+                env_extra={"NK_UI_TEST_COVER_ART_DIR": str(cover_dir)},
+            )
+            unmatched_out = str(unmatched_run["stdout"])
+            self.assertNotIn("cover_art_request=", unmatched_out)
+            self.assertNotIn("next_ui_cover_art ", unmatched_out)
+            self.assertIn("next_ui_disc_icon index=2 width=1 height=1", unmatched_out)
 
     # The next UI's controller page (player_ui_nk.h), as the frame line prints it.
     CONTROLLER_FOCUS = {
