@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 import io
 import shutil
+import subprocess
 import struct
 import sys
 import tempfile
@@ -228,6 +229,27 @@ class CaptureTranslation(unittest.TestCase):
         self.assertEqual((module.link_low, module.link_high), (TARGET, CODE_END))
         for word in (dead, dead + 4, dead + 0x100, LOAD + WINDOW - 4):
             self.assertFalse(in_ranges(word, module.spans), f"0x{word:08x} has no authority")
+
+    def test_a_kept_body_with_untranslatable_known_callee_compiles_a_named_stub(self):
+        dead = TARGET + 0x200
+        jal_dead = 0x0C000000 | ((dead >> 2) & 0x03FFFFFF)
+        image = code_capture.group_captures([capture({TARGET + 0x08: jal_dead,
+                                                       dead: 0x4C000000})])[0]
+        module, err = translate(image)
+        self.assertIsNone(module.unsupported_reason, err)
+        self.assertTrue(any(address == dead for address, _reason in module.stubbed))
+
+        compiler = shutil.which("gcc")
+        self.assertIsNotNone(compiler, "the code capture regression requires the configured C compiler")
+        with tempfile.TemporaryDirectory(prefix="code_capture_compile_") as directory:
+            source = Path(directory) / "capture.c"
+            source.write_text(code_capture.unit_text([module]), encoding="ascii")
+            result = subprocess.run(
+                [compiler, "-std=c11", "-Werror=implicit-function-declaration", "-fsyntax-only",
+                 "-I", str(ROOT / "src" / "rt"), str(source)],
+                capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_executable_authority_is_exactly_the_identity(self):
         # Every word the interpreter may run inside a bound capture is a word the runtime

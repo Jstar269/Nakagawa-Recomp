@@ -4466,7 +4466,10 @@ def _sv_step(w, regs, written):
         if fn == 0x27: bin2(d, regs[a], regs[b], lambda x, y: ~(x | y)); return
         if fn == 0x2A: bin2(d, regs[a], regs[b], lambda x, y: 1 if _sv_s32(x) < _sv_s32(y) else 0); return  # slt
         if fn == 0x2B: bin2(d, regs[a], regs[b], lambda x, y: 1 if x < y else 0); return      # sltu
+        if fn == 0x2C: bin2(d, regs[a], regs[b], lambda x, y: max(_sv_s32(x), _sv_s32(y))); return  # max
+        if fn == 0x2D: bin2(d, regs[a], regs[b], lambda x, y: min(_sv_s32(x), _sv_s32(y))); return  # min
         if fn == 0x0F: return                                                                 # sync (no GPR write)
+        W(d, None)                                                                            # unmodeled SPECIAL may write rd
     elif op in (0x08, 0x09):   # addi/addiu
         W(b, regs[a] + s16(w) if regs[a] is not None else None); return
     elif op == 0x0A:           # slti
@@ -4487,7 +4490,7 @@ def _sv_step(w, regs, written):
         return
     elif op in (0x11, 0x12):   # cop1/cop2 move group: mfc/cfc write rt, mtc/ctc none
         W(b, None); return     # (marking rt Unknown for mtc too is sound)
-    elif op in (0x1C, 0x1F):   # Allegrex special2/special3 (max/min, ext/ins/seb/seh/wsbw)
+    elif op in (0x1C, 0x1F):   # Allegrex special2/special3 (ext/ins/seb/seh/wsbw)
         W(d, None); W(b, None); return
     elif op in _SV_NOGPR_OPS:
         return
@@ -5198,7 +5201,7 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
                 out.append(f"  L_{addr:08x}: ;")
             w = ADDRESS_SPACE.instruction_word(addr, read32(elf, addr), options=options)
             if w is None:
-                continue
+                raise Unsupported(f"unreadable instruction word at 0x{addr:08x}")
             if promo is not None:
                 promoted = None
                 if (not is_control(w) and not _is_cop0_move(w) and addr not in sv_points
@@ -5947,6 +5950,17 @@ def translate_code_capture(index, image, profile=None, cfg_gate=False, options=N
     identity = [tuple(span) for span in module.overlay_check_spans]
     kept = [(fn, text) for fn, text in zip(module.functions, module.texts, strict=True)
             if in_ranges(fn[0], identity)]
+    # A translated body may contain a direct symbol call to a known function whose body
+    # stopped at an unsupported instruction. Keep that zero-word named stop stub in the C
+    # unit, even though its guest words are outside the capture identity and spans.
+    stubbed = {address for address, _reason in module.stubbed}
+    referenced_stubs = {
+        address for address in stubbed
+        if any(f"{module.prefix}_{address:08x}(" in str(text) for _fn, text in kept)
+    }
+    kept.extend((fn, text) for fn, text in zip(module.functions, module.texts, strict=True)
+                if fn[0] in referenced_stubs)
+    kept.sort(key=lambda item: item[0][0])
     module.functions = [fn for fn, _ in kept]
     module.texts = [text for _, text in kept]
     module.spans = identity

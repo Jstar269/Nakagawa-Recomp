@@ -1029,6 +1029,14 @@ class SpExitWalkFanOutTests(unittest.TestCase):
         words += [0x03E00008, 0]  # jr ra; nop
         return words
 
+    def test_unreadable_instruction_inside_translated_span_is_unsupported(self):
+        start = _WALK_BASE
+        with self.assertRaisesRegex(codegen.Unsupported, "unreadable instruction word"):
+            codegen.emit_function(
+                _WalkElf([0]), start, [(start, start + 8)], {start},
+                options=codegen.CodegenOptions(region_split_threshold=None),
+            )
+
     def test_the_walk_is_linear_in_the_body(self):
         elf, insns, labels = _walk_flow(self._blocks_body(2200, 2200))
         jumps = sum(1 for a in insns if codegen.read32(elf, a) == 0x01000008)
