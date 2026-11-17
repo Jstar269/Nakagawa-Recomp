@@ -778,9 +778,8 @@ typedef struct {
 
 typedef struct {
     int used;
-    int backend;                 /* 0 = ISO9660, 1 = merged host VFS namespace */
     uint32_t index;
-    SrVfsDirList list;           /* backend 1: fully materialized at Dopen */
+    SrVfsDirList list;           /* merged namespace, fully materialized at Dopen */
     char *path;
 } DirFd;
 

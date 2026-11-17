@@ -31,10 +31,26 @@ static int io_statlog_on(void) {
     return hle_env_switch(&s_io_statlog_enabled, "SR_STATLOG");
 }
 
+/* SR_IOLOG is asked on every file read, raw UMD read and Dopen, so it is cached like
+ * SR_STATLOG (#1296). */
+static int s_io_iolog_enabled = -1;
+#ifdef SR_HLE_THREAD_SELFTEST
+static unsigned s_io_iolog_env_reads; /* times io_iolog_on() consulted the environment */
+#endif
+
+static int io_iolog_on(void) {
+#ifdef SR_HLE_THREAD_SELFTEST
+    if (s_io_iolog_enabled < 0) s_io_iolog_env_reads++;
+#endif
+    return hle_env_switch(&s_io_iolog_enabled, "SR_IOLOG");
+}
+
 #ifdef SR_HLE_THREAD_SELFTEST
 static atomic_uint s_hle_devctl_refusal_log_count;
 void sr_hle_test_io_statlog_switch_reset(void) { s_io_statlog_enabled = -1; s_io_statlog_env_reads = 0; }
 unsigned sr_hle_test_io_statlog_env_reads(void) { return s_io_statlog_env_reads; }
+void sr_hle_test_io_iolog_switch_reset(void) { s_io_iolog_enabled = -1; s_io_iolog_env_reads = 0; }
+unsigned sr_hle_test_io_iolog_env_reads(void) { return s_io_iolog_env_reads; }
 #endif
 
 static int hle_devctl_refusal_first(const char *device, uint32_t command) {
@@ -170,7 +186,7 @@ static uint32_t hle_io_raw_umd_read(uint32_t fd, uint32_t dst, uint32_t sectors)
         for (uint32_t k = 0; k < n; k++) MEM_W8(dst + done + k, tmp[k]);
         done += n;
     }
-    if (getenv("SR_IOLOG"))
+    if (io_iolog_on())
         fprintf(stderr, "Read vbl=%u fd=%u sector=%u sectors=%u dst=0x%08x\n",
                 s_vcount_fwd, fd, f->off, sectors, dst);
     f->off += sectors;
@@ -365,6 +381,10 @@ uint32_t h_IoWrite(CpuState *s) {
                     "descriptor's 32-bit position is not supported yet (0x80010086)\n");
         return 0x80010086u;
     }
+    /* The source must lie in guest memory whole, as sceIoWriteAsync's submission requires:
+     * a byte past the arena reads back as zero, so the loop below would store zeros in the
+     * file and report the full count. Any view will do, because the loop reads byte by byte. */
+    if (count != 0u && !sr_inrange_n(src, count)) return 0x80010016u;
     if (f->truncated_bytes && !io_restore_truncated_gap(f)) return 0x80010005u;
     if (io_host_seek(f->host, f->off) != 0) return 0x80010005u;  /* host I/O error */
     uint8_t tmp[4096]; uint32_t done = 0;
@@ -397,15 +417,15 @@ uint32_t io_read_now(CpuState *s) {
     if (f->enhancement_data) {
         if (f->off >= f->size || count == 0u) return 0u;
         if (count > f->size - f->off) count = f->size - f->off;
-        if (!sr_guest_span_writable(dst, count)) return 0x80010016u;
+        if (!sr_guest_span_writable_any_view(dst, count)) return 0x80010016u;
         for (uint32_t i = 0; i < count; i++) MEM_W8(dst + i, f->enhancement_data[f->off + i]);
         f->off += count;
         return count;
     }
     if (f->archive_vfs) {
-        if (dst && !sr_guest_span_writable(dst, count)) return 0x80010016u;
         if (f->off >= f->size || count == 0u) return 0u;
         if (count > f->size - f->off) count = f->size - f->off;
+        if (!sr_guest_span_writable_any_view(dst, count)) return 0x80010016u;
         uint8_t tmp[4096];
         uint32_t done = 0;
         SrArchiveFile archive_file = {
@@ -452,6 +472,7 @@ uint32_t io_read_now(CpuState *s) {
     }
     if (f->off >= f->size) return 0u;
     if (count > f->size - f->off) count = f->size - f->off;
+    if (!sr_guest_span_writable_any_view(dst, count)) return 0x80010016u;
     /* Read in chunks straight into guest memory, from the host file or the ISO. */
     uint8_t tmp[4096];
     uint32_t done = 0;
@@ -470,7 +491,7 @@ uint32_t io_read_now(CpuState *s) {
     if (f->host && perf_started)
         sr_perf_storage_read(SR_PERF_STORAGE_VFS, done, perf_started, done == count);
     f->off += done;
-    if (getenv("SR_IOLOG")) {
+    if (io_iolog_on()) {
         static int n = 0;
         if (n++ < 4000)
             fprintf(stderr, "Read vbl=%u fd=%u off=%u size=%u dst=0x%08x -> %u\n",
@@ -1062,7 +1083,7 @@ static uint32_t vfs_overlay_merge_dir(const char *guest_path, SrVfsDirList *list
 
 static uint32_t h_io_dopen_path(const char *path) {
     if (!path) return 0x80010016u;
-    if (getenv("SR_IOLOG")) fprintf(stderr, "HLE_IoDopen: path='%s'\n", path);
+    if (io_iolog_on()) fprintf(stderr, "HLE_IoDopen: path='%s'\n", path);
     if (io_path_equals_ci(path, "disc0:")) return 0x80010016u;
     IoRawDevicePath raw_device = io_raw_device_path(path);
     if (raw_device != IO_RAW_DEVICE_NONE) {
@@ -1087,131 +1108,128 @@ static uint32_t h_io_dopen_path(const char *path) {
     d->path = sr_asset_index_strdup(path);
     if (!d->path) { hle_dirfd_release_descriptor(i); return 0x80010014u; }
     if (sr_flash0_font_is_device_path(path)) {
-                /* flash0: listings are materialized here like the merged namespace (backend 1),
-                 * so Dread and Dclose need no device-specific code. */
-                Flash0Sources sources;
-                flash0_font_sources(&sources);
-                sr_vfs_dirlist_init(&d->list);
-                uint32_t font_dir_rc = sr_flash0_font_list_dir(path, &sources, &d->list);
-                if (font_dir_rc != 0u) {
-                    hle_dirfd_release_descriptor(i);
-                    return font_dir_rc;
-                }
-                d->backend = 1;
-                return i;
+        /* flash0: listings are materialized here like the merged namespace,
+         * so Dread and Dclose need no device-specific code. */
+        Flash0Sources sources;
+        flash0_font_sources(&sources);
+        sr_vfs_dirlist_init(&d->list);
+        uint32_t font_dir_rc = sr_flash0_font_list_dir(path, &sources, &d->list);
+        if (font_dir_rc != 0u) {
+            hle_dirfd_release_descriptor(i);
+            return font_dir_rc;
+        }
+        return i;
     }
-            int device_path = io_path_is_disc_device(path);
-            int iso_first_result = -1;
-            IsoDirEntry iso_first = {0};
-            if (device_path) {
-                iso_first_result = iso_list(path, 0, &iso_first);
-                if (iso_first_result < 0) {
-                    uint32_t iso_lba = 0, iso_size = 0;
-                    /* A file on the ISO must not be shadowed by the extracted
-                     * directory index merely because its directory probe failed. */
-                    if (iso_lookup(path, &iso_lba, &iso_size) == 0) {
-                        hle_dirfd_release_descriptor(i);
-                        return 0x80010014u; /* SCE_KERNEL_ERROR_ERRNO_FILE_NOT_FOUND */
-                    }
-                }
-            }
-            /* One guest namespace, three possible sources, materialized here
-             * so a listing the guest walks cannot change mid-walk.  An ISO
-             * directory is the source sceIoOpen resolves first; the writable
-             * overlay and then the extracted-data index fill in names the ISO
-             * does not provide.  A missing ISO directory still reaches the
-             * same overlay/index fallback below. */
-            sr_vfs_dirlist_init(&d->list);
-
-            if (iso_first_result >= 0) {
-                d->list.exists = 1;
-                for (uint32_t iso_index = 0;; iso_index++) {
-                    IsoDirEntry entry;
-                    int iso_result;
-                    if (iso_index == 0u) {
-                        entry = iso_first;
-                        iso_result = iso_first_result;
-                    } else {
-                        iso_result = iso_list(path, iso_index, &entry);
-                    }
-                    if (iso_result == 0) break;
-                    if (iso_result < 0) {
-                        hle_dirfd_release_descriptor(i);
-                        return 0x80010005u; /* SCE_KERNEL_ERROR_ERRNO_IO */
-                    }
-                    if (!sr_vfs_dirlist_merge_lba(
-                            &d->list, entry.name, entry.is_dir,
-                            entry.is_dir ? 0u : (uint64_t)entry.size,
-                            entry.lba)) {
-                        hle_dirfd_release_descriptor(i);
-                        return 0x80010008u; /* SCE_KERNEL_ERROR_NO_MEMORY */
-                    }
-                    if (iso_index == UINT32_MAX) {
-                        hle_dirfd_release_descriptor(i);
-                        return 0x80010005u; /* SCE_KERNEL_ERROR_ERRNO_IO */
-                    }
-                }
-            }
-
-            int overlay_found = 0;
-            uint32_t overlay_rc = vfs_overlay_merge_dir(path, &d->list, &overlay_found);
-            if (overlay_rc != 0) {
-                hle_dirfd_release_descriptor(i);
-                return overlay_rc;
-            }
-            if (overlay_found) d->list.exists = 1;
-
-            int wanted_variant = -2;
-            char *norm_key = data_normalize_guest_key(path, &wanted_variant);
-            if (norm_key) {
-                if (s_data_archive_mode && data_archive_guest_path_allowed(path)) {
-                    int loose_found = 0;
-                    if (data_loose_merge_dir(norm_key, &d->list, &loose_found) != 0) {
-                        free(norm_key);
-                        hle_dirfd_release_descriptor(i);
-                        return 0x80010005u;
-                    }
-                    if (loose_found) d->list.exists = 1;
-                    if (sr_asset_index_list_dir(&s_data_index, norm_key,
-                                                wanted_variant, &d->list) < 0) {
-                        free(norm_key);
-                        hle_dirfd_release_descriptor(i);
-                        return 0x80010008u;
-                    }
-                    if (sr_archive_vfs_list_dir(&s_archive_vfs, norm_key,
-                                                wanted_variant, &d->list) < 0) {
-                        free(norm_key);
-                        hle_dirfd_release_descriptor(i);
-                        return 0x80010008u;
-                    }
-                } else if (atomic_load_explicit(&s_data_state, memory_order_acquire) ==
-                           SR_DATA_STATE_READY) {
-                    if (sr_asset_index_list_dir(&s_data_index, norm_key,
-                                                wanted_variant, &d->list) < 0) {
-                        free(norm_key);
-                        hle_dirfd_release_descriptor(i);
-                        return 0x80010008u;
-                    }
-                }
-                free(norm_key);
-            }
-
-            /* ABSENT and EMPTY are different answers. Only a directory no
-             * source has is a not-found; a directory that exists with no
-             * representable children opens and reads back zero entries. */
-            if (!d->list.exists) {
+    int device_path = io_path_is_disc_device(path);
+    int iso_first_result = -1;
+    IsoDirEntry iso_first = {0};
+    if (device_path) {
+        iso_first_result = iso_list(path, 0, &iso_first);
+        if (iso_first_result < 0) {
+            uint32_t iso_lba = 0, iso_size = 0;
+            /* A file on the ISO must not be shadowed by the extracted
+             * directory index merely because its directory probe failed. */
+            if (iso_lookup(path, &iso_lba, &iso_size) == 0) {
                 hle_dirfd_release_descriptor(i);
                 return 0x80010014u; /* SCE_KERNEL_ERROR_ERRNO_FILE_NOT_FOUND */
             }
-            if (d->list.skipped != 0u) {
-                fprintf(stderr,
-                        "sceIoDopen: '%s' listing omits %zu entry/entries the guest "
-                        "namespace cannot represent\n", path, d->list.skipped);
+        }
+    }
+    /* One guest namespace, three possible sources, materialized here
+     * so a listing the guest walks cannot change mid-walk.  An ISO
+     * directory is the source sceIoOpen resolves first; the writable
+     * overlay and then the extracted-data index fill in names the ISO
+     * does not provide.  A missing ISO directory still reaches the
+     * same overlay/index fallback below. */
+    sr_vfs_dirlist_init(&d->list);
+
+    if (iso_first_result >= 0) {
+        d->list.exists = 1;
+        for (uint32_t iso_index = 0;; iso_index++) {
+            IsoDirEntry entry;
+            int iso_result;
+            if (iso_index == 0u) {
+                entry = iso_first;
+                iso_result = iso_first_result;
+            } else {
+                iso_result = iso_list(path, iso_index, &entry);
             }
-            sr_vfs_dirlist_sort(&d->list);
-            d->backend = 1;
-            return i;
-    return SCE_ERROR_KERNEL_TOO_MANY_OPEN_FILES;
+            if (iso_result == 0) break;
+            if (iso_result < 0) {
+                hle_dirfd_release_descriptor(i);
+                return 0x80010005u; /* SCE_KERNEL_ERROR_ERRNO_IO */
+            }
+            if (!sr_vfs_dirlist_merge_lba(
+                    &d->list, entry.name, entry.is_dir,
+                    entry.is_dir ? 0u : (uint64_t)entry.size,
+                    entry.lba)) {
+                hle_dirfd_release_descriptor(i);
+                return 0x80010008u; /* SCE_KERNEL_ERROR_NO_MEMORY */
+            }
+            if (iso_index == UINT32_MAX) {
+                hle_dirfd_release_descriptor(i);
+                return 0x80010005u; /* SCE_KERNEL_ERROR_ERRNO_IO */
+            }
+        }
+    }
+
+    int overlay_found = 0;
+    uint32_t overlay_rc = vfs_overlay_merge_dir(path, &d->list, &overlay_found);
+    if (overlay_rc != 0) {
+        hle_dirfd_release_descriptor(i);
+        return overlay_rc;
+    }
+    if (overlay_found) d->list.exists = 1;
+
+    int wanted_variant = -2;
+    char *norm_key = data_normalize_guest_key(path, &wanted_variant);
+    if (norm_key) {
+        if (s_data_archive_mode && data_archive_guest_path_allowed(path)) {
+            int loose_found = 0;
+            if (data_loose_merge_dir(norm_key, &d->list, &loose_found) != 0) {
+                free(norm_key);
+                hle_dirfd_release_descriptor(i);
+                return 0x80010005u;
+            }
+            if (loose_found) d->list.exists = 1;
+            if (sr_asset_index_list_dir(&s_data_index, norm_key,
+                                        wanted_variant, &d->list) < 0) {
+                free(norm_key);
+                hle_dirfd_release_descriptor(i);
+                return 0x80010008u;
+            }
+            if (sr_archive_vfs_list_dir(&s_archive_vfs, norm_key,
+                                        wanted_variant, &d->list) < 0) {
+                free(norm_key);
+                hle_dirfd_release_descriptor(i);
+                return 0x80010008u;
+            }
+        } else if (atomic_load_explicit(&s_data_state, memory_order_acquire) ==
+                   SR_DATA_STATE_READY) {
+            if (sr_asset_index_list_dir(&s_data_index, norm_key,
+                                        wanted_variant, &d->list) < 0) {
+                free(norm_key);
+                hle_dirfd_release_descriptor(i);
+                return 0x80010008u;
+            }
+        }
+        free(norm_key);
+    }
+
+    /* ABSENT and EMPTY are different answers. Only a directory no
+     * source has is a not-found; a directory that exists with no
+     * representable children opens and reads back zero entries. */
+    if (!d->list.exists) {
+        hle_dirfd_release_descriptor(i);
+        return 0x80010014u; /* SCE_KERNEL_ERROR_ERRNO_FILE_NOT_FOUND */
+    }
+    if (d->list.skipped != 0u) {
+        fprintf(stderr,
+                "sceIoDopen: '%s' listing omits %zu entry/entries the guest "
+                "namespace cannot represent\n", path, d->list.skipped);
+    }
+    sr_vfs_dirlist_sort(&d->list);
+    return i;
 }
 
 static uint32_t h_IoDopen(CpuState *s) {
@@ -1232,26 +1250,23 @@ static uint32_t h_IoDread(CpuState *s) {
     /* A Memory Stick directory reports the FAT shape PSPAutotests tests/io/stat/stat.expected records
      * on a PSP ("dread vs getstat": mode 0x21ff attr 0x0020 for a file, 0x11ff attr 0x0010 for a
      * directory, equal to sceIoGetstat's). Every other device (disc0, flash0) keeps its 0x124 bits: no
-     * cell measures them. The device is the one the directory was opened on, not `backend`, which is 1
-     * for every merged-namespace listing. */
+     * cell measures them. The device is the one the directory was opened on: every listing is the
+     * merged namespace, materialized at Dopen. */
     const int ms_shape = d->path && sr_ms0_classify(d->path, NULL) == SR_MS0_OWNED;
-    if (d->backend == 0) {
-        int r = iso_list(d->path, d->index, &e);
-        if (r <= 0) return r < 0 ? 0x80010005u : 0;
-        d->index++;
-    } else {
-        /* The listing was materialized and bounded at Dopen: every name fits
-         * e.name and every size fits the guest's 32-bit field, so this walk
-         * has no failure mode of its own and simply runs out of entries. */
-        if (d->index >= d->list.count) return 0;
-        const SrVfsDirEntry *ve = &d->list.entries[d->index++];
-        memset(&e, 0, sizeof(e));
-        memcpy(e.name, ve->name, strlen(ve->name) + 1u);
-        e.is_dir = ve->is_dir;
-        e.size = (uint32_t)ve->size;
-        e.lba = ve->lba;
-    }
-    for (uint32_t i = 0; i < 0x15cu; i++) MEM_W8(de + i, 0);
+    /* The listing was materialized and bounded at Dopen: every name fits
+     * e.name and every size fits the guest's 32-bit field, so this walk
+     * has no failure mode of its own and simply runs out of entries. */
+    if (d->index >= d->list.count) return 0;
+    const SrVfsDirEntry *ve = &d->list.entries[d->index++];
+    memset(&e, 0, sizeof(e));
+    memcpy(e.name, ve->name, strlen(ve->name) + 1u);
+    e.is_dir = ve->is_dir;
+    e.size = (uint32_t)ve->size;
+    e.lba = ve->lba;
+    /* Clear d_stat (0x00-0x57) and d_name (0x58-0x157) only. d_private at 0x158 is the caller's
+     * pointer (the Memory Stick driver writes the long name through it), set once before a
+     * Dread loop, so the entry write must leave it and the word after it alone. */
+    for (uint32_t i = 0; i < 0x158u; i++) MEM_W8(de + i, 0);
     MEM_W32(de + 0x00, (e.is_dir ? 0x1000u : 0x2000u) | (ms_shape ? 0x01ffu : 0x0124u));
     MEM_W32(de + 0x04, e.is_dir ? 0x0010u : 0x0020u);
     MEM_W32(de + 0x08, e.size); MEM_W32(de + 0x0c, 0);
@@ -1962,28 +1977,7 @@ static uint32_t h_IoRename(CpuState *s) {
         free(new_hp);
         return rc;
     }
-    wchar_t *w_new = NULL;
-    if (sr_wide_path_alloc(new_hp, &w_new)) {
-        WIN32_FILE_ATTRIBUTE_DATA fad;
-        if (GetFileAttributesExW(w_new, GetFileExInfoStandard, &fad)) {
-            if (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                free(w_new);
-                free(old_hp);
-                free(new_hp);
-                return 0x80010015u;
-            }
-            int was_dir = 0;
-            if (!sr_vfs_delete_contained_leaf(new_hp, canonical, &was_dir)) {
-                free(w_new);
-                free(old_hp);
-                free(new_hp);
-                return 0x80010005u;
-            }
-        }
-        free(w_new);
-    }
-    wchar_t *w_old = NULL;
-    w_new = NULL;
+    wchar_t *w_old = NULL, *w_new = NULL;
     if (!sr_wide_path_alloc(old_hp, &w_old) || !sr_wide_path_alloc(new_hp, &w_new)) {
         free(w_old);
         free(w_new);
@@ -1991,7 +1985,23 @@ static uint32_t h_IoRename(CpuState *s) {
         free(new_hp);
         return 0x80010005u;
     }
-    BOOL ok = MoveFileExW(w_old, w_new, MOVEFILE_COPY_ALLOWED);
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (GetFileAttributesExW(w_new, GetFileExInfoStandard, &fad) &&
+        (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        free(w_old);
+        free(w_new);
+        free(old_hp);
+        free(new_hp);
+        return 0x80010015u;
+    }
+    /* An existing destination file is replaced in the move itself, never deleted first: a
+     * case-only rename (save.bin to SAVE.BIN names the source on NTFS), a rename onto itself,
+     * a missing source or a sharing violation then fails or succeeds with the destination
+     * intact. The replace renames over the destination's own name, so a link planted there is
+     * the object replaced, never its target. Both parents are verified inside the one Memory
+     * Stick root, so no copy fallback is allowed: like the POSIX renameat leg, the move is a
+     * rename or nothing. */
+    BOOL ok = MoveFileExW(w_old, w_new, MOVEFILE_REPLACE_EXISTING);
     DWORD err = ok ? ERROR_SUCCESS : GetLastError();
     free(w_old);
     free(w_new);
