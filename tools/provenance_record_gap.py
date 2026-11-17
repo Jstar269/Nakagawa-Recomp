@@ -238,7 +238,7 @@ def record_gaps(
     *,
     repo: Path = ROOT,
     covered: set[str] | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, object]]:
     """Return the tracked public paths that no exact trusted record covers.
 
     ``covered`` is the set of paths the authority speaks about exactly.  When it
@@ -494,8 +494,8 @@ def check_disposition_gaps(
     missing_gaps = {
         str(gap["path"])
         for gap in gaps
-        if isinstance(gap.get("independence"), dict)
-        and gap["independence"].get("status") == "missing"
+        if isinstance(independence := gap.get("independence"), dict)
+        and independence.get("status") == "missing"
     }
 
     baseline_paths = set(baseline.keys())

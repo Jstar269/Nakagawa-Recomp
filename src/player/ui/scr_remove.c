@@ -349,9 +349,9 @@ PlayerUiAction player_ui_screen_steam(NkUi *ui, const PlayerUiSteamModel *model)
                     theme->paper);
     nk_ui_text_role(ui, FLOW_ID_LEAD,
                     "Adds a shortcut to your Steam library that starts this game directly, for "
-                    "Steam Input and Big Picture. Nakagawa changes only Steam's list of "
-                    "non-Steam games on this PC, after saving a copy of it, and downloads "
-                    "nothing.",
+                    "Steam Input and Big Picture. Nakagawa changes only Steam's list of non-Steam "
+                    "games and shortcut artwork on this PC, after saving a copy of it, and "
+                    "downloads nothing.",
                     NK_UI_TYPE_BODY_S, theme->muted);
     if (blocked) {
         NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),

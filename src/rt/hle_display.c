@@ -1279,6 +1279,9 @@ void sr_vblank_tick(void) {
             psmf_av_final("exit_at_vblank");
             ge_scene_dump_finish();
             sr_compat_report();
+            /* _Exit skips atexit, so release the renderer (and save its pipeline cache) here; it writes
+             * the SR_PERF summary first, so the call below is then a no-op. */
+            gui_shutdown();
             sr_perf_shutdown();
             sr_profile_dump_final();
             SR_VERIFY_REPORT_NOW();

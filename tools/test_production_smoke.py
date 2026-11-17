@@ -1164,7 +1164,7 @@ class TestProductionSmokePackage(unittest.TestCase):
         report = json.loads(report_bytes)
 
         self.assertEqual(package["format"], "nakagawa-aot-package")
-        self.assertEqual(package["schema_version"], 2)
+        self.assertEqual(package["schema_version"], 3)
         self.assertEqual(package["title"]["id"], self.manifest["id"])
         self.assertEqual(package["runtime"]["abi"], "CpuState")
         # The package's ABI is the one the runtime header defines, not a value read back from
@@ -1179,10 +1179,21 @@ class TestProductionSmokePackage(unittest.TestCase):
             package["inputs"]["executable"]["sha256"],
             hashlib.sha256((self.fixture_dir / "guest.prx").read_bytes()).hexdigest(),
         )
-        self.assertTrue(package["generated_objects"])
-        for obj in package["generated_objects"]:
-            self.assertTrue(obj["path"].endswith(".o"))
-            self.assertTrue((self.build_dir / obj["path"]).is_file())
+        self.assertEqual(package["generated_objects"], [])
+        completion = json.loads(
+            (self.build_dir / "completion-manifest.json").read_text(encoding="utf-8")
+        )
+        completion_paths = {record["path"] for record in completion["artifacts"]}
+        self.assertTrue(any(path.endswith(".o") for path in completion_paths))
+        # Schema 3 packages keep no objects, but the build report records every object
+        # the build compiled (test_profile_zero_e2e reads it as the proof of AOT code).
+        compiled = report["artifacts"]["compiled_objects"]
+        self.assertTrue(compiled)
+        for record in compiled:
+            self.assertEqual(
+                hashlib.sha256((self.build_dir / record["path"]).read_bytes()).hexdigest(),
+                record["sha256"],
+            )
         self.assertTrue(package["required_local_assets"])
 
         self.assertEqual(report["format"], "nakagawa-build-report")

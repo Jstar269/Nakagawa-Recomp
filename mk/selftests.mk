@@ -74,7 +74,7 @@ profiler-selftest: $(GENERIC_TITLE_CONFIG_HEADER)
 		-ffunction-sections -fdata-sections \
 		-fno-asynchronous-unwind-tables -fno-unwind-tables $(LDFLAGS) \
 		$(LD_GC_SECTIONS) -o $(BUILD_DIR)/profiler_selftest.exe \
-		tests/native/profiler_selftest.c src/rt/recomp.c src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/domain_mode.c src/rt/stale_code.c src/rt/title_config.c src/rt/perf.c $(LIBS) -lm
+		tests/native/profiler_selftest.c src/rt/recomp.c src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/domain_mode.c src/rt/stale_code.c src/rt/vfpu_tables.c src/rt/title_config.c src/rt/perf.c $(LIBS) -lm
 	$(BUILD_DIR)/profiler_selftest.exe
 
 # Also covers the SR_PERF line formats, PERF_AUDIO included (#1296).
