@@ -1972,6 +1972,210 @@ class TestPresenterContract(unittest.TestCase):
         self.assertTrue(headless.startswith("headless\n"))
         self.assertTrue(offscreen.startswith("offscreen\n"))
 
+    @staticmethod
+    def _cheats_base0_output(cheats, frames=1, file_name="cheats-base0.ini"):
+        """What the base-0 runtime prints when it models the layout (src/rt/cheats.c)."""
+        image_end = display_generator.PSP_IMAGE_BASE + display_generator.IMAGE_SIZE - 1
+        lines = [
+            "BOOT_EVENT phase=init public_safe=1",
+            "BOOT_EVENT phase=image_loaded entry=0x00000000",
+        ]
+        if cheats:
+            lines += [
+                "CHEATS: this game's image is at 0x00000000 here and at 0x08804000 on a PSP: a "
+                f"cheat's address inside the image (0x08804000 to 0x{image_end:08X}) is moved with "
+                "it, and a cheat that names any other address is refused",
+                f"CHEATS: {file_name}: 1 on, 2 refused, 0 off, 0 for other discs",
+                'CHEATS: refused "Code in the image" (line 3): line 4 writes 4 byte(s) at 0x08804000 '
+                "(0x00000000 in this run), inside code the recompiler translated; a recompiled game "
+                "does not read its code again at run time; no line of this cheat is applied",
+                'CHEATS: refused "Outside the image" (line 5): line 6 names 4 byte(s) at 0x09000000, '
+                "outside the game's image as a PSP loads it (0x08804000 to "
+                f"0x{image_end:08X}); this run has the image at 0x00000000, and where other PSP "
+                "addresses are in it is not known; no line of this cheat is applied",
+                "CHEATS: the code forms are read as PPSSPP reads them (Core/CwCheat.cpp at "
+                "c437463bc5cb78a0236312ad23f9c3b56fb9ae67): PPSSPP-derived, not PSP-measured",
+            ]
+        lines += [
+            f"DRIVER_EXPECT_U32 addr=0x{address:08x} got=0x{value:08x} expected=0x{value:08x} status=PASS"
+            for address, value in display_generator.cheats_base0_expectations(frames, cheats)
+        ]
+        return "\n".join(lines) + "\n"
+
+    def test_cheats_base0_file_names_the_image_as_a_psp_has_it(self):
+        gen = display_generator
+        self.assertEqual(
+            gen.cheats_base0_file(),
+            "_C1 Data in the image\n_L 0x0000508F 0x000000A5\n"
+            "_C1 Code in the image\n_L 0x20004000 0x03E00008\n"
+            "_C1 Outside the image\n_L 0x20800000 0x12345678\n",
+        )
+        # The data byte is the image's last, in .bss; the third address is user memory past it.
+        self.assertEqual(gen.IMAGE_SIZE, 0x1090)
+        self.assertGreaterEqual(gen.IMAGE_SIZE - 1, gen.DATA_VADDR + gen.DATA_FILE_SIZE)
+        self.assertGreaterEqual(gen.CHEATS_OUTSIDE_IMAGE, gen.PSP_IMAGE_BASE + gen.IMAGE_SIZE)
+        # The two bases are the runtime's and the reader's.
+        runtime = (ROOT / "src" / "rt" / "cheats.c").read_text(encoding="utf-8")
+        reader = (ROOT / "src" / "core" / "nk_cheats.h").read_text(encoding="utf-8")
+        self.assertIn(f"#define CHEATS_PSP_IMAGE_BASE 0x{gen.PSP_IMAGE_BASE:08X}u", runtime)
+        self.assertIn(f"#define NK_CHEATS_ADDRESS_BASE 0x{gen.CWCHEAT_ADDRESS_BASE:08X}u", reader)
+        with_cheats = dict(gen.cheats_base0_expectations(1, True))
+        without = dict(gen.cheats_base0_expectations(1, False))
+        self.assertEqual(with_cheats[0x108C], 0xA5000000)
+        self.assertEqual(without[0x108C], 0)
+        self.assertEqual(with_cheats[0x0880508C], 0)
+        self.assertEqual(with_cheats[0], 0x27BDFFE0)
+        self.assertEqual(with_cheats[0x08804000], 0)
+        self.assertEqual(with_cheats[0x09000000], 0)
+
+    def test_cheats_base0_judgement_accepts_only_the_modelled_layout(self):
+        gen = display_generator
+        on = self._cheats_base0_output(True)
+        off = self._cheats_base0_output(False)
+        self.assertIsNone(gen.cheats_base0_evidence_failure(on, off, 1, "cheats-base0.ini"))
+        # What the runtime printed before the layout was modelled: every cheat on, the write at
+        # the PSP address as written, the code patch and the outside write applied.
+        before = (
+            "BOOT_EVENT phase=init public_safe=1\n"
+            "BOOT_EVENT phase=image_loaded entry=0x00000000\n"
+            "CHEATS: cheats-base0.ini: 3 on, 0 refused, 0 off, 0 for other discs\n"
+            "CHEATS: the code forms are read as PPSSPP reads them (Core/CwCheat.cpp at "
+            "c437463bc5cb78a0236312ad23f9c3b56fb9ae67): PPSSPP-derived, not PSP-measured\n"
+            "DRIVER_EXPECT_U32 addr=0x0000108c got=0x00000000 expected=0xa5000000 status=FAIL\n"
+            "DRIVER_EXPECT_U32 addr=0x0880508c got=0xa5000000 expected=0x00000000 status=FAIL\n"
+        )
+        failure = gen.cheats_base0_evidence_failure(before, off, 1, "cheats-base0.ini")
+        self.assertIsNotNone(failure)
+        self.assertIn("cheats on: omits: CHEATS: this game's image is at 0x00000000 here", failure)
+        self.assertIn("1 on, 2 refused", failure)
+        # Each named refusal, the layout line and each guest word is required on its own.
+        for line in on.splitlines():
+            if line.startswith("BOOT_EVENT phase=init") or "PPSSPP-derived" in line:
+                continue
+            without_line = on.replace(line + "\n", "")
+            self.assertIsNotNone(
+                gen.cheats_base0_evidence_failure(without_line, off, 1, "cheats-base0.ini"), line
+            )
+        # A word that is right by its own account but is not the one the route expects.
+        wrong = on.replace(
+            "addr=0x0000108c got=0xa5000000 expected=0xa5000000",
+            "addr=0x0000108c got=0x00000000 expected=0x00000000",
+        )
+        self.assertIn("omits", gen.cheats_base0_evidence_failure(wrong, off, 1, "cheats-base0.ini"))
+        # The PPSSPP-derived line is said once: not never, not twice.
+        origin = [line for line in on.splitlines() if "PPSSPP-derived" in line][0] + "\n"
+        for text in (on.replace(origin, ""), on + origin):
+            failure = gen.cheats_base0_evidence_failure(text, off, 1, "cheats-base0.ini")
+            self.assertIn("the PPSSPP-derived line appears", failure)
+        # With cheats off nothing is read or said, and the data byte is not written.
+        said = off + "CHEATS: cheats-base0.ini: 1 on, 2 refused, 0 off, 0 for other discs\n"
+        self.assertIn(
+            "cheats off: the runtime read or reported cheats",
+            gen.cheats_base0_evidence_failure(on, said, 1, "cheats-base0.ini"),
+        )
+        self.assertIn("cheats off: omits", gen.cheats_base0_evidence_failure(on, on, 1, "cheats-base0.ini"))
+        self.assertIn(
+            "contains: status=FAIL",
+            gen.cheats_base0_evidence_failure(
+                on + "DRIVER_EXPECT_U32 addr=0x00000004 got=0x1 expected=0x2 status=FAIL\n", off, 1,
+                "cheats-base0.ini"),
+        )
+
+    def test_cheats_base0_runs_the_base_zero_image_with_and_without_cheats(self):
+        gen = display_generator
+        calls = []
+
+        def fake_run(command, **kwargs):
+            env = dict(kwargs["env"])
+            calls.append((list(command), env, kwargs["cwd"]))
+            return subprocess.CompletedProcess(
+                command, 0, "", self._cheats_base0_output(env["SR_CHEATS"] == "1"))
+
+        ambient = {
+            "SR_DISC_ID": "ULUS-12345", "SR_RECORD": "run.nkrec", "SR_REPLAY": "run.nkrec",
+            "SR_HEADLESS_ACCEPT_PRESENTED_FRAMES": "3", "SR_VIDEO": "gdi", "SR_CHEATS": "1",
+            "SR_CHEATS_FILE": "someone-elses.ini",
+        }
+        with tempfile.TemporaryDirectory(prefix="display-smoke-base0-") as temp_dir:
+            build_dir = Path(temp_dir)
+            (build_dir / "fixture").mkdir()
+            (build_dir / "fixture" / "manifest.json").write_text('{"frames": 1}\n', encoding="ascii")
+            suffix = ".exe" if os.name == "nt" else ""
+            (build_dir / f"{gen.BASE0_ARTIFACT_STEM}{suffix}").write_bytes(b"runtime")
+            (build_dir / f"{gen.BASE0_ARTIFACT_STEM}_image.bin").write_bytes(b"image")
+            with mock.patch.dict(os.environ, ambient), mock.patch.object(
+                gen.subprocess, "run", side_effect=fake_run
+            ), contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(gen.cheats_base0(build_dir), 0)
+            cheat_file = build_dir / "cheats-base0.ini"
+            self.assertEqual(cheat_file.read_text(encoding="ascii"), gen.cheats_base0_file())
+            logs = sorted(path.name for path in build_dir.glob("*.log"))
+            # A run that exits non-zero, or whose evidence does not hold, fails the route.
+            with mock.patch.object(
+                gen.subprocess, "run",
+                side_effect=lambda command, **kwargs: subprocess.CompletedProcess(command, 3, "", ""),
+            ), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(gen.main(["cheats-base0", "--build-dir", str(build_dir)]), 1)
+            with mock.patch.object(
+                gen.subprocess, "run",
+                side_effect=lambda command, **kwargs: subprocess.CompletedProcess(
+                    command, 0, "", self._cheats_base0_output(False)),
+            ), contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(gen.main(["cheats-base0", "--build-dir", str(build_dir)]), 1)
+            self.assertIn("DISPLAY_SMOKE_CHEATS-BASE0 status=FAIL: base-0 cheats evidence cheats on: omits",
+                          err.getvalue())
+        self.assertIn("DISPLAY_SMOKE_CHEATS-BASE0 status=PASS frames=1 on=1 refused=2", out.getvalue())
+        self.assertEqual([env["SR_CHEATS"] for _, env, _ in calls], ["1", "0"])
+        self.assertEqual(logs, [
+            f"{gen.BASE0_ARTIFACT_STEM}.cheats-off.stderr.log",
+            f"{gen.BASE0_ARTIFACT_STEM}.cheats-off.stdout.log",
+            f"{gen.BASE0_ARTIFACT_STEM}.cheats-on.stderr.log",
+            f"{gen.BASE0_ARTIFACT_STEM}.cheats-on.stdout.log",
+        ])
+        for cheats, (command, env, cwd) in zip((True, False), calls, strict=True):
+            self.assertEqual(command[1:9], [
+                "--image", str((build_dir / f"{gen.BASE0_ARTIFACT_STEM}_image.bin").resolve()),
+                "0x00000000", "0x00000000", "none", "none", "--sched", "--gui",
+            ])
+            self.assertEqual(command[9:], [
+                f"--expect-u32=0x{address:08x}:0x{value:08x}"
+                for address, value in gen.cheats_base0_expectations(1, cheats)
+            ])
+            self.assertEqual(Path(env["SR_CHEATS_FILE"]), cheat_file.resolve())
+            self.assertEqual(env["SR_VIDEO"], "offscreen")
+            for selector in ("SDL_VIDEO_DRIVER", "SDL_VIDEODRIVER", "SDL_AUDIO_DRIVER", "SDL_AUDIODRIVER"):
+                self.assertEqual(env[selector], "dummy")
+            # Each of these would make the runtime refuse every cheat or pick another section.
+            for refused in ("SR_DISC_ID", "SR_RECORD", "SR_REPLAY", "SR_HEADLESS_ACCEPT_PRESENTED_FRAMES"):
+                self.assertNotIn(refused, env)
+            self.assertEqual(Path(cwd), ROOT)
+
+    def test_display_smoke_run_ends_with_the_base_zero_cheats_route(self):
+        makefile = read_makefile(ROOT)
+        self.assertIn(
+            f"DISPLAY_SMOKE_BASE0_NAME    := {display_generator.BASE0_ARTIFACT_STEM}\n", makefile)
+        run_recipe = makefile.split("\ndisplay-smoke-run: display-smoke\n", 1)[1].split("\n\n", 1)[0]
+        self.assertTrue(run_recipe.rstrip().endswith("\t$(MAKE) display-smoke-cheats-base0"), run_recipe)
+        recipe = makefile.split("\ndisplay-smoke-cheats-base0:\n", 1)[1].split("\n\n", 1)[0]
+        for part in (
+            "generate --out-dir $(DISPLAY_SMOKE_BASE0_FIXTURE)",
+            "--frames $(DISPLAY_SMOKE_FRAMES)",
+            "$(MAKE) all",
+            "GAME_NAME=$(DISPLAY_SMOKE_BASE0_NAME)",
+            "GAME_ELF=$(DISPLAY_SMOKE_BASE0_FIXTURE)/guest.prx",
+            "GAME_BASE=0 ",
+            "GAME_ENTRY=0 ",
+            "GAME_PSP_HEADER=$(DISPLAY_SMOKE_BASE0_FIXTURE)/guest.psp",
+            "GAME_EXTRA_ELFS= TITLE_MANIFEST=",
+            "BUILD_DIR=$(DISPLAY_SMOKE_BASE0_DIR)",
+            "FUNCS_PER_CHUNK=1 PUBLIC_SAFE=1",
+            "$(DISPLAY_SMOKE_GENERATOR) cheats-base0 --build-dir $(DISPLAY_SMOKE_BASE0_DIR)",
+        ):
+            self.assertIn(part, recipe)
+        self.assertIn("\tdisplay-smoke-cheats-base0 \\\n", makefile)
+        clean = makefile.split("\ndisplay-smoke-clean:\n", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("$(MAKE) BUILD_DIR=$(DISPLAY_SMOKE_BASE0_DIR) clean", clean)
+
     def test_display_smoke_offscreen_without_gui_is_a_usage_error(self):
         with self.assertRaises(SystemExit) as raised, contextlib.redirect_stderr(None):
             display_generator.parse_args(["run", "--build-dir", "x", "--offscreen"])

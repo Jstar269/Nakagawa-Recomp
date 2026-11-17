@@ -45,6 +45,7 @@ PUBLIC_TARGETS := \
 	showcase-linux \
 	display-smoke \
 	display-smoke-run \
+	display-smoke-cheats-base0 \
 	display-smoke-picture-gate \
 	display-smoke-gui \
 	display-smoke-fsr1 \
@@ -264,6 +265,7 @@ HELP_DESCRIPTION_showcase-smoke := run bundled demos headlessly with telemetry c
 HELP_DESCRIPTION_showcase-linux := build and smoke the showcase demos on this POSIX host (Linux CI gate)
 HELP_DESCRIPTION_display-smoke := build the display smoke fixture
 HELP_DESCRIPTION_display-smoke-run := run display smoke and compare its GE/present flight bundle
+HELP_DESCRIPTION_display-smoke-cheats-base0 := run the display smoke built at base 0 with a CWCheat file (part of display-smoke-run)
 HELP_DESCRIPTION_display-smoke-picture-gate := compare display smoke frames with an accepted reference (SKIP, PASS, FAIL)
 HELP_DESCRIPTION_display-smoke-gui := run the display smoke with its GUI
 HELP_DESCRIPTION_display-smoke-anime4k := compare the display smoke with the Anime4K movie upscaler off and on (needs a Vulkan device)
