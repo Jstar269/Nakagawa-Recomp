@@ -6,6 +6,7 @@
 #include "nk_steam_shortcuts.h"
 
 #include "nk_platform.h"
+#include "nk_zip.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -50,23 +51,16 @@ const char *nk_steam_status_name(NkSteamStatus status) {
 
 void nk_steam_free(void *buffer) { free(buffer); }
 
-/* ---- CRC-32 (IEEE 802.3), for the app ID Steam derives from a shortcut ---- */
-
-static uint32_t crc32_update(uint32_t crc, const char *data, size_t length) {
-    for (size_t i = 0; i < length; i++) {
-        crc ^= (uint8_t)data[i];
-        for (int bit = 0; bit < 8; bit++) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
-    }
-    return crc;
-}
+/* ---- The app ID Steam derives from a shortcut: the CRC-32 (IEEE 802.3, the ZIP checksum)
+ * of "\"<exe>\"<name>" with the top bit set ---- */
 
 uint32_t nk_steam_shortcut_app_id(const char *exe, const char *app_name) {
-    uint32_t crc = 0xFFFFFFFFu;
-    crc = crc32_update(crc, "\"", 1u);
-    crc = crc32_update(crc, exe, strlen(exe));
-    crc = crc32_update(crc, "\"", 1u);
-    crc = crc32_update(crc, app_name, strlen(app_name));
-    return (crc ^ 0xFFFFFFFFu) | 0x80000000u;
+    uint32_t crc = 0u;
+    crc = nk_zip_crc32(crc, "\"", 1u);
+    crc = nk_zip_crc32(crc, exe, strlen(exe));
+    crc = nk_zip_crc32(crc, "\"", 1u);
+    crc = nk_zip_crc32(crc, app_name, strlen(app_name));
+    return crc | 0x80000000u;
 }
 
 /* ---- Reading: a bounds-checked walk ---- */
@@ -631,7 +625,13 @@ static NkSteamStatus add_to_file(const char *vdf_path, const NkSteamShortcut *sh
             if (!nk_platform_path_missing(backup)) continue;
             backup_ready = true;
         }
-        if (!backup_ready || !write_file_synced(backup, current, current_size) ||
+        if (!backup_ready) {
+            /* Every name is taken by an earlier backup: `backup` names one of them, so it
+             * stays. */
+            backup[0] = '\0';
+            goto done;
+        }
+        if (!write_file_synced(backup, current, current_size) ||
             !file_equals(backup, current, current_size)) {
             (void)nk_remove_utf8(backup);
             backup[0] = '\0';
@@ -1412,8 +1412,18 @@ NkSteamStatus nk_steam_write_grid_art(const char *grid_dir, uint32_t app_id,
             goto rollback;
         }
         if (overwrite == NK_STEAM_GRID_OVERWRITE && plans[i].existed) {
-            if (nk_platform_dir_exists(plans[i].orig) ||
-                !grid_copy_file_verified(plans[i].dst, plans[i].orig,
+            /* A rollback copy left by an earlier run (a rollback that could not put it back,
+               or a crash before cleanup) may be the only copy of the user's own picture:
+               never truncate it to back up the current file. */
+            if (!nk_platform_path_missing(plans[i].orig)) {
+                grid_set_text(result->failed_path, sizeof(result->failed_path), plans[i].orig);
+                grid_set_text(result->detail, sizeof(result->detail),
+                              "An earlier rollback copy of Steam artwork is still here; it may "
+                              "be your original picture, so it was left as it is");
+                fail_status = NK_STEAM_ERR_BACKUP;
+                goto rollback;
+            }
+            if (!grid_copy_file_verified(plans[i].dst, plans[i].orig,
                                          NK_STEAM_GRID_EXISTING_BACKUP_MAX_BYTES) ||
                 !grid_files_equal(plans[i].dst, plans[i].orig,
                                   NK_STEAM_GRID_EXISTING_BACKUP_MAX_BYTES)) {

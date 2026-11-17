@@ -486,6 +486,8 @@ static void test_a_failed_backup_writes_nothing(void) {
     CHECK(file_is(vdf, in.data, in.size), "the original is untouched");
     snprintf(name, sizeof(name), "%s.nakagawa-backup-20261106-120000", vdf);
     CHECK(file_is(name, in.data, 1u), "an earlier backup is not overwritten");
+    snprintf(name, sizeof(name), "%s.nakagawa-backup-20261106-120000-100", vdf);
+    CHECK(file_is(name, in.data, 1u), "the last backup name tried is not deleted");
 }
 
 static void test_bad_stamp(void) {
@@ -1060,6 +1062,17 @@ static void test_grid_steam_running_and_overwrite_guards(void) {
               res.kept_mask == 0u && file_is(p_hero, pic1, pic1_len) &&
               nk_platform_path_missing(p_orig),
           "OVERWRITE replaced hero and cleaned rollback copy");
+
+    /* A rollback copy an earlier run could not put back (or a crash left) may be the user's
+       only copy of their own picture: OVERWRITE refuses instead of truncating it. */
+    CHECK(write_bytes(p_orig, custom_png, custom_len), "seed a leftover rollback copy");
+    CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                         NK_STEAM_GRID_OVERWRITE, &res),
+                 NK_STEAM_ERR_BACKUP, "OVERWRITE refuses over a leftover rollback copy");
+    CHECK(path_matches(res.failed_path, p_orig) && res.written_mask == 0u &&
+              file_is(p_orig, custom_png, custom_len) && file_is(p_hero, pic1, pic1_len) &&
+              file_is(p_icon, icon0, icon0_len) && file_is(p_wide, icon0, icon0_len),
+          "leftover rollback copy is kept byte for byte and named, and no slot changed");
 }
 
 static void test_grid_invalid_pngs_and_rollback(void) {

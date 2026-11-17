@@ -219,9 +219,18 @@ void nk_shared_boot_event_vwrite(FILE *stderr_stream, uint64_t timestamp_ns,
     boot_event_write_line(stderr_stream, format, timestamp_ns, args);
     fflush(stderr_stream);
 
+#if defined(_WIN32) || defined(_WIN64)
+    /* The player hands this per-user cache path over in a Unicode environment; the narrow
+       getenv/fopen pair would re-read it in the ANSI code page and lose any character outside
+       it, so the variable is read and opened wide. */
+    const wchar_t *path = _wgetenv(L"SR_BOOT_EVENT_FILE");
+    if (!path || !*path) return;
+    FILE *file = _wfopen(path, L"ab");
+#else
     const char *path = getenv("SR_BOOT_EVENT_FILE");
     if (!path || !*path) return;
     FILE *file = fopen(path, "ab");
+#endif
     if (!file) return;
     boot_event_write_line(file, format, timestamp_ns, args);
     fclose(file);
