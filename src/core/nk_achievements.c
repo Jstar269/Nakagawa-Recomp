@@ -53,6 +53,7 @@ struct NkAch {
     bool pending_replay_inflight;
     uint64_t pending_replay_now_ms;
     uint64_t pending_replay_after_ms;
+    bool pending_replay_blocked; /* the server refused the account: wait for the next sign-in */
     bool confirmed_unlock_unseen;
     uint32_t confirmed_unlock_id;
     char confirmed_unlock_hash[33];
@@ -405,6 +406,8 @@ static void RC_CCONV ach_login_done(int result, const char *error_message,
     if (!ach) return;
     if (result == RC_OK) {
         const rc_client_user_t *user = rc_client_get_user_info(client);
+        ach->pending_replay_blocked = false;
+        ach->pending_replay_after_ms = 0u;
         ach_push(ach, NK_ACH_EVENT_LOGIN_OK, 0u, user ? user->score_softcore : 0u, 0u,
                  user ? user->display_name : NULL, NULL);
     } else {
@@ -454,6 +457,21 @@ bool nk_ach_copy_user_name(const NkAch *ach, char *out, size_t out_size) {
 
 void nk_ach_logout(NkAch *ach) {
     if (ach) rc_client_logout(ach->client);
+}
+
+size_t nk_ach_sign_out(NkAch *ach) {
+    if (!ach) return 0u;
+    rc_client_logout(ach->client);
+    /* The records carry no account, so the next account to sign in could not be told from
+     * the one that earned them: they end here rather than be awarded to someone else. */
+    const size_t discarded = ach->pending_unlock_count;
+    memset(ach->pending_unlocks, 0, sizeof ach->pending_unlocks);
+    ach->pending_unlock_count = 0u;
+    ach->pending_replay_after_ms = 0u;
+    ach->pending_replay_blocked = false;
+    ach->confirmed_unlock_unseen = false;
+    if (discarded) ach_push(ach, NK_ACH_EVENT_QUEUE_CHANGED, 0u, 0u, 0u, NULL, NULL);
+    return discarded;
 }
 
 static void RC_CCONV ach_load_done(int result, const char *error_message,
@@ -547,38 +565,85 @@ bool nk_ach_restore_pending_unlock(NkAch *ach, const NkAchPendingUnlock *unlock)
     return true;
 }
 
+/* What the answer to a saved unlock's award request means for its record. */
+typedef enum AchReplayOutcome {
+    ACH_REPLAY_AWARDED, /* the server has the unlock: the record leaves the queue */
+    ACH_REPLAY_RETRY,   /* no definite answer (no connection, a busy server): the record waits */
+    ACH_REPLAY_SIGN_IN, /* the server refused the account: every record waits for a sign-in */
+    ACH_REPLAY_REFUSED  /* the server refused this unlock: the record leaves the queue, reported */
+} AchReplayOutcome;
+
+/* rc_client gives up an award the server answered with an error of its own and retries the rest
+ * (rc_client_award_achievement_callback). A saved record follows the same rule, with two
+ * differences that keep records: every 5xx, 408 and 429 waits, and a refused account (401, 403
+ * or rcheevos' credential results) stops the replay until the next sign-in instead of dropping
+ * each record in turn. */
+static AchReplayOutcome ach_replay_outcome(const NkAchResponse *response, uint32_t id,
+                                           char *message, size_t message_size) {
+    if (message && message_size) message[0] = '\0';
+    if (!response || !response->body || response->http_status < 200) return ACH_REPLAY_RETRY;
+    const int status = response->http_status;
+    if (status >= 500 || status == 408 || status == 429) return ACH_REPLAY_RETRY;
+
+    rc_api_server_response_t server;
+    memset(&server, 0, sizeof server);
+    server.body = response->body;
+    server.body_length = response->body_length;
+    server.http_status_code = status;
+    rc_api_award_achievement_response_t parsed;
+    const int result = rc_api_process_award_achievement_server_response(&parsed, &server);
+    AchReplayOutcome outcome = ACH_REPLAY_RETRY;
+    if (status < 300 && result == RC_OK && parsed.response.succeeded &&
+        (parsed.awarded_achievement_id == id || parsed.response.error_message != NULL)) {
+        outcome = ACH_REPLAY_AWARDED;
+    } else if (status == 401 || status == 403 || result == RC_INVALID_CREDENTIALS ||
+               result == RC_EXPIRED_TOKEN || result == RC_ACCESS_DENIED) {
+        outcome = ACH_REPLAY_SIGN_IN;
+    } else if (result == RC_OK && !parsed.response.succeeded &&
+               parsed.response.error_message != NULL) {
+        outcome = ACH_REPLAY_REFUSED;
+    }
+    if (outcome != ACH_REPLAY_AWARDED && message && message_size &&
+        parsed.response.error_message)
+        snprintf(message, message_size, "%s", parsed.response.error_message);
+    rc_api_destroy_award_achievement_response(&parsed);
+    return outcome;
+}
+
 static void RC_CCONV ach_pending_replay_done(const NkAchResponse *response, void *done_ctx) {
     AchPendingReplay *replay = (AchPendingReplay *)done_ctx;
     NkAch *ach = replay->ach;
-    bool succeeded = false;
-    if (response && response->http_status >= 200 && response->http_status < 300 &&
-        response->body) {
-        rc_api_server_response_t server;
-        memset(&server, 0, sizeof server);
-        server.body = response->body;
-        server.body_length = response->body_length;
-        server.http_status_code = response->http_status;
-        rc_api_award_achievement_response_t parsed;
-        int result = rc_api_process_award_achievement_server_response(&parsed, &server);
-        succeeded = result == RC_OK && parsed.response.succeeded &&
-            (parsed.awarded_achievement_id == replay->achievement_id ||
-             parsed.response.error_message != NULL);
-        rc_api_destroy_award_achievement_response(&parsed);
-    }
+    char message[sizeof(((NkAchEvent *)0)->message)];
+    const AchReplayOutcome outcome =
+        ach_replay_outcome(response, replay->achievement_id, message, sizeof message);
 
     bool restored = false;
-    if (succeeded) {
+    switch (outcome) {
+    case ACH_REPLAY_AWARDED:
+    case ACH_REPLAY_REFUSED: {
         const bool removed = ach_pending_remove(ach, replay->game_hash,
                                                  replay->achievement_id, &restored);
         ach->pending_replay_after_ms = 0u;
+        if (outcome == ACH_REPLAY_REFUSED)
+            ach_push(ach, NK_ACH_EVENT_UNLOCK_REFUSED, replay->achievement_id, 0u, 0u, NULL,
+                     message);
         if (removed) ach_push(ach, NK_ACH_EVENT_QUEUE_CHANGED, replay->achievement_id,
                               0u, 0u, NULL, NULL);
         if (removed && restored && ach->pending_unlock_count == 0u)
             ach_push(ach, NK_ACH_EVENT_RECONNECTED, 0u, 0u, 0u, NULL, NULL);
-    } else if (ach->pending_replay_now_ms <= UINT64_MAX - 30000u) {
-        ach->pending_replay_after_ms = ach->pending_replay_now_ms + 30000u;
-    } else {
-        ach->pending_replay_after_ms = UINT64_MAX;
+        break;
+    }
+    case ACH_REPLAY_SIGN_IN:
+        ach->pending_replay_blocked = true;
+        ach_push(ach, NK_ACH_EVENT_SERVER_ERROR, replay->achievement_id, 0u, 0u, NULL,
+                 message[0] ? message
+                            : "The account was refused; saved unlocks wait for a sign-in.");
+        break;
+    case ACH_REPLAY_RETRY:
+    default:
+        ach->pending_replay_after_ms = ach->pending_replay_now_ms <= UINT64_MAX - 30000u
+                                           ? ach->pending_replay_now_ms + 30000u : UINT64_MAX;
+        break;
     }
     ach->pending_replay_inflight = false;
     rc_api_destroy_request(&replay->request);
@@ -587,7 +652,7 @@ static void RC_CCONV ach_pending_replay_done(const NkAchResponse *response, void
 
 void nk_ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms) {
     if (!ach || !ach->transport || ach->pending_replay_inflight ||
-        now_ms < ach->pending_replay_after_ms) return;
+        ach->pending_replay_blocked || now_ms < ach->pending_replay_after_ms) return;
     const rc_client_user_t *user = rc_client_get_user_info(ach->client);
     if (!user || !user->username || !user->token) return;
 

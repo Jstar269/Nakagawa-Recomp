@@ -1641,6 +1641,14 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         source = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
         self.assertIn("package_builder_native_transport_request", source)
         self.assertIn("NK_ACH_HOST", source)
+        # main.c is a native-transport caller for this one request only: every use of the
+        # transport there is the call whose allowed-host argument is NK_ACH_HOST.
+        uses = re.findall(r"package_builder_native_transport\w*", source)
+        calls = re.findall(
+            r"package_builder_native_transport_request\(\s*&options,\s*job->url,\s*NK_ACH_HOST,",
+            source)
+        self.assertEqual(uses, ["package_builder_native_transport_request"])
+        self.assertEqual(len(calls), 1)
         self.assertIn("NK_PLAYER_VERSION", source)
         self.assertIn('"NakagawaRecomp/%.*s"', source)
         self.assertIn("components != 3u", source)
@@ -1685,6 +1693,17 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
                          "entries[i].unlocked_at_utc"):
             self.assertIn(required, queue_code)
         self.assertRegex(queue_code, r"\{'N', 'K', 'R', 'A', 'Q', '0', '0', '1'\}")
+        # A record names no account, so the user's Sign out discards what is still waiting
+        # (nk_ach_sign_out) and rewrites the file; only the switch turned off keeps the records.
+        sign_out = main[main.index("static void player_achievements_end_account"):
+                        main.index("static void player_achievements_collect_events")]
+        self.assertIn("nk_ach_sign_out(run->achievements)", sign_out)
+        self.assertIn("player_achievements_save_queue_or_report(run)", sign_out)
+        action_start = main.index("static void player_achievements_sign_out(PlayerRun *run) {")
+        action = main[action_start:
+                      main.index("static void player_achievements_settings_action", action_start)]
+        self.assertIn("player_achievements_end_account(run, removed)", action)
+        self.assertNotIn("nk_ach_logout", action)
 
     def test_runtime_host_toast_has_no_retroachievements_identity(self) -> None:
         runtime = REPO_ROOT / "src" / "rt"

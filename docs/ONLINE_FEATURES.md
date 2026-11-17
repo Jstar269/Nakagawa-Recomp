@@ -119,7 +119,11 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   package, guest memory, telemetry or capture is sent.
 - **Offline unlocks** are stored as owner-only, token-free records in the player's data folder. After the
   next sign-in, the player submits each pending unlock through rcheevos' award request builder and the
-  same transport. The game's title page shows its core achievements and unlock toasts appear in-game.
+  same transport. The queue holds at most 4,096 records and names no account: **Sign out** discards what
+  is still waiting, so it is never sent for the next account. With no definite answer (no connection, a
+  busy server) a record waits 30 seconds; a record the server refuses by its own error leaves the queue
+  and is reported; a refused account keeps every record until the next sign-in. The game's title page
+  shows its core achievements and unlock toasts appear in-game.
 - **Hardcore is unavailable.** The client starts softcore sessions only; the UI and requests do not claim
   hardcore eligibility.
 - **Tests** use rcheevos' server callback with canned responses and never touch the internet. The

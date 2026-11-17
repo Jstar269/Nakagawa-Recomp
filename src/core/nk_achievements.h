@@ -80,7 +80,9 @@ typedef enum NkAchEventKind {
     NK_ACH_EVENT_DISABLED,         /* id: an achievement rc_client turned off because guest memory
                                     * it reads could not be read; message: rc_client's note */
     NK_ACH_EVENT_QUEUE_FULL,       /* a real unlock could not fit the bounded offline queue */
-    NK_ACH_EVENT_QUEUE_CHANGED     /* the persisted pending queue gained or lost a record */
+    NK_ACH_EVENT_QUEUE_CHANGED,    /* the persisted pending queue gained or lost a record */
+    NK_ACH_EVENT_UNLOCK_REFUSED    /* id: a saved unlock the server answered with an error of its
+                                    * own; it left the queue. message: the server's error */
 } NkAchEventKind;
 
 typedef struct NkAchEvent {
@@ -147,7 +149,13 @@ bool nk_ach_begin_login(NkAch *ach, const char *username, const char *token);
 bool nk_ach_begin_login_with_password(NkAch *ach, const char *username, const char *password);
 bool nk_ach_copy_user_token(const NkAch *ach, char *out, size_t out_size);
 bool nk_ach_copy_user_name(const NkAch *ach, char *out, size_t out_size);
+/* Ends the session and keeps the pending unlocks: the stored credential, and so the account,
+ * stays (the Achievements switch turned off). */
 void nk_ach_logout(NkAch *ach);
+/* The user's Sign out: ends the session and discards every pending unlock, returning how many.
+ * A pending record names no account, so one kept past a sign-out would be awarded to whoever
+ * signs in next. */
+size_t nk_ach_sign_out(NkAch *ach);
 /* Loads the achievement set for the disc whose RA hash (32 lowercase hex digits, the MD5 RA's
  * PSP rule takes of PARAM.SFO then EBOOT.BIN) is hash. False only for a malformed hash;
  * otherwise the outcome is a GAME_LOADED or GAME_FAILED event. */
@@ -171,7 +179,11 @@ size_t nk_ach_take_events(NkAch *ach, NkAchEvent *out, size_t max);
 uint32_t nk_ach_events_dropped(const NkAch *ach);
 
 /* The player persists these token-free records in an owner-only file. Restored records are
- * replayed with rcheevos' request builder through the same opt-in transport after sign-in. */
+ * replayed with rcheevos' request builder through the same opt-in transport after sign-in,
+ * one at a time. An unlock the server has leaves the queue; with no definite answer (no
+ * connection, 5xx, 408, 429) it waits 30 seconds; an unlock the server refuses by its own error
+ * leaves the queue as an UNLOCK_REFUSED event, so it cannot hold the others back; a refused
+ * account (401, 403) keeps every record and stops the replay until the next sign-in. */
 size_t nk_ach_pending_unlock_count(const NkAch *ach);
 size_t nk_ach_copy_pending_unlocks(const NkAch *ach, NkAchPendingUnlock *out, size_t max);
 bool nk_ach_restore_pending_unlock(NkAch *ach, const NkAchPendingUnlock *unlock);

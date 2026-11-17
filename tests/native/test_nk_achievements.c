@@ -147,6 +147,8 @@ typedef struct Fake {
     int requests;
     char log[16][512];       /* the post data of each request, in order */
     int award_status;        /* the HTTP status awardachievement answers */
+    const char *award_body;  /* its body when not NULL, else k_award */
+    const char *refuse_award; /* an award whose post data holds this is answered k_refused, 200 */
 } Fake;
 
 static const char k_login[] =
@@ -169,6 +171,9 @@ static const char k_session[] =
 static const char k_award[] =
     "{\"Success\":true,\"Score\":0,\"SoftcoreScore\":17,\"AchievementID\":5501,"
     "\"AchievementsRemaining\":0}";
+static const char k_refused[] = "{\"Success\":false,\"Error\":\"Unknown achievement\"}";
+static const char k_bad_account[] =
+    "{\"Success\":false,\"Error\":\"Invalid user/token combination.\"}";
 static const char k_ok[] = "{\"Success\":true}";
 
 static int starts_with(const char *s, const char *prefix) {
@@ -185,12 +190,23 @@ static void fake_transport(void *ctx, const NkAchRequest *req, NkAchDone done, v
     else if (starts_with(post, "r=achievementsets&")) r.body = k_sets;
     else if (starts_with(post, "r=startsession&")) r.body = k_session;
     else if (starts_with(post, "r=awardachievement&")) {
-        r.body = k_award;
+        r.body = f->award_body ? f->award_body : k_award;
         r.http_status = f->award_status;
         if (f->award_status < 0) r.body = "";
+        if (f->refuse_award && strstr(post, f->refuse_award)) {
+            r.body = k_refused;
+            r.http_status = 200;
+        }
     }
     r.body_length = strlen(r.body);
     done(&r, done_ctx);
+}
+
+static int count_requests(const Fake *f, const char *prefix) {
+    int count = 0;
+    for (int i = 0; i < f->requests && i < 16; i++)
+        if (starts_with(f->log[i], prefix)) count++;
+    return count;
 }
 
 static int find_request(const Fake *f, const char *prefix) {
@@ -489,6 +505,154 @@ static void test_award_offline_is_pending(uint8_t *ram) {
     }
 }
 
+static NkAchPendingUnlock saved_unlock(uint32_t id) {
+    NkAchPendingUnlock unlock;
+    memset(&unlock, 0, sizeof unlock);
+    snprintf(unlock.game_hash, sizeof unlock.game_hash, "%s", HASH);
+    unlock.achievement_id = id;
+    unlock.unlocked_at_utc = 1700000000u;
+    return unlock;
+}
+
+/* Sign out, then another account signs in: a saved record names no account, so it must not be
+ * awarded to the new one. */
+static void test_sign_out_discards_saved_unlocks(uint8_t *ram) {
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = 200;
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    const NkAchPendingUnlock saved = saved_unlock(5501u);
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    CHECK(nk_ach_restore_pending_unlock(ach, &saved), "restore the first account's record");
+    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN"), "the first account signs in");
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(nk_ach_sign_out(ach) == 1u, "sign-out reports the one record it discarded");
+    CHECK(!nk_ach_logged_in(ach), "signed out");
+    CHECK(nk_ach_pending_unlock_count(ach) == 0u, "sign-out leaves no saved unlock");
+    size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_QUEUE_CHANGED) >= 0,
+          "the player is told to rewrite the queue file");
+    CHECK(nk_ach_begin_login(ach, "Other", "TOKEN2"), "another account signs in");
+    nk_ach_replay_pending_unlocks(ach, 1000u);
+    nk_ach_replay_pending_unlocks(ach, 40000u);
+    CHECK(count_requests(&fake, "r=awardachievement&") == 0,
+          "the first account's unlock is not awarded to the next account (%d award requests)",
+          count_requests(&fake, "r=awardachievement&"));
+    CHECK(nk_ach_sign_out(ach) == 0u, "nothing left to discard");
+    CHECK(nk_ach_sign_out(NULL) == 0u, "no bridge, nothing discarded");
+    nk_ach_destroy(ach);
+
+    /* The switch turned off (nk_ach_logout) keeps the records: the stored credential stays. */
+    NkAch *kept = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(kept != NULL, "create");
+    if (!kept) return;
+    CHECK(nk_ach_restore_pending_unlock(kept, &saved), "restore");
+    nk_ach_logout(kept);
+    CHECK(nk_ach_pending_unlock_count(kept) == 1u, "logout keeps the saved unlock");
+    nk_ach_destroy(kept);
+}
+
+/* An unlock the server refuses by its own error leaves the queue and is reported; the records
+ * behind it are still sent. */
+static void test_refused_saved_unlock_does_not_hold_the_queue(uint8_t *ram) {
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = 200;
+    fake.refuse_award = "a=7001&";
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    const NkAchPendingUnlock refused = saved_unlock(7001u);
+    const NkAchPendingUnlock good = saved_unlock(5501u);
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    CHECK(nk_ach_restore_pending_unlock(ach, &refused) &&
+              nk_ach_restore_pending_unlock(ach, &good), "restore two records");
+    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN"), "login starts");
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+
+    nk_ach_replay_pending_unlocks(ach, 1000u);
+    CHECK(count_requests(&fake, "r=awardachievement&") == 1, "the first record is sent");
+    CHECK(nk_ach_pending_unlock_count(ach) == 1u,
+          "the refused record left the queue (%u left)",
+          (unsigned)nk_ach_pending_unlock_count(ach));
+    size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    const int told = has_event(ev, n, NK_ACH_EVENT_UNLOCK_REFUSED);
+    CHECK(told >= 0, "the refusal is reported");
+    if (told >= 0)
+        CHECK(ev[told].id == 7001u && strcmp(ev[told].message, "Unknown achievement") == 0,
+              "UNLOCK_REFUSED names 7001 and the server's error (got %u: %s)", ev[told].id,
+              ev[told].message);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_QUEUE_CHANGED) >= 0, "the queue file is rewritten");
+
+    nk_ach_replay_pending_unlocks(ach, 1001u);
+    const int award = count_requests(&fake, "r=awardachievement&");
+    CHECK(award == 2 && strstr(fake.log[fake.requests - 1], "a=5501&") != NULL,
+          "the record behind it is sent next, with no 30 s wait (%d award requests)", award);
+    CHECK(nk_ach_pending_unlock_count(ach) == 0u, "the queue is empty");
+    n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_RECONNECTED) >= 0, "the player is told the queue is sent");
+    nk_ach_replay_pending_unlocks(ach, 40000u);
+    nk_ach_replay_pending_unlocks(ach, 80000u);
+    CHECK(count_requests(&fake, "r=awardachievement&") == 2,
+          "the refused unlock is never sent again (%d award requests)",
+          count_requests(&fake, "r=awardachievement&"));
+    nk_ach_destroy(ach);
+}
+
+/* No definite answer: the record waits 30 seconds. A refused account: every record waits for
+ * the next sign-in, and nothing is sent until then. */
+static void test_saved_unlock_waits_for_the_server_and_the_account(uint8_t *ram) {
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = 503;
+    fake.award_body = "";
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    const NkAchPendingUnlock saved = saved_unlock(5501u);
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    CHECK(nk_ach_restore_pending_unlock(ach, &saved), "restore");
+    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN"), "login starts");
+    nk_ach_replay_pending_unlocks(ach, 1000u);
+    nk_ach_replay_pending_unlocks(ach, 30999u);
+    CHECK(count_requests(&fake, "r=awardachievement&") == 1 &&
+              nk_ach_pending_unlock_count(ach) == 1u,
+          "a 503 keeps the record and is not retried inside 30 s");
+    nk_ach_replay_pending_unlocks(ach, 31000u);
+    CHECK(count_requests(&fake, "r=awardachievement&") == 2, "it is retried after 30 s");
+
+    fake.award_status = 401;
+    fake.award_body = k_bad_account;
+    nk_ach_replay_pending_unlocks(ach, 70000u);
+    CHECK(count_requests(&fake, "r=awardachievement&") == 3 &&
+              nk_ach_pending_unlock_count(ach) == 1u,
+          "a refused account keeps the record");
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    nk_ach_replay_pending_unlocks(ach, 110000u);
+    nk_ach_replay_pending_unlocks(ach, 150000u);
+    CHECK(count_requests(&fake, "r=awardachievement&") == 3,
+          "nothing more is sent until the next sign-in (%d award requests)",
+          count_requests(&fake, "r=awardachievement&"));
+    size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_UNLOCK_REFUSED) < 0, "the record was not dropped");
+
+    fake.award_status = 200;
+    fake.award_body = NULL;
+    nk_ach_logout(ach);
+    CHECK(nk_ach_pending_unlock_count(ach) == 1u, "ending the session keeps the record");
+    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN"), "the next sign-in");
+    nk_ach_replay_pending_unlocks(ach, 150001u);
+    CHECK(count_requests(&fake, "r=awardachievement&") == 4 &&
+              nk_ach_pending_unlock_count(ach) == 0u,
+          "the record is sent after the next sign-in");
+    nk_ach_destroy(ach);
+}
+
 int main(void) {
     uint8_t *ram = (uint8_t *)calloc(1u, USER_RAM_SIZE);
     if (!ram) {
@@ -502,6 +666,9 @@ int main(void) {
     test_no_transport_sends_nothing(ram);
     test_login_load_unlock(ram);
     test_award_offline_is_pending(ram);
+    test_sign_out_discards_saved_unlocks(ram);
+    test_refused_saved_unlock_does_not_hold_the_queue(ram);
+    test_saved_unlock_waits_for_the_server_and_the_account(ram);
     free(ram);
     if (g_failures) {
         fprintf(stderr, "test_nk_achievements: %d failure(s)\n", g_failures);

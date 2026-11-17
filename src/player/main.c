@@ -4717,6 +4717,30 @@ static void player_achievements_save_queue_or_report(PlayerRun *run) {
              "The offline unlock queue could not be saved to this PC.");
 }
 
+/* The user's Sign out, once the credential is gone: the session ends and the unlocks still
+   waiting are discarded and the queue file rewritten, because a record names no account and
+   the next account to sign in must not be awarded them. */
+static void player_achievements_end_account(PlayerRun *run, bool credential_removed) {
+    if (!run) return;
+    if (!credential_removed) {
+        /* The account is still the stored one: its records stay for its next session. */
+        if (run->achievements) nk_ach_logout(run->achievements);
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "Sign-out could not remove the token from Credential Manager.");
+        return;
+    }
+    const size_t discarded = run->achievements ? nk_ach_sign_out(run->achievements) : 0u;
+    if (discarded) {
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "Signed out. %u unsent unlock%s discarded.", (unsigned)discarded,
+                 discarded == 1u ? " was" : "s were");
+    } else {
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
+                 "Signed out.");
+    }
+    if (discarded) player_achievements_save_queue_or_report(run);
+}
+
 static void player_achievements_collect_events(PlayerRun *run) {
     if (!run || !run->achievements) return;
     PlayerApp *app = &run->app;
@@ -4731,12 +4755,10 @@ static void player_achievements_collect_events(PlayerRun *run) {
                 run->achievements_login_pending = false;
                 if (run->achievements_signout_pending) {
                     (void)nk_platform_credential_delete(k_ach_credential_target);
-                    nk_ach_logout(run->achievements);
+                    player_achievements_end_account(run, true);
                     run->achievements_signout_pending = false;
                     app->achievements_signed_in = false;
                     app->achievements_account[0] = '\0';
-                    snprintf(app->achievements_status, sizeof app->achievements_status,
-                             "Signed out.");
                     break;
                 }
                 if (!app->settings.achievements_enabled) {
@@ -4780,8 +4802,7 @@ static void player_achievements_collect_events(PlayerRun *run) {
                 if (run->achievements_signout_pending) {
                     (void)nk_platform_credential_delete(k_ach_credential_target);
                     run->achievements_signout_pending = false;
-                    snprintf(app->achievements_status, sizeof app->achievements_status,
-                             "Signed out.");
+                    player_achievements_end_account(run, true);
                 } else {
                     snprintf(app->achievements_status, sizeof app->achievements_status,
                              "Sign-in failed. Check the account or connection.");
@@ -4823,6 +4844,11 @@ static void player_achievements_collect_events(PlayerRun *run) {
                          "Connected. Pending unlocks synced.");
                 break;
             case NK_ACH_EVENT_QUEUE_CHANGED:
+                player_achievements_save_queue_or_report(run);
+                break;
+            case NK_ACH_EVENT_UNLOCK_REFUSED:
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "RetroAchievements refused a saved unlock; it left the offline queue.");
                 player_achievements_save_queue_or_report(run);
                 break;
             case NK_ACH_EVENT_QUEUE_FULL:
@@ -5126,18 +5152,19 @@ static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork 
 static void player_achievements_sign_out(PlayerRun *run) {
     if (!run) return;
     bool removed = nk_platform_credential_delete(k_ach_credential_target);
-    if (run->achievements_login_pending) {
-        run->achievements_signout_pending = true;
-    } else if (run->achievements) {
-        nk_ach_logout(run->achievements);
-    }
     player_achievements_stop_channel(run);
     player_achievements_clear_list(run);
     run->app.achievements_signed_in = false;
     run->app.achievements_account[0] = '\0';
-    snprintf(run->app.achievements_status, sizeof run->app.achievements_status, "%s",
-             removed ? "Signed out."
-                     : "Sign-out could not remove the token from Credential Manager.");
+    if (run->achievements_login_pending) {
+        /* The sign-in still on its way ends, and its records go, when it answers. */
+        run->achievements_signout_pending = true;
+        snprintf(run->app.achievements_status, sizeof run->app.achievements_status, "%s",
+                 removed ? "Signed out."
+                         : "Sign-out could not remove the token from Credential Manager.");
+    } else {
+        player_achievements_end_account(run, removed);
+    }
 }
 
 static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettingsOp op) {

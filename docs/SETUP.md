@@ -1315,7 +1315,9 @@ password is not saved. The token is kept in Windows Credential Manager. Other pl
 credential store refuse sign-in. Nakagawa identifies a game by hashing the raw `PSP_GAME/PARAM.SFO` and
 `PSP_GAME/SYSDIR/EBOOT.BIN` bytes from your readable disc image, in that order; it does not decrypt them for
 this check. Game files, saves and guest memory stay on this PC. Offline unlocks wait in an owner-only file
-under the player data folder until they can be submitted. The feature is softcore only; hardcore unlocks
+under the player data folder until they can be submitted. The file names no account, so **Sign out** discards
+the unlocks still waiting instead of sending them for the next account that signs in; an unlock the server
+refuses leaves the file and is reported on the **RA account** line. The feature is softcore only; hardcore unlocks
 are not available. Its requests identify themselves with the stable user agent `NakagawaRecomp/<version>`.
 To turn it on, open **Settings > Online and developer options**, switch on **Achievements**, read and accept the consent screen,
 then choose **Sign in**. The game's page lists the core achievements after the set loads.
