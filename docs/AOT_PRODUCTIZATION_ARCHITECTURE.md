@@ -29,7 +29,7 @@ Nakagawa Program + User's Game ISO → Play
 | --- | --- | :---: | :---: | :---: | :---: | --- |
 | **Option A** | **Bundled Lightweight C Compiler (TCC / MinGW-w64 Clang)** | YES | High (Pure C chunks) | Moderate (10–30s on first run) | Small (+15–30 MB) | **Viable Short-Term Native Route** |
 | **Option B** | **Embedded MIPS JIT Engine** | YES | Medium (JIT vs AOT optimization gap) | Instant (<1s) | Minimal (<5 MB) | **Secondary/Fallback Engine** |
-| **Option C** | **Build-Time AOT + End-User Asset Binding** | YES | **Maximum (target)** | **Instant (target)** | Moderate (+20–40 MB per title) | **Recommended target; NOT IMPLEMENTED** |
+| **Option C** | **Build-Time AOT + End-User Asset Binding** | YES | **Maximum (target)** | **Instant (target)** | Moderate (+20–40 MB per title) | **Recommended target for a title-independent core; NOT IMPLEMENTED** |
 | **Option D** | **Pre-Generated Static Stems + Interpreter Floor (#118)** | YES | High (fail-closed interpreter floor) | Instant (<1s) | Minimal (<10 MB) | **Transitional / Development Proving** |
 | **Option E** | **Embedded Cranelift / LLVM Backend** | YES | High | Fast (3–8s first run) | Moderate (+35 MB) | **Strategic Long-Term AOT Engine** |
 | **Option F** | **Cloud-Based Recompilation Service** | YES | Zero (Severe Privacy Risk) | Poor (Network transfer of multi-GB ISOs) | Minimal | **REJECTED (Hostile to Privacy)** |
@@ -48,17 +48,17 @@ Nakagawa Program + User's Game ISO → Play
 > each disc against Redump's PSP list. What this option still needs is a
 > precompiled release that runs without a compiler on the user's machine.
 
-In this model, Nakagawa maintainers/packagers compile the verified title executable (or generic recompiled core for supported manifests) into standalone release packages.
+In this model, a package ships the generic runtime plus, for a supported manifest, a title-independent recompiled core. The verified title executable itself is never compiled into a distributed package: C generated from a retail game is C generated from a retail game, and `AGENTS.md` Section 5 and its Hard limits forbid committing or publishing it or sharing anything built from a user's game. A per-title precompiled package would need an explicit maintainer policy change before it could be considered.
 
 * **How It Works:**
-  1. The distributed binary contains the recompiled code structure without proprietary game assets, textures, sounds, or movies.
+  1. The distributed binary contains the title-independent recompiled core, not code generated from a specific retail executable, and no proprietary game assets, textures, sounds, or movies.
   2. When the user loads their ISO in `nakagawa_player`, the player validates the disc hash and extracts the required private game assets (`USRDIR/xbdata`, audio files, saves) into the user's local app data directory.
   3. The runtime is launched with `PSP_ISO=<user_iso_path>` and pointers to the extracted assets.
 * **Why It Wins:**
   * Zero compilation latency for the user.
   * Zero compiler required on user machine.
   * Fixed, reproducible optimization settings (`-O2` runtime, `-O1` recomp chunks).
-  * Avoids distributing proprietary game bytes; user-supplied inputs remain required.
+  * Avoids distributing proprietary game bytes; user-supplied inputs remain required. The title-independent core carries no game bytes; a per-title precompiled package is not permitted (see the note above).
 
 ### Option A: Bundled Embedded Host Compiler (The "Compile-on-Import" Route)
 
