@@ -54,11 +54,16 @@ on:
     types: [checks_requested]
 
 concurrency:
-  # A new commit supersedes an in-flight run for the same PR/ref.  This is also
+  # A new commit supersedes an in-flight run for the same pull request.  This is also
   # intentionally shared by draft and ready events so stale work cannot consume
   # a runner after the PR advances: marking a Draft Ready cancels its light run,
   # and converting a pull request to a Draft cancels its full run.
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Every other run (a push to main, the nightly schedule, a manual run, a merge
+  # group) is a group of its own. Pushes, the schedule and manual runs all have the
+  # main branch's ref, so a group keyed on the ref let a landing cancel the nightly
+  # full-tier run, or a schedule cancel a push's main smoke, with nothing reporting
+  # the validation that never ran.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || format('run-{0}', github.run_id) }}
   cancel-in-progress: true
 
 permissions:
@@ -319,13 +324,17 @@ jobs:
         # fetches every other branch, and Betterleaks' default `git log --all` failed every
         # pull request on one unrelated branch's finding (79d9ef6e, on #1669's branch).
         # Without a pull-request base (pushes, merge groups, the schedule, manual runs) the
-        # scan covers all history reachable from HEAD.
+        # scan covers all history reachable from HEAD. `git log -p` prints no patch for a
+        # merge commit unless told to, so `--diff-merges=first-parent` makes every merge
+        # show what it brought to its first parent: a value typed while resolving a merge
+        # of main and removed in a later commit is still scanned (the merge-only canary in
+        # tools/betterleaks_canary.py).
         run: |
           set -euo pipefail
           if [ -n "$BASE_SHA" ]; then
-            "$BETTERLEAKS_BIN" git . --redact --verbose --log-opts="--full-history ${BASE_SHA}..HEAD"
+            "$BETTERLEAKS_BIN" git . --redact --verbose --log-opts="--full-history --diff-merges=first-parent ${BASE_SHA}..HEAD"
           else
-            "$BETTERLEAKS_BIN" git . --redact --verbose --log-opts="--full-history HEAD"
+            "$BETTERLEAKS_BIN" git . --redact --verbose --log-opts="--full-history --diff-merges=first-parent HEAD"
           fi
 
       - name: Run Betterleaks synthetic canaries
@@ -336,15 +345,17 @@ jobs:
       # (tools/ci_paths.py run_main_smoke), never pull requests. It waited for hygiene
       # to pass; as later steps of the same job it still runs only after every hygiene
       # step above succeeded.
+      # Both smoke steps are skipped when native_tools runs: its core part runs the same two
+      # commands on the same commit, so running them here too only repeated them.
       - name: Run compact import/publication smoke
         # Publication audit is part of the always-present hygiene checks above; this
         # smoke adds a fresh main-branch import gate without repeating it.
-        if: ${{ needs.classify.outputs.run_main_smoke == 'true' }}
+        if: ${{ needs.classify.outputs.run_main_smoke == 'true' && !(needs.classify.outputs.allow_substantive == 'true' && needs.classify.outputs.run_native == 'true') }}
         run: python tools/import_audit_gate.py
 
       - name: Run provenance record and disposition gap check
         # #355: ratchets disposition gaps for upstream-derived production paths.
-        if: ${{ needs.classify.outputs.run_main_smoke == 'true' }}
+        if: ${{ needs.classify.outputs.run_main_smoke == 'true' && !(needs.classify.outputs.allow_substantive == 'true' && needs.classify.outputs.run_native == 'true') }}
         run: python tools/provenance_record_gap.py --check
 
       # The former markdown job. It never depended on hygiene, so `!cancelled()` keeps
@@ -363,8 +374,11 @@ jobs:
   # Public-export candidate audit (#293/#294), in its own job so it overlaps the all-files
   # hygiene checks instead of running after them (#735 item 5). It is a separate required
   # result: ci_required fails unless it succeeds, and every gate that waited for hygiene
-  # also waits for it. The job runs on every event and gates no path, because publication
-  # integrity must never be path-dependent (tools/test_ci_paths.py).
+  # also waits for it. The job runs on every event, because publication integrity must
+  # never be path-dependent (tools/test_ci_paths.py). Its export step runs when the
+  # classifier routes security_publication: the publication files and the export tool
+  # and every gate it runs (tools/ci_paths.py PUBLIC_EXPORT_TOOLS), every full-matrix
+  # event, and every manual run.
   #
   # The job also builds the profile-zero fixture, the steps of the former
   # profile_zero_fixture job (docs/CI.md, "Jobs per run"). They run after the export
@@ -372,7 +386,8 @@ jobs:
   # that job's old condition, plus run_installer, which also starts the Windows job whose
   # smoke and routes parts download these fixtures (an installer-only change starts it with
   # run_python and run_windows both false). The steps never gate the
-  # export: the job-level condition and the export step name no path output.
+  # export: the job-level condition names no path output, and the export step names
+  # only security_publication.
   public_export:
     name: Public export audit and profile-zero fixture
     # The classifier picks the runner (docs/CI.md, "Self-hosted Linux runners"):
@@ -588,7 +603,9 @@ jobs:
     # long job, and each was a real failure that a light run would otherwise hide
     # until the landing batch (docs/CI.md, "Quick and full checks"): the tools mypy
     # baseline and the generated-file and documentation-lint tests run in the Python
-    # tooling job, and the format check in the native core part.
+    # tooling job, and the format check in the native core part. A change to a file
+    # tools/regen_all.py regenerates routes the Python job (tools/ci_paths.py), so a
+    # full run of a documentation-only change still checks it is current.
     name: Generated files and repository lints
     # Always hosted: a light run never needs the self-hosted pool. ubuntu-24.04, not
     # 26.04, because it is the hosted image of the Python tooling and native jobs whose
@@ -667,7 +684,7 @@ jobs:
     # ubuntu-24.04, or the nk-wsl pool for a trusted run while the pool is up.
     runs-on: ${{ fromJSON(needs.classify.outputs.linux_runner || '"ubuntu-24.04"') }}
     env:
-      NK_TEST_TIER: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'full' || 'pr' }}
+      NK_TEST_TIER: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group') && 'full' || 'pr' }}
     # id-token: write lets the coverage upload authenticate to Codecov with the
     # job's OIDC identity (use_oidc: true) instead of a stored repository token.
     # It is not a publication permission: contents stays read.
@@ -740,6 +757,9 @@ jobs:
           # building it would fetch an unhashed setuptools (Scorecard PinnedDependencies).
 
       - name: Enforce tools mypy baseline
+        # The baseline reads the whole tools/ tree, not a shard's modules, so one shard
+        # runs it. Shard 0 is in every shard list (tools/ci_paths.py python_shards).
+        if: matrix.shard == 0
         shell: bash
         run: |
           cat > "$RUNNER_TEMP/mypy-requirements.txt" <<'LOCK'

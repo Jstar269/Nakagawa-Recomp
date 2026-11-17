@@ -84,6 +84,53 @@ class CiPathClassificationTests(unittest.TestCase):
         self.assertEqual(result["security_publication"], "true")
         self.assertEqual(result["run_python"], "true")
 
+    def test_a_generated_document_alone_routes_the_python_freshness_tests(self) -> None:
+        """A full run of a docs-only change has no quick checks: the Python job must check freshness.
+
+        ``quick_checks`` (``regen_all.py --check``) runs only on a light run, so on the full
+        tier a hand edit to a generated document is caught only by the Python tooling job.
+        """
+        for path in (
+            "docs/HLE_COVERAGE.md",
+            "docs/RECOMP_HELPER_INVENTORY.md",
+            "docs/PSP_INTR_WAITS_CENSUS.md",
+            "docs/HLE_AND_WORKAROUND_INVENTORY.md",
+        ):
+            with self.subTest(path=path):
+                result = classify([path], tier=ci_paths_module.TIER_FULL)
+                self.assertEqual(result["docs_only"], "true")
+                self.assertEqual(result["tier"], "full")
+                self.assertEqual(result["allow_substantive"], "true")
+                self.assertEqual(result["run_python"], "true")
+                self.assertEqual(result["python_scope"], "all")
+        # A hand-written document still routes no Python job.
+        self.assertEqual(classify(["docs/CI.md"], tier=ci_paths_module.TIER_FULL)["run_python"], "false")
+        # The routed set is regen_all's own: every output its --check regenerates.
+        import regen_all
+
+        checked = {output for step in regen_all.STEPS if not step.skip for output in step.outputs}
+        self.assertEqual(ci_paths_module._regenerated_outputs(), frozenset(checked))
+
+    def test_public_export_tools_route_the_hosted_export_exercise(self) -> None:
+        """A change to the export tool or a gate it runs meets the fail-closed export check.
+
+        ci.yml's "Exercise public-export generation and candidate audit" step runs only
+        when ``security_publication`` is true (or on a manual run).
+        """
+        for path in (
+            "tools/build_public_export.py",
+            "tools/test_public_export.py",
+            "tools/public_export.py",
+            "tools/public_candidate.py",
+            "tools/publication_policy.py",
+            "tools/history_audit.py",
+            "tools/verify_sbom.py",
+        ):
+            with self.subTest(path=path):
+                result = classify([path])
+                self.assertEqual(result["security_publication"], "true")
+                self.assertEqual(result["run_python"], "true")
+
     def test_provenance_and_independence_campaign_route_security_publication(self) -> None:
         for path in (
             "docs/INDEPENDENCE_CAMPAIGN.md",

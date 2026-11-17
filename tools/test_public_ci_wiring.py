@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests" / "fixtures" / "showcase"))
 
+import betterleaks_canary  # noqa: E402
 import ci_required  # noqa: E402
 import ci_paths  # noqa: E402
 import ci_test_shards  # noqa: E402
@@ -168,6 +169,14 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertIn("--require-hashes", text)
         self.assertIn("python tools/mypy_baseline.py --scope issue-1391", text)
         self.assertIn("python tools/mypy_baseline.py", text)
+        # One shard runs it: the baseline checks the whole tools/ tree whatever the shard,
+        # and shard 0 is in every shard list the classifier exports.
+        conditions = [line.strip() for line in step if line.strip().startswith("if:")]
+        self.assertEqual(conditions, ["if: matrix.shard == 0"])
+        for paths in (["tools/ci_paths.py"], ["Makefile"], ["docs/HLE_COVERAGE.md"]):
+            with self.subTest(paths=paths):
+                shards = json.loads(ci_paths.classify(paths)["python_shards"])
+                self.assertEqual(shards[0], 0)
         config = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
         self.assertRegex(config, r"(?ms)- id: mypy-tools\n.*?entry: python tools/mypy_baseline\.py --scope issue-1391\n")
         self.assertIn("files: ^tools/.*\\.py$", config)
@@ -1861,7 +1870,12 @@ class PublicExportJobTests(unittest.TestCase):
         "Run compact import/publication smoke": "run: python tools/import_audit_gate.py",
         "Run provenance record and disposition gap check": "run: python tools/provenance_record_gap.py --check",
     }
-    MAIN_SMOKE_CONDITION = "if: ${{ needs.classify.outputs.run_main_smoke == 'true' }}"
+    # Skipped when native_tools runs, whose core part runs the same two commands
+    # (test_main_smoke_commands_run_once_whenever_the_smoke_is_due).
+    MAIN_SMOKE_CONDITION = (
+        "if: ${{ needs.classify.outputs.run_main_smoke == 'true' && "
+        "!(needs.classify.outputs.allow_substantive == 'true' && needs.classify.outputs.run_native == 'true') }}"
+    )
     MARKDOWN_STEPS = {
         "Set up Node.js": 'node-version: "26.13.1"',
         "Lint repository Markdown": "run: npx --yes markdownlint-cli2@0.24.1",
@@ -1895,6 +1909,41 @@ class PublicExportJobTests(unittest.TestCase):
         for name in self.HYGIENE_STEPS:
             with self.subTest(step=name):
                 self.assertEqual(self._conditions(self.blocks["hygiene"], name), [])
+
+    def test_main_smoke_commands_run_once_whenever_the_smoke_is_due(self) -> None:
+        """Hygiene's smoke steps and native_tools' core part never both run, and never both skip."""
+        conditions = {
+            condition
+            for name in self.MAIN_SMOKE_STEPS
+            for condition in self._conditions(self.blocks["hygiene"], name)
+        }
+        self.assertEqual(len(conditions), 1, conditions)
+        hygiene_if = _matched(re.fullmatch(r"if: \$\{\{(.*)\}\}", conditions.pop())).group(1)
+        native_if = _job_if(self.blocks["native_tools"])
+        core = "\n".join(self.blocks["native_tools"])
+        self.assertIn("part: [core, translation, player]", core)
+        native_steps = [
+            "\n".join(_ci_step(self.blocks["native_tools"], name) or [])
+            for name in self._step_names(self.blocks["native_tools"])
+        ]
+        for name, command in self.MAIN_SMOKE_STEPS.items():
+            with self.subTest(step=name):
+                running = [step for step in native_steps if f"\n        {command}" in step]
+                self.assertEqual(len(running), 1, f"native_tools no longer runs {command!r} once")
+                self.assertIn("if: matrix.part == 'core'", running[0])
+        for smoke in ("true", "false"):
+            for substantive in ("true", "false"):
+                for native in ("true", "false"):
+                    outputs = {"run_main_smoke": smoke, "allow_substantive": substantive, "run_native": native}
+                    context = {"needs": {"classify": {"result": "success", "outputs": outputs},
+                                         "public_export": {"result": "success"}}}
+                    with self.subTest(**outputs):
+                        in_hygiene = _actions_eval(hygiene_if, context)
+                        in_native = _actions_eval(native_if, context)
+                        if smoke == "true":
+                            self.assertNotEqual(in_hygiene, in_native)
+                        else:
+                            self.assertFalse(in_hygiene)
 
     def test_folded_main_smoke_and_markdown_steps_keep_their_commands_and_conditions(self) -> None:
         hygiene = self.blocks["hygiene"]
@@ -1935,8 +1984,12 @@ class PublicExportJobTests(unittest.TestCase):
         self.assertFalse(any("--all" in scan for scan in scans))
         self.assertIn("BASE_SHA: ${{ github.event.pull_request.base.sha }}", text)
         self.assertIn('if [ -n "$BASE_SHA" ]; then', text)
-        self.assertIn('--log-opts="--full-history ${BASE_SHA}..HEAD"', scans[0])
-        self.assertIn('--log-opts="--full-history HEAD"', scans[1])
+        # The canary proves a merge-only value is found with these exact log options, and
+        # `git log -p` gives a merge commit no patch without `--diff-merges`.
+        options = betterleaks_canary.HISTORY_LOG_OPTIONS
+        self.assertIn("--diff-merges=first-parent", options)
+        self.assertIn(f'--log-opts="{options} ${{BASE_SHA}}..HEAD"', scans[0])
+        self.assertIn(f'--log-opts="{options} HEAD"', scans[1])
 
     def test_pre_commit_bootstrap_uses_a_hash_locked_closure(self) -> None:
         step = _ci_step(self.blocks["hygiene"], "Install pre-commit")
@@ -3858,6 +3911,53 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
                 "    types: [checks_requested]",
             ],
         )
+
+    def _concurrency(self) -> tuple[str, str]:
+        lines = self.ci.splitlines()
+        start = lines.index("concurrency:")
+        body = {}
+        for line in lines[start + 1:]:
+            if line and not line.startswith(" "):
+                break
+            match = re.match(r"^  (group|cancel-in-progress): (.*)$", line)
+            if match:
+                body[match.group(1)] = match.group(2)
+        group = _matched(re.fullmatch(r"ci-\$\{\{ github\.workflow \}\}-\$\{\{(.*)\}\}", body["group"]))
+        return group.group(1).strip(), body["cancel-in-progress"]
+
+    def test_runs_on_main_never_cancel_each_other(self) -> None:
+        """A landing must not cancel the nightly full-tier run, nor a schedule a push's main smoke."""
+        expression, cancel = self._concurrency()
+        self.assertEqual(cancel, "true")
+        main_runs = [
+            ("push", 101), ("push", 102), ("schedule", 103), ("workflow_dispatch", 104), ("merge_group", 105),
+        ]
+        groups = [
+            _actions_value(expression, {"github": {"event_name": event, "ref": "refs/heads/main",
+                                                   "run_id": run_id, "event": {}}})
+            for event, run_id in main_runs
+        ]
+        self.assertEqual(len(set(groups)), len(groups), groups)
+        # A pull request's runs still share one group, so a new head supersedes the old run.
+        pull = [
+            _actions_value(expression, {"github": {"event_name": "pull_request", "ref": "refs/pull/7/merge",
+                                                   "run_id": run_id,
+                                                   "event": {"pull_request": {"number": 7}}}})
+            for run_id in (201, 202)
+        ]
+        self.assertEqual(pull[0], pull[1])
+        # A run's own group cannot collide with a pull request number.
+        collide = _actions_value(expression, {"github": {"event_name": "push", "run_id": 7, "event": {}}})
+        self.assertNotEqual(collide, pull[0])
+
+    def test_a_merge_group_runs_the_full_test_tier_like_a_manual_run(self) -> None:
+        """The header promises a group the same complete matrix as a manual run, test tier included."""
+        python_tools = "\n".join(_ci_job_blocks()["python_tools"])
+        line = _matched(re.search(r"NK_TEST_TIER: \$\{\{(.*)\}\}", python_tools)).group(1)
+        for event, tier in (("schedule", "full"), ("workflow_dispatch", "full"), ("merge_group", "full"),
+                            ("pull_request", "pr"), ("push", "pr")):
+            with self.subTest(event=event):
+                self.assertEqual(_actions_value(line, {"github": {"event_name": event}}), tier)
 
     def test_event_conditions_only_select_the_export_and_python_tier(self) -> None:
         blocks = _ci_job_blocks()
