@@ -1592,12 +1592,20 @@ static inline const char *hle_success_exception_issue(uint32_t nid) {
     }
 }
 
+#ifdef SR_HLE_THREAD_SELFTEST
+void sr_hle_test_note_env_switch_read(const char *name);
+#endif
 /* The other diagnostic switches on the per-call path follow the same rule (#1296). An
  * uncached getenv takes the C runtime's environment lock and compares the name against
  * every variable, and sr_syscall() plus the CpuSuspendIntr/CpuResumeIntr pair a guest
  * allocator brackets each allocation with read up to four of them per call. */
 static inline int hle_env_switch(int *cached, const char *name) {
-    if (*cached < 0) *cached = getenv(name) != NULL;
+    if (*cached < 0) {
+#ifdef SR_HLE_THREAD_SELFTEST
+        sr_hle_test_note_env_switch_read(name);
+#endif
+        *cached = getenv(name) != NULL;
+    }
     return *cached;
 }
 /* Argument 5+idx of an HLE call. PSP userland is MIPS EABI: arguments 1..8 arrive in

@@ -66,15 +66,24 @@
 #define MPEG_DATA_OUTPUT_SIZE 0xA0000
 
 static int s_mpeglog_enabled = -1;
+#ifdef SR_MPEG_MEDIA_SELFTEST
+static unsigned s_mpeglog_env_reads;
+#endif
 
 static int mpeg_log_on(void) {
-    if (s_mpeglog_enabled < 0) s_mpeglog_enabled = getenv("SR_MPEGLOG") != NULL;
+    if (s_mpeglog_enabled < 0) {
+#ifdef SR_MPEG_MEDIA_SELFTEST
+        s_mpeglog_env_reads++;
+#endif
+        s_mpeglog_enabled = getenv("SR_MPEGLOG") != NULL;
+    }
     return s_mpeglog_enabled;
 }
 
 #ifdef SR_MPEG_MEDIA_SELFTEST
-void sr_mpeg_test_log_switch_reset(void) { s_mpeglog_enabled = -1; }
+void sr_mpeg_test_log_switch_reset(void) { s_mpeglog_enabled = -1; s_mpeglog_env_reads = 0; }
 int sr_mpeg_test_log_switch(void) { return mpeg_log_on(); }
+unsigned sr_mpeg_test_log_env_reads(void) { return s_mpeglog_env_reads; }
 #endif
 
 /* Public MPEG constants and return families are recorded in PSPSDK's src/mpeg/pspmpeg.h.  The

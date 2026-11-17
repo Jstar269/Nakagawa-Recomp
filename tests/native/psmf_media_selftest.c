@@ -3195,16 +3195,20 @@ static void av_latch_mpeglog(void) { av_set_mpeglog(1); }
 
 static void test_mpeg_log_switch_is_cached(void) {
     extern void sr_mpeg_test_log_switch_reset(void);
-    extern int sr_mpeg_test_log_switch(void);
+    extern unsigned sr_mpeg_test_log_env_reads(void);
+    enum { LOG_RING = 0x08150000u, LOG_DATA = 0x08160000u, LOG_PACKETS = 8u };
     av_set_mpeglog(0);
     sr_mpeg_test_log_switch_reset();
-    CHECK(!sr_mpeg_test_log_switch(), "MPEG logger starts off");
-    av_set_mpeglog(1);
-    CHECK(!sr_mpeg_test_log_switch(), "MPEG logger keeps its first value");
-    sr_mpeg_test_log_switch_reset();
-    CHECK(sr_mpeg_test_log_switch(), "MPEG logger latches an enabled value");
-    av_set_mpeglog(0);
-    CHECK(sr_mpeg_test_log_switch(), "MPEG logger stays enabled for the process");
+    CHECK(mpeg_ringbuffer_construct(LOG_RING, LOG_PACKETS, LOG_DATA,
+                                    mpeg_ringbuffer_query_mem_size(LOG_PACKETS), 0u, 0u) == 0u,
+          "MPEG production logger fixture constructs a valid ring buffer");
+    for (unsigned i = 0; i < 4u; i++) {
+        CHECK(mpeg_ringbuffer_put(NULL, LOG_RING, 1u, 1u) == 1u,
+              "MPEG production ringbuffer entry accepts one packet");
+        if (i == 0u) av_set_mpeglog(1);
+    }
+    CHECK(sr_mpeg_test_log_env_reads() == 1u,
+          "MPEG production ringbuffer entry reads SR_MPEGLOG once across repeated calls");
     sr_mpeg_test_log_switch_reset();
     av_set_mpeglog(0);
 }
