@@ -71,6 +71,7 @@ instrumentation is this test's protection against the historical RAM runaway."
 #include "guest_interp.h"      /* SrGuestInterpCallBoundary: the dispatch entries defined below */
 #include "../core/nk_adhoc_net.h"
 #include "../core/nk_adhoc_relay.h"
+#include "../core/nk_adhoc_relay_client.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -95,7 +96,9 @@ instrumentation is this test's protection against the historical RAM runaway."
 #include <errno.h>
 #include <fcntl.h>            /* AT_FDCWD */
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <pthread.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #endif
 
@@ -10813,6 +10816,444 @@ static void test_adhoc_d2_d12_regressions(void) {
         nk_loopnet_destroy(s_adh_p2_net);
         s_adh_p2_net = NULL;
     }
+}
+
+/* ---- D1 regression: blocking ad hoc calls across sceNetAdhocctlTerm / Term / Close --------- */
+typedef struct {
+    adh_p2_sock_t lobby_lsn, data_lsn;
+    adh_p2_sock_t lobby_fds[4], data_fds[8];
+    uint8_t lobby_rx[4][256], data_rx[8][64];
+    size_t lobby_len[4], data_len[8];
+    int data_ack_sent[8], data_kind[8];
+    volatile int stop, stall_data_recv;
+} D1TcpServer;
+
+static void d1_nonblock(adh_p2_sock_t s) {
+#ifdef _WIN32
+    u_long on = 1u;
+    (void)ioctlsocket(s, FIONBIO, &on);
+#else
+    int fl = fcntl(s, F_GETFL, 0);
+    if (fl >= 0) (void)fcntl(s, F_SETFL, fl | O_NONBLOCK);
+#endif
+    int nd = 1;
+    (void)setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&nd, sizeof(nd));
+}
+
+#ifdef _WIN32
+static unsigned __stdcall d1_tcp_server_thread(void *arg) {
+#else
+static void *d1_tcp_server_thread(void *arg) {
+#endif
+    D1TcpServer *srv = (D1TcpServer *)arg;
+    static const uint8_t bssid[6] = {0x02u, 0xd1u, 0x00u, 0x00u, 0x00u, 0x01u};
+    while (!srv->stop) {
+        for (;;) {
+            adh_p2_sock_t c = accept(srv->lobby_lsn, NULL, NULL);
+            if (c == ADH_P2_BAD_SOCK) break;
+            d1_nonblock(c);
+            int placed = 0;
+            for (int i = 0; i < 4; i++) {
+                if (srv->lobby_fds[i] == ADH_P2_BAD_SOCK) {
+                    srv->lobby_fds[i] = c;
+                    srv->lobby_len[i] = 0u;
+                    placed = 1;
+                    break;
+                }
+            }
+            if (!placed) adh_p2_close_sock(c);
+        }
+        for (;;) {
+            adh_p2_sock_t c = accept(srv->data_lsn, NULL, NULL);
+            if (c == ADH_P2_BAD_SOCK) break;
+            d1_nonblock(c);
+            int rcv = 4096;
+            (void)setsockopt(c, SOL_SOCKET, SO_RCVBUF, (const char *)&rcv, sizeof(rcv));
+            int placed = 0;
+            for (int i = 0; i < 8; i++) {
+                if (srv->data_fds[i] == ADH_P2_BAD_SOCK) {
+                    srv->data_fds[i] = c;
+                    srv->data_len[i] = 0u;
+                    srv->data_ack_sent[i] = 0;
+                    srv->data_kind[i] = -1;
+                    placed = 1;
+                    break;
+                }
+            }
+            if (!placed) adh_p2_close_sock(c);
+        }
+        for (int i = 0; i < 4; i++) {
+            adh_p2_sock_t fd = srv->lobby_fds[i];
+            if (fd == ADH_P2_BAD_SOCK) continue;
+            int closed = 0;
+            while (srv->lobby_len[i] < sizeof(srv->lobby_rx[i])) {
+                int r = recv(fd, (char *)(srv->lobby_rx[i] + srv->lobby_len[i]),
+                             (int)(sizeof(srv->lobby_rx[i]) - srv->lobby_len[i]), 0);
+                if (r > 0) srv->lobby_len[i] += (size_t)r;
+                else { if (r == 0) closed = 1; break; }
+            }
+            while (srv->lobby_len[i] > 0u) {
+                uint8_t op = srv->lobby_rx[i][0];
+                size_t need = (op == 0u || op == 3u || op == 4u) ? 1u
+                            : (op == 1u ? 144u : (op == 2u ? 9u : 0u));
+                if (need == 0u) { srv->lobby_len[i] = 0u; break; }
+                if (srv->lobby_len[i] < need) break;
+                if (op == 2u) {
+                    uint8_t bp[7] = {6u, bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]};
+                    (void)adh_p2_send_all(fd, bp, sizeof(bp));
+                } else if (op == 4u) {
+                    uint8_t done = 5u;
+                    (void)adh_p2_send_all(fd, &done, 1u);
+                }
+                if (need < srv->lobby_len[i])
+                    memmove(srv->lobby_rx[i], srv->lobby_rx[i] + need, srv->lobby_len[i] - need);
+                srv->lobby_len[i] -= need;
+            }
+            if (closed) { adh_p2_close_sock(fd); srv->lobby_fds[i] = ADH_P2_BAD_SOCK; }
+        }
+        for (int i = 0; i < 8; i++) {
+            adh_p2_sock_t fd = srv->data_fds[i];
+            if (fd == ADH_P2_BAD_SOCK) continue;
+            int closed = 0;
+            if (!srv->data_ack_sent[i]) {
+                while (srv->data_len[i] < 24u) {
+                    int r = recv(fd, (char *)(srv->data_rx[i] + srv->data_len[i]),
+                                 (int)(24u - srv->data_len[i]), 0);
+                    if (r > 0) srv->data_len[i] += (size_t)r;
+                    else { if (r == 0) closed = 1; break; }
+                }
+                if (srv->data_len[i] >= 24u) {
+                    srv->data_kind[i] = (int)srv->data_rx[i][0];
+                    srv->data_ack_sent[i] = 1;
+                    if (srv->data_kind[i] == 2) {
+                        uint8_t ack[10];
+                        memset(ack, 0, sizeof(ack));
+                        memcpy(ack, srv->data_rx[i] + 14u, 6u);
+                        ack[8] = srv->data_rx[i][22];
+                        ack[9] = srv->data_rx[i][23];
+                        (void)adh_p2_send_all(fd, ack, sizeof(ack));
+                    }
+                }
+            } else if (!(srv->stall_data_recv && srv->data_kind[i] == 2)) {
+                uint8_t drain[128];
+                int r = recv(fd, (char *)drain, (int)sizeof(drain), 0);
+                if (r == 0) closed = 1;
+            }
+            if (closed) { adh_p2_close_sock(fd); srv->data_fds[i] = ADH_P2_BAD_SOCK; }
+        }
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        adh_p2_sock_t max_fd = 0;
+        if (srv->lobby_lsn != ADH_P2_BAD_SOCK) { FD_SET(srv->lobby_lsn, &rfds); if (srv->lobby_lsn > max_fd) max_fd = srv->lobby_lsn; }
+        if (srv->data_lsn != ADH_P2_BAD_SOCK) { FD_SET(srv->data_lsn, &rfds); if (srv->data_lsn > max_fd) max_fd = srv->data_lsn; }
+        for (int i = 0; i < 4; i++) if (srv->lobby_fds[i] != ADH_P2_BAD_SOCK) {
+            FD_SET(srv->lobby_fds[i], &rfds); if (srv->lobby_fds[i] > max_fd) max_fd = srv->lobby_fds[i];
+        }
+        for (int i = 0; i < 8; i++) if (srv->data_fds[i] != ADH_P2_BAD_SOCK && (!srv->stall_data_recv || !srv->data_ack_sent[i])) {
+            FD_SET(srv->data_fds[i], &rfds); if (srv->data_fds[i] > max_fd) max_fd = srv->data_fds[i];
+        }
+        struct timeval tv = {0, 1000};
+        (void)select((int)max_fd + 1, &rfds, NULL, NULL, &tv);
+    }
+#ifdef _WIN32
+    return 0u;
+#else
+    return NULL;
+#endif
+}
+
+enum { D1_WORKER_ENTRY = 0x089e3f80u, D1_WORKER_NAME = 0x089e4e00u, D1_SEND_BUF = 0x09100000u };
+static D1TcpServer *s_d1_srv;
+static volatile int s_d1_stage;
+static int s_d1_mode; /* 0=PtpAccept, 1=PtpRecv, 2=PtpSend, 3=PdpRecv, 4=PollSocket */
+static int32_t s_d1_sock_id;
+static uint32_t s_d1_worker_rc;
+static int s_d1_done;
+
+static void d1_worker_fn(CpuState *cpu) {
+    s_d1_stage = 1;
+    if (s_d1_mode == 0) {
+        s_d1_worker_rc = adh_call_full(0x9df81198u /* PtpAccept */, cpu->r[29],
+                                       (uint32_t)s_d1_sock_id, ADH_P2_PEER_MAC, ADH_P2_PORT,
+                                       0u /* infinite */, 0u, 0u, 0u, 0u);
+    } else if (s_d1_mode == 1) {
+        MEM_W32(ADH_P2_LEN, 64u);
+        s_d1_worker_rc = adh_call_full(0x8bea2b3eu /* PtpRecv */, cpu->r[29],
+                                       (uint32_t)s_d1_sock_id, ADH_P2_BUF, ADH_P2_LEN,
+                                       0u /* infinite */, 0u, 0u, 0u, 0u);
+    } else if (s_d1_mode == 2) {
+        MEM_W32(ADH_P2_LEN, 0x900000u); /* 9 MiB exceeds SO_SNDBUF + Linux tcp_wmem + 512 KiB TX buf */
+        s_d1_worker_rc = adh_call_full(0x4da4c788u /* PtpSend */, cpu->r[29],
+                                       (uint32_t)s_d1_sock_id, D1_SEND_BUF, ADH_P2_LEN,
+                                       0u /* infinite */, 0u, 0u, 0u, 0u);
+    } else if (s_d1_mode == 3) {
+        MEM_W32(ADH_P2_LEN, 64u);
+        s_d1_worker_rc = adh_call_full(0xdfe53e03u /* PdpRecv */, cpu->r[29],
+                                       (uint32_t)s_d1_sock_id, ADH_P2_PEER_MAC, ADH_P2_PORT,
+                                       ADH_P2_BUF, ADH_P2_LEN, 0u /* infinite */, 0u, 0u);
+    } else if (s_d1_mode == 4) {
+        MEM_W32(ADH_P2_SDS + 0u, (uint32_t)s_d1_sock_id);
+        MEM_W32(ADH_P2_SDS + 4u, 0x0002u /* ADHOC_EV_RECV */);
+        MEM_W32(ADH_P2_SDS + 8u, 0u);
+        s_d1_worker_rc = adh_call_full(0x7a662d6bu /* PollSocket */, cpu->r[29],
+                                       ADH_P2_SDS, 1u, 0u /* infinite */, 0u,
+                                       0u, 0u, 0u, 0u);
+    }
+    s_d1_stage = 2;
+    cpu->r[2] = 0u;
+}
+
+static void d1_spawn_and_wait_parked(CpuState *cpu, int mode, int32_t sock_id) {
+    s_d1_mode = mode;
+    s_d1_sock_id = sock_id;
+    s_d1_stage = 0;
+    s_d1_worker_rc = 0xdeadbeefu;
+    MEM_W8(D1_WORKER_NAME, 'd'); MEM_W8(D1_WORKER_NAME + 1u, '1'); MEM_W8(D1_WORKER_NAME + 2u, 0u);
+    sr_test_register_guest_fn(D1_WORKER_ENTRY, d1_worker_fn);
+    const uint32_t th = adh_call_full(0x446d8de6u /* sceKernelCreateThread */, cpu->r[29],
+                                      D1_WORKER_NAME, D1_WORKER_ENTRY, 0x20u, 0x2000u, 0u, 0u, 0u, 0u);
+    expect(th > 0u && th < 0x80000000u, "d1: worker thread created");
+    expect(adh_call_full(0xf475845du /* sceKernelStartThread */, cpu->r[29],
+                         th, 0u, 0u, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "d1: worker thread started");
+    for (int w = 0; w < 40 && s_d1_stage == 0; w++) {
+        cpu->r[4] = 2000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    /* Let worker execute enough iterations to enter its blocking wait loop (and fill PtpSend). */
+    for (int w = 0; w < 20; w++) {
+        cpu->r[4] = 5000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    expect(s_d1_stage == 1, "d1: worker thread is parked inside blocking ad hoc call");
+}
+
+static void d1_wait_worker_done(CpuState *cpu) {
+    for (int w = 0; w < 100 && s_d1_stage != 2; w++) {
+        cpu->r[4] = 5000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+}
+
+static void d1_session_begin(CpuState *cpu) {
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh(0x0c622081u, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "d1: Net/Adhocctl init");
+    expect(adh(ADH_NID_CREATE, adh_name(0, "D1GRP01"), 0u, 0u) == 0u, "d1: Create");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u, "d1: AdhocInit");
+}
+
+static int32_t d1_open_connected_ptp(CpuState *cpu, uint16_t lport, uint16_t dport) {
+    static const uint8_t peer_mac[6] = {0x02u, 0xaau, 0xbbu, 0xccu, 0xddu, 0xeeu};
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, peer_mac[i]);
+    const int32_t id = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29],
+                                              ADH_P2_SELF_MAC, lport, ADH_P2_PEER_MAC, dport,
+                                              0x1000u, 100000u, 3u, 0u);
+    expect(id > 0, "d1: PtpOpen succeeds");
+    if (id <= 0) return -1;
+    uint32_t crc = 1u;
+    for (int w = 0; w < 200; w++) {
+        crc = adh(0xfc6fc07bu /* PtpConnect */, (uint32_t)id, 0u, 1u /* ADHOC_F_NONBLOCK */);
+        if (crc == 0u || crc != 0x80410709u) break;
+#ifdef _WIN32
+        Sleep(2u);
+#else
+        usleep(2000);
+#endif
+        cpu->r[4] = 2000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    expect(crc == 0u, "d1: PtpConnect reaches ESTABLISHED");
+    return id;
+}
+
+static void d1_main_fn(CpuState *cpu) {
+    char msg[192];
+
+    /* 1. Reviewer scenario: PtpAccept blocked across sceNetAdhocctlTerm. */
+    d1_session_begin(cpu);
+    const int32_t lsn_id = (int32_t)adh_call_full(0xe08bdac1u /* PtpListen */, cpu->r[29],
+                                                  ADH_P2_SELF_MAC, 0x4501u, 0x1000u, 100000u, 3u, 2u, 0u, 0u);
+    expect(lsn_id > 0, "d1(PtpAccept/ctlTerm): PtpListen");
+    d1_spawn_and_wait_parked(cpu, 0, lsn_id);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d1(PtpAccept/ctlTerm): sceNetAdhocctlTerm");
+    d1_wait_worker_done(cpu);
+    snprintf(msg, sizeof(msg), "d1: PtpAccept across sceNetAdhocctlTerm woke with DISCONNECTED (got 0x%08x)",
+             s_d1_worker_rc);
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x8041070cu, msg);
+    expect(adh(0x157e6225u /* PtpClose */, (uint32_t)lsn_id, 0u, 0u) == 0u, "d1: PtpClose after ctlTerm");
+    expect(adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d1: cleanup 1");
+
+    /* 2. Reviewer scenario: PtpRecv blocked across sceNetAdhocctlTerm + re-init safety. */
+    d1_session_begin(cpu);
+    const int32_t rx_id = d1_open_connected_ptp(cpu, 0x4502u, 0x4503u);
+    d1_spawn_and_wait_parked(cpu, 1, rx_id);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d1(PtpRecv/ctlTerm): sceNetAdhocctlTerm");
+    d1_wait_worker_done(cpu);
+    snprintf(msg, sizeof(msg), "d1: PtpRecv across sceNetAdhocctlTerm woke with DISCONNECTED (got 0x%08x)",
+             s_d1_worker_rc);
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x8041070cu, msg);
+    /* Verify re-initializing adhocctl leaves stale socket detached instead of hijacking new handle 0. */
+    expect(adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_CREATE, adh_name(0, "D1GRP02"), 0u, 0u) == 0u, "d1: re-init adhocctl");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    MEM_W32(ADH_P2_LEN, 16u);
+    const uint32_t stale_rc = adh_call_full(0x8bea2b3eu /* PtpRecv */, cpu->r[29], (uint32_t)rx_id,
+                                            ADH_P2_BUF, ADH_P2_LEN, 10000u, 0u, 0u, 0u, 0u);
+    snprintf(msg, sizeof(msg), "d1: stale PtpRecv after adhocctl re-init refuses with DISCONNECTED (got 0x%08x)",
+             stale_rc);
+    expect(stale_rc == 0x8041070cu, msg);
+    expect(adh(0x157e6225u, (uint32_t)rx_id, 0u, 0u) == 0u &&
+           adh(0xa62c6f57u, 0u, 0u, 0u) == 0u &&
+           adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d1: cleanup 2");
+
+    /* 3. Reviewer scenario: PtpSend blocked across sceNetAdhocctlTerm. */
+    d1_session_begin(cpu);
+    s_d1_srv->stall_data_recv = 1;
+    const int32_t tx_id = d1_open_connected_ptp(cpu, 0x4504u, 0x4505u);
+    d1_spawn_and_wait_parked(cpu, 2, tx_id);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d1(PtpSend/ctlTerm): sceNetAdhocctlTerm");
+    d1_wait_worker_done(cpu);
+    s_d1_srv->stall_data_recv = 0;
+    snprintf(msg, sizeof(msg), "d1: PtpSend across sceNetAdhocctlTerm woke with DISCONNECTED (got 0x%08x)",
+             s_d1_worker_rc);
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x8041070cu, msg);
+    expect(adh(0x157e6225u, (uint32_t)tx_id, 0u, 0u) == 0u &&
+           adh(0xa62c6f57u, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d1: cleanup 3");
+
+    /* 4. Reviewer scenario: PdpRecv blocked across sceNetAdhocctlTerm, plus PollSocket. */
+    d1_session_begin(cpu);
+    const int32_t pdp_id = (int32_t)adh(0x6f92741bu /* PdpCreate */, ADH_P2_SELF_MAC, 0x4510u, 0x1000u);
+    expect(pdp_id > 0, "d1(PdpRecv/ctlTerm): PdpCreate");
+    d1_spawn_and_wait_parked(cpu, 3, pdp_id);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d1(PdpRecv/ctlTerm): sceNetAdhocctlTerm");
+    d1_wait_worker_done(cpu);
+    snprintf(msg, sizeof(msg), "d1: PdpRecv across sceNetAdhocctlTerm woke with DISCONNECTED (got 0x%08x)",
+             s_d1_worker_rc);
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x8041070cu, msg);
+    expect(adh(0x7f27bb5eu /* PdpDelete */, (uint32_t)pdp_id, 0u, 0u) == 0u &&
+           adh(0xa62c6f57u, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d1: cleanup 4");
+
+    /* 5. Close/Delete/sceNetAdhocTerm while blocked + PollSocket across sceNetAdhocctlTerm. */
+    d1_session_begin(cpu);
+    const int32_t l2 = (int32_t)adh_call_full(0xe08bdac1u, cpu->r[29], ADH_P2_SELF_MAC, 0x4520u,
+                                              0x1000u, 100000u, 3u, 2u, 0u, 0u);
+    d1_spawn_and_wait_parked(cpu, 0, l2);
+    expect(adh(0x157e6225u /* PtpClose */, (uint32_t)l2, 0u, 0u) == 0u, "d1: PtpClose while PtpAccept blocked");
+    d1_wait_worker_done(cpu);
+    snprintf(msg, sizeof(msg), "d1: PtpAccept across PtpClose returns SOCKET_DELETED (got 0x%08x)", s_d1_worker_rc);
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x80410707u, msg);
+
+    const int32_t p2 = (int32_t)adh(0x6f92741bu, ADH_P2_SELF_MAC, 0x4521u, 0x1000u);
+    d1_spawn_and_wait_parked(cpu, 3, p2);
+    expect(adh(0x7f27bb5eu /* PdpDelete */, (uint32_t)p2, 0u, 0u) == 0u, "d1: PdpDelete while PdpRecv blocked");
+    d1_wait_worker_done(cpu);
+    snprintf(msg, sizeof(msg), "d1: PdpRecv across PdpDelete returns SOCKET_DELETED (got 0x%08x)", s_d1_worker_rc);
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x80410707u, msg);
+
+    const int32_t r2 = d1_open_connected_ptp(cpu, 0x4522u, 0x4523u);
+    d1_spawn_and_wait_parked(cpu, 1, r2);
+    expect(adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u) == 0u, "d1: sceNetAdhocTerm while PtpRecv blocked");
+    d1_wait_worker_done(cpu);
+    snprintf(msg, sizeof(msg), "d1: PtpRecv across sceNetAdhocTerm returns SOCKET_DELETED (got 0x%08x)", s_d1_worker_rc);
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x80410707u, msg);
+
+    expect(adh(0xe1d621d7u, 0x20000u, 0u, 0u) == 0u, "d1: re-init Adhoc for PollSocket");
+    const int32_t poll_pdp = (int32_t)adh(0x6f92741bu, ADH_P2_SELF_MAC, 0x4524u, 0x1000u);
+    d1_spawn_and_wait_parked(cpu, 4, poll_pdp);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "d1: sceNetAdhocctlTerm while PollSocket blocked");
+    d1_wait_worker_done(cpu);
+    snprintf(msg, sizeof(msg), "d1: PollSocket across sceNetAdhocctlTerm returns EXCEPTION_EVENT (got 0x%08x rev=0x%08x)",
+             s_d1_worker_rc, MEM_R32(ADH_P2_SDS + 8u));
+    expect(s_d1_stage == 2 && s_d1_worker_rc == 0x80410717u && MEM_R32(ADH_P2_SDS + 8u) == 0x0800u, msg);
+
+    expect(adh(0x7f27bb5eu, (uint32_t)poll_pdp, 0u, 0u) == 0u &&
+           adh(0xa62c6f57u, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d1: cleanup 5");
+    s_d1_done = 1;
+}
+
+static void test_adhoc_d1_lifetime_across_term(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "d1: WSAStartup");
+#endif
+    D1TcpServer srv;
+    memset(&srv, 0, sizeof(srv));
+    for (int i = 0; i < 4; i++) srv.lobby_fds[i] = ADH_P2_BAD_SOCK;
+    for (int i = 0; i < 8; i++) srv.data_fds[i] = ADH_P2_BAD_SOCK;
+    srv.lobby_lsn = socket(AF_INET, SOCK_STREAM, 0);
+    srv.data_lsn = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in lsa, dsa;
+    memset(&lsa, 0, sizeof(lsa)); lsa.sin_family = AF_INET; lsa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    memset(&dsa, 0, sizeof(dsa)); dsa.sin_family = AF_INET; dsa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t lsl = sizeof(lsa), dsl = sizeof(dsa);
+    int rcv = 4096;
+    if (srv.data_lsn != ADH_P2_BAD_SOCK)
+        (void)setsockopt(srv.data_lsn, SOL_SOCKET, SO_RCVBUF, (const char *)&rcv, sizeof(rcv));
+    int ok = srv.lobby_lsn != ADH_P2_BAD_SOCK && srv.data_lsn != ADH_P2_BAD_SOCK &&
+             bind(srv.lobby_lsn, (struct sockaddr *)&lsa, sizeof(lsa)) == 0 && listen(srv.lobby_lsn, 8) == 0 &&
+             getsockname(srv.lobby_lsn, (struct sockaddr *)&lsa, &lsl) == 0 &&
+             bind(srv.data_lsn, (struct sockaddr *)&dsa, sizeof(dsa)) == 0 && listen(srv.data_lsn, 16) == 0 &&
+             getsockname(srv.data_lsn, (struct sockaddr *)&dsa, &dsl) == 0;
+    expect(ok, "d1: loopback relay server bound");
+    if (ok) {
+        d1_nonblock(srv.lobby_lsn);
+        d1_nonblock(srv.data_lsn);
+        s_d1_srv = &srv;
+#ifdef _WIN32
+        uintptr_t th = _beginthreadex(NULL, 0, d1_tcp_server_thread, &srv, 0, NULL);
+        expect(th != 0u, "d1: server thread started");
+#else
+        pthread_t th;
+        int pt_ok = pthread_create(&th, NULL, d1_tcp_server_thread, &srv) == 0;
+        expect(pt_ok, "d1: server thread started");
+#endif
+        char srv_spec[64];
+        snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u",
+                 (unsigned)ntohs(lsa.sin_port), (unsigned)ntohs(dsa.sin_port));
+        s_d1_done = 0;
+        const uint32_t loaded_end = adh_fixture_begin();
+        hle_test_setenv("SR_ADHOC_ENABLED", "1");
+        hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+        hle_net_reset();
+        adh_run(ADH_P2_MAIN, d1_main_fn);
+        expect(s_d1_done == 1, "d1: blocking lifetime regressions completed");
+        hle_net_reset();
+        hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+        hle_test_setenv("SR_ADHOC_SERVER", NULL);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+        adh_fixture_end(loaded_end);
+        srv.stop = 1;
+        adh_p2_close_sock(srv.lobby_lsn);
+        adh_p2_close_sock(srv.data_lsn);
+#ifdef _WIN32
+        if (th) { WaitForSingleObject((HANDLE)th, 3000u); CloseHandle((HANDLE)th); }
+#else
+        if (pt_ok) pthread_join(th, NULL);
+#endif
+        for (int i = 0; i < 4; i++) if (srv.lobby_fds[i] != ADH_P2_BAD_SOCK) adh_p2_close_sock(srv.lobby_fds[i]);
+        for (int i = 0; i < 8; i++) if (srv.data_fds[i] != ADH_P2_BAD_SOCK) adh_p2_close_sock(srv.data_fds[i]);
+        s_d1_srv = NULL;
+    } else {
+        if (srv.lobby_lsn != ADH_P2_BAD_SOCK) adh_p2_close_sock(srv.lobby_lsn);
+        if (srv.data_lsn != ADH_P2_BAD_SOCK) adh_p2_close_sock(srv.data_lsn);
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
 }
 
 extern void sr_hle_test_volatile_mem_reset(void);
@@ -58126,6 +58567,7 @@ static int hle_selftest_main(int argc, char **argv) {
         test_adhoc_online_loopnet_e2e();
         test_adhoc_online_real_tcp_loopback_e2e();
         test_adhoc_d2_d12_regressions();
+        test_adhoc_d1_lifetime_across_term();
         fprintf(stderr, "adhocctl: %d checks, %d failures\n", s_checks, s_failures);
         free(g_mem_base);
         return s_failures ? 1 : 0;
@@ -58280,6 +58722,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_adhoc_online_loopnet_e2e();
     test_adhoc_online_real_tcp_loopback_e2e();
     test_adhoc_d2_d12_regressions();
+    test_adhoc_d1_lifetime_across_term();
     test_unregistered_batch_profiler_refer_null();
     test_kernel_import_sweep_ge_head();
     test_ge_blocking_sync_waits_for_stalled_list();
