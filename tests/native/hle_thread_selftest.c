@@ -11302,6 +11302,10 @@ typedef struct {
     volatile int drop_lobby_on_connect;
     volatile int drop_lobby_mid_session;
     volatile int silent_lobby;
+    volatile int hold_connect_reply; /* joins the group but keeps the members and the BSSID back */
+    volatile int inject_late_reply;  /* sends a member and the BSSID to every logged-in client once */
+    volatile int leaves_seen;        /* DISCONNECT frames from clients that were in a group */
+    volatile int kicked;             /* clients logged out for breaking a server rule (below) */
     volatile int stall_ptp_forward;
     volatile int closed_unmatched_ptp_connects;
     volatile int last_login_ok;
@@ -11379,6 +11383,16 @@ static void mr_pump_once(AdhP2MiniRelay *r) {
             continue;
         }
         int closed = 0;
+        if (r->inject_late_reply && p->logged_in) {
+            uint8_t ghost[139], bp[7] = {6u, 0x02u, 0u, 0u, 0u, 0u, 0x66u};
+            memset(ghost, 0, sizeof(ghost));
+            ghost[0] = 2u; memcpy(ghost + 1, "Ghost", 5u);
+            ghost[129] = 0x02u; ghost[130] = 0xdeu; ghost[131] = 0xadu; ghost[134] = 0x01u;
+            mr_put32(ghost + 135, 0x7f000063u);
+            mr_send(p->fd, ghost, sizeof(ghost));
+            mr_send(p->fd, bp, sizeof(bp));
+            r->inject_late_reply = 0;
+        }
         while (p->rx_len < sizeof(p->rx)) {
             int n = recv(p->fd, (char *)(p->rx + p->rx_len), (int)(sizeof(p->rx) - p->rx_len), 0);
             if (n > 0) p->rx_len += (size_t)n;
@@ -11400,8 +11414,17 @@ static void mr_pump_once(AdhP2MiniRelay *r) {
                 p->logged_in = 1;
             } else if (op == 2u && !r->silent_lobby) {
                 if (r->drop_lobby_on_connect) { closed = 1; p->rx_len = 0u; break; }
+                /* PPSSPP's server logs out a client that joins a group while in one
+                 * (connect_user, Core/HLE/proAdhocServer.cpp:911-942). */
+                if (p->in_group) { r->kicked++; closed = 1; p->rx_len = 0u; break; }
                 memcpy(p->group, p->rx + 1, 8u);
                 if (!r->group_exists) { r->group_exists = 1; memcpy(r->active_group, p->group, 8u); }
+                if (r->hold_connect_reply) {
+                    p->in_group = 1;
+                    if (need < p->rx_len) memmove(p->rx, p->rx + need, p->rx_len - need);
+                    p->rx_len -= need;
+                    continue;
+                }
                 for (int j = 0; j < 6; j++) {
                     if (r->peers[j].active && r->peers[j].in_group && memcmp(r->peers[j].group, p->group, 8u) == 0) {
                         uint8_t cp1[139], cp2[139];
@@ -11419,12 +11442,17 @@ static void mr_pump_once(AdhP2MiniRelay *r) {
             } else if (op == 3u) {
                 if (p->in_group) {
                     p->in_group = 0;
+                    r->leaves_seen++;
                     for (int j = 0; j < 6; j++) {
                         if (j != i && r->peers[j].active && r->peers[j].in_group) {
                             uint8_t dp[5] = {3u, 0, 0, 0, 0}; mr_put32(dp + 1, p->peer_id);
                             mr_send(r->peers[j].fd, dp, sizeof(dp));
                         }
                     }
+                } else {
+                    /* PPSSPP's server logs out a client that leaves without a group
+                     * (disconnect_user, Core/HLE/proAdhocServer.cpp:1030-1041). */
+                    r->kicked++; closed = 1; p->rx_len = 0u; break;
                 }
             } else if (op == 4u && !r->silent_lobby) {
                 if (r->drop_lobby_on_connect) { closed = 1; p->rx_len = 0u; break; }
@@ -11756,8 +11784,19 @@ static void test_adhoc_d4_ptp_open_connect_regression(void) {
 static AdhP2MiniRelay *s_d3_srv;
 static int s_d3_done;
 
+/* One step of real and guest time: a loopback frame needs the first, the ad hoc thread the second. */
+static void d3_step(CpuState *cpu) {
+#ifdef _WIN32
+    Sleep(1u);
+#else
+    usleep(1000);
+#endif
+    cpu->r[4] = 5000u;
+    (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+}
+
 static void d3_main_fn(CpuState *cpu) {
-    char msg[160];
+    char msg[224];
     const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '3'};
     for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
     for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
@@ -11854,6 +11893,85 @@ static void d3_main_fn(CpuState *cpu) {
            "d3.3: retried Scan completes cleanly");
     expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
            net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.3: cleanup");
+
+    /* 4. sceNetAdhocctlDisconnect outside a group sends the lobby no leave: PPSSPP's server logs a
+     *    client out for one, which would lose the lobby and the Create after it. The DISCONNECT
+     *    event still comes, and in a group the lobby is told once. */
+    s_adh_events = 0u;
+    const int kicked0 = s_d3_srv->kicked, leaves0 = s_d3_srv->leaves_seen;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0u, "d3.4: Disconnect outside a group returns 0");
+    for (int w = 0; w < 200 && s_adh_events == 0u; w++) d3_step(cpu);
+    expect(s_adh_events == 1u && ADH_AT(0).event == 2 && ADH_AT(0).error == 0u,
+           "d3.4: its DISCONNECT event follows");
+    for (int w = 0; w < 20; w++) d3_step(cpu);
+    const uint32_t keep_rc = adh(ADH_NID_CREATE, adh_name(0, "D3KEEP1"), 0u, 0u);
+    for (int w = 0; w < 200 && keep_rc == 0u && adh_state() != 1u; w++) d3_step(cpu);
+    snprintf(msg, sizeof(msg),
+             "d3.4: the lobby outlives that Disconnect and Create connects "
+             "(rc=0x%08x state=%u events=%u kicked=%d leaves=%d)",
+             keep_rc, adh_state(), s_adh_events, s_d3_srv->kicked - kicked0,
+             s_d3_srv->leaves_seen - leaves0);
+    expect(keep_rc == 0u && adh_state() == 1u && s_adh_events == 2u && ADH_AT(1).event == 1 &&
+           s_d3_srv->kicked == kicked0 && s_d3_srv->leaves_seen == leaves0, msg);
+    expect(adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0u, "d3.4: Disconnect in the group returns 0");
+    for (int w = 0; w < 200 && (s_adh_events < 3u || s_d3_srv->leaves_seen == leaves0); w++)
+        d3_step(cpu);
+    snprintf(msg, sizeof(msg),
+             "d3.4: in a group the lobby is told of the leave once (events=%u state=%u leaves=%d kicked=%d)",
+             s_adh_events, adh_state(), s_d3_srv->leaves_seen - leaves0, s_d3_srv->kicked - kicked0);
+    expect(s_adh_events == 3u && ADH_AT(2).event == 2 && adh_state() == 0u &&
+           s_d3_srv->leaves_seen == leaves0 + 1 && s_d3_srv->kicked == kicked0, msg);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.4: cleanup");
+
+    /* 5. A join the lobby does not answer in time is given up: ERROR/TIMEOUT to the handlers, the
+     *    lobby told the console left, and the late answer (a member, then the BSSID) dropped. */
+    s_adh_events = 0u;
+    const int kicked1 = s_d3_srv->kicked, leaves1 = s_d3_srv->leaves_seen;
+    s_d3_srv->hold_connect_reply = 1;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u &&
+           adh(ADH_NID_CREATE, adh_name(0, "D3LATE1"), 0u, 0u) == 0u,
+           "d3.5: Create starts against a lobby that holds its answer back");
+    for (int w = 0; w < 20; w++) d3_step(cpu); /* the join reaches the server in real time */
+    for (int w = 0; w < 120 && s_adh_events == 0u; w++) {
+        cpu->r[4] = 50000u; /* 120 * 50 ms = 6.0 s of guest time, past the 5.0 s bound */
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    }
+    snprintf(msg, sizeof(msg),
+             "d3.5: the unanswered Create ends with ERROR/TIMEOUT (events=%u ev=%d err=0x%08x state=%u)",
+             s_adh_events, s_adh_events ? ADH_AT(0).event : -1,
+             s_adh_events ? ADH_AT(0).error : 0u, adh_state());
+    expect(s_adh_events == 1u && ADH_AT(0).event == 0 &&
+           ADH_AT(0).error == 0x80410b05u && adh_state() == 0u, msg);
+    for (int w = 0; w < 200 && s_d3_srv->leaves_seen == leaves1; w++) d3_step(cpu);
+    snprintf(msg, sizeof(msg), "d3.5: the lobby is told the abandoned join is over (leaves=%d kicked=%d)",
+             s_d3_srv->leaves_seen - leaves1, s_d3_srv->kicked - kicked1);
+    expect(s_d3_srv->leaves_seen == leaves1 + 1 && s_d3_srv->kicked == kicked1, msg);
+    s_d3_srv->hold_connect_reply = 0;
+    s_d3_srv->inject_late_reply = 1;
+    for (int w = 0; w < 60; w++) d3_step(cpu);
+    snprintf(msg, sizeof(msg),
+             "d3.5: the late member and BSSID of the abandoned join change nothing "
+             "(sent=%d state=%u events=%u)",
+             s_d3_srv->inject_late_reply == 0, adh_state(), s_adh_events);
+    expect(s_d3_srv->inject_late_reply == 0 && adh_state() == 0u && s_adh_events == 1u, msg);
+    const uint32_t new_rc = adh(ADH_NID_CREATE, adh_name(0, "D3NEW01"), 0u, 0u);
+    for (int w = 0; w < 200 && new_rc == 0u && adh_state() != 1u; w++) d3_step(cpu);
+    MEM_W32(ADH_P2_LEN, 256u);
+    const uint32_t list_rc = adh(ADH_NID_PEER_LIST, ADH_P2_LEN, ADH_P2_BUF, 0u);
+    snprintf(msg, sizeof(msg),
+             "d3.5: the next Create connects with no member of the abandoned group "
+             "(rc=0x%08x state=%u events=%u list=0x%08x bytes=%u)",
+             new_rc, adh_state(), s_adh_events, list_rc, MEM_R32(ADH_P2_LEN));
+    expect(new_rc == 0u && adh_state() == 1u && s_adh_events == 2u && ADH_AT(1).event == 1 &&
+           list_rc == 0u && MEM_R32(ADH_P2_LEN) == 0u, msg);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.5: cleanup");
     s_d3_done = 1;
 }
 

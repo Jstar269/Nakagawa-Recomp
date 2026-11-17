@@ -348,6 +348,8 @@ static struct {
     int group_null;          /* that name was NULL */
     uint8_t bssid[6];        /* resolved group BSSID */
     int online_active;       /* online transport attached for this Init session */
+    int lobby_group;         /* the lobby was asked to put this console in a group and has not
+                                been asked to take it out (PPSSPP adhocctlInServerGroup) */
     int lobby_lost_reported; /* logged dead-lobby warning once for this session */
     unsigned error_events;   /* ALREADY_CONNECTED events still to deliver */
     struct { int used; uint32_t fn, arg; } handlers[ADHOCCTL_HANDLERS];
@@ -560,6 +562,11 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
     for (size_t i = 0u; i < n && s_adhocctl.gen == gen; i++) {
         switch (ev[i].kind) {
         case NK_LOBBY_CONNECT:
+            /* A player of a group this console is neither in nor joining: the lobby had not yet
+             * seen the leave. PPSSPP drops it too (Core/HLE/proAdhoc.cpp:1739-1742). */
+            if (s_adhocctl.state != 1 && s_adhocctl.request != ADHOCCTL_REQ_CREATE &&
+                s_adhocctl.request != ADHOCCTL_REQ_CONNECT)
+                break;
             adhoc_upsert_peer(&ev[i]);
             break;
         case NK_LOBBY_DISCONNECT:
@@ -583,6 +590,20 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
             adhocctl_call_handlers(s, gen, sp, gp, ADHOCCTL_EVENT_SCAN, 0u);
             break;
         case NK_LOBBY_CONNECT_BSSID:
+            if (s_adhocctl.request != ADHOCCTL_REQ_CREATE &&
+                s_adhocctl.request != ADHOCCTL_REQ_CONNECT) {
+                /* No join is waiting for this answer: it timed out below, or the server sent it
+                 * unasked. PPSSPP drops the BSSID of an abandoned group join
+                 * (Core/HLE/proAdhoc.cpp:1673-1677); the state, the group's BSSID and the
+                 * handlers are left alone, and the log names it once. */
+                static int late_bssid_logged;
+                if (!late_bssid_logged) {
+                    late_bssid_logged = 1;
+                    fprintf(stderr, "HLE: adhocctl ignored the BSSID of a group join nothing "
+                                    "waits for (state=%d)\n", s_adhocctl.state);
+                }
+                break;
+            }
             memcpy(s_adhocctl.bssid, ev[i].bssid, 6u);
             s_adhocctl.state = 1;
             s_adhocctl.request = ADHOCCTL_REQ_NONE;
@@ -594,11 +615,19 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
     }
     if (s_adhocctl.gen != gen) return;
     const int is_relay = (s_adhoc_relay_client && t == nk_relay_client_transport(s_adhoc_relay_client));
+    /* The lobby connection is gone. PPSSPP tells the user ("Disconnected from AdhocServer"), times
+     * its peers out and sends the game no event (killAdhocctlClient, Core/HLE/proAdhoc.cpp:1336-1360).
+     * What the guest is told here is this project's modelled error, not PPSSPP's behaviour and
+     * UNMEASURED on a PSP: one named log line, the group and its peers dropped, and
+     * ADHOCCTL_EVENT_DISCONNECT with ADHOCCTL_ERROR_DISCONNECTED to the handlers, because Create,
+     * Connect, Join and Scan have already returned 0 and would otherwise wait forever. Later
+     * requests answer ADHOCCTL_ERROR_DISCONNECTED until the game runs Term and Init again. */
     if (is_relay && nk_relay_client_lobby_dead(s_adhoc_relay_client)) {
         const int had_work = (s_adhocctl.request == ADHOCCTL_REQ_CREATE ||
                               s_adhocctl.request == ADHOCCTL_REQ_CONNECT ||
                               s_adhocctl.request == ADHOCCTL_REQ_SCAN ||
                               s_adhocctl.state != 0);
+        s_adhocctl.lobby_group = 0;
         if (!s_adhocctl.lobby_lost_reported) {
             s_adhocctl.lobby_lost_reported = 1;
             const char *err = nk_relay_client_last_error(s_adhoc_relay_client);
@@ -616,8 +645,17 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
         }
         return;
     }
-    /* Match PPSSPP __AdhocctlNotify (Core/HLE/sceNetAdhoc.cpp:678) + adhocDefaultTimeout (5s):
-     * never leave Create/Connect/Join/Scan waiting forever on a silent lobby. */
+    /* A request the lobby has not answered within PPSSPP's adhocDefaultTimeout (5 s,
+     * Core/HLE/NetAdhocCommon.h:36) ends here instead of waiting forever. Only that bound is
+     * PPSSPP's. What the guest is told is this project's modelled error, not PPSSPP's behaviour
+     * and UNMEASURED on a PSP: PPSSPP blocks the call itself and answers BUSY when the request
+     * cannot be sent in that time (__AdhocctlNotify, Core/HLE/sceNetAdhoc.cpp:678-698), and it
+     * sends ADHOCCTL_EVENT_ERROR with SCE_NET_ADHOCCTL_ERROR_TIMEOUT only for a game-mode join
+     * that timed out (Core/HLE/proAdhoc.cpp:1627). Here the call has already returned 0, so the
+     * handlers get that event and error and the log names the request. A join given up this way
+     * is withdrawn from the lobby, as PPSSPP withdraws the game-mode join it gives up
+     * (NetAdhocctl_GameModeTimedOut, Core/HLE/sceNetAdhoc.cpp:1727-1736), and its late answer is
+     * dropped above. */
     if ((s_adhocctl.request == ADHOCCTL_REQ_CREATE ||
          s_adhocctl.request == ADHOCCTL_REQ_CONNECT ||
          s_adhocctl.request == ADHOCCTL_REQ_SCAN) &&
@@ -628,6 +666,10 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
                 req_kind, ADHOCCTL_ONLINE_REQUEST_TIMEOUT_US / 1000u,
                 (err && err[0]) ? " (" : "", (err && err[0]) ? err : "",
                 (err && err[0]) ? ")" : "");
+        if (s_adhocctl.lobby_group && t->ops->disconnect) {
+            (void)t->ops->disconnect(t);
+            s_adhocctl.lobby_group = 0;
+        }
         s_adhocctl.state = 0;
         s_adhocctl.request = ADHOCCTL_REQ_NONE;
         s_adhocctl.request_due = 0u;
@@ -701,6 +743,7 @@ static void adhocctl_teardown(void) {
     s_adhocctl.gen++;
     s_adhocctl.inited = 0;
     s_adhocctl.online_active = 0;
+    s_adhocctl.lobby_group = 0;
     s_adhocctl.lobby_lost_reported = 0;
     s_adhocctl.thread_uid = 0u;
     s_adhocctl.state = 0;
@@ -843,6 +886,7 @@ static uint32_t h_NetAdhocctlInit(CpuState *s) {
     for (uint32_t i = 0; i < 13u; i++) s_adhocctl.id[i] = id_bytes[i];
     s_adhocctl.inited = 1;
     s_adhocctl.online_active = online;
+    s_adhocctl.lobby_group = 0;
     s_adhocctl.lobby_lost_reported = 0;
     s_adhocctl.state = 0;
     s_adhocctl.request = ADHOCCTL_REQ_NONE;
@@ -1024,6 +1068,7 @@ static uint32_t adhocctl_start(const char *name, int request, uint32_t group_add
             }
             return ADHOCCTL_ERROR_DISCONNECTED;
         }
+        if (request != ADHOCCTL_REQ_SCAN) s_adhocctl.lobby_group = 1;
         s_adhocctl.request = request;
         s_adhocctl.request_due = sched_vtime_us() + ADHOCCTL_ONLINE_REQUEST_TIMEOUT_US;
         s_adhocctl.scan_shown = 0;
@@ -1070,7 +1115,14 @@ static uint32_t h_NetAdhocctlDisconnect(CpuState *s) {
     if (adhocctl_thread_lost("sceNetAdhocctlDisconnect", &busy)) return busy;
     if (adhocctl_pending("sceNetAdhocctlDisconnect", ADHOCCTL_REQ_DISCONNECT, &busy)) return busy;
     if (s_adhocctl.online_active && s_adhoc_active_transport && s_adhoc_active_transport->ops) {
-        (void)s_adhoc_active_transport->ops->disconnect(s_adhoc_active_transport);
+        /* The lobby hears of the leave only when it was asked to put this console in a group:
+         * PPSSPP's server logs out a client that leaves without one (disconnect_user,
+         * Core/HLE/proAdhocServer.cpp:1030-1041), so PPSSPP sends the leave only then
+         * (Core/HLE/sceNetAdhoc.cpp:2981-2982). The DISCONNECT event follows either way. */
+        if (s_adhocctl.lobby_group) {
+            (void)s_adhoc_active_transport->ops->disconnect(s_adhoc_active_transport);
+            s_adhocctl.lobby_group = 0;
+        }
         s_adhocctl.request = ADHOCCTL_REQ_DISCONNECT;
         s_adhocctl.request_due = sched_vtime_us() + ADHOC_POLL_WAIT_STEP_US;
         sched_service_kick(s_adhocctl.thread_uid);
