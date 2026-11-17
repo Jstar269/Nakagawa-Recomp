@@ -631,12 +631,16 @@ static uint32_t h_GeListSync(CpuState *s) {
     }
 }
 
+static int ge_unset_log_on(void) {
+    return ge_log_on();
+}
+
 static uint32_t h_GeUnsetCallback(CpuState *s) {
     uint32_t cbid = A0;
     if (cbid < (uint32_t)(sizeof(s_ge_cb) / sizeof(s_ge_cb[0]))) {
         s_ge_cb[cbid].used = 0;
     }
-    if (getenv("SR_GELOG")) {
+    if (ge_unset_log_on()) {
         fprintf(stderr, "sceGeUnsetCallback: cbid=%u\n", cbid);
     }
     return 0;

@@ -18526,6 +18526,87 @@ static void hle_archive_route_set_env(const char *name, const char *value) {
     hle_test_setenv(name, value);
 }
 
+static void test_hle_hot_log_switches_are_cached(void) {
+    extern void sr_hle_test_ge_log_reset(void);
+    extern unsigned sr_hle_test_ge_log_env_reads(void);
+    extern void sr_hle_test_io_statlog_switch_reset(void);
+    extern unsigned sr_hle_test_io_statlog_env_reads(void);
+    enum { GE_UNSET_NID = 0x05db22ceu, IO_GETSTAT_NID = 0xace946e8u,
+           PATH_ADDR = 0x0903e000u, STAT_ADDR = 0x0903e100u };
+    static const char ms_root[] = HLE_BUILD_ROOT "/hle_log_switch";
+    static const char guest_path[] = "ms0:/HOT_LOG_SWITCH.BIN";
+    char host_file[512];
+    char *old_ge = hle_archive_route_env_copy(getenv("SR_GELOG"));
+    char *old_gedump = hle_archive_route_env_copy(getenv("SR_GEDUMP"));
+    char *old_debug = hle_archive_route_env_copy(getenv("SR_DEBUG"));
+    char *old_statlog = hle_archive_route_env_copy(getenv("SR_STATLOG"));
+    char *old_memstick = hle_archive_route_env_copy(getenv("SR_MEMSTICK"));
+
+    snprintf(host_file, sizeof(host_file), "%s/HOT_LOG_SWITCH.BIN", ms_root);
+    expect(nk_platform_mkdir_p(ms_root), "hot-log test creates a synthetic Memory Stick root");
+    (void)remove(host_file);
+    FILE *file = fopen(host_file, "wb");
+    expect(file != NULL, "hot-log test creates a synthetic file for sceIoGetstat");
+    if (file) {
+        static const char contents[] = "cached stat log fixture";
+        expect(fwrite(contents, 1, sizeof(contents) - 1u, file) == sizeof(contents) - 1u,
+               "hot-log test writes its synthetic stat file");
+        fclose(file);
+    }
+    hle_archive_route_set_env("SR_MEMSTICK", ms_root);
+    memcpy(SR_HOST(PATH_ADDR), guest_path, sizeof(guest_path));
+
+    hle_archive_route_set_env("SR_GELOG", NULL);
+    hle_archive_route_set_env("SR_GEDUMP", NULL);
+    hle_archive_route_set_env("SR_DEBUG", NULL);
+    /* The handlers below are the registered production ones, reached through sr_syscall. The
+     * counters sit inside the cached switches, so a call site that asks the environment itself
+     * (as both did before #2642) leaves its counter at zero and prints after the switch is set. */
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    sr_hle_test_ge_log_reset();
+    for (unsigned i = 0; i < 4u; i++) {
+        CpuState cpu;
+        memset(&cpu, 0, sizeof(cpu));
+        expect(sr_syscall(&cpu, GE_UNSET_NID) == 0u,
+               "sceGeUnsetCallback production handler returns through sr_syscall");
+        if (i == 0u) hle_archive_route_set_env("SR_GELOG", "1");
+    }
+    expect(sr_hle_test_ge_log_env_reads() == 1u,
+           "sceGeUnsetCallback production path reads the cached GE log switch once across repeated syscalls");
+
+    hle_archive_route_set_env("SR_STATLOG", NULL);
+    sr_hle_test_io_statlog_switch_reset();
+    for (unsigned i = 0; i < 4u; i++) {
+        CpuState cpu;
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = PATH_ADDR;
+        cpu.r[5] = STAT_ADDR;
+        expect(sr_syscall(&cpu, IO_GETSTAT_NID) == 0u &&
+                   MEM_R32(STAT_ADDR + 8u) == sizeof("cached stat log fixture") - 1u,
+               "sceIoGetstat production handler runs through sr_syscall on a host-backed file");
+        if (i == 0u) hle_archive_route_set_env("SR_STATLOG", "1");
+    }
+    expect(sr_hle_test_io_statlog_env_reads() == 1u,
+           "sceIoGetstat production path reads SR_STATLOG once across repeated syscalls");
+    sr_hle_test_io_statlog_switch_reset();
+
+    hle_archive_route_set_env("SR_GELOG", old_ge);
+    hle_archive_route_set_env("SR_GEDUMP", old_gedump);
+    hle_archive_route_set_env("SR_DEBUG", old_debug);
+    hle_archive_route_set_env("SR_STATLOG", old_statlog);
+    hle_archive_route_set_env("SR_MEMSTICK", old_memstick);
+    free(old_ge);
+    free(old_gedump);
+    free(old_debug);
+    free(old_statlog);
+    free(old_memstick);
+    sr_hle_test_ge_log_reset();
+    sr_hle_test_io_statlog_switch_reset();
+    (void)remove(host_file);
+    (void)rmdir(ms_root);
+}
+
 static uint32_t hle_archive_route_open_result(const char *path) {
     CpuState cpu;
     uint32_t fd = disc_route_open(&cpu, path);
@@ -57395,6 +57476,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_nested_frame_under_psp_callback_dispatch();
     test_nested_frame_handle_hygiene();
     test_ge_guest_sentinel();
+    test_hle_hot_log_switches_are_cached();
     test_ge_consumed_list_ignores_late_stall_address();
     test_ge_stall_alias_across_call_return();
     test_ge_stall_alias_linear_from_uncached_list();

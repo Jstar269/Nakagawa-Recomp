@@ -151,15 +151,25 @@ int hle_wakelog_on(void) {
 /* Display-list tracing is extremely verbose (several writes per presented
  * frame).  Keep Standard mode quiet; Diagnostics enables SR_GEDUMP, and the
  * public SR_DEBUG GE bit (0x08) remains an equivalent opt-in. */
+static int s_ge_log_enabled = -1;
+#ifdef SR_HLE_THREAD_SELFTEST
+static unsigned s_ge_log_env_reads; /* times ge_log_on() consulted the environment */
+#endif
 int ge_log_on(void) {
-    static int enabled = -1;
-    if (enabled < 0) {
+    if (s_ge_log_enabled < 0) {
+#ifdef SR_HLE_THREAD_SELFTEST
+        s_ge_log_env_reads++;
+#endif
         const char *debug = getenv("SR_DEBUG");
-        enabled = getenv("SR_GEDUMP") != NULL || getenv("SR_GELOG") != NULL ||
-                  (debug != NULL && (strtoul(debug, NULL, 0) & 0x08u) != 0u);
+        s_ge_log_enabled = getenv("SR_GEDUMP") != NULL || getenv("SR_GELOG") != NULL ||
+                           (debug != NULL && (strtoul(debug, NULL, 0) & 0x08u) != 0u);
     }
-    return enabled;
+    return s_ge_log_enabled;
 }
+#ifdef SR_HLE_THREAD_SELFTEST
+void sr_hle_test_ge_log_reset(void) { s_ge_log_enabled = -1; s_ge_log_env_reads = 0; }
+unsigned sr_hle_test_ge_log_env_reads(void) { return s_ge_log_env_reads; }
+#endif
 
 void hle_lock(void) {
     while (atomic_flag_test_and_set_explicit(&s_hle_lock, memory_order_acquire)) { }

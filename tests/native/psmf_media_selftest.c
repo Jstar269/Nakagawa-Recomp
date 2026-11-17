@@ -3178,13 +3178,39 @@ static void test_mpeg_avc_decode_clear_in_vram_mirrors(void) {
 /* Latch SR_MPEGLOG before the player's first produce call: hle.c caches the flag the first
  * time it is consulted.  The feature-test macro above exposes the platform putenv prototype
  * on POSIX; the Windows CRT name (_putenv) comes from <stdlib.h>. */
-static char s_av_mpeglog_env[] = "SR_MPEGLOG=1";
-static void av_latch_mpeglog(void) {
 #ifdef _WIN32
-    _putenv(s_av_mpeglog_env);
-#else
-    putenv(s_av_mpeglog_env);
+static char s_av_mpeglog_env[] = "SR_MPEGLOG=1";
+static char s_av_mpeglog_unset_env[] = "SR_MPEGLOG=";
 #endif
+static void av_set_mpeglog(int enabled) {
+#ifdef _WIN32
+    _putenv(enabled ? s_av_mpeglog_env : s_av_mpeglog_unset_env);
+#else
+    if (enabled) setenv("SR_MPEGLOG", "1", 1);
+    else unsetenv("SR_MPEGLOG");
+#endif
+}
+
+static void av_latch_mpeglog(void) { av_set_mpeglog(1); }
+
+static void test_mpeg_log_switch_is_cached(void) {
+    extern void sr_mpeg_test_log_switch_reset(void);
+    extern unsigned sr_mpeg_test_log_env_reads(void);
+    enum { LOG_RING = 0x08150000u, LOG_DATA = 0x08160000u, LOG_PACKETS = 8u };
+    av_set_mpeglog(0);
+    sr_mpeg_test_log_switch_reset();
+    CHECK(mpeg_ringbuffer_construct(LOG_RING, LOG_PACKETS, LOG_DATA,
+                                    mpeg_ringbuffer_query_mem_size(LOG_PACKETS), 0u, 0u) == 0u,
+          "MPEG production logger fixture constructs a valid ring buffer");
+    for (unsigned i = 0; i < 4u; i++) {
+        CHECK(mpeg_ringbuffer_put(NULL, LOG_RING, 1u, 1u) == 1u,
+              "MPEG production ringbuffer entry accepts one packet");
+        if (i == 0u) av_set_mpeglog(1);
+    }
+    CHECK(sr_mpeg_test_log_env_reads() == 1u,
+          "MPEG production ringbuffer entry reads SR_MPEGLOG once across repeated calls");
+    sr_mpeg_test_log_switch_reset();
+    av_set_mpeglog(0);
 }
 
 static void test_psmf_log_tick_instance_isolation(void) {
@@ -6322,6 +6348,8 @@ int main(int argc, char **argv) {
     memset(arena, 0, sizeof(arena));
     if (argc == 4 && strcmp(argv[1], "--videorec-audio") == 0)
         return videorec_audio_hooks(argv[2], argv[3]);
+
+    test_mpeg_log_switch_is_cached();
 
 #if defined(SR_H264_FFMPEG)
     CHECK(sr_h264_select_backend("ffmpeg"),

@@ -81,6 +81,9 @@ typedef struct PresentFrame {
 
 static SDL_Window      *s_win;
 static int              s_window_hidden;      /* SR_WINDOW_HIDDEN: created hidden, never raised */
+#ifdef SR_VIDEOREC_SELFTEST
+static unsigned         s_selftest_present_clear_commands;
+#endif
 static SDL_Gamepad     *s_pad;
 static VkInstance       s_inst;
 static VkSurfaceKHR     s_surf;
@@ -2122,6 +2125,11 @@ Sdl3VkPresentPlan sdl3vk_present_plan(int mode, int srcw, int srch, int dw, int 
     return p;
 }
 
+int sdl3vk_present_needs_clear(const Sdl3VkPresentPlan *plan, int dw, int dh) {
+    if (!plan || dw <= 0 || dh <= 0) return 1;
+    return plan->x != 0 || plan->y != 0 || plan->w != dw || plan->h != dh;
+}
+
 /* The sharp-scaling intermediate image, shared by the frame ring: each use transitions it from
  * UNDEFINED behind a transfer-stage barrier, which also orders the write after the previous
  * frame's read on this queue. */
@@ -2662,22 +2670,26 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         if (!show) { why = "nothing to show"; goto fail_acquired; }
 
         /* fb image -> swapchain, aspect-correct letterbox blit. */
+        int dw = (int)s_swap_ext.width, dh = (int)s_swap_ext.height;
+        Sdl3VkPresentPlan plan = sdl3vk_present_plan(s_scaling, showw, showh, dw, dh,
+                                                     (int)s_max_image_dim);
         barrier(cmd, s_swap_img[idx], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 0, VK_ACCESS_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        {
+        if (sdl3vk_present_needs_clear(&plan, dw, dh)) {
             VkClearColorValue black = {{0, 0, 0, 1}};
             VkImageSubresourceRange rng = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
             vkCmdClearColorImage(cmd, s_swap_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                  &black, 1, &rng);
+#ifdef SR_VIDEOREC_SELFTEST
+            s_selftest_present_clear_commands++;
+#endif
+            /* The clear overlaps the blit at the image level; keep the dependency only when it ran. */
+            barrier(cmd, s_swap_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
         }
-        barrier(cmd, s_swap_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        int dw = (int)s_swap_ext.width, dh = (int)s_swap_ext.height;
-        Sdl3VkPresentPlan plan = sdl3vk_present_plan(s_scaling, showw, showh, dw, dh,
-                                                     (int)s_max_image_dim);
         VkImage blit_src = show;
         int bw = showw, bh = showh;
         VkImageBlit blt = {0};
