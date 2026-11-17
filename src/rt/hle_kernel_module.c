@@ -1584,18 +1584,29 @@ static uint32_t h_GetModuleId(CpuState *s) {
 /* sceKernelGetModuleIdList(SceUID *ids, SceSize size, int *count): size is in bytes, whole entries
  * are written (ceil(size / 4), never more than there are modules, so a size of 5 writes two) and
  * count receives the number of modules, not the number written.  pspautotests
- * modules/idlist/idlist.expected (rev 1a9e6c31, recorded on a PSP): a size of 0 writes nothing
- * and returns 0; sizes 1..8 return 0; a negative size, or a NULL buffer even with size 0, returns
- * 0x800200d3 and leaves count untouched; the caller's own module is in the list.  A PSP lists its
- * firmware modules too; the runtime lists the ones it holds: the main module first, then the
- * loaded ones in load order.  The order is not measured.  A NULL or unwritable count, and an
- * unwritable buffer, are not measured and stop the run by name. */
+ * tests/modules/idlist/idlist.expected at 774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party
+ * recording made on a PSP: a size of 0 writes nothing and returns 0; sizes 1..8 return 0; a
+ * negative size, or a NULL buffer even with size 0, returns 0x800200d3 and leaves count
+ * untouched; a NULL count returns 0x800200d3 (line 14), and so do a count pointer and a buffer in
+ * the kernel segment, at 0x88000000 (lines 15 and 16), the count pointer leaving the buffer
+ * untouched; the caller's own module is in the list.  The runtime refuses every pointer whose
+ * address, end or size has bit 31 set, the kernel's check on a user caller's pointers (uOFW
+ * src/kd/modulemgr/queryModule.c at f7b0623168842f02cddbdbf9437ac0c2380c51c8, MIT, read as a
+ * behaviour reference: both pointers are checked before anything is written).  Guest addresses
+ * lose their segment bits here (SR_PHYS), so without the check such a pointer is written through.
+ * A PSP lists its firmware modules too; the runtime lists the ones it holds: the main module
+ * first, then the loaded ones in load order.  The order is not measured.  A count pointer or
+ * buffer that passes the check and is not guest memory has no recorded cell and stops the run by
+ * name, before anything is written. */
 static uint32_t h_GetModuleIdList(CpuState *s) {
-    const uint32_t ids = A0, count_ptr = A2;
-    const int32_t size = (int32_t)A1;
-    if (!ids || size < 0) return 0x800200d3u;             /* ILLEGAL_ADDR (module manager's) */
-    if (!count_ptr || !sr_guest_span_writable(count_ptr, 4u))
-        return hle_unmodelled_stop("sceKernelGetModuleIdList", "with an unwritable count 0x%08x is not measured", count_ptr);
+    const uint32_t ids = A0, size = A1, count_ptr = A2;
+    if (!ids || !count_ptr ||
+        (((ids + size) | ids | size | (count_ptr + 4u) | count_ptr) & 0x80000000u) != 0u)
+        return 0x800200d3u;             /* ILLEGAL_ADDR (module manager's) */
+    if (!sr_guest_span_writable(count_ptr, 4u))
+        return hle_unmodelled_stop("sceKernelGetModuleIdList",
+                                   "with a count pointer 0x%08x outside guest memory is not measured",
+                                   count_ptr);
     uint32_t list[sizeof(s_loaded_modules) / sizeof(s_loaded_modules[0]) + 1u];
     uint32_t total = 0u;
     if (sr_loaded_base() < sr_loaded_end()) {
@@ -1608,10 +1619,12 @@ static uint32_t h_GetModuleIdList(CpuState *s) {
             continue;
         list[total++] = mod->uid;
     }
-    uint32_t n = (uint32_t)(((uint64_t)(uint32_t)size + 3u) / 4u);
+    uint32_t n = (size + 3u) / 4u;   /* size is below 0x80000000 here */
     if (n > total) n = total;
     if (n && !sr_guest_span_writable(ids, n * 4u))
-        return hle_unmodelled_stop("sceKernelGetModuleIdList", "with an unwritable buffer 0x%08x is not measured", ids);
+        return hle_unmodelled_stop("sceKernelGetModuleIdList",
+                                   "with a buffer 0x%08x outside guest memory is not measured",
+                                   ids);
     for (uint32_t i = 0; i < n; i++) MEM_W32(ids + 4u * i, list[i]);
     MEM_W32(count_ptr, total);
     return 0;

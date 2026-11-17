@@ -185,11 +185,68 @@ static int test_sounds(void) {
     return 1;
 }
 
+static int test_cover_art_decodes_and_invalidates(void) {
+    PlayerUiArt *art = player_ui_art_create(fake_reader);
+    const NkUiImage *icon = NULL;
+    const NkUiImage *cover = NULL;
+#ifdef SR_SELFTEST_BUILD_ROOT
+    const char *cover_file = SR_SELFTEST_BUILD_ROOT "/test_cover_art_ui.png";
+#else
+    const char *cover_file = "test_cover_art_ui.png";
+#endif
+    size_t png_size = 0u;
+    uint8_t *png_bytes = embedded_copy("input-prompts/xbox_button_a.png", &png_size);
+    FILE *f;
+    CHECK(art != NULL && png_bytes != NULL && png_size > 0u,
+          "create loader and copy PNG fixture for cover test");
+    f = fopen(cover_file, "wb");
+    CHECK(f != NULL && fwrite(png_bytes, 1u, png_size, f) == png_size, "write cover PNG file");
+    fclose(f);
+    free(png_bytes);
+
+    player_ui_art_pump(art);
+    player_ui_art_get_title(art, "good", cover_file, false, &icon, NULL, &cover);
+    CHECK(icon == NULL && cover == NULL, "neither image before background decode");
+    CHECK(settle(art), "icon and cached cover art finish decoding");
+    player_ui_art_get_title(art, "good", cover_file, false, &icon, NULL, &cover);
+    CHECK(icon != NULL && cover != NULL && cover->width == 64u && cover->height == 64u,
+          "cached cover PNG decodes alongside the disc icon");
+
+    /* Turning cover art off (NULL path) drops cover while keeping ICON0.PNG. */
+    player_ui_art_get_title(art, "good", NULL, false, &icon, NULL, &cover);
+    CHECK(icon != NULL && cover == NULL, "clearing cover path removes cover without re-reading icon");
+
+    /* Invalidating covers forces a fresh disk check (after delete -> stays NULL). */
+    player_ui_art_get_title(art, "good", cover_file, false, &icon, NULL, &cover);
+    CHECK(settle(art), "cover reloads when re-enabled");
+    player_ui_art_get_title(art, "good", cover_file, false, &icon, NULL, &cover);
+    CHECK(cover != NULL, "re-enabled cover decodes again");
+
+    /* Refresh waits for a cover read in flight before it deletes the cache
+       (Windows refuses to delete an open file), and no longer once it ends. */
+    CHECK(!player_ui_art_reading_cover(NULL), "no loader reads no cover");
+    CHECK(!player_ui_art_reading_cover(art), "no cover read while idle");
+    player_ui_art_get_title(art, "slow", cover_file, false, &icon, NULL, &cover);
+    player_ui_art_pump(art);
+    CHECK(player_ui_art_reading_cover(art), "a cover read in flight is reported");
+    CHECK(settle(art), "the slow cover read finishes");
+    CHECK(!player_ui_art_reading_cover(art), "a finished cover read releases the file");
+    (void)remove(cover_file);
+    player_ui_art_invalidate_covers(art);
+    player_ui_art_get_title(art, "good", cover_file, false, &icon, NULL, &cover);
+    CHECK(cover == NULL && settle(art), "invalidated missing cover settles cleanly");
+    player_ui_art_get_title(art, "good", cover_file, false, &icon, NULL, &cover);
+    CHECK(cover == NULL, "deleted cover file stays absent");
+
+    player_ui_art_destroy(art);
+    return 1;
+}
+
 int main(void) {
     SDL_SetAtomicInt(&g_reads, 0);
     (void)SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
     if (!test_art_loads_once_and_falls_back() || !test_art_slots_and_shutdown() ||
-        !test_sounds()) {
+        !test_cover_art_decodes_and_invalidates() || !test_sounds()) {
         return 1;
     }
     puts("player UI disc art and launcher sounds passed");

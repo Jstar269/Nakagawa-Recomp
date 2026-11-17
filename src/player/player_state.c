@@ -185,6 +185,7 @@ void player_app_init(PlayerApp *app) {
     app->window_width = 1280;
     app->window_height = 720;
     app->should_quit = false;
+    snprintf(app->cover_art_cache_size_label, sizeof(app->cover_art_cache_size_label), "0 KB");
 
     /* Initialize settings from disk or defaults */
     player_app_settings_init_default(&app->settings);
@@ -657,6 +658,7 @@ bool player_app_game_has_runtime(const PlayerApp *app, const GameRecord *game) {
 void player_app_sync_library(PlayerApp *app) {
     if (!app) return;
     player_app_runtime_package_cache_invalidate(app);
+    memset(app->cover_art_state, 0, sizeof(app->cover_art_state));
     app->game_count = 0;
     for (int i = 0; i < app->library.count && i < MAX_LIBRARY_GAMES; i++) {
         app->games[i] = app->library.entries[i];
@@ -1419,6 +1421,7 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->build_speed = PACKAGE_BUILD_SPEED_BALANCED;
     settings->check_updates_at_start = false;
     settings->discord_presence = false;
+    settings->download_cover_art = false;
     settings->picker_folder[0] = '\0';
     settings->rebuild_prompt_version[0] = '\0';
     settings->developer_mode = false;
@@ -2124,6 +2127,13 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.discord_presence = discord_val;
     }
 
+    /* Opt-in cover art (#2632): off unless the file says true. */
+    NkJsonNode *cover_art_node = nk_json_obj_get(root, "download_cover_art");
+    bool cover_art_val = false;
+    if (cover_art_node && nk_json_get_bool(cover_art_node, &cover_art_val)) {
+        app->settings.download_cover_art = cover_art_val;
+    }
+
     /* A folder that no longer fits is dropped, not cut short. */
     const char *picker_folder = nk_json_get_string(nk_json_obj_get(root, "picker_folder"));
     if (picker_folder && strlen(picker_folder) < sizeof(app->settings.picker_folder)) {
@@ -2402,6 +2412,8 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
             app->settings.check_updates_at_start ? "true" : "false");
     fprintf(f, "  \"discord_presence\": %s,\n",
             app->settings.discord_presence ? "true" : "false");
+    fprintf(f, "  \"download_cover_art\": %s,\n",
+            app->settings.download_cover_art ? "true" : "false");
     player_settings_write_string(f, "picker_folder", app->settings.picker_folder);
     player_settings_write_string(f, "rebuild_prompt_version",
                                  app->settings.rebuild_prompt_version);
@@ -4627,6 +4639,7 @@ void player_app_set_view(PlayerApp *app, PlayerView view) {
         app->drop_notice_visible = true;
     }
     if (view != VIEW_ACE_SETTINGS) app->enhanced_page_disc[0] = '\0';
+    if (view == VIEW_BUILD_CACHE) player_app_refresh_cover_art_cache_size(app);
     app->active_view = view;
 }
 
@@ -8289,6 +8302,57 @@ void player_app_clear_shared_library_cache(PlayerApp *app) {
         snprintf(app->settings_notice, sizeof(app->settings_notice),
                  "Shared library cache cleared. The next build compiles its libraries again.");
     }
+}
+
+void player_app_toggle_download_cover_art(PlayerApp *app) {
+    if (!app) return;
+    app->settings.download_cover_art = !app->settings.download_cover_art;
+    if (app->settings.download_cover_art) {
+        memset(app->cover_art_state, 0, sizeof(app->cover_art_state));
+    }
+    player_dev_log_add(app, "settings", "download cover art %s",
+                       app->settings.download_cover_art ? "on" : "off");
+    maybe_persist_settings(app);
+}
+
+void player_app_refresh_cover_art_cache_size(PlayerApp *app) {
+    char data_root[NK_MAX_PATH];
+    uint64_t bytes = 0u;
+    if (!app) return;
+    if (nk_platform_resolve_path(NK_PATH_DATA, data_root, sizeof(data_root))) {
+        (void)nk_cover_art_cache_size(data_root, &bytes);
+    }
+    app->cover_art_cache_bytes = bytes;
+    nk_cover_art_format_size(bytes, app->cover_art_cache_size_label,
+                             sizeof(app->cover_art_cache_size_label));
+    app->cover_art_cache_size_known = true;
+}
+
+void player_app_refresh_cover_art_cache(PlayerApp *app) {
+    char data_root[NK_MAX_PATH];
+    char code[48];
+    if (!app) return;
+    if (!nk_platform_resolve_path(NK_PATH_DATA, data_root, sizeof(data_root))) {
+        snprintf(app->settings_notice, sizeof(app->settings_notice),
+                 "The app-data folder is unavailable. No cover art was removed.");
+        return;
+    }
+    if (!nk_cover_art_clear_cache(data_root, code, sizeof(code),
+                                  app->settings_notice, sizeof(app->settings_notice))) {
+        return;
+    }
+    memset(app->cover_art_state, 0, sizeof(app->cover_art_state));
+    nk_cover_art_misses_clear(&app->cover_art_misses);
+    app->cover_art_generation++;
+    app->cover_art_cache_bytes = 0u;
+    nk_cover_art_format_size(0u, app->cover_art_cache_size_label,
+                             sizeof(app->cover_art_cache_size_label));
+    app->cover_art_cache_size_known = true;
+    snprintf(app->settings_notice, sizeof(app->settings_notice), "%s",
+             app->settings.download_cover_art
+                 ? "Cover art cache cleared. Covers for every verified disc download again now."
+                 : "Cover art cache cleared.");
+    player_dev_log_add(app, "settings", "cover art cache cleared");
 }
 
 void player_app_set_build_error(

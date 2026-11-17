@@ -1521,7 +1521,7 @@ static void write_runtime_package_fixture_variant(
     }
 
     int package_length = snprintf(package_json, sizeof(package_json),
-        "{\"format\":\"nakagawa-aot-package\",\"schema_version\":2,\"cache\":%s,"
+        "{\"format\":\"nakagawa-aot-package\",\"schema_version\":3,\"cache\":%s,"
         "\"title\":{\"id\":\"%s\",\"display_name\":\"Synthetic fixture\","
         "\"kind\":\"retail\",\"manifest_sha256\":\"%064d\","
         "\"protected_digest\":\"%064d\"},"
@@ -4819,14 +4819,14 @@ static void test_package_build_lifecycle(const char *self_executable) {
        check its newer layout would fail, and the player leaves it as it is. */
     {
         static const char current_format[] =
-            "\"format\":\"nakagawa-aot-package\",\"schema_version\":2,";
+            "\"format\":\"nakagawa-aot-package\",\"schema_version\":3,";
         char line[256];
         snprintf(package_path, sizeof(package_path), "%s%cpackages%c%s%cpackage.json",
                  user_root, sep, sep, rebuild_app->games[0].disc_id, sep);
         char *package_text = read_text_file(package_path);
         char *at = strstr(package_text, current_format);
         assert(at != NULL);
-        at[strlen(current_format) - 2u] = '3';
+        at[strlen(current_format) - 2u] = '4';
         write_text_file(package_path, package_text);
         player_app_runtime_package_cache_invalidate(rebuild_app);
         assert(player_app_validate_runtime_package(
@@ -4834,7 +4834,7 @@ static void test_package_build_lifecycle(const char *self_executable) {
                    incompatible_reason, sizeof(incompatible_reason)) ==
                NK_RUNTIME_PACKAGE_INCOMPATIBLE);
         assert(strstr(incompatible_reason,
-                      "built by a newer Nakagawa (package format 3; this player reads 2)") !=
+                      "built by a newer Nakagawa (package format 4; this player reads 3)") !=
                NULL);
         assert(player_incompatible_reason_line(incompatible_reason, line, sizeof(line)) > 0);
         static const char card_line[] = "No longer fits this player: built by a newer Nakagawa";
@@ -16505,6 +16505,70 @@ int main(int argc, char **argv) {
             assert(strcmp(activity.state, "Ace") == 0);
             s_app2->is_game_running = false;
             assert(!player_app_discord_activity(s_app2, &activity));
+        }
+
+        /* Opt-in cover art (#2632): off by default, persisted cleanly, toggleable, and
+           its cache size / clear helpers inspect only the cover-art cache under user data. */
+        player_app_init(s_app2);
+        assert(!s_app2->settings.download_cover_art);
+        assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
+        {
+            char *saved = read_text_file(test_settings_path);
+            assert(saved && strstr(saved, "\"download_cover_art\": false") != NULL);
+            free(saved);
+        }
+        write_text_file(test_settings_path,
+                        "{\"schema_version\": 2, \"download_cover_art\": \"yes\"}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.download_cover_art);
+        write_text_file(test_settings_path,
+                        "{\"schema_version\": 2, \"download_cover_art\": true}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(s_app2->settings.download_cover_art);
+        s_app2->settings_path[0] = '\0';
+        player_app_toggle_download_cover_art(s_app2);
+        assert(!s_app2->settings.download_cover_art);
+        player_app_toggle_download_cover_art(s_app2);
+        assert(s_app2->settings.download_cover_art);
+        {
+            char data_root[NK_MAX_PATH];
+            char cover_dir[NK_MAX_PATH];
+            char cover_path[NK_MAX_PATH];
+            uint8_t png[33] = {
+                0x89u, 'P', 'N', 'G', 0x0Du, 0x0Au, 0x1Au, 0x0Au,
+                0u, 0u, 0u, 13u, 'I', 'H', 'D', 'R',
+                0u, 0u, 0x02u, 0x00u, 0u, 0u, 0x02u, 0x00u,
+                8u, 6u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
+            };
+            assert(nk_platform_resolve_path(NK_PATH_DATA, data_root, sizeof(data_root)));
+            assert(nk_cover_art_cache_dir(data_root, cover_dir, sizeof(cover_dir)));
+            assert(nk_platform_mkdir_p(cover_dir));
+            assert(nk_cover_art_cache_path(
+                data_root, "0123456789abcdef0123456789abcdef01234567",
+                cover_path, sizeof(cover_path)));
+            {
+                FILE *f = nk_platform_fopen_private(cover_path, "wb");
+                assert(f && fwrite(png, 1u, sizeof(png), f) == sizeof(png));
+                fclose(f);
+            }
+            player_app_refresh_cover_art_cache_size(s_app2);
+            assert(s_app2->cover_art_cache_bytes == sizeof(png));
+            assert(strcmp(s_app2->cover_art_cache_size_label, "1 KB") == 0);
+            /* A disc remembered as having no art this session is requested again
+               only after Refresh forgets it. */
+            assert(nk_cover_art_misses_add(&s_app2->cover_art_misses,
+                                           "1111111111111111111111111111111111111111"));
+            player_app_refresh_cover_art_cache(s_app2);
+            assert(s_app2->cover_art_cache_bytes == 0u);
+            assert(strcmp(s_app2->cover_art_cache_size_label, "0 KB") == 0);
+            assert(s_app2->cover_art_generation == 1u);
+            assert(!nk_cover_art_misses_contains(&s_app2->cover_art_misses,
+                                                 "1111111111111111111111111111111111111111"));
+            assert(strcmp(s_app2->settings_notice,
+                          "Cover art cache cleared. Covers for every verified disc download "
+                          "again now.") == 0);
         }
 
         remove(test_settings_path);

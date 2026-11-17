@@ -14,10 +14,13 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from typing import Any, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tools import compiler_compare  # noqa: E402
+if TYPE_CHECKING:
+    from tools import compiler_compare
+else:
+    import compiler_compare  # noqa: E402
 
 
 class _TimedWorkloadResult(TypedDict):
@@ -184,6 +187,17 @@ class CompilerCompareTests(unittest.TestCase):
         smoke = "PRODUCTION_SMOKE_VERIFY status=FAIL: link map omitted object\nmake: *** Error 1"
         self.assertEqual(compiler_compare._first_error(linker), linker.splitlines()[0])
         self.assertEqual(compiler_compare._first_error(smoke), smoke.splitlines()[0])
+
+    def test_first_error_ignores_clay_error_fixture_output(self) -> None:
+        output = (
+            "Clay error 1\n"
+            "ld.lld: error: undefined symbol: sr_ge_vram_read_prepare\n"
+            "mingw32-make: *** [mk/selftests.mk:73: profiler-selftest] Error 1\n"
+        )
+        self.assertEqual(
+            compiler_compare._first_error(output),
+            "ld.lld: error: undefined symbol: sr_ge_vram_read_prepare",
+        )
 
     def test_fast_math_and_reassociation_are_rejected(self) -> None:
         for flag in compiler_compare.FORBIDDEN_FP_FLAGS:
@@ -601,12 +615,475 @@ class CompilerCompareTests(unittest.TestCase):
         )
         self.assertEqual(first, second)
 
+    def test_semantic_hash_normalizes_relative_windows_backslash_build_roots(self) -> None:
+        first_root = compiler_compare.ROOT / "build" / "cc317" / "trial-1"
+        second_root = compiler_compare.ROOT / "build" / "cc317" / "trial-2"
+        first = compiler_compare._semantic_digest(
+            [("production-smoke", r"build\cc317\trial-1\project-font\nkjpn.pgf 12 bytes" + "\n")],
+            first_root,
+        )
+        second = compiler_compare._semantic_digest(
+            [("production-smoke", r"build\cc317\trial-2\project-font\nkjpn.pgf 12 bytes" + "\n")],
+            second_root,
+        )
+        self.assertEqual(first, second)
+
     def test_semantic_hash_ignores_host_addresses_and_timing_fields(self) -> None:
         first = "SR_HOST=0x00000277B35C4040 -> calling fn 00007FF763502801 aot_ms=111.519 encoder_write_ms=4242 status=PASS"
         second = "SR_HOST=0x000001A2B1B57040 -> calling fn 00007FF6BA002801 aot_ms=144.635 encoder_write_ms=4218 status=PASS"
         a = compiler_compare._semantic_digest([("production-smoke", first)], compiler_compare.ROOT / "build" / "a")
         b = compiler_compare._semantic_digest([("production-smoke", second)], compiler_compare.ROOT / "build" / "b")
         self.assertEqual(a, b)
+
+    def _make_trial(self, root: Path, outputs: list[tuple[str, str]]) -> dict[str, Any]:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "fixture.o").write_bytes(b"o" * 11)
+        (root / "fixture.exe").write_bytes(b"e" * 17)
+        events = [
+            {
+                "category": "compile", "generated_c": True, "duration_s": 0.25,
+                "peak_working_set_bytes": 12345, "compiler": "gcc",
+                "argv": ["-O0", "-c", "fixture_recomp_0.c"],
+            },
+            {
+                "category": "link", "generated_c": False, "duration_s": 0.10,
+                "peak_working_set_bytes": 23456, "compiler": "gcc",
+                "argv": ["-O0", "-o", "fixture.exe", "fixture.o"],
+            },
+        ]
+        return cast(dict[str, Any], compiler_compare._trial_summary(events, root, outputs))
+
+    def test_unstable_semantic_repeats_retain_raw_outputs_and_name_divergent_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            raw_1 = "PASS header\nPERF host_time_ms=10.0 frame_us=16683 crc=0x1111\n"
+            raw_2 = "PASS header\nPERF host_time_ms=14.2 frame_us=16699 crc=0x1111\n"
+            trials = [
+                self._make_trial(base / "trial-1", [("cosim-selftest", "PASS\n"), ("display-smoke-run", raw_1)]),
+                self._make_trial(base / "trial-2", [("cosim-selftest", "PASS\n"), ("display-smoke-run", raw_2)]),
+                self._make_trial(base / "trial-3", [("cosim-selftest", "PASS\n"), ("display-smoke-run", raw_1)]),
+            ]
+            raw_file = base / "trial-2" / "semantic_outputs" / "display-smoke-run.raw.txt"
+            self.assertTrue(raw_file.is_file(), f"missing retained raw output {raw_file}")
+            self.assertEqual(raw_file.read_text(encoding="utf-8"), raw_2)
+
+            summary = compiler_compare._measurement_summary(trials)
+            self.assertFalse(summary["semantic_hash_stable"])
+            self.assertIsNone(summary["semantic_sha256"])
+            for trial in trials:
+                self.assertNotIn("_semantic_outputs", trial)
+
+            diff = summary.get("semantic_diff")
+            assert isinstance(diff, dict)
+            self.assertEqual(diff["target"], "display-smoke-run")
+            self.assertEqual(diff["baseline_trial"], 1)
+            self.assertEqual(diff["divergent_trial"], 2)
+            self.assertEqual(diff["line_number"], 2)
+            self.assertEqual(diff["fields"], ["frame_us"])
+            self.assertIn("host_time_ms=10.0", diff["baseline_line"])
+            self.assertIn("frame_us=16699", diff["divergent_line"])
+            self.assertTrue(diff["unified_diff"])
+
+            toolchains: list[dict[str, Any]] = [{
+                "name": "gcc/default",
+                "compiler": "gcc",
+                "linker_selection": "default",
+                "status": compiler_compare.STATUS_MEASURED,
+                "veto": {
+                    "status": compiler_compare.GATE_PASS,
+                    "failed_gate": None,
+                    "gates": [{"name": g, "status": compiler_compare.GATE_PASS} for g in compiler_compare.GATE_ORDER],
+                },
+                "measurements": {
+                    "repeats": 3,
+                    "trials": trials,
+                    "summary": summary,
+                    "workloads_status": compiler_compare.GATE_PASS,
+                    "workloads_detail": "ok",
+                    "workloads": [],
+                },
+            }]
+            report: dict[str, Any] = {
+                "schema": compiler_compare.SCHEMA,
+                "issue": compiler_compare.ISSUE,
+                "generated_at_utc": "2026-11-15T00:00:00Z",
+                "toolchains": toolchains,
+            }
+            report["semantic_hash_comparison"] = compiler_compare._semantic_hash_comparison(toolchains)
+            markdown = compiler_compare.render_markdown(report)
+            self.assertIn("display-smoke-run", markdown)
+            self.assertIn("line 2", markdown)
+            self.assertIn("frame_us", markdown)
+            self.assertIn("host_time_ms=<HOST_TIME>", markdown)
+            self.assertNotIn("host_time_ms=10.0", markdown)
+            diff_text = compiler_compare._format_semantic_diff_text(diff)
+            self.assertIn("fields: frame_us", diff_text)
+            self.assertIn("frame_us=16699", diff_text)
+
+    def _report_for_summary(self, summary: dict[str, Any], trials: list[dict[str, Any]]) -> dict[str, Any]:
+        toolchains: list[dict[str, Any]] = [{
+            "name": "gcc/default",
+            "compiler": "gcc",
+            "linker_selection": "default",
+            "status": compiler_compare.STATUS_MEASURED,
+            "veto": {
+                "status": compiler_compare.GATE_PASS,
+                "failed_gate": None,
+                "gates": [{"name": g, "status": compiler_compare.GATE_PASS} for g in compiler_compare.GATE_ORDER],
+            },
+            "measurements": {
+                "repeats": len(trials),
+                "trials": trials,
+                "summary": summary,
+                "workloads_status": compiler_compare.GATE_PASS,
+                "workloads_detail": "ok",
+                "workloads": [],
+            },
+        }]
+        report: dict[str, Any] = {
+            "schema": compiler_compare.SCHEMA,
+            "issue": compiler_compare.ISSUE,
+            "generated_at_utc": "2026-11-15T00:00:00Z",
+            "toolchains": toolchains,
+        }
+        report["semantic_hash_comparison"] = compiler_compare._semantic_hash_comparison(toolchains)
+        return report
+
+    def test_stable_semantic_repeats_have_no_semantic_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            trials = [
+                self._make_trial(base / f"trial-{i}", [("cosim-selftest", "PASS val=42\n")])
+                for i in (1, 2, 3)
+            ]
+            summary = compiler_compare._measurement_summary(trials)
+            self.assertTrue(summary["semantic_hash_stable"])
+            self.assertIsNone(summary.get("semantic_diff"))
+
+    def test_semantic_normaliser_and_markdown_redact_host_paths_and_addresses(self) -> None:
+        win_temp_1 = "C:\\" + "Users\\" + "alice\\AppData\\Local\\" + "Temp\\nk_1111.csv"
+        win_temp_2 = "C:\\" + "Users\\" + "alice\\AppData\\Local\\" + "Temp\\nk_2222.csv"
+        posix_home = "/ho" + "me/alice/work/trace.log"
+        posix_mac = "/Us" + "ers/alice/Library/Caches/out.bin"
+        posix_tmp = "/tm" + "p/nk_stage.txt"
+        posix_var_tmp = "/var/tm" + "p/nk_stage2.txt"
+        wsl_path = "/mnt/c/" + "Users/alice/drop.csv"
+        msys_path = "/c/" + "Users/alice/msys.csv"
+        unc_path = "\\\\" + "fileserver\\share\\out.bin"
+        raw_1 = (
+            f"wrote {win_temp_1} {posix_home} {posix_mac} {posix_tmp} {posix_var_tmp} "
+            f"{wsl_path} {msys_path} ~/local/file.txt {unc_path} "
+            "D:\\other\\path.txt /opt/tools/bin/run "
+            "ptr=0x00007FF763502801 addr=0x7fff1234abcd bare=00007FF6BA002801 "
+            "guest=0x08804000 crc=0x1111 status=PASS\n"
+        )
+        raw_2 = (
+            f"wrote {win_temp_2} {posix_home} {posix_mac} {posix_tmp} {posix_var_tmp} "
+            f"{wsl_path} {msys_path} ~/local/file.txt {unc_path} "
+            "D:\\other\\path.txt /opt/tools/bin/run "
+            "ptr=0x00007FF6BA002801 addr=0x7ffe99990000 bare=000001A2B1B57040 "
+            "guest=0x08804000 crc=0x1111 status=FAIL\n"
+        )
+        # Build-root, SR_HOST, and timing variation across repeats normalises to the same digest.
+        digest_a = compiler_compare._semantic_digest(
+            [("display-smoke-run", "build/a/out SR_HOST=0x00007FF763502801 host_time_ms=10.0\n")],
+            compiler_compare.ROOT / "build" / "a",
+        )
+        digest_b = compiler_compare._semantic_digest(
+            [("display-smoke-run", "build/b/out SR_HOST=0x00007FF6BA002801 host_time_ms=14.2\n")],
+            compiler_compare.ROOT / "build" / "b",
+        )
+        self.assertEqual(digest_a, digest_b)
+
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            trials = [
+                self._make_trial(base / "trial-1", [("display-smoke-run", raw_1)]),
+                self._make_trial(base / "trial-2", [("display-smoke-run", raw_2)]),
+                self._make_trial(base / "trial-3", [("display-smoke-run", raw_1)]),
+            ]
+            summary = compiler_compare._measurement_summary(trials)
+            markdown = compiler_compare.render_markdown(self._report_for_summary(summary, trials))
+
+        for secret in (
+            "alice", "AppData", "nk_1111", "nk_2222", "trace.log", "out.bin",
+            "nk_stage", "fileserver", "D:\\other", "/opt/tools", "7FF763502801",
+            "7FF6BA002801", "7fff1234abcd", "7ffe99990000", "01A2B1B57040",
+        ):
+            self.assertNotIn(secret, markdown)
+        self.assertIn("<HOST_PATH>", markdown)
+        self.assertIn("<HOST_ADDR>", markdown)
+        self.assertIn("guest=0x08804000", markdown)
+        self.assertIn("crc=0x1111", markdown)
+        diff = summary["semantic_diff"]
+        assert isinstance(diff, dict)
+        self.assertIn("status", diff["fields"])
+        self.assertIn("unstable field(s):", markdown)
+        self.assertIn("status", markdown)
+
+        # Defense in depth: render_markdown itself redacts even if given an unredacted report.
+        spaced_user = "C:\\" + "Users\\" + "Alice Smith\\AppData\\Local\\" + "Temp\\nk_3333.csv"
+        direct_summary = {
+            **{name: {"min": 1.0, "median": 1.0, "max": 1.0} for name in compiler_compare.MEASUREMENT_NAMES},
+            "semantic_sha256": None,
+            "semantic_hashes": ["a", "b", "a"],
+            "semantic_hash_stable": False,
+            "semantic_diff": {
+                "target": "display-smoke-run",
+                "baseline_trial": 1,
+                "divergent_trial": 2,
+                "line_number": 1,
+                "fields": ["status"],
+                "baseline_line": f"RAW {win_temp_1}",
+                "divergent_line": f"RAW {spaced_user}",
+                "baseline_normalised_line": f"wrote {win_temp_1} ptr=0x00007FF763502801 status=PASS",
+                "divergent_normalised_line": f"wrote {spaced_user} ptr=0x00007FF6BA002801 status=FAIL",
+            },
+        }
+        direct_report = self._report_for_summary(direct_summary, [
+            {"generated_c_compile_wall_seconds": 1.0, "peak_working_set_bytes": 1,
+             "link_wall_seconds": 1.0, "object_bytes": 1, "executable_bytes": 1,
+             "semantic_sha256": "a"},
+            {"generated_c_compile_wall_seconds": 1.0, "peak_working_set_bytes": 1,
+             "link_wall_seconds": 1.0, "object_bytes": 1, "executable_bytes": 1,
+             "semantic_sha256": "b"},
+            {"generated_c_compile_wall_seconds": 1.0, "peak_working_set_bytes": 1,
+             "link_wall_seconds": 1.0, "object_bytes": 1, "executable_bytes": 1,
+             "semantic_sha256": "a"},
+        ])
+        direct_md = compiler_compare.render_markdown(direct_report)
+        self.assertNotIn("alice", direct_md)
+        self.assertNotIn("Alice", direct_md)
+        self.assertNotIn("Smith", direct_md)
+        self.assertNotIn("nk_3333", direct_md)
+        self.assertNotIn("7FF763502801", direct_md)
+        self.assertNotIn("RAW ", direct_md)
+
+    def test_divergent_fields_handle_comma_joined_drive_letters_repeated_keys_and_json_tail(self) -> None:
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line("S a=1,b=2,c=3", "S a=1,b=9,c=3"),
+            ["b"],
+        )
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line(
+                "DISPLAY_FLIGHT_SMOKE aot=1 host_present=39,38 crc=0x11",
+                "DISPLAY_FLIGHT_SMOKE aot=1 host_present=33,34 crc=0x11",
+            ),
+            ["host_present"],
+        )
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line(
+                "wrote D:\\logs\\x_1111.csv",
+                "wrote D:\\logs\\x_2222.csv",
+            ),
+            [],
+        )
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line(
+                "ch=0 n=1 ch=8 n=3",
+                "ch=1 n=1 ch=8 n=3",
+            ),
+            ["ch"],
+        )
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line(
+                'status=PASS {"frames": 10}',
+                'status=PASS {"frames": 11}',
+            ),
+            ["frames"],
+        )
+
+    def test_first_semantic_divergence_handles_inserted_and_reordered_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            # Inserted line before a stable line carrying fields a and b.
+            trials_ins = [
+                self._make_trial(base / "ins-1", [("display-smoke-run", "hdr\nPERF a=1 b=2\nend\n")]),
+                self._make_trial(base / "ins-2", [("display-smoke-run", "hdr\nWARN x=3\nPERF a=1 b=2\nend\n")]),
+                self._make_trial(base / "ins-3", [("display-smoke-run", "hdr\nPERF a=1 b=2\nend\n")]),
+            ]
+            diff_ins = compiler_compare._measurement_summary(trials_ins)["semantic_diff"]
+            assert isinstance(diff_ins, dict)
+            self.assertEqual(diff_ins["line_number"], 2)
+            self.assertEqual(diff_ins["fields"], ["x"])
+
+            # Purely reordered identical lines: no field value changed.
+            trials_reord = [
+                self._make_trial(base / "reo-1", [("display-smoke-run", "hdr\nPERF a=1 b=2\nWARN x=3\nend\n")]),
+                self._make_trial(base / "reo-2", [("display-smoke-run", "hdr\nWARN x=3\nPERF a=1 b=2\nend\n")]),
+                self._make_trial(base / "reo-3", [("display-smoke-run", "hdr\nPERF a=1 b=2\nWARN x=3\nend\n")]),
+            ]
+            diff_reord = compiler_compare._measurement_summary(trials_reord)["semantic_diff"]
+            assert isinstance(diff_reord, dict)
+            self.assertEqual(diff_reord["fields"], [])
+
+            # Reordered line where only one field changed on the moved line.
+            trials_moved = [
+                self._make_trial(base / "mov-1", [("display-smoke-run", "hdr\nA a=1\nB b=2 c=5\nend\n")]),
+                self._make_trial(base / "mov-2", [("display-smoke-run", "hdr\nB b=9 c=5\nA a=1\nend\n")]),
+                self._make_trial(base / "mov-3", [("display-smoke-run", "hdr\nA a=1\nB b=2 c=5\nend\n")]),
+            ]
+            diff_moved = compiler_compare._measurement_summary(trials_moved)["semantic_diff"]
+            assert isinstance(diff_moved, dict)
+            self.assertEqual(diff_moved["fields"], ["b"])
+
+    def test_trailing_newline_only_divergence_is_named_case(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            trials = [
+                self._make_trial(base / "trial-1", [("cosim-selftest", "PASS\n")]),
+                self._make_trial(base / "trial-2", [("cosim-selftest", "PASS")]),
+                self._make_trial(base / "trial-3", [("cosim-selftest", "PASS\n")]),
+            ]
+            summary = compiler_compare._measurement_summary(trials)
+            diff = summary["semantic_diff"]
+            assert isinstance(diff, dict)
+            self.assertEqual(diff["kind"], "trailing_newline")
+            self.assertIsNone(diff["line_number"])
+            self.assertEqual(diff["fields"], [])
+            markdown = compiler_compare.render_markdown(self._report_for_summary(summary, trials))
+            self.assertIn("trailing newline", markdown.lower())
+            self.assertNotIn("line 1", markdown)
+            diff_text = compiler_compare._format_semantic_diff_text(diff)
+            self.assertIn("trailing_newline", diff_text)
+            self.assertNotIn("line: 1\n", diff_text)
+
+    def test_stale_semantic_diff_txt_is_removed_on_later_stable_run(self) -> None:
+        phase = {"unstable": True}
+
+        def scripted_trials(compiler_path: str, make: str, python: str, settings: dict[str, str],
+                            build_root: Path, repeats: int, *, env: dict[str, str]) -> list[dict[str, Any]]:
+            del compiler_path, make, python, settings, env
+            records: list[dict[str, Any]] = []
+            for index in range(1, repeats + 1):
+                val = 99 if phase["unstable"] and index == 2 else 1
+                records.append(self._make_trial(
+                    build_root / f"trial-{index}",
+                    [("cosim-selftest", f"PASS val={val}\n")],
+                ))
+            return records
+
+        diff_file = self.output / "gcc" / "default" / "measurements" / "semantic_diff.txt"
+        with mock.patch.object(compiler_compare, "_measurement_trials", scripted_trials):
+            unstable_report = self.compare()
+            self.assertFalse(unstable_report["toolchains"][0]["measurements"]["summary"]["semantic_hash_stable"])
+            self.assertTrue(diff_file.is_file())
+
+            phase["unstable"] = False
+            stable_report = self.compare()
+            self.assertTrue(stable_report["toolchains"][0]["measurements"]["summary"]["semantic_hash_stable"])
+            self.assertFalse(diff_file.exists())
+
+            # Also verify a later failing veto cleans up a stale semantic_diff.txt.
+            phase["unstable"] = True
+            self.compare()
+            self.assertTrue(diff_file.is_file())
+            self.fake.failing_gate = "display-smoke"
+            veto_report = self.compare()
+            self.assertEqual(veto_report["toolchains"][0]["status"], compiler_compare.STATUS_FAILED_VETO)
+            self.assertFalse(diff_file.exists())
+
+    def test_semantic_hash_preserves_64bit_values_guest_paths_and_previous_normalisation(self) -> None:
+        build_root = compiler_compare.ROOT / "build" / "a"
+        distinct_pairs = (
+            ("acc=0x00000001ff76c43b\n", "acc=0x00000001ff76c43c\n"),
+            ("mult hi_lo=0x0000000a00000003\n", "mult hi_lo=0x0000000a00000004\n"),
+            ("ticks=0000000004000010\n", "ticks=0000000004000020\n"),
+            ("open /PSP_GAME/USRDIR/a.bin ok\n", "open /PSP_GAME/USRDIR/b.bin ok\n"),
+            ("file=/PSP_GAME/SYSDIR/EBOOT.BIN n=1\n", "file=/PSP_GAME/SYSDIR/BOOT.BIN n=1\n"),
+            ("mount /usr/data1\n", "mount /usr/data2\n"),
+        )
+        for text_a, text_b in distinct_pairs:
+            with self.subTest(pair=(text_a.strip(), text_b.strip())):
+                norm_a = compiler_compare._normalise_semantic_output(text_a, build_root)
+                norm_b = compiler_compare._normalise_semantic_output(text_b, build_root)
+                self.assertEqual(norm_a, text_a)
+                self.assertEqual(norm_b, text_b)
+                digest_a = compiler_compare._semantic_digest([("cosim-selftest", text_a)], build_root)
+                digest_b = compiler_compare._semantic_digest([("cosim-selftest", text_b)], build_root)
+                self.assertNotEqual(digest_a, digest_b)
+
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            trials = [
+                self._make_trial(base / "trial-1", [("cosim-selftest", "acc=0x00000001ff76c43b\n")]),
+                self._make_trial(base / "trial-2", [("cosim-selftest", "acc=0x00000001ff76c43c\n")]),
+                self._make_trial(base / "trial-3", [("cosim-selftest", "acc=0x00000001ff76c43b\n")]),
+            ]
+            summary = compiler_compare._measurement_summary(trials)
+            self.assertFalse(summary["semantic_hash_stable"])
+            diff = summary["semantic_diff"]
+            assert isinstance(diff, dict)
+            diff_text = compiler_compare._format_semantic_diff_text(diff)
+            self.assertIn("acc=0x00000001ff76c43b", diff_text)
+            self.assertIn("acc=0x00000001ff76c43c", diff_text)
+
+    def test_align_first_divergence_bounds_pairing_work_on_many_differing_lines(self) -> None:
+        count = 300
+        lines_a = [
+            f"STEP idx={i:04d} a=1 b=2 c=3 d=4 e=5 f=6 g=7 h=8 payload=xxxxxxxx"
+            for i in range(count)
+        ]
+        lines_b = [
+            f"STEP idx={i:04d} a=1 b=9 c=3 d=4 e=5 f=6 g=7 h=8 payload=xxxxxxxx"
+            for i in range(count)
+        ]
+        trial_outputs = [
+            [{"target": "cosim-selftest", "raw": "\n".join(lines_a) + "\n", "normalized": "\n".join(lines_a) + "\n"}],
+            [{"target": "cosim-selftest", "raw": "\n".join(lines_b) + "\n", "normalized": "\n".join(lines_b) + "\n"}],
+        ]
+        with mock.patch.object(
+            compiler_compare, "_extract_line_fields", wraps=compiler_compare._extract_line_fields,
+        ) as extract_spy, mock.patch.object(
+            compiler_compare.difflib, "SequenceMatcher", wraps=compiler_compare.difflib.SequenceMatcher,
+        ) as sm_spy:
+            diff = compiler_compare._first_semantic_divergence(trial_outputs, ["h1", "h2"])
+
+        assert isinstance(diff, dict)
+        self.assertEqual(diff["kind"], "changed")
+        self.assertEqual(diff["line_number"], 1)
+        self.assertEqual(diff["fields"], ["b"])
+        self.assertLessEqual(extract_spy.call_count, 200)
+        self.assertLessEqual(sm_spy.call_count, 1500)
+
+        # Also verify bounded work when an unmatched line is inserted ahead of many differing lines.
+        inserted_b = ["WARN x=3", *lines_b]
+        inserted_outputs = [
+            [{"target": "cosim-selftest", "raw": "\n".join(lines_a) + "\n", "normalized": "\n".join(lines_a) + "\n"}],
+            [{"target": "cosim-selftest", "raw": "\n".join(inserted_b) + "\n", "normalized": "\n".join(inserted_b) + "\n"}],
+        ]
+        with mock.patch.object(
+            compiler_compare, "_extract_line_fields", wraps=compiler_compare._extract_line_fields,
+        ) as extract_spy2:
+            diff_ins = compiler_compare._first_semantic_divergence(inserted_outputs, ["h1", "h2"])
+        assert isinstance(diff_ins, dict)
+        self.assertLessEqual(extract_spy2.call_count, 200)
+
+    def test_divergent_fields_extract_keys_after_colon_slash_semicolon_and_angle(self) -> None:
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line("PERF:frames=3", "PERF:frames=4"),
+            ["frames"],
+        )
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line("PERF:frames=3 x=1", "PERF:frames=4 x=1"),
+            ["frames"],
+        )
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line("<BUILD_ROOT>/x.bin:size=3", "<BUILD_ROOT>/x.bin:size=4"),
+            ["size"],
+        )
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line("S a=1;b=2", "S a=1;b=9"),
+            ["b"],
+        )
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line("/dir/k=1", "/dir/k=2"),
+            ["k"],
+        )
+        self.assertEqual(
+            compiler_compare._divergent_fields_on_line("if a==1", "if a==2"),
+            [],
+        )
 
 
 class RuntimeWorkloadRunnerTests(unittest.TestCase):
@@ -687,7 +1164,7 @@ class TimingOnlyWorkloadTests(unittest.TestCase):
 
     def _run(self, name: str) -> _TimedWorkloadResult:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from tools import run_perf_benchmarks
+        import run_perf_benchmarks
         done = subprocess.CompletedProcess(args=[], returncode=0, stdout="built and ran\n")
         with tempfile.TemporaryDirectory() as temp, \
                 mock.patch.object(run_perf_benchmarks.subprocess, "run", return_value=done):
@@ -712,14 +1189,14 @@ class TimingOnlyWorkloadTests(unittest.TestCase):
 
     def test_every_timing_only_workload_is_a_real_ladder_workload(self) -> None:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from tools import run_perf_benchmarks
+        import run_perf_benchmarks
         names = {name for name, _targets in run_perf_benchmarks.WORKLOADS}
         self.assertTrue(run_perf_benchmarks.TIMING_ONLY <= names)
         self.assertTrue(all(name.startswith("platform-ladder-") for name in run_perf_benchmarks.TIMING_ONLY))
 
     def test_runtime_runner_passes_explicit_compiler_and_linker_to_make(self) -> None:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from tools import run_perf_benchmarks
+        import run_perf_benchmarks
         captured: list[list[str]] = []
         done = subprocess.CompletedProcess(args=[], returncode=0, stdout="built and ran\n")
 
@@ -739,7 +1216,7 @@ class TimingOnlyWorkloadTests(unittest.TestCase):
 
     def test_runtime_runner_cli_forwards_make_assignments(self) -> None:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from tools import run_perf_benchmarks
+        import run_perf_benchmarks
         captured: list[tuple[str, ...]] = []
 
         def fake_run_one(*_args, make_assignments=(), **_kwargs):

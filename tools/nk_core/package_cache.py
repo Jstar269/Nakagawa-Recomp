@@ -15,7 +15,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Iterator, Mapping, TypedDict
+from typing import Any, Iterable, Iterator, Mapping, TypedDict
 
 
 class _CacheKeyComponents(TypedDict):
@@ -61,7 +61,10 @@ RUNTIME_ABI_COMPATIBILITY: dict[int, frozenset[int]] = {
 }
 CACHE_ROOT_PARTS = ("cache", "packages")
 COMPLETION_MANIFEST = "completion-manifest.json"
-DEFAULT_MAX_CACHE_ENTRIES = 8
+# One unreferenced previous package or AOT stage is enough for rollback/reuse.
+# Entries used by installed packages are protected separately and do not count
+# against this history allowance.
+DEFAULT_MAX_CACHE_ENTRIES = 1
 CACHE_LIMIT_ENV = "NK_AOT_CACHE_MAX_ENTRIES"
 LOCAL_IDENTITIES_DIR = "title-input-identities"
 
@@ -783,6 +786,20 @@ def cache_entry_root(cache_root_path: Path | str, cache_key: Mapping[str, Any]) 
     return Path(cache_root_path) / "entries" / cache_entry_key(cache_key)
 
 
+def aot_stage_cache_key(cache_key: Mapping[str, Any]) -> str:
+    """The short cache folder for generated code, shared across native rebuild keys."""
+    native = cache_key.get("native") if isinstance(cache_key, Mapping) else None
+    components = native.get("components") if isinstance(native, Mapping) else None
+    digest = components.get("generated_code_digest") if isinstance(components, Mapping) else None
+    if not isinstance(digest, str) or not _is_cache_digest(digest):
+        raise PackageCacheError("cache key generated-code digest is invalid")
+    return digest[:CACHE_ENTRY_KEY_CHARS]
+
+
+def aot_stage_root(cache_root_path: Path | str, cache_key: Mapping[str, Any]) -> Path:
+    return Path(cache_root_path) / "aot-stages" / aot_stage_cache_key(cache_key)
+
+
 def _is_cache_entry_key(value: str) -> bool:
     return (len(value) == CACHE_ENTRY_KEY_CHARS and
             all(char in "0123456789abcdef" for char in value))
@@ -795,6 +812,11 @@ def cache_root_is_private(user_data_root: Path | str, repository_root: Path | st
 
 
 def cache_entry_limit(environment: Mapping[str, str] | None = None) -> int:
+    """Return the allowed number of unreferenced previous package entries.
+
+    The retained-history limit is deliberately capped at one; entries referenced
+    by installed packages are handled as protected entries by the caller.
+    """
     env = os.environ if environment is None else environment
     raw = env.get(CACHE_LIMIT_ENV)
     if raw is None or not raw.strip():
@@ -805,7 +827,7 @@ def cache_entry_limit(environment: Mapping[str, str] | None = None) -> int:
         raise PackageCacheError(f"{CACHE_LIMIT_ENV} must be a positive integer") from exc
     if value < 1:
         raise PackageCacheError(f"{CACHE_LIMIT_ENV} must be a positive integer")
-    return value
+    return min(value, DEFAULT_MAX_CACHE_ENTRIES)
 
 
 def _is_cache_digest(value: str) -> bool:
@@ -827,6 +849,7 @@ def prune_cache(
     *,
     max_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
     protected_entry: Path | str | None = None,
+    protected_entries: Iterable[Path | str] = (),
 ) -> tuple[int, int]:
     if type(max_entries) is not int or max_entries < 1:
         raise PackageCacheError("cache entry limit must be a positive integer")
@@ -857,16 +880,68 @@ def prune_cache(
             candidates.append((modified, entry))
     except OSError:
         return 0, 0
-    protected = (
-        _path_key(Path(protected_entry).expanduser().resolve(strict=False))
-        if protected_entry is not None else None
-    )
-    candidates.sort(key=lambda item: (_path_key(item[1]) == protected, item[0]), reverse=True)
+    protected = {
+        _path_key(Path(entry).expanduser().resolve(strict=False))
+        for entry in protected_entries
+    }
+    if protected_entry is not None:
+        protected.add(_path_key(Path(protected_entry).expanduser().resolve(strict=False)))
+    candidates.sort(key=lambda item: (_path_key(item[1]) in protected, item[0]), reverse=True)
     removed = 0
     for _, entry in candidates[max_entries:]:
-        if protected is not None and _path_key(entry) == protected:
+        if _path_key(entry) in protected:
             continue
         if entry.is_symlink():
+            continue
+        try:
+            shutil.rmtree(entry)
+        except OSError:
+            continue
+        removed += 1
+    return removed, len(candidates) - removed
+
+
+def prune_aot_stages(
+    cache_root_path: Path | str,
+    *,
+    protected_stage_keys: Iterable[str] = (),
+    max_previous: int = DEFAULT_MAX_CACHE_ENTRIES,
+) -> tuple[int, int]:
+    """Retain active generated-code stages plus a bounded previous stage."""
+    if type(max_previous) is not int or max_previous < 0:
+        raise PackageCacheError("AOT stage history limit must be a non-negative integer")
+    cache_root = Path(cache_root_path).expanduser().resolve(strict=False)
+    root = cache_root / "aot-stages"
+    if root.is_symlink() or not root.is_dir():
+        return 0, 0
+    protected = set()
+    for value in protected_stage_keys:
+        if not isinstance(value, str):
+            raise PackageCacheError("AOT stage cache key must be a short hexadecimal key")
+        key = value[:CACHE_ENTRY_KEY_CHARS]
+        if not _is_cache_entry_key(key):
+            raise PackageCacheError("AOT stage cache key must be a SHA-256 digest or short key")
+        protected.add(key)
+    candidates: list[tuple[int, Path]] = []
+    try:
+        for entry in root.iterdir():
+            if entry.is_symlink() or not entry.is_dir() or not _is_cache_entry_key(entry.name):
+                continue
+            try:
+                modified = entry.stat().st_mtime_ns
+            except OSError:
+                continue
+            candidates.append((modified, entry))
+    except OSError:
+        return 0, 0
+    candidates.sort(
+        key=lambda item: (item[1].name in protected, item[0]), reverse=True
+    )
+    protected_count = sum(entry.name in protected for _modified, entry in candidates)
+    keep_count = protected_count + max_previous
+    removed = 0
+    for _modified, entry in candidates[keep_count:]:
+        if entry.name in protected or entry.is_symlink():
             continue
         try:
             shutil.rmtree(entry)
@@ -1752,6 +1827,20 @@ def package_cache_key(package_dir: Path) -> Mapping[str, Any] | None:
     return _key_from_document(document)
 
 
+def package_manifest_schema_version(package_dir: Path) -> int | None:
+    """Return a supported per-title package schema version, if readable."""
+    try:
+        document = _read_json(package_dir / "package.json")
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    version = document.get("schema_version")
+    if type(version) is int and version in {2, 3}:
+        return version
+    return None
+
+
 def validate_package_cache(
     package_dir: Path,
     *,
@@ -1766,7 +1855,12 @@ def validate_package_cache(
         return False, f"package metadata is unreadable: {exc}"
     if not isinstance(package, dict) or not isinstance(report, dict):
         return False, "package metadata must contain JSON objects"
-    if package.get("format") != "nakagawa-aot-package" or package.get("schema_version") != 2:
+    package_schema = package.get("schema_version")
+    if (
+        package.get("format") != "nakagawa-aot-package"
+        or type(package_schema) is not int
+        or package_schema not in {2, 3}
+    ):
         return False, "package format or schema is unsupported"
     cache = package.get("cache")
     key = _key_from_document(package)
@@ -1873,7 +1967,27 @@ def validate_package_cache(
     objects = package.get("generated_objects", [])
     if not isinstance(objects, list):
         return False, "package generated object list is invalid"
+    if package_schema == 3 and objects:
+        return False, "runtime-only package schema must not declare generated objects"
     required = {"package.json", "build-report.json", executable_path, image_path}
+    modules_dir = package_dir / "modules"
+    if package_schema == 3 and (modules_dir.is_dir() or modules_dir.is_symlink()):
+        # A package that ships its guest modules ships every one it was built against;
+        # a missing module would only show when the game loads it.
+        for name, digest in package_modules.items():
+            if not isinstance(name, str):
+                return False, "package module input metadata is invalid"
+            module_path = f"modules/{name}"
+            try:
+                module_file = _resolve_within(package_dir, module_path)
+            except PackageCacheError as exc:
+                return False, str(exc)
+            if (
+                module_file.is_symlink() or not module_file.is_file()
+                or _digest_once(module_file, file_digests) != digest
+            ):
+                return False, f"package guest module is missing or stale: {module_path}"
+            required.add(module_path)
     for item in objects:
         if not isinstance(item, dict) or not isinstance(item.get("path"), str):
             return False, "package generated object record is invalid"
