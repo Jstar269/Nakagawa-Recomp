@@ -898,6 +898,13 @@ def _plain_name(value) -> bool:
             and not any(char in value for char in '/\\:\0'))
 
 
+def _runtime_file_path(value: object) -> bool:
+    """A ``runtime_files`` entry as ``stage_install`` records it: a file's path under ``bin/``, plain names
+    joined by ``/`` (``SDL3.dll``, ``assets/redump/redump-psp.zip``). An absolute path, a drive or any other
+    colon, a backslash, a NUL and an empty, ``.`` or ``..`` segment are all refused."""
+    return isinstance(value, str) and all(_plain_name(segment) for segment in value.split("/"))
+
+
 def _read_marker(dest: Path) -> dict:
     """The marker of ``dest`` once it passes the checks that make it this tool's own.
 
@@ -928,8 +935,11 @@ def _read_marker(dest: Path) -> dict:
     if not (isinstance(player, str) and player.startswith("bin/") and _plain_name(player[4:])):
         refuse(f"lists the player {player!r}, not bin/<file name>")
     files = record.get("runtime_files", [])
-    if not isinstance(files, list) or not all(_plain_name(name) for name in files):
-        refuse("lists a runtime file that is not a plain file name inside bin/")
+    if not isinstance(files, list):
+        refuse("has runtime_files that is not a list")
+    unsafe = [name for name in files if not _runtime_file_path(name)]
+    if unsafe:
+        refuse(f"lists the runtime file {unsafe[0]!r}, not a relative path of plain names inside bin/")
     integration = record.get("integration", [])
     if not isinstance(integration, list) or not all(isinstance(path, str) for path in integration):
         refuse("lists an integration entry that is not a path")

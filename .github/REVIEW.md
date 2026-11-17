@@ -16,7 +16,10 @@ runtime, an interpreter floor, and HLE, moving toward low-level emulation.
   `--lle-import-seam` must leave generated output byte-identical without the flag and
   keep unsupported behavior fail-closed.
 - **Visible failure:** invalid guest pointers, unknown opcodes, unowned targets, missing
-  inputs, and unavailable backends must be reported, not guessed or synthesized.
+  inputs, and unavailable backends must be reported, not guessed or synthesized. A known
+  operation may return its modeled PSP error to the guest, reported visibly (`AGENTS.md` section 6);
+  flag a change that returns one silently or
+  that turns such an error into a whole-run stop or a host crash, or hides a miss behind success.
 - **Generic implementation:** no title-specific branches, title-keyed overrides or private guest
   addresses in `src/rt/` or generic `tools/` code; a game's name or disc ID in a comment, test or
   document is fine. Evidence-backed title behavior belongs in a manifest/config with
@@ -25,9 +28,11 @@ runtime, an interpreter floor, and HLE, moving toward low-level emulation.
   upstream project is acceptable only under the `AGENTS.md` section 4 import rules (GPL-compatible
   licence, exact revision pinned, `PROVENANCE.md` and `CREDITS.md` entries, notices kept, labelled
   `derived-translated`); reject code that breaks them, including undisclosed copying or
-  line-by-line translation. PSP values need a measured cell, public specification, or an
-  explicit unmeasured/fail-closed label. Do not present engineering controls as legal
-  conclusions or call code clean-room/independent without a supporting trusted record.
+  line-by-line translation. A PPSSPP/JPCSP-derived interim behavior must meet section 7's source,
+  label, regression and once-per-run logging rules, and never be described as PSP-measured or
+  independent. Unknown NIDs, behavior with no public reference, and unmeasured save-data or flash
+  writes remain fail-closed. Do not present engineering controls as legal conclusions or call code
+  clean-room/independent without a supporting trusted record.
 - **Host neutrality:** shared runtime and `*_posix.c` changes must build on Linux as well
   as Windows, and generic PSP semantics must not depend on Windows APIs.
 

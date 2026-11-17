@@ -987,7 +987,10 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             /* One button column for every row the page shows, so a sentence of any of them
                that would be cut makes them all stack. The Nickname button's value is clamped
                to half the column, so only its name counts for the column's width. */
-            WizardRow rows[6];
+            static const char k_cover_art_sentence[] =
+                "Fetch Redump-matched box art from thumbnails.libretro.com to cache; "
+                "unmatched discs keep disc art.";
+            WizardRow rows[7];
             size_t row_count = 0u;
             if (model->online_mode) {
                 rows[row_count++] = (WizardRow){"Online mode", "On",
@@ -1016,6 +1019,9 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                           "Softcore only. Hardcore is unavailable.")};
             }
             rows[row_count++] = (WizardRow){"Nickname", "", SCR_NICKNAME_SENTENCE};
+            rows[row_count++] = (WizardRow){"Download cover art",
+                                            settings_on_off(model->download_cover_art),
+                                            k_cover_art_sentence};
             WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, false);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
@@ -1035,21 +1041,21 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DISCORD);
             }
             if ((model->achievements_available || model->achievements_enabled) &&
-                scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xB8u,
+                scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xF0u,
                                   "Achievements",
                                   "Softcore only. Agree to the host and data disclosure before signing in.",
                                   model->achievements_enabled, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS);
             } else {
                 (void)scr_wizard_value_state(
-                    ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xB8u,
+                    ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xF0u,
                     "Achievements", "Unavailable",
                     "Sign-in needs Windows Credential Manager, which this platform does not provide.",
                     false, true, inner - 32.0f, &column);
             }
             if (model->achievements_enabled &&
                 scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS_ACCOUNT,
-                                 SET_ID_TEXT + 0xBCu, "RA account",
+                                 SET_ID_TEXT + 0xF4u, "RA account",
                                  model->achievements_signed_in
                                      ? safe_text(model->achievements_account, "Signed in")
                                      : "Sign in",
@@ -1073,6 +1079,11 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                      false, inner - 32.0f, &column)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_EDIT_NICKNAME);
                 }
+            }
+            if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_COVER_ART, SET_ID_TEXT + 0xB8u,
+                                  "Download cover art", k_cover_art_sentence,
+                                  model->download_cover_art, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_COVER_ART);
             }
             nk_ui_end_container(ui);
         }
@@ -1183,6 +1194,25 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                     *result = settings_op(PLAYER_UI_SETTINGS_OPEN_REMOVE_TOOLS);
                 }
                 nk_ui_end_container(ui);
+            }
+            {
+                char cache_line[96];
+                NkUiLayout cache_row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
+                                                   NK_UI_SPACE_3);
+                cache_row.align_y = NK_UI_ALIGN_CENTER;
+                (void)snprintf(cache_line, sizeof(cache_line), "Cover art cache: %s",
+                               safe_text(model->cover_art_cache_size, "0 KB"));
+                if (nk_ui_begin_container(ui, SET_ID_TEXT + 0xCDu, &cache_row, NULL)) {
+                    NkUiTextStyle label_style = nk_ui_type(NK_UI_TYPE_BODY_S, theme->muted);
+                    nk_ui_text(ui, SET_ID_TEXT + 0xCEu, nk_ui_frame_text(ui, cache_line),
+                               &label_style);
+                    nk_ui_spacer(ui, SET_ID_TEXT + 0xCFu, sizing_grow(), sizing_fixed(1.0f));
+                    if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_REFRESH_COVER_ART,
+                                     "Refresh cover art", NK_UI_BUTTON_SMALL)) {
+                        *result = settings_op(PLAYER_UI_SETTINGS_REFRESH_COVER_ART);
+                    }
+                    nk_ui_end_container(ui);
+                }
             }
             if (model->notice != NULL && model->notice[0] != '\0') {
                 NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->warning);

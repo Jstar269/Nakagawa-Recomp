@@ -27,6 +27,7 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 import stage_install  # noqa: E402
+import stage_runtime_dlls  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
 
 _GIT_ENV = {
@@ -52,6 +53,14 @@ def _fixture_repo(root: Path) -> Path:
 def _fake_stager(target: Path) -> list[str]:
     (target / "SDL3.dll").write_bytes(b"fixture")
     return ["SDL3.dll"]
+
+
+def _nested_stager(target: Path) -> list[str]:
+    """The fake DLL, plus what the real stager copies into folders beside the player (the UI fonts, the launcher
+    music and the Redump list) under the names it returns for them. No DLL is resolved, so any host runs it."""
+    nested = stage_runtime_dlls.stage_runtime_dlls(
+        target, roots=[], search_dirs=[], notices=False, include_ui_fonts=True, repo_root=stage_install.ROOT)
+    return sorted(_fake_stager(target) + nested)
 
 
 class IconTests(unittest.TestCase):
@@ -975,6 +984,105 @@ class UninstallTests(unittest.TestCase):
         self.assertEqual(sorted(str(path) for path in dest.rglob("*")), before)
         self.assertTrue(self.lnk.is_file())
 
+    def _write_plain_marker(self):
+        """Replace the marker with a minimal valid one, for a test to make one change to."""
+        (self.dest / stage_install.MARKER).unlink()
+        stage_install._write_marker(self.dest, {
+            "schema_version": stage_install.SCHEMA_VERSION, "source_commit": "x",
+            "platform": "windows", "player": "bin/nakagawa_player.exe",
+            "runtime_files": [], "integration": [str(self.lnk)]})
+
+    def test_an_install_with_runtime_files_in_folders_is_uninstalled(self):
+        """The real stager copies the fonts, the music and the Redump list into folders under bin/ and the
+        marker records each by its path there (assets/redump/redump-psp.zip). The marker check allowed only
+        plain file names, so --uninstall refused every install the tool had staged on Windows."""
+        dest = self.root / "with folders"
+        record = stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_nested_stager)
+        marker = json.loads((dest / stage_install.MARKER).read_text(encoding="utf-8"))
+        self.assertEqual(marker["runtime_files"], record["runtime_files"])
+        self.assertIn("SDL3.dll", marker["runtime_files"])
+        self.assertIn("assets/redump/redump-psp.zip", marker["runtime_files"])
+        self.assertTrue(any(name.startswith("assets/fonts/ui/") and name.count("/") > 3
+                            for name in marker["runtime_files"]), marker["runtime_files"])
+        for name in marker["runtime_files"]:
+            self.assertTrue((dest / "bin" / name).is_file(), name)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = stage_install.main(["--uninstall", "--dry-run", "--dest", str(dest)])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertIn(str(dest / "bin"), json.loads(out.getvalue())["removed"])
+        self.assertTrue((dest / "bin" / "assets" / "redump" / "redump-psp.zip").is_file())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = stage_install.main(["--uninstall", "--dest", str(dest)])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(json.loads(out.getvalue())["left_in_folder"], [])
+        self.assertFalse(dest.exists())
+
+    def test_a_runtime_file_in_a_folder_under_bin_is_not_a_refusal(self):
+        self._write_plain_marker()
+        self._rewrite_marker(lambda r: r.update(
+            runtime_files=["SDL3.dll", "sub/evil.dll", "assets/fonts/ui/geist/Geist-Regular.ttf"]))
+        stage_install.uninstall(self.dest)
+        self.assertFalse(self.dest.exists())
+
+    def test_an_unsafe_runtime_file_is_refused_untouched(self):
+        for name, unsafe in (
+            ("absolute", "/abs/evil.dll"),
+            ("network share", "//server/share/evil.dll"),
+            ("drive", "C:/evil.dll"),
+            ("drive-relative", "C:evil.dll"),
+            ("colon", "assets/evil.dll:stream"),
+            ("backslash", "assets\\evil.dll"),
+            ("backslash parent", "..\\..\\evil.dll"),
+            ("NUL", "assets/evil\0.dll"),
+            ("empty", ""),
+            ("dot", "."),
+            ("dot dot", ".."),
+            ("parent first", "../evil.dll"),
+            ("parent inside", "assets/../../evil.dll"),
+            ("parent last", "assets/.."),
+            ("dot segment", "assets/./evil.dll"),
+            ("empty segment", "assets//evil.dll"),
+            ("trailing slash", "assets/"),
+            ("number", 5),
+            ("null", None),
+            ("boolean", True),
+            ("list", ["SDL3.dll"]),
+            ("object", {"path": "SDL3.dll"}),
+        ):
+            with self.subTest(name):
+                self._write_plain_marker()
+                # A safe name before and after it: one unsafe entry anywhere refuses the marker.
+                self._rewrite_marker(lambda r, unsafe=unsafe: r.update(
+                    runtime_files=["SDL3.dll", unsafe, "assets/redump/redump-psp.zip"]))
+                self._refused_untouched(self.dest)
+        for name, not_a_list in (("string", "SDL3.dll"), ("object", {"SDL3.dll": 1}), ("null", None)):
+            with self.subTest(f"runtime_files is a {name}"):
+                self._write_plain_marker()
+                self._rewrite_marker(lambda r, value=not_a_list: r.update(runtime_files=value))
+                self._refused_untouched(self.dest)
+
+    def test_a_runtime_file_reached_through_a_link_out_of_the_install_is_refused(self):
+        """Every segment is a plain name, but bin/assets is a link to a folder outside the install."""
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "keep.dll").write_bytes(b"keep")
+        link = self.dest / "bin" / "assets"
+        if os.name == "nt":  # a junction needs no privilege
+            made = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+                                  capture_output=True, text=True, check=False)
+            self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        else:
+            os.symlink(outside, link, target_is_directory=True)
+        self._write_plain_marker()
+        self._rewrite_marker(lambda r: r.update(runtime_files=["SDL3.dll", "assets/keep.dll"]))
+        with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_MARKER_INVALID.*resolves outside"):
+            stage_install.uninstall(self.dest)
+        self.assertEqual((outside / "keep.dll").read_bytes(), b"keep")
+        self.assertTrue((self.dest / "bin" / "SDL3.dll").is_file())
+        self.assertTrue(self.lnk.is_file())
+
     def test_a_marker_that_is_not_json_is_refused_untouched(self):
         (self.dest / stage_install.MARKER).write_text("not json {", encoding="utf-8")
         self._refused_untouched(self.dest)
@@ -992,17 +1100,12 @@ class UninstallTests(unittest.TestCase):
             lambda r: r.update(player="bin/../../elsewhere.exe"),
             lambda r: r.update(player="/abs/nakagawa_player.exe"),
             lambda r: r.update(runtime_files=["..\\..\\evil.dll"]),
-            lambda r: r.update(runtime_files=["sub/evil.dll"]),
             lambda r: r.update(schema_version="2"),
             lambda r: r.update(schema_version=stage_install.SCHEMA_VERSION + 1),
             lambda r: r.update(integration="not-a-list"),
         ):
             with self.subTest(change=change):
-                (self.dest / stage_install.MARKER).unlink()
-                stage_install._write_marker(self.dest, {
-                    "schema_version": stage_install.SCHEMA_VERSION, "source_commit": "x",
-                    "platform": "windows", "player": "bin/nakagawa_player.exe",
-                    "runtime_files": [], "integration": [str(self.lnk)]})
+                self._write_plain_marker()
                 self._rewrite_marker(change)
                 self._refused_untouched(self.dest)
 

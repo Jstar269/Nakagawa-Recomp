@@ -360,6 +360,10 @@ bool package_builder_native_transport_request(
     void *options, const char *url, const char *allowed_hosts,
     const char *method, const char *content_type,
     const void *body, size_t body_size, PackageHttpResponse *response);
+/* Whether `url` is an https:// URL whose host (no user info, no port) is one of the
+ * ';'-separated `allowed_hosts`, compared without case: the check every caller makes
+ * on PackageHttpResponse.final_url after a transport followed redirects. */
+bool package_builder_url_allowed(const char *url, const char *allowed_hosts);
 
 /* Download one manifest item to a .part file, check exact byte count and SHA-256,
  * then atomically promote it. A NULL transport selects native WinHTTP. */

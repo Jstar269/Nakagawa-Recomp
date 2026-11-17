@@ -267,6 +267,7 @@ add_executable(test_player_state
     tests/native/native_test_isolation.c
     src/player/player_state.c
     src/player/discord_presence.c
+    src/player/cover_art.c
     src/player/input_settings.c
     src/player/iso_reader.c
     src/player/package_builder.c
@@ -630,6 +631,25 @@ endif()
 add_test(NAME update_check_test COMMAND test_update_check)
 set_tests_properties(update_check_test PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# Opt-in cover art (#2632) on a fake transport and synthetic DAT/PNG inputs;
+# it never touches the internet.
+add_executable(test_cover_art
+    tests/native/test_cover_art.c
+    tests/native/native_test_isolation.c
+    src/player/package_builder.c
+    src/player/cover_art.c
+)
+target_include_directories(test_cover_art PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/player
+)
+target_link_libraries(test_cover_art PRIVATE nakagawa_core)
+if(WIN32)
+    target_link_libraries(test_cover_art PRIVATE winhttp bcrypt)
+endif()
+add_test(NAME cover_art_test COMMAND test_cover_art)
+set_tests_properties(cover_art_test PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # Discord status (#2259) on a fake transport and, on Windows, a fake pipe server with a
 # test-only name; it never opens Discord's own pipes.
 add_executable(test_discord_presence
@@ -805,6 +825,7 @@ if(BUILD_PLAYER)
         src/player/discord_presence.c
         src/core/nk_achievements.c
         ${NK_RCHEEVOS_PLAYER_SOURCES}
+        src/player/cover_art.c
         ${NK_UI_CORE_SOURCES}
         ${NK_UI_EDGE_SOURCES}
         src/ui/backend/nk_ui_sdlr.c

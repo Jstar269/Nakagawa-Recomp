@@ -581,6 +581,10 @@ static bool allowed_url(const char *url, const char *allowed_hosts) {
     return false;
 }
 
+bool package_builder_url_allowed(const char *url, const char *allowed_hosts) {
+    return allowed_url(url, allowed_hosts);
+}
+
 #if defined(_WIN32) || defined(_WIN64)
 typedef struct {
     HINTERNET session;

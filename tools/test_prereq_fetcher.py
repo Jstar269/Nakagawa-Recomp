@@ -1503,10 +1503,15 @@ ACHIEVEMENTS_VENDORED_TREE = "third_party/rcheevos"
 # that pipe and must stay outside the allowlist above.
 DISCORD_PRESENCE_PATHS = ("src/player/discord_presence.c", "src/player/discord_presence.h")
 DISCORD_PIPE_PREFIX = "discord-ipc-"
-# The shipped callers of the native transport: the prerequisite bootstrap, update check and
-# the opt-in RetroAchievements request runner. Another caller is a new egress.
+# The native transport callers include the prerequisite bootstrap (in package_builder.c), the
+# update check, opt-in RetroAchievements requests from main.c, and opt-in cover art. Another
+# caller is a new egress and must name its documented host and opt-in.
+COVER_ART_HOSTS = frozenset({"thumbnails.libretro.com"})
 NATIVE_TRANSPORT_CALLERS = frozenset({
-    "src/player/package_builder.c", "src/player/update_check.c", "src/player/main.c",
+    "src/player/package_builder.c",
+    "src/player/update_check.c",
+    "src/player/main.c",
+    "src/player/cover_art.c",
 })
 
 # Shipped code: everything under src/ and the Python the player runs. Maintainer
@@ -1583,6 +1588,24 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         setup = (REPO_ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
         for host in sorted(UPDATE_CHECK_HOSTS):
             self.assertIn(f"`{host}`", setup)
+
+    def test_cover_art_reaches_only_its_documented_libretro_host(self) -> None:
+        header = (REPO_ROOT / "src" / "player" / "cover_art.h").read_text(encoding="utf-8")
+        host = re.search(r'#define NK_COVER_ART_HOST\s+"([^"]*)"', header)
+        prefix = re.search(
+            r'#define NK_COVER_ART_BOXARTS_URL_PREFIX\s+(?:\\\s*\n\s*)?"https://"\s+NK_COVER_ART_HOST\s+"([^"]*)"',
+            header,
+        )
+        self.assertIsNotNone(host, "NK_COVER_ART_HOST")
+        self.assertIsNotNone(prefix, "NK_COVER_ART_BOXARTS_URL_PREFIX")
+        assert host is not None and prefix is not None
+        self.assertIn(host.group(1), COVER_ART_HOSTS)
+        self.assertEqual(prefix.group(1), "/Sony%20-%20PlayStation%20Portable/Named_Boxarts/")
+        impl = (REPO_ROOT / "src" / "player" / "cover_art.c").read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r"https?://[A-Za-z0-9.-]+", impl), [])
+        setup = (REPO_ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
+        for documented_host in sorted(COVER_ART_HOSTS):
+            self.assertIn(f"`{documented_host}`", setup)
 
     def test_achievements_name_only_the_retroachievements_server(self) -> None:
         header = (REPO_ROOT / "src" / "core" / "nk_achievements.h").read_text(encoding="utf-8")
