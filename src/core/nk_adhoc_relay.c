@@ -268,11 +268,13 @@ uint16_t nk_relay_port_in(uint16_t port, uint16_t offset) {
     return (uint16_t)(port - offset);
 }
 
+/* The shipped servers are the ones issue #1139 names (maintainer decision of 2026-11-06):
+ * socom.cc, PPSSPP's default aemu_postoffice server, beside the field for the user's own server.
+ * Another preset is another host the player may contact: it needs its own maintainer decision in
+ * that issue, a row under "Network use" in docs/SETUP.md and a line in
+ * tools/test_prereq_fetcher.py (AGENTS.md section 5). */
 static const NkAdhocServerPreset s_server_presets[] = {
     {"socom.cc", "socom.cc (EU / PPSSPP default)"},
-    {"psp.mgn.pub", "psp.mgn.pub (US)"},
-    {"relay.arenaanywhere.site", "relay.arenaanywhere.site (EU)"},
-    {"relay-usa.arenaanywhere.site", "relay-usa.arenaanywhere.site (US)"},
 };
 
 size_t nk_adhoc_server_preset_count(void) {

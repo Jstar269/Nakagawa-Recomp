@@ -1306,7 +1306,7 @@ runtime can make is listed below, and each is opt-in and off by default.
 | Check for updates | `api.github.com` (HTTPS) | When you select **CHECK FOR UPDATES** (Settings > Updates), or once at start if you turn on **Check at start** (off by default) | That button, and that switch |
 | Update download | `github.com`, which redirects to `release-assets.githubusercontent.com` (HTTPS) | Only after a check finds a newer version and you select **DOWNLOAD** | That button, per download |
 | Download cover art | `thumbnails.libretro.com` (HTTPS) | When **Download cover art** is on (Settings > Online and developer, off by default), once per verified Redump disc not yet cached | That switch, and **Refresh cover art** (Settings > Build tools and cache) |
-| Online play (ad hoc relay) | Shipped default `socom.cc`, presets `psp.mgn.pub`, `relay.arenaanywhere.site`, `relay-usa.arenaanywhere.site`, or a user-entered host (`27312` lobby, `27313` data, plain TCP) | Only when you turn **Ad hoc online play** on and launch a game that starts PSP ad hoc networking | **Settings > Online and developer > Online play** (`online_play` in `settings.json`, off by default) |
+| Online play (ad hoc relay) | The shipped server `socom.cc`, or a server you enter yourself (`27312` lobby, `27313` data, plain TCP) | Only when you turn **Ad hoc online play** on and launch a game that starts PSP ad hoc networking | **Settings > Online and developer > Online play** (`online_play` in `settings.json`, off by default) |
 
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).

@@ -163,10 +163,10 @@ privacy notice, and is off by default.
   through an ad hoc relay server, the way PPSSPP does. Nakagawa speaks the protocol of
   [aemu_postoffice](https://github.com/Kethen/aemu_postoffice) at commit `02abf18f`, the version PPSSPP pins, so
   Nakagawa players can play with PPSSPP players, and with PSPs running the aemu plugin, on the same servers.
-- **Servers.** The player ships `socom.cc` as its default server alongside curated presets
-  (`psp.mgn.pub`, `relay.arenaanywhere.site`, `relay-usa.arenaanywhere.site`), and lets the user
-  type a custom `host[:lobby_port[,data_port]]` address via the on-screen keyboard. A user-entered
-  server stays only in the local `settings.json`.
+- **Servers.** The player ships one server, `socom.cc` (PPSSPP's default), the host issue #1139 names, and
+  lets the user type their own address (`host[:lobby_port[,data_port]]`) with the on-screen keyboard. A
+  user-entered server stays only in the local `settings.json`. Another shipped server needs its own
+  maintainer decision first (`AGENTS.md` section 5).
 - **Two connections, both unencrypted.** The protocol is plain TCP. It has no encryption and no sign-in.
   - **Lobby** (port 27312): log in, find groups, join one, and learn who is in it.
   - **Data relay** (port 27313): one connection per ad hoc socket, carrying the game's own packets.
@@ -199,8 +199,8 @@ privacy notice, and is off by default.
 - **Where the code comes from** (`src/core/PROVENANCE.md` and `src/rt/PROVENANCE.md` have the details).
   - The relay codec (`src/core/nk_adhoc_relay.c/.h`) encodes and decodes the protocol's packets; no
     aemu_postoffice code is copied. The packet layouts and limits come from aemu_postoffice's headers. Its login
-    checks (PPSSPP's `login_user_data`), port offset, and curated community preset list come from PPSSPP, so
-    `nk_adhoc_relay.c` is labelled derived-translated.
+    checks (PPSSPP's `login_user_data`), port offset and the shipped server's name (PPSSPP's default) come from
+    PPSSPP, so `nk_adhoc_relay.c` is labelled derived-translated.
   - The TCP relay client header (`src/core/nk_adhoc_relay_client.h`) is project-authored. The client
     implementation (`src/core/nk_adhoc_relay_client.c`) is C99 over `nk_adhoc_relay.h` and `nk_adhoc_net.h` and is
     classified `derived-translated` from PPSSPP's `Core/HLE/AdhocTransportRelay.cpp` at rev `3bc60270` for its eager

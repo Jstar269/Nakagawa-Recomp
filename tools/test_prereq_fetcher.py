@@ -1471,14 +1471,13 @@ NETWORK_EGRESS_ALLOWLIST = frozenset({
     "tools/nk_core/prereq_fetcher.py",
 })
 
-# Opt-in ad hoc relay defaults (#1139): shipped server presets and plain-TCP ports
-# documented in docs/SETUP.md ("Network use") and docs/ONLINE_FEATURES.md.
+# Opt-in ad hoc relay defaults (#1139): the shipped servers and plain-TCP ports documented in
+# docs/SETUP.md ("Network use") and docs/ONLINE_FEATURES.md. The shipped servers are the hosts
+# issue #1139 names (maintainer decision of 2026-11-06): socom.cc, beside the field for the
+# user's own server. Another shipped host needs its own maintainer decision in that issue first.
 ADHOC_RELAY_DEFAULT_SERVER = "socom.cc"
 ADHOC_RELAY_PRESETS = (
     "socom.cc",
-    "psp.mgn.pub",
-    "relay.arenaanywhere.site",
-    "relay-usa.arenaanywhere.site",
 )
 ADHOC_RELAY_PORTS = (27312, 27313)
 
@@ -1622,6 +1621,19 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
             self.assertIn(f"`{host}`", setup)
         for port in ADHOC_RELAY_PORTS:
             self.assertIn(f"`{port}`", setup)
+        # The "Network use" row names the shipped servers and no other host.
+        rows = [line for line in setup.splitlines() if line.startswith("| Online play (ad hoc relay) |")]
+        self.assertEqual(len(rows), 1)
+        def quoted_hosts(text: str) -> tuple[str, ...]:
+            names = re.findall(r"`([a-z0-9-]+(?:\.[a-z0-9-]+)+)`", text)
+            return tuple(name for name in names if not name.endswith((".json", ".md")))
+
+        self.assertEqual(quoted_hosts(rows[0].split("|")[2]), ADHOC_RELAY_PRESETS)
+        features = (REPO_ROOT / "docs" / "ONLINE_FEATURES.md").read_text(encoding="utf-8")
+        servers = re.search(r"^- \*\*Servers\.\*\*(.*?)(?=^- \*\*)", features, re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(servers)
+        assert servers is not None
+        self.assertEqual(quoted_hosts(servers.group(1)), ADHOC_RELAY_PRESETS)
         pstate = (REPO_ROOT / "src" / "player" / "player_state.c").read_text(encoding="utf-8")
         self.assertIn("settings->online_play = false;", pstate)
 

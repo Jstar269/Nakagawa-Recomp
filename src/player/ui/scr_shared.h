@@ -173,7 +173,7 @@ typedef struct {
 #define SCR_ONLINE_PLAY_TOGGLE_SENTENCE \
     "Off by default. PSP ad hoc services stay closed until you turn this on."
 #define SCR_ONLINE_PLAY_PRESET_SENTENCE \
-    "Step through PPSSPP / aemu_postoffice community servers, or enter your own host below."
+    "Returns to the shipped community server. To use another, enter its host below."
 #define SCR_ONLINE_PLAY_SERVER_SENTENCE \
     "Server address to join (host, host:lobby_port, or host:lobby_port,data_port)."
 

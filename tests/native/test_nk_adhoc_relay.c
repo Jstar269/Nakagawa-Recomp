@@ -354,9 +354,13 @@ static void test_check_boundaries(void) {
 static void test_server_parsing_and_presets(void) {
     char host[NK_ADHOC_SERVER_MAX_LEN + 1u];
     uint16_t lp = 0u, dp = 0u;
-    CHECK(nk_adhoc_server_preset_count() >= 2u, "presets provide at least two servers");
+    /* The shipped servers are the hosts issue #1139 names: socom.cc and no other. */
+    CHECK(nk_adhoc_server_preset_count() == 1u, "one server is shipped (got %u)",
+          (unsigned)nk_adhoc_server_preset_count());
     const NkAdhocServerPreset *p0 = nk_adhoc_server_preset(0u);
-    CHECK(p0 && strcmp(p0->host, NK_ADHOC_DEFAULT_SERVER) == 0, "default preset is socom.cc");
+    CHECK(p0 && strcmp(p0->host, NK_ADHOC_DEFAULT_SERVER) == 0 && strcmp(p0->host, "socom.cc") == 0,
+          "the shipped server is the default, socom.cc");
+    CHECK(nk_adhoc_server_preset(1u) == NULL, "no second preset exists");
     CHECK(nk_adhoc_relay_parse_server("socom.cc", host, sizeof host, &lp, &dp) &&
               strcmp(host, "socom.cc") == 0 && lp == NK_RELAY_LOBBY_PORT &&
               dp == NK_RELAY_DATA_PORT,

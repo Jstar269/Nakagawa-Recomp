@@ -16427,15 +16427,21 @@ int main(int argc, char **argv) {
         assert(s_app2->settings.network_mode == NK_NETWORK_MODE_OFFLINE);
 
         /* Ad hoc online play (#1139): off by default on socom.cc, validates server specs,
-           cycles presets, persists through settings.json, and fails closed on invalid JSON. */
+           steps the preset, persists through settings.json, and fails closed on invalid JSON. */
         player_app_init(s_app2);
         assert(!s_app2->settings.online_play);
         assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
         s_app2->settings_path[0] = '\0';
+        /* One server is shipped (#1139 names socom.cc only): the preset step stays on it, and
+           from a server the user typed it returns to it. */
         player_app_cycle_online_play_preset(s_app2);
-        assert(strcmp(s_app2->settings.online_play_server, "psp.mgn.pub") == 0);
+        assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
+        assert(player_app_set_online_play_server(s_app2, "relay.example.invalid:27312"));
+        assert(strcmp(s_app2->settings.online_play_server, "relay.example.invalid:27312") == 0);
+        player_app_cycle_online_play_preset(s_app2);
+        assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
         assert(!player_app_set_online_play_server(s_app2, "bad server!!"));
-        assert(strcmp(s_app2->settings.online_play_server, "psp.mgn.pub") == 0);
+        assert(strcmp(s_app2->settings.online_play_server, NK_ADHOC_DEFAULT_SERVER) == 0);
         assert(player_app_set_online_play_server(s_app2, "127.0.0.1:27312,27313"));
         player_app_set_online_play(s_app2, true);
         assert(s_app2->settings.online_play);
