@@ -5,7 +5,8 @@
  * Opt-in plain-TCP ad hoc relay transport implementing NkAdhocTransportOps over
  * nk_adhoc_relay.h (#1139). Eager listener backlog up to max_backlog (RelayBacklog,
  * fillRelayBacklog, closeRelayBacklog) and three-way connect state polling
- * (RelayTransport::PtpConnect, RelayTransport::PtpConnectPoll, PTP_STATE_REFUSED) are
+ * (RelayTransport::PtpConnect and RelayTransport::PtpConnectPoll, with the refused result they
+ * report, SCE_NET_ADHOC_ERROR_CONNECTION_REFUSED; PTP_STATE_REFUSED is this file's name for it) are
  * adapted (derived-translated, docs/provenance/INDEPENDENCE_MODEL.md) from PPSSPP
  * Core/HLE/AdhocTransportRelay.cpp at revision 3bc60270eae3069f13dfbfdb7292a7e1375de6f6
  * (GPL-2.0-or-later); conveyed as GPL-3.0-or-later. Wire formats and limits arrive via
