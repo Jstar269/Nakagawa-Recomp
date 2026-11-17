@@ -41,11 +41,6 @@
 #include <string.h>
 #include <time.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <wincred.h>
-#endif
-
 #include "setup_staging.h"
 #include "player_ui_test.h"
 #include "nk_platform.h"
@@ -55,10 +50,6 @@
 #include "nk_json.h"
 #include "player_host.h"
 #include "nk_achievements.h"
-
-#ifdef _WIN32
-#include <wincred.h>
-#endif
 
 typedef struct PlayerRun PlayerRun;
 typedef struct PlayerAchHttpJob PlayerAchHttpJob;
@@ -4957,43 +4948,22 @@ static bool player_achievements_prompt_sign_in(PlayerRun *run) {
         run->achievements = nk_ach_create(NULL, player_ach_transport, run);
         if (!run->achievements) return false;
     }
-#if defined(_WIN32)
-    WCHAR username_w[CREDUI_MAX_USERNAME_LENGTH + 1u];
-    WCHAR password_w[CREDUI_MAX_PASSWORD_LENGTH + 1u];
+    /* The operating system's own credential dialog takes the password (nk_platform.h); the
+       player sees it only long enough to hand it to the sign-in request. */
     char username[256] = "";
     char password[1024] = "";
-    CREDUI_INFOW info;
-    memset(&info, 0, sizeof info);
-    info.cbSize = sizeof info;
-    info.pszMessageText = L"Enter your RetroAchievements.org username and password. "
-                          L"The password is used once to obtain a token and is not stored.";
-    info.pszCaptionText = L"Sign in to RetroAchievements";
-    BOOL save = FALSE;
-    SecureZeroMemory(username_w, sizeof username_w);
-    SecureZeroMemory(password_w, sizeof password_w);
-    const DWORD prompt = CredUIPromptForCredentialsW(
-        &info, L"retroachievements.org", NULL, 0u,
-        username_w, CREDUI_MAX_USERNAME_LENGTH + 1u,
-        password_w, CREDUI_MAX_PASSWORD_LENGTH + 1u,
-        &save, CREDUI_FLAGS_GENERIC_CREDENTIALS | CREDUI_FLAGS_DO_NOT_PERSIST |
-                   CREDUI_FLAGS_ALWAYS_SHOW_UI);
-    if (prompt != ERROR_SUCCESS) {
-        SecureZeroMemory(username_w, sizeof username_w);
-        SecureZeroMemory(password_w, sizeof password_w);
+    const int prompt = nk_platform_credential_prompt(
+        "Sign in to RetroAchievements",
+        "Enter your RetroAchievements.org username and password. "
+        "The password is used once to obtain a token and is not stored.",
+        NK_ACH_HOST, username, sizeof username, password, sizeof password);
+    if (prompt != 1) {
+        player_secure_clear(password, sizeof password);
         snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
-                 prompt == ERROR_CANCELLED ? "Sign-in cancelled." : "Credential prompt failed.");
+                 prompt == 0 ? "Sign-in cancelled." : "Credential prompt failed.");
         return false;
     }
-    const int username_bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, username_w,
-                                                    -1, username, sizeof username,
-                                                    NULL, NULL);
-    const int password_bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, password_w,
-                                                    -1, password, sizeof password,
-                                                    NULL, NULL);
-    SecureZeroMemory(username_w, sizeof username_w);
-    SecureZeroMemory(password_w, sizeof password_w);
-    if (username_bytes <= 1 || password_bytes <= 1 ||
-        !nk_ach_begin_login_with_password(run->achievements, username, password)) {
+    if (!nk_ach_begin_login_with_password(run->achievements, username, password)) {
         player_secure_clear(password, sizeof password);
         snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
                  "Sign-in could not start.");
@@ -5005,11 +4975,6 @@ static bool player_achievements_prompt_sign_in(PlayerRun *run) {
     snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
              "Signing in. Softcore only.");
     return true;
-#else
-    snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
-             "Sign-in requires Windows Credential Manager; this platform is unsupported.");
-    return false;
-#endif
 }
 
 static int SDLCALL player_ach_guest_memory_thread_main(void *userdata) {

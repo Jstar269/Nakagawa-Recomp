@@ -37,7 +37,7 @@ endif
 ifeq ($(NK_TARGET_OS),windows)
 PLAYER_PLATFORM_SRC := src/core/nk_platform_win32.c
 PLAYER_PLATFORM_LIBS := -lshell32 -lole32 -luuid -ladvapi32
-PLAYER_EXTRA_LIBS   := $(PLAYER_PLATFORM_LIBS) -lwinhttp -lbcrypt -lcredui
+PLAYER_EXTRA_LIBS   := $(PLAYER_PLATFORM_LIBS) -lwinhttp -lbcrypt
 PLAYER_PLAT_SOURCES := $(PLAYER_PLATFORM_SRC)
 # The Windows player is a GUI-subsystem program (-mwindows) so a double-click opens no console window;
 # main.c attaches to a parent terminal console or logs to the logs folder. The UI test binary keeps

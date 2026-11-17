@@ -836,32 +836,35 @@ static bool sha256_begin(BCRYPT_ALG_HANDLE *algorithm, BCRYPT_HASH_HANDLE *hash,
 }
 #endif
 
-PackageHttpOpen package_builder_native_transport(void) {
+/* The native senders behind the two entry points below, or none where this build has no
+   native HTTPS client: one host conditional names both. */
+typedef bool (*PackageNativeRequest)(void *context, const char *url, const char *allowed_hosts,
+                                     PackageHttpResponse *response, const char *method,
+                                     const char *content_type, const void *body,
+                                     size_t body_size, bool follow_redirects,
+                                     bool require_success);
 #if defined(_WIN32) || defined(_WIN64)
-    return winhttp_open;
+static const PackageHttpOpen k_native_open = winhttp_open;
+static const PackageNativeRequest k_native_request = winhttp_open_request;
 #else
-    return NULL;
+static const PackageHttpOpen k_native_open = NULL;
+static const PackageNativeRequest k_native_request = NULL;
 #endif
+
+PackageHttpOpen package_builder_native_transport(void) {
+    return k_native_open;
 }
 
 bool package_builder_native_transport_request(
     void *options, const char *url, const char *allowed_hosts,
     const char *method, const char *content_type,
     const void *body, size_t body_size, PackageHttpResponse *response) {
-#if defined(_WIN32) || defined(_WIN64)
-    return winhttp_open_request(options, url, allowed_hosts, response, method, content_type,
-                                body, body_size, false, false);
-#else
-    (void)options;
-    (void)url;
-    (void)allowed_hosts;
-    (void)method;
-    (void)content_type;
-    (void)body;
-    (void)body_size;
-    if (response) memset(response, 0, sizeof(*response));
-    return false;
-#endif
+    if (!k_native_request) {
+        if (response) memset(response, 0, sizeof(*response));
+        return false;
+    }
+    return k_native_request(options, url, allowed_hosts, response, method, content_type,
+                            body, body_size, false, false);
 }
 
 bool package_builder_download_verified(

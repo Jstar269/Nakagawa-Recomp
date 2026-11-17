@@ -902,7 +902,7 @@ if(BUILD_PLAYER)
         VERBATIM
     )
     if(WIN32)
-        target_link_libraries(nakagawa_player PRIVATE winhttp bcrypt credui)
+        target_link_libraries(nakagawa_player PRIVATE winhttp bcrypt)
     else()
         target_link_libraries(nakagawa_player PRIVATE m)
     endif()

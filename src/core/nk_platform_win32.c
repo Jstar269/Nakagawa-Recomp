@@ -583,6 +583,67 @@ bool nk_platform_credential_delete(const char *target) {
     return GetLastError() == ERROR_NOT_FOUND;
 }
 
+typedef DWORD (WINAPI *NkCredUiPrompt)(PCREDUI_INFOW info, PCWSTR target, void *reserved,
+                                       DWORD auth_error, PWSTR username, ULONG username_chars,
+                                       PWSTR password, ULONG password_chars, BOOL *save,
+                                       DWORD flags);
+
+int nk_platform_credential_prompt(const char *caption, const char *message, const char *target,
+                                  char *username, size_t username_size,
+                                  char *password, size_t password_size) {
+    if (username && username_size) username[0] = '\0';
+    if (password && password_size) password[0] = '\0';
+    if (!caption || !message || !target || !username || username_size < 2u ||
+        !password || password_size < 2u) return -1;
+    WCHAR wcaption[CREDUI_MAX_CAPTION_LENGTH + 1];
+    WCHAR wmessage[1024];
+    WCHAR wtarget[256];
+    if (!utf8_to_wide(caption, wcaption, sizeof(wcaption) / sizeof(wcaption[0])) ||
+        !utf8_to_wide(message, wmessage, sizeof(wmessage) / sizeof(wmessage[0])) ||
+        !utf8_to_wide(target, wtarget, sizeof(wtarget) / sizeof(wtarget[0]))) return -1;
+    /* credui.dll comes from the system folder, at this call only: every program that links this
+       file would import it otherwise, the title runtime among them. */
+    HMODULE credui = LoadLibraryExW(L"credui.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!credui) return -1;
+    NkCredUiPrompt prompt =
+        (NkCredUiPrompt)(void (*)(void))GetProcAddress(credui, "CredUIPromptForCredentialsW");
+    int outcome = -1;
+    if (prompt) {
+        WCHAR wusername[CREDUI_MAX_USERNAME_LENGTH + 1];
+        WCHAR wpassword[CREDUI_MAX_PASSWORD_LENGTH + 1];
+        CREDUI_INFOW info;
+        BOOL save = FALSE;
+        memset(&info, 0, sizeof info);
+        info.cbSize = sizeof info;
+        info.pszMessageText = wmessage;
+        info.pszCaptionText = wcaption;
+        SecureZeroMemory(wusername, sizeof wusername);
+        SecureZeroMemory(wpassword, sizeof wpassword);
+        const DWORD result = prompt(&info, wtarget, NULL, 0u,
+                                    wusername, CREDUI_MAX_USERNAME_LENGTH + 1,
+                                    wpassword, CREDUI_MAX_PASSWORD_LENGTH + 1, &save,
+                                    CREDUI_FLAGS_GENERIC_CREDENTIALS |
+                                        CREDUI_FLAGS_DO_NOT_PERSIST |
+                                        CREDUI_FLAGS_ALWAYS_SHOW_UI);
+        if (result == ERROR_CANCELLED) {
+            outcome = 0;
+        } else if (result == ERROR_SUCCESS &&
+                   wide_to_utf8(wusername, username, username_size) &&
+                   wide_to_utf8(wpassword, password, password_size) &&
+                   username[0] && password[0]) {
+            outcome = 1;
+        }
+        SecureZeroMemory(wusername, sizeof wusername);
+        SecureZeroMemory(wpassword, sizeof wpassword);
+        if (outcome != 1) {
+            SecureZeroMemory(username, username_size);
+            SecureZeroMemory(password, password_size);
+        }
+    }
+    FreeLibrary(credui);
+    return outcome;
+}
+
 static bool guest_memory_channel_names(const char *name, char *frame, size_t frame_size,
                                       char *ack, size_t ack_size,
                                       char *stop, size_t stop_size) {

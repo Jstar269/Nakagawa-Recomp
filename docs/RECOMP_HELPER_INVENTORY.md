@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **531** (declared in `recomp.h`: 454)
-- reach class: emitter-reached 96, production-runtime-only 394, selftest-only 0, address-only 8, none 33
-- provenance class of the home definition: declared-only 1, project_authored_attested 40, upstream_derived 490
+- helpers: **533** (declared in `recomp.h`: 456)
+- reach class: emitter-reached 96, production-runtime-only 396, selftest-only 0, address-only 8, none 33
+- provenance class of the home definition: declared-only 1, project_authored_attested 40, upstream_derived 492
 
 ## Helpers
 
@@ -328,6 +328,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_guest_host_run` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_guest_lane_refuse_import` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_guest_memmove` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
+| `sr_guest_memory_vblank` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_guest_rect_geometry` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_guest_rect_readable` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_guest_rect_writable` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
@@ -385,6 +386,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_host_address` | `rt/recomp.h` | yes | emitter-reached (direct) | `rt/recomp.h`: upstream_derived |
 | `sr_host_data_entry_count` | `rt/hle_data.c` | yes | production-runtime-only | `rt/hle_data.c`: upstream_derived |
 | `sr_host_data_prepare` | `rt/hle_data.c` | yes | production-runtime-only | `rt/hle_data.c`: upstream_derived |
+| `sr_host_notification` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_host_stack_entry_slow` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_host_stack_window_clear` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_inrange` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
