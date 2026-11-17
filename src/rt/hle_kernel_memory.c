@@ -146,9 +146,13 @@ static uint32_t h_AllocPartitionMemory(CpuState *s) {
     uint32_t type = A2;
     uint32_t size = A3;
     if (partition == VOLATILE_PART_ID) return volatile_part_alloc(type, size, stack_arg(s, 0));
+    /* Size 0, and a size whose 256-byte slot would wrap, is MEMBLOCK_ALLOC_FAILED: memblock.expected
+     * records it for sceKernelAllocMemoryBlock, which uOFW forwards to this call on partition 2,
+     * and the volatile partition answers the same. */
+    if (size == 0u || size > UINT32_MAX - 0xffu) return HLE_KERNEL_ERROR_MEMBLOCK_ALLOC_FAILED;
     uint32_t uid = (type == 2u)
         ? sr_alloc_block_at(stack_arg(s, 0), size, name)
-        : alloc_block(size ? size : 16);
+        : alloc_block(size);
     fprintf(stderr, "  -> uid=0x%x addr=0x%08x (heap_bump_now=0x%08x)\n",
             uid, sr_last_alloc_addr, s_heap);
     /* A block that cannot be placed is MEMBLOCK_ALLOC_FAILED: an Addr block at 0x08400000,
@@ -304,6 +308,24 @@ void fpl_remove_waiter(FplPool *p, uint32_t thread_uid) {
     }
 }
 
+/* Appends the thread at the tail; a thread already queued keeps its one entry. 0 when full. */
+static int fpl_enqueue_waiter(FplPool *p, uint32_t thread_uid) {
+    for (int i = 0; i < p->nwaiters; i++)
+        if (p->waiters[i].thread_uid == thread_uid) return 1;
+    if (p->nwaiters >= FPL_MAX_WAITERS) return 0;
+    p->waiters[p->nwaiters++].thread_uid = thread_uid;
+    return 1;
+}
+
+/* A wait that ends with a latched result (WAIT_RELEASE, CANCEL, DELETE) leaves the queue: the
+ * entry would otherwise keep nwaiters above zero, so every later allocate would queue behind a
+ * thread that no longer waits, and a FreeFpl would hand its wake to that thread. */
+static uint32_t fpl_wait_ended(uint32_t uid, uint32_t thread_uid, uint32_t result) {
+    FplPool *p = fpl_lookup(uid);
+    if (p) fpl_remove_waiter(p, thread_uid);
+    return result;
+}
+
 static uint32_t h_CreateFpl(CpuState *s) {
     /* a0=name, a1=partition, a2=attr, a3=blockSize. 5th arg (numBlocks) is in t0 (r8). */
     char name[32] = {0};
@@ -312,18 +334,33 @@ static uint32_t h_CreateFpl(CpuState *s) {
     uint32_t nblocks = stack_arg(s, 0);
     if (bsize == 0) return FPL_ILLEGAL_MEMSIZE;
     if (nblocks == 0) nblocks = 1;
-    uint32_t total = bsize * nblocks;
-    uint32_t block_uid = alloc_block(total ? total : 16);
+    /* The pool spans bsize * nblocks bytes, computed without wrapping. A product past 4 GB is
+     * a pool no partition holds; it is refused like the measured 0x7FFFFFFF-byte block
+     * (UNMEASURED for a product that wraps 32 bits). */
+    uint64_t total64 = (uint64_t)bsize * nblocks;
+    if (total64 > UINT32_MAX) return FPL_NO_MEMORY;
+    uint32_t total = (uint32_t)total64;
+    uint32_t block_uid = alloc_block(total);
     if (block_uid == 0xFFFFFFFFu) return FPL_NO_MEMORY;
     uint32_t pool = block_addr(block_uid);
     uint32_t uid = 0;
     for (int i = 0; i < FPL_MAX; i++) {
         if (!s_fpls[i].used) {
-            uid = (uint32_t)(i + 0x500);
             FplPool *p = &s_fpls[i];
             if (p->free_blocks) free(p->free_blocks);
             if (p->allocated) free(p->allocated);
             memset(p, 0, sizeof *p);
+            uint32_t *free_blocks = (uint32_t *)calloc(nblocks, sizeof(uint32_t));
+            uint8_t *allocated = (uint8_t *)calloc(nblocks, sizeof(uint8_t));
+            if (!free_blocks || !allocated) {
+                free(free_blocks);
+                free(allocated);
+                free_block(block_uid);
+                return FPL_NO_MEMORY;
+            }
+            /* The UID comes from the shared pool, so it never aliases another kernel object. */
+            uid = sr_alloc_uid();
+            p->uid = uid;
             p->base = pool;
             p->cur = pool;
             p->end = pool + total;
@@ -333,8 +370,8 @@ static uint32_t h_CreateFpl(CpuState *s) {
             p->attr = A2;
             memcpy(p->name, name, sizeof(p->name));
             p->nblocks = (int)nblocks;
-            p->free_blocks = (uint32_t *)calloc(nblocks, sizeof(uint32_t));
-            p->allocated = (uint8_t *)calloc(nblocks, sizeof(uint8_t));
+            p->free_blocks = free_blocks;
+            p->allocated = allocated;
             break;
         }
     }
@@ -350,15 +387,15 @@ static uint32_t fpl_try_allocate_internal(FplPool *p, uint32_t *addr_out) {
     if (p->nfree > 0) {
         uint32_t addr = p->free_blocks[--p->nfree];
         uint32_t bidx = (addr - p->base) / p->bsize;
-        if (p->allocated && (int)bidx < p->nblocks) p->allocated[bidx] = 1;
+        if (p->allocated && bidx < (uint32_t)p->nblocks) p->allocated[bidx] = 1;
         *addr_out = addr;
         return 0;
     }
-    if (p->cur + p->bsize <= p->end) {
+    if (p->end - p->cur >= p->bsize) {
         uint32_t addr = p->cur;
         p->cur += p->bsize;
         uint32_t bidx = (addr - p->base) / p->bsize;
-        if (p->allocated && (int)bidx < p->nblocks) p->allocated[bidx] = 1;
+        if (p->allocated && bidx < (uint32_t)p->nblocks) p->allocated[bidx] = 1;
         *addr_out = addr;
         return 0;
     }
@@ -424,8 +461,7 @@ static uint32_t allocate_fpl_common(CpuState *s, int is_cb) {
         return FPL_UNMEASURED_NO_SPACE;
     }
 
-    if (p->nwaiters >= FPL_MAX_WAITERS) return 0x80020190u; /* SCE_KERNEL_ERROR_NO_MEMORY */
-    p->waiters[p->nwaiters++].thread_uid = cur_thid;
+    if (!fpl_enqueue_waiter(p, cur_thid)) return 0x80020190u; /* SCE_KERNEL_ERROR_NO_MEMORY */
 
     for (;;) {
         if (is_cb && sr_thread_has_pending_callbacks(cur_thid)) {
@@ -454,7 +490,7 @@ static uint32_t allocate_fpl_common(CpuState *s, int is_cb) {
             if (is_cb) sched_set_current_cb_wait(0);
 
             uint32_t woken = 0;
-            if (sched_take_wake_result(&woken)) return woken;
+            if (sched_take_wake_result(&woken)) return fpl_wait_ended(uid, cur_thid, woken);
 
             p = fpl_lookup(uid);
             if (!p) return SCE_KERNEL_ERROR_WAIT_DELETE;
@@ -480,7 +516,7 @@ static uint32_t allocate_fpl_common(CpuState *s, int is_cb) {
             if (is_cb) sched_set_current_cb_wait(0);
 
             uint32_t woken = 0;
-            if (sched_take_wake_result(&woken)) return woken;
+            if (sched_take_wake_result(&woken)) return fpl_wait_ended(uid, cur_thid, woken);
 
             p = fpl_lookup(uid);
             if (!p) return SCE_KERNEL_ERROR_WAIT_DELETE;
@@ -504,9 +540,8 @@ static uint32_t h_AllocateFplCB(CpuState *s) {
 
 static uint32_t h_DeleteFpl(CpuState *s) {
     uint32_t uid = A0;
-    uint32_t idx = uid - 0x500;
-    if (idx >= FPL_MAX || !s_fpls[idx].used) return 0;
-    FplPool *p = &s_fpls[idx];
+    FplPool *p = fpl_lookup(uid);
+    if (!p) return 0;
     uint32_t block_uid = p->block_uid;
     int waiters = sched_count_waiters(uid);
     if (waiters) {
@@ -526,16 +561,19 @@ static uint32_t h_FreeFpl(CpuState *s) {
     uint32_t uid = A0, addr = A1;
     FplPool *p = fpl_lookup(uid);
     if (!p) return SCE_KERNEL_ERROR_UNKNOWN_FPLID;
-    if (addr < p->base || addr + p->bsize > p->end || ((addr - p->base) % p->bsize) != 0) {
+    /* Offsets, so no sum wraps: the block [addr, addr + bsize) lies wholly inside the pool. */
+    uint32_t span = p->end - p->base;
+    uint32_t off = addr - p->base;
+    if (addr < p->base || off >= span || span - off < p->bsize || (off % p->bsize) != 0) {
         /* Exact bad-address error code for FreeFpl is UNMEASURED; using SCE_KERNEL_ERROR_ILLEGAL_ADDR (0x80000103u) as defined in hle.c. */
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     }
-    uint32_t bidx = (addr - p->base) / p->bsize;
-    if (p->allocated && (int)bidx < p->nblocks && !p->allocated[bidx]) {
+    uint32_t bidx = off / p->bsize;
+    if (p->allocated && bidx < (uint32_t)p->nblocks && !p->allocated[bidx]) {
         /* Double-free or block not currently in use; exact error code is UNMEASURED, returning SCE_KERNEL_ERROR_ILLEGAL_ADDR */
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     }
-    if (p->allocated && (int)bidx < p->nblocks) p->allocated[bidx] = 0;
+    if (p->allocated && bidx < (uint32_t)p->nblocks) p->allocated[bidx] = 0;
     if (p->free_blocks && p->nfree < p->nblocks) {
         p->free_blocks[p->nfree++] = addr;
     }
@@ -688,6 +726,21 @@ void vpl_remove_waiter(VplPool *p, uint32_t thread_uid) {
     }
 }
 
+/* Same contracts as fpl_enqueue_waiter() and fpl_wait_ended(). */
+static int vpl_enqueue_waiter(VplPool *p, uint32_t thread_uid, uint32_t size) {
+    for (int i = 0; i < p->nwaiters; i++)
+        if (p->waiters[i].thread_uid == thread_uid) return 1;
+    if (p->nwaiters >= VPL_MAX_WAITERS) return 0;
+    p->waiters[p->nwaiters++] = (VplWaiter){thread_uid, size};
+    return 1;
+}
+
+static uint32_t vpl_wait_ended(uint32_t uid, uint32_t thread_uid, uint32_t result) {
+    VplPool *p = vpl_lookup(uid);
+    if (p) vpl_remove_waiter(p, thread_uid);
+    return result;
+}
+
 /* The bytes a pool hands out, which ReferVplStatus reports as poolSize. */
 static uint32_t vpl_pool_size(const VplPool *p) {
     return p->size > VPL_POOL_HEADER ? (p->size - VPL_POOL_HEADER) & ~(VPL_GRANULE - 1u) : 0u;
@@ -715,10 +768,12 @@ static uint32_t h_CreateVpl(CpuState *s) {
             vpl_release(p);
             p->base = base; p->size = size; p->block_uid = block_uid; p->used = 1;
             p->attr = A2;
+            /* The UID comes from the shared pool, so it never aliases another kernel object. */
+            p->uid = sr_alloc_uid();
             memset(s_vpl_names[i], 0, sizeof s_vpl_names[i]);
             if (A0) (void)guest_cstr(A0, s_vpl_names[i], (int)sizeof s_vpl_names[i]);
             if (vpl_pool_size(p)) vpl_insert_free(p, base + VPL_POOL_HEADER, vpl_pool_size(p));
-            return (uint32_t)(0x600 + i);
+            return p->uid;
         }
     }
     (void)free_block(block_uid);
@@ -799,8 +854,7 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
         return VPL_EXHAUSTED;
     }
 
-    if (p->nwaiters >= VPL_MAX_WAITERS) return 0x80020190u; /* SCE_KERNEL_ERROR_NO_MEMORY */
-    p->waiters[p->nwaiters++] = (VplWaiter){cur_thid, request};
+    if (!vpl_enqueue_waiter(p, cur_thid, request)) return 0x80020190u; /* SCE_KERNEL_ERROR_NO_MEMORY */
 
     for (;;) {
         if (is_cb && sr_thread_has_pending_callbacks(cur_thid)) {
@@ -829,7 +883,7 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
             if (is_cb) sched_set_current_cb_wait(0);
 
             uint32_t woken = 0;
-            if (sched_take_wake_result(&woken)) return woken;
+            if (sched_take_wake_result(&woken)) return vpl_wait_ended(uid, cur_thid, woken);
 
             p = vpl_lookup(uid);
             if (!p) return SCE_KERNEL_ERROR_WAIT_DELETE;
@@ -856,7 +910,7 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
             if (is_cb) sched_set_current_cb_wait(0);
 
             uint32_t woken = 0;
-            if (sched_take_wake_result(&woken)) return woken;
+            if (sched_take_wake_result(&woken)) return vpl_wait_ended(uid, cur_thid, woken);
 
             p = vpl_lookup(uid);
             if (!p) return SCE_KERNEL_ERROR_WAIT_DELETE;

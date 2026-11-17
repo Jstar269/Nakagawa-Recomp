@@ -2255,15 +2255,21 @@ uint32_t free_block(uint32_t uid) {
 
 FplPool s_fpls[FPL_MAX];
 
+/* FPL and VPL UIDs come from the shared sr_alloc_uid pool (a fixed 0x500 + slot range used to
+ * alias a semaphore or thread UID once the pool reached it), so a lookup matches the stored UID. */
 FplPool *fpl_lookup(uint32_t uid) {
-    uint32_t idx = uid - 0x500u;
-    return idx < FPL_MAX && s_fpls[idx].used ? &s_fpls[idx] : NULL;
+    if (uid == 0u) return NULL;
+    for (int i = 0; i < FPL_MAX; i++)
+        if (s_fpls[i].used && s_fpls[i].uid == uid) return &s_fpls[i];
+    return NULL;
 }
 VplPool s_vpls[VPL_MAX];
 
 VplPool *vpl_lookup(uint32_t uid) {
-    uint32_t i = uid - 0x600u;
-    return i < VPL_MAX && s_vpls[i].used ? &s_vpls[i] : NULL;
+    if (uid == 0u) return NULL;
+    for (int i = 0; i < VPL_MAX; i++)
+        if (s_vpls[i].used && s_vpls[i].uid == uid) return &s_vpls[i];
+    return NULL;
 }
 
 uint32_t h_WaitThreadEnd_impl(CpuState *s, int is_cb) {

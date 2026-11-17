@@ -224,6 +224,7 @@ typedef struct {
 } FplWaiter;
 
 typedef struct {
+    uint32_t uid;          /* from sr_alloc_uid; fpl_lookup matches it */
     uint32_t base;
     uint32_t cur;
     uint32_t end;
@@ -255,6 +256,7 @@ typedef struct { uint32_t thread_uid; uint32_t size; } VplWaiter;
  * both arrays by size / 16 + 1. A fixed table made the 129th live block of a pool
  * with free space read as exhausted, and a blocking AllocateVpl then never returned. */
 typedef struct {
+    uint32_t uid;          /* from sr_alloc_uid; vpl_lookup matches it */
     uint32_t base, size, block_uid;
     uint32_t attr;
     int used;

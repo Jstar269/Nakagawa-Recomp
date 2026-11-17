@@ -2294,7 +2294,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_td23_guest_pointer_validation",
             "tests/native/hle_thread_selftest.c:test_td28_partition_free_reuse",
         ],
-        "limitation": "partition and type refusals, the volatile-partition cells and the unplaceable-Addr code match the recorded cells; where a PSP places a partition-6 block is unmeasured, partitions 2 and 6 accept a NULL name that the PSP refuses (existing callers rely on it), a zero size allocates 16 bytes rather than being checked against the recorded size cells, and blocks are placed from a bump heap rather than the kernel's allocator (#341)",
+        "limitation": "partition and type refusals, the volatile-partition cells and the unplaceable-Addr code match the recorded cells; where a PSP places a partition-6 block is unmeasured, partitions 2 and 6 accept a NULL name that the PSP refuses (existing callers rely on it), and blocks are placed from a bump heap rather than the kernel's allocator (#341)",
     },
     "h_CtrlReadBuffer": {
         "status": "partial",

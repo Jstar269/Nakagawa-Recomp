@@ -559,7 +559,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_memory_block_high_in_low_based_partition
   - Evidence: PSPAutotests tests/sysmem/memblock.expected lines 9 and 25 to 33 (774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP): type 1 allocates, and a second type-1 block lies its size rounded up to 0x100 below the first
 - **`h_AllocPartitionMemory`** (`sceKernel`): `sceKernelAllocPartitionMemory` (0x237dbd4f)
-  - Limitation: partition and type refusals, the volatile-partition cells and the unplaceable-Addr code match the recorded cells; where a PSP places a partition-6 block is unmeasured, partitions 2 and 6 accept a NULL name that the PSP refuses (existing callers rely on it), a zero size allocates 16 bytes rather than being checked against the recorded size cells, and blocks are placed from a bump heap rather than the kernel's allocator (#341)
+  - Limitation: partition and type refusals, the volatile-partition cells and the unplaceable-Addr code match the recorded cells; where a PSP places a partition-6 block is unmeasured, partitions 2 and 6 accept a NULL name that the PSP refuses (existing callers rely on it), and blocks are placed from a bump heap rather than the kernel's allocator (#341)
   - Evidence: PSPAutotests tests/sysmem/partition.expected at 2ed7c9c5 (partitions 1, 3 and 4 0x800200D6, other numbers 0x800200D2, type past 4 0x800200D8)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: vmem-alloc-free and vmem-alloc-held, a partition-5 Low block at 0x08400000 and a partition-2 Addr block there 0x800200D9)
   - Evidence: tests/native/hle_thread_selftest.c:test_partition_unknown_block_codes

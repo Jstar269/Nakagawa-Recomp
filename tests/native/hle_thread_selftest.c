@@ -42334,10 +42334,12 @@ static void test_alloc_block_at_fixed_address(void) {
     uint32_t R3 = base0 + 0x30000u;
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 2u; cpu.r[7] = 0u; cpu.r[8] = R3;
+    heap_before = sr_hle_test_partition_heap_ptr();
     uint32_t uid_z = sr_syscall(&cpu, NID_ALLOC_PART);
-    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = uid_z;
-    expect(uid_z != 0u && uid_z < 0x80000000u && sr_syscall(&cpu, NID_GET_HEAD) == R3,
-           "type-2 handler maps size 0 to 16 like the existing path");
+    /* Audit 2026-11-17 (F-6235ecfb): size 0 is MEMBLOCK_ALLOC_FAILED (memblock.expected via
+     * uOFW's AllocMemoryBlock forwarding), no longer a 16-byte block. */
+    expect(uid_z == 0x800200d9u && sr_hle_test_partition_heap_ptr() == heap_before,
+           "type-2 handler refuses size 0 with MEMBLOCK_ALLOC_FAILED and places nothing");
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 3u; cpu.r[7] = 0x100u;
     uint32_t uid_t3 = sr_syscall(&cpu, NID_ALLOC_PART);
@@ -42406,7 +42408,7 @@ static void test_fpl_delete_releases_partition(void) {
     cpu.r[4] = FPL_NAMEBUF; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
     cpu.r[8] = 0x10u;
     uint32_t fpl1 = sr_syscall(&cpu, NID_FPL_CREATE);
-    expect(fpl1 >= 0x500u, "fpl1 create succeeds");
+    expect(fpl1 != 0u && fpl1 < 0x80000000u, "fpl1 create succeeds");
 
     /* Allocate first block to get fpl1 base address */
     memset(&cpu, 0, sizeof(cpu));
@@ -42452,7 +42454,7 @@ static void test_fpl_delete_releases_partition(void) {
     cpu.r[4] = FPL_NAMEBUF; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
     cpu.r[8] = 0x10u;
     uint32_t fpl2 = sr_syscall(&cpu, NID_FPL_CREATE);
-    expect(fpl2 >= 0x500u, "fpl2 create succeeds");
+    expect(fpl2 != 0u && fpl2 < 0x80000000u, "fpl2 create succeeds");
 
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = fpl2; cpu.r[5] = FPL_OUTPTR; cpu.r[6] = 0u;
@@ -42517,7 +42519,7 @@ static void test_vpl_nonblocking_roundtrip(void) {
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = FPL_NAMEBUF; cpu.r[5] = 2u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
     uint32_t vpl = sr_syscall(&cpu, NID_VPL_CREATE);
-    expect(vpl >= 0x600u, "vpl create succeeds");
+    expect(vpl != 0u && vpl < 0x80000000u, "vpl create succeeds");
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
     uint32_t trailer = sr_syscall(&cpu, 0x237dbd4fu);
@@ -42593,7 +42595,7 @@ static void test_vpl_block_count_bounded_by_pool_size(void) {
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = FPL_NAMEBUF; cpu.r[5] = 2u; cpu.r[6] = 0u; cpu.r[7] = POOL;
     uint32_t vpl = sr_syscall(&cpu, NID_VPL_CREATE);
-    expect(vpl >= 0x600u, "vpl create succeeds for the block-count pool");
+    expect(vpl != 0u && vpl < 0x80000000u, "vpl create succeeds for the block-count pool");
 
     int all = 1;
     for (uint32_t i = 0; i < BLOCKS; i++) {
@@ -43223,7 +43225,7 @@ static void test_wb_tlspl_vpl_cells(void) {
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = TLSPL_NAMEBUF; cpu.r[5] = 2u; cpu.r[6] = 0u; cpu.r[7] = 0x10000u;
     uint32_t vpl = sr_syscall(&cpu, NID_VPL_CREATE);
-    expect(vpl >= 0x600u && vpl < 0x80000000u, "wb vpl: create");
+    expect(vpl != 0u && vpl < 0x80000000u, "wb vpl: create");
     if (vpl >= 0x80000000u) return;
     for (uint32_t i = 0; i < 64u; ++i) MEM_W8(VPL_INFO + i, 0xccu);
     MEM_W32(VPL_INFO, 0u);
@@ -43577,7 +43579,7 @@ static void test_fpl_blocking_waits(void) {
 
     /* ---- 1. FreeFpl reuse and validation ---- */
     uint32_t pool = selftest_fpl_create(64, 2);
-    expect(pool >= 0x500u, "FPL: CreateFpl returns valid UID");
+    expect(pool != 0u && pool < 0x80000000u, "FPL: CreateFpl returns valid UID");
     expect(selftest_fpl_allocate(pool, out1, 0) == 0, "FPL: first allocation succeeds");
     expect(selftest_fpl_allocate(pool, out2, 0) == 0, "FPL: second allocation succeeds");
     uint32_t addr1 = MEM_R32(out1);
@@ -43587,7 +43589,7 @@ static void test_fpl_blocking_waits(void) {
     expect(selftest_fpl_try_allocate(pool, out3) == FPL_NO_MEMORY_ERR, "FPL: pool is exhausted");
     expect(MEM_R32(out3) == 0xfeedfaceu, "FPL: exhausted try_allocate leaves outptr untouched");
 
-    expect(selftest_fpl_free(0x5ffu, addr1) == FPL_UNKNOWN_ID_ERR, "FPL: bad UID free is rejected");
+    expect(selftest_fpl_free(0x7ffffff0u, addr1) == FPL_UNKNOWN_ID_ERR, "FPL: bad UID free is rejected");
     expect(selftest_fpl_free(pool, 0xdeadbeefu) == 0x80000103u, "FPL: illegal address free is rejected");
     expect(selftest_fpl_free(pool, addr1 + 1) == 0x80000103u, "FPL: unaligned address free is rejected");
 
@@ -43602,7 +43604,7 @@ static void test_fpl_blocking_waits(void) {
 
     /* ---- 2. AllocateFpl blocks then wakes on FreeFpl (FIFO order & CB check) ---- */
     pool = selftest_fpl_create(64, 1);
-    expect(pool >= 0x500u, "FPL: CreateFpl 1-block pool succeeds");
+    expect(pool != 0u && pool < 0x80000000u, "FPL: CreateFpl 1-block pool succeeds");
     expect(selftest_fpl_allocate(pool, out1, 0) == 0, "FPL: allocate exhausts pool");
     addr1 = MEM_R32(out1);
 
@@ -43802,7 +43804,7 @@ static void test_vpl_blocking_waits(void) {
     /* ---- 1. FreeVpl reuse and validation ---- */
     /* PSP-B1-01: 0x130 bytes hand out 0x110, two 128-byte blocks of 136. */
     uint32_t vpool = selftest_vpl_create(0x130u);
-    expect(vpool >= 0x600u, "VPL: CreateVpl returns valid UID");
+    expect(vpool != 0u && vpool < 0x80000000u, "VPL: CreateVpl returns valid UID");
     expect(selftest_vpl_allocate(vpool, 128, out1, 0) == 0, "VPL: first 128B allocation succeeds");
     expect(selftest_vpl_allocate(vpool, 128, out2, 0) == 0, "VPL: second 128B allocation succeeds");
     uint32_t addr1 = MEM_R32(out1);
@@ -43812,7 +43814,7 @@ static void test_vpl_blocking_waits(void) {
     expect(selftest_vpl_try_allocate(vpool, 64, out3) == VPL_EXHAUSTED_ERR, "VPL: pool is exhausted");
     expect(MEM_R32(out3) == 0xfeedfaceu, "VPL: exhausted try_allocate leaves outptr untouched");
 
-    expect(selftest_vpl_free(0x6ffu, addr1) == VPL_UNKNOWN_ID_ERR, "VPL: bad UID free is rejected");
+    expect(selftest_vpl_free(0x7ffffff0u, addr1) == VPL_UNKNOWN_ID_ERR, "VPL: bad UID free is rejected");
     expect(selftest_vpl_free(vpool, 0xdeadbeefu) == VPL_UNKNOWN_ID_ERR, "VPL: unknown address free is rejected");
 
     expect(selftest_vpl_free(vpool, addr1) == 0, "VPL: FreeVpl succeeds");
@@ -43829,7 +43831,7 @@ static void test_vpl_blocking_waits(void) {
      * Their code is UNMEASURED (the pspautotests "more than the pool" code); a blocking allocate
      * must not wait for space that cannot exist. */
     vpool = selftest_vpl_create(256);
-    expect(vpool >= 0x600u, "VPL: CreateVpl for the never-fits cells succeeds");
+    expect(vpool != 0u && vpool < 0x80000000u, "VPL: CreateVpl for the never-fits cells succeeds");
     MEM_W32(out1, 0xfeedfaceu);
     expect(selftest_vpl_try_allocate(vpool, 217, out1) == 0x800201b7u &&
                selftest_vpl_try_allocate(vpool, 256, out1) == 0x800201b7u &&
@@ -43841,13 +43843,13 @@ static void test_vpl_blocking_waits(void) {
     expect(selftest_vpl_free(vpool, MEM_R32(out1)) == 0 && selftest_vpl_delete(vpool) == 0,
            "VPL: never-fits pool frees and deletes");
     vpool = selftest_vpl_create(0x20u);
-    expect(vpool >= 0x600u && selftest_vpl_try_allocate(vpool, 1, out1) == 0x800201b7u,
+    expect(vpool != 0u && vpool < 0x80000000u && selftest_vpl_try_allocate(vpool, 1, out1) == 0x800201b7u,
            "VPL: a pool of 0x20 bytes holds no block, so any request is 0x800201B7");
     expect(selftest_vpl_delete(vpool) == 0, "VPL: the 0x20-byte pool deletes");
 
     /* ---- 2. AllocateVpl blocks then wakes on FreeVpl (FIFO order & CB check) ---- */
     vpool = selftest_vpl_create(256);
-    expect(vpool >= 0x600u, "VPL: CreateVpl succeeds");
+    expect(vpool != 0u && vpool < 0x80000000u, "VPL: CreateVpl succeeds");
     /* PSP-B1-01: a 256-byte pool hands out 224 bytes, all of them to one 216-byte block. */
     expect(selftest_vpl_allocate(vpool, 216, out1, 0) == 0, "VPL: allocate 216B exhausts pool");
     addr1 = MEM_R32(out1);
@@ -44007,6 +44009,233 @@ static void test_vpl_blocking_waits(void) {
     s_cur = (int)(cur - s_tcb);
 }
 
+/* Audit 2026-11-17 (F-7460cc80): sceKernelCreateFpl sizes the pool as blockSize * numBlocks
+ * without wrapping. A product past 4 GB used to wrap to a small (or zero) pool while the large
+ * block count was recorded, so allocations ran past the partition block. Such a pool is refused
+ * with NO_MEMORY, as the measured 0x7FFFFFFF-byte block is. */
+static void test_fpl_create_size_product_does_not_wrap(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    static const struct { uint32_t bsize, nblocks; const char *what; } cases[] = {
+        {0x10000u, 0x10001u, "CreateFpl 0x10000 x 0x10001 (wraps to 0x10000) is NO_MEMORY"},
+        {0x80000000u, 2u, "CreateFpl 0x80000000 x 2 (wraps to 0) is NO_MEMORY"},
+        {0xfffffff0u, 0x10000000u, "CreateFpl 0xFFFFFFF0 x 0x10000000 (wraps to 0) is NO_MEMORY"},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        uint32_t uid = selftest_fpl_create(cases[i].bsize, cases[i].nblocks);
+        expect(uid == FPL_NO_MEMORY_ERR, cases[i].what);
+        if (uid != 0u && uid < 0x80000000u) (void)selftest_fpl_delete(uid);
+    }
+    /* A product that fits is still a pool of exactly that many blocks. */
+    uint32_t uid = selftest_fpl_create(0x40u, 4u);
+    expect(uid != 0u && uid < 0x80000000u, "CreateFpl 0x40 x 4 makes a pool");
+    uint32_t out = 0x00271060u, seen = 0u;
+    for (int k = 0; k < 4; k++)
+        if (selftest_fpl_try_allocate(uid, out) == 0u) seen++;
+    expect(seen == 4u && selftest_fpl_try_allocate(uid, out) == FPL_NO_MEMORY_ERR,
+           "CreateFpl 0x40 x 4: four blocks, then NO_MEMORY");
+    (void)selftest_fpl_delete(uid);
+}
+
+/* Audit 2026-11-17 (F-30d6ed4b): FreeFpl checks the block in offsets from the pool base, so an
+ * address near 4 GB cannot wrap the end check. A 2-byte-block pool used to take 0xFFFFFFFE onto
+ * its free list and hand it to the next allocate. */
+static void test_fpl_free_bounds_do_not_wrap(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    uint32_t out = 0x00271070u;
+    uint32_t pool = selftest_fpl_create(2u, 2u);
+    expect(pool != 0u && pool < 0x80000000u, "FPL bounds: a 2 x 2-byte pool is created");
+    expect(selftest_fpl_free(pool, 0xfffffffeu) == 0x80000103u,
+           "FPL bounds: FreeFpl of 0xFFFFFFFE from a 2-byte-block pool is ILLEGAL_ADDR");
+    expect(selftest_fpl_try_allocate(pool, out) == 0u, "FPL bounds: first allocate succeeds");
+    uint32_t a = MEM_R32(out);
+    expect(selftest_fpl_try_allocate(pool, out) == 0u, "FPL bounds: second allocate succeeds");
+    uint32_t b = MEM_R32(out);
+    expect(a != 0xfffffffeu && b != 0xfffffffeu && (a < b ? b - a : a - b) == 2u,
+           "FPL bounds: both blocks lie in the pool, none at the refused address");
+    expect(selftest_fpl_try_allocate(pool, out) == FPL_NO_MEMORY_ERR,
+           "FPL bounds: the pool holds two blocks, then NO_MEMORY");
+    uint32_t lo = a < b ? a : b;
+    expect(selftest_fpl_free(pool, lo + 4u) == 0x80000103u,
+           "FPL bounds: FreeFpl one block past the end is ILLEGAL_ADDR");
+    expect(selftest_fpl_free(pool, lo) == 0u && selftest_fpl_free(pool, lo + 2u) == 0u,
+           "FPL bounds: both blocks free");
+    (void)selftest_fpl_delete(pool);
+
+    /* A 1-byte-block pool: 0xFFFFFFFF + 1 wraps to 0, and the block index used to reach the
+     * host tracking array about 4 GB past its end. */
+    pool = selftest_fpl_create(1u, 2u);
+    expect(pool != 0u && pool < 0x80000000u, "FPL bounds: a 2 x 1-byte pool is created");
+    expect(selftest_fpl_free(pool, 0xffffffffu) == 0x80000103u,
+           "FPL bounds: FreeFpl of 0xFFFFFFFF from a 1-byte-block pool is ILLEGAL_ADDR");
+    (void)selftest_fpl_delete(pool);
+}
+
+/* Audit 2026-11-17 (F-5e96c5e7): an FPL or VPL wait that ends with a latched result
+ * (sceKernelReleaseWaitThread's WAIT_RELEASE here) leaves the pool's queue. The entry used to
+ * stay, so ReferStatus counted a thread that no longer waits and a zero-timeout allocate on a
+ * pool with free space answered WAIT_TIMEOUT behind it. */
+static void test_pool_released_waiter_leaves_queue(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x101u, TH_RUNNING, 32);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    const uint32_t out1 = 0x00271080u, out2 = 0x00271084u, toptr = 0x00271088u;
+    const uint32_t info = 0x00271100u;
+    CpuState cpu;
+
+    for (int vpl = 0; vpl < 2; vpl++) {
+        const char *k = vpl ? "VPL" : "FPL";
+        char msg[160];
+        uint32_t pool = vpl ? selftest_vpl_create(256u) : selftest_fpl_create(64u, 1u);
+        snprintf(msg, sizeof msg, "%s released waiter: the pool is created", k);
+        expect(pool != 0u && pool < 0x80000000u, msg);
+        uint32_t rc = vpl ? selftest_vpl_allocate(pool, 216u, out1, 0u)
+                          : selftest_fpl_allocate(pool, out1, 0u);
+        snprintf(msg, sizeof msg, "%s released waiter: the owner exhausts the pool", k);
+        expect(rc == 0u, msg);
+        uint32_t held = MEM_R32(out1);
+
+        SelftestPoolWaiterCtx w;
+        memset(&w, 0, sizeof w);
+        w.uid = vpl ? 0x139u : 0x138u;
+        w.tcb = fixture_thread(w.uid, TH_READY, 32);
+        w.tcb->started = 1;
+        w.pool_uid = pool;
+        w.req_size = 128u;
+        w.outptr = out2;
+        MEM_W32(out2, 0xfeedfaceu);
+        w.tcb->coro = sr_coro_create(vpl ? selftest_vpl_waiter_fiber_body : selftest_fpl_waiter_fiber_body,
+                                     &w, (size_t)4 << 20);
+        s_cur = (int)(w.tcb - s_tcb);
+        sr_coro_switch(w.tcb->coro);
+        snprintf(msg, sizeof msg, "%s released waiter: the waiter blocks", k);
+        expect(w.returned == 0 && w.tcb->state == TH_WAIT_OBJ, msg);
+
+        s_cur = (int)(cur - s_tcb);
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = w.uid;
+        snprintf(msg, sizeof msg, "%s released waiter: ReleaseWaitThread returns 0", k);
+        expect(sr_syscall(&cpu, NID_WCR_RELEASE_WAIT) == 0u, msg);
+        s_cur = (int)(w.tcb - s_tcb);
+        w.tcb->state = TH_RUNNING;
+        sr_coro_switch(w.tcb->coro);
+        snprintf(msg, sizeof msg, "%s released waiter: the waiter returns WAIT_RELEASE (0x800201AA)", k);
+        expect(w.returned == 1 && w.ret == 0x800201aau && MEM_R32(out2) == 0xfeedfaceu, msg);
+        s_cur = (int)(cur - s_tcb);
+
+        memset(&cpu, 0, sizeof cpu);
+        MEM_W32(info, vpl ? 52u : 56u);
+        cpu.r[4] = pool;
+        cpu.r[5] = info;
+        rc = sr_syscall(&cpu, vpl ? NID_VPL_REFER : NID_RFS_REFER_FPL);
+        snprintf(msg, sizeof msg, "%s released waiter: ReferStatus counts no waiting thread", k);
+        expect(rc == 0u && MEM_R32(info + (vpl ? 48u : 52u)) == 0u, msg);
+
+        rc = vpl ? selftest_vpl_free(pool, held) : selftest_fpl_free(pool, held);
+        snprintf(msg, sizeof msg, "%s released waiter: the owner frees its block", k);
+        expect(rc == 0u, msg);
+        MEM_W32(toptr, 0u);
+        rc = vpl ? selftest_vpl_allocate(pool, 128u, out1, toptr)
+                 : selftest_fpl_allocate(pool, out1, toptr);
+        snprintf(msg, sizeof msg, "%s released waiter: a zero-timeout allocate takes the free block", k);
+        expect(rc == 0u, msg);
+        if (rc == 0u) {
+            if (vpl) (void)selftest_vpl_free(pool, MEM_R32(out1));
+            else (void)selftest_fpl_free(pool, MEM_R32(out1));
+        }
+
+        sr_coro_destroy(w.tcb->coro);
+        w.tcb->coro = NULL;
+        if (vpl) (void)selftest_vpl_delete(pool);
+        else (void)selftest_fpl_delete(pool);
+    }
+}
+
+/* Audit 2026-11-17 (F-3720bcac): FPL and VPL UIDs come from the shared sr_alloc_uid pool. They
+ * used to be the fixed 0x500 + slot and 0x600 + slot, which a semaphore, thread or memory block
+ * also received once the shared pool reached them, and waits, deletes and the threadman id list
+ * key on the UID. */
+static void test_pool_uids_come_from_the_shared_pool(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t s_uid;
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    /* Only ever moves the counter forward, as allocating that many objects would. */
+    if (s_uid < 0x4f0u) s_uid = 0x4f0u;
+    const uint32_t before = s_uid;
+    uint32_t fpl = selftest_fpl_create(64u, 1u);
+    uint32_t vpl = selftest_vpl_create(256u);
+    expect(fpl != 0u && fpl < 0x80000000u && vpl != 0u && vpl < 0x80000000u,
+           "pool uids: an FPL and a VPL are created");
+    expect(fpl >= before && fpl < s_uid && vpl >= before && vpl < s_uid && fpl != vpl,
+           "pool uids: both UIDs are ones the shared pool handed out during the creates");
+    int collided = 0;
+    for (int k = 0; k < 0x400 && s_uid <= 0x700u; k++) {
+        uint32_t u = sr_alloc_uid();
+        if (u == fpl || u == vpl) collided = 1;
+    }
+    expect(!collided, "pool uids: no later shared-pool UID equals a live FPL or VPL UID");
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    MEM_W32(0x00271200u, 56u);
+    cpu.r[4] = fpl;
+    cpu.r[5] = 0x00271200u;
+    expect(sr_syscall(&cpu, NID_RFS_REFER_FPL) == 0u, "pool uids: ReferFplStatus finds the pool by its UID");
+    expect(selftest_fpl_delete(fpl) == 0u && selftest_vpl_delete(vpl) == 0u,
+           "pool uids: both pools delete by their UIDs");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = fpl;
+    cpu.r[5] = 0x00271200u;
+    expect(sr_syscall(&cpu, NID_RFS_REFER_FPL) == FPL_UNKNOWN_ID_ERR,
+           "pool uids: a deleted FPL UID is unknown");
+}
+
+/* Audit 2026-11-17 (F-6235ecfb): sceKernelAllocPartitionMemory of size 0 on partitions 2 and 6
+ * is MEMBLOCK_ALLOC_FAILED (0x800200D9), as memblock.expected records for AllocMemoryBlock, which
+ * forwards to it on partition 2, and as the volatile partition answers. It used to hand back a
+ * 16-byte block. */
+static void test_partition_alloc_size_zero_refused(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t name = 0x00271300u;
+    MEM_W8(name, (uint8_t)'z');
+    MEM_W8(name + 1u, 0u);
+    static const struct { uint32_t part, type; const char *what; } cases[] = {
+        {2u, 0u, "AllocPartitionMemory(2, Low, size 0) is MEMBLOCK_ALLOC_FAILED"},
+        {2u, 1u, "AllocPartitionMemory(2, High, size 0) is MEMBLOCK_ALLOC_FAILED"},
+        {6u, 0u, "AllocPartitionMemory(6, Low, size 0) is MEMBLOCK_ALLOC_FAILED"},
+        {5u, 0u, "AllocPartitionMemory(5, Low, size 0) is MEMBLOCK_ALLOC_FAILED"},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        CpuState cpu;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = cases[i].part;
+        cpu.r[5] = name;
+        cpu.r[6] = cases[i].type;
+        cpu.r[7] = 0u;
+        cpu.r[8] = 0u;
+        uint32_t rc = sr_syscall(&cpu, 0x237dbd4fu);
+        expect(rc == 0x800200d9u, cases[i].what);
+        if (rc != 0u && rc < 0x80000000u) {
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = rc;
+            (void)sr_syscall(&cpu, 0xb6d61d02u);
+        }
+    }
+}
+
 /* Pool bounds measured on the PSP-3000 (docs/HARDWARE_ORACLE.md, #2397):
  * - PSP-HLE-KERNEL-STATUS-002 (case hle-kernel-pool-bounds, 2026-11-10, boot 173): partition 2,
  *   attribute 0, NULL options. sceKernelCreateFpl with block size 0 and one block is 0x800201B7,
@@ -44030,7 +44259,7 @@ static void test_kernel_pool_bounds_measured(void) {
            "pool bounds: a refused CreateFpl leaves the partition as it was");
 
     uint32_t vpl = selftest_vpl_create(0x1000u);
-    expect(vpl >= 0x600u && vpl < 0x80000000u, "pool bounds: CreateVpl of 0x1000 bytes returns a UID");
+    expect(vpl != 0u && vpl < 0x80000000u, "pool bounds: CreateVpl of 0x1000 bytes returns a UID");
     uint32_t blocks[16] = {0};
     uint32_t taken = 0;
     for (; taken < 16u; ++taken) {
@@ -44051,7 +44280,7 @@ static void test_kernel_pool_bounds_measured(void) {
 
     /* PSP-B1-01: the 1024-byte pool reports 992 bytes of pool and of free space. */
     vpl = selftest_vpl_create(1024u);
-    expect(vpl >= 0x600u && vpl < 0x80000000u, "pool bounds: CreateVpl of 1024 bytes returns a UID");
+    expect(vpl != 0u && vpl < 0x80000000u, "pool bounds: CreateVpl of 1024 bytes returns a UID");
     CpuState cpu;
     MEM_W32(VPL_INFO, 0x34u);
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
@@ -58187,6 +58416,11 @@ static int hle_selftest_main(int argc, char **argv) {
     test_tlspl_highmem_pool();
     test_psp_measured_safe_scalar_tls_20261117();
     test_vpl_blocking_waits();
+    test_fpl_create_size_product_does_not_wrap();
+    test_pool_released_waiter_leaves_queue();
+    test_pool_uids_come_from_the_shared_pool();
+    test_partition_alloc_size_zero_refused();
+    test_fpl_free_bounds_do_not_wrap();
     test_std_handles_measured();
     test_kernel_pool_bounds_measured();
     test_mbx_lifecycle_and_ordering();
