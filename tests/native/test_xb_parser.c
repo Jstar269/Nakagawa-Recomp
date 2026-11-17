@@ -1351,32 +1351,194 @@ static void test_archive_vfs_mount_scaling(void) {
     }
 }
 
-/* A member whose name has no archive key (here it ends in a Shift-JIS character whose
- * trail byte is 0x5c, which the key rule reads as a trailing separator) makes the mount
- * fail as an invalid archive, with nothing indexed; it is not an allocation failure. */
-static void test_archive_vfs_keyless_member_is_invalid(void) {
+static const SrVfsDirEntry *archive_list_find(const SrVfsDirList *list, const char *name) {
+    for (size_t i = 0; i < list->count; i++) {
+        if (strcmp(list->entries[i].name, name) == 0) return &list->entries[i];
+    }
+    return NULL;
+}
+
+/* The XB reader keeps a Shift-JIS pair byte for byte, so a trail byte 0x5c (the second
+ * byte of characters such as 0x95 0x5c and 0x8f 0x5c) is part of the name, not a
+ * separator. Such members mount, open by the guest's folded key (which turns every 0x5c
+ * into '/' and folds ASCII letters), and are listed as files, not as directories. */
+static void test_archive_vfs_sjis_trail_5c_member(void) {
     static const uint8_t first_data[] = "first";
-    static const uint8_t keyless_data[] = "keyless";
-    const FixtureEntry entries[2] = {
+    static const uint8_t end_data[] = "trail at the end";
+    static const uint8_t middle_data[] = "trail in the middle";
+    static const uint8_t nested_data[] = "below a trail directory";
+    static const uint8_t upper_data[] = "upper trail";
+    static const uint8_t bar_data[] = "trail 0x7c";
+    const FixtureEntry entries[6] = {
         { "data/first.bin", first_data, sizeof(first_data) - 1u, NK_XB_COMPRESSION_NONE },
-        { "data/\x83\x5c", keyless_data, sizeof(keyless_data) - 1u, NK_XB_COMPRESSION_NONE }
+        { "data/\x95\x5c", end_data, sizeof(end_data) - 1u, NK_XB_COMPRESSION_NONE },
+        { "data/ab\x83\x5c" "cd.bin", middle_data, sizeof(middle_data) - 1u,
+          NK_XB_COMPRESSION_NONE },
+        { "data/\x8f\x5c/in.bin", nested_data, sizeof(nested_data) - 1u,
+          NK_XB_COMPRESSION_NONE },
+        { "data/\x83\x41.bin", upper_data, sizeof(upper_data) - 1u, NK_XB_COMPRESSION_NONE },
+        /* A trail 0x7c is the ASCII '|' a standalone name byte may not be. */
+        { "data/\x83\x7c.bin", bar_data, sizeof(bar_data) - 1u, NK_XB_COMPRESSION_NONE }
     };
-    ByteBuffer archive = make_archive(entries, 2u, false);
+    ByteBuffer archive = make_archive(entries, 6u, false);
     NkXbArchive parsed;
     char error[256];
-    assert(nk_xb_open_memory(archive.data, archive.size, "keyless.xb", false, NULL,
+    assert(nk_xb_open_memory(archive.data, archive.size, "trail.xb", false, NULL,
                              &parsed, error, sizeof(error)) == NK_OK);
     nk_xb_close(&parsed);
 
     SrArchiveVfs vfs;
     sr_archive_vfs_init(&vfs);
-    assert(sr_archive_vfs_mount_memory(&vfs, archive.data, archive.size, "keyless.xb",
-                                       false, -1, NULL) == NK_ERROR_INVALID_XB);
-    assert(sr_archive_vfs_mount_count(&vfs) == 0u);
-    assert(sr_archive_vfs_entry_count(&vfs) == 0u);
+    assert(sr_archive_vfs_mount_memory(&vfs, archive.data, archive.size, "trail.xb",
+                                       false, -1, NULL) == NK_OK);
+    assert(sr_archive_vfs_mount_count(&vfs) == 1u);
+    assert(sr_archive_vfs_entry_count(&vfs) == 6u);
+
+    SrArchiveFile file;
+    /* The member's own spelling and the guest's folded key both open it. */
+    assert(sr_archive_vfs_lookup(&vfs, "data/\x95\x5c", -2, &file));
+    assert(file.size == sizeof(end_data) - 1u);
+    assert(sr_archive_vfs_lookup(&vfs, "data/\x95/", -2, &file));
+    assert(file.size == sizeof(end_data) - 1u);
+    assert(sr_archive_vfs_lookup(&vfs, "DATA/AB\x83\x5c" "CD.BIN", -2, &file));
+    assert(file.size == sizeof(middle_data) - 1u);
+    assert(sr_archive_vfs_lookup(&vfs, "data/ab\x83/cd.bin", -2, &file));
+    assert(file.size == sizeof(middle_data) - 1u);
+    assert(sr_archive_vfs_lookup(&vfs, "data/\x8f\x5c/in.bin", -2, &file));
+    assert(file.size == sizeof(nested_data) - 1u);
+    assert(sr_archive_vfs_lookup(&vfs, "data/\x8f//in.bin", -2, &file));
+    assert(file.size == sizeof(nested_data) - 1u);
+    assert(sr_archive_vfs_lookup(&vfs, "data/\x83" "a.bin", -2, &file));
+    assert(file.size == sizeof(upper_data) - 1u);
+    assert(sr_archive_vfs_lookup(&vfs, "data/\x83\x7c.bin", -2, &file));
+    assert(file.size == sizeof(bar_data) - 1u);
+    /* The trail byte is not a separator, so the name is not a directory prefix. */
+    assert(!sr_archive_vfs_lookup(&vfs, "data/ab\x83", -2, &file));
+
+    SrVfsDirList list;
+    sr_vfs_dirlist_init(&list);
+    assert(sr_archive_vfs_list_dir(&vfs, "data", -2, &list) == 1);
+    assert(list.exists && list.count == 6u && list.skipped == 0u);
+    const SrVfsDirEntry *child = archive_list_find(&list, "\x95\x5c");
+    assert(child && !child->is_dir && child->size == sizeof(end_data) - 1u);
+    child = archive_list_find(&list, "ab\x83\x5c" "cd.bin");
+    assert(child && !child->is_dir && child->size == sizeof(middle_data) - 1u);
+    child = archive_list_find(&list, "\x8f\x5c");
+    assert(child && child->is_dir);
+    child = archive_list_find(&list, "\x83\x41.bin");
+    assert(child && !child->is_dir && child->size == sizeof(upper_data) - 1u);
+    sr_vfs_dirlist_destroy(&list);
+
+    /* A directory whose name ends in a trail 0x5c lists its own children, whether the
+     * guest names it with the raw pair or with the folded '/' and a trailing separator. */
+    const char *nested_dirs[] = { "data/\x8f\x5c", "data/\x8f/", "/data/\x8f\x5c/",
+                                  "data/\x8f//" };
+    for (size_t i = 0; i < sizeof(nested_dirs) / sizeof(nested_dirs[0]); i++) {
+        sr_vfs_dirlist_init(&list);
+        assert(sr_archive_vfs_list_dir(&vfs, nested_dirs[i], -2, &list) == 1);
+        assert(list.exists && list.count == 1u);
+        child = archive_list_find(&list, "in.bin");
+        assert(child && !child->is_dir && child->size == sizeof(nested_data) - 1u);
+        sr_vfs_dirlist_destroy(&list);
+    }
+
     sr_archive_vfs_destroy(&vfs);
     free(archive.data);
-    printf("[XB_TEST] archive VFS keyless member refusal PASSED\n");
+    printf("[XB_TEST] archive VFS Shift-JIS trail 0x5c members PASSED\n");
+}
+
+/* Two unnumbered archives that hold the same member: open and the directory listing
+ * pick the same one, the first mount, so the size sceIoDread reports is the size of the
+ * file sceIoOpen serves. */
+static void test_archive_vfs_duplicate_unqualified_member_first_mount_wins(void) {
+    static const uint8_t first_data[] = "first mount";
+    static const uint8_t second_data[] = "second mount, longer";
+    const FixtureEntry first_entry = {
+        "data/x.bin", first_data, sizeof(first_data) - 1u, NK_XB_COMPRESSION_NONE
+    };
+    const FixtureEntry second_entry = {
+        "DATA/X.BIN", second_data, sizeof(second_data) - 1u, NK_XB_COMPRESSION_NONE
+    };
+    ByteBuffer first = make_archive(&first_entry, 1u, false);
+    ByteBuffer second = make_archive(&second_entry, 1u, false);
+    SrArchiveVfs vfs;
+    sr_archive_vfs_init(&vfs);
+    assert(sr_archive_vfs_mount_memory(&vfs, first.data, first.size, "a.xb", false, -1,
+                                       NULL) == NK_OK);
+    assert(sr_archive_vfs_mount_memory(&vfs, second.data, second.size, "b.xb", false, -1,
+                                       NULL) == NK_OK);
+
+    SrArchiveFile file;
+    assert(sr_archive_vfs_lookup(&vfs, "data/x.bin", -2, &file));
+    assert(file.mount_index == 0u && file.size == sizeof(first_data) - 1u);
+    uint8_t output[64];
+    size_t output_size = 0;
+    assert(sr_archive_vfs_read(&vfs, &file, 0u, output, sizeof(output), &output_size) == NK_OK);
+    assert(output_size == sizeof(first_data) - 1u);
+    assert(memcmp(output, first_data, output_size) == 0);
+
+    SrVfsDirList list;
+    sr_vfs_dirlist_init(&list);
+    assert(sr_archive_vfs_list_dir(&vfs, "data", -2, &list) == 1);
+    assert(list.count == 1u);
+    const SrVfsDirEntry *child = archive_list_find(&list, "x.bin");
+    assert(child && !child->is_dir && child->size == file.size);
+    sr_vfs_dirlist_destroy(&list);
+
+    sr_archive_vfs_destroy(&vfs);
+    free(first.data);
+    free(second.data);
+    printf("[XB_TEST] archive VFS duplicate unqualified member: open and listing agree PASSED\n");
+}
+
+/* A compressed member larger than the cache's byte budget is decoded once for a run of
+ * sequential small reads (the HLE read loops split one sceIoRead into 4 KiB pieces),
+ * not once per piece. */
+static void test_archive_vfs_oversize_member_decoded_once(void) {
+    uint8_t member[96];
+    for (size_t i = 0; i < sizeof(member); i++) member[i] = (uint8_t)(i * 7u + 3u);
+    static const uint8_t small_data[] = "small lzs member";
+    const FixtureEntry entries[2] = {
+        { "data/big.bin", member, sizeof(member), NK_XB_COMPRESSION_LZS },
+        { "data/small.bin", small_data, sizeof(small_data) - 1u, NK_XB_COMPRESSION_LZS }
+    };
+    ByteBuffer bytes = make_archive(entries, 2u, false);
+    SrArchiveVfs vfs;
+    sr_archive_vfs_init(&vfs);
+    assert(sr_archive_vfs_configure(&vfs, 32u, 4u));
+    assert(sr_archive_vfs_mount_memory(&vfs, bytes.data, bytes.size, "big.xb", false, -1,
+                                       NULL) == NK_OK);
+    SrArchiveFile big;
+    SrArchiveFile small;
+    assert(sr_archive_vfs_lookup(&vfs, "data/big.bin", -2, &big));
+    assert(sr_archive_vfs_lookup(&vfs, "data/small.bin", -2, &small));
+    assert(big.size == sizeof(member));
+
+    uint8_t output[sizeof(member)];
+    for (size_t offset = 0; offset < sizeof(member); offset += 8u) {
+        size_t output_size = 0;
+        assert(sr_archive_vfs_read(&vfs, &big, offset, output + offset, 8u,
+                                   &output_size) == NK_OK);
+        assert(output_size == 8u);
+    }
+    assert(memcmp(output, member, sizeof(member)) == 0);
+    assert(sr_archive_vfs_decode_count(&vfs) == 1u);
+    /* The oversize member stays outside the cache's byte budget. */
+    assert(sr_archive_vfs_cache_bytes(&vfs) == 0u);
+
+    /* A cached small member does not evict the oversize one. */
+    size_t small_size = 0;
+    assert(sr_archive_vfs_read(&vfs, &small, 0u, output, sizeof(output), &small_size) == NK_OK);
+    assert(small_size == sizeof(small_data) - 1u && memcmp(output, small_data, small_size) == 0);
+    assert(sr_archive_vfs_decode_count(&vfs) == 2u);
+    size_t tail_size = 0;
+    assert(sr_archive_vfs_read(&vfs, &big, 90u, output, sizeof(output), &tail_size) == NK_OK);
+    assert(tail_size == 6u && memcmp(output, member + 90u, 6u) == 0);
+    assert(sr_archive_vfs_decode_count(&vfs) == 2u);
+
+    sr_archive_vfs_destroy(&vfs);
+    free(bytes.data);
+    printf("[XB_TEST] archive VFS oversize compressed member decoded once PASSED\n");
 }
 
 static void test_archive_vfs_precedence(void) {
@@ -2046,7 +2208,9 @@ int main(void) {
     test_duplicate_canonical_path();
     test_deterministic_mutation_fuzz();
     test_archive_vfs_precedence();
-    test_archive_vfs_keyless_member_is_invalid();
+    test_archive_vfs_sjis_trail_5c_member();
+    test_archive_vfs_duplicate_unqualified_member_first_mount_wins();
+    test_archive_vfs_oversize_member_decoded_once();
     test_archive_vfs_provider();
     test_archive_vfs_many_members();
     test_archive_vfs_mount_scaling();
