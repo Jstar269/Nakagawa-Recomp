@@ -63,6 +63,13 @@ void sr_cheats_vblank(void);
 const char *sr_cheats_marker(void);
 /* The window cannot draw the marker: cheats are refused for the run, with the reason. */
 void sr_cheats_marker_unavailable(const char *why);
+/* The UI pass's answer for a present whose frame asked for the marker (gui.c): 0 when it was
+ * not drawn. May be called from the thread that presents. After a 0 the next VBLANK refuses
+ * the cheats for the rest of the run, with one line: none is applied unmarked. */
+void sr_cheats_marker_drawn(int drawn);
+/* The end of the run: for each cheat that was held on some VBLANK, how many it was held on and
+ * how many it applied on (the hold lines themselves are said once per cause). */
+void sr_cheats_run_end(void);
 /* The RetroAchievements hardcore seam: nonzero refuses cheats until it is cleared. */
 void sr_cheats_set_hardcore(int on);
 void sr_cheats_status(SrCheatsStatus *out);

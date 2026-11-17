@@ -56666,6 +56666,23 @@ static void test_callback_object_cells(void) {
 
 static char s_cheat_log[16384];
 
+/* The game image the host loader placed, as sr_loaded_base and sr_loaded_end report it (the
+ * fixture's stand-ins near the top of this file). A test that needs another layout calls this
+ * before cheats_start, which otherwise gives the image a generic title has: a relocatable main
+ * module at 0x08804000. cheats_end puts the fixture's own values back. */
+static uint32_t s_cheat_saved_base, s_cheat_saved_end;
+static int s_cheat_image_set;
+
+static void cheats_image(uint32_t base, uint32_t end) {
+    if (!s_cheat_image_set) {
+        s_cheat_saved_base = s_fixture_loaded_base;
+        s_cheat_saved_end = s_fixture_loaded_end;
+        s_cheat_image_set = 1;
+    }
+    s_fixture_loaded_base = base;
+    s_fixture_loaded_end = end;
+}
+
 static int cheats_file_write(char *path, size_t capacity, const char *name, const char *text) {
     char scratch[MAX_PATH];
     FILE *f;
@@ -56687,6 +56704,7 @@ static void cheats_start(const char *on, const char *path) {
     hle_test_setenv("SR_CHEATS", on);
     hle_test_setenv("SR_CHEATS_FILE", path);
     hle_test_setenv("SR_DISC_ID", "TEST-00001");
+    if (!s_cheat_image_set) cheats_image(CHEAT_BASE + 0x4000u, CHEAT_BASE + 0x8000u);
     s_cheat_log[0] = '\0';
     capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
     sr_cheats_init();
@@ -56712,11 +56730,29 @@ static void cheats_end(const char *path) {
     hle_test_setenv("SR_CHEATS_FILE", NULL);
     hle_test_setenv("SR_DISC_ID", NULL);
     hle_test_setenv("SR_RECORD", NULL);
+    hle_test_setenv("SR_HEADLESS_ACCEPT_PRESENTED_FRAMES", NULL);
     s_test_gui_buttons = 0u;
     s_test_gui_on = 0;
     sr_exec_span_reset();
+    if (s_cheat_image_set) {
+        s_fixture_loaded_base = s_cheat_saved_base;
+        s_fixture_loaded_end = s_cheat_saved_end;
+        s_cheat_image_set = 0;
+    }
     if (path && path[0]) remove(path);
 }
+
+/* What a call says on stderr, kept in s_cheat_log. */
+#define CHEATS_CAPTURE(call)                                                                     \
+    do {                                                                                         \
+        FILE *capture_ = NULL;                                                                   \
+        int saved_fd_ = -1;                                                                      \
+        int capturing_ = hle_data_stderr_capture_begin(&capture_, &saved_fd_);                   \
+        s_cheat_log[0] = '\0';                                                                   \
+        call;                                                                                    \
+        if (capturing_) hle_data_stderr_capture_end(capture_, saved_fd_, s_cheat_log, sizeof(s_cheat_log)); \
+        expect(capturing_, "cheats: the call's stderr is captured");                             \
+    } while (0)
 
 static int cheats_marker_is(const char *want) {
     const char *marker = sr_cheats_marker();
@@ -57102,6 +57138,284 @@ static void test_cheats_say_their_origin_once_at_first_use(void) {
     cheats_tick(2);
     expect(cheats_log_count(CHEATS_ORIGIN_LINE) == 1u, "cheats origin: the next run says it once at its own first use");
     remove(refused);
+    cheats_end(path);
+}
+
+/* A title whose manifest gives its executable "base": 0 (assets/titles/hst-ucus98701.json): the
+ * host loader puts the module's link addresses at guest address 0, so the image byte a PSP has
+ * at 0x08804000 + x is at x, the translated code's spans are registered there, and the heap
+ * starts after the image instead of where a PSP's is. A cheat names PSP addresses. Review of
+ * #2652, defect 1: the cheat's address was used as written, so a value cheat wrote memory that
+ * is not the game's variable and a code patch was not refused. */
+static void test_cheats_on_an_image_below_psp_memory(void) {
+    static const char text[] =
+        "_C1 A code patch\n"                          /* line 1 */
+        "_L 0x20005010 0x00000000\n"                  /* PSP 0x08805010: this run's 0x00001010, code */
+        "_C1 A value in the image\n"
+        "_L 0x20200000 0x000003E7\n"                  /* PSP 0x08A00000: this run's 0x001FC000 */
+        "_C1 A value in the heap\n"                   /* line 5 */
+        "_L 0x20B50000 0x000003E7\n"                  /* PSP 0x09350000: past the image */
+        "_C1 Through the game's pointer\n"
+        "_L 0x60200010 0x000000AA\n"                  /* the pointer cell is in the image */
+        "_L 0x00000001 0x00000008\n";
+    char path[MAX_PATH];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "base0", text), "cheats base 0: the cheat file is written");
+    cheats_image(0x00000000u, 0x00300000u);
+    expect(sr_exec_span_register(0x00001000u, 0x00001100u), "cheats base 0: the image's code is registered where it is");
+    memset(SR_HOST(0x00001000u), 0x5Au, 0x100u);
+    MEM_W32(0x001FC010u, 0x00400000u);   /* the game's pointer into its heap, as this run holds it */
+    cheats_start("1", path);
+    sr_cheats_status(&status);
+    expect(strstr(s_cheat_log, "CHEATS: this game's image is at 0x00000000 here and at 0x08804000 on a PSP: a cheat's "
+                               "address inside the image (0x08804000 to 0x08B03FFF) is moved with it") != NULL,
+           "cheats base 0: the start says where the image is and what that means for a cheat's address");
+    expect(status.applying && status.on == 2u && status.refused == 2u,
+           "cheats base 0: the two cheats that name the image's data are on, the other two are refused");
+    expect(strstr(s_cheat_log, "refused \"A code patch\" (line 1): line 2 writes 4 byte(s) at 0x08805010 "
+                               "(0x00001010 in this run), inside code the recompiler translated") != NULL,
+           "cheats base 0: a write into the image's code is refused by name, at the address the code has in this run");
+    expect(strstr(s_cheat_log, "refused \"A value in the heap\" (line 5): line 6 names 4 byte(s) at 0x09350000, "
+                               "outside the game's image as a PSP loads it (0x08804000 to 0x08B03FFF)") != NULL,
+           "cheats base 0: an address outside the image is refused by name, not written somewhere else");
+    cheats_tick(1);
+    expect(MEM_R32(0x001FC000u) == 0x000003E7u,
+           "cheats base 0: a data write lands on the image's bytes where this run has them");
+    expect(MEM_R32(0x08A00000u) == 0u && MEM_R32(0x09350000u) == 0u && MEM_R32(0x08805010u) == 0u,
+           "cheats base 0: nothing is written at the addresses as the file wrote them");
+    {
+        int code_kept = 1;
+        for (uint32_t i = 0; i < 0x100u; i++) code_kept &= MEM_R8(0x00001000u + i) == 0x5Au;
+        expect(code_kept, "cheats base 0: no byte of the image's translated code changes");
+    }
+    expect(MEM_R8(0x00400008u) == 0xAAu, "cheats base 0: the game's own pointer is followed as it is");
+    /* The VRAM window lies inside this layout's range and is not the game's memory. */
+    MEM_W32(0x001FC010u, 0x04000000u);
+    cheats_tick(1);
+    expect(MEM_R8(0x04000008u) == 0u &&
+           strstr(s_cheat_log, "is held: line 8: its pointer leads to 0x04000008, outside user memory") != NULL,
+           "cheats base 0: a pointer into the VRAM window holds its cheat");
+    cheats_end(path);
+}
+
+/* The file is read for one program's memory. A run with no host-loaded image, and a run whose
+ * program LoadExec replaced, cannot say where a PSP address is: refused by name. */
+static void test_cheats_need_the_program_they_were_read_for(void) {
+    char path[MAX_PATH];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "program", "_C1 Write\n_L 0x00000100 0x000000AB\n"),
+           "cheats program: the cheat file is written");
+    cheats_image(UINT32_MAX, 0x08800000u);   /* as driver.c leaves them when LoadExec boots a module */
+    cheats_start("1", path);
+    sr_cheats_status(&status);
+    expect(status.switched_on && !status.file_opened && !status.applying && cheats_marker_is(NULL) &&
+           strstr(s_cheat_log, "CHEATS: refused: this run has no game image placed by the host loader") != NULL,
+           "cheats program: without a host-loaded image cheats are refused by name and no file is opened");
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u, "cheats program: and nothing is written");
+    cheats_image(CHEAT_BASE + 0x4000u, CHEAT_BASE + 0x8000u);
+    cheats_start("1", path);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0xABu && cheats_marker_is("Cheats on: 1"),
+           "cheats program: with the image a generic title has, the cheat applies");
+    MEM_W8(CHEAT_BASE + 0x100u, 0u);
+    cheats_image(UINT32_MAX, 0x08800000u);   /* LoadExec: the old program's memory is gone */
+    cheats_tick(1);
+    sr_cheats_status(&status);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u && !status.applying && cheats_marker_is(NULL) &&
+           cheats_log_count("CHEATS: refused from here on: the game started another program") == 1u,
+           "cheats program: once the game starts another program the cheats stop, by name");
+    cheats_tick(2);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u && cheats_log_count("CHEATS") == 0u,
+           "cheats program: and stay stopped without saying it again");
+    cheats_end(path);
+}
+
+/* Review of #2652, defect 5: the launcher and the player refuse cheats for an acceptance
+ * checkpoint, and so does a runtime started without them. */
+static void test_cheats_refused_for_an_acceptance_checkpoint(void) {
+    char path[MAX_PATH];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "accept", "_C1 Write\n_L 0x00000100 0x000000AB\n"),
+           "cheats checkpoint: the cheat file is written");
+    hle_test_setenv("SR_HEADLESS_ACCEPT_PRESENTED_FRAMES", "30");
+    cheats_start("1", path);
+    sr_cheats_status(&status);
+    expect(status.switched_on && !status.file_opened && !status.applying && cheats_marker_is(NULL) &&
+           strstr(s_cheat_log, "CHEATS: refused: this run is an acceptance checkpoint "
+                               "(SR_HEADLESS_ACCEPT_PRESENTED_FRAMES)") != NULL,
+           "cheats checkpoint: the runtime refuses cheats by name and opens no file");
+    cheats_tick(2);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u, "cheats checkpoint: nothing is applied");
+    hle_test_setenv("SR_HEADLESS_ACCEPT_PRESENTED_FRAMES", NULL);
+    cheats_start("1", path);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0xABu, "cheats checkpoint: the same run without the checkpoint applies them");
+    cheats_end(path);
+}
+
+/* Review of #2652, defect 6: a UI pass that stops drawing after the start takes the cheats with
+ * it, with one line. gui.c hands every present's answer to sr_cheats_marker_drawn. */
+static void test_cheats_stop_when_the_marker_stops_being_drawn(void) {
+    char path[MAX_PATH];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "drawn", "_C1 Write\n_L 0x00000100 0x000000AB\n"),
+           "cheats drawn: the cheat file is written");
+    cheats_start("1", path);
+    sr_cheats_marker_drawn(1);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0xABu && cheats_marker_is("Cheats on: 1"),
+           "cheats drawn: while the marker is drawn the cheats apply");
+    MEM_W8(CHEAT_BASE + 0x100u, 0u);
+    sr_cheats_marker_drawn(0);
+    sr_cheats_marker_drawn(1);   /* a later present that draws does not bring them back */
+    cheats_tick(1);
+    sr_cheats_status(&status);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u && !status.applying && cheats_marker_is(NULL),
+           "cheats drawn: after a present that did not draw the marker, nothing is applied");
+    expect(cheats_log_count("CHEATS: refused: the window cannot show the cheats marker (the in-game UI stopped "
+                            "drawing)") == 1u,
+           "cheats drawn: and one line says so");
+    sr_cheats_marker_drawn(0);
+    cheats_tick(2);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u && cheats_log_count("CHEATS") == 0u,
+           "cheats drawn: it is said once");
+    cheats_end(path);
+}
+
+/* Review of #2652, defect 10: a button condition tests the pad as the VBLANK latched it. Ace
+ * late pad sampling may refresh that sample afterwards, before the game reads it; the cheat's
+ * pass has run by then, so a button the refresh adds reaches a condition at the next VBLANK. */
+static void test_cheats_button_condition_reads_the_vblank_latch(void) {
+    char path[MAX_PATH];
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ctrl_sampling_reset();
+    sr_hle_test_ctrl_ring_reset();
+    expect(cheats_file_write(path, sizeof(path), "latch",
+                             "_C1 While Cross is held\n_L 0xD0000000 0x10004000\n_L 0x000001D0 0x00000099\n"),
+           "cheats latch: the cheat file is written");
+    cheats_start("1", path);
+    s_test_gui_on = 1;
+    s_test_gui_buttons = 0u;
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x1D0u) == 0u, "cheats latch: Cross up at the VBLANK, the line does not run");
+    expect(ctrl_refresh_newest(PSP_CTRL_CROSS_BIT, 128u, 128u, 1u, 0u) &&
+           (sr_ctrl_live_buttons() & PSP_CTRL_CROSS_BIT) != 0u,
+           "cheats latch: a late refresh puts Cross into the sample the game reads this frame");
+    expect(MEM_R8(CHEAT_BASE + 0x1D0u) == 0u,
+           "cheats latch: this VBLANK's cheats have run already, on the sample as latched");
+    s_test_gui_buttons = PSP_CTRL_CROSS_BIT;
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x1D0u) == 0x99u, "cheats latch: the next VBLANK's latch carries Cross, and the line runs");
+    cheats_end(path);
+}
+
+/* Review of #2652, defects 3, 4 and 9: what a file can cost a run is bounded and said. */
+static void cheat_late_body(CpuState *s) { (void)s; }
+static uint32_t s_cheat_late_base;
+static const SrModuleFunc s_cheat_late_funcs[] = { {0x100u, 2u, cheat_late_body} };
+static const SrModuleSpan s_cheat_late_spans[] = { {0x100u, 0x180u}, {0x200u, 0x240u} };
+static SrModuleCode s_cheat_late_code = {
+    "cheat-late.prx", 0u, 0u, 0u, 0x1000u, 0x40u, 1u, NULL, &s_cheat_late_base,
+    s_cheat_late_funcs, 1u, s_cheat_late_spans, 2u, 0u, 0u,
+};
+
+static void test_cheats_bounds_and_late_code(void) {
+    static char text[8192];
+    char path[MAX_PATH];
+    SrCheatsStatus status;
+    SrModuleBindDetail detail;
+    size_t used = 0u;
+    reset_fixture();
+    /* Forty cheats refused for a line of their own, five fills of which four use the VBLANK's
+     * writes, and a write over memory that becomes code later. */
+    used += (size_t)snprintf(text + used, sizeof(text) - used,
+                             "_C1 Over late code\n_L 0x00000300 0x00000011\n_L 0x800060FE 0x00040001\n"
+                             "_L 0x00000077 0x00000000\n");
+    for (int i = 0; i < 40; i++) {
+        used += (size_t)snprintf(text + used, sizeof(text) - used, "_C1 Bad %d\n_L 0xB0000000 0x00000001\n", i);
+    }
+    for (int i = 0; i < 4; i++) {
+        used += (size_t)snprintf(text + used, sizeof(text) - used,
+                                 "_C1 Fill %d\n_L 0x80010000 0x0FFE0001\n_L 0x00000000 0x00000000\n", i);
+    }
+    used += (size_t)snprintf(text + used, sizeof(text) - used,
+                             "_C1 Fill 4\n_L 0x80010000 0x0FFE0001\n_L 0x00000000 0x00000000\n"
+                             "_C1 Fill 5\n_L 0x80010000 0x0FFE0001\n_L 0x00000000 0x00000000\n");
+    expect(used < sizeof(text) && cheats_file_write(path, sizeof(path), "bounds", text),
+           "cheats bounds: the cheat file is written");
+    cheats_start("1", path);
+    sr_cheats_status(&status);
+    expect(status.applying && status.on == 5u && status.refused == 42u,
+           "cheats bounds: the cheats that fit the VBLANK's budget are on; the rest are refused");
+    expect(cheats_log_count("CHEATS: refused \"Bad ") == 32u &&
+           strstr(s_cheat_log, "CHEATS: and 8 more refused cheat(s), each for a line of its own") != NULL,
+           "cheats bounds: the start names a bounded number of refusals and counts the rest");
+    expect(cheats_log_count("CHEATS: refused 2 cheat(s), the first at line 97: together the cheats that are on may do "
+                            "16384 writes, 1048576 bytes and 16384 codes in one VBLANK") == 1u &&
+           cheats_log_count("Fill 4") == 0u,
+           "cheats bounds: the VBLANK's limit is said once for all the cheats it refuses");
+    {
+        /* What the limit costs: with the four fills on, a VBLANK does 16,381 of its 16,384 writes. */
+        const clock_t before = clock();
+        cheats_tick(200);
+        fprintf(stderr, "cheats bounds: a VBLANK at the write limit took about %.3f ms here\n",
+                (double)(clock() - before) * 1000.0 / CLOCKS_PER_SEC / 200.0);
+    }
+    expect(MEM_R8(CHEAT_BASE + 0x300u) == 0x11u && MEM_R16(CHEAT_BASE + 0x60FEu) == 0x7777u &&
+           MEM_R16(CHEAT_BASE + 0x6100u) == 0x7777u,
+           "cheats bounds: before any module is bound there, the write over 0x08806100 is a data write");
+    /* A module bound after the file was read: its spans are code from then on. */
+    MEM_W8(CHEAT_BASE + 0x300u, 0x01u);
+    memset(SR_HOST(CHEAT_BASE + 0x60F0u), 0x5Au, 0x20u);
+    sr_module_code_register(&s_cheat_late_code);
+    expect(sr_module_code_bind(&s_cheat_late_code, CHEAT_BASE + 0x6000u, &detail) == SR_MODULE_BIND_OK,
+           "cheats bounds: a module is bound over the range");
+    expect(!sr_exec_span_overlaps(CHEAT_BASE + 0x60FFu, 1u) && sr_exec_span_overlaps(CHEAT_BASE + 0x60FFu, 2u) &&
+           sr_exec_span_overlaps(CHEAT_BASE + 0x6100u, 1u) && sr_exec_span_overlaps(CHEAT_BASE + 0x617Fu, 1u) &&
+           !sr_exec_span_overlaps(CHEAT_BASE + 0x6180u, 0x80u) && sr_exec_span_overlaps(CHEAT_BASE + 0x6180u, 0x81u) &&
+           sr_exec_span_overlaps(CHEAT_BASE + 0x623Fu, 4u) && !sr_exec_span_overlaps(CHEAT_BASE + 0x6240u, 0xDC0u) &&
+           sr_exec_span_overlaps(CHEAT_BASE + 0x5000u, 0x2000u) && !sr_exec_span_overlaps(CHEAT_BASE + 0x6100u, 0u),
+           "cheats bounds: a bound module's spans, and only they, are code to a writer");
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x300u) == 0x01u && MEM_R16(CHEAT_BASE + 0x60FEu) == 0x5A5Au &&
+           MEM_R16(CHEAT_BASE + 0x6100u) == 0x5A5Au,
+           "cheats bounds: the multi-write that now reaches the module's code is held whole");
+    expect(cheats_log_count("CHEATS: cheat \"Over late code\" is held: line 3: its write at 0x088060FE is inside "
+                            "code the recompiler translated") == 1u,
+           "cheats bounds: and the hold names the cheat, the line and the address");
+    sr_module_code_unbind(&s_cheat_late_code);
+    expect(!sr_exec_span_overlaps(CHEAT_BASE + 0x6100u, 1u), "cheats bounds: unbound, its spans are not code");
+    /* Static spans that overlap one another: a write is asked against all of them. */
+    expect(sr_exec_span_register(CHEAT_BASE + 0x7000u, CHEAT_BASE + 0x7100u) &&
+           sr_exec_span_register(CHEAT_BASE + 0x7010u, CHEAT_BASE + 0x7020u) &&
+           sr_exec_span_register(CHEAT_BASE + 0x7400u, CHEAT_BASE + 0x7500u),
+           "cheats bounds: three static spans are registered, one inside another");
+    expect(sr_exec_span_overlaps(CHEAT_BASE + 0x7080u, 1u) && sr_exec_span_overlaps(CHEAT_BASE + 0x70FFu, 0x400u) &&
+           !sr_exec_span_overlaps(CHEAT_BASE + 0x7100u, 0x300u) && sr_exec_span_overlaps(CHEAT_BASE + 0x7100u, 0x301u) &&
+           !sr_exec_span_overlaps(CHEAT_BASE + 0x6FFFu, 1u) && !sr_exec_span_overlaps(CHEAT_BASE + 0x7500u, 0x100u),
+           "cheats bounds: a byte past an inner span's end is still code when an outer span holds it");
+    /* The pointer-free cheat flickers between held and applied for 60 VBLANKs: two lines at
+     * most, and the counts at the end of the run. */
+    {
+        unsigned lines = 0u;
+        for (int i = 0; i < 60; i++) {
+            if (i & 1) sr_module_code_unbind(&s_cheat_late_code);
+            else (void)sr_module_code_bind(&s_cheat_late_code, CHEAT_BASE + 0x6000u, &detail);
+            cheats_tick(1);
+            lines += cheats_log_count("CHEATS");
+        }
+        expect(lines == 1u, "cheats bounds: a cheat held and released every VBLANK says so once, not every time");
+        sr_module_code_unbind(&s_cheat_late_code);
+        CHEATS_CAPTURE(sr_cheats_run_end());
+        expect(strstr(s_cheat_log, "CHEATS: cheat \"Over late code\" was held on 31 frame(s) and applied on 230") != NULL,
+               "cheats bounds: the end of the run gives the counts");
+    }
     cheats_end(path);
 }
 
@@ -57856,6 +58170,12 @@ static int hle_selftest_main(int argc, char **argv) {
     test_cheats_refuse_code_writes_and_bad_lines_by_name();
     test_cheats_refused_for_the_whole_run();
     test_cheats_say_their_origin_once_at_first_use();
+    test_cheats_on_an_image_below_psp_memory();
+    test_cheats_need_the_program_they_were_read_for();
+    test_cheats_refused_for_an_acceptance_checkpoint();
+    test_cheats_stop_when_the_marker_stops_being_drawn();
+    test_cheats_button_condition_reads_the_vblank_latch();
+    test_cheats_bounds_and_late_code();
     test_pad_vblank_deadline();
     test_pad_late_through_the_boundary();
     test_pad_latency_charges_reads_to_new_frames();

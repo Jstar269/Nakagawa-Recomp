@@ -926,7 +926,13 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     t.image_count = p->image_count;
     t.image_index = p->image_index;
     t.swapchain_gen = p->swapchain_gen;
-    return ace_ui_record(s_ace_ui, &t, &f);
+    {
+        const int drawn = ace_ui_record(s_ace_ui, &t, &f);
+        /* A present that asked for the cheats marker and did not get it drawn (the pass, its
+         * targets or its vertex data could not be made): the cheats stop (cheats.h). */
+        if (f.cheats_marker) sr_cheats_marker_drawn(drawn);
+        return drawn;
+    }
 }
 
 static void gui_ace_ui_off(const char *why) {

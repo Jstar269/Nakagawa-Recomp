@@ -75,7 +75,7 @@ static void t_report(void *ctx, const char *line) {
 }
 
 static const NkCheatHost k_host = { NULL, t_read, t_write, t_is_code, t_buttons, t_report };
-static const NkCheatConfig k_config = { "ULUS-12345", T_BASE, T_END };
+static const NkCheatConfig k_config = { .disc_id = "ULUS-12345", .user_base = T_BASE, .user_end = T_END };
 
 static uint8_t r8(uint32_t off) { return g_mem[off]; }
 static uint16_t r16(uint32_t off) { return (uint16_t)(g_mem[off] | (g_mem[off + 1u] << 8)); }
@@ -204,7 +204,7 @@ static void test_file_lines(void) {
 
     /* No _S line: the file is for the disc it is read for. No disc ID: only such a file applies. */
     {
-        const NkCheatConfig no_disc = { NULL, T_BASE, T_END };
+        const NkCheatConfig no_disc = { .disc_id = NULL, .user_base = T_BASE, .user_end = T_END };
         set = load_as("_C1 a\n_L 0x00000030 0x00000009\n_S ULUS-12345\n_C1 b\n_L 0x00000031 0x1\n", &no_disc, &k_host);
         nk_cheats_summary(set, &sum);
         CHECK(set && sum.on == 1u && sum.other_game == 1u,
@@ -227,15 +227,39 @@ static void test_file_lines(void) {
               "a name is cleaned for a log line");
         CHECK(nk_cheats_info(set, 1u, &info) && strlen(info.name) == 94u,
               "a long name is cut before the character that does not fit");
-        CHECK(nk_cheats_info(set, 2u, &info) && strcmp(info.name, "(unnamed)") == 0 && info.state == NK_CHEAT_ON,
-              "a cheat with no name is still a cheat");
+        /* A _C line with no name is not a cheat line in PPSSPP (it reads a _ line from five
+         * characters up), so it starts no cheat here either: its code line stays with the cheat
+         * before it, and the file says so. */
+        CHECK(nk_cheats_count(set) == 2u && nk_cheats_note_count(set) == 1u &&
+                  strstr(nk_cheats_note(set, 0u), "line 5: a _C line with no name starts no cheat"),
+              "a _C line with no name starts no cheat, and is noted");
+        CHECK(nk_cheats_apply(set, &k_host) == 2u && r8(0x42u) == 1u,
+              "the code line after it runs with the cheat before it, as in PPSSPP");
+        nk_cheats_free(set);
+    }
+    /* The case that matters: the cheat before is off, so the lines after a bare _C1 stay off.
+     * Read as a cheat of its own they would be turned on, which PPSSPP never does. */
+    {
+        guest_reset();
+        set = load("_C0 x\n_L 0x00000100 0x00000001\n_C1\n_L 0x00000101 0x00000002\n");
+        nk_cheats_summary(set, &sum);
+        CHECK(nk_cheats_count(set) == 1u && sum.on == 0u && sum.off == 1u && sum.notes == 1u,
+              "a bare _C1 after a cheat that is off turns nothing on");
+        CHECK(nk_cheats_apply(set, &k_host) == 0u && r8(0x100u) == 0u && r8(0x101u) == 0u,
+              "and neither line is applied");
+        nk_cheats_free(set);
+        set = load("_C1\n_L 0x00000101 0x00000002\n_C0\n_C1 y\n_L 0x00000102 0x00000003\n");
+        nk_cheats_summary(set, &sum);
+        CHECK(nk_cheats_count(set) == 1u && sum.on == 1u && sum.notes == 3u &&
+                  nk_cheats_apply(set, &k_host) == 1u && r8(0x101u) == 0u && r8(0x102u) == 3u,
+              "with no cheat before it, the lines after a bare _C1 belong to none and are noted");
         nk_cheats_free(set);
     }
 
     /* What cannot be held at all. */
     {
         char error[128] = "";
-        const NkCheatConfig empty = { "X", T_BASE, T_BASE };
+        const NkCheatConfig empty = { .disc_id = "X", .user_base = T_BASE, .user_end = T_BASE };
         CHECK(nk_cheats_load("x", (size_t)NK_CHEATS_MAX_FILE_BYTES + 1u, &k_config, NULL, error, sizeof(error)) == NULL &&
                   strstr(error, "larger than 64 MiB"),
               "a file over the size limit is refused whole, by name");
@@ -578,12 +602,12 @@ static void test_refusals(void) {
     {
         NkCheatInfo info;
         NkCheatSet *set = load("_CX name\n_L 0x00000100 0x00000001\n_C1x name\n_C\n");
-        CHECK(nk_cheats_count(set) == 3u && nk_cheats_info(set, 0u, &info) && info.state == NK_CHEAT_REFUSED &&
+        CHECK(nk_cheats_count(set) == 2u && nk_cheats_info(set, 0u, &info) && info.state == NK_CHEAT_REFUSED &&
                   info.refused_line == 1u && strstr(info.reason, "_C0 (off) or _C1 (on)"),
               "a _C line with no 0 or 1 is refused by name");
-        CHECK(nk_cheats_info(set, 1u, &info) && info.state == NK_CHEAT_REFUSED &&
-                  nk_cheats_info(set, 2u, &info) && info.state == NK_CHEAT_REFUSED,
-              "so are _C1x and a bare _C");
+        CHECK(nk_cheats_info(set, 1u, &info) && info.state == NK_CHEAT_REFUSED && nk_cheats_note_count(set) == 1u &&
+                  strstr(nk_cheats_note(set, 0u), "line 4: a _C line with no name starts no cheat"),
+              "so is _C1x; a bare _C starts no cheat and is noted");
         nk_cheats_free(set);
     }
     /* One refused cheat does not stop the others, and an off cheat carries its reason too. */
@@ -609,7 +633,7 @@ static void test_refusals(void) {
 
 /* The most one cheat may write in a frame. Checked at load, so no guest is needed. */
 static void test_frame_limit(void) {
-    const NkCheatConfig big = { NULL, T_BASE, T_BASE + 0x00800000u };
+    const NkCheatConfig big = { .disc_id = NULL, .user_base = T_BASE, .user_end = T_BASE + 0x00800000u };
     NkCheatInfo info;
     NkCheatSet *set = load_as("_C1 at the limit\n_L 0x50000000 0x00100000\n_L 0x00200000 0x00000000\n"
                               "_C1 over it\n_L 0x50000000 0x00100001\n_L 0x00200000 0x00000000\n"
@@ -730,6 +754,280 @@ static void test_held_frames(void) {
     CHECK(g_bad_access == 0, "no held frame read or wrote outside what was checked");
 }
 
+
+/* ---- the checks the safety claims rest on (review of #2652, defect 2) ------------------------ */
+
+static void test_safety_checks_are_pinned(void) {
+    NkCheatInfo info;
+    NkCheatSet *set;
+    /* A pointer's 32-bit write that starts inside user memory and ends past it. Checked for one
+     * byte it would pass, and the host would be handed a span that leaves user memory. */
+    guest_reset();
+    memset(g_mem + 0xFFF0u, 0x77, 0x10u);
+    w32(0x600u, T_END - 2u);
+    set = load("_C1 p\n_L 0x00000100 0x00000011\n_L 0x60000600 0x11223344\n_L 0x00020001 0x00000000\n");
+    CHECK(nk_cheats_apply(set, &k_host) == 0u && g_bad_access == 0 && r16(0xFFFEu) == 0x7777u && r8(0x100u) == 0u,
+          "a pointer write that ends past user memory holds the cheat: nothing is written, nothing is asked of the host");
+    CHECK(nk_cheats_info(set, 0u, &info) && info.held && g_report_count == 1 &&
+              strstr(g_reports[0], "pointer leads to 0x0880FFFE, outside user memory"),
+          "and the hold names the address");
+    w32(0x600u, T_END - 4u);
+    CHECK(nk_cheats_apply(set, &k_host) == 1u && r32(0xFFFCu) == 0x11223344u && g_bad_access == 0,
+          "the same write ending exactly at the end of user memory applies");
+    nk_cheats_free(set);
+    /* A pointer step reads four bytes: two of them past the end is a hold too. */
+    guest_reset();
+    memset(g_mem + 0xFFF0u, 0x77, 0x10u);
+    w32(0x600u, T_END - 0x22u);
+    set = load("_C1 w\n_L 0x60000600 0x00000001\n_L 0x00000002 0x00000000\n_L 0x20000020 0x00000000\n");
+    CHECK(nk_cheats_apply(set, &k_host) == 0u && g_bad_access == 0 && g_report_count == 1 &&
+              strstr(g_reports[0], "pointer leads to 0x0880FFFE, outside user memory"),
+          "a pointer step whose four bytes end past user memory holds the cheat and reads nothing there");
+    nk_cheats_free(set);
+    /* Code that appears after the file was read (a module bound later): read without a host so
+     * the reader cannot refuse them, a multi-write and a copy are still asked on every frame,
+     * for their whole run and before their first byte. */
+    guest_reset();
+    memset(g_mem + 0x3FF0u, 0x77, 0x10u);
+    memset(g_mem + 0x4000u, 0xC0, 0x100u);
+    set = load_as("_C1 m\n_L 0x40003FF8 0x00040001\n_L 0x00000055 0x00000000\n", &k_config, NULL);
+    CHECK(set && nk_cheats_info(set, 0u, &info) && info.state == NK_CHEAT_ON, "read without a host, a multi-write over code is on");
+    CHECK(nk_cheats_apply(set, &k_host) == 0u && g_bad_access == 0 && r32(0x3FF8u) == 0x77777777u &&
+              r32(0x4000u) == 0xC0C0C0C0u,
+          "a multi-write that reaches translated code is held whole: its writes before the code are not made");
+    CHECK(g_report_count == 1 && strstr(g_reports[0], "is inside code the recompiler translated"), "and the hold says why");
+    nk_cheats_free(set);
+    guest_reset();
+    memset(g_mem + 0x3FF0u, 0x77, 0x10u);
+    memset(g_mem + 0x4000u, 0xC0, 0x100u);
+    set = load_as("_C1 c\n_L 0x50000100 0x00000010\n_L 0x00003FF8 0x00000000\n", &k_config, NULL);
+    CHECK(nk_cheats_apply(set, &k_host) == 0u && g_bad_access == 0 && r32(0x3FF8u) == 0x77777777u &&
+              r32(0x4000u) == 0xC0C0C0C0u && g_report_count == 1 &&
+              strstr(g_reports[0], "is inside code the recompiler translated"),
+          "a copy whose destination reaches translated code is held whole");
+    nk_cheats_free(set);
+    /* A held cheat that wrote the same byte twice: put back newest first, the byte ends as it
+     * was found; oldest first it would end as the first write left it. */
+    guest_reset();
+    w8(0x100u, 0x77u);
+    set = load("_C1 u\n_L 0x00000100 0x00000011\n_L 0x00000100 0x00000022\n_L 0x30100001 0x00000100\n"
+               "_L 0x60000600 0x00000001\n_L 0x00000001 0x00000000\n");
+    CHECK(nk_cheats_apply(set, &k_host) == 0u && r8(0x100u) == 0x77u,
+          "a held cheat's writes to one byte are undone newest first");
+    nk_cheats_free(set);
+    CHECK(g_bad_access == 0, "no pinned check let a span leave user memory or reach code");
+}
+
+/* ---- an image that is not where a PSP has it (review of #2652, defect 1) --------------------- */
+
+static void test_moved_image(void) {
+    /* A PSP has the game's image at 0x08804000; this run has it at T_BASE + 0x3000, so the image
+     * byte a code names as 0x08805000 is the run's 0x08804000, the first byte of translated
+     * code (T_CODE_LO). The run's memory is the usual test memory, less a hole. */
+    const NkCheatConfig moved = { .disc_id = "ULUS-12345", .user_base = T_BASE, .user_end = T_END,
+                                  .hole_base = T_BASE + 0xA000u, .hole_end = T_BASE + 0xB000u,
+                                  .psp_image_base = 0x08804000u, .image_base = T_BASE + 0x3000u,
+                                  .image_size = 0x4000u };
+    NkCheatInfo info;
+    NkCheatSet *set;
+    char error[128] = "";
+    guest_reset();
+    memset(g_mem + 0x4000u, 0xC0, 0x100u);
+    set = load_as("_C1 data in the image\n_L 0x20004010 0x11223344\n_L 0x00007FFF 0x00000055\n"
+                  "_C1 code in the image\n_L 0x00004020 0x00000001\n_L 0x20005010 0x00000000\n"
+                  "_C1 below the image\n_L 0x20003FFC 0x00000001\n"
+                  "_C1 past the image\n_L 0x10007FFF 0x00000001\n"
+                  "_C1 the heap\n_L 0x20350000 0x000003E7\n"
+                  "_C1 through the game's pointer\n_L 0x60004100 0x000000AA\n_L 0x00000001 0x00000004\n"
+                  "_C1 a test and a copy\n_L 0xD0004010 0x00003344\n_L 0x00004030 0x00000001\n"
+                  "_L 0x50004010 0x00000004\n_L 0x00004040 0x00000000\n",
+                  &moved, &k_host);
+    CHECK(set && nk_cheats_count(set) == 7u, "the moved-image file loads");
+    CHECK(nk_cheats_info(set, 0u, &info) && info.state == NK_CHEAT_ON, "a data address inside the PSP's image is accepted");
+    CHECK(nk_cheats_info(set, 1u, &info) && info.state == NK_CHEAT_REFUSED && info.refused_line == 6u &&
+              strstr(info.reason, "writes 4 byte(s) at 0x08805010 (0x08804010 in this run), inside code the recompiler translated"),
+          "a write into the image's code is refused at the address the code has in this run");
+    CHECK(nk_cheats_info(set, 2u, &info) && info.state == NK_CHEAT_REFUSED && info.refused_line == 8u &&
+              strstr(info.reason, "names 4 byte(s) at 0x08803FFC, outside the game's image as a PSP loads it "
+                                  "(0x08804000 to 0x08807FFF); this run has the image at 0x08803000"),
+          "an address below the PSP's image is refused by name, not written somewhere else");
+    CHECK(nk_cheats_info(set, 3u, &info) && info.state == NK_CHEAT_REFUSED && info.refused_line == 10u &&
+              strstr(info.reason, "names 2 byte(s) at 0x08807FFF, outside the game's image"),
+          "a span that leaves the PSP's image is refused whole");
+    CHECK(nk_cheats_info(set, 4u, &info) && info.state == NK_CHEAT_REFUSED &&
+              strstr(info.reason, "where other PSP addresses are in it is not known"),
+          "a heap address is refused: where a PSP's heap is in this run is not known");
+    CHECK(nk_cheats_info(set, 5u, &info) && info.state == NK_CHEAT_ON && nk_cheats_info(set, 6u, &info) &&
+              info.state == NK_CHEAT_ON,
+          "a pointer cell, a test and a copy inside the image are accepted");
+    w32(0x3100u, T_BASE + 0x9000u);   /* the game's own pointer, as this run holds it: its heap */
+    CHECK(nk_cheats_apply(set, &k_host) == 3u && g_bad_access == 0, "the three accepted cheats apply");
+    CHECK(r32(0x3010u) == 0x11223344u && r8(0x6FFFu) == 0x55u, "a data write lands on the image's bytes as this run has them");
+    CHECK(r32(0x4010u) == 0xC0C0C0C0u && r8(0x7FFFu) == 0u && r8(0x4020u) == 0xC0u && r8(0x3020u) == 0u,
+          "and nothing is written at the address as the code wrote it, or by the refused cheat");
+    CHECK(r8(0x9004u) == 0xAAu, "the game's own pointer is followed as it is, into this run's heap");
+    CHECK(r8(0x3030u) == 1u && r32(0x3040u) == 0x11223344u, "a test reads, and a copy moves, the image's bytes as this run has them");
+    /* The pointer leads into the hole, memory that is not the game's: held. */
+    w32(0x3100u, T_BASE + 0xAFF8u);
+    g_report_count = 0;
+    CHECK(nk_cheats_apply(set, &k_host) == 2u && r8(0xAFFCu) == 0u && g_bad_access == 0 && g_report_count == 1 &&
+              strstr(g_reports[0], "pointer leads to 0x0880AFFC, outside user memory"),
+          "a pointer into memory that is not the game's holds its cheat");
+    w32(0x3100u, T_BASE + 0x9FFBu);
+    CHECK(nk_cheats_apply(set, &k_host) == 3u && r8(0x9FFFu) == 0xAAu && r8(0xA000u) == 0u,
+          "and the byte just below that memory is the game's");
+    nk_cheats_free(set);
+    {
+        const NkCheatConfig bad_hole = { .disc_id = NULL, .user_base = T_BASE, .user_end = T_END,
+                                         .hole_base = T_BASE + 2u, .hole_end = T_BASE + 1u };
+        const NkCheatConfig bad_image = { .disc_id = NULL, .user_base = T_BASE, .user_end = T_END,
+                                          .psp_image_base = 0xFFFFF000u, .image_size = 0x2000u };
+        CHECK(nk_cheats_load("x", 1u, &bad_hole, NULL, error, sizeof(error)) == NULL && error[0] &&
+                  nk_cheats_load("x", 1u, &bad_image, NULL, error, sizeof(error)) == NULL && error[0],
+              "a layout that cannot be is refused");
+    }
+    CHECK(g_bad_access == 0, "no moved-image test touched memory it had not been given");
+}
+
+/* ---- bounds on what a file can cost (review of #2652, defects 3, 4 and 9) -------------------- */
+
+static char *text_new(size_t cap) {
+    char *text = (char *)malloc(cap);
+    CHECK(text != NULL, "the test's file text is allocated");
+    if (text) text[0] = '\0';
+    return text;
+}
+
+static void test_frame_budget_of_the_file(void) {
+    const NkCheatConfig big = { .disc_id = NULL, .user_base = T_BASE, .user_end = T_BASE + 0x00800000u };
+    NkCheatInfo info;
+    NkCheatSummary sum;
+    NkCheatSet *set;
+    size_t used = 0u, cap = 1u << 20;
+    char *text = text_new(cap);
+    if (!text) return;
+    /* Five cheats of 4,096 one-byte writes: four use the frame's 16,384 writes exactly. */
+    for (int i = 0; i < 5; i++) {
+        used += (size_t)snprintf(text + used, cap - used, "_C1 fill %d\n_L 0x80000200 0x10000001\n_L 0x00000000 0x00000000\n", i);
+    }
+    used += (size_t)snprintf(text + used, cap - used, "_C1 one more write\n_L 0x00000100 0x00000001\n"
+                                                    "_C0 off\n_L 0x80000200 0xFFFF0001\n_L 0x00000000 0x00000000\n"
+                                                    "_C1 refused for a line of its own\n_L 0xB0000000 0x00000001\n");
+    set = load_as(text, &big, NULL);
+    nk_cheats_summary(set, &sum);
+    CHECK(set && sum.on == 4u && sum.refused == 3u && sum.off == 1u && sum.over_frame_limit == 2u &&
+              sum.over_frame_limit_line == 13u,
+          "the frame's writes are handed out in file order; what does not fit is refused, and counted apart");
+    CHECK(nk_cheats_info(set, 3u, &info) && info.state == NK_CHEAT_ON && !info.over_frame_limit, "the fourth fill still fits");
+    CHECK(nk_cheats_info(set, 4u, &info) && info.state == NK_CHEAT_REFUSED && info.over_frame_limit &&
+              info.refused_line == 13u &&
+              strstr(info.reason, "past the limit (16384 writes, 1048576 bytes, 16384 codes)"),
+          "the fifth is refused by name, with the limit");
+    CHECK(nk_cheats_info(set, 5u, &info) && info.state == NK_CHEAT_REFUSED && info.over_frame_limit,
+          "so is a single write after the budget is used");
+    CHECK(nk_cheats_info(set, 6u, &info) && info.state == NK_CHEAT_OFF && !info.over_frame_limit,
+          "a cheat that is off uses none of it");
+    CHECK(nk_cheats_info(set, 7u, &info) && info.state == NK_CHEAT_REFUSED && !info.over_frame_limit,
+          "a refusal for a line of the cheat's own is not counted as the limit");
+    nk_cheats_free(set);
+    /* One cheat cannot have more writes than a frame has. */
+    refused_at("_L 0x80005000 0x40010001\n_L 0x00000000 0x00000000\n", 2u, "more than 16384 writes");
+    /* Codes: 8,192 tests each guarding a write are 16,384 codes; one more pair does not fit. */
+    used = 0u;
+    used += (size_t)snprintf(text + used, cap - used, "_C1 many codes\n");
+    for (int i = 0; i < 8192; i++) {
+        used += (size_t)snprintf(text + used, cap - used, "_L 0xD0000100 0x00000000\n_L 0x00000101 0x00000001\n");
+    }
+    used += (size_t)snprintf(text + used, cap - used, "_C1 one pair more\n_L 0xD0000100 0x00000000\n_L 0x00000101 0x00000001\n");
+    set = load_as(text, &big, NULL);
+    CHECK(set && nk_cheats_info(set, 0u, &info) && info.state == NK_CHEAT_ON && nk_cheats_info(set, 1u, &info) &&
+              info.state == NK_CHEAT_REFUSED && info.over_frame_limit,
+          "the codes run in a frame are bounded the same way");
+    nk_cheats_free(set);
+    free(text);
+}
+
+static void test_load_bounds(void) {
+    NkCheatInfo info;
+    NkCheatSummary sum;
+    NkCheatSet *set;
+    size_t used = 0u;
+    const size_t cap = 9u << 20;
+    char *text = text_new(cap);
+    char error[128];
+    if (!text) return;
+    /* One cheat more than the reader keeps, each with a line. */
+    for (unsigned i = 0u; i < NK_CHEATS_MAX_CHEATS + 2u; i++) {
+        used += (size_t)snprintf(text + used, cap - used, "_C0 %u\n_L 0x00000100 0x00000001\n_M 0x0 0x0\n", i);
+    }
+    set = nk_cheats_load(text, used, &k_config, &k_host, error, sizeof(error));
+    nk_cheats_summary(set, &sum);
+    CHECK(set && nk_cheats_count(set) == NK_CHEATS_MAX_CHEATS && sum.not_kept == 2u && sum.notes == 1u &&
+              strstr(nk_cheats_note(set, 0u), "more cheats for this disc than the reader keeps"),
+          "cheats past the reader's bound are not kept, are counted, and are noted once");
+    nk_cheats_free(set);
+    /* One code line more than the reader keeps: the cheat that holds it is refused by name. */
+    used = (size_t)snprintf(text, cap, "_C0 long\n");
+    for (unsigned i = 0u; i < NK_CHEATS_MAX_LINES; i++) {
+        memcpy(text + used, "_L 0x00000100 0x00000001\n", 25u);
+        used += 25u;
+    }
+    used += (size_t)snprintf(text + used, cap - used, "_C1 next\n_L 0x00000101 0x00000001\n");
+    set = nk_cheats_load(text, used, &k_config, &k_host, error, sizeof(error));
+    CHECK(set && nk_cheats_count(set) == 2u && nk_cheats_info(set, 0u, &info) && info.state == NK_CHEAT_OFF &&
+              !strstr(info.reason, "is past the"),
+          "exactly the reader's bound of code lines is kept");
+    CHECK(nk_cheats_info(set, 1u, &info) && info.state == NK_CHEAT_REFUSED &&
+              info.refused_line == NK_CHEATS_MAX_LINES + 3u && strstr(info.reason, "is past the 262144 code lines"),
+          "a code line past it refuses its cheat by name");
+    nk_cheats_free(set);
+    free(text);
+}
+
+static void test_hold_reports_are_bounded(void) {
+    NkCheatInfo info;
+    NkCheatSet *set;
+    guest_reset();
+    set = load("_C1 flicker\n_L 0x60000600 0x00000001\n_L 0x00000001 0x00000000\n");
+    /* A pointer that is usable on one frame and not on the next, for 200 frames. */
+    for (int i = 0; i < 200; i++) {
+        w32(0x600u, (i & 1) ? T_BASE + 0x700u : 0u);
+        (void)nk_cheats_apply(set, &k_host);
+    }
+    CHECK(g_report_count == 2 && strstr(g_reports[0], "cheat \"flicker\" is held: line 2") &&
+              strstr(g_reports[1], "cheat \"flicker\" applies again"),
+          "a cheat held and released every frame says each once, not 200 lines");
+    /* Another cause is said once more, and only once. */
+    memset(g_mem + 0x4000u, 0xC0, 0x100u);
+    for (int i = 0; i < 6; i++) {
+        w32(0x600u, (i & 1) ? T_BASE + 0x700u : T_CODE_LO);
+        (void)nk_cheats_apply(set, &k_host);
+    }
+    CHECK(g_report_count == 3 && strstr(g_reports[2], "is inside code the recompiler translated"),
+          "a cause the cheat was not held for before is said once");
+    CHECK(nk_cheats_info(set, 0u, &info) && info.held_frames == 103u && info.applied_frames == 103u,
+          "every held frame is still counted");
+    nk_cheats_report_holds(set, &k_host);
+    CHECK(g_report_count == 4 && strstr(g_reports[3], "cheat \"flicker\" was held on 103 frame(s) and applied on 103"),
+          "the counts behind the lines said once are reported on request");
+    nk_cheats_free(set);
+    /* More held cheats than are named one by one. */
+    {
+        char text[4096];
+        size_t used = 0u;
+        guest_reset();
+        for (unsigned i = 0u; i < NK_CHEATS_MAX_HOLD_TOTALS + 3u; i++) {
+            used += (size_t)snprintf(text + used, sizeof(text) - used, "_C1 h%u\n_L 0x60000600 0x00000001\n_L 0x00000001 0x00000000\n", i);
+        }
+        set = load(text);
+        (void)nk_cheats_apply(set, &k_host);
+        g_report_count = 0;
+        nk_cheats_report_holds(set, &k_host);
+        CHECK(g_report_count == (int)NK_CHEATS_MAX_HOLD_TOTALS + 1, "the counts name a bounded number of cheats and count the rest");
+        nk_cheats_free(set);
+    }
+}
+
 #ifdef SR_SELFTEST_BUILD_ROOT
 static void test_file_loader(void) {
     const char *path = SR_SELFTEST_BUILD_ROOT "/test_nk_cheats.ini";
@@ -773,6 +1071,11 @@ int main(void) {
     test_frame_limit();
     test_code_writes();
     test_held_frames();
+    test_safety_checks_are_pinned();
+    test_moved_image();
+    test_frame_budget_of_the_file();
+    test_load_bounds();
+    test_hold_reports_are_bounded();
 #ifdef SR_SELFTEST_BUILD_ROOT
     test_file_loader();
 #endif

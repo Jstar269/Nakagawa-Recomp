@@ -108,8 +108,24 @@ extern "C" {
 #define NK_CHEATS_PPSSPP_REVISION "c437463bc5cb78a0236312ad23f9c3b56fb9ae67"
 /* A cheat file larger than this is refused whole. A full cheat.db is about 10 MiB. */
 #define NK_CHEATS_MAX_FILE_BYTES (64u * 1024u * 1024u)
-/* The most one cheat may write in one frame (its undo record is this large). */
+/* What the reader keeps for one disc: cheats (_C lines) and code lines (_L lines). More are left
+ * out by name. A cheat record is about 420 bytes and a code line at most 60 once it is checked,
+ * so the two bounds hold what any file can make the reader allocate to about 18 MiB, where the
+ * file cap alone allowed several GiB. The largest list in a cheat.db is a few hundred cheats. */
+#define NK_CHEATS_MAX_CHEATS 4096u
+#define NK_CHEATS_MAX_LINES 262144u
+/* What the cheats that are on may do in one frame, all of them together: separate writes, bytes
+ * written, and codes run. The cheats run on the scheduler's thread between two frames of the
+ * game, so their cost is the game's: a frame is 16.68 ms, and the bound keeps a file's worst
+ * case to a small part of it (src/rt/cheats.h has the measured figure), where a 100 KiB file of
+ * 65,535-write codes took a second per frame. The budget is handed out in file order when the
+ * file is read; a cheat that does not fit is refused by name. A hand-made cheat is a few codes
+ * and a table fill a few hundred writes. The bytes bound is also the undo record's size. */
+#define NK_CHEATS_MAX_FRAME_WRITES 16384u
 #define NK_CHEATS_MAX_FRAME_BYTES (1024u * 1024u)
+#define NK_CHEATS_MAX_FRAME_CODES 16384u
+/* Cheats nk_cheats_report_holds names one by one. */
+#define NK_CHEATS_MAX_HOLD_TOTALS 16u
 /* Bytes kept of a cheat's name, and of a refusal's reason, with the terminator. */
 #define NK_CHEATS_NAME_MAX 96u
 #define NK_CHEATS_REASON_MAX 224u
@@ -134,6 +150,7 @@ typedef struct {
     uint64_t applied_frames;
     uint64_t held_frames;
     bool held;              /* held on the last frame */
+    bool over_frame_limit;  /* refused because the file's cheats together pass the frame limit */
 } NkCheatInfo;
 
 typedef struct {
@@ -142,14 +159,32 @@ typedef struct {
     uint32_t refused;
     uint32_t other_game;    /* cheats under another disc's _S line */
     uint32_t notes;         /* every file note, kept or not */
+    uint32_t over_frame_limit;       /* of the refused: those refused for the frame limit */
+    uint32_t over_frame_limit_line;  /* the _C line of the first of them */
+    uint32_t not_kept;      /* cheats past NK_CHEATS_MAX_CHEATS: not read, not in the list */
 } NkCheatSummary;
 
 /* What a cheat may touch. disc_id selects the _S sections; NULL or "" matches none, so only a
- * file with no _S line applies. [user_base, user_end) is the memory codes may read and write. */
+ * file with no _S line applies. [user_base, user_end) is the memory of this run that codes may
+ * read and write, less [hole_base, hole_end) when that is not empty (memory inside the range
+ * that is not the game's).
+ *
+ * A code names a PSP address. image_size 0 says the run's memory is laid out as a PSP's, and
+ * the address is used as written. Otherwise the game's image is not where a PSP has it: the
+ * image a PSP loads at [psp_image_base, psp_image_base + image_size) is at [image_base,
+ * image_base + image_size) in this run. Then a span a code names must lie whole inside the PSP's
+ * image and is moved with it; a code that names any other address refuses its cheat, because
+ * where the rest of a PSP's memory (its heap, its stacks) lives in such a run is not known. A
+ * pointer a code follows is the game's own, read from this run's memory, and is used as it is. */
 typedef struct {
     const char *disc_id;
     uint32_t user_base;
     uint32_t user_end;
+    uint32_t hole_base;
+    uint32_t hole_end;
+    uint32_t psp_image_base;
+    uint32_t image_base;
+    uint32_t image_size;
 } NkCheatConfig;
 
 /* The guest, as the applier sees it. read and write are called only for spans the applier has
@@ -162,7 +197,8 @@ typedef struct {
     bool (*is_code)(void *ctx, uint32_t addr, uint32_t size);
     /* The pad's buttons as the guest reads them (SceCtrlData.Buttons). */
     uint32_t (*buttons)(void *ctx);
-    /* One line, without a newline, when a cheat starts or stops being held. May be NULL. */
+    /* One line, without a newline: the first time a cheat is held for each cause, the first time
+     * it applies again, and the counts nk_cheats_report_holds gives. May be NULL. */
     void (*report)(void *ctx, const char *line);
 } NkCheatHost;
 
@@ -192,6 +228,10 @@ const char *nk_cheats_note(const NkCheatSet *set, size_t index);
 /* Applies every cheat that is on, once, in file order. Returns how many applied completely;
  * the others were held and left memory as they found it. */
 uint32_t nk_cheats_apply(NkCheatSet *set, const NkCheatHost *host);
+/* Reports, for each cheat held on some frame since the load, how many frames it was held on
+ * and how many it applied on: the count behind the hold lines that are said once. At most
+ * NK_CHEATS_MAX_HOLD_TOTALS cheats are named, and one more line counts the rest. */
+void nk_cheats_report_holds(const NkCheatSet *set, const NkCheatHost *host);
 
 #ifdef __cplusplus
 }

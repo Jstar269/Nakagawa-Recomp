@@ -4076,11 +4076,16 @@ static void test_fuzz_archive_vfs(unsigned iters) {
 #define FUZZ_CHEAT_SIZE 0x10000u
 #define FUZZ_CHEAT_CODE_START 0x4000u
 #define FUZZ_CHEAT_CODE_SIZE 0x100u
+/* A second stretch that is data when a file is read and code from a later frame on, as the
+ * memory of a module bound after the start is. */
+#define FUZZ_CHEAT_LATE_START 0x8000u
+#define FUZZ_CHEAT_LATE_SIZE 0x40u
 
 typedef struct {
     uint8_t ram[FUZZ_CHEAT_SIZE];
     uint64_t written;
     uint32_t buttons;
+    bool late_code;
 } FuzzCheatGuest;
 
 static void fuzz_cheat_span(uint32_t addr, uint32_t size) {
@@ -4089,10 +4094,13 @@ static void fuzz_cheat_span(uint32_t addr, uint32_t size) {
 }
 
 static bool fuzz_cheat_is_code(void *ctx, uint32_t addr, uint32_t size) {
-    (void)ctx;
+    const FuzzCheatGuest *guest = (const FuzzCheatGuest *)ctx;
     const uint64_t lo = addr, hi = (uint64_t)addr + size;
     const uint64_t code = (uint64_t)FUZZ_CHEAT_BASE + FUZZ_CHEAT_CODE_START;
-    return size != 0u && lo < code + FUZZ_CHEAT_CODE_SIZE && code < hi;
+    const uint64_t late = (uint64_t)FUZZ_CHEAT_BASE + FUZZ_CHEAT_LATE_START;
+    if (size == 0u) return false;
+    if (lo < code + FUZZ_CHEAT_CODE_SIZE && code < hi) return true;
+    return guest->late_code && lo < late + FUZZ_CHEAT_LATE_SIZE && late < hi;
 }
 
 static void fuzz_cheat_read(void *ctx, uint32_t addr, void *out, uint32_t size) {
@@ -4201,6 +4209,257 @@ static void fuzz_cheat_set_runs(NkCheatSet *set, FuzzCheatGuest *guest, const Nk
     }
 }
 
+
+/* ---- cheat files against a second reading (review of #2652) -------------------------------------
+ *
+ * Files are made code by code, with addresses and counts drawn at the edges: the two ends of
+ * user memory, the code stretch, and a stretch that becomes code on the third frame. Every
+ * frame of every cheat the reader accepts is compared with a second reading of the same lines:
+ * a line-by-line interpreter written from the table of code forms in nk_cheats.h. It shares
+ * nothing with the applier (no operation list, no undo journal): it works on a copy of memory
+ * and throws the copy away when a code cannot run, which is the whole-or-nothing rule. */
+
+typedef struct {
+    uint32_t a, b;
+} FuzzRefLine;
+
+static bool fuzz_ref_ok(const FuzzCheatGuest *guest, uint32_t addr, uint64_t size, bool write) {
+    if (addr < FUZZ_CHEAT_BASE || addr - FUZZ_CHEAT_BASE >= FUZZ_CHEAT_SIZE ||
+        size > FUZZ_CHEAT_SIZE - (addr - FUZZ_CHEAT_BASE)) {
+        return false;
+    }
+    return !(write && fuzz_cheat_is_code((void *)(uintptr_t)guest, addr, (uint32_t)size));
+}
+
+static uint32_t fuzz_ref_get(const uint8_t *ram, uint32_t addr, unsigned size) {
+    uint32_t v = 0u;
+    for (unsigned i = 0; i < size; i++) v |= (uint32_t)ram[addr - FUZZ_CHEAT_BASE + i] << (8u * i);
+    return v;
+}
+
+static void fuzz_ref_put(uint8_t *ram, uint32_t addr, unsigned size, uint32_t v) {
+    for (unsigned i = 0; i < size; i++) ram[addr - FUZZ_CHEAT_BASE + i] = (uint8_t)(v >> (8u * i));
+}
+
+static bool fuzz_ref_compare(unsigned how, uint32_t memory, uint32_t value) {
+    return how == 0u ? memory == value : how == 1u ? memory != value : how == 2u ? memory < value : memory > value;
+}
+
+/* Runs one accepted cheat's lines on ram. False when a code cannot run on this frame. */
+static bool fuzz_ref_run(const FuzzCheatGuest *guest, uint8_t *ram, const FuzzRefLine *l, size_t n) {
+    for (size_t i = 0; i < n;) {
+        const uint32_t a = l[i].a, b = l[i].b;
+        const uint32_t addr = FUZZ_CHEAT_BASE + (a & 0x0FFFFFFFu);
+        const unsigned type = a >> 28;
+        if (type <= 2u) {
+            const unsigned size = 1u << type;
+            if (!fuzz_ref_ok(guest, addr, size, true)) return false;
+            fuzz_ref_put(ram, addr, size, b);
+            i += 1u;
+        } else if (type == 3u) {
+            const unsigned form = (a >> 20) & 0xFu, size = form <= 2u ? 1u : form <= 4u ? 2u : 4u;
+            const uint32_t at = FUZZ_CHEAT_BASE + (b & 0x0FFFFFFFu);
+            const uint32_t value = size == 4u ? l[i + 1u].a : (a & 0xFFFFu);
+            if (!fuzz_ref_ok(guest, at, size, true)) return false;
+            fuzz_ref_put(ram, at, size, (form & 1u) ? fuzz_ref_get(ram, at, size) + value
+                                                    : fuzz_ref_get(ram, at, size) - value);
+            i += size == 4u ? 2u : 1u;
+        } else if (type == 4u || type == 8u) {
+            const unsigned size = type == 4u ? 4u : (l[i + 1u].a >> 16) == 0x1000u ? 2u : 1u;
+            const uint32_t count = b >> 16, step = (b & 0xFFFFu) * size;
+            const uint32_t value = size == 2u ? (l[i + 1u].a & 0xFFFFu) : l[i + 1u].a;
+            /* The run is one thing: its whole extent has to be writable, gaps included. */
+            if (!fuzz_ref_ok(guest, addr, (uint64_t)(count - 1u) * step + size, true)) return false;
+            for (uint32_t k = 0; k < count; k++) fuzz_ref_put(ram, addr + k * step, size, value + k * l[i + 1u].b);
+            i += 2u;
+        } else if (type == 5u) {
+            const uint32_t to = FUZZ_CHEAT_BASE + (l[i + 1u].a & 0x0FFFFFFFu);
+            if (!fuzz_ref_ok(guest, addr, b, false) || !fuzz_ref_ok(guest, to, b, true)) return false;
+            memmove(ram + (to - FUZZ_CHEAT_BASE), ram + (addr - FUZZ_CHEAT_BASE), b);
+            i += 2u;
+        } else if (type == 6u) {
+            const unsigned form = (l[i + 1u].a >> 16) & 0xFu, size = form % 3u == 0u ? 1u : form % 3u == 1u ? 2u : 4u;
+            const uint32_t extra = (l[i + 1u].a & 0xFFFFu) - 1u;
+            uint32_t pointer, target;
+            if (!fuzz_ref_ok(guest, addr, 4u, false)) return false;
+            pointer = fuzz_ref_get(ram, addr, 4u);
+            for (uint32_t k = 0; k < extra; k++) {
+                const uint32_t words[2] = { l[i + 2u + k].a, l[i + 2u + k].b };
+                for (unsigned w = 0; w < 2u; w++) {
+                    uint32_t at;
+                    if (w == 1u && words[1] == 0u) break;
+                    at = ((words[w] >> 28) == 3u ? pointer - (words[w] & 0x0FFFFFFFu)
+                                                 : pointer + (words[w] & 0x0FFFFFFFu)) & 0x3FFFFFFFu;
+                    if (!fuzz_ref_ok(guest, at, 4u, false)) return false;
+                    pointer = fuzz_ref_get(ram, at, 4u);
+                }
+            }
+            target = (form >= 3u ? pointer - l[i + 1u].b : pointer + l[i + 1u].b) & 0x3FFFFFFFu;
+            if (!fuzz_ref_ok(guest, target, size, true)) return false;
+            fuzz_ref_put(ram, target, size, b);
+            i += 2u + extra;
+        } else if (type == 7u) {
+            const unsigned form = b >> 16, size = (form & 1u) ? 2u : 1u;
+            uint32_t old;
+            if (!fuzz_ref_ok(guest, addr, size, true)) return false;
+            old = fuzz_ref_get(ram, addr, size);
+            fuzz_ref_put(ram, addr, size, form <= 1u ? (old | (b & 0xFFFFu)) : form <= 3u ? (old & (b & 0xFFFFu))
+                                                                                        : (old ^ (b & 0xFFFFu)));
+            i += 1u;
+        } else if (type == 0xDu && ((b >> 28) == 0u || (b >> 28) == 2u)) {
+            const unsigned size = (b >> 28) == 0u ? 2u : 1u;
+            if (!fuzz_ref_ok(guest, addr, size, false)) return false;
+            i += fuzz_ref_compare((b >> 20) & 0xFu, fuzz_ref_get(ram, addr, size), b & (size == 1u ? 0xFFu : 0xFFFFu))
+                     ? 1u : 2u;
+        } else if (type == 0xDu && ((b >> 28) == 1u || (b >> 28) == 3u)) {
+            const bool all_held = (guest->buttons & (b & 0x0FFFFFFFu)) == (b & 0x0FFFFFFFu);
+            i += all_held == ((b >> 28) == 1u) ? 1u : 2u + (a & 0xFFu);
+        } else if (type == 0xDu) {
+            const unsigned size = 1u << l[i + 1u].b;
+            const uint32_t other = FUZZ_CHEAT_BASE + (b & 0x0FFFFFFFu);
+            if (!fuzz_ref_ok(guest, addr, size, false) || !fuzz_ref_ok(guest, other, size, false)) return false;
+            i += fuzz_ref_compare((b >> 28) - 4u, fuzz_ref_get(ram, addr, size), fuzz_ref_get(ram, other, size))
+                     ? 2u : 2u + l[i + 1u].a;
+        } else {
+            const unsigned size = (a >> 24) == 0xE1u ? 1u : 2u;
+            const uint32_t at = FUZZ_CHEAT_BASE + (b & 0x0FFFFFFFu);
+            assert(type == 0xEu);   /* the reader accepts no other type */
+            if (!fuzz_ref_ok(guest, at, size, false)) return false;
+            i += fuzz_ref_compare(b >> 28, fuzz_ref_get(ram, at, size), a & (size == 1u ? 0xFFFFu >> 8 : 0xFFFFu))
+                     ? 1u : 1u + ((a >> 16) & 0xFFu);
+        }
+    }
+    return true;
+}
+
+/* An offset into user memory, most often at an edge. */
+static uint32_t fuzz_ref_offset(void) {
+    static const uint32_t edges[] = { 0u, FUZZ_CHEAT_CODE_START, FUZZ_CHEAT_CODE_START + FUZZ_CHEAT_CODE_SIZE,
+                                      FUZZ_CHEAT_LATE_START, FUZZ_CHEAT_LATE_START + FUZZ_CHEAT_LATE_SIZE,
+                                      FUZZ_CHEAT_SIZE };
+    const uint32_t r = fuzz_rand32();
+    if ((r & 3u) == 0u) return (r >> 8) % FUZZ_CHEAT_SIZE;
+    return edges[(r >> 4) % (sizeof(edges) / sizeof(edges[0]))] + ((r >> 12) % 13u) - 6u;
+}
+
+#define FUZZ_REF_CHEATS 4u
+#define FUZZ_REF_LINES 24u
+
+static void test_fuzz_cheats_reference(unsigned iters) {
+    static const uint32_t pointer_cells[] = { 0x100u, 0x104u, 0x108u, 0x10Cu };
+    const NkCheatConfig config = { .disc_id = NULL, .user_base = FUZZ_CHEAT_BASE,
+                                   .user_end = FUZZ_CHEAT_BASE + FUZZ_CHEAT_SIZE };
+    FuzzCheatGuest *guest = (FuzzCheatGuest *)calloc(1u, sizeof(*guest));
+    uint8_t *want = (uint8_t *)malloc(FUZZ_CHEAT_SIZE), *trial = (uint8_t *)malloc(FUZZ_CHEAT_SIZE);
+    unsigned accepted = 0u, refused = 0u, applied_frames = 0u, held_frames = 0u;
+    printf("[FUZZ] Testing cheat files against a second reading (%u iterations)...\n", iters);
+    fflush(stdout);
+    assert(guest && want && trial);
+    const NkCheatHost host = { guest, fuzz_cheat_read, fuzz_cheat_write, fuzz_cheat_is_code, fuzz_cheat_buttons, NULL };
+    for (unsigned iter = 0; iter < iters; iter++) {
+        FuzzRefLine lines[FUZZ_REF_CHEATS][FUZZ_REF_LINES];
+        size_t counts[FUZZ_REF_CHEATS];
+        char text[FUZZ_REF_CHEATS * (FUZZ_REF_LINES * 28u + 16u)];
+        char err[128];
+        size_t used = 0u;
+        const unsigned cheats = 1u + fuzz_rand32() % FUZZ_REF_CHEATS;
+        NkCheatSet *set;
+        for (uint32_t i = 0; i < FUZZ_CHEAT_SIZE; i++) guest->ram[i] = (uint8_t)fuzz_rand32();
+        for (size_t p = 0; p < sizeof(pointer_cells) / sizeof(pointer_cells[0]); p++) {
+            const uint32_t pointer = (fuzz_rand32() & 1u) ? FUZZ_CHEAT_BASE + fuzz_ref_offset() : fuzz_rand32();
+            fuzz_ref_put(guest->ram, FUZZ_CHEAT_BASE + pointer_cells[p], 4u, pointer);
+        }
+        for (unsigned c = 0; c < cheats; c++) {
+            const unsigned codes = 1u + fuzz_rand32() % 4u;
+            size_t n = 0u;
+            for (unsigned k = 0; k < codes && n + 6u <= FUZZ_REF_LINES; k++) {
+                const uint32_t r = fuzz_rand32(), at = fuzz_ref_offset() & 0x0FFFFFFFu;
+                const uint32_t small = (r >> 8) & 0xFFu, count = 1u + ((r >> 16) % 9u), step = (r >> 20) % 5u;
+                FuzzRefLine *l = &lines[c][n];
+                switch (r % 12u) {
+                case 0: l[0].a = at; l[0].b = small; n += 1u; break;
+                case 1: l[0].a = 0x10000000u | at; l[0].b = (r >> 8) & 0xFFFFu; n += 1u; break;
+                case 2: l[0].a = 0x20000000u | at; l[0].b = fuzz_rand32(); n += 1u; break;
+                case 3:
+                    l[0].a = 0x30000000u | ((1u + (r >> 4) % 4u) << 20) | small; l[0].b = at; n += 1u;
+                    if (((l[0].a >> 20) & 0xFu) <= 2u) l[0].a &= 0xFFF000FFu;
+                    break;
+                case 4: l[0].a = 0x30500000u + ((r & 0x10u) << 16); l[0].b = at; l[1].a = fuzz_rand32(); l[1].b = 0u; n += 2u; break;
+                case 5: l[0].a = 0x40000000u | at; l[0].b = (count << 16) | step; l[1].a = fuzz_rand32(); l[1].b = small; n += 2u; break;
+                case 6:
+                    l[0].a = 0x80000000u | at; l[0].b = (count << 16) | step; l[1].b = small; n += 2u;
+                    l[1].a = (r & 0x10u) ? (0x10000000u | ((r >> 8) & 0xFFFFu)) : small;
+                    break;
+                case 7: l[0].a = 0x50000000u | at; l[0].b = 1u + (r >> 8) % 40u; l[1].a = fuzz_ref_offset() & 0x0FFFFFFFu; l[1].b = 0u; n += 2u; break;
+                case 8:
+                    l[0].a = 0x60000000u | pointer_cells[(r >> 4) % 4u]; l[0].b = small;
+                    l[1].a = (((r >> 12) % 6u) << 16) | (1u + ((r >> 20) & 1u)); l[1].b = (r >> 24) % 9u; n += 2u;
+                    if ((l[1].a & 0xFFFFu) == 2u) { l[2].a = ((r & 0x20u) ? 0x30000000u : 0x20000000u) | ((r >> 26) % 9u); l[2].b = 0u; n += 1u; }
+                    break;
+                case 9: l[0].a = 0x70000000u | at; l[0].b = (((r >> 4) % 6u) << 16) | small; n += 1u; break;
+                case 10:   /* a one-line test, then the line it guards */
+                    l[0].a = 0xD0000000u | at; l[0].b = (((r >> 4) % 4u) << 20) | small;
+                    l[1].a = 0x00000200u + (r >> 24); l[1].b = small; n += 2u;
+                    break;
+                default:   /* a button test, an address test or a multi-line test, guarding two lines */
+                    if ((r & 0x30u) == 0u) { l[0].a = 0xD0000001u; l[0].b = 0x10000000u | (1u << ((r >> 8) % 16u)) | ((r & 0x40u) << 23); n += 1u; }
+                    else if ((r & 0x30u) == 0x10u) { l[0].a = 0xD0000000u | at; l[0].b = ((4u + (r >> 8) % 2u) << 28) | (fuzz_ref_offset() & 0x0FFFFFFFu); l[1].a = 2u; l[1].b = (r >> 12) % 3u; n += 2u; }
+                    else { l[0].a = 0xE1020000u | small; l[0].b = (((r >> 8) % 4u) << 28) | at; n += 1u; }
+                    lines[c][n].a = 0x00000300u + (r >> 24); lines[c][n].b = small;
+                    lines[c][n + 1u].a = 0x00000400u + (r >> 24); lines[c][n + 1u].b = small;
+                    n += 2u;
+                    break;
+                }
+            }
+            counts[c] = n;
+            used += (size_t)snprintf(text + used, sizeof(text) - used, "_C1 c%u\n", c);
+            for (size_t i = 0; i < n; i++) {
+                used += (size_t)snprintf(text + used, sizeof(text) - used, "_L 0x%08lX 0x%08lX\n",
+                                         (unsigned long)lines[c][i].a, (unsigned long)lines[c][i].b);
+            }
+        }
+        guest->late_code = false;
+        set = nk_cheats_load(text, used, &config, &host, err, sizeof(err));
+        assert(set && nk_cheats_count(set) == cheats);
+        for (int frame = 0; frame < 4; frame++) {
+            uint32_t expect_applied = 0u;
+            guest->late_code = frame >= 2;
+            guest->buttons = fuzz_rand32() & 0x0000FFFFu;
+            memcpy(want, guest->ram, FUZZ_CHEAT_SIZE);
+            for (unsigned c = 0; c < cheats; c++) {
+                NkCheatInfo info;
+                assert(nk_cheats_info(set, c, &info));
+                if (frame == 0) {
+                    if (info.state == NK_CHEAT_ON) accepted++;
+                    else refused++;
+                }
+                if (info.state != NK_CHEAT_ON) continue;
+                memcpy(trial, want, FUZZ_CHEAT_SIZE);
+                if (fuzz_ref_run(guest, trial, lines[c], counts[c])) {
+                    memcpy(want, trial, FUZZ_CHEAT_SIZE);
+                    expect_applied++;
+                    applied_frames++;
+                } else {
+                    held_frames++;
+                }
+            }
+            if (nk_cheats_apply(set, &host) != expect_applied || memcmp(want, guest->ram, FUZZ_CHEAT_SIZE) != 0) {
+                fprintf(stderr, "cheat reference mismatch at iteration %u, frame %d:\n%s", iter, frame, text);
+                assert(!"the applier and the second reading disagree");
+            }
+        }
+        nk_cheats_free(set);
+    }
+    /* The comparison is worth something only if it saw accepted cheats, applied and held. */
+    if (iters >= 100u) assert(accepted > iters / 8u && refused > 0u && applied_frames > iters / 8u && held_frames > 0u);
+    free(trial);
+    free(want);
+    free(guest);
+    printf("[FUZZ] Cheat files against a second reading completed: %u cheats accepted, %u refused, "
+           "%u cheat-frames applied and %u held, 0 mismatches\n", accepted, refused, applied_frames, held_frames);
+    fflush(stdout);
+}
+
 static void test_fuzz_cheats(unsigned iters) {
     printf("[FUZZ] Testing cheat file reader and applier (%u iterations)...\n", iters);
     fflush(stdout);
@@ -4208,7 +4467,8 @@ static void test_fuzz_cheats(unsigned iters) {
     const char *cheat_path = SR_SELFTEST_BUILD_ROOT "/fuzz_cheats_temp.ini";
     const size_t seed_size = strlen(s_valid_cheat_file);
     const size_t cap = seed_size * 2u + 64u;
-    const NkCheatConfig config = { "test00001", FUZZ_CHEAT_BASE, FUZZ_CHEAT_BASE + FUZZ_CHEAT_SIZE };
+    const NkCheatConfig config = { .disc_id = "test00001", .user_base = FUZZ_CHEAT_BASE,
+                                   .user_end = FUZZ_CHEAT_BASE + FUZZ_CHEAT_SIZE };
     FuzzCheatGuest *guest = (FuzzCheatGuest *)malloc(sizeof(*guest));
     uint8_t *mutated = (uint8_t *)malloc(cap);
     char err[160];
@@ -4322,6 +4582,7 @@ int main(int argc, char **argv) {
     test_fuzz_manifest(iters);
     test_fuzz_input_profile(iters);
     test_fuzz_cheats(iters);
+    test_fuzz_cheats_reference(iters);
     test_fuzz_package(iters > 1000 ? 1000 : iters);
     test_fuzz_library(iters > 500 ? 500 : iters);
     test_fuzz_pgf(iters > 4000 ? 4000 : iters);

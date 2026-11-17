@@ -142,6 +142,9 @@ typedef struct {
     bool held;
     uint8_t held_why;
     uint32_t held_line;
+    uint8_t said_why;        /* one bit per HoldWhy this cheat has reported a hold for */
+    bool said_again;         /* "applies again" was reported */
+    bool over_limit;         /* refused for the file's frame limit, not for a line of its own */
 } Cheat;
 
 typedef struct {
@@ -153,6 +156,15 @@ typedef struct {
 struct NkCheatSet {
     uint32_t user_base;
     uint32_t user_end;
+    uint32_t hole_base;      /* memory inside the range that is not the game's; none when equal */
+    uint32_t hole_end;
+    uint32_t psp_image_base; /* image_size != 0: the image a PSP has here is at image_base */
+    uint32_t image_base;
+    uint32_t image_size;
+    uint32_t not_kept;       /* cheats past NK_CHEATS_MAX_CHEATS */
+    uint32_t lines_total;    /* code lines kept, of every cheat */
+    uint32_t over_limit;     /* cheats refused for the frame limit */
+    uint32_t over_limit_line;
     char disc_id[32];        /* letters and digits only, upper case; "" matches no section */
     Cheat *cheats;
     size_t count;
@@ -338,6 +350,7 @@ static void parse_text(NkCheatSet *set, const char *text, size_t size) {
     uint32_t file_line = 0u;
     Cheat *cur = NULL;
     bool ours = true;   /* before any _S line the file is for the disc it was read for */
+    bool dropped = false;   /* inside a cheat past NK_CHEATS_MAX_CHEATS: its lines are not read */
     if (size >= 3u && (unsigned char)text[0] == 0xEFu && (unsigned char)text[1] == 0xBBu &&
         (unsigned char)text[2] == 0xBFu) {
         pos = 3u;
@@ -360,11 +373,32 @@ static void parse_text(NkCheatSet *set, const char *text, size_t size) {
             normal_disc_id(id, sizeof(id), line + 2u, len - 2u);
             ours = id[0] != '\0' && strcmp(id, set->disc_id) == 0;
             cur = NULL;
+            dropped = false;
         } else if (line[1] == 'G') {
             /* The game's name: nothing to do. */
+        } else if (line[1] == 'C' && len < 5u) {
+            /* PPSSPP reads a _ line only from five characters up ("_C0 1" is the shortest), so a
+             * _C line with no name starts no cheat there, on or off, and the code lines after it
+             * stay with the cheat before it. Starting a cheat here would turn on lines PPSSPP
+             * leaves as they were. */
+            if (ours && !dropped) {
+                note_add(set, file_line, "a _C line with no name starts no cheat, as in PPSSPP; the code "
+                                         "lines after it stay with the cheat before");
+            }
         } else if (!ours) {
             if (line[1] == 'C' && set->other_game != UINT32_MAX) set->other_game++;
         } else if (line[1] == 'C') {
+            if (set->count >= NK_CHEATS_MAX_CHEATS) {
+                if (set->not_kept == 0u) {
+                    note_add(set, file_line, "more cheats for this disc than the reader keeps; this one "
+                                             "and every one after it are not read");
+                }
+                if (set->not_kept != UINT32_MAX) set->not_kept++;
+                cur = NULL;
+                dropped = true;
+                continue;
+            }
+            dropped = false;
             cur = cheat_new(set, file_line);
             if (!cur) break;
             clean_name(cur->name, sizeof(cur->name), len > 3u ? line + 3u : "", len > 3u ? len - 3u : 0u);
@@ -384,9 +418,18 @@ static void parse_text(NkCheatSet *set, const char *text, size_t size) {
                 !(at + 1u < len && line[at] == '/' && line[at + 1u] == '/')) {
                 ok = false;
             }
+            if (dropped) continue;
             if (!cur) note_add(set, file_line, "a code line before any _C line; it is not applied");
             else if (!ok) refuse(cur, file_line, "is not _L and two 32-bit hexadecimal values");
-            else cheat_add_line(set, cur, a, b, file_line);
+            else if (set->lines_total >= NK_CHEATS_MAX_LINES) {
+                refuse(cur, file_line, "is past the %lu code lines the reader keeps for one disc",
+                       (unsigned long)NK_CHEATS_MAX_LINES);
+            } else {
+                cheat_add_line(set, cur, a, b, file_line);
+                set->lines_total++;
+            }
+        } else if (dropped) {
+            /* A line of a cheat that is not read. */
         } else if (line[1] == 'M' || line[1] == 'N') {
             stray_line(set, cur, file_line, "is a PSP Action Replay code line (_M or _N), which is not supported");
         } else {
@@ -413,26 +456,53 @@ static uint32_t code_address(uint32_t word) {
 }
 
 static bool span_in_user_memory(const NkCheatSet *set, uint32_t addr, uint64_t size) {
-    return addr >= set->user_base && addr < set->user_end && size <= (uint64_t)(set->user_end - addr);
+    if (addr < set->user_base || addr >= set->user_end || size > (uint64_t)(set->user_end - addr)) return false;
+    return !(set->hole_base < set->hole_end && addr < set->hole_end && (uint64_t)addr + size > set->hole_base);
 }
 
-/* A span a code names outright: whole inside user memory, or the cheat is refused. */
-static bool check_span(Checker *k, uint32_t file_line, uint32_t addr, uint64_t size) {
-    if (span_in_user_memory(k->set, addr, size)) return true;
-    refuse(k->cheat, file_line, "names %llu byte(s) at 0x%08lX, outside user memory (0x%08lX to 0x%08lX)",
-           (unsigned long long)size, (unsigned long)addr, (unsigned long)k->set->user_base,
-           (unsigned long)(k->set->user_end - 1u));
-    return false;
+/* A span a code names outright. *addr comes in as the PSP address the code names and goes out
+ * as the address in this run: the same, unless the game's image is not where a PSP has it
+ * (NkCheatConfig). Then a span inside the PSP's image moves with the image, and any other
+ * refuses the cheat: where the rest of a PSP's memory lives in such a run is not known, and a
+ * cheat is never applied to a guess. The span must lie whole inside user memory either way. */
+static bool check_span(Checker *k, uint32_t file_line, uint32_t *addr, uint64_t size) {
+    const NkCheatSet *set = k->set;
+    uint32_t at = *addr;
+    if (set->image_size != 0u) {
+        const uint32_t into = at - set->psp_image_base;
+        if (at < set->psp_image_base || into >= set->image_size || size > (uint64_t)(set->image_size - into)) {
+            refuse(k->cheat, file_line,
+                   "names %llu byte(s) at 0x%08lX, outside the game's image as a PSP loads it (0x%08lX to "
+                   "0x%08lX); this run has the image at 0x%08lX, and where other PSP addresses are in it "
+                   "is not known",
+                   (unsigned long long)size, (unsigned long)at, (unsigned long)set->psp_image_base,
+                   (unsigned long)(set->psp_image_base + (set->image_size - 1u)), (unsigned long)set->image_base);
+            return false;
+        }
+        at = set->image_base + into;
+    }
+    if (!span_in_user_memory(set, at, size)) {
+        refuse(k->cheat, file_line, "names %llu byte(s) at 0x%08lX, outside user memory (0x%08lX to 0x%08lX)",
+               (unsigned long long)size, (unsigned long)at, (unsigned long)set->user_base,
+               (unsigned long)(set->user_end - 1u));
+        return false;
+    }
+    *addr = at;
+    return true;
 }
 
-/* A span a code writes outright: also not code the recompiler translated. */
-static bool check_write(Checker *k, uint32_t file_line, uint32_t addr, uint64_t size) {
+/* A span a code writes outright: also not code the recompiler translated, asked at the address
+ * the span has in this run. */
+static bool check_write(Checker *k, uint32_t file_line, uint32_t *addr, uint64_t size) {
+    const uint32_t named = *addr;
     if (!check_span(k, file_line, addr, size)) return false;
-    if (k->host && k->host->is_code && k->host->is_code(k->host->ctx, addr, (uint32_t)size)) {
+    if (k->host && k->host->is_code && k->host->is_code(k->host->ctx, *addr, (uint32_t)size)) {
+        char here[40] = "";
+        if (*addr != named) snprintf(here, sizeof(here), " (0x%08lX in this run)", (unsigned long)*addr);
         refuse(k->cheat, file_line,
-               "writes %llu byte(s) at 0x%08lX, inside code the recompiler translated; a recompiled "
+               "writes %llu byte(s) at 0x%08lX%s, inside code the recompiler translated; a recompiled "
                "game does not read its code again at run time",
-               (unsigned long long)size, (unsigned long)addr);
+               (unsigned long long)size, (unsigned long)named, here);
         return false;
     }
     return true;
@@ -476,7 +546,7 @@ static uint32_t check_code(Checker *k, size_t i, CheatOp *op, CheatWalk *walks, 
             refuse(c, at, "is a %s write (type 0x%X) with a value wider than that", k_size_words[op->size], type);
             return 0u;
         }
-        if (!check_write(k, at, op->addr, op->size)) return 0u;
+        if (!check_write(k, at, &op->addr, op->size)) return 0u;
         count_undo(k, 1u, op->size);
         return 1u;
     case 0x3u: {
@@ -506,7 +576,7 @@ static uint32_t check_code(Checker *k, size_t i, CheatOp *op, CheatWalk *walks, 
                 return 0u;
             }
         }
-        if (!check_write(k, at, op->addr, op->size)) return 0u;
+        if (!check_write(k, at, &op->addr, op->size)) return 0u;
         count_undo(k, 1u, op->size);
         return op->lines;
     }
@@ -538,7 +608,7 @@ static uint32_t check_code(Checker *k, size_t i, CheatOp *op, CheatWalk *walks, 
             return 0u;
         }
         extent = (uint64_t)(op->count - 1u) * op->step + op->size;
-        if (!check_write(k, at, op->addr, extent)) return 0u;
+        if (!check_write(k, at, &op->addr, extent)) return 0u;
         count_undo(k, op->count, (uint64_t)op->count * op->size);
         return 2u;
     }
@@ -556,7 +626,7 @@ static uint32_t check_code(Checker *k, size_t i, CheatOp *op, CheatWalk *walks, 
             refuse(c, at, "is a copy of 0 bytes, which copies nothing");
             return 0u;
         }
-        if (!check_span(k, at, op->addr, op->count) || !check_write(k, at, op->other, op->count)) return 0u;
+        if (!check_span(k, at, &op->addr, op->count) || !check_write(k, at, &op->other, op->count)) return 0u;
         if (op->addr < op->other ? op->other - op->addr < op->count : op->addr - op->other < op->count) {
             refuse(c, at, "is a copy whose source and destination overlap");
             return 0u;
@@ -614,7 +684,7 @@ static uint32_t check_code(Checker *k, size_t i, CheatOp *op, CheatWalk *walks, 
             }
         }
         op->lines = 2u + (points - 1u);
-        if (!check_span(k, at, op->addr, 4u)) return 0u;
+        if (!check_span(k, at, &op->addr, 4u)) return 0u;
         count_undo(k, 1u, op->size);
         return op->lines;
     }
@@ -632,7 +702,7 @@ static uint32_t check_code(Checker *k, size_t i, CheatOp *op, CheatWalk *walks, 
             refuse(c, at, "is an 8-bit boolean code with a value wider than that");
             return 0u;
         }
-        if (!check_write(k, at, op->addr, op->size)) return 0u;
+        if (!check_write(k, at, &op->addr, op->size)) return 0u;
         count_undo(k, 1u, op->size);
         return 1u;
     }
@@ -648,7 +718,7 @@ static uint32_t check_code(Checker *k, size_t i, CheatOp *op, CheatWalk *walks, 
                 refuse(c, at, "is a %s test (type 0xD) in a form that is not supported", k_size_words[op->size]);
                 return 0u;
             }
-            return check_span(k, at, op->addr, op->size) ? 1u : 0u;
+            return check_span(k, at, &op->addr, op->size) ? 1u : 0u;
         }
         if (form == 0x1u || form == 0x3u) {
             op->kind = OP_IF_BUTTONS;
@@ -685,7 +755,7 @@ static uint32_t check_code(Checker *k, size_t i, CheatOp *op, CheatWalk *walks, 
                 refuse(c, at, "is a 32-bit less-than or greater-than test of two addresses, which is not supported");
                 return 0u;
             }
-            if (!check_span(k, at, op->addr, op->size) || !check_span(k, at, op->other, op->size)) return 0u;
+            if (!check_span(k, at, &op->addr, op->size) || !check_span(k, at, &op->other, op->size)) return 0u;
             return 2u;
         }
         refuse(c, at, "is a test (type 0xD) in a form that is not supported");
@@ -706,7 +776,7 @@ static uint32_t check_code(Checker *k, size_t i, CheatOp *op, CheatWalk *walks, 
             refuse(c, at, "is a %s multi-line test (type 0xE) in a form that is not supported", k_size_words[op->size]);
             return 0u;
         }
-        return check_span(k, at, op->addr, op->size) ? 1u : 0u;
+        return check_span(k, at, &op->addr, op->size) ? 1u : 0u;
     }
     case 0xAu:
         refuse(c, at, "is code type 0xA (PPSSPP's vibration and shader codes), which is not supported");
@@ -764,6 +834,11 @@ static void check_cheat(NkCheatSet *set, Cheat *c, const NkCheatHost *host) {
                    (unsigned long)NK_CHEATS_MAX_FRAME_BYTES);
             goto done;
         }
+        if (k.undo_records > NK_CHEATS_MAX_FRAME_WRITES) {
+            refuse(c, ops[op_count - 1u].line, "brings what the cheat does in one frame to more than %lu writes",
+                   (unsigned long)NK_CHEATS_MAX_FRAME_WRITES);
+            goto done;
+        }
     }
     op_at_line[n] = op_count;
     /* A test's count of lines becomes the code it continues at when it fails. */
@@ -815,9 +890,16 @@ NkCheatSet *nk_cheats_load(const char *text, size_t size, const NkCheatConfig *c
                            const NkCheatHost *host, char *error, size_t error_size) {
     NkCheatSet *set;
     uint32_t undo_records = 0u, undo_bytes = 0u;
+    uint64_t frame_writes = 0u, frame_bytes = 0u, frame_codes = 0u;
     set_error(error, error_size, "");
     if ((!text && size != 0u) || !config || config->user_base >= config->user_end) {
         set_error(error, error_size, "the cheat reader was given no text or no user memory");
+        return NULL;
+    }
+    if (config->hole_base > config->hole_end ||
+        (config->image_size != 0u && (config->image_size - 1u > UINT32_MAX - config->psp_image_base ||
+                                      config->image_size - 1u > UINT32_MAX - config->image_base))) {
+        set_error(error, error_size, "the cheat reader was given a memory layout that cannot be");
         return NULL;
     }
     if (size > NK_CHEATS_MAX_FILE_BYTES) {
@@ -831,6 +913,11 @@ NkCheatSet *nk_cheats_load(const char *text, size_t size, const NkCheatConfig *c
     }
     set->user_base = config->user_base;
     set->user_end = config->user_end;
+    set->hole_base = config->hole_base;
+    set->hole_end = config->hole_end;
+    set->psp_image_base = config->psp_image_base;
+    set->image_base = config->image_base;
+    set->image_size = config->image_size;
     if (config->disc_id) {
         normal_disc_id(set->disc_id, sizeof(set->disc_id), config->disc_id, strlen(config->disc_id));
     }
@@ -838,10 +925,34 @@ NkCheatSet *nk_cheats_load(const char *text, size_t size, const NkCheatConfig *c
     for (size_t i = 0u; i < set->count && !set->out_of_memory; i++) {
         Cheat *c = &set->cheats[i];
         check_cheat(set, c, host);
-        if (cheat_applies(c)) {
-            if (c->undo_records > undo_records) undo_records = c->undo_records;
-            if (c->undo_bytes > undo_bytes) undo_bytes = c->undo_bytes;
+        if (!cheat_applies(c)) continue;
+        /* The frame's budget is handed out in file order. A cheat that does not fit is refused
+         * whole, like any other refusal; a smaller one after it may still fit. */
+        {
+            const uint64_t codes = (uint64_t)c->op_count + c->walk_count;
+            if (frame_writes + c->undo_records > NK_CHEATS_MAX_FRAME_WRITES ||
+                frame_bytes + c->undo_bytes > NK_CHEATS_MAX_FRAME_BYTES ||
+                frame_codes + codes > NK_CHEATS_MAX_FRAME_CODES) {
+                refuse(c, c->file_line,
+                       "would bring what the file's cheats do in one frame past the limit (%lu writes, %lu "
+                       "bytes, %lu codes); turn another cheat off to use this one",
+                       (unsigned long)NK_CHEATS_MAX_FRAME_WRITES, (unsigned long)NK_CHEATS_MAX_FRAME_BYTES,
+                       (unsigned long)NK_CHEATS_MAX_FRAME_CODES);
+                c->over_limit = true;
+                if (set->over_limit++ == 0u) set->over_limit_line = c->file_line;
+                free(c->ops);
+                free(c->walks);
+                c->ops = NULL;
+                c->walks = NULL;
+                c->op_count = c->walk_count = 0u;
+                continue;
+            }
+            frame_writes += c->undo_records;
+            frame_bytes += c->undo_bytes;
+            frame_codes += codes;
         }
+        if (c->undo_records > undo_records) undo_records = c->undo_records;
+        if (c->undo_bytes > undo_bytes) undo_bytes = c->undo_bytes;
     }
     if (!set->out_of_memory && undo_records > 0u) {
         set->undo = (UndoRecord *)malloc((size_t)undo_records * sizeof(*set->undo));
@@ -936,6 +1047,7 @@ bool nk_cheats_info(const NkCheatSet *set, size_t index, NkCheatInfo *out) {
     out->applied_frames = c->applied_frames;
     out->held_frames = c->held_frames;
     out->held = c->held;
+    out->over_frame_limit = c->over_limit;
     return true;
 }
 
@@ -951,6 +1063,9 @@ void nk_cheats_summary(const NkCheatSet *set, NkCheatSummary *out) {
     }
     out->other_game = set->other_game;
     out->notes = set->notes_total;
+    out->over_frame_limit = set->over_limit;
+    out->over_frame_limit_line = set->over_limit_line;
+    out->not_kept = set->not_kept;
 }
 
 size_t nk_cheats_note_count(const NkCheatSet *set) {
@@ -1162,9 +1277,13 @@ uint32_t nk_cheats_apply(NkCheatSet *set, const NkCheatHost *host) {
         if (run_cheat(&f, c, &held_line)) {
             applied++;
             c->applied_frames++;
-            if (c->held && host->report) {
-                char line[NK_CHEATS_NAME_MAX + 64u];
-                snprintf(line, sizeof(line), "cheat \"%s\" applies again", c->name);
+            /* Said the first time only: a pointer that comes and goes every frame would
+             * otherwise write a line a frame. nk_cheats_report_holds gives the counts. */
+            if (c->held && !c->said_again && host->report) {
+                char line[NK_CHEATS_NAME_MAX + 96u];
+                c->said_again = true;
+                snprintf(line, sizeof(line), "cheat \"%s\" applies again; a later hold for the same "
+                                             "cause is counted, not said", c->name);
                 host->report(host->ctx, line);
             }
             c->held = false;
@@ -1172,13 +1291,37 @@ uint32_t nk_cheats_apply(NkCheatSet *set, const NkCheatHost *host) {
         }
         undo_all(&f);
         c->held_frames++;
-        /* Said once per cause, not once per frame. */
-        if (!c->held || c->held_why != f.why || c->held_line != held_line) {
-            c->held = true;
-            c->held_why = f.why;
-            c->held_line = held_line;
+        c->held = true;
+        c->held_why = f.why;
+        c->held_line = held_line;
+        /* Said once per cause for each cheat, not once per frame and not once per change. */
+        if ((c->said_why & (1u << f.why)) == 0u) {
+            c->said_why |= (uint8_t)(1u << f.why);
             report_hold(&f, c);
         }
     }
     return applied;
+}
+
+void nk_cheats_report_holds(const NkCheatSet *set, const NkCheatHost *host) {
+    uint32_t said = 0u, more = 0u;
+    if (!set || !host || !host->report) return;
+    for (size_t i = 0u; i < set->count; i++) {
+        const Cheat *c = &set->cheats[i];
+        char line[NK_CHEATS_NAME_MAX + 128u];
+        if (c->held_frames == 0u) continue;
+        if (said == NK_CHEATS_MAX_HOLD_TOTALS) {
+            more++;
+            continue;
+        }
+        said++;
+        snprintf(line, sizeof(line), "cheat \"%s\" was held on %llu frame(s) and applied on %llu", c->name,
+                 (unsigned long long)c->held_frames, (unsigned long long)c->applied_frames);
+        host->report(host->ctx, line);
+    }
+    if (more != 0u) {
+        char line[96];
+        snprintf(line, sizeof(line), "and %lu more cheat(s) were held on some frames", (unsigned long)more);
+        host->report(host->ctx, line);
+    }
 }
